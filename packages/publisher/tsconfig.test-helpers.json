@@ -10,6 +10,7 @@
     "test/_helpers/promote-failure-transition-types.ts",
     "test/_helpers/claim-fencing-types.ts",
     "test/_helpers/ack-peer-selection-types.ts",
+    "test/_helpers/ack-diagnostics-types.ts",
     "test/helpers/chain-event-lane-fixture.ts",
     "test/chain-event-lane-scheduler.test.ts",
     "test/chain-event-lane-cursor-persistence.test.ts",

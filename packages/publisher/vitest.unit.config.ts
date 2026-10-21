@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'test/access-client-bounds.test.ts',
       'test/assertion-lifecycle-candidates.test.ts',
       'test/wm-lifecycle-integrity.test.ts',
       'test/assertion-write-provenance.test.ts',
@@ -28,6 +29,7 @@ export default defineConfig({
       'test/async-lift-validation.test.ts',
       'test/async-lift-publish-result.test.ts',
       'test/async-lift-claim-fencing.test.ts',
+      'test/async-lift-pause-barrier.test.ts',
       'test/async-lift-detached-completion.test.ts',
       'test/async-lift-work-available.test.ts',
       'test/async-lift-claim-selection.test.ts',
@@ -60,6 +62,7 @@ export default defineConfig({
       'test/async-lift-receipt-hint-failures.test.ts',
       'test/async-lift-post-finality-timing.test.ts',
       'test/async-lift-runner.test.ts',
+      'test/async-lift-runner-claim-control.test.ts',
       'test/async-lift-runner-wallet-wake.test.ts',
       'test/pre-broadcast-signal-await.test.ts',
       'test/stuck-transaction-speed-up-opt-in.test.ts',
@@ -76,6 +79,8 @@ export default defineConfig({
       'test/async-lift-chain-check-2945.test.ts',
       'test/lift-job-failure.test.ts',
       'test/async-promote-queue.test.ts',
+      'test/bound-share-mutation-guard.test.ts',
+      'test/share-reconciliation.test.ts',
       'test/async-promote-admission.test.ts',
       'test/async-promote-format3-upgrade.test.ts',
       'test/promote-retry-policy.test.ts',
@@ -112,6 +117,8 @@ export default defineConfig({
       'test/rootless-access.test.ts',
       'test/agents-meta-bound.test.ts',
       'test/ack-collector.test.ts',
+      'test/ack-collector-diagnostics.test.ts',
+      'test/ack-peer-status-ledger.test.ts',
       'test/publish-lifecycle-logger.test.ts',
       'test/storage-ack-handler.test.ts',
       'test/storage-ack-handler-local-self-ack.test.ts',

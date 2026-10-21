@@ -1,3 +1,4 @@
+import type { CoreChainCacheNetwork } from './core-chain-cache-config.js';
 import type { PreparedContentCacheConfig } from './sync/responder/prepared-content-cache.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -1024,8 +1025,8 @@ export interface ContextGraphWritePreflightProbe {
    * `storeErrorMessage`.
    */
   storeUnavailable?: boolean;
-  /** First store-read failure message, retained for 503 diagnostics. */
-  storeErrorMessage?: string;
+  storeErrorMessage?: string; // Existing 503 message; new attribution never copies it.
+  failureAttribution?: readonly import('./write-preflight-attribution.js').WritePreflightFailure[];
 }
 
 export type ContextGraphMemberPrincipalType = 'node' | 'agent' | 'identity';
@@ -1402,6 +1403,10 @@ export interface Rfc64CatalogBootstrapConfigV1 {
 export type { FinalizationRecoveryStoreFactory } from './finalization-recovery-store.js';
 
 export interface DKGAgentConfig {
+  /** Lower RPC usage by using the DKG Core chain cache. */
+  DKG_Core_chain_cache?: boolean;
+  /** Trusted local deployment configuration; never taken from a peer response. */
+  coreChainCacheNetworks?: readonly CoreChainCacheNetwork[];
   name: string;
   /**
    * Construction seam for the durable finalization inbox. Embedders and tests
@@ -1617,7 +1622,7 @@ export interface DKGAgentConfig {
   syncAdmission?: SyncAdmissionConfig;
   /** Daemon-local retained responder snapshot row/estimated-byte policy. */
   syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
-  /** Opt-in persistent verified public assertion bytes, never cached authority. */
+  /** Persistent verified public assertion bytes. Default on for cores with dataDir; never cached authority. */
   preparedContentCache?: PreparedContentCacheConfig;
   /**
    * Local requester/responder priority by Context Graph ID. Higher runs first.
@@ -2020,6 +2025,7 @@ export interface DKGAgentACKTransportOptions {
 export type ResolvedDKGAgentConfig =
   Omit<
     DKGAgentConfig,
+    | 'DKG_Core_chain_cache' | 'coreChainCacheNetworks'
     | 'storageAckTiming'
     | 'ackHandlerDeadlineMs'
     | 'ackSendTimeoutMs'
@@ -2036,6 +2042,7 @@ export type ResolvedDKGAgentConfig =
     | 'rfc64CatalogDeploymentProfile'
     | 'contextGraphSubscriptionRehydrationEnabled'
   > & {
+    readonly coreChainCacheNetworks: readonly CoreChainCacheNetwork[];
     contextGraphSubscriptionRehydrationEnabled: boolean;
     storageAckTiming: StorageAckTiming;
     syncReconcilerTiming: SyncReconcilerTiming;

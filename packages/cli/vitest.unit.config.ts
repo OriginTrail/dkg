@@ -12,6 +12,8 @@ export default defineConfig({
     include: runsDaemonHttpBehavior
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
+          'test/async-share-bound-recovery.test.ts',
+          'test/write-preflight-diagnostics.test.ts',
           'test/durable-synchronous-share.test.ts',
           'test/durable-private-payload-recovery.test.ts',
           'test/durable-gossip-signer-lookup.test.ts',
@@ -21,7 +23,9 @@ export default defineConfig({
           'test/durable-unregistered-author-process.test.ts',
           'test/promote-route-not-persisted.test.ts',
           'test/public-snapshot-job.test.ts',
+          'test/core-chain-cache-config.test.ts',
           'test/mcp-config-document.test.ts',
+          'test/mcp-launch-command.test.ts',
           'test/mcp-physical-config.test.ts',
           'test/mcp-config-metadata.test.ts',
           'test/api-client.test.ts',
@@ -43,6 +47,8 @@ export default defineConfig({
           // POST routes (pure handler, no hardhat). Belongs in the fast lane
           // alongside its clear-job sibling above.
           'test/publisher-admin-body-boundary.test.ts',
+          'test/publisher-live-control.test.ts',
+          'test/publisher-live-control-route.test.ts',
           // #1828 — daemon-boot intent-index backfill wiring (fail-open contract).
           'test/vm-publish-intent-backfill.test.ts',
           'test/agent-connect-routes.test.ts',
@@ -96,6 +102,7 @@ export default defineConfig({
           // handlers plus one live daemon on the mock chain; no hardhat.
           'test/node-admin-scope-routes.test.ts',
           'test/daemon-operator-scope-live.test.ts',
+          'test/private-access-route.test.ts',
           // R8 — #1085 /register policy-matrix route tests, extracted from
           // daemon-http-behavior-extra so they run here (pure route handler,
           // no hardhat/daemon spawn) instead of the daemon-http lane.
@@ -103,6 +110,9 @@ export default defineConfig({
           // Private-CG bootstrap readiness: clean-empty responses are only
           // terminal when authoritative metadata has been confirmed.
           'test/context-graph-subscribe-readiness.test.ts',
+          'test/approved-member-empty-graph-first-write.test.ts',
+          'test/context-graph-empty-vm-readiness.test.ts',
+          'test/context-graph-subscribe-empty-vm.test.ts',
           // A public graph its subscribe job left unproven gets the job again
           // (#3207). The real catch-up worker behind a fake thread; no hardhat.
           'test/context-graph-readiness-repeat.test.ts',
@@ -197,6 +207,9 @@ export default defineConfig({
           // plus one real-histogram smoke test, and the route block shape.
           'test/event-loop-delay-monitor.test.ts',
           'test/supervisor-liveness.test.ts',
+          'test/liveness-diagnostics.test.ts',
+          'test/liveness-supervisor-log.test.ts',
+          'test/foreground-supervisor-command.test.ts',
           'test/promote-async-routes.test.ts',
           'test/promote-async-daemon-lifecycle.test.ts',
           'test/daemon-ka-transport.test.ts',
@@ -204,6 +217,8 @@ export default defineConfig({
           // including preserving a known transaction hash on endpoint exhaustion.
           'test/chain-rpc-transport-status.test.ts',
           'test/async-promote-worker.test.ts',
+          'test/async-share-evidence-worker.test.ts',
+          'test/share-reconciliation-route.test.ts',
           // #2315 — privacy-bounded diagnostics and hostile logger isolation.
           'test/async-promote-worker-diagnostics.test.ts',
           'test/async-promote-error-classification.test.ts',

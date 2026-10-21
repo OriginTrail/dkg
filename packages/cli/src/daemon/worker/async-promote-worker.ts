@@ -1,38 +1,8 @@
 import { createPromoteExecutionAuthority } from './promote-execution-authority.js';
 import { executePromoteRequest } from './execute-promote-request.js';
 /**
- * Async-promote queue worker supervisor.
- *
- * PR #3 of the async-promote-queue series. PR #1 shipped the queue
- * library and HTTP routes. This module drains the queue: an in-process queue signal wakes N worker slots,
- * with periodic polling retained for durable cross-process writes and
- * retry deadlines. A claimed slot calls `agent.assertion.promote(...)`,
- * then records success or classified failure back into the queue.
- *
- * Open questions from the plan §10 are resolved here:
- *
- * 1. **Worker model**: in-process enqueue/recover signals wake all available
- *    slots immediately. One periodic poll remains as a durable fallback for
- *    cross-process writes and retry eligibility — the daemon still owns the
- *    recovery clock.
- *
- * 2. **Backoff curve**: defined in `async-promote-queue-utils.ts`,
- *    inherited by the queue itself; the worker just calls `fail()` with
- *    a classification and the queue handles backoff bookkeeping.
- *
- * 3. **Error classification**: see `async-promote-error-classification.ts`.
- *    Seeded from the rc.10 Graphify import patterns (see
- *    `INTEGRATION_NOTES_GRAPHIFY.md` and `dkg-graphify-rc10-test/FINDINGS_v2.md`).
- *
- * 4. **Telemetry**: the supervisor emits `memoryGraphChanged` on every
- *    `succeeded` transition that promoted >0 triples, mirroring the
- *    sync `/promote` route. State transitions to `queued`/`running`/
- *    `failed_retrying` are NOT emitted — they're queue internals.
- *
- * Shutdown semantics: RFC §6.2 says do NOT mark `running → queued`
- * on shutdown. We stop polling, let in-flight jobs complete (or
- * timeout), and rely on `recoverOnStartup()` at the next boot to
- * reclaim immutable bound shares; ambiguous legacy attempts remain parked.
+ * Durable queue worker: claim, prepare immutable recovery, execute, persist outcome.
+ * Shutdown leaves running leases for recovery; ambiguous legacy attempts stay parked.
  */
 
 import type {
@@ -43,7 +13,7 @@ import {
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
 import {
-  PromoteJobLeaseError,
+  PromoteJobLeaseError, PromoteAdmissionUncertainError,
   type AsyncPromoteQueue,
   type PromoteAttemptError,
   type PromoteJob,
@@ -254,11 +224,12 @@ function isRetryableQueueBookkeepingError(error: unknown): boolean {
  * in-flight heartbeat after that point throws a `PromoteJobLeaseError`,
  * which the heartbeat catcher logs and ignores.
  */
-export async function runPromoteJob<T extends { promotedCount: number }>(
+export async function runPromoteJob<T extends { promotedCount: number; shareEvidence?: import('@origintrail-official/dkg-publisher').ShareCompletionEvidence }>(
   args: {
     job: PromoteJob;
     queue: AsyncPromoteQueue;
     workerId: string;
+    prepareJob?: (job: PromoteJob, authority: PromoteExecutionAuthority) => Promise<{ job: PromoteJob; completedResult?: T }>;
     runPromote: (request: PromoteRequest, authority?: PromoteExecutionAuthority) => Promise<T>;
     now: () => number;
     heartbeatIntervalMs: number;
@@ -271,7 +242,6 @@ export async function runPromoteJob<T extends { promotedCount: number }>(
   },
 ): Promise<PromoteJobRunResult<T>> {
   const {
-    job,
     queue,
     runPromote,
     now,
@@ -283,6 +253,7 @@ export async function runPromoteJob<T extends { promotedCount: number }>(
     log: configuredLog,
     emitMemoryGraphChanged,
   } = args;
+  let job = args.job;
   const log = normalizePromoteWorkerLogger(configuredLog);
   if (!job.lease) {
     throw new Error(`runPromoteJob requires a job with an active lease (jobId=${job.jobId})`);
@@ -408,6 +379,22 @@ export async function runPromoteJob<T extends { promotedCount: number }>(
   }
 
   try {
+    let completedResult: T | undefined;
+    if (args.prepareJob) {
+      try {
+        const prepared = await args.prepareJob(job, createPromoteExecutionAuthority(queue, job.jobId, claimToken, now, throwIfShutdownInterrupted));
+        job = prepared.job;
+        completedResult = prepared.completedResult;
+        throwIfShutdownInterrupted();
+      } catch (cause) {
+        throwIfShutdownInterrupted();
+        if (cause instanceof PromoteAdmissionUncertainError || cause instanceof PromoteJobLeaseError) {
+          return { outcome: 'failure_bookkeeping_uncertain', cause, bookkeepingCause: cause,
+            diagnostic: failureBookkeepingUncertainty(cause) };
+        }
+        return await recordPromotionFailure(cause, false);
+      }
+    }
     // Queue ownership is established before the executor can mutate the asset.
     // A failed marker write has its own boundary, separate from promotion failures.
     try {
@@ -424,32 +411,14 @@ export async function runPromoteJob<T extends { promotedCount: number }>(
     }
     let result: T;
     try {
-      result = await runPromote(job.request, job.request.recoveryBinding
+      result = completedResult ?? await runPromote(job.request, job.request.recoveryBinding
         ? createPromoteExecutionAuthority(queue, job.jobId, claimToken, now, throwIfShutdownInterrupted) : undefined);
     } catch (err: unknown) {
       return await recordPromotionFailure(err, true);
     }
 
-    // Plan §7 recommendation (b): single OUTER commit-marker after
-    // `assertionPromote` returns. We can't observe the internal phases
-    // (WM clean / lifecycle stamp / gossip), so only stamp the recovery
-    // gate the queue actually consumes.
-    //
-    // Codex (#665#discussion_r3302646439): `assertion.promote()` has
-    // ALREADY mutated SWM / gossiped data at this point. Retry only the
-    // queue bookkeeping when a recognized transient store/network error
-    // interrupts either of the next two writes. We MUST NOT rerun the
-    // promote itself or let the outer worker park this as a normal
-    // `failed` row — that would expose it to
-    // `/promote-async/{jobId}/recover`, which blindly re-queues
-    // `failed` jobs. Re-running an already-completed promote risks
-    // duplicate WM/SWM writes and re-gossip. Instead, return the
-    // dedicated `partial_promote_ambiguity` outcome so the supervisor
-    // leaves the job in `running` state; on next daemon boot the lease
-    // will have expired and `recoverOnStartup()` will correctly route
-    // it into the "abandoned partial promote" bucket (promoteStarted
-    // = true, swmInserted = false → operator action required).
-    throwIfShutdownInterrupted();
+    // Retry only bookkeeping after promotion returns; never replay content on
+    // an uncertain outer marker write. Bound jobs retain their immutable owner.
     const bookkeepingDeadlineAt = now() + Math.max(0, bookkeepingRetryBudgetMs);
     try {
       await persistWithRecovery('record swmInserted', bookkeepingDeadlineAt, () =>
@@ -459,6 +428,7 @@ export async function runPromoteJob<T extends { promotedCount: number }>(
         queue.succeed(job.jobId, claimToken, {
           promotedCount: result.promotedCount,
           succeededAt: now(),
+          ...(job.request.agentAddress && result.shareEvidence ? { shareEvidence: result.shareEvidence } : {}),
         }),
       );
     } catch (bookkeepingErr: unknown) {
@@ -661,6 +631,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           job: claimed,
           queue: config.agent.promoteQueue,
           workerId: slot.workerId,
+          prepareJob: (job, authority) => config.agent.assertion.prepareQueuedShare(job, authority),
           runPromote: (request, executionAuthority) => executePromoteRequest(config.agent, request, { executionAuthority }),
           now,
           heartbeatIntervalMs,

@@ -55,6 +55,15 @@ are in-memory stores and provide no restart durability.
 - Background flush failures are logged. Explicit `flush()` and `close()` calls
   reject on write, sync, or rename failures so their callers can report that
   recent in-memory changes may not be durable.
+- Serialization writes N-Quads in chunks, and hydration feeds file chunks into
+  one parser. A snapshot can exceed V8's approximately 512 MiB single-string
+  limit. Existing `store.nq` files keep the same format, including blank-node
+  links across chunks. Individual RDF terms must still fit in memory.
+- This remains an in-memory backend with full snapshots. Capturing a consistent
+  snapshot allocates a native quad array proportional to the number of quads;
+  streaming its text does not bound total memory or eliminate full-store disk
+  writes. For large continuously growing graphs, use `oxigraph-server` or
+  Blazegraph and provision memory and disk for the workload.
 
 ### Hydration and corruption
 
@@ -79,7 +88,16 @@ are in-memory stores and provide no restart durability.
   from a torn overwrite; it cannot make unflushed memory durable.
 
 The executable regression contract is in
-[`test/oxigraph-persistence.test.ts`](test/oxigraph-persistence.test.ts). The
+[`test/oxigraph-persistence.test.ts`](test/oxigraph-persistence.test.ts) and
+[`test/oxigraph-large-persistence.test.ts`](test/oxigraph-large-persistence.test.ts).
+After building the storage dependency closure, run
+`node scripts/repro/oxigraph-large-snapshot.mjs` from the repository root for
+the larger native-worker check. It writes about 558 MB, verifies every value,
+kills the child process after `flush()`, and checks a fresh worker can reopen
+the data. Allow space for the snapshot and its temporary replacement, and run
+it separately from other memory-intensive devnet workloads. It uses long
+literals to cross the string ceiling; it is not a high-cardinality benchmark.
+The
 [archived WM persistence incident report](../../docs/archive/internal/bugs/wm-persistence-regression.md)
 retains the original diagnosis, reproduction evidence, and fix history.
 

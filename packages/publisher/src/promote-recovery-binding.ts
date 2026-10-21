@@ -1,3 +1,4 @@
+import { assertPromoteAuthor } from './assertion-promote-seal.js';
 import type { PromoteOwnershipReader } from './async-promote-ownership.js';
 import { readAssertionPromoteEvidence } from './assertion-promote-evidence.js';
 import {
@@ -66,6 +67,7 @@ async function readPromoteRecoveryEvidence(
   const evidence = await readAssertionPromoteEvidence(store, contextGraphId, name, agentAddress, opts?.subGraphName);
   const seal = evidence.seal;
   if (!seal) throw recoveryBindingConflict('Durable sharing requires a complete finalized seal');
+  assertPromoteAuthor(seal, opts?.authorAgentAddress);
   return { ...evidence, seal,
     sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(canonicalGraphScopedAuthorSealFromAssertionSealV1(seal)) };
 }

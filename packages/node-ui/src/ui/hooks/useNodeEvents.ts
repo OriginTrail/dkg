@@ -107,7 +107,7 @@ function disconnect() {
   source = null;
 }
 
-function subscribe(fn: Listener): () => void {
+export function subscribeNodeEvents(fn: Listener): () => void {
   listeners.add(fn);
   if (listeners.size === 1) connect();
   return () => {
@@ -126,7 +126,7 @@ export function useNodeEvents(handler: Listener) {
   handlerRef.current = handler;
 
   useEffect(() => {
-    return subscribe((event) => handlerRef.current(event));
+    return subscribeNodeEvents((event) => handlerRef.current(event));
   }, []);
 }
 

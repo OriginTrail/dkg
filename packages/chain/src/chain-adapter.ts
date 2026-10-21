@@ -1390,6 +1390,12 @@ export interface ChainReadOptions {
   signal?: AbortSignal;
 }
 
+/** Select identity-read ownership explicitly; cancellation never selects a cache policy. */
+export interface IdentityReadOptions extends ChainReadOptions {
+  /** Shared cached reads are the default; independent reads belong to this request. */
+  ownership?: 'shared' | 'independent';
+}
+
 /** Read options for resolving one publish transaction's receipt. */
 export interface PublishReceiptReadOptions extends ChainReadOptions {
   /**
@@ -1579,7 +1585,7 @@ export interface ChainAdapter {
 
   // Identity
   registerIdentity(proof: IdentityProof): Promise<bigint>;
-  getIdentityId(): Promise<bigint>;
+  getIdentityId(options?: IdentityReadOptions): Promise<bigint>;
   /**
    * OT-RFC-39 — resolve an arbitrary operational EOA to its on-chain
    * identityId. Returns 0n for addresses that are not registered
@@ -1940,7 +1946,7 @@ export interface ChainAdapter {
    * Sign an arbitrary message hash using the node's primary operational key.
    * Used for self-signing as receiver or context graph participant.
    */
-  signMessage?(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }>;
+  signMessage?(messageHash: Uint8Array, options?: ChainReadOptions): Promise<{ r: Uint8Array; vs: Uint8Array }>;
 
   /**
    * Sign EIP-712 typed data with the adapter's primary signer. Used by
@@ -2114,7 +2120,7 @@ export interface ChainAdapter {
   isShardingTableMember?(identityId: bigint): Promise<boolean>;
 
   /** Verify that a recovered signer address is a registered operational key for the given identity. */
-  verifyACKIdentity?(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean>;
+  verifyACKIdentity?(recoveredAddress: string, claimedIdentityId: bigint, options?: ChainReadOptions): Promise<boolean>;
 
   /**
    * Same gate as `verifyACKIdentity`, but returns the FAILING gate so callers
@@ -2130,6 +2136,7 @@ export interface ChainAdapter {
   verifyACKIdentityDetailed?(
     recoveredAddress: string,
     claimedIdentityId: bigint,
+    options?: ChainReadOptions,
   ): Promise<VerifyACKIdentityResult>;
 
   /** Idempotently register local operational wallets for an existing identity. */

@@ -1,5 +1,8 @@
 export const RFC64_UNIT_TESTS = [
+  "test/rfc64-private-placement-restart.integration.test.ts",
   "test/rfc64-catalog-repair-backoff.test.ts",
+  "test/finalized-private-repair-retry.test.ts",
+  "test/finalized-private-placement-owner-lanes.test.ts",
   "test/rfc64-catalog-repair-pressure.test.ts",
   "test/rfc64-catalog-repair-diagnostics.test.ts",
   // #3134 — a full author catalog refuses a new asset once, visibly, and is not retried on a timer.
@@ -73,6 +76,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-catalog-native-scoped-read-provider-v1.test.ts",
   "test/rfc64-public-catalog-native-reconciler-v1.test.ts",
   "test/rfc64-public-catalog-native-gate1.integration.test.ts",
+  "test/rfc64-public-catalog-durability.integration.test.ts",
   // #3198: a store that returns a typed literal in its own lexical form still holds the projection.
   "test/rfc64-projection-store-read-back-v1.test.ts",
   // A member holds two roster generations after a sync that followed a roster change: the newest is read.

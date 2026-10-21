@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { createContextGraph, fetchContextGraphs, fetchCurrentAgent } from '../../api.js';
+import { createContextGraph, fetchCurrentAgent } from '../../api.js';
+import { refreshContextGraphInventoryAfterMutation } from '../../hooks/useContextGraphInventory.js';
 import { useProjectsStore } from '../../stores/projects.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useJourneyStore } from '../../stores/journey.js';
@@ -65,7 +66,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   const [identityLoading, setIdentityLoading] = useState(true);
   const [identityError, setIdentityError] = useState(false);
 
-  const { setContextGraphs, contextGraphs, setActiveProject } = useProjectsStore();
+  const { contextGraphs, setActiveProject } = useProjectsStore();
   const { openTab } = useTabsStore();
   const { setStage, stage } = useJourneyStore();
 
@@ -227,8 +228,8 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
       }
 
       setProgress('Refreshing context graph list…');
-      const { contextGraphs: freshList } = await fetchContextGraphs();
-      setContextGraphs(freshList ?? []);
+      const inventory = await refreshContextGraphInventoryAfterMutation();
+      if (!inventory.ok) throw new Error(inventory.error);
 
       setActiveProject(result.created);
       openTab({ id: `project:${result.created}`, label: trimmedName, closable: true });
