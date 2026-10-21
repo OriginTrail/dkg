@@ -19,7 +19,13 @@ test.beforeEach(async ({ page }) => {
     ]);
   }
   await page.route('**/api/**', async route => {
-    if (route.request().url().endsWith('/api/query')) {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/context-graph/list') {
+      await route.fulfill({ json: { contextGraphs: [{ id: cg, name: 'Browser preview' }] } });
+    } else if (path === '/api/agent/identity') {
+      await route.fulfill({ json: { agentAddress: owner, agentDid: `did:ethr:${owner}`,
+        name: 'Browser preview', peerId: 'browser-preview', nodeIdentityId: '1' } });
+    } else if (path === '/api/query') {
       const request = route.request().postDataJSON();
       const result = await engine.query(request.sparql, { ...request, agentAddress: owner });
       await route.fulfill({ json: { result: { type: 'bindings', bindings: result.bindings } } });
@@ -103,6 +109,33 @@ test('Memory Stack flags the five-graph preview and loads the sixth graph', asyn
   await expect(page.locator('.v10-memstack-cell-n-lbl').first()).toHaveText('loaded entities');
   await page.getByRole('button', { name: 'Load more graph data' }).click();
   await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('6');
+});
+test('Memory Stack distinguishes loading and failure from empty inventory, retries, and retains loaded graphs', async ({ page }) => {
+  let failing = true;
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  await page.clock.install();
+  await page.route('**/api/context-graph/list', async route => {
+    await pending;
+    if (failing) await route.fulfill({ status: 503, json: { error: 'inventory unavailable' } });
+    else await route.fallback();
+  });
+  await page.goto('/');
+  try {
+    await expect(page.getByRole('status').filter({ hasText: 'Loading context graphs' })).toBeVisible();
+    await expect(page.getByText('No visible context graphs.', { exact: false })).toHaveCount(0);
+  } finally { release(); }
+  await expect(page.getByRole('alert')).toContainText('Context graphs unavailable.');
+  await expect(page.getByText('No visible context graphs.', { exact: false })).toHaveCount(0);
+  failing = false;
+  await page.getByRole('button', { name: 'Retry context graphs', exact: true }).click();
+  await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('5');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  failing = true;
+  // Ordinary polls may reuse the five-minute list cache; expire it before failing refresh.
+  await page.clock.fastForward(6 * 60_000);
+  await expect(page.getByRole('alert')).toContainText('Showing the last available context graphs.');
+  await expect(page.locator('.v10-memstack-cell-n').first()).toHaveText('5');
 });
 test('agent preview does not claim no contributions when the author is in a later graph', async ({ page }) => {
   await page.goto('/?view=agent');

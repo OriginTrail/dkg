@@ -10,6 +10,11 @@ const fetchCurrentAgentMock = vi.fn();
 const installOntologyMock = vi.fn();
 const publishProjectManifestMock = vi.fn();
 
+vi.mock('../src/ui/api-wrapper.js', () => ({ api: {
+  fetchContextGraphs: (options?: { fresh?: boolean }) => fetchContextGraphsMock(options),
+  fetchCurrentAgent: () => fetchCurrentAgentMock(),
+} }));
+
 vi.mock('../src/ui/api.js', async () => {
   const actual = await vi.importActual<any>('../src/ui/api.js');
   return {
@@ -97,7 +102,7 @@ describe('CreateProjectModal partial registration flow', () => {
     const { useTabsStore } = await import('../src/ui/stores/tabs.js');
     const { useJourneyStore } = await import('../src/ui/stores/journey.js');
     act(() => {
-      useProjectsStore.setState({ contextGraphs: [], loading: false, activeProjectId: null });
+      useProjectsStore.setState({ contextGraphs: [], loading: false, inventoryError: 'earlier inventory failure', activeProjectId: null });
       useTabsStore.setState({
         tabs: [{ id: 'dashboard', label: 'Dashboard', closable: false }],
         activeTabId: 'dashboard',
@@ -143,6 +148,9 @@ describe('CreateProjectModal partial registration flow', () => {
       undefined,
       expect.objectContaining({ register: true }),
     );
+    expect(fetchContextGraphsMock).toHaveBeenCalledWith({ fresh: true });
+    expect(useProjectsStore.getState().inventoryError).toBeNull();
+    expect(useProjectsStore.getState().loading).toBe(false);
     expect(useProjectsStore.getState().activeProjectId).toBe(cgId);
     expect(container!.querySelector('[data-testid="wire-workspace"]')).toBeTruthy();
     expect(container!.textContent).toContain('On-chain registration failed: rpc unavailable');
@@ -282,7 +290,7 @@ describe('CreateProjectModal partial registration flow', () => {
     const { useTabsStore } = await import('../src/ui/stores/tabs.js');
     const { useJourneyStore } = await import('../src/ui/stores/journey.js');
     act(() => {
-      useProjectsStore.setState({ contextGraphs: [], loading: false, activeProjectId: null });
+      useProjectsStore.setState({ contextGraphs: [], loading: false, inventoryError: 'earlier inventory failure', activeProjectId: null });
       useTabsStore.setState({
         tabs: [{ id: 'dashboard', label: 'Dashboard', closable: false }],
         activeTabId: 'dashboard',
@@ -401,7 +409,7 @@ describe('CreateProjectModal progress copy honesty', () => {
     const { useTabsStore } = await import('../src/ui/stores/tabs.js');
     const { useJourneyStore } = await import('../src/ui/stores/journey.js');
     act(() => {
-      useProjectsStore.setState({ contextGraphs: [], loading: false, activeProjectId: null });
+      useProjectsStore.setState({ contextGraphs: [], loading: false, inventoryError: 'earlier inventory failure', activeProjectId: null });
       useTabsStore.setState({
         tabs: [{ id: 'dashboard', label: 'Dashboard', closable: false }],
         activeTabId: 'dashboard',
