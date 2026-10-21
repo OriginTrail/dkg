@@ -198,6 +198,9 @@ export default defineConfig({
           // plus one real-histogram smoke test, and the route block shape.
           'test/event-loop-delay-monitor.test.ts',
           'test/supervisor-liveness.test.ts',
+          'test/liveness-diagnostics.test.ts',
+          'test/liveness-supervisor-log.test.ts',
+          'test/foreground-supervisor-command.test.ts',
           'test/promote-async-routes.test.ts',
           'test/promote-async-daemon-lifecycle.test.ts',
           'test/daemon-ka-transport.test.ts',
