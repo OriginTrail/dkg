@@ -1,6 +1,6 @@
 # #3394 — watchdog diagnostics and availability investigation
 
-Status: in progress. Owner: this session. Base: `testnet-canary` at `bec73c5ceacc3fcb36641898511eb173e2d09ed8`, explicitly requested by the user. Branch: `codex/3394-watchdog-diagnostics`. Risk: medium/high because the observer can terminate a worker with in-flight durable work.
+Status: implementation and live validation complete, with an explicit partial recovery verdict; PR gates tracked on GitHub. Owner: this session. Base: `testnet-canary` at `bec73c5ceacc3fcb36641898511eb173e2d09ed8`, explicitly requested by the user. Branch: `codex/3394-watchdog-diagnostics`. Risk: medium/high because the observer can terminate a worker with in-flight durable work.
 
 ## Executive summary
 
@@ -69,6 +69,8 @@ Private bundle inspection confirmed the published restart chronology and ambiguo
 
 Live setup: isolated `.tmp/issue3394-live`, owned container `dkg3394-blazegraph`, loopback API/store ports 19394/19395, prepared batch-1 claimed as `issue3394-20261021`. The pool is Base Sepolia, unlike the Gnosis incident. Use this as controlled validation, explicitly not exact historical reproduction. No deployment wallets or services will be used.
 
-Review round 1: classify native parser failures before sanitizing their codes; add valid-status/malformed-header coverage; remove the superseded count-only callback. The first live load remains pinned to `9855f8f72`; rebuild/restart the owned supervisor after it finishes before the controlled interruption check.
+Review round 1: classify native parser failures before sanitizing their codes; add valid-status/malformed-header coverage; remove the superseded count-only callback. The initial live load ran on `9855f8f72`; the owned supervisor was subsequently rebuilt/restarted on `a2f740ded` for interruption validation.
 
-Review round 2: keep raw monotonic grace expiry separate from formatted diagnostic duration. Ten-minute initial live load and publication/update verification passed; see the validation report. A dirty-label preflight prevented interruption; reconcile its admitted jobs before rebuilding from a clean commit.
+Review round 2: keep raw monotonic grace expiry separate from formatted diagnostic duration. Ten-minute initial live load and publication/update verification passed; see the validation report. A dirty-label preflight prevented interruption; its admitted jobs were reconciled before rebuilding from a clean commit.
+
+Final validation: the 608.903-second load passed, and the clean runtime retained five deadline failures and one restart summary across actual worker replacement. The interrupted publication recovered; the unbound async share failed conservatively at its unchanged 15-minute lease expiry. This is an existing downstream limitation, not an all-green recovery result. Final inventory: 83 successful / one failed share jobs, 19 finalized publications, 39 successful transaction receipts. Owned node/container/home removed, journal preserved and verified, wallet claim released. Round 3 added a fractional-time boundary regression and demonstrated that reverting the fix fails it; runtime code is unchanged from the live-tested `a2f740ded`. Full results and limitations: `run-reports/2026-10-21-issue3394-validation.md`.
