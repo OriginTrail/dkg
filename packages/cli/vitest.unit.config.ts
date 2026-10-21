@@ -230,6 +230,7 @@ export default defineConfig({
           'test/rpc-usage-log.test.ts',
           'test/rpc-usage-snapshot-route.test.ts',
           'test/publisher-runner-rpc-usage.test.ts',
+          'test/publisher-runtime-cleanup.test.ts',
           'test/publisher-startup-admission.test.ts',
           'test/publisher-startup-lifecycle.test.ts',
           'test/daemon-publisher-startup-cancellation.test.ts',

@@ -104,13 +104,24 @@ export async function clearDischargedStorageAckCopies(
   store: Pick<TripleStore, 'update'>,
   input: StorageAckCopyCleanupInput,
 ): Promise<void> {
-  if (input.cleanedOperations.length === 0) return;
+  const plan = planStorageAckCopyCleanup(input);
+  if (!plan) return;
   if (typeof store.update !== 'function') {
     throw new Error('the triple store cannot run an update for the StorageACK copy cleanup');
   }
-  await store.update(storageAckCopiesDischargeUpdate(input), {
-    source: 'publisher.storageAckCopyCleanup',
-    // The update touches only the meta graph; naming it keeps a graph-set index current.
-    touchedGraphs: [input.metaGraph],
-  });
+  await store.update(plan.sparql, plan.options);
+}
+
+export type StorageAckCopyCleanupWriter = (input: StorageAckCopyCleanupInput) => Promise<void>;
+
+/** Closed query and scope, derived together before any observation or dispatch. */
+export function planStorageAckCopyCleanup(input: StorageAckCopyCleanupInput) {
+  if (input.cleanedOperations.length === 0) return undefined;
+  const sparql = storageAckCopiesDischargeUpdate(input);
+  const graph = input.metaGraph;
+  return {
+    sparql,
+    graph,
+    options: { source: 'publisher.storageAckCopyCleanup', touchedGraphs: [graph] },
+  };
 }

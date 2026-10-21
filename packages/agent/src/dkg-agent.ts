@@ -1,3 +1,5 @@
+import type { StorageAckCopyCleanupWriter } from '@origintrail-official/dkg-publisher';
+import { createStorageAckCopyCleanupWriter } from './internal/storage-ack-copy-cleanup-writer.js';
 import { resolveConfiguredNetworkIdentity } from './configured-network-identity.js';
 import { snapshotCoreChainCacheNetworks } from './core-chain-cache-config.js';
 import { assertionLifecycleAuthorCandidates } from '@origintrail-official/dkg-publisher';
@@ -813,6 +815,7 @@ export class DKGAgent extends DKGAgentBase {
     store: TripleStore,
     publishedLifecycleWriter: PublishedNamedKaVmLifecycleWriter,
     ledgerTimestampWriter: StorageAckLedgerTimestampWriter,
+    storageAckCopyCleanup: StorageAckCopyCleanupWriter,
     publisher: DKGPublisher,
     queryEngine: DKGQueryEngine,
     eventBus: TypedEventBus,
@@ -835,6 +838,7 @@ export class DKGAgent extends DKGAgentBase {
       publicSnapshotStore,
       publishedLifecycleWriter,
       ledgerTimestampWriter,
+      storageAckCopyCleanup,
     );
     this.initializeVmReconcilePublicCoreTransportPreferencePolicy();
     this.configureSwmTargetExecutorSessionsV1({
@@ -1537,6 +1541,7 @@ export class DKGAgent extends DKGAgentBase {
     });
 
     const ledgerTimestampWriter = createStorageAckLedgerTimestampWriter(store, executeMutation);
+    const storageAckCopyCleanup = createStorageAckCopyCleanupWriter(store, executeMutation);
 
     const publicSnapshotStore = config.publicSnapshotStore ?? (config.publicSnapshotStoreFactory
       ? config.publicSnapshotStoreFactory(agentStore)
@@ -1544,6 +1549,7 @@ export class DKGAgent extends DKGAgentBase {
 
     const publisher = new DKGPublisher({
       store: agentStore,
+      storageAckCopyCleanup,
       promoteOwnershipReader: request => TripleStoreAsyncPromoteQueue.ownershipReader(
         agentStore, agentRef?._promoteQueueConfig)(request),
       chain,
@@ -1642,7 +1648,7 @@ export class DKGAgent extends DKGAgentBase {
     const queryEngine = new DKGQueryEngine(agentStore);
 
     const agent = new DKGAgent(
-      resolvedConfig, wallet, node, agentStore, publishedLifecycleWriter, ledgerTimestampWriter, publisher, queryEngine, eventBus, chain,
+      resolvedConfig, wallet, node, agentStore, publishedLifecycleWriter, ledgerTimestampWriter, storageAckCopyCleanup, publisher, queryEngine, eventBus, chain,
       workspaceOwnedEntities, writeLocks, publicSnapshotStore,
     );
     agentRef = agent;
