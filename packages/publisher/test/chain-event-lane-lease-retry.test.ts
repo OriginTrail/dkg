@@ -11,12 +11,12 @@ import { makeChain, makeHandler } from './helpers/chain-event-lane-fixture.js';
 
 const CADENCE_MS = 12_000;
 
-function update(blockNumber: number): ChainEvent {
+function update(blockNumber: number, blockHash = `0xblock${blockNumber}`): ChainEvent {
   return {
     type: 'KnowledgeAssetUpdated',
     blockNumber,
     updateIdentity: normalizeKnowledgeAssetUpdateIdentity({
-      blockNumber, logIndex: 0, blockHash: `0xblock${blockNumber}`, txHash: `0xtx${blockNumber}`,
+      blockNumber, logIndex: 0, blockHash, txHash: `0xtx${blockNumber}`,
     }),
     data: { batchId: String(blockNumber), merkleRoot: '0x' + '44'.repeat(32) },
   };
@@ -95,6 +95,50 @@ describe('ChainEventPoller collection updates across an expired scan lease', () 
     }
 
     expect(seen).toEqual([50, 51, 52, 53, 54]);
+    expect(saved).toEqual([100]);
+  });
+
+  it('delivers a fork again when it returns after its replacement was dispatched under expired leases', async () => {
+    const events = [update(50, '0xforka')];
+    const chain = indexedChain(events);
+    const seen: string[] = [];
+    let now = 0;
+    const { poll, saved } = collectionUpdatesPoller(chain.adapter, () => now, async ({ eventIdentity }) => {
+      seen.push(String(eventIdentity.blockHash));
+      if (seen.length <= 2) chain.commit();
+    });
+
+    await poll();
+    events[0] = update(50, '0xforkb');
+    now = CADENCE_MS;
+    await poll();
+    expect(saved).toEqual([]);
+    events[0] = update(50, '0xforka');
+    now = 2 * CADENCE_MS;
+    await poll();
+
+    expect(seen).toEqual(['0xforka', '0xforkb', '0xforka']);
+    expect(saved).toEqual([100]);
+  });
+
+  it('keeps what it delivered beyond the block where a later attempt stopped', async () => {
+    const events = [update(50), update(51), update(52)];
+    const chain = indexedChain(events);
+    const seen: string[] = [];
+    let now = 0;
+    const { poll, saved } = collectionUpdatesPoller(chain.adapter, () => now, async ({ eventIdentity }) => {
+      seen.push(`${eventIdentity.blockNumber}:${eventIdentity.blockHash}`);
+      if (seen.length === 3 || seen.length === 4) chain.commit();
+    });
+
+    await poll();
+    events[0] = update(50, '0xreplacement');
+    now = CADENCE_MS;
+    await poll();
+    now = 2 * CADENCE_MS;
+    await poll();
+
+    expect(seen).toEqual(['50:0xblock50', '51:0xblock51', '52:0xblock52', '50:0xreplacement']);
     expect(saved).toEqual([100]);
   });
 

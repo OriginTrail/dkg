@@ -466,9 +466,13 @@ export class ChainEventLaneRunner {
     let leaseExpired = false;
     const remembered = this.replayedEvents.get(lane.spec.name) ?? new Map<number, Set<string>>();
     const observed = new Map<number, Set<string>>();
-    // Events whose dispatch returned in this scan. A failed scan keeps them, so
-    // its retry dispatches only what is still owed.
-    const dispatched = new Map<number, Set<string>>();
+    // What this scan handed over: rows it dispatched and exact replays it
+    // skipped. A failed scan keeps it for the blocks it read, so its retry
+    // dispatches only what is still owed.
+    const delivered = new Map<number, Set<string>>();
+    let newDispatches = 0;
+    // Rows arrive in block order, so every block below the current row was read.
+    let readThrough = fromBlock - 1;
 
     try {
       for await (const incoming of this.chain.listenForEvents(filter)) {
@@ -490,6 +494,7 @@ export class ChainEventLaneRunner {
         // An exact replay dispatches nothing, so it needs no lease check; the
         // check before the cursor advance still covers the whole range.
         if (identity !== undefined) {
+          readThrough = Math.max(readThrough, event.blockNumber - 1);
           let atBlock = observed.get(event.blockNumber);
           if (atBlock === undefined) {
             atBlock = new Set();
@@ -498,7 +503,10 @@ export class ChainEventLaneRunner {
           const alreadySeen = remembered.get(event.blockNumber)?.has(identity)
             || atBlock.has(identity);
           atBlock.add(identity);
-          if (alreadySeen) continue;
+          if (alreadySeen) {
+            addReplayIdentity(delivered, event.blockNumber, identity);
+            continue;
+          }
         }
         if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
           leaseExpired = true;
@@ -506,7 +514,10 @@ export class ChainEventLaneRunner {
         }
         signal?.throwIfAborted();
         await dispatch();
-        if (identity !== undefined) addReplayIdentity(dispatched, event.blockNumber, identity);
+        if (identity !== undefined) {
+          addReplayIdentity(delivered, event.blockNumber, identity);
+          newDispatches += 1;
+        }
         signal?.throwIfAborted();
         if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
           leaseExpired = true;
@@ -514,6 +525,7 @@ export class ChainEventLaneRunner {
         }
         signal?.throwIfAborted();
       }
+      readThrough = upperBound;
 
       signal?.throwIfAborted();
       if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
@@ -539,14 +551,14 @@ export class ChainEventLaneRunner {
       if (signal?.aborted) signal.throwIfAborted();
       if (leaseExpired) this.restoreLaneState(state, stateBefore);
       const message = err instanceof Error ? err.message : String(err);
-      // The cursor stays put; only the replay memory learns what was dispatched.
+      // The cursor stays put; only the replay memory learns what was delivered.
       // A lease lasts one chain index revision, so a range whose dispatches
       // outlast it would otherwise be dispatched again from its start forever.
-      const kept = this.keepDispatched(lane, remembered, dispatched);
-      if (leaseExpired && kept > 0) {
+      if (lookback > 0) this.keepDelivered(lane, remembered, observed, delivered, fromBlock, readThrough);
+      if (leaseExpired && newDispatches > 0) {
         this.log.warn(
           ctx,
-          `Poll lane ${lane.spec.name}: ${message}; kept ${kept} new dispatch(es), `
+          `Poll lane ${lane.spec.name}: ${message}; kept ${newDispatches} new dispatch(es), `
             + 'scanning the range again next poll without repeating them',
         );
         this.applyLaneSchedule(lane, { kind: 'retry', now });
@@ -669,21 +681,25 @@ export class ChainEventLaneRunner {
     };
   }
 
-  /** Adds a failed scan's completed dispatches to the lane's replay memory; returns how many. */
-  private keepDispatched(
+  /**
+   * A failed scan replaces the replay memory of every block it read, as a
+   * successful scan does, with the rows it delivered there. A row of another
+   * fork is not suppressed once this scan saw the block hold different rows;
+   * blocks it did not reach keep what they had.
+   */
+  private keepDelivered(
     lane: ChainEventPollerLaneRuntime,
     remembered: Map<number, Set<string>>,
-    dispatched: ReadonlyMap<number, ReadonlySet<string>>,
-  ): number {
-    let kept = 0;
-    for (const [block, identities] of dispatched) {
-      for (const identity of identities) {
-        addReplayIdentity(remembered, block, identity);
-        kept += 1;
-      }
+    observed: ReadonlyMap<number, ReadonlySet<string>>,
+    delivered: ReadonlyMap<number, Set<string>>,
+    fromBlock: number,
+    readThrough: number,
+  ): void {
+    for (const block of remembered.keys()) {
+      if ((block >= fromBlock && block <= readThrough) || observed.has(block)) remembered.delete(block);
     }
-    if (kept > 0) this.replayedEvents.set(lane.spec.name, remembered);
-    return kept;
+    for (const [block, identities] of delivered) remembered.set(block, identities);
+    this.replayedEvents.set(lane.spec.name, remembered);
   }
 
   private async eventScanLeaseHolds(lease: EventScanHorizonLease): Promise<boolean> {
