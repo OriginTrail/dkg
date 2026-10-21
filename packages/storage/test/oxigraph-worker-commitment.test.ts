@@ -23,7 +23,7 @@ it('rejects replacement during a held flush, including a composed barrier', asyn
   const entered = new Promise<void>(resolve => { started = resolve; });
   const gate = new Promise<void>(resolve => { release = resolve; });
   const commitment = oxigraphWorkerCommitment('restart-durable', () => worker, async () => { started(); await gate; });
-  const composed = composeTripleStoreCommitment({ commitment } as TripleStore)!;
+  const composed = composeTripleStoreCommitment({ commitment } as TripleStore, async () => {})!;
   const attempt = composed.capture()();
   const rejected = expect(attempt).rejects.toMatchObject({ code: 'OXIGRAPH_WORKER_COMMIT_OWNER_CHANGED' });
   await entered; worker = {} as Worker; release(); await rejected;

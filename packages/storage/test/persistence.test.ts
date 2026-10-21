@@ -83,7 +83,7 @@ describe('explicit persistence certification', () => {
     for (const fixture of [{ flush }, { writesDurableOnAcknowledgement: true },
       { flush, writesDurableOnAcknowledgement: true },
       { get innerStore() { throw new Error('topology is not a persistence contract'); } },
-    ]) expect(composeTripleStoreCommitment(fixture as unknown as TripleStore)).toBeUndefined();
+    ]) expect(composeTripleStoreCommitment(fixture as unknown as TripleStore, flush)).toBeUndefined();
     expect(flush).not.toHaveBeenCalled();
   });
   it('does not certify an in-memory adapter whose optional flush cannot survive restart', async () => {
