@@ -129,6 +129,19 @@ describe('GH#2901 — SWM pointer maintenance after a durable SWM commit', () =>
         sealed: true,
         publishReady: true,
         shareOperationId: operationId,
+        shareEvidence: expect.objectContaining({
+          version: 1,
+          contextGraphId: CG,
+          assertionName: NAME,
+          agentAddress: AGENT,
+          entities: 'all',
+          shareOperationId: operationId,
+          seal: expect.objectContaining({
+            assertionMerkleRoot: `0x${f.sealedRoot}`,
+            authorAddress: AGENT,
+            assertionVersion: '1',
+          }),
+        }),
       });
       expect(await f.readPointer(SWM_PRED)).toBe(f.sealedRoot);
       const repaired = await f.describeKa();

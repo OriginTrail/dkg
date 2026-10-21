@@ -99,6 +99,9 @@ describe('native inventory reopen failure retains the original durable worker ob
     vi.spyOn(second,'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
     second.acceptOpenContextGraphPolicyV1({networkId:NETWORK_ID,contextGraphId:CONTEXT_GRAPH_ID,ownerAddress:AUTHOR});
     await second.whenRfc64CatalogResponsibilitiesIdleV1();
+    // As for the first agent, settle catalog startup before timing worker recovery.
+    // Keep projection admission open so the recovered inventory can hand off ownership.
+    await second.whenRfc64CatalogSupervisorsIdleV1();
     const reopenedQueue=new TripleStoreAsyncPromoteQueue(second.store,{backoff:()=>0,maxRetries:1});
     vi.spyOn(second,'promoteQueue','get').mockReturnValue(reopenedQueue);
     const assertion=second.assertion;
@@ -107,8 +110,12 @@ describe('native inventory reopen failure retains the original durable worker ob
       await commitDurableShareInventory(second,params);
       return {promotedCount:0,sealed:true,publishReady:true,shareOperationId:seeded.shareOperationId};
     }});
-    const worker=createPromoteWorkerSupervisor({agent:second,workerConcurrency:1,pollIntervalMs:10,log:()=>undefined});
-    try {await worker.start();await vi.waitFor(async()=>expect((await reopenedQueue.getStatus(job.jobId))?.state).toBe('succeeded'));}
+    const workerLogs: string[] = [];
+    const worker=createPromoteWorkerSupervisor({agent:second,workerConcurrency:1,pollIntervalMs:10,log:message=>{workerLogs.push(message);}});
+    try {
+      await worker.start();
+      await vi.waitFor(async()=>expect((await reopenedQueue.getStatus(job.jobId))?.state,workerLogs.join('\n')).toBe('succeeded'));
+    }
     finally {await worker.stop();}
     const jobs=await reopenedQueue.list();expect(jobs).toHaveLength(1);
     expect(jobs[0]).toMatchObject({jobId:job.jobId,request:{recoveryBinding:binding},attempt:{count:2}});

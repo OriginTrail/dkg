@@ -1,3 +1,5 @@
+import type { ShareReconciliationInput, ShareReconciliationResult } from './share-reconciliation.js';
+import type { ShareCompletionEvidence } from './share-completion-evidence.js';
 import type { PromoteNoEffectProof } from './promote-no-effect-rejection.js';
 import type { PromoteRecoveryBinding } from './promote-recovery-binding.js';
 /**
@@ -136,6 +138,8 @@ export interface PromoteAttemptState {
 }
 
 export interface PromoteResult {
+  /** Additive versioned observation; not queue replay authority. */
+  shareEvidence?: ShareCompletionEvidence;
   promotedCount: number;
   succeededAt: number;
   /** Informational only — populated when the worker observed the gossip payload size. */
@@ -261,6 +265,7 @@ export interface AsyncPromoteQueue {
   getStatus(jobId: string): Promise<PromoteJob | null>;
   // RFC §3.3
   list(filter?: PromoteListFilter): Promise<PromoteJob[]>;
+  reconcileShare?(input: ShareReconciliationInput): Promise<ShareReconciliationResult>;
   // RFC §3.4
   cancel(jobId: string): Promise<void>;
   recover(jobId: string): Promise<void>;
@@ -297,6 +302,11 @@ export interface AsyncPromoteQueue {
   };
 }
 
+/** Required on agent-owned queues that expose the reconciliation read API. */
+export interface PromoteShareReconciler {
+  reconcileShare(input: ShareReconciliationInput): Promise<ShareReconciliationResult>;
+}
+
 /**
  * #1837 — atomic by-exact-jobId terminal cleanup for the SWM share (promote) queue.
  * Segregated off the base contract (mirrors the publisher-side VmPublishTerminalJobClearer);
@@ -310,6 +320,8 @@ export interface PromoteTerminalJobClearer {
 }
 
 export interface AsyncPromoteQueueConfig {
+  /** Queue admission budget, including mutex wait. Defaults to 10 seconds. */
+  admissionTimeoutMs?: number;
   /** Defaults to `urn:dkg:promote-queue:control-plane` per RFC §4.1. */
   graphUri?: string;
   /** Defaults to 5 — promote retries are cheap. RFC §4.2. */
@@ -345,10 +357,12 @@ export class PromoteJobConflictError extends Error {
   constructor(
     readonly existingJobId: string,
     readonly key: { contextGraphId: string; subGraphName?: string; assertionName: string; agentAddress?: string },
+    readonly observedAdmission = false,
   ) {
     const lane = key.agentAddress ? `, agentAddress=${key.agentAddress}` : '';
     super(
-      `Promote job already active for (${key.contextGraphId}, ${key.subGraphName ?? '<no-sub>'}, ${key.assertionName}${lane}): ${existingJobId}`,
+      observedAdmission ? `Previously observed share admission: ${existingJobId}; inspect job status for its current state`
+      : `Promote job already active for (${key.contextGraphId}, ${key.subGraphName ?? '<no-sub>'}, ${key.assertionName}${lane}): ${existingJobId}`,
     );
   }
 }

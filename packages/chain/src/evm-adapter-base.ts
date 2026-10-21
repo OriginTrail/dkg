@@ -30,6 +30,7 @@ import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-author
 import type {
   ApprovalPolicy,
   ChainReadOptions,
+  IdentityReadOptions,
   EventScanHorizonLease,
   ContextGraphLiveAuthority,
   ContextGraphAuthorityIndexRevisionReader,
@@ -63,6 +64,7 @@ import {
   activeRpcRequestContext,
   withDetachedRpcRequestContext,
   withOwnedRpcRequestContext,
+  withRpcRequestContext,
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import type { RpcRequestClass } from './rpc-request-transport.js';
@@ -1265,7 +1267,9 @@ export class EVMChainAdapterBase {
   protected async readIdentityIdFromStorage(address: string): Promise<bigint> {
     if (!ethers.isAddress(address)) return 0n;
     const checksum = ethers.getAddress(address);
-    await this.init();
+    activeRpcRequestAbortSignal()?.throwIfAborted();
+    if (!this.initialized) await this.init();
+    activeRpcRequestAbortSignal()?.throwIfAborted();
     const previousIdentityStorage = this.contracts.identityStorage;
     // #1583 — keep the `{ refresh: true }` re-resolve. Pre-#1583 this re-hit the
     // Hub on every getIdentityId miss (a major RPC amplifier during publish
@@ -1281,7 +1285,9 @@ export class EVMChainAdapterBase {
     // stays fresh/uncached; `identityStorageChanged` flushes the identity caches
     // when the re-resolve lands on a new address.
     const identityStorage = await this.getIdentityStorage({ refresh: true });
+    activeRpcRequestAbortSignal()?.throwIfAborted();
     const identityStorageChanged = await this.identityStorageAddressChanged(previousIdentityStorage, identityStorage);
+    activeRpcRequestAbortSignal()?.throwIfAborted();
     if (identityStorageChanged) {
       this.identityIdCache.invalidateAll();
       this.resolvedContractAddressCache.invalidateAll();
@@ -1295,7 +1301,20 @@ export class EVMChainAdapterBase {
   }
 
   protected async readIdentityIdForAddress(address: string): Promise<bigint> {
-    return this.identityIdCache.getOrLoad(address, (checksum) => this.readIdentityIdFromStorage(checksum));
+    if (!ethers.isAddress(address)) return 0n;
+    const caller = activeRpcRequestContext();
+    caller.signal?.throwIfAborted();
+    // Initialization tracks its own waiters: preserve their progress and let
+    // it stop when all callers leave before sharing the cached value read.
+    if (!this.initialized) await this.init();
+    caller.signal?.throwIfAborted();
+    const identityId = await this.identityIdCache.getOrLoad(address, (checksum, onProgress) =>
+      withDetachedRpcRequestContext(caller.requestClass, () => withRpcRequestContext(
+        { onProgress, admissionPriority: caller.admissionPriority },
+        () => this.readIdentityIdFromStorage(checksum),
+      )), caller);
+    caller.signal?.throwIfAborted();
+    return identityId;
   }
 
   protected async refreshIdentityIdForAddress(address: string): Promise<bigint> {
@@ -3307,8 +3326,18 @@ export class EVMChainAdapterBase {
   // Identity
   // =====================================================================
 
-  async getIdentityId(): Promise<bigint> {
-    return this.readIdentityIdForAddress(this.signer.address);
+  async getIdentityId(options: IdentityReadOptions = {}): Promise<bigint> {
+    return withRpcRequestContext(options, async () => {
+      const signal = activeRpcRequestAbortSignal();
+      signal?.throwIfAborted();
+      // Shared loads belong to the adapter, not to the first cancellable waiter.
+      // Independent proof reads keep their caller's physical-work ownership.
+      const identityId = await (options.ownership === 'independent'
+        ? this.readIdentityIdFromStorage(this.signer.address)
+        : this.readIdentityIdForAddress(this.signer.address));
+      signal?.throwIfAborted();
+      return identityId;
+    });
   }
 
   // =====================================================================

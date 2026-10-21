@@ -51,6 +51,23 @@ describe('NetworkAdmissionService', () => {
     expect([...admission.verifiedSameNetworkPeerIds()]).toEqual([]);
   });
 
+  it('owns cache-only expiry, canonical aliases and quarantine in the same registry clock', () => {
+    let now = 1000;
+    const admission = new NetworkAdmissionService({ networkId: 'network-a', now: () => now });
+    admission.markVerifiedCacheOnly(VERIFIED_PEER_ID_CID);
+    expect(admission.cachedVerdict(VERIFIED_PEER_ID)).toBe('cache-only');
+    expect(admission.isAcceptedPeer(VERIFIED_PEER_ID)).toBe(false);
+    expect([...admission.verifiedSameNetworkPeerIds()]).toEqual([]);
+    now += 30_000;
+    expect(admission.cachedVerdict(VERIFIED_PEER_ID_CID)).toBeUndefined();
+    admission.markVerifiedCacheOnly(VERIFIED_PEER_ID);
+    admission.quarantinePeer(VERIFIED_PEER_ID_CID);
+    expect(admission.cachedVerdict(VERIFIED_PEER_ID)).toBe('rejected');
+    admission.markVerifiedSameNetwork(VERIFIED_PEER_ID);
+    expect(admission.cachedVerdict(VERIFIED_PEER_ID_CID)).toBe('same-network');
+    expect([...admission.verifiedSameNetworkPeerIds()]).toEqual([VERIFIED_PEER_ID]);
+  });
+
   it('keeps no-deadline quarantine indefinite for backward compatibility', () => {
     let now = 1_000;
     const admission = new NetworkAdmissionService({

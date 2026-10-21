@@ -25,6 +25,18 @@ async function setup() {
   return {store,publisher,reopen,queue,request,seal};
 }
 describe('bound ownership extends the publisher lifecycle mutation fence', () => {
+  it('keeps a failed bound owner in async admission observations until its obligation completes', async () => {
+    const { queue, request } = await setup();
+    const job = await queue.enqueueAndClaim(request, 'owner');
+    await queue.fail(job.jobId, job.lease!.claimToken, {
+      message: 'tail incomplete', retryable: false, classification: 'fatal', recordedAt: Date.now(),
+    });
+    await expect(queue.enqueue({ ...request, recoveryBinding: undefined })).rejects.toMatchObject({
+      existingJobId: job.jobId, observedAdmission: true,
+    });
+    await expect(queue.clearTerminalJob(job.jobId)).resolves.toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+  });
+
   it('checks new-operation capability before admission without imposing it on committed recovery', async () => {
     const { publisher, store, queue, request, seal } = await setup();
     const unavailable = new Error('inventory signer unavailable');
