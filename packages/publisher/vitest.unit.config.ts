@@ -75,6 +75,7 @@ export default defineConfig({
       'test/async-lift-chain-check-2945.test.ts',
       'test/lift-job-failure.test.ts',
       'test/async-promote-queue.test.ts',
+      'test/bound-share-mutation-guard.test.ts',
       'test/share-reconciliation.test.ts',
       'test/async-promote-admission.test.ts',
       'test/async-promote-format3-upgrade.test.ts',

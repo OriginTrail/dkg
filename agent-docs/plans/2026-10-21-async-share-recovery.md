@@ -118,3 +118,8 @@ Add two real-finalizer cases with a nonempty private partition. Pause after cano
 ## Review round 13 — incorporate updated base
 
 The reviewer completed `4d8967a22` with no issues. Base `651607954` adds write-preflight diagnostics/refactoring from #3343 and conflicts only where both branches prepend CLI unit-test entries. Retain both entries and the automatically merged agent test registrations/file-size budgets. Re-run preparation/private/preflight coverage and runtime build. Because the base affects HTTP write preflight, perform a fresh isolated live lifecycle smoke on the merged revision with a new wallet claim; do not reuse a released home. Preserve the earlier three real interruptions as recovery evidence, and distinguish their runtime from the merged-head smoke.
+
+
+## Review round 14 — publisher-owned queue binding coverage
+
+All test shards passed on the merged head, and its remote reviewer found no issues. The aggregate coverage gate now confirms agent and CLI changed lines are 100%, but publisher is 25/46 (54.35%): cross-package CLI execution does not instrument the publisher package's own report. Register the existing publisher ownership suite in unit CI and extend it with atomic binding acknowledgement/no-write/lost-ack outcomes, unchanged original lease/attempt/markers, invalid-token/started-job refusal and legacy/unsafe classification. Inspect all changed packages' downloaded CI coverage and merge local publisher instrumentation before pushing. Keep every repository threshold intact. No production change or additional live run is needed.
