@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { PromoteJobLeaseError } from '@origintrail-official/dkg-publisher';
 import { createPromotionAgentForTest } from '../../agent/test/_helpers/promotion-agent.js';
 import { makeTestKaNumberAllocator } from '../../agent/test/_helpers/ka-allocator.js';
@@ -12,17 +12,19 @@ import { executePromoteRequest } from '../src/daemon/worker/execute-promote-requ
 const CG = 'async-recovery', NAME = 'asset', AUTHOR = `0x${'11'.repeat(20)}`;
 const stores: OxigraphStore[] = [];
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(stores.splice(0).map(s => s.close())); });
-async function setup(subGraphName?: string) {
+async function setup(subGraphName?: string, oversized = false) {
   const store = new OxigraphStore(); stores.push(store);
   const { agent, publisher } = await createPromotionAgentForTest(store, {
     agentAddress: AUTHOR, peerId: '12D3KooWRecovery', kaAllocator: makeTestKaNumberAllocator(),
   });
   agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ mode: 'legacy', killSwitchActive: false });
   let time = Date.now();
-  agent.configurePromoteQueue({ now: () => time, leaseMs: 1000 });
+  agent.configurePromoteQueue({ now: () => time, leaseMs: 1000, backoff: () => 0 });
   if (subGraphName) await ensureSubGraphRegistration(store, { contextGraphId: CG, subGraphName, createdBy: '12D3KooWRecovery', timestamp: new Date() });
   await publisher.assertionCreate(CG, NAME, AUTHOR, subGraphName);
-  await publisher.assertionWrite(CG, NAME, AUTHOR, [{ subject: 'urn:asset', predicate: 'urn:value', object: '"original"' }], subGraphName);
+  await publisher.assertionWrite(CG, NAME, AUTHOR, oversized
+    ? Array.from({ length: 80 }, (_, i) => ({ subject: 'urn:large', predicate: `urn:value:${i}`, object: JSON.stringify('x'.repeat(55_000)) }))
+    : [{ subject: 'urn:asset', predicate: 'urn:value', object: '"original"' }], subGraphName);
   const finalized = await finalizeRootlessAssertionForTest({ publisher, store, contextGraphId: CG, name: NAME, agentAddress: AUTHOR, subGraphName });
   const queue = agent.promoteQueue;
   const { jobId } = await agent.assertion.promoteAsync(CG, NAME, { subGraphName, agentAddress: AUTHOR });
@@ -163,13 +165,57 @@ describe('async shares acquire durable replay authority before promotion', () =>
     expect((await f.queue.getStatus(f.jobId)).request.recoveryBinding).toBeUndefined();
   });
 
-  it('preserves legacy queued execution without inventing a binding', async () => {
+  it.each([[3, AUTHOR], [4, undefined]])('preserves queued format %s / lane %s without inventing authority', async (formatVersion, agentAddress) => {
     const f = await setup();
     const job = await f.claim();
-    const legacy = { ...job, formatVersion: 3, request: { ...job.request, agentAddress: undefined } };
+    const legacy = { ...job, formatVersion, request: { ...job.request, agentAddress } };
+    await f.queue.writeJob(legacy);
     const seal = vi.spyOn(f.agent, 'prepareAtomicAssertionShare');
     expect(await f.agent.assertion.prepareQueuedShare(legacy)).toEqual({ job: legacy });
     expect(seal).not.toHaveBeenCalled();
+    const runPromote = vi.fn(async () => ({ promotedCount: 1 }));
+    expect((await f.run(legacy, { runPromote })).outcome).toBe('succeeded');
+    expect(runPromote.mock.calls[0][0].recoveryBinding).toBeUndefined();
+    expect((await f.queue.getStatus(f.jobId)).request.recoveryBinding).toBeUndefined();
+  });
+
+  it.each([false, true])('discounts preparation retries but not earlier bound execution (%s)', async earlierBoundExecution => {
+    const f = await setup(undefined, true);
+    const busy = () => new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'test.prepare', { storeOperation: 'query' });
+    vi.spyOn(f.agent, 'prepareAtomicAssertionShare').mockRejectedValueOnce(busy()).mockRejectedValueOnce(busy());
+    for (let n = 1; n <= 2; n++) {
+      expect((await f.run(await f.claim())).outcome).toBe('failed_retrying');
+      expect((await f.queue.getStatus(f.jobId)).preparationAttempts).toBe(n);
+    }
+    if (earlierBoundExecution) {
+      expect((await f.run(await f.claim(), { runPromote: async () => { throw busy(); } })).outcome).toBe('failed_retrying');
+    }
+    const outcome = await f.run(await f.claim());
+    expect(outcome.outcome).toBe('failed_terminal');
+    expect(Boolean(outcome.retiredNoEffect)).toBe(!earlierBoundExecution);
+    const job = await f.queue.getStatus(f.jobId);
+    expect(job.attempt.count).toBe(earlierBoundExecution ? 4 : 3);
+    expect(job.preparationAttempts).toBe(2);
+    expect(await f.store.countQuads(f.finalized.sharedGraphUri)).toBe(0);
+    if (earlierBoundExecution) {
+      await expect(f.agent.assertion.discard(CG, NAME, { agentAddress: AUTHOR })).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
+      await expect(f.queue.clearTerminalJob(f.jobId)).resolves.toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    } else {
+      await expect(f.agent.assertion.discard(CG, NAME, { agentAddress: AUTHOR })).resolves.toBeUndefined();
+      await expect(f.queue.clearTerminalJob(f.jobId)).resolves.toEqual({ outcome: 'cleared' });
+    }
+  });
+
+  it('retains proof of an expired preparation-only claim before first bound execution', async () => {
+    const f = await setup(undefined, true);
+    await f.claim();
+    f.expire();
+    expect(await f.queue.recoverOnStartup()).toEqual({ reclaimed: 1, abandoned: 0 });
+    expect((await f.queue.getStatus(f.jobId)).preparationAttempts).toBe(1);
+    const outcome = await f.run(await f.claim());
+    expect(outcome.outcome).toBe('failed_terminal');
+    expect(outcome.retiredNoEffect).toBe(true);
+    await expect(f.agent.assertion.discard(CG, NAME, { agentAddress: AUTHOR })).resolves.toBeUndefined();
   });
 
   it('fails preparation before promotion without marking an unsafe start', async () => {

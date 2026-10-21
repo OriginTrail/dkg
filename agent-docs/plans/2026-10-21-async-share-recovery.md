@@ -58,3 +58,11 @@ Task checkout: `.codex/worktrees/async-share-recovery/dkg`; scratch `.scratch/as
 - Source diagnosis and preserved prior-run evidence agree on missing async binding.
 - Implemented queue transition, agent preparation and production worker hook. 203 CLI regressions and 152 publisher queue/admission/atomicity regressions passed. Removing the production hook reproduces the missing binding in the new integration test. Runtime builds/type tests, lint, file-size and native SQLite checks passed.
 - Next: open PR, run isolated live interruption and normal lifecycle checks while remote CI/review executes.
+
+## Review round 1
+
+Remote review found that preparation-only retries inflated the existing first-execution rejection guard. The fix records only a contiguous prefix of current-format unbound attempts whose durable markers prove promotion never started, then discounts that prefix when checking a producer-certified no-effect rejection. Any missing evidence, earlier execution, or bound retry keeps the conservative guard. Manual recovery constructs a new attempt record and drops the prefix. Old readers ignore the additive field and remain more conservative: after rollback they may retain an owner that the new version can retire; re-upgrade to complete that retirement. No old reader gains replay authority. Proven unstarted lease expiry also retains this prefix before markers are cleared. Tests cover safe rejection after two preparation failures and refusal after an additional bound attempt.
+
+The compatibility exclusions now have independent persisted-worker cases (older format with lane, current format without lane). Merged updated testnet-canary `abb89dff7`; resolved only file-size-budget conflict by keeping the stricter budgets. First live campaign continues on its original compiled runtime; rebuild only after it finishes, then repeat the interruption and lifecycle validation on the revised runtime.
+
+Round-1 verification: 113 focused CLI tests and 152 publisher tests passed. Independent legacy exclusions run persisted jobs through the worker. Safe oversized rejection after two preparation failures releases the asset; a prior bound execution prevents retirement. An expired unstarted claim also permits certified first-execution retirement.

@@ -180,6 +180,8 @@ export interface PromoteJob {
   lease?: PromoteLease;
   attempt: PromoteAttemptState;
   result?: PromoteResult;
+  /** Contiguous initial attempts proven to have failed before promotion started. */
+  preparationAttempts?: number;
   commitMarker?: PromoteCommitMarker;
   /**
    * Stable string describing why a job is currently in its state when

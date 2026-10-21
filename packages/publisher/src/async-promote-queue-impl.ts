@@ -5,7 +5,7 @@ import { readShareCompletionEvidence } from './share-completion-evidence.js';
 import { promoteSuccessTransition } from './async-promote-success.js';
 import { persistPromoteJobWithEvidence, type PromotePersistenceResult } from './promote-admission-persistence.js';
 import { PromoteAdmissionCoordinator, PromoteAdmissionError, type PromoteAdmissionAttempt } from './promote-admission.js';
-import { isRetiredBoundRejection } from './promote-no-effect-rejection.js';
+import { recordUnstartedPromoteAttempt, isRetiredBoundRejection } from './promote-no-effect-rejection.js';
 import { createPromoteOwnershipReader, hasUnfinishedBoundObligation, readPromoteOwnershipCandidates, promoteOwnershipLookup, storedPromoteLaneScope, type PromoteConflictLookup } from './async-promote-ownership.js';
 import { isBoundPromoteJob, snapshotPromoteRequest, claimPromoteJob } from './bound-promote-job.js';
 import { DEFAULT_PROMOTE_RETRY_TUNING } from './promote-retry-policy.js';
@@ -459,7 +459,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       if (isBoundPromoteJob(job) || (formatVersion <= ASYNC_PROMOTE_QUEUE_FORMAT_VERSION
         && hasRecoverableCommitMarker && swmInserted === false && promoteStarted !== true)) {
         const reclaimedJob: PromoteJob = {
-          ...job,
+          ...recordUnstartedPromoteAttempt(job),
           request: this.snapshotRequest(job.request),
           state: 'queued',
           updatedAt: now,
