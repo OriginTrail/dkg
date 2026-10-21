@@ -672,7 +672,9 @@ jobs:
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_agent == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Native runs can finish their tests at 10m; allow coverage/report cleanup.
+    # Keep the six hermetic unit shards on their existing deadline.
+    timeout-minutes: ${{ matrix.shard <= 4 && 12 || 10 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['tornado-agent'] }}
