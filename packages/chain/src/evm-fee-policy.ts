@@ -19,6 +19,8 @@
  */
 
 import { Transaction, type ethers } from 'ethers';
+import { applyTransactionFeeCap } from './evm-fee-cap.js';
+import type { EvmSigner } from './evm-signer.js';
 
 const GWEI = 1_000_000_000n;
 
@@ -209,4 +211,26 @@ export function replacementTransactionRequest(
     maxFeePerGas: fees.maxFeePerGas,
     maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
   };
+}
+
+/** Price before estimation under the operator cap, then validate the populated transaction. */
+export async function prepareTransactionWithFees(
+  signer: EvmSigner,
+  populated: ethers.TransactionRequest,
+  floor?: ChainFeeFloor,
+  maxFeePerGasWei?: bigint,
+): Promise<ethers.TransactionRequest> {
+  // Headroom over the latest base fee and the chain's floor (evm-fee-policy.ts), under the
+  // operator cap already (validated against the base fee read): ethers estimates gas with
+  // these fees, and the RPC checks them against the balance and the base fee.
+  const priced = await priceTransactionRequest(signer.provider, populated, floor);
+  const filled = await signer.populateTransaction(maxFeePerGasWei === undefined
+    ? priced.transaction
+    : applyTransactionFeeCap(priced.transaction, maxFeePerGasWei, priced.baseFeePerGas));
+  if (maxFeePerGasWei === undefined) return filled;
+  let baseFeePerGas = priced.baseFeePerGas;
+  if (baseFeePerGas === undefined && filled.maxFeePerGas !== null && filled.maxFeePerGas !== undefined) {
+    baseFeePerGas = (await signer.provider?.getBlock('latest'))?.baseFeePerGas;
+  }
+  return applyTransactionFeeCap(filled, maxFeePerGasWei, baseFeePerGas);
 }

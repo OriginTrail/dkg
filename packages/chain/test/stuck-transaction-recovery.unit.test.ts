@@ -109,7 +109,6 @@ describe('stuck-transaction decision', () => {
     maxFeePerGas: 614n,
     replacementsLeft: 5,
     renewalsLeft: 2,
-    finalLookupLeft: true,
   };
 
   it('replaces the next-to-mine transaction once the base fee has passed its cap', () => {
@@ -139,12 +138,10 @@ describe('stuck-transaction decision', () => {
       .toEqual({ action: 'give-up' });
   });
 
-  it('never replaces once the nonce is consumed; at the deadline it looks every hash up once more, then gives up', () => {
+  it('never replaces once the nonce is consumed; at the deadline it requests one final receipt pass', () => {
     expect(decideStuckTransaction({ ...base, latestNonce: 6723, deadlineReached: false })).toEqual({ action: 'wait' });
     expect(decideStuckTransaction({ ...base, latestNonce: 6723, deadlineReached: true }))
       .toEqual({ action: 'final-lookup' });
-    expect(decideStuckTransaction({ ...base, latestNonce: 6723, deadlineReached: true, finalLookupLeft: false }))
-      .toEqual({ action: 'give-up' });
   });
 
   it('checks every 30 s, or four times per receipt timeout when that is shorter', () => {
@@ -164,11 +161,11 @@ describe('StuckTransactionRecovery', () => {
 
     // Nothing is read before the first check interval.
     clock.now = 29_999;
-    await expect(recovery.onPending({ deadlineMs: 600_000, deadlineReached: false })).resolves.toBeUndefined();
+    await expect(recovery.onPending({ deadlineMs: 600_000, deadlineReached: false })).resolves.toEqual({ action: 'continue-polling' });
     expect(events).toEqual([]);
 
     clock.now = 30_000;
-    await expect(recovery.onPending({ deadlineMs: 600_000, deadlineReached: false })).resolves.toBeUndefined();
+    await expect(recovery.onPending({ deadlineMs: 600_000, deadlineReached: false })).resolves.toEqual({ action: 'replacement-broadcast', pollForMs: 30_000 });
     expect(signedTxs).toHaveLength(1);
     const replacementHash = broadcasts[0];
     expect(events).toEqual(['read', 'sign', `checkpoint:${replacementHash}`, `broadcast:${replacementHash}`]);
@@ -199,7 +196,7 @@ describe('StuckTransactionRecovery', () => {
     const clock = { now: 600_000 };
     const { recovery } = recoveryFor(original, port, clock);
 
-    await expect(recovery.onPending({ deadlineMs: 600_000, deadlineReached: true })).resolves.toBe(1_200_000);
+    await expect(recovery.onPending({ deadlineMs: 600_000, deadlineReached: true })).resolves.toEqual({ action: 'replacement-broadcast', pollForMs: 600_000 });
     expect(broadcasts).toHaveLength(1);
     expect(recovery.latestTxHash()).toBe(broadcasts[0]);
     expect(recovery.describeTimeout()).toBe(` (nonce 6722; also sent as ${original.txHash}; deadline renewed 1x)`);
@@ -214,10 +211,10 @@ describe('StuckTransactionRecovery', () => {
 
     for (let renewal = 1; renewal <= MAX_STUCK_TRANSACTION_DEADLINE_RENEWALS; renewal += 1) {
       await expect(recovery.onPending({ deadlineMs: clock.now, deadlineReached: true }))
-        .resolves.toBe(clock.now + 600_000);
+        .resolves.toEqual({ action: 'renew-deadline', pollForMs: 600_000 });
       clock.now += 600_000;
     }
-    await expect(recovery.onPending({ deadlineMs: clock.now, deadlineReached: true })).resolves.toBeUndefined();
+    await expect(recovery.onPending({ deadlineMs: clock.now, deadlineReached: true })).resolves.toEqual({ action: 'stop' });
     expect(broadcasts).toEqual([]);
   });
 
@@ -232,10 +229,9 @@ describe('StuckTransactionRecovery', () => {
     await recovery.onPending({ deadlineMs: 600_000, deadlineReached: false });
     clock.now = 600_000;
     // One more look at every hash: the transaction that consumed the slot may be ours.
-    await expect(recovery.onPending({ deadlineMs: 600_000, deadlineReached: true })).resolves.toBe(630_000);
-    clock.now = 630_000;
-    await expect(recovery.onPending({ deadlineMs: 630_000, deadlineReached: true })).resolves.toBeUndefined();
-    expect(events).toEqual(['read', 'read', 'read']);
+    await expect(recovery.onPending({ deadlineMs: 600_000, deadlineReached: true }))
+      .resolves.toEqual({ action: 'final-poll', pollForMs: 30_000 });
+    expect(events).toEqual(['read', 'read']);
     expect(recovery.txHashes()).toEqual([original.txHash]);
   });
 
@@ -248,7 +244,7 @@ describe('StuckTransactionRecovery', () => {
     const clock = { now: 600_000 };
     const { recovery, logs } = recoveryFor(original, port, clock);
 
-    await expect(recovery.onPending({ deadlineMs: 600_000, deadlineReached: true })).resolves.toBeUndefined();
+    await expect(recovery.onPending({ deadlineMs: 600_000, deadlineReached: true })).resolves.toEqual({ action: 'stop' });
     expect(broadcasts).toEqual([]);
     expect(recovery.txHashes()).toEqual([original.txHash]);
     expect(logs.join('\n')).toContain('replacement failed: write-ahead store unavailable');
@@ -274,7 +270,7 @@ describe('StuckTransactionRecovery', () => {
       const clock = { now: 600_000 };
       const { recovery, logs } = recoveryFor(original, port, clock);
 
-      await expect(recovery.onPending({ deadlineMs: 600_000, deadlineReached: true })).resolves.toBe(1_200_000);
+      await expect(recovery.onPending({ deadlineMs: 600_000, deadlineReached: true })).resolves.toEqual({ action: 'replacement-broadcast', pollForMs: 600_000 });
       expect(recovery.txHashes()).toEqual([original.txHash, broadcasts[0]]);
       // The timeout still names the transaction an endpoint is known to hold.
       expect(recovery.latestTxHash()).toBe(original.txHash);
@@ -315,7 +311,7 @@ describe('StuckTransactionRecovery', () => {
     const clock = { now: 600_000 };
     const { recovery } = recoveryFor(original, port, clock);
 
-    await expect(recovery.onPending({ deadlineMs: 600_000, deadlineReached: true })).resolves.toBeUndefined();
+    await expect(recovery.onPending({ deadlineMs: 600_000, deadlineReached: true })).resolves.toEqual({ action: 'stop' });
     expect(events).toEqual([]);
   });
 
@@ -518,6 +514,51 @@ describe('receipt wait over a transaction and its replacements', () => {
     await expect(outcome).resolves.toMatchObject({ status: 'fulfilled', receipt: { hash: minedReplacement } });
     expect(lookups).toContain(minedReplacement);
   });
+
+  it.each([false, true])('polls a late replacement before sleeping (uncertain broadcast: %s)', async (uncertain) => {
+    const chain = { latestNonce: 6722, baseFeePerGas: 4_900_000n };
+    let minedReplacement: string | undefined;
+    const { outcome, lookups } = await waitWithRecovery({
+      chain,
+      receiptTimeoutMs: 4_000,
+      checkIntervalMs: 1_000,
+      pollIntervalMs: 2_000,
+      minedHash: () => minedReplacement,
+      broadcast: async (_signedTx, txHash) => {
+        await new Promise((resolve) => setTimeout(resolve, 2_500));
+        chain.latestNonce = 6723;
+        minedReplacement = txHash;
+        if (uncertain) throw Object.assign(new Error('lost broadcast response'), { code: 'RPC_TIMEOUT' });
+      },
+    });
+    const settled = vi.fn();
+    void outcome.then(settled);
+    await vi.advanceTimersByTimeAsync(4_500);
+    expect(lookups).toContain(minedReplacement);
+    expect(settled).toHaveBeenCalledWith({ status: 'fulfilled', receipt: { hash: minedReplacement, status: 1 } });
+    await vi.runAllTimersAsync();
+  });
+
+  it('terminates after the completed final receipt pass without a synthetic renewal', async () => {
+    const { original, outcome, lookups } = await waitWithRecovery({
+      chain: { latestNonce: 6723, baseFeePerGas: 4_900_000n },
+      receiptTimeoutMs: 4_000,
+      checkIntervalMs: 1_000,
+      pollIntervalMs: 2_000,
+      minedHash: () => undefined,
+    });
+    const settled = vi.fn();
+    void outcome.then(settled);
+    await vi.advanceTimersByTimeAsync(4_000);
+    // Initial and 2-second polls, followed by one real final pass at the deadline.
+    expect(lookups).toEqual([original.txHash, original.txHash, original.txHash]);
+    expect(settled).toHaveBeenCalledWith({ status: 'rejected', reason: expect.objectContaining({
+      code: 'RPC_TIMEOUT', txHash: original.txHash,
+    }) });
+    await vi.runAllTimersAsync();
+    expect(lookups).toHaveLength(3);
+  });
+
 });
 
 describe('recovery read budgets', () => {

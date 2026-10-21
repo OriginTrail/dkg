@@ -32,10 +32,11 @@
  * later one then reject it, so its hash is polled and waited for.
  */
 
-import type { JsonRpcProvider } from 'ethers';
+import type { JsonRpcProvider, TransactionReceipt } from 'ethers';
 import type { ReplacementBroadcastSignal } from './chain-adapter.js';
 import { errorMessage } from './evm-adapter-errors.js';
-import { RPC_READ_STALL_TIMEOUT_MS } from './evm-adapter-constants.js';
+import { assertSuccessfulReceipt } from './evm-adapter-rpc.js';
+import { RPC_READ_STALL_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS } from './evm-adapter-constants.js';
 import { applyTransactionFeeCap } from './evm-fee-cap.js';
 import {
   type ChainFeeFloor,
@@ -49,6 +50,7 @@ import {
 } from './evm-fee-policy.js';
 import { signTransactionOnce, type EvmSigner } from './evm-signer.js';
 import { hostOnlyRpcText } from './rpc-failover-log.js';
+import { waitForReceiptWithDeadline, type ReceiptRecoveryOutcome, type WaitForReceiptWithDeadlineOptions } from './receipt-wait.js';
 
 /** How often a pending transaction is checked against the account nonce and base fee. */
 export const STUCK_TRANSACTION_CHECK_INTERVAL_MS = 30_000;
@@ -97,16 +99,10 @@ export function decideStuckTransaction(input: {
   readonly deadlineReached: boolean;
   readonly replacementsLeft: number;
   readonly renewalsLeft: number;
-  /**
-   * Whether the hashes have yet to be looked up once after the slot was seen
-   * consumed: the transaction that consumed it may be one of ours that was
-   * sent after the last lookup.
-   */
-  readonly finalLookupLeft: boolean;
 }): StuckTransactionDecision {
   if (input.latestNonce > input.nonce) {
     if (!input.deadlineReached) return { action: 'wait' };
-    return { action: input.finalLookupLeft ? 'final-lookup' : 'give-up' };
+    return { action: 'final-lookup' };
   }
   if (input.latestNonce < input.nonce) {
     if (!input.deadlineReached) return { action: 'wait' };
@@ -177,7 +173,6 @@ export class StuckTransactionRecovery {
   private renewals = 0;
   /** The latest hash an endpoint accepted; the original until a replacement is. */
   private acceptedTxHash: string;
-  private finalLookupDone = false;
   private nextCheckAtMs: number;
 
   constructor(private readonly options: StuckTransactionRecoveryOptions) {
@@ -213,12 +208,12 @@ export class StuckTransactionRecovery {
   }
 
   /**
-   * One step of the receipt wait that found no receipt. Returns a new
-   * absolute deadline to keep waiting past the current one, or nothing.
+   * One recovery decision after a receipt pass. Relative polling budgets are
+   * requests to the waiter; recovery never marks a receipt lookup as performed.
    */
-  async onPending(context: { deadlineMs: number; deadlineReached: boolean }): Promise<number | void> {
+  async onPending(context: { deadlineMs: number; deadlineReached: boolean }): Promise<ReceiptRecoveryOutcome> {
     const now = this.now();
-    if (!context.deadlineReached && now < this.nextCheckAtMs) return;
+    if (!context.deadlineReached && now < this.nextCheckAtMs) return { action: 'continue-polling' };
     this.nextCheckAtMs = now + this.options.checkIntervalMs;
 
     let head: { latestNonce: number; baseFeePerGas: bigint | null };
@@ -226,7 +221,7 @@ export class StuckTransactionRecovery {
       head = await this.options.port.readChainHead();
     } catch (err) {
       this.log(`[chain] ${this.options.label} tx ${this.latestTxHash()}: stuck-transaction check failed: ${describeError(err)}`);
-      return;
+      return { action: context.deadlineReached ? 'stop' : 'continue-polling' };
     }
     const newest = this.tracked[this.tracked.length - 1];
     const decision = decideStuckTransaction({
@@ -237,34 +232,29 @@ export class StuckTransactionRecovery {
       deadlineReached: context.deadlineReached,
       replacementsLeft: this.maxReplacements - this.replacements,
       renewalsLeft: this.maxDeadlineRenewals - this.renewals,
-      finalLookupLeft: !this.finalLookupDone,
     });
     switch (decision.action) {
       case 'wait':
+        return { action: 'continue-polling' };
       case 'give-up':
-        return;
+        return { action: 'stop' };
       case 'final-lookup':
-        // The renewed wait looks every hash up before anything else.
-        this.finalLookupDone = true;
-        return this.now() + this.options.checkIntervalMs;
+        return { action: 'final-poll', pollForMs: this.options.checkIntervalMs };
       case 'renew-deadline':
         this.renewals += 1;
         this.log(
           `[chain] ${this.options.label} tx ${newest.txHash} is unmined at the receipt deadline behind an ` +
           `earlier nonce (account nonce ${head.latestNonce}, ours ${this.options.nonce}); waiting again`,
         );
-        return this.now() + this.options.receiptTimeoutMs;
+        return { action: 'renew-deadline', pollForMs: this.options.receiptTimeoutMs };
       case 'replace': {
         const sent = await this.replace(newest, head.baseFeePerGas, decision.reason);
-        if (!sent) return;
-        if (decision.renewDeadline) {
-          this.renewals += 1;
-          return this.now() + this.options.receiptTimeoutMs;
-        }
-        // Signing and broadcasting can run past the deadline; the new hash still
-        // gets a check interval of polling before the wait may give up.
-        const pollUntilMs = this.now() + this.options.checkIntervalMs;
-        return pollUntilMs > context.deadlineMs ? pollUntilMs : undefined;
+        if (!sent) return { action: context.deadlineReached ? 'stop' : 'continue-polling' };
+        if (decision.renewDeadline) this.renewals += 1;
+        return {
+          action: 'replacement-broadcast',
+          pollForMs: decision.renewDeadline ? this.options.receiptTimeoutMs : this.options.checkIntervalMs,
+        };
       }
     }
   }
@@ -392,6 +382,29 @@ export function stuckTransactionRecoveryFor(
       broadcast: (signedTx, txHash) => chain.broadcast(signedTx, txHash, label),
       ...(target.onReplaced ? { onReplaced: target.onReplaced } : {}),
     },
+  });
+}
+
+/** Canonical adapter receipt wait, including optional same-nonce recovery. */
+export function waitForRecoverableTransactionReceipt(
+  options: Pick<WaitForReceiptWithDeadlineOptions<TransactionReceipt>,
+    'txHash' | 'receiptTimeoutMs' | 'getReceipt' | 'isReceiptEligible'> & { label: string },
+  recovery?: StuckTransactionRecovery,
+): Promise<TransactionReceipt> {
+  const { label, receiptTimeoutMs } = options;
+  return waitForReceiptWithDeadline({
+    ...options,
+    ...(recovery ? {
+      txHashes: () => recovery.txHashes(),
+      timeoutTxHash: () => recovery.latestTxHash(),
+      onPending: (context) => recovery.onPending(context),
+    } : {}),
+    pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
+    assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
+    formatTimeoutMessage: ({ txHash, lastError }) =>
+      `${label} tx ${txHash} timed out waiting for a receipt after ${receiptTimeoutMs}ms` +
+      (recovery?.describeTimeout() ?? '') +
+      (lastError ? ` (last RPC error: ${hostOnlyRpcText(errorMessage(lastError))})` : ''),
   });
 }
 

@@ -55,7 +55,6 @@ import {
   isRpcEndpointFailoverEligible,
   isRetryableRpcError,
   resolveRpcUrls,
-  assertSuccessfulReceipt,
   explainOutOfGasRevert,
   sleep,
 } from './evm-adapter-rpc.js';
@@ -79,7 +78,6 @@ import  {
   type ReceiptLookupOptions,
 } from './rpc-failover-client.js';
 import type { GasLimitBufferOptions } from './gas-limit-buffer.js';
-import { waitForReceiptWithDeadline } from './receipt-wait.js';
 import { markTransactionNotSubmitted } from './transaction-submission.js';
 import {
   RpcUsageTracker,
@@ -130,18 +128,19 @@ import type {
   RandomSamplingReadContextReader,
 } from './random-sampling-read-context.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE,
+import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE,
   TX_SERIALIZER_OBSERVE_AFTER_MS,
   TX_SERIALIZER_OBSERVE_INTERVAL_MS,
   resolveTxSerializerStallAfterMs,
 } from './evm-adapter-constants.js';
 import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
-import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
-import { chainFeeFloor, priceTransactionRequest, type ChainFeeFloor } from './evm-fee-policy.js';
+import { resolveMaxFeePerGasWei } from './evm-fee-cap.js';
+import { chainFeeFloor, prepareTransactionWithFees, type ChainFeeFloor } from './evm-fee-policy.js';
 import { numericChainIdOf } from './configured-chain-id.js';
 import {
   StuckTransactionRecovery,
   stuckTransactionRecoveryFor,
+  waitForRecoverableTransactionReceipt,
   type StuckTransactionTarget,
 } from './stuck-transaction-recovery.js';
 import { ContextGraphAuthorityHistoryCache } from './context-graph-authority-history.js';
@@ -1943,36 +1942,20 @@ export class EVMChainAdapterBase {
     return contract.connect(runner) as Contract;
   }
 
-  /**
-   * Wait for a broadcast transaction's receipt; a `recovery` also polls its
-   * same-nonce replacements and speeds it up while it is stuck.
-   */
   protected async waitForReceiptWithFailover(
     txHash: string,
     label: string,
     recovery?: StuckTransactionRecovery,
   ): Promise<ethers.TransactionReceipt> {
-    return waitForReceiptWithDeadline({
+    return waitForRecoverableTransactionReceipt({
       txHash,
-      ...(recovery
-        ? {
-          txHashes: () => recovery.txHashes(),
-          timeoutTxHash: () => recovery.latestTxHash(),
-          onPending: (context: { deadlineMs: number; deadlineReached: boolean }) => recovery.onPending(context),
-        }
-        : {}),
+      label,
       receiptTimeoutMs: this.receiptTimeoutMs,
-      pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
       getReceipt: (hash, options) => this.getTransactionReceiptWithFailover(hash, options),
       isReceiptEligible: async (receipt, { deadlineMs }) => (
         await this.receiptFinality.read(receipt, { deadlineMs })
       ) !== null,
-      assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
-      formatTimeoutMessage: ({ txHash: waitedTxHash, lastError }) =>
-        `${label} tx ${waitedTxHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
-        (recovery?.describeTimeout() ?? '') +
-        (lastError ? ` (last RPC error: ${hostOnlyRpcText(errorMessage(lastError))})` : ''),
-    });
+    }, recovery);
   }
 
   /** Speed-up state for one broadcast transaction; see stuck-transaction-recovery.ts. */
@@ -2014,19 +1997,7 @@ export class EVMChainAdapterBase {
     signer: EvmSigner,
     populated: ethers.TransactionRequest,
   ): Promise<ethers.TransactionRequest> {
-    // Headroom over the latest base fee and the chain's floor (evm-fee-policy.ts), under the
-    // operator cap already (validated against the base fee read): ethers estimates gas with
-    // these fees, and the RPC checks them against the balance and the base fee.
-    const priced = await priceTransactionRequest(signer.provider, populated, this.feeFloor);
-    const filled = await signer.populateTransaction(this.maxFeePerGasWei === undefined
-      ? priced.transaction
-      : applyTransactionFeeCap(priced.transaction, this.maxFeePerGasWei, priced.baseFeePerGas));
-    if (this.maxFeePerGasWei === undefined) return filled;
-    let baseFeePerGas = priced.baseFeePerGas;
-    if (baseFeePerGas === undefined && filled.maxFeePerGas !== null && filled.maxFeePerGas !== undefined) {
-      baseFeePerGas = (await signer.provider?.getBlock('latest'))?.baseFeePerGas;
-    }
-    return applyTransactionFeeCap(filled, this.maxFeePerGasWei, baseFeePerGas);
+    return prepareTransactionWithFees(signer, populated, this.feeFloor, this.maxFeePerGasWei);
   }
 
   /**
