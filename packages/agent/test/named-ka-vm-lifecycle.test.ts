@@ -93,6 +93,18 @@ describe('named KA VM lifecycle batching', () => {
     expect(await all(raw)).toEqual([...rows(value), ...unrelated, ...preserved].map(quadToNQuad).sort());
   });
 
+  it.each([true, false])('preserves verified repair proof on the atomic and compatibility paths (atomic=%s)', async atomic => {
+    const raw = memory(); const proof = rows().slice(0, 2);
+    proof[0] = { ...proof[0]!, object: `"${input.merkleRoot}"^^<http://www.w3.org/2001/XMLSchema#string>` };
+    await raw.insert(proof); const storedProof = await all(raw);
+    const update = vi.spyOn(raw, 'update'); const remove = vi.spyOn(raw, 'deleteByPatternWithoutCount');
+    await (atomic ? fast(raw) : (value: PublishedNamedKaVmLifecycleInput) => applyPublishedNamedKaVmLifecycle(raw, value))(
+      { ...input, preserveVerifiedVmProof: true });
+    expect(await all(raw)).toEqual([...storedProof, ...rows().slice(2).map(quadToNQuad)].sort());
+    expect(remove.mock.calls.some(([pattern]) => proof.some(q => q.subject === pattern.subject && q.predicate === pattern.predicate))).toBe(false);
+    if (atomic) expect(update.mock.calls[0]![0]).not.toContain(VM_CURRENT_ASSERTION_PRED);
+  });
+
   it('inserts absent pairs and supersedes the root without deleting assertion version', async () => {
     const raw = memory(); await raw.insert(unrelated);
     await fast(raw)(input);

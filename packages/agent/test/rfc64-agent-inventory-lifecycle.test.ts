@@ -62,7 +62,7 @@ function syntheticAgent(dataDirectory?: string): any {
   agent.storageACKRegistrationRuntime = new StorageACKRegistrationRuntime();
   agent.lastSyncDisconnectedAt = new Map();
   Object.assign(agent, {
-    config: dataDirectory === undefined ? {} : { dataDir: dataDirectory },
+    config: { coreChainCacheNetworks: [], ...(dataDirectory === undefined ? {} : { dataDir: dataDirectory }) },
     contextGraphMembershipPersistence: new ContextGraphMembershipPersistScheduler(),
     contextGraphSubscriptionPersistence: new ContextGraphSubscriptionPersistScheduler(),
     finalizationRuntime: new FinalizationRuntime(),

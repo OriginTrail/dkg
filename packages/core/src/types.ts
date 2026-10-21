@@ -54,6 +54,10 @@ export interface DKGNodeConfig {
    * `networkIdentity`.
    */
   otherNetworkRelays?: readonly string[];
+  /** Multiaddrs or bare peer ids exempt only from the static other-network
+   * dial list. Protocol admission and dynamic identity-mismatch denials remain
+   * authoritative. These peers are not selected as ordinary relays. */
+  staticDialExemptions?: readonly string[];
   /**
    * Transport-level network peer isolation: with a `networkIdentity`, refuse
    * `otherNetworkRelays` and any peer that failed the network-identity proof

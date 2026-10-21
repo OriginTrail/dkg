@@ -328,10 +328,25 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
   }
 
   requiresRfc64ShareInventoryV1(this: DKGAgent, contextGraphId: string, subGraphName: string | undefined): boolean {
+    return this.resolveRfc64ShareInventoryApplicabilityV1(contextGraphId, subGraphName).status === 'required';
+  }
+
+  /**
+   * A bound share owes the signed-inventory handoff only where the commit-time lane can be
+   * active. A fenced or non-responsible authority keeps the obligation above, but the share
+   * completes and its row goes to the detached observer, like an unbound share.
+   */
+  requiresRfc64ShareInventoryHandoffV1(this: DKGAgent, contextGraphId: string, subGraphName: string | undefined): boolean {
+    const decision = this.resolveRfc64ShareInventoryApplicabilityV1(contextGraphId, subGraphName);
+    return decision.status === 'required' && decision.authority.authoringAllowed === true;
+  }
+
+  /** One receiver-authority read per decision; readiness gaps throw their typed cause. */
+  private resolveRfc64ShareInventoryApplicabilityV1(this: DKGAgent, contextGraphId: string, subGraphName: string | undefined) {
     const decision = catalogAuthoringApplicability({ authority: this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
       config: this.config, service: this.rfc64PublicCatalogServiceV1 }, contextGraphId, subGraphName);
     if (decision.status === 'unavailable') throw decision.error;
-    return decision.status === 'required';
+    return decision;
   }
 
   /** Canonical selected-CG admission shared by inventory and projection. */

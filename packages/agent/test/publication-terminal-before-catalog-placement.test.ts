@@ -137,6 +137,8 @@ describe('a confirmed publication and its catalog placement', () => {
 
       const job = await path.job(jobId);
       expect(job?.status).toBe('finalized');
+      expect(await agent.assertion.history(CONTEXT_GRAPH_ID, asset.assertionCoordinate, { agentAddress: AUTHOR }))
+        .toMatchObject({ state: 'published', publishedUal: asset.seal.kaUal });
       expect(job?.timestamps).toMatchObject({ finalityObservedAt: 1_000, finalizedAt: 1_000 });
       expect(await path.postFinalityWaitMs(jobId)).toBe(0);
 

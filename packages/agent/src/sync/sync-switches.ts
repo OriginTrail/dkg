@@ -47,14 +47,15 @@ export function resolveVmReconcilerEnabled(configValue?: boolean): boolean {
 }
 
 /** Effective activation of the exact-batch stream wire: the requester on any
- * node and, on a core, the responder. Environment only; default off.
+ * node and, on a core, the responder. Default on with capability negotiation;
+ * either explicit off switch retains the ordinary bounded sync path.
  * `DKG_EXPERIMENTAL_EXACT_BATCH_STREAM` is the name this switch was first
  * deployed under. It is read only when the current name is not set, so a node
  * configured before the rename keeps its setting. */
 export function resolveExactBatchStreamEnabled(): boolean {
   return parseBooleanEnv('DKG_EXACT_BATCH_STREAM_ENABLED')
     ?? parseBooleanEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM')
-    ?? false;
+    ?? true;
 }
 
 export function parseIntegerEnv(name: string): number | undefined {
