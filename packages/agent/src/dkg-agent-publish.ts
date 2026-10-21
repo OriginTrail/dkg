@@ -5225,7 +5225,8 @@ export class PublishMethods extends DKGAgentBase {
       throwIfRecoveryDeadlineReached(signal);
       const ownership = await this._resolveRecoveredKnowledgeAssetVmLifecycleAuthor(request);
       throwIfRecoveryDeadlineReached(signal);
-      return ownership;
+      return ownership ? { input: { ...input, agentAddress: ownership.author },
+        preserveVerifiedVmProof: ownership.incomplete } : undefined;
     }));
     if (!result.acquired) throw Object.assign(new Error('Named KA lifecycle writer is busy; recovery will retry'),
       { code: 'KA_VM_RECOVERY_INCONSISTENT' });

@@ -9,7 +9,7 @@ import { tryUpdateWithTouchedGraphs, UnsupportedTripleStoreCapabilityError,
 import { WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED } from '@origintrail-official/dkg-publisher';
 
 import { applyLifecycleMutationFallback, buildNamedKaVmLifecycleMutation, checkedRoot, type WorkspaceLifecycleValues,
-  type NamedKaVmLifecycleFields, type NamedKaVmLifecycleProjectionInput as DescriptorProjectionInput } from './internal/named-ka-vm-lifecycle-mutation.js';
+  type PublishedNamedKaVmLifecycleInput, type TentativeNamedKaVmLifecycleInput, type VerifiedNamedKaDescriptorInput as DescriptorProjectionInput } from './internal/named-ka-vm-lifecycle-mutation.js';
 import type { ObservedStoreMutation } from './internal/observed-store-mutation.js';
 export type PublishedNamedKaVmLifecycleWriter = (input: DescriptorProjectionInput) => Promise<void>;
 
@@ -17,18 +17,7 @@ import { stripMetadataLiteral } from './sync/metadata-literal.js';
 
 const MEMORY_LAYER_PRED = 'http://dkg.io/ontology/memoryLayer';
 const STATE_PRED = 'http://dkg.io/ontology/state';
-/** A confirmed command cannot bypass the certified persistence barrier. */
-export interface PublishedNamedKaVmLifecycleInput extends NamedKaVmLifecycleFields {
-  readonly packedKaId?: bigint;
-  /** With the root, identifies this publication's own seal; a re-finalize can repeat the root. */
-  readonly assertionVersion: string;
-  readonly tentative?: never;
-}
-/** Tentative updates consume the prior sealed WM projection without claiming a VM graph. */
-export interface TentativeNamedKaVmLifecycleInput extends NamedKaVmLifecycleFields {
-  readonly tentative: true;
-  readonly packedKaId?: never;
-}
+export type { PublishedNamedKaVmLifecycleInput, TentativeNamedKaVmLifecycleInput, VerifiedNamedKaDescriptorInput } from './internal/named-ka-vm-lifecycle-mutation.js';
 type NamedKaVmLifecycleCommand = PublishedNamedKaVmLifecycleInput | TentativeNamedKaVmLifecycleInput;
 
 export interface NamedKaVmLifecycleApplyOptions {
@@ -107,7 +96,11 @@ async function applyNamedKaVmLifecycle(
   if (rows.type !== 'bindings' || rows.bindings.length > 1) {
     throw new NamedKaVmLifecycleIntegrityError('Invalid workspace pointers during confirmed lifecycle repair');
   }
-  await commitLifecycleMetadata(store, buildNamedKaVmLifecycleMutation(input, decodeWorkspaceLifecycleValues(rows.bindings[0]), preserveVerifiedVmProof));
+  const workspace = { kind: 'observed' as const, values: decodeWorkspaceLifecycleValues(rows.bindings[0]) };
+  const plan = input.tentative === true
+    ? buildNamedKaVmLifecycleMutation({ ...input, kind: 'tentative', workspace, preserveVerifiedVmProof: false })
+    : buildNamedKaVmLifecycleMutation({ ...input, kind: 'confirmed', workspace, preserveVerifiedVmProof });
+  await commitLifecycleMetadata(store, plan);
   // Graph writes can be visible before the debounced snapshot is on disk. The
   // repair owner may retire its fsynced journal only after this barrier succeeds.
   if (barrier !== undefined) await barrier({ source: 'agent.publish.confirmedLifecycleFlush' });
@@ -116,7 +109,7 @@ async function applyNamedKaVmLifecycle(
 
 /** Compatibility projection for externally verified descriptor repair. */
 export async function applyVerifiedNamedKaDescriptor(store: TripleStore, input: DescriptorProjectionInput): Promise<void> {
-  await applyLifecycleMutationFallback(store, buildNamedKaVmLifecycleMutation(input));
+  await applyLifecycleMutationFallback(store, buildNamedKaVmLifecycleMutation({ ...input, kind: 'verified-descriptor', workspace: { kind: 'verified' }, preserveVerifiedVmProof: input.preserveVerifiedVmProof ?? false }));
 }
 
 /** Compose over the configured decorated store and its observed fallback at agent construction. */
@@ -127,7 +120,7 @@ export function createPublishedNamedKaVmLifecycleWriter({ updateStore, fallbackS
 }): PublishedNamedKaVmLifecycleWriter {
   return async input => {
     // Query and observer scope have one closed, validated source of truth.
-    const plan = buildNamedKaVmLifecycleMutation(input);
+    const plan = buildNamedKaVmLifecycleMutation({ ...input, kind: 'verified-descriptor', workspace: { kind: 'verified' }, preserveVerifiedVmProof: input.preserveVerifiedVmProof ?? false });
     if (typeof updateStore.update === 'function' && await executeMutation(
       () => tryUpdateWithTouchedGraphs(updateStore, plan.sparql, [plan.graph], {
         source: 'agent.publish.namedKaVmLifecycle',

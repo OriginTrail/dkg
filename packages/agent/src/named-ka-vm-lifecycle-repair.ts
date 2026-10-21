@@ -40,7 +40,7 @@ export class NamedKaVmLifecycleRepair {
     /** Share the publisher's lifecycle domain for currency, admission and mutation. */
     writeLocks: Map<string, Promise<void>>;
     /** Resolve after the host's certified commit barrier: durable for every filesystem journal. */
-    apply: (input: ConfirmedNamedKaVmLifecycleInput) => Promise<void>;
+    apply: (input: ConfirmedNamedKaVmLifecycleInput, preserveVerifiedVmProof: boolean) => Promise<void>;
     /** Coherent chain version evidence; a newer chain version fences an old repair. */
     isCurrent: (input: ConfirmedNamedKaVmLifecycleInput) => Promise<boolean>;
     warn: (message: string) => void;
@@ -129,7 +129,8 @@ export class NamedKaVmLifecycleRepair {
       // Readiness already ran after the prior lifecycle writer physically retired.
       // Admission can still supersede this entry during the external currency read.
       outcome = await this.executor.commitIfCurrent(input,
-        () => this.serial(async () => this.entries.get(key) === entry)) ? 'repaired' : 'superseded';
+        () => this.serial(async () => this.entries.get(key) === entry
+          ? { input, preserveVerifiedVmProof: false } : undefined)) ? 'repaired' : 'superseded';
     } catch (error) {
       failure = error;
       outcome = isNamedKaVmLifecycleIntegrityError(error) ? 'rejected' : 'pending';

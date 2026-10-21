@@ -54,6 +54,61 @@ describe('inline named-KA completion certificate', () => {
     expect(repair).toHaveBeenCalledTimes(certified ? 0 : 1);
     expect(execute).toHaveBeenCalledOnce();
   });
+  it.each([false, true])('persists a malformed legacy receipt before mapping, surviving lease expiry and disk reopen (certified=%s)', async certified => {
+    const directory = await mkdtemp(join(tmpdir(), 'invalid-inline-receipt-')); directories.push(directory);
+    const path = join(directory, 'store.nq');
+    const store = new OxigraphStore(path); stores.push(store);
+    let now = 1_000;
+    const malformed = result(certified);
+    delete (malformed.onChainResult as Partial<NonNullable<typeof malformed.onChainResult>>).batchId;
+    const execute = vi.fn(async () => malformed);
+    const repair = vi.fn(async () => {});
+    const options = { now: () => now, detachReceiptReconciliation: false,
+      chainProofResolver: async () => recoveredResolution(),
+      knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
+      knowledgeAssetVmPublishHandler: { execute, finalizeRecovered: repair } };
+    const publisher = new TripleStoreAsyncLiftPublisher(store, options);
+    await stageKnowledgeAssetShareSnapshot({ store });
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+    expect(processed?.status).toBe('broadcast');
+    expect(processed?.broadcast?.txHash).toBe(KA_VM_EXECUTOR_TX_HASH);
+    now = processed!.claim!.claimLeaseExpiresAt + 1;
+    // Reopen without closing/flushing the original store: the post-send checkpoint
+    // itself must already be on disk before a mapping error is swallowed.
+    const reopened = new OxigraphStore(path); stores.push(reopened);
+    const recovery = new TripleStoreAsyncLiftPublisher(reopened, options);
+    expect((await recovery.getStatus(jobId))?.broadcast?.txHash).toBe(KA_VM_EXECUTOR_TX_HASH);
+    await recovery.recover();
+    await recovery.reconcileTransactions();
+    expect(await recovery.processNext('wallet-1')).toBeNull();
+    const recovered = await recovery.getStatus(jobId);
+    expect(recovered?.status).toBe('finalized');
+    expect(recovered?.broadcast?.txHash).toBe(KA_VM_EXECUTOR_TX_HASH);
+    expect(execute).toHaveBeenCalledOnce();
+    expect(repair).toHaveBeenCalledOnce();
+  });
+  it('propagates a post-send checkpoint failure without rolling the transaction back to validated', async () => {
+    const store = new OxigraphStore(); stores.push(store);
+    const execute = vi.fn(async () => result(true));
+    const publisher = new TripleStoreAsyncLiftPublisher(store, {
+      detachReceiptReconciliation: false,
+      chainProofResolver: async () => recoveredResolution(),
+      knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
+      knowledgeAssetVmPublishHandler: { execute, finalizeRecovered: async () => {} },
+    });
+    await stageKnowledgeAssetShareSnapshot({ store });
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const failure = new Error('post-send flush failed');
+    const flush = vi.spyOn(store, 'flush').mockRejectedValueOnce(failure);
+    await expect(publisher.processNext('wallet-1')).rejects.toBe(failure);
+    expect(await publisher.getStatus(jobId)).toMatchObject({ status: 'broadcast', broadcast: { txHash: KA_VM_EXECUTOR_TX_HASH } });
+    flush.mockRestore();
+    await publisher.reconcileTransactions();
+    expect((await publisher.getStatus(jobId))?.status).toBe('finalized');
+    expect(await publisher.processNext('wallet-1')).toBeNull();
+    expect(execute).toHaveBeenCalledOnce();
+  });
   it.each(['no-chain', 'private-no-acks', 'receipt'] as const)('preserves tentative %s transitions', async mode => {
     const store = new OxigraphStore(); stores.push(store);
     const confirmed = result(false);

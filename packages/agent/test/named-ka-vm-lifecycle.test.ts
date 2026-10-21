@@ -3,7 +3,7 @@ import { MemoryLayer, assertionLifecycleUri, contextGraphAssertionUri, contextGr
 import { GraphSetIndexStore, OxigraphStore, UnsupportedTripleStoreCapabilityError, quadToNQuad, type Quad, type TripleStore, type UpdateOptions } from '@origintrail-official/dkg-storage';
 import { VM_CURRENT_ASSERTION_PRED } from '@origintrail-official/dkg-publisher';
 import { applyPublishedNamedKaVmLifecycle as applyConfirmedLifecycle, applyVerifiedNamedKaDescriptor as applyPublishedNamedKaVmLifecycle, createPublishedNamedKaVmLifecycleWriter } from '../src/named-ka-vm-lifecycle.js';
-import type { NamedKaVmLifecycleProjectionInput } from '../src/internal/named-ka-vm-lifecycle-mutation.js';
+import type { VerifiedNamedKaDescriptorInput } from '../src/internal/named-ka-vm-lifecycle-mutation.js';
 import { createMutationObservedStore } from '../src/internal/context-graph-cache-invalidating-store.js';
 import { createObservedStoreMutation } from '../src/internal/observed-store-mutation.js';
 import type { StoreMutationObserver } from '../src/internal/store-mutation.js';
@@ -11,7 +11,7 @@ import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection
 import { createProjectionMutationObserver } from '../src/internal/projection-mutation-observer.js';
 
 const DKG = 'http://dkg.io/ontology/';
-const input: NamedKaVmLifecycleProjectionInput = {
+const input: VerifiedNamedKaDescriptorInput = {
   contextGraphId: 'urn:test:lifecycle-batch', agentAddress: '0x1111111111111111111111111111111111111111',
   name: 'asset', subGraphName: 'scope', publishedUal: 'did:dkg:base:84532/contract/42',
   merkleRoot: `0x${'AB'.repeat(32)}`, packedKaId: (0x1111111111111111111111111111111111111111n << 96n) | 42n,
@@ -113,7 +113,7 @@ describe('named KA VM lifecycle batching', () => {
     proof[0] = { ...proof[0]!, object: `"${input.merkleRoot}"^^<http://www.w3.org/2001/XMLSchema#string>` };
     await raw.insert(proof); const storedProof = await all(raw);
     const update = vi.spyOn(raw, 'update'); const remove = vi.spyOn(raw, 'deleteByPatternWithoutCount');
-    await (atomic ? fast(raw) : (value: NamedKaVmLifecycleProjectionInput) => applyPublishedNamedKaVmLifecycle(raw, value))(
+    await (atomic ? fast(raw) : (value: VerifiedNamedKaDescriptorInput) => applyPublishedNamedKaVmLifecycle(raw, value))(
       { ...input, preserveVerifiedVmProof: true });
     expect(await all(raw)).toEqual([...storedProof, ...rows().slice(2).map(quadToNQuad)].sort());
     expect(remove.mock.calls.some(([pattern]) => proof.some(q => q.subject === pattern.subject && q.predicate === pattern.predicate))).toBe(false);

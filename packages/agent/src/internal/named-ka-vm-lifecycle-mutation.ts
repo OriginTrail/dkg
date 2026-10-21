@@ -18,13 +18,28 @@ export interface NamedKaVmLifecycleFields {
   readonly merkleRoot: string;
   readonly priorMerkleRoot?: string;
 }
-/** Projection policy is supplied by the entry point after its own proof/admission checks. */
-export interface NamedKaVmLifecycleProjectionInput extends NamedKaVmLifecycleFields {
+/** Each entry point retains its operation contract at the projection boundary. */
+export interface PublishedNamedKaVmLifecycleInput extends NamedKaVmLifecycleFields {
   readonly packedKaId?: bigint;
-  readonly assertionVersion?: string;
-  readonly tentative?: boolean;
+  readonly assertionVersion: string;
+  readonly tentative?: never;
+}
+export interface TentativeNamedKaVmLifecycleInput extends NamedKaVmLifecycleFields {
+  readonly tentative: true;
+  readonly packedKaId?: never;
+  readonly assertionVersion?: never;
+}
+export interface VerifiedNamedKaDescriptorInput extends NamedKaVmLifecycleFields {
+  readonly packedKaId?: bigint;
+  readonly tentative?: never;
+  readonly assertionVersion?: never;
   readonly preserveVerifiedVmProof?: boolean;
 }
+type ObservedWorkspace = { readonly kind: 'observed'; readonly values: WorkspaceLifecycleValues };
+export type NamedKaVmLifecycleProjectionCommand =
+  | (PublishedNamedKaVmLifecycleInput & { readonly kind: 'confirmed'; readonly workspace: ObservedWorkspace; readonly preserveVerifiedVmProof: boolean })
+  | (TentativeNamedKaVmLifecycleInput & { readonly kind: 'tentative'; readonly workspace: ObservedWorkspace; readonly preserveVerifiedVmProof: false })
+  | (VerifiedNamedKaDescriptorInput & { readonly kind: 'verified-descriptor'; readonly workspace: { readonly kind: 'verified' }; readonly preserveVerifiedVmProof: boolean });
 export interface WorkspaceLifecycleValues {
   readonly wm?: string;
   readonly swm?: string;
@@ -45,20 +60,22 @@ export function checkedRoot(value: string): string {
 }
 
 export function buildNamedKaVmLifecycleMutation(
-  input: NamedKaVmLifecycleProjectionInput, workspace: WorkspaceLifecycleValues = {}, preserveVerifiedVmProof = input.preserveVerifiedVmProof ?? false,
+  input: NamedKaVmLifecycleProjectionCommand,
 ) {
   const assertionUri = contextGraphAssertionUri(input.contextGraphId, input.agentAddress, input.name, input.subGraphName);
   const lifecycleUri = assertionLifecycleUri(input.contextGraphId, input.agentAddress, input.name, input.subGraphName);
   const metaGraph = contextGraphMetaUri(input.contextGraphId), root = checkedRoot(input.merkleRoot);
   const prior = input.priorMerkleRoot === undefined ? undefined : checkedRoot(input.priorMerkleRoot);
+  const workspace = input.workspace.kind === 'observed' ? input.workspace.values : {};
+  const { preserveVerifiedVmProof } = input;
   const { wm, swm, activeSeal } = workspace;
   const reopenedDraft = workspace.state === 'created' && workspace.layer === MemoryLayer.WorkingMemory && activeSeal === undefined;
-  const consumedTentativePrior = input.tentative === true && prior !== undefined && wm === prior;
+  const consumedTentativePrior = input.kind === 'tentative' && prior !== undefined && wm === prior;
   // An unchanged re-finalize seals a newer version under the same root, so a
   // confirmed command owns the active seal only at its own assertion version.
   // Tentative commands carry no version and keep the root comparison.
   const ownsActiveSeal = activeSeal === root
-    && (input.tentative === true || sameAssertionVersion(workspace.activeSealVersion, input.assertionVersion ?? ''));
+    && (input.kind === 'tentative' || (input.kind === 'confirmed' && sameAssertionVersion(workspace.activeSealVersion, input.assertionVersion)));
   const preserveWorkspace = reopenedDraft || (activeSeal !== undefined && !ownsActiveSeal)
     || (wm !== undefined && wm !== root && !consumedTentativePrior) || (swm !== undefined && swm !== root);
   const deletes: Pick<Quad, 'subject' | 'predicate'>[] = [], inserts: Omit<Quad, 'graph'>[] = [];
@@ -82,7 +99,7 @@ export function buildNamedKaVmLifecycleMutation(
     replace(lifecycleUri, STATE_PRED, '"published"');
   }
   replace(lifecycleUri, PUBLISHED_UAL_PRED, JSON.stringify(input.publishedUal));
-  if (input.tentative !== true && input.packedKaId !== undefined && !preserveWorkspace) {
+  if (input.kind !== 'tentative' && input.packedKaId !== undefined && !preserveWorkspace) {
     const author = `0x${(input.packedKaId >> 96n).toString(16).padStart(40, '0')}`;
     const number = input.packedKaId & ((1n << 96n) - 1n);
     replace(lifecycleUri, ASSERTION_GRAPH_PRED, contextGraphLayerUri(input.contextGraphId, MemoryLayer.VerifiableMemory, author, number, input.subGraphName));

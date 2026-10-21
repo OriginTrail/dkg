@@ -26,6 +26,8 @@ async function fixture(legacy: boolean, evidence: AsyncKnowledgeAssetVmPublishRe
   const original = baseRequest();
   const request = { ...original, contextGraphId: '0x1111111111111111111111111111111111111111/legacy-recovery', agentAddress: AUTHOR,
     seal: { ...original.seal, ...(legacy ? { reservedKaId: undefined } : {}) } };
+  // Currency is checked before catalog admission; model the queued seal's actual deployment.
+  vi.spyOn(chain, 'getKnowledgeAssetsLifecycleAddress').mockResolvedValue(request.sealKav10Address);
   // Model already-materialized VM data: the regression is the required catalog tail,
   // not the separate chain-to-VM materializer. Normalization and observer remain real.
   const materialize = vi.fn<FinalizationHandler['handleChainReconciledKC']>(async () => 'already-confirmed');

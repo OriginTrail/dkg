@@ -1315,7 +1315,7 @@ export class TripleStoreAsyncLiftPublisher
       await this.recordKnowledgeAssetExecutionResult(claim, result, { publicByteSize });
     } catch (error) {
       if (!(error instanceof InvalidLiftPublishResultError)) throw error;
-      if (!result.onChainResult && broadcastRecorder.outcome !== 'recorded-durable') {
+      if (!(await this.getRequiredJob(claimed.jobId)).broadcast && broadcastRecorder.outcome !== 'recorded-durable') {
         return await this.failKnowledgeAssetVmPublishExecution(session, error, broadcastRecorder);
       }
       // Invalid executor evidence cannot erase the original transaction's repair obligation.
@@ -1432,9 +1432,22 @@ export class TripleStoreAsyncLiftPublisher
       if (current.broadcast && current.broadcast.txHash !== resultTxHash) return false;
       const certified = result.status === 'confirmed' && result.localFinalizationComplete === true;
       if (!certified && current.status !== 'validated') return false;
-      // Older inline handlers may omit the pre-send hook. Retain their receipt as
-      // tx-bearing recovery work even without a certificate; never reset and resend.
-      const completed = await this.applyPublishResultTransition(current, scope, result, {
+      // Legacy handlers may send without the pre-send hook. Preserve the usable
+      // hash before interpreting the rest of their receipt: mapping can reject
+      // missing fields, but lease expiry must never turn an accepted send into work.
+      let recorded: LiftJob = current;
+      if (current.status === 'validated' && typeof resultTxHash === 'string' && /^0x[0-9a-fA-F]{64}$/.test(resultTxHash)) {
+        const next = this.buildTransitionJob(current, 'broadcast', { broadcast: {
+          txHash: resultTxHash as LiftJobHex, walletId: current.claim.walletId,
+          publicByteSize: options.publicByteSize,
+        } });
+        this.assertJobMatchesStatus(next);
+        recorded = await scope.commit(next, 'broadcast');
+        // Unlike pre-send write-ahead, a failed flush cannot roll back this hash:
+        // the transaction has already escaped. Propagate persistence faults.
+        await this.store.flush?.();
+      }
+      const completed = await this.applyPublishResultTransition(recorded, scope, result, {
         ...options, deferFinalization: !certified,
       });
       return completed.status === 'finalized';

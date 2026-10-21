@@ -873,7 +873,7 @@ describe('review regression boundaries', () => {
     expect(migrated.get(lifecycleRepairKey(normalized))).toMatchObject({ input: normalized, attempts: 2, nextAttemptAt: 6_000 });
     const freshApply = vi.fn(async (_input: ConfirmedNamedKaVmLifecycleInput) => { throw new Error('retry remains pending'); });
     const fresh = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, now: () => 6_000, apply: freshApply, isCurrent: async () => true, warn: () => undefined });
-    await fresh.runDue(); expect(freshApply).toHaveBeenCalledWith({ ...normalized, packedKaId: PACKED });
+    await fresh.runDue(); expect(freshApply).toHaveBeenCalledWith({ ...normalized, packedKaId: PACKED }, false);
     const rewritten = JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'));
     expect(rewritten.version).toBe(2); expect(decodeLifecycleRepairJournal(rewritten).get(lifecycleRepairKey(normalized))).toMatchObject({ attempts: 3 });
     await fresh.stop();

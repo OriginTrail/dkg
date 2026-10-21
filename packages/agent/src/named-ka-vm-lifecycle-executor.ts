@@ -6,10 +6,14 @@ import { isConfirmedNamedKaVmLifecycleCurrent } from './named-ka-vm-lifecycle-cu
 import { applyPublishedNamedKaVmLifecycle, confirmedNamedKaVmLifecycleApplyOptions } from './named-ka-vm-lifecycle.js';
 
 type Coordinates = Pick<ConfirmedNamedKaVmLifecycleInput, 'contextGraphId' | 'name' | 'agentAddress' | 'subGraphName'>;
+export interface ConfirmedNamedKaVmLifecycleCommit {
+  readonly input: ConfirmedNamedKaVmLifecycleInput;
+  readonly preserveVerifiedVmProof: boolean;
+}
 interface ExecutionCapabilities {
   readonly writeLocks: Map<string, Promise<void>>;
   readonly isCurrent: (input: ConfirmedNamedKaVmLifecycleInput) => Promise<boolean>;
-  readonly apply: (input: ConfirmedNamedKaVmLifecycleInput, preserveVerifiedVmProof?: boolean) => Promise<void>;
+  readonly apply: (input: ConfirmedNamedKaVmLifecycleInput, preserveVerifiedVmProof: boolean) => Promise<void>;
 }
 
 /** One host policy for both journal replay and transaction-owned queue recovery. */
@@ -44,14 +48,12 @@ export class ConfirmedNamedKaVmLifecycleExecutor {
   }
   /** The caller holds our lock; recheck caller-specific admission after the external proof. */
   async commitIfCurrent(input: ConfirmedNamedKaVmLifecycleInput,
-    admit: () => Promise<boolean | { author: string; incomplete: boolean }>,
+    admit: () => Promise<ConfirmedNamedKaVmLifecycleCommit | undefined>,
   ): Promise<boolean> {
     if (!await this.capabilities.isCurrent(input)) return false;
     const admission = await admit();
     if (!admission) return false;
-    if (typeof admission === 'object') {
-      await this.capabilities.apply({ ...input, agentAddress: admission.author }, admission.incomplete);
-    } else await this.capabilities.apply(input);
+    await this.capabilities.apply(admission.input, admission.preserveVerifiedVmProof);
     return true;
   }
 }
