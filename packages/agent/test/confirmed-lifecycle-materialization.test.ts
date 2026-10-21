@@ -188,7 +188,8 @@ it.each(['publicTripleCount', 'privateTripleCount', 'privateMerkleRoot', 'batchI
     const corrupt = field === 'privateMerkleRoot' ? JSON.stringify('cd'.repeat(32))
       : field === 'subGraphName' ? '"wrong-subgraph"' : field === 'kaUal' ? 'urn:wrong-ka' : '"99"^^<http://www.w3.org/2001/XMLSchema#integer>';
     await store.insert([...input.materialization!.metadataQuads.filter(q => q.predicate !== dkg + field)
-      .map(q => q.predicate === dkg + 'transactionHash' ? { ...q, object: JSON.stringify(receipt) } : q),
+      .map(q => q.predicate === dkg + 'transactionHash' ? { ...q, object: JSON.stringify(receipt) }
+        : field === 'publicTripleCount' && q.predicate === dkg + 'merkleRoot' ? { ...q, object: JSON.stringify('0x' + input.merkleRoot.replace(/^0x/, '').toUpperCase()) } : q),
       { subject: input.materialization!.kaUal, predicate: dkg + field, object: corrupt, graph: meta },
       { subject: input.materialization!.kaUal, predicate: 'urn:receipt-note', object: '"preserve"', graph: meta },
       ...input.materialization!.publicQuads.map(q => ({ ...q, graph }))]);

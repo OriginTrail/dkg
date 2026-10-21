@@ -51,10 +51,14 @@ export function lifecycleMaterializationWire(snapshot: ConfirmedLifecycleMateria
 }
 const immutablePredicates = new Set(['contentScopeVersion', 'assertionVersion', 'publicTripleCount', 'privateTripleCount',
   'privateMerkleRoot', 'assertionGraph', 'subGraphName', 'merkleRoot', 'batchId', 'kaUal', 'status'].map(name => `http://dkg.io/ontology/${name}`));
-function reconcileImmutableMetadata(snapshot: ValidatedLifecycleMaterialization, metadata: readonly Quad[], sameVersion: boolean): Quad[] {
+function reconcileImmutableMetadata(snapshot: ValidatedLifecycleMaterialization, metadata: readonly Quad[], sameVersion: boolean, contextGraphId: string): Quad[] {
   const root = snapshot.metadataQuads.find(q => q.predicate === 'http://dkg.io/ontology/merkleRoot')!;
   const roots = metadata.filter(q => q.predicate === root.predicate);
-  if (!sameVersion || roots.length !== 1 || roots[0].object !== root.object) return [...snapshot.metadataQuads];
+  if (!sameVersion || roots.length !== 1) return [...snapshot.metadataQuads];
+  // Use the canonical parser for the stored root even when another immutable field is corrupt.
+  const anchored = parseConfirmedGraphKnowledgeAssetMetadataEnvelope(
+    [...snapshot.metadataQuads.filter(q => q.predicate !== root.predicate), ...roots], { contextGraphId, ual: snapshot.kaUal });
+  if (anchored.state !== 'confirmed' || rootHex(anchored.envelope.merkleRoot) !== snapshot.proof.merkleRoot) return [...snapshot.metadataQuads];
   // Same version/root receipt provenance and unrelated rows survive even a malformed count/identity.
   const canonical = preserveGraphKnowledgeAssetReceiptProvenanceV1(snapshot.metadataQuads, metadata);
   const replacedPredicates = new Set([...immutablePredicates, ...['transactionHash', 'materializedVersion', 'confirmationKind'].map(name => `http://dkg.io/ontology/${name}`)]);
@@ -152,7 +156,7 @@ export async function applyMaterializedConfirmedLifecycle(store: TripleStore, in
     const matches = result.quads.length === proof.publicTripleCount
       && rootHex(computeFlatKCRootV10(result.quads, proof.privateMerkleRoot ? [getBytes(`0x${proof.privateMerkleRoot}`)] : [])) === rootHex(input.merkleRoot);
     if (!exactMetadata && !snapshot) throw new Error('Confirmed lifecycle repair awaits its original public payload');
-    const recoveredBase = exactMetadata ? metadata : reconcileImmutableMetadata(snapshot!, metadata, current === BigInt(input.assertionVersion));
+    const recoveredBase = exactMetadata ? metadata : reconcileImmutableMetadata(snapshot!, metadata, current === BigInt(input.assertionVersion), input.contextGraphId);
     const controls = await reconcileConfirmedKnowledgeAssetControls(store, { metaGraph: meta, ual: scope.ual,
       anchor: { assertionVersion: input.assertionVersion, merkleRoot: getBytes(`0x${proof.merkleRoot}`) },
       metadataQuads: snapshot?.metadataQuads ?? metadata, restoreMissing: snapshot !== undefined });
