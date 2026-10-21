@@ -12,6 +12,8 @@ import { traceLaneLoads } from './load-graph.mjs';
 // load-closure guard cannot follow, each with the reason it needs no route of
 // its own.
 export const UNFOLLOWED_LOADS = new Map([
+  ['scripts/test-mcp-wsl-launch.mjs: execute = execFileSync',
+    'injected test seam defaults to node:child_process; calls only system /usr/bin/wslpath and /usr/bin/env, while the repository Windows driver is a literal URL also loaded directly by the smoke test'],
   ['scripts/ci/run-chain-rpc-node26.mjs: vitest',
     'the Vitest CLI resolved from packages/chain node_modules, run with the verified process.execPath; not a repository file'],
   ['packages/agent/test/sync-native-export-hostile.test.ts: pathToFileURL(`${oldDist}/dkg-agent-cg-resolve.js`).href',
