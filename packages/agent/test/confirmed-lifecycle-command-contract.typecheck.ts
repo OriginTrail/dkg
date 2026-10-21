@@ -1,5 +1,6 @@
 import type { TripleStore } from '@origintrail-official/dkg-storage';
-import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-repair.js';
+import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
+import { type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-evidence.js';
 import type { LifecycleRepairEntry, StoredLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
 import { applyTentativeNamedKaVmLifecycle, type TentativeNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle.js';
 import { applyPublishedNamedKaVmLifecycle } from './_helpers/confirmed-lifecycle-metadata-writer.js';
@@ -46,10 +47,10 @@ const wireEntry: LifecycleRepairEntry = { input: stored, attempts: 0, nextAttemp
 void workerInput; void workerPackedId; void wireEntry;
 
 // Newly admitted commands always bind their original chain deployment.
-declare const confirmedCommand: import('../src/named-ka-vm-lifecycle-repair.js').ConfirmedNamedKaVmLifecycleInput;
+declare const confirmedCommand: import('../src/named-ka-vm-lifecycle-evidence.js').ConfirmedNamedKaVmLifecycleInput;
 const { publicationDeployment: originalDeployment, ...unboundCommand } = confirmedCommand;
 // @ts-expect-error Historical unbound records cannot be submitted as new confirmed commands.
-const incompleteCommand: import('../src/named-ka-vm-lifecycle-repair.js').ConfirmedNamedKaVmLifecycleInput = unboundCommand;
+const incompleteCommand: import('../src/named-ka-vm-lifecycle-evidence.js').ConfirmedNamedKaVmLifecycleInput = unboundCommand;
 void originalDeployment; void incompleteCommand;
 
 import { buildNamedKaVmLifecycleMutation, type NamedKaVmLifecycleProjectionCommand } from '../src/internal/named-ka-vm-lifecycle-mutation.js';
@@ -86,7 +87,7 @@ const missingIdentity: ConfirmedNamedKaVmLifecycleInput = withoutIdentity;
 void confirmedNamedKaVmLifecycleInput(publication, withoutIdentity);
 void resolvedIdentity; void missingIdentity;
 
-import { normalizeLifecycleRepairInput, type ValidatedLifecycleRepairCommand } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import { normalizeLifecycleRepairInput, type ValidatedLifecycleRepairCommand } from '../src/named-ka-vm-lifecycle-evidence.js';
 import { applyMaterializedConfirmedLifecycle } from '../src/named-ka-vm-lifecycle-materialization.js';
 const executable: ValidatedLifecycleRepairCommand = normalizeLifecycleRepairInput(confirmed);
 void applyMaterializedConfirmedLifecycle(store, executable, { persistence: 'restart-durable' });

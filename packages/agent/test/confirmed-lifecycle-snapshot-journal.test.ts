@@ -9,7 +9,8 @@ import { NamedKaVmLifecycleIntegrityError } from '../src/named-ka-vm-lifecycle-i
 import { DurableReplaceableFile } from '../src/durable-file-replace.js';
 import { NamedKaVmLifecycleSnapshots } from '../src/named-ka-vm-lifecycle-snapshots.js';
 import { readLifecycleRepairJournalFile } from './_helpers/read-lifecycle-repair-journal.js';
-import { encodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import { encodeLifecycleRepairJournal, lifecycleRepairKey } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import { normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-evidence.js';
 import { confirmedMaterializationFixture } from './_helpers/confirmed-materialization-fixture.js';
 
 const dirs: string[] = [], owners: NamedKaVmLifecycleRepair[] = [];

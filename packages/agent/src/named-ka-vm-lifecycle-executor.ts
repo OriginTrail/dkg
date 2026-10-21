@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertionLifecycleWriteLockKey, tryWithKeyedLocks, withKeyedLocks } from '@origintrail-official/dkg-publisher';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
-import type { ValidatedLifecycleRepairCommand } from './named-ka-vm-lifecycle-repair-journal.js';
-import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
+import type { ValidatedLifecycleRepairCommand, ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-evidence.js';
 import { isConfirmedNamedKaVmLifecycleCurrent } from './named-ka-vm-lifecycle-current.js';
 import { confirmedNamedKaVmLifecycleApplyOptions } from './named-ka-vm-lifecycle.js';
 

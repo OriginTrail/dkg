@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-import { normalizeLifecycleRepairInput } from './named-ka-vm-lifecycle-repair-journal.js';
 import { repairPublishedDescriptor, type PublishedDescriptorRepairInput } from './published-descriptor-repair.js';
 import { incompleteNamedKaLifecycleOwner } from './incomplete-named-ka-lifecycle.js';
 import type { PromoteExecutionAuthority } from '@origintrail-official/dkg-publisher';
@@ -18,7 +17,7 @@ import { finalizeQueuedKnowledgeAssetVmPublish, retireLegacySwmAfterConfirmedLoc
  */
 
 import { ConfirmedNamedKaVmLifecycleExecutor, confirmedLifecycleExecutionCapabilities } from './named-ka-vm-lifecycle-executor.js';
-import { confirmedNamedKaVmLifecycleInput, type ConfirmedNamedKaVmCoordinates } from './named-ka-vm-lifecycle-evidence.js';
+import { confirmedNamedKaVmLifecycleInput, normalizeLifecycleRepairInput, type ConfirmedNamedKaVmCoordinates } from './named-ka-vm-lifecycle-evidence.js';
 
 import { buildInlinePayload, buildInlineChunked } from './internal/curated-inline-encryption.js';
 import { createContextGraphAuthorityError } from './internal/context-graph-authority/context-graph-authority.js';
@@ -5142,7 +5141,7 @@ export class PublishMethods extends DKGAgentBase {
   async _repairConfirmedNamedKaVmLifecycle(
     this: DKGAgent, coordinates: ConfirmedNamedKaVmCoordinates,
     confirmedPublication: ConfirmedNamedKaVmPublication,
-    snapshot?: import('./named-ka-vm-lifecycle-materialization.js').ConfirmedLifecyclePublicSnapshot,
+    snapshot?: import('./named-ka-vm-lifecycle-evidence.js').ConfirmedLifecyclePublicSnapshot,
   ): Promise<boolean> {
     let input = confirmedNamedKaVmLifecycleInput(confirmedPublication, coordinates);
     try {

@@ -1,90 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 import { MemoryLayer, contextGraphMetaUri, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
-import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata, materializedVersionQuad,
-  parseConfirmedGraphKnowledgeAssetMetadataEnvelope, confirmedGraphKnowledgeAssetProof, sameConfirmedGraphKnowledgeAssetProof, reconcileConfirmedGraphKnowledgeAssetMetadata,
-  readCurrentAssertionVersion, withMaterializationLock, reconcileConfirmedKnowledgeAssetControls, overlaySelectedKnowledgeAssetControls, type LocallyTrustedKnowledgeAssetControlEnvelope, type ConfirmedGraphKnowledgeAssetProof,
+import { parseConfirmedGraphKnowledgeAssetMetadataEnvelope, confirmedGraphKnowledgeAssetProof,
+  sameConfirmedGraphKnowledgeAssetProof, reconcileConfirmedGraphKnowledgeAssetMetadata,
+  readCurrentAssertionVersion, withMaterializationLock, reconcileConfirmedKnowledgeAssetControls, overlaySelectedKnowledgeAssetControls,
 } from '@origintrail-official/dkg-publisher';
 import { tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically, tryReplaceSubjectAtomically, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
-import { hexlify, getBytes } from 'ethers';
+import { getBytes } from 'ethers';
 import { mutatePublishedNamedKaVmLifecycle, type NamedKaVmLifecycleApplyOptions } from './named-ka-vm-lifecycle.js';
-import type { ValidatedLifecycleRepairCommand } from './named-ka-vm-lifecycle-repair-journal.js';
-import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
-import type { ConfirmedNamedKaVmPublication } from './named-ka-vm-lifecycle-recovery-error.js';
+import type { ValidatedLifecycleRepairCommand } from './named-ka-vm-lifecycle-evidence.js';
 import { verifyExactGraphContent } from './exact-graph-content-verifier.js';
 import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
-
-/** Immutable public recovery material; private plaintext never enters the journal. */
-export interface ConfirmedLifecycleMaterialization {
-  readonly kaUal: string;
-  readonly publicQuads: readonly Quad[];
-  readonly metadataQuads: readonly Quad[];
-}
-export interface ConfirmedLifecyclePublicSnapshot extends LocallyTrustedKnowledgeAssetControlEnvelope {
-  readonly publicQuads: readonly Quad[];
-}
-const rootHex = (root: string | Uint8Array): string => (typeof root === 'string' ? root : hexlify(root)).replace(/^0x/, '').toLowerCase();
-export interface ValidatedLifecycleMaterialization extends ConfirmedLifecycleMaterialization {
-  readonly proof: ConfirmedGraphKnowledgeAssetProof;
-}
-/** Persist the stable wire representation; execution-only validated proof is reconstructed at decode. */
-export function lifecycleMaterializationWire(snapshot: ConfirmedLifecycleMaterialization): ConfirmedLifecycleMaterialization {
-  return { kaUal: snapshot.kaUal, publicQuads: snapshot.publicQuads, metadataQuads: snapshot.metadataQuads };
-}
-
-
-export function confirmedLifecycleMaterialization(input: ConfirmedNamedKaVmLifecycleInput,
-  publication: ConfirmedNamedKaVmPublication, snapshot: ConfirmedLifecyclePublicSnapshot,
-): ConfirmedLifecycleMaterialization {
-  const { seal, onChainResult: receipt } = publication;
-  const scope = createGraphKnowledgeAssetScope(seal.kaUal!, input.assertionVersion);
-  const graph = knowledgeAssetLayerGraphUri(input.contextGraphId, MemoryLayer.VerifiableMemory, scope, input.subGraphName);
-  const version = { blockNumber: receipt?.blockNumber ?? 0, txIndex: receipt?.txIndex ?? 0 };
-  const metadataQuads = generateGraphKnowledgeAssetMetadata({
-    ual: scope.ual, contextGraphId: input.contextGraphId, subGraphName: input.subGraphName,
-    merkleRoot: seal.merkleRoot, assertionVersion: scope.assertionVersion,
-    publicTripleCount: seal.publicTripleCount!, privateTripleCount: seal.privateTripleCount,
-    privateMerkleRoot: seal.privateMerkleRoot, assertionGraph: graph,
-    publisherPeerId: snapshot.publisherPeerId, accessPolicy: snapshot.accessPolicy, allowedPeers: snapshot.allowedPeers,
-    authorAddress: seal.authorAddress, timestamp: new Date(seal.finalizedAtIso),
-  }, { status: 'confirmed', confirmation: receipt ? { kind: 'transaction', provenance: {
-    txHash: receipt.txHash, blockNumber: receipt.blockNumber, blockTimestamp: receipt.blockTimestamp ?? 0,
-    publisherAddress: receipt.publisherAddress, batchId: input.packedKaId, chainId: seal.chainId.toString(),
-  } } : { kind: 'finalized-materialization', provenance: { batchId: input.packedKaId, materializedVersion: version } } });
-  if (receipt) metadataQuads.push(materializedVersionQuad(contextGraphMetaUri(input.contextGraphId), scope.ual, version));
-  return Object.freeze({ kaUal: scope.ual,
-    publicQuads: Object.freeze(snapshot.publicQuads.map(q => Object.freeze({ ...q, graph: '' }))),
-    metadataQuads: Object.freeze(metadataQuads.map(q => Object.freeze(q))) });
-}
-
-/** Validate disk and in-process evidence identically before any graph-store work. */
-export function normalizeLifecycleMaterialization(value: unknown, input: ConfirmedNamedKaVmLifecycleInput): ValidatedLifecycleMaterialization {
-  const invalid = (): never => { throw new NamedKaVmLifecycleIntegrityError('Invalid confirmed lifecycle public recovery snapshot'); };
-  if (typeof value !== 'object' || value === null) return invalid();
-  const fields = value as Record<string, unknown>;
-  const quads = (raw: unknown): Quad[] => {
-    if (!Array.isArray(raw)) return invalid();
-    return raw.map(q => {
-      if (typeof q !== 'object' || q === null || ['subject', 'predicate', 'object', 'graph'].some(k => typeof q[k] !== 'string')) return invalid();
-      return { subject: q.subject, predicate: q.predicate, object: q.object, graph: q.graph };
-    });
-  };
-  if (typeof fields.kaUal !== 'string') return invalid();
-  const scope = createGraphKnowledgeAssetScope(fields.kaUal, input.assertionVersion);
-  if (((BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber)) !== input.packedKaId) return invalid();
-  const publicQuads = quads(fields.publicQuads).map(q => ({ ...q, graph: '' }));
-  const metadataQuads = quads(fields.metadataQuads);
-  const meta = contextGraphMetaUri(input.contextGraphId);
-  if (metadataQuads.some(q => q.subject !== scope.ual || q.graph !== meta)) return invalid();
-  const parsed = parseConfirmedGraphKnowledgeAssetMetadataEnvelope(metadataQuads, { contextGraphId: input.contextGraphId, ual: scope.ual });
-  if (parsed.state !== 'confirmed' || parsed.envelope.assertionVersion !== input.assertionVersion
-    || parsed.envelope.subGraphName !== input.subGraphName || parsed.envelope.batchId !== input.packedKaId
-    || rootHex(parsed.envelope.merkleRoot) !== rootHex(input.merkleRoot)
-    || parsed.envelope.publicTripleCount !== publicQuads.length
-    || rootHex(computeFlatKCRootV10(publicQuads, parsed.envelope.privateMerkleRoot ? [parsed.envelope.privateMerkleRoot] : [])) !== rootHex(input.merkleRoot)) return invalid();
-  const model = Object.freeze({ kaUal: scope.ual, publicQuads: Object.freeze(publicQuads.map(q => Object.freeze(q))),
-    metadataQuads: Object.freeze(metadataQuads.map(q => Object.freeze(q))), proof: confirmedGraphKnowledgeAssetProof(parsed.envelope) });
-  return model;
-}
 
 /** Caller owns the lifecycle lock. Share the publisher's materialization lock and worker fence. */
 export async function applyMaterializedConfirmedLifecycle(store: TripleStore, input: ValidatedLifecycleRepairCommand,
@@ -109,7 +34,7 @@ export async function applyMaterializedConfirmedLifecycle(store: TripleStore, in
     const existing = parseConfirmedGraphKnowledgeAssetMetadataEnvelope(metadata, { contextGraphId: input.contextGraphId, ual: scope.ual });
     const existingProof = existing.state === 'confirmed' ? confirmedGraphKnowledgeAssetProof(existing.envelope) : undefined;
     const sameCoordinates = existingProof?.assertionVersion === input.assertionVersion && existingProof.assertionGraph === graph
-      && existingProof.merkleRoot === rootHex(input.merkleRoot) && existingProof.batchId === input.packedKaId.toString()
+      && existingProof.merkleRoot === input.merkleRoot && existingProof.batchId === input.packedKaId.toString()
       && existingProof.subGraphName === input.subGraphName;
     const proof = snapshot?.proof ?? (sameCoordinates ? existingProof : undefined);
     const exactMetadata = sameCoordinates && (!snapshot || sameConfirmedGraphKnowledgeAssetProof(existingProof!, snapshot.proof));

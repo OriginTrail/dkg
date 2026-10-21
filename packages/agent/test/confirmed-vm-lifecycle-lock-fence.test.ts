@@ -7,7 +7,7 @@ import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-officia
 import { computeFlatKCRootV10, assertionLifecycleWriteLockKey, withKeyedLocks, type KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { confirmedLifecycleRecoveryFixture } from './_helpers/confirmed-lifecycle-recovery-fixture.js';
-import { confirmedLifecycleMaterialization } from '../src/named-ka-vm-lifecycle-materialization.js';
+import { confirmedLifecycleMaterialization } from '../src/named-ka-vm-lifecycle-evidence.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { applyPublishedNamedKaVmLifecycle } from './_helpers/confirmed-lifecycle-metadata-writer.js';
 const AUTHOR = '0x1111111111111111111111111111111111111111';

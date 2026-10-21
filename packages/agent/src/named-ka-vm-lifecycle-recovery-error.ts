@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { NamedKaVmPublishResult } from './named-ka-vm-publish-result.js';
-import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
+import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-evidence.js';
 
 export type ConfirmedNamedKaVmPublication = NamedKaVmPublishResult & { readonly status: 'confirmed' };
 export interface ConfirmedNamedKaVmLifecycleRecovery extends ConfirmedNamedKaVmLifecycleInput {

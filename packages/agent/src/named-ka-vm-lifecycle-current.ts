@@ -2,7 +2,7 @@
 import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
 import { activeRpcRequestAbortSignal, withRpcRequestContext, type ChainAdapter } from '@origintrail-official/dkg-chain';
 import { runBoundedOperation } from './bounded-operation.js';
-import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
+import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-evidence.js';
 
 /** Caller holds the same-KA lifecycle lock, so an earlier snapshot cannot outlive a newer stamp. */
 export async function isConfirmedNamedKaVmLifecycleCurrent(

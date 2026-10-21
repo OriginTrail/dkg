@@ -1,21 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
-import { normalizeLifecycleMaterialization, lifecycleMaterializationWire, type ConfirmedLifecycleMaterialization, type ValidatedLifecycleMaterialization } from './named-ka-vm-lifecycle-materialization.js';
+import { normalizeLifecycleRepairInput, normalizeLifecycleCoordinates,
+  normalizeLifecyclePackedIdentity, normalizeLifecyclePublicationDeployment,
+  type ConfirmedLifecycleMaterialization, type ValidatedLifecycleRepairCommand, type ConfirmedNamedKaVmLifecycleInput,
+} from './named-ka-vm-lifecycle-evidence.js';
 import { createHash } from 'node:crypto';
-import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
-declare const validatedLifecycleCommand: unique symbol;
-/** Only admission and journal decoding construct executable, frozen recovery commands. */
-export type ValidatedLifecycleRepairCommand = Omit<Readonly<ConfirmedNamedKaVmLifecycleInput>, 'materialization'> & {
-  readonly [validatedLifecycleCommand]: true;
-  readonly materialization?: ValidatedLifecycleMaterialization;
-};
 export type HistoricalUnboundLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifecycleInput, 'publicationDeployment' | 'packedKaId' | 'materialization'> & {
   readonly materialization?: never;
   readonly publicationDeployment?: ConfirmedNamedKaVmLifecycleInput['publicationDeployment'];
   readonly packedKaId?: bigint;
 };
-type JournalInput = ConfirmedKaInput | HistoricalUnboundLifecycleRepairInput;
-type ConfirmedKaInput = ValidatedLifecycleRepairCommand;
+type JournalInput = ValidatedLifecycleRepairCommand | HistoricalUnboundLifecycleRepairInput;
 export type StoredLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifecycleInput | HistoricalUnboundLifecycleRepairInput, 'packedKaId' | 'tentative'> & { packedKaId?: string; materializationRef?: string };
 interface RepairRetryState {
   attempts: number;
@@ -23,10 +18,16 @@ interface RepairRetryState {
   lastError?: string;
   rejected?: boolean;
 }
-export type LifecycleRepairEntry = RepairRetryState & (
-  | { input: ConfirmedKaInput; retention?: never }
+type DecodedLifecycleEvidence = (
+  | { input: ValidatedLifecycleRepairCommand; retention?: never }
   | { input: HistoricalUnboundLifecycleRepairInput; retention: 'historical-unbound' }
 );
+export type LifecycleRepairEntry = RepairRetryState & DecodedLifecycleEvidence;
+/** Persist the stable wire representation; execution-only validated proof is reconstructed at decode. */
+export function lifecycleMaterializationWire(snapshot: ConfirmedLifecycleMaterialization): ConfirmedLifecycleMaterialization {
+  return { kaUal: snapshot.kaUal, publicQuads: snapshot.publicQuads, metadataQuads: snapshot.metadataQuads };
+}
+
 function invalid(): never {
   throw new NamedKaVmLifecycleIntegrityError('Invalid confirmed named KA lifecycle repair evidence');
 }
@@ -37,46 +38,6 @@ function record(value: unknown): Record<string, unknown> {
 function string(value: unknown): string {
   if (typeof value !== 'string' || !value.trim()) return invalid();
   return value;
-}
-function root(value: unknown): string {
-  const text = string(value);
-  if (!/^(0x)?[0-9a-f]{64}$/i.test(text)) return invalid();
-  return text.toLowerCase().replace(/^0x/, '');
-}
-export function normalizeLifecycleRepairInput(value: unknown): ValidatedLifecycleRepairCommand {
-  const input = normalizeJournalInput(value);
-  if (input.publicationDeployment === undefined || input.packedKaId === undefined) return invalid();
-  return input as ValidatedLifecycleRepairCommand;
-}
-function normalizeJournalInput(value: unknown): JournalInput {
-  const input = record(value);
-  if ('tentative' in input) return invalid();
-  const assertionVersion = string(input['assertionVersion']);
-  if (!/^[1-9][0-9]*$/.test(assertionVersion)) return invalid();
-  const packed = input['packedKaId'];
-  let packedKaId: bigint | undefined;
-  if (packed !== undefined) {
-    if (typeof packed !== 'bigint' || packed < 0n || packed >= 1n << 256n) return invalid();
-    packedKaId = packed;
-  }
-  let publicationDeployment: ConfirmedNamedKaVmLifecycleInput['publicationDeployment'] | undefined;
-  if (input['publicationDeployment'] !== undefined) {
-    const deployment = record(input['publicationDeployment']);
-    const chainId = string(deployment['chainId']), lifecycleAddress = string(deployment['lifecycleAddress']);
-    if (!/^(0|[1-9][0-9]*)$/.test(chainId) || BigInt(chainId) >= 1n << 256n || !/^0x[0-9a-f]{40}$/i.test(lifecycleAddress)) return invalid();
-    publicationDeployment = Object.freeze({ chainId, lifecycleAddress: lifecycleAddress.toLowerCase() });
-  }
-  const normalized = {
-    contextGraphId: string(input['contextGraphId']), agentAddress: string(input['agentAddress']), name: string(input['name']),
-    publishedUal: string(input['publishedUal']), merkleRoot: root(input['merkleRoot']), assertionVersion,
-    ...(input['subGraphName'] === undefined ? {} : { subGraphName: string(input['subGraphName']) }),
-    ...(input['priorMerkleRoot'] === undefined ? {} : { priorMerkleRoot: root(input['priorMerkleRoot']) }),
-    ...(packedKaId === undefined ? {} : { packedKaId }),
-    ...(publicationDeployment === undefined ? {} : { publicationDeployment }),
-  };
-  if (input['materialization'] === undefined) return Object.freeze(normalized) as JournalInput;
-  if (publicationDeployment === undefined || packedKaId === undefined) return invalid();
-  return Object.freeze({ ...normalized, materialization: normalizeLifecycleMaterialization(input['materialization'], normalized as ConfirmedNamedKaVmLifecycleInput) }) as ValidatedLifecycleRepairCommand;
 }
 export function lifecycleRepairKey(input: ConfirmedNamedKaVmLifecycleInput | HistoricalUnboundLifecycleRepairInput): string {
   // Version-2 disk encoding is frozen independently of the in-process lock namespace.
@@ -116,12 +77,22 @@ export function encodeLifecycleRepairJournal(entries: ReadonlyMap<string, Lifecy
     return [key, { ...retry, input }];
   }) };
 }
-function decodeLifecycleRepairInput(value: unknown): JournalInput {
+function decodeLifecycleRepairInput(value: unknown): DecodedLifecycleEvidence {
   const input = record(value), packed = input['packedKaId'];
   if (packed !== undefined && !/^[0-9]+$/.test(string(packed))) return invalid();
-  return normalizeJournalInput({ ...input,
-    ...(packed === undefined ? {} : { packedKaId: BigInt(string(packed)) }),
-  });
+  const packedKaId = packed === undefined ? undefined : normalizeLifecyclePackedIdentity(BigInt(string(packed)));
+  if (packedKaId !== undefined && input['publicationDeployment'] !== undefined) {
+    return { input: normalizeLifecycleRepairInput({ ...input, packedKaId }) };
+  }
+  // Historical incomplete commands remain retained and can never reach execution.
+  if (input['materialization'] !== undefined) return invalid();
+  return { retention: 'historical-unbound', input: Object.freeze({
+    ...normalizeLifecycleCoordinates(input),
+    ...(packedKaId === undefined ? {} : { packedKaId }),
+    ...(input['publicationDeployment'] === undefined ? {} : {
+      publicationDeployment: normalizeLifecyclePublicationDeployment(input['publicationDeployment']),
+    }),
+  }) };
 }
 export function decodeLifecycleRepairJournal(value: unknown, snapshots?: ReadonlyMap<string, unknown>): Map<string, LifecycleRepairEntry> {
   const journal = record(value);
@@ -134,7 +105,8 @@ export function decodeLifecycleRepairJournal(value: unknown, snapshots?: Readonl
     const ref = stored['materializationRef'];
     if ((journal['version'] !== 4 && ref !== undefined) || (journal['version'] === 4 && stored['materialization'] !== undefined)) return invalid();
     if (ref !== undefined && (typeof ref !== 'string' || !/^[a-f0-9]{64}$/.test(ref) || !snapshots?.has(ref))) return invalid();
-    const input = decodeLifecycleRepairInput({ ...stored, ...(typeof ref === 'string' ? { materialization: snapshots!.get(ref) } : {}) });
+    const evidence = decodeLifecycleRepairInput({ ...stored, ...(typeof ref === 'string' ? { materialization: snapshots!.get(ref) } : {}) });
+    const input = evidence.input;
     const key = lifecycleRepairKey(input), attempts = entry['attempts'], nextAttemptAt = entry['nextAttemptAt'];
     const storedKey = journal['version'] === 1 ? historicalRepairKey(input) : key;
     if (tuple[0] !== storedKey || storedKeys.has(storedKey) || entries.has(key) || typeof attempts !== 'number' || !Number.isSafeInteger(attempts) || attempts < 0
@@ -142,9 +114,6 @@ export function decodeLifecycleRepairJournal(value: unknown, snapshots?: Readonl
       || (entry['lastError'] !== undefined && typeof entry['lastError'] !== 'string')
       || (entry['rejected'] !== undefined && typeof entry['rejected'] !== 'boolean')) return invalid();
     storedKeys.add(storedKey);
-    const evidence = input.publicationDeployment === undefined || input.packedKaId === undefined
-      ? { input: input as HistoricalUnboundLifecycleRepairInput, retention: 'historical-unbound' as const }
-      : { input: input as ConfirmedKaInput };
     entries.set(key, { ...evidence, attempts, nextAttemptAt,
       ...(entry['lastError'] === undefined ? {} : { lastError: entry['lastError'] }),
       ...(entry['rejected'] === undefined ? {} : { rejected: entry['rejected'] }),

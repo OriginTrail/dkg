@@ -4,23 +4,13 @@ import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import { readFile } from 'node:fs/promises';
 import { DurableReplaceableFile } from './durable-file-replace.js';
 import { join } from 'node:path';
-import type { PublishedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle.js';
 import { ConfirmedNamedKaVmLifecycleExecutor } from './named-ka-vm-lifecycle-executor.js';
-import { lifecycleRepairKey, normalizeLifecycleRepairInput, type LifecycleRepairEntry as RepairEntry, type ValidatedLifecycleRepairCommand } from './named-ka-vm-lifecycle-repair-journal.js';
+import { lifecycleRepairKey, type LifecycleRepairEntry as RepairEntry } from './named-ka-vm-lifecycle-repair-journal.js';
 import { NamedKaVmLifecycleSnapshots } from './named-ka-vm-lifecycle-snapshots.js';
 import { isStoreOperationTimeoutError, isStoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 
-export interface ConfirmedNamedKaVmPublicationDeployment {
-  readonly chainId: string;
-  readonly lifecycleAddress: string;
-}
-export interface ConfirmedNamedKaVmLifecycleInput extends PublishedNamedKaVmLifecycleInput {
-  readonly assertionVersion: string;
-  /** Bound by the admitted publication seal for every new confirmed command. */
-  readonly publicationDeployment: ConfirmedNamedKaVmPublicationDeployment;
-  readonly materialization?: import('./named-ka-vm-lifecycle-materialization.js').ConfirmedLifecycleMaterialization;
-  readonly priorMerkleRoot?: string;
-}
+import { normalizeLifecycleRepairInput, type ConfirmedNamedKaVmLifecycleInput, type ValidatedLifecycleRepairCommand } from './named-ka-vm-lifecycle-evidence.js';
+
 export type NamedKaVmLifecycleRepairOutcome = 'repaired' | 'pending' | 'superseded' | 'rejected';
 
 /** A confirmed transaction is never submitted again by this owner: it only repairs local evidence. */

@@ -1,7 +1,7 @@
 import { ConfirmedNamedKaVmLifecycleRecoveryError, isConfirmedNamedKaVmLifecycleRecoveryError,
   type ConfirmedNamedKaVmPublication, type ConfirmedNamedKaVmLifecycleRecovery,
   type ConfirmedNamedKaVmPublicationView, type ConfirmedNamedKaVmLifecycleRecoveryView } from '../src/index.js';
-import type { ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-repair.js';
+import type { ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-evidence.js';
 declare const publication: ConfirmedNamedKaVmPublication;
 declare const input: ConfirmedNamedKaVmLifecycleInput;
 new ConfirmedNamedKaVmLifecycleRecoveryError(publication, input, new Error('journal unavailable'));

@@ -1,5 +1,5 @@
 import type { ConfirmedNamedKaVmPublication } from '../../src/named-ka-vm-lifecycle-recovery-error.js';
-import type { ConfirmedNamedKaVmLifecycleInput } from '../../src/named-ka-vm-lifecycle-repair.js';
+import type { ConfirmedNamedKaVmLifecycleInput } from '../../src/named-ka-vm-lifecycle-evidence.js';
 
 export function confirmedLifecycleRecoveryFixture(): { publication: ConfirmedNamedKaVmPublication; input: ConfirmedNamedKaVmLifecycleInput } {
   const root = new Uint8Array(32).fill(0x12), author = '0x' + '11'.repeat(20), ual = `did:dkg:mock:31337/${author}/1`;

@@ -1,5 +1,5 @@
 import { readLifecycleRepairJournalFile } from './_helpers/read-lifecycle-repair-journal.js';
-import { confirmedLifecycleMaterialization } from '../src/named-ka-vm-lifecycle-materialization.js';
+import { confirmedLifecycleMaterialization } from '../src/named-ka-vm-lifecycle-evidence.js';
 import { NamedKaVmLifecycleIntegrityError } from '../src/named-ka-vm-lifecycle-integrity-error.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cp, copyFile, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
@@ -18,8 +18,10 @@ import { GossipSession } from '../src/gossip-session.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import { createKnowledgeAssetVmPublishIntentKey } from '../src/dkg-agent-publish.js';
 import { DurableReplaceableFile } from '../src/durable-file-replace.js';
-import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-repair.js';
-import { decodeLifecycleRepairJournal, encodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
+import { type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-evidence.js';
+import { decodeLifecycleRepairJournal, encodeLifecycleRepairJournal, lifecycleRepairKey } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import { normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-evidence.js';
 import { applyTentativeNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
 import { applyPublishedNamedKaVmLifecycle } from './_helpers/confirmed-lifecycle-metadata-writer.js';
 function serializedRepairInput(input: ConfirmedNamedKaVmLifecycleInput) {

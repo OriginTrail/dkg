@@ -5,8 +5,8 @@ import { join } from 'node:path';
 import { DurableDirectory } from '@origintrail-official/dkg-storage';
 import { DurableReplaceableFile } from './durable-file-replace.js';
 import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
-import { decodeLifecycleRepairJournal, encodeLifecycleRepairJournal, type LifecycleRepairEntry } from './named-ka-vm-lifecycle-repair-journal.js';
-import { lifecycleMaterializationWire, type ConfirmedLifecycleMaterialization } from './named-ka-vm-lifecycle-materialization.js';
+import { decodeLifecycleRepairJournal, encodeLifecycleRepairJournal, lifecycleMaterializationWire, type LifecycleRepairEntry } from './named-ka-vm-lifecycle-repair-journal.js';
+import type { ConfirmedLifecycleMaterialization } from './named-ka-vm-lifecycle-evidence.js';
 
 const digest = (bytes: string) => createHash('sha256').update(bytes).digest('hex');
 const validRef = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);

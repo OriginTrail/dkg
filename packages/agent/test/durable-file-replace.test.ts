@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { replaceDurableFile } from '../src/durable-file-replace.js';
-import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-repair.js';
+import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
+import { type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-evidence.js';
 import { confirmedMaterializationFixture } from './_helpers/confirmed-materialization-fixture.js';
 import { saveSourceWorkerState } from '../src/source-worker.js';
 

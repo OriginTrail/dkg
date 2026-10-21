@@ -5,8 +5,10 @@ import { tmpdir } from 'node:os';
 import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { assertionLifecycleWriteLockKey, withKeyedLocks, WM_CURRENT_ASSERTION_PRED } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-repair.js';
-import { decodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
+import { type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-evidence.js';
+import { decodeLifecycleRepairJournal, lifecycleRepairKey, type HistoricalUnboundLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import { normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-evidence.js';
 import { applyTentativeNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
 import { applyPublishedNamedKaVmLifecycle } from './_helpers/confirmed-lifecycle-metadata-writer.js';
 const fields: ConfirmedNamedKaVmLifecycleInput = { contextGraphId: 'command-contract', agentAddress: '0x1111111111111111111111111111111111111111', name: 'asset',
@@ -86,4 +88,15 @@ describe('confirmed lifecycle command contract', () => {
     await mutation; expect(await attempt).toBe('repaired');
     expect(await store.query(`ASK { GRAPH <${graph}> { <${lifecycle}> <${WM_CURRENT_ASSERTION_PRED}> "${'cd'.repeat(32)}" } }`)).toMatchObject({ value: true });
   });
+});
+
+it.each(['packedKaId', 'publicationDeployment'] as const)('retains historical missing %s only in the codec and rejects it at fresh admission', field => {
+  const { packedKaId, publicationDeployment, materialization: _snapshot, ...coordinates } = fields;
+  const incomplete: HistoricalUnboundLifecycleRepairInput = field === 'packedKaId'
+    ? { ...coordinates, publicationDeployment } : { ...coordinates, packedKaId };
+  expect(() => normalizeLifecycleRepairInput(incomplete)).toThrowError(expect.objectContaining({ code: 'KA_VM_LIFECYCLE_REPAIR_INTEGRITY' }));
+  const entries = decodeLifecycleRepairJournal({ version: 2, entries: [[lifecycleRepairKey(incomplete), {
+    input: { ...incomplete, packedKaId: incomplete.packedKaId?.toString() }, attempts: 0, nextAttemptAt: 0,
+  }]] });
+  expect([...entries.values()][0]).toMatchObject({ retention: 'historical-unbound', input: incomplete });
 });

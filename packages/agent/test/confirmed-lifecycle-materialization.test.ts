@@ -9,8 +9,10 @@ import { resolveConfirmedGraphScopedVm } from '../src/confirmed-graph-scoped-vm-
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { recoverReceiptBackedGraphScopedEvidence } from '../src/receipt-backed-graph-scoped-evidence.js';
 import { getBytes, hexlify } from 'ethers';
+import * as evidence from '../src/named-ka-vm-lifecycle-evidence.js';
 import * as materialization from '../src/named-ka-vm-lifecycle-materialization.js';
-import { decodeLifecycleRepairJournal, encodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import { decodeLifecycleRepairJournal, encodeLifecycleRepairJournal, lifecycleRepairKey, lifecycleMaterializationWire } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import { normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-evidence.js';
 import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
 import { confirmedLifecycleExecutionCapabilities } from '../src/named-ka-vm-lifecycle-executor.js';
 import { confirmedMaterializationFixture } from './_helpers/confirmed-materialization-fixture.js';
@@ -149,7 +151,7 @@ it('freezes admitted and decoded evidence while retry encoding does not revalida
   }
   const unrelated = normalizeLifecycleRepairInput({ ...source, name: 'independent-retry' });
   decoded.set(lifecycleRepairKey(unrelated), { input: unrelated, attempts: 2, nextAttemptAt: 20_000 });
-  const normalize = vi.spyOn(materialization, 'normalizeLifecycleMaterialization');
+  const normalize = vi.spyOn(evidence, 'normalizeLifecycleRepairInput');
   for (let attempt = 3; attempt < 6; attempt += 1) {
     decoded.get(lifecycleRepairKey(unrelated))!.attempts = attempt;
     const wire = encodeLifecycleRepairJournal(decoded);
@@ -207,7 +209,7 @@ it.each(['publicTripleCount', 'privateTripleCount', 'privateMerkleRoot', 'batchI
 it('validates admission once and executes the same frozen proof through retries and journal round-trips', async () => {
   const { owner, input, store, advance } = await fixture(true);
   const apply = vi.spyOn(materialization, 'applyMaterializedConfirmedLifecycle');
-  const normalize = vi.spyOn(materialization, 'normalizeLifecycleMaterialization');
+  const normalize = vi.spyOn(evidence, 'normalizeLifecycleRepairInput');
   const capture = store.commitment!.capture.bind(store.commitment);
   vi.spyOn(store.commitment!, 'capture').mockImplementationOnce(() => async () => { throw new Error('retry'); }).mockImplementation(capture);
   expect(await owner.submit(input)).toBe('pending');
@@ -221,7 +223,7 @@ it('validates admission once and executes the same frozen proof through retries 
   const reopened = [...decoded.values()][0]!.input;
   expect(reopened.materialization).toEqual(model); expect(reopened.materialization).not.toBe(model);
   expect(Object.isFrozen(reopened.materialization)).toBe(true);
-  const wire = materialization.lifecycleMaterializationWire(model);
+  const wire = lifecycleMaterializationWire(model);
   expect(wire).not.toHaveProperty('proof'); expect(wire.publicQuads).toBe(model.publicQuads);
   expect(() => normalizeLifecycleRepairInput({ ...command, materialization: { ...wire, publicQuads: [] } })).toThrow('public recovery snapshot');
   for (const changed of [{ merkleRoot: 'ab'.repeat(32) }, { packedKaId: command.packedKaId + 1n },

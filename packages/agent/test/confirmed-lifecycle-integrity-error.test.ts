@@ -8,7 +8,7 @@ import { NamedKaVmLifecycleIntegrityError, isNamedKaVmLifecycleIntegrityError } 
 import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
 import { applyPublishedNamedKaVmLifecycle } from './_helpers/confirmed-lifecycle-metadata-writer.js';
 import { isConfirmedNamedKaVmLifecycleCurrent } from '../src/named-ka-vm-lifecycle-current.js';
-import { normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import { normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-evidence.js';
 import { confirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-evidence.js';
 import { confirmedLifecycleRecoveryFixture } from './_helpers/confirmed-lifecycle-recovery-fixture.js';
 
