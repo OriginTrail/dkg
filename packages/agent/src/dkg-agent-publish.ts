@@ -3339,7 +3339,7 @@ export class PublishMethods extends DKGAgentBase {
       await stampFinalizedLifecycle(version, root); // Checks authority between its writes.
       await assertCurrent();
       await this.publisher.cleanupCanonicalWorkingMemorySources(
-        contextGraphId, name, agentAddress, canonicalGraph, [sourceWmGraphUri], opts?.subGraphName);
+        contextGraphId, name, agentAddress, canonicalGraph, [sourceWmGraphUri], opts?.subGraphName, opts?.executionAuthority);
       await assertCurrent();
       await privateStore.deleteKnowledgeAssetPrivateDraft(contextGraphId, agentAddress, name, opts?.subGraphName);
     };

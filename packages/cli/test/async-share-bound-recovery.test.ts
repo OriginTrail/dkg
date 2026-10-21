@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { assertionLifecycleUri, assertionScopedGraphUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { OxigraphStore, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { PromoteJobLeaseError } from '@origintrail-official/dkg-publisher';
@@ -373,8 +373,9 @@ describe('async shares acquire durable replay authority before promotion', () =>
     } finally { release(); await holder; await running; }
   });
 
-  it.each([{ revoked: false, leftover: true }, { revoked: true, leftover: true },
-    { revoked: false, leftover: false }, { revoked: true, leftover: false }])('fences completed legacy VM cleanup (revoked=$revoked, leftover=$leftover)', async ({ revoked, leftover }) => {
+  it.each([{ revoked: false, leftover: true, enumeration: false }, { revoked: true, leftover: true, enumeration: false },
+    { revoked: false, leftover: false, enumeration: false }, { revoked: true, leftover: false, enumeration: false },
+    { revoked: true, leftover: true, enumeration: true }])('fences completed legacy VM cleanup (revoked=$revoked, leftover=$leftover, enumeration=$enumeration)', async ({ revoked, leftover, enumeration }) => {
     const f = await setup();
     await f.agent.assertion.promote(CG, NAME, { agentAddress: AUTHOR });
     const vm = f.finalized.sharedGraphUri.replace('/_shared_memory/', '/_verifiable_memory/');
@@ -394,9 +395,16 @@ describe('async shares acquire durable replay authority before promotion', () =>
     let paused = false;
     const barrier = vi.spyOn(f.publisher as any, 'assertionScopedQuads').mockImplementation(async (uri: string) => {
       const rows = await scoped(uri);
-      if (uri === vm && !paused) { paused = true; entered(); await blocked; }
+      if (!enumeration && uri === vm && !paused) { paused = true; entered(); await blocked; }
       return rows;
     });
+    if (enumeration) {
+      const drop = f.publisher.dropAssertionScopedGraphs.bind(f.publisher), list = f.store.listGraphs.bind(f.store);
+      vi.spyOn(f.publisher, 'dropAssertionScopedGraphs').mockImplementationOnce(async (...args: any[]) => {
+        vi.spyOn(f.store, 'listGraphs').mockImplementationOnce(async () => { const graphs = await list(); entered(); await blocked; return graphs; });
+        return drop(...args);
+      });
+    }
     const promote = vi.spyOn(f.publisher, 'assertionPromote');
     const bind = vi.spyOn(f.queue, 'bindRecovery');
     const preparing = f.prepare(job);
@@ -423,6 +431,58 @@ describe('async shares acquire durable replay authority before promotion', () =>
       expect(await f.store.countQuads(vm)).toBe(1);
       expect(promote).not.toHaveBeenCalled(); expect(bind).not.toHaveBeenCalled();
     } finally { release(); await preparing.catch(() => {}); }
+  });
+
+  it.each(['enumeration', 'deletion'])('fences source cleanup after %s inside the helper', async stage => {
+    const f = await setup(undefined, false, true); useRealFinalizer(f);
+    const source = await f.publisher.wmGraphUri(CG, AUTHOR, NAME);
+    const child = assertionScopedGraphUri(source, 'urn:child');
+    const job = await f.claim();
+    let release!: () => void, entered!: () => void, cleaning = false, paused = false;
+    const blocked = new Promise<void>(r => { release = r; }), reached = new Promise<void>(r => { entered = r; });
+    const cleanup = f.publisher.cleanupCanonicalWorkingMemorySources.bind(f.publisher);
+    vi.spyOn(f.publisher, 'cleanupCanonicalWorkingMemorySources').mockImplementation(async (...args: any[]) => {
+      // Model an obsolete descendant at the cleanup boundary, after payload validation.
+      await f.store.insert([{ subject: 'urn:child', predicate: 'urn:value', object: '"child"', graph: child }]);
+      cleaning = true; return cleanup(...args);
+    });
+    const list = f.store.listGraphs.bind(f.store), drop = f.store.dropGraph.bind(f.store);
+    const pause = async () => { if (cleaning && !paused) { paused = true; entered(); await blocked; } };
+    vi.spyOn(f.store, 'listGraphs').mockImplementation(async () => {
+      const graphs = await list(); if (stage === 'enumeration') await pause(); return graphs;
+    });
+    const drops = vi.spyOn(f.store, 'dropGraph').mockImplementation(async graph => {
+      await drop(graph); if (stage === 'deletion') await pause();
+    });
+    const preparing = f.prepare(job);
+    void preparing.catch(() => {});
+    try {
+      await reached; const count = drops.mock.calls.length;
+      f.expire(); await f.queue.recoverOnStartup();
+      release(); await expect(preparing).rejects.toBeInstanceOf(PromoteJobLeaseError);
+      await f.queue.cancel(job.jobId);
+      expect(drops).toHaveBeenCalledTimes(count);
+      expect(await f.store.countQuads(source)).toBe(1);
+      expect(await f.store.countQuads(child)).toBe(drops.mock.calls.some(([graph]) => graph === child) ? 0 : 1);
+    } finally { release(); await preparing.catch(() => {}); }
+  });
+
+  it.each(['enumeration', 'deletion'])('fences scoped graph deletion after %s', async stage => {
+    const f = await setup(); const root = f.finalized.graphUri;
+    const child = assertionScopedGraphUri(root, 'urn:child');
+    await f.store.insert([{ subject: 'urn:child', predicate: 'urn:value', object: '"child"', graph: child }]);
+    const job = await f.claim();
+    const authority = createPromoteExecutionAuthority(f.queue, job.jobId, job.lease.claimToken, () => job.lease.expiresAt - 1, () => {});
+    const revoke = async () => { f.expire(); await f.queue.recoverOnStartup(); await f.queue.cancel(job.jobId); };
+    if (stage === 'enumeration') {
+      const list = f.store.listGraphs.bind(f.store);
+      vi.spyOn(f.store, 'listGraphs').mockImplementationOnce(async () => { const graphs = await list(); await revoke(); return graphs; });
+    }
+    const drop = f.store.dropGraph.bind(f.store);
+    const drops = vi.spyOn(f.store, 'dropGraph').mockImplementationOnce(async graph => { await drop(graph); if (stage === 'deletion') await revoke(); });
+    await expect(f.publisher.dropAssertionScopedGraphs(root, authority)).rejects.toBeInstanceOf(PromoteJobLeaseError);
+    expect(drops).toHaveBeenCalledTimes(stage === 'enumeration' ? 0 : 1);
+    expect(await f.store.countQuads(root)).toBe(1);
   });
 
   it('fails preparation before promotion without marking an unsafe start', async () => {

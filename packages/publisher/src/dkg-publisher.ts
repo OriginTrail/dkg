@@ -7157,10 +7157,12 @@ export class DKGPublisher implements Publisher {
     }
   }
 
-  private async dropAssertionScopedGraphs(wmGraphUri: string): Promise<void> {
+  private async dropAssertionScopedGraphs(wmGraphUri: string, authority?: PublisherAssertionPromoteOptions['executionAuthority']): Promise<void> {
     for (const graph of await listAssertionScopedGraphUris(this.store, wmGraphUri, 'named-only')) {
+      await authority?.assertCurrent();
       await this.store.dropGraph(graph);
     }
+    await authority?.assertCurrent();
     await this.store.dropGraph(wmGraphUri);
   }
 
@@ -7323,13 +7325,9 @@ export class DKGPublisher implements Publisher {
     canonicalGraphUri: string,
     additionalSourceGraphUris: readonly string[] = [],
     subGraphName?: string,
+    authority?: PublisherAssertionPromoteOptions['executionAuthority'],
   ): Promise<void> {
-    const nameKeyedSource = contextGraphAssertionUri(
-      contextGraphId,
-      agentAddress,
-      name,
-      subGraphName,
-    );
+    const nameKeyedSource = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     const sources = new Set([nameKeyedSource, ...additionalSourceGraphUris]);
     for (const sourceGraphUri of sources) {
       for (const graph of await listAssertionScopedGraphUris(
@@ -7337,9 +7335,10 @@ export class DKGPublisher implements Publisher {
         sourceGraphUri,
         'named-only',
       )) {
-        if (graph !== canonicalGraphUri) await this.store.dropGraph(graph);
+        if (graph !== canonicalGraphUri) { await authority?.assertCurrent(); await this.store.dropGraph(graph); }
       }
       if (sourceGraphUri !== canonicalGraphUri) {
+        await authority?.assertCurrent();
         await this.store.dropGraph(sourceGraphUri);
       }
     }
@@ -8279,7 +8278,7 @@ export class DKGPublisher implements Publisher {
       cleanupVm: async graph => {
         if ((await this.assertionScopedQuads(graph)).length) {
           await authority?.assertCurrent();
-          await this.dropAssertionScopedGraphs(graph);
+          await this.dropAssertionScopedGraphs(graph, authority);
         }
         if (await this.hasSwmShareComplete(contextGraphId, name, agentAddress, subGraphName))
           await this.clearPreparedShareCompletion(contextGraphId, name, agentAddress, subGraphName, authority);

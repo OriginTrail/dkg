@@ -96,3 +96,7 @@ Added leased queued-preparation coverage for verified pre-intent VM assets, with
 ## Review round 8
 
 Flattened publisher preparation bodies into explicit authority checks after lifecycle-lock acquisition and before graph deletion. A named concrete completion-marker cleanup method owns its own check and deletion; removed the generic callback-only check wrapper. Lock ordering and mutation order remain unchanged. Rerun the stale-preparation, mid-finalization, completed-legacy and synchronous recovery regressions, then validate the final production revision with a fresh small live lifecycle run.
+
+### Review round 9 — fence destructive cleanup internally
+
+Pass optional execution authority into canonical-source and completed-legacy scoped-graph cleanup. Recheck after graph enumeration and immediately before every graph deletion, including root graphs. Preserve synchronous callers without authority. Regressions revoke an actual queued claim inside enumeration and after the first deletion; stale workers must not delete further graphs. Rebuild after stopping the live worker and exercise the final revision on the retained isolated testnet home.
