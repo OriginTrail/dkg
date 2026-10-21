@@ -1,7 +1,7 @@
 import { Logger, type OperationContext } from '@origintrail-official/dkg-core';
 import { sanitizeWritePreflightFailures, type WritePreflightDiagnosticFailure } from './write-preflight-attribution.js';
 export type { WritePreflightDiagnosticFailure } from './write-preflight-attribution.js';
-import { createWarningGate } from './read-authority-diagnostics.js';
+import { createWarningGate } from './warning-gate.js';
 
 export type WritePreflightRescueOutcome = 'not-attempted' | 'unsupported' | 'denied' | 'deadline' | 'failed' | 'accepted';
 export interface WritePreflightDiagnostic {
