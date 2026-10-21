@@ -969,11 +969,15 @@ require('node:http').createServer((_req, res) => res.end('orphan')).listen(Numbe
           expect(runtimeStore.commitment?.durability).toBe('restart-durable');
           const commit = runtimeStore.commitment!.capture();
           await runtimeStore.update('INSERT DATA { GRAPH <urn:certified> { <urn:asset> <urn:value> "survives SIGKILL" } }');
-          directorySync.fail = root;
-          await expect(commit()).rejects.toMatchObject({ code: 'EIO' });
-          directorySync.fail = ''; directorySync.synced = [];
-          await commit();
-          expect(directorySync.synced).toEqual(expect.arrayContaining([join(dataDir, 'oxigraph-data'), dataDir, root]));
+          if (process.platform !== 'win32') {
+            directorySync.fail = root;
+            await expect(commit()).rejects.toMatchObject({ code: 'EIO' });
+            directorySync.fail = ''; directorySync.synced = [];
+            await commit();
+            expect(directorySync.synced).toEqual(expect.arrayContaining([join(dataDir, 'oxigraph-data'), dataDir, root]));
+          } else {
+            await commit(); // Pinned RocksDB Windows policy syncs WAL files, not directory handles.
+          }
           const phases: string[] = [];
           const recovery = result!.handle.requestRecovery!(result!.handle.getRecoveryState().generation, 'test certified WAL after SIGKILL');
           expect(recovery).toBeDefined();
