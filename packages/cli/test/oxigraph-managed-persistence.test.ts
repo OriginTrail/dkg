@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
@@ -26,7 +26,7 @@ vi.mock('node:fs/promises', async importOriginal => {
 
 it('reconstructs adoption ancestry after managed owner replacement and certifies actual SIGKILL/reopen', async () => {
   // Binary installation and the database share an absent node parent.
-  const root = await mkdtemp(join(tmpdir(), 'oxi-managed-persistence-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'oxi-managed-persistence-')));
   const dataDir = join(root, 'new-node'), cacheDir = join(dataDir, 'bin'), port = await freePort();
   const start = () => startManagedOxigraph({
     config: { store: { backend: MANAGED_OXIGRAPH_BACKEND, options: { port, cacheDir } } },

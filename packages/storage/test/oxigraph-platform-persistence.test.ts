@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
@@ -29,7 +29,7 @@ afterEach(async () => {
   io.directory = ''; io.snapshot = '';
 });
 async function fixture(platform: NodeJS.Platform) {
-  io.directory = await mkdtemp(join(tmpdir(), 'dkg-platform-snapshot-'));
+  io.directory = await realpath(await mkdtemp(join(tmpdir(), 'dkg-platform-snapshot-')));
   io.snapshot = join(io.directory, 'store.nq');
   // Oxigraph's native engine was loaded before changing the JS platform policy.
   Object.defineProperty(process, 'platform', { ...originalPlatform, value: platform });
@@ -71,7 +71,7 @@ it('POSIX directory sync errors still reject certified commitment and can be ret
   } finally { io.directoryError = false; await store.close(); }
 });
 async function nestedFixture() {
-  io.directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-ancestry-'));
+  io.directory = await realpath(await mkdtemp(join(tmpdir(), 'dkg-snapshot-ancestry-')));
   const created = join(io.directory, 'new'), snapshots = join(created, 'snapshots');
   io.snapshot = join(snapshots, 'store.nq');
   Object.defineProperty(process, 'platform', { ...originalPlatform, value: 'linux' });

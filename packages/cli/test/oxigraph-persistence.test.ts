@@ -13,6 +13,7 @@ const io = vi.hoisted(() => ({ names: [['000001.log']] as string[][], events: []
   absent: new Set<string>(),
   onRead: null as (() => void) | null }));
 vi.mock('node:fs/promises', () => ({
+  realpath: async (path: string) => path,
   stat: async (path: string) => { if (io.absent.has(path)) throw Object.assign(new Error('missing'), { code: 'ENOENT' }); return {}; },
   mkdir: async () => { io.absent.clear(); },
   readdir: async () => {

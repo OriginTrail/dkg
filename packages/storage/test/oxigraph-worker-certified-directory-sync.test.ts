@@ -1,13 +1,13 @@
 import { expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 it('retains ancestor-sync EIO across real worker replacement until a fresh certificate persists it', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'dkg-worker-dir-sync-'));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-worker-dir-sync-')));
   const snapshotDir = join(dir, 'snapshots'), flag = join(dir, 'inject-eio');
   try {
     await writeFile(flag, 'fail directory sync');

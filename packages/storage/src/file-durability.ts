@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-import { mkdir, open, stat } from 'node:fs/promises';
-import { dirname, parse, resolve } from 'node:path';
+import { mkdir, open, realpath, stat } from 'node:fs/promises';
+import { dirname, isAbsolute, parse, resolve, sep } from 'node:path';
+
+/** Pin relative paths without collapsing symlink-sensitive dot segments. */
+function absoluteTraversalPath(path: string): string {
+  if (isAbsolute(path)) return path;
+  const root = parse(path).root;
+  return `${root ? resolve(root) : process.cwd()}${sep}${path.slice(root.length)}`;
+}
 
 /** Windows FlushFileBuffers requires GENERIC_WRITE; a read-only handle fails. */
 async function syncFile(path: string): Promise<void> {
@@ -10,7 +17,7 @@ async function syncFile(path: string): Promise<void> {
 
 /** Flush the visible file through a writable handle, then its parent directory. */
 export async function persistFileAndParent(path: string, platform: NodeJS.Platform = process.platform): Promise<void> {
-  const absolutePath = resolve(path);
+  const absolutePath = absoluteTraversalPath(path);
   await syncFile(absolutePath);
   const directory = dirname(absolutePath);
   await persistDirectoryRange(directory, directory, platform);
@@ -37,7 +44,7 @@ export class DurableDirectory {
   private pendingThrough?: string;
 
   constructor(path: string, private readonly options: DurableDirectoryOptions = {}) {
-    this.path = resolve(path);
+    this.path = absoluteTraversalPath(path);
     // A replacement owner cannot infer successful parent fsync from existence:
     // the old worker/process may have died after mkdir but before certification.
     // Adopt the complete ancestry once; only a successful barrier clears it.
@@ -57,7 +64,7 @@ export class DurableDirectory {
     // Record their parent barrier before any creation, and keep it on every failure.
     if (existing !== this.path) this.retainThrough(existing);
     const firstCreated = await mkdir(this.path, { recursive: true, mode: this.options.mode });
-    if (firstCreated !== undefined) this.retainThrough(dirname(resolve(firstCreated)));
+    if (firstCreated !== undefined) this.retainThrough(dirname(firstCreated));
   }
 
   private retainThrough(through: string): void {
@@ -74,7 +81,7 @@ export class DurableDirectory {
 
   /** Flush a file in this directory through a writable handle, then persist the directory. */
   async persistFile(file: string): Promise<void> {
-    await syncFile(resolve(file));
+    await syncFile(absoluteTraversalPath(file));
     await this.persist();
   }
 }
@@ -84,6 +91,9 @@ export async function persistDirectoryRange(
   directory: string, last: string, platform: NodeJS.Platform = process.platform,
 ): Promise<void> {
   if (platform === 'win32') return;
+  // Traverse the actual filesystem before walking parents. Lexical '..' can
+  // point elsewhere when an earlier component is a directory symlink.
+  [directory, last] = await Promise.all([realpath(directory), realpath(last)]);
   for (;; directory = dirname(directory)) {
     const handle = await open(directory, 'r');
     try { await handle.sync(); } finally { await handle.close(); }
