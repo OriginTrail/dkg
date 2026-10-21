@@ -113,3 +113,8 @@ Add a real agent-package preparation/recovery regression with same-name, differe
 ## Review round 12 — observe private mutations under revoked authority
 
 Add two real-finalizer cases with a nonempty private partition. Pause after canonical public materialization (before private replacement), or after public source cleanup (before private draft deletion). Expire/reassign the claim and resume the stale worker; compare actual canonical private storage and the mutable private draft before/after, then let the replacement finish the original job and verify the private payload and completed share. Remove each corresponding guard separately as a mutation check. No production change or new live deployment is needed.
+
+
+## Review round 13 — incorporate updated base
+
+The reviewer completed `4d8967a22` with no issues. Base `651607954` adds write-preflight diagnostics/refactoring from #3343 and conflicts only where both branches prepend CLI unit-test entries. Retain both entries and the automatically merged agent test registrations/file-size budgets. Re-run preparation/private/preflight coverage and runtime build. Because the base affects HTTP write preflight, perform a fresh isolated live lifecycle smoke on the merged revision with a new wallet claim; do not reuse a released home. Preserve the earlier three real interruptions as recovery evidence, and distinguish their runtime from the merged-head smoke.

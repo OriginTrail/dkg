@@ -13,6 +13,7 @@ export default defineConfig({
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
           'test/async-share-bound-recovery.test.ts',
+          'test/write-preflight-diagnostics.test.ts',
           'test/durable-synchronous-share.test.ts',
           'test/durable-private-payload-recovery.test.ts',
           'test/durable-gossip-signer-lookup.test.ts',
