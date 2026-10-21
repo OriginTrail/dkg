@@ -1581,7 +1581,7 @@ describe('sync global backpressure', () => {
     try {
       delete process.env.DKG_EXACT_BATCH_STREAM_ENABLED;
       delete process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM;
-      expect(resolveExactBatchStreamEnabled()).toBe(false);
+      expect(resolveExactBatchStreamEnabled()).toBe(true);
 
       process.env.DKG_EXACT_BATCH_STREAM_ENABLED = '1';
       expect(resolveExactBatchStreamEnabled()).toBe(true);

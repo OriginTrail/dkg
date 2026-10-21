@@ -254,7 +254,7 @@ function isRetryableQueueBookkeepingError(error: unknown): boolean {
  * in-flight heartbeat after that point throws a `PromoteJobLeaseError`,
  * which the heartbeat catcher logs and ignores.
  */
-export async function runPromoteJob<T extends { promotedCount: number }>(
+export async function runPromoteJob<T extends { promotedCount: number; shareEvidence?: import('@origintrail-official/dkg-publisher').ShareCompletionEvidence }>(
   args: {
     job: PromoteJob;
     queue: AsyncPromoteQueue;
@@ -459,6 +459,7 @@ export async function runPromoteJob<T extends { promotedCount: number }>(
         queue.succeed(job.jobId, claimToken, {
           promotedCount: result.promotedCount,
           succeededAt: now(),
+          ...(job.request.agentAddress && result.shareEvidence ? { shareEvidence: result.shareEvidence } : {}),
         }),
       );
     } catch (bookkeepingErr: unknown) {
