@@ -80,7 +80,10 @@ existing fingerprint/processing hooks; no general worker API refactor is added.
 
 The daemon ingress's specific `429 / Too many requests` rejection clears write
 intent transactionally and persists `Retry-After`. Waiting polls do not consume
-additional retry attempts. Other HTTP errors and transport failures retain
+additional retry attempts or send HTTP requests, including preflight reads.
+The saved deadline survives handler restarts; after it expires, private graph
+validation and sealed readback run again before Kafka acknowledgement.
+Other HTTP errors and transport failures retain
 uncertain-write protection, with sanitized status codes stored in the journal;
 there is no blanket retry of arbitrary 4xx/5xx responses.
 

@@ -22,7 +22,12 @@ const message = (offset = '0') => ({ topic: source.topic, partition: 0, offset, 
 function daemon() {
   const assets = new Map(); let writes = 0; let loseResponse = false; let corrupt = false; let invisible = false;
   let rejection, descriptor = {}, normalize = false, changedLiteral = false, posts = 0;
+  let cooldownUntil = 0, requests = 0;
   const fetch = async (url, options) => {
+    requests++;
+    if (Date.now() < cooldownUntil) return Response.json({ error: 'Too many requests' }, {
+      status: 429, headers: { 'Retry-After': String(Math.ceil((cooldownUntil - Date.now()) / 1000)) },
+    });
     const path = new URL(url).pathname;
     if (path === '/api/context-graph/list') return Response.json({contextGraphs: [{id: source.contextGraphId, accessPolicy: 'private'}]});
     if (path === '/api/query') {
@@ -43,6 +48,7 @@ function daemon() {
       posts++;
       if (rejection) {
         const response = rejection; rejection = undefined;
+        if (response.cooldownMs) cooldownUntil = Date.now() + response.cooldownMs;
         return Response.json(response.body, { status: response.status, headers: response.headers });
       }
       writes++; assets.set(body.name, body);
@@ -59,9 +65,10 @@ function daemon() {
   };
   return { fetch, assets, get writes() { return writes; }, lose() { loseResponse = true; },
     corrupt() { corrupt = true; }, invisible() { invisible = true; },
-    rejectNext(status = 429, body = { error: 'Too many requests' }, headers = { 'Retry-After': '0' }) {
-      rejection = { status, body, headers };
+    rejectNext(status = 429, body = { error: 'Too many requests' }, headers = { 'Retry-After': '0' }, cooldownMs = 0) {
+      rejection = { status, body, headers, cooldownMs };
     },
+    get requests() { return requests; },
     get posts() { return posts; }, descriptor(value) { descriptor = value; }, normalize() { normalize = true; }, changeLiteral() { changedLiteral = true; } };
 }
 
@@ -78,11 +85,13 @@ async function fixture(t = { onTestFinished }, sources = [source]) {
     commits.push(record.offset);
     if (drain) queue = queue.filter(item => item.offset !== record.offset);
   }, async close() { closed++; } }; };
-  const hooks = await createHandler({ read, sinkFactory: () => createDkgSink(config, api.fetch) })
+  const createHooks = () => createHandler({ read, sinkFactory: () => createDkgSink(config, api.fetch) })
     .createSourceWorkerDeps({ config });
+  let hooks = await createHooks();
   const run = () => runSourceWorkerOnce(config.sources, config.stateFile,
     { ...hooks, now: () => new Date().toISOString(), getJobStatus() { throw new Error('No chain publisher permitted'); } });
-  return { config, api, run, readFailure(value) { readError = value; }, drain() { drain = true; }, setQueue(records) { queue = records; },
+  return { config, api, run, async restart() { hooks = await createHooks(); },
+    readFailure(value) { readError = value; }, drain() { drain = true; }, setQueue(records) { queue = records; },
     failCommit(value) { rejectCommit = value; }, get commits() { return commits; }, get closed() { return closed; } };
 }
 
@@ -172,7 +181,7 @@ test('a public graph is rejected before any Kafka event is written', async () =>
     if (options.method === 'POST') creates++;
     return Response.json({contextGraphs: [{id: source.contextGraphId, accessPolicy: 'open'}]});
   });
-  await assert.rejects(sink.ensure(source, buildAsset(source, message()), {}, {}), /DKG_PRIVATE_GRAPH_REQUIRED/);
+  await assert.rejects(sink.ensure(source, buildAsset(source, message()), {}, { rejection: () => undefined }), /DKG_PRIVATE_GRAPH_REQUIRED/);
   assert.equal(creates, 0);
 });
 
@@ -202,19 +211,26 @@ test('a definite pre-mutation 429 retries to exactly one sealed KA and acknowled
   assert.equal(f.api.posts, 2); assert.equal(f.api.writes, 1); assert.deepEqual(f.commits, ['0']);
 });
 
-test('Retry-After waits survive polls without exhausting the source retry budget', async t => {
+test('daemon-wide Retry-After cooldown survives handler restarts without HTTP requests or retry exhaustion', async t => {
   let now = Date.now(); const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
   t.onTestFinished(() => clock.mockRestore());
-  const f = await fixture(t); f.api.rejectNext(429, { error: 'Too many requests' }, { 'Retry-After': '60' });
-  await f.run();
+  const f = await fixture(t); f.api.rejectNext(429, { error: 'Too many requests' }, { 'Retry-After': '60' }, 60000);
+  const initial = (await f.run()).sources[source.id];
+  assert.equal(initial.lastError, 'DKG_HTTP_429'); assert.equal(initial.attemptCount, 1);
+  const requests = f.api.requests;
   for (let i = 0; i < 5; i++) {
+    now += 5000;
+    await f.restart();
     const result = (await f.run()).sources[source.id];
     assert.equal(result.lastStatus, 'retry-wait'); assert.equal(result.attemptCount, 1);
+    assert.notEqual(result.manualReviewRequired, true);
+    assert.equal(f.api.requests, requests);
   }
   assert.equal(f.api.posts, 1); assert.deepEqual(f.commits, []);
-  now += 60001;
+  now += 35001;
+  await f.restart();
   assert.equal((await f.run()).sources[source.id].lastStatus, 'completed');
-  assert.equal(f.api.writes, 1); assert.deepEqual(f.commits, ['0']);
+  assert.equal(f.api.posts, 2); assert.equal(f.api.writes, 1); assert.deepEqual(f.commits, ['0']);
 });
 
 test.each([500, 429])('unclassified HTTP %s remains ambiguous and cannot issue another create', async (status, t) => {
@@ -234,6 +250,10 @@ test.each([
   { status: 'wm-draft' }, { swmCurrentAssertion: 'shared' }, { vmCurrentAssertion: 'published' },
   { agentAddress: '0x' + 'b'.repeat(40) }, { contextGraphId: owner + '/other' },
   { wmCurrentAssertion: null }, { assertionGraph: 'urn:wrong-graph' },
+  { assertionGraph: `did:dkg:context-graph:${source.contextGraphId}/_working_memory/${owner}/bad>graph` },
+  { assertionGraph: `did:dkg:context-graph:${source.contextGraphId}/_working_memory/${owner}/bad\u0001graph` },
+  { assertionGraph: `did:dkg:context-graph:${source.contextGraphId}/_working_memory/${owner.toUpperCase()}/1` },
+  { assertionGraph: `did:dkg:context-graph:${source.contextGraphId}/_shared_working_memory/${owner}/1` },
 ])('invalid private sealed descriptor %j never acknowledges', async (override, t) => {
   const f = await fixture(t); f.api.descriptor(override);
   const result = (await f.run()).sources[source.id];

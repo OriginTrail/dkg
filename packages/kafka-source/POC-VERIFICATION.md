@@ -5,7 +5,35 @@ The consumer is a generic DKG Source Worker handler loaded through
 `codex/kafka-source-poc` based on `testnet-canary`
 `693be6317ba8d6db6aefc6b6ff3c77f52ef535cd`.
 
-## Polling review fixes — 21 October 2026
+## Daemon-wide cooldown review fixes — 21 October 2026
+
+Validation baseline: current `testnet-canary`
+`a8df4583820c998c31676cc2796597cd22f25b35`, merged into this PR branch.
+
+- Reproduced the review failure before changing the sink: a create rejected
+  with `Retry-After: 60`, followed by daemon-wide throttling, produced `failed`
+  instead of `retry-wait` on the next native worker poll.
+- Moved the persisted rejection deadline ahead of HTTP requests. Five polls
+  five seconds apart, each with a rebuilt handler and reopened journal, make
+  **zero HTTP requests**, preserve attempt count 1, do not require manual
+  review and acknowledge no offsets. After 60 seconds, processing resumes
+  with exactly one sealed KA and one acknowledgement. This cooldown scenario
+  uses the HTTP contract double, not a live rate-limited daemon.
+- Reused DKG core's canonical Working Memory prefix and SPARQL helpers.
+  Negative tests reject malformed IRIs, historical owner casing, another
+  memory layer, wrong ownership/graph and unsealed/shared descriptors.
+- **49 focused tests pass**, with **96.61% line coverage** (94% floor).
+  **774 repository script tests pass** on Node 22.23.1. Runtime package build
+  (Solidity excluded), frozen offline dependency installation, lint and test
+  inventory (2,746 files / 24 Vitest packages) pass.
+- Reran the real localhost broker's two polling regressions: expiration still
+  fails without offset/checkpoint advancement; a 100ms startup with a 20ms
+  read timeout delivers the queued record. This mode makes **no DKG requests
+  or graph writes**. It is not a new full broker-to-DKG lifecycle proof.
+- Sanitized aggregate evidence and current source/patch digests:
+  [`cooldown-recovery-20261021.json`](test/evidence/cooldown-recovery-20261021.json).
+
+## Earlier polling review fixes — 21 October 2026
 
 Updated the validation baseline by merging current `testnet-canary`
 `23ccf2fd37e8c16aca29be7af5ebf96ce898cb27`. The source remains a generic

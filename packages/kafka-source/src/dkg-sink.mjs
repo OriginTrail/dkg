@@ -1,3 +1,4 @@
+import { contextGraphLayerPrefixCandidates, MemoryLayer, isSafeIri, sparqlIri } from '@origintrail-official/dkg-core';
 import { content } from './asset.mjs';
 
 export function createDkgSink(config, requestFetch = fetch) {
@@ -26,6 +27,15 @@ export function createDkgSink(config, requestFetch = fetch) {
   }
   return {
     async ensure(source, asset, record, journal) {
+      // A definite rejected create has a durable cooldown. Wait before ANY
+      // HTTP request: the daemon can throttle reads as well as writes.
+      // An uncertain intent must still use readback recovery, never re-create.
+      const rejection = !record.intent && journal.rejection(record.position);
+      if (rejection?.retryAt > Date.now()) {
+        const error = new Error('DKG_RETRY_LATER');
+        error.retryAt = rejection.retryAt;
+        throw error;
+      }
       const graphs = await request('GET', '/api/context-graph/list');
       const graph = graphs?.contextGraphs?.find(graph => graph.id === source.contextGraphId);
       if (!graph || !['private', 1].includes(graph.accessPolicy)) throw new Error('DKG_PRIVATE_GRAPH_REQUIRED');
@@ -38,15 +48,15 @@ export function createDkgSink(config, requestFetch = fetch) {
           status.agentAddress?.toLowerCase() !== source.agentAddress.toLowerCase() ||
           status.name !== asset.name || status.status !== 'wm-sealed' || !status.wmCurrentAssertion ||
           status.swmCurrentAssertion || status.vmCurrentAssertion) throw new Error('DKG_PRIVATE_SEAL_REQUIRED');
-        const graphPrefix = `did:dkg:context-graph:${source.contextGraphId}/_working_memory/${source.agentAddress.toLowerCase()}/`;
-        if (!status.assertionGraph?.startsWith(graphPrefix) || /[\s<>"{}|\\^`]/.test(status.assertionGraph))
+        const [graphPrefix] = contextGraphLayerPrefixCandidates(source.contextGraphId, MemoryLayer.WorkingMemory, source.agentAddress);
+        if (!isSafeIri(status.assertionGraph) || !status.assertionGraph.startsWith(graphPrefix))
           throw new Error('DKG_ASSERTION_GRAPH_MISMATCH');
         // /wm/quads reads the mutable draft, which is empty after sealing.
         // Verify the immutable graph named by the native sealed descriptor.
         const data = await request('POST', '/api/query', {
           contextGraphId: source.contextGraphId, agentAddress: source.agentAddress,
           view: 'working-memory', includeContextGraphPartitions: true,
-          sparql: `CONSTRUCT { <${asset.subject}> ?p ?o } WHERE { GRAPH <${status.assertionGraph}> { <${asset.subject}> ?p ?o } } LIMIT ${asset.quads.length + 1}`,
+          sparql: `CONSTRUCT { ${sparqlIri(asset.subject)} ?p ?o } WHERE { GRAPH ${sparqlIri(status.assertionGraph)} { ${sparqlIri(asset.subject)} ?p ?o } } LIMIT ${asset.quads.length + 1}`,
         });
         // Current nodes return typed results; older V10 APIs return {quads,bindings}.
         if (!Array.isArray(data?.result?.quads) || (data.result.type && data.result.type !== 'quads') ||
@@ -59,12 +69,6 @@ export function createDkgSink(config, requestFetch = fetch) {
       // A previous request may still be executing. Never retry an ambiguous
       // create merely because the asset is not visible yet.
       if (record.intent) throw new Error('DKG_WRITE_OUTCOME_UNKNOWN');
-      const rejection = journal.rejection(record.position);
-      if (rejection?.retryAt > Date.now()) {
-        const error = new Error('DKG_RETRY_LATER');
-        error.retryAt = rejection.retryAt;
-        throw error;
-      }
       journal.intent(record.position);
       let failure;
       try {

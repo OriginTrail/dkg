@@ -1139,6 +1139,9 @@ importers:
 
   packages/kafka-source:
     dependencies:
+      '@origintrail-official/dkg-core':
+        specifier: workspace:*
+        version: link:../core
       '@origintrail-official/dkg-rdf-utils':
         specifier: workspace:*
         version: link:../rdf-utils

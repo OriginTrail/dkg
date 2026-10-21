@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "kafkajs": "2.2.4",
+    "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-rdf-utils": "workspace:*"
   },
   "devDependencies": {
