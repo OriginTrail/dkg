@@ -211,10 +211,27 @@ describe('async shares acquire durable replay authority before promotion', () =>
     const f = await setup();
     const first = await f.claim();
     await f.queue.recordCommitMarker(first.jobId, first.lease.claimToken, 'promoteStarted');
-    await expect(f.prepare(first)).rejects.toThrow('unstarted');
+    const preparation = vi.spyOn(f.agent, 'prepareAtomicAssertionShare');
+    await expect(f.prepare(await f.queue.getStatus(first.jobId))).rejects.toThrow('unstarted');
+    expect(preparation).not.toHaveBeenCalled();
     f.expire();
     expect(await f.queue.recoverOnStartup()).toEqual({ reclaimed: 0, abandoned: 1 });
     expect((await f.queue.getStatus(f.jobId)).request.recoveryBinding).toBeUndefined();
+  });
+
+  it.each(['subset', 'missing-marker', 'committed-marker', 'blank-lane'])('rejects unsafe %s before seal preparation and under the binding lock', async mode => {
+    const f = await setup(); const job = await f.claim();
+    const binding = (await f.agent.assertion.prepareDurableShare(CG, NAME)).recoveryBinding;
+    const unsafe = { ...job, request: { ...job.request }, commitMarker: job.commitMarker && { ...job.commitMarker } };
+    if (mode === 'subset') unsafe.request.entities = ['urn:asset'];
+    if (mode === 'missing-marker') unsafe.commitMarker = undefined;
+    if (mode === 'committed-marker') unsafe.commitMarker.swmInserted = true;
+    if (mode === 'blank-lane') unsafe.request.agentAddress = ' ';
+    await f.queue.writeJob(unsafe);
+    const preparation = vi.spyOn(f.agent, 'prepareAtomicAssertionShare');
+    await expect(f.prepare(unsafe)).rejects.toThrow('unstarted');
+    expect(preparation).not.toHaveBeenCalled();
+    await expect(f.queue.bindRecovery(job.jobId, job.lease.claimToken, binding)).rejects.toThrow('unstarted');
   });
 
   it.each([[3, AUTHOR], [4, undefined]])('preserves queued format %s / lane %s without inventing authority', async (formatVersion, agentAddress) => {

@@ -4,7 +4,7 @@ import { SwmCatalogAuthorityNotReady } from '../swm-inventory-write.js';
 import { commitConfirmedDurableShareInventory } from './durable-vm-share-inventory.js';
 import { attachCommittedShare } from './inventory-recovery-failure.js';
 import { createOperationContext } from '@origintrail-official/dkg-core';
-import { ASYNC_PROMOTE_QUEUE_FORMAT_VERSION, type PromoteExecutionAuthority, createPromoteRetryableFailure, UnfinishedBoundShareError } from '@origintrail-official/dkg-publisher';
+import { classifyQueuedSharePreparation, type PromoteExecutionAuthority, createPromoteRetryableFailure, UnfinishedBoundShareError } from '@origintrail-official/dkg-publisher';
 import type { DKGAgent } from '../../dkg-agent.js';
 import type { AssertionPromoteOptions } from '../../dkg-agent-types.js';
 import { prepareAssertionPromote } from './assertion-promote-precommit.js';
@@ -197,10 +197,7 @@ export function durableAssertionShareMethods(agent: DKGAgent, agentAddress: stri
       return agent.publisher.admitPreparedAssertionShare(request, () => admit(request, workerId));
     },
     async prepareQueuedShare(job: import('@origintrail-official/dkg-publisher').PromoteJob, authority: PromoteExecutionAuthority) {
-      if (job.request.recoveryBinding) return { job };
-      // Old queued records retain their original execution/recovery semantics;
-      // never manufacture replay authority for missing version/lane evidence.
-      if (job.formatVersion !== ASYNC_PROMOTE_QUEUE_FORMAT_VERSION || !job.request.agentAddress) return { job };
+      if (classifyQueuedSharePreparation(job) !== 'eligible') return { job };
       return authority.run(async () => {
         const bind = agent.promoteQueue.bindRecovery?.bind(agent.promoteQueue);
         if (!bind || !job.lease) throw new Error('Durable async share preparation requires a leased recovery queue');
