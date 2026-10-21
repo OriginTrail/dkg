@@ -69,7 +69,6 @@ export default defineConfig({
       "test/sync-work-admission.test.ts",
       "test/sync-work-admission-lifecycle.test.ts",
       ...RFC64_UNIT_TESTS,
-      "test/rfc64-private-roster-version.test.ts",
       "test/endorse.test.ts",
       "test/bounded-curator-discovery.test.ts",
       "test/discovery-peer-pagination.test.ts",
