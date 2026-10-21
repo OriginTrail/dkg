@@ -230,6 +230,12 @@ function resolveMaxConcurrentFromEnv(): number {
     'DKG_STORE_MAX_CONCURRENT',
     DEFAULT_MAX_CONCURRENT,
   );
+  // External HTTP stores can be limited by request latency before CPU capacity.
+  // Operators may qualify a larger budget without surrendering ACK/health
+  // reservations. Keep the existing CPU ceiling unless explicitly opted out.
+  if (process.env.DKG_STORE_CONCURRENCY_POLICY?.trim() === 'configured' && Number.isSafeInteger(configured)) {
+    return configured;
+  }
   // One admitted SPARQL request can use several Oxigraph/Rayon worker threads.
   // Letting an operator's stale tuning admit more store jobs than the host has
   // logical CPUs multiplies runnable work and can starve the reserved ACK lane
