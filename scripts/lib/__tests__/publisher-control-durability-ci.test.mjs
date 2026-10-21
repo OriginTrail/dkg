@@ -3,8 +3,8 @@ import fs from 'node:fs';
 import test from 'node:test';
 import { parse } from 'yaml';
 import { CI_MATRICES } from '../ci-lanes.mjs';
-import { isTestSurface, secondaryRoutes } from '../test-inventory-surface.mjs';
-import { pullRequestPlan, change } from './ci-plan-fixtures.mjs';
+import { discoverTestSurface, isTestSurface, secondaryRoutes } from '../test-inventory-surface.mjs';
+import { REPO_ROOT, pullRequestPlan, change } from './ci-plan-fixtures.mjs';
 
 const parent = 'scripts/repro/publisher-live-control-restart.mts';
 const worker = 'scripts/repro/publisher-live-control-worker.mts';
@@ -36,8 +36,10 @@ test('publisher campaign inputs and its runtime select the required CLI lane', (
 });
 
 test('publisher campaign is discoverable with an explicit required native execution route', () => {
-  assert.equal(isTestSurface(parent), true);
+  assert.equal(isTestSurface(parent), false, 'campaign knowledge belongs to standalone inventory policy');
   assert.equal(isTestSurface(worker), false, 'a disposable worker is not a second campaign');
+  const discovered = discoverTestSurface(REPO_ROOT, ['scripts/repro']);
+  assert.deepEqual(discovered, [parent]);
   const registrations = JSON.parse(read('test-policy/test-routes.json'));
   const route = registrations.find(({ pattern }) => pattern === parent);
   assert.ok(route);
@@ -46,4 +48,7 @@ test('publisher campaign is discoverable with an explicit required native execut
   assert.match(route.layer, /process/);
   assert.ok(route.prerequisites.length > 0);
   assert.equal(secondaryRoutes([parent], [route]).get(parent).command, command);
+  const withoutRoute = secondaryRoutes(discovered, []);
+  assert.deepEqual(discovered.filter(file => !withoutRoute.has(file)), [parent],
+    'removing the route must leave an unowned discovered campaign');
 });
