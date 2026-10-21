@@ -139,7 +139,7 @@ import {
   FileWorkspacePublicSnapshotStore,
   parseWorkspacePublicSnapshotNQuads,
   type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
-  type PromoteTerminalJobClearer, type TerminalJobClearOutcome,
+  type PromoteTerminalJobClearer, type PromoteShareReconciler, type TerminalJobClearOutcome,
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
@@ -4350,11 +4350,8 @@ export class DKGAgent extends DKGAgentBase {
 
       // ── Async promote (RFC: docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md) ──
       //
-      // These five methods are thin pass-throughs to the queue. The
-      // worker that actually drains the queue lives in the daemon (PR
-      // #3); on this surface we only enqueue, inspect, cancel, and
-      // recover. No memoryGraphChanged event is emitted at enqueue time
-      // — emission happens when the worker reports success.
+      // Queue access only; the daemon worker executes shares and emits memory changes.
+      // Reconciliation reads persisted completion evidence without admitting work.
       async promoteAsync(
         contextGraphId: string,
         name: string,
@@ -4376,6 +4373,9 @@ export class DKGAgent extends DKGAgentBase {
       },
       async getPromoteAsyncStatus(jobId: string): Promise<PromoteJob | null> {
         return agent.promoteQueue.getStatus(jobId);
+      },
+      async reconcileShare(input: import('@origintrail-official/dkg-publisher').ShareReconciliationInput) {
+        return agent.promoteQueue.reconcileShare(input);
       },
       async listPromoteAsyncJobs(filter?: PromoteListFilter): Promise<PromoteJob[]> {
         return agent.promoteQueue.list(filter);
@@ -4406,7 +4406,7 @@ export class DKGAgent extends DKGAgentBase {
    * `recordCommitMarker` / `recoverOnStartup`) without the assertion
    * subsurface having to leak those methods to user-facing callers.
    */
-  get promoteQueue(): AsyncPromoteQueue & PromoteTerminalJobClearer {
+  get promoteQueue(): AsyncPromoteQueue & PromoteTerminalJobClearer & PromoteShareReconciler {
     if (!this._promoteQueue) {
       this._promoteQueue = new TripleStoreAsyncPromoteQueue(this.store, this._promoteQueueConfig ?? {});
     }

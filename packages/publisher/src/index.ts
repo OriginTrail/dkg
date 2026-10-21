@@ -465,7 +465,7 @@ export {
   type BoundPromoteJob,
   type PromoteResult,
   type PromoteStats,
-  type PromoteTerminalJobClearer,
+  type PromoteTerminalJobClearer, type PromoteShareReconciler,
 } from './async-promote-queue.js';
 export {
   createPromotePostCommitFailure,
@@ -562,3 +562,6 @@ export { PromoteAdmissionError, type PromoteAdmissionPhase, type PromoteAdmissio
 export { assertionLifecycleWriteLockKey } from './store-write-locks.js';
 
 export { assertionLifecycleAuthorCandidates, readAssertionLifecycleCandidates } from './assertion-lifecycle-record.js';
+
+export { readShareCompletionEvidence, tryCreateShareCompletionEvidence, shareEvidenceMatchesRequest, type ShareCompletionEvidence } from './share-completion-evidence.js';
+export { validateShareReconciliationInput, type ShareReconciliationInput, type ShareReconciliationResult } from './share-reconciliation.js';

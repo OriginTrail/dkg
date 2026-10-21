@@ -1,3 +1,4 @@
+import { assertPromoteSeal } from './assertion-promote-seal.js';
 import { certifyPromoteNoEffectRejection } from './promote-no-effect-rejection.js';
 import { createPromoteOwnershipReader, type PromoteOwnershipReader } from './async-promote-ownership.js';
 import { assertionLifecycleWriteLockKey, writeLocksForStore } from './store-write-locks.js';
@@ -7,6 +8,7 @@ import { readAssertionPromoteEvidence, parsePromoteLifecycleLiteral } from './as
 import { confirmedVmSupersedesSeal, verifyCompletedLegacyPromote } from './completed-legacy-promote.js';
 import { snapshotPublisherPromoteOptions, type PublisherAssertionPromoteOptions, type AssertionPromoteResult } from './assertion-promote-types.js';
 export type { PublisherAssertionPromoteOptions } from './assertion-promote-types.js';
+import { tryCreateShareCompletionEvidence } from './share-completion-evidence.js';
 import { preparePromoteRecoveryBinding, assertPromoteRecoveryBinding, type PromoteRecoveryAdmission } from './promote-recovery-binding.js';
 import { throwIfCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
 import { readAssertionLifecycleRecord, type AssertionLifecycleRecord } from './assertion-lifecycle-record.js';
@@ -8247,7 +8249,7 @@ export class DKGPublisher implements Publisher {
     return this.withAssertionLifecycleWriteLock(request.contextGraphId, request.assertionName,
       request.agentAddress, request.subGraphName, async () => {
         await assertPromoteRecoveryBinding(this.store, request.contextGraphId, request.assertionName,
-          request.agentAddress, { subGraphName: request.subGraphName, recoveryBinding: request.recoveryBinding },
+          request.agentAddress, { subGraphName: request.subGraphName, authorAgentAddress: request.authorAgentAddress, recoveryBinding: request.recoveryBinding },
           () => this.clearSwmShareCompleteUnlocked(request.contextGraphId, request.assertionName, request.agentAddress, request.subGraphName), 'admission');
         return admit();
       });
@@ -8343,23 +8345,7 @@ export class DKGPublisher implements Publisher {
       this.store, contextGraphId, name, agentAddress, opts?.subGraphName,
     );
     const seal = evidence.seal;
-    if (!seal) {
-      throw Object.assign(
-        new Error('Graph-scoped KA sharing requires a finalized v2 assertion seal'),
-        { code: 'UNSEALED_SHARE_BLOCKED' },
-      );
-    }
-    if (seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
-      throw new LegacyKnowledgeAssetReadOnlyError();
-    }
-    if (
-      !seal.kaUal
-      || !seal.assertionVersion
-      || seal.publicTripleCount === undefined
-      || seal.privateTripleCount === undefined
-    ) {
-      throw new Error(`Graph-scoped assertion seal for <${sealSubject}> is incomplete`);
-    }
+    assertPromoteSeal(seal, sealSubject, opts?.authorAgentAddress);
     const contentScope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
     const immutablePrivateQuads = await tagPromoteStep(
       'knowledgeAssetPrivateQuads',
@@ -8650,6 +8636,7 @@ export class DKGPublisher implements Publisher {
       await maintainMarker(false);
       throw error;
     }
+    const shareEvidence = tryCreateShareCompletionEvidence(contextGraphId, name, agentAddress, opts?.subGraphName, seal, operationId);
     const normalizedQuads = validatedPayload.normalizedPublicQuads;
     const normalizedPrivateQuads = validatedPayload.normalizedPrivateQuads;
     const promotedPrivateRoot = validatedPayload.privateMerkleRoot;
@@ -8971,6 +8958,7 @@ export class DKGPublisher implements Publisher {
       gossipMessage: gossipPayload?.message,
       promotedAllRoots: true,
       shareOperationId: operationId,
+      ...(shareEvidence ? { shareEvidence } : {}),
     };
   }
 
