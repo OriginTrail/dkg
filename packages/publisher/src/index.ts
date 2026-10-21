@@ -570,3 +570,5 @@ export { assertionLifecycleAuthorCandidates, readAssertionLifecycleCandidates } 
 
 export { readShareCompletionEvidence, tryCreateShareCompletionEvidence, shareEvidenceMatchesRequest, type ShareCompletionEvidence } from './share-completion-evidence.js';
 export { validateShareReconciliationInput, type ShareReconciliationInput, type ShareReconciliationResult } from './share-reconciliation.js';
+
+export { confirmedGraphKnowledgeAssetProof, sameConfirmedGraphKnowledgeAssetProof, reconcileConfirmedGraphKnowledgeAssetMetadata, type ConfirmedGraphKnowledgeAssetProof } from './confirmed-metadata-reconciliation.js';

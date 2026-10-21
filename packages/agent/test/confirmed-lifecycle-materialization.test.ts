@@ -6,7 +6,9 @@ import { assertionLifecycleUri, contextGraphMetaUri, TypedEventBus, encodeAccess
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { AccessHandler, readConfirmedGraphKnowledgeAssetMetadataEnvelope, readLocallyTrustedKnowledgeAssetControlEnvelope, replaceLocallyTrustedKnowledgeAssetControlEnvelope, overlayLocallyTrustedKnowledgeAssetControls } from '@origintrail-official/dkg-publisher';
 import { resolveConfirmedGraphScopedVm } from '../src/confirmed-graph-scoped-vm-resolver.js';
-import { getBytes } from 'ethers';
+import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import { recoverReceiptBackedGraphScopedEvidence } from '../src/receipt-backed-graph-scoped-evidence.js';
+import { getBytes, hexlify } from 'ethers';
 import * as materialization from '../src/named-ka-vm-lifecycle-materialization.js';
 import { decodeLifecycleRepairJournal, encodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
 import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
@@ -216,4 +218,48 @@ it('retains a typed immutable proof across admission/retries and rejects copied 
   const wire = materialization.lifecycleMaterializationWire(model);
   expect(wire).not.toHaveProperty('proof'); expect(wire.publicQuads).toBe(model.publicQuads);
   expect(() => materialization.normalizeLifecycleMaterialization({ ...wire, publicQuads: [] }, input)).toThrow('public recovery snapshot');
+});
+
+it('restores admitted receipt provenance over exact receiptless content before durable retirement', async () => {
+  const { owner, input, store, path, graph, journal } = await fixture(true);
+  const dkg = 'http://dkg.io/ontology/', meta = contextGraphMetaUri(input.contextGraphId);
+  const receiptless = input.materialization!.metadataQuads.filter(q => q.predicate !== dkg + 'transactionHash')
+    .map(q => q.predicate === dkg + 'confirmationKind' ? { ...q, object: '"finalized-materialization"' } : q);
+  await store.insert([...receiptless, ...input.materialization!.publicQuads.map(q => ({ ...q, graph })),
+    { subject: input.publishedUal, predicate: 'urn:receipt-note', object: '"preserve"', graph: meta }]);
+  expect(await owner.submit(input)).toBe('repaired'); expect(await journal()).toHaveLength(0);
+  const reopened = new OxigraphStore(path); cleanups.push(() => reopened.close());
+  const resolved = await resolveConfirmedGraphScopedVm(reopened, { contextGraphId: input.contextGraphId,
+    ual: input.materialization!.kaUal, merkleRoot: getBytes(input.merkleRoot), kaId: input.packedKaId,
+    batchId: input.packedKaId, assertionVersion: BigInt(input.assertionVersion) });
+  expect(resolved).toMatchObject({ status: 'verified', envelope: { transactionHash: '0x' + '34'.repeat(32) } });
+  if (resolved.status !== 'verified') throw new Error('verified materialization required');
+  const resolveReceipt = vi.fn(async () => ({ status: 'confirmed', receipt: {
+    txHash: '0x' + '34'.repeat(32), blockNumber: 12, blockHash: '0x' + '56'.repeat(32), txIndex: 3,
+    merkleRoot: getBytes(input.merkleRoot), publisherAddress: input.agentAddress,
+    kaId: input.packedKaId, batchId: input.packedKaId, startKAId: input.packedKaId, endKAId: input.packedKaId,
+  } }));
+  const recovered = await recoverReceiptBackedGraphScopedEvidence({ store: reopened,
+    chain: { chainId: 'mock:31337', getMerkleRootCount: async () => 1n,
+      resolveCanonicalFinalizationReceipt: resolveReceipt } as unknown as ChainAdapter,
+    contextGraphId: input.contextGraphId, scope: { ual: input.publishedUal, assertionVersion: '1' },
+    head: { kaUal: input.publishedUal, assertionVersion: '1', publicQuadsDigest: resolved.publicQuadsDigest,
+      publicTripleCount: resolved.envelope.publicTripleCount, privateTripleCount: resolved.envelope.privateTripleCount,
+      privateMerkleRoot: resolved.envelope.privateMerkleRoot && hexlify(resolved.envelope.privateMerkleRoot) }, merkleRoot: getBytes(input.merkleRoot),
+    publisherAddress: input.agentAddress, kaId: input.packedKaId, batchId: input.packedKaId, onChainContextGraphId: 1n });
+  expect(recovered).toMatchObject({ status: 'recovered', evidence: { transactionHash: '0x' + '34'.repeat(32) } });
+  expect(resolveReceipt).toHaveBeenCalledExactlyOnceWith('0x' + '34'.repeat(32));
+  expect(await reopened.query(`ASK { GRAPH <${meta}> { <${input.publishedUal}> <${dkg}confirmationKind> "transaction"; <urn:receipt-note> "preserve"; <${dkg}accessPolicy> "allowList" } }`)).toMatchObject({ value: true });
+});
+
+it('propagates exact-content store failures without replacing or retiring evidence', async () => {
+  const { owner, input, store, journal, advance } = await fixture();
+  const query = store.query.bind(store), update = vi.spyOn(store, 'atomicUpdate');
+  const fault = vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+    if (options?.source === 'agent.publish.confirmedLifecyclePayload') throw new Error('payload store unavailable');
+    return query(sparql, options);
+  });
+  expect(await owner.submit(input)).toBe('pending'); expect(await journal()).toHaveLength(1);
+  expect(update).not.toHaveBeenCalled(); fault.mockRestore(); advance(); await owner.runDue();
+  expect(await journal()).toHaveLength(0);
 });
