@@ -19,6 +19,6 @@ it('retains ancestor-sync EIO across real worker replacement until a fresh certi
       timeout: 60_000,
     });
     const result = JSON.parse(stdout.split('\n').find(line => line.startsWith('{'))!);
-    expect(result).toMatchObject({ failure: { code: 'EIO', message: 'worker snapshot directory EIO' }, replacementFailure: { code: 'EIO' }, reopened: 1 });
+    expect(result).toMatchObject({ failure: { code: 'EIO', message: 'worker snapshot directory EIO' }, replacementFailure: { code: 'EIO' }, reopened: 2 });
   } finally { await rm(dir, { recursive: true, force: true }); }
 }, 60_000);

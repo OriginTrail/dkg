@@ -14,10 +14,7 @@
  * calls out to, so the options object handed to the supervisor can be asserted
  * directly.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { startOxigraphServer, resolveOxigraphBinary } = vi.hoisted(() => ({
   startOxigraphServer: vi.fn(),
@@ -64,9 +61,7 @@ function startedWith(): Record<string, unknown> {
 }
 
 describe('startManagedOxigraph launch-option forwarding', () => {
-  let dataDir: string;
-  beforeEach(async () => {
-    dataDir = await mkdtemp(join(tmpdir(), 'dkg-oxigraph-start-options-'));
+  beforeEach(() => {
     vi.clearAllMocks();
     resolveOxigraphBinary.mockResolvedValue({
       path: '/nonexistent/oxigraph',
@@ -78,8 +73,6 @@ describe('startManagedOxigraph launch-option forwarding', () => {
     );
   });
 
-  afterEach(async () => { await rm(dataDir, { recursive: true, force: true }); });
-
   it('hands the operator WAL threshold to the supervisor unchanged and says the reopen is on', async () => {
     const lines: string[] = [];
     const result = await startManagedOxigraph({
@@ -89,7 +82,7 @@ describe('startManagedOxigraph launch-option forwarding', () => {
           options: { walRestartThresholdBytes: 2 * 1024 ** 3 },
         },
       },
-      dataDir,
+      dataDir: '/data',
       platform: 'linux',
       log: line => lines.push(line),
     });
@@ -106,7 +99,7 @@ describe('startManagedOxigraph launch-option forwarding', () => {
     const lines: string[] = [];
     await startManagedOxigraph({
       config: { store: { backend: MANAGED_OXIGRAPH_BACKEND } },
-      dataDir,
+      dataDir: '/data',
       platform: 'linux',
       log: line => lines.push(line),
     });
@@ -135,7 +128,7 @@ describe('startManagedOxigraph launch-option forwarding', () => {
           options: { walRestartThresholdBytes: configured },
         },
       },
-      dataDir,
+      dataDir: '/data',
       platform: 'linux',
       log: line => lines.push(line),
     });

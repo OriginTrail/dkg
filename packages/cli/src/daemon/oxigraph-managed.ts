@@ -281,10 +281,6 @@ export interface ManagedOxigraphPlan {
   sharedMemoryPublicSnapshotStorage?: ManagedSnapshotStorageConfig;
 }
 
-function resolveManagedOxigraphLocation(options: Record<string, unknown>, dataDir: string): string {
-  return typeof options.location === 'string' && options.location.trim() ? options.location : join(dataDir, 'oxigraph-data');
-}
-
 /**
  * Pure: decide how to launch the managed server from config, or return
  * null if this node isn't using `oxigraph-server`. Does no I/O.
@@ -319,7 +315,8 @@ export function planManagedOxigraph(
     highMiB: options.memoryHighMiB,
     maxMiB: options.memoryMaxMiB,
   });
-  const location = resolveManagedOxigraphLocation(options, dataDir);
+  const location = typeof options.location === 'string' && options.location.trim()
+    ? options.location : join(dataDir, 'oxigraph-data');
   // Honour an operator `cacheDir` override (preserved by the wizard/flag flow)
   // the same way `location` is; fall back to the default binary cache dir.
   const cacheDir = resolveManagedOxigraphCacheDir(options, dataDir);
@@ -409,9 +406,6 @@ export async function startManagedOxigraph(
   if (cacheDir === null) return null;
   const log = opts.log ?? (() => {});
 
-  // Capture ancestry before the binary cache can create a shared parent.
-  const directoryOwner = new DurableDirectory(resolveManagedOxigraphLocation(opts.config.store?.options ?? {}, opts.dataDir), { platform: opts.platform });
-  await directoryOwner.create();
   const binary = await resolveOxigraphBinary({
     cacheDir,
     platform: opts.platform,
@@ -429,6 +423,7 @@ export async function startManagedOxigraph(
     binary.version,
   );
   if (plan === null) return null;
+  const directoryOwner = new DurableDirectory(plan.location, { platform: opts.platform });
 
   // The maintenance reopen is opt-in, so say which way this node runs when
   // the operator touched the option: on at which size, or ignored and why.

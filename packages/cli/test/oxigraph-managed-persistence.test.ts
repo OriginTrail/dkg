@@ -33,6 +33,7 @@ it('reconstructs adoption ancestry after managed owner replacement and certifies
     dataDir, log: () => {}, readyTimeoutMs: 30_000,
   });
   const update = 'INSERT DATA { GRAPH <urn:certified> { <urn:asset> <urn:value> "survives SIGKILL" } }';
+  const sentinel = 'ASK { GRAPH <urn:certified> { <urn:after-replacement> <urn:value> "fresh mutation" } }';
   let managed: Awaited<ReturnType<typeof start>> = null, store: TripleStore | undefined;
   try {
     managed = await start(); expect(managed).not.toBeNull();
@@ -50,7 +51,8 @@ it('reconstructs adoption ancestry after managed owner replacement and certifies
     managed = await start(); expect(managed).not.toBeNull();
     store = await createTripleStore(managed!.storeConfig);
     const commit = store.commitment!.capture();
-    await store.update(update);
+    await expect(store.query(sentinel)).resolves.toMatchObject({ type: 'boolean', value: false });
+    await store.update('INSERT DATA { GRAPH <urn:certified> { <urn:after-replacement> <urn:value> "fresh mutation" } }');
     if (process.platform !== 'win32') await expect(commit()).rejects.toMatchObject({ code: 'EIO' });
     directorySync.fail = ''; directorySync.synced = [];
     await commit();
@@ -66,6 +68,7 @@ it('reconstructs adoption ancestry after managed owner replacement and certifies
     finally { unsubscribe(); }
     expect(phases).toContain('signalled'); expect(phases).toContain('terminated');
     // The production supervisor verified ownership and sent SIGKILL; no graceful close since certification.
+    await expect(store.query(sentinel)).resolves.toMatchObject({ type: 'boolean', value: true });
     await expect(store.query('ASK { GRAPH <urn:certified> { <urn:asset> <urn:value> "survives SIGKILL" } }'))
       .resolves.toMatchObject({ type: 'boolean', value: true });
   } finally {
