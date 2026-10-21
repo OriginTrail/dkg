@@ -42,6 +42,7 @@ async function stack() {
 describe('publication lifecycle projection reuse', () => {
   it('writes required VM stamps and clears the share marker without reloading unchanged authority', async () => {
     const { raw, store, projection, lifecycle, cached } = await stack();
+    await raw.insert([{ graph: GRAPH, subject: SUBJECT, predicate: MARKER, object: '"true"' }]);
     const revision = projection.readContextGraphAuthorityFactsRevision(CG);
     const query = vi.spyOn(raw, 'query');
     await lifecycle({ contextGraphId: CG, agentAddress: AUTHOR, name: 'asset',
@@ -53,6 +54,8 @@ describe('publication lifecycle projection reuse', () => {
     expect(query).not.toHaveBeenCalled();
     expect(await raw.query(`ASK { GRAPH <${GRAPH}> { <${SUBJECT}> <http://dkg.io/ontology/state> "published" } }`))
       .toEqual({ type: 'boolean', value: true });
+    expect(await raw.query(`ASK { GRAPH <${GRAPH}> { <${SUBJECT}> <${MARKER}> ?value } }`))
+      .toEqual({ type: 'boolean', value: false });
   });
   it('invalidates real roster and delegation removals even on a lifecycle-shaped subject', async () => {
     const { raw, store, projection } = await stack();

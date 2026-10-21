@@ -1,6 +1,6 @@
-# Issue 3252 — scope post-publication cleanup observations
+# Issue 3252 — preserve authority caches during publication
 
-Status: ready for implementation. Owner: Codex. Base: `testnet-canary` at `abb89dff7`; branch `codex/3252-publish-store-tail`. User authorized investigation, implementation, PR/review and live testnet validation; no merge.
+Status: implemented; bounded live validation completed; PR review in progress. Owner: Codex. Base: `testnet-canary` at `abb89dff7`; branch `codex/3252-publish-store-tail`. User authorized investigation, implementation, PR/review and live testnet validation; no merge.
 
 ## Executive summary
 
@@ -51,7 +51,7 @@ Medium risk: the optimization changes cache/authority fencing. Self-review (not 
 | `.tmp/3252/` | This chat, isolated home and raw evidence | Stop owned processes, reconcile jobs/transactions, release matching claim; preserve compact evidence |
 | `/tmp/dkg-4582-*.log` | This chat, build/test logs | Retain relevant evidence through review |
 
-Native Node 22.23.3 arm64, pinned pnpm install, runtime build and SQLite construction passed on the unchanged base. No wallets claimed yet. Next: failing-before authority invalidation reproduction, then implementation.
+Initial checkpoint (before implementation): native Node 22.23.3 arm64, pinned pnpm install, runtime build and SQLite construction passed on the unchanged base. No wallets were claimed at that point.
 
 ## Implementation and validation update
 
@@ -61,7 +61,7 @@ Executed: 78 publisher cleanup/retirement cases; 188 agent cases across cleanup,
 
 Native runtime build/types, lint, source-size guard and test inventory pass. Source budgets are lowered only for the two changed files whose nearby comments were condensed; unrelated baseline changes from the generator were discarded.
 
-C4 pending: the attempted claim acquired nothing. Both prepared batches are held by other active tasks. No wallet files were copied, no live daemon launched and no testnet transactions sent. User was asked whether another pool exists; otherwise retry ownership after other work. This is a live-validation prerequisite, not a product failure.
+Initial C4 checkpoint (superseded below): the attempted claim acquired nothing. Both prepared batches are held by other active tasks. No wallet files were copied, no live daemon launched and no testnet transactions sent. User was asked whether another pool exists; otherwise retry ownership after other work. This is a live-validation prerequisite, not a product failure.
 
 Owned `dkg-3252-blazegraph` container (`127.0.0.1:19452`, pinned image digest recorded in report) supplies disposable isolated test namespaces. Tests dispose their namespaces; stop/remove this container after validation/review. An accidentally selected CLI default test config started a local Hardhat fixture; its owned process tree was stopped and the intended unit config rerun successfully. No real keys or network transactions were involved.
 
@@ -71,4 +71,14 @@ Further configuration inspection found `gc.finalizedCleanupEnabled` defaults to 
 
 The default path also unnecessarily discards the active CG projection: the existing composed lifecycle writer reports exact subject/predicate removals, but `invalidateGraph` invalidates its whole CG for every removal. Required VM stamps and `swmShareComplete` removal have non-projection predicates. Extend the same cache-preservation PR to retain a projection only when a removal names a safe non-CG subject and a safe predicate outside both projection-record and recipient-authority predicate sets. Keep whole-graph/whole-subject removal, unsafe terms, exact CG subject (any predicate, because absence proofs read any fact), policy/roster/delegation/subgraph predicates, and generic UPDATE conservative. No mutation is skipped.
 
-Pre-implementation self-review caught why subject-only filtering is unsafe: delegation reads can select any subject, and absence proofs inspect any predicate on the exact CG subject. The proposed predicate-and-subject proof preserves both. Add failing-before actual lifecycle writer/marker-clear checks, real authority change negatives, unknown-term negatives, uncertain outcome and both backend coverage. Reassess PR size as one cohesive cache-invalidation fix. Live validation remains required and batch-blocked.
+Pre-implementation self-review caught why subject-only filtering is unsafe: delegation reads can select any subject, and absence proofs inspect any predicate on the exact CG subject. The proposed predicate-and-subject proof preserves both. Add failing-before actual lifecycle writer/marker-clear checks, real authority change negatives, unknown-term negatives, uncertain outcome and both backend coverage. Reassess PR size as one cohesive cache-invalidation fix. Live validation was still required and batch-blocked at this design checkpoint.
+
+## Final validation and plan reconciliation
+
+Both cache-preservation paths are implemented. The default-path extension passes 15 new cases on Oxigraph and Blazegraph, including real marker removal, CG-subject absence proofs, delegation/roster changes and uncertain writes. The combined focused agent run passes 257 cases. Both unchanged-base regressions failed before their fixes.
+
+Batch 1 subsequently became available and was claimed before credential use. C4 completed as a bounded live Base Sepolia campaign at runtime commit `63a3342fcb99323a31262ee61429d7a2acbf94b7`: six publications with finalized cleanup enabled, then six with it disabled after a restart. Each finalized without retries, with successful receipts, required lifecycle stamps and exact RDF readback. See the report for receipt links, scope and cleanup status.
+
+Measurement refinement: repeated matched control/candidate experiments were executed against both real store backends in the targeted harness, rather than alternating implementations inside the live daemon. The live daemon used observational wrappers to confirm actual optimized-path execution, with all outcomes recorded; no live speedup is inferred. This isolates invalidation cost without confounding it with public RPC timing. It is narrower than the original full workload acceptance and leaves #3252 open. The observed catalog status has current authority, no missing rows and matching inventory digests, but differing head digests/row counts; broad catalog convergence remains unproven.
+
+The final change remains one cohesive cache-invalidation fix. Approximately 500 authored code/test lines plus plan/report evidence cover two related publication paths, shared construction and real-store correctness tests. C5: PR #3397 targets testnet-canary; first revision received a completed no-issues remote review. The substantive default-path extension receives a fresh request and bounded observation window. No merge is authorized.

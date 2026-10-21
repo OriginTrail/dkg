@@ -4,7 +4,7 @@ import { planStorageAckCopyCleanup, type StorageAckCopyCleanupWriter } from '@or
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { ObservedStoreMutation } from './observed-store-mutation.js';
 
-/** Compose over configured decorators; never unwrap an arbitrary store or trust SQL scope hints. */
+/** Compose over configured decorators; never unwrap an arbitrary store or trust SPARQL scope hints. */
 export function createStorageAckCopyCleanupWriter(
   store: TripleStore, executeMutation: ObservedStoreMutation,
 ): StorageAckCopyCleanupWriter {
