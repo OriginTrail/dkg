@@ -158,6 +158,34 @@ describe('generation-bound diagnostic history', () => {
     watcher.stop();
   });
 
+  it('keeps grace active when diagnostic rounding reaches the budget before raw time does', async () => {
+    vi.useFakeTimers();
+    let now = 100;
+    // This seam controls only the monotonic clock, not HTTP or a daemon service.
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const observations: LivenessObservation[] = [];
+    const summaries: LivenessRestartSummary[] = [];
+    const watcher = startLivenessWatcher({ port: 1, intervalMs: 10, shutdownGraceMs: 30,
+      consecutiveFailuresToKill: 1, isShuttingDown: () => true, probe: async () => failure(),
+      onObservation: (item) => observations.push(item), onUnresponsive: (item) => summaries.push(item) });
+    try {
+      await vi.advanceTimersByTimeAsync(10);
+      now = 129.6;
+      await vi.advanceTimersByTimeAsync(10);
+      expect(observations.at(-1)).toMatchObject({ consecutiveFailures: 0,
+        shutdownGrace: { state: 'within_grace', elapsedMs: 30, budgetMs: 30 } });
+      expect(summaries).toHaveLength(0);
+      now = 130;
+      await vi.advanceTimersByTimeAsync(10);
+      expect(observations.at(-1)).toMatchObject({ consecutiveFailures: 1,
+        shutdownGrace: { state: 'expired', elapsedMs: 30 } });
+      expect(summaries).toHaveLength(1);
+    } finally {
+      watcher.stop();
+      clock.mockRestore();
+    }
+  });
+
   it('stopping during shutdown detection prevents stale failure or kill callbacks', async () => {
     vi.useFakeTimers();
     let release!: (value: boolean) => void;
