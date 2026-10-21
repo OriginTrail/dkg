@@ -24,6 +24,7 @@ export default defineConfig({
           'test/public-snapshot-job.test.ts',
           'test/core-chain-cache-config.test.ts',
           'test/mcp-config-document.test.ts',
+          'test/mcp-launch-command.test.ts',
           'test/mcp-physical-config.test.ts',
           'test/mcp-config-metadata.test.ts',
           'test/api-client.test.ts',
