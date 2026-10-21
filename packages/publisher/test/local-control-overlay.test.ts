@@ -6,6 +6,7 @@ import {
   replaceLocallyTrustedKnowledgeAssetControls,
   readLocallyTrustedKnowledgeAssetControlEnvelope,
   toHex,
+  generateKCMetadata,
 } from '../src/index.js';
 
 const UAL = 'did:dkg:evm:31337/0x70997970c51812dc3a010c7d01b50e0d17dc79c8/7';
@@ -29,6 +30,25 @@ function incomingMetadata(): Quad[] {
 }
 
 describe('locally trusted KA control overlay', () => {
+  it('round-trips escaped metadata and typed control envelopes through the same RDF encoding', async () => {
+    const store = new OxigraphStore();
+    const controls = { accessPolicy: 'allowList' as const, allowedPeers: ['peer"a\\b\n\r☺'], publisherPeerId: 'publisher"c\\d\n\r' };
+    try {
+      const metadataRows = generateKCMetadata({ ual: UAL, contextGraphId: 'local-control-overlay', merkleRoot: ROOT,
+        timestamp: new Date('2026-10-21T00:00:00Z'), ...controls }, []);
+      await store.insert(metadataRows);
+      await replaceLocallyTrustedKnowledgeAssetControlEnvelope(store, UAL, { assertionVersion: '1', merkleRoot: ROOT }, controls);
+      const selected = await overlayLocallyTrustedKnowledgeAssetControls(store, META_GRAPH, UAL, incomingMetadata());
+      for (const predicate of ['accessPolicy', 'allowedPeer', 'publisherPeerId']) {
+        expect(selected.filter(q => q.predicate === DKG + predicate).map(q => q.object))
+          .toEqual(metadataRows.filter(q => q.predicate === DKG + predicate).map(q => q.object));
+      }
+      expect(await readLocallyTrustedKnowledgeAssetControlEnvelope(store, META_GRAPH, UAL, incomingMetadata())).toEqual(controls);
+      expect((await store.query(`SELECT ?publisher WHERE { GRAPH <${META_GRAPH}> { <${UAL}> <${DKG}publisherPeerId> ?publisher } }`)))
+        .toMatchObject({ type: 'bindings', bindings: [{ publisher: metadataRows.find(q => q.predicate === DKG + 'publisherPeerId')!.object }] });
+    } finally { await store.close(); }
+  });
+
   it('keeps incoming metadata when there is no matching local sidecar', async () => {
     const store = new OxigraphStore();
     const incoming = incomingMetadata();

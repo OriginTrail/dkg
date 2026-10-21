@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
+import { rdfLiteralLexicalValue, assertSafeGraphIriForSparql, mq, lit, intLit } from './metadata-rdf-terms.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from '@origintrail-official/dkg-storage';
 import { createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 const DKG = 'http://dkg.io/ontology/';
-const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const toHex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
 const LOCAL_TRUSTED_KA_CONTROL_PREDICATES = new Set([
   `${DKG}accessPolicy`,
@@ -29,40 +29,6 @@ export interface LocallyTrustedKnowledgeAssetControlEnvelope {
   accessPolicy: 'public' | 'ownerOnly' | 'allowList';
   allowedPeers: string[];
   publisherPeerId: string;
-}
-
-function rdfLiteralLexicalValue(value: string): string | undefined {
-  const match = /^("(?:\\.|[^"\\])*")/.exec(value);
-  if (!match) return undefined;
-  try {
-    return JSON.parse(match[1]);
-  } catch {
-    return undefined;
-  }
-}
-
-function assertSafeGraphIriForSparql(graphIri: string): void {
-  // GRAPH <...> must not allow delimiter/control chars that can alter query structure.
-  if (/[<>"{}|^`\\\s]/.test(graphIri)) {
-    throw new Error(`Unsafe graph IRI for SPARQL query: "${graphIri}"`);
-  }
-}
-
-function mq(s: string, p: string, o: string, g: string): Quad {
-  return { subject: s, predicate: p, object: o, graph: g };
-}
-
-function lit(val: string): string {
-  const escaped = val
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, '\\n')
-    .replace(/\r/g, '\\r');
-  return `"${escaped}"`;
-}
-
-function intLit(val: number | bigint): string {
-  return `"${val}"^^<${XSD}integer>`;
 }
 
 function readControlAnchor(
@@ -389,8 +355,6 @@ function validateLocallyTrustedControlRows(rows: readonly Quad[]): void {
     throw new Error('Locally trusted KA controls have an invalid allowedPeer envelope');
   }
 }
-
-
 
 /** Caller holds the KA materialization lock. Select once, preserving exact-anchor local ownership. */
 export async function reconcileConfirmedKnowledgeAssetControls(store: TripleStore, input: {

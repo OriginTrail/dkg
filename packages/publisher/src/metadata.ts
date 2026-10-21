@@ -1,3 +1,4 @@
+import { rdfLiteralLexicalValue, assertSafeGraphIriForSparql, mq, lit, intLit } from './metadata-rdf-terms.js';
 export { replaceLocallyTrustedKnowledgeAssetControls, overlaySelectedKnowledgeAssetControls, replaceLocallyTrustedKnowledgeAssetControlEnvelope, readLocallyTrustedKnowledgeAssetControls, overlayLocallyTrustedKnowledgeAssetControls, readLocallyTrustedKnowledgeAssetControlEnvelope, type LocallyTrustedKnowledgeAssetControlAnchor, type LocallyTrustedKnowledgeAssetControlEnvelope } from './knowledge-asset-controls.js';
 import { readStoredAssertionVersions } from './materialization-assertion-version.js';
 import { formatUncheckedWorkspaceOperationSubject } from './workspace-metadata-subjects.js';
@@ -192,13 +193,6 @@ function assertSafeContextGraphIdForSparql(contextGraphId: string): void {
 function assertSafeSubGraphNameForSparql(subGraphName: string): void {
   const v = validateSubGraphName(subGraphName);
   if (!v.valid) throw new Error(`Unsafe sub-graph name for SPARQL: ${v.reason}`);
-}
-
-function assertSafeGraphIriForSparql(graphIri: string): void {
-  // GRAPH <...> must not allow delimiter/control chars that can alter query structure.
-  if (/[<>"{}|^`\\\s]/.test(graphIri)) {
-    throw new Error(`Unsafe graph IRI for SPARQL query: "${graphIri}"`);
-  }
 }
 
 /**
@@ -420,16 +414,6 @@ export type ConfirmedGraphKnowledgeAssetMetadataRead =
   | { state: 'absent' }
   | { state: 'invalid' }
   | { state: 'confirmed'; envelope: ConfirmedGraphKnowledgeAssetMetadataEnvelope };
-
-function rdfLiteralLexicalValue(value: string): string | undefined {
-  const match = /^("(?:\\.|[^"\\])*")/.exec(value);
-  if (!match) return undefined;
-  try {
-    return JSON.parse(match[1]);
-  } catch {
-    return undefined;
-  }
-}
 
 function canonicalMetadataObject(predicate: string, value: string): string {
   const literal = rdfLiteralLexicalValue(value);
@@ -661,23 +645,6 @@ export function buildDeterministicTokenRows(
     );
   }
   return rows;
-}
-
-function mq(s: string, p: string, o: string, g: string): Quad {
-  return { subject: s, predicate: p, object: o, graph: g };
-}
-
-function lit(val: string): string {
-  const escaped = val
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, '\\n')
-    .replace(/\r/g, '\\r');
-  return `"${escaped}"`;
-}
-
-function intLit(val: number | bigint): string {
-  return `"${val}"^^<${XSD}integer>`;
 }
 
 /**
