@@ -557,6 +557,7 @@ export { overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1 } from './grap
 export { withMaterializationLocks } from './materialization-lock-group.js';
 export { readCurrentAssertionVersion } from './materialization-assertion-version.js';
 
+export { classifyQueuedSharePreparation } from './bind-promote-recovery.js';
 export type { ACKDiagnosticSummary } from './ack-diagnostics.js';
 export type { PromoteExecutionAuthority } from './assertion-promote-types.js';
 

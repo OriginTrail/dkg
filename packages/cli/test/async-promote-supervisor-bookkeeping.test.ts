@@ -35,7 +35,7 @@ async function setup(log?: PromoteWorkerLogger) {
     .mockRejectedValueOnce(retryableBookkeepingFailure())
     .mockResolvedValue({ promotedCount: 1 });
   const supervisor = createPromoteWorkerSupervisor({
-    agent: { promoteQueue: queue, assertion: { promote } } as unknown as DKGAgent,
+    agent: { promoteQueue: queue, assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote } } as unknown as DKGAgent,
     workerConcurrency: 1,
     pollIntervalMs: 1_000_000,
     postCommitRecoveryIntervalMs: 0,

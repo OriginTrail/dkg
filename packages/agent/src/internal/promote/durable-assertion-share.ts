@@ -4,7 +4,7 @@ import { SwmCatalogAuthorityNotReady } from '../swm-inventory-write.js';
 import { commitConfirmedDurableShareInventory } from './durable-vm-share-inventory.js';
 import { attachCommittedShare } from './inventory-recovery-failure.js';
 import { createOperationContext } from '@origintrail-official/dkg-core';
-import { createPromoteRetryableFailure, UnfinishedBoundShareError } from '@origintrail-official/dkg-publisher';
+import { classifyQueuedSharePreparation, type PromoteExecutionAuthority, createPromoteRetryableFailure, UnfinishedBoundShareError } from '@origintrail-official/dkg-publisher';
 import type { DKGAgent } from '../../dkg-agent.js';
 import type { AssertionPromoteOptions } from '../../dkg-agent-types.js';
 import { prepareAssertionPromote } from './assertion-promote-precommit.js';
@@ -18,7 +18,7 @@ function assertCompatibleAcknowledgement(required: boolean, requested?: boolean)
 }
 
 async function prepareShareSeal(agent: DKGAgent, contextGraphId: string, name: string,
-  promoteAgentAddress: string, opts?: AssertionPromoteOptions, preserveOwner = false): Promise<void> {
+  promoteAgentAddress: string, opts?: AssertionPromoteOptions, preserveOwner = false, executionAuthority?: PromoteExecutionAuthority): Promise<void> {
   if (opts?.skipSeal) {
     throw Object.assign(
       new Error(
@@ -39,7 +39,7 @@ async function prepareShareSeal(agent: DKGAgent, contextGraphId: string, name: s
     await agent.prepareAtomicAssertionShare(contextGraphId, name, promoteAgentAddress, {
       subGraphName: opts?.subGraphName,
       authorAgentAddress: opts?.authorAgentAddress,
-      preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
+      preSignedAuthorAttestation: opts?.preSignedAuthorAttestation, executionAuthority,
     });
   } catch (err: any) {
     // Finalization itself owns the lock/guard, including explicit wm/finalize.
@@ -66,9 +66,9 @@ async function prepareShareSeal(agent: DKGAgent, contextGraphId: string, name: s
 }
 
 export async function prepareDurableAssertionShare(agent: DKGAgent, contextGraphId: string, name: string,
-  agentAddress: string, opts?: AssertionPromoteOptions) {
+  agentAddress: string, opts?: AssertionPromoteOptions, executionAuthority?: PromoteExecutionAuthority) {
   const storageLane = opts?.agentAddress ?? agentAddress;
-  await prepareShareSeal(agent, contextGraphId, name, storageLane, opts, true);
+  await prepareShareSeal(agent, contextGraphId, name, storageLane, opts, true, executionAuthority);
   const { publisherOptions } = await prepareAssertionPromote(agent, {
     contextGraphId, publisherPeerId: agent.node.peerId.toString(), options: opts,
   });
@@ -79,7 +79,7 @@ export async function prepareDurableAssertionShare(agent: DKGAgent, contextGraph
   try { inventoryRequired = agent.requiresRfc64ShareInventoryHandoffV1(contextGraphId, opts?.subGraphName); }
   catch (cause) { if (cause instanceof SwmCatalogAuthorityNotReady) throw createPromoteRetryableFailure(cause); throw cause; }
   const recoveryBinding = await agent.publisher.prepareAssertionPromoteRecovery(
-    contextGraphId, name, storageLane, publisherOptions, inventoryRequired,
+    contextGraphId, name, storageLane, { ...publisherOptions, executionAuthority }, inventoryRequired,
     inventoryRequired ? () => assertShareInventorySigningCapability(agent, storageLane) : undefined);
   if ('completedResult' in recoveryBinding) {
     return { agentAddress: storageLane, recoveryBinding: undefined,
@@ -195,6 +195,21 @@ export function durableAssertionShareMethods(agent: DKGAgent, agentAddress: stri
       const admit = queue.enqueueAndClaim?.bind(queue);
       if (!admit) throw new Error('Durable share admission is unavailable');
       return agent.publisher.admitPreparedAssertionShare(request, () => admit(request, workerId));
+    },
+    async prepareQueuedShare(job: import('@origintrail-official/dkg-publisher').PromoteJob, authority: PromoteExecutionAuthority) {
+      if (classifyQueuedSharePreparation(job) !== 'eligible') return { job };
+      return authority.run(async () => {
+        const bind = agent.promoteQueue.bindRecovery?.bind(agent.promoteQueue);
+        if (!bind || !job.lease) throw new Error('Durable async share preparation requires a leased recovery queue');
+        const request = job.request;
+        const prepared = await prepareDurableAssertionShare(agent, request.contextGraphId, request.assertionName,
+          agentAddress, request, authority);
+        if (prepared.completedResult) return { job, completedResult: prepared.completedResult };
+        const bound = await agent.publisher.admitPreparedAssertionShare({ ...request, entities: 'all',
+          agentAddress: prepared.agentAddress, recoveryBinding: prepared.recoveryBinding },
+        () => bind(job.jobId, job.lease!.claimToken, prepared.recoveryBinding), authority);
+        return { job: bound };
+      });
     },
     prepareDurableShare: (contextGraphId: string, name: string, opts?: AssertionPromoteOptions) =>
       prepareDurableAssertionShare(agent, contextGraphId, name, agentAddress, opts),
