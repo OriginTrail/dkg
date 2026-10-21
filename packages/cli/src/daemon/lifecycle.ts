@@ -1,3 +1,4 @@
+import { buildCoreChainCacheConfig } from './core-chain-cache-config.js';
 // daemon/lifecycle.ts
 //
 // Owns daemon boot, agent configuration, HTTP serving and shutdown.
@@ -1809,6 +1810,8 @@ async function runDaemonInnerWithStartupOwnership(
   });
 
   const agentConfig: DKGAgentConfig = {
+    ...buildCoreChainCacheConfig({ enabled: config.DKG_Core_chain_cache, role,
+      networkName: selectedNetworkConfig, networkId, chain: chainBase, admission: rpcRequestGovernor }),
     kaNumberAllocator,
     name: config.name,
     genesisId: network?.genesisId,

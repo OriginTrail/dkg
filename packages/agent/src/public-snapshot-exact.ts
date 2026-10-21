@@ -17,6 +17,13 @@ export interface PublicSnapshotExactRecoveryOptions extends PublicSnapshotRecove
 }
 
 type ExactTransport = 'stream-preferred' | 'legacy';
+interface RecoverySelection {
+  readonly uals: readonly string[];
+  readonly transport: ExactTransport;
+  readonly answered: Set<string>;
+}
+type SelectionPass = { kind: 'complete' | 'answered' }
+  | { kind: 'wait'; reason: 'admission' | 'peer' };
 
 /**
  * Ten-asset batches from the configured peers in turn. A refusal that says
@@ -25,7 +32,7 @@ type ExactTransport = 'stream-preferred' | 'legacy';
  * the job. Assets already stored as the snapshot pins them are not fetched.
  */
 export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, options: PublicSnapshotExactRecoveryOptions): Promise<PublicSnapshotRecoveryResult> {
-  const { contextGraphId, peers, uals, evidence, signal, assertCurrent, deadline } = options;
+  const { contextGraphId, uals, evidence, signal, assertCurrent, deadline } = options;
   const committed = new Set<string>();
   let alreadyPresent = 0;
   const ctx = createOperationContext('sync');
@@ -58,43 +65,65 @@ export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, opti
     for (const ual of result.committedExactAssetUals ?? []) committed.add(ual);
     return pacing.settle(peer, result, committed.size - before);
   };
-  // Ask the peers for one selection until it is stored, every peer has
-  // answered for it, or the job ends.
-  const recover = async (batch: readonly string[], transport: ExactTransport) => {
-    const answered = new Set<string>();
-    for (;;) {
-      let wait: 'admission' | 'peer' | undefined;
-      for (const peer of peers) {
-        const remaining = batch.filter(ual => !committed.has(ual));
-        if (!remaining.length) return;
-        if (answered.has(peer)) continue;
-        if (pacing.heldOff(peer)) { wait ??= 'peer'; continue; }
-        assertActive();
-        const verdict = await attempt(peer, remaining, transport);
-        if (verdict === 'answered') answered.add(peer);
-        else if (verdict === 'retry-peer') wait ??= 'peer';
-        // Capacity is node-local: the other peers would meet the same refusal.
-        else { wait = 'admission'; break; }
-      }
-      if (wait === undefined || batch.every(ual => committed.has(ual))) return;
-      host.log.info(ctx, `Snapshot recovery for "${contextGraphId}" is waiting for `
-        + `${wait === 'admission' ? 'local sync capacity' : 'a busy core'}: ${committed.size}/${uals.length} committed`);
-      const waited = wait === 'admission'
-        ? await pacing.waitForAdmission()
-        : await pacing.waitForPeer(peers.filter(peer => !answered.has(peer)));
-      if (!waited) throw incomplete(wait === 'admission' ? 'local sync capacity stayed in use' : 'the configured cores stayed busy');
-      // Another sync may have stored some of these while the job waited.
-      await skipHeld(batch);
+  // One pass reports what happened. Only the scheduler below advances
+  // discovery or waits; answer history belongs to the asset selection.
+  const pass = async (selection: RecoverySelection, peers: readonly string[]): Promise<SelectionPass> => {
+    let wait: 'admission' | 'peer' | undefined;
+    for (const peer of peers) {
+      const remaining = selection.uals.filter(ual => !committed.has(ual));
+      if (!remaining.length) return { kind: 'complete' };
+      if (selection.answered.has(peer)) continue;
+      if (pacing.heldOff(peer)) { wait ??= 'peer'; continue; }
+      assertActive();
+      const verdict = await attempt(peer, remaining, selection.transport);
+      if (verdict === 'answered') selection.answered.add(peer);
+      else if (verdict === 'retry-peer') wait ??= 'peer';
+      // Capacity is node-local: the other peers would meet the same refusal.
+      else { wait = 'admission'; break; }
     }
+    if (selection.uals.every(ual => committed.has(ual))) return { kind: 'complete' };
+    return wait ? { kind: 'wait', reason: wait } : { kind: 'answered' };
   };
   for (let offset = 0; offset < uals.length; offset += 10) {
     const batch = uals.slice(offset, offset + 10);
     await skipHeld(batch);
-    await recover(batch, "stream-preferred");
-    // The stream profile excludes private commitments. Only missing assets
-    // use the bounded singleton transport, with identical authentication.
-    for (const ual of batch) if (!committed.has(ual)) await recover([ual], "legacy");
-    if (batch.some(ual => !committed.has(ual))) throw incomplete();
+    const selections: RecoverySelection[] = [
+      { uals: batch, transport: 'stream-preferred', answered: new Set() },
+      // The stream profile excludes private commitments. Only missing assets
+      // use the bounded singleton transport, with identical authentication.
+      ...batch.map(ual => ({ uals: [ual], transport: 'legacy' as const, answered: new Set<string>() })),
+    ];
+    const admitted = new Set<string>();
+    const discovery = options.peerBatches()[Symbol.asyncIterator]();
+    let discoveryDone = false, index = selections.length;
+    let peers: readonly string[] = [];
+    try {
+      while (batch.some(ual => !committed.has(ual))) {
+        assertActive();
+        if (index === selections.length) {
+          if (discoveryDone) throw incomplete();
+          const next = await discovery.next();
+          discoveryDone = next.done === true;
+          peers = discoveryDone ? [...admitted] : next.value;
+          if (!discoveryDone) peers.forEach(peer => admitted.add(peer));
+          index = 0;
+        }
+        const selection = selections[index]!;
+        const result = await pass(selection, peers);
+        // Busy suppliers never hide later undiscovered healthy suppliers.
+        if (result.kind !== 'wait' || (result.reason === 'peer' && !discoveryDone)) { index++; continue; }
+        host.log.info(ctx, `Snapshot recovery for "${contextGraphId}" is waiting for `
+          + `${result.reason === 'admission' ? 'local sync capacity' : 'a busy core'}: ${committed.size}/${uals.length} committed`);
+        const waited = result.reason === 'admission' ? await pacing.waitForAdmission()
+          : await pacing.waitForPeer(peers.filter(peer => !selection.answered.has(peer)));
+        if (!waited) throw incomplete(result.reason === 'admission'
+          ? 'local sync capacity stayed in use' : 'the configured cores stayed busy');
+        // Another sync may have stored some of these while the job waited.
+        await skipHeld(selection.uals);
+      }
+    } finally {
+      if (!discoveryDone) await discovery.return?.();
+    }
   }
   return { committed, alreadyPresent };
 }
