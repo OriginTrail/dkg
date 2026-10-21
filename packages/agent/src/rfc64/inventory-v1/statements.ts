@@ -404,6 +404,14 @@ ON CONFLICT (repair_digest) DO NOTHING;`,
   deleteFinalizedPrivatePlacementRepair: `
 DELETE FROM rfc64_finalized_private_placement_repairs_v1
 WHERE repair_digest = :repairDigest AND repair_json = :repairJson;`,
+  getFinalizedPrivatePlacementFailure: `
+SELECT state_json FROM rfc64_private_placement_failures_v1
+WHERE repair_digest = :digest;`,
+  upsertFinalizedPrivatePlacementFailure: `
+INSERT INTO rfc64_private_placement_failures_v1 (repair_digest, state_json)
+SELECT repair_digest, :json FROM rfc64_finalized_private_placement_repairs_v1
+WHERE repair_digest = :digest
+ON CONFLICT(repair_digest) DO UPDATE SET state_json = excluded.state_json;`,
   getUnregisteredAuthoritySeed: `
 SELECT network_id, context_graph_id, owner_address, policy_digest, signed_envelope
 FROM rfc64_unregistered_authority_seeds_v1
@@ -464,6 +472,8 @@ export const INVENTORY_V1_STATEMENT_IDS = Object.freeze({
   listFinalizedPrivatePlacementRepairs: 'rfc64.finalized-private-placement-repair.list.v1',
   insertFinalizedPrivatePlacementRepair: 'rfc64.finalized-private-placement-repair.insert.v1',
   deleteFinalizedPrivatePlacementRepair: 'rfc64.finalized-private-placement-repair.delete.v1',
+  getFinalizedPrivatePlacementFailure: 'rfc64.finalized-private-placement-failure.get.v1',
+  upsertFinalizedPrivatePlacementFailure: 'rfc64.finalized-private-placement-failure.upsert.v1',
   getUnregisteredAuthoritySeed: 'rfc64.unregistered-authority-seed.get.v1',
   insertUnregisteredAuthoritySeed: 'rfc64.unregistered-authority-seed.insert.v1',
 } as const satisfies Readonly<Record<InventoryV1StatementKey, string>>);
@@ -492,6 +502,7 @@ export const INVENTORY_V1_PERSISTENT_READ_STATEMENT_KEYS = Object.freeze([
   'getSwmAuthorRow',
   'listFinalizedPrivatePlacementRepairs',
   'getUnregisteredAuthoritySeed',
+  'getFinalizedPrivatePlacementFailure',
 ] as const satisfies readonly InventoryV1StatementKey[]);
 
 export const INVENTORY_V1_PLAN_STATEMENT_KEYS = Object.freeze([
@@ -512,4 +523,5 @@ export const INVENTORY_V1_PLAN_STATEMENT_KEYS = Object.freeze([
   'insertFinalizedPrivatePlacementRepair',
   'deleteFinalizedPrivatePlacementRepair',
   'insertUnregisteredAuthoritySeed',
+  'upsertFinalizedPrivatePlacementFailure',
 ] as const satisfies readonly InventoryV1StatementKey[]);

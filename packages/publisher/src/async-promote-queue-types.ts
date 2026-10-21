@@ -89,7 +89,7 @@ export interface OrdinaryPromoteRequest extends PromoteRequestScope {
   entities: readonly string[] | 'all';
 }
 
-/** Internal immutable synchronous-recovery authority; never client supplied. */
+/** Internal immutable share-recovery authority; never client supplied. */
 export interface BoundPromoteRequest extends PromoteRequestScope {
   recoveryBinding: PromoteRecoveryBinding;
   entities: 'all';
@@ -180,6 +180,8 @@ export interface PromoteJob {
   lease?: PromoteLease;
   attempt: PromoteAttemptState;
   result?: PromoteResult;
+  /** Contiguous initial attempts proven to have failed before promotion started. */
+  preparationAttempts?: number;
   commitMarker?: PromoteCommitMarker;
   /**
    * Stable string describing why a job is currently in its state when
@@ -261,6 +263,8 @@ export interface AsyncPromoteQueue {
   enqueue(request: PromoteRequest): Promise<string>;
   /** Persist ownership and the inline lease together, before content mutation. */
   enqueueAndClaim?(request: BoundPromoteRequest, workerId: string): Promise<BoundPromoteJob>;
+  /** Bind a claimed, unstarted job under the publisher lifecycle fence. Never HTTP supplied. */
+  bindRecovery?(jobId: string, claimToken: string, binding: PromoteRecoveryBinding): Promise<BoundPromoteJob>;
   // RFC §3.2
   getStatus(jobId: string): Promise<PromoteJob | null>;
   // RFC §3.3

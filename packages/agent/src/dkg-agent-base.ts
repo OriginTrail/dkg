@@ -326,6 +326,7 @@ import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
 import { insertWithOversizeGuard } from './sync/oversize-filter.js';
+import { compactSyncedPrivateRosterGenerations } from './private-roster-version.js';
 import { OversizeTombstoneLog } from './sync/oversize-tombstones.js';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore, MemoryChangelogCursorStore } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
@@ -1593,9 +1594,7 @@ export class DKGAgentBase {
    * Sync-ingest store insert (durable sync + registry meta pulls). Guarded by
    * the oversize filter (OT-RFC-56): quads whose literal exceeds the protocol
    * size invariant are dropped + tombstoned BEFORE the insert, so the sync
-   * offset cursor advances past pages containing them instead of the store
-   * throwing and the page being re-fetched from every peer forever (the
-   * 2026-07-08 mainnet poison-literal retry storm).
+   * offset cursor can pass poison-literal pages without an endless retry.
    */
   protected async insertSyncedQuadsAndInvalidateListCache(quads: Quad[], options?: QueryOptions): Promise<void> {
     const inserted = await insertWithOversizeGuard(
@@ -1605,7 +1604,8 @@ export class DKGAgentBase {
       'durable-sync',
     );
     if (inserted.length > 0) {
-      this.invalidateListContextGraphsCache();
+      try { await compactSyncedPrivateRosterGenerations(this.store, inserted, options); }
+      finally { this.invalidateListContextGraphsCache(); }
     }
   }
   protected get gossipRegistered() { return this.gossipSession.gossipRegistered; }

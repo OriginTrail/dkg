@@ -1,4 +1,4 @@
-import { canRetireBoundRejection, PROMOTE_NO_EFFECT_REJECTION_CODE } from './promote-no-effect-rejection.js';
+import { recordUnstartedPromoteAttempt, canRetireBoundRejection, PROMOTE_NO_EFFECT_REJECTION_CODE } from './promote-no-effect-rejection.js';
 import { isBoundPromoteJob } from './bound-promote-job.js';
 import {
   ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION,
@@ -84,6 +84,7 @@ export function promoteFailureTransition(
   now: number,
   backoff: (attemptCount: number) => number,
 ): { job: PromoteJob; transition: PromoteFailureTransition } {
+  job = recordUnstartedPromoteAttempt(job);
   const attemptCount = Math.max(1, job.attempt.count);
   const swmInserted = job.commitMarker?.swmInserted === true;
   const bound = isBoundPromoteJob(job);

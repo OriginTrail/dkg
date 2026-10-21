@@ -275,6 +275,9 @@ const publicRfc64Modules = [
   'swm-author-inventory-producer-v1.js',
 ];
 const blockedRfc64Modules = [
+  'private-placement-failure-state-v1.js',
+  'inventory-v1/finalized-private-repair-persistence.js',
+  'inventory-v1/schema-migrations.js',
   'catalog-projection-discovery-v1.js',
   'catalog-repair-diagnostics-v1.js',
   'catalog-repair-retry-v1.js',

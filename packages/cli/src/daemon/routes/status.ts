@@ -1,3 +1,4 @@
+import { handlePrivatePlacementRetry } from './private-placement-retry.js';
 // daemon/routes/status.ts
 //
 // Route handlers for status, info, connections, host, wallet, chain, identity, integrations, shutdown.
@@ -561,6 +562,7 @@ export function summarizeContextGraphIdentityStatus(
 }
 
 export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
+  if (await handlePrivatePlacementRetry(ctx)) return;
   const {
     req,
     res,
@@ -593,10 +595,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     path,
     requestAgentAddress,
   } = ctx;
-  // Registering adapters, creating the node identity, backfilling the store and
-  // shutting down act on the whole node, so they require a node-level admin
-  // token. Resolved lazily, inside those routes only, so read-only routes never
-  // depend on the caller's authentication.
+  // Node-wide operations resolve operator authentication lazily, inside those routes only.
   const nodeAuth = () => actorFromRequestContext(ctx).authentication;
 
   if ((req.method === "GET" || req.method === "HEAD") && path === "/.well-known/skill.md") {
