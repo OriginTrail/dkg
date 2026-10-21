@@ -18,8 +18,6 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
-      "test/storage-ack-admission.test.ts",
-      "test/storage-ack-admission-live.test.ts",
       "test/rfc64-manual-catalog-authority-scope-v1.test.ts",
       "test/sync-exact-export-admission.test.ts",
       "test/prepared-content-cache.test.ts",
@@ -86,6 +84,8 @@ export default defineConfig({
       "test/finalize-version-after-abandoned-update.test.ts",
       "test/named-ka-vm-lifecycle.test.ts",
       "test/storage-ack-ledger-timestamp-writer.test.ts",
+      "test/storage-ack-admission.test.ts",
+      "test/storage-ack-admission-live.test.ts",
       "test/named-ka-vm-lifecycle-construction.test.ts",
       "test/observed-store-mutation.test.ts",
       "test/durable-integrity-seal-assertion-version.test.ts",
