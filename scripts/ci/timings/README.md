@@ -7,8 +7,12 @@ successful main run identified in its `source` field. These timings include
 per-file hooks; the planner adds 1.1 seconds per file for collection/import
 overhead observed in that run. Global Hardhat setup is shared only by the four
 integration shards. Six shards use the existing hermetic unit configuration.
-Shard 10 reserves another 40 seconds for the RFC-64 evidence sidecar steps
-(`matrix.sidecars`). In September 2026 CI runs they took about 31 seconds
+Shard 10 reserves 160 seconds for the RFC-64 evidence and process-death sidecar
+steps (`matrix.sidecars`): 40 seconds for the existing evidence steps and 120
+seconds for the three-boundary catalog durability campaign. The latter runs six
+serial disposable workers, with no full devnet bootstrap, and has a four-minute
+step deadline. Calibrate its reservation from successful CI timings when available.
+In September 2026 CI runs the original evidence steps took about 31 seconds
 together: the rollout certificate about 20 s, Gate 1 live evidence about 10 s,
 and the Gate 0 unit tests about 1 s.
 

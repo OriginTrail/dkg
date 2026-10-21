@@ -6,6 +6,26 @@ import oxigraph from 'oxigraph';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 
 const readLimit = vi.hoisted(() => ({ path: '', maxBytes: Infinity, failRead: false, failOpen: false, failClose: false }));
+const writeFault = vi.hoisted(() => ({ path: '', bytesWritten: 0 }));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const fs = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...fs,
+    open: async (...args: Parameters<typeof fs.open>) => {
+      const handle = await fs.open(...args);
+      if (String(args[0]) !== writeFault.path || args[1] !== 'w') return handle;
+      const write = handle.writeFile.bind(handle);
+      handle.writeFile = async (...writeArgs: Parameters<typeof handle.writeFile>) => {
+        if (writeFault.bytesWritten > 0) {
+          throw Object.assign(new Error('injected mid-snapshot write failure'), { code: 'EIO' });
+        }
+        await write(...writeArgs);
+        writeFault.bytesWritten = (await handle.stat()).size;
+      };
+      return handle;
+    },
+  };
+});
 vi.mock('node:fs', async (importOriginal) => {
   const fs = await importOriginal<typeof import('node:fs')>();
   return {
@@ -44,6 +64,8 @@ afterEach(() => {
   readLimit.failRead = false;
   readLimit.failOpen = false;
   readLimit.failClose = false;
+  writeFault.path = '';
+  writeFault.bytesWritten = 0;
   vi.restoreAllMocks();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -105,6 +127,49 @@ describe('Oxigraph snapshots beyond one JavaScript string', () => {
       expect(await reopened.query('ASK { ?b <urn:p> "first" . GRAPH <urn:g> { <urn:end> <urn:p> ?b } }'))
         .toEqual({ type: 'boolean', value: true });
     } finally { await reopened.close(); }
+  });
+
+  it('keeps the previous snapshot after a mid-stream write fails and retries the entire new snapshot', async () => {
+    const path = snapshotPath();
+    const store = new OxigraphStore(path);
+    try {
+      await store.insert([{ subject: 'urn:original', predicate: 'urn:p', object: '"durable"', graph: 'urn:g' }]);
+      await store.flush();
+      const committed = readFileSync(path);
+      const additions = Array.from({ length: 1800 }, (_, n) => ({
+        subject: `urn:new:${n}`, predicate: 'urn:p', object: JSON.stringify(`${n}: ${'é🙂'.repeat(24)}`), graph: 'urn:g',
+      }));
+      writeFault.path = `${path}.tmp`;
+      await store.insert(additions);
+      await expect(store.flush()).rejects.toMatchObject({ code: 'EIO' });
+      expect(writeFault.bytesWritten).toBeGreaterThan(0);
+      expect(readFileSync(`${path}.tmp`).byteLength).toBe(writeFault.bytesWritten);
+      // Inspect disk before closing the writer: close() itself flushes and could
+      // otherwise conceal an acknowledgement or atomic-replacement regression.
+      expect(readFileSync(path)).toEqual(committed);
+      writeFault.path = '';
+      const previous = new OxigraphStore(path);
+      try {
+        expect(await previous.countQuads()).toBe(1);
+        expect(await previous.query('ASK { GRAPH <urn:g> { <urn:original> <urn:p> "durable" } }'))
+          .toEqual({ type: 'boolean', value: true });
+      } finally { await previous.close(); }
+
+      await store.flush();
+      const recovered = new OxigraphStore(path);
+      try {
+        expect(await recovered.countQuads()).toBe(additions.length + 1);
+        const result = await recovered.query('SELECT ?s ?value WHERE { GRAPH <urn:g> { ?s <urn:p> ?value } }');
+        expect(result.type).toBe('bindings');
+        if (result.type !== 'bindings') throw new Error('expected stored snapshot rows');
+        expect(result.bindings.map(row => [row.s, row.value]).sort()).toEqual([
+          ['urn:original', '"durable"'], ...additions.map(quad => [quad.subject, quad.object]),
+        ].sort());
+      } finally { await recovered.close(); }
+    } finally {
+      writeFault.path = '';
+      await store.close();
+    }
   });
 
   it('preserves a valid snapshot after a streaming read fails', () => {

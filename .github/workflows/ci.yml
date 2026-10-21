@@ -706,6 +706,12 @@ jobs:
       - name: "RFC-64 Gate 1 live evidence generate and verify (Oxigraph)"
         if: matrix.sidecars
         run: pnpm test:gate1:rfc64-public-open-harness
+      # The parent kills only its disposable worker, then reopens the actual
+      # SQLite/Oxigraph files and replays with fresh loopback peers. No devnet.
+      - name: "RFC-64 catalog durable-head process-death recovery"
+        if: matrix.sidecars
+        timeout-minutes: 4
+        run: node --experimental-sqlite --import tsx scripts/repro/rfc64-catalog-durable-head.mts
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit
