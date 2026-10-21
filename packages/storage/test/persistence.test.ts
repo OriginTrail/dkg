@@ -48,7 +48,7 @@ describe('storage persistence boundary', () => {
     try {
       expect(untrusted.commitment).toBeUndefined();
       await store.commitment!.capture()(options);
-      expect(flush).toHaveBeenCalledExactlyOnceWith(options);
+      expect(flush).toHaveBeenCalledExactlyOnceWith({ ...options, signal: expect.any(AbortSignal) });
     } finally { await store.close(); await untrusted.close(); }
   });
   it('accepts a separately certified acknowledgement through decorators', async () => {

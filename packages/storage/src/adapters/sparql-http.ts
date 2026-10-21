@@ -283,7 +283,12 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       constructionAuthority,
     );
     const managedRuntimeHooks = getManagedOxigraphRuntimeHooksV1(constructionAuthority);
-    this.flush = managedRuntimeHooks?.persistence;
+    const persistence = managedRuntimeHooks?.persistence;
+    this.flush = persistence ? options => this.runStoreWork('flush', options, async signal => {
+      signal?.throwIfAborted();
+      await persistence({ ...options, signal });
+      signal?.throwIfAborted();
+    }) : undefined;
     this.commitment = this.flush || writesDurableOnAcknowledgement
       ? certifiedTripleStoreCommitment('restart-durable', options => this.flush?.(options) ?? Promise.resolve()) : undefined;
     const managedRecovery = this.managedOxigraph
