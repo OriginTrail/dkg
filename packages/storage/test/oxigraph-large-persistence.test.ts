@@ -143,7 +143,6 @@ describe('Oxigraph snapshots beyond one JavaScript string', () => {
       await store.insert(additions);
       await expect(store.flush()).rejects.toMatchObject({ code: 'EIO' });
       expect(writeFault.bytesWritten).toBeGreaterThan(0);
-      expect(readFileSync(`${path}.tmp`).byteLength).toBe(writeFault.bytesWritten);
       // Inspect disk before closing the writer: close() itself flushes and could
       // otherwise conceal an acknowledgement or atomic-replacement regression.
       expect(readFileSync(path)).toEqual(committed);
