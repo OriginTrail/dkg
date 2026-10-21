@@ -93,9 +93,10 @@ describe('AsyncLiftRunner claim control', () => {
   it('never reopens the publisher gate when terminal closure races an awaited resume', async () => {
     let enterResume!: () => void; const entered = new Promise<void>(resolve => { enterResume = resolve; });
     let releaseResume!: () => void; const held = new Promise<void>(resolve => { releaseResume = resolve; });
+    const notifyWorkAvailable = vi.fn();
     const claimControl = createAsyncLiftClaimControl(async commit => {
       if (commit) { enterResume(); await held; commit(); }
-    }, () => {});
+    }, notifyWorkAvailable);
     const processNext = vi.fn(async () => null);
     const runner = new AsyncLiftRunner({ publisher: createPublisher({ claimControl, processNext }),
       walletIds: ['wallet-1'], pollIntervalMs: 60_000 });
@@ -108,6 +109,7 @@ describe('AsyncLiftRunner claim control', () => {
       expect(runner.claimGateStatus()).toMatchObject({ held: true, closed: true });
       expect(claimControl.state).toBe('closed');
       expect(processNext).not.toHaveBeenCalled();
+      expect(notifyWorkAvailable).not.toHaveBeenCalled();
       await expect(runner.claimControl.release()).rejects.toThrow('closed');
     } finally { releaseResume(); await resuming.catch(() => {}); await runner.stop(); }
   });
