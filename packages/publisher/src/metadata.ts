@@ -525,7 +525,8 @@ function unsignedIntegerLiteral(value: string | undefined): bigint | undefined {
   }
 }
 
-function bytes32Literal(value: string | undefined): Uint8Array | undefined {
+/** Canonical bytes32 RDF field decoding, shared by full envelopes and narrow recovery checks. */
+export function parseMetadataBytes32Literal(value: string | undefined): Uint8Array | undefined {
   const lexical = value === undefined ? undefined : rdfLiteralLexicalValue(value);
   const hex = lexical?.replace(/^0x/i, '');
   if (hex === undefined || !/^[0-9a-fA-F]{64}$/.test(hex)) return undefined;
@@ -570,10 +571,10 @@ export function parseConfirmedGraphKnowledgeAssetMetadataEnvelope(
     `${DKG}privateTripleCount`,
   ));
   const batchId = unsignedIntegerLiteral(singleMetadataObject(objects, `${DKG}batchId`));
-  const merkleRoot = bytes32Literal(singleMetadataObject(objects, `${DKG}merkleRoot`));
+  const merkleRoot = parseMetadataBytes32Literal(singleMetadataObject(objects, `${DKG}merkleRoot`));
   const privateRootValues = objects.get(`${DKG}privateMerkleRoot`) ?? [];
   const privateMerkleRoot = privateRootValues.length === 1
-    ? bytes32Literal(privateRootValues[0])
+    ? parseMetadataBytes32Literal(privateRootValues[0])
     : undefined;
   const assertionGraph = singleMetadataObject(objects, `${DKG}assertionGraph`);
   const kaUal = singleMetadataObject(objects, `${DKG}kaUal`);

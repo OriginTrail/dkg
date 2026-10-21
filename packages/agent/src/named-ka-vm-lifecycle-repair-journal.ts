@@ -1,15 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
-import { normalizeLifecycleMaterialization, lifecycleMaterializationWire, type ConfirmedLifecycleMaterialization } from './named-ka-vm-lifecycle-materialization.js';
+import { normalizeLifecycleMaterialization, lifecycleMaterializationWire, type ConfirmedLifecycleMaterialization, type ValidatedLifecycleMaterialization } from './named-ka-vm-lifecycle-materialization.js';
 import { createHash } from 'node:crypto';
 import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
-export type HistoricalUnboundLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifecycleInput, 'publicationDeployment' | 'packedKaId'> & {
+declare const validatedLifecycleCommand: unique symbol;
+/** Only admission and journal decoding construct executable, frozen recovery commands. */
+export type ValidatedLifecycleRepairCommand = Omit<Readonly<ConfirmedNamedKaVmLifecycleInput>, 'materialization'> & {
+  readonly [validatedLifecycleCommand]: true;
+  readonly materialization?: ValidatedLifecycleMaterialization;
+};
+export type HistoricalUnboundLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifecycleInput, 'publicationDeployment' | 'packedKaId' | 'materialization'> & {
+  readonly materialization?: never;
   readonly publicationDeployment?: ConfirmedNamedKaVmLifecycleInput['publicationDeployment'];
   readonly packedKaId?: bigint;
 };
 type JournalInput = ConfirmedKaInput | HistoricalUnboundLifecycleRepairInput;
-type ConfirmedKaInput = ConfirmedNamedKaVmLifecycleInput;
-export type StoredLifecycleRepairInput = Omit<JournalInput, 'packedKaId' | 'tentative'> & { packedKaId?: string; materializationRef?: string };
+type ConfirmedKaInput = ValidatedLifecycleRepairCommand;
+export type StoredLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifecycleInput | HistoricalUnboundLifecycleRepairInput, 'packedKaId' | 'tentative'> & { packedKaId?: string; materializationRef?: string };
 interface RepairRetryState {
   attempts: number;
   nextAttemptAt: number;
@@ -36,10 +43,10 @@ function root(value: unknown): string {
   if (!/^(0x)?[0-9a-f]{64}$/i.test(text)) return invalid();
   return text.toLowerCase().replace(/^0x/, '');
 }
-export function normalizeLifecycleRepairInput(value: unknown): ConfirmedNamedKaVmLifecycleInput {
+export function normalizeLifecycleRepairInput(value: unknown): ValidatedLifecycleRepairCommand {
   const input = normalizeJournalInput(value);
   if (input.publicationDeployment === undefined || input.packedKaId === undefined) return invalid();
-  return input as ConfirmedNamedKaVmLifecycleInput;
+  return input as ValidatedLifecycleRepairCommand;
 }
 function normalizeJournalInput(value: unknown): JournalInput {
   const input = record(value);
@@ -67,11 +74,11 @@ function normalizeJournalInput(value: unknown): JournalInput {
     ...(packedKaId === undefined ? {} : { packedKaId }),
     ...(publicationDeployment === undefined ? {} : { publicationDeployment }),
   };
-  if (input['materialization'] === undefined) return Object.freeze(normalized);
+  if (input['materialization'] === undefined) return Object.freeze(normalized) as JournalInput;
   if (publicationDeployment === undefined || packedKaId === undefined) return invalid();
-  return Object.freeze({ ...normalized, materialization: normalizeLifecycleMaterialization(input['materialization'], normalized as ConfirmedKaInput) });
+  return Object.freeze({ ...normalized, materialization: normalizeLifecycleMaterialization(input['materialization'], normalized as ConfirmedNamedKaVmLifecycleInput) }) as ValidatedLifecycleRepairCommand;
 }
-export function lifecycleRepairKey(input: JournalInput): string {
+export function lifecycleRepairKey(input: ConfirmedNamedKaVmLifecycleInput | HistoricalUnboundLifecycleRepairInput): string {
   // Version-2 disk encoding is frozen independently of the in-process lock namespace.
   // Preserve its original prefix and tuple ordering when changing publisher locks.
   const author = /^0x[0-9a-f]{40}$/i.test(input.agentAddress)

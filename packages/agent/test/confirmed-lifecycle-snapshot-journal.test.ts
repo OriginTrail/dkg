@@ -70,7 +70,7 @@ it('migrates version-3 inline evidence without losing its payload on another fai
   await writeFile(path, JSON.stringify(encodeLifecycleRepairJournal(new Map([[lifecycleRepairKey(normalized), { input: normalized, attempts: 0, nextAttemptAt: 0 }]]))));
   const repair = owner(dir, async () => { throw new Error('retry pressure'); }); await repair.runDue();
   expect(JSON.parse(await readFile(path, 'utf8')).version).toBe(4); expect(await readdir(snapshots)).toHaveLength(1);
-  expect([...(await readLifecycleRepairJournalFile(path)).values()][0]!.input.materialization).toEqual(input.materialization);
+  expect([...(await readLifecycleRepairJournalFile(path)).values()][0]!.input.materialization).toEqual(normalized.materialization);
 });
 it('does not write a journal or apply graphs when snapshot durability fails', async () => {
   const { dir, input, path } = await setup();
@@ -89,5 +89,5 @@ it('recreates a retired snapshot before referencing the same immutable object ag
   expect(await readdir(snapshots)).toHaveLength(0);
   const journal = await store.encode(entries);
   expect(await readdir(snapshots)).toHaveLength(1);
-  expect([...(await new NamedKaVmLifecycleSnapshots(dir).decode(journal)).values()][0]!.input.materialization).toEqual(input.materialization);
+  expect([...(await new NamedKaVmLifecycleSnapshots(dir).decode(journal)).values()][0]!.input.materialization).toEqual(normalized.materialization);
 });

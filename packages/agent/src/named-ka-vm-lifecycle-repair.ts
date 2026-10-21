@@ -6,7 +6,7 @@ import { DurableReplaceableFile } from './durable-file-replace.js';
 import { join } from 'node:path';
 import type { PublishedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle.js';
 import { ConfirmedNamedKaVmLifecycleExecutor } from './named-ka-vm-lifecycle-executor.js';
-import { lifecycleRepairKey, normalizeLifecycleRepairInput, type LifecycleRepairEntry as RepairEntry } from './named-ka-vm-lifecycle-repair-journal.js';
+import { lifecycleRepairKey, normalizeLifecycleRepairInput, type LifecycleRepairEntry as RepairEntry, type ValidatedLifecycleRepairCommand } from './named-ka-vm-lifecycle-repair-journal.js';
 import { NamedKaVmLifecycleSnapshots } from './named-ka-vm-lifecycle-snapshots.js';
 import { isStoreOperationTimeoutError, isStoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 
@@ -43,9 +43,9 @@ export class NamedKaVmLifecycleRepair {
     /** Share the publisher's lifecycle domain for currency, admission and mutation. */
     writeLocks: Map<string, Promise<void>>;
     /** Resolve after the host's certified commit barrier: durable for every filesystem journal. */
-    apply: (input: ConfirmedNamedKaVmLifecycleInput, preserveVerifiedVmProof: boolean) => Promise<void>;
+    apply: (input: ValidatedLifecycleRepairCommand, preserveVerifiedVmProof: boolean) => Promise<void>;
     /** Coherent chain version evidence; a newer chain version fences an old repair. */
-    isCurrent: (input: ConfirmedNamedKaVmLifecycleInput) => Promise<boolean>;
+    isCurrent: (input: ValidatedLifecycleRepairCommand) => Promise<boolean>;
     warn: (message: string) => void;
   }) {
     this.executor = new ConfirmedNamedKaVmLifecycleExecutor(options);

@@ -85,3 +85,15 @@ const missingIdentity: ConfirmedNamedKaVmLifecycleInput = withoutIdentity;
 // @ts-expect-error Receipts cannot supply a fallback for missing caller-resolved coordinates.
 void confirmedNamedKaVmLifecycleInput(publication, withoutIdentity);
 void resolvedIdentity; void missingIdentity;
+
+import { normalizeLifecycleRepairInput, type ValidatedLifecycleRepairCommand } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import { applyMaterializedConfirmedLifecycle } from '../src/named-ka-vm-lifecycle-materialization.js';
+const executable: ValidatedLifecycleRepairCommand = normalizeLifecycleRepairInput(confirmed);
+void applyMaterializedConfirmedLifecycle(store, executable, { persistence: 'restart-durable' });
+// @ts-expect-error Admission input cannot bypass validation at execution.
+void applyMaterializedConfirmedLifecycle(store, confirmed, { persistence: 'restart-durable' });
+// @ts-expect-error Internal command coordinates are immutable.
+executable.assertionVersion = '2';
+// @ts-expect-error Wire/raw evidence cannot replace validated proof even on an internal command.
+const rawSnapshotCommand: ValidatedLifecycleRepairCommand = { ...executable, materialization: confirmed.materialization };
+void rawSnapshotCommand;

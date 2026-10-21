@@ -204,20 +204,30 @@ it.each(['publicTripleCount', 'privateTripleCount', 'privateMerkleRoot', 'batchI
     expect(await resolve(reopened)).toMatchObject({ status: 'verified', envelope: { publicTripleCount: 1, privateTripleCount: 2, batchId: input.packedKaId } });
     expect(await reopened.query(`ASK { GRAPH <${meta}> { <${input.materialization!.kaUal}> <${dkg}transactionHash> "${field === 'transactionHash' ? '0x' + '34'.repeat(32) : receipt}"; <urn:receipt-note> "preserve" } }`)).toMatchObject({ value: true });
   });
-it('retains a typed immutable proof across admission/retries and rejects copied tampered evidence', async () => {
+it('validates admission once and executes the same frozen proof through retries and journal round-trips', async () => {
   const { owner, input, store, advance } = await fixture(true);
-  const model = materialization.normalizeLifecycleMaterialization(input.materialization, input);
-  expect(Object.isFrozen(model.proof)).toBe(true);
-  expect(materialization.normalizeLifecycleMaterialization(model, input)).toBe(model);
-  expect(normalizeLifecycleRepairInput({ ...input, materialization: model }).materialization).toBe(model);
-  expect(() => materialization.normalizeLifecycleMaterialization(model, { ...input, merkleRoot: 'ab'.repeat(32) })).toThrow('public recovery snapshot');
+  const apply = vi.spyOn(materialization, 'applyMaterializedConfirmedLifecycle');
+  const normalize = vi.spyOn(materialization, 'normalizeLifecycleMaterialization');
   const capture = store.commitment!.capture.bind(store.commitment);
   vi.spyOn(store.commitment!, 'capture').mockImplementationOnce(() => async () => { throw new Error('retry'); }).mockImplementation(capture);
-  expect(await owner.submit(input)).toBe('pending'); advance(); await owner.runDue();
-  expect(materialization.normalizeLifecycleMaterialization(model, input)).toBe(model);
+  expect(await owner.submit(input)).toBe('pending');
+  const command = apply.mock.calls[0]![1], model = command.materialization!;
+  expect(Object.isFrozen(command)).toBe(true); expect(Object.isFrozen(model.proof)).toBe(true);
+  advance(); await owner.runDue();
+  expect(apply).toHaveBeenCalledTimes(2); expect(apply.mock.calls[1]![1].materialization).toBe(model);
+  expect(normalize).toHaveBeenCalledOnce();
+  const entries = new Map([[lifecycleRepairKey(command), { input: command, attempts: 0, nextAttemptAt: 0 }]]);
+  const decoded = decodeLifecycleRepairJournal(JSON.parse(JSON.stringify(encodeLifecycleRepairJournal(entries))));
+  const reopened = [...decoded.values()][0]!.input;
+  expect(reopened.materialization).toEqual(model); expect(reopened.materialization).not.toBe(model);
+  expect(Object.isFrozen(reopened.materialization)).toBe(true);
   const wire = materialization.lifecycleMaterializationWire(model);
   expect(wire).not.toHaveProperty('proof'); expect(wire.publicQuads).toBe(model.publicQuads);
-  expect(() => materialization.normalizeLifecycleMaterialization({ ...wire, publicQuads: [] }, input)).toThrow('public recovery snapshot');
+  expect(() => normalizeLifecycleRepairInput({ ...command, materialization: { ...wire, publicQuads: [] } })).toThrow('public recovery snapshot');
+  for (const changed of [{ merkleRoot: 'ab'.repeat(32) }, { packedKaId: command.packedKaId + 1n },
+    { assertionVersion: '2' }, { contextGraphId: 'another-graph' }, { subGraphName: 'another-subgraph' }]) {
+    expect(() => normalizeLifecycleRepairInput({ ...command, ...changed })).toThrow();
+  }
 });
 
 it('restores admitted receipt provenance over exact receiptless content before durable retirement', async () => {
@@ -263,3 +273,19 @@ it('propagates exact-content store failures without replacing or retiring eviden
   expect(update).not.toHaveBeenCalled(); fault.mockRestore(); advance(); await owner.runDue();
   expect(await journal()).toHaveLength(0);
 });
+
+it.each(['missing', 'duplicate', 'malformed', 'different'])(
+  'does not preserve a receipt with a %s stored root despite otherwise matching coordinates', async kind => {
+    const { owner, input, store, path, graph } = await fixture(true);
+    const dkg = 'http://dkg.io/ontology/', meta = contextGraphMetaUri(input.contextGraphId);
+    const rows = input.materialization!.metadataQuads.filter(q => q.predicate !== dkg + 'merkleRoot')
+      .map(q => q.predicate === dkg + 'transactionHash' ? { ...q, object: JSON.stringify('0x' + 'ef'.repeat(32)) } : q);
+    const row = (object: string) => ({ subject: input.publishedUal, predicate: dkg + 'merkleRoot', object, graph: meta });
+    if (kind !== 'missing') rows.push(row(JSON.stringify(kind === 'malformed' ? 'invalid' : 'ab'.repeat(32))));
+    if (kind === 'duplicate') rows.push(row(JSON.stringify(input.merkleRoot)));
+    await store.insert([...rows, ...input.materialization!.publicQuads.map(q => ({ ...q, graph }))]);
+    expect(await owner.submit(input)).toBe('repaired');
+    const reopened = new OxigraphStore(path); cleanups.push(() => reopened.close());
+    expect(await readConfirmedGraphKnowledgeAssetMetadataEnvelope(reopened, { contextGraphId: input.contextGraphId,
+      ual: input.publishedUal })).toMatchObject({ state: 'confirmed', envelope: { transactionHash: '0x' + '34'.repeat(32) } });
+  });

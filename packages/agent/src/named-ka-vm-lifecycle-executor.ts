@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertionLifecycleWriteLockKey, tryWithKeyedLocks, withKeyedLocks } from '@origintrail-official/dkg-publisher';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
+import type { ValidatedLifecycleRepairCommand } from './named-ka-vm-lifecycle-repair-journal.js';
 import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
 import { isConfirmedNamedKaVmLifecycleCurrent } from './named-ka-vm-lifecycle-current.js';
 import { confirmedNamedKaVmLifecycleApplyOptions } from './named-ka-vm-lifecycle.js';
@@ -14,8 +15,8 @@ export interface ConfirmedNamedKaVmLifecycleAdmission {
 }
 interface ExecutionCapabilities {
   readonly writeLocks: Map<string, Promise<void>>;
-  readonly isCurrent: (input: ConfirmedNamedKaVmLifecycleInput) => Promise<boolean>;
-  readonly apply: (input: ConfirmedNamedKaVmLifecycleInput, preserveVerifiedVmProof: boolean) => Promise<void>;
+  readonly isCurrent: (input: ValidatedLifecycleRepairCommand) => Promise<boolean>;
+  readonly apply: (input: ValidatedLifecycleRepairCommand, preserveVerifiedVmProof: boolean) => Promise<void>;
 }
 
 /** One host policy for both journal replay and transaction-owned queue recovery. */
@@ -49,13 +50,15 @@ export class ConfirmedNamedKaVmLifecycleExecutor {
     return tryWithKeyedLocks(this.capabilities.writeLocks, [this.key(input)], work);
   }
   /** The caller holds our lock; recheck caller-specific admission after the external proof. */
-  async commitIfCurrent(input: ConfirmedNamedKaVmLifecycleInput,
+  async commitIfCurrent(input: ValidatedLifecycleRepairCommand,
     admit: () => Promise<ConfirmedNamedKaVmLifecycleAdmission | undefined>,
   ): Promise<boolean> {
     if (!await this.capabilities.isCurrent(input)) return false;
     const admission = await admit();
     if (!admission) return false;
-    await this.capabilities.apply({ ...input, agentAddress: admission.lifecycleAuthor }, admission.preserveVerifiedVmProof);
+    const command = input.agentAddress === admission.lifecycleAuthor ? input
+      : Object.freeze({ ...input, agentAddress: admission.lifecycleAuthor });
+    await this.capabilities.apply(command, admission.preserveVerifiedVmProof);
     return true;
   }
 }

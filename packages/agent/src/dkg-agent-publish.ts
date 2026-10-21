@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { normalizeLifecycleRepairInput } from './named-ka-vm-lifecycle-repair-journal.js';
 import { repairPublishedDescriptor, type PublishedDescriptorRepairInput } from './published-descriptor-repair.js';
 import { incompleteNamedKaLifecycleOwner } from './incomplete-named-ka-lifecycle.js';
 import type { PromoteExecutionAuthority } from '@origintrail-official/dkg-publisher';
@@ -344,7 +345,7 @@ import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { applyTentativeNamedKaVmLifecycle } from './named-ka-vm-lifecycle.js';
-import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
+import { NamedKaVmLifecycleRepair } from './named-ka-vm-lifecycle-repair.js';
 import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
 import {
   normalizeRecoveredNamedKaPublish,
@@ -5165,14 +5166,14 @@ export class PublishMethods extends DKGAgentBase {
     this: DKGAgent, request: GraphScopedKnowledgeAssetVmPublishRequest, publishedUal: string,
     packedKaId: bigint, merkleRoot: string = request.sealMerkleRoot, signal?: AbortSignal,
   ): Promise<boolean> {
-    const input: ConfirmedNamedKaVmLifecycleInput = {
+    const input = normalizeLifecycleRepairInput({
       contextGraphId: request.contextGraphId, name: request.name,
       agentAddress: request.agentAddress ?? this.defaultAgentAddress ?? this.peerId,
       subGraphName: request.subGraphName, publishedUal, packedKaId, merkleRoot,
       assertionVersion: request.assertionVersion,
       publicationDeployment: { chainId: request.sealChainId, lifecycleAddress: request.sealKav10Address },
       ...(request.vmCurrentAssertion ? { priorMerkleRoot: request.vmCurrentAssertion } : {}),
-    };
+    });
     const executor = this._confirmedNamedKaVmLifecycleExecutor();
     const result = await executor.tryWithLock(input, () => executor.commitIfCurrent(input, async () => {
       throwIfRecoveryDeadlineReached(signal);

@@ -7,6 +7,7 @@ import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata, materialized
 import { tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically, tryReplaceSubjectAtomically, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { hexlify, getBytes } from 'ethers';
 import { mutatePublishedNamedKaVmLifecycle, type NamedKaVmLifecycleApplyOptions } from './named-ka-vm-lifecycle.js';
+import type { ValidatedLifecycleRepairCommand } from './named-ka-vm-lifecycle-repair-journal.js';
 import type { ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-repair.js';
 import type { ConfirmedNamedKaVmPublication } from './named-ka-vm-lifecycle-recovery-error.js';
 import { verifyExactGraphContent } from './exact-graph-content-verifier.js';
@@ -25,10 +26,6 @@ const rootHex = (root: string | Uint8Array): string => (typeof root === 'string'
 export interface ValidatedLifecycleMaterialization extends ConfirmedLifecycleMaterialization {
   readonly proof: ConfirmedGraphKnowledgeAssetProof;
 }
-const validated = new WeakMap<object, { binding: string; model: ValidatedLifecycleMaterialization }>();
-const binding = (input: ConfirmedNamedKaVmLifecycleInput) => JSON.stringify([
-  input.contextGraphId, input.subGraphName, input.assertionVersion, input.packedKaId.toString(), rootHex(input.merkleRoot),
-]);
 /** Persist the stable wire representation; execution-only validated proof is reconstructed at decode. */
 export function lifecycleMaterializationWire(snapshot: ConfirmedLifecycleMaterialization): ConfirmedLifecycleMaterialization {
   return { kaUal: snapshot.kaUal, publicQuads: snapshot.publicQuads, metadataQuads: snapshot.metadataQuads };
@@ -37,7 +34,7 @@ export function lifecycleMaterializationWire(snapshot: ConfirmedLifecycleMateria
 
 export function confirmedLifecycleMaterialization(input: ConfirmedNamedKaVmLifecycleInput,
   publication: ConfirmedNamedKaVmPublication, snapshot: ConfirmedLifecyclePublicSnapshot,
-): ValidatedLifecycleMaterialization {
+): ConfirmedLifecycleMaterialization {
   const { seal, onChainResult: receipt } = publication;
   const scope = createGraphKnowledgeAssetScope(seal.kaUal!, input.assertionVersion);
   const graph = knowledgeAssetLayerGraphUri(input.contextGraphId, MemoryLayer.VerifiableMemory, scope, input.subGraphName);
@@ -54,15 +51,15 @@ export function confirmedLifecycleMaterialization(input: ConfirmedNamedKaVmLifec
     publisherAddress: receipt.publisherAddress, batchId: input.packedKaId, chainId: seal.chainId.toString(),
   } } : { kind: 'finalized-materialization', provenance: { batchId: input.packedKaId, materializedVersion: version } } });
   if (receipt) metadataQuads.push(materializedVersionQuad(contextGraphMetaUri(input.contextGraphId), scope.ual, version));
-  return normalizeLifecycleMaterialization({ kaUal: scope.ual, publicQuads: snapshot.publicQuads, metadataQuads }, input);
+  return Object.freeze({ kaUal: scope.ual,
+    publicQuads: Object.freeze(snapshot.publicQuads.map(q => Object.freeze({ ...q, graph: '' }))),
+    metadataQuads: Object.freeze(metadataQuads.map(q => Object.freeze(q))) });
 }
 
 /** Validate disk and in-process evidence identically before any graph-store work. */
 export function normalizeLifecycleMaterialization(value: unknown, input: ConfirmedNamedKaVmLifecycleInput): ValidatedLifecycleMaterialization {
   const invalid = (): never => { throw new NamedKaVmLifecycleIntegrityError('Invalid confirmed lifecycle public recovery snapshot'); };
   if (typeof value !== 'object' || value === null) return invalid();
-  const cached = validated.get(value);
-  if (cached) return cached.binding === binding(input) ? cached.model : invalid();
   const fields = value as Record<string, unknown>;
   const quads = (raw: unknown): Quad[] => {
     if (!Array.isArray(raw)) return invalid();
@@ -86,12 +83,11 @@ export function normalizeLifecycleMaterialization(value: unknown, input: Confirm
     || rootHex(computeFlatKCRootV10(publicQuads, parsed.envelope.privateMerkleRoot ? [parsed.envelope.privateMerkleRoot] : [])) !== rootHex(input.merkleRoot)) return invalid();
   const model = Object.freeze({ kaUal: scope.ual, publicQuads: Object.freeze(publicQuads.map(q => Object.freeze(q))),
     metadataQuads: Object.freeze(metadataQuads.map(q => Object.freeze(q))), proof: confirmedGraphKnowledgeAssetProof(parsed.envelope) });
-  validated.set(model, { binding: binding(input), model });
   return model;
 }
 
 /** Caller owns the lifecycle lock. Share the publisher's materialization lock and worker fence. */
-export async function applyMaterializedConfirmedLifecycle(store: TripleStore, input: ConfirmedNamedKaVmLifecycleInput,
+export async function applyMaterializedConfirmedLifecycle(store: TripleStore, input: ValidatedLifecycleRepairCommand,
   options: NamedKaVmLifecycleApplyOptions,
 ): Promise<void> {
   const scope = createGraphKnowledgeAssetScope(input.materialization?.kaUal ?? input.publishedUal, input.assertionVersion);
@@ -100,7 +96,7 @@ export async function applyMaterializedConfirmedLifecycle(store: TripleStore, in
   }
   const meta = contextGraphMetaUri(input.contextGraphId);
   const graph = knowledgeAssetLayerGraphUri(input.contextGraphId, MemoryLayer.VerifiableMemory, scope, input.subGraphName);
-  const snapshot = input.materialization === undefined ? undefined : normalizeLifecycleMaterialization(input.materialization, input);
+  const snapshot = input.materialization;
   await withMaterializationLock(meta, scope.ual, async () => {
     const capability = store.commitment;
     const barrier = capability && (capability.durability === 'restart-durable' || options.persistence === 'process-local') ? capability.capture() : undefined;
@@ -126,7 +122,7 @@ export async function applyMaterializedConfirmedLifecycle(store: TripleStore, in
     const matches = content.status === 'verified';
     if (!exactMetadata && !snapshot) throw new Error('Confirmed lifecycle repair awaits its original public payload');
     const recoveredBase = snapshot
-      ? reconcileConfirmedGraphKnowledgeAssetMetadata(snapshot, metadata, current === BigInt(input.assertionVersion), input.contextGraphId)
+      ? reconcileConfirmedGraphKnowledgeAssetMetadata(snapshot, metadata, current === BigInt(input.assertionVersion))
       : metadata;
     const controls = await reconcileConfirmedKnowledgeAssetControls(store, { metaGraph: meta, ual: scope.ual,
       anchor: { assertionVersion: input.assertionVersion, merkleRoot: getBytes(`0x${proof.merkleRoot}`) },

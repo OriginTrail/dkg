@@ -1,6 +1,6 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { hexlify } from 'ethers';
-import { parseConfirmedGraphKnowledgeAssetMetadataEnvelope, preserveGraphKnowledgeAssetReceiptProvenanceV1,
+import { parseMetadataBytes32Literal, preserveGraphKnowledgeAssetReceiptProvenanceV1,
   type ConfirmedGraphKnowledgeAssetMetadataEnvelope } from './metadata.js';
 
 const rootHex = (root: Uint8Array): string => hexlify(root).slice(2).toLowerCase();
@@ -35,16 +35,12 @@ const immutablePredicates = new Set(['contentScopeVersion', 'assertionVersion', 
   'privateMerkleRoot', 'assertionGraph', 'subGraphName', 'merkleRoot', 'batchId', 'kaUal', 'status'].map(name => `http://dkg.io/ontology/${name}`));
 /** Reconcile admitted confirmed evidence; the caller owns version fencing and access controls. */
 export function reconcileConfirmedGraphKnowledgeAssetMetadata(
-  snapshot: { kaUal: string; metadataQuads: readonly Quad[]; proof: ConfirmedGraphKnowledgeAssetProof },
-  metadata: readonly Quad[], sameVersion: boolean, contextGraphId: string,
+  snapshot: { metadataQuads: readonly Quad[]; proof: ConfirmedGraphKnowledgeAssetProof },
+  metadata: readonly Quad[], sameVersion: boolean,
 ): Quad[] {
-  const root = snapshot.metadataQuads.find(q => q.predicate === 'http://dkg.io/ontology/merkleRoot')!;
-  const roots = metadata.filter(q => q.predicate === root.predicate);
-  if (!sameVersion || roots.length !== 1) return [...snapshot.metadataQuads];
-  // Use the canonical parser for the stored root even when another immutable field is corrupt.
-  const anchored = parseConfirmedGraphKnowledgeAssetMetadataEnvelope(
-    [...snapshot.metadataQuads.filter(q => q.predicate !== root.predicate), ...roots], { contextGraphId, ual: snapshot.kaUal });
-  if (anchored.state !== 'confirmed' || rootHex(anchored.envelope.merkleRoot) !== snapshot.proof.merkleRoot) return [...snapshot.metadataQuads];
+  const roots = metadata.filter(q => q.predicate === 'http://dkg.io/ontology/merkleRoot');
+  const storedRoot = roots.length === 1 ? parseMetadataBytes32Literal(roots[0]!.object) : undefined;
+  if (!sameVersion || !storedRoot || rootHex(storedRoot) !== snapshot.proof.merkleRoot) return [...snapshot.metadataQuads];
   // Same version/root receipt provenance and unrelated rows survive even a malformed count/identity.
   const canonical = preserveGraphKnowledgeAssetReceiptProvenanceV1(snapshot.metadataQuads, metadata);
   const replacedPredicates = new Set([...immutablePredicates, ...['transactionHash', 'materializedVersion', 'confirmationKind'].map(name => `http://dkg.io/ontology/${name}`)]);

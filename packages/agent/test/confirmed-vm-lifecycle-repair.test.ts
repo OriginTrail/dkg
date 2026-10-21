@@ -24,7 +24,7 @@ import { applyTentativeNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.j
 import { applyPublishedNamedKaVmLifecycle } from './_helpers/confirmed-lifecycle-metadata-writer.js';
 function serializedRepairInput(input: ConfirmedNamedKaVmLifecycleInput) {
   return encodeLifecycleRepairJournal(new Map([[lifecycleRepairKey(input),
-    { input, attempts: 0, nextAttemptAt: 0 },
+    { input: normalizeLifecycleRepairInput(input), attempts: 0, nextAttemptAt: 0 },
   ]])).entries[0]![1].input;
 }
 
