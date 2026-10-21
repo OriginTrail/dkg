@@ -45,6 +45,7 @@ import {
   TripleStoreAsyncLiftPublisher,
   computeFlatKCRootV10,
   generateGraphKnowledgeAssetMetadata,
+  replaceLocallyTrustedKnowledgeAssetControlEnvelope,
   generateAssertionCreatedMetadata,
   generateAssertionPromotedMetadata,
   type AsyncKnowledgeAssetVmPublishRecoveryEvidence,
@@ -716,8 +717,7 @@ export function createPublicationPathV1(
   };
   const path: Pick<PublicationPathV1, 'materialization'> = { materialization: 'promoted' };
   vi.spyOn(agent, 'getContextGraphOnChainId').mockResolvedValue('1');
-  // Recovery asks the agent's own finalization handler whether the VM content is there; only that
-  // answer is staged.
+  // The staged materializer installs verified VM content and authenticated exact-anchor controls.
   vi.spyOn(agent.getOrCreateFinalizationHandler(), 'handleChainReconciledKC').mockImplementation(async (input) => {
     if (path.materialization === 'promoted' || path.materialization === 'already-confirmed') {
       const scope = createGraphKnowledgeAssetScope(input.ual, input.trustedAssertionEvidence!.assertionVersion);
@@ -729,6 +729,9 @@ export function createPublicationPathV1(
       }, { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
         batchId: input.kaId, materializedVersion: { blockNumber: input.versionBlock, txIndex: 0 },
       } } })]);
+      await replaceLocallyTrustedKnowledgeAssetControlEnvelope(agent.store, scope.ual,
+        { assertionVersion: scope.assertionVersion, merkleRoot: input.merkleRoot },
+        { publisherPeerId: agent.peerId, accessPolicy: 'ownerOnly', allowedPeers: [] });
     }
     fixture.record(`vm-materialization:${path.materialization}`);
     return path.materialization;
