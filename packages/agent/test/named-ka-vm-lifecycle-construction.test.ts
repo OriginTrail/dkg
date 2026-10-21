@@ -1,3 +1,5 @@
+import { getBytes } from 'ethers';
+import { replaceLocallyTrustedKnowledgeAssetControlEnvelope } from '@origintrail-official/dkg-publisher';
 import { describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { GRAPH_KA_CONTENT_SCOPE_VERSION, assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
@@ -29,6 +31,9 @@ describe('agent construction wires the queued lifecycle writer', () => {
       chainAdapter: chain, rfc64CatalogActivation: { enabled: false } });
     try {
       await store.insert([...input.materialization!.metadataQuads, ...publicQuads.map(q => ({ ...q, graph }))]);
+      await replaceLocallyTrustedKnowledgeAssetControlEnvelope(store, input.publishedUal,
+        { assertionVersion: input.assertionVersion, merkleRoot: getBytes(input.merkleRoot) },
+        { publisherPeerId: 'test-publisher', accessPolicy: 'allowList', allowedPeers: ['test-reader'] });
       const failure = new Error('lifecycle update rejected');
       const update = vi.spyOn(store, 'atomicUpdate');
       vi.spyOn(chain, 'getKnowledgeAssetsLifecycleAddress').mockResolvedValue(author);

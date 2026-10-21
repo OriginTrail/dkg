@@ -1,3 +1,5 @@
+import { getBytes } from 'ethers';
+import { replaceLocallyTrustedKnowledgeAssetControlEnvelope } from '@origintrail-official/dkg-publisher';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -56,6 +58,9 @@ describe('confirmed lifecycle persistence policy', () => {
       assertionVersion: input.assertionVersion, sealMerkleRoot: input.merkleRoot,
       sealChainId: input.publicationDeployment.chainId, sealKav10Address: input.publicationDeployment.lifecycleAddress } as GraphScopedKnowledgeAssetVmPublishRequest;
     await store.insert([...input.materialization!.metadataQuads, ...input.materialization!.publicQuads.map(q => ({ ...q, graph }))]);
+    await replaceLocallyTrustedKnowledgeAssetControlEnvelope(store, input.publishedUal,
+      { assertionVersion: input.assertionVersion, merkleRoot: getBytes(input.merkleRoot) },
+      { publisherPeerId: 'test-publisher', accessPolicy: 'allowList', allowedPeers: ['test-reader'] });
     const stamp = agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, input.publishedUal, input.packedKaId);
     if (durable) await expect(stamp).rejects.toMatchObject({ code: 'KA_VM_LIFECYCLE_DURABILITY_UNAVAILABLE' });
     else expect(await stamp).toBe(true);
