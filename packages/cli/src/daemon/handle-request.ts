@@ -1,3 +1,4 @@
+import { handlePrivateAccessRoutes } from './routes/private-access.js';
 // daemon/handle-request.ts
 //
 // The `handleRequest` HTTP router (~5,160 lines) extracted verbatim
@@ -407,6 +408,8 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
   await handleMemoryRoutes(ctx);
   if (res.writableEnded) return;
 
+  await handlePrivateAccessRoutes(ctx);
+  if (res.writableEnded || req.aborted || res.destroyed) return;
   await handlePublisherRoutes(ctx);
   if (res.writableEnded) return;
 

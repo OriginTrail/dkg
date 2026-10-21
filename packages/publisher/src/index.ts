@@ -535,7 +535,8 @@ export { acceptIncomingPublicQuads } from './incoming-public-copy.js';
 export { UpdateHandler } from './update-handler.js';
 export { ChainEventPoller, type ChainEventPollerConfig, type CursorPersistence, type OnContextGraphCreated } from './chain-event-poller.js';
 export { AccessHandler, type AccessPolicy } from './access-handler.js';
-export { AccessClient, type AccessResult } from './access-client.js';
+export { accessError, isAccessError, ACCESS_ERROR_CODES, type AccessError, type AccessErrorCode } from './access-errors.js';
+export { AccessClient, RequestOwnedAccessClient, type AccessResult, type RequestOwnedAccessResult, type AccessClientRequestOptions, type RequestOwnedAccessSendSurface } from './access-client.js';
 export * from './share-batching.js';
 export { withKeyedLocks, tryWithKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
 
