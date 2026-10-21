@@ -9,6 +9,7 @@ import { hexlify } from 'ethers';
 import type { PublishedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle.js';
 import type { ConfirmedNamedKaVmPublication } from './named-ka-vm-lifecycle-recovery-error.js';
 import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
+import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
 
 export interface ConfirmedNamedKaVmPublicationDeployment {
   readonly chainId: string;
@@ -163,7 +164,7 @@ export function normalizeLifecycleMaterialization(value: unknown, input: Confirm
   };
   if (typeof fields.kaUal !== 'string') return invalid();
   const scope = createGraphKnowledgeAssetScope(fields.kaUal, input.assertionVersion);
-  if (((BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber)) !== input.packedKaId) return invalid();
+  if (packKnowledgeAssetIdFromIdentity(scope) !== input.packedKaId) return invalid();
   const publicQuads = quads(fields.publicQuads).map(q => ({ ...q, graph: '' }));
   const metadataQuads = quads(fields.metadataQuads);
   const meta = contextGraphMetaUri(input.contextGraphId);

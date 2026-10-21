@@ -10,13 +10,14 @@ import { mutatePublishedNamedKaVmLifecycle, type NamedKaVmLifecycleApplyOptions 
 import type { ValidatedLifecycleRepairCommand } from './named-ka-vm-lifecycle-evidence.js';
 import { verifyExactGraphContent } from './exact-graph-content-verifier.js';
 import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
+import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
 
 /** Caller owns the lifecycle lock. Share the publisher's materialization lock and worker fence. */
 export async function applyMaterializedConfirmedLifecycle(store: TripleStore, input: ValidatedLifecycleRepairCommand,
   options: NamedKaVmLifecycleApplyOptions,
 ): Promise<void> {
   const scope = createGraphKnowledgeAssetScope(input.materialization?.kaUal ?? input.publishedUal, input.assertionVersion);
-  if (((BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber)) !== input.packedKaId) {
+  if (packKnowledgeAssetIdFromIdentity(scope) !== input.packedKaId) {
     throw new NamedKaVmLifecycleIntegrityError('Confirmed lifecycle UAL differs from its packed identity');
   }
   const meta = contextGraphMetaUri(input.contextGraphId);
