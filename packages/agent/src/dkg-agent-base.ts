@@ -1,3 +1,4 @@
+import { mergeRpcUsageWindows } from '@origintrail-official/dkg-chain';
 import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
 import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-recovery-host.js';
 import { createRecoveryAuthority } from './durable-recovery-authority.js';
@@ -2234,6 +2235,8 @@ export class DKGAgentBase {
    * protected instead of the daemon reaching through a cast.
    */
   drainRpcUsage(): RpcUsageWindow {
-    return this.chain.drainRpcUsage?.() ?? emptyRpcUsageWindow();
+    const normal = this.chain.drainRpcUsage?.() ?? emptyRpcUsageWindow();
+    const cache = this.config.coreChainCacheNetworks;
+    return cache.length ? mergeRpcUsageWindows(normal, ...cache.map(n => n.registry.drainRpcUsage?.())) : normal;
   }
 }

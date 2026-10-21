@@ -9,6 +9,34 @@ export interface PublicGraphSnapshotRequest {
   refresh: boolean;
 }
 
+export interface CoreChainCacheSnapshotRequest extends PublicGraphSnapshotRequest {
+  chainId: string;
+  deploymentId: string;
+}
+
+function validateCacheRequest(value: unknown): CoreChainCacheSnapshotRequest {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid snapshot request');
+  const r = value as Record<string, unknown>;
+  if (Object.keys(r).sort().join(',') !== 'chainId,contextGraphId,deploymentId,onChainId,refresh,version'
+    || typeof r.chainId !== 'string' || !r.chainId.length || r.chainId.length > 256
+    || typeof r.deploymentId !== 'string' || !r.deploymentId.length || r.deploymentId.length > 256)
+    throw new Error('Invalid snapshot request');
+  return { ...validateRequest({ version: r.version, contextGraphId: r.contextGraphId,
+    onChainId: r.onChainId, refresh: r.refresh }), chainId: r.chainId, deploymentId: r.deploymentId };
+}
+
+export function encodeCoreChainCacheSnapshotRequest(request: CoreChainCacheSnapshotRequest): Uint8Array {
+  const bytes = new TextEncoder().encode(JSON.stringify(validateCacheRequest(request)));
+  assertRequestSize(bytes);
+  return bytes;
+}
+
+export function decodeCoreChainCacheSnapshotRequest(bytes: Uint8Array): CoreChainCacheSnapshotRequest {
+  assertRequestSize(bytes);
+  const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  return validateCacheRequest(value);
+}
+
 function validateRequest(value: unknown): PublicGraphSnapshotRequest {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid snapshot request');
   const request = value as Record<string, unknown>;
