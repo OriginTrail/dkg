@@ -17,12 +17,12 @@ async function persistentStore() {
 describe('storage persistence boundary', () => {
   it('runs a real composed store barrier on the outer store with the caller options', async () => {
     const backend = await persistentStore(), store = new ChangelogStore(new GraphSetIndexStore(backend));
-    const innerFlush = vi.spyOn(backend, 'flush'), outerPersist = vi.spyOn(store.commitment!, 'commit');
-    const options = { source: 'persistence-boundary-test' };
+    const innerFlush = vi.spyOn(backend, 'flush'), capture = vi.spyOn(store.commitment!, 'capture');
+    const options = { source: 'persistence-boundary-test' }, commit = store.commitment!.capture();
     try {
       await store.insert([{ graph: 'urn:persistence', subject: 'urn:asset', predicate: 'urn:value', object: '"durable"' }]);
-      await store.commitment!.commit(options);
-      expect(outerPersist).toHaveBeenCalledWith(options); expect(innerFlush).toHaveBeenCalledWith(options);
+      await commit(options);
+      expect(capture).toHaveBeenCalledOnce(); expect(innerFlush).toHaveBeenCalledWith(options);
     } finally { await store.close(); }
   });
   it('refuses a decorator-only no-op flush around an uncertified endpoint', async () => {
@@ -46,20 +46,20 @@ describe('storage persistence boundary', () => {
     const store = await createTripleStore(config), untrusted = await createTripleStore({ ...config });
     try {
       expect(untrusted.commitment).toBeUndefined();
-      await store.commitment!.commit(options);
+      await store.commitment!.capture()(options);
       expect(flush).toHaveBeenCalledExactlyOnceWith(options);
     } finally { await store.close(); await untrusted.close(); }
   });
   it('accepts a separately certified acknowledgement through decorators', async () => {
     const endpoint = new SparqlHttpStore({ queryEndpoint: 'http://durable.test/query', writesDurableOnAcknowledgement: true });
-    const store = new ChangelogStore(new GraphSetIndexStore(endpoint)), outerPersist = vi.spyOn(store.commitment!, 'commit');
-    await store.commitment!.commit();
-    expect(outerPersist).toHaveBeenCalledOnce(); await store.close();
+    const store = new ChangelogStore(new GraphSetIndexStore(endpoint)), capture = vi.spyOn(store.commitment!, 'capture');
+    await store.commitment!.capture()();
+    expect(capture).toHaveBeenCalledOnce(); await store.close();
   });
   it('does not retire evidence after an outer persistence error', async () => {
     const backend = await persistentStore(), store = new GraphSetIndexStore(backend), failure = new Error('disk unavailable');
     vi.spyOn(backend, 'flush').mockRejectedValueOnce(failure);
-    await expect(store.commitment!.commit()).rejects.toBe(failure);
+    await expect(store.commitment!.capture()()).rejects.toBe(failure);
     await store.close();
   });
 });
@@ -68,11 +68,11 @@ describe('storage persistence boundary', () => {
 describe('explicit persistence certification', () => {
   it('uses an explicit callable without inspecting a decorator topology or flush', async () => {
     const commit = vi.fn(async () => {});
-    const store = { commitment: { durability: 'restart-durable', commit }, get innerStore() { throw new Error('topology is not a persistence contract'); } } as unknown as TripleStore;
+    const store = { commitment: { durability: 'restart-durable', capture: () => commit }, get innerStore() { throw new Error('topology is not a persistence contract'); } } as unknown as TripleStore;
     const options = { source: 'explicit-capability' }, drain = vi.fn(async () => {});
     const capability = composeTripleStoreCommitment(store, drain);
     expect(capability?.durability).toBe('restart-durable');
-    await capability!.commit(options);
+    await capability!.capture()(options);
     expect(drain).toHaveBeenCalledOnce();
     expect(commit).toHaveBeenCalledExactlyOnceWith(options);
     expect(drain.mock.invocationCallOrder[0]).toBeLessThan(commit.mock.invocationCallOrder[0]!);
@@ -99,10 +99,11 @@ describe('explicit persistence certification', () => {
       await realInsert(quads, options);
     });
     const flushed = vi.spyOn(backend, 'flush'); let persisted = false;
+    const commit = store.commitment!.capture();
     const mutation = store.insert([{ graph: 'urn:held-graph', subject: 'urn:held-asset', predicate: 'urn:value', object: '"held"' }]);
     try {
       await vi.waitFor(() => expect(entered).toBe(true));
-      const barrier = store.commitment!.commit().then(() => { persisted = true; });
+      const barrier = commit().then(() => { persisted = true; });
       await new Promise(resolve => setTimeout(resolve, 20));
       expect(persisted).toBe(false); expect(flushed).not.toHaveBeenCalled();
       release(); await mutation; await barrier;
@@ -119,12 +120,13 @@ describe('certified adapter and decorator composition', () => {
   it('binds a receiver-dependent certified adapter method through all outer barriers and survives reopen', async () => {
     const backend = await persistentStore(), path = join(directories.at(-1)!, 'store.nq');
     const capability = backend.commitment;
-    Object.defineProperty(capability, 'commit', { value: async function (options: Parameters<NonNullable<TripleStore['commitment']>['commit']>[0]) {
-      expect(this).toBe(capability); await backend.flush(options);
+    Object.defineProperty(capability, 'capture', { value: function () {
+      expect(this).toBe(capability);
+      return (options?: import('../src/triple-store.js').QueryOptions) => backend.flush(options);
     } });
     const dir = await mkdtemp(join(tmpdir(), 'dkg-bound-persistence-')); directories.push(dir);
     const store = new ChangelogStore(new GraphSetIndexStore(new SharedMemoryLiteralBlobStore(backend, { blobDir: dir, thresholdBytes: 1024 })));
-    const barrier = store.commitment!.commit;
+    const barrier = store.commitment!.capture();
     try {
       await store.insert([{ graph: 'urn:receiver', subject: 'urn:asset', predicate: 'urn:value', object: '"bound"' }]);
       await barrier({ source: 'detached-outer-barrier' });
@@ -150,7 +152,7 @@ describe('certified adapter and decorator composition', () => {
         ? new SharedMemoryLiteralBlobStore(new GraphSetIndexStore(new ChangelogStore(backend)), { blobDir: join(dir, `${outside}-blobs`), thresholdBytes: 10 })
         : new ChangelogStore(new GraphSetIndexStore(new SharedMemoryLiteralBlobStore(backend, { blobDir: join(dir, `${outside}-blobs`), thresholdBytes: 10 })));
       const flush = vi.spyOn(backend, 'flush'), options = { source: `composed-${outside}` };
-      try { await store.commitment!.commit(options); expect(flush).toHaveBeenCalledExactlyOnceWith(options); }
+      try { await store.commitment!.capture()(options); expect(flush).toHaveBeenCalledExactlyOnceWith(options); }
       finally { await store.close(); }
     }
   });
@@ -159,8 +161,9 @@ describe('certified adapter and decorator composition', () => {
     const path = join(dir, 'worker.nq'), persistent = new OxigraphWorkerStore(path), memory = new OxigraphWorkerStore();
     try {
       expect(memory.commitment?.durability).toBe('process-local');
+      const commit = persistent.commitment!.capture();
       await persistent.insert([{ graph: 'urn:worker', subject: 'urn:asset', predicate: 'urn:value', object: '"persisted"' }]);
-      await persistent.commitment!.commit();
+      await commit();
       const reopened = new OxigraphStore(path);
       try { expect(await reopened.query('ASK { GRAPH <urn:worker> { <urn:asset> <urn:value> "persisted" } }')).toMatchObject({ value: true }); }
       finally { await reopened.close(); }
@@ -171,12 +174,12 @@ describe('certified adapter and decorator composition', () => {
     const aborted = new AbortController(), reason = new Error('caller retired'); aborted.abort(reason);
     const flush = vi.spyOn(backend, 'flush');
     try {
-      await expect(store.commitment!.commit({ signal: aborted.signal })).rejects.toBe(reason);
+      await expect(store.commitment!.capture()({ signal: aborted.signal })).rejects.toBe(reason);
       expect(flush).not.toHaveBeenCalled();
       const controller = new AbortController(); let entered = false, release!: () => void;
       const held = new Promise<void>(resolve => { release = resolve; });
       flush.mockImplementationOnce(async () => { entered = true; await held; });
-      const barrier = store.commitment!.commit({ signal: controller.signal });
+      const barrier = store.commitment!.capture()({ signal: controller.signal });
       const rejected = expect(barrier).rejects.toBe(reason);
       await vi.waitFor(() => expect(entered).toBe(true)); controller.abort(reason); release(); await rejected;
     } finally { await store.close(); }
@@ -195,7 +198,7 @@ describe('Blazegraph acknowledged-write commitment', () => {
     try {
       expect(durable).toBeInstanceOf(ChangelogStore);
       expect(durable.commitment?.durability).toBe('restart-durable');
-      await durable.commitment!.commit({ source: 'blazegraph-factory-barrier' });
+      await durable.commitment!.capture()({ source: 'blazegraph-factory-barrier' });
       expect(volatile.commitment).toBeUndefined();
       await expect(createTripleStore(config({ writesDurableOnAcknowledgement: 'false' })))
         .rejects.toThrow('blazegraph writesDurableOnAcknowledgement must be boolean');
@@ -212,8 +215,9 @@ describe('explicit process-local commitment', () => {
     const store = new ChangelogStore(new GraphSetIndexStore(new SharedMemoryLiteralBlobStore(backend, { blobDir: dir, thresholdBytes: 1024 })));
     try {
       expect(store.commitment?.durability).toBe('process-local');
+      const commit = store.commitment!.capture();
       await store.insert([{ graph: 'urn:memory', subject: 'urn:asset', predicate: 'urn:value', object: '"committed"' }]);
-      await store.commitment!.commit();
+      await commit();
       expect(await store.headSeq()).toBe(1);
       expect(await store.query('ASK { GRAPH <urn:memory> { <urn:asset> <urn:value> "committed" } }')).toMatchObject({ value: true });
     } finally { await store.close(); }
@@ -228,10 +232,11 @@ describe('explicit process-local commitment', () => {
     const held = new Promise<void>(resolve => { release = resolve; });
     vi.spyOn(backend, 'insert').mockImplementation(async (quads, options) => { entered = true; await held; await insert(quads, options); });
     const failure = new Error('memory worker retired'), flush = vi.spyOn(backend, 'flush').mockRejectedValueOnce(failure);
+    const commit = store.commitment!.capture();
     const mutation = store.insert([{ graph: 'urn:memory', subject: 'urn:asset', predicate: 'urn:value', object: '"queued"' }]);
     try {
       await vi.waitFor(() => expect(entered).toBe(true));
-      const barrier = store.commitment!.commit(), rejected = expect(barrier).rejects.toBe(failure);
+      const barrier = commit(), rejected = expect(barrier).rejects.toBe(failure);
       await new Promise(resolve => setImmediate(resolve)); expect(flush).not.toHaveBeenCalled();
       release(); await mutation; await rejected; expect(await store.headSeq()).toBe(1);
     } finally { release(); await mutation; await store.close(); }

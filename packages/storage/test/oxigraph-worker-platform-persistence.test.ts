@@ -32,8 +32,9 @@ it('the real worker uses a writable renamed-file barrier and reopens when Window
     await writeFile(script, `import { OxigraphWorkerStore } from ${JSON.stringify(adapter)};
       const store = new OxigraphWorkerStore(${JSON.stringify(snapshot)});
       try {
+        const commit = store.commitment.capture();
         await store.insert([{subject:'urn:worker:windows',predicate:'urn:worker:p',object:'"persisted"',graph:'urn:worker:g'}]);
-        await store.commitment.commit();
+        await commit();
       } finally { await store.close(); }
       const reopened = new OxigraphWorkerStore(${JSON.stringify(snapshot)});
       try { console.log(JSON.stringify({ reopened:await reopened.countQuads() })); }

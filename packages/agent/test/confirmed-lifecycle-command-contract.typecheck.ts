@@ -69,3 +69,11 @@ void buildNamedKaVmLifecycleMutation({ ...descriptor, kind: 'verified-descriptor
 // @ts-expect-error Proof preservation cannot be supplied as a second independent channel.
 void buildNamedKaVmLifecycleMutation({ ...confirmed, kind: 'confirmed', workspace, preserveVerifiedVmProof: true }, {}, false);
 void noVersion;
+
+import type { ConfirmedNamedKaVmLifecycleAdmission } from '../src/named-ka-vm-lifecycle-executor.js';
+const admitted = { lifecycleAuthor: confirmed.agentAddress, preserveVerifiedVmProof: false };
+// @ts-expect-error Admission resolves author/policy; it cannot replace checked publication evidence.
+const replacedPublication: ConfirmedNamedKaVmLifecycleAdmission = { ...admitted, input: confirmed };
+// @ts-expect-error Admission cannot change the checked root independently.
+const replacedRoot: ConfirmedNamedKaVmLifecycleAdmission = { ...admitted, merkleRoot: '00' };
+void replacedPublication; void replacedRoot;

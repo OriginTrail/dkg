@@ -6,8 +6,8 @@ import { isConfirmedNamedKaVmLifecycleCurrent } from './named-ka-vm-lifecycle-cu
 import { applyPublishedNamedKaVmLifecycle, confirmedNamedKaVmLifecycleApplyOptions } from './named-ka-vm-lifecycle.js';
 
 type Coordinates = Pick<ConfirmedNamedKaVmLifecycleInput, 'contextGraphId' | 'name' | 'agentAddress' | 'subGraphName'>;
-export interface ConfirmedNamedKaVmLifecycleCommit {
-  readonly input: ConfirmedNamedKaVmLifecycleInput;
+export interface ConfirmedNamedKaVmLifecycleAdmission {
+  readonly lifecycleAuthor: string;
   readonly preserveVerifiedVmProof: boolean;
 }
 interface ExecutionCapabilities {
@@ -48,12 +48,12 @@ export class ConfirmedNamedKaVmLifecycleExecutor {
   }
   /** The caller holds our lock; recheck caller-specific admission after the external proof. */
   async commitIfCurrent(input: ConfirmedNamedKaVmLifecycleInput,
-    admit: () => Promise<ConfirmedNamedKaVmLifecycleCommit | undefined>,
+    admit: () => Promise<ConfirmedNamedKaVmLifecycleAdmission | undefined>,
   ): Promise<boolean> {
     if (!await this.capabilities.isCurrent(input)) return false;
     const admission = await admit();
     if (!admission) return false;
-    await this.capabilities.apply(admission.input, admission.preserveVerifiedVmProof);
+    await this.capabilities.apply({ ...input, agentAddress: admission.lifecycleAuthor }, admission.preserveVerifiedVmProof);
     return true;
   }
 }

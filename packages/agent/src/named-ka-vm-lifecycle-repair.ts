@@ -130,7 +130,7 @@ export class NamedKaVmLifecycleRepair {
       // Admission can still supersede this entry during the external currency read.
       outcome = await this.executor.commitIfCurrent(input,
         () => this.serial(async () => this.entries.get(key) === entry
-          ? { input, preserveVerifiedVmProof: false } : undefined)) ? 'repaired' : 'superseded';
+          ? { lifecycleAuthor: input.agentAddress, preserveVerifiedVmProof: false } : undefined)) ? 'repaired' : 'superseded';
     } catch (error) {
       failure = error;
       outcome = isNamedKaVmLifecycleIntegrityError(error) ? 'rejected' : 'pending';

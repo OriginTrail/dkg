@@ -1051,7 +1051,7 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     const durable = new BlazegraphStore(baseUrl);
     expect(durable.commitment?.durability).toBe('restart-durable');
     // Each acknowledged request already committed its own journal transaction: the barrier sends nothing.
-    await expect(durable.commitment!.commit({ source: 'blazegraph-commit-test' })).resolves.toBeUndefined();
+    await expect(durable.commitment!.capture()({ source: 'blazegraph-commit-test' })).resolves.toBeUndefined();
     expect(fetchCalls).toHaveLength(0);
     expect(new BlazegraphStore(baseUrl, { writesDurableOnAcknowledgement: true }).commitment?.durability).toBe('restart-durable');
     expect(new BlazegraphStore(baseUrl, { writesDurableOnAcknowledgement: false }).commitment).toBeUndefined();

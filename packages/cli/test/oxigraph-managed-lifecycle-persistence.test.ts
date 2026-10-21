@@ -43,7 +43,7 @@ it('completes confirmed lifecycle repair through actual managed configuration on
   try {
     store = await createTripleStore(managed!.storeConfig);
     expect(store.commitment?.durability).toBe('restart-durable');
-    expect(store.commitment?.commit).toBeTypeOf('function');
+    expect(store.commitment?.capture).toBeTypeOf('function');
     const cg = 'managed-lifecycle', author = `0x${'11'.repeat(20)}`, name = 'asset', hash = 'ab'.repeat(32);
     const packedKaId = (BigInt(author) << 96n) | 1n;
     const meta = contextGraphMetaUri(cg), lifecycle = assertionLifecycleUri(cg, author, name);

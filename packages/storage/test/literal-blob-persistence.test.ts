@@ -38,14 +38,14 @@ async function fixture() {
   const path = join(dir, 'store.nq'), blobDir = join(dir, 'literal-files', 'nested'), backend = new OxigraphStore(path);
   const store = new SharedMemoryLiteralBlobStore(backend, { blobDir, thresholdBytes: 10 }); stores.push(store);
   const quad = { graph: 'urn:dkg:cg/_shared_memory', subject: 'urn:asset', predicate: 'urn:value', object: '"a literal larger than the threshold"' };
-  return { store, backend, path, blobDir, quad, dir };
+  return { store, backend, path, blobDir, quad, dir, commit: store.commitment!.capture() };
 }
 describe('external literal persistence certification', () => {
   it('does not retain a failed directory-creation task and retries without a dangling reference', async () => {
     const f = await fixture(), insert = vi.spyOn(f.backend, 'insert'); syncControl.creationFail = true;
     await expect(f.store.insert([f.quad])).rejects.toMatchObject({ code: 'EACCES' });
     expect(insert).not.toHaveBeenCalled(); expect(syncControl.writes).toEqual([]);
-    syncControl.creationFail = false; await f.store.insert([f.quad]); await (f.store).commitment!.commit();
+    syncControl.creationFail = false; await f.store.insert([f.quad]); await f.commit();
     expect(await f.store.query('SELECT ?value WHERE { GRAPH <urn:dkg:cg/_shared_memory> { <urn:asset> <urn:value> ?value } }'))
       .toMatchObject({ bindings: [{ value: f.quad.object }] });
   });
@@ -57,7 +57,7 @@ describe('external literal persistence certification', () => {
     const second = f.store.insert([{ ...f.quad, subject: 'urn:second', object: '"another large content hash"' }]);
     try { await new Promise(resolve => setImmediate(resolve)); expect(syncControl.writes).toEqual([]); expect(insert).not.toHaveBeenCalled(); }
     finally { release(); await Promise.all([first, second]); }
-    await (f.store).commitment!.commit();
+    await f.commit();
     expect(insert).toHaveBeenCalledTimes(2);
   });
   it('prepares ancestry once before concurrent distinct blobs begin their own writes', async () => {
@@ -103,7 +103,7 @@ describe('external literal persistence certification', () => {
       await vi.waitFor(() => expect(syncControl.entered).toBe(true));
       expect(insert).not.toHaveBeenCalled();
     } finally { release(); }
-    await mutation; await (f.store).commitment!.commit();
+    await mutation; await f.commit();
     expect(syncControl.calls).toContain(f.blobDir); expect(syncControl.calls).toContain(join(f.blobDir, '..')); expect(syncControl.calls.some(path => /[a-f0-9]{64}$/.test(path))).toBe(true);
     const reopened = new SharedMemoryLiteralBlobStore(new OxigraphStore(f.path), { blobDir: f.blobDir, thresholdBytes: 10 }); stores.push(reopened);
     expect(await reopened.query('SELECT ?value WHERE { GRAPH <urn:dkg:cg/_shared_memory> { <urn:asset> <urn:value> ?value } }'))
@@ -115,7 +115,7 @@ describe('external literal persistence certification', () => {
     const next = { ...f.quad, subject: 'urn:next', object: '"a different literal larger than the threshold"' };
     syncControl.fail = failure;
     await expect(f.store.insert([next])).rejects.toMatchObject({ code: 'EIO' }); expect(insert).not.toHaveBeenCalled();
-    syncControl.fail = undefined; await f.store.insert([next]); await (f.store).commitment!.commit();
+    syncControl.fail = undefined; await f.store.insert([next]); await f.commit();
     expect(insert).toHaveBeenCalledOnce(); expect(syncControl.calls.filter(path => /[a-f0-9]{64}$/.test(path))).toHaveLength(2);
   });
 });

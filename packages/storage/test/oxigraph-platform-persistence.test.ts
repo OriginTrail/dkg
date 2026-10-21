@@ -34,13 +34,14 @@ async function fixture(platform: NodeJS.Platform) {
   // Oxigraph's native engine was loaded before changing the JS platform policy.
   Object.defineProperty(process, 'platform', { ...originalPlatform, value: platform });
   const store = new OxigraphStore(io.snapshot);
+  const commit = store.commitment.capture();
   await store.insert([{ subject: 'urn:platform:s', predicate: 'urn:platform:p', object: '"persisted"', graph: 'urn:platform:g' }]);
-  return store;
+  return { store, commit };
 }
 it.each(['flush', 'close', 'commit'] as const)('Windows %s flushes the renamed file with write access and reopens without a directory handle', async method => {
-  const store = await fixture('win32');
+  const { store, commit } = await fixture('win32');
   try {
-    await (method === 'commit' ? store.commitment.commit() : store[method]());
+    await (method === 'commit' ? commit() : store[method]());
     expect(io.calls).toContain(`${io.snapshot}.tmp:w`);
     expect(io.calls).toContain(`${io.snapshot}:r+`);
     expect(io.calls).not.toContain(`${io.directory}:r`);
@@ -49,23 +50,23 @@ it.each(['flush', 'close', 'commit'] as const)('Windows %s flushes the renamed f
   } finally { await store.close(); }
 });
 it('Windows writable-file sync errors reject certified commitment and can be retried', async () => {
-  const store = await fixture('win32');
+  const { store, commit } = await fixture('win32');
   try {
     io.fileError = true;
-    await expect(store.commitment.commit()).rejects.toMatchObject({ code: 'EIO' });
+    await expect(commit()).rejects.toMatchObject({ code: 'EIO' });
     io.fileError = false;
-    await store.commitment.commit();
+    await commit();
     const reopened = new OxigraphStore(io.snapshot);
     try { expect(await reopened.countQuads()).toBe(1); } finally { await reopened.close(); }
   } finally { io.fileError = false; await store.close(); }
 });
 it('POSIX directory sync errors still reject certified commitment and can be retried', async () => {
-  const store = await fixture('linux');
+  const { store, commit } = await fixture('linux');
   try {
     io.directoryError = true;
-    await expect(store.commitment.commit()).rejects.toMatchObject({ code: 'EIO' });
+    await expect(commit()).rejects.toMatchObject({ code: 'EIO' });
     io.directoryError = false;
-    await store.commitment.commit();
+    await commit();
     expect(io.calls).toContain(`${io.directory}:r`);
   } finally { io.directoryError = false; await store.close(); }
 });
@@ -75,28 +76,29 @@ async function nestedFixture() {
   io.snapshot = join(snapshots, 'store.nq');
   Object.defineProperty(process, 'platform', { ...originalPlatform, value: 'linux' });
   const store = new OxigraphStore(io.snapshot);
+  const commit = store.commitment.capture();
   await store.insert([{ subject: 'urn:ancestry:s', predicate: 'urn:ancestry:p', object: '"durable"', graph: 'urn:ancestry:g' }]);
   const directorySyncs = () => io.calls.filter(call => call.endsWith(':r')).map(call => call.slice(0, -':r'.length));
-  return { store, created, snapshots, directorySyncs };
+  return { store, commit, created, snapshots, directorySyncs };
 }
 it('syncs every newly created snapshot directory through its first existing parent before certifying', async () => {
-  const { store, created, snapshots, directorySyncs } = await nestedFixture();
+  const { store, commit, created, snapshots, directorySyncs } = await nestedFixture();
   try {
-    await store.commitment.commit();
+    await commit();
     // recursive mkdir created new/ and new/snapshots/: their entries live in new/ and the existing root.
     expect(directorySyncs()).toEqual([snapshots, created, io.directory]);
     io.calls = [];
-    await store.commitment.commit();
+    await commit();
     expect(directorySyncs()).toEqual([snapshots]);
   } finally { await store.close(); }
 });
 it('keeps the created snapshot ancestry pending after a failed barrier, although mkdir reports nothing on retry', async () => {
-  const { store, created, snapshots, directorySyncs } = await nestedFixture();
+  const { store, commit, created, snapshots, directorySyncs } = await nestedFixture();
   try {
     io.failSync = created;
-    await expect(store.commitment.commit()).rejects.toMatchObject({ code: 'EIO' });
+    await expect(commit()).rejects.toMatchObject({ code: 'EIO' });
     io.failSync = ''; io.calls = [];
-    await store.commitment.commit();
+    await commit();
     expect(directorySyncs()).toEqual([snapshots, created, io.directory]);
     const reopened = new OxigraphStore(io.snapshot);
     try { expect(await reopened.countQuads()).toBe(1); } finally { await reopened.close(); }

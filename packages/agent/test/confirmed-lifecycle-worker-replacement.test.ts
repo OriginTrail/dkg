@@ -50,10 +50,11 @@ it('retains repair evidence when a real worker dies after acknowledging lifecycl
       const journal = async () => JSON.parse(await readFile(${JSON.stringify(join(dir, 'repair/named-ka-vm-lifecycle-repairs.json'))}, 'utf8')).entries;
       let reopened;
       try {
+        const baselineBarrier = store.commitment.capture();
         await store.insert([{subject:'urn:baseline',predicate:'urn:value',object:'"keep"',graph:'urn:baseline'}]);
-        await store.commitment.commit();
-        const firstBarrier = store.commitment.capture?.() ?? store.commitment.commit;
-        const secondBarrier = store.commitment.capture?.() ?? store.commitment.commit;
+        await baselineBarrier();
+        const firstBarrier = store.commitment.capture();
+        const secondBarrier = store.commitment.capture();
         await writeFile(${JSON.stringify(flag)}, 'hold snapshot'); arm = true;
         const attempt = repair.submit(input);
         await entered;
@@ -71,18 +72,17 @@ it('retains repair evidence when a real worker dies after acknowledging lifecycl
         assert.equal((await journal()).length, 0);
         assert.equal((await worker.query(query)).value, true);
         await assert.rejects(secondBarrier(), { code: 'OXIGRAPH_WORKER_COMMIT_OWNER_CHANGED' });
-        await assert.rejects(store.commitment.commit(), { code: 'OXIGRAPH_WORKER_COMMIT_OWNER_CHANGED' });
         // Reopen before close can flush anything: only the fresh attempt's captured
         // barrier may justify retiring the durable journal.
         reopened = new OxigraphWorkerStore(path);
         assert.equal((await reopened.query(query)).value, true);
         assert.equal(await reopened.countQuads('urn:baseline'), 1);
         console.log(JSON.stringify({ acknowledgedThenLost: true, retainedUntilReapplied: true,
-          durableReopen: true, staleBarriersRejected: 3 }));
+          durableReopen: true, staleBarriersRejected: 2 }));
       } finally { release(); await unlink(${JSON.stringify(flag)}).catch(() => {}); await repair.stop(); await reopened?.close(); await store.close(); }`);
     const { stdout } = await promisify(execFile)(process.execPath, ['--import', preload, script], { timeout: 60_000 });
     expect(JSON.parse(stdout.split('\n').find(line => line.startsWith('{'))!)).toEqual({
-      acknowledgedThenLost: true, retainedUntilReapplied: true, durableReopen: true, staleBarriersRejected: 3,
+      acknowledgedThenLost: true, retainedUntilReapplied: true, durableReopen: true, staleBarriersRejected: 2,
     });
   } finally { await rm(dir, { recursive: true, force: true }); }
 }, 60_000);

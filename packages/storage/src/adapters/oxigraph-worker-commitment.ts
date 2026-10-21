@@ -21,9 +21,7 @@ export function oxigraphWorkerCommitment(
       assertOwner();
       await flush(options);
       assertOwner();
-    }).commit;
+    }).capture();
   };
-  // Unscoped callers cannot certify across replacement: only a fresh attempt
-  // captured before its writes can establish what the replacement must persist.
-  return { durability, commit: capture(), capture };
+  return { durability, capture };
 }

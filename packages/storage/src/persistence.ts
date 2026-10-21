@@ -3,24 +3,24 @@ import type { QueryOptions, TripleStore } from './triple-store.js';
 
 export type TripleStoreCommitDurability = 'process-local' | 'restart-durable';
 export type TripleStorePersistenceBarrier = (options?: QueryOptions) => Promise<void>;
-/** One commit boundary with an explicit guarantee; atomicity alone grants neither level. */
+/** One attempt-scoped boundary; atomicity alone grants neither durability level. */
 export interface TripleStoreCommitCapability {
   readonly durability: TripleStoreCommitDurability;
-  readonly commit: TripleStorePersistenceBarrier;
-  /** Capture before a mutation attempt when the backend can replace its write owner.
-   * The returned barrier must reject if that owner is replaced before certification. */
-  readonly capture?: () => TripleStorePersistenceBarrier;
+  /** Capture before the attempt's reads and writes. The barrier rejects if its
+   * write owner is replaced before certification. Stable adapters reuse a callable. */
+  readonly capture: () => TripleStorePersistenceBarrier;
 }
 
 /** Cancellation cannot turn a failed or unfinished commit into success. */
 export function certifiedTripleStoreCommitment(
   durability: TripleStoreCommitDurability, work: TripleStorePersistenceBarrier,
 ): TripleStoreCommitCapability {
-  return { durability, commit: async (options?: QueryOptions) => {
+  const commit: TripleStorePersistenceBarrier = async options => {
     options?.signal?.throwIfAborted();
     await work(options);
     options?.signal?.throwIfAborted();
-  } };
+  };
+  return { durability, capture: () => commit };
 }
 
 /** Decorators preserve the inner guarantee after their own mutation queue drains. */
@@ -29,14 +29,13 @@ export function composeTripleStoreCommitment(
 ): TripleStoreCommitCapability | undefined {
   const capability = inner.commitment;
   if (capability === undefined) return undefined;
-  const wrap = (commit: TripleStorePersistenceBarrier) => certifiedTripleStoreCommitment(capability.durability, async (options) => {
-    await drain?.();
-    options?.signal?.throwIfAborted();
-    await commit(options);
-  }).commit;
-  return { durability: capability.durability,
-    commit: wrap(options => capability.commit(options)),
+  return { durability: capability.durability, capture: () => {
     // Capture synchronously, before either the caller's writes or our own drain.
-    ...(capability.capture ? { capture: () => wrap(capability.capture!()) } : {}),
-  };
+    const commit = capability.capture();
+    return certifiedTripleStoreCommitment(capability.durability, async options => {
+      await drain?.();
+      options?.signal?.throwIfAborted();
+      await commit(options);
+    }).capture();
+  } };
 }

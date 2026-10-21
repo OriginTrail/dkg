@@ -36,7 +36,7 @@ const result = await store.query('SELECT * WHERE { ?s ?p ?o } LIMIT 10');
 ## Oxigraph persistence contract
 
 Confirmed named KA lifecycle repair keeps its fsynced journal until the metadata
-store certifies persistence through `commitment.commit()` with a `restart-durable`
+store certifies persistence through a barrier captured with `commitment.capture()` with a `restart-durable`
 guarantee. Snapshot adapters with a persistence path complete `flush()` before the
 journal entry is retired. A SPARQL endpoint that durably commits before returning
 successful mutation responses may opt in with
@@ -61,22 +61,21 @@ a persistence path. Plain `oxigraph`, and a worker without a persistence path,
 are in-memory stores and provide no restart durability.
 
 Standalone SDK agents without a data directory may use a `process-local`
-commitment. Decorators compose the same `commitment.commit()` boundary and retain
+commitment. Decorators compose the same captured persistence boundary and retain
 its declared durability while draining queued mutations. A process-local commit
 finishes metadata within the current process; it cannot retire a durable repair
 journal. Durable hosts require a `restart-durable` commitment, while uncertified
 remote endpoints expose no commitment. Standalone agents also use the stronger
 guarantee when their backing store supplies it.
 
-A replaceable worker also exposes `commitment.capture()`. Capture its barrier
+Every certified adapter exposes `commitment.capture()`. Capture its barrier
 before the attempt's reads and writes, then invoke that barrier after mutations
-finish. Decorators capture before their own awaited drains. A worker replacement
-invalidates every barrier captured from the old worker, so a successful flush
-of its replacement cannot certify lost writes. Recovery captures a fresh barrier
-and reapplies its metadata before retiring the journal. The worker's unscoped
-`commit()` remains bound to its original worker and refuses certification after
-replacement; ordinary `flush()` remains available but cannot prove that lost
-mutations were reapplied.
+finish. Stable adapters return their existing callable. Decorators capture before
+their own awaited drains. A worker replacement invalidates every barrier captured
+from the old worker, so a successful flush of its replacement cannot certify lost
+writes. Recovery captures a fresh barrier and reapplies its metadata before
+retiring the journal. Ordinary `flush()` remains available but cannot prove that
+lost mutations were reapplied.
 
 ### Mutation and flush semantics
 

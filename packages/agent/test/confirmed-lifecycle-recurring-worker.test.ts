@@ -82,9 +82,10 @@ describe('confirmed lifecycle recurring worker ownership', () => {
     const started = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
     const { input } = confirmedLifecycleRecoveryFixture();
     const apply = vi.fn(async (current: typeof input) => {
+      const commit = store.commitment!.capture();
       if (current.name === input.name) { entered(); await held; }
       await store.insert([{ graph: 'urn:worker', subject: `urn:${current.name}`, predicate: 'urn:value', object: '"committed"' }]);
-      await store.commitment!.commit();
+      await commit();
     });
     const owner = new NamedKaVmLifecycleRepair({ dataDir: dir, writeLocks: new Map(), warn: vi.fn(), apply, isCurrent: async () => true }); owners.push(owner);
     owner.start(); const submission = owner.submit(input); await started;
@@ -111,9 +112,9 @@ describe('confirmed lifecycle recurring worker ownership', () => {
     const internals = agent as unknown as { namedKaVmLifecycleRepair?: NamedKaVmLifecycleRepair; writeLocks: Map<string, Promise<void>> };
     const { input } = confirmedLifecycleRecoveryFixture();
     const owner = new NamedKaVmLifecycleRepair({ writeLocks: internals.writeLocks, warn: vi.fn(), isCurrent: async () => true,
-      apply: async () => { entered(); await held;
+      apply: async () => { const commit = agent.store.commitment!.capture(); entered(); await held;
         await agent.store.insert([{ graph: 'urn:worker', subject: 'urn:before-stop', predicate: 'urn:value', object: '"committed"' }]);
-        await agent.store.commitment!.commit();
+        await commit();
       } });
     let submission: Promise<unknown> | undefined, stopping: Promise<void> | undefined;
     try {
