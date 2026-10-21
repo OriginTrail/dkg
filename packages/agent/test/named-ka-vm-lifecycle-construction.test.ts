@@ -1,11 +1,12 @@
 import { getBytes } from 'ethers';
-import { replaceLocallyTrustedKnowledgeAssetControlEnvelope } from '@origintrail-official/dkg-publisher';
+import { generateAssertionCreatedMetadata, replaceLocallyTrustedKnowledgeAssetControlEnvelope } from '@origintrail-official/dkg-publisher';
 import { describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { GRAPH_KA_CONTENT_SCOPE_VERSION, assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { GRAPH_KA_CONTENT_SCOPE_VERSION, buildAssertionSealQuads, contextGraphAssertionUri, assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import type { GraphScopedKnowledgeAssetVmPublishRequest } from '../src/internal/knowledge-asset-vm-publish-request.js';
 import { confirmedMaterializationFixture } from './_helpers/confirmed-materialization-fixture.js';
+import { assertionSealFromQueuedKnowledgeAssetVmPublishRequest } from '../src/internal/knowledge-asset-vm-publish-request.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 
 const author = '0x1111111111111111111111111111111111111111';
@@ -34,6 +35,19 @@ describe('agent construction wires the queued lifecycle writer', () => {
       await replaceLocallyTrustedKnowledgeAssetControlEnvelope(store, input.publishedUal,
         { assertionVersion: input.assertionVersion, merkleRoot: getBytes(input.merkleRoot) },
         { publisherPeerId: 'test-publisher', accessPolicy: 'allowList', allowedPeers: ['test-reader'] });
+      // This test isolates the lifecycle mutation for an intact named asset.
+      const meta = contextGraphMetaUri(request.contextGraphId);
+      const lifecycle = assertionLifecycleUri(request.contextGraphId, author, request.name, request.subGraphName);
+      const seal = assertionSealFromQueuedKnowledgeAssetVmPublishRequest(request);
+      await store.insert([
+        ...generateAssertionCreatedMetadata({ contextGraphId: request.contextGraphId, agentAddress: author,
+          assertionName: request.name, subGraphName: request.subGraphName, kaNumber: 1n,
+          reservedUal: request.kaUal, timestamp: new Date(request.sealFinalizedAtIso) }),
+        ...buildAssertionSealQuads({ ...seal, assertionUri: contextGraphAssertionUri(request.contextGraphId, author, request.name, request.subGraphName), metaGraph: meta }),
+        ...['contentScopeVersion', 'assertionVersion'].map(predicate => ({ graph: meta, subject: lifecycle,
+          predicate: `http://dkg.io/ontology/${predicate}`,
+          object: JSON.stringify(predicate === 'contentScopeVersion' ? '2' : '1') })),
+      ]);
       const failure = new Error('lifecycle update rejected');
       const update = vi.spyOn(store, 'atomicUpdate');
       vi.spyOn(chain, 'getKnowledgeAssetsLifecycleAddress').mockResolvedValue(author);

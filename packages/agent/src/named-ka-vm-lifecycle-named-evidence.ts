@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { buildAssertionSealQuads, parseAssertionSealQuads,
+import { buildAssertionSealQuads, parseAssertionSealQuads, canonicalGraphScopedAuthorSealFromAssertionSealV1,
   assertionLifecycleUri, contextGraphAssertionUri, contextGraphMetaUri,
   createGraphKnowledgeAssetScope, MemoryLayer, knowledgeAssetLayerGraphUri,
   type AssertionSeal } from '@origintrail-official/dkg-core';
@@ -101,12 +101,14 @@ export async function restoreConfirmedNamedAssertion(store: TripleStore, input: 
     predicate: DKG + 'assertionVersion', object: integer(input.assertionVersion), graph: meta });
   // An intact original active seal already supports pull/edit. Preserve newer active
   // drafts; only their recovery archive may need the original publication's seal.
-  const terms = (rows: readonly Quad[]) => rows.map(q => JSON.stringify([q.predicate, q.object])).sort().join('\n');
+  const canonicalSeal = (value: AssertionSeal) => JSON.stringify(canonicalGraphScopedAuthorSealFromAssertionSealV1({
+    ...value, reservedKaId: input.packedKaId, contentScopeVersion: 2,
+  }));
   const sameSeal = (rows: Quad[], subject: string): boolean => {
     try {
       const stored = parseAssertionSealQuads(rows, subject);
       return !!stored && (stored.reservedKaId === undefined || stored.reservedKaId === input.packedKaId)
-        && terms(confirmedNamedSealQuads(stored, input.packedKaId)) === terms(sealQuads!);
+        && canonicalSeal(stored) === canonicalSeal(seal);
     } catch { return false; }
   };
   if (!sameSeal(await read(assertion, meta), assertion)) {
