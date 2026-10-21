@@ -1,5 +1,18 @@
 [
   {
+    "pattern": "packages/agent/campaigns/catalog-durable-head.test.ts",
+    "lane": "native-crash-campaign",
+    "reason": "Parent-owned destructive process-death and restart matrix; ordinary Gate1 regression remains in required unit CI",
+    "cadence": "manual",
+    "command": "node --experimental-sqlite --import tsx scripts/repro/rfc64-catalog-durable-head.mts",
+    "prerequisites": [
+      "Node 22 with experimental SQLite",
+      "built agent dependency closure",
+      "disposable loopback libp2p peers"
+    ],
+    "layer": "Native SQLite/Oxigraph/libp2p process-crash regression"
+  },
+  {
     "pattern": "packages/node-ui/browser-regressions/pr3236/*.spec.ts",
     "lane": "browser",
     "reason": "Standalone scoped-store and WebGL regressions run in the first required browser CI shard",
