@@ -396,6 +396,7 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
     ['packages/node-ui/src/ui/query-bindings.ts', 'evm:chain', 'assertion discovery decodes terms through the shared binding codec'],
     ['packages/node-ui/src/rdf-literal.ts', 'evm:chain', 'shared assertion discovery decodes reserved UAL literals'],
     ['packages/publisher/src/knowledge-asset-controls.ts', 'kosava_node_ui', 'the UI metadata regression loads trusted control anchor parsing'],
+    ['packages/publisher/src/metadata-rdf-terms.ts', 'kosava_node_ui', 'the UI metadata regression loads shared RDF compatibility primitives'],
     ['packages/publisher/src/materialization-assertion-version.ts', 'kosava_node_ui', 'the UI metadata regression loads the shared assertion version reader'],
     ['packages/query/README.md', 'bura_query', 'the query security tests read the README'],
     ['packages/cli/src/extraction/markdown-extractor.ts', 'tornado_agent', 'agent tests import CLI source'],

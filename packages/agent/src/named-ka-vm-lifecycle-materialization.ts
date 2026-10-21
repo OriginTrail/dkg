@@ -47,6 +47,13 @@ export async function applyMaterializedConfirmedLifecycle(store: TripleStore, in
     });
     const matches = content.status === 'verified';
     if (!exactMetadata && !snapshot) throw new Error('Confirmed lifecycle repair awaits its original public payload');
+    // Claim the named slot before touching its physical graphs or controls.
+    // The publisher shares the normal allocation fence and preserves newer drafts.
+    try { await reconcileConfirmedNamedAssertion(store, { ...input, kaUal: scope.ual }, proof, input.namedSeal); }
+    catch (error) {
+      if ((error as { code?: string }).code === 'CONFIRMED_NAMED_ASSERTION_INTEGRITY') throw new NamedKaVmLifecycleIntegrityError('Invalid confirmed named assertion seal evidence');
+      throw error;
+    }
     const recoveredBase = snapshot
       ? reconcileConfirmedGraphKnowledgeAssetMetadata(snapshot, metadata, current === BigInt(input.assertionVersion))
       : metadata;
@@ -69,11 +76,6 @@ export async function applyMaterializedConfirmedLifecycle(store: TripleStore, in
           : await tryReplaceGraphAndSubjectAtomically(store, graph, payload, meta, scope.ual, recoveredMetadata, { source: 'agent.publish.confirmedLifecycleMaterialization' });
       }
       if (!replaced) throw new Error('Confirmed lifecycle recovery requires atomic materialization replacement');
-    }
-    try { await reconcileConfirmedNamedAssertion(store, { ...input, kaUal: scope.ual }, proof, input.namedSeal); }
-    catch (error) {
-      if ((error as { code?: string }).code === 'CONFIRMED_NAMED_ASSERTION_INTEGRITY') throw new NamedKaVmLifecycleIntegrityError('Invalid confirmed named assertion seal evidence');
-      throw error;
     }
     await mutatePublishedNamedKaVmLifecycle(store, input, options.preserveVerifiedVmProof);
     // This outer barrier owns the payload read/replacement as well as the lifecycle write.

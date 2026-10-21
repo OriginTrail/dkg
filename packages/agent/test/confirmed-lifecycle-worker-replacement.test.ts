@@ -36,7 +36,7 @@ it.each([false, true])('recovers a real named asset after worker loss with newer
     ], { timeout: 60_000, env: { ...process.env, DKG_TEST_SNAPSHOT_PATH: join(dir, 'store.nq'),
       DKG_TEST_SNAPSHOT_FAULT: join(dir, 'block'), DKG_TEST_REPAIR_DIR: join(dir, 'repair') } });
     expect(JSON.parse(stdout.split('\n').find(line => line.startsWith('{'))!)).toEqual({
-      recoveredOriginalPayload: true, durableBeforeClose: true, unrelatedPreserved: true, namedReopenedAndEdited: true, newerDraftPreserved: newerDraft,
+      recoveredOriginalPayload: true, durableBeforeClose: true, unrelatedPreserved: true, recoveredSlotProtected: true, namedReopenedAndEdited: true, newerDraftPreserved: newerDraft,
     });
   } finally { await rm(dir, { recursive: true, force: true }); }
 }, 60_000);

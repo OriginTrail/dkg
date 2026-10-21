@@ -83,6 +83,9 @@ try {
   Object.defineProperty(recovered, 'peerId', { value: agent.peerId });
   recovered.publisher = new DKGPublisher({ store: reopened, chain, eventBus: new TypedEventBus(),
     keypair: await generateEd25519Keypair(), writeLocks: recovered.writeLocks });
+  await assert.rejects(recovered.assertion.create(contextGraphId, 'slot-impostor', {
+    agentAddress: author, reservedKaId: input.packedKaId,
+  }), error => error.code === 'KA_SLOT_ALREADY_CLAIMED');
   if (newerDraft) {
     const draft = await recovered.publisher.assertionQuery(contextGraphId, name, author);
     assert.ok(draft.some(q => q.subject === 'urn:newer-draft' && q.object === draftQuads[0].object));
@@ -96,7 +99,7 @@ try {
   assert.ok(edited.some(q => q.subject === 'urn:edited'));
   assert.equal(await reopened.countQuads(graph), 1, 'editing leaves confirmed VM content intact');
   console.log(JSON.stringify({ recoveredOriginalPayload: true, durableBeforeClose: true,
-    unrelatedPreserved: true, namedReopenedAndEdited: true, newerDraftPreserved: newerDraft }));
+    unrelatedPreserved: true, recoveredSlotProtected: true, namedReopenedAndEdited: true, newerDraftPreserved: newerDraft }));
 } catch (error) { console.error(error); throw error; } finally {
   await unlink(flag).catch(() => {}); await first?.stop(); await second?.stop();
   await reopened?.close(); await agent?.stop(); await store.close();

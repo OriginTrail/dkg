@@ -673,7 +673,8 @@ describe('review regression boundaries', () => {
       ...[['kaId', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>'], ['reservedUal', JSON.stringify(UAL)],
         ['contentScopeVersion', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>'], ['assertionName', JSON.stringify(NAME)],
         ['assertionVersion', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']].map(([predicate, object]) => ({
-        subject: LIFECYCLE, predicate: DKG + predicate, object: object!, graph: META }))]);
+        subject: LIFECYCLE, predicate: DKG + predicate, object: object!, graph: META })),
+      { subject: LIFECYCLE, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: `did:dkg:agent:${AUTHOR}`, graph: META }]);
     const commit = vi.spyOn(store, 'atomicUpdate'), insert = vi.spyOn(store, 'insert');
     const remove = vi.spyOn(store, 'deleteByPattern'), removeWithoutCount = vi.spyOn(store, 'deleteByPatternWithoutCount');
     const invalidate = vi.fn(), dirty = vi.fn();

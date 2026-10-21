@@ -20,7 +20,8 @@ export function decodeAssertionReservationValue(predicate: string, term: string)
     return literal.value;
   }
   if (numeric) return /^(0|[1-9][0-9]*)$/.test(term) ? term : undefined;
-  return predicate === 'http://dkg.io/ontology/reservedUal' ? term.replace(/^<|>$/g, '') : undefined;
+  return predicate === 'http://dkg.io/ontology/reservedUal' || predicate === 'http://www.w3.org/ns/prov#wasAttributedTo'
+    ? term.replace(/^<|>$/g, '') : undefined;
 }
 
 /** One identity decoder. Reservations require exact RDF integers; ordinary

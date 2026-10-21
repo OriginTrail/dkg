@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { assertionLifecycleUri, contextGraphMetaUri, TypedEventBus, encodeAccessRequest, decodeAccessResponse } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { AccessHandler, readConfirmedGraphKnowledgeAssetMetadataEnvelope, readLocallyTrustedKnowledgeAssetControlEnvelope, replaceLocallyTrustedKnowledgeAssetControlEnvelope, overlayLocallyTrustedKnowledgeAssetControls } from '@origintrail-official/dkg-publisher';
+import { AccessHandler, generateAssertionCreatedMetadata, readConfirmedGraphKnowledgeAssetMetadataEnvelope, readLocallyTrustedKnowledgeAssetControlEnvelope, replaceLocallyTrustedKnowledgeAssetControlEnvelope, overlayLocallyTrustedKnowledgeAssetControls } from '@origintrail-official/dkg-publisher';
 import { resolveConfirmedGraphScopedVm } from '../src/confirmed-graph-scoped-vm-resolver.js';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { recoverReceiptBackedGraphScopedEvidence } from '../src/receipt-backed-graph-scoped-evidence.js';
@@ -55,6 +55,20 @@ it('replaces wrong content of the same count without changing a newer draft or c
   expect(await owner.submit(input)).toBe('repaired');
   expect(await store.query(`ASK { GRAPH <${graph}> { <urn:payload> <urn:value> "original public payload" } }`)).toMatchObject({ value: true });
   expect(await store.query(`ASK { GRAPH <${meta}> { <${lifecycle}> <http://dkg.io/ontology/state> "created" . <${input.publishedUal}> <http://dkg.io/ontology/accessPolicy> "allowList" } }`)).toMatchObject({ value: true });
+});
+it('retains recovery without touching another claimant or its physical graphs and controls', async () => {
+  const { owner, input, store, graph, journal, advance } = await fixture();
+  const other = generateAssertionCreatedMetadata({ contextGraphId: input.contextGraphId, assertionName: 'other-owner',
+    agentAddress: input.agentAddress, kaNumber: 1n, reservedUal: input.publishedUal, timestamp: new Date() }, { provenanceEvents: false });
+  await store.insert([...other, { ...input.materialization!.publicQuads[0], graph, object: '"other claimant payload"' }]);
+  const snapshot = await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o');
+  const insert = vi.spyOn(store, 'insert'), replace = vi.spyOn(store, 'replaceGraphAndSubject');
+  expect(await owner.submit(input)).toBe('pending'); expect(await journal()).toHaveLength(1);
+  expect(insert).not.toHaveBeenCalled(); expect(replace).not.toHaveBeenCalled();
+  expect(await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o')).toEqual(snapshot);
+  await store.delete(other); advance(); await owner.runDue();
+  expect(await journal()).toHaveLength(0);
+  expect(await store.query(`ASK { GRAPH <${graph}> { <urn:payload> <urn:value> "original public payload" } }`)).toMatchObject({ value: true });
 });
 it('retains snapshot-less legacy evidence on missing content and upgrades matching evidence without another publication', async () => {
   const { owner, input, store, journal } = await fixture();

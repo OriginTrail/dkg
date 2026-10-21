@@ -1,10 +1,13 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { getBytes } from 'ethers';
+import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { canonicalGraphScopedAuthorSealFromAssertionSealV1, canonicalizeCanonicalGraphScopedAuthorSealV1, parseCanonicalGraphScopedAuthorSealV1, assertionLifecycleUri, contextGraphAssertionUri,
-  contextGraphMetaUri, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
+  contextGraphMetaUri, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer, TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { reconcileConfirmedNamedAssertion, assertConfirmedNamedAssertionSeal, confirmedNamedAssertionSealQuads } from '../src/confirmed-named-assertion.js';
 import { assertionRecoverySealGraph, assertionRecoverySealSubject } from '../src/assertion-seal-recovery.js';
+import { DKGPublisher } from '../src/dkg-publisher.js';
+import { generateSubGraphRegistration } from '../src/metadata.js';
 
 const author = '0x1111111111111111111111111111111111111111', id = (BigInt(author) << 96n) | 1n;
 const target = { contextGraphId: 'confirmed-reconcile', agentAddress: author, name: 'asset', packedKaId: id,
@@ -20,6 +23,10 @@ const meta = contextGraphMetaUri(target.contextGraphId), active = contextGraphAs
 const archiveGraph = assertionRecoverySealGraph(target.contextGraphId), archive = assertionRecoverySealSubject(target.contextGraphId, target.name, author);
 const lifecycle = assertionLifecycleUri(target.contextGraphId, author, target.name), stores: OxigraphStore[] = [];
 const store = () => { const value = new OxigraphStore(); stores.push(value); return value; };
+const publisher = async (s: OxigraphStore) => new DKGPublisher({ store: s, chain: new NoChainAdapter(),
+  eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair() });
+const claim = (p: DKGPublisher, name: string, subGraphName?: string) => p.assertionCreate(target.contextGraphId, name, author, subGraphName,
+  { expectedKaNumber: 1n, allocateKaNumber: async () => ({ number: 1n, reservedUal: target.kaUal }) });
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(stores.splice(0).map(s => s.close())); });
 it.each(['assertionVersion','batchId','merkleRoot','publicTripleCount','privateTripleCount','privateMerkleRoot','assertionGraph'])(
   'rejects a conflicting materialization %s', field => {
@@ -94,4 +101,50 @@ it('recognizes the intact original seal independent of canonical model property 
   const replace = vi.spyOn(s, 'replaceSubject');
   await expect(reconcileConfirmedNamedAssertion(s, target, proof, parsed)).resolves.toBeUndefined();
   expect(replace).not.toHaveBeenCalled();
+});
+
+it.each([undefined, 'scope'])('restores a reservation that normal allocation protects in scope %s', async subGraphName => {
+  const s = store(), p = await publisher(s);
+  await s.insert(generateSubGraphRegistration({ contextGraphId: target.contextGraphId, subGraphName: 'scope', createdBy: author, timestamp: new Date() }));
+  const scopedTarget = { ...target, subGraphName }, scopedProof = { ...proof, assertionGraph: knowledgeAssetLayerGraphUri(
+    target.contextGraphId, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(target.kaUal, '1'), subGraphName) };
+  await reconcileConfirmedNamedAssertion(s, scopedTarget, scopedProof, seal);
+  const snapshot = await s.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o');
+  await expect(claim(p, 'another-name', subGraphName)).rejects.toMatchObject({ code: 'KA_SLOT_ALREADY_CLAIMED' });
+  expect(await s.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o')).toEqual(snapshot);
+  await expect(claim(p, 'other-scope', subGraphName === undefined ? 'scope' : undefined)).resolves.toBeTypeOf('string');
+});
+
+it('refuses restoration before mutating a slot already claimed by another name', async () => {
+  const s = store(), p = await publisher(s); await claim(p, 'existing-owner');
+  const insert = vi.spyOn(s, 'insert'), replace = vi.spyOn(s, 'replaceSubject');
+  await expect(reconcileConfirmedNamedAssertion(s, target, proof, seal)).rejects.toMatchObject({ code: 'KA_SLOT_ALREADY_CLAIMED' });
+  expect(insert).not.toHaveBeenCalled(); expect(replace).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['http://www.w3.org/ns/prov#wasAttributedTo', 'did:dkg:agent:0x2222222222222222222222222222222222222222'],
+  ['http://dkg.io/ontology/subGraphName', '"wrong-scope"'],
+])('refuses conflicting surviving ownership field %s', async (predicate, object) => {
+  const s = store(); await s.insert([{ subject: lifecycle, graph: meta, predicate, object }]);
+  const insert = vi.spyOn(s, 'insert');
+  await expect(reconcileConfirmedNamedAssertion(s, target, proof, seal)).rejects.toThrow('reservation conflicts');
+  expect(insert).not.toHaveBeenCalled();
+});
+
+it('shares the normal allocation lock while restoring a reservation', async () => {
+  const s = store(), p = await publisher(s);
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  const insert = s.insert.bind(s);
+  vi.spyOn(s, 'insert').mockImplementation(async rows => {
+    if (rows.some(q => q.subject === lifecycle && q.predicate === 'http://dkg.io/ontology/kaId')) { enter(); await held; }
+    return insert(rows);
+  });
+  const repair = reconcileConfirmedNamedAssertion(s, target, proof, seal); await entered;
+  let settled = false;
+  const competing = claim(p, 'racing-name').then(() => 'unexpected-success', error => error.code).finally(() => { settled = true; });
+  try { await new Promise(resolve => setTimeout(resolve, 20)); expect(settled).toBe(false); }
+  finally { release(); await repair; }
+  expect(await competing).toBe('KA_SLOT_ALREADY_CLAIMED');
 });
