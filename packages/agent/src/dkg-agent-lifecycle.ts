@@ -1767,6 +1767,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.networkAdmissionCoordinator = new NetworkAdmissionCoordinator({
       admission: this.networkAdmission,
       identity: this.config.networkIdentity,
+      cacheIdentities: this.config.coreChainCacheNetworks.map(n => n.identity),
       selfPeerId: this.node.peerId.toString(),
       sign: (payload) => this.wallet.sign(payload),
       sendIdentityProbe: (peerId, data, options) =>

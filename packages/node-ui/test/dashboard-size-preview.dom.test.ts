@@ -9,10 +9,15 @@ import type { LayeredTriple, MemoryData } from '../src/ui/hooks/useMemoryEntitie
 const probes = vi.hoisted(() => ({
   graphs: [] as ContextGraph[],
   memory: new Map<string, MemoryData>(),
+  cgsError: null as string | null,
+  identityError: null as string | null,
+  retry: vi.fn(),
 }));
 vi.mock('../src/ui/hooks/useMyContextGraphs.js', () => ({
   useMyContextGraphs: () => ({
     myCgs: probes.graphs, identity: null, identityLoading: false, cgsLoading: false,
+    cgsError: probes.cgsError, identityError: probes.identityError, retry: probes.retry,
+    inventoryLoading: false, inventoryError: probes.cgsError || probes.identityError,
   }),
 }));
 vi.mock('../src/ui/hooks/useMemoryEntities.js', async (importOriginal) => ({
@@ -76,6 +81,7 @@ beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   probes.graphs = [];
   probes.memory.clear();
+  probes.cgsError = null; probes.identityError = null; probes.retry.mockReset();
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -86,6 +92,36 @@ afterEach(async () => {
 });
 
 describe('real DashboardView size presentation', () => {
+  it.each(['cgsError', 'identityError'] as const)('never claims an empty inventory after %s and exposes retry', async failed => {
+    probes[failed] = 'endpoint unavailable';
+    await render();
+    expect(container.textContent).not.toContain('No context graphs yet');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('could not be loaded');
+    expect(container.querySelector('.v10-dash-section-badge')?.textContent).toBe('—');
+    const retry = [...container.querySelectorAll('button')].find(button => button.textContent === 'Retry')!;
+    await act(async () => { retry.click(); });
+    expect(probes.retry).toHaveBeenCalledOnce();
+  });
+
+  it('keeps known graphs visible with an approximate count after refresh fails', async () => {
+    addGraph('retained', { triples: 3 });
+    probes.cgsError = 'refresh unavailable';
+    await render();
+    expect(container.querySelector('.v10-cg-row')?.textContent).toContain('retained');
+    expect(container.querySelector('.v10-dash-section-badge')?.textContent).toBe('~1');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('last available');
+    probes.cgsError = null;
+    await render();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.querySelector('.v10-dash-section-badge')?.textContent).toBe('1');
+  });
+
+  it('shows a genuine successful empty inventory as empty', async () => {
+    await render();
+    expect(container.textContent).toContain('No context graphs yet');
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
   it('does not assert a triple lower bound when a missing layer reveals promotion residue', async () => {
     const working: LayeredTriple[] = [0, 1, 2].map((i) => ({
       subject: 'urn:entity:A', predicate: `urn:edge:${i}`, object: 'urn:entity:B', layer: 'working',

@@ -1,3 +1,6 @@
+import { reconcileRetainedShareUnlocked, validateShareReconciliationInput, type ShareReconciliationInput } from './share-reconciliation.js';
+import { readShareCompletionEvidence } from './share-completion-evidence.js';
+import { promoteSuccessTransition } from './async-promote-success.js';
 import { persistPromoteJobWithEvidence, type PromotePersistenceResult } from './promote-admission-persistence.js';
 import { PromoteAdmissionCoordinator, PromoteAdmissionError, type PromoteAdmissionAttempt } from './promote-admission.js';
 import { isRetiredBoundRejection } from './promote-no-effect-rejection.js';
@@ -201,6 +204,11 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     });
   }
 
+  async reconcileShare(input: ShareReconciliationInput) {
+    const expected = validateShareReconciliationInput(input);
+    return this.withMutationLock(() => reconcileRetainedShareUnlocked(this.store, expected, this.graphUri));
+  }
+
   private async listUnlocked(
     filter: PromoteListFilter = {},
     source = 'publisher.asyncPromote.list',
@@ -382,22 +390,12 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   }
 
   async succeed(jobId: string, claimToken: string, result: PromoteResult): Promise<void> {
+    const snapshot = { ...result, ...(result.shareEvidence ? { shareEvidence: readShareCompletionEvidence(result.shareEvidence) } : {}) };
     await this.withMutationLock(async () => {
       await this.ensureGraph();
       const job = await this.requireJob(jobId);
       this.assertLeaseHeld(job, claimToken);
-      if (!job.commitMarker?.swmInserted) {
-        throw new Error(
-          `Cannot succeed job ${jobId}: commitMarker.swmInserted is false. Worker must record SWM commit before declaring success.`,
-        );
-      }
-      const succeeded: PromoteJob = {
-        ...job,
-        state: 'succeeded',
-        updatedAt: this.now(),
-        lease: undefined,
-        result,
-      };
+      const succeeded = promoteSuccessTransition(job, snapshot, this.now());
       await this.writeJob(succeeded);
     });
   }
@@ -887,12 +885,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   }
 
 
-  /**
-   * In-process mutex so concurrent queue mutations don't race the
-   * uniqueness/read-then-write SPARQL flow. Mirrors
-   * `AsyncLiftPublisher.withClaimLock`, widened from worker claims to
-   * all operations that can activate a uniqueness key.
-   */
+  /** Serializes control-graph mutations and consistent reads, including fallback replacements. */
   private async withMutationLock<T>(fn: () => Promise<T>): Promise<T> {
     const previous = TripleStoreAsyncPromoteQueue.mutationQueues.get(this.graphUri) ?? Promise.resolve();
     let release!: () => void;

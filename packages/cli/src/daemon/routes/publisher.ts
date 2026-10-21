@@ -1,3 +1,4 @@
+import { handlePublisherLiveControlRoute } from './publisher-live-control.js';
 import { normalizeContextGraphIdOrUri } from '../../context-graph-identifiers.js';
 import { hasNodeOperatorReadAccess, requireContextGraphReadAuthority } from './context-graph-read-authority.js';
 // daemon/routes/publisher.ts
@@ -518,6 +519,7 @@ async function readSmallJsonObject(
 }
 
 export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> {
+  if (await handlePublisherLiveControlRoute(ctx)) return;
   const {
     req,
     res,
