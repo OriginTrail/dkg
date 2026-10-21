@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 
@@ -79,27 +79,29 @@ async function nestedFixture() {
   const commit = store.commitment.capture();
   await store.insert([{ subject: 'urn:ancestry:s', predicate: 'urn:ancestry:p', object: '"durable"', graph: 'urn:ancestry:g' }]);
   const directorySyncs = () => io.calls.filter(call => call.endsWith(':r')).map(call => call.slice(0, -':r'.length));
-  return { store, commit, created, snapshots, directorySyncs };
+  const ancestors: string[] = [];
+  for (let path = snapshots;; path = dirname(path)) { ancestors.push(path); if (dirname(path) === path) break; }
+  return { store, commit, created, snapshots, ancestors, directorySyncs };
 }
-it('syncs every newly created snapshot directory through its first existing parent before certifying', async () => {
-  const { store, commit, created, snapshots, directorySyncs } = await nestedFixture();
+it('certifies all adopted snapshot ancestors once, then only the containing directory', async () => {
+  const { store, commit, snapshots, ancestors, directorySyncs } = await nestedFixture();
   try {
     await commit();
-    // recursive mkdir created new/ and new/snapshots/: their entries live in new/ and the existing root.
-    expect(directorySyncs()).toEqual([snapshots, created, io.directory]);
+    // The owner must certify existing ancestors as well as the directories it created.
+    expect(directorySyncs()).toEqual(ancestors);
     io.calls = [];
     await commit();
     expect(directorySyncs()).toEqual([snapshots]);
   } finally { await store.close(); }
 });
 it('keeps the created snapshot ancestry pending after a failed barrier, although mkdir reports nothing on retry', async () => {
-  const { store, commit, created, snapshots, directorySyncs } = await nestedFixture();
+  const { store, commit, created, ancestors, directorySyncs } = await nestedFixture();
   try {
     io.failSync = created;
     await expect(commit()).rejects.toMatchObject({ code: 'EIO' });
     io.failSync = ''; io.calls = [];
     await commit();
-    expect(directorySyncs()).toEqual([snapshots, created, io.directory]);
+    expect(directorySyncs()).toEqual(ancestors);
     const reopened = new OxigraphStore(io.snapshot);
     try { expect(await reopened.countQuads()).toBe(1); } finally { await reopened.close(); }
   } finally { io.failSync = ''; await store.close(); }

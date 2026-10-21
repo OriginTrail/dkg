@@ -5,6 +5,9 @@ import { createManagedOxigraphPersistenceBarrierV1 } from '../src/daemon/oxigrap
 
 const DIRECTORY = resolve('/owned/new/db');
 const wal = (name = '000001.log') => join(DIRECTORY, name);
+const ancestors: string[] = [];
+for (let path = DIRECTORY;; path = dirname(path)) { ancestors.push(path); if (dirname(path) === path) break; }
+const directoryEvents = ancestors.flatMap(path => [`open:${path}:r`, `sync:${path}`, `close:${path}`]);
 const io = vi.hoisted(() => ({ names: [['000001.log']] as string[][], events: [] as string[],
   failure: null as { path: string; code: string; operation?: 'open' | 'sync' } | null,
   absent: new Set<string>(),
@@ -33,7 +36,7 @@ describe('managed Oxigraph post-acknowledgement persistence', () => {
     expect(io.events).toEqual([
       `open:${wal()}:r+`, `sync:${wal()}`, `close:${wal()}`,
       `open:${wal('000002.log')}:r+`, `sync:${wal('000002.log')}`, `close:${wal('000002.log')}`,
-      `open:${DIRECTORY}:r`, `sync:${DIRECTORY}`, `close:${DIRECTORY}`,
+      ...directoryEvents,
     ]);
   });
   it('uses pinned RocksDB Windows file-sync policy without opening a directory', async () => {
@@ -44,7 +47,7 @@ describe('managed Oxigraph post-acknowledgement persistence', () => {
     io.names = [['000001.log'], ['000002.log'], ['000002.log'], ['000002.log']];
     await createManagedOxigraphPersistenceBarrierV1(new DurableDirectory(DIRECTORY, { platform: 'linux' }), '0.5.8')!();
     expect(io.events.filter(event => event.startsWith('sync:')))
-      .toEqual([`sync:${wal()}`, `sync:${DIRECTORY}`, `sync:${wal('000002.log')}`, `sync:${DIRECTORY}`]);
+      .toEqual([`sync:${wal()}`, ...ancestors.map(path => `sync:${path}`), `sync:${wal('000002.log')}`, `sync:${DIRECTORY}`]);
   });
   it('retries an old log removed between listing and opening', async () => {
     io.names = [['000001.log'], ['000002.log']]; io.failure = { path: wal(), code: 'ENOENT' };
@@ -81,7 +84,7 @@ describe('managed Oxigraph post-acknowledgement persistence', () => {
     io.failure = null; io.events = [];
     await barrier();
     expect(io.events.filter(event => event.startsWith('sync:'))).toEqual([
-      `sync:${wal()}`, `sync:${DIRECTORY}`, `sync:${parent}`, `sync:${existing}`,
+      `sync:${wal()}`, ...ancestors.map(path => `sync:${path}`),
     ]);
     io.events = []; await barrier();
     expect(io.events.filter(event => event.startsWith('sync:'))).toEqual([`sync:${wal()}`, `sync:${DIRECTORY}`]);

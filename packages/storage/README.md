@@ -87,10 +87,11 @@ lost mutations were reapplied.
   and then writes the current state.
 - A snapshot is written to a sibling temporary file, the file is synced, and
   then atomically renamed over the persistence file. The containing directory
-  is synced when the platform supports it. If the snapshot path's directories
-  had to be created, every parent of a new directory is synced too, up to and
-  including the first one that already existed; after a failed sync the next
-  flush retries that whole range. A crash before the rename retains
+  is synced when the platform supports it. Each new owner initially syncs all
+  ancestors through the filesystem root, including existing paths: a prior
+  worker/process may have created them but failed before syncing their entries.
+  Failed syncs retain that whole range for retry. After successful certification,
+  repeated flushes sync the containing directory plus any newly created ancestry. A crash before the rename retains
   the previous complete snapshot; a temporary file may remain for cleanup.
 - Background flush failures are logged. Explicit `flush()` and `close()` calls
   reject on write, sync, or rename failures so their callers can report that

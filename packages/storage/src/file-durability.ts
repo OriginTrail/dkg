@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { mkdir, open, stat } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { dirname, parse, resolve } from 'node:path';
 
 /** Windows FlushFileBuffers requires GENERIC_WRITE; a read-only handle fails. */
 async function syncFile(path: string): Promise<void> {
@@ -29,7 +29,8 @@ export interface DurableDirectoryOptions {
  * created for it, and the first parent that already existed. mkdir reports its
  * first new directory only on success. Capture the existing ancestor before
  * creation so partial mkdir failures and failed barriers retain the full range
- * until one persists it; the owner of a durable path keeps one instance.
+ * until one persists it. A new owner also certifies existing ancestry through
+ * the root, reconstructing obligations lost with its previous worker/process.
  */
 export class DurableDirectory {
   readonly path: string;
@@ -37,6 +38,10 @@ export class DurableDirectory {
 
   constructor(path: string, private readonly options: DurableDirectoryOptions = {}) {
     this.path = resolve(path);
+    // A replacement owner cannot infer successful parent fsync from existence:
+    // the old worker/process may have died after mkdir but before certification.
+    // Adopt the complete ancestry once; only a successful barrier clears it.
+    this.pendingThrough = parse(this.path).root;
   }
 
   async create(): Promise<void> {
