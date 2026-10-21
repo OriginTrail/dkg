@@ -1,5 +1,13 @@
 # Public Context Graph snapshot recovery
 
+For automatic selection across official chains, enable `DKG_Core_chain_cache`
+in the node config and send `"sourcePolicy":"DKG_Core_chain_cache"` with an
+empty `trustedCorePeerIds` array. The source-policy capability must be present
+in the authenticated GET response. Mainnet and testnet use the same mechanism
+but disjoint registries. A cache source may be registered on a different chain
+from the requested graph; ordinary content peers remain on the data network.
+See [chain-cache configuration and rollout](warm-sync-rollout.md).
+
 An explicit recovery job can obtain chain statements from operator-configured core peers instead of repeating asset RPC reads on every receiver. The default for this **new job API** is `core-cache`; existing background reconciliation keeps its existing policy.
 
 The core reads a complete ordered inventory and each asset's root, assertion version and graph binding at one confirmation-depth block. It resolves storage contracts through the Hub at that same block, checks the actual RPC chain id and rechecks the block hash after collection. Where canonical Multicall3 bytecode is present, bounded aggregates amortize RPC calls; development chains without it use bounded concurrent calls at the same anchor. Cache hits do no chain work. Cold readers coalesce; the cache bounds concurrent builds, retained graphs, inventory size and response size.
@@ -9,6 +17,19 @@ The core reads a complete ordered inventory and each asset's root, assertion ver
 `core-cache` trusts chain statements from the explicitly configured libp2p peer identities. Authenticated channel identity binds the supplier; this is not a chain-state proof or an independent RPC audit. A self-advertised core role grants no trust. There is no implicit fallback to arbitrary peers or to RPC.
 
 `rpc-only` constructs the same coherent snapshot using this receiver's configured RPC. Peers supply content, which is checked against that independently obtained inventory. Unsupported or unavailable snapshot providers fail explicitly.
+
+An operator can instead authorize `sourcePolicy: "base-mainnet-registered-cores"`
+with `trustedCorePeerIds: []`. This policy accepts any reachable registered
+Base mainnet core that proves its current operational-key identity and hosts
+the requested public graph. A fresh signed challenge binds the requester,
+responder, nonce, graph and chain/Hub deployment. Phonebook advertisements are
+routing hints only. Selection probes at most 16 peers, four concurrently, and
+pins at most four sources inside the existing job lifetime. The result records
+`selectedCorePeerIds`; transfer and final coverage use only that pinned set.
+Unknown policies, mixed explicit peers/policy, unsupported chains, missing
+registration verification and no eligible source fail closed. GET advertises
+support in `capabilities.sourcePolicies`. This remains core-cache trust when
+`mode` is core-cache; registration is not an independent asset-state proof.
 
 Both modes use the existing exact-batch transport, content-root verification, graph/asset identity checks, atomic replacement, lifecycle fencing and stale-version protection. Private graph authorization is unchanged. The new snapshot server answers only for locally subscribed graphs proven public at its snapshot anchor; private, missing and unavailable cases share a refusal.
 
@@ -22,7 +43,7 @@ A marked graph stays marked across partial imports, process restarts and subsequ
 
 ## Use
 
-Deploy this capability on the selected cores and receiver. Core streaming must already be enabled (`DKG_EXACT_BATCH_STREAM_ENABLED=1`) and the source core must subscribe to the graph. A fresh receiver installs an on-demand subscription only after accepting a valid public snapshot; this does not schedule the separate legacy catch-up endpoint. This change does not enable flags or alter services remotely.
+Deploy this capability on the selected cores and receiver. Capable nodes negotiate exact-batch streaming by default; an explicit `DKG_EXACT_BATCH_STREAM_ENABLED=0` disables it. The source core must subscribe to the graph. A fresh receiver installs an on-demand subscription only after accepting a valid public snapshot; this does not schedule the separate legacy catch-up endpoint. This change does not alter services remotely.
 
 The administrator-only daemon endpoint starts one owned job per node:
 

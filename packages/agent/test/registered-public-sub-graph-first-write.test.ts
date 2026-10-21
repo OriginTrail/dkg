@@ -411,6 +411,11 @@ describe('a member\'s first write into a sub-graph of a registered public graph 
     const missing = await member.agent.resolveSubGraphRegistration(contextGraphId, 'drafts');
     expect(missing).toEqual({ registered: false, detail: 'none of the 3 peer(s) of the context graph asked holds it' });
     expect(member.fetchSyncPages).toHaveBeenCalledTimes(SUB_GRAPH_RESOLUTION_MAX_PEERS);
+    // The miss is logged with the peers that answered, so a silent miss shows in the node's log.
+    expect(member.log.info.mock.calls.map((call) => String(call[1]))).toContainEqual(
+      `Sub-graph "drafts" of context graph "${contextGraphId}" not found: none of the 3 peer(s) of the context graph asked holds it `
+      + `(answered: ${member.fetchSyncPages.mock.calls.map((call) => String(call[1]).slice(-8)).join(', ')})`,
+    );
   });
 
   it('asks the connected peers when it cannot name the owner, and only them', async () => {

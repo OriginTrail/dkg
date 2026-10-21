@@ -14,10 +14,16 @@
  */
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
+  computeGossipSigningPayload,
   contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
   DKG_ONTOLOGY,
+  encodeGossipEnvelope,
+  encodeWorkspacePublishRequest,
   generateEd25519Keypair,
+  GOSSIP_ENVELOPE_FRESHNESS_MS,
+  GOSSIP_ENVELOPE_VERSION,
+  GOSSIP_TYPE_WORKSPACE_PUBLISH,
   TypedEventBus,
   type ContextGraphIdV1,
   type EvmAddressV1,
@@ -38,12 +44,21 @@ import {
   CORE_HOSTED_DEFINITION_MAX_FALLBACK_PEERS,
   CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS,
   CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS,
+  CORE_HOSTED_DEFINITION_SERVE_REFRESH_BUDGET_MS,
+  CORE_HOSTED_OWNER_TIE_CHECKS_PER_MINUTE,
+  coreHostedOwnerPeerIds,
+  coreHostedOwnerPeerTie,
+  coreHostedOwnerPeerTieSizes,
   ensureCoreHostedDefinition,
   hasPendingCoreHostedDefinitionRetry,
   holdsCoreHostedOwnerDefinition,
+  noteCoreHostedOwnerShare,
+  noteCoreHostedStorageAck,
+  pendingCoreHostedDefinitionHint,
   pendingCoreHostedDefinitionRefresh,
   refreshCoreHostedDefinitionBeforeServing,
 } from '../src/core-hosted-definition.js';
+import { OWNER_TIE_CHECKS_PER_MINUTE, OWNER_TIE_PENDING_MAX } from '../src/core-hosted-owner-peer-tie.js';
 import { ContextGraphRegistryMethods } from '../src/dkg-agent-cg-registry.js';
 import { Rfc64MetaBootstrapMethods } from '../src/dkg-agent-rfc64-meta-bootstrap.js';
 import { Rfc64SeedFetchMethods } from '../src/dkg-agent-rfc64-seed-fetch.js';
@@ -52,9 +67,19 @@ import {
   SUB_GRAPH_RESOLUTION_MAX_PEERS,
 } from '../src/peer-sub-graph-registration.js';
 import { readDurableMetaPage } from '../src/sync/responder/graph-plan.js';
+import { RELAYED_SHARE_FUTURE_SKEW_MS } from '../src/swm/owner-share-forward.js';
+import {
+  encryptedPayload,
+  relayedShareRequest,
+  senderKeyPayload,
+  signedEnvelope,
+  unsignedEnvelope,
+} from './_helpers/relayed-share-fixtures.js';
 
-const OWNER = new ethers.Wallet(`0x${'95'.repeat(32)}`).address.toLowerCase() as EvmAddressV1;
-const STRANGER = new ethers.Wallet(`0x${'96'.repeat(32)}`).address.toLowerCase();
+const OWNER_SIGNER = new ethers.Wallet(`0x${'95'.repeat(32)}`);
+const STRANGER_SIGNER = new ethers.Wallet(`0x${'96'.repeat(32)}`);
+const OWNER = OWNER_SIGNER.address.toLowerCase() as EvmAddressV1;
+const STRANGER = STRANGER_SIGNER.address.toLowerCase();
 const MEMBER = new ethers.Wallet(`0x${'97'.repeat(32)}`).address;
 const OWNER_PEER_ID = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 const CORE_PEER_ID = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
@@ -62,6 +87,8 @@ const SECOND_CORE_PEER_ID = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q
 const STRANGER_PEER_ID = '12D3KooWRBhwfeP2Y4TCx1SM6s9rUoHhR5STiGwxBhgFRcw3UERE';
 const OTHER_PEER_ID = '12D3KooWJWEKvSFbben74C7H4YtKjhPMTDxd7gP7zxWSUEeF27st';
 const MEMBER_PEER_ID = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
+/** A second node of the owner's wallet. */
+const OWNER_SECOND_PEER_ID = '12D3KooWOwnerSecondNode00000000000000000000000000000';
 const ON_CHAIN_ID = '12';
 const contextGraphId = `${OWNER}/one-graph` as ContextGraphIdV1;
 const REPORTS = 'reports';
@@ -227,6 +254,8 @@ interface CoreOptions {
   hosted?: boolean;
   localAuthor?: boolean;
   graphId?: string;
+  /** The node's configured role; default a Core. */
+  nodeRole?: 'core' | 'edge';
 }
 
 /** A Core that hosts the graph by its chain policy (`recordCoreHostedPublicCg` wrote its row). */
@@ -239,6 +268,7 @@ function coreNode(peers: Peers, options: CoreOptions = {}) {
   const graphId = options.graphId ?? contextGraphId;
   const surface = {
     ...base,
+    config: { nodeRole: options.nodeRole ?? 'core' },
     node: { ...base.node, stopSignal: stop.signal },
     subscribedContextGraphs: new Map([[graphId, {
       syncMode: 'always-on', subscribed: false, synced: false, onChainId: ON_CHAIN_ID, coreHosted: options.hosted !== false,
@@ -904,5 +934,777 @@ describe('a member that reaches a registered public graph only through Cores', (
     await expect(hasSubGraphRegistration(incomplete.store, contextGraphId, 'drafts')).resolves.toBe(false);
     await expect(incomplete.agent.resolveSubGraphRegistration(contextGraphId, 'drafts')).resolves.toEqual({ registered: true });
     await expect(hasSubGraphRegistration(incomplete.store, contextGraphId, 'drafts')).resolves.toBe(true);
+  });
+});
+
+
+/** A share into a graph naming `publisherPeerId`, in the envelope `signer` signs: the owner's wallet, now, by default. */
+async function ownerShare(publisherPeerId: string, options: {
+  readonly signer?: ethers.Wallet;
+  readonly graphId?: string;
+  readonly payloadGraphId?: string;
+  readonly signedAt?: number;
+} = {}): Promise<Uint8Array> {
+  const graphId = options.graphId ?? contextGraphId;
+  const payload = await relayedShareRequest({ contextGraphId: options.payloadGraphId ?? graphId, publisherPeerId });
+  return signedEnvelope(payload, options.signer ?? OWNER_SIGNER, {
+    contextGraphId: graphId,
+    signedAt: options.signedAt === undefined ? undefined : new Date(options.signedAt),
+  });
+}
+
+/** A small share of `graphId` naming `publisherPeerId`, signed by `signer` (the owner's wallet) now. */
+async function smallOwnerShare(graphId: string, publisherPeerId: string, signer: ethers.Wallet = OWNER_SIGNER): Promise<Uint8Array> {
+  const payload = encodeWorkspacePublishRequest({
+    contextGraphId: graphId, nquads: new Uint8Array(), manifest: [], publisherPeerId, shareOperationId: 'op-1', timestampMs: 0,
+  });
+  return signedEnvelope(payload, signer, { contextGraphId: graphId });
+}
+
+/** A small share naming `publisherPeerId` whose envelope claims the owner's wallet over bytes that are no signature. */
+function badSignatureShare(publisherPeerId: string): Uint8Array {
+  const payload = encodeWorkspacePublishRequest({
+    contextGraphId, nquads: new Uint8Array(), manifest: [], publisherPeerId, shareOperationId: 'op-1', timestampMs: 0,
+  });
+  return encodeGossipEnvelope({
+    version: GOSSIP_ENVELOPE_VERSION,
+    type: GOSSIP_TYPE_WORKSPACE_PUBLISH,
+    contextGraphId,
+    agentAddress: OWNER_SIGNER.address,
+    timestamp: new Date().toISOString(),
+    signature: new Uint8Array(65).fill(1),
+    payload,
+  });
+}
+
+/** An envelope that names the owner's wallet as its signer over a signature `signer` made. */
+async function claimedOwnerShare(publisherPeerId: string, signer: ethers.Wallet): Promise<Uint8Array> {
+  const payload = await relayedShareRequest({ contextGraphId, publisherPeerId });
+  const timestamp = new Date().toISOString();
+  const signature = await signer.signMessage(computeGossipSigningPayload(GOSSIP_TYPE_WORKSPACE_PUBLISH, contextGraphId, timestamp, payload));
+  return encodeGossipEnvelope({
+    version: GOSSIP_ENVELOPE_VERSION,
+    type: GOSSIP_TYPE_WORKSPACE_PUBLISH,
+    contextGraphId,
+    agentAddress: OWNER_SIGNER.address,
+    timestamp,
+    signature: ethers.getBytes(signature),
+    payload,
+  });
+}
+
+/** Real event-loop turns until `condition` holds; fake timers leave `setImmediate` real. */
+async function until(condition: () => boolean): Promise<void> {
+  const startedAt = performance.now();
+  while (!condition()) {
+    if (performance.now() - startedAt > 10_000) throw new Error('condition not met within 10 s');
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+/** Fetches from `peerId` wait until `release()`, then fail; fetches after it are answered as the peer holds. */
+function holdFetchesFrom(core: ReturnType<typeof coreNode>, peerId: string): { release(): void; held(): number } {
+  const serve = core.fetchSyncPages.getMockImplementation()!;
+  let open!: () => void;
+  const gate = new Promise<void>((resolve) => { open = resolve; });
+  let released = false;
+  let held = 0;
+  core.fetchSyncPages.mockImplementation(async (...args) => {
+    if (args[1] !== peerId || released) return serve(...args);
+    held += 1;
+    await gate;
+    throw new Error(`no answer from ${peerId.slice(-8)}`);
+  });
+  return { release: () => { released = true; open(); }, held: () => held };
+}
+
+describe('a Core asks the owner\'s node that an owner-signed share ties to a hosted graph', () => {
+  const infoLines = (core: ReturnType<typeof coreNode>) => core.log.info.mock.calls.map((call) => String(call[1]));
+
+  it('asks the tied node at once, installs the owner\'s sub-graph, and takes it for the definition\'s source', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)]);
+    // The graph was created minutes ago: nothing names the owner's node, and the window misses it.
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner], [OTHER_PEER_ID, await peerNode()]]), {
+      connected: [OTHER_PEER_ID, OWNER_PEER_ID], ownerNodes: [], seedPeers: [OTHER_PEER_ID],
+    });
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('not-found');
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OTHER_PEER_ID]);
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(true);
+    expect(await coreHostedOwnerPeerIds(core.agent, contextGraphId, OWNER)).toEqual([]);
+
+    // The owner's node delivers a share into the graph that the owner's wallet signed.
+    const startedAt = performance.now();
+    noteCoreHostedOwnerShare(core.agent, await ownerShare(OWNER_PEER_ID), OWNER_PEER_ID);
+    expect(coreHostedOwnerPeerTie(core.agent, contextGraphId)).toBe(OWNER_PEER_ID);
+    await pendingCoreHostedDefinitionHint(core.agent, contextGraphId);
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OTHER_PEER_ID, OWNER_PEER_ID]);
+    await expect(holdsCoreHostedOwnerDefinition(core.store, contextGraphId, OWNER)).resolves.toBe(true);
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, REPORTS)).resolves.toBe(true);
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(false);
+    expect(pendingCoreHostedDefinitionHint(core.agent, contextGraphId)).toBeUndefined();
+    expect(core.surface.peerResolver.connect).not.toHaveBeenCalled();
+    expect(infoLines(core)).toContainEqual(expect.stringContaining(
+      `installed the owner's definition from owner-tied node ${OWNER_PEER_ID.slice(-8)}`,
+    ));
+    // The owner lookups (the serve-time refresh, the forward of members' shares) name it now.
+    expect(await coreHostedOwnerPeerIds(core.agent, contextGraphId, OWNER)).toEqual([OWNER_PEER_ID]);
+  });
+
+  it('counts the tied node\'s fetch for no cooldown: a subscriber\'s request right after it refreshes from the owner', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner]]), { ownerNodes: [], seedPeers: [] });
+    noteCoreHostedOwnerShare(core.agent, await ownerShare(OWNER_PEER_ID), OWNER_PEER_ID);
+    await pendingCoreHostedDefinitionHint(core.agent, contextGraphId);
+    await expect(holdsCoreHostedOwnerDefinition(core.store, contextGraphId, OWNER)).resolves.toBe(true);
+
+    await owner.store.insert(subGraphRegistration(REPORTS));
+    await refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId);
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OWNER_PEER_ID, OWNER_PEER_ID]);
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, REPORTS)).resolves.toBe(true);
+  });
+
+  it('records the tie before the graph is hosted, and the attempt hosting starts asks the tied node before the connected peers', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner], [OTHER_PEER_ID, await peerNode()]]), {
+      connected: [OTHER_PEER_ID, OWNER_PEER_ID], ownerNodes: [], seedPeers: [OTHER_PEER_ID], hosted: false,
+    });
+    // The owner's share reaches the Core before its first StorageACK: the graph is not hosted yet.
+    noteCoreHostedOwnerShare(core.agent, await ownerShare(OWNER_PEER_ID), OWNER_PEER_ID);
+    expect(coreHostedOwnerPeerTie(core.agent, contextGraphId)).toBe(OWNER_PEER_ID);
+    expect(pendingCoreHostedDefinitionHint(core.agent, contextGraphId)).toBeUndefined();
+    expect(core.fetchSyncPages).not.toHaveBeenCalled();
+
+    // The StorageACK gate records the graph as hosted, then notes the ACK: one fetch, by the attempt.
+    core.surface.subscribedContextGraphs.get(contextGraphId)!.coreHosted = true;
+    const recorded = ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded');
+    noteCoreHostedStorageAck(core.agent, contextGraphId, OWNER_PEER_ID);
+    expect(pendingCoreHostedDefinitionHint(core.agent, contextGraphId)).toBeUndefined();
+    await expect(recorded).resolves.toBe('fetched');
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OWNER_PEER_ID]);
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, REPORTS)).resolves.toBe(true);
+    expect(infoLines(core)).toContainEqual(expect.stringContaining(`from owner node ${OWNER_PEER_ID.slice(-8)} (recorded)`));
+  });
+
+  it('makes one fetch for StorageACKs of the tied node while the definition is missing, and one more once it was held and lost', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)]);
+    owner.answer = 'fail';
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner], [OTHER_PEER_ID, await peerNode()]]), {
+      connected: [OWNER_PEER_ID, OTHER_PEER_ID], ownerNodes: [], seedPeers: [], hosted: false,
+    });
+    noteCoreHostedOwnerShare(core.agent, await ownerShare(OWNER_PEER_ID), OWNER_PEER_ID);
+    core.surface.subscribedContextGraphs.get(contextGraphId)!.coreHosted = true;
+
+    noteCoreHostedStorageAck(core.agent, contextGraphId, OWNER_PEER_ID);
+    await pendingCoreHostedDefinitionHint(core.agent, contextGraphId);
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OWNER_PEER_ID]);
+    // The fetch is no attempt: it schedules no retry.
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(false);
+    for (const requester of [OWNER_PEER_ID, OWNER_PEER_ID, OTHER_PEER_ID, undefined]) {
+      noteCoreHostedStorageAck(core.agent, contextGraphId, requester);
+    }
+    expect(pendingCoreHostedDefinitionHint(core.agent, contextGraphId)).toBeUndefined();
+    expect(core.fetchSyncPages).toHaveBeenCalledOnce();
+
+    // The owner answers again: the next attempt asks the node as an owner node and installs the definition.
+    owner.answer = 'complete';
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'retry')).resolves.toBe('fetched');
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OWNER_PEER_ID, OWNER_PEER_ID]);
+    // Held: an ACK reads nothing and asks nobody.
+    const queries = vi.spyOn(core.store, 'query');
+    noteCoreHostedStorageAck(core.agent, contextGraphId, OWNER_PEER_ID);
+    expect(pendingCoreHostedDefinitionHint(core.agent, contextGraphId)).toBeUndefined();
+    expect(queries).not.toHaveBeenCalled();
+    queries.mockRestore();
+
+    // The Core loses its copy while the owner's node is away: the attempt that finds it missing cannot reach the node.
+    core.connected.splice(core.connected.indexOf(OWNER_PEER_ID), 1);
+    owner.answer = 'fail';
+    await core.store.dropGraph(metaGraph);
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'retry')).resolves.toBe('not-found');
+    expect(core.fetchSyncPages).toHaveBeenCalledTimes(2);
+    // The node is back and asks for ACKs: one more fetch, which installs the definition and ends the retries.
+    core.connected.push(OWNER_PEER_ID);
+    owner.answer = 'complete';
+    noteCoreHostedStorageAck(core.agent, contextGraphId, OWNER_PEER_ID);
+    noteCoreHostedStorageAck(core.agent, contextGraphId, OWNER_PEER_ID);
+    await pendingCoreHostedDefinitionHint(core.agent, contextGraphId);
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OWNER_PEER_ID, OWNER_PEER_ID, OWNER_PEER_ID]);
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, REPORTS)).resolves.toBe(true);
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(false);
+    core.stop.abort();
+  });
+
+  it('runs a full attempt for a retry that comes due during the tied node\'s fetch, and keeps the retries armed', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)]);
+    owner.answer = 'fail';
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner], [OTHER_PEER_ID, await peerNode()]]), {
+      connected: [OWNER_PEER_ID, OTHER_PEER_ID], ownerNodes: [], seedPeers: [OTHER_PEER_ID],
+    });
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('not-found');
+    const slow = holdFetchesFrom(core, OWNER_PEER_ID);
+    noteCoreHostedOwnerShare(core.agent, await ownerShare(OWNER_PEER_ID), OWNER_PEER_ID);
+    const fetching = pendingCoreHostedDefinitionHint(core.agent, contextGraphId);
+    expect(fetching).toBeDefined();
+    await until(() => slow.held() === 1);
+
+    await vi.advanceTimersByTimeAsync(CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[0]!);
+    // The retry joined nothing: an attempt of its own runs. It does not ask
+    // the tied node a second time while that node's own fetch runs.
+    const attempt = pendingCoreHostedDefinitionRefresh(core.agent, contextGraphId);
+    expect(attempt).toBeDefined();
+    expect(attempt).not.toBe(fetching);
+    slow.release();
+    await fetching;
+    await expect(attempt).resolves.toBe('not-found');
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OTHER_PEER_ID, OWNER_PEER_ID, OTHER_PEER_ID]);
+    // The attempt scheduled the next retry, the second delay; the fetch that installed nothing moved nothing.
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(true);
+    expect(infoLines(core).filter((line) => line.includes('next attempt in'))).toEqual([
+      expect.stringContaining(`next attempt in ${CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[0]! / 1000} s`),
+      expect.stringContaining(`next attempt in ${CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[1]! / 1000} s`),
+    ]);
+
+    // That retry runs as well, and installs the definition once the owner answers.
+    owner.answer = 'complete';
+    await vi.advanceTimersByTimeAsync(CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[1]!);
+    await expect(holdsCoreHostedOwnerDefinition(core.store, contextGraphId, OWNER)).resolves.toBe(true);
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(false);
+  });
+
+  it('runs a full attempt right after a subscriber\'s refresh during which a retry came due, and keeps the retries armed', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    owner.answer = 'fail';
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner], [OTHER_PEER_ID, await peerNode()]]), {
+      connected: [OWNER_PEER_ID, OTHER_PEER_ID], ownerNodes: [OWNER_PEER_ID], seedPeers: [OTHER_PEER_ID],
+    });
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('not-found');
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OWNER_PEER_ID, OTHER_PEER_ID]);
+
+    // A subscriber asks past the cooldown, and the owner's node is slow to answer the refresh.
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS + 1);
+    const slow = holdFetchesFrom(core, OWNER_PEER_ID);
+    const serving = refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId);
+    const refresh = pendingCoreHostedDefinitionRefresh(core.agent, contextGraphId);
+    await until(() => slow.held() === 1);
+    await vi.advanceTimersByTimeAsync(CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[0]!);
+    // The retry came due: no timer is pending, and it waits for the refresh.
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(false);
+    expect(pendingCoreHostedDefinitionRefresh(core.agent, contextGraphId)).toBe(refresh);
+
+    slow.release();
+    await serving;
+    await refresh;
+    await pendingCoreHostedDefinitionRefresh(core.agent, contextGraphId);
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OWNER_PEER_ID, OTHER_PEER_ID, OWNER_PEER_ID, OWNER_PEER_ID, OTHER_PEER_ID]);
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(true);
+    await vi.advanceTimersByTimeAsync(CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[1]!);
+    expect(core.fetchSyncPages).toHaveBeenCalledTimes(7);
+    core.stop.abort();
+  });
+
+  it('starts its own refresh for a subscriber\'s request during the tied node\'s fetch, from the owner node the registry names', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner], [OWNER_SECOND_PEER_ID, await peerNode()]]), {
+      connected: [OWNER_PEER_ID, OWNER_SECOND_PEER_ID], ownerNodes: [OWNER_PEER_ID], seedPeers: [],
+    });
+    // The owner's second node ties itself to the graph and is slow to answer.
+    const slow = holdFetchesFrom(core, OWNER_SECOND_PEER_ID);
+    noteCoreHostedOwnerShare(core.agent, await ownerShare(OWNER_SECOND_PEER_ID), OWNER_SECOND_PEER_ID);
+    const fetching = pendingCoreHostedDefinitionHint(core.agent, contextGraphId);
+    await until(() => slow.held() === 1);
+
+    const startedAt = performance.now();
+    const serving = refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId);
+    const refresh = pendingCoreHostedDefinitionRefresh(core.agent, contextGraphId);
+    expect(refresh).toBeDefined();
+    expect(refresh).not.toBe(fetching);
+    // Two fetches of one graph's metadata run one after the other; the slow one gives up within its deadline.
+    setTimeout(() => slow.release(), 50);
+    await serving;
+    expect(performance.now() - startedAt).toBeLessThan(CORE_HOSTED_DEFINITION_SERVE_REFRESH_BUDGET_MS);
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OWNER_SECOND_PEER_ID, OWNER_PEER_ID]);
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, REPORTS)).resolves.toBe(true);
+    await fetching;
+    // The owner lookups name the tied node first: the one entry the owner's signature names.
+    expect(await coreHostedOwnerPeerIds(core.agent, contextGraphId, OWNER)).toEqual([OWNER_SECOND_PEER_ID, OWNER_PEER_ID]);
+  });
+
+  it('never asks a StorageACK requester that no owner-signed share ties, installs nothing it holds, and takes it for no source', async () => {
+    const requester = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration('drafts')]);
+    const core = coreNode(peersOf([[STRANGER_PEER_ID, requester]]), { connected: [STRANGER_PEER_ID], ownerNodes: [], seedPeers: [] });
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('not-found');
+    for (let i = 0; i < 3; i += 1) noteCoreHostedStorageAck(core.agent, contextGraphId, STRANGER_PEER_ID);
+    expect(pendingCoreHostedDefinitionHint(core.agent, contextGraphId)).toBeUndefined();
+    expect(pendingCoreHostedDefinitionRefresh(core.agent, contextGraphId)).toBeUndefined();
+    // Its own share, signed by its own wallet, ties nothing either.
+    noteCoreHostedOwnerShare(core.agent, await ownerShare(STRANGER_PEER_ID, { signer: STRANGER_SIGNER }), STRANGER_PEER_ID);
+    noteCoreHostedStorageAck(core.agent, contextGraphId, STRANGER_PEER_ID);
+    expect(coreHostedOwnerPeerTie(core.agent, contextGraphId)).toBeUndefined();
+    expect(core.fetchSyncPages).not.toHaveBeenCalled();
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, 'drafts')).resolves.toBe(false);
+    expect(await coreHostedOwnerPeerIds(core.agent, contextGraphId, OWNER)).toEqual([]);
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(true);
+    core.stop.abort();
+  });
+
+  const STRANGERS_GRAPH = `${STRANGER}/one-graph`;
+  const untied: Array<[string, () => Promise<{ wire: Uint8Array; from: string; options?: CoreOptions }>]> = [
+    ['the owner\'s share replayed by another node', async () => ({ wire: await ownerShare(OWNER_PEER_ID), from: STRANGER_PEER_ID })],
+    ['a share another wallet signed, naming its sender', async () => ({
+      wire: await ownerShare(STRANGER_PEER_ID, { signer: STRANGER_SIGNER }), from: STRANGER_PEER_ID,
+    })],
+    ['an envelope that names the owner\'s wallet over another wallet\'s signature', async () => ({
+      wire: await claimedOwnerShare(STRANGER_PEER_ID, STRANGER_SIGNER), from: STRANGER_PEER_ID,
+    })],
+    ['an envelope older than the freshness window', async () => ({
+      wire: await ownerShare(OWNER_PEER_ID, { signedAt: Date.now() - GOSSIP_ENVELOPE_FRESHNESS_MS - 60_000 }), from: OWNER_PEER_ID,
+    })],
+    ['an envelope signed ahead of the clock by more than the skew', async () => ({
+      wire: await ownerShare(OWNER_PEER_ID, { signedAt: Date.now() + RELAYED_SHARE_FUTURE_SKEW_MS + 60_000 }), from: OWNER_PEER_ID,
+    })],
+    ['a payload that names another graph than its envelope', async () => ({
+      wire: await ownerShare(OWNER_PEER_ID, { payloadGraphId: `${OWNER}/another-graph` }), from: OWNER_PEER_ID,
+    })],
+    ['an envelope for a graph whose id names another wallet', async () => ({
+      wire: await ownerShare(OWNER_PEER_ID, { graphId: STRANGERS_GRAPH }), from: OWNER_PEER_ID, options: { graphId: STRANGERS_GRAPH },
+    })],
+    ['a node that is not a Core', async () => ({ wire: await ownerShare(OWNER_PEER_ID), from: OWNER_PEER_ID, options: { nodeRole: 'edge' } })],
+    ['a graph this node created', async () => ({ wire: await ownerShare(OWNER_PEER_ID), from: OWNER_PEER_ID, options: { localAuthor: true } })],
+    ['a sender-key payload', async () => ({
+      wire: await signedEnvelope(senderKeyPayload(contextGraphId), OWNER_SIGNER, { contextGraphId }), from: OWNER_PEER_ID,
+    })],
+    ['an encrypted payload', async () => ({
+      wire: await signedEnvelope(encryptedPayload(contextGraphId), OWNER_SIGNER, { contextGraphId }), from: OWNER_PEER_ID,
+    })],
+    ['an unsigned envelope', async () => ({
+      wire: unsignedEnvelope(await relayedShareRequest({ contextGraphId, publisherPeerId: OWNER_PEER_ID }), contextGraphId), from: OWNER_PEER_ID,
+    })],
+  ];
+
+  it.each(untied)('ties no node for %s, and asks that node nothing for its StorageACK', async (_label, make) => {
+    const { wire, from, options } = await make();
+    const graphId = options?.graphId ?? contextGraphId;
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration('drafts')]);
+    const core = coreNode(peersOf([[from, owner]]), { connected: [from], ownerNodes: [], seedPeers: [], ...options });
+    noteCoreHostedOwnerShare(core.agent, wire, from);
+    noteCoreHostedStorageAck(core.agent, graphId, from);
+    expect(coreHostedOwnerPeerTie(core.agent, contextGraphId)).toBeUndefined();
+    expect(coreHostedOwnerPeerTie(core.agent, STRANGERS_GRAPH)).toBeUndefined();
+    expect(pendingCoreHostedDefinitionHint(core.agent, graphId)).toBeUndefined();
+    expect(core.fetchSyncPages).not.toHaveBeenCalled();
+  });
+
+  it('keeps the retries on the owner\'s node through alternating StorageACKs of slow untied peers and of a slow tied node', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const SLOW_MS = 20_000;
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    owner.answer = 'fail';
+    const slowPeers = [OWNER_SECOND_PEER_ID, OTHER_PEER_ID, STRANGER_PEER_ID];
+    const core = coreNode(
+      peersOf([[OWNER_PEER_ID, owner], ...await Promise.all(slowPeers.map(async (peerId) => [peerId, await peerNode()] as [string, PeerNode]))]),
+      { connected: [OWNER_PEER_ID, ...slowPeers], ownerNodes: [OWNER_PEER_ID], seedPeers: [] },
+    );
+    const serve = core.fetchSyncPages.getMockImplementation()!;
+    core.fetchSyncPages.mockImplementation(async (...args) => {
+      if (!slowPeers.includes(args[1])) return serve(...args);
+      await new Promise((resolve) => setTimeout(resolve, SLOW_MS));
+      throw new Error('timed out');
+    });
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('not-found');
+    noteCoreHostedOwnerShare(core.agent, await ownerShare(OWNER_SECOND_PEER_ID), OWNER_SECOND_PEER_ID);
+
+    const rounds = 4;
+    for (let round = 0; round < rounds; round += 1) {
+      for (const requester of [OTHER_PEER_ID, STRANGER_PEER_ID, OWNER_SECOND_PEER_ID, OTHER_PEER_ID, STRANGER_PEER_ID]) {
+        noteCoreHostedStorageAck(core.agent, contextGraphId, requester);
+      }
+      await vi.advanceTimersByTimeAsync(CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[round]! + SLOW_MS);
+    }
+    const asked = askedPeers(core.fetchSyncPages);
+    // Every attempt asked the owner's node the registry names: the first one and one per retry.
+    expect(asked.filter((peerId) => peerId === OWNER_PEER_ID)).toHaveLength(rounds + 1);
+    // The untied requesters were never asked; the tied node once by its own fetch, then by each retry.
+    expect(asked.filter((peerId) => peerId === OTHER_PEER_ID || peerId === STRANGER_PEER_ID)).toEqual([]);
+    expect(asked.filter((peerId) => peerId === OWNER_SECOND_PEER_ID)).toHaveLength(rounds + 1);
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(true);
+    core.stop.abort();
+  });
+
+  it('keeps one tie per graph, the latest node, and ties of graphs nobody hosts never push out a hosted graph\'s tie', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    owner.answer = 'fail';
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner], [OWNER_SECOND_PEER_ID, owner]]), {
+      connected: [OWNER_PEER_ID, OWNER_SECOND_PEER_ID], ownerNodes: [], seedPeers: [],
+    });
+    noteCoreHostedOwnerShare(core.agent, await ownerShare(OWNER_PEER_ID), OWNER_PEER_ID);
+    await pendingCoreHostedDefinitionHint(core.agent, contextGraphId);
+    // Another node of the owner ties itself later: it takes the first one's place and is asked once in turn.
+    noteCoreHostedOwnerShare(core.agent, await ownerShare(OWNER_SECOND_PEER_ID), OWNER_SECOND_PEER_ID);
+    expect(coreHostedOwnerPeerTie(core.agent, contextGraphId)).toBe(OWNER_SECOND_PEER_ID);
+    await pendingCoreHostedDefinitionHint(core.agent, contextGraphId);
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OWNER_PEER_ID, OWNER_SECOND_PEER_ID]);
+    noteCoreHostedStorageAck(core.agent, contextGraphId, OWNER_PEER_ID);
+    noteCoreHostedStorageAck(core.agent, contextGraphId, OWNER_SECOND_PEER_ID);
+    expect(pendingCoreHostedDefinitionHint(core.agent, contextGraphId)).toBeUndefined();
+
+    // The owner shares into a graph it has just created, which the Core does not host yet.
+    const fresh = `${OWNER}/created-now`;
+    noteCoreHostedOwnerShare(core.agent, await smallOwnerShare(fresh, OWNER_PEER_ID), OWNER_PEER_ID);
+    // Another wallet's nodes tie themselves to many graphs that wallet's id names, none of them hosted.
+    for (let node = 0; node < 18; node += 1) {
+      const peerId = `12D3KooWJunkNode${String(node).padStart(36, '0')}`;
+      for (let i = 0; i < 20; i += 1) {
+        noteCoreHostedOwnerShare(core.agent, await smallOwnerShare(`${STRANGER}/junk-${node}-${i}`, peerId, STRANGER_SIGNER), peerId);
+      }
+    }
+    expect(coreHostedOwnerPeerTie(core.agent, contextGraphId)).toBe(OWNER_SECOND_PEER_ID);
+    expect(coreHostedOwnerPeerTie(core.agent, fresh)).toBe(OWNER_PEER_ID);
+    const sizes = coreHostedOwnerPeerTieSizes(core.agent);
+    expect(sizes.hosted).toBe(1);
+    expect(sizes.pending).toBeGreaterThan(1);
+    expect(sizes.pending).toBeLessThanOrEqual(OWNER_TIE_PENDING_MAX);
+    // Its first StorageACK makes the Core host the graph: the tie counts among the hosted ones.
+    core.surface.subscribedContextGraphs.set(fresh, { ...core.surface.subscribedContextGraphs.get(contextGraphId)! });
+    expect(await coreHostedOwnerPeerIds(core.agent, fresh, OWNER)).toEqual([OWNER_PEER_ID]);
+    expect(coreHostedOwnerPeerTieSizes(core.agent)).toEqual({ hosted: 2, pending: sizes.pending - 1 });
+    core.stop.abort();
+  }, 120_000);
+
+  it(`checks at most ${OWNER_TIE_CHECKS_PER_MINUTE} signatures a minute in all, whichever nodes send envelopes whose signature fails`, async () => {
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner]]), { connected: [], ownerNodes: [], seedPeers: [] });
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    // Envelopes whose signature fails, from more nodes than one node's limit covers.
+    const senders = Math.ceil((2 * OWNER_TIE_CHECKS_PER_MINUTE) / CORE_HOSTED_OWNER_TIE_CHECKS_PER_MINUTE);
+    for (let i = 0; i < senders; i += 1) {
+      const peerId = `12D3KooWSender${String(i).padStart(38, '0')}`;
+      const share = badSignatureShare(peerId);
+      for (let j = 0; j < CORE_HOSTED_OWNER_TIE_CHECKS_PER_MINUTE; j += 1) noteCoreHostedOwnerShare(core.agent, share, peerId);
+    }
+    expect(coreHostedOwnerPeerTieSizes(core.agent)).toEqual({ hosted: 0, pending: 0 });
+    // The owner's share is not checked either until the minute ends.
+    const genuine = await ownerShare(OWNER_PEER_ID);
+    noteCoreHostedOwnerShare(core.agent, genuine, OWNER_PEER_ID);
+    expect(coreHostedOwnerPeerTie(core.agent, contextGraphId)).toBeUndefined();
+    clock.mockReturnValue(now + 60_000);
+    noteCoreHostedOwnerShare(core.agent, genuine, OWNER_PEER_ID);
+    expect(coreHostedOwnerPeerTie(core.agent, contextGraphId)).toBe(OWNER_PEER_ID);
+    core.stop.abort();
+  });
+
+  it(`checks at most ${CORE_HOSTED_OWNER_TIE_CHECKS_PER_MINUTE} signatures per node a minute, and none for the node a graph is tied to`, async () => {
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner]]), { connected: [], ownerNodes: [], seedPeers: [] });
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    // A tied node's further shares are not checked again, so they use up nothing.
+    noteCoreHostedOwnerShare(core.agent, await ownerShare(OWNER_PEER_ID), OWNER_PEER_ID);
+    const again = await ownerShare(OWNER_PEER_ID);
+    for (let i = 0; i < CORE_HOSTED_OWNER_TIE_CHECKS_PER_MINUTE + 1; i += 1) noteCoreHostedOwnerShare(core.agent, again, OWNER_PEER_ID);
+    noteCoreHostedOwnerShare(core.agent, await smallOwnerShare(`${OWNER}/second-graph`, OWNER_PEER_ID), OWNER_PEER_ID);
+    expect(coreHostedOwnerPeerTie(core.agent, `${OWNER}/second-graph`)).toBe(OWNER_PEER_ID);
+
+    // Envelopes whose signature fails use up the sender's checks for the minute.
+    const forged = await claimedOwnerShare(STRANGER_PEER_ID, STRANGER_SIGNER);
+    for (let i = 0; i < CORE_HOSTED_OWNER_TIE_CHECKS_PER_MINUTE; i += 1) noteCoreHostedOwnerShare(core.agent, forged, STRANGER_PEER_ID);
+    const genuine = await smallOwnerShare(`${OWNER}/third-graph`, STRANGER_PEER_ID);
+    noteCoreHostedOwnerShare(core.agent, genuine, STRANGER_PEER_ID);
+    expect(coreHostedOwnerPeerTie(core.agent, `${OWNER}/third-graph`)).toBeUndefined();
+    clock.mockReturnValue(now + 60_000);
+    noteCoreHostedOwnerShare(core.agent, genuine, STRANGER_PEER_ID);
+    expect(coreHostedOwnerPeerTie(core.agent, `${OWNER}/third-graph`)).toBe(STRANGER_PEER_ID);
+  });
+
+  it('never throws on a node without a transport, and serves a subscriber\'s request as it is', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner]]), { ownerNodes: [], seedPeers: [] });
+    core.surface.node.libp2p.getConnections = () => { throw new Error('not started'); };
+    expect(() => noteCoreHostedOwnerShare(core.agent, new Uint8Array([1, 2, 3]), OWNER_PEER_ID)).not.toThrow();
+    const share = await ownerShare(OWNER_PEER_ID);
+    expect(() => noteCoreHostedOwnerShare(core.agent, share, OWNER_PEER_ID)).not.toThrow();
+    expect(coreHostedOwnerPeerTie(core.agent, contextGraphId)).toBe(OWNER_PEER_ID);
+    expect(() => noteCoreHostedStorageAck(core.agent, contextGraphId, OWNER_PEER_ID)).not.toThrow();
+    expect(pendingCoreHostedDefinitionHint(core.agent, contextGraphId)).toBeUndefined();
+    await expect(refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId)).resolves.toBeUndefined();
+    expect(pendingCoreHostedDefinitionRefresh(core.agent, contextGraphId)).toBeUndefined();
+    expect(core.fetchSyncPages).not.toHaveBeenCalled();
+    // A share from this node itself ties nothing.
+    noteCoreHostedOwnerShare(core.agent, await ownerShare(CORE_PEER_ID, { graphId: `${OWNER}/own-share` }), CORE_PEER_ID);
+    expect(coreHostedOwnerPeerTie(core.agent, `${OWNER}/own-share`)).toBeUndefined();
+  });
+
+  it('ends the tied node\'s fetch quietly when a store read fails, and leaves the retries as they were', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner]]), { seedPeers: [] });
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+    // The copy is lost; a refresh finds it missing and the retries are armed again.
+    await core.store.dropGraph(metaGraph);
+    core.connected.splice(0);
+    owner.answer = 'fail';
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'retry')).resolves.toBe('not-found');
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(true);
+
+    core.connected.push(OWNER_PEER_ID);
+    core.store.query = (async () => { throw new Error('store unavailable'); }) as typeof core.store.query;
+    noteCoreHostedOwnerShare(core.agent, await ownerShare(OWNER_PEER_ID), OWNER_PEER_ID);
+    await expect(pendingCoreHostedDefinitionHint(core.agent, contextGraphId)).resolves.toBeUndefined();
+    expect(pendingCoreHostedDefinitionHint(core.agent, contextGraphId)).toBeUndefined();
+    expect(infoLines(core)).toContainEqual(expect.stringContaining('store unavailable'));
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(true);
+    core.stop.abort();
+  });
+
+  it('never refreshes a held definition from an untied requester before serving', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    const subscriber = await peerNode([...CANONICAL_CHAIN_FACTS]);
+    const renaming = await peerNode([...OWNER_DECLARATION, rootQuad(NAME, '"renamed by requester"')]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner], [MEMBER_PEER_ID, subscriber], [STRANGER_PEER_ID, renaming]]), {
+      connected: [OWNER_PEER_ID, MEMBER_PEER_ID, STRANGER_PEER_ID], ownerNodes: [OWNER_PEER_ID], seedPeers: [],
+    });
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+
+    // The owner's node goes away; a subscriber that holds the chain's facts only, then a peer
+    // that serves a renamed copy, ask for ACKs; subscribers' requests come past the cooldown.
+    core.connected.splice(core.connected.indexOf(OWNER_PEER_ID), 1);
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now');
+    for (const [round, requester] of [MEMBER_PEER_ID, STRANGER_PEER_ID].entries()) {
+      noteCoreHostedStorageAck(core.agent, contextGraphId, requester);
+      clock.mockReturnValue(now + (round + 1) * (CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS + 1));
+      await refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId);
+    }
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OWNER_PEER_ID]);
+    await expect(holdsCoreHostedOwnerDefinition(core.store, contextGraphId, OWNER)).resolves.toBe(true);
+    expect(await servedByCore(core, [])).not.toContainEqual(`${contextGraphUri} ${NAME} "renamed by requester"`);
+    expect(core.surface.peerResolver.connect).not.toHaveBeenCalled();
+    core.stop.abort();
+  });
+
+  it('fetches again when a refresh replaces the held definition with one that names no curator, asking the tied node then', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)]);
+    const peers = peersOf([[OWNER_PEER_ID, owner], [SECOND_CORE_PEER_ID, await peerNode([...OWNER_DECLARATION])]]);
+    const core = coreNode(peers, { connected: [SECOND_CORE_PEER_ID, OWNER_PEER_ID], ownerNodes: [], seedPeers: [SECOND_CORE_PEER_ID] });
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'restored')).resolves.toBe('fetched');
+    // Held: the owner's share ties its node and fetches nothing.
+    noteCoreHostedOwnerShare(core.agent, await ownerShare(OWNER_PEER_ID), OWNER_PEER_ID);
+    expect(pendingCoreHostedDefinitionHint(core.agent, contextGraphId)).toBeUndefined();
+
+    // The peer the copy came from now serves the chain's facts only, and the owner's node is not connected.
+    peers.set(SECOND_CORE_PEER_ID, await peerNode([...CANONICAL_CHAIN_FACTS]));
+    core.connected.splice(core.connected.indexOf(OWNER_PEER_ID), 1);
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS + 1);
+    await refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId);
+    await expect(pendingCoreHostedDefinitionRefresh(core.agent, contextGraphId)).resolves.toBe('fetched');
+    expect(askedPeers(core.fetchSyncPages)).toEqual([SECOND_CORE_PEER_ID, SECOND_CORE_PEER_ID, SECOND_CORE_PEER_ID, OWNER_PEER_ID]);
+    await expect(holdsCoreHostedOwnerDefinition(core.store, contextGraphId, OWNER)).resolves.toBe(true);
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, REPORTS)).resolves.toBe(true);
+    expect(infoLines(core)).toContainEqual(expect.stringContaining(`from owner node ${OWNER_PEER_ID.slice(-8)} (serve)`));
+
+    // Nobody serves it then: the retries go on, and the tied node's StorageACK asks it once it is back.
+    const alonePeers = peersOf([[SECOND_CORE_PEER_ID, await peerNode([...OWNER_DECLARATION])], [OWNER_PEER_ID, owner]]);
+    const alone = coreNode(alonePeers, { connected: [SECOND_CORE_PEER_ID], ownerNodes: [], seedPeers: [SECOND_CORE_PEER_ID] });
+    await expect(ensureCoreHostedDefinition(alone.agent, contextGraphId, 'restored')).resolves.toBe('fetched');
+    noteCoreHostedOwnerShare(alone.agent, await ownerShare(OWNER_PEER_ID), OWNER_PEER_ID);
+    alonePeers.set(SECOND_CORE_PEER_ID, await peerNode([...CANONICAL_CHAIN_FACTS]));
+    owner.answer = 'fail';
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 2 * (CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS + 1));
+    await refreshCoreHostedDefinitionBeforeServing(alone.agent, contextGraphId);
+    await expect(pendingCoreHostedDefinitionRefresh(alone.agent, contextGraphId)).resolves.toBe('not-found');
+    await expect(holdsCoreHostedOwnerDefinition(alone.store, contextGraphId, OWNER)).resolves.toBe(false);
+    expect(hasPendingCoreHostedDefinitionRetry(alone.agent, contextGraphId)).toBe(true);
+    alone.connected.push(OWNER_PEER_ID);
+    owner.answer = 'complete';
+    noteCoreHostedStorageAck(alone.agent, contextGraphId, OWNER_PEER_ID);
+    await pendingCoreHostedDefinitionHint(alone.agent, contextGraphId);
+    await expect(holdsCoreHostedOwnerDefinition(alone.store, contextGraphId, OWNER)).resolves.toBe(true);
+    expect(hasPendingCoreHostedDefinitionRetry(alone.agent, contextGraphId)).toBe(false);
+    alone.stop.abort();
+  });
+
+  it('keeps the held mark when the store loses the definition; the next subscriber\'s request finds it missing and fetches it', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION]);
+    const otherCore = await peerNode([...OWNER_DECLARATION]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner], [SECOND_CORE_PEER_ID, otherCore]]), {
+      connected: [OWNER_PEER_ID, SECOND_CORE_PEER_ID], ownerNodes: [OWNER_PEER_ID], seedPeers: [SECOND_CORE_PEER_ID],
+    });
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+    noteCoreHostedOwnerShare(core.agent, await ownerShare(OWNER_PEER_ID), OWNER_PEER_ID);
+
+    // The owner's node goes away and stops answering; the Core's copy is lost while it still hosts the graph.
+    core.connected.splice(core.connected.indexOf(OWNER_PEER_ID), 1);
+    owner.answer = 'fail';
+    await core.store.dropGraph(metaGraph);
+    // The mark is in memory: the tied node's ACK starts nothing.
+    noteCoreHostedStorageAck(core.agent, contextGraphId, OWNER_PEER_ID);
+    expect(pendingCoreHostedDefinitionHint(core.agent, contextGraphId)).toBeUndefined();
+
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS + 1);
+    await refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId);
+    await expect(pendingCoreHostedDefinitionRefresh(core.agent, contextGraphId)).resolves.toBe('fetched');
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OWNER_PEER_ID, SECOND_CORE_PEER_ID]);
+    expect(infoLines(core)).toContainEqual(expect.stringContaining(`from peer ${SECOND_CORE_PEER_ID.slice(-8)} (serve)`));
+    core.stop.abort();
+  });
+
+  it('asks a node tied during a subscriber\'s refresh once the refresh ends, so it never replaces the declaration the refresh installs', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)]);
+    // The owner's second node holds the chain's facts only.
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner], [OWNER_SECOND_PEER_ID, await peerNode([...CANONICAL_CHAIN_FACTS])]]), {
+      connected: [OWNER_PEER_ID, OWNER_SECOND_PEER_ID], ownerNodes: [OWNER_PEER_ID], seedPeers: [],
+    });
+    owner.answer = 'fail';
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('not-found');
+
+    // A subscriber asks past the cooldown, and the owner's node is slow to answer the refresh.
+    owner.answer = 'complete';
+    const serve = core.fetchSyncPages.getMockImplementation()!;
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => { answer = resolve; });
+    core.fetchSyncPages.mockImplementation(async (...args) => {
+      if (args[1] === OWNER_PEER_ID) await answered;
+      return serve(...args);
+    });
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS + 1);
+    const share = await ownerShare(OWNER_SECOND_PEER_ID, { signedAt: Date.now() });
+    const serving = refreshCoreHostedDefinitionBeforeServing(core.agent, contextGraphId);
+    const refresh = pendingCoreHostedDefinitionRefresh(core.agent, contextGraphId);
+    await until(() => core.fetchSyncPages.mock.calls.length === 2);
+    // Meanwhile the second node delivers a share the owner's wallet signed, then asks for a StorageACK.
+    noteCoreHostedOwnerShare(core.agent, share, OWNER_SECOND_PEER_ID);
+    noteCoreHostedStorageAck(core.agent, contextGraphId, OWNER_SECOND_PEER_ID);
+    expect(coreHostedOwnerPeerTie(core.agent, contextGraphId)).toBe(OWNER_SECOND_PEER_ID);
+    const tied = pendingCoreHostedDefinitionHint(core.agent, contextGraphId);
+    answer();
+    await serving;
+    await refresh;
+    await tied;
+    await expect(holdsCoreHostedOwnerDefinition(core.store, contextGraphId, OWNER)).resolves.toBe(true);
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, REPORTS)).resolves.toBe(true);
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OWNER_PEER_ID, OWNER_PEER_ID]);
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(false);
+    core.stop.abort();
+
+    // A refresh that installs nothing: the node tied while it ran is asked once it ends.
+    const away = await peerNode([...OWNER_DECLARATION]);
+    away.answer = 'fail';
+    const lone = coreNode(peersOf([[OWNER_PEER_ID, away], [OWNER_SECOND_PEER_ID, await peerNode([...OWNER_DECLARATION])]]), {
+      connected: [OWNER_PEER_ID, OWNER_SECOND_PEER_ID], ownerNodes: [OWNER_PEER_ID], seedPeers: [],
+    });
+    await expect(ensureCoreHostedDefinition(lone.agent, contextGraphId, 'recorded')).resolves.toBe('not-found');
+    clock.mockReturnValue(now + 2 * (CORE_HOSTED_DEFINITION_SERVE_COOLDOWN_MS + 1));
+    const loneShare = await ownerShare(OWNER_SECOND_PEER_ID, { signedAt: Date.now() });
+    const slow = holdFetchesFrom(lone, OWNER_PEER_ID);
+    const loneServing = refreshCoreHostedDefinitionBeforeServing(lone.agent, contextGraphId);
+    await until(() => slow.held() === 1);
+    noteCoreHostedOwnerShare(lone.agent, loneShare, OWNER_SECOND_PEER_ID);
+    slow.release();
+    await loneServing;
+    await pendingCoreHostedDefinitionHint(lone.agent, contextGraphId);
+    expect(askedPeers(lone.fetchSyncPages)).toEqual([OWNER_PEER_ID, OWNER_PEER_ID, OWNER_SECOND_PEER_ID]);
+    await expect(holdsCoreHostedOwnerDefinition(lone.store, contextGraphId, OWNER)).resolves.toBe(true);
+    expect(hasPendingCoreHostedDefinitionRetry(lone.agent, contextGraphId)).toBe(false);
+    lone.stop.abort();
+  });
+
+  it('clears the held mark and retries when the tied node\'s copy replaces the owner\'s declaration installed while its fetch ran', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)]);
+    // The owner's second node holds the chain's facts only.
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner], [OWNER_SECOND_PEER_ID, await peerNode([...CANONICAL_CHAIN_FACTS])]]), {
+      connected: [OWNER_PEER_ID, OWNER_SECOND_PEER_ID], ownerNodes: [OWNER_PEER_ID], seedPeers: [],
+    });
+    // The tied node's fetch finds the definition missing, and goes on only after an attempt installed it.
+    const share = await ownerShare(OWNER_SECOND_PEER_ID);
+    const query = core.store.query.bind(core.store);
+    let resume!: () => void;
+    const resumed = new Promise<void>((resolve) => { resume = resolve; });
+    vi.spyOn(core.store, 'query').mockImplementationOnce(async (...args) => {
+      const result = await query(...args);
+      await resumed;
+      return result;
+    });
+    noteCoreHostedOwnerShare(core.agent, share, OWNER_SECOND_PEER_ID);
+    const tied = pendingCoreHostedDefinitionHint(core.agent, contextGraphId);
+    expect(tied).toBeDefined();
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OWNER_PEER_ID]);
+
+    // The owner's node stops answering; the tied node's copy, the chain's facts, replaces the declaration.
+    owner.answer = 'fail';
+    resume();
+    await tied;
+    await pendingCoreHostedDefinitionRefresh(core.agent, contextGraphId);
+    expect(askedPeers(core.fetchSyncPages).slice(0, 2)).toEqual([OWNER_PEER_ID, OWNER_SECOND_PEER_ID]);
+    await expect(holdsCoreHostedOwnerDefinition(core.store, contextGraphId, OWNER)).resolves.toBe(false);
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(true);
+
+    // The owner's node answers again: the retry installs its declaration.
+    owner.answer = 'complete';
+    await vi.advanceTimersByTimeAsync(CORE_HOSTED_DEFINITION_RETRY_DELAYS_MS[0]!);
+    await pendingCoreHostedDefinitionRefresh(core.agent, contextGraphId);
+    await expect(holdsCoreHostedOwnerDefinition(core.store, contextGraphId, OWNER)).resolves.toBe(true);
+    await expect(hasSubGraphRegistration(core.store, contextGraphId, REPORTS)).resolves.toBe(true);
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(false);
+    core.stop.abort();
+  });
+
+  it('clears the held mark when an attempt\'s copy replaces the declaration the tied node\'s fetch installed meanwhile, and asks that node again', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)]);
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner], [OTHER_PEER_ID, await peerNode([...CANONICAL_CHAIN_FACTS])]]), {
+      connected: [OWNER_PEER_ID, OTHER_PEER_ID], ownerNodes: [], seedPeers: [OTHER_PEER_ID],
+    });
+    // The tied node is slow to answer its fetch; an attempt asks the connected peer meanwhile, after it.
+    const serve = core.fetchSyncPages.getMockImplementation()!;
+    let answerOwner!: () => void;
+    let answerPeer!: () => void;
+    const ownerAnswers = new Promise<void>((resolve) => { answerOwner = resolve; });
+    const peerAnswers = new Promise<void>((resolve) => { answerPeer = resolve; });
+    core.fetchSyncPages.mockImplementation(async (...args) => {
+      await (args[1] === OWNER_PEER_ID ? ownerAnswers : peerAnswers);
+      return serve(...args);
+    });
+    noteCoreHostedOwnerShare(core.agent, await ownerShare(OWNER_PEER_ID), OWNER_PEER_ID);
+    const tied = pendingCoreHostedDefinitionHint(core.agent, contextGraphId);
+    await until(() => core.fetchSyncPages.mock.calls.length === 1);
+    const attempt = ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded');
+    await until(() => vi.mocked(core.surface.resolveRfc64UnregisteredAuthoritySeedPeersV1).mock.calls.length === 1);
+    // The tied node installs the owner's declaration; then the peer's copy, the chain's facts, replaces it.
+    answerOwner();
+    await tied;
+    answerPeer();
+    await expect(attempt).resolves.toBe('not-found');
+    await pendingCoreHostedDefinitionHint(core.agent, contextGraphId);
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OWNER_PEER_ID, OTHER_PEER_ID, OWNER_PEER_ID]);
+    await expect(holdsCoreHostedOwnerDefinition(core.store, contextGraphId, OWNER)).resolves.toBe(true);
+    expect(hasPendingCoreHostedDefinitionRetry(core.agent, contextGraphId)).toBe(false);
+    core.stop.abort();
+  });
+
+  it('lets a member that reaches only the Core write into the owner\'s new sub-graph right after the owner\'s first StorageACK', async () => {
+    const owner = await peerNode([...OWNER_DECLARATION, ...subGraphRegistration(REPORTS)]);
+    const others = await Promise.all([OTHER_PEER_ID, STRANGER_PEER_ID].map(() => peerNode()));
+    // The graph was created minutes ago: no registry entry names the owner, and the window misses it.
+    const core = coreNode(peersOf([[OWNER_PEER_ID, owner], [OTHER_PEER_ID, others[0]!], [STRANGER_PEER_ID, others[1]!]]), {
+      connected: [OTHER_PEER_ID, STRANGER_PEER_ID, OWNER_PEER_ID], ownerNodes: [], seedPeers: [OTHER_PEER_ID, STRANGER_PEER_ID], hosted: false,
+    });
+    // The owner's share, then its first StorageACK, which makes the Core host the graph.
+    noteCoreHostedOwnerShare(core.agent, await ownerShare(OWNER_PEER_ID), OWNER_PEER_ID);
+    core.surface.subscribedContextGraphs.get(contextGraphId)!.coreHosted = true;
+    await expect(ensureCoreHostedDefinition(core.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+    noteCoreHostedStorageAck(core.agent, contextGraphId, OWNER_PEER_ID);
+
+    // The member holds the chain's facts only, cannot name the owner, and is connected to the Core only.
+    const member = memberNode(peersOf([[CORE_PEER_ID, core.node]]), { connected: [CORE_PEER_ID], owner: undefined });
+    await member.store.insert(CANONICAL_CHAIN_FACTS);
+    const publisher = await memberPublisher(member);
+    await expect(firstWrite(publisher, 'report-1', REPORTS)).resolves.toBeUndefined();
+    await expect(hasSubGraphRegistration(member.store, contextGraphId, REPORTS)).resolves.toBe(true);
+    expect(askedPeers(member.fetchSyncPages)).toEqual([CORE_PEER_ID]);
+    expect(askedPeers(core.fetchSyncPages)).toEqual([OWNER_PEER_ID]);
   });
 });

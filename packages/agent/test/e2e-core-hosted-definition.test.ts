@@ -40,6 +40,12 @@ import {
   sleep,
 } from './_helpers/real-chain-agent.js';
 import {
+  REPORTS,
+  coreDefinitionWorkSettled,
+  isConnected,
+  subGraphNames,
+} from './_helpers/core-hosted-definition-e2e.js';
+import {
   HARDHAT_KEYS,
   createProvider,
   getSharedContext,
@@ -53,7 +59,6 @@ const NAME = 'http://schema.org/name';
 const RUN = Date.now().toString(36);
 const OWNER_KEY = HARDHAT_KEYS.EXTRA2;
 const MEMBER_KEY = HARDHAT_KEYS.EXTRA1;
-const REPORTS = 'reports';
 
 const pool = new RealChainAgents();
 const tempDirs: string[] = [];
@@ -76,11 +81,13 @@ beforeAll(async () => {
   const owner = new ethers.Wallet(OWNER_KEY);
   await mintTokens(createProvider(), hubAddress, HARDHAT_KEYS.DEPLOYER, owner.address, ethers.parseEther('50000000'));
 });
+// Stopping a Core and two Edges that still have sync and catalog work in flight can take more than the default
+// 10 s hook budget on a slower runner; the other real-node suites give their teardown 120 s as well.
 afterEach(async () => {
   vi.restoreAllMocks();
   await pool.stopAll();
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
-});
+}, 120_000);
 afterAll(async () => {
   await revertSnapshot(fileSnapshot);
 });
@@ -97,15 +104,6 @@ async function startEdge(name: string, operationalKey: string, core: DKGAgent): 
   await agent.start();
   await connectWithIdentify(agent, core);
   return agent;
-}
-
-function isConnected(from: DKGAgent, to: DKGAgent): boolean {
-  const remote = to.node.libp2p.peerId.toString();
-  return from.node.libp2p.getConnections().some((connection) => connection.remotePeer.toString() === remote);
-}
-
-async function subGraphNames(agent: DKGAgent, contextGraphId: string): Promise<string[]> {
-  return (await agent.listSubGraphs(contextGraphId)).map((subGraph) => subGraph.name).sort();
 }
 
 describe('E2E: a Core serves the owner\'s definition of a hosted registered public graph', () => {
@@ -163,6 +161,8 @@ describe('E2E: a Core serves the owner\'s definition of a hosted registered publ
       500,
     );
     expect(held, 'the Core holds the owner\'s definition').toBe(true);
+    // The Core registers the sub-graphs after it installs the definition the poll sees.
+    await coreDefinitionWorkSettled(core, contextGraphId);
     expect(await subGraphNames(core, contextGraphId), 'the Core registered the owner\'s sub-graph').toEqual([REPORTS]);
 
     // POST /api/context-graph/subscribe: the admission proves the graph
