@@ -1,11 +1,11 @@
-import { lifecycleMaterializationWire, type LifecycleRepairEntry } from '../../src/named-ka-vm-lifecycle-repair-journal.js';
+import { lifecycleMaterializationWire, lifecycleRepairCoordinatesWire, type LifecycleRepairEntry } from '../../src/named-ka-vm-lifecycle-repair-journal.js';
 
 /** Historical inline v3 fixture; production writes compact v4 only. */
 export function historicalLifecycleRepairJournal(entries: ReadonlyMap<string, LifecycleRepairEntry>) {
   return { version: 3, entries: [...entries].map(([key, entry]) => {
     const { retention: _retention, input, ...retry } = entry;
-    const { materialization, ...coordinates } = input;
-    return [key, { ...retry, input: { ...coordinates, packedKaId: input.packedKaId?.toString(),
+    const { materialization } = input;
+    return [key, { ...retry, input: { ...lifecycleRepairCoordinatesWire(input),
       ...(materialization ? { materialization: lifecycleMaterializationWire(materialization) } : {}) } }] as const;
   }) };
 }

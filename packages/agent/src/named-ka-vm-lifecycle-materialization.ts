@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-import { restoreConfirmedNamedAssertion } from './named-ka-vm-lifecycle-named-evidence.js';
 import { MemoryLayer, contextGraphMetaUri, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { parseConfirmedGraphKnowledgeAssetMetadataEnvelope, confirmedGraphKnowledgeAssetProof,
-  sameConfirmedGraphKnowledgeAssetProof, reconcileConfirmedGraphKnowledgeAssetMetadata,
+  sameConfirmedGraphKnowledgeAssetProof, reconcileConfirmedGraphKnowledgeAssetMetadata, reconcileConfirmedNamedAssertion,
   readCurrentAssertionVersion, withMaterializationLock, reconcileConfirmedKnowledgeAssetControls, overlaySelectedKnowledgeAssetControls,
 } from '@origintrail-official/dkg-publisher';
 import { tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically, tryReplaceSubjectAtomically, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
@@ -71,7 +70,11 @@ export async function applyMaterializedConfirmedLifecycle(store: TripleStore, in
       }
       if (!replaced) throw new Error('Confirmed lifecycle recovery requires atomic materialization replacement');
     }
-    await restoreConfirmedNamedAssertion(store, input, proof);
+    try { await reconcileConfirmedNamedAssertion(store, { ...input, kaUal: scope.ual }, proof, input.namedSeal); }
+    catch (error) {
+      if ((error as { code?: string }).code === 'CONFIRMED_NAMED_ASSERTION_INTEGRITY') throw new NamedKaVmLifecycleIntegrityError('Invalid confirmed named assertion seal evidence');
+      throw error;
+    }
     await mutatePublishedNamedKaVmLifecycle(store, input, options.preserveVerifiedVmProof);
     // This outer barrier owns the payload read/replacement as well as the lifecycle write.
     await barrier({ source: 'agent.publish.confirmedLifecycleMaterializationFlush' });

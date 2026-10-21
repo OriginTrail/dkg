@@ -1,6 +1,6 @@
 import { ethers } from 'ethers';
 import {
-  ASSERTION_SEAL_PREDICATES, GRAPH_KA_CONTENT_SCOPE_VERSION, assertSafeIri,
+  ASSERTION_SEAL_PREDICATES, GRAPH_KA_CONTENT_SCOPE_VERSION, assertSafeIri, parseAssertionSealQuads,
   contextGraphMetaUri, contextGraphAssertionUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri, createGraphKnowledgeAssetScope, isSwmMerkleExcludedQuad,
   type AssertionSeal, type GraphKnowledgeAssetScope,
 } from '@origintrail-official/dkg-core';
@@ -164,3 +164,9 @@ export function assertionRecoverySealSubject(
       subGraphName,
     )}/_recovery_seal`;
   }
+
+/** A torn active seal may coexist with a complete recovery archive. */
+export function parseStoredAssertionSeal(quads: Quad[], subject: string): AssertionSeal | undefined {
+  try { return parseAssertionSealQuads(quads, subject) ?? undefined; }
+  catch { return undefined; }
+}

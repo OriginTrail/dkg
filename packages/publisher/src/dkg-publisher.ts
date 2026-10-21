@@ -119,7 +119,7 @@ import {
   type StagedKnowledgeAssetSharedWorkingMemoryV1,
 } from './knowledge-asset-swm-staging.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
-import { assertionRecoverySealGraph, assertionRecoverySealSubject, verifyPullRecoverySeal, validateGraphScopedPayloadAgainstSeal, type ResolvedAssertionSource } from './assertion-seal-recovery.js';
+import { assertionRecoverySealGraph, assertionRecoverySealSubject, parseStoredAssertionSeal, verifyPullRecoverySeal, validateGraphScopedPayloadAgainstSeal, type ResolvedAssertionSource } from './assertion-seal-recovery.js';
 import { resolveAssertionPullSource, type AssertionPromoteState } from './assertion-pull-source.js';
 import type { DurableRootAtomicCompanionResolver, DurableRootCompanionAdmissionWait } from
   './durable-root-atomic-companion.js';
@@ -6659,14 +6659,8 @@ export class DKGPublisher implements Publisher {
         }`,
       );
       const quads = result.type === 'quads' ? result.quads : [];
-      try {
-        const seal = parseAssertionSealQuads(quads, subject);
-        if (seal) loaded.push({ seal, subject, quads });
-      } catch {
-        // A complete recovery archive may coexist with a torn active-seal
-        // deletion after a crash. Ignore only the unusable candidate; the
-        // source payload is still verified against whichever complete seal wins.
-      }
+      const seal = parseStoredAssertionSeal(quads, subject);
+      if (seal) loaded.push({ seal, subject, quads });
     }
     return loaded;
   }

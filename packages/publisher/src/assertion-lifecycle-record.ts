@@ -11,6 +11,18 @@ export interface AssertionLifecycleRecord {
   readonly reservedUal?: string;
 }
 
+/** Shared RDF reservation fields for normal named operations and confirmed reconciliation. */
+export function decodeAssertionReservationValue(predicate: string, term: string): string | undefined {
+  const literal = parseRdfLiteralTerm(term);
+  const numeric = predicate === 'http://dkg.io/ontology/kaId' || predicate === 'http://dkg.io/ontology/contentScopeVersion';
+  if (literal) {
+    if (literal.kind === 'language' || (literal.kind === 'typed' && literal.datatype !== `http://www.w3.org/2001/XMLSchema#${numeric ? 'integer' : 'string'}`)) return undefined;
+    return literal.value;
+  }
+  if (numeric) return /^(0|[1-9][0-9]*)$/.test(term) ? term : undefined;
+  return predicate === 'http://dkg.io/ontology/reservedUal' ? term.replace(/^<|>$/g, '') : undefined;
+}
+
 /** One identity decoder. Reservations require exact RDF integers; ordinary
  * legacy reads retain their historical permissive numeric-literal policy. */
 export async function readAssertionLifecycleRecord(
@@ -34,11 +46,8 @@ export function decodeAssertionLifecycleRecord(
   const raw = ids[0]?.o;
   let number: bigint | undefined;
   if (policy === 'strict-reservation' && bindings.length > 0) {
-    const literal = raw === undefined ? null : parseRdfLiteralTerm(raw);
-    const value = literal?.value ?? raw;
-    if (ids.length !== 1 || value === undefined || value !== value.trim() || !/^(0|[1-9][0-9]*)$/.test(value)
-      || literal?.kind === 'language'
-      || (literal?.kind === 'typed' && literal.datatype !== 'http://www.w3.org/2001/XMLSchema#integer')) throw corrupt();
+    const value = raw === undefined ? undefined : decodeAssertionReservationValue('http://dkg.io/ontology/kaId', raw);
+    if (ids.length !== 1 || value === undefined || value !== value.trim() || !/^(0|[1-9][0-9]*)$/.test(value)) throw corrupt();
     number = BigInt(value);
     if (number > MAX_ROOTLESS_KA_NUMBER_V1) throw corrupt();
   } else {
@@ -47,7 +56,7 @@ export function decodeAssertionLifecycleRecord(
   }
   const ual = bindings.find(r => r.p === 'http://dkg.io/ontology/reservedUal')?.o;
   return { bindings, hasKaId: ids.length > 0, number,
-    reservedUal: ual?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim() };
+    reservedUal: ual === undefined ? undefined : decodeAssertionReservationValue('http://dkg.io/ontology/reservedUal', ual) ?? ual.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim() };
 }
 
 /** Legacy lifecycle subjects preserve caller spelling; layer graphs do not. */

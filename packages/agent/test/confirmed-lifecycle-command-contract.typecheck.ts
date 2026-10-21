@@ -102,3 +102,9 @@ void rawSnapshotCommand;
 // @ts-expect-error Production v4 wire cannot carry an inline payload.
 const inlineV4: StoredLifecycleRepairInputV4 = { ...stored, materialization: confirmed.materialization };
 void inlineV4;
+
+// @ts-expect-error Executable named evidence is typed rather than RDF wire quads.
+const rdfExecutable: ValidatedLifecycleRepairCommand = { ...executable, namedSealQuads: confirmed.namedSealQuads };
+// @ts-expect-error Canonical seal fields are immutable after admission.
+executable.namedSeal!.assertionVersion = '2';
+void rdfExecutable;

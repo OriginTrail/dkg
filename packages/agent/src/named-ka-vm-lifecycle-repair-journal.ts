@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+import { lifecycleNamedSealWire } from './named-ka-vm-lifecycle-named-evidence.js';
+import type { CanonicalGraphScopedAuthorSealV1 } from '@origintrail-official/dkg-core';
 import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
 import { normalizeLifecycleRepairInput, normalizeLifecycleCoordinates,
   normalizeLifecyclePackedIdentity, normalizeLifecyclePublicationDeployment,
@@ -26,6 +28,13 @@ export type LifecycleRepairEntry = RepairRetryState & DecodedLifecycleEvidence;
 /** Persist the stable wire representation; execution-only validated proof is reconstructed at decode. */
 export function lifecycleMaterializationWire(snapshot: ConfirmedLifecycleMaterialization): ConfirmedLifecycleMaterialization {
   return { kaUal: snapshot.kaUal, publicQuads: snapshot.publicQuads, metadataQuads: snapshot.metadataQuads };
+}
+
+/** Explicit executable-to-wire boundary shared with historical test fixtures. */
+export function lifecycleRepairCoordinatesWire(input: JournalInput): StoredLifecycleRepairInputV4 {
+  const { materialization: _materialization, namedSeal, ...coordinates } = input as JournalInput & { namedSeal?: CanonicalGraphScopedAuthorSealV1 };
+  return { ...coordinates, packedKaId: coordinates.packedKaId?.toString(),
+    ...(namedSeal ? { namedSealQuads: lifecycleNamedSealWire(namedSeal) } : {}) };
 }
 
 function invalid(): never {
@@ -64,8 +73,8 @@ export function encodeLifecycleRepairJournal(entries: ReadonlyMap<string, Lifecy
 ): { version: 4; entries: Array<[string, Omit<LifecycleRepairEntry, 'input'> & { input: StoredLifecycleRepairInputV4 }]> } {
   return { version: 4, entries: [...entries].map(([key, entry]) => {
     // Admission and decode own validation/copying; retry bookkeeping never rehashes payloads.
-    const { materialization, ...coordinates } = entry.input;
-    const input: StoredLifecycleRepairInputV4 = { ...coordinates, packedKaId: coordinates.packedKaId?.toString() };
+    const { materialization } = entry.input;
+    const input = lifecycleRepairCoordinatesWire(entry.input);
     if (materialization) {
       const ref = references.get(materialization);
       if (!ref || !/^[a-f0-9]{64}$/.test(ref)) return invalid();
@@ -130,7 +139,7 @@ export function decodeLifecycleRepairJournalWire(value: unknown): Map<string, Li
 export function hydrateLifecycleRepairWireEntry(wire: LifecycleRepairWireEntry, snapshot?: unknown): LifecycleRepairEntry {
   if (wire.materializationRef === undefined) return wire.entry;
   if (snapshot === undefined || wire.entry.retention !== undefined) return invalid();
-  return { ...wire.entry, input: normalizeLifecycleRepairInput({ ...wire.entry.input, materialization: snapshot }) };
+  return { ...wire.entry, input: normalizeLifecycleRepairInput({ ...lifecycleRepairCoordinatesWire(wire.entry.input), packedKaId: wire.entry.input.packedKaId, materialization: snapshot }) };
 }
 
 export function decodeLifecycleRepairJournal(value: unknown, snapshots?: ReadonlyMap<string, unknown>): Map<string, LifecycleRepairEntry> {

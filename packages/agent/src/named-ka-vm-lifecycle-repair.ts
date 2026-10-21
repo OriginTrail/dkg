@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { ConfirmedNamedKaVmLifecycleExecutor } from './named-ka-vm-lifecycle-executor.js';
 import { lifecycleRepairKey, type LifecycleRepairEntry as RepairEntry } from './named-ka-vm-lifecycle-repair-journal.js';
 import { NamedKaVmLifecycleSnapshots } from './named-ka-vm-lifecycle-snapshots.js';
+import { assertConfirmedNamedAssertionSeal } from '@origintrail-official/dkg-publisher';
+import type { Quad } from '@origintrail-official/dkg-storage';
 import { isStoreOperationTimeoutError, isStoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 
 import { normalizeLifecycleRepairInput, type ConfirmedNamedKaVmLifecycleInput, type ValidatedLifecycleRepairCommand } from './named-ka-vm-lifecycle-evidence.js';
@@ -82,10 +84,30 @@ export class NamedKaVmLifecycleRepair {
       if (previous && previous.input.assertionVersion === stored.assertionVersion && previous.input.merkleRoot !== stored.merkleRoot) {
         throw new NamedKaVmLifecycleIntegrityError('Conflicting confirmed roots at the same assertion version');
       }
-      // Fresh complete evidence can bind a legacy record that lacked its KA identity.
-      const entry = previous?.retention !== 'historical-unbound' && previous?.input.assertionVersion === stored.assertionVersion
-        && !(previous.input.materialization === undefined && stored.materialization !== undefined)
-        ? previous : { input: stored, attempts: 0, nextAttemptAt: this.now() };
+      // Merge only new evidence for the same immutable obligation; never discard
+      // its established snapshot or replace a retained seal on a matching submit.
+      let entry: RepairEntry = { input: stored, attempts: 0, nextAttemptAt: this.now() };
+      if (previous?.retention !== 'historical-unbound' && previous?.input.assertionVersion === stored.assertionVersion) {
+        const prior = previous.input;
+        const conflict = () => { throw new NamedKaVmLifecycleIntegrityError('Conflicting confirmed evidence at the same assertion version'); };
+        if (prior.packedKaId !== stored.packedKaId) conflict();
+        if (prior.namedSeal && stored.namedSeal && JSON.stringify(prior.namedSeal) !== JSON.stringify(stored.namedSeal)) conflict();
+        if (prior.materialization && stored.materialization) {
+          const terms = (rows: readonly Quad[]) => rows.map(q => JSON.stringify([q.subject, q.predicate, q.object, q.graph])).sort().join('\n');
+          if (prior.materialization.kaUal !== stored.materialization.kaUal
+            || terms(prior.materialization.publicQuads) !== terms(stored.materialization.publicQuads)
+            || terms(prior.materialization.metadataQuads) !== terms(stored.materialization.metadataQuads)) conflict();
+        }
+        const materialization = prior.materialization ?? stored.materialization, namedSeal = prior.namedSeal ?? stored.namedSeal;
+        if (namedSeal) {
+          try { assertConfirmedNamedAssertionSeal(namedSeal, { ...prior, kaUal: materialization?.kaUal }, materialization?.proof); }
+          catch { conflict(); }
+        }
+        entry = materialization === prior.materialization && namedSeal === prior.namedSeal ? previous : {
+          input: Object.freeze({ ...prior, ...(materialization ? { materialization } : {}), ...(namedSeal ? { namedSeal } : {}) }),
+          attempts: 0, nextAttemptAt: this.now(),
+        };
+      }
       this.entries.set(key, entry);
       // Write-ahead admission contains no external chain or graph-store work.
       try { await this.persist(); }

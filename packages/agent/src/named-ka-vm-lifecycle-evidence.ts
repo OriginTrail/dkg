@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { confirmedNamedSealQuads, normalizeConfirmedNamedSeal } from './named-ka-vm-lifecycle-named-evidence.js';
-import { MemoryLayer, contextGraphMetaUri, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
+import { type CanonicalGraphScopedAuthorSealV1, MemoryLayer, contextGraphMetaUri, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata, materializedVersionQuad,
   parseConfirmedGraphKnowledgeAssetMetadataEnvelope, confirmedGraphKnowledgeAssetProof,
   type LocallyTrustedKnowledgeAssetControlEnvelope, type ConfirmedGraphKnowledgeAssetProof,
@@ -39,9 +39,10 @@ export interface ValidatedLifecycleMaterialization extends ConfirmedLifecycleMat
 }
 declare const validatedLifecycleCommand: unique symbol;
 /** Only admission and journal decoding construct executable, frozen recovery commands. */
-export type ValidatedLifecycleRepairCommand = Omit<Readonly<ConfirmedNamedKaVmLifecycleInput>, 'materialization'> & {
+export type ValidatedLifecycleRepairCommand = Omit<Readonly<ConfirmedNamedKaVmLifecycleInput>, 'materialization' | 'namedSealQuads'> & {
   readonly [validatedLifecycleCommand]: true;
   readonly materialization?: ValidatedLifecycleMaterialization;
+  readonly namedSeal?: CanonicalGraphScopedAuthorSealV1;
 };
 function invalid(): never {
   throw new NamedKaVmLifecycleIntegrityError('Invalid confirmed named KA lifecycle repair evidence');
@@ -94,7 +95,7 @@ export function normalizeLifecycleRepairInput(value: unknown): ValidatedLifecycl
   const admitted = { ...coordinates, ...(materialization ? { materialization } : {}) };
   return Object.freeze({ ...admitted,
     ...(input['namedSealQuads'] === undefined ? {} : {
-      namedSealQuads: normalizeConfirmedNamedSeal(input['namedSealQuads'], admitted, materialization?.proof),
+      namedSeal: normalizeConfirmedNamedSeal(input['namedSealQuads'], admitted, materialization?.proof),
     }),
   }) as ValidatedLifecycleRepairCommand;
 }

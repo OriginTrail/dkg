@@ -575,3 +575,5 @@ export { validateShareReconciliationInput, type ShareReconciliationInput, type S
 export { confirmedGraphKnowledgeAssetProof, sameConfirmedGraphKnowledgeAssetProof, reconcileConfirmedGraphKnowledgeAssetMetadata, type ConfirmedGraphKnowledgeAssetProof } from './confirmed-metadata-reconciliation.js';
 
 export { assertionRecoverySealGraph, assertionRecoverySealSubject } from './assertion-seal-recovery.js';
+
+export { assertConfirmedNamedAssertionSeal, confirmedNamedAssertionSealQuads, reconcileConfirmedNamedAssertion, type ConfirmedNamedAssertionTarget } from './confirmed-named-assertion.js';

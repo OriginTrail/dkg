@@ -119,6 +119,53 @@ it('hydrates typed references into immutable evidence and reuses their verified 
   const restored = [...decoded.values()][0]!.input.materialization!;
   expect(restored).toEqual(normalized.materialization); expect(Object.isFrozen(restored)).toBe(true);
   expect(Object.isFrozen(restored.publicQuads[0])).toBe(true);
+  const command = [...decoded.values()][0]!.input;
+  expect(command).not.toHaveProperty('namedSealQuads');
+  expect(command).toHaveProperty('namedSeal.assertionVersion', '1');
+  expect(Object.isFrozen((command as typeof normalized).namedSeal)).toBe(true);
+  expect(wire.entries[0][1].input).not.toHaveProperty('namedSeal');
+  expect(wire.entries[0][1].input.namedSealQuads).toBeDefined();
   const writes = vi.spyOn(DurableReplaceableFile.prototype, 'replace');
   expect(await reopened.encode(decoded)).toEqual(wire); expect(writes).not.toHaveBeenCalled();
+});
+
+it.each([false, true])('durably upgrades a loaded seal-less obligation before restart recovery, resubmitted snapshot=%s', async includeSnapshot => {
+  const { dir, input, path } = await setup();
+  const { namedSealQuads: _seal, ...legacy } = input;
+  const first = owner(dir, async () => { throw new Error('original named seal unavailable'); });
+  expect(await first.submit(legacy)).toBe('pending'); await first.stop();
+  const admitted = vi.fn(async () => { throw new Error('held store pressure after upgraded admission'); });
+  const second = owner(dir, admitted);
+  expect(await second.submit(includeSnapshot ? input : { ...input, materialization: undefined })).toBe('pending');
+  expect(admitted).toHaveBeenCalledOnce();
+  expect(JSON.parse(await readFile(path, 'utf8')).entries[0][1].input.namedSealQuads).toHaveLength(input.namedSealQuads!.length);
+  await second.stop();
+  const { OxigraphStore } = await import('@origintrail-official/dkg-storage');
+  const { applyMaterializedConfirmedLifecycle } = await import('../src/named-ka-vm-lifecycle-materialization.js');
+  const { createGraphKnowledgeAssetScope, MemoryLayer, knowledgeAssetLayerGraphUri } = await import('@origintrail-official/dkg-core');
+  const storePath = join(dir, 'recovered.nq'), store = new OxigraphStore(storePath);
+  const third = new NamedKaVmLifecycleRepair({ dataDir: dir, writeLocks: new Map(), now: () => 200_000,
+    isCurrent: async () => true, warn: () => {}, apply: value => applyMaterializedConfirmedLifecycle(store, value, { persistence: 'restart-durable' }) }); owners.push(third);
+  try {
+    await third.runDue(); expect((await readLifecycleRepairJournalFile(path)).size).toBe(0);
+    const reopened = new OxigraphStore(storePath);
+    try {
+      const graph = knowledgeAssetLayerGraphUri(input.contextGraphId, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(input.materialization!.kaUal, input.assertionVersion));
+      expect(await reopened.countQuads(graph)).toBe(input.materialization!.publicQuads.length);
+      expect(await reopened.query(`ASK { GRAPH <did:dkg:context-graph:${input.contextGraphId}/_meta> { ?s <http://dkg.io/ontology/reservedUal> ${JSON.stringify(input.materialization!.kaUal)} } }`)).toMatchObject({ value: true });
+    } finally { await reopened.close(); }
+  } finally { await third.stop(); await store.close(); }
+});
+
+it.each(['identity', 'snapshot', 'seal'])('rejects contradictory same-version %s evidence without changing the retained obligation', async field => {
+  const { dir, input, path } = await setup();
+  const repair = owner(dir, async () => { throw new Error('pressure'); });
+  expect(await repair.submit(input)).toBe('pending');
+  const bytes = await readFile(path, 'utf8');
+  const changed = field === 'identity' ? { ...input, packedKaId: input.packedKaId + 1n, materialization: undefined, namedSealQuads: undefined }
+    : field === 'snapshot' ? { ...input, materialization: { ...input.materialization!, metadataQuads: input.materialization!.metadataQuads.map(q => q.predicate === 'http://dkg.io/ontology/publisherPeerId' ? { ...q, object: '"another-publisher"' } : q) } }
+    : { ...input, namedSealQuads: input.namedSealQuads!.map(q => q.predicate === 'http://dkg.io/ontology/assertionFinalizedAt' ? { ...q, object: '"2026-02-01T00:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' } : q) };
+  expect(changed).not.toEqual(input);
+  await expect(repair.submit(changed)).rejects.toBeInstanceOf(NamedKaVmLifecycleIntegrityError);
+  expect(await readFile(path, 'utf8')).toBe(bytes);
 });

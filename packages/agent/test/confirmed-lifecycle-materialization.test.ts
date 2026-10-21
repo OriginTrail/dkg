@@ -331,3 +331,16 @@ it.each(['missing', 'duplicate', 'malformed', 'different'])(
     expect(await readConfirmedGraphKnowledgeAssetMetadataEnvelope(reopened, { contextGraphId: input.contextGraphId,
       ual: input.publishedUal })).toMatchObject({ state: 'confirmed', envelope: { transactionHash: '0x' + '34'.repeat(32) } });
   });
+
+it.each(['count', 'namespace'])('compares typed snapshot-less seal %s against the later store-derived proof', async field => {
+  const { owner, input, store, graph, journal } = await fixture();
+  await store.insert([...input.materialization!.metadataQuads, ...input.materialization!.publicQuads.map(q => ({ ...q, graph }))]);
+  await replaceLocallyTrustedKnowledgeAssetControlEnvelope(store, input.publishedUal,
+    { assertionVersion: input.assertionVersion, merkleRoot: getBytes(input.merkleRoot) },
+    { publisherPeerId: 'test-publisher', accessPolicy: 'allowList', allowedPeers: ['test-reader'] });
+  const { materialization: _snapshot, ...legacy } = input;
+  const wrongCount = { ...legacy, namedSealQuads: legacy.namedSealQuads!.map(q => field === 'count' && q.predicate === 'http://dkg.io/ontology/publicTripleCount'
+    ? { ...q, object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' } : field === 'namespace' && q.predicate === 'http://dkg.io/ontology/kaUal'
+      ? { ...q, object: `<${input.materialization!.kaUal.replace('mock:31337', 'other:31337')}>` } : q) };
+  expect(await owner.submit(wrongCount)).toBe('rejected'); expect(await journal()).toHaveLength(1);
+});

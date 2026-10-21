@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'test/confirmed-named-assertion.test.ts',
       'test/access-client-bounds.test.ts',
       'test/assertion-lifecycle-candidates.test.ts',
       'test/wm-lifecycle-integrity.test.ts',
