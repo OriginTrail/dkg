@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { buildAssertionSealQuads, parseAssertionSealQuads, canonicalGraphScopedAuthorSealFromAssertionSealV1, canonicalizeCanonicalGraphScopedAuthorSealV1,
   assertionLifecycleUri, contextGraphAssertionUri, contextGraphMetaUri, createGraphKnowledgeAssetScope,
-  MemoryLayer, knowledgeAssetLayerGraphUri, toAgentDid, type CanonicalGraphScopedAuthorSealV1 } from '@origintrail-official/dkg-core';
+  MemoryLayer, knowledgeAssetLayerGraphUri, toAgentDid, normalizeAgentDid, type CanonicalGraphScopedAuthorSealV1 } from '@origintrail-official/dkg-core';
 import { tryReplaceSubjectAtomically, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { getBytes } from 'ethers';
 import type { ConfirmedGraphKnowledgeAssetProof } from './confirmed-metadata-reconciliation.js';
@@ -50,10 +50,12 @@ export function confirmedNamedAssertionSealQuads(seal: CanonicalGraphScopedAutho
     privateTripleCount: Number(seal.privateTripleCount), privateMerkleRoot: seal.privateMerkleRoot === null ? undefined : getBytes(seal.privateMerkleRoot) });
 }
 /** Caller holds the named lifecycle/materialization locks and owns the final persistence barrier. */
-export async function reconcileConfirmedNamedAssertion(store: TripleStore, target: ConfirmedNamedAssertionTarget,
+export async function reconcileConfirmedNamedAssertion(store: TripleStore, target: ConfirmedNamedAssertionTarget & { readonly kaUal: string },
   proof: ConfirmedGraphKnowledgeAssetProof, admittedSeal?: CanonicalGraphScopedAuthorSealV1): Promise<void> {
+  const identity = createGraphKnowledgeAssetScope(target.kaUal, target.assertionVersion);
+  if (((BigInt(identity.agentAddress) << 96n) | BigInt(identity.kaNumber)) !== target.packedKaId) return invalid();
   return withKeyedLocks(writeLocksForStore(store),
-    [assertionAllocationLockKey(target.contextGraphId, target.agentAddress, target.subGraphName)],
+    [assertionAllocationLockKey(target.contextGraphId, identity.agentAddress, target.subGraphName)],
     () => reconcileWithAllocationLock(store, target, proof, admittedSeal));
 }
 async function reconcileWithAllocationLock(store: TripleStore, target: ConfirmedNamedAssertionTarget,
@@ -87,7 +89,7 @@ async function reconcileWithAllocationLock(store: TripleStore, target: Confirmed
   }
   if (!seal) throw new Error('Confirmed lifecycle repair awaits its authenticated named assertion seal');
   const scope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion), existing = await read(lifecycle, meta);
-  await assertKaSlotOwnershipAvailable(store, target.contextGraphId, target.agentAddress, target.name, BigInt(scope.kaNumber), target.subGraphName);
+  await assertKaSlotOwnershipAvailable(store, target.contextGraphId, target.agentAddress, target.name, BigInt(scope.kaNumber), target.subGraphName, scope.agentAddress);
   const ontology = 'http://dkg.io/ontology/';
   const required = [['kaId', scope.kaNumber], ['reservedUal', scope.ual], ['contentScopeVersion', '2'], ['assertionName', target.name]] as const;
   const additions: Quad[] = [];
@@ -100,7 +102,7 @@ async function reconcileWithAllocationLock(store: TripleStore, target: Confirmed
   const ownerPredicate = 'http://www.w3.org/ns/prov#wasAttributedTo', owner = toAgentDid(target.agentAddress);
   const owners = existing.filter(q => q.predicate === ownerPredicate);
   if (!owners.length) additions.push({ subject: lifecycle, graph: meta, predicate: ownerPredicate, object: owner });
-  else if (owners.length !== 1 || decodeAssertionReservationValue(ownerPredicate, owners[0]!.object)?.toLowerCase() !== owner.toLowerCase()) {
+  else if (owners.length !== 1 || normalizeAgentDid(decodeAssertionReservationValue(ownerPredicate, owners[0]!.object) ?? '') !== owner) {
     throw new Error('Confirmed named assertion reservation conflicts with surviving records');
   }
   const subgraphs = existing.filter(q => q.predicate === ontology + 'subGraphName');

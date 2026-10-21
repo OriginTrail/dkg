@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, contextGraphMetaUri, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import { TypedEventBus, assertionLifecycleUri, contextGraphMetaUri, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '../src/dkg-publisher.js';
+import { assertKaSlotOwnershipAvailable } from '../src/assertion-ka-slot-ownership.js';
 
 const CG = 'reserved-slot-ownership';
 const AUTHOR = '0xa32f1cc125401b55911678847426759094055b2d';
@@ -22,6 +23,94 @@ async function registerSubgraph(store: OxigraphStore, name: string) {
 }
 
 describe('persistent KA slot ownership', () => {
+  it('keeps two wallet-authored assets under one peer owner in distinct writable graphs', async () => {
+    const store = new OxigraphStore(), p = await publisher(store), peer = 'peer-owner';
+    const otherWallet = `0x${'bb'.repeat(20)}`;
+    const first = await p.assertionCreate(CG, 'wallet-one', peer, undefined, allocation);
+    const second = await p.assertionCreate(CG, 'wallet-two', peer, undefined,
+      { allocateKaNumber: async () => ({ number: 7n, reservedUal: `did:dkg:none/${otherWallet}/7` }) });
+    expect(first).not.toBe(second);
+    expect(await p.wmGraphUri(CG, peer, 'wallet-one')).toBe(first);
+    expect(await p.wmGraphUri(CG, peer, 'wallet-two')).toBe(second);
+    for (const [name, graph] of [['wallet-one', first], ['wallet-two', second]]) {
+      expect(await store.query(`SELECT ?graph WHERE { GRAPH <${contextGraphMetaUri(CG)}> {
+        <${assertionLifecycleUri(CG, peer, name)}> <http://dkg.io/ontology/assertionGraph> ?graph
+      } }`)).toMatchObject({ bindings: [{ graph }] });
+    }
+    for (const name of ['wallet-one', 'wallet-two']) await p.assertionWrite(CG, name, peer,
+      [{ subject: 'urn:owner', predicate: 'urn:value', object: JSON.stringify(name) }]);
+    expect((await p.assertionQuery(CG, 'wallet-one', peer)).map(q => q.object)).toEqual(['"wallet-one"']);
+    expect((await p.assertionQuery(CG, 'wallet-two', peer)).map(q => q.object)).toEqual(['"wallet-two"']);
+    await store.close();
+  });
+
+  it('rejects two different lifecycle owners claiming the same wallet-authored physical slot', async () => {
+    const store = new OxigraphStore(), p = await publisher(store);
+    await p.assertionCreate(CG, 'first', 'peer-one', undefined, allocation);
+    await expect(p.assertionCreate(CG, 'second', 'peer-two', undefined, allocation))
+      .rejects.toMatchObject({ code: 'KA_SLOT_ALREADY_CLAIMED' });
+    await store.close();
+  });
+
+  it('serializes a shared physical slot across different peer owners and publisher instances', async () => {
+    const store = new OxigraphStore(), [a, b] = await Promise.all([publisher(store), publisher(store)]);
+    const result = await Promise.allSettled([
+      a.assertionCreate(CG, 'first', 'peer-one', undefined, allocation),
+      b.assertionCreate(CG, 'second', 'peer-two', undefined, allocation),
+    ]);
+    expect(result.filter(value => value.status === 'fulfilled')).toHaveLength(1);
+    expect(result.filter(value => value.status === 'rejected')).toEqual([
+      expect.objectContaining({ reason: expect.objectContaining({ code: 'KA_SLOT_ALREADY_CLAIMED' }) }),
+    ]);
+    expect(a.writeLocks.size).toBe(0); await store.close();
+  });
+
+  it('does not nest crossed lifecycle-owner and wallet allocation locks', async () => {
+    const store = new OxigraphStore(), p = await publisher(store), otherWallet = `0x${'bb'.repeat(20)}`;
+    const result = await Promise.all([
+      p.assertionCreate(CG, 'cross-one', otherWallet, undefined, allocation),
+      p.assertionCreate(CG, 'cross-two', AUTHOR, undefined,
+        { allocateKaNumber: async () => ({ number: 7n, reservedUal: `did:dkg:none/${otherWallet}/7` }) }),
+    ]);
+    expect(result[0]).not.toBe(result[1]); expect(p.writeLocks.size).toBe(0); await store.close();
+  }, 5_000);
+
+  it.each([undefined, `"  did:dkg:none/${AUTHOR.toUpperCase().replace('0X', '0x')}/0007  "`, `"\u00a0did:dkg:none/${AUTHOR}/7\u00a0"`])(
+    'protects legacy missing-UAL and normalized reserved-UAL records: %s', async reservedUal => {
+      const store = new OxigraphStore(), p = await publisher(store), graph = contextGraphMetaUri(CG);
+      const subject = assertionLifecycleUri(CG, 'old-peer', 'owner');
+      await store.insert([
+        { subject, graph, predicate: 'http://dkg.io/ontology/kaId', object: '"7"' },
+        { subject, graph, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: reservedUal ? 'did:dkg:agent:old-peer' : `did:dkg:agent:${AUTHOR}` },
+        ...(reservedUal ? [{ subject, graph, predicate: 'http://dkg.io/ontology/reservedUal', object: reservedUal }] : []),
+      ]);
+      await expect(p.assertionCreate(CG, 'new-peer', 'peer-two', undefined, allocation))
+        .rejects.toMatchObject({ code: 'KA_SLOT_ALREADY_CLAIMED' });
+      await store.close();
+    },
+  );
+
+  it('keeps different physical numbers under one wallet independent across peer owners', async () => {
+    const store = new OxigraphStore(), p = await publisher(store);
+    await p.assertionCreate(CG, 'first', 'peer-one', undefined, allocation);
+    await expect(p.assertionCreate(CG, 'second', 'peer-two', undefined,
+      { allocateKaNumber: async () => ({ number: 8n, reservedUal: `did:dkg:none/${AUTHOR}/8` }) })).resolves.toBeTypeOf('string');
+    await store.close();
+  });
+
+  it('keeps case-sensitive legacy peer graph slots separate when no wallet UAL exists', async () => {
+    const store = new OxigraphStore(), graph = contextGraphMetaUri(CG);
+    const subject = assertionLifecycleUri(CG, 'PeerOwner', 'first');
+    await store.insert([
+      { subject, graph, predicate: 'http://dkg.io/ontology/kaId', object: '"7"' },
+      { subject, graph, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: 'did:dkg:agent:PeerOwner' },
+    ]);
+    await expect(assertKaSlotOwnershipAvailable(store, CG, 'PeerOwner', 'other', 7n))
+      .rejects.toMatchObject({ code: 'KA_SLOT_ALREADY_CLAIMED' });
+    await expect(assertKaSlotOwnershipAvailable(store, CG, 'peerowner', 'other', 7n)).resolves.toBeUndefined();
+    await store.close();
+  });
+
   it('rejects another name without changing the owning draft and allows an owner retry/reopen', async () => {
     const store = new OxigraphStore();
     const p = await publisher(store);

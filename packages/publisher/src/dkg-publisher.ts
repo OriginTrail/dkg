@@ -7746,14 +7746,6 @@ export class DKGPublisher implements Publisher {
       onDisposition?: (disposition: 'created' | 'sealed-noop') => void;
     },
   ): Promise<string> {
-    return this.withWriteLocks([assertionAllocationLockKey(contextGraphId, agentAddress, subGraphName)], () =>
-      this.assertionCreateWithAllocationLock(contextGraphId, name, agentAddress, subGraphName, opts));
-  }
-
-  private async assertionCreateWithAllocationLock(
-    contextGraphId: string, name: string, agentAddress: string, subGraphName?: string,
-    opts?: { allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }>; expectedKaNumber?: bigint; lifecycle?: AssertionLifecycleRecord },
-  ): Promise<string> {
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
 
     // Clear any stale lifecycle data from a previous create/discard cycle
@@ -7830,57 +7822,65 @@ export class DKGPublisher implements Publisher {
     }
 
     assertExpectedKaSlotMatchesAllocation(opts?.expectedKaNumber, kaNumber);
-    if (kaNumber !== undefined) {
-      await assertKaSlotOwnershipAvailable(this.store, contextGraphId, agentAddress, name, kaNumber, subGraphName);
-    }
-
-    const staleEvents = await this.store.query(
-      `SELECT DISTINCT ?s WHERE { GRAPH <${metaGraph}> { ?s ?p ?o . FILTER(STR(?s) = "${lifecycleSubject}" || STRSTARTS(STR(?s), "${lifecycleSubject}/")) } }`,
+    const identity = kaNumber === undefined ? null : this.kaGraphIdentityFromLifecycle(
+      contextGraphId, agentAddress, name, subGraphName,
+      { ...lifecycle, number: kaNumber, reservedUal: reservedUal ?? lifecycle.reservedUal },
     );
-    if (staleEvents.type === 'bindings') {
-      for (const row of staleEvents.bindings) {
-        const subj = row['s'];
-        if (subj) await this.deleteStoreByPatternWithoutCount({ graph: metaGraph, subject: subj });
+    const physicalAuthor = identity?.agentAddress ?? agentAddress;
+    return this.withWriteLocks([assertionAllocationLockKey(contextGraphId, physicalAuthor, subGraphName)], async () => {
+      if (kaNumber !== undefined) {
+        await assertKaSlotOwnershipAvailable(this.store, contextGraphId, agentAddress, name, kaNumber, subGraphName, physicalAuthor);
       }
-    }
-    if (preserved.length > 0) {
-      await this.store.insert(preserved);
-    }
 
-    // Uniform layout: WM data lives in the per-KA graph keyed by {number} once the KA
-    // has an identity (D1). Now that the number is known, build + create that graph.
-    const graphUri = kaNumber !== undefined
-      ? contextGraphLayerUri(contextGraphId, MemoryLayer.WorkingMemory, agentAddress, kaNumber, subGraphName)
-      : contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
-    await this.store.createGraph(graphUri);
+      const staleEvents = await this.store.query(
+        `SELECT DISTINCT ?s WHERE { GRAPH <${metaGraph}> { ?s ?p ?o . FILTER(STR(?s) = "${lifecycleSubject}" || STRSTARTS(STR(?s), "${lifecycleSubject}/")) } }`,
+      );
+      if (staleEvents.type === 'bindings') {
+        for (const row of staleEvents.bindings) {
+          const subj = row['s'];
+          if (subj) await this.deleteStoreByPatternWithoutCount({ graph: metaGraph, subject: subj });
+        }
+      }
+      if (preserved.length > 0) {
+        await this.store.insert(preserved);
+      }
 
-    const lifecycleQuads = generateAssertionCreatedMetadata({
-      contextGraphId,
-      agentAddress,
-      assertionName: name,
-      subGraphName,
-      timestamp: new Date(),
-      kaNumber,
-      reservedUal,
-    }, { provenanceEvents: this.provenanceEvents });
-    if (!preserved.some((quad) => quad.predicate === `${A2_DKG}contentScopeVersion`)) {
-      lifecycleQuads.push({
-        subject: lifecycleSubject,
-        predicate: `${A2_DKG}contentScopeVersion`,
-        object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+      // Uniform layout: WM data lives in the per-KA graph keyed by {number} once the KA
+      // has an identity (D1). Now that the number is known, build + create that graph.
+      const graphUri = kaNumber !== undefined
+        ? contextGraphLayerUri(contextGraphId, MemoryLayer.WorkingMemory, physicalAuthor, kaNumber, subGraphName)
+        : contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
+      await this.store.createGraph(graphUri);
+
+      const lifecycleQuads = generateAssertionCreatedMetadata({
+        contextGraphId,
+        agentAddress,
+        kaAuthorAddress: physicalAuthor,
+        assertionName: name,
+        subGraphName,
+        timestamp: new Date(),
+        kaNumber,
+        reservedUal,
+      }, { provenanceEvents: this.provenanceEvents });
+      if (!preserved.some((quad) => quad.predicate === `${A2_DKG}contentScopeVersion`)) {
+        lifecycleQuads.push({
+          subject: lifecycleSubject,
+          predicate: `${A2_DKG}contentScopeVersion`,
+          object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+          graph: metaGraph,
+        });
+      }
+      await this.store.insert(lifecycleQuads);
+
+      await this.store.insert([{
+        subject: graphUri,
+        predicate: 'http://dkg.io/ontology/memoryLayer',
+        object: '"WM"',
         graph: metaGraph,
-      });
-    }
-    await this.store.insert(lifecycleQuads);
+      }]);
 
-    await this.store.insert([{
-      subject: graphUri,
-      predicate: 'http://dkg.io/ontology/memoryLayer',
-      object: '"WM"',
-      graph: metaGraph,
-    }]);
-
-    return graphUri;
+      return graphUri;
+    });
   }
 
   async assertionWrite(

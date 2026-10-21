@@ -148,3 +148,59 @@ it('shares the normal allocation lock while restoring a reservation', async () =
   finally { release(); await repair; }
   expect(await competing).toBe('KA_SLOT_ALREADY_CLAIMED');
 });
+
+it('restores a peer-owned KA without confusing a different wallet at the same number', async () => {
+  const s = store(), p = await publisher(s), peer = 'peer-owner', otherWallet = `0x${'22'.repeat(20)}`;
+  await p.assertionCreate(target.contextGraphId, 'other-wallet', peer, undefined, {
+    allocateKaNumber: async () => ({ number: 1n, reservedUal: `did:dkg:mock:31337/${otherWallet}/1` }),
+  });
+  await expect(reconcileConfirmedNamedAssertion(s, { ...target, agentAddress: peer }, proof, seal)).resolves.toBeUndefined();
+  const subject = assertionLifecycleUri(target.contextGraphId, peer, target.name);
+  expect(await s.query(`ASK { GRAPH <${meta}> { <${subject}> <http://www.w3.org/ns/prov#wasAttributedTo> <did:dkg:agent:${peer}>;
+    <http://dkg.io/ontology/reservedUal> "${target.kaUal}" } }`)).toMatchObject({ value: true });
+  await expect(p.assertionCreate(target.contextGraphId, 'same-wallet', 'different-peer', undefined, {
+    allocateKaNumber: async () => ({ number: 1n, reservedUal: target.kaUal }),
+  })).rejects.toMatchObject({ code: 'KA_SLOT_ALREADY_CLAIMED' });
+});
+
+it('refuses another peer owner already reserving the actual sealed wallet/number', async () => {
+  const s = store(), p = await publisher(s);
+  await p.assertionCreate(target.contextGraphId, 'existing-peer', 'peer-one', undefined, {
+    allocateKaNumber: async () => ({ number: 1n, reservedUal: target.kaUal }),
+  });
+  const insert = vi.spyOn(s, 'insert'), replace = vi.spyOn(s, 'replaceSubject');
+  await expect(reconcileConfirmedNamedAssertion(s, { ...target, agentAddress: 'peer-two' }, proof, seal))
+    .rejects.toMatchObject({ code: 'KA_SLOT_ALREADY_CLAIMED' });
+  expect(insert).not.toHaveBeenCalled(); expect(replace).not.toHaveBeenCalled();
+});
+
+it('shares the physical wallet allocation lock between peer-owned recovery and normal creation', async () => {
+  const s = store(), p = await publisher(s), peer = 'peer-owner';
+  const subject = assertionLifecycleUri(target.contextGraphId, peer, target.name);
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  const insert = s.insert.bind(s);
+  vi.spyOn(s, 'insert').mockImplementation(async rows => {
+    if (rows.some(q => q.subject === subject && q.predicate === 'http://dkg.io/ontology/kaId')) { enter(); await held; }
+    return insert(rows);
+  });
+  const repair = reconcileConfirmedNamedAssertion(s, { ...target, agentAddress: peer }, proof, seal); await entered;
+  let settled = false;
+  const competing = p.assertionCreate(target.contextGraphId, 'racing-peer', 'another-peer', undefined,
+    { allocateKaNumber: async () => ({ number: 1n, reservedUal: target.kaUal }) })
+    .then(() => 'unexpected-success', error => error.code).finally(() => { settled = true; });
+  try { await new Promise(resolve => setTimeout(resolve, 20)); expect(settled).toBe(false); }
+  finally { release(); await repair; }
+  expect(await competing).toBe('KA_SLOT_ALREADY_CLAIMED');
+});
+
+it('preserves case-sensitive peer ownership while normalizing EVM owner casing', async () => {
+  const s = store(), peer = 'PeerOwner';
+  await s.insert([{ subject: assertionLifecycleUri(target.contextGraphId, peer, target.name), graph: meta,
+    predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: 'did:dkg:agent:peerowner' }]);
+  await expect(reconcileConfirmedNamedAssertion(s, { ...target, agentAddress: peer }, proof, seal)).rejects.toThrow('reservation conflicts');
+  const walletOwner = '0xa32f1cc125401b55911678847426759094055b2d';
+  await s.insert([{ subject: assertionLifecycleUri(target.contextGraphId, walletOwner, target.name), graph: meta,
+    predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: `did:dkg:agent:${walletOwner.toUpperCase().replace('0X', '0x')}` }]);
+  await expect(reconcileConfirmedNamedAssertion(s, { ...target, agentAddress: walletOwner }, proof, seal)).resolves.toBeUndefined();
+});

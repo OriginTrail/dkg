@@ -56,10 +56,12 @@ it('replaces wrong content of the same count without changing a newer draft or c
   expect(await store.query(`ASK { GRAPH <${graph}> { <urn:payload> <urn:value> "original public payload" } }`)).toMatchObject({ value: true });
   expect(await store.query(`ASK { GRAPH <${meta}> { <${lifecycle}> <http://dkg.io/ontology/state> "created" . <${input.publishedUal}> <http://dkg.io/ontology/accessPolicy> "allowList" } }`)).toMatchObject({ value: true });
 });
-it('retains recovery without touching another claimant or its physical graphs and controls', async () => {
-  const { owner, input, store, graph, journal, advance } = await fixture();
+it.each([false, true])('retains recovery without touching another claimant or its physical graphs and controls, peer owner=%s', async peerOwned => {
+  const { owner, input: source, store, graph, journal, advance } = await fixture();
+  const input = peerOwned ? { ...source, agentAddress: 'recovering-peer' } : source;
   const other = generateAssertionCreatedMetadata({ contextGraphId: input.contextGraphId, assertionName: 'other-owner',
-    agentAddress: input.agentAddress, kaNumber: 1n, reservedUal: input.publishedUal, timestamp: new Date() }, { provenanceEvents: false });
+    agentAddress: peerOwned ? 'owning-peer' : input.agentAddress, kaAuthorAddress: source.agentAddress,
+    kaNumber: 1n, reservedUal: input.publishedUal, timestamp: new Date() }, { provenanceEvents: false });
   await store.insert([...other, { ...input.materialization!.publicQuads[0], graph, object: '"other claimant payload"' }]);
   const snapshot = await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o');
   const insert = vi.spyOn(store, 'insert'), replace = vi.spyOn(store, 'replaceGraphAndSubject');

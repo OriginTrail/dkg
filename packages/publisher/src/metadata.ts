@@ -1743,6 +1743,8 @@ WHERE  { GRAPH <${metaGraph}> { OPTIONAL { <${lifecycleUri}> <${pred}> ?old } } 
 export interface AssertionCreatedMeta {
   contextGraphId: string;
   agentAddress: string;
+  /** Physical KA wallet author when the lifecycle name belongs to another agent. */
+  kaAuthorAddress?: string;
   assertionName: string;
   subGraphName?: string;
   timestamp: Date;
@@ -1773,7 +1775,7 @@ export function generateAssertionCreatedMetadata(meta: AssertionCreatedMeta, opt
   // data is written to (else _meta-driven discovery/promote follows an empty name-keyed
   // graph). Number-keyed once the KA has an identity (D1), else legacy name-keyed.
   const graphUri = meta.kaNumber !== undefined
-    ? contextGraphLayerUri(meta.contextGraphId, MemoryLayer.WorkingMemory, meta.agentAddress, meta.kaNumber, meta.subGraphName)
+    ? contextGraphLayerUri(meta.contextGraphId, MemoryLayer.WorkingMemory, meta.kaAuthorAddress ?? meta.agentAddress, meta.kaNumber, meta.subGraphName)
     : contextGraphAssertionUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
   const agentUri = agentDid(meta.agentAddress);
   const eventUri = `${subject}/event/${nextEventId()}`;
