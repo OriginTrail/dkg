@@ -31,6 +31,7 @@ import {
   hasAuthoritativePublicMetaDefinition,
   hasAuthoritativePublicMetaDefinitionForApprovedMember,
 } from './context-graph-public-meta-proof.js';
+import { getSyncBackpressureBusyError } from './sync/backpressure.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from './sync/checkpoint/state.js';
 import { fetchFreshContextGraphMeta } from './sync/requester/fresh-meta-fetch.js';
 import { insertWithOversizeGuard, type OversizeDrop } from './sync/oversize-filter.js';
@@ -794,10 +795,13 @@ async function executeCuratorMetaRefresh(
     return true;
   } catch (error) {
     throwIfCuratorMetaRefreshAborted(options.signal);
-    agent.log.warn(
-      ctx,
-      `Meta refresh for "${contextGraphId}" failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    // Refused for want of a sync slot: the admission counts it into one line per interval.
+    if (!getSyncBackpressureBusyError(error)?.summarized) {
+      agent.log.warn(
+        ctx,
+        `Meta refresh for "${contextGraphId}" failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     return false;
   } finally {
     agent.metaRefreshTimestamps.set(contextGraphId, Date.now());

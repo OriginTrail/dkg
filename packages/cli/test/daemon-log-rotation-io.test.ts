@@ -5,6 +5,9 @@ const fsMocks = vi.hoisted(() => ({
   open: vi.fn(),
   writeFile: vi.fn(),
   readFile: vi.fn(),
+  readdir: vi.fn(),
+  rename: vi.fn(),
+  unlink: vi.fn(),
   read: vi.fn(),
   close: vi.fn(),
 }));
@@ -15,6 +18,9 @@ vi.mock('node:fs/promises', () => ({
   writeFile: fsMocks.writeFile,
   // Deliberately supplied so a regression to whole-file readFile() is visible.
   readFile: fsMocks.readFile,
+  readdir: fsMocks.readdir,
+  rename: fsMocks.rename,
+  unlink: fsMocks.unlink,
 }));
 
 const { rotateDaemonLogIfNeeded } = await import('../src/daemon/log-rotation.js');
@@ -22,7 +28,9 @@ const { rotateDaemonLogIfNeeded } = await import('../src/daemon/log-rotation.js'
 describe('daemon log rotation I/O bound', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    fsMocks.stat.mockResolvedValue({ size: 2_000_000_000 });
+    fsMocks.stat.mockResolvedValue({ size: 2_000_000_000, mtimeMs: Date.now(), isFile: () => true });
+    fsMocks.readdir.mockResolvedValue([]);
+    fsMocks.rename.mockResolvedValue(undefined);
     fsMocks.read.mockImplementation(async (
       buffer: Buffer,
       offset: number,
@@ -36,16 +44,31 @@ describe('daemon log rotation I/O bound', () => {
     fsMocks.writeFile.mockResolvedValue(undefined);
   });
 
-  it('reads only keepBytes from a multi-gigabyte log and never uses readFile', async () => {
+  it('rotates a multi-gigabyte log by renaming it, without reading it', async () => {
+    const result = await rotateDaemonLogIfNeeded('/var/lib/dkg/daemon.log', {
+      maxBytes: 100,
+      keepBytes: 60,
+    });
+
+    expect(result).toMatchObject({ rotated: true, trimmed: false, previousBytes: 2_000_000_000 });
+    expect(fsMocks.rename).toHaveBeenCalledWith('/var/lib/dkg/daemon.log', '/var/lib/dkg/daemon.log.1');
+    expect(fsMocks.open).not.toHaveBeenCalled();
+    expect(fsMocks.readFile).not.toHaveBeenCalled();
+  });
+
+  it('falls back to reading only keepBytes, never the whole file, when the rename fails', async () => {
+    fsMocks.rename.mockRejectedValue(Object.assign(new Error('busy'), { code: 'EBUSY' }));
+
     const result = await rotateDaemonLogIfNeeded('/var/lib/dkg/daemon.log', {
       maxBytes: 100,
       keepBytes: 60,
     });
 
     expect(result).toEqual({
-      rotated: true,
+      rotated: false,
+      trimmed: true,
       previousBytes: 2_000_000_000,
-      keptBytes: 60,
+      removedFiles: 0,
     });
     expect(fsMocks.readFile).not.toHaveBeenCalled();
     expect(fsMocks.read).toHaveBeenCalledTimes(1);

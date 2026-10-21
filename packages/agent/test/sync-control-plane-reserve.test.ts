@@ -5,9 +5,11 @@ import {
   contextGraphMetaGraphUri,
   createOperationContext,
   DKG_ONTOLOGY,
+  Logger,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DEFAULT_SYNC_SHARED_MEMORY_QUEUE_LIMIT } from '../src/sync/shared-memory-reserve.js';
+import { controlPlaneRefusals } from '../src/sync/control-plane-refusals.js';
 import {
   getSyncBackpressureSnapshot,
   resolveSyncGlobalBackpressure,
@@ -154,6 +156,17 @@ function published() {
   );
 }
 
+/** End the node-wide refusal summary's interval now and return the lines it logs. */
+function refusalSummaryNow(): string[] {
+  const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+  try {
+    controlPlaneRefusals.flush();
+    return warn.mock.calls.map(([, message]) => message);
+  } finally {
+    warn.mockRestore();
+  }
+}
+
 let savedEnv: Partial<Record<(typeof SYNC_ENV)[number], string>> = {};
 
 beforeEach(() => {
@@ -235,6 +248,36 @@ describe('reserved control-plane slot (#3280)', () => {
     });
     // Nothing waits for the general slot, so it goes to whatever asks next.
     expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 1, queued: 0 });
+  }));
+
+  it('counts refused refreshes into one line per interval and still logs every other refusal on its own', () => withHolds(async (keep) => {
+    refusalSummaryNow();
+    const policy = oneSlotNoQueue();
+    await running(keep(hold(longTransfer(policy))));
+    await running(keep(hold(metadataRefresh(policy, 'urn:cg:first'))));
+    const messages: string[] = [];
+    const logInfo = (_ctx: unknown, message: string) => { messages.push(message); };
+
+    for (const contextGraphId of ['urn:cg:second', 'urn:cg:third', 'urn:cg:second']) {
+      await expect(withGlobalSyncBackpressure(
+        { ...metadataRefresh(policy, contextGraphId), logInfo },
+        async () => undefined,
+      )).rejects.toMatchObject({ reason: 'queue_full', summarized: true });
+    }
+    // Other work refused for the same lack of a slot keeps its own line.
+    await expect(withGlobalSyncBackpressure(
+      { ...longTransfer(policy, 'urn:cg:second-large'), logInfo },
+      async () => undefined,
+    )).rejects.toMatchObject({ reason: 'queue_full', summarized: false });
+
+    expect(messages).toEqual([
+      'Sync backpressure rejected durable:urn:cg:second-large:peer (global inflight=1/1, queued=0/0)',
+    ]);
+    expect(refusalSummaryNow()).toEqual([
+      expect.stringMatching(
+        /^Sync backpressure rejected durable:control-plane 3 time\(s\) in the last \d+ s for 2 graph\(s\), each asked again later \(last: global inflight=1\/1, queued=0\/0, reserved control-plane inflight=1\/1\)$/,
+      ),
+    ]);
   }));
 
   it('waits in the general queue where the node has one, and takes the reserved slot when it frees', () => withHolds(async (keep) => {
@@ -451,7 +494,8 @@ describe('metadata refresh on a node with one sync slot and no queue (#3280)', (
     }
   }));
 
-  it('fails at once, without waiting, while the reserved slot is busy too', () => withHolds(async (keep) => {
+  it('fails at once, without waiting, while the reserved slot is busy too, and is counted, not logged', () => withHolds(async (keep) => {
+    refusalSummaryNow();
     const contextGraphId = `${OWNER}/busy-member`;
     const store = new OxigraphStore();
     try {
@@ -463,14 +507,38 @@ describe('metadata refresh on a node with one sync slot and no queue (#3280)', (
         .resolves.toBe(false);
 
       expect(member.fetches).toEqual([]);
-      expect(member.log.warn).toHaveBeenCalledWith(
-        expect.anything(),
-        `Meta refresh for "${contextGraphId}" failed: Sync backpressure rejected durable:control-plane `
-          + '(global inflight=1/1, queued=0/0, reserved control-plane inflight=1/1)',
-      );
+      // Neither the admission's line nor the refresh's warning: one line per interval instead.
+      expect(member.log.info).not.toHaveBeenCalledWith(expect.anything(), expect.stringContaining('rejected'));
+      expect(member.log.warn).not.toHaveBeenCalled();
+      expect(refusalSummaryNow()).toEqual([
+        expect.stringMatching(
+          /^Sync backpressure rejected durable:control-plane 1 time\(s\) in the last \d+ s for 1 graph\(s\), each asked again later \(last: global inflight=1\/1, queued=0\/0, reserved control-plane inflight=1\/1\)$/,
+        ),
+      ]);
       await expect(holdsAuthoritativePublicDefinitionV1(store, contextGraphId)).resolves.toBe(false);
     } finally {
       await store.close();
     }
   }));
+
+  it('still warns when a refresh fails for any other reason', async () => {
+    const contextGraphId = `${OWNER}/failing-member`;
+    const store = new OxigraphStore();
+    try {
+      const member = createOneSlotMember(store, contextGraphId);
+      member.agent.fetchSyncPages = async () => {
+        throw new Error('stream reset by peer');
+      };
+
+      await expect(runCuratorMetaRefreshFromPeer(member.agent, contextGraphId, SERVING_PEER_ID, BOOTSTRAP_REFRESH))
+        .resolves.toBe(false);
+
+      expect(member.log.warn).toHaveBeenCalledWith(
+        expect.anything(),
+        `Meta refresh for "${contextGraphId}" failed: stream reset by peer`,
+      );
+    } finally {
+      await store.close();
+    }
+  });
 });

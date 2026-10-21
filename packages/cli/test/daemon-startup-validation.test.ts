@@ -214,6 +214,8 @@ describe('daemon startup network validation', () => {
     } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('process.exit:1');
 
     expect((await stat(daemonLog)).size).toBeLessThan(DEFAULT_DAEMON_LOG_MAX_BYTES);
+    // A restart moves the whole inherited log aside instead of trimming its head.
+    expect((await stat(`${daemonLog}.1`)).size).toBe(DEFAULT_DAEMON_LOG_MAX_BYTES + 1024);
     let tail = '';
     for (let attempt = 0; attempt < 20; attempt += 1) {
       tail = await readFileTail(daemonLog);
