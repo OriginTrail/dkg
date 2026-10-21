@@ -23,64 +23,76 @@ export async function recoverPublicSnapshotBulk(agent: PublicSnapshotBulkHost, o
 }): Promise<PublicSnapshotRecoveryResult> {
   const { contextGraphId, signal, assertCurrent } = options;
   if (!options.dataDir) throw new Error('Bulk snapshot requires an isolated persistent data directory');
-  let supplier: string | undefined;
-  for (const peer of options.peers) {
-    signal.throwIfAborted(); assertCurrent();
-    try {
-      await agent.ensurePeerConnected(peer, { signal });
+  signal.throwIfAborted(); assertCurrent();
+  if (!options.uals.length) return { committed: new Set(), bulkChunks: [] };
+  async function* suppliers() {
+    for await (const peers of options.peerBatches()) for (const peer of peers) {
       signal.throwIfAborted(); assertCurrent();
-      // A cached advertisement and a best-effort dial do not prove reachability.
-      // Negotiate every candidate's live handler before pinning a supplier,
-      // without sending an application request.
-      const remaining = options.deadline - Date.now();
-      if (remaining <= 0) throw new Error('Bulk snapshot deadline exceeded');
-      const supported = await agent.router.probeProtocol(peer, BULK_GRAPH_PROTOCOL, Math.min(3_000, remaining), signal) === 'supported';
-      signal.throwIfAborted(); assertCurrent();
-      if (supported) { supplier = peer; break; }
-    } catch {
-      // A peer-specific probe failure must not discard other configured suppliers.
-      signal.throwIfAborted(); assertCurrent();
-      if (Date.now() >= options.deadline) throw new Error('Bulk snapshot deadline exceeded');
+      try {
+        await agent.ensurePeerConnected(peer, { signal });
+        signal.throwIfAborted(); assertCurrent();
+        const remaining = options.deadline - Date.now();
+        if (remaining <= 0) throw new Error('Bulk snapshot deadline exceeded');
+        const supported = await agent.router.probeProtocol(peer, BULK_GRAPH_PROTOCOL, Math.min(3_000, remaining), signal) === 'supported';
+        signal.throwIfAborted(); assertCurrent();
+        if (supported) yield peer;
+      } catch {
+        signal.throwIfAborted(); assertCurrent();
+        if (Date.now() >= options.deadline) throw new Error('Bulk snapshot deadline exceeded');
+      }
     }
   }
-  if (!supplier) throw new Error('Configured cores do not support bulk graph v1');
   let committedCount = 0;
   const chunks: BulkGraphMetrics[] = [];
   const ctx = createOperationContext('sync');
-  while (committedCount < options.uals.length) {
-    assertCurrent();
-    const request: BulkGraphRequest = { version: 1, contextGraphId,
-      snapshotDigest: options.evidence.snapshot.snapshotDigest,
-      assetUals: options.uals.slice(committedCount, committedCount + BULK_GRAPH_MAX_ASSETS) };
-    const result = await exchangeBulkGraphVerified(agent.router, supplier, request,
-      bulkGraphTransportOptions(Math.max(1, options.deadline - Date.now()), signal),
-      {
-        stagingRoot: join(options.dataDir!, 'bulk-snapshot-staging'),
-        verification: { contextGraphId, ctx,
-          parseAndFilter: agent.verification.parseAndFilter,
-          processDurableBatchInWorker: agent.verification.processBatch,
-        },
-        commit: async (assets, commitSignal) => {
-          assertCurrent();
-          const authenticated = assets.map(asset => options.evidence.authenticate(asset).asset);
-          const outcome = await materializeVerifiedGraphScopedGroup({ store: agent.store, assets: authenticated,
-            options: { priority: 'background', source: 'agent.publicSnapshot.bulkGroup', signal: commitSignal },
-            assertCurrent: () => { commitSignal.throwIfAborted(); assertCurrent(); },
-            shouldQuarantineCommitted: options.shouldQuarantineCommitted,
+  let failure: unknown;
+  let materialized = false;
+  for await (const supplier of suppliers()) {
+    try {
+      while (committedCount < options.uals.length) {
+        assertCurrent();
+        const request: BulkGraphRequest = { version: 1, contextGraphId,
+          snapshotDigest: options.evidence.snapshot.snapshotDigest,
+          assetUals: options.uals.slice(committedCount, committedCount + BULK_GRAPH_MAX_ASSETS) };
+        const result = await exchangeBulkGraphVerified(agent.router, supplier, request,
+          bulkGraphTransportOptions(Math.max(1, options.deadline - Date.now()), signal),
+          {
+            stagingRoot: join(options.dataDir!, 'bulk-snapshot-staging'),
+            verification: { contextGraphId, ctx,
+              parseAndFilter: agent.verification.parseAndFilter,
+              processDurableBatchInWorker: agent.verification.processBatch,
+            },
+            commit: async (assets, commitSignal) => {
+              assertCurrent();
+              const authenticated = assets.map(asset => options.evidence.authenticate(asset).asset);
+              const outcome = await materializeVerifiedGraphScopedGroup({ store: agent.store, assets: authenticated,
+                options: { priority: 'background', source: 'agent.publicSnapshot.bulkGroup', signal: commitSignal },
+                assertCurrent: () => { commitSignal.throwIfAborted(); assertCurrent(); },
+                shouldQuarantineCommitted: options.shouldQuarantineCommitted,
+              });
+              if (outcome !== 'applied') throw new Error('Bulk group was quarantined after graph binding changed');
+              materialized = true;
+              return authenticated;
+            },
+            reconcile: async (authenticated, commitSignal) => {
+              options.onCommitted();
+              commitSignal.throwIfAborted(); assertCurrent();
+              await Promise.all(authenticated.map(asset => agent.reconcile(asset, ctx)));
+            },
+            onMetrics: metrics => options.log(`Bulk snapshot progress ${JSON.stringify(metrics)}`),
           });
-          if (outcome !== 'applied') throw new Error('Bulk group was quarantined after graph binding changed');
-          return authenticated;
-        },
-        reconcile: async (authenticated, commitSignal) => {
-          options.onCommitted();
-          commitSignal.throwIfAborted(); assertCurrent();
-          await Promise.all(authenticated.map(asset => agent.reconcile(asset, ctx)));
-        },
-        onMetrics: metrics => options.log(`Bulk snapshot progress ${JSON.stringify(metrics)}`),
-      });
-    if (!result.committedAssetUals.length) throw new Error('Bulk snapshot made no durable progress');
-    committedCount += result.committedAssetUals.length;
-    chunks.push(result.metrics);
+        if (!result.committedAssetUals.length) throw new Error('Bulk snapshot made no durable progress');
+        committedCount += result.committedAssetUals.length;
+        chunks.push(result.metrics);
+      }
+      return { committed: new Set(options.uals.slice(0, committedCount)), bulkChunks: chunks };
+    } catch (error) {
+      signal.throwIfAborted(); assertCurrent();
+      // An empty/refusing host is only a discovery hint. Once a group has been
+      // applied, preserve any failure as terminal rather than replay partial work.
+      if (materialized || Date.now() >= options.deadline) throw error;
+      failure = error;
+    }
   }
-  return { committed: new Set(options.uals.slice(0, committedCount)), bulkChunks: chunks };
+  throw new Error(failure ? 'Configured cores did not supply bulk graph v1 content' : 'Configured cores do not support bulk graph v1', { cause: failure });
 }
