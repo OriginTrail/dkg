@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createOperationContext, type ContextGraphIdV1, type EvmAddressV1 } from '@origintrail-official/dkg-core';
 import { Rfc64SwmCatalogProjectionOwnerV1 } from '../src/dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
 import { AuthorCatalogFullErrorV1 } from '../src/internal/author-catalog-capacity.js';
+import { CatalogRepairConditionErrorV1 } from '../src/rfc64/catalog-repair-diagnostics-v1.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../src/rfc64/finalized-private-placement-repair-store-v1.js';
 import type { PrivatePlacementFailureStateV1 } from '../src/rfc64/private-placement-failure-state-v1.js';
 
@@ -36,7 +37,7 @@ function fixture(rows: readonly Rfc64FinalizedPrivatePlacementRepairV1[]) {
   const owner = new Rfc64SwmCatalogProjectionOwnerV1({
     resolvePartition: () => ({ retryIntervalMs: 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
     listDurableInventoryScopes: () => [], listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
-    acceptsFinalizedPrivateLane: id => { if (refuseAuthority && id === graph) throw new Error('authority unavailable'); return id === graph ? active : true; },
+    acceptsFinalizedPrivateLane: id => { if (refuseAuthority && id === graph) throw new CatalogRepairConditionErrorV1('policy_conflict', 'authority unavailable'); return id === graph ? active : true; },
     readRepairRevision: () => null, listFinalizedPrivateRepairs: () => pending,
     readPrivateFailure: row => records.get(row.assertionCoordinate) ?? null, writePrivateFailures: write,
     repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),
@@ -50,6 +51,67 @@ function fixture(rows: readonly Rfc64FinalizedPrivatePlacementRepairV1[]) {
     pass: async () => { owner.start(ctx); await owner.whenIdle(); },
   };
 }
+
+it('records an inactive lane as a measured failure and later resets it before admission', async () => {
+  const row = repair('inactive'); const healthy = repair('healthy', 'healthy' as ContextGraphIdV1);
+  const f = fixture([row, healthy]);
+  const observer = { cooldownSkipped: vi.fn(), released: vi.fn() };
+  const request = f.owner.requestFinalizedPrivate({ repair: row, ctx, observer });
+  f.setActive(false);
+  await f.pass(); await request.whenAttempted;
+  expect(f.attempt.mock.calls.map(([item]) => item.assertionCoordinate)).toEqual(['healthy']);
+  expect(f.records.get('inactive')).toMatchObject({ kind: 'lane_inactive', consecutiveFailures: 1,
+    firstFailedAtMs: 20000, lastFailedAtMs: 20000, nextAttemptAtMs: 25000 });
+  expect(observer.released).toHaveBeenCalledTimes(1);
+  expect(observer.released.mock.calls[0][0]?.record?.failed).toBe(true);
+  expect(f.owner.status()?.finalizedPrivatePlacement.waiters).toBe(0);
+  f.setActive(true); await f.pass();
+  expect(f.attempt.mock.calls.map(([item]) => item.assertionCoordinate)).toEqual(['healthy', 'inactive']);
+  expect(f.records.get('inactive')).toMatchObject({ consecutiveFailures: 0, firstFailedAtMs: 20000,
+    lastFailedAtMs: 20000, nextAttemptAtMs: null });
+});
+
+it('records the original authority failure without a pending reset and lets healthy graphs finish', async () => {
+  const row = repair('unresolved'); const healthy = repair('healthy', 'healthy' as ContextGraphIdV1);
+  const f = fixture([row, healthy]);
+  const observer = { cooldownSkipped: vi.fn(), released: vi.fn() };
+  const request = f.owner.requestFinalizedPrivate({ repair: row, ctx, observer });
+  f.failAuthority(true);
+  await f.pass(); await request.whenAttempted;
+  expect(f.attempt.mock.calls.map(([item]) => item.assertionCoordinate)).toEqual(['healthy']);
+  expect(f.records.get('unresolved')).toMatchObject({ kind: 'policy_conflict', consecutiveFailures: 1,
+    firstFailedAtMs: 20000, lastFailedAtMs: 20000, nextAttemptAtMs: 25000 });
+  expect(observer.released).toHaveBeenCalledTimes(1);
+  expect(observer.released.mock.calls[0][0]?.record?.failed).toBe(true);
+  expect(f.owner.status()?.finalizedPrivatePlacement.waiters).toBe(0);
+  f.failAuthority(false); await f.pass();
+  expect(f.attempt).toHaveBeenCalledTimes(1); // Authority recovery alone does not consume cooldown.
+  await vi.advanceTimersByTimeAsync(5000); await f.pass();
+  expect(f.attempt.mock.calls.map(([item]) => item.assertionCoordinate)).toEqual(['healthy', 'unresolved']);
+});
+
+it('observes an unannounced inactive edge after awaited failure before recording the current generation', async () => {
+  const row = repair('changed-during-attempt'); const f = fixture([row]); const held = deferred();
+  const previous = { ...parked, kind: 'unknown' as const, parked: false, nextAttemptAtMs: 20000 };
+  f.records.set(row.assertionCoordinate, previous);
+  f.attempt.mockImplementationOnce(async () => { await held.promise; throw new Error('obsolete attempt'); });
+  const request = f.owner.requestFinalizedPrivate({ repair: row, ctx });
+  f.owner.start(ctx); await vi.advanceTimersByTimeAsync(0);
+  try {
+    expect(f.attempt).toHaveBeenCalledTimes(1);
+    f.setActive(false); // No explicit availability notification: the completion must re-observe.
+    held.resolve(); await f.owner.whenIdle(); await request.whenAttempted;
+    expect(f.write.mock.calls.map(([entries]) => entries[0].state)).toEqual([
+      { ...previous, consecutiveFailures: 0, sameKindFailures: 0, nextAttemptAtMs: null },
+      { ...previous, kind: 'lane_inactive', consecutiveFailures: 1, sameKindFailures: 1,
+        lastFailedAtMs: 20000, nextAttemptAtMs: 25000 },
+    ]);
+    expect(f.attempt).toHaveBeenCalledTimes(1);
+    expect(f.owner.status()?.finalizedPrivatePlacement.waiters).toBe(0);
+    f.setActive(true); await f.pass();
+    expect(f.attempt).toHaveBeenCalledTimes(2);
+  } finally { held.resolve(); }
+});
 
 it('loads queued siblings before awaiting an attempt so a concurrent lane edge resets the parked sibling', async () => {
   const a = repair('a'); const b = repair('b'); const f = fixture([a, b]);

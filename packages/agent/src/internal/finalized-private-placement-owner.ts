@@ -29,6 +29,10 @@ interface GraphLane {
   active: boolean | undefined;
   resetPending: boolean;
 }
+type LaneReconciliation =
+  | { readonly kind: 'active' | 'inactive'; readonly resetCommitted: boolean }
+  | { readonly kind: 'authority-unavailable'; readonly resetCommitted: false; readonly error: unknown }
+  | { readonly kind: 'blocked'; readonly resetCommitted: false };
 interface Dependencies {
   listFinalizedPrivateRepairs(): readonly Rfc64FinalizedPrivatePlacementRepairV1[];
   acceptsFinalizedPrivateLane(graph: ContextGraphIdV1): boolean;
@@ -91,7 +95,7 @@ export class FinalizedPrivatePlacementOwnerV1 {
     const lane = this.#lanes.get(contextGraphId);
     if (!lane) return;
     try {
-      if (!this.#dependencies.acceptsFinalizedPrivateLane(lane.id)) this.#transitionLane(lane.id, false);
+      if (!this.#dependencies.acceptsFinalizedPrivateLane(lane.id)) this.#commitLaneReset(lane.id, false);
     } catch (error) { this.#warn('catalog_private_repair_lane_reset_failed', error); }
   }
 
@@ -110,7 +114,7 @@ export class FinalizedPrivatePlacementOwnerV1 {
       if (!laneAccepts && this.#options.retryIntervalMs > 0) this.#runner.schedule(this.#options.retryIntervalMs);
     }
     if (!laneAccepts) {
-      try { this.#transitionLane(repair.contextGraphId, false); }
+      try { this.#commitLaneReset(repair.contextGraphId, false); }
       catch (error) { this.#warn('catalog_private_repair_lane_reset_failed', error); }
       return rejected();
     }
@@ -174,7 +178,7 @@ export class FinalizedPrivatePlacementOwnerV1 {
     if (!lane.entries.size) this.#lanes.delete(lane.id);
   }
 
-  #transitionLane(contextGraphId: ContextGraphIdV1, active: boolean): boolean {
+  #commitLaneReset(contextGraphId: ContextGraphIdV1, active: boolean): boolean {
     const lane = this.#lanes.get(contextGraphId);
     if (!lane) return false;
     if (lane.active === undefined) { lane.active = active; return false; }
@@ -217,16 +221,31 @@ export class FinalizedPrivatePlacementOwnerV1 {
     }
   }
 
-  #observeLane(contextGraphId: ContextGraphIdV1): boolean {
-    let active: boolean;
-    try { active = this.#dependencies.acceptsFinalizedPrivateLane(contextGraphId); }
-    catch (error) {
-      // An uncertain lane cannot authorize admission or let an old completion
-      // overwrite the still-uncommitted reset obligation.
-      if (this.#lanes.get(contextGraphId)?.resetPending) throw error;
-      return false;
+  /** One pass-local outcome owns authority, durable reset and graph failure containment. */
+  #reconcileLane(contextGraphId: ContextGraphIdV1, blockedGraphs: Set<ContextGraphIdV1>, inFlightKey?: string): LaneReconciliation {
+    if (blockedGraphs.has(contextGraphId)) return { kind: 'blocked', resetCommitted: false };
+    try {
+      let active: boolean;
+      try { active = this.#dependencies.acceptsFinalizedPrivateLane(contextGraphId); }
+      catch (error) {
+        // Without a pending reset this remains an ordinary measured attempt failure.
+        // With one, uncertain authority cannot authorize overwriting the old evidence.
+        if (this.#lanes.get(contextGraphId)?.resetPending) throw error;
+        return { kind: 'authority-unavailable', resetCommitted: false, error };
+      }
+      return { kind: active ? 'active' : 'inactive', resetCommitted: this.#commitLaneReset(contextGraphId, active) };
     }
-    return this.#transitionLane(contextGraphId, active);
+    catch (error) {
+      blockedGraphs.add(contextGraphId);
+      // Settle earlier cooldown waiters and later siblings too. Keeping a due
+      // waiter would reschedule a failing graph immediately without backoff.
+      for (const sibling of this.#lanes.get(contextGraphId)?.entries ?? []) {
+        const key = finalizedPrivateRepairKeyV1(sibling.repair);
+        if (key !== inFlightKey) this.#waiters.release(key);
+      }
+      this.#warn('catalog_private_repair_lane_reset_failed', error);
+      return { kind: 'blocked', resetCommitted: false };
+    }
   }
 
   async #runPass(signal: AbortSignal): Promise<void> {
@@ -241,26 +260,12 @@ export class FinalizedPrivatePlacementOwnerV1 {
     for (const key of this.#waiters.keys()) if (!currentKeys.has(key)) this.#waiters.release(key);
     this.#options.fullCatalogs.passStarted(currentKeys);
     const blockedGraphs = new Set<ContextGraphIdV1>();
-    const observeLane = (contextGraphId: ContextGraphIdV1, inFlightKey?: string): boolean | undefined => {
-      if (blockedGraphs.has(contextGraphId)) return undefined;
-      try { return this.#observeLane(contextGraphId); }
-      catch (error) {
-        blockedGraphs.add(contextGraphId);
-        // Settle earlier cooldown waiters and later siblings too. Keeping a due
-        // waiter would reschedule a failing graph immediately without backoff.
-        for (const sibling of this.#lanes.get(contextGraphId)?.entries ?? []) {
-          const key = finalizedPrivateRepairKeyV1(sibling.repair);
-          if (key !== inFlightKey) this.#waiters.release(key);
-        }
-        this.#warn('catalog_private_repair_lane_reset_failed', error);
-        return undefined;
-      }
-    };
     await mapWithConcurrency(repairs, 1, async repair => {
       if (signal.aborted) return;
       const key = finalizedPrivateRepairKeyV1(repair);
       const entry = this.#entry(repair);
-      if (observeLane(repair.contextGraphId) === undefined) return;
+      const lane = this.#reconcileLane(repair.contextGraphId, blockedGraphs);
+      if (lane.kind === 'blocked') return;
       // Capacity still owns admission and wakeups, even after a durable scheduling reset.
       if (this.#options.fullCatalogs.park(key, repair)) return this.#waiters.release(key);
       if (entry.retry.parked) { this.#waiters.release(key); return; }
@@ -271,16 +276,18 @@ export class FinalizedPrivatePlacementOwnerV1 {
       entry.attempts += 1;
       const placement = timing.admit(key);
       try {
-        if (!this.#dependencies.acceptsFinalizedPrivateLane(repair.contextGraphId)) throw new CatalogRepairLaneInactiveErrorV1();
+        // No await separates the reconciled authority from admission.
+        if (lane.kind === 'inactive') throw new CatalogRepairLaneInactiveErrorV1();
+        if (lane.kind === 'authority-unavailable') throw lane.error;
         await withDefaultStoreWorkPriority('background', () => this.#dependencies.repairFinalizedPrivatePlacement(repair, placement.attempt));
         placement.end('completed');
         this.#forget(key);
       } catch (error) {
         placement.end('failed');
         if (!signal.aborted) {
-          const laneChanged = observeLane(repair.contextGraphId, key);
-          if (laneChanged === undefined) return;
-          if (laneChanged) this.#runner.request();
+          const afterAttempt = this.#reconcileLane(repair.contextGraphId, blockedGraphs, key);
+          if (afterAttempt.kind === 'blocked') return;
+          if (afterAttempt.resetCommitted) this.#runner.request();
           if (attemptGeneration !== entry.retry.generation) return;
           const historyRead = this.#restoreFailureHistory(entry);
           const capacityOwned = this.#options.fullCatalogs.placementRefused(key, repair, error);
