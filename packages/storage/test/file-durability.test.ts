@@ -51,14 +51,13 @@ it('keeps a failed range pending, although mkdir reports nothing on retry', asyn
   expect(io.synced).toEqual([path, created, root]);
 });
 
-it('applies its sync policy to every directory in the range', async () => {
+it.each(['EIO', 'EPERM', 'EINVAL', 'ENOTSUP', 'EISDIR'])('propagates POSIX %s at every directory and retains the failed range', async code => {
   const { root, created, path } = await absentNested();
-  const directory = new DurableDirectory(path, { policy: 'allow-unsupported', platform: 'linux' });
-  await directory.create(); io.fail = created;
-  await expect(directory.persist()).rejects.toMatchObject({ code: 'EIO' }); // Real I/O errors are never tolerated.
-  io.code = 'EPERM'; io.synced = [];
-  await directory.persist();
-  expect(io.synced).toEqual([path, root]);
+  const directory = new DurableDirectory(path, { platform: 'linux' });
+  await directory.create(); io.fail = created; io.code = code;
+  await expect(directory.persist()).rejects.toMatchObject({ code });
+  io.fail = ''; io.synced = []; await directory.persist();
+  expect(io.synced).toEqual([path, created, root]);
 });
 
 

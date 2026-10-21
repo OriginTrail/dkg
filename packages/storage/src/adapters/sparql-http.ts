@@ -191,8 +191,6 @@ export interface SparqlHttpStoreOptions extends SparqlHttpPersistenceOptions {
    * supervisor. Generic stores cannot use it to grant managed authority.
    */
   managedRecovery?: SparqlHttpManagedRecoveryV1;
-  /** Runtime-only post-acknowledgement barrier for the daemon-owned local store. */
-  managedPersistence?: (options?: QueryOptions) => Promise<void>;
   /**
    * Certified endpoint guarantees. `atomic-update` means a whole
    * multi-operation SPARQL Update is one transaction. `atomic-readback` adds
@@ -284,11 +282,10 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     this.managedOxigraph = isManagedOxigraphRuntimeConstructionAuthorityV1(
       constructionAuthority,
     );
-    this.flush = this.managedOxigraph && typeof options.managedPersistence === 'function'
-      ? options.managedPersistence : undefined;
+    const managedRuntimeHooks = getManagedOxigraphRuntimeHooksV1(constructionAuthority);
+    this.flush = managedRuntimeHooks?.persistence;
     this.commitment = this.flush || writesDurableOnAcknowledgement
       ? certifiedTripleStoreCommitment('restart-durable', options => this.flush?.(options) ?? Promise.resolve()) : undefined;
-    const managedRuntimeHooks = getManagedOxigraphRuntimeHooksV1(constructionAuthority);
     const managedRecovery = this.managedOxigraph
       ? snapshotManagedRecoveryCapability(options.managedRecovery)
       : undefined;

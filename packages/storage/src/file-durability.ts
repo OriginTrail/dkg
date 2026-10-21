@@ -2,10 +2,6 @@
 import { mkdir, open, stat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 
-/** Only callers maintaining a historical best-effort state file may tolerate these directory refusals. */
-export type DirectorySyncPolicy = 'strict' | 'allow-unsupported';
-const UNSUPPORTED_DIRECTORY_CODES = new Set(['EINVAL', 'ENOTSUP', 'EPERM', 'EISDIR']);
-
 /** Windows FlushFileBuffers requires GENERIC_WRITE; a read-only handle fails. */
 async function syncFile(path: string): Promise<void> {
   const file = await open(path, 'r+');
@@ -23,8 +19,6 @@ export async function persistFileAndParent(path: string, platform: NodeJS.Platfo
 export interface DurableDirectoryOptions {
   /** Mode of each directory `create()` makes, filtered by the umask; existing directories keep theirs. */
   readonly mode?: number;
-  /** Applies to every directory a barrier syncs. Strict by default. */
-  readonly policy?: DirectorySyncPolicy;
   /** Defaults to `process.platform`, read at each barrier. */
   readonly platform?: NodeJS.Platform;
 }
@@ -69,7 +63,7 @@ export class DurableDirectory {
   /** Sync this directory, then every directory entry created since the last successful barrier. */
   async persist(): Promise<void> {
     const through = this.pendingThrough;
-    await persistDirectoryRange(this.path, through ?? this.path, this.options.platform ?? process.platform, this.options.policy);
+    await persistDirectoryRange(this.path, through ?? this.path, this.options.platform ?? process.platform);
     if (this.pendingThrough === through) this.pendingThrough = undefined;
   }
 
@@ -82,16 +76,12 @@ export class DurableDirectory {
 
 /** POSIX directory fsync is strict by default; Windows has no supported directory handle through Node's open API. */
 export async function persistDirectoryRange(
-  directory: string, last: string, platform: NodeJS.Platform = process.platform, policy: DirectorySyncPolicy = 'strict',
+  directory: string, last: string, platform: NodeJS.Platform = process.platform,
 ): Promise<void> {
   if (platform === 'win32') return;
   for (;; directory = dirname(directory)) {
-    try {
-      const handle = await open(directory, 'r');
-      try { await handle.sync(); } finally { await handle.close(); }
-    } catch (error) {
-      if (policy !== 'allow-unsupported' || !UNSUPPORTED_DIRECTORY_CODES.has((error as NodeJS.ErrnoException).code ?? '')) throw error;
-    }
+    const handle = await open(directory, 'r');
+    try { await handle.sync(); } finally { await handle.close(); }
     if (directory === last || dirname(directory) === directory) break;
   }
 }

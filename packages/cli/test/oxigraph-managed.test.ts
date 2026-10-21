@@ -1,5 +1,5 @@
 /**
- * Managed Oxigraph orchestration — NO mocks.
+ * Managed Oxigraph orchestration — real binaries and servers; directory sync fault instrumentation.
  *
  * `planManagedOxigraph` / `resolveManagedOxigraphPort` (pure) are tested
  * directly. `startManagedOxigraph` previously had the binary-fetch and
@@ -29,6 +29,22 @@ import {
   DEFAULT_OXIGRAPH_PORT,
 } from '../src/daemon/oxigraph-managed.js';
 import { spawnOrphan, waitForCondition } from './fixtures/oxigraph-server-real-fixture.js';
+
+const directorySync = vi.hoisted(() => ({ fail: '', synced: [] as string[] }));
+vi.mock('node:fs/promises', async importOriginal => {
+  const fs = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...fs, open: async (...args: Parameters<typeof fs.open>) => {
+    const handle = await fs.open(...args), path = String(args[0]);
+    if (args[1] === 'r') {
+      const sync = handle.sync.bind(handle);
+      handle.sync = async () => {
+        if (path === directorySync.fail) throw Object.assign(new Error('held database ancestor sync'), { code: 'EIO' });
+        await sync(); directorySync.synced.push(path);
+      };
+    }
+    return handle;
+  } };
+});
 
 let systemOxigraphDir: string | undefined;
 let originalPath: string | undefined;
@@ -901,12 +917,10 @@ require('node:http').createServer((_req, res) => res.end('orphan')).listen(Numbe
   it(
     'rewrites store to sparql-http endpoints served by a REAL oxigraph it really downloaded',
     async () => {
-      // STABLE cache shared across runs: the first run on a machine really
-      // downloads + sha256-verifies the pinned binary (what production does
-      // on first boot); later runs prove the cache path.
-      const cacheDir = join(tmpdir(), 'dkg-test-oxigraph-cache');
-      await mkdir(cacheDir, { recursive: true });
-      const dataDir = await mkdtemp(join(tmpdir(), 'oxi-managed-'));
+      // Fresh sibling cache/database under one absent node directory. Binary installation
+      // must not hide the new-node entry's obligation in the previously existing root.
+      const root = await mkdtemp(join(tmpdir(), 'oxi-managed-'));
+      const dataDir = join(root, 'new-node'), cacheDir = join(dataDir, 'bin');
       const port = await freePort();
 
       const result = await startManagedOxigraph({
@@ -926,7 +940,6 @@ require('node:http').createServer((_req, res) => res.end('orphan')).listen(Numbe
             timeout: 30_000,
             queryEndpoint: `http://127.0.0.1:${port}/query`,
             updateEndpoint: `http://127.0.0.1:${port}/update`,
-            managedPersistence: expect.any(Function),
           },
         });
         const activityReports: boolean[] = [];
@@ -953,6 +966,25 @@ require('node:http').createServer((_req, res) => res.end('orphan')).listen(Numbe
           expect(registerStoreActivity).toHaveBeenCalledOnce();
           expect(activityReports).toContain(true);
           expect(activityReports.at(-1)).toBe(false);
+          expect(runtimeStore.commitment?.durability).toBe('restart-durable');
+          const commit = runtimeStore.commitment!.capture();
+          await runtimeStore.update('INSERT DATA { GRAPH <urn:certified> { <urn:asset> <urn:value> "survives SIGKILL" } }');
+          directorySync.fail = root;
+          await expect(commit()).rejects.toMatchObject({ code: 'EIO' });
+          directorySync.fail = ''; directorySync.synced = [];
+          await commit();
+          expect(directorySync.synced).toEqual(expect.arrayContaining([join(dataDir, 'oxigraph-data'), dataDir, root]));
+          const phases: string[] = [];
+          const recovery = result!.handle.requestRecovery!(result!.handle.getRecoveryState().generation, 'test certified WAL after SIGKILL');
+          expect(recovery).toBeDefined();
+          const unsubscribe = recovery!.subscribe(phase => { phases.push(phase); });
+          try { expect(await waitForCondition(() => Promise.resolve(phases.includes('reopened')), 30_000)).toBe(true); }
+          finally { unsubscribe(); }
+          expect(phases).toContain('signalled'); expect(phases).toContain('terminated');
+          // No graceful close occurred: the production supervisor verified ownership and sent SIGKILL.
+          await expect(runtimeStore.query('ASK { GRAPH <urn:certified> { <urn:asset> <urn:value> "survives SIGKILL" } }'))
+            .resolves.toMatchObject({ type: 'boolean', value: true });
+
         } finally {
           await runtimeStore.close();
         }
@@ -972,8 +1004,9 @@ require('node:http').createServer((_req, res) => res.end('orphan')).listen(Numbe
         const body = (await res.json()) as { boolean?: boolean };
         expect(typeof body.boolean).toBe('boolean');
       } finally {
+        directorySync.fail = ''; directorySync.synced = [];
         await result?.handle.stop();
-        await rm(dataDir, { recursive: true, force: true });
+        await rm(root, { recursive: true, force: true });
       }
 
       // stop() really released the port.

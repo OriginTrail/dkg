@@ -1,4 +1,4 @@
-export { DurableDirectory, persistFileAndParent, persistDirectoryRange, type DirectorySyncPolicy, type DurableDirectoryOptions } from './file-durability.js';
+export { DurableDirectory, persistFileAndParent, persistDirectoryRange, type DurableDirectoryOptions } from './file-durability.js';
 export { asQueryReadAdmissionCapability, type QueryReadAdmissionCapability } from './query-read-admission-capability.js';
 export { nonEmptyNamedGraphEnumerationPattern } from './adapters/graph-enumeration-query.js';
 export {

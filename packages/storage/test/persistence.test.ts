@@ -33,16 +33,17 @@ describe('storage persistence boundary', () => {
   });
   it('does not accept a persistence callback from generic managed-looking endpoint options', async () => {
     const flush = vi.fn(async () => {});
-    const endpoint = new SparqlHttpStore({ queryEndpoint: 'http://localhost/query',
-      managedByDkg: true, managedOxigraph: true, managedPersistence: flush });
+    const untrustedOptions = { queryEndpoint: 'http://localhost/query',
+      managedByDkg: true, managedOxigraph: true, managedPersistence: flush, persistence: flush };
+    const endpoint = new SparqlHttpStore(untrustedOptions);
     expect(endpoint.flush).toBeUndefined(); expect(endpoint.commitment).toBeUndefined();
     expect(flush).not.toHaveBeenCalled(); await endpoint.close();
   });
   it('accepts the runtime-owned barrier and loses that authority when the runtime brand is omitted', async () => {
     const flush = vi.fn(async () => {}), options = { source: 'owned-persistence' };
     const config = createManagedOxigraphRuntimeStoreConfigV1({ backend: 'sparql-http', options: {
-      queryEndpoint: 'http://127.0.0.1/query', managedByDkg: true, managedPersistence: flush,
-    } });
+      queryEndpoint: 'http://127.0.0.1/query', managedByDkg: true,
+    } }, { persistence: flush });
     const store = await createTripleStore(config), untrusted = await createTripleStore({ ...config });
     try {
       expect(untrusted.commitment).toBeUndefined();
