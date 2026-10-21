@@ -397,6 +397,7 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
     ['packages/publisher/src/materialization-assertion-version.ts', 'kosava_node_ui', 'the UI metadata regression loads the shared assertion version reader'],
     ['packages/query/README.md', 'bura_query', 'the query security tests read the README'],
     ['packages/cli/src/extraction/markdown-extractor.ts', 'tornado_agent', 'agent tests import CLI source'],
+    ['packages/cli/src/publisher-chain-proof.ts', 'tornado_agent', 'the agent restart regression uses canonical chain proof'],
     ['packages/cli/src/daemon.ts', 'kosava_node_ui', 'node-ui tests scan the CLI daemon sources'],
     ['packages/agent/src/dkg-agent-join.ts', 'tornado_core', 'the chain RPC-site census reads agent sources'],
     ['packages/agent/src/remote-query-handler.ts', 'tornado_core', 'the chain RPC-site census reads the extracted remote query authority check'],

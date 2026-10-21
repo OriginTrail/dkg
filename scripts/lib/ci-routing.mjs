@@ -437,10 +437,10 @@ export const PATH_TRIGGERS = Object.freeze([
     reason: 'the Core stream transport tests import the Agent production codec',
   },
   {
-    patterns: [/^packages\/cli\/src\/extraction\/markdown-extractor\.ts$/],
+    patterns: [/^packages\/cli\/src\/(?:extraction\/markdown-extractor|publisher-chain-proof)\.ts$/],
     lanes: ['tornado_agent'],
     evmScopes: [],
-    reason: 'the agent memory-layer tests import the CLI markdown extractor',
+    reason: 'the agent memory-layer tests import the CLI markdown extractor and chain-proof resolver',
   },
   {
     patterns: [/^packages\/cli\/src\/(?:auth|boolean-env-override|config|entity-search\/types|oxigraph-memory-limits|runtime-assets)\.ts$/],
