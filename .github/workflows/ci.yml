@@ -759,6 +759,10 @@ jobs:
         run: bash scripts/ci/verify-blazegraph-image-contract.sh
       - name: "CLI tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
+      - name: "Publisher pause/resume process-death durability (Oxigraph)"
+        if: matrix.shard == 1
+        timeout-minutes: 3
+        run: node --experimental-sqlite --import tsx scripts/repro/publisher-live-control-restart.mts
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit

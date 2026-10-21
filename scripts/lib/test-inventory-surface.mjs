@@ -4,6 +4,8 @@ import path from 'node:path';
 
 /** Execution surface: JS/TS cases, Python tests/drivers, shell test drivers, and YAML test cases. */
 export function isTestSurface(file) {
+  // Preserve the standalone campaign's published command while inventorying its assertions.
+  if (file === 'scripts/repro/publisher-live-control-restart.mts') return true;
   if (/\.(?:test|spec|test-d)\.[cm]?[jt]sx?$/.test(file)) return true;
   if (file.endsWith('.py')) return /(?:^|\/)(?:test_[^/]*|[^/]*_test|run_all_tests)\.py$/.test(file);
   if (file.endsWith('.sh')) return /(?:^|[/_.-])(?:test|tests|e2e|smoke|soak|verify)(?:[/_.-]|$)/.test(file);
