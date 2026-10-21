@@ -70,3 +70,5 @@ Private bundle inspection confirmed the published restart chronology and ambiguo
 Live setup: isolated `.tmp/issue3394-live`, owned container `dkg3394-blazegraph`, loopback API/store ports 19394/19395, prepared batch-1 claimed as `issue3394-20261021`. The pool is Base Sepolia, unlike the Gnosis incident. Use this as controlled validation, explicitly not exact historical reproduction. No deployment wallets or services will be used.
 
 Review round 1: classify native parser failures before sanitizing their codes; add valid-status/malformed-header coverage; remove the superseded count-only callback. The first live load remains pinned to `9855f8f72`; rebuild/restart the owned supervisor after it finishes before the controlled interruption check.
+
+Review round 2: keep raw monotonic grace expiry separate from formatted diagnostic duration. Ten-minute initial live load and publication/update verification passed; see the validation report. A dirty-label preflight prevented interruption; reconcile its admitted jobs before rebuilding from a clean commit.

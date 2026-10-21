@@ -187,8 +187,10 @@ export function startLivenessWatcher(opts: LivenessWatcherOpts): { stop(): void 
             shutdownObservedAt = performance.now();
             consecutiveFailures = 0;
           }
+          // Policy uses the raw monotonic duration, independent of telemetry precision/caps.
+          const elapsedMs = performance.now() - shutdownObservedAt;
+          suppressed = shutdownGraceMs < 0 || elapsedMs < shutdownGraceMs;
           grace.elapsedMs = livenessElapsedMs(shutdownObservedAt);
-          suppressed = shutdownGraceMs < 0 || grace.elapsedMs < shutdownGraceMs;
           grace.state = shutdownGraceMs < 0 ? 'unbounded' : suppressed ? 'within_grace' : 'expired';
         } else {
           shutdownObservedAt = null;
