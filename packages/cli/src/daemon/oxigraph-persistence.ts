@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { open } from 'node:fs/promises';
+import { open, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DurableDirectory, TripleStorePersistenceBarrier } from '@origintrail-official/dkg-storage';
 import { readRetainedWalSegmentNames } from './oxigraph-wal.js';
@@ -21,11 +21,13 @@ export function createManagedOxigraphPersistenceBarrierV1(
   version: string,
 ): TripleStorePersistenceBarrier | undefined {
   if (version !== '0.5.8') return undefined;
-  const directory = directoryOwner.path;
   return async (options) => {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       options?.signal?.throwIfAborted();
       try {
+        // Resolve before joining filenames: symlink/.. must identify the same
+        // database for discovery and fsync, never a lexical-path decoy.
+        const directory = await realpath(directoryOwner.path);
         const before = await readRetainedWalSegmentNames(directory);
         if (before.length === 0) throw new Error('Managed Oxigraph persistence awaits an active WAL');
         for (const name of before) {
