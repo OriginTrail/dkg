@@ -363,7 +363,7 @@ test('each changed path gets one routing decision with a fixed precedence', () =
   }
   // 4. A path claimed only by a trigger is routed by it alone.
   const imageContract = pullRequestPlan([change('blazegraph-image.json')]);
-  assert.deepEqual(selectedLanes(imageContract), ['bura_cli', 'bura_blazegraph_arm64']);
+  assert.deepEqual(selectedLanes(imageContract), ['tornado_core', 'tornado_blazegraph', 'bura_cli', 'bura_blazegraph_arm64']);
   assert.equal(imageContract.buildChecks, false);
   // 5. Everything else fails closed.
   assert.match(pullRequestPlan([change('new-root-tool.ts')]).reasons[0], /^Unclassified path changed/);
@@ -592,7 +592,7 @@ test('identity-wallet browser actions select the real-EVM chain scope', () => {
 
 test('Blazegraph provisioning changes include the native arm64 contract lane', () => {
   const rootContract = pullRequestPlan([change('blazegraph-image.json')]);
-  assert.deepEqual(selectedLanes(rootContract), ['bura_cli', 'bura_blazegraph_arm64']);
+  assert.deepEqual(selectedLanes(rootContract), ['tornado_core', 'tornado_blazegraph', 'bura_cli', 'bura_blazegraph_arm64']);
   // The arm64 job's contract check runs the CLI's metadata parser, which
   // loads the storage package's namespace contract.
   assert.ok(pullRequestPlan([change('packages/storage/blazegraph-namespace-contract.cjs')]).lanes.bura_blazegraph_arm64);

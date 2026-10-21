@@ -19,7 +19,6 @@ import { readRetainedWalSegmentNames } from './oxigraph-wal.js';
 export function createManagedOxigraphPersistenceBarrierV1(
   directoryOwner: DurableDirectory,
   version: string,
-  platform: NodeJS.Platform = process.platform,
 ): TripleStorePersistenceBarrier | undefined {
   if (version !== '0.5.8') return undefined;
   const directory = directoryOwner.path;
@@ -34,7 +33,7 @@ export function createManagedOxigraphPersistenceBarrierV1(
           const file = await open(join(directory, name), 'r+');
           try { await file.sync(); } finally { await file.close(); }
         }
-        if (platform !== 'win32') await directoryOwner.persist();
+        await directoryOwner.persist();
         options?.signal?.throwIfAborted();
         const after = await readRetainedWalSegmentNames(directory);
         options?.signal?.throwIfAborted();

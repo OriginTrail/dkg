@@ -484,7 +484,7 @@ export async function startManagedOxigraph(
     runtimeStoreConfig.graphSetIndex = plan.storeConfigTemplate.graphSetIndex;
   }
   const storeConfig = createManagedOxigraphRuntimeStoreConfigV1(runtimeStoreConfig, {
-    persistence: createManagedOxigraphPersistenceBarrierV1(directoryOwner, binary.version, opts.platform),
+    persistence: createManagedOxigraphPersistenceBarrierV1(directoryOwner, binary.version),
     getRecoveryState: readRecoveryState,
     registerActivity: () => handle.registerStoreActivity(),
     onClientTimeout: recoverTimedOutOperation,

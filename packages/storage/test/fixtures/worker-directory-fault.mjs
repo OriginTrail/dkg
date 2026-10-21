@@ -11,3 +11,5 @@ fs.promises.open = async (...args) => {
   return handle;
 };
 syncBuiltinESMExports();
+
+await import('./worker-disable-background-flush.mjs');

@@ -392,6 +392,12 @@ export const INSTALL_HOOK_INPUTS = installHookInputs(INSTALL_HOOK_DEPENDENCIES);
 
 export const PATH_TRIGGERS = Object.freeze([
   {
+    patterns: [/^blazegraph-image\.json$/],
+    lanes: ['tornado_core', 'tornado_blazegraph'],
+    evmScopes: [],
+    reason: 'storage acknowledged-write persistence tests load the pinned Blazegraph image',
+  },
+  {
     patterns: [/^test-policy\/(?:README\.md|test-routes\.json)$/],
     lanes: ['chain_rpc_node26'],
     evmScopes: [],
