@@ -34,6 +34,7 @@ import {
   type CoreHostedPublicCgRecordOutcome,
 } from './core-hosted-public-cg-record-decision.js';
 import { DEFAULT_SWM_TTL_MS } from './dkg-agent-constants.js';
+import { noteCoreHostedStorageAck } from './core-hosted-definition.js';
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
 import { resolveVmReconcilerEnabled } from './sync/backpressure.js';
 import { storageAckGrandfatherUpdate } from './storage-ack-retention.js';
@@ -198,6 +199,8 @@ export class VmPromotionMethods extends DKGAgentBase {
     switch (outcome) {
       case 'recorded':
       case 'already-recorded':
+        // While the definition is missing, a requester the owner tied to the graph is asked for it.
+        noteCoreHostedStorageAck(this, localCgId, request.publisherPeerId);
         return { ok: true };
       case 'curated':
         // A curated graph's plaintext never belongs in a core's VM; curated

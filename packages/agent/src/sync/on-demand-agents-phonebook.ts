@@ -18,7 +18,9 @@
  *  - one fetch tries at most `maxPeers` connected, network-admitted peers
  *    (known Cores first) inside one shared wall-clock budget;
  *  - a cooldown after every fetch that reached a peer, longer after one that
- *    obtained data than after one that failed;
+ *    completed (or found everything it was asked for), or after a second
+ *    partial fetch in a row, than after one that failed, obtained nothing, or
+ *    first left a wanted owner or wallet unresolved;
  *  - a graph whose curator a complete Core phonebook did not contain stops
  *    asking for hours (live `agents` gossip still delivers later profiles);
  *    an empty or near-empty "complete" answer does not count as one;
@@ -71,15 +73,24 @@ export function resolveOnDemandAgentsPhonebookFetch(
 }
 
 /**
- * Minimum spacing between fetches that obtained data. A full fetch is one
- * durable sync of the whole `agents` graph (~75k triples, ~24 s from one Core
- * on Base mainnet in September 2026). Profiles are re-published every 20
- * minutes and arrive over live `agents` gossip while the node is online, so a
- * phonebook fetched less than 30 minutes ago is not meaningfully stale; this
- * caps the worst case at two full fetches per hour per node.
+ * Minimum spacing after a fetch that completed, that found every owner and
+ * wallet it was asked for, or that was the second partial one in a row. A
+ * full fetch is one durable sync of the whole `agents` graph (~75k triples,
+ * ~24 s from one Core on Base mainnet in September 2026). Profiles are
+ * re-published every 20 minutes and arrive over live `agents` gossip while the
+ * node is online, so a phonebook fetched less than 30 minutes ago is not
+ * meaningfully stale; this caps the worst case at two full fetches per hour
+ * per node, after the first partial one.
  */
 export const AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS = 30 * 60_000;
-/** Spacing after a fetch that reached peers but obtained nothing. */
+/**
+ * Spacing after a fetch that reached peers but obtained nothing, or only part
+ * of a phonebook that left a wanted owner or wallet unresolved: overloaded
+ * Cores answer in part, and the share that asked for its graph's owner cannot
+ * wait half an hour for the next try. Only the first partial fetch in a row
+ * is spaced this way: partial answers that repeat come from Cores that stay
+ * overloaded, and each full fetch adds to their load.
+ */
 export const AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS = 10 * 60_000;
 /** Wall-clock budget one fetch shares across every peer it tries. */
 export const AGENTS_PHONEBOOK_FETCH_BUDGET_MS = 120_000;
@@ -253,6 +264,8 @@ export class OnDemandAgentsPhonebookFetcher {
   #lifetime = new AbortController();
   #inFlight: Promise<void> | undefined;
   #nextEligibleAt = 0;
+  /** Partial fetches in a row; any other outcome resets it. */
+  #partialsInRow = 0;
   /** Graph -> first trigger that wanted it; drained by the next fetch. */
   readonly #wants = new Map<string, AgentsPhonebookFetchTrigger>();
   /** Lower-cased wallets a waiting share needs; drained by the next fetch. */
@@ -572,9 +585,8 @@ export class OnDemandAgentsPhonebookFetcher {
       || (fetchedTriples > 0 && unresolved.size === 0 && unresolvedWallets.length === 0)
       ? 'complete'
       : fetchedTriples > 0 ? 'partial' : answeredEmpty ? 'empty' : 'failed';
-    this.#nextEligibleAt = now + (outcome === 'failed' || outcome === 'empty'
-      ? this.#failureCooldownMs
-      : this.#cooldownMs);
+    this.#partialsInRow = outcome === 'partial' ? this.#partialsInRow + 1 : 0;
+    this.#nextEligibleAt = now + (outcome === 'complete' || this.#partialsInRow > 1 ? this.#cooldownMs : this.#failureCooldownMs);
     if (networkPhonebook) {
       for (const contextGraphId of unresolved) {
         setBounded(

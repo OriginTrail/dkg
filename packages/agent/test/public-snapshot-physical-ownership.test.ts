@@ -22,17 +22,17 @@ it('retains real adapter builder slots and shutdown drain after the deadline unt
   };
   Object.assign(adapter, { init: vi.fn(async () => {}), providers: [provider] });
   const lifetime = new AgentWorkLifetime();
-  const runtime = new PublicSnapshotServingRuntime((id, chainId, signal) =>
-    adapter.readPublicGraphSnapshot(id, chainId, { signal }), lifetime);
-  const first = runtime.get('peer-a', 'graph-a', '1');
-  const second = runtime.get('peer-b', 'graph-b', '2');
+  const runtime = new PublicSnapshotServingRuntime(({ contextGraphId, onChainId }, signal) =>
+    adapter.readPublicGraphSnapshot(contextGraphId, onChainId, { signal }), lifetime);
+  const first = runtime.get('peer-a', { deploymentId: "test-hub", contextGraphId: 'graph-a', onChainId: '1' });
+  const second = runtime.get('peer-b', { deploymentId: "test-hub", contextGraphId: 'graph-b', onChainId: '2' });
   const settled = Promise.allSettled([first, second]);
   try {
     await vi.advanceTimersByTimeAsync(0);
     expect(provider.getBlock).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(110_000);
     expect(lifetime.physicalRuns.size).toBe(2);
-    await expect(runtime.get('peer-c', 'graph-c', '3')).rejects.toThrow('Snapshot builder busy');
+    await expect(runtime.get('peer-c', { deploymentId: "test-hub", contextGraphId: 'graph-c', onChainId: '3' })).rejects.toThrow('Snapshot builder busy');
     lifetime.close(new Error('shutdown'));
     let drained = false;
     const drain = lifetime.drain().then(() => { drained = true; });

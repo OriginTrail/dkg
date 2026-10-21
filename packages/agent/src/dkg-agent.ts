@@ -1,5 +1,8 @@
+import { resolveConfiguredNetworkIdentity } from './configured-network-identity.js';
+import { snapshotCoreChainCacheNetworks } from './core-chain-cache-config.js';
+import { assertionLifecycleAuthorCandidates } from '@origintrail-official/dkg-publisher';
 import { durableAssertionShareMethods } from './internal/promote/durable-assertion-share.js';
-import { resolvePreparedContentCacheConfig } from './sync/responder/prepared-content-cache.js';
+import { normalizeAgentPreparedCacheConfig } from './prepared-cache-config.js';
 import { PublicSnapshotMethods } from './dkg-agent-public-snapshot.js';
 import { createStorageAckLedgerTimestampWriter, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
 
@@ -138,7 +141,7 @@ import {
   FileWorkspacePublicSnapshotStore,
   parseWorkspacePublicSnapshotNQuads,
   type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
-  type PromoteTerminalJobClearer, type TerminalJobClearOutcome,
+  type PromoteTerminalJobClearer, type PromoteShareReconciler, type TerminalJobClearOutcome,
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
@@ -1221,9 +1224,10 @@ export class DKGAgent extends DKGAgentBase {
       );
     }
     validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
-    resolvePreparedContentCacheConfig(inputConfig.preparedContentCache, inputConfig.dataDir);
+    const preparedContentCache = normalizeAgentPreparedCacheConfig(inputConfig);
     const normalizedConfig = normalizeStorageAckConfig({
       ...inputConfig,
+      preparedContentCache,
       authorityIndex,
       syncContextGraphPriorities: resolveSyncContextGraphPriorities(
         inputConfig.syncContextGraphPriorities,
@@ -1447,24 +1451,7 @@ export class DKGAgent extends DKGAgentBase {
     // Load genesis knowledge into the store (idempotent)
     await DKGAgent.loadGenesis(store, genesisId);
     const computedNetworkId = await computeNetworkId(genesisId);
-    if (config.networkIdentity?.genesisId && config.networkIdentity.genesisId !== genesisId) {
-      throw new Error(
-        `DKGAgentConfig.networkIdentity.genesisId (${config.networkIdentity.genesisId}) ` +
-        `must match the selected genesisId (${genesisId})`,
-      );
-    }
-    if (config.networkIdentity?.networkId && config.networkIdentity.networkId !== computedNetworkId) {
-      throw new Error(
-        `DKGAgentConfig.networkIdentity.networkId (${config.networkIdentity.networkId}) ` +
-        `must match computeNetworkId(${genesisId}) (${computedNetworkId})`,
-      );
-    }
-    const networkIdentity = {
-      ...config.networkIdentity,
-      genesisId,
-      networkId: computedNetworkId,
-      chainId: constructedAgentChainId,
-    };
+    const networkIdentity = resolveConfiguredNetworkIdentity(config.networkIdentity, genesisId, computedNetworkId, constructedAgentChainId);
     const configWithoutRfc64CatalogControls = { ...config };
     delete configWithoutRfc64CatalogControls.rfc64PublicCatalogActivation;
     delete configWithoutRfc64CatalogControls.rfc64CatalogActivation;
@@ -1478,8 +1465,11 @@ export class DKGAgent extends DKGAgentBase {
     delete configWithoutRfc64CatalogControls.syncBackoffBaseMs;
     delete configWithoutRfc64CatalogControls.syncBackoffMaxMs;
     delete configWithoutRfc64CatalogControls.syncBackoffJitter;
+    delete configWithoutRfc64CatalogControls.DKG_Core_chain_cache;
     const resolvedConfig: ResolvedDKGAgentConfig = {
       ...configWithoutRfc64CatalogControls,
+      coreChainCacheNetworks: snapshotCoreChainCacheNetworks(config.DKG_Core_chain_cache,
+        config.coreChainCacheNetworks, networkIdentity, chain.deploymentId),
       genesisId,
       networkIdentity,
       rfc64CatalogAccessPolicyAuthority,
@@ -1505,6 +1495,7 @@ export class DKGAgent extends DKGAgentBase {
       bootstrapPeers: config.bootstrapPeers,
       relayPeers: config.relayPeers,
       otherNetworkRelays: config.otherNetworkRelays,
+      staticDialExemptions: resolvedConfig.coreChainCacheNetworks.flatMap(network => network.relays),
       networkPeerIsolation: config.networkPeerIsolation,
       enableMdns: !config.bootstrapPeers?.length && !config.relayPeers?.length,
       privateKey: keypair.secretKey,
@@ -2747,8 +2738,9 @@ export class DKGAgent extends DKGAgentBase {
     const storageACKDrain = this.storageACKRegistrationRuntime.closeAndDrain();
     void storageACKDrain.catch(() => {});
     this.peerSyncSession.close();
-    // No change notice, forwarded catalog head or notice pull starts after this.
+    // No change notice, forwarded catalog head, notice pull or owed share send starts after this.
     this.stopSwmChangeNoticesV1();
+    this.stopOwedPublicSharesV1();
     // Cancelling a waiter alone does not retire the shared physical scan.
     // Detached cold authority flights are aborted here too: after stop() no
     // request can consume their result, and the chain reader closes below.
@@ -2998,6 +2990,8 @@ export class DKGAgent extends DKGAgentBase {
     // The owner joins both an installed prover and any in-flight WAL/handle
     // creation. A timeout retains ownership and blocks store/network teardown.
     await this.randomSamplingRuntime?.stop();
+    // Graph-scoped foreground/serving work has physically drained above.
+    for (const network of this.config.coreChainCacheNetworks) network.registry.destroy();
     // rc.9 PR-G codex follow-up #G3: drain background substrate
     // fan-outs spawned by `publishWorkspaceGossip` (G2's
     // fire-and-forget detach) before tearing down libp2p. Without
@@ -3400,6 +3394,8 @@ export class DKGAgent extends DKGAgentBase {
     // `packages/cli/src/publisher-runner.ts:createV10ACKProviderForPublisher`.
     if (typeof this.chain.getEvmChainId !== 'function') return undefined;
     if (typeof this.chain.getKnowledgeAssetsLifecycleAddress !== 'function') return undefined;
+    // The Cores asked for StorageACKs learn which node is the graph owner's (`swm/owner-tie-offer.ts`).
+    this.offerOwnerTieV1(contextGraphId);
 
     const collector = new ACKCollector({
       gossipPublish: async (topic: string, data: Uint8Array) => {
@@ -4076,14 +4072,7 @@ export class DKGAgent extends DKGAgentBase {
         // then its EIP-55 and lowercase equivalents. The resolved subject must
         // be carried into the event/root queries below; rebuilding it from the
         // caller spelling would silently split one lifecycle into two.
-        const lifecycleAddresses = [addr];
-        if (/^0x[0-9a-fA-F]{40}$/.test(addr)) {
-          const lowercase = addr.toLowerCase();
-          const checksummed = ethers.getAddress(lowercase);
-          for (const candidate of [checksummed, lowercase]) {
-            if (!lifecycleAddresses.includes(candidate)) lifecycleAddresses.push(candidate);
-          }
-        }
+        const lifecycleAddresses = assertionLifecycleAuthorCandidates(addr);
 
         let lifecycleUri: string | undefined;
         let row: Record<string, string> | undefined;
@@ -4353,11 +4342,8 @@ export class DKGAgent extends DKGAgentBase {
 
       // ── Async promote (RFC: docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md) ──
       //
-      // These five methods are thin pass-throughs to the queue. The
-      // worker that actually drains the queue lives in the daemon (PR
-      // #3); on this surface we only enqueue, inspect, cancel, and
-      // recover. No memoryGraphChanged event is emitted at enqueue time
-      // — emission happens when the worker reports success.
+      // Queue access only; the daemon worker executes shares and emits memory changes.
+      // Reconciliation reads persisted completion evidence without admitting work.
       async promoteAsync(
         contextGraphId: string,
         name: string,
@@ -4379,6 +4365,9 @@ export class DKGAgent extends DKGAgentBase {
       },
       async getPromoteAsyncStatus(jobId: string): Promise<PromoteJob | null> {
         return agent.promoteQueue.getStatus(jobId);
+      },
+      async reconcileShare(input: import('@origintrail-official/dkg-publisher').ShareReconciliationInput) {
+        return agent.promoteQueue.reconcileShare(input);
       },
       async listPromoteAsyncJobs(filter?: PromoteListFilter): Promise<PromoteJob[]> {
         return agent.promoteQueue.list(filter);
@@ -4409,7 +4398,7 @@ export class DKGAgent extends DKGAgentBase {
    * `recordCommitMarker` / `recoverOnStartup`) without the assertion
    * subsurface having to leak those methods to user-facing callers.
    */
-  get promoteQueue(): AsyncPromoteQueue & PromoteTerminalJobClearer {
+  get promoteQueue(): AsyncPromoteQueue & PromoteTerminalJobClearer & PromoteShareReconciler {
     if (!this._promoteQueue) {
       this._promoteQueue = new TripleStoreAsyncPromoteQueue(this.store, this._promoteQueueConfig ?? {});
     }
