@@ -112,6 +112,7 @@ export default defineConfig({
       'test/rootless-access.test.ts',
       'test/agents-meta-bound.test.ts',
       'test/ack-collector.test.ts',
+      'test/ack-collector-diagnostics.test.ts',
       'test/ack-peer-status-ledger.test.ts',
       'test/publish-lifecycle-logger.test.ts',
       'test/storage-ack-handler.test.ts',
