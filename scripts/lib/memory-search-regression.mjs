@@ -1,12 +1,11 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
-/** Real HTTP writes/reads only. Called by the local devnet runner and daemon integration test. */
-export async function runMemorySearchRegression({ base, token }) {
+async function createSearchScenario({ base, token, graphPrefix, agentPrefix, graphName }) {
   const url = new URL(base);
   assert(['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname), 'This fixture requires a local devnet');
   const scenarioId = randomUUID();
-  const contextGraphId = `memory-search-${scenarioId}`;
+  const contextGraphId = `${graphPrefix}-${scenarioId}`;
   async function post(path, body, auth = token) {
     const response = await fetch(new URL(path, url), { method: 'POST',
       headers: { Authorization: `Bearer ${auth}`, 'Content-Type': 'application/json' },
@@ -15,11 +14,18 @@ export async function runMemorySearchRegression({ base, token }) {
     assert(response.ok, `${path}: HTTP ${response.status}: ${JSON.stringify(result)}`);
     return result;
   }
-  const alice = await post('/api/agent/register', { name: `memory-search-alice-${scenarioId}`, framework: 'devnet-regression' });
-  const bob = await post('/api/agent/register', { name: `memory-search-bob-${scenarioId}`, framework: 'devnet-regression' });
+  const alice = await post('/api/agent/register', { name: `${agentPrefix}-alice-${scenarioId}`, framework: 'devnet-regression' });
+  const bob = await post('/api/agent/register', { name: `${agentPrefix}-bob-${scenarioId}`, framework: 'devnet-regression' });
   assert(alice.authToken && bob.authToken);
-  await post('/api/context-graph/create', { id: contextGraphId, name: 'Memory search regression', accessPolicy: 0 }, alice.authToken);
+  await post('/api/context-graph/create', { id: contextGraphId, name: graphName, accessPolicy: 0 }, alice.authToken);
   await post('/api/context-graph/register', { id: contextGraphId, accessPolicy: 0 }, alice.authToken);
+  return { post, scenarioId, contextGraphId, alice, bob };
+}
+
+/** Real HTTP writes/reads only. Called by the local devnet runner and daemon integration test. */
+export async function runMemorySearchRegression({ base, token }) {
+  const { post, contextGraphId, alice, bob } = await createSearchScenario({ base, token,
+    graphPrefix: 'memory-search', agentPrefix: 'memory-search', graphName: 'Memory search regression' });
   const create = (name, count, auth) => post('/api/knowledge-assets', {
     contextGraphId, name, finalize: false,
     quads: Array.from({ length: count }, (_, index) => ({ subject: `urn:${contextGraphId}:${name}:${index}`,
@@ -56,26 +62,11 @@ export async function runMemorySearchRegression({ base, token }) {
 
 /** Requires the equal-vector HTTP fixture; all indexing still goes through the daemon. */
 export async function runMemoryVectorSearchRegression({ base, token }) {
-  const url = new URL(base);
-  assert(['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname), 'This fixture requires a local devnet');
-  const scenarioId = randomUUID();
-  const contextGraphId = `memory-vectors-${scenarioId}`;
+  const { post, scenarioId, contextGraphId, alice, bob } = await createSearchScenario({ base, token,
+    graphPrefix: 'memory-vectors', agentPrefix: 'vector', graphName: 'Vector tenant regression' });
   // Neither document contains this text. A disabled/failing embedding provider
   // cannot make the test pass via the SPARQL fallback.
   const query = `nonlexical-vector-query-${scenarioId}`;
-  async function post(path, body, auth = token) {
-    const response = await fetch(new URL(path, url), { method: 'POST',
-      headers: { Authorization: `Bearer ${auth}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
-    const result = await response.json();
-    assert(response.ok, `${path}: HTTP ${response.status}: ${JSON.stringify(result)}`);
-    return result;
-  }
-  const alice = await post('/api/agent/register', { name: `vector-alice-${scenarioId}`, framework: 'devnet-regression' });
-  const bob = await post('/api/agent/register', { name: `vector-bob-${scenarioId}`, framework: 'devnet-regression' });
-  assert(alice.authToken && bob.authToken);
-  await post('/api/context-graph/create', { id: contextGraphId, name: 'Vector tenant regression', accessPolicy: 0 }, alice.authToken);
-  await post('/api/context-graph/register', { id: contextGraphId, accessPolicy: 0 }, alice.authToken);
   const documents = [
     { auth: alice.authToken, markdown: `Alice confidential planning ${scenarioId}` },
     { auth: bob.authToken, markdown: `Bob confidential research ${scenarioId}` },
