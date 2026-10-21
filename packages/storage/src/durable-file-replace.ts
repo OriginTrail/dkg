@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { DurableDirectory } from './file-durability.js';
 import { randomUUID } from 'node:crypto';
-import { open, rename, rm, type FileHandle } from 'node:fs/promises';
+import { open, realpath, rename, rm, type FileHandle } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
 export interface DurableFileReplacePermissions {
@@ -26,7 +26,7 @@ export class DurableReplaceableFile {
 
   async replace(contents: string | Iterable<string>): Promise<void> {
     await this.directory.create();
-    const temporary = this.permissions.temporaryPath ?? join(this.directory.path, `.${basename(this.path)}.${process.pid}.${randomUUID()}.tmp`);
+    const temporary = this.permissions.temporaryPath ?? join(await realpath(this.directory.path), `.${basename(this.path)}.${process.pid}.${randomUUID()}.tmp`);
     let file: FileHandle | undefined;
     try {
       file = await open(temporary, this.permissions.temporaryPath ? 'w' : 'wx', this.permissions.fileMode);

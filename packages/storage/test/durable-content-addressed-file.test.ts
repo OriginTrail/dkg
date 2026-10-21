@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, writeFile, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DurableDirectoryPreparation } from '../src/durable-content-addressed-file.js';
@@ -15,7 +15,7 @@ const dirs: string[] = [];
 afterEach(async () => { observed.paths = []; for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
 describe('content addressed file persistence', () => {
   it('certifies adopted ancestry once per directory owner before blob writes', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-content-file-')); dirs.push(dir);
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-content-file-'))); dirs.push(dir);
     const directory = join(dir, 'new', 'nested');
     const ancestors: string[] = [];
     for (let path = directory;; path = dirname(path)) { ancestors.push(path); if (dirname(path) === path) break; }
@@ -31,7 +31,7 @@ describe('content addressed file persistence', () => {
     expect(observed.paths).toEqual(ancestors);
   });
   it('uses file FlushFileBuffers while omitting unsupported Windows directory handles', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-content-file-windows-')); dirs.push(dir);
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-content-file-windows-'))); dirs.push(dir);
     const directory = join(dir, 'new');
     await new DurableDirectoryPreparation(directory, 'win32').prepare();
     expect(observed.paths).toEqual([]);

@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DurableDirectory } from '../src/file-durability.js';
@@ -27,7 +27,7 @@ vi.mock('node:fs/promises', async importOriginal => {
 const roots: string[] = [];
 afterEach(async () => { io.synced = []; io.fail = ''; io.code = 'EIO'; io.partialCreate = ''; for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 async function absentNested() {
-  const root = await mkdtemp(join(tmpdir(), 'dkg-durable-directory-')); roots.push(root);
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dkg-durable-directory-'))); roots.push(root);
   const created = join(root, 'new');
   return { root, created, path: join(created, 'nested') };
 }
