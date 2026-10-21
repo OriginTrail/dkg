@@ -87,7 +87,8 @@ export class NamedKaVmLifecycleRepair {
       if (previous && previous.input.assertionVersion === stored.assertionVersion && previous.input.merkleRoot !== stored.merkleRoot) {
         throw new NamedKaVmLifecycleIntegrityError('Conflicting confirmed roots at the same assertion version');
       }
-      const entry = previous?.input.assertionVersion === stored.assertionVersion
+      // Fresh complete evidence can bind a legacy record that lacked its KA identity.
+      const entry = previous?.retention !== 'historical-unbound' && previous?.input.assertionVersion === stored.assertionVersion
         ? previous : { input: stored, attempts: 0, nextAttemptAt: this.now() };
       this.entries.set(key, entry);
       // Write-ahead admission contains no external chain or graph-store work.

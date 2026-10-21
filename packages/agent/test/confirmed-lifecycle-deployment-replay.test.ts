@@ -72,8 +72,13 @@ describe('confirmed lifecycle deployment-bound replay', () => {
     await writeFile(journalPath, JSON.stringify({ version: 2, entries: [[lifecycleRepairKey(unbound), {
       input: { ...unbound, packedKaId: unbound.packedKaId?.toString() }, attempts: 3, nextAttemptAt: 1000,
     }]] }));
-    f.snapshot.mockClear(); f.apply.mockClear(); f.ready(); await f.create().runDue();
+    f.snapshot.mockClear(); f.apply.mockClear(); f.ready(); const replay = f.create(); await replay.runDue();
     expect(f.snapshot).not.toHaveBeenCalled(); expect(f.apply).not.toHaveBeenCalled();
     expect([...await f.journal()][0]![1]).toMatchObject({ retention: 'historical-unbound', attempts: 3, nextAttemptAt: 1000, input: { publishedUal: unbound.publishedUal } });
+    if (field === 'packedKaId') {
+      expect(await replay.submit(f.input)).toBe('repaired');
+      expect(f.snapshot).toHaveBeenCalledWith(f.input.packedKaId, expect.anything());
+      expect((await f.journal()).size).toBe(0);
+    }
   });
 });
