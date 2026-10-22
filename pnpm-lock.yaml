@@ -14,7 +14,7 @@ overrides:
   cookie@<0.7.0: 0.7.0
   tmp@<0.2.4: 0.2.4
   hono@>=4.0.0 <4.13.13: 4.13.13
-  '@hono/node-server@>=1.0.0 <1.19.13': 1.19.13
+  '@hono/node-server@>=1.0.0 <1.19.17': 1.19.17
   immutable@<4.3.8: 4.3.8
   handlebars@>=4.0.0 <4.7.9: 4.7.9
   fast-uri@>=3.0.0 <3.1.2: 3.1.2
@@ -2432,8 +2432,8 @@ packages:
   '@ethersproject/wordlists@5.8.0':
     resolution: {integrity: sha512-2df9bbXicZws2Sb5S6ET493uJ0Z84Fjr3pC4tu/qlnZERibZCeUVuqdtt+7Tv9xxhUxHoIekIA7avrKUWHrezg==}
 
-  '@hono/node-server@1.19.13':
-    resolution: {integrity: sha512-TsQLe4i2gvoTtrHje625ngThGBySOgSK3Xo2XRYOdqGN1teR8+I7vchQC46uLJi8OF62YTYA3AhSpumtkhsaKQ==}
+  '@hono/node-server@1.19.17':
+    resolution: {integrity: sha512-dSneS5qhiauZWGDCeK4o695Xd9nUNjviSZCMQrj10eetr8Uln1ucn6bbphOM6UynAMMtNIzZNSpL9vnASJwrPQ==}
     engines: {node: '>=18.14.1'}
     peerDependencies:
       hono: 4.13.13
@@ -9031,7 +9031,7 @@ snapshots:
       '@ethersproject/properties': 5.8.0
       '@ethersproject/strings': 5.8.0
 
-  '@hono/node-server@1.19.13(hono@4.13.13)':
+  '@hono/node-server@1.19.17(hono@4.13.13)':
     dependencies:
       hono: 4.13.13
 
@@ -9623,7 +9623,7 @@ snapshots:
 
   '@modelcontextprotocol/sdk@1.32.1(zod@3.25.76)':
     dependencies:
-      '@hono/node-server': 1.19.13(hono@4.13.13)
+      '@hono/node-server': 1.19.17(hono@4.13.13)
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
       content-type: 1.0.5
@@ -9645,7 +9645,7 @@ snapshots:
 
   '@modelcontextprotocol/sdk@1.32.1(zod@4.4.3)':
     dependencies:
-      '@hono/node-server': 1.19.13(hono@4.13.13)
+      '@hono/node-server': 1.19.17(hono@4.13.13)
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
       content-type: 1.0.5
