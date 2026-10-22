@@ -6,6 +6,7 @@ import type {
   SyncCheckpointStore,
 } from './checkpoint/state.js';
 import { deleteSyncPageCheckpoint } from './requester/page-fetch.js';
+import type { DurableMetaContinuation } from './requester/durable-sync.js';
 
 /**
  * A verified DATA prefix of one manifest generation, whichever peer served it.
@@ -51,6 +52,23 @@ export function preferVerifiedDurableBoundary(
     return candidate.offset > current.offset ? candidate : current;
   }
   return candidate.updatedAtMs > current.updatedAtMs ? candidate : current;
+}
+
+/** One boundary of one generation, as a peer's refusal of it is remembered. */
+export function durableBoundaryIdentity(manifestDigest: string | undefined, offset: number): string {
+  return `${manifestDigest ?? ''}\0${offset}`;
+}
+
+/**
+ * Read and clear the offset at which the slice's DATA round found that the
+ * peer's rows did not line up with the boundary it resumed at, if it did.
+ */
+export function takeRejectedResumeOffset(
+  continuation: Pick<DurableMetaContinuation, 'rejectedResumeOffset'> | undefined,
+): number | undefined {
+  const offset = continuation?.rejectedResumeOffset;
+  if (continuation) continuation.rejectedResumeOffset = undefined;
+  return offset;
 }
 
 /**
