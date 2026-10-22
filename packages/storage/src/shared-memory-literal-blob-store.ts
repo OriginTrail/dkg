@@ -4,7 +4,7 @@ import type { TripleStoreCommitCapability } from './persistence.js';
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import { createHash } from 'node:crypto';
 import { open, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { LiteralHydrationBudget, readLiteralBlobBounded } from './bounded-literal-hydration.js';
 import type {
   ConstructResult,
@@ -80,7 +80,9 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     this.innerStore = inner;
     this.commitment = inner.commitment;
     this.graphEnumerationVisibility = inner.graphEnumerationVisibility?.bind(inner);
-    this.blobDir = options.blobDir;
+    // Match blobPath's lexical dot-segment handling before any filesystem work.
+    // Otherwise a symlink followed by '..' can prepare/sync a different parent.
+    this.blobDir = resolve(options.blobDir);
     this.thresholdBytes = options.thresholdBytes;
     this.blobDirectory = new DurableDirectoryPreparation(this.blobDir);
     this.blobWrites = new ContentAddressedBlobSingleFlight({
