@@ -32,7 +32,7 @@ export class NamedKaVmLifecycleRepair {
     now?: () => number;
     /** Share the publisher's lifecycle domain for currency, admission and mutation. */
     writeLocks: Map<string, Promise<void>>;
-    /** Resolve after the host's certified commit barrier: durable for every filesystem journal. */
+    /** Resolve after the host's completion policy; stock managed HTTP is acknowledgement-only. */
     apply: (input: ValidatedLifecycleRepairCommand, preserveVerifiedVmProof: boolean) => Promise<void>;
     /** Coherent chain version evidence; a newer chain version fences an old repair. */
     isCurrent: (input: ValidatedLifecycleRepairCommand) => Promise<boolean>;

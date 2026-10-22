@@ -5,7 +5,8 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import { ChangelogStore, GraphSetIndexStore, OxigraphStore, SparqlHttpStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import { ChangelogStore, GraphSetIndexStore, OxigraphStore, SparqlHttpStore, createManagedOxigraphRuntimeStoreConfigV1,
+  type TripleStore, type TripleStoreConfig } from '@origintrail-official/dkg-storage';
 import type { GraphScopedKnowledgeAssetVmPublishRequest } from '../src/internal/knowledge-asset-vm-publish-request.js';
 import { confirmedMaterializationFixture } from './_helpers/confirmed-materialization-fixture.js';
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -17,10 +18,10 @@ const { input, graph } = confirmedMaterializationFixture();
 const stores: TripleStore[] = [], owners: NamedKaVmLifecycleRepair[] = [], dirs: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const owner of owners.splice(0)) await owner.stop();
   for (const store of stores.splice(0)) await store.close(); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
-function agentFor(store: TripleStore, dataDir?: string) {
+function agentFor(store: TripleStore, dataDir?: string, storeConfig?: TripleStoreConfig, customStore = false) {
   const agent = Object.create(DKGAgent.prototype) as DKGAgent;
   const warn = vi.fn(), current = vi.fn(async () => ({ latestRoot: input.merkleRoot, rootCount: 1n }));
-  Object.assign(agent, { config: { dataDir }, store, writeLocks: new Map(), log: { warn }, _resolveRecoveredKnowledgeAssetVmLifecycleAuthor: async () => ({ author: input.agentAddress, incomplete: false }),
+  Object.assign(agent, { config: { dataDir, storeConfig, ...(customStore ? { store } : {}) }, store, writeLocks: new Map(), log: { warn }, _resolveRecoveredKnowledgeAssetVmLifecycleAuthor: async () => ({ author: input.agentAddress, incomplete: false }),
     chain: { readKnowledgeAssetVersionSnapshot: current, getEvmChainId: vi.fn(async () => 31337n),
       getKnowledgeAssetsLifecycleAddress: vi.fn(async () => input.publicationDeployment.lifecycleAddress) } });
   const owner = agent.getOrCreateNamedKaVmLifecycleRepair(); owners.push(owner); return { agent, owner, current, warn };
@@ -76,5 +77,31 @@ describe('confirmed lifecycle persistence policy', () => {
     const failure = new Error('durable storage unavailable'); const persist = vi.spyOn(store.commitment!, 'capture').mockReturnValueOnce(async () => { throw failure; });
     await expect(applyPublishedNamedKaVmLifecycle(store, input, { persistence: 'process-local' })).rejects.toBe(failure);
     expect(persist).toHaveBeenCalledOnce();
+  });
+  it('never downgrades a failed certified barrier under managed acknowledgement compatibility', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-managed-barrier-failure-')); dirs.push(dir);
+    const store = new OxigraphStore(join(dir, 'store.nq')); stores.push(store);
+    const config = createManagedOxigraphRuntimeStoreConfigV1({ backend: 'sparql-http',
+      options: { queryEndpoint: 'http://127.0.0.1:1/query', managedByDkg: true } });
+    const capture = vi.spyOn(store.commitment!, 'capture').mockReturnValueOnce(async () => { throw new Error('certified commit failed'); });
+    const { owner } = agentFor(store, dir, config);
+    expect(await owner.submit(input)).toBe('pending'); expect(capture).toHaveBeenCalledOnce();
+    expect(await hasVm(store)).toMatchObject({ value: true });
+    expect(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')).entries).toHaveLength(1);
+  });
+  it('does not grant acknowledgement compatibility to a serialized managedByDkg flag', async () => {
+    const config: TripleStoreConfig = { backend: 'sparql-http',
+      options: { queryEndpoint: 'http://127.0.0.1:1/query', managedByDkg: true } };
+    const store = new SparqlHttpStore({ queryEndpoint: 'http://127.0.0.1:1/query', managedByDkg: true }); stores.push(store);
+    const fetch = vi.spyOn(globalThis, 'fetch'), { owner } = agentFor(store, undefined, config);
+    expect(await owner.submit(input)).toBe('pending'); expect(fetch).not.toHaveBeenCalled();
+  });
+  it('does not let a custom store borrow an unused managed runtime configuration', async () => {
+    const store = new SparqlHttpStore({ queryEndpoint: 'http://untrusted.test/query' }); stores.push(store);
+    const config = createManagedOxigraphRuntimeStoreConfigV1({ backend: 'sparql-http',
+      options: { queryEndpoint: 'http://127.0.0.1:1/query', managedByDkg: true } });
+    const { owner } = agentFor(store, undefined, config, true);
+    const fetch = vi.spyOn(globalThis, 'fetch');
+    expect(await owner.submit(input)).toBe('pending'); expect(fetch).not.toHaveBeenCalled();
   });
 });

@@ -236,6 +236,7 @@ export {
 } from './rfc64-author-seal-read-gateway.js';
 export {
   createManagedOxigraphRuntimeStoreConfigV1,
+  isManagedOxigraphRuntimeStoreConfigV1,
   withManagedOxigraphRuntimeStoreConfigV1,
   type ManagedOxigraphRuntimeActivityLeaseV1,
   type ManagedOxigraphRecoveryHandleV1,

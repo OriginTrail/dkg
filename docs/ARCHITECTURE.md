@@ -702,6 +702,21 @@ sequenceDiagram
   end
 ```
 
+## Confirmed Named-Publication Recovery
+
+After chain confirmation, named-publication recovery retains the verified public
+payload and a compact local repair obligation before attempting the lifecycle
+writes. A failed attempt retries the original evidence and queued job, including
+after restart, without submitting another publication. Successful recovery restores
+the named owner, seal, content, receipt, routing and exact-version access controls.
+
+Restart-durable backends must pass their captured persistence barrier before the
+repair record can retire. Stock managed Oxigraph HTTP preserves its existing
+completion behavior after acknowledged local writes, without a durability
+certificate. Its failed writes still retry from the journal, but already completed
+HTTP writes have no new guarantee against later engine or system data loss. A
+failed supported-backend barrier never falls back to acknowledged completion.
+
 ## Private and SWM Triple-Store Encryption Boundary
 
 Current repository state separates triple-store persistence from peer-to-peer

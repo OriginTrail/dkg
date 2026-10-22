@@ -5134,6 +5134,7 @@ export class PublishMethods extends DKGAgentBase {
   private _confirmedNamedKaVmLifecycleExecutor(this: DKGAgent): ConfirmedNamedKaVmLifecycleExecutor {
     return new ConfirmedNamedKaVmLifecycleExecutor(confirmedLifecycleExecutionCapabilities({
       store: this.store, chain: this.chain, writeLocks: this.writeLocks, dataDir: this.config?.dataDir,
+      storeConfig: this.config?.store ? undefined : this.config?.storeConfig,
       readTimeoutMs: this.chainAuthorityReadBudgets.requestTimeoutMs,
     }));
   }

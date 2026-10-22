@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertionLifecycleWriteLockKey, tryWithKeyedLocks, withKeyedLocks } from '@origintrail-official/dkg-publisher';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import type { TripleStore, TripleStoreConfig } from '@origintrail-official/dkg-storage';
 import type { ValidatedLifecycleRepairCommand, ConfirmedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle-evidence.js';
 import { isConfirmedNamedKaVmLifecycleCurrent } from './named-ka-vm-lifecycle-current.js';
 import { confirmedNamedKaVmLifecycleApplyOptions } from './named-ka-vm-lifecycle.js';
@@ -24,13 +24,14 @@ export function confirmedLifecycleExecutionCapabilities(host: {
   chain: Parameters<typeof isConfirmedNamedKaVmLifecycleCurrent>[0];
   writeLocks: Map<string, Promise<void>>;
   dataDir?: string;
+  storeConfig?: TripleStoreConfig;
   readTimeoutMs: number;
 }): ExecutionCapabilities {
   return {
     writeLocks: host.writeLocks,
     isCurrent: input => isConfirmedNamedKaVmLifecycleCurrent(host.chain, input, host.readTimeoutMs, Boolean(host.dataDir)),
     apply: (input, preserveVerifiedVmProof = false) => applyMaterializedConfirmedLifecycle(host.store, input, {
-      ...confirmedNamedKaVmLifecycleApplyOptions(host.dataDir), preserveVerifiedVmProof,
+      ...confirmedNamedKaVmLifecycleApplyOptions(host.dataDir, host.storeConfig), preserveVerifiedVmProof,
     }),
   };
 }

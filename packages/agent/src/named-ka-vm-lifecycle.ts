@@ -4,8 +4,8 @@ import {
   ASSERTION_SEAL_PREDICATES, assertionLifecycleUri,
   contextGraphAssertionUri, contextGraphMetaUri, formatSparqlTerm,
 } from '@origintrail-official/dkg-core';
-import { tryUpdateWithTouchedGraphs, UnsupportedTripleStoreCapabilityError,
-  type TripleStore } from '@origintrail-official/dkg-storage';
+import { tryUpdateWithTouchedGraphs, UnsupportedTripleStoreCapabilityError, isManagedOxigraphRuntimeStoreConfigV1,
+  type TripleStore, type TripleStoreConfig } from '@origintrail-official/dkg-storage';
 import { WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED } from '@origintrail-official/dkg-publisher';
 
 import { applyLifecycleMutationFallback, buildNamedKaVmLifecycleMutation, checkedRoot, type WorkspaceLifecycleValues,
@@ -21,14 +21,15 @@ export type { PublishedNamedKaVmLifecycleInput, TentativeNamedKaVmLifecycleInput
 type NamedKaVmLifecycleCommand = PublishedNamedKaVmLifecycleInput | TentativeNamedKaVmLifecycleInput;
 
 export interface NamedKaVmLifecycleApplyOptions {
-  /** A durable repair journal always selects restart-durable; standalone SDK hosts may select process-local. */
-  readonly persistence: 'restart-durable' | 'process-local';
+  /** Stock managed HTTP preserves acknowledged completion without claiming restart durability. */
+  readonly persistence: 'restart-durable' | 'process-local' | 'acknowledged';
   /** Queue recovery may depend on this already-verified proof surviving partial fallback writes. */
   readonly preserveVerifiedVmProof?: boolean;
 }
-/** A filesystem journal selects durability; a standalone SDK may commit within its process. */
-export function confirmedNamedKaVmLifecycleApplyOptions(dataDir?: string): NamedKaVmLifecycleApplyOptions {
-  return { persistence: dataDir ? 'restart-durable' : 'process-local' };
+/** Select compatibility from the daemon's authenticated construction, never journal evidence. */
+export function confirmedNamedKaVmLifecycleApplyOptions(dataDir?: string, storeConfig?: TripleStoreConfig): NamedKaVmLifecycleApplyOptions {
+  return { persistence: isManagedOxigraphRuntimeStoreConfigV1(storeConfig)
+    ? 'acknowledged' : dataDir ? 'restart-durable' : 'process-local' };
 }
 
 /** Decode RDF once at the storage boundary, then apply each field's normalization contract. */

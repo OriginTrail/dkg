@@ -26,7 +26,11 @@ export async function applyMaterializedConfirmedLifecycle(store: TripleStore, in
   await withMaterializationLock(meta, scope.ual, async () => {
     const capability = store.commitment;
     const barrier = capability && (capability.durability === 'restart-durable' || options.persistence === 'process-local') ? capability.capture() : undefined;
-    if (!barrier) throw Object.assign(new Error('Confirmed lifecycle repair awaits an explicitly certified persistence barrier'), { code: 'KA_VM_LIFECYCLE_DURABILITY_UNAVAILABLE' });
+    // A declared capability must satisfy the host contract; failures never downgrade.
+    // Only stock managed HTTP may finish on acknowledged writes without a certificate.
+    if (!barrier && (options.persistence !== 'acknowledged' || capability)) {
+      throw Object.assign(new Error('Confirmed lifecycle repair awaits an explicitly certified persistence barrier'), { code: 'KA_VM_LIFECYCLE_DURABILITY_UNAVAILABLE' });
+    }
     const current = await readCurrentAssertionVersion(store, meta, scope.ual);
     if (current !== undefined && current > BigInt(input.assertionVersion)) throw new Error('Confirmed lifecycle repair awaits newer local materialization reconciliation');
     const metadataRead = await store.query(`CONSTRUCT { <${scope.ual}> ?p ?o } WHERE { GRAPH <${meta}> { <${scope.ual}> ?p ?o } }`);
@@ -78,6 +82,7 @@ export async function applyMaterializedConfirmedLifecycle(store: TripleStore, in
     }
     await mutatePublishedNamedKaVmLifecycle(store, input, options.preserveVerifiedVmProof);
     // This outer barrier owns the payload read/replacement as well as the lifecycle write.
-    await barrier({ source: 'agent.publish.confirmedLifecycleMaterializationFlush' });
+    if (barrier) await barrier({ source: 'agent.publish.confirmedLifecycleMaterializationFlush' });
+    else await store.flush?.({ source: 'agent.publish.confirmedLifecycleMaterializationFlush' });
   });
 }
