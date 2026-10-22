@@ -36,6 +36,13 @@ import {
  * network service spending cannot be switched on, so it deploys with a note.
  */
 const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
+  if (hre.network.config.environment === 'mainnet') {
+    console.log(
+      `[ServiceSubscriptions] ${hre.network.name}: Conviction Account service spending is not ` +
+        'deployed on mainnet yet, so this step is skipped.',
+    );
+    return;
+  }
   const after = await publishingConvictionAfterRun(hre);
   if (!versionAtLeast(after.version, [10, 1, 0])) {
     if (configuredParameter(hre, 'ConvictionServiceStorage', 'exactScheduleFrom') !== undefined) {

@@ -127,6 +127,24 @@ function storageHre(opts: {
 }
 
 describe('@unit deploy/052c — ConvictionServiceStorage and the schedule cut-over', () => {
+  it('on a mainnet network, deploys nothing, sets no parameters and runs no checks', async () => {
+    for (const network of ['base_mainnet', 'gnosis_mainnet']) {
+      const { hre, deployed, updates } = storageHre({
+        network,
+        environment: 'mainnet',
+        treasury: TREASURY,
+        publishingConvictionVersion: '10.0.7',
+        afterRunVersion: '10.0.7',
+      });
+      const lines = await captured(() => deployStorage(hre as never));
+      expect(deployed).to.have.length(0);
+      expect(updates).to.have.length(0);
+      expect(lines.join('\n')).to.match(
+        new RegExp(`${network}: Conviction Account service spending is not deployed on mainnet yet`),
+      );
+    }
+  });
+
   it('without a configured cut-over, deploys and sets the parameters with no checks', async () => {
     const { hre, deployed, updates } = storageHre({
       treasury: TREASURY,
@@ -241,9 +259,21 @@ describe('@unit deploy/052d — ServiceSubscriptions and PublishingConviction 10
     }
   });
 
+  it('on a mainnet network, deploys nothing, whatever build the run leaves', async () => {
+    for (const version of ['10.0.7', '10.1.0']) {
+      for (const network of ['base_mainnet', 'gnosis_mainnet']) {
+        const { hre, deployed } = ssHre(version, { network, environment: 'mainnet' });
+        const lines = await captured(() => deployServiceSubscriptions(hre as never));
+        expect(deployed).to.have.length(0);
+        expect(lines.join('\n')).to.match(
+          new RegExp(`${network}: Conviction Account service spending is not deployed on mainnet yet`),
+        );
+      }
+    }
+  });
+
   it('on a network without the cut-over, deploys against an older build with a note, so other deploys go on', async () => {
     for (const where of [
-      { network: 'base_mainnet', environment: 'mainnet' },
       { network: 'gnosis_chiado_test', environment: 'testnet' },
       { network: 'base_sepolia_v10', environment: 'testnet', configured: false },
     ]) {
