@@ -24,12 +24,12 @@
     "rpcUrl": "https://sepolia.base.org",
     "rpcUrls": [
       "https://base-sepolia-rpc.publicnode.com",
-      "https://base-sepolia.drpc.org"
+      "https://base-testnet.api.pocket.network"
     ],
     "walletRpcUrls": [
       "https://sepolia.base.org",
       "https://base-sepolia-rpc.publicnode.com",
-      "https://base-sepolia.drpc.org"
+      "https://base-testnet.api.pocket.network"
     ],
     "hubAddress": "0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6",
     "chainId": "base:84532"

@@ -2241,6 +2241,25 @@ cmd_addnode() {
   fi
 
   log "Adding node $node_num (role=$role)..."
+  # One mkdir claims the folder: it fails when another caller made the folder
+  # since the check above, so only the caller that created it goes on. A caller
+  # that names a mark (DEVNET_ADDNODE_MARK_NAME, a file name, with
+  # DEVNET_ADDNODE_MARK_TEXT) has it written into the folder before anything
+  # else happens there, the daemon's start included: it can then tell its own
+  # node from another caller's even when this addnode is interrupted.
+  if ! mkdir "$DEVNET_DIR/node${node_num}" 2>/dev/null; then
+    echo "[devnet] node${node_num} already exists at $DEVNET_DIR/node${node_num}"
+    exit 1
+  fi
+  if [ -n "${DEVNET_ADDNODE_MARK_NAME:-}" ]; then
+    case "$DEVNET_ADDNODE_MARK_NAME" in
+      */*|.|..)
+        echo "[devnet] DEVNET_ADDNODE_MARK_NAME must be a file name; node${node_num} was not started"
+        rm -rf "$DEVNET_DIR/node${node_num}"
+        exit 1 ;;
+    esac
+    printf '%s\n' "${DEVNET_ADDNODE_MARK_TEXT:-}" > "$DEVNET_DIR/node${node_num}/$DEVNET_ADDNODE_MARK_NAME"
+  fi
   DEVNET_NODE_ROLE_OVERRIDE="$role" create_node_config "$node_num"
 
   # A test that needs the new node to differ from the first second it runs

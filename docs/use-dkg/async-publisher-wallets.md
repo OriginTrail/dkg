@@ -33,7 +33,7 @@ The live runtime persists desired state in `publisher-control.json` in its data 
 
 A missing runtime returns HTTP 503. A persistence/control failure also returns 503, fences the runtime, and requires restart to reload durable intent; a failed request has no acknowledgement. A status read during a transition may show the previous acknowledged desired state alongside gates already closing. File contents are synced before atomic rename, and the parent directory is synced on supported POSIX hosts. Windows preserves process-restart state without claiming the same directory-fsync power-loss guarantee.
 
-The isolated native restart campaign runs actual two-wallet runtime composition, authenticated loopback HTTP routes, persistent Oxigraph queue evidence and SIGKILL/restart. After building publisher and CLI, run `node --experimental-sqlite --import tsx scripts/repro/publisher-live-control-restart.mts`. It uses a disposable data directory and `NoChainAdapter`; it verifies queue/control behavior rather than on-chain execution.
+The isolated native restart campaign runs actual two-wallet runtime composition, authenticated loopback HTTP routes, persistent Oxigraph queue evidence and SIGKILL/restart. After building publisher and CLI, run `node --experimental-sqlite --import tsx scripts/repro/publisher-live-control-restart.test.mts`. It uses a disposable data directory and `NoChainAdapter`; it verifies queue/control behavior rather than on-chain execution.
 
 ## Receipt, finality, and local completion
 

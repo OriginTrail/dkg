@@ -60,3 +60,15 @@ describe('DkgClient rolling query-result compatibility', () => {
     expect(result).toEqual({ type: 'quads', quads, bindings: [] });
   });
 });
+
+
+it('serializes both scoped metadata opt-ins to the daemon', async () => {
+  let body: Record<string, unknown> = {};
+  const client = new DkgClient({ config: makeConfig(), fetcher: (async (_url, init) => {
+    body = JSON.parse(String(init?.body));
+    return new Response(JSON.stringify({ result: { bindings: [] } }), { status: 200 });
+  }) as typeof fetch });
+  await client.query({ sparql: 'SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }', contextGraphId: 'parent',
+    includeContextGraphPartitions: true, includeSharedMemoryMeta: true });
+  expect(body).toMatchObject({ contextGraphId: 'parent', includeContextGraphPartitions: true, includeSharedMemoryMeta: true });
+});

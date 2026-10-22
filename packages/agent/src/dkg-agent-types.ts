@@ -1848,7 +1848,7 @@ export interface DKGAgentConfig {
   queryAccess?: QueryAccessConfig;
   /** User-selected context graph IDs to sync automatically on peer connect. */
   syncContextGraphs?: string[];
-  /** TTL for shared memory data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */
+  /** TTL for shared memory data in milliseconds. Expired operations are periodically cleaned up. Default: 30 days (`DEFAULT_SWM_TTL_MS`). Set to 0 to disable. */
   sharedMemoryTtlMs?: number;
   /**
    * OT-RFC-38 LU-6 — settings for the core-side host-mode SWM store.
@@ -1860,7 +1860,7 @@ export interface DKGAgentConfig {
    *  - `unregistered`: TTL/byte-cap for CGs the core knows about but that aren't on-chain registered yet.
    *  - `registered`: TTL/byte-cap for on-chain registered CGs (typically larger).
    *  - `pruneIntervalMs`: how often the TTL/cap sweep runs.
-   *  - `reconcileIntervalMs`: how often the host-mode subscription reconciler ensures cores are subscribed to all known curated CGs.
+   *  - `reconcileIntervalMs`: how often the host-mode subscription reconciler sweeps known curated CGs. With `stripCiphertext` on (the default) it declines them, so no curated CG is hosted in host mode.
    *  - `reconcileBatchSize`: max known CGs reconciled per tick. Default 32.
    *  - `reconcileJitterRatio`: startup interval jitter ratio in [0, 1]. Default 0.15.
    */

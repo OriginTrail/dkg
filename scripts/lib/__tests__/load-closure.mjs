@@ -16,6 +16,8 @@ export const UNFOLLOWED_LOADS = new Map([
     'injected test seam defaults to node:child_process; calls only system /usr/bin/wslpath and /usr/bin/env, while the repository Windows driver is a literal URL also loaded directly by the smoke test'],
   ['scripts/ci/run-chain-rpc-node26.mjs: vitest',
     'the Vitest CLI resolved from packages/chain node_modules, run with the verified process.execPath; not a repository file'],
+  ["scripts/repro/rfc64-catalog-durable-head.mts: resolve(repo, 'node_modules/vitest/vitest.mjs')",
+    'the installed Vitest CLI, not a repository file; the isolated campaign config, worker and fixtures are agent package inputs that select the required agent lane'],
   ['packages/agent/test/sync-native-export-hostile.test.ts: pathToFileURL(`${oldDist}/dkg-agent-cg-resolve.js`).href',
     'an optional user-supplied external frozen 10.0.20 build; compatibility cases always execute the repository historical source fixture, and no repository lane can route the external build'],
   ['packages/agent/src/generic-sql-source.ts: moduleName', 'the optional mssql driver and node:sqlite, neither a repository file'],

@@ -777,12 +777,14 @@ describe('ApiClient', () => {
       globalThis.fetch = fetch;
       await client.query('SELECT * { ?s ?p ?o }', 'my-contextGraph', {
         includeContextGraphPartitions: true,
+        includeSharedMemoryMeta: true,
       });
 
       const body = JSON.parse(calls[0].opts.body as string);
       expect(body.sparql).toBe('SELECT * { ?s ?p ?o }');
       expect(body.contextGraphId).toBe('my-contextGraph');
       expect(body.includeContextGraphPartitions).toBe(true);
+      expect(body.includeSharedMemoryMeta).toBe(true);
     });
 
     // LU-2 (SPEC_CG_MEMORY_MODEL): the legacy participantIdentityIds /
