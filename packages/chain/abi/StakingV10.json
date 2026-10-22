@@ -42,6 +42,28 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "NodeAlreadyInShardingTable",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "NodeBelowMinimumStake",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "NotPositionOwner",
     "type": "error"
@@ -197,6 +219,25 @@
     "inputs": [
       {
         "indexed": true,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "nodeStakeV10",
+        "type": "uint256"
+      }
+    ],
+    "name": "NodeAdmissionDeferred",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
         "internalType": "uint256",
         "name": "tokenId",
         "type": "uint256"
@@ -339,6 +380,19 @@
   {
     "inputs": [
       {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "admitNode",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "address",
         "name": "staker",
         "type": "address"
@@ -418,7 +472,7 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "staker",
+        "name": "",
         "type": "address"
       },
       {
@@ -428,6 +482,19 @@
       }
     ],
     "name": "claim",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "claimFor",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

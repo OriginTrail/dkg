@@ -187,10 +187,10 @@ export function RdfGraph({
   const prevViewConfigRef = useRef(viewConfig);
   useEffect(() => {
     const viz = vizRef.current;
-    if (!viz || !viewConfig || viewConfig === prevViewConfigRef.current) return;
+    if (!viz || viewConfig === prevViewConfigRef.current) return;
     prevViewConfigRef.current = viewConfig;
 
-    viz.applyView(viewConfig);
+    viz.applyView(viewConfig ?? { name: 'Default' });
     viz.refresh();
   }, [viewConfig]);
 

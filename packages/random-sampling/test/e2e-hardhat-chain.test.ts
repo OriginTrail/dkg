@@ -338,10 +338,42 @@ describe('Random Sampling E2E (Hardhat)', () => {
       const challenge = await proverAdapter.getNodeChallenge!(proverIdentityId);
       expect(challenge?.solved).toBe(true);
 
-      // Idempotency: a second tick within the same period sees the
-      // solved flag and short-circuits.
+      const period = await proverAdapter.getActiveProofPeriodStatus!();
+      const duration = period.proofingPeriodDurationInBlocks;
+      if (duration === undefined) {
+        throw new Error('real adapter omitted the live proof-period duration');
+      }
+      const readStatus = proverAdapter.getActiveProofPeriodStatus.bind(proverAdapter);
+      const readChallenge = proverAdapter.getNodeChallenge.bind(proverAdapter);
+      let statusReads = 0;
+      let challengeReads = 0;
+      proverAdapter.getActiveProofPeriodStatus = async () => {
+        statusReads += 1;
+        return readStatus();
+      };
+      proverAdapter.getNodeChallenge = async (identityId) => {
+        challengeReads += 1;
+        return readChallenge(identityId);
+      };
+
+      // The second tick performs the production adapter reads and records the
+      // solved period. The third tick proves the record is reusable: the real
+      // adapter still supplies the binding/head/Chronos guards, while the two
+      // expensive status/challenge reads do not run again.
       const second = await prover.tick();
       expect(second).toEqual({ kind: 'already-solved' });
+      expect({ statusReads, challengeReads }).toEqual({ statusReads: 1, challengeReads: 1 });
+
+      const third = await prover.tick();
+      expect(third).toEqual({ kind: 'already-solved' });
+      expect({ statusReads, challengeReads }).toEqual({ statusReads: 1, challengeReads: 1 });
+
+      // Cross the real contract's proof-period boundary. The cached solved
+      // observation must stop applying, so the next tick performs both reads
+      // again before the contract rotates to a fresh challenge.
+      await createProvider().send('hardhat_mine', [ethers.toQuantity(duration)]);
+      await prover.tick();
+      expect({ statusReads, challengeReads }).toEqual({ statusReads: 2, challengeReads: 2 });
     } finally {
       await prover.close();
       await store.close();

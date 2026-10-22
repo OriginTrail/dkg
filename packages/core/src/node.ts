@@ -35,9 +35,8 @@ import { bootstrap } from '@libp2p/bootstrap';
 import { kadDHT, type KadDHT } from '@libp2p/kad-dht';
 import { gossipsub, type GossipSub } from '@libp2p/gossipsub';
 import { mdns } from '@libp2p/mdns';
-import { identify } from '@libp2p/identify';
+import { identify, identifyPush } from '@libp2p/identify';
 import { ping, type Ping } from '@libp2p/ping';
-import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import { circuitRelayServer } from '@libp2p/circuit-relay-v2';
 import { dcutr } from '@libp2p/dcutr';
 import { autoNAT } from '@libp2p/autonat';
@@ -52,7 +51,10 @@ import { RelayMetricsAdapter, RELAY_V2_STOP_CODEC } from './libp2p-metrics-adapt
 import { readRelayReservations, readConnectionStreams } from './relay-internal-shapes.js';
 import { RelayFlapGuard, buildRelayFlapConnectionGater } from './relay-flap-guard.js';
 import { buildActiveRelayNetworkPolicy } from './relay-network-policy.js';
-import { parseCircuitRelayPeerIds, type RelayedConnectionGater } from './relay-path.js';
+import { buildRelayClientTransport } from './relay-client-transport.js';
+import { NetworkPeerDialPolicy, peerIdFromRelayAddress } from './network-peer-dial-policy.js';
+import { combineConnectionGaters, type SyncConnectionGater } from './connection-gater-combiner.js';
+import { parseCircuitRelayPeerIds } from './relay-path.js';
 import { isPublicLikeAddress } from './network/address-policy.js';
 import type { ConfiguredRelayTarget } from './network/relay-target.js';
 
@@ -413,6 +415,13 @@ export class DKGNode {
    */
   private relayCapacity: number | null = null;
   /**
+   * Transport-level network isolation for the running libp2p instance
+   * (other-network relays + identity-rejected peers). Null when the node has
+   * no `networkIdentity`, runs with `networkPeerIsolation: false`, or is not
+   * started.
+   */
+  private networkPeerDialPolicy: NetworkPeerDialPolicy | null = null;
+  /**
    * AbortController whose signal is wired into long-await sites
    * (currently: `ProtocolRouter.readAll` via `stopSignal` below). PR-6:
    * `stop()` aborts this controller as its FIRST action, before
@@ -746,43 +755,41 @@ export class DKGNode {
       activeNetworkRelayPeerIds,
       { log: (message) => console.warn(`[${new Date().toISOString()}] ${message}`) },
     );
-    const activeRelayDiscoveryFilter = activeRelayNetworkPolicy?.discoveryFilter;
+    // The relay-path policy above only gates `/p2p-circuit` paths. This one
+    // refuses DIRECT dials to peers known to belong to another DKG network
+    // (other bundled networks' relays, peers that failed the identity proof)
+    // and keeps their addresses out of the peer store, so kad-dht, circuit
+    // relay discovery and the reconnect queue cannot keep re-dialing them.
+    // `networkPeerIsolation: false` is the operator kill switch: the node then
+    // keeps exactly the pre-existing gater.
+    const networkPeerDialPolicy = activeNetworkRelayPeerIds && this.config.networkPeerIsolation !== false
+      ? new NetworkPeerDialPolicy({
+          selfPeerId: selfPeerIdEarly.toString(),
+          configuredRelayPeerIds: activeNetworkRelayPeerIds,
+          staticDialExemptionPeerIds: (this.config.staticDialExemptions ?? [])
+            .map(peerIdFromRelayAddress).filter((peerId): peerId is string => peerId !== undefined),
+          otherNetworkRelayPeerIds: (this.config.otherNetworkRelays ?? [])
+            .map((address) => peerIdFromRelayAddress(address))
+            .filter((peerId): peerId is string => peerId !== undefined),
+          log: (message) => console.log(`[${new Date().toISOString()}] ${message}`),
+          warn: (message) => console.warn(`[${new Date().toISOString()}] ${message}`),
+        })
+      : null;
 
     // TCP keepAlive helps prevent idle relay connections from being dropped by
     // middleboxes or remote timeouts (common cause of ECONNRESET).
     const transports: any[] = [
       tcp({ dialOpts: { keepAlive: true } }),
       webSockets(),
-      // STOP stream caps default to 300 in libp2p; on a Core Node holding
-      // 1024+ reservations that's a lower ceiling than maxReservations
-      // implies. Bump the transport-side caps to match the server-side
-      // capacity. Edge nodes keep the upstream defaults (passing
-      // undefined here is the same as omitting the field).
-      //
-      // reservationConcurrency controls how many reservations libp2p will
-      // attempt in parallel on different relays. Default upstream is 1,
-      // which serializes our N pending /p2p-circuit slots and effectively
-      // collapses multi-reservation back to single-reservation. Set to
-      // relayReservationCount so all N slots are attempted concurrently
-      // at startup. Only set on EDGE nodes with relayPeers — core /
-      // relay-server nodes don't multi-reserve through other relays.
-      circuitRelayTransport(
-        relayCaps
-          ? {
-              maxInboundStopStreams: relayCaps.maxInboundStopStreams,
-              maxOutboundStopStreams: relayCaps.maxOutboundStopStreams,
-              ...(activeRelayDiscoveryFilter ? { discoveryFilter: activeRelayDiscoveryFilter } : {}),
-              ...(isEdgeWithRelays
-                ? { reservationConcurrency: relayReservationCount }
-                : {}),
-            }
-          : isEdgeWithRelays
-            ? {
-                reservationConcurrency: relayReservationCount,
-                ...(activeRelayDiscoveryFilter ? { discoveryFilter: activeRelayDiscoveryFilter } : {}),
-              }
-            : undefined,
-      ),
+      // Stop-stream caps, parallel reservations (edges with relayPeers only)
+      // and the relay allowlist are applied in relay-client-transport.ts.
+      buildRelayClientTransport({
+        relayCaps,
+        reservationConcurrency: isEdgeWithRelays ? relayReservationCount : undefined,
+        networkPolicy: activeRelayNetworkPolicy,
+        log: (message) => console.log(`[${new Date().toISOString()}] ${message}`),
+        warn: (message) => console.warn(`[${new Date().toISOString()}] ${message}`),
+      }),
     ];
 
     // Nodes that already know their NAT status skip autoNAT probing:
@@ -800,7 +807,7 @@ export class DKGNode {
       !(usableRelayCandidates.length > 0 || enableRelay);
 
     const services: Record<string, any> = {
-      identify: identify(),
+      identify: identify(), identifyPush: identifyPush(),
       ping: ping(),
       dht: kadDHT(buildKadDHTOptions(
         this.config,
@@ -989,7 +996,10 @@ export class DKGNode {
       streamMuxers: [yamux()],
       peerDiscovery,
       services,
-      connectionGater: this.createRelayConnectionGater(activeRelayNetworkPolicy?.connectionGater),
+      connectionGater: this.createConnectionGater(
+        activeRelayNetworkPolicy?.connectionGater,
+        networkPeerDialPolicy?.connectionGater,
+      ),
       connectionManager: {
         minConnections: 0,
         // Core Nodes scale this with relayServerCapacity (default
@@ -1004,6 +1014,7 @@ export class DKGNode {
       ...(this.relayMetrics ? { metrics: () => this.relayMetrics! } : {}),
     } as any);
     this.stopAbortController = startStopAbortController;
+    this.networkPeerDialPolicy = networkPeerDialPolicy;
 
     this.setupConnectionObservability();
 
@@ -1453,7 +1464,10 @@ export class DKGNode {
     }
   }
 
-  private createRelayConnectionGater(activeRelayGater?: RelayedConnectionGater): ConnectionGater {
+  private createConnectionGater(
+    activeRelayGater?: SyncConnectionGater,
+    networkPeerGater?: SyncConnectionGater,
+  ): ConnectionGater {
     const ts = () => new Date().toISOString();
     // The gater hooks live in a pure builder (relay-flap-guard.ts) so the wiring
     // is unit-tested (relay-flap-guard.test.ts) — a hook arg-shape or plumbing
@@ -1462,14 +1476,11 @@ export class DKGNode {
       this.relayFlapGuard,
       (message) => console.warn(`[${ts()}] ${message}`),
     );
-    return {
-      denyInboundRelayedConnection: (relay, remotePeer) =>
-        activeRelayGater?.denyInboundRelayedConnection(relay, remotePeer) ||
-        flapGater.denyInboundRelayedConnection(relay, remotePeer),
-      denyDialMultiaddr: (multiaddr) =>
-        activeRelayGater?.denyDialMultiaddr(multiaddr) ||
-        flapGater.denyDialMultiaddr(multiaddr),
-    } as ConnectionGater;
+    // Consulted in this order; the first denial wins. The network policies are
+    // absent without a network identity (or with the peer-isolation kill
+    // switch off), so such a node keeps exactly the flap guard's hooks and
+    // libp2p's defaults for the rest, including its store-every-address filter.
+    return combineConnectionGaters([activeRelayGater, networkPeerGater, flapGater]);
   }
 
   /**
@@ -1620,6 +1631,7 @@ export class DKGNode {
     this.relayMetrics = null;
     this.relayCapacity = null;
     this.relayReservationCountTarget = 1;
+    this.networkPeerDialPolicy = null;
     const node = this.node;
     try {
       await node.stop();
@@ -1663,6 +1675,25 @@ export class DKGNode {
       peerId: peerId.toString(),
       addresses: addrs.map((addr) => addr.toString()),
     }));
+  }
+
+  /**
+   * Refuse connections with a peer that failed the network-identity proof, in
+   * both directions, and stop storing its addresses, for `durationMs`: pass the
+   * admission quarantine just applied so the two windows cannot drift (default
+   * 5 min). Call this BEFORE closing the peer's connections: libp2p's reconnect
+   * queue reacts to the disconnect by redialing keep-alive-tagged peers.
+   * Returns false when transport isolation is inactive (not started, no
+   * `networkIdentity`, or `networkPeerIsolation: false`) or the id is this
+   * node's own or unparseable.
+   */
+  denyPeerAfterNetworkMismatch(peerId: string, durationMs?: number): boolean {
+    return this.networkPeerDialPolicy?.denyAfterNetworkMismatch(peerId, durationMs) ?? false;
+  }
+
+  /** Lift a mismatch dial denial once the peer proved it belongs to this network. */
+  clearPeerNetworkMismatchDenial(peerId: string): void {
+    this.networkPeerDialPolicy?.clearNetworkMismatchDenial(peerId);
   }
 
   /**

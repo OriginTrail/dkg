@@ -359,10 +359,12 @@ export function rewriteGraphRoute(
   graphUris: readonly string[],
   fallbackGraphUri: string,
   policy: GraphSetRoutingPolicy,
+  fallbackPolicy: 'compatibility' | 'preserve-scope' = 'compatibility',
 ): GraphScopeRewriteResult {
   if (graphUris.length > 0) {
     const selected = rewriteGraphSet(scope, graphUris, policy);
     if (selected.kind === 'ready') return selected;
+    if (fallbackPolicy === 'preserve-scope' && graphUris.some(graph => graph !== fallbackGraphUri)) return selected;
   }
   return wrapWithGraph(scope, fallbackGraphUri);
 }

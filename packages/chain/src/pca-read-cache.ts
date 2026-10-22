@@ -35,8 +35,9 @@ export class PcaReadCache {
     accountId: bigint,
     extended: boolean,
     load: () => Promise<V10PublishingConvictionAccountInfo | null>,
+    strict = false,
   ): Promise<V10PublishingConvictionAccountInfo | null> {
-    const key = this.accountInfoCacheKey(accountId, extended);
+    const key = this.accountInfoCacheKey(accountId, extended, strict);
     return this.accountInfoCache.getOrLoad(key, key, load);
   }
 
@@ -61,11 +62,10 @@ export class PcaReadCache {
 
   private invalidatePcaAccountInfo(accountId?: bigint): void {
     if (accountId == null || accountId <= 0n) return;
-    for (const key of [
-      this.accountInfoCacheKey(accountId, false),
-      this.accountInfoCacheKey(accountId, true),
-    ]) {
-      this.accountInfoCache.invalidate(key);
+    for (const extended of [false, true]) {
+      for (const strict of [false, true]) {
+        this.accountInfoCache.invalidate(this.accountInfoCacheKey(accountId, extended, strict));
+      }
     }
   }
 
@@ -86,8 +86,8 @@ export class PcaReadCache {
     this.invalidateAllPcaAgents();
   }
 
-  private accountInfoCacheKey(accountId: bigint, extended: boolean): string {
-    return `${accountId.toString()}:${extended ? 'extended' : 'base'}`;
+  private accountInfoCacheKey(accountId: bigint, extended: boolean, strict = false): string {
+    return `${accountId.toString()}:${extended ? 'extended' : 'base'}${strict ? ':strict' : ''}`;
   }
 
   private normalizeAgent(agent: string): { address: string; cacheKey: string } | undefined {

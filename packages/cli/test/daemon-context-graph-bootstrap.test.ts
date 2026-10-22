@@ -113,6 +113,28 @@ describe('configured context graph daemon bootstrap', () => {
     );
   });
 
+  it('subscribes the verified cleartext id for a saved name hash this node already resolved', async () => {
+    const nameHash = '0x6de1d646b47ee4e0a97e330df174332739f6c1419885ebc559e9852be0e143f7';
+    const fixture = createAgent();
+    (fixture.agent as unknown as { resolveContextGraphIdAlias: (id: string) => string | null })
+      .resolveContextGraphIdAlias = (id) => (id === nameHash ? 'acme-fun-facts' : null);
+    const log = vi.fn();
+
+    await bootstrapConfiguredContextGraphs({
+      agent: fixture.agent,
+      configuredContextGraphIds: [nameHash, 'other-cg'],
+      networkDefaultContextGraphIds: [],
+      log,
+    });
+
+    expect(fixture.subscribeToContextGraph).toHaveBeenCalledWith('acme-fun-facts', { syncMode: 'always-on' });
+    expect(fixture.subscribeToContextGraph).toHaveBeenCalledWith('other-cg', { syncMode: 'always-on' });
+    expect(fixture.subscribeToContextGraph).not.toHaveBeenCalledWith(nameHash, expect.anything());
+    expect(log).toHaveBeenCalledWith(
+      `Configured context graph ${nameHash} resolves to "acme-fun-facts" (verified name hash) — subscribing the cleartext id`,
+    );
+  });
+
   it('treats an unknown bare configured graph as a remote metadata target', async () => {
     const fixture = createAgent();
 

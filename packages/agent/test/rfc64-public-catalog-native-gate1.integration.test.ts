@@ -1,58 +1,50 @@
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-
-import { multiaddr } from '@multiformats/multiaddr';
 import {
-  AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
-  AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
-  AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
+  AUTHOR_WALLET,
+  AUTHOR,
+  NETWORK_ID,
+  CONTEXT_GRAPH_ID,
+  KAV10,
+  GOVERNANCE_CONTRACT,
+  POLICY_DIGEST,
+  KA_NUMBER,
+  UAL,
+  SECOND_KA_NUMBER,
+  SECOND_KA_ID,
+  SECOND_UAL,
+  THIRD_KA_NUMBER,
+  DEPLOYMENT,
+  readExactSemanticPairForTest,
+  setTransactionTestVmGeneration,
+  readTransactionTestVmGeneration,
+  alternateRecoveryEncoding,
+  buildRowBundle,
+} from './helpers/native-gate1-fixture-values.js';
+import { createNativeGate1FixtureOwner } from './helpers/native-gate1-fixture.js';
+import {
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
-  DKGNode,
-  ProtocolRouter,
   assertAuthorCatalogRowV1,
-  assertCanonicalGraphScopedAuthorSealV1,
-  buildAuthorAttestationTypedData,
-  canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
   computeAuthorCatalogRowDigestV1,
   computeAuthorCatalogScopeDigestV1,
-  computeAuthorCatalogHeadObjectDigestV1,
-  computeCanonicalGraphScopedAuthorSealDigestV1,
-  computeControlObjectDigestHex,
-  computeKaChunkTreeRootV1,
+  contextGraphWorkspaceGraphUri,
   decodeOpaqueKaBundleV1,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
   deriveAuthorCatalogScopeFromHeadV1,
-  encodeOpaqueKaBundleV1,
   parseCanonicalGraphScopedAuthorSealV1,
   projectCanonicalGraphScopedAuthorSealRowsV1,
   type AuthorCatalogRowV1,
-  type AuthorCatalogScopeV1,
-  type AuthorCatalogHeadV1,
-  type CanonicalGraphScopedAuthorSealV1,
-  type CatalogSealDeploymentProfileV1,
-  type ContextGraphIdV1,
   type ContextGraphPolicyV1,
-  type Digest32V1,
   type EvmAddressV1,
   type NetworkIdV1,
-  type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
-  type SignedAuthorCatalogHeadEnvelopeV1,
   type SignedAuthorCatalogIssuerDelegationEnvelopeV1,
-  type SignedControlEnvelopeV1,
-  type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-
-import {
-  produceEmptyAuthorCatalogGenesisV1,
-  produceSparseAuthorCatalogSuccessorV1,
-} from '../src/rfc64/author-catalog-producer.js';
-import { createRfc64CatalogNativeScopedReadProviderV1 } from '../src/rfc64/catalog-native-scoped-read-provider-v1.js';
-import type { AcceptedRfc64CatalogAccessSnapshotV1 } from '../src/rfc64/catalog-access-policy-v1.js';
+import { produceSparseAuthorCatalogSuccessorV1 } from '../src/rfc64/author-catalog-producer.js';
 import {
   Rfc64PublicCatalogNativeReceiverV1,
   rfc64CatalogSignatureVariantDigestV1,
@@ -61,7 +53,17 @@ import {
   type Rfc64PublicCatalogNativeCommittedHeadTokenV1,
   type Rfc64PublicCatalogNativePrecommitTransactionV1,
 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
-import { readVerifiedAuthorCatalogRowAuthorshipV1 } from '../src/rfc64/catalog-row-authorship.js';
+import {
+  readVerifiedAuthorCatalogRowAuthorshipV1,
+  verifyAuthorCatalogBucketRowAuthorshipsV1,
+} from '../src/rfc64/catalog-row-authorship.js';
+import {
+  acquireRfc64LegacySwmBoundaryReceiverLeaseV1,
+  initializeRfc64LegacySwmBoundaryV1,
+  prepareRfc64LateLegacySwmBoundaryV1,
+  readRfc64LegacySwmBoundaryCountV1,
+  resolveRfc64LegacySwmColdBootstrapOmissionsV1,
+} from '../src/rfc64/legacy-swm-boundary-v1.js';
 import { createRfc64FinalizedVmAgentPrecommitV1 } from '../src/rfc64/finalized-vm-agent-precommit-v1.js';
 import {
   computeRfc64AppliedInventoryDigestV1,
@@ -71,16 +73,8 @@ import {
   RFC64_PUBLIC_CATALOG_EXACT_SET_BUNDLE_BYTES_MAX_V1,
   Rfc64PublicCatalogNativeTransportV1,
 } from '../src/rfc64/public-catalog-native-transport-v1.js';
-import {
-  RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
-  Rfc64PublicCatalogTransportV1,
-  type Rfc64PublicCatalogHeadAnnouncementV1,
-} from '../src/rfc64/public-catalog-transport-v1.js';
-
-import {
-  openRfc64PersistenceV1,
-  type Rfc64PersistenceV1,
-} from '../src/rfc64/persistence-v1.js';
+import { type Rfc64PublicCatalogHeadAnnouncementV1 } from '../src/rfc64/public-catalog-transport-v1.js';
+import { openRfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
 
 function appliedHeadLifecycleV1(
   transaction: Rfc64PublicCatalogNativePrecommitTransactionV1 | null = null,
@@ -95,117 +89,42 @@ function appliedHeadLifecycleV1(
   });
 }
 
-function appliedHeadLifecycleAbortingBeforeCasV1(
+/** Abort only after the actual helper (including flush and its final check) has resolved. */
+function abortAfterAppliedHeadPrecommitV1(
+  receiver: Rfc64PublicCatalogNativeReceiverV1,
   controller: AbortController,
   abortReason: unknown,
-  transaction: Rfc64PublicCatalogNativePrecommitTransactionV1,
-): Readonly<{
-  lifecycle: Rfc64PublicCatalogNativeAppliedHeadLifecycleV1;
-  afterAppliedHeadReadCount: () => number;
-}> {
-  let afterAppliedHeadReadCount = 0;
-  const lifecycle: Rfc64PublicCatalogNativeAppliedHeadLifecycleV1 = Object.freeze({
-    kind: 'rfc64-public-catalog-native-applied-head-lifecycle-v1',
-    transaction,
-    get afterAppliedHead() {
-      afterAppliedHeadReadCount += 1;
-      // The first read is the lifecycle type guard. Returning null makes that
-      // branch short-circuit after one read. The second read assigns the
-      // normalized lifecycle; its microtask runs after runBeforeAppliedHeadCommitV1's
-      // trailing abort check but before the awaiting receiver resumes at CAS.
-      if (afterAppliedHeadReadCount === 2) {
-        queueMicrotask(() => controller.abort(abortReason));
-      }
-      return null;
-    },
-  });
-  return Object.freeze({
-    lifecycle,
-    afterAppliedHeadReadCount: () => afterAppliedHeadReadCount,
+) {
+  const boundary = receiver as unknown as {
+    runBeforeAppliedHeadCommitV1(...args: unknown[]): Promise<unknown>;
+  };
+  const original = boundary.runBeforeAppliedHeadCommitV1.bind(receiver);
+  return vi.spyOn(boundary, 'runBeforeAppliedHeadCommitV1').mockImplementation(async (...args) => {
+    const lifecycle = await original(...args);
+    controller.abort(abortReason);
+    return lifecycle;
   });
 }
 
-const AUTHOR_WALLET = new ethers.Wallet(`0x${'66'.repeat(32)}`);
-const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
-const NETWORK_ID = 'otp:20430' as NetworkIdV1;
-const CONTEXT_GRAPH_ID =
-  '0x1111111111111111111111111111111111111111/native-gate-1' as ContextGraphIdV1;
-const KAV10 = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
-const GOVERNANCE_CONTRACT =
-  '0x5555555555555555555555555555555555555555' as EvmAddressV1;
-const POLICY_DIGEST = `0x${'75'.repeat(32)}` as Digest32V1;
-const MISSING_DELEGATION_DIGEST = `0x${'76'.repeat(32)}` as Digest32V1;
-const KA_NUMBER = 7n;
-const KA_ID = ((BigInt(AUTHOR) << 96n) | KA_NUMBER).toString();
-const UAL = `did:dkg:${NETWORK_ID}/${AUTHOR}/${KA_NUMBER}`;
-const SECOND_KA_NUMBER = 8n;
-const SECOND_KA_ID = ((BigInt(AUTHOR) << 96n) | SECOND_KA_NUMBER).toString();
-const SECOND_UAL = `did:dkg:${NETWORK_ID}/${AUTHOR}/${SECOND_KA_NUMBER}`;
-const THIRD_KA_NUMBER = 9n;
-const PROJECTION =
-  '<https://example.org/alice> <https://schema.org/age> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
-  + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n';
-const ASSERTION_ROOT =
-  '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f' as Digest32V1;
-const UTF8 = new TextEncoder();
-const DEPLOYMENT = Object.freeze({
-  networkId: NETWORK_ID,
-  assertedAtChainId: '20430',
-  assertedAtKav10Address: KAV10,
-}) as CatalogSealDeploymentProfileV1;
-const TRANSACTION_TEST_VM_GRAPH = 'urn:rfc64:test:private-vm-generation';
-const TRANSACTION_TEST_VM_SUBJECT = 'urn:rfc64:test:private-vm-asset';
-const TRANSACTION_TEST_VM_PREDICATE = 'urn:rfc64:test:private-vm-head';
-
-const temporaryDirectories: string[] = [];
-const nodes: DKGNode[] = [];
-const persistences: Rfc64PersistenceV1[] = [];
-const headTransports: Rfc64PublicCatalogTransportV1[] = [];
-const nativeTransports: Rfc64PublicCatalogNativeTransportV1[] = [];
-
-afterEach(async () => {
-  for (const transport of nativeTransports.splice(0)) transport.stop();
-  for (const transport of headTransports.splice(0)) transport.stop();
-  for (const persistence of persistences.splice(0)) {
-    try { await persistence.close(); } catch {}
-  }
-  for (const node of nodes.splice(0)) {
-    try { await node.stop(); } catch {}
-  }
-  await Promise.all(temporaryDirectories.splice(0).map(async (path) => {
-    await rm(path, { recursive: true, force: true });
-  }));
+// Counted pass-through: the receiver and its applied-predecessor load close
+// each catalog bucket once, however many rows it holds (#2812).
+vi.mock('../src/rfc64/catalog-row-authorship.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/rfc64/catalog-row-authorship.js')>();
+  return {
+    ...actual,
+    verifyAuthorCatalogBucketRowAuthorshipsV1: vi.fn(actual.verifyAuthorCatalogBucketRowAuthorshipsV1),
+  };
 });
 
-async function openPersistence(label: string): Promise<{
-  directory: string;
-  persistence: Rfc64PersistenceV1;
-}> {
-  const directory = await mkdtemp(join(tmpdir(), `dkg-rfc64-native-${label}-`));
-  temporaryDirectories.push(directory);
-  const persistence = await openRfc64PersistenceV1(
-    directory,
-    { yieldAfterPurgeBatch: async () => {} },
-  );
-  persistences.push(persistence);
-  return { directory, persistence };
-}
+const bucketClosures = () => vi.mocked(verifyAuthorCatalogBucketRowAuthorshipsV1).mock.calls
+  .map(([input]) => ({
+    bucketDigest: input.catalogBucket.objectDigest,
+    rows: input.catalogBucket.payload.rows.length,
+  }));
 
-async function startNode(): Promise<DKGNode> {
-  const node = new DKGNode({
-    listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
-    enableMdns: false,
-  });
-  nodes.push(node);
-  await node.start();
-  return node;
-}
-
-async function connect(from: DKGNode, to: DKGNode): Promise<void> {
-  const address = to.multiaddrs.find((candidate) => candidate.includes('/tcp/'));
-  if (address === undefined) throw new Error('test node has no TCP multiaddr');
-  await from.libp2p.dial(multiaddr(address));
-}
+const fixtureOwner = createNativeGate1FixtureOwner();
+const { setupLiveReceiver, persistences } = fixtureOwner;
+afterEach(() => fixtureOwner.dispose());
 
 describe('RFC-64 Gate 1 native successor to public SWM', () => {
   it('keeps the pre-cache receiver dependency shape source-compatible', () => {
@@ -271,6 +190,419 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     expect(sealRead).toMatchObject({ type: 'bindings' });
     if (sealRead.type !== 'bindings') throw new Error('stale seal query was not bindings');
     expect(sealRead.bindings).toHaveLength(1);
+  }, 30_000);
+
+  it('preserves a durably marked omitted legacy root graph during cold bootstrap', async () => {
+    const fixture = await setupLiveReceiver();
+    const owner = {};
+    const boundaryRoot = join(fixture.receiverDirectory, 'legacy-boundary');
+    await mkdir(boundaryRoot, { mode: 0o700 });
+    await initializeRfc64LegacySwmBoundaryV1(
+      owner,
+      boundaryRoot,
+      fixture.receiverStore,
+    );
+    const legacyGraph = `${contextGraphWorkspaceGraphUri(CONTEXT_GRAPH_ID)}`
+      + `/${AUTHOR}/${SECOND_KA_NUMBER}`;
+    const companion = prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      SECOND_UAL,
+      'durable-cold-bootstrap-legacy-share',
+      '1',
+    );
+    await fixture.receiverStore.replaceGraphAndSubject!(
+      legacyGraph,
+      [{
+        graph: legacyGraph,
+        subject: 'https://example.org/legacy',
+        predicate: 'https://schema.org/name',
+        object: '"preserved"',
+      }],
+      companion.graphUri,
+      companion.subject,
+      [...companion.quads],
+    );
+    companion.settle(true);
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      fixture.receiverStore,
+      undefined,
+      undefined,
+      undefined,
+      (scope) => resolveRfc64LegacySwmColdBootstrapOmissionsV1(owner, scope),
+    );
+
+    await expect(fixture.synchronize(fixture.announcement, receiver))
+      .resolves.toMatchObject({ inventoryRowCount: 1 });
+    await expect(fixture.receiverStore.hasGraph(legacyGraph)).resolves.toBe(true);
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
+
+    const restartedOwner = {};
+    await initializeRfc64LegacySwmBoundaryV1(
+      restartedOwner,
+      boundaryRoot,
+      fixture.receiverStore,
+    );
+    await expect(resolveRfc64LegacySwmColdBootstrapOmissionsV1(
+      restartedOwner,
+      fixture.scope,
+    )).resolves.toEqual(new Set([legacyGraph]));
+  }, 30_000);
+
+  it('rejects a cold-bootstrap target older than a durable same-UAL late root', async () => {
+    const fixture = await setupLiveReceiver();
+    const owner = {};
+    const boundaryRoot = join(fixture.receiverDirectory, 'legacy-boundary-stale-cold');
+    await mkdir(boundaryRoot, { mode: 0o700 });
+    await initializeRfc64LegacySwmBoundaryV1(owner, boundaryRoot, fixture.receiverStore);
+    const targetGraph = `${contextGraphWorkspaceGraphUri(CONTEXT_GRAPH_ID)}`
+      + `/${AUTHOR}/${KA_NUMBER}`;
+    const companion = prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      UAL,
+      'durable-newer-cold-root',
+      '2',
+    );
+    await fixture.receiverStore.replaceGraphAndSubject!(
+      targetGraph,
+      [{
+        graph: targetGraph,
+        subject: 'urn:test:newer-cold-root',
+        predicate: 'urn:test:version',
+        object: '"2"',
+      }],
+      companion.graphUri,
+      companion.subject,
+      [...companion.quads],
+    );
+    companion.settle(true);
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      fixture.receiverStore,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (scope) => acquireRfc64LegacySwmBoundaryReceiverLeaseV1(owner, scope),
+    );
+
+    await expect(fixture.synchronize(fixture.announcement, receiver))
+      .rejects.toMatchObject({
+        code: 'catalog-native-receiver-history',
+        message: expect.stringContaining('precedes its durable late SWM generation'),
+      });
+    const preserved = await fixture.receiverStore.query(
+      `SELECT ?o WHERE { GRAPH <${targetGraph}> { `
+        + `<urn:test:newer-cold-root> <urn:test:version> ?o } } LIMIT 1`,
+    );
+    expect(preserved).toMatchObject({
+      type: 'bindings',
+      bindings: [{ o: '"2"' }],
+    });
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
+  }, 30_000);
+
+  it('rejects exact-head replay older than a durable same-UAL late root', async () => {
+    const fixture = await setupLiveReceiver();
+    const owner = {};
+    const boundaryRoot = join(fixture.receiverDirectory, 'legacy-boundary-stale-replay');
+    await mkdir(boundaryRoot, { mode: 0o700 });
+    await initializeRfc64LegacySwmBoundaryV1(owner, boundaryRoot, fixture.receiverStore);
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      fixture.receiverStore,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (scope) => acquireRfc64LegacySwmBoundaryReceiverLeaseV1(owner, scope),
+    );
+    await expect(fixture.synchronize(fixture.announcement, receiver))
+      .resolves.toMatchObject({ appliedHeadStatus: 'applied' });
+    const targetGraph = `${contextGraphWorkspaceGraphUri(CONTEXT_GRAPH_ID)}`
+      + `/${AUTHOR}/${KA_NUMBER}`;
+    const companion = prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      UAL,
+      'durable-newer-replay-root',
+      '2',
+    );
+    await fixture.receiverStore.replaceGraphAndSubject!(
+      targetGraph,
+      [{
+        graph: targetGraph,
+        subject: 'urn:test:newer-replay-root',
+        predicate: 'urn:test:version',
+        object: '"2"',
+      }],
+      companion.graphUri,
+      companion.subject,
+      [...companion.quads],
+    );
+    companion.settle(true);
+
+    await expect(fixture.synchronize(fixture.announcement, receiver))
+      .rejects.toMatchObject({
+        code: 'catalog-native-receiver-history',
+        message: expect.stringContaining('precedes its durable late SWM generation'),
+      });
+    const preserved = await fixture.receiverStore.query(
+      `SELECT ?o WHERE { GRAPH <${targetGraph}> { `
+        + `<urn:test:newer-replay-root> <urn:test:version> ?o } } LIMIT 1`,
+    );
+    expect(preserved).toMatchObject({
+      type: 'bindings',
+      bindings: [{ o: '"2"' }],
+    });
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
+  }, 30_000);
+
+  it('admits an equal catalog generation while its receiver lease blocks new prepares', async () => {
+    const fixture = await setupLiveReceiver();
+    const owner = {};
+    const boundaryRoot = join(fixture.receiverDirectory, 'legacy-boundary-equal-race');
+    await mkdir(boundaryRoot, { mode: 0o700 });
+    await initializeRfc64LegacySwmBoundaryV1(owner, boundaryRoot, fixture.receiverStore);
+    const targetGraph = `${contextGraphWorkspaceGraphUri(CONTEXT_GRAPH_ID)}`
+      + `/${AUTHOR}/${KA_NUMBER}`;
+    const companion = prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      UAL,
+      'durable-equal-cold-root',
+      '1',
+    );
+    await fixture.receiverStore.replaceGraphAndSubject!(
+      targetGraph,
+      [{
+        graph: targetGraph,
+        subject: 'urn:test:equal-cold-root',
+        predicate: 'urn:test:version',
+        object: '"1"',
+      }],
+      companion.graphUri,
+      companion.subject,
+      [...companion.quads],
+    );
+    companion.settle(true);
+    let announceLeaseAcquired!: () => void;
+    const leaseAcquired = new Promise<void>((resolve) => { announceLeaseAcquired = resolve; });
+    let allowLeaseReturn!: () => void;
+    const leaseMayReturn = new Promise<void>((resolve) => { allowLeaseReturn = resolve; });
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      fixture.receiverStore,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async (scope) => {
+        const lease = await acquireRfc64LegacySwmBoundaryReceiverLeaseV1(owner, scope);
+        announceLeaseAcquired();
+        await leaseMayReturn;
+        return lease;
+      },
+    );
+    const synchronization = fixture.synchronize(fixture.announcement, receiver);
+    await leaseAcquired;
+    expect(() => prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      UAL,
+      'concurrent-newer-root',
+      '2',
+    )).toThrow(/retirement is in progress/);
+    allowLeaseReturn();
+
+    await expect(synchronization).resolves.toMatchObject({ appliedHeadStatus: 'applied' });
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(0);
+    const immediateNextPreparation = prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      UAL,
+      'immediate-post-receiver-root',
+      '2',
+    );
+    immediateNextPreparation.settle(false);
+  }, 30_000);
+
+  it('keeps an omitted author seal fail-closed when its root graph is allowlisted', async () => {
+    const fixture = await setupLiveReceiver();
+    const decoded = decodeOpaqueKaBundleV1(fixture.secondRowBundle.bundleBytes);
+    const seal = parseCanonicalGraphScopedAuthorSealV1(decoded.sealBytes);
+    const placement = deriveCanonicalGraphScopedAuthorSealPlacementV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      assertionCoordinate: fixture.secondRowBundle.row.assertionCoordinate,
+    });
+    const legacyGraph = `${contextGraphWorkspaceGraphUri(CONTEXT_GRAPH_ID)}`
+      + `/${AUTHOR}/${SECOND_KA_NUMBER}`;
+    await fixture.receiverStore.insert([
+      {
+        subject: 'https://example.org/legacy-with-seal',
+        predicate: 'https://schema.org/name',
+        object: '"preserved"',
+        graph: legacyGraph,
+      },
+      ...projectCanonicalGraphScopedAuthorSealRowsV1(seal, {
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        assertionCoordinate: fixture.secondRowBundle.row.assertionCoordinate,
+      }),
+    ]);
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      fixture.receiverStore,
+      undefined,
+      undefined,
+      undefined,
+      async () => new Set([legacyGraph]),
+    );
+
+    await expect(fixture.synchronize(fixture.announcement, receiver))
+      .rejects.toMatchObject({ code: 'catalog-native-receiver-history' });
+    await expect(fixture.receiverStore.hasGraph(legacyGraph)).resolves.toBe(true);
+    const sealRead = await fixture.receiverStore.query(
+      `SELECT ?p ?o WHERE { GRAPH <${placement.metaGraph}> { `
+        + `<${placement.subject}> ?p ?o } } LIMIT 1`,
+    );
+    expect(sealRead).toMatchObject({ type: 'bindings' });
+    if (sealRead.type !== 'bindings') throw new Error('legacy seal query was not bindings');
+    expect(sealRead.bindings).toHaveLength(1);
+  }, 30_000);
+
+  it('refuses empty cold bootstrap when unmarked root SWM and its seal exist', async () => {
+    const fixture = await setupLiveReceiver();
+    const decoded = decodeOpaqueKaBundleV1(fixture.rowBundle.bundleBytes);
+    const seal = parseCanonicalGraphScopedAuthorSealV1(decoded.sealBytes);
+    const staleGraph = `${contextGraphWorkspaceGraphUri(CONTEXT_GRAPH_ID)}`
+      + `/${AUTHOR}/${KA_NUMBER}`;
+    await fixture.receiverStore.insert([
+      {
+        graph: staleGraph,
+        subject: 'urn:test:unmarked-empty-genesis-root',
+        predicate: 'urn:test:value',
+        object: '"preserved"',
+      },
+      ...projectCanonicalGraphScopedAuthorSealRowsV1(seal, {
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        assertionCoordinate: fixture.rowBundle.row.assertionCoordinate,
+      }),
+    ]);
+
+    await expect(fixture.bootstrap()).rejects.toMatchObject({
+      code: 'catalog-native-receiver-history',
+      message: expect.stringContaining('omitted by the fetched exact head'),
+    });
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toBeNull();
+    await expect(fixture.receiverStore.hasGraph(staleGraph)).resolves.toBe(true);
+  }, 30_000);
+
+  it('allows empty cold bootstrap to preserve a durably marked root omission', async () => {
+    const fixture = await setupLiveReceiver();
+    const owner = {};
+    const boundaryRoot = join(fixture.receiverDirectory, 'legacy-boundary-empty-marked');
+    await mkdir(boundaryRoot, { mode: 0o700 });
+    await initializeRfc64LegacySwmBoundaryV1(owner, boundaryRoot, fixture.receiverStore);
+    const legacyGraph = `${contextGraphWorkspaceGraphUri(CONTEXT_GRAPH_ID)}`
+      + `/${AUTHOR}/${KA_NUMBER}`;
+    const companion = prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      UAL,
+      'durable-empty-genesis-root',
+      '1',
+    );
+    await fixture.receiverStore.replaceGraphAndSubject!(
+      legacyGraph,
+      [{
+        graph: legacyGraph,
+        subject: 'urn:test:marked-empty-genesis-root',
+        predicate: 'urn:test:value',
+        object: '"preserved"',
+      }],
+      companion.graphUri,
+      companion.subject,
+      [...companion.quads],
+    );
+    companion.settle(true);
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      fixture.receiverStore,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (scope) => acquireRfc64LegacySwmBoundaryReceiverLeaseV1(owner, scope),
+    );
+
+    await expect(fixture.bootstrap(fixture.genesisAnnouncement, receiver))
+      .resolves.toMatchObject({ inventoryRowCount: 0, appliedHeadStatus: 'applied' });
+    await expect(fixture.receiverStore.hasGraph(legacyGraph)).resolves.toBe(true);
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
+  }, 30_000);
+
+  it('holds the boundary lease through empty-genesis post-head work', async () => {
+    const fixture = await setupLiveReceiver();
+    const owner = {};
+    const boundaryRoot = join(fixture.receiverDirectory, 'legacy-boundary-empty-race');
+    await mkdir(boundaryRoot, { mode: 0o700 });
+    await initializeRfc64LegacySwmBoundaryV1(owner, boundaryRoot, fixture.receiverStore);
+    let announcePostHead!: () => void;
+    const postHeadEntered = new Promise<void>((resolve) => { announcePostHead = resolve; });
+    let allowPostHead!: () => void;
+    const postHeadMayFinish = new Promise<void>((resolve) => { allowPostHead = resolve; });
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      fixture.receiverStore,
+      async () => appliedHeadLifecycleV1(null, async () => {
+        announcePostHead();
+        await postHeadMayFinish;
+      }),
+      undefined,
+      undefined,
+      undefined,
+      (scope) => acquireRfc64LegacySwmBoundaryReceiverLeaseV1(owner, scope),
+    );
+    const bootstrap = fixture.bootstrap(fixture.genesisAnnouncement, receiver);
+    await postHeadEntered;
+    expect(() => prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      UAL,
+      'concurrent-empty-genesis-root',
+      '1',
+    )).toThrow(/retirement is in progress/);
+    allowPostHead();
+
+    await expect(bootstrap).resolves.toMatchObject({
+      inventoryRowCount: 0,
+      appliedHeadStatus: 'applied',
+    });
   }, 30_000);
 
   it('bootstraps exact empty genesis then activates one successor without manual seeding', async () => {
@@ -456,6 +788,103 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
   }, 30_000);
 
+  // A store may return a typed literal in its own lexical form of the same
+  // value, and that form may be longer than the canonical one the projection
+  // carries. These are the forms a second store engine returned.
+  const postReadStoreReturning = (
+    receiverStore: TripleStore,
+    storedForm: (object: string) => string,
+  ): TripleStore => new Proxy(receiverStore, {
+    get(target, property) {
+      if (property === 'query') {
+        return async (...args: Parameters<TripleStore['query']>) => {
+          const result = await target.query(...args);
+          if (
+            args[1]?.source === 'rfc64-public-catalog-native-post-read'
+            && result.type === 'bindings'
+            && result.bindings.length > 1
+          ) {
+            return {
+              ...result,
+              bindings: result.bindings.map((binding) => ({
+                ...binding,
+                o: storedForm(String(binding.o)),
+              })),
+            };
+          }
+          return result;
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as TripleStore;
+
+  it('accepts an exact projection when the store post-read returns literals in its own lexical form', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    const XSD = 'http://www.w3.org/2001/XMLSchema#';
+    const storeForms = new Map([
+      ['"Alice"', `"Alice"^^<${XSD}string>`],
+      [`"42"^^<${XSD}integer>`, `"42"^^<${XSD}int>`],
+    ]);
+    const returned: string[] = [];
+    const recordedDigests: string[] = [];
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      postReadStoreReturning(fixture.receiverStore, (object) => {
+        const stored = storeForms.get(object) ?? object;
+        returned.push(stored);
+        return stored;
+      }),
+      async (plan) => {
+        recordedDigests.push(...plan.rows.map((row) => row.publicQuadsDigest));
+      },
+    );
+
+    await expect(fixture.synchronize(fixture.announcement, receiver))
+      .resolves.toMatchObject({
+        appliedHeadStatus: 'applied',
+        inventoryRowCount: 1,
+        activatedTripleCount: 2,
+      });
+    // Both rows came back in the other form, and one of them longer than the
+    // projection's own bytes allow.
+    expect([...returned].sort()).toEqual([...storeForms.values()].sort());
+    // The digest kept for the row is the digest of what the store returned.
+    // A later read of this graph, or of its verified copy, is compared with
+    // it, and that read comes back in the store's spelling too.
+    const subject = 'https://example.org/alice';
+    expect(recordedDigests).toEqual([workspacePublicQuadsDigest([
+      { subject, predicate: 'https://schema.org/age', object: `"42"^^<${XSD}int>`, graph: '' },
+      { subject, predicate: 'https://schema.org/name', object: `"Alice"^^<${XSD}string>`, graph: '' },
+    ])]);
+    expect(recordedDigests).not.toEqual([workspacePublicQuadsDigest([
+      { subject, predicate: 'https://schema.org/age', object: `"42"^^<${XSD}integer>`, graph: '' },
+      { subject, predicate: 'https://schema.org/name', object: '"Alice"', graph: '' },
+    ])]);
+  }, 30_000);
+
+  it('rejects a post-read that returns far more bytes than the projection before the applied-head CAS', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    const observed = fixture.createCasObservedReceiver(
+      undefined,
+      postReadStoreReturning(fixture.receiverStore, (object) => (
+        object === '"Alice"' ? `"${'A'.repeat(400)}"` : object
+      )),
+    );
+
+    await expect(fixture.synchronize(fixture.announcement, observed.receiver))
+      .rejects.toMatchObject({
+        code: 'catalog-native-receiver-activation',
+        message: expect.stringContaining('exact SWM post-read failed'),
+      });
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+  }, 30_000);
+
   it('cold-bootstraps a zero-row successor on a fresh receiver', async () => {
     const fixture = await setupLiveReceiver();
 
@@ -510,12 +939,19 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     await fixture.bootstrap();
     await fixture.synchronize();
     const observed = fixture.createCasObservedReceiver();
+    vi.mocked(verifyAuthorCatalogBucketRowAuthorshipsV1).mockClear();
 
     const evidence = await fixture.synchronizeAny(
       fixture.multiAssetAnnouncement,
       observed.receiver,
     );
     if (!('rows' in evidence)) throw new Error('two-row successor returned non-multi evidence');
+    // One closure for the two-row target bucket, one for the applied
+    // predecessor's bucket.
+    expect(bucketClosures()).toEqual([
+      { bucketDigest: fixture.multiAssetSuccessor.bucket?.objectDigest, rows: 2 },
+      { bucketDigest: fixture.successor.bucket?.objectDigest, rows: 1 },
+    ]);
     const expectedRows = [fixture.rowBundle, fixture.secondRowBundle].map((bundle) => ({
       kaId: bundle.row.kaId,
       catalogRowDigest: computeAuthorCatalogRowDigestV1(
@@ -772,12 +1208,18 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     await fixture.synchronize();
     await fixture.synchronizeAny(fixture.multiAssetAnnouncement);
     const observed = fixture.createCasObservedReceiver();
+    vi.mocked(verifyAuthorCatalogBucketRowAuthorshipsV1).mockClear();
 
     const evidence = await fixture.synchronizeAny(
       fixture.removalAnnouncement,
       observed.receiver,
     );
     if (!('catalogRowDigest' in evidence)) throw new Error('one-row removal returned non-one-row evidence');
+    // The two-row applied predecessor is closed once, like the target.
+    expect(bucketClosures()).toEqual([
+      { bucketDigest: fixture.removalSuccessor.bucket?.objectDigest, rows: 1 },
+      { bucketDigest: fixture.multiAssetSuccessor.bucket?.objectDigest, rows: 2 },
+    ]);
     const removedSwmGraph =
       `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${SECOND_KA_NUMBER}`;
     const removedSeal = deriveCanonicalGraphScopedAuthorSealPlacementV1({
@@ -1173,6 +1615,66 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
   }, 30_000);
 
+  it('fetches and stores only authorized rows when the transport mutates its bucket mid-sync', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+    // A custom transport may return a mutable bucket. Swap its second row for
+    // another genuine row of the same author while the first bundle is in
+    // flight: the receiver keeps to the rows it authorized (#2812).
+    const replacement = fixture.thirdRowBundle;
+    let mutableRows: AuthorCatalogRowV1[] | undefined;
+    const fetchCatalogObject: Rfc64PublicCatalogNativeTransportV1['fetchCatalogObject'] =
+      async (...args) => {
+        const fetched = await fixture.receiverObjectFetch(...args);
+        if (fetched === null || !('rows' in fetched.envelope.payload)) return fetched;
+        const envelope = structuredClone(fetched.envelope);
+        mutableRows = (envelope.payload as { rows: AuthorCatalogRowV1[] }).rows;
+        return { envelope, issuerSignature: fetched.issuerSignature };
+      };
+    const fetchKaBundle: Rfc64PublicCatalogNativeTransportV1['fetchKaBundle'] =
+      async (...args) => {
+        if (args[1].blobDigest === replacement.row.transfer.blobDigest) {
+          return replacement.bundleBytes;
+        }
+        const bundle = await fixture.receiverBundleFetch(...args);
+        if (args[1].blobDigest === fixture.rowBundle.row.transfer.blobDigest && mutableRows) {
+          mutableRows[1] = structuredClone(replacement.row);
+        }
+        return bundle;
+      };
+    const putKaBundle = vi.fn(fixture.receiverPersistence.kaBundles.putKaBundle.bind(
+      fixture.receiverPersistence.kaBundles,
+    ));
+    fixture.receiverBundleFetch.mockClear();
+    const observed = fixture.createCasObservedReceiver(
+      { fetchCatalogObject, fetchKaBundle },
+      fixture.receiverStore,
+      { putKaBundle, readKaBundleByDigest: async () => null },
+    );
+
+    // Staging re-derives the mutated bucket's digest and refuses it, so the
+    // sync then fails closed with nothing activated.
+    await expect(fixture.synchronizeAny(
+      fixture.multiAssetAnnouncement,
+      observed.receiver,
+    )).rejects.toMatchObject({ code: 'catalog-native-receiver-catalog' });
+    expect(mutableRows?.[1]?.kaId).toBe(replacement.row.kaId);
+    const authorizedBlobs = [
+      fixture.rowBundle.row.transfer.blobDigest,
+      fixture.secondRowBundle.row.transfer.blobDigest,
+    ];
+    expect(fixture.receiverBundleFetch.mock.calls.map(([, request]) => request.blobDigest))
+      .toEqual(authorizedBlobs);
+    expect(putKaBundle.mock.calls.map(([input]) => input.blobDigest)).toEqual(authorizedBlobs);
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
+  }, 30_000);
+
   it('rejects an over-budget signed exact set before fetching its first bundle', async () => {
     const fixture = await setupLiveReceiver();
     await fixture.bootstrap();
@@ -1414,9 +1916,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     );
     const commit = vi.fn();
     const rollback = vi.fn();
-    const cancellationBoundary = appliedHeadLifecycleAbortingBeforeCasV1(
-      controller,
-      abortReason,
+    const lifecycle = appliedHeadLifecycleV1(
       {
         commit,
         rollback: async (cause) => {
@@ -1434,15 +1934,17 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     }, undefined, undefined, fixture.receiverStore, async (_plan, signal) => {
       expect(signal).toBe(controller.signal);
       await setTransactionTestVmGeneration(fixture.receiverStore, 'target');
-      return cancellationBoundary.lifecycle;
+      return lifecycle;
     });
+
+    const cancellationBoundary = abortAfterAppliedHeadPrecommitV1(receiver, controller, abortReason);
 
     await expect(fixture.bootstrap(
       fixture.genesisAnnouncement,
       receiver,
       controller.signal,
     )).rejects.toBe(abortReason);
-    expect(cancellationBoundary.afterAppliedHeadReadCount()).toBe(2);
+    expect(cancellationBoundary).toHaveBeenCalledOnce();
     expect(controller.signal.reason).toBe(abortReason);
     expect(compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
@@ -1470,9 +1972,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     const commit = vi.fn();
     const rollback = vi.fn();
     let targetWasActiveWhenLifecycleReturned = false;
-    const cancellationBoundary = appliedHeadLifecycleAbortingBeforeCasV1(
-      controller,
-      abortReason,
+    const lifecycle = appliedHeadLifecycleV1(
       {
         commit,
         rollback: async (cause) => {
@@ -1493,15 +1993,17 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       targetWasActiveWhenLifecycleReturned = await fixture.receiverStore.hasGraph(
         `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${KA_NUMBER}`,
       );
-      return cancellationBoundary.lifecycle;
+      return lifecycle;
     });
+
+    const cancellationBoundary = abortAfterAppliedHeadPrecommitV1(receiver, controller, abortReason);
 
     await expect(fixture.synchronize(
       fixture.announcement,
       receiver,
       controller.signal,
     )).rejects.toBe(abortReason);
-    expect(cancellationBoundary.afterAppliedHeadReadCount()).toBe(2);
+    expect(cancellationBoundary).toHaveBeenCalledOnce();
     expect(controller.signal.reason).toBe(abortReason);
     expect(targetWasActiveWhenLifecycleReturned).toBe(true);
     expect(compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
@@ -2397,856 +2899,3 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     )).toBeNull();
   }, 30_000);
 });
-
-async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
-  const [authorNode, receiverNode, authorOpened, receiverOpened] = await Promise.all([
-    startNode(),
-    startNode(),
-    openPersistence('author'),
-    openPersistence('receiver'),
-  ]);
-  const authorPersistence = authorOpened.persistence;
-  const receiverPersistence = receiverOpened.persistence;
-  await connect(receiverNode, authorNode);
-  const receiverStore = new OxigraphStore();
-  const scope = {
-    networkId: NETWORK_ID,
-    contextGraphId: CONTEXT_GRAPH_ID,
-    governanceChainId: null,
-    governanceContractAddress: null,
-    ownershipTransitionDigest: null,
-    subGraphName: null,
-    authorAddress: AUTHOR,
-    era: '0',
-    bucketCount: '1',
-  } as AuthorCatalogScopeV1;
-  const governedScope = Object.freeze({
-    ...scope,
-    governanceChainId: '20430',
-    governanceContractAddress: GOVERNANCE_CONTRACT,
-    ownershipTransitionDigest: `0x${'57'.repeat(32)}` as Digest32V1,
-  }) as AuthorCatalogScopeV1;
-  const signer = {
-    issuer: AUTHOR,
-    signDigest: async (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest),
-  };
-  const catalogIssuerDelegation = await buildDirectCatalogIssuerDelegation();
-  const governedCatalogIssuerDelegation = await buildDirectCatalogIssuerDelegation({
-    scope: governedScope,
-  });
-  const forgedCatalogIssuerDelegation = Object.freeze({
-    ...catalogIssuerDelegation,
-    signature: await new ethers.Wallet(`0x${'78'.repeat(32)}`).signMessage(
-      ethers.getBytes(catalogIssuerDelegation.objectDigest),
-    ),
-  }) as SignedAuthorCatalogIssuerDelegationEnvelopeV1;
-  const crossLaneDelegation = await buildDirectCatalogIssuerDelegation({
-    contextGraphId:
-      '0x1111111111111111111111111111111111111111/native-gate-1-other' as ContextGraphIdV1,
-  });
-  const expiredDelegation = await buildDirectCatalogIssuerDelegation({
-    effectiveAt: '1773890000000',
-    expiresAt: '1773899999999',
-  });
-  const rowBundle = await buildRowBundle(signingWallet);
-  const secondRowBundle = await buildRowBundle(signingWallet, {
-    kaNumber: SECOND_KA_NUMBER,
-    assertionCoordinate: 'gate-2-object',
-  });
-  const thirdRowBundle = await buildRowBundle(signingWallet, {
-    kaNumber: THIRD_KA_NUMBER,
-    assertionCoordinate: 'gate-2-replacement-object',
-  });
-  const genesis = await produceEmptyAuthorCatalogGenesisV1({
-    scope,
-    catalogIssuerDelegationDigest: catalogIssuerDelegation.objectDigest,
-    issuedAt: '1773900000000' as never,
-    signer,
-  });
-  const governedGenesis = await produceEmptyAuthorCatalogGenesisV1({
-    scope: governedScope,
-    catalogIssuerDelegationDigest: governedCatalogIssuerDelegation.objectDigest,
-    issuedAt: '1773900000000' as never,
-    signer,
-  });
-  const scopeDigest = computeAuthorCatalogScopeDigestV1(scope);
-  const successor = await produceSparseAuthorCatalogSuccessorV1({
-    previousHead: genesis.head,
-    previousDirectoryPath: genesis.directoryPath,
-    previousBucket: null,
-    selectedBucketId: '0' as never,
-    nextRows: [rowBundle.row],
-    issuedAt: '1773900001000' as never,
-    signer,
-  });
-  const multiAssetSuccessor = await produceSparseAuthorCatalogSuccessorV1({
-    previousHead: successor.head,
-    previousDirectoryPath: successor.directoryPath,
-    previousBucket: successor.bucket,
-    selectedBucketId: '0' as never,
-    nextRows: [rowBundle.row, secondRowBundle.row],
-    issuedAt: '1773900001002' as never,
-    signer,
-  });
-  const emptySuccessor = await produceSparseAuthorCatalogSuccessorV1({
-    previousHead: successor.head,
-    previousDirectoryPath: successor.directoryPath,
-    previousBucket: successor.bucket,
-    selectedBucketId: '0' as never,
-    nextRows: [],
-    issuedAt: '1773900001001' as never,
-    signer,
-  });
-  const malformedEmptySuccessors = await Promise.all([
-    buildMalformedEmptySuccessor(
-      emptySuccessor.head,
-      emptySuccessor.directoryPath[0]!,
-      { byteLength: '1' },
-    ),
-    buildMalformedEmptySuccessor(
-      emptySuccessor.head,
-      emptySuccessor.directoryPath[0]!,
-      { bucketDigest: `0x${'91'.repeat(32)}` },
-    ),
-  ]);
-  const removalSuccessor = await produceSparseAuthorCatalogSuccessorV1({
-    previousHead: multiAssetSuccessor.head,
-    previousDirectoryPath: multiAssetSuccessor.directoryPath,
-    previousBucket: multiAssetSuccessor.bucket,
-    selectedBucketId: '0' as never,
-    nextRows: [rowBundle.row],
-    issuedAt: '1773900001003' as never,
-    signer,
-  });
-  const threeAssetSuccessor = await produceSparseAuthorCatalogSuccessorV1({
-    previousHead: multiAssetSuccessor.head,
-    previousDirectoryPath: multiAssetSuccessor.directoryPath,
-    previousBucket: multiAssetSuccessor.bucket,
-    selectedBucketId: '0' as never,
-    nextRows: [rowBundle.row, secondRowBundle.row, thirdRowBundle.row],
-    issuedAt: '1773900001004' as never,
-    signer,
-  });
-  const replacementSuccessor = await produceSparseAuthorCatalogSuccessorV1({
-    previousHead: threeAssetSuccessor.head,
-    previousDirectoryPath: threeAssetSuccessor.directoryPath,
-    previousBucket: threeAssetSuccessor.bucket,
-    selectedBucketId: '0' as never,
-    nextRows: [rowBundle.row, thirdRowBundle.row],
-    issuedAt: '1773900001005' as never,
-    signer,
-  });
-  const governedSuccessor = await produceSparseAuthorCatalogSuccessorV1({
-    previousHead: governedGenesis.head,
-    previousDirectoryPath: governedGenesis.directoryPath,
-    previousBucket: null,
-    selectedBucketId: '0' as never,
-    nextRows: [rowBundle.row],
-    issuedAt: '1773900001000' as never,
-    signer,
-  });
-  const competingSuccessor = await produceSparseAuthorCatalogSuccessorV1({
-    previousHead: genesis.head,
-    previousDirectoryPath: genesis.directoryPath,
-    previousBucket: null,
-    selectedBucketId: '0' as never,
-    nextRows: [rowBundle.row],
-    issuedAt: '1773900001001' as never,
-    signer,
-  });
-  const alternateSecondSuccessor = await produceSparseAuthorCatalogSuccessorV1({
-    previousHead: competingSuccessor.head,
-    previousDirectoryPath: competingSuccessor.directoryPath,
-    previousBucket: competingSuccessor.bucket,
-    selectedBucketId: '0' as never,
-    nextRows: [rowBundle.row, secondRowBundle.row],
-    issuedAt: '1773900001006' as never,
-    signer,
-  });
-  const alternateThirdSuccessor = await produceSparseAuthorCatalogSuccessorV1({
-    previousHead: alternateSecondSuccessor.head,
-    previousDirectoryPath: alternateSecondSuccessor.directoryPath,
-    previousBucket: alternateSecondSuccessor.bucket,
-    selectedBucketId: '0' as never,
-    nextRows: [rowBundle.row, secondRowBundle.row, thirdRowBundle.row],
-    issuedAt: '1773900001007' as never,
-    signer,
-  });
-  const crossLaneHead = await rewriteCatalogHeadDelegation(
-    successor.head,
-    crossLaneDelegation.objectDigest,
-  );
-  const expiredHead = await rewriteCatalogHeadDelegation(
-    successor.head,
-    expiredDelegation.objectDigest,
-  );
-  const missingDelegationHead = await rewriteCatalogHeadDelegation(
-    successor.head,
-    MISSING_DELEGATION_DIGEST,
-  );
-  const missingDelegationGenesisHead = await rewriteCatalogHeadDelegation(
-    genesis.head,
-    MISSING_DELEGATION_DIGEST,
-  );
-  const invalidGenesis = await buildInvalidEmptyGenesis(
-    genesis.head,
-    successor.directoryPath[0]!,
-  );
-  const authorEnvelopes: readonly SignedControlEnvelopeV1[] = Object.freeze([
-    catalogIssuerDelegation,
-    governedCatalogIssuerDelegation,
-    crossLaneDelegation,
-    expiredDelegation,
-    ...genesis.stagedObjects,
-    ...governedGenesis.stagedObjects,
-    ...invalidGenesis.stagedObjects,
-    ...successor.stagedObjects,
-    ...emptySuccessor.stagedObjects,
-    ...malformedEmptySuccessors.flatMap(({ stagedObjects }) => stagedObjects),
-    ...multiAssetSuccessor.stagedObjects,
-    ...removalSuccessor.stagedObjects,
-    ...threeAssetSuccessor.stagedObjects,
-    ...replacementSuccessor.stagedObjects,
-    ...governedSuccessor.stagedObjects,
-    ...competingSuccessor.stagedObjects,
-    ...alternateSecondSuccessor.stagedObjects,
-    ...alternateThirdSuccessor.stagedObjects,
-    crossLaneHead,
-    expiredHead,
-    missingDelegationHead,
-    missingDelegationGenesisHead,
-  ]);
-  const authorObjects = new Map<string, SignedControlEnvelopeV1>(
-    authorEnvelopes.map((envelope) => [envelope.objectDigest, envelope]),
-  );
-  const authorObjectRead = vi.fn(async (digest: Digest32V1) =>
-    authorObjects.get(digest) ?? null);
-  const bundleBytesByDigest = new Map<string, Uint8Array>([
-    [rowBundle.row.transfer.blobDigest, rowBundle.bundleBytes],
-    [secondRowBundle.row.transfer.blobDigest, secondRowBundle.bundleBytes],
-    [thirdRowBundle.row.transfer.blobDigest, thirdRowBundle.bundleBytes],
-  ]);
-  const authorBundleRead = vi.fn(async (digest: Digest32V1) =>
-    bundleBytesByDigest.get(digest) ?? null);
-  const verifiedObjects = await Promise.all(
-    authorEnvelopes.map(async (envelope) => ({
-      envelope,
-      issuerSignature: await verifyControlEnvelopeIssuerSignatureV1(envelope),
-    })),
-  );
-  for (let offset = 0; offset < verifiedObjects.length; offset += 16) {
-    await authorPersistence.controlObjects.stageVerifiedObjects(
-      verifiedObjects.slice(offset, offset + 16),
-    );
-  }
-  const receivedAnnouncements: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
-  const openPolicy = async () => Object.freeze({
-    accessPolicy: 0 as const,
-    policyDigest: POLICY_DIGEST,
-  });
-  const acceptedPublicPolicy = (
-    selectedScope: Readonly<AuthorCatalogScopeV1>,
-  ): AcceptedRfc64CatalogAccessSnapshotV1 => Object.freeze({
-    policy: Object.freeze({
-      networkId: selectedScope.networkId,
-      contextGraphId: selectedScope.contextGraphId,
-      governanceChainId: selectedScope.governanceChainId,
-      governanceContractAddress: selectedScope.governanceContractAddress,
-      ownershipTransitionDigest: selectedScope.ownershipTransitionDigest,
-      era: selectedScope.era,
-      version: '0',
-      previousPolicyDigest: null,
-      accessPolicy: 0,
-      publishPolicy: 1,
-      publishAuthority: null,
-      publishAuthorityAccountId: '0',
-      projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
-      administrativeDelegationDigest: null,
-      source: selectedScope.governanceChainId === null
-        ? {
-            kind: 'owner-signed-unregistered',
-            ownerAddress: AUTHOR,
-            ownerAuthorityEra: selectedScope.era,
-          }
-        : {
-            kind: 'finalized-chain',
-            chainId: selectedScope.governanceChainId,
-            contractAddress: selectedScope.governanceContractAddress!,
-            blockNumber: '123',
-            blockHash: `0x${'77'.repeat(32)}` as Digest32V1,
-          },
-      effectiveAt: '1773900000000',
-      issuedAt: '1773900000000',
-    } satisfies ContextGraphPolicyV1),
-    policyDigest: POLICY_DIGEST,
-    roster: null,
-  });
-  const scopedControlObjects = {
-    getVerifiedObjectByDigest: async ({
-      objectDigest,
-      verifyIssuerSignature,
-    }: Parameters<Rfc64PersistenceV1['controlObjects']['getVerifiedObjectByDigest']>[0]) => {
-      const envelope = await authorObjectRead(objectDigest);
-      if (envelope === null) return null;
-      return Object.freeze({
-        envelope,
-        issuerSignature: await verifyIssuerSignature(envelope),
-      });
-    },
-  };
-  const createScopedProvider = (selectedScope: Readonly<AuthorCatalogScopeV1>) =>
-    createRfc64CatalogNativeScopedReadProviderV1({
-      controlObjects: scopedControlObjects,
-      kaBundles: { readKaBundleByDigest: authorBundleRead },
-      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-      resolveAcceptedPolicySnapshot: async () => acceptedPublicPolicy(selectedScope),
-    });
-  const resolveUngovernedScopedRead = createScopedProvider(scope);
-  const resolveGovernedScopedRead = createScopedProvider(governedScope);
-  const governedHeadDigests = new Set([
-    governedGenesis.head.objectDigest,
-    governedSuccessor.head.objectDigest,
-  ]);
-  const resolveScopedReadCapability = async (
-    requestedScope: Parameters<typeof resolveUngovernedScopedRead>[0],
-  ) => (governedHeadDigests.has(requestedScope.catalogHeadObjectDigest)
-    ? resolveGovernedScopedRead(requestedScope)
-    : resolveUngovernedScopedRead(requestedScope));
-  const authorHeadTransport = new Rfc64PublicCatalogTransportV1(
-    new ProtocolRouter(authorNode),
-    {
-      controlObjects: authorPersistence.controlObjects,
-      authorizeOpenCatalogOperation: openPolicy,
-      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-      onCatalogHeadAvailable: async () => {},
-    },
-  );
-  const receiverHeadTransport = new Rfc64PublicCatalogTransportV1(
-    new ProtocolRouter(receiverNode),
-    {
-      controlObjects: receiverPersistence.controlObjects,
-      authorizeOpenCatalogOperation: openPolicy,
-      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-      onCatalogHeadAvailable: async (announcement) => {
-        receivedAnnouncements.push(announcement);
-      },
-    },
-  );
-  const authorNativeTransport = new Rfc64PublicCatalogNativeTransportV1(
-    new ProtocolRouter(authorNode),
-    {
-      readCatalogObjectByDigest: authorObjectRead,
-      readKaBundleByDigest: authorBundleRead,
-      resolveScopedReadCapability,
-      authorizeOpenCatalogOperation: openPolicy,
-      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-    },
-  );
-  const receiverNativeTransport = new Rfc64PublicCatalogNativeTransportV1(
-    new ProtocolRouter(receiverNode),
-    {
-      readCatalogObjectByDigest: async () => null,
-      readKaBundleByDigest: async () => null,
-      authorizeOpenCatalogOperation: openPolicy,
-      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-    },
-  );
-  headTransports.push(authorHeadTransport, receiverHeadTransport);
-  nativeTransports.push(authorNativeTransport, receiverNativeTransport);
-  authorHeadTransport.start();
-  receiverHeadTransport.start();
-  authorNativeTransport.start();
-  receiverNativeTransport.start();
-  const announcementFor = (
-    head: Readonly<SignedAuthorCatalogHeadEnvelopeV1>,
-  ): Readonly<Rfc64PublicCatalogHeadAnnouncementV1> => Object.freeze({
-    kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
-    networkId: head.payload.networkId,
-    contextGraphId: head.payload.contextGraphId,
-    subGraphName: head.payload.subGraphName,
-    authorAddress: head.payload.authorAddress,
-    catalogEra: head.payload.era,
-    policyDigest: POLICY_DIGEST,
-    catalogVersion: head.payload.version,
-    catalogHeadObjectDigest: head.objectDigest,
-    signatureVariantDigest: rfc64CatalogSignatureVariantDigestV1(head),
-  });
-  const announcement = announcementFor(successor.head);
-  const genesisAnnouncement = announcementFor(genesis.head);
-  const multiAssetAnnouncement = announcementFor(multiAssetSuccessor.head);
-  const emptySuccessorAnnouncement = announcementFor(emptySuccessor.head);
-  const malformedEmptySuccessorAnnouncements = malformedEmptySuccessors.map(({ head }) => (
-    announcementFor(head)
-  ));
-  const removalAnnouncement = announcementFor(removalSuccessor.head);
-  const replacementAnnouncement = announcementFor(replacementSuccessor.head);
-  const threeAssetAnnouncement = announcementFor(threeAssetSuccessor.head);
-  const competingAnnouncement = announcementFor(competingSuccessor.head);
-  const alternateThirdAnnouncement = announcementFor(alternateThirdSuccessor.head);
-  const governedGenesisAnnouncement = announcementFor(governedGenesis.head);
-  const governedSuccessorAnnouncement = announcementFor(governedSuccessor.head);
-  const crossLaneAnnouncement = announcementFor(crossLaneHead);
-  const expiredAnnouncement = announcementFor(expiredHead);
-  const missingDelegationAnnouncement = announcementFor(missingDelegationHead);
-  const missingDelegationGenesisAnnouncement = announcementFor(missingDelegationGenesisHead);
-  const invalidGenesisAnnouncement = announcementFor(invalidGenesis.head);
-  await authorHeadTransport.announceCatalogHead(receiverNode.peerId, genesisAnnouncement);
-  await authorHeadTransport.announceCatalogHead(receiverNode.peerId, announcement);
-  expect(receivedAnnouncements).toEqual([genesisAnnouncement, announcement]);
-  const receiverHeadFetch = vi.fn(
-    receiverHeadTransport.fetchCatalogHead.bind(receiverHeadTransport),
-  );
-  const receiverObjectFetch = vi.fn(
-    receiverNativeTransport.fetchCatalogObject.bind(receiverNativeTransport),
-  );
-  const receiverBundleFetch = vi.fn(
-    receiverNativeTransport.fetchKaBundle.bind(receiverNativeTransport),
-  );
-  const createReceiver = (
-    inventory: Pick<
-      Rfc64PersistenceV1['inventory'],
-      'readAppliedCatalogHeadV1' | 'compareAndSwapAppliedCatalogHeadV1'
-    >,
-    controlObjects: Pick<
-      Rfc64PersistenceV1['controlObjects'],
-      'stageVerifiedObjects' | 'getVerifiedObjectByDigest'
-    > & Partial<Pick<
-      Rfc64PersistenceV1['controlObjects'],
-      'getVerifiedObject'
-    >> = receiverPersistence.controlObjects,
-    contentTransport: Pick<
-      Rfc64PublicCatalogNativeTransportV1,
-      'fetchCatalogObject' | 'fetchKaBundle'
-    > = {
-      fetchCatalogObject: receiverObjectFetch,
-      fetchKaBundle: receiverBundleFetch,
-    },
-    store: TripleStore = receiverStore,
-    beforeAppliedHeadCommit?: Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
-    kaBundles: Pick<
-      Rfc64PersistenceV1['kaBundles'],
-      'putKaBundle' | 'readKaBundleByDigest'
-    > =
-      receiverPersistence.kaBundles,
-    verifyIssuerSignature?: typeof verifyControlEnvelopeIssuerSignatureV1,
-  ) => new Rfc64PublicCatalogNativeReceiverV1({
-    headTransport: { fetchCatalogHead: receiverHeadFetch },
-    contentTransport,
-    controlObjects,
-    inventory,
-    kaBundles,
-    store,
-    verifyIssuerSignature,
-    beforeAppliedHeadCommit,
-  });
-  const createCasObservedReceiver = (contentTransport?: Pick<
-    Rfc64PublicCatalogNativeTransportV1,
-    'fetchCatalogObject' | 'fetchKaBundle'
-  >, store: TripleStore = receiverStore, kaBundles: Pick<
-    Rfc64PersistenceV1['kaBundles'],
-    'putKaBundle' | 'readKaBundleByDigest'
-  > | undefined = undefined, getVerifiedObjectByDigest: Rfc64PersistenceV1[
-    'controlObjects'
-  ]['getVerifiedObjectByDigest'] = receiverPersistence.controlObjects
-    .getVerifiedObjectByDigest.bind(receiverPersistence.controlObjects)) => {
-    const compareAndSwapAppliedCatalogHeadV1 = vi.fn(
-      receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1.bind(
-        receiverPersistence.inventory,
-      ),
-    );
-    const stageVerifiedObjects = vi.fn(
-      receiverPersistence.controlObjects.stageVerifiedObjects.bind(
-        receiverPersistence.controlObjects,
-      ),
-    );
-    const selectedKaBundles = kaBundles ?? {
-      putKaBundle: receiverPersistence.kaBundles.putKaBundle.bind(
-        receiverPersistence.kaBundles,
-      ),
-      // Security-path tests alter transport bundles. Keep those tests on the
-      // network path; restart/cache behavior has a separate explicit test.
-      readKaBundleByDigest: vi.fn(async () => null),
-    };
-    return Object.freeze({
-      compareAndSwapAppliedCatalogHeadV1,
-      stageVerifiedObjects,
-      receiver: createReceiver({
-        readAppliedCatalogHeadV1:
-          receiverPersistence.inventory.readAppliedCatalogHeadV1.bind(
-            receiverPersistence.inventory,
-          ),
-        compareAndSwapAppliedCatalogHeadV1,
-      }, {
-        stageVerifiedObjects,
-        getVerifiedObjectByDigest,
-      }, contentTransport, store, undefined, selectedKaBundles),
-    });
-  };
-  const receiver = createReceiver(receiverPersistence.inventory);
-  return {
-    announcement,
-    authorBundleRead,
-    authorObjectRead,
-    authorObjects,
-    alternateThirdAnnouncement,
-    catalogIssuerDelegation,
-    competingAnnouncement,
-    crossLaneAnnouncement,
-    createCasObservedReceiver,
-    createReceiver,
-    expiredAnnouncement,
-    emptySuccessor,
-    emptySuccessorAnnouncement,
-    malformedEmptySuccessorAnnouncements,
-    forgedCatalogIssuerDelegation,
-    genesis,
-    genesisAnnouncement,
-    governedGenesis,
-    governedGenesisAnnouncement,
-    governedScope,
-    governedSuccessor,
-    governedSuccessorAnnouncement,
-    invalidGenesisAnnouncement,
-    receiver,
-    receiverBundleFetch,
-    missingDelegationAnnouncement,
-    missingDelegationGenesisAnnouncement,
-    multiAssetAnnouncement,
-    multiAssetSuccessor,
-    removalAnnouncement,
-    removalSuccessor,
-    replacementAnnouncement,
-    replacementSuccessor,
-    receiverDirectory: receiverOpened.directory,
-    receiverHeadFetch,
-    receiverObjectFetch,
-    receiverPersistence,
-    receiverStore,
-    rowBundle,
-    secondRowBundle,
-    thirdRowBundle,
-    threeAssetAnnouncement,
-    threeAssetSuccessor,
-    scope,
-    scopeDigest,
-    successor,
-    bootstrap: (
-      selectedAnnouncement = genesisAnnouncement,
-      selectedReceiver = receiver,
-      signal?: AbortSignal,
-    ) => selectedReceiver.bootstrapEmptyBoundedPublicRootCatalog(
-      authorNode.peerId,
-      selectedAnnouncement,
-      scope,
-      DEPLOYMENT,
-      signal,
-    ),
-    bootstrapGoverned: (
-      selectedReceiver = receiver,
-      signal?: AbortSignal,
-    ) => selectedReceiver.bootstrapEmptyBoundedPublicRootCatalog(
-      authorNode.peerId,
-      governedGenesisAnnouncement,
-      governedScope,
-      DEPLOYMENT,
-      signal,
-    ),
-    synchronize: (
-      selectedAnnouncement = announcement,
-      selectedReceiver = receiver,
-      signal?: AbortSignal,
-    ) => selectedReceiver.synchronizeOneBoundedPublicRootRow(
-      authorNode.peerId,
-      selectedAnnouncement,
-      scope,
-      DEPLOYMENT,
-      signal,
-    ),
-    synchronizeAny: (
-      selectedAnnouncement = announcement,
-      selectedReceiver = receiver,
-      signal?: AbortSignal,
-    ) => selectedReceiver.synchronizeBoundedPublicRootCatalog(
-      authorNode.peerId,
-      selectedAnnouncement,
-      scope,
-      DEPLOYMENT,
-      signal,
-    ),
-    synchronizeGoverned: (
-      selectedReceiver = receiver,
-      signal?: AbortSignal,
-    ) => selectedReceiver.synchronizeOneBoundedPublicRootRow(
-      authorNode.peerId,
-      governedSuccessorAnnouncement,
-      governedScope,
-      DEPLOYMENT,
-      signal,
-    ),
-  };
-}
-
-async function readExactSemanticPairForTest(
-  store: TripleStore,
-  graph: string,
-  sealMetaGraph: string,
-  sealSubject: string,
-): Promise<{
-  readonly graph: readonly Readonly<Record<string, string>>[];
-  readonly seal: readonly Readonly<Record<string, string>>[];
-}> {
-  const [graphResult, sealResult] = await Promise.all([
-    store.query(
-      `SELECT ?s ?p ?o WHERE { GRAPH <${graph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`,
-    ),
-    store.query(
-      `SELECT ?p ?o WHERE { GRAPH <${sealMetaGraph}> { `
-        + `<${sealSubject}> ?p ?o } } ORDER BY ?p ?o`,
-    ),
-  ]);
-  if (graphResult.type !== 'bindings' || sealResult.type !== 'bindings') {
-    throw new Error('exact semantic pair test read did not return bindings');
-  }
-  return Object.freeze({
-    graph: Object.freeze(graphResult.bindings.map((row) => Object.freeze({ ...row }))),
-    seal: Object.freeze(sealResult.bindings.map((row) => Object.freeze({ ...row }))),
-  });
-}
-
-async function setTransactionTestVmGeneration(
-  store: TripleStore,
-  generation: 'predecessor' | 'target',
-): Promise<void> {
-  if (store.replaceGraph === undefined) {
-    throw new Error('transaction test requires atomic graph replacement');
-  }
-  await store.replaceGraph(TRANSACTION_TEST_VM_GRAPH, [{
-    subject: TRANSACTION_TEST_VM_SUBJECT,
-    predicate: TRANSACTION_TEST_VM_PREDICATE,
-    object: `"${generation}"`,
-    graph: TRANSACTION_TEST_VM_GRAPH,
-  }]);
-}
-
-async function readTransactionTestVmGeneration(
-  store: TripleStore,
-): Promise<'predecessor' | 'target'> {
-  const result = await store.query(
-    `SELECT ?generation WHERE { GRAPH <${TRANSACTION_TEST_VM_GRAPH}> { `
-      + `<${TRANSACTION_TEST_VM_SUBJECT}> <${TRANSACTION_TEST_VM_PREDICATE}> ?generation } }`,
-  );
-  if (result.type !== 'bindings' || result.bindings.length !== 1) {
-    throw new Error('transaction test VM generation is not exact');
-  }
-  const generation = result.bindings[0]?.generation;
-  if (generation === '"predecessor"') return 'predecessor';
-  if (generation === '"target"') return 'target';
-  throw new Error('transaction test VM generation is invalid');
-}
-
-async function buildDirectCatalogIssuerDelegation(options: {
-  readonly scope?: AuthorCatalogScopeV1;
-  readonly contextGraphId?: ContextGraphIdV1;
-  readonly effectiveAt?: string;
-  readonly expiresAt?: string;
-} = {}): Promise<SignedAuthorCatalogIssuerDelegationEnvelopeV1> {
-  const scope = options.scope ?? {
-    networkId: NETWORK_ID,
-    contextGraphId: CONTEXT_GRAPH_ID,
-    governanceChainId: null,
-    governanceContractAddress: null,
-    ownershipTransitionDigest: null,
-    subGraphName: null,
-    authorAddress: AUTHOR,
-    era: '0',
-    bucketCount: '1',
-  } as AuthorCatalogScopeV1;
-  const unsigned = testUnsignedEnvelope(
-    AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
-    {
-      authorAddress: scope.authorAddress,
-      authorAuthorityEvidenceDigest: null,
-      catalogEra: scope.era,
-      catalogIssuerKey: AUTHOR,
-      contextGraphId: options.contextGraphId ?? scope.contextGraphId,
-      effectiveAt: options.effectiveAt ?? '1773899999000',
-      expiresAt: options.expiresAt ?? '1774000000000',
-      governanceChainId: scope.governanceChainId,
-      governanceContractAddress: scope.governanceContractAddress,
-      networkId: scope.networkId,
-      ownershipTransitionDigest: scope.ownershipTransitionDigest,
-      previousDelegationDigest: null,
-      subGraphName: scope.subGraphName,
-    },
-  );
-  return signTestEnvelope(
-    unsigned,
-    computeControlObjectDigestHex(unsigned) as Digest32V1,
-  ) as Promise<SignedAuthorCatalogIssuerDelegationEnvelopeV1>;
-}
-
-async function rewriteCatalogHeadDelegation(
-  sourceHead: SignedAuthorCatalogHeadEnvelopeV1,
-  catalogIssuerDelegationDigest: Digest32V1,
-): Promise<SignedAuthorCatalogHeadEnvelopeV1> {
-  const headPayload = {
-    ...sourceHead.payload,
-    catalogIssuerDelegationDigest,
-  } as AuthorCatalogHeadV1;
-  const unsigned = testUnsignedEnvelope(AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1, headPayload);
-  return signTestEnvelope(
-    unsigned,
-    computeAuthorCatalogHeadObjectDigestV1(unsigned),
-  ) as Promise<SignedAuthorCatalogHeadEnvelopeV1>;
-}
-
-async function buildInvalidEmptyGenesis(
-  sourceHead: SignedAuthorCatalogHeadEnvelopeV1,
-  sourceDirectory: SignedAuthorCatalogDirectoryNodeEnvelopeV1,
-): Promise<{
-  head: SignedAuthorCatalogHeadEnvelopeV1;
-  stagedObjects: readonly SignedControlEnvelopeV1[];
-}> {
-  const headPayload = {
-    ...sourceHead.payload,
-    directoryRootDigest: sourceDirectory.objectDigest,
-  } as AuthorCatalogHeadV1;
-  const headUnsigned = testUnsignedEnvelope(AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1, headPayload);
-  const head = await signTestEnvelope(
-    headUnsigned,
-    computeAuthorCatalogHeadObjectDigestV1(headUnsigned),
-  ) as SignedAuthorCatalogHeadEnvelopeV1;
-  return Object.freeze({ head, stagedObjects: Object.freeze([sourceDirectory, head]) });
-}
-
-async function buildMalformedEmptySuccessor(
-  sourceHead: SignedAuthorCatalogHeadEnvelopeV1,
-  sourceDirectory: SignedAuthorCatalogDirectoryNodeEnvelopeV1,
-  descriptorOverrides: Readonly<Record<string, string>>,
-): Promise<{
-  head: SignedAuthorCatalogHeadEnvelopeV1;
-  stagedObjects: readonly SignedControlEnvelopeV1[];
-}> {
-  const sourceDescriptor = sourceDirectory.payload.entries[0];
-  if (sourceDescriptor === undefined) throw new Error('empty successor descriptor is missing');
-  const directoryUnsigned = testUnsignedEnvelope(
-    AUTHOR_CATALOG_DIRECTORY_NODE_OBJECT_TYPE_V1,
-    {
-      ...sourceDirectory.payload,
-      entries: [{ ...sourceDescriptor, ...descriptorOverrides }],
-    },
-  );
-  // Deliberately bypass the directory-specific encoder: these fixtures prove
-  // the receiver rejects signed but structurally malformed empty descriptors.
-  const directory = await signTestEnvelope(
-    directoryUnsigned,
-    computeControlObjectDigestHex(directoryUnsigned) as Digest32V1,
-  ) as SignedAuthorCatalogDirectoryNodeEnvelopeV1;
-  const headUnsigned = testUnsignedEnvelope(AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1, {
-    ...sourceHead.payload,
-    directoryRootDigest: directory.objectDigest,
-  });
-  const head = await signTestEnvelope(
-    headUnsigned,
-    computeAuthorCatalogHeadObjectDigestV1(headUnsigned),
-  ) as SignedAuthorCatalogHeadEnvelopeV1;
-  return Object.freeze({ head, stagedObjects: Object.freeze([directory, head]) });
-}
-
-function testUnsignedEnvelope(
-  objectType: string,
-  payload: unknown,
-): UnsignedControlEnvelopeV1 {
-  return Object.freeze({
-    issuer: AUTHOR,
-    objectType,
-    payload,
-    signatureEvidence: Object.freeze({ kind: 'none' }),
-    signatureSuite: 'eip191-personal-sign-digest-v1',
-  }) as UnsignedControlEnvelopeV1;
-}
-
-async function signTestEnvelope(
-  unsigned: UnsignedControlEnvelopeV1,
-  objectDigest: Digest32V1,
-): Promise<SignedControlEnvelopeV1> {
-  return Object.freeze({
-    ...unsigned,
-    objectDigest,
-    signature: await AUTHOR_WALLET.signMessage(ethers.getBytes(objectDigest)),
-  }) as SignedControlEnvelopeV1;
-}
-
-function alternateRecoveryEncoding(signature: string): string {
-  const recovery = signature.slice(-2);
-  if (recovery === '1b') return `${signature.slice(0, -2)}00`;
-  if (recovery === '1c') return `${signature.slice(0, -2)}01`;
-  throw new Error('test fixture signature did not use canonical v=27/28 encoding');
-}
-
-async function buildRowBundle(
-  signingWallet: ethers.Wallet = AUTHOR_WALLET,
-  options: {
-    readonly kaNumber?: bigint;
-    readonly assertionCoordinate?: string;
-  } = {},
-): Promise<{ row: AuthorCatalogRowV1; bundleBytes: Uint8Array; kaUal: string }> {
-  const kaNumber = options.kaNumber ?? KA_NUMBER;
-  const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
-  const kaUal = `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`;
-  const typedData = buildAuthorAttestationTypedData({
-    chainId: BigInt(DEPLOYMENT.assertedAtChainId),
-    kav10Address: DEPLOYMENT.assertedAtKav10Address,
-    merkleRoot: ethers.getBytes(ASSERTION_ROOT),
-    authorAddress: AUTHOR,
-    reservedKaId: BigInt(kaId),
-  });
-  const authorSignature = ethers.Signature.from(await signingWallet.signTypedData(
-    typedData.domain,
-    typedData.types,
-    typedData.message,
-  ));
-  const seal = {
-    assertionMerkleRoot: ASSERTION_ROOT,
-    authorAddress: AUTHOR,
-    authorAttestationR: authorSignature.r,
-    authorAttestationVS: authorSignature.yParityAndS,
-    authorSchemeVersion: '1',
-    assertedAtChainId: '20430',
-    assertedAtKav10Address: KAV10,
-    reservedKaId: kaId,
-    assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
-    contentScopeVersion: '2',
-    kaUal,
-    assertionVersion: '1',
-    publicTripleCount: '2',
-    privateTripleCount: '0',
-    privateMerkleRoot: null,
-  } as unknown as CanonicalGraphScopedAuthorSealV1;
-  assertCanonicalGraphScopedAuthorSealV1(seal);
-  const encoded = encodeOpaqueKaBundleV1(
-    UTF8.encode(PROJECTION),
-    canonicalizeCanonicalGraphScopedAuthorSealBytesV1(seal),
-  );
-  const byteLength = BigInt(encoded.bundleBytes.byteLength);
-  const row = {
-    kaId,
-    assertionCoordinate: options.assertionCoordinate ?? 'gate-1-object',
-    assertionVersion: '1',
-    projectionId: 'cg-shared-v1',
-    projectionDigest: encoded.projectionDigest,
-    sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal),
-    transfer: {
-      codec: 'dkg-ka-bundle-v1',
-      projectionId: 'cg-shared-v1',
-      projectionDigest: encoded.projectionDigest,
-      byteLength: byteLength.toString(),
-      chunkSize: '262144',
-      chunkCount: (((byteLength - 1n) / 262_144n) + 1n).toString(),
-      blobDigest: encoded.blobDigest,
-      chunkTreeRoot: computeKaChunkTreeRootV1(encoded.bundleBytes),
-    },
-  } as unknown as AuthorCatalogRowV1;
-  assertAuthorCatalogRowV1(row);
-  return { row, bundleBytes: encoded.bundleBytes, kaUal };
-}

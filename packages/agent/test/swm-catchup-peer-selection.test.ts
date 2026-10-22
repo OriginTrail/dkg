@@ -18,6 +18,46 @@ import {
 } from '../src/sync/shared-memory-diagnostics.js';
 
 describe('SWM catchup peer selection', () => {
+  it('initializes zero counters and retains an explicitly failed peer', () => {
+    for (const failedPeers of [0, 1]) {
+      const result = emptySharedMemorySyncResult(failedPeers);
+      for (const [field, value] of Object.entries(result)) {
+        expect(value, field).toBe(field === 'failedPeers' ? failedPeers : 0);
+      }
+      expect(readSharedMemoryPhaseFailureAttribution(result)).toEqual({
+        localBudget: 0, transport: 0, materialization: 0,
+      });
+    }
+  });
+
+  it('merges same-peer counters without synthesizing snapshot coverage', () => {
+    const prior = emptySharedMemorySyncResult(1);
+    const next = emptySharedMemorySyncResult(1);
+    Object.assign(prior, { insertedTriples: 2, bytesReceived: 3, metadataContinuationYields: 1 });
+    Object.assign(next, { insertedTriples: 5, bytesReceived: 7, resolvedMetadataContinuationYields: 1 });
+    recordSharedMemoryPhaseFailure(prior, 'local-budget');
+    recordSharedMemoryPhaseFailure(next, 'materialization', 2);
+    const coverage = {
+      contextGraphId: 'cg', peerIdSuffix: 'authority', snapshotsResolved: 1,
+      snapshotsTotal: 2, manifestComplete: false, missingCount: 1,
+      missingSample: ['root'], materializationFailures: 0, fromAuthority: true,
+    };
+    prior.swmCoverage = coverage;
+    next.swmCoverage = { ...coverage, fromAuthority: false, snapshotsResolved: 9,
+      snapshotsTotal: 10, manifestComplete: true };
+    for (const result of [mergeSamePeerSharedMemoryDiagnostics(prior, next),
+      mergeSamePeerSharedMemoryDiagnostics(next, prior)]) {
+      expect(result).toMatchObject({ insertedTriples: 7, bytesReceived: 10,
+        failedPeers: 1, failedPhases: 3, localYieldFailedPhases: 1,
+        metadataContinuationYields: 1, resolvedMetadataContinuationYields: 1 });
+      expect(result.swmCoverage).toBe(coverage);
+      expect(readSharedMemoryPhaseFailureAttribution({ ...result })).toEqual({
+        localBudget: 1, transport: 0, materialization: 2,
+      });
+      expect(JSON.stringify(result)).not.toContain('shared-memory-phase-failure-attribution');
+    }
+  });
+
   it.each([
     ['same peer', mergeSamePeerSharedMemoryDiagnostics],
     ['fleet', mergeFleetSharedMemoryDiagnostics],

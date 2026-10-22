@@ -4,9 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import {
+  GitHubApiError,
   inspectCiPolicyFreshness,
   inspectCiPolicyProtections,
   parseCiPolicyArguments,
@@ -24,9 +24,8 @@ import {
   rulesetIdsRequiringDetails,
   TESTNET_CANARY_ROLLOUT_POLICY,
 } from '../../ci/validate-delta-rollout-ruleset.mjs';
+import { REPO_ROOT, TRUSTED_CI_CONTROLLER_SHA } from './ci-plan-fixtures.mjs';
 
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
-const CONTROLLER_SHA = '780f14aa60c39bdca788967121085c3c0d82d85c';
 
 function rulesetDetail(id, overrides = {}) {
   return {
@@ -55,7 +54,7 @@ function evaluateDeltaRules(rules, rulesets = rulesetDetailsFor(rules)) {
 }
 
 function controllerCheckout({
-  ref = CONTROLLER_SHA,
+  ref = TRUSTED_CI_CONTROLLER_SHA,
   repository = TESTNET_CANARY_ROLLOUT_POLICY.repository,
   uses = 'actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0',
   quotedPath = false,
@@ -117,7 +116,7 @@ test('controller validation models quoted and id-first YAML and ignores unrelate
       planCheckout: controllerCheckout({ quotedPath: true, idFirst: true }),
     }),
   }]);
-  assert.equal(result.ref, CONTROLLER_SHA);
+  assert.equal(result.ref, TRUSTED_CI_CONTROLLER_SHA);
   assert.equal(result.checkouts.length, 2);
 
   const reordered = validateTrustedControllerPins([{
@@ -126,7 +125,7 @@ test('controller validation models quoted and id-first YAML and ignores unrelate
       planCheckout: controllerCheckout({ controllerFiles: [...CONTROLLER_POLICY_FILES].reverse() }),
     }),
   }]);
-  assert.equal(reordered.ref, CONTROLLER_SHA, 'manifest membership must not impose file ordering');
+  assert.equal(reordered.ref, TRUSTED_CI_CONTROLLER_SHA, 'manifest membership must not impose file ordering');
 });
 
 test('controller validation rejects missing, inconsistent, fake, and over-broad checkouts', () => {
@@ -197,7 +196,7 @@ test('controller validation rejects missing, inconsistent, fake, and over-broad 
   );
 });
 
-test('repository workflows expose one canonical protected-history controller pin', () => {
+test('repository workflows expose one canonical controller pin', () => {
   const result = validateTrustedControllerPins([
     {
       sourceName: 'ci.yml',
@@ -208,10 +207,16 @@ test('repository workflows expose one canonical protected-history controller pin
       source: fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/evm-integration.yml'), 'utf8'),
     },
   ]);
-  assert.equal(result.ref, CONTROLLER_SHA);
+  assert.equal(result.ref, TRUSTED_CI_CONTROLLER_SHA);
   assert.equal(result.checkouts.length, 4);
-  assert.ok(CONTROLLER_POLICY_FILES.includes('scripts/ci/plan-ci.mjs'));
-  assert.equal(CONTROLLER_POLICY_FILES.length, 4);
+  // The security-reviewed controller boundary, file by file.
+  assert.deepEqual([...CONTROLLER_POLICY_FILES].sort(), [
+    'scripts/ci/assert-ci-results.mjs',
+    'scripts/ci/plan-ci.mjs',
+    'scripts/lib/ci-delta.mjs',
+    'scripts/lib/ci-results.mjs',
+    'scripts/lib/ci-routing.mjs',
+  ]);
   assert.equal(CONTROLLER_POLICY_FILES.includes('scripts/ci/inspect-ci-policy.mjs'), false);
   assert.equal(
     CONTROLLER_POLICY_FILES.includes('scripts/ci/enforce-zizmor-sarif.mjs'),
@@ -378,6 +383,57 @@ test('protection inspection excludes controller freshness acquisition', async ()
     requestedEndpoints.filter((endpoint) => endpoint.includes('/rulesets/')).sort(),
     ['repos/OriginTrail/dkg/rulesets/1', 'repos/OriginTrail/dkg/rulesets/2'],
   );
+
+  // A controller file the pin predates is reported as drift, not an error;
+  // any other failure still errors the check.
+  const [addedLater] = CONTROLLER_POLICY_FILES.slice(-1);
+  const pinnedRef = `ref=${encodeURIComponent(inspection.controller.pin)}`;
+  const withNewFile = await inspectCiPolicyFreshness({
+    inspection,
+    token: 'test-token',
+    requestJson: async (endpoint, token) => {
+      if (endpoint.includes(`/contents/${addedLater}?${pinnedRef}`)) {
+        throw new GitHubApiError(endpoint, 404);
+      }
+      return requestJson(endpoint, token);
+    },
+  });
+  assert.equal(withNewFile.checks.freshness.status, 'fail');
+  assert.deepEqual(withNewFile.checks.freshness.details.driftedFiles, [addedLater]);
+  const unreachable = await inspectCiPolicyFreshness({
+    inspection,
+    token: 'test-token',
+    requestJson: async (endpoint, token) => {
+      if (endpoint.includes('/contents/')) throw new GitHubApiError(endpoint, 500);
+      return requestJson(endpoint, token);
+    },
+  });
+  assert.equal(unreachable.checks.freshness.status, 'error');
+  const lookalike = await inspectCiPolicyFreshness({
+    inspection,
+    token: 'test-token',
+    requestJson: async (endpoint, token) => {
+      if (endpoint.includes(`/contents/${addedLater}?${pinnedRef}`)) throw Object.assign(new Error('not an API response'), { status: 404 });
+      return requestJson(endpoint, token);
+    },
+  });
+  assert.equal(lookalike.checks.freshness.status, 'error', 'only a GitHub API 404 means the file is missing');
+  // The same drift through the real request helper and GitHub's own 404.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const endpoint = String(url).replace('https://api.github.com/', '');
+    if (endpoint.includes(`/contents/${addedLater}?${pinnedRef}`)) {
+      return new Response('{"message":"Not Found"}', { status: 404 });
+    }
+    return new Response(JSON.stringify(await requestJson(endpoint)), { status: 200 });
+  };
+  try {
+    const throughFetch = await inspectCiPolicyFreshness({ inspection, token: 'test-token' });
+    assert.equal(throughFetch.checks.freshness.status, 'fail');
+    assert.deepEqual(throughFetch.checks.freshness.details.driftedFiles, [addedLater]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 test('effective policy inspection reads every rules page and rejects malformed pages', async () => {
@@ -524,7 +580,7 @@ test('policy report renderer owns clean, drift, safeguard, and acquisition statu
     version: 2,
     policy: TESTNET_CANARY_ROLLOUT_POLICY,
     controller: {
-      pin: CONTROLLER_SHA,
+      pin: TRUSTED_CI_CONTROLLER_SHA,
       protectedBranches: ['main', 'testnet-canary'],
       freshnessBranch: 'testnet-canary',
     },

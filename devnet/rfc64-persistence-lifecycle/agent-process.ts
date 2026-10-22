@@ -112,6 +112,7 @@ const agent = await DKGAgent.create({
   store: new OxigraphStore(),
   syncSharedMemoryOnConnect: false,
   syncReconcilerEnabled: false,
+  vmReconcilerEnabled: false,
   syncOnConnectEnabled: false,
   durableSyncEnabled: false,
   agentProfileHeartbeatMs: 0,

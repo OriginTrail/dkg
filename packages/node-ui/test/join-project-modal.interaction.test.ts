@@ -22,6 +22,11 @@ const {
   connectToPeerIdWithTimeoutMock: vi.fn(),
 }));
 
+vi.mock('../src/ui/api-wrapper.js', () => ({ api: {
+  fetchContextGraphs: (options?: { fresh?: boolean }) => fetchContextGraphsMock(options),
+  fetchCurrentAgent: () => fetchCurrentAgentMock(),
+} }));
+
 vi.mock('../src/ui/api.js', async () => {
   const actual = await vi.importActual<any>('../src/ui/api.js');
   return {
@@ -53,6 +58,7 @@ describe('JoinProjectModal public subscription interaction', () => {
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     document.body.innerHTML = '';
     vi.clearAllMocks();
+    fetchCurrentAgentMock.mockResolvedValue({ agentDid: 'did:dkg:agent:viewer', peerId: 'viewer' });
     (globalThis as any).EventSource = class {
       constructor(_url: string) {}
       addEventListener() {}
@@ -73,6 +79,7 @@ describe('JoinProjectModal public subscription interaction', () => {
         subscribed: true,
         synced: false,
       }],
+      inventoryError: 'earlier inventory failure',
       loading: false,
       activeProjectId: null,
     });
@@ -152,7 +159,9 @@ describe('JoinProjectModal public subscription interaction', () => {
     expect(subscribeToContextGraphMock).toHaveBeenCalledWith('open-project', {
       syncMode: 'on-demand',
     });
-    expect(fetchContextGraphsMock).toHaveBeenCalled();
+    expect(fetchContextGraphsMock).toHaveBeenCalledWith({ fresh: true });
+    expect(useProjectsStore.getState().inventoryError).toBeNull();
+    expect(useProjectsStore.getState().loading).toBe(false);
     expect(signJoinRequestMock).not.toHaveBeenCalled();
     expect(submitJoinRequestMock).not.toHaveBeenCalled();
     expect(useProjectsStore.getState().activeProjectId).toBe('open-project');

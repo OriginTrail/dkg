@@ -25,6 +25,8 @@ import {
   assertAuthorCatalogHeadScopeBindingV1,
   assertAuthorCatalogScopeV1,
   assertAuthorCatalogBucketScopeBindingV1,
+  assertCanonicalDecimalU64,
+  assertCanonicalDeterministicUalV1,
   assertAuthorCatalogDirectoryNodeScopeBindingV1,
   assertCanonicalChainId,
   assertNetworkIdV1,
@@ -32,11 +34,11 @@ import {
   assertSignedAuthorCatalogDirectoryNodeEnvelopeV1,
   assertSignedAuthorCatalogHeadEnvelopeV1,
   assertSignedAuthorCatalogIssuerDelegationEnvelopeV1,
+  buildCatalogAssertionScopeV1,
   canonicalizeAuthorCatalogBucketPayloadBytesV1,
   canonicalizeAuthorSealStoreRoundTripRowV1,
   computeAuthorCatalogScopeDigestV1,
   computeControlSignatureVariantDigestHex,
-  contextGraphMetaUri,
   contextGraphWorkspaceGraphUri,
   deriveAuthorCatalogScopeFromHeadV1,
   readVerifiedCatalogSealBindingV1,
@@ -67,11 +69,9 @@ import {
   type VerifiedControlEnvelopeIssuerSignatureV1,
 } from '@origintrail-official/dkg-chain';
 import {
-  quadToNQuad,
   quadsToNQuads,
   readExactGraphPaged,
   tryReplaceGraphAndSubjectAtomically,
-  type Quad,
   type TripleStore,
   invalidateSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
@@ -86,7 +86,7 @@ export type { Rfc64PublicCatalogNativeCommittedHeadTokenV1 } from
 import { assertRfc64ExactIssuerSignatureProofV1 } from './catalog-transport-wire-v1-internal.js';
 import {
   readVerifiedAuthorCatalogRowAuthorshipV1,
-  verifyAuthorCatalogRowAuthorshipV1,
+  verifyAuthorCatalogBucketRowAuthorshipsV1,
   type VerifiedAuthorCatalogRowAuthorshipV1,
   type VerifiedAuthorCatalogRowAuthorshipSnapshotV1,
 } from './catalog-row-authorship.js';
@@ -122,6 +122,7 @@ import {
   failRfc64PublicCatalogNativeV1 as fail,
   Rfc64PublicCatalogNativeReceiverErrorV1,
 } from './public-catalog-native-errors-v1.js';
+import { projectionReadBackByteLimitV1, readBackHoldsProjectionV1 } from './projection-store-read-back-v1.js';
 import {
   deactivateRfc64CatalogOwnedProjectionV1 as deactivateExactOwnedPublicProjection,
   deriveRfc64PublicSwmGraphV1 as derivePublicSwmGraph,
@@ -155,14 +156,19 @@ const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 type Rfc64BoundedSuccessorTargetV1 =
   | Readonly<{
     kind: 'empty';
-    rows: readonly [];
   }>
   | Readonly<{
     kind: 'bucket';
-    rows: readonly AuthorCatalogRowV1[];
     bucket: SignedAuthorCatalogBucketEnvelopeV1;
     fetchedBucket: FetchedRfc64PublicCatalogObjectV1;
   }>;
+
+/** A catalog row as authorized: the verifier's frozen snapshot and its capability. */
+interface AuthorizedCatalogRowV1 {
+  readonly row: Readonly<AuthorCatalogRowV1>;
+  readonly authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
+  readonly authorshipCapability: VerifiedAuthorCatalogRowAuthorshipV1;
+}
 
 export interface Rfc64PublicCatalogNativeReceiverOptionsV1<
   TPostHeadExtension extends object = Rfc64PublicCatalogNativePostHeadExtensionV1,
@@ -198,6 +204,41 @@ export interface Rfc64PublicCatalogNativeReceiverOptionsV1<
    */
   readonly beforeAppliedHeadCommit?:
     Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1<TPostHeadExtension>;
+  /**
+   * Durable local proof for root SWM graphs predating catalog ownership. The
+   * receiver preserves authorized omissions read-only; it never uses this
+   * capability for author-seal omissions.
+   */
+  readonly resolveColdBootstrapLegacySwmGraphAllowlist?: (
+    scope: Readonly<AuthorCatalogScopeV1>,
+  ) => Promise<ReadonlySet<string>>;
+  /**
+   * Durable root-boundary evidence used for every history disposition. A
+   * catalog target may never replace a newer same-UAL late generation.
+   */
+  readonly resolveLegacySwmBoundaryEvidence?: (
+    scope: Readonly<AuthorCatalogScopeV1>,
+  ) => Promise<Readonly<{
+    graphAllowlist: ReadonlySet<string>;
+    lateAssertionVersionByKaUal: ReadonlyMap<string, string>;
+  }>>;
+  /**
+   * Serialized boundary lease held from durable evidence through semantic
+   * activation, applied-head finalization, and exact marker retirement.
+   */
+  readonly acquireLegacySwmBoundaryLease?: (
+    scope: Readonly<AuthorCatalogScopeV1>,
+  ) => Promise<Readonly<{
+    evidence: Readonly<{
+      graphAllowlist: ReadonlySet<string>;
+      lateAssertionVersionByKaUal: ReadonlyMap<string, string>;
+    }>;
+    retireAppliedAssets: (assets: readonly Readonly<{
+      kaUal: string;
+      assertionVersion: string;
+    }>[]) => Promise<void>;
+    release: () => void;
+  }>>;
   readonly transportTimeoutMs?: number;
 }
 
@@ -392,6 +433,18 @@ export class Rfc64PublicCatalogNativeReceiverV1<
         options.beforeAppliedHeadCommit !== undefined
         && typeof options.beforeAppliedHeadCommit !== 'function'
       )
+      || (
+        options.resolveColdBootstrapLegacySwmGraphAllowlist !== undefined
+        && typeof options.resolveColdBootstrapLegacySwmGraphAllowlist !== 'function'
+      )
+      || (
+        options.resolveLegacySwmBoundaryEvidence !== undefined
+        && typeof options.resolveLegacySwmBoundaryEvidence !== 'function'
+      )
+      || (
+        options.acquireLegacySwmBoundaryLease !== undefined
+        && typeof options.acquireLegacySwmBoundaryLease !== 'function'
+      )
     ) {
       fail('catalog-native-receiver-input', 'receiver dependencies are incomplete');
     }
@@ -451,6 +504,9 @@ export class Rfc64PublicCatalogNativeReceiverV1<
           throw new TypeError('catalog applied-head precommit returned an invalid lifecycle');
         }
       }
+      // Persist activated SWM and precommit VM writes before SQLite commits the head.
+      // Decorators forward flush; HTTP stores acknowledge writes at their backend.
+      await this.options.store.flush?.({ signal: precommitSignal });
       throwIfAborted(precommitSignal);
       return Object.freeze({ transaction, afterAppliedHead });
     } catch (cause) {
@@ -714,82 +770,99 @@ export class Rfc64PublicCatalogNativeReceiverV1<
       fail('catalog-native-receiver-catalog', 'verified genesis objects could not be staged', cause);
     }
 
-    const precommitLifecycle = await this.runBeforeAppliedHeadCommitV1(
-      Object.freeze({
-        catalogScope: trustedCatalogScope,
-        policyDigest: announcement.policyDigest,
-        catalogHeadDigest: head.objectDigest as Digest32V1,
-        inventoryDigest,
-        rows: Object.freeze([]),
-      }),
-      signal,
-      'catalog applied-head precommit rejected the exact empty inventory',
+    const legacySwmBoundaryLease = await acquireLegacySwmBoundaryReceiverLeaseV1(
+      trustedCatalogScope,
+      this.options.acquireLegacySwmBoundaryLease,
+      this.options.resolveLegacySwmBoundaryEvidence,
+      this.options.resolveColdBootstrapLegacySwmGraphAllowlist,
     );
-
-    let appliedHeadStatus: 'applied' | 'existing';
     try {
-      if (replay) {
-        appliedHeadStatus = 'existing';
-      } else {
-        try {
-          throwIfAborted(signal);
-          appliedHeadStatus = this.options.inventory.compareAndSwapAppliedCatalogHeadV1({
-            catalogScopeDigest,
-            authorAddress: head.payload.authorAddress,
-            expectedCurrentCatalogHeadDigest: null,
-            currentCatalogHeadDigest: head.objectDigest as Digest32V1,
-            appliedInventoryDigest: inventoryDigest,
-            catalogVersion: head.payload.version,
-            inventoryRowCount: '0' as never,
-          }).status;
-        } catch (cause) {
-          if (signal?.aborted && cause === signal.reason) throw cause;
-          const reconciled = this.options.inventory.readAppliedCatalogHeadV1(
-            catalogScopeDigest,
-            head.payload.authorAddress,
-          );
-          if (!isExactEmptyGenesisSnapshot(reconciled, head, inventoryDigest)) {
-            fail(
-              'catalog-native-receiver-history',
-              'genesis applied-head CAS lost to a different durable history',
-              cause,
-            );
-          }
-          appliedHeadStatus = 'existing';
-        }
-      }
-      const postRead = this.options.inventory.readAppliedCatalogHeadV1(
-        catalogScopeDigest,
-        head.payload.authorAddress,
+      await assertColdBootstrapHasNoOmittedSemanticStateV1(
+        this.options.store,
+        trustedCatalogScope,
+        [],
+        async () => legacySwmBoundaryLease.evidence.graphAllowlist,
       );
-      if (!isExactEmptyGenesisSnapshot(postRead, head, inventoryDigest)) {
-        fail(
-          'catalog-native-receiver-history',
-          'empty genesis durable post-read differs in head, digest, version, or row count',
+      const precommitLifecycle = await this.runBeforeAppliedHeadCommitV1(
+        Object.freeze({
+          catalogScope: trustedCatalogScope,
+          policyDigest: announcement.policyDigest,
+          catalogHeadDigest: head.objectDigest as Digest32V1,
+          inventoryDigest,
+          rows: Object.freeze([]),
+        }),
+        signal,
+        'catalog applied-head precommit rejected the exact empty inventory',
+      );
+
+      let appliedHeadStatus: 'applied' | 'existing';
+      try {
+        if (replay) {
+          appliedHeadStatus = 'existing';
+        } else {
+          try {
+            throwIfAborted(signal);
+            appliedHeadStatus = this.options.inventory.compareAndSwapAppliedCatalogHeadV1({
+              catalogScopeDigest,
+              authorAddress: head.payload.authorAddress,
+              expectedCurrentCatalogHeadDigest: null,
+              currentCatalogHeadDigest: head.objectDigest as Digest32V1,
+              appliedInventoryDigest: inventoryDigest,
+              catalogVersion: head.payload.version,
+              inventoryRowCount: '0' as never,
+            }).status;
+          } catch (cause) {
+            if (signal?.aborted && cause === signal.reason) throw cause;
+            const reconciled = this.options.inventory.readAppliedCatalogHeadV1(
+              catalogScopeDigest,
+              head.payload.authorAddress,
+            );
+            if (!isExactEmptyGenesisSnapshot(reconciled, head, inventoryDigest)) {
+              fail(
+                'catalog-native-receiver-history',
+                'genesis applied-head CAS lost to a different durable history',
+                cause,
+              );
+            }
+            appliedHeadStatus = 'existing';
+          }
+        }
+        const postRead = this.options.inventory.readAppliedCatalogHeadV1(
+          catalogScopeDigest,
+          head.payload.authorAddress,
         );
+        if (!isExactEmptyGenesisSnapshot(postRead, head, inventoryDigest)) {
+          fail(
+            'catalog-native-receiver-history',
+            'empty genesis durable post-read differs in head, digest, version, or row count',
+          );
+        }
+      } catch (cause) {
+        await this.rollbackAppliedHeadPrecommitV1(precommitLifecycle.transaction, cause);
+        throw cause;
       }
-    } catch (cause) {
-      await this.rollbackAppliedHeadPrecommitV1(precommitLifecycle.transaction, cause);
-      throw cause;
+      await precommitLifecycle.transaction?.commit();
+      const afterAppliedHeadEvidence = await precommitLifecycle.afterAppliedHead?.(
+        committedHeadTokenV1(
+        head.objectDigest as Digest32V1,
+        inventoryDigest,
+        ),
+      );
+      await legacySwmBoundaryLease.retireAppliedAssets([]);
+      return Object.freeze({
+        inventoryDigest,
+        catalogHeadDigest: head.objectDigest as Digest32V1,
+        inventoryRowCount: 0 as const,
+        activatedTripleCount: 0 as const,
+        stagedObjectCount: 3 as const,
+        appliedHeadStatus,
+        ...(afterAppliedHeadEvidence === undefined
+          ? {}
+          : { postAppliedHeadExtension: afterAppliedHeadEvidence }),
+      });
+    } finally {
+      legacySwmBoundaryLease.release();
     }
-    await precommitLifecycle.transaction?.commit();
-    const afterAppliedHeadEvidence = await precommitLifecycle.afterAppliedHead?.(
-      committedHeadTokenV1(
-      head.objectDigest as Digest32V1,
-      inventoryDigest,
-      ),
-    );
-    return Object.freeze({
-      inventoryDigest,
-      catalogHeadDigest: head.objectDigest as Digest32V1,
-      inventoryRowCount: 0 as const,
-      activatedTripleCount: 0 as const,
-      stagedObjectCount: 3 as const,
-      appliedHeadStatus,
-      ...(afterAppliedHeadEvidence === undefined
-        ? {}
-        : { postAppliedHeadExtension: afterAppliedHeadEvidence }),
-    });
   }
 
   private async synchronizeBoundedPublicRootCatalogFetched(
@@ -885,7 +958,7 @@ export class Rfc64PublicCatalogNativeReceiverV1<
 
     let target: Rfc64BoundedSuccessorTargetV1;
     if (isEmptyTarget) {
-      target = Object.freeze({ kind: 'empty' as const, rows: Object.freeze([] as []) });
+      target = Object.freeze({ kind: 'empty' as const });
     } else {
       const fetchedBucket = await this.fetchCatalogObjectWithCacheV1(
         remotePeerId,
@@ -925,22 +998,9 @@ export class Rfc64PublicCatalogNativeReceiverV1<
       );
       target = Object.freeze({
         kind: 'bucket' as const,
-        rows: bucket.payload.rows,
         bucket,
         fetchedBucket,
       });
-    }
-    const targetRows = target.rows;
-    try {
-      assertRfc64PublicCatalogExactSetBundleBytesV1(
-        targetRows.map((row) => row.transfer.byteLength),
-      );
-    } catch (cause) {
-      fail(
-        'catalog-native-receiver-slice',
-        'signed catalog exact set exceeds the V1 aggregate bundle-byte ceiling',
-        cause,
-      );
     }
     const preparedRows: Array<{
       readonly row: AuthorCatalogRowV1;
@@ -952,15 +1012,17 @@ export class Rfc64PublicCatalogNativeReceiverV1<
       readonly projectionBytes: Uint8Array;
       readonly expectedEvidence: Rfc64PublicCatalogInventoryEvidenceRowV1;
     }> = [];
-    for (const row of targetRows) {
+    // Past authorization, rows come only from the verifier's frozen
+    // snapshots, in bucket order, each with its own capability. The
+    // transport-owned bucket is not read again, so a response mutated across
+    // the awaits below cannot put another row beside a capability.
+    let authorizedRows: readonly AuthorizedCatalogRowV1[] = [];
+    if (target.kind === 'bucket') {
       throwIfAborted(signal);
-      if (target.kind !== 'bucket') {
-        fail('catalog-native-receiver-catalog', 'non-empty catalog target lost its bucket proof');
-      }
-      let authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
-      let authorshipCapability: VerifiedAuthorCatalogRowAuthorshipV1;
+      let authorshipCapabilities: readonly VerifiedAuthorCatalogRowAuthorshipV1[];
       try {
-        authorshipCapability = verifyAuthorCatalogRowAuthorshipV1({
+        // One bucket closure for every row instead of one per row (#2812).
+        authorshipCapabilities = verifyAuthorCatalogBucketRowAuthorshipsV1({
           catalogIssuerDelegation: fetchedDelegation.envelope,
           catalogIssuerDelegationSignature: fetchedDelegation.issuerSignature,
           parentAuthorAgentEvidence: null,
@@ -971,16 +1033,32 @@ export class Rfc64PublicCatalogNativeReceiverV1<
           directoryPathProof,
           catalogBucket: target.bucket,
           catalogBucketSignature: target.fetchedBucket.issuerSignature,
-          targetKaId: row.kaId,
         });
-        authorship = readVerifiedAuthorCatalogRowAuthorshipV1(authorshipCapability);
       } catch (cause) {
         fail(
           'catalog-native-receiver-authorization',
-          `catalog row ${row.kaId} is not authorized by the exact direct-author delegation closure`,
+          'catalog bucket rows are not authorized by the exact direct-author delegation closure',
           cause,
         );
       }
+      authorizedRows = authorshipCapabilities.map((authorshipCapability) => {
+        const authorship = readVerifiedAuthorCatalogRowAuthorshipV1(authorshipCapability);
+        return { row: authorship.row, authorship, authorshipCapability };
+      });
+    }
+    try {
+      assertRfc64PublicCatalogExactSetBundleBytesV1(
+        authorizedRows.map(({ row }) => row.transfer.byteLength),
+      );
+    } catch (cause) {
+      fail(
+        'catalog-native-receiver-slice',
+        'signed catalog exact set exceeds the V1 aggregate bundle-byte ceiling',
+        cause,
+      );
+    }
+    for (const { row, authorship, authorshipCapability } of authorizedRows) {
+      throwIfAborted(signal);
 
       const bundle = await this.fetchKaBundleWithCacheV1(
         remotePeerId,
@@ -1114,314 +1192,358 @@ export class Rfc64PublicCatalogNativeReceiverV1<
         // decision. Requiring target.previousHeadDigest here made the first
         // retry after a successful cold bootstrap fail despite exact durable
         // target state.
-        ? Object.freeze(targetRows.map((row) => Object.freeze({ ...row })))
+        ? Object.freeze(preparedRows.map(({ row }) => row))
         : await loadExactAppliedCatalogRowsForSnapshotV1(
           this.options.controlObjects,
           currentAppliedHead,
           trustedCatalogScope,
           this.#verifyIssuerSignature,
         );
-    if (historyDisposition === 'cold-bootstrap') {
-      await assertColdBootstrapHasNoOmittedSemanticStateV1(
-        this.options.store,
-        trustedCatalogScope,
-        preparedRows.map((prepared) => transitionLocationFromTarget(
-          head,
-          prepared.row,
-          prepared.sealBinding,
-        )),
-      );
-    }
-    const targetKaIds = new Set(preparedRows.map(({ row }) => row.kaId));
-    const plannedRemovals = predecessorRows
-      .filter((row) => !targetKaIds.has(row.kaId))
-      .map((row) => planOwnedRowRemoval(trustedCatalogScope, row));
-
-    try {
-      // Every exact bundle crossed its immutable durability barrier directly
-      // after verification above. This preserves restart/failover progress
-      // without making a staged-only head authoritative.
-      const verifiedObjects = [
-        fetchedDelegation,
-        fetchedHead,
-        fetchedDirectory,
-      ];
-      if (target.kind === 'bucket') verifiedObjects.push(target.fetchedBucket);
-      await this.options.controlObjects.stageVerifiedObjects(verifiedObjects);
-    } catch (cause) {
-      fail(
-        'catalog-native-receiver-catalog',
-        'verified catalog objects or KA bundles could not be staged',
-        cause,
-      );
-    }
-
-    const transitionJournal = await snapshotSemanticTransitionV1(
-      this.options.store,
-      [
-        ...plannedRemovals.map((removal) => transitionLocationFromRemoval(removal)),
-        ...preparedRows.map((prepared) => transitionLocationFromTarget(
-          head,
-          prepared.row,
-          prepared.sealBinding,
-        )),
-      ],
+    const legacySwmBoundaryLease = await acquireLegacySwmBoundaryReceiverLeaseV1(
+      trustedCatalogScope,
+      this.options.acquireLegacySwmBoundaryLease,
+      this.options.resolveLegacySwmBoundaryEvidence,
+      historyDisposition === 'cold-bootstrap'
+        ? this.options.resolveColdBootstrapLegacySwmGraphAllowlist
+        : undefined,
     );
-    const removedRows: Rfc64PublicCatalogNativeRemovedRowEvidenceV1[] = [];
-    const activatedRows: Rfc64PublicCatalogNativeActivatedRowEvidenceV1[] = [];
-    const activatedPrecommitRows: Rfc64PublicCatalogNativePrecommitRowPlanV1[] = [];
-    let completion!: ReturnType<typeof verifyRfc64PublicCatalogInventoryCompletenessV1>;
-    let activatedTripleCount = 0;
-    let semanticMutationAttempted = false;
-    const restoreExactPredecessorAfterFailure = async (
-      cause: unknown,
-      failureStage: 'semantic transition' | 'catalog applied-head precommit',
-    ): Promise<void> => {
-      if (!semanticMutationAttempted) return;
-      try {
-        await restoreSemanticTransitionV1(this.options.store, transitionJournal);
-      } catch (rollbackCause) {
-        fail(
-          'catalog-native-receiver-activation',
-          `${failureStage} failed and its exact predecessor rollback also failed`,
-          new AggregateError([cause, rollbackCause]),
-        );
-      }
-    };
     try {
-      for (const removal of plannedRemovals) {
-        throwIfAborted(signal);
-        semanticMutationAttempted = true;
-        await deactivateExactOwnedPublicProjection(this.options.store, removal);
-        removedRows.push(removal);
-      }
+      const legacySwmBoundaryEvidence = legacySwmBoundaryLease.evidence;
       for (const prepared of preparedRows) {
-        throwIfAborted(signal);
-        semanticMutationAttempted = true;
-        const activation = await activateExactPublicProjection(
-          this.options.store,
-          head,
-          prepared.row,
-          prepared.projectionMetadata.kaUal,
-          prepared.projectionBytes,
-          Number(prepared.projectionMetadata.publicTripleCount),
-          prepared.sealBinding,
-        );
-        activatedRows.push(Object.freeze({
-          ...activation.evidence,
-          swmGraph: activation.swmGraph,
-          publicQuadsDigest: activation.publicQuadsDigest,
-          authorship: prepared.authorship,
-        }));
-        activatedPrecommitRows.push(Object.freeze({
-          authorship: prepared.authorshipCapability,
-          sealBinding: prepared.sealBindingCapability,
-          publicQuadsDigest: activation.publicQuadsDigest,
-        }));
-      }
-      completion = verifyRfc64PublicCatalogInventoryCompletenessV1({
-        catalogScope: trustedCatalogScope,
-        expectedTotalRows: head.payload.totalRows as CountV1,
-        expectedRows,
-        observedRows: activatedRows.map((row) => ({
-          kaId: row.kaId,
-          catalogRowDigest: row.catalogRowDigest,
-          contentDigest: row.contentDigest,
-          sealDigest: row.sealDigest,
-          bundleDigest: row.bundleDigest,
-          kaUal: row.kaUal,
-          activatedTripleCount: row.activatedTripleCount,
-        })),
-      });
-      activatedTripleCount = activatedRows.reduce(
-        (total, row) => total + row.activatedTripleCount,
-        0,
-      );
-      if (!Number.isSafeInteger(activatedTripleCount)) {
-        fail(
-          'catalog-native-receiver-activation',
-          'total activated triple count is not a safe integer',
-        );
-      }
-    } catch (cause) {
-      await restoreExactPredecessorAfterFailure(cause, 'semantic transition');
-      if (signal?.aborted && cause === signal.reason) throw cause;
-      if (cause instanceof Rfc64PublicCatalogNativeReceiverErrorV1) throw cause;
-      fail(
-        'catalog-native-receiver-activation',
-        'semantic transition failed after mutation began',
-        cause,
-      );
-    }
-
-    const precommitLifecycle = await this.runBeforeAppliedHeadCommitV1(
-      Object.freeze({
-        catalogScope: trustedCatalogScope,
-        policyDigest: announcement.policyDigest,
-        catalogHeadDigest: head.objectDigest as Digest32V1,
-        inventoryDigest: completion.inventoryDigest,
-        rows: Object.freeze(activatedPrecommitRows),
-      }),
-      signal,
-      'catalog applied-head precommit rejected the exact activated inventory',
-      (cause) => restoreExactPredecessorAfterFailure(
-        cause,
-        'catalog applied-head precommit',
-      ),
-    );
-
-    let appliedHeadStatus: 'applied' | 'existing';
-    let headCommitDisposition: 'predecessor' | 'target' | 'indeterminate' =
-      historyDisposition === 'replay' ? 'target' : 'predecessor';
-    let precommitFinalized = false;
-    const finalizeTargetTransition = async (): Promise<void> => {
-      if (precommitFinalized) return;
-      // Set the fence before invoking operator code. A throwing commit hook
-      // cannot make a known-durable target safe to roll back to its predecessor.
-      precommitFinalized = true;
-      await precommitLifecycle.transaction?.commit();
-    };
-    const rollbackRejectedTransition = async (cause: unknown): Promise<void> => {
-      const rollbackFailures: unknown[] = [];
-      try {
-        await this.rollbackAppliedHeadPrecommitV1(precommitLifecycle.transaction, cause);
-      } catch (rollbackCause) {
-        rollbackFailures.push(rollbackCause);
-      }
-      try {
-        await restoreExactPredecessorAfterFailure(cause, 'catalog applied-head precommit');
-      } catch (rollbackCause) {
-        rollbackFailures.push(rollbackCause);
-      }
-      if (rollbackFailures.length > 0) {
-        fail(
-          'catalog-native-receiver-activation',
-          'rejected catalog head could not restore one exact SWM/VM predecessor',
-          new AggregateError([cause, ...rollbackFailures]),
-        );
-      }
-    };
-    try {
-      if (historyDisposition === 'replay') {
-        if (currentAppliedHead!.appliedInventoryDigest !== completion.inventoryDigest) {
+        const lateAssertionVersion = legacySwmBoundaryEvidence
+          .lateAssertionVersionByKaUal.get(prepared.projectionMetadata.kaUal);
+        if (
+          lateAssertionVersion !== undefined
+          && BigInt(prepared.row.assertionVersion) < BigInt(lateAssertionVersion)
+        ) {
           fail(
             'catalog-native-receiver-history',
-            'durable applied-head digest differs from exact semantic post-read',
+            `catalog target row ${prepared.row.kaId} precedes its durable late SWM generation`,
           );
         }
-        appliedHeadStatus = 'existing';
-      } else {
-        try {
-          throwIfAborted(signal);
-          const casResult = this.options.inventory.compareAndSwapAppliedCatalogHeadV1({
-            catalogScopeDigest,
-            authorAddress: head.payload.authorAddress,
-            expectedCurrentCatalogHeadDigest: historyDisposition === 'cold-bootstrap'
-              ? null
-              : currentAppliedHead!.currentCatalogHeadDigest,
-            currentCatalogHeadDigest: head.objectDigest as Digest32V1,
-            appliedInventoryDigest: completion.inventoryDigest,
-            catalogVersion: head.payload.version,
-            inventoryRowCount: head.payload.totalRows,
-          });
-          headCommitDisposition = 'target';
-          appliedHeadStatus = casResult.status;
-        } catch (cause) {
-          if (signal?.aborted && cause === signal.reason) throw cause;
-          // The CAS adapter can throw after its durable write. Until its exact
-          // state is read, predecessor rollback is unsafe.
-          headCommitDisposition = 'indeterminate';
-          let reconciled: ReturnType<
-            typeof this.options.inventory.readAppliedCatalogHeadV1
-          >;
-          try {
-            reconciled = this.options.inventory.readAppliedCatalogHeadV1(
-              catalogScopeDigest,
-              head.payload.authorAddress,
-            );
-          } catch (reconciliationCause) {
-            fail(
-              'catalog-native-receiver-history',
-              'applied-head CAS outcome is indeterminate; target SWM/VM state is retained',
-              new AggregateError([cause, reconciliationCause]),
-            );
-          }
-          if (
-            reconciled === null
-            || reconciled.currentCatalogHeadDigest !== head.objectDigest
-            || !isExactAppliedSuccessorSnapshot(
-              reconciled,
-              head,
-              completion.inventoryDigest,
-            )
-          ) {
-            headCommitDisposition = 'predecessor';
-            fail(
-              'catalog-native-receiver-history',
-              'applied-head CAS lost outside the serialized receiver; semantic state requires repair',
-              cause,
-            );
-          }
-          headCommitDisposition = 'target';
-          appliedHeadStatus = 'existing';
-        }
       }
-      // Once the exact target head is known durable, SWM and VM are the target
-      // generation. Finalize that recovery unit before a diagnostic post-read:
-      // a later read fault must never restore VM behind the committed head.
-      await finalizeTargetTransition();
-      const durablePostRead = this.options.inventory.readAppliedCatalogHeadV1(
-        catalogScopeDigest,
-        head.payload.authorAddress,
-      );
-      if (!isExactAppliedSuccessorSnapshot(
-        durablePostRead,
-        head,
-        completion.inventoryDigest,
-      )) {
-        fail(
-          'catalog-native-receiver-history',
-          'successor durable post-read differs in head, digest, version, or exact row count',
+      if (historyDisposition === 'cold-bootstrap') {
+        await assertColdBootstrapHasNoOmittedSemanticStateV1(
+          this.options.store,
+          trustedCatalogScope,
+          preparedRows.map((prepared) => transitionLocationFromTarget(
+            head,
+            prepared.row,
+            prepared.sealBinding,
+          )),
+          async () => legacySwmBoundaryEvidence.graphAllowlist,
         );
       }
-    } catch (cause) {
-      if (headCommitDisposition === 'predecessor') {
-        await rollbackRejectedTransition(cause);
-      } else {
-        // A confirmed or possibly committed CAS fences predecessor rollback.
-        // Keep both semantic journals on the target for exact durable repair.
-        await finalizeTargetTransition();
+      const targetKaIds = new Set(preparedRows.map(({ row }) => row.kaId));
+      const plannedRemovals = predecessorRows
+        .filter((row) => !targetKaIds.has(row.kaId))
+        .map((row) => planOwnedRowRemoval(trustedCatalogScope, row));
+
+      try {
+        // Every exact bundle crossed its immutable durability barrier directly
+        // after verification above. This preserves restart/failover progress
+        // without making a staged-only head authoritative.
+        const verifiedObjects = [
+          fetchedDelegation,
+          fetchedHead,
+          fetchedDirectory,
+        ];
+        if (target.kind === 'bucket') verifiedObjects.push(target.fetchedBucket);
+        await this.options.controlObjects.stageVerifiedObjects(verifiedObjects);
+      } catch (cause) {
+        fail(
+          'catalog-native-receiver-catalog',
+          'verified catalog objects or KA bundles could not be staged',
+          cause,
+        );
       }
-      throw cause;
-    }
 
-    // This is intentionally outside the transaction/CAS catch. At this point
-    // the exact head and primary transaction are durable and the post-read has
-    // succeeded. A cleanup failure is retryable by replay, never by restoring
-    // the predecessor behind an already-committed head.
-    const afterAppliedHeadEvidence = await precommitLifecycle.afterAppliedHead?.(
-      committedHeadTokenV1(
-        head.objectDigest as Digest32V1,
-        completion.inventoryDigest,
-      ),
-    );
+      const transitionJournal = await snapshotSemanticTransitionV1(
+        this.options.store,
+        [
+          ...plannedRemovals.map((removal) => transitionLocationFromRemoval(removal)),
+          ...preparedRows.map((prepared) => transitionLocationFromTarget(
+            head,
+            prepared.row,
+            prepared.sealBinding,
+          )),
+        ],
+      );
+      const removedRows: Rfc64PublicCatalogNativeRemovedRowEvidenceV1[] = [];
+      const activatedRows: Rfc64PublicCatalogNativeActivatedRowEvidenceV1[] = [];
+      const activatedPrecommitRows: Rfc64PublicCatalogNativePrecommitRowPlanV1[] = [];
+      let completion!: ReturnType<typeof verifyRfc64PublicCatalogInventoryCompletenessV1>;
+      let activatedTripleCount = 0;
+      let semanticMutationAttempted = false;
+      const restoreExactPredecessorAfterFailure = async (
+        cause: unknown,
+        failureStage: 'semantic transition' | 'catalog applied-head precommit',
+      ): Promise<void> => {
+        if (!semanticMutationAttempted) return;
+        try {
+          await restoreSemanticTransitionV1(this.options.store, transitionJournal);
+        } catch (rollbackCause) {
+          fail(
+            'catalog-native-receiver-activation',
+            `${failureStage} failed and its exact predecessor rollback also failed`,
+            new AggregateError([cause, rollbackCause]),
+          );
+        }
+      };
+      try {
+        for (const removal of plannedRemovals) {
+          throwIfAborted(signal);
+          semanticMutationAttempted = true;
+          await deactivateExactOwnedPublicProjection(this.options.store, removal);
+          removedRows.push(removal);
+        }
+        for (const prepared of preparedRows) {
+          throwIfAborted(signal);
+          semanticMutationAttempted = true;
+          const activation = await activateExactPublicProjection(
+            this.options.store,
+            head,
+            prepared.row,
+            prepared.projectionMetadata.kaUal,
+            prepared.projectionBytes,
+            Number(prepared.projectionMetadata.publicTripleCount),
+            prepared.sealBinding,
+          );
+          activatedRows.push(Object.freeze({
+            ...activation.evidence,
+            swmGraph: activation.swmGraph,
+            publicQuadsDigest: activation.publicQuadsDigest,
+            authorship: prepared.authorship,
+          }));
+          activatedPrecommitRows.push(Object.freeze({
+            authorship: prepared.authorshipCapability,
+            sealBinding: prepared.sealBindingCapability,
+            publicQuadsDigest: activation.publicQuadsDigest,
+          }));
+        }
+        completion = verifyRfc64PublicCatalogInventoryCompletenessV1({
+          catalogScope: trustedCatalogScope,
+          expectedTotalRows: head.payload.totalRows as CountV1,
+          expectedRows,
+          observedRows: activatedRows.map((row) => ({
+            kaId: row.kaId,
+            catalogRowDigest: row.catalogRowDigest,
+            contentDigest: row.contentDigest,
+            sealDigest: row.sealDigest,
+            bundleDigest: row.bundleDigest,
+            kaUal: row.kaUal,
+            activatedTripleCount: row.activatedTripleCount,
+          })),
+        });
+        activatedTripleCount = activatedRows.reduce(
+          (total, row) => total + row.activatedTripleCount,
+          0,
+        );
+        if (!Number.isSafeInteger(activatedTripleCount)) {
+          fail(
+            'catalog-native-receiver-activation',
+            'total activated triple count is not a safe integer',
+          );
+        }
+      } catch (cause) {
+        await restoreExactPredecessorAfterFailure(cause, 'semantic transition');
+        if (signal?.aborted && cause === signal.reason) throw cause;
+        if (cause instanceof Rfc64PublicCatalogNativeReceiverErrorV1) throw cause;
+        fail(
+          'catalog-native-receiver-activation',
+          'semantic transition failed after mutation began',
+          cause,
+        );
+      }
 
-    if (activatedRows.length === 1) {
-      const [only] = activatedRows;
-      if (only === undefined) {
-        fail('catalog-native-receiver-activation', 'one-row completion lost its activation row');
+      const precommitLifecycle = await this.runBeforeAppliedHeadCommitV1(
+        Object.freeze({
+          catalogScope: trustedCatalogScope,
+          policyDigest: announcement.policyDigest,
+          catalogHeadDigest: head.objectDigest as Digest32V1,
+          inventoryDigest: completion.inventoryDigest,
+          rows: Object.freeze(activatedPrecommitRows),
+        }),
+        signal,
+        'catalog applied-head precommit rejected the exact activated inventory',
+        (cause) => restoreExactPredecessorAfterFailure(
+          cause,
+          'catalog applied-head precommit',
+        ),
+      );
+
+      let appliedHeadStatus: 'applied' | 'existing';
+      let headCommitDisposition: 'predecessor' | 'target' | 'indeterminate' =
+        historyDisposition === 'replay' ? 'target' : 'predecessor';
+      let precommitFinalized = false;
+      const finalizeTargetTransition = async (): Promise<void> => {
+        if (precommitFinalized) return;
+        // Set the fence before invoking operator code. A throwing commit hook
+        // cannot make a known-durable target safe to roll back to its predecessor.
+        precommitFinalized = true;
+        await precommitLifecycle.transaction?.commit();
+      };
+      const rollbackRejectedTransition = async (cause: unknown): Promise<void> => {
+        const rollbackFailures: unknown[] = [];
+        try {
+          await this.rollbackAppliedHeadPrecommitV1(precommitLifecycle.transaction, cause);
+        } catch (rollbackCause) {
+          rollbackFailures.push(rollbackCause);
+        }
+        try {
+          await restoreExactPredecessorAfterFailure(cause, 'catalog applied-head precommit');
+        } catch (rollbackCause) {
+          rollbackFailures.push(rollbackCause);
+        }
+        if (rollbackFailures.length > 0) {
+          fail(
+            'catalog-native-receiver-activation',
+            'rejected catalog head could not restore one exact SWM/VM predecessor',
+            new AggregateError([cause, ...rollbackFailures]),
+          );
+        }
+      };
+      try {
+        if (historyDisposition === 'replay') {
+          if (currentAppliedHead!.appliedInventoryDigest !== completion.inventoryDigest) {
+            fail(
+              'catalog-native-receiver-history',
+              'durable applied-head digest differs from exact semantic post-read',
+            );
+          }
+          appliedHeadStatus = 'existing';
+        } else {
+          try {
+            throwIfAborted(signal);
+            const casResult = this.options.inventory.compareAndSwapAppliedCatalogHeadV1({
+              catalogScopeDigest,
+              authorAddress: head.payload.authorAddress,
+              expectedCurrentCatalogHeadDigest: historyDisposition === 'cold-bootstrap'
+                ? null
+                : currentAppliedHead!.currentCatalogHeadDigest,
+              currentCatalogHeadDigest: head.objectDigest as Digest32V1,
+              appliedInventoryDigest: completion.inventoryDigest,
+              catalogVersion: head.payload.version,
+              inventoryRowCount: head.payload.totalRows,
+            });
+            headCommitDisposition = 'target';
+            appliedHeadStatus = casResult.status;
+          } catch (cause) {
+            if (signal?.aborted && cause === signal.reason) throw cause;
+            // The CAS adapter can throw after its durable write. Until its exact
+            // state is read, predecessor rollback is unsafe.
+            headCommitDisposition = 'indeterminate';
+            let reconciled: ReturnType<
+              typeof this.options.inventory.readAppliedCatalogHeadV1
+            >;
+            try {
+              reconciled = this.options.inventory.readAppliedCatalogHeadV1(
+                catalogScopeDigest,
+                head.payload.authorAddress,
+              );
+            } catch (reconciliationCause) {
+              fail(
+                'catalog-native-receiver-history',
+                'applied-head CAS outcome is indeterminate; target SWM/VM state is retained',
+                new AggregateError([cause, reconciliationCause]),
+              );
+            }
+            if (
+              reconciled === null
+              || reconciled.currentCatalogHeadDigest !== head.objectDigest
+              || !isExactAppliedSuccessorSnapshot(
+                reconciled,
+                head,
+                completion.inventoryDigest,
+              )
+            ) {
+              headCommitDisposition = 'predecessor';
+              fail(
+                'catalog-native-receiver-history',
+                'applied-head CAS lost outside the serialized receiver; semantic state requires repair',
+                cause,
+              );
+            }
+            headCommitDisposition = 'target';
+            appliedHeadStatus = 'existing';
+          }
+        }
+        // Once the exact target head is known durable, SWM and VM are the target
+        // generation. Finalize that recovery unit before a diagnostic post-read:
+        // a later read fault must never restore VM behind the committed head.
+        await finalizeTargetTransition();
+        const durablePostRead = this.options.inventory.readAppliedCatalogHeadV1(
+          catalogScopeDigest,
+          head.payload.authorAddress,
+        );
+        if (!isExactAppliedSuccessorSnapshot(
+          durablePostRead,
+          head,
+          completion.inventoryDigest,
+        )) {
+          fail(
+            'catalog-native-receiver-history',
+            'successor durable post-read differs in head, digest, version, or exact row count',
+          );
+        }
+      } catch (cause) {
+        if (headCommitDisposition === 'predecessor') {
+          await rollbackRejectedTransition(cause);
+        } else {
+          // A confirmed or possibly committed CAS fences predecessor rollback.
+          // Keep both semantic journals on the target for exact durable repair.
+          await finalizeTargetTransition();
+        }
+        throw cause;
+      }
+
+      // This is intentionally outside the transaction/CAS catch. At this point
+      // the exact head and primary transaction are durable and the post-read has
+      // succeeded. A cleanup failure is retryable by replay, never by restoring
+      // the predecessor behind an already-committed head.
+      const afterAppliedHeadEvidence = await precommitLifecycle.afterAppliedHead?.(
+        committedHeadTokenV1(
+          head.objectDigest as Digest32V1,
+          completion.inventoryDigest,
+        ),
+      );
+      await legacySwmBoundaryLease.retireAppliedAssets(preparedRows.map((prepared) => (
+        Object.freeze({
+          kaUal: prepared.projectionMetadata.kaUal,
+          assertionVersion: prepared.row.assertionVersion,
+        })
+      )));
+
+      if (activatedRows.length === 1) {
+        const [only] = activatedRows;
+        if (only === undefined) {
+          fail('catalog-native-receiver-activation', 'one-row completion lost its activation row');
+        }
+        return Object.freeze({
+          inventoryDigest: completion.inventoryDigest,
+          catalogHeadDigest: head.objectDigest as Digest32V1,
+          catalogRowDigest: only.catalogRowDigest,
+          contentDigest: only.contentDigest,
+          bundleDigest: only.bundleDigest,
+          kaUal: only.kaUal,
+          inventoryRowCount: 1 as const,
+          activatedTripleCount: only.activatedTripleCount,
+          swmGraph: only.swmGraph,
+          authorship: only.authorship,
+          removedRows: Object.freeze(removedRows),
+          removedRowCount: removedRows.length,
+          appliedHeadStatus,
+          ...(afterAppliedHeadEvidence === undefined
+            ? {}
+            : { postAppliedHeadExtension: afterAppliedHeadEvidence }),
+        });
       }
       return Object.freeze({
         inventoryDigest: completion.inventoryDigest,
         catalogHeadDigest: head.objectDigest as Digest32V1,
-        catalogRowDigest: only.catalogRowDigest,
-        contentDigest: only.contentDigest,
-        bundleDigest: only.bundleDigest,
-        kaUal: only.kaUal,
-        inventoryRowCount: 1 as const,
-        activatedTripleCount: only.activatedTripleCount,
-        swmGraph: only.swmGraph,
-        authorship: only.authorship,
+        inventoryRowCount: activatedRows.length,
+        activatedTripleCount,
+        rows: Object.freeze(activatedRows),
         removedRows: Object.freeze(removedRows),
         removedRowCount: removedRows.length,
         appliedHeadStatus,
@@ -1429,20 +1551,9 @@ export class Rfc64PublicCatalogNativeReceiverV1<
           ? {}
           : { postAppliedHeadExtension: afterAppliedHeadEvidence }),
       });
+    } finally {
+      legacySwmBoundaryLease.release();
     }
-    return Object.freeze({
-      inventoryDigest: completion.inventoryDigest,
-      catalogHeadDigest: head.objectDigest as Digest32V1,
-      inventoryRowCount: activatedRows.length,
-      activatedTripleCount,
-      rows: Object.freeze(activatedRows),
-      removedRows: Object.freeze(removedRows),
-      removedRowCount: removedRows.length,
-      appliedHeadStatus,
-      ...(afterAppliedHeadEvidence === undefined
-        ? {}
-        : { postAppliedHeadExtension: afterAppliedHeadEvidence }),
-    });
   }
 
   private async fetchDirectAuthorCatalogIssuerDelegation(
@@ -2003,6 +2114,9 @@ async function assertColdBootstrapHasNoOmittedSemanticStateV1(
   store: TripleStore,
   scope: Readonly<AuthorCatalogScopeV1>,
   targets: readonly Readonly<Rfc64SemanticTransitionLocationV1>[],
+  resolveLegacySwmGraphAllowlist: ((
+    scope: Readonly<AuthorCatalogScopeV1>,
+  ) => Promise<ReadonlySet<string>>) | undefined,
 ): Promise<void> {
   const allowedGraphs = new Set(targets.map((target) => target.swmGraph));
   const allowedSealSubjects = new Set(targets.map((target) => target.sealSubject));
@@ -2024,9 +2138,26 @@ async function assertColdBootstrapHasNoOmittedSemanticStateV1(
       cause,
     );
   }
+  const omittedGraphs = existingGraphs.filter((graph) => !allowedGraphs.has(graph));
+  let legacySwmGraphAllowlist: ReadonlySet<string> = new Set();
+  if (omittedGraphs.length > 0 && resolveLegacySwmGraphAllowlist !== undefined) {
+    try {
+      legacySwmGraphAllowlist = await resolveLegacySwmGraphAllowlist(scope);
+      if (typeof legacySwmGraphAllowlist?.has !== 'function') {
+        throw new Error('legacy SWM graph allowlist is malformed');
+      }
+    } catch (cause) {
+      fail(
+        'catalog-native-receiver-history',
+        'cold bootstrap could not prove omitted legacy SWM materialization',
+        cause,
+      );
+    }
+  }
   if (
-    existingGraphs.length > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1
-    || existingGraphs.some((graph) => !allowedGraphs.has(graph))
+    existingGraphs.length
+      > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 + legacySwmGraphAllowlist.size
+    || omittedGraphs.some((graph) => !legacySwmGraphAllowlist.has(graph))
   ) {
     fail(
       'catalog-native-receiver-history',
@@ -2034,7 +2165,7 @@ async function assertColdBootstrapHasNoOmittedSemanticStateV1(
     );
   }
 
-  const metaGraph = contextGraphMetaUri(scope.contextGraphId);
+  const metaGraph = `did:dkg:context-graph:${buildCatalogAssertionScopeV1(scope)}/_meta`;
   let sealSubjects;
   try {
     sealSubjects = await store.query(
@@ -2064,6 +2195,139 @@ async function assertColdBootstrapHasNoOmittedSemanticStateV1(
       'cold bootstrap found author-seal materialization omitted by the fetched exact head',
     );
   }
+}
+
+async function resolveLegacySwmBoundaryEvidenceV1(
+  scope: Readonly<AuthorCatalogScopeV1>,
+  resolveEvidence: Rfc64PublicCatalogNativeReceiverOptionsV1[
+    'resolveLegacySwmBoundaryEvidence'
+  ],
+  resolveLegacySwmGraphAllowlist: Rfc64PublicCatalogNativeReceiverOptionsV1[
+    'resolveColdBootstrapLegacySwmGraphAllowlist'
+  ],
+): Promise<Readonly<{
+  graphAllowlist: ReadonlySet<string>;
+  lateAssertionVersionByKaUal: ReadonlyMap<string, string>;
+}>> {
+  try {
+    if (resolveEvidence === undefined) {
+      return Object.freeze({
+        graphAllowlist: resolveLegacySwmGraphAllowlist === undefined
+          ? new Set<string>()
+          : new Set(await resolveLegacySwmGraphAllowlist(scope)),
+        lateAssertionVersionByKaUal: new Map<string, string>(),
+      });
+    }
+    return normalizeLegacySwmBoundaryEvidenceV1(scope, await resolveEvidence(scope));
+  } catch (cause) {
+    fail(
+      'catalog-native-receiver-history',
+      'receiver could not prove the durable legacy SWM boundary',
+      cause,
+    );
+  }
+}
+
+async function acquireLegacySwmBoundaryReceiverLeaseV1(
+  scope: Readonly<AuthorCatalogScopeV1>,
+  acquireLease: Rfc64PublicCatalogNativeReceiverOptionsV1[
+    'acquireLegacySwmBoundaryLease'
+  ],
+  resolveEvidence: Rfc64PublicCatalogNativeReceiverOptionsV1[
+    'resolveLegacySwmBoundaryEvidence'
+  ],
+  resolveLegacySwmGraphAllowlist: Rfc64PublicCatalogNativeReceiverOptionsV1[
+    'resolveColdBootstrapLegacySwmGraphAllowlist'
+  ],
+): Promise<Readonly<{
+  evidence: Readonly<{
+    graphAllowlist: ReadonlySet<string>;
+    lateAssertionVersionByKaUal: ReadonlyMap<string, string>;
+  }>;
+  retireAppliedAssets: (assets: readonly Readonly<{
+    kaUal: string;
+    assertionVersion: string;
+  }>[]) => Promise<void>;
+  release: () => void;
+}>> {
+  if (acquireLease === undefined) {
+    return Object.freeze({
+      evidence: await resolveLegacySwmBoundaryEvidenceV1(
+        scope,
+        resolveEvidence,
+        resolveLegacySwmGraphAllowlist,
+      ),
+      retireAppliedAssets: async () => undefined,
+      release: () => undefined,
+    });
+  }
+  let lease: Awaited<ReturnType<NonNullable<typeof acquireLease>>> | undefined;
+  try {
+    lease = await acquireLease(scope);
+    if (
+      typeof lease?.retireAppliedAssets !== 'function'
+      || typeof lease?.release !== 'function'
+    ) {
+      throw new Error('legacy SWM boundary lease is malformed');
+    }
+    return Object.freeze({
+      evidence: normalizeLegacySwmBoundaryEvidenceV1(scope, lease.evidence),
+      retireAppliedAssets: lease.retireAppliedAssets,
+      release: lease.release,
+    });
+  } catch (cause) {
+    lease?.release?.();
+    fail(
+      'catalog-native-receiver-history',
+      'receiver could not acquire the durable legacy SWM boundary lease',
+      cause,
+    );
+  }
+}
+
+function normalizeLegacySwmBoundaryEvidenceV1(
+  scope: Readonly<AuthorCatalogScopeV1>,
+  evidence: Readonly<{
+    graphAllowlist: ReadonlySet<string>;
+    lateAssertionVersionByKaUal: ReadonlyMap<string, string>;
+  }>,
+): Readonly<{
+  graphAllowlist: ReadonlySet<string>;
+  lateAssertionVersionByKaUal: ReadonlyMap<string, string>;
+}> {
+  if (
+    typeof evidence?.graphAllowlist?.[Symbol.iterator] !== 'function'
+    || typeof evidence?.lateAssertionVersionByKaUal?.[Symbol.iterator] !== 'function'
+  ) {
+    throw new Error('legacy SWM boundary evidence is malformed');
+  }
+  const graphAllowlist = new Set<string>();
+  for (const graph of evidence.graphAllowlist) {
+    if (typeof graph !== 'string') {
+      throw new Error('legacy SWM graph allowlist entry is malformed');
+    }
+    graphAllowlist.add(graph);
+  }
+  const lateAssertionVersionByKaUal = new Map<string, string>();
+  for (const [kaUal, assertionVersion] of evidence.lateAssertionVersionByKaUal) {
+    const identity = assertCanonicalDeterministicUalV1(kaUal);
+    assertCanonicalDecimalU64(
+      assertionVersion,
+      'legacy SWM boundary assertionVersion',
+    );
+    if (
+      identity.chainId !== scope.networkId
+      || identity.agentAddress !== scope.authorAddress
+      || BigInt(assertionVersion) < 1n
+    ) {
+      throw new Error('legacy SWM version floor is outside the exact root author scope');
+    }
+    const previous = lateAssertionVersionByKaUal.get(identity.ual);
+    if (previous === undefined || BigInt(assertionVersion) > BigInt(previous)) {
+      lateAssertionVersionByKaUal.set(identity.ual, assertionVersion);
+    }
+  }
+  return Object.freeze({ graphAllowlist, lateAssertionVersionByKaUal });
 }
 
 function transitionLocationFromTarget(
@@ -2164,34 +2428,34 @@ async function activateExactPublicProjection(
     readBack = await readExactGraphPaged(store, swmGraph, {
       expectedQuadCount: expectedTripleCount,
       maxQuadCount: expectedTripleCount,
-      maxNQuadsBytes: projectionBytes.byteLength,
+      // The store may return a term in a longer form than the canonical one.
+      maxNQuadsBytes: projectionReadBackByteLimitV1(projectionText, expectedTripleCount),
       outputGraph: '',
       queryOptions: { source: 'rfc64-public-catalog-native-post-read' },
     });
   } catch (cause) {
     fail('catalog-native-receiver-activation', 'exact SWM post-read failed', cause);
   }
-  const readBackText = `${quadsToNQuads(readBack)}\n`;
-  if (readBackText !== projectionText) {
+  if (!readBackHoldsProjectionV1(projectionBytes, readBack)) {
+    const readBackText = `${quadsToNQuads(readBack)}\n`;
     const digest = (value: string) => createHash('sha256').update(value).digest('hex');
-    const setEqual = canonicalQuadSetV1(quads) === canonicalQuadSetV1(readBack);
-    if (!setEqual) {
-      fail(
-        'catalog-native-receiver-activation',
-        `exact SWM post-read differs from verified projection for ${kaUal}`
-          + ` expectedTriples=${expectedTripleCount} actualTriples=${readBack.length}`
-          + ` expectedBytes=${Buffer.byteLength(projectionText)}`
-          + ` actualBytes=${Buffer.byteLength(readBackText)}`
-          + ` expectedSha256=${digest(projectionText)}`
-          + ` actualSha256=${digest(readBackText)}`
-          + ` canonicalSetEqual=${setEqual}`,
-      );
-    }
+    fail(
+      'catalog-native-receiver-activation',
+      `exact SWM post-read differs from verified projection for ${kaUal}`
+        + ` expectedTriples=${expectedTripleCount} actualTriples=${readBack.length}`
+        + ` expectedBytes=${Buffer.byteLength(projectionText)}`
+        + ` actualBytes=${Buffer.byteLength(readBackText)}`
+        + ` expectedSha256=${digest(projectionText)}`
+        + ` actualSha256=${digest(readBackText)}`
+        + ' canonicalSetEqual=false',
+    );
   }
   await assertExactAuthorSealPostRead(store, sealBinding);
   return {
     swmGraph,
-    publicQuadsDigest: workspacePublicQuadsDigest(graphQuads),
+    // The digest of what the store holds, in the store's own spelling: later
+    // reads of this graph and of its verified copy are compared with it.
+    publicQuadsDigest: workspacePublicQuadsDigest(readBack),
     evidence: Object.freeze({
       kaId: row.kaId,
       catalogRowDigest: sealBinding.catalogRowDigest,
@@ -2255,11 +2519,6 @@ function compareQuads(
     || left.object.localeCompare(right.object)
     || left.subject.localeCompare(right.subject)
     || left.graph.localeCompare(right.graph);
-}
-
-/** RDF graph equality is set equality; triple insertion does not retain row order. */
-function canonicalQuadSetV1(quads: readonly Readonly<Quad>[]): string {
-  return [...new Set(quads.map(quadToNQuad))].sort().join('\n');
 }
 
 export function rfc64CatalogSignatureVariantDigestV1(

@@ -2,15 +2,16 @@ import {
   DKG_GOSSIP_MAX_MESSAGE_BYTES,
   parseDeterministicKnowledgeAssetUal,
 } from '@origintrail-official/dkg-core';
+import { EXACT_SYNC_GZIP_ENCODING, resolveExactSyncGzipProfile } from './wire-compression.js';
 
 /** One VM reconciliation slice deliberately fetches at most this many KAs. */
 export const MAX_EXACT_SYNC_ASSETS = 10;
 
 /**
- * A published assertion must already fit one DKG gossip application payload.
- * Apply that same per-asset wire ceiling to each compatibility phase so a
- * legacy responder that ignores the additive exact filter cannot turn a
- * narrow repair into an unbounded full-CG accumulation.
+ * Legacy multi-asset exact-sync admission budget. A gossip/staging transport
+ * ceiling is not a universal on-chain KA canonical-content validity rule.
+ * The singleton negotiated profile below separates bounded inflated named-
+ * graph wire bytes from unchanged root/count/version verification.
  */
 export const MAX_EXACT_SYNC_PHASE_BYTES_PER_ASSET = DKG_GOSSIP_MAX_MESSAGE_BYTES;
 export const MAX_EXACT_SYNC_PHASE_QUADS_PER_ASSET = 100_000;
@@ -65,16 +66,24 @@ export type ChallengePinnedExactAssetSelection = Extract<
   { readonly kind: 'challenge-pinned' }
 >;
 
-export function exactSyncPhaseAccumulationLimits(assetUals: readonly string[]): {
+export function exactSyncPhaseAccumulationLimits(
+  assetUals: readonly string[],
+  responseEncoding?: typeof EXACT_SYNC_GZIP_ENCODING,
+): {
   maxBytes: number;
   maxQuads: number;
+  maxHeapBytesEstimate?: number;
 } {
-  const assetCount = requireExactAssetUals(assetUals).length;
+  const normalizedAssetUals = requireExactAssetUals(assetUals);
+  const assetCount = normalizedAssetUals.length;
+  // This phase budget consumes an encoding already chosen for a durable phase.
+  const profile = resolveExactSyncGzipProfile({ assetUals: normalizedAssetUals, responseEncoding, phase: 'data' });
   return {
-    maxBytes: assetCount * MAX_EXACT_SYNC_PHASE_BYTES_PER_ASSET,
+    maxBytes: profile?.maxInflatedBytes ?? assetCount * MAX_EXACT_SYNC_PHASE_BYTES_PER_ASSET,
+    ...(profile ? { maxHeapBytesEstimate: profile.maxHeapBytesEstimate } : {}),
     // Align with the existing bounded exact-graph read contract so compact
     // wire data cannot expand into an unbounded retained JS object graph.
-    maxQuads: assetCount * MAX_EXACT_SYNC_PHASE_QUADS_PER_ASSET,
+    maxQuads: profile?.maxRows ?? assetCount * MAX_EXACT_SYNC_PHASE_QUADS_PER_ASSET,
   };
 }
 

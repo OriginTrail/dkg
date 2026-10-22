@@ -2,9 +2,9 @@ import { randomUUID } from '../../../lib/randomUUID.js';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useJourneyStore } from '../../../stores/journey.js';
 import { useProjectsStore } from '../../../stores/projects.js';
+import { useContextGraphInventory } from '../../../hooks/useContextGraphInventory.js';
 import {
   importFile,
-  type AgentIdentity,
   type LocalAgentChatAttachmentRef,
   type LocalAgentIntegration,
   type LocalAgentStreamEvent,
@@ -23,7 +23,6 @@ import {
 } from '../../../api.js';
 import { api } from '../../../api-wrapper.js';
 import { computeSelectableProjects, toSidebarIdentity } from '../../../lib/contextGraphSidebar.js';
-import { useCurrentAgent as useSharedCurrentAgentRaw } from '../../../hooks/useCurrentAgent.js';
 import { useVisibilityPolling } from '../../../hooks/useVisibilityPolling.js';
 import { buildAttachmentImportResultRefs, buildAttachmentImportSummary, buildAttachmentTurnSummary, draftToAttachmentRef, isSendableAttachmentDraft } from './attachments.js';
 import { buildChatContextEntries } from './chat-context.js';
@@ -52,10 +51,6 @@ import {
 } from './selection.js';
 import type { AgentInfo, ConnectionRow, LocalAgentAttachmentDraft, LocalAgentAttachmentStatus, LocalAgentMessage, LocalAgentSessionSummary } from './types.js';
 
-function useSharedCurrentAgent(): AgentIdentity | null {
-  return useSharedCurrentAgentRaw().data;
-}
-
 export function PanelRight() {
   const { stage, advance } = useJourneyStore();
   const [mode, setMode] = useState<'agents' | 'network' | 'sessions'>('agents');
@@ -64,11 +59,9 @@ export function PanelRight() {
   const [peerAgents, setPeerAgents] = useState<AgentInfo[]>([]);
   const [connections, setConnections] = useState<{ total: number; direct: number; relayed: number; rows: ConnectionRow[] }>({ total: 0, direct: 0, relayed: 0, rows: [] });
   const [peerLoading, setPeerLoading] = useState(true);
-  // Mirror Header — use the dedup'd shared hook so the panel doesn't
-  // race-fetch its own copy of the current agent on every mount
-  // (BUG-007). The boolean `loading` flag is intentionally ignored;
-  // callers below already null-check `currentAgent`.
-  const currentAgent = useSharedCurrentAgent();
+  // Inventory composes the same shared identity used by Header (BUG-007).
+  const { contextGraphs: availableProjects, loading: projectsLoading,
+    identity: { data: currentAgent } } = useContextGraphInventory();
 
   const [integrations, setIntegrations] = useState<LocalAgentIntegration[]>([]);
   const [selectedIntegrationId, setSelectedIntegrationId] = useState('openclaw');
@@ -100,8 +93,6 @@ export function PanelRight() {
   const localMessagesByConversationRef = useRef<Record<string, LocalAgentMessage[]>>({});
   const selectedIntegrationIdRef = useRef('openclaw');
   const selectedSessionIdRef = useRef<string | null>(getDefaultLocalAgentSessionId('openclaw'));
-  const availableProjects = useProjectsStore((state) => state.contextGraphs);
-  const projectsLoading = useProjectsStore((state) => state.loading);
   const activeProjectId = useProjectsStore((state) => state.activeProjectId);
   const setActiveProject = useProjectsStore((state) => state.setActiveProject);
 

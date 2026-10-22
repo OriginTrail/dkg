@@ -15,6 +15,11 @@ import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { SignerTxSerializer } from '../src/signer-tx-serializer.js';
+import {
+  ChainWriteAheadHookError,
+  getChainWriteAheadHookCause,
+  isChainWriteAheadHookError,
+} from '../src/write-ahead-hook-error.js';
 import { connectable } from './connectable.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
@@ -356,6 +361,29 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
     expect(send.calls).toEqual([]);
   });
 
+  it('keeps the hook error as the cause of the write-ahead wrapper, message unchanged (GH#2940)', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const signer = new ethers.Wallet(DEPLOYER_PK);
+    (a as any).broadcastSignedTransactionWithRetries = recorder(async () => undefined);
+    const hookError = Object.assign(new Error('WAL disk full'), { code: 'STORE_SCHEDULER_BUSY' });
+
+    const thrown = await (a as any).dispatchSerializedV10Write(
+      signer,
+      'publish',
+      async () => { throw hookError; },
+      async () => ({ signedTx: 'tx', txHash: '0xpre' }),
+      neverNull,
+    ).catch((error: unknown) => error);
+
+    expect(thrown).toBeInstanceOf(ChainWriteAheadHookError);
+    expect(isChainWriteAheadHookError(thrown)).toBe(true);
+    // Byte-for-byte the text callers and operators already see.
+    expect((thrown as Error).message).toBe('chain:writeahead hook failed before publish broadcast: WAL disk full');
+    // The original error — identity, so its own typed contract survives — rides as `cause`.
+    expect((thrown as Error).cause).toBe(hookError);
+    expect(getChainWriteAheadHookCause(thrown)).toBe(hookError);
+  });
+
   it('a failed write does not wedge the wallet — the next same-wallet write still runs', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     const signer = new ethers.Wallet(DEPLOYER_PK);
@@ -505,7 +533,7 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
   });
 
   it('forced re-approve (#888) routes through the caller-scoped approvalSender, never the public serializer', async () => {
-    // Pins the wiring `populateAndSignV10WithAllowanceRecovery` →
+    // Pins the wiring `prepareV10WithAllowanceRecovery` →
     // `ensureV10ApproveTrac(…, approvalSender)`: if the recovery path ever
     // fell back to the default `this.sendContractTransaction`, the in-lock
     // publish would re-enter the per-wallet serializer and self-deadlock.
@@ -523,15 +551,17 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
     (a as any).sendContractTransaction = publicSend;
     const scopedSend = recorder(async () => fakeReceipt('approve'));
     let populateCalls = 0;
-    (a as any).populateAndSignAcrossProviders = recorder(async () => {
+    (a as any).prepareAcrossProviders = recorder(async () => {
       populateCalls += 1;
       if (populateCalls === 1) {
         throw Object.assign(new Error('execution reverted'), { revert: { name: 'TooLowAllowance' } });
       }
-      return { signedTx: 'pub', txHash: '0xpub' };
+      return { transaction: { nonce: 1 }, signer };
     });
+    const signPreparedTransaction = recorder(async () => ({ signedTx: 'pub', txHash: '0xpub' }));
+    (a as any).signPreparedTransaction = signPreparedTransaction;
 
-    const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
+    const result = await (a as any).prepareV10WithAllowanceRecovery(
       signer,
       {} as any,
       'publish',
@@ -542,8 +572,9 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
       scopedSend,
     );
 
-    expect(result).toEqual({ signedTx: 'pub', txHash: '0xpub' });
+    expect(result).toEqual({ transaction: { nonce: 1 }, signer });
     expect(populateCalls).toBe(2);
+    expect(signPreparedTransaction.calls).toEqual([]); // the publish signs the result, once
     expect(publicSend.calls).toEqual([]);
     expect(scopedSend.calls).toHaveLength(1);
     expect(scopedSend.calls[0].slice(1, 2)).toEqual(['approve']);

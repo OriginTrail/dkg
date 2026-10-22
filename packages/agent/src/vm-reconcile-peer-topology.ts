@@ -1,6 +1,10 @@
+/**
+ * @deprecated Compatibility codecs for historical custom subscription-store
+ * records. These exports remain loadable; the recovery runtime does not
+ * consume topology keys or cached clean-miss evidence.
+ */
 import type {
   VmReconcilePeerTopology,
-  VmReconcilePeerTopologyEvidence,
   VmReconcilePeerTopologyPeer,
 } from './dkg-agent-types.js';
 
@@ -26,7 +30,7 @@ export function createVmReconcilePeerTopology(input: {
   };
 }
 
-/** One agent-owned parser for live and persistence-adapter topology input. */
+/** Decode historical persistence-adapter topology input. */
 export function parseVmReconcilePeerTopology(value: unknown): VmReconcilePeerTopology | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const topology = value as Record<string, unknown>;
@@ -142,57 +146,4 @@ export function createVmReconcileCleanMissPeerIds(
   if (topology.kind === 'unreadable') return [];
   const topologyPeers = new Set(topology.peers.map((peer) => peer.peerId));
   return [...new Set(peerIds)].filter((peerId) => topologyPeers.has(peerId));
-}
-
-/**
- * Exact topology preserves the existing local-generation backoff. A smaller
- * topology is reusable only when every remaining peer produced a clean SWM
- * completion while the miss was recorded; a connected-but-skipped peer is not
- * absence evidence.
- */
-export function canReuseVmReconcilePeerTopology(
-  cached: VmReconcilePeerTopologyEvidence,
-  current: VmReconcilePeerTopology,
-): boolean {
-  const cachedTopology = cached.topology;
-  if (cachedTopology.kind === 'unreadable' || current.kind === 'unreadable') {
-    return cachedTopology.kind === current.kind;
-  }
-  if (
-    cachedTopology.preferredPeerId !== current.preferredPeerId
-    || cachedTopology.privateOnly !== current.privateOnly
-  ) {
-    return false;
-  }
-
-  const peersMatch = (
-    left: VmReconcilePeerTopologyPeer,
-    right: VmReconcilePeerTopologyPeer,
-  ): boolean => left.peerId === right.peerId && left.core === right.core;
-  if (
-    cachedTopology.peers.length === current.peers.length
-    && current.peers.every((peer, index) => peersMatch(cachedTopology.peers[index]!, peer))
-  ) {
-    return true;
-  }
-
-  let cachedIndex = 0;
-  for (const peer of current.peers) {
-    while (
-      cachedIndex < cachedTopology.peers.length
-      && cachedTopology.peers[cachedIndex]?.peerId !== peer.peerId
-    ) {
-      cachedIndex += 1;
-    }
-    const cachedPeer = cachedTopology.peers[cachedIndex];
-    if (
-      !cachedPeer
-      || !peersMatch(cachedPeer, peer)
-    ) {
-      return false;
-    }
-    cachedIndex += 1;
-  }
-  const provenCleanMisses = new Set(cached.cleanMissPeerIds);
-  return current.peers.every((peer) => provenCleanMisses.has(peer.peerId));
 }

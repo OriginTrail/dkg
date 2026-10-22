@@ -97,7 +97,9 @@ function fakeCatalogAgent(options: FakeCatalogAgentOptions = {}) {
       accessPolicy: 'private' as const,
     })),
     resolveAgentByToken: vi.fn(() => undefined),
-    canReadContextGraph: vi.fn(async () => true),
+    resolveContextGraphReadAuthority: vi.fn(async (): Promise<import('@origintrail-official/dkg-agent').ContextGraphReadAuthorityDecision> => ({
+      outcome: 'allowed', grantScope: 'caller', source: 'registered-chain', reason: 'chain-participant', metadataBootstrap: 'forbidden',
+    })),
     _test: { assertions, assertionGraphs, registered },
   };
 }
@@ -215,7 +217,9 @@ describe('/api/profile/query-catalog/read', () => {
   it('denies an agent-scoped private catalog read before querying any graph', async () => {
     const agent = fakeCatalogAgent();
     agent.resolveAgentByToken.mockReturnValue('0x1111111111111111111111111111111111111111');
-    agent.canReadContextGraph.mockResolvedValue(false);
+    agent.resolveContextGraphReadAuthority.mockResolvedValue({
+      outcome: 'denied', grantScope: 'none', source: 'registered-chain', reason: 'agent-not-in-chain-roster', metadataBootstrap: 'forbidden',
+    });
     const { context, response } = readContext(agent);
     context.requestAgentAddress = '0x1111111111111111111111111111111111111111';
     context.authentication = requestAuthentication({
@@ -228,9 +232,10 @@ describe('/api/profile/query-catalog/read', () => {
     await handleMemoryRoutes(context);
 
     expect(response.statusCode).toBe(403);
-    expect(agent.canReadContextGraph).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, {
+    expect(agent.resolveContextGraphReadAuthority).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, expect.objectContaining({
       callerAgentAddress: '0x1111111111111111111111111111111111111111',
-    });
+      signal: expect.any(AbortSignal),
+    }));
     expect(agent.query).not.toHaveBeenCalled();
     expect(agent.store.query).not.toHaveBeenCalled();
   });
@@ -238,7 +243,9 @@ describe('/api/profile/query-catalog/read', () => {
   it('keeps an auth-disabled agent principal behind the private-graph ACL', async () => {
     const agentAddress = '0x1111111111111111111111111111111111111111';
     const agent = fakeCatalogAgent();
-    agent.canReadContextGraph.mockResolvedValue(false);
+    agent.resolveContextGraphReadAuthority.mockResolvedValue({
+      outcome: 'denied', grantScope: 'none', source: 'registered-chain', reason: 'agent-not-in-chain-roster', metadataBootstrap: 'forbidden',
+    });
     const { context, response } = readContext(agent);
     context.authentication = requestAuthentication({
       kind: 'agent',
@@ -250,16 +257,18 @@ describe('/api/profile/query-catalog/read', () => {
     await handleMemoryRoutes(context);
 
     expect(response.statusCode).toBe(403);
-    expect(agent.canReadContextGraph).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, {
-      callerAgentAddress: agentAddress,
-    });
+    expect(agent.resolveContextGraphReadAuthority).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, expect.objectContaining({
+      callerAgentAddress: agentAddress, signal: expect.any(AbortSignal),
+    }));
     expect(agent.query).not.toHaveBeenCalled();
     expect(agent.store.query).not.toHaveBeenCalled();
   });
 
   it('reads the registered meta subgraph through all Context Graph layers', async () => {
     const agent = fakeCatalogAgent();
-    agent.canReadContextGraph.mockResolvedValue(false);
+    agent.resolveContextGraphReadAuthority.mockResolvedValue({
+      outcome: 'denied', grantScope: 'none', source: 'registered-chain', reason: 'agent-not-in-chain-roster', metadataBootstrap: 'forbidden',
+    });
     const { context, response } = readContext(agent);
     context.authentication = requestAuthentication({ kind: 'nodeOperator', token: 'node-admin-token' });
     context.validTokens = new Set(['node-admin-token']);
@@ -267,7 +276,7 @@ describe('/api/profile/query-catalog/read', () => {
     await handleMemoryRoutes(context);
 
     expect(response.statusCode).toBe(200);
-    expect(agent.canReadContextGraph).not.toHaveBeenCalled();
+    expect(agent.resolveContextGraphReadAuthority).not.toHaveBeenCalled();
     expect(agent.query).toHaveBeenCalledTimes(3);
     for (const view of ['working-memory', 'shared-working-memory', 'verifiable-memory']) {
       expect(agent.query).toHaveBeenCalledWith(

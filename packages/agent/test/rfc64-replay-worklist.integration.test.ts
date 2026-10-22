@@ -8,6 +8,7 @@ import {
 } from '../src/rfc64/public-catalog-transport-v1.js';
 import { unsignedOpenContextGraphPolicyEnvelopeV1 } from
   '../src/rfc64/open-catalog-policy-v1.js';
+import { createAppliedCatalogHeadsSnapshotV1 } from '../src/rfc64/inventory-v1/index.js';
 import {
   createRfc64RolloutAgentHarness,
   RFC64_ROLLOUT_CONTEXT_GRAPH_ID as CONTEXT_GRAPH_ID,
@@ -100,17 +101,22 @@ describe('RFC-64 replay worklist lifecycle', () => {
         heads: Object.freeze([]),
       }));
     let idleCalls = 0;
-    vi.spyOn(service, 'whenReceiverIdle').mockImplementation(async () => {
-      idleCalls += 1;
-      if (idleCalls === 1) {
-        edge.markRfc64CatalogReplayPeerPendingV1(CONTEXT_GRAPH_ID, peer);
-      }
-    });
+    const whenIdle = vi.spyOn(service, 'whenReceiverIdleForContextGraph')
+      .mockImplementation(async () => {
+        idleCalls += 1;
+        if (idleCalls === 1) {
+          edge.markRfc64CatalogReplayPeerPendingV1(CONTEXT_GRAPH_ID, peer);
+        }
+      });
 
     await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
       CONTEXT_GRAPH_ID,
     )).resolves.toEqual({ requested: 2, failed: 0 });
     expect(requestReplay).toHaveBeenCalledTimes(2);
+    // The replay parks on ITS OWN graph: a wait keyed by any other string reads
+    // idle at once, so the id is pinned through runtime -> adapter -> service.
+    expect(whenIdle.mock.calls.map(([contextGraphId]) => contextGraphId))
+      .toEqual([CONTEXT_GRAPH_ID, CONTEXT_GRAPH_ID]);
   });
 
   it('does not let an older same-peer fence release a newer replay demand', async () => {
@@ -133,7 +139,7 @@ describe('RFC-64 replay worklist lifecycle', () => {
     expect(newer).not.toBeNull();
     older!.release();
 
-    await expect(edge.continueRfc64CatalogHeadReplayRecoveryV1(
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
       CONTEXT_GRAPH_ID,
     )).resolves.toEqual({ requested: 1, failed: 0 });
     expect(requestReplay).toHaveBeenCalledOnce();
@@ -174,7 +180,7 @@ describe('RFC-64 replay worklist lifecycle', () => {
     expect(newer).not.toBeNull();
     older!.release();
 
-    await expect(edge.continueRfc64CatalogHeadReplayRecoveryV1(
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
       CONTEXT_GRAPH_ID,
     )).resolves.toEqual({ requested: 1, failed: 0 });
     expect(requestReplay).toHaveBeenCalledOnce();
@@ -198,14 +204,18 @@ describe('RFC-64 replay worklist lifecycle', () => {
           heads: Object.freeze([]),
         });
       });
-    vi.spyOn(service, 'whenReceiverIdle').mockImplementation(async () => {
-      edge.markRfc64CatalogReplayPeerPendingV1(CONTEXT_GRAPH_ID, peer);
-    });
+    const whenIdle = vi.spyOn(service, 'whenReceiverIdleForContextGraph')
+      .mockImplementation(async () => {
+        edge.markRfc64CatalogReplayPeerPendingV1(CONTEXT_GRAPH_ID, peer);
+      });
 
     await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
       CONTEXT_GRAPH_ID,
     )).resolves.toEqual({ requested: 64, failed: 1 });
     expect(requestReplay).toHaveBeenCalledTimes(64);
+    expect(whenIdle).toHaveBeenCalledTimes(64);
+    expect(new Set(whenIdle.mock.calls.map(([contextGraphId]) => contextGraphId)))
+      .toEqual(new Set([CONTEXT_GRAPH_ID]));
     await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
       expect.objectContaining({
         contextGraphId: CONTEXT_GRAPH_ID,
@@ -295,7 +305,7 @@ describe('RFC-64 replay worklist lifecycle', () => {
       ...persistence,
       inventory: Object.freeze({
         ...persistence.inventory,
-        listAppliedCatalogHeadsV1: () => {
+        readAppliedCatalogHeadsSnapshotV1: () => {
           parityReads += 1;
           if (parityReads === 1) {
             edge.markRfc64CatalogReplayPeerPendingV1(
@@ -303,7 +313,7 @@ describe('RFC-64 replay worklist lifecycle', () => {
               '12D3KooWReplayParityBoundaryPeer64',
             );
           }
-          return [];
+          return createAppliedCatalogHeadsSnapshotV1([]);
         },
       }),
     });
@@ -336,12 +346,12 @@ describe('RFC-64 replay worklist lifecycle', () => {
       ...persistence,
       inventory: Object.freeze({
         ...persistence.inventory,
-        listAppliedCatalogHeadsV1: () => {
+        readAppliedCatalogHeadsSnapshotV1: () => {
           parityReads += 1;
           if (parityReads === 1) {
             edge.markRfc64CatalogReplayPeerPendingV1(CONTEXT_GRAPH_ID, peerB);
           }
-          return [];
+          return createAppliedCatalogHeadsSnapshotV1([]);
         },
       }),
     });

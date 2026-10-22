@@ -11,13 +11,16 @@ import {
   OxigraphWorkerStore,
   SharedMemoryLiteralBlobStore,
   UnsupportedTripleStoreCapabilityError,
+  buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
+  buildAtomicSubjectReplaceUpdate,
   tryReplaceGraphAndSubjectAtomically,
   tryReplaceGraphAtomically,
   type Quad,
   type QueryOptions,
   type TripleStore,
 } from '../src/index.js';
+import { formatGraphBlock } from '../src/atomic-graph-replace.js';
 
 const TARGET = 'did:dkg:context-graph:atomic/_shared_memory/0xabc/7';
 const OTHER = 'urn:test:unrelated';
@@ -357,5 +360,47 @@ describe('atomic named-graph replacement', () => {
       object: '"v"',
       graph: TARGET,
     }])).toThrow(/canonical skolem IRIs/i);
+  });
+
+  it('renders every triple, predicate included, through the one term serializer', () => {
+    const quads: Quad[] = [
+      { subject: '<urn:s>', predicate: '<urn:p>', object: '"v"@en', graph: TARGET },
+      { subject: 'urn:s', predicate: 'urn:q', object: '"42"^^http://www.w3.org/2001/XMLSchema#integer', graph: TARGET },
+    ];
+    const block = formatGraphBlock('urn:staging', quads);
+    expect(block).toBe(
+      '  GRAPH <urn:staging> {\n' +
+      '    <urn:s> <urn:p> "v"@en .\n' +
+      '    <urn:s> <urn:q> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n' +
+      '  }',
+    );
+    // The graph replacement stages exactly that block.
+    const { update, stagingGraph } = buildAtomicGraphReplaceUpdate(TARGET, quads);
+    expect(update).toContain(`INSERT DATA {\n${formatGraphBlock(stagingGraph!, quads)}\n};\n`);
+
+    // A predicate is an IRI: neither a blank node nor a literal reaches the store.
+    expect(() => formatGraphBlock('urn:staging', [{ ...quads[0], predicate: '_:p' }]))
+      .toThrow(/predicate cannot be a blank node/);
+    expect(() => formatGraphBlock('urn:staging', [{ ...quads[0], predicate: '"p"' }]))
+      .toThrow(/predicate must be an IRI/);
+    expect(() => formatGraphBlock('urn:staging', [{ ...quads[0], predicate: 'urn:p q' }]))
+      .toThrow(/^Unsafe or empty IRI value/);
+  });
+
+  it.each([
+    ['a blank node', '_:p', /predicate cannot be a blank node/],
+    ['a literal', '"p"', /predicate must be an IRI/],
+    ['a malformed IRI', 'urn:p q', /^Unsafe or empty IRI value/],
+  ])('rejects %s predicate through every public atomic builder', (_name, predicate, error) => {
+    const bad: Quad = { subject: 'urn:s', predicate, object: '"v"', graph: TARGET };
+    const meta = 'urn:test:meta';
+    const metaQuad: Quad = { subject: 'urn:meta:s', predicate: 'urn:p', object: '"m"', graph: meta };
+    expect(() => buildAtomicGraphReplaceUpdate(TARGET, [bad])).toThrow(error);
+    expect(() => buildAtomicGraphAndSubjectReplaceUpdate(TARGET, [bad], meta, 'urn:meta:s', [metaQuad]))
+      .toThrow(error);
+    expect(() => buildAtomicGraphAndSubjectReplaceUpdate(
+      TARGET, [quad('urn:s', '"v"')], meta, 'urn:meta:s', [{ ...metaQuad, predicate }],
+    )).toThrow(error);
+    expect(() => buildAtomicSubjectReplaceUpdate(TARGET, 'urn:s', [bad])).toThrow(error);
   });
 });

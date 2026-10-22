@@ -1,3 +1,5 @@
+import { isPublicSnapshotMode } from '@origintrail-official/dkg-agent/public-snapshot-mode';
+import { handleGenuiRender } from './query-genui.js';
 // daemon/routes/query.ts
 //
 // Route handlers for SPARQL query, GenUI render, catchup-status, verify, endorse, CCL policy + eval.
@@ -17,7 +19,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { isClientQueryFailure } from "./query-error.js";
+import { respondToQueryFailure } from "./query-error.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFile,
@@ -58,7 +60,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, classifySparqlOperation } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, classifySparqlOperation } from '@origintrail-official/dkg-core';
 import {
   findReservedSubjectPrefix,
   isSkolemizedUri,
@@ -70,7 +72,6 @@ import {
   handleNodeUIRequest,
   ChatMemoryManager,
   LogPushWorker,
-  LlmClient,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
 import {
@@ -194,14 +195,12 @@ import {
   parseRequiredSignatures,
   normalizeDetectedContentType,
   currentBundledMarkItDownAssetName,
-  bindingValue,
   carryForwardBundledMarkItDownBinary,
 } from '../manifest.js';
 import {
   resolveNameToPeerId,
   jsonResponse,
   safeDecodeURIComponent,
-  safeParseJson,
   validateOptionalSubGraphName,
   validateRequiredContextGraphId,
   validateEntities,
@@ -227,6 +226,8 @@ import {
   classifyClientError,
   sanitizeRevertMessage,
   respondIfStoreUnavailable,
+  isContextGraphReadAuthorityUnavailable,
+  respondIfContextGraphReadAuthorityUnavailable,
 } from '../http-utils.js';
 import {
   normalizeRepo,
@@ -331,7 +332,12 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import { actorFromRequestContext, type RequestContext } from './context.js';
+import { mayFollowOnChainIdToRow } from '../context-graph-on-chain-id-gate.js';
+import {
+  admitContextGraphFollow,
+  type ContextGraphFollowCaller,
+} from '../context-graph-subscription-admission.js';
 import {
   API_QUERY_CALLER_DISCONNECTED,
   createStoreQueryRequestLifecycle,
@@ -413,13 +419,66 @@ function parseVerifyTimeoutMs(
   return { value };
 }
 
+/**
+ * The latest catch-up job for a Context Graph id that `caller` may see. The
+ * id as given wins; an on-chain id (`32`, `#32`) then finds the job of the row
+ * it names, under its cleartext id or its name hash (adoption can move a job
+ * between the two). A job names its graph, so a job that names a cleartext id
+ * the caller did not give is returned only to a caller who may follow the id
+ * there: an on-chain id that finds a cleartext row, or a name hash this node
+ * resolved. A refusal returns `undefined`, which the route answers exactly as
+ * an id with no job.
+ */
+export async function latestCatchupJobIdFor(
+  agent: DKGAgent,
+  catchupTracker: CatchupTracker,
+  contextGraphId: string,
+  caller: ContextGraphFollowCaller,
+): Promise<string | undefined> {
+  const direct = catchupTracker.latestByContextGraph.get(contextGraphId);
+  if (direct !== undefined) {
+    // A job found by a resolved name hash names the cleartext id: the one it
+    // continued under, or, once the hash resolved, the one its identity note
+    // reports. A lookup by the cleartext id itself follows nothing.
+    const cleartextId = catchupTracker.jobs.get(direct)?.resolvedContextGraphId
+      ?? agent.resolveContextGraphIdAlias?.(contextGraphId)
+      ?? null;
+    if (cleartextId === null || cleartextId === contextGraphId) return direct;
+    return await admitContextGraphFollow(agent, cleartextId, caller) === 'allowed' ? direct : undefined;
+  }
+  const lookup = agent.lookupContextGraphOnChainIdReference?.(contextGraphId);
+  if (lookup?.kind !== 'held') return undefined;
+  const jobId = catchupTracker.latestByContextGraph.get(lookup.contextGraphId)
+    ?? catchupTracker.latestByContextGraph.get(lookup.nameHash);
+  if (jobId === undefined) return undefined;
+  return await mayFollowOnChainIdToRow(agent, lookup, caller) ? jobId : undefined;
+}
+
+/**
+ * Whether `caller` may read `job` by its job id. The id is no proof: while the
+ * name hash a job was created under is unresolved, any caller can learn it.
+ * Once the job names a cleartext id other than the one it was created under,
+ * only a caller who may follow the hash to that id sees the job. A refusal is
+ * answered exactly as an unknown job id.
+ */
+async function mayReadCatchupJobById(
+  agent: DKGAgent,
+  job: CatchupJob,
+  caller: ContextGraphFollowCaller,
+): Promise<boolean> {
+  const cleartextId = job.resolvedContextGraphId
+    ?? agent.resolveContextGraphIdAlias?.(job.contextGraphId)
+    ?? null;
+  if (cleartextId === null || cleartextId === job.contextGraphId) return true;
+  return await admitContextGraphFollow(agent, cleartextId, caller) === 'allowed';
+}
+
 export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
     res,
     agent,
     publisherControl,
-    config,
     startedAt,
     dashDb,
     opWallets,
@@ -462,6 +521,9 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     const contextGraphId = parsed.contextGraphId === 'all'
       ? undefined
       : parsed.contextGraphId;
+    if (parsed.chainEvidenceMode !== undefined && !isPublicSnapshotMode(parsed.chainEvidenceMode)) {
+      return jsonResponse(res, 400, { error: 'Invalid chainEvidenceMode; expected core-cache or rpc-only' });
+    }
     const graphSuffix = parsed.graphSuffix;
     const includeSharedMemory =
       parsed.includeSharedMemory ?? parsed.includeWorkspace;
@@ -542,6 +604,9 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       details: { sparql: sparql.slice(0, 200) },
     });
     tracker.startPhase(ctx, "parse");
+    // Declared outside the try so the catch can tell a caller abort apart from
+    // a genuine server-side failure.
+    let queryLifecycle: ApiQueryRequestLifecycle | undefined;
     try {
       tracker.completePhase(ctx, "parse");
       tracker.startPhase(ctx, "execute");
@@ -599,12 +664,13 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       // and SWM catch-up (issue #1989). Thread connection cancellation all the
       // way to the SPARQL adapter: if the HTTP caller times out or disconnects,
       // its queued/in-flight store request must not remain as orphan work.
-      const queryLifecycle = createApiQueryRequestLifecycle(req, res);
+      queryLifecycle = createApiQueryRequestLifecycle(req, res);
 
       let result;
       try {
         result = await agent.query(sparql, {
           contextGraphId,
+          chainEvidenceMode: parsed.chainEvidenceMode,
           graphSuffix,
           includeSharedMemory,
           includeContextGraphPartitions,
@@ -630,7 +696,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
           operationCtx: ctx,
         });
       } finally {
-        queryLifecycle.dispose();
+        queryLifecycle?.dispose();
       }
       const execDur = Date.now() - execT0;
       tracker.completePhase(ctx, "execute");
@@ -653,6 +719,21 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         if (!res.writableEnded) res.end();
         return;
       }
+      if (isContextGraphReadAuthorityUnavailable(err)) {
+        // The authority resolver folds ANY failure of its sources — including
+        // the abort raised when this caller disconnected — into `unavailable`,
+        // which drops the API_QUERY_CALLER_DISCONNECTED code checked above. An
+        // aborted request is a cancellation, not a retryable server failure:
+        // classify it as such instead of writing a 503 to a dead socket.
+        if (queryLifecycle?.signal.aborted) {
+          tracker.cancel(ctx, err);
+          if (!res.writableEnded) res.end();
+          return;
+        }
+        respondIfContextGraphReadAuthorityUnavailable(res, err, ctx);
+        tracker.fail(ctx, err);
+        return;
+      }
       const storeUnavailableOutcome = respondIfStoreUnavailable(res, err);
       if (storeUnavailableOutcome !== null) {
         // Pre-dispatch shedding is a cancellation; a store deadline may have
@@ -663,202 +744,16 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         return;
       }
       tracker.fail(ctx, err);
-      const msg = err?.message ?? "";
-      // #1758 — one classifier: a typed upstream status decides, otherwise
-      // legacy message families apply. See ./query-error.ts.
-      if (isClientQueryFailure(err)) {
-        return jsonResponse(res, 400, { error: msg });
-      }
+      // #1758 — one policy module answers a failed query: a rejection of the
+      // caller's own SPARQL is a 400, a withheld unscoped result a retryable
+      // 503. See ./query-error.ts.
+      if (respondToQueryFailure(res, err)) return;
       throw err;
     }
   }
 
-  // POST /api/genui/render  { contextGraphId, entityUri, libraryPrompt }
-  //
-  // Streams OpenUI Lang deltas over Server-Sent Events. The UI registers
-  // the component library client-side with @openuidev/react-lang and
-  // passes its `library.prompt()` text up; the daemon does the heavy
-  // lifting — resolving triples, reading the profile hint for the entity's
-  // rdf:type, composing the messages, and piping LlmClient stream events.
-  if (req.method === "POST" && path === "/api/genui/render") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = safeParseJson(body, res);
-    if (!parsed) return;
-    const { contextGraphId, entityUri, libraryPrompt } = parsed;
-    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
-    if (typeof entityUri !== "string" || !entityUri.trim()) {
-      return jsonResponse(res, 400, { error: 'Missing "entityUri"' });
-    }
-    if (typeof libraryPrompt !== "string" || !libraryPrompt.trim()) {
-      return jsonResponse(res, 400, { error: 'Missing "libraryPrompt"' });
-    }
-    if (!config.llm?.apiKey) {
-      return jsonResponse(res, 503, {
-        error: 'LLM not configured. Set an API key in Settings to enable GenUI.',
-      });
-    }
-
-    // Fetch entity triples.
-    // The entity's data lives in the sub-graph's named assertion graph, so
-    // we must wrap the pattern in GRAPH ?g — otherwise we'd only see the
-    // default graph, which is empty for these imports. DISTINCT because
-    // promoted triples can appear under both WM and SWM/VM named graphs
-    // for the same sub-graph.
-    let triples: Array<{ p: string; o: string }> = [];
-    let entityRdfType: string | null = null;
-    try {
-      // Stripping angle brackets is only ergonomic ("accept <uri> or uri"),
-      // not sanitisation — a crafted input containing `>` or whitespace can
-      // still break out of the interpolated `<…>`. `sparqlIri` runs
-      // `assertSafeIri` before wrapping.
-      const entityIri = entityUri.replace(/^<|>$/g, '');
-      let safeEntityIri: string;
-      try {
-        safeEntityIri = sparqlIri(entityIri);
-      } catch {
-        return jsonResponse(res, 400, {
-          error: `Unsafe entityUri: ${entityUri}`,
-        });
-      }
-      const triplesResult = await agent.query(
-        `SELECT DISTINCT ?p ?o WHERE { GRAPH ?g { ${safeEntityIri} ?p ?o } } LIMIT 200`,
-        { contextGraphId },
-      );
-      // `agent.query()` can return bindings as SPARQL-JSON objects
-      // (`{value, type, …}`) once the result has passed through the
-      // normaliser — stringifying them directly produces "[object Object]"
-      // and wrecks the downstream rdf:type lookup / LLM prompt. See
-      // `bindingValue` near the top of this file.
-      triples = (triplesResult?.bindings ?? []).map((row: any) => ({
-        p: bindingValue(row.p),
-        o: bindingValue(row.o),
-      }));
-      const typeT = triples.find(
-        (t) => t.p === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
-      );
-      if (typeT) entityRdfType = typeT.o;
-    } catch (err: any) {
-      if (respondIfStoreUnavailable(res, err) !== null) return;
-      return jsonResponse(res, 500, {
-        error: `Failed to fetch entity triples: ${err.message}`,
-      });
-    }
-
-    if (triples.length === 0) {
-      return jsonResponse(res, 404, {
-        error: `No triples found for <${entityUri}> in ${contextGraphId}`,
-      });
-    }
-
-    // Fetch the profile's detailHint for this type from the `meta` sub-graph.
-    // Same GRAPH ?g reasoning as above — the profile lives in a named
-    // assertion graph under `.../meta/assertion/...`, not in the default.
-    let detailHint: string | null = null;
-    let entityTypeLabel: string | null = null;
-    if (entityRdfType) {
-      // `entityRdfType` came from the quadstore as the value of `rdf:type`,
-      // so it's normally a safe IRI — but crafted imported data could in
-      // principle smuggle unsafe chars through. Validate before interpolating.
-      let safeTypeIri: string | null = null;
-      try {
-        safeTypeIri = sparqlIri(entityRdfType);
-      } catch {
-        safeTypeIri = null;
-      }
-      if (safeTypeIri) {
-        try {
-          const hintResult = await agent.query(
-            `
-              SELECT ?hint ?label WHERE {
-                GRAPH ?g {
-                  ?binding <http://dkg.io/ontology/profile/forType> ${safeTypeIri} ;
-                           <http://dkg.io/ontology/profile/detailHint> ?hint .
-                  OPTIONAL { ?binding <http://dkg.io/ontology/profile/label> ?label }
-                }
-              } LIMIT 1
-            `,
-            { contextGraphId, subGraphName: 'meta' },
-          );
-          const row = hintResult?.bindings?.[0];
-          if (row) {
-            const hintRaw = bindingValue(row.hint);
-            detailHint = hintRaw.replace(/^"|"$/g, '').replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
-            if (row.label) {
-              const labelRaw = bindingValue(row.label);
-              entityTypeLabel = labelRaw.replace(/^"|"$/g, '').replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
-            }
-          }
-        } catch {
-          // meta sub-graph may be missing — fall through, LLM still has triples.
-        }
-      }
-    }
-
-    // Compose the prompt
-    const systemPrompt =
-      libraryPrompt +
-      `\n\n# Task\n` +
-      `You will be given an RDF entity from a DKG context graph, described by its triples (predicate -> object). ` +
-      `Compose a single OpenUI Lang response that renders a rich, domain-appropriate detail view of this entity ` +
-      `using only components from the library above.\n` +
-      `\n## Rules\n` +
-      `- Output OpenUI Lang only. No prose, no markdown fences, no commentary.\n` +
-      `- Use the EntityDetail root if the library declares one; otherwise start with whatever the library's root wants.\n` +
-      `- Extract display values from the literal objects (strip XSD datatype suffixes).\n` +
-      `- If URI objects look like "urn:dkg:...", treat them as links to other entities.\n` +
-      `- Prefer grouping: header card -> stats grid -> related lists.\n` +
-      `- Keep it compact — no more than ~12 child blocks.\n`;
-
-    const userMessage = [
-      `Entity URI: ${entityUri}`,
-      entityRdfType ? `rdf:type: ${entityRdfType}${entityTypeLabel ? ` (${entityTypeLabel})` : ''}` : '',
-      detailHint ? `\nProfile hint for this type:\n${detailHint}` : '',
-      `\nTriples (${triples.length}):\n` + triples.slice(0, 120).map(t => `  ${t.p}  ${t.o}`).join('\n'),
-      triples.length > 120 ? `  … (${triples.length - 120} more triples truncated)` : '',
-    ].filter(Boolean).join('\n');
-
-    // Start SSE stream
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-    });
-
-    const client = new LlmClient();
-    const sendEvent = (type: string, data: unknown) => {
-      res.write(`event: ${type}\n`);
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
-    };
-
-    sendEvent('start', { entityUri, entityRdfType, entityTypeLabel });
-    try {
-      const events = client.stream({
-        config: config.llm!,
-        request: {
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userMessage },
-          ],
-          stream: true,
-          temperature: 0.3,
-          maxTokens: 1500,
-        },
-      });
-      for await (const ev of events) {
-        if (ev.type === 'text_delta') {
-          sendEvent('delta', { text: ev.delta });
-        } else if (ev.type === 'final') {
-          sendEvent('final', { content: ev.message.content ?? '' });
-        } else if (ev.type === 'error') {
-          sendEvent('error', { error: ev.error });
-        }
-      }
-      sendEvent('done', {});
-    } catch (err: any) {
-      sendEvent('error', { error: err?.message ?? String(err) });
-    } finally {
-      res.end();
-    }
+  if (req.method === 'POST' && path === '/api/genui/render') {
+    await handleGenuiRender(ctx);
     return;
   }
 
@@ -944,14 +839,20 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       });
     }
 
+    const caller = {
+      isNodeAdmin: canAdministerNode(authentication),
+      agentAddress: actorFromRequestContext(ctx).effectiveAgentAddress,
+    };
     const jobId =
       jobIdParam ??
-      (contextGraphId ? catchupTracker.latestByContextGraph.get(contextGraphId) : undefined);
+      (contextGraphId
+        ? await latestCatchupJobIdFor(agent, catchupTracker, contextGraphId, caller)
+        : undefined);
     if (!jobId) {
       return jsonResponse(res, 404, { error: "No catch-up job found" });
     }
     const job = catchupTracker.jobs.get(jobId);
-    if (!job) {
+    if (!job || (jobIdParam !== null && !await mayReadCatchupJobById(agent, job, caller))) {
       return jsonResponse(res, 404, {
         error: `Catch-up job "${jobId}" not found`,
       });
@@ -959,7 +860,8 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
 
     return jsonResponse(res, 200, toCatchupStatusResponse(
       job,
-      agent.getRfc64SelectedSwmGraphSyncStatus(job.contextGraphId),
+      agent.getRfc64SelectedSwmGraphSyncStatus(job.resolvedContextGraphId ?? job.contextGraphId),
+      agent.describeContextGraphIdentity?.(job.contextGraphId),
     ));
   }
 

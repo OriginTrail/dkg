@@ -9,6 +9,13 @@ import { runVitestLanes, runVitestRow } from '../../ci/run-vitest-lanes.mjs';
 
 const workflow = () => parse(fs.readFileSync(new URL('../../../.github/workflows/ci.yml', import.meta.url), 'utf8'));
 test('the real workflow consumes emitted matrices and canonical row execution', () => validateCiLaneWorkflow(workflow()));
+test('topology keeps weighted runners, bounded supporting concurrency and utilities in the core row', () => {
+  assert.equal(ciJobRow('tornado-core', 1).runner, 'weighted');
+  assert.equal(ciJobRow('bura-cli', 0).runner, 'weighted');
+  assert.equal(ciJobRow('kosava-supporting').concurrency, 3);
+  assert.equal(COVERAGE_JOBS['tornado-core']['http-utils'], 1);
+  assert.equal(COVERAGE_JOBS['tornado-core']['rdf-utils'], 1);
+});
 test('every executable topology lane has explicit inventory semantics', () => {
   for (const { job } of Object.values(CI_LANE_TOPOLOGY)) {
     assert.equal(typeof TEST_LANE_METADATA[job]?.layer, 'string', job);

@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { api } from '../../../api-wrapper.js';
-import { listJoinRequests, approveJoinRequest, rejectJoinRequest, type AgentIdentity, type PendingJoinRequest } from '../../../api.js';
+import { listJoinRequests, approveJoinRequest, rejectJoinRequest, type PendingJoinRequest } from '../../../api.js';
 import { useMemoryEntities } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfile } from '../../../hooks/useProjectProfile.js';
 import { SubGraphBar } from '../../../components/SubGraphBar.js';
@@ -8,6 +8,7 @@ import { canonicalAgentDid, normalizeAccessPolicy } from '../../../lib/contextGr
 import { layerNoun, useLayerTriples, useCanonicalTriples, type LayerView } from '../helpers.js';
 import { StatStrip } from '../../../components/ContextGraphPrimitives.js';
 import { useNodeEvents } from '../../../hooks/useNodeEvents.js';
+import { overviewRoleState, type OverviewAgentIdentity, type OverviewAgentStatus, type OverviewParticipantsStatus } from './overview-role.js';
 
 export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onRefresh, onNewProgram }: {
   active: LayerView;
@@ -222,88 +223,6 @@ export function ProjectHeaderStrip({
 }
 
 // ─── Project Overview Card ───────────────────────────────────
-
-type OverviewRoleState = {
-  label: string;
-  title: string;
-  tone: 'curator' | 'participant' | 'viewer' | 'unknown';
-};
-type OverviewAgentStatus = 'loading' | 'ok' | 'error';
-type OverviewParticipantsStatus = 'loading' | 'ok' | 'error';
-type OverviewAgentIdentity = Pick<AgentIdentity, 'agentDid'> & Partial<Pick<AgentIdentity, 'agentAddress'>>;
-
-function overviewRoleState(
-  cg: any,
-  currentAgent: OverviewAgentIdentity | null,
-  currentAgentStatus: OverviewAgentStatus,
-  participants: string[],
-  participantsStatus: OverviewParticipantsStatus,
-): OverviewRoleState {
-  const curator = typeof cg?.curator === 'string' ? cg.curator.trim() : '';
-  // Codex review issue P — match the address-or-did predicate
-  // `curatorStatusForOverview` uses (bug G), so the role pill and
-  // the join-requests gate can't disagree on older daemons that
-  // only surface `agentAddress`. `canonicalAgentDid` already
-  // normalises bare EVM addresses to the prefixed DID form, so
-  // any-of-the-two-matches resolves correctly.
-  const agentIds = new Set(
-    [currentAgent?.agentDid, currentAgent?.agentAddress]
-      .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
-      .map(canonicalAgentDid),
-  );
-  const hasIdentity = agentIds.size > 0;
-  if (curator && hasIdentity && agentIds.has(canonicalAgentDid(curator))) {
-    return {
-      label: 'Curator',
-      title: 'This agent is the curator for this Context Graph.',
-      tone: 'curator',
-    };
-  }
-  if (cg?.callerInvolved === true) {
-    if (curator && !hasIdentity && currentAgentStatus === 'loading') {
-      return {
-        label: 'Role checking',
-        title: 'This agent is involved in this Context Graph; curator status is still loading.',
-        tone: 'unknown',
-      };
-    }
-    if (curator && !hasIdentity && currentAgentStatus === 'error') {
-      return {
-        label: 'Role unknown',
-        title: 'This agent is involved in this Context Graph, but curator status could not be confirmed.',
-        tone: 'unknown',
-      };
-    }
-    return {
-      label: 'Joined',
-      title: 'This agent is involved in this Context Graph; curator status is shown only when identity metadata confirms it.',
-      tone: 'participant',
-    };
-  }
-  if (cg?.callerInvolved === false) {
-    return {
-      label: 'Not joined',
-      title: 'This agent is not listed as curator or participant for this Context Graph.',
-      tone: 'viewer',
-    };
-  }
-  const isListedParticipant = participantsStatus === 'ok' && participants
-    .map(participant => participant.trim())
-    .filter(Boolean)
-    .some(participant => agentIds.has(canonicalAgentDid(participant)));
-  if (isListedParticipant) {
-    return {
-      label: 'Joined',
-      title: 'This agent is listed as a participant for this Context Graph.',
-      tone: 'participant',
-    };
-  }
-  return {
-    label: 'Role unknown',
-    title: 'The node did not provide enough role metadata for this Context Graph.',
-    tone: 'unknown',
-  };
-}
 
 function overviewAccessAgentStat(
   cg: any,

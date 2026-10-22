@@ -28,8 +28,12 @@ export const DKGEvent = {
   CONTEXT_GRAPH_REGISTRATION_FAILED: 'context-graph:registration:failed',
   JOIN_REQUEST_RECEIVED: 'join-request:received',
   JOIN_APPROVED: 'join:approved',
+  JOIN_METADATA_CONFIRMED: 'join:metadata-confirmed',
+  /** A persisted subscription became live again, with the flags it had persisted. */
+  CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED: 'context-graph:subscription-activated',
   JOIN_REJECTED: 'join:rejected',
   PROJECT_SYNCED: 'project:synced',
+  CATALOG_READINESS_CHECK_REQUESTED: 'catalog:readiness-check-requested',
   MEMORY_GRAPH_CHANGED: 'memory-graph:changed',
 } as const;
 

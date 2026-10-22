@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { currentApiToken } from '../lib/apiToken.js';
 import { invalidateQueryCache } from '../api.js';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
@@ -66,7 +67,7 @@ export function isMemoryGraphEventRelevant(
 function connect() {
   if (source) return;
 
-  const token = typeof window !== 'undefined' ? (window as any).__DKG_TOKEN__ : undefined;
+  const token = currentApiToken();
   const url = token ? `/api/events?token=${encodeURIComponent(token)}` : '/api/events';
   source = new EventSource(url);
 
@@ -106,7 +107,7 @@ function disconnect() {
   source = null;
 }
 
-function subscribe(fn: Listener): () => void {
+export function subscribeNodeEvents(fn: Listener): () => void {
   listeners.add(fn);
   if (listeners.size === 1) connect();
   return () => {
@@ -125,7 +126,7 @@ export function useNodeEvents(handler: Listener) {
   handlerRef.current = handler;
 
   useEffect(() => {
-    return subscribe((event) => handlerRef.current(event));
+    return subscribeNodeEvents((event) => handlerRef.current(event));
   }, []);
 }
 

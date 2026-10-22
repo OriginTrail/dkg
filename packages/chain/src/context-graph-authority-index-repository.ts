@@ -54,10 +54,12 @@ export interface ContextGraphAuthorityIndexScopedRepository {
   reload(): Promise<ContextGraphAuthorityIndexRepositoryRecord>;
   invalidateOrReloadWinner(
     record: TokenedAuthorityIndexRecord,
+    signal?: AbortSignal,
   ): Promise<ContextGraphAuthorityIndexInvalidationResult>;
   commitOrReloadWinner(
     previous: ContextGraphAuthorityIndexRepositoryRecord,
     checkpoint: ContextGraphAuthorityIndexCheckpoint,
+    signal?: AbortSignal,
   ): Promise<ContextGraphAuthorityIndexCommitResult>;
 }
 
@@ -87,13 +89,14 @@ export class ContextGraphAuthorityIndexRepository {
     return Object.freeze({
       load: () => this.#load(scope),
       reload: () => this.#reload(scope),
-      invalidateOrReloadWinner: (record: TokenedAuthorityIndexRecord) => (
-        this.#invalidateOrReloadWinner(scope, record)
+      invalidateOrReloadWinner: (record: TokenedAuthorityIndexRecord, signal?: AbortSignal) => (
+        this.#invalidateOrReloadWinner(scope, record, signal)
       ),
       commitOrReloadWinner: (
         previous: ContextGraphAuthorityIndexRepositoryRecord,
         checkpoint: ContextGraphAuthorityIndexCheckpoint,
-      ) => this.#commitOrReloadWinner(scope, previous, checkpoint),
+        signal?: AbortSignal,
+      ) => this.#commitOrReloadWinner(scope, previous, checkpoint, signal),
     });
   }
 
@@ -117,11 +120,14 @@ export class ContextGraphAuthorityIndexRepository {
   async #invalidateOrReloadWinner(
     scope: string,
     record: TokenedAuthorityIndexRecord,
+    signal?: AbortSignal,
   ): Promise<ContextGraphAuthorityIndexInvalidationResult> {
+    signal?.throwIfAborted();
     this.#assertObservationScope(scope, record);
     const epoch = this.#epoch;
     this.#discardIfCurrent(scope, record);
     const token = await this.#store.invalidate(scope, record.token);
+    signal?.throwIfAborted();
     if (token === undefined) {
       return Object.freeze({
         kind: 'winner',
@@ -142,10 +148,13 @@ export class ContextGraphAuthorityIndexRepository {
     scope: string,
     previous: ContextGraphAuthorityIndexRepositoryRecord,
     checkpoint: ContextGraphAuthorityIndexCheckpoint,
+    signal?: AbortSignal,
   ): Promise<ContextGraphAuthorityIndexCommitResult> {
+    signal?.throwIfAborted();
     this.#assertObservationScope(scope, previous);
     const epoch = this.#epoch;
     const token = await this.#store.compareAndSwap(scope, previous.token, checkpoint);
+    signal?.throwIfAborted();
     if (token === undefined) {
       return Object.freeze({
         kind: 'winner',

@@ -16,7 +16,6 @@ import { useFetch } from '../../../hooks.js';
 import { executeQuery, writeProfileQueryCatalog, type QueryExecutionView } from '../../../api.js';
 import { useProjectProfileContext, type QueryCatalog } from '../../../hooks/useProjectProfile.js';
 import { EmptyState } from '../../../components/ContextGraphPrimitives.js';
-
 function contextGraphQueryTemplate(contextGraphId: string): string {
   return `SELECT ?g ?s ?p ?o WHERE {
   GRAPH ?g { ?s ?p ?o }
@@ -335,7 +334,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
       view: activeExecution.view,
       subGraphName: activeExecution.subGraphName,
       ...(activeExecution.view === 'working-memory' ? { includeContextGraphPartitions: true } : {}),
-    }),
+    }, { timeoutMs: null, maxResponseBytes: null }),
     [activeExecution.sparql, activeExecution.subGraphName, activeExecution.view, contextGraphId],
     0,
   );

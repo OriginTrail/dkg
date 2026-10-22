@@ -153,6 +153,36 @@ describe('EVMChainAdapter KA scalar update context', () => {
     ]);
   });
 
+  it('does not read Chronos when an update does not grow the byte size', async () => {
+    const response = [3n, 41n, 100n, 10n, 99n, false, 77n];
+    const { adapter, storage } = adapterWithUpdateContext(response);
+    const calls: string[] = [];
+    const mutable = adapter as unknown as {
+      contracts: {
+        knowledgeAssetStorage: object;
+        chronos: object;
+      };
+      readContractWithOptions: (
+        contract: object,
+        label: string,
+      ) => Promise<unknown>;
+    };
+    mutable.contracts.knowledgeAssetStorage = storage;
+    mutable.contracts.chronos = {};
+    mutable.readContractWithOptions = async (_contract, label) => {
+      calls.push(label);
+      if (label === 'kas.getKnowledgeAssetUpdateContext') return response;
+      throw new Error(`Unexpected contract read: ${label}`);
+    };
+
+    await expect(adapter.computeUpdateNewTokenAmount({
+      kaId: 42n,
+      newByteSize: 100n,
+      currentTokenAmount: 99n,
+    })).resolves.toBe(99n);
+    expect(calls).toEqual(['kas.getKnowledgeAssetUpdateContext']);
+  });
+
   it('rejects boolean values in uint tuple positions', async () => {
     const { adapter } = adapterWithUpdateContext([
       1n, 1n, false, 10n, 1n, false, 1n,

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { orderCatchupPeers } from '../src/p2p/peer-selection.js';
+import { orderCatchupPeers, orderCoresFirst } from '../src/p2p/peer-selection.js';
 
 /**
  * Unit tests for `orderCatchupPeers` — the tiered catch-up peer ordering
@@ -56,5 +56,25 @@ describe('orderCatchupPeers', () => {
     const peers = ['a', 'b', 'c'];
     expect(orderCatchupPeers(peers, 'b', true)).toEqual(['b', 'a', 'c']);
     expect(orderCatchupPeers(peers, 'b', false)).toEqual(['b', 'a', 'c']);
+  });
+});
+
+describe('orderCoresFirst', () => {
+  it('puts every Core first and keeps input order within each group', () => {
+    const peers = [
+      { id: 'edge-z', core: false },
+      { id: 'core-y', core: true },
+      { id: 'edge-a', core: false },
+      { id: 'core-b', core: true },
+    ];
+    expect(orderCoresFirst(peers, (peer) => peer.core).map((peer) => peer.id))
+      .toEqual(['core-y', 'core-b', 'edge-z', 'edge-a']);
+  });
+
+  it('returns a new array and leaves its input alone', () => {
+    const peers = ['a', 'b'];
+    const ordered = orderCoresFirst(peers, () => false);
+    expect(ordered).toEqual(['a', 'b']);
+    expect(ordered).not.toBe(peers);
   });
 });

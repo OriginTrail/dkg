@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import {
+  contextGraphLayerUri,
+  MemoryLayer,
+  parseDeterministicKnowledgeAssetUal,
+} from '@origintrail-official/dkg-core';
+import { ethers } from 'ethers';
+
 import { stableJson } from '../../rfc64-persistence-lifecycle/evidence.ts';
 import {
   GATE2_ADAPTER_PROTOCOL_VERSION,
@@ -31,7 +38,11 @@ const PROJECTIONS = [
   '<https://example.org/fixture-3> <https://schema.org/name> "Three" .\n',
 ];
 const KA_PROJECTION_DIGEST_DOMAIN_V1 = 'dkg-ka-projection-v1\n';
+const FINALIZED_VM_POST_READ_DIGEST_DOMAIN_V1 = ethers.toUtf8Bytes(
+  'OT-RFC-64:finalized-vm-post-read:v1\0',
+);
 const RUNTIME_FILES = [
+  { path: 'packages/cli/dist/cli.js', byteLength: 5, sha256: `0x${'5'.repeat(64)}` },
   { path: 'packages/agent/dist/index.js', byteLength: 1, sha256: `0x${'1'.repeat(64)}` },
   { path: 'packages/chain/dist/index.js', byteLength: 2, sha256: `0x${'2'.repeat(64)}` },
   { path: 'packages/core/dist/index.js', byteLength: 3, sha256: `0x${'3'.repeat(64)}` },
@@ -40,9 +51,17 @@ const RUNTIME_FILES = [
 const RUNTIME_MANIFEST = buildGate2RuntimeManifestFromEntriesV1(SOURCE_COMMIT, RUNTIME_FILES);
 const EXECUTED_RUNTIME = buildGate2ExecutedRuntimeManifestV1(SOURCE_COMMIT, RUNTIME_FILES);
 const RUNTIME_PROVENANCE = buildGate2RuntimeProvenanceV1(RUNTIME_MANIFEST, [
-  { id: 'author', loaded: EXECUTED_RUNTIME },
-  { id: 'receiverBeforeCrash', loaded: EXECUTED_RUNTIME },
-  { id: 'receiverAfterRestart', loaded: EXECUTED_RUNTIME },
+  { id: 'author', identity: { hostIdentity: 'host-a', pid: 101 }, loaded: EXECUTED_RUNTIME },
+  {
+    id: 'receiverBeforeCrash',
+    identity: { hostIdentity: 'host-b', pid: 101 },
+    loaded: EXECUTED_RUNTIME,
+  },
+  {
+    id: 'receiverAfterRestart',
+    identity: { hostIdentity: 'host-c', pid: 102 },
+    loaded: EXECUTED_RUNTIME,
+  },
 ]);
 
 function sample(): any {
@@ -73,6 +92,27 @@ function sample(): any {
     ),
     appliedHeadStatus: 'applied',
     catalogHeadDigest: authored.catalogHeadDigest,
+    finalizedSwmRetirementLifecycleReceipts: wireRows.map((row: any, index: number) => {
+      const parsedUal = parseDeterministicKnowledgeAssetUal(row.kaUal);
+      return {
+        assertionVersion: '1',
+        contextGraphId: authored.catalogScope.contextGraphId,
+        kaUal: row.kaUal,
+        kind: 'rfc64-finalized-swm-retirement-lifecycle-receipt-v2',
+        swmReconciliationOutcome: 'retired',
+        vmGraphIri: contextGraphLayerUri(
+          authored.catalogScope.contextGraphId,
+          MemoryLayer.VerifiableMemory,
+          parsedUal.agentAddress,
+          parsedUal.kaNumber,
+        ),
+        vmMaterializationStatus: 'materialized',
+        vmPostReadDigest: ethers.keccak256(ethers.concat([
+          FINALIZED_VM_POST_READ_DIGEST_DOMAIN_V1,
+          ethers.toUtf8Bytes(PROJECTIONS[index]!.slice(0, -1)),
+        ])).toLowerCase(),
+      };
+    }),
     inventoryDigest: received.declaredInventoryDigest,
     inventoryRowCount: 3,
     rows: wireRows,
@@ -86,9 +126,14 @@ function sample(): any {
       swmGraph: row.swmGraph,
     },
   }));
-  const ready = (role: 'author' | 'receiver', peerId: string) => ({
+  const ready = (
+    role: 'author' | 'receiver',
+    peerId: string,
+    processIdentity: { hostIdentity: string; pid: number },
+  ) => ({
     adapterId: GATE2_REAL_DKG_AGENT_ADAPTER_ID,
     peerId,
+    processIdentity,
     protocolVersion: GATE2_ADAPTER_PROTOCOL_VERSION,
     role,
     runtimeBuildManifestDigest: RUNTIME_MANIFEST.manifestDigest,
@@ -149,8 +194,8 @@ function sample(): any {
       },
     },
     ready: {
-      author: ready('author', AUTHOR_PEER),
-      receiver: ready('receiver', RECEIVER_PEER),
+      author: ready('author', AUTHOR_PEER, { hostIdentity: 'host-a', pid: 101 }),
+      receiver: ready('receiver', RECEIVER_PEER, { hostIdentity: 'host-b', pid: 101 }),
     },
     repository: {
       testedHeadCommit: SOURCE_COMMIT,
@@ -163,7 +208,11 @@ function sample(): any {
       processLocalSynchronization: null,
       reannouncementAcknowledgedByPeerId: RECEIVER_PEER,
       receiverStats: { applied: 0, dedupedAlreadyApplied: 1 },
-      restartedReady: ready('receiver', RECEIVER_PEER),
+      restartedReady: ready(
+        'receiver',
+        RECEIVER_PEER,
+        { hostIdentity: 'host-c', pid: 102 },
+      ),
       semanticPostRead: semantic,
       successorServedByPeerId: AUTHOR_PEER,
     },
@@ -316,3 +365,62 @@ test('copied semantic projections cannot masquerade as three complete assets', (
     /projection/u,
   );
 });
+
+for (const [label, mutate] of [
+  ['author ready', (raw: any) => {
+    raw.ready.author.processIdentity = { hostIdentity: 'other-author', pid: 901 };
+  }],
+  ['pre-crash receiver ready', (raw: any) => {
+    raw.ready.receiver.processIdentity = { hostIdentity: 'other-receiver', pid: 902 };
+  }],
+  ['restarted receiver ready', (raw: any) => {
+    raw.restartReplay.restartedReady.processIdentity = { hostIdentity: 'other-restart', pid: 903 };
+  }],
+] as const) {
+  test(`${label} is bound to its measured runtime provenance identity`, () => {
+    const raw = sample();
+    mutate(raw);
+    assert.throws(
+      () => verifyGate2ArtifactBytes(bytes(raw), SOURCE_COMMIT, RUNTIME_MANIFEST),
+      /processIdentity/u,
+    );
+  });
+}
+
+for (const [label, mutate, expected] of [
+  ['omitted', (wire: any) => {
+    delete wire.finalizedSwmRetirementLifecycleReceipts;
+  }, /must contain exactly keys/u],
+  ['null entry', (wire: any) => {
+    wire.finalizedSwmRetirementLifecycleReceipts[0] = null;
+  }, /must be a plain object/u],
+  ['wrong kind', (wire: any) => {
+    wire.finalizedSwmRetirementLifecycleReceipts[0].kind = 'wrong';
+  }, /\.kind/u],
+  ['wrong KA binding', (wire: any) => {
+    wire.finalizedSwmRetirementLifecycleReceipts[0].kaUal =
+      wire.finalizedSwmRetirementLifecycleReceipts[1].kaUal;
+  }, /\.kaUal/u],
+  ['wrong VM graph binding', (wire: any) => {
+    wire.finalizedSwmRetirementLifecycleReceipts[0].vmGraphIri = 'did:dkg:wrong';
+  }, /\.vmGraphIri/u],
+  ['wrong VM post-read digest', (wire: any) => {
+    wire.finalizedSwmRetirementLifecycleReceipts[0].vmPostReadDigest = `0x${'f'.repeat(64)}`;
+  }, /\.vmPostReadDigest/u],
+  ['non-certifying materialization status', (wire: any) => {
+    wire.finalizedSwmRetirementLifecycleReceipts[0].vmMaterializationStatus = 'existing';
+  }, /\.vmMaterializationStatus/u],
+  ['non-certifying reconciliation outcome', (wire: any) => {
+    wire.finalizedSwmRetirementLifecycleReceipts[0].swmReconciliationOutcome =
+      'already-retired-finalized';
+  }, /\.swmReconciliationOutcome/u],
+] as const) {
+  test(`${label} lifecycle evidence is rejected`, () => {
+    const raw = sample();
+    mutate(raw.authorizationNegative.positiveInventoryBefore);
+    assert.throws(
+      () => verifyGate2ArtifactBytes(bytes(raw), SOURCE_COMMIT, RUNTIME_MANIFEST),
+      expected,
+    );
+  });
+}

@@ -114,21 +114,18 @@ describe('selected SWM metadata transfer ownership', () => {
     }
   });
 
-  it('does not extend completed-manifest retention on no-progress retries', async () => {
-    const peerId = 'peer-snapshot-no-progress-expiry';
-    const contextGraphId = 'cg-snapshot-no-progress-expiry';
-    const baseNow = Date.now();
-    let elapsedMs = 0;
-    const clock = () => baseNow + elapsedMs;
-    const coordinator = new SelectedSwmMetaTransferCoordinator({ now: clock });
+  it('reads a completed manifest again after a round that replayed it and resolved nothing more', async () => {
+    const peerId = 'peer-snapshot-no-progress';
+    const contextGraphId = 'cg-snapshot-no-progress';
+    const coordinator = new SelectedSwmMetaTransferCoordinator();
+    // The peer's manifest named `ref-stale` when it was read. The peer has
+    // dropped that entry since and serves the corrected manifest.
     const firstManifest = [
       { ref: 'ref-a', digest: 'digest-a', count: 1 },
+      { ref: 'ref-b', digest: 'digest-b', count: 1 },
       { ref: 'ref-stale', digest: 'digest-stale', count: 1 },
     ];
-    const correctedManifest = [
-      firstManifest[0]!,
-      { ref: 'ref-fixed', digest: 'digest-fixed', count: 1 },
-    ];
+    const correctedManifest = [firstManifest[0]!, firstManifest[1]!];
     let fetchGeneration = 0;
     const fetchPage = vi.fn(async () => {
       fetchGeneration += 1;
@@ -142,49 +139,51 @@ describe('selected SWM metadata transfer ownership', () => {
         bytesReceived: 1,
         resumedFromOffset: 0,
         nextOffset: 1,
-        checkpointKey: `no-progress-expiry-${fetchGeneration}`,
+        checkpointKey: `no-progress-${fetchGeneration}`,
         completed: true,
         timedOut: false,
       };
     });
     const createFetcher = vi.fn(() => createSelectedSwmMetaFetcher({
       remotePeerId: peerId,
-      requesterScope: 'selected-swm-meta:retained:no-progress-expiry',
+      requesterScope: 'selected-swm-meta:retained:no-progress',
       retentionBudget: retentionBudget(),
       deleteCheckpoint: () => {},
       fetchPage,
-      now: clock,
-      retentionTtlMs: 10_000,
     }));
     const request = {
       ctx: testContext,
       remotePeerId: peerId,
       contextGraphId,
       graphUri: 'urn:meta',
-      deadline: clock() + 60_000,
+      deadline: Date.now() + 60_000,
     };
 
     try {
       await coordinator.run(peerId, createFetcher, async (fetcher) => {
         await fetcher.strategy.fetch(request);
-        const walk = fetcher.strategy.snapshotWalk!(contextGraphId, firstManifest);
-        walk.markResolved('ref-a');
+        fetcher.strategy.snapshotWalk!(contextGraphId, firstManifest).markResolved('ref-a');
       });
 
-      for (const retryAtMs of [4_000, 9_000]) {
-        elapsedMs = retryAtMs;
-        await coordinator.run(peerId, createFetcher, async (fetcher) => {
-          const cached = await fetcher.strategy.fetch({ ...request, deadline: clock() + 60_000 });
-          expect(cached.result.bytesReceived).toBe(0);
-          const walk = fetcher.strategy.snapshotWalk!(contextGraphId, firstManifest);
-          expect(walk.resolvedRefsSnapshot()).toEqual(['ref-a']);
-          // Deliberately make no progress.
-        });
-      }
-
-      elapsedMs = 10_001;
+      // A round that replays the manifest and resolves another ref keeps it.
       await coordinator.run(peerId, createFetcher, async (fetcher) => {
-        const refreshed = await fetcher.strategy.fetch({ ...request, deadline: clock() + 60_000 });
+        const cached = await fetcher.strategy.fetch(request);
+        expect(cached.result.bytesReceived).toBe(0);
+        fetcher.strategy.snapshotWalk!(contextGraphId, firstManifest).markResolved('ref-b');
+      });
+
+      // A round that replays it and resolves nothing more ends it: the ref
+      // the walk waits for is one the peer no longer serves.
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        const cached = await fetcher.strategy.fetch(request);
+        expect(cached.result.bytesReceived).toBe(0);
+        const walk = fetcher.strategy.snapshotWalk!(contextGraphId, firstManifest);
+        expect(walk.resolvedRefsSnapshot()).toEqual(['ref-a', 'ref-b']);
+      });
+      expect(fetchPage).toHaveBeenCalledOnce();
+
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        const refreshed = await fetcher.strategy.fetch(request);
         expect(refreshed.result.bytesReceived).toBe(1);
         const walk = fetcher.strategy.snapshotWalk!(contextGraphId, correctedManifest);
         expect(walk.resolvedRefsSnapshot()).toEqual([]);
@@ -193,6 +192,61 @@ describe('selected SWM metadata transfer ownership', () => {
 
       expect(fetchPage).toHaveBeenCalledTimes(2);
       expect(createFetcher).toHaveBeenCalledTimes(2);
+    } finally {
+      await coordinator.close();
+    }
+  });
+
+  it('lets a kept manifest expire when no round replays it', async () => {
+    const peerId = 'peer-snapshot-expiry';
+    const contextGraphId = 'cg-snapshot-expiry';
+    const baseNow = Date.now();
+    let elapsedMs = 0;
+    const clock = () => baseNow + elapsedMs;
+    const coordinator = new SelectedSwmMetaTransferCoordinator({ now: clock });
+    const manifest = [
+      { ref: 'ref-a', digest: 'digest-a', count: 1 },
+      { ref: 'ref-b', digest: 'digest-b', count: 1 },
+    ];
+    const fetchPage = vi.fn(async () => ({
+      quads: [{ subject: 'urn:manifest', predicate: 'urn:p', object: '"o"', graph: 'urn:meta' }],
+      bytesReceived: 1,
+      resumedFromOffset: 0,
+      nextOffset: 1,
+      checkpointKey: 'snapshot-expiry-checkpoint',
+      completed: true,
+      timedOut: false,
+    }));
+    const createFetcher = vi.fn(() => createSelectedSwmMetaFetcher({
+      remotePeerId: peerId,
+      requesterScope: 'selected-swm-meta:retained:snapshot-expiry',
+      retentionBudget: retentionBudget(),
+      deleteCheckpoint: () => {},
+      fetchPage,
+      now: clock,
+      retentionTtlMs: 10_000,
+    }));
+    const request = () => ({
+      ctx: testContext,
+      remotePeerId: peerId,
+      contextGraphId,
+      graphUri: 'urn:meta',
+      deadline: clock() + 60_000,
+    });
+
+    try {
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        await fetcher.strategy.fetch(request());
+        fetcher.strategy.snapshotWalk!(contextGraphId, manifest).markResolved('ref-a');
+      });
+
+      elapsedMs = 10_001;
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        const refreshed = await fetcher.strategy.fetch(request());
+        expect(refreshed.result.bytesReceived).toBe(1);
+        expect(fetcher.strategy.snapshotWalk!(contextGraphId, manifest).resolvedRefsSnapshot()).toEqual([]);
+      });
+      expect(fetchPage).toHaveBeenCalledTimes(2);
     } finally {
       await coordinator.close();
     }

@@ -24,6 +24,11 @@
       ],
       "outputs": ["dist/**", "generated/**"]
     },
+    "@origintrail-official/dkg#build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", "build-info.json"],
+      "cache": false
+    },
     "build:ui": {
       "dependsOn": [
         "build"

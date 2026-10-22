@@ -25,6 +25,7 @@
  *    surfaces the error alongside (mirrors useAssertionLifecycleEvents).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { CoalescingRecurringTask } from '@origintrail-official/dkg-core/dist/coalescing-recurring-task.js';
 import {
   markNotificationsRead,
   approveJoinRequest,
@@ -260,47 +261,29 @@ export function useNotificationsFeed(): UseNotificationsFeed {
   // Track whether we've ever loaded successfully, so a refresh failure keeps
   // the last-known-good payload instead of blanking the pane.
   const hasDataRef = useRef(false);
-  const loadInFlightRef = useRef(false);
-  const loadAgainRef = useRef(false);
-  const mountedRef = useRef(true);
+  const taskRef = useRef<CoalescingRecurringTask | null>(null);
   useEffect(() => {
-    mountedRef.current = true;
-    return () => { mountedRef.current = false; loadAgainRef.current = false; };
-  }, []);
-
-  const load = useCallback(function refreshFeed() {
-    if (!mountedRef.current) return;
-    if (loadInFlightRef.current) { loadAgainRef.current = true; return; }
-    loadInFlightRef.current = true;
-    loadAgainRef.current = false;
-    api.fetchNotificationsFeed()
-      .then((resp) => {
-        if (!mountedRef.current) return;
+    const task = new CoalescingRecurringTask({
+      closingMessage: 'Notification feed unmounted',
+      runPass: async signal => {
+        const resp = await api.fetchNotificationsFeed();
+        if (signal.aborted) return;
         hasDataRef.current = true;
         setData(resp);
         setRefreshError(false);
         setStatus(resp.scopeUnknown ? 'identity-pending' : 'ready');
-      })
-      .catch(() => {
-        if (!mountedRef.current) return;
-        // Last-known-good: keep prior rows if we have them. A WARM failure
-        // (already have data) keeps status 'ready' — which is what preserves
-        // the cached list — and raises `refreshError` so the pane still shows
-        // its inline retry banner (status alone can't, since 'ready' is what
-        // keeps the list — Codex R2-5). A COLD failure (nothing loaded yet) is
-        // the hard error state.
-        if (hasDataRef.current) {
-          setRefreshError(true);
-        } else {
-          setStatus('error');
-        }
-      })
-      .finally(() => {
-        loadInFlightRef.current = false;
-        // Retain one follow-up for events received during this refresh.
-        if (loadAgainRef.current && mountedRef.current) refreshFeed();
-      });
+      },
+      onError: () => {
+        if (task.closed) return;
+        // Keep last-known-good rows visible on a warm refresh failure.
+        if (hasDataRef.current) setRefreshError(true);
+        else setStatus('error');
+      },
+    });
+    taskRef.current = task;
+    return () => { taskRef.current = null; void task.close(); };
   }, []);
+  const load = useCallback(() => { taskRef.current?.request(); }, []);
 
   // 60s visibility-aware poll (pauses while the tab is hidden), with an
   // immediate load on mount — same cadence the old Header used.

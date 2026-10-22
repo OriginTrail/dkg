@@ -14,18 +14,22 @@ function providerKey(detail: Eip6963ProviderDetail): string {
 
 /**
  * Shared wallet connect surface. It starts EIP-6963 discovery only while a
- * browser-wallet UI is mounted, keeps provider metadata display-only, and uses conditional
- * hardware copy per inv-14.
+ * browser-wallet UI is mounted, keeps provider metadata display-only, and lets
+ * each feature own its explanatory guidance.
  */
+export interface WalletConnectControlProps {
+  className?: string;
+  testId?: string;
+  description?: React.ReactNode;
+}
+
 export function WalletConnectControl({
   className = '',
   testId = 'wallet-connect',
-  purpose = 'transaction',
-}: {
-  className?: string;
-  testId?: string;
-  purpose?: 'transaction' | 'message';
-}) {
+  description = (
+    <>Hardware wallet recommended. Verify every transaction on the signing device before confirming.</>
+  ),
+}: WalletConnectControlProps) {
   const discovered = useWalletStore((s) => s.discovered);
   const unsupported = useWalletStore((s) => s.unsupported);
   const address = useWalletStore((s) => s.address);
@@ -92,9 +96,7 @@ export function WalletConnectControl({
         {discovered.length !== 1 && <ChevronDown size={14} aria-hidden="true" />}
       </button>
       <p className="v10-wallet-note">
-        {purpose === 'message' ? 'Connect your agent wallet to sign Program requests. These signatures do not send blockchain transactions.' : <>Hardware wallet recommended. If your provider uses a device, verify the amount and contract on
-        the device. Hot publishing wallets can publish without prompts; their spend is bounded by the
-        per-epoch allowance, not the committed TRAC.</>}
+        {description}
       </p>
       <p className="v10-wallet-note">
         Provider names are self-reported and display-only.

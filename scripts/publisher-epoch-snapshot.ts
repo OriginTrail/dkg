@@ -632,7 +632,7 @@ async function main() {
     process.exit(1);
   }
 
-  const outDir = path.join(__dirname, '..', 'snapshots');
+  const outDir = path.join(__dirname, '..', 'misc', 'snapshots');
   if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
 
   const unixTs = Math.floor(Date.now() / 1000);
