@@ -42,6 +42,7 @@ import {
   workspacePublicQuadsDigest,
 } from '@origintrail-official/dkg-publisher';
 import { FinalizationHandler } from '../src/finalization-handler.js';
+import { prepareGraphScopedFinalizationMetadata } from '../src/finalization-metadata.js';
 import { resolveConfirmedGraphScopedVm } from '../src/confirmed-graph-scoped-vm-resolver.js';
 import { verifyExactGraphContent } from '../src/exact-graph-content-verifier.js';
 import {
@@ -2713,6 +2714,73 @@ describe('graph-scoped finalization handler', () => {
       <http://dkg.io/ontology/materializedVersion> "124:0" .
       FILTER NOT EXISTS { <${UAL}> <http://dkg.io/ontology/transactionHash> ?tx }
     `);
+  });
+
+  it.each(['transaction', 'finalized-materialization'] as const)(
+    'preserves local annotations and receive time during same-assertion %s metadata repair', async kind => {
+      const { message, vmGraph } = await stageGraph();
+      const repairHandler = kind === 'transaction' ? makeReconcileHandler({
+        getMerkleRootCount: async () => 1n,
+        resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
+      }) : makePublicReconcileHandler(message);
+      if (kind === 'transaction') {
+        await seedAuthenticatedLocalControls(message);
+        await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+      } else await expect(reconcileGraphScoped(repairHandler, message)).resolves.toBe('promoted');
+      const meta = `did:dkg:context-graph:${CG}/_meta`;
+      const receiveTime = () => store.query(`SELECT ?time WHERE { GRAPH <${meta}> { <${UAL}> <http://dkg.io/ontology/publishedAt> ?time } }`);
+      const before = await receiveTime();
+      await store.insert([
+        { subject: UAL, graph: meta, predicate: 'urn:local:annotation', object: '"preserve"' },
+        { subject: UAL, graph: meta, predicate: 'http://dkg.io/ontology/allowedPeer', object: '"obsolete-peer"' },
+      ]);
+      await store.deleteByPattern({ subject: UAL, graph: meta, predicate: 'http://dkg.io/ontology/accessPolicy' });
+      await expect(reconcileGraphScoped(repairHandler, message)).resolves.toBe('already-confirmed');
+      await expectGraphScopedMetadata('<urn:local:annotation> "preserve" .');
+      await expectGraphScopedMetadata('<http://dkg.io/ontology/allowedPeer> "obsolete-peer" .', false);
+      await expectGraphScopedMetadata(`<http://dkg.io/ontology/confirmationKind> "${kind}" .`);
+      expect(await receiveTime()).toEqual(before); expect(await store.countQuads(vmGraph)).toBe(2);
+    },
+  );
+
+  it('keeps newer finalization order while retaining a same-assertion receipt and annotation', async () => {
+    const { message, vmGraph } = await stageGraph();
+    await seedAuthenticatedLocalControls(message);
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    const graph = `did:dkg:context-graph:${CG}/_meta`;
+    const note = { subject: UAL, graph, predicate: 'urn:local:annotation', object: '"preserve"' };
+    await store.insert([note]);
+    const materializedVersion = { blockNumber: 200, txIndex: 0 };
+    const metadata = generateGraphKnowledgeAssetMetadata({ contextGraphId: CG, ual: UAL,
+      merkleRoot: message.kcMerkleRoot, publisherPeerId: 'verified-peer', timestamp: new Date(), assertionVersion: '1',
+      publicTripleCount: 2, privateTripleCount: message.privateTripleCount, privateMerkleRoot: message.privateMerkleRoot,
+      assertionGraph: vmGraph }, { status: 'confirmed', confirmation: { kind: 'finalized-materialization',
+      provenance: { batchId: PACKED_KA_ID, materializedVersion } } });
+    const prepared = await prepareGraphScopedFinalizationMetadata({ store, metadata,
+      materializedVersion, sameAssertion: true });
+    expect(prepared).toContainEqual(note);
+    expect(prepared.filter(q => q.predicate === 'http://dkg.io/ontology/transactionHash').map(q => q.object))
+      .toEqual([JSON.stringify(message.txHash)]);
+    expect(prepared.filter(q => q.predicate === 'http://dkg.io/ontology/materializedVersion').map(q => q.object))
+      .toEqual(['"200:0"']);
+  });
+
+  it('refuses same-assertion annotation repair before mutation when the metadata read is unavailable', async () => {
+    const { message } = await stageGraph();
+    await seedAuthenticatedLocalControls(message);
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    const meta = `did:dkg:context-graph:${CG}/_meta`;
+    await store.insert([{ subject: UAL, graph: meta, predicate: 'urn:local:annotation', object: '"preserve"' }]);
+    await store.deleteByPattern({ subject: UAL, graph: meta, predicate: 'http://dkg.io/ontology/accessPolicy' });
+    const snapshot = await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o');
+    const query = store.query.bind(store), replace = vi.spyOn(store, 'replaceGraphAndSubject');
+    vi.spyOn(store, 'query').mockImplementation((sparql, options) => options?.source === 'agent.finalization.sameAssertionMetadata'
+      ? Promise.resolve({ type: 'bindings', bindings: [] }) : query(sparql, options));
+    const repairHandler = makeReconcileHandler({ getMerkleRootCount: async () => 1n,
+      resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message) });
+    await expect(reconcileGraphScoped(repairHandler, message)).rejects.toThrow('Same-assertion metadata read unavailable');
+    expect(replace).not.toHaveBeenCalled();
+    expect(await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o')).toEqual(snapshot);
   });
 
   it('repairs receiptless public metadata after exact VM content committed alone', async () => {

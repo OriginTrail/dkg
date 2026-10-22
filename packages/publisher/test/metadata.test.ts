@@ -11,6 +11,7 @@ import {
   generateGraphKnowledgeAssetMetadata,
   readGraphKnowledgeAssetConfirmationKindV1,
   readGraphKnowledgeAssetReceiptProvenanceV1,
+  mergeSameVersionGraphKnowledgeAssetMetadataV1,
   generateShareMetadata,
   generateAssertionCreatedMetadata,
   generateAssertionPromotedMetadata,
@@ -379,6 +380,24 @@ describe('generateConfirmedFullMetadata', () => {
 });
 
 describe('generateGraphKnowledgeAssetMetadata confirmation state', () => {
+  it('preserves same-assertion annotations without retaining obsolete protocol controls or other scopes', () => {
+    const incoming = generateGraphKnowledgeAssetMetadata(makeGraphMeta(), { status: 'confirmed', confirmation: {
+      kind: 'finalized-materialization', provenance: { batchId: 7n, materializedVersion: { blockNumber: 123, txIndex: 0 } },
+    } });
+    const note = { ...incoming[0]!, predicate: 'urn:local:annotation', object: '"preserve"' };
+    const wrongSubject = { ...note, subject: 'urn:other' }, wrongGraph = { ...note, graph: 'urn:other' };
+    const merged = mergeSameVersionGraphKnowledgeAssetMetadataV1(incoming, [...incoming, note, wrongSubject, wrongGraph,
+      { ...note, predicate: `${DKG}allowedPeer`, object: '"obsolete-peer"' },
+      { ...note, predicate: `${DKG}privateMerkleRoot`, object: '"obsolete-private-root"' },
+      { ...note, predicate: `${PROV}wasAttributedTo`, object: 'did:dkg:agent:obsolete' }]);
+    expect(merged).toContainEqual(note); expect(merged).not.toContainEqual(wrongSubject); expect(merged).not.toContainEqual(wrongGraph);
+    expect(merged.some(q => q.predicate === `${DKG}allowedPeer` || q.predicate === `${DKG}privateMerkleRoot`)).toBe(false);
+    expect(merged.some(q => q.object.includes('obsolete'))).toBe(false);
+  });
+  it('keeps the incoming value when it explicitly supplies a same-assertion annotation', () => {
+    const identity = { subject: GRAPH_UAL, graph: META_GRAPH, predicate: 'urn:local:annotation', object: '"incoming"' };
+    expect(mergeSameVersionGraphKnowledgeAssetMetadataV1([identity], [{ ...identity, object: '"old"' }])).toEqual([identity]);
+  });
   it('parses explicit and rolling-compatible legacy confirmation state centrally', () => {
     const base = generateGraphKnowledgeAssetMetadata(makeGraphMeta(), { status: 'tentative' });
     expect(readGraphKnowledgeAssetConfirmationKindV1(base)).toBe('transaction');

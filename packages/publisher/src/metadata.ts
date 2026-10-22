@@ -173,8 +173,8 @@ export function preserveGraphKnowledgeAssetReceiptProvenanceV1(
 
 /**
  * Canonically merge metadata for an exact same-assertion replay. Stable local
- * receive time is retained for every lane; a receiptless finalized replay also
- * retains stronger, valid transaction provenance already authenticated here.
+ * receive time and unrelated local annotations are retained for every lane;
+ * a receiptless replay also retains stronger authenticated receipt provenance.
  */
 export function mergeSameVersionGraphKnowledgeAssetMetadataV1(
   incomingMetadata: readonly Quad[],

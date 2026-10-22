@@ -191,8 +191,8 @@ export function preserveGraphKnowledgeAssetReceiptProvenanceV1(
 
 /**
  * Canonically merge metadata for an exact same-assertion replay. Stable local
- * receive time is retained for every lane; a receiptless finalized replay also
- * retains stronger, valid transaction provenance already authenticated here.
+ * receive time and unrelated local annotations are retained for every lane;
+ * a receiptless replay also retains stronger authenticated receipt provenance.
  */
 export function mergeSameVersionGraphKnowledgeAssetMetadataV1(
   incomingMetadata: readonly Quad[],
@@ -221,6 +221,14 @@ export function mergeSameVersionGraphKnowledgeAssetMetadataV1(
     : [...incomingMetadata];
   if (readGraphKnowledgeAssetConfirmationKindV1(incomingMetadata) === 'finalized-materialization') {
     merged = preserveGraphKnowledgeAssetReceiptProvenanceV1(merged, currentMetadata);
+  }
+  if (identity !== undefined) {
+    const incomingPredicates = new Set(merged.map(quad => quad.predicate));
+    // Verified protocol controls/attribution always come from the new projection.
+    // Only unrelated annotations from this exact local metadata identity survive.
+    merged.push(...currentMetadata.filter(quad => quad.subject === identity.subject && quad.graph === identity.graph
+      && !quad.predicate.startsWith(DKG) && !quad.predicate.startsWith(PROV)
+      && !incomingPredicates.has(quad.predicate)));
   }
   return merged;
 }
