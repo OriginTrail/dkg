@@ -25,6 +25,7 @@ export default defineConfig({
           'test/mcp-physical-config.test.ts',
           'test/mcp-config-metadata.test.ts',
           'test/api-client.test.ts',
+          'test/ca-client.test.ts',
           'test/finalized-publish-options.test.ts',
           'test/messenger-outbox-memory.test.ts',
           'test/live-daemon-isolation.test.ts',
