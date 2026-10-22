@@ -28,6 +28,7 @@ import type { RecentSharedMemoryPullRuntime } from './recent-shared-memory-pull-
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
+import { controlPlaneRefusalSummary } from './sync/control-plane-refusals.js';
 import { PeerCapabilityRegistry } from './p2p/peer-capability.js';
 import { ACKCandidateDiscoveryCoordinator } from './p2p/ack-candidate-discovery.js';
 import type { StorageACKEndpoint } from './p2p/storage-ack-endpoint.js';
@@ -839,6 +840,8 @@ export class DKGAgentBase {
    */
   protected readonly reconciledKaAuthors = new Set<string>();
   protected readonly log = new Logger('DKGAgent');
+  /** Control-plane fetches refused for want of a sync slot: one warning per interval. */
+  readonly controlPlaneRefusals = controlPlaneRefusalSummary(this.log);
   /** Rate limit for the "Named KA recovery ... remains pending" warning. */
   protected readonly namedKaRecoveryPendingLog = new NamedKaRecoveryPendingLog();
 

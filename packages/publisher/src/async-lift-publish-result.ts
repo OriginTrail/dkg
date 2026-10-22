@@ -170,7 +170,7 @@ export function mapKnowledgeAssetVmPublishResultToLiftJobSuccess(params: {
  *  fail — `String()` on a null-prototype object, or a throwing `.code` accessor / Proxy — so
  *  every read is guarded and falls back to a safe default (`undefined` code, `''` message).
  *  A failure to inspect must never throw out of a failure-recording or recovery-decision path. */
-function readPublishErrorFacts(error: unknown): { code: unknown; message: string; lowerMessage: string } {
+export function readPublishErrorFacts(error: unknown): { code: unknown; message: string; lowerMessage: string } {
   let code: unknown;
   try {
     code = (error as { code?: unknown } | null | undefined)?.code;
@@ -179,11 +179,8 @@ function readPublishErrorFacts(error: unknown): { code: unknown; message: string
   }
   let message = '';
   try {
-    // Prefer a string `.message` even on a NON-Error throw (cross-realm errors, serialized
-    // errors from a worker, some RPC clients): `String(error)` on such a value yields
-    // '[object Object]', which classifies as nothing. `isKnowledgeAssetPublishPreconditionFailure`
-    // read `String(err?.message ?? err)` before it shared this extractor, so keeping the
-    // `.message` preference is parity with the caller it absorbed, not new behaviour.
+    // Prefer a string `.message` for cross-realm/worker errors and RPC clients.
+    // Timeout metadata and failure-code mapping share this throw-safe extraction.
     const own = (error as { message?: unknown } | null | undefined)?.message;
     const raw = error instanceof Error
       ? error.message

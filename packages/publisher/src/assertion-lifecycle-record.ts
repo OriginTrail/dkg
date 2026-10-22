@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { ethers } from 'ethers';
-import { assertSafeIri, assertionLifecycleUri, contextGraphMetaUri, MAX_ROOTLESS_KA_NUMBER_V1 } from '@origintrail-official/dkg-core';
+import { assertSafeIri, assertionLifecycleUri, contextGraphMetaUri, escapeSparqlLiteral, MAX_ROOTLESS_KA_NUMBER_V1 } from '@origintrail-official/dkg-core';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 
@@ -101,4 +101,39 @@ export async function readAssertionLifecycleCandidates(
     const bindings = result.bindings.filter(r => r.subject === candidate.subject) as Array<{ p: string; o: string }>;
     return bindings.length ? [{ ...candidate, record: decodeAssertionLifecycleRecord(bindings, 'strict-reservation') }] : [];
   });
+}
+
+/** Resolve historical lifecycle spelling without changing stored subjects or mutation lanes. */
+export async function resolveAssertionReadAuthor(
+  store: TripleStore, contextGraphId: string, author: string, name: string, subGraphName?: string,
+): Promise<string> {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(author)) return author;
+  const expected = assertSafeIri(assertionLifecycleUri(contextGraphId, author, name, subGraphName));
+  const suffix = `:${name}`;
+  const prefix = expected.slice(0, -author.length - suffix.length);
+  const corrupt = () => Object.assign(new Error('Cannot resolve an unambiguous working-memory lifecycle author'),
+    { code: 'KA_WM_LIFECYCLE_CORRUPT' });
+  // Bound by the assertion-name predicate/value and exact meta graph. Only the
+  // EVM segment is case-insensitive: graph IDs, names and subgraphs retain case.
+  const result = await store.query(`SELECT DISTINCT ?subject WHERE {
+    GRAPH <${assertSafeIri(contextGraphMetaUri(contextGraphId))}> {
+      ?subject <http://dkg.io/ontology/assertionName> "${escapeSparqlLiteral(name)}" .
+      FILTER(STRSTARTS(STR(?subject), "${escapeSparqlLiteral(prefix)}"))
+      FILTER(STRENDS(STR(?subject), "${escapeSparqlLiteral(suffix)}"))
+      FILTER(LCASE(STR(?subject)) = "${escapeSparqlLiteral(expected.toLowerCase())}")
+    }
+  }`, { source: 'publisher.assertion.read-author' });
+  if (result.type !== 'bindings') throw corrupt();
+  const authors = new Set<string>();
+  for (const row of result.bindings) {
+    const subject = row.subject;
+    if (typeof subject !== 'string' || subject.length !== expected.length
+      || !subject.startsWith(prefix) || !subject.endsWith(suffix)) throw corrupt();
+    const storedAuthor = subject.slice(prefix.length, -suffix.length);
+    if (storedAuthor.toLowerCase() !== author.toLowerCase()) throw corrupt();
+    authors.add(storedAuthor);
+  }
+  if (authors.size > 1) throw corrupt();
+  // An absent lifecycle retains the existing exact legacy-graph read behavior.
+  return authors.values().next().value ?? author;
 }

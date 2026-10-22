@@ -1,3 +1,4 @@
+import { handleKnowledgeAssetPullFrom } from './knowledge-asset-pull-from.js';
 import { handleShareJobCollection } from './share-job-collection.js';
 import { handlePublishedDescriptorRepair } from './published-descriptor-repair.js';
 import { promoteConflictResponse } from './promote-admission-response.js';
@@ -19,7 +20,7 @@ import { requireKnowledgeAssetRead } from './context-graph-read-authority.js';
 //   POST /api/knowledge-assets/:name/wm/write        append quads to the draft
 //   POST /api/knowledge-assets/:name/wm/finalize     seal the draft (git commit)
 //   POST /api/knowledge-assets/:name/wm/discard      throw the draft away
-//   POST /api/knowledge-assets/:name/wm/pull-from    seed draft from SWM/VM  [TODO]
+//   POST /api/knowledge-assets/:name/wm/pull-from    seed or verify draft from SWM/VM
 //   POST /api/knowledge-assets/:name/swm/share       advance the SWM pointer
 //   POST /api/knowledge-assets/:name/vm/publish      mint/update on chain
 //   POST /api/knowledge-assets/:name/vm/publish-async enqueue mint/update on chain
@@ -1201,33 +1202,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         return jsonResponse(res, 200, { discarded: true });
       }
       if (verb === "pull-from") {
-        // Net-new primitive (the git-checkout equivalent): seed a fresh WM
-        // draft from the current SWM or VM state (OT-RFC-43 §10.5.3).
-        const sourceLayer = parsed.layer;
-        if (sourceLayer !== "swm" && sourceLayer !== "vm") {
-          return jsonResponse(res, 400, { error: 'pull-from requires "layer": "swm" | "vm"' });
-        }
-        const onConflict = parsed.onConflict === "replace" ? "replace" : "reject";
-        try {
-          const result = await agent.assertion.pullFrom(contextGraphId, name, sourceLayer, {
-            subGraphName,
-            onConflict,
-            ...(writePreflightCallerAgentAddress ? { agentAddress: writePreflightCallerAgentAddress } : {}),
-          });
-          return jsonResponse(res, 200, { wmDraft: "open", seededFrom: { layer: sourceLayer }, ...result });
-        } catch (e: any) {
-          if (e?.code === "WM_DRAFT_CONFLICT") {
-            return jsonResponse(res, 409, { code: "WM_DRAFT_CONFLICT", error: e.message });
-          }
-          if (
-            e?.code === "UNSEALED_PULL_FROM_BLOCKED"
-            || e?.code === "PULL_FROM_EMPTY_SOURCE"
-            || e?.code === "LEGACY_KA_READ_ONLY"
-          ) {
-            return jsonResponse(res, 409, { code: e.code, error: e.message });
-          }
-          throw e; // -> outer catch -> 500
-        }
+        return await handleKnowledgeAssetPullFrom(ctx, parsed, contextGraphId, name, subGraphName, writePreflightCallerAgentAddress);
       }
     }
 

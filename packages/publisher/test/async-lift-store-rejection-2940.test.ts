@@ -356,7 +356,7 @@ describe('GH#2940 store-scheduler rejection vs transaction-submission timeout: c
 
       expect(preflights).toBe(2);
       expect(attempts.n).toBe(0);
-      expectRecordedAsPreDispatchStoreRejection(failed, schedulerBusy());
+      expectRecordedAsPreDispatchStoreRejection(failed, new Error('Publication validation failed (workspace_unavailable)'));
       h.advance(100);
       const finalized = await publisher.processNext('wallet-2');
       expect(finalized?.jobId).toBe(jobId);

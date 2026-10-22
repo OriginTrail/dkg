@@ -1,3 +1,4 @@
+import { StoreReadTransportFailure } from '@origintrail-official/dkg-storage';
 import type { AsyncLiftJournalCompletion } from '../src/async-lift-journal-completion.js';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -467,7 +468,7 @@ describe('async-lift claim fencing', () => {
     const firstClaim = await publisher.claimNext('wallet-a');
     if (!firstClaim) throw new Error('expected first claim');
     const staleSession = publisher.openClaimSession(firstClaim);
-    await staleSession.recordExecutionFailure('claimed', new Error('workspace unavailable'));
+    await staleSession.recordExecutionFailure('claimed', new StoreReadTransportFailure(new TypeError('fetch failed')));
     await expect(staleSession.recordExecutionFailure('claimed', new Error('overwrite attempt')))
       .rejects.toBeInstanceOf(StaleLiftJobClaimError);
 

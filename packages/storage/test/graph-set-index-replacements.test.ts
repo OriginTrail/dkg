@@ -105,7 +105,7 @@ describe.each(OPERATIONS)('graph index %s replacement lifecycle', (operation) =>
     await replace(store, operation, quads, options);
     expect(inner.calls).toHaveLength(1);
     expect(inner.calls[0]!.operation).toBe(operation);
-    expect(inner.calls[0]!.args[operation === 'replaceGraph' ? 1 : 2]).toBe(quads);
+    expect(inner.calls[0]!.args[operation === 'replaceGraph' ? 1 : 2]).toEqual(quads);
     expect(inner.calls[0]!.options).toBe(inner.scopedOptions);
     expect(inner.scopedOptions).toEqual({ ...options, source: 'test.replacement.scoped' });
     expect(inner.hasGraphOptions).toEqual([inner.scopedOptions]);
@@ -119,6 +119,21 @@ describe.each(OPERATIONS)('graph index %s replacement lifecycle', (operation) =>
       { type: 'graph-added', graph: GRAPH, source: operation },
       { type: 'graph-removed', graph: GRAPH, source: operation },
     ]));
+  });
+
+  it('snapshots replacement arrays before a prepared operation waits for commit', async () => {
+    const { store } = fixture();
+    const quads = [q(GRAPH, SUBJECT)], expected = [...quads];
+    const command = operation === 'replaceGraph' ? { operation, graphUri: GRAPH, quads }
+      : operation === 'replaceSubject' ? { operation, graphUri: GRAPH, subject: SUBJECT, quads }
+      : { operation, graphUri: GRAPH, subject: SUBJECT, replacementQuads: quads, insertQuads: [] };
+    const commit = await store.prepareImmutableMutation(command);
+    quads.length = 0;
+    await inner.runLogicalMutation(operation, undefined, options => commit.commit(options));
+    expect(inner.calls).toHaveLength(1);
+    expect(inner.calls[0]!.args[operation === 'replaceGraph' ? 1 : 2]).toEqual(expected);
+    expect(inner.scopes).toEqual([operation]);
+    expect(await store.listGraphs()).toEqual([GRAPH]);
   });
 
   it.each(['success', 'rejection'] as const)('bypasses index maintenance when disabled: %s', async outcome => {

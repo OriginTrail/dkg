@@ -8,6 +8,7 @@ import { memoizeRecoveryBindingProof, type DurableRecoveryAuthority } from './du
 import { materializeVerifiedGraphScopedAsset, type GraphScopedMaterializationOutcome } from './sync/requester/graph-scoped-materialization.js';
 import type { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
 import { createGraphScopedPhysicalOperationFence } from './sync/requester/graph-scoped-operation-fence.js';
+import { yieldStoreBackgroundLane } from './sync/requester/store-lane-yield.js';
 import { contextGraphSubscriptionSyncPremisesEqual, isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
 import type { ChallengeExactAssetFetchContext, DurableSyncContext } from './sync/requester/durable-sync.js';
 
@@ -77,6 +78,8 @@ export class RecoveryMaterializationOwner {
       asAbortError: asSyncFetchAbortError,
       track: (run) => ports.track(run),
     });
+    // How long this operation's last asset write held the store, if it wrote one.
+    let previousWriteMs: number | undefined;
     return {
       authenticateChallengePinnedAsset: ({
         asset,
@@ -120,6 +123,10 @@ export class RecoveryMaterializationOwner {
           `Context graph binding for ${asset.contextGraphId} changed during graph-scoped store`,
         )),
         operation: async (control): Promise<GraphScopedMaterializationOutcome> => {
+          // This operation's asset writes run back to back: let queued store work in between them.
+          if (previousWriteMs !== undefined) {
+            await yieldStoreBackgroundLane({ store: ports.store(), previousWriteMs, signal: operationSignal });
+          }
           const { isBindingCurrent, recaptureBindingGeneration, assertCurrent } = control;
           const authentication = await authority.authenticate(asset, authenticationDeadline, operationSignal);
           control.adoptEquivalentSubscription();
@@ -161,6 +168,7 @@ export class RecoveryMaterializationOwner {
           assertCurrent();
           onAtomicCommitStarted?.(asset.contextGraphId, asset.ual);
           assertCurrent();
+          const writeStartedAt = Date.now();
           const outcome = await materializeVerifiedGraphScopedAsset({
             store: ports.store(),
             asset: authentication.asset,
@@ -182,6 +190,7 @@ export class RecoveryMaterializationOwner {
             },
           });
           if (outcome === 'applied') await ports.reconcile(authentication.asset, ctx);
+          previousWriteMs = Date.now() - writeStartedAt;
           return outcome;
         },
       }),

@@ -19,11 +19,12 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && pnpm run test:types",
     "benchmark:delete-no-count": "pnpm run build && node scripts/delete-by-pattern-no-count-benchmark.mjs",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs storage",
-    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "test:types": "tsc --project tsconfig.type-tests.json"
   },
   "dependencies": {
     "@origintrail-official/dkg-http-utils": "workspace:*",

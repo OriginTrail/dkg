@@ -208,6 +208,8 @@ export default defineConfig({
           // `/api/status` → `eventLoopDelay`: the gauge with a fake histogram
           // plus one real-histogram smoke test, and the route block shape.
           'test/event-loop-delay-monitor.test.ts',
+          // The periodic `resource_usage` line: its fields and its schedule.
+          'test/resource-usage-log.test.ts',
           'test/supervisor-liveness.test.ts',
           'test/liveness-diagnostics.test.ts',
           'test/liveness-supervisor-log.test.ts',
@@ -229,6 +231,7 @@ export default defineConfig({
           'test/async-promote-bookkeeping-recovery.test.ts',
           'test/async-promote-queue-e2e.test.ts',
           'test/knowledge-assets-1116-share-errors.test.ts',
+          'test/knowledge-asset-pull-recovery.test.ts',
           'test/knowledge-assets-sub-graph-refusal.test.ts',
           'test/import-artifact-routes.test.ts',
           'test/shared-memory-catchup-durable.test.ts',

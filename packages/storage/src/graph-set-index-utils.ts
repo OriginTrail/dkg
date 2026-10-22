@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { Quad, QueryOptions, UpdateOptions } from "./triple-store.js";
-export function namedGraphsFromQuads(quads: Quad[]): string[] {
+export function namedGraphsFromQuads(quads: readonly Quad[]): string[] {
   return [...new Set(quads.map((quad) => quad.graph).filter(Boolean))];
 }
 
