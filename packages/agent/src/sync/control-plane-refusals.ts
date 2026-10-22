@@ -1,4 +1,6 @@
-import { createOperationContext, Logger } from '@origintrail-official/dkg-core';
+import { createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
+import type { SyncBackpressureBusyError } from './backpressure.js';
+import type { SyncAdmissionSource } from './policy.js';
 
 /**
  * One log line per interval, with a count, for control-plane fetches refused
@@ -12,6 +14,9 @@ import { createOperationContext, Logger } from '@origintrail-official/dkg-core';
  * minutes, and they change nothing the node holds. Every other refusal, and a
  * control-plane fetch that ends any other way (displaced, timed out, failed),
  * logs a line of its own.
+ *
+ * Each node owns one summary (`DKGAgentBase.controlPlaneRefusals`), written
+ * through its logger; the admission reaches it through `syncRefusalReporter`.
  */
 export const CONTROL_PLANE_REFUSAL_SUMMARY_INTERVAL_MS = 10 * 60_000;
 
@@ -85,9 +90,29 @@ export class ControlPlaneRefusalSummary {
   }
 }
 
-const log = new Logger('DKGAgent');
+/** A node's summary, written as warnings through its logger. */
+export function controlPlaneRefusalSummary(
+  log: { warn(ctx: OperationContext, message: string): void },
+): ControlPlaneRefusalSummary {
+  return new ControlPlaneRefusalSummary({ emit: (message) => log.warn(createOperationContext('sync'), message) });
+}
 
-/** The summary of the node-wide sync scheduler (`backpressure.ts`). */
-export const controlPlaneRefusals = new ControlPlaneRefusalSummary({
-  emit: (message) => log.warn(createOperationContext('sync'), message),
-});
+/**
+ * The refusal reporter of one admission (`withGlobalSyncBackpressure`'s
+ * `reportRefusal`): a control-plane fetch refused at once is counted in
+ * `summary`, and every other refusal, or any without a summary, is one
+ * `logInfo` line.
+ */
+export function syncRefusalReporter(
+  admission: { label: string; source?: SyncAdmissionSource; contextGraphId?: string },
+  summary: ControlPlaneRefusalSummary | undefined,
+  logInfo: (ctx: OperationContext, message: string) => void,
+): (ctx: OperationContext, error: SyncBackpressureBusyError) => void {
+  return (ctx, error) => {
+    if (summary && admission.source === 'control-plane' && error.state !== undefined) {
+      summary.note(admission.label, error.state, admission.contextGraphId);
+    } else {
+      logInfo(ctx, error.message);
+    }
+  };
+}

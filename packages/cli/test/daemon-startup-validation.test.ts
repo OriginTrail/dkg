@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, open, rm, stat } from 'node:fs/promises';
+import { mkdtemp, open, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { computeNetworkId } from '../../core/src/genesis.js';
@@ -7,6 +7,7 @@ import { buildEvmDeploymentId } from '@origintrail-official/dkg-chain';
 import { SqliteContextGraphStorageDiscoveryStore } from '@origintrail-official/dkg-node-ui';
 import {
   DEFAULT_DAEMON_LOG_MAX_BYTES,
+  DEFAULT_DAEMON_LOG_TOTAL_BYTES,
 } from '../src/daemon/log-rotation.js';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 
@@ -223,6 +224,47 @@ describe('daemon startup network validation', () => {
       await new Promise(resolve => setTimeout(resolve, 10));
     }
     expect(tail).toContain('Rotated daemon.log during startup');
+  });
+
+  it('keeps the newest lines of an inherited daemon log larger than the whole size limit', async () => {
+    tempHome = await mkdtemp(join(tmpdir(), 'dkg-log-rotation-oversized-'));
+    originalDkgHome = process.env.DKG_HOME;
+    process.env.DKG_HOME = tempHome;
+    stdoutWrite = process.stdout.write;
+    stderrWrite = process.stderr.write;
+    uncaughtExceptionListeners = process.listeners('uncaughtException') as NodeJS.UncaughtExceptionListener[];
+    unhandledRejectionListeners = process.listeners('unhandledRejection') as NodeJS.UnhandledRejectionListener[];
+
+    // A sparse log just past the whole limit, with its newest lines at the end.
+    const daemonLog = join(tempHome, 'daemon.log');
+    const newest = '\nnewest line before the restart\n';
+    const size = DEFAULT_DAEMON_LOG_TOTAL_BYTES + 1024;
+    const logHandle = await open(daemonLog, 'w');
+    await logHandle.truncate(size);
+    await logHandle.write(Buffer.from(newest), 0, newest.length, size - newest.length);
+    await logHandle.close();
+
+    mocks.loadNetworkConfig.mockResolvedValue(null);
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process, 'exit').mockImplementation(((code?: string | number | null) => {
+      throw new Error(`process.exit:${code}`);
+    }) as never);
+
+    await expect(runDaemonInner(true, {
+      name: 'startup-oversized-log-test',
+      networkConfig: 'missing-mainnet',
+      listenPort: 0,
+      nodeRole: 'edge',
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('process.exit:1');
+
+    expect(await readFile(`${daemonLog}.1`, 'utf-8')).toBe('newest line before the restart\n');
+    let tail = '';
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      tail = await readFileTail(daemonLog);
+      if (tail.includes('kept the last')) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    expect(tail).toContain('kept the last 0.0 MB of the newest rotated file within the size limit');
   });
 
   it('exits before agent creation when config.networkConfig does not resolve', async () => {

@@ -795,8 +795,8 @@ async function executeCuratorMetaRefresh(
     return true;
   } catch (error) {
     throwIfCuratorMetaRefreshAborted(options.signal);
-    // Refused for want of a sync slot: the admission counts it into one line per interval.
-    if (!getSyncBackpressureBusyError(error)?.summarized) {
+    // Refused at once by its admission, which reports it (one line per interval for this fetch).
+    if (getSyncBackpressureBusyError(error)?.reason !== 'queue_full') {
       agent.log.warn(
         ctx,
         `Meta refresh for "${contextGraphId}" failed: ${error instanceof Error ? error.message : String(error)}`,

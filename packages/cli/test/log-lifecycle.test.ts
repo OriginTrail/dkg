@@ -20,6 +20,7 @@ const noRotation = async () => ({
   trimmed: false,
   previousBytes: 0,
   removedFiles: 0,
+  newestCutTo: null,
 });
 
 describe('startDaemonLogController', () => {
@@ -495,7 +496,7 @@ describe('startDaemonLogController', () => {
       maxBatchEntries: 1,
       rotate: async () => {
         events.push('rotate');
-        return { rotated: true, trimmed: false, previousBytes: 10, removedFiles: 1 };
+        return { rotated: true, trimmed: false, previousBytes: 10, removedFiles: 1, newestCutTo: null };
       },
       append: async (data) => {
         appendCalls += 1;
@@ -535,6 +536,7 @@ describe('startDaemonLogController', () => {
       trimmed: false,
       previousBytes: 10,
       removedFiles: 1,
+      newestCutTo: null,
     });
     await logFileWriter.shutdown();
 

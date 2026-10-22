@@ -69,6 +69,7 @@ describe('daemon log rotation I/O bound', () => {
       trimmed: true,
       previousBytes: 2_000_000_000,
       removedFiles: 0,
+      newestCutTo: null,
     });
     expect(fsMocks.readFile).not.toHaveBeenCalled();
     expect(fsMocks.read).toHaveBeenCalledTimes(1);

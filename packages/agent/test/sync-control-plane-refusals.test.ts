@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createOperationContext } from '@origintrail-official/dkg-core';
+import { SyncBackpressureBusyError } from '../src/sync/backpressure.js';
 import {
   CONTROL_PLANE_REFUSAL_MAX_COUNTED_GRAPHS,
   CONTROL_PLANE_REFUSAL_SUMMARY_INTERVAL_MS,
   ControlPlaneRefusalSummary,
+  controlPlaneRefusalSummary,
+  syncRefusalReporter,
 } from '../src/sync/control-plane-refusals.js';
 
 const LABEL = 'durable:control-plane';
@@ -108,5 +112,51 @@ describe('control-plane refusal summary', () => {
     // The flushed interval's timer is gone: no second line when it would have fired.
     advance(CONTROL_PLANE_REFUSAL_SUMMARY_INTERVAL_MS);
     expect(lines).toHaveLength(1);
+  });
+});
+
+describe('control-plane refusal reporting', () => {
+  const ctx = createOperationContext('sync');
+  const refusal = (state?: string) => new SyncBackpressureBusyError(
+    `Sync backpressure rejected ${LABEL} (${state ?? BUSY})`,
+    'queue_full',
+    state,
+  );
+
+  it('counts a control-plane fetch refused at once in the summary, and logs every other refusal on its own', () => {
+    const summaryLines: string[] = [];
+    const infoLines: string[] = [];
+    const counted = new ControlPlaneRefusalSummary({ emit: (line) => summaryLines.push(line), now: () => clock });
+    const logInfo = (_ctx: unknown, message: string) => { infoLines.push(message); };
+
+    syncRefusalReporter({ label: LABEL, source: 'control-plane', contextGraphId: 'urn:cg:a' }, counted, logInfo)(ctx, refusal(BUSY));
+    syncRefusalReporter({ label: 'durable:urn:cg:b:peer', source: 'on-connect' }, counted, logInfo)(
+      ctx,
+      new SyncBackpressureBusyError('Sync backpressure rejected durable:urn:cg:b:peer (global inflight=1/1, queued=0/0)', 'queue_full', 'global inflight=1/1, queued=0/0'),
+    );
+    // Without a summary, or without the state of a refusal at once, a control-plane refusal is one line too.
+    syncRefusalReporter({ label: LABEL, source: 'control-plane' }, undefined, logInfo)(ctx, refusal(BUSY));
+    syncRefusalReporter({ label: LABEL, source: 'control-plane' }, counted, logInfo)(ctx, refusal());
+
+    expect(infoLines).toEqual([
+      'Sync backpressure rejected durable:urn:cg:b:peer (global inflight=1/1, queued=0/0)',
+      `Sync backpressure rejected ${LABEL} (${BUSY})`,
+      `Sync backpressure rejected ${LABEL} (${BUSY})`,
+    ]);
+    counted.flush();
+    expect(summaryLines).toEqual([expect.stringMatching(/ 1 time\(s\) in the last 1 s for 1 graph\(s\)/)]);
+  });
+
+  it('writes a node\'s summary as warnings of its logger, in a sync operation', () => {
+    const warnings: Array<{ ctx: { operationName: string }; message: string }> = [];
+    const summary = controlPlaneRefusalSummary({ warn: (ctx, message) => { warnings.push({ ctx, message }); } });
+
+    summary.note(LABEL, BUSY, 'urn:cg:a');
+    summary.flush();
+
+    expect(warnings).toEqual([{
+      ctx: expect.objectContaining({ operationName: 'sync' }),
+      message: expect.stringContaining(`Sync backpressure rejected ${LABEL} 1 time(s)`),
+    }]);
   });
 });

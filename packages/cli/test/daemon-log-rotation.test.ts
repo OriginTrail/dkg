@@ -1,4 +1,4 @@
-import { appendFile, mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, open, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -49,7 +49,7 @@ describe('rotateDaemonLogIfNeeded', () => {
 
     const result = await rotateDaemonLogIfNeeded(path, { maxBytes: 20, keepBytes: 10 });
 
-    expect(result).toEqual({ rotated: false, trimmed: false, previousBytes: 8, removedFiles: 0 });
+    expect(result).toEqual({ rotated: false, trimmed: false, previousBytes: 8, removedFiles: 0, newestCutTo: null });
     expect(await readFile(path, 'utf-8')).toBe('one\ntwo\n');
     expect(await names(join(path, '..'))).toEqual(['daemon.log']);
   });
@@ -61,7 +61,7 @@ describe('rotateDaemonLogIfNeeded', () => {
 
     const result = await rotateDaemonLogIfNeeded(path, { maxBytes: 20, keepBytes: 10 });
 
-    expect(result).toEqual({ rotated: true, trimmed: false, previousBytes: 21, removedFiles: 0 });
+    expect(result).toEqual({ rotated: true, trimmed: false, previousBytes: 21, removedFiles: 0, newestCutTo: null });
     expect(await names(join(path, '..'))).toEqual(['daemon.log.1', 'daemon.log.2', 'daemon.log.3']);
     expect(await readFile(`${path}.1`, 'utf-8')).toBe('live-1\nlive-2\nlive-3\n');
     expect(await readFile(`${path}.2`, 'utf-8')).toBe('previous\n');
@@ -94,7 +94,7 @@ describe('rotateDaemonLogIfNeeded', () => {
 
     const result = await rotateDaemonLogIfNeeded(path, { now: () => now });
 
-    expect(result).toEqual({ rotated: false, trimmed: false, previousBytes: 5, removedFiles: 2 });
+    expect(result).toEqual({ rotated: false, trimmed: false, previousBytes: 5, removedFiles: 2, newestCutTo: null });
     expect(await names(join(path, '..'))).toEqual(['daemon.log', 'daemon.log.1', 'daemon.log.2']);
   });
 
@@ -120,10 +120,53 @@ describe('rotateDaemonLogIfNeeded', () => {
     for (const name of others) await writeFile(join(dir, name), 'keep\n');
     await mkdir(join(dir, 'daemon.log.7'));
 
-    await rotateDaemonLogIfNeeded(path, { maxBytes: 20, keepBytes: 10, totalBytes: 20 });
+    await writeAged(join(dir, 'daemon.log.2'), 'aged\n', Date.now(), DEFAULT_DAEMON_LOG_RETAIN_MS + HOUR_MS);
 
-    // The rotated file itself is past the 20-byte cap, so it goes; nothing else does.
-    expect(await names(dir)).toEqual([...others, 'daemon.log.7'].sort());
+    const result = await rotateDaemonLogIfNeeded(path, { maxBytes: 20, keepBytes: 10 });
+
+    // The live file moved to .1 and the aged file (moved to .3) went; nothing else changed.
+    expect(result).toMatchObject({ rotated: true, removedFiles: 1 });
+    expect(await names(dir)).toEqual([...others, 'daemon.log.1', 'daemon.log.7'].sort());
+    for (const name of others) expect(await readFile(join(dir, name), 'utf-8')).toBe('keep\n');
+  });
+
+  it('keeps the last lines of a rotated file that alone passes the size limit, and judges older files as usual', async () => {
+    const lines = Array.from({ length: 60 }, (_, index) => `line-${String(index + 1).padStart(4, '0')}\n`);
+    const now = Date.now();
+    const path = await tempLog(lines.join(''));
+    await writeAged(`${path}.1`, 'previous\n', now, HOUR_MS);
+    await writeAged(`${path}.2`, 'older\n', now, DEFAULT_DAEMON_LOG_RETAIN_MS + HOUR_MS);
+
+    const result = await rotateDaemonLogIfNeeded(path, { maxBytes: 50, keepBytes: 35, totalBytes: 200, now: () => now });
+
+    // 600 bytes cannot fit in 200: the newest 35 bytes are read and the partial first line dropped.
+    expect(result).toEqual({ rotated: true, trimmed: false, previousBytes: 600, removedFiles: 1, newestCutTo: 30 });
+    expect(await readFile(`${path}.1`, 'utf-8')).toBe('line-0058\nline-0059\nline-0060\n');
+    expect(await readFile(`${path}.2`, 'utf-8')).toBe('previous\n');
+    expect(await names(join(path, '..'))).toEqual(['daemon.log.1', 'daemon.log.2']);
+  });
+
+  it('keeps the newest lines of an inherited log larger than the whole default size limit', async () => {
+    const path = await tempLog('');
+    const newest = '\nnewest line before the restart\n';
+    const size = DEFAULT_DAEMON_LOG_TOTAL_BYTES + 1024;
+    // A sparse file: only its last bytes are written.
+    const handle = await open(path, 'r+');
+    try {
+      await handle.truncate(size);
+      await handle.write(Buffer.from(newest), 0, newest.length, size - newest.length);
+    } finally {
+      await handle.close();
+    }
+
+    const result = await rotateDaemonLogIfNeeded(path);
+
+    expect(result).toMatchObject({ rotated: true, previousBytes: size, newestCutTo: newest.length - 1 });
+    expect(await readFile(`${path}.1`, 'utf-8')).toBe('newest line before the restart\n');
+    expect(describeDaemonLogRotation(result, 'during startup')).toBe(
+      'Rotated daemon.log during startup to daemon.log.1 (was 512.0 MB); '
+        + 'kept the last 0.0 MB of the newest rotated file within the size limit',
+    );
   });
 
   it('trims the live file in place to its last complete lines when the rename fails', async () => {
@@ -248,7 +291,13 @@ describe('daemon.log retention over days of writing', () => {
 });
 
 describe('daemon.log rotation lines and checks', () => {
-  const unchanged: DaemonLogRotationResult = { rotated: false, trimmed: false, previousBytes: 10, removedFiles: 0 };
+  const unchanged: DaemonLogRotationResult = {
+    rotated: false,
+    trimmed: false,
+    previousBytes: 10,
+    removedFiles: 0,
+    newestCutTo: null,
+  };
 
   it('describes only checks that changed something', () => {
     expect(describeDaemonLogRotation(unchanged)).toBeNull();
@@ -263,6 +312,8 @@ describe('daemon.log rotation lines and checks', () => {
       .toBe('Trimmed daemon.log in place after a failed rename (was 60.0 MB)');
     expect(describeDaemonLogRotation({ ...unchanged, removedFiles: 2 }))
       .toBe('Removed 2 rotated daemon.log file(s) past the age or size limit');
+    expect(describeDaemonLogRotation({ ...unchanged, newestCutTo: 35 * 1024 * 1024 }))
+      .toBe('Kept the last 35.0 MB of the newest rotated file within the size limit');
   });
 
   it('checks every interval, logs what changed, and survives a failed check', async () => {

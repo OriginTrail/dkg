@@ -17,7 +17,6 @@ import {
 } from './priority-admission-queue.js';
 import { sharedMemoryReserve, sharedMemoryReserveFor } from './shared-memory-reserve.js';
 import { controlPlaneReserve, controlPlaneReserveFor } from './control-plane-reserve.js';
-import { controlPlaneRefusals } from './control-plane-refusals.js';
 import {
   ReservedSyncSlots,
   recordSyncReserves,
@@ -433,8 +432,8 @@ export type SyncBackpressureBusyReason = 'queue_full' | 'queue_timeout' | 'displ
 export class SyncBackpressureBusyError extends Error {
   readonly reason: SyncBackpressureBusyReason;
 
-  /** `summarized`: a control-plane fetch refused at once, counted in `control-plane-refusals.ts` instead of logged. */
-  constructor(message: string, reason: SyncBackpressureBusyReason = 'queue_full', readonly summarized = false) {
+  /** `state`: slots and queue when an admission was refused at once (`queue_full`), for its reporter. */
+  constructor(message: string, reason: SyncBackpressureBusyReason = 'queue_full', readonly state?: string) {
     super(message);
     this.name = 'SyncBackpressureBusyError';
     this.reason = reason;
@@ -566,7 +565,7 @@ function acquire(
   lastLimit = limit;
   lastQueueLimit = queueLimit;
   const queuedBefore = queue.length;
-  const { reserve, source, contextGraphId } = terms.queued.payload;
+  const { reserve } = terms.queued.payload;
   return queue.acquire({
     ...terms.queued,
     signal: options.signal,
@@ -574,9 +573,7 @@ function acquire(
     createBusyError: () => {
       const state = `global inflight=${capacityTracker.inflightCount}/${limit}, queued=${queuedBefore}/${queueLimit}`
         + reservedSlotState(reserve);
-      if (source === 'control-plane') controlPlaneRefusals.note(options.label, state, contextGraphId);
-      return new SyncBackpressureBusyError(
-        `Sync backpressure rejected ${options.label} (${state})`, 'queue_full', source === 'control-plane');
+      return new SyncBackpressureBusyError(`Sync backpressure rejected ${options.label} (${state})`, 'queue_full', state);
     },
     createDisplacedError: (victim) => new SyncBackpressureBusyError(
         `Sync backpressure displaced ${victim.payload.contextGraphId ?? 'queued work'} for higher-priority ${options.label}`,
@@ -843,6 +840,8 @@ export async function withGlobalSyncBackpressure<T>(
     label: string;
     signal?: AbortSignal;
     logInfo?: (ctx: OperationContext, message: string) => void;
+    /** Reports a refusal at once in place of its `logInfo` line (`control-plane-refusals.ts`). */
+    reportRefusal?: (ctx: OperationContext, error: SyncBackpressureBusyError) => void;
   },
   work: () => Promise<T>,
 ): Promise<T> {
@@ -861,8 +860,9 @@ export async function withGlobalSyncBackpressure<T>(
   try {
     admission = acquire(options.policy, options);
   } catch (error) {
-    if (error instanceof SyncBackpressureBusyError && !error.summarized) {
-      options.logInfo?.(options.ctx, error.message);
+    if (error instanceof SyncBackpressureBusyError) {
+      if (options.reportRefusal) options.reportRefusal(options.ctx, error);
+      else options.logInfo?.(options.ctx, error.message);
     }
     throw error;
   }

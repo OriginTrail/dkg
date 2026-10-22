@@ -9,7 +9,8 @@ import { basename, dirname, join } from 'node:path';
  * rotation nor a restart drops a line. Rotated files are kept, newest first,
  * while their newest line is younger than `retainMs` and the live file and the
  * kept files together stay within `totalBytes`; the rest are removed, oldest
- * first.
+ * first. A newest rotated file too large to fit on its own keeps its last
+ * lines.
  *
  * The defaults keep at least 48 hours of a busy Core's log: within 512 MB a
  * node keeps the full 72 hours up to about 6.5 MB of log an hour, what the
@@ -47,6 +48,8 @@ export interface DaemonLogRotationResult {
   previousBytes: number;
   /** Rotated files removed by the age or size limit. */
   removedFiles: number;
+  /** Set when the newest rotated file alone passed the size limit: it kept only its last lines, this many bytes. */
+  newestCutTo: number | null;
 }
 
 interface RotatedLogFile {
@@ -83,11 +86,11 @@ async function listRotatedLogFiles(logFile: string): Promise<RotatedLogFile[]> {
 }
 
 /**
- * Trim an oversized log in place from a bounded tail read: at most keepBytes
- * are read, and the first partial line is dropped. A whole-file read once
- * copied a multi-gigabyte log into the daemon heap.
+ * Cut a log file in place to its last lines from a bounded tail read: at most
+ * keepBytes are read, and the first partial line is dropped. Returns the bytes
+ * kept. A whole-file read once copied a multi-gigabyte log into the daemon heap.
  */
-async function trimDaemonLogTail(logFile: string, size: number, keepBytes: number): Promise<void> {
+async function keepLogTail(logFile: string, size: number, keepBytes: number): Promise<number> {
   const bytesToRead = Math.min(keepBytes, size);
   const buffer = Buffer.allocUnsafe(bytesToRead);
   const handle = await open(logFile, 'r');
@@ -109,7 +112,9 @@ async function trimDaemonLogTail(logFile: string, size: number, keepBytes: numbe
 
   const tail = buffer.subarray(0, bytesRead);
   const firstNewline = tail.indexOf(0x0a);
-  await writeFile(logFile, firstNewline >= 0 ? tail.subarray(firstNewline + 1) : tail);
+  const kept = firstNewline >= 0 ? tail.subarray(firstNewline + 1) : tail;
+  await writeFile(logFile, kept);
+  return kept.length;
 }
 
 /** Move every rotated file up one number, oldest first, then the live file to `.1`. */
@@ -151,24 +156,32 @@ export async function rotateDaemonLogIfNeeded(
       await renameIntoRotation(logFile, files);
       rotated = true;
     } catch {
-      await trimDaemonLogTail(logFile, before.size, keepBytes);
+      await keepLogTail(logFile, before.size, keepBytes);
       trimmed = true;
     }
     files = await listRotatedLogFiles(logFile);
   }
 
   // Newest first: a file is kept only while every newer one is, so what is
-  // kept is always one unbroken stretch of the most recent log.
+  // kept is the most recent log. The newest rotated file can pass the size
+  // limit alone (a live file that grew far past `maxBytes`, as an inherited
+  // one can); it then keeps its last lines, at most `keepBytes` and what the
+  // limit leaves, and the files before it are judged as usual.
   const live = await stat(logFile).catch(() => null);
   let keptBytes = live?.size ?? 0;
   let keeping = true;
   let removedFiles = 0;
-  for (const file of files) {
-    keeping = keeping
-      && now() - file.mtimeMs <= retainMs
-      && keptBytes + file.size <= totalBytes;
+  let newestCutTo: number | null = null;
+  for (const [position, file] of files.entries()) {
+    const room = totalBytes - keptBytes;
+    let size = file.size;
+    keeping = keeping && now() - file.mtimeMs <= retainMs;
+    if (keeping && position === 0 && size > room && room > 0) {
+      size = newestCutTo = await keepLogTail(rotatedLogPath(logFile, file.index), size, Math.min(keepBytes, room));
+    }
+    keeping = keeping && size <= room;
     if (keeping) {
-      keptBytes += file.size;
+      keptBytes += size;
       continue;
     }
     await unlink(rotatedLogPath(logFile, file.index)).then(
@@ -177,7 +190,7 @@ export async function rotateDaemonLogIfNeeded(
       () => {},
     );
   }
-  return { rotated, trimmed, previousBytes, removedFiles };
+  return { rotated, trimmed, previousBytes, removedFiles, newestCutTo };
 }
 
 /** The log line for a check that changed something, or null when it changed nothing. */
@@ -189,6 +202,9 @@ export function describeDaemonLogRotation(
   const parts: string[] = [];
   if (result.rotated) parts.push(`Rotated daemon.log${when ? ` ${when}` : ''} to daemon.log.1 (${was})`);
   if (result.trimmed) parts.push(`Trimmed daemon.log${when ? ` ${when}` : ''} in place after a failed rename (${was})`);
+  if (result.newestCutTo !== null) {
+    parts.push(`kept the last ${(result.newestCutTo / MIB).toFixed(1)} MB of the newest rotated file within the size limit`);
+  }
   if (result.removedFiles > 0) {
     parts.push(`removed ${result.removedFiles} rotated daemon.log file(s) past the age or size limit`);
   }

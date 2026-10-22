@@ -5,11 +5,10 @@ import {
   contextGraphMetaGraphUri,
   createOperationContext,
   DKG_ONTOLOGY,
-  Logger,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DEFAULT_SYNC_SHARED_MEMORY_QUEUE_LIMIT } from '../src/sync/shared-memory-reserve.js';
-import { controlPlaneRefusals } from '../src/sync/control-plane-refusals.js';
+import { ControlPlaneRefusalSummary, syncRefusalReporter } from '../src/sync/control-plane-refusals.js';
 import {
   getSyncBackpressureSnapshot,
   resolveSyncGlobalBackpressure,
@@ -156,16 +155,6 @@ function published() {
   );
 }
 
-/** End the node-wide refusal summary's interval now and return the lines it logs. */
-function refusalSummaryNow(): string[] {
-  const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
-  try {
-    controlPlaneRefusals.flush();
-    return warn.mock.calls.map(([, message]) => message);
-  } finally {
-    warn.mockRestore();
-  }
-}
 
 let savedEnv: Partial<Record<(typeof SYNC_ENV)[number], string>> = {};
 
@@ -250,30 +239,37 @@ describe('reserved control-plane slot (#3280)', () => {
     expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 1, queued: 0 });
   }));
 
-  it('counts refused refreshes into one line per interval and still logs every other refusal on its own', () => withHolds(async (keep) => {
-    refusalSummaryNow();
+  it('hands a refusal to the admission\'s reporter, which counts refused refreshes and logs every other refusal', () => withHolds(async (keep) => {
     const policy = oneSlotNoQueue();
     await running(keep(hold(longTransfer(policy))));
     await running(keep(hold(metadataRefresh(policy, 'urn:cg:first'))));
     const messages: string[] = [];
+    const summaryLines: string[] = [];
     const logInfo = (_ctx: unknown, message: string) => { messages.push(message); };
+    const summary = new ControlPlaneRefusalSummary({ emit: (line) => summaryLines.push(line) });
+    const reported = (admission: Admission) => ({
+      ...admission,
+      logInfo,
+      reportRefusal: syncRefusalReporter(admission, summary, logInfo),
+    });
 
     for (const contextGraphId of ['urn:cg:second', 'urn:cg:third', 'urn:cg:second']) {
-      await expect(withGlobalSyncBackpressure(
-        { ...metadataRefresh(policy, contextGraphId), logInfo },
-        async () => undefined,
-      )).rejects.toMatchObject({ reason: 'queue_full', summarized: true });
+      await expect(withGlobalSyncBackpressure(reported(metadataRefresh(policy, contextGraphId)), async () => undefined))
+        .rejects.toMatchObject({ reason: 'queue_full', state: 'global inflight=1/1, queued=0/0, reserved control-plane inflight=1/1' });
     }
     // Other work refused for the same lack of a slot keeps its own line.
-    await expect(withGlobalSyncBackpressure(
-      { ...longTransfer(policy, 'urn:cg:second-large'), logInfo },
-      async () => undefined,
-    )).rejects.toMatchObject({ reason: 'queue_full', summarized: false });
+    await expect(withGlobalSyncBackpressure(reported(longTransfer(policy, 'urn:cg:second-large')), async () => undefined))
+      .rejects.toMatchObject({ reason: 'queue_full', state: 'global inflight=1/1, queued=0/0' });
+    // Without a reporter the admission logs every refusal itself.
+    await expect(withGlobalSyncBackpressure({ ...metadataRefresh(policy, 'urn:cg:fourth'), logInfo }, async () => undefined))
+      .rejects.toMatchObject({ reason: 'queue_full' });
 
     expect(messages).toEqual([
       'Sync backpressure rejected durable:urn:cg:second-large:peer (global inflight=1/1, queued=0/0)',
+      'Sync backpressure rejected durable:control-plane (global inflight=1/1, queued=0/0, reserved control-plane inflight=1/1)',
     ]);
-    expect(refusalSummaryNow()).toEqual([
+    summary.flush();
+    expect(summaryLines).toEqual([
       expect.stringMatching(
         /^Sync backpressure rejected durable:control-plane 3 time\(s\) in the last \d+ s for 2 graph\(s\), each asked again later \(last: global inflight=1\/1, queued=0\/0, reserved control-plane inflight=1\/1\)$/,
       ),
@@ -439,6 +435,7 @@ function createOneSlotMember(store: OxigraphStore, contextGraphId: string) {
   const fetches: string[] = [];
   const noop = () => {};
   const log = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() };
+  const summaryLines: string[] = [];
   const agent = {
     config: { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
     peerId: 'local-peer',
@@ -459,6 +456,7 @@ function createOneSlotMember(store: OxigraphStore, contextGraphId: string) {
     subscribedContextGraphs: new Map([[contextGraphId, {}]]),
     syncCheckpoints: new Map<string, number>(),
     log,
+    controlPlaneRefusals: new ControlPlaneRefusalSummary({ emit: (line) => summaryLines.push(line) }),
   };
   /** Admit work through this member's admission path, held until released. */
   const admit = (otherGraphId: string, label: string, source: SyncAdmissionSource) => holdWith(
@@ -472,7 +470,7 @@ function createOneSlotMember(store: OxigraphStore, contextGraphId: string) {
       { source },
     ),
   );
-  return { agent, fetches, log, admit };
+  return { agent, fetches, log, admit, summaryLines };
 }
 
 describe('metadata refresh on a node with one sync slot and no queue (#3280)', () => {
@@ -495,7 +493,6 @@ describe('metadata refresh on a node with one sync slot and no queue (#3280)', (
   }));
 
   it('fails at once, without waiting, while the reserved slot is busy too, and is counted, not logged', () => withHolds(async (keep) => {
-    refusalSummaryNow();
     const contextGraphId = `${OWNER}/busy-member`;
     const store = new OxigraphStore();
     try {
@@ -510,7 +507,8 @@ describe('metadata refresh on a node with one sync slot and no queue (#3280)', (
       // Neither the admission's line nor the refresh's warning: one line per interval instead.
       expect(member.log.info).not.toHaveBeenCalledWith(expect.anything(), expect.stringContaining('rejected'));
       expect(member.log.warn).not.toHaveBeenCalled();
-      expect(refusalSummaryNow()).toEqual([
+      member.agent.controlPlaneRefusals.flush();
+      expect(member.summaryLines).toEqual([
         expect.stringMatching(
           /^Sync backpressure rejected durable:control-plane 1 time\(s\) in the last \d+ s for 1 graph\(s\), each asked again later \(last: global inflight=1\/1, queued=0\/0, reserved control-plane inflight=1\/1\)$/,
         ),
