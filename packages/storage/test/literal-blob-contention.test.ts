@@ -3,6 +3,7 @@ import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { asChangelogReader, createTripleStore, type TripleStore } from '../src/index.js';
+import { immutableStorePreparation } from '../src/immutable-store-preparation.js';
 
 const disk = vi.hoisted(() => ({ hold: null as Promise<void> | null, entered: false, syncs: 0 }));
 vi.mock('node:fs/promises', async original => {
@@ -16,7 +17,7 @@ vi.mock('node:fs/promises', async original => {
   } };
 });
 let root: string, store: TripleStore | undefined;
-afterEach(async () => { await store?.close(); store = undefined; disk.hold = null; disk.entered = false; disk.syncs = 0;
+afterEach(async () => { await store?.close(); store = undefined; vi.restoreAllMocks(); disk.hold = null; disk.entered = false; disk.syncs = 0;
   if (root) await rm(root, { recursive: true, force: true }); });
 const graph = 'urn:dkg:cg/_shared_memory';
 const quad = (subject: string, object = '"small"') => ({ graph, subject, predicate: 'urn:value', object });
@@ -81,4 +82,25 @@ it('does not lend an admitted preparation to a new callback write during close',
   release(); await large; await closing; await callbackWrite; store = undefined;
   expect(callbackOutcome).toBeInstanceOf(Error);
   expect(String(callbackOutcome)).toContain('closing');
+});
+
+it('owns accepted preparation before it can synchronously initiate close', async () => {
+  const f = await fixture(), preparation = immutableStorePreparation(f)!;
+  const prepare = preparation.prepareImmutableQuads.bind(preparation);
+  const innerClose = vi.spyOn((f as TripleStore & { innerStore: TripleStore }).innerStore, 'close');
+  let closing: Promise<void> | undefined, release!: () => void;
+  disk.hold = new Promise<void>(resolve => { release = resolve; });
+  vi.spyOn(preparation, 'prepareImmutableQuads').mockImplementation(quads => {
+    const ready = prepare(quads);
+    closing = f.close();
+    return ready;
+  });
+  const large = f.insert([quad('urn:synchronous-close', `"${'w'.repeat(80 * 1024)}"`)]);
+  const outcome = large.then(() => 'success', error => error);
+  try {
+    await vi.waitFor(() => expect(disk.entered).toBe(true));
+    expect(innerClose).not.toHaveBeenCalled();
+  } finally { release(); await outcome; await closing; store = undefined; }
+  expect(await outcome).toBe('success');
+  expect(innerClose).toHaveBeenCalledOnce();
 });
