@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import type { OutputSchema, RequestedToolPermissions } from '@origintrail-official/dkg-graph-computer';
 import type { QueryCatalogItem } from '@origintrail-official/dkg-core/query-catalog';
-import { fetchProgramTools, fetchProgramQueries, type ProgramTool, type ToolKind } from './client.js';
+import { fetchProgramTools, fetchProgramQueries, type ProgramTool } from './client.js';
 import { readPermissions, rowSchema, simpleRows, toolCall, toolFor, toolIris } from './tool-permissions.js';
 import { JsonViewer } from '../common/JsonViewer.js';
 import { copyText } from '../common/copyText.js';

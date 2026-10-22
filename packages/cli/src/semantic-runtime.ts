@@ -677,7 +677,7 @@ function assertRequestedToolPermissions(program: StoredSemanticProgram, binding:
   const scope = {
     graphId: binding.contextGraphId, executionLayer: binding.executionLayer ?? 'wm',
     ...(binding.query ? { query: { selector: binding.query.selector, outputSchema: binding.query.outputSchema } } : {}),
-    ...(binding.sparqlRead ? { sparqlRead: (({ outputSchemaSha256: _, ...grant }) => grant)(binding.sparqlRead) } : {}),
+    ...(binding.sparqlRead ? { sparqlRead: (({ outputSchemaSha256: _outputSchemaSha256, ...grant }) => grant)(binding.sparqlRead) } : {}),
     ...(binding.assetCreation ? { assetCreation: binding.assetCreation } : {}),
     ...(binding.localLlm ? { localLlm: { toolIri: binding.localLlm.toolIri } } : {}),
   };

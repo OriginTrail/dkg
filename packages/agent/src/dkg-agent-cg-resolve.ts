@@ -1050,7 +1050,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   }
 
   probeContextGraphWritePreflight(this: DKGAgent, contextGraphId: string, opts?: { callerAgentAddress?: string | null }): Promise<ContextGraphWritePreflightProbe> {
-    return probeContextGraphWritePreflight(this, { store: this.config.contextGraphSubscriptionStore,
+    return probeContextGraphWritePreflight(this, { locallyCreated: this.localContextGraphProvenance.hasLocalCreate(contextGraphId),
+      store: this.config.contextGraphSubscriptionStore,
       current: id => this.subscribedContextGraphs.get(id) }, contextGraphId, opts);
   }
 

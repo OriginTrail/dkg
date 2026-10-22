@@ -43,7 +43,7 @@ function button(text: string) { return [...container.querySelectorAll('button')]
 async function click(text: string) { const b = button(text); expect(b).toBeDefined(); expect(b.disabled).toBe(false); await act(async () => b.click()); await settle(); }
 async function fill(label: string, value: string) {
   const element = label === 'source' ? container.querySelector('[aria-label="source"]')!
-    : [...container.querySelectorAll('label')].find(l => l.firstChild?.textContent === label)?.querySelector('input,textarea')!;
+    : [...container.querySelectorAll('label')].find(l => l.firstChild?.textContent === label)!.querySelector('input,textarea')!;
   expect(element).toBeDefined();
   await act(async () => {
     const prototype = element.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;

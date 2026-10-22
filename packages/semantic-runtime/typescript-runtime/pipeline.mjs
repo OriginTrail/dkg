@@ -7,7 +7,7 @@ export function map(fn, { concurrency = 4 } = {}) {
   if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 32) throw new Error('Invalid map concurrency');
   return async value => {
     if (!Array.isArray(value)) throw new Error('map expects an array');
-    const results = new Array(value.length);
+    const results = Array.from({ length: value.length });
     let next = 0, failed = false, failure;
     await Promise.all(Array.from({ length: Math.min(concurrency, value.length) }, async () => {
       while (!failed) {

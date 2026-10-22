@@ -144,8 +144,8 @@ export class TypeScriptProgramHost {
 
   async stop(): Promise<void> {
     this.stopped = true;
-    for (const cancel of [...this.cancellations]) cancel();
-    await Promise.allSettled([...this.cache.values()]);
+    for (const cancel of Array.from(this.cancellations)) cancel();
+    await Promise.allSettled(this.cache.values());
     await Promise.all([...this.directories].map(directory => rm(directory, { recursive: true, force: true })));
     this.cache.clear();
     this.ready.clear();

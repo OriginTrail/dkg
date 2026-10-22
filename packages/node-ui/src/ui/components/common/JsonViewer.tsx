@@ -5,7 +5,7 @@ import './json-viewer.css';
 
 /** RDF property values are already decoded by useMemoryEntities. */
 export function parseJsonContainer(text: string): object | undefined {
-  if (!/^[\s]*[\[{]/.test(text)) return undefined;
+  if (!/^[\s]*[[{]/.test(text)) return undefined;
   try {
     const value: unknown = JSON.parse(text);
     return value !== null && typeof value === 'object' ? value : undefined;

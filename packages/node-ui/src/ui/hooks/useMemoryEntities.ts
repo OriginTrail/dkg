@@ -4,7 +4,6 @@ import { isUri, canonicalEntityUri } from './memory-graph-query.js';
 export { canonicalEntityUri, rdfBindingValue, subGraphOf, readMemoryGraphPage, fetchMemoryEntity } from './memory-graph-query.js';
 import { MEMORY_LABEL_PREDICATES } from '../lib/memoryLabels.js';
 import { decodeRdfStringLiteral } from '../../rdf-literal.js';
-import { sparqlIri } from '@origintrail-official/dkg-core/sparql-safe';
 
 export type TrustLevel = 'working' | 'shared' | 'verified';
 export type MemoryLayerKey = 'wm' | 'swm' | 'vm';
@@ -413,37 +412,6 @@ export function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntit
 
 export const buildMemoryEntities = buildEntities;
 
-/** Read a clicked resource directly, even when its facts fall outside the loaded graph pages. */
-export async function fetchMemoryEntity(
-  contextGraphId: string,
-  uri: string,
-  layer?: MemoryLayerKey,
-  includeQueryCatalog = false,
-): Promise<{ triples: LayeredTriple[]; partial: boolean }> {
-  const target = canonicalEntityUri(uri);
-  const match = target.startsWith('_:')
-    ? `((isBlank(?s) && STR(?s) = ${JSON.stringify(target.slice(2))}) || (isBlank(?o) && STR(?o) = ${JSON.stringify(target.slice(2))}))`
-    : `(?s = ${sparqlIri(target)} || ?o = ${sparqlIri(target)})`;
-  const definitions = [
-    { key: 'wm', sparql: wmSparql(contextGraphId), layer: 'working' as const },
-    { key: 'swm', sparql: swmSparql(contextGraphId), layer: 'shared' as const },
-    { key: 'vm', sparql: vmSparql(contextGraphId), layer: 'verified' as const },
-    ...(includeQueryCatalog ? [
-      { key: 'wm', sparql: queryCatalogLayerSparql(contextGraphId, 'wm'), layer: 'working' as const },
-      { key: 'swm', sparql: queryCatalogLayerSparql(contextGraphId, 'swm'), layer: 'shared' as const },
-    ] : []),
-  ].filter(definition => !layer || definition.key === layer);
-  const results = await Promise.all(definitions.map(definition => readMemoryGraphPage(
-    definition.sparql.replace(/}\s+LIMIT\s+\d+\s*$/i, `FILTER(${match}) }`),
-    contextGraphId, { includeContextGraphPartitions: true, layerLimit: 1_000, direct: true },
-  )));
-  if (results.some(result => !result.ok)) throw new Error('Could not load all resource details. Retry to refresh this resource.');
-  return {
-    triples: results.flatMap((result, index) => result.triples.map(triple => ({ ...triple, layer: definitions[index].layer }))),
-    partial: results.some(result => result.truncated),
-  };
-}
-
 /**
  * Canonical "first-class entity" predicate — an entity belongs in the
  * Entities tab list (and therefore the graph node set) iff it has at
@@ -507,8 +475,6 @@ export function useMemoryEntities(
     return { wm, swm, vm, total: entityList.length };
   }, [entityList]);
 
-  const refresh = useCallback(() => { void fetchAll(true); }, [fetchAll]);
-  const nextPage = useCallback(() => { void loadMore(); }, [loadMore]);
   return {
     entities,
     entityList,

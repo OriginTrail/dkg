@@ -26,7 +26,6 @@ import {
   type RpcUsageIssuerContext,
 } from './rpc-usage.js';
 import { rpcRequestAbortReason } from './rpc-request-abort.js';
-import { chainRpcFetch } from './rpc-http1-dispatcher.js';
 import { recordRpcAdmissionWait, recordFailedRpcAdmissionWait, recordRpcEndpointLatency } from './rpc-request-timing.js';
 
 export type RpcRequestClass = 'foreground' | 'background';

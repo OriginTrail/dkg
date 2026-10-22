@@ -150,10 +150,10 @@ export const WORKSPACE_RULES = Object.freeze({
     evmScopes: ['chain', 'agent'],
   },
   'packages/semantic-runtime': {
-    lanes: ['bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'], evmScopes: [],
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'], evmScopes: [],
   },
   'packages/graph-computer': {
-    lanes: ['bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'], evmScopes: [],
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui', 'kosava_supporting', 'kosava_hardhat_plugins'], evmScopes: [],
   },
   'packages/cli': {
     // tornado_blazegraph: that job's storage conformance suite runs the CLI's
@@ -162,7 +162,7 @@ export const WORKSPACE_RULES = Object.freeze({
     // registry, node-ui, graph-viz, mcp-dkg and the three agent adapters.
     // kosava_node_ui: node-ui tests scan the CLI daemon sources
     // (packages/node-ui/test/helpers/read-cli-daemon.ts).
-    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_supporting', 'kosava_node_ui', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/node-ui': {
@@ -261,6 +261,8 @@ export const WORKSPACE_OWNING_LANES = Object.freeze({
   'packages/publisher': ['tornado_publisher'],
   'packages/random-sampling': ['kosava_hardhat_plugins'],
   'packages/agent': ['tornado_agent'],
+  'packages/semantic-runtime': ['kosava_supporting'],
+  'packages/graph-computer': ['kosava_supporting'],
   'packages/cli': ['bura_cli'],
   'packages/node-ui': ['kosava_node_ui'],
   'packages/node-store': ['kosava_node_ui'],

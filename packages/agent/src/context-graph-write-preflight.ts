@@ -8,7 +8,6 @@ import { classifyWritePreflightFailure, type WritePreflightFailure, type WritePr
 /** Read-only dependencies of this point probe; the agent mixin remains its adapter. */
 export interface WritePreflightHost {
   readonly store: Pick<TripleStore, 'query'>;
-  readonly localContextGraphProvenance?: { hasLocalCreate(contextGraphId: string): boolean };
   contextGraphExists(contextGraphId: string): Promise<boolean>;
   contextGraphHasLocalContent(contextGraphId: string): Promise<boolean>;
   curatorDidMatchesChecksumAgent(curator: string, checksumAddress: string): boolean;
@@ -16,6 +15,7 @@ export interface WritePreflightHost {
 }
 
 interface WritePreflightSubscriptions {
+  readonly locallyCreated?: boolean;
   readonly store?: Pick<ContextGraphSubscriptionStore, 'load'>;
   readonly current: (contextGraphId: string) => Pick<ContextGraphSub, 'subscribed' | 'synced'> | undefined;
 }
@@ -199,7 +199,7 @@ export async function probeContextGraphWritePreflight(
       // up. The optional `storeUnavailable`/`storeErrorMessage` pair is kept
       // for the 503-diagnostics path (unchanged wire behaviour).
       storeAvailable: !storeUnavailable,
-      locallyCreated: host.localContextGraphProvenance?.hasLocalCreate(contextGraphId) === true,
+      locallyCreated: subscriptions.locallyCreated === true,
       ...(exists !== undefined ? { exists } : {}),
       ...(hasLocalContent !== undefined ? { hasLocalContent } : {}),
       ...(inMemorySubscription

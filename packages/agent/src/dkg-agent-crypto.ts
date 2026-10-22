@@ -2245,6 +2245,18 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
           && !localRecipient.workspaceEncryptionKeys.some(key =>
             key.encryptionKeyId === recipient.recipientKeyId
             && (key.privateEncryptionKey || key.revokedAt));
+        const ownedKey = !externalApiRecipient && localRecipient?.workspaceEncryptionKeys.find(
+          key => key.encryptionKeyId === recipient.recipientKeyId,
+        );
+        if (ownedKey && (ownedKey.revokedAt || !ownedKey.privateEncryptionKey)) {
+          return {
+            kind: 'failure', agentAddress: recipientAgentAddress, keyId: recipient.recipientKeyId,
+            error: new SwmSenderKeySetupRejectionError(
+              ownedKey.revokedAt ? 'revoked-key' : 'active-private-key-missing',
+              `Local recipient key ${recipient.recipientKeyId} is revoked or missing private custody`,
+            ),
+          };
+        }
         if (recipientIsLocal && targetsLocalPeer && !externalApiRecipient) {
           try {
             await this.acceptSwmSenderKeyPackage(pkg, this.node.peerId.toString(), input.ctx);
@@ -2503,7 +2515,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   }
 
   swmSenderKeySetupAckReasonCode(this: DKGAgent, err: unknown): SwmSenderKeyPackageAckReasonCode {
-    if (isContextGraphAuthorityUnavailableMarker(err)) return 'authority-unavailable';
+    if (isContextGraphAuthorityUnavailableMarker(err)) {
+      return isRetryableContextGraphAuthorityUnavailableReason(err.reason)
+        ? 'agent-gate-pending'
+        : 'agent-gate-unavailable';
+    }
     if (err instanceof StaleSenderKeyTargetError) {
       return 'stale-target';
     }
@@ -3281,11 +3297,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // sender to retain and retry the package; one that needs a software or
       // configuration change is terminal, classified exactly as the promote
       // retry is (isRetryableContextGraphAuthorityUnavailableReason).
-      throw new SwmSenderKeySetupRejectionError(
-        isRetryableContextGraphAuthorityUnavailableReason(agentGateAuthority.reason)
-          ? 'agent-gate-pending'
-          : 'agent-gate-unavailable',
-        `Context graph "${pkg.contextGraphId}" agent gate authority is unavailable (${agentGateAuthority.reason})`,
+      const detail = agentGateAuthority.detail ?? '';
+      const diagnostic = `detailSha256=${createHash('sha256').update(detail).digest('hex')}`
+        + ` timeout=${/timeout|timed out|deadline/iu.test(detail)}`;
+      throw createContextGraphAuthorityError(
+        `Context graph "${pkg.contextGraphId}" agent gate authority is unavailable (${agentGateAuthority.reason}); ${diagnostic}`,
+        agentGateAuthority,
       );
     }
     const agentGateAddresses = agentGateAuthority.kind === 'available'
