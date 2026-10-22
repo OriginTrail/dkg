@@ -15,7 +15,7 @@ const EIP170_RUNTIME_LIMIT = 24_576;
 const isCoverage = process.argv.includes('coverage');
 
 /** Logic contracts whose runtime must stay deployable; each takes the Hub address. */
-const CONTRACTS = ['PublishingConviction'];
+const CONTRACTS = ['PublishingConviction', 'ServiceSubscriptions'];
 
 describe('@unit Contract runtime size (EIP-170)', () => {
   for (const name of CONTRACTS) {
