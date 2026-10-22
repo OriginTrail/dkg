@@ -59,7 +59,7 @@ import {
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { DKGAgent } from '../src/index.js';
+import { DKGAgent, agentFromPrivateKey } from '../src/index.js';
 import { peekFinalizedAuthorityColdResolution } from '../src/finalized-authority-cold-resolution.js';
 import {
   createLoopbackJsonRpcTestHarness,
@@ -6433,16 +6433,19 @@ describe('RFC-64 rollout authority integration', () => {
       accessPolicy: 1,
       callerAgentAddress: AUTHOR,
     });
-    await curator.inviteAgentToContextGraph(contextGraphId, MEMBER, AUTHOR);
+    const recipient = agentFromPrivateKey(ethers.Wallet.createRandom().privateKey, 'recipient');
+    const member = recipient.agentAddress.toLowerCase() as EvmAddressV1;
+    await (curator as any).persistAgentToStore(recipient);
+    await curator.inviteAgentToContextGraph(contextGraphId, member, AUTHOR);
     expect(await curator.hasConfirmedMetaState(contextGraphId)).toBe(true);
     expect(await curator.isLocalFirstUnregisteredContextGraph(contextGraphId)).toBe(true);
 
     const generalRecovery = vi.spyOn(curator, 'getMemberRecoveryRosterSource')
       .mockRejectedValue(new Error('catalog policy is rotating'));
     vi.spyOn(curator, 'getLocalMetadataMemberRecoveryGate')
-      .mockResolvedValue([AUTHOR, MEMBER, NONMEMBER]);
+      .mockResolvedValue([AUTHOR, member, NONMEMBER]);
     await expect(curator.resolveRfc64VerifiedPrivateRosterV1(contextGraphId))
-      .resolves.toEqual([AUTHOR, MEMBER].sort());
+      .resolves.toEqual([AUTHOR, member].sort());
     expect(generalRecovery).not.toHaveBeenCalled();
   });
 
