@@ -162,6 +162,17 @@
   {
     "inputs": [
       {
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      }
+    ],
+    "name": "OnlyServiceSubscriptions",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "uint256",
         "name": "accountId",
         "type": "uint256"
@@ -200,6 +211,17 @@
       }
     ],
     "name": "PrimaryNodeUnchanged",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "treasury",
+        "type": "address"
+      }
+    ],
+    "name": "ServiceFundingPausedTreasuryWired",
     "type": "error"
   },
   {
@@ -253,6 +275,11 @@
   {
     "inputs": [],
     "name": "ZeroPrimaryNode",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroServiceValue",
     "type": "error"
   },
   {
@@ -507,6 +534,67 @@
         "type": "uint256"
       },
       {
+        "indexed": true,
+        "internalType": "address",
+        "name": "assignee",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "value",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "cost",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "epoch",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "window",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "drawnFromWindow",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "drawnFromTopUp",
+        "type": "uint96"
+      }
+    ],
+    "name": "ServiceCostCovered",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
         "indexed": false,
         "internalType": "uint96",
         "name": "amount",
@@ -709,6 +797,94 @@
         "internalType": "uint96",
         "name": "discountedCost",
         "type": "uint96"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "assignee",
+        "type": "address"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint96",
+        "name": "value",
+        "type": "uint96"
+      }
+    ],
+    "name": "coverServiceCost",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint96",
+            "name": "cost",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "drawnFromWindow",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "drawnFromTopUp",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint40",
+            "name": "window",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "epoch",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint16",
+            "name": "discountBps",
+            "type": "uint16"
+          },
+          {
+            "components": [
+              {
+                "internalType": "uint40",
+                "name": "startEpoch",
+                "type": "uint40"
+              },
+              {
+                "internalType": "uint40",
+                "name": "endEpoch",
+                "type": "uint40"
+              },
+              {
+                "internalType": "uint96",
+                "name": "tokenAmount",
+                "type": "uint96"
+              }
+            ],
+            "internalType": "struct PublishingMathLib.ActiveSinkRange[3]",
+            "name": "topUpRanges",
+            "type": "tuple[3]"
+          }
+        ],
+        "internalType": "struct PublishingConviction.ServiceDraw",
+        "name": "d",
+        "type": "tuple"
       }
     ],
     "stateMutability": "nonpayable",

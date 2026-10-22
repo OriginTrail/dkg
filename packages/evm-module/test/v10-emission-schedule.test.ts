@@ -743,7 +743,7 @@ describe('@integration V10 deterministic emission schedule (10.0.8)', function (
     ).to.equal(expectedFee);
   });
 
-  it('reports version 10.0.8', async () => {
-    expect(await Logic.version()).to.equal('10.0.8');
+  it('reports version 10.1.0', async () => {
+    expect(await Logic.version()).to.equal('10.1.0');
   });
 });

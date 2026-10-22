@@ -6,6 +6,7 @@ import {INamed} from "./interfaces/INamed.sol";
 import {IVersioned} from "./interfaces/IVersioned.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {IPublishingConvictionErrors} from "./interfaces/IPublishingConvictionErrors.sol";
+import {IConvictionServiceErrors} from "./interfaces/IConvictionServiceErrors.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {Chronos} from "./storage/Chronos.sol";
@@ -113,8 +114,20 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *     short-circuits redundant work.
  *   - `migrateEmissionSchedule` is `onlyHubOwner` — a one-time batched
  *     convenience over the same idempotent `_scheduleRemaining` path.
+ *   - `coverServiceCost` (10.1.0, Conviction Account service spending,
+ *     OT-RFC-27) is `onlyServiceSubscriptions` — only the contract the Hub
+ *     names `ServiceSubscriptions`, resolved on every call. That contract
+ *     checks the owner's opt-in and the buyer key's assignment and caps
+ *     before it calls; this one only draws the allowance.
  */
-contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializable, IPublishingConvictionErrors {
+contract PublishingConviction is
+    INamed,
+    IVersioned,
+    ContractStatus,
+    IInitializable,
+    IPublishingConvictionErrors,
+    IConvictionServiceErrors
+{
     string private constant _NAME = "PublishingConviction";
     // Version history:
     //   1.0.0 — initial split-out from `DKGPublishingConvictionNFT` v2.0.0.
@@ -191,7 +204,18 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
     //          a later treasury wiring never reduces already-scheduled
     //          staker pools. No live impact today (recipient unset on all
     //          chains; the bps parameter itself is live at 300).
-    string private constant _VERSION = "10.0.8";
+    // 10.1.0 — Conviction Account service spending (OT-RFC-27). Adds
+    //          `coverServiceCost`, callable only by the Hub-registered
+    //          `ServiceSubscriptions`: the same allowance draw as
+    //          `coverPublishingCost` (the current window's base allowance
+    //          first, then the top-up buffer, at the account's discount tier,
+    //          with the 1-wei floor) and the same emission of the top-up
+    //          overflow, forward over the lock from the current epoch. It
+    //          moves no TRAC, and refuses to run while a protocol treasury is
+    //          wired. `_distributeProrated` now delegates to
+    //          `_distributeProratedRanges`, which also returns the ranges it
+    //          credited. No other behaviour changes.
+    string private constant _VERSION = "10.1.0";
 
     uint256 public constant BPS_DENOMINATOR = 10_000;
     /// @notice EpochStorage shard ID for the staker reward pool. Mirrors
@@ -207,6 +231,21 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
     ///         2 was previously unused by any Hub contract. The `distributed`
     ///         counter per epoch is the payout's idempotence source.
     uint256 public constant TREASURY_SHARD_ID = 2;
+
+    /// @notice The result of a `coverServiceCost` draw (10.1.0), returned to
+    ///         `ServiceSubscriptions`, which records the period and labels the
+    ///         cost against the account's emission.
+    struct ServiceDraw {
+        uint96 cost; // value × (10000 − discountBps) / 10000, at least 1 wei
+        uint96 drawnFromWindow; // from the current billing window's base allowance
+        uint96 drawnFromTopUp; // from the top-up buffer
+        uint40 window; // the billing window drawn: _currentBillingWindow(acct)
+        uint40 epoch; // chronos.getCurrentEpoch()
+        uint16 discountBps;
+        // The staker-pool credits made for `drawnFromTopUp`, in
+        // `prorateActiveSink`'s three-range shape; empty slots are zero.
+        PublishingMathLib.ActiveSinkRange[3] topUpRanges;
+    }
 
     // ============================================================
     //                  Hub-wired dependencies
@@ -333,6 +372,21 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
         uint96 topUpSwept,
         uint96 dustSwept
     );
+    /// @notice Emitted by `coverServiceCost` (10.1.0): a service plan period
+    ///         funded by the buyer key `assignee` drew `cost` of `accountId`'s
+    ///         allowance for a bucket value of `value`, in billing `window`
+    ///         during chain `epoch`. `subscriptionId` identifies the period.
+    event ServiceCostCovered(
+        uint256 indexed accountId,
+        address indexed assignee,
+        bytes32 indexed subscriptionId,
+        uint96 value,
+        uint96 cost,
+        uint40 epoch,
+        uint40 window,
+        uint96 drawnFromWindow,
+        uint96 drawnFromTopUp
+    );
 
     // ============================================================
     //                          Errors
@@ -340,6 +394,11 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
 
     error ZeroAddressDependency(string name);
     error OnlyConvictionNFT(address caller);
+    /// @notice `coverServiceCost` was called by an address other than the one
+    ///         the Hub names `ServiceSubscriptions`.
+    error OnlyServiceSubscriptions(address caller);
+    // `ServiceFundingPausedTreasuryWired` / `ZeroServiceValue` are declared in
+    // {IConvictionServiceErrors}, shared with `ServiceSubscriptions`.
     error NoConvictionAccount(address publishingAgent);
     // `InsufficientAllowance` / `AccountExpired` are declared in
     // {IPublishingConvictionErrors} (shared with KnowledgeAssetsLifecycle's
@@ -428,6 +487,17 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
     modifier onlyConvictionNFT() {
         if (msg.sender != hub.getContractAddress("DKGPublishingConvictionNFT")) {
             revert OnlyConvictionNFT(msg.sender);
+        }
+        _;
+    }
+
+    /// @dev Lazy Hub lookup, as `onlyConvictionNFT` does, so the service
+    ///      logic can be re-registered without re-initializing this contract.
+    ///      Until a contract is registered under the name, the Hub lookup
+    ///      itself reverts `ContractDoesNotExist`.
+    modifier onlyServiceSubscriptions() {
+        if (msg.sender != hub.getContractAddress("ServiceSubscriptions")) {
+            revert OnlyServiceSubscriptions(msg.sender);
         }
         _;
     }
@@ -893,6 +963,105 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
         emit CostCovered(accountId, currentEpoch, baseCost, discountedCost, drawnFromEpoch, drawnFromTopUp);
     }
 
+    // ============================================================
+    //     Service-cost coverage (Conviction Account services)
+    // ============================================================
+
+    /**
+     * @notice Draw `accountId`'s allowance for a service plan period that the
+     *         buyer key `assignee` funds, exactly as a publish draws it, and
+     *         return the split of the draw (10.1.0, OT-RFC-27).
+     *
+     * @dev Caller gate: `onlyServiceSubscriptions`. That contract checks the
+     *      owner's opt-in, the assignment and its caps before it calls; this
+     *      function checks neither and adds only the draw.
+     *
+     *      Behaviour — `coverPublishingCost` without the agent lookup and the
+     *      KA-lifetime check:
+     *        1. `value == 0` reverts `ZeroServiceValue`.
+     *        2. A wired protocol treasury reverts
+     *           `ServiceFundingPausedTreasuryWired`: the top-up path would
+     *           skim the fee with `transferStake`, and a service draw must
+     *           move no TRAC.
+     *        3. An unknown account reverts `UnknownAccount`, an expired one
+     *           `AccountExpired`.
+     *        4. Bring a pre-10.0.8 account's emission schedule current
+     *           (no-op for accounts scheduled at creation).
+     *        5. `cost = value × (1 − discountBps / 1e4)`, floored at 1 wei.
+     *        6. Spend order against the current window: base allowance
+     *           first, then the `topUpBalance` buffer. Short of both reverts
+     *           `InsufficientAllowance`; nothing is drawn partially.
+     *        7. Emit only the top-up-drawn overflow, forward over the lock
+     *           from the current epoch, as publishing does. Step 2 makes the
+     *           fee 0, so all of it is staker-bound; `d.topUpRanges` are the
+     *           credits made.
+     *
+     *      Does NOT move TRAC: the escrow is already in the vault, and the
+     *      base portion is already on the emission schedule.
+     */
+    function coverServiceCost(
+        uint256 accountId,
+        address assignee,
+        bytes32 subscriptionId,
+        uint96 value
+    ) external onlyServiceSubscriptions returns (ServiceDraw memory d) {
+        if (value == 0) revert ZeroServiceValue();
+        address treasury = parametersStorage.protocolTreasury();
+        if (treasury != address(0)) revert ServiceFundingPausedTreasuryWired(treasury);
+
+        PublishingConvictionStorage.Account memory acct =
+            publishingConvictionStorage.getAccount(accountId);
+        if (block.timestamp >= uint256(acct.expiresAtTimestamp)) {
+            revert AccountExpired(accountId, acct.expiresAtEpoch);
+        }
+
+        _scheduleRemaining(acct, accountId);
+
+        d.epoch = uint40(chronos.getCurrentEpoch());
+        d.window = _currentBillingWindow(acct);
+        d.discountBps = acct.discountBps;
+        d.cost = uint96((uint256(value) * (BPS_DENOMINATOR - uint256(acct.discountBps))) / BPS_DENOMINATOR);
+        // The post-discount floor of `coverPublishingCost`; `value > 0` here.
+        if (d.cost == 0) d.cost = 1;
+
+        uint96 baseAllowance = acct.committedTRAC / uint96(acct.lockDurationEpochs);
+        uint96 spent = publishingConvictionStorage.windowSpent(accountId, d.window);
+        uint96 windowRemaining = spent < baseAllowance ? baseAllowance - spent : 0;
+
+        if (d.cost <= windowRemaining) {
+            d.drawnFromWindow = d.cost;
+        } else {
+            d.drawnFromWindow = windowRemaining;
+            uint96 shortfall = d.cost - windowRemaining;
+            uint96 buffer = publishingConvictionStorage.topUpBalance(accountId);
+            if (shortfall > buffer) {
+                revert InsufficientAllowance(accountId, d.epoch, d.cost, windowRemaining + buffer);
+            }
+            d.drawnFromTopUp = shortfall;
+            publishingConvictionStorage.decreaseTopUpBalance(accountId, shortfall);
+        }
+
+        if (d.drawnFromWindow > 0) {
+            publishingConvictionStorage.increaseWindowSpent(accountId, d.window, d.drawnFromWindow);
+        }
+
+        if (d.drawnFromTopUp > 0) {
+            d.topUpRanges = _distributeProratedRanges(d.drawnFromTopUp, d.epoch, uint256(acct.lockDurationEpochs));
+        }
+
+        emit ServiceCostCovered(
+            accountId,
+            assignee,
+            subscriptionId,
+            value,
+            d.cost,
+            d.epoch,
+            d.window,
+            d.drawnFromWindow,
+            d.drawnFromTopUp
+        );
+    }
+
     /// @dev Mirrors `KnowledgeAssetsV10._distributeTokens` exactly so
     ///      conviction-funded reward curves match direct-spend curves.
     ///      Splits `amount` across `storageUnits + 1` chain epochs
@@ -905,9 +1074,21 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
         uint40 firstEpoch,
         uint256 storageUnits
     ) internal {
+        _distributeProratedRanges(amount, firstEpoch, storageUnits);
+    }
+
+    /// @dev `_distributeProrated`, also returning the three ranges it credited
+    ///      (10.1.0) so `coverServiceCost` can report exactly the emission its
+    ///      top-up overflow made. A range with a zero amount is not credited
+    ///      and stays zero in the result.
+    function _distributeProratedRanges(
+        uint96 amount,
+        uint40 firstEpoch,
+        uint256 storageUnits
+    ) internal returns (PublishingMathLib.ActiveSinkRange[3] memory ranges) {
         uint256 epochLengthSec = chronos.epochLength();
         uint256 timeRemainingInCurrentEpoch = chronos.timeUntilNextEpoch();
-        PublishingMathLib.ActiveSinkRange[3] memory ranges = PublishingMathLib.prorateActiveSink(
+        ranges = PublishingMathLib.prorateActiveSink(
             amount,
             firstEpoch,
             storageUnits,
