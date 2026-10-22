@@ -189,7 +189,8 @@ async function recordThroughPublish(agent: DKGAgent, target: Target): Promise<On
  * Complete the lifecycle of a mint whose VM content an earlier attempt
  * already recorded, without the consumed share. The local record must verify
  * against the sealed root, and the mint must pass the same checks as
- * adoption; the lifecycle is then stamped as a publish stamps it.
+ * adoption. The receipt is written before the lifecycle is stamped, because
+ * the stamp is what makes later attempts report the asset published.
  */
 async function completeRecordedLifecycle(
   agent: DKGAgent,
@@ -229,6 +230,9 @@ async function completeRecordedLifecycle(
     if (envelope.transactionHash !== undefined && envelope.transactionHash.toLowerCase() !== mint.txHash.toLowerCase()) {
       throw refused(`The local record of "${target.name}" names transaction ${envelope.transactionHash}, not the mint ${mint.txHash}.`);
     }
+    await agent.store.insert(buildAssertionPublishReceiptQuads({
+      assertionUri, metaGraph, txHash: mint.txHash, blockNumber: BigInt(mint.blockNumber),
+    }));
     await host.stampPublishedLifecycle({
       contextGraphId: target.contextGraphId,
       agentAddress: target.agentAddress,
@@ -238,9 +242,6 @@ async function completeRecordedLifecycle(
       merkleRoot: ethers.hexlify(seal.merkleRoot),
       packedKaId: kaId,
     });
-    await agent.store.insert(buildAssertionPublishReceiptQuads({
-      assertionUri, metaGraph, txHash: mint.txHash, blockNumber: BigInt(mint.blockNumber),
-    }));
     return mint;
   });
 }

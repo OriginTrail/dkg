@@ -12,8 +12,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
+  ASSERTION_PUBLISH_RECEIPT_PREDICATES,
   assertionLifecycleUri,
   buildAuthorAttestationTypedData,
+  contextGraphAssertionUri,
   contextGraphCatalogUri,
   contextGraphMetaUri,
 } from '@origintrail-official/dkg-core';
@@ -39,6 +41,8 @@ const ZERO = new Uint8Array(32);
 const PUBLISHED_UAL_PRED = 'http://dkg.io/ontology/publishedUal';
 const SWM_SHARE_COMPLETE_PRED = 'http://dkg.io/ontology/swmShareComplete';
 const LIFECYCLE = assertionLifecycleUri(CONTEXT_GRAPH, AUTHOR, NAME);
+const ASSERTION = contextGraphAssertionUri(CONTEXT_GRAPH, AUTHOR, NAME);
+const PUBLISHED_AT_TX_PRED = ASSERTION_PUBLISH_RECEIPT_PREDICATES.PUBLISHED_AT_TX;
 const META_GRAPH = contextGraphMetaUri(CONTEXT_GRAPH);
 const RECONCILE = { contextGraphId: CONTEXT_GRAPH, name: NAME };
 
@@ -127,24 +131,25 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     return { agent, store, sealed, lostMint, history, createKnowledgeAssets, updateKnowledgeCollection, accessPolicy };
   }
 
-  /** Make the next lifecycle write of `predicate` fail, as a transient store failure would. */
-  function failNextLifecycleWrite(target: DKGAgent, store: OxigraphStore, predicate: string) {
-    let failed = false;
-    const fail = () => {
-      if (failed) return false;
-      failed = true;
-      return true;
-    };
+  /** Fail chosen lifecycle writes once each, as transient store failures would. */
+  function lifecycleWriteFailures(target: DKGAgent, store: OxigraphStore) {
+    const pending = new Set<string>();
     const stampPointer = target._stampPointer.bind(target);
     vi.spyOn(target, '_stampPointer').mockImplementation(async (subject, pred, ...rest) => {
-      if (pred === predicate && fail()) throw new Error(`store write of ${predicate} failed`);
+      if (pending.delete(pred)) throw new Error(`store write of ${pred} failed`);
       return stampPointer(subject, pred, ...rest);
     });
     const insert = store.insert.bind(store);
     vi.spyOn(store, 'insert').mockImplementation(async (quads: Quad[]) => {
-      if (quads.some((quad) => quad.predicate === predicate) && fail()) throw new Error(`store write of ${predicate} failed`);
+      const failing = quads.find((quad) => pending.delete(quad.predicate));
+      if (failing) throw new Error(`store write of ${failing.predicate} failed`);
       return insert(quads);
     });
+    return { failNext: (predicate: string) => { pending.add(predicate); } };
+  }
+
+  function failNextLifecycleWrite(target: DKGAgent, store: OxigraphStore, predicate: string) {
+    lifecycleWriteFailures(target, store).failNext(predicate);
   }
 
   it('records the late mint on the vm/publish retry that reverts KaIdAlreadyMinted', async () => {
@@ -239,6 +244,22 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect(createKnowledgeAssets).not.toHaveBeenCalled();
     expect(await history()).toMatchObject({ status: 'vm-confirmed', publishedUal: sealed.kaUal });
     await expect(agent.reconcileKnowledgeAssetMint(reconcile)).resolves.toEqual({ status: 'already-published', ual: sealed.kaUal });
+  });
+
+  it('writes the receipt before the lifecycle stamp, so a failed receipt write is retried', async () => {
+    const { agent, store, lostMint, history } = await strandedAsset(new MockChainAdapter());
+    const writes = lifecycleWriteFailures(agent, store);
+    writes.failNext(VM_CURRENT_ASSERTION_PRED);
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+    // From a verified record without a receipt, the receipt write fails once.
+    await store.deleteByPattern({ subject: ASSERTION, predicate: PUBLISHED_AT_TX_PRED });
+    writes.failNext(PUBLISHED_AT_TX_PRED);
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toThrow(/publishedAtTx failed/);
+    expect((await history())?.publishedUal).toBeUndefined();
+
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toMatchObject({ status: 'adopted', txHash: lostMint.txHash });
+    const receipt = await store.query(`SELECT ?tx WHERE { GRAPH <${META_GRAPH}> { <${ASSERTION}> <${PUBLISHED_AT_TX_PRED}> ?tx } }`);
+    expect(receipt.type === 'bindings' && receipt.bindings.map((row) => String(row['tx']).replace(/^"|"$/g, ''))).toEqual([lostMint.txHash]);
   });
 
   it('refuses to complete a lifecycle when the share is gone and no verified record exists', async () => {
