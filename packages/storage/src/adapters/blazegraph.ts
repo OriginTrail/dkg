@@ -22,7 +22,7 @@ import { registerTripleStoreAdapter } from '../triple-store.js';
 import { decodeSparqlJsonQueryResult } from '../sparql-json-query-result.js';
 import { quadToBlazegraphNQuad } from './blazegraph-nquads.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
-import { blazegraphWriteCommitment, type BlazegraphPersistenceOptions } from './blazegraph-persistence.js';
+import { blazegraphWriteCommitment, completeBlazegraphWriteResponse, type BlazegraphPersistenceOptions } from './blazegraph-persistence.js';
 import {
   assertQuadLiteralsMutf8Safe,
   classifySparqlOperation,
@@ -827,7 +827,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
       const text = await deadline.waitFor(response.text().catch(() => ''));
       const excerpt = text.slice(0, responsePolicy === 'insert' ? 200 : 300);
       throw new Error(`Blazegraph ${responsePolicy} failed (${response.status}): ${excerpt}`);
-    }
+    } else await completeBlazegraphWriteResponse(response, deadline);
   }
 
   private async sparqlUpdate(
