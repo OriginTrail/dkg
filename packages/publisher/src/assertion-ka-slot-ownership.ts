@@ -2,18 +2,40 @@
 import { assertSafeIri, assertionLifecycleUri, contextGraphMetaUri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { ASSERTION_RESERVATION_PREDICATES as P, decodeAssertionLifecycleRecord } from './assertion-lifecycle-record.js';
-import { assertionPhysicalIdentityKey, decodeAssertionReservationIdentity } from './assertion-reservation.js';
+import { assertionPhysicalIdentityKey, decodeAssertionReservationIdentity, type AssertionPhysicalIdentity } from './assertion-reservation.js';
+import { withKeyedLocks } from './keyed-lock.js';
+import { writeLocksForStore } from './store-write-locks.js';
+
+export interface AssertionAllocationCoordinates {
+  readonly contextGraphId: string;
+  readonly lifecycleOwner: string;
+  readonly name: string;
+  readonly subGraphName?: string;
+}
 
 /** Shared-store creation lock: two lifecycle names cannot claim one graph. */
-export function assertionAllocationLockKey(contextGraphId: string, author: string, subGraphName?: string): string {
+function assertionAllocationLockKey(contextGraphId: string, author: string, subGraphName?: string): string {
   return `assertion-allocation:${JSON.stringify([contextGraphId, subGraphName ?? '', author.toLowerCase()])}`;
+}
+
+/** One captured physical identity owns both the lock and the ownership fence. */
+export function withAssertionAllocation<T>(store: TripleStore, coordinates: AssertionAllocationCoordinates,
+  physicalIdentity: AssertionPhysicalIdentity, mutate: () => Promise<T>,
+): Promise<T> {
+  const target = { ...coordinates }, identity = { ...physicalIdentity };
+  return withKeyedLocks(writeLocksForStore(store),
+    [assertionAllocationLockKey(target.contextGraphId, identity.agentAddress, target.subGraphName)], async () => {
+      await assertKaSlotOwnershipAvailable(store, target, identity);
+      return mutate();
+    });
 }
 
 /** Must run under the physical allocation lock, before changing either draft. */
 export async function assertKaSlotOwnershipAvailable(
-  store: TripleStore, contextGraphId: string, lifecycleOwner: string, name: string,
-  number: bigint, subGraphName?: string, physicalAuthor = lifecycleOwner,
+  store: TripleStore, coordinates: AssertionAllocationCoordinates, physicalIdentity: AssertionPhysicalIdentity,
 ): Promise<void> {
+  const { contextGraphId, lifecycleOwner, name, subGraphName } = coordinates;
+  const { number } = physicalIdentity;
   const unavailable = (reason = 'Cannot verify KA slot ownership') => Object.assign(new Error(reason), { code: 'KA_SLOT_OWNERSHIP_UNAVAILABLE' });
   const lifecycle = assertSafeIri(assertionLifecycleUri(contextGraphId, lifecycleOwner, name, subGraphName));
   const subgraphScope = subGraphName
@@ -38,7 +60,7 @@ export async function assertKaSlotOwnershipAvailable(
     const rows = candidates.get(row.owner) ?? new Map<string, { p: string; o: string }>();
     rows.set(JSON.stringify([row.p, row.o]), { p: row.p, o: row.o }); candidates.set(row.owner, rows);
   }
-  const expected = assertionPhysicalIdentityKey({ agentAddress: physicalAuthor, number });
+  const expected = assertionPhysicalIdentityKey(physicalIdentity);
   for (const [subject, rows] of candidates) {
     const identity = decodeAssertionReservationIdentity(decodeAssertionLifecycleRecord([...rows.values()]), {
       contextGraphId, lifecycleUri: subject, subGraphName,

@@ -115,7 +115,9 @@ it('refuses an unavailable archive replacement capability', async () => {
 });
 
 it('propagates unavailable store reads before any writes', async () => {
-  const s = store(); vi.spyOn(s, 'query').mockResolvedValueOnce({ type: 'bindings', bindings: [] });
+  const s = store(), query = s.query.bind(s);
+  vi.spyOn(s, 'query').mockImplementation((sparql, ...args) => sparql.includes(`CONSTRUCT { <${active}>`)
+    ? Promise.resolve({ type: 'bindings', bindings: [] }) : query(sparql, ...args));
   const insert = vi.spyOn(s, 'insert');
   await expect(reconcileConfirmedNamedAssertion(s, target, proof, seal)).rejects.toThrow('evidence read unavailable');
   expect(insert).not.toHaveBeenCalled();

@@ -3,7 +3,7 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, assertionLifecycleUri, contextGraphMetaUri, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '../src/dkg-publisher.js';
-import { assertKaSlotOwnershipAvailable } from '../src/assertion-ka-slot-ownership.js';
+import { assertKaSlotOwnershipAvailable, withAssertionAllocation } from '../src/assertion-ka-slot-ownership.js';
 
 const CG = 'reserved-slot-ownership';
 const AUTHOR = '0xa32f1cc125401b55911678847426759094055b2d';
@@ -23,6 +23,14 @@ async function registerSubgraph(store: OxigraphStore, name: string) {
 }
 
 describe('persistent KA slot ownership', () => {
+  it('fences the explicit physical identity before entering the allocation mutation', async () => {
+    const store = new OxigraphStore(), p = await publisher(store);
+    await p.assertionCreate(CG, 'owner', 'owning-peer', undefined, allocation);
+    const mutate = vi.fn(async () => 'unexpected mutation');
+    await expect(withAssertionAllocation(store, { contextGraphId: CG, lifecycleOwner: 'different-peer', name: 'impostor' },
+      { agentAddress: AUTHOR, number: 7n }, mutate)).rejects.toMatchObject({ code: 'KA_SLOT_ALREADY_CLAIMED' });
+    expect(mutate).not.toHaveBeenCalled(); await store.close();
+  });
   it.each(['missing-name', 'wrong-owner', 'conflicting-uals'])(
     'refuses ambiguous reservation identity before changing any graph: %s', async kind => {
       const store = new OxigraphStore(), p = await publisher(store), graph = contextGraphMetaUri(CG);
@@ -164,9 +172,9 @@ describe('persistent KA slot ownership', () => {
       { subject, graph, predicate: 'http://dkg.io/ontology/assertionName', object: '"first"' },
       { subject, graph, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: 'did:dkg:agent:PeerOwner' },
     ]);
-    await expect(assertKaSlotOwnershipAvailable(store, CG, 'PeerOwner', 'other', 7n))
+    await expect(assertKaSlotOwnershipAvailable(store, { contextGraphId: CG, lifecycleOwner: 'PeerOwner', name: 'other' }, { agentAddress: 'PeerOwner', number: 7n }))
       .rejects.toMatchObject({ code: 'KA_SLOT_ALREADY_CLAIMED' });
-    await expect(assertKaSlotOwnershipAvailable(store, CG, 'peerowner', 'other', 7n)).resolves.toBeUndefined();
+    await expect(assertKaSlotOwnershipAvailable(store, { contextGraphId: CG, lifecycleOwner: 'peerowner', name: 'other' }, { agentAddress: 'peerowner', number: 7n })).resolves.toBeUndefined();
     await store.close();
   });
 

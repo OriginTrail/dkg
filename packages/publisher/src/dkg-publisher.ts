@@ -14,7 +14,7 @@ import { preparePromoteRecoveryBinding, assertPromoteRecoveryBinding, type Promo
 import { throwIfCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
 import { readAssertionLifecycleRecord, type AssertionLifecycleRecord } from './assertion-lifecycle-record.js';
 import { assertExpectedKaSlotMatchesLifecycle, assertExpectedKaSlotMatchesAllocation } from './assertion-reserved-slot.js';
-import { assertKaSlotOwnershipAvailable, assertionAllocationLockKey } from './assertion-ka-slot-ownership.js';
+import { withAssertionAllocation } from './assertion-ka-slot-ownership.js';
 import { assertWorkingMemoryLifecycleMutable } from './working-memory-lifecycle.js';
 import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js';
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
@@ -7815,11 +7815,7 @@ export class DKGPublisher implements Publisher {
       hasPreservedKaId ? lifecycle : { bindings: [], hasKaId: true, number: kaNumber, reservedUal },
     );
     const physicalAuthor = identity?.agentAddress ?? agentAddress;
-    return this.withWriteLocks([assertionAllocationLockKey(contextGraphId, physicalAuthor, subGraphName)], async () => {
-      if (kaNumber !== undefined) {
-        await assertKaSlotOwnershipAvailable(this.store, contextGraphId, agentAddress, name, kaNumber, subGraphName, physicalAuthor);
-      }
-
+    const create = async () => {
       const staleEvents = await this.store.query(
         `SELECT DISTINCT ?s WHERE { GRAPH <${metaGraph}> { ?s ?p ?o . FILTER(STR(?s) = "${lifecycleSubject}" || STRSTARTS(STR(?s), "${lifecycleSubject}/")) } }`,
       );
@@ -7868,7 +7864,9 @@ export class DKGPublisher implements Publisher {
       }]);
 
       return graphUri;
-    });
+    };
+    return identity ? withAssertionAllocation(this.store, { contextGraphId, lifecycleOwner: agentAddress, name, subGraphName }, identity, create)
+      : create();
   }
 
   async assertionWrite(

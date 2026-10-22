@@ -20,6 +20,13 @@ const contextGraphId = 'worker-named-recovery', name = 'named-asset';
 const publicQuads = [{ subject: 'urn:payload', predicate: 'urn:value', object: '"original public payload"', graph: '' }];
 const draftQuads = [{ subject: 'urn:newer-draft', predicate: 'urn:value', object: '"preserve newer draft"', graph: '' }];
 const chain = new MockChainAdapter();
+const publicationAttempts = [];
+for (const method of ['createKnowledgeAssets', 'updateKnowledgeCollectionV10']) {
+  chain[method] = async () => {
+    publicationAttempts.push(method);
+    throw new Error(`unexpected ${method} during recovery`);
+  };
+}
 let next = 1n, now = 1000, input, reopened, second, first, agent;
 const allocator = new KaNumberAllocator({ allocate: () => next++, peekNext: () => next,
   reconcileFloor: (_author, floor) => { if (floor > next) next = floor; } });
@@ -52,9 +59,15 @@ try {
   input = confirmedNamedKaVmLifecycleInput(publication, { contextGraphId, name, agentAddress: author,
     packedKaId: seal.reservedKaId }, { publicQuads, publisherPeerId: agent.peerId,
     accessPolicy: 'allowList', allowedPeers: ['test-reader'] });
-  chain.readKnowledgeAssetVersionSnapshot = async () => ({ rootCount: BigInt(input.assertionVersion), latestRoot: input.merkleRoot });
-  // Any attempted second publication is a test failure; retries use only the original confirmation.
-  chain.publishKnowledgeAssets = async () => { throw new Error('unexpected publication during recovery'); };
+  chain.readKnowledgeAssetVersionSnapshot = async () => {
+    // Negative control: simulate recovery catching a publication error. A final
+    // attempt assertion must still fail even though the read returns valid proof.
+    if (process.argv[3]) {
+      assert(['createKnowledgeAssets', 'updateKnowledgeCollectionV10'].includes(process.argv[3]));
+      try { await chain[process.argv[3]]({}); } catch { /* deliberate swallowed error */ }
+    }
+    return { rootCount: BigInt(input.assertionVersion), latestRoot: input.merkleRoot };
+  };
   if (newerDraft) {
     await agent.assertion.discard(contextGraphId, name, { agentAddress: author });
     await agent.assertion.create(contextGraphId, name, { agentAddress: author });
@@ -98,8 +111,10 @@ try {
   const edited = await recovered.publisher.assertionQuery(contextGraphId, name, author);
   assert.ok(edited.some(q => q.subject === 'urn:edited'));
   assert.equal(await reopened.countQuads(graph), 1, 'editing leaves confirmed VM content intact');
+  assert.deepEqual(publicationAttempts, [], 'Recovery and named reopen/edit must attempt no mint or update');
   console.log(JSON.stringify({ recoveredOriginalPayload: true, durableBeforeClose: true,
-    unrelatedPreserved: true, recoveredSlotProtected: true, namedReopenedAndEdited: true, newerDraftPreserved: newerDraft }));
+    unrelatedPreserved: true, recoveredSlotProtected: true, namedReopenedAndEdited: true, newerDraftPreserved: newerDraft,
+    createKnowledgeAssetsCalls: 0, updateKnowledgeCollectionV10Calls: 0 }));
 } catch (error) { console.error(error); throw error; } finally {
   await unlink(flag).catch(() => {}); await first?.stop(); await second?.stop();
   await reopened?.close(); await agent?.stop(); await store.close();

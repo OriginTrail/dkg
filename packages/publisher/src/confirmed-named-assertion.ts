@@ -9,9 +9,7 @@ import { decodeAssertionLifecycleRecord, decodeAssertionReservationValue } from 
 import { generateAssertionReservationMetadata, sameAssertionReservationField, decodeAssertionReservationIdentity,
   ASSERTION_RESERVATION_PREDICATES as RESERVATION } from './assertion-reservation.js';
 import { assertionRecoverySealGraph, assertionRecoverySealSubject, parseStoredAssertionSeal } from './assertion-seal-recovery.js';
-import { assertKaSlotOwnershipAvailable, assertionAllocationLockKey } from './assertion-ka-slot-ownership.js';
-import { withKeyedLocks } from './keyed-lock.js';
-import { writeLocksForStore } from './store-write-locks.js';
+import { withAssertionAllocation } from './assertion-ka-slot-ownership.js';
 
 export interface ConfirmedNamedAssertionTarget {
   readonly contextGraphId: string;
@@ -56,8 +54,8 @@ export async function reconcileConfirmedNamedAssertion(store: TripleStore, targe
   proof: ConfirmedGraphKnowledgeAssetProof, admittedSeal?: CanonicalGraphScopedAuthorSealV1): Promise<void> {
   const identity = createGraphKnowledgeAssetScope(target.kaUal, target.assertionVersion);
   if (((BigInt(identity.agentAddress) << 96n) | BigInt(identity.kaNumber)) !== target.packedKaId) return invalid();
-  return withKeyedLocks(writeLocksForStore(store),
-    [assertionAllocationLockKey(target.contextGraphId, identity.agentAddress, target.subGraphName)],
+  return withAssertionAllocation(store, { contextGraphId: target.contextGraphId, lifecycleOwner: target.agentAddress,
+    name: target.name, subGraphName: target.subGraphName }, { agentAddress: identity.agentAddress, number: BigInt(identity.kaNumber), kaUal: identity.ual },
     () => reconcileWithAllocationLock(store, target, proof, admittedSeal));
 }
 async function reconcileWithAllocationLock(store: TripleStore, target: ConfirmedNamedAssertionTarget,
@@ -91,7 +89,6 @@ async function reconcileWithAllocationLock(store: TripleStore, target: Confirmed
   }
   if (!seal) throw new Error('Confirmed lifecycle repair awaits its authenticated named assertion seal');
   const scope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion), existing = await read(lifecycle, meta);
-  await assertKaSlotOwnershipAvailable(store, target.contextGraphId, target.agentAddress, target.name, BigInt(scope.kaNumber), target.subGraphName, scope.agentAddress);
   const ontology = 'http://dkg.io/ontology/';
   const reservation = decodeAssertionReservationIdentity(decodeAssertionLifecycleRecord(existing.map(q => ({ p: q.predicate, o: q.object }))), {
     lifecycleOwner: target.agentAddress,
