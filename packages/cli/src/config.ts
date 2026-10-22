@@ -59,7 +59,7 @@ import {
   type RpcRequestGovernorPolicyInput,
 } from '@origintrail-official/dkg-chain';
 import { runtimeAssetRoots } from './runtime-assets.js';
-import type { SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
+import type { SemanticRuntimeNodeSettings } from './semantic-runtime-node-settings.js';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -635,7 +635,7 @@ export interface LoggingConfig {
   kaPublishLifecycleDebug?: boolean;
 }
 
-export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLimits' | 'preparedContentCache'> {
+export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLimits' | 'preparedContentCache'>, SemanticRuntimeNodeSettings {
   /** Lower RPC usage by using the DKG Core chain cache. Core service defaults on. Edge use is opt-in. */
   DKG_Core_chain_cache?: boolean;
   name: string;
@@ -763,12 +763,6 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
   localBootstrapContextGraphs?: string[];
   /** Local daemon logging controls. */
   logging?: LoggingConfig;
-  /**
-   * Default-off Rust/Wasm semantic runtime. The daemon opt-in starts the
-   * integrity/watchdog/recovery partition only; graph activation and protected
-   * adapters still require explicit trusted host wiring.
-   */
-  semanticRuntime?: SemanticRuntimeConfig;
   /** Cross-agent query access policy for inbound query-remote requests. */
   queryAccess?: QueryAccessConfig;
   autoUpdate?: AutoUpdateConfig;

@@ -60,12 +60,17 @@ test('shared Linux build artifacts restore the executable safe-LLM runner for CL
 test('CI build producers install the pinned semantic toolchain before compiling', () => {
   const ci = yaml('workflows/ci.yml');
   const evm = yaml('workflows/evm-integration.yml');
-  for (const job of [ci.jobs.build, ci.jobs['semantic-runtime'], evm.jobs.build]) {
+  const mac = yaml('workflows/oxigraph-lifecycle-native.yml');
+  for (const job of [ci.jobs.build, ci.jobs['semantic-runtime'], evm.jobs.build, mac.jobs.lifecycle]) {
     const toolStep = job.steps.findIndex((step) => step.uses === setup);
     const buildStep = job.steps.findIndex((step) =>
-      /pnpm run (?:build:packages|check:semantic-runtime)|node scripts\/ci\/build-evm-integration.mjs/.test(step.run ?? ''));
+      /pnpm run (?:build:packages|check:semantic-runtime)|node scripts\/ci\/build-evm-integration.mjs|node scripts\/build-runtime-packages.mjs/.test(step.run ?? ''));
     assert.ok(toolStep >= 0 && buildStep > toolStep, 'build must follow tool installation');
   }
+  const semanticSteps = ci.jobs['semantic-runtime'].steps;
+  const codecBuild = semanticSteps.findIndex(step => /pnpm --filter @origintrail-official\/dkg-core build/.test(step.run ?? ''));
+  const semanticTests = semanticSteps.findIndex(step => /pnpm run check:semantic-runtime/.test(step.run ?? ''));
+  assert.ok(codecBuild >= 0 && codecBuild < semanticTests, 'TypeScript compiler and test imports require the built core codec');
   const action = yaml('actions/setup-semantic-runtime/action.yml');
   const commands = action.runs.steps.map((step) => step.run ?? '').join('\n');
   assert.match(commands, /nightly-2026-08-18/);

@@ -11,40 +11,33 @@
 //
 // See `packages/cli/scripts/split-handle-request.mjs` for the
 // extraction driver.
-
-import {
-  createServer,
-  type IncomingMessage,
-  type ServerResponse,
-} from "node:http";
-import { createHash, randomUUID } from "node:crypto";
-import {
-  appendFile,
-  chmod,
-  copyFile,
-  mkdir,
-  readFile,
-  rename,
-  rm,
-  stat,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
-import { execSync, exec, execFile } from "node:child_process";
+import { type ServerResponse } from "node:http";
+import { exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { join, dirname, resolve } from 'node:path';
-import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSync as fsWriteFileSync, unlinkSync } from 'node:fs';
+import { resolve } from 'node:path';
 // Namespace import: our Phase-8 install-context builder (~line 290) calls
 // `osModule.homedir()`, and the later agent-identity probe (~line 6851)
 // uses `osModule.hostname()` + `osModule.userInfo()`. v10-rc's new
 // OpenClaw config helper (~line 2535) uses a bare `homedir()` — aliased
 // below so both sites coexist without a duplicate-module import.
 import * as osModule from 'node:os';
-const { homedir } = osModule;
-import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { ethers } from 'ethers';
 import { handleEncryptionEnrollment } from './encryption-enrollment.js';
+import { isRootlessUpdateError, type RootlessUpdateErrorCode } from '@origintrail-official/dkg-agent';
+import { createOperationContext } from '@origintrail-official/dkg-core';
+import { resolveChainConfig } from '../../config.js';
+import { canAdministerNode } from '../../auth.js';
+import { resolveNameToPeerId, jsonResponse, oversizedRdfLiteralResponseBody, SMALL_BODY_BYTES, readBody } from '../http-utils.js';
+import { requireNodeAdmin } from '../node-admin-guard.js';
+import { authorizeAgentScopedAuthorClaim } from './shared-assertion-helpers.js';
+import { classifyAgentConnectError } from './agent-connect-error.js';
+import type { RequestContext } from './context.js';
+import { actorFromRequestContext } from './context.js';
+import { handleAgentsListRoute } from './agents-list.js';
+import type { UpdateOptions } from '@origintrail-official/dkg-publisher';
+import { buildSloPayload } from './agent-chat-slo.js';
+
+export const { homedir } = osModule;
 
 // Lazy resolver used by the manifest-install flow: find the
 // @origintrail-official/dkg-mcp package via Node's own resolution
@@ -52,294 +45,19 @@ import { handleEncryptionEnrollment } from './encryption-enrollment.js';
 // point at a valid MCP server install regardless of whether it's
 // running from a monorepo checkout, an npm-global `dkg`, or a
 // `pnpm dlx` tarball.
-const daemonRequire = createRequire(import.meta.url);
+export const daemonRequire = createRequire(import.meta.url);
 
-const execAsync = promisify(exec);
-const execFileAsync = promisify(execFile);
-import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
-import {
-  DKGAgent,
-  isRootlessUpdateError,
-  loadOpWallets,
-  type RootlessUpdateErrorCode,
-} from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
-import {
-  DashboardDB,
-  MetricsCollector,
-  OperationTracker,
-  handleNodeUIRequest,
-  ChatMemoryManager,
-  LogPushWorker,
-  LlmClient,
-  type MetricsSource,
-} from "@origintrail-official/dkg-node-ui";
+export const execAsync = promisify(exec);
+export const execFileAsync = promisify(execFile);
 
-const ROOTLESS_UPDATE_HTTP_STATUS = {
+export const ROOTLESS_UPDATE_HTTP_STATUS = {
   ROOTLESS_UPDATE_INVALID_KA_ID: 422,
   ROOTLESS_KA_NOT_MATERIALIZED: 422,
   ROOTLESS_UPDATE_TARGET_CORRUPT: 422,
   ROOTLESS_UPDATE_TARGET_NOT_CONFIRMED: 422,
 } as const satisfies Record<RootlessUpdateErrorCode, number>;
-import {
-  loadConfig,
-  saveConfig,
-  loadNetworkConfig,
-  resolveChainConfig,
-  dkgDir,
-  writePid,
-  removePid,
-  writeApiPort,
-  removeApiPort,
-  logPath,
-  ensureDkgDir,
-  TELEMETRY_ENDPOINTS,
-  type DkgConfig,
-  type AutoUpdateConfig,
-  type LocalAgentIntegrationCapabilities,
-  type LocalAgentIntegrationConfig,
-  type LocalAgentIntegrationManifest,
-  type LocalAgentIntegrationRuntime,
-  type LocalAgentIntegrationStatus,
-  type LocalAgentIntegrationTransport,
-  resolveContextGraphs,
-  resolveNetworkDefaultContextGraphs,
-  resolveSharedMemoryTtlMs,
-  repoDir,
-  releasesDir,
-  activeSlot,
-  inactiveSlot,
-  swapSlot,
-  gitCommandEnv,
-  gitCommandArgs,
-  isStandaloneInstall,
-  slotEntryPoint,
-  CLI_NPM_PACKAGE,
-} from '../../config.js';
-import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
-import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
-import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
-import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
-import {
-  expectedBundledMarkItDownBuildMetadata,
-  readCliPackageVersion,
-  type BundledMarkItDownMetadata,
-} from "../../extraction/markitdown-bundle-metadata.js";
-import {
-  checksumPathFor as markItDownChecksumPath,
-  hasVerifiedBundledBinary as hasVerifiedBundledMarkItDownBinary,
-  metadataPathFor as markItDownMetadataPath,
-} from '../../../scripts/markitdown-bundle-validation.mjs';
-import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from '../../extraction-status.js';
-import { FileStore } from '../../file-store.js';
-import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../../vector-store.js';
-import { parseBoundary, parseMultipart, MultipartParseError } from '../../http/multipart.js';
-// Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
-// Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
-// reuses the same publish/fetch/plan/write helpers the CLI uses, so wire
-// format stays identical between curator/joiner/CLI paths.
-import {
-  publishManifest as publishManifestImpl,
-  assembleStandardTemplates,
-} from '@origintrail-official/dkg-mcp/manifest/publish';
-import { fetchManifest as fetchManifestImpl } from '@origintrail-official/dkg-mcp/manifest/fetch';
-import {
-  planInstall as planInstallImpl,
-  writeInstall as writeInstallImpl,
-  buildReviewMarkdown as buildReviewMarkdownImpl,
-  type InstallContext,
-} from '@origintrail-official/dkg-mcp/manifest/install';
-import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 
-// Daemon sub-module imports — every public symbol from sibling
-// modules is pulled in here because the legacy monolithic file used
-// them all without explicit imports. Unused ones are tolerated by
-// the project's tsconfig (`noUnusedLocals` is off).
-import {
-  daemonState,
-  DEBUG_SYNC_TRACE,
-  resolveAutoUpdateEnabled,
-  type CorsAllowlist,
-} from '../state.js';
-import {
-  type CatchupJobState,
-  type CatchupJob,
-  type CatchupTracker,
-  toCatchupStatusResponse,
-} from '../types.js';
-import {
-  type MarkItDownTarget,
-  manifestRepoRoot,
-  type McpDkgAssets,
-  resolveMcpDkgAssets,
-  readMcpDkgVersion,
-  parseSemver,
-  cmpSemverForRange,
-  versionSatisfiesRange,
-  manifestNetworkLabel,
-  formatDaemonAuthority,
-  manifestSelfClient,
-  manifestPublisherUri,
-  type SupportedTool,
-  nicknameToSlug,
-  buildManifestInstallContext,
-  _autoUpdateIo,
-  loadMarkItDownTargets,
-  getNodeVersion,
-  getCurrentCommitShort,
-  loadSkillTemplate,
-  buildSkillMd,
-  skillEtag,
-  DAEMON_EXIT_CODE_RESTART,
-  parseRequiredSignatures,
-  normalizeDetectedContentType,
-  currentBundledMarkItDownAssetName,
-  bindingValue,
-  carryForwardBundledMarkItDownBinary,
-} from '../manifest.js';
-import {
-  resolveNameToPeerId,
-  jsonResponse,
-  oversizedRdfLiteralResponseBody,
-  safeDecodeURIComponent,
-  safeParseJson,
-  validateOptionalSubGraphName,
-  validateRequiredContextGraphId,
-  validateEntities,
-  validateConditions,
-  MAX_BODY_BYTES,
-  SMALL_BODY_BYTES,
-  MAX_UPLOAD_BYTES,
-  type ImportFileExtractionPayload,
-  buildImportFileResponse,
-  unregisteredSubGraphError,
-  readBody,
-  readBodyBuffer,
-  buildCorsAllowlist,
-  resolveCorsOrigin,
-  corsHeaders,
-  HttpRateLimiter,
-  isLoopbackClientIp,
-  isLoopbackRateLimitExemptPath,
-  shouldBypassRateLimitForLoopbackTraffic,
-  shortId,
-  sleep,
-  deriveBlockExplorerUrl,
-} from '../http-utils.js';
-import { requireNodeAdmin } from '../node-admin-guard.js';
-import {
-  normalizeRepo,
-  isValidRepoSpec,
-  repoToFetchUrl,
-  githubRepoForApi,
-  resolveRemoteCommitSha,
-  type PendingUpdateState,
-  type CommitCheckStatus,
-  readPendingUpdateState,
-  clearPendingUpdateState,
-  writePendingUpdateState,
-  type NpmVersionResult,
-  resolveLatestNpmVersion,
-  compareSemver,
-  getCurrentCliVersion,
-  type NpmVersionStatus,
-  checkForNpmVersionUpdate,
-  type UpdateStatus,
-  acquireUpdateLock,
-  releaseUpdateLock,
-  performNpmUpdate,
-} from '../auto-update.js';
-import { isValidRef, parseTagName } from '../../auto-update-ref.js';
-import {
-  OPENCLAW_UI_CONNECT_TIMEOUT_MS,
-  OPENCLAW_UI_CONNECT_POLL_MS,
-  OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
-  type PendingOpenClawUiAttachJob,
-  isOpenClawBridgeHealthCacheValid,
-  type OpenClawChannelTarget,
-  trimTrailingSlashes,
-  buildOpenClawGatewayBase,
-  loadBridgeAuthToken,
-  getOpenClawChannelTargets,
-  type OpenClawBridgeHealthState,
-  type OpenClawGatewayHealthState,
-  type OpenClawChannelHealthReport,
-  transportPatchFromOpenClawTarget,
-  probeOpenClawChannelHealth,
-  runOpenClawUiSetup,
-  localOpenclawConfigPath,
-  isOpenClawMemorySlotElected,
-  restartOpenClawGateway,
-  waitForOpenClawChatReady,
-  type OpenClawUiAttachDeps,
-  formatOpenClawUiAttachFailure,
-  scheduleOpenClawUiAttachJob,
-  cancelPendingLocalAgentAttachJob,
-  isOpenClawUiAttachCancelled,
-  shouldTryNextOpenClawTarget,
-  buildOpenClawChannelHeaders,
-  ensureOpenClawBridgeAvailable,
-  type OpenClawStreamRequest,
-  type OpenClawStreamResponse,
-  type OpenClawStreamReader,
-  writeOpenClawStreamChunk,
-  pipeOpenClawStream,
-  isValidOpenClawPersistTurnPayload,
-  type OpenClawAttachmentRef,
-  normalizeOpenClawAttachmentRef,
-  normalizeOpenClawAttachmentRefs,
-  type OpenClawChatContextEntry,
-  normalizeOpenClawChatContextEntry,
-  normalizeOpenClawChatContextEntries,
-  hasOpenClawChatTurnContent,
-  unescapeOpenClawAttachmentLiteralBody,
-  stripOpenClawAttachmentLiteral,
-  parseOpenClawAttachmentTripleCount,
-  isOpenClawAttachmentAssertionUriForContextGraph,
-  extractionRecordMatchesOpenClawAttachmentRef,
-  verifyOpenClawAttachmentRefsProvenance,
-} from '../openclaw.js';
-import {
-  type LocalAgentIntegrationDefinition,
-  type LocalAgentIntegrationRecord,
-  LOCAL_AGENT_INTEGRATION_DEFINITIONS,
-  isPlainRecord,
-  normalizeIntegrationId,
-  normalizeLocalAgentTransport,
-  normalizeLocalAgentCapabilities,
-  normalizeLocalAgentManifest,
-  normalizeLocalAgentRuntime,
-  isLocalAgentExplicitlyUserDisabled,
-  isExplicitLocalAgentDisconnectPatch,
-  normalizeExplicitLocalAgentDisconnectBody,
-  mergeLocalAgentIntegrationConfig,
-  getStoredLocalAgentIntegrations,
-  computeLocalAgentIntegrationStatus,
-  buildLocalAgentIntegrationRecord,
-  listLocalAgentIntegrations,
-  getLocalAgentIntegration,
-  pruneLegacyOpenClawConfig,
-  extractLocalAgentIntegrationPatch,
-  connectLocalAgentIntegration,
-  updateLocalAgentIntegration,
-  hasConfiguredLocalAgentChat,
-  hasStoredLocalAgentTransportConfig,
-  connectLocalAgentIntegrationFromUi,
-  type ReverseLocalAgentSetupDeps,
-  reverseLocalAgentSetupForUi,
-  refreshLocalAgentIntegrationFromUi,
-} from '../local-agents.js';
-
-import { authorizeAgentScopedAuthorClaim } from './shared-assertion-helpers.js';
-import { classifyAgentConnectError } from './agent-connect-error.js';
-import type { RequestContext } from './context.js';
-import { actorFromRequestContext } from './context.js';
-import { handleAgentsListRoute } from './agents-list.js';
-import type { UpdateOptions } from '@origintrail-official/dkg-publisher';
-
-function parsePrecomputedUpdateAttestation(
+export function parsePrecomputedUpdateAttestation(
   raw: unknown,
   res: ServerResponse,
 ): UpdateOptions['precomputedUpdateAttestation'] | undefined {
@@ -1070,135 +788,4 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   }
 }
 
-/**
- * Build the `/api/slo` response payload. Extracted out of the inline
- * route block so the public wire shape is testable in isolation
- * (rc.9 PR-A / Codex PR #570 R10) — production route + regression
- * test share the exact same code path, so a future drift in any
- * field name / nesting can't slip past CI.
- *
- * Cold-start safety: when `sharedMemoryHandler` has never been
- * instantiated (no SWM share has ever been received), the agent's
- * `getSwmHandlerStats()` returns its pristine snapshot rather than
- * throwing — `buildSloPayload` is safe to call against a fresh
- * daemon.
- */
-export function buildSloPayload(agent: {
-  getMessengerSloStats: () => Record<string, unknown>;
-  getMessengerOutboxStats?: DKGAgent['getMessengerOutboxStats'];
-  getSwmGossipStats: () => {
-    publishFailures: Record<string, number>;
-    publishFailuresOverflow: number;
-    publishFailuresTruncated: boolean;
-  };
-  getSwmHandlerStats: () => {
-    redundantApplies: Record<string, number>;
-    redundantAppliesLowerBound: boolean;
-    redundantAppliesOverflow: number;
-    redundantAppliesTruncated: boolean;
-  };
-  /**
-   * rc.9 PR-C addition. Optional on the interface so a hypothetical
-   * test double that only exercises the gossip + receiver sides
-   * doesn't have to stub it. Implementations that omit it simply
-   * leave `swm.substrateFanout` off the response — soak scripts
-   * check for its presence before referencing fields.
-   */
-  getSwmSubstrateFanoutStats?: () => {
-    delivered: Record<string, number>;
-    rejected: Record<string, number>;
-    /**
-     * rc.9 PR-D (codex follow-up from PR-G #G1): transient
-     * receiver-side rejections. Optional on the interface for
-     * back-compat with pre-PR-D test doubles.
-     */
-    retryable?: Record<string, number>;
-    queued: Record<string, number>;
-    inFlight: Record<string, number>;
-    failed: Record<string, number>;
-    overflow: {
-      delivered: number;
-      rejected: number;
-      retryable?: number;
-      queued: number;
-      inFlight: number;
-      failed: number;
-    };
-    truncated: boolean;
-  };
-  /**
-   * rc.9 PR-D addition. Optional for the same reason
-   * getSwmSubstrateFanoutStats is — test doubles don't need to
-   * stub a tracker they aren't exercising.
-   */
-  getSwmAckQuorumStats?: () => {
-    tracked: number;
-    completed: number;
-    watchdogFired: number;
-    deadlineExpired: number;
-    pending: number;
-  };
-}): {
-  protocols: Record<string, unknown>;
-  outbox?: ReturnType<DKGAgent['getMessengerOutboxStats']>;
-  gossip: {
-    publishFailures: Record<string, number>;
-    publishFailuresOverflow: number;
-    publishFailuresTruncated: boolean;
-  };
-  swm: {
-    redundantApplies: Record<string, number>;
-    redundantAppliesLowerBound: boolean;
-    redundantAppliesOverflow: number;
-    redundantAppliesTruncated: boolean;
-    /**
-     * rc.9 PR-C: substrate fan-out per-outcome counters. Present
-     * iff the agent exposes `getSwmSubstrateFanoutStats()` (every
-     * production agent does; opt-out is for test doubles).
-     */
-    substrateFanout?: {
-      delivered: Record<string, number>;
-      rejected: Record<string, number>;
-      retryable?: Record<string, number>;
-      queued: Record<string, number>;
-      inFlight: Record<string, number>;
-      failed: Record<string, number>;
-      overflow: {
-        delivered: number;
-        rejected: number;
-        retryable?: number;
-        queued: number;
-        inFlight: number;
-        failed: number;
-      };
-      truncated: boolean;
-    };
-    /**
-     * rc.9 PR-D: ack-quorum overlay counters. Same opt-out
-     * mechanic as `substrateFanout` — present iff the agent
-     * exposes `getSwmAckQuorumStats()`.
-     */
-    shareAckQuorum?: {
-      tracked: number;
-      completed: number;
-      watchdogFired: number;
-      deadlineExpired: number;
-      pending: number;
-    };
-  };
-} {
-  const swmHandler = agent.getSwmHandlerStats();
-  const substrateFanout = agent.getSwmSubstrateFanoutStats?.();
-  const shareAckQuorum = agent.getSwmAckQuorumStats?.();
-  const outbox = agent.getMessengerOutboxStats?.();
-  return {
-    protocols: agent.getMessengerSloStats(),
-    ...(outbox !== undefined ? { outbox } : {}),
-    gossip: agent.getSwmGossipStats(),
-    swm: {
-      ...swmHandler,
-      ...(substrateFanout !== undefined ? { substrateFanout } : {}),
-      ...(shareAckQuorum !== undefined ? { shareAckQuorum } : {}),
-    },
-  };
-}
+export { buildSloPayload } from './agent-chat-slo.js';

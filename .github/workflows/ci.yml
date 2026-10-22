@@ -443,6 +443,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Build TypeScript Program codec dependencies
+        run: |
+          pnpm --filter @origintrail-official/dkg-rdf-utils build
+          pnpm --filter @origintrail-official/dkg-core build
+
       - name: Run Rust, Wasm artifact, Worker, and differential gates
         run: pnpm run check:semantic-runtime
 
