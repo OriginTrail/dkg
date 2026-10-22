@@ -83,11 +83,13 @@ function isRecorded(lifecycle: AssertionHistoryDescriptor | null | undefined, se
  * against the seal, including that no update has superseded it. No transaction, ACK
  * request or member ciphertext is sent. While the share is still resident,
  * the synchronous publish path records the mint in adopt-only mode and
- * consumes the share. Once the share is gone, an earlier attempt already
- * recorded the VM content, so only the lifecycle is completed, from that
- * verified record. Either way the reconcile succeeds only once the lifecycle
- * names the sealed root and the asset's UAL as published, so an interrupted
- * attempt is resumed by retrying.
+ * consumes the share. Once a publish has consumed the share and finished its
+ * post-publish steps, only the lifecycle is left, and it is completed from
+ * the verified VM record. A share consumed by a publish that stopped before
+ * its finalization gossip and catalog transition refuses: those cannot be
+ * finished from the VM record alone. Either way the reconcile succeeds only
+ * once the lifecycle names the sealed root and the asset's UAL as published,
+ * so an interrupted attempt is resumed by retrying.
  */
 export async function reconcileLateMint(
   agent: DKGAgent,
@@ -114,9 +116,16 @@ export async function reconcileLateMint(
   if (vmPointer !== undefined && vmPointer !== sealRoot) {
     throw refused(`The lifecycle of "${name}" already records VM version ${vmPointer}, not the sealed ${sealRoot}.`);
   }
-  // A VM pointer means an earlier attempt recorded the mint and consumed the
-  // share; publishing again from it would plan an update transaction.
-  const mint = vmPointer === undefined && await shareResident(agent, reservation, target)
+  // A VM pointer means an earlier attempt recorded the mint, consumed the share
+  // and passed its finalization gossip; publishing again would plan an update.
+  const share = vmPointer === undefined ? await shareState(agent, reservation, target) : 'consumed';
+  if (share === 'interrupted') {
+    throw refused(
+      `An interrupted publish consumed the share of "${name}" before its finalization gossip and catalog transition. ` +
+        'Reconcile cannot finish those from the VM record alone, so it leaves the asset unrecorded.',
+    );
+  }
+  const mint = share === 'resident'
     ? await recordThroughPublish(agent, target)
     : await completeRecordedLifecycle(agent, host, reservation, target);
 
@@ -158,17 +167,26 @@ async function readSealedReservation(agent: DKGAgent, target: Target): Promise<S
   return { seal: { ...seal, publicTripleCount: seal.publicTripleCount }, scope, kaId, assertionUri, metaGraph };
 }
 
-/** The complete share a publish consumes is still in shared memory. */
-async function shareResident(agent: DKGAgent, { seal, scope }: SealedReservation, target: Target): Promise<boolean> {
+/**
+ * Where the complete share a publish consumes stands: still `resident`;
+ * `consumed` by a publish that went on to clear the share marker, which it
+ * does only after its finalization gossip; or `interrupted`, consumed while
+ * the marker stayed set because that publish stopped before those steps.
+ */
+async function shareState(
+  agent: DKGAgent,
+  { seal, scope }: SealedReservation,
+  target: Target,
+): Promise<'resident' | 'consumed' | 'interrupted'> {
   if (!(await agent.publisher.hasSwmShareComplete(target.contextGraphId, target.name, target.agentAddress, target.subGraphName))) {
-    return false;
+    return 'consumed';
   }
-  if (seal.publicTripleCount === 0) return true;
+  if (seal.publicTripleCount === 0) return 'resident';
   const shared = await agent._loadSelectedSWMQuads(target.contextGraphId, 'all', target.subGraphName, {
     kind: 'named-lifecycle',
     identity: { agentAddress: scope.agentAddress, kaNumber: BigInt(scope.kaNumber) },
   });
-  return shared.length > 0;
+  return shared.length > 0 ? 'resident' : 'interrupted';
 }
 
 async function recordThroughPublish(agent: DKGAgent, target: Target): Promise<OnChainPublishResult> {
@@ -218,7 +236,7 @@ async function completeRecordedLifecycle(
       || envelope.privateTripleCount !== (seal.privateTripleCount ?? 0)) {
       throw refused(
         `The share of "${target.name}" is no longer resident and this node holds no verified record of the sealed content ` +
-          `(${record.status === 'invalid' ? record.reason : record.status}). Share the asset again, then reconcile.`,
+          `(${record.status === 'invalid' ? record.reason : record.status}), so there is nothing to complete.`,
       );
     }
     const mint = await adoptExistingMint(host.chain, {

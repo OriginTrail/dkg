@@ -17,6 +17,7 @@ import {
   buildAuthorAttestationTypedData,
   contextGraphAssertionUri,
   contextGraphCatalogUri,
+  contextGraphFinalizationTopic,
   contextGraphMetaUri,
 } from '@origintrail-official/dkg-core';
 import {
@@ -244,6 +245,30 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect(createKnowledgeAssets).not.toHaveBeenCalled();
     expect(await history()).toMatchObject({ status: 'vm-confirmed', publishedUal: sealed.kaUal });
     await expect(agent.reconcileKnowledgeAssetMint(reconcile)).resolves.toEqual({ status: 'already-published', ual: sealed.kaUal });
+  });
+
+  it('refuses a share an interrupted publish consumed before its finalization gossip, instead of reporting success', async () => {
+    const chain = new MockChainAdapter();
+    const { agent, history, createKnowledgeAssets } = await strandedAsset(chain);
+    // The publish records the VM content and drops the shared graph, then its cleanup throws before the gossip.
+    const clearShare = agent.publisher.clearPublishedKnowledgeAssetSwm.bind(agent.publisher);
+    vi.spyOn(agent.publisher, 'clearPublishedKnowledgeAssetSwm').mockImplementationOnce(async (...args) => {
+      await clearShare(...args);
+      throw new Error('cleanup failed after dropping the shared graph');
+    });
+    const gossip = vi.spyOn(agent.gossip, 'publish');
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toThrow(/cleanup failed/);
+    const before = await history();
+    const lookup = vi.spyOn(chain, 'resolveKnowledgeAssetMint');
+
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
+      .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/interrupted publish consumed the share/) });
+
+    expect(await history()).toEqual(before);
+    expect(before?.vmCurrentAssertion).toBeUndefined();
+    expect(lookup).not.toHaveBeenCalled();
+    expect(createKnowledgeAssets).not.toHaveBeenCalled();
+    expect(gossip.mock.calls.filter(([topic]) => topic === contextGraphFinalizationTopic(CONTEXT_GRAPH))).toHaveLength(0);
   });
 
   it('writes the receipt before the lifecycle stamp, so a failed receipt write is retried', async () => {
