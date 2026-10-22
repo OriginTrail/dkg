@@ -414,6 +414,23 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
       .resolves.toMatchObject({ status: 'adopted', ual: first.sealed.kaUal, txHash: first.lostMint.txHash });
   });
 
+  it('leaves a draft that pull-from reopened while reconcile waited for the lifecycle lock', async () => {
+    const { agent, store, history } = await strandedAsset(new MockChainAdapter());
+    failNextLifecycleWrite(agent, store, PUBLISHED_UAL_PRED);
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+    // The retry reads the reservation, then pauses before the lock while pull-from reopens the asset as a draft.
+    vi.mocked(agent.getContextGraphOnChainId).mockImplementationOnce(async () => {
+      await agent.assertion.pullFrom(CONTEXT_GRAPH, NAME, 'vm', { agentAddress: AUTHOR });
+      return ON_CHAIN_CONTEXT_GRAPH.toString();
+    });
+
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
+      .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/removed while reconcile waited/) });
+
+    expect(await history()).toMatchObject({ state: 'created', memoryLayer: 'WM' });
+    expect((await history())?.publishedUal).toBeUndefined();
+  });
+
   it('fails retryably when the record-only publish does not confirm', async () => {
     const { agent } = await strandedAsset(new MockChainAdapter());
     vi.spyOn(agent, 'publishFromFinalizedAssertion').mockResolvedValueOnce({ status: 'tentative' } as never);

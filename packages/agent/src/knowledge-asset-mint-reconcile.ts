@@ -201,6 +201,35 @@ async function shareState(
   return shared.length > 0 ? 'resident' : 'interrupted';
 }
 
+/** Under the lifecycle write lock: the seal and lifecycle still describe the reservation reconcile verified. */
+async function assertReservationUnchanged(
+  agent: DKGAgent,
+  { seal, scope }: Pick<SealedReservation, 'seal' | 'scope'>,
+  target: Target,
+): Promise<void> {
+  let current: SealedReservation;
+  try {
+    current = await readSealedReservation(agent, target);
+  } catch (error) {
+    if ((error as { code?: string }).code !== KA_MINT_RECONCILE_REFUSED_CODE) throw error;
+    throw refused(`The seal of "${target.name}" was removed while reconcile waited, for example by pull-from; nothing was written.`);
+  }
+  const sealRoot = bareRoot(ethers.hexlify(seal.merkleRoot));
+  if (current.scope.ual !== scope.ual || current.scope.assertionVersion !== scope.assertionVersion
+    || bareRoot(ethers.hexlify(current.seal.merkleRoot)) !== sealRoot) {
+    throw refused(`The seal of "${target.name}" changed while reconcile waited; nothing was written.`);
+  }
+  const lifecycle = await agent.assertion.history(target.contextGraphId, target.name, {
+    agentAddress: target.agentAddress,
+    subGraphName: target.subGraphName,
+  });
+  for (const pointer of [lifecycle?.vmCurrentAssertion, lifecycle?.wmCurrentAssertion, lifecycle?.swmCurrentAssertion]) {
+    if (pointer !== undefined && bareRoot(pointer) !== sealRoot) {
+      throw refused(`The lifecycle of "${target.name}" changed while reconcile waited; nothing was written.`);
+    }
+  }
+}
+
 async function recordThroughPublish(agent: DKGAgent, target: Target): Promise<OnChainPublishResult> {
   const published = await agent.publishFromFinalizedAssertion(target.contextGraphId, target.name, {
     subGraphName: target.subGraphName,
@@ -234,6 +263,9 @@ async function completeRecordedLifecycle(
   }
   const lock = assertionLifecycleWriteLockKey(target.contextGraphId, target.name, target.agentAddress, target.subGraphName);
   return withKeyedLocks(host.writeLocks, [lock], async () => {
+    // A lifecycle operation that finished while this one waited for the lock
+    // (pull-from reopening a draft, a new seal) must not be stamped over.
+    await assertReservationUnchanged(agent, { seal, scope }, target);
     const record = await resolveConfirmedGraphScopedVm(agent.store, {
       contextGraphId: target.contextGraphId,
       ual: scope.ual,
