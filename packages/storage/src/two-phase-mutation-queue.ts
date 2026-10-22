@@ -7,7 +7,15 @@ export class TwoPhaseMutationQueue {
 
   constructor(private readonly closingMessage: string) {}
 
-  run<T>(commit: () => Promise<T>, prepare?: () => Promise<void>): Promise<T> {
+  run<T>(commit: () => Promise<T>): Promise<T> {
+    return this.admit(() => this.enqueue(commit));
+  }
+
+  runPrepared<P, T>(prepare: () => Promise<P>, commit: (prepared: P) => Promise<T>): Promise<T> {
+    return this.admit(() => prepare().then(prepared => this.enqueue(() => commit(prepared))));
+  }
+
+  private admit<T>(start: () => Promise<T>): Promise<T> {
     if (this.closing) return Promise.reject(new Error(this.closingMessage));
     let resolve!: (value: T | PromiseLike<T>) => void, reject!: (reason: unknown) => void;
     const task = new Promise<T>((onSuccess, onFailure) => { resolve = onSuccess; reject = onFailure; });
@@ -16,8 +24,7 @@ export class TwoPhaseMutationQueue {
     try {
       // Start preparation synchronously: callers snapshot mutable input before
       // their first await. Register ownership first: preparation can initiate close.
-      const work = prepare ? prepare().then(() => this.enqueue(commit)) : this.enqueue(commit);
-      void work.then(resolve, reject);
+      void start().then(resolve, reject);
     } catch (error) { reject(error); }
     return task;
   }

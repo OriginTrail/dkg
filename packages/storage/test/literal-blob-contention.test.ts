@@ -86,12 +86,12 @@ it('does not lend an admitted preparation to a new callback write during close',
 
 it('owns accepted preparation before it can synchronously initiate close', async () => {
   const f = await fixture(), preparation = immutableStorePreparation(f)!;
-  const prepare = preparation.prepareImmutableQuads.bind(preparation);
+  const prepare = preparation.prepareImmutableInsert.bind(preparation);
   const innerClose = vi.spyOn((f as TripleStore & { innerStore: TripleStore }).innerStore, 'close');
   let closing: Promise<void> | undefined, release!: () => void;
   disk.hold = new Promise<void>(resolve => { release = resolve; });
-  vi.spyOn(preparation, 'prepareImmutableQuads').mockImplementation(quads => {
-    const ready = prepare(quads);
+  vi.spyOn(preparation, 'prepareImmutableInsert').mockImplementation((target, quads) => {
+    const ready = prepare(target, quads);
     closing = f.close();
     return ready;
   });
@@ -108,15 +108,15 @@ it('owns accepted preparation before it can synchronously initiate close', async
 it('keeps a prepared write free of disk I/O after its bounded cache entry is evicted', async () => {
   const f = await fixture(), preparation = immutableStorePreparation(f)!;
   const inner = (f as TripleStore & { innerStore: TripleStore }).innerStore;
-  const insert = inner.insert.bind(inner), prepare = preparation.prepareImmutableQuads.bind(preparation);
+  const insert = inner.insert.bind(inner), prepare = preparation.prepareImmutableInsert.bind(preparation);
   let releaseSequence!: () => void, releaseDisk = () => {}, sequenceEntered = false, targetPrepared = false, done = false;
   const heldSequence = new Promise<void>(resolve => { releaseSequence = resolve; });
   vi.spyOn(inner, 'insert').mockImplementation(async (quads, options) => {
     if (options?.source === 'held-sequence') { sequenceEntered = true; await heldSequence; }
     await insert(quads, options);
   });
-  vi.spyOn(preparation, 'prepareImmutableQuads').mockImplementation(quads =>
-    prepare(quads).then(result => {
+  vi.spyOn(preparation, 'prepareImmutableInsert').mockImplementation((target, quads) =>
+    prepare(target, quads).then(result => {
       if (quads.some(q => q.subject === 'urn:evicted-target')) targetPrepared = true;
       return result;
     }));
@@ -127,7 +127,7 @@ it('keeps a prepared write free of disk I/O after its bounded cache entry is evi
   try {
     await vi.waitFor(() => expect(targetPrepared).toBe(true));
     // More than the 128-entry successful cache, without publishing any of these refs.
-    await Promise.all(Array.from({ length: 129 }, (_, i) => preparation.prepareImmutableQuads([
+    await Promise.all(Array.from({ length: 129 }, (_, i) => preparation.prepareImmutableInsert(inner, [
       quad(`urn:eviction:${i}`, `"${'e'.repeat(2048)}:${i}"`),
     ])));
     const preparedSyncs = disk.syncs;

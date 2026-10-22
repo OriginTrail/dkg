@@ -12,14 +12,18 @@ export interface TripleStoreCommitCapability {
 }
 
 /** Cancellation cannot turn a failed or unfinished commit into success. */
-export function certifiedTripleStoreCommitment(
-  durability: TripleStoreCommitDurability, work: TripleStorePersistenceBarrier,
-): TripleStoreCommitCapability {
-  const commit: TripleStorePersistenceBarrier = async options => {
+export function guardedTripleStorePersistenceBarrier(work: TripleStorePersistenceBarrier): TripleStorePersistenceBarrier {
+  return async options => {
     options?.signal?.throwIfAborted();
     await work(options);
     options?.signal?.throwIfAborted();
   };
+}
+
+export function certifiedTripleStoreCommitment(
+  durability: TripleStoreCommitDurability, work: TripleStorePersistenceBarrier,
+): TripleStoreCommitCapability {
+  const commit = guardedTripleStorePersistenceBarrier(work);
   return { durability, capture: () => commit };
 }
 
@@ -32,10 +36,10 @@ export function composeTripleStoreCommitment(
   return { durability: capability.durability, capture: () => {
     // Capture synchronously, before either the caller's writes or our own drain.
     const commit = capability.capture();
-    return certifiedTripleStoreCommitment(capability.durability, async options => {
+    return guardedTripleStorePersistenceBarrier(async options => {
       await drain();
       options?.signal?.throwIfAborted();
       await commit(options);
-    }).capture();
+    });
   } };
 }
