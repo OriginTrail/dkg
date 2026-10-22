@@ -96,7 +96,7 @@ it('completes healthy managed HTTP repair and the queued tail without inventing 
   } finally { await f.cleanup(); }
 }, 180_000);
 
-it.each(['not_started', 'unknown'] as const)('retains failed managed HTTP writes and retries after supervised restart: %s', async outcome => {
+it.each(['not_started', 'indeterminate'] as const)('retains failed managed HTTP writes and retries after supervised restart: %s', async outcome => {
   const f = await fixture(); let now = 1000;
   try {
     const store = await f.open();
@@ -107,7 +107,7 @@ it.each(['not_started', 'unknown'] as const)('retains failed managed HTTP writes
     const owner = makeOwner(store), update = store.atomicUpdate!.bind(store);
     vi.spyOn(store, 'atomicUpdate').mockImplementation(async (sparql, options) => {
       if (options?.source === 'agent.publish.confirmedLifecycleCommit') {
-        if (outcome === 'unknown') await update(sparql, options);
+        if (outcome === 'indeterminate') await update(sparql, options);
         throw new StoreOperationTimeoutError({ backend: 'managed-oxigraph', operation: 'update', outcome });
       }
       return update(sparql, options);
