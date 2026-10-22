@@ -125,7 +125,11 @@ async function deployFixture(): Promise<Fixture> {
 // Instrumented coverage runs say nothing about deployed gas.
 const skipUnderCoverage = process.argv.some((a) => a.includes('coverage'));
 
-(skipUnderCoverage ? describe.skip : describe)('@gas Conviction Account service spending', () => {
+describe('@gas Conviction Account service spending', () => {
+  before(function () {
+    if (skipUnderCoverage) this.skip();
+  });
+
   let accounts: SignerWithAddress[];
   let HubContract: Hub;
   let Token: Token;

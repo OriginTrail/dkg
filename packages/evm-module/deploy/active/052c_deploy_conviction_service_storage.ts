@@ -57,6 +57,10 @@ import {
  *     different one.
  * So a refused run deploys nothing that a later run would take as deployed
  * although the Hub never registered it.
+ *
+ * On a mainnet network the step is skipped, as is 052d: service spending
+ * reaches mainnet only as its own, deliberate release, so an ordinary mainnet
+ * deploy never registers these contracts.
  */
 
 async function checkCutOver(hre: HardhatRuntimeEnvironment, configured: bigint, onChain: bigint): Promise<void> {
@@ -118,6 +122,13 @@ async function checkCutOver(hre: HardhatRuntimeEnvironment, configured: bigint, 
 }
 
 const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
+  if (hre.network.config.environment === 'mainnet') {
+    console.log(
+      `[ConvictionServiceStorage] ${hre.network.name}: Conviction Account service spending is not ` +
+        'deployed on mainnet yet, so this step is skipped.',
+    );
+    return;
+  }
   const exactScheduleFrom = configuredParameter(hre, 'ConvictionServiceStorage', 'exactScheduleFrom');
   if (exactScheduleFrom !== undefined) {
     // What the storage holds: nothing yet when this run deploys it.
