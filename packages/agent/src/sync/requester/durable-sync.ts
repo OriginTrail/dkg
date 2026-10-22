@@ -45,7 +45,7 @@ import {
 } from './verified-asset-preparation.js';
 import type { DurableSyncBudget } from './durable-sync-budget.js';
 import { createDurableDataRoundBoundary } from './durable-data-round.js';
-import { describeDurableHoldingsPlan, planDurableDataFromLocalHoldings, settleHeldDurableData,
+import { planDurableDataFromLocalHoldings, settleDurableDataFromHoldings,
   type DurableHoldingsChannel, type HeldGraphScopedAssetsRequest } from './durable-data-holdings.js';
 import {
   normalizeDurableSyncContext,
@@ -985,12 +985,8 @@ async function runDurableSyncWithBudget(
         : undefined;
       if (graphScopedManifest && holdings && holdings.kind !== 'full') {
         recordPhaseOutcome(metaResult, { updateCheckpoint: true });
-        recordDurableSyncDiagnostics(accumulator, { bytesReceived: metaResult.bytesReceived,
-          fetchedMetaTriples: metaResult.quads.length });
-        if (holdings.kind === 'held') settleHeldDurableData({ remotePeerId, contextGraphId: pid,
-          manifest: graphScopedManifest, accumulator, deleteCheckpoint, setCheckpoint });
-        markDurableTerminalBoundary(accumulator, holdings.kind === 'held');
-        logInfo(ctx, describeDurableHoldingsPlan(pid, graphScopedManifest, holdings));
+        logInfo(ctx, settleDurableDataFromHoldings({ plan: holdings, remotePeerId, contextGraphId: pid,
+          manifest: graphScopedManifest, metaResult, accumulator, deleteCheckpoint, setCheckpoint }));
         endPhase();
         continue;
       }

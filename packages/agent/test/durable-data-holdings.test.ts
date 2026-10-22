@@ -22,6 +22,7 @@ import {
   planDurableDataFromHoldings,
   planDurableDataFromLocalHoldings,
   readHeldGraphScopedAssets,
+  settleDurableDataFromHoldings,
   settleHeldDurableData,
   type DurableHoldingsChannel,
 } from '../src/sync/requester/durable-data-holdings.js';
@@ -257,5 +258,42 @@ describe('planning a DATA phase from holdings', () => {
     });
     expect(settled?.responderSessionId).toBeUndefined();
     expect(finalizeDurableSyncCompletion(accumulator)).toMatchObject({ resumedPhases: 1, completedPhases: 1 });
+  });
+
+  it('completes a held round and leaves a fetch-missing round to the owner', () => {
+    const manifest = generation(3);
+    const checkpoints = new MemorySyncCheckpointStore();
+    const settle = (plan: Parameters<typeof settleDurableDataFromHoldings>[0]['plan']) => {
+      const accumulator = createDurableSyncAccumulator();
+      const line = settleDurableDataFromHoldings({
+        plan,
+        remotePeerId: 'peer-settle',
+        contextGraphId: CG,
+        manifest,
+        metaResult: { bytesReceived: 512, quads: manifest.descriptors.map(() => ({}) as Quad) },
+        accumulator,
+        deleteCheckpoint: (checkpointKey) => checkpoints.delete(checkpointKey),
+        setCheckpoint: (checkpointKey, checkpoint) => checkpoints.setManifestBoundOffset(
+          checkpointKey,
+          checkpoint.offset,
+          checkpoint.binding!.manifestDigest,
+          Date.now(),
+          checkpoint.binding!.manifestPrefixDigest,
+          checkpoint.binding!.terminal,
+        ),
+      });
+      return { line, result: finalizeDurableSyncCompletion(accumulator) };
+    };
+    const key = getSyncCheckpointKey('peer-settle', CG, false, 'data');
+
+    const missing = settle({ kind: 'fetch-missing', held: 2, batches: [[{ ual: uals(manifest)[0]!, assertionVersion: '1' }]], rows: 3 });
+    expect(missing.result).toMatchObject({ complete: false, bytesReceived: 512, fetchedMetaTriples: 3, fetchedDataTriples: 0 });
+    expect(checkpoints.get(key)).toBeUndefined();
+    expect(missing.line).toContain('leaving 1 asset(s)');
+
+    const held = settle({ kind: 'held', assets: 3 });
+    expect(held.result).toMatchObject({ complete: true, resumedPhases: 1, completedPhases: 1, fetchedDataTriples: 0 });
+    expect(checkpoints.get(key)).toMatchObject({ offset: manifest.manifestRowCount, terminal: true });
+    expect(held.line).toContain('skipping the DATA phase');
   });
 });
