@@ -1,6 +1,7 @@
 import { certifiedTripleStoreCommitment, type TripleStoreCommitCapability } from '../persistence.js';
 import { isReadOnlyStoreOperation } from '../store-operation-outcome.js';
 import { classifyStoreReadTransport } from '../store-read-transport-failure.js';
+import { consumeSparqlWriteResponse } from './sparql-http-write-response.js';
 import { normalizeNonNegativeNumber, normalizeSampleRate, normalizeQuerySource } from "./sparql-telemetry-options.js";
 import { refuseWithheldGraphQuery } from '../withheld-graph-query.js';
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
@@ -730,13 +731,8 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
           body: update,
           signal,
         });
-        if (res.ok && semanticWrite) this.logicalMutationScope.markMutationAcknowledged();
-        if (!res.ok) {
-          // Keep scheduler admission until the response body has settled too;
-          // otherwise retries can dispatch while an error body is unwinding.
-          const text = await res.text().catch(() => '');
-          throw new SparqlHttpResponseError(operation, res.status, text.slice(0, 300));
-        }
+        await consumeSparqlWriteResponse(res, signal, operation);
+        if (semanticWrite) this.logicalMutationScope.markMutationAcknowledged();
       } catch (error) {
         if (signal.aborted) {
           getMetrics().storeCancellationCompletedTotal.add(1, {

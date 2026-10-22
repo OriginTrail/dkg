@@ -3,6 +3,14 @@ import {
   readResponseBodyBytesBounded,
 } from '@origintrail-official/dkg-http-utils';
 
+/** Await EOF without accumulating mutation progress output. Fetch retains its original signal. */
+export async function drainResponseBody(response: Response, waitFor: <T>(work: Promise<T>) => Promise<T> = work => work): Promise<void> {
+  const reader = response.body?.getReader();
+  if (!reader) return;
+  try { while (!(await waitFor(reader.read())).done) { /* Discard chunks. */ } }
+  finally { reader.releaseLock(); }
+}
+
 export class StoreResponseTooLargeError extends Error {
   readonly code = 'STORE_RESPONSE_TOO_LARGE';
   readonly maxBytes: number;

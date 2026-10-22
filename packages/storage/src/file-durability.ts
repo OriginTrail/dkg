@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-import { mkdir, open, realpath, stat } from 'node:fs/promises';
+import { mkdir, open, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, parse, resolve, sep } from 'node:path';
+import { durablePathTraversal } from './durable-path-traversal.js';
 
 /** Pin relative paths without collapsing symlink-sensitive dot segments. */
 function absoluteTraversalPath(path: string): string {
@@ -19,8 +20,14 @@ async function syncFile(path: string): Promise<void> {
 export async function persistFileAndParent(path: string, platform: NodeJS.Platform = process.platform): Promise<void> {
   const absolutePath = absoluteTraversalPath(path);
   await syncFile(absolutePath);
-  const directory = dirname(absolutePath);
-  await persistDirectoryRange(directory, directory, platform);
+  await persistFileDirectoryEntries(absolutePath, platform);
+}
+
+/** The writer already synced its own handle; certify its target name and traversed aliases. */
+export async function persistFileDirectoryEntries(path: string, platform: NodeJS.Platform = process.platform): Promise<void> {
+  if (platform === 'win32') return;
+  const traversal = await durablePathTraversal(absoluteTraversalPath(path)), directory = dirname(traversal.resolved);
+  await persistResolvedDirectoryRange(directory, traversal.aliasParents.length ? parse(directory).root : directory, traversal.aliasParents);
 }
 
 export interface DurableDirectoryOptions {
@@ -91,12 +98,28 @@ export async function persistDirectoryRange(
   directory: string, last: string, platform: NodeJS.Platform = process.platform,
 ): Promise<void> {
   if (platform === 'win32') return;
-  // Traverse the actual filesystem before walking parents. Lexical '..' can
-  // point elsewhere when an earlier component is a directory symlink.
-  [directory, last] = await Promise.all([realpath(directory), realpath(last)]);
-  for (;; directory = dirname(directory)) {
-    const handle = await open(directory, 'r');
-    try { await handle.sync(); } finally { await handle.close(); }
-    if (directory === last || dirname(directory) === directory) break;
+  const target = await durablePathTraversal(absoluteTraversalPath(directory));
+  const through = directory === last ? target : await durablePathTraversal(absoluteTraversalPath(last));
+  await persistResolvedDirectoryRange(target.resolved, through.resolved, [...target.aliasParents, ...through.aliasParents]);
+}
+
+async function persistResolvedDirectoryRange(directory: string, last: string, aliases: readonly string[]): Promise<void> {
+  const synced = new Set<string>();
+  const range = async (path: string, through: string) => {
+    for (;;) {
+      if (!synced.has(path)) {
+        const handle = await open(path, 'r');
+        try { await handle.sync(); } finally { await handle.close(); }
+        synced.add(path);
+      }
+      if (path === through || dirname(path) === path) break;
+      path = dirname(path);
+    }
+  };
+  await range(directory, last);
+  // An alias's parent may lie outside the target ancestry. New owners cannot
+  // infer that its entry or ancestors were persisted by whoever created it.
+  for (const alias of aliases) {
+    await range(alias, parse(alias).root);
   }
 }

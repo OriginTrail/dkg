@@ -1,5 +1,5 @@
 import { DurableDirectoryPreparation } from './durable-content-addressed-file.js';
-import { persistDirectoryRange } from './file-durability.js';
+import { persistFileDirectoryEntries } from './file-durability.js';
 import type { TripleStoreCommitCapability } from './persistence.js';
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import { createHash } from 'node:crypto';
@@ -441,7 +441,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
       await file.writeFile(term, 'utf8');
       await file.sync();
     } finally { await file.close(); }
-    await persistDirectoryRange(this.blobDir, this.blobDir);
+    await persistFileDirectoryEntries(path);
   }
 
   private async readBlob(hash: string, constraints?: { maxBytes?: number; signal?: AbortSignal }): Promise<string> {

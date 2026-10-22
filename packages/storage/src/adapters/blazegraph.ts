@@ -260,7 +260,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     this.url = url.replace(/\/$/, '');
     this.operationTimeoutMs = resolveOperationTimeout(options.timeout);
     this.scheduler = options.scheduler ?? externalStorePriorityScheduler;
-    this.commitment = blazegraphWriteCommitment(options);
+    this.commitment = blazegraphWriteCommitment(options, this.url);
     this.rfc64SharedProjectionStreamV1 = createRfc64HttpSharedProjectionRunnerV1({
       runConstruct: (request, consume) => this.runStreamingConstruct(request, consume),
       responseError: (status, excerpt) => new Error(
