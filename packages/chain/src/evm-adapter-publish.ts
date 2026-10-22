@@ -1453,6 +1453,7 @@ export class PublishMethods extends EVMChainAdapterBase {
         );
       },
       params.onBroadcastAccepted,
+      params.onBeforeReplacementBroadcast,
     );
 
     return {
