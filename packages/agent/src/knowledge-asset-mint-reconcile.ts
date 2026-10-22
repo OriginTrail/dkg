@@ -2,6 +2,7 @@
 import { ethers } from 'ethers';
 import type { ChainAdapter, OnChainPublishResult } from '@origintrail-official/dkg-chain';
 import {
+  ASSERTION_PUBLISH_RECEIPT_PREDICATES,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   buildAssertionPublishReceiptQuads,
   contextGraphAssertionUri,
@@ -121,9 +122,13 @@ export async function reconcileLateMint(
   if (chainTargetMismatch) throw refused(`Cannot record "${name}": ${chainTargetMismatch}`);
   const sealRoot = bareRoot(ethers.hexlify(reservation.seal.merkleRoot));
   const lifecycle = () => agent.assertion.history(contextGraphId, name, { agentAddress, subGraphName });
+  // A minted version is complete only with its publish receipt; the publish
+  // path writes that receipt best-effort, so a missing one is completed here.
+  const complete = async (state: AssertionHistoryDescriptor | null | undefined) => isRecorded(state, sealRoot, ual)
+    && (BigInt(reservation.scope.assertionVersion) !== 1n || await hasPublishReceipt(agent, reservation));
 
   const before = await lifecycle();
-  if (isRecorded(before, sealRoot, ual)) return { status: 'already-published', ual };
+  if (await complete(before)) return { status: 'already-published', ual };
   const vmPointer = before?.vmCurrentAssertion === undefined ? undefined : bareRoot(before.vmCurrentAssertion);
   if (vmPointer !== undefined && vmPointer !== sealRoot) {
     throw refused(`The lifecycle of "${name}" already records VM version ${vmPointer}, not the sealed ${sealRoot}.`);
@@ -142,9 +147,9 @@ export async function reconcileLateMint(
     : await completeRecordedLifecycle(agent, host, reservation, target);
 
   const after = await lifecycle();
-  if (!isRecorded(after, sealRoot, ual)) {
+  if (!(await complete(after))) {
     throw Object.assign(new Error(
-      `The mint of "${name}" was verified but its lifecycle is not complete ` +
+      `The mint of "${name}" was verified but its lifecycle or publish receipt is not complete ` +
         `(VM version ${after?.vmCurrentAssertion ?? 'none'}, publishedUal ${after?.publishedUal ?? 'none'}, ` +
         `expected ${sealRoot} and ${ual}). Retry the reconcile.`,
     ), { code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
@@ -177,6 +182,15 @@ async function readSealedReservation(agent: DKGAgent, target: Target): Promise<S
     throw refused(`The seal of "${target.name}" reserves KA ${seal.reservedKaId}, not its UAL's ${kaId}.`);
   }
   return { seal: { ...seal, publicTripleCount: seal.publicTripleCount }, scope, kaId, assertionUri, metaGraph };
+}
+
+/** The publish receipt (transaction and block) a confirmed mint leaves on the assertion. */
+async function hasPublishReceipt(agent: DKGAgent, { assertionUri, metaGraph }: SealedReservation): Promise<boolean> {
+  const result = await agent.store.query(
+    `ASK { GRAPH <${metaGraph}> { <${assertionUri}> <${ASSERTION_PUBLISH_RECEIPT_PREDICATES.PUBLISHED_AT_TX}> ?tx } }`,
+    { source: 'agent.reconcileLateMint.receipt' },
+  );
+  return result.type === 'boolean' && result.value;
 }
 
 /**
@@ -248,8 +262,9 @@ async function recordThroughPublish(agent: DKGAgent, target: Target): Promise<On
  * Complete the lifecycle of a mint whose VM content an earlier attempt
  * already recorded, without the consumed share. The local record must verify
  * against the sealed root, and the mint must pass the same checks as
- * adoption. The receipt is written before the lifecycle is stamped, because
- * the stamp is what makes later attempts report the asset published.
+ * adoption, read before the lifecycle lock is taken. The receipt is written
+ * before the lifecycle is stamped, because the stamp is what makes later
+ * attempts report the asset published.
  */
 async function completeRecordedLifecycle(
   agent: DKGAgent,
@@ -261,6 +276,15 @@ async function completeRecordedLifecycle(
   if (!onChainContextGraphId || !/^\d+$/.test(onChainContextGraphId)) {
     throw refused(`Context graph "${target.contextGraphId}" has no on-chain id.`);
   }
+  // Chain evidence is read before the lifecycle lock: the lock does not
+  // stabilize chain state, and holding it through a log scan would stall
+  // every other operation on this asset's lifecycle.
+  const mint = await adoptExistingMint(host.chain, {
+    kaId,
+    merkleRoot: seal.merkleRoot,
+    contextGraphId: BigInt(onChainContextGraphId),
+    authorAddress: seal.authorAddress,
+  }, { txHash: target.txHash });
   const lock = assertionLifecycleWriteLockKey(target.contextGraphId, target.name, target.agentAddress, target.subGraphName);
   return withKeyedLocks(host.writeLocks, [lock], async () => {
     // A lifecycle operation that finished while this one waited for the lock
@@ -283,12 +307,6 @@ async function completeRecordedLifecycle(
           `(${record.status === 'invalid' ? record.reason : record.status}), so there is nothing to complete.`,
       );
     }
-    const mint = await adoptExistingMint(host.chain, {
-      kaId,
-      merkleRoot: seal.merkleRoot,
-      contextGraphId: BigInt(onChainContextGraphId),
-      authorAddress: seal.authorAddress,
-    }, { txHash: target.txHash });
     if (envelope.transactionHash !== undefined && envelope.transactionHash.toLowerCase() !== mint.txHash.toLowerCase()) {
       throw refused(`The local record of "${target.name}" names transaction ${envelope.transactionHash}, not the mint ${mint.txHash}.`);
     }

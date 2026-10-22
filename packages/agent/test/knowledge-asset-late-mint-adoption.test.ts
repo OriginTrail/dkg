@@ -160,6 +160,11 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     lifecycleWriteFailures(target, store).failNext(predicate);
   }
 
+  async function receiptTxHashes(store: OxigraphStore): Promise<string[]> {
+    const receipt = await store.query(`SELECT ?tx WHERE { GRAPH <${META_GRAPH}> { <${ASSERTION}> <${PUBLISHED_AT_TX_PRED}> ?tx } }`);
+    return receipt.type === 'bindings' ? receipt.bindings.map((row) => String(row['tx']).replace(/^"|"$/g, '')) : [];
+  }
+
   it('records the late mint on the vm/publish retry that reverts KaIdAlreadyMinted', async () => {
     const { agent, sealed, lostMint, history, createKnowledgeAssets } = await strandedAsset(new WalletMockChain(), wallet.address);
     vi.spyOn(agent as unknown as { createV10ACKProvider(cg: string): unknown }, 'createV10ACKProvider')
@@ -290,8 +295,21 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect((await history())?.publishedUal).toBeUndefined();
 
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toMatchObject({ status: 'adopted', txHash: lostMint.txHash });
-    const receipt = await store.query(`SELECT ?tx WHERE { GRAPH <${META_GRAPH}> { <${ASSERTION}> <${PUBLISHED_AT_TX_PRED}> ?tx } }`);
-    expect(receipt.type === 'bindings' && receipt.bindings.map((row) => String(row['tx']).replace(/^"|"$/g, ''))).toEqual([lostMint.txHash]);
+    expect(await receiptTxHashes(store)).toEqual([lostMint.txHash]);
+  });
+
+  it('completes a publish receipt the publish path failed to write, instead of reporting success without it', async () => {
+    const { agent, store, sealed, lostMint, history } = await strandedAsset(new MockChainAdapter());
+    failNextLifecycleWrite(agent, store, PUBLISHED_AT_TX_PRED);
+
+    // The publish path swallows its receipt failure and stamps the lifecycle anyway.
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+    expect(await history()).toMatchObject({ status: 'vm-confirmed', publishedUal: sealed.kaUal });
+    expect(await receiptTxHashes(store)).toEqual([]);
+
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toMatchObject({ status: 'adopted', txHash: lostMint.txHash });
+    expect(await receiptTxHashes(store)).toEqual([lostMint.txHash]);
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toEqual({ status: 'already-published', ual: sealed.kaUal });
   });
 
   it('refuses to complete a lifecycle when the share is gone and no verified record exists', async () => {
@@ -429,6 +447,23 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
 
     expect(await history()).toMatchObject({ state: 'created', memoryLayer: 'WM' });
     expect((await history())?.publishedUal).toBeUndefined();
+  });
+
+  it('reads mint evidence outside the lifecycle lock, so pull-from finishes during a slow lookup', async () => {
+    const chain = new MockChainAdapter();
+    const { agent, store, history } = await strandedAsset(chain);
+    failNextLifecycleWrite(agent, store, PUBLISHED_UAL_PRED);
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+    // pull-from takes the same lifecycle lock; were the lookup inside it, this would never finish.
+    const lookup = chain.resolveKnowledgeAssetMint.bind(chain);
+    vi.spyOn(chain, 'resolveKnowledgeAssetMint').mockImplementationOnce(async (...args) => {
+      await agent.assertion.pullFrom(CONTEXT_GRAPH, NAME, 'vm', { agentAddress: AUTHOR });
+      return lookup(...args);
+    });
+
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
+      .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/removed while reconcile waited/) });
+    expect(await history()).toMatchObject({ state: 'created', memoryLayer: 'WM' });
   });
 
   it('fails retryably when the record-only publish does not confirm', async () => {
