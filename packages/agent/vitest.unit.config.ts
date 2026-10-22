@@ -26,6 +26,7 @@ export default defineConfig({
       "test/confirmed-lifecycle-dispatch.test.ts",
       "test/confirmed-lifecycle-graph-markers.test.ts",
       "test/confirmed-lifecycle-process-local.test.ts",
+      "test/confirmed-lifecycle-blazegraph.test.ts",
       "test/write-preflight-attribution.test.ts",
       "test/rfc64-manual-catalog-authority-scope-v1.test.ts",
       "test/sync-exact-export-admission.test.ts",

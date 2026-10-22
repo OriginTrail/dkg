@@ -22,7 +22,8 @@ import { registerTripleStoreAdapter } from '../triple-store.js';
 import { decodeSparqlJsonQueryResult } from '../sparql-json-query-result.js';
 import { quadToBlazegraphNQuad } from './blazegraph-nquads.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
-import { blazegraphWriteCommitment, completeBlazegraphWriteResponse, type BlazegraphPersistenceOptions } from './blazegraph-persistence.js';
+import { blazegraphWriteCommitment, type BlazegraphPersistenceOptions } from './blazegraph-persistence.js';
+import { assertSingleBlazegraphUpdate, postBlazegraphWriteRequest } from './blazegraph-write-request.js';
 import {
   assertQuadLiteralsMutf8Safe,
   classifySparqlOperation,
@@ -455,6 +456,12 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     );
   }
 
+  /** Only a verified single operation; unsupported batches refuse before dispatch. */
+  async atomicUpdate(sparql: string, options?: UpdateOptions): Promise<void> {
+    assertSingleBlazegraphUpdate(sparql);
+    await this.sparqlUpdate(sparql, options);
+  }
+
   async replaceGraph(
     graphUri: string,
     quads: DKGQuad[],
@@ -815,19 +822,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     deadline: AdmittedReadDeadline,
     responsePolicy: 'insert' | 'update' | 'bulk group',
   ): Promise<void> {
-    deadline.check();
-    const response = await deadline.waitFor(fetch(this.url, {
-      method: 'POST', headers: { 'Content-Type': contentType }, body, signal: deadline.signal,
-    }));
-    if (responsePolicy === 'bulk group') {
-      // Bulk staging bounds and drains every response before the next write.
-      await deadline.waitFor(readResponseTextBounded(response, 64 * 1024));
-      if (!response.ok) throw new Error(`Blazegraph bulk group failed (${response.status})`);
-    } else if (!response.ok) {
-      const text = await deadline.waitFor(response.text().catch(() => ''));
-      const excerpt = text.slice(0, responsePolicy === 'insert' ? 200 : 300);
-      throw new Error(`Blazegraph ${responsePolicy} failed (${response.status}): ${excerpt}`);
-    } else await completeBlazegraphWriteResponse(response, deadline);
+    await postBlazegraphWriteRequest(this.url, body, contentType, deadline, responsePolicy);
   }
 
   private async sparqlUpdate(

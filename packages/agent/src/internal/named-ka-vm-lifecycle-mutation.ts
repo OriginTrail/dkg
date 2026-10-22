@@ -122,10 +122,13 @@ export function buildNamedKaVmLifecycleMutation(
   const removals = writes.map(write => write.target);
   const quads = [...writes.flatMap(write => write.kind === 'replace' ? write.quads : []), ...additions];
   // Validate all terms before any path writes. Both dispatches use this exact projection.
-  const deleteStatements = removals.map(q => `DELETE WHERE { GRAPH ${graph} { ${term(q.subject, 'subject')} ${term(q.predicate, 'predicate')} ?o } }`);
+  const deletePatterns = removals.map((q, index) => `${term(q.subject, 'subject')} ${term(q.predicate, 'predicate')} ?old${index} .`);
   const insertStatements = quads.map(q => `${term(q.subject, 'subject')} ${term(q.predicate, 'predicate')} ${term(q.object, 'object')} .`).join('\n');
+  // One native MODIFY operation, including when every old predicate is absent.
+  // Independent OPTIONALs remove every old value without making inserts conditional on it.
+  const where = deletePatterns.map(pattern => `OPTIONAL { GRAPH ${graph} { ${pattern} } }`).join('\n');
   return { graph: metaGraph, writes, additions, mutation: { removals, quads },
-    sparql: [...deleteStatements, `INSERT DATA { GRAPH ${graph} { ${insertStatements} } }`].join(';\n') };
+    sparql: `DELETE { GRAPH ${graph} { ${deletePatterns.join('\n')} } }\nINSERT { GRAPH ${graph} { ${insertStatements} } }\nWHERE { ${where} }` };
 
 }
 
