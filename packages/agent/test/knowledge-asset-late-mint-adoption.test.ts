@@ -11,7 +11,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { buildAuthorAttestationTypedData, contextGraphCatalogUri } from '@origintrail-official/dkg-core';
+import {
+  assertionLifecycleUri,
+  buildAuthorAttestationTypedData,
+  contextGraphCatalogUri,
+  contextGraphMetaUri,
+} from '@origintrail-official/dkg-core';
 import {
   VM_CURRENT_ASSERTION_PRED,
   computeFlatKCRootV10,
@@ -31,6 +36,9 @@ const QUADS = [{ subject: 'urn:lot:2026-08-12', predicate: 'http://schema.org/na
 const MERKLE_ROOT = computeFlatKCRootV10(QUADS, []);
 const ZERO = new Uint8Array(32);
 const PUBLISHED_UAL_PRED = 'http://dkg.io/ontology/publishedUal';
+const SWM_SHARE_COMPLETE_PRED = 'http://dkg.io/ontology/swmShareComplete';
+const LIFECYCLE = assertionLifecycleUri(CONTEXT_GRAPH, AUTHOR, NAME);
+const META_GRAPH = contextGraphMetaUri(CONTEXT_GRAPH);
 const RECONCILE = { contextGraphId: CONTEXT_GRAPH, name: NAME };
 
 /** The mock chain with a real publish wallet, which the vm/publish path needs to sign. */
@@ -232,6 +240,7 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     });
     const keyed = agent as unknown as Record<string, (...args: unknown[]) => unknown>;
     vi.spyOn(agent, 'getLocalSigningAgentForAddress').mockReturnValue(null);
+    const publishFromSharedMemory = vi.spyOn(agent.publisher, 'publishFromSharedMemory');
     const senderKeyWork = ['_resolveCuratedChainKeyContext', '_resolveInlineEncryption', 'loadSwmSenderKeyState', 'createV10ACKProvider']
       .map((method) => vi.spyOn(keyed, method));
     for (const spy of senderKeyWork) spy.mockClear();
@@ -243,5 +252,61 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     // The curated catalog floor is recorded as the minting publish records it.
     const catalog = await store.query(`SELECT ?s WHERE { GRAPH <${contextGraphCatalogUri(CONTEXT_GRAPH)}> { ?s ?p ?o } }`);
     expect(catalog.type === 'bindings' && catalog.bindings.length).toBeGreaterThan(0);
+    // The curated hook the publisher received refuses to encrypt anything.
+    const encrypt = publishFromSharedMemory.mock.calls[0]?.[2]?.encryptInlinePayload;
+    expect(encrypt).toBeTypeOf('function');
+    await expect(encrypt!(new Uint8Array([1]))).rejects.toThrow(/never encrypts/);
+  });
+
+  it('never routes a record-only publish onto the update path', async () => {
+    const { agent, store, updateKnowledgeCollection } = await strandedAsset(new MockChainAdapter());
+    await agent.reconcileKnowledgeAssetMint(RECONCILE);
+    // A new complete share of the published asset, as an edit cycle leaves it.
+    await store.insert([{ subject: LIFECYCLE, predicate: SWM_SHARE_COMPLETE_PRED, object: '"true"', graph: META_GRAPH }]);
+
+    await expect(agent.publishFromFinalizedAssertion(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR, adoptExistingMint: {} }))
+      .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE });
+    expect(updateKnowledgeCollection).not.toHaveBeenCalled();
+  });
+
+  it('refuses when the lifecycle already records another VM version', async () => {
+    const { agent, createKnowledgeAssets } = await strandedAsset(new MockChainAdapter());
+    await agent._stampPointer(LIFECYCLE, VM_CURRENT_ASSERTION_PRED, 'ff'.repeat(32), META_GRAPH);
+
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
+      .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/already records VM version/) });
+    expect(createKnowledgeAssets).not.toHaveBeenCalled();
+  });
+
+  it('fails retryably when the record-only publish does not confirm', async () => {
+    const { agent } = await strandedAsset(new MockChainAdapter());
+    vi.spyOn(agent, 'publishFromFinalizedAssertion').mockResolvedValueOnce({ status: 'tentative' } as never);
+
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
+      .rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE, message: expect.stringMatching(/ended tentative/) });
+  });
+
+  it('refuses to complete a lifecycle without an on-chain context graph', async () => {
+    const { agent } = await strandedAsset(new MockChainAdapter());
+    await agent.publisher.clearSwmShareComplete(CONTEXT_GRAPH, NAME, AUTHOR);
+    vi.mocked(agent.getContextGraphOnChainId).mockResolvedValue(null);
+
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
+      .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/has no on-chain id/) });
+  });
+
+  it('refuses to complete a lifecycle from a local record of another transaction', async () => {
+    const chain = new MockChainAdapter();
+    const { agent, store, history } = await strandedAsset(chain);
+    failNextLifecycleWrite(agent, store, VM_CURRENT_ASSERTION_PRED);
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+    const lookedUp = await chain.resolveKnowledgeAssetMint(RESERVED_KA_ID);
+    if (lookedUp.status !== 'confirmed') throw new Error(`expected the lost mint to resolve, got ${lookedUp.status}`);
+    vi.spyOn(chain, 'resolveKnowledgeAssetMint')
+      .mockResolvedValue({ ...lookedUp, mint: { ...lookedUp.mint, txHash: `0x${'ee'.repeat(32)}` } });
+
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
+      .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/names transaction/) });
+    expect((await history())?.vmCurrentAssertion).toBeUndefined();
   });
 });

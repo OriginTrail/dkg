@@ -1,8 +1,11 @@
 import type { ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Command } from 'commander';
 import { MintAdoptionRefusedError } from '@origintrail-official/dkg-publisher';
+import { ApiClient } from '../src/api-client.js';
 import type { AllowedHttpAuthentication } from '../src/auth.js';
+import { registerKnowledgeAssetCommand } from '../src/commands/knowledge-asset.js';
 import type { DkgConfig } from '../src/config.js';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
@@ -94,6 +97,16 @@ describe('POST /api/knowledge-assets/:name/vm/reconcile', () => {
     expect(result.body).toMatchObject({ code: 'KA_MINT_RECONCILE_INCOMPLETE', retryable: true });
   });
 
+  it.each([
+    ['a caller precondition', new Error('assertion <urn:x> is not finalized. Call wm/finalize first'), 409,
+      { code: 'VM_PUBLISH_PRECONDITION', error: 'assertion <urn:x> is not finalized. Call wm/finalize first' }],
+    ['an unexpected failure', new Error('store exploded'), 500, { error: 'store exploded' }],
+  ] as const)('answers %s with %i', async (_case, failure, status, body) => {
+    const agent = stubAgent(async () => { throw failure; });
+    const result = await callRoute(PATH, OPERATOR, { contextGraphId: CG, subGraphName: 'lots' }, agent);
+    expect(result).toEqual({ status, body });
+  });
+
   it('answers 409 when this node holds nothing it can complete', async () => {
     const agent = stubAgent(async () => {
       throw Object.assign(new Error('no verified record of the sealed content'), { code: 'KA_MINT_RECONCILE_REFUSED' });
@@ -133,5 +146,48 @@ describe('POST /api/knowledge-assets/:name/vm/publish with a refused late-mint a
       status: 409,
       body: { code: 'KA_MINT_ADOPTION_REFUSED', reason: 'root-mismatch', kaId: '30013', retryable: false, error: refusal.message },
     });
+  });
+});
+
+describe('dkg ka reconcile', () => {
+  const lines: string[] = [];
+  beforeEach(() => {
+    lines.length = 0;
+    vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => { lines.push(args.map(String).join(' ')); });
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  async function reconcile(args: string[], answer: unknown) {
+    const knowledgeAssetReconcileMint = vi.fn().mockResolvedValue(answer);
+    vi.spyOn(ApiClient, 'connect').mockResolvedValue({ knowledgeAssetReconcileMint } as unknown as ApiClient);
+    const program = new Command().name('dkg');
+    program.exitOverride();
+    registerKnowledgeAssetCommand(program);
+    await program.parseAsync(['node', 'dkg', 'ka', 'reconcile', ...args]);
+    return knowledgeAssetReconcileMint;
+  }
+
+  it('records the late mint and prints the original transaction', async () => {
+    const client = await reconcile(['lots-2026-08-12', '-c', CG, '--sub-graph-name', 'lots', '--tx-hash', TX_HASH], ADOPTED);
+
+    expect(client).toHaveBeenCalledExactlyOnceWith(CG, 'lots-2026-08-12', { subGraphName: 'lots', txHash: TX_HASH });
+    expect(lines).toEqual([
+      'Knowledge asset late mint recorded:',
+      '  Name:    lots-2026-08-12',
+      '  KA ID:   30013',
+      `  UAL:     ${UAL}`,
+      `  Tx hash: ${TX_HASH}`,
+      '  Block:   48853001',
+    ]);
+  });
+
+  it('reports an already published asset, and prints JSON on request', async () => {
+    await reconcile(['lots-2026-08-12', '-c', CG], { status: 'already-published', ual: UAL });
+    expect(lines).toEqual([`Knowledge asset "lots-2026-08-12" is already published as ${UAL}; nothing to do.`]);
+
+    lines.length = 0;
+    const client = await reconcile(['lots-2026-08-12', '-c', CG, '--json'], ADOPTED);
+    expect(client).toHaveBeenCalledExactlyOnceWith(CG, 'lots-2026-08-12', {});
+    expect(JSON.parse(lines.join('\n'))).toEqual(ADOPTED);
   });
 });

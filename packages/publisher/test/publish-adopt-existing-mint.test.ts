@@ -13,6 +13,9 @@ import { ethers } from 'ethers';
 import {
   MockChainAdapter,
   kaIdAlreadyMintedFromError,
+  kaIdAlreadyMintedRevert,
+  type ChainAdapter,
+  type KnowledgeAssetMintEvidence,
   type KnowledgeAssetMintLookupOptions,
   type KnowledgeAssetMintResolution,
   type OnChainPublishResult,
@@ -31,10 +34,14 @@ import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import {
   MintAdoptionRefusedError,
+  adoptExistingMint,
   generateGraphKnowledgeAssetMetadata,
   generatedPrivateCatalogTripleKeys,
+  mintOrAdoptKnowledgeAssets,
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
 } from '../src/index.js';
+import { sealedMintAdoption, type SealedMintAdoption } from '../src/adopt-existing-mint.js';
+import { PublisherPlanner } from '../src/publisher-planning.js';
 import { buildSeal, mockSealCtx } from './_helpers/seal.js';
 import { mockChainStubACKProvider } from './_helpers/acks.js';
 
@@ -409,5 +416,68 @@ describe('a sealed publish whose transaction mined after the node stopped waitin
     expect(fixture.chain.createCalls).toBe(0);
     expect(fixture.acks).not.toHaveBeenCalled();
     await expectNothingRecorded(fixture);
+  });
+});
+
+describe('adoption refuses what the chain cannot prove', () => {
+  const author = ethers.getAddress(`0x${'ab'.repeat(20)}`);
+  const kaId = (BigInt(author) << 96n) | 7n;
+  const merkleRoot = ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('sealed content')));
+  const expected = { kaId, merkleRoot, contextGraphId: 1n, authorAddress: author };
+  const mint = (overrides: Partial<KnowledgeAssetMintEvidence> = {}): KnowledgeAssetMintEvidence => ({
+    kaId, merkleRoot, contextGraphId: 1n, authorAddress: author, publisherAddress: author, tokenAmount: 5n,
+    knowledgeAssetsContract: ethers.getAddress(`0x${'11'.repeat(20)}`), txHash: `0x${'aa'.repeat(32)}`,
+    blockNumber: 100, blockHash: `0x${'bb'.repeat(32)}`, txIndex: 0, blockTimestamp: 0, ...overrides,
+  });
+  const chainAnswering = (resolution: KnowledgeAssetMintResolution) => ({
+    resolveKnowledgeAssetMint: async () => resolution,
+    readKnowledgeAssetVersionSnapshot: async () => null,
+  }) as unknown as ChainAdapter;
+
+  it('refuses on an adapter that cannot look up mints and current versions', async () => {
+    await expect(adoptExistingMint({} as ChainAdapter, expected))
+      .rejects.toMatchObject({ reason: 'lookup-unsupported', retryable: false });
+  });
+
+  it.each([
+    ['a rejected receipt', { status: 'rejected', reason: 'transaction 0xaa reverted' }, 'mint-receipt-invalid'],
+    ['a receipt for another id', { status: 'confirmed', mint: mint({ kaId: kaId + 1n }) }, 'mint-receipt-invalid'],
+    ['another author', { status: 'confirmed', mint: mint({ authorAddress: ethers.getAddress(`0x${'cd'.repeat(20)}`) }) }, 'author-mismatch'],
+  ] as const)('refuses %s', async (_case, resolution, reason) => {
+    await expect(adoptExistingMint(chainAnswering(resolution as KnowledgeAssetMintResolution), expected))
+      .rejects.toMatchObject({ reason, retryable: false });
+  });
+
+  it('refuses a KaIdAlreadyMinted revert that names another id than the reservation', async () => {
+    const chain = { createKnowledgeAssets: async () => { throw kaIdAlreadyMintedRevert(kaId + 1n); } } as unknown as ChainAdapter;
+    const params = { reservedKaId: kaId, merkleRoot, contextGraphId: 1n, author: { address: author } } as unknown as V10PublishParams;
+
+    const refusal = await mintOrAdoptKnowledgeAssets(chain, params, {} as SealedMintAdoption).catch((error: unknown) => error);
+
+    expect(refusal).toMatchObject({ reason: 'reserved-id-mismatch', retryable: false, kaId });
+    expect(kaIdAlreadyMintedFromError((refusal as Error).cause)).toBe(kaId + 1n);
+  });
+
+  it('records an existing mint only for a sealed publish with a reserved id', async () => {
+    const store = new OxigraphStore();
+    expect(sealedMintAdoption(store, undefined, { contextGraphId: CONTEXT_GRAPH, log: () => {} })).toBeUndefined();
+    expect(() => sealedMintAdoption(store, undefined, { contextGraphId: CONTEXT_GRAPH, existingOnly: {}, log: () => {} }))
+      .toThrow(/requires a sealed graph-scoped publish/);
+    const params = { merkleRoot, contextGraphId: 1n, author: { address: author } } as unknown as V10PublishParams;
+    await expect(mintOrAdoptKnowledgeAssets({} as ChainAdapter, params, { existingOnly: {} } as SealedMintAdoption))
+      .rejects.toThrow(/requires a reserved KA id/);
+  });
+
+  it('plans a record-only publish only for an on-chain context graph on a V10-ready chain', async () => {
+    const planner = new PublisherPlanner({
+      chain: { chainId: 'none' } as ChainAdapter,
+      resolvePublisherAddressSelection: vi.fn(),
+      resolvePublisherSigner: vi.fn(),
+      localTentativePublisherAddress: () => author,
+      log: { info: () => {}, warn: () => {} },
+    });
+
+    await expect(planner.prepareMintAdoption(1n)).rejects.toThrow(/on-chain context graph id and a V10-ready chain/);
+    await expect(planner.prepareMintAdoption(undefined)).rejects.toThrow(/on-chain context graph id and a V10-ready chain/);
   });
 });

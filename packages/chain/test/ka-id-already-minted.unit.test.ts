@@ -55,7 +55,9 @@ describe('decodeKnowledgeAssetMintReceipt', () => {
   const contracts = { knowledgeAssets, contextGraphStorage };
 
   it('takes id, root, author, cost and context graph from the one receipt', () => {
-    expect(decodeKnowledgeAssetMintReceipt([created(KA_ID), registered(35n, KA_ID)], contracts, KA_ID)).toEqual({
+    // A log of the same contract that does not decode as a known event is skipped.
+    const undecodable = { ...created(KA_ID), data: '0x' };
+    expect(decodeKnowledgeAssetMintReceipt([undecodable, created(KA_ID), registered(35n, KA_ID)], contracts, KA_ID)).toEqual({
       kaId: KA_ID,
       merkleRoot: ethers.getBytes(root),
       contextGraphId: 35n,

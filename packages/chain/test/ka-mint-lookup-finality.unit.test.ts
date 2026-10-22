@@ -23,7 +23,20 @@ const CONFIRMATIONS = 3;
 /** The lowest head at which a block-100 receipt has three confirmations. */
 const FINAL_HEAD = MINT_BLOCK + CONFIRMATIONS - 1;
 
-function mintLookupAdapter(endpoint: { head: number; hashAtMintHeight: string }, scan: { finds: boolean }) {
+/** What the endpoint holds besides its head: the receipt, whether the id is free, and pending transactions. */
+interface ChainState {
+  receiptStatus?: number;
+  /** The scanned creation log belongs to another KA's transaction. */
+  receiptMintsKaId?: bigint;
+  kaMinted?: boolean;
+  pendingTransactions?: string[];
+}
+
+function mintLookupAdapter(
+  endpoint: { head: number; hashAtMintHeight: string },
+  scan: { finds: boolean },
+  state: ChainState = {},
+) {
   const knowledgeAssets = {
     address: ethers.getAddress(`0x${'11'.repeat(20)}`),
     interface: new ethers.Interface(loadAbi('DKGKnowledgeAssets')),
@@ -34,7 +47,7 @@ function mintLookupAdapter(endpoint: { head: number; hashAtMintHeight: string },
   };
   const receipt = {
     hash: TX_HASH,
-    status: 1,
+    status: state.receiptStatus ?? 1,
     blockNumber: MINT_BLOCK,
     blockHash: MINT_BLOCK_HASH,
     index: 4,
@@ -42,11 +55,13 @@ function mintLookupAdapter(endpoint: { head: number; hashAtMintHeight: string },
     logs: [
       {
         address: knowledgeAssets.address,
-        ...knowledgeAssets.interface.encodeEventLog('KnowledgeAssetCreated', [KA_ID, AUTHOR, 'op', ROOT, 256n, 1n, 3n, 42n, false]),
+        ...knowledgeAssets.interface.encodeEventLog('KnowledgeAssetCreated', [
+          state.receiptMintsKaId ?? KA_ID, AUTHOR, 'op', ROOT, 256n, 1n, 3n, 42n, false,
+        ]),
       },
       {
         address: contextGraphStorage.address,
-        ...contextGraphStorage.interface.encodeEventLog('KnowledgeAssetRegisteredToContextGraph', [35n, KA_ID]),
+        ...contextGraphStorage.interface.encodeEventLog('KnowledgeAssetRegisteredToContextGraph', [35n, state.receiptMintsKaId ?? KA_ID]),
       },
     ],
   };
@@ -73,8 +88,8 @@ function mintLookupAdapter(endpoint: { head: number; hashAtMintHeight: string },
       },
     },
     getTransactionReceiptWithFailover: vi.fn(async (hash: string) => (hash === TX_HASH ? receipt : null)),
-    getTransactionWithFailover: vi.fn(async () => null),
-    readFinalizedChainProofSnapshot: vi.fn(async () => ({ kaMinted: true })),
+    getTransactionWithFailover: vi.fn(async (hash: string) => (state.pendingTransactions?.includes(hash) ? { hash } : null)),
+    readFinalizedChainProofSnapshot: vi.fn(async () => ({ kaMinted: state.kaMinted ?? true })),
     resolveContractDeployBlock: vi.fn(async () => ({ fromBlock: 0, head: 1_000, scanProviders: [] })),
     queryEventLogsPage,
     readProviderRetryingNull: vi.fn(async (_label: string, read: (p: typeof provider) => Promise<unknown>) => read(provider)),
@@ -138,5 +153,45 @@ describe('resolveKnowledgeAssetMint holds a recovered receipt to the production 
 
     await expect(chain.resolveKnowledgeAssetMint(KA_ID, { txHash: TX_HASH })).resolves.toEqual(confirmed);
     expect(queryEventLogsPage).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolveKnowledgeAssetMint without a final mint receipt', () => {
+  const finalEndpoint = { head: FINAL_HEAD, hashAtMintHeight: MINT_BLOCK_HASH };
+  const PENDING_TX = `0x${'cc'.repeat(32)}`;
+
+  it('reports not-minted only when the finality-depth block proves the id free', async () => {
+    const { chain, queryEventLogsPage } = mintLookupAdapter(finalEndpoint, { finds: false }, { kaMinted: false });
+
+    await expect(chain.resolveKnowledgeAssetMint(KA_ID)).resolves.toEqual({ status: 'not-minted' });
+    await expect(chain.resolveKnowledgeAssetMint(KA_ID, { txHash: PENDING_TX })).resolves.toEqual({ status: 'not-minted' });
+    // A hinted transaction still in the mempool keeps the answer pending.
+    const pending = mintLookupAdapter(finalEndpoint, { finds: false }, { kaMinted: false, pendingTransactions: [PENDING_TX] });
+    await expect(pending.chain.resolveKnowledgeAssetMint(KA_ID, { txHash: PENDING_TX })).resolves.toEqual({ status: 'pending' });
+    expect(queryEventLogsPage).not.toHaveBeenCalled();
+  });
+
+  it('reports not-found when no creation log or receipt is recovered', async () => {
+    const { chain } = mintLookupAdapter(finalEndpoint, { finds: false });
+
+    await expect(chain.resolveKnowledgeAssetMint(KA_ID)).resolves.toEqual({ status: 'not-found' });
+    await expect(chain.resolveKnowledgeAssetMint(KA_ID, { txHash: PENDING_TX })).resolves.toEqual({ status: 'not-found' });
+  });
+
+  it('rejects a reverted receipt and a receipt that minted another id', async () => {
+    const reverted = mintLookupAdapter(finalEndpoint, { finds: true }, { receiptStatus: 0 });
+    await expect(reverted.chain.resolveKnowledgeAssetMint(KA_ID))
+      .resolves.toEqual({ status: 'rejected', reason: `transaction ${TX_HASH} reverted` });
+
+    const other = mintLookupAdapter(finalEndpoint, { finds: true }, { receiptMintsKaId: KA_ID + 1n });
+    await expect(other.chain.resolveKnowledgeAssetMint(KA_ID))
+      .resolves.toMatchObject({ status: 'rejected', reason: expect.stringContaining(TX_HASH) });
+  });
+
+  it('requires the knowledge asset and context graph storage contracts', async () => {
+    const { chain } = mintLookupAdapter(finalEndpoint, { finds: true });
+    (chain as unknown as { contracts: Record<string, unknown> }).contracts = {};
+
+    await expect(chain.resolveKnowledgeAssetMint(KA_ID)).rejects.toThrow(/requires DKGKnowledgeAssets and ContextGraphStorage/);
   });
 });
