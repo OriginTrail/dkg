@@ -190,7 +190,7 @@ export function preserveGraphKnowledgeAssetReceiptProvenanceV1(
 }
 
 const RECOVERY_CANONICAL_PREDICATES = new Set(['contentScopeVersion', 'assertionVersion', 'publicTripleCount', 'privateTripleCount',
-  'privateMerkleRoot', 'assertionGraph', 'subGraphName', 'merkleRoot', 'batchId', 'kaUal', 'status',
+  'privateMerkleRoot', 'assertionGraph', 'subGraphName', 'authenticatedSubGraphName', 'merkleRoot', 'batchId', 'kaUal', 'status',
   'transactionHash', 'materializedVersion', 'confirmationKind'].map(name => `${DKG}${name}`));
 
 /** One retention owner; callers separately establish the assertion anchor and trusted controls. */
@@ -300,6 +300,19 @@ function appendConfirmationControls(
   if (confirmation.kind === 'transaction') {
     quads.push(mq(ual, GRAPH_KNOWLEDGE_ASSET_TRANSACTION_HASH_PREDICATE, lit(confirmation.transactionHash), metaGraph));
   }
+}
+
+/** Caller has verified this exact assertion scope; stale or missing local routes are projections. */
+export function withLocallyAuthenticatedGraphKnowledgeAssetRouteV1(
+  metadata: readonly Quad[], subGraphName: string | undefined,
+): Quad[] {
+  const identity = metadata[0], routes = metadata.filter(q => q.predicate === AUTHENTICATED_SUB_GRAPH);
+  if (subGraphName === undefined && routes.length === 0) return [...metadata];
+  if (subGraphName !== undefined && identity !== undefined && routes.length === 1 && routes[0]!.subject === identity.subject
+    && routes[0]!.graph === identity.graph && routes[0]!.object === lit(subGraphName)) return [...metadata];
+  const result = metadata.filter(q => q.predicate !== AUTHENTICATED_SUB_GRAPH);
+  if (identity !== undefined) appendAuthenticatedSubGraphRoute(result, identity.subject, identity.graph, subGraphName);
+  return result;
 }
 
 /** Locally authenticated routing is independent of receipt or snapshot provenance. */

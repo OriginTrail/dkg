@@ -54,9 +54,8 @@ export async function applyMaterializedConfirmedLifecycle(store: TripleStore, in
       if ((error as { code?: string }).code === 'CONFIRMED_NAMED_ASSERTION_INTEGRITY') throw new NamedKaVmLifecycleIntegrityError('Invalid confirmed named assertion seal evidence');
       throw error;
     }
-    const recoveredBase = snapshot
-      ? reconcileConfirmedGraphKnowledgeAssetMetadata(snapshot, metadata, current === BigInt(input.assertionVersion))
-      : metadata;
+    const recoveredBase = reconcileConfirmedGraphKnowledgeAssetMetadata(
+      snapshot ?? { metadataQuads: metadata, proof }, metadata, current === BigInt(input.assertionVersion));
     const controls = await reconcileConfirmedKnowledgeAssetControls(store, { metaGraph: meta, ual: scope.ual,
       anchor: { assertionVersion: input.assertionVersion, merkleRoot: getBytes(`0x${proof.merkleRoot}`) },
       metadataQuads: snapshot?.metadataQuads ?? metadata, restoreMissing: snapshot !== undefined });

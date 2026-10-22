@@ -2,7 +2,7 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import { hexlify } from 'ethers';
 import { parseMetadataBytes32Literal,
   type ConfirmedGraphKnowledgeAssetMetadataEnvelope } from './metadata.js';
-import { reconcileSameAssertionGraphKnowledgeAssetMetadataV1 } from './graph-knowledge-asset-metadata.js';
+import { reconcileSameAssertionGraphKnowledgeAssetMetadataV1, withLocallyAuthenticatedGraphKnowledgeAssetRouteV1 } from './graph-knowledge-asset-metadata.js';
 
 const rootHex = (root: Uint8Array): string => hexlify(root).slice(2).toLowerCase();
 /** Validated execution proof contains no mutable byte arrays or RDF parsing ambiguity. */
@@ -37,9 +37,10 @@ export function reconcileConfirmedGraphKnowledgeAssetMetadata(
   snapshot: { metadataQuads: readonly Quad[]; proof: ConfirmedGraphKnowledgeAssetProof },
   metadata: readonly Quad[], sameVersion: boolean,
 ): Quad[] {
+  const canonical = withLocallyAuthenticatedGraphKnowledgeAssetRouteV1(snapshot.metadataQuads, snapshot.proof.subGraphName);
   const roots = metadata.filter(q => q.predicate === 'http://dkg.io/ontology/merkleRoot');
   const storedRoot = roots.length === 1 ? parseMetadataBytes32Literal(roots[0]!.object) : undefined;
-  if (!sameVersion || !storedRoot || rootHex(storedRoot) !== snapshot.proof.merkleRoot) return [...snapshot.metadataQuads];
+  if (!sameVersion || !storedRoot || rootHex(storedRoot) !== snapshot.proof.merkleRoot) return canonical;
   return reconcileSameAssertionGraphKnowledgeAssetMetadataV1({ lane: 'lifecycle-recovery',
-    incomingMetadata: snapshot.metadataQuads, currentMetadata: metadata });
+    incomingMetadata: canonical, currentMetadata: metadata });
 }

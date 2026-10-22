@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { assertionLifecycleUri, contextGraphMetaUri, TypedEventBus, encodeAccessRequest, decodeAccessResponse } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { AccessHandler, generateAssertionCreatedMetadata, readConfirmedGraphKnowledgeAssetMetadataEnvelope, readLocallyTrustedKnowledgeAssetControlEnvelope, replaceLocallyTrustedKnowledgeAssetControlEnvelope, overlayLocallyTrustedKnowledgeAssetControls } from '@origintrail-official/dkg-publisher';
 import { resolveConfirmedGraphScopedVm } from '../src/confirmed-graph-scoped-vm-resolver.js';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
@@ -21,11 +22,11 @@ import { confirmedMaterializationFixture } from './_helpers/confirmed-materializ
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
-async function fixture(privateContent = false, version = '1') {
+async function fixture(privateContent = false, version = '1', subGraphName?: string) {
   const dir = await mkdtemp(join(tmpdir(), 'dkg-confirmed-payload-'));
   cleanups.push(() => rm(dir, { recursive: true, force: true }));
   const path = join(dir, 'store.nq'), store = new OxigraphStore(path); cleanups.push(() => store.close());
-  const source = confirmedMaterializationFixture(privateContent, undefined, version);
+  const source = confirmedMaterializationFixture(privateContent, subGraphName, version);
   let now = 1_000;
   const owner = new NamedKaVmLifecycleRepair({ dataDir: dir, now: () => now, warn: () => {},
     ...confirmedLifecycleExecutionCapabilities({ store, chain: source.chain, dataDir: dir, writeLocks: new Map(), readTimeoutMs: 1000 }) });
@@ -275,6 +276,40 @@ it.each(['publicTripleCount', 'privateTripleCount', 'privateMerkleRoot', 'batchI
     expect(await resolve(reopened)).toMatchObject({ status: 'verified', envelope: { publicTripleCount: 1, privateTripleCount: 2, batchId: input.packedKaId } });
     expect(await reopened.query(`ASK { GRAPH <${meta}> { <${input.materialization!.kaUal}> <${dkg}transactionHash> "${field === 'transactionHash' ? '0x' + '34'.repeat(32) : receipt}"; <urn:receipt-note> "preserve" } }`)).toMatchObject({ value: true });
   });
+it.each([[undefined, true], ['code', true], ['code', false]] as const)('repairs authenticated routing for scope %s with snapshot=%s through durable retry without registration', async (subGraphName, snapshot) => {
+  const { owner, input: source, store, path, graph, journal, chain, publicQuads } = await fixture(false, '1', subGraphName);
+  const { materialization: _snapshot, ...legacy } = source, input = snapshot ? source : legacy;
+  const dkg = 'http://dkg.io/ontology/', meta = contextGraphMetaUri(input.contextGraphId), receipt = '0x' + 'ef'.repeat(32);
+  await store.insert([...source.materialization!.metadataQuads.filter(q => q.predicate !== dkg + 'authenticatedSubGraphName')
+    .map(q => q.predicate === dkg + 'transactionHash' ? { ...q, object: JSON.stringify(receipt) } : q),
+    { subject: input.publishedUal, predicate: dkg + 'authenticatedSubGraphName', object: '"old-scope"', graph: meta },
+    { subject: input.publishedUal, predicate: 'urn:receipt-note', object: '"preserve"', graph: meta },
+    ...publicQuads.map(q => ({ ...q, graph }))]);
+  const query = 'SELECT ?value WHERE { GRAPH ?g { <urn:payload> <urn:value> ?value } }';
+  const visible = (target: OxigraphStore, view: 'verifiable-memory' | 'partitions') => new DKGQueryEngine(target).query(query,
+    { contextGraphId: input.contextGraphId, ...(view === 'partitions' ? { includeContextGraphPartitions: true } : { view }) });
+  expect(await store.query(`ASK { GRAPH <${meta}> { ?registration a <${dkg}SubGraph> } }`)).toMatchObject({ value: false });
+  if (subGraphName) expect(await visible(store, 'verifiable-memory')).toMatchObject({ bindings: [] });
+  await replaceLocallyTrustedKnowledgeAssetControlEnvelope(store, input.publishedUal,
+    { assertionVersion: input.assertionVersion, merkleRoot: getBytes(input.merkleRoot) },
+    { publisherPeerId: 'test-publisher', accessPolicy: 'allowList', allowedPeers: ['test-reader'] });
+  const capture = store.commitment!.capture.bind(store.commitment);
+  vi.spyOn(store.commitment!, 'capture').mockImplementationOnce(() => async () => { throw new Error('routing write not yet durable'); }).mockImplementation(capture);
+  expect(await owner.submit(input)).toBe('pending'); expect(await journal()).toHaveLength(1);
+  await owner.stop(); await store.close();
+  const retryStore = new OxigraphStore(path); cleanups.push(() => retryStore.close());
+  const retry = new NamedKaVmLifecycleRepair({ dataDir: dirname(path), now: () => 10_000, warn: () => {},
+    ...confirmedLifecycleExecutionCapabilities({ store: retryStore, chain, dataDir: dirname(path), writeLocks: new Map(), readTimeoutMs: 1000 }) });
+  cleanups.push(() => retry.stop()); await retry.runDue(); expect(await journal()).toHaveLength(0);
+  const reopened = new OxigraphStore(path); cleanups.push(() => reopened.close());
+  expect(await reopened.query(`SELECT ?scope WHERE { GRAPH <${meta}> { <${input.publishedUal}> <${dkg}authenticatedSubGraphName> ?scope } }`))
+    .toMatchObject({ bindings: subGraphName ? [{ scope: JSON.stringify(subGraphName) }] : [] });
+  for (const view of ['verifiable-memory', 'partitions'] as const) {
+    expect(await visible(reopened, view)).toMatchObject({ bindings: [{ value: '"original public payload"' }] });
+  }
+  expect(await reopened.query(`ASK { GRAPH <${meta}> { ?registration a <${dkg}SubGraph> } }`)).toMatchObject({ value: false });
+  expect(await reopened.query(`ASK { GRAPH <${meta}> { <${input.publishedUal}> <${dkg}transactionHash> "${receipt}"; <urn:receipt-note> "preserve" } }`)).toMatchObject({ value: true });
+});
 it('validates admission once and executes the same frozen proof through retries and journal round-trips', async () => {
   const { owner, input, store, advance } = await fixture(true);
   const apply = vi.spyOn(materialization, 'applyMaterializedConfirmedLifecycle');
