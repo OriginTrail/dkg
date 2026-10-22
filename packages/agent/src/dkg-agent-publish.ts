@@ -490,6 +490,7 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { adoptOnlyInlineHooks, resolvePublishTargetCuration } from './publish-target-curation.js';
 import { KA_MINT_RECONCILE_REFUSED_CODE } from './knowledge-asset-mint-reconcile.js';
+import { sealChainTargetMismatch } from './seal-chain-target.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
@@ -5837,26 +5838,8 @@ export class PublishMethods extends DKGAgentBase {
     //    points at. This is the cross-deployment safety the EIP-712
     //    domain is buying us; surface as an early 4xx-equivalent
     //    rather than a tx revert.
-    if (
-      typeof this.chain.getEvmChainId === 'function' &&
-      typeof this.chain.getKnowledgeAssetsLifecycleAddress === 'function'
-    ) {
-      const liveChainId = await this.chain.getEvmChainId();
-      const liveKav10 = await this.chain.getKnowledgeAssetsLifecycleAddress();
-      if (liveChainId !== seal.chainId) {
-        throw new Error(
-          `publishFromFinalizedAssertion: seal binds chainId=${seal.chainId.toString()} but daemon ` +
-            `is configured for chainId=${liveChainId.toString()}. The author signature is not valid ` +
-            `against this chain. Re-finalize the assertion against the target chain.`,
-        );
-      }
-      if (liveKav10.toLowerCase() !== seal.kav10Address.toLowerCase()) {
-        throw new Error(
-          `publishFromFinalizedAssertion: seal binds KAv10=${seal.kav10Address} but daemon ` +
-            `is configured for KAv10=${liveKav10}. The signature is not valid against this deployment.`,
-        );
-      }
-    }
+    const chainTargetMismatch = await sealChainTargetMismatch(this.chain, seal);
+    if (chainTargetMismatch) throw new Error(`publishFromFinalizedAssertion: ${chainTargetMismatch}`);
 
     // #1116 (round 9, reviewer 🔴 #1/#2) — MARKER GATE. A valid seal is no longer
     // SUFFICIENT to publish: it must be backed by a LIVE complete full share

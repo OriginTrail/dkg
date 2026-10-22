@@ -24,6 +24,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGAgent, KA_MINT_RECONCILE_INCOMPLETE_CODE, KA_MINT_RECONCILE_REFUSED_CODE } from '../src/index.js';
+import { sealChainTargetMismatch } from '../src/seal-chain-target.js';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 
 const wallet = new ethers.Wallet(`0x${'35'.repeat(32)}`);
@@ -73,7 +74,7 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
    * A finalized, fully shared asset whose own mint already landed on chain
    * unobserved. `publisherAddress` gives the node a wallet to publish with.
    */
-  async function strandedAsset(chain: MockChainAdapter, publisherAddress?: string) {
+  async function strandedAsset(chain: MockChainAdapter, publisherAddress?: string, subGraphName?: string) {
     const store = new OxigraphStore();
     agent = await DKGAgent.create({
       name: 'LateMintNode', listenPort: 0, listenHost: '127.0.0.1', store,
@@ -95,10 +96,14 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     const signed = ethers.Signature.from(await wallet.signTypedData(typedData.domain, typedData.types, typedData.message));
     const signature = { r: ethers.getBytes(signed.r), vs: ethers.getBytes(signed.yParityAndS) };
     const preSignedAuthorAttestation = { address: AUTHOR, reservedKaId: RESERVED_KA_ID, signature };
-    await agent.assertion.create(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR, reservedKaId: RESERVED_KA_ID });
-    await agent.assertion.write(CONTEXT_GRAPH, NAME, QUADS, { agentAddress: AUTHOR });
-    const sealed = await agent.assertion.finalize(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR, preSignedAuthorAttestation });
-    await agent.assertion.promote(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR, preSignedAuthorAttestation, entities: 'all' });
+    if (subGraphName) {
+      await agent.createContextGraph({ id: CONTEXT_GRAPH, name: CONTEXT_GRAPH });
+      await agent.createSubGraph(CONTEXT_GRAPH, subGraphName);
+    }
+    await agent.assertion.create(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR, reservedKaId: RESERVED_KA_ID, subGraphName });
+    await agent.assertion.write(CONTEXT_GRAPH, NAME, QUADS, { agentAddress: AUTHOR, subGraphName });
+    const sealed = await agent.assertion.finalize(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR, preSignedAuthorAttestation, subGraphName });
+    await agent.assertion.promote(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR, preSignedAuthorAttestation, entities: 'all', subGraphName });
 
     // The first publish attempt's transaction, which mined after the node gave up on its receipt.
     const lostMint = await chain.createKnowledgeAssets({
@@ -115,7 +120,7 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
       author: { address: AUTHOR, signature, schemeVersion: 1 },
       ackSignatures: [{ identityId: 1n, r: ZERO, vs: ZERO }],
     });
-    const history = () => agent!.assertion.history(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR });
+    const history = () => agent!.assertion.history(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR, subGraphName });
     expect(await history()).toMatchObject({ status: 'swm-shared', reservedUal: sealed.kaUal });
     const createKnowledgeAssets = vi.spyOn(chain, 'createKnowledgeAssets');
     const updateKnowledgeCollection = vi.spyOn(chain, 'updateKnowledgeCollectionV10');
@@ -221,6 +226,21 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
       .resolves.toEqual({ status: 'already-published', ual: sealed.kaUal });
   });
 
+  it('records and resumes a late mint in a sub-graph, as the operator commands address it', async () => {
+    const { agent, store, sealed, lostMint, history, createKnowledgeAssets } =
+      await strandedAsset(new MockChainAdapter(), undefined, 'lots');
+    const reconcile = { ...RECONCILE, subGraphName: 'lots' };
+    failNextLifecycleWrite(agent, store, VM_CURRENT_ASSERTION_PRED);
+
+    await expect(agent.reconcileKnowledgeAssetMint(reconcile)).rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+    await expect(agent.reconcileKnowledgeAssetMint(reconcile))
+      .resolves.toMatchObject({ status: 'adopted', ual: sealed.kaUal, txHash: lostMint.txHash });
+
+    expect(createKnowledgeAssets).not.toHaveBeenCalled();
+    expect(await history()).toMatchObject({ status: 'vm-confirmed', publishedUal: sealed.kaUal });
+    await expect(agent.reconcileKnowledgeAssetMint(reconcile)).resolves.toEqual({ status: 'already-published', ual: sealed.kaUal });
+  });
+
   it('refuses to complete a lifecycle when the share is gone and no verified record exists', async () => {
     const { agent, history, createKnowledgeAssets } = await strandedAsset(new MockChainAdapter());
     await agent.publisher.clearSwmShareComplete(CONTEXT_GRAPH, NAME, AUTHOR);
@@ -269,14 +289,46 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect(updateKnowledgeCollection).not.toHaveBeenCalled();
   });
 
-  it('refuses when the lifecycle already records another VM version', async () => {
-    const { agent, createKnowledgeAssets } = await strandedAsset(new MockChainAdapter());
+  it.each([
+    ['without a published UAL', false],
+    ['even with the asset\'s UAL as published', true],
+  ])('refuses when the lifecycle already records another VM version, %s', async (_case, withPublishedUal) => {
+    const { agent, store, sealed, history, createKnowledgeAssets } = await strandedAsset(new MockChainAdapter());
     await agent._stampPointer(LIFECYCLE, VM_CURRENT_ASSERTION_PRED, 'ff'.repeat(32), META_GRAPH);
+    if (withPublishedUal) {
+      await store.insert([{ subject: LIFECYCLE, predicate: PUBLISHED_UAL_PRED, object: `"${sealed.kaUal}"`, graph: META_GRAPH }]);
+    }
+    const before = await history();
 
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
       .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/already records VM version/) });
     expect(createKnowledgeAssets).not.toHaveBeenCalled();
+    expect(await history()).toEqual(before);
   });
+
+  it.each([
+    ['its seal', async (chain: MockChainAdapter) => {
+      vi.spyOn(chain, 'getEvmChainId').mockResolvedValue((await chain.getEvmChainId()) + 1n);
+    }, /seal binds chainId=/],
+    ['its UAL', async (chain: MockChainAdapter) => {
+      (chain as { chainId: string }).chainId = 'mock:1';
+    }, /belongs to chain mock:31337/],
+  ] as const)('refuses a consumed-share record when %s names another chain than the node, before reading chain evidence',
+    async (_case, repointNode, refusal) => {
+      const chain = new MockChainAdapter();
+      const { agent, store, history } = await strandedAsset(chain);
+      failNextLifecycleWrite(agent, store, VM_CURRENT_ASSERTION_PRED);
+      await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+      const before = await history();
+      // The same author, KA number, content and graph number can exist on the other chain.
+      await repointNode(chain);
+      const lookup = vi.spyOn(chain, 'resolveKnowledgeAssetMint');
+
+      await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
+        .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(refusal) });
+      expect(lookup).not.toHaveBeenCalled();
+      expect(await history()).toEqual(before);
+    });
 
   it('fails retryably when the record-only publish does not confirm', async () => {
     const { agent } = await strandedAsset(new MockChainAdapter());
@@ -308,5 +360,26 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
       .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/names transaction/) });
     expect((await history())?.vmCurrentAssertion).toBeUndefined();
+  });
+});
+
+describe('sealChainTargetMismatch', () => {
+  const kav10Address = `0x${'12'.repeat(20)}`;
+  const seal = { chainId: 31337n, kav10Address };
+  const chainAt = (chainId: bigint, kav10: string) => ({
+    getEvmChainId: async () => chainId,
+    getKnowledgeAssetsLifecycleAddress: async () => kav10,
+  }) as unknown as MockChainAdapter;
+
+  it('accepts a seal for this chain and deployment, and an adapter without an EVM identity', async () => {
+    await expect(sealChainTargetMismatch(chainAt(31337n, kav10Address.toUpperCase().replace('0X', '0x')), seal)).resolves.toBeUndefined();
+    await expect(sealChainTargetMismatch({} as MockChainAdapter, seal)).resolves.toBeUndefined();
+  });
+
+  it('names the chain or deployment the seal binds instead', async () => {
+    await expect(sealChainTargetMismatch(chainAt(100n, kav10Address), seal))
+      .resolves.toMatch(/^seal binds chainId=31337 but daemon is configured for chainId=100\./);
+    await expect(sealChainTargetMismatch(chainAt(31337n, `0x${'34'.repeat(20)}`), seal))
+      .resolves.toMatch(/^seal binds KAv10=0x1212.* but daemon is configured for KAv10=0x3434/);
   });
 });

@@ -14,6 +14,7 @@ import { adoptExistingMint, assertionLifecycleWriteLockKey, withKeyedLocks } fro
 import type { AssertionHistoryDescriptor, DKGAgent } from './dkg-agent.js';
 import { resolveConfirmedGraphScopedVm } from './confirmed-graph-scoped-vm-resolver.js';
 import type { PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
+import { sealChainTargetMismatch } from './seal-chain-target.js';
 
 /** The mint was recorded but the lifecycle did not complete; retrying resumes it. */
 export const KA_MINT_RECONCILE_INCOMPLETE_CODE = 'KA_MINT_RECONCILE_INCOMPLETE';
@@ -66,9 +67,10 @@ const bareRoot = (root: string) => root.toLowerCase().replace(/^0x/, '');
 
 const refused = (message: string) => Object.assign(new Error(message), { code: KA_MINT_RECONCILE_REFUSED_CODE });
 
-/** Recorded means the lifecycle names a VM version and the asset's own UAL as published, not a derived status. */
-function isRecorded(lifecycle: AssertionHistoryDescriptor | null | undefined, ual: string): boolean {
-  return lifecycle?.vmCurrentAssertion !== undefined && lifecycle.publishedUal === ual;
+/** Recorded means the lifecycle names the sealed root as its VM version and the asset's UAL as published, not a derived status. */
+function isRecorded(lifecycle: AssertionHistoryDescriptor | null | undefined, sealRoot: string, ual: string): boolean {
+  return lifecycle?.vmCurrentAssertion !== undefined && bareRoot(lifecycle.vmCurrentAssertion) === sealRoot
+    && lifecycle.publishedUal === ual;
 }
 
 /**
@@ -76,8 +78,9 @@ function isRecorded(lifecycle: AssertionHistoryDescriptor | null | undefined, ua
  * stopped waiting for it, so it stays `swm-shared` and every `vm/publish`
  * retry reverts `KaIdAlreadyMinted`.
  *
- * The seal's reserved id is looked up on chain and its mint verified against
- * the seal, including that no update has superseded it. No transaction, ACK
+ * The seal and its UAL must name the chain and deployment this node points
+ * at. The seal's reserved id is looked up on that chain and its mint verified
+ * against the seal, including that no update has superseded it. No transaction, ACK
  * request or member ciphertext is sent. While the share is still resident,
  * the synchronous publish path records the mint in adopt-only mode and
  * consumes the share. Once the share is gone, an earlier attempt already
@@ -96,11 +99,17 @@ export async function reconcileLateMint(
   const target: Target = { contextGraphId, name, subGraphName, agentAddress, txHash: input.txHash };
   const reservation = await readSealedReservation(agent, target);
   const { ual } = reservation.scope;
+  // Chain evidence only means something for the chain the reservation names.
+  if (reservation.scope.chainId !== host.chain.chainId) {
+    throw refused(`The UAL ${ual} of "${name}" belongs to chain ${reservation.scope.chainId}, not ${host.chain.chainId}.`);
+  }
+  const chainTargetMismatch = await sealChainTargetMismatch(host.chain, reservation.seal);
+  if (chainTargetMismatch) throw refused(`Cannot record "${name}": ${chainTargetMismatch}`);
   const sealRoot = bareRoot(ethers.hexlify(reservation.seal.merkleRoot));
   const lifecycle = () => agent.assertion.history(contextGraphId, name, { agentAddress, subGraphName });
 
   const before = await lifecycle();
-  if (isRecorded(before, ual)) return { status: 'already-published', ual };
+  if (isRecorded(before, sealRoot, ual)) return { status: 'already-published', ual };
   const vmPointer = before?.vmCurrentAssertion === undefined ? undefined : bareRoot(before.vmCurrentAssertion);
   if (vmPointer !== undefined && vmPointer !== sealRoot) {
     throw refused(`The lifecycle of "${name}" already records VM version ${vmPointer}, not the sealed ${sealRoot}.`);
@@ -112,7 +121,7 @@ export async function reconcileLateMint(
     : await completeRecordedLifecycle(agent, host, reservation, target);
 
   const after = await lifecycle();
-  if (!isRecorded(after, ual) || bareRoot(after!.vmCurrentAssertion!) !== sealRoot) {
+  if (!isRecorded(after, sealRoot, ual)) {
     throw Object.assign(new Error(
       `The mint of "${name}" was verified but its lifecycle is not complete ` +
         `(VM version ${after?.vmCurrentAssertion ?? 'none'}, publishedUal ${after?.publishedUal ?? 'none'}, ` +

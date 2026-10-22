@@ -234,7 +234,7 @@ async function strandedPublishFixture() {
 
   return {
     chain, store, publisher, publish, strand, mintForeign, reconcileMaterialized, kaId, ual, swmGraph, vmGraph, acks, encrypt,
-    graphSize, recordedTxHashes, metadataValueCounts,
+    graphSize, recordedTxHashes, metadataValueCounts, sealedRoot: seal.expectedMerkleRoot,
   };
 }
 
@@ -376,20 +376,26 @@ describe('a sealed publish whose transaction mined after the node stopped waitin
     expect(await fixture.graphSize(fixture.swmGraph)).toBe(1);
   });
 
-  it('refuses a late mint that a later update superseded, on retry and reconcile alike', async () => {
+  it.each([
+    ['to other content', ['updated content']],
+    // The latest root equals the seal again, so only the version count shows the mint is not current.
+    ['to other content and back (A → B → A)', ['updated content', 'sealed']],
+  ] as const)('refuses a late mint that later updates superseded %s, on retry and reconcile alike', async (_case, history) => {
     const fixture = await strandedPublishFixture();
     await fixture.strand();
-    // While this node was away, the author updated the asset to other content through another node.
-    const update = await fixture.chain.updateKnowledgeCollectionV10({
-      kaId: fixture.kaId,
-      newMerkleRoot: ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('updated content'))),
-      newByteSize: 1n,
-      newMerkleLeafCount: 1,
-      authorAddress: ethers.ZeroAddress,
-      authorR: new Uint8Array(32),
-      authorVS: new Uint8Array(32),
-    });
-    expect(update.success).toBe(true);
+    // While this node was away, the author updated the asset through another node.
+    for (const content of history) {
+      const update = await fixture.chain.updateKnowledgeCollectionV10({
+        kaId: fixture.kaId,
+        newMerkleRoot: content === 'sealed' ? fixture.sealedRoot : ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes(content))),
+        newByteSize: 1n,
+        newMerkleLeafCount: 1,
+        authorAddress: ethers.ZeroAddress,
+        authorR: new Uint8Array(32),
+        authorVS: new Uint8Array(32),
+      });
+      expect(update.success).toBe(true);
+    }
 
     for (const adoptExistingMint of [undefined, {}]) {
       await expect(fixture.publish(adoptExistingMint)).rejects.toMatchObject({ reason: 'superseded', retryable: false });
