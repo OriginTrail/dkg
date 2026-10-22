@@ -44,6 +44,19 @@ export type KnowledgeAssetMintResolution =
   /** The recovered transaction does not prove this mint. */
   | { status: 'rejected'; reason: string };
 
+/** The optional mint lookup of a `ChainAdapter`. */
+export interface KnowledgeAssetMintLookup {
+  /**
+   * Find and verify the transaction that minted `kaId`, for a publish whose
+   * transaction mined after the node stopped waiting. All facts of a
+   * `confirmed` answer come from one receipt at the configured finality depth.
+   */
+  resolveKnowledgeAssetMint?(
+    kaId: bigint,
+    options?: KnowledgeAssetMintLookupOptions,
+  ): Promise<KnowledgeAssetMintResolution>;
+}
+
 type MintReceiptFacts = Pick<
   KnowledgeAssetMintEvidence,
   'kaId' | 'merkleRoot' | 'contextGraphId' | 'authorAddress' | 'tokenAmount' | 'knowledgeAssetsContract'
