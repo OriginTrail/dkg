@@ -1,9 +1,9 @@
 import { DurableDirectoryPreparation } from './durable-content-addressed-file.js';
-import { persistFileAndParent } from './file-durability.js';
+import { persistDirectoryRange } from './file-durability.js';
 import type { TripleStoreCommitCapability } from './persistence.js';
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import { createHash } from 'node:crypto';
-import { readFile, writeFile } from 'node:fs/promises';
+import { open, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { LiteralHydrationBudget, readLiteralBlobBounded } from './bounded-literal-hydration.js';
 import type {
@@ -215,6 +215,16 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
         'SharedMemoryLiteralBlobStore',
       );
     }
+    const mappedInput = await this.prepareImmutableAuthorCommit(input);
+    return this.inner.rfc64AuthorCommitCasV1(mappedInput, options);
+  }
+
+  /** Internal preparation capability: no RDF mutation or changelog sequence. */
+  prepareImmutableQuads(quads: readonly Quad[]): Promise<Quad[]> {
+    return this.externalizeQuads(quads);
+  }
+
+  async prepareImmutableAuthorCommit(input: Rfc64AuthorCommitCasInputV1): Promise<Rfc64AuthorCommitCasInputV1> {
     // Normalize first so an incomplete closed manifest cannot create blobs.
     // The manifest is also the sole source for decorator traversal: adding a
     // semantic role to the protocol plan cannot silently bypass blob mapping.
@@ -225,10 +235,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
         ? this.translateGuardObject(context.graphUri, object)
         : this.externalizeScalarObject(context.graphUri, object!),
     });
-    return this.inner.rfc64AuthorCommitCasV1(
-      sourceFromNormalizedRfc64AuthorCommitCasV1(mappedInput),
-      options,
-    );
+    return sourceFromNormalizedRfc64AuthorCommitCasV1(mappedInput);
   }
 
   async atomicUpdate(sparql: string, options?: UpdateOptions): Promise<void> {
@@ -418,14 +425,21 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     await this.blobDirectory.prepare();
     const path = this.blobPath(hash);
 
+    let file;
     try {
-      await writeFile(path, term, { encoding: 'utf8', flag: 'wx' });
+      file = await open(path, 'wx');
     } catch (err) {
       if (!isNodeError(err, 'EEXIST')) throw err;
+      await this.readBlob(hash);
+      file = await open(path, 'r+');
     }
-
-    await this.readBlob(hash);
-    await persistFileAndParent(path);
+    try {
+      // Re-submit even matching existing bytes after a failed/unknown preparation.
+      // Sync the writer itself: a newly opened descriptor can miss its old EIO.
+      await file.writeFile(term, 'utf8');
+      await file.sync();
+    } finally { await file.close(); }
+    await persistDirectoryRange(this.blobDir, this.blobDir);
   }
 
   private async readBlob(hash: string, constraints?: { maxBytes?: number; signal?: AbortSignal }): Promise<string> {

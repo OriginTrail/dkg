@@ -15,6 +15,15 @@ async function persistentStore() {
 }
 
 describe('storage persistence boundary', () => {
+  it.each([undefined, true, false])('does not certify stock managed HTTP from acknowledgement flag %s', async writesDurableOnAcknowledgement => {
+    const config = createManagedOxigraphRuntimeStoreConfigV1({ backend: 'sparql-http', options: {
+      queryEndpoint: 'http://127.0.0.1:7878/query', managedByDkg: true, writesDurableOnAcknowledgement,
+    } });
+    const store = await createTripleStore(config);
+    try { expect(store.commitment).toBeUndefined(); await store.flush?.(); expect(store.commitment).toBeUndefined(); }
+    finally { await store.close(); }
+  });
+
   it('runs a real composed store barrier on the outer store with the caller options', async () => {
     const backend = await persistentStore(), store = new ChangelogStore(new GraphSetIndexStore(backend));
     const innerFlush = vi.spyOn(backend, 'flush'), capture = vi.spyOn(store.commitment!, 'capture');
@@ -36,20 +45,24 @@ describe('storage persistence boundary', () => {
     const untrustedOptions = { queryEndpoint: 'http://localhost/query',
       managedByDkg: true, managedOxigraph: true, managedPersistence: flush, persistence: flush };
     const endpoint = new SparqlHttpStore(untrustedOptions);
-    expect(endpoint.flush).toBeUndefined(); expect(endpoint.commitment).toBeUndefined();
+    expect(endpoint).not.toHaveProperty('flush'); expect(endpoint.commitment).toBeUndefined();
     expect(flush).not.toHaveBeenCalled(); await endpoint.close();
   });
-  it('accepts the runtime-owned barrier and loses that authority when the runtime brand is omitted', async () => {
-    const flush = vi.fn(async () => {}), options = { source: 'owned-persistence' };
+  it('ignores a legacy runtime persistence callback without a supported engine provider', async () => {
+    const persistence = vi.fn(async () => {});
+    let generation = 0;
+    const legacyHooks = { persistence, getRecoveryState: () => ({ recovering: false, generation }) };
     const config = createManagedOxigraphRuntimeStoreConfigV1({ backend: 'sparql-http', options: {
-      queryEndpoint: 'http://127.0.0.1/query', managedByDkg: true,
-    } }, { persistence: flush });
-    const store = await createTripleStore(config), untrusted = await createTripleStore({ ...config });
+      queryEndpoint: 'http://127.0.0.1/query', managedByDkg: true, writesDurableOnAcknowledgement: true,
+    } }, legacyHooks);
+    const store = await createTripleStore(config);
     try {
-      expect(untrusted.commitment).toBeUndefined();
-      await store.commitment!.capture()(options);
-      expect(flush).toHaveBeenCalledExactlyOnceWith({ ...options, signal: expect.any(AbortSignal) });
-    } finally { await store.close(); await untrusted.close(); }
+      expect(store.commitment).toBeUndefined();
+      generation += 1;
+      await store.flush?.();
+      expect(store.commitment).toBeUndefined();
+      expect(persistence).not.toHaveBeenCalled();
+    } finally { await store.close(); }
   });
   it('accepts a separately certified acknowledgement through decorators', async () => {
     const endpoint = new SparqlHttpStore({ queryEndpoint: 'http://durable.test/query', writesDurableOnAcknowledgement: true });

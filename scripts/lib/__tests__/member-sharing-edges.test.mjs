@@ -3,30 +3,41 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { openDevnet } from '../member-sharing/devnet.mjs';
 import { TemporaryEdges } from '../member-sharing/temporary-edges.mjs';
 
 const MARK = '.issue-3251-member-sharing';
 
 /**
- * A devnet folder whose devnet.sh is a fake: addnode refuses a folder that
- * exists, as the real one does, and otherwise creates it; `duringAddnode` runs
- * at the start of each addnode, as another suite might. Every call is kept.
+ * A devnet folder whose devnet.sh is a fake that does what addnode does: it
+ * refuses a folder that exists, creates the folder with one mkdir, writes the
+ * caller's mark into it first, and then starts the node. `duringAddnode` runs
+ * at the start of each addnode, as another suite might; `readiness(number)`
+ * says how the start ends: 'ready', 'failed', or 'hang' (until it is
+ * cancelled). Every call is kept.
  */
-function fakeDevnet(t, { duringAddnode = () => {} } = {}) {
+function fakeDevnet(t, { duringAddnode = () => {}, readiness = () => 'ready' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-edges-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const calls = [];
   const nodeDir = node => join(dir, `node${typeof node === 'object' ? node.number : node}`);
   return {
     dir, calls, nodeDir,
-    async devnetSh(args) {
+    async devnetSh(args, env = {}, timeoutMs, { signal } = {}) {
       calls.push(args.join(' '));
       if (args[0] !== 'addnode') return { status: 0, output: '' };
       const number = Number(args[1]);
       duringAddnode(number);
-      if (existsSync(nodeDir(number))) return { status: 1, output: `[devnet] node${number} already exists` };
-      mkdirSync(nodeDir(number));
+      try { mkdirSync(nodeDir(number)); } catch { return { status: 1, output: `[devnet] node${number} already exists` }; }
+      if (env.DEVNET_ADDNODE_MARK_NAME) writeFileSync(join(nodeDir(number), env.DEVNET_ADDNODE_MARK_NAME), `${env.DEVNET_ADDNODE_MARK_TEXT}\n`);
       writeFileSync(join(nodeDir(number), 'config.json'), '{"ours":true}');
+      const end = readiness(number);
+      if (end === 'failed') return { status: 1, output: `[devnet] node${number} did not become ready` };
+      if (end === 'hang') {
+        return new Promise(resolve => {
+          signal?.addEventListener('abort', () => { calls.push(`cancelled addnode ${number}`); resolve({ status: null, output: 'killed' }); }, { once: true });
+        });
+      }
       return { status: 0, output: '' };
     },
     devnetShSync(args) { calls.push(args.join(' ')); return { status: 0, output: '' }; },
@@ -75,4 +86,75 @@ test('a node another suite created while addnode ran is left untouched: a refuse
   assert.ok(!devnet.calls.some(call => call === 'stop-node 9'), devnet.calls.join(', '));
   // The nodes this run added were marked as its own only once their addnode succeeded.
   assert.ok(!existsSync(devnet.nodeDir(7)) && !existsSync(devnet.nodeDir(8)));
+});
+
+test('a start interrupted while the node comes up is cancelled, and the cleanup removes that node and no other', async t => {
+  const devnet = fakeDevnet(t, { readiness: number => (number === 9 ? 'hang' : 'ready') });
+  const edges = new TemporaryEdges(devnet, { stamp: 'S', log: { say() {}, note() {} } });
+  edges.allocate({ relay1: 'r1', relay2: 'r2' });
+  await edges.start(edges.owner);
+  await edges.start(edges.member1);
+  // Another suite's node beside them.
+  foreign(devnet, 10);
+  const starting = edges.start(edges.member2);
+  for (let i = 0; i < 100 && !existsSync(join(devnet.nodeDir(9), MARK)); i++) await new Promise(resolve => { setTimeout(resolve, 10); });
+  // Before the daemon was up, addnode had marked the folder as this run's, in its starting state.
+  assert.equal(readFileSync(join(devnet.nodeDir(9), MARK), 'utf8'), 'S member2 starting\n');
+  // The signal handler's cleanup, while node 9 is still coming up.
+  edges.cleanup({ keep: false, failed: false });
+  assert.ok(devnet.calls.includes('cancelled addnode 9'), devnet.calls.join(', '));
+  assert.ok(devnet.calls.includes('stop-node 9'), devnet.calls.join(', '));
+  assert.ok(!existsSync(devnet.nodeDir(9)) && !existsSync(devnet.nodeDir(7)) && !existsSync(devnet.nodeDir(8)));
+  assert.ok(untouched(devnet, 10));
+  assert.ok(!devnet.calls.includes('stop-node 10'), devnet.calls.join(', '));
+  await assert.rejects(starting, /temporary node 9 could not be added \(it is removed at the cleanup\)/);
+});
+
+test('a node whose start failed after addnode created it is removed; a later run reclaims one a killed run left starting', async t => {
+  const devnet = fakeDevnet(t, { readiness: number => (number === 8 ? 'failed' : 'ready') });
+  const edges = new TemporaryEdges(devnet, { stamp: 'S', log: { say() {}, note() {} } });
+  edges.allocate({ relay1: 'r1', relay2: 'r2' });
+  await edges.start(edges.owner);
+  await assert.rejects(edges.start(edges.member1), /temporary node 8 could not be added \(it is removed at the cleanup\): \[devnet\] node8 did not become ready/);
+  assert.deepEqual(edges.started.map(node => node.number), [7, 8]);
+  edges.cleanup({ keep: false, failed: false });
+  assert.ok(!existsSync(devnet.nodeDir(7)) && !existsSync(devnet.nodeDir(8)));
+  // A run killed outright (no cleanup) left node 9 in its starting state, next to another suite's node 10.
+  mkdirSync(devnet.nodeDir(9));
+  writeFileSync(join(devnet.nodeDir(9), MARK), 'EARLIER member2 starting\n');
+  foreign(devnet, 10);
+  const next = new TemporaryEdges(devnet, { stamp: 'NEXT', log: { say() {}, note() {} } });
+  next.reclaimLeftovers();
+  assert.ok(!existsSync(devnet.nodeDir(9)));
+  assert.ok(untouched(devnet, 10));
+});
+
+test('cancelling the real devnet.sh call stops the script while the node comes up: its later steps never run', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'dkg-devnet-sh-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dir = join(root, '.devnet');
+  mkdirSync(join(root, 'scripts'));
+  mkdirSync(join(dir, 'node8'), { recursive: true });
+  writeFileSync(join(dir, 'node8', 'config.json'), '{"theirs":true}');
+  // A stand-in for addnode: it claims and marks the folder, waits while the node comes up, then records the start.
+  writeFileSync(join(root, 'scripts', 'devnet.sh'), [
+    'set -e',
+    'mkdir "$DEVNET_DIR/node$2"',
+    `echo "$DEVNET_ADDNODE_MARK_TEXT" > "$DEVNET_DIR/node$2/${MARK}"`,
+    'sleep 3 > /dev/null 2>&1',
+    'echo up > "$DEVNET_DIR/node$2/started"',
+  ].join('\n'));
+  const devnet = openDevnet({ repoRoot: root, dir, apiPortBase: 9201, libp2pPortBase: 10001, adminToken: 'token' });
+  const cancel = new AbortController();
+  const began = Date.now();
+  const adding = devnet.devnetSh(['addnode', '7', 'edge'], { DEVNET_ADDNODE_MARK_TEXT: 'S member2 starting' }, 30_000, { signal: cancel.signal });
+  for (let i = 0; i < 200 && !existsSync(join(dir, 'node7', MARK)); i++) await new Promise(resolve => { setTimeout(resolve, 10); });
+  assert.equal(readFileSync(join(dir, 'node7', MARK), 'utf8'), 'S member2 starting\n');
+  cancel.abort();
+  const added = await adding;
+  assert.notEqual(added.status, 0);
+  assert.ok(Date.now() - began < 2_000, `the call ended ${Date.now() - began} ms after it began: it was waited for, not stopped`);
+  await new Promise(resolve => { setTimeout(resolve, 3_500 - (Date.now() - began)); });
+  assert.equal(existsSync(join(dir, 'node7', 'started')), false, 'the step after the wait ran: the script was not stopped');
+  assert.equal(readFileSync(join(dir, 'node8', 'config.json'), 'utf8'), '{"theirs":true}');
 });

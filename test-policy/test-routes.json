@@ -1,5 +1,18 @@
 [
   {
+    "pattern": "scripts/repro/publisher-live-control-restart.test.mts",
+    "lane": "native-crash-campaign",
+    "reason": "Five serial runtime starts prove persisted publisher pause, resume, startup override and graceful shutdown fencing in the first required CLI shard",
+    "cadence": "required",
+    "command": "node --experimental-sqlite --import tsx scripts/repro/publisher-live-control-restart.test.mts",
+    "prerequisites": [
+      "Node 22 with experimental SQLite",
+      "built publisher and CLI dependency closure",
+      "disposable loopback HTTP listeners and temporary persistent Oxigraph store"
+    ],
+    "layer": "Native publisher HTTP/Oxigraph process-crash regression"
+  },
+  {
     "pattern": "packages/agent/campaigns/catalog-durable-head.test.ts",
     "lane": "native-crash-campaign",
     "reason": "Parent-owned process-death and restart matrix runs once in the required agent sidecar shard; ordinary Gate1 regression remains in the package inventory",

@@ -51,14 +51,26 @@ journal evidence retained. Transparent decorators and the agent store facade
 compose this callable explicitly. Queued decorators drain their completed mutations
 before the inner barrier; optional `flush`, acknowledgement flags on arbitrary objects,
 and decorator topology do not certify persistence. The external-literal decorator
-syncs newly created or verified blob files and their directory entries before
-acknowledging the referencing mutation; sync failures propagate and retry verifies
-the existing immutable bytes.
+syncs blob bytes through their writer handle and persists their directory entries
+before acknowledging a referencing mutation. Failed or unknown preparations
+verify and re-submit the full immutable bytes on retry; a new descriptor's sync
+alone cannot certify an earlier writer. Only successful preparations enter the
+owner's bounded cache.
 
 This contract applies to `OxigraphStore` when it is created with a persistence
 path (`oxigraph-persistent`) and to `oxigraph-worker` when that worker is given
 a persistence path. Plain `oxigraph`, and a worker without a persistence path,
 are in-memory stores and provide no restart durability.
+
+Stock managed `oxigraph-server` also exposes no restart-durable commitment:
+its HTTP API has no supported engine-owned persistence barrier. Ordinary reads,
+writes and supervised process restart remain available, but durable lifecycle
+completion retains its recovery record and stays pending. The
+`writesDurableOnAcknowledgement` flag cannot override this managed-server
+boundary. A future supported engine integration must introduce its owner-bound
+barrier with the provider; this change ships no runtime persistence hook, custom
+Oxigraph build or external WAL synchronization protocol. Persistent embedded/worker Oxigraph snapshots and
+Blazegraph's standard forced disk-journal acknowledgements remain certified.
 
 Standalone SDK agents without a data directory may use a `process-local`
 commitment. Decorators compose the same captured persistence boundary and retain
