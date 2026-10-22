@@ -33,6 +33,19 @@ async function fixture(privateContent = false, version = '1') {
   const journal = async () => JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')).entries;
   return { ...source, store, owner, journal, path, advance: () => { now += 5_000; } };
 }
+it('completes ordinary durable recovery with an aliased reservation UAL and retains its original spelling', async () => {
+  const { owner, input, store, journal, path } = await fixture();
+  const lifecycle = assertionLifecycleUri(input.contextGraphId, input.agentAddress, input.name), meta = contextGraphMetaUri(input.contextGraphId);
+  const alias = ` \u00a0${input.publishedUal.replace(/\/1$/, '/0001')} \u00a0`;
+  const row = { subject: lifecycle, graph: meta, predicate: 'http://dkg.io/ontology/reservedUal', object: JSON.stringify(alias) };
+  await store.insert([row]);
+  expect(await owner.submit(input)).toBe('repaired'); expect(await journal()).toHaveLength(0);
+  const reopened = new OxigraphStore(path); cleanups.push(() => reopened.close());
+  expect(await reopened.query(`SELECT ?ual WHERE { GRAPH <${meta}> { <${lifecycle}> <${row.predicate}> ?ual } }`))
+    .toMatchObject({ bindings: [{ ual: row.object }] });
+  expect(await readConfirmedGraphKnowledgeAssetMetadataEnvelope(reopened, { contextGraphId: input.contextGraphId, ual: input.publishedUal }))
+    .toMatchObject({ state: 'confirmed', envelope: { assertionVersion: '1' } });
+});
 it.each([false, true])('restores missing public payload and complete metadata with private commitment=%s, durable before close', async privateContent => {
   const { owner, input, store, path, graph, publicQuads, journal } = await fixture(privateContent);
   expect(await owner.submit(input)).toBe('repaired');

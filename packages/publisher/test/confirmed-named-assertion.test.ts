@@ -8,6 +8,7 @@ import { reconcileConfirmedNamedAssertion, assertConfirmedNamedAssertionSeal, co
 import { assertionRecoverySealGraph, assertionRecoverySealSubject } from '../src/assertion-seal-recovery.js';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { generateSubGraphRegistration } from '../src/metadata.js';
+import { ASSERTION_RESERVATION_PREDICATES } from '../src/assertion-reservation.js';
 
 const author = '0x1111111111111111111111111111111111111111', id = (BigInt(author) << 96n) | 1n;
 const target = { contextGraphId: 'confirmed-reconcile', agentAddress: author, name: 'asset', packedKaId: id,
@@ -28,6 +29,30 @@ const publisher = async (s: OxigraphStore) => new DKGPublisher({ store: s, chain
 const claim = (p: DKGPublisher, name: string, subGraphName?: string) => p.assertionCreate(target.contextGraphId, name, author, subGraphName,
   { expectedKaNumber: 1n, allocateKaNumber: async () => ({ number: 1n, reservedUal: target.kaUal }) });
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(stores.splice(0).map(s => s.close())); });
+it.each([undefined, 'scope'])('restores the same stable reservation normal creation writes while preserving the newer draft in scope %s', async subGraphName => {
+  const s = store(), p = await publisher(s), peer = 'peer-owner';
+  if (subGraphName) await s.insert(generateSubGraphRegistration({ contextGraphId: target.contextGraphId, subGraphName,
+    createdBy: author, timestamp: new Date() }));
+  await p.assertionCreate(target.contextGraphId, target.name, peer, subGraphName,
+    { allocateKaNumber: async () => ({ number: 1n, reservedUal: target.kaUal }) });
+  await p.assertionWrite(target.contextGraphId, target.name, peer,
+    [{ subject: 'urn:newer', predicate: 'urn:value', object: '"keep draft"' }], subGraphName);
+  const own = assertionLifecycleUri(target.contextGraphId, peer, target.name, subGraphName);
+  await s.insert([{ subject: own, graph: meta, predicate: 'http://dkg.io/ontology/assertionVersion',
+    object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }]);
+  const read = () => s.query(`SELECT ?p ?o WHERE { GRAPH <${meta}> { <${own}> ?p ?o } } ORDER BY ?p ?o`);
+  const before = await read(); expect(before.type).toBe('bindings');
+  const stable = new Set<string>(Object.values(ASSERTION_RESERVATION_PREDICATES));
+  for (const predicate of stable) await s.deleteByPattern({ graph: meta, subject: own, predicate });
+  await reconcileConfirmedNamedAssertion(s, { ...target, agentAddress: peer, subGraphName }, { ...proof,
+    assertionGraph: knowledgeAssetLayerGraphUri(target.contextGraphId, MemoryLayer.VerifiableMemory,
+      createGraphKnowledgeAssetScope(target.kaUal, '1'), subGraphName) }, seal);
+  const after = await read(); expect(after.type).toBe('bindings');
+  if (before.type !== 'bindings' || after.type !== 'bindings') throw new Error('bindings required');
+  expect(after.bindings.filter(row => stable.has(row.p!))).toEqual(before.bindings.filter(row => stable.has(row.p!)));
+  expect(after.bindings.filter(row => !stable.has(row.p!))).toEqual(before.bindings.filter(row => !stable.has(row.p!)));
+  expect((await p.assertionQuery(target.contextGraphId, target.name, peer, subGraphName)).map(q => q.object)).toEqual(['"keep draft"']);
+});
 it.each(['assertionVersion','batchId','merkleRoot','publicTripleCount','privateTripleCount','privateMerkleRoot','assertionGraph'])(
   'rejects a conflicting materialization %s', field => {
     const wrong = { ...proof, [field]: field.endsWith('Count') ? 2 : 'different' };
@@ -61,6 +86,16 @@ it('preserves a newer archive and active draft', async () => {
 it('rejects surviving reservation conflicts', async () => {
   const s = store(); await s.insert([{ subject: lifecycle, graph: meta, predicate: 'http://dkg.io/ontology/kaId', object: '"2"' }]);
   await expect(reconcileConfirmedNamedAssertion(s, target, proof, seal)).rejects.toThrow('reservation conflicts');
+});
+it.each([
+  ['http://dkg.io/ontology/reservedUal', JSON.stringify(target.kaUal.replace(/\/1$/, '/2'))],
+  ['http://dkg.io/ontology/reservedUal', JSON.stringify(target.kaUal.replace('mock:31337', 'mock:31338'))],
+  ['http://dkg.io/ontology/kaId', '"1garbage"'],
+])('refuses genuinely conflicting reservation values before writing: %s %s', async (predicate, object) => {
+  const s = store(); await s.insert([{ subject: lifecycle, graph: meta, predicate, object }]);
+  const insert = vi.spyOn(s, 'insert'), replace = vi.spyOn(s, 'replaceSubject');
+  await expect(reconcileConfirmedNamedAssertion(s, target, proof, seal)).rejects.toThrow('reservation conflicts');
+  expect(insert).not.toHaveBeenCalled(); expect(replace).not.toHaveBeenCalled();
 });
 it('requires atomic archive replacement and propagates executed failures', async () => {
   const s = store(); const update = vi.spyOn(s, 'replaceSubject').mockRejectedValueOnce(new Error('archive write failed'));
@@ -203,4 +238,19 @@ it('preserves case-sensitive peer ownership while normalizing EVM owner casing',
   await s.insert([{ subject: assertionLifecycleUri(target.contextGraphId, walletOwner, target.name), graph: meta,
     predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: `did:dkg:agent:${walletOwner.toUpperCase().replace('0X', '0x')}` }]);
   await expect(reconcileConfirmedNamedAssertion(s, { ...target, agentAddress: walletOwner }, proof, seal)).resolves.toBeUndefined();
+});
+
+it('accepts the ordinary UAL aliases during confirmed restoration without changing their stored spelling', async () => {
+  const s = store(), wallet = '0xa32f1cc125401b55911678847426759094055b2d', packed = (BigInt(wallet) << 96n) | 1n;
+  const ual = `did:dkg:mock:31337/${wallet}/1`, peer = 'alias-owner';
+  const aliased = ` \u00a0did:dkg:mock:31337/${wallet.toUpperCase().replace('0X', '0x')}/0001 \u00a0`;
+  const own = assertionLifecycleUri(target.contextGraphId, peer, target.name);
+  await s.insert([{ subject: own, graph: meta, predicate: 'http://dkg.io/ontology/kaId', object: '"1"' },
+    { subject: own, graph: meta, predicate: 'http://dkg.io/ontology/reservedUal', object: JSON.stringify(aliased) }]);
+  const rows = () => s.query(`SELECT ?ual WHERE { GRAPH <${meta}> { <${own}> <http://dkg.io/ontology/reservedUal> ?ual } }`);
+  const before = await rows();
+  await expect(reconcileConfirmedNamedAssertion(s, { ...target, agentAddress: peer, packedKaId: packed, kaUal: ual },
+    { ...proof, batchId: packed.toString(), assertionGraph: knowledgeAssetLayerGraphUri(target.contextGraphId, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(ual, '1')) },
+    { ...seal, reservedKaId: packed.toString(), kaUal: ual, authorAddress: wallet } as typeof seal)).resolves.toBeUndefined();
+  expect(await rows()).toEqual(before);
 });

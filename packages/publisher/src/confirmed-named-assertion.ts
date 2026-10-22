@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 import { buildAssertionSealQuads, parseAssertionSealQuads, canonicalGraphScopedAuthorSealFromAssertionSealV1, canonicalizeCanonicalGraphScopedAuthorSealV1,
   assertionLifecycleUri, contextGraphAssertionUri, contextGraphMetaUri, createGraphKnowledgeAssetScope,
-  MemoryLayer, knowledgeAssetLayerGraphUri, toAgentDid, normalizeAgentDid, type CanonicalGraphScopedAuthorSealV1 } from '@origintrail-official/dkg-core';
+  MemoryLayer, knowledgeAssetLayerGraphUri, type CanonicalGraphScopedAuthorSealV1 } from '@origintrail-official/dkg-core';
 import { tryReplaceSubjectAtomically, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { getBytes } from 'ethers';
 import type { ConfirmedGraphKnowledgeAssetProof } from './confirmed-metadata-reconciliation.js';
-import { decodeAssertionReservationValue } from './assertion-lifecycle-record.js';
+import { decodeAssertionLifecycleRecord, decodeAssertionReservationValue } from './assertion-lifecycle-record.js';
+import { generateAssertionReservationMetadata, sameAssertionReservationField, decodeAssertionReservationIdentity,
+  ASSERTION_RESERVATION_PREDICATES as RESERVATION } from './assertion-reservation.js';
 import { assertionRecoverySealGraph, assertionRecoverySealSubject, parseStoredAssertionSeal } from './assertion-seal-recovery.js';
 import { assertKaSlotOwnershipAvailable, assertionAllocationLockKey } from './assertion-ka-slot-ownership.js';
 import { withKeyedLocks } from './keyed-lock.js';
@@ -91,25 +93,24 @@ async function reconcileWithAllocationLock(store: TripleStore, target: Confirmed
   const scope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion), existing = await read(lifecycle, meta);
   await assertKaSlotOwnershipAvailable(store, target.contextGraphId, target.agentAddress, target.name, BigInt(scope.kaNumber), target.subGraphName, scope.agentAddress);
   const ontology = 'http://dkg.io/ontology/';
-  const required = [['kaId', scope.kaNumber], ['reservedUal', scope.ual], ['contentScopeVersion', '2'], ['assertionName', target.name]] as const;
+  const reservation = decodeAssertionReservationIdentity(decodeAssertionLifecycleRecord(existing.map(q => ({ p: q.predicate, o: q.object }))), {
+    lifecycleOwner: target.agentAddress,
+  });
+  if (reservation.kind === 'conflict') throw new Error('Confirmed named assertion reservation conflicts with surviving records');
+  const projection = generateAssertionReservationMetadata({ contextGraphId: target.contextGraphId, agentAddress: target.agentAddress,
+    assertionName: target.name, subGraphName: target.subGraphName, kaNumber: scope.kaNumber, reservedUal: scope.ual });
   const additions: Quad[] = [];
-  for (const [name, value] of required) {
-    const predicate = ontology + name, rows = existing.filter(q => q.predicate === predicate);
-    if (rows.length === 0) additions.push({ subject: lifecycle, graph: meta, predicate,
-      object: name === 'kaId' || name === 'contentScopeVersion' ? `"${value}"^^<http://www.w3.org/2001/XMLSchema#integer>` : JSON.stringify(value) });
-    else if (rows.length !== 1 || decodeAssertionReservationValue(predicate, rows[0]!.object) !== String(value)) throw new Error('Confirmed named assertion reservation conflicts with surviving records');
+  for (const predicate of Object.values(RESERVATION)) {
+    const desired = projection.find(quad => quad.predicate === predicate), rows = existing.filter(q => q.predicate === predicate);
+    if (desired && rows.length === 0) additions.push(desired);
+    else if (rows.some(row => desired === undefined || !sameAssertionReservationField(desired, row.object))) {
+      throw new Error('Confirmed named assertion reservation conflicts with surviving records');
+    }
   }
-  const ownerPredicate = 'http://www.w3.org/ns/prov#wasAttributedTo', owner = toAgentDid(target.agentAddress);
-  const owners = existing.filter(q => q.predicate === ownerPredicate);
-  if (!owners.length) additions.push({ subject: lifecycle, graph: meta, predicate: ownerPredicate, object: owner });
-  else if (owners.length !== 1 || normalizeAgentDid(decodeAssertionReservationValue(ownerPredicate, owners[0]!.object) ?? '') !== owner) {
-    throw new Error('Confirmed named assertion reservation conflicts with surviving records');
-  }
-  const subgraphs = existing.filter(q => q.predicate === ontology + 'subGraphName');
-  if (target.subGraphName !== undefined && subgraphs.length === 0) additions.push({ subject: lifecycle, graph: meta,
-    predicate: ontology + 'subGraphName', object: JSON.stringify(target.subGraphName) });
-  else if (subgraphs.length !== (target.subGraphName === undefined ? 0 : 1)
-    || subgraphs.some(q => decodeAssertionReservationValue(q.predicate, q.object) !== target.subGraphName)) {
+  const scopes = existing.filter(q => q.predicate === ontology + 'contentScopeVersion');
+  if (!scopes.length) additions.push({ subject: lifecycle, graph: meta, predicate: ontology + 'contentScopeVersion',
+    object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' });
+  else if (scopes.length !== 1 || decodeAssertionReservationValue(ontology + 'contentScopeVersion', scopes[0]!.object) !== '2') {
     throw new Error('Confirmed named assertion reservation conflicts with surviving records');
   }
   if (!existing.some(q => q.predicate === ontology + 'assertionVersion')) additions.push({ subject: lifecycle, graph: meta,

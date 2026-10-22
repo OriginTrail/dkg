@@ -1,3 +1,4 @@
+import { generateAssertionReservationMetadata, ASSERTION_RESERVATION_PREDICATES as RESERVATION } from './assertion-reservation.js';
 import { rdfLiteralLexicalValue, assertSafeGraphIriForSparql, mq, lit, intLit } from './metadata-rdf-terms.js';
 export { replaceLocallyTrustedKnowledgeAssetControls, overlaySelectedKnowledgeAssetControls, replaceLocallyTrustedKnowledgeAssetControlEnvelope, readLocallyTrustedKnowledgeAssetControls, overlayLocallyTrustedKnowledgeAssetControls, readLocallyTrustedKnowledgeAssetControlEnvelope, type LocallyTrustedKnowledgeAssetControlAnchor, type LocallyTrustedKnowledgeAssetControlEnvelope } from './knowledge-asset-controls.js';
 import { readStoredAssertionVersions } from './materialization-assertion-version.js';
@@ -1659,8 +1660,8 @@ export function subGraphWritersSparql(contextGraphId: string, subGraphName: stri
 export const WM_CURRENT_ASSERTION_PRED = `${DKG}wmCurrentAssertion`;
 export const SWM_CURRENT_ASSERTION_PRED = `${DKG}swmCurrentAssertion`;
 export const VM_CURRENT_ASSERTION_PRED = `${DKG}vmCurrentAssertion`;
-export const KA_ID_PRED = `${DKG}kaId`;
-export const RESERVED_UAL_PRED = `${DKG}reservedUal`;
+export const KA_ID_PRED = RESERVATION.number;
+export const RESERVED_UAL_PRED = RESERVATION.ual;
 export const PROV_WAS_REVISION_OF = `${PROV}wasRevisionOf`;
 // In-flight lane markers stamped on the lifecycle URN while a share /
 // promote operation is outstanding. Their presence means the draft is NOT
@@ -1777,7 +1778,8 @@ export function generateAssertionCreatedMetadata(meta: AssertionCreatedMeta, opt
   const graphUri = meta.kaNumber !== undefined
     ? contextGraphLayerUri(meta.contextGraphId, MemoryLayer.WorkingMemory, meta.kaAuthorAddress ?? meta.agentAddress, meta.kaNumber, meta.subGraphName)
     : contextGraphAssertionUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
-  const agentUri = agentDid(meta.agentAddress);
+  const reservation = generateAssertionReservationMetadata(meta);
+  const leading = (quad: Quad) => quad.predicate === RESERVATION.owner || quad.predicate === RESERVATION.name;
   const eventUri = `${subject}/event/${nextEventId()}`;
 
   const quads: Quad[] = [
@@ -1796,8 +1798,7 @@ export function generateAssertionCreatedMetadata(meta: AssertionCreatedMeta, opt
     // resolver's live feed is content-layer `prov:wasGeneratedBy` writers
     // (semantic enrichment, agent profiles, user data) untouched by the
     // trim. See docs/rfcs/ka-metadata-trim.md Phase 1.
-    mq(subject, `${PROV}wasAttributedTo`, agentUri, metaGraph),
-    mq(subject, `${DKG}assertionName`, lit(meta.assertionName), metaGraph),
+    ...reservation.filter(leading),
     mq(subject, `${DKG}assertionGraph`, graphUri, metaGraph),
     mq(subject, `${DKG}state`, lit('created'), metaGraph),
     mq(subject, `${DKG}memoryLayer`, lit(MemoryLayer.WorkingMemory), metaGraph),
@@ -1817,21 +1818,9 @@ export function generateAssertionCreatedMetadata(meta: AssertionCreatedMeta, opt
     );
   }
 
-  // D1 (identity-at-create): stamp the KA number + reserved UAL on the lifecycle URN
-  // so the UAL is the KA's identity from the first write — the per-KA graph name
-  // {addr}/{number} and the _meta row key both derive from it. Finalize's
-  // hasExistingKaId guard then finds this stamp and skips re-allocation. Consensus-
-  // neutral: the seal commits content+author, never the kaId.
-  if (meta.kaNumber !== undefined) {
-    quads.push(mq(subject, KA_ID_PRED, intLit(BigInt(meta.kaNumber)), metaGraph));
-  }
-  if (meta.reservedUal) {
-    quads.push(mq(subject, RESERVED_UAL_PRED, lit(meta.reservedUal), metaGraph));
-  }
-
-  if (meta.subGraphName) {
-    quads.push(mq(subject, `${DKG}subGraphName`, lit(meta.subGraphName), metaGraph));
-  }
+  // Keep the historical quad order while the shared projection owns every
+  // stable field and literal encoding.
+  quads.push(...reservation.filter(quad => !leading(quad)));
 
   return quads;
 }

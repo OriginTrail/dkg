@@ -1,3 +1,4 @@
+import { decodeAssertionReservationIdentity } from './assertion-reservation.js';
 import { assertPromoteSeal } from './assertion-promote-seal.js';
 import { certifyPromoteNoEffectRejection } from './promote-no-effect-rejection.js';
 import { createPromoteOwnershipReader, type PromoteOwnershipReader } from './async-promote-ownership.js';
@@ -6778,27 +6779,14 @@ export class DKGPublisher implements Publisher {
   private kaGraphIdentityFromLifecycle(
     contextGraphId: string, agentAddress: string, name: string, subGraphName: string | undefined, record: AssertionLifecycleRecord,
   ): { agentAddress: string; number: bigint; kaUal?: string } | null {
-    const urn = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
-    if (record.number !== undefined) {
-      const number = record.number;
-      const rawUal = record.reservedUal;
-      if (rawUal) {
-        try {
-          const scope = createGraphKnowledgeAssetScope(rawUal, 1);
-          if (BigInt(scope.kaNumber) !== number) {
-            throw new Error(`reservedUal number ${scope.kaNumber} does not match kaId ${number}`);
-          }
-          return { agentAddress: scope.agentAddress, number, kaUal: scope.ual };
-        } catch (err) {
-          this.log.warn(
-            createOperationContext('share'),
-            `Ignoring invalid reservedUal on <${urn}>: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
-      return { agentAddress, number };
+    const identity = decodeAssertionReservationIdentity(record, { lifecycleOwner: agentAddress });
+    if (identity.kind === 'unallocated') return null;
+    if (identity.kind === 'conflict') throw Object.assign(new Error(identity.reason), { code: 'KA_WM_LIFECYCLE_CORRUPT' });
+    if (identity.kind === 'legacy-fallback' && identity.warning) {
+      const urn = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
+      this.log.warn(createOperationContext('share'), `Ignoring invalid reservedUal on <${urn}>: ${identity.warning}`);
     }
-    return null;
+    return identity.identity;
   }
 
   /** Mutation gate: missing/legacy scope is query/export-only. */
@@ -7824,7 +7812,7 @@ export class DKGPublisher implements Publisher {
     assertExpectedKaSlotMatchesAllocation(opts?.expectedKaNumber, kaNumber);
     const identity = kaNumber === undefined ? null : this.kaGraphIdentityFromLifecycle(
       contextGraphId, agentAddress, name, subGraphName,
-      { ...lifecycle, number: kaNumber, reservedUal: reservedUal ?? lifecycle.reservedUal },
+      hasPreservedKaId ? lifecycle : { bindings: [], hasKaId: true, number: kaNumber, reservedUal },
     );
     const physicalAuthor = identity?.agentAddress ?? agentAddress;
     return this.withWriteLocks([assertionAllocationLockKey(contextGraphId, physicalAuthor, subGraphName)], async () => {

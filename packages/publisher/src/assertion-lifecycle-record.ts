@@ -4,6 +4,14 @@ import { assertSafeIri, assertionLifecycleUri, contextGraphMetaUri, MAX_ROOTLESS
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 
+export const ASSERTION_RESERVATION_PREDICATES = {
+  owner: 'http://www.w3.org/ns/prov#wasAttributedTo',
+  name: 'http://dkg.io/ontology/assertionName',
+  number: 'http://dkg.io/ontology/kaId',
+  ual: 'http://dkg.io/ontology/reservedUal',
+  subGraphName: 'http://dkg.io/ontology/subGraphName',
+} as const;
+
 export interface AssertionLifecycleRecord {
   readonly bindings: ReadonlyArray<Readonly<{ p: string; o: string }>>;
   readonly hasKaId: boolean;
@@ -22,6 +30,12 @@ export function decodeAssertionReservationValue(predicate: string, term: string)
   if (numeric) return /^(0|[1-9][0-9]*)$/.test(term) ? term : undefined;
   return predicate === 'http://dkg.io/ontology/reservedUal' || predicate === 'http://www.w3.org/ns/prov#wasAttributedTo'
     ? term.replace(/^<|>$/g, '') : undefined;
+}
+
+/** Preserve the ordinary lifecycle reader's accepted historical UAL terms. */
+export function decodeStoredAssertionReservedUal(term: string): string {
+  return (decodeAssertionReservationValue(ASSERTION_RESERVATION_PREDICATES.ual, term)
+    ?? term.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')).trim();
 }
 
 /** One identity decoder. Reservations require exact RDF integers; ordinary
@@ -56,8 +70,7 @@ export function decodeAssertionLifecycleRecord(
     if (match) number = BigInt(match[1]);
   }
   const ual = bindings.find(r => r.p === 'http://dkg.io/ontology/reservedUal')?.o;
-  const reservedUal = ual === undefined ? undefined : (decodeAssertionReservationValue('http://dkg.io/ontology/reservedUal', ual)
-    ?? ual.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')).trim();
+  const reservedUal = ual === undefined ? undefined : decodeStoredAssertionReservedUal(ual);
   return { bindings, hasKaId: ids.length > 0, number, reservedUal };
 }
 
