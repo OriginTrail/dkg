@@ -81,6 +81,12 @@ test('component execution lanes use a JSPI-capable runtime while ordinary builds
   assert.equal(nodeSetup(jobs['semantic-runtime'])['node-version'], '26.8.2');
   assert.equal(nodeSetup(jobs['bura-cli'])['node-version'], '26.8.2');
   assert.match(nodeSetup(jobs['kosava-supporting'])['node-version'], /semantic-runtime.*26\.8\.2.*22/);
+  for (const name of ['graph-runtime-integration', 'llm-integration', 'ui-integration', 'typescript-program-bundles']) {
+    const workflow = yaml(`workflows/${name}.yml`);
+    for (const job of Object.values(workflow.jobs)) {
+      assert.equal(nodeSetup(job)['node-version'], '26.8.2', `${name} requires JSPI-capable Node`);
+    }
+  }
 });
 
 test('native WSL fixture compiles real CLI modules without starting or building a semantic engine', () => {

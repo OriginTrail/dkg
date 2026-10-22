@@ -21,11 +21,13 @@ export interface WalletConnectControlProps {
   className?: string;
   testId?: string;
   description?: React.ReactNode;
+  purpose?: 'transaction' | 'message';
 }
 
 export function WalletConnectControl({
   className = '',
   testId = 'wallet-connect',
+  purpose = 'transaction',
   description = (
     <>Hardware wallet recommended. Verify every transaction on the signing device before confirming.</>
   ),
