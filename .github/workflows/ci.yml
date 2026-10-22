@@ -155,7 +155,7 @@ jobs:
           if [[ "${PLAN_EVENT}" == "pull_request" ]]; then
             while IFS= read -r -d '' changed; do
               case "${changed}" in
-                scripts/repro/publisher-live-control-restart.mts|scripts/repro/publisher-live-control-worker.mts)
+                scripts/repro/publisher-live-control-restart.test.mts|scripts/repro/publisher-live-control-worker.mts)
                   PLAN_EVENT="pull_request_delta_disabled"
                   break
                   ;;
@@ -787,7 +787,7 @@ jobs:
       - name: "Publisher pause/resume process-death durability (Oxigraph)"
         if: matrix.shard == 1
         timeout-minutes: 3
-        run: node --experimental-sqlite --import tsx scripts/repro/publisher-live-control-restart.mts
+        run: node --experimental-sqlite --import tsx scripts/repro/publisher-live-control-restart.test.mts
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit

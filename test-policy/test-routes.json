@@ -1,10 +1,10 @@
 [
   {
-    "pattern": "scripts/repro/publisher-live-control-restart.mts",
+    "pattern": "scripts/repro/publisher-live-control-restart.test.mts",
     "lane": "native-crash-campaign",
     "reason": "Five serial runtime starts prove persisted publisher pause, resume, startup override and graceful shutdown fencing in the first required CLI shard",
     "cadence": "required",
-    "command": "node --experimental-sqlite --import tsx scripts/repro/publisher-live-control-restart.mts",
+    "command": "node --experimental-sqlite --import tsx scripts/repro/publisher-live-control-restart.test.mts",
     "prerequisites": [
       "Node 22 with experimental SQLite",
       "built publisher and CLI dependency closure",

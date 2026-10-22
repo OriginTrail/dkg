@@ -10,7 +10,7 @@ import { discoverTestSurface, isTestSurface, secondaryRoutes } from '../test-inv
 import { REPO_ROOT, TRUSTED_CI_CONTROLLER_SHA, gateNeeds, succeeded, pullRequestPlan, change } from './ci-plan-fixtures.mjs';
 import { CONTROLLER_POLICY_FILES } from '../../ci/trusted-controller-pins.mjs';
 
-const parent = 'scripts/repro/publisher-live-control-restart.mts';
+const parent = 'scripts/repro/publisher-live-control-restart.test.mts';
 const worker = 'scripts/repro/publisher-live-control-worker.mts';
 const command = `node --experimental-sqlite --import tsx ${parent}`;
 const read = (file) => fs.readFileSync(new URL(`../../../${file}`, import.meta.url), 'utf8');
@@ -111,7 +111,7 @@ test('actual workflow routes campaign-only diffs through the active trusted cont
 });
 
 test('publisher campaign is discoverable with an explicit required native execution route', () => {
-  assert.equal(isTestSurface(parent), false, 'campaign knowledge belongs to standalone inventory policy');
+  assert.equal(isTestSurface(parent), true, 'the parent uses the existing test suffix convention');
   assert.equal(isTestSurface(worker), false, 'a disposable worker is not a second campaign');
   const discovered = discoverTestSurface(REPO_ROOT, ['scripts/repro']);
   assert.deepEqual(discovered, [parent]);

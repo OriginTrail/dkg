@@ -598,7 +598,7 @@ export const SUPPORT_PATH_ROUTES = Object.freeze([
     reason: 'the chain lane runs the ABI sync script against temporary directories',
   },
   {
-    pattern: /^scripts\/repro\/publisher-live-control-(?:restart|worker)\.mts$/,
+    pattern: /^scripts\/repro\/publisher-live-control-(?:restart\.test|worker)\.mts$/,
     lanes: ['bura_cli'],
     reason: 'the required CLI lane runs the five-start publisher control durability campaign',
   },

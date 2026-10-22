@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 
 /** Execution surface: JS/TS cases, Python tests/drivers, shell test drivers, and YAML test cases. */
@@ -13,25 +13,8 @@ export function isTestSurface(file) {
 
 /** Test files the inventory routes: tracked or unignored and present on disk, optionally under `paths`. */
 export function discoverTestSurface(root, paths = []) {
-  const list = (scope) => new Set(execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', ...scope],
-    { cwd: root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }).split('\0').filter(Boolean));
-  const all = list([]);
-  // These declarations are independent of routes: a missing route must leave a
-  // discoverable, unowned test, rather than silently remove its obligation.
-  const declarations = JSON.parse(readFileSync(path.join(root, 'test-policy/standalone-test-entrypoints.json'), 'utf8'));
-  if (!Array.isArray(declarations)) throw new Error('standalone test entrypoints must be an array');
-  const standalone = new Set();
-  for (const file of declarations) {
-    if (typeof file !== 'string' || file.length === 0 || file.includes('\\')
-      || path.posix.isAbsolute(file) || path.posix.normalize(file) !== file || file.startsWith('../')
-      || standalone.has(file) || !all.has(file) || !existsSync(path.join(root, file))) {
-      throw new Error(`invalid or stale standalone test entrypoint: ${String(file)}`);
-    }
-    standalone.add(file);
-  }
-  return [...(paths.length ? list(paths) : all)]
-    .filter(file => isTestSurface(file) || standalone.has(file))
-    .filter(file => existsSync(path.join(root, file)));
+  const listed = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', ...paths], { cwd: root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }).split('\0');
+  return [...new Set(listed)].filter(isTestSurface).filter((file) => existsSync(path.join(root, file)));
 }
 
 const matchesRoute = (file, route) => path.posix.matchesGlob(file, route.pattern);
