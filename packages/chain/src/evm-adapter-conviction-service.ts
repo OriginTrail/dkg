@@ -269,13 +269,13 @@ export class ConvictionServiceMethods extends EVMChainAdapterBase {
       const parametersStorage = this.contracts.parametersStorage ?? await this.resolveContract('ParametersStorage');
       const [logicVersion, enabledAt, allowance, span, cutOver, total, cursor, count, treasury] = await Promise.all([
         this.readContract(pc, 'publishingConviction.version', 'version'),
-        this.readContract(css, 'css.serviceSpendingEnabledAt', 'serviceSpendingEnabledAt', accountId),
-        this.readContract(ss, 'ss.currentWindowAllowance', 'currentWindowAllowance', accountId),
-        this.readContract(ss, 'ss.emissionSpan', 'emissionSpan', accountId),
-        this.readContract(css, 'css.exactScheduleFrom', 'exactScheduleFrom'),
-        this.readContract(css, 'css.accountServiceLabelTotal', 'accountServiceLabelTotal', accountId),
-        this.readContract(css, 'css.labelCursor', 'labelCursor', accountId),
-        this.readContract(css, 'css.assigneeCount', 'assigneeCount', accountId),
+        this.readContract(css, 'convictionServiceStorage.serviceSpendingEnabledAt', 'serviceSpendingEnabledAt', accountId),
+        this.readContract(ss, 'serviceSubscriptions.currentWindowAllowance', 'currentWindowAllowance', accountId),
+        this.readContract(ss, 'serviceSubscriptions.emissionSpan', 'emissionSpan', accountId),
+        this.readContract(css, 'convictionServiceStorage.exactScheduleFrom', 'exactScheduleFrom'),
+        this.readContract(css, 'convictionServiceStorage.accountServiceLabelTotal', 'accountServiceLabelTotal', accountId),
+        this.readContract(css, 'convictionServiceStorage.labelCursor', 'labelCursor', accountId),
+        this.readContract(css, 'convictionServiceStorage.assigneeCount', 'assigneeCount', accountId),
         this.readContract(parametersStorage, 'parametersStorage.protocolTreasury', 'protocolTreasury'),
       ]);
       // Until the schedule cut-over is set, `baseLabelCapacity` reverts
@@ -283,10 +283,10 @@ export class ConvictionServiceMethods extends EVMChainAdapterBase {
       const cutOverAt = Number(cutOver);
       const remainingBaseCapacity = cutOverAt === 0
         ? 0n
-        : BigInt(await this.readContract(ss, 'ss.baseLabelCapacity', 'baseLabelCapacity', accountId));
+        : BigInt(await this.readContract(ss, 'serviceSubscriptions.baseLabelCapacity', 'baseLabelCapacity', accountId));
       const assignees = await this.readAssignees(css, accountId, Number(count));
       const actives = await mapLimited(assignees, READ_CONCURRENCY, async (assignee) => Boolean(
-        await this.readContract(css, 'css.isAssignmentActive', 'isAssignmentActive', accountId, assignee),
+        await this.readContract(css, 'convictionServiceStorage.isAssignmentActive', 'isAssignmentActive', accountId, assignee),
       ));
       return {
         accountId,
@@ -316,7 +316,7 @@ export class ConvictionServiceMethods extends EVMChainAdapterBase {
       const account = await this.readConvictionServiceAccount(accountId);
       if (!account) return null;
       return windowAllowanceOf(
-        await this.readContract(ss, 'ss.currentWindowAllowance', 'currentWindowAllowance', accountId),
+        await this.readContract(ss, 'serviceSubscriptions.currentWindowAllowance', 'currentWindowAllowance', accountId),
         account,
       );
     }, { unknownAccount: null });
@@ -326,7 +326,7 @@ export class ConvictionServiceMethods extends EVMChainAdapterBase {
     requireAccountId(accountId);
     const { css } = await this.convictionServiceContracts();
     return this.convictionServiceCall(async () => BigInt(
-      await this.readContract(css, 'css.assignmentNonce', 'assignmentNonce', accountId),
+      await this.readContract(css, 'convictionServiceStorage.assignmentNonce', 'assignmentNonce', accountId),
     ));
   }
 
@@ -422,13 +422,13 @@ export class ConvictionServiceMethods extends EVMChainAdapterBase {
     requireAccountId(accountId);
     const { css } = await this.convictionServiceContracts();
     return this.convictionServiceCall(async () => {
-      const count = Number(await this.readContract(css, 'css.assigneeCount', 'assigneeCount', accountId));
+      const count = Number(await this.readContract(css, 'convictionServiceStorage.assigneeCount', 'assigneeCount', accountId));
       const assignees = await this.readAssignees(css, accountId, count);
       return mapLimited(assignees, READ_CONCURRENCY, async (assignee) => {
         const [a, u, active] = await Promise.all([
-          this.readContract(css, 'css.getAssignment', 'getAssignment', accountId, assignee),
-          this.readContract(css, 'css.getUsage', 'getUsage', accountId, assignee),
-          this.readContract(css, 'css.isAssignmentActive', 'isAssignmentActive', accountId, assignee),
+          this.readContract(css, 'convictionServiceStorage.getAssignment', 'getAssignment', accountId, assignee),
+          this.readContract(css, 'convictionServiceStorage.getUsage', 'getUsage', accountId, assignee),
+          this.readContract(css, 'convictionServiceStorage.isAssignmentActive', 'isAssignmentActive', accountId, assignee),
         ]);
         return assignmentOf(assignee, a, u, Boolean(active));
       });
@@ -446,13 +446,13 @@ export class ConvictionServiceMethods extends EVMChainAdapterBase {
       const epochStorage = await this.resolveContract('EpochStorageV8', 'EpochStorage');
       // Until the schedule cut-over is set there is no schedule basis, and
       // `scheduledEmission` reverts `ExactScheduleFromUnset`.
-      const scheduleSet = Number(await this.readContract(css, 'css.exactScheduleFrom', 'exactScheduleFrom')) !== 0;
+      const scheduleSet = Number(await this.readContract(css, 'convictionServiceStorage.exactScheduleFrom', 'exactScheduleFrom')) !== 0;
       const epochs = Array.from({ length: toEpoch - fromEpoch + 1 }, (_, i) => fromEpoch + i);
       return mapLimited(epochs, READ_CONCURRENCY, async (epoch) => {
         const [scheduled, label, serviceLabel, pool] = await Promise.all([
-          scheduleSet ? this.readContract(ss, 'ss.scheduledEmission', 'scheduledEmission', accountId, epoch) : 0n,
-          this.readContract(css, 'css.accountLabel', 'accountLabel', accountId, epoch),
-          this.readContract(css, 'css.serviceLabel', 'serviceLabel', epoch),
+          scheduleSet ? this.readContract(ss, 'serviceSubscriptions.scheduledEmission', 'scheduledEmission', accountId, epoch) : 0n,
+          this.readContract(css, 'convictionServiceStorage.accountLabel', 'accountLabel', accountId, epoch),
+          this.readContract(css, 'convictionServiceStorage.serviceLabel', 'serviceLabel', epoch),
           this.readContract(epochStorage, 'epochStorage.getEpochPool', 'getEpochPool', 1, epoch),
         ]);
         return {
@@ -475,7 +475,7 @@ export class ConvictionServiceMethods extends EVMChainAdapterBase {
     // A lost reply must never fund twice: a period id this buyer key already
     // funded is answered from the chain, and nothing is sent.
     const funded = await this.convictionServiceCall(async () => Boolean(
-      await this.readContract(css, 'css.subscriptionExists', 'subscriptionExists', subscriptionId),
+      await this.readContract(css, 'convictionServiceStorage.subscriptionExists', 'subscriptionExists', subscriptionId),
     ));
     if (funded) return this.existingServicePeriodFunding(subscriptionId);
     let receipt: ethers.TransactionReceipt;
@@ -522,10 +522,10 @@ export class ConvictionServiceMethods extends EVMChainAdapterBase {
     requirePeriodPage(offset, limit);
     const { css } = await this.convictionServiceContracts();
     return this.convictionServiceCall(async () => {
-      const total = Number(await this.readContract(css, 'css.accountSubscriptionCount', 'accountSubscriptionCount', accountId));
+      const total = Number(await this.readContract(css, 'convictionServiceStorage.accountSubscriptionCount', 'accountSubscriptionCount', accountId));
       const indexes = Array.from({ length: Math.max(0, Math.min(total, offset + limit) - offset) }, (_, i) => offset + i);
       const periods = await mapLimited(indexes, READ_CONCURRENCY, async (index) => {
-        const id = String(await this.readContract(css, 'css.accountSubscriptionAt', 'accountSubscriptionAt', accountId, index));
+        const id = String(await this.readContract(css, 'convictionServiceStorage.accountSubscriptionAt', 'accountSubscriptionAt', accountId, index));
         const period = await this.readServicePeriod(css, id);
         if (!period) throw new Error(`ConvictionServiceStorage lists ${id} for account ${accountId} but holds no record of it`);
         return period;
@@ -631,14 +631,14 @@ export class ConvictionServiceMethods extends EVMChainAdapterBase {
   protected async readAssignees(css: Contract, accountId: bigint, count: number): Promise<string[]> {
     const indexes = Array.from({ length: count }, (_, i) => i);
     return mapLimited(indexes, READ_CONCURRENCY, async (index) => ethers.getAddress(
-      await this.readContract<string>(css, 'css.assigneeAt', 'assigneeAt', accountId, index),
+      await this.readContract<string>(css, 'convictionServiceStorage.assigneeAt', 'assigneeAt', accountId, index),
     ));
   }
 
   protected async readServicePeriod(css: Contract, subscriptionId: string): Promise<CaPeriod | null> {
-    const raw = await this.readContract(css, 'css.getSubscription', 'getSubscription', subscriptionId);
+    const raw = await this.readContract(css, 'convictionServiceStorage.getSubscription', 'getSubscription', subscriptionId);
     if (Number(raw[5]) === 0) return null;
-    const buckets = await this.readContract(css, 'css.getBuckets', 'getBuckets', subscriptionId);
+    const buckets = await this.readContract(css, 'convictionServiceStorage.getBuckets', 'getBuckets', subscriptionId);
     return servicePeriodOf(subscriptionId, raw, buckets);
   }
 
@@ -651,7 +651,7 @@ export class ConvictionServiceMethods extends EVMChainAdapterBase {
   ): Promise<bigint> {
     const advanced = findServiceSubscriptionsLog(receipt.logs, await ss.getAddress(), 'AssignmentNonceAdvanced');
     if (advanced) return BigInt(advanced.args.nextNonce);
-    return BigInt(await this.readContract(css, 'css.assignmentNonce', 'assignmentNonce', accountId));
+    return BigInt(await this.readContract(css, 'convictionServiceStorage.assignmentNonce', 'assignmentNonce', accountId));
   }
 
   /**

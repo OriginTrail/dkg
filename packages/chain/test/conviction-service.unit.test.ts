@@ -43,6 +43,8 @@ import {
 } from '../src/conviction-service-errors.js';
 import { decodeServicePeriodFunding, getServiceSubscriptionsInterface } from '../src/evm-adapter-conviction-service.js';
 import { getPcaLogicInterface } from '../src/evm-adapter-errors.js';
+import { boundedRpcUsageSnapshotConsumerLabel, normalizeRpcUsageConsumer } from '../src/rpc-usage.js';
+import { CONVICTION_SERVICE_RPC_USAGE_CONSUMERS } from '../src/conviction-service-rpc-usage.js';
 
 // Hardhat's well-known development keys #0 (owner) and #1 (buyer key).
 const OWNER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -531,6 +533,28 @@ describe('error decoding', () => {
     const refused = new RemoteSignerError('REMOTE_SIGNER_REJECTED', 'policy refused the transaction');
     h.onSend(() => { throw refused; });
     await expect(h.adapter.setConvictionServiceSpending(42n, true)).rejects.toBe(refused);
+  });
+});
+
+describe('RPC usage labels', () => {
+  it('reports every read of the mixin by name in the retained RPC usage vocabulary', () => {
+    const source = readFileSync(join(import.meta.dirname, '../src/evm-adapter-conviction-service.ts'), 'utf8');
+    const labels = new Set<string>();
+    for (const m of source.matchAll(/\breadContract(?:<[^>]*>)?\(\s*[^,]+,\s*'([^']+)'/g)) labels.add(m[1]!);
+    for (const m of source.matchAll(/\bread(?:Tip)?Provider(?:RetryingNull)?\(\s*'([^']+)'/g)) labels.add(m[1]!);
+    for (const m of source.matchAll(/\bresolveContract\(\s*'(\w+)'/g)) labels.add(`Hub.getContractAddress(${m[1]})`);
+    expect(labels.size).toBeGreaterThan(25);
+    for (const label of labels) {
+      const normalized = normalizeRpcUsageConsumer(label);
+      expect(normalized, label).toBeDefined();
+      expect(normalized, label).not.toBe('other');
+      expect(boundedRpcUsageSnapshotConsumerLabel(label), label).toBe(normalized);
+    }
+    // Every label the module lists is one the adapter reads under.
+    const known = new Set([...labels].map((l) => normalizeRpcUsageConsumer(l)));
+    for (const listed of CONVICTION_SERVICE_RPC_USAGE_CONSUMERS) {
+      expect(known.has(normalizeRpcUsageConsumer(listed)), listed).toBe(true);
+    }
   });
 });
 
