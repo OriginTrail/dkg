@@ -333,7 +333,10 @@ const PINNED_DIGESTS: Record<string, string> = {
   //   - `EpochStorage`, for `getEpochPool(1, epoch)`, the staker pool an
   //     epoch's service labels are read against.
   ServiceSubscriptions:         '5c4ac6b97e1eb4d7fa79656ad0505c33b9729ce0ec0903fee40b152eccd3ed85',
-  ConvictionServiceStorage:     '05e41ea1232c9dea46b5f511ea5366eb0bb57416e2b08d223da762e0e936730c',
+  //   Repinned: `createSubscription` refuses a record whose `periodStart` is 0
+  //   with the new error `ZeroPeriodStart(bytes32)`, and an id that already
+  //   holds a record or buckets with `SubscriptionExists`.
+  ConvictionServiceStorage:     'e5461cca449e42ac110535c8b5f46a1b16d15405ce6954a645ca0174935216a6',
   EpochStorage:                 '3d31df1a69c4610dbf62b319b62091fb55384b2987bb037e5f01554ab371b0d2',
 };
 

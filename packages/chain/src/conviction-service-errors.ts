@@ -75,6 +75,8 @@ export const CONVICTION_SERVICE_REVERT_KINDS: Readonly<Record<string, Conviction
   // An invariant the contracts guard, or a governance-only setter: never the
   // caller's doing.
   DrawMismatch: 'internal',
+  // ServiceSubscriptions records every period with the block time as its start.
+  ZeroPeriodStart: 'internal',
   TopUpUnderflow: 'internal',
   SafeCastOverflowedUintDowncast: 'internal',
   ZeroLock: 'internal',

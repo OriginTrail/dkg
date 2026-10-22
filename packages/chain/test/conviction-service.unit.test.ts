@@ -472,7 +472,7 @@ describe('error decoding', () => {
         'AssignmentExpired', 'CapsUnchanged', 'CapExceeded', 'PeriodAlreadyFunded', 'LabelCapacityExceeded',
         'InsufficientAllowance', 'AccountExpired'],
       unavailable: ['ExactScheduleFromUnset', 'ServiceFundingPausedTreasuryWired'],
-      internal: ['DrawMismatch', 'Panic', 'SomethingNew'],
+      internal: ['DrawMismatch', 'ZeroPeriodStart', 'Panic', 'SomethingNew'],
     };
     for (const [kind, names] of Object.entries(byKind)) {
       for (const name of names) expect(convictionServiceRevertKind(name), name).toBe(kind);
