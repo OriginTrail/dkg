@@ -292,6 +292,21 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'requireConvictionNFT',
   'pcaWrite',
   'pcaWriteAndInvalidate',
+  // Protected EVM-only helpers behind the Conviction Account service-spending
+  // surface (evm-adapter-conviction-service.ts): Hub resolution, the typed-revert
+  // read/write wrappers, the buyer-key signer, contract reads and the funding-log
+  // recovery. The public methods they serve ARE mirrored on MockChainAdapter,
+  // which models the contracts in memory and raises the same typed reverts.
+  'convictionServiceContracts',
+  'convictionServiceCall',
+  'convictionServiceWrite',
+  'convictionServiceBuyer',
+  'readConvictionServiceAccount',
+  'readAssignees',
+  'readServicePeriod',
+  'nextAssignmentNonceOf',
+  'existingServicePeriodFunding',
+  'blockNumberAtTimestamp',
   // Identity read-cache helpers are EVM-only: the mock's identity registry is
   // in-memory and its writes are already immediately visible.
   'invalidateIdentityStorageBinding',

@@ -4,8 +4,8 @@
  * EVMChainAdapter — public entrypoint for the EVM chain adapter. This file was
  * split into focused sibling modules to stay within AI context windows:
  *   - evm-adapter-base.ts        shared state + constructor + plumbing
- *   - evm-adapter-{identity,publish,context-graph,conviction,ack-sign,
- *     random-sampling,storage-reads,events}.ts   per-domain method groups
+ *   - evm-adapter-{identity,publish,context-graph,conviction,conviction-service,
+ *     ack-sign,random-sampling,storage-reads,events}.ts   per-domain method groups
  *   - evm-adapter-{abi,errors,rpc,allowance,types,constants}.ts  free helpers
  *
  * The class is assembled below from EVMChainAdapterBase + the holder mixins
@@ -21,6 +21,7 @@ import { IdentityMethods } from './evm-adapter-identity.js';
 import { PublishMethods } from './evm-adapter-publish.js';
 import { ContextGraphMethods } from './evm-adapter-context-graph.js';
 import { ConvictionMethods } from './evm-adapter-conviction.js';
+import { ConvictionServiceMethods } from './evm-adapter-conviction-service.js';
 import { AckSignMethods } from './evm-adapter-ack-sign.js';
 import { RandomSamplingMethods } from './evm-adapter-random-sampling.js';
 import { StorageReadMethods } from './evm-adapter-storage-reads.js';
@@ -60,5 +61,6 @@ export type { EVMAdapterConfig, EVMAdapterOptions } from './evm-adapter-types.js
  */
 export class EVMChainAdapter extends EVMChainAdapterBase implements ChainAdapter {}
 type PublicConvictionMethods = Pick<ConvictionMethods, keyof ConvictionMethods>;
-export interface EVMChainAdapter extends IdentityMethods, PublishMethods, ContextGraphMethods, PublicConvictionMethods, AckSignMethods, RandomSamplingMethods, StorageReadMethods, EventsMethods, PublicGraphSnapshotMethods {}
-applyMixins(EVMChainAdapter, [IdentityMethods, PublishMethods, ContextGraphMethods, ConvictionMethods, AckSignMethods, RandomSamplingMethods, StorageReadMethods, EventsMethods, PublicGraphSnapshotMethods]);
+type PublicConvictionServiceMethods = Pick<ConvictionServiceMethods, keyof ConvictionServiceMethods>;
+export interface EVMChainAdapter extends IdentityMethods, PublishMethods, ContextGraphMethods, PublicConvictionMethods, PublicConvictionServiceMethods, AckSignMethods, RandomSamplingMethods, StorageReadMethods, EventsMethods, PublicGraphSnapshotMethods {}
+applyMixins(EVMChainAdapter, [IdentityMethods, PublishMethods, ContextGraphMethods, ConvictionMethods, ConvictionServiceMethods, AckSignMethods, RandomSamplingMethods, StorageReadMethods, EventsMethods, PublicGraphSnapshotMethods]);
