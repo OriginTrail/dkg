@@ -290,7 +290,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       await persistence({ ...options, signal });
       signal?.throwIfAborted();
     }, managedPersistenceScheduler) : undefined;
-    this.commitment = this.flush || writesDurableOnAcknowledgement
+    this.commitment = this.flush || (writesDurableOnAcknowledgement && !this.managedOxigraph)
       ? certifiedTripleStoreCommitment('restart-durable', options => this.flush?.(options) ?? Promise.resolve()) : undefined;
     const managedRecovery = this.managedOxigraph
       ? snapshotManagedRecoveryCapability(options.managedRecovery)

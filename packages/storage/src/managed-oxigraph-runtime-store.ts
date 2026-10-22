@@ -41,6 +41,7 @@ export interface ManagedOxigraphRuntimeActivityLeaseV1 {
 
 /** Runtime control plane supplied only by the daemon-owned construction path. */
 export interface ManagedOxigraphRuntimeHooksV1 {
+  /** Supported engine-owned durability integration; absent for stock Oxigraph HTTP. */
   readonly persistence?: TripleStorePersistenceBarrier;
   readonly onClientTimeout?: (operation: StoreOperation) => void;
   /** Bound to the original process; signalling is not confirmed termination. */

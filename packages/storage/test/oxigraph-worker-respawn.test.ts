@@ -155,7 +155,7 @@ describe('OxigraphWorkerStore respawn after unexpected worker exit', () => {
       try { expect(await reopened.countQuads('urn:test:reapplied')).toBe(3); }
       finally { await reopened.close(); }
     } finally { await store.close(); }
-  });
+  }, 15_000); // Starts three real workers, including replacement and independent disk reopen.
 
   it('rejects an in-flight op at kill time with the retryable "restarted — retry" message', async () => {
     const store = makeStore(path);

@@ -60,6 +60,16 @@ path (`oxigraph-persistent`) and to `oxigraph-worker` when that worker is given
 a persistence path. Plain `oxigraph`, and a worker without a persistence path,
 are in-memory stores and provide no restart durability.
 
+Stock managed `oxigraph-server` also exposes no restart-durable commitment:
+its HTTP API has no supported engine-owned persistence barrier. Ordinary reads,
+writes and supervised process restart remain available, but durable lifecycle
+completion retains its recovery record and stays pending. The
+`writesDurableOnAcknowledgement` flag cannot override this managed-server
+boundary. A future supported engine integration may supply a runtime-owned
+barrier; this change does not ship a custom Oxigraph build or an external WAL
+synchronization protocol. Persistent embedded/worker Oxigraph snapshots and
+Blazegraph's standard forced disk-journal acknowledgements remain certified.
+
 Standalone SDK agents without a data directory may use a `process-local`
 commitment. Decorators compose the same captured persistence boundary and retain
 its declared durability while draining queued mutations. A process-local commit

@@ -5,6 +5,8 @@ export interface SparqlHttpPersistenceOptions {
   /**
    * Opt in only when successful mutation responses certify durable persistence.
    * Atomicity/readback alone does not grant this endpoint guarantee.
+   * DKG-managed Oxigraph requires a runtime-owned persistence barrier instead;
+   * this flag cannot certify its stock HTTP acknowledgement.
    */
   writesDurableOnAcknowledgement?: boolean;
 }

@@ -15,6 +15,15 @@ async function persistentStore() {
 }
 
 describe('storage persistence boundary', () => {
+  it.each([undefined, true, false])('does not certify stock managed HTTP from acknowledgement flag %s', async writesDurableOnAcknowledgement => {
+    const config = createManagedOxigraphRuntimeStoreConfigV1({ backend: 'sparql-http', options: {
+      queryEndpoint: 'http://127.0.0.1:7878/query', managedByDkg: true, writesDurableOnAcknowledgement,
+    } });
+    const store = await createTripleStore(config);
+    try { expect(store.commitment).toBeUndefined(); await store.flush?.(); expect(store.commitment).toBeUndefined(); }
+    finally { await store.close(); }
+  });
+
   it('runs a real composed store barrier on the outer store with the caller options', async () => {
     const backend = await persistentStore(), store = new ChangelogStore(new GraphSetIndexStore(backend));
     const innerFlush = vi.spyOn(backend, 'flush'), capture = vi.spyOn(store.commitment!, 'capture');

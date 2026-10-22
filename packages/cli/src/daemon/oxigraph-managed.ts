@@ -1,4 +1,3 @@
-import { DurableDirectory } from '@origintrail-official/dkg-storage';
 /**
  * Managed local Oxigraph server orchestration (Release 2 opt-in path).
  *
@@ -24,7 +23,6 @@ import { DurableDirectory } from '@origintrail-official/dkg-storage';
  * matching the Blazegraph-Docker provisioner's contract.
  */
 import { join } from 'node:path';
-import { createManagedOxigraphPersistenceBarrierV1 } from './oxigraph-persistence.js';
 import {
   createManagedOxigraphRuntimeStoreConfigV1,
   DEFAULT_SPARQL_HTTP_TIMEOUT_MS,
@@ -423,7 +421,6 @@ export async function startManagedOxigraph(
     binary.version,
   );
   if (plan === null) return null;
-  const directoryOwner = new DurableDirectory(plan.location, { platform: opts.platform });
 
   // The maintenance reopen is opt-in, so say which way this node runs when
   // the operator touched the option: on at which size, or ignored and why.
@@ -479,7 +476,8 @@ export async function startManagedOxigraph(
     runtimeStoreConfig.graphSetIndex = plan.storeConfigTemplate.graphSetIndex;
   }
   const storeConfig = createManagedOxigraphRuntimeStoreConfigV1(runtimeStoreConfig, {
-    persistence: createManagedOxigraphPersistenceBarrierV1(directoryOwner, binary.version),
+    // Stock Oxigraph HTTP has no engine-owned persistence API. Do not infer
+    // durable completion from its version, acknowledgement or external WAL I/O.
     getRecoveryState: readRecoveryState,
     registerActivity: () => handle.registerStoreActivity(),
     onClientTimeout: recoverTimedOutOperation,
