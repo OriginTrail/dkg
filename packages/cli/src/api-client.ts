@@ -27,6 +27,7 @@ import {
   type AgentListPageOptions,
 } from '@origintrail-official/dkg-core';
 import { loadApiClientToken } from './auth.js';
+import { vmPublishRequestBody } from './vm-publish-client-request.js';
 import type { KnowledgeAssetWritableQuad } from './knowledge-asset-write-contract.js';
 import {
   finalizedPublishOptionsPayload,
@@ -1089,21 +1090,8 @@ export class ApiClient {
     options?: KnowledgeAssetPublishAuthorSelection
       & KnowledgeAssetFinalizedPublishOptions,
   ): Promise<KnowledgeAssetPublishResponse> {
-    // GH#1786 — `selectedAuthorAgentAddress` is destructured out alongside
-    // `subGraphName` for two reasons: the daemon reads it at the TOP level of the
-    // body, and `finalizedPublishOptionsPayload` throws on any key outside its
-    // allowlist, so leaving it in would break every publish that supplies it.
-    const { subGraphName, selectedAuthorAgentAddress, ...finalizedOptions } = options ?? {};
-    const publishOptions = finalizedPublishOptionsPayload(finalizedOptions);
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`, {
-      contextGraphId,
-      ...(subGraphName ? { subGraphName } : {}),
-      // Presence, NOT truthiness: an explicitly empty/malformed selector must reach
-      // the daemon so it is rejected 400, rather than being silently omitted here and
-      // letting normal author resolution publish a different author.
-      ...(selectedAuthorAgentAddress !== undefined ? { selectedAuthorAgentAddress } : {}),
-      ...(publishOptions ? { options: publishOptions } : {}),
-    }, knowledgeAssetMutationDeadline(name, contextGraphId, subGraphName));
+    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`, vmPublishRequestBody(contextGraphId, options),
+      knowledgeAssetMutationDeadline(name, contextGraphId, options?.subGraphName));
   }
 
   async knowledgeAssetReconcileMint(contextGraphId: string, name: string, options?: { subGraphName?: string; txHash?: string }): Promise<KnowledgeAssetMintReconcileResult> {
@@ -1116,14 +1104,7 @@ export class ApiClient {
     options?: KnowledgeAssetPublishAuthorSelection
       & KnowledgeAssetFinalizedPublishOptions,
   ): Promise<KnowledgeAssetPublishAsyncResponse> {
-    const { subGraphName, selectedAuthorAgentAddress, ...finalizedOptions } = options ?? {};
-    const publishOptions = finalizedPublishOptionsPayload(finalizedOptions);
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish-async`, {
-      contextGraphId,
-      ...(subGraphName ? { subGraphName } : {}),
-      ...(selectedAuthorAgentAddress !== undefined ? { selectedAuthorAgentAddress } : {}),
-      ...(publishOptions ? { options: publishOptions } : {}),
-    });
+    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish-async`, vmPublishRequestBody(contextGraphId, options));
   }
 
   async createAssertion(

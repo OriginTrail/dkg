@@ -18,6 +18,11 @@ import {
   type OnChainPublishResult,
   type V10PublishParams,
 } from '@origintrail-official/dkg-chain';
+import {
+  MemoryLayer,
+  knowledgeAssetLayerGraphUri,
+  type GraphKnowledgeAssetScope,
+} from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import {
@@ -130,55 +135,129 @@ export async function adoptExistingMint(
   return publishResultFromMint(mint);
 }
 
+/** Adoption context for one sealed (graph-scoped) publish. */
+export interface SealedMintAdoption {
+  /** Reconcile: record the existing mint and send nothing. */
+  readonly existingOnly?: { txHash?: string };
+  readonly store: TripleStore;
+  /** The confirmed record this publish writes, to recognize one that already exists. */
+  readonly record: { contextGraphId: string; ual: string }
+    & Omit<ConfirmedGraphKnowledgeAssetMetadataEnvelope, 'transactionHash' | 'subGraphName' | 'batchId' | 'merkleRoot'>;
+  readonly log: (message: string) => void;
+}
+
 /**
- * The chain step of a publish. A sealed publish (`expected` set) adopts its
- * own existing mint when the contract reports the reserved id already
- * minted: only a `KaIdAlreadyMinted` revert decoded from structured revert
- * data, for exactly the sealed reservation, leads there. `existingOnly`
- * (reconcile) skips `createKnowledgeAssets` and goes straight to adoption,
- * so nothing is sent.
+ * The adoption context of a publish, or `undefined` for one that is not
+ * graph-scoped. Recording only an existing mint requires a sealed publish.
+ */
+export function sealedMintAdoption(
+  store: TripleStore,
+  graphPublish: {
+    scope: GraphKnowledgeAssetScope;
+    publicTripleCount: number;
+    privateTripleCount: number;
+    expectedPrivateMerkleRoot?: Uint8Array;
+  } | undefined,
+  input: { contextGraphId: string; subGraphName?: string; existingOnly?: { txHash?: string }; log: (message: string) => void },
+): SealedMintAdoption | undefined {
+  if (!graphPublish) {
+    if (input.existingOnly) throw new Error('adoptExistingMint requires a sealed graph-scoped publish');
+    return undefined;
+  }
+  const { scope } = graphPublish;
+  return {
+    ...(input.existingOnly ? { existingOnly: input.existingOnly } : {}),
+    store,
+    log: input.log,
+    record: {
+      contextGraphId: input.contextGraphId,
+      ual: scope.ual,
+      assertionVersion: scope.assertionVersion,
+      assertionGraph: knowledgeAssetLayerGraphUri(input.contextGraphId, MemoryLayer.VerifiableMemory, scope, input.subGraphName),
+      publicTripleCount: graphPublish.publicTripleCount,
+      privateTripleCount: graphPublish.privateTripleCount,
+      ...(graphPublish.expectedPrivateMerkleRoot ? { privateMerkleRoot: graphPublish.expectedPrivateMerkleRoot } : {}),
+    },
+  };
+}
+
+/** Results this module adopted, and whether each keeps a record the node already holds. */
+const adoptedResults = new WeakMap<OnChainPublishResult, { keepsExistingRecord: boolean }>();
+
+/** Whether the publish recorded an existing mint instead of minting. */
+export function isAdoptedMint(result: OnChainPublishResult): boolean {
+  return adoptedResults.has(result);
+}
+
+/** Whether an adopted mint is already recorded locally, so the publish must not write it again. */
+export function keepsExistingRecord(result: OnChainPublishResult): boolean {
+  return adoptedResults.get(result)?.keepsExistingRecord === true;
+}
+
+/**
+ * The chain step of a publish. A sealed publish adopts its own existing mint
+ * when the contract reports the reserved id already minted: only a
+ * `KaIdAlreadyMinted` revert decoded from structured revert data, for exactly
+ * the sealed reservation, leads there. With `existingOnly` (reconcile) it
+ * skips `createKnowledgeAssets` and goes straight to adoption, so nothing is
+ * sent. The seal's expectation is the publish's own reserved id, root,
+ * context graph and author.
  */
 export async function mintOrAdoptKnowledgeAssets(
   chain: ChainAdapter,
   params: V10PublishParams,
-  adoption: { expected?: MintAdoptionExpectation; existingOnly?: { txHash?: string } },
-): Promise<{ result: OnChainPublishResult; adopted: boolean }> {
-  const { expected, existingOnly } = adoption;
-  if (existingOnly) {
-    if (!expected) throw new Error('Recording an existing mint requires a sealed graph-scoped publish');
-    return { result: await adoptExistingMint(chain, expected, { txHash: existingOnly.txHash }), adopted: true };
+  sealed: SealedMintAdoption | undefined,
+): Promise<OnChainPublishResult> {
+  const expected: MintAdoptionExpectation | undefined = sealed && params.reservedKaId !== undefined
+    ? {
+      kaId: params.reservedKaId,
+      merkleRoot: params.merkleRoot,
+      contextGraphId: params.contextGraphId,
+      authorAddress: params.author.address,
+    }
+    : undefined;
+  if (sealed?.existingOnly) {
+    if (!expected) throw new Error('Recording an existing mint requires a reserved KA id');
+    return adopted(sealed, expected, await adoptExistingMint(chain, expected, { txHash: sealed.existingOnly.txHash }));
   }
   try {
-    return { result: await chain.createKnowledgeAssets(params), adopted: false };
+    return await chain.createKnowledgeAssets(params);
   } catch (error) {
     const mintedKaId = expected ? kaIdAlreadyMintedFromError(error) : null;
-    if (!expected || mintedKaId === null) throw error;
-    if (mintedKaId !== expected.kaId || params.reservedKaId !== expected.kaId) {
+    if (!sealed || !expected || mintedKaId === null) throw error;
+    if (mintedKaId !== expected.kaId) {
       throw new MintAdoptionRefusedError('reserved-id-mismatch', expected.kaId,
         `the contract reports KA ${mintedKaId} already minted`, { cause: error });
     }
-    return { result: await adoptExistingMint(chain, expected, { revert: error }), adopted: true };
+    return adopted(sealed, expected, await adoptExistingMint(chain, expected, { revert: error }));
   }
+}
+
+async function adopted(
+  sealed: SealedMintAdoption,
+  expected: MintAdoptionExpectation,
+  result: OnChainPublishResult,
+): Promise<OnChainPublishResult> {
+  const keepsRecord = await adoptedMintAlreadyRecorded(sealed.store, { ...sealed.record, merkleRoot: expected.merkleRoot }, result);
+  adoptedResults.set(result, { keepsExistingRecord: keepsRecord });
+  sealed.log(`Adopted the existing mint of KA ${expected.kaId}: tx=${result.txHash} block=${result.blockNumber}`
+    + (keepsRecord ? '; keeping the record this node already holds' : ''));
+  return result;
 }
 
 /**
  * Whether an adopted mint is already recorded locally. The run that minted it
  * may have recorded it before failing, or the node's chain reconcile may have
  * materialized it. Either record must describe exactly the sealed content and
- * this transaction; then the caller keeps it instead of adding a second set of
- * rows. Anything else refuses before the caller writes.
+ * this transaction; then the publish keeps it instead of adding a second set
+ * of rows. Anything else refuses before the publish writes.
  */
-export async function adoptedMintAlreadyRecorded(
+async function adoptedMintAlreadyRecorded(
   store: TripleStore,
-  input: {
-    contextGraphId: string;
-    ual: string;
-    mint: OnChainPublishResult;
-    expected: Omit<ConfirmedGraphKnowledgeAssetMetadataEnvelope, 'transactionHash' | 'subGraphName' | 'batchId'>;
-  },
+  expected: SealedMintAdoption['record'] & { merkleRoot: Uint8Array },
+  mint: OnChainPublishResult,
 ): Promise<boolean> {
-  const { mint, expected } = input;
-  const existing = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, input);
+  const existing = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, expected);
   if (existing.state === 'absent') return false;
   const recorded = existing.state === 'confirmed' ? existing.envelope : undefined;
   const hex = (bytes?: Uint8Array) => (bytes ? ethers.hexlify(bytes) : undefined);
@@ -196,7 +275,7 @@ export async function adoptedMintAlreadyRecorded(
     return true;
   }
   throw new MintAdoptionRefusedError('existing-record-conflict', mint.kaId ?? mint.batchId,
-    `the local record of ${input.ual} is ${existing.state === 'invalid' ? 'unreadable' : 'for other content or another transaction'}`);
+    `the local record of ${expected.ual} is ${existing.state === 'invalid' ? 'unreadable' : 'for other content or another transaction'}`);
 }
 
 function publishResultFromMint(mint: KnowledgeAssetMintEvidence): OnChainPublishResult {

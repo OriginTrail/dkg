@@ -159,7 +159,7 @@ import {
   type PublisherAddressResolution,
   type PublisherSigner,
 } from './publisher-planning.js';
-import { adoptedMintAlreadyRecorded, mintOrAdoptKnowledgeAssets } from './adopt-existing-mint.js';
+import { isAdoptedMint, keepsExistingRecord, mintOrAdoptKnowledgeAssets, sealedMintAdoption } from './adopt-existing-mint.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
@@ -2104,7 +2104,7 @@ export class DKGPublisher implements Publisher {
     // r12 (3878010163) — the lifecycle hooks enter as the ONE shared contract (intersected,
     // not re-declared field by field), so a hook added to PublishLifecycleHooks is available
     // at this public entry point without editing this list.
-    options?: PublishLifecycleHooks & {
+    options?: PublishLifecycleHooks & Pick<PublishOptions, 'adoptExistingMint'> & {
       operationCtx?: OperationContext;
       clearSharedMemoryAfter?: boolean;
       /** Triggers remap: moves data from the default data graph to `/context/{id}`. */
@@ -2163,7 +2163,6 @@ export class DKGPublisher implements Publisher {
       privateMerkleRoot?: PublishOptions['privateMerkleRoot'];
       privateTripleCount?: PublishOptions['privateTripleCount'];
       pricingPolicy?: PublishOptions['pricingPolicy'];
-      adoptExistingMint?: PublishOptions['adoptExistingMint'];
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
@@ -2699,10 +2698,10 @@ export class DKGPublisher implements Publisher {
     const normalizedAllowedPeers = [...new Set((allowedPeers ?? []).map((p) => p.trim()).filter(Boolean))];
     const normalizedPublisherPeerId = publisherPeerId.trim();
     const graphPublish = resolveGraphScopedPublishDescriptor({ kind: 'initial', options });
-    // Reconcile records the seal's existing mint: no signer or funding plan,
-    // member ciphertext, ACK round or transaction.
-    const adoptOnly = options.adoptExistingMint;
-    if (adoptOnly && !graphPublish) throw new Error('adoptExistingMint requires a sealed graph-scoped publish');
+    // A sealed publish adopts its own late mint; reconcile (adoptOnly) records it and sends nothing.
+    const sealedAdoption = sealedMintAdoption(this.store, graphPublish, { contextGraphId, subGraphName: options.subGraphName,
+      existingOnly: options.adoptExistingMint, log: (message) => this.log.info(ctx, message) });
+    const adoptOnly = sealedAdoption?.existingOnly;
     assertPublicationPricingPolicyApplicable(pricingPolicy, {
       kind: 'initial',
       graphScoped: graphPublish !== undefined,
@@ -2732,14 +2731,9 @@ export class DKGPublisher implements Publisher {
     // can be resolved at all, the on-chain branch throws
     // `PublisherWalletRequiredError` instead of silently degrading.
     const hasAttributionOverride = options.publisherNodeIdentityIdOverride !== undefined;
-    const publisherPlanning = adoptOnly
-      ? await this.publisherPlanner.prepareMintAdoption()
-      : await this.publisherPlanner.prepare(publisherContextGraphId);
+    const publisherPlanning = await (adoptOnly ? this.publisherPlanner.prepareMintAdoption(publisherContextGraphId) : this.publisherPlanner.prepare(publisherContextGraphId));
     const chainV10Ready = publisherPlanning.chainV10Ready;
     const canAttemptOnChainPublish = publisherPlanning.canAttemptOnChainPublish;
-    if (adoptOnly && (publisherContextGraphId === undefined || !chainV10Ready)) {
-      throw new Error('adoptExistingMint requires an on-chain context graph id and a V10-ready chain');
-    }
 
     // RFC-001 §9.x — sign-at-creation. The publisher is a pure
     // transport layer for the AuthorAttestation: the seal is built at
@@ -3336,10 +3330,7 @@ export class DKGPublisher implements Publisher {
     // (the agent wires it eagerly), but those are intentional local
     // publishes and must not fail before the local branch below can run.
     const v10ACKProvider = options.v10ACKProvider;
-    const shouldCollectV10ACKs =
-      v10ACKProvider !== undefined &&
-      canAttemptOnChainPublish &&
-      !adoptOnly;
+    const shouldCollectV10ACKs = v10ACKProvider !== undefined && canAttemptOnChainPublish && !adoptOnly;
     let v10ACKs: V10CoreNodeACK[] | undefined;
     if (shouldCollectV10ACKs) {
       onPhase?.('collect_v10_acks', 'start');
@@ -3825,12 +3816,7 @@ export class DKGPublisher implements Publisher {
         onPhase?.('chain:sign', 'start');
         signStarted = true;
         if (!publisherSigner && !adoptOnly) throw new PublisherWalletRequiredError('publish');
-        if (publisherSigner) {
-          this.log.info(
-            ctx,
-            `Signing on-chain publish (attributionId=${attributionIdentityId}${hasAttributionOverride ? ' [override]' : ''}, signer=${publisherSigner.address}, source=${publisherSigner.source})`,
-          );
-        }
+        if (publisherSigner) this.log.info(ctx, `Signing on-chain publish (attributionId=${attributionIdentityId}${hasAttributionOverride ? ' [override]' : ''}, signer=${publisherSigner.address}, source=${publisherSigner.source})`);
 
         onPhase?.('chain:sign', 'end');
         signStarted = false;
@@ -3966,7 +3952,6 @@ export class DKGPublisher implements Publisher {
             },
           });
         }
-        let adoptedMint = false;
         try {
           // OT-RFC-49 / WS-D — handshake hardening. When the publisher ran the
           // curated catalog path, the chain submit MUST carry the same
@@ -4005,7 +3990,7 @@ export class DKGPublisher implements Publisher {
               merkleLeafCount: kcMerkleLeafCount,
             },
           });
-          const minted = await mintOrAdoptKnowledgeAssets(this.chain, {
+          onChainResult = await mintOrAdoptKnowledgeAssets(this.chain, {
             publishOperationId,
             contextGraphId: v10CgId,
             publisherAddress: publisherSigner?.address,
@@ -4045,14 +4030,7 @@ export class DKGPublisher implements Publisher {
             onBroadcast: emitWriteAheadStart,
             onBroadcastAccepted: (signal) =>
               onBroadcastAccepted?.({ ...signal, operationKind: 'create' }),
-          }, {
-            expected: graphPublish && reservedKaId !== undefined
-              ? { kaId: reservedKaId, merkleRoot: kcMerkleRoot, contextGraphId: v10CgId, authorAddress: effectiveAuthorAddress }
-              : undefined,
-            existingOnly: adoptOnly,
-          });
-          onChainResult = minted.result;
-          adoptedMint = minted.adopted;
+          }, sealedAdoption);
         } finally {
           if (writeAhead.didWriteAhead()) onPhase?.('chain:writeahead', 'end');
         }
@@ -4065,12 +4043,7 @@ export class DKGPublisher implements Publisher {
           bestEffortNotify(onPublishConfirmed, { txHash: onChainResult.txHash });
         }
 
-        // An adopted mint keeps what its original transaction paid.
-        if (adoptedMint) {
-          this.log.info(ctx, `Adopted the existing mint of ${onChainResult.kaId}: tx=${onChainResult.txHash} block=${onChainResult.blockNumber}`);
-        } else {
-          onChainResult.tokenAmount = tokenAmount;
-        }
+        if (!isAdoptedMint(onChainResult)) onChainResult.tokenAmount = tokenAmount; // an adopted mint keeps its original cost
 
         const kaId = onChainResult.kaId ?? onChainResult.batchId;
         if (reservedKaId !== undefined && kaId !== reservedKaId) {
@@ -4111,18 +4084,6 @@ export class DKGPublisher implements Publisher {
           },
         });
 
-        // An adopted mint may already be recorded, by the run that minted it or by
-        // chain reconcile: keep that record rather than write a second one.
-        const keepAdoptedRecord = adoptedMint && graphPublish !== undefined && await adoptedMintAlreadyRecorded(
-          this.store, { contextGraphId, ual, mint: onChainResult, expected: {
-            assertionVersion: graphPublish.scope.assertionVersion,
-            assertionGraph: knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.VerifiableMemory, graphPublish.scope, options.subGraphName),
-            publicTripleCount: graphPublish.publicTripleCount,
-            privateTripleCount: graphPublish.privateTripleCount,
-            ...(privateRoots[0] ? { privateMerkleRoot: privateRoots[0] } : {}),
-            merkleRoot: kcMerkleRoot,
-          } },
-        );
         for (const km of kaMetadata) {
           km.kcUal = ual;
         }
@@ -4187,7 +4148,7 @@ export class DKGPublisher implements Publisher {
             q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
           );
         }
-        if (graphPublish && !keepAdoptedRecord) {
+        if (graphPublish && !keepsExistingRecord(onChainResult)) {
           await replaceLocallyTrustedKnowledgeAssetControls(
             this.store,
             graphPublish.scope.ual,
@@ -4227,7 +4188,7 @@ export class DKGPublisher implements Publisher {
         } else {
           await this.store.insert(vmQuads);
         }
-        if (!keepAdoptedRecord) await this.store.insert(confirmedQuads);
+        if (!keepsExistingRecord(onChainResult)) await this.store.insert(confirmedQuads);
         // GH #1078 — supersede/persist private slices only now that the chain
         // has confirmed (before returning 'confirmed', so no read sees the KA
         // confirmed without its private data).
