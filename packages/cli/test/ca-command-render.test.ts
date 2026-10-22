@@ -252,7 +252,7 @@ describe('dkg ca contracts, mine and status', () => {
       `  owner:     ${OWNER}`,
       `  buyerKey:  ${BUYER}`,
       '  owned:     42, 43',
-      '  assigned:  1',
+      '  assigned:  44',
       '    account 44: active; 7.0 of 1000.0 TRAC used; expires 2026-11-30T00:00:00.000Z',
     ]);
     const none = await run(['ca', 'mine'], { mine: vi.fn(async () => ({ owner: null, buyerKey: null, owned: [], assigned: [] })) });

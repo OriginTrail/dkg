@@ -98,7 +98,7 @@ export function mineLines(m: CaMineResponse): string[] {
       ['owner', m.owner ?? 'none (the node has no operational wallet)'],
       ['buyerKey', m.buyerKey ?? 'none (the node holds no signer for its buyer key)'],
       ['owned', m.owned.length === 0 ? 'none' : m.owned.map((a) => a.accountId).join(', ')],
-      ['assigned', m.assigned.length === 0 ? 'none' : String(m.assigned.length)],
+      ['assigned', m.assigned.length === 0 ? 'none' : m.assigned.map((a) => a.accountId).join(', ')],
     ]),
   ];
   for (const a of m.assigned) {
