@@ -7,8 +7,7 @@ import type { GraphScopedDurableManifestPlan } from '../src/sync/durable-integri
 import {
   createDurableDataRoundBoundary,
   DEFAULT_DURABLE_DATA_ROUND_BUDGET,
-  manifestFirstGraphEnd,
-  manifestHasCheckpointableGraph,
+  manifestGraphsAfter,
 } from '../src/sync/requester/durable-data-round.js';
 import { planBoundedGraphScopedDurableBatch } from '../src/sync/durable-integrity.js';
 import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
@@ -41,16 +40,34 @@ function manifestOfSizes(rowCounts: readonly number[]): GraphScopedDurableManife
   } as unknown as GraphScopedDurableManifestPlan;
 }
 
-function progress(
-  resumedFromOffset: number,
-  nextOffset: number,
-  acceptedQuads = nextOffset - resumedFromOffset,
-  acceptedHeapBytesEstimate = 0,
-): SyncPageProgress {
-  return { resumedFromOffset, nextOffset, acceptedQuads, acceptedHeapBytesEstimate };
+/** `count` retained rows of graph `index`, each with a literal of `literalLength` characters. */
+function rowsOf(index: number, count: number, literalLength = 1): Quad[] {
+  return Array.from({ length: count }, (_, row) => ({
+    subject: `urn:durable-round:${index}:${row}`,
+    predicate: 'urn:durable-round:value',
+    object: `"${'v'.repeat(literalLength)}"`,
+    graph: graphOf(index),
+  }));
 }
 
-const SMALL_BUDGET = { softRows: 10, softHeapBytes: 1_000, maxRows: 30, maxHeapBytes: 3_000 };
+/**
+ * Feed one round's pages to its boundary. Each page retains `quads` and moves
+ * the responder's raw offset past them and past `filtered` rows it dropped.
+ */
+function roundOf(stop: (progress: SyncPageProgress) => boolean, resumedFromOffset = 0) {
+  let nextOffset = resumedFromOffset;
+  let acceptedQuads = 0;
+  let acceptedHeapBytesEstimate = 0;
+  return (quads: Quad[], filtered = 0): boolean => {
+    nextOffset += quads.length + filtered;
+    acceptedQuads += quads.length;
+    acceptedHeapBytesEstimate += quads.reduce((total, quad) => total + estimateQuadHeapBytes(quad), 0);
+    return stop({ resumedFromOffset, nextOffset, acceptedQuads, acceptedHeapBytesEstimate, pageQuads: quads });
+  };
+}
+
+const ROW_BUDGET = { softRows: 10, softHeapBytes: 1e12, maxRows: 30, maxHeapBytes: 1e12 };
+const HEAP_BUDGET = { softRows: 1e12, softHeapBytes: 1_000, maxRows: 1e12, maxHeapBytes: 3_000 };
 
 /**
  * A responder for one rootless snapshot: DATA row `i` belongs to the manifest
@@ -132,94 +149,97 @@ function dataFetchParams(
 }
 
 describe('full-graph durable data round boundary', () => {
-  it('needs a graph boundary strictly inside the round to keep a checkpoint', () => {
-    const manifest = syntheticManifest(3, 4);
-    expect(manifestHasCheckpointableGraph(manifest, 0, 3)).toBe(false);
-    // An incomplete round never checkpoints a final graph ending at its stop offset.
-    expect(manifestHasCheckpointableGraph(manifest, 0, 4)).toBe(false);
-    expect(manifestHasCheckpointableGraph(manifest, 0, 5)).toBe(true);
-    expect(manifestHasCheckpointableGraph(manifest, 0, 8)).toBe(true);
-    expect(manifestHasCheckpointableGraph(manifest, 4, 8)).toBe(false);
-    expect(manifestHasCheckpointableGraph(manifest, 4, 9)).toBe(true);
-    expect(manifestHasCheckpointableGraph(manifest, 8, 12)).toBe(false);
-    // Rows past the manifest's last graph, or no graphs at all, hold nothing to keep.
-    expect(manifestHasCheckpointableGraph(manifest, 12, 20)).toBe(false);
-    expect(manifestHasCheckpointableGraph(syntheticManifest(0, 4), 0, 4)).toBe(false);
-    // Zero-public descriptors add no boundary of their own.
-    const withEmpty = {
-      ...manifest,
-      descriptors: [{ assertionGraph: graphOf(9), publicTripleCount: 0 }, ...manifest.descriptors],
-    } as unknown as GraphScopedDurableManifestPlan;
-    expect(manifestHasCheckpointableGraph(withEmpty, 0, 4)).toBe(false);
-    expect(manifestHasCheckpointableGraph(withEmpty, 0, 5)).toBe(true);
+  it('keeps reading until the round holds a graph it can checkpoint, then stops at a soft limit', () => {
+    const page = roundOf(createDurableDataRoundBoundary({ manifest: syntheticManifest(10, 4), budget: ROW_BUDGET }));
+    expect(page(rowsOf(0, 3))).toBe(false);
+    expect(page(rowsOf(0, 1))).toBe(false);
+    // Ten rows: the soft limit, with two whole graphs.
+    expect(page([...rowsOf(1, 4), ...rowsOf(2, 2)])).toBe(true);
   });
 
-  it('stops at a checkpointable graph once a soft row or heap limit is reached', () => {
-    const manifest = syntheticManifest(10, 4);
-    const stop = createDurableDataRoundBoundary({ manifest, budget: SMALL_BUDGET });
-    expect(stop(progress(0, 9, 9))).toBe(false);
-    expect(stop(progress(0, 10, 10))).toBe(true);
-    // A soft limit inside the round's only graph waits for the next boundary.
-    expect(stop(progress(8, 12, 10))).toBe(false);
-    expect(stop(progress(8, 13, 10))).toBe(true);
-    // The heap estimate ends a round of a few large rows the same way.
-    expect(stop(progress(0, 6, 6, 999))).toBe(false);
-    expect(stop(progress(0, 6, 6, 1_000))).toBe(true);
+  it('never stops at the end of the only whole graph, which an incomplete round replays', () => {
+    const budget = { ...ROW_BUDGET, softRows: 4 };
+    const page = roundOf(createDurableDataRoundBoundary({ manifest: syntheticManifest(3, 4), budget }));
+    expect(page(rowsOf(0, 4))).toBe(false);
+    expect(page(rowsOf(1, 1))).toBe(true);
   });
 
-  it('keeps the soft deadline of a recovery slice', () => {
-    const manifest = syntheticManifest(10, 4);
-    let now = 1_000;
-    const stop = createDurableDataRoundBoundary({
-      manifest,
-      budget: SMALL_BUDGET,
-      settlementSliceDeadline: 2_000,
-      now: () => now,
-    });
-    expect(stop(progress(0, 6, 6))).toBe(false);
-    now = 2_000;
-    expect(stop(progress(0, 6, 6))).toBe(true);
-    expect(stop(progress(0, 4, 4))).toBe(false);
-  });
-
-  it('reads a first graph larger than the hard limits whole, and stops only past it', () => {
-    const manifest = manifestOfSizes([100, 4, 4]);
+  it('counts the rows a round retains, not the raw responder offset, when rows are filtered', () => {
     const onHardLimit = vi.fn();
-    const stop = createDurableDataRoundBoundary({ manifest, budget: SMALL_BUDGET, onHardLimit });
-    // Inside its first graph a round reads on past every limit: that graph is its allowance.
-    expect(stop(progress(0, 50, 50, 50_000))).toBe(false);
-    expect(stop(progress(0, 100, 100, 100_000))).toBe(false);
-    // One row past the first graph it holds a checkpointable graph and stops.
-    expect(stop(progress(0, 101, 101))).toBe(true);
-    // A round resumed after the large graph has the next graph as its allowance.
-    expect(stop(progress(100, 103, 3))).toBe(false);
+    const page = roundOf(createDurableDataRoundBoundary({
+      manifest: manifestOfSizes([300, 10]), budget: ROW_BUDGET, onHardLimit,
+    }));
+    // 30 filtered rows and 280 rows of the first graph: the raw offset (310) is past
+    // that graph's end, but the graph is not whole yet.
+    expect(page(rowsOf(0, 280), 30)).toBe(false);
+    expect(page(rowsOf(0, 20))).toBe(true);
     expect(onHardLimit).not.toHaveBeenCalled();
   });
 
-  it('ends a round at the hard limit when it holds more than its first graph declares', () => {
-    const manifest = syntheticManifest(2, 100);
+  it('reads a first graph larger than the hard limits whole, and stops just past it', () => {
     const onHardLimit = vi.fn();
-    const stop = createDurableDataRoundBoundary({ manifest, budget: SMALL_BUDGET, onHardLimit });
-    expect(stop(progress(0, 29, 29))).toBe(false);
-    // More rows than the first graph declares before it is whole.
-    expect(stop(progress(0, 50, 101))).toBe(true);
-    // Rows past the manifest's end.
-    expect(stop(progress(200, 229, 29))).toBe(false);
-    expect(stop(progress(200, 230, 30))).toBe(true);
-    expect(stop(progress(200, 212, 12, 3_000))).toBe(true);
-    expect(onHardLimit.mock.calls).toEqual([
-      [progress(0, 50, 101)],
-      [progress(200, 230, 30)],
-      [progress(200, 212, 12, 3_000)],
-    ]);
+    const page = roundOf(createDurableDataRoundBoundary({
+      manifest: manifestOfSizes([100, 4, 4]), budget: ROW_BUDGET, onHardLimit,
+    }));
+    // Inside its first graph a round reads on past every limit: that graph is its allowance.
+    expect(page(rowsOf(0, 50))).toBe(false);
+    expect(page(rowsOf(0, 50))).toBe(false);
+    expect(page(rowsOf(1, 1))).toBe(true);
+    // A resumed round starts at a verified graph boundary: its first graph is the one starting there.
+    const resumed = roundOf(createDurableDataRoundBoundary({
+      manifest: manifestOfSizes([4, 100, 4]), budget: ROW_BUDGET, onHardLimit,
+    }), 4);
+    expect(resumed(rowsOf(1, 60))).toBe(false);
+    expect(resumed(rowsOf(1, 40))).toBe(false);
+    expect(resumed(rowsOf(2, 1))).toBe(true);
+    // The same holds for the heap estimate of a few very large rows.
+    const heavy = roundOf(createDurableDataRoundBoundary({
+      manifest: manifestOfSizes([3, 1, 1]), budget: HEAP_BUDGET, onHardLimit,
+    }));
+    expect(heavy(rowsOf(0, 2, 20_000))).toBe(false);
+    expect(heavy(rowsOf(0, 1, 20_000))).toBe(false);
+    expect(heavy(rowsOf(1, 1))).toBe(true);
+    expect(onHardLimit).not.toHaveBeenCalled();
   });
 
-  it('finds the end of the first graph with rows after an offset', () => {
+  it('keeps the soft deadline of a recovery slice', () => {
+    let now = 1_000;
+    const boundary = () => createDurableDataRoundBoundary({
+      manifest: syntheticManifest(10, 4), budget: ROW_BUDGET, settlementSliceDeadline: 2_000, now: () => now,
+    });
+    const page = roundOf(boundary());
+    expect(page([...rowsOf(0, 4), ...rowsOf(1, 1)])).toBe(false);
+    now = 2_000;
+    expect(page(rowsOf(1, 1))).toBe(true);
+    // A round with no whole graph reads on past the deadline.
+    expect(roundOf(boundary())(rowsOf(0, 3))).toBe(false);
+  });
+
+  it('ends a round at the hard limit for rows outside its first graph\'s allowance', () => {
+    const onHardLimit = vi.fn();
+    const boundary = () => createDurableDataRoundBoundary({ manifest: manifestOfSizes([100, 50, 50]), budget: ROW_BUDGET, onHardLimit });
+    // More rows of the first graph than it declares.
+    expect(roundOf(boundary())(rowsOf(0, 101))).toBe(true);
+    // Rows of later graphs while the first is still incomplete.
+    const outOfOrder = roundOf(boundary());
+    expect(outOfOrder([...rowsOf(0, 5), ...rowsOf(1, 29)])).toBe(false);
+    expect(outOfOrder(rowsOf(1, 1))).toBe(true);
+    // Rows past the manifest's end.
+    const pastEnd = roundOf(boundary(), 200);
+    expect(pastEnd(rowsOf(7, 29))).toBe(false);
+    expect(pastEnd(rowsOf(7, 1))).toBe(true);
+    const heavyPastEnd = roundOf(createDurableDataRoundBoundary({
+      manifest: manifestOfSizes([4]), budget: HEAP_BUDGET, onHardLimit,
+    }), 4);
+    expect(heavyPastEnd(rowsOf(7, 1, 3_000))).toBe(true);
+    expect(onHardLimit).toHaveBeenCalledTimes(4);
+  });
+
+  it('lists the graphs with rows a round reads after its resume offset', () => {
     const manifest = manifestOfSizes([0, 5, 0, 7]);
-    expect(manifestFirstGraphEnd(manifest, 0)).toBe(5);
-    expect(manifestFirstGraphEnd(manifest, 4)).toBe(5);
-    expect(manifestFirstGraphEnd(manifest, 5)).toBe(12);
-    expect(manifestFirstGraphEnd(manifest, 12)).toBeUndefined();
+    expect(manifestGraphsAfter(manifest, 0)).toEqual([{ graph: graphOf(1), rows: 5 }, { graph: graphOf(3), rows: 7 }]);
+    expect(manifestGraphsAfter(manifest, 5)).toEqual([{ graph: graphOf(3), rows: 7 }]);
+    expect(manifestGraphsAfter(manifest, 12)).toEqual([]);
   });
 
   it('holds one asset larger than the hard limit whole and checkpoints it, then resumes after it', async () => {
@@ -231,14 +251,13 @@ describe('full-graph durable data round boundary', () => {
     const responder = syntheticResponder(manifest);
     const remotePeerId = `${PEER}-large`;
     const checkpointStore = new MemorySyncCheckpointStore();
-    const boundary = createDurableDataRoundBoundary({ manifest });
 
     const first = await fetchSyncPages(dataFetchParams(responder, {
       remotePeerId,
       checkpointStore,
       manifestDigest: DIGEST,
       manifestPrefixDigestAtOffset: () => PREFIX,
-      shouldStopAfterPage: boundary,
+      shouldStopAfterPage: createDurableDataRoundBoundary({ manifest }),
     }));
 
     // The round read the whole asset and stopped on the next page.
@@ -262,7 +281,7 @@ describe('full-graph durable data round boundary', () => {
       checkpointStore,
       manifestDigest: DIGEST,
       manifestPrefixDigestAtOffset: () => PREFIX,
-      shouldStopAfterPage: boundary,
+      shouldStopAfterPage: createDurableDataRoundBoundary({ manifest }),
     }));
     expect(second.resumedFromOffset).toBe(largeRows);
     expect(responder.requests[0]!.offset).toBe(largeRows);
@@ -297,8 +316,13 @@ describe('full-graph durable data round boundary', () => {
     // It ended at the first page past a soft limit that holds a whole graph.
     const last = observed.at(-1)!;
     expect(last.acceptedQuads >= budget.softRows || last.acceptedHeapBytesEstimate >= budget.softHeapBytes).toBe(true);
-    expect(manifestHasCheckpointableGraph(manifest, 0, last.nextOffset)).toBe(true);
-    expect(observed.slice(0, -1).every((page) => !boundary(page))).toBe(true);
+    const planned = planBoundedGraphScopedDurableBatch(
+      round.quads, manifest, 0, round.nextOffset, false, 0, round.quadRawOffsets,
+    );
+    expect(planned?.completedGraphCount).toBeGreaterThan(0);
+    // Replayed page by page, the same boundary decides to stop only on the last page.
+    const replay = createDurableDataRoundBoundary({ manifest });
+    expect(observed.map((page) => replay(page))).toEqual([...observed.slice(1).map(() => false), true]);
     expect(responder.requests.at(-1)!.offset + responder.requests.at(-1)!.limit)
       .toBeLessThan(manifest.manifestRowCount);
   });

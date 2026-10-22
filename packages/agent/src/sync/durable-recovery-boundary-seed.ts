@@ -12,8 +12,10 @@ import type { DurableMetaContinuation } from './requester/durable-sync.js';
  * A verified DATA prefix of one manifest generation, whichever peer served it.
  *
  * Durable checkpoints are keyed by the peer that served them, but what they
- * prove is local: every graph before the offset was verified against the
- * manifest and stored here.
+ * record is local: every graph before the offset was verified against the
+ * manifest and stored here. A boundary is worth no more than the checkpoint it
+ * was read from: it is offered only while that checkpoint still records it,
+ * and only for that checkpoint's lifetime.
  */
 export interface VerifiedDurableBoundary {
   readonly manifestDigest: DurableManifestDigest;
@@ -22,10 +24,13 @@ export interface VerifiedDurableBoundary {
   readonly terminal: boolean;
   /** When the checkpoint was last written, i.e. when this generation was last verified. */
   readonly updatedAtMs: number;
+  /** The checkpoint the boundary was read from. */
+  readonly sourceCheckpointKey: string;
 }
 
 export function verifiedDurableBoundaryOf(
   entry: SyncCheckpointEntry | undefined,
+  sourceCheckpointKey: string,
 ): VerifiedDurableBoundary | undefined {
   if (!entry?.manifestDigest || !entry.manifestPrefixDigest || entry.offset <= 0) return undefined;
   return {
@@ -34,7 +39,27 @@ export function verifiedDurableBoundaryOf(
     offset: entry.offset,
     terminal: entry.terminal === true,
     updatedAtMs: entry.updatedAtMs,
+    sourceCheckpointKey,
   };
+}
+
+/**
+ * The checkpoint a boundary was read from, while it still records that
+ * boundary: unexpired, of the same generation, prefix and offset. A deleted or
+ * expired checkpoint, or one that moved, ends the boundary.
+ */
+export function liveDurableBoundarySource(
+  store: SyncCheckpointStore,
+  boundary: VerifiedDurableBoundary | undefined,
+): SyncCheckpointEntry | undefined {
+  if (!boundary) return undefined;
+  const source = store.get(boundary.sourceCheckpointKey);
+  return source
+    && source.manifestDigest === boundary.manifestDigest
+    && source.manifestPrefixDigest === boundary.manifestPrefixDigest
+    && source.offset === boundary.offset
+    ? source
+    : undefined;
 }
 
 /**
@@ -80,7 +105,9 @@ export function takeRejectedResumeOffset(
  * proves the same prefix (`resolveManifestCheckpointDecision`); otherwise it
  * starts at row 0 as before. A terminal boundary is never given: there is no
  * interrupted round to continue, and it would replace the peer's own offset.
- * Returns whether the checkpoint was replaced.
+ * The written checkpoint keeps the source checkpoint's lifetime, and nothing
+ * is written once that checkpoint no longer records the boundary. Returns
+ * whether the checkpoint was replaced.
  */
 export function seedVerifiedDurableBoundary(
   store: SyncCheckpointStore,
@@ -88,6 +115,8 @@ export function seedVerifiedDurableBoundary(
   boundary: VerifiedDurableBoundary | undefined,
 ): boolean {
   if (!boundary || boundary.terminal) return false;
+  const source = liveDurableBoundarySource(store, boundary);
+  if (!source) return false;
   const current = store.get(checkpointKey);
   if (current && current.offset >= boundary.offset) return false;
   deleteSyncPageCheckpoint(store, checkpointKey);
@@ -95,7 +124,7 @@ export function seedVerifiedDurableBoundary(
     checkpointKey,
     boundary.offset,
     boundary.manifestDigest,
-    undefined,
+    source.updatedAtMs,
     boundary.manifestPrefixDigest,
   );
   return true;

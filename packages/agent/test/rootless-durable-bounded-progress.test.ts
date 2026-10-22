@@ -550,12 +550,14 @@ describe('bounded rootless durable progress', () => {
             nextOffset: data.length - 1,
             acceptedQuads: data.length - 1,
             acceptedHeapBytesEstimate: 0,
+            pageQuads: data.slice(0, -1),
           }) ?? false,
           shouldStopAfterPage?.({
             resumedFromOffset: 0,
             nextOffset: data.length,
             acceptedQuads: data.length,
             acceptedHeapBytesEstimate: 0,
+            pageQuads: data.slice(-1),
           }) ?? false,
         );
         return pageResult('data', { quads: data, nextOffset: data.length });
@@ -621,6 +623,7 @@ describe('bounded rootless durable progress', () => {
           nextOffset: data.length,
           acceptedQuads: data.length,
           acceptedHeapBytesEstimate: 0,
+          pageQuads: data,
         }) ?? false);
         return pageResult('data', { quads: data, nextOffset: data.length });
       },
@@ -665,67 +668,57 @@ describe('bounded rootless durable progress', () => {
     const fixtures = orderedAssets();
     const meta = fixtures.flatMap((entry) => entry.meta);
     const data = fixtures.flatMap((entry) => entry.payload);
+    const firstGraph = fixtures[0]!.payload;
     const warnings: string[] = [];
-    let boundary: DurableSyncFetchRequest['shouldStopAfterPage'];
-
-    await runDurableSync({
-      ctx,
-      remotePeerId: 'peer-round-limit',
-      contextGraphIds: [CONTEXT_GRAPH_ID],
-      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      fetchSyncPages: async ({ phase, shouldStopAfterPage }: DurableSyncFetchRequest) => {
-        if (phase === 'meta') return pageResult('meta', { quads: meta, nextOffset: meta.length });
-        boundary = shouldStopAfterPage;
-        return pageResult('data', { quads: data, nextOffset: data.length });
-      },
-      processDurableBatchInWorker: processBatch,
-      storeInsert: async () => {},
-      storeGraphScopedAsset: async () => 'applied',
-      deleteCheckpoint: () => {},
-      setCheckpoint: () => {},
-      logInfo: () => {},
-      logWarn: (_ctx, message) => { warnings.push(message); },
-      logDebug: () => {},
+    // Each run is one DATA round, with a boundary of its own.
+    const roundBoundary = async (remotePeerId: string, onVerifiedFullSnapshot?: () => Promise<void>) => {
+      let boundary: DurableSyncFetchRequest['shouldStopAfterPage'] = () => true;
+      await runDurableSync({
+        ctx,
+        remotePeerId,
+        contextGraphIds: [CONTEXT_GRAPH_ID],
+        durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+        fetchSyncPages: async ({ phase, shouldStopAfterPage }: DurableSyncFetchRequest) => {
+          if (phase === 'meta') return pageResult('meta', { quads: meta, nextOffset: meta.length });
+          boundary = shouldStopAfterPage;
+          return pageResult('data', { quads: data, nextOffset: data.length });
+        },
+        processDurableBatchInWorker: processBatch,
+        storeInsert: async () => {},
+        storeGraphScopedAsset: async () => 'applied',
+        ...(onVerifiedFullSnapshot ? { onVerifiedFullSnapshot } : {}),
+        deleteCheckpoint: () => {},
+        setCheckpoint: () => {},
+        logInfo: () => {},
+        logWarn: (_ctx, message) => { warnings.push(message); },
+        logDebug: () => {},
+      });
+      return boundary;
+    };
+    const page = (nextOffset: number, acceptedQuads: number, pageQuads: readonly Quad[]) => ({
+      resumedFromOffset: 0, nextOffset, acceptedQuads, acceptedHeapBytesEstimate: 0, pageQuads,
     });
 
     // Every full-graph DATA round gets the boundary, not only recovery slices.
-    expect(boundary).toBeDefined();
-    const { softRows, maxRows } = DEFAULT_DURABLE_DATA_ROUND_BUDGET;
-    const page = (nextOffset: number, acceptedQuads: number) => ({
-      resumedFromOffset: 0, nextOffset, acceptedQuads, acceptedHeapBytesEstimate: 0,
-    });
-    expect(boundary!(page(5, 5))).toBe(false);
-    expect(boundary!(page(5, softRows))).toBe(true);
+    const soft = await roundBoundary('peer-round-soft');
+    expect(soft).toBeDefined();
+    expect(soft!(page(firstGraph.length, firstGraph.length, firstGraph))).toBe(false);
+    expect(soft!(page(data.length, DEFAULT_DURABLE_DATA_ROUND_BUDGET.softRows, data.slice(firstGraph.length))))
+      .toBe(true);
     expect(warnings).toEqual([]);
-    // A round holding more rows than its first graph declares ends at the hard limit, without progress.
-    expect(boundary!(page(3, maxRows))).toBe(true);
+
+    // Rows past the count the first graph declares end the round at the hard limit, without progress.
+    const hard = await roundBoundary('peer-round-limit');
+    const extra = { ...firstGraph[0]!, subject: 'urn:bounded:extra' };
+    expect(hard!(page(firstGraph.length + 1, firstGraph.length + 1, [...firstGraph, extra]))).toBe(true);
     expect(warnings).toEqual([
-      expect.stringContaining(`reached its hard limit at ${maxRows} rows (offset 0->3)`),
+      expect.stringContaining(
+        `reached its hard limit at ${firstGraph.length + 1} rows (offset 0->${firstGraph.length + 1})`,
+      ),
     ]);
 
     // A caller that needs one complete snapshot from row 0 keeps a single round.
-    let snapshotBoundary: DurableSyncFetchRequest['shouldStopAfterPage'] = () => true;
-    await runDurableSync({
-      ctx,
-      remotePeerId: 'peer-round-snapshot',
-      contextGraphIds: [CONTEXT_GRAPH_ID],
-      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      fetchSyncPages: async ({ phase, shouldStopAfterPage }: DurableSyncFetchRequest) => {
-        if (phase === 'meta') return pageResult('meta', { quads: meta, nextOffset: meta.length });
-        snapshotBoundary = shouldStopAfterPage;
-        return pageResult('data', { quads: data, nextOffset: data.length });
-      },
-      processDurableBatchInWorker: processBatch,
-      storeInsert: async () => {},
-      storeGraphScopedAsset: async () => 'applied',
-      onVerifiedFullSnapshot: async () => {},
-      deleteCheckpoint: () => {},
-      setCheckpoint: () => {},
-      logInfo: () => {},
-      logWarn: () => {},
-      logDebug: () => {},
-    });
-    expect(snapshotBoundary).toBeUndefined();
+    expect(await roundBoundary('peer-round-snapshot', async () => {})).toBeUndefined();
   });
 
   it('waits for adjacent zero-public descriptors before checkpointing their shared offset', async () => {
