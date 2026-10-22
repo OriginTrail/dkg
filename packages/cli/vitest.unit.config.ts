@@ -85,6 +85,7 @@ export default defineConfig({
           'test/daemon/plugin-loader.test.ts',
           'test/daemon/routes/plugins.test.ts',
           'test/daemon-pca-routes.test.ts',
+          'test/daemon-ca-routes.test.ts',
           'test/knowledge-assets-error-mapping.test.ts',
           'test/promote-admission-route.test.ts',
           'test/daemon-identity-wallet-routes.test.ts',
