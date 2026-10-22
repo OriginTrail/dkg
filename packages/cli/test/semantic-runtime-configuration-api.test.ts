@@ -118,6 +118,7 @@ async function fixture() {
     assertContextGraphOwner: vi.fn(async (cg: string, identity: string) => { if (cg !== graph || identity !== owner) throw new Error('not owner'); }),
     canReadContextGraph: vi.fn(async (_cg: string, opts: any) => allowed(opts.callerAgentAddress)),
     resolveContextGraphReadAuthority: vi.fn(async (_cg: string, opts: any) => ({ outcome: allowed(opts.callerAgentAddress) ? 'allowed' : 'denied' })),
+    canUseSharedMemoryForContextGraph: vi.fn(async () => true),
     resolveSharedMemoryReadAdmission: vi.fn(async (_cg: string, opts: any) => ({
       outcome: allowed(opts.callerAgentAddress) ? 'allowed' : 'denied',
     })),
