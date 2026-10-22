@@ -197,6 +197,9 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'getTransactionReceiptWithFailover',
   'getTransactionWithFailover',
   'waitForReceiptWithFailover',
+  // Protected same-nonce speed-up behind that receipt wait; the mock mines
+  // nothing it could re-price.
+  'createStuckTransactionRecovery',
   'prepareSignerTransaction',
   'signPreparedTransaction',
   // #1336 read-facade + populate plumbing: the chain-concept read facades over

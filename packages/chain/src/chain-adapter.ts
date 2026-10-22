@@ -1,3 +1,5 @@
+import type { PreBroadcastSignal, ReplacementBroadcastSignal } from './transaction-broadcast-types.js';
+export type { PreBroadcastSignal, ReplacementBroadcastSignal } from './transaction-broadcast-types.js';
 import type { ChainEvent } from './knowledge-asset-update-identity.js';
 export type { ChainEvent } from './knowledge-asset-update-identity.js';
 import type { ContextGraphAuthorityIndexRevisionReader } from './context-graph-authority-index-reader.js';
@@ -1104,6 +1106,15 @@ export interface V10PublishParams {
    * undo an accepted transaction and therefore must not fail the chain write.
    */
   onBroadcastAccepted?: (signal: PreBroadcastSignal) => Promise<void> | void;
+  /**
+   * Opts this write into stuck-transaction speed-up (stuck-transaction-recovery.ts): re-signing
+   * it at the same nonce with higher fees. Awaited before each replacement is broadcast, never for
+   * the original; **fail-closed**: a throw means that replacement is not sent. The call resolves
+   * with whichever hash is mined, which may differ from the one {@link onBroadcast} saw, so a
+   * caller whose durable record holds one hash per transaction must omit it. Neither this hook
+   * nor a failed replacement ever becomes the call's error.
+   */
+  onBeforeReplacementBroadcast?: (signal: ReplacementBroadcastSignal) => Promise<void> | void;
 }
 
 export interface V10UpdateKAParams {
@@ -1157,6 +1168,8 @@ export interface V10UpdateKAParams {
   onBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
   /** Post-send counterpart to {@link onBroadcast}; see V10PublishParams. */
   onBroadcastAccepted?: (signal: PreBroadcastSignal) => Promise<void> | void;
+  /** Stuck-transaction speed-up opt-in; see {@link V10PublishParams.onBeforeReplacementBroadcast}. */
+  onBeforeReplacementBroadcast?: (signal: ReplacementBroadcastSignal) => Promise<void> | void;
 }
 
 /**
@@ -1352,16 +1365,6 @@ export interface OperationalWalletRegistrationResult {
 export interface SignedTransactionEnvelope {
   readonly signedTx: string;
   readonly txHash: string;
-  readonly nonce?: number;
-}
-
-export interface PreBroadcastSignal {
-  /** The signed transaction's hash, known before it is sent. */
-  readonly txHash: string;
-  /**
-   * The account nonce the signed transaction reserved. Absent only when it could not be read —
-   * recovery treats that as "no proof of absence available" rather than guessing.
-   */
   readonly nonce?: number;
 }
 

@@ -1,7 +1,7 @@
 /**
  * Real two-wallet runtime + HTTP + persistent Oxigraph + SIGKILL/restart proof.
  * Build publisher/CLI first; run node --experimental-sqlite --import tsx
- * scripts/repro/publisher-live-control-restart.mts. No chain RPC or production writes.
+ * scripts/repro/publisher-live-control-restart.test.mts. No chain RPC or production writes.
  */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';

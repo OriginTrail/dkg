@@ -24,15 +24,7 @@ export function classifyScopedContentGraph(
   if (isKnownChildContextGraphPartition(graph, knownChildContextGraphs)) return undefined;
 
   const tail = graph.slice(root.length + 1);
-  if (
-    !tail ||
-    isMetadataGraphTail(tail) ||
-    isPrivateGraphTail(tail) ||
-    isRulesGraphTail(tail) ||
-    isStagingGraphTail(tail)
-  ) {
-    return undefined;
-  }
+  if (!tail) return undefined;
 
   // Normalize the optional registered subgraph coordinate once. Partition
   // semantics and draft ownership are identical below root and subgraphs.
@@ -44,6 +36,14 @@ export function classifyScopedContentGraph(
     subGraphName = first;
     partition = tail.length === first.length ? '' : tail.slice(first.length + 1);
   }
+  // Metadata uses the same coordinate parser but requires a registered
+  // subgraph even for explicit scope. Keep its distinct cached classification.
+  if (partition === '_shared_memory_meta') {
+    return subGraphName === undefined || registeredSubGraphs.has(subGraphName)
+      ? admit('shared-metadata', subGraphName) : undefined;
+  }
+  if (isMetadataGraphTail(tail) || isPrivateGraphTail(tail)
+    || isRulesGraphTail(tail) || isStagingGraphTail(tail)) return undefined;
   if (!partition) return admit('content', subGraphName);
   if (partition.startsWith('_shared_memory/')) return admit('shared', subGraphName);
   if (partition.startsWith('_verifiable_memory/')) return admit('verified', subGraphName);
