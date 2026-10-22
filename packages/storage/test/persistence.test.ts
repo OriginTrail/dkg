@@ -202,6 +202,16 @@ describe('certified adapter and decorator composition', () => {
 
 
 describe('Blazegraph acknowledged-write commitment', () => {
+  it.each(['true', 'TRUE', ''])('withholds certification for progress-monitor responses: %s', async monitor => {
+    const store = await createTripleStore({ backend: 'blazegraph', options: {
+      url: `http://blaze.test/sparql?monitor=${monitor}`, writesDurableOnAcknowledgement: true,
+    } });
+    expect(store.commitment).toBeUndefined(); await store.close();
+  });
+  it('retains the normal certificate with monitoring explicitly disabled', async () => {
+    const store = await createTripleStore({ backend: 'blazegraph', options: { url: 'http://blaze.test/sparql?monitor=false' } });
+    expect(store.commitment?.durability).toBe('restart-durable'); await store.close();
+  });
   it('reaches the outermost factory decorator by default and disappears when the operator opts out', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-blazegraph-commitment-')); directories.push(dir);
     const fetch = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('the barrier sends no Blazegraph request'));

@@ -1,5 +1,5 @@
-import { afterEach, expect, it, vi } from 'vitest';
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink } from 'node:fs/promises';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -35,7 +35,8 @@ afterEach(async () => {
 
 // Node cannot sync directories on Windows; the POSIX identity/barrier contract is tested here.
 // test-disable-allow: D1 #2962 -- owner=Jurij89 lane=storage-unit-linux expires=2026-11-14 Actual directory fsync runs in required Linux storage tests; Node has no Windows directory barrier.
-it.skipIf(process.platform === 'win32').each([
+describe.skipIf(process.platform === 'win32')('POSIX blob directory entry persistence', () => {
+it.each([
   [false, false], [true, false], [false, true], [true, true],
 ])('persists the actual blob parent for symlink/.. paths: relative=%s, existing=%s', async (relativePath, existing) => {
   root = await realpath(await mkdtemp(join(tmpdir(), 'dkg-blob-directory-')));
@@ -59,4 +60,24 @@ it.skipIf(process.platform === 'win32').each([
   store = new SharedMemoryLiteralBlobStore(new OxigraphStore(snapshot), { blobDir: configured, thresholdBytes: 10 });
   await expect(store.query(`SELECT ?value WHERE { GRAPH <${quad.graph}> { <urn:asset> <urn:value> ?value } }`))
     .resolves.toMatchObject({ bindings: [{ value: quad.object }] });
+});
+
+it('certifies an adopted blob file alias and the target name before exposing RDF', async () => {
+  root = await realpath(await mkdtemp(join(tmpdir(), 'dkg-blob-file-alias-')));
+  const blobDir = join(root, 'blobs'), adopted = join(root, 'adopted');
+  await Promise.all([mkdir(blobDir), mkdir(adopted)]);
+  const quad = { graph: 'urn:identity/_shared_memory', subject: 'urn:asset', predicate: 'urn:value', object: '"verified existing bytes behind a file alias"' };
+  const hash = createHash('sha256').update(quad.object).digest('hex');
+  await writeFile(join(adopted, hash), quad.object);
+  await symlink(`../adopted/${hash}`, join(blobDir, hash));
+  const backend = new OxigraphStore(join(root, 'store.nq'));
+  store = new SharedMemoryLiteralBlobStore(backend, { blobDir, thresholdBytes: 10 });
+  fault.parent = adopted; fault.fail = true;
+  await expect(store.insert([quad])).rejects.toMatchObject({ code: 'EIO' });
+  expect(fault.fileSynced).toBe(true); expect(fault.parentSyncs).toBeGreaterThan(0);
+  expect(await backend.countQuads(quad.graph)).toBe(0);
+  fault.fail = false; await store.insert([quad]); await store.commitment!.capture()();
+  await expect(store.query(`SELECT ?value WHERE { GRAPH <${quad.graph}> { <urn:asset> <urn:value> ?value } }`))
+    .resolves.toMatchObject({ bindings: [{ value: quad.object }] });
+});
 });
