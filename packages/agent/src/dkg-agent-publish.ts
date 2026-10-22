@@ -5234,30 +5234,15 @@ export class PublishMethods extends DKGAgentBase {
     };
 
     const queuedSeal = bareRoot(request.sealMerkleRoot);
-    const queuedWm = bareRoot(request.wmCurrentAssertion) ?? queuedSeal;
     const queuedVm = bareRoot(request.vmCurrentAssertion);
-    const liveWm = bareRoot(history.wmCurrentAssertion);
-    const liveSwm = bareRoot(history.swmCurrentAssertion);
     const liveVm = bareRoot(history.vmCurrentAssertion);
     if (!queuedSeal) return false;
-    if (liveSwm && liveSwm !== queuedSeal) return false;
-    if (liveWm && queuedWm && liveWm !== queuedWm) return false;
     if (liveVm && liveVm !== queuedSeal && liveVm !== queuedVm) return false;
 
-    // Normal post-publish cleanup removes the mutable lifecycle share pointer,
-    // while the append-only promote event remains. A crash can therefore leave
-    // recovery with no currentShareOperationId even though the named lifecycle
-    // still identifies the exact queued operation. Prefer the live pointer and
-    // otherwise use the most recent promoted event; newer content is already
-    // rejected above by the WM/SWM/VM root comparisons.
-    const liveShareOperationId = history.currentShareOperationId?.trim()
-      || [...history.events]
-        .reverse()
-        .find((event) => event.type === 'promoted' && event.shareOperationId?.trim())
-        ?.shareOperationId?.trim();
-    if (!liveShareOperationId || liveShareOperationId !== request.shareOperationId.trim()) {
-      return false;
-    }
+    // Canonical transaction/version and exact VM materialization are checked
+    // before this admission. A newer draft or share must not skip restoration
+    // of that publication's immutable controls. The confirmed projection owns
+    // workspace consumption guards and preserves those newer mutable heads.
     if (history.kaNumber && request.kaNumber && history.kaNumber !== request.kaNumber) {
       return false;
     }
