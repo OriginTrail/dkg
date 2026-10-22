@@ -1,4 +1,4 @@
-import { decodeAssertionReservationIdentity } from './assertion-reservation.js';
+import { decodeAssertionReservationIdentity, resolveAssertionReservationIdentity, type AssertionReservationIdentity } from './assertion-reservation.js';
 import { assertPromoteSeal } from './assertion-promote-seal.js';
 import { certifyPromoteNoEffectRejection } from './promote-no-effect-rejection.js';
 import { createPromoteOwnershipReader, type PromoteOwnershipReader } from './async-promote-ownership.js';
@@ -6779,7 +6779,13 @@ export class DKGPublisher implements Publisher {
   private kaGraphIdentityFromLifecycle(
     contextGraphId: string, agentAddress: string, name: string, subGraphName: string | undefined, record: AssertionLifecycleRecord,
   ): { agentAddress: string; number: bigint; kaUal?: string } | null {
-    const identity = decodeAssertionReservationIdentity(record, agentAddress);
+    return this.kaGraphIdentityFromReservation(contextGraphId, agentAddress, name, subGraphName,
+      decodeAssertionReservationIdentity(record, agentAddress));
+  }
+
+  private kaGraphIdentityFromReservation(
+    contextGraphId: string, agentAddress: string, name: string, subGraphName: string | undefined, identity: AssertionReservationIdentity,
+  ): { agentAddress: string; number: bigint; kaUal?: string } | null {
     if (identity.kind === 'unallocated') return null;
     if (identity.kind === 'conflict') throw Object.assign(new Error(identity.reason), { code: 'KA_WM_LIFECYCLE_CORRUPT' });
     if (identity.kind === 'legacy-fallback' && identity.warning) {
@@ -7810,9 +7816,10 @@ export class DKGPublisher implements Publisher {
     }
 
     assertExpectedKaSlotMatchesAllocation(opts?.expectedKaNumber, kaNumber);
-    const identity = kaNumber === undefined ? null : this.kaGraphIdentityFromLifecycle(
+    const identity = kaNumber === undefined ? null : this.kaGraphIdentityFromReservation(
       contextGraphId, agentAddress, name, subGraphName,
-      hasPreservedKaId ? lifecycle : { bindings: [], hasKaId: true, number: kaNumber, reservedUal },
+      hasPreservedKaId ? decodeAssertionReservationIdentity(lifecycle, agentAddress)
+        : resolveAssertionReservationIdentity({ number: kaNumber, reservedUal, lifecycleOwner: agentAddress }),
     );
     const physicalAuthor = identity?.agentAddress ?? agentAddress;
     const create = async () => {

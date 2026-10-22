@@ -43,7 +43,12 @@ export function assertionPhysicalIdentityKey(identity: AssertionPhysicalIdentity
 }
 
 /** The one physical-graph policy used by reads, allocation and restoration. */
-function resolveIdentity(number: bigint | undefined, reservedUal: string | undefined, owner: string | undefined): AssertionReservationIdentity {
+export function resolveAssertionReservationIdentity(input: {
+  readonly number: bigint | undefined;
+  readonly reservedUal: string | undefined;
+  readonly lifecycleOwner: string | undefined;
+}): AssertionReservationIdentity {
+  const { number, reservedUal, lifecycleOwner: owner } = input;
   if (number === undefined) return { kind: 'unallocated' };
   let warning: string | undefined;
   if (reservedUal) {
@@ -86,7 +91,9 @@ export function decodeAssertionReservationIdentity(record: AssertionLifecycleRec
     .map(row => decodeAssertionLifecycleRecord([row]).number);
   if (numbers.some(number => number !== record.number)) return { kind: 'conflict', reason: 'Contradictory KA reservation numbers' };
   const uals = record.bindings.filter(row => row.p === P.ual).map(row => decodeStoredAssertionReservedUal(row.o));
-  const candidates = (uals.length === 0 ? [record.reservedUal] : uals).map(ual => resolveIdentity(record.number, ual, lifecycleOwner));
+  const candidates = (uals.length === 0 ? [record.reservedUal] : uals).map(reservedUal => resolveAssertionReservationIdentity({
+    number: record.number, reservedUal, lifecycleOwner,
+  }));
   const keys = new Set(candidates.map(candidate => candidate.kind === 'reserved'
     ? `reserved:${candidate.identity.kaUal}` : candidate.kind === 'legacy-fallback'
       ? `legacy:${assertionPhysicalIdentityKey(candidate.identity)}` : candidate.kind));

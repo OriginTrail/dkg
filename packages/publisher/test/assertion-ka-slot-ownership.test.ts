@@ -23,6 +23,19 @@ async function registerSubgraph(store: OxigraphStore, name: string) {
 }
 
 describe('persistent KA slot ownership', () => {
+  it.each([undefined, 'invalid', `did:dkg:none/0x${'bb'.repeat(20)}/8`])(
+    'uses the ordinary fallback policy for a fresh allocation UAL %s', async reservedUal => {
+      const store = new OxigraphStore(), p = await publisher(store);
+      const graph = await p.assertionCreate(CG, 'fresh-owner', AUTHOR, undefined,
+        { allocateKaNumber: async () => ({ number: 7n, reservedUal }) });
+      expect(await p.wmGraphUri(CG, AUTHOR, 'fresh-owner')).toBe(graph);
+      await p.assertionWrite(CG, 'fresh-owner', AUTHOR, [{ subject: 'urn:fresh', predicate: 'urn:value', object: '"retained"' }]);
+      await expect(p.assertionCreate(CG, 'impostor', 'another-peer', undefined, allocation))
+        .rejects.toMatchObject({ code: 'KA_SLOT_ALREADY_CLAIMED' });
+      expect((await p.assertionQuery(CG, 'fresh-owner', AUTHOR)).map(q => q.object)).toEqual(['"retained"']);
+      await store.close();
+    },
+  );
   it('fences the explicit physical identity before entering the allocation mutation', async () => {
     const store = new OxigraphStore(), p = await publisher(store);
     await p.assertionCreate(CG, 'owner', 'owning-peer', undefined, allocation);
