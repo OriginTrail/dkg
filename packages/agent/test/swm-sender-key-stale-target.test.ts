@@ -222,6 +222,13 @@ describe('sender-key authority failures', () => {
       expect(ack.reason).toMatch(/detailSha256=[0-9a-f]{64}/u);
       expect(ack.reason).not.toContain('secret-api-key');
       expect(internals.swmSenderKeyReceiveStates.size).toBe(0);
+      const gateError = await agent.getContextGraphAgentGateAddresses(TEST_CONTEXT_GRAPH_ID, { requireAvailable: true })
+        .catch((error: unknown) => error);
+      expect(gateError).toBeInstanceOf(Error);
+      expect((gateError as Error).message).toContain(reason);
+      expect((gateError as Error).message).toContain('timeout=true');
+      expect((gateError as Error).message).toMatch(/detailSha256=[0-9a-f]{64}/u);
+      expect((gateError as Error).message).not.toContain('secret-api-key');
     },
   );
 

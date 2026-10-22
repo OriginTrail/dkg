@@ -132,6 +132,24 @@
         "statements": 97
       }
     },
+    "graph-computer": {
+      "sourceRevision": "60786a373e0d3403dfe34eb70722f4a86959a0ef",
+      "measuredAt": "2026-10-22",
+      "node": "22.23.1",
+      "platform": "darwin-arm64",
+      "measured": {
+        "lines": 97.83,
+        "functions": 95.06,
+        "branches": 84.48,
+        "statements": 90.48
+      },
+      "thresholds": {
+        "lines": 96,
+        "functions": 94,
+        "branches": 83,
+        "statements": 89
+      }
+    },
     "graph-viz": {
       "measured": {
         "lines": 24.48,

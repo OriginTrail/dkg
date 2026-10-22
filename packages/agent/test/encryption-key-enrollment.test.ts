@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
 import { signWorkspaceEncryptionKey } from '../src/agent-keystore.js';
-import { EncryptionKeyEnrollments, encryptionKeyEnrollmentPayload, type EncryptionKeyEnrollment } from '../src/encryption-key-enrollment.js';
+import { EncryptionKeyEnrollments, encryptionKeyEnrollmentPayload, hasVerifiedEncryptionCustody, type EncryptionKeyEnrollment } from '../src/encryption-key-enrollment.js';
 
 const directories: string[] = [];
 const agents: DKGAgent[] = [];
@@ -56,7 +56,8 @@ describe('encryption-only node custody for external agents', () => {
 
   it('rejects expired challenges and retains pending state when durable activation fails', async () => {
     let now = Date.now();
-    const service = new EncryptionKeyEnrollments(join(await directory(), 'pending.json'), 'receiver', () => now);
+    const path = join(await directory(), 'pending.json');
+    const service = new EncryptionKeyEnrollments(path, 'receiver', () => now);
     const wallet = ethers.Wallet.createRandom();
     const challenge = await service.prepare(wallet.address);
     const input = await signed(challenge, wallet);
@@ -65,6 +66,31 @@ describe('encryption-only node custody for external agents', () => {
     const persist = vi.fn();
     await expect(service.activate(input, persist)).rejects.toThrow(/expired/);
     expect(persist).not.toHaveBeenCalled();
+    const replacement = await service.prepare(wallet.address);
+    expect(replacement.enrollmentId).not.toBe(challenge.enrollmentId);
+    expect(Object.keys(JSON.parse(await readFile(path, 'utf8')))).toEqual([replacement.enrollmentId]);
+  });
+
+  it('accepts only durable custody bound to this agent, peer and active private key', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    // Activation's short-lived deadline does not expire durable signed consent.
+    const service = new EncryptionKeyEnrollments(join(await directory(), 'pending.json'), 'receiver', () => 0);
+    const challenge = await service.prepare(wallet.address);
+    const entry = await service.activate(await signed(challenge, wallet), async (_publicKey, key) => key);
+    expect(challenge.expiresAt).toBeLessThan(Date.now());
+    expect(hasVerifiedEncryptionCustody(wallet.address, 'receiver', [entry])).toBe(true);
+    expect(hasVerifiedEncryptionCustody(wallet.address, 'other-node', [entry])).toBe(false);
+    expect(hasVerifiedEncryptionCustody(ethers.Wallet.createRandom().address, 'receiver', [entry])).toBe(false);
+    for (const invalid of [
+      { ...entry, custodyAuthorization: undefined },
+      { ...entry, revokedAt: new Date().toISOString() },
+      { ...entry, privateEncryptionKey: undefined },
+      { ...entry, encryptionKeyId: 'another-key' },
+      { ...entry, encryptionKeyProof: 'invalid-signature' },
+      { ...entry, custodyAuthorization: { ...entry.custodyAuthorization!, custodyProof: 'invalid-signature' } },
+    ]) {
+      expect(hasVerifiedEncryptionCustody(wallet.address, 'receiver', [invalid])).toBe(false);
+    }
   });
 
   it('does not advertise or activate a key if durable keystore persistence fails', async () => {
@@ -74,9 +100,11 @@ describe('encryption-only node custody for external agents', () => {
     const wallet = ethers.Wallet.createRandom();
     const challenge = await agent.prepareEncryptionKeyEnrollment(wallet.address);
     const persist = vi.spyOn(agent as any, 'persistAgentToStore');
-    const write = vi.spyOn(agent as any, 'saveToKeystore').mockRejectedValueOnce(new Error('disk full'));
+    const blocker = join(await directory(), 'not-a-directory');
+    await writeFile(blocker, 'blocked');
+    const write = vi.spyOn(agent as any, 'keystorePath').mockReturnValue(join(blocker, 'agent-keystore.json'));
     const input = await signed(challenge, wallet);
-    await expect(agent.activateEncryptionKeyEnrollment(input)).rejects.toThrow('disk full');
+    await expect(agent.activateEncryptionKeyEnrollment(input)).rejects.toThrow(/EEXIST|ENOTDIR|not a directory/i);
     expect(persist).not.toHaveBeenCalled();
     expect(agent.hasLocalAgent(wallet.address)).toBe(false);
     write.mockRestore();
@@ -104,14 +132,18 @@ describe('encryption-only node custody for external agents', () => {
     expect(record.mode).toBe('self-sovereign');
     expect(record.privateKey).toBeUndefined();
     expect(record.workspaceEncryptionKeys[0].privateEncryptionKey).toBeTruthy();
+    expect(agent.hasAuthorizedWorkspaceEncryptionCustodyForAddress(wallet.address)).toBe(true);
+    expect(agent.hasAuthorizedWorkspaceEncryptionCustodyForAddress(ethers.Wallet.createRandom().address)).toBe(false);
     expect((agent as any).defaultAgentAddress).toBe(originalDefault);
     expect((agent as any).localApprovedAgentByCG.size).toBe(0);
     await expect(agent.signJoinRequest('private-data', wallet.address)).rejects.toThrow(/custodial|private key/i);
     const host = await agent.registerAgent('replication-host');
-    (agent as any).defaultAgentAddress = host.agentAddress;
+    const outsideGraph = await agent.registerAgent('outside-graph');
+    (agent as any).defaultAgentAddress = outsideGraph.agentAddress;
     await agent.createContextGraph({ id: 'shared-programs', name: 'Programs', accessPolicy: 1,
       callerAgentAddress: host.agentAddress, allowedAgents: [host.agentAddress, wallet.address] });
     (agent as any).localApprovedAgentByCG.set('shared-programs', wallet.address.toLowerCase());
+    await expect(agent.findLocalAgentForContextGraph('shared-programs')).resolves.toBe(host.agentAddress);
     const request = JSON.parse(new TextDecoder().decode(await agent.buildSyncRequest('shared-programs', 0, 10, false, 'curator-peer', 'meta')));
     expect(request.requesterAgentAddress).toBe(host.agentAddress);
     expect(request.requesterSignatureR).toMatch(/^0x/);
