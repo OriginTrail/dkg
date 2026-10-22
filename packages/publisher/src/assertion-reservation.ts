@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { assertionLifecycleUri, contextGraphMetaUri, createGraphKnowledgeAssetScope,
+import { assertionLifecycleUri, decodeAssertionLifecycleUriOwner, contextGraphMetaUri, createGraphKnowledgeAssetScope,
   canonicalKnowledgeAssetGraphIdentitySuffix, normalizeAgentDid, toAgentDid } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { ASSERTION_RESERVATION_PREDICATES as P, decodeAssertionLifecycleRecord,
@@ -77,11 +77,8 @@ export function resolveStoredAssertionLifecycleOwner(record: AssertionLifecycleR
   const names = values(P.name), owners = values(P.owner).map(value => value === undefined ? undefined : normalizeAgentDid(value));
   const uniqueOwners = [...new Set(owners)];
   if (names.length !== 1 || !names[0] || uniqueOwners.length !== 1 || uniqueOwners[0] === undefined) return undefined;
-  const prefix = assertionLifecycleUri(contextGraphId, '', '', subGraphName).slice(0, -1), suffix = `:${names[0]}`;
-  if (!lifecycleUri.startsWith(prefix) || !lifecycleUri.endsWith(suffix)) return undefined;
-  const owner = lifecycleUri.slice(prefix.length, -suffix.length);
-  if (!owner || normalizeAgentDid(toAgentDid(owner)) !== uniqueOwners[0]
-    || assertionLifecycleUri(contextGraphId, owner, names[0], subGraphName) !== lifecycleUri) return undefined;
+  const owner = decodeAssertionLifecycleUriOwner(lifecycleUri, { contextGraphId, name: names[0], subGraphName });
+  if (owner === undefined || normalizeAgentDid(toAgentDid(owner)) !== uniqueOwners[0]) return undefined;
   return owner;
 }
 

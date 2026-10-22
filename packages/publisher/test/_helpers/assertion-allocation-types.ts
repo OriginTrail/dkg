@@ -3,6 +3,7 @@ import { assertKaSlotOwnershipAvailable, withAssertionAllocation, type Assertion
 import type { AssertionPhysicalIdentity } from '../../src/assertion-reservation.js';
 import { decodeAssertionReservationIdentity, resolveStoredAssertionLifecycleOwner } from '../../src/assertion-reservation.js';
 import type { AssertionLifecycleRecord } from '../../src/assertion-lifecycle-record.js';
+import { decodeAssertionLifecycleUriOwner } from '@origintrail-official/dkg-core';
 
 declare const store: TripleStore;
 declare const coordinates: AssertionAllocationCoordinates;
@@ -30,3 +31,9 @@ void resolveStoredAssertionLifecycleOwner(record, { lifecycleUri: 'urn:lifecycle
 void decodeAssertionReservationIdentity(record);
 // @ts-expect-error Identity decoding does not infer a mode from coordinate fields.
 void decodeAssertionReservationIdentity(record, {});
+
+void decodeAssertionLifecycleUriOwner('urn:lifecycle', { contextGraphId: 'cg', name: 'asset' });
+// @ts-expect-error The scoped URI inverse requires the assertion name.
+void decodeAssertionLifecycleUriOwner('urn:lifecycle', { contextGraphId: 'cg' });
+// @ts-expect-error The scoped URI inverse requires the context graph.
+void decodeAssertionLifecycleUriOwner('urn:lifecycle', { name: 'asset' });

@@ -189,48 +189,47 @@ export function preserveGraphKnowledgeAssetReceiptProvenanceV1(
   ];
 }
 
-/**
- * Canonically merge metadata for an exact same-assertion replay. Stable local
- * receive time and unrelated local annotations are retained for every lane;
- * a receiptless replay also retains stronger authenticated receipt provenance.
- */
+const RECOVERY_CANONICAL_PREDICATES = new Set(['contentScopeVersion', 'assertionVersion', 'publicTripleCount', 'privateTripleCount',
+  'privateMerkleRoot', 'assertionGraph', 'subGraphName', 'merkleRoot', 'batchId', 'kaUal', 'status',
+  'transactionHash', 'materializedVersion', 'confirmationKind'].map(name => `${DKG}${name}`));
+
+/** One retention owner; callers separately establish the assertion anchor and trusted controls. */
+export function reconcileSameAssertionGraphKnowledgeAssetMetadataV1(input: {
+  readonly lane: 'lifecycle-recovery' | 'verified-projection';
+  readonly incomingMetadata: readonly Quad[];
+  readonly currentMetadata: readonly Quad[];
+}): Quad[] {
+  const { lane, incomingMetadata, currentMetadata } = input, identity = incomingMetadata[0];
+  let canonical = [...incomingMetadata];
+  if (lane === 'verified-projection') {
+    const times = currentMetadata.filter(quad => quad.predicate === GRAPH_KNOWLEDGE_ASSET_PUBLISHED_AT_PREDICATE);
+    const lexical = times.length === 1 ? rdfLiteralLexicalValue(times[0]!.object) : undefined;
+    if (identity !== undefined && times.length === 1 && times[0]!.subject === identity.subject
+      && times[0]!.graph === identity.graph && lexical !== undefined && Number.isFinite(Date.parse(lexical))) {
+      canonical = [...canonical.filter(quad => quad.predicate !== GRAPH_KNOWLEDGE_ASSET_PUBLISHED_AT_PREDICATE), times[0]!];
+    }
+  }
+  if (lane === 'lifecycle-recovery' || readGraphKnowledgeAssetConfirmationKindV1(incomingMetadata) === 'finalized-materialization') {
+    canonical = preserveGraphKnowledgeAssetReceiptProvenanceV1(canonical, currentMetadata);
+  }
+  const incomingPredicates = new Set(canonical.map(quad => quad.predicate));
+  const currentPredicates = new Set(currentMetadata.map(quad => quad.predicate));
+  const retainedPredicates = new Set([...currentPredicates].filter(predicate => lane === 'lifecycle-recovery'
+    // Recovery overlays trusted controls separately and keeps existing non-immutable fields.
+    ? !RECOVERY_CANONICAL_PREDICATES.has(predicate)
+    // Verified projection owns protocol fields and any annotation it explicitly supplies.
+    : !predicate.startsWith(DKG) && !predicate.startsWith(PROV) && !incomingPredicates.has(predicate)));
+  const retained = currentMetadata.filter(quad => retainedPredicates.has(quad.predicate)
+    && (lane === 'lifecycle-recovery' || (identity !== undefined && quad.subject === identity.subject && quad.graph === identity.graph)));
+  const incoming = canonical.filter(quad => !retainedPredicates.has(quad.predicate));
+  return lane === 'lifecycle-recovery' ? [...retained, ...incoming] : [...incoming, ...retained];
+}
+
+/** Exact-assertion replay keeps incoming protocol controls plus local receive time, receipt and omitted annotations. */
 export function mergeSameVersionGraphKnowledgeAssetMetadataV1(
-  incomingMetadata: readonly Quad[],
-  currentMetadata: readonly Quad[],
+  incomingMetadata: readonly Quad[], currentMetadata: readonly Quad[],
 ): Quad[] {
-  const identity = incomingMetadata[0];
-  const currentPublishedAt = currentMetadata.filter(
-    (quad) => quad.predicate === GRAPH_KNOWLEDGE_ASSET_PUBLISHED_AT_PREDICATE,
-  );
-  const publishedAtLexical = currentPublishedAt.length === 1
-    ? rdfLiteralLexicalValue(currentPublishedAt[0]!.object)
-    : undefined;
-  const preservePublishedAt = identity !== undefined
-    && currentPublishedAt.length === 1
-    && currentPublishedAt[0]!.subject === identity.subject
-    && currentPublishedAt[0]!.graph === identity.graph
-    && publishedAtLexical !== undefined
-    && Number.isFinite(Date.parse(publishedAtLexical));
-  let merged = preservePublishedAt
-    ? [
-        ...incomingMetadata.filter(
-          (quad) => quad.predicate !== GRAPH_KNOWLEDGE_ASSET_PUBLISHED_AT_PREDICATE,
-        ),
-        currentPublishedAt[0]!,
-      ]
-    : [...incomingMetadata];
-  if (readGraphKnowledgeAssetConfirmationKindV1(incomingMetadata) === 'finalized-materialization') {
-    merged = preserveGraphKnowledgeAssetReceiptProvenanceV1(merged, currentMetadata);
-  }
-  if (identity !== undefined) {
-    const incomingPredicates = new Set(merged.map(quad => quad.predicate));
-    // Verified protocol controls/attribution always come from the new projection.
-    // Only unrelated annotations from this exact local metadata identity survive.
-    merged.push(...currentMetadata.filter(quad => quad.subject === identity.subject && quad.graph === identity.graph
-      && !quad.predicate.startsWith(DKG) && !quad.predicate.startsWith(PROV)
-      && !incomingPredicates.has(quad.predicate)));
-  }
-  return merged;
+  return reconcileSameAssertionGraphKnowledgeAssetMetadataV1({ lane: 'verified-projection', incomingMetadata, currentMetadata });
 }
 
 /** Replace peer confirmation claims with facts established by this receiver. */

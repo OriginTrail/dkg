@@ -633,10 +633,7 @@ export function contextGraphRulesUri(contextGraphId: string): string {
  * PROV event targets, node-ui receipt/lifecycle-feed hooks (the receipt
  * hook already reads both shapes — see useEntityOnChainReceipt P3.4).
  */
-export function assertionLifecycleUri(contextGraphId: string, agentAddress: string, name: string, subGraphName?: string): string {
-  if (subGraphName) return `urn:dkg:assertion:${contextGraphId}:${subGraphName}:${agentAddress}:${name}`;
-  return `urn:dkg:assertion:${contextGraphId}:${agentAddress}:${name}`;
-}
+export { assertionLifecycleUri, decodeAssertionLifecycleUriOwner, type AssertionLifecycleUriScope } from './assertion-lifecycle-uri.js';
 
 export function contextGraphSubGraphUri(contextGraphId: string, subGraphName: string): string {
   return `did:dkg:context-graph:${contextGraphId}/${subGraphName}`;

@@ -1,5 +1,6 @@
 import { createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1 } from '../src/graph-knowledge-asset-metadata.js';
+import { reconcileConfirmedGraphKnowledgeAssetMetadata } from '../src/confirmed-metadata-reconciliation.js';
 import { describe, it, expect } from 'vitest';
 import {
   generateKCMetadata,
@@ -380,6 +381,20 @@ describe('generateConfirmedFullMetadata', () => {
 });
 
 describe('generateGraphKnowledgeAssetMetadata confirmation state', () => {
+  it('keeps deliberate annotation precedence separate from assertion authority in both retention lanes', () => {
+    const meta = makeGraphMeta();
+    const canonical = generateGraphKnowledgeAssetMetadata(meta, { status: 'confirmed', confirmation: {
+      kind: 'finalized-materialization', provenance: { batchId: 7n, materializedVersion: { blockNumber: 123, txIndex: 0 } },
+    } });
+    const note = { ...canonical[0]!, predicate: 'urn:local:annotation', object: '"incoming"' };
+    const incoming = [...canonical, note], current = [...canonical, { ...note, object: '"local"' }];
+    const snapshot = { metadataQuads: incoming, proof: { assertionVersion: '1', publicTripleCount: 2, privateTripleCount: 0,
+      assertionGraph: meta.assertionGraph, merkleRoot: '07'.repeat(32), batchId: '7' } };
+    const values = (rows: typeof incoming) => rows.filter(q => q.predicate === note.predicate).map(q => q.object);
+    expect(values(reconcileConfirmedGraphKnowledgeAssetMetadata(snapshot, current, true))).toEqual(['"local"']);
+    expect(values(mergeSameVersionGraphKnowledgeAssetMetadataV1(incoming, current))).toEqual(['"incoming"']);
+    expect(values(reconcileConfirmedGraphKnowledgeAssetMetadata(snapshot, current, false))).toEqual(['"incoming"']);
+  });
   it('preserves same-assertion annotations without retaining obsolete protocol controls or other scopes', () => {
     const incoming = generateGraphKnowledgeAssetMetadata(makeGraphMeta(), { status: 'confirmed', confirmation: {
       kind: 'finalized-materialization', provenance: { batchId: 7n, materializedVersion: { blockNumber: 123, txIndex: 0 } },
