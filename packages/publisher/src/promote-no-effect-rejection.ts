@@ -18,11 +18,13 @@ export function getPromoteNoEffectProof(error: unknown): PromoteNoEffectProof | 
   return error instanceof Error ? certified.get(error) : undefined;
 }
 
-/** A later attempt or lost proof cannot retire a possibly committed earlier attempt. */
+/** Discount only a proven preparation-only prefix; later execution or lost proof stays fenced. */
 export function canRetireBoundRejection(job: Omit<PromoteJob, 'state'> & {state: string},
   proof: PromoteNoEffectProof | undefined): boolean {
   const binding = job.request.recoveryBinding;
-  return job.formatVersion === 4 && binding !== undefined && job.attempt.count === 1
+  const prepared = job.preparationAttempts ?? 0;
+  return job.formatVersion === 4 && binding !== undefined
+    && Number.isSafeInteger(prepared) && prepared >= 0 && job.attempt.count === prepared + 1
     && job.commitMarker?.swmInserted === false && job.reason === undefined
     && proof?.sealDigest === binding.sealDigest && proof?.operationId === binding.intent.operationId;
 }
@@ -31,4 +33,15 @@ export function isRetiredBoundRejection(job: Omit<PromoteJob, 'state'> & {state:
   return job.state === 'failed' && error?.diagnosticCode === PROMOTE_NO_EFFECT_REJECTION_CODE
     && error.classification === 'cap_exceeded' && error.retryable === false
     && canRetireBoundRejection(job, error.noEffectProof);
+}
+
+/** A contiguous prefix only: missing/crashed execution evidence must not be discounted. */
+export function recordUnstartedPromoteAttempt(job: PromoteJob): PromoteJob {
+  const prepared = job.preparationAttempts ?? 0;
+  if (job.formatVersion === 4 && !job.request.recoveryBinding
+    && job.commitMarker?.promoteStarted === false && job.commitMarker.swmInserted === false
+    && Number.isSafeInteger(prepared) && prepared >= 0 && job.attempt.count === prepared + 1) {
+    return { ...job, preparationAttempts: job.attempt.count };
+  }
+  return job;
 }
