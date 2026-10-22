@@ -31,8 +31,13 @@ function fakeTime() {
 describe('yielding the store background lane between asset writes', () => {
   it('costs one event-loop turn when the lane is idle or unreported', async () => {
     const time = fakeTime();
-    await yieldStoreBackgroundLane({ store: { getPressureSnapshot: () => lane(0) }, previousWriteMs: 5_000, ...time });
-    await yieldStoreBackgroundLane({ store: {}, previousWriteMs: 5_000, ...time });
+    for (const store of [{ getPressureSnapshot: () => lane(0) }, {}]) {
+      // Work queued for the next turn has run by the time the yield returns.
+      let queuedTurnRan = false;
+      setImmediate(() => { queuedTurnRan = true; });
+      await yieldStoreBackgroundLane({ store, previousWriteMs: 5_000, ...time });
+      expect(queuedTurnRan).toBe(true);
+    }
     expect(time.sleeps).toEqual([]);
   });
 

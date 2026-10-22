@@ -183,6 +183,8 @@ export interface DurableMetaContinuationState {
 export interface DurableMetaContinuation extends DurableHoldingsChannel {
   readonly requesterScope: SyncCheckpointScope;
   state?: DurableMetaContinuationState;
+  /** Set by a DATA round whose rows did not line up with the boundary it resumed at; the owner clears it. */
+  rejectedResumeOffset?: number;
 }
 
 export interface DurableSyncStoreInsertRequest {
@@ -1116,6 +1118,9 @@ async function runDurableSyncWithBudget(
           : null;
         if (!bounded && graphScopedManifest) {
           deleteCheckpoint(dataResult.checkpointKey);
+          if (durableMetaContinuation && dataResult.resumedFromOffset > 0) {
+            durableMetaContinuation.rejectedResumeOffset = dataResult.resumedFromOffset;
+          }
           throw Object.assign(
             new Error(
               `Discarding rootless durable response for "${pid}": responder and manifest coordinates cannot be reconciled`,

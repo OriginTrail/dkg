@@ -586,11 +586,21 @@ export const SUPPORT_PATH_ROUTES = Object.freeze([
     reason: 'the CLI devnet-publish smoke test runs the publish helpers',
   },
   {
+    pattern: /^scripts\/repro\/rfc64-catalog-durable-head\.mts$/,
+    lanes: ['tornado_agent'],
+    reason: 'the required agent sidecar runs the isolated catalog process-death campaign',
+  },
+  {
     // packages/chain/test/sync-chain-abis.unit.test.ts runs a copy of it against
     // temporary ABI directories.
     pattern: /^scripts\/sync-chain-abis\.mjs$/,
     lanes: ['tornado_core'],
     reason: 'the chain lane runs the ABI sync script against temporary directories',
+  },
+  {
+    pattern: /^scripts\/repro\/publisher-live-control-(?:restart\.test|worker)\.mts$/,
+    lanes: ['bura_cli'],
+    reason: 'the required CLI lane runs the five-start publisher control durability campaign',
   },
   ...BUILD_ONLY_SCRIPTS.map((family) => ({ pattern: scriptsPattern(family), lanes: [], reason: family.reason })),
   {

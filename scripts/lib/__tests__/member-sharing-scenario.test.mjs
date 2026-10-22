@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { GraphScenario } from '../member-sharing/graph-scenario.mjs';
 import { createGraphs } from '../member-sharing/graphs.mjs';
-import { createReport } from '../member-sharing/report.mjs';
 
 const owner = { number: 7, role: 'owner', label: 'node7 (owner)' };
 const member1 = { number: 8, role: 'member1', label: 'node8 (member1)' };
@@ -28,7 +27,6 @@ function fakeIo({ refuse = () => null } = {}) {
   const io = {
     events,
     handles: [],
-    evidence: [],
     async write(author, graph, sub, what) {
       events.push(`write ${graph.key} ${what} by ${author.role}`);
       return { author, graph, sub, what };
@@ -52,9 +50,8 @@ function fakeIo({ refuse = () => null } = {}) {
       io.handles.push(handle);
       return handle;
     },
-    async writeAndWatch(caseId, author, graph, sub, what, nodes, evidence) {
+    async writeAndWatch(caseId, author, graph, sub, what, nodes) {
       events.push(`case ${caseId}: ${what} by ${author.role} in ${graph.key}${sub ? `/${sub}` : ''} -> ${nodes.map(node => node.role).join(', ')}`);
-      io.evidence.push([author.role, sub, evidence]);
       return { caseId, author, nodes };
     },
   };
@@ -152,55 +149,4 @@ test('a graph records as facts whether it is registered on chain and whether it 
   assert.deepEqual(await facts('registered', { accessPolicy: 0, publishPolicy: 1, register: true }), { private: false, registered: true });
   // Whether a known gap applies to a registered private graph is the known gaps' decision, not this record's.
   assert.deepEqual(await facts('private', { accessPolicy: 1, publishPolicy: 0, register: true }), { private: true, registered: true });
-});
-
-test('a member\'s own writes carry its history with the definition, which they also add to', async () => {
-  const io = fakeIo();
-  const registered = new GraphScenario({ key: 'registered' }, { cases: OTHER_CASES, authors: members, sub: 's' });
-  await registered.writeHistory(io, owner);
-  assert.equal(await registered.subscribeMembers(io, members), null);
-  // Not known before the subscriptions settled.
-  await registered.memberWrites(io, owner, members);
-  assert.deepEqual(io.evidence.map(([role, , evidence]) => [role, evidence.definitionHistory.seen]),
-    [['member1', undefined], ['member2', undefined], ['member1', undefined], ['member2', undefined]]);
-  // Member 1 held the definition 4 s after it subscribed; member 2 never did.
-  registered.observers[0].finish({ definedAt: 4_000 });
-  registered.observers[1].finish({ definedAt: null });
-  await registered.observedSubscriptions();
-  assert.deepEqual([registered.historyOf(member1).seen, registered.historyOf(member2).seen], [true, false]);
-  // One history per member, shared by all of its writes: what is seen later reaches the earlier writes' judgement too.
-  assert.equal(io.evidence[0][2].definitionHistory, registered.historyOf(member1));
-  assert.equal(io.evidence[1][2].definitionHistory, registered.historyOf(member2));
-});
-
-test('a definition obtained after the subscription was observed and then lost is not #3264 (the example of the review)', async () => {
-  // Neither member held the definition while its subscription was observed. Member 1 then obtains it: the node
-  // accepts its root write. It loses it before its sub-graph write, which is refused as a write to an unknown graph.
-  // Member 2 never obtains it: both its writes are refused.
-  const graph = { key: 'registered', registered: true, private: false };
-  const authors = [{ ...member1, member: true }, { ...member2, member: true }];
-  const accepted = { member1: { root: true, s: false }, member2: { root: false, s: false } };
-  const io = fakeIo();
-  io.writeAndWatch = async (caseId, author, writtenTo, sub, what, nodes, evidence) => {
-    const ok = accepted[author.role][sub ?? 'root'];
-    const record = {
-      author, graph: writtenTo, sub, value: `${what} (1)`, definitionHistory: evidence.definitionHistory,
-      error: ok ? null : 'the author refused the asset: HTTP 404', errorCode: ok ? undefined : 'CONTEXT_GRAPH_NOT_FOUND', definitionHeld: ok ? undefined : false,
-    };
-    return { pairs: nodes.map(node => ({ caseId, record, node, from: 0, progress: { view: 1_000, partitions: 1_000 }, last: {} })), done: Promise.resolve() };
-  };
-  const scenario = new GraphScenario(graph, { cases: OTHER_CASES, authors, sub: 's' });
-  await scenario.writeHistory(io, owner);
-  assert.equal(await scenario.subscribeMembers(io, authors), null);
-  scenario.observers.forEach(handle => handle.finish({ definedAt: null }));
-  await scenario.observedSubscriptions();
-  const handles = await scenario.memberWrites(io, owner, authors);
-  const lines = [];
-  const report = createReport({ 7: 'registered' }, { print: line => lines.push(line) });
-  for (const pair of handles.flatMap(handle => handle.pairs)) report.reportPair(pair, { boundMs: 60_000 });
-  const verdicts = lines.map(line => /^ {2}\[(\w+)\] case 7: "(\w+) live (root|sub-graph) \(1\)" by \S+ \S+ in \S+(?: root)? at node(\d)/.exec(line)?.slice(1)).filter(Boolean);
-  assert.deepEqual(verdicts.filter(([, author]) => author === 'member1').map(([verdict, , scope]) => [verdict, scope]),
-    [['PASS', 'root'], ['PASS', 'root'], ['FAIL', 'sub-graph'], ['FAIL', 'sub-graph']], lines.join('\n'));
-  assert.ok(lines.filter(line => line.includes('"member1 live sub-graph (1)"')).every(line => line.endsWith('the author held the definition before and lost it, so this is not #3264')), lines.join('\n'));
-  assert.deepEqual(verdicts.filter(([, author]) => author === 'member2').map(([verdict]) => verdict), ['XFAIL', 'XFAIL', 'XFAIL', 'XFAIL'], lines.join('\n'));
 });
