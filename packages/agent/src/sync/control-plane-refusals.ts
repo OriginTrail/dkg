@@ -38,6 +38,7 @@ export interface ControlPlaneRefusalSummaryOptions {
 
 export class ControlPlaneRefusalSummary {
   private readonly tallies = new Map<string, RefusalTally>();
+  private readonly stopSignals = new WeakSet<AbortSignal>();
   private readonly intervalMs: number;
   private readonly now: () => number;
   private startedAt = 0;
@@ -48,8 +49,12 @@ export class ControlPlaneRefusalSummary {
     this.now = options.now ?? Date.now;
   }
 
-  /** Count one refusal. The first refusal of an interval starts that interval. */
-  note(label: string, state: string, contextGraphId?: string): void {
+  /**
+   * Count one refusal. The first refusal of an interval starts that interval.
+   * `stop`, the node's stop signal, ends it early: a node that stops logs what
+   * it counted, and a refusal counted after that is logged at once.
+   */
+  note(label: string, state: string, contextGraphId?: string, stop?: AbortSignal): void {
     if (this.timer === undefined) {
       this.startedAt = this.now();
       this.timer = setTimeout(() => this.flush(), this.intervalMs);
@@ -65,6 +70,11 @@ export class ControlPlaneRefusalSummary {
     if (contextGraphId !== undefined && tally.graphs.size < CONTROL_PLANE_REFUSAL_MAX_COUNTED_GRAPHS) {
       tally.graphs.add(contextGraphId);
     }
+    if (stop && !this.stopSignals.has(stop)) {
+      this.stopSignals.add(stop);
+      stop.addEventListener('abort', () => this.flush(), { once: true });
+    }
+    if (stop?.aborted) this.flush();
   }
 
   /** Log the open interval now, one line per label, and start the next one empty. */
@@ -100,17 +110,19 @@ export function controlPlaneRefusalSummary(
 /**
  * The refusal reporter of one admission (`withGlobalSyncBackpressure`'s
  * `reportRefusal`): a control-plane fetch refused at once is counted in
- * `summary`, and every other refusal, or any without a summary, is one
+ * `summary`, which logs its open interval when `stop` (the node's stop
+ * signal) fires, and every other refusal, or any without a summary, is one
  * `logInfo` line.
  */
 export function syncRefusalReporter(
   admission: { label: string; source?: SyncAdmissionSource; contextGraphId?: string },
   summary: ControlPlaneRefusalSummary | undefined,
   logInfo: (ctx: OperationContext, message: string) => void,
+  stop?: AbortSignal,
 ): (ctx: OperationContext, error: SyncBackpressureBusyError) => void {
   return (ctx, error) => {
     if (summary && admission.source === 'control-plane' && error.state !== undefined) {
-      summary.note(admission.label, error.state, admission.contextGraphId);
+      summary.note(admission.label, error.state, admission.contextGraphId, stop);
     } else {
       logInfo(ctx, error.message);
     }

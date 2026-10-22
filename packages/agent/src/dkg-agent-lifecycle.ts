@@ -1432,8 +1432,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           reservedSlotOnly: admission.reservedSlotOnly,
           signal: admissionBoundary.signal,
           logInfo,
-          // A control-plane fetch refused at once is counted, one warning per interval.
-          reportRefusal: syncRefusalReporter({ label, source, contextGraphId }, this.controlPlaneRefusals, logInfo),
+          // A control-plane fetch refused at once is counted, one warning per interval and at node stop.
+          reportRefusal: syncRefusalReporter(
+            { label, source, contextGraphId }, this.controlPlaneRefusals, logInfo, this.node.stopSignal,
+          ),
         },
         timedWork,
       );

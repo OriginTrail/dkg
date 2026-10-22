@@ -436,11 +436,12 @@ function createOneSlotMember(store: OxigraphStore, contextGraphId: string) {
   const noop = () => {};
   const log = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() };
   const summaryLines: string[] = [];
+  const stop = new AbortController();
   const agent = {
     config: { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
     peerId: 'local-peer',
     node: {
-      stopSignal: undefined,
+      stopSignal: stop.signal,
       libp2p: { getConnections: () => [{ remotePeer: { toString: () => SERVING_PEER_ID } }] },
     },
     metaRefreshTimestamps: new Map<string, number>(),
@@ -470,7 +471,7 @@ function createOneSlotMember(store: OxigraphStore, contextGraphId: string) {
       { source },
     ),
   );
-  return { agent, fetches, log, admit, summaryLines };
+  return { agent, fetches, log, admit, summaryLines, stop };
 }
 
 describe('metadata refresh on a node with one sync slot and no queue (#3280)', () => {
@@ -507,7 +508,9 @@ describe('metadata refresh on a node with one sync slot and no queue (#3280)', (
       // Neither the admission's line nor the refresh's warning: one line per interval instead.
       expect(member.log.info).not.toHaveBeenCalledWith(expect.anything(), expect.stringContaining('rejected'));
       expect(member.log.warn).not.toHaveBeenCalled();
-      member.agent.controlPlaneRefusals.flush();
+      // Counted, and logged when the node stops (or when its interval ends).
+      expect(member.summaryLines).toEqual([]);
+      member.stop.abort();
       expect(member.summaryLines).toEqual([
         expect.stringMatching(
           /^Sync backpressure rejected durable:control-plane 1 time\(s\) in the last \d+ s for 1 graph\(s\), each asked again later \(last: global inflight=1\/1, queued=0\/0, reserved control-plane inflight=1\/1\)$/,

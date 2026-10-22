@@ -96,6 +96,28 @@ describe('control-plane refusal summary', () => {
     ]);
   });
 
+  it('logs the open interval once when the node stops, and nothing more when its timer would have fired', () => {
+    const refusals = summary();
+    const stop = new AbortController();
+    refusals.note(LABEL, BUSY, 'urn:cg:a', stop.signal);
+    advance(5 * 60_000);
+    refusals.note(LABEL, BUSY, 'urn:cg:b', stop.signal);
+    expect(lines).toEqual([]);
+
+    stop.abort();
+    expect(lines).toEqual([
+      `Sync backpressure rejected ${LABEL} 2 time(s) in the last 300 s for 2 graph(s), each asked again later `
+        + `(last: ${BUSY})`,
+    ]);
+    advance(CONTROL_PLANE_REFUSAL_SUMMARY_INTERVAL_MS);
+    expect(lines).toHaveLength(1);
+
+    // A refusal counted after the node stopped is logged at once.
+    refusals.note(LABEL, BUSY, 'urn:cg:c', stop.signal);
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toMatch(/ 1 time\(s\) in the last 1 s for 1 graph\(s\)/);
+  });
+
   it('flushes on demand, writes nothing for an empty interval, and survives a failing log', () => {
     const refusals = summary(() => { throw new Error('log closed'); });
     refusals.flush();
@@ -145,6 +167,18 @@ describe('control-plane refusal reporting', () => {
     ]);
     counted.flush();
     expect(summaryLines).toEqual([expect.stringMatching(/ 1 time\(s\) in the last 1 s for 1 graph\(s\)/)]);
+  });
+
+  it('hands the node\'s stop signal to the summary, which logs at once when the node stops', () => {
+    const summaryLines: string[] = [];
+    const counted = new ControlPlaneRefusalSummary({ emit: (line) => summaryLines.push(line), now: () => clock });
+    const stop = new AbortController();
+    const report = syncRefusalReporter({ label: LABEL, source: 'control-plane' }, counted, () => {}, stop.signal);
+
+    report(ctx, refusal(BUSY));
+    expect(summaryLines).toEqual([]);
+    stop.abort();
+    expect(summaryLines).toEqual([expect.stringMatching(/ 1 time\(s\) in the last 1 s for 0 graph\(s\)/)]);
   });
 
   it('writes a node\'s summary as warnings of its logger, in a sync operation', () => {
