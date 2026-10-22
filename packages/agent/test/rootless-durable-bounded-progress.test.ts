@@ -697,7 +697,7 @@ describe('bounded rootless durable progress', () => {
     expect(boundary!(page(5, 5))).toBe(false);
     expect(boundary!(page(5, softRows))).toBe(true);
     expect(warnings).toEqual([]);
-    // A round that reaches the hard limit inside one graph ends without progress.
+    // A round holding more rows than its first graph declares ends at the hard limit, without progress.
     expect(boundary!(page(3, maxRows))).toBe(true);
     expect(warnings).toEqual([
       expect.stringContaining(`reached its hard limit at ${maxRows} rows (offset 0->3)`),

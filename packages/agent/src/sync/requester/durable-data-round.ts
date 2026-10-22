@@ -9,11 +9,14 @@ import type { SyncPageProgress } from './page-fetch.js';
  * a round can end at any complete graph: the requester verifies and stores the
  * leading graphs, checkpoints that boundary, and the next round resumes there.
  * The soft limits end a round at the first such boundary after either is
- * reached. The hard limits end it even without one: the round then makes no
- * progress, but it never grows past them. One legal asset (at most 100,000
- * rows in its 4 MiB envelope) plus one page always fits between the two, so a
- * round that reaches its soft limit inside the largest asset can still finish
- * that asset.
+ * reached, so a round holds at most the soft limits and one page once its
+ * first graph is whole.
+ *
+ * That first graph is held whole whatever its size. Verification and the
+ * atomic write take one asset at once, so a round that stopped inside it could
+ * never make progress; the graph's declared row count is its explicit
+ * allowance. The hard limits end a round that holds more rows than that graph
+ * declares before it is whole, or rows past the manifest's end.
  */
 export interface DurableDataRoundBudget {
   readonly softRows: number;
@@ -50,11 +53,25 @@ export function manifestHasCheckpointableGraph(
   return false;
 }
 
+/** Where the first graph with rows after `resumedFromOffset` ends, if the manifest has one. */
+export function manifestFirstGraphEnd(
+  manifest: GraphScopedDurableManifestPlan,
+  resumedFromOffset: number,
+): number | undefined {
+  let boundary = 0;
+  for (const descriptor of manifest.descriptors) {
+    boundary += descriptor.publicTripleCount;
+    if (boundary > resumedFromOffset) return boundary;
+  }
+  return undefined;
+}
+
 /**
  * The page boundary of one full-graph durable DATA round: stop after a page
  * once the round reached a soft limit (or its recovery slice's soft deadline)
- * and holds a checkpointable graph, or once it reached a hard limit. A hard
- * limit therefore ends only a round that holds no checkpointable graph.
+ * and holds a checkpointable graph; read on while the round is inside its
+ * first graph; otherwise stop at a hard limit. A hard limit therefore ends
+ * only a round that holds no checkpointable graph.
  */
 export function createDurableDataRoundBoundary(input: {
   readonly manifest: GraphScopedDurableManifestPlan;
@@ -76,6 +93,12 @@ export function createDurableDataRoundBoundary(input: {
       progress.resumedFromOffset,
       progress.nextOffset,
     )) return true;
+    const firstGraphEnd = manifestFirstGraphEnd(input.manifest, progress.resumedFromOffset);
+    if (
+      firstGraphEnd !== undefined
+      && progress.nextOffset <= firstGraphEnd
+      && progress.acceptedQuads <= firstGraphEnd - progress.resumedFromOffset
+    ) return false;
     if (
       progress.acceptedQuads < budget.maxRows
       && progress.acceptedHeapBytesEstimate < budget.maxHeapBytes
