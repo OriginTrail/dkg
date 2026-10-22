@@ -19,6 +19,12 @@ vi.mock('node:fs/promises', async importOriginal => {
     return actual.writeFile(...args);
   }, open: async (...args: Parameters<typeof actual.open>) => {
     const file = await actual.open(...args), sync = file.sync.bind(file), path = String(args[0]);
+    if (path.includes('literal-files')) {
+      const write = file.writeFile.bind(file);
+      file.writeFile = async (...values: Parameters<typeof write>) => {
+        syncControl.writes.push(path); await write(...values);
+      };
+    }
     if (path.includes('literal-files') || path === syncControl.ancestorPath) file.sync = async () => {
       syncControl.calls.push(path); syncControl.entered = true;
       if (syncControl.holdPath === undefined || syncControl.holdPath === path) await syncControl.held;
