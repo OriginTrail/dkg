@@ -147,6 +147,7 @@ export default defineConfig({
           // rendering (in-process, mocked ApiClient). No hardhat/daemon.
           'test/pca-confirmation-wire.test.ts',
           'test/pca-command-render.test.ts',
+          'test/ca-command-render.test.ts',
           'test/auth.test.ts',
           // Pure logic — no hardhat needed. Adding to the unit config means
           // contributors can run it via `pnpm test:unit` in ~2s instead of
