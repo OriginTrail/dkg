@@ -23,7 +23,9 @@ import {
 import {
   VM_CURRENT_ASSERTION_PRED,
   computeFlatKCRootV10,
+  computePrivateRootV10,
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
+  skolemizeKnowledgeAssetParts,
 } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGAgent, KA_MINT_RECONCILE_INCOMPLETE_CODE, KA_MINT_RECONCILE_REFUSED_CODE } from '../src/index.js';
@@ -39,6 +41,15 @@ const RESERVED_KA_ID = (BigInt(AUTHOR) << 96n) | 7n;
 const QUADS = [{ subject: 'urn:lot:2026-08-12', predicate: 'http://schema.org/name', object: '"Lot 12"', graph: '' }];
 const MERKLE_ROOT = computeFlatKCRootV10(QUADS, []);
 const ZERO = new Uint8Array(32);
+
+interface AssetContent { quads: Quad[]; privateQuads: Quad[] }
+
+/** The KC root finalize seals for this content: canonical public triples plus the private root. */
+async function sealedRootOf({ quads, privateQuads }: AssetContent): Promise<Uint8Array> {
+  const canonical = await skolemizeKnowledgeAssetParts(quads, privateQuads);
+  const privateRoot = computePrivateRootV10(canonical.privateQuads);
+  return computeFlatKCRootV10(canonical.publicQuads, privateRoot ? [privateRoot] : []);
+}
 const PUBLISHED_UAL_PRED = 'http://dkg.io/ontology/publishedUal';
 const SWM_SHARE_COMPLETE_PRED = 'http://dkg.io/ontology/swmShareComplete';
 const LIFECYCLE = assertionLifecycleUri(CONTEXT_GRAPH, AUTHOR, NAME);
@@ -79,7 +90,7 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
    * A finalized, fully shared asset whose own mint already landed on chain
    * unobserved. `publisherAddress` gives the node a wallet to publish with.
    */
-  async function strandedAsset(chain: MockChainAdapter, publisherAddress?: string, subGraphName?: string) {
+  async function strandedAsset(chain: MockChainAdapter, publisherAddress?: string, subGraphName?: string, content?: AssetContent) {
     const store = new OxigraphStore();
     agent = await DKGAgent.create({
       name: 'LateMintNode', listenPort: 0, listenHost: '127.0.0.1', store,
@@ -96,26 +107,35 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
       await agent.createContextGraph({ id: CONTEXT_GRAPH, name: CONTEXT_GRAPH });
       await agent.createSubGraph(CONTEXT_GRAPH, subGraphName);
     }
-    const { sealed, lostMint, history } = await strandAuthorAsset(chain, wallet, subGraphName);
+    const { sealed, lostMint, history } = await strandAuthorAsset(chain, wallet, subGraphName, content);
     const createKnowledgeAssets = vi.spyOn(chain, 'createKnowledgeAssets');
     const updateKnowledgeCollection = vi.spyOn(chain, 'updateKnowledgeCollectionV10');
     return { agent, store, sealed, lostMint, history, createKnowledgeAssets, updateKnowledgeCollection, accessPolicy };
   }
 
   /** One author's finalized, shared asset named NAME on the running agent, whose mint landed unobserved. */
-  async function strandAuthorAsset(chain: MockChainAdapter, author: ethers.Wallet, subGraphName?: string) {
+  async function strandAuthorAsset(
+    chain: MockChainAdapter,
+    author: ethers.Wallet,
+    subGraphName?: string,
+    content: AssetContent = { quads: QUADS, privateQuads: [] },
+  ) {
     const reservedKaId = (BigInt(author.address) << 96n) | 7n;
+    const merkleRoot = await sealedRootOf(content);
     const typedData = buildAuthorAttestationTypedData({
       chainId: await chain.getEvmChainId(),
       kav10Address: await chain.getKnowledgeAssetsLifecycleAddress(),
-      authorAddress: author.address, merkleRoot: MERKLE_ROOT, reservedKaId, schemeVersion: 1,
+      authorAddress: author.address, merkleRoot, reservedKaId, schemeVersion: 1,
     });
     const signed = ethers.Signature.from(await author.signTypedData(typedData.domain, typedData.types, typedData.message));
     const signature = { r: ethers.getBytes(signed.r), vs: ethers.getBytes(signed.yParityAndS) };
     const preSignedAuthorAttestation = { address: author.address, reservedKaId, signature };
     const agentAddress = author.address;
     await agent!.assertion.create(CONTEXT_GRAPH, NAME, { agentAddress, reservedKaId, subGraphName });
-    await agent!.assertion.write(CONTEXT_GRAPH, NAME, QUADS, { agentAddress, subGraphName });
+    if (content.quads.length > 0) await agent!.assertion.write(CONTEXT_GRAPH, NAME, content.quads, { agentAddress, subGraphName });
+    if (content.privateQuads.length > 0) {
+      await agent!.publisher.assertionWritePrivate(CONTEXT_GRAPH, NAME, agentAddress, content.privateQuads, subGraphName);
+    }
     const sealed = await agent!.assertion.finalize(CONTEXT_GRAPH, NAME, { agentAddress, preSignedAuthorAttestation, subGraphName });
     await agent!.assertion.promote(CONTEXT_GRAPH, NAME, { agentAddress, preSignedAuthorAttestation, entities: 'all', subGraphName });
 
@@ -125,7 +145,7 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
       contextGraphId: ON_CHAIN_CONTEXT_GRAPH,
       publisherAddress: chain.signerAddress,
       reservedKaId,
-      merkleRoot: MERKLE_ROOT,
+      merkleRoot,
       knowledgeAssetsAmount: 1,
       byteSize: 1n,
       epochs: 1,
@@ -464,6 +484,35 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
       .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/removed while reconcile waited/) });
     expect(await history()).toMatchObject({ state: 'created', memoryLayer: 'WM' });
+  });
+
+  it('records a private-only late mint and resumes it, keeping the private content and its commitment', async () => {
+    const secret: Quad = { subject: 'urn:lot:2026-08-12', predicate: 'http://schema.org/description', object: '"farm-only notes"', graph: '' };
+    const content = { quads: [], privateQuads: [secret] };
+    const { agent, store, sealed, lostMint, history, createKnowledgeAssets } =
+      await strandedAsset(new MockChainAdapter(), undefined, undefined, content);
+    expect(sealed.publicTripleCount).toBe(0);
+    const privateRoot = computePrivateRootV10((await skolemizeKnowledgeAssetParts([], [secret])).privateQuads)!;
+    const keyed = agent as unknown as Record<string, (...args: unknown[]) => unknown>;
+    const memberEncryption = ['_resolveInlineEncryption', '_resolveCuratedChainKeyContext', 'createV10ACKProvider']
+      .map((method) => vi.spyOn(keyed, method));
+    for (const spy of memberEncryption) spy.mockClear();
+    const secretCopies = async () => {
+      const result = await store.query(`SELECT ?g WHERE { GRAPH ?g { <${secret.subject}> <${secret.predicate}> ${secret.object} } }`);
+      return result.type === 'bindings' ? result.bindings.length : 0;
+    };
+    failNextLifecycleWrite(agent, store, VM_CURRENT_ASSERTION_PRED);
+
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
+      .resolves.toMatchObject({ status: 'adopted', ual: sealed.kaUal, txHash: lostMint.txHash });
+
+    expect(await history()).toMatchObject({ status: 'vm-confirmed', publishedUal: sealed.kaUal });
+    expect(await readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, { contextGraphId: CONTEXT_GRAPH, ual: sealed.kaUal }))
+      .toMatchObject({ state: 'confirmed', envelope: { publicTripleCount: 0, privateTripleCount: 1, privateMerkleRoot: privateRoot } });
+    expect(await secretCopies()).toBeGreaterThan(0);
+    expect(createKnowledgeAssets).not.toHaveBeenCalled();
+    for (const spy of memberEncryption) expect(spy).not.toHaveBeenCalled();
   });
 
   it('fails retryably when the record-only publish does not confirm', async () => {
