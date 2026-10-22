@@ -59,6 +59,7 @@ import {
   type RpcRequestGovernorPolicyInput,
 } from '@origintrail-official/dkg-chain';
 import { runtimeAssetRoots } from './runtime-assets.js';
+import { resolveCaBuyerAddress, type ConvictionServiceChainSettings } from './conviction-service-config.js';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -355,7 +356,7 @@ export interface ApprovalPolicyConfig {
 
 export type ApprovalPolicyConfigInput = ApprovalPolicyConfig | ApprovalPolicyMode;
 
-export interface ChainConfig extends ChainSignerSettings {
+export interface ChainConfig extends ChainSignerSettings, ConvictionServiceChainSettings {
   /** 'evm' for real blockchain, omit or 'mock' for in-memory (testing only) */
   type: 'evm' | 'mock';
   /** JSON-RPC endpoint URL */
@@ -1937,6 +1938,7 @@ export function resolveChainConfig(
     if (maxFeePerGasWei === 0n) throw new Error('chain.maxFeePerGasWei must be greater than zero');
     merged.maxFeePerGasWei = maxFeePerGasWei;
   }
+  if (cfg?.caBuyerAddress !== undefined) merged.caBuyerAddress = resolveCaBuyerAddress(cfg.caBuyerAddress);
   // Funding floors: local config wins, else the network overlay's per-chain
   // default (both default 0n downstream in the adapter when unset). Persisted
   // values arrive as string/number — normalize to bigint here, failing fast on
