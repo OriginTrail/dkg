@@ -65,21 +65,21 @@ const GAS: Record<string, Case> = {
   // spend, usage, label total, cursor and period list.
   'fundFromConviction, one bucket, base only, labels within 3 epochs': {
     target: 700_000n,
-    measured: 758_438n,
+    measured: 758_691n,
     above: true,
   },
-  'the same on an account from before the cut-over, lock 12': { target: 900_000n, measured: 822_974n },
+  'the same on an account from before the cut-over, lock 12': { target: 900_000n, measured: 823_251n },
   // Above its target, as the first base-only funding is.
   'fundFromConviction, one bucket, with top-up overflow, lock 12': {
     target: 1_300_000n,
-    measured: 1_328_646n,
+    measured: 1_328_911n,
     above: true,
   },
-  'fundFromConviction, one bucket, with top-up overflow, lock 60': { target: 4_500_000n, measured: 3_655_780n },
+  'fundFromConviction, one bucket, with top-up overflow, lock 60': { target: 4_500_000n, measured: 3_656_045n },
   // The same fundings for a later period of an account that has funded one
   // before: the account's usage, label total, cursor and period list exist.
-  'base only, labels within 3 epochs, a later period': { target: 700_000n, measured: 638_717n },
-  'with top-up overflow, lock 12, a later period': { target: 1_300_000n, measured: 1_217_426n },
+  'base only, labels within 3 epochs, a later period': { target: 700_000n, measured: 638_994n },
+  'with top-up overflow, lock 12, a later period': { target: 1_300_000n, measured: 1_217_679n },
 };
 
 const ROUNDING = 5_000n;

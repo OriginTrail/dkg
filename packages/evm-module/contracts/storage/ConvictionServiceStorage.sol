@@ -25,8 +25,10 @@ import {HubDependent} from "../abstract/HubDependent.sol";
  *   - It is policy-free. Every mutator is `onlyContracts` (any Hub-registered
  *     contract, and the Hub owner), and the logic contracts enforce every
  *     business rule (ownership, consent, caps, label capacity) before they
- *     write. Business events come from the logic contracts; this contract
- *     emits events only for its own parameters.
+ *     write. The one rule it keeps itself is the integrity of its period
+ *     records: each id is written once, and a written record always reads as
+ *     existing (`createSubscription`). Business events come from the logic
+ *     contracts; this contract emits events only for its own parameters.
  *   - The parameter setters are `onlyHub`, so governance reaches them through
  *     `Hub.forwardCall` (the Hub owner may also call them directly).
  *
@@ -133,7 +135,11 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
 
     error ExactScheduleFromAlreadySet(uint40 current);
     error InvalidParameter(string name);
+    /// @notice The id already holds a period record or buckets.
     error SubscriptionExists(bytes32 subscriptionId);
+    /// @notice The period record has a `periodStart` of 0, so it would read as
+    ///         absent.
+    error ZeroPeriodStart(bytes32 subscriptionId);
 
     // ============================================================
     //          State (the declaration order is the layout)
@@ -330,16 +336,26 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     }
 
     /// @notice Record a funded period and its buckets, in the given order, and
-    ///         append its id to the account's list. Reverts when a record with
-    ///         a non-zero `periodStart` already exists under the id.
+    ///         append its id to the account's list.
+    /// @dev    A record exists exactly when its `periodStart` is non-zero, so
+    ///         this refuses a record with a `periodStart` of 0, which would read
+    ///         as absent and could be written again (`ZeroPeriodStart`), and an
+    ///         id that already holds a record or buckets (`SubscriptionExists`),
+    ///         whose second write would append its buckets to the first's and
+    ///         list the id twice. The storage checks both itself because every
+    ///         Hub-registered contract can call it, and it is never upgraded in
+    ///         place.
     function createSubscription(
         bytes32 subscriptionId,
         Subscription calldata s,
         Bucket[] calldata buckets
     ) external onlyContracts {
-        if (_subscriptions[subscriptionId].periodStart != 0) revert SubscriptionExists(subscriptionId);
-        _subscriptions[subscriptionId] = s;
+        if (s.periodStart == 0) revert ZeroPeriodStart(subscriptionId);
         Bucket[] storage stored = _buckets[subscriptionId];
+        if (_subscriptions[subscriptionId].periodStart != 0 || stored.length != 0) {
+            revert SubscriptionExists(subscriptionId);
+        }
+        _subscriptions[subscriptionId] = s;
         for (uint256 i; i < buckets.length; i++) {
             stored.push(buckets[i]);
         }

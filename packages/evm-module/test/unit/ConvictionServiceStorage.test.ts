@@ -10,7 +10,8 @@
 //     the future;
 //   - the mutators' semantics: assignment listing and usage reset, cap
 //     updates that keep everything but the seven limits, the usage window
-//     roll-over, label totals, and period records;
+//     roll-over, label totals, and period records, each written once and
+//     never with a start of 0;
 //   - the compiler's storage layout against the documented one.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
@@ -502,6 +503,43 @@ describe('@unit ConvictionServiceStorage', () => {
       expect(await CSS.accountSubscriptionCount(7n)).to.equal(1n);
       expect(await CSS.accountSubscriptionCount(8n)).to.equal(0n);
       expect(await CSS.getBuckets(id)).to.have.length(1);
+    });
+
+    it('createSubscription reverts ZeroPeriodStart for a record with no start, which would read as absent, and stores nothing', async () => {
+      const id = ethers.id('subscription-1');
+      for (const caller of [logic, owner]) {
+        await expect(
+          CSS.connect(caller).createSubscription(id, subscriptionRecord(7n, { periodStart: 0n }), [
+            bucketOf('m', 1n, 1n, 1n),
+          ]),
+        )
+          .to.be.revertedWithCustomError(CSS, 'ZeroPeriodStart')
+          .withArgs(id);
+      }
+      expect(await CSS.subscriptionExists(id)).to.equal(false);
+      expect(await CSS.getBuckets(id)).to.have.length(0);
+      expect(await CSS.accountSubscriptionCount(7n)).to.equal(0n);
+    });
+
+    it('createSubscription reverts SubscriptionExists for an id that holds buckets but no record', async () => {
+      // No mutator leaves an id in this state any more; plant it at the
+      // documented layout (`_buckets` is slot 14) to prove the second guard.
+      const id = ethers.id('subscription-1');
+      const lengthSlot = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(['bytes32', 'uint256'], [id, 14n]));
+      await hre.network.provider.send('hardhat_setStorageAt', [
+        await CSS.getAddress(),
+        lengthSlot,
+        ethers.toBeHex(1n, 32),
+      ]);
+      expect(await CSS.getBuckets(id)).to.have.length(1);
+      expect(await CSS.subscriptionExists(id)).to.equal(false);
+
+      await expect(CSS.connect(logic).createSubscription(id, subscriptionRecord(7n), [bucketOf('m', 1n, 1n, 1n)]))
+        .to.be.revertedWithCustomError(CSS, 'SubscriptionExists')
+        .withArgs(id);
+      expect(await CSS.subscriptionExists(id)).to.equal(false);
+      expect(await CSS.getBuckets(id)).to.have.length(1);
+      expect(await CSS.accountSubscriptionCount(7n)).to.equal(0n);
     });
 
     it('keeps each account list in funding order, separate from other accounts', async () => {

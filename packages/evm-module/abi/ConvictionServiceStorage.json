@@ -60,6 +60,17 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "ZeroPeriodStart",
+    "type": "error"
+  },
+  {
     "anonymous": false,
     "inputs": [
       {
