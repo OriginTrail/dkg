@@ -4,7 +4,7 @@ import { join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
 import { NamedKaVmLifecycleSnapshots } from '../src/named-ka-vm-lifecycle-snapshots.js';
-import { lifecycleRepairKey, lifecycleMaterializationWire } from '../src/named-ka-vm-lifecycle-repair-journal.js';
+import { lifecycleRepairKey, lifecycleMaterializationWire, type LifecycleRepairEntry } from '../src/named-ka-vm-lifecycle-repair-journal.js';
 import { normalizeLifecycleRepairInput, reconcileLifecycleRepairEvidence } from '../src/named-ka-vm-lifecycle-evidence.js';
 import { confirmedMaterializationFixture } from './_helpers/confirmed-materialization-fixture.js';
 import { DurableReplaceableFile } from '../src/durable-file-replace.js';
@@ -98,7 +98,7 @@ it('bounds distinct physical preparations and pins references until admission', 
   const leases = await Promise.all(work); expect(io.calls).toBe(6);
   await snapshots.retireUnreferenced(new Map());
   expect((await readdir(join(f.dir, 'named-ka-vm-lifecycle-snapshots'))).filter(name => name.endsWith('.json'))).toHaveLength(6);
-  const command = commands[0], entries = new Map([[lifecycleRepairKey(command), { input: command, attempts: 0, nextAttemptAt: 0 }]]);
+  const command = commands[0], entries = new Map<string, LifecycleRepairEntry>([[lifecycleRepairKey(command), { input: command, preparedSnapshot: leases[0].snapshot ? leases[0] : undefined, attempts: 0, nextAttemptAt: 0 }]]);
   const wire = snapshots.encodePrepared(entries);
   for (const lease of leases) lease.release();
   await snapshots.retireUnreferenced(entries);
@@ -107,7 +107,7 @@ it('bounds distinct physical preparations and pins references until admission', 
 });
 it('waits for physical retirement before reusing and journaling the same snapshot', async () => {
   const f = await fixture(), snapshots = new NamedKaVmLifecycleSnapshots(f.dir), command = normalizeLifecycleRepairInput(f.input);
-  const entries = new Map([[lifecycleRepairKey(command), { input: command, attempts: 0, nextAttemptAt: 0 }]]);
+  const entries = new Map<string, LifecycleRepairEntry>([[lifecycleRepairKey(command), { input: command, attempts: 0, nextAttemptAt: 0 }]]);
   await snapshots.encode(entries);
   let release!: () => void; io.deleteHold = new Promise<void>(resolve => { release = resolve; });
   const cleanup = snapshots.retireUnreferenced(new Map()); await vi.waitFor(() => expect(io.deleting).toBe(true));
@@ -115,7 +115,11 @@ it('waits for physical retirement before reusing and journaling the same snapsho
   try { await new Promise(resolve => setTimeout(resolve, 20)); expect(done).toBe(false); }
   finally { release(); await cleanup; }
   const lease = await work;
-  try { expect((await new NamedKaVmLifecycleSnapshots(f.dir).decode(snapshots.encodePrepared(entries))).size).toBe(1); }
+  try {
+    if (!lease.snapshot) throw new Error('Expected prepared snapshot');
+    entries.get(lifecycleRepairKey(command))!.preparedSnapshot = lease;
+    expect((await new NamedKaVmLifecycleSnapshots(f.dir).decode(snapshots.encodePrepared(entries))).size).toBe(1);
+  }
   finally { lease.release(); }
 });
 
@@ -174,7 +178,7 @@ it('readmits equivalent distinct snapshot objects after the retained repair reti
   const prepare = NamedKaVmLifecycleSnapshots.prototype.prepare;
   let preparing = false, release!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
-  vi.spyOn(NamedKaVmLifecycleSnapshots.prototype, 'prepare').mockImplementation(async function(snapshot) {
+  const prepareSpy = vi.spyOn(NamedKaVmLifecycleSnapshots.prototype, 'prepare').mockImplementation(async function(snapshot) {
     const lease = await prepare.call(this, snapshot); preparing = true; await held; return lease;
   });
   const next = f.owner.submit(f.input), settled = next.then(value => value, error => error);
@@ -182,6 +186,7 @@ it('readmits equivalent distinct snapshot objects after the retained repair reti
     await f.owner.runDue(); expect((await f.journal()).entries).toHaveLength(0);
   } finally { release(); }
   expect(await settled).toBe('repaired'); expect((await f.journal()).entries).toHaveLength(0);
+  expect(prepareSpy).toHaveBeenCalledOnce();
 });
 
 it('allows independent admission and due retry during held cleanup and drains that cleanup on stop', async () => {
@@ -223,4 +228,25 @@ it('drains a held optional cleanup failure without failing shutdown or losing jo
   io.deleteFailure = false; f.owner.start();
   expect(await f.owner.submit(f.input)).toBe('repaired'); await f.owner.stop();
   expect(await readdir(join(f.dir, 'named-ka-vm-lifecycle-snapshots'))).toHaveLength(0);
+});
+
+
+it('carries exact owner-bound prepared evidence into encoding and requires fresh-owner adoption', async () => {
+  const f = await fixture(), snapshots = new NamedKaVmLifecycleSnapshots(f.dir), fresh = new NamedKaVmLifecycleSnapshots(f.dir);
+  const command = normalizeLifecycleRepairInput(f.input), prepared = await snapshots.prepare(command.materialization);
+  if (!prepared.snapshot) throw new Error('Expected prepared snapshot');
+  try {
+    expect(prepared.snapshot).toBe(command.materialization); expect(Object.isFrozen(prepared)).toBe(true);
+    const entries = new Map<string, LifecycleRepairEntry>([[lifecycleRepairKey(command), {
+      input: command, preparedSnapshot: prepared, attempts: 0, nextAttemptAt: 0,
+    }]]);
+    const wire = snapshots.encodePrepared(entries);
+    expect(wire.entries[0][1].input.materializationRef).toBe(prepared.reference);
+    expect(wire.entries[0][1]).not.toHaveProperty('preparedSnapshot');
+    await fresh.prepare();
+    expect(() => fresh.encodePrepared(entries)).toThrow('not prepared by this owner');
+    const adopted = await fresh.decode(wire), leases = await fresh.prepareEntries(adopted);
+    try { expect(fresh.encodePrepared(adopted)).toEqual(wire); expect(io.calls).toBe(1); }
+    finally { for (const lease of leases) lease.release(); }
+  } finally { prepared.release(); }
 });

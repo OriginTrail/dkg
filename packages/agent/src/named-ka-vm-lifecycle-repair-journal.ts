@@ -8,6 +8,7 @@ import { normalizeLifecycleRepairInput, normalizeLifecycleCoordinates,
   type ConfirmedLifecycleMaterialization, type ValidatedLifecycleRepairCommand, type ConfirmedNamedKaVmLifecycleInput, type HistoricalUnboundLifecycleRepairInput,
 } from './named-ka-vm-lifecycle-evidence.js';
 import { createHash } from 'node:crypto';
+import type { PreparedLifecycleSnapshot } from './named-ka-vm-lifecycle-snapshots.js';
 export type { HistoricalUnboundLifecycleRepairInput } from './named-ka-vm-lifecycle-evidence.js';
 type JournalInput = ValidatedLifecycleRepairCommand | HistoricalUnboundLifecycleRepairInput;
 export type StoredLifecycleRepairInputV4 = Omit<ConfirmedNamedKaVmLifecycleInput | HistoricalUnboundLifecycleRepairInput, 'packedKaId' | 'tentative' | 'materialization' | 'namedSeal'> & { packedKaId?: string; materializationRef?: string; namedSealQuads?: readonly Quad[] };
@@ -16,6 +17,8 @@ interface RepairRetryState {
   nextAttemptAt: number;
   lastError?: string;
   rejected?: boolean;
+  /** In-process ownership only; the persisted journal carries its reference. */
+  preparedSnapshot?: PreparedLifecycleSnapshot;
 }
 type DecodedLifecycleEvidence = (
   | { input: ValidatedLifecycleRepairCommand; retention?: never }
@@ -87,18 +90,18 @@ function historicalRepairKey(input: JournalInput): string {
 }
 /** Production emits only compact v4 records; historical compatibility is read-only. */
 export function encodeLifecycleRepairJournal(entries: ReadonlyMap<string, LifecycleRepairEntry>,
-  references: Pick<ReadonlyMap<ConfirmedLifecycleMaterialization, string>, 'get'>,
-): { version: 4; entries: Array<[string, Omit<LifecycleRepairEntry, 'input'> & { input: StoredLifecycleRepairInputV4 }]> } {
+  referenceFor: (entry: LifecycleRepairEntry) => string | undefined,
+): { version: 4; entries: Array<[string, Omit<LifecycleRepairEntry, 'input' | 'preparedSnapshot'> & { input: StoredLifecycleRepairInputV4 }]> } {
   return { version: 4, entries: [...entries].map(([key, entry]) => {
     // Admission and decode own validation/copying; retry bookkeeping never rehashes payloads.
     const { materialization } = entry.input;
     const input = lifecycleRepairCoordinatesWire(entry.input);
     if (materialization) {
-      const ref = references.get(materialization);
+      const ref = referenceFor(entry);
       if (!ref || !/^[a-f0-9]{64}$/.test(ref)) return invalid();
       input.materializationRef = ref;
     }
-    const { retention: _retention, ...retry } = entry;
+    const { retention: _retention, preparedSnapshot: _preparedSnapshot, ...retry } = entry;
     return [key, { ...retry, input }];
   }) };
 }

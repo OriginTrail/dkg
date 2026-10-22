@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { assertCanonicalGraphScopedAuthorSealV1 } from '@origintrail-official/dkg-core';
 import { historicalLifecycleRepairJournal } from './_helpers/historical-lifecycle-repair-journal.js';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -104,7 +105,7 @@ it.each(['key', 'retry', 'version', 'tuple'] as const)('rejects malformed %s bef
   const references = new Map([[normalized.materialization!, 'ab'.repeat(32)]]);
   const wire = encodeLifecycleRepairJournal(new Map([[lifecycleRepairKey(normalized), {
     input: normalized, attempts: 0, nextAttemptAt: 0,
-  }]]), references);
+  }]]), entry => references.get(entry.input.materialization!));
   const malformed = JSON.parse(JSON.stringify(wire));
   if (field === 'key') malformed.entries[0][0] = 'invalid';
   if (field === 'retry') malformed.entries[0][1].attempts = -1;
@@ -177,7 +178,7 @@ it.each(['subject', 'graph', 'extra', 'duplicate', 'model'])('rejects malformed 
   const { dir, input } = await setup(), command = normalizeLifecycleRepairInput(input);
   const wire = JSON.parse(JSON.stringify(encodeLifecycleRepairJournal(new Map([[lifecycleRepairKey(command), {
     input: command, attempts: 0, nextAttemptAt: 0,
-  }]]), new Map([[command.materialization!, 'ab'.repeat(32)]]))));
+  }]]), () => 'ab'.repeat(32))));
   const stored = wire.entries[0][1].input, rows = stored.namedSealQuads;
   if (field === 'subject') rows[0].subject = 'urn:wrong';
   if (field === 'graph') rows[0].graph = 'urn:wrong';
@@ -185,4 +186,20 @@ it.each(['subject', 'graph', 'extra', 'duplicate', 'model'])('rejects malformed 
   if (field === 'duplicate') rows.push(rows[0]);
   if (field === 'model') stored.namedSeal = command.namedSeal;
   await expect(new NamedKaVmLifecycleSnapshots(dir).decode(wire)).rejects.toBeInstanceOf(NamedKaVmLifecycleIntegrityError);
+});
+
+
+it('preserves an adopted snapshot hash even when its original wire bytes use different formatting', async () => {
+  const { dir, input, snapshots } = await setup(), command = normalizeLifecycleRepairInput(input);
+  const entries = new Map([[lifecycleRepairKey(command), { input: command, attempts: 1, nextAttemptAt: 0 }]]);
+  const wire = await new NamedKaVmLifecycleSnapshots(dir).encode(entries);
+  const original = wire.entries[0][1].input.materializationRef!;
+  const pretty = JSON.stringify(JSON.parse(await readFile(join(snapshots, `${original}.json`), 'utf8')), null, 2);
+  const adoptedRef = createHash('sha256').update(pretty).digest('hex'); expect(adoptedRef).not.toBe(original);
+  await new DurableReplaceableFile(join(snapshots, `${adoptedRef}.json`), { fileMode: 0o600, directoryMode: 0o700 }).replace(pretty);
+  wire.entries[0][1].input.materializationRef = adoptedRef;
+  const reopened = new NamedKaVmLifecycleSnapshots(dir), decoded = await reopened.decode(wire);
+  const writes = vi.spyOn(DurableReplaceableFile.prototype, 'replace');
+  expect(await reopened.encode(decoded)).toEqual(wire); expect(writes).not.toHaveBeenCalled();
+  expect(await readFile(join(snapshots, `${adoptedRef}.json`), 'utf8')).toBe(pretty);
 });

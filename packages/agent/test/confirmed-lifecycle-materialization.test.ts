@@ -222,7 +222,7 @@ it('freezes admitted and decoded evidence while retry encoding does not revalida
   for (let attempt = 3; attempt < 6; attempt += 1) {
     decoded.get(lifecycleRepairKey(unrelated))!.attempts = attempt;
     const references = new Map([...decoded.values()].map(entry => [entry.input.materialization!, 'ab'.repeat(32)]));
-    const wire = encodeLifecycleRepairJournal(decoded, references);
+    const wire = encodeLifecycleRepairJournal(decoded, entry => references.get(entry.input.materialization!));
     expect(wire.version).toBe(4);
     expect(wire.entries[0]![1].input.materializationRef).toBe('ab'.repeat(32));
     expect(wire.entries[0]![1].input).not.toHaveProperty('materialization');

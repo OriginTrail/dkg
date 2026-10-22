@@ -112,43 +112,41 @@ export class NamedKaVmLifecycleRepair {
     const key = lifecycleRepairKey(stored);
     // Reject stale/conflicting evidence before preparing an unnecessary immutable file.
     const initial = await this.serial(async () => {
-      const evidence = reconcileLifecycleRepairEvidence(this.entries.get(key), stored);
-      return evidence.status === 'superseded' ? undefined : evidence.input;
+      const previous = this.entries.get(key), evidence = reconcileLifecycleRepairEvidence(previous, stored);
+      return evidence.status === 'superseded' ? undefined : { input: evidence.input,
+        preparedSnapshot: previous?.input.materialization === evidence.input.materialization ? previous?.preparedSnapshot : undefined };
     });
     if (!initial) return 'superseded';
-    let selected: ValidatedLifecycleRepairCommand = initial;
-    let lease: Awaited<ReturnType<NamedKaVmLifecycleSnapshots['prepare']>> | undefined;
-    type Admission = { outcome: NamedKaVmLifecycleRepairOutcome } | { key: string; entry: RepairEntry };
-    let admitted: Admission;
+    const leases: Array<Awaited<ReturnType<NamedKaVmLifecycleSnapshots['prepare']>>> = [];
+    let admitted: { outcome: NamedKaVmLifecycleRepairOutcome } | { key: string; entry: RepairEntry };
     try {
-      for (;;) {
-        const prepared = selected;
-        const nextLease = await this.snapshots?.prepare(prepared.materialization);
-        lease?.release(); lease = nextLease;
-        const checked = await this.serial<Admission | { prepare: ValidatedLifecycleRepairCommand }>(async () => {
-          // An accepted preparation can journal during stop; execution remains fenced.
-          const previous = this.entries.get(key), evidence = reconcileLifecycleRepairEvidence(previous, stored);
-          if (evidence.status === 'superseded') return { outcome: 'superseded' as const };
-          // Retirement or an equivalent concurrent admission may select a different
-          // immutable object. Prepare/lease it outside serialization, then recheck.
-          if (evidence.input.materialization !== prepared.materialization) return { prepare: evidence.input };
-          const entry: RepairEntry = evidence.status === 'unchanged' && previous !== undefined ? previous
-            : { input: evidence.input, attempts: 0, nextAttemptAt: this.now() };
-          this.entries.set(key, entry);
-          try { await this.persist(); }
-          catch (error) {
-            if (previous) this.entries.set(key, previous); else this.entries.delete(key);
-            throw error;
-          }
-          return { key, entry };
-        });
-        if ('prepare' in checked) { selected = checked.prepare; continue; }
-        admitted = checked; break;
-      }
+      const prepared = await this.snapshots?.prepare(initial.input.materialization, initial.preparedSnapshot);
+      if (prepared) leases.push(prepared);
+      admitted = await this.serial(async () => {
+        // Reconcile the prepared immutable evidence, retaining its exact handle
+        // even if the prior entry retired while physical preparation was pending.
+        const previous = this.entries.get(key), evidence = reconcileLifecycleRepairEvidence(previous, initial.input);
+        if (evidence.status === 'superseded') return { outcome: 'superseded' as const };
+        let handle = evidence.input.materialization === prepared?.snapshot && prepared?.snapshot ? prepared
+          : previous?.preparedSnapshot;
+        if (this.snapshots && evidence.input.materialization && handle !== prepared) {
+          if (!handle || handle.snapshot !== evidence.input.materialization) throw new Error('Missing prepared lifecycle evidence');
+          handle = this.snapshots.retain(handle); leases.push(handle);
+        }
+        const entry: RepairEntry = evidence.status === 'unchanged' && previous !== undefined ? previous
+          : { input: evidence.input, ...(handle ? { preparedSnapshot: handle } : {}), attempts: 0, nextAttemptAt: this.now() };
+        this.entries.set(key, entry);
+        try { await this.persist(); }
+        catch (error) {
+          if (previous) this.entries.set(key, previous); else this.entries.delete(key);
+          throw error;
+        }
+        return { key, entry };
+      });
     } catch (error) {
-      lease?.release(); await this.cleanupUnusedPreparation(); throw error;
+      for (const lease of leases) lease.release(); await this.cleanupUnusedPreparation(); throw error;
     }
-    lease?.release();
+    for (const lease of leases) lease.release();
     if ('outcome' in admitted) { await this.cleanupUnusedPreparation(); return admitted.outcome; }
     return this.execute(admitted.key, admitted.entry);
   }
