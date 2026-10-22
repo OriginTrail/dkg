@@ -15,8 +15,8 @@
   {
     "pattern": "packages/agent/campaigns/catalog-durable-head.test.ts",
     "lane": "native-crash-campaign",
-    "reason": "Parent-owned destructive process-death and restart matrix; ordinary Gate1 regression remains in required unit CI",
-    "cadence": "manual",
+    "reason": "Parent-owned process-death and restart matrix runs once in the required agent sidecar shard; ordinary Gate1 regression remains in the package inventory",
+    "cadence": "required",
     "command": "node --experimental-sqlite --import tsx scripts/repro/rfc64-catalog-durable-head.mts",
     "prerequisites": [
       "Node 22 with experimental SQLite",
