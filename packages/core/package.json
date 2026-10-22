@@ -67,7 +67,7 @@
     "@libp2p/circuit-relay-v2": "^4.2.5",
     "@libp2p/crypto": "^5.1.18",
     "@libp2p/dcutr": "^3.0.20",
-    "@libp2p/gossipsub": "^15.0.23",
+    "@libp2p/gossipsub": "^16.1.1",
     "@libp2p/identify": "^4.1.6",
     "@libp2p/interface": "^3.2.2",
     "@libp2p/kad-dht": "^16.2.7",
