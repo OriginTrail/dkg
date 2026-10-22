@@ -1,3 +1,4 @@
+import { prepareImmutableMutation, runImmutableMutation, assertImmutableMutationCapability, type ImmutableStoreMutation, type ImmutableStorePreparation, type PreparedMutation } from './immutable-store-preparation.js';
 import type { TripleStoreCommitCapability } from './persistence.js';
 import type { GraphSetIndexStoreOptions } from './graph-set-index-store-options.js';
 export type { GraphSetIndexStoreOptions } from './graph-set-index-store-options.js';
@@ -6,7 +7,6 @@ import { namedGraphsFromQuads, endsWithHighSurrogate, normalizeGraphUris, queryO
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import type { GraphSetMutationSource, TouchedGraphMutationSource, GraphSetRefreshSource, PendingFullRefreshSource, GraphSetMutationEvent, GraphSetDiagnosticEvent } from './graph-set-index-types.js';
 export type { GraphSetMutationSource, GraphSetMutationEvent } from './graph-set-index-types.js';
-import { assertSubjectAndInsertPayload } from './atomic-subject-insert.js';
 import { performance } from 'node:perf_hooks';
 import {
   codePointLowerBound,
@@ -87,7 +87,7 @@ type GraphSetIndexStoreInternalOptions = GraphSetIndexStoreOptions & {
  * only graphs containing at least one quad are listed; empty `createGraph()`
  * calls are not visible until data is inserted.
  */
-export class GraphSetIndexStore implements TripleStoreDecorator {
+export class GraphSetIndexStore implements TripleStoreDecorator, ImmutableStorePreparation {
   get queryCancellation() {
     return this.inner.queryCancellation;
   }
@@ -144,17 +144,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
-    return runLogicalStoreMutation(this.inner, 'insert', options, async options => {
-      if (!this.enabled) {
-        await this.inner.insert(quads, options);
-        return;
-      }
-      await this.inner.insert(quads, options);
-      const touched = namedGraphsFromQuads(quads);
-      if (touched.length === 0) return;
-      this.bumpMutation();
-      this.addGraphs(touched, 'insert');
-    });
+    return runImmutableMutation(this, { operation: 'insert', quads }, options);
   }
 
   async delete(quads: Quad[], options?: QueryOptions): Promise<void> {
@@ -311,164 +301,68 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     });
   }
 
-  async replaceGraph(
-    graphUri: string,
-    quads: Quad[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    return runLogicalStoreMutation(this.inner, 'replaceGraph', options, async options => {
-      if (typeof this.inner.replaceGraph !== 'function') {
-        throw new UnsupportedTripleStoreCapabilityError('replaceGraph', 'GraphSetIndexStore');
-      }
-      return this.runReplacementMutation('replaceGraph', [graphUri], options,
-        () => this.inner.replaceGraph!(graphUri, quads, options));
-    });
+  async replaceGraph(graphUri: string, quads: Quad[], options?: QueryOptions): Promise<void> {
+    return runImmutableMutation(this, { operation: 'replaceGraph', graphUri, quads }, options);
   }
 
   async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
-    return runLogicalStoreMutation(this.inner, 'replaceAssetGroup', options, async options => {
-      if (!this.inner.replaceAssetGroup) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'group-decorator');
-      try { await this.inner.replaceAssetGroup(assets, options); }
+    return runImmutableMutation(this, { operation: 'replaceAssetGroup', assets }, options);
+  }
+
+  async replaceGraphAndSubject(graphUri: string, graphQuads: Quad[], metaGraphUri: string,
+    metadataSubject: string, metadataQuads: Quad[], options?: QueryOptions): Promise<void> {
+    return runImmutableMutation(this, { operation: 'replaceGraphAndSubject', graphUri, graphQuads,
+      metaGraphUri, metadataSubject, metadataQuads }, options);
+  }
+
+  async replaceSubject(graphUri: string, subject: string, quads: Quad[], options?: QueryOptions): Promise<void> {
+    return runImmutableMutation(this, { operation: 'replaceSubject', graphUri, subject, quads }, options);
+  }
+
+  async replaceSubjectAndInsert(graphUri: string, subject: string, replacementQuads: Quad[], insertQuads: Quad[],
+    options?: QueryOptions): Promise<void> {
+    return runImmutableMutation(this, { operation: 'replaceSubjectAndInsert', graphUri, subject, replacementQuads, insertQuads }, options);
+  }
+
+  async rfc64AuthorCommitCasV1(input: Rfc64AuthorCommitCasInputV1, options?: QueryOptions): Promise<Rfc64AuthorCommitCasResultV1> {
+    return runImmutableMutation(this, { operation: 'rfc64AuthorCommitCasV1', input }, options);
+  }
+
+  async prepareImmutableMutation(mutation: ImmutableStoreMutation): Promise<PreparedMutation<void | Rfc64AuthorCommitCasResultV1>> {
+    const operation = mutation.operation;
+    assertImmutableMutationCapability(this.inner, operation);
+    let command = mutation, touched: string[];
+    switch (mutation.operation) {
+      case 'insert': touched = namedGraphsFromQuads(mutation.quads); break;
+      case 'replaceAssetGroup': touched = [...new Set(mutation.assets.flatMap(asset => [asset.graphUri, asset.metaGraphUri]))]; break;
+      case 'replaceGraphAndSubject': touched = [mutation.graphUri, mutation.metaGraphUri]; break;
+      case 'rfc64AuthorCommitCasV1': {
+        // Copy/validate all fallible protocol inputs before dispatch and observation.
+        const manifest = normalizeRfc64AuthorCommitCasV1(mutation.input);
+        command = { ...mutation, input: sourceFromNormalizedRfc64AuthorCommitCasV1(manifest) };
+        touched = [...manifest.touchedGraphs]; break;
+      }
+      default: touched = [mutation.graphUri];
+    }
+    const commit = await prepareImmutableMutation(this.inner, command);
+    return async (scoped, appended = []) => {
+      let result: void | Rfc64AuthorCommitCasResultV1;
+      try { result = await commit(scoped, appended); }
       catch (error) {
-        if (!isStoreOperationNotStarted(error, 'replaceAssetGroup')) this.scheduleFullRefresh('replaceAssetGroup');
+        const observeFailure = this.enabled || operation === 'replaceAssetGroup' || operation === 'replaceGraphAndSubject';
+        if (operation !== 'insert' && observeFailure && !isStoreOperationNotStarted(error, operation)) this.scheduleFullRefresh(operation);
         throw error;
       }
-      if (!this.enabled) return;
-      this.bumpMutation();
-      await this.maintainTouchedGraphs([...new Set(assets.flatMap(a => [a.graphUri, a.metaGraphUri]))], 'replaceAssetGroup', options);
-    });
-  }
-
-  async replaceGraphAndSubject(
-    graphUri: string,
-    graphQuads: Quad[],
-    metaGraphUri: string,
-    metadataSubject: string,
-    metadataQuads: Quad[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    return runLogicalStoreMutation(this.inner, 'replaceGraphAndSubject', options, async options => {
-      if (typeof this.inner.replaceGraphAndSubject !== 'function') {
-        throw new UnsupportedTripleStoreCapabilityError(
-          'replaceGraphAndSubject',
-          'GraphSetIndexStore',
-        );
+      if (!this.enabled || (operation === 'rfc64AuthorCommitCasV1' && result === 'conflict')) return result;
+      if (operation === 'insert') {
+        // Changelog adds its markers only after preparation and sequence allocation.
+        const graphs = normalizeGraphUris([...touched, ...namedGraphsFromQuads(appended)]);
+        if (graphs.length) { this.bumpMutation(); this.addGraphs(graphs, operation); }
+      } else {
+        this.bumpMutation(); await this.maintainTouchedGraphs(touched, operation, scoped);
       }
-      try {
-        await this.inner.replaceGraphAndSubject(
-          graphUri,
-          graphQuads,
-          metaGraphUri,
-          metadataSubject,
-          metadataQuads,
-          options,
-        );
-      } catch (error) {
-        if (!isStoreOperationNotStarted(error, 'replaceGraphAndSubject')) {
-          this.scheduleFullRefresh('replaceGraphAndSubject');
-        }
-        throw error;
-      }
-      if (!this.enabled) return;
-      this.bumpMutation();
-      await this.maintainTouchedGraphs(
-        [graphUri, metaGraphUri],
-        'replaceGraphAndSubject',
-        options,
-      );
-    });
-  }
-
-  async replaceSubject(
-    graphUri: string,
-    subject: string,
-    quads: Quad[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    return runLogicalStoreMutation(this.inner, 'replaceSubject', options, async options => {
-      if (typeof this.inner.replaceSubject !== 'function') {
-        throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'GraphSetIndexStore');
-      }
-      return this.runReplacementMutation('replaceSubject', [graphUri], options,
-        () => this.inner.replaceSubject!(graphUri, subject, quads, options));
-    });
-  }
-
-  async replaceSubjectAndInsert(
-    graphUri: string, subject: string, replacementQuads: Quad[], insertQuads: Quad[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    assertSubjectAndInsertPayload(graphUri, subject, replacementQuads, insertQuads);
-    return runLogicalStoreMutation(this.inner, 'replaceSubjectAndInsert', options, async options => {
-      if (typeof this.inner.replaceSubjectAndInsert !== 'function') {
-        throw new UnsupportedTripleStoreCapabilityError('replaceSubjectAndInsert', 'GraphSetIndexStore');
-      }
-      return this.runReplacementMutation('replaceSubjectAndInsert', [graphUri], options,
-        () => this.inner.replaceSubjectAndInsert!(graphUri, subject, replacementQuads, insertQuads, options));
-    });
-  }
-
-  private async runReplacementMutation(
-    operation: 'replaceGraph' | 'replaceSubject' | 'replaceSubjectAndInsert',
-    touchedGraphs: string[],
-    options: QueryOptions | undefined,
-    execute: () => Promise<void>,
-  ): Promise<void> {
-    if (!this.enabled) {
-      await execute();
-      return;
-    }
-    try {
-      await execute();
-    } catch (error) {
-      // A rejected replacement may have committed. Only a not-started outcome
-      // bound to this dispatch is clean; a nested post-commit probe is not.
-      if (!isStoreOperationNotStarted(error, operation)) {
-        this.scheduleFullRefresh(operation);
-      }
-      throw error;
-    }
-    this.bumpMutation();
-    await this.maintainTouchedGraphs(touchedGraphs, operation, options);
-  }
-
-  async rfc64AuthorCommitCasV1(
-    input: Rfc64AuthorCommitCasInputV1,
-    options?: QueryOptions,
-  ): Promise<Rfc64AuthorCommitCasResultV1> {
-    return runLogicalStoreMutation(this.inner, 'rfc64AuthorCommitCasV1', options, async options => {
-      if (typeof this.inner.rfc64AuthorCommitCasV1 !== 'function') {
-        throw new UnsupportedTripleStoreCapabilityError(
-          'rfc64AuthorCommitCasV1',
-          'GraphSetIndexStore',
-        );
-      }
-      const manifest = normalizeRfc64AuthorCommitCasV1(input);
-      const source = sourceFromNormalizedRfc64AuthorCommitCasV1(manifest);
-      if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(source, options);
-      // Prepare every fallible index-maintenance input before dispatch. Once the
-      // inner capability reports `committed`, only best-effort observation and
-      // index maintenance may remain; malformed caller input must never create a
-      // committed backend mutation that this decorator cannot account for.
-      const touchedGraphs = [...manifest.touchedGraphs];
-      let result: Rfc64AuthorCommitCasResultV1;
-      try {
-        result = await this.inner.rfc64AuthorCommitCasV1(source, options);
-      } catch (error) {
-        if (!isStoreOperationNotStarted(error, 'rfc64AuthorCommitCasV1')) {
-          this.scheduleFullRefresh('rfc64AuthorCommitCasV1');
-        }
-        throw error;
-      }
-      if (result === 'conflict') return result;
-      this.bumpMutation();
-      await this.maintainTouchedGraphs(
-        touchedGraphs,
-        'rfc64AuthorCommitCasV1',
-        options,
-      );
       return result;
-    });
+    };
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {
