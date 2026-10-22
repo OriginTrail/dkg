@@ -57,15 +57,14 @@ function resolveIdentity(number: bigint | undefined, reservedUal: string | undef
   return { kind: 'legacy-fallback', identity: { agentAddress: owner, number }, ...(warning === undefined ? {} : { warning }) };
 }
 
-interface ReservationCoordinates {
-  readonly lifecycleOwner?: string;
-  readonly contextGraphId?: string;
-  readonly lifecycleUri?: string;
+export interface StoredAssertionLifecycleCoordinates {
+  readonly contextGraphId: string;
+  readonly lifecycleUri: string;
   readonly subGraphName?: string;
 }
 
 /** Infer a legacy owner only when the native subject and stable fields agree. */
-function storedLifecycleOwner(record: AssertionLifecycleRecord, coordinates: ReservationCoordinates): string | undefined {
+export function resolveStoredAssertionLifecycleOwner(record: AssertionLifecycleRecord, coordinates: StoredAssertionLifecycleCoordinates): string | undefined {
   const { contextGraphId, lifecycleUri, subGraphName } = coordinates;
   if (contextGraphId === undefined || lifecycleUri === undefined) return undefined;
   const values = (predicate: string) => [...new Set(record.bindings.filter(row => row.p === predicate)
@@ -82,13 +81,12 @@ function storedLifecycleOwner(record: AssertionLifecycleRecord, coordinates: Res
 }
 
 /** RDF is decoded once by the normal record reader; aliases share its policy. */
-export function decodeAssertionReservationIdentity(record: AssertionLifecycleRecord, coordinates: ReservationCoordinates): AssertionReservationIdentity {
+export function decodeAssertionReservationIdentity(record: AssertionLifecycleRecord, lifecycleOwner: string | undefined): AssertionReservationIdentity {
   const numbers = record.bindings.filter(row => row.p === P.number)
     .map(row => decodeAssertionLifecycleRecord([row]).number);
   if (numbers.some(number => number !== record.number)) return { kind: 'conflict', reason: 'Contradictory KA reservation numbers' };
-  const owner = coordinates.lifecycleOwner ?? storedLifecycleOwner(record, coordinates);
   const uals = record.bindings.filter(row => row.p === P.ual).map(row => decodeStoredAssertionReservedUal(row.o));
-  const candidates = (uals.length === 0 ? [record.reservedUal] : uals).map(ual => resolveIdentity(record.number, ual, owner));
+  const candidates = (uals.length === 0 ? [record.reservedUal] : uals).map(ual => resolveIdentity(record.number, ual, lifecycleOwner));
   const keys = new Set(candidates.map(candidate => candidate.kind === 'reserved'
     ? `reserved:${candidate.identity.kaUal}` : candidate.kind === 'legacy-fallback'
       ? `legacy:${assertionPhysicalIdentityKey(candidate.identity)}` : candidate.kind));

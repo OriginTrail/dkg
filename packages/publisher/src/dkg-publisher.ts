@@ -6779,7 +6779,7 @@ export class DKGPublisher implements Publisher {
   private kaGraphIdentityFromLifecycle(
     contextGraphId: string, agentAddress: string, name: string, subGraphName: string | undefined, record: AssertionLifecycleRecord,
   ): { agentAddress: string; number: bigint; kaUal?: string } | null {
-    const identity = decodeAssertionReservationIdentity(record, { lifecycleOwner: agentAddress });
+    const identity = decodeAssertionReservationIdentity(record, agentAddress);
     if (identity.kind === 'unallocated') return null;
     if (identity.kind === 'conflict') throw Object.assign(new Error(identity.reason), { code: 'KA_WM_LIFECYCLE_CORRUPT' });
     if (identity.kind === 'legacy-fallback' && identity.warning) {

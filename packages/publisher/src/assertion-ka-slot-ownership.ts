@@ -2,7 +2,8 @@
 import { assertSafeIri, assertionLifecycleUri, contextGraphMetaUri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { ASSERTION_RESERVATION_PREDICATES as P, decodeAssertionLifecycleRecord } from './assertion-lifecycle-record.js';
-import { assertionPhysicalIdentityKey, decodeAssertionReservationIdentity, type AssertionPhysicalIdentity } from './assertion-reservation.js';
+import { assertionPhysicalIdentityKey, decodeAssertionReservationIdentity, resolveStoredAssertionLifecycleOwner,
+  type AssertionPhysicalIdentity } from './assertion-reservation.js';
 import { withKeyedLocks } from './keyed-lock.js';
 import { writeLocksForStore } from './store-write-locks.js';
 
@@ -62,9 +63,11 @@ export async function assertKaSlotOwnershipAvailable(
   }
   const expected = assertionPhysicalIdentityKey(physicalIdentity);
   for (const [subject, rows] of candidates) {
-    const identity = decodeAssertionReservationIdentity(decodeAssertionLifecycleRecord([...rows.values()]), {
+    const record = decodeAssertionLifecycleRecord([...rows.values()]);
+    const owner = resolveStoredAssertionLifecycleOwner(record, {
       contextGraphId, lifecycleUri: subject, subGraphName,
     });
+    const identity = decodeAssertionReservationIdentity(record, owner);
     if (identity.kind === 'conflict') throw unavailable(identity.reason);
     if (identity.kind === 'unallocated') throw unavailable();
     if (assertionPhysicalIdentityKey(identity.identity) === expected) {

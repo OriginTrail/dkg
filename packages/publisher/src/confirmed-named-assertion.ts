@@ -90,9 +90,7 @@ async function reconcileWithAllocationLock(store: TripleStore, target: Confirmed
   if (!seal) throw new Error('Confirmed lifecycle repair awaits its authenticated named assertion seal');
   const scope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion), existing = await read(lifecycle, meta);
   const ontology = 'http://dkg.io/ontology/';
-  const reservation = decodeAssertionReservationIdentity(decodeAssertionLifecycleRecord(existing.map(q => ({ p: q.predicate, o: q.object }))), {
-    lifecycleOwner: target.agentAddress,
-  });
+  const reservation = decodeAssertionReservationIdentity(decodeAssertionLifecycleRecord(existing.map(q => ({ p: q.predicate, o: q.object }))), target.agentAddress);
   if (reservation.kind === 'conflict') throw new Error('Confirmed named assertion reservation conflicts with surviving records');
   const projection = generateAssertionReservationMetadata({ contextGraphId: target.contextGraphId, agentAddress: target.agentAddress,
     assertionName: target.name, subGraphName: target.subGraphName, kaNumber: scope.kaNumber, reservedUal: scope.ual });
