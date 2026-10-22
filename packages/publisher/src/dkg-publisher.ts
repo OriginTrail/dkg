@@ -159,7 +159,7 @@ import {
   type PublisherAddressResolution,
   type PublisherSigner,
 } from './publisher-planning.js';
-import { isAdoptedMint, keepsExistingRecord, mintOrAdoptKnowledgeAssets, sealedMintAdoption } from './adopt-existing-mint.js';
+import { mintOrAdoptKnowledgeAssets, sealedMintAdoption, type MintRecording } from './adopt-existing-mint.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
@@ -3565,7 +3565,7 @@ export class DKGPublisher implements Publisher {
 
     onPhase?.('chain', 'start');
 
-    let onChainResult: OnChainPublishResult | undefined;
+    let onChainResult: OnChainPublishResult | undefined, recording: MintRecording | undefined;
     let status: 'tentative' | 'confirmed' = 'tentative';
     ensurePublishOperationIdentity();
     // The operation id may be needed earlier as an encryption nonce domain,
@@ -3990,7 +3990,7 @@ export class DKGPublisher implements Publisher {
               merkleLeafCount: kcMerkleLeafCount,
             },
           });
-          onChainResult = await mintOrAdoptKnowledgeAssets(this.chain, {
+          ({ result: onChainResult, recording } = await mintOrAdoptKnowledgeAssets(this.chain, {
             publishOperationId,
             contextGraphId: v10CgId,
             publisherAddress: publisherSigner?.address,
@@ -4030,7 +4030,7 @@ export class DKGPublisher implements Publisher {
             onBroadcast: emitWriteAheadStart,
             onBroadcastAccepted: (signal) =>
               onBroadcastAccepted?.({ ...signal, operationKind: 'create' }),
-          }, sealedAdoption);
+          }, sealedAdoption));
         } finally {
           if (writeAhead.didWriteAhead()) onPhase?.('chain:writeahead', 'end');
         }
@@ -4043,7 +4043,7 @@ export class DKGPublisher implements Publisher {
           bestEffortNotify(onPublishConfirmed, { txHash: onChainResult.txHash });
         }
 
-        if (!isAdoptedMint(onChainResult)) onChainResult.tokenAmount = tokenAmount; // an adopted mint keeps its original cost
+        if (!recording.adopted) onChainResult.tokenAmount = tokenAmount; // an adopted mint keeps its original cost
 
         const kaId = onChainResult.kaId ?? onChainResult.batchId;
         if (reservedKaId !== undefined && kaId !== reservedKaId) {
@@ -4148,7 +4148,7 @@ export class DKGPublisher implements Publisher {
             q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
           );
         }
-        if (graphPublish && !keepsExistingRecord(onChainResult)) {
+        if (graphPublish && !recording.keepsExistingRecord) {
           await replaceLocallyTrustedKnowledgeAssetControls(
             this.store,
             graphPublish.scope.ual,
@@ -4188,7 +4188,7 @@ export class DKGPublisher implements Publisher {
         } else {
           await this.store.insert(vmQuads);
         }
-        if (!keepsExistingRecord(onChainResult)) await this.store.insert(confirmedQuads);
+        if (!recording.keepsExistingRecord) await this.store.insert(confirmedQuads);
         // GH #1078 — supersede/persist private slices only now that the chain
         // has confirmed (before returning 'confirmed', so no read sees the KA
         // confirmed without its private data).

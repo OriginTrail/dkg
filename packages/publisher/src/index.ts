@@ -19,6 +19,8 @@ export {
   mintOrAdoptKnowledgeAssets,
   type MintAdoptionExpectation,
   type MintAdoptionRefusalReason,
+  type MintOrAdoptOutcome,
+  type MintRecording,
 } from './adopt-existing-mint.js';
 export * from './publication-payload-measurement.js';
 export { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';

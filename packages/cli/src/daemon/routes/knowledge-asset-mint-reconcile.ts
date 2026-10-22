@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { validateAssertionName } from '@origintrail-official/dkg-core';
-import { KA_MINT_RECONCILE_INCOMPLETE_CODE, reconcileKnowledgeAssetMint } from '@origintrail-official/dkg-agent';
+import { KA_MINT_RECONCILE_INCOMPLETE_CODE, KA_MINT_RECONCILE_REFUSED_CODE } from '@origintrail-official/dkg-agent';
 import type { RequestContext } from './context.js';
 import { requireNodeAdmin } from '../node-admin-guard.js';
 import { jsonResponse, readBody, safeParseJson, SMALL_BODY_BYTES, validateOptionalSubGraphName,
@@ -8,13 +8,14 @@ import { jsonResponse, readBody, safeParseJson, SMALL_BODY_BYTES, validateOption
 import { respondAmbiguousAssertionAuthor, respondMintAdoptionRefused } from './knowledge-assets-error-mapping.js';
 
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
-/** Caller preconditions: not a finalized complete share, or a graph this node cannot publish to. */
-const PRECONDITION_CODES = new Set(['PUBLISH_NOT_FULL_SHARE', 'CG_NOT_REGISTERED']);
+/** Caller preconditions: no record to complete, not a finalized complete share, or a graph this node cannot publish to. */
+const PRECONDITION_CODES = new Set([KA_MINT_RECONCILE_REFUSED_CODE, 'PUBLISH_NOT_FULL_SHARE', 'CG_NOT_REGISTERED']);
 
 /**
  * Record one named asset whose publish transaction mined after the node
  * stopped waiting for it. Verifies the seal's reserved id on chain and adopts
- * that mint; never sends a transaction, ACK request or member ciphertext.
+ * that mint, resuming an interrupted earlier attempt; never sends a
+ * transaction, ACK request or member ciphertext.
  */
 export async function handleKnowledgeAssetMintReconcile(
   { agent, authentication, req, res }: RequestContext,
@@ -33,7 +34,7 @@ export async function handleKnowledgeAssetMintReconcile(
   const contextGraphId = await resolveRequiredWriteContextGraphId(agent, parsed.contextGraphId, res, preflight);
   if (!contextGraphId) return;
   try {
-    return jsonResponse(res, 200, await reconcileKnowledgeAssetMint(agent, {
+    return jsonResponse(res, 200, await agent.reconcileKnowledgeAssetMint({
       contextGraphId, name, subGraphName: parsed.subGraphName, txHash: parsed.txHash,
     }));
   } catch (error: any) {

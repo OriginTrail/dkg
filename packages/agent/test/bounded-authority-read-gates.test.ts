@@ -141,6 +141,7 @@ describe('bounded-freshness authority reads', () => {
         'dkg-agent-swm-host.ts',
         'dkg-agent-crypto.ts',
         'dkg-agent-publish.ts',
+        'publish-target-curation.ts',
       ];
       const flipped = files.filter((file) => source(file).includes("freshness: 'bounded'")
         || source(file).includes("freshness: opts.freshness ?? 'bounded'"));
@@ -158,10 +159,10 @@ describe('bounded-freshness authority reads', () => {
     it('never flips the key-issuance or plaintext-downgrade paths', () => {
       // `dkg-agent-crypto.ts` holds `cgAuth.recipients` and
       // `cgAuth.senderKeyAccept`; `dkg-agent-publish.ts` holds
-      // `cgAuth.curatedProbe` and `cgAuth.curatedKeyCtx`. A stale roster at any
-      // of them hands over a key or permits plaintext, and neither is repaired
-      // by the next read.
-      for (const file of ['dkg-agent-crypto.ts', 'dkg-agent-publish.ts']) {
+      // `cgAuth.curatedKeyCtx` and `publish-target-curation.ts` holds
+      // `cgAuth.curatedProbe`. A stale roster at any of them hands over a key
+      // or permits plaintext, and neither is repaired by the next read.
+      for (const file of ['dkg-agent-crypto.ts', 'dkg-agent-publish.ts', 'publish-target-curation.ts']) {
         expect(source(file)).not.toContain("freshness: 'bounded'");
       }
     });

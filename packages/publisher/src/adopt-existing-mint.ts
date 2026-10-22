@@ -48,6 +48,10 @@ export type MintAdoptionRefusalReason =
   | 'root-mismatch'
   | 'context-graph-mismatch'
   | 'author-mismatch'
+  /** An update replaced the minted content, so recording it would install a stale version as current. */
+  | 'superseded'
+  /** The current-version view at the finality-depth block is missing, behind the mint, or contradicts it. */
+  | 'version-view-unavailable'
   /** The node already holds a record of this KA that does not describe the sealed content. */
   | 'existing-record-conflict';
 
@@ -55,6 +59,7 @@ export type MintAdoptionRefusalReason =
 const RETRYABLE_REFUSALS: ReadonlySet<MintAdoptionRefusalReason> = new Set([
   'mint-receipt-missing',
   'mint-not-final',
+  'version-view-unavailable',
 ]);
 
 export class MintAdoptionRefusedError extends Error {
@@ -84,8 +89,9 @@ export interface MintAdoptionExpectation {
 /**
  * Verify the existing mint of `expected.kaId` against the seal and return it
  * as the publish result: the original transaction, block, publisher and TRAC
- * cost, never the retry's quote. `revert` is the `KaIdAlreadyMinted` failure
- * that led here, if any; it becomes the refusal's `cause`.
+ * cost, never the retry's quote. The mint must also still be the asset's
+ * current version. `revert` is the `KaIdAlreadyMinted` failure that led here,
+ * if any; it becomes the refusal's `cause`.
  */
 export async function adoptExistingMint(
   chain: ChainAdapter,
@@ -94,8 +100,8 @@ export async function adoptExistingMint(
 ): Promise<OnChainPublishResult> {
   const refuse = (reason: MintAdoptionRefusalReason, detail: string) =>
     new MintAdoptionRefusedError(reason, expected.kaId, detail, { cause: options.revert });
-  if (typeof chain.resolveKnowledgeAssetMint !== 'function') {
-    throw refuse('lookup-unsupported', 'this chain adapter cannot look up mints');
+  if (typeof chain.resolveKnowledgeAssetMint !== 'function' || typeof chain.readKnowledgeAssetVersionSnapshot !== 'function') {
+    throw refuse('lookup-unsupported', 'this chain adapter cannot look up mints and current versions');
   }
   const resolution = await chain.resolveKnowledgeAssetMint(expected.kaId, {
     txHash: options.txHash,
@@ -131,6 +137,20 @@ export async function adoptExistingMint(
   }
   if (mint.authorAddress.toLowerCase() !== expected.authorAddress.toLowerCase()) {
     throw refuse('author-mismatch', `minted for author ${mint.authorAddress}, not ${expected.authorAddress}`);
+  }
+  // A receipt proves the content was minted, not that it is still current.
+  // The pinned version view only gates adoption: every recorded fact still
+  // comes from the receipt. A mint is version 1, so more roots mean an update
+  // superseded it; fewer, or one other root, mean the view cannot be trusted
+  // yet (the rule named-ka-publish-recovery.ts applies to a recovered create).
+  const current = await chain.readKnowledgeAssetVersionSnapshot(expected.kaId, { signal: options.signal });
+  if (current && current.rootCount > 1n) {
+    throw refuse('superseded', `the KA is at version ${current.rootCount}; an update replaced the minted content`);
+  }
+  if (!current || current.rootCount < 1n
+    || current.latestRoot.toLowerCase() !== ethers.hexlify(mint.merkleRoot).toLowerCase()) {
+    throw refuse('version-view-unavailable',
+      'the current version at the finality-depth block is unavailable or does not show this mint yet');
   }
   return publishResultFromMint(mint);
 }
@@ -181,17 +201,18 @@ export function sealedMintAdoption(
   };
 }
 
-/** Results this module adopted, and whether each keeps a record the node already holds. */
-const adoptedResults = new WeakMap<OnChainPublishResult, { keepsExistingRecord: boolean }>();
-
-/** Whether the publish recorded an existing mint instead of minting. */
-export function isAdoptedMint(result: OnChainPublishResult): boolean {
-  return adoptedResults.has(result);
+/** How the publish records its chain step. */
+export interface MintRecording {
+  /** An existing mint was adopted: it keeps its original cost, not the retry's quote. */
+  readonly adopted: boolean;
+  /** The node already holds exactly this record, so the publish must not write it again. */
+  readonly keepsExistingRecord: boolean;
 }
 
-/** Whether an adopted mint is already recorded locally, so the publish must not write it again. */
-export function keepsExistingRecord(result: OnChainPublishResult): boolean {
-  return adoptedResults.get(result)?.keepsExistingRecord === true;
+/** The chain step's result and how the publish records it. */
+export interface MintOrAdoptOutcome {
+  readonly result: OnChainPublishResult;
+  readonly recording: MintRecording;
 }
 
 /**
@@ -207,7 +228,7 @@ export async function mintOrAdoptKnowledgeAssets(
   chain: ChainAdapter,
   params: V10PublishParams,
   sealed: SealedMintAdoption | undefined,
-): Promise<OnChainPublishResult> {
+): Promise<MintOrAdoptOutcome> {
   const expected: MintAdoptionExpectation | undefined = sealed && params.reservedKaId !== undefined
     ? {
       kaId: params.reservedKaId,
@@ -221,7 +242,7 @@ export async function mintOrAdoptKnowledgeAssets(
     return adopted(sealed, expected, await adoptExistingMint(chain, expected, { txHash: sealed.existingOnly.txHash }));
   }
   try {
-    return await chain.createKnowledgeAssets(params);
+    return { result: await chain.createKnowledgeAssets(params), recording: { adopted: false, keepsExistingRecord: false } };
   } catch (error) {
     const mintedKaId = expected ? kaIdAlreadyMintedFromError(error) : null;
     if (!sealed || !expected || mintedKaId === null) throw error;
@@ -237,12 +258,11 @@ async function adopted(
   sealed: SealedMintAdoption,
   expected: MintAdoptionExpectation,
   result: OnChainPublishResult,
-): Promise<OnChainPublishResult> {
+): Promise<MintOrAdoptOutcome> {
   const keepsRecord = await adoptedMintAlreadyRecorded(sealed.store, { ...sealed.record, merkleRoot: expected.merkleRoot }, result);
-  adoptedResults.set(result, { keepsExistingRecord: keepsRecord });
   sealed.log(`Adopted the existing mint of KA ${expected.kaId}: tx=${result.txHash} block=${result.blockNumber}`
     + (keepsRecord ? '; keeping the record this node already holds' : ''));
-  return result;
+  return { result, recording: { adopted: true, keepsExistingRecord: keepsRecord } };
 }
 
 /**

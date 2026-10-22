@@ -48,76 +48,72 @@ async function callRoute(path: string, authentication: AllowedHttpAuthentication
   return { status: res.statusCode, body: res.body ? JSON.parse(res.body) as Record<string, unknown> : {} };
 }
 
-/** The agent surface reconcile drives: author resolution, lifecycle history, and the publish path. */
-function stubAgent(opts: {
-  statuses: Array<{ status: string; publishedUal?: string } | null>;
-  publish?: () => Promise<unknown>;
-}) {
-  const history = vi.fn();
-  for (const status of opts.statuses) history.mockResolvedValueOnce(status);
-  const publishFromFinalizedAssertion = vi.fn(opts.publish ?? (async () => ({
-    status: 'confirmed',
-    ual: UAL,
-    kaId: 30013n,
-    onChainResult: { kaId: 30013n, batchId: 30013n, txHash: TX_HASH, blockNumber: 48_853_001, tokenAmount: 100n },
-  })));
-  return {
-    resolveFinalizedAssertionPublishAuthor: vi.fn(async () => AUTHOR),
-    assertion: { history },
-    publishFromFinalizedAssertion,
-  };
+const ADOPTED = { status: 'adopted', ual: UAL, kaId: '30013', txHash: TX_HASH, blockNumber: 48_853_001, tokenAmount: '100' };
+
+/** The agent's reconcile, answering or failing as the agent would. */
+function stubAgent(reconcile: () => Promise<unknown> = async () => ADOPTED) {
+  return { reconcileKnowledgeAssetMint: vi.fn(reconcile) };
 }
 
 describe('POST /api/knowledge-assets/:name/vm/reconcile', () => {
   it('rejects an agent-scoped token before reading the body or the asset', async () => {
-    const agent = stubAgent({ statuses: [] });
+    const agent = stubAgent();
     const result = await callRoute(PATH, AGENT_SCOPE, '{invalid', agent);
     expect(result.status).toBe(403);
-    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+    expect(agent.reconcileKnowledgeAssetMint).not.toHaveBeenCalled();
   });
 
   it.each([42, '', '0x1234', `0x${'zz'.repeat(32)}`])('rejects txHash=%j before touching the asset', async (txHash) => {
-    const agent = stubAgent({ statuses: [] });
+    const agent = stubAgent();
     const result = await callRoute(PATH, OPERATOR, { contextGraphId: CG, subGraphName: 'lots', txHash }, agent);
     expect(result.status).toBe(400);
-    expect(agent.resolveFinalizedAssertionPublishAuthor).not.toHaveBeenCalled();
+    expect(agent.reconcileKnowledgeAssetMint).not.toHaveBeenCalled();
   });
 
-  it('adopts the late mint through the publish path in record-only mode and reports it', async () => {
-    const agent = stubAgent({ statuses: [{ status: 'swm-shared' }, { status: 'vm-confirmed', publishedUal: UAL }] });
+  it('reconciles the named asset and reports the adopted mint', async () => {
+    const agent = stubAgent();
     const result = await callRoute(PATH, OPERATOR, { contextGraphId: CG, subGraphName: 'lots', txHash: TX_HASH }, agent);
-    expect(result).toEqual({
-      status: 200,
-      body: { status: 'adopted', ual: UAL, kaId: '30013', txHash: TX_HASH, blockNumber: 48_853_001, tokenAmount: '100' },
+    expect(result).toEqual({ status: 200, body: ADOPTED });
+    expect(agent.reconcileKnowledgeAssetMint).toHaveBeenCalledExactlyOnceWith({
+      contextGraphId: CG, name: 'lots-2026-08-12-083f0bc7e9b78e9c', subGraphName: 'lots', txHash: TX_HASH,
     });
-    expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledExactlyOnceWith(
-      CG, 'lots-2026-08-12-083f0bc7e9b78e9c',
-      { subGraphName: 'lots', agentAddress: AUTHOR, adoptExistingMint: { txHash: TX_HASH } },
-    );
   });
 
-  it('leaves an already published asset untouched', async () => {
-    const agent = stubAgent({ statuses: [{ status: 'vm-confirmed', publishedUal: UAL }] });
+  it('reports an already published asset', async () => {
+    const agent = stubAgent(async () => ({ status: 'already-published', ual: UAL }));
     const result = await callRoute(PATH, OPERATOR, { contextGraphId: CG, subGraphName: 'lots' }, agent);
     expect(result).toEqual({ status: 200, body: { status: 'already-published', ual: UAL } });
-    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
   });
 
-  it('fails retryably when the record did not flip the lifecycle to vm-confirmed', async () => {
-    const agent = stubAgent({ statuses: [{ status: 'swm-shared' }, { status: 'swm-shared' }] });
+  it('fails retryably when the lifecycle did not complete', async () => {
+    const agent = stubAgent(async () => {
+      throw Object.assign(new Error('lifecycle is not complete'), { code: 'KA_MINT_RECONCILE_INCOMPLETE' });
+    });
     const result = await callRoute(PATH, OPERATOR, { contextGraphId: CG, subGraphName: 'lots' }, agent);
     expect(result.status).toBe(503);
     expect(result.body).toMatchObject({ code: 'KA_MINT_RECONCILE_INCOMPLETE', retryable: true });
   });
 
+  it('answers 409 when this node holds nothing it can complete', async () => {
+    const agent = stubAgent(async () => {
+      throw Object.assign(new Error('no verified record of the sealed content'), { code: 'KA_MINT_RECONCILE_REFUSED' });
+    });
+    const result = await callRoute(PATH, OPERATOR, { contextGraphId: CG, subGraphName: 'lots' }, agent);
+    expect(result).toEqual({
+      status: 409, body: { code: 'KA_MINT_RECONCILE_REFUSED', error: 'no verified record of the sealed content' },
+    });
+  });
+
   it.each([
     ['mint-receipt-missing', 503, true],
     ['mint-not-final', 503, true],
+    ['version-view-unavailable', 503, true],
     ['root-mismatch', 409, false],
     ['not-minted', 409, false],
+    ['superseded', 409, false],
   ] as const)('answers a %s refusal with %i', async (reason, status, retryable) => {
     const refusal = new MintAdoptionRefusedError(reason, 30013n, 'detail');
-    const agent = stubAgent({ statuses: [{ status: 'swm-shared' }], publish: async () => { throw refusal; } });
+    const agent = stubAgent(async () => { throw refusal; });
     const result = await callRoute(PATH, OPERATOR, { contextGraphId: CG, subGraphName: 'lots' }, agent);
     expect(result).toEqual({
       status,

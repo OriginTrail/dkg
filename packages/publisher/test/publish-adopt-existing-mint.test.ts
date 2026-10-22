@@ -47,6 +47,7 @@ const LOT: Quad = { subject: 'urn:lot:2026-08-12', predicate: 'http://schema.org
 class LateMintChain extends MockChainAdapter {
   loseNextReceipt = false;
   hideMintReceipt = false;
+  hideVersionView = false;
   createCalls = 0;
   broadcasts = 0;
   planCalls = 0;
@@ -111,6 +112,10 @@ class LateMintChain extends MockChainAdapter {
     options?: KnowledgeAssetMintLookupOptions,
   ): Promise<KnowledgeAssetMintResolution> {
     return this.hideMintReceipt ? { status: 'not-found' } : super.resolveKnowledgeAssetMint(kaId, options);
+  }
+
+  override async readKnowledgeAssetVersionSnapshot(kaId: bigint) {
+    return this.hideVersionView ? null : super.readKnowledgeAssetVersionSnapshot(kaId);
   }
 }
 
@@ -362,6 +367,39 @@ describe('a sealed publish whose transaction mined after the node stopped waitin
     expect(await fixture.metadataValueCounts()).toEqual(before);
     expect(await fixture.graphSize(fixture.vmGraph)).toBe(0);
     expect(await fixture.graphSize(fixture.swmGraph)).toBe(1);
+  });
+
+  it('refuses a late mint that a later update superseded, on retry and reconcile alike', async () => {
+    const fixture = await strandedPublishFixture();
+    await fixture.strand();
+    // While this node was away, the author updated the asset to other content through another node.
+    const update = await fixture.chain.updateKnowledgeCollectionV10({
+      kaId: fixture.kaId,
+      newMerkleRoot: ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('updated content'))),
+      newByteSize: 1n,
+      newMerkleLeafCount: 1,
+      authorAddress: ethers.ZeroAddress,
+      authorR: new Uint8Array(32),
+      authorVS: new Uint8Array(32),
+    });
+    expect(update.success).toBe(true);
+
+    for (const adoptExistingMint of [undefined, {}]) {
+      await expect(fixture.publish(adoptExistingMint)).rejects.toMatchObject({ reason: 'superseded', retryable: false });
+      await expectNothingRecorded(fixture);
+    }
+  });
+
+  it('waits for a current-version view that shows the mint before adopting it', async () => {
+    const fixture = await strandedPublishFixture();
+    const original = await fixture.strand();
+    fixture.chain.hideVersionView = true;
+
+    await expect(fixture.publish({})).rejects.toMatchObject({ reason: 'version-view-unavailable', retryable: true });
+    await expectNothingRecorded(fixture);
+
+    fixture.chain.hideVersionView = false;
+    await expect(fixture.publish({})).resolves.toMatchObject({ status: 'confirmed', onChainResult: { txHash: original.txHash } });
   });
 
   it('reconcile of an unminted reservation refuses as not minted and sends nothing', async () => {

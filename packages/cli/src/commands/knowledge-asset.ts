@@ -519,7 +519,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
         return;
       }
       if (result.status === 'already-published') {
-        console.log(`Knowledge asset "${name}" is already published${result.ual ? ` as ${result.ual}` : ''}; nothing to do.`);
+        console.log(`Knowledge asset "${name}" is already published as ${result.ual}; nothing to do.`);
         return;
       }
       console.log('Knowledge asset late mint recorded:');
