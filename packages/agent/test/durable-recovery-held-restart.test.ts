@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { createRpcTimeoutError } from '@origintrail-official/dkg-chain';
 import {
   MemoryLayer,
   createGraphKnowledgeAssetScope,
@@ -162,12 +163,17 @@ function node(
   const writes: string[] = [];
   const info: string[] = [];
   let holdingsUnreadable = options.holdingsUnreadable === true;
-  const readHeld = currentHeldGraphScopedAssetsReader({
+  // Chain checks answered per round; later ones time out, as on a throttled endpoint past the round's budget.
+  let chainAnswersPerRound = Number.POSITIVE_INFINITY;
+  let chainAnswersLeft = chainAnswersPerRound;
+  const holdings = currentHeldGraphScopedAssetsReader({
     readHeld: async (request) => {
       if (holdingsUnreadable) throw new Error('store queue wait timeout');
       return heldGraphScopedAssetsReader(store)(request);
     },
     readChainState: async ({ ual }) => {
+      if (chainAnswersLeft <= 0) throw createRpcTimeoutError('held chain check exceeded its context-graph deadline');
+      chainAnswersLeft -= 1;
       const onChain = chain().find((fixture) => fixture.ual === ual)!;
       return { merkleRootHex: onChain.rootHex, assertionVersion: BigInt(onChain.version), bound: true };
     },
@@ -176,7 +182,7 @@ function node(
   const round = (
     checkpointStore: MemorySyncCheckpointStore,
     remotePeerId: string,
-    roundOptions: Pick<DurableSyncContext, 'durableMetaContinuation' | 'exactAssetSelectionFor'>,
+    roundOptions: Pick<DurableSyncContext, 'durableMetaContinuation' | 'exactAssetSelectionFor' | 'settlementSliceDeadline'>,
   ) => runDurableSync({
     ctx,
     remotePeerId,
@@ -213,7 +219,7 @@ function node(
       logDebug: () => {},
     }),
     ...roundOptions,
-    readHeldGraphScopedAssets: readHeld,
+    heldGraphScopedAssets: holdings,
     processDurableBatchInWorker: processBatch,
     storeInsert: async ({ quads }) => { await store.insert(quads); },
     storeGraphScopedAsset: async ({ asset: verified }) => {
@@ -242,8 +248,12 @@ function node(
     logDebug: () => {},
   });
 
-  /** A process lifetime: a new owner and a new checkpoint store. */
-  const start = (startOptions: { exactRequests?: boolean } = {}) => {
+  /**
+   * A process lifetime: a new owner and a new checkpoint store. With
+   * `sliceSpent`, each round starts past its slice's soft deadline, as once
+   * held-copy checks used the slice: a DATA round stops at its first complete graph.
+   */
+  const start = (startOptions: { exactRequests?: boolean; sliceSpent?: boolean } = {}) => {
     const checkpointStore = new MemorySyncCheckpointStore();
     const dependencies: DurableRecoveryRunnerDependencies = {
       checkpointStore,
@@ -256,11 +266,13 @@ function node(
       isPrivateContextGraph: async () => false,
       orderPeerIds: (peerIds) => [...peerIds],
       isSyncCapable: async () => true,
-      executeSlice: (peerId, durableMetaContinuation: DurableMetaContinuation) => round(
-        checkpointStore,
-        peerId,
-        { durableMetaContinuation },
-      ),
+      executeSlice: (peerId, durableMetaContinuation: DurableMetaContinuation) => {
+        chainAnswersLeft = chainAnswersPerRound;
+        return round(checkpointStore, peerId, {
+          durableMetaContinuation,
+          settlementSliceDeadline: startOptions.sliceSpent ? Date.now() : undefined,
+        });
+      },
       ...(startOptions.exactRequests === false ? {} : {
         executeExactSlice: async (peerId: string, assetUals: readonly string[]) => {
           const selection = createUalOnlyExactAssetSelection(assetUals);
@@ -278,11 +290,31 @@ function node(
     };
   };
   const failHoldingsReads = (fail: boolean) => { holdingsUnreadable = fail; };
-  return { store, writes, info, start, failHoldingsReads };
+  const limitChainAnswersPerRound = (answers: number) => { chainAnswersPerRound = answers; };
+  return { store, writes, info, start, failHoldingsReads, limitChainAnswersPerRound };
 }
 
 const generation = (version3 = '1') => [1, 2, 3, 4, 5, 6].map((n) => asset(n, n === 3 ? version3 : '1'));
 const rowsOf = (fixtures: readonly AssetFixture[]) => fixtures.reduce((rows, fixture) => rows + fixture.payload.length, 0);
+
+describe('a recovery whose rounds outlast their slices', () => {
+  it('resumes each round at its settled boundary under a complete manifest', async () => {
+    const graph = Array.from({ length: 12 }, (_, index) => asset(index + 1));
+    const peer = servingPeer(graph);
+    const core = node(peer);
+
+    // Every round writes past its slice's soft deadline, so it yields at the first settled boundary it can.
+    const recovered = await core.start({ sliceSpent: true }).recover();
+
+    expect(recovered.outcome).toBe('terminal');
+    expect([...core.writes].sort()).toEqual(graph.map((fixture) => fixture.ual).sort());
+    expect(core.info.filter((line) => line.startsWith('Yielding durable recovery')).length).toBeGreaterThan(1);
+    expect(await readHeldGraphScopedAssets(core.store, {
+      contextGraphId: CG,
+      descriptors: createGraphScopedDurableManifestPlan(graph.flatMap((fixture) => fixture.meta), CG)!.descriptors,
+    })).toEqual(new Set(graph.map((fixture) => fixture.ual)));
+  });
+});
 
 describe('a restarted Core and a graph it has already recovered', () => {
   it('transfers no DATA rows when the graph is unchanged', async () => {
@@ -407,6 +439,44 @@ describe('a restarted Core and a graph it has already recovered', () => {
     expect(restarted.outcome).toBe('terminal');
     expect(peer.served.dataRows).toBe(rowsOf(generation()));
     expect(core.info).toContainEqual(expect.stringContaining('store queue wait timeout'));
+  });
+
+  it('settles a large held graph over several rounds when the chain answers only part of its checks in each', async () => {
+    const large = Array.from({ length: 120 }, (_, index) => asset(index + 1));
+    const peer = servingPeer(large);
+    const core = node(peer);
+    expect((await core.start().recover()).outcome).toBe('terminal');
+
+    // A throttled endpoint: each round's checks run out of budget after 50 assets, and with them its slice.
+    core.limitChainAnswersPerRound(50);
+    peer.served.dataRows = 0;
+    const restarted = await core.start({ sliceSpent: true }).recover();
+
+    expect(restarted.outcome).toBe('terminal');
+    expect(core.info).toContainEqual(expect.stringContaining("against the chain within the round's budget"));
+    expect(core.info).toContainEqual(expect.stringContaining('already held at this META generation'));
+    // Each round's checks resume where the last stopped; in between, short DATA rounds rather than a re-pull.
+    expect(peer.served.dataRows).toBeLessThan(rowsOf(large) / 4);
+  });
+
+  it('fetches only an updated asset of a large graph when the chain answers part of the checks in each round', async () => {
+    const large = (updated = '1') => Array.from({ length: 120 }, (_, index) => asset(index + 1, index === 2 ? updated : '1'));
+    const peer = servingPeer(large());
+    const core = node(peer);
+    expect((await core.start().recover()).outcome).toBe('terminal');
+
+    peer.publish(large('2'));
+    core.limitChainAnswersPerRound(50);
+    peer.served.dataRows = 0;
+    peer.served.exactDataRows = 0;
+    const restarted = await core.start({ sliceSpent: true }).recover();
+
+    expect(restarted.outcome).toBe('terminal');
+    expect(core.info).toContainEqual(expect.stringContaining("against the chain within the round's budget"));
+    expect(core.info).toContainEqual(expect.stringContaining('fetches 1 missing asset(s)'));
+    // The updated asset by exact request, and short DATA rounds while the checks catch up: no full-graph re-pull.
+    expect(peer.served.exactDataRows).toBe(asset(3, '2').payload.length);
+    expect(peer.served.dataRows).toBeLessThan(rowsOf(large()) / 4);
   });
 
   it('pulls the graph again when the store no longer holds it', async () => {

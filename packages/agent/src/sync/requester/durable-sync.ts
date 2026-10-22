@@ -46,7 +46,7 @@ import {
 import type { DurableSyncBudget } from './durable-sync-budget.js';
 import { createDurableDataRoundBoundary } from './durable-data-round.js';
 import { planDurableDataFromLocalHoldings, settleDurableDataFromHoldings,
-  type DurableHoldingsChannel, type HeldGraphScopedAssetsRequest } from './durable-data-holdings.js';
+  type DurableHoldingsChannel, type DurableHoldingsReader } from './durable-data-holdings.js';
 import {
   normalizeDurableSyncContext,
   type LegacyDurableSyncContext, type NormalizedDurableSyncContext,
@@ -342,7 +342,7 @@ export interface DurableSyncContext {
   /** Present only for the graph-owned bounded recovery runner. */
   durableMetaContinuation?: DurableMetaContinuation;
   /** Which assets of a verified generation this node holds; plans that runner's DATA phase. */
-  readHeldGraphScopedAssets?: (request: HeldGraphScopedAssetsRequest) => Promise<ReadonlySet<string>>;
+  heldGraphScopedAssets?: DurableHoldingsReader;
   stopOnBackoffWorthyFailure?: boolean;
   processDurableBatchInWorker: (
     dataQuads: Quad[],
@@ -612,7 +612,7 @@ async function runDurableSyncWithBudget(
     sinceBatchIdFor,
     exactAssetFetchPolicyFor,
     durableMetaContinuation,
-    readHeldGraphScopedAssets,
+    heldGraphScopedAssets,
     stopOnBackoffWorthyFailure = false,
     processDurableBatchInWorker,
     storeInsert,
@@ -978,9 +978,9 @@ async function runDurableSyncWithBudget(
       const graphScopedManifest = preparedMeta.manifestPlan;
       // A graph-owned round fetches only the rows of the verified generation that this node lacks.
       const holdings = graphScopedManifest && exactAssetUals === undefined && onVerifiedFullSnapshot === undefined
-        && durableMetaContinuation && readHeldGraphScopedAssets
+        && durableMetaContinuation && heldGraphScopedAssets
         ? await planDurableDataFromLocalHoldings({ contextGraphId: pid, manifest: graphScopedManifest,
-            channel: durableMetaContinuation, readHeld: readHeldGraphScopedAssets, signal,
+            channel: durableMetaContinuation, holdings: heldGraphScopedAssets, signal,
             logWarn: (message) => logWarn(ctx, message) })
         : undefined;
       if (graphScopedManifest && holdings && holdings.kind !== 'full') {
@@ -1440,6 +1440,8 @@ async function runDurableSyncWithBudget(
           ctx,
           `Yielding durable recovery for "${pid}" at an authenticated manifest boundary after the settlement slice expired`,
         );
+        // As after a whole page: the next round proves its DATA boundary with META fetched again from row zero.
+        if (updateMetaCheckpoint && metaResult.completed) deleteCheckpoint(metaResult.checkpointKey);
         markDurableTerminalBoundary(accumulator, false);
         endPhase();
         break;

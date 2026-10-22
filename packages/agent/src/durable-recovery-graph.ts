@@ -94,7 +94,7 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
       ? () => exactAssetFetchPolicy
       : undefined,
     durableMetaContinuation,
-    readHeldGraphScopedAssets: currentHeldGraphScopedAssetsReader({
+    heldGraphScopedAssets: currentHeldGraphScopedAssetsReader({
       readHeld: host.readHeldGraphScopedAssets,
       readChainState: authority.readHeldAssetChainState?.bind(authority),
       budget: contextGraphBudget,

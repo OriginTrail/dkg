@@ -231,9 +231,12 @@ export class DurableRecoveryRunner {
     // Set once a seeded peer discarded the boundary; the rest of this run uses each peer's own checkpoint.
     let seedingRefused = false;
     // Set once this run advanced a full-graph round, as a first recovery does, or an exact request
-    // left assets missing: the rest of the run pulls full-graph rounds.
+    // left assets missing: the rest of the run pulls full-graph rounds. A round that ran DATA because
+    // its held-copy checks ran out of budget, yet confirmed more of them, does not count.
     let pullsFullGraph = false;
     const fetchedExactly = new Set<string>();
+    // Held copies this run confirmed current on chain: a later round asks the chain only for the rest.
+    const confirmedHeldCopies = new Set<string>();
     let slices = 0;
     let lastPeerId: string | undefined;
     let lastResult: DurableSyncResult = createIncompleteDurableSyncResult();
@@ -394,11 +397,12 @@ export class DurableRecoveryRunner {
       health.attempts += 1;
       slices += 1;
       lastPeerId = candidate.peerId;
+      const confirmedBefore = confirmedHeldCopies.size;
 
       try {
         let metaContinuation = metaContinuations.get(candidate.peerId);
         if (!metaContinuation) {
-          metaContinuation = this.createMetaContinuation();
+          metaContinuation = { ...this.createMetaContinuation(), confirmedHeldCopies };
           metaContinuations.set(candidate.peerId, metaContinuation);
         }
         metaContinuation.ownerFetchesMissingAssets = deps.executeExactSlice !== undefined && !pullsFullGraph;
@@ -524,7 +528,7 @@ export class DurableRecoveryRunner {
         );
       }
       if (outcome === 'partial-progress') {
-        if (checkpointAdvanced || manifestRebound) pullsFullGraph = true;
+        if ((checkpointAdvanced || manifestRebound) && confirmedHeldCopies.size === confirmedBefore) pullsFullGraph = true;
         health.successfulSlices += 1;
         health.lastSuccessfulTransportAtMs = Date.now();
         if ((lastResult.timedOutPhases ?? 0) > 0) health.recentTimeouts += 1;

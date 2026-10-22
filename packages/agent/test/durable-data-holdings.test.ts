@@ -9,6 +9,7 @@ import {
   generateGraphKnowledgeAssetMetadata,
   overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1,
 } from '@origintrail-official/dkg-publisher';
+import { createRpcTimeoutError } from '@origintrail-official/dkg-chain';
 import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import {
@@ -22,11 +23,13 @@ import {
   planDurableDataFromHoldings,
   planDurableDataFromLocalHoldings,
   currentHeldGraphScopedAssetsReader,
+  HELD_CHAIN_CHECK_BUDGET_MS,
   HeldGenerationNotCurrentError,
   readHeldGraphScopedAssets,
   settleDurableDataFromHoldings,
   settleHeldDurableData,
   type DurableHoldingsChannel,
+  type DurableHoldingsReader,
 } from '../src/sync/requester/durable-data-holdings.js';
 import { materializeVerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
 import { partitionVerifiedGraphScopedAssets } from '../src/sync/requester/verified-asset-preparation.js';
@@ -230,7 +233,7 @@ describe('planning a DATA phase from holdings', () => {
       contextGraphId: CG,
       manifest,
       channel,
-      readHeld: async () => new Set(uals(manifest).slice(1)),
+      holdings: { read: async () => new Set(uals(manifest).slice(1)), confirmCurrent: async () => {} },
       logWarn: () => {},
     });
     expect(plan?.kind).toBe('fetch-missing');
@@ -243,7 +246,7 @@ describe('planning a DATA phase from holdings', () => {
       contextGraphId: CG,
       manifest,
       channel: {},
-      readHeld: async () => { throw new Error('store queue wait timeout'); },
+      holdings: { read: async () => { throw new Error('store queue wait timeout'); }, confirmCurrent: async () => {} },
       logWarn,
     });
     expect(failed).toBeUndefined();
@@ -255,19 +258,42 @@ describe('planning a DATA phase from holdings', () => {
       contextGraphId: CG,
       manifest,
       channel: {},
-      readHeld: async () => { throw new Error('aborted read'); },
+      holdings: { read: async () => { throw new Error('aborted read'); }, confirmCurrent: async () => {} },
       signal: aborted.signal,
       logWarn,
     })).rejects.toThrow('node stopping');
 
-    // A held copy the chain does not confirm fails the round instead of falling back to a full pull.
+    // A held copy the chain shows superseded fails the round instead of falling back to a full pull.
     await expect(planDurableDataFromLocalHoldings({
       contextGraphId: CG,
       manifest,
       channel: {},
-      readHeld: async () => { throw new HeldGenerationNotCurrentError('behind the chain'); },
+      holdings: {
+        read: async () => new Set(uals(manifest)),
+        confirmCurrent: async () => { throw new HeldGenerationNotCurrentError('behind the chain'); },
+      },
       logWarn,
     })).rejects.toBeInstanceOf(HeldGenerationNotCurrentError);
+  });
+
+  it('asks the chain only when the plan skips held copies', async () => {
+    const manifest = generation(3);
+    const confirmCurrent = vi.fn(async () => {});
+    const plan = (held: readonly string[], ownerFetchesMissingAssets: boolean) => planDurableDataFromLocalHoldings({
+      contextGraphId: CG,
+      manifest,
+      channel: { ownerFetchesMissingAssets },
+      holdings: { read: async () => new Set(held), confirmCurrent },
+      logWarn: () => {},
+    });
+
+    // Full-graph rounds authenticate everything they fetch, as a first recovery's rounds do.
+    expect(await plan(uals(manifest).slice(1), false)).toMatchObject({ kind: 'full' });
+    expect(await plan([], true)).toMatchObject({ kind: 'full' });
+    expect(confirmCurrent).not.toHaveBeenCalled();
+    expect(await plan(uals(manifest).slice(1), true)).toMatchObject({ kind: 'fetch-missing' });
+    expect(await plan(uals(manifest), true)).toMatchObject({ kind: 'held' });
+    expect(confirmCurrent).toHaveBeenCalledTimes(2);
   });
 
   it('settles a held generation as a completed DATA phase at its terminal boundary', () => {
@@ -350,7 +376,7 @@ describe('planning a DATA phase from holdings', () => {
 
 describe('holding a copy only while it is current on chain', () => {
   type ChainState = { merkleRootHex: string; assertionVersion: bigint; bound: boolean };
-  const generation = () => manifestOf([asset(1), asset(2), asset(3)]);
+  const generation = (count = 3) => manifestOf(Array.from({ length: count }, (_, index) => asset(index + 1)));
   const currentOf = (manifest: GraphScopedDurableManifestPlan) => new Map<string, ChainState>(
     manifest.descriptors.map((descriptor) => [descriptor.ual, {
       merkleRootHex: descriptor.claimedRootHex,
@@ -358,30 +384,46 @@ describe('holding a copy only while it is current on chain', () => {
       bound: true,
     }]),
   );
-  function reader(chain: Map<string, ChainState>, held: readonly string[], reads: string[] = [], deadlines: number[] = []) {
+  function reader(
+    chain: Map<string, ChainState>,
+    reads: string[] = [],
+    deadlines: number[] = [],
+    authenticationDeadline = () => 42,
+  ) {
     return currentHeldGraphScopedAssetsReader({
-      readHeld: async () => new Set(held),
+      readHeld: async () => new Set<string>(),
       readChainState: async ({ ual }, deadline) => {
         reads.push(ual);
         deadlines.push(deadline);
         const state = chain.get(ual);
-        if (!state) throw new Error('chain endpoint unavailable');
+        if (!state) throw createRpcTimeoutError('held chain check exceeded its context-graph deadline');
         return state;
       },
-      budget: { createGraphScopedAuthenticationDeadline: () => 42 },
+      budget: { createGraphScopedAuthenticationDeadline: authenticationDeadline },
     })!;
   }
+  const confirm = (holdings: DurableHoldingsReader, manifest: GraphScopedDurableManifestPlan, held: readonly string[],
+    signal?: AbortSignal) => holdings.confirmCurrent({ contextGraphId: CG, descriptors: manifest.descriptors, signal }, new Set(held));
 
-  it('keeps held copies the chain confirms, and reads only those', async () => {
+  it('confirms held copies the chain shows current, and reads only those', async () => {
     const manifest = generation();
     const held = [manifest.descriptors[0]!.ual, manifest.descriptors[2]!.ual];
     const reads: string[] = [];
     const deadlines: number[] = [];
 
-    expect(await reader(currentOf(manifest), held, reads, deadlines)({ contextGraphId: CG, descriptors: manifest.descriptors }))
-      .toEqual(new Set(held));
+    await expect(confirm(reader(currentOf(manifest), reads, deadlines), manifest, held)).resolves.toBeUndefined();
     expect(reads.sort()).toEqual([...held].sort());
     expect(deadlines).toEqual([42, 42]);
+  });
+
+  it('bounds the checks by one budget, even with a later authentication deadline', async () => {
+    const manifest = generation();
+    const deadlines: number[] = [];
+    const startedAt = Date.now();
+    await confirm(reader(currentOf(manifest), [], deadlines, () => startedAt + 3_600_000), manifest,
+      [manifest.descriptors[0]!.ual]);
+    expect(deadlines[0]).toBeGreaterThanOrEqual(startedAt + HELD_CHAIN_CHECK_BUDGET_MS);
+    expect(deadlines[0]).toBeLessThanOrEqual(Date.now() + HELD_CHAIN_CHECK_BUDGET_MS);
   });
 
   it('fails a peer generation whose held copy is behind the chain', async () => {
@@ -391,36 +433,72 @@ describe('holding a copy only while it is current on chain', () => {
     const all = manifest.descriptors.map((descriptor) => descriptor.ual);
     chain.set(behind.ual, { merkleRootHex: 'ab'.repeat(32), assertionVersion: 2n, bound: true });
 
-    await expect(reader(chain, all)({ contextGraphId: CG, descriptors: manifest.descriptors }))
+    await expect(confirm(reader(chain), manifest, all))
       .rejects.toThrow(`${behind.ual} is at version 2 on chain, 1 here and at the peer`);
     // The same version with another root is not current either.
     chain.set(behind.ual, { merkleRootHex: 'ab'.repeat(32), assertionVersion: 1n, bound: true });
-    await expect(reader(chain, all)({ contextGraphId: CG, descriptors: manifest.descriptors }))
-      .rejects.toBeInstanceOf(HeldGenerationNotCurrentError);
+    await expect(confirm(reader(chain), manifest, all)).rejects.toBeInstanceOf(HeldGenerationNotCurrentError);
   });
 
-  it('fails an asset bound elsewhere, and a chain that cannot answer', async () => {
+  it('fails an asset bound elsewhere; a chain that cannot answer is not a verdict', async () => {
     const manifest = generation();
     const first = manifest.descriptors[0]!;
     const unbound = currentOf(manifest);
     unbound.set(first.ual, { ...unbound.get(first.ual)!, bound: false });
-    await expect(reader(unbound, [first.ual])({ contextGraphId: CG, descriptors: manifest.descriptors }))
+    await expect(confirm(reader(unbound), manifest, [first.ual]))
       .rejects.toThrow(`Held asset ${first.ual} is not bound to "${CG}" on chain`);
 
-    const unreachable = reader(new Map(), [first.ual])({ contextGraphId: CG, descriptors: manifest.descriptors });
-    await expect(unreachable).rejects.toBeInstanceOf(HeldGenerationNotCurrentError);
-    await expect(unreachable).rejects.toThrow('chain endpoint unavailable');
+    const unanswered = confirm(reader(new Map()), manifest, [first.ual]);
+    await expect(unanswered).rejects.toThrow("against the chain within the round's budget");
+    await expect(unanswered).rejects.not.toBeInstanceOf(HeldGenerationNotCurrentError);
+  });
+
+  it('falls back to DATA rounds when a large graph cannot be confirmed within the budget', async () => {
+    // Hundreds of held assets, and a chain whose answers stop when the round's budget runs out.
+    const manifest = generation(300);
+    const answered = new Map([...currentOf(manifest)].slice(0, 100));
+    const holdings = reader(answered);
+    const channel: DurableHoldingsChannel = { ownerFetchesMissingAssets: true };
+    const logWarn = vi.fn();
+
+    const plan = await planDurableDataFromLocalHoldings({
+      contextGraphId: CG,
+      manifest,
+      channel,
+      holdings: { read: async () => new Set(manifest.descriptors.map((descriptor) => descriptor.ual)), confirmCurrent: holdings.confirmCurrent },
+      logWarn,
+    });
+
+    // No shortcut this round, and no failure: the round pulls the graph in bounded rounds.
+    expect(plan).toBeUndefined();
+    expect(channel.missingAssetBatches).toBeUndefined();
+    expect(logWarn).toHaveBeenCalledWith(expect.stringContaining("against the chain within the round's budget"));
+  });
+
+  it('leaves a later round of the run only the copies an earlier round did not confirm', async () => {
+    const manifest = generation(300);
+    const all = manifest.descriptors.map((descriptor) => descriptor.ual);
+    const confirmed = new Set<string>();
+    const confirmOnce = (chain: Map<string, ChainState>, reads: string[]) => reader(chain, reads)
+      .confirmCurrent({ contextGraphId: CG, descriptors: manifest.descriptors }, new Set(all), confirmed);
+
+    // The first round's budget ends after a third of the checks; the ones it finished stay confirmed.
+    await expect(confirmOnce(new Map([...currentOf(manifest)].slice(0, 100)), []))
+      .rejects.toThrow("within the round's budget");
+    expect(confirmed.size).toBe(100);
+
+    const reads: string[] = [];
+    await confirmOnce(currentOf(manifest), reads);
+    expect(reads.sort()).toEqual(all.slice(100).sort());
+    expect(confirmed.size).toBe(300);
   });
 
   it('stops at an abort, and plans no shortcut without a store or a chain', async () => {
     const manifest = generation();
     const aborted = new AbortController();
     aborted.abort(new Error('node stopping'));
-    await expect(reader(new Map(), [manifest.descriptors[0]!.ual])({
-      contextGraphId: CG,
-      descriptors: manifest.descriptors,
-      signal: aborted.signal,
-    })).rejects.toThrow('node stopping');
+    await expect(confirm(reader(new Map()), manifest, [manifest.descriptors[0]!.ual], aborted.signal))
+      .rejects.toThrow('node stopping');
 
     const budget = { createGraphScopedAuthenticationDeadline: () => 42 };
     expect(currentHeldGraphScopedAssetsReader({ readHeld: async () => new Set<string>(), budget })).toBeUndefined();
