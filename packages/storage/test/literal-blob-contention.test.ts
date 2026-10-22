@@ -104,3 +104,40 @@ it('owns accepted preparation before it can synchronously initiate close', async
   expect(await outcome).toBe('success');
   expect(innerClose).toHaveBeenCalledOnce();
 });
+
+it('keeps a prepared write free of disk I/O after its bounded cache entry is evicted', async () => {
+  const f = await fixture(), preparation = immutableStorePreparation(f)!;
+  const inner = (f as TripleStore & { innerStore: TripleStore }).innerStore;
+  const insert = inner.insert.bind(inner), prepare = preparation.prepareImmutableQuads.bind(preparation);
+  let releaseSequence!: () => void, releaseDisk = () => {}, sequenceEntered = false, targetPrepared = false, done = false;
+  const heldSequence = new Promise<void>(resolve => { releaseSequence = resolve; });
+  vi.spyOn(inner, 'insert').mockImplementation(async (quads, options) => {
+    if (options?.source === 'held-sequence') { sequenceEntered = true; await heldSequence; }
+    await insert(quads, options);
+  });
+  vi.spyOn(preparation, 'prepareImmutableQuads').mockImplementation(quads =>
+    prepare(quads).then(result => {
+      if (quads.some(q => q.subject === 'urn:evicted-target')) targetPrepared = true;
+      return result;
+    }));
+  const blocker = f.insert([quad('urn:blocker')], { source: 'held-sequence' });
+  await vi.waitFor(() => expect(sequenceEntered).toBe(true));
+  const target = f.insert([quad('urn:evicted-target', `"${'t'.repeat(80 * 1024)}"`)]).then(() => { done = true; });
+  const settled = Promise.allSettled([blocker, target]);
+  try {
+    await vi.waitFor(() => expect(targetPrepared).toBe(true));
+    // More than the 128-entry successful cache, without publishing any of these refs.
+    await Promise.all(Array.from({ length: 129 }, (_, i) => preparation.prepareImmutableQuads([
+      quad(`urn:eviction:${i}`, `"${'e'.repeat(2048)}:${i}"`),
+    ])));
+    const preparedSyncs = disk.syncs;
+    expect(preparedSyncs).toBe(130);
+    disk.entered = false;
+    disk.hold = new Promise<void>(resolve => { releaseDisk = resolve; });
+    releaseSequence();
+    await vi.waitFor(() => expect(done).toBe(true));
+    expect(disk.entered).toBe(false);
+    expect(disk.syncs).toBe(preparedSyncs);
+  } finally { releaseSequence(); releaseDisk(); await settled; }
+  await blocker; await target;
+}, 15_000);
