@@ -1,4 +1,5 @@
 import { certifiedTripleStoreCommitment, type TripleStoreCommitCapability } from '../persistence.js';
+import { managedPersistenceScheduler } from '../managed-persistence-admission.js';
 import { isReadOnlyStoreOperation } from '../store-operation-outcome.js';
 import { classifyStoreReadTransport } from '../store-read-transport-failure.js';
 import { normalizeNonNegativeNumber, normalizeSampleRate, normalizeQuerySource } from "./sparql-telemetry-options.js";
@@ -288,7 +289,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       signal?.throwIfAborted();
       await persistence({ ...options, signal });
       signal?.throwIfAborted();
-    }) : undefined;
+    }, managedPersistenceScheduler) : undefined;
     this.commitment = this.flush || writesDurableOnAcknowledgement
       ? certifiedTripleStoreCommitment('restart-durable', options => this.flush?.(options) ?? Promise.resolve()) : undefined;
     const managedRecovery = this.managedOxigraph
@@ -452,6 +453,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     operation: StoreOperation,
     options: QueryOptions | undefined,
     work: (signal: AbortSignal | undefined, context: StoreWorkContext) => Promise<T>,
+    scheduler: StorePriorityScheduler = this.scheduler,
   ): Promise<T> {
     const recovery = this.readRecoveryState();
     if (this.logicalMutationScope.refusesAdmission(recovery)) {
@@ -460,7 +462,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     return this.workLifecycle.run(
       options?.signal,
       (signal, context) => {
-        return this.scheduler.run(
+        return scheduler.run(
           options?.priority,
           options?.source ?? `sparql-http.${operation}`,
           () => work(signal, context),

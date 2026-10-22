@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { OxigraphStore, SharedMemoryLiteralBlobStore } from '../src/index.js';
@@ -33,7 +33,7 @@ afterEach(async () => { syncControl.fail = undefined; syncControl.failPath = und
   vi.restoreAllMocks(); for (const store of stores.splice(0)) await store.close();
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
 async function fixture() {
-  const dir = await mkdtemp(join(tmpdir(), 'dkg-literal-persistence-')); dirs.push(dir);
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-literal-persistence-'))); dirs.push(dir);
   syncControl.ancestorPath = dir;
   const path = join(dir, 'store.nq'), blobDir = join(dir, 'literal-files', 'nested'), backend = new OxigraphStore(path);
   const store = new SharedMemoryLiteralBlobStore(backend, { blobDir, thresholdBytes: 10 }); stores.push(store);

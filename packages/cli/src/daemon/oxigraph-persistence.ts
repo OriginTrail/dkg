@@ -7,8 +7,10 @@ import { readRetainedWalSegmentNames } from './oxigraph-wal.js';
 /**
  * Oxigraph 0.5.8 uses the RocksDB default WAL: a successful HTTP mutation has
  * written its log bytes to the OS, but has not synced them to stable storage.
- * This barrier supplies that missing step for the daemon-owned local database.
- * It does not certify arbitrary HTTP endpoints or a different engine version.
+ * Version/settings-bound workaround for the daemon-owned local database. This
+ * is not an engine-owned durability API: it cannot observe RocksDB's writer
+ * boundary or native sticky error state. Replacement with that API is required
+ * before claiming a complete managed persistence integration.
  *
  * A retired/recycled log is safe only after RocksDB installs durable SST and
  * manifest state. Recheck the numeric names and retry on turnover. Open r+,
@@ -21,7 +23,12 @@ export function createManagedOxigraphPersistenceBarrierV1(
   version: string,
 ): TripleStorePersistenceBarrier | undefined {
   if (version !== '0.5.8') return undefined;
+  let walFailure: unknown;
   return async (options) => {
+    // A new descriptor may not observe the writeback error already consumed by
+    // another sync. Only replacing the owner after engine recovery/reapplication
+    // can restore trust; this owner must never certify the visible memtable.
+    if (walFailure !== undefined) throw walFailure;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       options?.signal?.throwIfAborted();
       try {
@@ -32,13 +39,19 @@ export function createManagedOxigraphPersistenceBarrierV1(
         if (before.length === 0) throw new Error('Managed Oxigraph persistence awaits an active WAL');
         for (const name of before) {
           options?.signal?.throwIfAborted();
-          const file = await open(join(directory, name), 'r+');
-          try { await file.sync(); } finally { await file.close(); }
+          try {
+            const file = await open(join(directory, name), 'r+');
+            try { await file.sync(); } finally { await file.close(); }
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') walFailure ??= error;
+            throw error;
+          }
         }
         await directoryOwner.persist();
         options?.signal?.throwIfAborted();
         const after = await readRetainedWalSegmentNames(directory);
         options?.signal?.throwIfAborted();
+        if (walFailure !== undefined) throw walFailure;
         if (before.length === after.length && before.every((name, index) => name === after[index])) return;
       } catch (error) {
         options?.signal?.throwIfAborted();

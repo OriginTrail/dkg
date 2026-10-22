@@ -31,6 +31,15 @@ vi.mock('node:fs/promises', () => ({
 beforeEach(() => { io.names = [['000001.log']]; io.events = []; io.failure = null; io.onRead = null; io.absent.clear(); });
 
 describe('managed Oxigraph post-acknowledgement persistence', () => {
+  it('retains WAL failure for the owner instead of certifying a retry on a new descriptor', async () => {
+    const barrier = createManagedOxigraphPersistenceBarrierV1(new DurableDirectory(DIRECTORY, { platform: 'linux' }), '0.5.8')!;
+    io.failure = { path: wal(), code: 'EIO', operation: 'sync' };
+    await expect(barrier()).rejects.toMatchObject({ code: 'EIO' });
+    io.failure = null; io.events = [];
+    await expect(barrier()).rejects.toMatchObject({ code: 'EIO' });
+    expect(io.events).toEqual([]);
+  });
+
   it('syncs existing WALs before the POSIX directory', async () => {
     io.names = [['000002.log', '000001.log', 'CURRENT', 'LOG']];
     await createManagedOxigraphPersistenceBarrierV1(new DurableDirectory(DIRECTORY, { platform: 'linux' }), '0.5.8')!();

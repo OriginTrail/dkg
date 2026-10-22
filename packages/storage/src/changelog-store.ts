@@ -1,8 +1,9 @@
 import { composeTripleStoreCommitment, type TripleStoreCommitCapability } from './persistence.js';
+import { immutableStorePreparation, StoreMutationPreparation, type StorePreparationAdmission } from './immutable-store-preparation.js';
 import type { ChangelogStoreOptions } from './changelog-store-options.js';
 export type { ChangelogStoreOptions } from './changelog-store-options.js';
 import { composeGraphEnumerationVisibility } from './graph-enumeration-visibility.js';
-import { parseIntTerm, stripIri, stripLiteral } from "./changelog-terms.js";
+import { parseIntTerm, stripLiteral, collectChangeRecords, distinctSeqCoverage, queryOptionsFromUpdateOptions } from "./changelog-terms.js";
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import { ChangelogReservedGraphs } from './changelog-reserved-graphs.js';
 import { assertSubjectAndInsertPayload } from './atomic-subject-insert.js';
@@ -236,6 +237,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   private tail: Promise<unknown> = Promise.resolve();
   /** Set by close(): the write gate is shut so no new mutation may enqueue. */
   private closing = false;
+  private readonly preparation = new StoreMutationPreparation(() => this.closing);
   /**
    * Set when a mutation could not be attributed to specific graphs (an opaque
    * `update()`/`query()` UPDATE with no `touchedGraphs` hint). Its changed
@@ -267,12 +269,16 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   // ------------------------------------------------------------------
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
+    return this.preparation.run(admission => this.insertPrepared(quads, admission, options));
+  }
+
+  private async insertPrepared(quads: Quad[], admission: StorePreparationAdmission, options?: QueryOptions): Promise<void> {
     if (!this.enabled) return this.inner.insert(quads, options);
     // The reserved plane is not writable through the public API: strip any
     // caller-supplied quads targeting it so a forged marker (e.g. a fake seq to
     // jump the high-water mark) can never reach the inner store. Only the
     // decorator's own internal writes (below, via this.inner) touch it.
-    const safe = this.stripReserved(quads);
+    const safe = await this.prepareQuads(this.stripReserved(quads));
     const touched = this.attributableGraphs(safe);
     if (touched.length === 0) {
       // Nothing the log cares about (default graph only).
@@ -293,7 +299,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       this.adoptDurableSeq(candidate); // advance only after durable success (gapless)
       await this.noteHighWater();
       this.fire(records);
-    });
+    }, admission);
   }
 
   async delete(quads: Quad[], options?: QueryOptions): Promise<void> {
@@ -381,12 +387,21 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     quads: Quad[],
     options?: QueryOptions,
   ): Promise<void> {
+    return this.preparation.run(admission => this.replaceGraphPrepared(graphUri, quads, admission, options));
+  }
+
+  private async replaceGraphPrepared(
+    graphUri: string,
+    quads: Quad[],
+    admission: StorePreparationAdmission, options?: QueryOptions,
+  ): Promise<void> {
     if (typeof this.inner.replaceGraph !== 'function') {
       throw new UnsupportedTripleStoreCapabilityError('replaceGraph', 'ChangelogStore');
     }
     if (!this.enabled) return this.inner.replaceGraph(graphUri, quads, options);
     this.reservedGuard.assertNotReserved(graphUri, 'replaceGraph');
-    await this.runAtomicMutation({
+    quads = await this.prepareQuads(quads);
+    await this.runAtomicMutation({ admission,
       operation: 'replaceGraph',
       touchedGraphs: [graphUri],
       options,
@@ -395,11 +410,19 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   }
 
   async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
+    return this.preparation.run(admission => this.replaceAssetGroupPrepared(assets, admission, options));
+  }
+
+  private async replaceAssetGroupPrepared(assets: readonly AtomicAssetReplacement[], admission: StorePreparationAdmission, options?: QueryOptions): Promise<void> {
     if (!this.inner.replaceAssetGroup) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'group-decorator');
     if (!this.enabled) return this.inner.replaceAssetGroup(assets, options);
     const touchedGraphs = [...new Set(assets.flatMap(a => [a.graphUri, a.metaGraphUri]))];
     for (const graph of touchedGraphs) this.reservedGuard.assertNotReserved(graph, 'replaceAssetGroup');
-    await this.runAtomicMutation({ operation: 'replaceAssetGroup', touchedGraphs, options,
+    assets = await Promise.all(assets.map(async asset => ({ ...asset,
+      graphQuads: await this.prepareQuads(asset.graphQuads),
+      metadataQuads: await this.prepareQuads(asset.metadataQuads),
+    })));
+    await this.runAtomicMutation({ admission, operation: 'replaceAssetGroup', touchedGraphs, options,
       execute: options => this.inner.replaceAssetGroup!(assets, options) });
   }
 
@@ -410,6 +433,17 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     metadataSubject: string,
     metadataQuads: Quad[],
     options?: QueryOptions,
+  ): Promise<void> {
+    return this.preparation.run(admission => this.replaceGraphAndSubjectPrepared(graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads, admission, options));
+  }
+
+  private async replaceGraphAndSubjectPrepared(
+    graphUri: string,
+    graphQuads: Quad[],
+    metaGraphUri: string,
+    metadataSubject: string,
+    metadataQuads: Quad[],
+    admission: StorePreparationAdmission, options?: QueryOptions,
   ): Promise<void> {
     if (typeof this.inner.replaceGraphAndSubject !== 'function') {
       throw new UnsupportedTripleStoreCapabilityError(
@@ -429,7 +463,8 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     }
     this.reservedGuard.assertNotReserved(graphUri, 'replaceGraphAndSubject');
     this.reservedGuard.assertNotReserved(metaGraphUri, 'replaceGraphAndSubject');
-    await this.runAtomicMutation({
+    [graphQuads, metadataQuads] = await Promise.all([this.prepareQuads(graphQuads), this.prepareQuads(metadataQuads)]);
+    await this.runAtomicMutation({ admission,
       operation: 'replaceGraphAndSubject',
       touchedGraphs: [graphUri, metaGraphUri],
       options,
@@ -450,6 +485,15 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     quads: Quad[],
     options?: QueryOptions,
   ): Promise<void> {
+    return this.preparation.run(admission => this.replaceSubjectPrepared(graphUri, subject, quads, admission, options));
+  }
+
+  private async replaceSubjectPrepared(
+    graphUri: string,
+    subject: string,
+    quads: Quad[],
+    admission: StorePreparationAdmission, options?: QueryOptions,
+  ): Promise<void> {
     if (typeof this.inner.replaceSubject !== 'function') {
       throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'ChangelogStore');
     }
@@ -460,7 +504,8 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     // predicate/object is accepted, matching the insert() path (#1863 regression
     // the raw-update path reintroduced via assertNoReservedRef).
     this.reservedGuard.assertNotReserved(graphUri, 'replaceSubject');
-    await this.runAtomicMutation({
+    quads = await this.prepareQuads(quads);
+    await this.runAtomicMutation({ admission,
       operation: 'replaceSubject',
       touchedGraphs: [graphUri],
       options,
@@ -472,6 +517,13 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     graphUri: string, subject: string, replacementQuads: Quad[], insertQuads: Quad[],
     options?: QueryOptions,
   ): Promise<void> {
+    return this.preparation.run(admission => this.replaceSubjectAndInsertPrepared(graphUri, subject, replacementQuads, insertQuads, admission, options));
+  }
+
+  private async replaceSubjectAndInsertPrepared(
+    graphUri: string, subject: string, replacementQuads: Quad[], insertQuads: Quad[],
+    admission: StorePreparationAdmission, options?: QueryOptions,
+  ): Promise<void> {
     assertSubjectAndInsertPayload(graphUri, subject, replacementQuads, insertQuads);
     if (typeof this.inner.replaceSubjectAndInsert !== 'function') {
       throw new UnsupportedTripleStoreCapabilityError('replaceSubjectAndInsert', 'ChangelogStore');
@@ -480,7 +532,8 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       return this.inner.replaceSubjectAndInsert(graphUri, subject, replacementQuads, insertQuads, options);
     }
     this.reservedGuard.assertNotReserved(graphUri, 'replaceSubjectAndInsert');
-    await this.runAtomicMutation({
+    [replacementQuads, insertQuads] = await Promise.all([this.prepareQuads(replacementQuads), this.prepareQuads(insertQuads)]);
+    await this.runAtomicMutation({ admission,
       operation: 'replaceSubjectAndInsert',
       touchedGraphs: [graphUri],
       options,
@@ -494,6 +547,13 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     input: Rfc64AuthorCommitCasInputV1,
     options?: QueryOptions,
   ): Promise<Rfc64AuthorCommitCasResultV1> {
+    return this.preparation.run(admission => this.rfc64AuthorCommitCasV1Prepared(input, admission, options));
+  }
+
+  private async rfc64AuthorCommitCasV1Prepared(
+    input: Rfc64AuthorCommitCasInputV1,
+    admission: StorePreparationAdmission, options?: QueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1> {
     if (typeof this.inner.rfc64AuthorCommitCasV1 !== 'function') {
       throw new UnsupportedTripleStoreCapabilityError(
         'rfc64AuthorCommitCasV1',
@@ -501,12 +561,13 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       );
     }
     const manifest = normalizeRfc64AuthorCommitCasV1(input);
-    const source = sourceFromNormalizedRfc64AuthorCommitCasV1(manifest);
+    let source = sourceFromNormalizedRfc64AuthorCommitCasV1(manifest);
     if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(source, options);
     for (const graph of manifest.referencedGraphs) {
       this.reservedGuard.assertNotReserved(graph, 'rfc64AuthorCommitCasV1');
     }
-    return this.runAtomicMutation({
+    source = await (immutableStorePreparation(this.inner)?.prepareImmutableAuthorCommit(source) ?? Promise.resolve(source));
+    return this.runAtomicMutation({ admission,
       operation: 'rfc64AuthorCommitCasV1',
       touchedGraphs: manifest.touchedGraphs,
       options,
@@ -791,8 +852,13 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   }
 
   /** Await the current mutation-queue tail (all writes enqueued so far settle). */
-  private drain(): Promise<void> {
-    return this.tail.then(() => undefined, () => undefined);
+  private async drain(): Promise<void> {
+    await this.preparation.drain();
+    await this.tail.then(() => undefined, () => undefined);
+  }
+
+  private prepareQuads(quads: readonly Quad[]): Promise<Quad[]> {
+    return immutableStorePreparation(this.inner)?.prepareImmutableQuads(quads) ?? Promise.resolve([...quads]);
   }
 
   // ------------------------------------------------------------------
@@ -800,10 +866,10 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   // ------------------------------------------------------------------
 
   /** Serialize a mutation so no two writes interleave their seq allocation. */
-  private runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+  private runExclusive<T>(fn: () => Promise<T>, admission?: StorePreparationAdmission): Promise<T> {
     // Once close() has shut the gate, refuse new mutations rather than racing
     // the inner store's close — anything already queued still drains.
-    if (this.closing) {
+    if (this.closing && !this.preparation.owns(admission)) {
       return Promise.reject(new Error('ChangelogStore: store is closing; write rejected'));
     }
     const run = this.tail.then(() => fn(), () => fn());
@@ -813,18 +879,19 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   }
 
   private runExclusiveMutation<T>(operation: StoreOperation, options: QueryOptions | undefined,
-    work: (options: QueryOptions | undefined) => Promise<T>): Promise<T> {
+    work: (options: QueryOptions | undefined) => Promise<T>, admission?: StorePreparationAdmission): Promise<T> {
     return this.runExclusive(() => runLogicalStoreMutation(this.inner, operation, options, async scoped => {
       try { return await work(scoped); }
       catch (error) {
         if (!isStoreOperationNotStarted(error, operation)) this.flagReconcile(`${operation}(indeterminate-failure)`);
         throw error;
       }
-    }));
+    }), admission);
   }
 
   /** Shared outcome-aware lifecycle for counted and certified atomic mutations. */
   private runAtomicMutation<T>(args: {
+    admission?: StorePreparationAdmission;
     operation: StoreOperation;
     touchedGraphs: readonly string[];
     options?: QueryOptions;
@@ -835,7 +902,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       const result = await args.execute(options);
       if (args.committed?.(result) ?? true) await this.markPostMutation(args.touchedGraphs, options);
       return result;
-    });
+    }, args.admission);
   }
 
   /**
@@ -1024,8 +1091,6 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     return quads.filter((q) => !(q.graph && this.reservedGuard.isReservedGraph(q.graph)));
   }
 
-
-
 }
 
 // ====================================================================
@@ -1049,46 +1114,6 @@ export function changelogSchemaQuad(): Quad {
     object: `"${CHANGELOG_SCHEMA_VERSION}"^^<${XSD_INTEGER}>`,
     graph: CHANGELOG_GRAPH,
   };
-}
-
-/**
- * Distinct seqs one page covers — the load-bearing count behind
- * {@link ChangelogStore.readChanges}. A page keeps widening until it covers
- * `limit` distinct seqs or the log is drained, because the responder reads a
- * page shorter than `limit` as "log drained" and advances the requester past
- * everything it did not receive. Duplicate rows for one seq (two writers across
- * a release swap) count once; a missing seq (a hole) is what the next window
- * makes up for. Never relax this to the row count.
- */
-function distinctSeqCoverage(page: readonly ChangeRecord[]): number {
-  return new Set(page.map((record) => record.seq)).size;
-}
-
-/** Append well-formed `{ seq, graph, op }` rows from a SELECT binding set, skipping malformed rows. */
-function collectChangeRecords(
-  bindings: ReadonlyArray<Record<string, string | undefined>>,
-  out: ChangeRecord[],
-): void {
-  for (const b of bindings) {
-    const seq = parseIntTerm(b.seq);
-    const graph = stripIri(b.graph);
-    const op = stripLiteral(b.op);
-    if (seq == null || !graph || (op !== 'upsert' && op !== 'drop')) continue;
-    out.push({ seq, graph, op });
-  }
-}
-
-/**
- * Drop the update-only `touchedGraphs` hint, yielding the read-path
- * `QueryOptions` (source/priority/signal) to forward to the post-mutation
- * `hasGraph` probes. Intentionally duplicates GraphSetIndexStore's boundary
- * helper of the same name — a trivial destructure kept local to avoid a
- * decorator-to-decorator import.
- */
-function queryOptionsFromUpdateOptions(options?: UpdateOptions): QueryOptions | undefined {
-  if (!options) return undefined;
-  const { touchedGraphs: _touchedGraphs, ...readOptions } = options;
-  return readOptions;
 }
 
 /** Preserve the caller's exact abort reason while keeping query-free reads cancellable. */

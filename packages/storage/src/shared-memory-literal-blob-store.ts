@@ -215,6 +215,16 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
         'SharedMemoryLiteralBlobStore',
       );
     }
+    const mappedInput = await this.prepareImmutableAuthorCommit(input);
+    return this.inner.rfc64AuthorCommitCasV1(mappedInput, options);
+  }
+
+  /** Internal preparation capability: no RDF mutation or changelog sequence. */
+  prepareImmutableQuads(quads: readonly Quad[]): Promise<Quad[]> {
+    return this.externalizeQuads(quads);
+  }
+
+  async prepareImmutableAuthorCommit(input: Rfc64AuthorCommitCasInputV1): Promise<Rfc64AuthorCommitCasInputV1> {
     // Normalize first so an incomplete closed manifest cannot create blobs.
     // The manifest is also the sole source for decorator traversal: adding a
     // semantic role to the protocol plan cannot silently bypass blob mapping.
@@ -225,10 +235,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
         ? this.translateGuardObject(context.graphUri, object)
         : this.externalizeScalarObject(context.graphUri, object!),
     });
-    return this.inner.rfc64AuthorCommitCasV1(
-      sourceFromNormalizedRfc64AuthorCommitCasV1(mappedInput),
-      options,
-    );
+    return sourceFromNormalizedRfc64AuthorCommitCasV1(mappedInput);
   }
 
   async atomicUpdate(sparql: string, options?: UpdateOptions): Promise<void> {
