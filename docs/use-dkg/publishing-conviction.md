@@ -60,7 +60,11 @@ dkg pca info <accountId>
 dkg pca info <accountId> --probe-key <agentAddress>
 ```
 
-The read-only snapshot includes owner, committed TRAC, top-up buffer, base epoch allowance, creation and expiry epochs, agent count, settlement window, and discount basis points.
+The read-only snapshot includes owner, committed TRAC, top-up buffer, base epoch allowance, creation and expiry epochs, agent count, settlement window, and discount basis points. When the account has service spending on, it also points to `dkg ca status`.
+
+## Spend the Account on Services
+
+An account can also pay for services sold on the DKG, such as inference and query services: the owner opts it in and assigns a buyer key within caps, and the buyer key funds service periods from the account's allowance, at the account's discount. See [Spend a Conviction Account on Services](conviction-accounts.md).
 
 ## Use PCA With a Curated Context Graph
 
