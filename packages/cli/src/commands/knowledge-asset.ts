@@ -505,6 +505,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
           + 'Verifies the mint of its reserved id against the seal; sends no transaction (node admin)',
       )
       .option('--tx-hash <hash>', 'Mint transaction hash, if known (otherwise found from the creation log)')
+      .option('--selected-author-agent-address <address>', 'Resident author to record when several authors have an asset with this name')
       .option('--json', 'Print JSON'),
   ))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
@@ -513,6 +514,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       const result = await client.knowledgeAssetReconcileMint(contextGraphId, name, {
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
         ...(typeof opts.txHash === 'string' ? { txHash: opts.txHash } : {}),
+        ...(typeof opts.selectedAuthorAgentAddress === 'string' ? { selectedAuthorAgentAddress: opts.selectedAuthorAgentAddress } : {}),
       });
       if (opts.json) {
         console.log(JSON.stringify(result, null, 2));

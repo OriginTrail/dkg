@@ -32,6 +32,8 @@ export interface KnowledgeAssetMintReconcileInput {
   subGraphName?: string;
   /** Hint: the transaction believed to have minted the asset. */
   txHash?: string;
+  /** Which resident author's asset to record when several authors use this name. */
+  selectedAuthorAgentAddress?: string;
 }
 
 export type KnowledgeAssetMintReconcileResult =
@@ -102,7 +104,10 @@ export async function reconcileLateMint(
   input: KnowledgeAssetMintReconcileInput,
 ): Promise<KnowledgeAssetMintReconcileResult> {
   const { contextGraphId, name, subGraphName } = input;
-  const agentAddress = await agent.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, { subGraphName });
+  const agentAddress = await agent.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, {
+    subGraphName,
+    ...(input.selectedAuthorAgentAddress === undefined ? {} : { selectedAuthorAgentAddress: input.selectedAuthorAgentAddress }),
+  });
   const target: Target = { contextGraphId, name, subGraphName, agentAddress, txHash: input.txHash };
   const reservation = await readSealedReservation(agent, target);
   const { ual } = reservation.scope;

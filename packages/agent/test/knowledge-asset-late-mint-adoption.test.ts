@@ -92,44 +92,51 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     vi.spyOn(agent as unknown as { _resolveInlineEncryption(): Promise<object> }, '_resolveInlineEncryption')
       .mockResolvedValue({});
     const accessPolicy = vi.spyOn(agent, 'resolveOnChainAccessPolicyState').mockResolvedValue(0);
-
-    const typedData = buildAuthorAttestationTypedData({
-      chainId: await chain.getEvmChainId(),
-      kav10Address: await chain.getKnowledgeAssetsLifecycleAddress(),
-      authorAddress: AUTHOR, merkleRoot: MERKLE_ROOT, reservedKaId: RESERVED_KA_ID, schemeVersion: 1,
-    });
-    const signed = ethers.Signature.from(await wallet.signTypedData(typedData.domain, typedData.types, typedData.message));
-    const signature = { r: ethers.getBytes(signed.r), vs: ethers.getBytes(signed.yParityAndS) };
-    const preSignedAuthorAttestation = { address: AUTHOR, reservedKaId: RESERVED_KA_ID, signature };
     if (subGraphName) {
       await agent.createContextGraph({ id: CONTEXT_GRAPH, name: CONTEXT_GRAPH });
       await agent.createSubGraph(CONTEXT_GRAPH, subGraphName);
     }
-    await agent.assertion.create(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR, reservedKaId: RESERVED_KA_ID, subGraphName });
-    await agent.assertion.write(CONTEXT_GRAPH, NAME, QUADS, { agentAddress: AUTHOR, subGraphName });
-    const sealed = await agent.assertion.finalize(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR, preSignedAuthorAttestation, subGraphName });
-    await agent.assertion.promote(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR, preSignedAuthorAttestation, entities: 'all', subGraphName });
+    const { sealed, lostMint, history } = await strandAuthorAsset(chain, wallet, subGraphName);
+    const createKnowledgeAssets = vi.spyOn(chain, 'createKnowledgeAssets');
+    const updateKnowledgeCollection = vi.spyOn(chain, 'updateKnowledgeCollectionV10');
+    return { agent, store, sealed, lostMint, history, createKnowledgeAssets, updateKnowledgeCollection, accessPolicy };
+  }
+
+  /** One author's finalized, shared asset named NAME on the running agent, whose mint landed unobserved. */
+  async function strandAuthorAsset(chain: MockChainAdapter, author: ethers.Wallet, subGraphName?: string) {
+    const reservedKaId = (BigInt(author.address) << 96n) | 7n;
+    const typedData = buildAuthorAttestationTypedData({
+      chainId: await chain.getEvmChainId(),
+      kav10Address: await chain.getKnowledgeAssetsLifecycleAddress(),
+      authorAddress: author.address, merkleRoot: MERKLE_ROOT, reservedKaId, schemeVersion: 1,
+    });
+    const signed = ethers.Signature.from(await author.signTypedData(typedData.domain, typedData.types, typedData.message));
+    const signature = { r: ethers.getBytes(signed.r), vs: ethers.getBytes(signed.yParityAndS) };
+    const preSignedAuthorAttestation = { address: author.address, reservedKaId, signature };
+    const agentAddress = author.address;
+    await agent!.assertion.create(CONTEXT_GRAPH, NAME, { agentAddress, reservedKaId, subGraphName });
+    await agent!.assertion.write(CONTEXT_GRAPH, NAME, QUADS, { agentAddress, subGraphName });
+    const sealed = await agent!.assertion.finalize(CONTEXT_GRAPH, NAME, { agentAddress, preSignedAuthorAttestation, subGraphName });
+    await agent!.assertion.promote(CONTEXT_GRAPH, NAME, { agentAddress, preSignedAuthorAttestation, entities: 'all', subGraphName });
 
     // The first publish attempt's transaction, which mined after the node gave up on its receipt.
     const lostMint = await chain.createKnowledgeAssets({
       publishOperationId: 'lost-attempt',
       contextGraphId: ON_CHAIN_CONTEXT_GRAPH,
       publisherAddress: chain.signerAddress,
-      reservedKaId: RESERVED_KA_ID,
+      reservedKaId,
       merkleRoot: MERKLE_ROOT,
       knowledgeAssetsAmount: 1,
       byteSize: 1n,
       epochs: 1,
       tokenAmount: 5n,
       isImmutable: false,
-      author: { address: AUTHOR, signature, schemeVersion: 1 },
+      author: { address: author.address, signature, schemeVersion: 1 },
       ackSignatures: [{ identityId: 1n, r: ZERO, vs: ZERO }],
     });
-    const history = () => agent!.assertion.history(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR, subGraphName });
+    const history = () => agent!.assertion.history(CONTEXT_GRAPH, NAME, { agentAddress, subGraphName });
     expect(await history()).toMatchObject({ status: 'swm-shared', reservedUal: sealed.kaUal });
-    const createKnowledgeAssets = vi.spyOn(chain, 'createKnowledgeAssets');
-    const updateKnowledgeCollection = vi.spyOn(chain, 'updateKnowledgeCollectionV10');
-    return { agent, store, sealed, lostMint, history, createKnowledgeAssets, updateKnowledgeCollection, accessPolicy };
+    return { sealed, lostMint, history };
   }
 
   /** Fail chosen lifecycle writes once each, as transient store failures would. */
@@ -389,6 +396,22 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
       .resolves.toMatchObject({ status: 'adopted', ual: sealed.kaUal, txHash: lostMint.txHash });
     expect(await history()).toMatchObject({ status: 'vm-confirmed', publishedUal: sealed.kaUal });
+  });
+
+  it('records the selected one of two same-named assets by different authors, and leaves the other alone', async () => {
+    const chain = new MockChainAdapter();
+    const first = await strandedAsset(chain);
+    const otherAuthor = new ethers.Wallet(`0x${'36'.repeat(32)}`);
+    const second = await strandAuthorAsset(chain, otherAuthor);
+
+    await expect(first.agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ code: 'AMBIGUOUS_ASSERTION_AUTHOR' });
+    await expect(first.agent.reconcileKnowledgeAssetMint({ ...RECONCILE, selectedAuthorAgentAddress: otherAuthor.address }))
+      .resolves.toMatchObject({ status: 'adopted', ual: second.sealed.kaUal, txHash: second.lostMint.txHash });
+
+    expect(await second.history()).toMatchObject({ status: 'vm-confirmed', publishedUal: second.sealed.kaUal });
+    expect(await first.history()).toMatchObject({ status: 'swm-shared' });
+    await expect(first.agent.reconcileKnowledgeAssetMint({ ...RECONCILE, selectedAuthorAgentAddress: AUTHOR }))
+      .resolves.toMatchObject({ status: 'adopted', ual: first.sealed.kaUal, txHash: first.lostMint.txHash });
   });
 
   it('fails retryably when the record-only publish does not confirm', async () => {

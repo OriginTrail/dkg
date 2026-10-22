@@ -20,6 +20,7 @@ const AGENT_SCOPE = requestAuthentication({ kind: 'agent', agentAddress: '0x0000
 const OPERATOR = requestAuthentication({ kind: 'nodeOperator' });
 const CG = '0xd14e38693f4a8b7cc71a3c0203e146fd58a046d1/perutnina-ptuj';
 const AUTHOR = '0x00000000000000000000000000000000000000a1';
+const OTHER_AUTHOR = '0x00000000000000000000000000000000000000b2';
 const UAL = `did:dkg:gnosis:100/${AUTHOR}/30013`;
 const TX_HASH = `0x${'ab'.repeat(32)}`;
 const PATH = '/api/knowledge-assets/lots-2026-08-12-083f0bc7e9b78e9c/vm/reconcile';
@@ -80,6 +81,34 @@ describe('POST /api/knowledge-assets/:name/vm/reconcile', () => {
     expect(agent.reconcileKnowledgeAssetMint).toHaveBeenCalledExactlyOnceWith({
       contextGraphId: CG, name: 'lots-2026-08-12-083f0bc7e9b78e9c', subGraphName: 'lots', txHash: TX_HASH,
     });
+  });
+
+  it.each([null, '', '0x1234'])('rejects selectedAuthorAgentAddress=%j before touching the asset', async (selected) => {
+    const agent = stubAgent();
+    const result = await callRoute(PATH, OPERATOR, { contextGraphId: CG, selectedAuthorAgentAddress: selected }, agent);
+    expect(result.status).toBe(400);
+    expect(agent.reconcileKnowledgeAssetMint).not.toHaveBeenCalled();
+  });
+
+  it('forwards the resident-author selector, as vm/publish accepts it', async () => {
+    const agent = stubAgent();
+    const result = await callRoute(PATH, OPERATOR, {
+      contextGraphId: CG, subGraphName: 'lots', txHash: TX_HASH, selectedAuthorAgentAddress: OTHER_AUTHOR,
+    }, agent);
+    expect(result.status).toBe(200);
+    expect(agent.reconcileKnowledgeAssetMint).toHaveBeenCalledExactlyOnceWith({
+      contextGraphId: CG, name: 'lots-2026-08-12-083f0bc7e9b78e9c', subGraphName: 'lots', txHash: TX_HASH,
+      selectedAuthorAgentAddress: OTHER_AUTHOR,
+    });
+  });
+
+  it.each([
+    ['AMBIGUOUS_ASSERTION_AUTHOR', [AUTHOR, OTHER_AUTHOR]],
+    ['ASSERTION_AUTHOR_NOT_RESIDENT', [AUTHOR]],
+  ])('answers %s with 409 and the resident candidates', async (code, candidates) => {
+    const agent = stubAgent(async () => { throw Object.assign(new Error(`author selection: ${code}`), { code, candidates }); });
+    const result = await callRoute(PATH, OPERATOR, { contextGraphId: CG, subGraphName: 'lots' }, agent);
+    expect(result).toEqual({ status: 409, body: { code, error: `author selection: ${code}`, candidates } });
   });
 
   it('reports an already published asset', async () => {
@@ -168,9 +197,13 @@ describe('dkg ka reconcile', () => {
   }
 
   it('records the late mint and prints the original transaction', async () => {
-    const client = await reconcile(['lots-2026-08-12', '-c', CG, '--sub-graph-name', 'lots', '--tx-hash', TX_HASH], ADOPTED);
+    const client = await reconcile([
+      'lots-2026-08-12', '-c', CG, '--sub-graph-name', 'lots', '--tx-hash', TX_HASH, '--selected-author-agent-address', OTHER_AUTHOR,
+    ], ADOPTED);
 
-    expect(client).toHaveBeenCalledExactlyOnceWith(CG, 'lots-2026-08-12', { subGraphName: 'lots', txHash: TX_HASH });
+    expect(client).toHaveBeenCalledExactlyOnceWith(CG, 'lots-2026-08-12', {
+      subGraphName: 'lots', txHash: TX_HASH, selectedAuthorAgentAddress: OTHER_AUTHOR,
+    });
     expect(lines).toEqual([
       'Knowledge asset late mint recorded:',
       '  Name:    lots-2026-08-12',

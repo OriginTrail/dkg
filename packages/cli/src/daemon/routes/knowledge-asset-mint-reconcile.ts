@@ -5,7 +5,8 @@ import type { RequestContext } from './context.js';
 import { requireNodeAdmin } from '../node-admin-guard.js';
 import { jsonResponse, readBody, safeParseJson, SMALL_BODY_BYTES, validateOptionalSubGraphName,
   resolveRequiredWriteContextGraphId, respondIfChainRpcTransportError, respondIfStoreUnavailable } from '../http-utils.js';
-import { respondAmbiguousAssertionAuthor, respondMintAdoptionRefused } from './knowledge-assets-error-mapping.js';
+import { respondAmbiguousAssertionAuthor, respondAuthorSelectionError, respondMintAdoptionRefused } from './knowledge-assets-error-mapping.js';
+import { resolveSelectedAuthorAgentAddress } from './selected-author.js';
 
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
 /** Caller preconditions: no record to complete, not a finalized complete share, or a graph this node cannot publish to. */
@@ -18,10 +19,11 @@ const PRECONDITION_CODES = new Set([KA_MINT_RECONCILE_REFUSED_CODE, 'PUBLISH_NOT
  * transaction, ACK request or member ciphertext.
  */
 export async function handleKnowledgeAssetMintReconcile(
-  { agent, authentication, req, res }: RequestContext,
+  ctx: RequestContext,
   name: string,
   preflight: Parameters<typeof resolveRequiredWriteContextGraphId>[3],
 ): Promise<void> {
+  const { agent, authentication, req, res } = ctx;
   if (!requireNodeAdmin(authentication, res, 'POST /api/knowledge-assets/:name/vm/reconcile', 'record an existing mint')) return;
   const valid = validateAssertionName(name);
   if (!valid.valid) return jsonResponse(res, 400, { error: `Invalid "name": ${valid.reason}` });
@@ -31,14 +33,19 @@ export async function handleKnowledgeAssetMintReconcile(
     return jsonResponse(res, 400, { error: '"txHash" must be a 0x-prefixed 32-byte transaction hash' });
   }
   if (!validateOptionalSubGraphName(parsed.subGraphName, res)) return;
+  // The same resident-author selector as vm/publish, for an AMBIGUOUS_ASSERTION_AUTHOR answer.
+  const selectedAuthor = resolveSelectedAuthorAgentAddress(ctx, parsed);
+  if (!selectedAuthor.ok) return;
   const contextGraphId = await resolveRequiredWriteContextGraphId(agent, parsed.contextGraphId, res, preflight);
   if (!contextGraphId) return;
   try {
     return jsonResponse(res, 200, await agent.reconcileKnowledgeAssetMint({
       contextGraphId, name, subGraphName: parsed.subGraphName, txHash: parsed.txHash,
+      ...(selectedAuthor.value !== undefined ? { selectedAuthorAgentAddress: selectedAuthor.value } : {}),
     }));
   } catch (error: any) {
     if (respondMintAdoptionRefused(res, error) || respondAmbiguousAssertionAuthor(res, error)) return;
+    if (respondAuthorSelectionError(res, error)) return;
     if (respondIfStoreUnavailable(res, error) || respondIfChainRpcTransportError(res, error)) return;
     const message = error?.message ?? String(error);
     if (error?.code === KA_MINT_RECONCILE_INCOMPLETE_CODE) {

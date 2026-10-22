@@ -8,14 +8,16 @@ A node administrator records one asset with:
 dkg ka reconcile <name> -c <context-graph-id> --sub-graph-name <sub-graph>
 ```
 
-Omit `--sub-graph-name` for an asset in the root graph. Add `--tx-hash <hash>` when the mint transaction is known (for example from `daemon.log`). Without it, the node finds the transaction from the asset's creation log, newest block first. A hint that does not prove the mint (for example a duplicate send that reverted) falls back to that search. The HTTP equivalent is:
+Omit `--sub-graph-name` for an asset in the root graph. Add `--tx-hash <hash>` when the mint transaction is known (for example from `daemon.log`). Without it, the node finds the transaction from the asset's creation log, newest block first. A hint that does not prove the mint (for example a duplicate send that reverted) falls back to that search.
+
+When several authors have an asset with this name, the node answers 409 `AMBIGUOUS_ASSERTION_AUTHOR` with the resident candidates. Pick one with `--selected-author-agent-address <address>`; it is the same selector `vm/publish` takes. The HTTP equivalent is:
 
 ```http
 POST /api/knowledge-assets/<encoded-name>/vm/reconcile
 Authorization: Bearer <node-operator-token>
 Content-Type: application/json
 
-{ "contextGraphId": "<context-graph-id>", "subGraphName": "<sub-graph>", "txHash": "<optional-hash>" }
+{ "contextGraphId": "<context-graph-id>", "subGraphName": "<sub-graph>", "txHash": "<optional-hash>", "selectedAuthorAgentAddress": "<optional-author>" }
 ```
 
 The node verifies the mint before recording anything:
@@ -38,6 +40,7 @@ It then records the original transaction, block, publisher and TRAC cost through
 | 503 `KA_MINT_RECONCILE_INCOMPLETE` | The mint was verified, but the lifecycle does not yet name the sealed version and the asset's UAL as published. Retry; the retry resumes. |
 | 409 `KA_MINT_RECONCILE_REFUSED` | The node holds nothing it can complete. One of:<br>- the asset is not a finalized graph-scoped asset;<br>- its seal or UAL names another chain;<br>- its lifecycle records another VM version;<br>- its share is gone and there is no verified local record of the sealed content, so there is nothing to complete;<br>- an interrupted publish consumed its share before the finalization gossip and catalog transition. Reconcile cannot finish those from the VM record alone, so the asset stays unrecorded. Keep its evidence for a follow-up. |
 | 409 `VM_PUBLISH_PRECONDITION` or `PUBLISH_NOT_FULL_SHARE` | The asset is not a finalized, fully shared asset. |
+| 409 `AMBIGUOUS_ASSERTION_AUTHOR` or `ASSERTION_AUTHOR_NOT_RESIDENT` | Several authors have an asset with this name, or the selected author has none. Retry with one of the returned `candidates` as the selected author. |
 
 An interrupted attempt is resumed by retrying. While the asset's complete share is still in shared memory, the node records the mint through the publish path, keeping a matching record an earlier attempt left. Once an attempt has consumed the share and gone past its finalization gossip, the VM content and its metadata are already recorded. "Past its finalization gossip" means it cleared the share marker or stamped the VM pointer, both of which the publish path does only after the gossip. The retry then verifies that record against the seal, verifies the mint again, writes the receipt and completes only the lifecycle. Reconcile reports `already-published` only when the lifecycle names the sealed version as its VM version and the asset's UAL as its published UAL. The command sends nothing, so it is safe to retry. On a large node, a 500 with "Triple-store response exceeds byte limit" can come from a concurrent query sharing the store's graph listing during the shared-memory cleanup. Retry it while the node serves no other queries.
 

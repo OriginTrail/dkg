@@ -1452,11 +1452,13 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
   it('knowledgeAssetReconcileMint POSTs the record-only request to .../vm/reconcile', async () => {
     const txHash = `0x${'ab'.repeat(32)}`;
     const calls = track({ status: 'already-published', ual: 'did:dkg:31337/0xabc/7' });
-    await expect(client.knowledgeAssetReconcileMint('cg', 'lot 12', { subGraphName: 'lots', txHash }))
+    const selectedAuthorAgentAddress = `0x${'b2'.repeat(20)}`;
+    await expect(client.knowledgeAssetReconcileMint('cg', 'lot 12', { subGraphName: 'lots', txHash, selectedAuthorAgentAddress }))
       .resolves.toEqual({ status: 'already-published', ual: 'did:dkg:31337/0xabc/7' });
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets/lot%2012/vm/reconcile`);
     expect(calls[0].opts.method).toBe('POST');
-    expect(JSON.parse(calls[0].opts.body as string)).toEqual({ contextGraphId: 'cg', subGraphName: 'lots', txHash });
+    expect(JSON.parse(calls[0].opts.body as string))
+      .toEqual({ contextGraphId: 'cg', subGraphName: 'lots', txHash, selectedAuthorAgentAddress });
   });
 
   it('knowledgeAssetShare rejects root selection and unsealed sharing before HTTP serialization', async () => {

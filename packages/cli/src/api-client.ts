@@ -1094,7 +1094,7 @@ export class ApiClient {
       knowledgeAssetMutationDeadline(name, contextGraphId, options?.subGraphName));
   }
 
-  async knowledgeAssetReconcileMint(contextGraphId: string, name: string, options?: { subGraphName?: string; txHash?: string }): Promise<KnowledgeAssetMintReconcileResult> {
+  async knowledgeAssetReconcileMint(contextGraphId: string, name: string, options?: KnowledgeAssetPublishAuthorSelection & { txHash?: string }): Promise<KnowledgeAssetMintReconcileResult> {
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/reconcile`, { contextGraphId, ...options });
   }
 
