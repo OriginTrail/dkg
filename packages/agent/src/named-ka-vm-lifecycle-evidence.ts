@@ -6,10 +6,13 @@ import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata, materialized
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { hexlify } from 'ethers';
+import { createHash } from 'node:crypto';
 import type { PublishedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle.js';
 import type { ConfirmedNamedKaVmPublication } from './named-ka-vm-lifecycle-recovery-error.js';
 import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
 import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
+
+const materializationFingerprints = new WeakMap<ConfirmedLifecycleMaterialization, string>();
 
 function invalidNamedSeal(): never { throw new NamedKaVmLifecycleIntegrityError('Invalid confirmed named assertion seal evidence'); }
 /** Fresh confirmations stay typed. Resolved identity supplies only a missing legacy seal field. */
@@ -200,6 +203,12 @@ export function normalizeLifecycleMaterialization(value: unknown, input: Confirm
     || rootHex(computeFlatKCRootV10(publicQuads, parsed.envelope.privateMerkleRoot ? [parsed.envelope.privateMerkleRoot] : [])) !== rootHex(input.merkleRoot)) return invalid();
   const model = Object.freeze({ kaUal: scope.ual, publicQuads: Object.freeze(publicQuads.map(q => Object.freeze(q))),
     metadataQuads: Object.freeze(metadataQuads.map(q => Object.freeze(q))), proof: confirmedGraphKnowledgeAssetProof(parsed.envelope) });
+  // Cache the existing order-independent evidence comparison at validation,
+  // outside compact journal serialization. Frozen models cannot change afterward.
+  const terms = (rows: readonly Quad[]) => rows.map(q => JSON.stringify([q.subject, q.predicate, q.object, q.graph])).sort();
+  materializationFingerprints.set(model, createHash('sha256').update(JSON.stringify([
+    model.kaUal, terms(model.publicQuads), terms(model.metadataQuads),
+  ])).digest('hex'));
   return model;
 }
 
@@ -230,10 +239,9 @@ export function reconcileLifecycleRepairEvidence(previous: RetainedLifecycleRepa
   if (current.packedKaId !== incoming.packedKaId) conflict();
   if (current.namedSeal && incoming.namedSeal && canonicalizeCanonicalGraphScopedAuthorSealV1(current.namedSeal) !== canonicalizeCanonicalGraphScopedAuthorSealV1(incoming.namedSeal)) conflict();
   if (current.materialization && incoming.materialization) {
-    const terms = (rows: readonly Quad[]) => rows.map(q => JSON.stringify([q.subject, q.predicate, q.object, q.graph])).sort().join('\n');
-    if (current.materialization.kaUal !== incoming.materialization.kaUal
-      || terms(current.materialization.publicQuads) !== terms(incoming.materialization.publicQuads)
-      || terms(current.materialization.metadataQuads) !== terms(incoming.materialization.metadataQuads)) conflict();
+    const currentFingerprint = materializationFingerprints.get(current.materialization);
+    const incomingFingerprint = materializationFingerprints.get(incoming.materialization);
+    if (!currentFingerprint || !incomingFingerprint || currentFingerprint !== incomingFingerprint) conflict();
   }
   const materialization = current.materialization ?? incoming.materialization, namedSeal = current.namedSeal ?? incoming.namedSeal;
   if (namedSeal) {

@@ -18,6 +18,8 @@ export class NamedKaVmLifecycleRepair {
   private readonly executor: ConfirmedNamedKaVmLifecycleExecutor;
   private entries = new Map<string, RepairEntry>();
   private loaded = false;
+  private loadTask?: Promise<void>;
+  private journalCertain = false;
   private journalTail: Promise<unknown> = Promise.resolve();
   private inFlight = new Set<Promise<unknown>>();
   private worker?: CoalescingRecurringTask;
@@ -51,47 +53,94 @@ export class NamedKaVmLifecycleRepair {
     return result;
   }
   private now(): number { return this.options.now?.() ?? Date.now(); }
-  private async load(): Promise<void> {
-    if (this.loaded) return;
-    if (this.options.dataDir) {
-      // Only an absent journal means no obligations; a missing referenced snapshot must fail closed.
-      let bytes: string | undefined;
-      try { bytes = await readFile(join(this.options.dataDir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-      if (bytes !== undefined) this.entries = await this.snapshots!.decode(JSON.parse(bytes));
-    }
-    this.loaded = true;
+  private load(): Promise<void> {
+    if (this.loaded) return Promise.resolve();
+    if (this.loadTask) return this.loadTask;
+    const task = Promise.resolve().then(async () => {
+      let entries = this.entries;
+      if (this.options.dataDir) {
+        let bytes: string | undefined;
+        try { bytes = await readFile(join(this.options.dataDir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        if (bytes !== undefined) entries = await this.snapshots!.decode(JSON.parse(bytes));
+        // Includes historical inline migration and fresh-owner ancestry adoption.
+        const leases = await this.snapshots!.prepareEntries(entries);
+        try { this.entries = entries; this.loaded = true; }
+        finally { for (const lease of leases) lease.release(); }
+      } else this.loaded = true;
+    });
+    this.loadTask = task;
+    void task.catch(() => { if (this.loadTask === task) this.loadTask = undefined; });
+    return task;
   }
   private async persist(): Promise<void> {
     const dir = this.options.dataDir;
     if (!dir) return;
     this.journalFile ??= new DurableReplaceableFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), { fileMode: 0o600, directoryMode: 0o700 });
-    await this.journalFile.replace(JSON.stringify(await this.snapshots!.encode(this.entries)));
+    try {
+      await this.journalFile.replace(JSON.stringify(this.snapshots!.encodePrepared(this.entries)));
+      this.journalCertain = true;
+    } catch (error) { this.journalCertain = false; throw error; }
     try { await this.snapshots!.retireUnreferenced(this.entries); }
     catch (error) { this.options.warn(`Lifecycle snapshot cleanup deferred: ${String(error)}`); }
   }
 
-  async submit(input: ConfirmedNamedKaVmLifecycleInput): Promise<NamedKaVmLifecycleRepairOutcome> {
-    const admitted = await this.serial<{ outcome: NamedKaVmLifecycleRepairOutcome } | { key: string; entry: RepairEntry }>(async () => {
-      if (this.stopped) throw new Error('Named KA lifecycle repair owner is stopped');
-      await this.load();
+  submit(input: ConfirmedNamedKaVmLifecycleInput): Promise<NamedKaVmLifecycleRepairOutcome> {
+    if (this.stopped) return Promise.reject(new Error('Named KA lifecycle repair owner is stopped'));
+    let resolve!: (value: NamedKaVmLifecycleRepairOutcome) => void, reject!: (reason: unknown) => void;
+    const task = new Promise<NamedKaVmLifecycleRepairOutcome>((onSuccess, onFailure) => { resolve = onSuccess; reject = onFailure; });
+    // Own the whole submission before input getters or filesystem callbacks can stop us.
+    this.inFlight.add(task);
+    void task.finally(() => this.inFlight.delete(task)).catch(() => {});
+    try {
       const stored = normalizeLifecycleRepairInput(input);
-      const key = lifecycleRepairKey(stored);
-      const previous = this.entries.get(key);
-      const evidence = reconcileLifecycleRepairEvidence(previous, stored);
-      if (evidence.status === 'superseded') return { outcome: 'superseded' as const };
-      const entry: RepairEntry = evidence.status === 'unchanged' && previous !== undefined ? previous
-        : { input: evidence.input, attempts: 0, nextAttemptAt: this.now() };
-      this.entries.set(key, entry);
-      // Write-ahead admission contains no external chain or graph-store work.
-      try { await this.persist(); }
-      catch (error) {
-        if (previous) this.entries.set(key, previous); else this.entries.delete(key);
-        throw error;
-      }
-      return { key, entry };
+      void this.submitPrepared(stored).then(resolve, reject);
+    } catch (error) { reject(error); }
+    return task;
+  }
+
+  private async cleanupUnusedPreparation(): Promise<void> {
+    await this.serial(async () => {
+      if (!this.journalCertain || !this.snapshots) return;
+      try { await this.snapshots.retireUnreferenced(this.entries); }
+      catch (error) { this.options.warn(`Lifecycle snapshot cleanup deferred: ${String(error)}`); }
     });
-    if ('outcome' in admitted) return admitted.outcome;
+  }
+
+  private async submitPrepared(stored: ValidatedLifecycleRepairCommand): Promise<NamedKaVmLifecycleRepairOutcome> {
+    await this.load();
+    const key = lifecycleRepairKey(stored);
+    // Reject stale/conflicting evidence before preparing an unnecessary immutable file.
+    const selected = await this.serial(async () => {
+      const evidence = reconcileLifecycleRepairEvidence(this.entries.get(key), stored);
+      return evidence.status === 'superseded' ? undefined : evidence.input;
+    });
+    if (!selected) return 'superseded';
+    let lease: Awaited<ReturnType<NamedKaVmLifecycleSnapshots['prepare']>> | undefined;
+    let admitted: { outcome: NamedKaVmLifecycleRepairOutcome } | { key: string; entry: RepairEntry };
+    try {
+      lease = await this.snapshots?.prepare(selected.materialization);
+      admitted = await this.serial(async () => {
+        // Already accepted work may persist its obligation during shutdown; execute
+        // will leave it pending while dependencies are stopped. New input is fenced above.
+        const previous = this.entries.get(key), evidence = reconcileLifecycleRepairEvidence(previous, stored);
+        if (evidence.status === 'superseded') return { outcome: 'superseded' as const };
+        const entry: RepairEntry = evidence.status === 'unchanged' && previous !== undefined ? previous
+          : { input: evidence.input, attempts: 0, nextAttemptAt: this.now() };
+        this.entries.set(key, entry);
+        try { await this.persist(); }
+        catch (error) {
+          if (previous) this.entries.set(key, previous); else this.entries.delete(key);
+          throw error;
+        }
+        return { key, entry };
+      });
+    } catch (error) {
+      lease?.release(); await this.cleanupUnusedPreparation(); throw error;
+    }
+    lease?.release();
+    if ('outcome' in admitted) { await this.cleanupUnusedPreparation(); return admitted.outcome; }
+    if (admitted.entry.input.materialization !== selected.materialization) await this.cleanupUnusedPreparation();
     return this.execute(admitted.key, admitted.entry);
   }
 
@@ -159,9 +208,10 @@ export class NamedKaVmLifecycleRepair {
     return pass;
   }
   private async runDuePass(signal?: AbortSignal): Promise<void> {
+    if (this.stopped || signal?.aborted) return;
+    await this.load();
     const due = await this.serial(async () => {
       if (this.stopped) return [];
-      await this.load();
       return [...this.entries].filter(([, entry]) => entry.retention !== 'historical-unbound' && !entry.rejected && entry.nextAttemptAt <= this.now())
         .sort((a, b) => a[1].nextAttemptAt - b[1].nextAttemptAt).slice(0, 10);
     });
