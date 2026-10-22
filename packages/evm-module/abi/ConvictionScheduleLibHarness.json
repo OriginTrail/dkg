@@ -1,0 +1,177 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "timeRemaining",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epochLength",
+        "type": "uint256"
+      }
+    ],
+    "name": "InvalidTimeRemaining",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint8",
+        "name": "bits",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint256",
+        "name": "value",
+        "type": "uint256"
+      }
+    ],
+    "name": "SafeCastOverflowedUintDowncast",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "lock",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "length",
+        "type": "uint256"
+      }
+    ],
+    "name": "WindowAmountsLengthMismatch",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroLock",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "anchorEpoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "lock",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epochLength",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "timeRemaining",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint96[]",
+        "name": "windowAmounts",
+        "type": "uint96[]"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "emissionAt",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "pure",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "anchorEpoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "lock",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epochLength",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "timeRemaining",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint96[]",
+        "name": "windowAmounts",
+        "type": "uint96[]"
+      },
+      {
+        "internalType": "uint256",
+        "name": "fromEpoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "toEpoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "emissionRange",
+    "outputs": [
+      {
+        "internalType": "uint96[]",
+        "name": "amounts",
+        "type": "uint96[]"
+      }
+    ],
+    "stateMutability": "pure",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "anchorEpoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "lock",
+        "type": "uint256"
+      }
+    ],
+    "name": "span",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "firstEpoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "lastEpoch",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "pure",
+    "type": "function"
+  }
+]
