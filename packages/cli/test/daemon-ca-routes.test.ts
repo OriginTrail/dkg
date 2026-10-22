@@ -272,6 +272,9 @@ describe('the status of each refusal', () => {
       expect((await call(agent, method, path, body)).status, `${method} ${path}`).toBe(400);
     }
     for (const fn of Object.values(agent)) if (vi.isMockFunction(fn)) expect(fn).not.toHaveBeenCalled();
+    // A body over the small-body limit is answered as every daemon route answers it.
+    const oversized = await call(agent, 'POST', '/api/ca/42/periods', { ...PLAN, planDigest: 'x'.repeat(300 * 1024) });
+    expect(oversized.status).toBe(413);
   });
 });
 

@@ -31,9 +31,11 @@ import {
   type TxResult,
 } from '@origintrail-official/dkg-chain';
 import {
+  isPayloadTooLargeError,
   jsonResponse,
   readBody,
   respondIfChainRpcTransportError,
+  respondWithDaemonError,
   safeDecodeURIComponent,
   sanitizeRpcMessage,
   SMALL_BODY_BYTES,
@@ -122,6 +124,7 @@ function respondCaError(res: ServerResponse, err: unknown, op: string, accountId
   const where = accountId === undefined ? {} : { accountId };
   if (err instanceof CaRefusal) return jsonResponse(res, err.status, err.body);
   if (err instanceof CaBadRequest) return jsonResponse(res, 400, { error: err.message, ...where, ...err.extra });
+  if (isPayloadTooLargeError(err)) return respondWithDaemonError(res, err);
   const msg = err instanceof Error ? err.message : String(err);
   if (/No blockchain configured/i.test(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
   if (isConvictionServiceRevertError(err)) {
