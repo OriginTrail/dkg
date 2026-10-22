@@ -16,17 +16,10 @@
  * it through the Hub (Hub.forwardCall) before it creates the account.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createServer, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { ethers, Wallet } from 'ethers';
-import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { EVMChainAdapter, connectRemoteSigners, type RemoteSigners } from '@origintrail-official/dkg-chain';
-import { handleCaRoutes } from '../src/daemon/routes/ca.js';
-import { jsonResponse } from '../src/daemon/http-utils.js';
-import type { RequestContext } from '../src/daemon/routes/context.js';
-import { ApiClient } from '../src/api-client.js';
 import type { CaTermsWire } from '../src/ca-client.js';
-import { requestAuthentication } from './_helpers/request-authentication.js';
+import { ensureExactScheduleFrom, serveCaNode, stopCaNode, type CaNode as Node } from './_helpers/ca-hardhat-node.js';
 import {
   createProvider,
   getSharedContext,
@@ -41,13 +34,6 @@ const PAYER_TOKEN = 'conviction-payer-credential-4e5f6a7b';
 const REFUSING_TOKEN = 'conviction-refusing-credential-8c9d0e1f';
 const DAY = 86_400;
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
-
-interface Node {
-  agent: DKGAgent;
-  chain: EVMChainAdapter;
-  client: ApiClient;
-  server: Server;
-}
 
 const owner = new Wallet(HARDHAT_KEYS.EXTRA1);
 const localBuyer = new Wallet(HARDHAT_KEYS.EXTRA2);
@@ -69,23 +55,7 @@ let d: Node;
 
 /** Serve one node's /api/ca routes on a loopback port, as the daemon dispatches them. */
 async function serve(name: string, chain: EVMChainAdapter, primaryWallet: string): Promise<Node> {
-  const agent = await DKGAgent.create({
-    name, listenHost: '127.0.0.1', listenPort: 0, nodeRole: 'edge', chainAdapter: chain,
-    rfc64CatalogActivation: { enabled: false }, syncOnConnectEnabled: false,
-  });
-  const server = createServer((req, res) => {
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-    const ctx = {
-      req, res, agent, url, path: url.pathname,
-      authentication: requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
-      opWallets: { wallets: [{ address: primaryWallet }] },
-    } as unknown as RequestContext;
-    handleCaRoutes(ctx)
-      .then(() => { if (!res.writableEnded) jsonResponse(res, 404, { error: 'Not found' }); })
-      .catch((err: unknown) => jsonResponse(res, 500, { error: String(err) }));
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const node = { agent, chain, server, client: new ApiClient(`http://127.0.0.1:${(server.address() as AddressInfo).port}`) };
+  const node = await serveCaNode(name, chain, primaryWallet);
   nodes.push(node);
   return node;
 }
@@ -121,24 +91,11 @@ describe('/api/ca against the contracts on Hardhat', () => {
     snapshotId = await takeSnapshot();
     const provider = createProvider();
     const { rpcUrl, hubAddress } = getSharedContext();
-    const deployer = new Wallet(HARDHAT_KEYS.DEPLOYER, provider);
-    const hub = new ethers.Contract(hubAddress, [
-      'function getContractAddress(string) view returns (address)',
-      'function forwardCall(address target, bytes data) returns (bytes)',
-    ], deployer);
+    const hub = new ethers.Contract(hubAddress, ['function getContractAddress(string) view returns (address)'], provider);
     tokenAddress = await hub.getContractAddress('Token');
 
     // The schedule cut-over, set once through the Hub, at or before the chain's time.
-    const cssAddress = await hub.getContractAddress('ConvictionServiceStorage');
-    const css = new ethers.Contract(cssAddress, [
-      'function exactScheduleFrom() view returns (uint40)',
-      'function setExactScheduleFrom(uint40 timestamp)',
-    ], provider);
-    chainNow = (await provider.getBlock('latest'))!.timestamp;
-    if (BigInt(await css.exactScheduleFrom()) === 0n) {
-      await (await hub.forwardCall(cssAddress, css.interface.encodeFunctionData('setExactScheduleFrom', [chainNow]))).wait();
-    }
-    expect(BigInt(await css.exactScheduleFrom())).toBeGreaterThan(0n);
+    chainNow = await ensureExactScheduleFrom();
 
     await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, owner.address, ethers.parseEther('100000'));
     await sendEth(remoteBuyer.address, '10');
@@ -169,11 +126,7 @@ describe('/api/ca against the contracts on Hardhat', () => {
   }, 180_000);
 
   afterAll(async () => {
-    for (const node of nodes) {
-      await new Promise<void>((resolve) => node.server.close(() => resolve()));
-      await node.agent.stop().catch(() => {});
-      node.chain.destroy();
-    }
+    for (const node of nodes) await stopCaNode(node);
     remote?.destroy();
     refusing?.destroy();
     await fake?.close();
