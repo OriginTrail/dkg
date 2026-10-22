@@ -1617,7 +1617,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       expect(await CSS.accountSubscriptionCount(accountId)).to.equal(2n);
     });
 
-    it('the storage alone would take a record whose periodStart is 0, which reads as absent, so the logic never writes one', async () => {
+    it('the storage itself refuses a record whose periodStart is 0, which would read as absent, from any Hub writer', async () => {
       // A Hub owner write, which the storage admits as it admits any Hub contract.
       const id = ethers.id('ghost');
       const record = {
@@ -1638,11 +1638,23 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
         drawnFromTopUp: 0n,
       };
       const buckets = [bucket(0, CLASS_INFERENCE, TRAC)];
-      await CSS.createSubscription(id, record, buckets);
+      await expect(CSS.createSubscription(id, record, buckets))
+        .to.be.revertedWithCustomError(CSS, 'ZeroPeriodStart')
+        .withArgs(id);
       expect(await CSS.subscriptionExists(id)).to.equal(false);
-      await CSS.createSubscription(id, record, buckets);
-      expect(await CSS.getBuckets(id)).to.have.length(2);
-      expect(await CSS.accountSubscriptionCount(1n)).to.equal(2n);
+      expect(await CSS.getBuckets(id)).to.have.length(0);
+      expect(await CSS.accountSubscriptionCount(1n)).to.equal(0n);
+
+      // With a start, the same write records the period once; a second write
+      // under the id is refused, so its buckets are never appended twice.
+      const started = { ...record, periodStart: 1_700_000_000n, periodEnd: 1_700_000_000n + DAY };
+      await CSS.createSubscription(id, started, buckets);
+      expect(await CSS.subscriptionExists(id)).to.equal(true);
+      await expect(CSS.createSubscription(id, started, buckets))
+        .to.be.revertedWithCustomError(CSS, 'SubscriptionExists')
+        .withArgs(id);
+      expect(await CSS.getBuckets(id)).to.have.length(1);
+      expect(await CSS.accountSubscriptionCount(1n)).to.equal(1n);
     });
   });
 
