@@ -3,10 +3,11 @@
 /**
  * The RPC usage consumer labels of Conviction Account service spending
  * (OT-RFC-27): the Hub lookups and the reads of
- * `evm-adapter-conviction-service.ts`. `rpc-usage.ts` adds them to the closed
+ * `evm-adapter-conviction-service.ts` and
+ * `evm-adapter-conviction-service-assignees.ts`. `rpc-usage.ts` adds them to the closed
  * snapshot vocabulary (version 4), so the retained diagnostic reports each by
  * name instead of as `other`. A label the adapter reads under must be listed
- * here; `conviction-service.unit.test.ts` checks the adapter's source.
+ * here; `conviction-service.unit.test.ts` checks the adapter's sources.
  */
 export const CONVICTION_SERVICE_RPC_USAGE_CONSUMERS = [
   // Hub lookups, resolved on every call.
@@ -48,4 +49,8 @@ export const CONVICTION_SERVICE_RPC_USAGE_CONSUMERS = [
   'conviction service block search head',
   'conviction service block search',
   'conviction service PeriodFunded log',
+
+  // Finding the accounts that assigned a buyer key, from its ServiceAssigned
+  // logs (evm-adapter-conviction-service-assignees.ts).
+  'conviction service ServiceAssigned logs',
 ] as const;

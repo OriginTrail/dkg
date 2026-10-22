@@ -254,6 +254,14 @@ export interface ConvictionServiceAdapter {
 
   /** Every assignee ever assigned on the account, in assignment order, with its assignment. */
   listConvictionServiceAssignments?(accountId: bigint): Promise<Array<{ assignee: string } & CaAssignment>>;
+  /**
+   * Every account that has assigned `assignee`, in ascending id order, with its
+   * stored assignment of `assignee`, which may since have been revoked or have
+   * expired. The accounts are found from the `ServiceAssigned` logs with that
+   * assignee topic, from the `ServiceSubscriptions` deployment on, and each is
+   * then read from storage.
+   */
+  listConvictionServiceAccountsByAssignee?(assignee: string): Promise<Array<{ accountId: bigint; assignee: string } & CaAssignment>>;
   /** Labels per epoch, `fromEpoch` to `toEpoch` inclusive, at most `CA_LABELS_MAX_EPOCHS` epochs. */
   getConvictionServiceLabels?(accountId: bigint, fromEpoch: number, toEpoch: number): Promise<CaEpochLabel[]>;
 

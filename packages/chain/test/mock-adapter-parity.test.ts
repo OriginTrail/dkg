@@ -307,6 +307,10 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'nextAssignmentNonceOf',
   'existingServicePeriodFunding',
   'blockNumberAtTimestamp',
+  // The ServiceAssigned log scan behind listConvictionServiceAccountsByAssignee
+  // (evm-adapter-conviction-service-assignees.ts); the mock reads its model.
+  'scanServiceAssignedAccounts',
+  'scanServiceAssignedLogs',
   // Identity read-cache helpers are EVM-only: the mock's identity registry is
   // in-memory and its writes are already immediately visible.
   'invalidateIdentityStorageBinding',

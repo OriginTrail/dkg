@@ -398,6 +398,16 @@ export abstract class MockConvictionServiceMethods implements ConvictionServiceA
     return ca ? ca.assignees.map((a) => this.mockServiceAssignmentOf(ca, a)) : [];
   }
 
+  async listConvictionServiceAccountsByAssignee(
+    assignee: string,
+  ): Promise<Array<{ accountId: bigint; assignee: string } & CaAssignment>> {
+    const who = requireAddress(assignee, 'assignee');
+    const accounts = [...this.mockServiceAvailable().accounts].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return accounts
+      .filter(([, ca]) => ca.assignments.has(who.toLowerCase()))
+      .map(([accountId, ca]) => ({ accountId, ...this.mockServiceAssignmentOf(ca, who) }));
+  }
+
   async getConvictionServiceLabels(accountId: bigint, fromEpoch: number, toEpoch: number): Promise<CaEpochLabel[]> {
     requireLabelRange(fromEpoch, toEpoch);
     requireAccountId(accountId);

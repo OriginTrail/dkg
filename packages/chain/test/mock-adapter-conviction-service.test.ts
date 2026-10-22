@@ -120,6 +120,7 @@ describe('contracts and availability', () => {
       () => mock.setConvictionServiceSpending(accountId, true),
       () => mock.fundServicePeriodFromConviction(request()),
       () => mock.listServicePeriods(accountId, 0, 10),
+      () => mock.listConvictionServiceAccountsByAssignee(BUYER.address),
     ]) {
       await expect(call()).rejects.toBeInstanceOf(ConvictionServiceUnavailableError);
     }
@@ -273,6 +274,31 @@ describe('revoke, caps and nonce', () => {
     await reverts(mock.updateConvictionServiceCaps(foreign, BUYER.address, terms), 'NotAccountOwner', { accountId: foreign, caller });
     await reverts(mock.advanceConvictionServiceNonce(foreign), 'NotAccountOwner', { accountId: foreign, caller });
     expect((await mock.advanceConvictionServiceNonce(accountId)).nextNonce).toBe(1n);
+  });
+});
+
+describe('the accounts that assigned a buyer key', () => {
+  it('lists every account that assigned it, ascending, with its assignment there, revoked ones too', async () => {
+    const { accountId: second } = await mock.createPublishingConvictionAccount(COMMITTED);
+    await mock.setConvictionServiceSpending(second, true);
+    const later = termsFor({ accountId: second, maxTotalCost: 500n * TRAC });
+    await mock.assignConvictionServiceBuyer(later, { assignee: (await mock.signConvictionServiceConsent(later)).signature }, 'owner');
+    await assigned();
+    await mock.fundServicePeriodFromConviction(request());
+    await mock.revokeConvictionServiceBuyer(second, BUYER.address);
+
+    const found = await mock.listConvictionServiceAccountsByAssignee(BUYER.address.toLowerCase());
+    expect(found.map((a) => [a.accountId, a.assignee, a.active, a.maxTotalCost])).toEqual([
+      [accountId, BUYER.address, true, 1000n * TRAC],
+      [second, BUYER.address, false, 500n * TRAC],
+    ]);
+    expect(found[0]!.usage).toMatchObject({ totalCost: 10n * TRAC, periods: 1 });
+    expect(found[1]!.revokedAt).toBe(T0);
+    expect(await mock.listConvictionServiceAccountsByAssignee(OTHER.address)).toEqual([]);
+  });
+
+  it('refuses a malformed assignee', async () => {
+    await expect(mock.listConvictionServiceAccountsByAssignee('0x1234')).rejects.toBeInstanceOf(ConvictionServiceInputError);
   });
 });
 

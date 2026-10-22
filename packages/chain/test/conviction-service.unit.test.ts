@@ -537,12 +537,16 @@ describe('error decoding', () => {
 });
 
 describe('RPC usage labels', () => {
-  it('reports every read of the mixin by name in the retained RPC usage vocabulary', () => {
-    const source = readFileSync(join(import.meta.dirname, '../src/evm-adapter-conviction-service.ts'), 'utf8');
+  it('reports every read of the mixins by name in the retained RPC usage vocabulary', () => {
+    const source = ['evm-adapter-conviction-service.ts', 'evm-adapter-conviction-service-assignees.ts']
+      .map((file) => readFileSync(join(import.meta.dirname, '../src', file), 'utf8'))
+      .join('\n');
     const labels = new Set<string>();
     for (const m of source.matchAll(/\breadContract(?:<[^>]*>)?\(\s*[^,]+,\s*'([^']+)'/g)) labels.add(m[1]!);
     for (const m of source.matchAll(/\bread(?:Tip)?Provider(?:RetryingNull)?\(\s*'([^']+)'/g)) labels.add(m[1]!);
     for (const m of source.matchAll(/\bresolveContract\(\s*'(\w+)'/g)) labels.add(`Hub.getContractAddress(${m[1]})`);
+    // The eth_getLogs pages of a scan run under a consumer constant.
+    for (const m of source.matchAll(/\b\w+_RPC_USAGE_CONSUMER = '([^']+)'/g)) labels.add(m[1]!);
     expect(labels.size).toBeGreaterThan(25);
     for (const label of labels) {
       const normalized = normalizeRpcUsageConsumer(label);
@@ -639,5 +643,102 @@ describe('reads', () => {
     expect(page.periods.map((p) => [p.subscriptionId, p.cost, p.buckets])).toEqual([[id, 3n * TRAC, REQUEST.buckets]]);
     h.reads.set(`${CSS}:getSubscription`, () => Array.from({ length: 15 }, () => 0n));
     expect(await h.adapter.getServicePeriod(bytes32('99'))).toBeNull();
+  });
+});
+
+describe('the accounts that assigned a buyer key', () => {
+  const ASSIGNMENT = [25n, 25n, 0n, 100n, 1000n, 2_678_400n, 1_760_000_100n, 1_795_996_800n, 0n, 3n];
+  const NEVER_ASSIGNED = [0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n];
+
+  /** A `ServiceAssigned` log of `accountId` assigning BUYER, in `blockNumber`. */
+  function assignedLog(accountId: bigint, blockNumber: number) {
+    const { topics, data } = SS_IFACE.encodeEventLog('ServiceAssigned', [
+      accountId, BUYER, bytes32('d1'), 25n, 25n, 0n, 100n, 1000n, 2_678_400n, 1_795_996_800n, 3n,
+    ]);
+    return { address: SS, topics, data, blockNumber };
+  }
+
+  /** The harness with the deployment block and head given, and `eth_getLogs` answered from `logs`. */
+  function scanHarness(chain: { fromBlock: number; head: number; logs: Array<ReturnType<typeof assignedLog>> }) {
+    const h = harness();
+    const a = h.adapter as any;
+    const provider = { name: 'rpc' };
+    const pages: Array<{ lo: number; hi: number; consumer: string; topics: unknown }> = [];
+    a.resolveContractDeployBlock = async (address: string, _label: string, contractLabel: string) => {
+      expect([address, contractLabel]).toEqual([SS, 'ServiceSubscriptions']);
+      return { fromBlock: chain.fromBlock, head: chain.head, scanProviders: [{ provider, backendHead: chain.head }] };
+    };
+    a.queryEventLogsPage = async (
+      contract: Contract, filter: { getTopicFilter(): Promise<unknown> }, lo: number, hi: number,
+      _providers: unknown, _connected: unknown, _label: string, _preferred: unknown, consumer: string,
+    ) => {
+      expect(await contract.getAddress()).toBe(SS);
+      pages.push({ lo, hi, consumer, topics: await filter.getTopicFilter() });
+      return { logs: chain.logs.filter((log) => log.blockNumber >= lo && log.blockNumber <= hi), provider };
+    };
+    h.reads.set(`${CSS}:getAssignment`, (id: bigint, who: string) => {
+      expect(who).toBe(BUYER);
+      return id === 9n ? NEVER_ASSIGNED : ASSIGNMENT;
+    });
+    h.reads.set(`${CSS}:getUsage`, () => [3n, 3n, 3n, 1n]);
+    h.reads.set(`${CSS}:isAssignmentActive`, (id: bigint) => id !== 7n);
+    return { ...h, pages };
+  }
+
+  it('scans ServiceAssigned by the assignee topic from the deployment block, and reads each account from storage', async () => {
+    const h = scanHarness({
+      fromBlock: 1_000,
+      head: 25_500,
+      logs: [assignedLog(42n, 1_200), assignedLog(7n, 15_000), assignedLog(42n, 25_000), assignedLog(9n, 25_400)],
+    });
+    const found = await h.adapter.listConvictionServiceAccountsByAssignee(BUYER.toLowerCase());
+    // Ascending, each once; account 9 holds no stored assignment (its log was dropped by a reorg).
+    expect(found).toEqual([7n, 42n].map((accountId) => ({
+      accountId, assignee: BUYER, maxCostPerPeriod: 25n, maxInferenceCostPerPeriod: 25n, maxQueryCostPerPeriod: 0n,
+      maxCostPerWindow: 100n, maxTotalCost: 1000n, maxPeriodSeconds: 2_678_400, assignedAt: 1_760_000_100,
+      expiresAt: 1_795_996_800, revokedAt: 0, nonce: 3n, active: accountId !== 7n,
+      usage: { totalCost: 3n, windowCost: 3n, window: 3, periods: 1 },
+    })));
+    expect(h.pages.map((p) => [p.lo, p.hi])).toEqual([[1_000, 10_999], [11_000, 20_999], [21_000, 25_500]]);
+    const assigneeTopic = ethers.zeroPadValue(BUYER.toLowerCase(), 32);
+    for (const page of h.pages) {
+      expect(page.consumer).toBe('conviction service ServiceAssigned logs');
+      expect(page.topics).toEqual([SS_IFACE.getEvent('ServiceAssigned')!.topicHash, null, assigneeTopic]);
+    }
+  });
+
+  it('rescans only the blocks after the last scan, from a reorg margin back, and keeps what it found', async () => {
+    const chain = { fromBlock: 1_000, head: 5_000, logs: [assignedLog(42n, 1_200)] };
+    const h = scanHarness(chain);
+    expect((await h.adapter.listConvictionServiceAccountsByAssignee(BUYER)).map((e) => e.accountId)).toEqual([42n]);
+    chain.head = 8_000;
+    chain.logs.push(assignedLog(7n, 7_000));
+    expect((await h.adapter.listConvictionServiceAccountsByAssignee(BUYER)).map((e) => e.accountId)).toEqual([7n, 42n]);
+    expect(h.pages.map((p) => [p.lo, p.hi])).toEqual([[1_000, 5_000], [4_951, 8_000]]);
+  });
+
+  it('shares one pass between concurrent calls for one assignee', async () => {
+    const h = scanHarness({ fromBlock: 0, head: 100, logs: [assignedLog(42n, 50)] });
+    const [first, second] = await Promise.all([
+      h.adapter.listConvictionServiceAccountsByAssignee(BUYER),
+      h.adapter.listConvictionServiceAccountsByAssignee(BUYER),
+    ]);
+    expect(first).toEqual(second);
+    expect(h.pages).toHaveLength(1);
+  });
+
+  it('refuses a range beyond its page budget before reading any log, saying why', async () => {
+    const h = scanHarness({ fromBlock: 0, head: 30_000_000, logs: [] });
+    await expect(h.adapter.listConvictionServiceAccountsByAssignee(BUYER))
+      .rejects.toThrow(/would read blocks \[0, 30000000\], 3001 pages .*deployment block .*archive RPC/s);
+    expect(h.pages).toHaveLength(0);
+  });
+
+  it('refuses a malformed assignee, and answers a Hub without the service contracts as unavailable', async () => {
+    const h = scanHarness({ fromBlock: 0, head: 10, logs: [] });
+    await expect(h.adapter.listConvictionServiceAccountsByAssignee('0x1234')).rejects.toBeInstanceOf(ConvictionServiceInputError);
+    h.missing.add('ServiceSubscriptions');
+    await expect(h.adapter.listConvictionServiceAccountsByAssignee(BUYER)).rejects.toBeInstanceOf(ConvictionServiceUnavailableError);
+    expect(h.pages).toHaveLength(0);
   });
 });

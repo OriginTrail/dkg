@@ -517,7 +517,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
   it('retains only the frozen code-owned snapshot consumer vocabulary', () => {
     expect(RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION).toBe(4);
     expect(Object.isFrozen(RPC_USAGE_SNAPSHOT_CONSUMERS)).toBe(true);
-    expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toHaveLength(209);
+    expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toHaveLength(210);
     expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toEqual(
       [...new Set(RPC_USAGE_SNAPSHOT_CONSUMERS)].sort(),
     );

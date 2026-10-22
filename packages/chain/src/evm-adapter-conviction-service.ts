@@ -164,7 +164,8 @@ export function servicePeriodOf(subscriptionId: string, raw: ArrayLike<unknown>,
   };
 }
 
-function assignmentOf(
+/** `ConvictionServiceStorage.getAssignment` and `getUsage` as an assignment. */
+export function assignmentOf(
   assignee: string,
   a: ArrayLike<unknown>,
   u: ArrayLike<unknown>,
@@ -217,7 +218,7 @@ function windowAllowanceOf(raw: ArrayLike<unknown>, account: ConvictionServiceAc
 }
 
 /** Run `fn` over `items` with at most `limit` in flight; results keep the order of `items`. */
-async function mapLimited<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+export async function mapLimited<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const out: R[] = [];
   let next = 0;
   const worker = async (): Promise<void> => {
@@ -230,7 +231,7 @@ async function mapLimited<T, R>(items: readonly T[], limit: number, fn: (item: T
   return out;
 }
 
-const READ_CONCURRENCY = 4;
+export const READ_CONCURRENCY = 4;
 
 export class ConvictionServiceMethods extends EVMChainAdapterBase {
   async getConvictionServiceContracts(): Promise<CaContracts | null> {
