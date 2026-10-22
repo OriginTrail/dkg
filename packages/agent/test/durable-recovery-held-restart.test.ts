@@ -16,7 +16,12 @@ import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/che
 import { createGraphScopedDurableManifestPlan } from '../src/sync/durable-integrity.js';
 import { createUalOnlyExactAssetSelection } from '../src/sync/exact-assets.js';
 import { DurableRecoveryRunner, type DurableRecoveryRunnerDependencies } from '../src/sync/durable-recovery-runner.js';
-import { heldGraphScopedAssetsReader, readHeldGraphScopedAssets } from '../src/sync/requester/durable-data-holdings.js';
+import { classifyDurableProgress } from '../src/sync/durable-progress.js';
+import {
+  currentHeldGraphScopedAssetsReader,
+  heldGraphScopedAssetsReader,
+  readHeldGraphScopedAssets,
+} from '../src/sync/requester/durable-data-holdings.js';
 import {
   runDurableSync,
   type DurableMetaContinuation,
@@ -30,6 +35,7 @@ import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 
 const CG = 'held-restart-cg';
 const PEER = '12D3KooWHeldRestartPeer';
+const SECOND_PEER = '12D3KooWHeldRestartPeerTwo';
 const ctx = { operationId: 'held-restart', operationName: 'sync' } as OperationContext;
 const stores: OxigraphStore[] = [];
 
@@ -42,6 +48,8 @@ interface AssetFixture {
   readonly graph: string;
   readonly payload: Quad[];
   readonly meta: Quad[];
+  readonly version: string;
+  readonly rootHex: string;
 }
 
 function asset(kaNumber: number, version = '1'): AssetFixture {
@@ -53,10 +61,11 @@ function asset(kaNumber: number, version = '1'): AssetFixture {
     object: `"v${version}-${index}"`,
     graph,
   }));
+  const merkleRoot = computeFlatKCRootV10(payload, []);
   const meta = generateGraphKnowledgeAssetMetadata({
     ual,
     contextGraphId: CG,
-    merkleRoot: computeFlatKCRootV10(payload, []),
+    merkleRoot,
     publisherPeerId: 'publisher-peer',
     accessPolicy: 'public',
     timestamp: new Date(0),
@@ -65,7 +74,7 @@ function asset(kaNumber: number, version = '1'): AssetFixture {
     privateTripleCount: 0,
     assertionGraph: graph,
   }, { status: 'tentative' });
-  return { ual, graph, payload, meta };
+  return { ual, graph, payload, meta, version, rootHex: Buffer.from(merkleRoot).toString('hex') };
 }
 
 /**
@@ -80,6 +89,7 @@ function servingPeer(initial: AssetFixture[]) {
   return {
     served,
     publish(next: AssetFixture[]) { assets = next; },
+    current: () => assets,
     buildSyncRequest: async (
       _cg: string, offset: number, limit: number, _swm: boolean, _peer: string, phase?: string,
       _snapshotRef?: string, _sinceBatchId?: string, _session?: string, _recovery?: boolean, assetUals?: string[],
@@ -134,13 +144,35 @@ function processBatch(
   };
 }
 
-/** One node: its triple store survives a restart; checkpoints and the owner's memory need not. */
-function node(peer: ReturnType<typeof servingPeer>, options: { holdingsUnreadable?: boolean } = {}) {
+type ServingPeer = ReturnType<typeof servingPeer>;
+
+/**
+ * One node: its triple store survives a restart; checkpoints and the owner's
+ * memory need not. Its chain is the generation the first peer serves unless a
+ * test moves it.
+ */
+function node(
+  serving: ServingPeer | Record<string, ServingPeer>,
+  options: { holdingsUnreadable?: boolean; chain?: () => readonly AssetFixture[] } = {},
+) {
+  const peers: Record<string, ServingPeer> = 'send' in serving ? { [PEER]: serving as ServingPeer } : serving;
+  const chain = options.chain ?? (() => Object.values(peers)[0]!.current());
   const store = new OxigraphStore();
   stores.push(store);
   const writes: string[] = [];
   const info: string[] = [];
   let holdingsUnreadable = options.holdingsUnreadable === true;
+  const readHeld = currentHeldGraphScopedAssetsReader({
+    readHeld: async (request) => {
+      if (holdingsUnreadable) throw new Error('store queue wait timeout');
+      return heldGraphScopedAssetsReader(store)(request);
+    },
+    readChainState: async ({ ual }) => {
+      const onChain = chain().find((fixture) => fixture.ual === ual)!;
+      return { merkleRootHex: onChain.rootHex, assertionVersion: BigInt(onChain.version), bound: true };
+    },
+    budget: { createGraphScopedAuthenticationDeadline: () => Date.now() + 60_000 },
+  });
   const round = (
     checkpointStore: MemorySyncCheckpointStore,
     remotePeerId: string,
@@ -173,18 +205,15 @@ function node(peer: ReturnType<typeof servingPeer>, options: { holdingsUnreadabl
       returnAcceptedPrefixOnRetryableTransportFailure: request.returnAcceptedPrefixOnRetryableTransportFailure,
       requesterScope: request.requesterScope,
       assetUals: request.exactAssetUals,
-      buildSyncRequest: peer.buildSyncRequest,
-      send: peer.send,
-      parseAndFilter: peer.parseAndFilter,
+      buildSyncRequest: peers[request.remotePeerId]!.buildSyncRequest,
+      send: peers[request.remotePeerId]!.send,
+      parseAndFilter: peers[request.remotePeerId]!.parseAndFilter,
       logWarn: () => {},
       logInfo: () => {},
       logDebug: () => {},
     }),
     ...roundOptions,
-    readHeldGraphScopedAssets: async (request) => {
-      if (holdingsUnreadable) throw new Error('store queue wait timeout');
-      return heldGraphScopedAssetsReader(store)(request);
-    },
+    readHeldGraphScopedAssets: readHeld,
     processDurableBatchInWorker: processBatch,
     storeInsert: async ({ quads }) => { await store.insert(quads); },
     storeGraphScopedAsset: async ({ asset: verified }) => {
@@ -222,7 +251,7 @@ function node(peer: ReturnType<typeof servingPeer>, options: { holdingsUnreadabl
       resolvePreferredPeerId: async () => undefined,
       connectRequestedPeer: async () => {},
       primeConnections: async () => {},
-      liveConnectionPeerIds: () => [PEER],
+      liveConnectionPeerIds: () => Object.keys(peers),
       admitPeer: async () => true,
       isPrivateContextGraph: async () => false,
       orderPeerIds: (peerIds) => [...peerIds],
@@ -277,10 +306,55 @@ describe('a restarted Core and a graph it has already recovered', () => {
     expect(peer.served.dataRequests).toBe(0);
     expect(peer.served.dataRows).toBe(0);
     expect(core.writes).toEqual([]);
-    expect(second.result).toMatchObject({ fetchedDataTriples: 0, insertedDataTriples: 0, completedPhases: 2 });
+    expect(second.result).toMatchObject({
+      fetchedDataTriples: 0, insertedDataTriples: 0, completedPhases: 2, verifiedHeldAssets: 6,
+    });
+    // The held completion is readiness proof, as inserted data or a private-only response is.
+    expect(classifyDurableProgress(second.result, { complete: second.result.complete }).completedReadinessCleanly)
+      .toBe(true);
     expect(restarted.checkpointStore.get(getSyncCheckpointKey(PEER, CG, false, 'data')))
       .toMatchObject({ offset: rowsOf(generation()), terminal: true });
     expect(core.info).toContainEqual(expect.stringContaining('already held at this META generation'));
+  });
+
+  it('fetches an asset again when its rows were removed and its envelope kept', async () => {
+    const peer = servingPeer(generation());
+    const core = node(peer);
+    expect((await core.start().recover()).outcome).toBe('terminal');
+
+    // A removed sub-graph drops the rows and keeps the confirmed envelope.
+    const dropped = asset(2);
+    await core.store.dropGraph(dropped.graph);
+    peer.served.dataRows = 0;
+    core.writes.length = 0;
+    const recovered = await core.start().recover();
+
+    expect(recovered.outcome).toBe('terminal');
+    expect(peer.served.dataRows).toBe(dropped.payload.length);
+    expect(core.writes).toEqual([dropped.ual]);
+  });
+
+  it('recovers from a peer with the current version when the first peer is behind the chain', async () => {
+    const behind = servingPeer(generation());
+    const current = servingPeer(generation());
+    let onChain = generation();
+    const core = node({ [PEER]: behind, [SECOND_PEER]: current }, { chain: () => onChain });
+    expect((await core.start().recover()).outcome).toBe('terminal');
+
+    // Asset 3 is updated on chain; only the second peer serves the new version.
+    onChain = generation('2');
+    current.publish(generation('2'));
+    behind.served.dataRows = 0;
+    current.served.dataRows = 0;
+    core.writes.length = 0;
+    const recovered = await core.start().recover();
+
+    expect(recovered.outcome).toBe('terminal');
+    expect(recovered.peerId).toBe(SECOND_PEER);
+    expect(behind.served.dataRows).toBe(0);
+    expect(current.served.dataRows).toBe(asset(3, '2').payload.length);
+    expect(core.writes).toEqual([asset(3, '2').ual]);
+    expect(core.info).toContainEqual(expect.stringContaining('is behind the chain'));
   });
 
   it('transfers only the updated asset when one asset has a new version', async () => {

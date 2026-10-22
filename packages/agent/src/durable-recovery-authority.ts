@@ -1,9 +1,11 @@
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { RegisteredContextGraphAuthority } from './registered-context-graph-authority.js';
-import { authenticateDurableGraphScopedAsset } from './durable-recovery-authentication.js';
+import { authenticateDurableGraphScopedAsset,
+  readHeldGraphScopedAssetChainStateWithinDeadline } from './durable-recovery-authentication.js';
 import type { partitionVerifiedGraphScopedAssets } from './sync/requester/verified-asset-preparation.js';
 import type { VmRecoveryRegisteredPublicEvidence } from "./vm-recovery-pass-authority.js";
-import type { AuthenticatedGraphScopedAsset, VerifiedGraphScopedAsset } from './sync/requester/graph-scoped-materialization.js';
+import type { AuthenticatedGraphScopedAsset, GraphScopedAssetChainState,
+  VerifiedGraphScopedAsset } from './sync/requester/graph-scoped-materialization.js';
 
 /** One policy owns public transport admission and authentication of recovered assets.
  * Exchange policy retains VM-pass freshness/revocation; a snapshot job is pinned
@@ -15,6 +17,9 @@ export interface DurableRecoveryAuthority {
   isRegisteredPublic(contextGraphId: string, signal?: AbortSignal): boolean | Promise<boolean>;
   authenticate(asset: VerifiedGraphScopedAsset, deadline: number, signal?: AbortSignal):
     AuthenticatedGraphScopedAsset | Promise<AuthenticatedGraphScopedAsset>;
+  /** The chain views `authenticate` checks, read for a copy this node already holds. */
+  readHeldAssetChainState?(copy: { readonly ual: string; readonly contextGraphId: string }, deadline: number,
+    signal?: AbortSignal): Promise<GraphScopedAssetChainState>;
 }
 
 /** Public compatibility evidence; authentication strategies remain internal. */
@@ -64,6 +69,9 @@ export function createRecoveryAuthority(
         `Retrying graph-scoped durable authentication for ${asset.ual} `
         + `after transient chain verification failure (${attempt}/${maxAttempts}): `
         + `${error instanceof Error ? error.message : String(error)}`),
+    }),
+    readHeldAssetChainState: (copy, deadline, signal) => readHeldGraphScopedAssetChainStateWithinDeadline({
+      chain: dependencies.chain, copy, verifyContextGraphBinding, deadline, signal,
     }),
   };
 }

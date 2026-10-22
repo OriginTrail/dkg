@@ -21,6 +21,8 @@ import {
   describeDurableHoldingsPlan,
   planDurableDataFromHoldings,
   planDurableDataFromLocalHoldings,
+  currentHeldGraphScopedAssetsReader,
+  HeldGenerationNotCurrentError,
   readHeldGraphScopedAssets,
   settleDurableDataFromHoldings,
   settleHeldDurableData,
@@ -44,7 +46,10 @@ interface AssetFixture {
 }
 
 /** One graph-scoped asset as a peer serves it: its public rows and its META envelope. */
-function asset(kaNumber: number, options: { version?: string; rows?: number; value?: string } = {}): AssetFixture {
+function asset(
+  kaNumber: number,
+  options: { version?: string; rows?: number; value?: string; privateOnly?: boolean } = {},
+): AssetFixture {
   const version = options.version ?? '1';
   const ual = `did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ef/${kaNumber}`;
   const graph = knowledgeAssetLayerGraphUri(
@@ -52,7 +57,8 @@ function asset(kaNumber: number, options: { version?: string; rows?: number; val
     MemoryLayer.VerifiableMemory,
     createGraphKnowledgeAssetScope(ual, version),
   );
-  const payload = Array.from({ length: options.rows ?? 3 }, (_, index): Quad => ({
+  const privateRoot = options.privateOnly ? new Uint8Array(32).fill(0x66) : undefined;
+  const payload = Array.from({ length: options.privateOnly ? 0 : options.rows ?? 3 }, (_, index): Quad => ({
     subject: `urn:held:${kaNumber}:${index}`,
     predicate: 'urn:held:value',
     object: `"${options.value ?? 'v1'}-${index}"`,
@@ -61,13 +67,14 @@ function asset(kaNumber: number, options: { version?: string; rows?: number; val
   const meta = generateGraphKnowledgeAssetMetadata({
     ual,
     contextGraphId: CG,
-    merkleRoot: computeFlatKCRootV10(payload, []),
+    merkleRoot: computeFlatKCRootV10(payload, privateRoot ? [privateRoot] : []),
     publisherPeerId: 'publisher-peer',
     accessPolicy: 'public',
     timestamp: new Date(0),
     assertionVersion: version,
     publicTripleCount: payload.length,
-    privateTripleCount: 0,
+    privateTripleCount: privateRoot ? 1 : 0,
+    ...(privateRoot ? { privateMerkleRoot: privateRoot } : {}),
     assertionGraph: graph,
   }, { status: 'tentative' });
   return { ual, graph, payload, meta };
@@ -102,21 +109,50 @@ async function storeConfirmed(target: OxigraphStore, fixture: AssetFixture): Pro
 }
 
 describe('which assets of a verified generation this node holds', () => {
-  it('holds a confirmed copy at the same version and root, or at a newer version', async () => {
+  it('holds a confirmed copy of the same version and root whose rows are all stored', async () => {
     const local = store();
     const same = asset(1);
     const newerHere = asset(2, { version: '2', value: 'v2' });
     const otherRoot = asset(3, { value: 'local' });
     const tentative = asset(4);
+    const privateOnly = asset(6, { privateOnly: true });
     await storeConfirmed(local, same);
     await storeConfirmed(local, newerHere);
     await storeConfirmed(local, otherRoot);
+    await storeConfirmed(local, privateOnly);
     await local.insert([...tentative.payload, ...tentative.meta]);
 
-    const remote = manifestOf([same, asset(2), asset(3, { value: 'remote' }), tentative, asset(5)]);
+    const remote = manifestOf([same, asset(2), asset(3, { value: 'remote' }), tentative, asset(5), privateOnly]);
     const held = await readHeldGraphScopedAssets(local, { contextGraphId: CG, descriptors: remote.descriptors }, 2);
 
-    expect([...held].sort()).toEqual([same.ual, newerHere.ual].sort());
+    // A newer local version is not this peer's generation; a zero-public asset holds with no rows.
+    expect([...held].sort()).toEqual([same.ual, privateOnly.ual].sort());
+  });
+
+  it('does not hold a confirmed copy whose rows were removed', async () => {
+    const local = store();
+    const dropped = asset(1);
+    const thinned = asset(2);
+    const kept = asset(3);
+    for (const fixture of [dropped, thinned, kept]) await storeConfirmed(local, fixture);
+    // A removed sub-graph drops the rows and keeps the confirmed envelope.
+    await local.dropGraph(dropped.graph);
+    await local.deleteByPattern({ ...thinned.payload[0]! });
+
+    const { descriptors } = manifestOf([dropped, thinned, kept]);
+    expect(await readHeldGraphScopedAssets(local, { contextGraphId: CG, descriptors })).toEqual(new Set([kept.ual]));
+  });
+
+  it('fails a row count that does not return bindings', async () => {
+    const local = store();
+    await storeConfirmed(local, asset(1));
+    const counting = {
+      query: (sparql: string, options?: object) => (sparql.includes('COUNT(*)')
+        ? Promise.resolve({ type: 'quads', quads: [] })
+        : local.query(sparql, options)),
+    } as unknown as TripleStore;
+    await expect(readHeldGraphScopedAssets(counting, { contextGraphId: CG, descriptors: manifestOf([asset(1)]).descriptors }))
+      .rejects.toThrow('Held asset row COUNT expected a bindings result');
   });
 
   it('fails a store read that does not return complete bindings', async () => {
@@ -223,6 +259,15 @@ describe('planning a DATA phase from holdings', () => {
       signal: aborted.signal,
       logWarn,
     })).rejects.toThrow('node stopping');
+
+    // A held copy the chain does not confirm fails the round instead of falling back to a full pull.
+    await expect(planDurableDataFromLocalHoldings({
+      contextGraphId: CG,
+      manifest,
+      channel: {},
+      readHeld: async () => { throw new HeldGenerationNotCurrentError('behind the chain'); },
+      logWarn,
+    })).rejects.toBeInstanceOf(HeldGenerationNotCurrentError);
   });
 
   it('settles a held generation as a completed DATA phase at its terminal boundary', () => {
@@ -257,7 +302,8 @@ describe('planning a DATA phase from holdings', () => {
       terminal: true,
     });
     expect(settled?.responderSessionId).toBeUndefined();
-    expect(finalizeDurableSyncCompletion(accumulator)).toMatchObject({ resumedPhases: 1, completedPhases: 1 });
+    expect(finalizeDurableSyncCompletion(accumulator))
+      .toMatchObject({ resumedPhases: 1, completedPhases: 1, verifiedHeldAssets: 3 });
   });
 
   it('completes a held round and leaves a fetch-missing round to the owner', () => {
@@ -287,13 +333,98 @@ describe('planning a DATA phase from holdings', () => {
     const key = getSyncCheckpointKey('peer-settle', CG, false, 'data');
 
     const missing = settle({ kind: 'fetch-missing', held: 2, batches: [[{ ual: uals(manifest)[0]!, assertionVersion: '1' }]], rows: 3 });
-    expect(missing.result).toMatchObject({ complete: false, bytesReceived: 512, fetchedMetaTriples: 3, fetchedDataTriples: 0 });
+    expect(missing.result).toMatchObject({
+      complete: false, bytesReceived: 512, fetchedMetaTriples: 3, fetchedDataTriples: 0, verifiedHeldAssets: 0,
+    });
     expect(checkpoints.get(key)).toBeUndefined();
     expect(missing.line).toContain('leaving 1 asset(s)');
 
     const held = settle({ kind: 'held', assets: 3 });
-    expect(held.result).toMatchObject({ complete: true, resumedPhases: 1, completedPhases: 1, fetchedDataTriples: 0 });
+    expect(held.result).toMatchObject({
+      complete: true, resumedPhases: 1, completedPhases: 1, fetchedDataTriples: 0, verifiedHeldAssets: 3,
+    });
     expect(checkpoints.get(key)).toMatchObject({ offset: manifest.manifestRowCount, terminal: true });
     expect(held.line).toContain('skipping the DATA phase');
+  });
+});
+
+describe('holding a copy only while it is current on chain', () => {
+  type ChainState = { merkleRootHex: string; assertionVersion: bigint; bound: boolean };
+  const generation = () => manifestOf([asset(1), asset(2), asset(3)]);
+  const currentOf = (manifest: GraphScopedDurableManifestPlan) => new Map<string, ChainState>(
+    manifest.descriptors.map((descriptor) => [descriptor.ual, {
+      merkleRootHex: descriptor.claimedRootHex,
+      assertionVersion: BigInt(descriptor.assertionVersion),
+      bound: true,
+    }]),
+  );
+  function reader(chain: Map<string, ChainState>, held: readonly string[], reads: string[] = [], deadlines: number[] = []) {
+    return currentHeldGraphScopedAssetsReader({
+      readHeld: async () => new Set(held),
+      readChainState: async ({ ual }, deadline) => {
+        reads.push(ual);
+        deadlines.push(deadline);
+        const state = chain.get(ual);
+        if (!state) throw new Error('chain endpoint unavailable');
+        return state;
+      },
+      budget: { createGraphScopedAuthenticationDeadline: () => 42 },
+    })!;
+  }
+
+  it('keeps held copies the chain confirms, and reads only those', async () => {
+    const manifest = generation();
+    const held = [manifest.descriptors[0]!.ual, manifest.descriptors[2]!.ual];
+    const reads: string[] = [];
+    const deadlines: number[] = [];
+
+    expect(await reader(currentOf(manifest), held, reads, deadlines)({ contextGraphId: CG, descriptors: manifest.descriptors }))
+      .toEqual(new Set(held));
+    expect(reads.sort()).toEqual([...held].sort());
+    expect(deadlines).toEqual([42, 42]);
+  });
+
+  it('fails a peer generation whose held copy is behind the chain', async () => {
+    const manifest = generation();
+    const chain = currentOf(manifest);
+    const behind = manifest.descriptors[1]!;
+    const all = manifest.descriptors.map((descriptor) => descriptor.ual);
+    chain.set(behind.ual, { merkleRootHex: 'ab'.repeat(32), assertionVersion: 2n, bound: true });
+
+    await expect(reader(chain, all)({ contextGraphId: CG, descriptors: manifest.descriptors }))
+      .rejects.toThrow(`${behind.ual} is at version 2 on chain, 1 here and at the peer`);
+    // The same version with another root is not current either.
+    chain.set(behind.ual, { merkleRootHex: 'ab'.repeat(32), assertionVersion: 1n, bound: true });
+    await expect(reader(chain, all)({ contextGraphId: CG, descriptors: manifest.descriptors }))
+      .rejects.toBeInstanceOf(HeldGenerationNotCurrentError);
+  });
+
+  it('fails an asset bound elsewhere, and a chain that cannot answer', async () => {
+    const manifest = generation();
+    const first = manifest.descriptors[0]!;
+    const unbound = currentOf(manifest);
+    unbound.set(first.ual, { ...unbound.get(first.ual)!, bound: false });
+    await expect(reader(unbound, [first.ual])({ contextGraphId: CG, descriptors: manifest.descriptors }))
+      .rejects.toThrow(`Held asset ${first.ual} is not bound to "${CG}" on chain`);
+
+    const unreachable = reader(new Map(), [first.ual])({ contextGraphId: CG, descriptors: manifest.descriptors });
+    await expect(unreachable).rejects.toBeInstanceOf(HeldGenerationNotCurrentError);
+    await expect(unreachable).rejects.toThrow('chain endpoint unavailable');
+  });
+
+  it('stops at an abort, and plans no shortcut without a store or a chain', async () => {
+    const manifest = generation();
+    const aborted = new AbortController();
+    aborted.abort(new Error('node stopping'));
+    await expect(reader(new Map(), [manifest.descriptors[0]!.ual])({
+      contextGraphId: CG,
+      descriptors: manifest.descriptors,
+      signal: aborted.signal,
+    })).rejects.toThrow('node stopping');
+
+    const budget = { createGraphScopedAuthenticationDeadline: () => 42 };
+    expect(currentHeldGraphScopedAssetsReader({ readHeld: async () => new Set<string>(), budget })).toBeUndefined();
+    expect(currentHeldGraphScopedAssetsReader({ readChainState: async () => ({ merkleRootHex: '', assertionVersion: 1n, bound: true }), budget }))
+      .toBeUndefined();
   });
 });

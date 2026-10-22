@@ -1,9 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  createGraphKnowledgeAssetScope,
   createOperationContext,
+  DKGEvent,
+  knowledgeAssetLayerGraphUri,
+  MemoryLayer,
   PROTOCOL_SYNC,
   SYSTEM_CONTEXT_GRAPHS,
 } from '@origintrail-official/dkg-core';
+import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   DKGAgent,
@@ -37,6 +42,9 @@ import {
   VmReconcileShutdownTimeoutError,
 } from '../src/vm-reconcile-service.js';
 import { exactAssetFetchSessionPolicy } from '../src/sync/requester/exact-durable-fetch.js';
+import { createGraphScopedDurableManifestPlan } from '../src/sync/durable-integrity.js';
+import { createDurableSyncAccumulator, finalizeDurableSyncCompletion } from '../src/sync/durable-progress.js';
+import { settleDurableDataFromHoldings } from '../src/sync/requester/durable-data-holdings.js';
 import { stubLifecycleFetch } from './_helpers/sync-fetch-coalescing.js';
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
@@ -113,6 +121,42 @@ function cleanDurableSyncResult() {
     failedPhases: 0,
     deniedPhases: 0,
   };
+}
+
+/**
+ * A round's result as the settlement of a generation the store already held
+ * produces it, with that peer's terminal boundary in the agent's checkpoints.
+ */
+function heldGenerationRoundResult(agent: DKGAgent, contextGraphId: string, remotePeerId: string) {
+  const meta = [1, 2].flatMap((kaNumber) => {
+    const ual = `did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ef/${kaNumber}`;
+    const graph = knowledgeAssetLayerGraphUri(
+      contextGraphId,
+      MemoryLayer.VerifiableMemory,
+      createGraphKnowledgeAssetScope(ual, '1'),
+    );
+    const payload = [{ subject: `urn:held:${kaNumber}`, predicate: 'urn:held:value', object: '"v1"', graph }];
+    return generateGraphKnowledgeAssetMetadata({
+      ual, contextGraphId, merkleRoot: computeFlatKCRootV10(payload, []), publisherPeerId: 'publisher-peer',
+      accessPolicy: 'public', timestamp: new Date(0), assertionVersion: '1', publicTripleCount: 1,
+      privateTripleCount: 0, assertionGraph: graph,
+    }, { status: 'tentative' });
+  });
+  const manifest = createGraphScopedDurableManifestPlan(meta, contextGraphId)!;
+  const checkpoints = (agent as any).syncCheckpoints;
+  const accumulator = createDurableSyncAccumulator();
+  settleDurableDataFromHoldings({
+    plan: { kind: 'held', assets: manifest.descriptors.length },
+    remotePeerId,
+    contextGraphId,
+    manifest,
+    metaResult: { bytesReceived: 512, quads: meta },
+    accumulator,
+    deleteCheckpoint: (key) => checkpoints.delete(key),
+    setCheckpoint: (key, checkpoint) => checkpoints.setManifestBoundOffset(key, checkpoint.offset,
+      checkpoint.binding!.manifestDigest, Date.now(), checkpoint.binding!.manifestPrefixDigest, checkpoint.binding!.terminal),
+  });
+  return finalizeDurableSyncCompletion(accumulator);
 }
 
 function cleanSharedMemorySyncResult() {
@@ -1795,6 +1839,41 @@ describe('DKGAgent sync fetch coalescing', () => {
       expect(result.dataSynced).toBe(3);
       expect(result.diagnostics.durable.rejectedKcs).toBe(1);
       expect(agent.getSubscribedContextGraphs().get('coalesced-cg')?.synced).not.toBe(true);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('promotes subscription readiness from a round whose whole generation was already stored and current', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const remotePeer = { toString: () => PEER_A };
+
+    try {
+      await agent.start();
+      agent.subscribeToContextGraph('coalesced-cg');
+      (agent as any).isPrivateContextGraph = async () => false;
+      (agent as any).resolvePreferredSyncPeerId = async () => undefined;
+      (agent as any).primeCatchupConnections = async () => undefined;
+      (agent as any).ensurePeerAdmittedForRecovery = async () => true;
+      (agent as any).waitForSyncProtocol = async () => true;
+      (agent as any).refreshMetaSyncedFlags = async () => undefined;
+      (agent.node.libp2p as any).getConnections = () => [{ remotePeer }];
+      (agent.node.libp2p.peerStore as any).get = async () => ({ protocols: [PROTOCOL_SYNC] });
+      (agent as any).syncFromPeerDetailed = async () => heldGenerationRoundResult(agent, 'coalesced-cg', PEER_A);
+      const projectSynced = vi.fn();
+      agent.eventBus.on(DKGEvent.PROJECT_SYNCED, projectSynced);
+      expect(agent.getSubscribedContextGraphs().get('coalesced-cg')?.synced).not.toBe(true);
+
+      const result = await agent.syncContextGraphFromConnectedPeers('coalesced-cg');
+
+      expect(result.dataSynced).toBe(0);
+      expect(result.peersSucceeded).toBe(1);
+      expect(agent.getSubscribedContextGraphs().get('coalesced-cg')?.synced).toBe(true);
+      expect(projectSynced).toHaveBeenCalledWith(expect.objectContaining({
+        contextGraphId: 'coalesced-cg',
+        dataSynced: 0,
+        durableHeldAssets: 2,
+      }));
     } finally {
       await agent.stop().catch(() => {});
     }

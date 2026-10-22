@@ -186,6 +186,7 @@ export default defineConfig({
       "test/durable-data-holdings.test.ts",
       "test/durable-recovery-held-restart.test.ts",
       "test/durable-recovery-missing-assets.test.ts",
+      "test/durable-held-asset-chain-state.test.ts",
       "test/store-lane-yield.test.ts",
       "test/durable-progress.test.ts",
       "test/gossip-publish-handler.test.ts",

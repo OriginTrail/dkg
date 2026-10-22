@@ -17,8 +17,10 @@ import {
   type DurableSyncAccumulator,
 } from '../durable-progress.js';
 import { MAX_EXACT_SYNC_ASSETS } from '../exact-assets.js';
+import { mapWithConcurrencyDrained } from '../../map-with-concurrency.js';
 import { DEFAULT_DURABLE_DATA_ROUND_BUDGET, type DurableDataRoundBudget } from './durable-data-round.js';
 import type { DurableSyncContext } from './durable-sync.js';
+import type { GraphScopedAssetChainState } from './graph-scoped-materialization.js';
 import type { SyncPageResult } from './page-fetch.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
@@ -31,6 +33,9 @@ const ENVELOPE_PREDICATES = [
 
 /** Assets per store read: one VALUES list of exact metadata subjects. */
 const HOLDINGS_READ_CHUNK = 200;
+
+/** Assertion graphs per row-count query, so one query never holds the background lane long. */
+const ROW_COUNT_CHUNK = 50;
 
 export interface HeldGraphScopedAssetsRequest {
   readonly contextGraphId: string;
@@ -68,12 +73,14 @@ export type DurableHoldingsPlan =
 
 /**
  * The assets of a verified META generation that this node already holds: a
- * confirmed graph-scoped copy at the descriptor's version, root, row counts
- * and graph, or a confirmed copy at a newer version, which a copy from this
- * peer could not replace. Durable sync verified such a copy against its root
- * and the chain before it wrote the data graph and the metadata in one atomic
- * replacement, so its metadata stands for its rows. That keeps this a
- * metadata read (one store query per chunk of assets), not a content re-hash.
+ * confirmed graph-scoped copy at the descriptor's version, root, row counts,
+ * graph and sub-graph, whose assertion graph still holds exactly the declared
+ * number of public rows. Durable sync verified such a copy against its root
+ * and the chain before it wrote the rows and the metadata in one atomic
+ * replacement, but metadata alone is not proof: a removed sub-graph drops the
+ * rows and keeps the envelope. One metadata query per chunk of assets, then
+ * one row count per assertion graph, with no content re-hash. Whether the
+ * copy is still the current version is for the caller to check.
  */
 export async function readHeldGraphScopedAssets(
   store: TripleStore,
@@ -82,6 +89,7 @@ export async function readHeldGraphScopedAssets(
 ): Promise<Set<string>> {
   const metaGraph = assertSafeIri(contextGraphMetaUri(request.contextGraphId));
   const predicates = ENVELOPE_PREDICATES.map((predicate) => `<${predicate}>`).join(' ');
+  const options = { priority: 'background' as const, signal: request.signal };
   const held = new Set<string>();
   for (let start = 0; start < request.descriptors.length; start += chunkSize) {
     const chunk = request.descriptors.slice(start, start + chunkSize);
@@ -89,7 +97,7 @@ export async function readHeldGraphScopedAssets(
     // sparql-scan-allow: R4 -- exact meta graph; subjects and predicates are bound by finite VALUES lists
     const result = await store.query(
       `SELECT ?ual ?predicate ?object WHERE { GRAPH <${metaGraph}> { VALUES ?ual { ${subjects} } VALUES ?predicate { ${predicates} } ?ual ?predicate ?object } }`,
-      { priority: 'background', source: 'agent.durableSync.heldAssets', signal: request.signal },
+      { ...options, source: 'agent.durableSync.heldAssets' },
     );
     if (result.type !== 'bindings') throw new Error('Held asset metadata SELECT expected a bindings result');
     const rowsBySubject = new Map<string, Array<{ predicate: string; object: string }>>();
@@ -101,15 +109,33 @@ export async function readHeldGraphScopedAssets(
       rows.push({ predicate, object });
       rowsBySubject.set(ual, rows);
     }
-    for (const descriptor of chunk) {
-      const stored = parseConfirmedGraphKnowledgeAssetMetadataEnvelope(
+    const confirmed = chunk.filter((descriptor) => holdsDescriptor(
+      descriptor,
+      parseConfirmedGraphKnowledgeAssetMetadataEnvelope(
         rowsBySubject.get(descriptor.ual) ?? [],
         { contextGraphId: request.contextGraphId, ual: descriptor.ual },
-      );
-      if (holdsDescriptor(descriptor, stored)) held.add(descriptor.ual);
+      ),
+    ));
+    for (let rowStart = 0; rowStart < confirmed.length; rowStart += ROW_COUNT_CHUNK) {
+      const counted = confirmed.slice(rowStart, rowStart + ROW_COUNT_CHUNK);
+      // One indexed count per exact assertion graph, as the responder's page plan reads them.
+      const counts = await store.query(`SELECT ?graph ?rows WHERE { ${counted.map(({ assertionGraph }) => {
+        const graph = `<${assertSafeIri(assertionGraph)}>`;
+        return `{ SELECT (${graph} AS ?graph) (COUNT(*) AS ?rows) WHERE { GRAPH ${graph} { ?s ?p ?o } } }`;
+      }).join(' UNION ')} }`, { ...options, source: 'agent.durableSync.heldAssetRows' });
+      if (counts.type !== 'bindings') throw new Error('Held asset row COUNT expected a bindings result');
+      const rowsByGraph = new Map(counts.bindings.map(({ graph, rows }) => [graph, integerLexical(rows)]));
+      for (const descriptor of counted) {
+        if (rowsByGraph.get(descriptor.assertionGraph) === descriptor.publicTripleCount) held.add(descriptor.ual);
+      }
     }
   }
   return held;
+}
+
+function integerLexical(raw: string | undefined): number | undefined {
+  const lexical = raw?.replace(/^"([^"]*)"(?:\^\^.*)?$/, '$1');
+  return lexical !== undefined && /^\d+$/.test(lexical) ? Number(lexical) : undefined;
 }
 
 /** The holdings reader a recovery host gives graph-owned rounds. */
@@ -119,16 +145,72 @@ export function heldGraphScopedAssetsReader(
   return (request) => readHeldGraphScopedAssets(store, request);
 }
 
+/** A peer's generation cannot be settled from holdings: its round fails, and the owner tries another peer. */
+export class HeldGenerationNotCurrentError extends Error {
+  readonly code = 'SYNC_HELD_GENERATION_NOT_CURRENT';
+}
+
+/** Held assets checked against the chain at once; the first mismatch stops the rest. */
+const HELD_CHAIN_CHECK_CONCURRENCY = 8;
+
+/**
+ * Hold a copy only while it is the asset's current version: its chain root
+ * and root count must be the descriptor's, and the asset must be bound to
+ * this context graph, as authentication requires of a fetched copy. A held
+ * copy that is not current means this peer serves a superseded generation
+ * (or the chain cannot say), so the round fails instead of completing with it.
+ */
+export function currentHeldGraphScopedAssetsReader(input: {
+  readonly readHeld?: (request: HeldGraphScopedAssetsRequest) => Promise<ReadonlySet<string>>;
+  readonly readChainState?: (copy: { readonly ual: string; readonly contextGraphId: string },
+    deadline: number, signal?: AbortSignal) => Promise<GraphScopedAssetChainState>;
+  /** The round's budget: the chain checks share one authentication deadline. */
+  readonly budget: { createGraphScopedAuthenticationDeadline(): number };
+}): ((request: HeldGraphScopedAssetsRequest) => Promise<ReadonlySet<string>>) | undefined {
+  const { readHeld, readChainState } = input;
+  if (!readHeld || !readChainState) return undefined;
+  return async (request) => {
+    const held = await readHeld(request);
+    const deadline = input.budget.createGraphScopedAuthenticationDeadline();
+    const { contextGraphId } = request;
+    await mapWithConcurrencyDrained(
+      request.descriptors.filter((descriptor) => held.has(descriptor.ual)),
+      HELD_CHAIN_CHECK_CONCURRENCY,
+      async ({ ual, assertionVersion, claimedRootHex }) => {
+        let state: GraphScopedAssetChainState;
+        try {
+          state = await readChainState({ ual, contextGraphId }, deadline, request.signal);
+        } catch (error) {
+          request.signal?.throwIfAborted();
+          throw new HeldGenerationNotCurrentError(
+            `Could not check held asset ${ual} of "${contextGraphId}" against the chain: `
+              + `${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
+          );
+        }
+        if (!state.bound) {
+          throw new HeldGenerationNotCurrentError(`Held asset ${ual} is not bound to "${contextGraphId}" on chain`);
+        }
+        if (state.assertionVersion !== BigInt(assertionVersion) || state.merkleRootHex !== claimedRootHex) {
+          throw new HeldGenerationNotCurrentError(
+            `This peer's generation of "${contextGraphId}" is behind the chain: ${ual} is at version `
+              + `${state.assertionVersion} on chain, ${assertionVersion} here and at the peer`,
+          );
+        }
+      },
+    );
+    return held;
+  };
+}
+
 function holdsDescriptor(
   descriptor: GraphScopedDescriptor,
   stored: ConfirmedGraphKnowledgeAssetMetadataRead,
 ): boolean {
   if (stored.state !== 'confirmed') return false;
   const { envelope } = stored;
-  const storedVersion = BigInt(envelope.assertionVersion);
-  const version = BigInt(descriptor.assertionVersion);
-  if (storedVersion !== version) return storedVersion > version;
-  return Buffer.from(envelope.merkleRoot).toString('hex') === descriptor.claimedRootHex
+  return BigInt(envelope.assertionVersion) === BigInt(descriptor.assertionVersion)
+    && Buffer.from(envelope.merkleRoot).toString('hex') === descriptor.claimedRootHex
     && envelope.assertionGraph === descriptor.assertionGraph
     && envelope.publicTripleCount === descriptor.publicTripleCount
     && envelope.privateTripleCount === descriptor.privateTripleCount
@@ -204,6 +286,7 @@ export async function planDurableDataFromLocalHoldings(input: {
     held = await input.readHeld({ contextGraphId, descriptors: manifest.descriptors, signal: input.signal });
   } catch (error) {
     input.signal?.throwIfAborted();
+    if (error instanceof HeldGenerationNotCurrentError) throw error;
     input.logWarn(
       `Could not read which assets of "${contextGraphId}" this node holds; fetching the graph: `
         + `${error instanceof Error ? error.message : String(error)}`,
@@ -238,7 +321,12 @@ export function settleHeldDurableData(input: {
     offset: manifest.manifestRowCount,
     binding: { manifestDigest: manifest.manifestDigest, manifestPrefixDigest: prefix.prefixDigest, terminal: true },
   });
-  recordDurableSyncDiagnostics(input.accumulator, { resumedPhases: 1, completedPhases: 1 });
+  recordDurableSyncDiagnostics(input.accumulator, {
+    resumedPhases: 1,
+    completedPhases: 1,
+    // Readiness evidence for a completion that inserted nothing: every asset is stored and current.
+    verifiedHeldAssets: manifest.descriptors.length,
+  });
 }
 
 /**

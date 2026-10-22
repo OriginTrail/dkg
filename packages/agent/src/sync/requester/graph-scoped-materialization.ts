@@ -136,6 +136,50 @@ export async function authenticateChallengePinnedGraphScopedAsset(
   });
 }
 
+/** Where the chain stands for one graph-scoped asset. */
+export interface GraphScopedAssetChainState {
+  readonly merkleRootHex: string;
+  readonly assertionVersion: bigint;
+  /** The asset is bound on chain to the local context graph. */
+  readonly bound: boolean;
+}
+
+/**
+ * Read the views authentication checks a fetched copy against (latest root,
+ * root count, context-graph binding) for an asset this node already holds,
+ * so a held copy can be checked against current chain truth without a copy
+ * from a peer.
+ */
+export async function readGraphScopedAssetChainState(
+  chain: ChainAdapter,
+  copy: { readonly ual: string; readonly contextGraphId: string },
+  verifyContextGraphBinding: VerifyContextGraphBinding,
+  options: { signal?: AbortSignal } = {},
+): Promise<GraphScopedAssetChainState> {
+  if (chain.chainId === 'none' || !chain.getLatestMerkleRoot || !chain.getMerkleRootCount || !chain.getKAContextGraphId) {
+    throw Object.assign(
+      new Error('A held graph-scoped asset check requires chain root, assertion-count, and context-graph views'),
+      { code: 'VM_CHAIN_VERIFICATION_UNSUPPORTED' },
+    );
+  }
+  const identity = parseDeterministicKnowledgeAssetUal(copy.ual);
+  if (identity.chainId !== chain.chainId) {
+    throw new Error(`Held graph-scoped asset ${copy.ual} is not on local chain ${chain.chainId}`);
+  }
+  const kaId = (BigInt(identity.agentAddress) << 96n) | BigInt(identity.kaNumber);
+  const [latestRoot, rootCount, boundContextGraphId] = await Promise.all([
+    chain.getLatestMerkleRoot(kaId, { signal: options.signal }),
+    chain.getMerkleRootCount(kaId, { signal: options.signal }),
+    chain.getKAContextGraphId(kaId, { signal: options.signal }),
+  ]);
+  return {
+    merkleRootHex: Buffer.from(latestRoot).toString('hex'),
+    assertionVersion: rootCount,
+    bound: boundContextGraphId > 0n
+      && await verifyContextGraphBinding(copy.contextGraphId, boundContextGraphId, options.signal),
+  };
+}
+
 /**
  * Bind the peer-verified payload to current chain truth before its structural
  * metadata can influence local assertion ordering. No-chain development keeps

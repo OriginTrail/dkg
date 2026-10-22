@@ -11,6 +11,8 @@ export interface DurableProgressSummary {
   readonly insertedMetaTriples?: number;
   readonly metaOnlyResponses?: number;
   readonly verifiedPrivateOnlyResponses?: number;
+  /** Assets of a completed generation already stored and current on chain; durable only. */
+  readonly verifiedHeldAssets?: number;
   readonly dataRejectedMissingMeta?: number;
   readonly rejectedKcs?: number;
   readonly resumedPhases?: number;
@@ -35,6 +37,8 @@ export interface DurableProgressClassification {
   readonly hasInsertedData: boolean;
   readonly hasMetadataEvidence: boolean;
   readonly hasVerifiedPrivateOnlyResponse: boolean;
+  /** A completed generation was found already stored and current: readiness proof without inserts. */
+  readonly hasVerifiedHeldAssets: boolean;
   readonly hasCleanVerifiedPrivateOnlyCompletion: boolean;
   readonly integrityRejected: boolean;
   readonly metadataOnly: boolean;
@@ -68,6 +72,7 @@ export function classifyDurableProgress(
   const checkpointAdvances = progress?.checkpointAdvances ?? 0;
   const resumedPhases = progress?.resumedPhases ?? 0;
   const verifiedPrivateOnlyResponses = progress?.verifiedPrivateOnlyResponses ?? 0;
+  const hasVerifiedHeldAssets = (progress?.verifiedHeldAssets ?? 0) > 0;
 
   const timedOut = (progress?.timedOutPhases ?? 0) > 0;
   const transportFailed = (progress?.failedPeers ?? 0) > 0;
@@ -134,6 +139,7 @@ export function classifyDurableProgress(
     hasMetadataEvidence,
     hasVerifiedPrivateOnlyResponse,
     hasCleanVerifiedPrivateOnlyCompletion,
+    hasVerifiedHeldAssets,
     integrityRejected,
     metadataOnly,
     timedOut,
@@ -149,7 +155,7 @@ export function classifyDurableProgress(
     madeReadinessProgress,
     completedWithoutFailure,
     completedReadinessCleanly: completedWithoutFailure
-      && (hasInsertedData || hasVerifiedPrivateOnlyResponse),
+      && (hasInsertedData || hasVerifiedPrivateOnlyResponse || hasVerifiedHeldAssets),
     cleanNonMetadataResponse: !transportFailed
       && !phaseFailed
       && !timedOut
@@ -201,6 +207,7 @@ const DURABLE_SYNC_COUNTER_REDUCERS = {
   emptyResponses: 'sum',
   metaOnlyResponses: 'sum',
   verifiedPrivateOnlyResponses: 'sum',
+  verifiedHeldAssets: 'sum',
   dataRejectedMissingMeta: 'sum',
   rejectedKcs: 'sum',
   failedPeers: 'max',
@@ -402,7 +409,7 @@ export function finalizeDurableSyncCompletion(
 
 export type InitializedDurableSyncResult = DurableSyncResult & Required<Pick<
   DurableSyncResult,
-  'backoffWorthyFailures' | 'deferredBackpressure'
+  'backoffWorthyFailures' | 'deferredBackpressure' | 'verifiedHeldAssets'
 >>;
 
 export type InitializedDurableSyncDiagnostics = Omit<InitializedDurableSyncResult, 'complete'>;

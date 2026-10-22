@@ -1244,6 +1244,8 @@ export interface DurableSyncDiagnostics {
   metaOnlyResponses: number;
   /** Cryptographically verified V2 responses whose public graph is intentionally empty. */
   verifiedPrivateOnlyResponses: number;
+  /** Assets of a completed generation already stored here and current on chain; no DATA fetched for them. */
+  verifiedHeldAssets?: number;
   dataRejectedMissingMeta: number;
   rejectedKcs: number;
   failedPeers: number;

@@ -2,7 +2,8 @@ import { createAbortError as asSyncFetchAbortError } from './bounded-operation.j
 import { withRetry } from '@origintrail-official/dkg-core';
 import { createRpcTimeoutError, isChainRpcTransportError, type ChainAdapter } from '@origintrail-official/dkg-chain';
 import { authenticateChallengePinnedGraphScopedAsset, authenticateVerifiedGraphScopedAsset,
-  type ChallengePinnedGraphScopedAsset, type VerifiedGraphScopedAsset, type VerifyContextGraphBinding,
+  readGraphScopedAssetChainState, type ChallengePinnedGraphScopedAsset, type GraphScopedAssetChainState,
+  type VerifiedGraphScopedAsset, type VerifyContextGraphBinding,
 } from './sync/requester/graph-scoped-materialization.js';
 import type { ExactAssetCommitment } from './sync/exact-assets.js';
 
@@ -101,6 +102,34 @@ export async function authenticateChallengePinnedGraphScopedAssetWithinDeadline(
   });
   if (Date.now() >= authenticationDeadline) throw deadlineError;
   return authenticated;
+}
+
+/** A held copy's chain views, under the authentication retry policy and the round's deadline. */
+export function readHeldGraphScopedAssetChainStateWithinDeadline(params: {
+  chain: ChainAdapter;
+  copy: { readonly ual: string; readonly contextGraphId: string };
+  verifyContextGraphBinding: VerifyContextGraphBinding;
+  deadline: number;
+  signal?: AbortSignal;
+}): Promise<GraphScopedAssetChainState> {
+  const { chain, copy, verifyContextGraphBinding, deadline, signal } = params;
+  return runAuthenticationWithinDeadline({
+    deadline,
+    deadlineError: createRpcTimeoutError(
+      `Chain check of held graph-scoped asset ${copy.ual} exceeded its context-graph deadline`,
+    ),
+    signal,
+    operation: (deadlineSignal) => withRetry(
+      () => readGraphScopedAssetChainState(chain, copy, verifyContextGraphBinding, { signal: deadlineSignal }),
+      {
+        maxAttempts: DURABLE_AUTHENTICATION_MAX_ATTEMPTS,
+        baseDelayMs: DURABLE_AUTHENTICATION_RETRY_BASE_MS,
+        maxDelayMs: DURABLE_AUTHENTICATION_RETRY_MAX_MS,
+        isRetryable: isChainRpcTransportError,
+        signal: deadlineSignal,
+      },
+    ),
+  });
 }
 
 export async function authenticateDurableGraphScopedAsset(params: {
