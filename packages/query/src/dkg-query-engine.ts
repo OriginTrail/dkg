@@ -378,7 +378,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       const lane = discovery ? { query: reads.query,
         listGraphsByPrefix: async (prefix: string) => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads;
       const variableContentGraphs = discovery ? selectContentPartitions(
-        discovery.partitions, plan.draftAccess, plan.graphs.subGraphName) : [];
+        discovery.partitions, plan.draftAccess, plan.graphs.subGraphName, plan.includeSharedMemoryMeta) : [];
       return this.executeScoped(scope, plan, lane, variableContentGraphs, reads.catalog);
     };
     switch (plan.discovery.catalog.kind) {

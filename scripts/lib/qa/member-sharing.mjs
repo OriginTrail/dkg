@@ -226,12 +226,12 @@ export const describe = record => `"${record.value}" by ${record.author.label} i
  * check with its evidence: held when both reads found the write within the
  * bound; missing otherwise, with what each read last saw; or refused, with
  * whether its author is a member, the refusal's structured code, whether the
- * author held the graph's definition right after it, and whether anything
- * ever showed the author holding it: its history as it stands when the write
- * is judged (the record's `definitionHistory`), so that a definition obtained
- * and lost after the subscription counts.
+ * author held the graph's definition right after it, and `definitionSeen`:
+ * whether anything ever showed the author holding it, a snapshot of its
+ * history taken when the write is judged (observation.mjs keeps it), so that
+ * a definition obtained and lost after the subscription counts.
  */
-export function pairResult(pair, { boundMs }) {
+export function pairResult(pair, { boundMs, definitionSeen }) {
   const secs = ms => Math.round(ms / 1000);
   const what = `${describe(pair.record)} at ${pair.node.label}`;
   const { record } = pair;
@@ -240,7 +240,7 @@ export function pairResult(pair, { boundMs }) {
       check: 'write-refused', outcome: 'fail', text: `${what}: not written, ${record.error}`,
       evidence: {
         registered: record.graph.registered, private: record.graph.private, member: record.author.member === true,
-        definitionHeld: record.definitionHeld, definitionSeen: record.definitionHistory?.seen, errorCode: record.errorCode,
+        definitionHeld: record.definitionHeld, definitionSeen, errorCode: record.errorCode,
       },
     };
   }

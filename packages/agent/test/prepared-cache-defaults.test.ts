@@ -11,7 +11,12 @@ import { exactAssetExportFixture } from './fixtures/exact-asset-export.js';
 const directories: string[] = [];
 const agents: DKGAgent[] = [];
 afterEach(async () => {
-  for (const agent of agents.splice(0)) await agent.stop();
+  for (const agent of agents.splice(0)) {
+    await agent.stop();
+    // These fixtures never start their agents, so stop() does not close the
+    // stores created by create(). Drain their workers before removing dataDir.
+    await agent.store.close();
+  }
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
   await Promise.all(directories.splice(0).map(directory => rm(directory, { recursive: true, force: true })));

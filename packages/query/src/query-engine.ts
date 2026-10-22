@@ -40,6 +40,8 @@ export interface QueryOptions {
    * joins across KAs. This does not include SWM, VM, metadata or other agents.
    */
   includeContextGraphPartitions?: boolean;
+  /** Include registered subgraph SWM metadata in scoped GRAPH-variable expansion; requires includeContextGraphPartitions. */
+  includeSharedMemoryMeta?: boolean;
   /** Internal draft policy derived from caller identity; never accept from HTTP input. */
   draftAccess?: DraftAccessPolicy;
   /**

@@ -89,6 +89,9 @@ export function compileCiTopology(topology = CI_LANE_TOPOLOGY) {
         row: rows.length, suite: group.id, shard: group.shards === 1 ? 0 : index + 1, shards: group.shards,
         label: group.shards === 1 ? group.label ?? group.id : `${group.id} [${index + 1}/${group.shards}]`,
         sidecars: group.runner === 'agent' && AGENT_SHARD_POLICY.descriptors[index]?.reservedOverheadMs > 0,
+        ...(group.runner === 'agent' ? {
+          timeoutMinutes: AGENT_SHARD_POLICY.descriptors[index].inventory === 'integration' ? 12 : 10,
+        } : {}),
       });
     }
     jobs[job] = packages;
