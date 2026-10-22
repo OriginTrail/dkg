@@ -37,6 +37,8 @@ export interface QueryOptions {
    * to their selected graph set unless this is true.
    */
   includeContextGraphPartitions?: boolean;
+  /** Include registered subgraph SWM metadata in scoped GRAPH-variable expansion; requires includeContextGraphPartitions. */
+  includeSharedMemoryMeta?: boolean;
   /** Internal draft policy derived from caller identity; never accept from HTTP input. */
   draftAccess?: DraftAccessPolicy;
   /**

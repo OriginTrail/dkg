@@ -91,6 +91,10 @@ jobs:
       # This immutable controller is the authority for test selection. A
       # policy update intentionally uses a new reviewed commit SHA; never use
       # the merge candidate or a mutable branch here.
+      # Rotation shims:
+      # - jobs.changes.steps.plan publisher campaign full-CI fallback
+      # Remove that exact-path fallback after rotating to protected policy
+      # that routes both publisher-live-control parent and worker to bura_cli.
       - name: Checkout trusted CI controller
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -143,6 +147,20 @@ jobs:
           PLAN_EVENT="${EVENT_NAME}"
           if [[ "${EVENT_NAME}" == "pull_request" && "${DELTA_ENABLED}" != "true" ]]; then
             PLAN_EVENT="pull_request_delta_disabled"
+          fi
+
+          # The pinned controller predates this campaign route. Widen only
+          # exact parent/worker changes until its protected-policy rotation;
+          # the controller still generates and validates the entire plan.
+          if [[ "${PLAN_EVENT}" == "pull_request" ]]; then
+            while IFS= read -r -d '' changed; do
+              case "${changed}" in
+                scripts/repro/publisher-live-control-restart.test.mts|scripts/repro/publisher-live-control-worker.mts)
+                  PLAN_EVENT="pull_request_delta_disabled"
+                  break
+                  ;;
+              esac
+            done < "${CHANGES_FILE}"
           fi
 
           node trusted-ci/scripts/ci/plan-ci.mjs \
@@ -672,7 +690,8 @@ jobs:
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_agent == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Inventory policy grants native runs headroom for coverage/report cleanup.
+    timeout-minutes: ${{ matrix.timeoutMinutes }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['tornado-agent'] }}
@@ -765,6 +784,10 @@ jobs:
         run: bash scripts/ci/verify-blazegraph-image-contract.sh
       - name: "CLI tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
+      - name: "Publisher pause/resume process-death durability (Oxigraph)"
+        if: matrix.shard == 1
+        timeout-minutes: 3
+        run: node --experimental-sqlite --import tsx scripts/repro/publisher-live-control-restart.test.mts
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit

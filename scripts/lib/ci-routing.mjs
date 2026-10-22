@@ -603,6 +603,11 @@ export const SUPPORT_PATH_ROUTES = Object.freeze([
     lanes: ['tornado_core'],
     reason: 'the chain lane runs the ABI sync script against temporary directories',
   },
+  {
+    pattern: /^scripts\/repro\/publisher-live-control-(?:restart\.test|worker)\.mts$/,
+    lanes: ['bura_cli'],
+    reason: 'the required CLI lane runs the five-start publisher control durability campaign',
+  },
   ...BUILD_ONLY_SCRIPTS.map((family) => ({ pattern: scriptsPattern(family), lanes: [], reason: family.reason })),
   {
     // Any other script, including a new one: its consumers are not known, so it

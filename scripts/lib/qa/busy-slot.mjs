@@ -1,114 +1,120 @@
 // The judgements of case 6 of devnet-test-issue-3251-member-sharing.mjs: did
-// the large transfer hold member 2's only sync slot while the writes were made
-// and received? Kept apart from the devnet I/O so that each one is tested on
-// its own.
+// the large transfer hold member 2's general sync slot while the writes were
+// made and received? Kept apart from the devnet I/O so that each one is tested
+// on its own.
 //
-// The evidence is the node's own: its diagnostics (`sync-global` in
-// /api/diagnostics/backpressure, read every second) and its log. The node
-// names no admission, so which admission a reading shows is reconstructed in
-// admission-identity.mjs, which lists what that rests on. Here: the policy of
-// the case (one slot, no queue), the confirmation that the work in the slot is
-// the transfer, the readings that show it there through the window, and which
-// receipts that evidence covers.
+// The evidence is the node's own admission trace (admission-trace.mjs), which
+// names each admission, the slot it holds (the general one, or a reserved one
+// of the fixes under test: shared-memory pulls #3258, control-plane fetches
+// #3302), the general pool's effective policy, and until when a line shows it
+// holding its slot. The node's diagnostics cannot serve: they report one pool,
+// grown by the reserved slots.
 
-import { identifyAdmission, sameAdmission, startInterval } from './admission-identity.mjs';
+/** How long the transfer must have held the general slot before the writes start: a pull that ends at once is not the transfer. */
+export const TRANSFER_CONFIRM_MS = 5_000;
+/** The trace lists the admissions that hold a slot once a second: one that no line of the last few seconds lists may have ended. */
+export const TRACE_FRESH_MS = 3_000;
 
 /**
- * Whether a reading shows the policy of case 6's member: one sync slot and no
- * queue (`syncGlobalMaxInflight: 1`, `syncGlobalQueueLimit: 0`). The reading
- * reports the node's effective policy, so an environment override
- * (`DKG_SYNC_GLOBAL_MAX_INFLIGHT`, …) that gave it spare slots shows here.
- * Returns null when it does, else the reason.
+ * Whether the general sync pool has the policy of case 6's member: one slot
+ * and no queue (`syncGlobalMaxInflight: 1`, `syncGlobalQueueLimit: 0`), as an
+ * admission's trace record names it. That is the node's effective policy, so
+ * an environment override (`DKG_SYNC_GLOBAL_MAX_INFLIGHT`, …) that gave it
+ * spare slots shows here. The reserved slots beside the general one are not
+ * counted: they are the fixes under test. Returns null when it does, else the
+ * reason.
  */
-export function singleSlotProblem(reading) {
-  if (!reading || reading.unreadable) return `the sync slots could not be read (${reading?.unreadable ?? 'no reading'})`;
-  if (reading.capacityModel !== 'shared') return `the sync slots are not one shared pool (${reading.capacityModel ?? 'no capacity model'})`;
-  if (reading.inflightLimit !== 1) return `the node runs ${reading.inflightLimit ?? 'an unknown number of'} sync slot(s), not one`;
-  if (reading.queueLimit !== 0) return `the node has a sync queue of ${reading.queueLimit ?? 'unknown size'}, not none`;
+export function singleSlotProblem(policy) {
+  if (!policy || policy.limit === null || policy.limit === undefined) return 'its trace names no sync policy';
+  if (policy.partitioned) return 'its general sync slots are partitioned, not one pool';
+  if (policy.limit !== 1) return `the node runs ${policy.limit} general sync slot(s), not one`;
+  if (policy.queueLimit !== 0) return `the node has a general sync queue of ${policy.queueLimit ?? 'unknown size'}, not none`;
   return null;
 }
 
 /**
- * Whether a reading shows the large transfer in the slot: the policy of case
- * 6, work in flight that the reading identifies (admission-identity.mjs), and
- * only admissions of the large graph (`isTransfer`) in the log that it can be.
- * Returns { transfer } (its identity: when it started, and its class) or
- * { why }.
+ * Whether the large transfer holds the node's only general sync slot at `now`:
+ * its trace (`admissions`, null when the node wrote none) shows an admission
+ * of the large graph (`isTransfer`) in the general slot, under the policy of
+ * case 6, that has no release, that a line of the last `freshMs` shows holding
+ * the slot, and that has held it for `confirmMs` already. A reserved slot
+ * leaves the general one to other work, so a transfer there is not the case.
+ * A catch-up job that is merely running proves nothing: without an admission
+ * there is nothing that holds the slot. Returns { transfer } (its admission)
+ * or { why }.
  */
-export function heldTransfer(reading, records, isTransfer) {
-  const policy = reading === undefined ? 'no reading yet' : singleSlotProblem(reading);
-  if (policy) return { why: policy };
-  const identified = identifyAdmission(reading, records);
-  if (!identified.identity) return { why: identified.why };
-  const { records: candidates, ...transfer } = identified.identity;
-  if (!candidates.some(isTransfer)) return { why: 'its slot was held by other work' };
-  if (!candidates.every(isTransfer)) return { why: 'its log cannot tell the transfer from other work admitted at about the same time' };
-  return { transfer };
+export function heldTransfer(admissions, isTransfer, { now, confirmMs = TRANSFER_CONFIRM_MS, freshMs = TRACE_FRESH_MS }) {
+  if (admissions === null) return { why: 'the node writes no admission trace (DKG_SYNC_ADMISSION_TRACE)' };
+  const transfers = admissions.filter(isTransfer);
+  if (transfers.length === 0) return { why: 'no transfer of it was admitted to a sync slot' };
+  const holding = transfers.filter(admission => admission.releasedAt === null && now - admission.heldUntil <= freshMs);
+  const general = holding.filter(admission => admission.slot === 'general');
+  const confirmed = general.filter(admission => admission.heldUntil - admission.startedAt >= confirmMs);
+  if (confirmed.length) {
+    const transfer = confirmed.at(-1);
+    const policy = singleSlotProblem(transfer.policy);
+    return policy ? { why: policy } : { transfer };
+  }
+  if (general.length) return { why: `its transfer of the large graph has held the general slot for less than ${Math.round(confirmMs / 1000)} s` };
+  if (holding.length) return { why: `its transfer of the large graph holds a reserved ${holding.at(-1).slot} slot, not the general one` };
+  return { why: 'no transfer of it holds a slot now: each gave it up, or no recent trace line shows it holding' };
 }
 
 /**
- * How long the transfer held the node's only sync slot from `from`, the start
- * of the window of the writes and of their receipt checks, and whether that
- * reached `until`, the window's end. `transfer` is its identity from
- * heldTransfer; `samples` are readings of the node's `sync-global` scheduler
- * ({ sentAt, at, inflight, oldestActiveAgeMs, oldestOperations, inflightLimit,
- * queueLimit, capacityModel }, or { at, unreadable }), also those taken after
- * `until`.
- *
- * A reading taken before the window (a free slot before the transfer was
- * admitted, say) neither proves nor disproves anything about it. From the
- * window's start, each reading must show the single-slot policy, work in
- * flight, and that work being the transfer (sameAdmission). One admission
- * holds the slot without a break, so between two such readings the transfer
- * held it throughout; after the last one nothing is known. The evidence ends
- * at the first reading of other work, of a free slot, of another policy, or
- * that could not be read, and at a gap longer than `maxGapMs` between
- * readings. A reading that came too slowly to tell proves nothing either way,
- * like a missing one. A catch-up job that is merely running proves nothing:
- * without an admission there is nothing that holds the slot.
- *
- * Returns { held, reason, provenUntil }. `provenUntil` is the earliest moment
- * the last reading of the transfer can have been taken (when its request went
- * out): the transfer held the slot from `from` to then. `held` is whether that
- * reaches `until`; `reason` says why the evidence ended short of it.
+ * How long the node's general sync slot has been free at `now`, by its trace:
+ * 0 while a recent line shows an admission holding it, else the time since the
+ * last line that did (`Infinity` for a trace without one). A new pull admitted
+ * while the slot is free takes it.
  */
-export function busySlotCovered({ transfer, samples, from, until, maxGapMs = 5000 }) {
+export function generalSlotIdleFor(admissions, now, { freshMs = TRACE_FRESH_MS } = {}) {
+  const general = (admissions ?? []).filter(admission => admission.slot === 'general');
+  if (general.some(admission => admission.releasedAt === null && now - admission.heldUntil <= freshMs)) return 0;
+  const last = Math.max(-Infinity, ...general.map(admission => admission.heldUntil));
+  return Math.max(0, now - last);
+}
+
+/**
+ * Until when the trace shows the transfer in the general slot, read once the
+ * window of the writes and their receipt checks has ended at `until`: its
+ * release, or the last `holding` line that lists it, never later (a lost
+ * release or a dead process ends the evidence there). Another admission in
+ * the one general slot meanwhile contradicts the trace, and then nothing is
+ * proven. Returns { held (through `until`), provenUntil, reason }.
+ */
+export function busySlotCovered({ transfer, admissions, until }) {
   if (!transfer) return { held: false, reason: 'no transfer of it was admitted to a sync slot', provenUntil: null };
-  const readings = samples.filter(sample => sample.at >= from).sort((a, b) => a.at - b.at);
-  if (readings.length === 0) return { held: false, reason: 'no reading of the sync slot in the window', provenUntil: null };
-  let previous = from;
-  let provenUntil = null;
-  let slow = 0;
-  const gap = (ms, last = '') => `no reading of the sync slot for ${last}${Math.round(ms / 1000)} s${slow ? ` (${slow} more came too slowly to tell which work held it)` : ''}`;
-  const ended = reason => ({ held: false, reason, provenUntil });
-  for (const sample of readings) {
-    if (sample.at - previous > maxGapMs) return ended(gap(sample.at - previous));
-    if (sample.unreadable) return ended(`the sync slot could not be read (${sample.unreadable})`);
-    const policy = singleSlotProblem(sample);
-    if (policy) return ended(policy);
-    if (!startInterval(sample)) return ended('the sync slot was free');
-    const same = sameAdmission(sample, transfer);
-    if (same === 'other') return ended('the slot was held by other work');
-    if (same === 'unclear') {
-      slow += 1;
-      continue;
-    }
-    previous = sample.at;
-    provenUntil = Number.isFinite(sample.sentAt) ? sample.sentAt : sample.at;
-    slow = 0;
-    if (provenUntil >= until) return { held: true, provenUntil };
-  }
-  if (until - previous > maxGapMs) return ended(gap(until - previous, 'the last '));
-  if (provenUntil === null) return ended(gap(until - from));
-  return ended('no reading of the sync slot was taken at or after the end of the window');
+  const traced = admissions?.find(admission => admission.id === transfer.id);
+  if (!traced) return { held: false, reason: 'the trace no longer shows the transfer', provenUntil: null };
+  const other = admissions.find(admission => admission.id !== traced.id && admission.slot === 'general'
+    && admission.startedAt < traced.heldUntil && admission.heldUntil > traced.startedAt);
+  if (other) return { held: false, reason: `the trace shows ${other.label} in the one general slot while the transfer held it`, provenUntil: null };
+  const provenUntil = traced.heldUntil;
+  if (provenUntil >= until) return { held: true, provenUntil };
+  return {
+    held: false,
+    provenUntil,
+    reason: traced.releasedAt === null ? 'no trace line shows the transfer holding the slot after then' : 'the transfer gave up the slot',
+  };
 }
 
 /**
  * Whether a write that a read found at `receivedAt` (when that read completed)
- * was received while the transfer held the slot: a reading taken at or after
- * that moment still showed the transfer, with the evidence unbroken since the
- * window began (`busy` from busySlotCovered). A receipt later than the last
- * such reading is not: the slot may by then have gone to the pull that
- * delivered the write.
+ * was received while the transfer held the slot (`busy` from busySlotCovered):
+ * no later than the last moment the trace shows it holding. A receipt after
+ * that is not: the slot may by then have gone to the pull that delivered the
+ * write.
  */
 export const receivedWhileHeld = (receivedAt, busy) => busy.provenUntil !== null && receivedAt <= busy.provenUntil;
+
+/**
+ * The admissions of `isOther` (the public graph's pulls) that held a slot
+ * between `from` and `to`, counted by slot: { 'shared-memory': 2, … }.
+ */
+export function admissionsBySlot(admissions, isOther, from, to) {
+  const counts = {};
+  for (const admission of admissions ?? []) {
+    if (!isOther(admission) || admission.startedAt > to || admission.heldUntil < from) continue;
+    counts[admission.slot] = (counts[admission.slot] ?? 0) + 1;
+  }
+  return counts;
+}
