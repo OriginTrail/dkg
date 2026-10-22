@@ -10,7 +10,12 @@ import {
   parseAssertionSealQuads,
   type AssertionSeal,
 } from '@origintrail-official/dkg-core';
-import { adoptExistingMint, assertionLifecycleWriteLockKey, withKeyedLocks } from '@origintrail-official/dkg-publisher';
+import {
+  adoptExistingMint,
+  assertionLifecycleWriteLockKey,
+  graphScopeTargetsChain,
+  withKeyedLocks,
+} from '@origintrail-official/dkg-publisher';
 import type { AssertionHistoryDescriptor, DKGAgent } from './dkg-agent.js';
 import { resolveConfirmedGraphScopedVm } from './confirmed-graph-scoped-vm-resolver.js';
 import type { PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
@@ -101,8 +106,10 @@ export async function reconcileLateMint(
   const target: Target = { contextGraphId, name, subGraphName, agentAddress, txHash: input.txHash };
   const reservation = await readSealedReservation(agent, target);
   const { ual } = reservation.scope;
-  // Chain evidence only means something for the chain the reservation names.
-  if (reservation.scope.chainId !== host.chain.chainId) {
+  // Chain evidence only means something for the chain the reservation names,
+  // compared as the publish path compares it (exact label or EIP-155 alias).
+  const evmChainId = typeof host.chain.getEvmChainId === 'function' ? await host.chain.getEvmChainId() : undefined;
+  if (!graphScopeTargetsChain(reservation.scope.chainId, host.chain.chainId, evmChainId)) {
     throw refused(`The UAL ${ual} of "${name}" belongs to chain ${reservation.scope.chainId}, not ${host.chain.chainId}.`);
   }
   const chainTargetMismatch = await sealChainTargetMismatch(host.chain, reservation.seal);

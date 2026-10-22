@@ -358,6 +358,7 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     }, /seal binds chainId=/],
     ['its UAL', async (chain: MockChainAdapter) => {
       (chain as { chainId: string }).chainId = 'mock:1';
+      vi.spyOn(chain, 'getEvmChainId').mockResolvedValue(1n);
     }, /belongs to chain mock:31337/],
   ] as const)('refuses a consumed-share record when %s names another chain than the node, before reading chain evidence',
     async (_case, repointNode, refusal) => {
@@ -375,6 +376,20 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
       expect(lookup).not.toHaveBeenCalled();
       expect(await history()).toEqual(before);
     });
+
+  it('accepts a UAL whose chain label is an EIP-155 alias of the node\'s chain, as the publish path does', async () => {
+    const chain = new MockChainAdapter();
+    const { agent, store, sealed, lostMint, history } = await strandedAsset(chain);
+    failNextLifecycleWrite(agent, store, VM_CURRENT_ASSERTION_PRED);
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+    // The UAL says mock:31337; the node now labels the same EIP-155 chain evm:31337.
+    expect(sealed.kaUal).toMatch(/^did:dkg:mock:31337\//);
+    (chain as { chainId: string }).chainId = 'evm:31337';
+
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
+      .resolves.toMatchObject({ status: 'adopted', ual: sealed.kaUal, txHash: lostMint.txHash });
+    expect(await history()).toMatchObject({ status: 'vm-confirmed', publishedUal: sealed.kaUal });
+  });
 
   it('fails retryably when the record-only publish does not confirm', async () => {
     const { agent } = await strandedAsset(new MockChainAdapter());
