@@ -1,3 +1,4 @@
+import type { ImmutableStorePreparation, PreparedInsert, PreparedMutation } from './immutable-store-preparation.js';
 import { DurableDirectoryPreparation } from './durable-content-addressed-file.js';
 import { persistFileDirectoryEntries } from './file-durability.js';
 import type { TripleStoreCommitCapability } from './persistence.js';
@@ -51,7 +52,7 @@ export interface SharedMemoryLiteralBlobStoreOptions {
   thresholdBytes: number;
 }
 
-export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
+export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, ImmutableStorePreparation {
   get queryCancellation() {
     return this.inner.queryCancellation;
   }
@@ -91,8 +92,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   }
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
-    if (quads.length === 0) return this.inner.insert(quads, options);
-    return this.inner.insert(await this.externalizeQuads(quads), options);
+    return (await this.prepareImmutableInsert(this.inner, quads))([], options);
   }
 
   async delete(quads: Quad[], options?: QueryOptions): Promise<void> {
@@ -127,117 +127,91 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     }
   }
 
-  async replaceGraph(
-    graphUri: string,
-    quads: Quad[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    if (typeof this.inner.replaceGraph !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError(
-        'replaceGraph',
-        'SharedMemoryLiteralBlobStore',
-      );
-    }
-    await this.inner.replaceGraph(graphUri, await this.externalizeQuads(quads), options);
+  async replaceGraph(graphUri: string, quads: Quad[], options?: QueryOptions): Promise<void> {
+    return (await this.prepareImmutableReplaceGraph(this.inner, graphUri, quads))(options);
   }
 
   async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
-    if (!this.inner.replaceAssetGroup) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'group-decorator');
-    const replaced = await Promise.all(assets.map(async asset => {
+    return (await this.prepareImmutableReplaceAssetGroup(this.inner, assets))(options);
+  }
+
+  async replaceGraphAndSubject(graphUri: string, graphQuads: Quad[], metaGraphUri: string,
+    metadataSubject: string, metadataQuads: Quad[], options?: QueryOptions): Promise<void> {
+    return (await this.prepareImmutableReplaceGraphAndSubject(this.inner, graphUri, graphQuads,
+      metaGraphUri, metadataSubject, metadataQuads))(options);
+  }
+
+  async replaceSubject(graphUri: string, subject: string, quads: Quad[], options?: QueryOptions): Promise<void> {
+    return (await this.prepareImmutableReplaceSubject(this.inner, graphUri, subject, quads))(options);
+  }
+
+  async replaceSubjectAndInsert(graphUri: string, subject: string, replacementQuads: Quad[], insertQuads: Quad[],
+    options?: QueryOptions): Promise<void> {
+    return (await this.prepareImmutableReplaceSubjectAndInsert(this.inner, graphUri, subject, replacementQuads, insertQuads))(options);
+  }
+
+  async rfc64AuthorCommitCasV1(input: Rfc64AuthorCommitCasInputV1, options?: QueryOptions): Promise<Rfc64AuthorCommitCasResultV1> {
+    return (await this.prepareImmutableAuthorCommit(this.inner, input))(options);
+  }
+
+  async prepareImmutableInsert(target: TripleStore, quads: readonly Quad[]): Promise<PreparedInsert> {
+    const prepared = await this.externalizeQuads(quads);
+    return (appended, options) => target.insert([...prepared, ...appended], options);
+  }
+
+  async prepareImmutableReplaceGraph(target: TripleStore, graphUri: string, quads: readonly Quad[]): Promise<PreparedMutation> {
+    if (!target.replaceGraph) throw new UnsupportedTripleStoreCapabilityError('replaceGraph', 'SharedMemoryLiteralBlobStore');
+    const prepared = await this.externalizeQuads(quads);
+    return options => target.replaceGraph!(graphUri, prepared, options);
+  }
+
+  async prepareImmutableReplaceAssetGroup(target: TripleStore, assets: readonly AtomicAssetReplacement[]): Promise<PreparedMutation> {
+    if (!target.replaceAssetGroup) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'group-decorator');
+    const prepared = await Promise.all(assets.map(async asset => {
       const [graphQuads, metadataQuads] = await Promise.all([
-        this.externalizeQuads(asset.graphQuads),
-        this.externalizeQuads(asset.metadataQuads),
+        this.externalizeQuads(asset.graphQuads), this.externalizeQuads(asset.metadataQuads),
       ]);
       return { ...asset, graphQuads, metadataQuads };
     }));
-    await this.inner.replaceAssetGroup(replaced, options);
+    return options => target.replaceAssetGroup!(prepared, options);
   }
 
-  async replaceGraphAndSubject(
-    graphUri: string,
-    graphQuads: Quad[],
-    metaGraphUri: string,
-    metadataSubject: string,
-    metadataQuads: Quad[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    if (typeof this.inner.replaceGraphAndSubject !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError(
-        'replaceGraphAndSubject',
-        'SharedMemoryLiteralBlobStore',
-      );
-    }
-    const [externalizedGraph, externalizedMetadata] = await Promise.all([
+  async prepareImmutableReplaceGraphAndSubject(target: TripleStore, graphUri: string, graphQuads: readonly Quad[],
+    metaGraphUri: string, metadataSubject: string, metadataQuads: readonly Quad[]): Promise<PreparedMutation> {
+    if (!target.replaceGraphAndSubject) throw new UnsupportedTripleStoreCapabilityError('replaceGraphAndSubject', 'SharedMemoryLiteralBlobStore');
+    const [preparedGraph, preparedMetadata] = await Promise.all([
       this.externalizeQuads(graphQuads), this.externalizeQuads(metadataQuads),
     ]);
-    await this.inner.replaceGraphAndSubject(graphUri, externalizedGraph,
-      metaGraphUri, metadataSubject, externalizedMetadata, options);
+    return options => target.replaceGraphAndSubject!(graphUri, preparedGraph, metaGraphUri, metadataSubject, preparedMetadata, options);
   }
 
-  async replaceSubject(
-    graphUri: string,
-    subject: string,
-    quads: Quad[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    if (typeof this.inner.replaceSubject !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError(
-        'replaceSubject',
-        'SharedMemoryLiteralBlobStore',
-      );
-    }
-    // Externalize oversized literals before the replace, exactly like insert() /
-    // replaceGraph() — so a large job payload is stored as a blob ref rather than
-    // inline, keeping the atomic path byte-consistent with the fallback.
-    await this.inner.replaceSubject(graphUri, subject, await this.externalizeQuads(quads), options);
+  async prepareImmutableReplaceSubject(target: TripleStore, graphUri: string, subject: string, quads: readonly Quad[]): Promise<PreparedMutation> {
+    if (!target.replaceSubject) throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'SharedMemoryLiteralBlobStore');
+    const prepared = await this.externalizeQuads(quads);
+    return options => target.replaceSubject!(graphUri, subject, prepared, options);
   }
 
-  async replaceSubjectAndInsert(
-    graphUri: string, subject: string, replacementQuads: Quad[], insertQuads: Quad[],
-    options?: QueryOptions,
-  ): Promise<void> {
+  async prepareImmutableReplaceSubjectAndInsert(target: TripleStore, graphUri: string, subject: string,
+    replacementQuads: readonly Quad[], insertQuads: readonly Quad[]): Promise<PreparedMutation> {
     assertSubjectAndInsertPayload(graphUri, subject, replacementQuads, insertQuads);
-    if (typeof this.inner.replaceSubjectAndInsert !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError('replaceSubjectAndInsert', 'SharedMemoryLiteralBlobStore');
-    }
-    const externalized = await this.externalizeQuads([...replacementQuads, ...insertQuads]);
-    await this.inner.replaceSubjectAndInsert(
-      graphUri, subject, externalized.slice(0, replacementQuads.length),
-      externalized.slice(replacementQuads.length), options,
-    );
+    if (!target.replaceSubjectAndInsert) throw new UnsupportedTripleStoreCapabilityError('replaceSubjectAndInsert', 'SharedMemoryLiteralBlobStore');
+    const prepared = await this.externalizeQuads([...replacementQuads, ...insertQuads]);
+    return options => target.replaceSubjectAndInsert!(graphUri, subject, prepared.slice(0, replacementQuads.length),
+      prepared.slice(replacementQuads.length), options);
   }
 
-  async rfc64AuthorCommitCasV1(
-    input: Rfc64AuthorCommitCasInputV1,
-    options?: QueryOptions,
-  ): Promise<Rfc64AuthorCommitCasResultV1> {
-    if (typeof this.inner.rfc64AuthorCommitCasV1 !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError(
-        'rfc64AuthorCommitCasV1',
-        'SharedMemoryLiteralBlobStore',
-      );
-    }
-    const mappedInput = await this.prepareImmutableAuthorCommit(input);
-    return this.inner.rfc64AuthorCommitCasV1(mappedInput, options);
-  }
-
-  /** Internal preparation capability: no RDF mutation or changelog sequence. */
-  prepareImmutableQuads(quads: readonly Quad[]): Promise<Quad[]> {
-    return this.externalizeQuads(quads);
-  }
-
-  async prepareImmutableAuthorCommit(input: Rfc64AuthorCommitCasInputV1): Promise<Rfc64AuthorCommitCasInputV1> {
-    // Normalize first so an incomplete closed manifest cannot create blobs.
-    // The manifest is also the sole source for decorator traversal: adding a
-    // semantic role to the protocol plan cannot silently bypass blob mapping.
+  async prepareImmutableAuthorCommit(target: TripleStore, input: Rfc64AuthorCommitCasInputV1): Promise<PreparedMutation<Rfc64AuthorCommitCasResultV1>> {
+    if (!target.rfc64AuthorCommitCasV1) throw new UnsupportedTripleStoreCapabilityError('rfc64AuthorCommitCasV1', 'SharedMemoryLiteralBlobStore');
+    // Snapshot the closed manifest synchronously, before any blob work or await.
     const manifest = normalizeRfc64AuthorCommitCasV1(input);
-    const mappedInput = await mapRfc64AuthorCommitCasV1(manifest, {
-      mapQuad: (quad) => this.externalizeInsertQuad(quad),
+    const mapped = await mapRfc64AuthorCommitCasV1(manifest, {
+      mapQuad: quad => this.externalizeInsertQuad(quad),
       mapObject: (object, context) => context.kind === 'expected'
         ? this.translateGuardObject(context.graphUri, object)
         : this.externalizeScalarObject(context.graphUri, object!),
     });
-    return sourceFromNormalizedRfc64AuthorCommitCasV1(mappedInput);
+    const prepared = sourceFromNormalizedRfc64AuthorCommitCasV1(mapped);
+    return options => target.rfc64AuthorCommitCasV1!(prepared, options);
   }
 
   async atomicUpdate(sparql: string, options?: UpdateOptions): Promise<void> {
