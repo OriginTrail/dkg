@@ -7,8 +7,10 @@ import type { GraphScopedDurableManifestPlan } from '../src/sync/durable-integri
 import {
   createDurableDataRoundBoundary,
   DEFAULT_DURABLE_DATA_ROUND_BUDGET,
+  manifestFirstGraphEnd,
   manifestHasCheckpointableGraph,
 } from '../src/sync/requester/durable-data-round.js';
+import { planBoundedGraphScopedDurableBatch } from '../src/sync/durable-integrity.js';
 import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
 import { fetchSyncPages, type SyncPageProgress } from '../src/sync/requester/page-fetch.js';
 
@@ -23,14 +25,19 @@ function graphOf(index: number): string {
 
 /** A rootless manifest of `graphCount` graphs with `rowsPerGraph` public rows each. */
 function syntheticManifest(graphCount: number, rowsPerGraph: number): GraphScopedDurableManifestPlan {
+  return manifestOfSizes(Array.from({ length: graphCount }, () => rowsPerGraph));
+}
+
+/** A rootless manifest whose graphs have the given public row counts, in order. */
+function manifestOfSizes(rowCounts: readonly number[]): GraphScopedDurableManifestPlan {
   return {
     contextGraphId: CG_ID,
     manifestDigest: DIGEST,
-    descriptors: Array.from({ length: graphCount }, (_, index) => ({
+    descriptors: rowCounts.map((publicTripleCount, index) => ({
       assertionGraph: graphOf(index),
-      publicTripleCount: rowsPerGraph,
+      publicTripleCount,
     })),
-    manifestRowCount: graphCount * rowsPerGraph,
+    manifestRowCount: rowCounts.reduce((total, count) => total + count, 0),
   } as unknown as GraphScopedDurableManifestPlan;
 }
 
@@ -46,14 +53,24 @@ function progress(
 const SMALL_BUDGET = { softRows: 10, softHeapBytes: 1_000, maxRows: 30, maxHeapBytes: 3_000 };
 
 /**
- * A responder for one rootless snapshot: DATA row `i` belongs to graph
- * `floor(i / rowsPerGraph)`, served in pages of the requested size. Rows are
+ * A responder for one rootless snapshot: DATA row `i` belongs to the manifest
+ * graph whose range holds it, served in pages of the requested size. Rows are
  * built only when a page is asked for, so a test of a multi-million-row graph
  * costs only the pages the requester fetches.
  */
-function syntheticResponder(manifest: GraphScopedDurableManifestPlan, rowsPerGraph: number) {
+function syntheticResponder(manifest: GraphScopedDurableManifestPlan) {
   const requests: Array<{ offset: number; limit: number }> = [];
   const encoder = new TextEncoder();
+  const graphEnds: number[] = [];
+  for (const descriptor of manifest.descriptors) {
+    graphEnds.push((graphEnds.at(-1) ?? 0) + descriptor.publicTripleCount);
+  }
+  let graphIndex = 0;
+  const graphOfRow = (row: number): string => {
+    while (graphEnds[graphIndex]! <= row) graphIndex += 1;
+    while (graphIndex > 0 && graphEnds[graphIndex - 1]! > row) graphIndex -= 1;
+    return manifest.descriptors[graphIndex]!.assertionGraph;
+  };
   return {
     requests,
     buildSyncRequest: async (_cg: string, offset: number, limit: number) => (
@@ -65,7 +82,7 @@ function syntheticResponder(manifest: GraphScopedDurableManifestPlan, rowsPerGra
       const end = Math.min(manifest.manifestRowCount, offset + limit);
       const lines: string[] = [];
       for (let row = offset; row < end; row += 1) {
-        lines.push(`${row}\t${graphOf(Math.floor(row / rowsPerGraph))}`);
+        lines.push(`${row}\t${graphOfRow(row)}`);
       }
       return encoder.encode(lines.join('\n'));
     },
@@ -165,23 +182,92 @@ describe('full-graph durable data round boundary', () => {
     expect(stop(progress(0, 4, 4))).toBe(false);
   });
 
-  it('ends a round at the hard limit even without a checkpointable graph', () => {
+  it('reads a first graph larger than the hard limits whole, and stops only past it', () => {
+    const manifest = manifestOfSizes([100, 4, 4]);
+    const onHardLimit = vi.fn();
+    const stop = createDurableDataRoundBoundary({ manifest, budget: SMALL_BUDGET, onHardLimit });
+    // Inside its first graph a round reads on past every limit: that graph is its allowance.
+    expect(stop(progress(0, 50, 50, 50_000))).toBe(false);
+    expect(stop(progress(0, 100, 100, 100_000))).toBe(false);
+    // One row past the first graph it holds a checkpointable graph and stops.
+    expect(stop(progress(0, 101, 101))).toBe(true);
+    // A round resumed after the large graph has the next graph as its allowance.
+    expect(stop(progress(100, 103, 3))).toBe(false);
+    expect(onHardLimit).not.toHaveBeenCalled();
+  });
+
+  it('ends a round at the hard limit when it holds more than its first graph declares', () => {
     const manifest = syntheticManifest(2, 100);
     const onHardLimit = vi.fn();
     const stop = createDurableDataRoundBoundary({ manifest, budget: SMALL_BUDGET, onHardLimit });
     expect(stop(progress(0, 29, 29))).toBe(false);
-    expect(onHardLimit).not.toHaveBeenCalled();
-    expect(stop(progress(0, 30, 30))).toBe(true);
-    expect(stop(progress(0, 12, 12, 3_000))).toBe(true);
-    expect(onHardLimit.mock.calls).toEqual([[progress(0, 30, 30)], [progress(0, 12, 12, 3_000)]]);
+    // More rows than the first graph declares before it is whole.
+    expect(stop(progress(0, 50, 101))).toBe(true);
+    // Rows past the manifest's end.
+    expect(stop(progress(200, 229, 29))).toBe(false);
+    expect(stop(progress(200, 230, 30))).toBe(true);
+    expect(stop(progress(200, 212, 12, 3_000))).toBe(true);
+    expect(onHardLimit.mock.calls).toEqual([
+      [progress(0, 50, 101)],
+      [progress(200, 230, 30)],
+      [progress(200, 212, 12, 3_000)],
+    ]);
   });
 
-  it('fits the largest legal asset and one page between its soft and hard limits', () => {
+  it('finds the end of the first graph with rows after an offset', () => {
+    const manifest = manifestOfSizes([0, 5, 0, 7]);
+    expect(manifestFirstGraphEnd(manifest, 0)).toBe(5);
+    expect(manifestFirstGraphEnd(manifest, 4)).toBe(5);
+    expect(manifestFirstGraphEnd(manifest, 5)).toBe(12);
+    expect(manifestFirstGraphEnd(manifest, 12)).toBeUndefined();
+  });
+
+  it('holds one asset larger than the hard limit whole and checkpoints it, then resumes after it', async () => {
     const budget = DEFAULT_DURABLE_DATA_ROUND_BUDGET;
-    const largestAssetRows = 100_000;
-    expect(budget.softRows + largestAssetRows + SYNC_REQUEST_PAGE_SIZE).toBeLessThan(budget.maxRows);
-    expect(budget.softHeapBytes + 4 * 1024 * 1024 + largestAssetRows * 160 + 6 * 1024 * 1024)
-      .toBeLessThan(budget.maxHeapBytes);
+    // One valid asset of 300,000 public rows (over the 262,144-row hard limit), then small ones.
+    const largeRows = 300_000;
+    expect(largeRows).toBeGreaterThan(budget.maxRows);
+    const manifest = manifestOfSizes([largeRows, 20_000, 20_000, 20_000]);
+    const responder = syntheticResponder(manifest);
+    const remotePeerId = `${PEER}-large`;
+    const checkpointStore = new MemorySyncCheckpointStore();
+    const boundary = createDurableDataRoundBoundary({ manifest });
+
+    const first = await fetchSyncPages(dataFetchParams(responder, {
+      remotePeerId,
+      checkpointStore,
+      manifestDigest: DIGEST,
+      manifestPrefixDigestAtOffset: () => PREFIX,
+      shouldStopAfterPage: boundary,
+    }));
+
+    // The round read the whole asset and stopped on the next page.
+    expect(first.completed).toBe(false);
+    expect(first.quads.length).toBeGreaterThan(largeRows);
+    expect(first.quads.length).toBeLessThanOrEqual(largeRows + SYNC_REQUEST_PAGE_SIZE);
+    const planned = planBoundedGraphScopedDurableBatch(
+      first.quads, manifest, 0, first.nextOffset, false, 0, first.quadRawOffsets,
+    );
+    expect(planned?.safeNextOffset).toBe(largeRows);
+    expect(planned?.completedGraphCount).toBe(1);
+
+    // The next round continues after the asset: the durable layer checkpoints its
+    // boundary and rewinds the held responder session to it.
+    checkpointStore.setManifestBoundOffset(
+      getSyncCheckpointKey(remotePeerId, CG_ID, false, 'data'), largeRows, DIGEST, Date.now(), PREFIX, false, largeRows,
+    );
+    responder.requests.length = 0;
+    const second = await fetchSyncPages(dataFetchParams(responder, {
+      remotePeerId,
+      checkpointStore,
+      manifestDigest: DIGEST,
+      manifestPrefixDigestAtOffset: () => PREFIX,
+      shouldStopAfterPage: boundary,
+    }));
+    expect(second.resumedFromOffset).toBe(largeRows);
+    expect(responder.requests[0]!.offset).toBe(largeRows);
+    expect(second.completed).toBe(true);
+    expect(second.quads.length).toBe(60_000);
   });
 
   it('ends a round of a multi-million-row graph at a checkpointable graph within its budget', async () => {
@@ -189,7 +275,7 @@ describe('full-graph durable data round boundary', () => {
     const rowsPerGraph = 11_287;
     const manifest = syntheticManifest(565, rowsPerGraph);
     expect(manifest.manifestRowCount).toBeGreaterThan(6_000_000);
-    const responder = syntheticResponder(manifest, rowsPerGraph);
+    const responder = syntheticResponder(manifest);
     const observed: SyncPageProgress[] = [];
     const boundary = createDurableDataRoundBoundary({ manifest });
 
@@ -220,7 +306,7 @@ describe('full-graph durable data round boundary', () => {
   it('primes a fresh responder session to a proven boundary whose token is gone', async () => {
     const rowsPerGraph = 5;
     const manifest = syntheticManifest(6, rowsPerGraph);
-    const responder = syntheticResponder(manifest, rowsPerGraph);
+    const responder = syntheticResponder(manifest);
     const checkpointStore = new MemorySyncCheckpointStore();
     const remotePeerId = `${PEER}-prime`;
     const checkpointKey = getSyncCheckpointKey(remotePeerId, CG_ID, false, 'data');
