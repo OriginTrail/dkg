@@ -43,6 +43,7 @@ import type { TxResult } from './chain-adapter.js';
 import {
   SERVICE_ASSIGNMENT_TYPES,
   assignmentCapsArg,
+  assignmentCapsRefusal,
   assignmentTermsArg,
   consentSignatureArg,
   convictionServiceDomain,
@@ -178,15 +179,7 @@ function isValidEoaConsent(party: string, digest: string, signature: string): bo
 
 /** The contract's caps rules (`_validateCaps`), in its order. */
 function validateCaps(c: CaAssignmentCaps, maxPeriodSeconds: number, now: number): void {
-  const reason = c.maxCostPerPeriod === 0n ? 'maxCostPerPeriod'
-    : c.maxInferenceCostPerPeriod > c.maxCostPerPeriod ? 'maxInferenceCostPerPeriod'
-      : c.maxQueryCostPerPeriod > c.maxCostPerPeriod ? 'maxQueryCostPerPeriod'
-        : c.maxInferenceCostPerPeriod === 0n && c.maxQueryCostPerPeriod === 0n ? 'classCaps'
-          : c.maxTotalCost < c.maxCostPerPeriod ? 'maxTotalCost'
-            : c.maxCostPerWindow !== 0n && c.maxCostPerWindow < c.maxCostPerPeriod ? 'maxCostPerWindow'
-              : c.maxPeriodSeconds === 0 || c.maxPeriodSeconds > maxPeriodSeconds ? 'maxPeriodSeconds'
-                : c.expiresAt <= now ? 'expiresAt'
-                  : null;
+  const reason = assignmentCapsRefusal(c, maxPeriodSeconds, now);
   if (reason) throw revert('InvalidAssignmentTerms', { reason });
 }
 

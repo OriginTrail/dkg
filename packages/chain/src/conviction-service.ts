@@ -368,6 +368,25 @@ export function fundingRequestArg(req: CaFundingRequest): CaFundingRequest {
   };
 }
 
+/**
+ * The first of `ServiceSubscriptions`'s caps rules (`assign` and
+ * `updateAssignmentCaps`) that `caps` breaks, as the reason its
+ * `InvalidAssignmentTerms` revert carries, or `null` when they hold.
+ * `maxPeriodSeconds` is the chain's longest period
+ * (`ConvictionServiceStorage.maxPeriodSeconds`), `now` its time.
+ */
+export function assignmentCapsRefusal(caps: CaAssignmentCaps, maxPeriodSeconds: number, now: number): string | null {
+  if (caps.maxCostPerPeriod === 0n) return 'maxCostPerPeriod';
+  if (caps.maxInferenceCostPerPeriod > caps.maxCostPerPeriod) return 'maxInferenceCostPerPeriod';
+  if (caps.maxQueryCostPerPeriod > caps.maxCostPerPeriod) return 'maxQueryCostPerPeriod';
+  if (caps.maxInferenceCostPerPeriod === 0n && caps.maxQueryCostPerPeriod === 0n) return 'classCaps';
+  if (caps.maxTotalCost < caps.maxCostPerPeriod) return 'maxTotalCost';
+  if (caps.maxCostPerWindow !== 0n && caps.maxCostPerWindow < caps.maxCostPerPeriod) return 'maxCostPerWindow';
+  if (caps.maxPeriodSeconds === 0 || caps.maxPeriodSeconds > maxPeriodSeconds) return 'maxPeriodSeconds';
+  if (caps.expiresAt <= now) return 'expiresAt';
+  return null;
+}
+
 /** A Conviction Account id, or a `ConvictionServiceInputError`. */
 export function requireAccountId(accountId: unknown): bigint {
   return requireUint(accountId, UINT256_MAX, 'accountId');

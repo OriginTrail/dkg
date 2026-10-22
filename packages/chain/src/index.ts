@@ -388,6 +388,7 @@ export {
   CA_SERVICE_CLASS_INFERENCE,
   CA_SERVICE_CLASS_QUERY,
   SERVICE_ASSIGNMENT_TYPES,
+  assignmentCapsRefusal,
   convictionServiceDomain,
   serviceAssignmentDigest,
   serviceSubscriptionIdOf,

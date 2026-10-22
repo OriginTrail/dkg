@@ -27,6 +27,7 @@ import { HubContractNotFoundError } from '../src/hub-contract-not-found-error.js
 import { RemoteSignerError } from '../src/remote-signer-errors.js';
 import {
   SERVICE_ASSIGNMENT_TYPES,
+  assignmentCapsRefusal,
   convictionServiceDomain,
   serviceAssignmentDigest,
   serviceSubscriptionIdOf,
@@ -740,5 +741,31 @@ describe('the accounts that assigned a buyer key', () => {
     h.missing.add('ServiceSubscriptions');
     await expect(h.adapter.listConvictionServiceAccountsByAssignee(BUYER)).rejects.toBeInstanceOf(ConvictionServiceUnavailableError);
     expect(h.pages).toHaveLength(0);
+  });
+});
+
+describe('the caps rules', () => {
+  const NOW = 1_760_000_000;
+  const MAX_PERIOD = 2_678_400;
+
+  it('names the first rule the caps break, in the contract\'s order, as its InvalidAssignmentTerms reason', () => {
+    const cases: Array<[Partial<CaAssignmentTerms>, string | null]> = [
+      [{}, null],
+      [{ maxCostPerPeriod: 0n, maxTotalCost: 0n }, 'maxCostPerPeriod'],
+      [{ maxInferenceCostPerPeriod: 26n * TRAC }, 'maxInferenceCostPerPeriod'],
+      [{ maxQueryCostPerPeriod: 26n * TRAC }, 'maxQueryCostPerPeriod'],
+      [{ maxInferenceCostPerPeriod: 0n, maxQueryCostPerPeriod: 0n }, 'classCaps'],
+      [{ maxTotalCost: 24n * TRAC }, 'maxTotalCost'],
+      [{ maxCostPerWindow: 24n * TRAC }, 'maxCostPerWindow'],
+      [{ maxCostPerWindow: 0n }, null],
+      [{ maxPeriodSeconds: 0 }, 'maxPeriodSeconds'],
+      [{ maxPeriodSeconds: MAX_PERIOD + 1 }, 'maxPeriodSeconds'],
+      [{ expiresAt: NOW }, 'expiresAt'],
+      // The first broken rule wins.
+      [{ maxQueryCostPerPeriod: 26n * TRAC, expiresAt: NOW }, 'maxQueryCostPerPeriod'],
+    ];
+    for (const [over, reason] of cases) {
+      expect(assignmentCapsRefusal({ ...TERMS, ...over }, MAX_PERIOD, NOW), JSON.stringify(over, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))).toBe(reason);
+    }
   });
 });
