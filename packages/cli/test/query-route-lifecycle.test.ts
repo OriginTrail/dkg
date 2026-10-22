@@ -104,6 +104,19 @@ function cclRouteContext(
 }
 
 describe('/api/query request lifecycle', () => {
+  it('forwards metadata opt-in as an explicit boolean under the normal guarded query route', async () => {
+    for (const value of [true, false, 'true']) {
+      const req = new RequestStub({ sparql: 'SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }',
+        contextGraphId: 'parent', includeContextGraphPartitions: true, includeSharedMemoryMeta: value });
+      const res = new ResponseStub(), query = vi.fn(async (_sparql: string, _options: Record<string, unknown>) => ({ bindings: [] }));
+      const tracker = { start() {}, startPhase() {}, completePhase() {}, complete() {}, fail() {}, cancel() {} };
+      await handleQueryRoutes(queryRouteContext(req, res, { query }, tracker));
+      expect(res.statusCode).toBe(200);
+      expect(query.mock.calls[0][1]).toMatchObject({ contextGraphId: 'parent', includeContextGraphPartitions: true,
+        includeSharedMemoryMeta: value === true });
+    }
+  });
+
   it.each([
     {
       path: '/api/ccl/policy/approve',

@@ -1,3 +1,4 @@
+import type { QueryOptions } from './query-options.js';
 import { shareJobsPath, shareReconciliationPath } from './share-job-client-paths.js';
 import { createEntityClient } from './entity-search/client.js';
 import { readFile } from 'node:fs/promises';
@@ -1718,25 +1719,7 @@ export class ApiClient {
   async query(
     sparql: string,
     contextGraphId?: string,
-    opts?: {
-      graphSuffix?: string;
-      includeSharedMemory?: boolean;
-      includeContextGraphPartitions?: boolean;
-      view?: 'working-memory' | 'shared-working-memory' | 'verifiable-memory';
-      agentAddress?: string;
-      assertionName?: string;
-      subGraphName?: string;
-      verifiedGraph?: string;
-      minTrust?:
-        | 'SelfAttested'
-        | 'Endorsed'
-        | 'PartiallyVerified'
-        | 'ConsensusVerified'
-        | 0
-        | 1
-        | 2
-        | 3;
-    },
+    opts?: QueryOptions,
   ): Promise<{ result: QueryResult }> {
     return this.post('/api/query', {
       sparql,
@@ -1744,6 +1727,7 @@ export class ApiClient {
       graphSuffix: opts?.graphSuffix,
       includeSharedMemory: opts?.includeSharedMemory,
       includeContextGraphPartitions: opts?.includeContextGraphPartitions,
+      includeSharedMemoryMeta: opts?.includeSharedMemoryMeta,
       view: opts?.view,
       agentAddress: opts?.agentAddress,
       assertionName: opts?.assertionName,
