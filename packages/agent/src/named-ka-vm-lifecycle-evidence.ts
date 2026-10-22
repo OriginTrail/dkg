@@ -12,8 +12,6 @@ import type { ConfirmedNamedKaVmPublication } from './named-ka-vm-lifecycle-reco
 import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
 import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
 
-const materializationFingerprints = new WeakMap<ConfirmedLifecycleMaterialization, string>();
-
 function invalidNamedSeal(): never { throw new NamedKaVmLifecycleIntegrityError('Invalid confirmed named assertion seal evidence'); }
 /** Fresh confirmations stay typed. Resolved identity supplies only a missing legacy seal field. */
 export function confirmedNamedSeal(seal: AssertionSeal, packedKaId: bigint): CanonicalGraphScopedAuthorSealV1 {
@@ -54,6 +52,8 @@ export interface ConfirmedLifecyclePublicSnapshot extends LocallyTrustedKnowledg
 const rootHex = (root: string | Uint8Array): string => (typeof root === 'string' ? root : hexlify(root)).replace(/^0x/, '').toLowerCase();
 export interface ValidatedLifecycleMaterialization extends ConfirmedLifecycleMaterialization {
   readonly proof: ConfirmedGraphKnowledgeAssetProof;
+  /** Order-independent evidence digest computed once at validation; never serialized. */
+  readonly fingerprint: string;
 }
 declare const validatedLifecycleCommand: unique symbol;
 /** Only admission and journal decoding construct executable, frozen recovery commands. */
@@ -206,10 +206,10 @@ export function normalizeLifecycleMaterialization(value: unknown, input: Confirm
   // Cache the existing order-independent evidence comparison at validation,
   // outside compact journal serialization. Frozen models cannot change afterward.
   const terms = (rows: readonly Quad[]) => rows.map(q => JSON.stringify([q.subject, q.predicate, q.object, q.graph])).sort();
-  materializationFingerprints.set(model, createHash('sha256').update(JSON.stringify([
+  const fingerprint = createHash('sha256').update(JSON.stringify([
     model.kaUal, terms(model.publicQuads), terms(model.metadataQuads),
-  ])).digest('hex'));
-  return model;
+  ])).digest('hex');
+  return Object.freeze({ ...model, fingerprint });
 }
 
 /** Incomplete historical journal evidence can be retained but cannot execute. */
@@ -239,8 +239,8 @@ export function reconcileLifecycleRepairEvidence(previous: RetainedLifecycleRepa
   if (current.packedKaId !== incoming.packedKaId) conflict();
   if (current.namedSeal && incoming.namedSeal && canonicalizeCanonicalGraphScopedAuthorSealV1(current.namedSeal) !== canonicalizeCanonicalGraphScopedAuthorSealV1(incoming.namedSeal)) conflict();
   if (current.materialization && incoming.materialization) {
-    const currentFingerprint = materializationFingerprints.get(current.materialization);
-    const incomingFingerprint = materializationFingerprints.get(incoming.materialization);
+    const currentFingerprint = current.materialization.fingerprint;
+    const incomingFingerprint = incoming.materialization.fingerprint;
     if (!currentFingerprint || !incomingFingerprint || currentFingerprint !== incomingFingerprint) conflict();
   }
   const materialization = current.materialization ?? incoming.materialization, namedSeal = current.namedSeal ?? incoming.namedSeal;

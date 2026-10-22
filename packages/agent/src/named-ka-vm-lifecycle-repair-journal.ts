@@ -22,7 +22,7 @@ type DecodedLifecycleEvidence = (
   | { input: HistoricalUnboundLifecycleRepairInput; retention: 'historical-unbound' }
 );
 export type LifecycleRepairEntry = RepairRetryState & DecodedLifecycleEvidence;
-/** Persist the stable wire representation; execution-only validated proof is reconstructed at decode. */
+/** Persist the stable wire representation; execution-only proof and fingerprint are reconstructed at decode. */
 export function lifecycleMaterializationWire(snapshot: ConfirmedLifecycleMaterialization): ConfirmedLifecycleMaterialization {
   return { kaUal: snapshot.kaUal, publicQuads: snapshot.publicQuads, metadataQuads: snapshot.metadataQuads };
 }

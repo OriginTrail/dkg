@@ -31,7 +31,7 @@ import {
   TripleStoreAsyncLiftPublisher,
   type KnowledgeAssetVmPublishRequest,
 } from '@origintrail-official/dkg-publisher';
-import { OxigraphStore, StoreOperationTimeoutError, GraphManager, PrivateContentStore, createManagedOxigraphSparqlStoreV1, deleteByPatternWithoutCount } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, StoreOperationTimeoutError, GraphManager, PrivateContentStore, SparqlHttpStore, deleteByPatternWithoutCount } from '@origintrail-official/dkg-storage';
 import { startOxigraphSparqlEndpoint } from '../../storage/test/helpers/oxigraph-sparql-endpoint.js';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 import { extractFromMarkdown } from '../../cli/src/extraction/markdown-extractor.js';
@@ -133,15 +133,17 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
       const agent = await createAgent(`QueuedUpdateRetry-${options.label}`, {
         ...(dataDir ? { dataDir, publicSnapshotStore } : {}),
         ...(endpoint ? {
-          store: createManagedOxigraphSparqlStoreV1({
+          store: new SparqlHttpStore({
             queryEndpoint: endpoint.queryEndpoint,
             updateEndpoint: endpoint.updateEndpoint,
-            // This in-process fixture fsyncs its snapshot before every write ACK.
-            // Atomic/readback support alone never certifies a production endpoint.
+            consistencyProfile: 'atomic-readback',
+            // This custom endpoint fsyncs its snapshot before every write ACK.
+            // Use explicit generic certification; stock managed HTTP has no barrier.
             writesDurableOnAcknowledgement: endpoint.writesDurableOnAcknowledgement,
           }),
         } : {}),
       });
+      if (endpoint) expect(agent.store.commitment?.durability).toBe('restart-durable');
       ownedAgents.push(agent);
       return { agent, publicSnapshotStore };
     };
@@ -316,7 +318,7 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
       queue = makeQueue();
       dispatch = vi.spyOn((agent as any).chain, 'updateKnowledgeCollectionV10');
       settlement = vi.spyOn(agent as any, '_repairConfirmedNamedKaVmLifecycle');
-      // Fresh managed adapter, agent, file snapshot reader and native queue.
+      // Fresh certified HTTP adapter, agent, file snapshot reader and native queue.
       // The HTTP fixture remains available: this proves client/agent reopen.
       // Its awaited fsynced ACK contract is separately checked from disk above;
       // it grants no durability contract to upstream oxigraph-server.
@@ -339,7 +341,7 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
     { label: 'owner-only', accessPolicy: 'ownerOnly' },
     { label: 'allow-list', accessPolicy: 'allowList', allowedPeers: allowList },
     { label: 'private', accessPolicy: 'ownerOnly', privatePayload: true },
-    { label: 'managed-reopen', accessPolicy: 'allowList', allowedPeers: allowList, reopen: true },
+    { label: 'http-reopen', accessPolicy: 'allowList', allowedPeers: allowList, reopen: true },
   ])('retries and finalizes the same $label UPDATE job once [GH#2482]', async (options) => {
     await withUpdateFixture(options, async (fixture) => {
       const { queue, jobId, originalRequest, dispatch, writeAhead, confirmations, settlement } = fixture;
@@ -2116,9 +2118,13 @@ describe('rootless graph-scoped KA lifecycle', () => {
           finalizeRecovered: input => restartedAgent!.finalizeRecoveredQueuedKnowledgeAssetVmPublish(input),
         },
       });
-      await recoveredQueue.reconcileTransactions();
-      expect(await recoveredQueue.getStatus(jobId)).toMatchObject({ status: 'finalized',
-        finalization: { txHash: processed!.broadcast!.txHash } });
+      // RDF becomes readable before the active writer releases its lock/barrier.
+      // Ordinary recovery retries a busy writer; the first pass need not terminalize.
+      await vi.waitFor(async () => {
+        await recoveredQueue.reconcileTransactions();
+        expect(await recoveredQueue.getStatus(jobId)).toMatchObject({ status: 'finalized',
+          finalization: { txHash: processed!.broadcast!.txHash } });
+      }, { timeout: 15_000, interval: 100 });
       expect(await recoveredQueue.processNext('wallet-1')).toBeNull();
       expect(republish).not.toHaveBeenCalled();
       expect(await (restartedAgent as any).chain.getMerkleRootCount(kaId)).toBe(rootCount);

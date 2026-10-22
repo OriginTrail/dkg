@@ -19,6 +19,10 @@ export class NamedKaVmLifecycleSnapshots {
   private directoryReady = false;
   private ready?: Promise<void>;
   private cleaning?: Promise<void>;
+  private readonly retiring = new Map<string, Promise<void>>();
+  private retained = new Set<string | undefined>();
+  private retirementAllowed = false;
+  private cleanupRequested = false;
   private readonly pins = new Map<string, number>();
   private readonly preparing = new Map<string, Promise<void>>();
   private active = 0;
@@ -78,9 +82,9 @@ export class NamedKaVmLifecycleSnapshots {
       } };
       this.references.set(snapshot, ref);
       try {
-        // A cleanup already dispatched before our pin may still unlink this ref.
-        // Wait for physical retirement before trusting the cache or recreating it.
-        await this.cleaning?.catch(() => {});
+        // An unlink dispatched before our pin may still retire this same ref.
+        // Unrelated cleanup must not block independent snapshot preparations.
+        await this.retiring.get(ref)?.catch(() => {});
         await this.ensureDirectory();
         if (!this.durable.has(ref)) {
           let work = this.preparing.get(ref);
@@ -127,27 +131,54 @@ export class NamedKaVmLifecycleSnapshots {
     try { return this.encodePrepared(entries); } finally { for (const lease of leases) lease.release(); }
   }
 
-  /** Called under journal serialization, only after the compact journal's durable commit. */
-  retireUnreferenced(entries: ReadonlyMap<string, LifecycleRepairEntry>): Promise<void> {
+  /** Publish only a durably committed journal's reference set, synchronously. */
+  publishRetained(entries: ReadonlyMap<string, LifecycleRepairEntry>): void {
+    this.retained = new Set([...entries.values()].map(entry => entry.input.materialization && this.references.get(entry.input.materialization)));
+    this.retirementAllowed = true;
+  }
+
+  /** An uncertain checkpoint may visibly contain refs absent from the in-memory map. */
+  suspendRetirement(): void { this.retirementAllowed = false; }
+
+  /** Optional bounded I/O is owned here, outside compact journal serialization. */
+  cleanup(): Promise<void> {
+    this.cleanupRequested = true;
     if (this.cleaning) return this.cleaning;
-    const retained = new Set([...entries.values()].map(entry => entry.input.materialization && this.references.get(entry.input.materialization)));
-    // Register ownership before invoking any filesystem callback.
     const task = Promise.resolve().then(async () => {
-      let files: string[];
-      try { files = await readdir(this.directory); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
-      const obsolete = files.filter(file => /^[a-f0-9]{64}\.json$/.test(file)
-        && !retained.has(file.slice(0, -5)) && !this.pins.has(file.slice(0, -5))).slice(0, 10);
-      for (const file of obsolete) {
-        const ref = file.slice(0, -5);
-        if (this.pins.has(ref)) continue;
-        this.durable.delete(ref);
-        try { await unlink(join(this.directory, file)); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-      }
+      try {
+        do { this.cleanupRequested = false; await this.cleanupPass(); }
+        while (this.cleanupRequested && this.retirementAllowed);
+      } finally { if (this.cleaning === task) this.cleaning = undefined; }
     });
     this.cleaning = task;
-    void task.finally(() => { if (this.cleaning === task) this.cleaning = undefined; }).catch(() => {});
     return task;
   }
+
+  private async cleanupPass(): Promise<void> {
+    if (!this.retirementAllowed) return;
+    let files: string[];
+    try { files = await readdir(this.directory); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+    let removed = 0;
+    for (const file of files) {
+      if (!this.retirementAllowed || removed >= 10) break;
+      if (!/^[a-f0-9]{64}\.json$/.test(file)) continue;
+      const ref = file.slice(0, -5);
+      // Both sets may change while an earlier unlink is physically pending.
+      if (this.retained.has(ref) || this.pins.has(ref)) continue;
+      this.durable.delete(ref); removed++;
+      const work = Promise.resolve().then(() => unlink(join(this.directory, file)));
+      this.retiring.set(ref, work);
+      try { await work; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      finally { if (this.retiring.get(ref) === work) this.retiring.delete(ref); }
+    }
+  }
+
+  /** Standalone codec-owner convenience; the journal owner publishes before scheduling. */
+  retireUnreferenced(entries: ReadonlyMap<string, LifecycleRepairEntry>): Promise<void> {
+    this.publishRetained(entries); return this.cleanup();
+  }
+
+  async drain(): Promise<void> { while (this.cleaning) await this.cleaning.catch(() => {}); }
 }
