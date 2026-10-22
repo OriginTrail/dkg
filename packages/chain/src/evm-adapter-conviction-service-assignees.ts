@@ -34,11 +34,11 @@ import {
 } from './evm-adapter-conviction-service.js';
 
 /** Blocks per `eth_getLogs` page of the assignee scan, before the reader fits them to an RPC's span cap. */
-export const CA_ASSIGNEE_SCAN_PAGE_BLOCKS = 10_000;
+const CA_ASSIGNEE_SCAN_PAGE_BLOCKS = 10_000;
 /** Pages one scan may read, about 20 million blocks; a longer range fails with guidance. */
-export const CA_ASSIGNEE_SCAN_MAX_PAGES = 2_000;
+const CA_ASSIGNEE_SCAN_MAX_PAGES = 2_000;
 /** The RPC usage consumer of the scan's `eth_getLogs` reads. */
-export const CA_ASSIGNEE_SCAN_RPC_USAGE_CONSUMER = 'conviction service ServiceAssigned logs';
+const CA_ASSIGNEE_SCAN_RPC_USAGE_CONSUMER = 'conviction service ServiceAssigned logs';
 
 interface AssigneeScan {
   /** The last block scanned. */

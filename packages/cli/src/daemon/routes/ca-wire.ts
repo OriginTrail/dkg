@@ -28,7 +28,7 @@ const UINT40_MAX = 0xff_ffff_ffff;
 const UINT32_MAX = 0xffff_ffff;
 
 /** The longest period the contracts take by default (`ConvictionServiceStorage.maxPeriodSeconds`): 31 days. */
-export const CA_DEFAULT_MAX_PERIOD_SECONDS = 31 * 86_400;
+const CA_DEFAULT_MAX_PERIOD_SECONDS = 31 * 86_400;
 
 /** A request the route refuses with 400 before anything is read or sent. */
 export class CaBadRequest extends Error {
@@ -59,7 +59,7 @@ function refuseUnknownFields(body: Record<string, unknown>, allowed: readonly st
 }
 
 /** A decimal TRAC amount (string or number) as wei, from 0 (or 1 wei with `positive`) to the uint96 range. */
-export function parseTracAmount(raw: unknown, field: string, opts: { positive?: boolean } = {}): bigint {
+function parseTracAmount(raw: unknown, field: string, opts: { positive?: boolean } = {}): bigint {
   if (typeof raw !== 'string' && typeof raw !== 'number') {
     throw new CaBadRequest(`${field} must be a decimal string of TRAC`);
   }
@@ -72,7 +72,7 @@ export function parseTracAmount(raw: unknown, field: string, opts: { positive?: 
 }
 
 /** A decimal integer of wei (string, or a safe-integer number) up to `max`. */
-export function parseWei(raw: unknown, field: string, max = UINT96_MAX): bigint {
+function parseWei(raw: unknown, field: string, max = UINT96_MAX): bigint {
   const s = typeof raw === 'number' && Number.isSafeInteger(raw) ? String(raw) : raw;
   if (typeof s !== 'string' || !/^\d+$/.test(s.trim())) throw new CaBadRequest(`${field} must be a decimal string of wei`);
   const value = BigInt(s.trim());
@@ -93,7 +93,7 @@ export function parseInteger(raw: unknown, field: string, min: number, max: numb
  * An ISO-8601 time with its zone (`Z` or `±hh:mm`) as unix seconds: a time
  * without one would mean whatever the node's local zone makes of it.
  */
-export function parseIsoTime(raw: unknown, field: string): number {
+function parseIsoTime(raw: unknown, field: string): number {
   if (typeof raw !== 'string'
     || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(raw.trim())) {
     throw new CaBadRequest(`${field} must be an ISO-8601 time with a zone, such as 2026-11-30T00:00:00Z`);
