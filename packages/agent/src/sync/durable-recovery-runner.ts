@@ -24,8 +24,10 @@ import {
 import { deleteSyncPageCheckpoint } from './requester/page-fetch.js';
 import type { DurableMetaContinuation } from './requester/durable-sync.js';
 import {
+  durableBoundaryIdentity,
   preferVerifiedDurableBoundary,
   seedVerifiedDurableBoundary,
+  takeRejectedResumeOffset,
   verifiedDurableBoundaryOf,
   type VerifiedDurableBoundary,
 } from './durable-recovery-boundary-seed.js';
@@ -129,6 +131,9 @@ export class DurableRecoveryRunner {
   /** Per graph, the verified DATA boundary worth continuing, learned from any peer's checkpoint. */
   private readonly verifiedBoundaryByGraph = new Map<string, VerifiedDurableBoundary>();
 
+  /** Per graph and peer, the boundary that peer's rows did not line up with; it is not handed to that peer again. */
+  private readonly refusedBoundaryByGraphPeer = new Map<string, string>();
+
   private metaScopeSequence = 0;
 
   run(input: {
@@ -181,6 +186,8 @@ export class DurableRecoveryRunner {
     const progressTotals = createProgressTotals();
     const attemptedWithoutProgress = new Set<string>();
     const incompatiblePeers = new Set<string>();
+    // Peers retried at once, without the boundary their rows refused.
+    const retriedAfterRefusal = new Set<string>();
     // Set once a seeded peer discarded the boundary; the rest of this run uses each peer's own checkpoint.
     let seedingRefused = false;
     let slices = 0;
@@ -328,7 +335,10 @@ export class DurableRecoveryRunner {
         false,
         'data',
       );
-      const boundary = seedingRefused ? undefined : this.verifiedBoundaryByGraph.get(contextGraphId);
+      const graphPeerKey = `${contextGraphId}\0${candidate.peerId}`;
+      const remembered = seedingRefused ? undefined : this.verifiedBoundaryByGraph.get(contextGraphId);
+      const boundary = remembered && this.refusedBoundaryByGraphPeer.get(graphPeerKey)
+        !== durableBoundaryIdentity(remembered.manifestDigest, remembered.offset) ? remembered : undefined;
       const seeded = seedVerifiedDurableBoundary(deps.checkpointStore, checkpointKey, boundary);
       if (seeded) {
         deps.logInfo(
@@ -358,8 +368,13 @@ export class DurableRecoveryRunner {
       accumulateProgress(progressTotals, lastResult);
       recordPeerSlice(candidate.peerId, lastResult);
       const after = deps.checkpointStore.get(checkpointKey);
-      // A round discards a seeded boundary its peer's rows or META do not line up with.
-      if (seeded && !after) seedingRefused = true;
+      // The round reports a boundary its peer's rows did not line up with: that peer never gets it
+      // again, and after a refused seed the rest of this run uses each peer's own checkpoint.
+      const rejectedResumeOffset = takeRejectedResumeOffset(metaContinuations.get(candidate.peerId));
+      if (rejectedResumeOffset !== undefined) {
+        this.refusedBoundaryByGraphPeer.set(graphPeerKey, durableBoundaryIdentity(before?.manifestDigest, rejectedResumeOffset));
+        if (seeded) seedingRefused = true;
+      }
       const preferred = preferVerifiedDurableBoundary(
         this.verifiedBoundaryByGraph.get(contextGraphId),
         verifiedDurableBoundaryOf(after),
@@ -426,6 +441,12 @@ export class DurableRecoveryRunner {
         continue;
       }
 
+      if (rejectedResumeOffset !== undefined && !retriedAfterRefusal.has(candidate.peerId)) {
+        // Its round discarded the checkpoint: retry the peer once, from its own state, without the boundary.
+        retriedAfterRefusal.add(candidate.peerId);
+        await owner.scheduleContinuation();
+        continue;
+      }
       attemptedWithoutProgress.add(candidate.peerId);
       if (outcome === 'incompatible') incompatiblePeers.add(candidate.peerId);
       if ((lastResult.timedOutPhases ?? 0) > 0) health.recentTimeouts += 1;

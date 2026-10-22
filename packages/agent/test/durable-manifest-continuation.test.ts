@@ -204,7 +204,7 @@ function createTwoRoundHarness(
     logDebug: () => {},
   });
 
-  const run = async (round: Round) => {
+  const run = async (round: Round, durableMetaContinuation?: DurableMetaContinuation) => {
     currentRound = round;
     return runDurableSync({
       ctx,
@@ -212,6 +212,7 @@ function createTwoRoundHarness(
       contextGraphIds: [contextGraphId],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages: fetch,
+      durableMetaContinuation,
       exactAssetSelectionFor: exactAssetUals
         ? () => ({ kind: 'ual-only', assetUals: exactAssetUals })
         : undefined,
@@ -501,12 +502,15 @@ describe('manifest-bound durable DATA continuation', () => {
     );
 
     // This responder's rows at the boundary belong to the graph before it.
+    const continuation: DurableMetaContinuation = { requesterScope: 'durable-recovery-meta:misaligned' };
     const misaligned = await harness.run({
       meta,
       dataPage: (offset) => offset === 0 ? [...prefix, ...x[1]!.payload] : offset === prefix.length ? prefix : [],
-    });
+    }, continuation);
     expect(misaligned.complete).toBe(false);
     expect(harness.checkpointStore.get(key)).toBeUndefined();
+    // The round tells the recovery owner which boundary the peer's rows refused.
+    expect(continuation.rejectedResumeOffset).toBe(prefix.length);
 
     harness.dataRequests.length = 0;
     const restarted = await harness.run({
