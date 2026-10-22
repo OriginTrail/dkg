@@ -17,8 +17,8 @@ export function configuredParameter(
 ): bigint | undefined {
   const environment = hre.helpers.parametersConfig[hre.network.config.environment];
   const merged = {
-    ...(environment?.[contractName] ?? {}),
-    ...(environment?.overrides?.[hre.network.name]?.[contractName] ?? {}),
+    ...environment?.[contractName],
+    ...environment?.overrides?.[hre.network.name]?.[contractName],
   } as Record<string, ParameterValue>;
   const value = merged[parameter];
   if (value === undefined) return undefined;
