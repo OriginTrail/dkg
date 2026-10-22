@@ -90,7 +90,7 @@ An assignment uses up the account's assignment nonce, so a consent assigns once:
 dkg ca assign <accountId> --consent consent.json --owner-signature 0x…
 ```
 
-**A buyer key whose signer refuses typed data** consents the same way, by sending the assignment with the owner's signature. Without a consent, its file holds only the terms for the owner to sign: amounts in wei, `expiresAt` in unix seconds, and the account's current assignment nonce, which the `assignmentNonce(accountId)` view of the `ConvictionServiceStorage` contract that `dkg ca contracts` names returns:
+**A buyer key whose signer refuses typed data** consents the same way, by sending the assignment with the owner's signature. That needs an owner who signs with a wallet of its own, as above: an owner node signs only by sending the assignment, which needs the assignee's signature. Without a consent, the file holds only the terms for the owner to sign: amounts in wei, `expiresAt` in unix seconds, and the account's current assignment nonce, which the `assignmentNonce(accountId)` view of the `ConvictionServiceStorage` contract that `dkg ca contracts` names returns:
 
 ```json
 {
