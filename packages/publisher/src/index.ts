@@ -569,3 +569,5 @@ export { assertionLifecycleAuthorCandidates, readAssertionLifecycleCandidates } 
 
 export { readShareCompletionEvidence, tryCreateShareCompletionEvidence, shareEvidenceMatchesRequest, type ShareCompletionEvidence } from './share-completion-evidence.js';
 export { validateShareReconciliationInput, type ShareReconciliationInput, type ShareReconciliationResult } from './share-reconciliation.js';
+
+export { clearDischargedStorageAckCopies, planStorageAckCopyCleanup, type StorageAckCopyCleanupInput, type StorageAckCopyCleanupWriter } from './storage-ack-copy-cleanup.js';

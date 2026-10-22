@@ -319,6 +319,12 @@ export class ContextGraphMetaProjection {
     const contextGraphId =
       contextGraphIdFromMetaGraphUri(graphUri) ?? contextGraphIdFromCatalogGraphUri(graphUri);
     if (contextGraphId) {
+      // Lifecycle stamps cannot change this projection. Still fence any fact on the CG
+      // subject: read-authority absence proofs inspect all its predicates, not only this set.
+      if (subject !== undefined && isSafeIri(subject) && subject !== contextGraphDataUri(contextGraphId)
+        && predicate !== undefined && isSafeIri(predicate)
+        && !PROJECTION_RECORD_PREDICATES.has(predicate)
+        && !WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES.has(predicate)) return;
       this.markDirty(contextGraphId, false);
       // Catalog reads admit only the disclosure floor, never peers or roster.
       // Keep projection/node-wide and recipient-key invalidation independent.

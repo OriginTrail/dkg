@@ -1,3 +1,4 @@
+import { clearDischargedStorageAckCopies, type StorageAckCopyCleanupWriter } from '@origintrail-official/dkg-publisher';
 import { mergeRpcUsageWindows } from '@origintrail-official/dkg-chain';
 import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
 import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-recovery-host.js';
@@ -680,6 +681,7 @@ export class DKGAgentBase {
   readonly wallet: AgentWallet;
   readonly node: DKGNode;
   readonly store: TripleStore;
+  readonly storageAckCopyCleanup: StorageAckCopyCleanupWriter;
   protected readonly storageAckLedgerTimestampWriter: StorageAckLedgerTimestampWriter;
   protected readonly publishedNamedKaVmLifecycleWriter: PublishedNamedKaVmLifecycleWriter;
   readonly publisher: DKGPublisher;
@@ -2086,11 +2088,13 @@ export class DKGAgentBase {
     publicSnapshotStore?: WorkspacePublicSnapshotStore,
     publishedLifecycleWriter?: PublishedNamedKaVmLifecycleWriter,
     ledgerTimestampWriter?: StorageAckLedgerTimestampWriter,
+    storageAckCopyCleanup?: StorageAckCopyCleanupWriter,
   ) {
     this.config = config;
     this.wallet = wallet;
     this.node = node;
     this.store = store;
+    this.storageAckCopyCleanup = storageAckCopyCleanup ?? (input => clearDischargedStorageAckCopies(store, input));
     this.storageAckLedgerTimestampWriter = ledgerTimestampWriter ?? applyStorageAckLedgerTimestamp(store);
     this.publishedNamedKaVmLifecycleWriter = publishedLifecycleWriter
       ?? (input => applyPublishedNamedKaVmLifecycle(store, input));

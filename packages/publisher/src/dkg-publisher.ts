@@ -1,3 +1,4 @@
+import type { StorageAckCopyCleanupWriter } from './storage-ack-copy-cleanup.js';
 import { assertPromoteSeal } from './assertion-promote-seal.js';
 import { certifyPromoteNoEffectRejection } from './promote-no-effect-rejection.js';
 import { createPromoteOwnershipReader, type PromoteOwnershipReader } from './async-promote-ownership.js';
@@ -415,6 +416,8 @@ export interface DurableRootPromotionAtomicCompanionResolver {
 }
 
 export interface DKGPublisherConfig {
+  /** Closed cleanup composed by the agent with graph-scoped mutation observation. */
+  storageAckCopyCleanup?: StorageAckCopyCleanupWriter;
   store: TripleStore;
   /** Trusted queue ownership scope, explicitly supplied by the composing agent. */
   promoteOwnershipReader?: PromoteOwnershipReader;
@@ -449,12 +452,8 @@ export interface DKGPublisherConfig {
   workspaceSenderKeyEncryptor?: WorkspaceSenderKeyEncryptor;
   /** Optional out-of-Oxigraph store for immutable public SWM operation snapshots. */
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
-  /**
-   * OT-RFC-43 Option 1 — when present, the publisher allocates a deterministic
-   * packed reservedKaId for each V10 mint (and reconciles the per-author floor
-   * against the chain on first use). Omit for mock/no-chain or pre-Option-1
-   * flows; the real EVM adapter then throws on the missing reservedKaId.
-   */
+  /** Allocate packed mint IDs and reconcile the author floor on first use.
+   * Optional for mocks; real EVM publishing requires a reserved ID. */
   kaAllocator?: KaIdAllocator;
   /**
    * Synchronous root-only resolver for metadata that must share the SWM graph's
@@ -1154,7 +1153,7 @@ export class DKGPublisher implements Publisher {
     this.setWorkspaceAgentRecipientResolver(config.workspaceAgentRecipientResolver);
     this.workspaceSenderKeyEncryptor = config.workspaceSenderKeyEncryptor;
     this.publicSnapshotStore = config.publicSnapshotStore;
-    this.publishedSnapshotRetirement = new PublishedSnapshotRetirement(this.store, config.publicSnapshotStore?.lifecycle);
+    this.publishedSnapshotRetirement = new PublishedSnapshotRetirement(this.store, config.publicSnapshotStore?.lifecycle, config.storageAckCopyCleanup);
     this.publisherPlanner = new PublisherPlanner({
       chain: this.chain,
       resolvePublisherAddressSelection: (contextGraphId, options) =>
