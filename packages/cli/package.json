@@ -47,7 +47,7 @@
   },
   "dependencies": {
     "@iarna/toml": "^2.2.5",
-    "@modelcontextprotocol/sdk": "^1",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@origintrail-official/dkg-adapter-hermes": "workspace:*",
     "@origintrail-official/dkg-adapter-openclaw": "workspace:*",
     "@origintrail-official/dkg-adapter-prime-agent": "workspace:*",
