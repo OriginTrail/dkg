@@ -495,11 +495,13 @@ describe('byte-budget sync pagination', () => {
   it('returns a soft page boundary as incomplete progress without a timeout', async () => {
     let sends = 0;
     const observedProgress: Array<{ resumedFromOffset: number; nextOffset: number }> = [];
+    const retained = { subject: 'urn:s', predicate: 'urn:p', object: 'urn:o', graph: 'urn:g' };
     const result = await fetchSyncPages(pageFetchParams({
       includeSharedMemory: false,
       phase: 'data',
       graphUri: `did:dkg:context-graph:${CG_ID}`,
-      parseAndFilter: async () => ({ quads: [], totalQuads: SYNC_PAGE_SIZE }),
+      // The responder sent a full page; one of its rows survived filtering.
+      parseAndFilter: async () => ({ quads: [retained], totalQuads: SYNC_PAGE_SIZE }),
       send: async () => {
         sends += 1;
         return new TextEncoder().encode('<urn:s> <urn:p> <urn:o> <urn:g> .');
@@ -514,8 +516,9 @@ describe('byte-budget sync pagination', () => {
     expect(observedProgress).toEqual([{
       resumedFromOffset: 0,
       nextOffset: SYNC_PAGE_SIZE,
-      acceptedQuads: 0,
-      acceptedHeapBytesEstimate: 0,
+      acceptedQuads: 1,
+      acceptedHeapBytesEstimate: expect.any(Number),
+      pageQuads: [retained],
     }]);
     expect(result).toMatchObject({
       nextOffset: SYNC_PAGE_SIZE,

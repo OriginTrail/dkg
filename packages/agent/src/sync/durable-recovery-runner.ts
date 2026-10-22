@@ -25,6 +25,7 @@ import { deleteSyncPageCheckpoint } from './requester/page-fetch.js';
 import type { DurableMetaContinuation } from './requester/durable-sync.js';
 import {
   durableBoundaryIdentity,
+  liveDurableBoundarySource,
   preferVerifiedDurableBoundary,
   seedVerifiedDurableBoundary,
   takeRejectedResumeOffset,
@@ -306,11 +307,16 @@ export class DurableRecoveryRunner {
       const canonicalManifestDigest = owner.manifestDigest
         ?? selectCanonicalDurableRecoveryManifest(candidates);
       if (canonicalManifestDigest) owner.bindManifest(canonicalManifestDigest);
+      // A remembered boundary lasts only while the checkpoint it came from still records it.
+      const remembered = this.verifiedBoundaryByGraph.get(contextGraphId);
       const preferred = candidates.reduce<VerifiedDurableBoundary | undefined>(
-        (boundary, candidate) => preferVerifiedDurableBoundary(boundary, verifiedDurableBoundaryOf(candidate.checkpoint)),
-        this.verifiedBoundaryByGraph.get(contextGraphId),
+        (boundary, candidate) => preferVerifiedDurableBoundary(boundary, verifiedDurableBoundaryOf(
+          candidate.checkpoint, getSyncCheckpointKey(candidate.peerId, contextGraphId, false, 'data'),
+        )),
+        liveDurableBoundarySource(deps.checkpointStore, remembered) ? remembered : undefined,
       );
       if (preferred) this.verifiedBoundaryByGraph.set(contextGraphId, preferred);
+      else this.verifiedBoundaryByGraph.delete(contextGraphId);
       return rankDurableRecoveryPeers(candidates, canonicalManifestDigest);
     };
 
@@ -377,7 +383,7 @@ export class DurableRecoveryRunner {
       }
       const preferred = preferVerifiedDurableBoundary(
         this.verifiedBoundaryByGraph.get(contextGraphId),
-        verifiedDurableBoundaryOf(after),
+        verifiedDurableBoundaryOf(after, checkpointKey),
       );
       if (preferred) this.verifiedBoundaryByGraph.set(contextGraphId, preferred);
       const manifestDigest = after?.manifestDigest ?? before?.manifestDigest;

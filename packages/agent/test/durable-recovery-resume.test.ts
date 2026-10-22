@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_SYNC_CHECKPOINT_TTL_MS,
   getSyncCheckpointKey,
   MemorySyncCheckpointStore,
   type SyncCheckpointEntry,
 } from '../src/sync/checkpoint/state.js';
 import {
   durableBoundaryIdentity,
+  liveDurableBoundarySource,
   preferVerifiedDurableBoundary,
   seedVerifiedDurableBoundary,
   takeRejectedResumeOffset,
@@ -61,7 +63,7 @@ function runner(peers: string[], slices: Record<string, Slice[]>, store = new Me
 
 /** A slice that verified and stored the graphs up to `offset` of `GENERATION`. */
 const advanceTo = (offset: number, prefix: `sha256:${string}`, terminal = false): Slice => async (peerId, store) => {
-  store.setManifestBoundOffset(dataKey(peerId), offset, GENERATION, Date.now(), prefix, terminal);
+  store.setManifestBoundOffset(dataKey(peerId), offset, GENERATION, undefined, prefix, terminal);
   return { ...createIncompleteDurableSyncResult(), complete: terminal };
 };
 const failWith = (message: string): Slice => async () => { throw new Error(message); };
@@ -105,18 +107,77 @@ describe('durable recovery continues a verified prefix with another peer', () =>
 
   it('remembers the boundary for a later owner run and peers that are behind it', async () => {
     const recovery = new DurableRecoveryRunner();
+    const store = new MemorySyncCheckpointStore();
     const first = runner(['peer-aaaaaaaa'], {
       'peer-aaaaaaaa': [advanceTo(10, PREFIX_10), failWith('store queue wait timeout')],
-    });
+    }, store);
     expect((await recovery.run({ contextGraphId: GRAPH, dependencies: first.dependencies })).outcome)
       .toBe('no-progress');
 
     // A later run sees only a peer whose own checkpoint is behind the boundary.
-    const second = runner(['peer-cccccccc'], { 'peer-cccccccc': [advanceTo(20, PREFIX_20, true)] });
-    second.store.setManifestBoundOffset(dataKey('peer-cccccccc'), 5, GENERATION, Date.now(), PREFIX_10);
+    const second = runner(['peer-cccccccc'], { 'peer-cccccccc': [advanceTo(20, PREFIX_20, true)] }, store);
+    store.setManifestBoundOffset(dataKey('peer-cccccccc'), 5, GENERATION, Date.now(), PREFIX_10);
     expect((await recovery.run({ contextGraphId: GRAPH, dependencies: second.dependencies })).outcome)
       .toBe('terminal');
     expect(second.atSliceStart[0]!.checkpoint).toMatchObject({ offset: 10, manifestPrefixDigest: PREFIX_10 });
+  });
+
+  it('forgets a remembered boundary once the checkpoint it came from is gone', async () => {
+    let now = Date.now();
+    const store = new MemorySyncCheckpointStore({ clock: () => now });
+    const recovery = new DurableRecoveryRunner();
+    const advanceAndLeave = () => recovery.run({
+      contextGraphId: GRAPH,
+      dependencies: runner(['peer-aaaaaaaa'], {
+        'peer-aaaaaaaa': [advanceTo(10, PREFIX_10), failWith('store queue wait timeout')],
+      }, store).dependencies,
+    });
+    const laterPeerStartsAt = async () => {
+      const later = runner(['peer-cccccccc'], { 'peer-cccccccc': [noProgress] }, store);
+      await recovery.run({ contextGraphId: GRAPH, dependencies: later.dependencies });
+      return later.atSliceStart.map(({ checkpoint }) => checkpoint?.offset);
+    };
+
+    // Deleted: the boundary goes with the checkpoint that recorded it.
+    expect((await advanceAndLeave()).outcome).toBe('no-progress');
+    store.delete(dataKey('peer-aaaaaaaa'));
+    expect(await laterPeerStartsAt()).toEqual([undefined]);
+
+    // Expired: the boundary is not handed out again with a fresh lifetime.
+    expect((await advanceAndLeave()).outcome).toBe('no-progress');
+    now += DEFAULT_SYNC_CHECKPOINT_TTL_MS + 1;
+    expect(await laterPeerStartsAt()).toEqual([undefined]);
+    expect(store.get(dataKey('peer-cccccccc'))).toBeUndefined();
+  });
+
+  it('gives a boundary only while its checkpoint records it, and only for that checkpoint\'s lifetime', () => {
+    let now = Date.now();
+    const store = new MemorySyncCheckpointStore({ clock: () => now });
+    const sourceKey = dataKey('peer-aaaaaaaa');
+    store.setManifestBoundOffset(sourceKey, 10, GENERATION, undefined, PREFIX_10);
+    const source = store.get(sourceKey)!;
+    const boundary = verifiedDurableBoundaryOf(source, sourceKey);
+    expect(liveDurableBoundarySource(store, boundary)).toEqual(source);
+    expect(liveDurableBoundarySource(store, undefined)).toBeUndefined();
+
+    // Seeded halfway through the source's lifetime, the copy expires with the source.
+    now += DEFAULT_SYNC_CHECKPOINT_TTL_MS / 2;
+    expect(seedVerifiedDurableBoundary(store, dataKey('peer-bbbbbbbb'), boundary)).toBe(true);
+    expect(store.get(dataKey('peer-bbbbbbbb'))).toMatchObject({
+      offset: 10, updatedAtMs: source.updatedAtMs, expiresAtMs: source.expiresAtMs,
+    });
+    now = source.expiresAtMs + 1;
+    expect(store.get(dataKey('peer-bbbbbbbb'))).toBeUndefined();
+    expect(seedVerifiedDurableBoundary(store, dataKey('peer-bbbbbbbb'), boundary)).toBe(false);
+    expect(store.get(dataKey('peer-bbbbbbbb'))).toBeUndefined();
+
+    // A checkpoint that moved on no longer records the boundary read from it.
+    store.setManifestBoundOffset(sourceKey, 10, GENERATION, undefined, PREFIX_10);
+    const recorded = verifiedDurableBoundaryOf(store.get(sourceKey), sourceKey);
+    store.setManifestBoundOffset(sourceKey, 20, GENERATION, undefined, PREFIX_20);
+    expect(liveDurableBoundarySource(store, recorded)).toBeUndefined();
+    expect(seedVerifiedDurableBoundary(store, dataKey('peer-cccccccc'), recorded)).toBe(false);
+    expect(store.get(dataKey('peer-cccccccc'))).toBeUndefined();
   });
 
   it('stops seeding when a seeded peer refuses the boundary', async () => {
@@ -191,9 +252,8 @@ describe('durable recovery continues a verified prefix with another peer', () =>
 
   it('keeps a peer checkpoint that is already at or past the boundary', () => {
     const store = new MemorySyncCheckpointStore();
-    const boundary = verifiedDurableBoundaryOf({
-      offset: 10, updatedAtMs: 1, expiresAtMs: 2, manifestDigest: GENERATION, manifestPrefixDigest: PREFIX_10,
-    });
+    store.setManifestBoundOffset(dataKey('peer-aaaaaaaa'), 10, GENERATION, undefined, PREFIX_10);
+    const boundary = verifiedDurableBoundaryOf(store.get(dataKey('peer-aaaaaaaa')), dataKey('peer-aaaaaaaa'));
     store.setManifestBoundOffset(dataKey('peer-dddddddd'), 10, GENERATION, Date.now(), PREFIX_10);
     expect(seedVerifiedDurableBoundary(store, dataKey('peer-dddddddd'), boundary)).toBe(false);
     expect(seedVerifiedDurableBoundary(store, dataKey('peer-eeeeeeee'), undefined)).toBe(false);
@@ -206,7 +266,7 @@ describe('durable recovery continues a verified prefix with another peer', () =>
     store.setManifestBoundOffset(dataKey('peer-ffffffff'), 5, GENERATION, Date.now(), PREFIX_10);
     const terminal = verifiedDurableBoundaryOf({
       offset: 20, updatedAtMs: 1, expiresAtMs: 2, terminal: true, manifestDigest: GENERATION, manifestPrefixDigest: PREFIX_20,
-    });
+    }, dataKey('peer-aaaaaaaa'));
     expect(terminal?.terminal).toBe(true);
     expect(seedVerifiedDurableBoundary(store, dataKey('peer-ffffffff'), terminal)).toBe(false);
     expect(store.get(dataKey('peer-ffffffff'))?.offset).toBe(5);
@@ -221,13 +281,14 @@ describe('durable recovery continues a verified prefix with another peer', () =>
   });
 
   it('prefers the further boundary of a generation and the latest verified generation', () => {
+    const source = dataKey('peer-aaaaaaaa');
     const at = (manifestDigest: typeof GENERATION, offset: number, updatedAtMs: number) => verifiedDurableBoundaryOf({
       offset, updatedAtMs, expiresAtMs: updatedAtMs + 1, manifestDigest, manifestPrefixDigest: PREFIX_10,
-    });
-    expect(verifiedDurableBoundaryOf(undefined)).toBeUndefined();
+    }, source);
+    expect(verifiedDurableBoundaryOf(undefined, source)).toBeUndefined();
     expect(verifiedDurableBoundaryOf({ offset: 0, updatedAtMs: 1, expiresAtMs: 2, manifestDigest: GENERATION,
-      manifestPrefixDigest: PREFIX_10 })).toBeUndefined();
-    expect(verifiedDurableBoundaryOf({ offset: 5, updatedAtMs: 1, expiresAtMs: 2 })).toBeUndefined();
+      manifestPrefixDigest: PREFIX_10 }, source)).toBeUndefined();
+    expect(verifiedDurableBoundaryOf({ offset: 5, updatedAtMs: 1, expiresAtMs: 2 }, source)).toBeUndefined();
     expect(preferVerifiedDurableBoundary(at(GENERATION, 10, 1), at(GENERATION, 20, 0))?.offset).toBe(20);
     expect(preferVerifiedDurableBoundary(at(GENERATION, 20, 0), at(GENERATION, 10, 5))?.offset).toBe(20);
     expect(preferVerifiedDurableBoundary(at(GENERATION, 900, 1), at(NEWER_GENERATION, 10, 2))?.manifestDigest)
