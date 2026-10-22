@@ -317,6 +317,24 @@ const PINNED_DIGESTS: Record<string, string> = {
   // Updated OT-RFC-51: storage surface for the above — primaryNode field on the
   // widened Account tuple + the seeded per-epoch publishing allocation getters.
   PublishingConvictionStorage:  '7eeae71f0efd9183fce232ccc669227dfd70fe4f93b4663392a0a52c1ccba859',
+  // Conviction Account service spending (OT-RFC-27), vendored for the adapter's
+  // service-spending surface (`evm-adapter-conviction-service.ts`):
+  //   - `ServiceSubscriptions` 1.0.0, the logic: the owner's opt-in
+  //     (`setServiceSpending`), two-party EIP-712 consent to an assignment
+  //     (`assign`), `revoke`, `updateAssignmentCaps`, `advanceAssignmentNonce`,
+  //     the buyer key's `fundFromConviction`, the views (`hashAssignment`,
+  //     `currentWindowAllowance`, `scheduledEmission`, `emissionSpan`,
+  //     `baseLabelCapacity`, ...), the events `ServiceSpendingSet`,
+  //     `ServiceAssigned`, `ServiceRevoked`, `CapsUpdated`,
+  //     `AssignmentNonceAdvanced`, `PeriodFunded`, `ServiceEmissionLabelled`,
+  //     and its errors, which `conviction-service-errors.ts` classifies one by one.
+  //   - `ConvictionServiceStorage` 1.0.0, the state: opt-in, nonces, assignments,
+  //     usage, labels and period records with their buckets.
+  //   - `EpochStorage`, for `getEpochPool(1, epoch)`, the staker pool an
+  //     epoch's service labels are read against.
+  ServiceSubscriptions:         '5c4ac6b97e1eb4d7fa79656ad0505c33b9729ce0ec0903fee40b152eccd3ed85',
+  ConvictionServiceStorage:     '05e41ea1232c9dea46b5f511ea5366eb0bb57416e2b08d223da762e0e936730c',
+  EpochStorage:                 '3d31df1a69c4610dbf62b319b62091fb55384b2987bb037e5f01554ab371b0d2',
 };
 
 describe('ABI pin digest — detects silent contract surface drift [CH-5]', () => {
@@ -360,6 +378,49 @@ describe('ABI content sanity — required event/error surfaces are present [CH-5
       'uint96',
       'uint40',
       'uint40',
+    ]);
+  });
+
+  it('ServiceSubscriptions declares PeriodFunded with subscriptionId as its first indexed topic', () => {
+    // The adapter finds a funded period's log by this topic, and sellers
+    // verify a plan against this event's fields.
+    const abi = JSON.parse(
+      readFileSync(join(ABI_DIR, 'ServiceSubscriptions.json'), 'utf8'),
+    ) as AbiEntry[];
+    const ev = abi.find((e) => e.type === 'event' && e.name === 'PeriodFunded');
+    expect(ev).toBeDefined();
+    expect((ev!.inputs ?? []).map((i) => `${i.name}:${i.type}${i.indexed ? ':indexed' : ''}`)).toEqual([
+      'subscriptionId:bytes32:indexed',
+      'accountId:uint256:indexed',
+      'assignee:address:indexed',
+      'periodId:bytes32',
+      'sessionKey:address',
+      'planDigest:bytes32',
+      'periodStart:uint40',
+      'periodEnd:uint40',
+      'value:uint96',
+      'cost:uint96',
+      'discountBps:uint16',
+      'buckets:tuple[]',
+    ]);
+  });
+
+  it('PublishingConviction declares ServiceCostCovered with the draw split the adapter reads', () => {
+    const abi = JSON.parse(
+      readFileSync(join(ABI_DIR, 'PublishingConviction.json'), 'utf8'),
+    ) as AbiEntry[];
+    const ev = abi.find((e) => e.type === 'event' && e.name === 'ServiceCostCovered');
+    expect(ev).toBeDefined();
+    expect((ev!.inputs ?? []).map((i) => `${i.name}:${i.type}${i.indexed ? ':indexed' : ''}`)).toEqual([
+      'accountId:uint256:indexed',
+      'assignee:address:indexed',
+      'subscriptionId:bytes32:indexed',
+      'value:uint96',
+      'cost:uint96',
+      'epoch:uint40',
+      'window:uint40',
+      'drawnFromWindow:uint96',
+      'drawnFromTopUp:uint96',
     ]);
   });
 
