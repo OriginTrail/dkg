@@ -1416,6 +1416,8 @@ async function runDurableSyncWithBudget(
           ctx,
           `Yielding durable recovery for "${pid}" at an authenticated manifest boundary after the settlement slice expired`,
         );
+        // As after a whole page: the next round proves its DATA boundary with META fetched again from row zero.
+        if (updateMetaCheckpoint && metaResult.completed) deleteCheckpoint(metaResult.checkpointKey);
         markDurableTerminalBoundary(accumulator, false);
         endPhase();
         break;
