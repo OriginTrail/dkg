@@ -48,6 +48,11 @@ export function withoutMemberList(contextGraphId: string, snapshot: readonly Qua
   return snapshot.filter((quad) => !isMemberListQuad(contextGraphId, quad));
 }
 
+/** The member-list rows of a snapshot. */
+export function memberListOf(contextGraphId: string, snapshot: readonly Quad[]): Quad[] {
+  return snapshot.filter((quad) => isMemberListQuad(contextGraphId, quad));
+}
+
 /** Whether the snapshot's root names `curatorAddress` (an EVM address) as its curator. */
 export function snapshotNamesCurator(
   contextGraphId: string,
@@ -82,4 +87,41 @@ export async function readLocalMemberListRootRows(
   return result.bindings
     .filter((row) => typeof row['p'] === 'string' && typeof row['o'] === 'string')
     .map((row) => ({ subject: contextGraphUri, predicate: row['p']!, object: row['o']!, graph: metaGraph }));
+}
+
+/**
+ * Replace the definition in a graph's root `_meta` with the staged one and keep
+ * the member list this node holds: the root's member-list rows and the
+ * delegations are not touched. A row the staged definition repeats stays in
+ * place instead of being deleted and inserted again, so the result does not
+ * depend on the order in which a store applies the two halves.
+ */
+export function replaceCuratorMetaDefinitionSparql(
+  contextGraphId: string,
+  metaGraph: string,
+  stagingGraph: string,
+): string {
+  const root = assertSafeIri(contextGraphDataGraphUri(contextGraphId));
+  assertSafeIri(metaGraph);
+  assertSafeIri(stagingGraph);
+  const memberList = MEMBER_LIST_ROOT_PREDICATES.map((predicate) => `<${assertSafeIri(predicate)}>`).join(', ');
+  return `DELETE {
+    GRAPH <${metaGraph}> { <${root}> ?stalePredicate ?staleObject . }
+  }
+  INSERT {
+    GRAPH <${metaGraph}> { ?freshSubject ?freshPredicate ?freshObject . }
+  }
+  WHERE {
+    {
+      GRAPH <${metaGraph}> {
+        <${root}> ?stalePredicate ?staleObject .
+        FILTER (?stalePredicate NOT IN (${memberList}))
+        FILTER NOT EXISTS { GRAPH <${stagingGraph}> { <${root}> ?stalePredicate ?staleObject . } }
+      }
+    }
+    UNION
+    {
+      GRAPH <${stagingGraph}> { ?freshSubject ?freshPredicate ?freshObject . }
+    }
+  }`;
 }

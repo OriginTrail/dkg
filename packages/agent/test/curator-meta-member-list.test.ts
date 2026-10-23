@@ -4,10 +4,11 @@
  * A node takes a graph's member list only from the graph's curator (#3421).
  *
  * A refresh from a peer the caller did not tie to the curator (the RFC-64
- * metadata bootstrap, a Core's hosted copy) adds the definition, and the
- * member list the node holds stays as it is, on both ways a store replaces the
- * projection. A snapshot from a node tied to the curator it names, and the
- * curator refresh, replace the member list as before.
+ * metadata bootstrap, a Core's hosted copy) installs the definition; the
+ * member list it serves fills an empty one, and one the node holds stays as it
+ * is, on both ways a store replaces the projection. A snapshot from a node tied
+ * to the curator it names, and the curator refresh, replace the member list as
+ * before. Each case checks the whole resulting projection.
  */
 import {
   contextGraphDataGraphUri,
@@ -27,6 +28,7 @@ import {
 } from '../src/curator-meta-refresh.js';
 import {
   isMemberListQuad,
+  memberListOf,
   readLocalMemberListRootRows,
   snapshotNamesCurator,
   withoutMemberList,
@@ -61,9 +63,14 @@ function definition(curator?: string): Quad[] {
   ];
 }
 
-/** What the node holds: the definition, and a member list it took from the curator. */
-const HELD: readonly Quad[] = Object.freeze([
+/** The definition the node holds: told apart from the served one by its name. */
+const HELD_DEFINITION: readonly Quad[] = Object.freeze([
   ...definition(OWNER),
+  rootRow(DKG_ONTOLOGY.SCHEMA_NAME, literal('Held')),
+]);
+
+/** A member list the node took from the curator, with a revocation of its own. */
+const HELD_MEMBER_LIST: readonly Quad[] = Object.freeze([
   rootRow(DKG_ONTOLOGY.DKG_ALLOWED_AGENT, literal(HELD_MEMBER)),
   rootRow(DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT, literal(HELD_MEMBER)),
   rootRow(DKG_ONTOLOGY.DKG_ALLOWED_PEER, literal(HELD_PEER_ID)),
@@ -71,15 +78,23 @@ const HELD: readonly Quad[] = Object.freeze([
   ...delegationRows(HELD_MEMBER, HELD_PEER_ID),
 ]);
 
-/** What a peer serves: the definition with a member list of its own, which revokes the held member. */
+/** The definition a peer serves, named apart from the held one. */
+function servedDefinition(curator?: string): Quad[] {
+  return [...definition(curator), rootRow(DKG_ONTOLOGY.SCHEMA_NAME, literal('Served'))];
+}
+
+/** What a peer serves: its definition with a member list of its own, which revokes the held member. */
 function served(curator?: string): Quad[] {
   return [
-    ...definition(curator),
+    ...servedDefinition(curator),
     rootRow(DKG_ONTOLOGY.DKG_ALLOWED_AGENT, literal(SERVED_MEMBER)),
     rootRow(DKG_ONTOLOGY.DKG_REVOKED_AGENT, literal(HELD_MEMBER)),
     ...delegationRows(SERVED_MEMBER, SERVING_PEER_ID),
   ];
 }
+
+/** The node's own revocation, which every replacement keeps. */
+const LOCAL_REVOCATION = rootRow(DKG_ONTOLOGY.DKG_REVOKED_AGENT, literal(REVOKED));
 
 const RELAYED: CuratorMetaRefreshOptions = Object.freeze({
   force: true,
@@ -152,29 +167,30 @@ async function metaRows(store: TripleStore): Promise<Quad[]> {
 }
 
 const key = (quad: Quad) => `${quad.subject} ${quad.predicate} ${quad.object}`;
-const memberListOf = async (store: TripleStore) => (await metaRows(store))
-  .filter((quad) => isMemberListQuad(contextGraphId, quad)).map(key).sort();
-const definitionOf = async (store: TripleStore) => (await metaRows(store))
-  .filter((quad) => !isMemberListQuad(contextGraphId, quad)).map(key).sort();
-const keysOf = (rows: readonly Quad[]) => rows.map(key).sort();
+const keysOf = (rows: readonly Quad[]) => [...new Set(rows.map(key))].sort();
+const projectionOf = async (store: TripleStore) => keysOf(await metaRows(store));
 
 describe.each(['subject replacement', 'staged update'] as const)('a node\'s member list through the %s', (path) => {
   it('stays as it is when a peer the caller did not tie to the curator serves the definition', async () => {
-    const store = await holding(HELD);
+    const store = await holding([...HELD_DEFINITION, ...HELD_MEMBER_LIST]);
     const agent = refreshAgent(asSeenThrough(store, path), served(OWNER));
 
     await expect(runCuratorMetaRefreshFromPeer(agent, contextGraphId, SERVING_PEER_ID, RELAYED)).resolves.toBe(true);
 
-    expect(await memberListOf(store)).toEqual(keysOf(HELD.filter((quad) => isMemberListQuad(contextGraphId, quad))));
-    // The in-process store applies a staged update one solution at a time, so
-    // the rows it shares with the snapshot are checked on the subject path only.
-    if (path === 'subject replacement') {
-      expect(await definitionOf(store)).toEqual(keysOf(definition(OWNER)));
-    }
+    expect(await projectionOf(store)).toEqual(keysOf([...servedDefinition(OWNER), ...HELD_MEMBER_LIST]));
+  });
+
+  it('is filled from the served snapshot while the node holds none', async () => {
+    const store = await holding([]);
+    const agent = refreshAgent(asSeenThrough(store, path), served(OWNER));
+
+    await expect(runCuratorMetaRefreshFromPeer(agent, contextGraphId, SERVING_PEER_ID, RELAYED)).resolves.toBe(true);
+
+    expect(await projectionOf(store)).toEqual(keysOf(served(OWNER)));
   });
 
   it('is replaced by the member list of a node tied to the curator its snapshot names', async () => {
-    const store = await holding(HELD);
+    const store = await holding(HELD_MEMBER_LIST);
     const agent = refreshAgent(asSeenThrough(store, path), served(OWNER));
 
     await expect(runCuratorMetaRefreshFromPeer(
@@ -184,15 +200,11 @@ describe.each(['subject replacement', 'staged update'] as const)('a node\'s memb
       { ...RELAYED, acceptMemberList: true },
     )).resolves.toBe(true);
 
-    // The node's own revocations are kept, as on every curator refresh.
-    expect(await memberListOf(store)).toEqual(keysOf([
-      ...served(OWNER).filter((quad) => isMemberListQuad(contextGraphId, quad)),
-      rootRow(DKG_ONTOLOGY.DKG_REVOKED_AGENT, literal(REVOKED)),
-    ]));
+    expect(await projectionOf(store)).toEqual(keysOf([...served(OWNER), LOCAL_REVOCATION]));
   });
 
   it('stays as it is when the tied node\'s snapshot names no curator', async () => {
-    const store = await holding(HELD);
+    const store = await holding([...HELD_DEFINITION, ...HELD_MEMBER_LIST]);
     const agent = refreshAgent(asSeenThrough(store, path), served());
 
     await expect(runCuratorMetaRefreshFromPeer(
@@ -202,27 +214,26 @@ describe.each(['subject replacement', 'staged update'] as const)('a node\'s memb
       { ...RELAYED, acceptMemberList: true },
     )).resolves.toBe(true);
 
-    expect(await memberListOf(store)).toEqual(keysOf(HELD.filter((quad) => isMemberListQuad(contextGraphId, quad))));
+    expect(await projectionOf(store)).toEqual(keysOf([...servedDefinition(), ...HELD_MEMBER_LIST]));
   });
 
   it('is replaced by the curator refresh, as before', async () => {
-    const store = await holding(HELD);
+    const store = await holding(HELD_MEMBER_LIST);
     const agent = refreshAgent(asSeenThrough(store, path), served(OWNER));
 
     await expect(runCuratorMetaRefreshFromPeer(agent, contextGraphId, SERVING_PEER_ID, { force: true }))
       .resolves.toBe(true);
 
-    expect(await memberListOf(store)).toEqual(keysOf([
-      ...served(OWNER).filter((quad) => isMemberListQuad(contextGraphId, quad)),
-      rootRow(DKG_ONTOLOGY.DKG_REVOKED_AGENT, literal(REVOKED)),
-    ]));
+    expect(await projectionOf(store)).toEqual(keysOf([...served(OWNER), LOCAL_REVOCATION]));
   });
 });
 
 describe('the member list rows of a graph', () => {
   it('are the allowlist, participants, allowed peers, revocations and delegations', () => {
-    expect(withoutMemberList(contextGraphId, served(OWNER))).toEqual(definition(OWNER));
-    expect(HELD.filter((quad) => isMemberListQuad(contextGraphId, quad))).toHaveLength(6);
+    expect(withoutMemberList(contextGraphId, served(OWNER))).toEqual(servedDefinition(OWNER));
+    expect(memberListOf(contextGraphId, served(OWNER))).toHaveLength(4);
+    expect(HELD_MEMBER_LIST.every((quad) => isMemberListQuad(contextGraphId, quad))).toBe(true);
+    expect(HELD_DEFINITION.some((quad) => isMemberListQuad(contextGraphId, quad))).toBe(false);
     // Another graph's delegations are not this graph's member list.
     const other = delegationRows(SERVED_MEMBER, SERVING_PEER_ID)
       .map((quad) => ({ ...quad, subject: quad.subject.replace('/member-list:', '/other:') }));

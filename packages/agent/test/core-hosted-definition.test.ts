@@ -1052,32 +1052,42 @@ describe('a Core asks the owner\'s node that an owner-signed share ties to a hos
     expect(await coreHostedOwnerPeerIds(core.agent, contextGraphId, OWNER)).toEqual([OWNER_PEER_ID]);
   });
 
-  it('takes the graph\'s member list from the tied node only (#3421)', async () => {
-    const delegation = `did:dkg:agent-delegation:${contextGraphId}:${MEMBER.toLowerCase()}`;
-    const memberList: Quad[] = [
-      rootQuad(DKG_ONTOLOGY.DKG_ALLOWED_AGENT, `"${MEMBER.toLowerCase()}"`),
-      { subject: delegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT, object: `"${MEMBER.toLowerCase()}"`, graph: metaGraph },
-      { subject: delegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: `"${MEMBER_PEER_ID}"`, graph: metaGraph },
-    ];
-    const memberListHeldBy = async (store: OxigraphStore) => (await servedMeta({ store, answer: 'complete' }))
-      .filter((quad) => isMemberListQuad(contextGraphId, quad))
-      .map((quad) => `${quad.subject} ${quad.predicate} ${quad.object}`)
-      .sort();
-    const owner = await peerNode([...OWNER_DECLARATION, ...memberList]);
+  it('changes a member list it holds only from the tied node, and fills an empty one from any (#3421)', async () => {
+    const memberList = (agent: string, peerId: string): Quad[] => {
+      const delegation = `did:dkg:agent-delegation:${contextGraphId}:${agent.toLowerCase()}`;
+      return [
+        rootQuad(DKG_ONTOLOGY.DKG_ALLOWED_AGENT, `"${agent.toLowerCase()}"`),
+        { subject: delegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT, object: `"${agent.toLowerCase()}"`, graph: metaGraph },
+        { subject: delegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: `"${peerId}"`, graph: metaGraph },
+      ];
+    };
+    const keys = (quads: readonly Quad[]) => quads.map((quad) => `${quad.subject} ${quad.predicate} ${quad.object}`).sort();
+    const memberListHeldBy = async (store: OxigraphStore) => keys(
+      (await servedMeta({ store, answer: 'complete' })).filter((quad) => isMemberListQuad(contextGraphId, quad)),
+    );
+    const owners = memberList(MEMBER, MEMBER_PEER_ID);
+    const earlier = memberList(STRANGER, STRANGER_PEER_ID);
+    const owner = await peerNode([...OWNER_DECLARATION, ...owners]);
 
-    // The agent registry names the owner's node, but no share the owner signed ties it.
+    // An empty Core takes the member list served with the definition.
+    const empty = coreNode(peersOf([[OWNER_PEER_ID, owner]]));
+    await expect(ensureCoreHostedDefinition(empty.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+    expect(await memberListHeldBy(empty.store)).toEqual(keys(owners));
+
+    // A Core that holds a member list keeps it when no share the owner signed ties the serving node.
     const untied = coreNode(peersOf([[OWNER_PEER_ID, owner]]));
+    await untied.store.insert(earlier);
     await expect(ensureCoreHostedDefinition(untied.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
     await expect(holdsCoreHostedOwnerDefinition(untied.store, contextGraphId, OWNER)).resolves.toBe(true);
-    expect(await memberListHeldBy(untied.store)).toEqual([]);
+    expect(await memberListHeldBy(untied.store)).toEqual(keys(earlier));
 
+    // The tied node's member list replaces it.
     const tied = coreNode(peersOf([[OWNER_PEER_ID, owner]]), { ownerNodes: [], seedPeers: [] });
+    await tied.store.insert(earlier);
     noteCoreHostedOwnerShare(tied.agent, await ownerShare(OWNER_PEER_ID), OWNER_PEER_ID);
     await pendingCoreHostedDefinitionHint(tied.agent, contextGraphId);
     await expect(holdsCoreHostedOwnerDefinition(tied.store, contextGraphId, OWNER)).resolves.toBe(true);
-    expect(await memberListHeldBy(tied.store)).toEqual(
-      memberList.map((quad) => `${quad.subject} ${quad.predicate} ${quad.object}`).sort(),
-    );
+    expect(await memberListHeldBy(tied.store)).toEqual(keys(owners));
   });
 
   it('counts the tied node\'s fetch for no cooldown: a subscriber\'s request right after it refreshes from the owner', async () => {
