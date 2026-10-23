@@ -87,6 +87,25 @@ describe('GH#3419 pre-validation provenance', () => {
     } finally { await readStore.close(); server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(e => e ? reject(e) : resolve())); }
   });
 
+  it('keeps a resolved payload count mismatch terminal and separate from dependency outages', async () => {
+    const h = createAsyncLift2270Harness();
+    const { stage } = createStoreRejectionFixtures(h);
+    let executions = 0;
+    const publisher = h.createPublisher({ ...RETRY_LANE,
+      resolvedSliceOverrides: { quads: [] },
+      knowledgeAssetVmPublishHandler: { execute: async () => { executions++; return confirmedPublishResult(); } },
+    });
+    await stage();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const failed = expectFailed(await publisher.processNext('wallet-1'));
+    expect(failed.failure).toMatchObject({ failedFromState: 'claimed', code: 'canonicalization_failed', retryable: false,
+      validationDiagnostic: { stage: 'content_validation', cause: 'content' } });
+    expect((await publisher.getStatus(jobId))?.failure).toEqual(failed.failure);
+    expect(executions).toBe(0);
+    expect(failed.broadcast).toBeUndefined();
+    expect(failed.timestamps.nextRetryAt).toBeUndefined();
+  });
+
   it('records a KA preparation rejection from validated without running the executor', async () => {
     const h = createAsyncLift2270Harness();
     const { stage } = createStoreRejectionFixtures(h);

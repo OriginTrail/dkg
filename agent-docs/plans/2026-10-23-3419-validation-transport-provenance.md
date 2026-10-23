@@ -45,11 +45,11 @@ Self-review: typed read provenance alone is not proof of publication position; p
 | Work | State | Evidence / next step |
 | --- | --- | --- |
 | Investigation and plan | Complete | Native store read producer identified; historical exact request remains unknown |
-| Implementation and local checks | In progress | Add red producer/classification regression first |
-| PR and remote review | Pending | No PR yet |
-| Live run and cleanup | Pending | No #3419 claim or live resources created |
+| Implementation and local checks | Complete | Final unit 2,413; focused 216; storage 238; full worker 71; build/types/file-size passed |
+| PR and remote review | In progress | PR #3431; source 2a96dc138a5061bcb91fc21f1924906e758b2222; reviewer clean, final CI pending |
+| Live run and cleanup | Complete | Six confirmed publications; twelve receipts/all ten signer nonces reconciled; both claims released; homes removed |
 
-Resource ownership: `.tmp/issue-3419/` is task scratch/evidence. Retain sanitized evidence and report; delete copied secrets at completion. No active #3419 resources yet.
+Resource ownership: `.tmp/issue-3419/` is task scratch/evidence. Retain sanitized evidence and report; delete copied secrets at completion. No active #3419 live resources remain; sanitized evidence is retained.
 
 ### Review round 1 and live evidence
 
@@ -79,3 +79,18 @@ Resource ownership: `.tmp/issue-3419/` is task scratch/evidence. Retain sanitize
 - Prior source `de87b5c98de067f6112c282233f4de4e752160eb` passed all 2,408 publisher unit tests and the storage 238-test regression set. It also passed the live read-fault → same-job retry → confirmed publication check in fresh namespace/context slot 949.
 - Fresh-home setup did not reuse slot 947: registration produced 948, and cores correctly refused that reused namespace because it was already bound to 947. Its job exhausted bounded quorum retries without signing a publish transaction; the native guarded exact-job clear succeeded and its journal/evidence is retained. A new namespace registered slot 949 and confirmed successfully. Both additional registrations are included in nonce/receipt reconciliation. This is a setup correction, not a product-policy bypass.
 - Keep this second isolated home and matching Batch 1 claim stopped through final review. Its reconciled allocator floor is now 25009 (default author), 2 (secondary author). Restart at the final source head and confirm an UPDATE in slot 949, then reconcile and release. Preserve both claim cycles and all public evidence.
+
+### Final execution evidence
+
+- PR #3431 targets `testnet-canary`; reviewed source `2a96dc138a5061bcb91fc21f1924906e758b2222`. Review 5627125897 by `otReviewAgent`: “Review Agent completed this review and found no issues.” All review threads resolved; five substantive source revisions.
+- Final publisher unit suite: 133 files / 2,413 tests passed. Focused mapper/provenance/message 216; storage regressions 238; full worker integration 71. Package builds/types/exports, native runtime build and file-size guard passed.
+- Final source confirmed job `2d332425-bb7b-40aa-98b1-2d9507801f0e` as an UPDATE in context slot 949 after one preflight connection refusal and same-job retry. Across both claim cycles, six publications succeeded with exact RDF readback, on-chain roots/publishers/membership and successful receipts. Unknown/stale/input/auth/restart and chain-evidence controls passed.
+- All twelve submitted transactions succeeded; every consumed nonce is accounted for and all ten wallets ended pending == latest. All nine admitted jobs are settled (six finalized, two terminal negative controls, one guarded cleared pre-send setup-conflict job). Both Batch 1 claims released and both isolated homes removed. No active live resources remain.
+- Preserve Batch 1 native allocator floors: default author `0x247b02c301b34e52e9021728f34c3457f81f2dfc` next 25009; secondary `0xaddff5d971ec77276bd38d77aad2822c41c72611` next 2.
+- Full report: `run-reports/2026-10-23-issue-3419-testnet.md`; sanitized evidence `.tmp/issue-3419/evidence/`. Validation is posted at https://github.com/OriginTrail/dkg/pull/3431#issuecomment-6363233332. Final run report and ledger are retained locally rather than changing the reviewed CI source head. Final remote CI remains the only pending work at this note. No merge performed.
+
+### Final CI coverage correction
+
+- All fifty test/build checks passed at `2a96dc138a5061bcb91fc21f1924906e758b2222`, but merged changed-line coverage failed at 61/68 (89.71%) against the required 90%, causing the dependent CI gate to fail. No coverage policy was weakened.
+- Added a real worker negative control for a resolved payload count mismatch: persisted `claimed / content_validation / content`, terminal `canonicalization_failed`, no retry/hash, and zero executor calls. This covers the explicit deterministic content guard at `async-lift-validation.ts` and fulfills the content-versus-dependency acceptance case. Focused set now passes 217 tests.
+- The correction changes tests and this execution ledger only. Publisher/storage production trees remain byte-identical to the reviewed and live-validated `2a96dc138a5061bcb91fc21f1924906e758b2222`; no further wallet activity or live replay is warranted. Re-run CI and remote review for this final test-only revision, with the same bounded 30-minute revision window.
