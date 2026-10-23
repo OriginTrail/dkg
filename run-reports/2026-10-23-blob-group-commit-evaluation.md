@@ -10,8 +10,8 @@ Runtime: native macOS arm64, Node22.23.3, SQLite3.51.3, libuv1.51.0, pnpm10.28.1
 
 ## Validation
 
-- Current full storage:1,687passed/110files,45existing environment-gated skips.
-- Current native/integrated cases:34(part of the full cohort), including last-ACK whole-process SIGKILL before any RDF write and exact fresh-process readback; native FULL; pre/post-COMMIT worker death; same-write retry with no premature RDF/changelog; exact batch coverage and late arrivals; independent read progress; close/cancellation drainage; bounded allocation; legacy compatibility and tested rollback export.
+- Current full storage:1,694passed/110files,45existing environment-gated skips.
+- Current native/integrated cases:41(part of the full cohort), including last-ACK whole-process SIGKILL before any RDF write and exact fresh-process readback; native FULL; pre/post-COMMIT worker death; same-write retry with no premature RDF/changelog; exact batch coverage and late arrivals; independent read progress; close/cancellation drainage; bounded allocation; legacy compatibility and tested rollback export.
 - Counterfactuals fail as intended: acknowledging before COMMIT creates a dangling RDF ref; unconditionally materializing a16MiB value violates the allocation assertion. Correct source restored and rebuilt.
 - Runtime dependency closure, source/type/package/prepared-CLI builds pass. Lint, source-size and disabled-test ratchets pass without increased budgets. Later metadata-only documentation changes do not alter these results.
 
@@ -130,3 +130,7 @@ Final-source hydrated readp99(ms) and all raw throughput rounds:
 | mixed-8 | 4.177 | 8.777 | 4.847 | 468.15, 1468.33, 2736.32 | 1036.24, 1118.65, 1174.29 | 2175.27, 2056.69, 3328.18 |
 
 The final full-storage rerun passes1,687 cases. Exact UTF-8/BOM preservation is covered in the shared decoder; this final character-preservation correction follows the comparison and changes no barrier or batch policy.
+
+## Round3 contract evidence
+
+The final local cohort passes1,694storage tests/110files with45existing gated skips;41native/integrated cases are included. Actual writer connections expose the required four effective settings on first open and failure-driven reopen. Each injected native downgrade rejects before blob ACK/RDF publication, then ordinary retry reinstates the full policy. Fresh-owner and lost-ACK matching-row adoption fail on a real native SQLite readonly error at full-byte INSERT, despite readable existing bytes; retry re-submits exact hash/byte length/payload hash. Unsupported runtime rejection allocates zero RDF workers. Counterfactuals removing factory preflight, accepting downgraded policy or skipping matching-row writes fail their distinguishing cases; correct source is restored and rebuilt. One session registry and canonical worker-error transport replace duplicated generic state/protocol. The actual057 CI packaging failure is corrected with shared Node engines metadata; patched SQLite is still checked separately for the optional mode. Runtime/types/package/preparedCLI, release-pack verification and hygiene pass. No later performance result or physical power-loss proof is implied.

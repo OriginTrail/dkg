@@ -6,6 +6,7 @@
 
 import { dirname, join } from 'node:path';
 import type { TripleStoreCommitCapability } from './persistence.js';
+import { assertSqliteBlobRuntime } from './sqlite-literal-blob-protocol.js';
 import type { LargeLiteralStorageConfig, SharedMemoryLiteralBlobStoreOptions } from './literal-blob-options.js';
 export type { LargeLiteralStorageConfig } from './literal-blob-options.js';
 import {
@@ -698,9 +699,10 @@ export async function createTripleStore(
         `Registered: [${[...adapterRegistry.keys()].join(', ')}]`,
     );
   }
+  const largeLiteralStorage = resolveLargeLiteralStorageOptions(config);
+  if (largeLiteralStorage?.persistence === 'sqlite-wal') assertSqliteBlobRuntime();
   const constructionAuthority = getManagedOxigraphRuntimeConstructionAuthorityV1(config);
   const store = await factory(resolveAdapterOptions(config), constructionAuthority);
-  const largeLiteralStorage = resolveLargeLiteralStorageOptions(config);
   const withLargeLiteralStorage = largeLiteralStorage
     ? new SharedMemoryLiteralBlobStore(store, largeLiteralStorage)
     : store;

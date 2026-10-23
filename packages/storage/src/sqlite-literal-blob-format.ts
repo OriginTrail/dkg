@@ -1,5 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
+import { StoreResponseTooLargeError } from './http-response-limit.js';
 import { SQLITE_BLOB_APPLICATION_ID, SQLITE_BLOB_VERSION } from './sqlite-literal-blob-protocol.js';
 
 export const SQLITE_BLOB_BOUNDED_COLUMNS = `typeof(term) AS kind,
@@ -41,9 +42,7 @@ export function decodeSqliteBlobRow(hash: string, row: Record<string, unknown>, 
   if (row.kind !== 'blob') throw new Error('Invalid literal blob encoding');
   const bytes = Number(row.bytes);
   if (!Number.isSafeInteger(bytes) || bytes < 0) throw new Error('Invalid literal blob size');
-  if (maxBytes !== undefined && bytes > maxBytes) throw Object.assign(new Error('Literal blob exceeds response-byte budget'), {
-    code: 'STORE_RESPONSE_TOO_LARGE', maxBytes, actualBytes: bytes,
-  });
+  if (maxBytes !== undefined && bytes > maxBytes) throw new StoreResponseTooLargeError(maxBytes, bytes);
   if (!(row.term instanceof Uint8Array) || row.term.byteLength !== bytes) throw new Error('Invalid literal blob term');
   verifySqliteBlobBytes(hash, row.term);
   return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(row.term);

@@ -1,6 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { lstatSync } from 'node:fs';
 import { parentPort, workerData } from 'node:worker_threads';
+import { serializeWorkerErrorV1 } from './worker-error-protocol.js';
+import { StoreResponseTooLargeError } from './http-response-limit.js';
 import { assertSqliteBlobRuntime, SQLITE_BLOB_APPLICATION_ID, SQLITE_BLOB_VERSION, type BlobRequest, type BlobResponse } from './sqlite-literal-blob-protocol.js';
 import { assertSqliteBlobByteLimit, assertSqliteBlobHash, assertSqliteBlobSchema, decodeSqliteBlobRow, isEmptySqliteBlobDatabase,
   sqliteBlobPragma as pragma, SQLITE_BLOB_BOUNDED_COLUMNS, verifySqliteBlobBytes } from './sqlite-literal-blob-format.js';
@@ -15,8 +17,9 @@ const send = (message: BlobResponse) => port.postMessage(message);
 const boundedTermSql = `SELECT ${SQLITE_BLOB_BOUNDED_COLUMNS} FROM blobs WHERE hash=?`;
 
 function failure(id: number, error: unknown): void {
-  const e = error as Error & { code?: string; maxBytes?: number; actualBytes?: number };
-  send({ id, error: { message: e.message ?? String(error), code: e.code, maxBytes: e.maxBytes, actualBytes: e.actualBytes } });
+  const envelope = serializeWorkerErrorV1(error);
+  send({ id, error: error instanceof StoreResponseTooLargeError
+    ? { ...envelope, maxBytes: error.maxBytes, actualBytes: error.actualBytes } : envelope });
 }
 function openDatabase(write: boolean): DatabaseSync | undefined {
   if (write && workerData.readOnly) throw new Error('Literal blob read owner cannot write');

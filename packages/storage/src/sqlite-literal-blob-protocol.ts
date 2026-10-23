@@ -1,13 +1,12 @@
 /** Private worker protocol: it carries data, never caller-provided SQL or persistence hooks. */
+import type { WorkerErrorEnvelopeV1 } from './worker-error-protocol.js';
 export type BlobRequest =
   | { id: number; operation: 'write'; hash: string; term: string }
   | { id: number; operation: 'read'; hash: string; maxBytes?: number }
   | { id: number; operation: 'close' };
-export interface BlobFailure {
-  message: string;
-  code?: string;
+export interface BlobFailure extends WorkerErrorEnvelopeV1 {
   maxBytes?: number;
-  actualBytes?: number;
+  actualBytes?: number | bigint;
 }
 export type BlobResponse = { ready: true } | {
   id: number; value?: string; error?: BlobFailure;

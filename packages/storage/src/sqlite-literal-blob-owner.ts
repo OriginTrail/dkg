@@ -5,6 +5,7 @@ import { DurableDirectoryPreparation } from './durable-content-addressed-file.js
 import { raceStoreWorkAgainstAbort } from './abortable-store-work-lifecycle.js';
 import { StoreResponseTooLargeError } from './http-response-limit.js';
 import { StoreWorkDrain } from './store-work-drain.js';
+import { deserializeWorkerErrorV1 } from './worker-error-protocol.js';
 import { assertSqliteBlobRuntime, SQLITE_BLOB_FILENAME, type BlobRequest, type BlobResponse } from './sqlite-literal-blob-protocol.js';
 
 type Command = BlobRequest extends infer R ? R extends BlobRequest ? Omit<R, 'id'> : never : never;
@@ -12,7 +13,7 @@ interface Pending { resolve: (value: string | undefined) => void; reject: (error
 interface Session {
   worker: Worker;
   pending: Map<number, Pending>;
-  ready: Promise<void>;
+  ready: Promise<Session>;
   dead: boolean;
 }
 type Role = 'reader' | 'writer';
@@ -21,7 +22,6 @@ export class SqliteLiteralBlobOwner {
   private readonly directory: DurableDirectoryPreparation;
   private readonly path: string;
   private readonly sessions = new Map<Role, Session>();
-  private readonly opening = new Map<Role, Promise<Session>>();
   private readonly children = new Set<Worker>();
   private readonly work = new StoreWorkDrain('Literal blob owner is closing');
   private readonly capacity = {
@@ -56,8 +56,8 @@ export class SqliteLiteralBlobOwner {
   close(): Promise<void> {
     return this.work.close(async () => {
       try {
-        await Promise.all([...this.opening.values()].map(async ready => {
-          const session = await ready;
+        await Promise.all([...this.sessions.values()].map(async session => {
+          await session.ready;
           if (!session.dead) await this.request(session, { operation: 'close' });
         }));
       } finally {
@@ -75,32 +75,27 @@ export class SqliteLiteralBlobOwner {
     }));
   }
   private ensureSession(role: Role): Promise<Session> {
-    const existing = this.opening.get(role);
-    if (existing) return existing;
-    const opening = this.startSession(role);
-    this.opening.set(role, opening);
-    void opening.catch(() => { if (this.opening.get(role) === opening) this.opening.delete(role); });
-    return opening;
+    return (this.sessions.get(role) ?? this.startSession(role)).ready;
   }
-  private async startSession(role: Role): Promise<Session> {
+  private startSession(role: Role): Session {
     const sibling = new URL('./sqlite-literal-blob-worker.js', import.meta.url);
     const compiled = new URL('../dist/sqlite-literal-blob-worker.js', import.meta.url);
     const url = existsSync(sibling) ? sibling : compiled;
     if (!existsSync(url)) throw new Error('Build dkg-storage before starting the literal blob worker');
     const worker = new Worker(url, { workerData: { path: this.path, readOnly: role === 'reader' } });
     this.children.add(worker);
-    let resolve!: () => void, reject!: (error: unknown) => void;
-    const ready = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
+    let resolve!: (session: Session) => void, reject!: (error: unknown) => void;
+    const ready = new Promise<Session>((yes, no) => { resolve = yes; reject = no; });
     const session: Session = { worker, pending: new Map(), ready, dead: false };
     this.sessions.set(role, session);
     const lost = (error: unknown) => {
       session.dead = true; reject(error);
       for (const request of session.pending.values()) request.reject(error);
       session.pending.clear();
-      if (this.sessions.get(role) === session) { this.sessions.delete(role); this.opening.delete(role); }
+      if (this.sessions.get(role) === session) this.sessions.delete(role);
     };
     worker.on('message', (response: BlobResponse) => {
-      if ('ready' in response) { resolve(); return; }
+      if ('ready' in response) { resolve(session); return; }
       const pending = session.pending.get(response.id);
       if (!pending) return;
       session.pending.delete(response.id);
@@ -108,12 +103,11 @@ export class SqliteLiteralBlobOwner {
         const e = response.error;
         pending.reject(e.code === 'STORE_RESPONSE_TOO_LARGE' && e.maxBytes !== undefined && e.actualBytes !== undefined
           ? new StoreResponseTooLargeError(e.maxBytes, e.actualBytes)
-          : Object.assign(new Error(e.message), { code: e.code }));
+          : deserializeWorkerErrorV1(e));
       } else pending.resolve(response.value);
     });
     worker.on('error', lost);
     worker.on('exit', code => { this.children.delete(worker); lost(new Error(`Literal blob worker exited (${code}); retry the original preparation`)); });
-    await ready;
     return session;
   }
   private request(session: Session, command: Command): Promise<string | undefined> {

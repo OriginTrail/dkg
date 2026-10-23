@@ -9,7 +9,8 @@ import { SqliteLiteralBlobOwner } from '../src/sqlite-literal-blob-owner.js';
 import { SQLITE_BLOB_FILENAME } from '../src/sqlite-literal-blob-protocol.js';
 import { asChangelogReader, createTripleStore, type TripleStore } from '../src/index.js';
 const control = vi.hoisted(() => ({ mode: '', signal: undefined as SharedArrayBuffer | undefined,
-  instances: [] as Worker[], allocations: [] as number[], handlers: [] as ((error: Error) => void)[], reads: 0, commits: 0 }));
+  instances: [] as Worker[], allocations: [] as number[], handlers: [] as ((error: Error) => void)[], reads: 0, commits: 0,
+  policies: [] as Record<string, unknown>[], writes: [] as { hash: string; bytes: number; payloadHash: string }[] }));
 vi.mock('node:worker_threads', async original => {
   const native = await original<typeof import('node:worker_threads')>();
   return { ...native, Worker: class extends native.Worker {
@@ -21,7 +22,12 @@ vi.mock('node:worker_threads', async original => {
       } : options);
       control.instances.push(this);
       queueMicrotask(() => { const handler = this.listeners('error')[0]; if (handler) control.handlers.push(handler as (error: Error) => void); });
-      this.on('message', message => { if (message?.diagnostic === 'allocation') control.allocations.push(message.bytes); if (message?.diagnostic === 'commit') control.commits += 1; });
+      this.on('message', message => {
+        if (message?.diagnostic === 'allocation') control.allocations.push(message.bytes);
+        if (message?.diagnostic === 'commit') control.commits += 1;
+        if (message?.diagnostic === 'policy') control.policies.push(message.values);
+        if (message?.diagnostic === 'write') control.writes.push(message);
+      });
     }
     override postMessage(message: { operation?: string }, transferList?: readonly import('node:worker_threads').Transferable[]) {
       if (message?.operation === 'read') control.reads += 1;
@@ -41,6 +47,7 @@ afterEach(async () => {
   for (const o of owners.splice(0)) await o.close().catch(() => {});
   expect(control.instances.every(worker => worker.threadId === -1)).toBe(true);
   control.mode = ''; control.signal = undefined; control.instances = []; control.allocations = []; control.handlers = []; control.reads = 0; control.commits = 0;
+  control.policies = []; control.writes = [];
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 it.each(['before-commit', 'after-commit'])('recovers a native worker %s failure without accepting an uncertain write', async fault => {
@@ -59,6 +66,8 @@ it('retains a real native FULL failure and succeeds with a fresh owner after the
   await expect(o.read(hash(value))).resolves.toBeUndefined();
   // Reopening the failed native connection permits ordinary retry on this owner.
   await o.write(hash(value), value); await o.close();
+  expect(control.policies).toHaveLength(2);
+  expect(control.policies).toEqual([requiredPolicy, requiredPolicy]);
   const retry = owner(f.directory);
   await expect(retry.read(hash(value))).resolves.toBe(value);
 });
@@ -131,6 +140,7 @@ it('coalesces a ready group into one native durable transaction', async () => {
 });
 
 const graph = 'urn:sqlite-blob/_shared_memory';
+const requiredPolicy = { journal_mode: 'wal', synchronous: 2, fullfsync: 1, checkpoint_fullfsync: 1 };
 async function composed(directory: string) {
   const store = await createTripleStore({ backend: 'oxigraph-worker', options: { path: join(directory, 'store.nq') },
     graphSetIndex: true, changelog: true, largeLiteralStorage: { directory: join(directory, 'blobs'), thresholdBytes: 1024, persistence: 'sqlite-wal' } });
@@ -164,4 +174,45 @@ it.each(['before-commit', 'after-commit', 'full'])('retries %s without publishin
   const reopened = await composed(f.root);
   await expect(reopened.query(select('urn:retry'))).resolves.toMatchObject({ bindings: [{ value }] });
   expect((await asChangelogReader(reopened)!.readChanges(0, 10)).map(change => change.seq)).toEqual([1, 2]);
+});
+it('rejects an unsupported runtime before allocating an RDF worker', async () => {
+  const f = await fixture(), descriptor = Object.getOwnPropertyDescriptor(process.versions, 'sqlite')!;
+  try {
+    Object.defineProperty(process.versions, 'sqlite', { ...descriptor, value: '3.51.2' });
+    await expect(composed(f.root)).rejects.toThrow('requires a Node runtime');
+    expect(control.instances).toHaveLength(0);
+  } finally {
+    Object.defineProperty(process.versions, 'sqlite', descriptor);
+    // Counterfactual failures still clean every exact worker allocated by this test.
+    await Promise.all(control.instances.map(worker => worker.terminate()));
+  }
+});
+it.each(['journal_mode', 'synchronous', 'fullfsync', 'checkpoint_fullfsync'])(
+  'rejects a native %s downgrade before publication, then reestablishes the full policy on retry', async key => {
+    const f = await fixture(), s = await composed(f.root); await s.insert([quad('urn:seed')]);
+    control.mode = 'policy-downgrade:'+key;
+    await expect(s.insert([quad('urn:policy', value)])).rejects.toThrow('required durability policy');
+    await expect(s.query(select('urn:policy'))).resolves.toMatchObject({ bindings: [] });
+    expect((await asChangelogReader(s)!.readChanges(0, 10)).map(change => change.seq)).toEqual([1]);
+    expect(control.policies).toHaveLength(1); expect(control.policies[0]![key]).not.toBe(requiredPolicy[key as keyof typeof requiredPolicy]);
+    await s.insert([quad('urn:policy', value)]);
+    expect(control.policies).toHaveLength(2); expect(control.policies[1]).toEqual(requiredPolicy);
+    await expect(s.query(select('urn:policy'))).resolves.toMatchObject({ bindings: [{ value }] });
+  });
+it.each(['fresh-owner', 'lost-ACK'])('re-submits full matching bytes after %s and refuses a real native write error', async mode => {
+  const f = await fixture(), s = await composed(f.root); await s.insert([quad('urn:seed')]);
+  if (mode === 'fresh-owner') { const seed = owner(f.directory); await seed.write(hash(value), value); await seed.close(); }
+  else {
+    control.mode = 'after-commit';
+    await expect(s.insert([quad('urn:adopt', value)])).rejects.toThrow('worker exited');
+  }
+  control.mode = 'resubmit-readonly'; control.writes = [];
+  await expect(s.insert([quad('urn:adopt', value)])).rejects.toThrow('readonly');
+  expect(control.writes).toMatchObject([{ hash: hash(value), bytes: Buffer.byteLength(value), payloadHash: hash(value) }]);
+  await expect(s.query(select('urn:adopt'))).resolves.toMatchObject({ bindings: [] });
+  await expect(owner(f.directory).read(hash(value))).resolves.toBe(value);
+  await s.insert([quad('urn:adopt', value)]);
+  expect(control.writes).toHaveLength(2);
+  expect(control.writes[1]).toMatchObject({ hash: hash(value), bytes: Buffer.byteLength(value), payloadHash: hash(value) });
+  await expect(s.query(select('urn:adopt'))).resolves.toMatchObject({ bindings: [{ value }] });
 });
