@@ -133,7 +133,7 @@ export interface QueryOptions {
 
 export type TripleStoreQueryOptions = QueryOptions;
 
-/** Optional backend-owned admission spanning a mutation and decorator bookkeeping.
+/** Optional lifetime ownership spanning preparation, mutation and decorator bookkeeping.
  * Each backend request retains its own scheduler slot. Query options remain
  * telemetry/cancellation values and never confer continuation authority.
  */
@@ -390,7 +390,7 @@ export function findTripleStoreCapability<T>(
   return null;
 }
 
-/** Keep the outer decorator path, discovering only the backend's lifetime owner. */
+/** Discover the outer lifetime owner without bypassing the decorator write path. */
 export function runLogicalStoreMutation<T>(
   store: unknown, operation: StoreOperation, options: QueryOptions | undefined,
   work: (options: QueryOptions | undefined) => Promise<T>,

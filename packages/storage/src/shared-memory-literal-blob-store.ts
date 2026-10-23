@@ -1,4 +1,4 @@
-import { prepareImmutableMutation, runImmutableMutation, assertImmutableMutationCapability, type ImmutableStorePreparation, type ImmutableStoreMutation, type PreparedMutation } from './immutable-store-preparation.js';
+import { prepareImmutableMutation, runImmutableMutation, runRfc64AuthorCommitCasMutation, assertImmutableMutationCapability, type ImmutableStorePreparation, type ImmutableStoreMutation, type PreparedMutation } from './immutable-store-preparation.js';
 import { LiteralBlobFileOwner } from './literal-blob-file-owner.js';
 import { assertLiteralBlobStoreOptions, type SharedMemoryLiteralBlobStoreOptions } from './literal-blob-options.js';
 export type { SharedMemoryLiteralBlobStoreOptions } from './literal-blob-options.js';
@@ -29,8 +29,6 @@ import type {
 } from './rfc64-author-commit-cas.js';
 import {
   mapRfc64AuthorCommitCasV1,
-  normalizeRfc64AuthorCommitCasV1,
-  sourceFromNormalizedRfc64AuthorCommitCasV1,
 } from './rfc64-author-commit-cas.js';
 import {
   ContentAddressedBlobSingleFlight,
@@ -57,7 +55,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
   private readonly blobWrites: ContentAddressedBlobSingleFlight;
   private readonly fileBlobs: LiteralBlobFileOwner;
   private readonly sqliteBlobs?: SqliteLiteralBlobOwner;
-  private readonly blobWork?: StoreWorkDrain;
+  private readonly blobWork = new StoreWorkDrain('Literal blob store is closing');
 
   constructor(inner: TripleStore, options: SharedMemoryLiteralBlobStoreOptions) {
     assertLiteralBlobStoreOptions(options);
@@ -72,7 +70,6 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
     this.fileBlobs = new LiteralBlobFileOwner(blobDir);
     if (options.persistence === 'sqlite-wal') {
       this.sqliteBlobs = new SqliteLiteralBlobOwner(blobDir);
-      this.blobWork = new StoreWorkDrain('Literal blob store is closing');
     }
     this.blobWrites = new ContentAddressedBlobSingleFlight({
       createOrVerify: (hash, term) => this.sqliteBlobs ? this.sqliteBlobs.write(hash, term) : this.fileBlobs.write(hash, term),
@@ -82,8 +79,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
 
   runLogicalMutation<T>(operation: StoreOperation, options: QueryOptions | undefined,
     work: (options: QueryOptions | undefined) => Promise<T>): Promise<T> {
-    const start = () => runLogicalStoreMutation(this.inner, operation, options, work);
-    return this.blobWork ? this.blobWork.run(start) : start();
+    return this.blobWork.run(() => runLogicalStoreMutation(this.inner, operation, options, work));
   }
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
@@ -146,7 +142,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
   }
 
   async rfc64AuthorCommitCasV1(input: Rfc64AuthorCommitCasInputV1, options?: QueryOptions): Promise<Rfc64AuthorCommitCasResultV1> {
-    return runImmutableMutation(this, { operation: 'rfc64AuthorCommitCasV1', input }, options);
+    return runRfc64AuthorCommitCasMutation(this, input, options);
   }
 
   async prepareImmutableMutation<M extends ImmutableStoreMutation>(mutation: M): Promise<PreparedMutation<M>> {
@@ -174,13 +170,12 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
           insertQuads: rows.slice(mutation.replacementQuads.length) }; break;
       }
       case 'rfc64AuthorCommitCasV1': {
-        const manifest = normalizeRfc64AuthorCommitCasV1(mutation.input);
-        const mapped = await mapRfc64AuthorCommitCasV1(manifest, {
+        const mapped = await mapRfc64AuthorCommitCasV1(mutation.plan, {
           mapQuad: quad => this.externalizeInsertQuad(quad),
           mapObject: (object, context) => context.kind === 'expected'
             ? this.translateGuardObject(context.graphUri, object) : this.externalizeScalarObject(context.graphUri, object!),
         });
-        prepared = { ...mutation, input: sourceFromNormalizedRfc64AuthorCommitCasV1(mapped) }; break;
+        prepared = { ...mutation, plan: mapped }; break;
       }
     }
     return prepareImmutableMutation(this.inner, prepared);
@@ -207,7 +202,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
-    return this.blobWork ? this.blobWork.run(() => this.queryAndHydrate(sparql, options)) : this.queryAndHydrate(sparql, options);
+    return this.sqliteBlobs ? this.blobWork.run(() => this.queryAndHydrate(sparql, options)) : this.queryAndHydrate(sparql, options);
   }
 
   private async queryAndHydrate(sparql: string, options?: QueryOptions): Promise<QueryResult> {
@@ -258,10 +253,10 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
     await this.inner.flush?.(options);
   }
 
-  async close(): Promise<void> {
-    return this.blobWork ? this.blobWork.close(async () => {
-      try { await this.inner.close(); } finally { await this.sqliteBlobs!.close(); }
-    }) : this.inner.close();
+  close(): Promise<void> {
+    return this.blobWork.close(async () => {
+      try { await this.inner.close(); } finally { await this.sqliteBlobs?.close(); }
+    });
   }
 
   private async externalizeQuads(quads: readonly Quad[]): Promise<Quad[]> {

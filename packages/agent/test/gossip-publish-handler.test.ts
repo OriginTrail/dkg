@@ -9,7 +9,7 @@ import {
   createOperationContext,
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { createTripleStore, OxigraphStore, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import {
@@ -44,7 +44,7 @@ function makePublishMessage(opts: {
   });
 }
 
-function createHandler(store?: OxigraphStore, callbacks?: Partial<{
+function createHandler(store?: TripleStore, callbacks?: Partial<{
   contextGraphExists: (id: string) => Promise<boolean>;
   getContextGraphOwner: (id: string) => Promise<string | null>;
   setContextGraphSubscription: (id: string, next: ContextGraphSub) => void;
@@ -81,8 +81,9 @@ function createHandler(store?: OxigraphStore, callbacks?: Partial<{
 }
 
 describe('GossipPublishHandler', () => {
-  it('materializes a graph-scoped KA into one exact VM graph without root metadata', async () => {
-    const { store, handler } = createHandler();
+  it.each([false, true])('materializes a graph-scoped KA into one exact VM graph without root metadata (reused default=%s)', async reused => {
+    const backing = reused ? await createTripleStore({ backend: 'oxigraph' }) : undefined;
+    const { store, handler } = createHandler(backing);
     const author = '0x70997970c51812dc3a010c7d01b50e0d17dc79c8';
     const kaNumber = 41n;
     const packedKaId = (BigInt(author) << 96n) | kaNumber;
@@ -142,6 +143,7 @@ describe('GossipPublishHandler', () => {
       allowedPeers: [],
     });
 
+    if (reused) await store.close();
     await handler.handlePublishMessage(data, CONTEXT_GRAPH, undefined, '12D3KooWPublisher');
 
     expect(await store.countQuads(vmGraph)).toBe(1);

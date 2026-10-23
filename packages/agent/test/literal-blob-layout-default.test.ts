@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { applyDefaultLargeLiteralStorage } from '../src/dkg-agent-helpers.js';
 
-it.each(['files', 'sqlite-wal'] as const)('preserves the agent-selected %s blob layout through defaulting and durable reopen', async persistence => {
+it.each(['files', 'sqlite-wal'] as const)('preserves the agent-selected %s blob layout through defaulting, same-instance reuse and durable reopen', async persistence => {
   const root = await mkdtemp(join(tmpdir(), 'dkg-agent-blob-layout-'));
   let store: TripleStore | undefined;
   try {
@@ -17,7 +17,14 @@ it.each(['files', 'sqlite-wal'] as const)('preserves the agent-selected %s blob 
     const files = await readdir(join(root, 'literal-blobs'));
     expect(files.includes('literal-blobs-v1.sqlite')).toBe(persistence === 'sqlite-wal');
     expect(files.some(name => /^[a-f0-9]{64}$/.test(name))).toBe(persistence === 'files');
+    const nextObject = JSON.stringify('fresh after same-instance close '.repeat(4096));
+    await store.insert([{ graph, subject: 'urn:next-asset', predicate: 'urn:value', object: nextObject }]);
+    await expect(store.query(`SELECT ?value WHERE { GRAPH <${graph}> { <urn:next-asset> <urn:value> ?value } }`))
+      .resolves.toMatchObject({ bindings: [{ value: nextObject }] });
+    await store.close();
     store = await createTripleStore(config);
+    await expect(store.query(`SELECT ?value WHERE { GRAPH <${graph}> { <urn:next-asset> <urn:value> ?value } }`))
+      .resolves.toMatchObject({ bindings: [{ value: nextObject }] });
     await expect(store.query(`SELECT ?value WHERE { GRAPH <${graph}> { <urn:asset> <urn:value> ?value } }`))
       .resolves.toMatchObject({ bindings: [{ value: object }] });
   } finally { await store?.close(); await rm(root, { recursive: true, force: true }); }

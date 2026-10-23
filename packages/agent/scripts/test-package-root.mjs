@@ -355,6 +355,7 @@ const blockedRfc64Modules = [
   'public-catalog-reconciliation-failure-v1.js',
   'public-catalog-reconciliation-outcome-v1.js',
   'public-catalog-receiver-task-lifecycle-v1.js',
+  'announced-current-head-retry-v1.js',
   'public-catalog-receiver-v1.js',
   'public-catalog-service-v1.js',
   'public-catalog-head-delivery-v1.js',

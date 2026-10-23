@@ -33,11 +33,14 @@ export type ShareAnswer = typeof DELIVERED | typeof REFUSED | typeof RETRY_LATER
 /**
  * An agent with GossipSub subscribers `subscribers` and followers `followers`
  * of `graph`, every peer dialable; `share` makes the next share and resolves
- * with the peers it was sent to directly, sorted.
+ * with the peers it was sent to directly, sorted. With `members`, `graph` is a
+ * curated public graph whose allowlist names one agent per member peer, each
+ * registered with that peer and connected (#3421).
  */
 export async function agentWith(options: {
   subscribers: string[];
   followers: string[];
+  members?: string[];
   answer?: (peerId: string) => ShareAnswer;
   graph?: string;
 }) {
@@ -72,6 +75,25 @@ export async function agentWith(options: {
     },
   };
   for (const peerId of options.followers) sharedMemoryFollowersOf(agent).note(graph, peerId);
+  const members = options.members;
+  if (members !== undefined) {
+    const allowedAgents = members.map((_, index) => `0x${(index + 1).toString(16).padStart(40, '0')}`);
+    const storedMeta = agent.getCgMeta.bind(agent);
+    Object.assign(agent, {
+      getCgMeta: async (contextGraphId: string, metaOptions?: { signal?: AbortSignal }) => ({
+        ...(await storedMeta(contextGraphId, metaOptions)),
+        ...(contextGraphId === graph ? { accessPolicy: 'public', allowedAgents } : {}),
+      }),
+    });
+    agent.discovery.findAgentPeerPageByAddress = async (address) => ({
+      peerIds: members.filter((_, index) => allowedAgents[index] === address),
+      nextAfterPeerId: null,
+    });
+    Object.defineProperty(host.node, 'libp2p', {
+      value: { getPeers: () => members.map((peerId) => ({ toString: () => peerId })) },
+      configurable: true,
+    });
+  }
   let shares = 0;
   const share = async (subGraphName: string | null | undefined): Promise<string[]> => {
     sent.length = 0;

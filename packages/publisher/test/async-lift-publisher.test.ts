@@ -904,6 +904,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     'chain-access-policy-timeout',
     'chain-participant-authority-unavailable',
     'rfc64-private-read-roster-unavailable',
+    'approved-member-metadata-pending',
   ])('retries transient authority reason %s from validated without inventing broadcast evidence', async (reason) => {
     const publisher = createPublisher({
       config: {
