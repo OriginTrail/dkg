@@ -1,3 +1,4 @@
+import { namedGraphsFromQuads } from './graph-set-index-utils.js';
 import type { StoreWorkDrain } from './store-work-drain.js';
 import { runLogicalStoreMutation, type Quad, type QueryOptions, type TripleStore } from './triple-store.js';
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
@@ -16,6 +17,16 @@ export type ImmutableStoreMutation =
   | { operation: 'replaceSubjectAndInsert'; graphUri: string; subject: string;
       replacementQuads: readonly Quad[]; insertQuads: readonly Quad[] }
   | { operation: 'rfc64AuthorCommitCasV1'; plan: NormalizedRfc64AuthorCommitCasV1 };
+/** Graph attribution comes from the same typed command used for preparation. */
+export function immutableMutationTouchedGraphs(mutation: ImmutableStoreMutation): string[] {
+  switch (mutation.operation) {
+    case 'insert': return namedGraphsFromQuads(mutation.quads);
+    case 'replaceAssetGroup': return [...new Set(mutation.assets.flatMap(asset => [asset.graphUri, asset.metaGraphUri]))];
+    case 'replaceGraphAndSubject': return [mutation.graphUri, mutation.metaGraphUri];
+    case 'rfc64AuthorCommitCasV1': return [...mutation.plan.touchedGraphs];
+    default: return [mutation.graphUri];
+  }
+}
 export type ImmutableMutationResult<M extends ImmutableStoreMutation> =
   M extends { operation: 'rfc64AuthorCommitCasV1' } ? Rfc64AuthorCommitCasResultV1 : void;
 export type MutationCommit<T = void> = (options?: QueryOptions) => Promise<T>;

@@ -1,4 +1,4 @@
-import { prepareImmutableMutation, closeImmutableStoreMutations, runImmutableMutation, runRfc64AuthorCommitCasMutation, assertImmutableMutationCapability, type ImmutableStoreMutation, type ImmutableStorePreparation, type PreparedMutation } from './immutable-store-preparation.js';
+import { prepareImmutableMutation, immutableMutationTouchedGraphs, closeImmutableStoreMutations, runImmutableMutation, runRfc64AuthorCommitCasMutation, assertImmutableMutationCapability, type ImmutableStoreMutation, type ImmutableStorePreparation, type PreparedMutation } from './immutable-store-preparation.js';
 import type { TripleStoreCommitCapability } from './persistence.js';
 import type { GraphSetIndexStoreOptions } from './graph-set-index-store-options.js';
 export type { GraphSetIndexStoreOptions } from './graph-set-index-store-options.js';
@@ -335,16 +335,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator, ImmutableStoreP
   async prepareImmutableMutation<M extends ImmutableStoreMutation>(mutation: M): Promise<PreparedMutation<M>> {
     const operation = mutation.operation;
     assertImmutableMutationCapability(this.inner, operation);
-    let touched: string[];
-    switch (mutation.operation) {
-      case 'insert': touched = namedGraphsFromQuads(mutation.quads); break;
-      case 'replaceAssetGroup': touched = [...new Set(mutation.assets.flatMap(asset => [asset.graphUri, asset.metaGraphUri]))]; break;
-      case 'replaceGraphAndSubject': touched = [mutation.graphUri, mutation.metaGraphUri]; break;
-      case 'rfc64AuthorCommitCasV1': {
-        touched = [...mutation.plan.touchedGraphs]; break;
-      }
-      default: touched = [mutation.graphUri];
-    }
+    const touched = immutableMutationTouchedGraphs(mutation);
     const prepared = await prepareImmutableMutation(this.inner, mutation);
     return { operation, commit: async (scoped, appended) => {
       let result;
