@@ -149,6 +149,16 @@ typecheck and changed-file ESLint. Browser security policy denied the builder
 origin because of a saved user permission. Browser visual/drag verification is
 outstanding; no alternate browser or screenshot workaround was used.
 
+The final development preview build at nOS commit
+`e7f3d24ea5256fb9d193385a795277959fa3698a` passed and replaced the static preview
+snapshot, retaining its predecessor. The owned preview gateway was restarted
+with the workflow/inspection route allowlist. A final read-only JSON check through
+that gateway was rejected by automatic approval review, including after the user
+explicitly approved it, because the public fixture selector was classified as a
+prohibited Bearer token. That gateway check remains unverified; no alternate
+transport or authentication workaround was attempted. Direct node/client proof
+above is independent of this blocked check. Root repository lint also passed.
+
 Private continuation/evidence: `workflow-builder-verification-v2.json`,
 `workflow-builder-evidence-v2.json`, and the earlier retained verification and
 evidence files. They preserve exact save definitions and invocation identities.
