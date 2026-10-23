@@ -32,14 +32,14 @@ import {
   finalizedPublishOptionsPayload,
   type KnowledgeAssetFinalizedPublishOptions,
 } from './finalized-publish-options.js';
-import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
-import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import { parseRegisterPcaAgentResult, type RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import {
   serializeStatusQuery,
   type StatusQueryOptions,
   type StoreQuadsStatusFields,
   type StoreReachabilityFields,
 } from './status-store-quads-wire.js';
+import type { DaemonRuntimeStatusFields } from './status-runtime-wire.js';
 import type {
   CatchupContextGraphIdentity,
   CatchupStatusResponse,
@@ -441,7 +441,7 @@ export interface RelayStatusResponse {
   configuredAnnounceAddresses: string[];
 }
 
-export interface DaemonStatusResponse extends StoreQuadsStatusFields, StoreReachabilityFields {
+export interface DaemonStatusResponse extends StoreQuadsStatusFields, StoreReachabilityFields, DaemonRuntimeStatusFields {
   name: string;
   peerId: string;
   nodeRole?: string;
