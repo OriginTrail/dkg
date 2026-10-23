@@ -297,6 +297,7 @@ import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import {
   conflictsWithOwnedContextGraphBinding, resolveDiscoveredContextGraphBinding,
 } from './context-graph-chain-discovery-binding.js';
+import { projectDiscoveredContextGraphSubscription } from './context-graph-discovery-enrichment.js';
 import {
   relocatePrivateContextGraphMetadata,
   type ContextGraphMetadataRelocationResult,
@@ -1923,16 +1924,10 @@ export class DKGAgent extends DKGAgentBase {
       );
       return existing;
     }
-    const next: ContextGraphSub = {
-      ...existing,
-      syncMode: existing?.syncMode ?? 'always-on',
-      name: metadata.name ?? existing?.name,
-      subscribed: existing?.subscribed === true,
-      synced: existing?.synced === true,
-      sharedMemorySynced: existing?.sharedMemorySynced === true,
-      metaSynced: existing?.metaSynced === true,
-      participantAgents: metadata.participantAgents ?? existing?.participantAgents,
-    };
+    const next = projectDiscoveredContextGraphSubscription(
+      existing, metadata, this.contextGraphSubscriptionDormancyById.get(contextGraphId),
+    );
+    if (next === existing) return existing;
 
     const invalidExplicitOnChainId = metadata.onChainId !== undefined
       && authoritativeOnChainId === undefined;

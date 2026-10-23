@@ -717,7 +717,8 @@ describe('E2E: shared memory between agents linked only through a relay, public 
     buildsOn(FOLLOWING);
     await whenNobodyPulls(everyone);
     // A node of an older release has no handler for the notice: take member
-    // 2's away. The owner then fails to open the stream, once, and goes on.
+    // 2's away. The owner leaves it out once identify has told it, or fails
+    // to open the stream once and does not send it again (#3421).
     (member2 as unknown as { router: { unregister(protocolId: string): void } }).router
       .unregister(PROTOCOL_SWM_CHANGE_NOTICE);
     const ownerLog = vi.spyOn((owner as unknown as { log: { info(...args: unknown[]): void } }).log, 'info');
@@ -733,7 +734,8 @@ describe('E2E: shared memory between agents linked only through a relay, public 
         DELIVERY_BOUND_MS,
         500,
       );
-      expect(noticeLine, 'the owner\'s change notice line after the share').toMatch(/reached 0 of 1 follower\(s\)$/);
+      expect(noticeLine, 'the owner\'s change notice line after the share')
+        .toMatch(/reached 0 of 0 follower\(s\); 1 without the notice protocol$/);
     } finally {
       ownerLog.mockRestore();
     }
