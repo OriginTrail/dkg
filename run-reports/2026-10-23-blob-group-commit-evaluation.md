@@ -10,8 +10,8 @@ Runtime: native macOS arm64, Node22.23.3, SQLite3.51.3, libuv1.51.0, pnpm10.28.1
 
 ## Validation
 
-- Current full storage:1,722passed/111files,45existing environment-gated skips.
-- Current native/integrated cases:67(part of the full cohort), including last-ACK whole-process SIGKILL before any RDF write and exact fresh-process readback; native FULL; pre/post-COMMIT worker death; same-write retry with no premature RDF/changelog; exact batch coverage and late arrivals; independent read progress; close/cancellation drainage; bounded allocation; legacy compatibility and tested rollback export.
+- Current full storage:1,723passed/111files,45existing environment-gated skips.
+- Current native/integrated cases:68(part of the full cohort), including last-ACK whole-process SIGKILL before any RDF write and exact fresh-process readback; native FULL; pre/post-COMMIT worker death; same-write retry with no premature RDF/changelog; exact batch coverage and late arrivals; independent read progress; close/cancellation drainage; bounded allocation; legacy compatibility and tested rollback export.
 - Counterfactuals fail as intended: acknowledging before COMMIT creates a dangling RDF ref; unconditionally materializing a16MiB value violates the allocation assertion. Correct source restored and rebuilt.
 - Runtime dependency closure, source/type/package/prepared-CLI builds pass. Lint, source-size and disabled-test ratchets pass without increased budgets. Later metadata-only documentation changes do not alter these results.
 
@@ -358,3 +358,9 @@ The proposed throughput/small-write-p95 budgets pass in this nativeBlazegraph sa
 | mixed | 79.55, 83.73, 72.26 | 86.54, 89.55, 68.15 | 89.65, 78.19, 73.71 |
 
 Counts and read values pass throughout. Exact owned container/volumes were removed; unrelated services and wallets were untouched. Earlier unfavorable samples are retained. Human budget/scope/default acceptance and final combined-tip live testnet remain open; no new publication or physical power-loss proof is claimed.
+
+
+## Round10 stored-row integrity and standalone publisher configuration
+
+
+Round10 local validation: full storage1,723/111files passes with45existing gated skips, including68native/integrated cases. The stored-row conflict test uses altered valid UTF-8 of exactly the original byte length, so byte comparison rather than size alone must reject; independent native row inspection verifies retention after fresh-owner close. Disabling that guard acknowledges the write and fails the regression. Both standalone runtime and inspector reconstruct a real worker store with config.store omitted and hydrate a SQLite-only literal; removing the layout spread makes both fail with missing legacy blobs. Restored CLI composition/managed suites pass46cases/3files, including actual stock managed HTTP process restart without certification. CLI type contracts,17dependency-route and7execution-route cases, lint/size/disabled/diff pass. No production changes from955, new timeouts/skips, default adoption, live or merge claim. Current-head review/full CI remain pending.

@@ -91,6 +91,19 @@ it('rejects altered valid UTF-8 BLOB bytes below the read budget after native re
   db.prepare('UPDATE blobs SET term=? WHERE hash=?').run(Buffer.from('"corrupted but valid UTF-8"'), hash(value)); db.close();
   await expect(reopen(f.directory).read(hash(value), 4096)).rejects.toThrow('integrity mismatch');
 });
+it('rejects a write conflicting with altered stored bytes and preserves the existing row', async () => {
+  const f = await fixture(), value = '"original immutable literal"', corrupted = Buffer.from(value.replace('original', 'corrupt!'));
+  await f.owner.write(hash(value), value); await f.owner.close();
+  const db = new DatabaseSync(f.path);
+  db.prepare('UPDATE blobs SET term=? WHERE hash=?').run(corrupted, hash(value)); db.close();
+  const retry = reopen(f.directory);
+  const outcome = await retry.write(hash(value), value).then(() => 'ack', error => error.message);
+  await retry.close();
+  const inspect = new DatabaseSync(f.path, { readOnly: true });
+  const rows = inspect.prepare('SELECT hash, term FROM blobs').all(); inspect.close();
+  expect(outcome).toContain('Literal blob conflict');
+  expect(rows).toEqual([{ hash: hash(value), term: new Uint8Array(corrupted) }]);
+});
 it('does not adopt an empty database with an unknown version', async () => {
   const f = await fixture(), seed = reopen(f.directory); await seed.write(hash('seed'), 'seed'); await seed.close();
   const db = new DatabaseSync(f.path);
