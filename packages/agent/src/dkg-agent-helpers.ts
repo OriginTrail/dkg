@@ -277,7 +277,7 @@ export function defaultLargeLiteralStorage(
   dataDir: string,
   config: LargeLiteralStorageConfig | undefined,
 ): LargeLiteralStorageConfig {
-  return {
+  return { ...config,
     enabled: config?.enabled ?? true,
     thresholdBytes: config?.thresholdBytes,
     directory: config?.directory ?? join(dataDir, 'literal-blobs'),

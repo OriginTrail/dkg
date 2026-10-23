@@ -418,7 +418,7 @@ describe('planManagedOxigraph', () => {
     const plan = planManagedOxigraph(
       {
         store: { backend: MANAGED_OXIGRAPH_BACKEND },
-        largeLiteralStorage: { enabled: false, directory: '/custom/blobs' },
+        largeLiteralStorage: { enabled: false, directory: '/custom/blobs', persistence: 'sqlite-wal' },
       },
       '/data',
     );
@@ -426,6 +426,7 @@ describe('planManagedOxigraph', () => {
       enabled: false,
       thresholdBytes: undefined,
       directory: '/custom/blobs',
+      persistence: 'sqlite-wal',
     });
   });
 

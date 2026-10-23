@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { LiteralHydrationBudget } from './bounded-literal-hydration.js';
 import { SqliteLiteralBlobOwner } from './sqlite-literal-blob-owner.js';
-import { LiteralBlobWorkLifecycle } from './literal-blob-work-lifecycle.js';
+import { StoreWorkDrain } from './store-work-drain.js';
 import type { StoreOperation } from './store-operation-outcome.js';
 import type {
   ConstructResult,
@@ -58,7 +58,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
   private readonly blobWrites: ContentAddressedBlobSingleFlight;
   private readonly fileBlobs: LiteralBlobFileOwner;
   private readonly sqliteBlobs?: SqliteLiteralBlobOwner;
-  private readonly blobWork?: LiteralBlobWorkLifecycle;
+  private readonly blobWork?: StoreWorkDrain;
 
   constructor(inner: TripleStore, options: SharedMemoryLiteralBlobStoreOptions) {
     if (!options.blobDir?.trim()) {
@@ -78,7 +78,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
     this.fileBlobs = new LiteralBlobFileOwner(this.blobDir);
     if (options.persistence === 'sqlite-wal') {
       this.sqliteBlobs = new SqliteLiteralBlobOwner(this.blobDir);
-      this.blobWork = new LiteralBlobWorkLifecycle();
+      this.blobWork = new StoreWorkDrain('Literal blob store is closing');
     } else if (options.persistence !== undefined && options.persistence !== 'files') {
       throw new Error('Unsupported literal blob persistence layout');
     }

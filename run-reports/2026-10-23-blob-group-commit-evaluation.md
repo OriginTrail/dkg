@@ -1,6 +1,6 @@
 # Durable blob group-commit evaluation
 
-This is an isolated, optional candidate based on foundation0af290930. Defaults remain legacy files. It is not a default-rollout decision, closure of the performance P1, live testnet evidence, or merge readiness. No Oxigraph fork or extra native dependency is involved. The user requires retaining the guarantee while reducing the heavy cost; no budget waiver was accepted.
+This is an isolated, optional candidate based on foundation0af290930. Initial measurements below cover47969201e; the final review-revision comparison is recorded separately at the end. Defaults remain legacy files. It is not a default-rollout decision, closure of the performance P1, live testnet evidence, or merge readiness. No Oxigraph fork or extra native dependency is involved. The user requires retaining the guarantee while reducing the heavy cost; no budget waiver was accepted.
 
 ## Contract and implementation
 
@@ -10,8 +10,8 @@ Runtime: native macOS arm64, Node22.23.3, SQLite3.51.3, libuv1.51.0, pnpm10.28.1
 
 ## Validation
 
-- Full storage:1,683passed/110files,45existing environment-gated skips.
-- New native/integrated cases:30(part of the full cohort), including last-ACK whole-process SIGKILL before any RDF write and exact fresh-process readback; native FULL; pre/post-COMMIT worker death; same-write retry with no premature RDF/changelog; exact batch coverage and late arrivals; independent read progress; close/cancellation drainage; bounded allocation; legacy compatibility and tested rollback export.
+- Current full storage:1,687passed/110files,45existing environment-gated skips.
+- Current native/integrated cases:34(part of the full cohort), including last-ACK whole-process SIGKILL before any RDF write and exact fresh-process readback; native FULL; pre/post-COMMIT worker death; same-write retry with no premature RDF/changelog; exact batch coverage and late arrivals; independent read progress; close/cancellation drainage; bounded allocation; legacy compatibility and tested rollback export.
 - Counterfactuals fail as intended: acknowledging before COMMIT creates a dangling RDF ref; unconditionally materializing a16MiB value violates the allocation assertion. Correct source restored and rebuilt.
 - Runtime dependency closure, source/type/package/prepared-CLI builds pass. Lint, source-size and disabled-test ratchets pass without increased budgets. Later metadata-only documentation changes do not alter these results.
 
@@ -95,3 +95,38 @@ The first integrated single-worker version improved concurrent writes but blocke
 | fresh-8 | 490.73, 494.88, 832.26 | 279.09, 280.46, 284.14 | 883.55, 849.70, 932.65 |
 | mixed-1 | 1549.78, 1489.48, 2420.47 | 595.39, 583.15, 588.83 | 799.91, 780.39, 755.62 |
 | mixed-8 | 1495.46, 1575.60, 2754.34 | 1120.79, 1097.66, 1159.99 | 2550.41, 2584.72, 1855.26 |
+
+
+## Review revision: shared owners, configuration and corruption
+
+Review5631520192 identified configuration propagation and requested shared drain/format code and read-side corruption coverage. Agent, standalone publisher and managed configuration builders now preserve the explicit layout while retaining the files default. A real agent-default/factory/reopen test covers both layouts(two cases); managed configuration/startup suite40passes. StoreWorkDrain provides separate nonserializing lifetime instances for wrapper/physical owner and composes TwoPhaseMutationQueue; capacity and serialized-tail concerns remain separate. SQLite format identity/schema, bounded projection and verified decoding are shared by worker/exporter. Real altered UTF-8 BLOBs reject on read/hydration despite a valid legacy file, and export shares strict schema/integrity checks. Removing read-side hash verification makes both native-owner and wrapper corruption tests fail; correct source is restored/rebuilt. Current fullstorage1,687, runtime/type/package/prepared-CLI and unchanged hygiene ratchets pass. These results add no live/merge readiness.
+
+A fresh final-source three-pair expanded worker comparison uses exact archived f9/0af controls, incompressible80KiB values and two full-hydration readers,1and8writers,72cases/86,400writes. All counts/read-value checks pass; no owned build/test overlaps measurement. Median writes/s:
+
+| Case | Base | Files | Candidate | Candidate/base |
+|---|---:|---:|---:|---:|
+| small-1 | 3406.22 | 3137.24 | 3593.76 | 105.51% |
+| small-8 | 5392.04 | 5230.63 | 4306.09 | 79.86% |
+| replay-1 | 668.63 | 1650.01 | 1725.57 | 258.07% |
+| replay-8 | 759.48 | 3443.31 | 3095.39 | 407.57% |
+| fresh-1 | 435.35 | 153.75 | 211.06 | 48.48% |
+| fresh-8 | 425.32 | 283.31 | 816.96 | 192.08% |
+| mixed-1 | 1454.36 | 570.80 | 712.87 | 49.02% |
+| mixed-8 | 1468.33 | 1118.65 | 2175.27 | 148.15% |
+
+Fresh/mixed eight-writer throughput improves substantially and meets80% of base. **Small-only eight-writer throughput is79.86% of base, slightly below that budget**; do not round it into a pass. One-writer fresh/mixed still retain roughly49% of base. Saturated replay readp99 remains higher as offered RDF write throughput grows; no blanket regression-free claim is made. The earlier equal-rate and Blazegraph samples retain their revision/workload boundaries. Defaults/adoption and human performance acceptance remain open.
+
+Final-source hydrated readp99(ms) and all raw throughput rounds:
+
+| Case | Base read99 | Files read99 | Candidate read99 | Base rounds | Files rounds | Candidate rounds |
+|---|---:|---:|---:|---|---|---|
+| small-1 | 6.582 | 13.223 | 5.415 | 1995.51, 3406.22, 4936.98 | 959.50, 3280.03, 3137.24 | 3593.76, 3585.81, 7755.39 |
+| small-8 | 2.769 | 4.128 | 4.357 | 721.11, 5392.04, 9573.01 | 5230.63, 4871.93, 9675.75 | 2611.09, 4306.09, 6277.88 |
+| replay-1 | 5.664 | 7.778 | 5.517 | 322.86, 668.63, 836.74 | 746.67, 1763.18, 1650.01 | 1725.57, 1636.60, 3021.89 |
+| replay-8 | 4.745 | 25.334 | 31.325 | 179.68, 759.48, 1417.82 | 2962.99, 3443.31, 4713.52 | 2601.37, 3095.39, 3807.53 |
+| fresh-1 | 5.381 | 4.690 | 3.776 | 259.67, 435.35, 587.40 | 153.75, 150.15, 217.23 | 211.06, 206.07, 241.33 |
+| fresh-8 | 5.599 | 8.613 | 5.578 | 146.36, 425.32, 872.83 | 276.68, 283.31, 285.12 | 775.25, 816.96, 886.39 |
+| mixed-1 | 5.299 | 3.944 | 3.498 | 472.26, 1454.36, 2622.39 | 560.14, 570.80, 891.65 | 691.26, 712.87, 839.11 |
+| mixed-8 | 4.177 | 8.777 | 4.847 | 468.15, 1468.33, 2736.32 | 1036.24, 1118.65, 1174.29 | 2175.27, 2056.69, 3328.18 |
+
+The final full-storage rerun passes1,687 cases. Exact UTF-8/BOM preservation is covered in the shared decoder; this final character-preservation correction follows the comparison and changes no barrier or batch policy.

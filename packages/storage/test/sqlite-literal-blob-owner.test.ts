@@ -50,9 +50,10 @@ it('bounds hydrated bytes before materializing a large stored value', async () =
   await expect(f.owner.read(hash(value), 16)).rejects.toBeInstanceOf(StoreResponseTooLargeError);
   await expect(f.owner.read(hash(value), Buffer.byteLength(value))).resolves.toBe(value);
 });
-it('checks byte budgets for multibyte values and rejects invalid limits', async () => {
-  const f = await fixture(), value = 'é'; await f.owner.write(hash(value), value);
-  await expect(f.owner.read(hash(value), 1)).rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE', actualBytes: 2 });
+it.each(['é', '\uFEFFé'])('preserves exact UTF-8/BOM bytes and rejects invalid byte limits for %j', async value => {
+  const f = await fixture(); await f.owner.write(hash(value), value);
+  await expect(f.owner.read(hash(value), 1)).rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE', actualBytes: Buffer.byteLength(value) });
+  await expect(f.owner.read(hash(value), Buffer.byteLength(value))).resolves.toBe(value);
   await expect(f.owner.read(hash(value), -1)).rejects.toThrow('non-negative safe integer');
 });
 it('rejects a conflicting caller hash and retains committed data', async () => {
@@ -81,6 +82,13 @@ it('rejects unexpected tables or encoding instead of mutating another database',
   const f = await fixture(), seed = reopen(f.directory); await seed.write(hash('seed'), 'seed'); await seed.close();
   const db = new DatabaseSync(f.path); db.exec('CREATE TABLE unrelated(value TEXT)'); db.close();
   await expect(f.owner.read(hash('seed'))).rejects.toThrow('schema');
+});
+it('rejects altered valid UTF-8 BLOB bytes below the read budget after native reopen', async () => {
+  const f = await fixture(), value = '"original immutable literal"';
+  await f.owner.write(hash(value), value); await f.owner.close();
+  const db = new DatabaseSync(f.path);
+  db.prepare('UPDATE blobs SET term=? WHERE hash=?').run(Buffer.from('"corrupted but valid UTF-8"'), hash(value)); db.close();
+  await expect(reopen(f.directory).read(hash(value), 4096)).rejects.toThrow('integrity mismatch');
 });
 it('does not adopt an empty database with an unknown version', async () => {
   const f = await fixture(), seed = reopen(f.directory); await seed.write(hash('seed'), 'seed'); await seed.close();

@@ -1,10 +1,10 @@
 import { DatabaseSync } from 'node:sqlite';
-import { createHash } from 'node:crypto';
 import { lstatSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { LiteralBlobFileOwner } from './literal-blob-file-owner.js';
-import { assertSqliteBlobRuntime, SQLITE_BLOB_APPLICATION_ID, SQLITE_BLOB_FILENAME, SQLITE_BLOB_VERSION } from './sqlite-literal-blob-protocol.js';
+import { assertSqliteBlobRuntime, SQLITE_BLOB_FILENAME } from './sqlite-literal-blob-protocol.js';
+import { assertSqliteBlobSchema, decodeSqliteBlobRow, SQLITE_BLOB_BOUNDED_COLUMNS } from './sqlite-literal-blob-format.js';
 
 /** Offline, non-destructive export for an older binary. Stop writers before invoking. */
 export async function exportLiteralBlobs(source: string, destination: string, maxLiteralBytes = 256 * 1024 * 1024): Promise<number> {
@@ -15,18 +15,20 @@ export async function exportLiteralBlobs(source: string, destination: string, ma
   const db = new DatabaseSync(path, { readOnly: true }), files = new LiteralBlobFileOwner(resolve(destination));
   let count = 0;
   try {
-    if (db.prepare('PRAGMA application_id').get()!.application_id !== SQLITE_BLOB_APPLICATION_ID ||
-      db.prepare('PRAGMA user_version').get()!.user_version !== SQLITE_BLOB_VERSION ||
-      db.prepare('PRAGMA encoding').get()!.encoding !== 'UTF-8') throw new Error('Unsupported literal blob database identity/version/encoding');
-    // Iterate one read snapshot, materializing at most one bounded BLOB at a time.
-    const rows = db.prepare(`SELECT hash, typeof(term) AS kind,
-      CASE WHEN typeof(term)='blob' THEN length(term) END AS bytes,
-      CASE WHEN typeof(term)='blob' AND length(term)<=? THEN term END AS term FROM blobs ORDER BY hash`);
+    assertSqliteBlobSchema(db);
+    // One offline snapshot; the shared projection never materializes over-budget BLOBs.
+    const rows = db.prepare(`SELECT hash, ${SQLITE_BLOB_BOUNDED_COLUMNS} FROM blobs ORDER BY hash`);
     for (const row of rows.iterate(maxLiteralBytes)) {
-      if (typeof row.hash !== 'string' || !/^[a-f0-9]{64}$/.test(row.hash) || row.kind !== 'blob') throw new Error('Invalid literal blob export row');
-      if (Number(row.bytes) > maxLiteralBytes) throw new Error(`Literal blob ${row.hash} exceeds export byte limit ${maxLiteralBytes}`);
-      if (!(row.term instanceof Uint8Array) || createHash('sha256').update(row.term).digest('hex') !== row.hash) throw new Error(`Literal blob integrity mismatch for ${row.hash}`);
-      const term = new TextDecoder('utf-8', { fatal: true }).decode(row.term);
+      if (typeof row.hash !== 'string') throw new Error('Invalid literal blob export row');
+      let term: string;
+      try { term = decodeSqliteBlobRow(row.hash, row, maxLiteralBytes); }
+      catch (error) {
+        // Offline export has its own explicit per-term policy and diagnostic.
+        if ((error as { code?: string }).code === 'STORE_RESPONSE_TOO_LARGE') {
+          throw new Error(`Literal blob ${row.hash} exceeds export byte limit ${maxLiteralBytes}`, { cause: error });
+        }
+        throw error;
+      }
       await files.write(row.hash, term); count += 1;
     }
     return count;

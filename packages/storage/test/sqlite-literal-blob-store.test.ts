@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTripleStore, OxigraphStore, SharedMemoryLiteralBlobStore, type TripleStore } from '../src/index.js';
@@ -72,4 +73,26 @@ it('exports durable hash files for rollback and leaves the source database and l
   expect(await readFile(join(directory, hash(value)), 'utf8')).toBe(value);
   const rollback = await open(root, 'files');
   await expect(rollback.query(select('urn:asset'))).resolves.toMatchObject({ bindings: [{ value }] });
+});
+it('propagates SQLite corruption through hydration and export even when a valid legacy file exists', async () => {
+  const root = await fixture(), seed = await open(root, 'sqlite-wal');
+  await seed.insert([quad('urn:asset')]); await seed.close();
+  const directory = join(root, 'blobs'), legacy = join(directory, hash(value));
+  await writeFile(legacy, value, 'utf8');
+  const db = new DatabaseSync(join(directory, SQLITE_BLOB_FILENAME));
+  db.prepare('UPDATE blobs SET term=? WHERE hash=?').run(Buffer.from('"corrupted but valid UTF-8"'), hash(value)); db.close();
+  const current = await open(root, 'sqlite-wal');
+  await expect(current.query(select('urn:asset'), { maxLiteralHydrationBytes: Buffer.byteLength(value) + 10 })).rejects.toThrow('integrity mismatch');
+  await current.close();
+  await expect(exportLiteralBlobs(directory, directory)).rejects.toThrow('integrity mismatch');
+  expect(await readFile(legacy, 'utf8')).toBe(value);
+});
+it('shares strict format validation with offline export before creating any hash files', async () => {
+  const root = await fixture(), seed = await open(root, 'sqlite-wal');
+  await seed.insert([quad('urn:asset')]); await seed.close();
+  const directory = join(root, 'blobs'), path = join(directory, SQLITE_BLOB_FILENAME);
+  const db = new DatabaseSync(path); db.exec('CREATE TABLE unrelated(value TEXT)'); db.close();
+  const before = await readFile(path), destination = join(root, 'exported');
+  await expect(exportLiteralBlobs(directory, destination)).rejects.toThrow('schema');
+  expect(await readdir(root)).not.toContain('exported'); expect(await readFile(path)).toEqual(before);
 });

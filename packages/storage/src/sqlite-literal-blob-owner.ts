@@ -4,6 +4,7 @@ import { Worker } from 'node:worker_threads';
 import { DurableDirectoryPreparation } from './durable-content-addressed-file.js';
 import { raceStoreWorkAgainstAbort } from './abortable-store-work-lifecycle.js';
 import { StoreResponseTooLargeError } from './http-response-limit.js';
+import { StoreWorkDrain } from './store-work-drain.js';
 import { assertSqliteBlobRuntime, SQLITE_BLOB_FILENAME, type BlobRequest, type BlobResponse } from './sqlite-literal-blob-protocol.js';
 
 type Command = BlobRequest extends infer R ? R extends BlobRequest ? Omit<R, 'id'> : never : never;
@@ -22,14 +23,12 @@ export class SqliteLiteralBlobOwner {
   private readonly sessions = new Map<Role, Session>();
   private readonly opening = new Map<Role, Promise<Session>>();
   private readonly children = new Set<Worker>();
-  private readonly accepted = new Set<Promise<unknown>>();
+  private readonly work = new StoreWorkDrain('Literal blob owner is closing');
   private readonly capacity = {
     reader: { physical: 0, limit: 4, waiting: [] as Array<() => void> },
     writer: { physical: 0, limit: 8, waiting: [] as Array<() => void> },
   };
   private nextId = 0;
-  private closing = false;
-  private stopped?: Promise<void>;
 
   constructor(directory: string) {
     assertSqliteBlobRuntime();
@@ -55,10 +54,7 @@ export class SqliteLiteralBlobOwner {
     return raceStoreWorkAgainstAbort(work, signal);
   }
   close(): Promise<void> {
-    if (this.stopped) return this.stopped;
-    this.closing = true;
-    this.stopped = (async () => {
-      await Promise.allSettled(this.accepted);
+    return this.work.close(async () => {
       try {
         await Promise.all([...this.opening.values()].map(async ready => {
           const session = await ready;
@@ -67,22 +63,16 @@ export class SqliteLiteralBlobOwner {
       } finally {
         await Promise.all([...this.children].map(worker => worker.terminate()));
       }
-    })();
-    return this.stopped;
+    });
   }
   private admit<T>(role: Role, work: () => Promise<T>): Promise<T> {
-    if (this.closing) return Promise.reject(new Error('Literal blob owner is closing'));
     const capacity = this.capacity[role];
-    const task = Promise.resolve().then(async () => {
+    return this.work.run(() => Promise.resolve().then(async () => {
       if (capacity.physical >= capacity.limit) await new Promise<void>(resolve => capacity.waiting.push(resolve));
       else capacity.physical += 1;
       try { return await work(); }
       finally { const next = capacity.waiting.shift(); if (next) next(); else capacity.physical -= 1; }
-    });
-    // Registration precedes preparation, worker creation and any synchronous callback.
-    this.accepted.add(task);
-    void task.then(() => this.accepted.delete(task), () => this.accepted.delete(task));
-    return task;
+    }));
   }
   private ensureSession(role: Role): Promise<Session> {
     const existing = this.opening.get(role);
