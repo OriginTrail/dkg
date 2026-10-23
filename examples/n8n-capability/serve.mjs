@@ -81,7 +81,7 @@ try {
     try { program = await client.programs.getSource({ graphId, programIri, programLayer: 'wm' }); }
     catch (error) { if (error.code !== 'PROGRAM_NOT_FOUND') throw error; }
     if (program) program = { graphId, programIri, programLayer: 'wm', authorAgentAddress: program.authorAgentAddress, sourceHash: program.sourceHash };
-    else program = await client.programs.upload({ graphId, programIri, name: definition.kind + '-v1', label: definition.name, language: 'typescript-v1',
+    else program = await client.programs.upload({ graphId, programIri, name: definition.kind + '-' + definition.grant.workflowSha256.slice(0, 12), label: definition.name, language: 'typescript-v1',
       source: definition.kind === 'text' ? programSource : csvProgramSource(definition.kind), version: '1.0.0', requiredTools: [definition.grant.toolIri], requestedPermissions: { graphId, n8n: definition.grant } });
     if (!definition.enabled) continue;
     let approval;

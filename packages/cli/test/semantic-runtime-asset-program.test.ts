@@ -129,8 +129,18 @@ describe('tenant-approved asset creation through real Wasm', () => {
     try {
       journalStore.registerStrategyArtifact({ artifactHash: hashCanonicalPlan(new Uint8Array([1])), strategyId: 'native', version: '1', canonicalPlan: new Uint8Array([1]), sourceRef: 'urn:native', reviewState: 'approved', createdAt: 1 });
       journalStore.createExecution({ executionId, planId: hashCanonicalPlan(new Uint8Array([1])), partitionId: 'native', status: 'active', graphRevision: 'native-request', policyEpoch: 1n, rootProcessId: executionId, leaseEpoch: 0n });
+      const canonicalQuads = [
+        { subject: executionId, predicate: SR + 'orderedOutputs', object: JSON.stringify('["private-result"]') },
+        { subject: executionId, predicate: 'http://www.w3.org/ns/prov#startedAtTime', object: '"2026-10-23T18:44:36Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' },
+        { subject: executionId, predicate: 'http://www.w3.org/ns/prov#endedAtTime', object: '"2026-10-23T18:44:40.84Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' },
+        { subject: executionId, predicate: SR + 'observedAt', object: '"2026-10-23T18:44:40.8401Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' },
+      ];
       const terminal = { contextGraphId: graph, name: 'native-execution-receipt', agentAddress: wallet.address, layer: 'wm' as const,
-        requestIdentity: 'native-request', quads: [{ subject: executionId, predicate: SR + 'orderedOutputs', object: JSON.stringify('["private-result"]') }], outputs: ['private-result'] };
+        requestIdentity: 'native-request', quads: [canonicalQuads[0],
+          { ...canonicalQuads[1], object: '"2026-10-23T18:44:36.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' },
+          { ...canonicalQuads[2], object: '"2026-10-23T18:44:40.840Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' },
+          ...canonicalQuads.slice(3),
+        ], outputs: ['private-result'] };
       let journal = new ExecutionReceiptJournal(journalStore, executionId); journal.prepare(terminal);
       const persist = async () => persistExecutionKnowledgeAsset(agent, graph, terminal.name, wallet.address, terminal.quads,
         await assertion.history(graph, terminal.name, { agentAddress: wallet.address }), 'wm', async () => {}, journal);
@@ -145,7 +155,7 @@ describe('tenant-approved asset creation through real Wasm', () => {
       expect(assertion.create).toHaveBeenCalledTimes(1);
       expect(assertion.finalize).toHaveBeenCalledTimes(1);
       expect(assertion.finalize).toHaveBeenCalledWith(graph, terminal.name, { agentAddress: wallet.address, authorAgentAddress: wallet.address });
-      expect(await assertion.query(graph, terminal.name)).toEqual(expect.arrayContaining(terminal.quads.map(q => expect.objectContaining(q))));
+      expect(await assertion.query(graph, terminal.name)).toEqual(expect.arrayContaining(canonicalQuads.map(q => expect.objectContaining(q))));
     } finally { journalStore.close(); await store.close(); }
   });
 

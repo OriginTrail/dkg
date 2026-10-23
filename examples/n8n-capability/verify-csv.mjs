@@ -74,6 +74,13 @@ if (process.argv.includes('--export')) {
   exported = await invoke('export', 'google-sheets-export', exportInput, readFileSync(components.exportTokenFile, 'utf8').trim());
   assert.equal(exported.output.rowCount, rows.length);
   assert.ok(exported.output.spreadsheetUrl.startsWith('https://docs.google.com/spreadsheets/d/' + exported.output.spreadsheetId + '/'));
+  const execution = await n8nApi('executions/' + exported.n8nExecutionId + '?includeData=true');
+  assert.equal(execution.status, 'success');
+  const runData = execution.data.resultData.runData;
+  for (const name of ['Create Google Sheet', 'Write Google rows']) assert.equal(runData[name][0].executionStatus, 'success');
+  assert.deepEqual(runData['Write Google rows'][0].data.main[0].map(item => item.json),
+    exportInput.rows.map(row => Object.fromEntries(exportInput.columns.map((column, i) => [column, row[i]]))));
+  nodeProof.push({ kaRef: exported.kaRef, n8nExecutionId: exported.n8nExecutionId, nodes: Object.keys(runData) });
 }
 const report = { parsed, mapped, malformedCsvRejected: true, duplicateMappingRejected: true, nodeProof, completedReplayVerified: true,
   google: exported ?? { available: google.available, unprivilegedExportDenied: true, connectionRequired: !google.available } };

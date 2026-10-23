@@ -20,7 +20,8 @@ The companion nOS change starts from Ziga's PR #934 at
 Private node homes, credentials, provider history and runtime logs remain outside
 the repository. The reproducible scripts write `evidence.json`,
 `regression-evidence.json`, `composition-evidence.json`, `csv-evidence.json` and
-`csv-composition-evidence.json` into the chosen local
+`csv-composition-evidence.json`, `google-export-effect-evidence.json` and
+`normalization-reconciliation-evidence.json` into the chosen local
 state directory. They contain execution references and non-secret evidence.
 
 ## Validation
@@ -28,6 +29,7 @@ state directory. They contain execution references and non-secret evidence.
 | Check | Result |
 | --- | --- |
 | DKG affected CLI approval, invocation, runtime, adapter and native receipt suites | 241/241 pass, 6 files; unit config |
+| OAuth follow-up: native asset/receipt, runtime and n8n adapter suites | 75/75 pass, 3 files; timestamp regression failed before the fix |
 | Graph Computer SDK | 37/37 pass, 3 files |
 | CLI build and type tests; semantic-runtime TypeScript build | Pass |
 | Agent build, type tests and package-root boundary after the canary merge | Pass |
@@ -36,15 +38,16 @@ state directory. They contain execution references and non-secret evidence.
 | nOS console typecheck, production build and changed-file ESLint | Pass |
 | Real n8n / DKG invocation, composition, readback, replay and denial checks | Pass |
 | DKG full runtime package build, repository lint and libp2p pin check | Pass |
-| Google Sheets create/append against a connected account | Pending operator OAuth connection; no Sheet created |
+| Google Sheets create/append against a connected account | Pass: two mapped rows, real new Sheet, private receipt readback and completed replay |
 
 ## CSV extension
 
 The approved extension uses three separate Program KAs. Parse CSV runs n8n's
 Convert to File and Extract From File nodes; Map fields runs Edit Fields; Export
-to Google Sheets contains native Google Sheets create/append nodes. Google is an
-inactive n8n draft and an unavailable, unapproved KA until its OAuth credential
-is connected. Google writes additionally require the private operator export
+to Google Sheets contains native Google Sheets create/append nodes. Setup keeps
+Google inactive and unapproved until its OAuth credential is connected. The owned
+instance now has a connected credential and an active, pinned export KA. Google
+writes additionally require the private operator export
 key at the preview bridge; the public kit login alone cannot authorize them.
 
 Real CSV parser execution `16` accepted BOM, quoted commas and an embedded
@@ -60,16 +63,41 @@ mapper through two approved `invoke_program` calls. Its execution is
 `urn:sr:execution:7972a95b-3f9d-4474-98ca-714d38fbd1f3`, with child n8n executions
 `19` and `20`. Parent and child receipts survived the subsequent service restart.
 
+Google OAuth setup enabled Sheets and Drive APIs, added the PoC test user and
+created a web client with the exact local n8n callback. The credential uses only
+`drive.file`; n8n shows **Account connected**. Billing settings and quotas were
+not changed. Client secrets and OAuth tokens remain outside the repositories.
+
+Google export KA `urn:demo:n8n:google-sheets-export:73c05deaa967` ran native n8n
+create/append nodes in successful execution `23`. The new Sheet contains `Name`
+and `Email`, with the two mapped synthetic rows also verified in Google Sheets.
+Its private DKG execution is
+`urn:sr:execution:b73459e1-cea8-42fa-8c88-85d5e2b6ea44`. The original invocation
+was reconciled after a service rebuild/restart, and its completed retry returned
+the same verified receipt, n8n execution and Sheet. No second Sheet was created.
+The private evidence retains the Sheet ID and URL. Workflow revision hashes now
+also distinguish local KA names, avoiding a collision with the disabled draft
+when OAuth enables a new pinned workflow.
+
 The authorized Cloudflare gateway now serves the CSV build. Loopback API checks
 through the gateway verified catalog availability, existing parser/mapper receipt
 replay, viewer denial, foreign-origin denial and blocked raw admin routes. This
 is API evidence, without a new public or local browser visual check.
 
-An earlier preview invocation, `ea153e24-aac9-49b6-9217-ba7f19d43cf6`, remains
-blocked by `EXECUTION_LAYER_CONFLICT` after n8n execution `11`. Its original
-journal is retained and its retry did not redispatch n8n. Later normalization
-and all CSV proofs completed, but this unresolved earlier receipt conflict is
-a draft limitation.
+An additional Google receipt replay through the preview gateway was rejected by
+automatic approval review because it would transmit the private export key over
+loopback. That gateway write check remains unverified; direct KA export, receipt
+readback, replay and refusal without the export key passed.
+
+Both the first Google receipt and earlier preview invocation
+`ea153e24-aac9-49b6-9217-ba7f19d43cf6` exposed the same timestamp comparison bug:
+Oxigraph canonicalizes `.840Z` to `.84Z`, while the durable receipt retains its
+original lexical form. Receipt comparison now removes only trailing fractional
+zeroes from UTC `xsd:dateTime` literals, preserving sub-millisecond precision.
+The native regression covers `.000Z`, `.840Z`, `.8401Z`, lost write/finalize
+acknowledgements and SQLite reopen. Both original journals were retained and
+reconciled. The earlier normalization receipt now completes and replays with
+its original n8n execution `11`, without another n8n dispatch.
 
 The live check exposed a pre-existing receipt-finalization issue: selecting an
 executor's lane did not also select its signing author. Receipt finalization now

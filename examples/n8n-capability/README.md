@@ -108,8 +108,18 @@ retain them for reconciliation if a call fails.
 Until Google is connected, its workflow remains an inactive draft and its KA is
 listed as unavailable. In the local n8n editor, connect an operator-owned **Google
 Sheets OAuth2 API** credential. A Google connection in ChatGPT cannot be reused
-as an n8n credential. Stop the example DKG server, then run setup with that
-existing credential's ID and restart the server:
+as an n8n credential.
+
+For self-hosted n8n, enable the Google Sheets and Drive APIs in your Google Cloud
+project. Create a web OAuth client using the exact callback URL displayed by n8n,
+then enter its client ID and secret in the credential editor. Enable custom
+scopes with `https://www.googleapis.com/auth/drive.file`; it allows this PoC to
+create and write its own spreadsheet. Add your account as a test user if the
+OAuth app is in Testing, then use **Sign in with Google** and confirm that n8n
+shows **Account connected**.
+
+Stop the example DKG server, then run setup with that existing credential's ID
+and restart the server:
 
 ```sh
 node examples/n8n-capability/setup-csv.mjs /tmp/n8n-ka-state EXISTING_CREDENTIAL_ID
