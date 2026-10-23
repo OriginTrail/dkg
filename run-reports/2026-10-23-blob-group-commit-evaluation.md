@@ -1,6 +1,6 @@
 # Durable blob group-commit evaluation
 
-This is an isolated, optional candidate based on foundation0af290930. Initial measurements below cover47969201e; the final review-revision comparison is recorded separately at the end. Defaults remain legacy files. It is not a default-rollout decision, closure of the performance P1, live testnet evidence, or merge readiness. No Oxigraph fork or extra native dependency is involved. The user requires retaining the guarantee while reducing the heavy cost; no budget waiver was accepted.
+This is an isolated, optional candidate incorporating foundation7656690ee/testnet-canary556ad8d483. Earlier samples below remain attributed to their original foundation0af290930 source. Initial measurements below cover47969201e; the final review-revision comparison is recorded separately at the end. Defaults remain legacy files. It is not a default-rollout decision, closure of the performance P1, live testnet evidence, or merge readiness. No Oxigraph fork or extra native dependency is involved. The user requires retaining the guarantee while reducing the heavy cost; no budget waiver was accepted.
 
 ## Contract and implementation
 
@@ -10,7 +10,7 @@ Runtime: native macOS arm64, Node22.23.3, SQLite3.51.3, libuv1.51.0, pnpm10.28.1
 
 ## Validation
 
-- Current full storage:1,723passed/111files,45existing environment-gated skips.
+- Full storage at final runtime source8bcd97b62:1,736passed/114files,45existing environment-gated skips. The later765 test-only fixture binding passes the exact17 routing and7crash cases; it does not change runtime source.
 - Current native/integrated cases:68(part of the full cohort), including last-ACK whole-process SIGKILL before any RDF write and exact fresh-process readback; native FULL; pre/post-COMMIT worker death; same-write retry with no premature RDF/changelog; exact batch coverage and late arrivals; independent read progress; close/cancellation drainage; bounded allocation; legacy compatibility and tested rollback export.
 - Counterfactuals fail as intended: acknowledging before COMMIT creates a dangling RDF ref; unconditionally materializing a16MiB value violates the allocation assertion. Correct source restored and rebuilt.
 - Runtime dependency closure, source/type/package/prepared-CLI builds pass. Lint, source-size and disabled-test ratchets pass without increased budgets. Later metadata-only documentation changes do not alter these results.
@@ -370,3 +370,63 @@ Round10 local validation: full storage1,723/111files passes with45existing gated
 
 
 Round11 validation: all1,723storage tests/111files pass(45existing gated skips), including68native/integrated cases and the existing file barrier/coalescing/drain regressions. Storage source/types and release-pack checks pass; real publisher composition5cases passes after rebuilding storage; lint/size/disabled/diff pass with unchanged budgets. The only runtime diff since955 is removal of the file-only forwarding hop plus constructor-local path storage; SQLite engine/queues/policy/batch timing are unchanged. Earlier955benchmark results retain their exact revision attribution; no fresh benchmark or universal performance claim is implied. Because completed f3 review has only this mechanical nit and all semantic regressions remain green, overlap new-head full test-only CI/EVM with review rather than waiting another review window to start CI. Both must finish on the exact published head before technical convergence. Rollout/human and combined-live gates remain open.
+
+
+## Updated-base final-source comparison (2026-10-23 UTC)
+
+Candidate runtime source: `8bcd97b62` (subsequent foundation765 integration changes only the crash test/plan). Base: `556ad8d483`; durable-files foundation: `ab5facfea`. Fresh archived controls use the same installed/built556 dependency closure. Node22.23.3/SQLite3.51.3/macOS arm64; three alternating groups, with no owned local build/test competing during measurement. All prior samples and limits above remain retained.
+
+Observed complete cohorts: worker72cases/86,400writes; equal-paced worker36/8,640; pinned native Blazegraph36/8,640. Every expected count/read assertion passes. The native journal reports DiskRW/ForceMetadata, with Identical namespaces; exact labeled container and anonymous volumes were removed. The worker uses incompressible80KiB prefixes and full hydration readers. Native Blazegraph uses repeated80KiB prefixes and two small SELECT readers; it is not a full-hydration or live publication benchmark.
+
+Median worker writes/s:
+
+| Case | Base | Files | Candidate | Candidate/base |
+|---|---:|---:|---:|---:|
+| small-1 | 6,587.50 | 6,159.92 | 6,563.75 | 99.64% |
+| small-8 | 9,039.83 | 7,993.21 | 14,309.58 | 158.29% |
+| replay-1 | 1,070.72 | 2,668.09 | 2,690.21 | 251.25% |
+| replay-8 | 1,097.50 | 4,424.70 | 4,961.88 | 452.11% |
+| fresh-1 | 649.04 | 197.46 | 289.09 | 44.54% |
+| fresh-8 | 671.01 | 284.41 | 999.28 | 148.92% |
+| mixed-1 | 2,140.46 | 682.87 | 1,121.28 | 52.38% |
+| mixed-8 | 2,202.15 | 1,141.37 | 3,605.73 | 163.74% |
+
+Concurrent worker throughput and small-write-p95 budgets pass in this sample; single-writer fresh/mixed retain44.54%/52.38% of base and remain a disclosed cost. Small-only eight-writer p95 is1.962/2.122/0.942ms(base/files/candidate); use the raw summary for exact per-round evidence. This is not universal performance acceptance.
+
+Equal-paced worker hydrated read p99(ms):
+
+| Workload | Base | Files | Candidate |
+|---|---:|---:|---:|
+| small-8 | 2.952 | 4.180 | 1.939 |
+| replay-8 | 2.818 | 3.096 | 1.867 |
+| fresh-8 | 3.267 | 4.093 | 1.968 |
+| mixed-8 | 2.340 | 2.885 | 1.583 |
+
+Native Blazegraph medians:
+
+| Workload | Base writes/s | Files writes/s | Candidate writes/s | Candidate/base |
+|---|---:|---:|---:|---:|
+| small | 90.76 | 93.38 | 68.62 | 75.61% |
+| replay | 75.25 | 92.55 | 84.56 | 112.38% |
+| fresh | 60.20 | 95.49 | 86.99 | 144.50% |
+| mixed | 86.43 | 101.92 | 91.87 | 106.29% |
+
+**Native small-only budgets FAIL in this sample.** Throughput retains75.61% of base (<80%); small-write p95 is103.820/104.996/137.645ms, with candidate/base1.326 (>1.25). Fresh/mixed throughput passes. Native small-read p99 is33.087/33.333/42.398ms; replay34.827/37.159/42.151; fresh33.506/30.095/38.150; mixed35.617/31.546/36.112(base/files/candidate). Do not claim an overall native or no-regression pass.
+
+The native small-only per-round throughput is base55.26/90.76/110.23, files77.16/93.38/96.09 and candidate68.62/68.59/93.54. This variation and changing host load do not establish causality. Retain the failed sample and perform a bounded focused diagnostic after one common server warmup, with all six order permutations and unchanged source/policy/budgets. No runtime change or performance waiver is justified merely by a noisy or favorable run.
+
+Current component validation: full storage1,736/114files,45existing gated (including68 native/integrated); agent defaulting/same-instance reuse/reopen2; managed/publisher45; runtime/source/types/packages and release-pack at parenta427; current storage/types and final exact routing17/crash7 pass. The765 fixture binding is test-only, with no changed runtime/declarations or benchmark code. Fresh current-head review/fullCI/EVM, human/default/adoption decisions and final combined-tip live proof remain required.
+
+## Bounded native small-write diagnostic
+
+Same runtime source8bcd97b62, base556 and filesab5, same pinned journal policy and thresholds. One common server warmup for each variant (three unmeasured240-write cases), then all six order permutations,600measured writes/case and two small SELECT readers: **18cases/10,800writes**. No owned build/test overlaps. All count/read checks pass and the exact labeled container/volumes are removed. SQL initialization still occurs per case before the measured interval; this is not an initialization-latency or power-loss claim.
+
+| Variant | Median writes/s | Small-write p95 ms | Read p99 ms | Six throughput samples |
+|---|---:|---:|---:|---|
+| base | 81.93 | 128.854 | 39.624 | 72.74 / 81.65 / 89.10 / 84.00 / 82.22 / 53.32 |
+| files | 78.30 | 126.764 | 38.431 | 72.64 / 78.60 / 77.65 / 78.01 / 82.10 / 80.95 |
+| candidate | 77.11 | 127.296 | 41.513 | 77.27 / 76.94 / 81.94 / 77.31 / 72.02 / 72.53 |
+
+The warmed balanced diagnostic meets the proposed small-write budgets: **94.11% of base throughput and 0.988x base p95**. Read p99 is 1.048x base. This supports a viable steady-state path; it does not erase the original75.61%/1.326x miss, establish its cause, prove no regression, or accept a rollout. No runtime change or budget relaxation was made in response to the miss.
+
+Single-writer costs, initial blob preparation outside the timer, native read tails, uncontrolled host load and the failed complete native sample remain disclosed. Defaults stay files and the optional engine is not adopted into3406. Human performance/design/adoption review, current-head completed automated review/fullCI/EVM and fresh combined-tip live proof remain gates; no merge or activation is authorized.
