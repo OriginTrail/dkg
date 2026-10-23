@@ -84,43 +84,47 @@ describe('RFC-64 announced-head re-pull schedule', () => {
     expect(schedule.retryAt(5) - time.now()).toBe(300_000);
   });
 
-  it('keeps a head whose budget ran out quiet, and an older version of its scope with it', () => {
+  it('keeps a head whose budget ran out quiet for the providers that were tried, and nothing else', () => {
     const time = clock();
     const schedule = new Rfc64AnnouncedHeadRetryScheduleV1({ intervalMs: 5_000, now: time.now });
+    const spent = headAt('7');
 
-    expect(schedule.isQuiet('scope', '7')).toBe(false);
-    schedule.quiet('scope', '7');
-    expect(schedule.isQuiet('scope', '7')).toBe(true);
-    expect(schedule.isQuiet('scope', '6')).toBe(true);
-    // A newer head is new work; another scope is not affected.
-    expect(schedule.isQuiet('scope', '8')).toBe(false);
-    expect(schedule.isQuiet('other-scope', '7')).toBe(false);
+    expect(schedule.isQuiet(spent, 'peer-a')).toBe(false);
+    schedule.quiet(spent, new Set(['peer-a', 'peer-b']));
+    expect(schedule.isQuiet(spent, 'peer-a')).toBe(true);
+    expect(schedule.isQuiet(spent, 'peer-b')).toBe(true);
+    // A provider the lane has not tried, an older or newer version, or another
+    // head at the same version is not silenced: an announced version is not verified.
+    expect(schedule.isQuiet(spent, 'peer-c')).toBe(false);
+    expect(schedule.isQuiet(headAt('6'), 'peer-a')).toBe(false);
+    expect(schedule.isQuiet(headAt('8'), 'peer-a')).toBe(false);
+    expect(schedule.isQuiet(headAt('7', 'cc'), 'peer-a')).toBe(false);
 
     time.advance(RFC64_ANNOUNCED_HEAD_QUIET_MS_V1 - 1);
-    expect(schedule.isQuiet('scope', '7')).toBe(true);
+    expect(schedule.isQuiet(spent, 'peer-a')).toBe(true);
     time.advance(1);
-    expect(schedule.isQuiet('scope', '7')).toBe(false);
+    expect(schedule.isQuiet(spent, 'peer-a')).toBe(false);
     // The expired entry is gone.
-    expect(schedule.quietScopes).toBe(0);
+    expect(schedule.quietHeads).toBe(0);
   });
 
-  it('remembers a bounded number of quiet scopes, forgetting the oldest first', () => {
+  it('remembers a bounded number of quiet heads, forgetting the oldest first', () => {
     const time = clock();
     const schedule = new Rfc64AnnouncedHeadRetryScheduleV1({
       intervalMs: 5_000,
       quietMs: 60_000,
       now: time.now,
     });
-    for (let index = 0; index < 1_024; index += 1) schedule.quiet(`scope-${index}`, '1');
-    expect(schedule.quietScopes).toBe(1_024);
+    for (let index = 0; index < 1_024; index += 1) schedule.quiet(headAt(String(index + 1)), ['peer-a']);
+    expect(schedule.quietHeads).toBe(1_024);
 
     // Quieting one again moves it to the newest place.
-    schedule.quiet('scope-0', '2');
-    schedule.quiet('scope-new', '1');
-    expect(schedule.quietScopes).toBe(1_024);
-    expect(schedule.isQuiet('scope-1', '1')).toBe(false);
-    expect(schedule.isQuiet('scope-0', '2')).toBe(true);
-    expect(schedule.isQuiet('scope-new', '1')).toBe(true);
+    schedule.quiet(headAt('1'), ['peer-a']);
+    schedule.quiet(headAt('2000'), ['peer-a']);
+    expect(schedule.quietHeads).toBe(1_024);
+    expect(schedule.isQuiet(headAt('2'), 'peer-a')).toBe(false);
+    expect(schedule.isQuiet(headAt('1'), 'peer-a')).toBe(true);
+    expect(schedule.isQuiet(headAt('2000'), 'peer-a')).toBe(true);
   });
 
   it('defaults to the wall clock', () => {

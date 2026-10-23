@@ -1523,7 +1523,8 @@ export class Rfc64PublicCatalogServiceV1 {
    * Peers repeat their hints on each connect and scoped replay. A hint asks
    * for a pull now only when it brings a newer head or a provider the lane
    * has not tried; a repeat leaves a retained target to its re-pull delay, and
-   * a head whose budget ran out stays quiet for a while.
+   * a head whose budget ran out stays quiet for a while from the providers
+   * the lane tried.
    */
   #requestAnnouncedCurrentHeadSynchronization(
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
@@ -1537,7 +1538,7 @@ export class Rfc64PublicCatalogServiceV1 {
     if (target === undefined) {
       if (
         this.#announcedCurrentHeadTargets.size >= MAX_ANNOUNCED_CURRENT_HEAD_SCOPES_V1
-        || this.#announcedCurrentHeadRetry.isQuiet(key, announcement.catalogVersion)
+        || this.#announcedCurrentHeadRetry.isQuiet(announcement, remotePeerId)
       ) {
         return;
       }
@@ -1634,7 +1635,7 @@ export class Rfc64PublicCatalogServiceV1 {
           return;
         }
         if (target.attempts >= this.#announcedCurrentHeadMaxPullAttempts) {
-          this.#announcedCurrentHeadRetry.quiet(key, target.announcement.catalogVersion);
+          this.#announcedCurrentHeadRetry.quiet(target.announcement, target.remotePeerIds);
           this.#observeAccelerationFailure(target, true, error);
           return;
         }

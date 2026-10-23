@@ -1421,3 +1421,45 @@ describe('RFC-64 announced-head acceleration: a retained head another lane appli
     });
   });
 });
+
+describe('RFC-64 announced-head acceleration: the quiet period covers one exact head (T9)', () => {
+  const discoveriesTo = (router: RecordingRouter, peerId: string) => router.sends.filter((send) => (
+    send.protocolId === RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1 && send.peerId === peerId
+  )).length;
+
+  it('lets an honest lower-version hint pull after a forged high version spent its budget', async () => {
+    const { router, service, onAccelerationFailed } = heldPassService({ maxAttempts: 1 });
+    const policy = acceptPolicy(service);
+    service.start();
+    const headAtVersion = (catalogVersion: string, digestByte: string) => announcement({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+      catalogVersion,
+      policyDigest: policy.policyDigest,
+      catalogHeadObjectDigest: `0x${digestByte.repeat(32)}` as Digest32V1,
+    });
+
+    // A policy-admitted peer claims a version that does not exist; its one pull fails.
+    const forged = headAtVersion('999999', 'f0');
+    await deliverHint(router, forged, 'peer-forger');
+    await service.whenReceiverIdle();
+    expect(onAccelerationFailed.mock.calls.map(([event]) => [event.announcedCatalogVersion, event.abandoned]))
+      .toEqual([['999999', true]]);
+
+    // The same claim again is quiet...
+    await deliverHint(router, forged, 'peer-forger');
+    await service.whenReceiverIdle();
+    expect(discoveriesTo(router, 'peer-forger')).toBe(1);
+
+    // ...but an honest provider's hint for a real, lower version is pulled.
+    await deliverHint(router, headAtVersion('8', '08'), 'peer-honest');
+    await service.whenReceiverIdle();
+    expect(discoveriesTo(router, 'peer-honest')).toBe(1);
+    expect(onAccelerationFailed.mock.calls.at(-1)![0]).toMatchObject({ announcedCatalogVersion: '8' });
+
+    // And the quiet head itself is pulled again when a provider the lane has not tried names it.
+    await deliverHint(router, forged, 'peer-other');
+    await service.whenReceiverIdle();
+    expect(discoveriesTo(router, 'peer-other')).toBe(1);
+  });
+});

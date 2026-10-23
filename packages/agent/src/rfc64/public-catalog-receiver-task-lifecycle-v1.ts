@@ -203,9 +203,9 @@ export class Rfc64ReceiverTaskLifecycleV1<
    * replaced stay queued and then settle as already applied, without a lease.
    *
    * Only ambient heads, delivered hints, take part. A caller-awaited head
-   * keeps its place, and a verified current head has its own placement and
-   * retirement rules. A delivered head is not verified yet, so the jump is
-   * bounded twice:
+   * keeps its place: no head queued behind it runs ahead of it. A verified
+   * current head has its own placement and retirement rules. A delivered head
+   * is not verified yet, so the jump is bounded twice:
    * - it reaches at most one signed lineage window past the first head, the
    *   furthest the receiver can apply in one step;
    * - a head passed over once is never passed over again. When the newest
@@ -227,10 +227,10 @@ export class Rfc64ReceiverTaskLifecycleV1<
     let newest = index;
     for (let candidate = index + 1; candidate < this.#queue.length; candidate += 1) {
       const task = this.#queue[candidate]!;
+      if (task.scopeKey !== first.scopeKey || task.cancellation.signal.aborted) continue;
+      if (task.schedulingPolicy.schedulingClass !== 'ambient') break;
       if (
-        task.scopeKey === first.scopeKey
-        && isCoalescibleAmbientHeadV1(task)
-        && task.catalogVersion > this.#queue[newest]!.catalogVersion
+        task.catalogVersion > this.#queue[newest]!.catalogVersion
         && task.catalogVersion - first.catalogVersion <= RFC64_RECEIVER_MAX_HEAD_JUMP_V1
       ) {
         newest = candidate;

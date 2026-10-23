@@ -144,6 +144,41 @@ describe('RFC-64 receiver: one lease turn applies the newest delivered head of a
     expect(leaseTurns).toEqual([1, 2, 4]);
   });
 
+  it('does not let a later delivered head overtake a caller-awaited one between them', async () => {
+    const fence = createRfc64LegacySwmFenceCoordinatorV1();
+    const { receiver, leaseTurns } = leasedReceiver(fence);
+    const stale = holdNodeWideTurn(fence);
+
+    receiver.schedule(headAt(1), 'member');
+    await settle();
+    receiver.schedule(headAt(2), 'member');
+    const awaited = receiver.scheduleManyAndWait([{ announcement: headAt(3), remotePeerId: 'member' }]);
+    receiver.schedule(headAt(4), 'member');
+    stale.open();
+
+    // The awaited head is reconciled through its own providers, not reported already applied.
+    await expect(awaited).resolves.toMatchObject({ outcome: 'applied' });
+    await receiver.whenIdle();
+    expect(leaseTurns).toEqual([1, 2, 3, 4]);
+  });
+
+  it('still coalesces the delivered heads in front of a caller-awaited one', async () => {
+    const fence = createRfc64LegacySwmFenceCoordinatorV1();
+    const { receiver, leaseTurns } = leasedReceiver(fence);
+    const stale = holdNodeWideTurn(fence);
+
+    receiver.schedule(headAt(1), 'member');
+    await settle();
+    receiver.schedule(headAt(2), 'member');
+    receiver.schedule(headAt(3), 'member');
+    const awaited = receiver.scheduleManyAndWait([{ announcement: headAt(4), remotePeerId: 'member' }]);
+    stale.open();
+
+    await expect(awaited).resolves.toMatchObject({ outcome: 'applied' });
+    await receiver.whenIdle();
+    expect(leaseTurns).toEqual([1, 3, 4]);
+  });
+
   it('falls back to the older heads, in order, when the newest one cannot be applied', async () => {
     const fence = createRfc64LegacySwmFenceCoordinatorV1();
     const { receiver, leaseTurns, applied } = leasedReceiver(

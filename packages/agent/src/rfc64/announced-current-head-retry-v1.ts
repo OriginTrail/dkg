@@ -16,9 +16,10 @@
  *   unapplied, from the configured interval up to
  *   {@link RFC64_ANNOUNCED_HEAD_MAX_RETRY_DELAY_MS_V1};
  * - a head whose budget ran out stays quiet for
- *   {@link RFC64_ANNOUNCED_HEAD_QUIET_MS_V1}: a hint for it, or for an older
- *   version of its scope, starts no pull. A newer version is new work and is
- *   pulled at once.
+ *   {@link RFC64_ANNOUNCED_HEAD_QUIET_MS_V1}: a hint for that exact head from
+ *   a provider the lane already tried starts no pull. Any other head of the
+ *   scope, and the same head from another provider, is pulled as before. An
+ *   announced version is not verified, so it must not silence the scope.
  * The ambient lane still schedules every hint, and the catalog's replay
  * cadence still recovers a head that is served later.
  */
@@ -53,8 +54,8 @@ export const RFC64_ANNOUNCED_HEAD_MAX_RETRY_DELAY_MS_V1 = 120_000;
 /** How long hints for a head whose pull budget ran out start no pull. */
 export const RFC64_ANNOUNCED_HEAD_QUIET_MS_V1 = 15 * 60_000;
 
-/** Scopes remembered as quiet at once; the oldest is forgotten first. */
-const MAX_QUIET_SCOPES_V1 = 1_024;
+/** Heads remembered as quiet at once; the oldest is forgotten first. */
+const MAX_QUIET_HEADS_V1 = 1_024;
 
 export interface Rfc64AnnouncedHeadRetryScheduleOptionsV1 {
   /** Delay before the first re-pull of a head. */
@@ -69,7 +70,8 @@ export class Rfc64AnnouncedHeadRetryScheduleV1 {
   readonly #maxDelayMs: number;
   readonly #quietMs: number;
   readonly #now: () => number;
-  readonly #quietByScope = new Map<string, Readonly<{ version: bigint; until: number }>>();
+  /** By exact head identity: the providers that were tried, and until when. */
+  readonly #quietByHead = new Map<string, Readonly<{ providers: ReadonlySet<string>; until: number }>>();
 
   constructor(options: Readonly<Rfc64AnnouncedHeadRetryScheduleOptionsV1>) {
     this.#intervalMs = options.intervalMs;
@@ -81,9 +83,9 @@ export class Rfc64AnnouncedHeadRetryScheduleV1 {
     this.#now = options.now ?? (() => Date.now());
   }
 
-  /** Scopes that are quiet now or were when last looked at. */
-  get quietScopes(): number {
-    return this.#quietByScope.size;
+  /** Heads that are quiet now or were when last looked at. */
+  get quietHeads(): number {
+    return this.#quietByHead.size;
   }
 
   /** Whether a retained head is due for its re-pull now. */
@@ -97,28 +99,36 @@ export class Rfc64AnnouncedHeadRetryScheduleV1 {
     return this.#now() + Math.min(this.#maxDelayMs, this.#intervalMs * 2 ** doublings);
   }
 
-  /** The lane spent its pull budget on this head of the scope. */
-  quiet(scopeKey: string, catalogVersion: string): void {
-    this.#quietByScope.delete(scopeKey);
-    if (this.#quietByScope.size >= MAX_QUIET_SCOPES_V1) {
-      const oldest = this.#quietByScope.keys().next().value;
-      if (oldest !== undefined) this.#quietByScope.delete(oldest);
+  /** The lane spent its pull budget on this exact head, pulled from these providers. */
+  quiet(
+    announcement: Readonly<Rfc64PublicCatalogHeadAnnouncementV1>,
+    providers: Iterable<string>,
+  ): void {
+    const head = exactHeadIdentityV1(announcement);
+    this.#quietByHead.delete(head);
+    if (this.#quietByHead.size >= MAX_QUIET_HEADS_V1) {
+      const oldest = this.#quietByHead.keys().next().value;
+      if (oldest !== undefined) this.#quietByHead.delete(oldest);
     }
-    this.#quietByScope.set(scopeKey, Object.freeze({
-      version: BigInt(catalogVersion),
+    this.#quietByHead.set(head, Object.freeze({
+      providers: new Set(providers),
       until: this.#now() + this.#quietMs,
     }));
   }
 
-  /** True while a hint for this version of the scope must start no pull. */
-  isQuiet(scopeKey: string, catalogVersion: string): boolean {
-    const quiet = this.#quietByScope.get(scopeKey);
+  /** True while a hint for this exact head from this provider must start no pull. */
+  isQuiet(
+    announcement: Readonly<Rfc64PublicCatalogHeadAnnouncementV1>,
+    remotePeerId: string,
+  ): boolean {
+    const head = exactHeadIdentityV1(announcement);
+    const quiet = this.#quietByHead.get(head);
     if (quiet === undefined) return false;
     if (this.#now() >= quiet.until) {
-      this.#quietByScope.delete(scopeKey);
+      this.#quietByHead.delete(head);
       return false;
     }
-    return BigInt(catalogVersion) <= quiet.version;
+    return quiet.providers.has(remotePeerId);
   }
 }
 
