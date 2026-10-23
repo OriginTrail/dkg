@@ -133,9 +133,10 @@ child; no mapper is dispatched. Mapping/header validation likewise stops before
 an invalid downstream call. Unknown outcomes keep the original request identity.
 Viewer, foreign-account, foreign-origin and stale-pin writes are denied. Google
 parents require the existing private export authorization at save and run; a
-missing-key parent is refused before source or approval creation. A new composed
-Google export has not been exercised with that private key; the earlier native
-Google leaf export proof remains separate.
+missing-key parent is refused before source or approval creation. Initial
+automated builder validation did not exercise a composed Google export with the
+private key; the later user-triggered result is documented below. The earlier
+native Google leaf export proof remains separate.
 
 **View in DKG** retrieves live source and its revision from the owned fixture
 node at `127.0.0.1:4631`, graph `n8n-capability-poc`, private Working Memory. The
@@ -168,3 +169,30 @@ changes are intended as draft PRs stacked on their respective dependency PRs.
 An optional replacement of the local n8n API key was rejected by automatic
 approval review; no replacement was created and the original isolated test
 credential remains in use.
+
+## Workflow result view recovery
+
+A user-triggered Parse CSV → Map fields → Google Sheets workflow completed
+native n8n executions `38`, `39` and `40`. Its parent execution
+`urn:sr:execution:000ea5f6-2782-4a18-8fbe-423d43e25b04` retained a completed
+terminal receipt and completed receipt-lifecycle journal. The Google output
+contained the new spreadsheet identity/link and a row count of two. These were
+inspected through read-only local SQLite, without reading or transmitting a
+credential and without repeating the export.
+
+The nOS view incorrectly called the strict CSV-table parser on every final
+output. Successful Google/text results and confirmed CSV rejections therefore
+threw during React rendering and blanked the view after execution. The corrected
+result component chooses the final block's output type and contains malformed
+table presentation errors while retaining the execution reference. A confirmed
+preview rejection also clears its pending identity before strict table validation,
+so the input can be corrected.
+
+Six renderer regression cases include Google, text, parser/map rejection, a valid
+table and a malformed table. Five failed with the previous rendering logic; all
+six pass with the fix. The full console/integration suite passed 1,200 tests across
+149 files, plus console typecheck, changed-file lint and formatting. Rendering the
+actual stored terminal output displayed its Google link and all three execution
+IDs without another n8n execution. This was source/server-render validation;
+automated browser access remains blocked by the saved permission. The private
+`workflow-result-render-evidence.json` records this proof and its boundaries.
