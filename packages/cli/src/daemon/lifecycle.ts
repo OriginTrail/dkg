@@ -165,6 +165,7 @@ import {
   resolveMetricsCollectorConfig,
 } from '../metrics-collector-config.js';
 import { assertNodeRuntimeSupported } from '../node-runtime-preflight.js';
+import { refuseBrotliOnDaemonFetch } from './outbound-brotli-refusal.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
 import {
   exitAfterFatalLogDrain,
@@ -1294,6 +1295,7 @@ async function runDaemonInnerWithStartupOwnership(
   if (!assertNodeRuntimeSupported(log)) {
     throw new Error('Node runtime preflight failed; see the preceding fatal message.');
   }
+  refuseBrotliOnDaemonFetch(log);
   const backpressureMonitor = new BackpressureMonitor({
     emit: (level, message) => log(`[${level}] ${message}`),
   });
