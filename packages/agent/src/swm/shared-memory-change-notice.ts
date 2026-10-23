@@ -35,7 +35,7 @@
  * are found the same way ({@link swmChangeRecipients}).
  */
 
-import { validateContextGraphId, validateSubGraphName } from '@origintrail-official/dkg-core';
+import { isProtocolUnsupportedError, validateContextGraphId, validateSubGraphName } from '@origintrail-official/dkg-core';
 
 export const SWM_CHANGE_NOTICE_KIND_V1 = 'dkg-swm-change-notice-v1';
 /** Upper bound of an encoded notice; a valid one is well below it. */
@@ -162,7 +162,7 @@ export interface SwmChangeNoticeDelivery {
 /** The class of a send that failed, from its error. */
 export function swmChangeNoticeFailure(error: unknown): Exclude<SwmChangeNoticeOutcome, 'reached'> {
   const text = (error instanceof Error ? `${error.name} ${error.message}` : String(error)).toLowerCase();
-  if (/protocol selection failed|could not negotiate|unsupported ?protocol|protocol not supported/.test(text)) return 'unsupported';
+  if (isProtocolUnsupportedError(error) || text.includes('unsupportedprotocol')) return 'unsupported';
   if (/timeout|timed out/.test(text)) return 'timeout';
   if (/dial|no valid addresses|no.reservation|econnrefused|unreachable/.test(text)) return 'unreachable';
   if (/reset|closed|econnreset|epipe/.test(text)) return 'reset';
@@ -196,6 +196,11 @@ interface WaitingChange {
   readonly timer: ReturnType<typeof setTimeout>;
 }
 
+/** One notice of one scope on its way: the followers it goes to, once they are known. */
+interface NoticeRun {
+  recipients?: ReadonlySet<string>;
+}
+
 /** One key per graph and scope. */
 function scopeKey(contextGraphId: string, subGraphName: string | null): string {
   return `${contextGraphId}\0${subGraphName ?? ''}`;
@@ -210,8 +215,13 @@ export class SwmChangeNotifier {
   readonly #lastSentAt = new Map<string, number>();
   readonly #waiting = new Map<string, WaitingChange>();
   readonly #inFlight = new Set<Promise<void>>();
-  /** The latest notice of each scope still in flight: an older one stops its resends, the newer one tells everyone. */
-  readonly #latest = new Map<string, object>();
+  /**
+   * The latest notice of each scope still in flight. An older notice leaves
+   * its resends to the followers the newer one goes to; it keeps sending to
+   * the others, such as the newer change's author, which no notice of its
+   * own change is sent to.
+   */
+  readonly #latest = new Map<string, NoticeRun>();
   readonly #whenStopped: Promise<void>;
   #markStopped!: () => void;
   #stopped = false;
@@ -270,19 +280,20 @@ export class SwmChangeNotifier {
       const oldest = this.#lastSentAt.keys().next().value;
       if (oldest !== undefined) this.#lastSentAt.delete(oldest);
     }
-    const token = {};
-    this.#latest.set(key, token);
-    const run = this.#fanOut(key, token, change, sources).catch((error: unknown) => {
+    const notice: NoticeRun = {};
+    this.#latest.set(key, notice);
+    const run = this.#fanOut(key, notice, change, sources).catch((error: unknown) => {
       this.#ports.log?.(`SWM change notice for "${change.contextGraphId}" not delivered: ${errorText(error)}`);
     }).finally(() => {
-      if (this.#latest.get(key) === token) this.#latest.delete(key);
+      if (this.#latest.get(key) === notice) this.#latest.delete(key);
     });
     this.#inFlight.add(run);
     void run.finally(() => this.#inFlight.delete(run));
   }
 
-  async #fanOut(key: string, token: object, change: SwmRemoteChange, sources: ReadonlySet<string>): Promise<void> {
+  async #fanOut(key: string, run: NoticeRun, change: SwmRemoteChange, sources: ReadonlySet<string>): Promise<void> {
     const recipients = await swmChangeRecipients(this.#ports, change.contextGraphId, sources);
+    run.recipients = new Set(recipients);
     if (recipients.length === 0) return;
     const { contextGraphId, subGraphName, hint } = change;
     const notice = { contextGraphId, subGraphName, hint };
@@ -296,9 +307,15 @@ export class SwmChangeNotifier {
       if (attempt > 0) {
         await Promise.race([this.#sleep(this.#resendDelaysMs[attempt - 1]!), this.#whenStopped]);
         if (this.#stopped) break;
-        // A newer notice of this scope went to every follower: it carries the resends from here.
-        handedOver = this.#latest.get(key) !== token;
-        if (handedOver) break;
+        // A newer notice of this scope carries the resends to the followers it goes to.
+        const newer = this.#latest.get(key);
+        const covered = newer === run ? undefined : newer?.recipients;
+        if (covered !== undefined) {
+          const left = pending.filter((peerId) => !covered.has(peerId));
+          handedOver ||= left.length < pending.length;
+          pending = left;
+          if (pending.length === 0) break;
+        }
       }
       for (const { peerId, outcome } of await this.#ports.deliver(notice, pending)) {
         outcomes.set(peerId, outcome);

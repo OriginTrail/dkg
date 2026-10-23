@@ -97,6 +97,7 @@ describe('change notice wire form', () => {
   it.each([
     ['protocol selection failed', 'unsupported'],
     ['Protocol selection failed - could not negotiate /dkg/10.0.1/swm-change-notice', 'unsupported'],
+    ['protocol mismatch', 'unsupported'],
     [Object.assign(new Error('nope'), { name: 'UnsupportedProtocolError' }), 'unsupported'],
     ['The operation was aborted due to timeout', 'timeout'],
     [Object.assign(new Error('signal'), { name: 'TimeoutError' }), 'timeout'],
@@ -392,6 +393,56 @@ describe('the owner\'s resends to the followers a notice did not reach (#3421)',
         + `not reached: ${MEMBER_2.slice(-8)}=timeout; a newer notice takes over the resends`,
       `SWM change notice for "${CG}" sub-graph "notes" (op-2): reached 2 of 3 follower(s); `
         + `not reached: ${MEMBER_2.slice(-8)}=timeout`,
+    ]);
+  });
+
+  it('keeps sending it to a follower it missed that authors the next change, which the newer notice leaves out', async () => {
+    vi.useFakeTimers();
+    const { owner, attempts, log } = scripted({ [MEMBER_2]: ['timeout'] });
+
+    owner.afterRemoteChange(change('op-1'));
+    await vi.advanceTimersByTimeAsync(1_000);
+    // Member 2 has not pulled the first change, and writes the next one itself.
+    owner.afterRemoteChange({ contextGraphId: CG, subGraphName: 'notes', hint: 'op-2', sourcePeerId: MEMBER_2 });
+    await vi.advanceTimersByTimeAsync(60_000);
+    await owner.settled();
+
+    expect(attempts.map(({ recipients }) => recipients)).toEqual([
+      [MEMBER_1, MEMBER_2, MEMBER_3],
+      [MEMBER_1, MEMBER_3],
+      [MEMBER_2],
+    ]);
+    expect(log.mock.calls.map(([line]) => line)).toEqual([
+      `SWM change notice for "${CG}" sub-graph "notes" (op-2): reached 2 of 2 follower(s)`,
+      `SWM change notice for "${CG}" sub-graph "notes" (op-1): reached 3 of 3 follower(s), 1 on a resend`,
+    ]);
+  });
+
+  it('keeps sending it to a follower the newer notice leaves out while that notice is still on its way', async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const { owner, attempts } = scripted({ [MEMBER_2]: ['timeout'] }, {
+      // The newer notice's followers take a while to find: until then, the older one does not know whom it covers.
+      followers: async () => {
+        if (attempts.length > 0) await held;
+        return [MEMBER_1, MEMBER_2, MEMBER_3];
+      },
+    });
+
+    owner.afterRemoteChange(change('op-1'));
+    await vi.advanceTimersByTimeAsync(1_000);
+    owner.afterRemoteChange({ contextGraphId: CG, subGraphName: 'notes', hint: 'op-2', sourcePeerId: MEMBER_1 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    release();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await owner.settled();
+
+    // The resend to member 2 went out while the newer notice's followers were unknown; the newer notice reached it too.
+    expect(attempts.map(({ recipients }) => recipients)).toEqual([
+      [MEMBER_1, MEMBER_2, MEMBER_3],
+      [MEMBER_2],
+      [MEMBER_2, MEMBER_3],
     ]);
   });
 

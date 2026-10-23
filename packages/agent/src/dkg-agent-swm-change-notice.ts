@@ -19,7 +19,6 @@ import {
   PROTOCOL_SWM_UPDATE_RELAYED,
 } from '@origintrail-official/dkg-core';
 import { coreHostedOwnerPeerIds } from './core-hosted-definition.js';
-import { toLibp2pPeerId } from './p2p/peer-id.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import { rfc64UnregisteredAuthorityOwnerV1 } from './rfc64/unregistered-authority-transport-v1.js';
@@ -307,9 +306,7 @@ export class SwmChangeNoticeMethods extends DKGAgentBase {
       )),
       // What identify told of the peer; unknown (no protocols yet) is tried.
       supportsNotice: async (peerId) => {
-        const libp2pPeerId = toLibp2pPeerId({ toString: () => peerId });
-        if (libp2pPeerId === undefined) return undefined;
-        const protocols = (await this.node.libp2p.peerStore.get(libp2pPeerId).catch(() => undefined))?.protocols ?? [];
+        const protocols = await this.getPeerProtocols(peerId);
         return protocols.length === 0 ? undefined : protocols.includes(PROTOCOL_SWM_CHANGE_NOTICE);
       },
       log: (message) => this.log.info(shareCtx, message),

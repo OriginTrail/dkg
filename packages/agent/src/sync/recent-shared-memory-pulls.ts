@@ -25,8 +25,8 @@
  * metadata and not its newest data. So when no owner is connected and no
  * other peer gave new data (none is connected, or the pull from one stored
  * nothing new), the owner is asked in the same pull: connected to through its
- * route when it is known (bounded, with the route's cooldowns), and pulled.
- * At most once per graph and interval.
+ * route when it is known (bounded, with the route's cooldowns), and pulled:
+ * once per pull of the graph, so at most once per graph and interval.
  *
  * Bounds: one pull of a graph per `intervalMs` and never two at once, plus at
  * most one more of the owner, `pullsPerTick` pulls per tick, one tick at a
@@ -83,8 +83,6 @@ export interface RecentSharedMemoryPullOptions {
 interface GraphState {
   activeAt: number;
   pulledAt: number;
-  /** The start of the last pull that asked the owner: pulled it while connected, or connected to it. */
-  ownerAskedAt: number;
   inFlight: boolean;
   turn: number;
 }
@@ -146,9 +144,7 @@ export class RecentSharedMemoryPulls {
       this.#graphs.set(contextGraphId, state);
       return;
     }
-    this.#graphs.set(contextGraphId, {
-      activeAt: now, pulledAt: now, ownerAskedAt: Number.NEGATIVE_INFINITY, inFlight: false, turn: 0,
-    });
+    this.#graphs.set(contextGraphId, { activeAt: now, pulledAt: now, inFlight: false, turn: 0 });
     // Never forget a graph whose pull runs: a new state for it would let a
     // second pull of the same graph start beside the first.
     for (const [oldest, oldestState] of this.#graphs) {
@@ -221,7 +217,7 @@ export class RecentSharedMemoryPulls {
       this.#ports.onError?.(contextGraphId, error);
       return false;
     }
-    if (target === null && !this.#mayAskOwner(state)) return false;
+    if (target === null && this.#ports.connectOwner === undefined) return false;
     if (target !== null) state.turn += 1;
     state.inFlight = true;
     const pull = this.#pullFrom(contextGraphId, state, target).finally(() => {
@@ -238,15 +234,14 @@ export class RecentSharedMemoryPulls {
    */
   async #pullFrom(contextGraphId: string, state: GraphState, target: PullTarget): Promise<void> {
     if (target !== null) {
-      if (target.owner) state.ownerAskedAt = state.pulledAt;
       const stored = await this.#pullOnce(contextGraphId, state, target.peerId);
       if (target.owner || stored > 0) return;
     }
-    if (this.#closed || !this.#mayAskOwner(state)) return;
-    state.ownerAskedAt = state.pulledAt;
+    const connectOwner = this.#ports.connectOwner;
+    if (this.#closed || connectOwner === undefined) return;
     let owners: readonly string[] = [];
     try {
-      owners = await this.#ports.connectOwner!(contextGraphId);
+      owners = await connectOwner(contextGraphId);
     } catch (error) {
       this.#ports.onError?.(contextGraphId, error);
     }
@@ -264,13 +259,5 @@ export class RecentSharedMemoryPulls {
       this.#ports.onError?.(contextGraphId, error);
       return 0;
     }
-  }
-
-  /**
-   * The owner can be asked in the pull that started at `state.pulledAt`: the
-   * route to it exists, and no pull within the interval before asked it.
-   */
-  #mayAskOwner(state: GraphState): boolean {
-    return this.#ports.connectOwner !== undefined && state.pulledAt - state.ownerAskedAt >= this.#intervalMs;
   }
 }
