@@ -766,12 +766,12 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
     checkpoint,
     usesPageSession,
     savedResponderSessionOffset: savedResponderSession?.responderSessionOffset,
-    manifestCheckpointDecision,
+    manifestRebindNeedsPriming: manifestCheckpointDecision.kind === 'rebind-and-prime',
   });
   if (responderResumeDecision.kind === 'reset-unmappable') {
-    // Without its token, only a prefix proven for this manifest is primed
-    // (resolveManifestCheckpointDecision); restart any other offset instead of
-    // guessing that its verified and raw coordinates match.
+    // A verified manifest coordinate is not necessarily a raw responder
+    // coordinate. Once the immutable token is gone, restart instead of
+    // guessing that both coordinate spaces match.
     deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
     checkpoint = undefined;
   }

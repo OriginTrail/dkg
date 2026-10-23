@@ -182,7 +182,6 @@ export default defineConfig({
       "test/durable-recovery-coordinator.test.ts",
       "test/manifest-resume-policy.test.ts",
       "test/durable-data-round.test.ts",
-      "test/durable-recovery-resume.test.ts",
       "test/store-lane-yield.test.ts",
       "test/durable-progress.test.ts",
       "test/gossip-publish-handler.test.ts",

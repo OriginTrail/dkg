@@ -326,35 +326,4 @@ describe('full-graph durable data round boundary', () => {
     expect(responder.requests.at(-1)!.offset + responder.requests.at(-1)!.limit)
       .toBeLessThan(manifest.manifestRowCount);
   });
-
-  it('primes a fresh responder session to a proven boundary whose token is gone', async () => {
-    const rowsPerGraph = 5;
-    const manifest = syntheticManifest(6, rowsPerGraph);
-    const responder = syntheticResponder(manifest);
-    const checkpointStore = new MemorySyncCheckpointStore();
-    const remotePeerId = `${PEER}-prime`;
-    const checkpointKey = getSyncCheckpointKey(remotePeerId, CG_ID, false, 'data');
-    // A verified boundary of this generation, written without a responder
-    // token (an expired session, a restart, or another peer's prefix).
-    checkpointStore.setManifestBoundOffset(checkpointKey, 15, DIGEST, Date.now(), PREFIX);
-    const info: string[] = [];
-
-    const result = await fetchSyncPages(dataFetchParams(responder, {
-      remotePeerId,
-      checkpointStore,
-      manifestDigest: DIGEST,
-      manifestPrefixDigestAtOffset: (offset) => (offset === 15 ? PREFIX : undefined),
-      logInfo: (_ctx, message) => { info.push(message); },
-    }));
-
-    // One discarded prime page at zero, then the verified boundary onward.
-    expect(responder.requests[0]!.offset).toBe(0);
-    expect(responder.requests.slice(1).map(({ offset }) => offset)[0]).toBe(15);
-    expect(info).toContainEqual(expect.stringContaining('before reusing verified offset 15'));
-    expect(result.resumedFromOffset).toBe(15);
-    expect(result.completed).toBe(true);
-    expect(result.quads.map((quad) => quad.graph)).toEqual(
-      Array.from({ length: 15 }, (_, index) => graphOf(3 + Math.floor(index / rowsPerGraph))),
-    );
-  });
 });
