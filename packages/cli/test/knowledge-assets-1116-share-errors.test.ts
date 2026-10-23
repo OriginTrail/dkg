@@ -2351,6 +2351,8 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     { code: 'SUB_GRAPH_NOT_FOUND', status: 400 },
     { code: 'KA_PROMOTE_RECOVERY_REQUIRED', status: 409 },
     { code: 'STORE_OPERATION_TIMEOUT', status: 503 },
+    { code: 'WM_RECOVERY_UNAVAILABLE', status: 503 },
+    { code: 'WM_RECOVERY_VERIFICATION_FAILED', status: 500 },
   ])('wm/pull-from preserves structured $code errors after delegation', async ({ code, status }) => {
     await startWith({ pullFrom: async () => {
       throw Object.assign(new Error('bounded pull failure'), { code, retryable: true });

@@ -28,6 +28,7 @@ export async function handleKnowledgeAssetPullFrom(
       { ...options, ...(agentAddress ? { agentAddress } : {}) });
     return jsonResponse(res, 200, { wmDraft: 'open', seededFrom: { layer: sourceLayer }, ...result });
   } catch (error: any) {
+    if (error?.code === 'WM_RECOVERY_VERIFICATION_FAILED') return jsonResponse(res, 500, { code: error.code, error: error.message });
     if (error?.code === 'WM_RECOVERY_UNAVAILABLE') return jsonResponse(res, 503,
       { code: error.code, error: error.message, retryable: true, outcome: 'not_started' }, undefined, { 'Retry-After': '1' });
     if (['WM_DRAFT_CONFLICT', 'WM_DRAFT_NOT_EXACT', 'WM_RECOVERY_SOURCE_UNAVAILABLE',

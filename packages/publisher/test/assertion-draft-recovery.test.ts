@@ -7,7 +7,7 @@ import { TypedEventBus, generateEd25519Keypair, createGraphKnowledgeAssetScope, 
 import { OxigraphStore, PrivateContentStore, GraphManager, StoreOperationTimeoutError, StoreSchedulerBusyError, StoreReadTransportFailure, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '../src/index.js';
 import { finalizeRootlessAssertionForTest } from './_helpers/rootless-lifecycle.js';
-import { CG, AGENT, NAME, SCHEMA, DKG, ENTITY_1, ENTITY_2, ENTITY_3, makePublisher, q, key, seedDirtyDraft, seedShared, registerSubGraph, cleanupPullFixtures } from './_helpers/assertion-pull.js';
+import { CG, AGENT, NAME, SCHEMA, ENTITY_1, ENTITY_2, makePublisher, q, seedDirtyDraft, seedShared, registerSubGraph, cleanupPullFixtures } from './_helpers/assertion-pull.js';
 
 afterEach(async () => { vi.restoreAllMocks(); await cleanupPullFixtures(); });
 
@@ -79,6 +79,34 @@ describe('source-pinned exact WM recovery (#3350)', () => {
       expect(failure).toMatchObject({ retryable: true, code: kind === 'timeout' ? 'STORE_OPERATION_TIMEOUT'
         : kind === 'busy' ? 'STORE_SCHEDULER_BUSY' : 'WM_RECOVERY_UNAVAILABLE' });
       expect(String(failure)).not.toContain('PRIVATE_SENTINEL');
+      expect(failure.cause).toBeUndefined();
+      expect(await snapshot(store)).toBe(before);
+    });
+
+  it.each(['lifecycle', 'public-draft', 'private-draft'].flatMap(boundary =>
+    ['transport', 'unexpected'].map(kind => ({ boundary, kind }))))(
+    'bounds $kind failures during $boundary reads', async ({ boundary, kind }) => {
+      const { publisher, store, recoverExact } = await make();
+      const before = await snapshot(store);
+      const error = kind === 'transport' ? new StoreReadTransportFailure(new Error('PRIVATE_BACKEND_EXCERPT_3350'))
+        : new Error('PRIVATE_BACKEND_EXCERPT_3350');
+      if (boundary === 'private-draft') {
+        vi.spyOn(PrivateContentStore.prototype, 'getKnowledgeAssetPrivateDraftTriples').mockRejectedValueOnce(error);
+      } else {
+        const graph = await publisher.wmGraphUri(CG, AGENT, NAME);
+        const original = store.query.bind(store);
+        let injected = false;
+        vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+          const target = boundary === 'lifecycle' ? sparql.includes('SELECT ?id')
+            : sparql.includes(`GRAPH <${graph}>`) && sparql.includes('CONSTRUCT');
+          if (!injected && target) { injected = true; throw error; }
+          return original(sparql, options);
+        });
+      }
+      const failure = await publisher.assertionPullFrom(CG, NAME, AGENT, 'swm', { recoverExact }).catch(e => e);
+      expect(failure).toMatchObject(kind === 'transport' ? { code: 'WM_RECOVERY_UNAVAILABLE', retryable: true }
+        : { code: 'WM_RECOVERY_VERIFICATION_FAILED' });
+      expect(String(failure)).not.toContain('PRIVATE_BACKEND_EXCERPT');
       expect(failure.cause).toBeUndefined();
       expect(await snapshot(store)).toBe(before);
     });
@@ -160,6 +188,37 @@ describe('source-pinned exact WM recovery (#3350)', () => {
     const recovery = publisher.assertionPullFrom(CG, NAME, AGENT, 'swm', { recoverExact });
     await write;
     await expect(recovery).rejects.toMatchObject({ code: 'WM_DRAFT_NOT_EXACT' });
+  });
+
+  it('holds the lifecycle lock across both draft partitions', async () => {
+    const { publisher, store, recoverExact } = await make();
+    let enterRead!: () => void;
+    let releaseRead!: () => void;
+    const entered = new Promise<void>(resolve => { enterRead = resolve; });
+    const gate = new Promise<void>(resolve => { releaseRead = resolve; });
+    const original = PrivateContentStore.prototype.getKnowledgeAssetPrivateDraftTriples;
+    vi.spyOn(PrivateContentStore.prototype, 'getKnowledgeAssetPrivateDraftTriples').mockImplementationOnce(async function (...args) {
+      const rows = await original.apply(this, args); // Real private storage read, then hold verification open.
+      enterRead();
+      await gate;
+      return rows;
+    });
+    const before = await snapshot(store);
+    const recovery = publisher.assertionPullFrom(CG, NAME, AGENT, 'swm', { recoverExact });
+    await entered;
+    let writerFinished = false;
+    const writer = publisher.assertionWritePrivate(CG, NAME, AGENT, [q(ENTITY_2, 'urn:secret', '"concurrent"')])
+      .then(() => { writerFinished = true; });
+    try {
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(writerFinished, 'writer must wait for recovery to release its lifecycle lock').toBe(false);
+      expect(await snapshot(store)).toBe(before);
+    } finally { releaseRead(); await Promise.allSettled([recovery, writer]); }
+    await expect(recovery).resolves.toMatchObject({ recovered: true });
+    await writer;
+    expect(writerFinished).toBe(true);
+    await expect(publisher.assertionPullFrom(CG, NAME, AGENT, 'swm', { recoverExact }))
+      .rejects.toMatchObject({ code: 'WM_DRAFT_NOT_EXACT' });
   });
 
   it.each([false, true])('distinguishes partial=%s after store/publisher restart', async partial => {

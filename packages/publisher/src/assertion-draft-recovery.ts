@@ -28,15 +28,18 @@ export interface AssertionDraftEvidence extends ExactPullSource {
   privateMerkleRoot: string | null;
 }
 
-export interface AssertionPullFromResult extends ExactPullSource {
+interface AssertionPullFromCounts extends ExactPullSource {
   seeded: number;
   seededPublic: number;
   seededPrivate: number;
   fromLayer: 'swm' | 'vm';
   contentScopeVersion: number;
-  recovered?: true;
-  draftEvidence?: AssertionDraftEvidence;
 }
+
+export type AssertionPullFromResult = AssertionPullFromCounts & (
+  { recovered: true; draftEvidence: AssertionDraftEvidence }
+  | { recovered?: never; draftEvidence?: never }
+);
 
 /** Parse untrusted transport input and copy the pin before any asynchronous work. */
 export function parseExactPullSource(value: unknown, onConflict: unknown = 'reject'): ExactPullSource | undefined {
@@ -59,16 +62,34 @@ export function snapshotAssertionPullOptions(opts?: AssertionPullFromOptions): A
 }
 
 /** Preserve retry classification without propagating store excerpts or exception causes. */
-export function rethrowDraftSourceFailure(error: unknown): never {
-  if (isStoreOperationTimeoutError(error)) throw new StoreOperationTimeoutError({
+function boundedDraftReadFailure(error: unknown): Error | undefined {
+  if (isStoreOperationTimeoutError(error)) return new StoreOperationTimeoutError({
     backend: 'triple-store', operation: 'query', timeoutMs: error.timeoutMs, outcome: 'not_started',
   });
-  if (isStoreSchedulerBusyError(error)) throw new StoreSchedulerBusyError(error.reason, error.priority, 'query', { storeOperation: 'query' });
-  if (isStoreReadTransportFailure(error)) throw Object.assign(
+  if (isStoreSchedulerBusyError(error)) return new StoreSchedulerBusyError(error.reason, error.priority, 'query', { storeOperation: 'query' });
+  if (isStoreReadTransportFailure(error)) return Object.assign(
     new Error('Draft recovery could not read the store; retry verification. No draft was modified.'),
     { code: 'WM_RECOVERY_UNAVAILABLE', retryable: true });
-  throw draftRecoveryError('WM_RECOVERY_SOURCE_UNAVAILABLE');
+  return undefined;
 }
+
+export function rethrowDraftSourceFailure(error: unknown): never {
+  throw boundedDraftReadFailure(error) ?? draftRecoveryError('WM_RECOVERY_SOURCE_UNAVAILABLE');
+}
+
+/** The complete exact verification path shares bounded transport handling. */
+export function rethrowDraftVerificationFailure(error: unknown): never {
+  const transient = boundedDraftReadFailure(error);
+  if (transient) throw transient;
+  const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+  if (typeof code === 'string' && [
+    'WM_DRAFT_NOT_EXACT', 'WM_RECOVERY_SOURCE_UNAVAILABLE', 'WM_RECOVERY_UNAVAILABLE',
+    'SUB_GRAPH_NOT_FOUND', 'KA_ASSERTION_ALREADY_FINALIZED', 'KA_PROMOTE_RECOVERY_REQUIRED',
+  ].includes(code)) throw error;
+  throw Object.assign(new Error('Draft recovery verification failed; no draft was modified.'),
+    { code: 'WM_RECOVERY_VERIFICATION_FAILED' });
+}
+
 
 /** Bounded errors deliberately exclude RDF, parser errors and exception causes. */
 export function draftRecoveryError(code: 'WM_DRAFT_NOT_EXACT' | 'WM_RECOVERY_SOURCE_UNAVAILABLE'): Error {

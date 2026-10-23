@@ -120,7 +120,7 @@ import {
 } from './knowledge-asset-swm-staging.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { verifyPullRecoverySeal, validateGraphScopedPayloadAgainstSeal, type ResolvedAssertionSource } from './assertion-seal-recovery.js';
-import { snapshotAssertionPullOptions, verifyExactAssertionDraft, draftRecoveryError, rethrowDraftSourceFailure, type AssertionPullFromOptions, type AssertionPullFromResult } from './assertion-draft-recovery.js';
+import { snapshotAssertionPullOptions, verifyExactAssertionDraft, draftRecoveryError, rethrowDraftSourceFailure, rethrowDraftVerificationFailure, type AssertionPullFromOptions, type AssertionPullFromResult } from './assertion-draft-recovery.js';
 import { resolveAssertionPullSource, type AssertionPromoteState } from './assertion-pull-source.js';
 import type { DurableRootAtomicCompanionResolver, DurableRootCompanionAdmissionWait } from
   './durable-root-atomic-companion.js';
@@ -8061,19 +8061,9 @@ export class DKGPublisher implements Publisher {
     opts?: AssertionPullFromOptions,
   ): Promise<AssertionPullFromResult> {
     const stableOpts = snapshotAssertionPullOptions(opts);
-    return this.withAssertionLifecycleWriteLock(
-      contextGraphId,
-      name,
-      agentAddress,
-      stableOpts?.subGraphName,
-      () => this.assertionPullFromUnlocked(
-        contextGraphId,
-        name,
-        agentAddress,
-        sourceLayer,
-        stableOpts,
-      ),
-    );
+    const run = () => this.assertionPullFromUnlocked(contextGraphId, name, agentAddress, sourceLayer, stableOpts);
+    return this.withAssertionLifecycleWriteLock(contextGraphId, name, agentAddress, stableOpts?.subGraphName,
+      () => stableOpts?.recoverExact ? run().catch(rethrowDraftVerificationFailure) : run());
   }
 
   private async assertionPullFromUnlocked(

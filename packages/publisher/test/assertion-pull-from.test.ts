@@ -13,12 +13,11 @@ import {
   contextGraphMetaUri,
   contextGraphPrivateUri,
   contextGraphSubGraphPrivateUri,
-  contextGraphSubGraphUri,
   createGraphKnowledgeAssetScope,
   generateEd25519Keypair,
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, OxigraphStore, PrivateContentStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGPublisher, TripleStoreAsyncPromoteQueue, assertionScopedGraphUri } from '../src/index.js';
 import { resolveKnowledgeAssetWorkspaceHead, storeKnowledgeAssetWorkspaceHead, storeKnowledgeAssetOperationPublicQuads } from '../src/workspace-resolution.js';
 import { finalizeRootlessAssertionForTest } from './_helpers/rootless-lifecycle.js';
