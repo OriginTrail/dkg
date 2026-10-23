@@ -29,6 +29,7 @@ import {
   type ManagedOxigraphRuntimeStoreConfigV1,
   type TripleStoreConfig,
   type StoreOperation,
+  type LargeLiteralStorageConfig,
 } from '@origintrail-official/dkg-storage';
 import {
   OXIGRAPH_VERSION,
@@ -202,11 +203,7 @@ interface StoreConfigLike {
 
 interface ConfigLike {
   store?: StoreConfigLike;
-  largeLiteralStorage?: {
-    enabled?: boolean;
-    thresholdBytes?: number;
-    directory?: string;
-  };
+  largeLiteralStorage?: LargeLiteralStorageConfig;
   sharedMemoryPublicSnapshotStorage?: {
     enabled?: boolean;
     directory?: string;
@@ -253,7 +250,7 @@ export interface ManagedOxigraphPlan {
    * throw without an explicit directory; we default it under the data dir
    * to preserve parity with the local Oxigraph default.
    */
-  largeLiteralStorage: { enabled: boolean; thresholdBytes?: number; directory: string };
+  largeLiteralStorage: LargeLiteralStorageConfig & { enabled: boolean; directory: string };
   /** Startup readiness deadline passed to the managed server supervisor. */
   readyTimeoutMs?: number;
   /** Optional native Oxigraph query timeout, passed as `oxigraph serve --timeout-s`. */
@@ -319,7 +316,7 @@ export function planManagedOxigraph(
   // the same way `location` is; fall back to the default binary cache dir.
   const cacheDir = resolveManagedOxigraphCacheDir(options, dataDir);
 
-  const largeLiteralStorage = {
+  const largeLiteralStorage = { ...config.largeLiteralStorage,
     enabled: config.largeLiteralStorage?.enabled ?? true,
     thresholdBytes: config.largeLiteralStorage?.thresholdBytes,
     directory: config.largeLiteralStorage?.directory ?? join(dataDir, 'literal-blobs'),
@@ -374,7 +371,7 @@ export interface ManagedOxigraphResult {
   handle: OxigraphServerHandle;
   /** Drop-in replacement for `config.store`. */
   storeConfig: ManagedOxigraphRuntimeStoreConfigV1;
-  largeLiteralStorage: { enabled: boolean; thresholdBytes?: number; directory: string };
+  largeLiteralStorage: LargeLiteralStorageConfig & { enabled: boolean; directory: string };
   /** Set only when the operator enabled the feature (else leave config as-is). */
   sharedMemoryPublicSnapshotStorage?: ManagedSnapshotStorageConfig;
 }

@@ -6,6 +6,9 @@
 
 import { dirname, join } from 'node:path';
 import type { TripleStoreCommitCapability } from './persistence.js';
+import { assertSqliteBlobRuntime } from './sqlite-literal-blob-protocol.js';
+import { assertLiteralBlobStoreOptions, type LargeLiteralStorageConfig, type SharedMemoryLiteralBlobStoreOptions } from './literal-blob-options.js';
+export type { LargeLiteralStorageConfig } from './literal-blob-options.js';
 import {
   DEFAULT_LARGE_LITERAL_THRESHOLD_BYTES,
   SharedMemoryLiteralBlobStore,
@@ -658,15 +661,6 @@ export function getSparqlEndpoint(storeConfig: TripleStoreConfig): SparqlEndpoin
   return { queryUrl: queryEndpoint, updateUrl: updateEndpoint, headers };
 }
 
-export interface LargeLiteralStorageConfig {
-  /** Enable large SWM literal blob storage. Defaults to true when present. */
-  enabled?: boolean;
-  /** Externalize literal object terms larger than this UTF-8 byte size. */
-  thresholdBytes?: number;
-  /** Content-addressed blob directory. Defaults to `<dirname(options.path)>/literal-blobs` when a persistent path is available. */
-  directory?: string;
-}
-
 export interface TripleStoreConfig {
   backend: TripleStoreBackend;
   options?: Record<string, unknown>;
@@ -706,9 +700,10 @@ export async function createTripleStore(
         `Registered: [${[...adapterRegistry.keys()].join(', ')}]`,
     );
   }
+  const largeLiteralStorage = resolveLargeLiteralStorageOptions(config);
+  if (largeLiteralStorage?.persistence === 'sqlite-wal') assertSqliteBlobRuntime();
   const constructionAuthority = getManagedOxigraphRuntimeConstructionAuthorityV1(config);
   const store = await factory(resolveAdapterOptions(config), constructionAuthority);
-  const largeLiteralStorage = resolveLargeLiteralStorageOptions(config);
   const withLargeLiteralStorage = largeLiteralStorage
     ? new SharedMemoryLiteralBlobStore(store, largeLiteralStorage)
     : store;
@@ -778,7 +773,7 @@ function isDefaultLocalGraphSetIndexBackend(backend: TripleStoreBackend): boolea
 
 function resolveLargeLiteralStorageOptions(
   config: TripleStoreConfig,
-): { blobDir: string; thresholdBytes: number } | undefined {
+): SharedMemoryLiteralBlobStoreOptions | undefined {
   const largeLiteralStorage = config.largeLiteralStorage;
   if (!largeLiteralStorage || largeLiteralStorage.enabled === false) return undefined;
 
@@ -790,7 +785,9 @@ function resolveLargeLiteralStorageOptions(
     );
   }
 
-  return { blobDir: directory, thresholdBytes };
+  const options = { blobDir: directory, thresholdBytes, persistence: largeLiteralStorage.persistence };
+  assertLiteralBlobStoreOptions(options);
+  return options;
 }
 
 function inferLiteralBlobDirectory(options: Record<string, unknown> | undefined): string | undefined {

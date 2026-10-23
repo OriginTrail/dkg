@@ -1308,7 +1308,7 @@ async function createPublisherStore(dataDir: string, config: DkgConfig): Promise
 }
 
 function defaultLargeLiteralStorage(dataDir: string, config: DkgConfig) {
-  return {
+  return { ...config.largeLiteralStorage,
     enabled: config.largeLiteralStorage?.enabled ?? true,
     thresholdBytes: config.largeLiteralStorage?.thresholdBytes,
     directory: config.largeLiteralStorage?.directory ?? join(dataDir, 'literal-blobs'),

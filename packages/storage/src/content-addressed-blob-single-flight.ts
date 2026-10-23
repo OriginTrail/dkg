@@ -1,3 +1,5 @@
+import { BoundedWork } from './bounded-work.js';
+
 interface PendingBlobWrite {
   readonly value: string;
   readonly ready: Promise<void>;
@@ -20,22 +22,21 @@ export class ContentAddressedBlobSingleFlight {
   private readonly pending = new Map<string, PendingBlobWrite>();
   private readonly completed = new Map<string, string>();
   private cachedBytes = 0;
-  private active = 0;
-  private readonly waiting: Array<() => void> = [];
-  private readonly maxConcurrent: number;
+  private readonly preparations: BoundedWork;
   private readonly maxCachedEntries: number;
   private readonly maxCachedBytes: number;
 
   constructor(private readonly options: ContentAddressedBlobSingleFlightOptions) {
-    this.maxConcurrent = options.maxConcurrent ?? 4;
+    const maxConcurrent = options.maxConcurrent ?? 4;
     this.maxCachedEntries = options.maxCachedEntries ?? 128;
     this.maxCachedBytes = options.maxCachedBytes ?? 8 * 1024 * 1024;
-    for (const [name, value] of Object.entries({ maxConcurrent: this.maxConcurrent,
+    for (const [name, value] of Object.entries({ maxConcurrent,
       maxCachedEntries: this.maxCachedEntries, maxCachedBytes: this.maxCachedBytes })) {
       if (!Number.isSafeInteger(value) || value < (name === 'maxConcurrent' ? 1 : 0)) {
         throw new Error(`Invalid blob preparation ${name}`);
       }
     }
+    this.preparations = new BoundedWork(maxConcurrent);
   }
 
   async createOrVerify(hash: string, value: string): Promise<void> {
@@ -55,18 +56,11 @@ export class ContentAddressedBlobSingleFlight {
       return;
     }
 
-    const ready = Promise.resolve().then(async () => {
-      if (this.active >= this.maxConcurrent) await new Promise<void>(resolve => this.waiting.push(resolve));
-      else this.active += 1;
-      try {
-        await this.options.createOrVerify(hash, value);
-        this.remember(hash, value);
-      } finally {
-        const next = this.waiting.shift();
-        if (next) next(); // Transfer the physical slot directly to the next waiter.
-        else this.active -= 1;
-      }
-    });
+    // Publish pending identity before invoking any possibly reentrant preparation callback.
+    const ready = Promise.resolve().then(() => this.preparations.run(async () => {
+      await this.options.createOrVerify(hash, value);
+      this.remember(hash, value);
+    }));
     entry = { value, ready };
     this.pending.set(hash, entry);
 
