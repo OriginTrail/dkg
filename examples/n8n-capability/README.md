@@ -161,6 +161,31 @@ DKG node, places the capability on the existing canvas and invokes the same
 Program path. The bridge is a loopback-only account-A fixture, using public kit
 selectors; production identity integration is separate work.
 
+The **Workflow builder** tab lets the account owner drag installed KA blocks,
+connect compatible ports and configure mapping or a Google Sheet title. Save
+creates a private, finalized Program KA whose source includes the graph/layout
+and whose explicit child grants pin the selected capability versions. Open reads
+saved versions back from DKG; edits create another immutable revision. Run invokes
+the parent Program through `invoke_program`, verifies parent/child receipts and
+returns each actual n8n execution reference. This PoC supports a single path of
+one to eight blocks. CSV/text data is supplied at run time, outside saved source.
+
+Google-containing workflows require the private operator export key for both
+save and run. Invalid CSV, missing mapped columns or incompatible Google headers
+stop before downstream calls with a confirmed result the user can correct.
+Uncertain outcomes retain the original invocation for reconciliation.
+
+```sh
+node examples/n8n-capability/verify-workflows.mjs /tmp/n8n-ka-state
+```
+
+This uses the owned local n8n SQLite history read-only to prove that completed
+replay did not dispatch another execution. It also verifies source readback,
+saved-version reopening and refusal of unauthorized parent workflows. **View in
+DKG** reads live Program source and its exact revision from the local node's
+private Working Memory. The example HTTP server exposes the fixture API rather
+than a standalone node dashboard.
+
 ## Execution boundaries
 
 The tenant approval and the operator installation must agree on graph, executor,

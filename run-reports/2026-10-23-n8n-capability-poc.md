@@ -108,6 +108,51 @@ The DKG Program editor's tool picker is unchanged: n8n grants are configured via
 the SDK/operator path until the editor has a workflow-grant form. The PoC canvas
 discovers and invokes the resulting KA.
 
+## Self-service nOS workflow builder
+
+The nOS builder reuses the existing draggable canvas and port connections with
+the installed KA catalog. The user selects blocks, connects one path (up to eight
+blocks), configures mapping/title, saves a version and runs it. Each save creates
+a native private Program KA with `permitsProgram` links, generated TypeScript
+composition and pinned owner-approved child operations. Layout/configuration are
+retained with source; CSV/text is provided only at run time. Earlier compiler
+formats remain readable, and engine/source revisions retain distinct identities.
+
+The real-runtime verifier saved workflow
+`urn:demo:nos:workflow:af073eb9-95ec-4731-a4ab-e204cb6309a6:75aec39dce9a127c1a6c`.
+Parent execution `urn:sr:execution:015fecea-20f9-46cc-ab0c-49c7e7310a45`
+invoked native n8n parser `31` and mapper `32` and returned the two mapped rows.
+Parent and child outputs were independently read back from DKG. Repeated save
+returned the same source revision, and repeated run retained the same n8n IDs.
+Read-only n8n SQLite execution IDs prove that replay did not dispatch again.
+Saved Programs were reopened after the service restart; the actual nOS client
+also passed live save/list/source/run/confirmed-rejection response validation.
+
+Invalid CSV produces a confirmed parent receipt with only the executed parser
+child; no mapper is dispatched. Mapping/header validation likewise stops before
+an invalid downstream call. Unknown outcomes keep the original request identity.
+Viewer, foreign-account, foreign-origin and stale-pin writes are denied. Google
+parents require the existing private export authorization at save and run; a
+missing-key parent is refused before source or approval creation. A new composed
+Google export has not been exercised with that private key; the earlier native
+Google leaf export proof remains separate.
+
+**View in DKG** retrieves live source and its revision from the owned fixture
+node at `127.0.0.1:4631`, graph `n8n-capability-poc`, private Working Memory. The
+example server hosts API routes; it does not serve a standalone node dashboard.
+This confirms local KA storage and does not imply public-chain publication.
+
+Validation for this addition: 11 backend compiler/service tests; 1,194 unique
+console/integration tests across 148 files (the loopback sign-in suite was rerun
+with socket permission); development/production bundle isolation; console
+typecheck and changed-file ESLint. Browser security policy denied the builder
+origin because of a saved user permission. Browser visual/drag verification is
+outstanding; no alternate browser or screenshot workaround was used.
+
+Private continuation/evidence: `workflow-builder-verification-v2.json`,
+`workflow-builder-evidence-v2.json`, and the earlier retained verification and
+evidence files. They preserve exact save definitions and invocation identities.
+
 Hosted CI, integration review and production deployment remain separate. Both
 changes are intended as draft PRs stacked on their respective dependency PRs.
 An optional replacement of the local n8n API key was rejected by automatic
