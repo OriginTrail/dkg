@@ -32,7 +32,9 @@ sequenceDiagram
   Publisher->>Store: current seal and complete immutable source
   Publisher->>Store: both current draft partitions
   Publisher->>Publisher: verify pinned identity, counts and roots
-  Publisher-->>Client: exact evidence or bounded conflict; no writes
+  Publisher-->>NamedAPI: Exact evidence or bounded conflict
+  NamedAPI-->>Client: Scope-bound evidence or conflict
+  Note over Publisher,Store: Verification performs no writes
 ```
 
 ## Execution chunks
@@ -96,3 +98,11 @@ Next action: submit round 2, verify executable source blobs against the captured
 The remote reviewer completed review of executable-code head `f8ead9b3b6b2486d9603edeffc2637e18afd8910` with “found no issues”; no unresolved review threads remain. The full CI run completed with all unrelated jobs passing, but CLI shard 4 failed the existing node-skill size guard (1004 split lines versus a limit below 1000). Coverage merge and CI gate then failed because that shard failed. Keep a concise, complete recovery entry in the skill and move the detailed API/error/CLI/snapshot contract into `docs/use-dkg/wm-draft-recovery.md`. The skill is back to 998 lines; 21 endpoint tests and three route-parity tests pass. This revision changes documentation only, so the nine executed source blobs remain identical and the stopped/released testnet environment need not be restarted.
 
 Round 3 is in progress for this substantive documentation/CI fix. Submit it, recheck source blob equality, request current-head review, and observe required CI to completion within its bounded window. Code-owner approval remains required by branch rules; no merge is authorized.
+
+### Round 4 — measured CLI coverage and diagram rendering
+
+The reviewer found no issues on `97d59998865c827de393063bd68589300fb19086`, and all CLI test shards passed. The merged coverage gate then measured 14/20 changed executable CLI lines (70%) against its 80% floor: subprocess CLI smoke tests do not instrument the command, and the real-daemon suite does not cover the extracted handler in the parent process. Add in-process command tests for complete pin forwarding/output, ordinary pulls and rejection before daemon connection, plus focused HTTP helper tests for success evidence/actor propagation and malformed layer/pin refusal. Keep production sources and coverage thresholds unchanged; verify the previously uncovered lines execute before submitting.
+
+The user reported broken PR Mermaid diagrams. GitHub displayed parse errors caused by unescaped semicolons in sequence message labels. Both PR-body diagrams now render correctly after moving those clauses into notes and returning publisher evidence through the API. Apply the same correction to this plan's diagram. Preserve screenshot evidence privately. This body edit does not extend the observation window; the coverage/test revision starts the next bounded window when pushed.
+
+Round-4 verification: all 15 focused tests passed under V8 instrumentation. Merging their hit maps with the downloaded current-head CI maps covers 20/20 changed executable CLI lines (100%, required 80%). Tracked-file lint, source-size guard and diff hygiene pass. The additional test file takes the cohesive code/test diff to 999 changed lines; retaining pin validation, response-contract and fault/concurrency coverage together is justified by this single additive recovery contract. Production code is identical to the live-tested candidate.
