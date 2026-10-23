@@ -50,7 +50,7 @@ import { POOLED_MESSAGE_PROTOCOL } from './message-stream-pool.js';
 import { RelayMetricsAdapter, RELAY_V2_STOP_CODEC } from './libp2p-metrics-adapter.js';
 import { readRelayReservations, readConnectionStreams } from './relay-internal-shapes.js';
 import { repairRelayReservationTimers } from './relay-reservation-timers.js';
-import { connectionMonitorOptions } from './connection-monitor-policy.js';
+import { connectionMonitorOptions, connectionMonitorPingService } from './connection-monitor-policy.js';
 import { RelayFlapGuard, buildRelayFlapConnectionGater } from './relay-flap-guard.js';
 import { buildActiveRelayNetworkPolicy } from './relay-network-policy.js';
 import { buildRelayClientTransport } from './relay-client-transport.js';
@@ -862,6 +862,7 @@ export class DKGNode {
         //     above so the wiring decision is reviewable in-place.
       }),
       dcutr: dcutr(),
+      livenessPing: connectionMonitorPingService(),
     };
 
     if (useAutoNAT) {
