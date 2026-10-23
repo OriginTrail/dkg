@@ -529,6 +529,9 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       .description('Seed a fresh WM draft from SWM or VM state')
       .requiredOption('--layer <layer>', 'Source layer: swm or vm')
       .option('--on-conflict <mode>', 'Draft conflict mode: reject or replace (default: reject)')
+      .option('--recover-exact-ual <ual>', 'Verify the existing draft against this pinned KA; never writes')
+      .option('--recover-exact-root <root>', 'Merkle root retained with the pinned source before the original pull')
+      .option('--recover-exact-version <version>', 'Assertion version for exact recovery (requires --recover-exact-ual)')
       .option('--json', 'Print JSON'),
   ))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
@@ -538,8 +541,13 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       if (onConflict !== undefined && onConflict !== 'reject' && onConflict !== 'replace') {
         throw new Error('--on-conflict must be reject or replace');
       }
+      const recoverExact = opts.recoverExactUal !== undefined || opts.recoverExactVersion !== undefined || opts.recoverExactRoot !== undefined
+        ? { kaUal: String(opts.recoverExactUal ?? ''), assertionVersion: String(opts.recoverExactVersion ?? ''), merkleRoot: String(opts.recoverExactRoot ?? '') } : undefined;
+      if (recoverExact && (!recoverExact.kaUal || !/^[1-9]\d*$/.test(recoverExact.assertionVersion) || !/^0x[0-9a-fA-F]{64}$/.test(recoverExact.merkleRoot) || onConflict === 'replace'))
+        throw new Error('Exact recovery requires --recover-exact-ual, --recover-exact-version and --recover-exact-root and reject conflict mode');
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetPullFrom(requiredContextGraphId(opts), name, layer, {
+        ...(recoverExact ? { recoverExact } : {}),
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
         ...(onConflict ? { onConflict } : {}),
       });

@@ -1,3 +1,4 @@
+import { ethers } from 'ethers';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION, MemoryLayer, LegacyKnowledgeAssetReadOnlyError,
   contextGraphAssertionUri, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri,
@@ -5,6 +6,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { validateGraphScopedPayloadAgainstSeal, type ResolvedAssertionSource } from './assertion-seal-recovery.js';
+import { draftRecoveryError, type ExactPullSource } from './assertion-draft-recovery.js';
 
 /** Read-only lifecycle inspection; caller policy decides whether recovery is allowed. */
 export type AssertionPromoteState = { kind: 'mutable' } | {
@@ -18,6 +20,7 @@ interface PullSourceInput {
   agentAddress: string;
   subGraphName?: string;
   sourceLayer: 'swm' | 'vm';
+  recoverExact?: ExactPullSource;
   state: AssertionPromoteState;
   loadSeals: () => Promise<ResolvedAssertionSource['loadedSeal'][]>;
   verifyRecovery: (operationId: string | undefined) => Promise<ResolvedAssertionSource | undefined>;
@@ -36,7 +39,15 @@ export async function resolveAssertionPullSource(input: PullSourceInput): Promis
     if (sourceLayer === 'swm') return recovery;
   }
   const sealSubject = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
-  const loadedSeals = recovery ? [recovery.loadedSeal] : await input.loadSeals();
+  const candidates = recovery ? [recovery.loadedSeal] : await input.loadSeals();
+  // An opt-in retry is pinned to the current candidate. Never fall back to an
+  // archived older source merely because a newer active seal has no SWM copy.
+  if (input.recoverExact && (candidates[0]?.seal.kaUal !== input.recoverExact.kaUal
+    || String(candidates[0]?.seal.assertionVersion) !== input.recoverExact.assertionVersion
+    || ethers.hexlify(candidates[0].seal.merkleRoot).toLowerCase() !== input.recoverExact.merkleRoot)) {
+    throw draftRecoveryError('WM_RECOVERY_SOURCE_UNAVAILABLE');
+  }
+  const loadedSeals = input.recoverExact ? candidates.slice(0, 1) : candidates;
   if (loadedSeals.length === 0) {
     throw Object.assign(new Error(
       `Cannot pull "${name}" from ${sourceLayer.toUpperCase()}: rootless mutation requires a finalized v2 assertion seal`,
