@@ -1,3 +1,4 @@
+import type { AssertionPullFromOptions, AssertionPullFromResult } from '@origintrail-official/dkg-publisher';
 import { StorageACKAdmission } from './storage-ack-admission.js';
 import { runStorageACKOperation } from './storage-ack-diagnostics.js';
 import { requireStorageACKContextGraphId } from './internal/storage-ack-context-graph.js';
@@ -3899,19 +3900,12 @@ export class DKGAgent extends DKGAgentBase {
         contextGraphId: string,
         name: string,
         sourceLayer: 'swm' | 'vm',
-        opts?: { subGraphName?: string; agentAddress?: string; onConflict?: 'reject' | 'replace' },
-      ): Promise<{
-        seeded: number;
-        seededPublic: number;
-        seededPrivate: number;
-        fromLayer: 'swm' | 'vm';
-        contentScopeVersion: number;
-        kaUal: string;
-        assertionVersion: string;
-      }> {
+        opts?: AssertionPullFromOptions & { agentAddress?: string },
+      ): Promise<AssertionPullFromResult> {
         const pullAgentAddress = opts?.agentAddress ?? agentAddress;
         return agent.publisher.assertionPullFrom(contextGraphId, name, pullAgentAddress, sourceLayer, {
           ...(opts?.subGraphName !== undefined ? { subGraphName: opts.subGraphName } : {}),
+          ...(opts?.recoverExact !== undefined ? { recoverExact: opts.recoverExact } : {}),
           ...(opts?.onConflict !== undefined ? { onConflict: opts.onConflict } : {}),
         });
       },
