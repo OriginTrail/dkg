@@ -130,6 +130,21 @@ describe('classifyDurableProgress', () => {
     expect(progress.madeReadinessProgress).toBe(true);
   });
 
+  it('accepts a held generation as readiness proof only for a clean completion', () => {
+    const held = { insertedTriples: 0, insertedDataTriples: 0, resumedPhases: 1, completedPhases: 2, verifiedHeldAssets: 6 };
+
+    expect(classifyDurableProgress(held, { complete: true })).toMatchObject({
+      hasVerifiedHeldAssets: true,
+      hasInsertedData: false,
+      completedReadinessCleanly: true,
+    });
+    // The same counters without the held evidence prove nothing, as before.
+    expect(classifyDurableProgress({ ...held, verifiedHeldAssets: 0 }, { complete: true }).completedReadinessCleanly)
+      .toBe(false);
+    expect(classifyDurableProgress(held, { complete: false }).completedReadinessCleanly).toBe(false);
+    expect(classifyDurableProgress({ ...held, failedPhases: 1 }, { complete: true }).completedReadinessCleanly).toBe(false);
+  });
+
   it('does not classify an explicitly incomplete durable result as readiness complete', () => {
     const progress = classifyDurableProgress({
       insertedTriples: 40_000,

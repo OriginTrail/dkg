@@ -9,6 +9,7 @@ import { runChallengeExactAssetFetch, runDurableSync, runDurableSyncDetailed, ty
 import { resolveSyncAgentsMeta } from './sync/agents-meta-policy.js';
 import { runExactBatchStreamDriver } from './sync/requester/exact-batch-stream-driver.js';
 import { resolveExactBatchStreamEnabled } from './sync/backpressure.js';
+import { currentHeldGraphScopedAssetsReader } from './sync/requester/durable-data-holdings.js';
 import { SYNC_TOTAL_TIMEOUT_MS } from './dkg-agent-constants.js';
 
 import type { DurableGraphOptions, PhysicalDurableSyncResult } from './durable-recovery-types.js';
@@ -93,6 +94,11 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
       ? () => exactAssetFetchPolicy
       : undefined,
     durableMetaContinuation,
+    heldGraphScopedAssets: currentHeldGraphScopedAssetsReader({
+      readHeld: host.readHeldGraphScopedAssets,
+      readChainState: authority.readHeldAssetChainState?.bind(authority),
+      budget: contextGraphBudget,
+    }),
     stopOnBackoffWorthyFailure,
     admitVerifiedPage: page => authority.admitVerifiedPage(page),
     processDurableBatchInWorker: host.verification.processBatch,

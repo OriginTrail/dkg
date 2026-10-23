@@ -44,6 +44,9 @@ import {
   partitionVerifiedGraphScopedAssets,
 } from './verified-asset-preparation.js';
 import type { DurableSyncBudget } from './durable-sync-budget.js';
+import { createDurableDataRoundBoundary } from './durable-data-round.js';
+import { planDurableDataFromLocalHoldings, settleDurableDataFromHoldings,
+  type DurableHoldingsChannel, type DurableHoldingsReader } from './durable-data-holdings.js';
 import {
   normalizeDurableSyncContext,
   type LegacyDurableSyncContext, type NormalizedDurableSyncContext,
@@ -177,9 +180,11 @@ export interface DurableMetaContinuationState {
 }
 
 /** One graph-owner-private retained META prefix across bounded recovery slices. */
-export interface DurableMetaContinuation {
+export interface DurableMetaContinuation extends DurableHoldingsChannel {
   readonly requesterScope: SyncCheckpointScope;
   state?: DurableMetaContinuationState;
+  /** Set by a DATA round whose rows did not line up with the boundary it resumed at; the owner clears it. */
+  rejectedResumeOffset?: number;
 }
 
 export interface DurableSyncStoreInsertRequest {
@@ -336,6 +341,8 @@ export interface DurableSyncContext {
   exactAssetFetchPolicyFor?: (contextGraphId: string) => Exclude<ExactAssetFetchSessionPolicy, { kind: 'ephemeral-challenge' }> | undefined;
   /** Present only for the graph-owned bounded recovery runner. */
   durableMetaContinuation?: DurableMetaContinuation;
+  /** Which assets of a verified generation this node holds; plans that runner's DATA phase. */
+  heldGraphScopedAssets?: DurableHoldingsReader;
   stopOnBackoffWorthyFailure?: boolean;
   processDurableBatchInWorker: (
     dataQuads: Quad[],
@@ -527,20 +534,6 @@ function createManifestSettlementCheckpointer(options: {
   };
 }
 
-function manifestHasCompleteGraphAfterOffset(
-  manifest: GraphScopedDurableManifestPlan,
-  resumedFromOffset: number,
-  nextOffset: number,
-): boolean {
-  let boundaryOffset = 0;
-  for (const descriptor of manifest.descriptors) {
-    boundaryOffset += descriptor.publicTripleCount;
-    if (boundaryOffset > nextOffset) return false;
-    if (boundaryOffset > resumedFromOffset) return true;
-  }
-  return false;
-}
-
 export function runDurableSync(
   context: DurableSyncContext,
 ): Promise<InitializedDurableSyncResult>;
@@ -619,6 +612,7 @@ async function runDurableSyncWithBudget(
     sinceBatchIdFor,
     exactAssetFetchPolicyFor,
     durableMetaContinuation,
+    heldGraphScopedAssets,
     stopOnBackoffWorthyFailure = false,
     processDurableBatchInWorker,
     storeInsert,
@@ -982,6 +976,20 @@ async function runDurableSyncWithBudget(
         );
       }
       const graphScopedManifest = preparedMeta.manifestPlan;
+      // A graph-owned round fetches only the rows of the verified generation that this node lacks.
+      const holdings = graphScopedManifest && exactAssetUals === undefined && onVerifiedFullSnapshot === undefined
+        && durableMetaContinuation && heldGraphScopedAssets
+        ? await planDurableDataFromLocalHoldings({ contextGraphId: pid, manifest: graphScopedManifest,
+            channel: durableMetaContinuation, holdings: heldGraphScopedAssets, signal,
+            logWarn: (message) => logWarn(ctx, message) })
+        : undefined;
+      if (graphScopedManifest && holdings && holdings.kind !== 'full') {
+        recordPhaseOutcome(metaResult, { updateCheckpoint: true });
+        logInfo(ctx, settleDurableDataFromHoldings({ plan: holdings, remotePeerId, contextGraphId: pid,
+          manifest: graphScopedManifest, metaResult, accumulator, deleteCheckpoint, setCheckpoint }));
+        endPhase();
+        continue;
+      }
       const rawDataResult = await fetchPhase(
         'data',
         dataGraph,
@@ -994,15 +1002,14 @@ async function runDurableSyncWithBudget(
           )?.prefixDigest
           : undefined,
         preparedMeta.forceFreshUnboundDataSession,
-        graphScopedManifest && settlementSliceDeadline !== undefined
-          ? (progress) => (
-              Date.now() >= settlementSliceDeadline
-              && manifestHasCompleteGraphAfterOffset(
-                graphScopedManifest!,
-                progress.resumedFromOffset,
-                progress.nextOffset,
-              )
-            )
+        // A full-graph round holds what it fetched until it is verified and
+        // stored, so it ends at a checkpointable graph within a row/heap budget.
+        // A caller that needs one complete snapshot from row 0 keeps one round.
+        graphScopedManifest && exactAssetUals === undefined && onVerifiedFullSnapshot === undefined
+          ? createDurableDataRoundBoundary({ manifest: graphScopedManifest, settlementSliceDeadline,
+              onHardLimit: ({ resumedFromOffset, nextOffset, acceptedQuads }) => logWarn(ctx,
+                `Durable data round for "${pid}" reached its hard limit at ${acceptedQuads} rows `
+                  + `(offset ${resumedFromOffset}->${nextOffset}) without a complete graph to checkpoint`) })
           : undefined,
       );
       throwIfOperationAborted();
@@ -1107,6 +1114,9 @@ async function runDurableSyncWithBudget(
           : null;
         if (!bounded && graphScopedManifest) {
           deleteCheckpoint(dataResult.checkpointKey);
+          if (durableMetaContinuation && dataResult.resumedFromOffset > 0) {
+            durableMetaContinuation.rejectedResumeOffset = dataResult.resumedFromOffset;
+          }
           throw Object.assign(
             new Error(
               `Discarding rootless durable response for "${pid}": responder and manifest coordinates cannot be reconciled`,
@@ -1430,6 +1440,8 @@ async function runDurableSyncWithBudget(
           ctx,
           `Yielding durable recovery for "${pid}" at an authenticated manifest boundary after the settlement slice expired`,
         );
+        // As after a whole page: the next round proves its DATA boundary with META fetched again from row zero.
+        if (updateMetaCheckpoint && metaResult.completed) deleteCheckpoint(metaResult.checkpointKey);
         markDurableTerminalBoundary(accumulator, false);
         endPhase();
         break;

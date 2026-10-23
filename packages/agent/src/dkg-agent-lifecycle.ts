@@ -185,6 +185,7 @@ import {
 } from './sync/checkpoint/state.js';
 import {
   DurableRecoveryRunner,
+  exactMissingAssetRequest,
   type DurableRecoveryExecution,
 } from './sync/durable-recovery-runner.js';
 export type {
@@ -6588,6 +6589,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             durableMetaContinuation,
           },
         ),
+        executeExactSlice: exactMissingAssetRequest(this, contextGraphId, DURABLE_RECOVERY_HARD_TIMEOUT_MS),
         logDebug: (message) => this.log.debug(ctx, message),
         logInfo: (message) => this.log.info(ctx, message),
         logWarn: (message) => this.log.warn(ctx, message),
@@ -6989,6 +6991,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const accessDeniedPeers = new Set<string>();
     let cleanDurableDataSynced = 0;
     let cleanDurablePrivateOnlyCompletions = 0;
+    /** Assets of clean durable rounds that found the whole generation already stored and current. */
+    let cleanDurableHeldAssets = 0;
     let cleanSharedMemoryDataSynced = 0;
     /** Assets of clean SWM rounds that found nothing missing: already held here. */
     let cleanSharedMemoryHeldAssets = 0;
@@ -7058,6 +7062,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         cleanDurableDataSynced += r.durable.insertedDataTriples;
         cleanDurablePrivateOnlyCompletions +=
           durableProgress.hasVerifiedPrivateOnlyResponse ? 1 : 0;
+        cleanDurableHeldAssets += r.durable.verifiedHeldAssets ?? 0;
       }
       if (sharedMemoryCompletedCleanly) {
         cleanSharedMemoryDataSynced += r.shared!.insertedDataTriples;
@@ -7242,7 +7247,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // deliver. A clean round that found nothing missing proves the plane too:
     // the node received those writes earlier and holds what that peer holds.
     const durableCompletedCleanly =
-      cleanDurableDataSynced > 0 || cleanDurablePrivateOnlyCompletions > 0;
+      cleanDurableDataSynced > 0 || cleanDurablePrivateOnlyCompletions > 0 || cleanDurableHeldAssets > 0;
     const sharedMemoryCompletedCleanly = cleanSharedMemoryDataSynced > 0 || cleanSharedMemoryHeldAssets > 0;
     if (durableCompletedCleanly || sharedMemoryCompletedCleanly) {
       this.markContextGraphSubscriptionState(contextGraphId, {
@@ -7257,6 +7262,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         dataSynced: cleanDurableDataSynced,
         sharedMemorySynced: cleanSharedMemoryDataSynced,
         sharedMemoryHeldAssets: cleanSharedMemoryHeldAssets,
+        durableHeldAssets: cleanDurableHeldAssets,
         verifiedPrivateOnlyResponses: cleanDurablePrivateOnlyCompletions,
       });
     }

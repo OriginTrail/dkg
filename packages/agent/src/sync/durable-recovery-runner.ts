@@ -23,6 +23,17 @@ import {
 } from './durable-recovery-coordinator.js';
 import { deleteSyncPageCheckpoint } from './requester/page-fetch.js';
 import type { DurableMetaContinuation } from './requester/durable-sync.js';
+import type { ExactDurableFetchDisposition } from './requester/exact-durable-fetch.js';
+import {
+  durableBoundaryIdentity,
+  liveDurableBoundarySource,
+  preferVerifiedDurableBoundary,
+  seedVerifiedDurableBoundary,
+  takeRejectedResumeOffset,
+  verifiedDurableBoundaryOf,
+  type VerifiedDurableBoundary,
+} from './durable-recovery-boundary-seed.js';
+import type { MissingDurableAsset } from './requester/durable-data-holdings.js';
 
 export interface DurableRecoveryExecution {
   readonly outcome: DurableRecoveryContinuationOutcome;
@@ -64,9 +75,46 @@ export interface DurableRecoveryRunnerDependencies {
     peerId: string,
     metaContinuation: DurableMetaContinuation,
   ): Promise<DurableSyncResult>;
+  /**
+   * Fetch assets this node lacks with one exact request; `complete` when every
+   * one was found, verified and stored. Without it, rounds pull the full graph.
+   */
+  executeExactSlice?(
+    peerId: string,
+    assetUals: readonly string[],
+  ): Promise<{ readonly result: DurableSyncResult; readonly complete: boolean }>;
   logDebug(message: string): void;
   logInfo(message: string): void;
   logWarn(message: string): void;
+}
+
+/** What the owner's exact requests need from the agent. */
+export interface ExactMissingAssetSource {
+  readonly node: { readonly stopSignal?: AbortSignal };
+  syncExactKnowledgeAssetsFromPeerDetailed(
+    remotePeerId: string,
+    contextGraphId: string,
+    assetUals: readonly string[],
+    options: { signal?: AbortSignal; totalTimeoutMs?: number },
+  ): Promise<{ readonly result: DurableSyncResult; readonly disposition: ExactDurableFetchDisposition }>;
+}
+
+/**
+ * The owner's exact request for assets a held generation lacks. It is complete
+ * when the fetch found every requested asset and stored it.
+ */
+export function exactMissingAssetRequest(
+  source: ExactMissingAssetSource,
+  contextGraphId: string,
+  totalTimeoutMs: number,
+): NonNullable<DurableRecoveryRunnerDependencies['executeExactSlice']> {
+  return async (peerId, assetUals) => {
+    const exact = await source.syncExactKnowledgeAssetsFromPeerDetailed(peerId, contextGraphId, assetUals, {
+      signal: source.node.stopSignal,
+      totalTimeoutMs,
+    });
+    return { result: exact.result, complete: exact.disposition === 'found' && exact.result.complete === true };
+  };
 }
 
 type MutableDurableRecoveryPeerHealth = {
@@ -90,6 +138,7 @@ const PROGRESS_COUNTERS = [
   'emptyResponses',
   'metaOnlyResponses',
   'verifiedPrivateOnlyResponses',
+  'verifiedHeldAssets',
 ] as const satisfies readonly (keyof DurableSyncResult)[];
 
 type ProgressTotals = Record<typeof PROGRESS_COUNTERS[number], number>;
@@ -119,6 +168,12 @@ export class DurableRecoveryRunner {
   private readonly coordinator = new DurableRecoveryCoordinator<DurableRecoveryExecution>();
 
   private readonly healthByGraphPeer = new Map<string, MutableDurableRecoveryPeerHealth>();
+
+  /** Per graph, the verified DATA boundary worth continuing, learned from any peer's checkpoint. */
+  private readonly verifiedBoundaryByGraph = new Map<string, VerifiedDurableBoundary>();
+
+  /** Per graph and peer, the boundary that peer's rows did not line up with; it is not handed to that peer again. */
+  private readonly refusedBoundaryByGraphPeer = new Map<string, string>();
 
   private metaScopeSequence = 0;
 
@@ -172,6 +227,17 @@ export class DurableRecoveryRunner {
     const progressTotals = createProgressTotals();
     const attemptedWithoutProgress = new Set<string>();
     const incompatiblePeers = new Set<string>();
+    // Peers retried at once, without the boundary their rows refused.
+    const retriedAfterRefusal = new Set<string>();
+    // Set once a seeded peer discarded the boundary; the rest of this run uses each peer's own checkpoint.
+    let seedingRefused = false;
+    // Set once this run advanced a full-graph round, as a first recovery does, or an exact request
+    // left assets missing: the rest of the run pulls full-graph rounds. A round that ran DATA because
+    // its held-copy checks ran out of budget, yet confirmed more of them, does not count.
+    let pullsFullGraph = false;
+    const fetchedExactly = new Set<string>();
+    // Held copies this run confirmed current on chain: a later round asks the chain only for the rest.
+    const confirmedHeldCopies = new Set<string>();
     let slices = 0;
     let lastPeerId: string | undefined;
     let lastResult: DurableSyncResult = createIncompleteDurableSyncResult();
@@ -288,6 +354,16 @@ export class DurableRecoveryRunner {
       const canonicalManifestDigest = owner.manifestDigest
         ?? selectCanonicalDurableRecoveryManifest(candidates);
       if (canonicalManifestDigest) owner.bindManifest(canonicalManifestDigest);
+      // A remembered boundary lasts only while the checkpoint it came from still records it.
+      const remembered = this.verifiedBoundaryByGraph.get(contextGraphId);
+      const preferred = candidates.reduce<VerifiedDurableBoundary | undefined>(
+        (boundary, candidate) => preferVerifiedDurableBoundary(boundary, verifiedDurableBoundaryOf(
+          candidate.checkpoint, getSyncCheckpointKey(candidate.peerId, contextGraphId, false, 'data'),
+        )),
+        liveDurableBoundarySource(deps.checkpointStore, remembered) ? remembered : undefined,
+      );
+      if (preferred) this.verifiedBoundaryByGraph.set(contextGraphId, preferred);
+      else this.verifiedBoundaryByGraph.delete(contextGraphId);
       return rankDurableRecoveryPeers(candidates, canonicalManifestDigest);
     };
 
@@ -312,18 +388,31 @@ export class DurableRecoveryRunner {
         false,
         'data',
       );
+      const graphPeerKey = `${contextGraphId}\0${candidate.peerId}`;
+      const remembered = seedingRefused ? undefined : this.verifiedBoundaryByGraph.get(contextGraphId);
+      const boundary = remembered && this.refusedBoundaryByGraphPeer.get(graphPeerKey)
+        !== durableBoundaryIdentity(remembered.manifestDigest, remembered.offset) ? remembered : undefined;
+      const seeded = seedVerifiedDurableBoundary(deps.checkpointStore, checkpointKey, boundary);
+      if (seeded) {
+        deps.logInfo(
+          `Durable recovery for "${contextGraphId}" continues with ${candidate.peerId.slice(-8)} from verified offset ${boundary!.offset}`,
+        );
+      }
       const before = deps.checkpointStore.get(checkpointKey);
       const health = this.healthFor(contextGraphId, candidate.peerId);
       health.attempts += 1;
       slices += 1;
       lastPeerId = candidate.peerId;
+      const confirmedBefore = confirmedHeldCopies.size;
 
       try {
         let metaContinuation = metaContinuations.get(candidate.peerId);
         if (!metaContinuation) {
-          metaContinuation = this.createMetaContinuation();
+          metaContinuation = { ...this.createMetaContinuation(), confirmedHeldCopies };
           metaContinuations.set(candidate.peerId, metaContinuation);
         }
+        metaContinuation.ownerFetchesMissingAssets = deps.executeExactSlice !== undefined && !pullsFullGraph;
+        metaContinuation.missingAssetBatches = undefined;
         lastResult = await deps.executeSlice(candidate.peerId, metaContinuation);
       } catch (error) {
         lastResult = createFailedPeerDurableSyncResult();
@@ -335,6 +424,18 @@ export class DurableRecoveryRunner {
       accumulateProgress(progressTotals, lastResult);
       recordPeerSlice(candidate.peerId, lastResult);
       const after = deps.checkpointStore.get(checkpointKey);
+      // The round reports a boundary its peer's rows did not line up with: that peer never gets it
+      // again, and after a refused seed the rest of this run uses each peer's own checkpoint.
+      const rejectedResumeOffset = takeRejectedResumeOffset(metaContinuations.get(candidate.peerId));
+      if (rejectedResumeOffset !== undefined) {
+        this.refusedBoundaryByGraphPeer.set(graphPeerKey, durableBoundaryIdentity(before?.manifestDigest, rejectedResumeOffset));
+        if (seeded) seedingRefused = true;
+      }
+      const preferred = preferVerifiedDurableBoundary(
+        this.verifiedBoundaryByGraph.get(contextGraphId),
+        verifiedDurableBoundaryOf(after, checkpointKey),
+      );
+      if (preferred) this.verifiedBoundaryByGraph.set(contextGraphId, preferred);
       const manifestDigest = after?.manifestDigest ?? before?.manifestDigest;
       const checkpointOffset = after?.offset ?? before?.offset ?? 0;
       if (manifestDigest && manifestDigest !== owner.manifestDigest) {
@@ -342,6 +443,56 @@ export class DurableRecoveryRunner {
         safeOffset = checkpointOffset;
       } else {
         safeOffset = Math.max(safeOffset, checkpointOffset);
+      }
+
+      // The round found this node holding the rest of the generation and left these assets to us.
+      const continuation = metaContinuations.get(candidate.peerId);
+      const missingAssetBatches = continuation?.missingAssetBatches;
+      if (continuation && missingAssetBatches && deps.executeExactSlice) {
+        continuation.missingAssetBatches = undefined;
+        health.successfulSlices += 1;
+        health.lastSuccessfulTransportAtMs = Date.now();
+        const versionOf = (asset: MissingDurableAsset) => `${asset.ual}\0${asset.assertionVersion}`;
+        const missingAssets = missingAssetBatches.flat();
+        const stillMissing = missingAssets.filter((asset) => fetchedExactly.has(versionOf(asset))).length;
+        if (stillMissing > 0) {
+          // Stored by an exact request, yet not held at that version: do not ask for it again.
+          pullsFullGraph = true;
+          deps.logWarn(
+            `Durable recovery for "${contextGraphId}" still lacks ${stillMissing} asset version(s) it fetched with exact requests; continuing with full-graph rounds`,
+          );
+        } else {
+          deps.logInfo(
+            `Durable recovery for "${contextGraphId}" fetches ${missingAssets.length} missing asset(s) from ${candidate.peerId.slice(-8)} in ${missingAssetBatches.length} exact request(s)`,
+          );
+          for (const batch of missingAssetBatches) {
+            if (!deps.isRunning()) return finish('no-progress');
+            for (const asset of batch) fetchedExactly.add(versionOf(asset));
+            slices += 1;
+            let exact: { readonly result: DurableSyncResult; readonly complete: boolean };
+            try {
+              exact = await deps.executeExactSlice(candidate.peerId, batch.map((asset) => asset.ual));
+            } catch (error) {
+              exact = { result: createFailedPeerDurableSyncResult(), complete: false };
+              deps.logWarn(
+                `Durable recovery exact request for "${contextGraphId}" from ${candidate.peerId.slice(-8)} failed: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+            accumulateProgress(progressTotals, exact.result);
+            recordPeerSlice(candidate.peerId, exact.result);
+            if (!exact.complete) {
+              pullsFullGraph = true;
+              deps.logWarn(
+                `Durable recovery for "${contextGraphId}" did not store ${batch.length} missing asset(s) from ${candidate.peerId.slice(-8)} with an exact request; continuing with full-graph rounds`,
+              );
+              break;
+            }
+          }
+          if (!pullsFullGraph) attemptedWithoutProgress.clear();
+        }
+        // The next round confirms the generation is held, or pulls what is still missing.
+        await owner.scheduleContinuation();
+        continue;
       }
 
       const checkpointAdvanced = (after?.offset ?? 0) > (before?.offset ?? 0);
@@ -383,6 +534,7 @@ export class DurableRecoveryRunner {
         );
       }
       if (outcome === 'partial-progress') {
+        if ((checkpointAdvanced || manifestRebound) && confirmedHeldCopies.size === confirmedBefore) pullsFullGraph = true;
         health.successfulSlices += 1;
         health.lastSuccessfulTransportAtMs = Date.now();
         if ((lastResult.timedOutPhases ?? 0) > 0) health.recentTimeouts += 1;
@@ -396,6 +548,12 @@ export class DurableRecoveryRunner {
         continue;
       }
 
+      if (rejectedResumeOffset !== undefined && !retriedAfterRefusal.has(candidate.peerId)) {
+        // Its round discarded the checkpoint: retry the peer once, from its own state, without the boundary.
+        retriedAfterRefusal.add(candidate.peerId);
+        await owner.scheduleContinuation();
+        continue;
+      }
       attemptedWithoutProgress.add(candidate.peerId);
       if (outcome === 'incompatible') incompatiblePeers.add(candidate.peerId);
       if ((lastResult.timedOutPhases ?? 0) > 0) health.recentTimeouts += 1;
