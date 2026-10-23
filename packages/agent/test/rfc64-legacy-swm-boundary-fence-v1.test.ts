@@ -269,6 +269,67 @@ describe('RFC-64 legacy SWM fence coordinator', () => {
       expect(ran).toBe(true);
     });
 
+    it('lets a lease that applies a new head go ahead of waiting replays, and keeps each kind in order', async () => {
+      const fence = createRfc64LegacySwmFenceCoordinatorV1();
+      const order: string[] = [];
+      const lease = gate();
+      const holder = runRfc64LegacySwmRetirementV1(
+        fence, { source: 'receiver-lease', contextGraphId: OTHER_CG }, () => lease.promise,
+      );
+      const asked = (name: string, contextGraphId: string, yieldsNodeWideTurn: boolean) => (
+        runRfc64LegacySwmRetirementV1(
+          fence,
+          { source: 'receiver-lease', contextGraphId, yieldsNodeWideTurn },
+          async () => { order.push(name); },
+        )
+      );
+      const waiting = [
+        asked('replay-1', 'replayed-graph-1', true),
+        asked('replay-2', 'replayed-graph-2', true),
+        asked('new-1', 'new-graph-1', false),
+        runRfc64LegacySwmRetirementV1(
+          fence, { source: 'republish-retirement', contextGraphId: CG }, async () => { order.push('republish'); },
+        ),
+        asked('new-2', 'new-graph-2', false),
+      ];
+      await tick();
+      expect(order).toEqual([]);
+
+      lease.open();
+      await Promise.all([holder, ...waiting]);
+      expect(order).toEqual(['new-1', 'republish', 'new-2', 'replay-1', 'replay-2']);
+      expect(fence.nodeWideTurnHeld).toBe(false);
+      expect(fence.nodeWideWaiters).toEqual([]);
+    });
+
+    it('gives a replay the node-wide turn at once when it is free', async () => {
+      const fence = createRfc64LegacySwmFenceCoordinatorV1();
+      let ran = false;
+      const replay = runRfc64LegacySwmRetirementV1(
+        fence,
+        { source: 'receiver-lease', contextGraphId: CG, yieldsNodeWideTurn: true },
+        async () => { ran = true; },
+      );
+      // Free turn: it joins its graph's chain inside the call.
+      expect(fence.nodeWideTurnHeld).toBe(true);
+      await expect(replay).resolves.toEqual({ ran: true, value: undefined });
+      expect(ran).toBe(true);
+      await tick();
+      expect(fence.nodeWideTurnHeld).toBe(false);
+    });
+
+    it('passes the node-wide turn on when the work in it fails', async () => {
+      const fence = createRfc64LegacySwmFenceCoordinatorV1();
+      const failing = runRfc64LegacySwmRetirementV1(
+        fence, { source: 'receiver-lease', contextGraphId: OTHER_CG }, async () => { throw new Error('lease work failed'); },
+      );
+      const next = runRfc64LegacySwmRetirementV1(
+        fence, { source: 'receiver-lease', contextGraphId: CG }, async () => 'next',
+      );
+      await expect(failing).rejects.toThrow('lease work failed');
+      await expect(next).resolves.toEqual({ ran: true, value: 'next' });
+    });
+
     it('lets the retirement of an asset pass a whole-graph retirement that still waits for another graph', async () => {
       const fence = createRfc64LegacySwmFenceCoordinatorV1();
       const order: string[] = [];

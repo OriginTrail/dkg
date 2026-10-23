@@ -58,6 +58,10 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-public-catalog-current-head-discovery-v1.test.ts",
   "test/rfc64-public-catalog-receiver-v1.test.ts",
   "test/rfc64-receiver-task-lifecycle-scoped-idle-v1.test.ts",
+  // A lease turn applies the newest delivered head of its scope.
+  "test/rfc64-receiver-lease-coalescing.test.ts",
+  // An announced head no provider serves is re-pulled with a doubling delay, then left quiet.
+  "test/rfc64-announced-current-head-retry-v1.test.ts",
   "test/rfc64-public-catalog-reconciliation-outcome-v1.test.ts",
   "test/rfc64-public-catalog-reconciliation-failure-v1.test.ts",
   "test/rfc64-public-catalog-service-v1.test.ts",

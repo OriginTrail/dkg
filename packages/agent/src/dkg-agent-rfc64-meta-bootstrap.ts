@@ -36,6 +36,9 @@
  *    `registrationStatus`) are stripped and no subscription chain binding is
  *    applied (`ignoreRegistrationBinding`): a binding comes only from chain
  *    truth through the finalized-index / name-hash paths;
+ *  - for the same reason its member list is not taken, and the one this node
+ *    holds stays: the member list comes from the graph's curator
+ *    (`curator-meta-member-list.ts`);
  *  - a snapshot whose `dkg:curator` is not the owner the accepted policy
  *    authenticated is rejected (`expectedCuratorAddress`);
  *  - it never touches the `ontology` / `agents` system graphs.
@@ -214,8 +217,9 @@ export class Rfc64MetaBootstrapMethods extends DKGAgentBase {
       // `force` bypasses the auth-probe cooldown: this is an explicit
       // activation event, not a repeated probe. `requirePublicDefinition`
       // rejects any private snapshot outright. `ignoreRegistrationBinding`
-      // strips the peer's chain-registration claims and skips the
-      // subscription binding: an arbitrary connected peer is not chain truth.
+      // strips the peer's chain-registration claims and its member list, and
+      // skips the subscription binding: an arbitrary connected peer is neither
+      // chain truth nor the curator.
       const refreshed = await runCuratorMetaRefreshFromPeer(this, contextGraphId, peerId, {
         force: true,
         requirePublicDefinition: true,

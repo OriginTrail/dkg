@@ -48,7 +48,7 @@ import { setTimeout as waitForPeerEventTurn } from 'node:timers/promises';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
 import { captureExactBatchStreamRefusalScope } from './sync/exact-batch-stream-capability.js';
 import { createStorageACKRegistrationPlan } from './p2p/storage-ack-registrar.js';
-import { syncOpenedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
+import { isRedundantLimitedConnection, syncOpenedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import { ProtocolRouter, GossipSubManager, DKGEvent,
   registerExperimentalExactBatchResponder,
@@ -242,6 +242,10 @@ import {
 } from './sync/on-connect/attempt-accounting.js';
 import { ReconciledSyncOnConnectPeerJobRunner } from
   './sync/on-connect/peer-job-runner.js';
+import {
+  graphScopedSyncOnConnectPeerOutcome,
+  type SyncOnConnectGraphScope,
+} from './sync/on-connect/graph-scope.js';
 import type {
   SelectedSharedMemoryRequestedScope,
   SelectedSharedMemorySyncResult,
@@ -374,30 +378,6 @@ export type JoinApprovalMetadataRecoveryOutcome = 'completed' | 'retry' | 'stop'
  * restricted. One attempt is a single curator metadata fetch.
  */
 const JOIN_APPROVAL_METADATA_RECOVERY_RETRY_MS = Object.freeze([15_000, 30_000, 60_000, 120_000, 300_000]);
-
-/**
- * Wait `ms` unless the node stops first; resolves whether the wait completed.
- * The listener is removed either way, so nothing stays attached to the
- * node-lifetime signal.
- */
-function waitUnlessStopped(ms: number, stopSignal: AbortSignal | undefined): Promise<boolean> {
-  return new Promise((resolve) => {
-    if (stopSignal?.aborted === true) {
-      resolve(false);
-      return;
-    }
-    const onStop = () => {
-      clearTimeout(timer);
-      resolve(false);
-    };
-    const timer = setTimeout(() => {
-      stopSignal?.removeEventListener('abort', onStop);
-      resolve(true);
-    }, ms);
-    (timer as ReturnType<typeof setTimeout> & { unref?: () => void }).unref?.();
-    stopSignal?.addEventListener('abort', onStop, { once: true });
-  });
-}
 
 function startRehydrationAuthorityBudget(budgetMs: number): RehydrationAuthorityBudget {
   if (budgetMs === 0) {
@@ -614,7 +594,12 @@ import {
 import { verifiedCuratorDialAddress } from './curator-dial-address.js';
 import { signsThroughExternalSigner } from './external-author-signing.js';
 import { watchCuratorRegistrationRefusal } from './curator-registration-refusal.js';
-import { runJoinApprovalMetadataRecovery, runPostApprovalSyncWithMetadataRecovery } from './join-approval-metadata-refetch.js';
+import {
+  runJoinApprovalMetadataRecovery,
+  runPostApprovalSyncWithMetadataRecovery,
+  waitForJoinApprovalMetadataRetry,
+} from './join-approval-metadata-refetch.js';
+import { isApprovedMemberMetadataConfirmed } from './internal/context-graph-authority/approved-member-metadata-pending.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
@@ -1801,6 +1786,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // separately.
       ...createNetworkAdmissionRouterPolicy(this.networkAdmissionCoordinator),
       admissionExemptProtocols: [PROTOCOL_NETWORK_IDENTITY],
+      publicDirectAddressesOnly: this.config.publicAddressesOnly === true,
     });
     this.messenger = new Messenger({
       router: this.router,
@@ -3104,6 +3090,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const { signal } = peerEvents;
     const connectionSyncPorts: PeerConnectionSyncPorts = {
       localPeerId: this.node.libp2p.peerId.toString(),
+      isRedundantConnection: (connection) => {
+        const remotePeer = connection.remotePeer.toString();
+        return this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer) && isRedundantLimitedConnection(connection,
+          this.node.libp2p.getConnections().filter((open) => open.remotePeer.toString() === remotePeer));
+      },
       prepareCatalogReplay: (remotePeer) => (
         this.prepareRfc64CatalogConnectionReplayV1(remotePeer)
       ),
@@ -3826,11 +3817,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             ),
           ),
         }),
-      runOrdinary: () => captureSyncOnConnectAttempt(
+      runOrdinary: (contextGraphIds) => captureSyncOnConnectAttempt(
         (onSyncAccounting) => this.trySyncFromPeer(
           remotePeer,
           onSyncAccounting,
           source,
+          contextGraphIds,
         ),
       ),
       selectedRetryStillRequired: () => (
@@ -3862,6 +3854,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       rfc64RecoveryPlan?: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>;
       /** Accepted RFC-64 authority exposed a scope hidden from the prior pass. */
       authorityScopeChanged?: boolean;
+      /**
+       * With `authorityScopeChanged`: the graphs whose authority changed. The
+       * pass syncs only these; without it the pass covers the whole scope.
+       */
+      authorityScopeContextGraphIds?: ReadonlySet<string>;
     } = {},
   ): boolean {
     if (!this.peerSyncSession.checkpoint()) return false;
@@ -3876,6 +3873,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return false;
     }
     const authorityScopeChanged = options.authorityScopeChanged === true;
+    const ordinaryScope: SyncOnConnectGraphScope = authorityScopeChanged
+      ? options.authorityScopeContextGraphIds ?? null
+      : null;
     if (authorityScopeChanged) this.peerSyncSession.clearBackoff(remotePeer);
     const now = Date.now();
     const disconnectBoundary = this.syncOnConnectDisconnectBoundary(remotePeer, now);
@@ -3914,7 +3914,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
       return selectedSwmRetryRequired
         ? false
-        : scheduler.enqueueOrdinary(remotePeer, handleSyncError, delayMs);
+        : scheduler.enqueueOrdinary(remotePeer, handleSyncError, delayMs, ordinaryScope);
     }
 
     const { lastQueued, backoff } = admissionState;
@@ -3929,7 +3929,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return false;
     }
 
-    this.peerSyncSession.recordQueued(remotePeer, now, exactRecoveryPlan !== undefined);
+    // A graph-scoped pass leaves the peer's other graphs unsynced, so it must
+    // not hold off the next whole-scope on-connect pass.
+    if (ordinaryScope === null || selectedSwmRetryRequired) {
+      this.peerSyncSession.recordQueued(remotePeer, now, exactRecoveryPlan !== undefined);
+    }
     return selectedSwmRetryRequired
       ? scheduler.enqueueSelected(
         remotePeer,
@@ -3937,7 +3941,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         delayMs,
         exactRecoveryPlan,
       )
-      : scheduler.enqueueOrdinary(remotePeer, handleSyncError, delayMs);
+      : scheduler.enqueueOrdinary(remotePeer, handleSyncError, delayMs, ordinaryScope);
   }
 
   async attemptSyncFromPeerWithReconcilerAccounting(
@@ -3992,6 +3996,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeer: string,
     onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
     source: SyncAdmissionSource = 'on-connect',
+    graphScope: SyncOnConnectGraphScope = null,
   ): Promise<SyncOnConnectOutcome | 'not-started'> {
     const session = this.peerSyncSession;
     const { signal } = session;
@@ -4001,6 +4006,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return 'not-started';
     }
     const automaticPeerSweep = source === 'on-connect' || source === 'reconcile';
+    // A graph-scoped pass (an accepted authority change) syncs only the named
+    // graphs. Scope lists may hold a graph by its wire id.
+    const inGraphScope = (contextGraphId: string): boolean => graphScope === null
+      || graphScope.has(this.rfc64AuthorityContextGraphIdV1(contextGraphId));
     const acceptedPolicies = (this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
       ?? []).filter(({ policyEnvelope }) => this.resolveRfc64CatalogReceiverAuthorityV1(
@@ -4027,7 +4036,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ).filter((contextGraphId) => this.rfc64LegacySwmGossipAllowedForContextGraph(
         contextGraphId,
       )),
-    ])];
+    ])].filter(inGraphScope);
     const remotePeerIsCompleteSwmProvider = acceptedPolicies.some(
         ({ completeSwmProviders = [] }) => completeSwmProviders.includes(remotePeer),
       );
@@ -4072,7 +4081,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // not start a duplicate durable pull before its useful SWM transfer;
         // unrelated Edge peers should do neither plane in the automatic sweep.
         return completeSwmProviders.length === 0 || this.peerCapabilityRegistry.supportsCore(remotePeer);
-      }),
+      }).filter(inGraphScope),
       syncFromPeer: async (peerId, contextGraphIds) => {
         const requestedContextGraphIds = contextGraphIds
           ?? [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, ...(this.config.syncContextGraphs ?? [])];
@@ -4155,8 +4164,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onPeerSkippedNoSync: (peerId) => {
         session.commit(() => session.markSkippedNoSync(peerId));
       },
-      onSyncAccounting: (peerId, outcome) => {
+      onSyncAccounting: (peerId, peerOutcome) => {
         if (!session.checkpoint()) return;
+        const outcome = graphScope === null
+          ? peerOutcome
+          : graphScopedSyncOnConnectPeerOutcome(peerOutcome);
         if (onSyncAccounting) {
           onSyncAccounting(outcome);
         } else {
@@ -7597,15 +7609,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const delayMs = JOIN_APPROVAL_METADATA_RECOVERY_RETRY_MS[
         Math.min(attempt, JOIN_APPROVAL_METADATA_RECOVERY_RETRY_MS.length - 1)
       ]!;
-      if (!(await waitUnlessStopped(delayMs, stopSignal))) return;
+      if (!(await waitForJoinApprovalMetadataRetry(this, contextGraphId, curatorPeerId, delayMs, stopSignal))) return;
       const current = this.subscribedContextGraphs.get(contextGraphId);
       if (
         !this.localApprovedAgentByCG.has(contextGraphId)
         || current?.subscribed !== true
-        // A concurrent data catch-up can set `synced` while authoritative
-        // join metadata is still pending or unknown. Only its explicit
-        // confirmation ends this join-specific retry.
-        || (current.synced === true && current.metaSynced === true && current.pendingMeta !== true)
+        // A concurrent data catch-up can set `synced`, and a public graph's
+        // own definition `metaSynced`, while the approved member's metadata
+        // is still pending or unknown (#3421). Only the confirmation of that
+        // member ends this join-specific retry.
+        || (current.synced === true && current.metaSynced === true && current.pendingMeta !== true
+          && await isApprovedMemberMetadataConfirmed(this, contextGraphId).catch(() => false))
       ) return;
     }
   }

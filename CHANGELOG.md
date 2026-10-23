@@ -4,6 +4,17 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Security
+
+- Outbound HTTP from the node refuses Brotli-encoded responses, as defence in
+  depth for CVE-2026-111497 in the Brotli decoder that Node.js bundles: a
+  request no longer offers `br`, and a response encoded with it fails before
+  anything decodes it. Operators should still upgrade Node.js to 22.23.4,
+  24.22.1, 26.12.1 or later and restart the node (see
+  `docs/use-dkg/updates-and-rollback.md`). `GET /api/status` reports the Node.js
+  release the daemon runs on as `runtime.nodeVersion` to a node-operator token,
+  and `dkg status` prints it.
+
 ### Fixed
 
 - Git updater quarantine files no longer cause an otherwise clean source build
