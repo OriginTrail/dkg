@@ -1,7 +1,44 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ContentAddressedBlobSingleFlight } from '../src/content-addressed-blob-single-flight.js';
 
 describe('ContentAddressedBlobSingleFlight', () => {
+  it('remembers successful immutable preparation without another disk operation', async () => {
+    const createOrVerify = vi.fn(async () => {});
+    const blobs = new ContentAddressedBlobSingleFlight({ createOrVerify });
+    await blobs.createOrVerify('same', 'value');
+    await blobs.createOrVerify('same', 'value');
+    expect(createOrVerify).toHaveBeenCalledOnce();
+    await expect(blobs.createOrVerify('same', 'different')).rejects.toThrow('conflicting bytes');
+  });
+
+  it('bounds completed preparations by bytes and entries and re-verifies evicted content', async () => {
+    const createOrVerify = vi.fn(async () => {});
+    const blobs = new ContentAddressedBlobSingleFlight({ createOrVerify, maxCachedBytes: 6, maxCachedEntries: 2 });
+    await blobs.createOrVerify('a', 'aa');
+    await blobs.createOrVerify('b', 'bb');
+    await blobs.createOrVerify('a', 'aa'); // Refresh the older entry.
+    await blobs.createOrVerify('c', 'cc');
+    await blobs.createOrVerify('b', 'bb'); // Entry limit evicted b.
+    expect(createOrVerify).toHaveBeenCalledTimes(4);
+    await blobs.createOrVerify('large', '1234567'); // Cannot be cached.
+    await blobs.createOrVerify('large', '1234567');
+    await blobs.createOrVerify('d', '12345'); // Byte limit evicts a/c/b.
+    await blobs.createOrVerify('b', 'bb');
+    expect(createOrVerify).toHaveBeenCalledTimes(8);
+  });
+
+  it('bounds distinct physical preparations while coalescing queued duplicate content', async () => {
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const createOrVerify = vi.fn(async () => held);
+    const blobs = new ContentAddressedBlobSingleFlight({ createOrVerify, maxConcurrent: 2 });
+    const work = ['a', 'b', 'c', 'c'].map(hash => blobs.createOrVerify(hash, hash));
+    try {
+      await vi.waitFor(() => expect(createOrVerify).toHaveBeenCalledTimes(2));
+    } finally { release(); await Promise.all(work); }
+    expect(createOrVerify).toHaveBeenCalledTimes(3);
+  });
+
   it('coalesces concurrent same-hash writes and preserves the immutable blob', async () => {
     const blobs = new Map<string, string>();
     let writes = 0;

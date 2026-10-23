@@ -1,0 +1,44 @@
+# PR #3405 performance rereview and #3406 rebase
+
+Status: in progress. Primary owner only; distinct durability and regression self-review before publication. This scoped continuation supplements the lifecycle plan on #3406 without copying its history into the foundation PR.
+
+## Outcome and evidence
+
+User requests validation/addressing of lupuszr's latest foundation feedback, then rebasing #3406. Review5625589390 on214cd54df confirms prior correctness fixes and no demonstrated new correctness failure. Fresh/mixed throughput remains below the proposed80% of base budget (171.56/744.92 and729.85/2502.07 writes/s); neither that objection nor human scope/design acceptance is resolved. Retain existing healthy managed-Oxigraph ACK compatibility, supported-backend barriers and no fork. No merge/deployment authorized. The user-requested dependent rebase requires an exact-old-head lease when publishing rewritten history.
+
+Native Node22.23.3 local160-write fresh probe on214:211.12 writes/s. I/O instrumentation counts173 writer syncs (996.67ms summed concurrent),174 blob-directory syncs (825.18ms),176 realpath calls (170.76ms),355 opens (610.30ms). These are a short diagnostic, not comparable three-pair acceptance data. Latest base has advanced to f9b5f2524; inspect/reconcile its relevant changes while updating the stack.
+
+## Selected bounded experiment
+
+Keep each blob's own writable-handle write+sync and fresh-owner verification/retry. After its writer sync and close, admit its path to an owner-local directory-barrier batch. Snapshot admitted paths before dispatch; later arrivals form a subsequent batch and must never borrow an in-flight sync. Resolve each actual file target and traversed alias before deduplicating directory/ancestor syncs. All members wait for every directory in their batch; any failure rejects them all, caches no success, and ordinary retry rewrites bytes and performs the barriers again. One active batch bounds directory work, with no global mutation lock or ordinary read capacity held. Existing four physical blob-preparation slots and owner shutdown/drain stay intact.
+
+Alternative: only document the measured cost and request owner budget acceptance. Remains available if batching is ineffective; do not ship extra durability protocol complexity without a demonstrated benefit. Dropping required syncs or certifying later arrivals using an earlier batch is rejected. A packed-blob format or changed default guarantee is outside this feedback batch.
+
+## Work and validation
+
+1. Add actual-I/O regressions for batching, no early RDF references, late arrivals requiring a new batch, shared directory failure/retry/reopen and existing aliases/same-writer error coverage. Demonstrate relevant checks fail without batching/with unsafe joining.
+2. Implement narrow internal barrier batching; measure identical benchmark before/after in alternating runs. Keep only with material measured benefit; preserve any missed80% budget explicitly. Run full storage, affected native/backend/CLI contracts and builds/hygiene before push.
+3. Incorporate current testnet-canary if necessary to keep foundation reviewable, resolve conflicts preserving upstream fixes. Rebase dependent #3406 onto final foundation, preserving its incremental changes. Verify range/tree differences; publish with exact old-head lease only after local readiness.
+4. Reply with measurements and actual outcomes, refresh descriptions and review/CI for new heads. Preserve human acceptance blockers. Prior a6 live result remains historical after code changes; rerun relevant live proof before merge readiness if production behavior changes.
+
+## Review lenses / stop conditions
+
+Durability: group coverage starts only after each member's own file barrier; canonical and alias parent obligations survive failures; later members never share earlier coverage. Regression: small-write progress, cache eviction, bounded preparations, index/changelog ordering, close admission/drain and no new managed certificate. Keep the existing tested implementation if no useful measured improvement; do not turn a diagnostic into owner acceptance. Independent peer review is unavailable under current no-delegation instruction; use distinct self-review and current-head remote review.
+
+## Experiment outcome and execution update
+
+Three alternating unchanged/candidate pairs on the same native checkout,1,200 writes per fresh/mixed case,8writers/2readers,80KiB literals:12cases/14,400measuredwrites. Unchanged214 medians284.67fresh/1163.75mixed writes/s; candidate239.98/952.78 (15.7%/18.1% slower). All measured counts and read assertions passed. Directory-batch prototype is discarded completely; no production code or new barrier API from the experiment is retained. Its source/patch and logs are ignored local evidence. This compares214 to a rejected prototype, not214 against testnet-canary; host/control differences do not supersede lupuszr's results. The owner's reply asks for explanation and does not accept the performance cost. Explained that the cost belongs to our guarantee and that his request is valid; performance P1 remains open.
+
+Foundation merged current target f9b5f2524 cleanly, retaining the stack's review history. Only review evidence and managed-backend scope wording are newly authored foundation changes. Next verify foundation, publish/reply; then perform the requested dependent rebase, inspect its exact tree/diff and test affected upstream integration. No additional durability protocol is shipping.
+
+## Updated foundation validation
+
+Runtime dependency closure, dependent type/package contracts and prepared CLI build pass. Full storage:1,653 passed/107files,45environment-gated skips. Selected managed/runtime CLI:54 passed/4files, including actual stock-server writes and supervised restart while commitment remains absent. Lint, disabled-test audit (zero additions), source-size ratchets and git diff checks pass. No production source from the batching experiment remains. New foundation source changes are solely inherited from target f9b5f2524; authored changes are this evidence, execution plan and corrected managed-compatibility documentation.
+
+## User steering and remote round21
+
+The owner now requires finding a way to retain the stronger guarantee without the heavy cost; the earlier budget-acceptance alternative is not approved. Work continues on contract-preserving performance research. Increasing physical preparation concurrency from4to8 gives only a modest preliminary improvement; no production bound change has been made. An isolated Node-SQLite worker/group-commit prototype enforces WAL,FULL,fullfsync/checkpoint_fullfsync and shows potential, but results vary and it changes the disk format. It has not passed crash/failure/adoption/legacy-format validation and is not shipping. SQLite defaults or a Node datasync rename are not acceptable shortcuts: libuv1.51 uses the same full-sync implementation for both on macOS (https://github.com/libuv/libuv/blob/v1.51.0/src/unix/fs.c); SQLite requires explicit FULL/fullfsync policy (https://www.sqlite.org/pragma.html#pragma_synchronous). Broader engine integration must justify its migration/runtime costs before production changes.
+
+Completed remote review5629542037 on652 adds valid4360522287/4360522295. Split actual pinned-Blazegraph UPDATE and N-Quads writes into independent acknowledgement→SIGKILL→reopen proofs so a later insertion cannot flush and mask an UPDATE gap. Both independent native cases pass under loaded DiskRW/ForceMetadata policy; the helper removes only its exact owned labeled container. Preserve one preparation pipeline, while making its interface generic over the operation and returning an explicit operation/commit model: CAS returns its result, only insert accepts markers. Both decorators must implement that same checked relationship; no assertion repairs a widened owner interface. Changelog's internal queue uses a separate ordinary callback type and preserves receiver, marker fusion, sequence/outcome bookkeeping and close/drain. Type contracts reject void-only CAS owners/models and replacement/CAS marker arguments; widening the owner interface makes the negative-owner assertion unused and fails compilation. Final storage1653/107files passes(45gatedskips); focused51cases/6files, type/build, native2crashes, size/diff and lint pass.
+
+The upper is locally rebased with history preserved onto652 as6319d20a7. Three import/type-test conflicts were resolved by retaining both upstream validation/draft-recovery and upper lifecycle code. The resulting tree differs from the full three-way combined tree only at those three resolved conflict files. Runtime/types/CLIbuild,231agent lifecycle/recovery tests/20files and317publisher tests/4files pass. It remains unpublished pending incorporation of this foundation follow-up and current validation. No new-tip live pass is claimed; no wallet claim/signing or merge.

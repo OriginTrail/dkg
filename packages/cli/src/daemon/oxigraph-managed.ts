@@ -313,10 +313,8 @@ export function planManagedOxigraph(
     highMiB: options.memoryHighMiB,
     maxMiB: options.memoryMaxMiB,
   });
-  const location =
-    typeof options.location === 'string' && options.location.trim()
-      ? options.location
-      : join(dataDir, 'oxigraph-data');
+  const location = typeof options.location === 'string' && options.location.trim()
+    ? options.location : join(dataDir, 'oxigraph-data');
   // Honour an operator `cacheDir` override (preserved by the wizard/flag flow)
   // the same way `location` is; fall back to the default binary cache dir.
   const cacheDir = resolveManagedOxigraphCacheDir(options, dataDir);
@@ -478,6 +476,8 @@ export async function startManagedOxigraph(
     runtimeStoreConfig.graphSetIndex = plan.storeConfigTemplate.graphSetIndex;
   }
   const storeConfig = createManagedOxigraphRuntimeStoreConfigV1(runtimeStoreConfig, {
+    // Stock Oxigraph HTTP has no engine-owned persistence API. Do not infer
+    // durable completion from its version, acknowledgement or external WAL I/O.
     getRecoveryState: readRecoveryState,
     registerActivity: () => handle.registerStoreActivity(),
     onClientTimeout: recoverTimedOutOperation,

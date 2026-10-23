@@ -1,9 +1,12 @@
+import { prepareImmutableMutation, immutableMutationTouchedGraphs, closeImmutableStoreMutations, runImmutableMutation, runRfc64AuthorCommitCasMutation, assertImmutableMutationCapability, type ImmutableStoreMutation, type ImmutableStorePreparation, type PreparedMutation } from './immutable-store-preparation.js';
+import type { TripleStoreCommitCapability } from './persistence.js';
+import type { GraphSetIndexStoreOptions } from './graph-set-index-store-options.js';
+export type { GraphSetIndexStoreOptions } from './graph-set-index-store-options.js';
 import { composeGraphEnumerationVisibility } from './graph-enumeration-visibility.js';
 import { namedGraphsFromQuads, endsWithHighSurrogate, normalizeGraphUris, queryOptionsFromUpdateOptions } from "./graph-set-index-utils.js";
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import type { GraphSetMutationSource, TouchedGraphMutationSource, GraphSetRefreshSource, PendingFullRefreshSource, GraphSetMutationEvent, GraphSetDiagnosticEvent } from './graph-set-index-types.js';
 export type { GraphSetMutationSource, GraphSetMutationEvent } from './graph-set-index-types.js';
-import { assertSubjectAndInsertPayload } from './atomic-subject-insert.js';
 import { performance } from 'node:perf_hooks';
 import {
   codePointLowerBound,
@@ -32,12 +35,10 @@ import type {
   Rfc64AuthorCommitCasInputV1,
   Rfc64AuthorCommitCasResultV1,
 } from './rfc64-author-commit-cas.js';
-import {
-  normalizeRfc64AuthorCommitCasV1,
-  sourceFromNormalizedRfc64AuthorCommitCasV1,
-} from './rfc64-author-commit-cas.js';
 import { isStoreOperationNotStarted } from './store-operation-outcome.js';
 import { raceStoreWorkAgainstAbort } from './abortable-store-work-lifecycle.js';
+import { StoreWorkDrain } from './store-work-drain.js';
+import type { StoreOperation } from './store-operation-outcome.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 export const DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
@@ -46,23 +47,6 @@ const MIN_GRAPH_SET_REVALIDATE_FAILURE_BACKOFF_MS = 1_000;
 // the mutation generation, before falling back to one O(store) rebuild.
 const MAINTAIN_INDEX_MAX_PROBE_RETRIES = 4;
 
-export interface GraphSetIndexStoreOptions {
-  enabled?: boolean;
-  /** Revalidate after this interval. Use 0 to revalidate on every read. */
-  revalidateMs?: number;
-  /**
-   * Initial retry delay after a failed warm periodic revalidation.
-   * Ignored when revalidateMs is 0.
-   */
-  revalidateFailureBackoffMs?: number;
-  /**
-   * Maximum exponential retry delay after failed warm periodic revalidations.
-   * Ignored when revalidateMs is 0.
-   */
-  revalidateFailureMaxBackoffMs?: number;
-  now?: () => number;
-  onMutation?: (event: GraphSetMutationEvent) => void;
-}
 
 /** Immutable graph catalog maintained in Unicode code-point order. */
 export interface SortedGraphSetSource {
@@ -101,7 +85,7 @@ type GraphSetIndexStoreInternalOptions = GraphSetIndexStoreOptions & {
  * only graphs containing at least one quad are listed; empty `createGraph()`
  * calls are not visible until data is inserted.
  */
-export class GraphSetIndexStore implements TripleStoreDecorator {
+export class GraphSetIndexStore implements TripleStoreDecorator, ImmutableStorePreparation {
   get queryCancellation() {
     return this.inner.queryCancellation;
   }
@@ -112,6 +96,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
 
   private readonly inner: TripleStore;
   readonly innerStore: TripleStore;
+  readonly commitment?: TripleStoreCommitCapability;
   private readonly enabled: boolean;
   private readonly revalidateMs: number;
   private readonly revalidateFailureBackoffMs: number;
@@ -125,6 +110,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   private revalidateFailureCount = 0;
   private mutationGeneration = 0;
   private readonly refreshCoordinator = new RefreshCoordinator<ReadonlySet<string>>();
+  private readonly mutations = new StoreWorkDrain('Graph set index is closing');
   /**
    * Pending full rebuild requested by a mutation whose exact graph effects can't
    * be applied incrementally. The stored source preserves the observer contract
@@ -136,6 +122,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
     this.innerStore = inner;
+    this.commitment = inner.commitment;
     this.graphEnumerationVisibility = composeGraphEnumerationVisibility(inner, graph => !isAtomicGraphReplaceStagingGraph(graph));
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);
@@ -155,22 +142,17 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     this.onDiagnostic = (options as GraphSetIndexStoreInternalOptions).onDiagnostic;
   }
 
+  runLogicalMutation<T>(operation: StoreOperation, options: QueryOptions | undefined,
+    work: (options: QueryOptions | undefined) => Promise<T>): Promise<T> {
+    return this.mutations.run(() => runLogicalStoreMutation(this.inner, operation, options, work));
+  }
+
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
-    return runLogicalStoreMutation(this.inner, 'insert', options, async options => {
-      if (!this.enabled) {
-        await this.inner.insert(quads, options);
-        return;
-      }
-      await this.inner.insert(quads, options);
-      const touched = namedGraphsFromQuads(quads);
-      if (touched.length === 0) return;
-      this.bumpMutation();
-      this.addGraphs(touched, 'insert');
-    });
+    return runImmutableMutation(this, { operation: 'insert', quads }, options);
   }
 
   async delete(quads: Quad[], options?: QueryOptions): Promise<void> {
-    return runLogicalStoreMutation(this.inner, 'delete', options, async options => {
+    return this.runLogicalMutation('delete', options, async options => {
       if (!this.enabled) {
         await this.inner.delete(quads, options);
         return;
@@ -184,7 +166,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   async deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number> {
-    return runLogicalStoreMutation(this.inner, 'deleteByPattern', options, async options => {
+    return this.runLogicalMutation('deleteByPattern', options, async options => {
       if (!this.enabled) {
         return this.inner.deleteByPattern(pattern, options);
       }
@@ -207,7 +189,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     pattern: Partial<Quad>,
     options?: QueryOptions,
   ): Promise<void> {
-    return runLogicalStoreMutation(this.inner, 'deleteByPattern', options, async options => {
+    return this.runLogicalMutation('deleteByPattern', options, async options => {
       if (!this.enabled) {
         await deleteByPatternWithoutCount(this.inner, pattern, options);
         return;
@@ -243,16 +225,24 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
-    return runLogicalStoreMutation(this.inner, 'update', options, async scoped => {
+    return this.runUpdate(sparql, options, 'update');
+  }
+
+  async atomicUpdate(sparql: string, options?: UpdateOptions): Promise<void> {
+    return this.runUpdate(sparql, options, 'atomicUpdate');
+  }
+
+  private async runUpdate(sparql: string, options: UpdateOptions | undefined, capability: 'update' | 'atomicUpdate'): Promise<void> {
+    return this.runLogicalMutation('update', options, async scoped => {
       const scopedUpdateOptions: UpdateOptions = { ...options, ...scoped };
-      if (typeof this.inner.update !== 'function') {
-        throw new UnsupportedTripleStoreCapabilityError('update', 'GraphSetIndexStore');
+      if (typeof this.inner[capability] !== 'function') {
+        throw new UnsupportedTripleStoreCapabilityError(capability, 'GraphSetIndexStore');
       }
       if (!this.enabled) {
-        await this.inner.update(sparql, scopedUpdateOptions);
+        await this.inner[capability]!(sparql, scopedUpdateOptions);
         return;
       }
-      await this.inner.update(sparql, scopedUpdateOptions);
+      await this.inner[capability]!(sparql, scopedUpdateOptions);
       // A server-side SPARQL UPDATE (e.g. the RS heal's INSERT…WHERE) can create or
       // drop named graphs the index must learn about. When the caller declares the
       // touched graphs (#1549: RS-heal + agents-meta prune write statically-known
@@ -304,7 +294,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
-    return runLogicalStoreMutation(this.inner, 'dropGraph', options, async options => {
+    return this.runLogicalMutation('dropGraph', options, async options => {
       if (!this.enabled) {
         await this.inner.dropGraph(graphUri, options);
         return;
@@ -315,164 +305,56 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     });
   }
 
-  async replaceGraph(
-    graphUri: string,
-    quads: Quad[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    return runLogicalStoreMutation(this.inner, 'replaceGraph', options, async options => {
-      if (typeof this.inner.replaceGraph !== 'function') {
-        throw new UnsupportedTripleStoreCapabilityError('replaceGraph', 'GraphSetIndexStore');
-      }
-      return this.runReplacementMutation('replaceGraph', [graphUri], options,
-        () => this.inner.replaceGraph!(graphUri, quads, options));
-    });
+  async replaceGraph(graphUri: string, quads: Quad[], options?: QueryOptions): Promise<void> {
+    return runImmutableMutation(this, { operation: 'replaceGraph', graphUri, quads }, options);
   }
 
   async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
-    return runLogicalStoreMutation(this.inner, 'replaceAssetGroup', options, async options => {
-      if (!this.inner.replaceAssetGroup) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'group-decorator');
-      try { await this.inner.replaceAssetGroup(assets, options); }
+    return runImmutableMutation(this, { operation: 'replaceAssetGroup', assets }, options);
+  }
+
+  async replaceGraphAndSubject(graphUri: string, graphQuads: Quad[], metaGraphUri: string,
+    metadataSubject: string, metadataQuads: Quad[], options?: QueryOptions): Promise<void> {
+    return runImmutableMutation(this, { operation: 'replaceGraphAndSubject', graphUri, graphQuads,
+      metaGraphUri, metadataSubject, metadataQuads }, options);
+  }
+
+  async replaceSubject(graphUri: string, subject: string, quads: Quad[], options?: QueryOptions): Promise<void> {
+    return runImmutableMutation(this, { operation: 'replaceSubject', graphUri, subject, quads }, options);
+  }
+
+  async replaceSubjectAndInsert(graphUri: string, subject: string, replacementQuads: Quad[], insertQuads: Quad[],
+    options?: QueryOptions): Promise<void> {
+    return runImmutableMutation(this, { operation: 'replaceSubjectAndInsert', graphUri, subject, replacementQuads, insertQuads }, options);
+  }
+
+  async rfc64AuthorCommitCasV1(input: Rfc64AuthorCommitCasInputV1, options?: QueryOptions): Promise<Rfc64AuthorCommitCasResultV1> {
+    return runRfc64AuthorCommitCasMutation(this, input, options);
+  }
+
+  async prepareImmutableMutation<M extends ImmutableStoreMutation>(mutation: M): Promise<PreparedMutation<M>> {
+    const operation = mutation.operation;
+    assertImmutableMutationCapability(this.inner, operation);
+    const touched = immutableMutationTouchedGraphs(mutation);
+    const prepared = await prepareImmutableMutation(this.inner, mutation);
+    return { operation, commit: async (scoped, appended) => {
+      let result;
+      try { result = await prepared.commit(scoped, appended); }
       catch (error) {
-        if (!isStoreOperationNotStarted(error, 'replaceAssetGroup')) this.scheduleFullRefresh('replaceAssetGroup');
+        const observeFailure = this.enabled || operation === 'replaceAssetGroup' || operation === 'replaceGraphAndSubject';
+        if (operation !== 'insert' && observeFailure && !isStoreOperationNotStarted(error, operation)) this.scheduleFullRefresh(operation);
         throw error;
       }
-      if (!this.enabled) return;
-      this.bumpMutation();
-      await this.maintainTouchedGraphs([...new Set(assets.flatMap(a => [a.graphUri, a.metaGraphUri]))], 'replaceAssetGroup', options);
-    });
-  }
-
-  async replaceGraphAndSubject(
-    graphUri: string,
-    graphQuads: Quad[],
-    metaGraphUri: string,
-    metadataSubject: string,
-    metadataQuads: Quad[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    return runLogicalStoreMutation(this.inner, 'replaceGraphAndSubject', options, async options => {
-      if (typeof this.inner.replaceGraphAndSubject !== 'function') {
-        throw new UnsupportedTripleStoreCapabilityError(
-          'replaceGraphAndSubject',
-          'GraphSetIndexStore',
-        );
+      if (!this.enabled || (operation === 'rfc64AuthorCommitCasV1' && result === 'conflict')) return result;
+      if (operation === 'insert') {
+        // Changelog adds its markers only after preparation and sequence allocation.
+        const graphs = normalizeGraphUris([...touched, ...namedGraphsFromQuads(appended ?? [])]);
+        if (graphs.length) { this.bumpMutation(); this.addGraphs(graphs, operation); }
+      } else {
+        this.bumpMutation(); await this.maintainTouchedGraphs(touched, operation, scoped);
       }
-      try {
-        await this.inner.replaceGraphAndSubject(
-          graphUri,
-          graphQuads,
-          metaGraphUri,
-          metadataSubject,
-          metadataQuads,
-          options,
-        );
-      } catch (error) {
-        if (!isStoreOperationNotStarted(error, 'replaceGraphAndSubject')) {
-          this.scheduleFullRefresh('replaceGraphAndSubject');
-        }
-        throw error;
-      }
-      if (!this.enabled) return;
-      this.bumpMutation();
-      await this.maintainTouchedGraphs(
-        [graphUri, metaGraphUri],
-        'replaceGraphAndSubject',
-        options,
-      );
-    });
-  }
-
-  async replaceSubject(
-    graphUri: string,
-    subject: string,
-    quads: Quad[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    return runLogicalStoreMutation(this.inner, 'replaceSubject', options, async options => {
-      if (typeof this.inner.replaceSubject !== 'function') {
-        throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'GraphSetIndexStore');
-      }
-      return this.runReplacementMutation('replaceSubject', [graphUri], options,
-        () => this.inner.replaceSubject!(graphUri, subject, quads, options));
-    });
-  }
-
-  async replaceSubjectAndInsert(
-    graphUri: string, subject: string, replacementQuads: Quad[], insertQuads: Quad[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    assertSubjectAndInsertPayload(graphUri, subject, replacementQuads, insertQuads);
-    return runLogicalStoreMutation(this.inner, 'replaceSubjectAndInsert', options, async options => {
-      if (typeof this.inner.replaceSubjectAndInsert !== 'function') {
-        throw new UnsupportedTripleStoreCapabilityError('replaceSubjectAndInsert', 'GraphSetIndexStore');
-      }
-      return this.runReplacementMutation('replaceSubjectAndInsert', [graphUri], options,
-        () => this.inner.replaceSubjectAndInsert!(graphUri, subject, replacementQuads, insertQuads, options));
-    });
-  }
-
-  private async runReplacementMutation(
-    operation: 'replaceGraph' | 'replaceSubject' | 'replaceSubjectAndInsert',
-    touchedGraphs: string[],
-    options: QueryOptions | undefined,
-    execute: () => Promise<void>,
-  ): Promise<void> {
-    if (!this.enabled) {
-      await execute();
-      return;
-    }
-    try {
-      await execute();
-    } catch (error) {
-      // A rejected replacement may have committed. Only a not-started outcome
-      // bound to this dispatch is clean; a nested post-commit probe is not.
-      if (!isStoreOperationNotStarted(error, operation)) {
-        this.scheduleFullRefresh(operation);
-      }
-      throw error;
-    }
-    this.bumpMutation();
-    await this.maintainTouchedGraphs(touchedGraphs, operation, options);
-  }
-
-  async rfc64AuthorCommitCasV1(
-    input: Rfc64AuthorCommitCasInputV1,
-    options?: QueryOptions,
-  ): Promise<Rfc64AuthorCommitCasResultV1> {
-    return runLogicalStoreMutation(this.inner, 'rfc64AuthorCommitCasV1', options, async options => {
-      if (typeof this.inner.rfc64AuthorCommitCasV1 !== 'function') {
-        throw new UnsupportedTripleStoreCapabilityError(
-          'rfc64AuthorCommitCasV1',
-          'GraphSetIndexStore',
-        );
-      }
-      const manifest = normalizeRfc64AuthorCommitCasV1(input);
-      const source = sourceFromNormalizedRfc64AuthorCommitCasV1(manifest);
-      if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(source, options);
-      // Prepare every fallible index-maintenance input before dispatch. Once the
-      // inner capability reports `committed`, only best-effort observation and
-      // index maintenance may remain; malformed caller input must never create a
-      // committed backend mutation that this decorator cannot account for.
-      const touchedGraphs = [...manifest.touchedGraphs];
-      let result: Rfc64AuthorCommitCasResultV1;
-      try {
-        result = await this.inner.rfc64AuthorCommitCasV1(source, options);
-      } catch (error) {
-        if (!isStoreOperationNotStarted(error, 'rfc64AuthorCommitCasV1')) {
-          this.scheduleFullRefresh('rfc64AuthorCommitCasV1');
-        }
-        throw error;
-      }
-      if (result === 'conflict') return result;
-      this.bumpMutation();
-      await this.maintainTouchedGraphs(
-        touchedGraphs,
-        'rfc64AuthorCommitCasV1',
-        options,
-      );
       return result;
-    });
+    } };
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {
@@ -525,7 +407,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
-    return runLogicalStoreMutation(this.inner, 'deleteBySubjectPrefix', options, async options => {
+    return this.runLogicalMutation('deleteBySubjectPrefix', options, async options => {
       if (!this.enabled) {
         return this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
       }
@@ -542,11 +424,12 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   async flush(options?: QueryOptions): Promise<void> {
+    await this.mutations.drain();
     await this.inner.flush?.(options);
   }
 
-  async close(): Promise<void> {
-    await this.inner.close();
+  close(): Promise<void> {
+    return closeImmutableStoreMutations(this.mutations, this.inner);
   }
 
   private async ensureGraphSet(options?: QueryOptions): Promise<ReadonlySet<string>> {

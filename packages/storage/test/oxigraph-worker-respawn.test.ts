@@ -141,6 +141,22 @@ describe('OxigraphWorkerStore respawn after unexpected worker exit', () => {
     }
   });
 
+  it('invalidates captured barriers on real worker replacement and certifies reapplied writes', async () => {
+    const store = makeStore(path);
+    try {
+      await store.insert(quads(1)); await store.flush();
+      const old = store.commitment.capture();
+      await killWorker(store);
+      await store.countQuads('urn:test:g');
+      await expect(old()).rejects.toMatchObject({ code: 'OXIGRAPH_WORKER_COMMIT_OWNER_CHANGED' });
+      const fresh = store.commitment.capture();
+      await store.insert(quads(3, 'urn:test:reapplied')); await fresh();
+      const reopened = makeStore(path);
+      try { expect(await reopened.countQuads('urn:test:reapplied')).toBe(3); }
+      finally { await reopened.close(); }
+    } finally { await store.close(); }
+  }, 15_000); // Starts three real workers, including replacement and independent disk reopen.
+
   it('rejects an in-flight op at kill time with the retryable "restarted — retry" message', async () => {
     const store = makeStore(path);
     try {

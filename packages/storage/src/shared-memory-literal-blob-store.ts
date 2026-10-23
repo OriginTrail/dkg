@@ -1,7 +1,11 @@
+import { prepareImmutableMutation, closeImmutableStoreMutations, runImmutableMutation, runRfc64AuthorCommitCasMutation, assertImmutableMutationCapability, type ImmutableStorePreparation, type ImmutableStoreMutation, type PreparedMutation } from './immutable-store-preparation.js';
+import { DurableDirectoryPreparation } from './durable-content-addressed-file.js';
+import { persistFileDirectoryEntries } from './file-durability.js';
+import type { TripleStoreCommitCapability } from './persistence.js';
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { open, readFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { LiteralHydrationBudget, readLiteralBlobBounded } from './bounded-literal-hydration.js';
 import type {
   ConstructResult,
@@ -14,17 +18,16 @@ import type {
   TripleStore,
   TripleStoreDecorator,
 } from './triple-store.js';
-import { deleteByPatternWithoutCount } from './triple-store.js';
+import { deleteByPatternWithoutCount, runLogicalStoreMutation } from './triple-store.js';
+import { StoreWorkDrain } from './store-work-drain.js';
+import type { StoreOperation } from './store-operation-outcome.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
-import { assertSubjectAndInsertPayload } from './atomic-subject-insert.js';
 import type {
   Rfc64AuthorCommitCasInputV1,
   Rfc64AuthorCommitCasResultV1,
 } from './rfc64-author-commit-cas.js';
 import {
   mapRfc64AuthorCommitCasV1,
-  normalizeRfc64AuthorCommitCasV1,
-  sourceFromNormalizedRfc64AuthorCommitCasV1,
 } from './rfc64-author-commit-cas.js';
 import {
   ContentAddressedBlobSingleFlight,
@@ -48,7 +51,7 @@ export interface SharedMemoryLiteralBlobStoreOptions {
   thresholdBytes: number;
 }
 
-export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
+export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, ImmutableStorePreparation {
   get queryCancellation() {
     return this.inner.queryCancellation;
   }
@@ -58,11 +61,14 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   }
 
   readonly innerStore: TripleStore;
+  readonly commitment?: TripleStoreCommitCapability;
   readonly graphEnumerationVisibility;
   private readonly inner: TripleStore;
   private readonly blobDir: string;
   private readonly thresholdBytes: number;
   private readonly blobWrites: ContentAddressedBlobSingleFlight;
+  private readonly blobDirectory: DurableDirectoryPreparation;
+  private readonly blobWork = new StoreWorkDrain('Literal blob store is closing');
 
   constructor(inner: TripleStore, options: SharedMemoryLiteralBlobStoreOptions) {
     if (!options.blobDir?.trim()) {
@@ -73,17 +79,25 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     }
     this.inner = inner;
     this.innerStore = inner;
+    this.commitment = inner.commitment;
     this.graphEnumerationVisibility = inner.graphEnumerationVisibility?.bind(inner);
-    this.blobDir = options.blobDir;
+    // Match blobPath's lexical dot-segment handling before any filesystem work.
+    // Otherwise a symlink followed by '..' can prepare/sync a different parent.
+    this.blobDir = resolve(options.blobDir);
     this.thresholdBytes = options.thresholdBytes;
+    this.blobDirectory = new DurableDirectoryPreparation(this.blobDir);
     this.blobWrites = new ContentAddressedBlobSingleFlight({
       createOrVerify: (hash, term) => this.writeBlobFile(hash, term),
     });
   }
 
+  runLogicalMutation<T>(operation: StoreOperation, options: QueryOptions | undefined,
+    work: (options: QueryOptions | undefined) => Promise<T>): Promise<T> {
+    return this.blobWork.run(() => runLogicalStoreMutation(this.inner, operation, options, work));
+  }
+
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
-    if (quads.length === 0) return this.inner.insert(quads, options);
-    return this.inner.insert(await this.externalizeQuads(quads), options);
+    return runImmutableMutation(this, { operation: 'insert', quads }, options);
   }
 
   async delete(quads: Quad[], options?: QueryOptions): Promise<void> {
@@ -118,110 +132,74 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     }
   }
 
-  async replaceGraph(
-    graphUri: string,
-    quads: Quad[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    if (typeof this.inner.replaceGraph !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError(
-        'replaceGraph',
-        'SharedMemoryLiteralBlobStore',
-      );
-    }
-    await this.inner.replaceGraph(graphUri, await this.externalizeQuads(quads), options);
+  async replaceGraph(graphUri: string, quads: Quad[], options?: QueryOptions): Promise<void> {
+    return runImmutableMutation(this, { operation: 'replaceGraph', graphUri, quads }, options);
   }
 
   async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
-    if (!this.inner.replaceAssetGroup) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'group-decorator');
-    const replaced = await Promise.all(assets.map(async asset => {
-      const [graphQuads, metadataQuads] = await Promise.all([
-        this.externalizeQuads(asset.graphQuads),
-        this.externalizeQuads(asset.metadataQuads),
-      ]);
-      return { ...asset, graphQuads, metadataQuads };
-    }));
-    await this.inner.replaceAssetGroup(replaced, options);
+    return runImmutableMutation(this, { operation: 'replaceAssetGroup', assets }, options);
   }
 
-  async replaceGraphAndSubject(
-    graphUri: string,
-    graphQuads: Quad[],
-    metaGraphUri: string,
-    metadataSubject: string,
-    metadataQuads: Quad[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    if (typeof this.inner.replaceGraphAndSubject !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError(
-        'replaceGraphAndSubject',
-        'SharedMemoryLiteralBlobStore',
-      );
-    }
-    const [externalizedGraph, externalizedMetadata] = await Promise.all([
-      this.externalizeQuads(graphQuads), this.externalizeQuads(metadataQuads),
-    ]);
-    await this.inner.replaceGraphAndSubject(graphUri, externalizedGraph,
-      metaGraphUri, metadataSubject, externalizedMetadata, options);
+  async replaceGraphAndSubject(graphUri: string, graphQuads: Quad[], metaGraphUri: string,
+    metadataSubject: string, metadataQuads: Quad[], options?: QueryOptions): Promise<void> {
+    return runImmutableMutation(this, { operation: 'replaceGraphAndSubject', graphUri, graphQuads,
+      metaGraphUri, metadataSubject, metadataQuads }, options);
   }
 
-  async replaceSubject(
-    graphUri: string,
-    subject: string,
-    quads: Quad[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    if (typeof this.inner.replaceSubject !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError(
-        'replaceSubject',
-        'SharedMemoryLiteralBlobStore',
-      );
-    }
-    // Externalize oversized literals before the replace, exactly like insert() /
-    // replaceGraph() — so a large job payload is stored as a blob ref rather than
-    // inline, keeping the atomic path byte-consistent with the fallback.
-    await this.inner.replaceSubject(graphUri, subject, await this.externalizeQuads(quads), options);
+  async replaceSubject(graphUri: string, subject: string, quads: Quad[], options?: QueryOptions): Promise<void> {
+    return runImmutableMutation(this, { operation: 'replaceSubject', graphUri, subject, quads }, options);
   }
 
-  async replaceSubjectAndInsert(
-    graphUri: string, subject: string, replacementQuads: Quad[], insertQuads: Quad[],
-    options?: QueryOptions,
-  ): Promise<void> {
-    assertSubjectAndInsertPayload(graphUri, subject, replacementQuads, insertQuads);
-    if (typeof this.inner.replaceSubjectAndInsert !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError('replaceSubjectAndInsert', 'SharedMemoryLiteralBlobStore');
-    }
-    const externalized = await this.externalizeQuads([...replacementQuads, ...insertQuads]);
-    await this.inner.replaceSubjectAndInsert(
-      graphUri, subject, externalized.slice(0, replacementQuads.length),
-      externalized.slice(replacementQuads.length), options,
-    );
+  async replaceSubjectAndInsert(graphUri: string, subject: string, replacementQuads: Quad[], insertQuads: Quad[],
+    options?: QueryOptions): Promise<void> {
+    return runImmutableMutation(this, { operation: 'replaceSubjectAndInsert', graphUri, subject, replacementQuads, insertQuads }, options);
   }
 
-  async rfc64AuthorCommitCasV1(
-    input: Rfc64AuthorCommitCasInputV1,
-    options?: QueryOptions,
-  ): Promise<Rfc64AuthorCommitCasResultV1> {
-    if (typeof this.inner.rfc64AuthorCommitCasV1 !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError(
-        'rfc64AuthorCommitCasV1',
-        'SharedMemoryLiteralBlobStore',
-      );
+  async rfc64AuthorCommitCasV1(input: Rfc64AuthorCommitCasInputV1, options?: QueryOptions): Promise<Rfc64AuthorCommitCasResultV1> {
+    return runRfc64AuthorCommitCasMutation(this, input, options);
+  }
+
+  async prepareImmutableMutation<M extends ImmutableStoreMutation>(mutation: M): Promise<PreparedMutation<M>> {
+    assertImmutableMutationCapability(this.inner, mutation.operation);
+    let prepared: M;
+    switch (mutation.operation) {
+      case 'insert': case 'replaceGraph': case 'replaceSubject':
+        prepared = { ...mutation, quads: await this.externalizeQuads(mutation.quads) }; break;
+      case 'replaceAssetGroup':
+        prepared = { ...mutation, assets: await Promise.all(mutation.assets.map(async asset => {
+          const [graphQuads, metadataQuads] = await Promise.all([
+            this.externalizeQuads(asset.graphQuads), this.externalizeQuads(asset.metadataQuads),
+          ]);
+          return { ...asset, graphQuads, metadataQuads };
+        })) }; break;
+      case 'replaceGraphAndSubject': {
+        const [graphQuads, metadataQuads] = await Promise.all([
+          this.externalizeQuads(mutation.graphQuads), this.externalizeQuads(mutation.metadataQuads),
+        ]);
+        prepared = { ...mutation, graphQuads, metadataQuads }; break;
+      }
+      case 'replaceSubjectAndInsert': {
+        const rows = await this.externalizeQuads([...mutation.replacementQuads, ...mutation.insertQuads]);
+        prepared = { ...mutation, replacementQuads: rows.slice(0, mutation.replacementQuads.length),
+          insertQuads: rows.slice(mutation.replacementQuads.length) }; break;
+      }
+      case 'rfc64AuthorCommitCasV1': {
+        const mapped = await mapRfc64AuthorCommitCasV1(mutation.plan, {
+          mapQuad: quad => this.externalizeInsertQuad(quad),
+          mapObject: (object, context) => context.kind === 'expected'
+            ? this.translateGuardObject(context.graphUri, object) : this.externalizeScalarObject(context.graphUri, object!),
+        });
+        prepared = { ...mutation, plan: mapped }; break;
+      }
     }
-    // Normalize first so an incomplete closed manifest cannot create blobs.
-    // The manifest is also the sole source for decorator traversal: adding a
-    // semantic role to the protocol plan cannot silently bypass blob mapping.
-    const manifest = normalizeRfc64AuthorCommitCasV1(input);
-    const mappedInput = await mapRfc64AuthorCommitCasV1(manifest, {
-      mapQuad: (quad) => this.externalizeInsertQuad(quad),
-      mapObject: (object, context) => context.kind === 'expected'
-        ? this.translateGuardObject(context.graphUri, object)
-        : this.externalizeScalarObject(context.graphUri, object!),
-    });
-    return this.inner.rfc64AuthorCommitCasV1(
-      sourceFromNormalizedRfc64AuthorCommitCasV1(mappedInput),
-      options,
-    );
+    return prepareImmutableMutation(this.inner, prepared);
+  }
+
+  async atomicUpdate(sparql: string, options?: UpdateOptions): Promise<void> {
+    if (typeof this.inner.atomicUpdate !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError('atomicUpdate', 'SharedMemoryLiteralBlobStore');
+    }
+    return this.inner.atomicUpdate(sparql, options);
   }
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
@@ -282,11 +260,12 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   }
 
   async flush(options?: QueryOptions): Promise<void> {
+    await this.blobWork.drain();
     await this.inner.flush?.(options);
   }
 
-  async close(): Promise<void> {
-    return this.inner.close();
+  close(): Promise<void> {
+    return closeImmutableStoreMutations(this.blobWork, this.inner);
   }
 
   private async externalizeQuads(quads: readonly Quad[]): Promise<Quad[]> {
@@ -401,20 +380,24 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   }
 
   private async writeBlobFile(hash: string, term: string): Promise<void> {
-    await mkdir(this.blobDir, { recursive: true });
+    await this.blobDirectory.prepare();
     const path = this.blobPath(hash);
 
+    let file;
     try {
-      await writeFile(path, term, { encoding: 'utf8', flag: 'wx' });
+      file = await open(path, 'wx');
     } catch (err) {
-      if (isNodeError(err, 'EEXIST')) {
-        await this.readBlob(hash);
-        return;
-      }
-      throw err;
+      if (!isNodeError(err, 'EEXIST')) throw err;
+      await this.readBlob(hash);
+      file = await open(path, 'r+');
     }
-
-    await this.readBlob(hash);
+    try {
+      // Re-submit even matching existing bytes after a failed/unknown preparation.
+      // Sync the writer itself: a newly opened descriptor can miss its old EIO.
+      await file.writeFile(term, 'utf8');
+      await file.sync();
+    } finally { await file.close(); }
+    await persistFileDirectoryEntries(path);
   }
 
   private async readBlob(hash: string, constraints?: { maxBytes?: number; signal?: AbortSignal }): Promise<string> {
