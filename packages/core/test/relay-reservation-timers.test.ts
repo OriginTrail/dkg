@@ -178,11 +178,13 @@ describe('relay reservation timer repair', () => {
     const peer = await newPeer();
     store.reserve(peer, addr);
     const original = store.reservations.get(peer)!;
+    // Saved before the repair: the repair would replace it on the same object.
+    const originalSignal = original.signal;
     original.expiry = new Date(0);
     store.reservationTtl = undefined;
 
     repairRelayReservationTimers(relay, quiet);
-    expect(store.reservations.get(peer)!.signal).toBe(original.signal);
+    expect(store.reservations.get(peer)!.signal).toBe(originalSignal);
     store.clear();
   });
 
