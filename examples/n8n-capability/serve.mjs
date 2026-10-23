@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { DashboardDB, OperationTracker } from '../../packages/node-ui/dist/index.js';
 import { createProtocolStores } from '../../packages/cli/dist/daemon/protocol-persistence.js';
@@ -16,6 +16,7 @@ import { handleSemanticRuntimeRoutes } from '../../packages/cli/dist/daemon/rout
 import { startConfiguredSemanticRuntime } from '../../packages/cli/dist/semantic-runtime.js';
 import { programSource } from './workflow.mjs';
 import { createCapabilityBridge } from './bridge.mjs';
+import { csvProgramSource } from './csv-workflows.mjs';
 
 const require = createRequire(new URL('../../packages/cli/package.json', import.meta.url));
 const { Wallet } = require('ethers');
@@ -23,6 +24,9 @@ const state = resolve(process.argv[2] ?? '');
 if (!process.argv[2]) throw new Error('Supply the state directory created by setup-n8n.mjs');
 const { grant, ...connection } = JSON.parse(readFileSync(join(state, 'n8n.json'), 'utf8'));
 const graphId = 'n8n-capability-poc', kaRef = 'urn:demo:n8n:normalize-text:1';
+const csvFile = join(state, 'csv-components.json');
+const csv = existsSync(csvFile) ? JSON.parse(readFileSync(csvFile, 'utf8')) : { components: [] };
+const definitions = [{ kind: 'text', kaRef, name: 'Normalize text', enabled: true, grant }, ...csv.components];
 const nodeUrl = 'http://127.0.0.1:4631';
 mkdirSync(join(state, 'dkg'), { recursive: true, mode: 0o700 });
 const dashDb = new DashboardDB({ dataDir: join(state, 'dkg') });
@@ -44,15 +48,16 @@ try {
   if (!await agent.contextGraphExists(graphId)) await agent.createContextGraph({ id: graphId, name: 'n8n capability PoC',
     private: true, accessPolicy: 1, allowedAgents: [owner], callerAgentAddress: owner });
   const semanticRuntime = { enabled: true, startupTimeoutMs: 30000, watchdogMs: 1000,
-    n8n: { ...connection, workflows: [{ contextGraphId: graphId, executorAgentAddress: owner,
-      workflowId: grant.workflowId, workflowSha256: grant.workflowSha256 }] } };
+    n8n: { ...connection, workflows: definitions.filter(item => item.enabled).map(item => ({ contextGraphId: graphId, executorAgentAddress: owner,
+      workflowId: item.grant.workflowId, workflowSha256: item.grant.workflowSha256 })) } };
   runtime = await startConfiguredSemanticRuntime(semanticRuntime, { dataDirectory: join(state, 'runtime'), log: () => {} });
   const config = { name: 'n8n-ka-poc', apiPort: 4631, listenPort: 0, nodeRole: 'edge', semanticRuntime };
   const Database = require('better-sqlite3');
   nonceDb = new Database(join(state, 'http-nonces.db'));
   const nonces = new SqliteAgentHttpNonceStore(nonceDb);
   const client = new GraphComputer({ nodeUrl, peerId: agent.peerId, signer, retries: 0 });
-  const bridge = createCapabilityBridge({ agent, client, graphId, owner, config: semanticRuntime });
+  const bridge = createCapabilityBridge({ agent, client, graphId, owner, config: semanticRuntime,
+    definitions, exportTokenFile: csv.exportTokenFile });
   server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', nodeUrl), path = url.pathname;
@@ -70,25 +75,30 @@ try {
       res.end(JSON.stringify({ code: error.code ?? 'POC_REQUEST_FAILED', error: error.message })); } }
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(4631, '127.0.0.1', resolve); });
-  let program;
-  try { program = await client.programs.getSource({ graphId, programIri: kaRef, programLayer: 'wm' }); }
-  catch (error) { if (error.code !== 'PROGRAM_NOT_FOUND') throw error; }
-  if (program) program = { graphId, programIri: kaRef, programLayer: 'wm', authorAgentAddress: program.authorAgentAddress, sourceHash: program.sourceHash };
-  else program = await client.programs.upload({ graphId, programIri: kaRef, name: 'normalize-text-v1', label: 'Normalize text', language: 'typescript-v1',
-    source: programSource, version: '1.0.0', requiredTools: [grant.toolIri], requestedPermissions: { graphId, n8n: grant } });
-  let approval;
-  try { approval = await client.programs.getApproval({ graphId, operationIri: kaRef }); }
-  catch (error) { if (error.status !== 404) throw error; }
-  if (!approval) await client.programs.approve({ graphId, operationIri: kaRef, program, allowedCallers: [owner], n8n: grant,
-    typescript: { children: [], maxCalls: 1, maxConcurrency: 1, timeoutMs: 30000 } });
+  for (const definition of definitions) {
+    const programIri = definition.kaRef;
+    let program;
+    try { program = await client.programs.getSource({ graphId, programIri, programLayer: 'wm' }); }
+    catch (error) { if (error.code !== 'PROGRAM_NOT_FOUND') throw error; }
+    if (program) program = { graphId, programIri, programLayer: 'wm', authorAgentAddress: program.authorAgentAddress, sourceHash: program.sourceHash };
+    else program = await client.programs.upload({ graphId, programIri, name: definition.kind + '-v1', label: definition.name, language: 'typescript-v1',
+      source: definition.kind === 'text' ? programSource : csvProgramSource(definition.kind), version: '1.0.0', requiredTools: [definition.grant.toolIri], requestedPermissions: { graphId, n8n: definition.grant } });
+    if (!definition.enabled) continue;
+    let approval;
+    try { approval = await client.programs.getApproval({ graphId, operationIri: programIri }); }
+    catch (error) { if (error.status !== 404) throw error; }
+    if (!approval) await client.programs.approve({ graphId, operationIri: programIri, program, allowedCallers: [owner], n8n: definition.grant,
+      typescript: { children: [], maxCalls: 1, maxConcurrency: 1, timeoutMs: 30000 } });
+  }
   const keyFile = join(state, 'caller-key');
   writeFileSync(keyFile, signer.privateKey, { mode: 0o600 });
   writeFileSync(join(state, 'client.json'), JSON.stringify({ nodeUrl, peerId: agent.peerId, graphId, kaRef, keyFile }, null, 2), { mode: 0o600 });
   const capabilities = await bridge.list();
   if (!capabilities.length) throw new Error('Capability KA is missing from DKG query results');
   const invocationId = randomUUID();
-  const evidence = await bridge.invoke(capabilities[0], { text: '  hello dkg  ' }, invocationId);
-  const replay = await bridge.invoke(capabilities[0], { text: '  hello dkg  ' }, invocationId);
+  const normalize = capabilities.find(item => item.kaRef === kaRef);
+  const evidence = await bridge.invoke(normalize, { text: '  hello dkg  ' }, invocationId);
+  const replay = await bridge.invoke(normalize, { text: '  hello dkg  ' }, invocationId);
   if (JSON.stringify(evidence) !== JSON.stringify(replay)) throw new Error('Completed invocation did not replay its receipt');
   writeFileSync(join(state, 'evidence.json'), JSON.stringify({ ...evidence, completedReplayVerified: true,
     chain: 'MockChainAdapter; no on-chain transactions', nodeUrl }, null, 2));

@@ -26,7 +26,7 @@ await assert.rejects(client.programs.invoke({ ...operation, inputs: [{ text: 12 
 await assert.rejects(clientFor(Wallet.createRandom()).programs.invoke({ ...operation, inputs: [{ text: 'denied' }] }), error => error.status === 403);
 const prefix = connection.nodeUrl + '/spike/ka/accounts/account-a/capabilities';
 const inventory = await fetch(prefix, { headers: { authorization: 'Bearer l1-viewer-a' } });
-const catalog = await inventory.json(); assert.equal(catalog.canInvoke, false); assert.equal(catalog.capabilities[0].kaRef, connection.kaRef);
+const catalog = await inventory.json(); assert.equal(catalog.canInvoke, false); assert.ok(catalog.capabilities.some(item => item.kaRef === connection.kaRef));
 const input = { kaRef: connection.kaRef, sourceHash: evidence.sourceHash, input: { text: 'denied' }, invocationId: randomUUID() };
 const viewer = await fetch(prefix + '/invoke', { method: 'POST', headers: { authorization: 'Bearer l1-viewer-a', 'content-type': 'application/json' }, body: JSON.stringify(input) });
 assert.equal(viewer.status, 403);

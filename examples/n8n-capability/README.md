@@ -64,6 +64,76 @@ for a completed retry. Keep the UUID and input together.
 `invoke_program`, and records parent/child execution references plus the actual
 n8n result `COMPOSED DKG`. Its completed retry returns the same receipt.
 
+## Three CSV component KAs
+
+To extend this same owned instance, stop the example DKG server and run:
+
+```sh
+node examples/n8n-capability/setup-csv.mjs /tmp/n8n-ka-state
+node examples/n8n-capability/serve.mjs /tmp/n8n-ka-state
+```
+
+This installs three independent Program KAs with pinned n8n workflow definitions:
+
+| KA | Real n8n nodes | Input and output |
+| --- | --- | --- |
+| Parse CSV | Convert to File → Extract From File | UTF-8 CSV → ordered columns and rows |
+| Map fields | Edit Fields | Table plus source indexes/output names → selected, renamed table |
+| Export to Google Sheets | Google Sheets (create) → Split Out → Edit Fields → Google Sheets (append) | Mapped table/title → new spreadsheet ID and URL |
+
+The parser accepts quoted fields, embedded newlines and BOM. This PoC limits CSV
+input to 2 KiB, 8 columns, 20 data rows and 128 characters per cell. Invalid CSV
+returns a confirmed `ok: false` result, so the user can correct it. Mapping rejects
+duplicate/unsafe output names and mismatched row widths before dispatch. Google
+Sheets values use `RAW` so text is not interpreted as formulas.
+
+In nOS, select **CSV pipeline** under **Invoke a KA**. Upload or paste CSV, parse
+it, select/rename columns, apply the mapping, preview the rows and download the
+mapped CSV. Each step has its own KA reference, revision and execution receipt.
+
+```sh
+node examples/n8n-capability/verify-csv.mjs /tmp/n8n-ka-state
+node examples/n8n-capability/compose-csv.mjs /tmp/n8n-ka-state
+```
+
+Verification uses actual n8n execution data and private DKG receipt readback. It
+checks quoted multiline CSV/BOM, column mapping, malformed input, duplicate names
+and completed retries without another n8n execution. The composition example
+invokes the parser and mapper KAs from an approved parent Program using
+`invoke_program`. Prepared invocation identities are saved before dispatch;
+retain them for reconciliation if a call fails.
+
+### Connect Google Sheets
+
+Until Google is connected, its workflow remains an inactive draft and its KA is
+listed as unavailable. In the local n8n editor, connect an operator-owned **Google
+Sheets OAuth2 API** credential. A Google connection in ChatGPT cannot be reused
+as an n8n credential. Stop the example DKG server, then run setup with that
+existing credential's ID and restart the server:
+
+```sh
+node examples/n8n-capability/setup-csv.mjs /tmp/n8n-ka-state EXISTING_CREDENTIAL_ID
+node examples/n8n-capability/serve.mjs /tmp/n8n-ka-state
+```
+
+Setup publishes a new pinned Google export workflow and creates a private
+`google-export-token` file in the state directory. Enter its value only into the
+operator export key field in the console. The public kit login cannot authorize
+Google writes. The key is sent as a header; it is excluded from KA inputs,
+receipts and browser storage. n8n retains the Google OAuth token itself.
+
+To intentionally create one new Google Sheet and verify its completed replay:
+
+```sh
+node examples/n8n-capability/verify-csv.mjs /tmp/n8n-ka-state --export
+```
+
+This verification reuses its saved export invocation; it does not blindly create
+a second Sheet on rerun. A lost or partial Google response needs inspection: the
+create and append nodes are separate external effects inside one n8n workflow.
+Google creation and writes are only proven after running against a connected
+account; saving the workflow alone does not prove them.
+
 Verification checks replay without an additional n8n execution, invalid input,
 unauthorized signed callers, viewer/foreign-account refusal and stale KA pins.
 `--check-workflow-change` temporarily edits the owned fixture, proves dispatch is
