@@ -4,9 +4,12 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { resolveWorkspaceAgentRecipientKeys } from '@origintrail-official/dkg-publisher';
 import {
   DKGEvent,
+  DKG_ONTOLOGY,
   PROTOCOL_JOIN_REQUEST,
+  SYSTEM_CONTEXT_GRAPHS,
   WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
   computeWorkspaceAgentEncryptionKeyProofPayload,
+  contextGraphDataGraphUri,
   encodeWorkspaceEncryptionKey,
   generateWorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
@@ -955,6 +958,23 @@ describe('context graph open enrollment policy', () => {
     expect(registered).toHaveBeenCalled();
     expect(await agent.getJoinRequestStatus(contextGraphId, joiner.agentAddress)).toBe('approved');
     expect(await agent.listPendingJoinRequests(contextGraphId)).toEqual([]);
+
+    // Only the graph's own metadata names its members: an agent that the
+    // replicated system graphs list as allowed still waits for the approver.
+    const listedElsewhere = await agent.registerAgent('listed-elsewhere', { framework: 'test' });
+    await (agent as any).store.insert([SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, SYSTEM_CONTEXT_GRAPHS.AGENTS].map((systemGraph) => ({
+      subject: contextGraphDataGraphUri(contextGraphId),
+      predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+      object: JSON.stringify(listedElsewhere.agentAddress),
+      graph: contextGraphDataGraphUri(systemGraph),
+    })));
+    (agent as any).contextGraphMetaProjection.markDirty(contextGraphId);
+    expect((await agent.getCgMeta(contextGraphId)).allowedAgents.map((address: string) => address.toLowerCase()))
+      .toContain(listedElsewhere.agentAddress.toLowerCase());
+    const request = await agent.signJoinRequest(contextGraphId, listedElsewhere.agentAddress);
+    await expect(agent.processIncomingJoinRequest(contextGraphId, request, listedElsewhere.name, agent.peerId))
+      .resolves.toMatchObject({ status: 'pending' });
+    expect(await agent.getJoinRequestStatus(contextGraphId, listedElsewhere.agentAddress)).toBe('pending');
   }, 30_000);
 
   it('requires a carrier-matched replay to cache keys before private manual approval', async () => {

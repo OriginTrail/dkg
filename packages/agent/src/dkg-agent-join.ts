@@ -1607,7 +1607,8 @@ export class JoinRequestMethods extends DKGAgentBase {
    * Return a just-applied decision to pending when the notification handler
    * could not commit its downstream durable state. The generation/status
    * guard prevents compensation from overwriting a newer request or a
-   * concurrent conflicting decision.
+   * concurrent conflicting decision; with `curatorPeerId`, a decision of
+   * another curator is left alone too. Resolves whether it changed the state.
    */
   async restoreRequesterJoinDecisionAfterFailedApply(
     this: DKGAgent,
@@ -1615,21 +1616,24 @@ export class JoinRequestMethods extends DKGAgentBase {
     agentAddress: string,
     requestGeneration: string,
     appliedStatus: 'approved' | 'rejected',
-  ): Promise<void> {
+    curatorPeerId?: string,
+  ): Promise<boolean> {
     const key = requesterJoinStateKey(contextGraphId, agentAddress);
-    await withRequesterJoinStateLock(this, key, async () => {
+    return withRequesterJoinStateLock(this, key, async () => {
       const current = await this.readRequesterJoinRequestState(contextGraphId, agentAddress);
       if (
         !current ||
         current.requestGeneration !== requestGeneration ||
-        current.status !== appliedStatus
+        current.status !== appliedStatus ||
+        (curatorPeerId !== undefined && current.curatorPeerId !== curatorPeerId)
       ) {
-        return;
+        return false;
       }
       await this.writeRequesterJoinRequestState(contextGraphId, agentAddress, {
         ...current,
         status: 'pending',
       });
+      return true;
     });
   }
 

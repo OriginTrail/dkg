@@ -44,6 +44,27 @@ interface MemberInternals {
 const internalsOf = (agent: DKGAgent) => agent as unknown as MemberInternals;
 const generation = (digit: string) => `0x${digit.repeat(64)}`;
 
+/** The curator's member list arriving in the graph's own `_meta`: `member` allowed, delegated to `peerId`. */
+async function memberListArrives(
+  agent: DKGAgent,
+  member: string,
+  delegation: { readonly peerId: string; readonly expiresAtMs?: number } = { peerId: '12D3KooWPendingApprovalMember' },
+): Promise<void> {
+  const subject = contextGraphDataGraphUri(CONTEXT_GRAPH);
+  const graph = contextGraphMetaGraphUri(CONTEXT_GRAPH);
+  const delegationSubject = `did:dkg:agent-delegation:${CONTEXT_GRAPH}:${member}`;
+  const literal = (value: string) => JSON.stringify(value);
+  await (agent as unknown as { store: { insert(quads: unknown[]): Promise<void> } }).store.insert([
+    { subject, predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, object: literal(member), graph },
+    { subject: delegationSubject, predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT, object: literal(member), graph },
+    { subject: delegationSubject, predicate: DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT, object: literal(String(Date.now() - 120_000)), graph },
+    { subject: delegationSubject, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: literal(delegation.peerId), graph },
+    ...(delegation.expiresAtMs === undefined ? [] : [
+      { subject: delegationSubject, predicate: DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT, object: literal(String(delegation.expiresAtMs)), graph },
+    ]),
+  ]);
+}
+
 /** A root `_meta` snapshot with the given definition and allowlist. */
 function snapshot(
   accessPolicy: 'public' | 'private',
@@ -144,7 +165,7 @@ describe('a join approval whose member list is pending (#3421)', () => {
     it.each([
       {
         case: 'the member list arrived',
-        arrange: (m: Awaited<ReturnType<typeof approvedMember>>) => { m.confirmed.mockResolvedValue(true); },
+        arrange: (m: Awaited<ReturnType<typeof approvedMember>>) => memberListArrives(m.member, m.address),
       },
       {
         case: 'no approval binding is held',
@@ -170,7 +191,7 @@ describe('a join approval whose member list is pending (#3421)', () => {
       },
     ])('keeps the plain refusal when $case', async ({ arrange }) => {
       const observed = await approvedMember();
-      arrange(observed);
+      await arrange(observed);
 
       const refusal = await refuseUnlistedWorkspaceSigner(observed.member, CONTEXT_GRAPH);
 
@@ -237,10 +258,10 @@ describe('a join approval whose member list is pending (#3421)', () => {
         },
       },
       {
-        case: 'the confirmation cannot be read',
+        case: 'the graph\'s metadata cannot be read',
         curator: CURATOR_PEER,
         arrange: (member: DKGAgent) => {
-          vi.spyOn(member, 'hasConfirmedApprovedMemberMetaState').mockRejectedValue(new Error('store fault'));
+          vi.spyOn(member, 'getOwnCgMetaFacts').mockRejectedValue(new Error('store fault'));
         },
       },
     ])('goes to the curator when $case', async ({ curator, arrange }) => {
@@ -270,6 +291,36 @@ describe('a join approval whose member list is pending (#3421)', () => {
     });
   });
 
+  describe('a member the graph\'s own metadata names already', () => {
+    it('sends its join request to the curator, to renew a delegation that expired', async () => {
+      // Unconfirmed: the member list names the member, and its delegation in it has expired.
+      const { member, address, recover } = await approvedMember({ metadataConfirmed: false });
+      await memberListArrives(member, address, { peerId: '12D3KooWPendingApprovalMember', expiresAtMs: Date.now() - 60_000 });
+      const send = vi.spyOn(member, 'forwardJoinRequestOnce').mockResolvedValue({ delivered: 1, errors: [], alreadyMember: true });
+      const delegation = { agentAddress: address } as never;
+
+      await expect(member.forwardJoinRequest(CONTEXT_GRAPH, delegation, undefined, CURATOR_PEER))
+        .resolves.toEqual({ delivered: 1, errors: [], alreadyMember: true });
+
+      expect(send).toHaveBeenCalledWith(CONTEXT_GRAPH, delegation, undefined, CURATOR_PEER);
+      expect(recover).not.toHaveBeenCalled();
+      await expect(readApprovedMemberMetadataPending(member, CONTEXT_GRAPH)).resolves.toBeUndefined();
+    });
+
+    it.each(['participantAgent', 'revokedAgent'] as const)('is not pending when it names the member as %s', async (role) => {
+      const { member, address } = await approvedMember();
+      const predicate = role === 'participantAgent' ? DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT : DKG_ONTOLOGY.DKG_REVOKED_AGENT;
+      await (member as unknown as { store: { insert(quads: unknown[]): Promise<void> } }).store.insert([{
+        subject: contextGraphDataGraphUri(CONTEXT_GRAPH),
+        predicate,
+        object: JSON.stringify(address),
+        graph: contextGraphMetaGraphUri(CONTEXT_GRAPH),
+      }]);
+
+      await expect(readApprovedMemberMetadataPending(member, CONTEXT_GRAPH)).resolves.toBeUndefined();
+    });
+  });
+
   describe('the listing row of the caller', () => {
     it('shows the pending approval on a row that does not involve the caller yet', async () => {
       const { member, address } = await approvedMember();
@@ -281,7 +332,7 @@ describe('a join approval whose member list is pending (#3421)', () => {
     });
 
     it('is what the context-graph listing shows the caller', async () => {
-      const { member, address, confirmed } = await approvedMember();
+      const { member, address } = await approvedMember();
       // The curator's public declaration, held before the join; its allowlist
       // does not name the member yet.
       await (member as unknown as { store: { insert(quads: unknown[]): Promise<void> } }).store
@@ -291,7 +342,7 @@ describe('a join approval whose member list is pending (#3421)', () => {
         .find((row) => row.id === CONTEXT_GRAPH);
       expect(pendingRow).toMatchObject({ callerInvolved: false, joinState: 'approved-metadata-pending' });
 
-      confirmed.mockResolvedValue(true);
+      await memberListArrives(member, address);
       (member as unknown as { invalidateListContextGraphsCache(): void }).invalidateListContextGraphsCache();
       const row = (await member.listContextGraphs({ callerAgentAddress: address }))
         .find((candidate) => candidate.id === CONTEXT_GRAPH);
@@ -300,12 +351,13 @@ describe('a join approval whose member list is pending (#3421)', () => {
     });
 
     it('leaves a row alone that involves the caller, or whose state cannot be read', async () => {
-      const { member, address, resolveAcceptance } = await approvedMember();
+      const { member, address } = await approvedMember();
+      const ownFacts = vi.spyOn(member, 'getOwnCgMetaFacts');
       const involved = { id: CONTEXT_GRAPH, callerInvolved: true };
       await expect(withCallerJoinState(member, involved, address)).resolves.toBe(involved);
-      expect(resolveAcceptance).not.toHaveBeenCalled();
+      expect(ownFacts).not.toHaveBeenCalled();
 
-      resolveAcceptance.mockRejectedValue(new Error('chain fault'));
+      ownFacts.mockRejectedValue(new Error('store fault'));
       const row = { id: CONTEXT_GRAPH, callerInvolved: false };
       await expect(withCallerJoinState(member, row, address)).resolves.toBe(row);
     });
@@ -381,6 +433,23 @@ describe('a join approval whose member list is pending (#3421)', () => {
       await expect(member.readRequesterJoinRequestState(CONTEXT_GRAPH, address)).resolves.toMatchObject({
         status: 'approved',
         requestGeneration: generation('2'),
+      });
+      expect(internalsOf(member).localApprovedAgentByCG.get(CONTEXT_GRAPH)).toBe(address);
+    });
+
+    it('leaves another curator\'s approval of the same request in place', async () => {
+      const { member, address, acceptance } = await approvedMember();
+      const settle = await watchCuratorSnapshotForApprovedMember(member, CONTEXT_GRAPH, CURATOR_PEER, acceptance);
+      // The same signed request went to another curator, which approved it.
+      await member.setRequesterJoinRequestPending(CONTEXT_GRAPH, address, generation('1'), OTHER_CURATOR_PEER);
+      await member.applyRequesterJoinDecision(CONTEXT_GRAPH, address, generation('1'), 'approved', OTHER_CURATOR_PEER);
+
+      await settle!(snapshot('public', [CURATOR_AGENT]));
+
+      await expect(member.readRequesterJoinRequestState(CONTEXT_GRAPH, address)).resolves.toMatchObject({
+        status: 'approved',
+        requestGeneration: generation('1'),
+        curatorPeerId: OTHER_CURATOR_PEER,
       });
       expect(internalsOf(member).localApprovedAgentByCG.get(CONTEXT_GRAPH)).toBe(address);
     });

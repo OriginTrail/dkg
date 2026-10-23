@@ -7,8 +7,10 @@
  * After a curator approves a join it tells the member, and the member fetches
  * the graph's metadata from the curator: the allowlist that names the member
  * and lets it sign shared-memory writes. A curator that is reachable only over
- * short-lived connections can need many attempts to serve it. Until it
- * arrives, the node treats the approval as pending, not as absent:
+ * short-lived connections can need many attempts to serve it. Until the
+ * graph's own metadata names the member, the node treats the approval as
+ * pending, not as absent (once it names the member, a delegation that needs
+ * renewing is the curator's to renew, and a join request goes to it):
  *  - a write is refused with a retryable authority wait instead of "no allowed
  *    signing key", so the share is tried again instead of being lost;
  *  - a new join request of the same agent to the same curator is answered
@@ -57,7 +59,13 @@ interface ApprovedMemberMetadataAgent {
     agentAddress: string,
     requestGeneration: string,
     appliedStatus: 'approved',
-  ): Promise<void>;
+    curatorPeerId: string,
+  ): Promise<boolean>;
+  getOwnCgMetaFacts(contextGraphId: string): Promise<{
+    readonly allowedAgents: readonly string[];
+    readonly participantAgents: readonly string[];
+    readonly revokedAgents: readonly string[];
+  }>;
   resolveApprovedMemberAcceptance(contextGraphId: string): Promise<ApprovedMemberAcceptance | undefined>;
   hasConfirmedApprovedMemberMetaState(
     contextGraphId: string,
@@ -91,10 +99,25 @@ export async function isApprovedMemberMetadataConfirmed(
 }
 
 /**
+ * Whether the graph's own metadata names `agentAddress` in its member list, as
+ * allowed, participant or revoked: the curator's list has arrived, whatever
+ * state the member's delegation in it is in.
+ */
+async function ownMetadataNamesMember(
+  agent: ApprovedMemberMetadataAgent,
+  contextGraphId: string,
+  agentAddress: string,
+): Promise<boolean> {
+  const facts = await agent.getOwnCgMetaFacts(contextGraphId);
+  return [facts.allowedAgents, facts.participantAgents, facts.revokedAgents]
+    .some((agents) => agents.some((listed) => listed.toLowerCase() === agentAddress));
+}
+
+/**
  * The approval of `contextGraphId` that waits for its member list: the node's
  * approved agent (`agentAddress`, when given, must be that agent), a durable
- * approval of its request, and local metadata that does not prove the member
- * yet. `undefined` otherwise. A read that fails rejects.
+ * approval of its request, and the graph's own metadata that does not name the
+ * member yet. `undefined` otherwise. A read that fails rejects.
  */
 export async function readApprovedMemberMetadataPending(
   agentObject: object,
@@ -107,7 +130,7 @@ export async function readApprovedMemberMetadataPending(
   if (agentAddress !== undefined && agentAddress.toLowerCase() !== approved) return undefined;
   const request = await agent.readRequesterJoinRequestState(contextGraphId, approved);
   if (request?.status !== 'approved') return undefined;
-  if (await isApprovedMemberMetadataConfirmed(agent, contextGraphId)) return undefined;
+  if (await ownMetadataNamesMember(agent, contextGraphId, approved)) return undefined;
   return {
     agentAddress: approved,
     requestGeneration: request.requestGeneration,
@@ -248,13 +271,15 @@ export async function watchCuratorSnapshotForApprovedMember(
     if (!curatorSnapshotOmitsApprovedMember(contextGraphId, quads, acceptance)) return;
     const ctx = createOperationContext('sync');
     try {
-      await agent.restoreRequesterJoinDecisionAfterFailedApply(
+      // Only the approval this fetch serves, of this curator, goes back to pending:
+      // a newer one, or another curator's approval of the same request, stays.
+      if (!(await agent.restoreRequesterJoinDecisionAfterFailedApply(
         contextGraphId,
         member,
         requestGeneration,
         'approved',
-      );
-      // A newer approval of the member, held now, is not this snapshot's to end.
+        curatorPeerId,
+      ))) return;
       if ((await agent.readRequesterJoinRequestState(contextGraphId, member))?.status === 'approved') return;
       if (agent.localApprovedAgentByCG.get(contextGraphId) === member) {
         agent.localApprovedAgentByCG.delete(contextGraphId);
