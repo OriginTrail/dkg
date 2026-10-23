@@ -10,7 +10,7 @@ import type {
   RandomSamplingDisabledReason,
 } from '@origintrail-official/dkg-agent';
 import type {
-  ShareReconciliationInput, ShareReconciliationResult,
+  ShareReconciliationInput, ShareReconciliationResult, AssertionPullFromOptions,
   AsyncLiftRetryOutcome,
   AsyncPreparedPublishPayload,
   JournalReadResult,
@@ -1019,7 +1019,7 @@ export class ApiClient {
     contextGraphId: string,
     name: string,
     layer: 'swm' | 'vm',
-    options?: { subGraphName?: string; onConflict?: 'reject' | 'replace' },
+    options?: AssertionPullFromOptions,
   ): Promise<Record<string, unknown>> {
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/pull-from`, { contextGraphId, layer, ...(options ?? {}) });
   }

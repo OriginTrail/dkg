@@ -301,6 +301,7 @@ import  {
   syncAdmissionWouldBeRefused,
   withGlobalSyncBackpressure,
 } from './sync/backpressure.js';
+import { syncRefusalReporter } from './sync/control-plane-refusals.js';
 import {
   contextGraphPriority,
   countSyncPriorityClasses,
@@ -1415,6 +1416,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         });
       }
     };
+    const logInfo = (opCtx: OperationContext, message: string): void => this.log.info(opCtx, message);
     try {
       return await withGlobalSyncBackpressure(
         {
@@ -1429,7 +1431,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           selectedSwmPriority,
           reservedSlotOnly: admission.reservedSlotOnly,
           signal: admissionBoundary.signal,
-          logInfo: (opCtx, message) => this.log.info(opCtx, message),
+          logInfo,
+          // A control-plane fetch refused at once is counted, one warning per interval and at node stop.
+          reportRefusal: syncRefusalReporter(
+            { label, source, contextGraphId }, this.controlPlaneRefusals, logInfo, this.node.stopSignal,
+          ),
         },
         timedWork,
       );

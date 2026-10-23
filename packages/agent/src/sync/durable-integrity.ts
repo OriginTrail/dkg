@@ -503,7 +503,13 @@ export function planBoundedGraphScopedDurableBatch(
   // that case: the next round must receive at least one verified data graph so
   // its clean completion can serve as readiness evidence rather than an empty
   // terminal probe after all useful rows were persisted by timed-out rounds.
-  if (!phaseCompleted && safeNextOffset === rawNextOffset && completedPositiveGraphs.length > 0) {
+  // Filtered rows can move the raw offset past the manifest's end, so an
+  // incomplete round never checkpoints that end either: no graph starts there.
+  if (
+    !phaseCompleted
+    && (safeNextOffset === rawNextOffset || safeNextOffset === manifestOffset)
+    && completedPositiveGraphs.length > 0
+  ) {
     const replay = completedPositiveGraphs.pop()!;
     completeGraphs.delete(replay.graph);
     safeNextOffset -= replay.rowCount;

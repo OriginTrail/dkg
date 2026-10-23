@@ -186,6 +186,9 @@ export default defineConfig({
       "test/durable-manifest-continuation.test.ts",
       "test/durable-recovery-coordinator.test.ts",
       "test/manifest-resume-policy.test.ts",
+      "test/durable-data-round.test.ts",
+      "test/durable-recovery-slice-yield.test.ts",
+      "test/store-lane-yield.test.ts",
       "test/durable-progress.test.ts",
       "test/gossip-publish-handler.test.ts",
       "test/discovery-subscription-boundary.test.ts",
@@ -262,6 +265,8 @@ export default defineConfig({
       "test/sync-shared-memory-reserve.test.ts",
       // #3280 — the reserved control-plane slot and its own bounded queue.
       "test/sync-control-plane-reserve.test.ts",
+      // Refused control-plane fetches: one summary line per interval.
+      "test/sync-control-plane-refusals.test.ts",
       // #3251 — the safety-net pull of public graphs in use on an Edge.
       "test/recent-shared-memory-pulls.test.ts",
       "test/sync-admission-trace.test.ts",
