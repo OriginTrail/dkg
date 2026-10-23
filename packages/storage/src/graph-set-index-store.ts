@@ -1,4 +1,4 @@
-import { prepareImmutableMutation, runImmutableMutation, runRfc64AuthorCommitCasMutation, assertImmutableMutationCapability, type ImmutableStoreMutation, type ImmutableStorePreparation, type PreparedMutation } from './immutable-store-preparation.js';
+import { prepareImmutableMutation, closeImmutableStoreMutations, runImmutableMutation, runRfc64AuthorCommitCasMutation, assertImmutableMutationCapability, type ImmutableStoreMutation, type ImmutableStorePreparation, type PreparedMutation } from './immutable-store-preparation.js';
 import type { TripleStoreCommitCapability } from './persistence.js';
 import type { GraphSetIndexStoreOptions } from './graph-set-index-store-options.js';
 export type { GraphSetIndexStoreOptions } from './graph-set-index-store-options.js';
@@ -438,7 +438,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator, ImmutableStoreP
   }
 
   close(): Promise<void> {
-    return this.mutations.close(() => this.inner.close());
+    return closeImmutableStoreMutations(this.mutations, this.inner);
   }
 
   private async ensureGraphSet(options?: QueryOptions): Promise<ReadonlySet<string>> {
