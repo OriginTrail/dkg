@@ -11,7 +11,7 @@ export type { PublisherAssertionPromoteOptions } from './assertion-promote-types
 import { tryCreateShareCompletionEvidence } from './share-completion-evidence.js';
 import { preparePromoteRecoveryBinding, assertPromoteRecoveryBinding, type PromoteRecoveryAdmission } from './promote-recovery-binding.js';
 import { throwIfCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
-import { readAssertionLifecycleRecord, type AssertionLifecycleRecord } from './assertion-lifecycle-record.js';
+import { readAssertionLifecycleRecord, resolveAssertionReadAuthor, type AssertionLifecycleRecord } from './assertion-lifecycle-record.js';
 import { assertExpectedKaSlotMatchesLifecycle, assertExpectedKaSlotMatchesAllocation } from './assertion-reserved-slot.js';
 import { assertKaSlotOwnershipAvailable, assertionAllocationLockKey } from './assertion-ka-slot-ownership.js';
 import { assertWorkingMemoryLifecycleMutable } from './working-memory-lifecycle.js';
@@ -8024,8 +8024,8 @@ export class DKGPublisher implements Publisher {
     subGraphName?: string,
   ): Promise<Quad[]> {
     DKGPublisher.validateOptionalSubGraph(subGraphName);
-    const graphUri = await this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName);
-    return this.assertionScopedQuads(graphUri);
+    const storedAuthor = await resolveAssertionReadAuthor(this.store, contextGraphId, agentAddress, name, subGraphName);
+    return this.assertionScopedQuads(await this.wmGraphUri(contextGraphId, storedAuthor, name, subGraphName));
   }
 
   async assertionQueryPrivate(
