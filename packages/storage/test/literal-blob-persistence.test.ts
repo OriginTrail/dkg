@@ -41,7 +41,8 @@ afterEach(async () => { syncControl.fail = undefined; syncControl.failPath = und
 async function fixture() {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-literal-persistence-'))); dirs.push(dir);
   syncControl.ancestorPath = dir;
-  const path = join(dir, 'store.nq'), blobDir = join(dir, 'literal-files', 'nested'), backend = new OxigraphStore(path);
+  const rdfDir = await realpath(await mkdtemp(join(tmpdir(), 'dkg-literal-rdf-'))); dirs.push(rdfDir);
+  const path = join(rdfDir, 'store.nq'), blobDir = join(dir, 'literal-files', 'nested'), backend = new OxigraphStore(path);
   const store = new SharedMemoryLiteralBlobStore(backend, { blobDir, thresholdBytes: 10 }); stores.push(store);
   const quad = { graph: 'urn:dkg:cg/_shared_memory', subject: 'urn:asset', predicate: 'urn:value', object: '"a literal larger than the threshold"' };
   return { store, backend, path, blobDir, quad, dir, commit: store.commitment!.capture() };
@@ -79,6 +80,7 @@ describe('external literal persistence certification', () => {
       expect(insert).not.toHaveBeenCalled();
     } finally { release(); await Promise.allSettled([first, second]); }
     await Promise.all([first, second]);
+    await f.backend.flush(); // Snapshot persistence must not contaminate blob ancestry evidence.
     expect(syncControl.creations).toEqual([f.blobDir]);
     expect(syncControl.calls.filter(path => path === f.dir)).toHaveLength(1);
     expect(syncControl.calls.filter(path => /[a-f0-9]{64}$/.test(path))).toHaveLength(2);
