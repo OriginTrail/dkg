@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { afterEach, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { DKGEvent } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
 import type { ContextGraphSubscriptionRecord } from '../src/dkg-agent-types.js';
 import { CoalescingRecurringTask } from '../src/coalescing-recurring-task.js';
@@ -43,6 +44,10 @@ it.each([
     getSubscribers: () => [],
   };
   let available = false;
+  const activations: unknown[] = [];
+  agent.eventBus.on(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, event => activations.push(event));
+  const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
+  let discoveryObservation: { sameRow: boolean; stillDormant: boolean } | undefined;
   vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority').mockImplementation(async () => available
     ? { outcome: 'allowed', source: 'registered-chain', reason: 'open-context-graph', metadataBootstrap: 'eligible', onChainId: 7n }
     : { outcome: 'unavailable', source: 'registered-chain', reason: 'temporary-authority-outage', metadataBootstrap: 'eligible' });
@@ -59,10 +64,10 @@ it.each([
       }
       agent!.recordDiscoveredContextGraph(id, { name, onChainId: '7' });
       await agent!.enqueueContextGraphSubscriptionPersistWrite(id, async () => undefined);
-      if (action === 'discovery') {
-        expect(agent!.getSubscribedContextGraphs().get(id)).toBe(provisional);
-        expect(agent!.getContextGraphSubscriptionRehydrationStatus()?.dormantReasons.authorityUnavailable).toContain(id);
-      }
+      discoveryObservation = {
+        sameRow: agent!.getSubscribedContextGraphs().get(id) === provisional,
+        stillDormant: agent!.getContextGraphSubscriptionRehydrationStatus()?.dormantReasons.authorityUnavailable.includes(id) === true,
+      };
     }
     return {
       active: false, mode: 'catalog', contextGraphId, responsible: false,
@@ -84,15 +89,23 @@ it.each([
   finally { internal.started = false; }
   await agent.enqueueContextGraphSubscriptionPersistWrite(id, async () => undefined);
   if (action === 'unsubscribe') {
+    expect(activations).toEqual([]);
     expect(agent.getSubscribedContextGraphs().get(id)?.subscribed).not.toBe(true);
     expect(rows.has(id)).toBe(false);
     return;
   }
   if (action === 'replacement') {
+    expect(activations).toEqual([]);
     expect(agent.getSubscribedContextGraphs().get(id)).toMatchObject({ subscribed: true, onChainId: '8' });
     expect(rows.get(id)).toMatchObject({ subscribed: true, onChainId: '8' });
     return;
   }
+  // Recovery catches callback failures. Assertions belong outside that shell,
+  // and active flags alone cannot prove the network activation committed.
+  expect(discoveryObservation).toEqual({ sameRow: true, stillDormant: true });
+  expect(activations).toEqual([{ contextGraphId: id }]);
+  expect(subscribe).toHaveBeenCalledOnce();
+  expect(subscribe).toHaveBeenCalledWith(id, expect.objectContaining({ persist: false, syncMode: 'always-on' }));
   expect(rows.get(id)?.subscribed).toBe(true);
   expect(agent.getSubscribedContextGraphs().get(id)?.subscribed).toBe(true);
   expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({ activated: 1, dormant: 0 });
