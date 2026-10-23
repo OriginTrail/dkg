@@ -1,4 +1,10 @@
 export { asQueryReadAdmissionCapability, type QueryReadAdmissionCapability } from './query-read-admission-capability.js';
+export {
+  decodeSparqlTsvSelectResponse,
+  decodeSparqlTsvSelectResult,
+  SparqlTsvResultsShapeError,
+  type SparqlTsvResponseOptions,
+} from './sparql-tsv-query-result.js';
 export { nonEmptyNamedGraphEnumerationPattern } from './adapters/graph-enumeration-query.js';
 export {
   BlazegraphNamespaceManager,
