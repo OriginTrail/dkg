@@ -13,6 +13,11 @@
  * The owner of a graph pulls it too. A member that reaches the graph only
  * through Cores (a relay-only Edge) shares into it through them, and the
  * owner holds such a share only once it fetched it from one of them.
+ *
+ * A member of a curated public graph keeps the graph in use (#3421): one of
+ * its agents is on the graph's allowlist, and the graph is not its own. When
+ * no owner is connected, the owner is reached through the route a share to
+ * it takes (`swm/relay-only-share-routes.ts`).
  */
 
 import {
@@ -25,8 +30,11 @@ import type { ContextGraphSub, DKGAgentConfig, SharedMemorySyncResult } from './
 import { resolveBoundedCuratorSyncPeer } from './dkg-agent-cg-resolve.js';
 import type { DKGAgent } from './dkg-agent.js';
 import { durableSyncEnabled, syncOnConnectEnabled } from './internal/lifecycle-sync-policy.js';
+import { listsLocalAllowedAgent } from './internal/local-private-member.js';
+import { routeShareToGraphOwner, type GraphOwnerRoutePorts } from './swm/relay-only-share-routes.js';
 import type { SyncAdmissionSource } from './sync/policy.js';
 import {
+  RECENT_SHARED_MEMORY_MAX_GRAPHS,
   RECENT_SHARED_MEMORY_PULL_TICK_MS,
   RecentSharedMemoryPulls,
   type RecentSharedMemoryPullOptions,
@@ -54,7 +62,11 @@ interface RecentSharedMemoryPullAgent {
     off(event: string, handler: (data: unknown) => void): void;
   };
   readonly log: { debug(ctx: OperationContext, message: string): void };
+  readonly localAgents: ReadonlyMap<string, unknown>;
   isPrivateContextGraph(contextGraphId: string): Promise<boolean>;
+  isCuratorOf(contextGraphId: string): Promise<boolean>;
+  getCgMeta(contextGraphId: string): Promise<Parameters<typeof listsLocalAllowedAgent>[0]>;
+  graphOwnerRoutePortsV1(): GraphOwnerRoutePorts;
   canUseSharedMemoryForContextGraph(contextGraphId: string): Promise<boolean>;
   selectCatchupPeers(peers: Array<{ toString(): string }>): Array<{ toString(): string }>;
   rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId: string): boolean;
@@ -144,17 +156,38 @@ export function startRecentSharedMemoryPulls(
     return resolution.peerId;
   };
 
+  const subscribedAlwaysOn = (contextGraphId: string): boolean => {
+    const subscription = agent.subscribedContextGraphs.get(contextGraphId);
+    return !SYSTEM_CONTEXT_GRAPH_IDS.has(contextGraphId)
+      && subscription?.subscribed === true && subscription.syncMode === 'always-on';
+  };
+  // A member of a public graph, not its owner: one of this node's agents is on its allowlist.
+  const isMember = async (contextGraphId: string): Promise<boolean> => (
+    !(await agent.isPrivateContextGraph(contextGraphId))
+    && listsLocalAllowedAgent(await agent.getCgMeta(contextGraphId), [...agent.localAgents.keys()])
+    && !(await agent.isCuratorOf(contextGraphId))
+  );
+
   const pulls = new RecentSharedMemoryPulls({
     eligible: async (contextGraphId) => {
-      if (SYSTEM_CONTEXT_GRAPH_IDS.has(contextGraphId)) return false;
-      const subscription = agent.subscribedContextGraphs.get(contextGraphId);
-      if (subscription?.subscribed !== true || subscription.syncMode !== 'always-on') return false;
+      if (!subscribedAlwaysOn(contextGraphId)) return false;
       // The graph's owner as well: see the module comment.
       return !(await agent.isPrivateContextGraph(contextGraphId));
     },
+    memberGraphs: async () => {
+      const members: string[] = [];
+      for (const contextGraphId of agent.subscribedContextGraphs.keys()) {
+        if (members.length >= RECENT_SHARED_MEMORY_MAX_GRAPHS) break;
+        if (subscribedAlwaysOn(contextGraphId) && await isMember(contextGraphId).catch(() => false)) {
+          members.push(contextGraphId);
+        }
+      }
+      return members;
+    },
+    connectOwner: async (contextGraphId) => routeShareToGraphOwner(agent.graphOwnerRoutePortsV1(), contextGraphId),
     sources: async (contextGraphId) => {
       // Authority not confirmed yet: the sync would only be refused. Next interval.
-      if (!(await agent.canUseSharedMemoryForContextGraph(contextGraphId))) return { owners: [], others: [] };
+      if (!(await agent.canUseSharedMemoryForContextGraph(contextGraphId))) return null;
       const owner = await ownerPeerOf(contextGraphId);
       const connected = agent.selectCatchupPeers([...agent.node.libp2p.getPeers()])
         .map((peer) => peer.toString())
