@@ -98,9 +98,9 @@ it('bounds distinct physical preparations and pins references until admission', 
   const leases = await Promise.all(work); expect(io.calls).toBe(6);
   await snapshots.retireUnreferenced(new Map());
   expect((await readdir(join(f.dir, 'named-ka-vm-lifecycle-snapshots'))).filter(name => name.endsWith('.json'))).toHaveLength(6);
-  const command = commands[0], entries = new Map<string, LifecycleRepairEntry>([[lifecycleRepairKey(command), { input: command, preparedSnapshot: leases[0].snapshot ? leases[0] : undefined, attempts: 0, nextAttemptAt: 0 }]]);
+  const command = commands[0], entries = new Map<string, LifecycleRepairEntry>([[lifecycleRepairKey(command), { input: command, preparedSnapshot: leases[0]?.handle, attempts: 0, nextAttemptAt: 0 }]]);
   const wire = snapshots.encodePrepared(entries);
-  for (const lease of leases) lease.release();
+  for (const lease of leases) lease?.release();
   await snapshots.retireUnreferenced(entries);
   expect((await new NamedKaVmLifecycleSnapshots(f.dir).decode(wire)).size).toBe(1);
   await snapshots.retireUnreferenced(new Map()); expect(await readdir(join(f.dir, 'named-ka-vm-lifecycle-snapshots'))).toHaveLength(0);
@@ -115,9 +115,9 @@ it('waits for physical retirement before reusing and journaling the same snapsho
   try { await new Promise(resolve => setTimeout(resolve, 20)); expect(done).toBe(false); }
   finally { release(); await cleanup; }
   const lease = await work;
+  if (!lease) throw new Error('Expected prepared snapshot');
   try {
-    if (!lease.snapshot) throw new Error('Expected prepared snapshot');
-    entries.get(lifecycleRepairKey(command))!.preparedSnapshot = lease;
+    entries.get(lifecycleRepairKey(command))!.preparedSnapshot = lease.handle;
     expect((await new NamedKaVmLifecycleSnapshots(f.dir).decode(snapshots.encodePrepared(entries))).size).toBe(1);
   }
   finally { lease.release(); }
@@ -167,7 +167,7 @@ it('coalesces duplicate snapshots while their first physical fsync is still held
     await new Promise(resolve => setTimeout(resolve, 30)); expect(io.calls).toBe(1); expect(io.active).toBe(1);
   } finally {
     release();
-    for (const result of await Promise.allSettled(work)) if (result.status === 'fulfilled') result.value.release();
+    for (const result of await Promise.allSettled(work)) if (result.status === 'fulfilled') result.value?.release();
   }
   expect(io.calls).toBe(1);
 });
@@ -234,19 +234,23 @@ it('drains a held optional cleanup failure without failing shutdown or losing jo
 it('carries exact owner-bound prepared evidence into encoding and requires fresh-owner adoption', async () => {
   const f = await fixture(), snapshots = new NamedKaVmLifecycleSnapshots(f.dir), fresh = new NamedKaVmLifecycleSnapshots(f.dir);
   const command = normalizeLifecycleRepairInput(f.input), prepared = await snapshots.prepare(command.materialization);
-  if (!prepared.snapshot) throw new Error('Expected prepared snapshot');
+  if (!prepared) throw new Error('Expected prepared snapshot');
   try {
-    expect(prepared.snapshot).toBe(command.materialization); expect(Object.isFrozen(prepared)).toBe(true);
+    expect(prepared.handle.snapshot).toBe(command.materialization); expect(Object.isFrozen(prepared)).toBe(true);
+    expect(Object.isFrozen(prepared.handle)).toBe(true); expect(prepared.handle).not.toHaveProperty('release');
     const entries = new Map<string, LifecycleRepairEntry>([[lifecycleRepairKey(command), {
-      input: command, preparedSnapshot: prepared, attempts: 0, nextAttemptAt: 0,
+      input: command, preparedSnapshot: prepared.handle, attempts: 0, nextAttemptAt: 0,
     }]]);
     const wire = snapshots.encodePrepared(entries);
-    expect(wire.entries[0][1].input.materializationRef).toBe(prepared.reference);
+    expect(wire.entries[0][1].input.materializationRef).toBe(prepared.handle.reference);
     expect(wire.entries[0][1]).not.toHaveProperty('preparedSnapshot');
     await fresh.prepare();
     expect(() => fresh.encodePrepared(entries)).toThrow('not prepared by this owner');
-    const adopted = await fresh.decode(wire), leases = await fresh.prepareEntries(adopted);
-    try { expect(fresh.encodePrepared(adopted)).toEqual(wire); expect(io.calls).toBe(1); }
+    const adopted = await fresh.decode(wire), handle = [...adopted.values()][0]!.preparedSnapshot!;
+    expect(handle).not.toHaveProperty('release');
+    const leases = await fresh.prepareEntries(adopted);
+    try { expect(leases[0]!.handle).toBe(handle); expect(fresh.encodePrepared(adopted)).toEqual(wire); expect(io.calls).toBe(1); }
     finally { for (const lease of leases) lease.release(); }
+    expect(fresh.encodePrepared(adopted)).toEqual(wire);
   } finally { prepared.release(); }
 });

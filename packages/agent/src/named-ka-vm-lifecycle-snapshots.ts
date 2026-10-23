@@ -13,11 +13,8 @@ export interface PreparedLifecycleSnapshot {
   readonly [snapshotOwner]: object;
   readonly snapshot: ValidatedLifecycleMaterialization;
   readonly reference: string;
-  release(): void;
 }
-export type LifecycleSnapshotLease = PreparedLifecycleSnapshot | {
-  readonly snapshot: undefined; readonly reference: undefined; release(): void;
-};
+export interface LifecycleSnapshotLease { readonly handle: PreparedLifecycleSnapshot; release(): void; }
 const digest = (bytes: string) => createHash('sha256').update(bytes).digest('hex');
 /** Immutable snapshots are durable before their compact retry records become visible. */
 export class NamedKaVmLifecycleSnapshots {
@@ -55,7 +52,7 @@ export class NamedKaVmLifecycleSnapshots {
       entries.set(key, entry);
       if (ref && entry.input.materialization) {
         this.durable.add(ref);
-        entry.preparedSnapshot = this.handle(entry.input.materialization, ref, () => {});
+        entry.preparedSnapshot = this.handle(entry.input.materialization, ref);
       }
     }
     return entries;
@@ -76,18 +73,19 @@ export class NamedKaVmLifecycleSnapshots {
     finally { const next = this.waiters.shift(); if (next) next(); else this.active--; }
   }
 
-  private handle(snapshot: ValidatedLifecycleMaterialization, reference: string, release: () => void): PreparedLifecycleSnapshot {
-    return Object.freeze({ [snapshotOwner]: this.owner, snapshot, reference, release });
+  private handle(snapshot: ValidatedLifecycleMaterialization, reference: string): PreparedLifecycleSnapshot {
+    return Object.freeze({ [snapshotOwner]: this.owner, snapshot, reference });
   }
 
-  private pin(snapshot: ValidatedLifecycleMaterialization, reference: string): PreparedLifecycleSnapshot {
+  private pin(handle: PreparedLifecycleSnapshot): LifecycleSnapshotLease {
+    const { reference } = handle;
     this.pins.set(reference, (this.pins.get(reference) ?? 0) + 1);
     let released = false;
-    return this.handle(snapshot, reference, () => {
+    return Object.freeze({ handle, release: () => {
       if (released) return; released = true;
       const remaining = (this.pins.get(reference) ?? 1) - 1;
       if (remaining) this.pins.set(reference, remaining); else this.pins.delete(reference);
-    });
+    } });
   }
 
   private assertHandle(handle: PreparedLifecycleSnapshot): void {
@@ -97,13 +95,13 @@ export class NamedKaVmLifecycleSnapshots {
   }
 
   /** Synchronously retain already-prepared current evidence through admission. */
-  retain(handle: PreparedLifecycleSnapshot): PreparedLifecycleSnapshot {
-    this.assertHandle(handle); return this.pin(handle.snapshot, handle.reference);
+  retain(handle: PreparedLifecycleSnapshot): LifecycleSnapshotLease {
+    this.assertHandle(handle); return this.pin(handle);
   }
 
   /** Own exact validated evidence and its durable reference through admission. */
-  async prepare(snapshot?: ValidatedLifecycleMaterialization, adopted?: PreparedLifecycleSnapshot): Promise<LifecycleSnapshotLease> {
-    if (!snapshot) { await this.ensureDirectory(); return { snapshot: undefined, reference: undefined, release() {} }; }
+  async prepare(snapshot?: ValidatedLifecycleMaterialization, adopted?: PreparedLifecycleSnapshot): Promise<LifecycleSnapshotLease | undefined> {
+    if (!snapshot) { await this.ensureDirectory(); return undefined; }
     if (adopted && (adopted[snapshotOwner] !== this.owner || adopted.snapshot !== snapshot)) {
       throw new NamedKaVmLifecycleIntegrityError('Lifecycle snapshot handle does not match its preparation owner');
     }
@@ -113,7 +111,7 @@ export class NamedKaVmLifecycleSnapshots {
       const cached = adopted && this.durable.has(adopted.reference) ? adopted.reference : undefined;
       let bytes: string | undefined;
       const ref = cached ?? digest(bytes = JSON.stringify(lifecycleMaterializationWire(snapshot)));
-      const lease = this.pin(snapshot, ref);
+      const lease = this.pin(cached ? adopted! : this.handle(snapshot, ref));
       try {
         await this.retiring.get(ref)?.catch(() => {});
         await this.ensureDirectory();
@@ -140,10 +138,10 @@ export class NamedKaVmLifecycleSnapshots {
     const results = await Promise.allSettled([...entries.values()].map(async entry => {
       const adopted = entry.preparedSnapshot?.[snapshotOwner] === this.owner ? entry.preparedSnapshot : undefined;
       const lease = await this.prepare(entry.input.materialization, adopted);
-      if (lease.snapshot) entry.preparedSnapshot = lease; else delete entry.preparedSnapshot;
+      if (lease) entry.preparedSnapshot = lease.handle; else delete entry.preparedSnapshot;
       return lease;
     }));
-    const leases = results.flatMap(result => result.status === 'fulfilled' ? [result.value] : []);
+    const leases = results.flatMap(result => result.status === 'fulfilled' && result.value ? [result.value] : []);
     const failed = results.find(result => result.status === 'rejected');
     if (failed?.status === 'rejected') { for (const lease of leases) lease.release(); throw failed.reason; }
     return leases;

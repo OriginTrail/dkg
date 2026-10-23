@@ -6,7 +6,7 @@ import { DurableReplaceableFile } from './durable-file-replace.js';
 import { join } from 'node:path';
 import { ConfirmedNamedKaVmLifecycleExecutor } from './named-ka-vm-lifecycle-executor.js';
 import { lifecycleRepairKey, type LifecycleRepairEntry as RepairEntry } from './named-ka-vm-lifecycle-repair-journal.js';
-import { NamedKaVmLifecycleSnapshots } from './named-ka-vm-lifecycle-snapshots.js';
+import { NamedKaVmLifecycleSnapshots, type LifecycleSnapshotLease } from './named-ka-vm-lifecycle-snapshots.js';
 import { isStoreOperationTimeoutError, isStoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 
 import { normalizeLifecycleRepairInput, reconcileLifecycleRepairEvidence, type ConfirmedNamedKaVmLifecycleInput, type ValidatedLifecycleRepairCommand } from './named-ka-vm-lifecycle-evidence.js';
@@ -117,7 +117,7 @@ export class NamedKaVmLifecycleRepair {
         preparedSnapshot: previous?.input.materialization === evidence.input.materialization ? previous?.preparedSnapshot : undefined };
     });
     if (!initial) return 'superseded';
-    const leases: Array<Awaited<ReturnType<NamedKaVmLifecycleSnapshots['prepare']>>> = [];
+    const leases: LifecycleSnapshotLease[] = [];
     let admitted: { outcome: NamedKaVmLifecycleRepairOutcome } | { key: string; entry: RepairEntry };
     try {
       const prepared = await this.snapshots?.prepare(initial.input.materialization, initial.preparedSnapshot);
@@ -127,11 +127,12 @@ export class NamedKaVmLifecycleRepair {
         // even if the prior entry retired while physical preparation was pending.
         const previous = this.entries.get(key), evidence = reconcileLifecycleRepairEvidence(previous, initial.input);
         if (evidence.status === 'superseded') return { outcome: 'superseded' as const };
-        let handle = evidence.input.materialization === prepared?.snapshot && prepared?.snapshot ? prepared
-          : previous?.preparedSnapshot;
-        if (this.snapshots && evidence.input.materialization && handle !== prepared) {
+        const preparedHandle = prepared?.handle;
+        const handle = !evidence.input.materialization ? undefined : evidence.input.materialization === preparedHandle?.snapshot
+          ? preparedHandle : previous?.preparedSnapshot;
+        if (this.snapshots && evidence.input.materialization && handle !== preparedHandle) {
           if (!handle || handle.snapshot !== evidence.input.materialization) throw new Error('Missing prepared lifecycle evidence');
-          handle = this.snapshots.retain(handle); leases.push(handle);
+          leases.push(this.snapshots.retain(handle));
         }
         const entry: RepairEntry = evidence.status === 'unchanged' && previous !== undefined ? previous
           : { input: evidence.input, ...(handle ? { preparedSnapshot: handle } : {}), attempts: 0, nextAttemptAt: this.now() };
