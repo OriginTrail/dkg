@@ -257,6 +257,8 @@ export default defineConfig({
       "test/sync-shared-memory-reserve.test.ts",
       // #3280 — the reserved control-plane slot and its own bounded queue.
       "test/sync-control-plane-reserve.test.ts",
+      // Refused control-plane fetches: one summary line per interval.
+      "test/sync-control-plane-refusals.test.ts",
       // #3251 — the safety-net pull of public graphs in use on an Edge.
       "test/recent-shared-memory-pulls.test.ts",
       "test/sync-admission-trace.test.ts",

@@ -206,6 +206,8 @@ export default defineConfig({
           // `/api/status` → `eventLoopDelay`: the gauge with a fake histogram
           // plus one real-histogram smoke test, and the route block shape.
           'test/event-loop-delay-monitor.test.ts',
+          // The periodic `resource_usage` line: its fields and its schedule.
+          'test/resource-usage-log.test.ts',
           'test/supervisor-liveness.test.ts',
           'test/liveness-diagnostics.test.ts',
           'test/liveness-supervisor-log.test.ts',
