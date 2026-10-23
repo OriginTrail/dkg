@@ -1,3 +1,4 @@
+import { runInNewContext } from 'node:vm';
 import { broadcastExhausted } from './_helpers/rpc-prep-failure-2942.js';
 import * as subtraction from '../src/async-lift-subtraction.js';
 import { seedLegacyRawLiftTestJob } from './_helpers/legacy-raw-lift.js';
@@ -21,7 +22,7 @@ const map = (error: unknown, overrides = {}) => mapExecutionFailure({
 
 describe('GH#3419 pre-validation provenance', () => {
   it.each([
-    new TypeError('fetch failed'), new Error('query timeout authority root unavailable'),
+    new TypeError('fetch failed'), runInNewContext('new TypeError("fetch failed")'), new Error('query timeout authority root unavailable'),
     new Error('lost cause'), new Error('arbitrary wrapper', { cause: transport() }),
     new LiftValidationStageError('initial_preflight', stageError(transport())),
   ])('does not infer content failure or retry safety from unknown/wrapped evidence', error => {
@@ -150,7 +151,9 @@ describe('GH#3419 pre-validation provenance', () => {
   it.each((['broadcast', 'included'] as const).flatMap(status => [
     { status, label: 'read interruption', error: () => stageError(transport()) },
     { status, label: 'string timeout', error: () => 'request timed out' },
-  ]))('keeps $status chain evidence held after $label', async ({ status, error }) => {
+    { status, label: 'cross-realm timeout', error: () => runInNewContext('new Error("request timed out")') },
+    { status, label: 'serialized timeout', error: () => ({ message: 'request timed out' }) },
+  ]))('keeps $status chain evidence held after $label', async ({ status, error, label }) => {
     const h = createAsyncLift2270Harness();
     const { stage } = createStoreRejectionFixtures(h);
     const publisher = h.createPublisher(RETRY_LANE);
@@ -164,13 +167,13 @@ describe('GH#3419 pre-validation provenance', () => {
     if (status === 'included') await publisher.update(jobId, 'included', { broadcast, inclusion: { txHash: TX_HASH, blockNumber: 1 } });
     const failed = expectFailed(await publisher.openClaimSession(claim).recordExecutionFailure(status, error(), { neverDispatched: true }));
     expect(failed.broadcast?.txHash).toBe(TX_HASH);
-    if (typeof error() !== 'string') {
+    if (label === 'read interruption') {
       expect(failed.failure).toMatchObject({ code: status === 'included' ? 'confirmation_mismatch' : 'rpc_unavailable',
         message: 'Publication validation boundary conflicts with persisted execution state',
         validationDiagnostic: { stage: 'initial_preflight', cause: 'unknown' } });
       expect(failed.failure.timeout).toBeUndefined();
     }
-    if (typeof error() === 'string') expect(failed.failure).toMatchObject({
+    if (label !== 'read interruption') expect(failed.failure).toMatchObject({
       code: status === 'included' ? 'finality_timeout' : 'tx_submit_timeout',
       timeout: { timeoutMs: 0, handling: 'check_chain_then_finalize_or_reset' },
     });

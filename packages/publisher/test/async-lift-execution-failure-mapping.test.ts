@@ -266,8 +266,8 @@ const MAPPING_ROWS: readonly MappingRow[] = [
   // `String(error)`, the publish mapper prefers a string `.message`. Pinned, not endorsed.
   row('a non-Error throw with a .message: the publish mapper classifies on .message and persists it', 'broadcast', 'broadcast',
     () => ({ message: 'insufficient funds for gas' }), to('broadcast', 'insufficient_funds', { message: 'insufficient funds for gas' })),
-  row('a non-Error throw whose .message names a timeout rejects: the legacy text builds no timeout metadata', 'broadcast', 'broadcast',
-    () => ({ message: 'RPC submit timed out' }), { rejects: /Timeout metadata is required/ }),
+  row('a serialized timeout uses the publish mapper facts for valid timeout metadata', 'broadcast', 'broadcast',
+    () => ({ message: 'RPC submit timed out' }), to('broadcast', 'tx_submit_timeout', { timeout: true, message: 'RPC submit timed out' })),
 ];
 
 describe('GH#2945 recordExecutionFailure: the failure decision, characterized through the real publisher', () => {
@@ -595,7 +595,7 @@ describe('GH#2945 mapExecutionFailure: the same decision as a pure function', ()
     // The clock is read once, and only when a non-pre-send origin's legacy text names a timeout - even when
     // the publish mapper then drops the metadata (a permanent author refusal beats the timeout wording).
     const preSendOrigin = failure.failedFromState === 'claimed' || failure.failedFromState === 'validated';
-    expect(clock.calls).toBe(!preSendOrigin && namesTimeout(legacyText(error)) ? 1 : 0);
+    expect(clock.calls).toBe(!preSendOrigin && (r.expected.timeout || namesTimeout(legacyText(error))) ? 1 : 0);
   });
 
   it('reads the clock exactly once for a timeout wording whose metadata the publish mapper drops', () => {

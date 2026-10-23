@@ -9,7 +9,7 @@ import {
 import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE } from '@origintrail-official/dkg-core';
 import { isRpcPreconditionError } from './ack-errors.js';
 import type { ExecutionFailureEvidence } from './async-lift-publisher-types.js';
-import { isPermanentAuthorCapabilityFailure, mapPublishExceptionToLiftJobFailure } from './async-lift-publish-result.js';
+import { isPermanentAuthorCapabilityFailure, mapPublishExceptionToLiftJobFailure, readPublishErrorFacts } from './async-lift-publish-result.js';
 import {
   createLiftJobFailureMetadata,
   type LiftJobFailureCode,
@@ -233,7 +233,6 @@ export function mapExecutionFailure(input: ExecutionFailureInput): LiftJobFailur
   const origin: LiftJobState = validatedBeforeDispatch && (classified.gate || staged)
     ? 'validated' : requestedOrigin;
   const message = error instanceof Error ? error.message : typeof error === 'string' ? error : 'Unknown publication execution failure';
-  const lower = message.toLowerCase();
   const errorPayloadRef = `urn:dkg:publisher:error:${jobId}`;
 
   if (origin === 'claimed' || origin === 'validated') {
@@ -258,6 +257,7 @@ export function mapExecutionFailure(input: ExecutionFailureInput): LiftJobFailur
       errorPayloadRef, validationDiagnostic: { stage: staged.stage, cause: 'unknown' },
     });
   }
+  const { lowerMessage: lower } = readPublishErrorFacts(error);
   return mapPublishExceptionToLiftJobFailure({
     error,
     failedFromState: requestedOrigin === 'included' ? 'included' : 'broadcast',
