@@ -44,6 +44,7 @@ import {
   partitionVerifiedGraphScopedAssets,
 } from './verified-asset-preparation.js';
 import type { DurableSyncBudget } from './durable-sync-budget.js';
+import { createDurableDataRoundBoundary } from './durable-data-round.js';
 import {
   normalizeDurableSyncContext,
   type LegacyDurableSyncContext, type NormalizedDurableSyncContext,
@@ -180,6 +181,8 @@ export interface DurableMetaContinuationState {
 export interface DurableMetaContinuation {
   readonly requesterScope: SyncCheckpointScope;
   state?: DurableMetaContinuationState;
+  /** Set by a DATA round whose rows did not line up with the boundary it resumed at; the owner clears it. */
+  rejectedResumeOffset?: number;
 }
 
 export interface DurableSyncStoreInsertRequest {
@@ -525,20 +528,6 @@ function createManifestSettlementCheckpointer(options: {
     persistedDescriptorCount = descriptorIndex;
     return { numericAdvance };
   };
-}
-
-function manifestHasCompleteGraphAfterOffset(
-  manifest: GraphScopedDurableManifestPlan,
-  resumedFromOffset: number,
-  nextOffset: number,
-): boolean {
-  let boundaryOffset = 0;
-  for (const descriptor of manifest.descriptors) {
-    boundaryOffset += descriptor.publicTripleCount;
-    if (boundaryOffset > nextOffset) return false;
-    if (boundaryOffset > resumedFromOffset) return true;
-  }
-  return false;
 }
 
 export function runDurableSync(
@@ -994,15 +983,14 @@ async function runDurableSyncWithBudget(
           )?.prefixDigest
           : undefined,
         preparedMeta.forceFreshUnboundDataSession,
-        graphScopedManifest && settlementSliceDeadline !== undefined
-          ? (progress) => (
-              Date.now() >= settlementSliceDeadline
-              && manifestHasCompleteGraphAfterOffset(
-                graphScopedManifest!,
-                progress.resumedFromOffset,
-                progress.nextOffset,
-              )
-            )
+        // A full-graph round holds what it fetched until it is verified and
+        // stored, so it ends at a checkpointable graph within a row/heap budget.
+        // A caller that needs one complete snapshot from row 0 keeps one round.
+        graphScopedManifest && exactAssetUals === undefined && onVerifiedFullSnapshot === undefined
+          ? createDurableDataRoundBoundary({ manifest: graphScopedManifest, settlementSliceDeadline,
+              onHardLimit: ({ resumedFromOffset, nextOffset, acceptedQuads }) => logWarn(ctx,
+                `Durable data round for "${pid}" reached its hard limit at ${acceptedQuads} rows `
+                  + `(offset ${resumedFromOffset}->${nextOffset}) without a complete graph to checkpoint`) })
           : undefined,
       );
       throwIfOperationAborted();
@@ -1107,6 +1095,9 @@ async function runDurableSyncWithBudget(
           : null;
         if (!bounded && graphScopedManifest) {
           deleteCheckpoint(dataResult.checkpointKey);
+          if (durableMetaContinuation && dataResult.resumedFromOffset > 0) {
+            durableMetaContinuation.rejectedResumeOffset = dataResult.resumedFromOffset;
+          }
           throw Object.assign(
             new Error(
               `Discarding rootless durable response for "${pid}": responder and manifest coordinates cannot be reconciled`,
