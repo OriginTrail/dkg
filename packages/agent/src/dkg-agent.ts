@@ -1907,6 +1907,18 @@ export class DKGAgent extends DKGAgentBase {
     } = {},
   ): ContextGraphSub {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
+    const dormancy = this.contextGraphSubscriptionDormancyById.get(contextGraphId);
+    if (
+      (existing?.subscribed === true || existing?.coreHosted === true)
+      && dormancy === 'authorityUnavailable'
+    ) {
+      // Deferred activation installs a provisional row before awaiting its
+      // authority/durability boundary. Discovery must not re-save that row:
+      // even identical enrichment advances its revision and clears dormancy,
+      // so activation rolls back with no owner left to retry it. The activation
+      // owner commits first; a later discovery pass may enrich the live row.
+      return existing;
+    }
     const authoritativeOnChainId = isCanonicalAuthoritativeContextGraphId(metadata.onChainId)
       ? metadata.onChainId
       : undefined;
