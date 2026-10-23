@@ -376,6 +376,7 @@ describe('acceptSwmSenderKeyPackage: stale-target throw type', () => {
     'chain-participant-authority-unavailable': true,
     'chain-participant-authority-invalid': false,
     'rfc64-private-read-roster-unavailable': true,
+    'approved-member-metadata-pending': true,
   };
 
   it('classifies exactly the registered unavailable reasons', () => {

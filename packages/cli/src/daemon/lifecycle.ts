@@ -383,6 +383,7 @@ import {
 import { runPreAgentStoreBootSteps } from './pre-agent-store-boot.js';
 import { startManagedOxigraph } from './oxigraph-managed.js';
 import { buildAgentRuntimeStoreConfig } from './agent-runtime-store-config.js';
+import { resolveLanAddressesEnabled, resolvePublicAddressesOnly } from '../lan-addresses.js';
 import type { OxigraphServerHandle } from './oxigraph-server.js';
 import { resetNatStatus, startNatStatusWatcher } from './nat-status.js';
 import {
@@ -1224,6 +1225,7 @@ async function runDaemonInnerWithStartupOwnership(
     config.networkPeerIsolationEnabled,
     process.env.DKG_NETWORK_PEER_ISOLATION_ENABLED,
   );
+  const lanAddressesEnabled = resolveLanAddressesEnabled(config.lanAddressesEnabled);
   // Resolve the local collector toggle before constructing daemon resources.
   // This is independent from OTLP metrics export configuration.
   const metricsCollectorConfig = resolveMetricsCollectorConfig(config);
@@ -1738,6 +1740,14 @@ async function runDaemonInnerWithStartupOwnership(
       'No relay or bootstrap peers configured. Set "relay" or "bootstrapPeers" in ~/.dkg/config.json or run from repo so network/testnet.json is found.',
     );
   }
+  // An Edge with public relays is on a public network, where LAN and VPN
+  // addresses, its own and its peers', reach nobody.
+  const publicAddressesOnly = resolvePublicAddressesOnly({ lanAddressesEnabled, role, relayPeers });
+  if (publicAddressesOnly) {
+    log(
+      `Addresses: ${config.announceAddresses?.length ? '' : 'announcing public and relay addresses only; '}a peer that announces no public address is reached over its open relay circuit (set lanAddressesEnabled for a LAN or VPN deployment)`,
+    );
+  }
 
   const mockIdentityId = chainBase?.type === 'mock' && chainBase.mockIdentityId != null
     ? BigInt(chainBase.mockIdentityId)
@@ -1843,6 +1853,7 @@ async function runDaemonInnerWithStartupOwnership(
     networkPeerIsolation: networkPeerIsolationEnabled,
     preferredACKPeerIds: preferredACKPeerIds.length > 0 ? preferredACKPeerIds : undefined,
     announceAddresses: config.announceAddresses,
+    publicAddressesOnly,
     nodeRole: role,
     authorityIndex,
     relayServerCapacity: config.relayServerCapacity,

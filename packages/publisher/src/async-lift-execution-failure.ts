@@ -107,6 +107,8 @@ function classifyKnowledgeAssetVmPublishPreconditionCode(error: unknown): LiftJo
       case 'chain-access-policy-timeout':
       case 'chain-participant-authority-unavailable':
       case 'rfc64-private-read-roster-unavailable':
+      // An approved member whose member list is still arriving (#3421).
+      case 'approved-member-metadata-pending':
         return 'authority_unavailable';
       case 'chain-access-policy-unknown':
       case 'chain-participant-authority-unsupported':
