@@ -53,6 +53,28 @@ export interface SemanticSparqlReadGrant {
   outputSchemaSha256: string;
 }
 
+/** A reviewed n8n workflow exposed through a TypeScript Program KA. */
+export interface SemanticN8nGrant {
+  toolIri: 'urn:dkg:tool:n8n';
+  workflowId: string;
+  workflowSha256: string;
+  inputSchema: SemanticQueryOutputSchema;
+  outputSchema: SemanticQueryOutputSchema;
+}
+
+/** Operator installation. Credentials never belong to a Program or approval. */
+export interface SemanticN8nConfig {
+  baseUrl: string;
+  apiTokenFile: string;
+  webhookTokenFile: string;
+  workflows: Array<{
+    contextGraphId: string;
+    executorAgentAddress: string;
+    workflowId: string;
+    workflowSha256: string;
+  }>;
+}
+
 /** Tenant-owned invoke grant. Only the host may select the executor and data graph. */
 export interface SemanticProgramBinding {
   /** API-owned permission revision; changes invalidate previous invocation identities. */
@@ -75,6 +97,8 @@ export interface SemanticProgramBinding {
   assetCreation?: { toolIri: string };
   /** Native graph-scoped read-only chat. Pins the operator model/tool configuration. */
   localLlm?: { toolIri: string; configurationSha256: string };
+  /** Requires both this tenant grant and an operator-installed workflow. */
+  n8n?: SemanticN8nGrant;
   /** TypeScript calls share these tool grants and may also invoke pinned child operations. */
   typescript?: SemanticTypeScriptGrant;
   /** Output assets inherit this execution layer; defaults to wm for compatibility. */

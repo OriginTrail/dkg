@@ -102,6 +102,14 @@ export interface SparqlReadPermission {
   outputSchema: OutputSchema;
 }
 
+export interface N8nPermission {
+  toolIri: 'urn:dkg:tool:n8n';
+  workflowId: string;
+  workflowSha256: string;
+  inputSchema: OutputSchema;
+  outputSchema: OutputSchema;
+}
+
 export interface QueryPermission { selector: string; outputSchema: OutputSchema }
 
 export interface ApproveProgram extends Operation {
@@ -114,6 +122,7 @@ export interface ApproveProgram extends Operation {
   query?: QueryPermission;
   assetCreation?: { toolIri: string };
   localLlm?: { toolIri: string; configurationSha256: string };
+  n8n?: N8nPermission;
   typescript?: {
     /** Pinned tool identities; the server fills these from the stored Program. */
     requiredTools?: string[];
@@ -136,6 +145,7 @@ export interface ProgramBinding {
   query?: QueryPermission & { queryIri: string; definitionSha256: string; outputSchemaSha256: string };
   assetCreation?: { toolIri: string };
   localLlm?: { toolIri: string; configurationSha256: string };
+  n8n?: N8nPermission;
   typescript?: {
     /** Pinned tool identities; the server fills these from the stored Program. */
     requiredTools?: string[];
@@ -207,4 +217,5 @@ export interface RequestedToolPermissions {
   sparqlRead?: SparqlReadPermission;
   assetCreation?: { toolIri: string };
   localLlm?: { toolIri: string };
+  n8n?: N8nPermission;
 }

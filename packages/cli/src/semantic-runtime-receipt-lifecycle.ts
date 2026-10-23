@@ -69,7 +69,9 @@ export async function persistKnowledgeAsset(
       if (written.size !== expected.size || [...written].some(q => !expected.has(q))) conflict(`${errors.subject} write is incomplete or conflicts`);
       await assertAuthorized();
       save({ phase: 'finalize' });
-      await agent.assertion.finalize(contextGraphId, name, lane);
+      // Lane selection does not select the signing author. Seal as the same
+      // approved executor whose namespace was reserved by create().
+      await agent.assertion.finalize(contextGraphId, name, { ...lane, authorAgentAddress: agentAddress });
       history = await read();
     } else if (actual.size !== expected.size) conflict(`${errors.subject} sealed content differs from the expected receipt`);
     if (!history?.wmCurrentAssertion) uncertain();

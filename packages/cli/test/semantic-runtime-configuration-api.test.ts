@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { n8nWorkflowSha256 } from '../src/semantic-runtime-n8n-contract.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -372,6 +373,56 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     const result = await f.manager.programs.invoke(operation);
     expect(result.outputs).toEqual([6]); expect(result.trace?.calls).toEqual([expect.objectContaining({ kind: 'program', target: f.program.programIri,
       status: 'succeeded', result: 6, durationMs: expect.any(Number), executionIri: expect.stringMatching(/^urn:sr:execution:/) })]);
+  });
+
+  it('invokes an n8n-backed Program KA from a signed client and a parent Program, with durable replay and revocation', async () => {
+    const n8nTool = 'urn:dkg:tool:n8n';
+    const definition = { versionId: 'reviewed-version-1', nodes: [{ id: 'normalize', name: 'Normalize', type: 'n8n-nodes-base.set', typeVersion: 3.4,
+      parameters: {} }], connections: {}, settings: { executionOrder: 'v1' } };
+    const schema = { type: 'object', required: ['text'], additionalProperties: false,
+      properties: { text: { type: 'string', maxLength: 256 } } };
+    const n8n = { toolIri: n8nTool, workflowId: 'normalize', workflowSha256: n8nWorkflowSha256(definition), inputSchema: schema, outputSchema: schema };
+    const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
+      export function run(input: unknown) { return invoke_tool('${n8nTool}', input); }`, { graphId: graph, n8n }, [n8nTool]);
+    const apiTokenFile = join(f.target.dir, 'n8n-api'), webhookTokenFile = join(f.target.dir, 'n8n-webhook');
+    writeFileSync(apiTokenFile, 'private-api-token-for-local-test', { mode: 0o600 });
+    writeFileSync(webhookTokenFile, 'private-webhook-token-for-local-test', { mode: 0o600 });
+    f.target.config.semanticRuntime.n8n = { baseUrl: 'http://127.0.0.1:5679', apiTokenFile, webhookTokenFile,
+      workflows: [{ contextGraphId: graph, executorAgentAddress: owner, workflowId: 'normalize', workflowSha256: n8n.workflowSha256 }] };
+    let dispatches = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: URL, init: RequestInit) => {
+      const u = new URL(String(url));
+      if (u.pathname === '/api/v1/workflows/normalize') return Response.json({ ...definition, id: 'normalize', active: true });
+      if (u.pathname === '/webhook/dkg-capability-normalize') {
+        dispatches++; const { input } = JSON.parse(String(init.body));
+        return Response.json({ executionId: String(dispatches), output: { text: input.text.trim().toUpperCase() } });
+      }
+      return Response.json({ id: u.pathname.split('/').pop(), workflowId: 'normalize', status: 'success', workflowVersionId: 'reviewed-version-1', workflowData: definition });
+    }));
+    try {
+      const approval = await f.approve();
+      expect(approval.resolution?.executable).toBe(true);
+      await f.client.routes.create({ ...f.operation, targetPeerId: f.agent.peerId });
+      const prepared = f.client.programs.prepareInvocation({ ...f.operation, inputs: [{ text: '  hello dkg  ' }] });
+      const result = await f.client.programs.invoke(prepared);
+      expect(result.outputs).toMatchObject([{ kind: 'n8n-result', n8nExecutionId: '1', output: { text: 'HELLO DKG' } }]);
+      expect(await f.client.programs.invoke(prepared)).toEqual(result); expect(dispatches).toBe(1);
+      await expect(f.client.programs.invoke({ ...prepared, inputs: [{ text: 'different' }] })).rejects.toMatchObject({ status: 409 });
+      await expect(f.client.programs.invoke({ ...f.operation, inputs: [{ text: 10 }] })).rejects.toMatchObject({ status: 422 });
+      expect(dispatches).toBe(1);
+      const parent = await f.manager.programs.upload({ graphId: sourceGraph, language: 'typescript-v1', requiredTools: [],
+        permittedPrograms: [f.program.programIri], source: `import { invoke_program } from '${toolApi}';
+          export function run(input: unknown) { return invoke_program('${f.program.programIri}', [input]); }` });
+      const parentOperation = { graphId: graph, operationIri: 'urn:test:n8n-parent' };
+      await f.manager.programs.approve({ ...parentOperation, program: parent, allowedCallers: [caller], typescript: { children: [f.operation] } });
+      await f.client.routes.create({ ...parentOperation, targetPeerId: f.agent.peerId });
+      const parentResult = await f.client.programs.invoke({ ...parentOperation, inputs: [{ text: '  composed  ' }] });
+      expect(parentResult.outputs).toMatchObject([{ output: { text: 'COMPOSED' } }]); expect(dispatches).toBe(2);
+      const receipt = await f.store.query(`SELECT ?output WHERE { GRAPH ?g { <${result.executionIri}> <${SR}output> ?output } }`);
+      expect(JSON.stringify(receipt)).toContain('HELLO DKG');
+      await f.manager.programs.revoke({ ...f.operation, expectedRevision: approval.revision });
+      await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ status: 403 }); expect(dispatches).toBe(2);
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it('stores requests, approves and executes signed remote reads without data graph membership', async () => {

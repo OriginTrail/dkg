@@ -1,3 +1,4 @@
+import { validateN8nConfig } from './semantic-runtime-n8n-contract.js';
 import { sparqlIri } from '@origintrail-official/dkg-core';
 import { type SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
 import { validateEffectiveProgramConfiguration } from './semantic-runtime-program-bindings.js';
@@ -10,6 +11,7 @@ export function validateSemanticRuntimeConfig(config: SemanticRuntimeConfig): vo
 }
 
 export function validateSemanticRuntimeSettings(config: SemanticRuntimeConfig): void {
+  if (config.n8n !== undefined) validateN8nConfig(config.n8n);
   if (config.programPolicy !== undefined) validateSemanticProgramPolicy(config.programPolicy);
   validatePositiveInteger(config.watchdogMs, 'semanticRuntime.watchdogMs', 60_000);
   validatePositiveInteger(config.startupTimeoutMs, 'semanticRuntime.startupTimeoutMs', 120_000);

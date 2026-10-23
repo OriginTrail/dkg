@@ -108,10 +108,10 @@ describe('tenant-approved asset creation through real Wasm', () => {
   it.each(['write', 'finalize'] as const)('recovers lost %s against native DKG create/history/query/finalize and SQLite reopen', async phase => {
     const store = new OxigraphStore();
     const chain = new MockChainAdapter(), wallet = new ethers.Wallet(`0x${'11'.repeat(32)}`);
-    const publisher = new DKGPublisher({ store, chain, eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair(), publisherPrivateKey: wallet.privateKey });
+    const publisher = new DKGPublisher({ store, chain, eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair(), publisherPrivateKey: new ethers.Wallet(`0x${'22'.repeat(32)}`).privateKey });
     const agent = Object.create(DKGAgent.prototype) as any;
     Object.assign(agent, { store, publisher, chain, config: {}, defaultAgentAddress: wallet.address,
-      reconciledKaAuthors: new Set(), localAgents: new Map(), log: { info() {}, warn() {}, debug() {}, error() {} } });
+      reconciledKaAuthors: new Set(), localAgents: new Map([[wallet.address, { name: 'native-executor', agentAddress: wallet.address, mode: 'custodial', privateKey: wallet.privateKey }]]), log: { info() {}, warn() {}, debug() {}, error() {} } });
     Object.defineProperty(agent, 'peerId', { value: 'native-receipt-node' });
     let next = 1n;
     agent.kaNumberAllocator = new KaNumberAllocator({ allocate: () => next++, reconcileFloor: () => {}, peekNext: () => next });
@@ -144,6 +144,7 @@ describe('tenant-approved asset creation through real Wasm', () => {
       expect((await assertion.history(graph, terminal.name)).wmCurrentAssertion).toMatch(/^[0-9a-f]{64}$/);
       expect(assertion.create).toHaveBeenCalledTimes(1);
       expect(assertion.finalize).toHaveBeenCalledTimes(1);
+      expect(assertion.finalize).toHaveBeenCalledWith(graph, terminal.name, { agentAddress: wallet.address, authorAgentAddress: wallet.address });
       expect(await assertion.query(graph, terminal.name)).toEqual(expect.arrayContaining(terminal.quads.map(q => expect.objectContaining(q))));
     } finally { journalStore.close(); await store.close(); }
   });

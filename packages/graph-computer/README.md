@@ -484,3 +484,36 @@ restrictions, child revocation, completed replay after restart, and refusal to
 repeat a failed workflow. The runtime tests exercise real Wasm concurrency,
 import restrictions, build/execution timeouts, and memory limits during both
 compilation and invocation.
+
+
+## Invoke an n8n capability KA (local PoC)
+
+An owner-approved TypeScript Program can declare `urn:dkg:tool:n8n` and call
+`invoke_tool` with a JSON input. The tenant grant pins an n8n workflow and bounded
+input/output schemas; the node operator separately installs the same workflow
+for the exact graph and executor. Its credentials and loopback origin stay in
+node configuration, outside the Program and invocation.
+
+For example, after approving the operation under its Program KA IRI:
+
+```ts
+const execution = await client.programs.invoke({
+  graphId: 'n8n-capability-poc',
+  operationIri: 'urn:demo:n8n:normalize-text:1',
+  inputs: [{ text: '  hello dkg  ' }],
+});
+// execution.outputs[0]:
+// { kind: 'n8n-result', workflowId, workflowSha256, n8nExecutionId,
+//   output: { text: 'HELLO DKG' } }
+```
+
+A permitted parent Program uses `invoke_program` with the child's Program IRI.
+Both paths retain caller authorization, exact source/approval pins, the shared
+durable effect broker and private execution receipts. Completed retries use the
+same UUID and input. An ambiguous external outcome requires inspection and is
+never automatically redispatched.
+
+See [the runnable local example](../../examples/n8n-capability/README.md) for real
+n8n execution, a real DKG node with a mock local chain boundary, readback checks
+and the companion nOS canvas. This optional tool currently supports bound
+TypeScript Programs only.

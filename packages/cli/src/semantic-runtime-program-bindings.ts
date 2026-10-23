@@ -4,6 +4,7 @@ import { canonicalizeJson, sparqlIri, validateContextGraphId, type CanonicalJson
 import type { SemanticProgramBinding, SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
 import { ethers } from 'ethers';
 
+import { validateN8nGrant } from './semantic-runtime-n8n-contract.js';
 import { validateSparqlReadGrant } from './semantic-runtime-sparql-adapter.js';
 import { validateSemanticQueryPins } from './semantic-runtime-query-pins.js';
 
@@ -24,7 +25,7 @@ function validateBindings(value: unknown, perGraph: boolean): asserts value is S
   const graphCounts = new Map<string, number>();
   for (const binding of value) {
     if (!record(binding)
-      || !keys(binding, ['operationIri', 'contextGraphId', 'enabled', 'allowedCallerAgentAddresses', 'executorAgentAddress', 'program', 'query', 'sparqlRead', 'assetCreation', 'localLlm', 'typescript', 'executionLayer', 'authorizationRevision'])
+      || !keys(binding, ['operationIri', 'contextGraphId', 'enabled', 'allowedCallerAgentAddresses', 'executorAgentAddress', 'program', 'query', 'sparqlRead', 'assetCreation', 'localLlm', 'n8n', 'typescript', 'executionLayer', 'authorizationRevision'])
       || typeof binding.enabled !== 'boolean'
       || !address(binding.executorAgentAddress)
       || !Array.isArray(binding.allowedCallerAgentAddresses)
@@ -64,6 +65,10 @@ function validateBindings(value: unknown, perGraph: boolean): asserts value is S
         throw new Error('INVALID_LOCAL_LLM_GRANT');
       }
     }
+    if (binding.n8n !== undefined) {
+      validateN8nGrant(binding.n8n);
+      if (!binding.typescript) throw new Error('INVALID_N8N_GRANT');
+    }
     if (binding.sparqlRead !== undefined) validateSparqlReadGrant(binding.sparqlRead);
     if (binding.sparqlRead && binding.assetCreation && (binding.sparqlRead as { toolIri: string }).toolIri === binding.assetCreation.toolIri) throw new Error('DUPLICATE_PROGRAM_TOOL');
     if (binding.typescript !== undefined) {
@@ -74,7 +79,7 @@ function validateBindings(value: unknown, perGraph: boolean): asserts value is S
         || !Number.isSafeInteger(grant.maxConcurrency) || Number(grant.maxConcurrency) < 1 || Number(grant.maxConcurrency) > 8
         || !Number.isSafeInteger(grant.timeoutMs) || Number(grant.timeoutMs) < 100 || Number(grant.timeoutMs) > 120000) throw new Error('INVALID_TYPESCRIPT_GRANT');
       if (grant.requiredTools !== undefined) {
-        if (!Array.isArray(grant.requiredTools) || grant.requiredTools.length > 3
+        if (!Array.isArray(grant.requiredTools) || grant.requiredTools.length > 5
           || new Set(grant.requiredTools).size !== grant.requiredTools.length
           || grant.requiredTools.some(iri => typeof iri !== 'string' || iri.length > 2048 || !/^[a-z][a-z0-9+.-]*:/i.test(iri))) throw new Error('INVALID_TYPESCRIPT_TOOLS');
         for (const iri of grant.requiredTools) sparqlIri(iri);

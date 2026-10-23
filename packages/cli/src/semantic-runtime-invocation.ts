@@ -1,3 +1,5 @@
+import { computeEffectRequestDigest } from '@origintrail-official/dkg-semantic-runtime';
+import { assertN8nValue } from './semantic-runtime-n8n-contract.js';
 import { ExecutionReceiptJournal } from '@origintrail-official/dkg-semantic-runtime';
 import { recoverTerminalExecutionReceipt } from './semantic-runtime-terminal-receipt.js';
 import { createHash } from 'node:crypto';
@@ -239,7 +241,22 @@ export function createProgramToolDispatcher(
       throw new SemanticProgramError('UNSUPPORTED_PROGRAM_TOOL', 'Unsupported WASI tool import', 422);
     }
     const effectId = `urn:sr:effect:${invocationId}:${callId}`;
+    // Materialize the owner's approved, schema-bounded workflow grant as an
+    // exact per-effect approval. The broker retains its normal approval checks.
+    let approvalId: string | undefined;
+    if (tool.operation === 'n8n/workflow' && bound?.binding.n8n) {
+      assertN8nValue(bound.binding.n8n.inputSchema, input, 'INPUT');
+      approvalId = `urn:sr:approval:n8n:${hashParts([bound.digest, effectId])}`;
+      if (!runtime.store.approval(approvalId)) runtime.store.putApproval({
+        approvalId, executionId: executionIri, effectClass: descriptor.effectClass,
+        principal: resolved.public.executingNode,
+        requestDigest: computeEffectRequestDigest(tool.operation, tool.semanticVersion!, descriptor.verb, toolIri, input),
+        notBefore: Date.now() - 1000, expiresAt: runtime.store.capability(capabilityId)!.expiresAt,
+        oneShot: true, consumedAt: null,
+      });
+    }
     const proposal = {
+      ...(approvalId ? { approvalId } : {}),
       effectId,
       executionId: executionIri,
       processId: `tool:${tool.operation}`,

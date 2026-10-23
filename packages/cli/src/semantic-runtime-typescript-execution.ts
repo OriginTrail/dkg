@@ -30,15 +30,17 @@ export function assertRequestedToolPermissions(program: StoredSemanticProgram, b
     graphId: binding.contextGraphId, executionLayer: binding.executionLayer ?? 'wm',
     ...(binding.query ? { query: { selector: binding.query.selector, outputSchema: binding.query.outputSchema } } : {}),
     ...(binding.sparqlRead ? { sparqlRead: (({ outputSchemaSha256: _outputSchemaSha256, ...grant }) => grant)(binding.sparqlRead) } : {}),
+    ...(binding.n8n ? { n8n: binding.n8n } : {}),
     ...(binding.assetCreation ? { assetCreation: binding.assetCreation } : {}),
     ...(binding.localLlm ? { localLlm: { toolIri: binding.localLlm.toolIri } } : {}),
   };
   const tools = new Set(program.requiredTools);
-  const expectedCount = Number(!!binding.query) + Number(!!binding.sparqlRead) + Number(!!binding.assetCreation) + Number(!!binding.localLlm);
+  const expectedCount = Number(!!binding.query) + Number(!!binding.sparqlRead) + Number(!!binding.assetCreation) + Number(!!binding.localLlm) + Number(!!binding.n8n);
   if (!sameSet(tools, new Set(binding.typescript?.requiredTools ?? []))
     || tools.size !== expectedCount
     || binding.sparqlRead && !tools.has(binding.sparqlRead.toolIri)
     || binding.assetCreation && !tools.has(binding.assetCreation.toolIri)
+    || binding.n8n && !tools.has(binding.n8n.toolIri)
     || binding.localLlm && !tools.has(binding.localLlm.toolIri)
     || (expectedCount > 0 && !requested)) {
     throw new SemanticProgramError('PROGRAM_BINDING_TOOL_FORBIDDEN', 'Declared tools must match the approved tool grants', 403);
@@ -46,7 +48,7 @@ export function assertRequestedToolPermissions(program: StoredSemanticProgram, b
   if (requested) {
     const normalized = { executionLayer: 'wm', ...requested,
       graphId: typeof requested.graphId === 'string' ? requested.graphId.replace(/^did:dkg:context-graph:/, '') : null };
-    if (canonicalizeJson(normalized as CanonicalJsonValue) !== canonicalizeJson(scope as CanonicalJsonValue)) {
+    if (canonicalizeJson(normalized as CanonicalJsonValue) !== canonicalizeJson(scope as unknown as CanonicalJsonValue)) {
       throw new SemanticProgramError('PROGRAM_PERMISSION_MISMATCH', 'Approval differs from the Program requested tool scope', 403);
     }
   }
