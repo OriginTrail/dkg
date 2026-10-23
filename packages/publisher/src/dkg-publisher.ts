@@ -120,7 +120,7 @@ import {
 } from './knowledge-asset-swm-staging.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { verifyPullRecoverySeal, validateGraphScopedPayloadAgainstSeal, type ResolvedAssertionSource } from './assertion-seal-recovery.js';
-import { snapshotAssertionPullOptions, verifyExactAssertionDraft, draftRecoveryError, type AssertionPullFromOptions, type AssertionPullFromResult } from './assertion-draft-recovery.js';
+import { snapshotAssertionPullOptions, verifyExactAssertionDraft, draftRecoveryError, rethrowDraftSourceFailure, type AssertionPullFromOptions, type AssertionPullFromResult } from './assertion-draft-recovery.js';
 import { resolveAssertionPullSource, type AssertionPromoteState } from './assertion-pull-source.js';
 import type { DurableRootAtomicCompanionResolver, DurableRootCompanionAdmissionWait } from
   './durable-root-atomic-companion.js';
@@ -8093,7 +8093,7 @@ export class DKGPublisher implements Publisher {
       readPublicQuads: (graph) => this.assertionScopedQuads(graph),
       readPrivateQuads: (scope) => this.privateStore.getKnowledgeAssetPrivateTriples(contextGraphId, scope, subGraphName),
     }).catch(error => {
-      if (opts?.recoverExact) throw draftRecoveryError('WM_RECOVERY_SOURCE_UNAVAILABLE');
+      if (opts?.recoverExact) rethrowDraftSourceFailure(error);
       throw error;
     });
     const { loadedSeal: selectedSeal, scope, payload: validated } = source;

@@ -1085,6 +1085,9 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect((await agent.post(path, { contextGraphId: cg, layer: 'swm' })).body.code).toBe('WM_DRAFT_CONFLICT');
       const recovered = await agent.post(path, { contextGraphId: cg, layer: 'swm', recoverExact });
       expect(recovered.status, JSON.stringify(recovered.body)).toBe(200);
+      const missingSubgraph = await agent.post(path, { contextGraphId: cg, layer: 'swm', subGraphName: 'missing' });
+      expect(missingSubgraph.status, JSON.stringify(missingSubgraph.body)).toBe(400);
+      expect(missingSubgraph.body.code).toBe('SUB_GRAPH_NOT_FOUND');
       expect(recovered.body).toMatchObject({ recovered: true, draftEvidence: {
         agentAddress: agent.agentAddress, contextGraphId: cg, privateTripleCount: 0, ...recoverExact } });
       expect((await agent.post(path, { contextGraphId: cg, layer: 'swm',
@@ -1093,6 +1096,9 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
         expect((await agent.post(path, { contextGraphId: cg, layer: 'swm', recoverExact: invalid })).status).toBe(400);
       }
       expect((await agent.post(path, { contextGraphId: cg, layer: 'swm', recoverExact, onConflict: 'replace' })).status).toBe(400);
+      const other = await registerAgentClient('ka-wrong-recovery-actor');
+      const wrongActor = await other.post(path, { contextGraphId: cg, layer: 'swm', recoverExact, agentAddress: agent.agentAddress });
+      expect(wrongActor.status).toBe(400); // Named mutation targets cannot override the bearer actor.
       expect((await fetch(`${daemon.base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contextGraphId: cg, layer: 'swm', recoverExact }) })).status).toBe(401);
 

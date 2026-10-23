@@ -1,3 +1,4 @@
+import { parseExactPullSource } from '@origintrail-official/dkg-publisher';
 import { Command } from 'commander';
 import { toErrorMessage } from '@origintrail-official/dkg-core';
 import {
@@ -541,10 +542,13 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       if (onConflict !== undefined && onConflict !== 'reject' && onConflict !== 'replace') {
         throw new Error('--on-conflict must be reject or replace');
       }
-      const recoverExact = opts.recoverExactUal !== undefined || opts.recoverExactVersion !== undefined || opts.recoverExactRoot !== undefined
-        ? { kaUal: String(opts.recoverExactUal ?? ''), assertionVersion: String(opts.recoverExactVersion ?? ''), merkleRoot: String(opts.recoverExactRoot ?? '') } : undefined;
-      if (recoverExact && (!recoverExact.kaUal || !/^[1-9]\d*$/.test(recoverExact.assertionVersion) || !/^0x[0-9a-fA-F]{64}$/.test(recoverExact.merkleRoot) || onConflict === 'replace'))
+      let recoverExact;
+      try {
+        recoverExact = parseExactPullSource(opts.recoverExactUal !== undefined || opts.recoverExactVersion !== undefined || opts.recoverExactRoot !== undefined
+          ? { kaUal: opts.recoverExactUal, assertionVersion: opts.recoverExactVersion, merkleRoot: opts.recoverExactRoot } : undefined, onConflict);
+      } catch {
         throw new Error('Exact recovery requires --recover-exact-ual, --recover-exact-version and --recover-exact-root and reject conflict mode');
+      }
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetPullFrom(requiredContextGraphId(opts), name, layer, {
         ...(recoverExact ? { recoverExact } : {}),

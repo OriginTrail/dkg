@@ -1,5 +1,6 @@
 import { ethers } from 'ethers';
-import type { Quad } from '@origintrail-official/dkg-storage';
+import { isStoreOperationTimeoutError, isStoreSchedulerBusyError, isStoreReadTransportFailure,
+  StoreOperationTimeoutError, StoreSchedulerBusyError, type Quad } from '@origintrail-official/dkg-storage';
 import type { ResolvedAssertionSource } from './assertion-seal-recovery.js';
 import { validateGraphScopedPayloadAgainstSeal } from './assertion-seal-recovery.js';
 
@@ -37,18 +38,36 @@ export interface AssertionPullFromResult extends ExactPullSource {
   draftEvidence?: AssertionDraftEvidence;
 }
 
-export function snapshotAssertionPullOptions(opts?: AssertionPullFromOptions): AssertionPullFromOptions | undefined {
-  if (!opts) return undefined;
-  const source = opts.recoverExact;
-  if (source !== undefined && (!source || typeof source !== 'object' || Array.isArray(source)
-    || typeof source.kaUal !== 'string' || !source.kaUal
-    || typeof source.assertionVersion !== 'string' || !/^[1-9]\d*$/.test(source.assertionVersion)
-    || typeof source.merkleRoot !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(source.merkleRoot)
-    || (opts.onConflict !== undefined && opts.onConflict !== 'reject'))) {
-    throw Object.assign(new Error('recoverExact requires kaUal, assertionVersion and merkleRoot strings and onConflict:"reject".'),
-      { code: 'INVALID_PULL_RECOVERY_OPTIONS' });
+/** Parse untrusted transport input and copy the pin before any asynchronous work. */
+export function parseExactPullSource(value: unknown, onConflict: unknown = 'reject'): ExactPullSource | undefined {
+  if (value === undefined) return undefined;
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const pin = value as Record<string, unknown>;
+    if (typeof pin.kaUal === 'string' && pin.kaUal
+      && typeof pin.assertionVersion === 'string' && /^[1-9]\d*$/.test(pin.assertionVersion)
+      && typeof pin.merkleRoot === 'string' && /^0x[0-9a-fA-F]{64}$/.test(pin.merkleRoot)
+      && (onConflict === undefined || onConflict === 'reject')) {
+      return { kaUal: pin.kaUal, assertionVersion: pin.assertionVersion, merkleRoot: pin.merkleRoot.toLowerCase() };
+    }
   }
-  return { ...opts, ...(source !== undefined ? { recoverExact: { kaUal: source.kaUal, assertionVersion: source.assertionVersion, merkleRoot: source.merkleRoot.toLowerCase() } } : {}) };
+  throw Object.assign(new Error('recoverExact requires kaUal, assertionVersion and merkleRoot strings and onConflict:"reject".'),
+    { code: 'INVALID_PULL_RECOVERY_OPTIONS' });
+}
+
+export function snapshotAssertionPullOptions(opts?: AssertionPullFromOptions): AssertionPullFromOptions | undefined {
+  return opts ? { ...opts, recoverExact: parseExactPullSource(opts.recoverExact, opts.onConflict) } : undefined;
+}
+
+/** Preserve retry classification without propagating store excerpts or exception causes. */
+export function rethrowDraftSourceFailure(error: unknown): never {
+  if (isStoreOperationTimeoutError(error)) throw new StoreOperationTimeoutError({
+    backend: 'triple-store', operation: 'query', timeoutMs: error.timeoutMs, outcome: 'not_started',
+  });
+  if (isStoreSchedulerBusyError(error)) throw new StoreSchedulerBusyError(error.reason, error.priority, 'query', { storeOperation: 'query' });
+  if (isStoreReadTransportFailure(error)) throw Object.assign(
+    new Error('Draft recovery could not read the store; retry verification. No draft was modified.'),
+    { code: 'WM_RECOVERY_UNAVAILABLE', retryable: true });
+  throw draftRecoveryError('WM_RECOVERY_SOURCE_UNAVAILABLE');
 }
 
 /** Bounded errors deliberately exclude RDF, parser errors and exception causes. */

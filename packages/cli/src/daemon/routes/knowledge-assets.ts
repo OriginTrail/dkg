@@ -1251,7 +1251,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         return jsonResponse(res, 200, { discarded: true });
       }
       if (verb === "pull-from") {
-        return handleKnowledgeAssetPullFrom(ctx, parsed, contextGraphId, name, subGraphName, writePreflightCallerAgentAddress);
+        return await handleKnowledgeAssetPullFrom(ctx, parsed, contextGraphId, name, subGraphName, writePreflightCallerAgentAddress);
       }
     }
 

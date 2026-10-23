@@ -2347,6 +2347,20 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(String(res.body.error)).toContain('unsealed Knowledge Asset');
   });
 
+  it.each([
+    { code: 'SUB_GRAPH_NOT_FOUND', status: 400 },
+    { code: 'KA_PROMOTE_RECOVERY_REQUIRED', status: 409 },
+    { code: 'STORE_OPERATION_TIMEOUT', status: 503 },
+  ])('wm/pull-from preserves structured $code errors after delegation', async ({ code, status }) => {
+    await startWith({ pullFrom: async () => {
+      throw Object.assign(new Error('bounded pull failure'), { code, retryable: true });
+    } });
+    const res = await post('wm/pull-from', { contextGraphId: CG_ID, layer: 'swm' });
+    expect(res.status).toBe(status);
+    expect(res.body.code).toBe(code);
+    if (status === 503) expect(res.body.retryable).toBe(true);
+  });
+
   it('wm/pull-from: an unrelated pull error still propagates (not silently 409ed)', async () => {
     // Guard: only the explicit lifecycle conflict codes map to 409. Any other
     // error rethrows to the outer handler (→ 500).
