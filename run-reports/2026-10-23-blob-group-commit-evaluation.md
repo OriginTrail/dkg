@@ -430,3 +430,9 @@ Same runtime source8bcd97b62, base556 and filesab5, same pinned journal policy a
 The warmed balanced diagnostic meets the proposed small-write budgets: **94.11% of base throughput and 0.988x base p95**. Read p99 is 1.048x base. This supports a viable steady-state path; it does not erase the original75.61%/1.326x miss, establish its cause, prove no regression, or accept a rollout. No runtime change or budget relaxation was made in response to the miss.
 
 Single-writer costs, initial blob preparation outside the timer, native read tails, uncontrolled host load and the failed complete native sample remain disclosed. Defaults stay files and the optional engine is not adopted into3406. Human performance/design/adoption review, current-head completed automated review/fullCI/EVM and fresh combined-tip live proof remain gates; no merge or activation is authorized.
+
+## Shutdown integration validation
+
+The a848 foundation integration restores prompt HTTP cancellation through preparation wrappers while preserving drain-first snapshot persistence. The optional native blob owner closes after its own complete hydration drain. A real native SQLite/HTTP handoff hold verifies HTTP close completes, physical blob close waits, exact bytes hydrate, and native close occurs once; moving cleanup into the early HTTP phase fails. Correct source/dist is restored before the final1,742-case storage run/115files (45existing gated), including69native/integrated cases. Agent layout/reuse2, managed/publisher45, source/types, routing17 and package/hygiene checks pass.
+
+Changes after measured8bcd affect shutdown ordering; the timed steady read/write paths, batching, policy and data format are unchanged. Performance measurements keep their exact8bcd attribution and all failed samples/limits. Current-head remote review/fullCI/EVM, human/default/adoption review and fresh final combined-tip live validation remain outstanding.

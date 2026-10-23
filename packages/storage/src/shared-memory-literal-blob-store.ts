@@ -1,4 +1,4 @@
-import { prepareImmutableMutation, runImmutableMutation, runRfc64AuthorCommitCasMutation, assertImmutableMutationCapability, type ImmutableStorePreparation, type ImmutableStoreMutation, type PreparedMutation } from './immutable-store-preparation.js';
+import { prepareImmutableMutation, closeImmutableStoreMutations, runImmutableMutation, runRfc64AuthorCommitCasMutation, assertImmutableMutationCapability, type ImmutableStorePreparation, type ImmutableStoreMutation, type PreparedMutation } from './immutable-store-preparation.js';
 import { LiteralBlobFileOwner } from './literal-blob-file-owner.js';
 import { assertLiteralBlobStoreOptions, type SharedMemoryLiteralBlobStoreOptions } from './literal-blob-options.js';
 export type { SharedMemoryLiteralBlobStoreOptions } from './literal-blob-options.js';
@@ -255,8 +255,8 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
   }
 
   close(): Promise<void> {
-    return this.blobWork.close(async () => {
-      try { await this.inner.close(); } finally { await this.sqliteBlobs?.close(); }
+    return closeImmutableStoreMutations(this.blobWork, this.inner, async () => {
+      await this.sqliteBlobs?.close();
     });
   }
 

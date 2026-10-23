@@ -1,3 +1,4 @@
+import type { StoreWorkDrain } from './store-work-drain.js';
 import { runLogicalStoreMutation, type Quad, type QueryOptions, type TripleStore } from './triple-store.js';
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import { assertSubjectAndInsertPayload } from './atomic-subject-insert.js';
@@ -42,6 +43,17 @@ export function prepareImmutableMutation<M extends ImmutableStoreMutation>(
   const owner = store as TripleStore & Partial<ImmutableStorePreparation>;
   return owner.prepareImmutableMutation
     ? owner.prepareImmutableMutation(mutation) : Promise.resolve(prepareDirectMutation(store, mutation));
+}
+
+/** An inner logical owner already covers preparation and can cancel dispatched work.
+ * Physical cleanup still follows this decorator's entire drain, including hydration. */
+export function closeImmutableStoreMutations(drain: StoreWorkDrain, inner: TripleStore,
+  afterInnerClose?: () => Promise<void>): Promise<void> {
+  const innerOwnsWork = typeof inner.runLogicalMutation === 'function';
+  return drain.close(async () => {
+    try { if (!innerOwnsWork) await inner.close(); }
+    finally { await afterInnerClose?.(); }
+  }, innerOwnsWork ? () => inner.close() : undefined);
 }
 
 /** Public writes own admission before preparation; prepared commits never re-enter it. */

@@ -133,7 +133,8 @@ export interface QueryOptions {
 
 export type TripleStoreQueryOptions = QueryOptions;
 
-/** Optional lifetime ownership spanning preparation, mutation and decorator bookkeeping.
+/** Optional lifetime ownership through close, spanning preparation, mutation and bookkeeping.
+ * Inner close may start while an outer owner drains its accepted work.
  * Each backend request retains its own scheduler slot. Query options remain
  * telemetry/cancellation values and never confer continuation authority.
  */
