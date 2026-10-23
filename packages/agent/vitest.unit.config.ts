@@ -68,6 +68,7 @@ export default defineConfig({
       "test/owner-share-forward.test.ts",
       "test/relayed-swm-share-receive.test.ts",
       "test/shared-memory-sync-fresh-round.test.ts",
+      "test/public-swm-data-phase.test.ts",
       "test/dkg-agent-swm-target-executor-composition.test.ts",
       "test/private-swm-recovery-lifecycle-budget.test.ts",
       'test/private-access-request-owner.test.ts',
@@ -321,6 +322,8 @@ export default defineConfig({
       "test/sync-on-connect-attempt-accounting.test.ts",
       "test/sync-on-connect-peer-job-runner.test.ts",
       "test/sync-on-connect-peer-scheduler.test.ts",
+      "test/sync-on-connect-graph-scope.test.ts",
+      "test/sync-on-connect-authority-catchup-scope.test.ts",
       "test/system-context-graph-policy.test.ts",
       "test/on-demand-agents-phonebook.test.ts",
       "test/on-demand-agents-phonebook-agent.test.ts",
@@ -427,6 +430,10 @@ export default defineConfig({
       "test/cg-resolve-refresh.test.ts",
       "test/private-cg-membership-bootstrap.test.ts",
       "test/join-approval-metadata-refetch.test.ts",
+      // #3421 — a join approval whose member list is still pending, and the
+      // members a curator's join admission recognises.
+      "test/approved-member-metadata-pending.test.ts",
+      "test/join-admission-members.test.ts",
       "test/workspace-crypto-delegatee-filter.test.ts",
       "test/swm-public-snapshot-materialization.test.ts",
       "test/swm-public-cg-plaintext.test.ts",
@@ -434,6 +441,7 @@ export default defineConfig({
       "test/swm-sender-key-peer-routes.test.ts",
       "test/swm-sender-key-overlapping-shares.test.ts",
       "test/swm-shares-through-relay.test.ts",
+      "test/public-allowlist-peers.test.ts",
       "test/swm-share-holder-cores.test.ts",
       "test/swm-owed-public-share-wiring.test.ts",
       // #2827 — SWM authority and plaintext decisions for a joined member of a

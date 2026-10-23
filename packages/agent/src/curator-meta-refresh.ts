@@ -34,6 +34,7 @@ import {
 import { getSyncBackpressureBusyError } from './sync/backpressure.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from './sync/checkpoint/state.js';
 import { fetchFreshContextGraphMeta } from './sync/requester/fresh-meta-fetch.js';
+import { watchCuratorSnapshotForApprovedMember } from './internal/context-graph-authority/approved-member-metadata-pending.js';
 import { insertWithOversizeGuard, type OversizeDrop } from './sync/oversize-filter.js';
 import type {
   SyncPageFetchOptions,
@@ -399,6 +400,22 @@ async function fetchAuthoritativeMetaSnapshot(
     false,
     'meta',
   );
+  // The proof layer owns each snapshot contract; this refresh only picks one.
+  // Public subscriptions reach it without an approved member. A join-approved
+  // member is judged by its acceptance (#2827, #2831 review), which admits
+  // exactly one definition: a public acceptance only the public definition,
+  // and only while its authority still holds after the fetch; an unproven one
+  // only the complete private definition. A peer can then neither downgrade a
+  // private graph nor leave a public graph stored as private.
+  const approvedMember = options.approvedMember
+    ?? (options.memberProof === undefined
+      ? undefined
+      : unprovenApprovedMemberAcceptance(options.memberProof));
+  // A complete snapshot from the authenticated curator that leaves the
+  // approved member out ends that member's pending approval (#3421).
+  const omissionWatch = approvedMember !== undefined && options.trustedCuratorPeerId === curatorPeerId
+    ? await watchCuratorSnapshotForApprovedMember(agent, contextGraphId, curatorPeerId, approvedMember)
+    : undefined;
   // A fresh session from offset 0, admitted as control-plane traffic (the
   // attribution of every caller is listed in `fetchFreshContextGraphMeta`).
   const result = await fetchFreshContextGraphMeta(agent, ctx, curatorPeerId, contextGraphId, {
@@ -424,17 +441,6 @@ async function fetchAuthoritativeMetaSnapshot(
     agent.syncCheckpoints.delete(result.checkpointKey);
     return undefined;
   }
-  // The proof layer owns each snapshot contract; this refresh only picks one.
-  // Public subscriptions reach it without an approved member. A join-approved
-  // member is judged by its acceptance (#2827, #2831 review), which admits
-  // exactly one definition: a public acceptance only the public definition,
-  // and only while its authority still holds after the fetch; an unproven one
-  // only the complete private definition. A peer can then neither downgrade a
-  // private graph nor leave a public graph stored as private.
-  const approvedMember = options.approvedMember
-    ?? (options.memberProof === undefined
-      ? undefined
-      : unprovenApprovedMemberAcceptance(options.memberProof));
   const acceptsAuthoritativePublicDefinition = approvedMember === undefined
     ? hasAuthoritativePublicMetaDefinition(contextGraphId, controlMetaQuads)
     : approvedMember.admittedDefinition === 'public'
@@ -474,6 +480,7 @@ async function fetchAuthoritativeMetaSnapshot(
       ctx,
       `Rejected curator metadata snapshot for "${contextGraphId}": missing an unambiguous public definition or the complete private definition and approved-member delegation proof`,
     );
+    await omissionWatch?.(controlMetaQuads);
     return undefined;
   }
   if (
