@@ -328,7 +328,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator, ImmutableStoreP
     return runImmutableMutation(this, { operation: 'rfc64AuthorCommitCasV1', input }, options);
   }
 
-  async prepareImmutableMutation(mutation: ImmutableStoreMutation): Promise<PreparedMutation<void | Rfc64AuthorCommitCasResultV1>> {
+  async prepareImmutableMutation<M extends ImmutableStoreMutation>(mutation: M): Promise<PreparedMutation<M>> {
     const operation = mutation.operation;
     assertImmutableMutationCapability(this.inner, operation);
     let command = mutation, touched: string[];
@@ -344,10 +344,10 @@ export class GraphSetIndexStore implements TripleStoreDecorator, ImmutableStoreP
       }
       default: touched = [mutation.graphUri];
     }
-    const commit = await prepareImmutableMutation(this.inner, command);
-    return async (scoped, appended = []) => {
-      let result: void | Rfc64AuthorCommitCasResultV1;
-      try { result = await commit(scoped, appended); }
+    const prepared = await prepareImmutableMutation(this.inner, command);
+    return { operation, commit: async (scoped, appended) => {
+      let result;
+      try { result = await prepared.commit(scoped, appended); }
       catch (error) {
         const observeFailure = this.enabled || operation === 'replaceAssetGroup' || operation === 'replaceGraphAndSubject';
         if (operation !== 'insert' && observeFailure && !isStoreOperationNotStarted(error, operation)) this.scheduleFullRefresh(operation);
@@ -356,13 +356,13 @@ export class GraphSetIndexStore implements TripleStoreDecorator, ImmutableStoreP
       if (!this.enabled || (operation === 'rfc64AuthorCommitCasV1' && result === 'conflict')) return result;
       if (operation === 'insert') {
         // Changelog adds its markers only after preparation and sequence allocation.
-        const graphs = normalizeGraphUris([...touched, ...namedGraphsFromQuads(appended)]);
+        const graphs = normalizeGraphUris([...touched, ...namedGraphsFromQuads(appended ?? [])]);
         if (graphs.length) { this.bumpMutation(); this.addGraphs(graphs, operation); }
       } else {
         this.bumpMutation(); await this.maintainTouchedGraphs(touched, operation, scoped);
       }
       return result;
-    };
+    } };
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {

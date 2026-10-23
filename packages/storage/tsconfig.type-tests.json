@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "rootDir": "../.."
+  },
+  "include": [
+    "src",
+    "test/immutable-preparation.typecheck.ts"
+  ]
+}

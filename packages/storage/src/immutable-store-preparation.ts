@@ -17,31 +17,38 @@ export type ImmutableStoreMutation =
   | { operation: 'rfc64AuthorCommitCasV1'; input: Rfc64AuthorCommitCasInputV1 };
 export type ImmutableMutationResult<M extends ImmutableStoreMutation> =
   M extends { operation: 'rfc64AuthorCommitCasV1' } ? Rfc64AuthorCommitCasResultV1 : void;
-/** Only insert accepts appended marker quads; every layer forwards one commit. */
-export type PreparedMutation<T = void> = (options?: QueryOptions, appendedQuads?: readonly Quad[]) => Promise<T>;
+export type MutationCommit<T = void> = (options?: QueryOptions) => Promise<T>;
+/** The admitted operation owns its result and only insert can append markers. */
+export interface PreparedMutation<M extends ImmutableStoreMutation> {
+  readonly operation: M['operation'];
+  readonly commit: (options?: QueryOptions,
+    appendedQuads?: M extends { operation: 'insert' } ? readonly Quad[] : never) => Promise<ImmutableMutationResult<M>>;
+}
+export type PreparedInsertMutation = PreparedMutation<Extract<ImmutableStoreMutation, { operation: 'insert' }>>;
+type AnyPreparedMutation = {
+  [O in ImmutableStoreMutation['operation']]: PreparedMutation<Extract<ImmutableStoreMutation, { operation: O }>>;
+}[ImmutableStoreMutation['operation']];
 export interface ImmutableStorePreparation {
-  prepareImmutableMutation(mutation: ImmutableStoreMutation): Promise<PreparedMutation<void | Rfc64AuthorCommitCasResultV1>>;
+  prepareImmutableMutation<M extends ImmutableStoreMutation>(mutation: M): Promise<PreparedMutation<M>>;
 }
 
 /** Each decorator composes directly with its inner boundary; never search past it. */
 export function prepareImmutableMutation<M extends ImmutableStoreMutation>(
   store: TripleStore, mutation: M,
-): Promise<PreparedMutation<ImmutableMutationResult<M>>> {
+): Promise<PreparedMutation<M>> {
   if (mutation.operation === 'replaceSubjectAndInsert') {
     assertSubjectAndInsertPayload(mutation.graphUri, mutation.subject, mutation.replacementQuads, mutation.insertQuads);
   }
   const owner = store as TripleStore & Partial<ImmutableStorePreparation>;
-  const prepared = owner.prepareImmutableMutation
+  return owner.prepareImmutableMutation
     ? owner.prepareImmutableMutation(mutation) : Promise.resolve(prepareDirectMutation(store, mutation));
-  // The discriminant binds both the adapter dispatch and its result type.
-  return prepared as Promise<PreparedMutation<ImmutableMutationResult<M>>>;
 }
 
 /** Public writes own admission before preparation; prepared commits never re-enter it. */
 export function runImmutableMutation<M extends ImmutableStoreMutation>(store: TripleStore, mutation: M,
   options?: QueryOptions): Promise<ImmutableMutationResult<M>> {
   return runLogicalStoreMutation(store, mutation.operation, options, async scoped =>
-    (await prepareImmutableMutation(store, mutation))(scoped));
+    (await prepareImmutableMutation(store, mutation)).commit(scoped));
 }
 
 export function assertImmutableMutationCapability(store: TripleStore, operation: ImmutableStoreMutation['operation']): void {
@@ -49,41 +56,37 @@ export function assertImmutableMutationCapability(store: TripleStore, operation:
   if (typeof store[operation] !== 'function') throw new UnsupportedTripleStoreCapabilityError(operation, 'immutable mutation');
 }
 
-function prepareDirectMutation(store: TripleStore, mutation: ImmutableStoreMutation): PreparedMutation<void | Rfc64AuthorCommitCasResultV1> {
+function prepareDirectMutation<M extends ImmutableStoreMutation>(store: TripleStore, mutation: M): PreparedMutation<M>;
+function prepareDirectMutation(store: TripleStore, mutation: ImmutableStoreMutation): AnyPreparedMutation {
   assertImmutableMutationCapability(store, mutation.operation);
-  let commit: PreparedMutation<void | Rfc64AuthorCommitCasResultV1>;
   switch (mutation.operation) {
     case 'insert': {
       const rows = [...mutation.quads];
-      return (options, appended = []) => store.insert([...rows, ...appended], options);
+      return { operation: mutation.operation, commit: (options, appended = []) => store.insert([...rows, ...appended], options) };
     }
     case 'replaceGraph': {
       const rows = [...mutation.quads];
-      commit = options => store.replaceGraph!(mutation.graphUri, rows, options); break;
+      return { operation: mutation.operation, commit: options => store.replaceGraph!(mutation.graphUri, rows, options) };
     }
     case 'replaceAssetGroup': {
       const assets = mutation.assets.map(asset => ({ ...asset, graphQuads: [...asset.graphQuads], metadataQuads: [...asset.metadataQuads] }));
-      commit = options => store.replaceAssetGroup!(assets, options); break;
+      return { operation: mutation.operation, commit: options => store.replaceAssetGroup!(assets, options) };
     }
     case 'replaceGraphAndSubject': {
       const rows = [...mutation.graphQuads], metadata = [...mutation.metadataQuads];
-      commit = options => store.replaceGraphAndSubject!(mutation.graphUri, rows, mutation.metaGraphUri, mutation.metadataSubject, metadata, options); break;
+      return { operation: mutation.operation, commit: options => store.replaceGraphAndSubject!(mutation.graphUri, rows, mutation.metaGraphUri, mutation.metadataSubject, metadata, options) };
     }
     case 'replaceSubject': {
       const rows = [...mutation.quads];
-      commit = options => store.replaceSubject!(mutation.graphUri, mutation.subject, rows, options); break;
+      return { operation: mutation.operation, commit: options => store.replaceSubject!(mutation.graphUri, mutation.subject, rows, options) };
     }
     case 'replaceSubjectAndInsert': {
       const rows = [...mutation.replacementQuads], inserted = [...mutation.insertQuads];
-      commit = options => store.replaceSubjectAndInsert!(mutation.graphUri, mutation.subject, rows, inserted, options); break;
+      return { operation: mutation.operation, commit: options => store.replaceSubjectAndInsert!(mutation.graphUri, mutation.subject, rows, inserted, options) };
     }
     case 'rfc64AuthorCommitCasV1': {
       const input = sourceFromNormalizedRfc64AuthorCommitCasV1(normalizeRfc64AuthorCommitCasV1(mutation.input));
-      commit = options => store.rfc64AuthorCommitCasV1!(input, options); break;
+      return { operation: mutation.operation, commit: options => store.rfc64AuthorCommitCasV1!(input, options) };
     }
   }
-  return (options, appended) => {
-    if (appended?.length) return Promise.reject(new Error('Only insert accepts appended immutable mutation quads'));
-    return commit(options);
-  };
 }

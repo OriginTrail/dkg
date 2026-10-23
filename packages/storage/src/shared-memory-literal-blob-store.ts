@@ -153,9 +153,9 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
     return runImmutableMutation(this, { operation: 'rfc64AuthorCommitCasV1', input }, options);
   }
 
-  async prepareImmutableMutation(mutation: ImmutableStoreMutation): Promise<PreparedMutation<void | Rfc64AuthorCommitCasResultV1>> {
+  async prepareImmutableMutation<M extends ImmutableStoreMutation>(mutation: M): Promise<PreparedMutation<M>> {
     assertImmutableMutationCapability(this.inner, mutation.operation);
-    let prepared: ImmutableStoreMutation;
+    let prepared: M;
     switch (mutation.operation) {
       case 'insert': case 'replaceGraph': case 'replaceSubject':
         prepared = { ...mutation, quads: await this.externalizeQuads(mutation.quads) }; break;

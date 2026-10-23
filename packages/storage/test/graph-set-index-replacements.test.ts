@@ -129,7 +129,7 @@ describe.each(OPERATIONS)('graph index %s replacement lifecycle', (operation) =>
       : { operation, graphUri: GRAPH, subject: SUBJECT, replacementQuads: quads, insertQuads: [] };
     const commit = await store.prepareImmutableMutation(command);
     quads.length = 0;
-    await inner.runLogicalMutation(operation, undefined, options => commit(options));
+    await inner.runLogicalMutation(operation, undefined, options => commit.commit(options));
     expect(inner.calls).toHaveLength(1);
     expect(inner.calls[0]!.args[operation === 'replaceGraph' ? 1 : 2]).toEqual(expected);
     expect(inner.scopes).toEqual([operation]);

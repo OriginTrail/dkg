@@ -1,5 +1,5 @@
 import { composeTripleStoreCommitment, type TripleStoreCommitCapability } from './persistence.js';
-import { prepareImmutableMutation, type PreparedMutation } from './immutable-store-preparation.js';
+import { prepareImmutableMutation, type MutationCommit, type PreparedInsertMutation } from './immutable-store-preparation.js';
 import { TwoPhaseMutationQueue } from './two-phase-mutation-queue.js';
 import type { ChangelogStoreOptions } from './changelog-store-options.js';
 export type { ChangelogStoreOptions } from './changelog-store-options.js';
@@ -273,8 +273,8 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     // decorator's own internal writes (below, via this.inner) touch it.
     const safe = this.stripReserved(quads);
     const touched = this.attributableGraphs(safe);
-    const commitInsert = (insert: PreparedMutation): PreparedMutation => async scoped => {
-      if (touched.length === 0) return insert(scoped);
+    const commitInsert = (insert: PreparedInsertMutation): MutationCommit => async scoped => {
+      if (touched.length === 0) return insert.commit(scoped);
       await this.ensureSeeded();
       let candidate = this.seq;
       const markers: Quad[] = [];
@@ -285,7 +285,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
         markers.push(...markerQuads(candidate, graph, 'upsert'));
       }
       // Data + markers in ONE insert() → one backend transaction → atomic.
-      await insert(scoped, markers);
+      await insert.commit(scoped, markers);
       this.adoptDurableSeq(candidate); // advance only after durable success (gapless)
       await this.noteHighWater();
       this.fire(records);
@@ -714,7 +714,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   // Internals
   // ------------------------------------------------------------------
 
-  private executeMutation<T>(operation: StoreOperation, options: QueryOptions | undefined, commit: PreparedMutation<T>): Promise<T> {
+  private executeMutation<T>(operation: StoreOperation, options: QueryOptions | undefined, commit: MutationCommit<T>): Promise<T> {
     return runLogicalStoreMutation(this.inner, operation, options, async scoped => {
       try { return await commit(scoped); }
       catch (error) {
@@ -724,27 +724,27 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     });
   }
 
-  private runExclusiveMutation<T>(operation: StoreOperation, options: QueryOptions | undefined, work: PreparedMutation<T>): Promise<T> {
+  private runExclusiveMutation<T>(operation: StoreOperation, options: QueryOptions | undefined, work: MutationCommit<T>): Promise<T> {
     return this.mutations.run(() => this.executeMutation(operation, options, work));
   }
 
   private runPreparedExclusiveMutation<T>(operation: StoreOperation, options: QueryOptions | undefined,
-    prepare: () => Promise<PreparedMutation<T>>): Promise<T> {
+    prepare: () => Promise<MutationCommit<T>>): Promise<T> {
     return this.mutations.runPrepared(prepare, commit => this.executeMutation(operation, options, commit));
   }
 
   /** Shared outcome-aware lifecycle for counted and certified atomic mutations. */
   private runAtomicMutation<T>(args: {
     operation: StoreOperation; touchedGraphs: readonly string[]; options?: QueryOptions; committed?: (result: T) => boolean;
-  } & ({ prepare: () => Promise<PreparedMutation<T>>; execute?: never } | { execute: PreparedMutation<T>; prepare?: never })): Promise<T> {
-    const withBookkeeping = (commit: PreparedMutation<T>): PreparedMutation<T> => async options => {
+  } & ({ prepare: () => Promise<{ commit: MutationCommit<T> }>; execute?: never } | { execute: MutationCommit<T>; prepare?: never })): Promise<T> {
+    const withBookkeeping = (commit: MutationCommit<T>): MutationCommit<T> => async options => {
       const result = await commit(options);
       if (args.committed?.(result) ?? true) await this.markPostMutation(args.touchedGraphs, options);
       return result;
     };
     const prepare = args.prepare;
     return prepare
-      ? this.runPreparedExclusiveMutation(args.operation, args.options, async () => withBookkeeping(await prepare()))
+      ? this.runPreparedExclusiveMutation(args.operation, args.options, async () => { const prepared = await prepare(); return withBookkeeping(options => prepared.commit(options)); })
       : this.runExclusiveMutation(args.operation, args.options, withBookkeeping(args.execute));
   }
 

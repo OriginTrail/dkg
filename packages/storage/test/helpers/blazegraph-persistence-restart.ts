@@ -62,21 +62,27 @@ public class JournalPolicy {
     const commitment = store.commitment;
     assert.ok(commitment);
     assert.equal(commitment.durability, 'restart-durable');
-    const commit = commitment.capture();
-    await store.update('INSERT DATA { GRAPH <urn:durability> { <urn:update> <urn:value> "acknowledged update" } }');
-    await store.insert([{ subject: 'urn:nquads', predicate: 'urn:value', object: '"acknowledged N-Quads"', graph: 'urn:durability' }]);
-    await commit();
-    await docker('kill', '--signal', 'KILL', name);
-    assert.equal(await docker('inspect', '--format', '{{.State.ExitCode}}', name), '137');
-    await docker('start', name);
-    // Docker may assign another ephemeral host port when the same container restarts.
-    endpoint = `http://${await docker('port', name, `${metadata.containerPort}/tcp`)}/bigdata/namespace/kb/sparql`;
-    await ready(); await store.close(); store = new BlazegraphStore(endpoint);
-    assert.deepEqual(await store.query('SELECT ?s ?o WHERE { GRAPH <urn:durability> { ?s <urn:value> ?o } } ORDER BY ?s'), {
-      type: 'bindings', variables: ['s', 'o'], bindings: [
-        { s: 'urn:nquads', o: '"acknowledged N-Quads"' }, { s: 'urn:update', o: '"acknowledged update"' },
-      ],
-    });
+    const cases = [
+      { subject: 'urn:update', value: '"acknowledged update"',
+        write: () => store!.update('INSERT DATA { GRAPH <urn:durability> { <urn:update> <urn:value> "acknowledged update" } }') },
+      { subject: 'urn:nquads', value: '"acknowledged N-Quads"',
+        write: () => store!.insert([{ subject: 'urn:nquads', predicate: 'urn:value', object: '"acknowledged N-Quads"', graph: 'urn:durability' }]) },
+    ];
+    for (const scenario of cases) {
+      const commit = store.commitment!.capture();
+      await scenario.write();
+      await commit();
+      // This write must be the last mutation: a later commit could mask a premature ACK.
+      await docker('kill', '--signal', 'KILL', name);
+      assert.equal(await docker('inspect', '--format', '{{.State.ExitCode}}', name), '137');
+      await docker('start', name);
+      endpoint = `http://${await docker('port', name, `${metadata.containerPort}/tcp`)}/bigdata/namespace/kb/sparql`;
+      await ready(); await store.close(); store = new BlazegraphStore(endpoint);
+      assert.deepEqual(await store.query(`SELECT ?o WHERE { GRAPH <urn:durability> { <${scenario.subject}> <urn:value> ?o } }`), {
+        type: 'bindings', variables: ['o'], bindings: [{ o: scenario.value }],
+      });
+      console.log(`Independent acknowledged-write SIGKILL/reopen passed: ${scenario.subject}`);
+    }
     console.log(`Blazegraph acknowledged-write SIGKILL/reopen passed: ${metadata.image}; ${policy.replace(/\n/g, '; ')}`);
   } finally {
     await store?.close();
