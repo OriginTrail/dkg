@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { PROTOCOL_SYNC, contextGraphWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
 import { InMemoryPeerSyncLease, runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
 import { ordinaryLane } from './_helpers/run-sync-on-connect.js';
 import {
@@ -8,6 +8,7 @@ import {
 } from '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 import { classifySharedMemoryFreshness } from '../src/sync/shared-memory-freshness.js';
 import {
+  DKG,
   PEER,
   callSelectedSharedMemoryFromPeerDetailed,
   callSelectedSharedMemorySummary,
@@ -385,7 +386,17 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
 
   it('reuses a complete retained manifest when a later aggregate-data phase fails', async () => {
     const publicCg = 'selected-complete-metadata-reuse';
-    const manifest = snapshotManifest(publicCg, 3);
+    const snapshots = snapshotManifest(publicCg, 3);
+    // A legacy root as well: its rows travel in the aggregate data phase, so the round fetches it (#3421).
+    const manifest = {
+      ...snapshots,
+      meta: [...snapshots.meta, {
+        subject: 'urn:selected-swm-legacy-op',
+        predicate: `${DKG}rootEntity`,
+        object: 'urn:selected-swm-legacy-root',
+        graph: contextGraphWorkspaceMetaGraphUri(publicCg),
+      }],
+    };
     const harness = createSelectedSwmLifecycleHarness({
       contextGraphs: { public: publicCg },
       manifest,

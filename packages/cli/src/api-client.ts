@@ -32,14 +32,14 @@ import {
   finalizedPublishOptionsPayload,
   type KnowledgeAssetFinalizedPublishOptions,
 } from './finalized-publish-options.js';
-import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
-import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import { parseRegisterPcaAgentResult, type RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import {
   serializeStatusQuery,
   type StatusQueryOptions,
   type StoreQuadsStatusFields,
   type StoreReachabilityFields,
 } from './status-store-quads-wire.js';
+import type { DaemonRuntimeStatusFields } from './status-runtime-wire.js';
 import type {
   CatchupContextGraphIdentity,
   CatchupStatusResponse,
@@ -441,7 +441,7 @@ export interface RelayStatusResponse {
   configuredAnnounceAddresses: string[];
 }
 
-export interface DaemonStatusResponse extends StoreQuadsStatusFields, StoreReachabilityFields {
+export interface DaemonStatusResponse extends StoreQuadsStatusFields, StoreReachabilityFields, DaemonRuntimeStatusFields {
   name: string;
   peerId: string;
   nodeRole?: string;
@@ -2114,20 +2114,20 @@ export class ApiClient {
   }
 
   /**
-   * Forward a previously-signed join delegation to the curator over
-   * P2P. The daemon dials `curatorPeerId` directly (DHT-resolved if
-   * not currently connected). Returns the delivery count so callers can detect
-   * "no curator reachable" without inspecting log output.
+   * Forward a previously-signed join delegation to the curator over P2P (the daemon dials
+   * `curatorPeerId` directly). Returns the delivery count so callers can detect "no curator
+   * reachable"; `reRequest` sends a request even while an approval's member list is pending.
    */
   async requestJoin(
     contextGraphId: string,
     delegation: unknown,
     curatorPeerId: string,
     agentName?: string,
+    options: { reRequest?: boolean } = {},
   ): Promise<ContextGraphJoinResult> {
     return this.post(
       `/api/context-graph/${encodeURIComponent(contextGraphId)}/request-join`,
-      { delegation, curatorPeerId, ...(agentName ? { agentName } : {}) },
+      { delegation, curatorPeerId, ...(agentName ? { agentName } : {}), ...(options.reRequest ? { reRequest: true } : {}) },
     );
   }
 

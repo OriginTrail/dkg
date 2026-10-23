@@ -1154,6 +1154,39 @@ describe('RFC-64 unregistered replica authority', () => {
     expect(warn.mock.calls.filter(([, message]) => String(message)
       .includes('authority refresh incomplete'))).toHaveLength(1);
   });
+
+  it('catches up only the re-established graph after the refresh loop\'s own retry', async () => {
+    const receiver = await startSeededPublicReplica('unregistered-seed-refresh-retry-catchup');
+    // The first acceptance's catch-up window passes before any peer connects.
+    await new Promise<void>((resolve) => setTimeout(resolve, 3_100));
+    const remotePeerId = '12D3KooWRefreshRetryCatchupPeer';
+    vi.spyOn(receiver.node.libp2p, 'getPeers').mockReturnValue(
+      [{ toString: () => remotePeerId }] as never,
+    );
+    const queueSync = vi.spyOn(receiver, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
+    const owner = (receiver as any).rfc64PublicCatalogOwnerV1;
+    vi.spyOn(receiver, 'readRfc64UnregisteredAuthoritySeedV1')
+      .mockRejectedValueOnce(new Error('seed inventory unavailable'));
+
+    owner.requestAuthorityRefresh();
+    await owner.whenIdle();
+    await expect(receiver.canUseSharedMemoryForContextGraph(CONTEXT_GRAPH_ID))
+      .resolves.toBe(false);
+    expect(queueSync).not.toHaveBeenCalled();
+
+    // The loop's own retry accepts the graph again, and the catch-up that
+    // acceptance schedules asks the connected peer for this graph only.
+    await vi.waitFor(() => expect(queueSync).toHaveBeenCalledOnce(), {
+      timeout: RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.failureRetryDelaysMs[0]! + 3_000 + 4_000,
+      interval: 100,
+    });
+    expect(queueSync).toHaveBeenCalledWith(remotePeerId, expect.any(Function), 0, {
+      authorityScopeChanged: true,
+      authorityScopeContextGraphIds: new Set([CONTEXT_GRAPH_ID]),
+    });
+    await expect(receiver.canUseSharedMemoryForContextGraph(CONTEXT_GRAPH_ID))
+      .resolves.toBe(true);
+  });
 });
 
 /**

@@ -137,6 +137,22 @@ describe('DKGAgent same-instance restart re-subscribes gossip', () => {
     await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
   });
 
+  it('keeps the default store writable across repeated same-instance restarts', async () => {
+    agent = (await createEdgeAgent('RestartDefaultStoreWrites')).agent;
+    await agent.start();
+    for (let generation = 0; generation < 3; generation += 1) {
+      const subject = `urn:restart-write:${generation}`;
+      await agent.store.insert([{ graph: 'urn:restart-writes', subject, predicate: 'urn:value', object: '"retained"' }]);
+      await expect(agent.store.query(`ASK { GRAPH <urn:restart-writes> { <${subject}> <urn:value> "retained" } }`))
+        .resolves.toMatchObject({ value: true });
+      await agent.stop();
+      await agent.start();
+    }
+    const result = await agent.store.query('SELECT ?s WHERE { GRAPH <urn:restart-writes> { ?s <urn:value> "retained" } }');
+    expect(result).toMatchObject({ type: 'bindings' });
+    if (result.type === 'bindings') expect(result.bindings).toHaveLength(3);
+  }, 60_000);
+
   it('re-subscribes a subscribed context graph and the system graphs on the fresh manager, on every restart', async () => {
     const boot = await createEdgeAgent('RestartGossipTopics');
     agent = boot.agent;

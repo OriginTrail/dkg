@@ -1462,11 +1462,10 @@ export class DKGAgent extends DKGAgentBase {
       chainAuthorityReadBudgets: resolveChainAuthorityReadBudgets(config.chainConfig),
     };
 
-    const port = config.listenPort ?? 0;
-    const host = config.listenHost ?? '0.0.0.0';
     const nodeConfig: DKGNodeConfig = {
-      listenAddresses: [`/ip4/${host}/tcp/${port}`],
+      listenAddresses: [`/ip4/${config.listenHost ?? '0.0.0.0'}/tcp/${config.listenPort ?? 0}`],
       announceAddresses: config.announceAddresses,
+      announcePublicAddressesOnly: config.publicAddressesOnly,
       bootstrapPeers: config.bootstrapPeers,
       relayPeers: config.relayPeers,
       otherNetworkRelays: config.otherNetworkRelays,
