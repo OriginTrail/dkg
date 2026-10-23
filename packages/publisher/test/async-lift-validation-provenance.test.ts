@@ -87,12 +87,15 @@ describe('GH#3419 pre-validation provenance', () => {
     } finally { await readStore.close(); server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(e => e ? reject(e) : resolve())); }
   });
 
-  it('keeps a resolved payload count mismatch terminal and separate from dependency outages', async () => {
+  it.each([
+    { slice: 'public', overrides: { quads: [] } },
+    { slice: 'private', overrides: { privateQuads: [{ subject: 'urn:private', predicate: 'urn:p', object: '"private fixture"' }] } },
+  ])('keeps a resolved $slice payload count mismatch terminal and separate from dependency outages', async ({ overrides }) => {
     const h = createAsyncLift2270Harness();
     const { stage } = createStoreRejectionFixtures(h);
     let executions = 0;
     const publisher = h.createPublisher({ ...RETRY_LANE,
-      resolvedSliceOverrides: { quads: [] },
+      resolvedSliceOverrides: overrides,
       knowledgeAssetVmPublishHandler: { execute: async () => { executions++; return confirmedPublishResult(); } },
     });
     await stage();
