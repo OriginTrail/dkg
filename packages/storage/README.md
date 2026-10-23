@@ -91,6 +91,56 @@ writes. Recovery captures a fresh barrier and reapplies its metadata before
 retiring the journal. Ordinary `flush()` remains available but cannot prove that
 lost mutations were reapplied.
 
+### Optional durable blob group commit
+
+Large SWM literals can use an engine-owned SQLite blob layout:
+
+```typescript
+largeLiteralStorage: {
+  directory: './data/literal-blobs',
+  persistence: 'sqlite-wal',
+}
+```
+
+The default remains `files`. The optional layout uses the SQLite engine bundled
+with Node, with no additional native dependency or Oxigraph build. It requires
+SQLite 3.51.3 or later, or the patched 3.50.7/3.44.6 branches, to include the
+[upstream WAL-reset fix](https://www.sqlite.org/wal.html#walreset). An unsupported
+runtime rejects the option before opening the blob database; it never silently
+falls back to a weaker durability policy.
+
+One worker writes immutable BLOB bytes in bounded groups of up to eight members
+and 2 MiB (a single larger term is allowed). It verifies WAL, FULL synchronous,
+fullfsync and checkpoint_fullfsync policy. Every member waits for its exact
+native COMMIT; later arrivals need another commit. Failed transactions reject,
+close their native connection and retry normally. Successful preparations retain
+the existing bounded success cache. A separate read-only worker allows hydrated
+reads to proceed during a slow writer commit. Accepted mutations and queries
+drain through preparation and hydration before close. None of this supplies a
+missing RDF-backend commitment: stock managed Oxigraph remains uncertified.
+
+The versioned database is `literal-blobs-v1.sqlite`. RDF hash references and
+serialized literal bytes are unchanged. Existing hash files remain readable and
+are not automatically migrated or deleted. Query byte limits are checked before
+materializing stored BLOB values; hashes and UTF-8 are verified on read.
+
+For backup or rollback, stop the node and retain the **whole blob directory**.
+An older binary cannot read the new database layout. Before starting that binary,
+export its entries into legacy hash files with the built version of this package:
+
+```sh
+node packages/storage/dist/export-literal-blobs.js ./data/literal-blobs ./data/literal-blobs
+```
+
+The exporter opens the source read-only, verifies every term and persists each
+hash file through the same writer and directory barriers as the legacy layout.
+It retains the source database and existing files, rejects corrupt/conflicting
+bytes, and can be rerun after an interrupted export. The default per-term export
+limit is 256 MiB; the internal `exportLiteralBlobs` function accepts an explicit
+higher bound when required. Remove the new persistence setting from the older
+binary's configuration. Do not copy only a live SQLite main file or manually
+synchronize/discover its WAL files.
+
 ### Mutation and flush semantics
 
 - Mutations update the in-memory store immediately and schedule a full N-Quads

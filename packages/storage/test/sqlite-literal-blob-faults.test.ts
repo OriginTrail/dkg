@@ -1,0 +1,167 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+import type { Worker } from 'node:worker_threads';
+import { SqliteLiteralBlobOwner } from '../src/sqlite-literal-blob-owner.js';
+import { SQLITE_BLOB_FILENAME } from '../src/sqlite-literal-blob-protocol.js';
+import { asChangelogReader, createTripleStore, type TripleStore } from '../src/index.js';
+const control = vi.hoisted(() => ({ mode: '', signal: undefined as SharedArrayBuffer | undefined,
+  instances: [] as Worker[], allocations: [] as number[], handlers: [] as ((error: Error) => void)[], reads: 0, commits: 0 }));
+vi.mock('node:worker_threads', async original => {
+  const native = await original<typeof import('node:worker_threads')>();
+  return { ...native, Worker: class extends native.Worker {
+    constructor(url: string | URL, options?: import('node:worker_threads').WorkerOptions) {
+      const isBlob = String(url).endsWith('/sqlite-literal-blob-worker.js');
+      const fault = isBlob ? control.mode : ''; if (isBlob) control.mode = '';
+      super(fault ? new URL('./fixtures/sqlite-blob-worker-fault.mjs', import.meta.url) : url, fault ? {
+        ...options, workerData: { ...options?.workerData, actualWorker: String(url), fault, signal: control.signal },
+      } : options);
+      control.instances.push(this);
+      queueMicrotask(() => { const handler = this.listeners('error')[0]; if (handler) control.handlers.push(handler as (error: Error) => void); });
+      this.on('message', message => { if (message?.diagnostic === 'allocation') control.allocations.push(message.bytes); if (message?.diagnostic === 'commit') control.commits += 1; });
+    }
+    override postMessage(message: { operation?: string }, transferList?: readonly import('node:worker_threads').Transferable[]) {
+      if (message?.operation === 'read') control.reads += 1;
+      return super.postMessage(message, transferList);
+    }
+  } };
+});
+const roots: string[] = [], owners: SqliteLiteralBlobOwner[] = [], holds: Int32Array[] = [];
+const stores: TripleStore[] = [];
+const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+const value = JSON.stringify('immutable exact bytes '.repeat(4096));
+function owner(directory: string) { const o = new SqliteLiteralBlobOwner(directory); owners.push(o); return o; }
+async function fixture() { const root = await mkdtemp(join(tmpdir(), 'dkg-sqlite-blob-fault-')); roots.push(root); return { root, directory: join(root, 'blobs') }; }
+afterEach(async () => {
+  for (const held of holds.splice(0)) { Atomics.store(held, 1, 0x7fffffff); Atomics.notify(held, 1); }
+  for (const store of stores.splice(0)) await store.close().catch(() => {});
+  for (const o of owners.splice(0)) await o.close().catch(() => {});
+  expect(control.instances.every(worker => worker.threadId === -1)).toBe(true);
+  control.mode = ''; control.signal = undefined; control.instances = []; control.allocations = []; control.handlers = []; control.reads = 0; control.commits = 0;
+  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+});
+it.each(['before-commit', 'after-commit'])('recovers a native worker %s failure without accepting an uncertain write', async fault => {
+  const f = await fixture(), o = owner(f.directory); control.mode = fault;
+  await expect(o.write(hash(value), value)).rejects.toThrow('worker exited');
+  await expect(o.read(hash(value))).resolves.toBe(fault === 'after-commit' ? value : undefined);
+  await o.write(hash(value), value);
+  // A stale owner's error cannot invalidate its replacement.
+  expect(control.handlers.length).toBeGreaterThan(1);
+  control.handlers[0]!(new Error('late old-owner failure'));
+  await expect(o.read(hash(value))).resolves.toBe(value);
+});
+it('retains a real native FULL failure and succeeds with a fresh owner after the limit is removed', async () => {
+  const f = await fixture(), o = owner(f.directory); control.mode = 'full';
+  await expect(o.write(hash(value), value)).rejects.toThrow('database or disk is full');
+  await expect(o.read(hash(value))).resolves.toBeUndefined();
+  // Reopening the failed native connection permits ordinary retry on this owner.
+  await o.write(hash(value), value); await o.close();
+  const retry = owner(f.directory);
+  await expect(retry.read(hash(value))).resolves.toBe(value);
+});
+it('keeps writes arriving during a held COMMIT behind a separate native barrier', async () => {
+  const f = await fixture(), o = owner(f.directory), signal = new Int32Array(new SharedArrayBuffer(8)); holds.push(signal);
+  control.mode = 'hold'; control.signal = signal.buffer as SharedArrayBuffer;
+  let firstDone = false, secondDone = false;
+  const first = o.write(hash(value), value).then(() => { firstDone = true; });
+  await vi.waitFor(() => expect(Atomics.load(signal, 0)).toBe(1));
+  const secondValue = value+'second', second = o.write(hash(secondValue), secondValue).then(() => { secondDone = true; });
+  await new Promise(resolve => setImmediate(resolve)); expect(firstDone).toBe(false); expect(secondDone).toBe(false);
+  Atomics.store(signal, 1, 1); Atomics.notify(signal, 1);
+  await first; await vi.waitFor(() => expect(Atomics.load(signal, 0)).toBe(2));
+  expect(secondDone).toBe(false);
+  Atomics.store(signal, 1, 2); Atomics.notify(signal, 1); await second;
+  await expect(o.read(hash(secondValue))).resolves.toBe(secondValue);
+});
+it('registers accepted writes before close and drains a held native commit', async () => {
+  const f = await fixture(), o = owner(f.directory), signal = new Int32Array(new SharedArrayBuffer(8)); holds.push(signal);
+  control.mode = 'hold'; control.signal = signal.buffer as SharedArrayBuffer;
+  const writing = o.write(hash(value), value);
+  await vi.waitFor(() => expect(Atomics.load(signal, 0)).toBe(1));
+  let closed = false; const closing = o.close().then(() => { closed = true; });
+  await expect(o.write(hash('late'), 'late')).rejects.toThrow('closing');
+  await new Promise(resolve => setImmediate(resolve)); expect(closed).toBe(false);
+  Atomics.store(signal, 1, 1); Atomics.notify(signal, 1); await writing; await closing;
+  await expect(owner(f.directory).read(hash(value))).resolves.toBe(value);
+});
+it('hydrates committed bytes through an independent reader while the writer is held at COMMIT', async () => {
+  const f = await fixture(), seed = owner(f.directory); await seed.write(hash('seed'), 'seed'); await seed.close();
+  const o = owner(f.directory), signal = new Int32Array(new SharedArrayBuffer(8)); holds.push(signal);
+  control.mode = 'hold'; control.signal = signal.buffer as SharedArrayBuffer;
+  let done = false; const writing = o.write(hash(value), value).then(() => { done = true; });
+  await vi.waitFor(() => expect(Atomics.load(signal, 0)).toBe(1));
+  await expect(o.read(hash('seed'))).resolves.toBe('seed');
+  expect(done).toBe(false);
+  Atomics.store(signal, 1, 1); Atomics.notify(signal, 1); await writing;
+  await expect(o.read(hash(value))).resolves.toBe(value);
+});
+it('rejects an oversized BLOB without allocating its stored payload', async () => {
+  const f = await fixture(), seed = owner(f.directory); await seed.write(hash('seed'), 'seed'); await seed.close();
+  const db = new DatabaseSync(join(f.directory, SQLITE_BLOB_FILENAME));
+  db.prepare('UPDATE blobs SET term=zeroblob(?) WHERE hash=?').run(16*1024*1024, hash('seed')); db.close();
+  control.mode = 'allocation'; control.allocations = [];
+  await expect(owner(f.directory).read(hash('seed'), 16)).rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE', actualBytes: 16*1024*1024 });
+  expect(control.allocations.length).toBeGreaterThan(0);
+  expect(Math.max(...control.allocations)).toBeLessThan(1024*1024);
+});
+
+it('detaches an aborted read, permits an independent write and drains the accepted read RPC', async () => {
+  const f = await fixture(), seed = owner(f.directory); await seed.write(hash('seed'), 'seed'); await seed.close();
+  const o = owner(f.directory), signal = new Int32Array(new SharedArrayBuffer(8)); holds.push(signal);
+  control.mode = 'hold-read'; control.signal = signal.buffer as SharedArrayBuffer;
+  const controller = new AbortController(), reading = o.read(hash('seed'), undefined, controller.signal);
+  await vi.waitFor(() => expect(Atomics.load(signal, 0)).toBe(1));
+  controller.abort(); await expect(reading).rejects.toMatchObject({ name: 'AbortError' });
+  await o.write(hash(value), value);
+  let closed = false; const closing = o.close().then(() => { closed = true; });
+  await new Promise(resolve => setImmediate(resolve)); expect(closed).toBe(false);
+  Atomics.store(signal, 1, 1); Atomics.notify(signal, 1); await closing;
+  await expect(owner(f.directory).read(hash(value))).resolves.toBe(value);
+});
+
+it('coalesces a ready group into one native durable transaction', async () => {
+  const f = await fixture(), o = owner(f.directory); control.mode = 'collect';
+  const values = Array.from({ length: 8 }, (_, i) => 'ready-batch-'+i);
+  await Promise.all(values.map(term => o.write(hash(term), term)));
+  expect(control.commits).toBe(1);
+  await expect(Promise.all(values.map(term => o.read(hash(term))))).resolves.toEqual(values);
+});
+
+const graph = 'urn:sqlite-blob/_shared_memory';
+async function composed(directory: string) {
+  const store = await createTripleStore({ backend: 'oxigraph-worker', options: { path: join(directory, 'store.nq') },
+    graphSetIndex: true, changelog: true, largeLiteralStorage: { directory: join(directory, 'blobs'), thresholdBytes: 1024, persistence: 'sqlite-wal' } });
+  stores.push(store); return store;
+}
+const quad = (subject: string, object = '"small"') => ({ graph, subject, predicate: 'urn:value', object });
+const select = (subject: string) => `SELECT ?value WHERE { GRAPH <${graph}> { <${subject}> <urn:value> ?value } }`;
+it('keeps native group commit outside RDF sequence allocation and drains it before store close', async () => {
+  const f = await fixture(), s = await composed(f.root), signal = new Int32Array(new SharedArrayBuffer(8)); holds.push(signal);
+  await s.insert([quad('urn:seed')]); control.mode = 'hold'; control.signal = signal.buffer as SharedArrayBuffer;
+  const large = s.insert([quad('urn:large', value)]);
+  await vi.waitFor(() => expect(Atomics.load(signal, 0)).toBe(1));
+  await s.insert([quad('urn:independent')]);
+  await expect(s.query(select('urn:large'))).resolves.toMatchObject({ bindings: [] });
+  expect((await asChangelogReader(s)!.readChanges(0, 10)).map(change => change.seq)).toEqual([1, 2]);
+  expect(await s.listGraphs()).toEqual([graph]);
+  let closed = false; const closing = s.close().then(() => { closed = true; });
+  await expect(s.insert([quad('urn:late')])).rejects.toThrow('closing');
+  await new Promise(resolve => setImmediate(resolve)); expect(closed).toBe(false);
+  Atomics.store(signal, 1, 1); Atomics.notify(signal, 1); await large; await closing;
+  const reopened = await composed(f.root);
+  await expect(reopened.query(select('urn:large'))).resolves.toMatchObject({ bindings: [{ value }] });
+  expect((await asChangelogReader(reopened)!.readChanges(0, 10)).map(change => change.seq)).toEqual([1, 2, 3]);
+});
+it.each(['before-commit', 'after-commit', 'full'])('retries %s without publishing an RDF ref or changelog prematurely', async fault => {
+  const f = await fixture(), s = await composed(f.root); await s.insert([quad('urn:seed')]); control.mode = fault;
+  await expect(s.insert([quad('urn:retry', value)])).rejects.toThrow();
+  await expect(s.query(select('urn:retry'))).resolves.toMatchObject({ bindings: [] });
+  expect((await asChangelogReader(s)!.readChanges(0, 10)).map(change => change.seq)).toEqual([1]);
+  await s.insert([quad('urn:retry', value)]); await s.close();
+  const reopened = await composed(f.root);
+  await expect(reopened.query(select('urn:retry'))).resolves.toMatchObject({ bindings: [{ value }] });
+  expect((await asChangelogReader(reopened)!.readChanges(0, 10)).map(change => change.seq)).toEqual([1, 2]);
+});

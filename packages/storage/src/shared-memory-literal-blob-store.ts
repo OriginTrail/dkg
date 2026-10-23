@@ -1,12 +1,15 @@
 import { prepareImmutableMutation, runImmutableMutation, assertImmutableMutationCapability, type ImmutableStorePreparation, type ImmutableStoreMutation, type PreparedMutation } from './immutable-store-preparation.js';
-import { DurableDirectoryPreparation } from './durable-content-addressed-file.js';
-import { persistFileDirectoryEntries } from './file-durability.js';
+import { LiteralBlobFileOwner } from './literal-blob-file-owner.js';
+import type { SharedMemoryLiteralBlobStoreOptions } from './literal-blob-options.js';
+export type { SharedMemoryLiteralBlobStoreOptions } from './literal-blob-options.js';
 import type { TripleStoreCommitCapability } from './persistence.js';
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import { createHash } from 'node:crypto';
-import { open, readFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
-import { LiteralHydrationBudget, readLiteralBlobBounded } from './bounded-literal-hydration.js';
+import { resolve } from 'node:path';
+import { LiteralHydrationBudget } from './bounded-literal-hydration.js';
+import { SqliteLiteralBlobOwner } from './sqlite-literal-blob-owner.js';
+import { LiteralBlobWorkLifecycle } from './literal-blob-work-lifecycle.js';
+import type { StoreOperation } from './store-operation-outcome.js';
 import type {
   ConstructResult,
   Quad,
@@ -18,7 +21,7 @@ import type {
   TripleStore,
   TripleStoreDecorator,
 } from './triple-store.js';
-import { deleteByPatternWithoutCount } from './triple-store.js';
+import { deleteByPatternWithoutCount, runLogicalStoreMutation } from './triple-store.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 import type {
   Rfc64AuthorCommitCasInputV1,
@@ -37,20 +40,6 @@ export const EXTERNAL_LITERAL_REF_DATATYPE = 'http://dkg.io/ontology/externalLit
 export const SHARED_MEMORY_GRAPH_SUFFIX = '/_shared_memory';
 export const DEFAULT_LARGE_LITERAL_THRESHOLD_BYTES = 65_536;
 
-export interface SharedMemoryLiteralBlobStoreOptions {
-  /**
-   * Directory containing content-addressed RDF literal term blobs.
-   * Files are named `<sha256>` and contain the exact serialized
-   * RDF object term string received by `insert`.
-   */
-  blobDir: string;
-  /**
-   * Externalize SWM literal object terms whose UTF-8 serialized term size
-   * is strictly greater than this value.
-   */
-  thresholdBytes: number;
-}
-
 export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, ImmutableStorePreparation {
   get queryCancellation() {
     return this.inner.queryCancellation;
@@ -67,7 +56,9 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
   private readonly blobDir: string;
   private readonly thresholdBytes: number;
   private readonly blobWrites: ContentAddressedBlobSingleFlight;
-  private readonly blobDirectory: DurableDirectoryPreparation;
+  private readonly fileBlobs: LiteralBlobFileOwner;
+  private readonly sqliteBlobs?: SqliteLiteralBlobOwner;
+  private readonly blobWork?: LiteralBlobWorkLifecycle;
 
   constructor(inner: TripleStore, options: SharedMemoryLiteralBlobStoreOptions) {
     if (!options.blobDir?.trim()) {
@@ -84,10 +75,23 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
     // Otherwise a symlink followed by '..' can prepare/sync a different parent.
     this.blobDir = resolve(options.blobDir);
     this.thresholdBytes = options.thresholdBytes;
-    this.blobDirectory = new DurableDirectoryPreparation(this.blobDir);
+    this.fileBlobs = new LiteralBlobFileOwner(this.blobDir);
+    if (options.persistence === 'sqlite-wal') {
+      this.sqliteBlobs = new SqliteLiteralBlobOwner(this.blobDir);
+      this.blobWork = new LiteralBlobWorkLifecycle();
+    } else if (options.persistence !== undefined && options.persistence !== 'files') {
+      throw new Error('Unsupported literal blob persistence layout');
+    }
     this.blobWrites = new ContentAddressedBlobSingleFlight({
-      createOrVerify: (hash, term) => this.writeBlobFile(hash, term),
+      createOrVerify: (hash, term) => this.sqliteBlobs ? this.sqliteBlobs.write(hash, term) : this.writeBlobFile(hash, term),
+      maxConcurrent: this.sqliteBlobs ? 8 : 4,
     });
+  }
+
+  runLogicalMutation<T>(operation: StoreOperation, options: QueryOptions | undefined,
+    work: (options: QueryOptions | undefined) => Promise<T>): Promise<T> {
+    const start = () => runLogicalStoreMutation(this.inner, operation, options, work);
+    return this.blobWork ? this.blobWork.run(start) : start();
   }
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
@@ -211,6 +215,10 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+    return this.blobWork ? this.blobWork.run(() => this.queryAndHydrate(sparql, options)) : this.queryAndHydrate(sparql, options);
+  }
+
+  private async queryAndHydrate(sparql: string, options?: QueryOptions): Promise<QueryResult> {
     const rewritten = this.rewriteLargeLiteralConstants(sparql);
     if (!rewritten) {
       const result = await this.inner.query(sparql, options);
@@ -259,7 +267,9 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
   }
 
   async close(): Promise<void> {
-    return this.inner.close();
+    return this.blobWork ? this.blobWork.close(async () => {
+      try { await this.inner.close(); } finally { await this.sqliteBlobs!.close(); }
+    }) : this.inner.close();
   }
 
   private async externalizeQuads(quads: readonly Quad[]): Promise<Quad[]> {
@@ -374,54 +384,17 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
   }
 
   private async writeBlobFile(hash: string, term: string): Promise<void> {
-    await this.blobDirectory.prepare();
-    const path = this.blobPath(hash);
-
-    let file;
-    try {
-      file = await open(path, 'wx');
-    } catch (err) {
-      if (!isNodeError(err, 'EEXIST')) throw err;
-      await this.readBlob(hash);
-      file = await open(path, 'r+');
-    }
-    try {
-      // Re-submit even matching existing bytes after a failed/unknown preparation.
-      // Sync the writer itself: a newly opened descriptor can miss its old EIO.
-      await file.writeFile(term, 'utf8');
-      await file.sync();
-    } finally { await file.close(); }
-    await persistFileDirectoryEntries(path);
+    await this.fileBlobs.write(hash, term);
   }
 
   private async readBlob(hash: string, constraints?: { maxBytes?: number; signal?: AbortSignal }): Promise<string> {
     assertSha256Hex(hash);
-    const path = this.blobPath(hash);
-    let content: string;
-    try {
-      constraints?.signal?.throwIfAborted();
-      content = constraints?.maxBytes === undefined
-        ? await readFile(path, { encoding: 'utf8', signal: constraints?.signal })
-        : await readLiteralBlobBounded(path, constraints.maxBytes, constraints.signal);
-      constraints?.signal?.throwIfAborted();
-    } catch (err) {
-      if (isNodeError(err, 'ENOENT')) {
-        throw new Error(`SWM external literal blob missing for sha256:${hash} at ${path}`);
-      }
-      throw err;
+    if (this.sqliteBlobs) {
+      const term = await this.sqliteBlobs.read(hash, constraints?.maxBytes, constraints?.signal);
+      if (term !== undefined) return term;
+      // Existing hash files remain immutable/readable; only a true miss falls back.
     }
-
-    const actual = sha256Term(content);
-    if (actual !== hash) {
-      throw new Error(
-        `SWM external literal blob corrupt for sha256:${hash} at ${path}: found sha256:${actual}`,
-      );
-    }
-    return content;
-  }
-
-  private blobPath(hash: string): string {
-    return join(this.blobDir, hash);
+    return this.fileBlobs.read(hash, constraints);
   }
 }
 
@@ -601,10 +574,6 @@ function assertSha256Hex(hash: string): void {
   if (!/^[a-f0-9]{64}$/i.test(hash)) {
     throw new Error(`Invalid sha256 literal blob key: ${hash}`);
   }
-}
-
-function isNodeError(err: unknown, code: string): boolean {
-  return err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === code;
 }
 
 function escapeRegExp(value: string): string {
