@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import type { Worker } from 'node:worker_threads';
 import { SqliteLiteralBlobOwner } from '../src/sqlite-literal-blob-owner.js';
 import { SQLITE_BLOB_FILENAME } from '../src/sqlite-literal-blob-protocol.js';
-import { asChangelogReader, createTripleStore, type TripleStore } from '../src/index.js';
+import { asChangelogReader, createTripleStore, registerTripleStoreAdapter, OxigraphWorkerStore, type TripleStore } from '../src/index.js';
 const control = vi.hoisted(() => ({ mode: '', signal: undefined as SharedArrayBuffer | undefined,
   instances: [] as Worker[], allocations: [] as number[], handlers: [] as ((error: Error) => void)[], reads: 0, commits: 0,
   policies: [] as Record<string, unknown>[], writes: [] as { hash: string; bytes: number; payloadHash: string }[] }));
@@ -41,6 +41,14 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const value = JSON.stringify('immutable exact bytes '.repeat(4096));
 function owner(directory: string) { const o = new SqliteLiteralBlobOwner(directory); owners.push(o); return o; }
 async function fixture() { const root = await mkdtemp(join(tmpdir(), 'dkg-sqlite-blob-fault-')); roots.push(root); return { root, directory: join(root, 'blobs') }; }
+function workerAllocationProbe(root: string) {
+  const backends: TripleStore[] = [];
+  const config = { backend: 'blob-options-allocation-probe', options: { path: join(root, 'store.nq') } };
+  registerTripleStoreAdapter(config.backend, async () => {
+    const backend = new OxigraphWorkerStore(config.options); backends.push(backend); return backend;
+  });
+  return { config, backends };
+}
 afterEach(async () => {
   for (const held of holds.splice(0)) { Atomics.store(held, 1, 0x7fffffff); Atomics.notify(held, 1); }
   for (const store of stores.splice(0)) await store.close().catch(() => {});
@@ -180,16 +188,32 @@ it.each(['before-commit', 'after-commit', 'full'])('retries %s without publishin
   expect((await asChangelogReader(reopened)!.readChanges(0, 10)).map(change => change.seq)).toEqual([1, 2]);
 });
 it('rejects an unsupported runtime before allocating an RDF worker', async () => {
-  const f = await fixture(), descriptor = Object.getOwnPropertyDescriptor(process.versions, 'sqlite')!;
+  const f = await fixture(), probe = workerAllocationProbe(f.root), descriptor = Object.getOwnPropertyDescriptor(process.versions, 'sqlite')!;
   try {
     Object.defineProperty(process.versions, 'sqlite', { ...descriptor, value: '3.51.2' });
-    await expect(composed(f.root)).rejects.toThrow('requires a Node runtime');
-    expect(control.instances).toHaveLength(0);
+    await expect(createTripleStore({ ...probe.config, largeLiteralStorage: { directory: f.directory, persistence: 'sqlite-wal' } })).rejects.toThrow('requires a Node runtime');
+    expect(probe.backends).toHaveLength(0); expect(control.instances).toHaveLength(0);
   } finally {
     Object.defineProperty(process.versions, 'sqlite', descriptor);
-    // Counterfactual failures still clean every exact worker allocated by this test.
-    await Promise.all(control.instances.map(worker => worker.terminate()));
+    // Close captured real backends intentionally so a failing counterfactual cannot auto-respawn.
+    await Promise.all(probe.backends.map(backend => backend.close()));
   }
+});
+it.each([
+  { label: 'unknown layout', input: { persistence: 'sqlite' }, error: 'Unsupported literal blob persistence' },
+  { label: 'nonstring layout', input: { persistence: 42 }, error: 'Unsupported literal blob persistence' },
+  { label: 'blank directory', input: { directory: ' ' }, error: 'requires options.blobDir' },
+  { label: 'nonstring directory', input: { directory: 17 }, error: 'requires options.blobDir' },
+  { label: 'negative threshold', input: { thresholdBytes: -1 }, error: 'non-negative integer thresholdBytes' },
+  { label: 'fractional threshold', input: { thresholdBytes: 1.25 }, error: 'non-negative integer thresholdBytes' },
+])('rejects invalid JSON blob options ($label) before allocating an RDF worker', async ({ input, error }) => {
+  const f = await fixture(), probe = workerAllocationProbe(f.root);
+  const config = JSON.parse(JSON.stringify({ ...probe.config,
+    largeLiteralStorage: { directory: f.directory, persistence: 'files', ...input } }));
+  try {
+    await expect(createTripleStore(config)).rejects.toThrow(error);
+    expect(probe.backends).toHaveLength(0); expect(control.instances).toHaveLength(0);
+  } finally { await Promise.all(probe.backends.map(backend => backend.close())); }
 });
 it.each(['journal_mode', 'synchronous', 'fullfsync', 'checkpoint_fullfsync'])(
   'rejects a native %s downgrade before publication, then reestablishes the full policy on retry', async key => {

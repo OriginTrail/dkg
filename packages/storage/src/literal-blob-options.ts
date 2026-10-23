@@ -19,3 +19,16 @@ export interface LargeLiteralStorageConfig {
   /** Defaults to legacy files; sqlite-wal enables durable group commit. */
   persistence?: LiteralBlobPersistence;
 }
+
+/** Pure validation shared by direct construction and the factory's preallocation boundary. */
+export function assertLiteralBlobStoreOptions(options: SharedMemoryLiteralBlobStoreOptions): void {
+  if (typeof options.blobDir !== 'string' || !options.blobDir.trim()) {
+    throw new Error('SharedMemoryLiteralBlobStore requires options.blobDir');
+  }
+  if (!Number.isSafeInteger(options.thresholdBytes) || options.thresholdBytes < 0) {
+    throw new Error('SharedMemoryLiteralBlobStore requires a non-negative integer thresholdBytes');
+  }
+  if (options.persistence !== undefined && options.persistence !== 'files' && options.persistence !== 'sqlite-wal') {
+    throw new Error('Unsupported literal blob persistence layout');
+  }
+}

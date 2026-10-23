@@ -1,6 +1,6 @@
 import { prepareImmutableMutation, runImmutableMutation, assertImmutableMutationCapability, type ImmutableStorePreparation, type ImmutableStoreMutation, type PreparedMutation } from './immutable-store-preparation.js';
 import { LiteralBlobFileOwner } from './literal-blob-file-owner.js';
-import type { SharedMemoryLiteralBlobStoreOptions } from './literal-blob-options.js';
+import { assertLiteralBlobStoreOptions, type SharedMemoryLiteralBlobStoreOptions } from './literal-blob-options.js';
 export type { SharedMemoryLiteralBlobStoreOptions } from './literal-blob-options.js';
 import type { TripleStoreCommitCapability } from './persistence.js';
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
@@ -61,12 +61,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
   private readonly blobWork?: StoreWorkDrain;
 
   constructor(inner: TripleStore, options: SharedMemoryLiteralBlobStoreOptions) {
-    if (!options.blobDir?.trim()) {
-      throw new Error('SharedMemoryLiteralBlobStore requires options.blobDir');
-    }
-    if (!Number.isSafeInteger(options.thresholdBytes) || options.thresholdBytes < 0) {
-      throw new Error('SharedMemoryLiteralBlobStore requires a non-negative integer thresholdBytes');
-    }
+    assertLiteralBlobStoreOptions(options);
     this.inner = inner;
     this.innerStore = inner;
     this.commitment = inner.commitment;
@@ -79,8 +74,6 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
     if (options.persistence === 'sqlite-wal') {
       this.sqliteBlobs = new SqliteLiteralBlobOwner(this.blobDir);
       this.blobWork = new StoreWorkDrain('Literal blob store is closing');
-    } else if (options.persistence !== undefined && options.persistence !== 'files') {
-      throw new Error('Unsupported literal blob persistence layout');
     }
     this.blobWrites = new ContentAddressedBlobSingleFlight({
       createOrVerify: (hash, term) => this.sqliteBlobs ? this.sqliteBlobs.write(hash, term) : this.writeBlobFile(hash, term),

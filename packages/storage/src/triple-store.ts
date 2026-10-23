@@ -7,7 +7,7 @@
 import { dirname, join } from 'node:path';
 import type { TripleStoreCommitCapability } from './persistence.js';
 import { assertSqliteBlobRuntime } from './sqlite-literal-blob-protocol.js';
-import type { LargeLiteralStorageConfig, SharedMemoryLiteralBlobStoreOptions } from './literal-blob-options.js';
+import { assertLiteralBlobStoreOptions, type LargeLiteralStorageConfig, type SharedMemoryLiteralBlobStoreOptions } from './literal-blob-options.js';
 export type { LargeLiteralStorageConfig } from './literal-blob-options.js';
 import {
   DEFAULT_LARGE_LITERAL_THRESHOLD_BYTES,
@@ -784,7 +784,9 @@ function resolveLargeLiteralStorageOptions(
     );
   }
 
-  return { blobDir: directory, thresholdBytes, persistence: largeLiteralStorage.persistence };
+  const options = { blobDir: directory, thresholdBytes, persistence: largeLiteralStorage.persistence };
+  assertLiteralBlobStoreOptions(options);
+  return options;
 }
 
 function inferLiteralBlobDirectory(options: Record<string, unknown> | undefined): string | undefined {
