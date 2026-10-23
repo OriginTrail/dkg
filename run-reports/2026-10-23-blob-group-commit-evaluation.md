@@ -10,8 +10,8 @@ Runtime: native macOS arm64, Node22.23.3, SQLite3.51.3, libuv1.51.0, pnpm10.28.1
 
 ## Validation
 
-- Current full storage:1,716passed/110files,45existing environment-gated skips.
-- Current native/integrated cases:63(part of the full cohort), including last-ACK whole-process SIGKILL before any RDF write and exact fresh-process readback; native FULL; pre/post-COMMIT worker death; same-write retry with no premature RDF/changelog; exact batch coverage and late arrivals; independent read progress; close/cancellation drainage; bounded allocation; legacy compatibility and tested rollback export.
+- Current full storage:1,720passed/111files,45existing environment-gated skips.
+- Current native/integrated cases:65(part of the full cohort), including last-ACK whole-process SIGKILL before any RDF write and exact fresh-process readback; native FULL; pre/post-COMMIT worker death; same-write retry with no premature RDF/changelog; exact batch coverage and late arrivals; independent read progress; close/cancellation drainage; bounded allocation; legacy compatibility and tested rollback export.
 - Counterfactuals fail as intended: acknowledging before COMMIT creates a dangling RDF ref; unconditionally materializing a16MiB value violates the allocation assertion. Correct source restored and rebuilt.
 - Runtime dependency closure, source/type/package/prepared-CLI builds pass. Lint, source-size and disabled-test ratchets pass without increased budgets. Later metadata-only documentation changes do not alter these results.
 
@@ -278,3 +278,7 @@ NativeBlazegraph meets the proposed throughput/small-p95 budgets in this sample.
 | mixed | 67.69, 76.67, 73.38 | 75.76, 78.02, 63.27 | 81.94, 78.56, 89.04 |
 
 All current sample budgets that pass remain separate from human acceptance/default rollout. Single-writer/saturation costs remain material. There was no live chain publication, no wallet claim and no physical power-loss experiment. The combined final stack still requires live testnet validation after source/default decisions converge.
+
+## Round8 bounded-work composition
+
+A shared FIFO BoundedWork now owns slot transfer/release for both single-flight preparation and the SQLite physical owner. Separate instances retain logical preparation admission,4reader/8writer capacities and StoreWorkDrain registration. Pending cache identity still precedes callbacks; cache/coalescing/eviction, failure retry and abort/close drainage remain intact. Observable FIFO/new-arrival and synchronous-throw cases pass; omitting handoff or making the slot stealable fails the distinguishing test without native resources. Actual held native COMMIT/read probes assert8write/4read RPC limits and progress through the independent role. The prior63native/integrated cases and6single-flight tests pass; new physical bounds cases pass separately. Final full storage passes1,720cases/111files with45existing gated skips, including65native/integrated cases. Runtime/types/package/preparedCLI, release-pack verification,17dependency-routing cases and hygiene pass without increased budgets/timeouts/skips. Final published-source timing follows; no rollout/performance/live acceptance is implied.

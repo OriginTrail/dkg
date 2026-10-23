@@ -10,7 +10,7 @@ import { SQLITE_BLOB_FILENAME } from '../src/sqlite-literal-blob-protocol.js';
 import { unexpectedBlobSchemas } from './fixtures/sqlite-blob-unexpected-schema.js';
 import { asChangelogReader, createTripleStore, registerTripleStoreAdapter, OxigraphWorkerStore, type TripleStore } from '../src/index.js';
 const control = vi.hoisted(() => ({ mode: '', signal: undefined as SharedArrayBuffer | undefined,
-  instances: [] as Worker[], allocations: [] as number[], handlers: [] as ((error: Error) => void)[], reads: 0, commits: 0,
+  instances: [] as Worker[], allocations: [] as number[], handlers: [] as ((error: Error) => void)[], reads: 0, rpcWrites: 0, commits: 0,
   policies: [] as Record<string, unknown>[], writes: [] as { hash: string; bytes: number; payloadHash: string }[] }));
 vi.mock('node:worker_threads', async original => {
   const native = await original<typeof import('node:worker_threads')>();
@@ -32,6 +32,7 @@ vi.mock('node:worker_threads', async original => {
     }
     override postMessage(message: { operation?: string }, transferList?: readonly import('node:worker_threads').Transferable[]) {
       if (message?.operation === 'read') control.reads += 1;
+      if (message?.operation === 'write') control.rpcWrites += 1;
       return super.postMessage(message, transferList);
     }
   } };
@@ -55,7 +56,7 @@ afterEach(async () => {
   for (const store of stores.splice(0)) await store.close().catch(() => {});
   for (const o of owners.splice(0)) await o.close().catch(() => {});
   expect(control.instances.every(worker => worker.threadId === -1)).toBe(true);
-  control.mode = ''; control.signal = undefined; control.instances = []; control.allocations = []; control.handlers = []; control.reads = 0; control.commits = 0;
+  control.mode = ''; control.signal = undefined; control.instances = []; control.allocations = []; control.handlers = []; control.reads = 0; control.rpcWrites = 0; control.commits = 0;
   control.policies = []; control.writes = [];
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
@@ -307,4 +308,39 @@ it.each(unexpectedBlobSchemas)('rejects unexpected schema ($label) before publis
     outcome: 'rejected', publicRows: { bindings: [] }, changes: [1],
   });
   await current.close(); expect(await readFile(path)).toEqual(before);
+});
+
+it('bounds physical writer RPCs at eight while an independent reader progresses during native commit', async () => {
+  const f = await fixture(), o = owner(f.directory), signal = new Int32Array(new SharedArrayBuffer(8)); holds.push(signal);
+  control.mode = 'hold'; control.signal = signal.buffer as SharedArrayBuffer;
+  const values = Array.from({ length: 9 }, (_, i) => 'bounded-writer-'+i);
+  const writing = Promise.all(values.map(term => o.write(hash(term), term)));
+  let reading: Promise<unknown> | undefined;
+  try {
+    await vi.waitFor(() => expect(Atomics.load(signal, 0)).toBe(1));
+    expect(control.rpcWrites).toBe(8);
+    let readDone = false; reading = o.read(hash('absent')).then(result => { expect(result).toBeUndefined(); readDone = true; });
+    await vi.waitFor(() => expect(readDone).toBe(true), { timeout: 2_000 });
+    expect(control.rpcWrites).toBe(8);
+  } finally {
+    Atomics.store(signal, 1, 0x7fffffff); Atomics.notify(signal, 1);
+    await Promise.allSettled([writing, ...(reading ? [reading] : [])]);
+  }
+  await writing; expect(control.rpcWrites).toBe(9);
+});
+it('bounds physical reader RPCs at four while an independent writer progresses during a native read', async () => {
+  const f = await fixture(), seed = owner(f.directory); await seed.write(hash('seed'), 'seed'); await seed.close();
+  const o = owner(f.directory), signal = new Int32Array(new SharedArrayBuffer(8)); holds.push(signal);
+  control.mode = 'hold-read'; control.signal = signal.buffer as SharedArrayBuffer;
+  const reading = Promise.all(Array.from({ length: 5 }, () => o.read(hash('seed'))));
+  let writing: Promise<void> | undefined;
+  try {
+    await vi.waitFor(() => expect(Atomics.load(signal, 0)).toBe(1)); expect(control.reads).toBe(4);
+    let writeDone = false; writing = o.write(hash('independent'), 'independent').then(() => { writeDone = true; });
+    await vi.waitFor(() => expect(writeDone).toBe(true), { timeout: 2_000 }); expect(control.reads).toBe(4);
+  } finally {
+    Atomics.store(signal, 1, 0x7fffffff); Atomics.notify(signal, 1);
+    await Promise.allSettled([reading, ...(writing ? [writing] : [])]);
+  }
+  await expect(reading).resolves.toEqual(Array(5).fill('seed')); expect(control.reads).toBe(5);
 });

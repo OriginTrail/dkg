@@ -5,6 +5,7 @@ import { DurableDirectoryPreparation } from './durable-content-addressed-file.js
 import { raceStoreWorkAgainstAbort } from './abortable-store-work-lifecycle.js';
 import { StoreResponseTooLargeError } from './http-response-limit.js';
 import { StoreWorkDrain } from './store-work-drain.js';
+import { BoundedWork } from './bounded-work.js';
 import { deserializeWorkerErrorV1 } from './worker-error-protocol.js';
 import { assertSqliteBlobRuntime, SQLITE_BLOB_FILENAME, type BlobRequest, type BlobResponse } from './sqlite-literal-blob-protocol.js';
 
@@ -25,8 +26,8 @@ export class SqliteLiteralBlobOwner {
   private readonly children = new Set<Worker>();
   private readonly work = new StoreWorkDrain('Literal blob owner is closing');
   private readonly capacity = {
-    reader: { physical: 0, limit: 4, waiting: [] as Array<() => void> },
-    writer: { physical: 0, limit: 8, waiting: [] as Array<() => void> },
+    reader: new BoundedWork(4),
+    writer: new BoundedWork(8),
   };
   private nextId = 0;
 
@@ -66,14 +67,9 @@ export class SqliteLiteralBlobOwner {
     });
   }
   private admit<T>(role: Role, work: () => Promise<T>): Promise<T> {
-    const capacity = this.capacity[role];
-    return this.work.run(() => Promise.resolve().then(async () => {
-      if (capacity.physical >= capacity.limit) await new Promise<void>(resolve => capacity.waiting.push(resolve));
-      else capacity.physical += 1;
-      try { return await work(); }
-      finally { const next = capacity.waiting.shift(); if (next) next(); else capacity.physical -= 1; }
-    }));
+    return this.work.run(() => Promise.resolve().then(() => this.capacity[role].run(work)));
   }
+
   private ensureSession(role: Role): Promise<Session> {
     return (this.sessions.get(role) ?? this.startSession(role)).ready;
   }
