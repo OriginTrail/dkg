@@ -1,27 +1,104 @@
 // SPDX-License-Identifier: Apache-2.0
+import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
+import {
+  ASSERTION_SEAL_PREDICATES, assertionLifecycleUri,
+  contextGraphAssertionUri, contextGraphMetaUri, formatSparqlTerm,
+} from '@origintrail-official/dkg-core';
+import { tryUpdateWithTouchedGraphs, UnsupportedTripleStoreCapabilityError, isManagedOxigraphRuntimeStoreConfigV1,
+  type TripleStore, type TripleStoreConfig } from '@origintrail-official/dkg-storage';
+import { WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED } from '@origintrail-official/dkg-publisher';
 
-import { deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
-import { buildNamedKaVmLifecycleMutation, type PublishedNamedKaVmLifecycleInput } from './internal/named-ka-vm-lifecycle-mutation.js';
+import { applyLifecycleMutationFallback, buildNamedKaVmLifecycleMutation, checkedRoot, type WorkspaceLifecycleValues,
+  type PublishedNamedKaVmLifecycleInput, type TentativeNamedKaVmLifecycleInput, type VerifiedNamedKaDescriptorInput as DescriptorProjectionInput } from './internal/named-ka-vm-lifecycle-mutation.js';
 import type { ObservedStoreMutation } from './internal/observed-store-mutation.js';
+export type PublishedNamedKaVmLifecycleWriter = (input: DescriptorProjectionInput) => Promise<void>;
 
-export type { PublishedNamedKaVmLifecycleInput } from './internal/named-ka-vm-lifecycle-mutation.js';
-export type PublishedNamedKaVmLifecycleWriter = (input: PublishedNamedKaVmLifecycleInput) => Promise<void>;
+import { stripMetadataLiteral } from './sync/metadata-literal.js';
 
-async function applyOrderedReplacements(store: TripleStore, replacements: readonly Quad[]): Promise<void> {
-  for (const quad of replacements) {
-    await deleteByPatternWithoutCount(store, {
-      subject: quad.subject, predicate: quad.predicate, graph: quad.graph,
-    });
-    await store.insert([quad]);
-  }
+const MEMORY_LAYER_PRED = 'http://dkg.io/ontology/memoryLayer';
+const STATE_PRED = 'http://dkg.io/ontology/state';
+export type { PublishedNamedKaVmLifecycleInput, TentativeNamedKaVmLifecycleInput, VerifiedNamedKaDescriptorInput } from './internal/named-ka-vm-lifecycle-mutation.js';
+type NamedKaVmLifecycleCommand = PublishedNamedKaVmLifecycleInput | TentativeNamedKaVmLifecycleInput;
+
+export interface NamedKaVmLifecycleApplyOptions {
+  /** Stock managed HTTP preserves acknowledged completion without claiming restart durability. */
+  readonly persistence: 'restart-durable' | 'process-local' | 'acknowledged';
+  /** Queue recovery may depend on this already-verified proof surviving partial fallback writes. */
+  readonly preserveVerifiedVmProof?: boolean;
+}
+/** Select compatibility from the daemon's authenticated construction, never journal evidence. */
+export function confirmedNamedKaVmLifecycleApplyOptions(dataDir?: string, storeConfig?: TripleStoreConfig): NamedKaVmLifecycleApplyOptions {
+  return { persistence: isManagedOxigraphRuntimeStoreConfigV1(storeConfig)
+    ? 'acknowledged' : dataDir ? 'restart-durable' : 'process-local' };
 }
 
-/** Explicit compatibility writer; no store-identity discovery or wrapper traversal. */
-export async function applyPublishedNamedKaVmLifecycle(
-  store: TripleStore,
-  input: PublishedNamedKaVmLifecycleInput,
+/** Decode RDF once at the storage boundary, then apply each field's normalization contract. */
+function decodeWorkspaceLifecycleValues(bindings: Record<string, string> | undefined): WorkspaceLifecycleValues {
+  const root = (term?: string) => stripMetadataLiteral(term)?.toLowerCase().replace(/^0x/, '');
+  return { wm: root(bindings?.wm), swm: root(bindings?.swm), activeSeal: root(bindings?.activeSeal),
+    activeSealVersion: stripMetadataLiteral(bindings?.activeSealVersion)?.trim(),
+    state: stripMetadataLiteral(bindings?.state)?.toLowerCase(), layer: stripMetadataLiteral(bindings?.layer)?.toUpperCase() };
+}
+/** One request on certified atomic backends; typed preflight refusal alone permits fallback. */
+async function commitLifecycleMetadata(store: TripleStore, plan: ReturnType<typeof buildNamedKaVmLifecycleMutation>): Promise<void> {
+  if (store.atomicUpdate) {
+    try {
+      await store.atomicUpdate(plan.sparql, { source: 'agent.publish.confirmedLifecycleCommit', touchedGraphs: [plan.graph] });
+      return;
+    } catch (error) {
+      if (!(error instanceof UnsupportedTripleStoreCapabilityError) || error.capability !== 'atomicUpdate') throw error;
+    }
+  }
+  await applyLifecycleMutationFallback(store, plan);
+}
+
+/** Tentative projection has no confirmed-completion certificate. */
+export async function applyTentativeNamedKaVmLifecycle(store: TripleStore, input: TentativeNamedKaVmLifecycleInput): Promise<void> {
+  if (input.tentative !== true || 'packedKaId' in input) throw new NamedKaVmLifecycleIntegrityError('Tentative lifecycle commands require tentative mode without confirmed graph coordinates');
+  const barrier = store.commitment?.capture();
+  await mutateNamedKaVmLifecycle(store, input, false);
+  if (barrier) await barrier({ source: 'agent.publish.tentativeLifecycleFlush' });
+  else await store.flush?.({ source: 'agent.publish.tentativeLifecycleFlush' });
+}
+
+/** Mutation only: the materialization owner certifies the complete attempt. */
+export async function mutatePublishedNamedKaVmLifecycle(
+  store: TripleStore, input: PublishedNamedKaVmLifecycleInput, preserveVerifiedVmProof = false,
 ): Promise<void> {
-  await applyOrderedReplacements(store, buildNamedKaVmLifecycleMutation(input).replacements);
+  if ('tentative' in input) throw new NamedKaVmLifecycleIntegrityError('Confirmed lifecycle commands cannot carry tentative mode');
+  await mutateNamedKaVmLifecycle(store, input, preserveVerifiedVmProof);
+}
+async function mutateNamedKaVmLifecycle(
+  store: TripleStore, input: NamedKaVmLifecycleCommand, preserveVerifiedVmProof: boolean,
+): Promise<void> {
+  const assertionUri = contextGraphAssertionUri(input.contextGraphId, input.agentAddress, input.name, input.subGraphName);
+  const lifecycleUri = assertionLifecycleUri(input.contextGraphId, input.agentAddress, input.name, input.subGraphName);
+  const metaGraph = contextGraphMetaUri(input.contextGraphId);
+  // Validate inputs before I/O and use the shared RDF serializer at the query boundary.
+  checkedRoot(input.merkleRoot);
+  if (input.priorMerkleRoot !== undefined) checkedRoot(input.priorMerkleRoot);
+  const iri = (value: string) => formatSparqlTerm(value, { position: 'subject' });
+  const rows = await store.query(`SELECT ?wm ?swm ?state ?layer ?activeSeal ?activeSealVersion WHERE { GRAPH ${iri(metaGraph)} {
+    OPTIONAL { ${iri(lifecycleUri)} <${WM_CURRENT_ASSERTION_PRED}> ?wm }
+    OPTIONAL { ${iri(lifecycleUri)} <${SWM_CURRENT_ASSERTION_PRED}> ?swm }
+    OPTIONAL { ${iri(lifecycleUri)} <${STATE_PRED}> ?state }
+    OPTIONAL { ${iri(lifecycleUri)} <${MEMORY_LAYER_PRED}> ?layer }
+    OPTIONAL { ${iri(assertionUri)} <${ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT}> ?activeSeal }
+    OPTIONAL { ${iri(assertionUri)} <${ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION}> ?activeSealVersion }
+  } } LIMIT 2`, { source: 'agent.publish.confirmedLifecycleWorkspaceGuard' });
+  if (rows.type !== 'bindings' || rows.bindings.length > 1) {
+    throw new NamedKaVmLifecycleIntegrityError('Invalid workspace pointers during confirmed lifecycle repair');
+  }
+  const workspace = { kind: 'observed' as const, values: decodeWorkspaceLifecycleValues(rows.bindings[0]) };
+  const plan = input.tentative === true
+    ? buildNamedKaVmLifecycleMutation({ ...input, kind: 'tentative', workspace, preserveVerifiedVmProof: false })
+    : buildNamedKaVmLifecycleMutation({ ...input, kind: 'confirmed', workspace, preserveVerifiedVmProof });
+  await commitLifecycleMetadata(store, plan);
+}
+
+/** Compatibility projection for externally verified descriptor repair. */
+export async function applyVerifiedNamedKaDescriptor(store: TripleStore, input: DescriptorProjectionInput): Promise<void> {
+  await applyLifecycleMutationFallback(store, buildNamedKaVmLifecycleMutation({ ...input, kind: 'verified-descriptor', workspace: { kind: 'verified' }, preserveVerifiedVmProof: input.preserveVerifiedVmProof ?? false }));
 }
 
 /** Compose over the configured decorated store and its observed fallback at agent construction. */
@@ -32,7 +109,7 @@ export function createPublishedNamedKaVmLifecycleWriter({ updateStore, fallbackS
 }): PublishedNamedKaVmLifecycleWriter {
   return async input => {
     // Query and observer scope have one closed, validated source of truth.
-    const plan = buildNamedKaVmLifecycleMutation(input);
+    const plan = buildNamedKaVmLifecycleMutation({ ...input, kind: 'verified-descriptor', workspace: { kind: 'verified' }, preserveVerifiedVmProof: input.preserveVerifiedVmProof ?? false });
     if (typeof updateStore.update === 'function' && await executeMutation(
       () => tryUpdateWithTouchedGraphs(updateStore, plan.sparql, [plan.graph], {
         source: 'agent.publish.namedKaVmLifecycle',
@@ -42,6 +119,6 @@ export function createPublishedNamedKaVmLifecycleWriter({ updateStore, fallbackS
       'update',
     )) return;
     // Only absent or typed unsupported capability reaches this ordered path.
-    await applyOrderedReplacements(fallbackStore, plan.replacements);
+    await applyLifecycleMutationFallback(fallbackStore, plan);
   };
 }

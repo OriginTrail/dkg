@@ -1,3 +1,4 @@
+import { decodeAssertionReservationIdentity, resolveAssertionReservationIdentity, type AssertionReservationIdentity } from './assertion-reservation.js';
 import { assertPromoteSeal } from './assertion-promote-seal.js';
 import { certifyPromoteNoEffectRejection } from './promote-no-effect-rejection.js';
 import { createPromoteOwnershipReader, type PromoteOwnershipReader } from './async-promote-ownership.js';
@@ -13,7 +14,7 @@ import { preparePromoteRecoveryBinding, assertPromoteRecoveryBinding, type Promo
 import { throwIfCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
 import { readAssertionLifecycleRecord, resolveAssertionReadAuthor, type AssertionLifecycleRecord } from './assertion-lifecycle-record.js';
 import { assertExpectedKaSlotMatchesLifecycle, assertExpectedKaSlotMatchesAllocation } from './assertion-reserved-slot.js';
-import { assertKaSlotOwnershipAvailable, assertionAllocationLockKey } from './assertion-ka-slot-ownership.js';
+import { withAssertionAllocation } from './assertion-ka-slot-ownership.js';
 import { assertWorkingMemoryLifecycleMutable } from './working-memory-lifecycle.js';
 import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js';
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
@@ -23,7 +24,7 @@ import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import { fallbackAuthorResolver, type FallbackAuthor } from './fallback-author.js';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { GraphManager, deleteByPatternWithoutCount, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
@@ -119,7 +120,7 @@ import {
   type StagedKnowledgeAssetSharedWorkingMemoryV1,
 } from './knowledge-asset-swm-staging.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
-import { verifyPullRecoverySeal, validateGraphScopedPayloadAgainstSeal, type ResolvedAssertionSource } from './assertion-seal-recovery.js';
+import { assertionRecoverySealGraph, assertionRecoverySealSubject, parseStoredAssertionSeal, verifyPullRecoverySeal, validateGraphScopedPayloadAgainstSeal, type ResolvedAssertionSource } from './assertion-seal-recovery.js';
 import { snapshotAssertionPullOptions, verifyExactAssertionDraft, draftRecoveryError, rethrowDraftSourceFailure, rethrowDraftVerificationFailure, type AssertionPullFromOptions, type AssertionPullFromResult } from './assertion-draft-recovery.js';
 import { resolveAssertionPullSource, type AssertionPromoteState } from './assertion-pull-source.js';
 import type { DurableRootAtomicCompanionResolver, DurableRootCompanionAdmissionWait } from
@@ -6483,8 +6484,8 @@ export class DKGPublisher implements Publisher {
     subGraphName?: string,
   ): Promise<void> {
     await this.clearActiveAssertionSeal(contextGraphId, name, agentAddress, subGraphName);
-    const recoveryGraph = this.assertionRecoverySealGraph(contextGraphId, subGraphName);
-    const recoverySubject = this.assertionRecoverySealSubject(
+    const recoveryGraph = assertionRecoverySealGraph(contextGraphId, subGraphName);
+    const recoverySubject = assertionRecoverySealSubject(
       contextGraphId,
       name,
       agentAddress,
@@ -6493,29 +6494,6 @@ export class DKGPublisher implements Publisher {
     for (const predicate of Object.values(ASSERTION_SEAL_PREDICATES)) {
       await this.deleteStoreByPatternWithoutCount({ graph: recoveryGraph, subject: recoverySubject, predicate });
     }
-  }
-
-  private assertionRecoverySealGraph(
-    contextGraphId: string,
-    subGraphName?: string,
-  ): string {
-    return subGraphName
-      ? contextGraphSubGraphPrivateUri(contextGraphId, subGraphName)
-      : contextGraphPrivateUri(contextGraphId);
-  }
-
-  private assertionRecoverySealSubject(
-    contextGraphId: string,
-    name: string,
-    agentAddress: string,
-    subGraphName?: string,
-  ): string {
-    return `${contextGraphAssertionUri(
-      contextGraphId,
-      agentAddress,
-      name,
-      subGraphName,
-    )}/_recovery_seal`;
   }
 
   private async activeAssertionSealSubjects(
@@ -6604,8 +6582,8 @@ export class DKGPublisher implements Publisher {
     subGraphName?: string,
   ): Promise<Array<{ seal: AssertionSeal; subject: string; quads: Quad[] }>> {
     const metaGraph = contextGraphMetaUri(contextGraphId);
-    const recoveryGraph = this.assertionRecoverySealGraph(contextGraphId, subGraphName);
-    const recoverySubject = this.assertionRecoverySealSubject(
+    const recoveryGraph = assertionRecoverySealGraph(contextGraphId, subGraphName);
+    const recoverySubject = assertionRecoverySealSubject(
       contextGraphId,
       name,
       agentAddress,
@@ -6628,14 +6606,8 @@ export class DKGPublisher implements Publisher {
         }`,
       );
       const quads = result.type === 'quads' ? result.quads : [];
-      try {
-        const seal = parseAssertionSealQuads(quads, subject);
-        if (seal) loaded.push({ seal, subject, quads });
-      } catch {
-        // A complete recovery archive may coexist with a torn active-seal
-        // deletion after a crash. Ignore only the unusable candidate; the
-        // source payload is still verified against whichever complete seal wins.
-      }
+      const seal = parseStoredAssertionSeal(quads, subject);
+      if (seal) loaded.push({ seal, subject, quads });
     }
     return loaded;
   }
@@ -6648,8 +6620,8 @@ export class DKGPublisher implements Publisher {
     loaded: { seal: AssertionSeal; subject: string; quads: Quad[] },
     subGraphName?: string,
   ): Promise<Quad[]> {
-    const recoveryGraph = this.assertionRecoverySealGraph(contextGraphId, subGraphName);
-    const recoverySubject = this.assertionRecoverySealSubject(
+    const recoveryGraph = assertionRecoverySealGraph(contextGraphId, subGraphName);
+    const recoverySubject = assertionRecoverySealSubject(
       contextGraphId,
       name,
       agentAddress,
@@ -6753,27 +6725,20 @@ export class DKGPublisher implements Publisher {
   private kaGraphIdentityFromLifecycle(
     contextGraphId: string, agentAddress: string, name: string, subGraphName: string | undefined, record: AssertionLifecycleRecord,
   ): { agentAddress: string; number: bigint; kaUal?: string } | null {
-    const urn = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
-    if (record.number !== undefined) {
-      const number = record.number;
-      const rawUal = record.reservedUal;
-      if (rawUal) {
-        try {
-          const scope = createGraphKnowledgeAssetScope(rawUal, 1);
-          if (BigInt(scope.kaNumber) !== number) {
-            throw new Error(`reservedUal number ${scope.kaNumber} does not match kaId ${number}`);
-          }
-          return { agentAddress: scope.agentAddress, number, kaUal: scope.ual };
-        } catch (err) {
-          this.log.warn(
-            createOperationContext('share'),
-            `Ignoring invalid reservedUal on <${urn}>: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
-      return { agentAddress, number };
+    return this.kaGraphIdentityFromReservation(contextGraphId, agentAddress, name, subGraphName,
+      decodeAssertionReservationIdentity(record, agentAddress));
+  }
+
+  private kaGraphIdentityFromReservation(
+    contextGraphId: string, agentAddress: string, name: string, subGraphName: string | undefined, identity: AssertionReservationIdentity,
+  ): { agentAddress: string; number: bigint; kaUal?: string } | null {
+    if (identity.kind === 'unallocated') return null;
+    if (identity.kind === 'conflict') throw Object.assign(new Error(identity.reason), { code: 'KA_WM_LIFECYCLE_CORRUPT' });
+    if (identity.kind === 'legacy-fallback' && identity.warning) {
+      const urn = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
+      this.log.warn(createOperationContext('share'), `Ignoring invalid reservedUal on <${urn}>: ${identity.warning}`);
     }
-    return null;
+    return identity.identity;
   }
 
   /** Mutation gate: missing/legacy scope is query/export-only. */
@@ -6984,7 +6949,7 @@ export class DKGPublisher implements Publisher {
     contextGraphId: string, name: string, agentAddress: string,
     operationId: string | undefined, subGraphName?: string,
   ): Promise<ResolvedAssertionSource | undefined> {
-    const subject = this.assertionRecoverySealSubject(contextGraphId, name, agentAddress, subGraphName);
+    const subject = assertionRecoverySealSubject(contextGraphId, name, agentAddress, subGraphName);
     const archived = (await this.loadAssertionSeals(contextGraphId, name, agentAddress, subGraphName))
       .find((candidate) => candidate.subject === subject);
     return verifyPullRecoverySeal({
@@ -7721,14 +7686,6 @@ export class DKGPublisher implements Publisher {
       onDisposition?: (disposition: 'created' | 'sealed-noop') => void;
     },
   ): Promise<string> {
-    return this.withWriteLocks([assertionAllocationLockKey(contextGraphId, agentAddress, subGraphName)], () =>
-      this.assertionCreateWithAllocationLock(contextGraphId, name, agentAddress, subGraphName, opts));
-  }
-
-  private async assertionCreateWithAllocationLock(
-    contextGraphId: string, name: string, agentAddress: string, subGraphName?: string,
-    opts?: { allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }>; expectedKaNumber?: bigint; lifecycle?: AssertionLifecycleRecord },
-  ): Promise<string> {
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
 
     // Clear any stale lifecycle data from a previous create/discard cycle
@@ -7805,57 +7762,64 @@ export class DKGPublisher implements Publisher {
     }
 
     assertExpectedKaSlotMatchesAllocation(opts?.expectedKaNumber, kaNumber);
-    if (kaNumber !== undefined) {
-      await assertKaSlotOwnershipAvailable(this.store, contextGraphId, agentAddress, name, kaNumber, subGraphName);
-    }
-
-    const staleEvents = await this.store.query(
-      `SELECT DISTINCT ?s WHERE { GRAPH <${metaGraph}> { ?s ?p ?o . FILTER(STR(?s) = "${lifecycleSubject}" || STRSTARTS(STR(?s), "${lifecycleSubject}/")) } }`,
+    const identity = kaNumber === undefined ? null : this.kaGraphIdentityFromReservation(
+      contextGraphId, agentAddress, name, subGraphName,
+      hasPreservedKaId ? decodeAssertionReservationIdentity(lifecycle, agentAddress)
+        : resolveAssertionReservationIdentity({ number: kaNumber, reservedUal, lifecycleOwner: agentAddress }),
     );
-    if (staleEvents.type === 'bindings') {
-      for (const row of staleEvents.bindings) {
-        const subj = row['s'];
-        if (subj) await this.deleteStoreByPatternWithoutCount({ graph: metaGraph, subject: subj });
+    const physicalAuthor = identity?.agentAddress ?? agentAddress;
+    const create = async () => {
+      const staleEvents = await this.store.query(
+        `SELECT DISTINCT ?s WHERE { GRAPH <${metaGraph}> { ?s ?p ?o . FILTER(STR(?s) = "${lifecycleSubject}" || STRSTARTS(STR(?s), "${lifecycleSubject}/")) } }`,
+      );
+      if (staleEvents.type === 'bindings') {
+        for (const row of staleEvents.bindings) {
+          const subj = row['s'];
+          if (subj) await this.deleteStoreByPatternWithoutCount({ graph: metaGraph, subject: subj });
+        }
       }
-    }
-    if (preserved.length > 0) {
-      await this.store.insert(preserved);
-    }
+      if (preserved.length > 0) {
+        await this.store.insert(preserved);
+      }
 
-    // Uniform layout: WM data lives in the per-KA graph keyed by {number} once the KA
-    // has an identity (D1). Now that the number is known, build + create that graph.
-    const graphUri = kaNumber !== undefined
-      ? contextGraphLayerUri(contextGraphId, MemoryLayer.WorkingMemory, agentAddress, kaNumber, subGraphName)
-      : contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
-    await this.store.createGraph(graphUri);
+      // Uniform layout: WM data lives in the per-KA graph keyed by {number} once the KA
+      // has an identity (D1). Now that the number is known, build + create that graph.
+      const graphUri = kaNumber !== undefined
+        ? contextGraphLayerUri(contextGraphId, MemoryLayer.WorkingMemory, physicalAuthor, kaNumber, subGraphName)
+        : contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
+      await this.store.createGraph(graphUri);
 
-    const lifecycleQuads = generateAssertionCreatedMetadata({
-      contextGraphId,
-      agentAddress,
-      assertionName: name,
-      subGraphName,
-      timestamp: new Date(),
-      kaNumber,
-      reservedUal,
-    }, { provenanceEvents: this.provenanceEvents });
-    if (!preserved.some((quad) => quad.predicate === `${A2_DKG}contentScopeVersion`)) {
-      lifecycleQuads.push({
-        subject: lifecycleSubject,
-        predicate: `${A2_DKG}contentScopeVersion`,
-        object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+      const lifecycleQuads = generateAssertionCreatedMetadata({
+        contextGraphId,
+        agentAddress,
+        kaAuthorAddress: physicalAuthor,
+        assertionName: name,
+        subGraphName,
+        timestamp: new Date(),
+        kaNumber,
+        reservedUal,
+      }, { provenanceEvents: this.provenanceEvents });
+      if (!preserved.some((quad) => quad.predicate === `${A2_DKG}contentScopeVersion`)) {
+        lifecycleQuads.push({
+          subject: lifecycleSubject,
+          predicate: `${A2_DKG}contentScopeVersion`,
+          object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+          graph: metaGraph,
+        });
+      }
+      await this.store.insert(lifecycleQuads);
+
+      await this.store.insert([{
+        subject: graphUri,
+        predicate: 'http://dkg.io/ontology/memoryLayer',
+        object: '"WM"',
         graph: metaGraph,
-      });
-    }
-    await this.store.insert(lifecycleQuads);
+      }]);
 
-    await this.store.insert([{
-      subject: graphUri,
-      predicate: 'http://dkg.io/ontology/memoryLayer',
-      object: '"WM"',
-      graph: metaGraph,
-    }]);
-
-    return graphUri;
+      return graphUri;
+    };
+    return identity ? withAssertionAllocation(this.store, { contextGraphId, lifecycleOwner: agentAddress, name, subGraphName }, identity, create)
+      : create();
   }
 
   async assertionWrite(

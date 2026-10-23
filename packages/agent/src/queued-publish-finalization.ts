@@ -3,15 +3,13 @@
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION, contextGraphFinalizationTopic, encodeFinalizationMessage,
   type AssertionSeal, type FinalizationMessageMsg, type Logger, type OperationContext,
-  createGraphKnowledgeAssetScope, contextGraphAssertionUri, assertionLifecycleUri, contextGraphMetaUri,
+  createGraphKnowledgeAssetScope, contextGraphAssertionUri, assertionLifecycleUri,
 } from '@origintrail-official/dkg-core';
 import {
-  VM_CURRENT_ASSERTION_PRED, WM_CURRENT_ASSERTION_PRED,
   type AsyncKnowledgeAssetVmPublishExecutionResult, type DKGPublisher,
   type LiftJobTailStep, type LiftJobTailStepObserver, type PublishResult,
 } from '@origintrail-official/dkg-publisher';
 import type { SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
-import { ethers } from 'ethers';
 import type { DKGAgent } from './dkg-agent.js';
 import type {
   GraphScopedKnowledgeAssetVmPublishRequest, planKnowledgeAssetVmPublication,
@@ -52,6 +50,8 @@ interface QueuedPublishFinalizationContext {
   readonly operationPlan: ReturnType<typeof planKnowledgeAssetVmPublication>;
   /** Captured before execution; lifecycle ownership can differ from the UAL author. */
   readonly effectiveAuthor: string;
+  readonly publisherPeerId: string;
+  readonly snapshotQuads: readonly import('@origintrail-official/dkg-storage').Quad[];
   readonly snapshotPrivateRoot?: Uint8Array;
   readonly queuedOnChainContextGraphId?: string;
   readonly onChainCapable: boolean;
@@ -59,8 +59,8 @@ interface QueuedPublishFinalizationContext {
 }
 
 type FinalizationAgentMethod =
-  | '_writeQueuedKnowledgeAssetVmPublishReceipt' | '_stampQueuedKnowledgeAssetVmPublishedLifecycle'
-  | '_stampPointer' | '_stampPointerIfDivergedFromVm' | 'retireLegacySwmAfterVerifiedVmTwin'
+  | '_writeQueuedKnowledgeAssetVmPublishReceipt' | '_repairConfirmedNamedKaVmLifecycle'
+  | 'retireLegacySwmAfterVerifiedVmTwin'
   | 'getContextGraphOnChainId';
 
 /** Keep the original receiver and lazy access to capabilities that some branches never use. */
@@ -88,7 +88,37 @@ interface QueuedPublishFinalizationServices {
 export async function finalizeQueuedKnowledgeAssetVmPublish(
   context: QueuedPublishFinalizationContext,
   services: QueuedPublishFinalizationServices,
-): Promise<AsyncKnowledgeAssetVmPublishExecutionResult> {
+): Promise<AsyncKnowledgeAssetVmPublishExecutionResult & { lifecycleRepairPending?: true }> {
+  let lifecycleRepairPending = false;
+  let finalized: AsyncKnowledgeAssetVmPublishExecutionResult & { lifecycleRepairPending?: true };
+  try {
+    try { services.onPostConfirmationStep?.('publish'); } catch { /* observation only */ }
+    if (context.result.status === 'confirmed') {
+      const { request, seal, result, operationPlan, effectiveAuthor } = context;
+      const scope = createGraphKnowledgeAssetScope(request.kaUal, request.assertionVersion);
+      lifecycleRepairPending = await services.agent._repairConfirmedNamedKaVmLifecycle({
+        contextGraphId: request.contextGraphId, name: request.name, agentAddress: effectiveAuthor,
+        subGraphName: request.subGraphName,
+        packedKaId: (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber),
+        ...(operationPlan.kind === 'update' ? { priorMerkleRoot: operationPlan.vmCurrentAssertion } : {}),
+      }, { ...result, status: 'confirmed', seal,
+        assertionUri: contextGraphAssertionUri(request.contextGraphId, effectiveAuthor, request.name, request.subGraphName) }, { publicQuads: context.snapshotQuads, publisherPeerId: context.publisherPeerId,
+          accessPolicy: request.accessPolicy ?? 'ownerOnly', allowedPeers: [...(request.allowedPeers ?? [])] });
+    }
+  } finally {
+    try { services.onPostConfirmationStep?.('lifecycleStamp'); } catch { /* observation only */ }
+    // Journal admission or retirement must never skip the independent confirmation
+    // tail. Its own required writes decide whether the original queue job can finish.
+    finalized = await finishQueuedConfirmationTail(context, services, lifecycleRepairPending);
+  }
+  return finalized;
+}
+
+async function finishQueuedConfirmationTail(
+  context: QueuedPublishFinalizationContext,
+  services: QueuedPublishFinalizationServices,
+  lifecycleRepairPending: boolean,
+): Promise<AsyncKnowledgeAssetVmPublishExecutionResult & { lifecycleRepairPending?: true }> {
   const {
     request: originalRequest, seal, result, operationPlan, effectiveAuthor: agentAddress,
     snapshotPrivateRoot, queuedOnChainContextGraphId, onChainCapable, ctx,
@@ -98,8 +128,6 @@ export async function finalizeQueuedKnowledgeAssetVmPublish(
   const graphScope = createGraphKnowledgeAssetScope(request.kaUal, request.assertionVersion);
   const assertionUri = contextGraphAssertionUri(request.contextGraphId, agentAddress, request.name, request.subGraphName);
   const lifecycleUri = assertionLifecycleUri(request.contextGraphId, agentAddress, request.name, request.subGraphName);
-  const metaGraph = contextGraphMetaUri(request.contextGraphId);
-  const packedKaId = (BigInt(graphScope.agentAddress) << 96n) | BigInt(graphScope.kaNumber);
   const sharedMemoryScope: SharedMemoryGraphScope = {
     kind: 'named-lifecycle',
     identity: { agentAddress: graphScope.agentAddress, kaNumber: BigInt(graphScope.kaNumber) },
@@ -108,7 +136,7 @@ export async function finalizeQueuedKnowledgeAssetVmPublish(
   const ended = (step: LiftJobTailStep): void => {
     try { services.onPostConfirmationStep?.(step); } catch { /* observation only */ }
   };
-  let complete = true;
+  let complete = !lifecycleRepairPending;
   const required = async (
     run: () => Promise<void | boolean>,
     failureLabel: string,
@@ -129,7 +157,6 @@ export async function finalizeQueuedKnowledgeAssetVmPublish(
     }
   };
 
-  ended('publish');
   if (result.status === 'confirmed') {
     if (result.onChainResult) {
       const chainResult = result.onChainResult;
@@ -160,26 +187,6 @@ export async function finalizeQueuedKnowledgeAssetVmPublish(
         request.contextGraphId, request.subGraphName, ctx,
       ), `Failed to clear remaining SWM after confirmed queued publish of <${lifecycleUri}>`, 'remainingSwmClear');
     }
-    if (operationPlan.kind === 'update') {
-      // Provenance has historically been part of the update tail without its own observation.
-      await required(async () => {
-        const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
-        const priorBare = operationPlan.vmCurrentAssertion.startsWith('0x')
-          ? operationPlan.vmCurrentAssertion.slice(2)
-          : operationPlan.vmCurrentAssertion;
-        const priorUri = `${lifecycleUri}#assertion-${priorBare}`;
-        await agent._stampPointer(lifecycleUri, VM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
-        await agent._stampPointerIfDivergedFromVm(lifecycleUri, WM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
-        await agent.store.insert([
-          { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri, graph: metaGraph },
-          { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: `"${priorBare}"`, graph: metaGraph },
-        ]);
-      }, `Failed to stamp queued update provenance for <${lifecycleUri}>`);
-    }
-    await required(() => agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(
-      request, result.ual,
-      packedKaId ?? seal.reservedKaId ?? result.onChainResult?.kaId ?? result.kaId,
-    ), `Failed to stamp queued VM lifecycle marker for <${lifecycleUri}>`, 'lifecycleStamp');
     if (result.onChainResult) {
       // Graph lookup and message construction intentionally precede the best-effort gossip catch.
       const broadcastCgId = queuedOnChainContextGraphId ?? (onChainCapable
@@ -238,5 +245,5 @@ export async function finalizeQueuedKnowledgeAssetVmPublish(
   if (result.status === 'confirmed' && result.onChainResult && catalogCompletionRecorded === true && complete) {
     return { ...result, status: 'confirmed', onChainResult: result.onChainResult, localFinalizationComplete: true };
   }
-  return { ...result, localFinalizationComplete: undefined };
+  return { ...result, localFinalizationComplete: undefined, ...(lifecycleRepairPending ? { lifecycleRepairPending: true } : {}) };
 }

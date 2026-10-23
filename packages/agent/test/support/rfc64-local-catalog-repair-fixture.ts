@@ -95,6 +95,7 @@ interface StartRepairAgentOptionsV1 {
   readonly name: string;
   readonly dataDir?: string;
   readonly storePath?: string;
+  readonly durableStore?: boolean;
   /** Replaces the in-memory store, for example with {@link scheduledRepairStoreV1}. */
   readonly store?: TripleStore;
   readonly syncContextGraphs?: readonly string[];
@@ -117,7 +118,7 @@ export async function startRepairAgentV1(
     listenPort: 0,
     bootstrapPeers: [],
     nodeRole: 'edge',
-    store: options.store ?? new OxigraphStore(options.storePath),
+    store: options.store ?? new OxigraphStore(options.storePath ?? (options.durableStore ? join(dataDir, 'store.nq') : undefined)),
     syncSharedMemoryOnConnect: false,
     syncReconcilerEnabled: false,
     vmReconcilerEnabled: false,

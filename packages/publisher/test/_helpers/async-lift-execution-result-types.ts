@@ -4,7 +4,6 @@ import type {
   AsyncKnowledgeAssetVmPublishJobHandler,
   PublishResult,
 } from '../../src/index.js';
-import type { TripleStoreAsyncLiftPublisher } from '../../src/async-lift-publisher-impl.js';
 
 declare const legacy: PublishResult;
 declare const chain: NonNullable<PublishResult['onChainResult']>;
@@ -45,9 +44,3 @@ function consume(result: AsyncKnowledgeAssetVmPublishExecutionResult): void {
   }
 }
 void consume;
-
-type DetachedResult = Parameters<TripleStoreAsyncLiftPublisher['recordDetachedPublishResult']>[1];
-const detached: DetachedResult = certified;
-// @ts-expect-error The detached transition requires the certificate, not a generic result.
-const invalidDetached: DetachedResult = legacy;
-void [detached, invalidDetached];

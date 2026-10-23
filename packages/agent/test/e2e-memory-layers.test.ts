@@ -11,12 +11,14 @@
  */
 import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { waitForSharedMemorySubscriber } from './_helpers/gossip-readiness.js';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent as RealDKGAgent, type DKGAgentConfig } from '../src/index.js';
 import { SEAL_CAPABILITY_GAP_CODE } from '../src/dkg-agent-publish.js';
+import { createChainProofResolver } from '../../cli/src/publisher-chain-proof.js';
+import { DurableReplaceableFile } from '../src/durable-file-replace.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
@@ -29,7 +31,7 @@ import {
   TripleStoreAsyncLiftPublisher,
   type KnowledgeAssetVmPublishRequest,
 } from '@origintrail-official/dkg-publisher';
-import { GraphManager, PrivateContentStore, createManagedOxigraphSparqlStoreV1, deleteByPatternWithoutCount } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, StoreOperationTimeoutError, GraphManager, PrivateContentStore, SparqlHttpStore, deleteByPatternWithoutCount } from '@origintrail-official/dkg-storage';
 import { startOxigraphSparqlEndpoint } from '../../storage/test/helpers/oxigraph-sparql-endpoint.js';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 import { extractFromMarkdown } from '../../cli/src/extraction/markdown-extractor.js';
@@ -115,10 +117,14 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
     options: RetryCase,
     run: (fixture: Awaited<ReturnType<typeof prepareUpdate>>) => Promise<void>,
   ) {
-    const endpoint = options.reopen ? await startOxigraphSparqlEndpoint() : undefined;
     const dataDir = options.reopen
       ? await mkdtemp(join(tmpdir(), 'dkg-queued-update-reopen-'))
       : undefined;
+    const snapshotPath = dataDir ? join(dataDir, 'http-store.nq') : undefined;
+    const durableSnapshot = snapshotPath ? new DurableReplaceableFile(snapshotPath, { fileMode: 0o600, directoryMode: 0o700 }) : undefined;
+    const endpoint = snapshotPath ? await startOxigraphSparqlEndpoint({
+      persistBeforeAcknowledgement: store => durableSnapshot!.replace(store.dump({ format: 'application/n-quads' })),
+    }) : undefined;
     const ownedAgents: DKGAgent[] = [];
     const openAgent = async () => {
       const publicSnapshotStore = dataDir
@@ -127,17 +133,36 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
       const agent = await createAgent(`QueuedUpdateRetry-${options.label}`, {
         ...(dataDir ? { dataDir, publicSnapshotStore } : {}),
         ...(endpoint ? {
-          store: createManagedOxigraphSparqlStoreV1({
+          store: new SparqlHttpStore({
             queryEndpoint: endpoint.queryEndpoint,
             updateEndpoint: endpoint.updateEndpoint,
+            consistencyProfile: 'atomic-readback',
+            // This custom endpoint fsyncs its snapshot before every write ACK.
+            // Use explicit generic certification; stock managed HTTP has no barrier.
+            writesDurableOnAcknowledgement: endpoint.writesDurableOnAcknowledgement,
           }),
         } : {}),
       });
+      if (endpoint) expect(agent.store.commitment?.durability).toBe('restart-durable');
       ownedAgents.push(agent);
       return { agent, publicSnapshotStore };
     };
     try {
-      await run(await prepareUpdate(options, openAgent));
+      const fixture = await prepareUpdate(options, openAgent);
+      await run(fixture);
+      if (snapshotPath) {
+        // Read only disk bytes before either the endpoint or agent stops. A
+        // graceful close must not make the advertised durability true later.
+        const probePath = join(dataDir!, 'read-probe.nq');
+        await copyFile(snapshotPath, probePath);
+        const disk = new OxigraphStore(probePath);
+        try {
+          const lifecycle = assertionLifecycleUri(fixture.cg, fixture.agent.defaultAgentAddress ?? fixture.agent.peerId, fixture.name);
+          expect(await disk.query(`ASK { GRAPH <${contextGraphMetaUri(fixture.cg)}> {
+            <${lifecycle}> <http://dkg.io/ontology/state> "published" ; <http://dkg.io/ontology/memoryLayer> "VM"
+          } }`)).toMatchObject({ type: 'boolean', value: true });
+        } finally { await disk.close(); }
+      }
     } finally {
       vi.restoreAllMocks();
       for (const agent of ownedAgents) {
@@ -253,8 +278,8 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
     );
 
     let dispatch = vi.spyOn((agent as any).chain, 'updateKnowledgeCollectionV10');
-    // Both CREATE and UPDATE reach this shared settlement hook after their branch.
-    let settlement = vi.spyOn(agent as any, '_stampQueuedKnowledgeAssetVmPublishedLifecycle');
+    // Confirmed CREATE and UPDATE submit their stamp to the canonical repair owner.
+    let settlement = vi.spyOn(agent as any, '_repairConfirmedNamedKaVmLifecycle');
     const privateReplace = vi.spyOn(PrivateContentStore.prototype, 'replaceKnowledgeAssetPrivateTriples');
     // The real queued handler and agent.update run, including the native staging
     // boundary. The author attestation already exists by design; this one-shot
@@ -292,10 +317,11 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
       expect(agent.peerId).toBe(originalPeerId);
       queue = makeQueue();
       dispatch = vi.spyOn((agent as any).chain, 'updateKnowledgeCollectionV10');
-      settlement = vi.spyOn(agent as any, '_stampQueuedKnowledgeAssetVmPublishedLifecycle');
-      // Fresh managed adapter, agent, file snapshot reader and native queue.
-      // The HTTP fixture remains available: this proves client/agent reopen,
-      // not backend process restart or disk crash durability.
+      settlement = vi.spyOn(agent as any, '_repairConfirmedNamedKaVmLifecycle');
+      // Fresh certified HTTP adapter, agent, file snapshot reader and native queue.
+      // The HTTP fixture remains available: this proves client/agent reopen.
+      // Its awaited fsynced ACK contract is separately checked from disk above;
+      // it grants no durability contract to upstream oxigraph-server.
       expect(await queue.getStatus(jobId)).toMatchObject({
         jobId,
         status: 'failed',
@@ -315,7 +341,7 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
     { label: 'owner-only', accessPolicy: 'ownerOnly' },
     { label: 'allow-list', accessPolicy: 'allowList', allowedPeers: allowList },
     { label: 'private', accessPolicy: 'ownerOnly', privatePayload: true },
-    { label: 'managed-reopen', accessPolicy: 'allowList', allowedPeers: allowList, reopen: true },
+    { label: 'http-reopen', accessPolicy: 'allowList', allowedPeers: allowList, reopen: true },
   ])('retries and finalizes the same $label UPDATE job once [GH#2482]', async (options) => {
     await withUpdateFixture(options, async (fixture) => {
       const { queue, jobId, originalRequest, dispatch, writeAhead, confirmations, settlement } = fixture;
@@ -332,6 +358,12 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
       expect(writeAhead).toHaveBeenCalledOnce();
       expect(confirmations).toHaveBeenCalledOnce();
       expect(settlement).toHaveBeenCalledOnce();
+      const [coordinates, publication] = settlement.mock.calls[0]!;
+      expect(coordinates).toMatchObject({ contextGraphId: fixture.cg, name: fixture.name });
+      expect(coordinates).not.toHaveProperty('merkleRoot'); expect(coordinates).not.toHaveProperty('assertionVersion');
+      expect(publication).toMatchObject({ status: 'confirmed', seal: { assertionVersion: fixture.intent.assertionVersion } });
+      expect(ethers.hexlify(publication.seal.merkleRoot)).toBe(fixture.intent.sealMerkleRoot);
+      expect(await settlement.mock.results[0]?.value).toBe(false);
       expect(writeAhead.mock.calls[0]?.[0].txHash).toBe(finalized?.broadcast?.txHash);
       expect(confirmations.mock.calls[0]?.[0].txHash).toBe(finalized?.broadcast?.txHash);
       expect(await fixture.agent.assertion.history(fixture.cg, fixture.name)).toMatchObject({
@@ -807,16 +839,7 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
     expect(vmData.bindings.length).toBeGreaterThan(0);
   }, 30_000);
 
-  it('F4 regression (Codex #898 after publish): WM-graph marker is UPDATED to "VM" and a stale re-promote is a no-op', async () => {
-    // Adversarial review F4: the publish-time SWM→VM flip briefly DELETED the
-    // per-KA `<wmGraph> dkg:memoryLayer` row (RFC ka-metadata-trim "orphan
-    // marker cleanup"). That row is the witness `assertAssertionDataPersisted`
-    // reads to classify a stale re-promote after a successful publish as a
-    // harmless no-op (the Codex #898 case, post-publish variant: the lifecycle
-    // URN's dkg:assertionGraph back-link has been re-pointed at the VM graph by
-    // then, so the URN fallback can no longer vouch for the WM graph). The fix
-    // UPDATES the marker in place to "VM" — keeping the witness and killing the
-    // misleading orphan "SWM" value.
+  it('F4 regression (Codex #898 after publish): only the actual VM graph is marked and a stale re-promote is a no-op', async () => {
     const agent = await createAgent('DoublePromoteBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Double Promote E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -833,8 +856,7 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
     expect(pub.status).toBe('confirmed');
     expect(pub.kaId).toBeDefined();
 
-    // 1. The marker must now read "VM" on the per-KA WM graph URI the flip
-    //    derives from the minted kaId — present (not deleted), not "SWM".
+    // The VM graph owns its layer marker; retired WM has none.
     const DKG = 'http://dkg.io/ontology/';
     const metaGraph = contextGraphMetaUri(CG_ID);
     const kaId = BigInt(pub.kaId!);
@@ -848,12 +870,13 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
       `SELECT ?layer WHERE { GRAPH <${metaGraph}> { <${wmGraphFromKaId}> <${DKG}memoryLayer> ?layer } }`,
     );
     expect(markerRes.type).toBe('bindings');
-    expect(markerRes.bindings.map((b: Record<string, string>) => b['layer'])).toEqual([`"${MemoryLayer.VerifiableMemory}"`]);
+    expect(markerRes.bindings).toEqual([]);
+    const vmGraph = contextGraphLayerUri(CG_ID, MemoryLayer.VerifiableMemory,
+      '0x' + (kaId >> 96n).toString(16).padStart(40, '0'), kaId & ((1n << 96n) - 1n));
+    const vmMarker = await (agent as any).store.query(`SELECT ?layer WHERE { GRAPH <${metaGraph}> { <${vmGraph}> <${DKG}memoryLayer> ?layer } }`);
+    expect(vmMarker.bindings.map((b: Record<string, string>) => b['layer'])).toEqual([`"${MemoryLayer.VerifiableMemory}"`]);
 
-    // 2. Codex #898 post-publish: import-file extraction markers survive
-    //    promote+publish by design. With the WM marker deleted (pre-F4) the
-    //    stale re-promote below misfired AssertionNotPersistedError; the "VM"
-    //    marker short-circuits it to the harmless `{ promotedCount: 0 }` no-op.
+    // Retained import audit markers must not turn a stale promote into a failure.
     const author = agent.defaultAgentAddress ?? agent.peerId;
     const wmGraphPromoteSees = await (agent as any).publisher.wmGraphUri(CG_ID, author, name);
     await (agent as any).store.insert([
@@ -1995,6 +2018,121 @@ describe('rootless graph-scoped KA lifecycle', () => {
     await expect(
       agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name),
     ).rejects.toMatchObject({ code: 'PUBLISH_NOT_FULL_SHARE' });
+  }, 60_000);
+
+  it('repairs a confirmed queued lifecycle stamp automatically after a real agent restart', async () => {
+    const CG_ID = 'confirmed-lifecycle-restart';
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-confirmed-lifecycle-e2e-'));
+    const storePath = join(dir, 'store.nq');
+    const store = new OxigraphStore(storePath);
+    let firstAgent: DKGAgent | undefined;
+    let restartedAgent: DKGAgent | undefined;
+    try {
+      firstAgent = await createAgent('ConfirmedLifecycleRepairBeforeRestart', {
+        dataDir: dir, store, sharedMemoryPublicSnapshotStorage: { enabled: false },
+        syncReconcilerEnabled: false, vmReconcilerEnabled: false,
+      });
+      await firstAgent.createContextGraph({ id: CG_ID, name: 'Confirmed Lifecycle Repair E2E' });
+      await firstAgent.registerContextGraph(CG_ID);
+      const name = 'confirmed-stamp-restart';
+      await firstAgent.assertion.create(CG_ID, name);
+      await firstAgent.assertion.write(CG_ID, name, [
+        { subject: 'urn:confirmed-stamp-restart', predicate: 'http://schema.org/name', object: '"Repair after restart"' },
+      ]);
+      await firstAgent.assertion.promote(CG_ID, name);
+      const intent = await firstAgent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+      const publisher = (firstAgent as any).publisher;
+      const publish = publisher.publish.bind(publisher);
+      let armed = false;
+      let rejectedCommits = 0;
+      const author = firstAgent.defaultAgentAddress ?? firstAgent.peerId;
+      const lifecycle = assertionLifecycleUri(CG_ID, author, name);
+      const atomicUpdate = store.atomicUpdate.bind(store);
+      const fault = vi.spyOn(store, 'atomicUpdate').mockImplementation(async (sparql, options) => {
+        if (armed && options?.source === 'agent.publish.confirmedLifecycleCommit') {
+          rejectedCommits += 1;
+          throw new StoreOperationTimeoutError({ backend: 'managed-oxigraph', operation: 'update', outcome: 'not_started' });
+        }
+        await atomicUpdate(sparql, options);
+      });
+      const submitted = vi.spyOn(publisher, 'publish').mockImplementation(async (...args: any[]) => {
+        const result = await publish(...args);
+        armed = result.status === 'confirmed';
+        return result;
+      });
+      const queue = new TripleStoreAsyncLiftPublisher(store, { publicSnapshotStore: (firstAgent as any).publicSnapshotStore, knowledgeAssetVmPublishHandler: {
+        execute: ({ request, publishOptions }) => firstAgent!.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+      } });
+      const jobId = await queue.enqueueKnowledgeAssetVmPublish(intent);
+      const processed = await queue.processNext('wallet-1');
+      if (processed?.status === 'failed') throw new Error(JSON.stringify(processed.failure));
+      expect(processed).toMatchObject({ jobId, status: 'broadcast' });
+      expect(processed?.finalization).toBeUndefined();
+      expect(submitted).toHaveBeenCalledTimes(1);
+      const kaId = BigInt(intent.seal.reservedKaId!);
+      const rootCount = await (firstAgent as any).chain.getMerkleRootCount(kaId);
+      expect(rootCount).toBe(1n);
+      expect(rejectedCommits).toBeGreaterThan(0);
+      const before = await firstAgent.assertion.history(CG_ID, name);
+      expect(before?.state).not.toBe('published');
+      await firstAgent.stop();
+      agents.splice(agents.indexOf(firstAgent), 1);
+      const journal = JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'));
+      expect(journal.entries).toHaveLength(1);
+      fault.mockRestore();
+      restartedAgent = await createAgent('ConfirmedLifecycleRepairAfterRestart', {
+        dataDir: dir, store: new OxigraphStore(storePath), sharedMemoryPublicSnapshotStorage: { enabled: false },
+        syncReconcilerEnabled: false, vmReconcilerEnabled: false,
+      });
+      // Restore chain-backed context-graph authority as the daemon does before queue recovery.
+      await restartedAgent.discoverContextGraphsFromChain();
+      const republish = vi.spyOn((restartedAgent as any).publisher, 'publish');
+      let history = await restartedAgent.assertion.history(CG_ID, name);
+      const deadline = Date.now() + 20_000;
+      while (history?.state !== 'published' && Date.now() < deadline) {
+        await sleep(100);
+        history = await restartedAgent.assertion.history(CG_ID, name);
+      }
+      expect(history).toMatchObject({ vmCurrentAssertion: intent.sealMerkleRoot.slice(2),
+        state: 'published', memoryLayer: MemoryLayer.VerifiableMemory });
+      const published = await (restartedAgent as any).store.query(`SELECT ?ual WHERE { GRAPH <${contextGraphMetaUri(CG_ID)}> {
+        <${lifecycle}> <http://dkg.io/ontology/publishedUal> ?ual
+      } }`);
+      expect(published.bindings).toHaveLength(1);
+      expect(await (restartedAgent as any).chain.getMerkleRootCount(kaId)).toBe(rootCount);
+      expect(republish).not.toHaveBeenCalled();
+      const adapters = new Map([['wallet-1', (restartedAgent as any).chain]]);
+      const resolveProof = createChainProofResolver(adapters);
+      const recoveredQueue = new TripleStoreAsyncLiftPublisher((restartedAgent as any).store, {
+        chainProofResolver: resolveProof,
+        knowledgeAssetVmPublishRecoveryResolver: async (_job, lookup, carried, options) => {
+          const verdict = carried ? { status: 'recovered' as const, recovery: carried } : await resolveProof(lookup, options);
+          if (verdict.status !== 'recovered' || !verdict.recovery.canonicalCreate) return null;
+          const receipt = verdict.recovery.canonicalCreate;
+          return { inclusion: verdict.recovery.inclusion,
+            finalization: { ...verdict.recovery.finalization, ual: intent.kaUal! },
+            publishProof: { merkleRoot: receipt.merkleRoot, authorAddress: receipt.authorAddress, txIndex: receipt.txIndex } };
+        },
+        knowledgeAssetVmPublishHandler: {
+          execute: vi.fn(async () => { throw new Error('Must recover the original transaction'); }),
+          finalizeRecovered: input => restartedAgent!.finalizeRecoveredQueuedKnowledgeAssetVmPublish(input),
+        },
+      });
+      // RDF becomes readable before the active writer releases its lock/barrier.
+      // Ordinary recovery retries a busy writer; the first pass need not terminalize.
+      await vi.waitFor(async () => {
+        await recoveredQueue.reconcileTransactions();
+        expect(await recoveredQueue.getStatus(jobId)).toMatchObject({ status: 'finalized',
+          finalization: { txHash: processed!.broadcast!.txHash } });
+      }, { timeout: 15_000, interval: 100 });
+      expect(await recoveredQueue.processNext('wallet-1')).toBeNull();
+      expect(republish).not.toHaveBeenCalled();
+      expect(await (restartedAgent as any).chain.getMerkleRootCount(kaId)).toBe(rootCount);
+    } finally {
+      if (restartedAgent) { await restartedAgent.stop(); agents.splice(agents.indexOf(restartedAgent), 1); }
+      if (firstAgent && agents.includes(firstAgent)) { await firstAgent.stop(); agents.splice(agents.indexOf(firstAgent), 1); }
+      await rm(dir, { recursive: true, force: true });
+    }
   }, 60_000);
 
   it('async VM publish with clearAfter false clears published roots but leaves unrelated SWM content', async () => {

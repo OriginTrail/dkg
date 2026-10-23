@@ -39,6 +39,7 @@ import {
   type PublishOptions,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { GossipSession } from '../src/gossip-session.js';
 import { localGossipSigner } from '../src/external-author-signing.js';
 import { computeSwmSenderKeyRecipientRouteHash } from '../src/dkg-agent-swm-state.js';
 
@@ -1019,10 +1020,12 @@ function makeQueuedAgentHarness(options: {
 }) {
   const publisherPublish = recorder(async (_opts: any) => ({
     status: options.publishStatus ?? 'tentative',
-    ual: options.ual,
+    ual: options.publishStatus === 'confirmed' ? _opts.kaUal : options.ual,
   }));
   const agentLike: any = {
     peerId: options.peerId,
+    writeLocks: new Map(),
+    gossipSession: new GossipSession(),
     defaultAgentAddress: QUEUED_TEST_AUTHOR,
     chain: options.chain ?? {},
     store: {
@@ -1046,6 +1049,7 @@ function makeQueuedAgentHarness(options: {
     _stampPointer: recorder(async () => undefined),
     resolveRfc64CatalogAuthoringLaneV1: () => null,
   };
+  Object.setPrototypeOf(bindInlineEncryptionFactory(agentLike), DKGAgent.prototype); // bind first: `??=` keeps an inherited resolver
   agentLike.afterConfirmedGraphScopedVmPublishV1 =
     (DKGAgent.prototype as any).afterConfirmedGraphScopedVmPublishV1;
   agentLike.retireLegacySwmAfterConfirmedLocalPublish =

@@ -5,7 +5,7 @@ import { assertionLifecycleUri, contextGraphMetaUri, contextGraphLayerUri, Memor
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
-import { applyPublishedNamedKaVmLifecycle } from '../../src/named-ka-vm-lifecycle.js';
+import { applyVerifiedNamedKaDescriptor as applyPublishedNamedKaVmLifecycle } from '../../src/named-ka-vm-lifecycle.js';
 import { AUTHOR, PUBLISHER, TX_HASH } from './named-ka-recovery-fixture.js';
 
 const DKG = 'http://dkg.io/ontology/';

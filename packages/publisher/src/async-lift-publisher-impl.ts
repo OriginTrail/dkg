@@ -1,3 +1,4 @@
+import { completeClaimedKnowledgeAssetExecution } from './async-lift-knowledge-asset-completion.js';
 import { atLiftValidationStage } from './lift-validation-error.js';
 import { createAsyncLiftClaimControl } from './async-lift-claim-gate.js';
 import type { WorkerLiftJobClaimSession } from './lift-job-transition-scope.js';
@@ -53,7 +54,6 @@ import {
 import type {
   AsyncKnowledgeAssetVmPublishJobHandler,
   AsyncKnowledgeAssetVmPublishExecutionResult,
-  AsyncKnowledgeAssetVmPublishCertifiedResult,
   ActiveLiftJobClaim,
   ActiveLiftJobClaimSession,
   AsyncLiftAdministrativeMutations,
@@ -119,7 +119,9 @@ import { persistLiftJobRecord } from './job-record-atomic-write.js';
 import {
   isDefinitivePreAcceptanceSendFailure,
   mapPublishExceptionToLiftJobFailure,
-  mapPublishResultToLiftJobSuccess,
+  mapClaimedPublishResultToLiftJobSuccess,
+  InvalidLiftPublishResultError,
+  type AsyncLiftPublishSuccess,
   type AsyncLiftPublishFailureInput,
 } from './async-lift-publish-result.js';
 import { isKnowledgeAssetPublishPreconditionFailure, mapExecutionFailure } from './async-lift-execution-failure.js';
@@ -247,11 +249,6 @@ export function chainCheckOutcomeOf(resolution: AsyncLiftChainProofResolution): 
 type BusinessOperationResult<T> =
   | { readonly kind: 'succeeded'; readonly value: T }
   | { readonly kind: 'failed'; readonly error: unknown };
-
-/** A publish result is business-invalid; persistence and ownership failures remain unwrapped. */
-class InvalidLiftPublishResultError extends Error {
-  override readonly name = 'InvalidLiftPublishResultError';
-}
 
 /**
  * GH#2270 — why a failed job is being reaccepted, stated by the caller rather than inferred.
@@ -1311,14 +1308,20 @@ export class TripleStoreAsyncLiftPublisher
     if (executionAttempt.value.kind === 'detached') {
       return executionAttempt.value.job;
     }
-    // Queue mutations deliberately sit outside business catches. Ownership loss is control flow
-    // for processNext(), while a local persistence fault must escape to recovery rather than be
-    // reclassified as a publish failure.
-    return await this.recordWorkerPublishResult(
-      session,
-      executionAttempt.value.publishResult,
-      { publicByteSize },
-    );
+    // Named-KA completion has the same certificate and original-transaction fence
+    // whether execution detached or finished inline. An incomplete local tail leaves
+    // the durable broadcast on the recovery track; it never authorizes another send.
+    const result = executionAttempt.value.publishResult;
+    try {
+      await this.recordKnowledgeAssetExecutionResult(claim, result, { publicByteSize });
+    } catch (error) {
+      if (!(error instanceof InvalidLiftPublishResultError)) throw error;
+      if (!(await this.getRequiredJob(claimed.jobId)).broadcast && broadcastRecorder.outcome !== 'recorded-durable') {
+        return await this.failKnowledgeAssetVmPublishExecution(session, error, broadcastRecorder);
+      }
+      // Invalid executor evidence cannot erase the original transaction's repair obligation.
+    }
+    return await this.getRequiredJob(claimed.jobId);
   }
 
   private async recordWorkerPublishResult(
@@ -1413,23 +1416,20 @@ export class TripleStoreAsyncLiftPublisher
     });
   }
 
-  /** Complete only the original claim and transaction, including after proof releases its wallet. */
-  private async recordDetachedPublishResult(
-    claim: ActiveLiftJobClaim, result: AsyncKnowledgeAssetVmPublishCertifiedResult, options: { publicByteSize?: number },
+  private async recordKnowledgeAssetExecutionResult(
+    claim: ActiveLiftJobClaim, result: AsyncKnowledgeAssetVmPublishExecutionResult, options: { publicByteSize?: number },
   ): Promise<boolean> {
-    if (result.localFinalizationComplete !== true || result.status !== 'confirmed' || !result.onChainResult) return false;
-    // Keep canonical claim -> job lock order through terminal persistence and wallet deletion.
-    // Otherwise a claimant can replace the wallet lock between its guarded read and deletion.
-    // This short transaction does no lifecycle repair: the executor certified that work already.
-    return this.journalCompletion.runPublicOperation((owner) => this.claimCoordinator.runClaimJobTransaction(owner, claim.jobId, async (transaction) => {
+    // Keep canonical claim -> job lock order through persistence and wallet deletion.
+    return this.journalCompletion.runPublicOperation(owner => this.claimCoordinator.runClaimJobTransaction(owner, claim.jobId, async transaction => {
       if (transaction.kind !== 'present') return false;
-      const { current, scope } = transaction;
-      if (current.status !== 'broadcast' && current.status !== 'included') return false;
-      if (current.claim?.claimToken !== claim.claim.claimToken
-        || current.claim?.walletId !== claim.claim.walletId) return false;
-      if (current.broadcast.txHash !== result.onChainResult.txHash) return false;
-      const completed = await this.applyPublishResultTransition(current, scope, result, options);
-      return completed.status === 'finalized';
+      return completeClaimedKnowledgeAssetExecution({ ...transaction, claim, result, ...options }, {
+        buildBroadcast: (job, broadcast) => {
+          const next = this.buildTransitionJob(job, 'broadcast', { broadcast });
+          this.assertJobMatchesStatus(next); return next;
+        },
+        flush: () => this.store.flush?.() ?? Promise.resolve(),
+        applyMapped: (job, mapped) => this.applyMappedPublishResultTransition(job, transaction.scope, mapped),
+      });
     }));
   }
 
@@ -1445,7 +1445,7 @@ export class TripleStoreAsyncLiftPublisher
       async (result) => {
         this.chainObservations.completion.executorSettled(jobId);
         if (result?.localFinalizationComplete !== true) return;
-        completed = await this.recordDetachedPublishResult(claim, result, options);
+        completed = await this.recordKnowledgeAssetExecutionResult(claim, result, options);
         if (completed) this.executorProofHints.delete(jobId);
       },
       () => { this.chainObservations.completion.executorSettled(jobId); },
@@ -2061,21 +2061,14 @@ export class TripleStoreAsyncLiftPublisher
     publishResult: PublishResult,
     options: { publicByteSize?: number },
   ): Promise<LiftJob> {
-    const jobId = current.jobId;
-    if (!current.claim || !current.validation) {
-      throw new Error(`LiftJob ${jobId} must be claimed and validated before recording publish results`);
-    }
+    const mappedResult = mapClaimedPublishResultToLiftJobSuccess(current, publishResult, options);
+    return this.applyMappedPublishResultTransition(current, scope, mappedResult);
+  }
 
-    let mappedResult: ReturnType<typeof mapPublishResultToLiftJobSuccess>;
-    try {
-      mappedResult = mapPublishResultToLiftJobSuccess({
-        publishResult,
-        walletId: current.claim.walletId,
-        publicByteSize: options.publicByteSize,
-      });
-    } catch (error) {
-      throw new InvalidLiftPublishResultError(error instanceof Error ? error.message : String(error));
-    }
+  private async applyMappedPublishResultTransition(
+    current: LiftJob, scope: LiftJobTransitionScope, mappedResult: AsyncLiftPublishSuccess,
+  ): Promise<LiftJob> {
+    const jobId = current.jobId;
     // GH#2270 PR-3 r2 — the publish RESULT has no nonce to report; only the pre-send write-ahead
     // ever knew it. Every transition below replaces `broadcast` wholesale, so without this the
     // nonce recorded before the send is silently dropped the moment the executor returns — and a

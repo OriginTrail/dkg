@@ -4,11 +4,38 @@ import { assertSafeIri, assertionLifecycleUri, contextGraphMetaUri, escapeSparql
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 
+export const ASSERTION_RESERVATION_PREDICATES = {
+  owner: 'http://www.w3.org/ns/prov#wasAttributedTo',
+  name: 'http://dkg.io/ontology/assertionName',
+  number: 'http://dkg.io/ontology/kaId',
+  ual: 'http://dkg.io/ontology/reservedUal',
+  subGraphName: 'http://dkg.io/ontology/subGraphName',
+} as const;
+
 export interface AssertionLifecycleRecord {
   readonly bindings: ReadonlyArray<Readonly<{ p: string; o: string }>>;
   readonly hasKaId: boolean;
   readonly number?: bigint;
   readonly reservedUal?: string;
+}
+
+/** Shared RDF reservation fields for normal named operations and confirmed reconciliation. */
+export function decodeAssertionReservationValue(predicate: string, term: string): string | undefined {
+  const literal = parseRdfLiteralTerm(term);
+  const numeric = predicate === 'http://dkg.io/ontology/kaId' || predicate === 'http://dkg.io/ontology/contentScopeVersion';
+  if (literal) {
+    if (literal.kind === 'language' || (literal.kind === 'typed' && literal.datatype !== `http://www.w3.org/2001/XMLSchema#${numeric ? 'integer' : 'string'}`)) return undefined;
+    return literal.value;
+  }
+  if (numeric) return /^(0|[1-9][0-9]*)$/.test(term) ? term : undefined;
+  return predicate === 'http://dkg.io/ontology/reservedUal' || predicate === 'http://www.w3.org/ns/prov#wasAttributedTo'
+    ? term.replace(/^<|>$/g, '') : undefined;
+}
+
+/** Preserve the ordinary lifecycle reader's accepted historical UAL terms. */
+export function decodeStoredAssertionReservedUal(term: string): string {
+  return (decodeAssertionReservationValue(ASSERTION_RESERVATION_PREDICATES.ual, term)
+    ?? term.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')).trim();
 }
 
 /** One identity decoder. Reservations require exact RDF integers; ordinary
@@ -34,11 +61,8 @@ export function decodeAssertionLifecycleRecord(
   const raw = ids[0]?.o;
   let number: bigint | undefined;
   if (policy === 'strict-reservation' && bindings.length > 0) {
-    const literal = raw === undefined ? null : parseRdfLiteralTerm(raw);
-    const value = literal?.value ?? raw;
-    if (ids.length !== 1 || value === undefined || value !== value.trim() || !/^(0|[1-9][0-9]*)$/.test(value)
-      || literal?.kind === 'language'
-      || (literal?.kind === 'typed' && literal.datatype !== 'http://www.w3.org/2001/XMLSchema#integer')) throw corrupt();
+    const value = raw === undefined ? undefined : decodeAssertionReservationValue('http://dkg.io/ontology/kaId', raw);
+    if (ids.length !== 1 || value === undefined || value !== value.trim() || !/^(0|[1-9][0-9]*)$/.test(value)) throw corrupt();
     number = BigInt(value);
     if (number > MAX_ROOTLESS_KA_NUMBER_V1) throw corrupt();
   } else {
@@ -46,8 +70,8 @@ export function decodeAssertionLifecycleRecord(
     if (match) number = BigInt(match[1]);
   }
   const ual = bindings.find(r => r.p === 'http://dkg.io/ontology/reservedUal')?.o;
-  return { bindings, hasKaId: ids.length > 0, number,
-    reservedUal: ual?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '').trim() };
+  const reservedUal = ual === undefined ? undefined : decodeStoredAssertionReservedUal(ual);
+  return { bindings, hasKaId: ids.length > 0, number, reservedUal };
 }
 
 /** Legacy lifecycle subjects preserve caller spelling; layer graphs do not. */

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { BlazegraphNamespaceManager, blazegraphNamespaceApiUrlFromSparqlEndpoint, createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
-import { applyPublishedNamedKaVmLifecycle, createPublishedNamedKaVmLifecycleWriter, type PublishedNamedKaVmLifecycleWriter } from '../src/named-ka-vm-lifecycle.js';
+import { applyVerifiedNamedKaDescriptor as applyPublishedNamedKaVmLifecycle, createPublishedNamedKaVmLifecycleWriter, type PublishedNamedKaVmLifecycleWriter } from '../src/named-ka-vm-lifecycle.js';
 import { createMutationObservedStore } from '../src/internal/context-graph-cache-invalidating-store.js';
 import { createObservedStoreMutation } from '../src/internal/observed-store-mutation.js';
 

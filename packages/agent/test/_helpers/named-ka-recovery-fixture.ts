@@ -52,12 +52,12 @@ export const NO_ENDPOINT_SERVES: KnowledgeAssetVersionSnapshotUnavailable = {
 export const NO_ENDPOINT_SERVES_WORDS = 'endpoint 1 of 2 (rpc.example) refused a block-pinned read (http 400); '
   + 'endpoint 2 of 2 (backup.example) could not be reached for the head block read';
 
-export function seededChain(): MockChainAdapter {
+export function seededChain(merkleRootHex = SEAL_MERKLE_ROOT): MockChainAdapter {
   const chain = new MockChainAdapter(CHAIN_ID);
   chain.__registerKC({
     kaId: RESERVED_KA_ID,
     contextGraphId: 1n,
-    merkleRootHex: SEAL_MERKLE_ROOT,
+    merkleRootHex,
     chunks: [],
   });
   return chain;

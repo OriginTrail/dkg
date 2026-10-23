@@ -3,6 +3,8 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'test/metadata-rdf-terms.test.ts',
+      'test/confirmed-named-assertion.test.ts',
       'test/access-client-bounds.test.ts',
       'test/assertion-lifecycle-candidates.test.ts',
       'test/wm-lifecycle-integrity.test.ts',
@@ -31,6 +33,7 @@ export default defineConfig({
       'test/async-lift-claim-fencing.test.ts',
       'test/async-lift-pause-barrier.test.ts',
       'test/async-lift-detached-completion.test.ts',
+      'test/async-lift-inline-completion.test.ts',
       'test/async-lift-work-available.test.ts',
       'test/async-lift-claim-selection.test.ts',
       'test/async-lift-wallet-snapshot.test.ts',

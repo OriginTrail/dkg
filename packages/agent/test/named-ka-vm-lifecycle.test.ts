@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryLayer, assertionLifecycleUri, contextGraphAssertionUri, contextGraphLayerUri, contextGraphMetaUri, sparqlString } from '@origintrail-official/dkg-core';
 import { GraphSetIndexStore, OxigraphStore, UnsupportedTripleStoreCapabilityError, quadToNQuad, type Quad, type TripleStore, type UpdateOptions } from '@origintrail-official/dkg-storage';
 import { VM_CURRENT_ASSERTION_PRED } from '@origintrail-official/dkg-publisher';
-import { applyPublishedNamedKaVmLifecycle, createPublishedNamedKaVmLifecycleWriter, type PublishedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle.js';
+import { applyVerifiedNamedKaDescriptor as applyPublishedNamedKaVmLifecycle, createPublishedNamedKaVmLifecycleWriter } from '../src/named-ka-vm-lifecycle.js';
+import { applyPublishedNamedKaVmLifecycle as applyConfirmedLifecycle } from './_helpers/confirmed-lifecycle-metadata-writer.js';
+import type { VerifiedNamedKaDescriptorInput } from '../src/internal/named-ka-vm-lifecycle-mutation.js';
 import { createMutationObservedStore } from '../src/internal/context-graph-cache-invalidating-store.js';
 import { createObservedStoreMutation } from '../src/internal/observed-store-mutation.js';
 import type { StoreMutationObserver } from '../src/internal/store-mutation.js';
@@ -10,7 +12,7 @@ import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection
 import { createProjectionMutationObserver } from '../src/internal/projection-mutation-observer.js';
 
 const DKG = 'http://dkg.io/ontology/';
-const input: PublishedNamedKaVmLifecycleInput = {
+const input: VerifiedNamedKaDescriptorInput = {
   contextGraphId: 'urn:test:lifecycle-batch', agentAddress: '0x1111111111111111111111111111111111111111',
   name: 'asset', subGraphName: 'scope', publishedUal: 'did:dkg:base:84532/contract/42',
   merkleRoot: `0x${'AB'.repeat(32)}`, packedKaId: (0x1111111111111111111111111111111111111111n << 96n) | 42n,
@@ -38,7 +40,7 @@ function rows(value = input): Quad[] {
     const author = `0x${(value.packedKaId >> 96n).toString(16).padStart(40, '0')}`;
     const id = value.packedKaId & ((1n << 96n) - 1n);
     result.push(q(lifecycle, `${DKG}assertionGraph`, contextGraphLayerUri(value.contextGraphId, MemoryLayer.VerifiableMemory, author, id, value.subGraphName)),
-      q(contextGraphLayerUri(value.contextGraphId, MemoryLayer.WorkingMemory, author, id, value.subGraphName), `${DKG}memoryLayer`, sparqlString(MemoryLayer.VerifiableMemory)));
+      q(contextGraphLayerUri(value.contextGraphId, MemoryLayer.VerifiableMemory, author, id, value.subGraphName), `${DKG}memoryLayer`, sparqlString(MemoryLayer.VerifiableMemory)));
   }
   return result;
 }
@@ -93,12 +95,26 @@ describe('named KA VM lifecycle batching', () => {
     expect(await all(raw)).toEqual([...rows(value), ...unrelated, ...preserved].map(quadToNQuad).sort());
   });
 
+  it.each([true, false])('projects identical confirmed and verified descriptor metadata (atomic=%s)', async atomic => {
+    const confirmed = memory(), descriptor = memory();
+    await confirmed.insert(unrelated); await descriptor.insert(unrelated);
+    const store = atomic ? confirmed : new Proxy(confirmed, { get(target, key) {
+      if (key === 'atomicUpdate') return undefined;
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    await applyConfirmedLifecycle(store, { contextGraphId: input.contextGraphId, agentAddress: input.agentAddress, name: input.name, subGraphName: input.subGraphName, publishedUal: input.publishedUal, merkleRoot: input.merkleRoot, packedKaId: input.packedKaId, assertionVersion: '1' }, { persistence: 'process-local' });
+    await fast(descriptor)(input);
+    expect(await all(confirmed)).toEqual(await all(descriptor));
+    expect(await all(confirmed)).toEqual([...rows(), ...unrelated].map(quadToNQuad).sort());
+  });
+
   it.each([true, false])('preserves verified repair proof on the atomic and compatibility paths (atomic=%s)', async atomic => {
     const raw = memory(); const proof = rows().slice(0, 2);
     proof[0] = { ...proof[0]!, object: `"${input.merkleRoot}"^^<http://www.w3.org/2001/XMLSchema#string>` };
     await raw.insert(proof); const storedProof = await all(raw);
     const update = vi.spyOn(raw, 'update'); const remove = vi.spyOn(raw, 'deleteByPatternWithoutCount');
-    await (atomic ? fast(raw) : (value: PublishedNamedKaVmLifecycleInput) => applyPublishedNamedKaVmLifecycle(raw, value))(
+    await (atomic ? fast(raw) : (value: VerifiedNamedKaDescriptorInput) => applyPublishedNamedKaVmLifecycle(raw, value))(
       { ...input, preserveVerifiedVmProof: true });
     expect(await all(raw)).toEqual([...storedProof, ...rows().slice(2).map(quadToNQuad)].sort());
     expect(remove.mock.calls.some(([pattern]) => proof.some(q => q.subject === pattern.subject && q.predicate === pattern.predicate))).toBe(false);
@@ -127,7 +143,11 @@ describe('named KA VM lifecycle batching', () => {
     vi.spyOn(raw, 'deleteByPatternWithoutCount').mockImplementation(async q => { calls.push(`delete:${q.subject}:${q.predicate}`); await remove(q); });
     vi.spyOn(raw, 'insert').mockImplementation(async qs => { calls.push(`insert:${qs[0]!.subject}:${qs[0]!.predicate}`); await insert(qs); });
     await fast(store)(input);
-    expect(calls).toEqual(rows().flatMap(q => [`delete:${q.subject}:${q.predicate}`, `insert:${q.subject}:${q.predicate}`]));
+    const expected = rows().flatMap(q => [`delete:${q.subject}:${q.predicate}`, `insert:${q.subject}:${q.predicate}`]);
+    const retired = [MemoryLayer.WorkingMemory, MemoryLayer.SharedWorkingMemory].map(layer =>
+      `delete:${contextGraphLayerUri(input.contextGraphId, layer, input.agentAddress, 42n, input.subGraphName)}:${DKG}memoryLayer`);
+    expected.splice(expected.length - 2, 0, ...retired);
+    expect(calls).toEqual(expected);
     expect(await all(raw)).toEqual(rows().map(quadToNQuad).sort());
     expect(unsupported).toHaveBeenCalledTimes(mode === 'absent' ? 0 : 1);
   });
@@ -212,7 +232,7 @@ describe('named KA VM lifecycle batching', () => {
     expect(update).toHaveBeenCalledOnce(); expect(remove).not.toHaveBeenCalled();
     update.mockClear();
     await applyPublishedNamedKaVmLifecycle(unknown, input);
-    expect(update).not.toHaveBeenCalled(); expect(remove).toHaveBeenCalledTimes(7);
+    expect(update).not.toHaveBeenCalled(); expect(remove).toHaveBeenCalledTimes(9);
     expect(await all(raw)).toEqual(rows().map(quadToNQuad).sort());
   });
 

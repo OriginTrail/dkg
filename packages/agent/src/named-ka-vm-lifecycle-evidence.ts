@@ -1,0 +1,254 @@
+// SPDX-License-Identifier: Apache-2.0
+import { assertCanonicalGraphScopedAuthorSealV1, canonicalGraphScopedAuthorSealFromAssertionSealV1, canonicalizeCanonicalGraphScopedAuthorSealV1, type AssertionSeal, type CanonicalGraphScopedAuthorSealV1, MemoryLayer, contextGraphMetaUri, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
+import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata, materializedVersionQuad,
+  assertConfirmedNamedAssertionSeal, parseConfirmedGraphKnowledgeAssetMetadataEnvelope, confirmedGraphKnowledgeAssetProof,
+  type LocallyTrustedKnowledgeAssetControlEnvelope, type ConfirmedGraphKnowledgeAssetProof,
+} from '@origintrail-official/dkg-publisher';
+import type { Quad } from '@origintrail-official/dkg-storage';
+import { hexlify } from 'ethers';
+import { createHash } from 'node:crypto';
+import type { PublishedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle.js';
+import type { ConfirmedNamedKaVmPublication } from './named-ka-vm-lifecycle-recovery-error.js';
+import { NamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
+import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
+
+function invalidNamedSeal(): never { throw new NamedKaVmLifecycleIntegrityError('Invalid confirmed named assertion seal evidence'); }
+/** Fresh confirmations stay typed. Resolved identity supplies only a missing legacy seal field. */
+export function confirmedNamedSeal(seal: AssertionSeal, packedKaId: bigint): CanonicalGraphScopedAuthorSealV1 {
+  try { return canonicalGraphScopedAuthorSealFromAssertionSealV1({ ...seal, reservedKaId: seal.reservedKaId ?? packedKaId }); }
+  catch { return invalidNamedSeal(); }
+}
+function normalizeConfirmedNamedSeal(value: unknown, input: ConfirmedNamedKaVmLifecycleInput,
+  proof?: ConfirmedGraphKnowledgeAssetProof): CanonicalGraphScopedAuthorSealV1 {
+  try {
+    assertCanonicalGraphScopedAuthorSealV1(value);
+    const canonical = Object.freeze({ ...value });
+    assertConfirmedNamedAssertionSeal(canonical, { ...input, kaUal: input.materialization?.kaUal }, proof);
+    return canonical;
+  } catch { return invalidNamedSeal(); }
+}
+
+export interface ConfirmedNamedKaVmPublicationDeployment {
+  readonly chainId: string;
+  readonly lifecycleAddress: string;
+}
+export interface ConfirmedNamedKaVmLifecycleInput extends PublishedNamedKaVmLifecycleInput {
+  readonly assertionVersion: string;
+  /** Bound by the admitted publication seal for every new confirmed command. */
+  readonly publicationDeployment: ConfirmedNamedKaVmPublicationDeployment;
+  readonly materialization?: ConfirmedLifecycleMaterialization;
+  readonly priorMerkleRoot?: string;
+  readonly namedSeal?: CanonicalGraphScopedAuthorSealV1;
+}
+/** Immutable public recovery material; private plaintext never enters the journal. */
+export interface ConfirmedLifecycleMaterialization {
+  readonly kaUal: string;
+  readonly publicQuads: readonly Quad[];
+  readonly metadataQuads: readonly Quad[];
+}
+export interface ConfirmedLifecyclePublicSnapshot extends LocallyTrustedKnowledgeAssetControlEnvelope {
+  readonly publicQuads: readonly Quad[];
+}
+const rootHex = (root: string | Uint8Array): string => (typeof root === 'string' ? root : hexlify(root)).replace(/^0x/, '').toLowerCase();
+export interface ValidatedLifecycleMaterialization extends ConfirmedLifecycleMaterialization {
+  readonly proof: ConfirmedGraphKnowledgeAssetProof;
+  /** Order-independent evidence digest computed once at validation; never serialized. */
+  readonly fingerprint: string;
+}
+declare const validatedLifecycleCommand: unique symbol;
+/** Only admission and journal decoding construct executable, frozen recovery commands. */
+export type ValidatedLifecycleRepairCommand = Omit<Readonly<ConfirmedNamedKaVmLifecycleInput>, 'materialization' | 'namedSeal'> & {
+  readonly [validatedLifecycleCommand]: true;
+  readonly materialization?: ValidatedLifecycleMaterialization;
+  readonly namedSeal?: CanonicalGraphScopedAuthorSealV1;
+};
+function invalid(): never {
+  throw new NamedKaVmLifecycleIntegrityError('Invalid confirmed named KA lifecycle repair evidence');
+}
+function record(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return invalid();
+  return value as Record<string, unknown>;
+}
+function string(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim()) return invalid();
+  return value;
+}
+function root(value: unknown): string {
+  const text = string(value);
+  if (!/^(0x)?[0-9a-f]{64}$/i.test(text)) return invalid();
+  return text.toLowerCase().replace(/^0x/, '');
+}
+/** Canonical field readers also let the disk codec retain incomplete historical facts. */
+export function normalizeLifecyclePackedIdentity(value: unknown): bigint {
+  if (typeof value !== 'bigint' || value < 0n || value >= 1n << 256n) return invalid();
+  return value;
+}
+export function normalizeLifecyclePublicationDeployment(value: unknown): ConfirmedNamedKaVmPublicationDeployment {
+  const deployment = record(value);
+  const chainId = string(deployment['chainId']), lifecycleAddress = string(deployment['lifecycleAddress']);
+  if (!/^(0|[1-9][0-9]*)$/.test(chainId) || BigInt(chainId) >= 1n << 256n || !/^0x[0-9a-f]{40}$/i.test(lifecycleAddress)) return invalid();
+  return Object.freeze({ chainId, lifecycleAddress: lifecycleAddress.toLowerCase() });
+}
+export function normalizeLifecycleCoordinates(value: unknown): Omit<ConfirmedNamedKaVmLifecycleInput, 'materialization' | 'packedKaId' | 'publicationDeployment' | 'namedSeal'> {
+  const input = record(value);
+  if ('tentative' in input) return invalid();
+  const assertionVersion = string(input['assertionVersion']);
+  if (!/^[1-9][0-9]*$/.test(assertionVersion)) return invalid();
+  return Object.freeze({
+    contextGraphId: string(input['contextGraphId']), agentAddress: string(input['agentAddress']), name: string(input['name']),
+    publishedUal: string(input['publishedUal']), merkleRoot: root(input['merkleRoot']), assertionVersion,
+    ...(input['subGraphName'] === undefined ? {} : { subGraphName: string(input['subGraphName']) }),
+    ...(input['priorMerkleRoot'] === undefined ? {} : { priorMerkleRoot: root(input['priorMerkleRoot']) }),
+  });
+}
+/** Fresh executable evidence always requires complete deployment and identity binding. */
+export function normalizeLifecycleRepairInput(value: unknown): ValidatedLifecycleRepairCommand {
+  const input = record(value);
+  if ('namedSealQuads' in input) return invalid();
+  const coordinates = { ...normalizeLifecycleCoordinates(input),
+    packedKaId: normalizeLifecyclePackedIdentity(input['packedKaId']),
+    publicationDeployment: normalizeLifecyclePublicationDeployment(input['publicationDeployment']),
+  };
+  const materialization = input['materialization'] === undefined ? undefined
+    : normalizeLifecycleMaterialization(input['materialization'], coordinates);
+  const admitted = { ...coordinates, ...(materialization ? { materialization } : {}) };
+  return Object.freeze({ ...admitted,
+    ...(input['namedSeal'] === undefined ? {} : {
+      namedSeal: normalizeConfirmedNamedSeal(input['namedSeal'], admitted, materialization?.proof),
+    }),
+  }) as ValidatedLifecycleRepairCommand;
+}
+
+export interface ConfirmedNamedKaVmCoordinates {
+  readonly contextGraphId: string;
+  readonly agentAddress: string;
+  readonly name: string;
+  readonly subGraphName?: string;
+  readonly priorMerkleRoot?: string;
+  /** The authoritative graph-scoped identity resolved by the caller. */
+  readonly packedKaId: bigint;
+}
+
+/** Derive repair evidence once from the admitted confirmation, never from a second root/version description. */
+export function confirmedNamedKaVmLifecycleInput(
+  publication: ConfirmedNamedKaVmPublication,
+  coordinates: ConfirmedNamedKaVmCoordinates,
+  snapshot?: ConfirmedLifecyclePublicSnapshot,
+): ConfirmedNamedKaVmLifecycleInput {
+  const { seal } = publication;
+  if (publication.status !== 'confirmed' || seal.kaUal === undefined || seal.assertionVersion === undefined) {
+    throw new NamedKaVmLifecycleIntegrityError('Confirmed named KA repair requires a validated graph-scoped publication');
+  }
+  const scope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
+  const input: ConfirmedNamedKaVmLifecycleInput = {
+    contextGraphId: coordinates.contextGraphId, name: coordinates.name, agentAddress: coordinates.agentAddress,
+    ...(coordinates.subGraphName === undefined ? {} : { subGraphName: coordinates.subGraphName }),
+    ...(coordinates.priorMerkleRoot === undefined ? {} : { priorMerkleRoot: coordinates.priorMerkleRoot }),
+    packedKaId: coordinates.packedKaId,
+    namedSeal: confirmedNamedSeal(seal, coordinates.packedKaId),
+    publishedUal: publication.ual, merkleRoot: hexlify(seal.merkleRoot), assertionVersion: scope.assertionVersion,
+    publicationDeployment: Object.freeze({ chainId: seal.chainId.toString(), lifecycleAddress: seal.kav10Address }),
+  };
+  return Object.freeze({ ...input, ...(snapshot === undefined ? {} : { materialization: confirmedLifecycleMaterialization(input, publication, snapshot) }) });
+}
+
+export function confirmedLifecycleMaterialization(input: ConfirmedNamedKaVmLifecycleInput,
+  publication: ConfirmedNamedKaVmPublication, snapshot: ConfirmedLifecyclePublicSnapshot,
+): ConfirmedLifecycleMaterialization {
+  const { seal, onChainResult: receipt } = publication;
+  const scope = createGraphKnowledgeAssetScope(seal.kaUal!, input.assertionVersion);
+  const graph = knowledgeAssetLayerGraphUri(input.contextGraphId, MemoryLayer.VerifiableMemory, scope, input.subGraphName);
+  const version = { blockNumber: receipt?.blockNumber ?? 0, txIndex: receipt?.txIndex ?? 0 };
+  const metadataQuads = generateGraphKnowledgeAssetMetadata({
+    ual: scope.ual, contextGraphId: input.contextGraphId, subGraphName: input.subGraphName,
+    merkleRoot: seal.merkleRoot, assertionVersion: scope.assertionVersion,
+    publicTripleCount: seal.publicTripleCount!, privateTripleCount: seal.privateTripleCount,
+    privateMerkleRoot: seal.privateMerkleRoot, assertionGraph: graph,
+    publisherPeerId: snapshot.publisherPeerId, accessPolicy: snapshot.accessPolicy, allowedPeers: snapshot.allowedPeers,
+    authorAddress: seal.authorAddress, timestamp: new Date(seal.finalizedAtIso),
+  }, { status: 'confirmed', confirmation: receipt ? { kind: 'transaction', provenance: {
+    txHash: receipt.txHash, blockNumber: receipt.blockNumber, blockTimestamp: receipt.blockTimestamp ?? 0,
+    publisherAddress: receipt.publisherAddress, batchId: input.packedKaId, chainId: seal.chainId.toString(),
+  } } : { kind: 'finalized-materialization', provenance: { batchId: input.packedKaId, materializedVersion: version } } });
+  if (receipt) metadataQuads.push(materializedVersionQuad(contextGraphMetaUri(input.contextGraphId), scope.ual, version));
+  return Object.freeze({ kaUal: scope.ual,
+    publicQuads: Object.freeze(snapshot.publicQuads.map(q => Object.freeze({ ...q, graph: '' }))),
+    metadataQuads: Object.freeze(metadataQuads.map(q => Object.freeze(q))) });
+}
+
+/** Validate disk and in-process evidence identically before any graph-store work. */
+export function normalizeLifecycleMaterialization(value: unknown, input: ConfirmedNamedKaVmLifecycleInput): ValidatedLifecycleMaterialization {
+  const invalid = (): never => { throw new NamedKaVmLifecycleIntegrityError('Invalid confirmed lifecycle public recovery snapshot'); };
+  if (typeof value !== 'object' || value === null) return invalid();
+  const fields = value as Record<string, unknown>;
+  const quads = (raw: unknown): Quad[] => {
+    if (!Array.isArray(raw)) return invalid();
+    return raw.map(q => {
+      if (typeof q !== 'object' || q === null || ['subject', 'predicate', 'object', 'graph'].some(k => typeof q[k] !== 'string')) return invalid();
+      return { subject: q.subject, predicate: q.predicate, object: q.object, graph: q.graph };
+    });
+  };
+  if (typeof fields.kaUal !== 'string') return invalid();
+  const scope = createGraphKnowledgeAssetScope(fields.kaUal, input.assertionVersion);
+  if (packKnowledgeAssetIdFromIdentity(scope) !== input.packedKaId) return invalid();
+  const publicQuads = quads(fields.publicQuads).map(q => ({ ...q, graph: '' }));
+  const metadataQuads = quads(fields.metadataQuads);
+  const meta = contextGraphMetaUri(input.contextGraphId);
+  if (metadataQuads.some(q => q.subject !== scope.ual || q.graph !== meta)) return invalid();
+  const parsed = parseConfirmedGraphKnowledgeAssetMetadataEnvelope(metadataQuads, { contextGraphId: input.contextGraphId, ual: scope.ual });
+  if (parsed.state !== 'confirmed' || parsed.envelope.assertionVersion !== input.assertionVersion
+    || parsed.envelope.subGraphName !== input.subGraphName || parsed.envelope.batchId !== input.packedKaId
+    || rootHex(parsed.envelope.merkleRoot) !== rootHex(input.merkleRoot)
+    || parsed.envelope.publicTripleCount !== publicQuads.length
+    || rootHex(computeFlatKCRootV10(publicQuads, parsed.envelope.privateMerkleRoot ? [parsed.envelope.privateMerkleRoot] : [])) !== rootHex(input.merkleRoot)) return invalid();
+  const model = Object.freeze({ kaUal: scope.ual, publicQuads: Object.freeze(publicQuads.map(q => Object.freeze(q))),
+    metadataQuads: Object.freeze(metadataQuads.map(q => Object.freeze(q))), proof: confirmedGraphKnowledgeAssetProof(parsed.envelope) });
+  // Cache the existing order-independent evidence comparison at validation,
+  // outside compact journal serialization. Frozen models cannot change afterward.
+  const terms = (rows: readonly Quad[]) => rows.map(q => JSON.stringify([q.subject, q.predicate, q.object, q.graph])).sort();
+  const fingerprint = createHash('sha256').update(JSON.stringify([
+    model.kaUal, terms(model.publicQuads), terms(model.metadataQuads),
+  ])).digest('hex');
+  return Object.freeze({ ...model, fingerprint });
+}
+
+/** Incomplete historical journal evidence can be retained but cannot execute. */
+export type HistoricalUnboundLifecycleRepairInput = Omit<ConfirmedNamedKaVmLifecycleInput, 'publicationDeployment' | 'packedKaId' | 'materialization'> & {
+  readonly materialization?: never;
+  readonly publicationDeployment?: ConfirmedNamedKaVmLifecycleInput['publicationDeployment'];
+  readonly packedKaId?: bigint;
+};
+export type RetainedLifecycleRepairEvidence =
+  | { readonly input: ValidatedLifecycleRepairCommand; readonly retention?: never }
+  | { readonly input: HistoricalUnboundLifecycleRepairInput; readonly retention: 'historical-unbound' };
+
+/** Pure monotonic evidence selection. Scheduling and persistence belong to the retry owner. */
+export function reconcileLifecycleRepairEvidence(previous: RetainedLifecycleRepairEvidence | undefined, incoming: ValidatedLifecycleRepairCommand):
+  { status: 'superseded' } | { status: 'unchanged' | 'upgraded'; input: ValidatedLifecycleRepairCommand } {
+  const prior = previous?.input;
+  const conflict = (): never => { throw new NamedKaVmLifecycleIntegrityError('Conflicting confirmed evidence at the same assertion version'); };
+  const authorKey = (value: string) => /^0x[0-9a-f]{40}$/i.test(value) ? value.toLowerCase() : value;
+  if (prior && (prior.contextGraphId !== incoming.contextGraphId || prior.name !== incoming.name
+    || prior.subGraphName !== incoming.subGraphName || authorKey(prior.agentAddress) !== authorKey(incoming.agentAddress)
+    || (prior.publicationDeployment && (prior.publicationDeployment.chainId !== incoming.publicationDeployment.chainId
+      || prior.publicationDeployment.lifecycleAddress.toLowerCase() !== incoming.publicationDeployment.lifecycleAddress)))) conflict();
+  if (prior && BigInt(prior.assertionVersion) > BigInt(incoming.assertionVersion)) return { status: 'superseded' };
+  if (prior?.assertionVersion === incoming.assertionVersion && prior.merkleRoot !== incoming.merkleRoot) conflict();
+  if (!previous || previous.retention === 'historical-unbound' || previous.input.assertionVersion !== incoming.assertionVersion) return { status: 'upgraded', input: incoming };
+  const current = previous.input;
+  if (current.packedKaId !== incoming.packedKaId) conflict();
+  if (current.namedSeal && incoming.namedSeal && canonicalizeCanonicalGraphScopedAuthorSealV1(current.namedSeal) !== canonicalizeCanonicalGraphScopedAuthorSealV1(incoming.namedSeal)) conflict();
+  if (current.materialization && incoming.materialization) {
+    const currentFingerprint = current.materialization.fingerprint;
+    const incomingFingerprint = incoming.materialization.fingerprint;
+    if (!currentFingerprint || !incomingFingerprint || currentFingerprint !== incomingFingerprint) conflict();
+  }
+  const materialization = current.materialization ?? incoming.materialization, namedSeal = current.namedSeal ?? incoming.namedSeal;
+  if (namedSeal) {
+    try { assertConfirmedNamedAssertionSeal(namedSeal, { ...current, kaUal: materialization?.kaUal }, materialization?.proof); }
+    catch { conflict(); }
+  }
+  if (materialization === current.materialization && namedSeal === current.namedSeal) return { status: 'unchanged', input: current };
+  return { status: 'upgraded', input: Object.freeze({ ...current,
+    ...(materialization ? { materialization } : {}), ...(namedSeal ? { namedSeal } : {}) }) };
+}

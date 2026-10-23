@@ -431,7 +431,7 @@ export const PATH_TRIGGERS = Object.freeze([
   // Files other packages load by relative path, outside their declared
   // dependencies.
   {
-    patterns: [/^packages\/publisher\/src\/(?:metadata|materialization-assertion-version|assertion-lifecycle-events|entity-share-metadata|graph-knowledge-asset-metadata|workspace-metadata-subjects)\.ts$/],
+    patterns: [/^packages\/publisher\/src\/(?:metadata|metadata-rdf-terms|assertion-reservation|assertion-lifecycle-record|knowledge-asset-controls|materialization-assertion-version|assertion-lifecycle-events|entity-share-metadata|graph-knowledge-asset-metadata|workspace-metadata-subjects)\.ts$/],
     lanes: ['kosava_node_ui'],
     evmScopes: [],
     reason: 'the UI reserved-UAL regression loads the publisher metadata writer and its helpers',
@@ -443,10 +443,10 @@ export const PATH_TRIGGERS = Object.freeze([
     reason: 'the Core stream transport tests import the Agent production codec',
   },
   {
-    patterns: [/^packages\/cli\/src\/extraction\/markdown-extractor\.ts$/],
+    patterns: [/^packages\/cli\/src\/(?:extraction\/markdown-extractor|publisher-chain-proof)\.ts$/],
     lanes: ['tornado_agent'],
     evmScopes: [],
-    reason: 'the agent memory-layer tests import the CLI markdown extractor',
+    reason: 'the agent memory-layer tests import the CLI markdown extractor and chain-proof resolver',
   },
   {
     patterns: [/^packages\/cli\/src\/(?:auth|boolean-env-override|config|entity-search\/types|oxigraph-memory-limits|runtime-assets)\.ts$/],

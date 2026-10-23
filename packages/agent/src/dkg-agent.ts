@@ -4,7 +4,6 @@ import { runStorageACKOperation } from './storage-ack-diagnostics.js';
 import { requireStorageACKContextGraphId } from './internal/storage-ack-context-graph.js';
 import { resolveConfiguredNetworkIdentity } from './configured-network-identity.js';
 import { snapshotCoreChainCacheNetworks } from './core-chain-cache-config.js';
-import { assertionLifecycleAuthorCandidates } from '@origintrail-official/dkg-publisher';
 import { durableAssertionShareMethods } from './internal/promote/durable-assertion-share.js';
 import { normalizeAgentPreparedCacheConfig } from './prepared-cache-config.js';
 import { PublicSnapshotMethods } from './dkg-agent-public-snapshot.js';
@@ -14,7 +13,6 @@ import { createStorageAckLedgerTimestampWriter, type StorageAckLedgerTimestampWr
 import { createACKSendP2P } from './internal/storage-ack-owned-request.js';
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
 import { PrivateAccessMethods } from './private-access-request.js';
-import type { ACKCanonicalCandidatePeerSelectionResult } from '@origintrail-official/dkg-publisher';
 import { randomUUID } from 'node:crypto';
 import { createAuthorityIndexBootstrap } from './authority-index-bootstrap.js';
 import { planAuthorityIndexBootstrap } from './authority-index-config.js';
@@ -133,7 +131,7 @@ import {
 import { enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type ChainAdapter, type ChainEventLogBinding, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
-  PublishJournal, StaleWriteError,
+  PublishJournal, StaleWriteError, assertionLifecycleAuthorCandidates, type ACKCanonicalCandidatePeerSelectionResult,
   ACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   resolveWorkspaceAgentRecipients,
@@ -2703,6 +2701,7 @@ export class DKGAgent extends DKGAgentBase {
 
   async stop(): Promise<void> {
     if (!this.started) return;
+    const namedLifecycleRepairDrain = this.namedKaVmLifecycleRepair?.beginStop();
     this.endLegacySwmShareAdmissionWaits();
     // Fence ACK routes, retries, and self sends before shutdown awaits.
     const storageACKDrain = this.storageACKRegistrationRuntime.closeAndDrain();
@@ -3002,6 +3001,7 @@ export class DKGAgent extends DKGAgentBase {
     // Stop admission and await the active finalization recovery batch while
     // chain and graph-store dependencies are still alive. No new retry may
     // begin after this boundary.
+    await namedLifecycleRepairDrain;
     await this.finalizationHandler?.stopRecoveryWorker();
     // OT-RFC-64 Gate 1: unregister the public catalog protocols and drain the
     // receiver scheduler (awaiting in-flight durable stage writes) while the

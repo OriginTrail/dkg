@@ -1,0 +1,230 @@
+import { confirmedNamedSeal } from '../src/named-ka-vm-lifecycle-evidence.js';
+import { readLifecycleRepairJournalFile } from './_helpers/read-lifecycle-repair-journal.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { assertionLifecycleUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { confirmedNamedAssertionSealQuads, computeFlatKCRootV10, replaceLocallyTrustedKnowledgeAssetControlEnvelope, assertionLifecycleWriteLockKey, withKeyedLocks, type KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { confirmedLifecycleRecoveryFixture } from './_helpers/confirmed-lifecycle-recovery-fixture.js';
+import { confirmedLifecycleMaterialization } from '../src/named-ka-vm-lifecycle-evidence.js';
+import { DKGAgent } from '../src/dkg-agent.js';
+import { applyPublishedNamedKaVmLifecycle } from './_helpers/confirmed-lifecycle-metadata-writer.js';
+const AUTHOR = '0x1111111111111111111111111111111111111111';
+const quads = (version: number) => [{ subject: 'urn:lock:payload', predicate: 'urn:value', object: JSON.stringify(`version-${version}`), graph: '' }];
+const root = (version: number) => Buffer.from(computeFlatKCRootV10(quads(version), []) ) .toString('hex');
+const ROOT1 = root(1), ROOT2 = root(2), CG = 'locked-repair', NAME = 'asset';
+const UAL = `did:dkg:mock:31337/${AUTHOR}/1`;
+const PACKED = (BigInt(AUTHOR) << 96n) | 1n;
+const dirs: string[] = [], owners: Array<{ stop(): Promise<void> }> = [], stores: OxigraphStore[] = [];
+afterEach(async () => { vi.restoreAllMocks(); for (const owner of owners.splice(0)) await owner.stop();
+  for (const store of stores.splice(0)) await store.close(); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
+async function fixture(subGraphName?: string, durable = true) {
+  const dir = await mkdtemp(join(tmpdir(), 'dkg-lifecycle-lock-fence-')); dirs.push(dir);
+  const store = new OxigraphStore(join(dir, 'store.nq')); stores.push(store);
+  const agent = Object.create(DKGAgent.prototype) as any;
+  Object.defineProperty(agent, 'peerId', { value: 'locked-repair-peer' });
+  agent.config = durable ? { dataDir: dir } : {}; agent.store = store; agent.writeLocks = new Map<string, Promise<void>>();
+  agent.log = { warn: vi.fn(), info: vi.fn() };
+  let current = 1;
+  agent.chain = { getEvmChainId: vi.fn(async () => 31337n), getKnowledgeAssetsLifecycleAddress: vi.fn(async () => AUTHOR), readKnowledgeAssetVersionSnapshot: vi.fn(async () => ({
+    latestRoot: current === 1 ? ROOT1 : ROOT2, rootCount: BigInt(current),
+  })) };
+  const fields = { contextGraphId: CG, name: NAME, agentAddress: AUTHOR, subGraphName,
+    packedKaId: PACKED, merkleRoot: ROOT1, assertionVersion: '1', publishedUal: UAL, publicationDeployment: { chainId: '31337', lifecycleAddress: AUTHOR } };
+  const makeInput = (input: typeof fields, version: number) => {
+    const { publication } = confirmedLifecycleRecoveryFixture();
+    const merkleRoot = computeFlatKCRootV10(quads(version), []);
+    const seal = { ...publication.seal, merkleRoot, assertionVersion: input.assertionVersion, kaUal: UAL, kav10Address: AUTHOR };
+    return { ...input, namedSeal: confirmedNamedSeal(seal, input.packedKaId),
+      materialization: confirmedLifecycleMaterialization(input, { ...publication, ual: UAL, merkleRoot, seal },
+    { publicQuads: quads(version), publisherPeerId: 'locked-repair-peer', accessPolicy: 'ownerOnly', allowedPeers: [] }) };
+  };
+  const input = makeInput(fields, 1);
+  const newer = makeInput({ ...fields, merkleRoot: ROOT2, assertionVersion: '2' }, 2);
+  const key = assertionLifecycleWriteLockKey(CG, NAME, AUTHOR, subGraphName);
+  const repair = agent.getOrCreateNamedKaVmLifecycleRepair(); owners.push(repair);
+  const descriptor = () => store.query(`SELECT ?root ?ual WHERE { GRAPH <${contextGraphMetaUri(CG)}> {
+    <${assertionLifecycleUri(CG, AUTHOR, NAME, subGraphName)}> <http://dkg.io/ontology/vmCurrentAssertion> ?root ;
+      <http://dkg.io/ontology/publishedUal> ?ual } }`);
+  const journal = async () => (await readLifecycleRepairJournalFile(join(dir, 'named-ka-vm-lifecycle-repairs.json')));
+  return { dir, store, agent, input, newer, key, repair, descriptor, journal, advance: () => { current = 2; } };
+}
+describe('confirmed lifecycle lock-time authority fence', () => {
+  it.each([undefined, 'private-lane'])('cannot regress a newer stamp while the old repair waits, lane=%s', async lane => {
+    const f = await fixture(lane);
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+    const stamping = withKeyedLocks(f.agent.writeLocks, [f.key], async () => {
+      entered(); await held; f.advance(); await applyPublishedNamedKaVmLifecycle(f.store, f.newer);
+    });
+    await started;
+    const predecessor = f.agent.writeLocks.get(f.key);
+    const old = f.repair.submit(f.input);
+    try { await vi.waitFor(() => expect(f.agent.writeLocks.get(f.key)).not.toBe(predecessor)); }
+    finally { release(); }
+    await stamping;
+    expect(await old).toBe('superseded');
+    expect(await f.descriptor()).toMatchObject({ bindings: [{ root: JSON.stringify(ROOT2), ual: JSON.stringify(f.newer.publishedUal) }] });
+    expect((await f.journal()).size).toBe(0);
+    const reopen = new OxigraphStore(join(f.dir, 'store.nq')); stores.push(reopen);
+    expect(await reopen.query(`ASK { GRAPH <${contextGraphMetaUri(CG)}> {
+      <${assertionLifecycleUri(CG, AUTHOR, NAME, lane)}> <http://dkg.io/ontology/vmCurrentAssertion> ${JSON.stringify(ROOT2)} } }`)).toMatchObject({ value: true });
+  });
+  it('refuses an old admitted entry after a newer admission arrives while its lifecycle lock is held', async () => {
+    const f = await fixture(); let release!: () => void;
+    const commit = vi.spyOn(f.store, 'atomicUpdate');
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const holder = withKeyedLocks(f.agent.writeLocks, [f.key], async () => { await held; });
+    const predecessor = f.agent.writeLocks.get(f.key), old = f.repair.submit(f.input);
+    let newer!: Promise<string>;
+    try {
+      await vi.waitFor(() => expect(f.agent.writeLocks.get(f.key)).not.toBe(predecessor));
+      newer = f.repair.submit(f.newer);
+      await vi.waitFor(async () => expect([...await f.journal()].map(([, value]) => value.input.assertionVersion)).toEqual(['2']));
+    } finally { release(); }
+    await holder;
+    expect(await old).toBe('superseded'); expect(await newer).toBe('pending');
+    expect(commit).not.toHaveBeenCalled();
+    expect(await f.descriptor()).toMatchObject({ bindings: [] });
+    expect([...await f.journal()].map(([, value]) => value.input.assertionVersion)).toEqual(['2']);
+    f.advance(); vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 6_000);
+    await f.repair.runDue();
+    expect(commit.mock.calls.every(([sparql]) => !sparql.includes(ROOT1))).toBe(true);
+    expect(await f.descriptor()).toMatchObject({ bindings: [{ root: JSON.stringify(ROOT2), ual: JSON.stringify(f.newer.publishedUal) }] });
+    expect((await f.journal()).size).toBe(0);
+  });
+  it('admits a newer confirmed version during a held currency read and refuses the superseded commit', async () => {
+    const f = await fixture(); let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+    f.agent.chain.readKnowledgeAssetVersionSnapshot.mockImplementationOnce(async () => {
+      entered(); await held; return { latestRoot: ROOT1, rootCount: 1n };
+    });
+    const commit = vi.spyOn(f.store, 'atomicUpdate');
+    const old = f.repair.submit(f.input); await started;
+    const newer = f.repair.submit(f.newer);
+    try {
+      await vi.waitFor(async () => expect([...await f.journal()].map(([, value]) => value.input.assertionVersion)).toEqual(['2']));
+      expect(commit).not.toHaveBeenCalled();
+    } finally { release(); }
+    expect(await old).toBe('superseded'); expect(await newer).toBe('pending');
+    expect(commit).not.toHaveBeenCalled();
+    expect(await f.descriptor()).toMatchObject({ bindings: [] });
+    f.advance(); vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 6_000);
+    await f.repair.runDue();
+    expect(commit.mock.calls.filter(([, options]) => options?.source === 'agent.publish.confirmedLifecycleCommit')).toHaveLength(1);
+    expect(await f.descriptor()).toMatchObject({ bindings: [{ root: JSON.stringify(ROOT2) }] });
+    expect((await f.journal()).size).toBe(0);
+  });
+  it('holds the lifecycle lock through durable journal retirement and shutdown drain', async () => {
+    const f = await fixture();
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+    const persistence = f.repair as unknown as { persist(): Promise<void> };
+    const persist = persistence.persist.bind(persistence);
+    let writes = 0;
+    vi.spyOn(persistence, 'persist').mockImplementation(async () => {
+      if (++writes === 2) { entered(); await held; }
+      await persist();
+    });
+    const submission = f.repair.submit(f.input); await started;
+    const committed = await f.descriptor();
+    expect(committed).toMatchObject({ bindings: [{ root: JSON.stringify(ROOT1) }] });
+    expect((await f.journal()).size).toBe(1); // Real write-ahead bytes remain until the held retirement commits.
+    let mutated = false, stopped = false;
+    const mutation = withKeyedLocks(f.agent.writeLocks, [f.key], async () => {
+      expect((await f.journal()).size).toBe(0);
+      mutated = true;
+      await applyPublishedNamedKaVmLifecycle(f.store, f.newer);
+    });
+    void mutation.catch(() => undefined); // The final await reports failures after releasing the held barrier.
+    const stopping = f.repair.stop().then(() => { stopped = true; });
+    try {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(mutated).toBe(false); expect(stopped).toBe(false);
+    } finally { release(); await Promise.allSettled([submission, mutation, stopping]); }
+    expect(await submission).toBe('repaired'); await mutation; await stopping;
+    expect(mutated).toBe(true); expect(stopped).toBe(true);
+    expect(await f.descriptor()).toMatchObject({ bindings: [{ root: JSON.stringify(ROOT2) }] });
+  });
+  it('retains failed journal retirement before releasing the lifecycle lock, then retries without a new publication', async () => {
+    const f = await fixture();
+    const commit = vi.spyOn(f.store, 'atomicUpdate');
+    const persistence = f.repair as unknown as { persist(): Promise<void> };
+    const persist = persistence.persist.bind(persistence);
+    let writes = 0;
+    vi.spyOn(persistence, 'persist').mockImplementation(async () => {
+      if (++writes === 2) throw Object.assign(new Error('retirement directory sync failed'), { code: 'EIO' });
+      await persist();
+    });
+    await expect(f.repair.submit(f.input)).resolves.toBe('pending');
+    await withKeyedLocks(f.agent.writeLocks, [f.key], async () => {
+      expect((await f.journal()).size).toBe(1);
+      expect(await f.descriptor()).toMatchObject({ bindings: [{ root: JSON.stringify(ROOT1) }] });
+    });
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 5000);
+    await f.repair.runDue(); clock.mockRestore();
+    expect((await f.journal()).size).toBe(0);
+    expect(commit).toHaveBeenCalledTimes(2);
+    expect(await f.descriptor()).toMatchObject({ bindings: [{ root: JSON.stringify(ROOT1) }] });
+    expect(f.agent.writeLocks.size).toBe(0);
+  });
+  it.each(['standalone', 'durable-evm'] as const)('preserves missing chain-evidence policy for %s', async scenario => {
+    const f = await fixture(undefined, scenario !== 'standalone');
+    delete f.agent.chain.readKnowledgeAssetVersionSnapshot;
+    f.agent.chain.getEvmChainId = vi.fn(async () => 31337n);
+    const commit = vi.spyOn(f.store, 'atomicUpdate');
+    expect(await f.repair.submit(f.input)).toBe(scenario === 'standalone' ? 'repaired' : 'pending');
+    if (scenario === 'durable-evm') {
+      expect(commit).not.toHaveBeenCalled(); expect((await f.journal()).size).toBe(1);
+    } else {
+      expect(await f.descriptor()).toMatchObject({ bindings: [{ root: JSON.stringify(ROOT1) }] });
+      await expect(f.journal()).rejects.toMatchObject({ code: 'ENOENT' });
+    }
+  });
+  it.each(['current', 'missing-controls', 'newer', 'unfinalized', 'conflicting-root', 'chain-error', 'replaced-workspace'] as const)(
+    'retains coherent recovered queued behavior for %s', async scenario => {
+      const f = await fixture();
+      f.agent._resolveRecoveredKnowledgeAssetVmLifecycleAuthor = vi.fn(async () => scenario !== 'replaced-workspace' && ({ author: AUTHOR, incomplete: false }));
+      if (scenario === 'newer') f.advance();
+      if (scenario === 'unfinalized') f.agent.chain.readKnowledgeAssetVersionSnapshot.mockResolvedValue({ latestRoot: ROOT1, rootCount: 0n });
+      if (scenario === 'conflicting-root') f.agent.chain.readKnowledgeAssetVersionSnapshot.mockResolvedValue({ latestRoot: ROOT2, rootCount: 1n });
+      if (scenario === 'chain-error') f.agent.chain.readKnowledgeAssetVersionSnapshot.mockRejectedValue(new Error('chain temporarily unavailable'));
+      const request = { ...f.input, sealMerkleRoot: ROOT1, shareOperationId: 'own-operation', sealChainId: '31337', sealKav10Address: AUTHOR } as unknown as KnowledgeAssetVmPublishRequest;
+      const graph = f.input.materialization.metadataQuads.find(q => q.predicate === 'http://dkg.io/ontology/assertionGraph')!.object;
+      await f.store.insert([...confirmedNamedAssertionSealQuads(f.input.namedSeal, contextGraphAssertionUri(CG, AUTHOR, NAME), contextGraphMetaUri(CG)), ...f.input.materialization.metadataQuads, ...f.input.materialization.publicQuads.map(q => ({ ...q, graph }))]);
+      if (scenario !== 'missing-controls') await replaceLocallyTrustedKnowledgeAssetControlEnvelope(f.store, f.input.publishedUal,
+        { assertionVersion: '1', merkleRoot: Uint8Array.from(Buffer.from(ROOT1, 'hex')) },
+        { publisherPeerId: 'locked-repair-peer', accessPolicy: 'ownerOnly', allowedPeers: [] });
+      const commit = vi.spyOn(f.store, 'atomicUpdate');
+      const queued = f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, f.input.publishedUal, PACKED);
+      if (scenario === 'current') {
+        expect(await queued).toBe(true);
+        expect(f.agent._resolveRecoveredKnowledgeAssetVmLifecycleAuthor).toHaveBeenCalledOnce();
+        expect(await f.descriptor()).toMatchObject({ bindings: [{ root: JSON.stringify(ROOT1), ual: JSON.stringify(f.input.publishedUal) }] });
+      } else {
+        if (scenario === 'newer' || scenario === 'replaced-workspace') expect(await queued).toBe(false);
+        else await expect(queued).rejects.toThrow();
+        expect(commit).not.toHaveBeenCalled(); expect(await f.descriptor()).toMatchObject({ bindings: [] });
+      }
+    },
+  );
+  it('defers a busy recovered writer then rechecks currency on retry', async () => {
+    const f = await fixture();
+    f.agent._resolveRecoveredKnowledgeAssetVmLifecycleAuthor = vi.fn(async () => ({ author: AUTHOR, incomplete: false }));
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const holder = withKeyedLocks(f.agent.writeLocks, [f.key], async () => {
+      await held; f.advance(); await applyPublishedNamedKaVmLifecycle(f.store, f.newer);
+    });
+    const request = { ...f.input, sealMerkleRoot: ROOT1, shareOperationId: 'old-operation', sealChainId: '31337', sealKav10Address: AUTHOR } as unknown as KnowledgeAssetVmPublishRequest;
+    const queued = f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, f.input.publishedUal, PACKED);
+    try { await expect(queued).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' }); }
+    finally { release(); }
+    await holder;
+    expect(await f.agent._stampQueuedKnowledgeAssetVmPublishedLifecycle(request, f.input.publishedUal, PACKED)).toBe(false);
+    expect(f.agent._resolveRecoveredKnowledgeAssetVmLifecycleAuthor).not.toHaveBeenCalled();
+    expect(await f.descriptor()).toMatchObject({ bindings: [{ root: JSON.stringify(ROOT2), ual: JSON.stringify(f.newer.publishedUal) }] });
+  });
+});

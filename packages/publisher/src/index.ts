@@ -1,3 +1,5 @@
+export { reconcileConfirmedKnowledgeAssetControls } from './knowledge-asset-controls.js';
+export { overlaySelectedKnowledgeAssetControls } from './metadata.js';
 export { journalEntriesContextGraphId } from './async-lift-control-plane.js';
 export { parseExactPullSource } from './assertion-draft-recovery.js';
 export type { ExactPullSource, AssertionPullFromOptions, AssertionPullFromResult, AssertionDraftEvidence } from './assertion-draft-recovery.js';
@@ -571,3 +573,9 @@ export { assertionLifecycleAuthorCandidates, readAssertionLifecycleCandidates } 
 
 export { readShareCompletionEvidence, tryCreateShareCompletionEvidence, shareEvidenceMatchesRequest, type ShareCompletionEvidence } from './share-completion-evidence.js';
 export { validateShareReconciliationInput, type ShareReconciliationInput, type ShareReconciliationResult } from './share-reconciliation.js';
+
+export { confirmedGraphKnowledgeAssetProof, sameConfirmedGraphKnowledgeAssetProof, reconcileConfirmedGraphKnowledgeAssetMetadata, type ConfirmedGraphKnowledgeAssetProof } from './confirmed-metadata-reconciliation.js';
+
+export { assertionRecoverySealGraph, assertionRecoverySealSubject } from './assertion-seal-recovery.js';
+
+export { assertConfirmedNamedAssertionSeal, confirmedNamedAssertionSealQuads, reconcileConfirmedNamedAssertion, type ConfirmedNamedAssertionTarget } from './confirmed-named-assertion.js';

@@ -4,6 +4,7 @@ import {
   toAgentDid,
   knowledgeAssetLayerGraphUri,
   MemoryLayer,
+  contextGraphDataGraphUri,
 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
@@ -189,40 +190,47 @@ export function preserveGraphKnowledgeAssetReceiptProvenanceV1(
   ];
 }
 
-/**
- * Canonically merge metadata for an exact same-assertion replay. Stable local
- * receive time is retained for every lane; a receiptless finalized replay also
- * retains stronger, valid transaction provenance already authenticated here.
- */
-export function mergeSameVersionGraphKnowledgeAssetMetadataV1(
-  incomingMetadata: readonly Quad[],
-  currentMetadata: readonly Quad[],
-): Quad[] {
-  const identity = incomingMetadata[0];
-  const currentPublishedAt = currentMetadata.filter(
-    (quad) => quad.predicate === GRAPH_KNOWLEDGE_ASSET_PUBLISHED_AT_PREDICATE,
-  );
-  const publishedAtLexical = currentPublishedAt.length === 1
-    ? rdfLiteralLexicalValue(currentPublishedAt[0]!.object)
-    : undefined;
-  const preservePublishedAt = identity !== undefined
-    && currentPublishedAt.length === 1
-    && currentPublishedAt[0]!.subject === identity.subject
-    && currentPublishedAt[0]!.graph === identity.graph
-    && publishedAtLexical !== undefined
-    && Number.isFinite(Date.parse(publishedAtLexical));
-  let merged = preservePublishedAt
-    ? [
-        ...incomingMetadata.filter(
-          (quad) => quad.predicate !== GRAPH_KNOWLEDGE_ASSET_PUBLISHED_AT_PREDICATE,
-        ),
-        currentPublishedAt[0]!,
-      ]
-    : [...incomingMetadata];
-  if (readGraphKnowledgeAssetConfirmationKindV1(incomingMetadata) === 'finalized-materialization') {
-    merged = preserveGraphKnowledgeAssetReceiptProvenanceV1(merged, currentMetadata);
+const RECOVERY_CANONICAL_PREDICATES = new Set(['contentScopeVersion', 'assertionVersion', 'publicTripleCount', 'privateTripleCount',
+  'privateMerkleRoot', 'assertionGraph', 'subGraphName', 'authenticatedSubGraphName', 'merkleRoot', 'batchId', 'kaUal', 'status',
+  'transactionHash', 'materializedVersion', 'confirmationKind', 'contextGraph'].map(name => `${DKG}${name}`));
+
+/** One retention owner; callers separately establish the assertion anchor and trusted controls. */
+export function reconcileSameAssertionGraphKnowledgeAssetMetadataV1(input: {
+  readonly lane: 'lifecycle-recovery' | 'verified-projection';
+  readonly incomingMetadata: readonly Quad[];
+  readonly currentMetadata: readonly Quad[];
+}): Quad[] {
+  const { lane, incomingMetadata, currentMetadata } = input, identity = incomingMetadata[0];
+  let canonical = [...incomingMetadata];
+  if (lane === 'verified-projection') {
+    const times = currentMetadata.filter(quad => quad.predicate === GRAPH_KNOWLEDGE_ASSET_PUBLISHED_AT_PREDICATE);
+    const lexical = times.length === 1 ? rdfLiteralLexicalValue(times[0]!.object) : undefined;
+    if (identity !== undefined && times.length === 1 && times[0]!.subject === identity.subject
+      && times[0]!.graph === identity.graph && lexical !== undefined && Number.isFinite(Date.parse(lexical))) {
+      canonical = [...canonical.filter(quad => quad.predicate !== GRAPH_KNOWLEDGE_ASSET_PUBLISHED_AT_PREDICATE), times[0]!];
+    }
   }
-  return merged;
+  if (lane === 'lifecycle-recovery' || readGraphKnowledgeAssetConfirmationKindV1(incomingMetadata) === 'finalized-materialization') {
+    canonical = preserveGraphKnowledgeAssetReceiptProvenanceV1(canonical, currentMetadata);
+  }
+  const incomingPredicates = new Set(canonical.map(quad => quad.predicate));
+  const currentPredicates = new Set(currentMetadata.map(quad => quad.predicate));
+  const retainedPredicates = new Set([...currentPredicates].filter(predicate => lane === 'lifecycle-recovery'
+    // Recovery overlays trusted controls separately and keeps existing non-immutable fields.
+    ? !RECOVERY_CANONICAL_PREDICATES.has(predicate)
+    // Verified projection owns protocol fields and any annotation it explicitly supplies.
+    : !predicate.startsWith(DKG) && !predicate.startsWith(PROV) && !incomingPredicates.has(predicate)));
+  const retained = currentMetadata.filter(quad => retainedPredicates.has(quad.predicate)
+    && (lane === 'lifecycle-recovery' || (identity !== undefined && quad.subject === identity.subject && quad.graph === identity.graph)));
+  const incoming = canonical.filter(quad => !retainedPredicates.has(quad.predicate));
+  return lane === 'lifecycle-recovery' ? [...retained, ...incoming] : [...incoming, ...retained];
+}
+
+/** Exact-assertion replay keeps incoming protocol controls plus local receive time, receipt and omitted annotations. */
+export function mergeSameVersionGraphKnowledgeAssetMetadataV1(
+  incomingMetadata: readonly Quad[], currentMetadata: readonly Quad[],
+): Quad[] {
+  return reconcileSameAssertionGraphKnowledgeAssetMetadataV1({ lane: 'verified-projection', incomingMetadata, currentMetadata });
 }
 
 /** Replace peer confirmation claims with facts established by this receiver. */
@@ -293,6 +301,27 @@ function appendConfirmationControls(
   if (confirmation.kind === 'transaction') {
     quads.push(mq(ual, GRAPH_KNOWLEDGE_ASSET_TRANSACTION_HASH_PREDICATE, lit(confirmation.transactionHash), metaGraph));
   }
+}
+
+/** Caller has verified this exact assertion scope; stale or missing local routes are projections. */
+export function withLocallyAuthenticatedGraphKnowledgeAssetRouteV1(
+  metadata: readonly Quad[], subGraphName: string | undefined, contextGraphId: string,
+): Quad[] {
+  const identity = metadata[0], predicate = `${DKG}contextGraph`, expected = contextGraphDataGraphUri(contextGraphId);
+  let canonical = [...metadata];
+  const bindings = metadata.filter(q => q.predicate === predicate);
+  if (identity && (bindings.length !== 1 || bindings[0]!.subject !== identity.subject
+    || bindings[0]!.graph !== identity.graph || bindings[0]!.object !== expected)) {
+    canonical = canonical.filter(q => q.predicate !== predicate);
+    canonical.push(mq(identity.subject, predicate, expected, identity.graph));
+  }
+  const routes = canonical.filter(q => q.predicate === AUTHENTICATED_SUB_GRAPH);
+  if (subGraphName === undefined && routes.length === 0) return canonical;
+  if (subGraphName !== undefined && identity !== undefined && routes.length === 1 && routes[0]!.subject === identity.subject
+    && routes[0]!.graph === identity.graph && routes[0]!.object === lit(subGraphName)) return canonical;
+  const result = canonical.filter(q => q.predicate !== AUTHENTICATED_SUB_GRAPH);
+  if (identity !== undefined) appendAuthenticatedSubGraphRoute(result, identity.subject, identity.graph, subGraphName);
+  return result;
 }
 
 /** Locally authenticated routing is independent of receipt or snapshot provenance. */

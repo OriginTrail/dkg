@@ -1,6 +1,8 @@
 import type { PublishResult } from '@origintrail-official/dkg-publisher';
 
-type StorageAckPublishResult = Pick<PublishResult, 'status' | 'v10ACKs'>;
+type StorageAckPublishResult = Pick<PublishResult, 'status'> & {
+  readonly v10ACKs?: readonly { readonly peerId?: unknown }[];
+};
 
 /**
  * Return the distinct Core peer IDs that actually backed a confirmed publish.

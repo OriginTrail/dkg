@@ -6,7 +6,7 @@ import { RecoveryMaterializationOwner } from './durable-recovery-materialization
 import { deleteSyncPageCheckpoint } from './sync/requester/page-fetch.js';
 import { AgentWorkLifetime } from './agent-work-lifetime.js';
 import { applyStorageAckLedgerTimestamp, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
-import { applyPublishedNamedKaVmLifecycle, type PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
+import { applyVerifiedNamedKaDescriptor, type PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
 
 export { createListContextGraphsCacheInvalidatingStore } from './internal/context-graph-cache-invalidating-store.js';
 import type { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
@@ -25,7 +25,7 @@ import type { RecentSharedMemoryPullRuntime } from './recent-shared-memory-pull-
  * unchanged. The constructor is `protected` (was `private`) so subclasses can
  * be declared; external construction still goes through `DKGAgent.create`.
  */
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
 import { controlPlaneRefusalSummary } from './sync/control-plane-refusals.js';
@@ -42,6 +42,7 @@ import {
 } from './finalization-recovery-sqlite-store.js';
 import type { FinalizationRecoveryHealth } from './finalization-recovery-store.js';
 import { FinalizationRuntime } from './finalization-runtime.js';
+import type { NamedKaVmLifecycleRepair } from './named-ka-vm-lifecycle-repair.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
 import { Rfc64BackgroundWorkDispatcherV1 } from
   './rfc64/background-work-dispatcher-v1.js';
@@ -1439,6 +1440,7 @@ export class DKGAgentBase {
   protected profileProvisioningInFlight = false;
   protected readonly config: ResolvedDKGAgentConfig;
   protected started = false;
+  protected namedKaVmLifecycleRepair?: NamedKaVmLifecycleRepair;
   /**
    * Lazily resolved so partial test hosts built on the prototype (and any
    * configuration that predates the resolved field) still receive the
@@ -2096,7 +2098,7 @@ export class DKGAgentBase {
     this.store = store;
     this.storageAckLedgerTimestampWriter = ledgerTimestampWriter ?? applyStorageAckLedgerTimestamp(store);
     this.publishedNamedKaVmLifecycleWriter = publishedLifecycleWriter
-      ?? (input => applyPublishedNamedKaVmLifecycle(store, input));
+      ?? (input => applyVerifiedNamedKaDescriptor(store, input));
     this.contextGraphMetaProjection = new ContextGraphMetaProjection(store);
     this.publisher = publisher;
     this.queryEngine = queryEngine;

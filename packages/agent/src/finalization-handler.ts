@@ -32,7 +32,7 @@ import {
   readCurrentAssertionVersion,
   generateGraphKnowledgeAssetMetadata,
   compareMaterializedVersion, readMaterializedVersion,
-  writeMaterializedVersion, materializedVersionQuad,
+  writeMaterializedVersion,
   withMaterializationLock,
   workspacePublicQuadsDigest,
   KnowledgeAssetWorkspaceHeadCorruptError,
@@ -46,6 +46,7 @@ import {
 const DKG_NS = 'http://dkg.io/ontology/';
 const PROV_NS = 'http://www.w3.org/ns/prov#';
 const CHAIN_FINALIZED_RECONCILE_PEER_ID = 'chain-finalized-reconcile-v1';
+import { prepareGraphScopedFinalizationMetadata } from './finalization-metadata.js';
 import { ethers } from 'ethers';
 import {
   FinalizationLifecycleLogger,
@@ -2143,9 +2144,8 @@ export class FinalizationHandler {
         },
         metadataConfirmation,
       );
-      const committedMetadata = confirmation.kind === 'transaction'
-        ? [...metadata, materializedVersionQuad(metaGraph, scope.ual, effectiveVersion)]
-        : metadata;
+      const committedMetadata = await prepareGraphScopedFinalizationMetadata({ store: this.store, metadata,
+        materializedVersion: effectiveVersion, sameAssertion: confirmedAssertionVersion === scope.assertionVersion });
       const vmQuads = verifiedQuads.map((quad) => ({ ...quad, graph: vmGraph }));
       const replaced = await tryReplaceGraphAndSubjectAtomically(
         this.store,

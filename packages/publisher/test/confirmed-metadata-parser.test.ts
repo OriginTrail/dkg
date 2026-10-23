@@ -1,3 +1,4 @@
+import { confirmedGraphKnowledgeAssetProof, sameConfirmedGraphKnowledgeAssetProof, reconcileConfirmedGraphKnowledgeAssetMetadata } from '../src/confirmed-metadata-reconciliation.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri,
@@ -85,4 +86,57 @@ describe('confirmed graph metadata parser', () => {
     await expect(readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, input)).rejects.toThrow('incomplete binding');
     await expect(readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, input)).rejects.toThrow('expected a bindings result');
   });
+});
+
+function snapshotEvidence() {
+  const metadataQuads = fixture(2, 'documents');
+  const parsed = parseConfirmedGraphKnowledgeAssetMetadataEnvelope(metadataQuads, input);
+  if (parsed.state !== 'confirmed') throw new Error('Confirmed fixture absent');
+  return { metadataQuads, proof: confirmedGraphKnowledgeAssetProof(parsed.envelope), envelope: parsed.envelope };
+}
+
+it('freezes canonical proof independently of mutable receipt and root buffers', () => {
+  const { proof, envelope } = snapshotEvidence();
+  const same = confirmedGraphKnowledgeAssetProof({ ...envelope, transactionHash: `0x${'22'.repeat(32)}` });
+  expect(sameConfirmedGraphKnowledgeAssetProof(proof, same)).toBe(true);
+  envelope.merkleRoot.fill(0); envelope.privateMerkleRoot!.fill(0);
+  expect(proof.merkleRoot).toBe('07'.repeat(32)); expect(proof.privateMerkleRoot).toBe('09'.repeat(32));
+  expect(Object.isFrozen(proof)).toBe(true);
+});
+
+it.each(['assertionVersion', 'publicTripleCount', 'privateTripleCount', 'privateMerkleRoot',
+  'assertionGraph', 'subGraphName', 'merkleRoot', 'batchId'] as const)('does not certify a changed immutable %s', field => {
+  const { proof } = snapshotEvidence();
+  const different = { ...proof, [field]: typeof proof[field] === 'number' ? 99 : 'different' };
+  expect(sameConfirmedGraphKnowledgeAssetProof(proof, different)).toBe(false);
+});
+
+it.each(['present', 'missing'] as const)('repairs immutable metadata with equivalent root encoding while keeping a %s original receipt', mode => {
+  const snapshot = snapshotEvidence();
+  const metadata = snapshot.metadataQuads.filter(q => mode !== 'missing' || q.predicate !== DKG + 'transactionHash').map(q => {
+    if (q.predicate === DKG + 'publicTripleCount' || q.predicate === DKG + 'batchId') return { ...q, object: '"99"' };
+    if (q.predicate === DKG + 'merkleRoot') return { ...q, object: `"0X${snapshot.proof.merkleRoot.toUpperCase()}"` };
+    if (q.predicate === DKG + 'transactionHash') return { ...q, object: `"0x${'22'.repeat(32)}"` };
+    return q;
+  });
+  const note = { ...metadata[0]!, predicate: 'urn:local:note', object: '"preserve"' };
+  metadata.push(note);
+  const original = structuredClone(metadata);
+  const repaired = reconcileConfirmedGraphKnowledgeAssetMetadata(snapshot, metadata, true, input.contextGraphId);
+  expect(metadata).toEqual(original); expect(repaired).toContainEqual(note);
+  const parsed = parseConfirmedGraphKnowledgeAssetMetadataEnvelope(repaired, input);
+  expect(parsed.state).toBe('confirmed');
+  if (parsed.state !== 'confirmed') throw new Error('Repaired metadata absent');
+  expect(sameConfirmedGraphKnowledgeAssetProof(snapshot.proof, confirmedGraphKnowledgeAssetProof(parsed.envelope))).toBe(true);
+  expect(parsed.envelope.transactionHash).toBe(`0x${(mode === 'present' ? '22' : '11').repeat(32)}`);
+});
+
+it.each(['different-version', 'different-root', 'missing-root', 'ambiguous-root'] as const)('does not inherit provenance from %s metadata', mode => {
+  const snapshot = snapshotEvidence();
+  let metadata = snapshot.metadataQuads.map(q => q.predicate === DKG + 'transactionHash'
+    ? { ...q, object: `"0x${'22'.repeat(32)}"` } : q);
+  if (mode === 'different-root') metadata = metadata.map(q => q.predicate === DKG + 'merkleRoot' ? { ...q, object: `"${'ff'.repeat(32)}"` } : q);
+  if (mode === 'missing-root') metadata = metadata.filter(q => q.predicate !== DKG + 'merkleRoot');
+  if (mode === 'ambiguous-root') metadata.push({ ...metadata.find(q => q.predicate === DKG + 'merkleRoot')! });
+  expect(reconcileConfirmedGraphKnowledgeAssetMetadata(snapshot, metadata, mode !== 'different-version', input.contextGraphId)).toEqual(snapshot.metadataQuads);
 });

@@ -95,6 +95,20 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
     if (store) await store.dropGraph(GRAPH).catch(() => {});
   });
 
+  it('executes one native MODIFY and refuses a batch before changing data', async () => {
+    const graph = `${GRAPH}:atomic-modify`;
+    try {
+      await store.atomicUpdate(`DELETE { GRAPH <${graph}> { <urn:s> <urn:p> ?old } }
+        INSERT { GRAPH <${graph}> { <urn:s> <urn:p> "new; value" } }
+        WHERE { OPTIONAL { GRAPH <${graph}> { <urn:s> <urn:p> ?old } } }`);
+      await store.commitment!.capture()();
+      expect(await store.query(`ASK { GRAPH <${graph}> { <urn:s> <urn:p> "new; value" } }`)).toMatchObject({ value: true });
+      await expect(store.atomicUpdate(`DELETE WHERE { GRAPH <${graph}> { ?s ?p ?o } }; INSERT DATA { GRAPH <${graph}> { <urn:s> <urn:p> "other" } }`))
+        .rejects.toMatchObject({ name: 'UnsupportedTripleStoreCapabilityError', outcome: 'not_started' });
+      expect(await store.query(`ASK { GRAPH <${graph}> { <urn:s> <urn:p> "new; value" } }`)).toMatchObject({ value: true });
+    } finally { await store.dropGraph(graph); }
+  });
+
   it('replaces values and preserves exact content on replay', async () => {
     const store = new BlazegraphStore(BLAZEGRAPH_URL!, { timeout: 10_000 });
     const root = `urn:group-test:${randomUUID()}`, meta = `${root}:meta`;

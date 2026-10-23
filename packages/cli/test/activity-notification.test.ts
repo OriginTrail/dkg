@@ -1,7 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { recordPcaDiscount } from '../src/daemon/routes/knowledge-assets-activity.js';
+import type { RequestContext } from '../src/daemon/routes/context.js';
 import { DashboardDB, ASSERTION_ACTIVITY_TYPE, PCA_COST_COVERED_TYPE } from '@origintrail-official/dkg-node-ui';
 import {
   recordAssertionActivity,
@@ -172,5 +174,31 @@ describe('recordConvictionCostCovered (B8 confirmed-discount bell)', () => {
       baseCost: 1n, discountedCost: 1n, drawnFromEpoch: 1n, drawnFromTopUp: 0n,
     })).toBeNull();
     expect(db.getNotifications().notifications).toHaveLength(0);
+  });
+});
+
+
+describe('confirmed publication PCA receipt activity', () => {
+  const receipt = { publisherAddress: '0xAbCdEf0123456789012345678901234567890123', convictionCostCovered: {
+    accountId: 7n, epoch: 42, baseCost: 1000n, discountedCost: 700n, drawnFromEpoch: 500n, drawnFromTopUp: 200n,
+  } };
+  it('retains the complete paid receipt in the dashboard and notifies the confirmed-discount channel', () => {
+    const emitNotification = vi.fn(), ctx = { dashDb: db, emitNotification } as unknown as RequestContext;
+    recordPcaDiscount(ctx, 'cg-receipt', receipt);
+    const rows = db.getNotifications().notifications;
+    expect(rows).toHaveLength(1); expect(rows[0].type).toBe(PCA_COST_COVERED_TYPE);
+    expect(JSON.parse(rows[0].meta!)).toMatchObject({ publisherAddress: receipt.publisherAddress.toLowerCase(),
+      accountId: '7', epoch: 42, baseCost: '1000', discountedCost: '700', drawnFromEpoch: '500', drawnFromTopUp: '200' });
+    expect(emitNotification).toHaveBeenCalledExactlyOnceWith({ contextGraphId: 'cg-receipt', type: 'pca_cost_covered' });
+  });
+  it('does not fabricate paid activity for absent or incomplete chain receipts', () => {
+    const emitNotification = vi.fn(), ctx = { dashDb: db, emitNotification } as unknown as RequestContext;
+    for (const missing of [undefined, {}, { publisherAddress: receipt.publisherAddress }, { convictionCostCovered: receipt.convictionCostCovered }]) recordPcaDiscount(ctx, 'cg-receipt', missing);
+    expect(db.getNotifications().notifications).toHaveLength(0); expect(emitNotification).not.toHaveBeenCalled();
+  });
+  it('keeps an already persisted paid receipt when the advisory notification fails', () => {
+    const ctx = { dashDb: db, emitNotification: () => { throw new Error('SSE client disconnected'); } } as unknown as RequestContext;
+    expect(() => recordPcaDiscount(ctx, 'cg-receipt', receipt)).not.toThrow();
+    expect(db.getNotifications().notifications).toHaveLength(1);
   });
 });

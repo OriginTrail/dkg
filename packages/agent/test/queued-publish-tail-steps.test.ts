@@ -9,7 +9,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { GRAPH_KA_CONTENT_SCOPE_VERSION, contextGraphAssertionUri, assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { GRAPH_KA_CONTENT_SCOPE_VERSION, contextGraphAssertionUri } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10,
   type KnowledgeAssetVmPublishRequest,
@@ -138,7 +138,10 @@ function harness(options: {
     _stampPointer: call('stampVmPointer()'),
     _stampPointerIfDivergedFromVm: call('stampWmPointer()'),
     _writeQueuedKnowledgeAssetVmPublishReceipt: call('writeReceipt()'),
-    _stampQueuedKnowledgeAssetVmPublishedLifecycle: call('stampLifecycle()'),
+    _repairConfirmedNamedKaVmLifecycle: async () => {
+      calls.push('repairLifecycle()');
+      return options.failStep === 'repairLifecycle()';
+    },
     retireLegacySwmAfterVerifiedVmTwin: async () => {
       calls.push('retireLegacySwm()');
       await options.retireLegacySwm?.();
@@ -183,18 +186,16 @@ describe('the steps a queued executor reports after the confirmation', () => {
     // Exercise the real write boundaries: mocking these methods hides a second
     // fallback to the default address after asynchronous publication finishes.
     host._writeQueuedKnowledgeAssetVmPublishReceipt = PublishMethods.prototype._writeQueuedKnowledgeAssetVmPublishReceipt;
-    host._stampQueuedKnowledgeAssetVmPublishedLifecycle = PublishMethods.prototype._stampQueuedKnowledgeAssetVmPublishedLifecycle;
-    (host as any).publishedNamedKaVmLifecycleWriter = async (input: PublishedNamedKaVmLifecycleInput) => {
-      lifecycleWrites.push(input);
-    };
+    host._repairConfirmedNamedKaVmLifecycle = PublishMethods.prototype._repairConfirmedNamedKaVmLifecycle;
+    (host as any).getOrCreateNamedKaVmLifecycleRepair = () => ({ submit: async (input: PublishedNamedKaVmLifecycleInput) => {
+      lifecycleWrites.push(input); return 'repaired';
+    } });
     const clear = vi.spyOn(host.publisher, 'clearPublishedKnowledgeAssetSwm');
     const marker = vi.spyOn(host.publisher, 'clearSwmShareComplete');
-    const lifecycle = vi.spyOn(host as any, '_stampQueuedKnowledgeAssetVmPublishedLifecycle');
+    const lifecycle = vi.spyOn(host as any, '_repairConfirmedNamedKaVmLifecycle');
     const pointer = vi.spyOn(host as any, '_stampPointer');
-    const insert = vi.spyOn(host.store, 'insert').mockImplementation(async (quads) => { writtenQuads.push(...quads); });
+    vi.spyOn(host.store, 'insert').mockImplementation(async (quads) => { writtenQuads.push(...quads); });
     const catalog = vi.spyOn(host as any, 'observeRfc64ConfirmedVmV1');
-    const metaGraph = contextGraphMetaUri(queued.contextGraphId);
-    const lifecycleUri = assertionLifecycleUri(queued.contextGraphId, effectiveAuthor, queued.name, queued.subGraphName);
     expect((await execute(queued)).localFinalizationComplete).toBe(true);
     expect(clear).toHaveBeenCalledWith(queued.contextGraphId, {
       kind: 'named-lifecycle', identity: { agentAddress: AUTHOR, kaNumber: KA_NUMBER },
@@ -209,7 +210,10 @@ describe('the steps a queued executor reports after the confirmation', () => {
     const laterAuthor = `0x${'33'.repeat(20)}`;
     expect(writtenQuads.some(quad => quad.subject.includes(laterAuthor))).toBe(false);
     expect(lifecycleWrites.some(input => input.agentAddress === laterAuthor)).toBe(false);
-    expect(lifecycle).toHaveBeenCalledWith(expect.objectContaining({ ...queued, agentAddress: effectiveAuthor }), UAL, PACKED_KA_ID);
+    expect(lifecycle).toHaveBeenCalledWith(expect.objectContaining({ contextGraphId: queued.contextGraphId,
+      name: queued.name, agentAddress: effectiveAuthor, subGraphName: 'documents', packedKaId: PACKED_KA_ID }),
+      expect.objectContaining({ status: 'confirmed', ual: UAL, seal: expect.objectContaining({ assertionVersion: '1' }) }),
+      expect.objectContaining({ publicQuads: QUADS, publisherPeerId: 'peer-1' }));
     expect(queued).toEqual(originalRequest);
     expect(catalog).toHaveBeenCalledWith(expect.objectContaining({
       contextGraphId: queued.contextGraphId, subGraphName: 'documents', assertionCoordinate: queued.name,
@@ -217,11 +221,8 @@ describe('the steps a queued executor reports after the confirmation', () => {
     }));
     if (kind === 'update') {
       expect(calls).toContain('update()');
-      expect(pointer).toHaveBeenCalledWith(lifecycleUri, expect.any(String), ROOT.slice(2), metaGraph);
-      expect(insert).toHaveBeenCalledWith(expect.arrayContaining([{
-        subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf',
-        object: `${lifecycleUri}#assertion-${prior}`, graph: metaGraph,
-      }]));
+      expect(lifecycleWrites[0]).toMatchObject({ priorMerkleRoot: `0x${prior}` });
+      expect(pointer).not.toHaveBeenCalled();
     } else {
       expect(calls).toContain('publish()');
       expect(pointer).not.toHaveBeenCalled();
@@ -243,6 +244,7 @@ describe('the steps a queued executor reports after the confirmation', () => {
       // announcement, so no such step is reported.
       'readGraphId()',
       'publish()', 'ended:publish',
+      'repairLifecycle()', 'ended:lifecycleStamp',
       'writeReceipt()', 'ended:receiptWrite',
       'clearPublishedGraph()', 'ended:publishedGraphClear',
       'retireLegacySwm()',
@@ -250,9 +252,8 @@ describe('the steps a queued executor reports after the confirmation', () => {
 
     retirement.release();
     await expect(executing).resolves.toMatchObject({ status: 'confirmed', ual: UAL });
-    expect(calls.slice(8)).toEqual([
+    expect(calls.slice(10)).toEqual([
       'ended:legacySwmRetire',
-      'stampLifecycle()', 'ended:lifecycleStamp',
       'gossip()', 'ended:finalizationGossip',
       'clearShareMarker()', 'ended:shareMarkerClear',
       'catalogObserver()', 'ended:catalogObserver',
@@ -262,7 +263,7 @@ describe('the steps a queued executor reports after the confirmation', () => {
   it('reports the clear of the rest of shared memory when the request asks for it', async () => {
     const { calls, execute } = harness();
     await execute(request({ clearSharedMemoryAfter: true }));
-    expect(calls.slice(calls.indexOf('ended:legacySwmRetire'), calls.indexOf('stampLifecycle()'))).toEqual([
+    expect(calls.slice(calls.indexOf('ended:legacySwmRetire'), calls.indexOf('gossip()'))).toEqual([
       'ended:legacySwmRetire', 'clearRemainingSharedMemory()', 'ended:remainingSwmClear',
     ]);
   });
@@ -272,11 +273,10 @@ describe('the steps a queued executor reports after the confirmation', () => {
     await execute(request({ vmCurrentAssertion: `0x${'cd'.repeat(32)}` }));
     expect(calls).toEqual([
       'update()', 'ended:publish',
+      'repairLifecycle()', 'ended:lifecycleStamp',
       'writeReceipt()', 'ended:receiptWrite',
       'clearPublishedGraph()', 'ended:publishedGraphClear',
       'retireLegacySwm()', 'ended:legacySwmRetire',
-      'stampVmPointer()', 'stampWmPointer()', 'stampProvenance()',
-      'stampLifecycle()', 'ended:lifecycleStamp',
       'readGraphId()', 'ended:graphIdRead',
       'gossip()', 'ended:finalizationGossip',
       'clearShareMarker()', 'ended:shareMarkerClear',
@@ -294,7 +294,7 @@ describe('the steps a queued executor reports after the confirmation', () => {
   });
 
   it.each(OPERATIONS.flatMap(operation =>
-    ['writeReceipt()', 'stampLifecycle()', 'clearShareMarker()', 'clearRemainingSharedMemory()']
+    ['writeReceipt()', 'repairLifecycle()', 'clearShareMarker()', 'clearRemainingSharedMemory()']
       .map(failStep => ({ ...operation, failStep }))))(
     'leaves $kind recovery responsible when $failStep fails despite an upstream certificate', async ({ overrides, failStep }) => {
       const { calls, execute } = harness({ failStep, publish: async () => ({
@@ -308,34 +308,16 @@ describe('the steps a queued executor reports after the confirmation', () => {
     },
   );
 
-  it.each(['stampVmPointer()', 'stampWmPointer()', 'stampProvenance()'])(
-    'keeps an update confirmed but uncertified after %s fails, and continues the remaining tail', async (failStep) => {
-      const { calls, execute } = harness({ failStep, publish: async () => ({
-        ...publishResult(), localFinalizationComplete: true,
-      }) });
-      const result = await execute(request({
-        vmCurrentAssertion: `0x${'cd'.repeat(32)}`,
-        assertionVersion: '2',
-        clearSharedMemoryAfter: true,
-      }));
-      expect(result.status).toBe('confirmed');
-      expect(result.localFinalizationComplete).toBeUndefined();
-      const provenanceSteps = ['stampVmPointer()', 'stampWmPointer()', 'stampProvenance()'];
-      expect(calls).toEqual([
-        'update()', 'ended:publish',
-        'writeReceipt()', 'ended:receiptWrite',
-        'clearPublishedGraph()', 'ended:publishedGraphClear',
-        'retireLegacySwm()', 'ended:legacySwmRetire',
-        'clearRemainingSharedMemory()', 'ended:remainingSwmClear',
-        ...provenanceSteps.slice(0, provenanceSteps.indexOf(failStep) + 1),
-        'stampLifecycle()', 'ended:lifecycleStamp',
-        'readGraphId()', 'ended:graphIdRead',
-        'gossip()', 'ended:finalizationGossip',
-        'clearShareMarker()', 'ended:shareMarkerClear',
-        'catalogObserver()', 'ended:catalogObserver',
-      ]);
-    },
-  );
+  it('keeps an update confirmed but uncertified while canonical lifecycle repair is pending', async () => {
+    const { calls, execute } = harness({ failStep: 'repairLifecycle()', publish: async () => ({
+      ...publishResult(), localFinalizationComplete: true,
+    }) });
+    const result = await execute(request({ vmCurrentAssertion: `0x${'cd'.repeat(32)}`, assertionVersion: '2' }));
+    expect(result).toMatchObject({ status: 'confirmed', lifecycleRepairPending: true });
+    expect(result.localFinalizationComplete).toBeUndefined();
+    expect(calls).not.toContain('stampProvenance()');
+    expect(calls.slice(-2)).toEqual(['catalogObserver()', 'ended:catalogObserver']);
+  });
 
   it.each(OPERATIONS.flatMap(operation => [false, undefined].map(catalogCompletion => ({ ...operation, catalogCompletion }))))(
     'clears an upstream $kind certificate when catalog completion is $catalogCompletion', async ({ overrides, catalogCompletion }) => {
@@ -390,7 +372,7 @@ describe('the steps a queued executor reports after the confirmation', () => {
       clearPublishedGraph: async () => { throw new Error('the store refused the clear'); },
     });
     await expect(execute()).resolves.toMatchObject({ status: 'confirmed' });
-    expect(calls.slice(calls.indexOf('clearPublishedGraph()'), calls.indexOf('stampLifecycle()'))).toEqual([
+    expect(calls.slice(calls.indexOf('clearPublishedGraph()'), calls.indexOf('gossip()'))).toEqual([
       'clearPublishedGraph()', 'ended:publishedGraphClear',
     ]);
     expect(calls).not.toContain('retireLegacySwm()');
@@ -409,7 +391,7 @@ describe('the steps a queued executor reports after the confirmation', () => {
     // The catalog tail is still called, and returns at once for a result that is not confirmed.
     expect(calls).toEqual([
       ...(kind === 'create' ? ['readGraphId()', 'publish()'] : ['update()']),
-      'ended:publish', 'ended:catalogObserver',
+      'ended:publish', 'ended:lifecycleStamp', 'ended:catalogObserver',
     ]);
   });
 

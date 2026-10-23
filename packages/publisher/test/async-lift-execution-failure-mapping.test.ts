@@ -371,7 +371,7 @@ describe('catalog proof availability at the real queued execution boundary', () 
           writeAhead += 1;
           sends += 1; // Deterministic adapter send seam; no network or signing.
           const confirmed = confirmedPublishResult();
-          return { ...confirmed, onChainResult: { ...confirmed.onChainResult, txHash: TX_HASH } };
+          return { ...confirmed, localFinalizationComplete: true, onChainResult: { ...confirmed.onChainResult, txHash: TX_HASH } };
         },
       },
     });

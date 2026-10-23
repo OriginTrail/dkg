@@ -44,6 +44,7 @@ import type {
   BrowserWalletRpcMethod,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
+import { waitForSignal } from './wait-for-signal.js';
 import { SignerTxSerializer } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
@@ -3966,7 +3967,8 @@ export class EVMChainAdapterBase {
     );
   }
 
-  async getKnowledgeAssetsLifecycleAddress(): Promise<string> {
+  async getKnowledgeAssetsLifecycleAddress(options: ChainReadOptions = {}): Promise<string> {
+    options.signal?.throwIfAborted();
     // PR3 / RC11: TTL-cached. KAV10 address only changes on a contract
     // redeploy + Hub-rotation event; 1h staleness is harmless and the
     // ACK digest mismatch the contract would surface on actually-stale
@@ -3975,11 +3977,11 @@ export class EVMChainAdapterBase {
     if (EVMChainAdapterBase.preflightCacheFresh(this.cachedKav10Address, now)) {
       return this.cachedKav10Address!.value;
     }
-    await this.init();
+    await waitForSignal(this.init(), options.signal);
     if (!this.contracts.knowledgeAssetsLifecycle) {
       throw new Error('KnowledgeAssetsLifecycle / KnowledgeAssetsLifecycle contract not deployed on this chain.');
     }
-    const addr = await this.contracts.knowledgeAssetsLifecycle.getAddress();
+    const addr = await waitForSignal(this.contracts.knowledgeAssetsLifecycle.getAddress(), options.signal);
     this.cachedKav10Address = { value: addr, cachedAt: now };
     return addr;
   }
@@ -3992,7 +3994,8 @@ export class EVMChainAdapterBase {
     return this.finalityConfirmations;
   }
 
-  async getEvmChainId(): Promise<bigint> {
+  async getEvmChainId(options: ChainReadOptions = {}): Promise<bigint> {
+    options.signal?.throwIfAborted();
     // PR3 / RC11: TTL-cached so an `eth_chainId` rate-limit on the
     // public RPC (the dzudza failure mode) cannot kill steady-state
     // publish traffic. Chain id is structurally immutable for a given
@@ -4003,11 +4006,12 @@ export class EVMChainAdapterBase {
       return this.cachedChainId!.value;
     }
     const chainId = this.configuredStaticChainId == null
-      ? (await this.readProvider('getNetwork (chainId)', (p) => p.getNetwork())).chainId
-      : await this.rpcFailover.read(
+      ? (await waitForSignal(this.readProvider('getNetwork (chainId)', (p) => p.getNetwork(), options), options.signal)).chainId
+      : await waitForSignal(this.rpcFailover.read(
           createRpcReadDescriptor('validate configured chainId'),
           (p) => this.ensureConfiguredStaticChainIdValidated(p),
-        );
+          options,
+        ), options.signal);
     this.cachedChainId = { value: chainId, cachedAt: now };
     return chainId;
   }

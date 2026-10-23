@@ -21,7 +21,7 @@
  * curator with the share. Before the fix the publish answered 409
  * `ASSERTION_AUTHOR_NOT_RESIDENT`.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { ethers } from 'ethers';
 import { DKGAgent } from '@origintrail-official/dkg-agent';
@@ -244,6 +244,7 @@ describe('a curator publishes a member\'s sub-graph share from shared memory (GH
 
     // 4. The curator promotes it to Verified Memory, naming the member as author.
     await installHardhatACKProvider(curator as any);
+    const repair = vi.spyOn(curator as any, '_repairConfirmedNamedKaVmLifecycle');
     const published = await curatorRoutes.post(`/api/knowledge-assets/${NAME}/vm/publish`, {
       contextGraphId: CG,
       subGraphName: SUB_GRAPH,
@@ -251,6 +252,9 @@ describe('a curator publishes a member\'s sub-graph share from shared memory (GH
     });
     expect(published.status, JSON.stringify(published.body)).toBe(200);
     expect(published.body.status).toBe('confirmed');
+    expect(published.body.lifecycleRepairPending).not.toBe(true);
+    expect(repair.mock.calls[0]?.[2]).toMatchObject({ publisherPeerId: member.peerId });
+    repair.mockRestore();
     // Published under the member's seal and in the member's KA namespace.
     expect(published.body.authorAddress.toLowerCase()).toBe(memberAddress.toLowerCase());
     expect(BigInt(published.body.kaId) >> 96n).toBe(BigInt(memberAddress));

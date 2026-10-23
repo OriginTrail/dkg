@@ -231,6 +231,16 @@ export function createMutationObservedStore(
         'update',
       )
       : undefined,
+    // Preserve explicit whole-request atomicity and the same outcome-aware invalidation as UPDATE.
+    atomicUpdate: innerStore.atomicUpdate
+      ? (sparql, options) => invalidateAfterMutation(
+        () => innerStore.atomicUpdate!(sparql, options),
+        () => true,
+        { everything: true },
+        'update',
+      )
+      : undefined,
+    commitment: innerStore.commitment,
     flush: innerStore.flush ? (options) => innerStore.flush!(options) : undefined,
     close() {
       return innerStore.close();

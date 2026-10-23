@@ -44,6 +44,16 @@ Use `dkg ka publish-async notes -c my-project` for an async VM publish job. `dkg
 
 Async VM publish requires the async publisher to be enabled and backed by publisher wallets with native gas plus PCA registration or TRAC for direct spend. Publisher wallet node identity is optional attribution: if the wallet resolves to identity `0`, the publish runs in no-attribution mode. Use `--publisher-node-identity-id 0` to force no-attribution for one publish. See [Async Publisher Wallets](async-publisher-wallets.md).
 
+## Confirmed publication with pending local metadata
+
+A named KA publish can confirm on-chain while a transient graph-store timeout prevents its VM lifecycle metadata from being stamped. The publish result then includes `lifecycleRepairPending: true` with the confirmed UAL. The daemon repairs the VM root, divergent WM pointer, update provenance, memory layer, published state, published UAL and assertion graph from that same confirmed result. Do not publish again to repair these fields.
+
+With `dataDir` configured, pending work and retry deadlines are persisted before the first stamp in `named-ka-vm-lifecycle-repairs.json` and survive a daemon restart. The worker admits at most ten repairs per pass, starts retries after five seconds, and backs off to a maximum five-minute interval. A newer coherent chain version retires an older repair, and a newer local WM/SWM draft retains its layer/state. Invalid or conflicting evidence is retained as a rejected record and reported in the logs rather than retried. Hosts without `dataDir` retain pending work only for their current process.
+
+Confirmed named-KA lifecycle repair first plans the metadata changes under the same KA write lock used by draft mutations. Stores that explicitly implement `atomicUpdate` apply the VM pointer, consumed WM pointer, state, memory layers, graph pointer, published UAL, and update provenance in one transaction. Embedded and worker Oxigraph provide this capability; HTTP endpoints require a certified atomic consistency profile. A generic `update` method alone is insufficient. Older stores use an idempotent sequence backed by the durable repair journal, so transient partial metadata remains possible until repair succeeds. A failed atomic commit never falls back to separate writes.
+
+`publishAsync`'s initial SWM pointer remains optional: its fresh generated name is published by the queued VM lane, which supplies the required VM descriptor and its durable repair.
+
 ## Editing a published Knowledge Asset
 
 ```bash
