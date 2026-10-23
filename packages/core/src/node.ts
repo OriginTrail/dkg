@@ -49,6 +49,7 @@ import { DKG_GOSSIP_MAX_RPC_BYTES, dhtProtocolForNetwork } from './constants.js'
 import { POOLED_MESSAGE_PROTOCOL } from './message-stream-pool.js';
 import { RelayMetricsAdapter, RELAY_V2_STOP_CODEC } from './libp2p-metrics-adapter.js';
 import { readRelayReservations, readConnectionStreams } from './relay-internal-shapes.js';
+import { repairRelayReservationTimers } from './relay-reservation-timers.js';
 import { RelayFlapGuard, buildRelayFlapConnectionGater } from './relay-flap-guard.js';
 import { buildActiveRelayNetworkPolicy } from './relay-network-policy.js';
 import { buildRelayClientTransport } from './relay-client-transport.js';
@@ -1015,6 +1016,7 @@ export class DKGNode {
     } as any);
     this.stopAbortController = startStopAbortController;
     this.networkPeerDialPolicy = networkPeerDialPolicy;
+    if (services.relay) repairRelayReservationTimers(this.node.services.relay);
 
     this.setupConnectionObservability();
 
