@@ -56,7 +56,9 @@ export function manifestGraphsAfter(
  * stops once the round reached a soft limit (or its recovery slice's soft
  * deadline) and holds a graph the planner keeps; it reads on while only its
  * first graph's rows are past the hard limits; otherwise it stops at a hard
- * limit, which therefore ends only a round with nothing to checkpoint.
+ * limit, which therefore ends only a round with nothing to checkpoint. Once
+ * every remaining graph is whole it reads on to the end of the phase, where
+ * the last graph completes: no graph starts at the manifest's end to resume.
  *
  * Responders serve whole exact graphs in manifest order (both sides sort them
  * by code point). A row outside the first graph that arrives before that graph
@@ -92,9 +94,10 @@ export function createDurableDataRoundBoundary(input: {
       completeRows += graphs[completeGraphs]!.rows;
       completeGraphs += 1;
     }
-    // An incomplete round never keeps a last graph that ends exactly at its raw stop offset.
-    const checkpointable = completeGraphs > 1
-      || (completeGraphs === 1 && progress.resumedFromOffset + completeRows < progress.nextOffset);
+    // An incomplete round never checkpoints the manifest's end, and never keeps a
+    // last graph that ends exactly at its raw stop offset.
+    const checkpointable = completeGraphs < graphs.length && (completeGraphs > 1
+      || (completeGraphs === 1 && progress.resumedFromOffset + completeRows < progress.nextOffset));
     const due = progress.acceptedQuads >= budget.softRows
       || progress.acceptedHeapBytesEstimate >= budget.softHeapBytes
       || (input.settlementSliceDeadline !== undefined && now() >= input.settlementSliceDeadline);

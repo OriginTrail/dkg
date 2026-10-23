@@ -649,7 +649,9 @@ describe('bounded rootless durable progress', () => {
     });
 
     expect(materialized).toEqual([fixtures[0]!.ual]);
-    expect(pageYieldDecisions).toEqual([true]);
+    // Both graphs are whole, so the round reads on to the end of the phase; the expired
+    // slice then stops it after the first asset is stored.
+    expect(pageYieldDecisions).toEqual([false]);
     expect(summary).toMatchObject({
       complete: false,
       failedPhases: 0,
@@ -703,7 +705,8 @@ describe('bounded rootless durable progress', () => {
     const soft = await roundBoundary('peer-round-soft');
     expect(soft).toBeDefined();
     expect(soft!(page(firstGraph.length, firstGraph.length, firstGraph))).toBe(false);
-    expect(soft!(page(data.length, DEFAULT_DURABLE_DATA_ROUND_BUDGET.softRows, data.slice(firstGraph.length))))
+    // The soft limit with two whole graphs, short of the last one.
+    expect(soft!(page(data.length - 1, DEFAULT_DURABLE_DATA_ROUND_BUDGET.softRows, data.slice(firstGraph.length, -1))))
       .toBe(true);
     expect(warnings).toEqual([]);
 

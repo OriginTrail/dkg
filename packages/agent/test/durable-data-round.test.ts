@@ -241,6 +241,26 @@ describe('full-graph durable data round boundary', () => {
     expect(onHardLimit).toHaveBeenCalledTimes(4);
   });
 
+  it('reads on to the end of the phase once every remaining graph is whole, past filtered rows too', () => {
+    const budget = { ...ROW_BUDGET, softRows: 4 };
+    // A filtered row before a round's only remaining graph moves the raw offset one past its end.
+    expect(roundOf(createDurableDataRoundBoundary({ manifest: manifestOfSizes([100]), budget }))(rowsOf(0, 100), 1))
+      .toBe(false);
+    // Both remaining graphs whole, with a filtered row between them.
+    const both = roundOf(createDurableDataRoundBoundary({ manifest: manifestOfSizes([4, 8]), budget }));
+    expect(both(rowsOf(0, 4))).toBe(false);
+    expect(both(rowsOf(1, 8), 1)).toBe(false);
+    // A resumed round whose only remaining graph is the last one.
+    expect(roundOf(createDurableDataRoundBoundary({ manifest: manifestOfSizes([4, 8]), budget }), 4)(rowsOf(1, 8), 1))
+      .toBe(false);
+    // An incomplete round that stops there anyway keeps the last graph for the next round,
+    // whatever the raw offset: no graph starts at the manifest's end to resume from.
+    const rows = [...rowsOf(0, 4), ...rowsOf(1, 8)];
+    const rawOffsets = [0, 1, 2, 3, ...Array.from({ length: 8 }, (_, index) => 5 + index)];
+    expect(planBoundedGraphScopedDurableBatch(rows, manifestOfSizes([4, 8]), 0, 13, false, 0, rawOffsets))
+      .toMatchObject({ safeNextOffset: 4, safeRawNextOffset: 4, completedGraphCount: 1 });
+  });
+
   it('lists the graphs with rows a round reads after its resume offset', () => {
     const manifest = manifestOfSizes([0, 5, 0, 7]);
     expect(manifestGraphsAfter(manifest, 0)).toEqual([{ graph: graphOf(1), rows: 5 }, { graph: graphOf(3), rows: 7 }]);
