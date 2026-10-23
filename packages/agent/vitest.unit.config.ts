@@ -321,6 +321,8 @@ export default defineConfig({
       "test/sync-on-connect-attempt-accounting.test.ts",
       "test/sync-on-connect-peer-job-runner.test.ts",
       "test/sync-on-connect-peer-scheduler.test.ts",
+      "test/sync-on-connect-graph-scope.test.ts",
+      "test/sync-on-connect-authority-catchup-scope.test.ts",
       "test/system-context-graph-policy.test.ts",
       "test/on-demand-agents-phonebook.test.ts",
       "test/on-demand-agents-phonebook-agent.test.ts",
