@@ -57,6 +57,11 @@ export function manifestGraphsAfter(
  * deadline) and holds a graph the planner keeps; it reads on while only its
  * first graph's rows are past the hard limits; otherwise it stops at a hard
  * limit, which therefore ends only a round with nothing to checkpoint.
+ *
+ * Responders serve whole exact graphs in manifest order (both sides sort them
+ * by code point). A row outside the first graph that arrives before that graph
+ * is whole therefore means the responder lacks it, or sent rows the planner
+ * rejects: no round could make progress from such rows, at any size.
  */
 export function createDurableDataRoundBoundary(input: {
   readonly manifest: GraphScopedDurableManifestPlan;

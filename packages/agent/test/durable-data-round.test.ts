@@ -220,10 +220,16 @@ describe('full-graph durable data round boundary', () => {
     const boundary = () => createDurableDataRoundBoundary({ manifest: manifestOfSizes([100, 50, 50]), budget: ROW_BUDGET, onHardLimit });
     // More rows of the first graph than it declares.
     expect(roundOf(boundary())(rowsOf(0, 101))).toBe(true);
-    // Rows of later graphs while the first is still incomplete.
-    const outOfOrder = roundOf(boundary());
-    expect(outOfOrder([...rowsOf(0, 5), ...rowsOf(1, 29)])).toBe(false);
-    expect(outOfOrder(rowsOf(1, 1))).toBe(true);
+    // Rows of later graphs while the first is still incomplete: graphs come in manifest
+    // order, so the responder lacks the rest of the first graph.
+    const gap = roundOf(boundary());
+    expect(gap([...rowsOf(0, 5), ...rowsOf(1, 29)])).toBe(false);
+    expect(gap(rowsOf(1, 1))).toBe(true);
+    // Read to the end of the phase, such a round would still keep nothing.
+    const wholePhase = [...rowsOf(0, 5), ...rowsOf(1, 50), ...rowsOf(2, 50)];
+    expect(planBoundedGraphScopedDurableBatch(
+      wholePhase, manifestOfSizes([100, 50, 50]), 0, wholePhase.length, true,
+    )?.completedGraphCount ?? 0).toBe(0);
     // Rows past the manifest's end.
     const pastEnd = roundOf(boundary(), 200);
     expect(pastEnd(rowsOf(7, 29))).toBe(false);
