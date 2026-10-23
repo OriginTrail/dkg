@@ -4,7 +4,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { findLibp2pPinViolations, lockfileFamilyVersions } from './lib/libp2p-pins.mjs';
+import { findLibp2pPinViolations, lockfileFamily } from './lib/libp2p-pins.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const manifests = readdirSync(join(root, 'packages'))
@@ -12,8 +12,8 @@ const manifests = readdirSync(join(root, 'packages'))
   .filter((file) => existsSync(file))
   .map((file) => JSON.parse(readFileSync(file, 'utf8')))
   .filter((manifest) => !manifest.private);
-const lockVersions = lockfileFamilyVersions(readFileSync(join(root, 'pnpm-lock.yaml'), 'utf8'));
-const violations = findLibp2pPinViolations({ manifests, lockVersions });
+const lockFamily = lockfileFamily(readFileSync(join(root, 'pnpm-lock.yaml'), 'utf8'));
+const violations = findLibp2pPinViolations({ manifests, lockFamily });
 for (const violation of violations) console.error(`libp2p pins: ${violation}`);
 if (violations.length > 0) process.exit(1);
-console.log(`libp2p pins: ${lockVersions.size} family packages pinned exactly in ${manifests.length} published packages.`);
+console.log(`libp2p pins: ${lockFamily.versions.size} family packages pinned exactly in ${manifests.length} published packages.`);

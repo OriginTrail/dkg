@@ -740,48 +740,21 @@ importers:
       '@iarna/toml':
         specifier: ^2.2.5
         version: 2.2.5
-      '@libp2p/autonat':
-        specifier: 3.0.32
-        version: 3.0.32
-      '@libp2p/bootstrap':
-        specifier: 12.0.36
-        version: 12.0.36
-      '@libp2p/circuit-relay-v2':
-        specifier: 4.2.17
-        version: 4.2.17
       '@libp2p/crypto':
         specifier: 5.2.0
         version: 5.2.0
-      '@libp2p/dcutr':
-        specifier: 3.0.32
-        version: 3.0.32
-      '@libp2p/gossipsub':
-        specifier: 15.0.23
-        version: 15.0.23
-      '@libp2p/identify':
-        specifier: 4.1.18
-        version: 4.1.18
       '@libp2p/interface':
         specifier: 3.4.0
         version: 3.4.0
       '@libp2p/interface-internal':
         specifier: 3.2.2
         version: 3.2.2
-      '@libp2p/kad-dht':
-        specifier: 16.4.9
-        version: 16.4.9
       '@libp2p/logger':
         specifier: 6.2.16
         version: 6.2.16
-      '@libp2p/mdns':
-        specifier: 12.0.36
-        version: 12.0.36
       '@libp2p/multistream-select':
         specifier: 7.0.32
         version: 7.0.32
-      '@libp2p/noise':
-        specifier: 1.0.1
-        version: 1.0.1
       '@libp2p/peer-collections':
         specifier: 7.0.32
         version: 7.0.32
@@ -800,18 +773,9 @@ importers:
       '@libp2p/record':
         specifier: 4.0.15
         version: 4.0.15
-      '@libp2p/tcp':
-        specifier: 11.0.32
-        version: 11.0.32
       '@libp2p/utils':
         specifier: 7.4.5
         version: 7.4.5
-      '@libp2p/websockets':
-        specifier: 10.1.25
-        version: 10.1.25(bufferutil@4.1.0)(utf-8-validate@5.0.10)
-      '@libp2p/yamux':
-        specifier: 8.0.7
-        version: 8.0.7
       '@modelcontextprotocol/sdk':
         specifier: ^1
         version: 1.27.1(zod@4.4.3)
@@ -893,9 +857,6 @@ importers:
       jsonc-parser:
         specifier: 3.3.1
         version: 3.3.1
-      libp2p:
-        specifier: 3.5.1
-        version: 3.5.1
       n3:
         specifier: ^2.0.1
         version: 2.0.1
