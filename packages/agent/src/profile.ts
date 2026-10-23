@@ -4,6 +4,7 @@ import {
   SYSTEM_CONTEXT_GRAPHS,
   canonicalAgentDidSubject,
   isPublicLikeAddress,
+  peerIdFromRelayAddress,
   toAgentDid,
 } from '@origintrail-official/dkg-core';
 /** Compatibility re-export; canonicalization is implemented and documented in dkg-core. */
@@ -51,6 +52,25 @@ export function collectPublishableMultiaddrs(
     out.push(ma);
   }
   return out;
+}
+
+/**
+ * The relay a profile names for reaching this node: the first configured relay
+ * the node holds a reservation on (one of its own circuit addresses runs
+ * through it), else the first configured relay. A node reserves on a few of
+ * its relays only (3 by default), so the first one in the list is often not
+ * among them, and a peer that dials this node through it is refused.
+ */
+export function advertisedRelayAddress(
+  relayPeers: readonly string[] | undefined,
+  selfAddresses: readonly string[],
+): string | undefined {
+  const reservedOn = new Set(selfAddresses.flatMap((address) => {
+    const circuit = address.indexOf('/p2p-circuit');
+    const relayPeerId = circuit < 0 ? undefined : peerIdFromRelayAddress(address.slice(0, circuit));
+    return relayPeerId ? [relayPeerId] : [];
+  }));
+  return relayPeers?.find((relay) => reservedOn.has(peerIdFromRelayAddress(relay) ?? '')) ?? relayPeers?.[0];
 }
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
