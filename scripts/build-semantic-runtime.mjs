@@ -148,6 +148,9 @@ export function assertPortableBuildEnvironment(env = process.env) {
 function buildInto(outputRoot) {
   assertPortableBuildEnvironment();
   verifyToolchain();
+  // Cargo may pass only `rustc` to RUSTC_WRAPPER (notably with Homebrew).
+  // The macOS wrapper needs the selected compiler's full path for its dylibs.
+  const rustc = run('rustup', ['which', '--toolchain', EXPECTED_RUST_TOOLCHAIN, 'rustc'], { capture: true });
   run('cargo', [
     `+${EXPECTED_RUST_TOOLCHAIN}`,
     'build',
@@ -185,6 +188,7 @@ function buildInto(outputRoot) {
     {
       env: {
         ...process.env,
+        RUSTC: rustc,
         RUSTC_WRAPPER: rustcWrapper,
         CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS: rustFlags,
       },
@@ -229,6 +233,7 @@ function buildInto(outputRoot) {
     {
       env: {
         ...process.env,
+        RUSTC: rustc,
         RUSTC_WRAPPER: rustcWrapper,
         CARGO_TARGET_WASM32_WASIP2_RUSTFLAGS: rustFlags,
       },
