@@ -2,7 +2,7 @@
 
 Date: 23 October 2026. The DKG branch starts from Graph Computer PR #3427 at
 `6bf4c9c38756cc77f0c39e523975f54d45c31c95` and includes freshly fetched
-`origin/testnet-canary` at `f9b5f2524ed6052c7126ddd940e6d05ea5a77549`.
+`origin/testnet-canary` at `5446819250510f5bf0d92a8d632712546bc2e325`.
 The companion nOS change starts from Ziga's PR #934 at
 `4f0dd2eb9d4fb4c61ca0e603640821ef84e7fd16`.
 
@@ -29,6 +29,7 @@ state directory. They contain execution references and non-secret evidence.
 | DKG affected CLI approval, invocation, runtime, adapter and native receipt suites | 239/239 pass, 6 files |
 | Graph Computer SDK | 37/37 pass, 3 files |
 | CLI build and type tests; semantic-runtime TypeScript build | Pass |
+| Agent build, type tests and package-root boundary after the canary merge | Pass |
 | nOS console, console integration and development/production bundle boundary | 1178/1178 pass, 147 files |
 | nOS console typecheck, production build and changed-file ESLint | Pass |
 | Real n8n / DKG invocation, composition, readback, replay and denial checks | Pass |
@@ -37,6 +38,10 @@ The live check exposed a pre-existing receipt-finalization issue: selecting an
 executor's lane did not also select its signing author. Receipt finalization now
 passes the approved executor as author. The native regression uses different
 publisher/executor keys and verifies executor attribution.
+
+The DKG Program editor's tool picker is unchanged: n8n grants are configured via
+the SDK/operator path until the editor has a workflow-grant form. The PoC canvas
+discovers and invokes the resulting KA.
 
 Hosted CI, integration review and production deployment remain separate. Both
 changes are intended as draft PRs stacked on their respective dependency PRs.
