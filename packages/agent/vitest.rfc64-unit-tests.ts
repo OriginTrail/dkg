@@ -20,6 +20,8 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-legacy-swm-promote-admission.test.ts",
   "test/rfc64-legacy-swm-promote-admission-schedules.test.ts",
   "test/rfc64-inventory-v1-lifecycle.test.ts",
+  // A pre-migration copy and the down-migration let `dkg rollback` return a node to an older release.
+  "test/rfc64-inventory-v1-rollback.test.ts",
   "test/rfc64-inventory-v1-candidates.test.ts",
   "test/rfc64-inventory-v1-applied-head.test.ts",
   "test/rfc64-swm-author-inventory-persistence-v1.test.ts",

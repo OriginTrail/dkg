@@ -35,6 +35,74 @@ dkg mcp setup --force
 
 Use `dkg rollback` when the latest installed version breaks daemon startup or a critical integration.
 
+## Rolling back
+
+`dkg rollback` returns the node to the version it ran before the last update:
+
+1. It checks that the local stores can be given back in a form the older version
+   opens. If they cannot, it stops here and changes nothing.
+2. It stops the daemon.
+3. It readies the stores for the older version (see below).
+4. It switches versions: an Edge reinstalls the previous npm release, a Core
+   flips to the other blue-green slot.
+
+Then start the node with `dkg start`. If the reinstall fails, the daemon stays
+stopped on the current version; `dkg start` starts it again.
+
+If a service manager restarts the node by itself (for example systemd with
+`Restart=always`), stop the service first, run `dkg rollback`, then start the
+service. While `dkg rollback` readies the stores it holds them, so a node the
+service manager starts in that window fails to open them instead of changing
+them.
+
+### Stores that a newer version migrated
+
+A release can move a local store to a newer schema that older releases refuse.
+`dkg rollback` gives such a store back in the older form:
+
+- 10.0.26 moves the RFC-64 inventory database
+  (`rfc64-sync/inventory-v1.sqlite3`) to schema v6. Releases from 10.0.17 to
+  10.0.25 open schema v5 at most and stop at start-up on schema v6.
+- `dkg rollback` lowers the database from v6 to v5. Schema v6 adds only the
+  retry history of private placement repairs, which 10.0.25 does not use, so
+  every row 10.0.25 reads is kept, including those written after the update.
+- Before migrating, 10.0.26 keeps a copy of the database as it was:
+  `rfc64-sync/inventory-v1.schema-v5.pre-migration.sqlite3`. A node keeps one
+  such copy per store; the next migration replaces it. Migrating needs free
+  disk space for the copy plus 64 MiB; with less, the node stops at start-up
+  and says so, and the database stays as it was.
+- If the database is not exactly the v6 schema, `dkg rollback` restores that
+  copy instead and keeps the replaced database next to it as
+  `rfc64-sync/inventory-v1.schema-v6.before-rollback.sqlite3`. The restored
+  copy lacks what the node recorded after the update.
+- If neither works, `dkg rollback` refuses, names the database and its schema,
+  and changes nothing.
+
+To install an older version by hand, for example with
+`npm install -g @origintrail-official/dkg@<version>` or by switching a git
+checkout, stop the node and ready its stores first:
+
+```bash
+dkg rollback --stores-for 10.0.25
+```
+
+This only readies the stores. It does not switch versions.
+
+### Publisher jobs that failed on 10.0.26
+
+10.0.26 records a cause with each publish job that fails before its
+transaction is sent, and a new failure code, `validation_unknown`. 10.0.25
+cannot read these job records: it leaves them out of job lists, answers an
+error when asked for one by id, and refuses to publish the same Knowledge Asset
+to Verified Memory again while such a record exists. Before rolling back, clear
+the failed jobs you no longer need:
+
+```bash
+dkg publisher clear failed
+```
+
+It keeps failed jobs that may still have a transaction on chain.
+
 ## Node.js security releases
 
 Node.js 22.23.4, 24.22.1 and 26.12.1, released on 21 October 2026, fix

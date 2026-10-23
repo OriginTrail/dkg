@@ -52,11 +52,15 @@ describe('maintenance command shutdown gate', () => {
     const swapSlot = vi.fn(async () => {});
     const errors: string[] = [];
 
+    const prepareStores = vi.fn(async () => ({ release() {} }));
     await expect(executeCoreRollbackActivation('b', {
       stopDaemon: async () => false,
+      prepareStores,
       swapSlot,
       error: (message) => errors.push(message),
     })).resolves.toBe(false);
+
+    expect(prepareStores).not.toHaveBeenCalled();
 
     expect(swapSlot).not.toHaveBeenCalled();
     expect(errors).toEqual([
@@ -64,16 +68,46 @@ describe('maintenance command shutdown gate', () => {
     ]);
   });
 
-  it('stops the daemon before activating the exact Core rollback target', async () => {
+  it('stops the daemon and readies the stores before activating the exact Core rollback target', async () => {
     const calls: string[] = [];
 
     await expect(executeCoreRollbackActivation('b', {
       stopDaemon: async () => { calls.push('stop'); return true; },
+      prepareStores: async () => {
+        calls.push('stores');
+        return { release: () => { calls.push('release'); } };
+      },
       swapSlot: async (target) => { calls.push(`swap:${target}`); },
       error: () => {},
     })).resolves.toBe(true);
 
-    expect(calls).toEqual(['stop', 'swap:b']);
+    expect(calls).toEqual(['stop', 'stores', 'swap:b', 'release']);
+  });
+
+  it('keeps the current slot when the stores cannot be readied for the target', async () => {
+    const swapSlot = vi.fn(async () => {});
+
+    await expect(executeCoreRollbackActivation('b', {
+      stopDaemon: async () => true,
+      prepareStores: async () => null,
+      swapSlot,
+      error: () => {},
+    })).resolves.toBe(false);
+
+    expect(swapSlot).not.toHaveBeenCalled();
+  });
+
+  it('releases the stores when the slot switch fails', async () => {
+    const release = vi.fn();
+
+    await expect(executeCoreRollbackActivation('b', {
+      stopDaemon: async () => true,
+      prepareStores: async () => ({ release }),
+      swapSlot: async () => { throw new Error('slot link refused'); },
+      error: () => {},
+    })).rejects.toThrow('slot link refused');
+
+    expect(release).toHaveBeenCalledTimes(1);
   });
 
   it('wires the registered Core rollback action through the shutdown gate', async () => {

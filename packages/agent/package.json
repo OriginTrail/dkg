@@ -18,6 +18,11 @@
       "import": "./dist/rfc64/public-catalog-activation-config-v1.js",
       "default": "./dist/rfc64/public-catalog-activation-config-v1.js"
     },
+    "./rfc64/inventory-v1/rollback": {
+      "types": "./dist/rfc64/inventory-v1/rollback.d.ts",
+      "import": "./dist/rfc64/inventory-v1/rollback.js",
+      "default": "./dist/rfc64/inventory-v1/rollback.js"
+    },
     "./write-preflight-attribution": {
       "types": "./dist/write-preflight-attribution.d.ts",
       "import": "./dist/write-preflight-attribution.js",
@@ -165,7 +170,9 @@
     "./dist/rfc64/catalog-operational-targets-v1.js": null,
     "./dist/rfc64/private-read-roster-v1.js": null,
     "./dist/rfc64/inventory-v1/finalized-private-repair-persistence.js": null,
-    "./dist/rfc64/inventory-v1/schema-migrations.js": null
+    "./dist/rfc64/inventory-v1/schema-migrations.js": null,
+    "./dist/rfc64/inventory-v1/pre-migration-copy.js": null,
+    "./dist/rfc64/inventory-v1/rollback.js": null
   },
   "scripts": {
     "build": "tsc && pnpm run test:types && pnpm run test:package-root",
