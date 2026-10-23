@@ -297,6 +297,7 @@ import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import {
   conflictsWithOwnedContextGraphBinding, resolveDiscoveredContextGraphBinding,
 } from './context-graph-chain-discovery-binding.js';
+import { projectDiscoveredContextGraphSubscription } from './context-graph-discovery-enrichment.js';
 import {
   relocatePrivateContextGraphMetadata,
   type ContextGraphMetadataRelocationResult,
@@ -1907,18 +1908,6 @@ export class DKGAgent extends DKGAgentBase {
     } = {},
   ): ContextGraphSub {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
-    const dormancy = this.contextGraphSubscriptionDormancyById.get(contextGraphId);
-    if (
-      (existing?.subscribed === true || existing?.coreHosted === true)
-      && dormancy === 'authorityUnavailable'
-    ) {
-      // Deferred activation installs a provisional row before awaiting its
-      // authority/durability boundary. Discovery must not re-save that row:
-      // even identical enrichment advances its revision and clears dormancy,
-      // so activation rolls back with no owner left to retry it. The activation
-      // owner commits first; a later discovery pass may enrich the live row.
-      return existing;
-    }
     const authoritativeOnChainId = isCanonicalAuthoritativeContextGraphId(metadata.onChainId)
       ? metadata.onChainId
       : undefined;
@@ -1935,16 +1924,10 @@ export class DKGAgent extends DKGAgentBase {
       );
       return existing;
     }
-    const next: ContextGraphSub = {
-      ...existing,
-      syncMode: existing?.syncMode ?? 'always-on',
-      name: metadata.name ?? existing?.name,
-      subscribed: existing?.subscribed === true,
-      synced: existing?.synced === true,
-      sharedMemorySynced: existing?.sharedMemorySynced === true,
-      metaSynced: existing?.metaSynced === true,
-      participantAgents: metadata.participantAgents ?? existing?.participantAgents,
-    };
+    const next = projectDiscoveredContextGraphSubscription(
+      existing, metadata, this.contextGraphSubscriptionDormancyById.get(contextGraphId),
+    );
+    if (next === existing) return existing;
 
     const invalidExplicitOnChainId = metadata.onChainId !== undefined
       && authoritativeOnChainId === undefined;
