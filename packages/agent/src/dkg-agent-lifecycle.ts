@@ -1786,6 +1786,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // separately.
       ...createNetworkAdmissionRouterPolicy(this.networkAdmissionCoordinator),
       admissionExemptProtocols: [PROTOCOL_NETWORK_IDENTITY],
+      publicDirectAddressesOnly: this.config.publicAddressesOnly === true,
     });
     this.messenger = new Messenger({
       router: this.router,

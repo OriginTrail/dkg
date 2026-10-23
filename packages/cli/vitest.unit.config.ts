@@ -53,6 +53,7 @@ export default defineConfig({
           'test/vm-publish-intent-backfill.test.ts',
           'test/agent-connect-routes.test.ts',
           'test/preferred-relays.test.ts',
+          'test/lan-addresses.test.ts',
           'test/reconcile-503-mapping.test.ts',
           'test/sealed-create-retry-route.test.ts',
           'test/config.test.ts',

@@ -207,6 +207,8 @@ export interface ProtocolRouterOptions {
    */
   isPeerKnownRejected?: (peerId: string, protocolId: string) => boolean;
   admissionExemptProtocols?: Iterable<string>;
+  /** Count only a peer's public addresses and DNS names as its direct route (see `relay-only-peer-memory.ts`). */
+  publicDirectAddressesOnly?: boolean;
 }
 
 /** Per-protocol overrides applied to an inbound registration. */
@@ -320,10 +322,11 @@ export class ProtocolRouter {
    * anyway.
    */
   private readonly peerWireVariant = new Map<string, Map<string, 'pooled' | 'one-shot'>>();
-  private readonly relayOnlyPeers = new RelayOnlyPeerMemory();
+  private readonly relayOnlyPeers: RelayOnlyPeerMemory;
 
   constructor(node: DKGNode, options?: ProtocolRouterOptions) {
     this.node = node;
+    this.relayOnlyPeers = new RelayOnlyPeerMemory({ publicDirectAddressesOnly: options?.publicDirectAddressesOnly });
     this.network = options?.network ?? new LibP2PNetwork(node);
     this.peerResolver = options?.peerResolver;
     this.isPeerAccepted = options?.isPeerAccepted;
@@ -1424,13 +1427,12 @@ interface ReusableConnection {
 /**
  * Options for {@link tryReuseExistingConnection}.
  *
- * `peerHasDirectAddrs` is async + lazy because the fast path only
- * needs it when considering a limited (circuit-relay) candidate;
- * resolving it eagerly would charge a peerStore hop to every
- * fast-path attempt including the common warm-direct-connection
- * happy path. The router reads the peer store through `RelayOnlyPeerRoute`;
- * a miss counts as no direct address so the Window D shape
- * (cold-cache, single inbound circuit) still benefits.
+ * `peerHasDirectAddrs` is async + lazy because the fast path only needs it
+ * when considering a limited (circuit-relay) candidate; resolving it eagerly
+ * would charge a peerStore hop to every fast-path attempt including the common
+ * warm-direct-connection happy path. The router reads the peer store through
+ * `RelayOnlyPeerRoute`; a miss counts as no direct address so the Window D
+ * shape (cold-cache, single inbound circuit) still benefits.
  */
 interface TryReuseExistingConnectionOptions {
   peerHasDirectAddrs: () => Promise<boolean>;
@@ -1517,11 +1519,10 @@ export async function tryReuseExistingConnection(
   // peerStore would tell CM to upgrade, unless a recent normal dial
   // showed those addresses end on a relay (relay-only-peer-memory.ts).
   //
-  // For non-limited candidates (direct connections), no upgrade
-  // race exists — use them directly without consulting peerStore.
-  // For limited candidates, defer the peerStore.get until needed
-  // and memoize so we pay at most one async hop per fast-path
-  // attempt regardless of how many limited candidates exist.
+  // For non-limited candidates (direct connections), no upgrade race exists:
+  // use them directly without consulting peerStore. For limited candidates,
+  // defer the peerStore.get until needed and memoize so we pay at most one
+  // async hop per fast-path attempt regardless of how many limited ones exist.
   let peerStoreHasDirectAddrsMemo: boolean | null = null;
   const peerStoreHasDirectAddrs = async (): Promise<boolean> => {
     if (peerStoreHasDirectAddrsMemo !== null) return peerStoreHasDirectAddrsMemo;

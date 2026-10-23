@@ -30,6 +30,15 @@ export interface DKGNodeConfig {
   listenAddresses?: string[];
   /** Multiaddr strings to announce to the network (for nodes behind NAT/VPS with a public IP not bound to the interface). */
   announceAddresses?: string[];
+  /**
+   * Announce only the addresses a peer on a public network can dial: public
+   * addresses and relay circuits. Loopback, private (RFC 1918), shared
+   * (100.64/10), link-local and unique-local interface addresses stay out of
+   * identify, the peer record and `multiaddrs`. Ignored when
+   * `announceAddresses` is set: an explicit list is announced as given.
+   * Default false.
+   */
+  announcePublicAddressesOnly?: boolean;
   /** DKG bootstrap peer multiaddrs (NOT public IPFS nodes). */
   bootstrapPeers?: string[];
   /** Enable mDNS for local peer discovery. Default: true. */
