@@ -50,3 +50,11 @@ Self-review: typed read provenance alone is not proof of publication position; p
 | Live run and cleanup | Pending | No #3419 claim or live resources created |
 
 Resource ownership: `.tmp/issue-3419/` is task scratch/evidence. Retain sanitized evidence and report; delete copied secrets at completion. No active #3419 resources yet.
+
+### Review round 1 and live evidence
+
+- Source head `0e1f68ed2316707e4b971d13aec02fefa3705047`: 2,402 publisher unit tests passed. Native live job `11a65348-ef19-48e7-bca8-eacafdf753e3` recorded an actual preflight connection refusal as `initial_preflight / store_read_transport`, projected bounded backoff without a hash, retried once as the same job and finalized on Base Sepolia. Receipt/readback verification continues. A malformed backend response terminated a separate job as sanitized `validation_unknown` without a send.
+- Remote reviewer `otReviewAgent`, review `5626627386`, found five actionable items: adapter read deadline provenance; duplicate classifier branches; snapshot error ownership; a full-suite keyword fixture; missing preparation caller coverage. All are addressed in revision 2. Storage deadline errors preserve their prior timeout type and fields, with read-only tagging only inside proven read boundaries. Mutation/receipt deadlines remain excluded.
+- Revision 2 focused checks: storage transport suite 24 passing; mapper/provenance 202 passing; full publisher worker integration suite 71 passing. Final full unit/build checks are running. No new reviewer window is started by documentation-only updates; substantive revision 2 gets one 30-minute window, maximum 10 rounds overall.
+- Batch 1 claimed by `issue-3419-20261023`; ownership in ignored evidence. Native home uses API 19319 and managed store 19719; task-only preflight transport shim redirects a single read to refused port 19419, without touching signer/chain calls. Publisher and daemon are stopped during revision. All resources remain owned until final transaction/nonces reconciliation.
+- One cohesive PR remains appropriate: producer typing, classification, codec and their callers must change together. The review additions are coupled regression coverage, not a separable feature.

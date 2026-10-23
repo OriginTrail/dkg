@@ -1,3 +1,4 @@
+import { InvalidWorkspaceSnapshotError } from './workspace-snapshot-error.js';
 import { isStoreReadTransportFailure } from '@origintrail-official/dkg-storage';
 import { LiftPayloadValidationError, LiftValidationStageError, type LiftValidationDiagnostic } from './lift-validation-error.js';
 import { isCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
@@ -141,6 +142,32 @@ function classifyKnowledgeAssetVmPublishPreconditionCode(error: unknown): LiftJo
   return null;
 }
 
+/** Recognize the cause once; dispatch policy below consumes only this closed result. */
+function classifyValidationFailure(error: unknown): {
+  code: LiftJobFailureCode;
+  cause: LiftValidationDiagnostic['cause'];
+  gate?: 'pre_dispatch' | 'validated_only';
+  requiresProof?: true;
+} {
+  // A structured refusal may also carry typed dispatch evidence. Keep its code precedence
+  // while retaining that evidence for origin selection (for example, a rejected write-ahead).
+  const dependency = isStoreReadTransportFailure(error)
+    ? { code: 'workspace_unavailable', cause: 'store_read_transport', gate: 'pre_dispatch' } as const
+    : isTransientRpcFailure(error)
+      ? { code: 'workspace_unavailable', cause: 'rpc_transport', gate: 'pre_dispatch' } as const
+      : isProvenStoreRejection(error)
+        ? { code: 'workspace_unavailable', cause: 'store_not_started', gate: 'pre_dispatch' } as const
+        : isCatalogFloorAuthorityUnavailable(error)
+          ? { code: 'authority_unavailable', cause: 'precondition', gate: 'validated_only' } as const : undefined;
+  const structured = classifyKnowledgeAssetVmPublishPreconditionCode(error);
+  if (structured) return { code: structured, cause: 'precondition', gate: dependency?.gate };
+  if (dependency) return { ...dependency, requiresProof: true };
+  if (error instanceof LiftPayloadValidationError || error instanceof InvalidWorkspaceSnapshotError) {
+    return { code: 'canonicalization_failed', cause: 'content' };
+  }
+  return { code: 'validation_unknown', cause: 'unknown' };
+}
+
 export function isKnowledgeAssetPublishPreconditionFailure(error: unknown): boolean {
   if (error instanceof LiftValidationStageError) error = error.cause;
   if (classifyKnowledgeAssetVmPublishPreconditionCode(error) !== null) return true;
@@ -198,36 +225,20 @@ export function mapExecutionFailure(input: ExecutionFailureInput): LiftJobFailur
   const { jobId, currentStatus, requestedOrigin, evidence, now } = input;
   const staged = input.error instanceof LiftValidationStageError ? input.error : undefined;
   const error = staged ? staged.cause : input.error;
-  const readTransport = isStoreReadTransportFailure(error);
-  const transientRpc = isTransientRpcFailure(error);
-  const catalogAuthorityUnavailable = isCatalogFloorAuthorityUnavailable(error);
-  const provenPreDispatch = evidence?.neverDispatched === true
-    && currentStatus === 'validated'
-    && (isProvenStoreRejection(error) || transientRpc || readTransport || catalogAuthorityUnavailable || staged !== undefined);
-  // A failure raised while the job is still 'claimed' (the initial preflight) precedes validation,
-  // and so precedes everything that could dispatch anything: the typed cause alone is enough. The
-  // old keyword chain recorded keyword-less transport failures as terminal canonicalization.
-  // Native preflight reads lifecycle metadata through typed read-only store boundaries.
-  // A raw fetch message or an arbitrary wrapper never qualifies as transport evidence.
-  const claimedDependencyFailure = requestedOrigin === 'claimed'
-    && currentStatus === 'claimed'
-    && (transientRpc || readTransport || isProvenStoreRejection(error));
-  const origin: LiftJobState = provenPreDispatch ? 'validated' : requestedOrigin;
+  const classified = classifyValidationFailure(error);
+  const validatedBeforeDispatch = evidence?.neverDispatched === true && currentStatus === 'validated';
+  const claimedBeforeDispatch = requestedOrigin === 'claimed' && currentStatus === 'claimed';
+  const dependencyRetrySafe = validatedBeforeDispatch
+    || (claimedBeforeDispatch && classified.gate === 'pre_dispatch');
+  const origin: LiftJobState = validatedBeforeDispatch && (classified.gate || staged)
+    ? 'validated' : requestedOrigin;
   const message = error instanceof Error ? error.message : 'Unknown publication execution failure';
   const lower = message.toLowerCase();
   const errorPayloadRef = `urn:dkg:publisher:error:${jobId}`;
 
   if (origin === 'claimed' || origin === 'validated') {
-    const structured = classifyKnowledgeAssetVmPublishPreconditionCode(error);
-    const code: LiftJobFailureCode = structured
-      ?? (provenPreDispatch && catalogAuthorityUnavailable ? 'authority_unavailable'
-        : (provenPreDispatch && (isProvenStoreRejection(error) || transientRpc || readTransport)) || claimedDependencyFailure
-          ? 'workspace_unavailable'
-          : error instanceof LiftPayloadValidationError ? 'canonicalization_failed' : 'validation_unknown');
-    const cause: LiftValidationDiagnostic['cause'] = structured || catalogAuthorityUnavailable ? 'precondition'
-      : readTransport ? 'store_read_transport' : transientRpc ? 'rpc_transport'
-      : isProvenStoreRejection(error) ? 'store_not_started'
-      : error instanceof LiftPayloadValidationError ? 'content' : 'unknown';
+    const code = classified.requiresProof && !dependencyRetrySafe ? 'validation_unknown' : classified.code;
+    const { cause } = classified;
     // Never serialize the cause: store responses and content guards can embed private payloads.
     const diagnosticMessage = code === 'validation_unknown' ? 'Publication validation failed for an unknown reason'
       : cause === 'store_read_transport' ? 'Publication validation dependency read was interrupted'

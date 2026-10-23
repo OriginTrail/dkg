@@ -1,5 +1,7 @@
+import * as subtraction from '../src/async-lift-subtraction.js';
+import { seedLegacyRawLiftTestJob } from './_helpers/legacy-raw-lift.js';
 import { createServer } from 'node:http';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { SparqlHttpStore, StoreReadTransportFailure } from '@origintrail-official/dkg-storage';
 import { mapExecutionFailure } from '../src/async-lift-execution-failure.js';
 import { atLiftValidationStage, LiftValidationStageError } from '../src/lift-validation-error.js';
@@ -7,8 +9,8 @@ import { assertCanonicalLiftJobPayload } from '../src/lift-job-payload-codec.js'
 import { deriveLiftJobRetryProjection, isHeldForChainProof } from '../src/async-lift-retry-disposition.js';
 import { parseWorkspacePublicSnapshotNQuads } from '../src/workspace-snapshot-store.js';
 import { kaVmPublishRequest, KA_VM_VALIDATION } from '../../../scripts/testing/ka-vm-publish.js';
-import { createAsyncLift2270Harness, expectFailed, TX_HASH } from './_helpers/async-lift-2270-harness.js';
-import { RETRY_LANE, createStoreRejectionFixtures } from './_helpers/store-rejection-2940.js';
+import { createAsyncLift2270Harness, confirmedPublishResult, expectFailed, TX_HASH } from './_helpers/async-lift-2270-harness.js';
+import { RETRY_LANE, createStoreRejectionFixtures, rawLiftRequest } from './_helpers/store-rejection-2940.js';
 
 const transport = () => new StoreReadTransportFailure(new TypeError('fetch failed'));
 const stageError = (error: unknown) => new LiftValidationStageError('initial_preflight', error);
@@ -50,13 +52,13 @@ describe('GH#3419 pre-validation provenance', () => {
     expect(JSON.stringify(failure)).not.toContain('private');
   });
 
-  it('persists actual read HTTP provenance, projects backoff and retries only the same admitted job', async () => {
+  it.each(['http-503', 'deadline'])('persists actual read %s provenance, projects backoff and retries only the same admitted job', async kind => {
     const secret = 'private-response-body credential=secret urn:private-rdf';
-    const server = createServer((_req, res) => { res.writeHead(503); res.end(secret); });
+    const server = createServer((_req, res) => { if (kind === 'http-503') { res.writeHead(503); res.end(secret); } });
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('missing server address');
-    const readStore = new SparqlHttpStore({ queryEndpoint: `http://127.0.0.1:${address.port}/private`, consistencyProfile: 'atomic-readback' });
+    const readStore = new SparqlHttpStore({ queryEndpoint: `http://127.0.0.1:${address.port}/private`, consistencyProfile: 'atomic-readback', timeout: 25 });
     const h = createAsyncLift2270Harness();
     const { stage } = createStoreRejectionFixtures(h);
     let preflights = 0, executions = 0;
@@ -80,7 +82,47 @@ describe('GH#3419 pre-validation provenance', () => {
       h.advance(10_000);
       expect(await publisher.processNext('wallet-1')).toMatchObject({ jobId });
       expect(executions).toBe(1);
-    } finally { await readStore.close(); await new Promise<void>((resolve, reject) => server.close(e => e ? reject(e) : resolve())); }
+    } finally { await readStore.close(); server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(e => e ? reject(e) : resolve())); }
+  });
+
+  it('records a KA preparation rejection from validated without running the executor', async () => {
+    const h = createAsyncLift2270Harness();
+    const { stage } = createStoreRejectionFixtures(h);
+    let executions = 0;
+    const publisher = h.createPublisher({ ...RETRY_LANE,
+      resolvedSliceOverrides: { accessPolicy: 'ownerOnly', publisherPeerId: '' },
+      knowledgeAssetVmPublishHandler: { execute: async () => { executions++; return confirmedPublishResult(); } },
+    });
+    await stage();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const failed = expectFailed(await publisher.processNext('wallet-1'));
+    expect(failed.failure).toMatchObject({ failedFromState: 'validated', code: 'canonicalization_failed',
+      validationDiagnostic: { stage: 'payload_preparation', cause: 'content' } });
+    expect((await publisher.getStatus(jobId))?.failure).toEqual(failed.failure);
+    expect(executions).toBe(0);
+    expect(failed.timestamps.nextRetryAt).toBeUndefined();
+  });
+
+  it('retries a typed read failure at raw subtraction with proof supplied by the worker', async () => {
+    const h = createAsyncLift2270Harness();
+    const { stage } = createStoreRejectionFixtures(h);
+    let executions = 0;
+    const publisher = h.createPublisher({ ...RETRY_LANE, publishExecutor: async () => { executions++; return confirmedPublishResult(); } });
+    await stage();
+    const jobId = await seedLegacyRawLiftTestJob(h.store, rawLiftRequest());
+    const subtract = vi.spyOn(subtraction, 'subtractFinalizedExactQuads').mockRejectedValueOnce(transport());
+    try {
+      const failed = expectFailed(await publisher.processNext('wallet-1'));
+      expect(subtract).toHaveBeenCalledTimes(1);
+      expect(failed.failure).toMatchObject({ failedFromState: 'validated', code: 'workspace_unavailable',
+        validationDiagnostic: { stage: 'workspace_read', cause: 'store_read_transport' } });
+      expect(failed.timestamps.nextRetryAt).toBeDefined();
+      expect(failed.broadcast).toBeUndefined();
+      expect(executions).toBe(0);
+      h.advance(10_000);
+      expect(await publisher.processNext('wallet-1')).toMatchObject({ jobId, status: 'finalized' });
+      expect(executions).toBe(1);
+    } finally { subtract.mockRestore(); }
   });
 
   it.each(['broadcast', 'included'] as const)('keeps %s chain evidence held after a typed read interruption', async status => {

@@ -1,4 +1,4 @@
-import { LiftPayloadValidationError } from './lift-validation-error.js';
+import { InvalidWorkspaceSnapshotError } from './workspace-snapshot-error.js';
 import { FinalizedSnapshotCollector, SNAPSHOT_RETIREMENT_PATTERN } from './finalized-snapshot-collector.js';
 import {
   mkdir,
@@ -1193,5 +1193,5 @@ function normalizeParsedObjectTerm(term: string): string {
 }
 
 function invalidSnapshotBlob(ref: string, index: number): Error {
-  return new LiftPayloadValidationError(`Invalid shared-memory public snapshot blob ${ref} at line ${index + 1}`);
+  return new InvalidWorkspaceSnapshotError(`Invalid shared-memory public snapshot blob ${ref} at line ${index + 1}`);
 }
