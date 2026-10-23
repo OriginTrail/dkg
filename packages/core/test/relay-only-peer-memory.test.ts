@@ -164,6 +164,13 @@ describe('RelayOnlyPeerRoute with publicDirectAddressesOnly', () => {
       .resolves.toBe(true);
   });
 
+  it('takes any DNS name for a direct route, as DCUtR may dial it', async () => {
+    const memory = new RelayOnlyPeerMemory({ publicDirectAddressesOnly: true });
+    for (const name of ['/dns4/node.local/tcp/4001', '/dns6/relay.example.org/tcp/4001', '/dnsaddr/node.example.org', '/dns/localhost/tcp/4001']) {
+      await expect(memory.routeFor(PEER_A, peer(CIRCUIT, ...UNREACHABLE, name)).peerHasDirectAddrs(), name).resolves.toBe(true);
+    }
+  });
+
   it('keys the record on the public addresses only', async () => {
     const memory = new RelayOnlyPeerMemory({ publicDirectAddressesOnly: true, now: () => T0 });
     const first = memory.routeFor(PEER_A, peer(CIRCUIT, PUBLIC, LAN));

@@ -207,7 +207,7 @@ export interface ProtocolRouterOptions {
    */
   isPeerKnownRejected?: (peerId: string, protocolId: string) => boolean;
   admissionExemptProtocols?: Iterable<string>;
-  /** Count only a peer's public addresses as its direct route (see `relay-only-peer-memory.ts`). */
+  /** Count only a peer's public addresses and DNS names as its direct route (see `relay-only-peer-memory.ts`). */
   publicDirectAddressesOnly?: boolean;
 }
 

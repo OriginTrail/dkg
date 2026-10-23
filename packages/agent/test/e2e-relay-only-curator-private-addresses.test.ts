@@ -23,8 +23,8 @@
  *  2. after the curator approves the member's join request, the member holds
  *     the curator's metadata naming it (the listing says it is involved), and
  *     its write into the graph goes through;
- *  3. a sync from the curator completes with pages, and returns the curator's
- *     shared memory;
+ *  3. a sync from the curator completes over the circuit, and the curator's
+ *     shared memory reaches the member;
  *  and, for all of it, the member opened no stream by dialing the curator.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -208,7 +208,7 @@ describe('E2E: a relay-only curator that announces unreachable private addresses
     completed.add(APPROVED);
   }, 240_000);
 
-  it('3. a sync from the curator completes with pages and returns the curator\'s shared memory', async () => {
+  it('3. a sync from the curator completes over the circuit, and the curator\'s shared memory reaches the member', async () => {
     buildsOn(APPROVED);
     const shared = await writeAndShare(curator, contextGraphId, 'curator-share');
     expect(shared.promoted.sealed).toBe(true);
@@ -219,7 +219,8 @@ describe('E2E: a relay-only curator that announces unreachable private addresses
       BOUND_MS,
       1_000,
     );
-    expect(result, 'the sync from the curator completed').toMatchObject({ deniedPhases: 0 });
+    expect(result?.completedPhases ?? 0, 'phases the sync from the curator completed').toBeGreaterThan(0);
+    expect(result?.deniedPhases, 'phases the curator denied').toBe(0);
     const names = await pollUntil(() => sharedNames(member, contextGraphId, shared.subject), (found) => found.length > 0, BOUND_MS, 500);
     expect(names).toEqual(['"curator-share"']);
 
