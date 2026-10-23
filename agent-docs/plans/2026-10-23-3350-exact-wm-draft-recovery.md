@@ -90,3 +90,9 @@ Live campaign complete: see `run-reports/2026-10-23-issue-3350-wm-draft-recovery
 All jobs terminal; all signer pending/latest nonces equal after shutdown; owned processes/listeners stopped; batch-2 released with its original token. Private home/store/evidence retained for review; source wallet bundles unchanged. No live node or automation remains running.
 
 Next action: submit round 2, verify executable source blobs against the captured live manifest, reply to/resolve the three findings, and finish current-head remote review/CI. Rounds used: 2 (round 2 currently in progress). Preserve the active 30-minute observation deadline in `.tmp/issue-3350/evidence/review-ledger.json`; metadata-only changes do not extend it. No merge authorized.
+
+### Round 3 — CI documentation budget
+
+The remote reviewer completed review of executable-code head `f8ead9b3b6b2486d9603edeffc2637e18afd8910` with “found no issues”; no unresolved review threads remain. The full CI run completed with all unrelated jobs passing, but CLI shard 4 failed the existing node-skill size guard (1004 split lines versus a limit below 1000). Coverage merge and CI gate then failed because that shard failed. Keep a concise, complete recovery entry in the skill and move the detailed API/error/CLI/snapshot contract into `docs/use-dkg/wm-draft-recovery.md`. The skill is back to 998 lines; 21 endpoint tests and three route-parity tests pass. This revision changes documentation only, so the nine executed source blobs remain identical and the stopped/released testnet environment need not be restarted.
+
+Round 3 is in progress for this substantive documentation/CI fix. Submit it, recheck source blob equality, request current-head review, and observe required CI to completion within its bounded window. Code-owner approval remains required by branch rules; no merge is authorized.

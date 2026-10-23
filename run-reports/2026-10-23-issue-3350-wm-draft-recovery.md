@@ -69,6 +69,7 @@ The code also has real-Oxigraph tests for private-only, subgraph and VM recovery
 - CLI smoke: 15 tests passed; the strengthened recovery flags were retested after parser consolidation.
 - Publisher, agent and CLI builds/type/package-boundary checks passed; discriminated result type is checked by compile-time positive/negative fixtures.
 - Gated real-store concurrency test passes normally and **fails when exact recovery deliberately bypasses its lifecycle lock**; source restored afterward.
+- Documentation checks: 21 skill-endpoint tests and three route-parity tests passed after keeping the node skill concise and moving the full recovery contract to `docs/use-dkg/wm-draft-recovery.md`.
 - Repository lint, source-size guard and `git diff --check` passed. The first post-split CI run caught five unused test imports; these were removed and tracked-file lint rerun successfully.
 
 ## Cleanup and retained evidence
