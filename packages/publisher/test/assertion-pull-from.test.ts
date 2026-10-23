@@ -205,6 +205,8 @@ describe('rootless assertionPullFrom', () => {
         .resolves.toMatchObject({ kaUal: finalized.kaUal, assertionVersion: finalized.assertionVersion, seededPrivate: 1 });
       expect(new Set((await restarted.assertionQuery(CG, NAME, AGENT)).map(key)))
         .toEqual(new Set(finalized.publicQuads.map(key)));
+      expect(new Set((await restarted.assertionQuery(CG, NAME, `0x${AGENT.slice(2).toUpperCase()}`)).map(key)))
+        .toEqual(new Set(finalized.publicQuads.map(key)));
       expect(new Set((await restarted.assertionQueryPrivate(CG, NAME, AGENT)).map(key)))
         .toEqual(new Set(finalized.privateQuads.map(key)));
     },
