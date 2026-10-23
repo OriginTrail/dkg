@@ -174,6 +174,7 @@
       "protobufjs"
     ],
     "overrides": {
+      "dompurify@<3.4.17": "3.4.17",
       "axios@<1.15.2": "1.15.2",
       "minimatch@<10.2.3": "10.2.3",
       "serialize-javascript@>=5.0.0 <7.0.5": "7.0.5",
