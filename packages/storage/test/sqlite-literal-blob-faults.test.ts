@@ -18,7 +18,7 @@ vi.mock('node:worker_threads', async original => {
       const isBlob = String(url).endsWith('/sqlite-literal-blob-worker.js');
       const fault = isBlob ? control.mode : ''; if (isBlob) control.mode = '';
       super(fault ? new URL('./fixtures/sqlite-blob-worker-fault.mjs', import.meta.url) : url, fault ? {
-        ...options, workerData: { ...options?.workerData, actualWorker: String(url), fault, signal: control.signal },
+        ...options, workerData: { ...options?.workerData, fault, signal: control.signal },
       } : options);
       control.instances.push(this);
       queueMicrotask(() => { const handler = this.listeners('error')[0]; if (handler) control.handlers.push(handler as (error: Error) => void); });
@@ -57,8 +57,12 @@ it.each(['before-commit', 'after-commit'])('recovers a native worker %s failure 
   await o.write(hash(value), value);
   // A stale owner's error cannot invalidate its replacement.
   expect(control.handlers.length).toBeGreaterThan(1);
+  const workers = control.instances.length;
   control.handlers[0]!(new Error('late old-owner failure'));
-  await expect(o.read(hash(value))).resolves.toBe(value);
+  const distinct = value+'after-stale-callback';
+  await o.write(hash(distinct), distinct);
+  expect(control.instances).toHaveLength(workers);
+  await expect(o.read(hash(distinct))).resolves.toBe(distinct);
 });
 it('retains a real native FULL failure and succeeds with a fresh owner after the limit is removed', async () => {
   const f = await fixture(), o = owner(f.directory); control.mode = 'full';
@@ -215,4 +219,39 @@ it.each(['fresh-owner', 'lost-ACK'])('re-submits full matching bytes after %s an
   expect(control.writes).toHaveLength(2);
   expect(control.writes[1]).toMatchObject({ hash: hash(value), bytes: Buffer.byteLength(value), payloadHash: hash(value) });
   await expect(s.query(select('urn:adopt'))).resolves.toMatchObject({ bindings: [{ value }] });
+});
+
+it.each(['full', 'before-commit'])('rejects every collected group member on native %s, drains close and permits ordinary retry', async fault => {
+  const f = await fixture(), s = await composed(f.root); await s.insert([quad('urn:seed')]);
+  control.mode = 'collect-'+fault;
+  const values = Array.from({ length: 8 }, (_, i) => JSON.stringify('immutable exact bytes '.repeat(4096)+'failed-group-'+i));
+  const subjects = values.map((_, i) => 'urn:failed-group:'+i);
+  const settled = Promise.allSettled(values.map((term, i) => s.insert([quad(subjects[i]!, term)])));
+  let timeout: NodeJS.Timeout | undefined;
+  let outcomes: Awaited<typeof settled>;
+  try {
+    outcomes = await Promise.race([settled, new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => reject(new Error('Every failed group member must settle')), 3_000);
+    })]);
+  } catch (error) {
+    // A broken failure fan-out must fail without leaving its accepted work stranded.
+    await Promise.all(control.instances.map(worker => worker.terminate()));
+    await settled; throw error;
+  } finally { clearTimeout(timeout); }
+  expect(outcomes.every(result => result.status === 'rejected')).toBe(true);
+  for (const result of outcomes) {
+    if (result.status !== 'rejected') throw new Error('Expected failed group member');
+    expect(String(result.reason)).toContain(fault === 'full' ? 'database or disk is full' : 'worker exited');
+  }
+  for (const subject of subjects) await expect(s.query(select(subject))).resolves.toMatchObject({ bindings: [] });
+  expect((await asChangelogReader(s)!.readChanges(0, 20)).map(change => change.seq)).toEqual([1]);
+  // In particular, failed accepted work must not strand physical or logical drainage.
+  await s.close();
+  const retry = await composed(f.root);
+  await Promise.all(values.map((term, i) => retry.insert([quad(subjects[i]!, term)])));
+  for (const [i, subject] of subjects.entries()) {
+    await expect(retry.query(select(subject))).resolves.toMatchObject({ bindings: [{ value: values[i] }] });
+  }
+  expect((await asChangelogReader(retry)!.readChanges(0, 20)).map(change => change.seq)).toEqual([1,2,3,4,5,6,7,8,9]);
+  await retry.close();
 });

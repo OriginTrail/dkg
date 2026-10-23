@@ -10,8 +10,8 @@ Runtime: native macOS arm64, Node22.23.3, SQLite3.51.3, libuv1.51.0, pnpm10.28.1
 
 ## Validation
 
-- Current full storage:1,694passed/110files,45existing environment-gated skips.
-- Current native/integrated cases:41(part of the full cohort), including last-ACK whole-process SIGKILL before any RDF write and exact fresh-process readback; native FULL; pre/post-COMMIT worker death; same-write retry with no premature RDF/changelog; exact batch coverage and late arrivals; independent read progress; close/cancellation drainage; bounded allocation; legacy compatibility and tested rollback export.
+- Current full storage:1,696passed/110files,45existing environment-gated skips.
+- Current native/integrated cases:43(part of the full cohort), including last-ACK whole-process SIGKILL before any RDF write and exact fresh-process readback; native FULL; pre/post-COMMIT worker death; same-write retry with no premature RDF/changelog; exact batch coverage and late arrivals; independent read progress; close/cancellation drainage; bounded allocation; legacy compatibility and tested rollback export.
 - Counterfactuals fail as intended: acknowledging before COMMIT creates a dangling RDF ref; unconditionally materializing a16MiB value violates the allocation assertion. Correct source restored and rebuilt.
 - Runtime dependency closure, source/type/package/prepared-CLI builds pass. Lint, source-size and disabled-test ratchets pass without increased budgets. Later metadata-only documentation changes do not alter these results.
 
@@ -134,3 +134,70 @@ The final full-storage rerun passes1,687 cases. Exact UTF-8/BOM preservation is 
 ## Round3 contract evidence
 
 The final local cohort passes1,694storage tests/110files with45existing gated skips;41native/integrated cases are included. Actual writer connections expose the required four effective settings on first open and failure-driven reopen. Each injected native downgrade rejects before blob ACK/RDF publication, then ordinary retry reinstates the full policy. Fresh-owner and lost-ACK matching-row adoption fail on a real native SQLite readonly error at full-byte INSERT, despite readable existing bytes; retry re-submits exact hash/byte length/payload hash. Unsupported runtime rejection allocates zero RDF workers. Counterfactuals removing factory preflight, accepting downgraded policy or skipping matching-row writes fail their distinguishing cases; correct source is restored and rebuilt. One session registry and canonical worker-error transport replace duplicated generic state/protocol. The actual057 CI packaging failure is corrected with shared Node engines metadata; patched SQLite is still checked separately for the optional mode. Runtime/types/package/preparedCLI, release-pack verification and hygiene pass. No later performance result or physical power-loss proof is implied.
+
+## Published6f74e6973 production comparison
+
+After round3, the actual published production code was remeasured without owned local builds/tests competing. The subsequent round4 changes concern only tests, their fixture load and this report; production format, timing, capacity and native barriers are unchanged. Exact archived f9b5f2524/0af controls use the same installed dependency closure. This supplements all earlier rounds rather than replacing a less favorable result. Other host load remains uncontrolled.
+
+Three alternating expanded worker groups:72cases/86,400writes, incompressible80KiB values, one/eight writers and two readers hydrating80KiB values. Median writes/s and candidate/base:
+
+| Case | Base | Durable files | Candidate | Candidate/base |
+|---|---:|---:|---:|---:|
+| small-1 | 4,274.80 | 4,129.55 | 4,633.15 | 108.38% |
+| small-8 | 6,338.60 | 5,999.81 | 6,197.93 | 97.78% |
+| replay-1 | 797.82 | 2,020.56 | 1,945.34 | 243.83% |
+| replay-8 | 1,009.07 | 3,494.42 | 3,712.43 | 367.90% |
+| fresh-1 | 603.72 | 165.51 | 227.04 | 37.61% |
+| fresh-8 | 548.40 | 290.72 | 871.53 | 158.92% |
+| mixed-1 | 1,805.30 | 611.26 | 825.83 | 45.75% |
+| mixed-8 | 1,726.73 | 1,199.90 | 2,743.67 | 158.89% |
+
+Concurrent fresh/mixed throughput clears the proposed80% budget in this sample. This does not establish overall acceptance: lone fresh/mixed writes retain37.61%/45.75% ofbase. Small-only eight-writer p95 is2.354/4.191/3.598ms(base/files/candidate), candidate1.53xbase, beyond a1.25x latency budget. Saturated replay readp99 is2.606/29.971/36.972ms. Earlier round2 small-only throughput79.86% remains relevant evidence of control variance.
+
+Raw expanded throughput rounds (writes/s):
+
+| Case | Base rounds | File rounds | Candidate rounds |
+|---|---|---|---|
+| small-1 | 3956.37, 4274.80, 7497.46 | 3540.22, 4256.33, 4129.55 | 4633.15, 4248.16, 8301.31 |
+| small-8 | 6338.60, 6031.88, 9754.03 | 4995.62, 5999.81, 8656.05 | 6197.93, 7189.76, 5403.42 |
+| replay-1 | 757.91, 797.82, 1281.21 | 1922.38, 2058.14, 2020.56 | 1945.34, 1921.85, 2829.71 |
+| replay-8 | 895.50, 1009.07, 1433.87 | 3438.40, 3494.42, 4689.51 | 3079.82, 3712.43, 4020.20 |
+| fresh-1 | 603.72, 493.29, 841.42 | 162.28, 171.69, 165.51 | 227.04, 225.37, 277.73 |
+| fresh-8 | 548.40, 533.41, 871.82 | 290.72, 280.92, 292.56 | 871.53, 807.77, 997.63 |
+| mixed-1 | 1805.30, 1644.75, 2723.69 | 599.57, 611.26, 753.35 | 825.83, 806.60, 923.59 |
+| mixed-8 | 1612.37, 1726.73, 2697.24 | 1199.90, 1133.90, 1215.20 | 2583.90, 2743.67, 3504.54 |
+
+Equal-rate controls (80ms/writer,8writers,240writes/case,36cases/8,640writes) retain approximately79.8–94.9writes/s. Readerp99 and small-writep95 below are medians, milliseconds.
+
+| Case | Readp99 base/files/candidate | Smallp95 base/files/candidate |
+|---|---|---|
+| small-8 | 4.720 / 4.661 / 3.199 | 5.857 / 5.621 / 6.623 |
+| replay-8 | 4.878 / 5.406 / 3.113 | n/a / n/a / n/a |
+| fresh-8 | 4.996 / 5.629 / 3.258 | n/a / n/a / n/a |
+| mixed-8 | 4.472 / 5.129 / 2.681 | 14.589 / 4.680 / 7.111 |
+
+Current native Blazegraph: same exact pinned image, verified loaded DiskRW/ForceMetadata journal policy, fresh Identical namespaces,8writers/two small SELECT readers,240writes/case,3alternating groups,36cases/8,640writes. This is a local backend workload, not live chain publication.
+
+| Case | Base writes/s | Files writes/s | Candidate writes/s | Smallp95 base/files/candidate ms |
+|---|---:|---:|---:|---|
+| small | 91.57 | 78.38 | 80.71 | 114.369 / 150.023 / 136.339 |
+| replay | 74.73 | 87.18 | 84.55 | n/a / n/a / n/a |
+| fresh | 67.28 | 86.95 | 86.23 | n/a / n/a / n/a |
+| mixed | 76.60 | 87.37 | 87.55 | 132.756 / 114.128 / 115.423 |
+
+The proposed throughput/small-p95 budgets are met in this native Blazegraph sample, including the small-only control. Counts/read values are checked; the exact labeled container and anonymous volumes were removed and its ownership manifest records cleanup. No wallets or live signing were used. Native Blazegraph evidence does not erase the worker single-writer/saturated-tail costs or grant default/adoption/human acceptance. Raw rounds, host-load records and ownership are retained under task-owned r3-* evidence.
+
+Raw native Blazegraph throughput rounds (writes/s):
+
+| Case | Base rounds | File rounds | Candidate rounds |
+|---|---|---|---|
+| small | 44.89, 91.57, 93.52 | 64.81, 78.38, 89.84 | 69.85, 82.18, 80.71 |
+| replay | 46.71, 74.73, 79.04 | 64.75, 87.75, 87.18 | 81.52, 84.55, 89.00 |
+| fresh | 52.46, 69.88, 67.28 | 64.67, 86.95, 88.63 | 86.23, 85.07, 96.29 |
+| mixed | 61.57, 86.82, 76.60 | 62.87, 94.67, 87.37 | 86.80, 87.55, 102.75 |
+
+## Round4 review and CI regressions
+
+The writer-replacement regression now issues a distinct write after the old writer callback and asserts that no additional worker is allocated; removing identity-checked deletion fails it. Two deterministic composed-store groups collect eight distinct values and fail at actual SQLite FULL or pre-COMMIT worker death. Every member rejects, no RDF/changelog references appear, close drains, and ordinary retries produce exact values and the expected contiguous sequences. Rejecting only one member fails the explicit settlement guard; exact owned workers are terminated on that failing counterfactual. The fixture loads the fixed relative production build, allowing the CI dependency tracer to follow it without an exception list.
+
+Final full storage1,696/110files(45existing gated skips),43native/integrated cases and780repository script assertions pass. An initial concurrently contended full run exceeded the default5s total in a new three-reopen case; the redundant final reopen was removed, preserving the failure/close/retry/content/sequence checks. Final full rerun passes with unchanged timeouts and no added skips/budgets. Production source remains identical to6f74e6973; that revision's runtime/types/package/preparedCLI and release-pack verification remain applicable. Current-head remote review/fullCI and human/default acceptance remain separate gates.

@@ -8,7 +8,7 @@ const ids = new Set(); let seenWrite = false, commits = 0, capped = false;
 let handler, collected = false; const delivery = [];
 nativeOn('message', request => {
   if (request.operation === 'write') { seenWrite = true; ids.add(request.id); }
-  if (workerData.fault === 'collect') {
+  if (workerData.fault.startsWith('collect')) {
     delivery.push(request);
     if (delivery.length === 8 || collected) {
       collected = true;
@@ -16,18 +16,18 @@ nativeOn('message', request => {
     }
   }
 });
-if (workerData.fault === 'collect') parentPort.on = function(event, callback) {
+if (workerData.fault.startsWith('collect')) parentPort.on = function(event, callback) {
   if (event === 'message') { handler = callback; return this; }
   return nativeOn(event, callback);
 };
 const exec = DatabaseSync.prototype.exec;
 let downgraded = false, resubmitBlocked = false;
 DatabaseSync.prototype.exec = function(sql) {
-  if (seenWrite && sql === 'BEGIN IMMEDIATE' && workerData.fault === 'full' && !capped) {
+  if (seenWrite && sql === 'BEGIN IMMEDIATE' && workerData.fault.endsWith('full') && !capped) {
     capped = true; exec.call(this, 'PRAGMA max_page_count=8');
   }
   if (seenWrite && sql === 'COMMIT') {
-    if (workerData.fault === 'before-commit') process.exit(71);
+    if (workerData.fault.endsWith('before-commit')) process.exit(71);
     if (workerData.fault === 'hold') {
       commits += 1; Atomics.store(signal, 0, commits); Atomics.notify(signal, 0);
       while (Atomics.load(signal, 1) < commits) Atomics.wait(signal, 1, Atomics.load(signal, 1));
@@ -75,4 +75,4 @@ DatabaseSync.prototype.prepare = function(sql) {
     }
     return statement;
 };
-await import(workerData.actualWorker);
+await import('../../dist/sqlite-literal-blob-worker.js');
