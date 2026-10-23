@@ -1,4 +1,4 @@
-import { prepareImmutableMutation, runImmutableMutation, runRfc64AuthorCommitCasMutation, assertImmutableMutationCapability, type ImmutableStorePreparation, type ImmutableStoreMutation, type PreparedMutation } from './immutable-store-preparation.js';
+import { prepareImmutableMutation, closeImmutableStoreMutations, runImmutableMutation, runRfc64AuthorCommitCasMutation, assertImmutableMutationCapability, type ImmutableStorePreparation, type ImmutableStoreMutation, type PreparedMutation } from './immutable-store-preparation.js';
 import { DurableDirectoryPreparation } from './durable-content-addressed-file.js';
 import { persistFileDirectoryEntries } from './file-durability.js';
 import type { TripleStoreCommitCapability } from './persistence.js';
@@ -265,7 +265,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
   }
 
   close(): Promise<void> {
-    return this.blobWork.close(() => this.inner.close());
+    return closeImmutableStoreMutations(this.blobWork, this.inner);
   }
 
   private async externalizeQuads(quads: readonly Quad[]): Promise<Quad[]> {

@@ -24,10 +24,16 @@ export class StoreWorkDrain {
 
   async drain(): Promise<void> { await Promise.allSettled(this.generation.accepted); }
 
-  close(finalize: () => Promise<void>): Promise<void> {
+  close(finalize: () => Promise<void>, beforeDrain?: () => Promise<void>): Promise<void> {
     const generation = this.generation;
     if (!generation.closing) {
-      generation.closing = Promise.allSettled(generation.accepted).then(finalize).then(() => {
+      const draining = Promise.allSettled(generation.accepted);
+      // The gate is installed before this optional cancellation phase can run.
+      const beginning = beforeDrain ? Promise.resolve().then(beforeDrain) : Promise.resolve();
+      generation.closing = Promise.allSettled([draining, beginning]).then(async () => {
+        // Cleanup follows all accepted work even when early shutdown failed.
+        await finalize();
+        await beginning;
         // Old cleanup never changes a subsequent lifetime; failed close stays fenced.
         if (this.generation === generation) this.generation = newGeneration();
       });
