@@ -28,6 +28,8 @@ export async function assertProgramInvocationAuthorized(input: {
   operatorAddress: string;
   policyIri: string;
   policyHashHex: string;
+  /** Completed invocations may disclose a verified receipt, never dispatch more work. */
+  allowCompletedReceipt?: boolean;
 }): Promise<void> {
   const { agent, runtime, executionId, config, contextGraphId, program, originalCaller, operatorAddress } = input;
   const assertActiveCapability = () => {
@@ -35,7 +37,7 @@ export async function assertProgramInvocationAuthorized(input: {
     const capabilityId = executionId.replace('urn:sr:execution:', 'urn:sr:capability:');
     const capability = runtime.store.capability(capabilityId);
     const now = Date.now();
-    if (!execution || execution.status !== 'active' || !capability
+    if (!execution || !(execution.status === 'active' || input.allowCompletedReceipt && execution.status === 'completed') || !capability
       || capability.executionId !== executionId || capability.revokedAt !== null
       || capability.policyEpoch !== execution.policyEpoch
       || now < capability.notBefore || now >= capability.expiresAt) {
@@ -49,8 +51,9 @@ export async function assertProgramInvocationAuthorized(input: {
   const currentProgram = await loadStoredSemanticProgram(
     agent, contextGraphId, program.programIri, program.layer, originalCaller,
   );
-  validateProgramPin(config, currentProgram, sourceHashOf(program));
-  if (currentProgram.authorAgentAddress !== program.authorAgentAddress
+  if (config.programPolicy) validateProgramPin(config, currentProgram, sourceHashOf(program));
+  if (sourceHashOf(currentProgram) !== sourceHashOf(program)
+    || currentProgram.authorAgentAddress !== program.authorAgentAddress
     || currentProgram.version !== program.version
     || JSON.stringify(currentProgram.requiredTools) !== JSON.stringify(program.requiredTools)
     || JSON.stringify(currentProgram.permittedPrograms) !== JSON.stringify(program.permittedPrograms)) {

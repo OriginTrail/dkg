@@ -310,18 +310,20 @@ export async function invokeResolved(
   bound?: BoundProgramInvocation,
 ): Promise<SemanticInvocationResult> {
   const pinnedPolicyHash = bound ? '' : programPolicyHash(config);
+  let readingCompletedReceipt = false;
   const assertAuthorized = async () => {
-    await bound?.assertAuthorized();
-    if (!pinnedPolicyHash) return;
-    if (!config?.programPolicy || programPolicyHash(config) !== pinnedPolicyHash) {
+    await scope.assertAncestors?.();
+    if (bound) { await bound.assertAuthorized(); return; }
+    if (!config || programPolicyHash(config) !== pinnedPolicyHash
+      || config.operatorPolicyIri !== resolved.public.selectedPolicy.iri) {
       throw new SemanticProgramError('PROGRAM_POLICY_CHANGED', 'Operator Program policy changed during execution', 403);
     }
-    await scope.assertAncestors?.();
     await assertProgramInvocationAuthorized({
       agent, runtime, executionId: `urn:sr:execution:${invocationId}`, config, contextGraphId,
       program: resolved.program, originalCaller: callerAgentAddress ?? resolved.program.authorAgentAddress,
       operatorAddress: resolved.operatorAddress, policyIri: resolved.public.selectedPolicy.iri,
       policyHashHex: resolved.policyHashHex,
+      allowCompletedReceipt: readingCompletedReceipt,
     });
   };
   const pinnedChildInvoker: SemanticProgramChildInvoker = async (input) => {
@@ -375,6 +377,7 @@ export async function invokeResolved(
     executionLayer,
   ]);
   const journal = new ExecutionReceiptJournal(runtime.store, executionIri);
+  readingCompletedReceipt = existingExecution?.status === 'completed';
   if (journal.terminal && existingExecution && ['active', 'completed'].includes(existingExecution.status)) {
     return recoverTerminalExecutionReceipt(agent, runtime.store, journal, {
       contextGraphId, name: assertionName, agentAddress: resolved.operatorAddress,
@@ -396,18 +399,15 @@ export async function invokeResolved(
         500,
       );
     }
+    await assertAuthorized();
+    const outputs = await loadExecutionOutputs(agent, contextGraphId, executionIri, executionLayer, resolved.operatorAddress);
+    await assertAuthorized();
     return {
       invocationId,
       executionIri,
       executionLayer,
       ...(executionLayer === 'vm' ? { executionUal: priorHistory.publishedUal } : {}),
-      outputs: await loadExecutionOutputs(
-        agent,
-        contextGraphId,
-        executionIri,
-        executionLayer,
-        resolved.operatorAddress,
-      ),
+      outputs,
       persisted: true,
     };
   }

@@ -426,6 +426,7 @@ describe('semantic runtime daemon configuration', () => {
     } : created ? { memoryLayer: 'WM' } : null);
     const agent = {
       getDefaultAgentAddress: () => operator,
+      canReadContextGraph: vi.fn(async () => true),
       listLocalAgents: () => [{ agentAddress: operator }],
       getCustodialAgentPrivateKey: () => '0x01',
       query: vi.fn(async (sparql: string) => {

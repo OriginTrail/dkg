@@ -132,6 +132,9 @@ createInterface({input:process.stdin}).on('line', line => {
             ...(parent ? { permittedProgram: `<${childIri}>` } : {}),
           }] };
         }
+        if (options.source === 'semantic-runtime-execution-output-load') return { bindings: [...receipts.values()].flat()
+          .filter(q => sparql.includes(`<${q.subject}>`) && /#(orderedOutputs|output|outputHash)$/.test(q.predicate))
+          .map(q => ({ g: graph.replace('_verifiable_memory', '_working_memory'), [q.predicate.split('#')[1]]: q.object })) };
         if (sparql.includes('usesExecutionPolicy') || sparql.includes('offersTool')) return { bindings: toolRows };
         if (options.source === 'semantic-runtime-dkg-query') return { bindings: [{ total: 3 }] };
         return { bindings: [] };
@@ -161,6 +164,10 @@ createInterface({input:process.stdin}).on('line', line => {
       const modelToolResult = JSON.parse(response.outputs![0]);
       expect(modelToolResult.ok).toBe(true);
       expect(JSON.parse(modelToolResult.output)).toEqual({ outputs: [{ '/result/bindings/0/total': 3 }] });
+      const retry = await invokeStoredSemanticProgram(agent, runtime!, 'tenant', parentIri,
+        '123e4567-e89b-42d3-a456-426614174111', 'vm', 'wm', config,
+        { baseURL: 'http://127.0.0.1:12345/v1', model: 'fixture' } as any, caller, undefined, suppliedTransport);
+      expect(retry.outputs).toEqual(response.outputs);
       expect(suppliedTransport).not.toHaveBeenCalled();
       expect(agent.assertion.write).toHaveBeenCalledTimes(2);
       expect(agent.query.mock.calls.filter(([, options]: any[]) => options.source === 'semantic-runtime-dkg-query'))
@@ -170,4 +177,98 @@ createInterface({input:process.stdin}).on('line', line => {
       await runtime?.stop(); vi.unstubAllEnvs(); fs.rmSync(temporary, { recursive: true, force: true });
     }
   }, 60_000);
+});
+
+
+async function receiptAuthorityFixture(pinned: boolean, layer: 'wm' | 'swm' | 'vm' = 'vm') {
+  const operator = '0x1111111111111111111111111111111111111111';
+  const programIri = 'urn:program:receipt-authority';
+  const source = `(strategy receipt-authority (version "1.0.0") (scope network:devnet) (goal authority)
+    (supervise one-for-one (max-restarts 1) (window-ms 1000) (delegate worker (emit private-result))))`;
+  const graph = `did:dkg:context-graph:tenant/_verifiable_memory/${operator}/7`;
+  const state = { version: '1', canRead: true, source };
+  const entries = new Map<string, any>();
+  const digest = 'ab'.repeat(32), ual = 'did:dkg:receipt';
+  const agent = {
+    listLocalAgents: () => [{ agentAddress: operator }], getCustodialAgentPrivateKey: () => '0x01',
+    canReadContextGraph: vi.fn(async () => state.canRead),
+    query: vi.fn(async (sparql: string, options: any) => {
+      if (options.source === 'semantic-runtime-program-load') return { bindings: [{ g: graph, language: '"sexpr-v1"', version: '"1.0.0"', source: JSON.stringify(state.source) }] };
+      if (sparql.includes('usesExecutionPolicy')) return { bindings: [{ g: graph, policyVersion: JSON.stringify(state.version), tool: '<urn:tool:unused>' }] };
+      if (options.source === 'semantic-runtime-execution-output-load') {
+        const entry = [...entries.values()][0];
+        return { bindings: entry.quads.filter((q: any) => /#(orderedOutputs|output|outputHash)$/.test(q.predicate)).map((q: any) => ({
+          g: graph.replace('_verifiable_memory', { wm: '_working_memory', swm: '_shared_memory', vm: '_verifiable_memory' }[layer]),
+          [q.predicate.split('#')[1]]: q.object,
+        })) };
+      }
+      return { bindings: [] };
+    }),
+    assertion: {
+      history: vi.fn(async (_cg: string, name: string) => entries.has(name) ? { ...entries.get(name) } : null),
+      create: vi.fn(async (_cg: string, name: string) => { entries.set(name, { memoryLayer: 'WM', quads: [] }); }),
+      query: vi.fn(async (_cg: string, name: string) => entries.get(name)?.quads ?? []),
+      write: vi.fn(async (_cg: string, name: string, quads: any[]) => { entries.get(name).quads.push(...quads); }),
+      finalize: vi.fn(async (_cg: string, name: string) => { entries.get(name).wmCurrentAssertion = digest; }),
+      promote: vi.fn(async (_cg: string, name: string) => { Object.assign(entries.get(name), { swmCurrentAssertion: digest, memoryLayer: 'SWM' }); return { publishReady: true }; }),
+    },
+    publishFromFinalizedAssertion: vi.fn(async (_cg: string, name: string) => {
+      Object.assign(entries.get(name), { vmCurrentAssertion: digest, memoryLayer: 'VM', publishedUal: ual }); return { status: 'confirmed', ual };
+    }),
+  };
+  const config = { enabled: true, operatorPolicyIri: 'urn:policy:receipt', watchdogMs: 1000,
+    ...(pinned ? { programPolicy: { contextGraphIds: ['tenant'], programs: [{ programIri, sourceHash: createHash('sha256').update(source).digest('hex') }] } } : {}) };
+  const runtime = (await startConfiguredSemanticRuntime(config, { log: vi.fn(), openStore: () => new SemanticRuntimeStore(':memory:') }))!;
+  const invocationId = '123e4567-e89b-42d3-a456-426614174222';
+  const invoke = () => invokeStoredSemanticProgram(agent as any, runtime, 'tenant', programIri, invocationId, 'vm', layer, config);
+  return { agent, runtime, invoke, state, invocationId };
+}
+
+describe('receipt authority for direct VM policy and pinned Programs', () => {
+  it.each([false, true].flatMap(pinned => (['wm', 'swm', 'vm'] as const).map(layer => ({ pinned, layer }))))(
+    'returns the same authorized completed $layer receipt with pin=$pinned and enforces capability revocation', async ({ pinned, layer }) => {
+      const f = await receiptAuthorityFixture(pinned, layer);
+      try {
+        const first = await f.invoke();
+        const start = vi.spyOn(f.runtime.host, 'startPlan');
+        expect(await f.invoke()).toEqual(first);
+        expect(first).toMatchObject({ persisted: true, outputs: [] });
+        expect(start).not.toHaveBeenCalled();
+        expect(f.agent.assertion.create).toHaveBeenCalledTimes(1);
+        f.runtime.store.revokeCapability(`urn:sr:capability:${f.invocationId}`, Date.now());
+        await expect(f.invoke()).rejects.toMatchObject({ code: 'PROGRAM_AUTHORITY_REVOKED' });
+      } finally { await f.runtime.stop(); }
+    },
+  );
+  it.each([false, true].flatMap(pinned => (['create', 'write', 'finalize', 'promote'] as const).map(phase => ({ pinned, phase }))))(
+    'starts no later lifecycle stage after VM policy changes during $phase with pin=$pinned', async ({ pinned, phase }) => {
+      const f = await receiptAuthorityFixture(pinned);
+      try {
+        const complete = f.agent.assertion[phase].getMockImplementation()!;
+        f.agent.assertion[phase].mockImplementation(async (...args: any[]) => {
+          const result = await (complete as any)(...args); f.state.version = '2'; return result;
+        });
+        await expect(f.invoke()).rejects.toMatchObject({ code: 'PROGRAM_POLICY_CHANGED' });
+        const phases = ['create', 'write', 'finalize', 'promote'] as const;
+        for (const later of phases.slice(phases.indexOf(phase) + 1)) expect(f.agent.assertion[later]).not.toHaveBeenCalled();
+        expect(f.agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+      } finally { await f.runtime.stop(); }
+    },
+  );
+  it.each([false, true].flatMap(pinned => ['membership', 'source'].map(change => ({ pinned, change }))))(
+    'rechecks $change authority during receipt create with pin=$pinned', async ({ pinned, change }) => {
+      const f = await receiptAuthorityFixture(pinned);
+      try {
+        const create = f.agent.assertion.create.getMockImplementation()!;
+        f.agent.assertion.create.mockImplementation(async (...args: any[]) => {
+          await (create as any)(...args);
+          if (change === 'membership') f.state.canRead = false; else f.state.source += '\n; source replaced';
+        });
+        await expect(f.invoke()).rejects.toMatchObject({ status: 403 });
+        expect(f.agent.assertion.write).not.toHaveBeenCalled();
+        expect(f.agent.assertion.finalize).not.toHaveBeenCalled();
+        expect(f.agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+      } finally { await f.runtime.stop(); }
+    },
+  );
 });

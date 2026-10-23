@@ -10,6 +10,10 @@ export async function recoverTerminalExecutionReceipt(
   assertAuthorized: () => Promise<void>,
 ): Promise<SemanticInvocationResult> {
   const terminal = journal.terminal!;
+  const executionIri = `urn:sr:execution:${invocationId}`;
+  if (store.execution(executionIri)?.status === 'completed' && journal.progress.phase !== 'completed') {
+    throw new SemanticProgramError('EXECUTION_PERSISTENCE_INCONSISTENT', 'Completed execution has unfinished receipt persistence', 409);
+  }
   if (Object.entries(expected).some(([key, value]) => terminal[key as keyof typeof expected] !== value)) {
     throw new SemanticProgramError('INVOCATION_LAYER_CONFLICT', 'Terminal receipt belongs to different inputs or authority', 409);
   }
@@ -17,7 +21,6 @@ export async function recoverTerminalExecutionReceipt(
   const history = await agent.assertion.history(terminal.contextGraphId, terminal.name, { agentAddress: terminal.agentAddress });
   const evidence = await persistExecutionKnowledgeAsset(agent, terminal.contextGraphId, terminal.name,
     terminal.agentAddress, terminal.quads, history, terminal.layer, assertAuthorized, journal);
-  const executionIri = `urn:sr:execution:${invocationId}`;
   const outputs = await loadExecutionOutputs(agent, terminal.contextGraphId, executionIri, terminal.layer, terminal.agentAddress);
   if (JSON.stringify(outputs) !== JSON.stringify(terminal.outputs)) {
     throw new SemanticProgramError('EXECUTION_OUTPUT_INCONSISTENT', 'Persisted outputs differ from the terminal receipt', 409);
