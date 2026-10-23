@@ -1014,7 +1014,16 @@ jobs:
       - name: Restore devnet EVM artifacts
         run: tar -xzf /tmp/evm-devnet-test-artifacts.tgz
       - name: Install Playwright Chromium
-        run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium --with-deps
+        run: |
+          # Chromium's OS dependencies come from Ubuntu. Unrelated Microsoft
+          # feeds on the hosted image can return 403 or stall apt update.
+          # Keep Ubuntu's signed sources and the actual dependency install.
+          for source in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+            if [[ -f "$source" ]] && grep -q 'packages\.microsoft\.com' "$source"; then
+              sudo mv -- "$source" "${source}.disabled-for-playwright"
+            fi
+          done
+          pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium --with-deps
       - name: node-ui memory preview and WebGL regressions
         if: matrix.shard == 1
         run: pnpm --dir packages/node-ui exec playwright test --config playwright.pr3236.config.ts
