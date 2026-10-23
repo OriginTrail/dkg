@@ -1,8 +1,8 @@
-import { createHash } from 'node:crypto';
+import { boundOperationInvocationScope, canonicalProgramInputs } from '@origintrail-official/dkg-core/graph-computer-protocol';
+export { canonicalProgramInputs } from '@origintrail-official/dkg-core/graph-computer-protocol';
 
 import type { SignedAgentDelegation } from '@origintrail-official/dkg-agent';
 import { sparqlIri, validateContextGraphId } from '@origintrail-official/dkg-core';
-import { canonicalizeJson, type CanonicalJsonValue } from '@origintrail-official/dkg-core';
 
 /** No caller-selected source, executor, query, parameters or output layer. */
 export interface BoundSemanticInboxInvocationV3 {
@@ -37,15 +37,5 @@ export function assertBoundSemanticInvocation(value: unknown): asserts value is 
 
 /** Version and kind separate operation grants from ordinary Program invocation. */
 export function boundSemanticInvocationScope(request: UnsignedBoundSemanticInvocation, targetPeerId: string): string {
-  const digest = createHash('sha256').update(JSON.stringify([
-    request.version, request.kind, request.contextGraphId, request.operationIri,
-    request.invocationId.toLowerCase(), targetPeerId,
-    ...(request.version === 4 ? [createHash('sha256').update(canonicalProgramInputs(request.inputs)).digest('hex')] : []),
-  ])).digest('hex');
-  return `dkg.semantic-runtime.bound-operation.v${request.version}:${digest}`;
-}
-
-export function canonicalProgramInputs(value: unknown): string {
-  if (!Array.isArray(value)) throw new Error('INVALID_PROGRAM_INPUTS');
-  return canonicalizeJson(value as CanonicalJsonValue, { maxBytes: 65536, maxDepth: 20 });
+  return boundOperationInvocationScope(request, targetPeerId);
 }

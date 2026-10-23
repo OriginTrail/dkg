@@ -1,3 +1,5 @@
+import { spawnSync } from 'node:child_process';
+import { ExecutionReceiptJournal, type ReceiptProgress } from '../src/receipt-journal.js';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -54,6 +56,62 @@ function seedExecution(store: SemanticRuntimeStore): StrategyArtifactRecord {
   });
   return plan;
 }
+
+describe('terminal execution receipt journal', () => {
+  const terminal = { contextGraphId: 'tenant', name: 'receipt', agentAddress: '0x1111111111111111111111111111111111111111',
+    layer: 'vm' as const, requestIdentity: 'approved-caller-program-inputs',
+    quads: [{ subject: 'urn:execution', predicate: 'urn:output', object: '"private-result"' }], outputs: ['private-result'] };
+  it('keeps the terminal snapshot immutable and checkpoints idempotent', () => {
+    const store = new SemanticRuntimeStore(':memory:');
+    try {
+      seedExecution(store);
+      const journal = new ExecutionReceiptJournal(store, 'exec-1');
+      const competing = new ExecutionReceiptJournal(store, 'exec-1');
+      expect(() => journal.checkpoint({ phase: 'create' })).toThrow('requires terminal execution');
+      journal.prepare(terminal);
+      expect(() => competing.prepare(terminal)).toThrow();
+      expect(() => journal.prepare(terminal)).toThrow('already exists');
+      journal.checkpoint({ phase: 'sealed', assertion: 'ab'.repeat(32) });
+      const seq = store.execution('exec-1')!.nextEventSeq;
+      journal.checkpoint({ phase: 'sealed', assertion: 'ab'.repeat(32) });
+      expect(store.execution('exec-1')!.nextEventSeq).toBe(seq);
+      const reopened = new ExecutionReceiptJournal(store, 'exec-1');
+      expect(reopened.terminal).toEqual(terminal);
+      expect(reopened.progress).toEqual(journal.progress);
+      expect(() => new ExecutionReceiptJournal(store, 'missing').prepare(terminal)).toThrow('durable execution');
+    } finally { store.close(); }
+  });
+  it.each(['prepared', 'create', 'write', 'finalize', 'share', 'publish', 'completed'] as const)(
+    'retains the exact terminal result after a real process kill at %s', phase => {
+      const temporary = databasePath();
+      const plan = artifact();
+      const moduleUrl = new URL('../dist/index.js', import.meta.url).href;
+      const progress: ReceiptProgress = { phase, ...(phase === 'share' || phase === 'publish' || phase === 'completed' ? { assertion: 'ab'.repeat(32) } : {}) };
+      try {
+        const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+          import { SemanticRuntimeStore, ExecutionReceiptJournal } from ${JSON.stringify(moduleUrl)};
+          const store = new SemanticRuntimeStore(${JSON.stringify(temporary.path)});
+          store.registerStrategyArtifact({ ...${JSON.stringify(plan)}, canonicalPlan: Uint8Array.from([129, 1]) });
+          store.createExecution({ executionId: 'exec-1', planId: ${JSON.stringify(plan.artifactHash)}, partitionId: 'partition-1',
+            status: 'active', graphRevision: 'approved-caller-program-inputs', policyEpoch: 1n, rootProcessId: 'root', leaseEpoch: 0n });
+          const journal = new ExecutionReceiptJournal(store, 'exec-1');
+          journal.prepare(${JSON.stringify(terminal)});
+          journal.checkpoint(${JSON.stringify(progress)});
+          process.kill(process.pid, 'SIGKILL');
+        `], { encoding: 'utf8', timeout: 10000 });
+        expect(child.stderr).toBe('');
+        expect(child.signal).toBe('SIGKILL');
+        const store = new SemanticRuntimeStore(temporary.path);
+        try {
+          const journal = new ExecutionReceiptJournal(store, 'exec-1');
+          expect(journal.terminal).toEqual(terminal);
+          expect(journal.progress).toEqual(progress);
+          store.verifyRuntimeEventChain('exec-1');
+        } finally { store.close(); }
+      } finally { fs.rmSync(temporary.directory, { recursive: true, force: true }); }
+    },
+  );
+});
 
 describe('SemanticRuntimeStore', () => {
   it('persists hash-linked events and validated snapshots across reopen', () => {

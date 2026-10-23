@@ -30,15 +30,7 @@ export async function resolveStoredSemanticProgram(
   llmConfig?: LlmConfig,
   callerAgentAddress?: string,
 ): Promise<SemanticProgramResolution> {
-  return (await resolveInternal(
-    agent,
-    contextGraphId,
-    programIri,
-    programLayer,
-    config,
-    llmConfig,
-    callerAgentAddress,
-  )).public;
+  return (await resolveInternal({ agent, contextGraphId, programIri, programLayer, config, llmConfig, callerAgentAddress })).public;
 }
 
 export async function assertBoundQueryDefinition(agent: DKGAgent, binding: SemanticProgramBinding): Promise<void> {
@@ -88,9 +80,11 @@ export async function validateBoundSemanticProgram(
     const program = await validateTypeScriptProgram(agent, runtime, binding, check);
     return (await resolveTypeScriptTools(agent, runtime, binding, program, config, check)).public;
   }
-  const resolved = await resolveInternal(agent, binding.contextGraphId, binding.program.programIri, binding.program.programLayer,
-    config, undefined, executor.agentAddress, executor.agentAddress, binding.executionLayer ?? 'wm', undefined, check,
-    { binding, digest: programBindingDigest(binding), assertAuthorized: check }, runtime.store);
+  const resolved = await resolveInternal({ agent, contextGraphId: binding.contextGraphId,
+    programIri: binding.program.programIri, programLayer: binding.program.programLayer, config,
+    callerAgentAddress: executor.agentAddress, executingAgentAddress: executor.agentAddress,
+    executionLayer: binding.executionLayer ?? 'wm', assertAuthorized: check,
+    bound: { binding, digest: programBindingDigest(binding), assertAuthorized: check }, assetStore: runtime.store });
   if (!resolved.public.executable) throw new SemanticProgramError('REQUIRED_TOOL_UNAVAILABLE', 'The declared tools do not match the approved installed adapters', 409);
   // Exercise the actual typed component boundary with validation-only stubs.
   // No adapter dispatch, data query, asset creation or execution journal write
@@ -125,15 +119,30 @@ export async function validateBoundSemanticProgram(
   return resolved.public;
 }
 
-export async function resolveProgramTools(
-  agent: DKGAgent, contextGraphId: string, program: StoredSemanticProgram,
-  config: SemanticRuntimeConfig | undefined, llmConfig: LlmConfig | undefined,
-  callerAgentAddress: string | undefined, executingAgentAddress: string | undefined,
-  executionLayer: SemanticMemoryLayer, childInvoker: SemanticProgramChildInvoker | undefined,
-  assertAuthorized: (() => Promise<void>) | undefined, bound: BoundProgramInvocation | undefined,
-  assetStore: SemanticRuntimeStore | undefined,
-  localLlmProvider?: LocalLlmProgramProvider,
-) {
+/** Explicit authority and runtime inputs shared by the language-specific executors. */
+export interface ProgramResolutionContext {
+  agent: DKGAgent;
+  contextGraphId: string;
+  programIri: string;
+  programLayer: SemanticMemoryLayer;
+  config: SemanticRuntimeConfig | undefined;
+  llmConfig?: LlmConfig;
+  callerAgentAddress?: string;
+  executingAgentAddress?: string;
+  executionLayer?: SemanticMemoryLayer;
+  childInvoker?: SemanticProgramChildInvoker;
+  assertAuthorized?: () => Promise<void>;
+  bound?: BoundProgramInvocation;
+  assetStore?: SemanticRuntimeStore;
+  localLlmProvider?: LocalLlmProgramProvider;
+}
+type ProgramToolContext = Omit<ProgramResolutionContext, 'programIri' | 'programLayer' | 'executionLayer'> & {
+  program: StoredSemanticProgram; executionLayer: SemanticMemoryLayer;
+};
+
+export async function resolveProgramTools(context: ProgramToolContext) {
+  const { agent, contextGraphId, program, config, llmConfig, callerAgentAddress, executingAgentAddress,
+    executionLayer, childInvoker, assertAuthorized, bound, assetStore, localLlmProvider } = context;
   const programIri = program.programIri, programLayer = program.layer;
   const readPrincipal = bound?.binding.executorAgentAddress ?? callerAgentAddress;
   const originalCaller = callerAgentAddress ?? program.authorAgentAddress;
@@ -329,21 +338,8 @@ export async function resolveProgramTools(
   return { tools, registry, operatorAddress, operatorIri, policyIri, policyVersion, policyHashHex };
 }
 
-export async function resolveInternal(
-  agent: DKGAgent,
-  contextGraphId: string,
-  programIri: string,
-  programLayer: SemanticMemoryLayer,
-  config: SemanticRuntimeConfig | undefined,
-  llmConfig?: LlmConfig,
-  callerAgentAddress?: string,
-  executingAgentAddress?: string,
-  executionLayer: SemanticMemoryLayer = 'vm',
-  childInvoker?: SemanticProgramChildInvoker,
-  assertAuthorized?: () => Promise<void>,
-  bound?: BoundProgramInvocation,
-  assetStore?: SemanticRuntimeStore,
-): Promise<InternalResolution> {
+export async function resolveInternal(context: ProgramResolutionContext): Promise<InternalResolution> {
+  const { agent, contextGraphId, programIri, programLayer, config, callerAgentAddress, executionLayer = 'vm', bound } = context;
   await bound?.assertAuthorized();
   const readPrincipal = bound?.binding.executorAgentAddress ?? callerAgentAddress;
   // Only an already-authorized bound caller gets this readiness diagnostic.
@@ -400,9 +396,7 @@ export async function resolveInternal(
     || compilation.plan.effectUpperBound.some((effect) => !['read', 'asset-creation'].includes(effect)))) {
     throw new SemanticProgramError('PROGRAM_BINDING_TOOL_FORBIDDEN', 'Program uses tools outside the tenant binding', 403);
   }
-  const { tools, registry, operatorAddress, operatorIri, policyIri, policyVersion, policyHashHex } = await resolveProgramTools(
-    agent, contextGraphId, program, config, llmConfig, callerAgentAddress, executingAgentAddress,
-    executionLayer, childInvoker, assertAuthorized, bound, assetStore);
+  const { tools, registry, operatorAddress, operatorIri, policyIri, policyVersion, policyHashHex } = await resolveProgramTools({ ...context, program, executionLayer });
   const declaredAdapters = new Set(
     tools.flatMap((tool) => tool.operation && tool.semanticVersion
       ? [`${tool.operation}@${tool.semanticVersion}`]

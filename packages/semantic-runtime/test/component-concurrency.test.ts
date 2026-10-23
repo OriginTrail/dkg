@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 
 import { WasmStrategyAdmissionClient } from '../src/admission.js';
 import {
@@ -7,6 +8,7 @@ import {
   ComponentUnavailableError,
 } from '../src/component-supervisor.js';
 import { SemanticRuntimeHost } from '../src/host.js';
+import { defaultExecutionCapability } from '../src/component-types.js';
 
 const workerUrl = new URL('../dist/worker.js', import.meta.url);
 const componentWorkerUrl = new URL('../dist/component-worker.js', import.meta.url);
@@ -25,6 +27,45 @@ async function plan(): Promise<Uint8Array> {
 }
 
 describe('WASI 0.3 component execution isolation', () => {
+  it('completes another real component while the first is suspended in a host tool', async () => {
+    const admission = new WasmStrategyAdmissionClient({ workerUrl: componentWorkerUrl });
+    const slow = await admission.compileAndAdmit(`(strategy smoke/suspended
+      (version "1.0.0") (scope network:devnet) (goal overlap)
+      (supervise one-for-one (max-restarts 1) (window-ms 1000)
+        (delegate reader (grant dkg.query) (call dkg/query@1 "barrier"))))`);
+    if (!slow.ok) throw new Error('suspended fixture did not compile');
+    const fast = await plan();
+    const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+    const capability = defaultExecutionCapability(createHash('sha256').update('DKG-STRATEGY-PLAN-V1\0').update(slow.plan.canonicalPlan).digest('hex'));
+    capability.tools = [{ operation: 'dkg/query', version: '1', witInterface: 'origintrail:semantic-runtime/query-catalog@0.1.0' }];
+    capability.budgets.maxToolCalls = capability.budgets.maxDkgQueries = 1;
+    const host = new SemanticRuntimeHost({ workerUrl, componentWorkerUrl, config: { watchdogMs: 1000, maxActiveExecutions: 2 } });
+    await host.start();
+    let firstRun: Promise<unknown> | undefined;
+    try {
+      const first = await host.startPlan(slow.plan.canonicalPlan, 0n, capability, async () => {
+        entered.resolve(); await release.promise;
+        return { kind: 'query-catalog', json: '[]' };
+      });
+      let firstFinished = false;
+      firstRun = host.applyPlan(first.handle).then(result => { firstFinished = true; return result; });
+      await entered.promise;
+      const second = await host.startPlan(fast);
+      await expect(host.applyPlan(second.handle)).resolves.toMatchObject({ kind: 'completed' });
+      expect(firstFinished).toBe(false);
+      await host.dropPlan(second.handle);
+      expect(host.activeComponentExecutions).toBe(1);
+      release.resolve();
+      await expect(firstRun).resolves.toMatchObject({ kind: 'completed' });
+      await host.dropPlan(first.handle);
+      expect(host.activeComponentExecutions).toBe(0);
+    } finally {
+      release.resolve();
+      await host.stop();
+      await firstRun?.catch(() => undefined);
+    }
+  });
+
   it('runs independent executions in distinct component instances without a global queue', async () => {
     const canonicalPlan = await plan();
     const host = new SemanticRuntimeHost({

@@ -67,6 +67,7 @@ function fixture(layer: 'wm' | 'swm' | 'vm' = 'swm') {
   const dataVm = `did:dkg:context-graph:${dataGraph}/_verifiable_memory/${executor}/7`;
   const written: Array<{ subject: string; predicate: string; object: string }> = [];
   const histories = new Set<string>();
+  const receiptContent = new Map<string, typeof written>();
   const state = { source, author: programAuthor, tools: [tool] as Array<string | undefined>, visible: true, child: undefined as string | undefined };
   const readData = vi.fn(async (): Promise<{ bindings: Array<Record<string, string>> }> => ({
     bindings: [{ device: 'urn:kamstrup:device:W10', temperature: '21.5' }],
@@ -105,9 +106,10 @@ function fixture(layer: 'wm' | 'swm' | 'vm' = 'swm') {
     }),
     assertion: {
       history: vi.fn(async (_graph: string, name: string) => histories.has(name)
-        ? { wmCurrentAssertion: '11'.repeat(32), memoryLayer: 'WM', state: 'finalized' } : null),
-      create: vi.fn(async () => 'urn:test:execution'),
-      write: vi.fn(async (_graph: string, _name: string, quads: typeof written) => { written.push(...quads); }),
+        ? { wmCurrentAssertion: '11'.repeat(32), memoryLayer: 'WM', state: 'finalized' } : receiptContent.has(name) ? { memoryLayer: 'WM' } : null),
+      create: vi.fn(async (_graph: string, name: string) => { receiptContent.set(name, []); return 'urn:test:execution'; }),
+      query: vi.fn(async (_graph: string, name: string) => receiptContent.get(name) ?? []),
+      write: vi.fn(async (_graph: string, name: string, quads: typeof written) => { written.push(...quads); receiptContent.get(name)!.push(...quads); }),
       finalize: vi.fn(async (_graph: string, name: string) => { histories.add(name); }),
     },
   };

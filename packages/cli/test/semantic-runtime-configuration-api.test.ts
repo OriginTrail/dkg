@@ -108,6 +108,8 @@ async function fixture() {
   const content = new Map<string, Quad[]>();
   const sealed = new Set<string>();
   let uploaded: Quad[] = [];
+  const layers = new Map<string, 'WM' | 'SWM' | 'VM'>();
+  const receiptUal = (name: string) => `did:dkg:asset:${name}`;
   let inbox!: (request: any, peer: string) => Promise<any>;
   const allowed = (address?: string) => [owner, foreignExecutor, author, member].includes(address ?? '');
   const agent: any = {
@@ -126,7 +128,9 @@ async function fixture() {
     query: vi.fn(async (query: string, opts: any) => DKGAgent.prototype.query.call(agent, query, opts)),
     assertion: {
       history: vi.fn(async (_cg: string, name: string) => sealed.has(name)
-        ? { wmCurrentAssertion: 'aa'.repeat(32), memoryLayer: 'WM' }
+        ? { wmCurrentAssertion: 'aa'.repeat(32), memoryLayer: layers.get(name) ?? 'WM',
+          ...(layers.get(name) !== 'WM' && layers.has(name) ? { swmCurrentAssertion: 'aa'.repeat(32) } : {}),
+          ...(layers.get(name) === 'VM' ? { vmCurrentAssertion: 'aa'.repeat(32), publishedUal: receiptUal(name) } : {}) }
         : content.has(name) ? { wmCurrentAssertion: null, memoryLayer: 'WM' } : null),
       create: vi.fn(async (_cg: string, name: string) => { content.set(name, []); return 'urn:example:asset:' + name; }),
       write: vi.fn(async (cg: string, name: string, quads: Quad[], lane: { agentAddress: string }) => {
@@ -135,8 +139,18 @@ async function fixture() {
       }),
       finalize: vi.fn(async (_cg: string, name: string) => { sealed.add(name); return { merkleRoot: new Uint8Array(32).fill(170), authorAddress: owner }; }),
       query: vi.fn(async (_cg: string, name: string) => content.get(name) ?? []),
+      promote: vi.fn(async (_cg: string, name: string) => {
+        layers.set(name, 'SWM');
+        await store.insert((content.get(name) ?? []).map(q => ({ ...q, graph: q.graph.replace('_working_memory', '_shared_memory') })));
+        return { publishReady: true };
+      }),
     },
   };
+  agent.publishFromFinalizedAssertion = vi.fn(async (_cg: string, name: string) => {
+    layers.set(name, 'VM');
+    await store.insert((content.get(name) ?? []).map(q => ({ ...q, graph: q.graph.replace('_working_memory', '_verifiable_memory') })));
+    return { status: 'confirmed', ual: receiptUal(name) };
+  });
   const target = node(agent);
   const senderAgent: any = {
     peerId: 'peer-client', registerSkill: vi.fn(), resolveLocalAgentAddress: (address: string) => address,
@@ -440,6 +454,79 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     const after = f.agent.assertion.create.mock.calls.length;
     expect((await invoke(failedId, true)).body.code).toBe('INVOCATION_NOT_RETRYABLE');
     expect(f.agent.assertion.create).toHaveBeenCalledTimes(after);
+  });
+
+  const terminalReceiptCases = [
+    ...(['wm', 'swm', 'vm'] as const).flatMap(layer => ['create', 'write', 'partial-write', 'finalize'].map(phase => ({ layer, phase }))),
+    ...(['swm', 'vm'] as const).map(layer => ({ layer, phase: 'promote' })),
+    { layer: 'vm' as const, phase: 'publish' },
+  ];
+  it.each(terminalReceiptCases)('recovers TypeScript terminal $layer receipt after lost $phase response across restart without another tool call', async ({ layer, phase }) => {
+    const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
+      export function run() { return invoke_tool('${createTool}', ${JSON.stringify(assetInput)}); }`,
+      { graphId: graph, executionLayer: layer, assetCreation: { toolIri: createTool } }, [createTool]);
+    await f.approve();
+    const method = phase === 'partial-write' ? 'write' : phase === 'publish' ? 'publishFromFinalizedAssertion' : phase;
+    const operation = method === 'publishFromFinalizedAssertion' ? f.agent[method] : f.agent.assertion[method];
+    const complete = operation.getMockImplementation();
+    let injected = false;
+    operation.mockImplementation(async (...args: any[]) => {
+      if (!injected && args[1].startsWith('semantic-execution-')) {
+        injected = true;
+        if (phase === 'partial-write') await complete(args[0], args[1], args[2].slice(0, 3), args[3]);
+        else if (phase !== 'write') await complete(...args);
+        throw new Error('terminal reply lost');
+      }
+      return complete(...args);
+    });
+    const id = randomUUID();
+    const invoke = () => request(f.target, 'caller', 'POST', '/api/programs/execute', {
+      contextGraphId: graph, operationIri: f.operation.operationIri, invocationId: id,
+    });
+    const first = await invoke();
+    expect(first.status).toBe(422);
+    expect(injected).toBe(true);
+    expect(f.target.runtime!.store.execution(`urn:sr:execution:${id}`)?.status).toBe('active');
+    await f.target.boot();
+    const execute = vi.spyOn(f.target.runtime!.typescript!, 'execute');
+    const recovered = await invoke();
+    expect(recovered.status).toBe(200);
+    expect(recovered.body).toMatchObject({ invocationId: id, persisted: true, executionLayer: layer });
+    expect(JSON.parse(recovered.body.outputs[0])).toMatchObject({ kind: 'asset-created', layer });
+    expect(execute).not.toHaveBeenCalled();
+    const creates = f.agent.assertion.create.mock.calls.map(([, name]: any) => name);
+    expect(creates.filter((name: string) => name.startsWith('program-asset-'))).toHaveLength(1);
+    expect(creates.filter((name: string) => name.startsWith('semantic-execution-'))).toHaveLength(1);
+    expect((await invoke()).body.outputs).toEqual(recovered.body.outputs);
+  });
+
+  it.each(['create', 'write', 'finalize', 'promote', 'publish'] as const)('stops later TypeScript receipt stages after durable revocation during %s', async phase => {
+    const f = await toolFixture(`export function run() { return 'private-result'; }`,
+      { graphId: graph, executionLayer: 'vm' }, []);
+    const approval = await f.approve();
+    const operation = phase === 'publish' ? f.agent.publishFromFinalizedAssertion : f.agent.assertion[phase];
+    const complete = operation.getMockImplementation();
+    operation.mockImplementation(async (...args: any[]) => {
+      const result = await complete(...args);
+      if (args[1].startsWith('semantic-execution-')) {
+        await f.manager.programs.revoke({ ...f.operation, expectedRevision: approval.revision });
+      }
+      return result;
+    });
+    const id = randomUUID();
+    const invoke = () => request(f.target, 'caller', 'POST', '/api/programs/execute', {
+      contextGraphId: graph, operationIri: f.operation.operationIri, invocationId: id,
+    });
+    const result = await invoke();
+    expect(result.status).toBe(403);
+    expect(JSON.stringify(result.body)).not.toContain('private-result');
+    const stages = ['create', 'write', 'finalize', 'promote', 'publish'];
+    for (const later of stages.slice(stages.indexOf(phase) + 1)) {
+      const next = later === 'publish' ? f.agent.publishFromFinalizedAssertion : f.agent.assertion[later];
+      expect(next.mock.calls.filter(([, name]: any) => name.startsWith('semantic-execution-'))).toHaveLength(0);
+    }
+    await f.target.boot();
+    expect((await invoke()).status).toBe(403);
   });
 
   it('stops on uncertain writes even when guest code catches the error', async () => {

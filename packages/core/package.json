@@ -56,7 +56,17 @@
       "default": "./dist/sync-wire-objects.js"
     },
     "./dist/*": "./dist/*",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./canonical-json": {
+      "types": "./dist/canonical-json.d.ts",
+      "import": "./dist/canonical-json.js",
+      "default": "./dist/canonical-json.js"
+    },
+    "./graph-computer-protocol": {
+      "types": "./dist/graph-computer-protocol.d.ts",
+      "import": "./dist/graph-computer-protocol.js",
+      "default": "./dist/graph-computer-protocol.js"
+    }
   },
   "scripts": {
     "build": "tsc && pnpm run test:types",

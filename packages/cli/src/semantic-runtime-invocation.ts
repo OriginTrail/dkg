@@ -1,3 +1,5 @@
+import { ExecutionReceiptJournal } from '@origintrail-official/dkg-semantic-runtime';
+import { recoverTerminalExecutionReceipt } from './semantic-runtime-terminal-receipt.js';
 import { createHash } from 'node:crypto';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import type { LlmConfig } from '@origintrail-official/dkg-node-ui';
@@ -330,21 +332,10 @@ export async function invokeResolved(
       undefined, { ancestors: [...scope.ancestors, programIri], assertAncestors: assertAuthorized },
     );
   };
-  const resolved = await resolveInternal(
-    agent,
-    contextGraphId,
-    programIri,
-    programLayer,
-    config,
-    llmConfig,
-    callerAgentAddress,
-    executingAgentAddress,
-    executionLayer,
-    config?.programPolicy ? pinnedChildInvoker : childInvoker,
-    assertAuthorized,
-    bound,
-    runtime.store,
-  );
+  const resolved = await resolveInternal({ agent, contextGraphId, programIri, programLayer, config, llmConfig,
+    callerAgentAddress, executingAgentAddress, executionLayer,
+    childInvoker: config?.programPolicy ? pinnedChildInvoker : childInvoker,
+    assertAuthorized, bound, assetStore: runtime.store });
   const localOperator = agent.listLocalAgents().find(({ agentAddress }) =>
     agentAddress.toLowerCase() === resolved.operatorAddress.toLowerCase());
   if (!localOperator || !agent.getCustodialAgentPrivateKey(localOperator.agentAddress)) {
@@ -383,6 +374,13 @@ export async function invokeResolved(
     programLayer,
     executionLayer,
   ]);
+  const journal = new ExecutionReceiptJournal(runtime.store, executionIri);
+  if (journal.terminal && existingExecution && ['active', 'completed'].includes(existingExecution.status)) {
+    return recoverTerminalExecutionReceipt(agent, runtime.store, journal, {
+      contextGraphId, name: assertionName, agentAddress: resolved.operatorAddress,
+      layer: executionLayer, requestIdentity: executionGraphRevision,
+    }, invocationId, assertAuthorized);
+  }
   if (existingExecution?.status === 'completed') {
     if (existingExecution.graphRevision !== executionGraphRevision) {
       throw new SemanticProgramError(
@@ -592,7 +590,7 @@ export async function invokeResolved(
   } finally {
     await runtime.host.dropPlan(receipt.handle).catch(() => undefined);
   }
-  await bound?.assertAuthorized();
+  await assertAuthorized();
   const finishedAt = new Date();
   const quads = buildExecutionQuads({
     bound,
@@ -613,6 +611,9 @@ export async function invokeResolved(
     startedAt,
     finishedAt,
   });
+  journal.prepare({ contextGraphId, name: assertionName, agentAddress: resolved.operatorAddress,
+    layer: executionLayer, requestIdentity: executionGraphRevision, quads,
+    outputs: execution.outputs.map(output => output.value) });
   let persistence: PersistenceEvidence;
   try {
     persistence = await persistExecutionKnowledgeAsset(
@@ -623,6 +624,8 @@ export async function invokeResolved(
       quads,
       priorHistory,
       executionLayer,
+      assertAuthorized,
+      journal,
     );
   } catch (error) {
     if (error instanceof SemanticProgramError) throw error;
@@ -632,6 +635,7 @@ export async function invokeResolved(
       502,
     );
   }
+  await assertAuthorized();
   runtime.store.setExecutionStatus(executionIri, 'completed');
   return {
     invocationId,

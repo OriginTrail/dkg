@@ -2,7 +2,7 @@ import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { sparqlIri } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { SemanticMemoryLayer, SemanticProgramError, SemanticProgramForkResult, StoredSemanticProgram } from './semantic-runtime-types.js';
-import { PROV, RDFS, RDF_TYPE, SR, hashParts, historyIsAtLayer, historyLayerLabel, iriQuad, iriValue, literalQuad, literalValue, programGraphAuthor, queryOptions, resultRows, semanticLayerLabel, validateGraphAndProgram, validateSemanticMemoryLayer } from './semantic-runtime-values.js';
+import { PROV, RDFS, RDF_TYPE, SR, hashParts, iriQuad, iriValue, literalQuad, literalValue, programGraphAuthor, queryOptions, resultRows, semanticLayerLabel, sourceHashOf, validateGraphAndProgram, validateSemanticMemoryLayer } from './semantic-runtime-values.js';
 import { parseRequestedPermissions } from './semantic-runtime-typescript-execution.js';
 import { persistProgramKnowledgeAsset } from './semantic-runtime-execution-persistence.js';
 
@@ -175,23 +175,6 @@ export async function forkStoredSemanticProgram(
   const name = `semantic-program-fork-${hashParts([sourceProgramIri, newProgramIri]).slice(0, 24)}`;
   const lane = { agentAddress: authorAgentAddress };
   const existingHistory = await agent.assertion.history(contextGraphId, name, lane);
-  if (existingHistory && historyIsAtLayer(existingHistory, targetLayer)) {
-    return {
-      programIri: newProgramIri,
-      programLayer: targetLayer,
-      ...(targetLayer === 'vm' ? { programUal: existingHistory.publishedUal } : {}),
-      authorAgentAddress,
-      derivedFrom: sourceProgramIri,
-      persisted: true,
-    };
-  }
-  if (existingHistory) {
-    throw new SemanticProgramError(
-      'PROGRAM_FORK_LAYER_CONFLICT',
-      `The fork already exists in ${historyLayerLabel(existingHistory)}; use the normal DKG promotion controls to move it`,
-      409,
-    );
-  }
   const existing = await agent.query(`
     SELECT DISTINCT ?g WHERE {
       GRAPH ?g { ${sparqlIri(newProgramIri)} ?predicate ?object }
@@ -202,7 +185,7 @@ export async function forkStoredSemanticProgram(
     'semantic-runtime-program-fork-target',
     authorAgentAddress,
   ));
-  if (resultRows(existing).length > 0) {
+  if (!existingHistory && resultRows(existing).length > 0) {
     throw new SemanticProgramError(
       'PROGRAM_FORK_IRI_CONFLICT',
       `Program IRI ${newProgramIri} already exists in ${semanticLayerLabel(targetLayer)}`,
@@ -234,6 +217,12 @@ export async function forkStoredSemanticProgram(
     quads,
     existingHistory,
     targetLayer,
+    async () => {
+      const current = await loadStoredSemanticProgram(agent, contextGraphId, sourceProgramIri, sourceLayer, authorAgentAddress);
+      if (sourceHashOf(current) !== sourceHashOf(source) || current.authorAgentAddress !== source.authorAgentAddress) {
+        throw new SemanticProgramError('PROGRAM_FORK_SOURCE_CHANGED', 'Fork source changed during persistence', 403);
+      }
+    },
   );
   return {
     programIri: newProgramIri,

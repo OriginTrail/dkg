@@ -3770,20 +3770,6 @@ async function runDaemonInnerWithStartupOwnership(
         natStatusWatcherStop?.();
         resetNatStatus();
 
-        // Stop semantic trigger intake/Worker ownership before the DKG agent
-        // and its backing stores. Phase 0 has no external effects; later
-        // phases extend host.stop() with drain/checkpoint/reconciliation while
-        // preserving this position in the shutdown order.
-        if (semanticRuntimeHost) {
-          const runtimeToStop = semanticRuntimeHost;
-          semanticRuntimeHost = null;
-          await runtimeToStop
-            .stop()
-            .catch((err: any) =>
-              log(`Semantic runtime stop error: ${err?.message ?? String(err)}`),
-            );
-        }
-
         // ── Producer-quiescent teardown ────────────────────────────────────
         // Both the ORDER and the WIRING live in `./teardown.ts` — the order in
         // `runProducerQuiescentTeardown`, the slot assignment in
@@ -3799,6 +3785,11 @@ async function runDaemonInnerWithStartupOwnership(
         const teardown = await runProducerQuiescentTeardown(
           buildProducerQuiescentTeardownSteps({
             closeHttpServer: () => closeDaemonHttpServer(server, detachedHttpResponses),
+            stopSemanticRuntime: async () => {
+              const runtimeToStop = semanticRuntimeHost;
+              semanticRuntimeHost = null;
+              await runtimeToStop?.stop();
+            },
             closeEntitySearch: async () => { entitySearch?.close(); },
             closeLocalLlm: () => localLlm.close(),
             drainCatchupJobs,

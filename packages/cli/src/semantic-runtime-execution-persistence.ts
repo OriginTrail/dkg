@@ -1,8 +1,10 @@
 import { buildExecutionOutputQuads, decodeExecutionOutputRows, ExecutionOutputCodecError, type ExecutionOutputRow } from './semantic-runtime-execution-output.js';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import type { ExecutionReceiptJournal } from '@origintrail-official/dkg-semantic-runtime';
+import { persistKnowledgeAsset } from './semantic-runtime-receipt-lifecycle.js';
 import { sparqlIri } from '@origintrail-official/dkg-core';
 import { BoundProgramInvocation, PersistenceEvidence, SemanticMemoryLayer, SemanticProgramError, SemanticToolResolution } from './semantic-runtime-types.js';
-import { PROV, RDF_TYPE, SR, XSD_DATE_TIME, historyIsAtLayer, historyLayerLabel, iriQuad, iriValue, literalQuad, literalValue, programGraphAuthor, queryOptions, resultRows, toHex, typedLiteralQuad } from './semantic-runtime-values.js';
+import { PROV, RDF_TYPE, SR, XSD_DATE_TIME, iriQuad, iriValue, literalQuad, literalValue, programGraphAuthor, queryOptions, resultRows, toHex, typedLiteralQuad } from './semantic-runtime-values.js';
 
 export async function loadExecutionOutputs(
   agent: DKGAgent,
@@ -114,13 +116,15 @@ export async function persistExecutionKnowledgeAsset(
   quads: Array<{ subject: string; predicate: string; object: string }>,
   initialHistory: Awaited<ReturnType<DKGAgent['assertion']['history']>>,
   targetLayer: SemanticMemoryLayer,
+  assertAuthorized: () => Promise<void>,
+  journal?: ExecutionReceiptJournal,
 ): Promise<PersistenceEvidence> {
   return persistKnowledgeAsset(agent, contextGraphId, name, operatorAddress, quads, initialHistory, targetLayer, {
     layerConflict: 'EXECUTION_LAYER_CONFLICT',
     shareFailed: 'EXECUTION_SHARE_FAILED',
     publishFailed: 'EXECUTION_PUBLISH_FAILED',
     subject: 'Execution Knowledge Asset',
-  });
+  }, assertAuthorized, journal);
 }
 
 export async function persistProgramKnowledgeAsset(
@@ -131,82 +135,14 @@ export async function persistProgramKnowledgeAsset(
   quads: Array<{ subject: string; predicate: string; object: string }>,
   initialHistory: Awaited<ReturnType<DKGAgent['assertion']['history']>>,
   targetLayer: SemanticMemoryLayer,
+  assertAuthorized: () => Promise<void>,
+  journal?: ExecutionReceiptJournal,
 ): Promise<PersistenceEvidence> {
   return persistKnowledgeAsset(agent, contextGraphId, name, authorAgentAddress, quads, initialHistory, targetLayer, {
     layerConflict: 'PROGRAM_FORK_LAYER_CONFLICT',
     shareFailed: 'PROGRAM_FORK_SHARE_FAILED',
     publishFailed: 'PROGRAM_FORK_PUBLISH_FAILED',
     subject: 'Forked Program',
-  });
+  }, assertAuthorized, journal);
 }
 
-export async function persistKnowledgeAsset(
-  agent: DKGAgent,
-  contextGraphId: string,
-  name: string,
-  agentAddress: string,
-  quads: Array<{ subject: string; predicate: string; object: string }>,
-  initialHistory: Awaited<ReturnType<DKGAgent['assertion']['history']>>,
-  targetLayer: SemanticMemoryLayer,
-  errors: {
-    layerConflict: string;
-    shareFailed: string;
-    publishFailed: string;
-    subject: string;
-  },
-): Promise<PersistenceEvidence> {
-  const lane = { agentAddress };
-  let history = initialHistory;
-  if (history && historyIsAtLayer(history, targetLayer)) {
-    return {
-      layer: targetLayer,
-      ...(targetLayer === 'vm' && history.publishedUal ? { ual: history.publishedUal } : {}),
-    };
-  }
-  if (history?.memoryLayer) {
-    throw new SemanticProgramError(
-      errors.layerConflict,
-      `${errors.subject} already exists in ${historyLayerLabel(history)}`,
-      409,
-    );
-  }
-  if (!history) {
-    await agent.assertion.create(contextGraphId, name, lane);
-    await agent.assertion.write(contextGraphId, name, quads, lane);
-    await agent.assertion.finalize(contextGraphId, name, lane);
-    history = await agent.assertion.history(contextGraphId, name, lane);
-  } else if (!history.wmCurrentAssertion) {
-    await agent.assertion.write(contextGraphId, name, quads, lane);
-    await agent.assertion.finalize(contextGraphId, name, lane);
-    history = await agent.assertion.history(contextGraphId, name, lane);
-  }
-  if (!history?.wmCurrentAssertion) {
-    throw new SemanticProgramError(
-      errors.layerConflict,
-      `${errors.subject} was not finalized in Working Memory`,
-      502,
-    );
-  }
-  if (targetLayer === 'wm') return { layer: targetLayer };
-  if (!history?.swmCurrentAssertion) {
-    const share = await agent.assertion.promote(contextGraphId, name, lane);
-    if (!share.publishReady) {
-      throw new SemanticProgramError(
-        errors.shareFailed,
-        `${errors.subject} was not made publish-ready in Shared Working Memory`,
-        502,
-      );
-    }
-  }
-  if (targetLayer === 'swm') return { layer: targetLayer };
-  const publication = await agent.publishFromFinalizedAssertion(contextGraphId, name, lane);
-  if (publication.status !== 'confirmed' || publication.contextGraphError || !publication.ual) {
-    throw new SemanticProgramError(
-      errors.publishFailed,
-      publication.contextGraphError
-        ?? `${errors.subject} publish did not confirm (${publication.status})`,
-      502,
-    );
-  }
-  return { layer: targetLayer, ual: publication.ual };
-}

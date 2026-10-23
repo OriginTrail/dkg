@@ -1,3 +1,5 @@
+import { encryptedSkillTransport } from './_helpers/encrypted-skill-transport.js';
+import { SemanticProgramError } from '../src/semantic-runtime-types.js';
 import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -45,6 +47,59 @@ function membership(overrides: Record<string, unknown> = {}) {
 }
 
 describe('semantic runtime DKG inbox invocation', () => {
+  it.each(['direct', 'adapter'] as const)('rechecks destination revocation through real sender and receiver caches for %s deliveries', async mode => {
+    const transport = await encryptedSkillTransport();
+    let permitted = true;
+    let effects = 0;
+    const executions = new Map<string, { caller: string; program: string }>();
+    const authorAgent: any = {
+      peerId: 'peer-author',
+      ...membership({ getContextGraphOwner: vi.fn(async () => permitted ? `did:dkg:agent:${CALLER}` : `did:dkg:agent:${AUTHOR}`) }),
+      getDefaultAgentAddress: () => AUTHOR,
+      registerSkill: (iri: string, handler: any) => transport.receiver.registerSkill(iri, handler),
+      query: vi.fn(async () => programResult()), listLocalAgents: () => [{ agentAddress: AUTHOR }],
+      getCustodialAgentPrivateKey: () => AUTHOR_KEY,
+    };
+    const invoke = vi.fn(async (...args: any[]) => {
+      const id = args[4], previous = executions.get(id);
+      if (previous && (previous.caller !== args[9] || previous.program !== args[3])) {
+        throw new SemanticProgramError('INVOCATION_LAYER_CONFLICT', 'Different caller or Program', 409);
+      }
+      if (!previous) { effects++; executions.set(id, { caller: args[9], program: args[3] }); }
+      return { invocationId: id, executionIri: `urn:sr:execution:${id}`, executionLayer: 'wm', outputs: ['private-result'], persisted: true };
+    });
+    registerSemanticRuntimeInboxSkill(authorAgent, {} as any, { enabled: true }, undefined, { invoke: invoke as any });
+    let localCaller = CALLER, localKey = CALLER_KEY;
+    const sender: any = {
+      peerId: 'peer-sender', ...membership(), query: vi.fn(async () => programResult()),
+      resolveLocalAgentAddress: () => localCaller, getCustodialAgentPrivateKey: () => localKey,
+      listLocalAgents: () => [{ agentAddress: localCaller }], findAgentPeerIdsByAddress: vi.fn(async () => ['peer-author']),
+      invokeSkill: vi.fn(transport.send),
+    };
+    const adapter = createRemoteExecuteAdapter(sender, CONTEXT_GRAPH, CALLER, 'vm', 'wm');
+    const delivery = (program = PROGRAM) => mode === 'direct'
+      ? invokeSemanticProgramOnAuthorNode(sender, {} as any, CONTEXT_GRAPH, program, INVOCATION, 'vm', 'wm', { enabled: true }, undefined, localCaller)
+      : adapter.dispatch({ effectId: 'parent-effect' } as any, { nodeId: 'peer-author', programIri: program });
+    await delivery(); await delivery();
+    expect(effects).toBe(1);
+    // A stale forwarder still authorizes the wallet. The destination revokes it.
+    permitted = false;
+    await expect(delivery()).rejects.toMatchObject(mode === 'direct' ? { code: 'PROGRAM_CONTEXT_GRAPH_FORBIDDEN' } : { message: expect.stringContaining('PROGRAM_CONTEXT_GRAPH_FORBIDDEN') });
+    transport.restartSender();
+    await expect(delivery()).rejects.toMatchObject(mode === 'direct' ? { code: 'PROGRAM_CONTEXT_GRAPH_FORBIDDEN' } : { message: expect.stringContaining('PROGRAM_CONTEXT_GRAPH_FORBIDDEN') });
+    permitted = true;
+    await expect(delivery('urn:sr:program:other')).rejects.toMatchObject(mode === 'direct' ? { code: 'INVOCATION_LAYER_CONFLICT' } : { message: expect.stringContaining('INVOCATION_LAYER_CONFLICT') });
+    if (mode === 'direct') {
+      localCaller = TARGET; localKey = TARGET_KEY;
+      // Permit this second caller at the forwarding node only.
+      sender.getContextGraphOwner.mockResolvedValue(`did:dkg:agent:${TARGET}`);
+      await expect(delivery()).rejects.toMatchObject({ code: 'PROGRAM_CONTEXT_GRAPH_FORBIDDEN' });
+    }
+    expect(effects).toBe(1);
+    const ids = sender.invokeSkill.mock.calls.map((call: any[]) => call[3].messageId);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
   it('executes a replicated Program on the explicitly targeted node as that node operator', async () => {
     let inboxHandler: ((request: any, senderPeerId: string) => Promise<any>) | undefined;
     const expected = {
@@ -268,7 +323,7 @@ describe('semantic runtime DKG inbox invocation', () => {
     ) => {
       expect(peerId).toBe('peer-author');
       expect(skillUri).toBe(SEMANTIC_RUNTIME_INBOX_SKILL_IRI);
-      expect(options).toMatchObject({ messageId: INVOCATION, requestOwned: true });
+      expect(options).toMatchObject({ messageId: expect.any(String), requestOwned: true });
       return inboxHandler!({ skillUri, inputData }, 'peer-sender');
     });
     const senderAgent = {

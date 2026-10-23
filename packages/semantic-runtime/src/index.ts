@@ -104,6 +104,7 @@ export {
   type SnapshotRecord,
   type StrategyArtifactRecord,
 } from './persistence.js';
+export { ExecutionReceiptJournal, type TerminalExecutionReceipt, type ReceiptProgress } from './receipt-journal.js';
 export {
   TrustedStrategyActivationService,
   hashCanonicalPlan,

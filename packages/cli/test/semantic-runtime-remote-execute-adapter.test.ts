@@ -57,15 +57,18 @@ describe('wallet-authorized remote execution adapter', () => {
     expect(agent.getCustodialAgentPrivateKey).toHaveBeenCalledWith('local-agent');
     expect(agent.resolveLocalAgentAddress).toHaveBeenCalledWith(wallet.address);
     expect(agent.isPrivateContextGraph).toHaveBeenCalledWith('private-context');
-    expect(agent.invokeSkill).toHaveBeenCalledWith(input.nodeId, SEMANTIC_RUNTIME_INBOX_SKILL_IRI, expect.any(Uint8Array), { messageId: invocation.invocationId, timeoutMs: 600_000, requestOwned: true });
+    expect(agent.invokeSkill).toHaveBeenCalledWith(input.nodeId, SEMANTIC_RUNTIME_INBOX_SKILL_IRI, expect.any(Uint8Array), { messageId: expect.any(String), timeoutMs: 600_000, requestOwned: true });
     expect(result).toEqual({ status: 'succeeded', output: JSON.stringify({ executionIri: 'urn:sr:execution:child', ...(layer === 'vm' ? { executionUal: 'did:dkg:execution-child' } : {}) }), evidenceRef: layer === 'vm' ? 'did:dkg:execution-child' : 'urn:sr:execution:child' });
   });
 
   it('retries a protected effect with the same invocation id and gives a new effect a different id', async () => {
-    const { adapter, invocations } = setup();
+    const { adapter, invocations, agent } = setup();
     await adapter.dispatch(authorization, input);
     await adapter.dispatch({ ...authorization, attemptId: 'attempt-2' }, input);
     await adapter.dispatch({ ...authorization, effectId: 'urn:sr:effect:parent:2' }, input);
+    const deliveries = agent.invokeSkill.mock.calls.map(call => (call[3] as { messageId: string }).messageId);
+    expect(new Set(deliveries).size).toBe(3);
+    expect(deliveries).not.toContain(invocations[0].invocationId);
     expect(invocations[1].invocationId).toBe(invocations[0].invocationId);
     expect(invocations[2].invocationId).not.toBe(invocations[0].invocationId);
     expect(await adapter.reconcile({} as Parameters<typeof adapter.reconcile>[0], input)).toEqual({ status: 'unknown', evidenceRef: 'urn:sr:reconciliation:retry-same-invocation-required' });

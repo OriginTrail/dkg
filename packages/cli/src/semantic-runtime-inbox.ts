@@ -337,7 +337,7 @@ export async function invokeSemanticProgramOnAuthorNode(
       SEMANTIC_RUNTIME_INBOX_SKILL_IRI,
       encodeJson({ ...unsigned, authorization }),
       {
-        messageId: invocationId,
+        messageId: randomUUID(),
         timeoutMs: INVOCATION_TIMEOUT_MS,
         requestOwned: true,
       },

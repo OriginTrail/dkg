@@ -128,6 +128,7 @@ export function historyIsAtLayer(
   layer: SemanticMemoryLayer,
 ): boolean {
   return history.memoryLayer === ({ wm: 'WM', swm: 'SWM', vm: 'VM' } as const)[layer]
+    && Boolean(history[({ wm: 'wmCurrentAssertion', swm: 'swmCurrentAssertion', vm: 'vmCurrentAssertion' } as const)[layer]])
     && (layer !== 'vm' || Boolean(history.publishedUal));
 }
 

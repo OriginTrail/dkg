@@ -56,10 +56,13 @@ describe('semantic runtime daemon configuration', () => {
     const sourceProgramIri = 'urn:sr:program:original';
     const newProgramIri = 'urn:sr:program:my-copy';
     const source = '(strategy fork-me)';
+    let forkLayer = 'WM';
+    const forkUal = 'did:dkg:31337/0x2222222222222222222222222222222222222222/9';
     const tool = 'urn:sr:tool:investigator-v1';
     const permittedProgram = 'urn:sr:program:read-field-a';
     const written: Array<{ subject: string; predicate: string; object: string }> = [];
     let finalized = false;
+    let created = false;
     const agent = {
       getContextGraphOwner: vi.fn(async () => `did:dkg:agent:${copier}`),
       curatorDidMatchesChecksumAgent: vi.fn((owner: string, caller: string) =>
@@ -84,9 +87,12 @@ describe('semantic runtime daemon configuration', () => {
       assertion: {
         history: vi.fn(async () => finalized ? {
           wmCurrentAssertion: '11'.repeat(32),
-          state: 'finalized',
-        } : null),
-        create: vi.fn(async () => 'urn:test:fork-assertion'),
+          state: 'finalized', memoryLayer: forkLayer,
+          ...(forkLayer !== 'WM' ? { swmCurrentAssertion: '11'.repeat(32) } : {}),
+          ...(forkLayer === 'VM' ? { vmCurrentAssertion: '11'.repeat(32), publishedUal: forkUal } : {}),
+        } : created ? { memoryLayer: 'WM' } : null),
+        create: vi.fn(async () => { created = true; return 'urn:test:fork-assertion'; }),
+        query: vi.fn(async () => written),
         write: vi.fn(async (_cg: string, _name: string, quads: typeof written) => {
           written.push(...quads);
         }),
@@ -94,16 +100,16 @@ describe('semantic runtime daemon configuration', () => {
           finalized = true;
           return { merkleRoot: new Uint8Array(32), authorAddress: copier };
         }),
-        promote: vi.fn(async () => ({
+        promote: vi.fn(async () => { forkLayer = 'SWM'; return {
           promotedCount: written.length,
           sealed: true,
           publishReady: true,
-        })),
+        }; }),
       },
-      publishFromFinalizedAssertion: vi.fn(async () => ({
+      publishFromFinalizedAssertion: vi.fn(async () => { forkLayer = 'VM'; return {
         status: 'confirmed',
-        ual: 'did:dkg:31337/0x2222222222222222222222222222222222222222/9',
-      })),
+        ual: forkUal,
+      }; }),
     } as any;
 
     await expect(forkStoredSemanticProgram(
@@ -396,6 +402,7 @@ describe('semantic runtime daemon configuration', () => {
     );
     const written: Array<{ subject: string; predicate: string; object: string }> = [];
     let finalized = false;
+    let created = false;
     let promoted = false;
     let published = false;
     let replayOutputs: Array<{ output?: string; orderedOutputs?: string }> | undefined;
@@ -416,7 +423,7 @@ describe('semantic runtime daemon configuration', () => {
       memoryLayer: published ? 'VM' : promoted ? 'SWM' : 'WM',
       assertionGraph: graph,
       status: 'wm-ahead',
-    } : null);
+    } : created ? { memoryLayer: 'WM' } : null);
     const agent = {
       getDefaultAgentAddress: () => operator,
       listLocalAgents: () => [{ agentAddress: operator }],
@@ -461,7 +468,8 @@ describe('semantic runtime daemon configuration', () => {
       }),
       assertion: {
         history,
-        create: vi.fn(async () => 'urn:test:assertion'),
+        create: vi.fn(async () => { created = true; return 'urn:test:assertion'; }),
+        query: vi.fn(async () => written),
         write: vi.fn(async (_cg: string, _name: string, quads: typeof written) => {
           written.push(...quads);
         }),
@@ -547,7 +555,7 @@ describe('semantic runtime daemon configuration', () => {
         'vm', executionLayer, config, undefined, '0x2222222222222222222222222222222222222222',
       )).rejects.toMatchObject({ code: 'INVOCATION_LAYER_CONFLICT' });
       replayOutputs = [{ output: '"b"' }, { output: '"a"' }, { orderedOutputs: JSON.stringify('["b","a","b"]') }];
-      await expect(invoke()).resolves.toMatchObject({ outputs: ['b', 'a', 'b'] });
+      await expect(invoke()).rejects.toMatchObject({ code: 'EXECUTION_OUTPUT_INCONSISTENT' });
       replayOutputs = [{ output: '"a"' }, { output: '"b"' }];
       await expect(invoke()).rejects.toMatchObject({ code: 'EXECUTION_OUTPUT_ORDER_UNAVAILABLE' });
       replayOutputs = [{ output: '"a"' }, { orderedOutputs: JSON.stringify('["b"]') }];

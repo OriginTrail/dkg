@@ -1,4 +1,5 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { agentHttpRequestSigningMessage } from '@origintrail-official/dkg-core/graph-computer-protocol';
+import { randomBytes } from 'node:crypto';
 
 import { ethers } from 'ethers';
 
@@ -21,15 +22,7 @@ export interface AgentHttpRequest {
 
 /** UTF-8 JSON array, signed with Ethereum personal_sign (EIP-191 version 0x45). */
 export function agentHttpSigningMessage(input: AgentHttpRequest): string {
-  const address = ethers.getAddress(input.agentAddress).toLowerCase();
-  if (!/^[A-Z]+$/.test(input.method) || !input.path.startsWith('/') || input.path.startsWith('//')
-      || /[\r\n#]/.test(input.path) || !input.targetPeerId || /[\r\n]/.test(input.targetPeerId + input.contentType)
-      || !/^(0|[1-9][0-9]{0,15})$/.test(input.timestamp) || !Number.isSafeInteger(Number(input.timestamp))
-      || !/^[0-9a-f]{32,64}$/.test(input.nonce)) throw new Error('Invalid agent HTTP signing input');
-  return JSON.stringify([
-    'DKG-HTTP-REQUEST-V1', address, input.targetPeerId, input.method, input.path,
-    input.contentType, createHash('sha256').update(input.body).digest('hex'), input.timestamp, input.nonce,
-  ]);
+  return agentHttpRequestSigningMessage({ ...input, agentAddress: ethers.getAddress(input.agentAddress) });
 }
 
 function headers(input: AgentHttpRequest, signature: string): Record<string, string> {

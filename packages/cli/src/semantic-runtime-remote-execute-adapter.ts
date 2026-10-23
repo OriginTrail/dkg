@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -123,7 +123,7 @@ export function createRemoteExecuteAdapter(
           input.nodeId,
           SEMANTIC_RUNTIME_INBOX_SKILL_IRI,
           encodeJson({ ...unsigned, authorization: signed }),
-          { messageId: invocationId, timeoutMs: INVOCATION_TIMEOUT_MS, requestOwned: true },
+          { messageId: randomUUID(), timeoutMs: INVOCATION_TIMEOUT_MS, requestOwned: true },
         );
       } catch (error) {
         throw new Error(`REMOTE_NODE_UNREACHABLE:${safeMessage(error)}`);

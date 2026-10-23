@@ -1,3 +1,11 @@
+import { DKGAgent, KaNumberAllocator } from '@origintrail-official/dkg-agent';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import { DKGPublisher } from '@origintrail-official/dkg-publisher';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { ExecutionReceiptJournal, hashCanonicalPlan } from '@origintrail-official/dkg-semantic-runtime';
+import { ethers } from 'ethers';
+import { persistExecutionKnowledgeAsset } from '../src/semantic-runtime-execution-persistence.js';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -75,7 +83,7 @@ function fixture(layer: Layer = 'wm') {
     assertion: {
       history: vi.fn(async (_graph: string, name: string) => assets.get(name) ? { ...required(name) } : null),
       query: vi.fn(async (_graph: string, name: string) => [...required(name).quads]),
-      create: vi.fn(async (_graph: string, name: string) => { if (assets.has(name)) throw new Error('duplicate create'); assets.set(name, { quads: [] }); return `urn:asset:${name}`; }),
+      create: vi.fn(async (_graph: string, name: string) => { if (assets.has(name)) throw new Error('duplicate create'); assets.set(name, { quads: [], memoryLayer: 'WM' }); return `urn:asset:${name}`; }),
       write: vi.fn(async (_graph: string, name: string, input: typeof quads) => { required(name).quads.push(...input); }),
       finalize: vi.fn(async (_graph: string, name: string) => { Object.assign(required(name), { wmCurrentAssertion: assertion, memoryLayer: 'WM' }); }),
       promote: vi.fn(async (_graph: string, name: string) => { Object.assign(required(name), { swmCurrentAssertion: assertion, memoryLayer: 'SWM' }); return { publishReady: true }; }),
@@ -97,6 +105,127 @@ function fixture(layer: Layer = 'wm') {
 }
 
 describe('tenant-approved asset creation through real Wasm', () => {
+  it.each(['write', 'finalize'] as const)('recovers lost %s against native DKG create/history/query/finalize and SQLite reopen', async phase => {
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter(), wallet = new ethers.Wallet(`0x${'11'.repeat(32)}`);
+    const publisher = new DKGPublisher({ store, chain, eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair(), publisherPrivateKey: wallet.privateKey });
+    const agent = Object.create(DKGAgent.prototype) as any;
+    Object.assign(agent, { store, publisher, chain, config: {}, defaultAgentAddress: wallet.address,
+      reconciledKaAuthors: new Set(), localAgents: new Map(), log: { info() {}, warn() {}, debug() {}, error() {} } });
+    Object.defineProperty(agent, 'peerId', { value: 'native-receipt-node' });
+    let next = 1n;
+    agent.kaNumberAllocator = new KaNumberAllocator({ allocate: () => next++, reconcileFloor: () => {}, peekNext: () => next });
+    const native = agent.assertion;
+    const assertion = Object.fromEntries(Object.entries(native).map(([key, fn]) => [key, typeof fn === 'function' ? vi.fn((...args: any[]) => (fn as any)(...args)) : fn]));
+    Object.defineProperty(agent, 'assertion', { value: assertion });
+    const original = assertion[phase].getMockImplementation();
+    assertion[phase].mockImplementationOnce(async (...args: any[]) => {
+      if (phase === 'finalize') await original(...args);
+      throw new Error('lost native receipt acknowledgement');
+    });
+    const dir = mkdtempSync(join(tmpdir(), 'native-receipt-')); dirs.push(dir);
+    const path = join(dir, 'journal.sqlite'), executionId = 'urn:sr:execution:native-receipt';
+    let journalStore = new SemanticRuntimeStore(path);
+    try {
+      journalStore.registerStrategyArtifact({ artifactHash: hashCanonicalPlan(new Uint8Array([1])), strategyId: 'native', version: '1', canonicalPlan: new Uint8Array([1]), sourceRef: 'urn:native', reviewState: 'approved', createdAt: 1 });
+      journalStore.createExecution({ executionId, planId: hashCanonicalPlan(new Uint8Array([1])), partitionId: 'native', status: 'active', graphRevision: 'native-request', policyEpoch: 1n, rootProcessId: executionId, leaseEpoch: 0n });
+      const terminal = { contextGraphId: graph, name: 'native-execution-receipt', agentAddress: wallet.address, layer: 'wm' as const,
+        requestIdentity: 'native-request', quads: [{ subject: executionId, predicate: SR + 'orderedOutputs', object: JSON.stringify('["private-result"]') }], outputs: ['private-result'] };
+      let journal = new ExecutionReceiptJournal(journalStore, executionId); journal.prepare(terminal);
+      const persist = async () => persistExecutionKnowledgeAsset(agent, graph, terminal.name, wallet.address, terminal.quads,
+        await assertion.history(graph, terminal.name, { agentAddress: wallet.address }), 'wm', async () => {}, journal);
+      await expect(persist()).rejects.toThrow('lost native receipt acknowledgement');
+      const draft = await assertion.history(graph, terminal.name, { agentAddress: wallet.address });
+      expect(draft.memoryLayer).toBe('WM');
+      if (phase === 'write') { expect(draft.wmCurrentAssertion).toBeUndefined(); expect(await assertion.query(graph, terminal.name)).toEqual([]); }
+      journalStore.close(); journalStore = new SemanticRuntimeStore(path);
+      journal = new ExecutionReceiptJournal(journalStore, executionId);
+      await expect(persist()).resolves.toEqual({ layer: 'wm' });
+      expect((await assertion.history(graph, terminal.name)).wmCurrentAssertion).toMatch(/^[0-9a-f]{64}$/);
+      expect(assertion.create).toHaveBeenCalledTimes(1);
+      expect(assertion.finalize).toHaveBeenCalledTimes(1);
+      expect(await assertion.query(graph, terminal.name)).toEqual(expect.arrayContaining(terminal.quads.map(q => expect.objectContaining(q))));
+    } finally { journalStore.close(); await store.close(); }
+  });
+
+  const terminalCases = [
+    ...(['wm', 'swm', 'vm'] as const).flatMap(layer => ['create', 'write', 'partial-write', 'finalize'].map(phase => ({ layer, phase }))),
+    ...(['swm', 'vm'] as const).map(layer => ({ layer, phase: 'promote' })),
+    { layer: 'vm' as const, phase: 'publish' },
+  ];
+  it.each(terminalCases)('recovers a terminal $layer receipt after lost $phase acknowledgement and SQLite reopen', async ({ layer, phase }) => {
+    const f = fixture(layer);
+    const dir = mkdtempSync(join(tmpdir(), 'terminal-receipt-')); dirs.push(dir);
+    const database = join(dir, 'runtime.sqlite');
+    const first = await f.start(database);
+    const method = phase === 'partial-write' ? 'write' : phase === 'publish' ? 'publishFromFinalizedAssertion' : phase;
+    const owner = method === 'publishFromFinalizedAssertion' ? f.agent : f.agent.assertion;
+    const operation = (owner as any)[method];
+    const complete = operation.getMockImplementation();
+    let injected = false;
+    operation.mockImplementation(async (...args: any[]) => {
+      if (!injected && args[1].startsWith('semantic-execution-')) {
+        injected = true;
+        if (phase === 'partial-write') await complete(args[0], args[1], args[2].slice(0, 3), args[3]);
+        else if (phase !== 'write') await complete(...args);
+        throw new Error('terminal acknowledgement lost');
+      }
+      return complete(...args);
+    });
+    await expect(f.invoke(first)).rejects.toMatchObject({ code: 'EXECUTION_PERSIST_FAILED' });
+    expect(injected).toBe(true);
+    expect(first.store.execution(`urn:sr:execution:${id}`)?.status).toBe('active');
+    await first.stop(); runtimes.splice(runtimes.indexOf(first), 1);
+    const second = await f.start(database);
+    const start = vi.spyOn(second.host, 'startPlan');
+    const result = await f.invoke(second);
+    expect(result).toMatchObject({ persisted: true, executionLayer: layer });
+    expect(second.store.execution(result.executionIri)?.status).toBe('completed');
+    expect(f.created()).toHaveLength(1);
+    expect(f.agent.assertion.create.mock.calls.filter(([, name]) => name.startsWith('semantic-execution-'))).toHaveLength(1);
+    expect(start).not.toHaveBeenCalled();
+    const content = f.assets.get(`semantic-execution-${id}`)!;
+    expect(content.wmCurrentAssertion).toBeTruthy();
+    expect(new Set(content.quads.map(q => JSON.stringify(q))).size).toBe(content.quads.length);
+    if (layer === 'vm') expect(result.executionUal).toBe(`did:dkg:asset:semantic-execution-${id}`);
+    expect(await f.invoke(second)).toEqual(result);
+  });
+
+  it.each(['create', 'write', 'finalize', 'promote'] as const)('starts no later receipt mutation after revocation during %s', async phase => {
+    const f = fixture('vm');
+    const runtime = await f.start();
+    const complete = f.agent.assertion[phase].getMockImplementation()!;
+    f.agent.assertion[phase].mockImplementation(async (...args: any[]) => {
+      const result = await (complete as any)(...args);
+      if (args[1].startsWith('semantic-execution-')) f.binding.enabled = false;
+      return result;
+    });
+    await expect(f.invoke(runtime)).rejects.toMatchObject({ code: 'PROGRAM_INVOCATION_FORBIDDEN' });
+    const stages = ['create', 'write', 'finalize', 'promote'] as const;
+    for (const later of stages.slice(stages.indexOf(phase) + 1)) {
+      expect(f.agent.assertion[later].mock.calls.filter(([, name]) => name.startsWith('semantic-execution-'))).toHaveLength(0);
+    }
+    expect(f.agent.publishFromFinalizedAssertion.mock.calls.filter(([, name]) => name.startsWith('semantic-execution-'))).toHaveLength(0);
+    await expect(f.invoke(runtime)).rejects.toMatchObject({ code: 'PROGRAM_INVOCATION_FORBIDDEN' });
+  });
+
+  it.each(['finalize', 'promote', 'publish'] as const)('does not reissue an unresolved terminal %s', async phase => {
+    const f = fixture(phase === 'finalize' ? 'wm' : phase === 'promote' ? 'swm' : 'vm');
+    const runtime = await f.start();
+    const operation = phase === 'publish' ? f.agent.publishFromFinalizedAssertion : f.agent.assertion[phase];
+    const complete = operation.getMockImplementation()!;
+    operation.mockImplementation(async (...args: any[]) => {
+      if (args[1].startsWith('semantic-execution-')) throw new Error('still pending');
+      return (complete as any)(...args);
+    });
+    await expect(f.invoke(runtime)).rejects.toMatchObject({ code: 'EXECUTION_PERSIST_FAILED' });
+    const calls = operation.mock.calls.length;
+    await expect(f.invoke(runtime)).rejects.toMatchObject({ code: 'RECEIPT_REQUIRES_RECONCILIATION' });
+    expect(operation).toHaveBeenCalledTimes(calls);
+    expect(runtime.store.execution(`urn:sr:execution:${id}`)?.status).toBe('active');
+    expect(f.created()).toHaveLength(1);
+  });
+
   it.each(['wm', 'swm', 'vm'] as const)('creates content and the Execution in the approved %s layer; retries return the same receipt', async (layer) => {
     const f = fixture(layer);
     const runtime = await f.start();

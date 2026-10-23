@@ -120,6 +120,7 @@ createInterface({input:process.stdin}).on('line', line => {
       { tool: '<urn:tool:query>', operation: '"dkg/query"', witInterface: '"origintrail:semantic-runtime/query-catalog@0.1.0"' },
     ].map(row => ({ ...row, g: graph, policyVersion: '"1"', toolVersion: '"1"' }));
     const finalized = new Set<string>();
+    const receipts = new Map<string, any[]>();
     const agent = {
       canReadContextGraph: vi.fn(async () => true),
       listLocalAgents: () => [{ agentAddress: operator }], getCustodialAgentPrivateKey: () => '0x01',
@@ -136,8 +137,10 @@ createInterface({input:process.stdin}).on('line', line => {
         return { bindings: [] };
       }),
       assertion: {
-        history: vi.fn(async (_cg: string, name: string) => finalized.has(name) ? { wmCurrentAssertion: '11'.repeat(32), state: 'finalized' } : null),
-        create: vi.fn(async () => 'urn:assertion'), write: vi.fn(async () => {}),
+        history: vi.fn(async (_cg: string, name: string) => finalized.has(name) ? { wmCurrentAssertion: '11'.repeat(32), memoryLayer: 'WM', state: 'finalized' } : receipts.has(name) ? { memoryLayer: 'WM' } : null),
+        create: vi.fn(async (_cg: string, name: string) => { receipts.set(name, []); return 'urn:assertion'; }),
+        write: vi.fn(async (_cg: string, name: string, quads: any[]) => { receipts.get(name)!.push(...quads); }),
+        query: vi.fn(async (_cg: string, name: string) => receipts.get(name) ?? []),
         finalize: vi.fn(async (_cg: string, name: string) => { finalized.add(name); }),
       },
     } as any;

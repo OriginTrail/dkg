@@ -1,3 +1,5 @@
+import { ExecutionReceiptJournal } from '@origintrail-official/dkg-semantic-runtime';
+import { recoverTerminalExecutionReceipt } from './semantic-runtime-terminal-receipt.js';
 import { createHash } from 'node:crypto';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { canonicalizeJson, type CanonicalJsonValue } from '@origintrail-official/dkg-core';
@@ -53,9 +55,10 @@ export function assertRequestedToolPermissions(program: StoredSemanticProgram, b
 export async function resolveTypeScriptTools(agent: DKGAgent, runtime: ConfiguredSemanticRuntimeService,
   binding: SemanticProgramBinding, program: StoredSemanticProgram, config: SemanticRuntimeConfig, check: () => Promise<void>) {
   const digest = programBindingDigest(binding);
-  const resolved = await resolveProgramTools(agent, binding.contextGraphId, program, config, undefined,
-    binding.executorAgentAddress, binding.executorAgentAddress, binding.executionLayer ?? 'wm', undefined, check,
-    { binding, digest, assertAuthorized: check }, runtime.store, runtime.localLlmProvider);
+  const resolved = await resolveProgramTools({ agent, contextGraphId: binding.contextGraphId, program, config,
+    callerAgentAddress: binding.executorAgentAddress, executingAgentAddress: binding.executorAgentAddress,
+    executionLayer: binding.executionLayer ?? 'wm', assertAuthorized: check,
+    bound: { binding, digest, assertAuthorized: check }, assetStore: runtime.store, localLlmProvider: runtime.localLlmProvider });
   if (resolved.tools.some(tool => !tool.effective)) throw new SemanticProgramError('REQUIRED_TOOL_UNAVAILABLE', 'A requested adapter is unavailable', 409);
   return { registry: resolved.registry, policyHashHex: resolved.policyHashHex,
     public: { contextGraphId: binding.contextGraphId, programIri: program.programIri, programLayer: program.layer,
@@ -134,13 +137,20 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
     const layer = binding.executionLayer ?? 'wm';
     const previous = runtime.store.execution(executionIri);
     const history = await agent.assertion.history(graph, name, { agentAddress: executor.agentAddress });
+    const journal = new ExecutionReceiptJournal(runtime.store, executionIri);
+    if (previous && journal.terminal && ['active', 'completed'].includes(previous.status)) {
+      const result = await recoverTerminalExecutionReceipt(agent, runtime.store, journal, {
+        contextGraphId: graph, name, agentAddress: executor.agentAddress, layer, requestIdentity: identity,
+      }, invocationId, check);
+      return { ...result, ...(mayReadTrace ? { trace: readProgramTrace(runtime.store, executionIri) } : {}) };
+    }
     if (previous) {
       if (previous.graphRevision !== identity) throw new SemanticProgramError('INVOCATION_LAYER_CONFLICT', 'Invocation already has different inputs or authority', 409);
       if (previous.status !== 'completed') {
         // JavaScript continuations are not durable. Never replay partially run
         // workflows and accidentally repeat an external effect after a crash.
         if (previous.status === 'active') runtime.store.setExecutionStatus(executionIri, 'failed');
-        throw new SemanticProgramError('INVOCATION_NOT_RETRYABLE', 'Interrupted or failed TypeScript execution requires a new invocation ID', 409,
+        throw new SemanticProgramError('INVOCATION_NOT_RETRYABLE', 'Interrupted TypeScript execution has no terminal receipt; reconcile its effects before starting new work', 409,
           mayReadTrace ? readProgramTrace(runtime.store, executionIri) : undefined);
       }
       if (!history || !historyIsAtLayer(history, layer)) throw new SemanticProgramError('EXECUTION_PERSISTENCE_INCONSISTENT', 'Completed receipt is missing', 500);
@@ -200,14 +210,16 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
         tools: resolved.public.requiredTools, events: [], agents: [], outputs: [{ role: 'result', processId: new Uint8Array(), value: output }],
         childExecutions, startedAt, finishedAt: new Date() });
       quads.push(literalQuad(executionIri, `${SR}inputHash`, createHash('sha256').update(inputJson).digest('hex')));
-      const persistence = await persistExecutionKnowledgeAsset(agent, graph, name, executor.agentAddress, quads, history, layer);
-      await check();
+      journal.prepare({ contextGraphId: graph, name, agentAddress: executor.agentAddress, layer,
+        requestIdentity: identity, quads, outputs: [output] });
       trace.finish();
+      const persistence = await persistExecutionKnowledgeAsset(agent, graph, name, executor.agentAddress, quads, history, layer, check, journal);
+      await check();
       runtime.store.setExecutionStatus(executionIri, 'completed');
       return { ...(mayReadTrace ? { trace: trace.trace } : {}), invocationId, executionIri, executionLayer: layer, ...(persistence.ual ? { executionUal: persistence.ual } : {}), outputs: [output], persisted: true };
     } catch (error) {
       trace.finish(error);
-      runtime.store.setExecutionStatus(executionIri, 'failed');
+      if (!journal.terminal) runtime.store.setExecutionStatus(executionIri, 'failed');
       const failure = error instanceof SemanticProgramError ? error : budget.uncertainEffect
         ?? new SemanticProgramError('TYPESCRIPT_EXECUTION_FAILED', safeMessage(error), 422);
       // A revoked grant must not leak earlier successful reads through diagnostics.
