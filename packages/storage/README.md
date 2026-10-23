@@ -64,8 +64,10 @@ are in-memory stores and provide no restart durability.
 
 Stock managed `oxigraph-server` also exposes no restart-durable commitment:
 its HTTP API has no supported engine-owned persistence barrier. Ordinary reads,
-writes and supervised process restart remain available, but durable lifecycle
-completion retains its recovery record and stays pending. The
+writes and supervised process restart remain available. The dependent lifecycle
+integration (#3406) preserves existing healthy managed-server completion on
+acknowledged writes, with failed local writes retained for retry; that compatibility
+policy does not certify restart durability. The
 `writesDurableOnAcknowledgement` flag cannot override this managed-server
 boundary. A future supported engine integration must introduce its owner-bound
 barrier with the provider; this change ships no runtime persistence hook, custom
