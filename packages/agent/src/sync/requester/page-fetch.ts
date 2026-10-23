@@ -212,6 +212,8 @@ export type SyncPageResult = SyncPageResultFields & SharedMemoryCompletionFields
 export interface SyncPageProgress {
   readonly resumedFromOffset: number;
   readonly nextOffset: number;
+  readonly acceptedQuads: number; readonly acceptedHeapBytesEstimate: number;
+  readonly pageQuads: readonly Quad[];
 }
 
 function acceptedIncompletePrefixResult(
@@ -438,9 +440,9 @@ export interface SyncPageFetchOptions {
   readonly maxAcceptedQuads?: number;
   readonly maxAcceptedHeapBytesEstimate?: number;
   /**
-   * Soft owner boundary evaluated only after a page made forward progress.
-   * Returning true yields an incomplete prefix without classifying the peer as
-   * timed out; callers must still verify and checkpoint a safe graph boundary.
+   * Soft owner boundary after a page made forward progress, given the rows and
+   * estimated heap retained so far and the page's own rows. True yields an
+   * incomplete prefix without a timeout; callers still verify and checkpoint.
    */
   readonly shouldStopAfterPage?: (progress: SyncPageProgress) => boolean;
 }
@@ -1115,7 +1117,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
       // probes upward only after sustained success, at most doubling each time.
       adaptivePageSizer.onPageSuccess();
 
-      if (shouldStopAfterPage?.({ resumedFromOffset, nextOffset: offset })) {
+      if (shouldStopAfterPage?.({ resumedFromOffset, nextOffset: offset, acceptedQuads: allQuads.length, acceptedHeapBytesEstimate, pageQuads: parsed.quads })) {
         yielded = true;
         break;
       }
@@ -1394,9 +1396,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
 
   return {
     quads: allQuads,
-    ...(hasCompleteQuadRawOffsetMapping
-      ? { quadRawOffsets: allQuadRawOffsets }
-      : {}),
+    ...(hasCompleteQuadRawOffsetMapping ? { quadRawOffsets: allQuadRawOffsets } : {}),
     bytesReceived,
     decodedBytesReceived,
     resumedFromOffset,

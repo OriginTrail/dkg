@@ -1,3 +1,4 @@
+import { readBoundedStream as readAll } from './bounded-stream-read.js';
 import type { PeerId, Stream } from '@libp2p/interface';
 import type { StreamHandler as DKGStreamHandler } from './types.js';
 import type { DKGNode } from './node.js';
@@ -11,6 +12,7 @@ import {
   type MessageStreamPoolOptions,
 } from './message-stream-pool.js';
 import { withSpan, getMetrics } from './telemetry-api.js';
+import { RelayOnlyPeerMemory } from './relay-only-peer-memory.js';
 import { boundDuplexStreamBuffers, notifyInboundFailure, notifyInboundOpen,
   validateDuplexStreamOptions, type InboundDuplexDiagnostics, type InboundDuplexStage } from './duplex-stream-support.js';
 
@@ -318,6 +320,7 @@ export class ProtocolRouter {
    * anyway.
    */
   private readonly peerWireVariant = new Map<string, Map<string, 'pooled' | 'one-shot'>>();
+  private readonly relayOnlyPeers = new RelayOnlyPeerMemory();
 
   constructor(node: DKGNode, options?: ProtocolRouterOptions) {
     this.node = node;
@@ -876,14 +879,10 @@ export class ProtocolRouter {
         for (const connection of connections) considered.add(connection);
         return connections;
       };
+      const route = this.relayOnlyPeers.routeFor(peerIdStr, () => libp2p.peerStore.get(targetPeer));
       const reuseOptions: TryReuseExistingConnectionOptions = {
-        peerHasDirectAddrs: async () => {
-          const peer = await libp2p.peerStore.get(targetPeer);
-          return (peer.addresses ?? []).some(({ multiaddr }) => {
-            const address = multiaddr?.toString?.() ?? '';
-            return Boolean(address) && !address.includes('/p2p-circuit');
-          });
-        },
+        peerHasDirectAddrs: route.peerHasDirectAddrs,
+        reuseLimitedDespiteDirectAddrs: (connection) => route.reuseLimited(connection, options.resolverTimeoutMs),
         allowLimitedWithDirectAddrs: options.allowLimitedWithDirectAddrs,
         excludeConnections: options.excludeConnections,
       };
@@ -928,6 +927,8 @@ export class ProtocolRouter {
             { ...reuseOptions, allowLimitedWithDirectAddrs: true });
           if (!reused) throw error;
           stream = reused.stream;
+        } finally {
+          if (!signal.aborted) route.afterNormalDial(rawGetConnectionsFor(libp2p, targetPeer));
         }
       }
       if (signal.aborted) {
@@ -1427,9 +1428,8 @@ interface ReusableConnection {
  * needs it when considering a limited (circuit-relay) candidate;
  * resolving it eagerly would charge a peerStore hop to every
  * fast-path attempt including the common warm-direct-connection
- * happy path. The implementation in `send()` does
- * `peerStore.get(pid).then(p => p.addresses.some(non-circuit))`,
- * defensively returning `false` on miss so the Window D shape
+ * happy path. The router reads the peer store through `RelayOnlyPeerRoute`;
+ * a miss counts as no direct address so the Window D shape
  * (cold-cache, single inbound circuit) still benefits.
  */
 interface TryReuseExistingConnectionOptions {
@@ -1440,6 +1440,8 @@ interface TryReuseExistingConnectionOptions {
    * failed, proving that the cached direct route is not currently usable.
    */
   allowLimitedWithDirectAddrs?: boolean;
+  /** Reuse this limited connection anyway: a recent dial with those direct addresses ended on a relay. */
+  reuseLimitedDespiteDirectAddrs?: (connection: ReusableConnection) => boolean;
   /**
    * Connections to skip when iterating candidates.
    *
@@ -1512,7 +1514,8 @@ export async function tryReuseExistingConnection(
   // dialProtocol returning "no valid addresses for peer". CM
   // cannot auto-upgrade when there's nothing to upgrade to. So
   // the right guard is: skip limited candidates only when
-  // peerStore would tell CM to upgrade.
+  // peerStore would tell CM to upgrade, unless a recent normal dial
+  // showed those addresses end on a relay (relay-only-peer-memory.ts).
   //
   // For non-limited candidates (direct connections), no upgrade
   // race exists — use them directly without consulting peerStore.
@@ -1543,11 +1546,8 @@ export async function tryReuseExistingConnection(
   for (const conn of orderedCandidates) {
     if (conn.status && conn.status !== 'open') continue;
     if (exclude?.has(conn)) continue;
-    if ((conn as unknown as { limits?: unknown }).limits) {
-      if (!options.allowLimitedWithDirectAddrs && await peerStoreHasDirectAddrs()) {
-        continue;
-      }
-    }
+    if (conn.limits && !options.allowLimitedWithDirectAddrs && await peerStoreHasDirectAddrs()
+      && options.reuseLimitedDespiteDirectAddrs?.(conn) !== true) continue;
     try {
       const s = await conn.newStream(protocolId, {
         runOnLimitedConnection: true,
@@ -2032,25 +2032,6 @@ function isBenignStreamClosure(err: unknown): boolean {
   );
 }
 
-async function readAll(
-  stream: Stream | AsyncIterable<Uint8Array>,
-  maxBytes = DEFAULT_MAX_READ_BYTES,
-): Promise<Uint8Array> {
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for await (const chunk of stream) {
-    const buf = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk.subarray());
-    total += buf.length;
-    if (total > maxBytes) {
-      if ('abort' in stream && typeof (stream as Stream).abort === 'function') {
-        (stream as Stream).abort(new Error('read limit exceeded'));
-      }
-      throw new Error(`Read limit exceeded (${maxBytes} bytes)`);
-    }
-    chunks.push(buf);
-  }
-  return concat(chunks);
-}
 
 /**
  * Per-(peer, logical-protocol) wire variant memo. Persists across
@@ -2119,16 +2100,3 @@ ProtocolRouter.prototype.memoizePeerWire = function (
   }
   inner.set(logicalProtocolId, variant);
 };
-
-function concat(arrays: Uint8Array[]): Uint8Array {
-  if (arrays.length === 0) return new Uint8Array(0);
-  if (arrays.length === 1) return arrays[0];
-  const total = arrays.reduce((sum, a) => sum + a.length, 0);
-  const result = new Uint8Array(total);
-  let offset = 0;
-  for (const a of arrays) {
-    result.set(a, offset);
-    offset += a.length;
-  }
-  return result;
-}

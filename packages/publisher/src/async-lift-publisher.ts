@@ -1,3 +1,4 @@
+export type { AsyncLiftClaimControl } from './async-lift-claim-gate.js';
 export type {
   AsyncLiftAdmissionContext,
   ActiveLiftJobClaim,

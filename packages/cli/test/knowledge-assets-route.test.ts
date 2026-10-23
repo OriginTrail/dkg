@@ -446,6 +446,14 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(body.count).toBe(2);
       // Sorted: ex:A precedes ex:Z.
       expect(body.quads[0].subject).toBe('ex:A');
+      const descriptor = await getJson(daemon, `/api/knowledge-assets/sorted?contextGraphId=${LOCAL}`);
+      const author = String(descriptor.body.agentAddress);
+      for (const spelling of [author, author.toLowerCase(), caseVariantAddress(author)]) {
+        const equivalent = await getJson(daemon,
+          `/api/knowledge-assets/sorted/wm/quads?contextGraphId=${LOCAL}&agentAddress=${spelling}`);
+        expect(equivalent.status).toBe(200);
+        expect(equivalent.body).toEqual(body);
+      }
     });
 
     it('rejects a bad assertion name (400, no query)', async () => {
@@ -1061,6 +1069,12 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(readRes.status, `read: ${JSON.stringify(readRes.body)}`).toBe(200);
       expect(readRes.body.count).toBeGreaterThan(0);
       expect(readRes.body.quads.some((q: any) => q.subject === 'ex:token-pull')).toBe(true);
+      for (const spelling of [agent.agentAddress.toLowerCase(), caseVariantAddress(agent.agentAddress)]) {
+        const equivalent = await agent.get(
+          `/api/knowledge-assets/${name}/wm/quads?contextGraphId=${cg}&agentAddress=${spelling}`);
+        expect(equivalent.status).toBe(200);
+        expect(equivalent.body).toEqual(readRes.body);
+      }
     });
   });
 

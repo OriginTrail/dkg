@@ -506,6 +506,9 @@ export class Rfc64PublicCatalogNativeReceiverV1<
           throw new TypeError('catalog applied-head precommit returned an invalid lifecycle');
         }
       }
+      // Persist activated SWM and precommit VM writes before SQLite commits the head.
+      // Decorators forward flush; HTTP stores acknowledge writes at their backend.
+      await this.options.store.flush?.({ signal: precommitSignal });
       throwIfAborted(precommitSignal);
       return Object.freeze({ transaction, afterAppliedHead });
     } catch (cause) {

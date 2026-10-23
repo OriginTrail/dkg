@@ -239,9 +239,8 @@ export interface Rfc64CatalogAuthorSignerV1 {
 /** Compatibility name retained for the legacy public/open authoring surface. */
 export type Rfc64OpenCatalogAuthorSignerV1 = Rfc64CatalogAuthorSignerV1;
 
-const RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1 =
-  'https://dkg.network/ontology#rfc64RosterVersion';
-const RFC64_PRIVATE_ROSTER_VERSION_RADIX_V1 = 10_000_000_000_000n;
+import { RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1, RFC64_PRIVATE_ROSTER_VERSION_RADIX_V1,
+  readPrivateRosterGeneration } from './private-roster-version.js';
 
 export interface AcceptOpenContextGraphPolicyInputV1 {
   readonly networkId: NetworkIdV1;
@@ -1905,36 +1904,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<string> {
-    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
-    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const result = await this.store.query(`
-      SELECT ?version WHERE {
-        GRAPH <${metaGraph}> {
-          <${contextGraphUri}> <${RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1}> ?version .
-        }
-      }
-    `, { source: 'agent.rfc64.privateRosterVersion' });
-    if (result.type !== 'bindings' || result.bindings.length === 0) return '0';
-    const versions = new Set<string>();
-    for (const row of result.bindings) {
-      const raw = row['version'];
-      if (typeof raw !== 'string') {
-        throw new Error('RFC-64 private roster version is not a literal');
-      }
-      const lexical = raw.match(/^"([0-9]+)"(?:\^\^<[^>]+>)?$/u)?.[1]
-        ?? (/^[0-9]+$/u.test(raw) ? raw : undefined);
-      if (lexical === undefined || !/^(0|[1-9][0-9]*)$/u.test(lexical)) {
-        throw new Error('RFC-64 private roster version is not canonical');
-      }
-      if (BigInt(lexical) >= RFC64_PRIVATE_ROSTER_VERSION_RADIX_V1) {
-        throw new Error('RFC-64 private roster version exceeds its generation lane');
-      }
-      versions.add(lexical);
-    }
-    // The curator replaces its generation; a member's sync stores the newer one
-    // beside the one it held. Generations only advance, so the newest is current.
-    const newest = [...versions].map((version) => BigInt(version));
-    return newest.reduce((left, right) => (right > left ? right : left)).toString(10);
+    return readPrivateRosterGeneration(this.store, contextGraphId);
   }
 
   /**

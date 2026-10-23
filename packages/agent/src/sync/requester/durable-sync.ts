@@ -44,6 +44,7 @@ import {
   partitionVerifiedGraphScopedAssets,
 } from './verified-asset-preparation.js';
 import type { DurableSyncBudget } from './durable-sync-budget.js';
+import { createDurableDataRoundBoundary } from './durable-data-round.js';
 import {
   normalizeDurableSyncContext,
   type LegacyDurableSyncContext, type NormalizedDurableSyncContext,
@@ -484,6 +485,9 @@ function createManifestSettlementCheckpointer(options: {
     // The prefix helper includes every adjacent zero-public descriptor. Wait
     // until all of those descriptors have settled before binding this offset.
     if (!prefix || prefix.descriptorCount !== descriptorIndex) return undefined;
+    // Only a completed phase checkpoints the manifest's end, as terminal: no
+    // graph starts there for a non-terminal checkpoint to resume from.
+    if (safeOffset === manifest.manifestRowCount) return undefined;
     if (
       safeOffset === persistedOffset
       && descriptorIndex === persistedDescriptorCount
@@ -525,20 +529,6 @@ function createManifestSettlementCheckpointer(options: {
     persistedDescriptorCount = descriptorIndex;
     return { numericAdvance };
   };
-}
-
-function manifestHasCompleteGraphAfterOffset(
-  manifest: GraphScopedDurableManifestPlan,
-  resumedFromOffset: number,
-  nextOffset: number,
-): boolean {
-  let boundaryOffset = 0;
-  for (const descriptor of manifest.descriptors) {
-    boundaryOffset += descriptor.publicTripleCount;
-    if (boundaryOffset > nextOffset) return false;
-    if (boundaryOffset > resumedFromOffset) return true;
-  }
-  return false;
 }
 
 export function runDurableSync(
@@ -994,15 +984,14 @@ async function runDurableSyncWithBudget(
           )?.prefixDigest
           : undefined,
         preparedMeta.forceFreshUnboundDataSession,
-        graphScopedManifest && settlementSliceDeadline !== undefined
-          ? (progress) => (
-              Date.now() >= settlementSliceDeadline
-              && manifestHasCompleteGraphAfterOffset(
-                graphScopedManifest!,
-                progress.resumedFromOffset,
-                progress.nextOffset,
-              )
-            )
+        // A full-graph round holds what it fetched until it is verified and
+        // stored, so it ends at a checkpointable graph within a row/heap budget.
+        // A caller that needs one complete snapshot from row 0 keeps one round.
+        graphScopedManifest && exactAssetUals === undefined && onVerifiedFullSnapshot === undefined
+          ? createDurableDataRoundBoundary({ manifest: graphScopedManifest, settlementSliceDeadline,
+              onHardLimit: ({ resumedFromOffset, nextOffset, acceptedQuads }) => logWarn(ctx,
+                `Durable data round for "${pid}" reached its hard limit at ${acceptedQuads} rows `
+                  + `(offset ${resumedFromOffset}->${nextOffset}) without a complete graph to checkpoint`) })
           : undefined,
       );
       throwIfOperationAborted();
@@ -1430,6 +1419,8 @@ async function runDurableSyncWithBudget(
           ctx,
           `Yielding durable recovery for "${pid}" at an authenticated manifest boundary after the settlement slice expired`,
         );
+        // As after a whole page: the next round proves its DATA boundary with META fetched again from row zero.
+        if (updateMetaCheckpoint && metaResult.completed) deleteCheckpoint(metaResult.checkpointKey);
         markDurableTerminalBoundary(accumulator, false);
         endPhase();
         break;

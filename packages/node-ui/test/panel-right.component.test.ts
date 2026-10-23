@@ -19,6 +19,7 @@ const fetchConnectionsMock = vi.fn();
 const fetchLocalAgentIntegrationsMock = vi.fn();
 const fetchLocalAgentHistoryMock = vi.fn();
 const fetchCurrentAgentMock = vi.fn();
+const fetchContextGraphsMock = vi.fn();
 const importFileMock = vi.fn();
 const persistLocalAgentChatFailureMock = vi.fn();
 const streamLocalAgentChatMock = vi.fn();
@@ -53,6 +54,7 @@ vi.mock('../src/ui/api-wrapper.js', () => ({
     // through the wrapper (not the named import). Wire the same mock
     // through the wrapper so the hook resolves under test.
     fetchCurrentAgent: fetchCurrentAgentMock,
+    fetchContextGraphs: fetchContextGraphsMock,
   },
 }));
 
@@ -77,9 +79,14 @@ describe('PanelRight component', () => {
   afterEach(() => vi.unstubAllGlobals());
   beforeEach(() => {
     vi.clearAllMocks();
+    fetchContextGraphsMock.mockImplementation(async () => {
+      const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+      return { contextGraphs: useProjectsStore.getState().contextGraphs };
+    });
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     localStorage.clear();
     Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal('EventSource', class { addEventListener() {} close() {} });
 
     fetchAgentsMock.mockResolvedValue({ agents: [{
       agentUri: 'did:dkg:agent:peer-2',
@@ -137,6 +144,29 @@ describe('PanelRight component', () => {
       extraction: { status: 'completed', tripleCount: 4, pipelineUsed: 'markdown' },
     });
     apiFetchMemorySessionsMock.mockResolvedValue({ sessions: [] });
+  });
+
+  it('keeps the chat graph picker live when the sidebar collapses during its initial inventory load', async () => {
+    let reply!: (value: any) => void;
+    fetchContextGraphsMock.mockReturnValueOnce(new Promise(resolve => { reply = resolve; }));
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const { useContextGraphInventory } = await import('../src/ui/hooks/useContextGraphInventory.js');
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    useProjectsStore.setState({ contextGraphs: [], loading: false, inventoryLoaded: false, activeProjectId: null });
+    function SidebarInventory() { useContextGraphInventory(); return null; }
+    const container = document.createElement('div'); document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(React.createElement(React.Fragment, {},
+        React.createElement(SidebarInventory, { key: 'sidebar' }), React.createElement(PanelRight, { key: 'chat' }))));
+      await act(async () => root.render(React.createElement(React.Fragment, {}, React.createElement(PanelRight, { key: 'chat' }))));
+      await act(async () => reply({ contextGraphs: [{ id: 'loaded', name: 'Loaded graph', callerInvolved: true }] }));
+      const picker = container.querySelector('.v10-local-agent-target-select .v10-select-trigger') as HTMLButtonElement;
+      expect(picker).not.toBeNull();
+      expect(picker.disabled).toBe(false);
+      await act(async () => picker.click());
+      expect(document.body.textContent).toContain('Loaded graph');
+    } finally { await act(async () => root.unmount()); container.remove(); }
   });
 
   it.each(['https', 'http', 'no-crypto'])('local-LLM send on %s exposes results or early errors', async (origin) => {

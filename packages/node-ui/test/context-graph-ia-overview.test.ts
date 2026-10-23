@@ -3,6 +3,7 @@
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { belongsInMyProjectsSidebar, belongsInContextOracleSidebar, classifyContextOracleEntry } from '../src/ui/lib/contextGraphSidebar.js';
 
 // Codex bug L — the `'unknown'` branch of PendingJoinRequestsSection
 // now optimistically fires `listJoinRequests`. Mock the API module so
@@ -89,6 +90,32 @@ async function render(element: React.ReactElement): Promise<{ container: HTMLDiv
 }
 
 describe('Context Graph IA and Overview', () => {
+  it.each([
+    { accessPolicy: 'public', subscribed: true, synced: false, label: 'Public subscriber' },
+    { accessPolicy: 'public', subscribed: false, synced: true, label: 'Public viewer' },
+    { accessPolicy: 'public', subscribed: false, synced: false, label: 'Public viewer' },
+    { accessPolicy: 'private', subscribed: true, synced: true, label: 'Not joined' },
+    { accessPolicy: undefined, subscribed: true, synced: true, label: 'Not joined' },
+  ])('explains $label without claiming membership for a non-participant', async ({ label, ...state }) => {
+    const { container, root } = await render(React.createElement(ProjectOverviewCard, {
+      cg: { id: 'public-readable', name: 'Readable graph', callerInvolved: false, ...state },
+      memory: baseMemory, participants: [], currentAgent: { agentDid: 'did:dkg:agent:viewer' },
+    }));
+    try {
+      const role = container.querySelector('.v10-po-identity-pair .v10-po-badge');
+      expect(role?.textContent?.trim()).toBe(label);
+      expect(role?.getAttribute('data-role')).toBe('viewer');
+      if (state.accessPolicy === 'public') {
+        expect(role?.getAttribute('title')).toContain('public');
+        expect(container.textContent).not.toContain('Not joined');
+        const cg = { id: 'public-readable', name: 'Readable graph', callerInvolved: false, ...state };
+        expect(belongsInMyProjectsSidebar(cg, null)).toBe(false);
+        expect(belongsInContextOracleSidebar(cg, null)).toBe(true);
+        expect(classifyContextOracleEntry(cg)).toBe(state.subscribed || state.synced ? 'project' : 'catalogue');
+      }
+    } finally { await act(async () => root.unmount()); }
+  });
+
   beforeEach(() => {
     document.body.innerHTML = '';
     // Reset the listJoinRequests mock back to a benign empty

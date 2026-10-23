@@ -292,7 +292,7 @@ export interface AgentIdentity {
   nodeIdentityId: string;
 }
 
-export const fetchCurrentAgent = () => get<AgentIdentity>('/api/agent/identity');
+export { fetchCurrentAgent } from './agent-identity-api.js';
 
 export async function createContextGraph(
   id: string,

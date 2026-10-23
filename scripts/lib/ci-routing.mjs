@@ -306,12 +306,12 @@ const IDENTITY_WALLET_EVM_PATTERNS = [
   /^packages\/node-ui\/src\/rdf-literal\.ts$/,
   /^packages\/node-ui\/src\/ui\/web3\//,
   /^packages\/node-ui\/src\/ui\/pages\/identity-wallets\//,
-  /^packages\/node-ui\/src\/ui\/(?:api|assertion-identity|assertions-page|query-bindings|query-api|query-transport|http|identity-wallet-api|pca-api)\.ts$/,
+  /^packages\/node-ui\/src\/ui\/(?:api|agent-identity-api|assertion-identity|assertions-page|query-bindings|query-api|query-transport|http|identity-wallet-api|pca-api)\.ts$/,
   /^packages\/node-ui\/src\/ui\/(?:lib\/(?:nativeGasSymbol|apiToken|randomUUID|read-cache)|stores\/wallet)\.ts$/,
   /^packages\/node-ui\/integration\/identity-wallet-actions-v10\.test\.ts$/,
   // The daemon route the suite drives and the CLI modules it loads.
   /^packages\/cli\/src\/daemon\/routes\/(?:identity-wallets|restricted-browser-wallet-rpc)\.ts$/,
-  /^packages\/cli\/src\/(?:daemon\/http-utils|daemon\/reconcile-unavailable|daemon\/read-authority-diagnostics|daemon\/context-graph-write-readiness|daemon\/context-graph-catchup-progress|context-graph-identifiers|auth|boolean-env-override|config|entity-search\/types|oxigraph-memory-limits|runtime-assets)\.ts$/,
+  /^packages\/cli\/src\/(?:daemon\/http-utils|daemon\/reconcile-unavailable|daemon\/write-context-graph-preflight|daemon\/write-preflight-diagnostics|daemon\/write-preflight-attribution|daemon\/read-authority-diagnostics|daemon\/warning-gate|daemon\/context-graph-write-readiness|daemon\/context-graph-catchup-progress|context-graph-identifiers|auth|boolean-env-override|config|entity-search\/types|oxigraph-memory-limits|runtime-assets)\.ts$/,
 ];
 
 // File-level triggers: lanes or EVM scopes that specific paths select on top
@@ -586,11 +586,21 @@ export const SUPPORT_PATH_ROUTES = Object.freeze([
     reason: 'the CLI devnet-publish smoke test runs the publish helpers',
   },
   {
+    pattern: /^scripts\/repro\/rfc64-catalog-durable-head\.mts$/,
+    lanes: ['tornado_agent'],
+    reason: 'the required agent sidecar runs the isolated catalog process-death campaign',
+  },
+  {
     // packages/chain/test/sync-chain-abis.unit.test.ts runs a copy of it against
     // temporary ABI directories.
     pattern: /^scripts\/sync-chain-abis\.mjs$/,
     lanes: ['tornado_core'],
     reason: 'the chain lane runs the ABI sync script against temporary directories',
+  },
+  {
+    pattern: /^scripts\/repro\/publisher-live-control-(?:restart\.test|worker)\.mts$/,
+    lanes: ['bura_cli'],
+    reason: 'the required CLI lane runs the five-start publisher control durability campaign',
   },
   ...BUILD_ONLY_SCRIPTS.map((family) => ({ pattern: scriptsPattern(family), lanes: [], reason: family.reason })),
   {

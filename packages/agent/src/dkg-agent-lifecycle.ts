@@ -301,6 +301,7 @@ import  {
   syncAdmissionWouldBeRefused,
   withGlobalSyncBackpressure,
 } from './sync/backpressure.js';
+import { syncRefusalReporter } from './sync/control-plane-refusals.js';
 import {
   contextGraphPriority,
   countSyncPriorityClasses,
@@ -521,7 +522,7 @@ import {
   type SyncPeerResolution,
 } from './dkg-agent-cg-resolve.js';
 import { runCuratorMetaRefreshFromPeer } from './curator-meta-refresh.js';
-import { ensureCoreHostedDefinition, refreshCoreHostedDefinitionBeforeServing } from './core-hosted-definition.js';
+import { ensureCoreHostedDefinition, noteCoreHostedOwnerShare, refreshCoreHostedDefinitionBeforeServing } from './core-hosted-definition.js';
 import { isCanonicalAuthoritativeContextGraphId } from
   './context-graph-binding-state.js';
 import { projectDormantContextGraphIdentities } from './context-graph-dormant-identity.js';
@@ -1415,6 +1416,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         });
       }
     };
+    const logInfo = (opCtx: OperationContext, message: string): void => this.log.info(opCtx, message);
     try {
       return await withGlobalSyncBackpressure(
         {
@@ -1429,7 +1431,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           selectedSwmPriority,
           reservedSlotOnly: admission.reservedSlotOnly,
           signal: admissionBoundary.signal,
-          logInfo: (opCtx, message) => this.log.info(opCtx, message),
+          logInfo,
+          // A control-plane fetch refused at once is counted, one warning per interval and at node stop.
+          reportRefusal: syncRefusalReporter(
+            { label, source, contextGraphId }, this.controlPlaneRefusals, logInfo, this.node.stopSignal,
+          ),
         },
         timedWork,
       );
@@ -1767,6 +1773,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.networkAdmissionCoordinator = new NetworkAdmissionCoordinator({
       admission: this.networkAdmission,
       identity: this.config.networkIdentity,
+      cacheIdentities: this.config.coreChainCacheNetworks.map(n => n.identity),
       selfPeerId: this.node.peerId.toString(),
       sign: (payload) => this.wallet.sign(payload),
       sendIdentityProbe: (peerId, data, options) =>
@@ -1939,7 +1946,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // the sender's quorum tracker can upgrade queued → delivered
     // after receiver-side application succeeds (rather than the
     // current proxy through substrate-level wire delivery).
-    this.messenger.register(PROTOCOL_SWM_UPDATE, async (data, peerId) => this.handleSwmUpdate(data, peerId));
+    this.messenger.register(PROTOCOL_SWM_UPDATE, async (data, peerId) => {
+      // On a Core, a share the graph's owner signed ties the delivering node to the graph (`core-hosted-definition.ts`).
+      noteCoreHostedOwnerShare(this, data, peerId);
+      return this.handleSwmUpdate(data, peerId);
+    });
     // PR-C codex R7: tell Messenger that the 1-byte rejection
     // sentinel is an APP-LEVEL rejection — Messenger's
     // protocol-level `delivered` counter + latency histogram

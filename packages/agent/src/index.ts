@@ -222,6 +222,7 @@ export {
 } from './ccl-policy.js';
 export { ContextGraphPolicyAuthorizationError } from './dkg-agent-ownership.js';
 export { DKGAgent } from './dkg-agent.js';
+export type { PrivateAccessRequest, PrivateAccessResponse } from './private-access-request.js';
 export { resolveWorkingMemoryIdentityAliases } from './working-memory-identity.js';
 export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
 export {
@@ -660,3 +661,5 @@ export {
 // exported. The serve-side resolver `shouldWithholdAgentsDurableMeta` stays
 // internal; only the in-agent lifecycle (at its env boundary) + tests use it.
 export { resolveSyncAgentsMeta, parseBooleanEnv } from './sync/agents-meta-policy.js';
+
+export type { CoreChainCacheNetwork } from './core-chain-cache-config.js';
