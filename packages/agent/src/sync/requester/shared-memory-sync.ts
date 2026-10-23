@@ -676,7 +676,6 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       const dataPhase = await recoveryBoundary.read(() => fetchPublicSwmDataPhase({
         contextGraphId: pid, remotePeerId, metaQuads: fetchedMetaQuads, registeredSubGraphNames: verificationSubGraphNames, excludedSubGraphNames,
         metaWhole: wsMetaResult.completed && !wsMetaResult.timedOut && wsMetaResult.resumedFromOffset === 0,
-        verifyMetadata: (metaQuads) => processSharedMemoryBatch([], metaQuads, pid, verificationSubGraphNames, excludedSubGraphNames),
         fetch: () => fetchRecoveryPages(pid, 'data', wsGraph, deadline, workAdmission),
       }));
       const wsDataResult = dataPhase.result;
@@ -689,7 +688,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
         : wsDataResult.quads.filter((quad) => (
           isNamedSubgraphSharedMemoryDataGraph(pid, quad.graph)
         ));
-      const processed = dataPhase.metadataOnly ?? await recoveryBoundary.read(() => processSharedMemoryBatch(
+      const processed = await recoveryBoundary.read(() => processSharedMemoryBatch(
         dataPhase.legacyQuads(fetchedDataQuads),
         fetchedMetaQuads,
         pid,
@@ -794,7 +793,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       // no head rows to describe.
       if (snapshotMaterializer && wsMetaResult.completed) {
         try {
-          const descriptors = dataPhase.descriptors ?? parseGraphScopedSwmRecoveryDescriptors({
+          const descriptors = parseGraphScopedSwmRecoveryDescriptors({
             contextGraphId: pid,
             metaQuads: processed.verifiedMeta,
             // Without the subgraph admission context every KA under a

@@ -11,7 +11,7 @@ import {
   workspaceKnowledgeAssetOperationSnapshotGraph,
 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { fetchPublicSwmDataPhase } from '../src/sync/requester/public-swm-data-phase.js';
+import { fetchPublicSwmDataPhase, planPublicSwmDataPhase } from '../src/sync/requester/public-swm-data-phase.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import { processSharedMemoryBatch } from '../src/sync-verify-worker-impl.js';
@@ -53,23 +53,18 @@ function legacyMeta(root: string): Quad[] {
 /** The gate over `metaQuads`, with a fetch that records whether it ran and serves `served`. */
 async function gate(metaQuads: Quad[], options: { whole?: boolean; served?: Quad[] } = {}) {
   const fetch = vi.fn(async () => page(options.served ?? []));
-  const verifyMetadata = vi.fn((quads: Quad[]) => Promise.resolve(processSharedMemoryBatch([], quads, CG, [], [])));
-  const phase = await fetchPublicSwmDataPhase({
-    contextGraphId: CG,
-    remotePeerId: PEER,
-    metaQuads,
-    metaWhole: options.whole ?? true,
-    verifyMetadata,
-    fetch,
-  });
-  return { phase, fetch, verifyMetadata };
+  const metadata = { contextGraphId: CG, metaQuads, metaWhole: options.whole ?? true };
+  const phase = await fetchPublicSwmDataPhase({ ...metadata, remotePeerId: PEER, fetch });
+  return { phase, fetch, plan: planPublicSwmDataPhase(metadata) };
 }
 
-describe('the data phase of a public shared-memory round (#3421)', () => {
-  it('is not fetched for the metadata of graph-scoped shares: complete and empty, with the metadata\'s verification', async () => {
-    const share = fixtures.share({ version: 1, operationId: 'op-1', marker: 'one', ual: 'did:dkg:hardhat:31337/0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/1' });
+const SHARE_UAL = 'did:dkg:hardhat:31337/0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/1';
 
-    const { phase, fetch } = await gate(share.meta);
+describe('the data phase of a public shared-memory round (#3421)', () => {
+  it('is not fetched for the metadata of graph-scoped shares: complete and empty', async () => {
+    const share = fixtures.share({ version: 1, operationId: 'op-1', marker: 'one', ual: SHARE_UAL });
+
+    const { phase, fetch, plan } = await gate(share.meta);
 
     expect(fetch).not.toHaveBeenCalled();
     expect(phase.result).toEqual({
@@ -81,34 +76,31 @@ describe('the data phase of a public shared-memory round (#3421)', () => {
       completed: true,
       timedOut: false,
     });
-    expect(phase.metadataOnly?.verifiedMeta).toHaveLength(share.meta.length);
-    expect(phase.descriptors?.map(({ assertionGraph }) => assertionGraph)).toEqual([share.assertionGraph]);
+    expect(plan).toEqual({ fetch: false, transportGraphs: new Set([share.assertionGraph]) });
   });
 
   it('is fetched when the metadata names a root entity, and keeps graph-scoped transport graphs out of the root check', async () => {
-    const share = fixtures.share({ version: 1, operationId: 'op-1', marker: 'one', ual: 'did:dkg:hardhat:31337/0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/1' });
+    const share = fixtures.share({ version: 1, operationId: 'op-1', marker: 'one', ual: SHARE_UAL });
     const legacy: Quad = { subject: 'urn:legacy:root', predicate: 'http://schema.org/name', object: '"kept"', graph: DATA_GRAPH };
     const transported: Quad = { subject: 'urn:snap:one:0', predicate: 'http://schema.org/status', object: '"one"', graph: share.assertionGraph };
 
     const { phase, fetch } = await gate([...share.meta, ...legacyMeta('urn:legacy:root')], { served: [legacy, transported] });
 
     expect(fetch).toHaveBeenCalledTimes(1);
-    expect(phase.metadataOnly).toBeUndefined();
     expect(phase.legacyQuads(phase.result.quads)).toEqual([legacy]);
   });
 
   it('is fetched for a legacy root whose operation names no creator, which the verifier still admits rows for', async () => {
     const withoutCreator = legacyMeta('urn:legacy:root').filter((row) => row.predicate !== `${DKG}publisherPeerId`);
+    expect(processSharedMemoryBatch([], withoutCreator, CG, [], []).entityCreators).toEqual([]);
 
-    const { phase, fetch, verifyMetadata } = await gate(withoutCreator);
+    const { fetch } = await gate(withoutCreator);
 
-    expect((await verifyMetadata.mock.results[0]!.value).entityCreators).toEqual([]);
     expect(fetch).toHaveBeenCalledTimes(1);
-    expect(phase.metadataOnly).toBeUndefined();
   });
 
   it('is fetched when the metadata is not whole, is empty, or does not parse, and then checks every quad', async () => {
-    const share = fixtures.share({ version: 1, operationId: 'op-1', marker: 'one', ual: 'did:dkg:hardhat:31337/0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/1' });
+    const share = fixtures.share({ version: 1, operationId: 'op-1', marker: 'one', ual: SHARE_UAL });
     const quad: Quad = { subject: 'urn:any', predicate: 'http://schema.org/name', object: '"x"', graph: share.assertionGraph };
     const notWhole = await gate(share.meta, { whole: false, served: [quad] });
     const empty = await gate([], { served: [quad] });
@@ -118,12 +110,11 @@ describe('the data phase of a public shared-memory round (#3421)', () => {
       : row));
     const unparsed = await gate(broken, { served: [quad] });
 
-    for (const { phase, fetch } of [notWhole, empty, unparsed]) {
+    for (const { phase, fetch, plan } of [notWhole, empty, unparsed]) {
       expect(fetch).toHaveBeenCalledTimes(1);
+      expect(plan.transportGraphs.size).toBe(0);
       expect(phase.legacyQuads(phase.result.quads)).toEqual([quad]);
     }
-    expect(notWhole.verifyMetadata).not.toHaveBeenCalled();
-    expect(empty.verifyMetadata).not.toHaveBeenCalled();
   });
 
   it('is fetched for a graph-backed snapshot, whose bytes travel in it, and keeps its graphs out of the root check', async () => {
@@ -134,11 +125,10 @@ describe('the data phase of a public shared-memory round (#3421)', () => {
       .concat({ subject: share.operationSubject, predicate: `${DKG}publicSnapshotGraph`, object: snapshotGraph, graph: META_GRAPH });
     const inLocator: Quad = { subject: 'urn:snap:g:0', predicate: 'http://schema.org/status', object: '"g"', graph: snapshotGraph };
 
-    const { phase, fetch } = await gate(graphBacked, { served: [inLocator] });
+    const { phase, fetch, plan } = await gate(graphBacked, { served: [inLocator] });
 
-    expect(phase.descriptors?.map(({ snapshotSource }) => snapshotSource.locator)).toEqual([{ kind: 'graph', graph: snapshotGraph }]);
+    expect(plan).toEqual({ fetch: true, transportGraphs: new Set([share.assertionGraph, snapshotGraph]) });
     expect(fetch).toHaveBeenCalledTimes(1);
-    expect(phase.metadataOnly).toBeUndefined();
     expect(phase.legacyQuads(phase.result.quads)).toEqual([]);
   });
 });

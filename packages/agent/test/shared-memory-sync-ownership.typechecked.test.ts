@@ -148,6 +148,9 @@ describe('runSharedMemorySync ownership hydration', () => {
     const subData = { graph: SUB_GRAPH_SWM, subject: 'urn:subgraph:legacy-owned', predicate: STATUS, object: '"sub"' };
     const rootMeta = { graph: ROOT_META_GRAPH, subject: 'urn:op:root', predicate: RDF_TYPE, object: `${DKG}WorkspaceOperation` };
     const subMeta = { graph: SUB_GRAPH_META, subject: 'urn:op:sub', predicate: RDF_TYPE, object: `${DKG}WorkspaceOperation` };
+    // Legacy operations name their roots; a round fetches the data phase for them (#3421).
+    const rootRoot = { graph: ROOT_META_GRAPH, subject: 'urn:op:root', predicate: `${DKG}rootEntity`, object: rootData.subject };
+    const subRoot = { graph: SUB_GRAPH_META, subject: 'urn:op:sub', predicate: `${DKG}rootEntity`, object: subData.subject };
 
     const summary = await runSharedMemorySync({
       mode: { kind: 'ordinary' },
@@ -156,7 +159,7 @@ describe('runSharedMemorySync ownership hydration', () => {
       contextGraphIds: [CG_ID],
       createContextGraphSyncDeadline: () => Date.now() + 30_000,
       fetchSyncPages: async (_ctx, _peer, _cg, _includeSwm, phase) => (
-        phase === 'data' ? page([rootData, subData], phase) : page([rootMeta, subMeta], phase)
+        phase === 'data' ? page([rootData, subData], phase) : page([rootMeta, rootRoot, subMeta, subRoot], phase)
       ),
       processSharedMemoryBatch: async (data, meta) => {
         processedBatches.push({ data: [...data], meta: [...meta] });
@@ -181,11 +184,10 @@ describe('runSharedMemorySync ownership hydration', () => {
       logDebug: () => {},
     });
 
-    // The metadata is verified alone first: its legacy roots call for the data phase (#3421).
-    expect(processedBatches).toEqual([{ data: [], meta: [subMeta] }, { data: [subData], meta: [subMeta] }]);
-    expect(inserted).toEqual([subData, subMeta]);
+    expect(processedBatches).toEqual([{ data: [subData], meta: [subMeta, subRoot] }]);
+    expect(inserted).toEqual([subData, subMeta, subRoot]);
     expect(summary.insertedDataTriples).toBe(1);
-    expect(summary.insertedMetaTriples).toBe(1);
+    expect(summary.insertedMetaTriples).toBe(2);
   });
 
   it('hydrates root and sub-graph SWM ownership under separate keys', async () => {
