@@ -1,3 +1,4 @@
+import type { LocalFirstWriteProvenance } from './context-graph-write-provenance.js';
 import type { CoreChainCacheNetwork } from './core-chain-cache-config.js';
 import type { PreparedContentCacheConfig } from './sync/responder/prepared-content-cache.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -984,7 +985,7 @@ export type ContextGraphSubscriptionRehydrationInternalStatus = Omit<
   keyof ContextGraphDormancyProjection | 'dormant'
 >;
 
-export interface ContextGraphWritePreflightProbe {
+export interface ContextGraphWritePreflightProbe extends LocalFirstWriteProvenance {
   /**
    * Explicit, REQUIRED store-availability discriminant. `true` when every
    * store-backed read the probe issued answered, `false` when at least one

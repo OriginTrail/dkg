@@ -59,6 +59,7 @@ import {
   type RpcRequestGovernorPolicyInput,
 } from '@origintrail-official/dkg-chain';
 import { runtimeAssetRoots } from './runtime-assets.js';
+import type { SemanticRuntimeNodeSettings } from './semantic-runtime-node-settings.js';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -634,7 +635,7 @@ export interface LoggingConfig {
   kaPublishLifecycleDebug?: boolean;
 }
 
-export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLimits' | 'preparedContentCache'> {
+export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLimits' | 'preparedContentCache'>, SemanticRuntimeNodeSettings {
   /** Lower RPC usage by using the DKG Core chain cache. Core service defaults on. Edge use is opt-in. */
   DKG_Core_chain_cache?: boolean;
   name: string;
@@ -889,10 +890,10 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
   localAgentIntegrations?: Record<string, LocalAgentIntegrationConfig>;
   /**
    * API authentication. When enabled, all non-public endpoints require
-   * a Bearer token in the Authorization header. A token is auto-generated
-   * on first start and stored in `<DKG_HOME>/auth.token`.
+   * a verified agent-key signature or a Bearer token. A legacy token is
+   * auto-generated on first start and stored in `<DKG_HOME>/auth.token`.
    */
-  auth?: { enabled?: boolean; tokens?: string[] };
+  auth?: { enabled?: boolean; tokens?: string[]; operatorAgentAddresses?: string[] };
   /**
    * Opt-in telemetry streaming to a central network dashboard.
    * `enabled` is the master gate: when false, NOTHING is forwarded off the

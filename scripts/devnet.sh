@@ -40,6 +40,8 @@
 #                 Local snapshot-store watermarks (defaults: 256 MiB, 512 MiB,
 #                 and 1 GiB) so devnet keeps capacity admission without
 #                 requiring production-scale free disk.
+#   DEVNET_ENABLE_SEMANTIC_RUNTIME=1
+#                 Enable the Wasm semantic runtime on each node
 #   DEVNET_SNAPSHOT_GC_FINALIZED_CLEANUP=1
 #                 Opt every node into the finalized-snapshot collector
 #                 (sharedMemoryPublicSnapshotStorage.gc.finalizedCleanupEnabled).
@@ -727,6 +729,10 @@ create_node_config() {
       swm_sync_block='"syncSharedMemoryOnConnect": false,'
       ;;
   esac
+  local semantic_runtime_block=""
+  if [ "${DEVNET_ENABLE_SEMANTIC_RUNTIME:-}" = "1" ]; then
+    semantic_runtime_block="\"semanticRuntime\": { \"enabled\": true, \"watchdogMs\": 1000, \"startupTimeoutMs\": 30000, \"operatorPolicyIri\": \"${DEVNET_SEMANTIC_RUNTIME_POLICY_IRI:-urn:sr:policy:devnet-codex}\" },"
+  fi
 
   # Random Sampling prover (core-only). For devnet we want a
   # persistent WAL (so `dkg rs wal-tail` / smoke tests can read the
@@ -786,6 +792,7 @@ create_node_config() {
   ${rs_block}
   ${publisher_block}
   ${epcis_block}
+${semantic_runtime_block}
   ${chain_block}
 }
 EOCONF

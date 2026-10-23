@@ -18,6 +18,11 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      "test/encryption-key-enrollment.test.ts",
+      "test/private-recipient-admission.test.ts",
+      "test/join-encryption-key-cache.test.ts",
+      "test/agent-rotate-encryption-key.test.ts",
+      "test/encryption-key-rdf-recovery.test.ts",
       "test/write-preflight-attribution.test.ts",
       "test/rfc64-manual-catalog-authority-scope-v1.test.ts",
       "test/sync-exact-export-admission.test.ts",
@@ -333,7 +338,6 @@ export default defineConfig({
       "test/vm-reconcile-lifecycle-timer.test.ts",
       // #2858 — refresh of confirmed VM copies after an on-chain KA update.
       "test/vm-refresh-after-update.test.ts",
-      "test/core-fills-gap.test.ts",
       "test/vm-promotion-gate.test.ts",
       "test/vm-recovery-microbatch-planner.test.ts",
       "test/vm-recovery-phase-timing.test.ts",
@@ -387,7 +391,6 @@ export default defineConfig({
       "test/direct-rootless-publish.test.ts",
       "test/rootless-update-boundary.test.ts",
       "test/rootless-update-error.test.ts",
-      "test/changelog-requester.test.ts",
       "test/encrypt-inline-policy.test.ts",
       // #3081 — the steps the queued executor reports after the confirmation (observation only).
       "test/queued-publish-tail-steps.test.ts",
@@ -408,7 +411,6 @@ export default defineConfig({
       "test/messenger-substrate.test.ts",
       "test/messenger-outbox-budget.test.ts",
       "test/context-graph-join-policy.test.ts",
-      "test/join-encryption-key-cache.test.ts",
       "test/bounded-operation.test.ts",
       "test/private-read-chain-authority.test.ts",
       "test/knowledge-asset-draft-read-authority.test.ts",
@@ -426,6 +428,9 @@ export default defineConfig({
       "test/swm-public-snapshot-materialization.test.ts",
       "test/swm-public-cg-plaintext.test.ts",
       "test/swm-sender-key-stale-target.test.ts",
+      "test/swm-sender-key-pending-by-agent.test.ts",
+      "test/swm-external-api-recipient.test.ts",
+      "test/approved-private-replica.test.ts",
       "test/swm-sender-key-peer-routes.test.ts",
       "test/swm-sender-key-overlapping-shares.test.ts",
       "test/swm-shares-through-relay.test.ts",
@@ -434,7 +439,6 @@ export default defineConfig({
       // #2827 — SWM authority and plaintext decisions for a joined member of a
       // public, unregistered context graph.
       "test/public-unregistered-member-swm.test.ts",
-      "test/approved-private-replica.test.ts",
       "test/approved-private-replica-proof-runs.test.ts",
       "test/swm-snapshot-materializer.test.ts",
       // #3296 — a newer stored head proves an asset held only with its content.

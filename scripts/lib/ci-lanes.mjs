@@ -54,7 +54,7 @@ const LANE_GROUPS = {
   kosava_supporting: [{
     id: 'supporting', shards: 1, concurrency: 3, maxWorkers: 2,
     packages: ['epcis', 'mcp-dkg', 'local-llm', 'network-sim', 'graph-viz', 'okf', 'adapter-elizaos', 'adapter-hermes', 'adapter-openclaw', 'adapter-prime-agent'],
-  }],
+  }, { id: 'semantic-runtime', packages: ['semantic-runtime', 'graph-computer'], shards: 1, maxWorkers: 1 }],
   kosava_hardhat_plugins: [{ id: 'plugins', packages: ['random-sampling', 'kafka-plugin'], shards: 1 }],
 };
 for (const lane of Object.keys(LANE_GROUPS)) {

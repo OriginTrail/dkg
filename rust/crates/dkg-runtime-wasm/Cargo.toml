@@ -1,0 +1,24 @@
+[package]
+name = "dkg-runtime-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+dkg-runtime-types.workspace = true
+dkg-runtime-kernel.workspace = true
+dkg-runtime-codec.workspace = true
+dkg-strategy-compiler.workspace = true
+dkg-ir.workspace = true
+sha2.workspace = true
+wasm-bindgen.workspace = true
+
+[dev-dependencies]
+minicbor.workspace = true
+
+[lints]
+workspace = true

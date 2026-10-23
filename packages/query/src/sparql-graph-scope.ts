@@ -147,6 +147,35 @@ function scopeGraphlessDescribe(
   return `${scope.source.slice(0, insertion)} ${clauses} ${scope.source.slice(insertion)}`;
 }
 
+/** Merge only the already-authorized partitions into a default dataset.
+ * The caller's dataset clauses are rejected before this host-owned rewrite.
+ * This supports joins between KAs without exposing any other named graph.
+ */
+export function mergeDefaultGraphDataset(
+  scope: PreparedGraphScope,
+  graphUris: readonly string[],
+): GraphScopeRewriteResult {
+  if (scope.hasGraphClause || scope.hasDatasetClause || graphUris.length === 0) {
+    return unsupported('strategy-rejected');
+  }
+  if (!scope.where) {
+    const describe = scopeGraphlessDescribe(scope, graphUris);
+    return describe === null
+      ? unsupported('missing-where')
+      : ready(transitionGraphScope(scope, describe));
+  }
+  const previous = scope.prepared.tokens[scope.where.openingTokenIndex - 1];
+  const insertion = previous?.kind === 'word' && previous.upper === 'WHERE'
+    ? previous.start
+    : scope.where.openStart;
+  const clauses = [...new Set(graphUris)]
+    .map((graph) => `FROM <${assertSafeIri(graph)}>`).join(' ');
+  return ready(transitionGraphScope(
+    scope,
+    `${scope.source.slice(0, insertion)} ${clauses} ${scope.source.slice(insertion)}`,
+  ));
+}
+
 export function wrapWithGraph(
   scope: PreparedGraphScope,
   graphUri: string,

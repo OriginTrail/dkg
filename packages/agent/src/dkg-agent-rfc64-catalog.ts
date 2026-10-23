@@ -18,216 +18,81 @@
  * admits candidate rows or activates KA / SWM / VM state.
  */
 
+// SPDX-License-Identifier: Apache-2.0
+/**
+ * RFC-64 Gate 1 public author-catalog wiring, extracted as a DKGAgent mixin
+ * holder. Methods take `this: DKGAgent` so cross-mixin calls resolve against
+ * the composed class.
+ *
+ * Responsibilities:
+ *   - construct + start {@link Rfc64PublicCatalogServiceV1} on the production
+ *     router during `start()` (dormant when no `dataDir` opened the RFC-64
+ *     persistence), and drain + close it during `stop()`;
+ *   - expose the author path (sign + durably stage the direct-author issuer
+ *     delegation, produce + durably stage + best-effort announce its bound
+ *     genesis head) and the accepted-open-policy seed used by both sides;
+ *   - expose read-only observability for tests / evidence.
+ *
+ * Gate-1 boundary: staging a fetched head is the terminal step. Nothing here
+ * admits candidate rows or activates KA / SWM / VM state.
+ */
 import { type Rfc64CatalogTargetLeaseV1, Rfc64CatalogTargetTrackerV1, rfc64CatalogTargetExactIdentityKeyV1 } from './rfc64/catalog-operational-targets-v1.js';
 import { evaluateRfc64CatalogCompletionV1 } from './rfc64/catalog-completion-evidence-v1.js';
 export { RFC64_CATALOG_TARGET_MAX_ENTRIES_V1, RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1, type Rfc64CatalogTargetLeaseV1, Rfc64CatalogTargetTrackerV1, rfc64CatalogTargetExactIdentityKeyV1, projectRfc64OperationalRowCountsV1 } from './rfc64/catalog-operational-targets-v1.js';
-import {
-  SYSTEM_CONTEXT_GRAPHS,
-  DKGEvent,
-  ZERO_DIGEST32_V1,
-  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
-  contextGraphDataGraphUri,
-  contextGraphMetaGraphUri,
-  assertContextGraphIdV1,
-  assertNetworkIdV1,
-  assertSignedAuthorCatalogBucketEnvelopeV1,
-  assertSignedAuthorCatalogDirectoryNodeEnvelopeV1,
-  assertSignedAuthorCatalogHeadEnvelopeV1,
-  assertSignedAuthorCatalogIssuerDelegationEnvelopeV1,
-  computeAuthorCatalogScopeDigestV1,
-  computeControlSignatureVariantDigestHex,
-  createOperationContext,
-  deriveAuthorCatalogScopeFromHeadV1,
-  type AssertionCoordinateV1,
-  type ByteLengthV1,
-  type CanonicalGraphScopedAuthorSealV1,
-  type CatalogSealDeploymentProfileV1,
-  type OperationContext,
-  type ContextGraphIdV1,
-  type Digest32V1,
-  type EvmAddressV1,
-  type KaIdV1,
-  type NetworkIdV1,
-  type SubGraphNameV1,
-  type TimestampMsV1,
-  type DecimalU64V1,
-  type AuthorCatalogScopeV1,
-  type CountV1,
-  type SignedAuthorCatalogBucketEnvelopeV1,
-  type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
-  type SignedAuthorCatalogHeadEnvelopeV1,
-} from '@origintrail-official/dkg-core';
-import {
-  assertContextGraphAuthorityIndexId,
-  resolveRpcUrls,
-  verifyControlEnvelopeIssuerSignatureV1,
-  withRpcRequestContext,
-  type ContextGraphAuthorityIndexId,
-  type ContextGraphAuthorityIndexRevisionReader,
-  type ContextGraphAuthoritySnapshot,
-  type ContextGraphAuthorityReader,
-  type ContextGraphAuthorityReaderCapability,
-} from '@origintrail-official/dkg-chain';
+import { SYSTEM_CONTEXT_GRAPHS, DKGEvent, ZERO_DIGEST32_V1, MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1, contextGraphDataGraphUri, contextGraphMetaGraphUri, assertContextGraphIdV1, assertNetworkIdV1, assertSignedAuthorCatalogBucketEnvelopeV1, assertSignedAuthorCatalogDirectoryNodeEnvelopeV1, assertSignedAuthorCatalogHeadEnvelopeV1, assertSignedAuthorCatalogIssuerDelegationEnvelopeV1, computeAuthorCatalogScopeDigestV1, computeControlSignatureVariantDigestHex, createOperationContext, deriveAuthorCatalogScopeFromHeadV1, type AssertionCoordinateV1, type ByteLengthV1, type CanonicalGraphScopedAuthorSealV1, type CatalogSealDeploymentProfileV1, type OperationContext, type ContextGraphIdV1, type Digest32V1, type EvmAddressV1, type KaIdV1, type NetworkIdV1, type SubGraphNameV1, type TimestampMsV1, type DecimalU64V1, type AuthorCatalogScopeV1, type CountV1, type SignedAuthorCatalogBucketEnvelopeV1, type SignedAuthorCatalogDirectoryNodeEnvelopeV1, type SignedAuthorCatalogHeadEnvelopeV1 } from '@origintrail-official/dkg-core';
+import { assertContextGraphAuthorityIndexId, resolveRpcUrls, verifyControlEnvelopeIssuerSignatureV1, withRpcRequestContext, type ContextGraphAuthorityIndexId, type ContextGraphAuthorityIndexRevisionReader, type ContextGraphAuthoritySnapshot, type ContextGraphAuthorityReader, type ContextGraphAuthorityReaderCapability } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { resolveChainFinalityConfirmationsV1 } from './chain-finality-confirmations-v1.js';
 import type { DKGAgent } from './dkg-agent.js';
 import { sharedMemoryFollowersOf } from './swm/shared-memory-followers.js';
-import {
-  answerRfc64CatalogHeadReplayRequestV1,
-  rfc64CatalogReplayPeerFailureV1,
-} from './internal/catalog-head-replay-peers.js';
+import { answerRfc64CatalogHeadReplayRequestV1, rfc64CatalogReplayPeerFailureV1 } from './internal/catalog-head-replay-peers.js';
 import { yieldMainThread } from './main-thread-time-slice.js';
-import {
-  isApprovedPrivateReplicaDelegationActive,
-  resolveApprovedPrivateReplicaAuthority,
-} from './approved-private-replica.js';
-import {
-  Rfc64CatalogReplayConnectionRuntimeV1,
-  type Rfc64CatalogReplayConnectionReservationV1,
-} from './rfc64/catalog-replay-connection-runtime-v1.js';
-import {
-  Rfc64CatalogReplayRecoveryRuntimeV1,
-  type Rfc64CatalogReplayPeerDemandV1,
-  type Rfc64CatalogReplayPeerFenceLeaseV1,
-} from './rfc64/catalog-replay-recovery-runtime-v1.js';
+import { isApprovedPrivateReplicaDelegationActive, resolveApprovedPrivateReplicaAuthority } from './approved-private-replica.js';
+import { Rfc64CatalogReplayConnectionRuntimeV1, type Rfc64CatalogReplayConnectionReservationV1 } from './rfc64/catalog-replay-connection-runtime-v1.js';
+import { Rfc64CatalogReplayRecoveryRuntimeV1, type Rfc64CatalogReplayPeerDemandV1, type Rfc64CatalogReplayPeerFenceLeaseV1 } from './rfc64/catalog-replay-recovery-runtime-v1.js';
 export { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from
   './rfc64/catalog-limits-v1.js';
-import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from
-  './rfc64/catalog-limits-v1.js';
+import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from './rfc64/catalog-limits-v1.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
-import type { Rfc64CatalogShadowExecutionStatusV1 } from
-  './rfc64/catalog-shadow-observability-v1.js';
-import {
-  RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1,
-  snapshotRfc64CatalogDeploymentProfileV1,
-} from './rfc64/catalog-authority-config-v1.js';
+import type { Rfc64CatalogShadowExecutionStatusV1 } from './rfc64/catalog-shadow-observability-v1.js';
+import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1, snapshotRfc64CatalogDeploymentProfileV1 } from './rfc64/catalog-authority-config-v1.js';
 import type { AcceptedOpenCatalogPolicyV1 } from './rfc64/open-catalog-policy-v1.js';
 import { rfc64CatalogLookupFailedAsV1 } from './rfc64/catalog-policy-decision-probe-v1.js';
-import {
-  resolveRfc64CatalogAuthorizationRosterV1,
-  type AcceptRfc64CatalogAccessSnapshotInputV1,
-  type AcceptedRfc64CatalogAccessSnapshotV1,
-  type Rfc64CatalogAccessPolicyRegistryOptionsV1,
-  type Rfc64CatalogLocalAuthorizationScopeV1,
-} from './rfc64/catalog-access-policy-v1.js';
+import { resolveRfc64CatalogAuthorizationRosterV1, type AcceptRfc64CatalogAccessSnapshotInputV1, type AcceptedRfc64CatalogAccessSnapshotV1, type Rfc64CatalogAccessPolicyRegistryOptionsV1, type Rfc64CatalogLocalAuthorizationScopeV1 } from './rfc64/catalog-access-policy-v1.js';
 import { scopeRfc64CatalogAccessAuthorityV1 } from './rfc64/manual-catalog-authority-scope-v1.js';
-import type {
-  Rfc64PublicCatalogCurrentReceiverReconcilerV1,
-} from './rfc64/public-catalog-receiver-v1.js';
+import type { Rfc64PublicCatalogCurrentReceiverReconcilerV1 } from './rfc64/public-catalog-receiver-v1.js';
 import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
-import {
-  RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1,
-  Rfc64PublicCatalogServiceV1,
-  snapshotRfc64PublicCatalogAnnouncementPeersV1,
-  type PublishAuthorCatalogGenesisResultV1,
-  type PublishOpenAuthorCatalogGenesisResultV1,
-  type AnnounceRfc64PublicCatalogHeadInputV1,
-  type AnnounceRfc64PublicCatalogHeadResultV1,
-  type Rfc64PublicCatalogReconcilerClientsV1,
-  type Rfc64PublicCatalogServiceNativeOptionsV1,
-  type Rfc64PublicCatalogServiceStatsV1,
-} from './rfc64/public-catalog-service-v1.js';
-import {
-  Rfc64PublicCatalogNativeReceiverErrorV1,
-  Rfc64PublicCatalogNativeReceiverV1,
-} from './rfc64/public-catalog-native-receiver-v1.js';
+import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1, Rfc64PublicCatalogServiceV1, snapshotRfc64PublicCatalogAnnouncementPeersV1, type PublishAuthorCatalogGenesisResultV1, type PublishOpenAuthorCatalogGenesisResultV1, type AnnounceRfc64PublicCatalogHeadInputV1, type AnnounceRfc64PublicCatalogHeadResultV1, type Rfc64PublicCatalogReconcilerClientsV1, type Rfc64PublicCatalogServiceNativeOptionsV1, type Rfc64PublicCatalogServiceStatsV1 } from './rfc64/public-catalog-service-v1.js';
+import { Rfc64PublicCatalogNativeReceiverErrorV1, Rfc64PublicCatalogNativeReceiverV1 } from './rfc64/public-catalog-native-receiver-v1.js';
 import { createRfc64FinalizedPolicyAgentPrecommitV1 } from './rfc64/finalized-policy-agent-precommit-v1.js';
 import { createRfc64FinalizedVmAgentPrecommitV1 } from './rfc64/finalized-vm-agent-precommit-v1.js';
-import {
-  createRfc64CatalogAppliedHeadCoordinatorV1,
-} from './rfc64/catalog-applied-head-coordinator-v1.js';
-import type { Rfc64CatalogAppliedHeadEvidenceV1 } from
-  './rfc64/finalized-swm-retirement-lifecycle-receipt-v1.js';
-import {
-  reduceRfc64CatalogSynchronizationEvidenceReplayV1,
-  snapshotRfc64CatalogSynchronizationEvidenceV1,
-  type Rfc64CatalogSynchronizationEvidenceV1,
-} from './rfc64/catalog-synchronization-evidence-v1.js';
-import {
-  createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
-  createRfc64VerifiedStagedCatalogHeadMemoV1,
-  type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1,
-  type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
-} from './rfc64/public-catalog-native-reconciler-v1.js';
+import { createRfc64CatalogAppliedHeadCoordinatorV1 } from './rfc64/catalog-applied-head-coordinator-v1.js';
+import type { Rfc64CatalogAppliedHeadEvidenceV1 } from './rfc64/finalized-swm-retirement-lifecycle-receipt-v1.js';
+import { reduceRfc64CatalogSynchronizationEvidenceReplayV1, snapshotRfc64CatalogSynchronizationEvidenceV1, type Rfc64CatalogSynchronizationEvidenceV1 } from './rfc64/catalog-synchronization-evidence-v1.js';
+import { createRfc64BoundedPublicRootCatalogNativeReconcilerV1, createRfc64VerifiedStagedCatalogHeadMemoV1, type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1, type Rfc64BoundedPublicRootCatalogDeploymentResolverV1 } from './rfc64/public-catalog-native-reconciler-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
-import {
-  loadRfc64OperationalAppliedHeadsV1,
-  rfc64CatalogTargetScopeKeyV1,
-  type Rfc64OperationalAppliedHeadV1,
-} from './rfc64/catalog-operational-applied-heads-v1.js';
+import { loadRfc64OperationalAppliedHeadsV1, rfc64CatalogTargetScopeKeyV1, type Rfc64OperationalAppliedHeadV1 } from './rfc64/catalog-operational-applied-heads-v1.js';
 import { groupRfc64OperationalAppliedHeadsV1, loadRfc64OperationalPromisedRowCountsV1 } from './rfc64/catalog-operational-reads-v1.js';
 import { verifyPrivateCatalogSubscriptionReadinessV1 } from './rfc64/private-catalog-subscription-readiness-v1.js';
-import {
-  type Rfc64PublicCatalogReconciliationFailureV1,
-} from './rfc64/public-catalog-reconciliation-failure-v1.js';
-import type { Rfc64PublicCatalogReceiverCompletionOutcomeV1 } from
-  './rfc64/public-catalog-reconciliation-outcome-v1.js';
-import {
-  Rfc64PublicCatalogSuccessorProducerV1,
-  type Rfc64PublicCatalogIssuerAuthorizationV1,
-  type Rfc64PublicCatalogSuccessorAssetInputV1,
-} from './rfc64/public-catalog-successor-producer-v1.js';
-import {
-  RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
-  RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
-  Rfc64PublicCatalogTransportErrorV1,
-  type Rfc64PublicCatalogHeadAnnouncementV1,
-  type Rfc64PublicCatalogHeadReplayRequestV1,
-} from './rfc64/public-catalog-transport-v1.js';
+import { type Rfc64PublicCatalogReconciliationFailureV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
+import type { Rfc64PublicCatalogReceiverCompletionOutcomeV1 } from './rfc64/public-catalog-reconciliation-outcome-v1.js';
+import { Rfc64PublicCatalogSuccessorProducerV1, type Rfc64PublicCatalogIssuerAuthorizationV1, type Rfc64PublicCatalogSuccessorAssetInputV1 } from './rfc64/public-catalog-successor-producer-v1.js';
+import { RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1, RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1, Rfc64PublicCatalogTransportErrorV1, type Rfc64PublicCatalogHeadAnnouncementV1, type Rfc64PublicCatalogHeadReplayRequestV1 } from './rfc64/public-catalog-transport-v1.js';
 import { createRfc64CatalogNativeScopedReadProviderV1 } from './rfc64/catalog-native-scoped-read-provider-v1.js';
-import {
-  projectRfc64CatalogReceiverAuthorityV1,
-  resolveRfc64CatalogResponsibilityAuthorityV1,
-  type Rfc64CatalogAuthorityPolicyV1,
-  type Rfc64CatalogExecutionPlanV1,
-} from './rfc64/public-catalog-activation-config-v1.js';
-import {
-  Rfc64CatalogResponsibilityRegistryV1,
-  type Rfc64CatalogResponsibilitySelectionV1,
-} from './rfc64/catalog-responsibility-registry-v1.js';
+import { projectRfc64CatalogReceiverAuthorityV1, resolveRfc64CatalogResponsibilityAuthorityV1, type Rfc64CatalogAuthorityPolicyV1, type Rfc64CatalogExecutionPlanV1 } from './rfc64/public-catalog-activation-config-v1.js';
+import { Rfc64CatalogResponsibilityRegistryV1, type Rfc64CatalogResponsibilitySelectionV1 } from './rfc64/catalog-responsibility-registry-v1.js';
 import { Rfc64CatalogResponsibilityRosterV1 } from './internal/rfc64-catalog-responsibility-roster-v1.js';
-import {
-  projectRfc64CatalogTransportStateV1,
-  rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1,
-  type Rfc64CatalogRolloutModeV1,
-} from './rfc64/catalog-rollout-authority-v1.js';
-import {
-  isRfc64AuthorityRpcCircuitOpenErrorV1,
-  type Rfc64AuthorityReadCoordinatorSnapshotV1,
-  type Rfc64AuthorityReadRunOptionsV1,
-} from './rfc64/authority-rpc-circuit-breaker-v1.js';
-import {
-  composeRfc64FinalizedCatalogAuthorityV1,
-  composeRfc64RegisteredRosterVersionV1,
-  composeRfc64UnregisteredCatalogAuthorityV1,
-  parseRfc64AuthoritySnapshotV1,
-  type Rfc64ReleaseNativeAuthoritySnapshotV1,
-} from './rfc64/release-native-catalog-authority-v1.js';
-import {
-  acquireRfc64LegacySwmBoundaryReceiverLeaseV1,
-  readRfc64LegacySwmBoundaryCountV1,
-} from
-  './rfc64/legacy-swm-boundary-v1.js';
-import type { Rfc64CatalogMutationCoordinatorV1 } from
-  './rfc64/catalog-mutation-runtime-v1.js';
-import {
-  Rfc64CatalogReplaySnapshotRuntimeV1,
-} from './rfc64/catalog-replay-snapshot-runtime-v1.js';
-import {
-  assertRfc64ReplayManifestScopesUniqueV1,
-  isRfc64CatalogHeadOfAcceptedGenerationV1,
-} from './rfc64/catalog-replay-generation-v1.js';
-import {
-  Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1,
-  type Rfc64FinalizedAuthoritySnapshotEvidenceV1,
-} from './rfc64/finalized-authority-snapshot-batch-runtime-v1.js';
-import {
-  isRfc64SharedStorePressureFailureV1,
-  type Rfc64CatalogAuthorityRefreshRequestV1,
-} from './rfc64/catalog-authority-refresh-loop-v1.js';
-import { loadRfc64UnregisteredReplicaAuthorityV1 } from
-  './rfc64/unregistered-replica-authority-v1.js';
+import { projectRfc64CatalogTransportStateV1, rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1, type Rfc64CatalogRolloutModeV1 } from './rfc64/catalog-rollout-authority-v1.js';
+import { isRfc64AuthorityRpcCircuitOpenErrorV1, type Rfc64AuthorityReadCoordinatorSnapshotV1, type Rfc64AuthorityReadRunOptionsV1 } from './rfc64/authority-rpc-circuit-breaker-v1.js';
+import { composeRfc64FinalizedCatalogAuthorityV1, composeRfc64RegisteredRosterVersionV1, composeRfc64UnregisteredCatalogAuthorityV1, parseRfc64AuthoritySnapshotV1, type Rfc64ReleaseNativeAuthoritySnapshotV1 } from './rfc64/release-native-catalog-authority-v1.js';
+import { acquireRfc64LegacySwmBoundaryReceiverLeaseV1, readRfc64LegacySwmBoundaryCountV1 } from './rfc64/legacy-swm-boundary-v1.js';
+import type { Rfc64CatalogMutationCoordinatorV1 } from './rfc64/catalog-mutation-runtime-v1.js';
+import { Rfc64CatalogReplaySnapshotRuntimeV1 } from './rfc64/catalog-replay-snapshot-runtime-v1.js';
+import { assertRfc64ReplayManifestScopesUniqueV1, isRfc64CatalogHeadOfAcceptedGenerationV1 } from './rfc64/catalog-replay-generation-v1.js';
+import { Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1, type Rfc64FinalizedAuthoritySnapshotEvidenceV1 } from './rfc64/finalized-authority-snapshot-batch-runtime-v1.js';
+import { isRfc64SharedStorePressureFailureV1, type Rfc64CatalogAuthorityRefreshRequestV1 } from './rfc64/catalog-authority-refresh-loop-v1.js';
+import { loadRfc64UnregisteredReplicaAuthorityV1 } from './rfc64/unregistered-replica-authority-v1.js';
 import type { ContextGraphSub } from './dkg-agent-types.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
@@ -239,8 +104,7 @@ export interface Rfc64CatalogAuthorSignerV1 {
 /** Compatibility name retained for the legacy public/open authoring surface. */
 export type Rfc64OpenCatalogAuthorSignerV1 = Rfc64CatalogAuthorSignerV1;
 
-import { RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1, RFC64_PRIVATE_ROSTER_VERSION_RADIX_V1,
-  readPrivateRosterGeneration } from './private-roster-version.js';
+import { RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1, RFC64_PRIVATE_ROSTER_VERSION_RADIX_V1, readPrivateRosterGeneration } from './private-roster-version.js';
 
 export interface AcceptOpenContextGraphPolicyInputV1 {
   readonly networkId: NetworkIdV1;
@@ -320,10 +184,7 @@ export {
   snapshotRfc64PublicCatalogAutoPublishConfigV1,
   snapshotRfc64PublicCatalogBootstrapConfigV1,
 } from './rfc64/catalog-authority-config-v1.js';
-import {
-  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
-  withRpcUsageSite,
-} from '@origintrail-official/dkg-chain';
+import { CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcUsageSite } from '@origintrail-official/dkg-chain';
 
 export interface PublishOpenAuthorCatalogSuccessorParamsV1 {
   /** Exact durable predecessor returned by genesis or a prior successor. */
@@ -1716,11 +1577,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         : null;
     }
 
-    const localAgents = new Set<EvmAddressV1>();
-    for (const { agentAddress } of this.listLocalAgents()) {
+    const registeredAgents = new Set<EvmAddressV1>();
+    const nodeAgents = new Set<EvmAddressV1>();
+    for (const { agentAddress, mode } of this.listLocalAgents()) {
       const normalized = agentAddress.toLowerCase();
       if (ethers.isAddress(normalized) && normalized !== ethers.ZeroAddress) {
-        localAgents.add(normalized as EvmAddressV1);
+        registeredAgents.add(normalized as EvmAddressV1);
+        // Registration of an external caller stores its public identity and
+        // bearer mapping, not custody of its wallet. Counting it here can
+        // both invent node membership and deactivate the real local member.
+        if (mode === 'custodial') nodeAgents.add(normalized as EvmAddressV1);
       }
     }
     const defaultAgentAddress = this.defaultAgentAddress?.toLowerCase();
@@ -1729,17 +1595,18 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       && ethers.isAddress(defaultAgentAddress)
       && defaultAgentAddress !== ethers.ZeroAddress
     ) {
-      localAgents.add(defaultAgentAddress as EvmAddressV1);
+      registeredAgents.add(defaultAgentAddress as EvmAddressV1);
+      nodeAgents.add(defaultAgentAddress as EvmAddressV1);
     }
 
     const approvedAgent = this.localApprovedAgentByCG.get(contextGraphId)?.toLowerCase();
     if (
       approvedAgent !== undefined
-      && localAgents.has(approvedAgent as EvmAddressV1)
+      && registeredAgents.has(approvedAgent as EvmAddressV1)
       && rosterSet.has(approvedAgent as EvmAddressV1)
     ) return approvedAgent as EvmAddressV1;
 
-    const matching = [...localAgents].filter((address) => rosterSet.has(address));
+    const matching = [...nodeAgents].filter((address) => rosterSet.has(address));
     return matching.length === 1 ? matching[0]! : null;
   }
 

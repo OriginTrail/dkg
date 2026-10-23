@@ -133,6 +133,8 @@ export interface ProducerQuiescentTeardownSteps {
   /** Stop accepting new connections and drain in-flight callbacks while their
    * dependencies are still alive. The outer shutdown deadline bounds this. */
   closeServer: () => Promise<void>;
+  /** Retire Program intake/Workers before their model and agent dependencies. */
+  stopSemanticRuntime: () => Promise<void>;
   /** Close the daemon-owned MCP child before the DKG agent/store retires. */
   closeEntitySearch: () => Promise<void>;
   closeLocalLlm: () => Promise<void>;
@@ -179,6 +181,7 @@ export type TeardownStepName = keyof ProducerQuiescentTeardownSteps;
  */
 const TEARDOWN_ORDER = [
   'closeServer',
+  'stopSemanticRuntime',
   'closeEntitySearch',
   'closeLocalLlm',
   'drainCatchupJobs',
@@ -356,6 +359,7 @@ export async function closeDaemonBackingStoresAfterTeardown(
 export interface ProducerQuiescentTeardownDeps {
   /** HTTP-layer operation that ends permanent streams, stops admission, and drains finite callbacks. */
   closeHttpServer: () => Promise<void>;
+  stopSemanticRuntime: () => Promise<void>;
   closeEntitySearch: () => Promise<void>;
   closeLocalLlm: () => Promise<void>;
   drainCatchupJobs: (budgetMs: number, log: (message: string) => void) => Promise<unknown>;
@@ -380,6 +384,7 @@ export function buildProducerQuiescentTeardownSteps(
 ): ProducerQuiescentTeardownSteps {
   return {
     closeServer: () => deps.closeHttpServer(),
+    stopSemanticRuntime: () => deps.stopSemanticRuntime(),
     closeEntitySearch: () => deps.closeEntitySearch(),
     closeLocalLlm: () => deps.closeLocalLlm(),
     drainCatchupJobs: async () => {

@@ -54,7 +54,7 @@ export function TypeBreakdownWidget({ entities }: { entities: MemoryEntity[] }) 
     return [...counts.entries()].sort((a, b) => b[1].count - a[1].count);
   }, [entities, profile]);
 
-  if (breakdown.length === 0) return null;
+  if (breakdown.length < 2) return null;
 
   return (
     <GenWidget title="Entity Types">

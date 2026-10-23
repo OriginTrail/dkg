@@ -5,6 +5,11 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
+    "./typescript-program-bundle": {
+      "types": "./dist/typescript-program-bundle.d.ts",
+      "import": "./dist/typescript-program-bundle.js",
+      "default": "./dist/typescript-program-bundle.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
@@ -51,7 +56,17 @@
       "default": "./dist/sync-wire-objects.js"
     },
     "./dist/*": "./dist/*",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./canonical-json": {
+      "types": "./dist/canonical-json.d.ts",
+      "import": "./dist/canonical-json.js",
+      "default": "./dist/canonical-json.js"
+    },
+    "./graph-computer-protocol": {
+      "types": "./dist/graph-computer-protocol.d.ts",
+      "import": "./dist/graph-computer-protocol.js",
+      "default": "./dist/graph-computer-protocol.js"
+    }
   },
   "scripts": {
     "build": "tsc && pnpm run test:types",

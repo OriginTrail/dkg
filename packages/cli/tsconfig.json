@@ -13,6 +13,7 @@
     { "path": "../okf" },
     { "path": "../node-store" },
     { "path": "../node-ui" },
+    { "path": "../semantic-runtime" },
     { "path": "../adapter-openclaw" },
     { "path": "../local-llm" },
     { "path": "../mcp-dkg" }

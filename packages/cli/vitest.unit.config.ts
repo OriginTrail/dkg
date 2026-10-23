@@ -56,6 +56,24 @@ export default defineConfig({
           'test/reconcile-503-mapping.test.ts',
           'test/sealed-create-retry-route.test.ts',
           'test/config.test.ts',
+          'test/semantic-runtime.test.ts',
+          'test/semantic-runtime-inbox.test.ts',
+          'test/semantic-runtime-bound-inbox.test.ts',
+          'test/semantic-runtime-query-adapter.test.ts',
+          'test/semantic-runtime-query-pins.test.ts',
+          'test/semantic-runtime-program-policy.test.ts',
+          'test/semantic-runtime-program-bindings.test.ts',
+          'test/semantic-runtime-graph-configuration-limits.test.ts',
+          'test/semantic-runtime-execution-output.test.ts',
+          'test/local-private-first-write.test.ts',
+          'test/write-preflight-resilience.test.ts',
+          'test/semantic-runtime-asset-program.test.ts',
+          'test/semantic-runtime-sparql-adapter.test.ts',
+          'test/semantic-runtime-configuration-api.test.ts',
+          'test/semantic-runtime-routes.test.ts',
+          'test/semantic-runtime-safe-llm-adapter.test.ts',
+          'test/semantic-runtime-local-llm-adapter.test.ts',
+          'test/semantic-runtime-remote-execute-adapter.test.ts',
           'test/status-route-rpc.test.ts',
           // Pure: in-process status route and a chain adapter over scripted endpoints.
           'test/status-chain-rpc.test.ts',
@@ -156,6 +174,10 @@ export default defineConfig({
           'test/pca-confirmation-wire.test.ts',
           'test/pca-command-render.test.ts',
           'test/auth.test.ts',
+          'test/agent-http-auth.test.ts',
+          'test/encryption-enrollment-routes.test.ts',
+          'test/agent-encryption-key-routes.test.ts',
+          'test/request-actor-authentication.test.ts',
           // Pure logic — no hardhat needed. Adding to the unit config means
           // contributors can run it via `pnpm test:unit` in ~2s instead of
           // paying the 2-minute hardhat-boot tax of the default config.
@@ -374,6 +396,7 @@ export default defineConfig({
           'test/context-graph-list-cli.test.ts',
           'test/historical-context-graph-discovery.test.ts',
           'test/context-graph-subscriptions-route.test.ts',
+          'test/context-graph-authority-route.test.ts',
           // Daemon call-site wiring guard: runDaemonInner passes the resolved
           // syncAgentsMeta into DKGAgent.create. Fully mocked (network/agent/
           // wallets) — no hardhat.

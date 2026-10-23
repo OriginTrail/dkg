@@ -7,6 +7,7 @@ export {
   type QueryResultTooLargeErrorLike,
 } from '@origintrail-official/dkg-query';
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+export { encryptionKeyEnrollmentPayload, type EncryptionKeyEnrollment } from './encryption-key-enrollment.js';
 export {
   authorityIndexTrustDomain,
   planAuthorityIndexBootstrap,

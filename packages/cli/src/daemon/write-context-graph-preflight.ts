@@ -33,7 +33,9 @@ function exactProbeIsLocallyWritable(
   if (!requireLocalWritable) {
     return hasActiveSyncedSubscription(probe) || probe.hasLocalContent === true || probe.declarationFound === true;
   }
-  return hasActiveSyncedSubscription(probe) || probe.hasLocalContent === true;
+  return hasActiveSyncedSubscription(probe) || probe.hasLocalContent === true || (
+    probe.locallyCreated === true && probe.declarationFound === true
+  );
 }
 
 function exactProbeCanFastAccept(

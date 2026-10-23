@@ -1,0 +1,26 @@
+[package]
+name = "dkg-runtime-component"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dkg-runtime-codec.workspace = true
+dkg-runtime-types.workspace = true
+dkg-runtime-wasm.workspace = true
+minicbor.workspace = true
+wit-bindgen.workspace = true
+
+[lints.rust]
+unsafe_code = "allow"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

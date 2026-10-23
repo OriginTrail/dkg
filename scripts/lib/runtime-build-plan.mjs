@@ -7,6 +7,7 @@ export const RUNTIME_BUILD_ROOTS = Object.freeze([
   '@origintrail-official/dkg-epcis',
   '@origintrail-official/dkg-okf',
   '@origintrail-official/dkg-random-sampling',
+  '@origintrail-official/dkg-semantic-runtime',
   '@origintrail-official/dkg-agent',
   '@origintrail-official/dkg-graph-viz',
   '@origintrail-official/dkg-node-ui',
