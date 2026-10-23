@@ -1,3 +1,6 @@
+import { InvalidWorkspaceSnapshotError } from './workspace-snapshot-error.js';
+import { isStoreReadTransportFailure } from '@origintrail-official/dkg-storage';
+import { LiftPayloadValidationError, LiftValidationStageError, type LiftValidationDiagnostic } from './lift-validation-error.js';
 import { isCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
 import {
   getChainWriteAheadHookCause,
@@ -6,7 +9,7 @@ import {
 import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE } from '@origintrail-official/dkg-core';
 import { isRpcPreconditionError } from './ack-errors.js';
 import type { ExecutionFailureEvidence } from './async-lift-publisher-types.js';
-import { isPermanentAuthorCapabilityFailure, mapPublishExceptionToLiftJobFailure } from './async-lift-publish-result.js';
+import { isPermanentAuthorCapabilityFailure, mapPublishExceptionToLiftJobFailure, readPublishErrorFacts } from './async-lift-publish-result.js';
 import {
   createLiftJobFailureMetadata,
   type LiftJobFailureCode,
@@ -57,8 +60,8 @@ function isTransientRpcFailure(error: unknown): boolean {
  * (b) IS the persisted failure code. Registering a future structured
  * preflight error here cannot desynchronize state and code, which was
  * previously possible because the two decisions lived in independent
- * condition chains. Message-keyed legacy failures still flow through the
- * message chain in `mapExecutionFailure` (their consolidation is #1974's scope).
+ * condition chains. Unrecognized pre-validation failures remain terminal and unknown; message text
+ * cannot establish content failure or authorize a retry.
  */
 // GH#2940 — only register causes that are pre-send BY CONSTRUCTION (raised before anything is
 // signed). A typed store rejection is position-agnostic: it can equally arise after the send, so
@@ -139,10 +142,36 @@ function classifyKnowledgeAssetVmPublishPreconditionCode(error: unknown): LiftJo
   return null;
 }
 
+/** Recognize the cause once; dispatch policy below consumes only this closed result. */
+function classifyValidationFailure(error: unknown): {
+  code: LiftJobFailureCode;
+  cause: LiftValidationDiagnostic['cause'];
+  gate?: 'pre_dispatch' | 'validated_only';
+  requiresProof?: true;
+} {
+  // A structured refusal may also carry typed dispatch evidence. Keep its code precedence
+  // while retaining that evidence for origin selection (for example, a rejected write-ahead).
+  const dependency = isStoreReadTransportFailure(error)
+    ? { code: 'workspace_unavailable', cause: 'store_read_transport', gate: 'pre_dispatch' } as const
+    : isTransientRpcFailure(error)
+      ? { code: 'workspace_unavailable', cause: 'rpc_transport', gate: 'pre_dispatch' } as const
+      : isProvenStoreRejection(error)
+        ? { code: 'workspace_unavailable', cause: 'store_not_started', gate: 'pre_dispatch' } as const
+        : isCatalogFloorAuthorityUnavailable(error)
+          ? { code: 'authority_unavailable', cause: 'precondition', gate: 'validated_only' } as const : undefined;
+  const structured = classifyKnowledgeAssetVmPublishPreconditionCode(error);
+  if (structured) return { code: structured, cause: 'precondition', gate: dependency?.gate };
+  if (dependency) return { ...dependency, requiresProof: true };
+  if (error instanceof LiftPayloadValidationError || error instanceof InvalidWorkspaceSnapshotError) {
+    return { code: 'canonicalization_failed', cause: 'content' };
+  }
+  return { code: 'validation_unknown', cause: 'unknown' };
+}
+
 export function isKnowledgeAssetPublishPreconditionFailure(error: unknown): boolean {
+  if (error instanceof LiftValidationStageError) error = error.cause;
   if (classifyKnowledgeAssetVmPublishPreconditionCode(error) !== null) return true;
-  const anyError = error as { code?: unknown; message?: unknown };
-  const message = String(anyError?.message ?? error);
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
   return /is not finalized/i.test(message)
     || /No quads in shared memory/i.test(message)
     || /has no private payload/i.test(message)
@@ -193,47 +222,42 @@ export interface ExecutionFailureInput {
  *     qualifies, and an absent `txHash` is never a proof — it is only one more exclusion.
  */
 export function mapExecutionFailure(input: ExecutionFailureInput): LiftJobFailureMetadata {
-  const { jobId, currentStatus, requestedOrigin, error, evidence, now } = input;
-  const transientRpc = isTransientRpcFailure(error);
-  const catalogAuthorityUnavailable = isCatalogFloorAuthorityUnavailable(error);
-  const preDispatchRecoverable = evidence?.neverDispatched === true
-    && currentStatus === 'validated'
-    && (isProvenStoreRejection(error) || transientRpc || catalogAuthorityUnavailable);
-  // A failure raised while the job is still 'claimed' (the initial preflight) precedes validation,
-  // and so precedes everything that could dispatch anything: the typed cause alone is enough. The
-  // keyword chain below would otherwise record a multi-endpoint exhaustion message that carries
-  // none of its words as the TERMINAL `canonicalization_failed` - a transient outage ending a job.
-  // No in-repo preflight raises a typed transport failure today (the agent's is store-only); this
-  // keeps a chain read added to one later, or a third-party handler's, from ending the job.
-  const claimedTransientRpc = requestedOrigin === 'claimed'
-    && currentStatus === 'claimed'
-    && transientRpc;
-  const origin: LiftJobState = preDispatchRecoverable ? 'validated' : requestedOrigin;
-  const message = error instanceof Error ? error.message : String(error);
-  const lower = message.toLowerCase();
+  const { jobId, currentStatus, requestedOrigin, evidence, now } = input;
+  const staged = input.error instanceof LiftValidationStageError ? input.error : undefined;
+  const error = staged ? staged.cause : input.error;
+  const classified = classifyValidationFailure(error);
+  const validatedBeforeDispatch = evidence?.neverDispatched === true && currentStatus === 'validated';
+  const claimedBeforeDispatch = requestedOrigin === 'claimed' && currentStatus === 'claimed';
+  const dependencyRetrySafe = validatedBeforeDispatch
+    || (claimedBeforeDispatch && classified.gate === 'pre_dispatch');
+  const origin: LiftJobState = validatedBeforeDispatch && (classified.gate || staged)
+    ? 'validated' : requestedOrigin;
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : 'Unknown publication execution failure';
   const errorPayloadRef = `urn:dkg:publisher:error:${jobId}`;
 
   if (origin === 'claimed' || origin === 'validated') {
-    const code =
-      // Structured precondition failures (author capability / stale intent /
-      // corrupt head) come from the SAME classifier that routed the failure
-      // to this pre-send branch, so their state and code cannot drift apart.
-      // Everything message-keyed stays in the legacy chain below (#1974).
-      classifyKnowledgeAssetVmPublishPreconditionCode(error)
-        ?? (preDispatchRecoverable && catalogAuthorityUnavailable
-        ? 'authority_unavailable'
-        : preDispatchRecoverable || claimedTransientRpc
-        ? 'workspace_unavailable'
-        : lower.includes('timeout') || lower.includes('timed out') || lower.includes('unavailable') || lower.includes('query') || lower.includes('store')
-        ? 'workspace_unavailable'
-        : lower.includes('authority')
-        ? 'authority_forbidden'
-        : lower.includes('workspace') || lower.includes('root')
-          ? 'workspace_slice_not_found'
-          : 'canonicalization_failed');
-    return createLiftJobFailureMetadata({ failedFromState: origin, code, message, errorPayloadRef });
+    const code = classified.requiresProof && !dependencyRetrySafe ? 'validation_unknown' : classified.code;
+    const { cause } = classified;
+    // Never serialize the cause: store responses and content guards can embed private payloads.
+    const diagnosticMessage = code === 'validation_unknown' ? 'Publication validation failed for an unknown reason'
+      : cause === 'store_read_transport' ? 'Publication validation dependency read was interrupted'
+      : cause === 'content' ? 'Publication payload failed deterministic validation'
+      : staged ? `Publication validation failed (${code})` : message;
+    return createLiftJobFailureMetadata({
+      failedFromState: origin, code, message: diagnosticMessage, errorPayloadRef,
+      validationDiagnostic: { ...(staged ? { stage: staged.stage } : {}), cause },
+    });
   }
 
+  if (staged) {
+    const failedFromState = requestedOrigin === 'included' ? 'included' : 'broadcast';
+    return createLiftJobFailureMetadata({
+      failedFromState, code: failedFromState === 'included' ? 'confirmation_mismatch' : 'rpc_unavailable',
+      message: 'Publication validation boundary conflicts with persisted execution state',
+      errorPayloadRef, validationDiagnostic: { stage: staged.stage, cause: 'unknown' },
+    });
+  }
+  const { lowerMessage: lower } = readPublishErrorFacts(error);
   return mapPublishExceptionToLiftJobFailure({
     error,
     failedFromState: requestedOrigin === 'included' ? 'included' : 'broadcast',

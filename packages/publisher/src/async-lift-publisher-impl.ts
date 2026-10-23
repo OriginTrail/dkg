@@ -1,3 +1,4 @@
+import { atLiftValidationStage } from './lift-validation-error.js';
 import { createAsyncLiftClaimControl } from './async-lift-claim-gate.js';
 import type { WorkerLiftJobClaimSession } from './lift-job-transition-scope.js';
 import { AsyncLiftJournalCompletion, type JournalOperation, type JournalSection } from './async-lift-journal-completion.js';
@@ -1063,19 +1064,19 @@ export class TripleStoreAsyncLiftPublisher
       if (!request) {
         throw new Error(`LiftJob ${claimed.jobId} is not a raw lift job`);
       }
-      const resolved = await resolveLiftWorkspaceSlice({
+      const resolved = await atLiftValidationStage('workspace_read', () => resolveLiftWorkspaceSlice({
         store: this.store,
         graphManager: this.graphManager,
         request,
         publicSnapshotStore: this.publicSnapshotStore,
-      });
-      const validated = validateLiftPublishPayload({
+      }));
+      const validated = await atLiftValidationStage('content_validation', () => validateLiftPublishPayload({
         request,
         resolved: {
           ...resolved,
           ...this.resolvedSliceOverrides,
         },
-      });
+      }));
       return { request, validated };
     });
     if (validationAttempt.kind === 'failed') {
@@ -1086,33 +1087,32 @@ export class TripleStoreAsyncLiftPublisher
     await session.update('validated', { validation: validated.validation });
 
     const preparationAttempt = await this.runBusinessOperation(async () => {
-      const subtracted = await subtractFinalizedExactQuads({
+      const subtracted = await atLiftValidationStage('workspace_read', () => subtractFinalizedExactQuads({
         store: this.store,
         graphManager: this.graphManager,
         request,
         validation: validated.validation,
         resolved: validated.resolved,
-      });
+      }));
 
       if (subtracted.resolved.quads.length === 0 && (subtracted.resolved.privateQuads?.length ?? 0) === 0) {
         return null;
       }
 
-      return prepareAsyncPublishPayload({
+      return atLiftValidationStage('payload_preparation', () => prepareAsyncPublishPayload({
         request,
         validation: validated.validation,
         resolved: subtracted.resolved,
-      });
+      }));
     });
     if (preparationAttempt.kind === 'failed') {
-      return await session.recordExecutionFailure('validated', preparationAttempt.error);
+      return await session.recordExecutionFailure('validated', preparationAttempt.error, { neverDispatched: true });
     }
     const prepared = preparationAttempt.value;
     if (!prepared) return await this.finalizeNoopPublish(session);
 
     const publicByteSize = this.computePublicByteSize(prepared.publishOptions.quads);
-    // GH#2270 — the same pre-send write-ahead KA VM publish has taken since #1864. The
-    // executor's typed pre-send hook records the signed hash durably before it goes on the wire.
+    // Await the durable write-ahead before sending the signed publication.
     const broadcastRecorder = this.createPreSendBroadcastRecorder(session, { publicByteSize });
     const publishAttempt = await this.runBusinessOperation(() => this.publishExecutor!({
       walletId,
@@ -1147,7 +1147,7 @@ export class TripleStoreAsyncLiftPublisher
     const snapshotMetadata = createKnowledgeAssetVmPublishSnapshotMetadata(request);
     const preflightInput = { walletId, request, snapshot, snapshotMetadata };
 
-    const initialPreflight = await this.runBusinessOperation(() => handler.preflight?.(preflightInput));
+    const initialPreflight = await this.runBusinessOperation(() => atLiftValidationStage('initial_preflight', () => handler.preflight?.(preflightInput)));
     if (initialPreflight.kind === 'failed') {
       return await session.recordExecutionFailure('claimed', initialPreflight.error);
     }
@@ -1156,20 +1156,20 @@ export class TripleStoreAsyncLiftPublisher
     }
 
     const validationAttempt = await this.runBusinessOperation(async () => {
-      const resolved = await resolveLiftWorkspaceSlice({
+      const resolved = await atLiftValidationStage('workspace_read', () => resolveLiftWorkspaceSlice({
         store: this.store,
         graphManager: this.graphManager,
         request: snapshot,
         publicSnapshotStore: this.publicSnapshotStore,
-      });
-      return validateLiftPublishPayload({
+      }));
+      return atLiftValidationStage('content_validation', () => validateLiftPublishPayload({
         request: snapshot,
         metadata: snapshotMetadata,
         resolved: {
           ...resolved,
           ...this.resolvedSliceOverrides,
         },
-      });
+      }));
     });
     if (validationAttempt.kind === 'failed') {
       return await session.recordExecutionFailure('claimed', validationAttempt.error);
@@ -1178,14 +1178,14 @@ export class TripleStoreAsyncLiftPublisher
     await session.update('validated', { validation: validated.validation });
 
     const preparationAttempt = await this.runBusinessOperation(() =>
-      prepareAsyncPublishPayload({
+      atLiftValidationStage('payload_preparation', () => prepareAsyncPublishPayload({
         request: snapshot,
         metadata: snapshotMetadata,
         validation: validated.validation,
         resolved: validated.resolved,
-      }));
+      })));
     if (preparationAttempt.kind === 'failed') {
-      return await session.recordExecutionFailure('claimed', preparationAttempt.error);
+      return await session.recordExecutionFailure('validated', preparationAttempt.error, { neverDispatched: true });
     }
     const prepared = preparationAttempt.value;
 
@@ -1194,7 +1194,7 @@ export class TripleStoreAsyncLiftPublisher
       merkleRoot: request.sealMerkleRoot,
       publicByteSize,
     });
-    const finalPreflight = await this.runBusinessOperation(() => handler.preflight?.(preflightInput));
+    const finalPreflight = await this.runBusinessOperation(() => atLiftValidationStage('final_preflight', () => handler.preflight?.(preflightInput)));
     if (finalPreflight.kind === 'failed') {
       return await this.failKnowledgeAssetVmPublishExecution(session, finalPreflight.error, broadcastRecorder);
     }

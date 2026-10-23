@@ -1,3 +1,4 @@
+import type { AssertionPullFromOptions, AssertionPullFromResult } from '@origintrail-official/dkg-publisher';
 import { StorageACKAdmission } from './storage-ack-admission.js';
 import { runStorageACKOperation } from './storage-ack-diagnostics.js';
 import { requireStorageACKContextGraphId } from './internal/storage-ack-context-graph.js';
@@ -296,6 +297,7 @@ import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import {
   conflictsWithOwnedContextGraphBinding, resolveDiscoveredContextGraphBinding,
 } from './context-graph-chain-discovery-binding.js';
+import { projectDiscoveredContextGraphSubscription } from './context-graph-discovery-enrichment.js';
 import {
   relocatePrivateContextGraphMetadata,
   type ContextGraphMetadataRelocationResult,
@@ -1922,16 +1924,10 @@ export class DKGAgent extends DKGAgentBase {
       );
       return existing;
     }
-    const next: ContextGraphSub = {
-      ...existing,
-      syncMode: existing?.syncMode ?? 'always-on',
-      name: metadata.name ?? existing?.name,
-      subscribed: existing?.subscribed === true,
-      synced: existing?.synced === true,
-      sharedMemorySynced: existing?.sharedMemorySynced === true,
-      metaSynced: existing?.metaSynced === true,
-      participantAgents: metadata.participantAgents ?? existing?.participantAgents,
-    };
+    const next = projectDiscoveredContextGraphSubscription(
+      existing, metadata, this.contextGraphSubscriptionDormancyById.get(contextGraphId),
+    );
+    if (next === existing) return existing;
 
     const invalidExplicitOnChainId = metadata.onChainId !== undefined
       && authoritativeOnChainId === undefined;
@@ -3899,19 +3895,12 @@ export class DKGAgent extends DKGAgentBase {
         contextGraphId: string,
         name: string,
         sourceLayer: 'swm' | 'vm',
-        opts?: { subGraphName?: string; agentAddress?: string; onConflict?: 'reject' | 'replace' },
-      ): Promise<{
-        seeded: number;
-        seededPublic: number;
-        seededPrivate: number;
-        fromLayer: 'swm' | 'vm';
-        contentScopeVersion: number;
-        kaUal: string;
-        assertionVersion: string;
-      }> {
+        opts?: AssertionPullFromOptions & { agentAddress?: string },
+      ): Promise<AssertionPullFromResult> {
         const pullAgentAddress = opts?.agentAddress ?? agentAddress;
         return agent.publisher.assertionPullFrom(contextGraphId, name, pullAgentAddress, sourceLayer, {
           ...(opts?.subGraphName !== undefined ? { subGraphName: opts.subGraphName } : {}),
+          ...(opts?.recoverExact !== undefined ? { recoverExact: opts.recoverExact } : {}),
           ...(opts?.onConflict !== undefined ? { onConflict: opts.onConflict } : {}),
         });
       },
