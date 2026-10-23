@@ -56,6 +56,8 @@ export default defineConfig({
       "test/registered-private-empty-vm-finality.test.ts",
       "test/rfc64-registered-private-empty-vm-proof.test.ts",
       "test/core-hosted-definition.test.ts",
+      // #3421 — a graph's member list is taken only from its curator.
+      "test/curator-meta-member-list.test.ts",
       "test/core-hosted-owner-peer-tie.test.ts",
       "test/owner-tie-offer.test.ts",
       "test/fresh-meta-fetch.test.ts",

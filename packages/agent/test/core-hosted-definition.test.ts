@@ -59,6 +59,7 @@ import {
   refreshCoreHostedDefinitionBeforeServing,
 } from '../src/core-hosted-definition.js';
 import { OWNER_TIE_CHECKS_PER_MINUTE, OWNER_TIE_PENDING_MAX } from '../src/core-hosted-owner-peer-tie.js';
+import { isMemberListQuad } from '../src/curator-meta-member-list.js';
 import { ContextGraphRegistryMethods } from '../src/dkg-agent-cg-registry.js';
 import { Rfc64MetaBootstrapMethods } from '../src/dkg-agent-rfc64-meta-bootstrap.js';
 import { Rfc64SeedFetchMethods } from '../src/dkg-agent-rfc64-seed-fetch.js';
@@ -1049,6 +1050,34 @@ describe('a Core asks the owner\'s node that an owner-signed share ties to a hos
     ));
     // The owner lookups (the serve-time refresh, the forward of members' shares) name it now.
     expect(await coreHostedOwnerPeerIds(core.agent, contextGraphId, OWNER)).toEqual([OWNER_PEER_ID]);
+  });
+
+  it('takes the graph\'s member list from the tied node only (#3421)', async () => {
+    const delegation = `did:dkg:agent-delegation:${contextGraphId}:${MEMBER.toLowerCase()}`;
+    const memberList: Quad[] = [
+      rootQuad(DKG_ONTOLOGY.DKG_ALLOWED_AGENT, `"${MEMBER.toLowerCase()}"`),
+      { subject: delegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT, object: `"${MEMBER.toLowerCase()}"`, graph: metaGraph },
+      { subject: delegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: `"${MEMBER_PEER_ID}"`, graph: metaGraph },
+    ];
+    const memberListHeldBy = async (store: OxigraphStore) => (await servedMeta({ store, answer: 'complete' }))
+      .filter((quad) => isMemberListQuad(contextGraphId, quad))
+      .map((quad) => `${quad.subject} ${quad.predicate} ${quad.object}`)
+      .sort();
+    const owner = await peerNode([...OWNER_DECLARATION, ...memberList]);
+
+    // The agent registry names the owner's node, but no share the owner signed ties it.
+    const untied = coreNode(peersOf([[OWNER_PEER_ID, owner]]));
+    await expect(ensureCoreHostedDefinition(untied.agent, contextGraphId, 'recorded')).resolves.toBe('fetched');
+    await expect(holdsCoreHostedOwnerDefinition(untied.store, contextGraphId, OWNER)).resolves.toBe(true);
+    expect(await memberListHeldBy(untied.store)).toEqual([]);
+
+    const tied = coreNode(peersOf([[OWNER_PEER_ID, owner]]), { ownerNodes: [], seedPeers: [] });
+    noteCoreHostedOwnerShare(tied.agent, await ownerShare(OWNER_PEER_ID), OWNER_PEER_ID);
+    await pendingCoreHostedDefinitionHint(tied.agent, contextGraphId);
+    await expect(holdsCoreHostedOwnerDefinition(tied.store, contextGraphId, OWNER)).resolves.toBe(true);
+    expect(await memberListHeldBy(tied.store)).toEqual(
+      memberList.map((quad) => `${quad.subject} ${quad.predicate} ${quad.object}`).sort(),
+    );
   });
 
   it('counts the tied node\'s fetch for no cooldown: a subscriber\'s request right after it refreshes from the owner', async () => {
