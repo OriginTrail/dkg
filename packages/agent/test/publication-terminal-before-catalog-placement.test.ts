@@ -283,7 +283,7 @@ describe('a confirmed publication and its catalog placement', () => {
       expect(parked.entries()).toBe(1);
       expect(fixture.queue()).toMatchObject({ pending: 6, oldestPendingAgeMs: 1_000, passRunning: true });
       expect(Object.keys(fixture.queue()!).sort()).toEqual([
-        'cooldownSkips', 'depth', 'lastPassDurationMs', 'oldestPendingAgeMs', 'oldestWaiterAgeMs',
+        'cooldownSkips', 'depth', 'failures', 'lastPassDurationMs', 'oldestPendingAgeMs', 'oldestWaiterAgeMs',
         'passRunning', 'pending', 'waiters',
       ]);
 

@@ -1,3 +1,5 @@
+import type { QueryOptions } from './query-options.js';
+import { shareJobsPath, shareReconciliationPath } from './share-job-client-paths.js';
 import { createEntityClient } from './entity-search/client.js';
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
@@ -8,6 +10,7 @@ import type {
   RandomSamplingDisabledReason,
 } from '@origintrail-official/dkg-agent';
 import type {
+  ShareReconciliationInput, ShareReconciliationResult,
   AsyncLiftRetryOutcome,
   AsyncPreparedPublishPayload,
   JournalReadResult,
@@ -1052,14 +1055,12 @@ export class ApiClient {
     state?: KnowledgeAssetShareJobState | KnowledgeAssetShareJobState[];
     limit?: number;
   }): Promise<{ jobs: KnowledgeAssetShareJobView[] }> {
-    const params = new URLSearchParams();
-    if (options?.contextGraphId) params.set('contextGraphId', options.contextGraphId);
-    if (options?.state) {
-      params.set('state', Array.isArray(options.state) ? options.state.join(',') : options.state);
-    }
-    if (options?.limit !== undefined) params.set('limit', String(options.limit));
-    const qs = params.toString();
-    return this.get(`/api/knowledge-assets/swm/share-jobs${qs ? `?${qs}` : ''}`);
+    return this.get(shareJobsPath(options));
+  }
+
+  /** Read retained execution evidence; never infer retry permission from an unproven result. */
+  async knowledgeAssetReconcileShare(input: ShareReconciliationInput): Promise<ShareReconciliationResult> {
+    return this.get(shareReconciliationPath(input));
   }
 
   async knowledgeAssetShareJob(jobId: string): Promise<KnowledgeAssetShareJobView> {
@@ -1718,25 +1719,7 @@ export class ApiClient {
   async query(
     sparql: string,
     contextGraphId?: string,
-    opts?: {
-      graphSuffix?: string;
-      includeSharedMemory?: boolean;
-      includeContextGraphPartitions?: boolean;
-      view?: 'working-memory' | 'shared-working-memory' | 'verifiable-memory';
-      agentAddress?: string;
-      assertionName?: string;
-      subGraphName?: string;
-      verifiedGraph?: string;
-      minTrust?:
-        | 'SelfAttested'
-        | 'Endorsed'
-        | 'PartiallyVerified'
-        | 'ConsensusVerified'
-        | 0
-        | 1
-        | 2
-        | 3;
-    },
+    opts?: QueryOptions,
   ): Promise<{ result: QueryResult }> {
     return this.post('/api/query', {
       sparql,
@@ -1744,6 +1727,7 @@ export class ApiClient {
       graphSuffix: opts?.graphSuffix,
       includeSharedMemory: opts?.includeSharedMemory,
       includeContextGraphPartitions: opts?.includeContextGraphPartitions,
+      includeSharedMemoryMeta: opts?.includeSharedMemoryMeta,
       view: opts?.view,
       agentAddress: opts?.agentAddress,
       assertionName: opts?.assertionName,

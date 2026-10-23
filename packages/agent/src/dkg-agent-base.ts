@@ -1,3 +1,4 @@
+import { mergeRpcUsageWindows } from '@origintrail-official/dkg-chain';
 import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
 import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-recovery-host.js';
 import { createRecoveryAuthority } from './durable-recovery-authority.js';
@@ -27,6 +28,7 @@ import type { RecentSharedMemoryPullRuntime } from './recent-shared-memory-pull-
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
+import { controlPlaneRefusalSummary } from './sync/control-plane-refusals.js';
 import { PeerCapabilityRegistry } from './p2p/peer-capability.js';
 import { ACKCandidateDiscoveryCoordinator } from './p2p/ack-candidate-discovery.js';
 import type { StorageACKEndpoint } from './p2p/storage-ack-endpoint.js';
@@ -223,7 +225,7 @@ import {
   FileWorkspacePublicSnapshotStore,
   parseWorkspacePublicSnapshotNQuads,
   type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
-  type PromoteTerminalJobClearer,
+  type PromoteTerminalJobClearer, type PromoteShareReconciler,
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
@@ -325,6 +327,7 @@ import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
 import { insertWithOversizeGuard } from './sync/oversize-filter.js';
+import { compactSyncedPrivateRosterGenerations } from './private-roster-version.js';
 import { OversizeTombstoneLog } from './sync/oversize-tombstones.js';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore, MemoryChangelogCursorStore } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
@@ -697,7 +700,7 @@ export class DKGAgentBase {
   // Typed with the terminal-clear capability at the ownership boundary (not cast at the
   // getter): the only assigned value is `TripleStoreAsyncPromoteQueue`, which implements it,
   // and any test/subclass substituting a queue must now satisfy the clearer at compile time.
-  protected _promoteQueue?: AsyncPromoteQueue & PromoteTerminalJobClearer;
+  protected _promoteQueue?: AsyncPromoteQueue & PromoteTerminalJobClearer & PromoteShareReconciler;
   /**
    * Override for tests / future operator config. When set before
    * `promoteQueue` is first accessed, the queue is constructed with
@@ -836,6 +839,8 @@ export class DKGAgentBase {
    */
   protected readonly reconciledKaAuthors = new Set<string>();
   protected readonly log = new Logger('DKGAgent');
+  /** Control-plane fetches refused for want of a sync slot: one warning per interval. */
+  readonly controlPlaneRefusals = controlPlaneRefusalSummary(this.log);
   /** Rate limit for the "Named KA recovery ... remains pending" warning. */
   protected readonly namedKaRecoveryPendingLog = new NamedKaRecoveryPendingLog();
 
@@ -1592,9 +1597,7 @@ export class DKGAgentBase {
    * Sync-ingest store insert (durable sync + registry meta pulls). Guarded by
    * the oversize filter (OT-RFC-56): quads whose literal exceeds the protocol
    * size invariant are dropped + tombstoned BEFORE the insert, so the sync
-   * offset cursor advances past pages containing them instead of the store
-   * throwing and the page being re-fetched from every peer forever (the
-   * 2026-07-08 mainnet poison-literal retry storm).
+   * offset cursor can pass poison-literal pages without an endless retry.
    */
   protected async insertSyncedQuadsAndInvalidateListCache(quads: Quad[], options?: QueryOptions): Promise<void> {
     const inserted = await insertWithOversizeGuard(
@@ -1604,7 +1607,8 @@ export class DKGAgentBase {
       'durable-sync',
     );
     if (inserted.length > 0) {
-      this.invalidateListContextGraphsCache();
+      try { await compactSyncedPrivateRosterGenerations(this.store, inserted, options); }
+      finally { this.invalidateListContextGraphsCache(); }
     }
   }
   protected get gossipRegistered() { return this.gossipSession.gossipRegistered; }
@@ -2234,6 +2238,8 @@ export class DKGAgentBase {
    * protected instead of the daemon reaching through a cast.
    */
   drainRpcUsage(): RpcUsageWindow {
-    return this.chain.drainRpcUsage?.() ?? emptyRpcUsageWindow();
+    const normal = this.chain.drainRpcUsage?.() ?? emptyRpcUsageWindow();
+    const cache = this.config.coreChainCacheNetworks;
+    return cache.length ? mergeRpcUsageWindows(normal, ...cache.map(n => n.registry.drainRpcUsage?.())) : normal;
   }
 }

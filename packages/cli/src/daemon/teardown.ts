@@ -42,6 +42,7 @@ import {
   VM_RECONCILE_SHUTDOWN_TIMEOUT_ERROR_CODE,
 } from '@origintrail-official/dkg-agent';
 import { CATCHUP_SHUTDOWN_DRAIN_BUDGET_MS } from './catchup-telemetry.js';
+import type { PublisherLiveControl } from '../publisher-live-control.js';
 
 /**
  * The FIRST thing graceful shutdown does: close catch-up admission, end the
@@ -92,6 +93,8 @@ import { CATCHUP_SHUTDOWN_DRAIN_BUDGET_MS } from './catchup-telemetry.js';
  */
 export async function beginGracefulShutdown(deps: {
   state: { catchupAcceptingJobs: boolean };
+  /** Install the terminal claim fence now; HTTP and existing execution drain later. */
+  publisherControl?: Pick<PublisherLiveControl, 'close'>;
   removeApiPort: () => Promise<void>;
   log: (message: string) => void;
   endShareAdmissionWaits?: () => void;
@@ -101,6 +104,10 @@ export async function beginGracefulShutdown(deps: {
   stopCatchupTriggers?: () => void;
 }): Promise<void> {
   deps.state.catchupAcceptingJobs = false;
+  const reportControlClose = (error: unknown) => deps.log(`Publisher control shutdown error: ${error instanceof Error ? error.message : String(error)}`);
+  // close() fences synchronously. Do not await a resume that HTTP teardown must drain.
+  try { void deps.publisherControl?.close().catch(reportControlClose); }
+  catch (error) { reportControlClose(error); }
   try {
     deps.endShareAdmissionWaits?.();
   } catch (err: any) {

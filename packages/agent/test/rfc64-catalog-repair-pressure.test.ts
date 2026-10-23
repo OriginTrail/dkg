@@ -53,6 +53,8 @@ function fixture(reconcile: (signal: AbortSignal) => Promise<void>, queueLimit =
     listLocalAuthorAddresses: () => [AUTHOR],
     acceptsPublicRootLane: () => true,
     acceptsFinalizedPrivateLane: () => true,
+    readPrivateFailure: () => null,
+    writePrivateFailures: () => {},
     listFinalizedPrivateRepairs: () => [],
     repairFinalizedPrivatePlacement: async () => {},
     readRepairRevision: () => ({ scopeIdentity: 'scope-1', headRevision: 'revision-1' }),

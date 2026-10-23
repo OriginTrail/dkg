@@ -14,7 +14,7 @@ import { DurableShareFailure, observeShareRecovery } from '../src/daemon/routes/
 import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-agent', () => import('../../agent/src/index.js'));
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
-import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { computeCanonicalGraphScopedAuthorSealDigestV1, assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { BlazegraphStore, OxigraphStore, StoreOperationTimeoutError, StoreSchedulerBusyError, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncPromoteQueue, CuratorRejectedError, CuratorUnconfirmedError, PromoteAdmissionUncertainError,
   computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata, skolemizeKnowledgeAssetParts } from '@origintrail-official/dkg-publisher';
@@ -158,6 +158,68 @@ async function confirmVmUpdate(fixture: Awaited<ReturnType<typeof publishWhileHa
 }
 
 describe('durable synchronous share ownership', () => {
+  it('rechecks the author before admitting a prepared durable owner', async () => {
+    const { store, agent, finalized } = await setup();
+    const prepared = await agent.assertion.prepareDurableShare(CG, NAME, { agentAddress: AUTHOR });
+    await expect(agent.assertion.admitDurableShare({ contextGraphId: CG, assertionName: NAME, entities: 'all',
+      ...prepared, authorAgentAddress: '0x3333333333333333333333333333333333333333' }, 'admission-check'))
+      .rejects.toMatchObject({ code: 'KA_SHARE_AUTHOR_MISMATCH' });
+    expect(await agent.promoteQueue.list()).toHaveLength(0);
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
+    daemonState.promoteWorkerAvailable = true;
+    await expect(durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR, authorAgentAddress: AUTHOR }))
+      .resolves.toMatchObject({ publishReady: true });
+    await store.close();
+  });
+  it('rejects a synchronous author mismatch before ownership and permits the corrected request', async () => {
+    const { store, agent, finalized } = await setup();
+    daemonState.promoteWorkerAvailable = true;
+    const mismatch = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR,
+      authorAgentAddress: '0x3333333333333333333333333333333333333333' }).catch(error => error);
+    expect(mismatch).toMatchObject({ code: 'KA_SHARE_AUTHOR_MISMATCH' });
+    expect(classifySynchronousShareFailure(mismatch, { contextGraphId: CG, name: NAME, phase: 'swm-share' }))
+      .toMatchObject({ status: 409, body: { code: 'KA_SHARE_AUTHOR_MISMATCH' } });
+    expect(await agent.promoteQueue.list()).toHaveLength(0);
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
+    expect(await store.countQuads(finalized.graphUri)).toBe(1);
+    await expect(durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR, authorAgentAddress: signer.address }))
+      .resolves.toMatchObject({ promotedCount: 1, publishReady: true });
+    const jobs = await agent.promoteQueue.list();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].state).toBe('succeeded');
+    await store.close();
+  });
+
+  it('completes an ordinary share with a matching mixed-case author hint', async () => {
+    const { store, agent, finalized } = await setup();
+    const id = await agent.promoteQueue.enqueue({ contextGraphId: CG, assertionName: NAME, agentAddress: AUTHOR,
+      authorAgentAddress: signer.address, entities: 'all' });
+    const job = (await agent.promoteQueue.claimNext('author-check'))!;
+    expect(await runPromoteJob({ job, queue: agent.promoteQueue, workerId: 'author-check',
+      runPromote: (r, executionAuthority) => executePromoteRequest(agent, r, { executionAuthority }),
+      now: Date.now, heartbeatIntervalMs: 0, log: () => {} })).toMatchObject({ outcome: 'succeeded' });
+    expect((await agent.promoteQueue.getStatus(id))?.result?.shareEvidence?.seal.authorAddress).toBe(AUTHOR);
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+    expect(await store.countQuads(finalized.graphUri)).toBe(0);
+    await store.close();
+  });
+  it('rejects a mismatched share author before SWM commit through the real worker', async () => {
+    const { store, agent, finalized } = await setup();
+    const request = { contextGraphId: CG, assertionName: NAME, agentAddress: AUTHOR,
+      authorAgentAddress: '0x3333333333333333333333333333333333333333', entities: 'all' as const };
+    const id = await agent.promoteQueue.enqueue(request), job = (await agent.promoteQueue.claimNext('author-check'))!;
+    const gossip = vi.spyOn(agent, 'publishWorkspaceGossip');
+    const result = await runPromoteJob({ job, queue: agent.promoteQueue, workerId: 'author-check',
+      runPromote: (r, executionAuthority) => executePromoteRequest(agent, r, { executionAuthority }),
+      now: Date.now, heartbeatIntervalMs: 0, log: () => {} });
+    expect(result).toMatchObject({ outcome: 'failed_terminal', cause: { code: 'KA_SHARE_AUTHOR_MISMATCH' } });
+    expect((await agent.promoteQueue.getStatus(id))?.state).toBe('failed');
+    expect(await store.countQuads(finalized.sharedGraphUri)).toBe(0);
+    expect(await store.countQuads(finalized.graphUri)).toBe(1);
+    expect(gossip).not.toHaveBeenCalled();
+    await store.close();
+  });
+
   it.each(['unowned-precommit', 'bound-precommit', 'committed-missing-layer'])('preflights only new uncommitted admission (%s)', async state => {
     const { store, agent, publisher, finalized } = await setup();
     const opts = { publisherPeerId: agent.node.peerId.toString(), confirmBeforeCommit: async () => { throw new CuratorUnconfirmedError(CG); } };
@@ -764,7 +826,10 @@ describe('durable synchronous share ownership', () => {
     const result = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR });
     const [job] = await agent.promoteQueue.list({});
     expect(result).toEqual({ promotedCount: 1, sealed: true, publishReady: true,
-      shareOperationId: job.request.recoveryBinding!.intent.operationId });
+      shareOperationId: job.request.recoveryBinding!.intent.operationId, shareEvidence: job.result!.shareEvidence });
+    expect(job.result!.shareEvidence).toMatchObject({ version: 1, contextGraphId: CG, assertionName: NAME,
+      shareOperationId: job.request.recoveryBinding!.intent.operationId, seal: { kaUal: finalized.kaUal } });
+    expect(computeCanonicalGraphScopedAuthorSealDigestV1(job.result!.shareEvidence!.seal)).toBe(job.request.recoveryBinding!.sealDigest);
     expect(job).toMatchObject({ state: 'succeeded', request: { recoveryBinding: { inventoryRequired: true } } });
     await expect(writer.mock.results[0]!.value).resolves.toMatchObject({ status: 'dormant', dormantReason: 'inactive-lane' });
     expect(writer).toHaveBeenCalledTimes(2);

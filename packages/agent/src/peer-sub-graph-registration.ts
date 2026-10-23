@@ -382,7 +382,7 @@ export function resolveUnregisteredSubGraphFromPeers(
 /** What one lookup of the graph's peers found. */
 type PeerLookupOutcome =
   | { readonly registered: true }
-  | { readonly registered: false; readonly asked: number; readonly answered: number; readonly lastFailure: string };
+  | { readonly registered: false; readonly asked: number; readonly answered: readonly string[]; readonly lastFailure: string };
 
 async function resolveWithinBudget(
   agent: PeerSubGraphResolutionAgent,
@@ -416,9 +416,14 @@ async function resolveWithinBudget(
     state.misses.delete(key);
     return { registered: true };
   }
-  if (outcome !== undefined && outcome.answered > 0) {
-    const detail = `none of the ${outcome.answered} peer(s) of the context graph asked holds it`;
+  if (outcome !== undefined && outcome.answered.length > 0) {
+    const detail = `none of the ${outcome.answered.length} peer(s) of the context graph asked holds it`;
     rememberMiss(state, key, { at: Date.now(), forMs: SUB_GRAPH_RESOLUTION_MISS_COOLDOWN_MS, detail });
+    agent.log.info(
+      ctx,
+      `Sub-graph "${subGraphName}" of context graph "${contextGraphId}" not found: ${detail} `
+      + `(answered: ${outcome.answered.map((peerId) => peerId.slice(-8)).join(', ')})`,
+    );
     return { registered: false, detail };
   }
   if (outcome !== undefined && outcome.asked === 0) {
@@ -461,7 +466,7 @@ async function lookUpPeers(
   // The lookup before this one may have registered it.
   if (await hasSubGraphRegistration(agent.store, contextGraphId, subGraphName)) return { registered: true };
   const peerIds = await resolutionPeers(agent, contextGraphId, signal);
-  let answered = 0;
+  const answered: string[] = [];
   let lastFailure = '';
   let asking = peerIds;
   for (let round = 0; asking.length > 0; round += 1) {
@@ -490,7 +495,7 @@ async function lookUpPeers(
         lastFailure = `peer ${peerId.slice(-8)} sent an incomplete answer`;
         continue;
       }
-      answered += 1;
+      answered.push(peerId);
       const wanted = new Set(state.wanted.get(contextGraphId)).add(subGraphName);
       const found = readRequestedPeerSubGraphRegistrations(contextGraphId, quads, wanted);
       await registerPeerSubGraphs(agent, contextGraphId, found, peerId, ctx);

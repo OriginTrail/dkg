@@ -74,6 +74,7 @@ afterEach(async () => {
 
 describe('exact-batch stream responder switch', () => {
   it.each([
+    ['default configuration', {}],
     ['its current name', { [CURRENT]: '1' }],
     // A core configured before the rename must keep serving after an upgrade.
     ['the name it was first deployed under', { [FIRST_DEPLOYED]: '1' }],
@@ -82,7 +83,7 @@ describe('exact-batch stream responder switch', () => {
   });
 
   it.each([
-    ['neither name is set', {}],
+    ['the first deployed name is explicitly off', { [FIRST_DEPLOYED]: '0' }],
     ['its current name is off, whatever the first name says', { [CURRENT]: '0', [FIRST_DEPLOYED]: '1' }],
   ])('a core does not serve the stream protocol when %s', async (_case, env) => {
     expect(await servedProtocols('core', env)).not.toContain(EXACT_BATCH_STREAM_PROTOCOL);
