@@ -122,7 +122,7 @@ it.each(['present', 'missing'] as const)('repairs immutable metadata with equiva
   const note = { ...metadata[0]!, predicate: 'urn:local:note', object: '"preserve"' };
   metadata.push(note);
   const original = structuredClone(metadata);
-  const repaired = reconcileConfirmedGraphKnowledgeAssetMetadata(snapshot, metadata, true);
+  const repaired = reconcileConfirmedGraphKnowledgeAssetMetadata(snapshot, metadata, true, input.contextGraphId);
   expect(metadata).toEqual(original); expect(repaired).toContainEqual(note);
   const parsed = parseConfirmedGraphKnowledgeAssetMetadataEnvelope(repaired, input);
   expect(parsed.state).toBe('confirmed');
@@ -138,5 +138,5 @@ it.each(['different-version', 'different-root', 'missing-root', 'ambiguous-root'
   if (mode === 'different-root') metadata = metadata.map(q => q.predicate === DKG + 'merkleRoot' ? { ...q, object: `"${'ff'.repeat(32)}"` } : q);
   if (mode === 'missing-root') metadata = metadata.filter(q => q.predicate !== DKG + 'merkleRoot');
   if (mode === 'ambiguous-root') metadata.push({ ...metadata.find(q => q.predicate === DKG + 'merkleRoot')! });
-  expect(reconcileConfirmedGraphKnowledgeAssetMetadata(snapshot, metadata, mode !== 'different-version')).toEqual(snapshot.metadataQuads);
+  expect(reconcileConfirmedGraphKnowledgeAssetMetadata(snapshot, metadata, mode !== 'different-version', input.contextGraphId)).toEqual(snapshot.metadataQuads);
 });

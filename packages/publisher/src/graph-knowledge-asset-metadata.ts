@@ -4,6 +4,7 @@ import {
   toAgentDid,
   knowledgeAssetLayerGraphUri,
   MemoryLayer,
+  contextGraphDataGraphUri,
 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
@@ -191,7 +192,7 @@ export function preserveGraphKnowledgeAssetReceiptProvenanceV1(
 
 const RECOVERY_CANONICAL_PREDICATES = new Set(['contentScopeVersion', 'assertionVersion', 'publicTripleCount', 'privateTripleCount',
   'privateMerkleRoot', 'assertionGraph', 'subGraphName', 'authenticatedSubGraphName', 'merkleRoot', 'batchId', 'kaUal', 'status',
-  'transactionHash', 'materializedVersion', 'confirmationKind'].map(name => `${DKG}${name}`));
+  'transactionHash', 'materializedVersion', 'confirmationKind', 'contextGraph'].map(name => `${DKG}${name}`));
 
 /** One retention owner; callers separately establish the assertion anchor and trusted controls. */
 export function reconcileSameAssertionGraphKnowledgeAssetMetadataV1(input: {
@@ -304,13 +305,21 @@ function appendConfirmationControls(
 
 /** Caller has verified this exact assertion scope; stale or missing local routes are projections. */
 export function withLocallyAuthenticatedGraphKnowledgeAssetRouteV1(
-  metadata: readonly Quad[], subGraphName: string | undefined,
+  metadata: readonly Quad[], subGraphName: string | undefined, contextGraphId: string,
 ): Quad[] {
-  const identity = metadata[0], routes = metadata.filter(q => q.predicate === AUTHENTICATED_SUB_GRAPH);
-  if (subGraphName === undefined && routes.length === 0) return [...metadata];
+  const identity = metadata[0], predicate = `${DKG}contextGraph`, expected = contextGraphDataGraphUri(contextGraphId);
+  let canonical = [...metadata];
+  const bindings = metadata.filter(q => q.predicate === predicate);
+  if (identity && (bindings.length !== 1 || bindings[0]!.subject !== identity.subject
+    || bindings[0]!.graph !== identity.graph || bindings[0]!.object !== expected)) {
+    canonical = canonical.filter(q => q.predicate !== predicate);
+    canonical.push(mq(identity.subject, predicate, expected, identity.graph));
+  }
+  const routes = canonical.filter(q => q.predicate === AUTHENTICATED_SUB_GRAPH);
+  if (subGraphName === undefined && routes.length === 0) return canonical;
   if (subGraphName !== undefined && identity !== undefined && routes.length === 1 && routes[0]!.subject === identity.subject
-    && routes[0]!.graph === identity.graph && routes[0]!.object === lit(subGraphName)) return [...metadata];
-  const result = metadata.filter(q => q.predicate !== AUTHENTICATED_SUB_GRAPH);
+    && routes[0]!.graph === identity.graph && routes[0]!.object === lit(subGraphName)) return canonical;
+  const result = canonical.filter(q => q.predicate !== AUTHENTICATED_SUB_GRAPH);
   if (identity !== undefined) appendAuthenticatedSubGraphRoute(result, identity.subject, identity.graph, subGraphName);
   return result;
 }

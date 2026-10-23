@@ -36,8 +36,9 @@ export function sameConfirmedGraphKnowledgeAssetProof(
 export function reconcileConfirmedGraphKnowledgeAssetMetadata(
   snapshot: { metadataQuads: readonly Quad[]; proof: ConfirmedGraphKnowledgeAssetProof },
   metadata: readonly Quad[], sameVersion: boolean,
+  contextGraphId: string,
 ): Quad[] {
-  const canonical = withLocallyAuthenticatedGraphKnowledgeAssetRouteV1(snapshot.metadataQuads, snapshot.proof.subGraphName);
+  const canonical = withLocallyAuthenticatedGraphKnowledgeAssetRouteV1(snapshot.metadataQuads, snapshot.proof.subGraphName, contextGraphId);
   const roots = metadata.filter(q => q.predicate === 'http://dkg.io/ontology/merkleRoot');
   const storedRoot = roots.length === 1 ? parseMetadataBytes32Literal(roots[0]!.object) : undefined;
   if (!sameVersion || !storedRoot || rootHex(storedRoot) !== snapshot.proof.merkleRoot) return canonical;

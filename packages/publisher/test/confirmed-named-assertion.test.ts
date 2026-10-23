@@ -66,7 +66,9 @@ it.each(['assertionVersion','packedKaId','merkleRoot','kaUal','publicationDeploy
 it.each(['admitted','active','archive'] as const)('restores identity using %s original evidence and makes repeat reconciliation idempotent', async source => {
   const s = store();
   if (source !== 'admitted') await s.insert(confirmedNamedAssertionSealQuads(seal, source === 'active' ? active : archive, source === 'active' ? meta : archiveGraph));
+  const reads = vi.spyOn(s, 'query');
   await reconcileConfirmedNamedAssertion(s, target, proof, source === 'admitted' ? seal : undefined);
+  expect(reads.mock.calls.filter(([, options]) => options?.source === 'agent.publish.confirmedNamedEvidence')).toHaveLength(1);
   expect(await s.query(`ASK { GRAPH <${meta}> { <${lifecycle}> <http://dkg.io/ontology/reservedUal> "${target.kaUal}" } }`)).toMatchObject({ value: true });
   const insert = vi.spyOn(s, 'insert'), update = vi.spyOn(s, 'replaceSubject');
   await reconcileConfirmedNamedAssertion(s, target, proof, seal);
@@ -116,11 +118,18 @@ it('refuses an unavailable archive replacement capability', async () => {
 
 it('propagates unavailable store reads before any writes', async () => {
   const s = store(), query = s.query.bind(s);
-  vi.spyOn(s, 'query').mockImplementation((sparql, ...args) => sparql.includes(`CONSTRUCT { <${active}>`)
+  vi.spyOn(s, 'query').mockImplementation((sparql, ...args) => args[0]?.source === 'agent.publish.confirmedNamedEvidence'
     ? Promise.resolve({ type: 'bindings', bindings: [] }) : query(sparql, ...args));
   const insert = vi.spyOn(s, 'insert');
   await expect(reconcileConfirmedNamedAssertion(s, target, proof, seal)).rejects.toThrow('evidence read unavailable');
   expect(insert).not.toHaveBeenCalled();
+});
+it('refuses over-budget evidence before any reconciliation mutation', async () => {
+  const s = store();
+  await s.insert(Array.from({ length: 257 }, (_, i) => ({ subject: archive, graph: archiveGraph, predicate: `urn:extra:${i}`, object: '"retained"' })));
+  const insert = vi.spyOn(s, 'insert'), replace = vi.spyOn(s, 'replaceSubject');
+  await expect(reconcileConfirmedNamedAssertion(s, target, proof, seal)).rejects.toThrow('bounded row limit');
+  expect(insert).not.toHaveBeenCalled(); expect(replace).not.toHaveBeenCalled();
 });
 it('does not accept a stored seal from a different root or identity', async () => {
   const s = store();

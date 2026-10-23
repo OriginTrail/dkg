@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { buildAssertionSealQuads, parseAssertionSealQuads, canonicalGraphScopedAuthorSealFromAssertionSealV1, canonicalizeCanonicalGraphScopedAuthorSealV1,
+import { buildAssertionSealQuads, assertSafeIri, canonicalGraphScopedAuthorSealFromAssertionSealV1, canonicalizeCanonicalGraphScopedAuthorSealV1,
   assertionLifecycleUri, contextGraphAssertionUri, contextGraphMetaUri, createGraphKnowledgeAssetScope,
   MemoryLayer, knowledgeAssetLayerGraphUri, type CanonicalGraphScopedAuthorSealV1 } from '@origintrail-official/dkg-core';
 import { tryReplaceSubjectAtomically, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
@@ -65,30 +65,33 @@ async function reconcileWithAllocationLock(store: TripleStore, target: Confirmed
   const lifecycle = assertionLifecycleUri(target.contextGraphId, target.agentAddress, target.name, target.subGraphName);
   const archiveGraph = assertionRecoverySealGraph(target.contextGraphId, target.subGraphName);
   const archive = assertionRecoverySealSubject(target.contextGraphId, target.name, target.agentAddress, target.subGraphName);
-  const read = async (subject: string, graph: string) => {
-    const result = await store.query(`CONSTRUCT { <${subject}> ?p ?o } WHERE { GRAPH <${graph}> { <${subject}> ?p ?o } }`);
-    if (result.type !== 'quads') throw new Error('Confirmed named assertion evidence read unavailable');
-    return result.quads;
-  };
-  const decode = (rows: Quad[], subject: string): CanonicalGraphScopedAuthorSealV1 | undefined => {
-    const stored = parseStoredAssertionSeal(rows, subject);
+  const coordinates = [[meta, assertion], [meta, lifecycle], [archiveGraph, archive]]
+    .map(([graph, subject]) => `(<${assertSafeIri(graph!)}> <${assertSafeIri(subject!)}>)`).join(' ');
+  const maxRows = 256;
+  const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE {
+    VALUES (?g ?s) { ${coordinates} } GRAPH ?g { ?s ?p ?o }
+  } LIMIT ${maxRows + 1}`, { source: 'agent.publish.confirmedNamedEvidence', maxResponseBytes: 128 * 1024 });
+  if (result.type !== 'quads') throw new Error('Confirmed named assertion evidence read unavailable');
+  if (result.quads.length > maxRows) throw new Error('Confirmed named assertion evidence exceeds bounded row limit');
+  const activeRows = result.quads.filter(q => q.subject === assertion);
+  const archivedRows = result.quads.filter(q => q.subject === archive);
+  const existing = result.quads.filter(q => q.subject === lifecycle);
+  const activeStored = parseStoredAssertionSeal(activeRows, assertion), archiveStored = parseStoredAssertionSeal(archivedRows, archive);
+  const decode = (stored: ReturnType<typeof parseStoredAssertionSeal>): CanonicalGraphScopedAuthorSealV1 | undefined => {
     if (!stored || (stored.reservedKaId !== undefined && stored.reservedKaId !== target.packedKaId)) return undefined;
     try { return canonicalGraphScopedAuthorSealFromAssertionSealV1({ ...stored, reservedKaId: target.packedKaId, contentScopeVersion: 2 }); }
     catch { return undefined; }
   };
-  const activeRows = await read(assertion, meta);
-  let archivedRows: Quad[] | undefined;
-  const readArchive = async () => archivedRows ??= await read(archive, archiveGraph);
+  const activeSeal = decode(activeStored), archivedSeal = decode(archiveStored);
   let seal = admittedSeal;
   if (seal) assertConfirmedNamedAssertionSeal(seal, target, proof);
-  else for (const subject of [assertion, archive]) {
-    const candidate = decode(subject === assertion ? activeRows : await readArchive(), subject);
+  else for (const candidate of [activeSeal, archivedSeal]) {
     if (!candidate) continue;
     try { assertConfirmedNamedAssertionSeal(candidate, target, proof); seal = candidate; break; }
     catch { /* Historical commands remain pending until a matching original seal is available. */ }
   }
   if (!seal) throw new Error('Confirmed lifecycle repair awaits its authenticated named assertion seal');
-  const scope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion), existing = await read(lifecycle, meta);
+  const scope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
   const ontology = 'http://dkg.io/ontology/';
   const reservation = decodeAssertionReservationIdentity(decodeAssertionLifecycleRecord(existing.map(q => ({ p: q.predicate, o: q.object }))), target.agentAddress);
   if (reservation.kind === 'conflict') throw new Error('Confirmed named assertion reservation conflicts with surviving records');
@@ -113,16 +116,15 @@ async function reconcileWithAllocationLock(store: TripleStore, target: Confirmed
   const originalSeal = canonicalizeCanonicalGraphScopedAuthorSealV1(seal);
   const same = (candidate: CanonicalGraphScopedAuthorSealV1 | undefined) => candidate !== undefined && canonicalizeCanonicalGraphScopedAuthorSealV1(candidate) === originalSeal;
   // Leave active drafts/seals untouched; restore the original only in the publisher's recovery archive.
-  if (!same(decode(activeRows, assertion))) {
-    const rows = await readArchive(), archived = decode(rows, archive);
+  const activeMatches = same(activeSeal), archiveMatches = same(archivedSeal);
+  if (!activeMatches) {
     // A malformed archive cannot authorize its own replacement; keep the obligation.
-    const current = parseAssertionSealQuads(rows, archive);
-    if (rows.length > 0 && !current) throw new Error('Confirmed named assertion recovery awaits malformed archived seal reconciliation');
+    const current = archiveStored;
+    if (archivedRows.length > 0 && !current) throw new Error('Confirmed named assertion recovery awaits malformed archived seal reconciliation');
     if (current?.assertionVersion && BigInt(current.assertionVersion) > BigInt(seal.assertionVersion)) throw new Error('Confirmed named assertion recovery awaits newer archived seal reconciliation');
-    if (!same(archived) && !await tryReplaceSubjectAtomically(store, archiveGraph, archive,
-      confirmedNamedAssertionSealQuads(seal, archive, archiveGraph), { source: 'agent.publish.confirmedNamedSeal' })) {
-      throw new Error('Confirmed named assertion recovery requires atomic seal replacement');
-    }
   }
-  if (additions.length) await store.insert(additions);
+  const plan = { archive: !activeMatches && !archiveMatches ? confirmedNamedAssertionSealQuads(seal, archive, archiveGraph) : undefined, additions };
+  if (plan.archive && !await tryReplaceSubjectAtomically(store, archiveGraph, archive,
+    plan.archive, { source: 'agent.publish.confirmedNamedSeal' })) throw new Error('Confirmed named assertion recovery requires atomic seal replacement');
+  if (plan.additions.length) await store.insert(plan.additions);
 }

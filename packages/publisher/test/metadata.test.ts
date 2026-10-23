@@ -391,9 +391,9 @@ describe('generateGraphKnowledgeAssetMetadata confirmation state', () => {
     const snapshot = { metadataQuads: incoming, proof: { assertionVersion: '1', publicTripleCount: 2, privateTripleCount: 0,
       assertionGraph: meta.assertionGraph, merkleRoot: '07'.repeat(32), batchId: '7' } };
     const values = (rows: typeof incoming) => rows.filter(q => q.predicate === note.predicate).map(q => q.object);
-    expect(values(reconcileConfirmedGraphKnowledgeAssetMetadata(snapshot, current, true))).toEqual(['"local"']);
+    expect(values(reconcileConfirmedGraphKnowledgeAssetMetadata(snapshot, current, true, meta.contextGraphId))).toEqual(['"local"']);
     expect(values(mergeSameVersionGraphKnowledgeAssetMetadataV1(incoming, current))).toEqual(['"incoming"']);
-    expect(values(reconcileConfirmedGraphKnowledgeAssetMetadata(snapshot, current, false))).toEqual(['"incoming"']);
+    expect(values(reconcileConfirmedGraphKnowledgeAssetMetadata(snapshot, current, false, meta.contextGraphId))).toEqual(['"incoming"']);
   });
   it('preserves same-assertion annotations without retaining obsolete protocol controls or other scopes', () => {
     const incoming = generateGraphKnowledgeAssetMetadata(makeGraphMeta(), { status: 'confirmed', confirmation: {

@@ -19,6 +19,7 @@ import { normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-evid
 import { NamedKaVmLifecycleRepair } from '../src/named-ka-vm-lifecycle-repair.js';
 import { confirmedLifecycleExecutionCapabilities } from '../src/named-ka-vm-lifecycle-executor.js';
 import { confirmedMaterializationFixture } from './_helpers/confirmed-materialization-fixture.js';
+import { readGraphScopedVmManifest } from '../src/sync/responder/exact-graph-reader.js';
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -310,6 +311,36 @@ it.each([[undefined, true], ['code', true], ['code', false]] as const)('repairs 
   expect(await reopened.query(`ASK { GRAPH <${meta}> { ?registration a <${dkg}SubGraph> } }`)).toMatchObject({ value: false });
   expect(await reopened.query(`ASK { GRAPH <${meta}> { <${input.publishedUal}> <${dkg}transactionHash> "${receipt}"; <urn:receipt-note> "preserve" } }`)).toMatchObject({ value: true });
 });
+it.each([[true, 'wrong'], [false, 'wrong'], [true, 'missing'], [false, 'missing']] as const)(
+  'repairs the context-graph route with snapshot=%s and %s binding before retiring durable recovery', async (snapshot, mode) => {
+    const { owner, input: source, store, path, graph, journal, chain, publicQuads } = await fixture();
+    const { materialization: _snapshot, ...legacy } = source, input = snapshot ? source : legacy;
+    const dkg = 'http://dkg.io/ontology/', meta = contextGraphMetaUri(input.contextGraphId), receipt = '0x' + 'ef'.repeat(32);
+    await store.insert([...source.materialization!.metadataQuads.filter(q => q.predicate !== dkg + 'contextGraph')
+      .map(q => q.predicate === dkg + 'transactionHash' ? { ...q, object: JSON.stringify(receipt) } : q),
+      ...(mode === 'wrong' ? [{ subject: input.publishedUal, predicate: dkg + 'contextGraph', object: 'did:dkg:context-graph:wrong', graph: meta }] : []),
+      { subject: input.publishedUal, predicate: 'urn:receipt-note', object: '"preserve"', graph: meta },
+      ...publicQuads.map(q => ({ ...q, graph }))]);
+    await expect(readGraphScopedVmManifest(store, input.contextGraphId)).rejects.toThrow(mode === 'wrong' ? 'points outside context graph' : 'incomplete V2 descriptor');
+    await replaceLocallyTrustedKnowledgeAssetControlEnvelope(store, input.publishedUal,
+      { assertionVersion: input.assertionVersion, merkleRoot: getBytes(input.merkleRoot) },
+      { publisherPeerId: 'test-publisher', accessPolicy: 'allowList', allowedPeers: ['test-reader'] });
+    const capture = store.commitment!.capture.bind(store.commitment);
+    vi.spyOn(store.commitment!, 'capture').mockImplementationOnce(() => async () => { throw new Error('route is not durable yet'); }).mockImplementation(capture);
+    expect(await owner.submit(input)).toBe('pending'); expect(await journal()).toHaveLength(1);
+    await owner.stop(); await store.close();
+    const retryStore = new OxigraphStore(path); cleanups.push(() => retryStore.close());
+    const retry = new NamedKaVmLifecycleRepair({ dataDir: dirname(path), now: () => 10_000, warn: () => {},
+      ...confirmedLifecycleExecutionCapabilities({ store: retryStore, chain, dataDir: dirname(path), writeLocks: new Map(), readTimeoutMs: 1000 }) });
+    cleanups.push(() => retry.stop()); await retry.runDue(); expect(await journal()).toHaveLength(0);
+    const reopened = new OxigraphStore(path); cleanups.push(() => reopened.close());
+    await expect(readGraphScopedVmManifest(reopened, input.contextGraphId)).resolves.toMatchObject({
+      confirmedEntries: [{ ual: input.publishedUal, graph, rowCount: 1 }],
+    });
+    expect(await reopened.query(`SELECT ?route WHERE { GRAPH <${meta}> { <${input.publishedUal}> <${dkg}contextGraph> ?route } }`))
+      .toMatchObject({ bindings: [{ route: `did:dkg:context-graph:${input.contextGraphId}` }] });
+    expect(await reopened.query(`ASK { GRAPH <${meta}> { <${input.publishedUal}> <${dkg}transactionHash> "${receipt}"; <urn:receipt-note> "preserve" } }`)).toMatchObject({ value: true });
+  });
 it('validates admission once and executes the same frozen proof through retries and journal round-trips', async () => {
   const { owner, input, store, advance } = await fixture(true);
   const apply = vi.spyOn(materialization, 'applyMaterializedConfirmedLifecycle');

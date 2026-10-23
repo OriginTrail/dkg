@@ -59,7 +59,7 @@ export async function applyMaterializedConfirmedLifecycle(store: TripleStore, in
       throw error;
     }
     const recoveredBase = reconcileConfirmedGraphKnowledgeAssetMetadata(
-      snapshot ?? { metadataQuads: metadata, proof }, metadata, current === BigInt(input.assertionVersion));
+      snapshot ?? { metadataQuads: metadata, proof }, metadata, current === BigInt(input.assertionVersion), input.contextGraphId);
     const controls = await reconcileConfirmedKnowledgeAssetControls(store, { metaGraph: meta, ual: scope.ual,
       anchor: { assertionVersion: input.assertionVersion, merkleRoot: getBytes(`0x${proof.merkleRoot}`) },
       metadataQuads: snapshot?.metadataQuads ?? metadata, restoreMissing: snapshot !== undefined });
