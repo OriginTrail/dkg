@@ -1,3 +1,4 @@
+import { broadcastExhausted } from './_helpers/rpc-prep-failure-2942.js';
 import * as subtraction from '../src/async-lift-subtraction.js';
 import { seedLegacyRawLiftTestJob } from './_helpers/legacy-raw-lift.js';
 import { createServer } from 'node:http';
@@ -125,7 +126,31 @@ describe('GH#3419 pre-validation provenance', () => {
     } finally { subtract.mockRestore(); }
   });
 
-  it.each(['broadcast', 'included'] as const)('keeps %s chain evidence held after a typed read interruption', async status => {
+  it('does not turn a hash-bearing final-preflight RPC failure into a dependency retry', async () => {
+    const h = createAsyncLift2270Harness();
+    const { stage } = createStoreRejectionFixtures(h);
+    let preflights = 0, executions = 0;
+    const publisher = h.createPublisher({ ...RETRY_LANE, knowledgeAssetVmPublishHandler: {
+      preflight: async () => { if (++preflights === 2) throw broadcastExhausted(TX_HASH); },
+      execute: async () => { executions++; return confirmedPublishResult(); },
+    } });
+    await stage();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const failed = expectFailed(await publisher.processNext('wallet-1'));
+    expect(failed.failure).toMatchObject({ failedFromState: 'validated', code: 'validation_unknown', retryable: false,
+      validationDiagnostic: { stage: 'final_preflight', cause: 'unknown' } });
+    expect(executions).toBe(0);
+    expect(failed.timestamps.nextRetryAt).toBeUndefined();
+    expect(deriveLiftJobRetryProjection(failed, { autoRetryEnabled: true })).toEqual({ autoRetryEligible: false });
+    expect(await publisher.retry({ jobId })).toBe(0);
+    h.advance(10_000);
+    expect(await publisher.processNext('wallet-1')).toBeNull();
+  });
+
+  it.each((['broadcast', 'included'] as const).flatMap(status => [
+    { status, label: 'read interruption', error: () => stageError(transport()) },
+    { status, label: 'string timeout', error: () => 'request timed out' },
+  ]))('keeps $status chain evidence held after $label', async ({ status, error }) => {
     const h = createAsyncLift2270Harness();
     const { stage } = createStoreRejectionFixtures(h);
     const publisher = h.createPublisher(RETRY_LANE);
@@ -137,8 +162,12 @@ describe('GH#3419 pre-validation provenance', () => {
     const broadcast = { txHash: TX_HASH, walletId: 'wallet-1', operationKind: 'create' as const };
     await publisher.update(jobId, 'broadcast', { broadcast });
     if (status === 'included') await publisher.update(jobId, 'included', { broadcast, inclusion: { txHash: TX_HASH, blockNumber: 1 } });
-    const failed = expectFailed(await publisher.openClaimSession(claim).recordExecutionFailure(status, stageError(transport()), { neverDispatched: true }));
+    const failed = expectFailed(await publisher.openClaimSession(claim).recordExecutionFailure(status, error(), { neverDispatched: true }));
     expect(failed.broadcast?.txHash).toBe(TX_HASH);
+    if (typeof error() === 'string') expect(failed.failure).toMatchObject({
+      code: status === 'included' ? 'finality_timeout' : 'tx_submit_timeout',
+      timeout: { timeoutMs: 0, handling: 'check_chain_then_finalize_or_reset' },
+    });
     expect(isHeldForChainProof(failed)).toBe(true);
     expect(deriveLiftJobRetryProjection(failed, { autoRetryEnabled: true })).toMatchObject({ autoRetryEligible: false, waitingReason: 'pending_chain_proof' });
   });

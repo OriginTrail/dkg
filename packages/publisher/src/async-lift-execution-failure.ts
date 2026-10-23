@@ -232,7 +232,7 @@ export function mapExecutionFailure(input: ExecutionFailureInput): LiftJobFailur
     || (claimedBeforeDispatch && classified.gate === 'pre_dispatch');
   const origin: LiftJobState = validatedBeforeDispatch && (classified.gate || staged)
     ? 'validated' : requestedOrigin;
-  const message = error instanceof Error ? error.message : 'Unknown publication execution failure';
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : 'Unknown publication execution failure';
   const lower = message.toLowerCase();
   const errorPayloadRef = `urn:dkg:publisher:error:${jobId}`;
 
