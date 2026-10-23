@@ -1,5 +1,7 @@
 
 import { verifiedDelegationKeyIds, verifyJoinEncryptionKeyBundle } from './internal/join-encryption-key-bundle.js';
+import { answerJoinFromHeldApproval } from './internal/context-graph-authority/approved-member-metadata-pending.js';
+import { joinAdmissionActiveMembers } from './internal/context-graph-authority/join-admission-members.js';
 import type { PeerSyncConnection } from './p2p/peer-connection.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -1124,7 +1126,7 @@ export class JoinRequestMethods extends DKGAgentBase {
       getContextGraphMeta: (contextGraphId) => this.getCgMeta(contextGraphId),
       getActiveMembers: (contextGraphId) => withRpcUsageSite(
         CG_AUTH_RPC_SITES.joinAdmissionRoster,
-        () => this.getMemberRecoveryRosterSource(contextGraphId),
+        () => joinAdmissionActiveMembers(this, contextGraphId),
       ),
       getContextGraphOwner: (contextGraphId) => this.getContextGraphOwner(contextGraphId),
       resolveLocalOwnerAddress: (ownerDid) => this.resolveLocalJoinPolicyOwnerAddress(ownerDid),
@@ -3261,14 +3263,12 @@ export class JoinRequestMethods extends DKGAgentBase {
     delegation: SignedAgentDelegation,
     agentName: string | undefined,
     curatorPeerId: string,
-  ): Promise<{ delivered: number; queued?: boolean; errors: string[]; alreadyMember?: boolean; autoApproved?: boolean }> {
+    options: { reRequest?: boolean } = {},
+  ): Promise<{ delivered: number; queued?: boolean; errors: string[]; alreadyMember?: boolean; autoApproved?: boolean; approvedMetadataPending?: boolean }> {
     const key = requesterJoinStateKey(contextGraphId, delegation.agentAddress);
-    return withRequesterJoinForwardLock(this, key, () => this.forwardJoinRequestOnce(
-      contextGraphId,
-      delegation,
-      agentName,
-      curatorPeerId,
-    ));
+    return withRequesterJoinForwardLock(this, key, async () => (options.reRequest === true ? undefined
+      : await answerJoinFromHeldApproval(this, contextGraphId, delegation.agentAddress, curatorPeerId))
+      ?? this.forwardJoinRequestOnce(contextGraphId, delegation, agentName, curatorPeerId));
   }
 
   async forwardJoinRequestOnce(this: DKGAgent,

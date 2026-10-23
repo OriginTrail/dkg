@@ -2114,20 +2114,20 @@ export class ApiClient {
   }
 
   /**
-   * Forward a previously-signed join delegation to the curator over
-   * P2P. The daemon dials `curatorPeerId` directly (DHT-resolved if
-   * not currently connected). Returns the delivery count so callers can detect
-   * "no curator reachable" without inspecting log output.
+   * Forward a previously-signed join delegation to the curator over P2P (the daemon dials
+   * `curatorPeerId` directly). Returns the delivery count so callers can detect "no curator
+   * reachable"; `reRequest` sends a request even while an approval's member list is pending.
    */
   async requestJoin(
     contextGraphId: string,
     delegation: unknown,
     curatorPeerId: string,
     agentName?: string,
+    options: { reRequest?: boolean } = {},
   ): Promise<ContextGraphJoinResult> {
     return this.post(
       `/api/context-graph/${encodeURIComponent(contextGraphId)}/request-join`,
-      { delegation, curatorPeerId, ...(agentName ? { agentName } : {}) },
+      { delegation, curatorPeerId, ...(agentName ? { agentName } : {}), ...(options.reRequest ? { reRequest: true } : {}) },
     );
   }
 

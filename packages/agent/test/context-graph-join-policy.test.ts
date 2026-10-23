@@ -926,6 +926,37 @@ describe('context graph open enrollment policy', () => {
     );
   }, 30_000);
 
+  it('answers a repeated request of an admitted member of a registered public graph as already a member (#3421)', async () => {
+    const { agent, owner } = await boot();
+    const contextGraphId = 'public-registered-member-repeat';
+    await agent.createContextGraph({
+      id: contextGraphId,
+      name: 'Registered public graph',
+      description: '',
+      accessPolicy: 0,
+      callerAgentAddress: owner.agentAddress,
+    });
+    const joiner = await agent.registerAgent('public-member', { framework: 'test' });
+    const first = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    await expect(agent.processIncomingJoinRequest(contextGraphId, first, joiner.name, agent.peerId))
+      .resolves.toMatchObject({ status: 'pending' });
+    await agent.approveJoinRequest(contextGraphId, joiner.agentAddress, owner.agentAddress);
+
+    // Registered on chain as public: its chain record names no participants,
+    // so the member recovery roster has none. The curator's allowlist does.
+    const registered = vi.spyOn(agent, 'resolveSwmRegisteredAuthority')
+      .mockResolvedValue({ kind: 'public', onChainId: 7n });
+    await expect(agent.getMemberRecoveryRosterSource(contextGraphId)).resolves.toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const repeat = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    await expect(agent.processIncomingJoinRequest(contextGraphId, repeat, joiner.name, agent.peerId))
+      .resolves.toMatchObject({ status: 'approved', alreadyMember: true });
+
+    expect(registered).toHaveBeenCalled();
+    expect(await agent.getJoinRequestStatus(contextGraphId, joiner.agentAddress)).toBe('approved');
+    expect(await agent.listPendingJoinRequests(contextGraphId)).toEqual([]);
+  }, 30_000);
+
   it('requires a carrier-matched replay to cache keys before private manual approval', async () => {
     const { agent, owner, chain } = await boot();
     const contextGraphId = 'private-policy-cold-carrier-replay';

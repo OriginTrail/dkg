@@ -375,30 +375,6 @@ export type JoinApprovalMetadataRecoveryOutcome = 'completed' | 'retry' | 'stop'
  */
 const JOIN_APPROVAL_METADATA_RECOVERY_RETRY_MS = Object.freeze([15_000, 30_000, 60_000, 120_000, 300_000]);
 
-/**
- * Wait `ms` unless the node stops first; resolves whether the wait completed.
- * The listener is removed either way, so nothing stays attached to the
- * node-lifetime signal.
- */
-function waitUnlessStopped(ms: number, stopSignal: AbortSignal | undefined): Promise<boolean> {
-  return new Promise((resolve) => {
-    if (stopSignal?.aborted === true) {
-      resolve(false);
-      return;
-    }
-    const onStop = () => {
-      clearTimeout(timer);
-      resolve(false);
-    };
-    const timer = setTimeout(() => {
-      stopSignal?.removeEventListener('abort', onStop);
-      resolve(true);
-    }, ms);
-    (timer as ReturnType<typeof setTimeout> & { unref?: () => void }).unref?.();
-    stopSignal?.addEventListener('abort', onStop, { once: true });
-  });
-}
-
 function startRehydrationAuthorityBudget(budgetMs: number): RehydrationAuthorityBudget {
   if (budgetMs === 0) {
     return { spent: () => false, race: (decision) => decision, dispose: () => {} };
@@ -614,7 +590,12 @@ import {
 import { verifiedCuratorDialAddress } from './curator-dial-address.js';
 import { signsThroughExternalSigner } from './external-author-signing.js';
 import { watchCuratorRegistrationRefusal } from './curator-registration-refusal.js';
-import { runJoinApprovalMetadataRecovery, runPostApprovalSyncWithMetadataRecovery } from './join-approval-metadata-refetch.js';
+import {
+  runJoinApprovalMetadataRecovery,
+  runPostApprovalSyncWithMetadataRecovery,
+  waitForJoinApprovalMetadataRetry,
+} from './join-approval-metadata-refetch.js';
+import { isApprovedMemberMetadataConfirmed } from './internal/context-graph-authority/approved-member-metadata-pending.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
@@ -7597,15 +7578,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const delayMs = JOIN_APPROVAL_METADATA_RECOVERY_RETRY_MS[
         Math.min(attempt, JOIN_APPROVAL_METADATA_RECOVERY_RETRY_MS.length - 1)
       ]!;
-      if (!(await waitUnlessStopped(delayMs, stopSignal))) return;
+      if (!(await waitForJoinApprovalMetadataRetry(this, contextGraphId, curatorPeerId, delayMs, stopSignal))) return;
       const current = this.subscribedContextGraphs.get(contextGraphId);
       if (
         !this.localApprovedAgentByCG.has(contextGraphId)
         || current?.subscribed !== true
-        // A concurrent data catch-up can set `synced` while authoritative
-        // join metadata is still pending or unknown. Only its explicit
-        // confirmation ends this join-specific retry.
-        || (current.synced === true && current.metaSynced === true && current.pendingMeta !== true)
+        // A concurrent data catch-up can set `synced`, and a public graph's
+        // own definition `metaSynced`, while the approved member's metadata
+        // is still pending or unknown (#3421). Only the confirmation of that
+        // member ends this join-specific retry.
+        || (current.synced === true && current.metaSynced === true && current.pendingMeta !== true
+          && await isApprovedMemberMetadataConfirmed(this, contextGraphId).catch(() => false))
       ) return;
     }
   }
