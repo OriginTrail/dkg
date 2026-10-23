@@ -1,3 +1,4 @@
+import { LiftPayloadValidationError } from './lift-validation-error.js';
 import { FinalizedSnapshotCollector, SNAPSHOT_RETIREMENT_PATTERN } from './finalized-snapshot-collector.js';
 import {
   mkdir,
@@ -16,7 +17,6 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import { withSnapshotSource, readSnapshotSource, readSnapshotFileIdentity, sameSnapshotSource, sameSnapshotFileIdentity, snapshotPath, SnapshotSourceChangedError, type OpenedSnapshotSource, type SnapshotFileSource, type SnapshotFileIdentity, type SnapshotFileReader } from './workspace-snapshot-source.js';
 import { BoundedLruCache } from '@origintrail-official/dkg-core';
 import { snapshotHash, snapshotLifecycleGate, type WorkspaceSnapshotLifecycle } from './workspace-snapshot-lifecycle.js';
-
 export interface SharedMemoryPublicSnapshotStorageConfig {
   enabled?: boolean;
   directory?: string;
@@ -1193,5 +1193,5 @@ function normalizeParsedObjectTerm(term: string): string {
 }
 
 function invalidSnapshotBlob(ref: string, index: number): Error {
-  return new Error(`Invalid shared-memory public snapshot blob ${ref} at line ${index + 1}`);
+  return new LiftPayloadValidationError(`Invalid shared-memory public snapshot blob ${ref} at line ${index + 1}`);
 }

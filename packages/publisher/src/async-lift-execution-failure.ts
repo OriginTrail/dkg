@@ -1,3 +1,5 @@
+import { isStoreReadTransportFailure } from '@origintrail-official/dkg-storage';
+import { LiftPayloadValidationError, LiftValidationStageError, type LiftValidationDiagnostic } from './lift-validation-error.js';
 import { isCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
 import {
   getChainWriteAheadHookCause,
@@ -57,8 +59,8 @@ function isTransientRpcFailure(error: unknown): boolean {
  * (b) IS the persisted failure code. Registering a future structured
  * preflight error here cannot desynchronize state and code, which was
  * previously possible because the two decisions lived in independent
- * condition chains. Message-keyed legacy failures still flow through the
- * message chain in `mapExecutionFailure` (their consolidation is #1974's scope).
+ * condition chains. Unrecognized pre-validation failures remain terminal and unknown; message text
+ * cannot establish content failure or authorize a retry.
  */
 // GH#2940 — only register causes that are pre-send BY CONSTRUCTION (raised before anything is
 // signed). A typed store rejection is position-agnostic: it can equally arise after the send, so
@@ -140,9 +142,9 @@ function classifyKnowledgeAssetVmPublishPreconditionCode(error: unknown): LiftJo
 }
 
 export function isKnowledgeAssetPublishPreconditionFailure(error: unknown): boolean {
+  if (error instanceof LiftValidationStageError) error = error.cause;
   if (classifyKnowledgeAssetVmPublishPreconditionCode(error) !== null) return true;
-  const anyError = error as { code?: unknown; message?: unknown };
-  const message = String(anyError?.message ?? error);
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
   return /is not finalized/i.test(message)
     || /No quads in shared memory/i.test(message)
     || /has no private payload/i.test(message)
@@ -193,53 +195,56 @@ export interface ExecutionFailureInput {
  *     qualifies, and an absent `txHash` is never a proof — it is only one more exclusion.
  */
 export function mapExecutionFailure(input: ExecutionFailureInput): LiftJobFailureMetadata {
-  const { jobId, currentStatus, requestedOrigin, error, evidence, now } = input;
+  const { jobId, currentStatus, requestedOrigin, evidence, now } = input;
+  const staged = input.error instanceof LiftValidationStageError ? input.error : undefined;
+  const error = staged ? staged.cause : input.error;
+  const readTransport = isStoreReadTransportFailure(error);
   const transientRpc = isTransientRpcFailure(error);
   const catalogAuthorityUnavailable = isCatalogFloorAuthorityUnavailable(error);
-  const preDispatchRecoverable = evidence?.neverDispatched === true
+  const provenPreDispatch = evidence?.neverDispatched === true
     && currentStatus === 'validated'
-    && (isProvenStoreRejection(error) || transientRpc || catalogAuthorityUnavailable);
+    && (isProvenStoreRejection(error) || transientRpc || readTransport || catalogAuthorityUnavailable || staged !== undefined);
   // A failure raised while the job is still 'claimed' (the initial preflight) precedes validation,
   // and so precedes everything that could dispatch anything: the typed cause alone is enough. The
-  // keyword chain below would otherwise record a multi-endpoint exhaustion message that carries
-  // none of its words as the TERMINAL `canonicalization_failed` - a transient outage ending a job.
-  // No in-repo preflight raises a typed transport failure today (the agent's is store-only); this
-  // keeps a chain read added to one later, or a third-party handler's, from ending the job.
-  const claimedTransientRpc = requestedOrigin === 'claimed'
+  // old keyword chain recorded keyword-less transport failures as terminal canonicalization.
+  // Native preflight reads lifecycle metadata through typed read-only store boundaries.
+  // A raw fetch message or an arbitrary wrapper never qualifies as transport evidence.
+  const claimedDependencyFailure = requestedOrigin === 'claimed'
     && currentStatus === 'claimed'
-    && transientRpc;
-  const origin: LiftJobState = preDispatchRecoverable ? 'validated' : requestedOrigin;
-  const message = error instanceof Error ? error.message : String(error);
+    && (transientRpc || readTransport || isProvenStoreRejection(error));
+  const origin: LiftJobState = provenPreDispatch ? 'validated' : requestedOrigin;
+  const message = error instanceof Error ? error.message : 'Unknown publication execution failure';
   const lower = message.toLowerCase();
   const errorPayloadRef = `urn:dkg:publisher:error:${jobId}`;
 
   if (origin === 'claimed' || origin === 'validated') {
-    const code =
-      // Structured precondition failures (author capability / stale intent /
-      // corrupt head) come from the SAME classifier that routed the failure
-      // to this pre-send branch, so their state and code cannot drift apart.
-      // Everything message-keyed stays in the legacy chain below (#1974).
-      classifyKnowledgeAssetVmPublishPreconditionCode(error)
-        ?? (preDispatchRecoverable && catalogAuthorityUnavailable
-        ? 'authority_unavailable'
-        : preDispatchRecoverable || claimedTransientRpc
-        ? 'workspace_unavailable'
-        : lower.includes('timeout') || lower.includes('timed out') || lower.includes('unavailable') || lower.includes('query') || lower.includes('store')
-        ? 'workspace_unavailable'
-        : lower.includes('authority')
-        ? 'authority_forbidden'
-        : lower.includes('workspace') || lower.includes('root')
-          ? 'workspace_slice_not_found'
-          : 'canonicalization_failed');
-    return createLiftJobFailureMetadata({ failedFromState: origin, code, message, errorPayloadRef });
+    const structured = classifyKnowledgeAssetVmPublishPreconditionCode(error);
+    const code: LiftJobFailureCode = structured
+      ?? (provenPreDispatch && catalogAuthorityUnavailable ? 'authority_unavailable'
+        : (provenPreDispatch && (isProvenStoreRejection(error) || transientRpc || readTransport)) || claimedDependencyFailure
+          ? 'workspace_unavailable'
+          : error instanceof LiftPayloadValidationError ? 'canonicalization_failed' : 'validation_unknown');
+    const cause: LiftValidationDiagnostic['cause'] = structured || catalogAuthorityUnavailable ? 'precondition'
+      : readTransport ? 'store_read_transport' : transientRpc ? 'rpc_transport'
+      : isProvenStoreRejection(error) ? 'store_not_started'
+      : error instanceof LiftPayloadValidationError ? 'content' : 'unknown';
+    // Never serialize the cause: store responses and content guards can embed private payloads.
+    const diagnosticMessage = code === 'validation_unknown' ? 'Publication validation failed for an unknown reason'
+      : cause === 'store_read_transport' ? 'Publication validation dependency read was interrupted'
+      : cause === 'content' ? 'Publication payload failed deterministic validation'
+      : staged ? `Publication validation failed (${code})` : message;
+    return createLiftJobFailureMetadata({
+      failedFromState: origin, code, message: diagnosticMessage, errorPayloadRef,
+      validationDiagnostic: { ...(staged ? { stage: staged.stage } : {}), cause },
+    });
   }
 
-  return mapPublishExceptionToLiftJobFailure({
-    error,
+  const failure = mapPublishExceptionToLiftJobFailure({
+    error: staged ? new Error('Publication validation boundary conflicts with persisted execution state') : error,
     failedFromState: requestedOrigin === 'included' ? 'included' : 'broadcast',
     errorPayloadRef,
     timeout:
-      lower.includes('timeout') || lower.includes('timed out')
+      !staged && (lower.includes('timeout') || lower.includes('timed out'))
         ? {
             // A PLACEHOLDER, not a measurement: the executor reports no configured or elapsed
             // deadline, so 0 means "unknown" — never "the configured timeout was zero" nor
@@ -255,4 +260,5 @@ export function mapExecutionFailure(input: ExecutionFailureInput): LiftJobFailur
           }
         : undefined,
   });
+  return staged ? { ...failure, validationDiagnostic: { stage: staged.stage, cause: 'unknown' } } : failure;
 }
