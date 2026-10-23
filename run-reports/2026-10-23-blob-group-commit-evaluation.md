@@ -436,3 +436,79 @@ Single-writer costs, initial blob preparation outside the timer, native read tai
 The a848 foundation integration restores prompt HTTP cancellation through preparation wrappers while preserving drain-first snapshot persistence. The optional native blob owner closes after its own complete hydration drain. A real native SQLite/HTTP handoff hold verifies HTTP close completes, physical blob close waits, exact bytes hydrate, and native close occurs once; moving cleanup into the early HTTP phase fails. Correct source/dist is restored before the final1,742-case storage run/115files (45existing gated), including69native/integrated cases. Agent layout/reuse2, managed/publisher45, source/types, routing17 and package/hygiene checks pass.
 
 Changes after measured8bcd affect shutdown ordering; the timed steady read/write paths, batching, policy and data format are unchanged. Performance measurements keep their exact8bcd attribution and all failed samples/limits. Current-head remote review/fullCI/EVM, human/default/adoption review and fresh final combined-tip live validation remain outstanding.
+
+
+## Final canonical-command source comparison (2026-10-23 UTC)
+
+Measured runtime commit: `1d78ca5e7e28f9e320157e2909d5b3cf6b4abc4f`. Base: `556ad8d483`; durable-files foundation: `85c2ffe05`. All controls share the installed/built556 dependency closure on macOS arm64 / Node22.23.3 / SQLite3.51.3. No owned local build/test competes with these measurements. Later documentation does not change this runtime source.
+
+Complete measured cohorts: **72worker cases/86,400writes**, **36equal-paced cases/8,640writes**, and **72native Blazegraph cases/17,280writes**, totaling **180cases/112,320writes**. All value/count assertions pass. Native measurements include one/eight writers, two small SELECT readers, and a declared common server warmup of three unmeasured240-write small cases before all groups. Per-case setup/warmup and cold blob initialization remain outside the timed interval. Native policy is verified DiskRW/ForceMetadata with fresh Identical namespaces. The worker uses incompressible80KiB values/full hydration readers; native uses repeated80KiB prefixes/small SELECT readers. All prior failed samples remain above.
+
+Worker medians:
+
+| Case | Base writes/s | Files writes/s | Candidate writes/s | Candidate/base | Candidate/base small p95 |
+|---|---:|---:|---:|---:|---:|
+| small-1 | 6,429.90 | 6,960.86 | 8,279.77 | 128.77% | 0.807x |
+| small-8 | 9,744.18 | 9,477.75 | 9,383.28 | 96.30% | 0.906x |
+| replay-1 | 1,158.30 | 2,673.51 | 2,674.15 | 230.87% | — |
+| replay-8 | 1,466.53 | 4,479.98 | 4,380.15 | 298.67% | — |
+| fresh-1 | 858.25 | 210.05 | 279.03 | 32.51% | — |
+| fresh-8 | 805.79 | 287.36 | 985.21 | 122.27% | — |
+| mixed-1 | 2,480.65 | 835.63 | 1,053.28 | 42.46% | 1.261x |
+| mixed-8 | 2,493.04 | 1,141.28 | 3,381.24 | 135.63% | 0.278x |
+
+The proposed concurrent worker throughput/small-write-p95 budgets pass. **Single-writer fresh/mixed retain32.51%/42.46% of base**, so this remains a substantial disclosed cost; do not generalize the concurrent pass. Saturated read p99 values (base/files/candidate,ms):
+
+| Case | Base | Files | Candidate |
+|---|---:|---:|---:|
+| small-1 | 2.593 | 2.451 | 2.499 |
+| small-8 | 2.311 | 1.720 | 2.355 |
+| replay-1 | 2.078 | 2.698 | 3.114 |
+| replay-8 | 1.544 | 35.147 | 34.770 |
+| fresh-1 | 1.545 | 1.498 | 1.366 |
+| fresh-8 | 1.729 | 8.982 | 2.828 |
+| mixed-1 | 1.844 | 1.374 | 1.117 |
+| mixed-8 | 2.102 | 8.772 | 2.236 |
+
+Equal-paced worker hydrated read p99(ms):
+
+| Workload | Base | Files | Candidate |
+|---|---:|---:|---:|
+| small-8 | 0.981 | 0.879 | 0.800 |
+| replay-8 | 0.910 | 0.862 | 0.716 |
+| fresh-8 | 0.938 | 1.286 | 0.834 |
+| mixed-8 | 0.854 | 0.853 | 0.720 |
+
+Native Blazegraph medians after the declared common server warmup:
+
+| Case | Base writes/s | Files writes/s | Candidate writes/s | Candidate/base | Candidate/base small p95 |
+|---|---:|---:|---:|---:|---:|
+| small-1 | 100.65 | 99.63 | 89.60 | 89.02% | 0.969x |
+| small-8 | 95.66 | 108.13 | 102.54 | 107.18% | 0.865x |
+| replay-1 | 76.89 | 99.41 | 88.77 | 115.45% | — |
+| replay-8 | 87.78 | 101.24 | 111.65 | 127.20% | — |
+| fresh-1 | 74.40 | 64.20 | 67.31 | 90.47% | — |
+| fresh-8 | 83.06 | 98.69 | 100.03 | 120.42% | — |
+| mixed-1 | 84.61 | 90.32 | 84.01 | 99.29% | 1.054x |
+| mixed-8 | 94.20 | 111.05 | 104.93 | 111.39% | 0.892x |
+
+All measured native throughput/small-write-p95 budgets pass in this warm steady-state sample, including one writer. Fresh1retains90.47% and mixed1retains99.29%; fresh8/mixed8are120.42%/111.39%. This is representative backend evidence, not a cold-start claim or an overall no-regression SLA. The earlier complete native75.61%/1.326x small-write miss is not deleted or attributed to a proven cause.
+
+Native read p99(ms) retains material variation:
+
+| Case | Base | Files | Candidate |
+|---|---:|---:|---:|
+| small-1 | 29.855 | 32.002 | 37.412 |
+| small-8 | 37.435 | 25.744 | 30.230 |
+| replay-1 | 30.337 | 29.474 | 32.285 |
+| replay-8 | 26.702 | 35.007 | 29.719 |
+| fresh-1 | 27.728 | 26.221 | 29.249 |
+| fresh-8 | 27.656 | 31.532 | 30.221 |
+| mixed-1 | 35.427 | 28.880 | 30.960 |
+| mixed-8 | 29.865 | 29.145 | 30.751 |
+
+For example, native small1 read p99 is25.31% above base; no blanket read-tail pass is claimed. Uncontrolled host load and the previous failed/successful rounds remain disclosed. The diagnostic wrapper completed all72 measurements, then its cleanup ownership guard rejected a shadowed loop variable. The exact manifest-owned container/anonymous volumes were verified and removed; the ignored wrapper loop is corrected without changing recorded measurements. Ownership metadata records successful cleanup.
+
+Final source validation before measurement:1,742storage/115files with45existing gated and69native/integrated cases; current storage/type contracts; agent layout2; standalone/inspector publisher5; routing17; release-pack/lint/unchanged size/disabled-test/diff. The actual post-HTTP hydration test distinguishes premature native cleanup; the forced-flush ancestry fixture distinguishes unrelated RDF persistence from blob preparation. Runtime dependency/caller coverage is inherited and source-attributed in the plan. Current-head completed review/fullCI/EVM remain required.
+
+**Defaults remain files and the optional mode is not adopted into3406.** No performance waiver, default activation, Oxigraph fork, merge or current combined-tip live result is implied. Human performance/design/rollout review remains open. A fresh live campaign also needs the prior native allocator state (or a confirmed unused funded author); both pool batches were available at23:17UTC, which is advisory and grants no ownership. No wallets are claimed or copied.
