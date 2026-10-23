@@ -20,6 +20,12 @@ import {
   type Rfc64PublicCatalogReconcileResultV1,
 } from '../src/rfc64/public-catalog-receiver-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from '../src/rfc64/public-catalog-transport-v1.js';
+import {
+  Rfc64ReceiverTaskLifecycleV1,
+  rfc64ReceiverSchedulingPolicyV1,
+  type Rfc64ReceiverLifecycleTaskV1,
+} from '../src/rfc64/public-catalog-receiver-task-lifecycle-v1.js';
+import { createRfc64PublicCatalogReceiverCompletionV1 } from '../src/rfc64/public-catalog-reconciliation-outcome-v1.js';
 
 const CG = '0x1111111111111111111111111111111111111111/new-private-graph';
 const STALE_CG = '0x1111111111111111111111111111111111111111/stale-public-graph';
@@ -273,6 +279,78 @@ describe('RFC-64 receiver: one lease turn applies the newest delivered head of a
     expect(leaseTurns).toEqual([1, 2 + window, 3 + window]);
   });
 
+  /**
+   * A reconciler that applies a head the way the native receiver bounds it:
+   * at most one lineage window past the durable head. `failing` heads miss.
+   */
+  function windowedReceiver(
+    fence: Rfc64LegacySwmFenceCoordinatorV1,
+    failing: ReadonlySet<number> = new Set(),
+  ): LeasedReceiverV1 {
+    let applied = 0;
+    const leaseTurns: number[] = [];
+    const receiver = new Rfc64PublicCatalogReceiverV1({
+      isHeadSatisfied: async (head) => Number(head.catalogVersion) <= applied,
+      reconcileHead: async (_peerId, head) => {
+        const version = Number(head.catalogVersion);
+        if (version - applied - 1 > RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1) return 'not-found';
+        if (failing.has(version)) {
+          // It misses once its lease turn comes, after the heads behind it were delivered.
+          await runRfc64LegacySwmRetirementV1(
+            fence,
+            { source: 'receiver-lease', contextGraphId: head.contextGraphId },
+            async () => {},
+          );
+          return 'not-found';
+        }
+        await runRfc64LegacySwmRetirementV1(
+          fence,
+          { source: 'receiver-lease', contextGraphId: head.contextGraphId },
+          async () => {
+            leaseTurns.push(version);
+            applied = Math.max(applied, version);
+          },
+        );
+        return 'applied';
+      },
+    }, { maxAttempts: 1, retryBackoffMs: 0 });
+    return { receiver, leaseTurns, applied: () => applied };
+  }
+
+  it('measures the jump from the durable head, not from the first queued head', async () => {
+    const fence = createRfc64LegacySwmFenceCoordinatorV1();
+    const { receiver, leaseTurns, applied } = windowedReceiver(fence);
+    const stale = holdNodeWideTurn(fence);
+
+    receiver.schedule(headAt(1), 'member');
+    await settle();
+    for (const version of [1000, 2000, 3000]) receiver.schedule(headAt(version), 'member');
+    stale.open();
+    await receiver.whenIdle();
+
+    // 3000 is within a window of 1000 but not of the durable head 1.
+    expect(leaseTurns).toEqual([1, 2000, 3000]);
+    expect(applied()).toBe(3000);
+  });
+
+  it('runs a scope in order until one of its heads settled, then jumps within the window of that head', async () => {
+    const fence = createRfc64LegacySwmFenceCoordinatorV1();
+    const window = RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1;
+    const { receiver, leaseTurns, applied } = windowedReceiver(fence, new Set([1]));
+    const stale = holdNodeWideTurn(fence);
+
+    receiver.schedule(headAt(1), 'member');
+    await settle();
+    for (const version of [2, 3, window + 2, window + 3]) receiver.schedule(headAt(version), 'member');
+    stale.open();
+    await receiver.whenIdle();
+
+    // 1 misses, so nothing is known about the durable head: 2 runs in order,
+    // then the newest head within one window of 2 replaces the rest.
+    expect(leaseTurns).toEqual([2, window + 3]);
+    expect(applied()).toBe(window + 3);
+  });
+
   it('keeps the heads of other scopes in their order', async () => {
     const appliedByGraph = new Map<string, number>();
     const order: string[] = [];
@@ -286,17 +364,67 @@ describe('RFC-64 receiver: one lease turn applies the newest delivered head of a
         return 'applied';
       },
     }, { maxConcurrent: 1, maxAttempts: 1, retryBackoffMs: 0 });
-
     receiver.schedule(headAt(1, STALE_CG), 'peer');
     receiver.schedule(headAt(1), 'member');
+    await receiver.whenIdle();
+    order.length = 0;
+
     receiver.schedule(headAt(2, STALE_CG), 'peer');
     receiver.schedule(headAt(2), 'member');
+    receiver.schedule(headAt(3, STALE_CG), 'peer');
+    receiver.schedule(headAt(3), 'member');
     await receiver.whenIdle();
 
-    // One slot: each scope gets its turn in delivery order, and the newest
-    // queued head of a scope takes the place of its older one.
-    // other@1 started at once; new@1 was queued before other@2.
-    expect(order).toEqual(['other@1', 'new@2', 'other@2']);
-    expect(receiver.stats()).toMatchObject({ applied: 3, dedupedAlreadyApplied: 1 });
+    // One slot: other@2 started at once; new@2 was queued before other@3, and
+    // the newest queued head of each scope takes the place of its older one.
+    expect(order).toEqual(['other@2', 'new@3', 'other@3']);
+    expect(receiver.stats()).toMatchObject({ applied: 5, dedupedAlreadyApplied: 1 });
   });
 });
+
+describe('RFC-64 receiver task lifecycle: what it remembers of settled heads', () => {
+  const lifecycleTask = (scopeKey: string, version: bigint): Rfc64ReceiverLifecycleTaskV1 => ({
+    key: `${scopeKey}@${version}`,
+    scopeKey,
+    contextGraphId: CG,
+    catalogVersion: version,
+    schedulingPolicy: rfc64ReceiverSchedulingPolicyV1('ambient'),
+    cancellation: new AbortController(),
+    providers: new Map([['member', {}]]),
+  });
+  const applied = createRfc64PublicCatalogReceiverCompletionV1({
+    outcome: 'applied',
+    appliedProviderPeerId: 'member',
+    providerAttempts: 1,
+  });
+  const settle = (
+    tasks: Rfc64ReceiverTaskLifecycleV1<Rfc64ReceiverLifecycleTaskV1>,
+    scopeKey: string,
+    version: bigint,
+  ) => {
+    const task = lifecycleTask(scopeKey, version);
+    tasks.schedule(task);
+    expect(tasks.takeNextRunnable()).toBe(task);
+    tasks.finalize(task, applied, (wake) => wake());
+  };
+  const nextVersion = (
+    tasks: Rfc64ReceiverTaskLifecycleV1<Rfc64ReceiverLifecycleTaskV1>,
+    scopeKey: string,
+  ) => {
+    tasks.schedule(lifecycleTask(scopeKey, 2n));
+    tasks.schedule(lifecycleTask(scopeKey, 3n));
+    return tasks.takeNextRunnable()?.catalogVersion;
+  };
+
+  it('jumps in a scope whose head settled, and forgets the oldest scope beyond its bound', () => {
+    const tasks = new Rfc64ReceiverTaskLifecycleV1<Rfc64ReceiverLifecycleTaskV1>(() => {});
+    settle(tasks, 'oldest', 1n);
+    for (let index = 0; index < 4_096; index += 1) settle(tasks, `scope-${index}`, 1n);
+    // An older head settling later does not lower what is known.
+    settle(tasks, 'scope-4095', 0n);
+
+    expect(nextVersion(tasks, 'scope-4095')).toBe(3n);
+    expect(nextVersion(tasks, 'oldest')).toBe(2n);
+  });
+});
+

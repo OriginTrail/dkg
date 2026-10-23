@@ -7,8 +7,10 @@ import type { Rfc64PublicCatalogHeadAnnouncementV1 } from
   './public-catalog-transport-v1.js';
 import { RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1 } from './catalog-head-lineage-v1.js';
 
-/** How far past the first queued head of a scope the next run may jump. */
+/** How many heads a jump may leave out after the durable head of its scope. */
 const RFC64_RECEIVER_MAX_HEAD_JUMP_V1 = BigInt(RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1);
+/** Scopes whose settled heads this scheduler remembers; the oldest is forgotten first. */
+const RFC64_RECEIVER_MAX_SETTLED_SCOPES_V1 = 4_096;
 
 export type Rfc64ReceiverSchedulingClassV1 =
   | 'ambient'
@@ -91,6 +93,11 @@ export class Rfc64ReceiverTaskLifecycleV1<
   /** One semantic writer per scope: the task currently holding that scope's lock. */
   readonly #activeByScopeKey = new Map<string, TTask>();
   readonly #deferredTimers = new Map<TTask, ReturnType<typeof setTimeout>>();
+  /**
+   * Per scope, the highest head a task settled as applied or already applied:
+   * the durable head is at least that one.
+   */
+  readonly #settledVersionByScopeKey = new Map<string, bigint>();
 
   constructor(
     private readonly onSettled: (
@@ -208,8 +215,10 @@ export class Rfc64ReceiverTaskLifecycleV1<
    * keeps its place: no head queued behind it runs ahead of it. A verified
    * current head has its own placement and retirement rules. A delivered head
    * is not verified yet, so the jump is bounded three times:
-   * - it reaches at most one signed lineage window past the first head, the
-   *   furthest the receiver can apply in one step;
+   * - it reaches at most one signed lineage window past the durable head, the
+   *   furthest the receiver applies in one step. The scheduler knows the
+   *   durable head only as the newest head of the scope it saw settle as
+   *   applied, so a scope runs in order until one of its heads settled here;
    * - one provider delivered the head it jumps to and every head it replaces.
    *   The jump proves the lineage through the replaced heads; a provider that
    *   announced each of them can serve it, as running them in order would
@@ -230,7 +239,10 @@ export class Rfc64ReceiverTaskLifecycleV1<
   /** The queue index of the task to run in place of the one at `index`. */
   #newestAmbientHeadOfScopeAt(index: number): number {
     const first = this.#queue[index]!;
-    if (!isCoalescibleAmbientHeadV1(first) || first.passedOver === true) return index;
+    const durable = this.#settledVersionByScopeKey.get(first.scopeKey);
+    if (!isCoalescibleAmbientHeadV1(first) || first.passedOver === true || durable === undefined) {
+      return index;
+    }
     // The delivered heads of the scope, up to its first caller-awaited head.
     const heads: TTask[] = [first];
     for (let candidate = index + 1; candidate < this.#queue.length; candidate += 1) {
@@ -242,7 +254,7 @@ export class Rfc64ReceiverTaskLifecycleV1<
     const targets = heads
       .filter((task) => (
         task.catalogVersion > first.catalogVersion
-        && task.catalogVersion - first.catalogVersion <= RFC64_RECEIVER_MAX_HEAD_JUMP_V1
+        && task.catalogVersion - durable - 1n <= RFC64_RECEIVER_MAX_HEAD_JUMP_V1
       ))
       // Newest first.
       .sort((left, right) => (
@@ -361,6 +373,9 @@ export class Rfc64ReceiverTaskLifecycleV1<
   ): boolean {
     if (task.settled === true) return false;
     task.settled = true;
+    if (result.outcome === 'applied' || result.outcome === 'already-applied') {
+      this.#recordSettledHead(task);
+    }
     const queueIndex = this.#queue.indexOf(task);
     if (queueIndex >= 0) this.#queue.splice(queueIndex, 1);
     this.removeDeferred(task);
@@ -369,6 +384,17 @@ export class Rfc64ReceiverTaskLifecycleV1<
     const waiters = task.completionWaiters?.splice(0) ?? [];
     for (const resolve of waiters) notify(() => resolve(result));
     return true;
+  }
+
+  #recordSettledHead(task: TTask): void {
+    const settled = this.#settledVersionByScopeKey.get(task.scopeKey);
+    if (settled !== undefined && settled >= task.catalogVersion) return;
+    this.#settledVersionByScopeKey.delete(task.scopeKey);
+    if (this.#settledVersionByScopeKey.size >= RFC64_RECEIVER_MAX_SETTLED_SCOPES_V1) {
+      const oldest = this.#settledVersionByScopeKey.keys().next().value;
+      if (oldest !== undefined) this.#settledVersionByScopeKey.delete(oldest);
+    }
+    this.#settledVersionByScopeKey.set(task.scopeKey, task.catalogVersion);
   }
 }
 
