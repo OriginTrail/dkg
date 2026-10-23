@@ -250,6 +250,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
   }
 
   async flush(options?: QueryOptions): Promise<void> {
+    await this.blobWork.drain();
     await this.inner.flush?.(options);
   }
 

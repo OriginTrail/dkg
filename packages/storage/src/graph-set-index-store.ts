@@ -433,6 +433,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator, ImmutableStoreP
   }
 
   async flush(options?: QueryOptions): Promise<void> {
+    await this.mutations.drain();
     await this.inner.flush?.(options);
   }
 
