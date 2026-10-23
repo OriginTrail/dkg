@@ -340,6 +340,15 @@ describe('rootless assertionPullFrom', () => {
     fault.mockRestore();
   }
 
+  it('checks the exact source pin even through partial-seal recovery (#3350)', async () => {
+    const { publisher, store } = await makePublisher();
+    const source = await seedShared(publisher, store);
+    await interruptClear(publisher, store, 4);
+    await expect(publisher.assertionPullFrom(CG, NAME, AGENT, 'swm', {
+      recoverExact: { ...source, merkleRoot: `0x${'ab'.repeat(32)}` },
+    })).rejects.toMatchObject({ code: 'WM_RECOVERY_SOURCE_UNAVAILABLE' });
+  });
+
   it.each(Array.from({ length: sealPredicates.length * 2 + 1 }, (_, i) => i))(
     'recovers active-seal clear boundary %i after publisher restart (#3332)', async (boundary) => {
       const { publisher, store } = await makePublisher();

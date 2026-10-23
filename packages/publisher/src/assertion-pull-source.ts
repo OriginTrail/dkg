@@ -36,7 +36,7 @@ export async function resolveAssertionPullSource(input: PullSourceInput): Promis
   if (state.kind === 'swm-seal-unavailable') {
     recovery = await input.verifyRecovery(state.operationId);
     if (!recovery) throw state.error;
-    if (sourceLayer === 'swm') return recovery;
+    if (sourceLayer === 'swm' && !input.recoverExact) return recovery;
   }
   const sealSubject = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
   const candidates = recovery ? [recovery.loadedSeal] : await input.loadSeals();
