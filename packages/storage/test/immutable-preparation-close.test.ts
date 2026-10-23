@@ -21,6 +21,7 @@ vi.mock('node:fs/promises', async importOriginal => {
     return file;
   } };
 });
+const child = fileURLToPath(new URL('./fixtures/graph-index-close-process.mjs', import.meta.url));
 const roots: string[] = [], stores: TripleStore[] = [];
 afterEach(async () => {
   gate.release?.(); gate.held = undefined; gate.directory = ''; gate.entered = false; gate.fail = false;
@@ -31,7 +32,6 @@ afterEach(async () => {
 async function root() { const value = await realpath(await mkdtemp(join(tmpdir(), 'dkg-preparation-close-'))); roots.push(value); return value; }
 it('persists a small accepted factory insert before close acknowledgement with default changelog disabled', async () => {
   const path = join(await root(), 'store.nq');
-  const child = fileURLToPath(new URL('./fixtures/graph-index-close-process.mjs', import.meta.url));
   const result = spawnSync(process.execPath, [child, path], { encoding: 'utf8', timeout: 15_000 });
   expect(result.error).toBeUndefined(); expect(result.stdout, result.stderr).toContain('write-and-close-ack');
   expect(result.signal === 'SIGKILL' || (process.platform === 'win32' && result.status !== 0)).toBe(true);
@@ -40,7 +40,6 @@ it('persists a small accepted factory insert before close acknowledgement with d
 });
 it.each([true, false])('persists an accepted small insert before immediate flush acknowledgement (index=%s)', async graphSetIndex => {
   const path = join(await root(), 'store.nq');
-  const child = fileURLToPath(new URL('./fixtures/graph-index-close-process.mjs', import.meta.url));
   const result = spawnSync(process.execPath, [child, path, 'flush', String(graphSetIndex)], { encoding: 'utf8', timeout: 15_000 });
   expect(result.error).toBeUndefined(); expect(result.stdout, result.stderr).toContain('write-and-flush-ack');
   expect(result.signal === 'SIGKILL' || (process.platform === 'win32' && result.status !== 0)).toBe(true);
