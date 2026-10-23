@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { NetworkAdmissionProbeError } from '../src/p2p/network-admission-coordinator.js';
 import { resolveRfc64CatalogExecutionPlanV1 } from '../src/rfc64/catalog-rollout-authority-v1.js';
-import { syncOpenedPeerConnection } from '../src/sync/peer-connection.js';
+import { isRedundantLimitedConnection, syncOpenedPeerConnection } from '../src/sync/peer-connection.js';
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { createPeerEventFixture, deferred, flushMicrotasks } from './_helpers/peer-event-lifecycle.js';
 
@@ -395,5 +395,46 @@ describe('peer connection lifecycle', () => {
     expect(log.warn.mock.calls[0][1]).toBe(
       `Network admission probe failed for ${remotePeer.slice(-8)} on connect: admission transport unavailable`,
     );
+  });
+});
+
+describe('a second, limited connection to a connected peer', () => {
+  const circuit = { id: 'circuit-2', status: 'open', limits: { bytes: 1n } };
+
+  it('is redundant beside another open connection, limited or not', () => {
+    expect(isRedundantLimitedConnection(circuit, [{ id: 'direct', status: 'open' }, circuit])).toBe(true);
+    expect(isRedundantLimitedConnection(circuit, [{ id: 'circuit-1', status: 'open', limits: {} }, circuit])).toBe(true);
+    expect(isRedundantLimitedConnection(circuit, [{}, circuit])).toBe(true);
+  });
+
+  it('is not redundant as the peer\'s only open connection, or when unlimited', () => {
+    expect(isRedundantLimitedConnection(circuit, [circuit])).toBe(false);
+    expect(isRedundantLimitedConnection(circuit, [])).toBe(false);
+    expect(isRedundantLimitedConnection(circuit, [{ ...circuit }])).toBe(false);
+    expect(isRedundantLimitedConnection(circuit, [{ id: 'old', status: 'closing' }, { id: 'older', status: 'closed' }])).toBe(false);
+    const direct = { id: 'direct-2', status: 'open' };
+    expect(isRedundantLimitedConnection(direct, [{ id: 'circuit-1', status: 'open', limits: {} }, direct])).toBe(false);
+    expect(isRedundantLimitedConnection({ ...direct, limits: null }, [{ id: 'other', status: 'open' }])).toBe(false);
+  });
+
+  it('starts no admission, catalog replay or sync-on-connect on connection:open', async () => {
+    const f = await createPeerEventFixture();
+    try {
+      const admission = vi.spyOn(f.agent.networkAdmissionCoordinator, 'ensureAdmitted').mockResolvedValue(false);
+      const duplicate = { remotePeer: f.peer, direction: 'inbound', limits: { bytes: 1n } };
+      const connections = vi.spyOn(f.agent.node.libp2p, 'getConnections')
+        .mockReturnValue([{ status: 'open' }, duplicate] as never);
+      f.agent.node.libp2p.dispatchEvent(new CustomEvent('connection:open', { detail: duplicate }));
+      await flushMicrotasks();
+      expect(admission).not.toHaveBeenCalled();
+
+      // The peer's first connection runs it, limited or not.
+      connections.mockReturnValue([duplicate] as never);
+      f.agent.node.libp2p.dispatchEvent(new CustomEvent('connection:open', { detail: duplicate }));
+      await flushMicrotasks();
+      expect(admission).toHaveBeenCalledOnce();
+    } finally {
+      await f.close();
+    }
   });
 });

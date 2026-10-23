@@ -133,6 +133,7 @@ export interface CuratorMetaRefreshAgent {
   readonly log: {
     warn(ctx: OperationContext, message: string): void;
     info(ctx: OperationContext, message: string): void;
+    debug(ctx: OperationContext, message: string): void;
   };
   invalidateListContextGraphsCache(): void;
   resolveCuratorPeerId(

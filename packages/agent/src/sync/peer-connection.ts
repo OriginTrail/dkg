@@ -23,6 +23,31 @@ export interface PeerConnectionSyncContext {
   log: Pick<Logger, 'info' | 'warn'>;
 }
 
+/** The parts of a libp2p connection {@link isRedundantLimitedConnection} reads. */
+export interface OpenedConnectionView {
+  readonly id?: string;
+  readonly status?: string;
+  readonly limits?: unknown;
+}
+
+/**
+ * A limited connection to a peer that already holds another open connection
+ * adds no route: it is a second circuit, mostly a dial that libp2p aborts at
+ * once as a duplicate of the open one, or a parallel path through another
+ * relay. Admission, the catalog replay and sync-on-connect ran for the open
+ * connection; running them again for each such circuit would start another
+ * round of them, at both ends, for every request to a relay-only peer.
+ */
+export function isRedundantLimitedConnection(
+  connection: OpenedConnectionView,
+  peerConnections: readonly OpenedConnectionView[],
+): boolean {
+  if (connection.limits == null) return false;
+  return peerConnections.some((other) => other !== connection
+    && (other.id === undefined || other.id !== connection.id)
+    && (other.status === undefined || other.status === 'open'));
+}
+
 /** Connection policy belongs to sync; the generic lifetime owns only supervision. */
 export async function syncOpenedPeerConnection(
   context: PeerConnectionSyncContext,

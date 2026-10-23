@@ -53,6 +53,26 @@ export function collectPublishableMultiaddrs(
   return out;
 }
 
+/**
+ * The relay a profile names for reaching this node: the first configured relay
+ * the node holds a reservation on (one of its own circuit addresses runs
+ * through it), else the first configured relay. A node reserves on a few of
+ * its relays only (3 by default), so the first one in the list is often not
+ * among them, and a peer that dials this node through it is refused.
+ */
+export function advertisedRelayAddress(
+  relayPeers: readonly string[] | undefined,
+  selfAddresses: readonly string[],
+): string | undefined {
+  const peerIdAtEnd = (address: string): string | undefined => /\/p2p\/([^/]+)\/*$/.exec(address)?.[1];
+  const reservedOn = new Set(selfAddresses.flatMap((address) => {
+    const circuit = address.indexOf('/p2p-circuit');
+    const relayPeerId = circuit < 0 ? undefined : peerIdAtEnd(address.slice(0, circuit));
+    return relayPeerId ? [relayPeerId] : [];
+  }));
+  return relayPeers?.find((relay) => reservedOn.has(peerIdAtEnd(relay) ?? '')) ?? relayPeers?.[0];
+}
+
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const SCHEMA = 'https://schema.org/';
 const DKG = 'https://dkg.network/ontology#';

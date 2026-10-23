@@ -1,5 +1,6 @@
 import { BoundedLruCache } from './bounded-lru-cache.js';
 import { RELAY_DEFAULT_DURATION_LIMIT_MS } from './relay-capacity-policy.js';
+import { isTransportTimeoutError } from './request-abort-lifecycle.js';
 
 /**
  * Which peers a normal dial currently reaches only through a relay.
@@ -126,8 +127,15 @@ export class RelayOnlyPeerRoute {
     return circuitCarriesOperation(connection, operationMs, this.memory.now());
   }
 
-  /** Record what a normal dial that was not cancelled left behind. */
-  afterNormalDial(connections: ReadonlyArray<RelayOnlyPeerConnection>): void {
+  /**
+   * Record what a normal dial left behind. A dial that the caller or a stop
+   * cancelled shows nothing about the direct addresses and is not recorded. A
+   * dial that the request's deadline cut short is: while a circuit stayed
+   * open, the direct addresses gave no connection within a request's time, so
+   * the next request uses the circuit instead of spending its own time again.
+   */
+  afterNormalDial(connections: ReadonlyArray<RelayOnlyPeerConnection>, signal?: AbortSignal): void {
+    if (signal?.aborted && !isTransportTimeoutError(signal.reason)) return;
     const open = connections.filter((connection) => !connection.status || connection.status === 'open');
     if (open.some((connection) => !connection.limits)) this.memory.forget(this.peerId);
     else if (open.length > 0 && this.addresses !== undefined) this.memory.remember(this.peerId, this.addresses);

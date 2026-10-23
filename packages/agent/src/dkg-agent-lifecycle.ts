@@ -48,7 +48,7 @@ import { setTimeout as waitForPeerEventTurn } from 'node:timers/promises';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
 import { captureExactBatchStreamRefusalScope } from './sync/exact-batch-stream-capability.js';
 import { createStorageACKRegistrationPlan } from './p2p/storage-ack-registrar.js';
-import { syncOpenedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
+import { isRedundantLimitedConnection, syncOpenedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import { ProtocolRouter, GossipSubManager, DKGEvent,
   registerExperimentalExactBatchResponder,
@@ -3119,6 +3119,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       queueSync: (remotePeer, onError) => this.queueSyncFromPeerOnConnect(remotePeer, onError),
     };
     this.node.libp2p.addEventListener('connection:open', (evt) => {
+      if (isRedundantLimitedConnection(evt.detail, this.node.libp2p.getConnections(evt.detail.remotePeer))) return;
       void peerEvents.run(() => syncOpenedPeerConnection({
         ports: connectionSyncPorts, session: peerEvents, ctx, log: this.log,
       }, evt.detail), (error) => handleSyncError(evt.detail.remotePeer.toString(), error));

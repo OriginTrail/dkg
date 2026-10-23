@@ -138,6 +138,26 @@ describe('RelayOnlyPeerRoute', () => {
     expect(memory.holds(PEER_A, LAN)).toBe(true);
   });
 
+  it('records a dial the request deadline cut short, not one the caller or a stop cancelled', async () => {
+    const aborted = (reason: unknown) => { const controller = new AbortController(); controller.abort(reason); return controller.signal; };
+    const timeout = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    const memory = new RelayOnlyPeerMemory();
+    const route = memory.routeFor(PEER_A, peer(LAN));
+    await route.peerHasDirectAddrs();
+
+    route.afterNormalDial([circuit()], aborted(new DOMException('aborted', 'AbortError')));
+    route.afterNormalDial([circuit()], aborted(new Error('node stopping')));
+    expect(memory.holds(PEER_A, LAN)).toBe(false);
+
+    route.afterNormalDial([circuit()], aborted(timeout));
+    expect(memory.holds(PEER_A, LAN)).toBe(true);
+    // A deadline-cut dial that left a direct connection open still forgets the peer.
+    route.afterNormalDial([circuit(), direct()], aborted(timeout));
+    expect(memory.holds(PEER_A, LAN)).toBe(false);
+    route.afterNormalDial([circuit()], new AbortController().signal);
+    expect(memory.holds(PEER_A, LAN)).toBe(true);
+  });
+
   it('still requires the circuit to carry the operation', async () => {
     const memory = new RelayOnlyPeerMemory({ now: () => T0 });
     memory.remember(PEER_A, LAN);

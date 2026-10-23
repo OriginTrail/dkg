@@ -928,7 +928,7 @@ export class ProtocolRouter {
           if (!reused) throw error;
           stream = reused.stream;
         } finally {
-          if (!signal.aborted) route.afterNormalDial(rawGetConnectionsFor(libp2p, targetPeer));
+          route.afterNormalDial(rawGetConnectionsFor(libp2p, targetPeer), signal);
         }
       }
       if (signal.aborted) {
