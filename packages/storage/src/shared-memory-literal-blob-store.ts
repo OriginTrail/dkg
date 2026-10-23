@@ -53,7 +53,6 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
   readonly commitment?: TripleStoreCommitCapability;
   readonly graphEnumerationVisibility;
   private readonly inner: TripleStore;
-  private readonly blobDir: string;
   private readonly thresholdBytes: number;
   private readonly blobWrites: ContentAddressedBlobSingleFlight;
   private readonly fileBlobs: LiteralBlobFileOwner;
@@ -68,15 +67,15 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
     this.graphEnumerationVisibility = inner.graphEnumerationVisibility?.bind(inner);
     // Match blobPath's lexical dot-segment handling before any filesystem work.
     // Otherwise a symlink followed by '..' can prepare/sync a different parent.
-    this.blobDir = resolve(options.blobDir);
+    const blobDir = resolve(options.blobDir);
     this.thresholdBytes = options.thresholdBytes;
-    this.fileBlobs = new LiteralBlobFileOwner(this.blobDir);
+    this.fileBlobs = new LiteralBlobFileOwner(blobDir);
     if (options.persistence === 'sqlite-wal') {
-      this.sqliteBlobs = new SqliteLiteralBlobOwner(this.blobDir);
+      this.sqliteBlobs = new SqliteLiteralBlobOwner(blobDir);
       this.blobWork = new StoreWorkDrain('Literal blob store is closing');
     }
     this.blobWrites = new ContentAddressedBlobSingleFlight({
-      createOrVerify: (hash, term) => this.sqliteBlobs ? this.sqliteBlobs.write(hash, term) : this.writeBlobFile(hash, term),
+      createOrVerify: (hash, term) => this.sqliteBlobs ? this.sqliteBlobs.write(hash, term) : this.fileBlobs.write(hash, term),
       maxConcurrent: this.sqliteBlobs ? 8 : 4,
     });
   }
@@ -374,10 +373,6 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
       return externalLiteralRefTerm(sha256Term(term));
     });
     return rewritten === sparql ? undefined : rewritten;
-  }
-
-  private async writeBlobFile(hash: string, term: string): Promise<void> {
-    await this.fileBlobs.write(hash, term);
   }
 
   private async readBlob(hash: string, constraints?: { maxBytes?: number; signal?: AbortSignal }): Promise<string> {
