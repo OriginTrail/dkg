@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { SqliteLiteralBlobOwner } from '../src/sqlite-literal-blob-owner.js';
 import { assertSqliteBlobRuntime, SQLITE_BLOB_APPLICATION_ID, SQLITE_BLOB_FILENAME, SQLITE_BLOB_VERSION } from '../src/sqlite-literal-blob-protocol.js';
 import { StoreResponseTooLargeError } from '../src/http-response-limit.js';
+import { unexpectedBlobSchemas } from './fixtures/sqlite-blob-unexpected-schema.js';
 
 const roots: string[] = [], owners: SqliteLiteralBlobOwner[] = [];
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -119,4 +120,27 @@ it('recovers the last durable acknowledgement after whole-process kill before an
   const reopened = run('read');
   expect(reopened.error).toBeUndefined(); expect(reopened.status, reopened.stderr).toBe(0);
   expect(reopened.stdout).toContain('fresh-process-exact-readback');
+});
+
+it.each(unexpectedBlobSchemas)('rejects unexpected native schema ($label) before acknowledgement and preserves seed bytes', async ({ sql }) => {
+  const f = await fixture(), value = '"retained seed"'; await f.owner.write(hash(value), value); await f.owner.close();
+  const db = new DatabaseSync(f.path); db.exec(sql); db.close();
+  const before = await readFile(f.path), retry = reopen(f.directory);
+  const outcome = await retry.write(hash(value), value).then(() => 'ack', () => 'rejected'); await retry.close();
+  const inspect = new DatabaseSync(f.path, { readOnly: true });
+  const rows = inspect.prepare('SELECT hash, term FROM blobs').all(); inspect.close();
+  expect({ outcome, rows }).toEqual({ outcome: 'rejected', rows: [{ hash: hash(value), term: new Uint8Array(Buffer.from(value)) }] });
+  expect(await readFile(f.path)).toEqual(before);
+});
+it('refuses an unclaimed SQLite database containing sqliteX user data instead of adopting it', async () => {
+  const f = await fixture();
+  await f.owner.write(hash('seed'), 'seed'); await f.owner.close();
+  const db = new DatabaseSync(f.path);
+  db.exec("DROP TABLE blobs; PRAGMA application_id=0; PRAGMA user_version=0; CREATE TABLE sqliteXforeign(value TEXT); INSERT INTO sqliteXforeign VALUES('retain me');"); db.close();
+  const before = await readFile(f.path), retry = reopen(f.directory);
+  await expect(retry.write(hash('new'), 'new')).rejects.toThrow('identity/version/encoding'); await retry.close();
+  expect(await readFile(f.path)).toEqual(before);
+  const inspect = new DatabaseSync(f.path, { readOnly: true });
+  expect(inspect.prepare('PRAGMA application_id').get()!.application_id).toBe(0);
+  expect(inspect.prepare('SELECT value FROM sqliteXforeign').all()).toEqual([{ value: 'retain me' }]); inspect.close();
 });

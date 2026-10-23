@@ -9,22 +9,27 @@ export const SQLITE_BLOB_BOUNDED_COLUMNS = `typeof(term) AS kind,
 
 export function sqliteBlobPragma(db: DatabaseSync, name: string): unknown { return db.prepare(`PRAGMA ${name}`).get()![name]; }
 
+// GLOB treats '_' literally. Never hide executable/unknown objects behind an internal-looking name.
+const SCHEMA_OBJECTS = `SELECT type, name, tbl_name FROM sqlite_schema
+  WHERE type NOT IN ('table', 'index') OR name NOT GLOB 'sqlite_*'`;
+
 export function isEmptySqliteBlobDatabase(db: DatabaseSync): boolean {
   return sqliteBlobPragma(db, 'application_id') === 0 && sqliteBlobPragma(db, 'user_version') === 0 &&
     sqliteBlobPragma(db, 'encoding') === 'UTF-8' &&
-    db.prepare("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").all().length === 0;
+    db.prepare(SCHEMA_OBJECTS).all().length === 0;
 }
 
 /** The worker and offline exporter accept exactly the same versioned format. */
 export function assertSqliteBlobSchema(db: DatabaseSync): void {
   if (sqliteBlobPragma(db, 'application_id') !== SQLITE_BLOB_APPLICATION_ID || sqliteBlobPragma(db, 'user_version') !== SQLITE_BLOB_VERSION ||
     sqliteBlobPragma(db, 'encoding') !== 'UTF-8') throw new Error('Unsupported literal blob database identity/version/encoding');
+  const objects = db.prepare(SCHEMA_OBJECTS).all();
   const columns = db.prepare('PRAGMA table_info(blobs)').all();
   const table = db.prepare("PRAGMA table_list('blobs')").all().find(row => row.schema === 'main');
   if (columns.length !== 2 || columns[0]!.name !== 'hash' || columns[0]!.type !== 'TEXT' || columns[0]!.pk !== 1 || columns[0]!.notnull !== 1 ||
     columns[1]!.name !== 'term' || columns[1]!.type !== 'BLOB' || columns[1]!.notnull !== 1 || columns[1]!.pk !== 0 ||
     table?.type !== 'table' || table.wr !== 0 || table.ncol !== 2 ||
-    db.prepare("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").all().some(row => row.name !== 'blobs')) {
+    objects.length !== 1 || objects[0]!.type !== 'table' || objects[0]!.name !== 'blobs' || objects[0]!.tbl_name !== 'blobs') {
     throw new Error('Unsupported literal blob database schema');
   }
 }

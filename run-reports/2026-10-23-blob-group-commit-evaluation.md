@@ -10,8 +10,8 @@ Runtime: native macOS arm64, Node22.23.3, SQLite3.51.3, libuv1.51.0, pnpm10.28.1
 
 ## Validation
 
-- Current full storage:1,706passed/110files,45existing environment-gated skips.
-- Current native/integrated cases:53(part of the full cohort), including last-ACK whole-process SIGKILL before any RDF write and exact fresh-process readback; native FULL; pre/post-COMMIT worker death; same-write retry with no premature RDF/changelog; exact batch coverage and late arrivals; independent read progress; close/cancellation drainage; bounded allocation; legacy compatibility and tested rollback export.
+- Current full storage:1,716passed/110files,45existing environment-gated skips.
+- Current native/integrated cases:63(part of the full cohort), including last-ACK whole-process SIGKILL before any RDF write and exact fresh-process readback; native FULL; pre/post-COMMIT worker death; same-write retry with no premature RDF/changelog; exact batch coverage and late arrivals; independent read progress; close/cancellation drainage; bounded allocation; legacy compatibility and tested rollback export.
 - Counterfactuals fail as intended: acknowledging before COMMIT creates a dangling RDF ref; unconditionally materializing a16MiB value violates the allocation assertion. Correct source restored and rebuilt.
 - Runtime dependency closure, source/type/package/prepared-CLI builds pass. Lint, source-size and disabled-test ratchets pass without increased budgets. Later metadata-only documentation changes do not alter these results.
 
@@ -211,3 +211,70 @@ A new review reply on the previously resolved startup thread identified invalid 
 Rollback publication now stages and syncs complete bytes through the existing legacy writer, atomically hard-links a complete hash without replacing conflicts, and re-certifies final bytes/name through that writer's barriers. A failed partial re-submission cannot truncate already complete bytes. Only the invocation's own staging directory is cleaned; an abandoned partial stage remains ignored. Destination filesystems must support hard links. Normal legacy write policy and source SQLite data are preserved. Tests inject an actual FileHandle.writeFile prefix plus ENOSPC at both staging and final re-submission, then run a fresh exporter, verify exact legacy hydration and unchanged source DB bytes, and separately protect an unrelated conflicting hash. Direct-final and overwrite-publication counterfactuals fail their distinguishing cases.
 
 CLI configuration imports/re-exports the canonical storage type without a runtime dependency; its typed persistence contract fails against the old three-field interface. Reader/writer connection mode now comes from the immutable worker role, removing promotion/writable state while preserving missing reads, read-only refusal and failure-driven reopen. Focused53native/integrated cases, runtime dependency/type/package/preparedCLI builds, dependency routing and hygiene pass; final full storage also passes1,706cases/110files, with45existing gated skips. Release-pack verification passes. No timeout, skip or source-size budget was increased. These changes do not imply new performance acceptance, default adoption or live testnet proof.
+
+## Round7 native schema identity regression
+
+Independent native reproduction confirmed the review finding: the old name-only validation acknowledged a write after a same-name trigger deleted its row, allowed composed RDF/changelog publication, accepted legal sqliteX objects hidden by LIKE's underscore wildcard, and adopted an unclaimed foreign database. All10new owner/composed/export regressions fail against the previous production code.
+
+Both adoption and strict format checks now share a literal SQLite-internal prefix scan, while always exposing executable/unknown object types. The expected single user object must be a table named blobs associated with that table; existing version/encoding/rowid/column checks remain. Same-name and sqliteX triggers/tables reject before ACK/RDF/changelog/export publication, preserving source rows/bytes and foreign identity. Focused63native/integrated cases pass; final full storage also passes1,716cases/110files with45existing gated skips. Runtime dependency/type/package/preparedCLI, release-pack verification,17dependency-routing cases and hygiene pass with no increased budgets or skips. The preceding c2c published source has a completed fresh72case/86,400write worker comparison and36case/8,640write equal-rate/nativeBlazegraph controls; these remain revision-limited and do not claim global performance/default/live acceptance.
+
+## Final published c2c1722ae performance controls
+
+This complete rerun covers published c2c1722ae, before the subsequent startup/adoption-only schema rejection fix. Valid-format native write/read/commit scheduling is unchanged; these figures are tied to c2c, not claimed as a fresh measure of a later tip. No owned local builds or tests competed. Exact archived f9b5f2524/0af controls share the installed dependency closure. Other host load remains uncontrolled. All144cases/103,680writes complete with expected counts/read values and exact labeled nativeBlazegraph container/volume cleanup.
+
+Expanded worker (72cases/86,400writes), median writes/s:
+
+| Case | Base | Files | Candidate | Candidate/base |
+|---|---:|---:|---:|---:|
+| small-1 | 5053.24 | 4989.37 | 5034.47 | 99.63% |
+| small-8 | 6902.78 | 6514.90 | 6863.43 | 99.43% |
+| replay-1 | 908.72 | 2092.67 | 2130.33 | 234.43% |
+| replay-8 | 956.36 | 3259.55 | 3494.62 | 365.41% |
+| fresh-1 | 568.08 | 176.17 | 233.87 | 41.17% |
+| fresh-8 | 554.55 | 285.59 | 853.62 | 153.93% |
+| mixed-1 | 1791.43 | 698.33 | 841.52 | 46.97% |
+| mixed-8 | 1873.67 | 1155.31 | 2674.04 | 142.72% |
+
+Concurrent throughput and small-write-p95 budgets pass in this sample: small-only p95 base/files/candidate2.854/2.812/3.000ms; mixed-small p958.426/0.742/3.137ms. It remains no overall acceptance: single-writer fresh/mixed retain41.17%/46.97% ofbase; saturated replay readp99 is3.519/40.547/19.159ms. Earlier79.86% small-only throughput and1.53x small-p95 samples remain disclosed.
+
+Raw expanded throughput rounds (writes/s):
+
+| Case | Base rounds | Files rounds | Candidate rounds |
+|---|---|---|---|
+| small-1 | 2842.54, 5501.43, 5053.24 | 7953.63, 4686.39, 4989.37 | 4707.96, 5857.69, 5034.47 |
+| small-8 | 11986.77, 5018.26, 6902.78 | 9795.35, 6369.61, 6514.90 | 7401.89, 6284.97, 6863.43 |
+| replay-1 | 1011.89, 858.24, 908.72 | 3160.95, 2092.67, 2012.68 | 2146.92, 2105.09, 2130.33 |
+| replay-8 | 1487.77, 942.64, 956.36 | 4857.77, 2270.10, 3259.55 | 3502.45, 3494.62, 3407.01 |
+| fresh-1 | 811.20, 568.08, 549.40 | 223.41, 175.31, 176.17 | 233.87, 238.25, 199.76 |
+| fresh-8 | 934.31, 554.55, 549.82 | 285.82, 283.96, 285.59 | 853.62, 877.48, 836.37 |
+| mixed-1 | 2840.65, 1753.52, 1791.43 | 876.69, 677.80, 698.33 | 841.52, 862.50, 632.00 |
+| mixed-8 | 2687.87, 1757.02, 1873.67 | 1119.40, 1172.60, 1155.31 | 2568.15, 2674.04, 2964.47 |
+
+Equal-paced controls(36cases/8,640writes), readerp99 and small-writep95 in milliseconds:
+
+| Case | Readerp99 base/files/candidate | Smallp95 base/files/candidate |
+|---|---|---|
+| small-8 | 6.291 / 4.895 / 3.763 | 3.776 / 5.610 / 3.883 |
+| replay-8 | 5.239 / 6.602 / 3.582 | n/a / n/a / n/a |
+| fresh-8 | 6.195 / 6.272 / 3.741 | n/a / n/a / n/a |
+| mixed-8 | 3.266 / 5.263 / 3.148 | 7.998 / 6.465 / 4.395 |
+
+Pinned nativeBlazegraph(36cases/8,640writes), verified loaded DiskRW/ForceMetadata and fresh Identical namespaces:
+
+| Case | Base writes/s | Files writes/s | Candidate writes/s | Smallp95 base/files/candidate ms |
+|---|---:|---:|---:|---|
+| small | 71.04 | 75.93 | 75.97 | 162.920 / 137.749 / 130.521 |
+| replay | 65.78 | 76.05 | 76.11 | n/a / n/a / n/a |
+| fresh | 62.70 | 74.43 | 76.32 | n/a / n/a / n/a |
+| mixed | 73.38 | 75.76 | 81.94 | 143.764 / 134.407 / 127.238 |
+
+NativeBlazegraph meets the proposed throughput/small-p95 budgets in this sample. Raw throughput rounds:
+
+| Case | Base rounds | Files rounds | Candidate rounds |
+|---|---|---|---|
+| small | 56.24, 71.04, 90.73 | 73.08, 84.00, 75.93 | 71.68, 77.89, 75.97 |
+| replay | 58.66, 65.78, 74.15 | 75.85, 81.81, 76.05 | 72.24, 76.11, 76.32 |
+| fresh | 57.59, 62.70, 70.64 | 73.92, 74.43, 79.66 | 78.81, 76.32, 69.98 |
+| mixed | 67.69, 76.67, 73.38 | 75.76, 78.02, 63.27 | 81.94, 78.56, 89.04 |
+
+All current sample budgets that pass remain separate from human acceptance/default rollout. Single-writer/saturation costs remain material. There was no live chain publication, no wallet claim and no physical power-loss experiment. The combined final stack still requires live testnet validation after source/default decisions converge.

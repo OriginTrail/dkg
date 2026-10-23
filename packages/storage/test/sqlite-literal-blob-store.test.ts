@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { createTripleStore, OxigraphStore, SharedMemoryLiteralBlobStore, type TripleStore } from '../src/index.js';
 import { SQLITE_BLOB_FILENAME } from '../src/sqlite-literal-blob-protocol.js';
 import { exportLiteralBlobs } from '../src/export-literal-blobs.js';
+import { unexpectedBlobSchemas } from './fixtures/sqlite-blob-unexpected-schema.js';
 const roots: string[] = [], stores: TripleStore[] = [];
 const graph = 'urn:sqlite-compat/_shared_memory', value = JSON.stringify('exact é payload '.repeat(8000));
 const hash = (term: string) => createHash('sha256').update(term).digest('hex');
@@ -138,4 +139,13 @@ it('protects a conflicting existing rollback hash file while preserving the SQLi
   await writeFile(destination, foreign, 'utf8');
   await expect(exportLiteralBlobs(directory, directory)).rejects.toThrow('corrupt');
   expect(await readFile(destination, 'utf8')).toBe(foreign); expect(await readFile(source)).toEqual(before);
+});
+
+it.each(unexpectedBlobSchemas)('rejects unexpected schema ($label) before rollback publication and preserves source data', async ({ sql }) => {
+  const root = await fixture(), current = await open(root, 'sqlite-wal');
+  await current.insert([quad('urn:seed')]); await current.close();
+  const source = join(root, 'blobs', SQLITE_BLOB_FILENAME), db = new DatabaseSync(source);
+  db.exec(sql); db.close(); const before = await readFile(source), destination = join(root, 'exported');
+  await expect(exportLiteralBlobs(join(root, 'blobs'), destination)).rejects.toThrow('schema');
+  expect(await readdir(root)).not.toContain('exported'); expect(await readFile(source)).toEqual(before);
 });

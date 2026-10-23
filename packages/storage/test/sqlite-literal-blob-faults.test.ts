@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import type { Worker } from 'node:worker_threads';
 import { SqliteLiteralBlobOwner } from '../src/sqlite-literal-blob-owner.js';
 import { SQLITE_BLOB_FILENAME } from '../src/sqlite-literal-blob-protocol.js';
+import { unexpectedBlobSchemas } from './fixtures/sqlite-blob-unexpected-schema.js';
 import { asChangelogReader, createTripleStore, registerTripleStoreAdapter, OxigraphWorkerStore, type TripleStore } from '../src/index.js';
 const control = vi.hoisted(() => ({ mode: '', signal: undefined as SharedArrayBuffer | undefined,
   instances: [] as Worker[], allocations: [] as number[], handlers: [] as ((error: Error) => void)[], reads: 0, commits: 0,
@@ -293,4 +294,17 @@ it('refuses writes sent to the fixed read-only worker without creating a missing
   reader.postMessage({ id: 90001, operation: 'write', hash: hash(value), term: value });
   await expect(response).resolves.toMatchObject({ error: { message: 'Literal blob read owner cannot write' } });
   await expect(o.read(hash(value))).resolves.toBeUndefined(); expect(await readdir(f.root)).toEqual([]);
+});
+
+it.each(unexpectedBlobSchemas)('rejects unexpected schema ($label) before publishing a composed RDF reference or changelog entry', async ({ sql }) => {
+  const f = await fixture(), seed = await composed(f.root); await seed.insert([quad('urn:seed', value)]); await seed.close();
+  const path = join(f.directory, SQLITE_BLOB_FILENAME), db = new DatabaseSync(path); db.exec(sql); db.close();
+  const before = await readFile(path), current = await composed(f.root);
+  const outcome = await current.insert([quad('urn:schema-poison', value)]).then(() => 'ack', () => 'rejected');
+  const publicRows = await current.query(`SELECT ?s WHERE { GRAPH <${graph}> { ?s <urn:value> ?v FILTER(?s=<urn:schema-poison>) } }`);
+  const changes = await asChangelogReader(current)!.readChanges(0, 20);
+  expect({ outcome, publicRows, changes: changes.map(change => change.seq) }).toMatchObject({
+    outcome: 'rejected', publicRows: { bindings: [] }, changes: [1],
+  });
+  await current.close(); expect(await readFile(path)).toEqual(before);
 });
