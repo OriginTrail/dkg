@@ -10,8 +10,8 @@ Runtime: native macOS arm64, Node22.23.3, SQLite3.51.3, libuv1.51.0, pnpm10.28.1
 
 ## Validation
 
-- Current full storage:1,720passed/111files,45existing environment-gated skips.
-- Current native/integrated cases:65(part of the full cohort), including last-ACK whole-process SIGKILL before any RDF write and exact fresh-process readback; native FULL; pre/post-COMMIT worker death; same-write retry with no premature RDF/changelog; exact batch coverage and late arrivals; independent read progress; close/cancellation drainage; bounded allocation; legacy compatibility and tested rollback export.
+- Current full storage:1,722passed/111files,45existing environment-gated skips.
+- Current native/integrated cases:67(part of the full cohort), including last-ACK whole-process SIGKILL before any RDF write and exact fresh-process readback; native FULL; pre/post-COMMIT worker death; same-write retry with no premature RDF/changelog; exact batch coverage and late arrivals; independent read progress; close/cancellation drainage; bounded allocation; legacy compatibility and tested rollback export.
 - Counterfactuals fail as intended: acknowledging before COMMIT creates a dangling RDF ref; unconditionally materializing a16MiB value violates the allocation assertion. Correct source restored and rebuilt.
 - Runtime dependency closure, source/type/package/prepared-CLI builds pass. Lint, source-size and disabled-test ratchets pass without increased budgets. Later metadata-only documentation changes do not alter these results.
 
@@ -282,3 +282,79 @@ All current sample budgets that pass remain separate from human acceptance/defau
 ## Round8 bounded-work composition
 
 A shared FIFO BoundedWork now owns slot transfer/release for both single-flight preparation and the SQLite physical owner. Separate instances retain logical preparation admission,4reader/8writer capacities and StoreWorkDrain registration. Pending cache identity still precedes callbacks; cache/coalescing/eviction, failure retry and abort/close drainage remain intact. Observable FIFO/new-arrival and synchronous-throw cases pass; omitting handoff or making the slot stealable fails the distinguishing test without native resources. Actual held native COMMIT/read probes assert8write/4read RPC limits and progress through the independent role. The prior63native/integrated cases and6single-flight tests pass; new physical bounds cases pass separately. Final full storage passes1,720cases/111files with45existing gated skips, including65native/integrated cases. Runtime/types/package/preparedCLI, release-pack verification,17dependency-routing cases and hygiene pass without increased budgets/timeouts/skips. Final published-source timing follows; no rollout/performance/live acceptance is implied.
+
+## Round9 exact byte-split acknowledgement membership
+
+Test-only deterministic collection now combines with successive native COMMIT holds. Eight600KiB values split3/3/2; one oversized value followed by7small values splits1/7. While each later commit is held, exact prior members alone settle and appear through independent native reads. Final release yields every exact value and expected commit count. A production counterfactual acknowledging queued nonmembers after the first commit fails both cases; every hold is released and accepted work drains. Correct worker restored/rebuilt. Production source is unchanged from published955; final full storage passes1,722cases/111files with45existing gated skips, including67native/integrated cases. Current release-pack verification,17dependency-route cases and hygiene pass; the unchanged955production runtime/type/CLI build remains applicable. No budgets/timeouts/skips were increased. No new performance/default/live acceptance is implied.
+
+## Published955eab3da performance refresh
+
+The full144case/103,680write matrix was repeated after the bounded-work refactor, with no owned local build/test competition. The subsequent round9 adds tests only; production code is identical. Same exact f9/0af controls, three alternating groups, raw outputs and uncontrolled other-host-load limits apply.
+
+Worker medians (72cases/86,400writes), writes/s:
+
+| Case | Base | Files | Candidate | Candidate/base |
+|---|---:|---:|---:|---:|
+| small-1 | 5502.77 | 4949.45 | 4991.45 | 90.71% |
+| small-8 | 6375.06 | 6434.88 | 6919.75 | 108.54% |
+| replay-1 | 926.59 | 2115.27 | 2258.33 | 243.72% |
+| replay-8 | 998.30 | 3709.45 | 3621.13 | 362.73% |
+| fresh-1 | 588.14 | 188.98 | 237.22 | 40.33% |
+| fresh-8 | 607.47 | 276.07 | 920.57 | 151.54% |
+| mixed-1 | 1810.72 | 726.45 | 858.66 | 47.42% |
+| mixed-8 | 1953.24 | 1091.10 | 2992.44 | 153.20% |
+
+Concurrent throughput/small-p95 budgets pass in this sample: small p952.957/2.956/2.903ms, mixed-small p958.637/1.170/2.339ms(base/files/candidate). Single-writer fresh/mixed retain40.33%/47.42% ofbase; saturated read costs remain separate. Raw throughput rounds:
+
+| Case | Base rounds | Files rounds | Candidate rounds |
+|---|---|---|---|
+| small-1 | 8731.10, 4743.23, 5502.77 | 8534.95, 4949.45, 2989.31 | 4175.34, 4991.45, 5810.70 |
+| small-8 | 10168.99, 6375.06, 6336.45 | 9596.05, 4784.91, 6434.88 | 7920.70, 6703.49, 6919.75 |
+| replay-1 | 1349.36, 926.59, 890.92 | 3137.21, 2115.27, 1958.59 | 1157.77, 2258.33, 2298.22 |
+| replay-8 | 1481.25, 923.33, 998.30 | 4016.53, 3222.45, 3709.45 | 3621.13, 3439.48, 3730.96 |
+| fresh-1 | 879.07, 588.03, 588.14 | 221.25, 184.20, 188.98 | 213.54, 239.34, 237.22 |
+| fresh-8 | 922.89, 457.66, 607.47 | 262.19, 276.07, 284.83 | 962.74, 920.57, 882.84 |
+| mixed-1 | 2886.38, 1746.57, 1810.72 | 754.87, 726.45, 663.55 | 858.66, 886.82, 850.32 |
+| mixed-8 | 2924.09, 1850.29, 1953.24 | 1072.33, 1091.10, 1171.25 | 2992.44, 2809.91, 3085.98 |
+
+Worker readp99 (unpaced saturation), milliseconds:
+
+| Case | Base | Files | Candidate |
+|---|---:|---:|---:|
+| small-1 | 3.701 | 3.972 | 3.801 |
+| small-8 | 3.340 | 3.292 | 3.341 |
+| replay-1 | 2.676 | 5.297 | 3.749 |
+| replay-8 | 3.127 | 35.933 | 26.061 |
+| fresh-1 | 2.867 | 2.531 | 2.544 |
+| fresh-8 | 3.282 | 8.745 | 3.305 |
+| mixed-1 | 2.795 | 2.534 | 1.899 |
+| mixed-8 | 2.407 | 8.669 | 3.018 |
+
+Equal-paced reader controls (36cases/8,640writes), readp99 in milliseconds:
+
+| Case | Base | Files | Candidate |
+|---|---:|---:|---:|
+| small-8 | 1.955 | 2.062 | 1.866 |
+| replay-8 | 1.887 | 2.263 | 1.483 |
+| fresh-8 | 2.094 | 2.478 | 1.829 |
+| mixed-8 | 1.980 | 1.816 | 1.249 |
+
+Pinned nativeBlazegraph (36cases/8,640writes), loaded DiskRW/ForceMetadata and fresh Identical namespaces verified:
+
+| Case | Base writes/s | Files writes/s | Candidate writes/s | Smallp95 base/files/candidate ms | Readp99 base/files/candidate ms |
+|---|---:|---:|---:|---|---|
+| small | 68.42 | 85.00 | 90.58 | 145.966 / 115.257 / 110.125 | 42.072 / 32.712 / 33.408 |
+| replay | 59.44 | 82.96 | 82.64 | n/a / n/a / n/a | 35.468 / 32.868 / 33.959 |
+| fresh | 66.30 | 80.06 | 79.56 | n/a / n/a / n/a | 30.804 / 35.796 / 34.994 |
+| mixed | 79.55 | 86.54 | 78.19 | 128.635 / 118.042 / 141.486 | 31.315 / 35.973 / 39.618 |
+
+The proposed throughput/small-write-p95 budgets pass in this nativeBlazegraph sample. Mixed readp99 is26.5% abovebase(39.618vs31.315ms); do not call this a universal no-regression pass. Raw throughput rounds:
+
+| Case | Base rounds | Files rounds | Candidate rounds |
+|---|---|---|---|
+| small | 68.42, 76.91, 68.16 | 84.22, 86.54, 85.00 | 90.58, 90.86, 59.17 |
+| replay | 59.44, 77.99, 58.02 | 84.29, 82.96, 75.84 | 82.64, 91.45, 63.87 |
+| fresh | 66.30, 70.92, 64.55 | 88.74, 80.06, 72.19 | 79.56, 93.11, 64.25 |
+| mixed | 79.55, 83.73, 72.26 | 86.54, 89.55, 68.15 | 89.65, 78.19, 73.71 |
+
+Counts and read values pass throughout. Exact owned container/volumes were removed; unrelated services and wallets were untouched. Earlier unfavorable samples are retained. Human budget/scope/default acceptance and final combined-tip live testnet remain open; no new publication or physical power-loss proof is claimed.

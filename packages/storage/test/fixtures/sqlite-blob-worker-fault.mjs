@@ -28,7 +28,7 @@ DatabaseSync.prototype.exec = function(sql) {
   }
   if (seenWrite && sql === 'COMMIT') {
     if (workerData.fault.endsWith('before-commit')) process.exit(71);
-    if (workerData.fault === 'hold') {
+    if (workerData.fault.endsWith('hold')) {
       commits += 1; Atomics.store(signal, 0, commits); Atomics.notify(signal, 0);
       while (Atomics.load(signal, 1) < commits) Atomics.wait(signal, 1, Atomics.load(signal, 1));
     }

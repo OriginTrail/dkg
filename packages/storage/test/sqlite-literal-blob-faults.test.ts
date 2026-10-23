@@ -344,3 +344,29 @@ it('bounds physical reader RPCs at four while an independent writer progresses d
   }
   await expect(reading).resolves.toEqual(Array(5).fill('seed')); expect(control.reads).toBe(5);
 });
+
+it.each([
+  { label: 'byte-limited 3/3/2 groups', lengths: Array(8).fill(600 * 1024) as number[], committedCounts: [3, 6, 8] },
+  { label: 'one oversized member followed by seven small members', lengths: [2 * 1024 * 1024 + 1024, ...Array(7).fill(8)] as number[], committedCounts: [1, 8] },
+])('acknowledges exact members for $label while later queued commits are held', async ({ lengths, committedCounts }) => {
+  const f = await fixture(), o = owner(f.directory), signal = new Int32Array(new SharedArrayBuffer(8)); holds.push(signal);
+  control.mode = 'collect-hold'; control.signal = signal.buffer as SharedArrayBuffer;
+  const values = lengths.map((length, i) => JSON.stringify('x'.repeat(length)+':'+i)), completed = values.map(() => false);
+  const writing = Promise.all(values.map((term, i) => o.write(hash(term), term).then(() => { completed[i] = true; })));
+  try {
+    await vi.waitFor(() => expect(Atomics.load(signal, 0)).toBe(1));
+    expect(completed).toEqual(values.map(() => false));
+    for (const [group, count] of committedCounts.slice(0, -1).entries()) {
+      Atomics.store(signal, 1, group + 1); Atomics.notify(signal, 1);
+      await vi.waitFor(() => expect(Atomics.load(signal, 0)).toBe(group + 2));
+      await vi.waitFor(() => expect(completed.slice(0, count)).toEqual(Array(count).fill(true)));
+      // Physical readback gives nonmember ACKs time to arrive and verifies the exact native transaction boundary.
+      await expect(Promise.all(values.map(term => o.read(hash(term))))).resolves.toEqual(values.map((term, i) => i < count ? term : undefined));
+      expect(completed).toEqual(values.map((_, i) => i < count));
+    }
+  } finally {
+    Atomics.store(signal, 1, 0x7fffffff); Atomics.notify(signal, 1); await Promise.allSettled([writing]);
+  }
+  await writing; expect(completed).toEqual(values.map(() => true)); expect(control.commits).toBe(committedCounts.length);
+  await expect(Promise.all(values.map(term => o.read(hash(term))))).resolves.toEqual(values);
+});
