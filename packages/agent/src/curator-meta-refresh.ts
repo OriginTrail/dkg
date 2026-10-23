@@ -46,6 +46,13 @@ import { isCanonicalAuthoritativeContextGraphId } from
   './context-graph-binding-state.js';
 import { ensureCuratorConnected } from './curator-peer-connection.js';
 import {
+  memberListOf,
+  readLocalMemberListRootRows,
+  replaceCuratorMetaDefinitionSparql,
+  snapshotNamesCurator,
+  withoutMemberList,
+} from './curator-meta-member-list.js';
+import {
   learnPeerSubGraphs,
   readLocalSubGraphNames,
   readPeerSubGraphRegistrations,
@@ -99,14 +106,25 @@ export interface CuratorMetaRefreshOptions {
    * binding is applied afterwards. A chain binding may only come from chain
    * truth (finalized authority index / name-hash resolution). The
    * authenticated join-approval and curator-resolved refreshes never set this.
+   *
+   * Its member list (`curator-meta-member-list.ts`) is dropped as well, unless
+   * `acceptMemberList` is set, and the member list this node holds stays.
    */
   ignoreRegistrationBinding?: boolean;
+  /**
+   * With `ignoreRegistrationBinding`: the caller established that the serving
+   * peer is a node of the graph's curator (a share signed by the owner's
+   * wallet ties it to the graph), so the snapshot's member list counts too,
+   * when the snapshot names `expectedCuratorAddress` as its curator.
+   */
+  acceptMemberList?: boolean;
   /**
    * Reject a snapshot whose root `dkg:curator` names any wallet other than
    * this EVM address (case-insensitive). Set by the RFC-64 replica bootstrap
    * to the owner the accepted policy already authenticated, so a relayed
    * declaration cannot re-home the graph under a stranger's identity. A
-   * snapshot that names no curator passes this check.
+   * snapshot that names no curator passes this check; its member list never
+   * counts (`acceptMemberList`).
    */
   expectedCuratorAddress?: string;
 }
@@ -190,6 +208,11 @@ interface AuthoritativeMetaSnapshot {
    * replacement asks it again right before its first projection write.
    */
   approvedMember?: ApprovedMemberAcceptance;
+  /**
+   * The member list a relayed snapshot carried, left out of `quads`: it fills
+   * an empty member list, and one this node holds stays as it is.
+   */
+  relayedMemberList?: Quad[];
 }
 
 const CURATOR_AGENT_DID_PREFIX = 'did:dkg:agent:';
@@ -498,13 +521,22 @@ async function fetchAuthoritativeMetaSnapshot(
     return undefined;
   }
   // A relayed declaration is installed without its chain-registration claims;
-  // the peer that served it is not a source of chain truth.
-  const quads = options.ignoreRegistrationBinding === true
+  // the peer that served it is not a source of chain truth. Nor is it a source
+  // of the member list, unless the caller tied it to the curator it names.
+  const relayed = options.ignoreRegistrationBinding === true;
+  const memberListFromCurator = !relayed || (
+    options.acceptMemberList === true
+    && options.expectedCuratorAddress !== undefined
+    && snapshotNamesCurator(contextGraphId, controlMetaQuads, options.expectedCuratorAddress)
+  );
+  const unbound = relayed
     ? stripRelayedRegistrationBindingQuads(contextGraphId, controlMetaQuads)
     : controlMetaQuads;
   return {
     checkpointKey: result.checkpointKey,
-    quads,
+    ...(memberListFromCurator
+      ? { quads: unbound }
+      : { quads: withoutMemberList(contextGraphId, unbound), relayedMemberList: memberListOf(contextGraphId, unbound) }),
     // Registrations this node holds are left out before the per-snapshot
     // limit applies, so a node that refreshes a definition with more
     // registrations than the limit learns the next ones each time (#3293).
@@ -567,7 +599,19 @@ async function atomicallyReplaceCuratorMetaSnapshot(
   authoritative: AuthoritativeMetaSnapshot,
   ctx: OperationContext,
 ): Promise<boolean> {
-  const snapshot = authoritative.quads;
+  // A relayed member list fills an empty one; one this node holds changes only
+  // through the curator. Refreshes of one graph run one at a time.
+  const localMemberRows = authoritative.relayedMemberList === undefined
+    ? []
+    : await readLocalMemberListRootRows(
+      agent.store,
+      contextGraphMetaGraphUri(contextGraphId),
+      contextGraphDataGraphUri(contextGraphId),
+    );
+  const keepsLocalMemberList = localMemberRows.length > 0;
+  const snapshot = keepsLocalMemberList
+    ? authoritative.quads
+    : [...authoritative.quads, ...(authoritative.relayedMemberList ?? [])];
   const activationHolds = async (): Promise<boolean> => (
     (authoritative.approvedMember === undefined || await authoritative.approvedMember.stillHolds())
     && preservesCuratorRegistrationBinding(agent, contextGraphId, snapshot)
@@ -635,20 +679,21 @@ async function atomicallyReplaceCuratorMetaSnapshot(
     const rootRowKeys = new Set(rootRows.map((quad) => `${quad.predicate}\u0000${quad.object}`));
     const rootReplacement = [
       ...rootRows,
-      ...localRevocationRows.filter(
+      ...[...localRevocationRows, ...localMemberRows].filter(
         (quad) => !rootRowKeys.has(`${quad.predicate}\u0000${quad.object}`),
       ),
     ];
     const desiredDelegations = [...desiredBySubject.entries()]
       .filter(([subject]) => subject.startsWith(delegationPrefix))
       .sort(([left], [right]) => left.localeCompare(right));
-    const existingDelegations = new Set(
+    // A snapshot without a member list removes no delegation this node holds.
+    const existingDelegations = new Set(keepsLocalMemberList ? [] : (
       existingDelegationSubjects.bindings
         .map((row) => row['s'])
         .filter((subject): subject is string => (
           typeof subject === 'string' && subject.startsWith(delegationPrefix)
-        )),
-    );
+        ))
+    ));
 
     // Each subject below is its own commit, and a delegation for an agent the
     // current root already allows takes effect as soon as it lands. So the
@@ -712,7 +757,9 @@ async function atomicallyReplaceCuratorMetaSnapshot(
     try {
       replaced = await tryUpdateWithTouchedGraphs(
         agent.store,
-        replaceCuratorMetaProjectionSparql(contextGraphId, metaGraph, stagingGraph),
+        keepsLocalMemberList
+          ? replaceCuratorMetaDefinitionSparql(contextGraphId, metaGraph, stagingGraph)
+          : replaceCuratorMetaProjectionSparql(contextGraphId, metaGraph, stagingGraph),
         [metaGraph],
         { source: 'agent.metaRefresh.replace' },
       );
