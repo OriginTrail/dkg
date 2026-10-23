@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
-import type { Agent } from 'undici';
+import { refuseBrotliResponses } from '@origintrail-official/dkg-http-utils';
+import type { Dispatcher } from 'undici';
 
 /**
  * Node's built-in fetch (undici) stops waiting after 300 s without response
@@ -16,23 +17,26 @@ import type { Agent } from 'undici';
  * handlers of the undici that Node bundles on every supported line (6 on
  * Node 22, 7 on Node 24/25, 8 on Node 26). It is loaded on the first forward
  * rather than at import time: every CLI command imports the daemon routes.
+ * Like every outbound fetch of the daemon, it refuses Brotli-encoded
+ * responses (CVE-2026-111497).
  */
 const DISPATCHER_TIMER_MARGIN_MS = 60_000;
 
 const requireUndici = createRequire(import.meta.url);
-const dispatchers = new Map<number, Agent>();
+const dispatchers = new Map<number, Dispatcher>();
 
 /** undici header/body timer used for a forward whose deadline is `deadlineMs`. */
 export function localAgentChannelDispatcherTimeoutMs(deadlineMs: number): number {
   return deadlineMs + DISPATCHER_TIMER_MARGIN_MS;
 }
 
-function localAgentChannelDispatcher(deadlineMs: number): Agent {
+function localAgentChannelDispatcher(deadlineMs: number): Dispatcher {
   let dispatcher = dispatchers.get(deadlineMs);
   if (!dispatcher) {
     const undici = requireUndici('undici') as typeof import('undici');
     const timeoutMs = localAgentChannelDispatcherTimeoutMs(deadlineMs);
-    dispatcher = new undici.Agent({ headersTimeout: timeoutMs, bodyTimeout: timeoutMs });
+    dispatcher = new undici.Agent({ headersTimeout: timeoutMs, bodyTimeout: timeoutMs })
+      .compose(refuseBrotliResponses as unknown as Dispatcher.DispatcherComposeInterceptor);
     dispatchers.set(deadlineMs, dispatcher);
   }
   return dispatcher;

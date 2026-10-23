@@ -126,6 +126,12 @@ export interface PromoteAttemptError {
    * never reach the queue row. The recovery sweep keys on it.
    */
   diagnosticCode?: string;
+  /**
+   * The context-graph authority reason behind a retryable prerequisite failure,
+   * when the worker recognized one from its closed set (for example
+   * `approved-member-metadata-pending`). Never free text.
+   */
+  authorityReason?: string;
   /** Producer certificate; only the fenced first failed attempt may retire its owner. */
   noEffectProof?: PromoteNoEffectProof;
 }

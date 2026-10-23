@@ -62,10 +62,11 @@ describe('FocusFilter', () => {
     const filter = new FocusFilter({ maxNodes: 5, hops: 1, focalNode: 'urn:node10' });
     const result = filter.compute(model);
 
-    expect(result.nodes.has('urn:node10')).toBe(true);
-    expect(result.nodes.has('urn:node9') || result.nodes.has('urn:node11')).toBe(true);
-    // 3+ hops away should not be visible
-    expect(result.nodes.has('urn:node0')).toBe(false);
+    expect(new Set(result.nodes.keys())).toEqual(new Set(['urn:node9', 'urn:node10', 'urn:node11']));
+    expect(result.edges.size).toBe(2);
+    expect(result.nodes.get('urn:node10')?.isBoundary).toBe(false);
+    expect(result.nodes.get('urn:node9')?.isBoundary).toBe(true);
+    expect(result.nodes.get('urn:node11')?.isBoundary).toBe(true);
   });
 
   it('respects maxNodes — stops BFS when limit reached', () => {

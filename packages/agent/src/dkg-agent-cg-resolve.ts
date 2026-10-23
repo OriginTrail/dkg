@@ -25,6 +25,7 @@ import { contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphDataUri
 import { GraphManager, type Quad } from '@origintrail-official/dkg-storage';
 import { assertContextGraphAuthorityIndexId, type ContextGraphAuthorityProjectionServedEvidence, type ContextGraphAuthoritySnapshot } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
+import { withCallerJoinState } from './internal/context-graph-authority/approved-member-metadata-pending.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { claimedAgentSyncRequestSigner } from './sync/auth/request-signing.js';
 import { normalizeExactSyncResponseEncoding } from './sync/wire-compression.js';
@@ -273,7 +274,7 @@ async function applyContextGraphListPrivacy(
   const annotated = await mapContextGraphListRows(visibleRows, async (r) => {
     const curatorMatch = agent.curatorDidMatchesChecksumAgent(r.curator, checksum);
     const allowlisted = await agent.callerIsAllowlistedAgentParticipant(r.id, checksum);
-    return { ...r, callerInvolved: curatorMatch || allowlisted };
+    return withCallerJoinState(agent, { ...r, callerInvolved: curatorMatch || allowlisted }, checksum);
   });
 
   return annotated
@@ -2643,7 +2644,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       // `callerInvolved` must reflect ONLY the provided caller wallet.
       // Using local node identity (`creatorIsSelf`) leaks curated rows to unrelated callers.
       if (!allowlistRead.ok) return { row: r, privacy };
-      return { row: { ...r, callerInvolved: allowlistRead.value }, privacy };
+      return { row: await withCallerJoinState(this, { ...r, callerInvolved: allowlistRead.value }, checksum), privacy };
     });
     const annotated = annotatedSettled.map((entry, index) => {
       if (entry.status === 'fulfilled') return entry.value;

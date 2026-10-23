@@ -138,6 +138,26 @@ describe('RelayOnlyPeerRoute', () => {
     expect(memory.holds(PEER_A, LAN)).toBe(true);
   });
 
+  it('records a dial the request deadline cut short, not one the caller or a stop cancelled', async () => {
+    const aborted = (reason: unknown) => { const controller = new AbortController(); controller.abort(reason); return controller.signal; };
+    const timeout = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    const memory = new RelayOnlyPeerMemory();
+    const route = memory.routeFor(PEER_A, peer(LAN));
+    await route.peerHasDirectAddrs();
+
+    route.afterNormalDial([circuit()], aborted(new DOMException('aborted', 'AbortError')));
+    route.afterNormalDial([circuit()], aborted(new Error('node stopping')));
+    expect(memory.holds(PEER_A, LAN)).toBe(false);
+
+    route.afterNormalDial([circuit()], aborted(timeout));
+    expect(memory.holds(PEER_A, LAN)).toBe(true);
+    // A deadline-cut dial that left a direct connection open still forgets the peer.
+    route.afterNormalDial([circuit(), direct()], aborted(timeout));
+    expect(memory.holds(PEER_A, LAN)).toBe(false);
+    route.afterNormalDial([circuit()], new AbortController().signal);
+    expect(memory.holds(PEER_A, LAN)).toBe(true);
+  });
+
   it('still requires the circuit to carry the operation', async () => {
     const memory = new RelayOnlyPeerMemory({ now: () => T0 });
     memory.remember(PEER_A, LAN);
@@ -145,6 +165,43 @@ describe('RelayOnlyPeerRoute', () => {
     await route.peerHasDirectAddrs();
     expect(route.reuseLimited(circuit(), 1_000)).toBe(true);
     expect(route.reuseLimited(circuit({ bytes: 1024n }), 1_000)).toBe(false);
+  });
+});
+
+describe('RelayOnlyPeerRoute with publicDirectAddressesOnly', () => {
+  const PUBLIC = '/ip4/198.51.100.20/tcp/4001';
+  const UNREACHABLE = [
+    '/ip4/127.0.0.1/tcp/4001', LAN, '/ip4/10.0.0.4/tcp/4001', '/ip4/172.17.0.1/tcp/4001',
+    '/ip4/100.64.0.9/tcp/4001', '/ip4/169.254.3.4/tcp/4001', '/ip6/fe80::1/tcp/4001', '/ip6/fd00::5/tcp/4001',
+  ];
+
+  it('takes no loopback, private, shared, link-local or unique-local address for a direct route', async () => {
+    const memory = new RelayOnlyPeerMemory({ publicDirectAddressesOnly: true });
+    await expect(memory.routeFor(PEER_A, peer(CIRCUIT, ...UNREACHABLE)).peerHasDirectAddrs()).resolves.toBe(false);
+    await expect(memory.routeFor(PEER_A, peer(CIRCUIT, ...UNREACHABLE, PUBLIC)).peerHasDirectAddrs()).resolves.toBe(true);
+    // Without the option every non-circuit address counts, as before.
+    await expect(new RelayOnlyPeerMemory().routeFor(PEER_A, peer(CIRCUIT, ...UNREACHABLE)).peerHasDirectAddrs())
+      .resolves.toBe(true);
+  });
+
+  it('takes any DNS name for a direct route, as DCUtR may dial it', async () => {
+    const memory = new RelayOnlyPeerMemory({ publicDirectAddressesOnly: true });
+    for (const name of ['/dns4/node.local/tcp/4001', '/dns6/relay.example.org/tcp/4001', '/dnsaddr/node.example.org', '/dns/localhost/tcp/4001']) {
+      await expect(memory.routeFor(PEER_A, peer(CIRCUIT, ...UNREACHABLE, name)).peerHasDirectAddrs(), name).resolves.toBe(true);
+    }
+  });
+
+  it('keys the record on the public addresses only', async () => {
+    const memory = new RelayOnlyPeerMemory({ publicDirectAddressesOnly: true, now: () => T0 });
+    const first = memory.routeFor(PEER_A, peer(CIRCUIT, PUBLIC, LAN));
+    await first.peerHasDirectAddrs();
+    first.afterNormalDial([circuit()]);
+    expect(memory.holds(PEER_A, PUBLIC)).toBe(true);
+
+    // A changed private address set leaves the record in place.
+    const later = memory.routeFor(PEER_A, peer(PUBLIC, '/ip4/10.9.9.9/tcp/4001'));
+    await later.peerHasDirectAddrs();
+    expect(later.reuseLimited(circuit(), 1_000)).toBe(true);
   });
 });
 

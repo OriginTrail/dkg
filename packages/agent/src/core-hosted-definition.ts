@@ -56,11 +56,15 @@
  * any peer (the RFC-64 metadata bootstrap's relayed refresh): the declaration
  * must be unambiguously public, its curator must be the owner the graph's id
  * names, which the chain binding of the id attests, and the serving peer's
- * chain registration claims are stripped. A Core cannot re-home the graph,
- * flip it private or bind it to another slot; what it adds is availability.
- * A subscriber verifies the Core's copy the same way, so a Core cannot forge
- * a definition that a subscriber accepts either. Sub-graph registrations are
- * bookkeeping, not authority (`peer-sub-graph-registration.ts`).
+ * chain registration claims are stripped. The graph's member list counts only
+ * from the node the owner tied to the graph (`curator-meta-member-list.ts`):
+ * a copy from any other peer adds the definition and leaves the member list
+ * the Core holds as it is. A Core cannot re-home the graph, flip it private or
+ * bind it to another slot; what it adds is availability. A subscriber verifies
+ * the Core's copy the same way and takes no member list from it, so a Core
+ * cannot forge a definition or a member list that a subscriber accepts either.
+ * Sub-graph registrations are bookkeeping, not authority
+ * (`peer-sub-graph-registration.ts`).
  */
 
 import {
@@ -293,9 +297,10 @@ function isConnected(agent: CoreHostedDefinitionAgent, peerId: string): boolean 
 /**
  * Install the owner's declaration served by `peerId`, verified as the RFC-64
  * metadata bootstrap verifies a relayed declaration: public only, curator is
- * `owner`, chain claims stripped, no subscription binding applied. False when
- * the peer served none, served a declaration that failed the checks, or could
- * not be reached.
+ * `owner`, chain claims stripped, no subscription binding applied. Its member
+ * list counts only when `peerId` is the node the owner tied to the graph.
+ * False when the peer served none, served a declaration that failed the
+ * checks, or could not be reached.
  */
 async function refreshFromPeer(
   agent: CoreHostedDefinitionAgent,
@@ -304,11 +309,13 @@ async function refreshFromPeer(
   peerId: string,
   signal: AbortSignal | undefined,
 ): Promise<boolean> {
+  const tie = tieOf(agent, stateOf(agent), contextGraphId);
   return runCuratorMetaRefreshFromPeer(agent, contextGraphId, peerId, {
     force: true,
     requirePublicDefinition: true,
     ignoreRegistrationBinding: true,
     expectedCuratorAddress: owner,
+    acceptMemberList: tie?.owner === owner && tie.peerId === peerId,
     signal,
   });
 }

@@ -52,3 +52,28 @@ describe('RFC 3987 absolute IRI syntax', () => {
     expect(isAbsoluteRfc3987IriV1('urn:test:value#\uE000')).toBe(false);
   });
 });
+
+describe('RFC 3987 authority and path boundaries', () => {
+  it.each([
+    'a:/', 'a:/one/two', 'a+1.-:/path',
+    'http://user:password@example.org:8080/path', 'http://example.org:',
+    'http://[::1]:8080/', 'http://[vAF.ab:cd!$&\'()*+,;=]/',
+    'http://[1:2:3:4:5:6:7:8]/', 'http://[::ffff:192.0.2.1]/',
+  ])('accepts syntax without imposing scheme-specific normalization (%s)', iri => {
+    expect(isAbsoluteRfc3987IriV1(iri)).toBe(true);
+  });
+
+  it.each([
+    'a_b:path', 'a%20:path', 'a/:path',
+    'http://user@@host/', 'http://bad%zz@host/', 'http://[::1]suffix/',
+    'http://[::1]:x/', 'http://host:abc/', 'http://unbracketed:host:123/',
+    'http://[vG.test]/', 'http://[v1.]/', 'http://[v1.invalid^]/',
+    'http://[:1:2:3:4:5:6:7]/', 'http://[1:2:3:4:5:6:7:]/',
+    'http://[1::2::3]/', 'http://[1:::2]/', 'http://[1:2:3:4:5:6:7:GG]/',
+    'http://[1:2:3:4:5:6:7:12345]/', 'http://[192.0.2.1::]/',
+    'http://[::192.0.2]/', 'http://[::192.0.2.256]/', 'http://[::192.0.02.1]/',
+    'http://[::192.0.x.1]/', 'http://[::192.0..1]/', 'http://[::192.0.2000.1]/',
+  ])('rejects malformed schemes, authority delimiters and IP literals (%s)', iri => {
+    expect(isAbsoluteRfc3987IriV1(iri)).toBe(false);
+  });
+});

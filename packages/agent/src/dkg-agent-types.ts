@@ -1503,18 +1503,16 @@ export interface DKGAgentConfig {
    */
   networkRelays?: readonly string[];
   /**
-   * Relay multiaddrs declared by the OTHER DKG networks bundled with this
-   * build (the daemon derives them from network/*.json). With a network
-   * identity the node refuses to dial these peers, store their addresses or
-   * accept their connections. `relayPeers` win over this static list only: a
-   * `relayPeers` entry that fails the network-identity proof is refused like
-   * any other peer (`DKGNodeConfig.otherNetworkRelays`).
+   * Relay multiaddrs declared by the OTHER DKG networks bundled with this build
+   * (the daemon derives them from network/*.json). With a network identity the
+   * node refuses to dial these peers, store their addresses or accept their
+   * connections. `relayPeers` win over this static list only: a `relayPeers` entry
+   * that fails the network-identity proof is refused like any other peer (`DKGNodeConfig.otherNetworkRelays`).
    */
   otherNetworkRelays?: readonly string[];
   /**
-   * Transport-level network peer isolation (`DKGNodeConfig.networkPeerIsolation`).
-   * Default true; false is the operator kill switch, leaving other networks'
-   * peers to network admission alone.
+   * Transport-level network peer isolation (`DKGNodeConfig.networkPeerIsolation`). Default true; false is
+   * the operator kill switch, leaving other networks' peers to network admission alone.
    */
   networkPeerIsolation?: boolean;
   /** Legacy ACK candidate allowlist. When set, unlisted connected peers are not dialed for ACKs. */
@@ -1533,6 +1531,8 @@ export interface DKGAgentConfig {
   preferredACKPeerIds?: string[];
   /** Multiaddrs to announce to the network (for VPS/cloud nodes with a public IP not on the interface). */
   announceAddresses?: string[];
+  /** Announce public and relay addresses only, and take only a peer's public addresses for a direct route. Default false. */
+  publicAddressesOnly?: boolean;
   skills?: Array<{
     skillType: string;
     pricePerCall?: number;

@@ -362,6 +362,7 @@ export {
   SWM_CATCHUP_FALLBACK_PROBE_LIMIT,
   SWM_CATCHUP_PEER_GOOD_TTL_MS,
   SWM_CATCHUP_PEER_NEGATIVE_TTL_MS,
+  swmCatchupOwnerPeerIds,
   type SelectSwmCatchupPeersInput,
   type SelectSwmCatchupPeersResult,
   type SwmCatchupPeerOutcome,

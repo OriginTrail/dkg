@@ -47,7 +47,7 @@ interface FakeConnection {
   newStream: ReturnType<typeof vi.fn>;
 }
 
-function fixture() {
+function fixture(options: { publicDirectAddressesOnly?: boolean } = {}) {
   const connections: FakeConnection[] = [];
   const connection = (opts: { limits?: FakeConnection['limits']; openedAt?: number; remoteAddr?: string } = {}) => {
     const created: FakeConnection = {
@@ -76,6 +76,7 @@ function fixture() {
   } as unknown as DKGNode, {
     network: { dialProtocol: dial } as unknown as Network,
     peerResolver: { resolve } as unknown as PeerResolver,
+    ...options,
   });
   return { router, connections, connection, relay, addresses, dial };
 }
@@ -192,6 +193,54 @@ describe.each(callers)('relay-only peer with a direct address in the peer store,
     await expect(invoke(f.router)).resolves.toEqual(RESPONSE);
 
     expect(f.dial).toHaveBeenCalledTimes(2);
+    expect(circuit.newStream).not.toHaveBeenCalled();
+  });
+});
+
+// What a node lists when it announces every interface it has: loopback, a LAN,
+// a container bridge and a VPN in the shared range. None is reachable from
+// another network.
+const UNREACHABLE_ADDRESSES = [
+  '/ip4/127.0.0.1/tcp/4001', '/ip4/10.0.0.4/tcp/4001', '/ip4/172.17.0.1/tcp/4001', '/ip4/100.64.0.9/tcp/4001',
+];
+const PUBLIC_ADDRESS = '/ip4/198.51.100.20/tcp/4001';
+
+function listAddresses(f: ReturnType<typeof fixture>, addresses: readonly string[]): void {
+  f.addresses.splice(0, f.addresses.length, ...addresses.map((address) => ({ multiaddr: { toString: () => address } })));
+}
+
+describe.each(callers)('relay-only peer that announces no public address, through $name', ({ invoke }) => {
+  it('with publicDirectAddressesOnly, takes the open circuit from the first operation, without a dial', async () => {
+    const f = fixture({ publicDirectAddressesOnly: true }), circuit = f.relay();
+    listAddresses(f, UNREACHABLE_ADDRESSES);
+    f.connections.push(circuit);
+
+    await expect(invoke(f.router)).resolves.toEqual(RESPONSE);
+    await expect(invoke(f.router)).resolves.toEqual(RESPONSE);
+
+    expect(f.dial).not.toHaveBeenCalled();
+    expect(circuit.newStream).toHaveBeenCalledTimes(2);
+  });
+
+  it('without the option, dials past the circuit first', async () => {
+    const f = fixture(), circuit = f.relay();
+    listAddresses(f, UNREACHABLE_ADDRESSES);
+    f.connections.push(circuit);
+
+    await expect(invoke(f.router)).resolves.toEqual(RESPONSE);
+
+    expect(f.dial).toHaveBeenCalledOnce();
+    expect(circuit.newStream).not.toHaveBeenCalled();
+  });
+
+  it('with publicDirectAddressesOnly, still dials a peer that also announces a public address', async () => {
+    const f = fixture({ publicDirectAddressesOnly: true }), circuit = f.relay();
+    listAddresses(f, [...UNREACHABLE_ADDRESSES, PUBLIC_ADDRESS]);
+    f.connections.push(circuit);
+
+    await expect(invoke(f.router)).resolves.toEqual(RESPONSE);
+
+    expect(f.dial).toHaveBeenCalledOnce();
     expect(circuit.newStream).not.toHaveBeenCalled();
   });
 });

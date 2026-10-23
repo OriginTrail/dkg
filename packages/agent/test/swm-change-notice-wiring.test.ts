@@ -8,10 +8,11 @@
  * The notice logic itself is in `swm-change-notice.test.ts`, and the whole
  * path over real sync in `e2e-swm-relay-only.test.ts`.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   DKG_GOSSIP_MAX_RPC_BYTES,
   PROTOCOL_SWM_CHANGE_NOTICE,
+  PROTOCOL_SWM_UPDATE,
   PROTOCOL_SWM_UPDATE_RELAYED,
   ProtocolRouter,
   type DKGNode,
@@ -321,6 +322,62 @@ describe('the owner\'s side, as the agent wires it', () => {
 
     expect(target.sends.map(({ peerId, protocolId }) => [peerId, protocolId])).toEqual([[FOLLOWER, PROTOCOL_SWM_CHANGE_NOTICE]]);
     expect(decodeSwmChangeNoticeV1(target.sends[0]!.bytes)).toEqual({ contextGraphId: CG, subGraphName: 'notes', hint: 'op-7' });
+  });
+
+  it('sends a notice again to a follower it did not reach (#3421)', async () => {
+    vi.useFakeTimers();
+    try {
+      const target = owner();
+      let failures = 1;
+      Object.assign(target.agent, {
+        messenger: {
+          sendToPeer: async (peerId: string, protocolId: string, bytes: Uint8Array, options: unknown) => {
+            target.sends.push({ peerId, protocolId, bytes, options });
+            if (failures-- > 0) throw new Error('The stream has been reset');
+            return new Uint8Array();
+          },
+        },
+      });
+
+      target.agent.noticeSwmFollowersAfterApplyV1({ cgId: CG, subGraphName: 'notes', shareOperationId: 'op-7' }, CURATOR);
+      await vi.advanceTimersByTimeAsync(3_000);
+      await target.agent.whenSwmChangeNoticesSettledV1();
+
+      expect(target.sends.map(({ peerId, protocolId }) => [peerId, protocolId])).toEqual([
+        [FOLLOWER, PROTOCOL_SWM_CHANGE_NOTICE],
+        [FOLLOWER, PROTOCOL_SWM_CHANGE_NOTICE],
+      ]);
+      expect(target.logLines).toContain(
+        `SWM change notice for "${CG}" sub-graph "notes" (op-7): reached 1 of 1 follower(s), 1 on a resend`,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves out a follower whose identify lists no notice protocol, and counts it apart (#3421)', async () => {
+    const speaks = '12D3KooWAUCFb3hwTLUu3bhMqAsqtF1YH1sTUaMuTXiyvC1z7k65';
+    const lacks = '12D3KooWBzj7Hg2cKCdsKL6QcjC5UbLztKTvzCZQHaT4P4ZyJEAA';
+    const untold = '12D3KooWCUmtMdmJuxp2YsJya4JASgt4tf7VeKAFrA4NZ415q2RS';
+    const target = owner();
+    target.state.dialable = new Set([speaks, lacks, untold]);
+    const protocols = new Map([
+      [speaks, [PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_CHANGE_NOTICE]],
+      [lacks, [PROTOCOL_SWM_UPDATE]],
+    ]);
+    Object.assign(target.agent.node.libp2p, {
+      peerStore: { get: async (peerId: { toString(): string }) => ({ protocols: protocols.get(peerId.toString()) ?? [] }) },
+    });
+    for (const peerId of [speaks, lacks, untold]) sharedMemoryFollowersOf(target.agent).note(CG, peerId);
+
+    target.agent.noticeSwmFollowersAfterApplyV1({ cgId: CG, subGraphName: 'notes', shareOperationId: 'op-9' }, CURATOR);
+    await target.agent.whenSwmChangeNoticesSettledV1();
+
+    // Identify has not told of `untold` yet: it is tried.
+    expect(target.sends.map(({ peerId }) => peerId).sort()).toEqual([speaks, untold].sort());
+    expect(target.logLines).toContain(
+      `SWM change notice for "${CG}" sub-graph "notes" (op-9): reached 2 of 2 follower(s); 1 without the notice protocol`,
+    );
   });
 
   it('hands another author\'s catalog head to the catalog delivery, for the followers it reaches except the source', async () => {

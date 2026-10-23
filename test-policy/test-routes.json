@@ -86,6 +86,17 @@
     ]
   },
   {
+    "pattern": "scripts/docs/*.test.mjs",
+    "lane": "docs",
+    "reason": "Documentation contracts workflow runs these dependency-free tests for documentation, example, and docs-tooling changes",
+    "cadence": "pull_request/manual",
+    "command": "node --test scripts/docs/*.test.mjs",
+    "layer": "documentation tooling",
+    "prerequisites": [
+      "Node.js 22"
+    ]
+  },
+  {
     "pattern": "devnet/rfc64-persistence-lifecycle/*.test.ts",
     "lane": "inventory-windows",
     "reason": "Gate 0 evidence-encoder, child-process cleanup and verifier unit tests run on the Windows inventory evidence leg before generation and on the Linux tornado-agent sidecar shard, which also runs the POSIX-only cases",

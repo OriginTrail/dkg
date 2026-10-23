@@ -1,5 +1,7 @@
 import { BoundedLruCache } from './bounded-lru-cache.js';
+import { isPublicLikeAddress } from './network/address-policy.js';
 import { RELAY_DEFAULT_DURATION_LIMIT_MS } from './relay-capacity-policy.js';
+import { isTransportTimeoutError } from './request-abort-lifecycle.js';
 
 /**
  * Which peers a normal dial currently reaches only through a relay.
@@ -23,6 +25,16 @@ import { RELAY_DEFAULT_DURATION_LIMIT_MS } from './relay-capacity-policy.js';
  * the router opens streams on the open circuit without dialing. The record
  * holds for that exact set of direct addresses: a changed set, a dial that
  * reaches the peer directly, or the end of the time bound puts the guard back.
+ *
+ * On a public network a peer's loopback, private and shared (100.64/10)
+ * addresses reach nobody outside its own networks, and a node that does not
+ * filter what it announces lists every interface it has. With
+ * `publicDirectAddressesOnly` only an address libp2p could upgrade the relayed
+ * connection to counts as a direct route: DCUtR dials a peer's public
+ * addresses and DNS names, never a private IP, so a private IP cannot close
+ * the circuit under a stream. The record holds for that subset: a peer that
+ * announces neither is relay-only from its first stream, and its open circuit
+ * carries streams without a dial.
  */
 
 /** How long a dial that reached the peer only through a relay is remembered. */
@@ -42,6 +54,8 @@ export interface RelayOnlyPeerMemoryOptions {
   ttlMs?: number;
   maxPeers?: number;
   now?: () => number;
+  /** Count only public addresses and DNS names as a direct route. Default false: any non-circuit address counts. */
+  publicDirectAddressesOnly?: boolean;
 }
 
 /** The parts of a libp2p connection the record reads. */
@@ -59,11 +73,13 @@ export class RelayOnlyPeerMemory {
   private readonly records: BoundedLruCache<string, { addresses: string; expiresAt: number }>;
   private readonly ttlMs: number;
   readonly now: () => number;
+  readonly publicDirectAddressesOnly: boolean;
 
   constructor(options: RelayOnlyPeerMemoryOptions = {}) {
     this.records = new BoundedLruCache(options.maxPeers ?? RELAY_ONLY_PEER_MEMORY_MAX_PEERS);
     this.ttlMs = options.ttlMs ?? RELAY_ONLY_PEER_MEMORY_TTL_MS;
     this.now = options.now ?? Date.now;
+    this.publicDirectAddressesOnly = options.publicDirectAddressesOnly === true;
   }
 
   /** True while a dial with exactly these direct addresses reached the peer only through a relay. */
@@ -101,15 +117,17 @@ export class RelayOnlyPeerRoute {
   ) {}
 
   /**
-   * Whether the peer store lists a non-circuit address for the peer. Throws
-   * when the peer store has no entry, as the peer-store read does.
+   * Whether the peer store lists a non-circuit address for the peer (a public
+   * one or a DNS name, with `publicDirectAddressesOnly`). Throws when the peer
+   * store has no entry, as the peer-store read does.
    */
   readonly peerHasDirectAddrs = async (): Promise<boolean> => {
     const peer = await this.readPeer();
     const direct = new Set<string>();
     for (const { multiaddr } of peer.addresses ?? []) {
       const address = multiaddr?.toString?.() ?? '';
-      if (address && !address.includes('/p2p-circuit')) direct.add(address);
+      if (!address || address.includes('/p2p-circuit')) continue;
+      if (!this.memory.publicDirectAddressesOnly || mayUpgradeRelayedConnection(address)) direct.add(address);
     }
     this.addresses = direct.size > 0 ? [...direct].sort().join(ADDRESS_SEPARATOR) : undefined;
     return direct.size > 0;
@@ -126,12 +144,24 @@ export class RelayOnlyPeerRoute {
     return circuitCarriesOperation(connection, operationMs, this.memory.now());
   }
 
-  /** Record what a normal dial that was not cancelled left behind. */
-  afterNormalDial(connections: ReadonlyArray<RelayOnlyPeerConnection>): void {
+  /**
+   * Record what a normal dial left behind. A dial that the caller or a stop
+   * cancelled shows nothing about the direct addresses and is not recorded. A
+   * dial that the request's deadline cut short is: while a circuit stayed
+   * open, the direct addresses gave no connection within a request's time, so
+   * the next request uses the circuit instead of spending its own time again.
+   */
+  afterNormalDial(connections: ReadonlyArray<RelayOnlyPeerConnection>, signal?: AbortSignal): void {
+    if (signal?.aborted && !isTransportTimeoutError(signal.reason)) return;
     const open = connections.filter((connection) => !connection.status || connection.status === 'open');
     if (open.some((connection) => !connection.limits)) this.memory.forget(this.peerId);
     else if (open.length > 0 && this.addresses !== undefined) this.memory.remember(this.peerId, this.addresses);
   }
+}
+
+/** A public address or a DNS name: what DCUtR dials to upgrade a relayed connection. */
+function mayUpgradeRelayedConnection(address: string): boolean {
+  return isPublicLikeAddress(address) || /^\/dns(?:4|6|addr)?\//.test(address);
 }
 
 /**

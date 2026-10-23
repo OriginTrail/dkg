@@ -550,6 +550,7 @@ export function createNativeGate1FixtureOwner(options: {
       ) => Promise<ReadonlySet<string>>,
       acquireLegacySwmBoundaryLease?: (
         scope: Readonly<AuthorCatalogScopeV1>,
+        request: Readonly<{ replay: boolean }>,
       ) => ReturnType<typeof acquireRfc64LegacySwmBoundaryReceiverLeaseV1>,
     ) => new Rfc64PublicCatalogNativeReceiverV1({
       headTransport: { fetchCatalogHead: receiverHeadFetch },

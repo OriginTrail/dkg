@@ -33,6 +33,7 @@ import type { RegisteredContextGraphAuthority } from './registered-context-graph
 import { resolveSwmMemberRecoveryAuthorityDecision, resolveSwmRegisteredAuthorityDecision, resolveSwmTransportAuthorityDecision, type SwmRegisteredAuthorityReadOptions, type SwmTransportAuthority } from './internal/context-graph-authority/swm-transport-authority.js';
 import { noRosterFrom } from './internal/context-graph-authority/unanswered-authority-read.js';
 import { FANOUT_RESPONSE_REJECTED, FANOUT_RESPONSE_RETRYABLE } from './swm/substrate-fanout.js';
+import { refuseUnlistedWorkspaceSigner } from './internal/context-graph-authority/approved-member-metadata-pending.js';
 import { SyncTargetSupersededError } from './sync/error-tags.js';
 import { resolveAssetUalFromKaIdentity } from './ka-identity.js';
 
@@ -3448,7 +3449,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     const external = await externalAuthorGossipSigner(this.config?.authorSigners, this.localAgents.values(), { allowed: allowedSet });
     if (external) return external;
 
-    throw new Error(`Cannot gossip SWM write for agent-gated context graph "${contextGraphId}": no local allowed signing agent key`);
+    throw await refuseUnlistedWorkspaceSigner(this, contextGraphId);
   }
 
   async encodeWorkspaceGossipMessage(this: DKGAgent, contextGraphId: string, message: Uint8Array, resolvedSigner?: WorkspaceGossipSigner | null): Promise<Uint8Array> {

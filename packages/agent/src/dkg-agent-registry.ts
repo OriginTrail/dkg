@@ -23,6 +23,7 @@ import { connectToMultiaddr } from './p2p/peer-connect.js';
 import { NetworkAdmissionRejectedError, NetworkAdmissionInvalidPeerIdError, type NetworkAdmissionAttemptOptions } from './p2p/network-admission-coordinator.js';
 import { MultiaddrPeerTargetParseError, parseExplicitConnectTarget as parseMultiaddrExplicitConnectTarget } from './p2p/multiaddr-peer-target.js';
 import { assertAgentNameFree, generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey, writeKeystoreEntry, agentKeystorePath, readAgentKeystore, assertKeystoreHoldsNoPayerKey, ensureWorkspaceEncryptionKey, hashAgentToken, activeWorkspaceEncryptionKeys, appendCustodialWorkspaceEncryptionKey, revokeCustodialWorkspaceEncryptionKey, migrateLegacyWorkspaceEncryptionFields, refreshDefaultEncryptionKeyView, type AgentKeyRecord, type KeystoreEntry, type WorkspaceEncryptionKeyEntry } from './agent-keystore.js';
+import { advertisedRelayAddress } from './profile.js';
 import { externalSignerAgentPublicKey, signsThroughExternalSigner } from './external-author-signing.js';
 import { externalSignerDefaultAgent } from './default-agent.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -186,7 +187,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
       framework: this.config.framework,
       nodeRole: this.config.nodeRole ?? 'edge',
       publicKey: pubKeyBase64,
-      relayAddress: relayAddrs?.[0],
+      relayAddress: advertisedRelayAddress(relayAddrs, this.node.multiaddrs),
       agentAddress: this.defaultAgentAddress,
       multiaddrs: collectPublishableMultiaddrs(this.node.multiaddrs),
       lastSeen: new Date().toISOString(),
