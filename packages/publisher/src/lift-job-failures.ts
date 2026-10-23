@@ -1,4 +1,5 @@
 import { hostOnlyRpcText } from '@origintrail-official/dkg-chain';
+import type { LiftValidationDiagnostic } from './lift-validation-error.js';
 import type { LiftJobActiveState } from './lift-job-states.js';
 
 export const LIFT_JOB_FAILURE_PHASES = [
@@ -37,6 +38,7 @@ export const LIFT_JOB_FAILURE_CODES = [
   'workspace_slice_not_found',
   'publish_intent_stale',
   'canonicalization_failed',
+  'validation_unknown',
   'authority_unavailable',
   'authority_forbidden',
   'validation_timeout',
@@ -167,6 +169,7 @@ export interface LiftJobFailureMetadata {
   readonly rpcResponseRef?: string;
   readonly revertReasonRef?: string;
   readonly timeout?: LiftJobTimeoutMetadata;
+  readonly validationDiagnostic?: LiftValidationDiagnostic;
 }
 
 /**
@@ -189,6 +192,7 @@ export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, BuiltInLiftJo
   workspace_slice_not_found: { code: 'workspace_slice_not_found', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
   publish_intent_stale: { code: 'publish_intent_stale', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
   canonicalization_failed: { code: 'canonicalization_failed', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
+  validation_unknown: { code: 'validation_unknown', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
   // The production producer structurally admits only the agent's closed set of
   // transient authority-unavailability reasons; terminal and unknown reasons
   // map to authority_forbidden. The existing bounded budget/backoff owns
@@ -231,6 +235,7 @@ const LIFT_JOB_FAILURE_ALLOWED_STATES: Record<LiftJobFailureCode, readonly LiftJ
   workspace_slice_not_found: ['accepted', 'claimed', 'validated'],
   publish_intent_stale: ['claimed', 'validated'],
   canonicalization_failed: ['claimed', 'validated'],
+  validation_unknown: ['claimed', 'validated'],
   authority_unavailable: ['claimed', 'validated'],
   // GH#1786 — also reachable from 'broadcast': the executor discovers mid-publish, before
   // any transaction is sent, that it cannot re-sign the UpdateAuthorAttestation for this
