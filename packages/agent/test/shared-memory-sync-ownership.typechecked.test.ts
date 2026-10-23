@@ -181,7 +181,8 @@ describe('runSharedMemorySync ownership hydration', () => {
       logDebug: () => {},
     });
 
-    expect(processedBatches).toEqual([{ data: [subData], meta: [subMeta] }]);
+    // The metadata is verified alone first: its legacy roots call for the data phase (#3421).
+    expect(processedBatches).toEqual([{ data: [], meta: [subMeta] }, { data: [subData], meta: [subMeta] }]);
     expect(inserted).toEqual([subData, subMeta]);
     expect(summary.insertedDataTriples).toBe(1);
     expect(summary.insertedMetaTriples).toBe(1);

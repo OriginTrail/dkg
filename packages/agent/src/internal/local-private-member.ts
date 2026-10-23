@@ -3,7 +3,7 @@
 
 
 /** A context graph member identity: a bare agent address or its `did:dkg:agent:` DID. */
-function memberAgentAddress(value: string): string | undefined {
+export function memberAgentAddress(value: string): string | undefined {
   const match = /^(?:did:dkg:agent:)?(0x[0-9a-fA-F]{40})$/.exec(value.trim());
   return match?.[1]?.toLowerCase();
 }

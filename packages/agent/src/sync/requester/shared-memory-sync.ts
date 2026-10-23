@@ -54,6 +54,7 @@ import {
   type GraphScopedSwmRecoveryDescriptor,
 } from '../graph-scoped-swm-recovery.js';
 import { admitServedSubGraphNames } from './served-sub-graph-admission.js';
+import { fetchPublicSwmDataPhase } from './public-swm-data-phase.js';
 import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
 import {
   createRecoveryExecutionAdmission,
@@ -656,28 +657,12 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
         recordPhaseOutcome(wsMetaResult, { updateCheckpoint: false });
         break;
       }
-      const wsDataResult = await recoveryBoundary.read(() => fetchRecoveryPages(
-        pid,
-        'data',
-        wsGraph,
-        deadline,
-        workAdmission,
-      ));
-      peerRespondedForContextGraph = true;
-      const fetchDurationMs = Date.now() - fetchStartedAt;
-
-      const verifyStartedAt = Date.now();
       const registeredSubGraphNames = getRegisteredSubGraphNames
         ? await recoveryBoundary.read(() => getRegisteredSubGraphNames(pid))
         : undefined;
       const excludedSubGraphNames = getExcludedSubGraphNames
         ? await recoveryBoundary.read(() => getExcludedSubGraphNames(pid))
         : undefined;
-      const fetchedDataQuads = includeRootScope
-        ? wsDataResult.quads
-        : wsDataResult.quads.filter((quad) => (
-          isNamedSubgraphSharedMemoryDataGraph(pid, quad.graph)
-        ));
       const fetchedMetaQuads = includeRootScope
         ? wsMetaResult.quads
         : wsMetaResult.quads.filter((quad) => (
@@ -687,8 +672,25 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       const verificationSubGraphNames = await recoveryBoundary.read(() => admitServedSubGraphNames({
         contextGraphId: pid, metaQuads: fetchedMetaQuads, registeredSubGraphNames, excludedSubGraphNames, isOwnContextGraph,
       }));
-      const processed = await recoveryBoundary.read(() => processSharedMemoryBatch(
-        fetchedDataQuads,
+      // Only legacy roots and graph-backed snapshots need the data phase (#3421).
+      const dataPhase = await recoveryBoundary.read(() => fetchPublicSwmDataPhase({
+        contextGraphId: pid, remotePeerId, metaQuads: fetchedMetaQuads, registeredSubGraphNames: verificationSubGraphNames, excludedSubGraphNames,
+        metaWhole: wsMetaResult.completed && !wsMetaResult.timedOut && wsMetaResult.resumedFromOffset === 0,
+        verifyMetadata: (metaQuads) => processSharedMemoryBatch([], metaQuads, pid, verificationSubGraphNames, excludedSubGraphNames),
+        fetch: () => fetchRecoveryPages(pid, 'data', wsGraph, deadline, workAdmission),
+      }));
+      const wsDataResult = dataPhase.result;
+      peerRespondedForContextGraph = true;
+      const fetchDurationMs = Date.now() - fetchStartedAt;
+
+      const verifyStartedAt = Date.now();
+      const fetchedDataQuads = includeRootScope
+        ? wsDataResult.quads
+        : wsDataResult.quads.filter((quad) => (
+          isNamedSubgraphSharedMemoryDataGraph(pid, quad.graph)
+        ));
+      const processed = dataPhase.metadataOnly ?? await recoveryBoundary.read(() => processSharedMemoryBatch(
+        dataPhase.legacyQuads(fetchedDataQuads),
         fetchedMetaQuads,
         pid,
         verificationSubGraphNames,
@@ -763,7 +765,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
         }
       };
       if (dropped > 0) {
-        logWarn(ctx, `SWM sync dropped ${dropped} triples with invalid subjects (not in meta rootEntity or skolemized child)`);
+        logWarn(ctx, `SWM sync dropped ${dropped} triples with invalid subjects (not in meta rootEntity or skolemized child) for "${pid}" from ${remotePeerId.slice(-8)}`);
         summary.droppedDataTriples += dropped;
       }
 
@@ -792,7 +794,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       // no head rows to describe.
       if (snapshotMaterializer && wsMetaResult.completed) {
         try {
-          const descriptors = parseGraphScopedSwmRecoveryDescriptors({
+          const descriptors = dataPhase.descriptors ?? parseGraphScopedSwmRecoveryDescriptors({
             contextGraphId: pid,
             metaQuads: processed.verifiedMeta,
             // Without the subgraph admission context every KA under a

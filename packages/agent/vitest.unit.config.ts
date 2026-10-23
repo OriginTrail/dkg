@@ -68,6 +68,7 @@ export default defineConfig({
       "test/owner-share-forward.test.ts",
       "test/relayed-swm-share-receive.test.ts",
       "test/shared-memory-sync-fresh-round.test.ts",
+      "test/public-swm-data-phase.test.ts",
       "test/dkg-agent-swm-target-executor-composition.test.ts",
       "test/private-swm-recovery-lifecycle-budget.test.ts",
       'test/private-access-request-owner.test.ts',
@@ -434,6 +435,7 @@ export default defineConfig({
       "test/swm-sender-key-peer-routes.test.ts",
       "test/swm-sender-key-overlapping-shares.test.ts",
       "test/swm-shares-through-relay.test.ts",
+      "test/public-allowlist-peers.test.ts",
       "test/swm-share-holder-cores.test.ts",
       "test/swm-owed-public-share-wiring.test.ts",
       // #2827 — SWM authority and plaintext decisions for a joined member of a
