@@ -41,6 +41,8 @@ import {
 } from './rfc64-author-commit-cas.js';
 import { isStoreOperationNotStarted } from './store-operation-outcome.js';
 import { raceStoreWorkAgainstAbort } from './abortable-store-work-lifecycle.js';
+import { StoreWorkDrain } from './store-work-drain.js';
+import type { StoreOperation } from './store-operation-outcome.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 export const DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
@@ -112,6 +114,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator, ImmutableStoreP
   private revalidateFailureCount = 0;
   private mutationGeneration = 0;
   private readonly refreshCoordinator = new RefreshCoordinator<ReadonlySet<string>>();
+  private readonly mutations = new StoreWorkDrain('Graph set index is closing');
   /**
    * Pending full rebuild requested by a mutation whose exact graph effects can't
    * be applied incrementally. The stored source preserves the observer contract
@@ -143,12 +146,17 @@ export class GraphSetIndexStore implements TripleStoreDecorator, ImmutableStoreP
     this.onDiagnostic = (options as GraphSetIndexStoreInternalOptions).onDiagnostic;
   }
 
+  runLogicalMutation<T>(operation: StoreOperation, options: QueryOptions | undefined,
+    work: (options: QueryOptions | undefined) => Promise<T>): Promise<T> {
+    return this.mutations.run(() => runLogicalStoreMutation(this.inner, operation, options, work));
+  }
+
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
     return runImmutableMutation(this, { operation: 'insert', quads }, options);
   }
 
   async delete(quads: Quad[], options?: QueryOptions): Promise<void> {
-    return runLogicalStoreMutation(this.inner, 'delete', options, async options => {
+    return this.runLogicalMutation('delete', options, async options => {
       if (!this.enabled) {
         await this.inner.delete(quads, options);
         return;
@@ -162,7 +170,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator, ImmutableStoreP
   }
 
   async deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number> {
-    return runLogicalStoreMutation(this.inner, 'deleteByPattern', options, async options => {
+    return this.runLogicalMutation('deleteByPattern', options, async options => {
       if (!this.enabled) {
         return this.inner.deleteByPattern(pattern, options);
       }
@@ -185,7 +193,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator, ImmutableStoreP
     pattern: Partial<Quad>,
     options?: QueryOptions,
   ): Promise<void> {
-    return runLogicalStoreMutation(this.inner, 'deleteByPattern', options, async options => {
+    return this.runLogicalMutation('deleteByPattern', options, async options => {
       if (!this.enabled) {
         await deleteByPatternWithoutCount(this.inner, pattern, options);
         return;
@@ -229,7 +237,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator, ImmutableStoreP
   }
 
   private async runUpdate(sparql: string, options: UpdateOptions | undefined, capability: 'update' | 'atomicUpdate'): Promise<void> {
-    return runLogicalStoreMutation(this.inner, 'update', options, async scoped => {
+    return this.runLogicalMutation('update', options, async scoped => {
       const scopedUpdateOptions: UpdateOptions = { ...options, ...scoped };
       if (typeof this.inner[capability] !== 'function') {
         throw new UnsupportedTripleStoreCapabilityError(capability, 'GraphSetIndexStore');
@@ -290,7 +298,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator, ImmutableStoreP
   }
 
   async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
-    return runLogicalStoreMutation(this.inner, 'dropGraph', options, async options => {
+    return this.runLogicalMutation('dropGraph', options, async options => {
       if (!this.enabled) {
         await this.inner.dropGraph(graphUri, options);
         return;
@@ -415,7 +423,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator, ImmutableStoreP
   }
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
-    return runLogicalStoreMutation(this.inner, 'deleteBySubjectPrefix', options, async options => {
+    return this.runLogicalMutation('deleteBySubjectPrefix', options, async options => {
       if (!this.enabled) {
         return this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
       }
@@ -435,8 +443,8 @@ export class GraphSetIndexStore implements TripleStoreDecorator, ImmutableStoreP
     await this.inner.flush?.(options);
   }
 
-  async close(): Promise<void> {
-    await this.inner.close();
+  close(): Promise<void> {
+    return this.mutations.close(() => this.inner.close());
   }
 
   private async ensureGraphSet(options?: QueryOptions): Promise<ReadonlySet<string>> {

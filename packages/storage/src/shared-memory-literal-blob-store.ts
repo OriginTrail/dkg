@@ -18,7 +18,9 @@ import type {
   TripleStore,
   TripleStoreDecorator,
 } from './triple-store.js';
-import { deleteByPatternWithoutCount } from './triple-store.js';
+import { deleteByPatternWithoutCount, runLogicalStoreMutation } from './triple-store.js';
+import { StoreWorkDrain } from './store-work-drain.js';
+import type { StoreOperation } from './store-operation-outcome.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 import type {
   Rfc64AuthorCommitCasInputV1,
@@ -68,6 +70,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
   private readonly thresholdBytes: number;
   private readonly blobWrites: ContentAddressedBlobSingleFlight;
   private readonly blobDirectory: DurableDirectoryPreparation;
+  private readonly blobWork = new StoreWorkDrain('Literal blob store is closing');
 
   constructor(inner: TripleStore, options: SharedMemoryLiteralBlobStoreOptions) {
     if (!options.blobDir?.trim()) {
@@ -88,6 +91,11 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
     this.blobWrites = new ContentAddressedBlobSingleFlight({
       createOrVerify: (hash, term) => this.writeBlobFile(hash, term),
     });
+  }
+
+  runLogicalMutation<T>(operation: StoreOperation, options: QueryOptions | undefined,
+    work: (options: QueryOptions | undefined) => Promise<T>): Promise<T> {
+    return this.blobWork.run(() => runLogicalStoreMutation(this.inner, operation, options, work));
   }
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
@@ -258,8 +266,8 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
     await this.inner.flush?.(options);
   }
 
-  async close(): Promise<void> {
-    return this.inner.close();
+  close(): Promise<void> {
+    return this.blobWork.close(() => this.inner.close());
   }
 
   private async externalizeQuads(quads: readonly Quad[]): Promise<Quad[]> {
