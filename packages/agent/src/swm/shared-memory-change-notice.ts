@@ -21,8 +21,13 @@
  * arrives while that pull runs is answered by one more pull after it, since
  * the running one may have read the sender's metadata before the change.
  *
- * A node that does not know the protocol refuses the stream; the owner sends
- * once, without retries, and goes on. Nothing waits for the notice.
+ * A follower the notice did not reach is sent it again 3 s later, and once
+ * more 15 s after that (#3421): a relayed connection to a follower behind a
+ * NAT often lives too short for one stream, and a follower that misses the
+ * notice otherwise waits for its next periodic pull. A node that does not know
+ * the protocol refuses the stream and is not sent it again; one known not to
+ * speak it is not sent it at all. The owner logs who it did not reach and why.
+ * Nothing waits for the notice.
  *
  * A root share of a catalog-owned graph does not use this notice: it reaches
  * the owner as its author's catalog head, and the owner passes the head's
@@ -143,16 +148,45 @@ export interface SwmRemoteChange {
   readonly sourcePeerId: string;
 }
 
+/**
+ * How the notice to one follower ended. `unsupported`: the follower does not
+ * speak the protocol, and is not sent the notice again.
+ */
+export type SwmChangeNoticeOutcome = 'reached' | 'unsupported' | 'unreachable' | 'timeout' | 'reset' | 'failed';
+
+export interface SwmChangeNoticeDelivery {
+  readonly peerId: string;
+  readonly outcome: SwmChangeNoticeOutcome;
+}
+
+/** The class of a send that failed, from its error. */
+export function swmChangeNoticeFailure(error: unknown): Exclude<SwmChangeNoticeOutcome, 'reached'> {
+  const text = (error instanceof Error ? `${error.name} ${error.message}` : String(error)).toLowerCase();
+  if (/protocol selection failed|could not negotiate|unsupported ?protocol|protocol not supported/.test(text)) return 'unsupported';
+  if (/timeout|timed out/.test(text)) return 'timeout';
+  if (/dial|no valid addresses|no.reservation|econnrefused|unreachable/.test(text)) return 'unreachable';
+  if (/reset|closed|econnreset|epipe/.test(text)) return 'reset';
+  return 'failed';
+}
+
 export interface SwmChangeNotifierPorts extends SwmChangeRecipientPorts {
-  /** One attempt per recipient, no retries; resolves with how many it reached. */
-  readonly deliver: (notice: SwmChangeNoticeV1, recipients: readonly string[]) => Promise<number>;
+  /** One attempt per recipient; resolves with how each one ended. */
+  readonly deliver: (notice: SwmChangeNoticeV1, recipients: readonly string[]) => Promise<readonly SwmChangeNoticeDelivery[]>;
+  /** False for a peer known not to speak the notice protocol: it is left out and counted apart. */
+  readonly supportsNotice?: (peerId: string) => Promise<boolean | undefined>;
   readonly log?: (message: string) => void;
   /** Shortest gap between two notices of one scope; changes within it share one trailing notice. */
   readonly minIntervalMs?: number;
+  /** Pauses before each resend to the followers the attempt before did not reach. */
+  readonly resendDelaysMs?: readonly number[];
+  readonly sleep?: (ms: number) => Promise<void>;
   readonly now?: () => number;
 }
 
 export const SWM_CHANGE_NOTICE_MIN_INTERVAL_MS = 1_000;
+export const SWM_CHANGE_NOTICE_RESEND_DELAYS_MS: readonly number[] = [3_000, 15_000];
+/** Followers named in the log line of a notice that did not reach them; the rest are counted. */
+const MAX_LOGGED_MISSES = 8;
 /** Scopes with a trailing notice waiting at once; a burst over more drops the excess, periodic sync stays. */
 const MAX_WAITING_SCOPES = 256;
 
@@ -170,16 +204,25 @@ function scopeKey(contextGraphId: string, subGraphName: string | null): string {
 export class SwmChangeNotifier {
   readonly #ports: SwmChangeNotifierPorts;
   readonly #minIntervalMs: number;
+  readonly #resendDelaysMs: readonly number[];
+  readonly #sleep: (ms: number) => Promise<void>;
   readonly #now: () => number;
   readonly #lastSentAt = new Map<string, number>();
   readonly #waiting = new Map<string, WaitingChange>();
   readonly #inFlight = new Set<Promise<void>>();
+  /** The latest notice of each scope still in flight: an older one stops its resends, the newer one tells everyone. */
+  readonly #latest = new Map<string, object>();
+  readonly #whenStopped: Promise<void>;
+  #markStopped!: () => void;
   #stopped = false;
 
   constructor(ports: SwmChangeNotifierPorts) {
     this.#ports = ports;
     this.#minIntervalMs = ports.minIntervalMs ?? SWM_CHANGE_NOTICE_MIN_INTERVAL_MS;
+    this.#resendDelaysMs = ports.resendDelaysMs ?? SWM_CHANGE_NOTICE_RESEND_DELAYS_MS;
+    this.#sleep = ports.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms).unref?.()));
     this.#now = ports.now ?? Date.now;
+    this.#whenStopped = new Promise((resolve) => { this.#markStopped = resolve; });
   }
 
   /** Called after a share from another peer was applied here. Never throws and never waits for the delivery. */
@@ -212,9 +255,10 @@ export class SwmChangeNotifier {
     while (this.#inFlight.size > 0) await Promise.allSettled(this.#inFlight);
   }
 
-  /** Shutdown: drop the trailing notices that wait and send no more. */
+  /** Shutdown: drop the trailing notices that wait, end the waits for a resend, and send no more. */
   stop(): void {
     this.#stopped = true;
+    this.#markStopped();
     for (const waiting of this.#waiting.values()) clearTimeout(waiting.timer);
     this.#waiting.clear();
   }
@@ -226,34 +270,82 @@ export class SwmChangeNotifier {
       const oldest = this.#lastSentAt.keys().next().value;
       if (oldest !== undefined) this.#lastSentAt.delete(oldest);
     }
-    const run = this.#fanOut(change, sources).catch((error: unknown) => {
+    const token = {};
+    this.#latest.set(key, token);
+    const run = this.#fanOut(key, token, change, sources).catch((error: unknown) => {
       this.#ports.log?.(`SWM change notice for "${change.contextGraphId}" not delivered: ${errorText(error)}`);
+    }).finally(() => {
+      if (this.#latest.get(key) === token) this.#latest.delete(key);
     });
     this.#inFlight.add(run);
     void run.finally(() => this.#inFlight.delete(run));
   }
 
-  async #fanOut(change: SwmRemoteChange, sources: ReadonlySet<string>): Promise<void> {
+  async #fanOut(key: string, token: object, change: SwmRemoteChange, sources: ReadonlySet<string>): Promise<void> {
     const recipients = await swmChangeRecipients(this.#ports, change.contextGraphId, sources);
     if (recipients.length === 0) return;
     const { contextGraphId, subGraphName, hint } = change;
-    const reached = await this.#ports.deliver({ contextGraphId, subGraphName, hint }, recipients);
+    const notice = { contextGraphId, subGraphName, hint };
+    const unsupported = new Set(await this.#knownWithoutNotice(recipients));
+    const followers = recipients.filter((peerId) => !unsupported.has(peerId));
+    const outcomes = new Map<string, SwmChangeNoticeOutcome>();
+    let pending = followers;
+    let resent = 0;
+    let handedOver = false;
+    for (let attempt = 0; pending.length > 0 && attempt <= this.#resendDelaysMs.length; attempt += 1) {
+      if (attempt > 0) {
+        await Promise.race([this.#sleep(this.#resendDelaysMs[attempt - 1]!), this.#whenStopped]);
+        if (this.#stopped) break;
+        // A newer notice of this scope went to every follower: it carries the resends from here.
+        handedOver = this.#latest.get(key) !== token;
+        if (handedOver) break;
+      }
+      for (const { peerId, outcome } of await this.#ports.deliver(notice, pending)) {
+        outcomes.set(peerId, outcome);
+        if (outcome === 'reached' && attempt > 0) resent += 1;
+      }
+      pending = pending.filter((peerId) => {
+        const outcome = outcomes.get(peerId) ?? 'failed';
+        if (outcome === 'unsupported') unsupported.add(peerId);
+        return outcome !== 'reached' && outcome !== 'unsupported';
+      });
+    }
     const scope = subGraphName === null ? 'root' : `sub-graph "${subGraphName}"`;
+    const sentTo = followers.filter((peerId) => !unsupported.has(peerId));
+    const reached = sentTo.filter((peerId) => outcomes.get(peerId) === 'reached').length;
+    const misses = sentTo.filter((peerId) => outcomes.get(peerId) !== 'reached')
+      .map((peerId) => `${peerId.slice(-8)}=${outcomes.get(peerId) ?? 'failed'}`);
     this.#ports.log?.(
-      `SWM change notice for "${contextGraphId}" ${scope} (${hint}): reached ${reached} of ${recipients.length} follower(s)`,
+      `SWM change notice for "${contextGraphId}" ${scope} (${hint}): reached ${reached} of ${sentTo.length} follower(s)`
+      + (resent > 0 ? `, ${resent} on a resend` : '')
+      + (misses.length > 0 ? `; not reached: ${misses.slice(0, MAX_LOGGED_MISSES).join(', ')}` : '')
+      + (misses.length > MAX_LOGGED_MISSES ? ` (+${misses.length - MAX_LOGGED_MISSES} more)` : '')
+      + (handedOver && misses.length > 0 ? '; a newer notice takes over the resends' : '')
+      + (unsupported.size > 0 ? `; ${unsupported.size} without the notice protocol` : ''),
     );
+  }
+
+  /** The recipients known not to speak the notice protocol. */
+  async #knownWithoutNotice(recipients: readonly string[]): Promise<string[]> {
+    const supportsNotice = this.#ports.supportsNotice;
+    if (supportsNotice === undefined) return [];
+    const support = await Promise.all(recipients.map((peerId) => supportsNotice(peerId).catch(() => undefined)));
+    return recipients.filter((_, index) => support[index] === false);
   }
 }
 
-/** Send one encoded notice to each recipient; how many accepted the stream. */
+/** Send one encoded notice to each recipient; how each send ended. */
 export async function sendSwmChangeNotice(
   notice: SwmChangeNoticeV1,
   recipients: readonly string[],
   send: (peerId: string, bytes: Uint8Array) => Promise<unknown>,
-): Promise<number> {
+): Promise<SwmChangeNoticeDelivery[]> {
   const bytes = encodeSwmChangeNoticeV1(notice);
   const results = await Promise.allSettled(recipients.map((peerId) => send(peerId, bytes)));
-  return results.filter((result) => result.status === 'fulfilled').length;
+  return results.map((result, index) => ({
+    peerId: recipients[index]!,
+    outcome: result.status === 'fulfilled' ? 'reached' : swmChangeNoticeFailure(result.reason),
+  }));
 }
 
 // ── Follower side ─────────────────────────────────────────────────────────
