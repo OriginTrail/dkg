@@ -6,6 +6,9 @@
 export const INCOMING_COPY_ALLOWED_USERS = Object.freeze({
   canonicalizeRdfObjectTerm: Object.freeze([
     'packages/publisher/src/incoming-public-copy.ts',
+    // Kafka compares its submitted private RDF values with native sealed
+    // readback; broker bytes/digests and advertised assertion hashes stay raw.
+    'packages/kafka-source/src/asset.mjs',
     'packages/rdf-utils/src/index.ts',
   ]),
   acceptIncomingPublicQuads: Object.freeze([
