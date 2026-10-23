@@ -36,7 +36,8 @@ export interface OpenedConnectionView {
  * once as a duplicate of the open one, or a parallel path through another
  * relay. Admission, the catalog replay and sync-on-connect ran for the open
  * connection; running them again for each such circuit would start another
- * round of them, at both ends, for every request to a relay-only peer.
+ * round of them, at both ends, for every request to a relay-only peer. (The
+ * caller still records the circuit's way back through its relay.)
  */
 export function isRedundantLimitedConnection(
   connection: OpenedConnectionView,

@@ -4,6 +4,7 @@ import {
   SYSTEM_CONTEXT_GRAPHS,
   canonicalAgentDidSubject,
   isPublicLikeAddress,
+  peerIdFromRelayAddress,
   toAgentDid,
 } from '@origintrail-official/dkg-core';
 /** Compatibility re-export; canonicalization is implemented and documented in dkg-core. */
@@ -64,13 +65,12 @@ export function advertisedRelayAddress(
   relayPeers: readonly string[] | undefined,
   selfAddresses: readonly string[],
 ): string | undefined {
-  const peerIdAtEnd = (address: string): string | undefined => /\/p2p\/([^/]+)\/*$/.exec(address)?.[1];
   const reservedOn = new Set(selfAddresses.flatMap((address) => {
     const circuit = address.indexOf('/p2p-circuit');
-    const relayPeerId = circuit < 0 ? undefined : peerIdAtEnd(address.slice(0, circuit));
+    const relayPeerId = circuit < 0 ? undefined : peerIdFromRelayAddress(address.slice(0, circuit));
     return relayPeerId ? [relayPeerId] : [];
   }));
-  return relayPeers?.find((relay) => reservedOn.has(peerIdAtEnd(relay) ?? '')) ?? relayPeers?.[0];
+  return relayPeers?.find((relay) => reservedOn.has(peerIdFromRelayAddress(relay) ?? '')) ?? relayPeers?.[0];
 }
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';

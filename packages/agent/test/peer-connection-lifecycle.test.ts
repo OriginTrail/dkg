@@ -417,16 +417,18 @@ describe('a second, limited connection to a connected peer', () => {
     expect(isRedundantLimitedConnection({ ...direct, limits: null }, [{ id: 'other', status: 'open' }])).toBe(false);
   });
 
-  it('starts no admission, catalog replay or sync-on-connect on connection:open', async () => {
+  it('starts no admission, catalog replay or sync-on-connect on connection:open, and records its way back', async () => {
     const f = await createPeerEventFixture();
     try {
       const admission = vi.spyOn(f.agent.networkAdmissionCoordinator, 'ensureAdmitted').mockResolvedValue(false);
+      const enrich = vi.spyOn(f.agent, 'enrichPeerStoreFromInboundCircuit').mockRejectedValue(new Error('peer store busy'));
       const duplicate = { remotePeer: f.peer, direction: 'inbound', limits: { bytes: 1n } };
       const connections = vi.spyOn(f.agent.node.libp2p, 'getConnections')
         .mockReturnValue([{ status: 'open' }, duplicate] as never);
       f.agent.node.libp2p.dispatchEvent(new CustomEvent('connection:open', { detail: duplicate }));
       await flushMicrotasks();
       expect(admission).not.toHaveBeenCalled();
+      expect(enrich).toHaveBeenCalledExactlyOnceWith(duplicate);
 
       // The peer's first connection runs it, limited or not.
       connections.mockReturnValue([duplicate] as never);
