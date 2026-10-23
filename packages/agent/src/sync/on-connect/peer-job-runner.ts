@@ -7,7 +7,10 @@ import {
   type SyncOnConnectPeerAccountingEntry,
   type SyncReconcilerAttemptOutcome,
 } from './attempt-accounting.js';
-import type { SyncOnConnectGraphScope } from './graph-scope.js';
+import {
+  graphScopedSyncOnConnectPeerOutcome,
+  type SyncOnConnectGraphScope,
+} from './graph-scope.js';
 import type { SyncOnConnectPeerJobRunner } from './peer-scheduler.js';
 import type { SyncOnConnectPeerOutcome } from './sync-on-connect.js';
 
@@ -42,6 +45,8 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
   private automaticSelectedPhase: SyncAttempt | null;
   private pendingInitialProbe: Readonly<{ value: Probe }> | null;
   private ordinaryFailedWithoutAccounting = false;
+  /** What this job's ordinary passes covered: nothing yet, some graphs, or the whole scope. */
+  private ordinaryCoverage: 'none' | 'graphs' | 'whole' = 'none';
   private terminalState: 'active' | 'cancelled' | 'finished' = 'active';
   private readonly cancelForLifetime = () => this.cancel();
 
@@ -76,6 +81,8 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
     contextGraphIds: SyncOnConnectGraphScope = null,
   ): Promise<SyncReconcilerAttemptOutcome> {
     this.assertActive();
+    if (contextGraphIds === null) this.ordinaryCoverage = 'whole';
+    else if (this.ordinaryCoverage === 'none') this.ordinaryCoverage = 'graphs';
     const automaticSelectedPhase = this.automaticSelectedPhase;
     this.automaticSelectedPhase = null;
     let selectedPhaseFailed = false;
@@ -157,7 +164,7 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
     const combined = combineSyncOnConnectPeerAccounting(entries);
     this.accountingEntries.length = 0;
     if (combined === null) return;
-    const outcome: SyncOnConnectPeerOutcome = this.selectedPhaseExecuted
+    const peerOutcome: SyncOnConnectPeerOutcome = this.selectedPhaseExecuted
       && this.dependencies.selectedRetryStillRequired()
       && combined.outcome.reconcilerDisposition === 'clear'
       ? {
@@ -166,6 +173,12 @@ implements SyncOnConnectPeerJobRunner<SelectedPlan> {
           progress: combined.outcome.progress,
         }
       : combined.outcome;
+    // A job whose ordinary work covered only some graphs left the peer's
+    // other graphs unsynced: its selected phase's progress must not hold off
+    // the next whole-scope pass either.
+    const outcome = this.ordinaryCoverage === 'graphs'
+      ? graphScopedSyncOnConnectPeerOutcome(peerOutcome)
+      : peerOutcome;
     if (combined.resetBackoffBeforeRetry) {
       this.dependencies.resetBackoffBeforeRetry();
     }
