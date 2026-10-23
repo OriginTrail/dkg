@@ -26,6 +26,7 @@
 
 import type { Rfc64PublicCatalogCurrentHeadScopeV1 } from './public-catalog-current-head-discovery-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './public-catalog-transport-v1.js';
+import { rfc64ReceiverHeadKeyV1 } from './public-catalog-receiver-task-lifecycle-v1.js';
 
 /**
  * Delay armed AFTER a re-pull pass completes, before the next pass may start.
@@ -99,21 +100,37 @@ export class Rfc64AnnouncedHeadRetryScheduleV1 {
     return this.#now() + Math.min(this.#maxDelayMs, this.#intervalMs * 2 ** doublings);
   }
 
-  /** The lane spent its pull budget on this exact head, pulled from these providers. */
+  /**
+   * The lane spent its pull budget on this exact head, pulled from these
+   * providers. Providers of an earlier budget that are still quiet stay so.
+   */
   quiet(
     announcement: Readonly<Rfc64PublicCatalogHeadAnnouncementV1>,
     providers: Iterable<string>,
   ): void {
     const head = exactHeadIdentityV1(announcement);
+    const earlier = this.#quietByHead.get(head);
+    const stillQuiet = earlier !== undefined && this.#now() < earlier.until ? earlier.providers : [];
     this.#quietByHead.delete(head);
     if (this.#quietByHead.size >= MAX_QUIET_HEADS_V1) {
       const oldest = this.#quietByHead.keys().next().value;
       if (oldest !== undefined) this.#quietByHead.delete(oldest);
     }
     this.#quietByHead.set(head, Object.freeze({
-      providers: new Set(providers),
+      providers: new Set([...stillQuiet, ...providers]),
       until: this.#now() + this.#quietMs,
     }));
+  }
+
+  /** True while hints for this exact head from every one of these providers start no pull. */
+  isQuietFromAll(
+    announcement: Readonly<Rfc64PublicCatalogHeadAnnouncementV1>,
+    providers: Iterable<string>,
+  ): boolean {
+    for (const provider of providers) {
+      if (!this.isQuiet(announcement, provider)) return false;
+    }
+    return true;
   }
 
   /** True while a hint for this exact head from this provider must start no pull. */
@@ -228,21 +245,11 @@ export function hintSettlesRetainedAnnouncedHeadV1(
     || (order === 0 && exactHeadIdentityV1(announcement) === exactHeadIdentityV1(target.announcement));
 }
 
-/** Every field that names one exact head. */
+/** Every field that names one exact head: the receiver's own exact-head key. */
 export function exactHeadIdentityV1(
   announcement: Readonly<Rfc64PublicCatalogHeadAnnouncementV1>,
 ): string {
-  return [
-    announcement.networkId,
-    announcement.contextGraphId,
-    announcement.subGraphName ?? '',
-    announcement.authorAddress,
-    announcement.catalogEra,
-    announcement.catalogVersion,
-    announcement.policyDigest,
-    announcement.catalogHeadObjectDigest,
-    announcement.signatureVariantDigest,
-  ].join('\n');
+  return rfc64ReceiverHeadKeyV1(announcement);
 }
 
 /** A retained re-pull target dropped so the announced-scope map stays under its cap. */

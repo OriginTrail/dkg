@@ -68,6 +68,8 @@ export interface Rfc64ReceiverLifecycleTaskV1 {
   settled?: boolean;
   /** A newer head of its scope ran in its place once; it now runs in queue order. */
   passedOver?: boolean;
+  /** Who delivered the head, by provider context key; a task without any never coalesces. */
+  readonly providers?: ReadonlyMap<string, unknown>;
 }
 
 /**
@@ -205,9 +207,14 @@ export class Rfc64ReceiverTaskLifecycleV1<
    * Only ambient heads, delivered hints, take part. A caller-awaited head
    * keeps its place: no head queued behind it runs ahead of it. A verified
    * current head has its own placement and retirement rules. A delivered head
-   * is not verified yet, so the jump is bounded twice:
+   * is not verified yet, so the jump is bounded three times:
    * - it reaches at most one signed lineage window past the first head, the
    *   furthest the receiver can apply in one step;
+   * - one provider delivered the head it jumps to and every head it replaces.
+   *   The jump proves the lineage through the replaced heads; a provider that
+   *   announced each of them can serve it, as running them in order would
+   *   have needed. A head delivered only by a provider that lacks the older
+   *   ones runs after them, as a direct successor;
    * - a head passed over once is never passed over again. When the newest
    *   head cannot be applied, the older ones run in queue order, so later
    *   hints for newer heads delay them by one attempt at most. The scope
@@ -224,30 +231,30 @@ export class Rfc64ReceiverTaskLifecycleV1<
   #newestAmbientHeadOfScopeAt(index: number): number {
     const first = this.#queue[index]!;
     if (!isCoalescibleAmbientHeadV1(first) || first.passedOver === true) return index;
-    let newest = index;
+    // The delivered heads of the scope, up to its first caller-awaited head.
+    const heads: TTask[] = [first];
     for (let candidate = index + 1; candidate < this.#queue.length; candidate += 1) {
       const task = this.#queue[candidate]!;
       if (task.scopeKey !== first.scopeKey || task.cancellation.signal.aborted) continue;
       if (task.schedulingPolicy.schedulingClass !== 'ambient') break;
-      if (
-        task.catalogVersion > this.#queue[newest]!.catalogVersion
+      heads.push(task);
+    }
+    const targets = heads
+      .filter((task) => (
+        task.catalogVersion > first.catalogVersion
         && task.catalogVersion - first.catalogVersion <= RFC64_RECEIVER_MAX_HEAD_JUMP_V1
-      ) {
-        newest = candidate;
-      }
+      ))
+      // Newest first.
+      .sort((left, right) => (
+        left.catalogVersion === right.catalogVersion ? 0 : left.catalogVersion > right.catalogVersion ? -1 : 1
+      ));
+    for (const target of targets) {
+      const replaced = heads.filter((task) => task.catalogVersion < target.catalogVersion);
+      if (!sharesOneProviderV1(target, replaced)) continue;
+      for (const task of replaced) task.passedOver = true;
+      return this.#queue.indexOf(target);
     }
-    if (newest === index) return index;
-    const newestVersion = this.#queue[newest]!.catalogVersion;
-    for (const task of this.#queue) {
-      if (
-        task.scopeKey === first.scopeKey
-        && isCoalescibleAmbientHeadV1(task)
-        && task.catalogVersion < newestVersion
-      ) {
-        task.passedOver = true;
-      }
-    }
-    return newest;
+    return index;
   }
 
   begin(task: TTask): void {
@@ -363,6 +370,17 @@ export class Rfc64ReceiverTaskLifecycleV1<
     for (const resolve of waiters) notify(() => resolve(result));
     return true;
   }
+}
+
+/** Whether one provider delivered `target` and every task in `replaced`. */
+function sharesOneProviderV1(
+  target: Rfc64ReceiverLifecycleTaskV1,
+  replaced: readonly Rfc64ReceiverLifecycleTaskV1[],
+): boolean {
+  for (const provider of target.providers?.keys() ?? []) {
+    if (replaced.every((task) => task.providers?.has(provider) === true)) return true;
+  }
+  return false;
 }
 
 function isCoalescibleAmbientHeadV1(task: Rfc64ReceiverLifecycleTaskV1): boolean {

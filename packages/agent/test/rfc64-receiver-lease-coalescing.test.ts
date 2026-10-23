@@ -201,6 +201,61 @@ describe('RFC-64 receiver: one lease turn applies the newest delivered head of a
     expect(receiver.stats()).toMatchObject({ applied: 3, notFound: 1 });
   });
 
+  it('does not jump to a head from a provider that did not deliver the heads it would replace', async () => {
+    const fence = createRfc64LegacySwmFenceCoordinatorV1();
+    let applied = 0;
+    const leaseTurns: number[] = [];
+    const attempts: string[] = [];
+    const receiver = new Rfc64PublicCatalogReceiverV1({
+      isHeadSatisfied: async (head) => Number(head.catalogVersion) <= applied,
+      reconcileHead: async (peerId, head) => {
+        const version = Number(head.catalogVersion);
+        attempts.push(`${version}@${peerId}`);
+        // This provider serves its head but not the predecessors a jump has to prove.
+        if (peerId === 'relay' && version > applied + 1) return 'not-found';
+        await runRfc64LegacySwmRetirementV1(
+          fence,
+          { source: 'receiver-lease', contextGraphId: head.contextGraphId },
+          async () => {
+            leaseTurns.push(version);
+            applied = Math.max(applied, version);
+          },
+        );
+        return 'applied';
+      },
+    }, { maxAttempts: 1, retryBackoffMs: 0 });
+    const stale = holdNodeWideTurn(fence);
+
+    receiver.schedule(headAt(1), 'member');
+    await settle();
+    receiver.schedule(headAt(2), 'member');
+    receiver.schedule(headAt(3), 'relay');
+    stale.open();
+    await receiver.whenIdle();
+
+    // In order: 3 is a direct successor of 2 and applies from its own provider.
+    expect(leaseTurns).toEqual([1, 2, 3]);
+    expect(attempts).toEqual(['1@member', '2@member', '3@relay']);
+  });
+
+  it('jumps when one provider delivered the newest head and every head it replaces', async () => {
+    const fence = createRfc64LegacySwmFenceCoordinatorV1();
+    const { receiver, leaseTurns } = leasedReceiver(fence);
+    const stale = holdNodeWideTurn(fence);
+
+    receiver.schedule(headAt(1), 'member');
+    await settle();
+    receiver.schedule(headAt(2), 'member');
+    receiver.schedule(headAt(3), 'member');
+    receiver.schedule(headAt(3), 'relay');
+    receiver.schedule(headAt(4), 'relay');
+    receiver.schedule(headAt(4), 'member');
+    stale.open();
+    await receiver.whenIdle();
+
+    expect(leaseTurns).toEqual([1, 4]);
+  });
+
   it('does not jump further than one signed lineage window', async () => {
     const fence = createRfc64LegacySwmFenceCoordinatorV1();
     const { receiver, leaseTurns } = leasedReceiver(fence);

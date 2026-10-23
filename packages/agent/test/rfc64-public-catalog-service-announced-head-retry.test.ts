@@ -1463,3 +1463,33 @@ describe('RFC-64 announced-head acceleration: the quiet period covers one exact 
     expect(discoveriesTo(router, 'peer-other')).toBe(1);
   });
 });
+
+describe('RFC-64 announced-head acceleration: a hint repeated during the last pull (T10)', () => {
+  it('does not pull the head again once that pull spent its budget', async () => {
+    const { router, service, onAccelerationFailed } = heldPassService({ maxAttempts: 1 });
+    const policy = acceptPolicy(service);
+    service.start();
+    const head = announcement({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+      catalogVersion: '0',
+      policyDigest: policy.policyDigest,
+    });
+
+    router.hold('peer-a');
+    await deliverHint(router, head, 'peer-a');
+    await deliverHint(router, head, 'peer-a');
+    router.release('peer-a');
+    await service.whenReceiverIdle();
+
+    expect(router.sends.filter(
+      ({ protocolId }) => protocolId === RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1,
+    )).toHaveLength(1);
+    expect(onAccelerationFailed.mock.calls.map(([event]) => [event.attempt, event.abandoned]))
+      .toEqual([[1, true]]);
+    expect(service.stats()).toMatchObject({
+      announcedCurrentHeadPendingScopes: 0,
+      announcedCurrentHeadRetryArmed: false,
+    });
+  });
+});

@@ -1636,6 +1636,14 @@ export class Rfc64PublicCatalogServiceV1 {
         }
         if (target.attempts >= this.#announcedCurrentHeadMaxPullAttempts) {
           this.#announcedCurrentHeadRetry.quiet(target.announcement, target.remotePeerIds);
+          // A repeat of the hint that came during this pull is quiet now as well.
+          const repeat = this.#announcedCurrentHeadTargets.get(key);
+          if (repeat !== undefined && this.#announcedCurrentHeadRetry.isQuietFromAll(
+            repeat.announcement,
+            repeat.remotePeerIds,
+          )) {
+            this.#announcedCurrentHeadTargets.delete(key);
+          }
           this.#observeAccelerationFailure(target, true, error);
           return;
         }

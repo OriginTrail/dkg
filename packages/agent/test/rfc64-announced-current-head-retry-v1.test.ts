@@ -108,6 +108,24 @@ describe('RFC-64 announced-head re-pull schedule', () => {
     expect(schedule.quietHeads).toBe(0);
   });
 
+  it('keeps the providers of an earlier spent budget quiet when another provider spends one', () => {
+    const time = clock();
+    const schedule = new Rfc64AnnouncedHeadRetryScheduleV1({ intervalMs: 5_000, now: time.now });
+    const spent = headAt('7');
+
+    schedule.quiet(spent, ['peer-a']);
+    time.advance(60_000);
+    schedule.quiet(spent, ['peer-b']);
+    expect(schedule.isQuiet(spent, 'peer-a')).toBe(true);
+    expect(schedule.isQuiet(spent, 'peer-b')).toBe(true);
+
+    // Once the earlier quiet period has run out, it is not carried into a new one.
+    time.advance(RFC64_ANNOUNCED_HEAD_QUIET_MS_V1);
+    schedule.quiet(spent, ['peer-c']);
+    expect(schedule.isQuiet(spent, 'peer-a')).toBe(false);
+    expect(schedule.isQuiet(spent, 'peer-c')).toBe(true);
+  });
+
   it('remembers a bounded number of quiet heads, forgetting the oldest first', () => {
     const time = clock();
     const schedule = new Rfc64AnnouncedHeadRetryScheduleV1({
