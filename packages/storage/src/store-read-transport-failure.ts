@@ -11,6 +11,7 @@ export class StoreReadTransportFailure extends Error {
 
 /** Retain the established SPARQL status/operation contract at proven read boundaries. */
 class StoreReadSparqlHttpFailure extends SparqlHttpResponseError {
+  declare private readonly readProvenance: void;
   constructor(cause: SparqlHttpResponseError) {
     super(cause.operation, cause.status, cause.responseExcerpt);
     this.cause = cause;
@@ -19,10 +20,11 @@ class StoreReadSparqlHttpFailure extends SparqlHttpResponseError {
 
 /** Preserve the adapter deadline contract for consumers outside the publisher. */
 class StoreReadDeadlineFailure extends StoreOperationTimeoutError {
+  declare private readonly readProvenance: void;
   constructor(cause: StoreOperationTimeoutError) { super({ ...cause, message: cause.message, cause }); }
 }
 
-export function isStoreReadTransportFailure(error: unknown): error is StoreReadTransportFailure | SparqlHttpResponseError | StoreOperationTimeoutError {
+export function isStoreReadTransportFailure(error: unknown): error is StoreReadTransportFailure | StoreReadSparqlHttpFailure | StoreReadDeadlineFailure {
   return error instanceof StoreReadTransportFailure || error instanceof StoreReadSparqlHttpFailure || error instanceof StoreReadDeadlineFailure;
 }
 

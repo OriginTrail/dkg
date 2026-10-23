@@ -250,12 +250,20 @@ export function mapExecutionFailure(input: ExecutionFailureInput): LiftJobFailur
     });
   }
 
-  const failure = mapPublishExceptionToLiftJobFailure({
-    error: staged ? new Error('Publication validation boundary conflicts with persisted execution state') : error,
+  if (staged) {
+    const failedFromState = requestedOrigin === 'included' ? 'included' : 'broadcast';
+    return createLiftJobFailureMetadata({
+      failedFromState, code: failedFromState === 'included' ? 'confirmation_mismatch' : 'rpc_unavailable',
+      message: 'Publication validation boundary conflicts with persisted execution state',
+      errorPayloadRef, validationDiagnostic: { stage: staged.stage, cause: 'unknown' },
+    });
+  }
+  return mapPublishExceptionToLiftJobFailure({
+    error,
     failedFromState: requestedOrigin === 'included' ? 'included' : 'broadcast',
     errorPayloadRef,
     timeout:
-      !staged && (lower.includes('timeout') || lower.includes('timed out'))
+      lower.includes('timeout') || lower.includes('timed out')
         ? {
             // A PLACEHOLDER, not a measurement: the executor reports no configured or elapsed
             // deadline, so 0 means "unknown" — never "the configured timeout was zero" nor
@@ -271,5 +279,4 @@ export function mapExecutionFailure(input: ExecutionFailureInput): LiftJobFailur
           }
         : undefined,
   });
-  return staged ? { ...failure, validationDiagnostic: { stage: staged.stage, cause: 'unknown' } } : failure;
 }

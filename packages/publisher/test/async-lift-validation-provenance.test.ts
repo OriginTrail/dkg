@@ -164,6 +164,12 @@ describe('GH#3419 pre-validation provenance', () => {
     if (status === 'included') await publisher.update(jobId, 'included', { broadcast, inclusion: { txHash: TX_HASH, blockNumber: 1 } });
     const failed = expectFailed(await publisher.openClaimSession(claim).recordExecutionFailure(status, error(), { neverDispatched: true }));
     expect(failed.broadcast?.txHash).toBe(TX_HASH);
+    if (typeof error() !== 'string') {
+      expect(failed.failure).toMatchObject({ code: status === 'included' ? 'confirmation_mismatch' : 'rpc_unavailable',
+        message: 'Publication validation boundary conflicts with persisted execution state',
+        validationDiagnostic: { stage: 'initial_preflight', cause: 'unknown' } });
+      expect(failed.failure.timeout).toBeUndefined();
+    }
     if (typeof error() === 'string') expect(failed.failure).toMatchObject({
       code: status === 'included' ? 'finality_timeout' : 'tx_submit_timeout',
       timeout: { timeoutMs: 0, handling: 'check_chain_then_finalize_or_reset' },
