@@ -141,6 +141,8 @@ higher bound when required. Remove the new persistence setting from the older
 binary's configuration. Do not copy only a live SQLite main file or manually
 synchronize/discover its WAL files.
 
+Rollback export publishes each hash through a unique same-directory staging area and an atomic hard link, so the destination filesystem must support hard links. Completed final bytes are re-submitted through the legacy writer and its durability barriers. An interrupted invocation can be rerun; incomplete `.literal-export-*` staging directories are ignored, while conflicting existing hash files reject and are left intact. Stop node writers before exporting. The source database is retained.
+
 ### Mutation and flush semantics
 
 - Mutations update the in-memory store immediately and schedule a full N-Quads

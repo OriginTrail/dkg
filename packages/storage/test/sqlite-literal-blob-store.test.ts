@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open as openFile, readFile, readdir, rm, writeFile, type FileHandle } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -95,4 +95,47 @@ it('shares strict format validation with offline export before creating any hash
   const before = await readFile(path), destination = join(root, 'exported');
   await expect(exportLiteralBlobs(directory, destination)).rejects.toThrow('schema');
   expect(await readdir(root)).not.toContain('exported'); expect(await readFile(path)).toEqual(before);
+});
+
+it.each([1, 2])('retries rollback export after native partial write %s without damaging source or legacy hydration', async failureAt => {
+  const root = await fixture(), current = await open(root, 'sqlite-wal');
+  await current.insert([quad('urn:asset')]); await current.close();
+  const directory = join(root, 'blobs'), source = join(directory, SQLITE_BLOB_FILENAME);
+  const before = await readFile(source), destination = join(directory, hash(value));
+  const probePath = join(root, 'write-probe'), probe = await openFile(probePath, 'wx');
+  const prototype = Object.getPrototypeOf(probe), nativeWrite = prototype.writeFile as FileHandle['writeFile'];
+  await probe.close(); await rm(probePath);
+  let writes = 0, partialBytes = 0;
+  const fault = vi.spyOn(prototype, 'writeFile').mockImplementation(async function(this: FileHandle,
+    data: Parameters<FileHandle['writeFile']>[0], options?: Parameters<FileHandle['writeFile']>[1]) {
+    if (data === value && ++writes === failureAt) {
+      await nativeWrite.call(this, Buffer.from(value).subarray(0, 31)); await this.sync();
+      partialBytes = (await this.stat()).size;
+      throw Object.assign(new Error('injected partial write ENOSPC'), { code: 'ENOSPC' });
+    }
+    return nativeWrite.call(this, data, options);
+  });
+  try { await expect(exportLiteralBlobs(directory, directory)).rejects.toMatchObject({ code: 'ENOSPC' }); }
+  finally { fault.mockRestore(); }
+  expect(partialBytes).toBe(failureAt === 1 ? 31 : Buffer.byteLength(value));
+  if (failureAt === 1) await expect(readFile(destination)).rejects.toMatchObject({ code: 'ENOENT' });
+  else expect(await readFile(destination, 'utf8')).toBe(value);
+  // A killed invocation may leave its private partial stage; fresh runs ignore it.
+  const abandoned = join(directory, '.literal-export-abandoned'); await mkdir(abandoned);
+  const prefix = Buffer.from(value).subarray(0, 31); await writeFile(join(abandoned, hash(value)), prefix);
+  expect(await exportLiteralBlobs(directory, directory)).toBe(1);
+  expect(await readFile(destination, 'utf8')).toBe(value);
+  expect(await readFile(join(abandoned, hash(value)))).toEqual(prefix);
+  expect(await readFile(source)).toEqual(before);
+  const rollback = await open(root, 'files');
+  await expect(rollback.query(select('urn:asset'))).resolves.toMatchObject({ bindings: [{ value }] });
+});
+it('protects a conflicting existing rollback hash file while preserving the SQLite source', async () => {
+  const root = await fixture(), current = await open(root, 'sqlite-wal');
+  await current.insert([quad('urn:asset')]); await current.close();
+  const directory = join(root, 'blobs'), source = join(directory, SQLITE_BLOB_FILENAME), before = await readFile(source);
+  const destination = join(directory, hash(value)), foreign = '"unrelated existing literal"';
+  await writeFile(destination, foreign, 'utf8');
+  await expect(exportLiteralBlobs(directory, directory)).rejects.toThrow('corrupt');
+  expect(await readFile(destination, 'utf8')).toBe(foreign); expect(await readFile(source)).toEqual(before);
 });

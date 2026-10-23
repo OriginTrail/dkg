@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -278,4 +278,19 @@ it.each(['full', 'before-commit'])('rejects every collected group member on nati
   }
   expect((await asChangelogReader(retry)!.readChanges(0, 20)).map(change => change.seq)).toEqual([1,2,3,4,5,6,7,8,9]);
   await retry.close();
+});
+
+it('refuses writes sent to the fixed read-only worker without creating a missing database', async () => {
+  const f = await fixture(), o = owner(f.directory);
+  await expect(o.read(hash(value))).resolves.toBeUndefined();
+  const reader = control.instances[0]!;
+  const response = new Promise<{ error?: { message: string } }>(resolve => {
+    const onMessage = (message: { id?: number; error?: { message: string } }) => {
+      if (message.id === 90001) { reader.off('message', onMessage); resolve(message); }
+    };
+    reader.on('message', onMessage);
+  });
+  reader.postMessage({ id: 90001, operation: 'write', hash: hash(value), term: value });
+  await expect(response).resolves.toMatchObject({ error: { message: 'Literal blob read owner cannot write' } });
+  await expect(o.read(hash(value))).resolves.toBeUndefined(); expect(await readdir(f.root)).toEqual([]);
 });

@@ -12,7 +12,8 @@ export async function exportLiteralBlobs(source: string, destination: string, ma
   if (!Number.isSafeInteger(maxLiteralBytes) || maxLiteralBytes < 0) throw new RangeError('Invalid export literal byte limit');
   const path = join(resolve(source), SQLITE_BLOB_FILENAME), entry = lstatSync(path);
   if (!entry.isFile() || entry.isSymbolicLink()) throw new Error('Literal blob database must be a regular file');
-  const db = new DatabaseSync(path, { readOnly: true }), files = new LiteralBlobFileOwner(resolve(destination));
+  const files = new LiteralBlobFileOwner(resolve(destination));
+  const db = new DatabaseSync(path, { readOnly: true });
   let count = 0;
   try {
     assertSqliteBlobSchema(db);
@@ -29,7 +30,7 @@ export async function exportLiteralBlobs(source: string, destination: string, ma
         }
         throw error;
       }
-      await files.write(row.hash, term); count += 1;
+      await files.writeStaged(row.hash, term); count += 1;
     }
     return count;
   } finally { db.close(); }

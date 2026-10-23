@@ -1,3 +1,5 @@
+import type { LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+export type { LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import type { SharedMemoryPublicSnapshotStorageConfig } from '@origintrail-official/dkg-publisher';
 import { normalizeOxigraphMemoryLimits, oxigraphMemorySupportError } from './oxigraph-memory-limits.js';
 import { resolveBooleanEnvOverride } from './boolean-env-override.js';
@@ -483,12 +485,6 @@ export type ResolvedChainConfig = Partial<
   /** Normalized positive fee-per-gas cap. */
   maxFeePerGasWei?: bigint;
 };
-
-export interface LargeLiteralStorageConfig {
-  enabled?: boolean;
-  thresholdBytes?: number;
-  directory?: string;
-}
 
 export type { SharedMemoryPublicSnapshotStorageConfig } from '@origintrail-official/dkg-publisher';
 
