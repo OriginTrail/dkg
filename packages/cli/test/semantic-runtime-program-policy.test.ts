@@ -221,7 +221,7 @@ async function receiptAuthorityFixture(pinned: boolean, layer: 'wm' | 'swm' | 'v
   const runtime = (await startConfiguredSemanticRuntime(config, { log: vi.fn(), openStore: () => new SemanticRuntimeStore(':memory:') }))!;
   const invocationId = '123e4567-e89b-42d3-a456-426614174222';
   const invoke = () => invokeStoredSemanticProgram(agent as any, runtime, 'tenant', programIri, invocationId, 'vm', layer, config);
-  return { agent, runtime, invoke, state, invocationId };
+  return { agent, runtime, invoke, state, invocationId, config };
 }
 
 describe('receipt authority for direct VM policy and pinned Programs', () => {
@@ -251,6 +251,27 @@ describe('receipt authority for direct VM policy and pinned Programs', () => {
         await expect(f.invoke()).rejects.toMatchObject({ code: 'PROGRAM_POLICY_CHANGED' });
         const phases = ['create', 'write', 'finalize', 'promote'] as const;
         for (const later of phases.slice(phases.indexOf(phase) + 1)) expect(f.agent.assertion[later]).not.toHaveBeenCalled();
+        expect(f.agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+      } finally { await f.runtime.stop(); }
+    },
+  );
+  it.each([false, true].flatMap(pinned => ['local-policy', 'operator-policy'].map(change => ({ pinned, change }))))(
+    'rejects $change retirement while the last authority query is pending with pin=$pinned', async ({ pinned, change }) => {
+      const f = await receiptAuthorityFixture(pinned);
+      try {
+        const query = f.agent.query.getMockImplementation()!;
+        f.agent.query.mockImplementation(async (...args: any[]) => {
+          const result = await (query as any)(...args);
+          if (args[1].source === 'semantic-runtime-policy-recheck' && f.agent.assertion.create.mock.calls.length) {
+            if (change === 'operator-policy') f.config.operatorPolicyIri = 'urn:policy:retired';
+            else f.config.programPolicy = { contextGraphIds: ['tenant'], programs: [] };
+          }
+          return result;
+        });
+        await expect(f.invoke()).rejects.toMatchObject({ code: 'PROGRAM_POLICY_CHANGED' });
+        expect(f.agent.assertion.create).toHaveBeenCalledTimes(1);
+        expect(f.agent.assertion.write).not.toHaveBeenCalled();
+        expect(f.agent.assertion.promote).not.toHaveBeenCalled();
         expect(f.agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
       } finally { await f.runtime.stop(); }
     },

@@ -311,20 +311,24 @@ export async function invokeResolved(
 ): Promise<SemanticInvocationResult> {
   const pinnedPolicyHash = bound ? '' : programPolicyHash(config);
   let readingCompletedReceipt = false;
-  const assertAuthorized = async () => {
-    await scope.assertAncestors?.();
-    if (bound) { await bound.assertAuthorized(); return; }
+  const assertCurrentPolicy = () => {
     if (!config || programPolicyHash(config) !== pinnedPolicyHash
       || config.operatorPolicyIri !== resolved.public.selectedPolicy.iri) {
       throw new SemanticProgramError('PROGRAM_POLICY_CHANGED', 'Operator Program policy changed during execution', 403);
     }
+  };
+  const assertAuthorized = async () => {
+    await scope.assertAncestors?.();
+    if (bound) { await bound.assertAuthorized(); return; }
+    assertCurrentPolicy();
     await assertProgramInvocationAuthorized({
-      agent, runtime, executionId: `urn:sr:execution:${invocationId}`, config, contextGraphId,
+      agent, runtime, executionId: `urn:sr:execution:${invocationId}`, config: config!, contextGraphId,
       program: resolved.program, originalCaller: callerAgentAddress ?? resolved.program.authorAgentAddress,
       operatorAddress: resolved.operatorAddress, policyIri: resolved.public.selectedPolicy.iri,
       policyHashHex: resolved.policyHashHex,
       allowCompletedReceipt: readingCompletedReceipt,
     });
+    assertCurrentPolicy();
   };
   const pinnedChildInvoker: SemanticProgramChildInvoker = async (input) => {
     await assertAuthorized();
