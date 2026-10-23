@@ -193,6 +193,7 @@ export default defineConfig({
           'test/auto-update-workspace-clean.test.ts',
           'test/maintenance-update-gate.test.ts',
           'test/node-runtime-preflight.test.ts',
+          'test/outbound-brotli-refusal.test.ts',
           'test/dkg-doctor.test.ts',
           'test/metrics-collector-config.test.ts',
           'test/init.test.ts',
