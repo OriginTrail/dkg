@@ -347,6 +347,42 @@ describe('recent shared-memory pulls of member graphs, and the owner (#3421)', (
     expect(h.pulls$.trackedGraphCount).toBe(0);
   });
 
+  it('keeps its member graphs on their interval when other activity fills the tracking limit (#3421 review)', async () => {
+    const members = ['urn:cg:m1', 'urn:cg:m2', 'urn:cg:m3'];
+    const h = scheduler({ maxGraphs: 3 }, { memberGraphs: async () => members });
+    for (const id of [...members, 'urn:cg:other']) h.state.eligible.add(id);
+    h.state.others = ['peer'];
+    expect(await h.pulls$.tick()).toBe(0);
+
+    // Another graph comes into use before every tick, with the tracking limit full of members.
+    for (let round = 0; round < 6; round += 1) {
+      h.pulls$.noteActivity('urn:cg:other');
+      h.advance(TICK);
+      await h.pulls$.tick();
+    }
+
+    // Six ticks are three intervals: each member was pulled three times.
+    expect(h.pulls.map(([id]) => id).sort()).toEqual([...members, ...members, ...members].sort());
+    expect(h.pulls$.trackedGraphCount).toBe(3);
+  });
+
+  it('lets a graph that is no longer a member go like any other, and tracks at most the limit of members', async () => {
+    let members = ['urn:cg:m1', 'urn:cg:m2', 'urn:cg:m3', 'urn:cg:m4'];
+    const h = scheduler({ maxGraphs: 3 }, { memberGraphs: async () => members });
+    for (const id of [...members, 'urn:cg:other']) h.state.eligible.add(id);
+    h.state.others = ['peer'];
+
+    await h.pulls$.tick();
+    expect(h.pulls$.trackedGraphCount).toBe(3);
+    members = ['urn:cg:m1'];
+    await h.pulls$.tick();
+    h.pulls$.noteActivity('urn:cg:other');
+    // m2, the least recently active graph that is no member any more, made room; m1 stays.
+    h.advance(INTERVAL);
+    await h.pulls$.tick();
+    expect(h.pulls.map(([id]) => id).sort()).toEqual(['urn:cg:m1', 'urn:cg:m3', 'urn:cg:other']);
+  });
+
   it('notes nothing when the member lookup fails', async () => {
     const h = scheduler({}, { memberGraphs: async () => { throw new Error('store closed'); } });
     h.state.eligible.add(GRAPH);

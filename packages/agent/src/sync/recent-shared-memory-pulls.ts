@@ -109,6 +109,8 @@ export class RecentSharedMemoryPulls {
   readonly #maxGraphs: number;
   /** In order of last activity, oldest first. */
   readonly #graphs = new Map<string, GraphState>();
+  /** The member graphs as of the last tick: in use for as long as they are, never let go for others. */
+  #members: ReadonlySet<string> = new Set();
   readonly #closedSignal: Promise<void>;
   #markClosed!: () => void;
   #closed = false;
@@ -145,11 +147,37 @@ export class RecentSharedMemoryPulls {
       return;
     }
     this.#graphs.set(contextGraphId, { activeAt: now, pulledAt: now, inFlight: false, turn: 0 });
-    // Never forget a graph whose pull runs: a new state for it would let a
-    // second pull of the same graph start beside the first.
+    this.#forgetBeyondLimit();
+  }
+
+  /**
+   * Keep the member graphs in use: refresh those tracked, track the others.
+   * A member graph keeps its state, so its pulls stay on their interval, and
+   * is never let go to make room for another graph (#3421 review: a member
+   * let go and noted again restarted its interval, and at the limit each one
+   * noted again let go the next, so none was ever due).
+   */
+  #noteMembers(members: readonly string[]): void {
+    if (this.#closed) return;
+    const now = this.#now();
+    this.#members = new Set(members.slice(0, this.#maxGraphs));
+    for (const contextGraphId of this.#members) {
+      const state = this.#graphs.get(contextGraphId);
+      if (state !== undefined) state.activeAt = now;
+      else this.#graphs.set(contextGraphId, { activeAt: now, pulledAt: now, inFlight: false, turn: 0 });
+    }
+    this.#forgetBeyondLimit();
+  }
+
+  /**
+   * Let the least recently active graphs go beyond the limit, but never a
+   * member graph, and never a graph whose pull runs: a new state for it
+   * would let a second pull of the same graph start beside the first.
+   */
+  #forgetBeyondLimit(): void {
     for (const [oldest, oldestState] of this.#graphs) {
       if (this.#graphs.size <= this.#maxGraphs) break;
-      if (!oldestState.inFlight) this.#graphs.delete(oldest);
+      if (!oldestState.inFlight && !this.#members.has(oldest)) this.#graphs.delete(oldest);
     }
   }
 
@@ -175,9 +203,7 @@ export class RecentSharedMemoryPulls {
   }
 
   async #tick(): Promise<number> {
-    if (this.#ports.memberGraphs !== undefined) {
-      for (const contextGraphId of await this.#ports.memberGraphs().catch(() => [])) this.noteActivity(contextGraphId);
-    }
+    if (this.#ports.memberGraphs !== undefined) this.#noteMembers(await this.#ports.memberGraphs().catch(() => []));
     const now = this.#now();
     for (const [contextGraphId, state] of this.#graphs) {
       if (!state.inFlight && now - state.activeAt >= this.#activityWindowMs) {
