@@ -5,6 +5,11 @@ import type { PeerSyncSession } from './peer-sync-session.js';
 
 export interface PeerConnectionSyncPorts {
   readonly localPeerId: string;
+  /**
+   * Whether `connection` is a second circuit to an admitted peer
+   * ({@link isRedundantLimitedConnection}): it only records its way back.
+   */
+  isRedundantConnection(connection: PeerSyncConnection): boolean;
   /** Reserve the catalog-owned replay transition before asynchronous admission. */
   prepareCatalogReplay(remotePeer: string): Readonly<{
     admit(): void;
@@ -34,10 +39,12 @@ export interface OpenedConnectionView {
  * A limited connection to a peer that already holds another open connection
  * adds no route: it is a second circuit, mostly a dial that libp2p aborts at
  * once as a duplicate of the open one, or a parallel path through another
- * relay. Admission, the catalog replay and sync-on-connect ran for the open
- * connection; running them again for each such circuit would start another
- * round of them, at both ends, for every request to a relay-only peer. (The
- * caller still records the circuit's way back through its relay.)
+ * relay. Once the peer is admitted, admission, the catalog replay and
+ * sync-on-connect have run for it; running them again for each such circuit
+ * would start another round of them, at both ends, for every request to a
+ * relay-only peer. A peer that is not admitted gets them again, so a failed
+ * attempt is retried. The circuit's way back through its relay is recorded
+ * either way.
  */
 export function isRedundantLimitedConnection(
   connection: OpenedConnectionView,
@@ -59,6 +66,10 @@ export async function syncOpenedPeerConnection(
   signal.throwIfAborted();
   const remotePeer = connection.remotePeer.toString();
   if (remotePeer === ports.localPeerId) return;
+  if (ports.isRedundantConnection(connection)) {
+    await enrichPeerStore(context, connection, remotePeer);
+    return;
+  }
   const catalogReplay = ports.prepareCatalogReplay(remotePeer);
   let catalogReplaySettled = catalogReplay === null;
   const rejectCatalogReplay = (): void => {
@@ -98,13 +109,7 @@ export async function syncOpenedPeerConnection(
       catalogReplay.admit();
       catalogReplaySettled = true;
     }
-    try {
-      await session.step(() => ports.enrichPeerStore(connection));
-    } catch (err: unknown) {
-      signal.throwIfAborted();
-      const message = err instanceof Error ? err.message : String(err);
-      log.warn(ctx, `Reverse-path peerStore enrichment failed for ${remotePeer}: ${message}`);
-    }
+    await enrichPeerStore(context, connection, remotePeer);
     signal.throwIfAborted();
     // PR-2 (SWM-fanout plan): drain pending sender-key packages
     // that were queued because the recipient had no advertised
@@ -126,5 +131,20 @@ export async function syncOpenedPeerConnection(
   } finally {
     releaseCleanup();
     rejectCatalogReplay();
+  }
+}
+
+/** Record the connection's way back through its relay; best-effort, so a failure is only logged. */
+async function enrichPeerStore(
+  { ports, session, ctx, log }: PeerConnectionSyncContext,
+  connection: PeerSyncConnection,
+  remotePeer: string,
+): Promise<void> {
+  try {
+    await session.step(() => ports.enrichPeerStore(connection));
+  } catch (err: unknown) {
+    session.signal.throwIfAborted();
+    const message = err instanceof Error ? err.message : String(err);
+    log.warn(ctx, `Reverse-path peerStore enrichment failed for ${remotePeer}: ${message}`);
   }
 }

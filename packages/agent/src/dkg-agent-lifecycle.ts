@@ -3108,6 +3108,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const { signal } = peerEvents;
     const connectionSyncPorts: PeerConnectionSyncPorts = {
       localPeerId: this.node.libp2p.peerId.toString(),
+      isRedundantConnection: (connection) => {
+        const remotePeer = connection.remotePeer.toString();
+        return this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer) && isRedundantLimitedConnection(connection,
+          this.node.libp2p.getConnections().filter((open) => open.remotePeer.toString() === remotePeer));
+      },
       prepareCatalogReplay: (remotePeer) => (
         this.prepareRfc64CatalogConnectionReplayV1(remotePeer)
       ),
@@ -3119,11 +3124,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       queueSync: (remotePeer, onError) => this.queueSyncFromPeerOnConnect(remotePeer, onError),
     };
     this.node.libp2p.addEventListener('connection:open', (evt) => {
-      if (isRedundantLimitedConnection(evt.detail, this.node.libp2p.getConnections(evt.detail.remotePeer))) {
-        // A second circuit still teaches the peer store the way back through its relay.
-        void this.enrichPeerStoreFromInboundCircuit(evt.detail).catch(() => undefined);
-        return;
-      }
       void peerEvents.run(() => syncOpenedPeerConnection({
         ports: connectionSyncPorts, session: peerEvents, ctx, log: this.log,
       }, evt.detail), (error) => handleSyncError(evt.detail.remotePeer.toString(), error));
