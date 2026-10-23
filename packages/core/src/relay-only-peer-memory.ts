@@ -1,4 +1,5 @@
 import { BoundedLruCache } from './bounded-lru-cache.js';
+import { isPublicLikeAddress } from './network/address-policy.js';
 import { RELAY_DEFAULT_DURATION_LIMIT_MS } from './relay-capacity-policy.js';
 
 /**
@@ -23,6 +24,14 @@ import { RELAY_DEFAULT_DURATION_LIMIT_MS } from './relay-capacity-policy.js';
  * the router opens streams on the open circuit without dialing. The record
  * holds for that exact set of direct addresses: a changed set, a dial that
  * reaches the peer directly, or the end of the time bound puts the guard back.
+ *
+ * On a public network a peer's loopback, private and shared (100.64/10)
+ * addresses reach nobody outside its own networks, and a node that does not
+ * filter what it announces lists every interface it has. With
+ * `publicDirectAddressesOnly` only public addresses count as a direct route,
+ * and the record holds for that subset: a peer that announces no public
+ * address is relay-only from its first stream, and its open circuit carries
+ * streams without a dial.
  */
 
 /** How long a dial that reached the peer only through a relay is remembered. */
@@ -42,6 +51,8 @@ export interface RelayOnlyPeerMemoryOptions {
   ttlMs?: number;
   maxPeers?: number;
   now?: () => number;
+  /** Count only public addresses as a direct route. Default false: any non-circuit address counts. */
+  publicDirectAddressesOnly?: boolean;
 }
 
 /** The parts of a libp2p connection the record reads. */
@@ -59,11 +70,13 @@ export class RelayOnlyPeerMemory {
   private readonly records: BoundedLruCache<string, { addresses: string; expiresAt: number }>;
   private readonly ttlMs: number;
   readonly now: () => number;
+  readonly publicDirectAddressesOnly: boolean;
 
   constructor(options: RelayOnlyPeerMemoryOptions = {}) {
     this.records = new BoundedLruCache(options.maxPeers ?? RELAY_ONLY_PEER_MEMORY_MAX_PEERS);
     this.ttlMs = options.ttlMs ?? RELAY_ONLY_PEER_MEMORY_TTL_MS;
     this.now = options.now ?? Date.now;
+    this.publicDirectAddressesOnly = options.publicDirectAddressesOnly === true;
   }
 
   /** True while a dial with exactly these direct addresses reached the peer only through a relay. */
@@ -101,15 +114,17 @@ export class RelayOnlyPeerRoute {
   ) {}
 
   /**
-   * Whether the peer store lists a non-circuit address for the peer. Throws
-   * when the peer store has no entry, as the peer-store read does.
+   * Whether the peer store lists a non-circuit address for the peer (a public
+   * one, with `publicDirectAddressesOnly`). Throws when the peer store has no
+   * entry, as the peer-store read does.
    */
   readonly peerHasDirectAddrs = async (): Promise<boolean> => {
     const peer = await this.readPeer();
     const direct = new Set<string>();
     for (const { multiaddr } of peer.addresses ?? []) {
       const address = multiaddr?.toString?.() ?? '';
-      if (address && !address.includes('/p2p-circuit')) direct.add(address);
+      if (!address || address.includes('/p2p-circuit')) continue;
+      if (!this.memory.publicDirectAddressesOnly || isPublicLikeAddress(address)) direct.add(address);
     }
     this.addresses = direct.size > 0 ? [...direct].sort().join(ADDRESS_SEPARATOR) : undefined;
     return direct.size > 0;

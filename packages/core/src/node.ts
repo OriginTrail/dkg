@@ -55,7 +55,7 @@ import { buildRelayClientTransport } from './relay-client-transport.js';
 import { NetworkPeerDialPolicy, peerIdFromRelayAddress } from './network-peer-dial-policy.js';
 import { combineConnectionGaters, type SyncConnectionGater } from './connection-gater-combiner.js';
 import { parseCircuitRelayPeerIds } from './relay-path.js';
-import { isPublicLikeAddress } from './network/address-policy.js';
+import { isPublicLikeAddress, isPublicOrCircuitAddress } from './network/address-policy.js';
 import type { ConfiguredRelayTarget } from './network/relay-target.js';
 
 export {
@@ -368,6 +368,16 @@ export function nodeHasDirectPublicAddress(selfAddrs: readonly string[]): boolea
       !a.startsWith('/dnsaddr/') &&
       isPublicLikeAddress(a),
   );
+}
+
+/**
+ * libp2p `announceFilter` of `announcePublicAddressesOnly`: the node's own
+ * addresses that a peer on a public network can dial. libp2p applies it to
+ * `getMultiaddrs()`, the self peer record and identify (push included), so
+ * the circuits the relay watchdog reads stay in.
+ */
+export function announcePublicAddresses<T extends { toString(): string }>(addresses: T[]): T[] {
+  return addresses.filter((address) => isPublicOrCircuitAddress(address.toString()));
 }
 
 export class DKGNode {
@@ -989,7 +999,7 @@ export class DKGNode {
         listen: listenAddrs,
         ...(this.config.announceAddresses?.length
           ? { announce: this.config.announceAddresses }
-          : {}),
+          : this.config.announcePublicAddressesOnly ? { announceFilter: announcePublicAddresses } : {}),
       },
       transports: transports as any,
       connectionEncrypters: [noise()],
