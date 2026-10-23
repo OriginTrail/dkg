@@ -187,8 +187,10 @@ interface HeldPull {
 
 /**
  * Hold `reader`'s next pull of the graph's shared memory from `provider`
- * between its two fetches: after the metadata, before the data. Whatever the
- * provider applies meanwhile is not in the metadata that pull read.
+ * right after its metadata fetch, before anything else the pull fetches or
+ * stores. Whatever the provider applies meanwhile is not in the metadata that
+ * pull read. (A pull of graph-scoped shares fetches no data phase after the
+ * metadata, #3421, so the hold is on the metadata fetch's return.)
  */
 function holdNextPullAfterMetadata(reader: DKGAgent, provider: DKGAgent, contextGraphId: string): HeldPull {
   type FetchSyncPages = (...args: unknown[]) => Promise<unknown>;
@@ -200,13 +202,14 @@ function holdNextPullAfterMetadata(reader: DKGAgent, provider: DKGAgent, context
   const reached = new Promise<void>((resolve) => { markReached = resolve; });
   let holding = true;
   host.fetchSyncPages = async function holdAfterMetadata(this: unknown, ...args: unknown[]) {
+    const fetched = await fetchSyncPages.apply(this, args);
     // (ctx, peerId, contextGraphId, includeSharedMemory, phase, ...)
-    if (holding && args[1] === provider.peerId && args[2] === contextGraphId && args[3] === true && args[4] === 'data') {
+    if (holding && args[1] === provider.peerId && args[2] === contextGraphId && args[3] === true && args[4] === 'meta') {
       holding = false;
       markReached();
       await released;
     }
-    return fetchSyncPages.apply(this, args);
+    return fetched;
   };
   return {
     reached,
