@@ -27,7 +27,7 @@
     "test:package-exports": "node scripts/test-package-exports.mjs"
   },
   "dependencies": {
-    "@multiformats/multiaddr": "^13.0.3",
+    "@multiformats/multiaddr": "13.0.3",
     "@origintrail-official/dkg-chain": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-query": "workspace:*",
