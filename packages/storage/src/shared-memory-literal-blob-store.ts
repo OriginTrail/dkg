@@ -1,4 +1,4 @@
-import { prepareImmutableMutation, runImmutableMutation, assertImmutableMutationCapability, type ImmutableStorePreparation, type ImmutableStoreMutation, type PreparedMutation } from './immutable-store-preparation.js';
+import { prepareImmutableMutation, runImmutableMutation, runRfc64AuthorCommitCasMutation, assertImmutableMutationCapability, type ImmutableStorePreparation, type ImmutableStoreMutation, type PreparedMutation } from './immutable-store-preparation.js';
 import { DurableDirectoryPreparation } from './durable-content-addressed-file.js';
 import { persistFileDirectoryEntries } from './file-durability.js';
 import type { TripleStoreCommitCapability } from './persistence.js';
@@ -28,8 +28,6 @@ import type {
 } from './rfc64-author-commit-cas.js';
 import {
   mapRfc64AuthorCommitCasV1,
-  normalizeRfc64AuthorCommitCasV1,
-  sourceFromNormalizedRfc64AuthorCommitCasV1,
 } from './rfc64-author-commit-cas.js';
 import {
   ContentAddressedBlobSingleFlight,
@@ -158,7 +156,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
   }
 
   async rfc64AuthorCommitCasV1(input: Rfc64AuthorCommitCasInputV1, options?: QueryOptions): Promise<Rfc64AuthorCommitCasResultV1> {
-    return runImmutableMutation(this, { operation: 'rfc64AuthorCommitCasV1', input }, options);
+    return runRfc64AuthorCommitCasMutation(this, input, options);
   }
 
   async prepareImmutableMutation<M extends ImmutableStoreMutation>(mutation: M): Promise<PreparedMutation<M>> {
@@ -186,13 +184,12 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator, Immut
           insertQuads: rows.slice(mutation.replacementQuads.length) }; break;
       }
       case 'rfc64AuthorCommitCasV1': {
-        const manifest = normalizeRfc64AuthorCommitCasV1(mutation.input);
-        const mapped = await mapRfc64AuthorCommitCasV1(manifest, {
+        const mapped = await mapRfc64AuthorCommitCasV1(mutation.plan, {
           mapQuad: quad => this.externalizeInsertQuad(quad),
           mapObject: (object, context) => context.kind === 'expected'
             ? this.translateGuardObject(context.graphUri, object) : this.externalizeScalarObject(context.graphUri, object!),
         });
-        prepared = { ...mutation, input: sourceFromNormalizedRfc64AuthorCommitCasV1(mapped) }; break;
+        prepared = { ...mutation, plan: mapped }; break;
       }
     }
     return prepareImmutableMutation(this.inner, prepared);

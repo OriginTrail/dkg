@@ -1,4 +1,4 @@
-import { prepareImmutableMutation, runImmutableMutation, assertImmutableMutationCapability, type ImmutableStoreMutation, type ImmutableStorePreparation, type PreparedMutation } from './immutable-store-preparation.js';
+import { prepareImmutableMutation, runImmutableMutation, runRfc64AuthorCommitCasMutation, assertImmutableMutationCapability, type ImmutableStoreMutation, type ImmutableStorePreparation, type PreparedMutation } from './immutable-store-preparation.js';
 import type { TripleStoreCommitCapability } from './persistence.js';
 import type { GraphSetIndexStoreOptions } from './graph-set-index-store-options.js';
 export type { GraphSetIndexStoreOptions } from './graph-set-index-store-options.js';
@@ -34,10 +34,6 @@ import { GraphSetCatalogState } from './graph-set-catalog-state.js';
 import type {
   Rfc64AuthorCommitCasInputV1,
   Rfc64AuthorCommitCasResultV1,
-} from './rfc64-author-commit-cas.js';
-import {
-  normalizeRfc64AuthorCommitCasV1,
-  sourceFromNormalizedRfc64AuthorCommitCasV1,
 } from './rfc64-author-commit-cas.js';
 import { isStoreOperationNotStarted } from './store-operation-outcome.js';
 import { raceStoreWorkAgainstAbort } from './abortable-store-work-lifecycle.js';
@@ -333,26 +329,23 @@ export class GraphSetIndexStore implements TripleStoreDecorator, ImmutableStoreP
   }
 
   async rfc64AuthorCommitCasV1(input: Rfc64AuthorCommitCasInputV1, options?: QueryOptions): Promise<Rfc64AuthorCommitCasResultV1> {
-    return runImmutableMutation(this, { operation: 'rfc64AuthorCommitCasV1', input }, options);
+    return runRfc64AuthorCommitCasMutation(this, input, options);
   }
 
   async prepareImmutableMutation<M extends ImmutableStoreMutation>(mutation: M): Promise<PreparedMutation<M>> {
     const operation = mutation.operation;
     assertImmutableMutationCapability(this.inner, operation);
-    let command = mutation, touched: string[];
+    let touched: string[];
     switch (mutation.operation) {
       case 'insert': touched = namedGraphsFromQuads(mutation.quads); break;
       case 'replaceAssetGroup': touched = [...new Set(mutation.assets.flatMap(asset => [asset.graphUri, asset.metaGraphUri]))]; break;
       case 'replaceGraphAndSubject': touched = [mutation.graphUri, mutation.metaGraphUri]; break;
       case 'rfc64AuthorCommitCasV1': {
-        // Copy/validate all fallible protocol inputs before dispatch and observation.
-        const manifest = normalizeRfc64AuthorCommitCasV1(mutation.input);
-        command = { ...mutation, input: sourceFromNormalizedRfc64AuthorCommitCasV1(manifest) };
-        touched = [...manifest.touchedGraphs]; break;
+        touched = [...mutation.plan.touchedGraphs]; break;
       }
       default: touched = [mutation.graphUri];
     }
-    const prepared = await prepareImmutableMutation(this.inner, command);
+    const prepared = await prepareImmutableMutation(this.inner, mutation);
     return { operation, commit: async (scoped, appended) => {
       let result;
       try { result = await prepared.commit(scoped, appended); }

@@ -11,6 +11,10 @@ export class TwoPhaseMutationQueue {
     return this.work.run(() => this.enqueue(commit));
   }
 
+  runConcurrent<T>(work: () => Promise<T>): Promise<T> {
+    return this.work.run(work);
+  }
+
   runPrepared<P, T>(prepare: () => Promise<P>, commit: (prepared: P) => Promise<T>): Promise<T> {
     return this.work.run(() => prepare().then(prepared => this.enqueue(() => commit(prepared))));
   }

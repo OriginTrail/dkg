@@ -1,7 +1,7 @@
 import { runLogicalStoreMutation, type Quad, type QueryOptions, type TripleStore } from './triple-store.js';
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import { assertSubjectAndInsertPayload } from './atomic-subject-insert.js';
-import { normalizeRfc64AuthorCommitCasV1, sourceFromNormalizedRfc64AuthorCommitCasV1,
+import { normalizeRfc64AuthorCommitCasV1, sourceFromNormalizedRfc64AuthorCommitCasV1, type NormalizedRfc64AuthorCommitCasV1,
   type Rfc64AuthorCommitCasInputV1, type Rfc64AuthorCommitCasResultV1 } from './rfc64-author-commit-cas.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 
@@ -14,7 +14,7 @@ export type ImmutableStoreMutation =
   | { operation: 'replaceSubject'; graphUri: string; subject: string; quads: readonly Quad[] }
   | { operation: 'replaceSubjectAndInsert'; graphUri: string; subject: string;
       replacementQuads: readonly Quad[]; insertQuads: readonly Quad[] }
-  | { operation: 'rfc64AuthorCommitCasV1'; input: Rfc64AuthorCommitCasInputV1 };
+  | { operation: 'rfc64AuthorCommitCasV1'; plan: NormalizedRfc64AuthorCommitCasV1 };
 export type ImmutableMutationResult<M extends ImmutableStoreMutation> =
   M extends { operation: 'rfc64AuthorCommitCasV1' } ? Rfc64AuthorCommitCasResultV1 : void;
 export type MutationCommit<T = void> = (options?: QueryOptions) => Promise<T>;
@@ -51,6 +51,15 @@ export function runImmutableMutation<M extends ImmutableStoreMutation>(store: Tr
     (await prepareImmutableMutation(store, mutation)).commit(scoped));
 }
 
+/** Own public compatibility normalization before entering the private command protocol. */
+export function runRfc64AuthorCommitCasMutation(store: TripleStore, input: Rfc64AuthorCommitCasInputV1,
+  options?: QueryOptions): Promise<Rfc64AuthorCommitCasResultV1> {
+  return runLogicalStoreMutation(store, 'rfc64AuthorCommitCasV1', options, async scoped => {
+    const command = { operation: 'rfc64AuthorCommitCasV1', plan: normalizeRfc64AuthorCommitCasV1(input) } as const;
+    return (await prepareImmutableMutation(store, command)).commit(scoped);
+  });
+}
+
 export function assertImmutableMutationCapability(store: TripleStore, operation: ImmutableStoreMutation['operation']): void {
   if (operation === 'insert') return; // Required by TripleStore, unlike the optional atomic capabilities.
   if (typeof store[operation] !== 'function') throw new UnsupportedTripleStoreCapabilityError(operation, 'immutable mutation');
@@ -85,8 +94,8 @@ function prepareDirectMutation(store: TripleStore, mutation: ImmutableStoreMutat
       return { operation: mutation.operation, commit: options => store.replaceSubjectAndInsert!(mutation.graphUri, mutation.subject, rows, inserted, options) };
     }
     case 'rfc64AuthorCommitCasV1': {
-      const input = sourceFromNormalizedRfc64AuthorCommitCasV1(normalizeRfc64AuthorCommitCasV1(mutation.input));
-      return { operation: mutation.operation, commit: options => store.rfc64AuthorCommitCasV1!(input, options) };
+      return { operation: mutation.operation, commit: options =>
+        store.rfc64AuthorCommitCasV1!(sourceFromNormalizedRfc64AuthorCommitCasV1(mutation.plan), options) };
     }
   }
 }

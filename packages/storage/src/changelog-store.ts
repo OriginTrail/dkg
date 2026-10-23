@@ -33,7 +33,6 @@ import type {
 } from './rfc64-author-commit-cas.js';
 import {
   normalizeRfc64AuthorCommitCasV1,
-  sourceFromNormalizedRfc64AuthorCommitCasV1,
 } from './rfc64-author-commit-cas.js';
 import { isStoreOperationNotStarted, type StoreOperation } from './store-operation-outcome.js';
 
@@ -424,11 +423,13 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   async rfc64AuthorCommitCasV1(input: Rfc64AuthorCommitCasInputV1, options?: QueryOptions): Promise<Rfc64AuthorCommitCasResultV1> {
     if (!this.inner.rfc64AuthorCommitCasV1) throw new UnsupportedTripleStoreCapabilityError('rfc64AuthorCommitCasV1', 'ChangelogStore');
     const manifest = normalizeRfc64AuthorCommitCasV1(input);
-    const source = sourceFromNormalizedRfc64AuthorCommitCasV1(manifest);
-    if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(source, options);
+    const command = { operation: 'rfc64AuthorCommitCasV1', plan: manifest } as const;
+    if (!this.enabled) return this.mutations.runConcurrent(() =>
+      runLogicalStoreMutation(this.inner, 'rfc64AuthorCommitCasV1', options, async scoped =>
+        (await prepareImmutableMutation(this.inner, command)).commit(scoped)));
     for (const graph of manifest.referencedGraphs) this.reservedGuard.assertNotReserved(graph, 'rfc64AuthorCommitCasV1');
     return this.runAtomicMutation({ operation: 'rfc64AuthorCommitCasV1', touchedGraphs: manifest.touchedGraphs, options,
-      prepare: () => prepareImmutableMutation(this.inner, { operation: 'rfc64AuthorCommitCasV1', input: source }),
+      prepare: () => prepareImmutableMutation(this.inner, command),
       committed: result => result === 'committed' });
   }
 
