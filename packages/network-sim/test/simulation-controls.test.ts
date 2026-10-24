@@ -88,14 +88,17 @@ describe('simulation form and streamed results', () => {
     oldSource.emit({ type: 'done', completed: 500, errors: 0 });
     await ui.click('Play Simulation');
     act(() => source().onerror?.());
-    await act(async () => {
-      confirm(Response.json({ stopped: true }));
-      oldSource.onopen?.(); oldSource.onerror?.();
-    });
+    await act(async () => confirm(Response.json({ stopped: true })));
     expect(ui.button('Stop Simulation').disabled).toBe(false);
     expect(ui.container.querySelector('[role="status"]')?.textContent).toContain('Connection lost');
     expect(source().close).not.toHaveBeenCalled();
     expect(store.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'START_SIMULATION' }));
+    act(() => oldSource.onopen?.());
+    expect(ui.container.querySelector('[role="status"]')?.textContent).toContain('Connection lost');
+    act(() => source().onopen?.());
+    expect(ui.container.querySelector('[role="status"]')).toBeNull();
+    act(() => oldSource.onerror?.());
+    expect(ui.container.querySelector('[role="status"]')).toBeNull();
   });
   it.each(['op', 'status'])('counts failures once in progress and excludes them from succeeded totals via %s events', async eventType => {
     await ui.fill('Total Ops', '2');
