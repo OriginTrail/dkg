@@ -330,6 +330,8 @@ export default defineConfig({
       "test/system-context-graph-policy.test.ts",
       "test/on-demand-agents-phonebook.test.ts",
       "test/on-demand-agents-phonebook-agent.test.ts",
+      "test/peer-profile-follow-up.test.ts",
+      "test/peer-profile-follow-up-agent.test.ts",
       "test/sync-requester-bailout.test.ts",
       "test/swm-catchup-peer-selection.test.ts",
       "test/swm-curator-recovery-plan.test.ts",
