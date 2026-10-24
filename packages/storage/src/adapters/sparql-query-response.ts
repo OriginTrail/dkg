@@ -3,7 +3,10 @@ import type { StoreOperation } from '../store-operation-outcome.js';
 import { decodeSparqlJsonQueryResult } from '../sparql-json-query-result.js';
 import { decodeSparqlTsvSelectResponse } from '../sparql-tsv-query-result.js';
 import { SparqlHttpResponseError } from './sparql-http-response-error.js';
-import { readSparqlResponseText } from './sparql-response-policy.js';
+import {
+  assertManagedOxigraphSparqlResponseComplete,
+  readSparqlResponseText,
+} from './sparql-response-policy.js';
 
 export interface SparqlQueryResponseOptions {
   readonly isAsk: boolean;
@@ -34,9 +37,9 @@ export async function decodeSparqlHttpQueryResponse(
   if (options.useStreamingTsv && !contentType.includes('json')) {
     return decodeSparqlTsvSelectResponse(response, {
       maxResponseBytes: options.maxResponseBytes,
-      managedOxigraph: true,
-      operation: options.operation,
-    });
+    }, options.managedOxigraph
+      ? line => assertManagedOxigraphSparqlResponseComplete(line, options.operation)
+      : undefined);
   }
   const text = await readSparqlResponseText(response, {
     maxResponseBytes: options.maxResponseBytes,

@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   decodeSparqlTsvSelectResponse,
   decodeSparqlTsvSelectResult,
+  SparqlTsvResultsShapeError,
 } from '../src/sparql-tsv-query-result.js';
+import { decodeSparqlHttpQueryResponse } from '../src/adapters/sparql-query-response.js';
 
 function chunkedResponse(
   chunks: readonly Uint8Array[],
@@ -62,9 +64,7 @@ describe('SPARQL TSV SELECT decoding', () => {
   it('decodes UTF-8 and row delimiters incrementally across arbitrary chunks', async () => {
     const bytes = new TextEncoder().encode('?name\r\n"Živjo 🌍"\r\n');
     const chunks = Array.from(bytes, byte => Uint8Array.of(byte));
-    await expect(decodeSparqlTsvSelectResponse(chunkedResponse(chunks), {
-      operation: 'query',
-    })).resolves.toEqual({
+    await expect(decodeSparqlTsvSelectResponse(chunkedResponse(chunks))).resolves.toEqual({
       type: 'bindings',
       variables: ['name'],
       bindings: [{ name: '"Živjo 🌍"' }],
@@ -84,7 +84,6 @@ describe('SPARQL TSV SELECT decoding', () => {
       },
     });
     await expect(decodeSparqlTsvSelectResponse(new Response(streamingBody), {
-      operation: 'query',
       maxResponseBytes: bytes.byteLength - 1,
     })).rejects.toMatchObject({
       code: 'STORE_RESPONSE_TOO_LARGE',
@@ -101,7 +100,6 @@ describe('SPARQL TSV SELECT decoding', () => {
     await expect(decodeSparqlTsvSelectResponse(new Response(declaredBody, {
       headers: { 'Content-Length': String(bytes.byteLength) },
     }), {
-      operation: 'query',
       maxResponseBytes: 1,
     })).rejects.toMatchObject({
       code: 'STORE_RESPONSE_TOO_LARGE',
@@ -117,19 +115,43 @@ describe('SPARQL TSV SELECT decoding', () => {
     expect(() => decodeSparqlTsvSelectResult('?x\t?y\n"one"\n')).toThrow('1 columns; expected 2');
     expect(() => decodeSparqlTsvSelectResult('?x\n<relative>\n')).toThrow('absolute safe IRI');
     expect(() => decodeSparqlTsvSelectResult('?x\n_:bad.\n')).toThrow('not a valid RDF term');
+    expect(decodeSparqlTsvSelectResult('?café\t?δοκιμή\t?𐀀name\n')).toMatchObject({
+      variables: ['café', 'δοκιμή', '𐀀name'],
+    });
+    for (const header of ['$x', String.raw`?\u0078`, '??x', '?a-b']) {
+      expect(() => decodeSparqlTsvSelectResult(`${header}\n`), header)
+        .toThrow('must be a variable');
+    }
 
-    await expect(decodeSparqlTsvSelectResponse(chunkedResponse([
+    const utf8Failure = await decodeSparqlTsvSelectResponse(chunkedResponse([
       Uint8Array.from([0x3f, 0x78, 0x0a, 0xc3, 0x28]),
-    ]), { operation: 'query' })).rejects.toThrow('not valid UTF-8');
+    ])).catch((error: unknown) => error);
+    expect(utf8Failure).toBeInstanceOf(SparqlTsvResultsShapeError);
+    expect(utf8Failure).toMatchObject({ cause: expect.any(TypeError) });
+  });
+
+  it('passes transport failures through without translating them to TSV shape errors', async () => {
+    const transportFailure = new Error('transport failed');
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(transportFailure);
+      },
+    });
+    await expect(decodeSparqlTsvSelectResponse(new Response(body)))
+      .rejects.toBe(transportFailure);
   });
 
   it('maps a managed Oxigraph cancellation suffix to the typed timeout error', async () => {
     const body = new TextEncoder().encode(
       '?x\n<urn:partial>\nThe SPARQL operation has been cancelled',
     );
-    await expect(decodeSparqlTsvSelectResponse(chunkedResponse([body]), {
-      operation: 'query',
+    await expect(decodeSparqlHttpQueryResponse(chunkedResponse([body], {
+      'Content-Type': 'text/tab-separated-values',
+    }), {
+      isAsk: false,
       managedOxigraph: true,
+      operation: 'query',
+      useStreamingTsv: true,
     })).rejects.toMatchObject({
       code: 'STORE_OPERATION_TIMEOUT',
       backend: 'oxigraph-server',

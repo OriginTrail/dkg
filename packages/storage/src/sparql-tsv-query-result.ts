@@ -2,19 +2,16 @@ import {
   decodeNTriplesIriEscapesStrict,
   formatCanonicalRdfLiteralTerm,
   isRdfBlankNodeLabel,
+  isSparqlVariableNameRaw,
   parseRdfLiteralTerm,
   type RdfLiteralTerm,
 } from '@origintrail-official/dkg-rdf-utils';
 import { consumeStoreResponseBodyChunks } from './http-response-limit.js';
 import {
-  assertManagedOxigraphSparqlResponseComplete,
-} from './adapters/sparql-response-policy.js';
-import {
   createSparqlResultIriValidator,
   isSafeSparqlResultIri,
   MAX_CACHED_SPARQL_IRI_VARIABLES,
 } from './sparql-result-iri.js';
-import type { StoreOperation } from './store-operation-outcome.js';
 import type { SelectResult } from './triple-store.js';
 
 const XSD_NAMESPACE = 'http://www.w3.org/2001/XMLSchema#';
@@ -34,17 +31,6 @@ function hasForbiddenLiteralControlCharacter(cell: string): boolean {
   return false;
 }
 
-// SPARQL 1.1 VARNAME. A TSV header always uses the `?name` spelling.
-const PN_CHARS_BASE =
-  'A-Za-z\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF'
-  + '\\u200C-\\u200D\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF\\uF900-\\uFDCF'
-  + '\\uFDF0-\\uFFFD\\u{10000}-\\u{EFFFF}';
-const PN_CHARS_U = `${PN_CHARS_BASE}_`;
-const TSV_HEADER_VARIABLE = new RegExp(
-  `^\\?([${PN_CHARS_U}0-9][${PN_CHARS_U}0-9\\u00B7\\u0300-\\u036F\\u203F-\\u2040]*)$`,
-  'u',
-);
-
 export class SparqlTsvResultsShapeError extends Error {
   constructor(message: string, options: ErrorOptions = {}) {
     super(message, options);
@@ -54,8 +40,6 @@ export class SparqlTsvResultsShapeError extends Error {
 
 export interface SparqlTsvResponseOptions {
   maxResponseBytes?: number;
-  managedOxigraph?: boolean;
-  operation: StoreOperation;
 }
 
 /**
@@ -65,40 +49,36 @@ export interface SparqlTsvResponseOptions {
  */
 export async function decodeSparqlTsvSelectResponse(
   response: Response,
-  options: SparqlTsvResponseOptions,
+  options: SparqlTsvResponseOptions = {},
+  inspectLine?: (line: string) => void,
 ): Promise<SelectResult> {
-  const parser = new SparqlTsvSelectParser(options);
+  const parser = new SparqlTsvSelectParser();
+  const lines = new SparqlTsvLineFramer((line) => {
+    inspectLine?.(line);
+    parser.consumeLine(line);
+  });
   const decoder = new TextDecoder('utf-8', { fatal: true });
-  try {
-    await consumeStoreResponseBodyChunks(response, options.maxResponseBytes, chunk => {
-      parser.feed(decoder.decode(chunk, { stream: true }));
-    });
-    parser.feed(decoder.decode());
-    return parser.finish();
-  } catch (error) {
-    if (error instanceof TypeError && /encoded data|utf-8/i.test(error.message)) {
-      throw new SparqlTsvResultsShapeError('SPARQL TSV response is not valid UTF-8', {
-        cause: error,
-      });
-    }
-    throw error;
-  }
+  await consumeStoreResponseBodyChunks(response, options.maxResponseBytes, chunk => {
+    lines.feed(decodeTsvUtf8(decoder, chunk));
+  });
+  lines.feed(decodeTsvUtf8(decoder));
+  lines.finish();
+  return parser.finish();
 }
 
 /** Decode an already-buffered TSV result; primarily useful for fixtures and benchmarks. */
 export function decodeSparqlTsvSelectResult(text: string): SelectResult {
-  const parser = new SparqlTsvSelectParser({ operation: 'query' });
-  parser.feed(text);
+  const parser = new SparqlTsvSelectParser();
+  const lines = new SparqlTsvLineFramer(line => parser.consumeLine(line));
+  lines.feed(text);
+  lines.finish();
   return parser.finish();
 }
 
-class SparqlTsvSelectParser {
+class SparqlTsvLineFramer {
   private pending = '';
-  private variables: string[] | undefined;
-  private readonly bindings: Array<Record<string, string>> = [];
-  private normalizer: TsvResultNormalizer | undefined;
 
-  constructor(private readonly options: SparqlTsvResponseOptions) {}
+  constructor(private readonly consumeLine: (line: string) => void) {}
 
   feed(text: string): void {
     if (text.length === 0) return;
@@ -121,16 +101,24 @@ class SparqlTsvSelectParser {
     for (const line of lines) this.consumeLine(line);
   }
 
-  finish(): SelectResult {
+  finish(): void {
     // At EOF, a pending CR is a line terminator; a non-empty remainder is the
     // final unterminated line. A final terminator never invents an empty row.
     if (this.pending.endsWith('\r')) {
       this.consumeLine(this.pending.slice(0, -1));
-      this.pending = '';
     } else if (this.pending.length > 0) {
       this.consumeLine(this.pending);
-      this.pending = '';
     }
+    this.pending = '';
+  }
+}
+
+class SparqlTsvSelectParser {
+  private variables: string[] | undefined;
+  private readonly bindings: Array<Record<string, string>> = [];
+  private normalizer: TsvResultNormalizer | undefined;
+
+  finish(): SelectResult {
     if (this.variables === undefined) {
       malformed('SPARQL TSV response is missing its header');
     }
@@ -141,11 +129,8 @@ class SparqlTsvSelectParser {
     }) satisfies SelectResult;
   }
 
-  private consumeLine(rawLine: string): void {
+  consumeLine(rawLine: string): void {
     const line = this.variables === undefined ? rawLine.replace(/^\uFEFF/, '') : rawLine;
-    if (this.options.managedOxigraph === true) {
-      assertManagedOxigraphSparqlResponseComplete(line, this.options.operation);
-    }
     if (this.variables === undefined) {
       this.consumeHeader(line);
       return;
@@ -176,15 +161,29 @@ class SparqlTsvSelectParser {
   private consumeHeader(line: string): void {
     const cells = line === '' ? [] : line.split('\t');
     const variables = cells.map((cell, index) => {
-      const match = TSV_HEADER_VARIABLE.exec(cell);
-      if (match === null) malformed(`SPARQL TSV header column ${index} must be a variable`);
-      return match[1]!;
+      if (!cell.startsWith('?') || !isSparqlVariableNameRaw(cell.slice(1))) {
+        malformed(`SPARQL TSV header column ${index} must be a variable`);
+      }
+      return cell.slice(1);
     });
     if (new Set(variables).size !== variables.length) {
       malformed('SPARQL TSV header variables must not contain duplicates');
     }
     this.variables = variables;
     this.normalizer = new TsvResultNormalizer(variables.length);
+  }
+}
+
+function decodeTsvUtf8(decoder: TextDecoder, chunk?: Uint8Array): string {
+  try {
+    return chunk === undefined
+      ? decoder.decode()
+      : decoder.decode(chunk, { stream: true });
+  } catch (cause) {
+    if (!(cause instanceof TypeError)) throw cause;
+    throw new SparqlTsvResultsShapeError('SPARQL TSV response is not valid UTF-8', {
+      cause,
+    });
   }
 }
 

@@ -23,6 +23,10 @@ export async function readResponseBodyBytesBounded(
   response: Response,
   maxBytes: number,
 ): Promise<Uint8Array> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new RangeError('maxBytes must be a non-negative safe integer');
+  }
+
   const chunks: Uint8Array[] = [];
   const totalBytes = await consumeResponseBodyChunks(response, maxBytes, chunk => {
     chunks.push(chunk);
