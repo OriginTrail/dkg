@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Parser, type Quad as N3Quad } from 'n3';
 import type { JsonLdDocument, Options as JsonLdOptions } from 'jsonld';
 import { formatCanonicalRdfTerm } from '@origintrail-official/dkg-rdf-utils';
@@ -87,7 +88,12 @@ export async function parseRdfInput(
       throw error;
     }
     if (typeof nquads !== 'string') throw new Error('JSON-LD conversion did not return N-Quads');
-    return { sourceKind: 'jsonld', quads: await parseN3Quads(nquads, 'nquads', defaultGraph) };
+    // Blank-node labels are document-local. Separate CLI processes otherwise
+    // restart the N3/jsonld counters and conflate anonymous nodes in one KA.
+    return {
+      sourceKind: 'jsonld',
+      quads: await parseN3Quads(nquads, 'nquads', defaultGraph, `dkg${randomUUID()}_`),
+    };
   }
 
   return { sourceKind: 'rdf', quads: await parseN3Quads(content, format, defaultGraph) };
@@ -97,6 +103,7 @@ function parseN3Quads(
   content: string,
   format: Exclude<RdfFormat, 'json' | 'jsonld'>,
   defaultGraph: string,
+  blankNodePrefix?: string,
 ): Promise<SimpleQuad[]> {
   // N3 parser handles N-Triples, N-Quads, Turtle, TriG
   const n3Format = N3_FORMAT_MAP[format];
@@ -104,7 +111,7 @@ function parseN3Quads(
 
   return new Promise((resolve, reject) => {
     const quads: SimpleQuad[] = [];
-    const parser = new Parser({ format: n3Format });
+    const parser = new Parser({ format: n3Format, blankNodePrefix });
 
     parser.parse(content, (error: Error | null, quad: N3Quad | null) => {
       if (error) { reject(error); return; }
@@ -118,16 +125,6 @@ function parseN3Quads(
       });
     });
   });
-}
-
-/** Array-only compatibility facade for callers that do not need source provenance. */
-export async function parseRdf(
-  content: string,
-  format: RdfFormat,
-  defaultGraph: string,
-  baseIRI?: string,
-): Promise<SimpleQuad[]> {
-  return (await parseRdfInput(content, format, defaultGraph, baseIRI)).quads;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

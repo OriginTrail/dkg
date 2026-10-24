@@ -46,6 +46,40 @@ function assertLinks(quads: Quad[], kind: 'list' | 'nested') {
 }
 
 describe('JSON-LD CLI writes through the real daemon', () => {
+  it('keeps anonymous nodes distinct across separate CLI writes and finalization', async () => {
+    const name = 'separate-documents';
+    await runCli(['ka', 'create', name, '-c', CG, '--no-finalize']);
+    for (const label of ['A', 'B']) {
+      const path = join(daemon!.home, `document-${label}.jsonld`);
+      await writeFile(path, JSON.stringify({
+        '@id': `urn:doc${label}`,
+        'https://example.org/child': { 'https://example.org/name': label },
+      }));
+      await runCli(['ka', 'write', name, '-c', CG, '-f', path]);
+    }
+    const assertSeparateChildren = (quads: Quad[]) => {
+      const children = ['A', 'B'].map((label) => {
+        const edge = quads.find((quad) => quad.subject === `urn:doc${label}`
+          && quad.predicate === 'https://example.org/child');
+        expect(edge).toBeDefined();
+        expect(quads.filter((quad) => quad.subject === edge!.object
+          && quad.predicate === 'https://example.org/name').map((quad) => quad.object))
+          .toEqual([`"${label}"`]);
+        return edge!.object;
+      });
+      expect(children[0]).not.toBe(children[1]);
+      return children;
+    };
+    const path = `/api/knowledge-assets/${name}/wm/quads?contextGraphId=${CG}`;
+    const before = await getJson(daemon!, path);
+    expect(before.status, JSON.stringify(before.body)).toBe(200);
+    expect(assertSeparateChildren(before.body.quads as Quad[]).every((id) => id.startsWith('_:'))).toBe(true);
+    await runCli(['ka', 'finalize', name, '-c', CG]);
+    const after = await getJson(daemon!, path);
+    expect(after.status, JSON.stringify(after.body)).toBe(200);
+    expect(assertSeparateChildren(after.body.quads as Quad[]).every((id) => !id.startsWith('_:'))).toBe(true);
+  });
+
   it.each(['list', 'nested'] as const)('writes and finalizes linked %s RDF without losing blank-node edges', async (kind) => {
     const document = kind === 'list'
       ? { '@id': 'urn:list', 'https://example.org/items': { '@list': [{ '@id': 'urn:first' }, { '@id': 'urn:second' }] } }
