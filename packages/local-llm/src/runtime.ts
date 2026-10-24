@@ -170,9 +170,8 @@ function compactText(value: string, limit: number): string {
   if (text.length <= limit) return text;
   const detailedMarker = `\n...[${text.length - limit} chars omitted]...\n`;
   const marker = detailedMarker.length <= limit ? detailedMarker : '…';
-  const available = Math.max(0, limit - marker.length);
-  const headLength = Math.ceil(available * 0.6);
-  const tailLength = Math.max(0, available - headLength);
+  const headLength = Math.ceil((limit - marker.length) * 0.6);
+  const tailLength = limit - marker.length - headLength;
   return `${text.slice(0, headLength)}${marker}${tailLength ? text.slice(-tailLength) : ''}`;
 }
 
