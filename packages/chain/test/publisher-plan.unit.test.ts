@@ -34,7 +34,7 @@ describe('publisher candidate pricing boundaries', () => {
       getConvictionAgentAccountId,
     }) as PlanReaderHost;
     await expect(assembled.publisherConvictionPlanReader()?.getAccountId(publisher)).resolves.toBe(42n);
-    expect(getConvictionAgentAccountId).toHaveBeenCalledWith(publisher);
+    expect(getConvictionAgentAccountId).toHaveBeenCalledWith(publisher, { strict: true });
 
     // Without the conviction mixin, publish planning reaches the base hook and stays direct-spend.
     const withoutConviction = Object.create(PublishMethods.prototype) as PlanReaderHost;

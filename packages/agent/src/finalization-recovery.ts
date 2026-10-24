@@ -20,6 +20,7 @@ import {
 } from './finalization-graph-envelope.js';
 import {
   FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD,
+  FINALIZATION_RECOVERY_TRANSIENT_FAILURE_CODES,
   type FinalizationRecoveryEntry,
   type FinalizationRecoveryHealth,
   type FinalizationRecoveryFailureCode,
@@ -1142,14 +1143,16 @@ export class FinalizationRecovery<
         reason,
         entry.state === 'SETTLED'
           ? { mode: 'ordinary', retryDelayMs: ordinaryDelay }
-          : {
-              mode: 'stable-failure',
-              retryDelayMs: ordinaryDelay,
-              failureCode,
-              stableFailureThreshold: FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD,
-              stableFailureRetryMs: FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS,
-              retryDeadlineAt: entry.createdAt + this.liveRetryWindowMs,
-            },
+          : FINALIZATION_RECOVERY_TRANSIENT_FAILURE_CODES.has(failureCode)
+            ? { mode: 'transient', retryDelayMs: ordinaryDelay, failureCode }
+            : {
+                mode: 'stable-failure',
+                retryDelayMs: ordinaryDelay,
+                failureCode,
+                stableFailureThreshold: FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD,
+                stableFailureRetryMs: FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS,
+                retryDeadlineAt: entry.createdAt + this.liveRetryWindowMs,
+              },
       );
       if (result.status === 'stale') {
         this.log.info(

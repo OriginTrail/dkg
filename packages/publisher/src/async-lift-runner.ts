@@ -54,9 +54,9 @@ export class AsyncLiftRunner {
   /** Whether unresolved tx work remains, from the last pass outcome (boot-seeded); selects active vs idle cadence. */
   private pendingReconciliation = false;
   private unsubscribeScheduler?: () => void;
-  /** Wallet wake latch: a release poke landing while its loop is mid-processNext skips the next sleep. */
+  /** Wallet wake latch: work/release pokes during processNext skip the next idle sleep. */
   private readonly walletWakePending = new Set<string>();
-  /** At most one parked idle sleeper per wallet, resolvable by a release poke (or by stop()). */
+  /** At most one parked idle sleeper per wallet, resolvable by work/release pokes or stop(). */
   private readonly walletSleepers = new Map<string, () => void>();
 
   constructor(private readonly config: AsyncLiftRunnerConfig) {
@@ -109,17 +109,20 @@ export class AsyncLiftRunner {
     }
 
     this.started = true;
-    // ONE atomic scheduler attachment: reconciliation demand (a tx-bearing job left executor
-    // ownership — pull the next pass forward) and wallet release (the wallet is claimable NOW —
-    // let its loop claim instead of idling out the poll) take over together, so scheduling
-    // ownership can never be split between runner incarnations. Attaching after startup
-    // recovery loses nothing: no in-process work can settle before the wallet loops start.
+    // One atomic attachment for reconciliation demand, wallet release, and accepted work.
+    // Each callback invites its loop to recheck authoritative state; none grants ownership.
+    // All callbacks transfer together, so scheduling cannot split between runner incarnations.
+    // Attaching after startup recovery loses no accepted work: every wallet makes its initial
+    // claim attempt immediately, including for work admitted before this attachment.
     // Optional-chained on the METHOD too: a capability object built against the pre-scheduler
     // contract degrades to cadence-and-poll scheduling instead of failing start().
     this.unsubscribeScheduler = this.config.publisher.reconciliationScheduling
       ?.attachScheduler?.({
         onReconciliationDemand: () => this.demandTransactionReconciliation(),
         onWalletRelease: (walletId) => this.wakeWallet(walletId),
+        onWorkAvailable: () => {
+          for (const walletId of this.config.walletIds) this.wakeWallet(walletId);
+        },
       });
     this.scheduleTransactionReconciliation();
     this.running = Promise.all(
@@ -170,7 +173,7 @@ export class AsyncLiftRunner {
     }
   }
 
-  /** The publisher's poke that walletId's lock was deleted: its next claim attempt can run now. */
+  /** Work arrived or the wallet was released: invite a claim without bypassing its ownership. */
   private wakeWallet(walletId: string): void {
     if (this.stopped || !this.started) return;
     // A release for a wallet this runner does not drive must not accumulate latch state.

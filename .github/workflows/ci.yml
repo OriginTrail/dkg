@@ -61,6 +61,7 @@ jobs:
       full_ci: ${{ steps.plan.outputs.full_ci }}
       run_node: ${{ steps.plan.outputs.run_node }}
       node_test_artifacts: ${{ steps.plan.outputs.node_test_artifacts }}
+      chain_rpc_node26: ${{ steps.plan.outputs.chain_rpc_node26 }}
       tornado_core: ${{ steps.plan.outputs.tornado_core }}
       tornado_blazegraph: ${{ steps.plan.outputs.tornado_blazegraph }}
       tornado_publisher: ${{ steps.plan.outputs.tornado_publisher }}
@@ -94,7 +95,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: 4aca346d4818eb63e661c6028a4e2c1cbea2bd92
+          ref: 8af04a376332c17527ce0f7dffaac8432ba1a9b3
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
@@ -155,6 +156,12 @@ jobs:
       # has finalized its outputs, so it cannot influence test selection.
       - name: Validate npm metadata points to v10
         run: node candidate/scripts/check-npm-metadata.mjs
+
+  # Source-only transport regressions use the supported runtime independently.
+  chain-rpc-node26:
+    needs: changes
+    if: needs.changes.outputs.chain_rpc_node26 == 'true'
+    uses: ./.github/workflows/chain-rpc-node26.yml
 
   # ------------------------------------------------------------------
   # One canonical build. Every test job downloads this artifact instead
@@ -234,6 +241,12 @@ jobs:
       - name: Test audit-dial-protocol lexer
         run: node --test scripts/audit-dial-protocol.test.mjs
 
+      - name: Audit source file size
+        run: node scripts/audit-file-size.mjs
+
+      - name: Test source file-size guard
+        run: node --test scripts/audit-file-size.test.mjs
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -305,6 +318,10 @@ jobs:
         run: node scripts/ci/fetch-trusted-controller.mjs
       - name: Test repository scripts
         run: pnpm run test:scripts
+      - name: Test share recovery evidence reducers
+        run: |
+          node --test scripts/testnet-share-recovery/*.test.mjs
+          python3 -m unittest discover -s scripts/testnet-share-recovery -p test_payload_evidence.py
       - name: Verify every test has an execution route
         run: pnpm test:inventory
       - name: Upload test execution inventory
@@ -570,6 +587,8 @@ jobs:
           DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-epcis exec vitest run test/external-event-query.test.ts
           DKG_REQUIRE_BLAZEGRAPH=1 pnpm test:conformance
           pnpm --filter @origintrail-official/dkg-storage exec vitest run --no-file-parallelism test/blazegraph.integration.test.ts test/term-canon-blazegraph-oracle.test.ts test/rfc64-semantic-read-gateway.blazegraph.integration.test.ts test/rfc64-shared-projection-stream.blazegraph.integration.test.ts
+          DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run test/scoped-catalog-backend.test.ts
+          pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts
           pnpm --filter @origintrail-official/dkg-agent exec vitest run --config vitest.blazegraph.config.ts
           DKG_RFC64_GATE1_STORE_BACKEND=blazegraph node --import tsx --test devnet/rfc64-gate1-public-open/rollout-store-fixture.test.ts devnet/rfc64-gate1-public-open/rollout-transition.test.ts
 
@@ -902,6 +921,9 @@ jobs:
         run: tar -xzf /tmp/evm-devnet-test-artifacts.tgz
       - name: Install Playwright Chromium
         run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium --with-deps
+      - name: node-ui memory preview and WebGL regressions
+        if: matrix.shard == 1
+        run: pnpm --dir packages/node-ui exec playwright test --config playwright.pr3236.config.ts
       - name: "node-ui real-node Playwright e2e (shard ${{ matrix.shard }}/7)"
         run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright test --shard=${{ matrix.shard }}/7
       - name: Record first-attempt browser failures separately from retries
@@ -1551,6 +1573,7 @@ jobs:
     if: always()
     needs:
       - changes
+      - chain-rpc-node26
       - build
       - evm-node-test-artifacts
       - evm-devnet-test-artifacts
@@ -1580,7 +1603,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: 4aca346d4818eb63e661c6028a4e2c1cbea2bd92
+          ref: 8af04a376332c17527ce0f7dffaac8432ba1a9b3
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |

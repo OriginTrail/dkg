@@ -202,6 +202,44 @@ describe('POST /api/context-graph/{id}/request-join', () => {
     expect(callOrder).toEqual(['profile', 'join']);
   });
 
+  it('reports a durably queued join request as pending instead of a transport failure', async () => {
+    const contextGraphId = 'private-queued-join';
+    const curatorPeerId = '12D3KooWQueuedJoinCurator';
+    const delegation = {
+      agentAddress: '0x5555555555555555555555555555555555555555',
+      scope: `join:test:${contextGraphId}`,
+      issuedAtMs: Date.now(),
+      delegateePeerId: '12D3KooWQueuedJoiner',
+      signature: `0x${'44'.repeat(65)}`,
+    };
+    const agent = {
+      peerId: delegation.delegateePeerId,
+      isCuratorOf: vi.fn().mockResolvedValue(false),
+      ensureProfilePublished: vi.fn().mockResolvedValue(undefined),
+      forwardJoinRequest: vi.fn().mockResolvedValue({
+        delivered: 0,
+        queued: true,
+        errors: [],
+      }),
+      resolveAgentByToken: () => undefined,
+    };
+
+    server = await startRouteServer(agent);
+    const response = await fetch(routeUrl(server, contextGraphId), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ delegation, curatorPeerId, agentName: 'queued-joiner' }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      status: 'pending',
+      delivered: 0,
+      queued: true,
+    });
+  });
+
   it('fails closed and does not forward when the cold profile cannot publish', async () => {
     const contextGraphId = 'private-profile-unavailable';
     const ensureProfilePublished = vi.fn().mockRejectedValue(new Error('registry unavailable'));

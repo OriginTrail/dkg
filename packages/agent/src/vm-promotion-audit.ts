@@ -13,6 +13,7 @@
 import {
   contextGraphMetaUri,
   createGraphKnowledgeAssetScope,
+  assertSafeIri,
   isSafeIri,
   sparqlString,
   validateSubGraphName,
@@ -201,13 +202,31 @@ export function storageAckNamespaceSubGraphsQuery(namespace: string, limit: numb
   } } ORDER BY ?subGraph LIMIT ${limit}`;
 }
 
-/** Whether the namespace's VM holds the asset at `version` or later. */
-export function storageAckPromotedQuery(namespace: string, kaUal: string, version: bigint): string {
-  return `ASK { GRAPH <${contextGraphMetaUri(namespace)}> {
-    <${kaUal}> <${DKG}status> "confirmed" ;
-      <${DKG}assertionVersion> ?confirmedVersion .
-    FILTER(?confirmedVersion >= ${version})
-  } }`;
+/** Check one already-bounded audit slice across its exact VM metadata graphs. */
+export function storageAckPromotedBatchQuery(candidates: readonly Pick<
+  StorageAckLedgerCandidate, 'operationSubject' | 'namespace' | 'kaUal' | 'assertionVersion'
+>[]): string {
+  if (candidates.length === 0) throw new Error('Promoted-copy batch must not be empty');
+  const values = candidates.map((candidate) => {
+    if (typeof candidate.assertionVersion !== 'bigint' || candidate.assertionVersion < 0n) {
+      throw new Error('Promoted-copy batch requires a non-negative assertion version');
+    }
+    return `(<${assertSafeIri(candidate.operationSubject)}> `
+      + `<${assertSafeIri(contextGraphMetaUri(candidate.namespace))}> `
+      + `<${assertSafeIri(candidate.kaUal)}> ${candidate.assertionVersion})`;
+  }).join('\n      ');
+  // Keep the filter outside GRAPH: Oxigraph does not see the VALUES-bound
+  // minimum inside the graph pattern, even though it sees the graph's version.
+  return `SELECT DISTINCT ?op WHERE {
+    VALUES (?op ?graph ?ka ?minVersion) {
+      ${values}
+    }
+    GRAPH ?graph {
+      ?ka <${DKG}status> "confirmed" ;
+        <${DKG}assertionVersion> ?confirmedVersion .
+    }
+    FILTER(?confirmedVersion >= ?minVersion)
+  }`;
 }
 
 /** Ledger rows whose ACK copy no longer exists (retired or expired). */
@@ -241,7 +260,7 @@ export function parseStorageAckLedgerCandidate(
   if (!operationSubject || !namespace || !kaUal || !versionLiteral || !Number.isFinite(signedAtMs)) {
     return null;
   }
-  if (!isStorageAckNamespace(namespace) || !isSafeIri(kaUal)) return null;
+  if (!isSafeIri(operationSubject) || !isStorageAckNamespace(namespace) || !isSafeIri(kaUal)) return null;
   let assertionVersion: bigint;
   try {
     assertionVersion = BigInt(versionLiteral);

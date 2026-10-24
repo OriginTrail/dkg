@@ -41,6 +41,14 @@ test('Windows groups retain every original test selector exactly once', () => {
     /--config vitest\.unit\.config\.ts\s+\$\{\{ matrix.tests \}\}/);
 });
 
+test('the Windows Node 22 gate executes the regression launcher and process-tree checks', () => {
+  const node = job.steps.find((step) => step.uses?.startsWith('actions/setup-node@'));
+  assert.equal(node.with['node-version'], 22);
+  const smoke = job.steps.find((step) => step.run === 'pnpm qa:check-regression-launcher');
+  assert.ok(smoke); assert.equal(smoke.if, undefined); assert.equal(smoke['continue-on-error'], undefined);
+  assert.ok(job.steps.indexOf(smoke) > job.steps.findIndex((step) => step.run === 'pnpm install --frozen-lockfile'));
+});
+
 const scripts = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8')).scripts;
 const prefix = 'test:gate0:rfc64-persistence-lifecycle';
 const harnessDir = 'devnet/rfc64-persistence-lifecycle';
@@ -102,7 +110,12 @@ test('each matrix leg builds once and only inventory runs named evidence steps',
   ];
   const evidence = job.steps.filter((step) => step.if === 'matrix.evidence');
   assert.deepEqual(evidence.map((step) => step.run), expectedCommands);
-  assert.equal(job.steps.filter((step) => step.if).length, evidence.length);
+  const snapshot = job.steps.filter((step) => step.if === "matrix.group == 'object-stores'");
+  assert.equal(snapshot.length, 1);
+  assert.equal(snapshot[0].run.trim(), 'pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.unit.config.ts test/workspace-snapshot-retirement.test.ts test/workspace-snapshot-write-scope.test.ts test/finalized-snapshot-collector.test.ts');
+  assert.ok(!snapshot[0]['continue-on-error']);
+  assert.ok(job.steps.indexOf(build) < job.steps.indexOf(snapshot[0]));
+  assert.equal(job.steps.filter((step) => step.if).length, evidence.length + snapshot.length);
   assert.ok(evidence.every((step) => step.name && !step['continue-on-error']));
   assert.ok(job.steps.indexOf(build) < job.steps.indexOf(evidence[0]));
   assert.equal(evidence.find((step) => step.run === `pnpm ${prefix}:generate:only`)['timeout-minutes'], 20);

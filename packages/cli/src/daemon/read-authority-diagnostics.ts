@@ -5,6 +5,35 @@ export interface ContextGraphReadAuthorityAttribution {
   readonly source: string;
   readonly reason: string;
   readonly dependency: string;
+  /** The agent's classification of the reason's detail, where it gives one. */
+  readonly detailCode?: string;
+}
+
+/**
+ * The attribution a thrown read-authority marker carries. The agent's error is
+ * recognised structurally, so each field is read defensively; a missing,
+ * non-string or throwing field becomes `unknown` here and nowhere else. The
+ * detail code is optional: anything but a string leaves it out.
+ */
+export function decodeReadAuthorityAttribution(err: unknown): ContextGraphReadAuthorityAttribution {
+  const read = (key: keyof ContextGraphReadAuthorityAttribution): unknown => {
+    try {
+      return Reflect.get(err as object, key);
+    } catch {
+      return undefined;
+    }
+  };
+  const field = (key: 'source' | 'reason' | 'dependency'): string => {
+    const value = read(key);
+    return typeof value === 'string' ? value : 'unknown';
+  };
+  const detailCode = read('detailCode');
+  return {
+    source: field('source'),
+    reason: field('reason'),
+    dependency: field('dependency'),
+    ...(typeof detailCode === 'string' ? { detailCode } : {}),
+  };
 }
 
 export interface ReadAuthorityDiagnosticsOptions {
@@ -25,7 +54,7 @@ export interface ReadAuthorityDiagnostics {
 const ATTRIBUTION_TOKEN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 /** An attribution token as the agent emits them; anything else logs as `unknown`. */
-function attributionToken(value: string): string {
+export function attributionToken(value: string): string {
   return ATTRIBUTION_TOKEN.test(value) ? value : 'unknown';
 }
 
@@ -64,8 +93,9 @@ function createWarningGate(
 
 /**
  * Server-side attribution for read-authority 503s (#2834): the authority
- * source, its reason and the dependency that could not answer (store, chain,
- * local state or unknown). Every 503 gets exactly one line under its own
+ * source, its reason, the dependency that could not answer (store, chain,
+ * local state or unknown) and, where the agent classifies the reason's detail,
+ * that detail code. Every 503 gets exactly one line under its own
  * operation id, so the id a response carries can always be found. The first
  * 503 of an attribution in a window is a warning, which reports how many
  * repeats it held back since the previous one; repeats in between are info
@@ -85,7 +115,8 @@ export function createReadAuthorityDiagnostics(
     record(ctx, attribution) {
       const detail = `source=${attributionToken(attribution.source)}`
         + ` reason=${attributionToken(attribution.reason)}`
-        + ` dependency=${attributionToken(attribution.dependency)}`;
+        + ` dependency=${attributionToken(attribution.dependency)}`
+        + (attribution.detailCode === undefined ? '' : ` detail=${attributionToken(attribution.detailCode)}`);
       const decision = warningDue(detail);
       if (decision.warn) {
         logger.warn(

@@ -48,11 +48,15 @@ function createHarness(
     policies?: Record<string, AgentsPhonebookAccessPolicy>;
     /** Wallets (lower-cased) a successful sync adds to the phonebook. */
     syncAddsWallets?: string[];
+    /** Wallets (lower-cased) whose encryption key a successful sync adds; defaults to `syncAddsWallets`. */
+    syncAddsKeys?: string[];
     sync?: SyncBehaviour;
   } = {},
 ) {
   let now = 10_000_000;
   const phonebook = new Set<string>();
+  /** Wallets whose usable encryption key the store holds. */
+  const recipientKeys = new Set<string>();
   const subscriptions = new Set(options.subscribed ?? [CG]);
   const policies = new Map(Object.entries(options.policies ?? {}));
   const peers: AgentsPhonebookCandidatePeer[] = [...(options.peers ?? [{ peerId: CORE_A, core: true }])];
@@ -62,8 +66,10 @@ function createHarness(
   const debug: string[] = [];
   let enabled = true;
   const syncAddsWallets = options.syncAddsWallets ?? [OWNER.toLowerCase()];
+  const syncAddsKeys = options.syncAddsKeys ?? syncAddsWallets;
   const sync: SyncBehaviour = options.sync ?? (async () => {
     for (const wallet of syncAddsWallets) phonebook.add(wallet);
+    for (const wallet of syncAddsKeys) recipientKeys.add(wallet);
     return complete(75_141);
   });
   const deps: OnDemandAgentsPhonebookDeps = {
@@ -71,6 +77,7 @@ function createHarness(
     remoteCuratorWallet: (contextGraphId) => /^(0x[0-9a-fA-F]{40})\/.+$/.exec(contextGraphId)?.[1] ?? null,
     isActiveSubscription: (contextGraphId) => subscriptions.has(contextGraphId),
     phonebookHasWallet: vi.fn(async (wallet: string) => phonebook.has(wallet.toLowerCase())),
+    recipientKeyKnown: vi.fn(async (wallet: string) => recipientKeys.has(wallet.toLowerCase())),
     readAccessPolicy: vi.fn(async (contextGraphId: string) => policies.get(contextGraphId) ?? 'public'),
     listConnectedPeers: () => peers,
     preparePeer: vi.fn(async () => true),
@@ -91,6 +98,7 @@ function createHarness(
     fetcher,
     deps,
     phonebook,
+    recipientKeys,
     subscriptions,
     policies,
     peers,
@@ -189,6 +197,62 @@ describe('OnDemandAgentsPhonebookFetcher', () => {
     await h.fetcher.whenIdle();
 
     expect(h.syncCalls.map(({ peerId }) => peerId)).toEqual([CORE_B]);
+  });
+
+  it('asks a peer again while this node\'s own sync slots turn the request away, and counts no answer until one comes', async () => {
+    const deferred = { fetchedTriples: 0, insertedTriples: 0, complete: false, deferred: true };
+    let refusals = 2;
+    let addOwner = (): void => {};
+    const h = createHarness({
+      localDeferralRetryMs: 1,
+      sync: async () => {
+        if (refusals > 0) {
+          refusals -= 1;
+          return deferred;
+        }
+        addOwner();
+        return complete(75_141);
+      },
+    });
+    addOwner = () => { h.phonebook.add(OWNER.toLowerCase()); };
+
+    h.fetcher.request(CG, 'subscribe');
+    await h.fetcher.whenIdle();
+
+    expect(h.syncCalls.map(({ peerId }) => peerId)).toEqual([CORE_A, CORE_A, CORE_A]);
+    expect(h.info).toHaveLength(1);
+    expect(h.info[0]).toContain(`peers=[${CORE_A.slice(-8)}:core:complete:75141]`);
+    expect(h.info[0]).toContain('outcome=complete');
+    expect(h.resolvedBatches).toEqual([[CG]]);
+  });
+
+  it('starts no cooldown when this node\'s own sync slots stay busy, and asks again on the re-check', async () => {
+    const deferred = { fetchedTriples: 0, insertedTriples: 0, complete: false, deferred: true };
+    let busy = true;
+    let addOwner = (): void => {};
+    const h = createHarness({
+      localDeferralRetryMs: 1,
+      localDeferralMaxRetries: 2,
+      sync: async () => {
+        if (busy) return deferred;
+        addOwner();
+        return complete(75_141);
+      },
+    });
+    addOwner = () => { h.phonebook.add(OWNER.toLowerCase()); };
+
+    h.fetcher.request(CG, 'subscribe');
+    await h.fetcher.whenIdle();
+    // Asked once and again twice; never counted as an answer.
+    expect(h.syncCalls).toHaveLength(3);
+    expect(h.info).toEqual([]);
+    expect(h.debug.some((line) => line.includes("this node's sync slots stayed busy"))).toBe(true);
+
+    busy = false;
+    await vi.waitFor(() => expect(h.info).toHaveLength(1));
+    await h.fetcher.whenIdle();
+    expect(h.info[0]).toContain('outcome=complete');
+    expect(h.resolvedBatches).toEqual([[CG]]);
   });
 
   it('does not take an empty "complete" Core answer for the network phonebook', async () => {
@@ -323,7 +387,7 @@ describe('OnDemandAgentsPhonebookFetcher', () => {
     expect(h.info[0]).toContain('outcome=complete');
   });
 
-  it('reports a partial fetch when data arrived but the owner is still unknown', async () => {
+  it('reports a partial fetch when data arrived but the owner is still unknown, and asks again after the short cooldown', async () => {
     const h = createHarness({
       maxPeers: 1,
       sync: async () => ({ fetchedTriples: 900, insertedTriples: 900, complete: false }),
@@ -333,8 +397,43 @@ describe('OnDemandAgentsPhonebookFetcher', () => {
     await h.fetcher.whenIdle();
 
     expect(h.info[0]).toContain('curatorResolved=0/1 outcome=partial');
-    expect(h.info[0]).toContain(`nextFetchInMs=${AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS}`);
+    // A partial fetch left what it was asked for unresolved: it is spaced like a failed one.
+    expect(h.info[0]).toContain(`nextFetchInMs=${AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS}`);
     expect(h.resolvedBatches).toEqual([]);
+
+    h.advance(AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS - 1);
+    h.fetcher.request(CG, 'vm-reconcile');
+    await h.fetcher.whenIdle();
+    expect(h.syncCalls).toHaveLength(1);
+    h.advance(1);
+    h.fetcher.request(CG, 'vm-reconcile');
+    await h.fetcher.whenIdle();
+    expect(h.syncCalls).toHaveLength(2);
+  });
+
+  // Partial answers that repeat come from Cores that stay overloaded: only the
+  // first partial fetch in a row is followed by the short cooldown.
+  it('spaces a second partial fetch in a row by the full cooldown, and the first partial after another outcome by the short one', async () => {
+    const answers: Array<'partial' | 'failed'> = ['partial', 'partial', 'partial', 'failed', 'partial'];
+    const h = createHarness({
+      maxPeers: 1,
+      sync: async () => {
+        if (answers.shift() === 'failed') throw new Error('stream reset');
+        return { fetchedTriples: 900, insertedTriples: 900, complete: false };
+      },
+    });
+    const spacings: string[] = [];
+    for (let fetch = 0; fetch < 5; fetch += 1) {
+      h.fetcher.request(CG, 'vm-reconcile');
+      await h.fetcher.whenIdle();
+      const line = h.info.at(-1) ?? '';
+      spacings.push(`${/outcome=(\w+)/.exec(line)?.[1]}:${/nextFetchInMs=(\d+)/.exec(line)?.[1]}`);
+      h.advance(AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS);
+    }
+    const short = AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS;
+    const full = AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS;
+    expect(spacings).toEqual([`partial:${short}`, `partial:${full}`, `partial:${full}`, `failed:${short}`, `partial:${short}`]);
+    expect(h.syncCalls).toHaveLength(5);
   });
 
   it('does not repeat inside the cooldown, and fetches again once it expires', async () => {
@@ -801,5 +900,220 @@ describe('on-demand agents phonebook fetch duration buckets', () => {
     expect(boundaries[boundaries.length - 1]!).toBeGreaterThanOrEqual(Math.max(...DURATIONS_MS));
     // The trailing entry is the +Inf overflow: nothing may land there.
     expect(counts[counts.length - 1]!).toBe(0);
+  });
+});
+
+describe('OnDemandAgentsPhonebookFetcher.ensureWallets (#2849)', () => {
+  const MEMBER = '0x00000000000000000000000000000000000000B1';
+  const MEMBER_2 = '0x00000000000000000000000000000000000000B2';
+  const member = MEMBER.toLowerCase();
+  const member2 = MEMBER_2.toLowerCase();
+
+  it('fetches the phonebook for a share recipient whose key is missing and reports it known', async () => {
+    const h = createHarness({ syncAddsWallets: [member] });
+
+    const known = await h.fetcher.ensureWallets([MEMBER]);
+
+    expect([...known]).toEqual([member]);
+    expect(h.syncCalls).toHaveLength(1);
+    expect(h.info.at(-1)).toContain('trigger=share-recipient');
+    expect(h.info.at(-1)).toContain('recipientsResolved=1/1');
+    // A share recipient is not a graph owner: no graph recovery is scheduled.
+    expect(h.resolvedBatches).toEqual([]);
+  });
+
+  it('does not fetch for a recipient whose key the store already holds', async () => {
+    const h = createHarness();
+    h.recipientKeys.add(member);
+
+    const known = await h.fetcher.ensureWallets([MEMBER]);
+
+    expect([...known]).toEqual([member]);
+    expect(h.syncCalls).toHaveLength(0);
+  });
+
+  it('fetches for a recipient whose stored profile has no key, and fails closed if none arrives', async () => {
+    // An older profile maps the wallet to a peer but carries no key; a Core
+    // holds the republished profile with the key.
+    const refreshed = createHarness({ syncAddsWallets: [member] });
+    refreshed.phonebook.add(member);
+    expect([...(await refreshed.fetcher.ensureWallets([MEMBER]))]).toEqual([member]);
+    expect(refreshed.syncCalls).toHaveLength(1);
+    expect(refreshed.info.at(-1)).toContain('recipientsResolved=1/1');
+
+    // The network has no key either: the fetch runs and reports the wallet unknown.
+    const keyless = createHarness({ syncAddsWallets: [member], syncAddsKeys: [] });
+    keyless.phonebook.add(member);
+    expect([...(await keyless.fetcher.ensureWallets([MEMBER]))]).toEqual([]);
+    expect(keyless.syncCalls).toHaveLength(1);
+    expect(keyless.info.at(-1)).toContain('recipientsResolved=0/1');
+  });
+
+  it('fetches nothing while cooling down, disabled or closed', async () => {
+    const h = createHarness({ syncAddsWallets: [member] });
+    await h.fetcher.ensureWallets([MEMBER]);
+    expect(h.syncCalls).toHaveLength(1);
+
+    // Cooling down: a second missing recipient waits for the next window.
+    expect([...(await h.fetcher.ensureWallets([MEMBER_2]))]).toEqual([]);
+    expect(h.syncCalls).toHaveLength(1);
+
+    h.advance(AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS + 1);
+    h.setEnabled(false);
+    expect([...(await h.fetcher.ensureWallets([MEMBER_2]))]).toEqual([]);
+    h.setEnabled(true);
+    await h.fetcher.close();
+    expect([...(await h.fetcher.ensureWallets([MEMBER_2]))]).toEqual([]);
+    expect(h.syncCalls).toHaveLength(1);
+  });
+
+  it('serves a share that asks mid-fetch from the same fetch, walking on until its recipient resolves', async () => {
+    let releaseFirstPeer!: () => void;
+    const firstPeerHeld = new Promise<void>((resolve) => { releaseFirstPeer = resolve; });
+    const h = createHarness({
+      peers: [
+        { peerId: EDGE, core: false },
+        { peerId: EDGE_2, core: false },
+        { peerId: EDGE_3, core: false },
+      ],
+      // Partial peers: each holds one member's profile.
+      sync: async (peerId) => {
+        if (peerId === EDGE) {
+          await firstPeerHeld;
+          h.recipientKeys.add(member);
+        }
+        if (peerId === EDGE_2) h.recipientKeys.add(member2);
+        return complete(40);
+      },
+    });
+
+    const first = h.fetcher.ensureWallets([MEMBER]);
+    await vi.waitFor(() => expect(h.syncCalls).toHaveLength(1));
+    // The second share asks while the first peer is still answering.
+    const second = h.fetcher.ensureWallets([MEMBER_2]);
+    await vi.waitFor(() => expect(h.deps.recipientKeyKnown).toHaveBeenCalledWith(member2, expect.anything()));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    releaseFirstPeer();
+
+    expect([...(await first)]).toEqual([member]);
+    expect([...(await second)]).toEqual([member2]);
+    expect(h.syncCalls.map((call) => call.peerId)).toEqual([EDGE, EDGE_2]);
+  });
+
+  it('walks peers until every recipient of one request resolves', async () => {
+    const h = createHarness({
+      peers: [
+        { peerId: EDGE, core: false },
+        { peerId: EDGE_2, core: false },
+        { peerId: EDGE_3, core: false },
+      ],
+      sync: async (peerId) => {
+        if (peerId === EDGE) h.recipientKeys.add(member);
+        if (peerId === EDGE_2) h.recipientKeys.add(member2);
+        return complete(40);
+      },
+    });
+
+    const known = await h.fetcher.ensureWallets([MEMBER, MEMBER_2]);
+
+    expect([...known].sort()).toEqual([member, member2].sort());
+    expect(h.syncCalls.map((call) => call.peerId)).toEqual([EDGE, EDGE_2]);
+    expect(h.info.at(-1)).toContain('recipientsResolved=2/2');
+  });
+
+  it('keeps walking peers until the wanted recipient resolves, then stops', async () => {
+    const h = createHarness({
+      peers: [
+        { peerId: EDGE, core: false },
+        { peerId: EDGE_2, core: false },
+        { peerId: EDGE_3, core: false },
+      ],
+      sync: async (peerId) => {
+        if (peerId === EDGE_2) h.recipientKeys.add(member);
+        return complete(40);
+      },
+    });
+
+    const known = await h.fetcher.ensureWallets([MEMBER]);
+
+    expect([...known]).toEqual([member]);
+    expect(h.syncCalls.map((call) => call.peerId)).toEqual([EDGE, EDGE_2]);
+  });
+
+  it('stops waiting at the caller signal without aborting the shared fetch', async () => {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    const h = createHarness({
+      sync: async () => {
+        await released;
+        h.recipientKeys.add(member);
+        return complete(75_141);
+      },
+    });
+    const wait = new AbortController();
+
+    const early = h.fetcher.ensureWallets([MEMBER], wait.signal);
+    await vi.waitFor(() => expect(h.syncCalls).toHaveLength(1));
+    wait.abort();
+    expect([...(await early)]).toEqual([]);
+
+    // The fetch still completes and serves the next attempt from the phonebook.
+    release();
+    await h.fetcher.whenIdle();
+    expect([...(await h.fetcher.ensureWallets([MEMBER]))]).toEqual([member]);
+    expect(h.syncCalls).toHaveLength(1);
+  });
+
+  // The owner of a graph a relay-only member shares into is looked up this way
+  // when the share is made. Overloaded Cores answer the first fetch only in
+  // part; the owner's lookup must not then wait half an hour for the next one.
+  it('fetches again for a wallet a partial fetch left unknown once the short cooldown has passed, not before', async () => {
+    let answersInFull = false;
+    const h = createHarness({
+      maxPeers: 1,
+      sync: async () => {
+        if (!answersInFull) return { fetchedTriples: 900, insertedTriples: 900, complete: false };
+        h.recipientKeys.add(member);
+        return complete(75_141);
+      },
+    });
+
+    expect([...(await h.fetcher.ensureWallets([MEMBER]))]).toEqual([]);
+    expect(h.info.at(-1)).toContain('outcome=partial');
+    expect(h.info.at(-1)).toContain(`nextFetchInMs=${AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS}`);
+    answersInFull = true;
+
+    h.advance(AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS - 1);
+    expect([...(await h.fetcher.ensureWallets([MEMBER]))]).toEqual([]);
+    expect(h.syncCalls).toHaveLength(1);
+
+    h.advance(1);
+    expect([...(await h.fetcher.ensureWallets([MEMBER]))]).toEqual([member]);
+    expect(h.syncCalls).toHaveLength(2);
+  });
+
+  it('still spaces the next fetch by the full cooldown after a complete one', async () => {
+    const h = createHarness({ syncAddsWallets: [member] });
+    expect([...(await h.fetcher.ensureWallets([MEMBER]))]).toEqual([member]);
+    expect(h.info.at(-1)).toContain('outcome=complete');
+    expect(h.info.at(-1)).toContain(`nextFetchInMs=${AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS}`);
+
+    h.advance(AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS);
+    expect([...(await h.fetcher.ensureWallets([MEMBER_2]))]).toEqual([]);
+    expect(h.syncCalls).toHaveLength(1);
+    h.advance(AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS - AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS);
+    await h.fetcher.ensureWallets([MEMBER_2]);
+    expect(h.syncCalls).toHaveLength(2);
+  });
+
+  it('starts no cooldown when no peer could be asked', async () => {
+    const h = createHarness({ peers: [], syncAddsWallets: [member] });
+
+    expect([...(await h.fetcher.ensureWallets([MEMBER]))]).toEqual([]);
+    expect(h.syncCalls).toHaveLength(0);
+
+    h.peers.push({ peerId: CORE_A, core: true });
+    expect([...(await h.fetcher.ensureWallets([MEMBER]))]).toEqual([member]);
+    expect(h.syncCalls).toHaveLength(1);
   });
 });

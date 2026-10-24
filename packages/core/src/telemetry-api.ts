@@ -201,6 +201,8 @@ export interface DkgMetrics {
   storeSchedulerRejectionsTotal: Counter;
   /** ms; priority and operation identify the bounded admission lane and static caller */
   storeSchedulerQueueWaitMs: Histogram;
+  /** ms; admitted execution time by priority, static operation and outcome={ok|error} */
+  storeSchedulerOperationDurationMs: Histogram;
   /** active admitted operations by priority and operation */
   storeSchedulerActive: UpDownCounter;
   /** current queued work; scheduler and lane are bounded static labels */
@@ -234,10 +236,6 @@ export interface DkgMetrics {
   backpressureQueueWaitMs: Histogram;
   /** admitted-work duration by bounded scheduler, lane, and outcome */
   backpressureActiveDurationMs: Histogram;
-  /** scope={finalization|reconcile} */
-  storeScanSingleFlightJoinsTotal: Counter;
-  /** active unique scans by scope */
-  storeScanSingleFlightActive: UpDownCounter;
   /** bounded materialized result rows by static source */
   storeQueryResultRows: Histogram;
   /** conservative bounded materialized bytes by static source */
@@ -246,6 +244,16 @@ export interface DkgMetrics {
   storeCancellationCompletedTotal: Counter;
   /** scope and reason identify the bounded retry loop; attempt is capped */
   storeRetryAttemptsTotal: Counter;
+  /** adapter, operation,
+   *  position={graph|subject|predicate|object|datatype|subject-prefix},
+   *  kind={iri|literal|blank-node|relative-iri|rfc3987-iri},
+   *  enforcement={observe|reject} — malformed RDF terms reaching a storage
+   *  adapter's SPARQL builders, and relative or RFC 3987-invalid IRIs in the
+   *  quads it writes through its atomic-replace and RFC-64 builders or an
+   *  N-Quads load. `observe` = counted and logged, and the write was built
+   *  exactly as before validation existed (the pre-validation SPARQL still
+   *  strips characters from a malformed IRI). */
+  storeSparqlInvalidTermsTotal: Counter;
   /** current durable finalization entries whose retry gate is open */
   finalizationRecoveryDueEntries: Gauge;
   /** milliseconds since the oldest currently due finalization was received */
@@ -417,6 +425,11 @@ function buildMetrics(): DkgMetrics {
       description: 'External-store admission queue wait by lane and static caller',
       advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
     }),
+    storeSchedulerOperationDurationMs: meter.createHistogram('dkg.store.scheduler_operation_duration_ms', {
+      unit: 'ms',
+      description: 'External-store execution time after admission by lane and static caller',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
     storeSchedulerActive: meter.createUpDownCounter('dkg.store.scheduler_active', {
       description: 'Currently admitted external-store operations by lane and static caller',
     }),
@@ -461,12 +474,6 @@ function buildMetrics(): DkgMetrics {
       description: 'Scheduler admitted-work duration by bounded scheduler, lane, and outcome',
       advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
     }),
-    storeScanSingleFlightJoinsTotal: meter.createCounter('dkg.store.scan_singleflight_joins_total', {
-      description: 'Equivalent expensive scans joined to an already running promise',
-    }),
-    storeScanSingleFlightActive: meter.createUpDownCounter('dkg.store.scan_singleflight_active', {
-      description: 'Currently running unique expensive scans',
-    }),
     storeQueryResultRows: meter.createHistogram('dkg.store.query_result_rows', {
       description: 'Rows retained by bounded expensive store reads',
       advice: { explicitBucketBoundaries: QUAD_COUNT_BUCKETS },
@@ -481,6 +488,9 @@ function buildMetrics(): DkgMetrics {
     }),
     storeRetryAttemptsTotal: meter.createCounter('dkg.store.retry_attempts_total', {
       description: 'Bounded expensive-work retry attempts',
+    }),
+    storeSparqlInvalidTermsTotal: meter.createCounter('dkg.store.sparql_invalid_terms_total', {
+      description: 'Malformed RDF terms reaching storage-adapter writes, by adapter, operation, position, kind and enforcement',
     }),
     finalizationRecoveryDueEntries: meter.createGauge(
       'dkg.finalization_recovery.due_entries',

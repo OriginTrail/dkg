@@ -1,5 +1,18 @@
 [
   {
+    "pattern": "packages/node-ui/browser-regressions/pr3236/*.spec.ts",
+    "lane": "browser",
+    "reason": "Standalone scoped-store and WebGL regressions run in the first required browser CI shard",
+    "cadence": "required",
+    "command": "pnpm --dir packages/node-ui exec playwright test --config playwright.pr3236.config.ts",
+    "layer": "browser regression fixtures",
+    "prerequisites": [
+      "pnpm frozen install",
+      "built workspace dependencies",
+      "Playwright Chromium"
+    ]
+  },
+  {
     "pattern": "packages/node-ui/e2e/specs/devnet-local/**",
     "lane": "browser-local",
     "reason": "Heavy destructive scenarios use isolated devnet in scheduled main CI or explicit local runs",
@@ -44,6 +57,17 @@
     "prerequisites": [
       "pnpm frozen install",
       "built workspace dependencies"
+    ]
+  },
+  {
+    "pattern": "scripts/docs/*.test.mjs",
+    "lane": "docs",
+    "reason": "Documentation contracts workflow runs these dependency-free tests for documentation, example, and docs-tooling changes",
+    "cadence": "pull_request/manual",
+    "command": "node --test scripts/docs/*.test.mjs",
+    "layer": "documentation tooling",
+    "prerequisites": [
+      "Node.js 22"
     ]
   },
   {
@@ -135,15 +159,15 @@
     "command": "bash tools/observability/smoke-test.sh"
   },
   {
-    "pattern": "ccl_v0_1/tests/**",
+    "pattern": "packages/agent/ccl_v0_1/tests/**",
     "lane": "ccl-python-yaml",
-    "reason": "Python CCL driver loads the YAML case corpus; requires ccl_v0_1/requirements.txt",
+    "reason": "Python CCL driver loads the YAML case corpus; requires PyYAML",
     "cadence": "manual",
-    "command": "cd ccl_v0_1 && python3 tests/run_all_tests.py",
+    "command": "cd packages/agent/ccl_v0_1 && python3 tests/run_all_tests.py",
     "layer": "Python/YAML conformance",
     "prerequisites": [
       "Python 3",
-      "ccl_v0_1/requirements.txt"
+      "PyYAML"
     ]
   },
   {
@@ -152,5 +176,29 @@
     "reason": "Long-running operator soak drivers for isolated devnets; prerequisites are documented by each script",
     "cadence": "manual",
     "command": "bash {file}"
+  },
+  {
+    "pattern": "scripts/testnet-share-recovery/test_*.py",
+    "lane": "python",
+    "reason": "Exact full-graph evidence verifier regressions for the testnet share-recovery campaign",
+    "cadence": "required",
+    "command": "python3 -m unittest discover -s scripts/testnet-share-recovery -p test_payload_evidence.py",
+    "layer": "evidence validation",
+    "prerequisites": [
+      "Python 3.9 or newer"
+    ]
+  },
+  {
+    "pattern": "scripts/testnet-share-recovery/*.test.mjs",
+    "lane": "scripts",
+    "reason": "Exact identity evidence verifier regressions for the testnet share-recovery campaign",
+    "cadence": "required",
+    "command": "node --test scripts/testnet-share-recovery/*.test.mjs",
+    "layer": "evidence validation",
+    "prerequisites": [
+      "Node.js 22",
+      "Built core and RDF utility packages",
+      "Python 3.9 or newer"
+    ]
   }
 ]

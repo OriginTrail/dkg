@@ -1,3 +1,5 @@
+export { asQueryReadAdmissionCapability, type QueryReadAdmissionCapability } from './query-read-admission-capability.js';
+export { nonEmptyNamedGraphEnumerationPattern } from './adapters/graph-enumeration-query.js';
 export {
   BlazegraphNamespaceManager,
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
@@ -15,6 +17,9 @@ export {
   type Quad,
   type TripleStore,
   type TripleStoreDecorator,
+  type LogicalStoreMutationCapability,
+  runLogicalStoreMutation,
+  type BoundedQueryResponseCapability,
   type QueryResult,
   type QueryOptions,
   type StoreWorkPriority,
@@ -31,6 +36,7 @@ export {
   isStoreWorkPriority,
   registerTripleStoreAdapter,
   findTripleStoreCapability,
+  asBoundedQueryResponseCapability,
   deleteByPatternWithoutCount,
   createTripleStore,
   tryUpdateWithTouchedGraphs,
@@ -52,6 +58,11 @@ export {
   type AtomicGraphAndSubjectReplaceUpdate,
   type AtomicGraphReplaceUpdate,
 } from './atomic-graph-replace.js';
+export {
+  assertSubjectAndInsertPayload,
+  buildAtomicSubjectAndInsertUpdate,
+  tryReplaceSubjectAndInsertAtomically,
+} from './atomic-subject-insert.js';
 /**
  * Stable caller contract for one bounded RFC-64 author commit. Compilation,
  * receipt execution, normalization, and decorator mapping stay module-internal.
@@ -68,6 +79,10 @@ export {
   type Rfc64AuthorCommitStateTransitionV1,
   type Rfc64AuthorCommitSubjectReplacementV1,
 } from './rfc64-author-commit-cas.js';
+export {
+  describeRfc64AuthorCommitCasV1,
+  type Rfc64AuthorCommitMutationV1,
+} from './rfc64-author-commit-mutation.js';
 export {
   Rfc64SemanticAuthorCommitErrorV1,
   compileRfc64SemanticAuthorCommitV1,
@@ -90,6 +105,7 @@ export {
   getExternalStorePrioritySchedulerSnapshot,
   withDefaultStoreWorkPriority,
   activeDefaultStoreWorkPriority,
+  storeLaneInflightLimit,
   DEFAULT_STORE_QUEUE_LIMIT,
   DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS,
   type StorePrioritySchedulerSnapshot,
@@ -162,14 +178,24 @@ export {
   type GraphWriteScope,
 } from './graph-write-gen.js';
 export {
+  EXACT_GRAPH_EXPORT_MAX_ROWS,
+  EXACT_GRAPH_EXPORT_MAX_RESPONSE_BYTES,
   ExactGraphReadError,
   quadToNQuad,
   quadsToNQuads,
+  readBoundedGraphPayload,
+  readExactGraph,
   readExactGraphPaged,
   readExactGraphPagedWithDiscoveredCount,
+  supportsBoundedExactGraphExport,
   type ExactGraphReadErrorCode,
   type ExactGraphReadErrorKind,
   type ReadExactGraphPagedOptions,
+  type ReadExactGraphOptions,
+  type BoundedGraphPayloadProfile,
+  type ReadBoundedGraphPayloadOptions,
+  type BoundedGraphPayloadRefusalReason,
+  type BoundedGraphPayloadResult,
 } from './bounded-rdf.js';
 export { StoreResponseTooLargeError } from './http-response-limit.js';
 export {
@@ -207,6 +233,12 @@ export {
 } from './rfc64-author-seal-read-gateway.js';
 export {
   createManagedOxigraphRuntimeStoreConfigV1,
+  withManagedOxigraphRuntimeStoreConfigV1,
+  type ManagedOxigraphRuntimeActivityLeaseV1,
+  type ManagedOxigraphRecoveryHandleV1,
+  type ManagedOxigraphRecoveryPhaseV1,
+  type ManagedOxigraphRuntimeHooksV1,
+  type ManagedOxigraphRuntimeStateV1,
   type ManagedOxigraphRuntimeStoreConfigV1,
 } from './managed-oxigraph-runtime-store.js';
 export {
@@ -292,3 +324,7 @@ import './adapters/oxigraph.js';
 import './adapters/oxigraph-worker.js';
 import './adapters/blazegraph.js';
 import './adapters/sparql-http.js';
+
+export { buildAtomicAssetGroupUpdate, ATOMIC_ASSET_GROUP_MAX_ASSETS, ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES, type AtomicAssetReplacement } from './atomic-asset-group.js';
+
+export { StoreReadTransportFailure, isStoreReadTransportFailure } from './store-read-transport-failure.js';

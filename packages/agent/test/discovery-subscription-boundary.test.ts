@@ -45,7 +45,7 @@ describe('Context Graph discovery/subscription boundary', () => {
   it.each([
     ['default', undefined],
     ['explicitly enabled', true],
-  ] as const)('keeps persisted subscription rehydration %s', async (_label, enabled) => {
+  ] as const)('keeps rehydration %s but leaves an unproven remote row dormant', async (_label, enabled) => {
     const id = `rehydration-${_label.replace(/\s+/g, '-')}`;
     const record: ContextGraphSubscriptionRecord = {
       id,
@@ -73,17 +73,16 @@ describe('Context Graph discovery/subscription boundary', () => {
 
     try {
       await agent.start();
-      expect(agent.getSubscribedContextGraphs().get(id)).toMatchObject({
-        subscribed: true,
-        synced: true,
-      });
-      expect((agent as any).config.syncContextGraphs ?? []).toContain(id);
-      expect((agent as any).gossipRegistered.has(id)).toBe(true);
+      expect(agent.getSubscribedContextGraphs().has(id)).toBe(false);
+      expect((agent as any).config.syncContextGraphs ?? []).not.toContain(id);
+      expect((agent as any).gossipRegistered.has(id)).toBe(false);
+      expect(persisted.get(id)).toMatchObject(record);
       expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
         rehydrationEnabled: true,
         persistedTotal: 1,
-        activated: 1,
-        dormant: 0,
+        activated: 0,
+        dormant: 1,
+        dormantReasons: { authorityUnavailable: [id] },
       });
     } finally {
       await agent.stop().catch(() => {});
@@ -246,7 +245,7 @@ describe('Context Graph discovery/subscription boundary', () => {
         expect((agent as any).localContextGraphProvenance.hasLocalCreate(contextGraphId))
           .toBe(true);
         expect(await agent.resolveContextGraphRegistrationBinding(contextGraphId))
-          .toEqual({ kind: 'unregistered' });
+          .toEqual({ kind: 'unregistered', unregisteredEvidence: 'local-create' });
         expect(resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
         expect(persistedMemberships.some((record) =>
           record.contextGraphId === contextGraphId
@@ -368,7 +367,7 @@ describe('Context Graph discovery/subscription boundary', () => {
           expect(restarted.getSubscribedContextGraphs().has(id)).toBe(false);
           restarted.subscribeToContextGraph(id);
           await expect(restarted.resolveContextGraphRegistrationBinding(id))
-            .resolves.toEqual({ kind: 'unregistered' });
+            .resolves.toEqual({ kind: 'unregistered', unregisteredEvidence: 'local-create' });
           await expect(restarted.getContextGraphOnChainPolicy(id))
             .resolves.toEqual({});
           expect((restarted as any).localContextGraphProvenance.hasLocalCreate(id))
@@ -1184,7 +1183,7 @@ describe('Context Graph discovery/subscription boundary', () => {
     }
   }, 60_000);
 
-  it('resets and persists reconciliation state when discovery changes an active graph binding', async () => {
+  it('refuses a foreign discovery binding and preserves active reconciliation state', async () => {
     const persisted = new Map<string, ContextGraphSubscriptionRecord>();
     const localId = 'discovery-rebind-active';
     const oldOnChainId = '601';
@@ -1221,19 +1220,18 @@ describe('Context Graph discovery/subscription boundary', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       expect(agent.getSubscribedContextGraphs().get(localId)).toMatchObject({
-        name: 'Rebound Active Graph',
         subscribed: true,
-        onChainId: newOnChainId,
-        lastReconciledOrdinal: 0,
+        onChainId: oldOnChainId,
+        onChainHash: oldOnChainHash,
+        lastReconciledOrdinal: 7,
       });
-      expect(agent.getSubscribedContextGraphs().get(localId)?.onChainHash).toBeUndefined();
-      // The live reconciler may immediately self-prime a fresh cursor after
-      // the reset; the stale object must never survive the rebind.
-      expect((agent as any).reconcileCursors.get(localId)).not.toBe(staleCursor);
+      expect(agent.getSubscribedContextGraphs().get(localId)?.name).not.toBe('Rebound Active Graph');
+      expect((agent as any).reconcileCursors.get(localId)).toBe(staleCursor);
       expect(persisted.get(localId)).toMatchObject({
         subscribed: true,
-        onChainId: newOnChainId,
-        lastReconciledOrdinal: 0,
+        onChainId: oldOnChainId,
+        onChainHash: oldOnChainHash,
+        lastReconciledOrdinal: 7,
       });
 
       (agent as any).setContextGraphSubscription(localId, {
@@ -1242,7 +1240,7 @@ describe('Context Graph discovery/subscription boundary', () => {
       });
       const currentCursor = { watermark: 4, ahead: new Set<number>() };
       (agent as any).reconcileCursors.set(localId, currentCursor);
-      agent.recordDiscoveredContextGraph(localId, { onChainId: newOnChainId });
+      agent.recordDiscoveredContextGraph(localId, { onChainId: oldOnChainId });
 
       expect(agent.getSubscribedContextGraphs().get(localId)?.lastReconciledOrdinal).toBe(4);
       expect((agent as any).reconcileCursors.get(localId)).toBe(currentCursor);

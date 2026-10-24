@@ -9,7 +9,14 @@
  * class.
  */
 
+
+import { contextGraphBindingAbortReason, raceContextGraphBindingAgainstAbort } from './internal/context-graph-binding-abort.js';
 import { createHash, randomUUID } from 'node:crypto';
+import type { ApprovedPrivateReplicaAuthority } from './approved-private-replica.js';
+import {
+  resolveApprovedPrivateReplicaAuthorityWithinRuns,
+  type ApprovedPrivateReplicaProofOutcome,
+} from './approved-private-replica-proof-runs.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -98,7 +105,7 @@ import {
   contextGraphMetadataHomeGraph,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcUsageSite, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityProjectionServedEvidence, type ContextGraphAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcRequestContext, withRpcUsageSite, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityProjectionServedEvidence, type ContextGraphAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -124,7 +131,9 @@ import {
   type WorkspaceAgentRecipientResolverInput,
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
+  hasSubGraphRegistration, type UnregisteredSubGraphResolution,
 } from '@origintrail-official/dkg-publisher';
+import { resolveUnregisteredSubGraphFromPeers } from './peer-sub-graph-registration.js';
 import { join } from 'node:path';
 import {
   DKGQueryEngine, QueryHandler,
@@ -132,11 +141,11 @@ import {
   validateReadOnlySparql,
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
+import { finalizedTargetPlan, projectFinalizedTargets, peekFinalizedTargets } from './internal/context-graph-authority/finalized-target-projection.js';
 import { isRfc64AuthorityRpcCircuitOpenErrorV1 } from
   './rfc64/authority-rpc-circuit-breaker-v1.js';
 import {
   finalizedContextGraphSnapshotMismatchV1,
-  resolveFinalizedContextGraphNameBindingV1,
 } from './internal/context-graph-authority/finalized-context-graph-binding.js';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 
@@ -240,7 +249,7 @@ import {
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -397,6 +406,7 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import { LocalContextGraphRegistrationStatusStore } from
   './local-context-graph-registration-status.js';
 import type { DKGAgent } from './dkg-agent.js';
+import type { ContextGraphFinalizedAbsenceDetailCode, ContextGraphUnregisteredEvidence } from './registered-context-graph-authority.js';
 import {
   isCanonicalPositiveContextGraphId,
   localContextGraphIdMatchesCommittedNameHash,
@@ -416,11 +426,19 @@ const CHAIN_ATTESTED_DECLARATION_SCAN_MAX = 512;
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 
 export type ContextGraphRegistrationBinding =
-  | { kind: 'unregistered' }
+  | {
+      kind: 'unregistered';
+      /** Explicit VM non-applicability; never set by legacy lookup fallbacks. */
+      unregisteredEvidence?: ContextGraphUnregisteredEvidence;
+      /** Current participant-only authority for an approved private replica. */
+      approvedPrivateReplicaAuthority?: ApprovedPrivateReplicaAuthority;
+    }
   | {
       kind: 'registered';
       onChainId: bigint;
       provenance: 'authoritative' | 'ontology' | 'reverse-name-hash' | 'numeric-id' | 'name-hash';
+      /** Same-request atomic evidence; never a persisted permission. */
+      finalizedSnapshot?: ContextGraphAuthoritySnapshot;
     }
   | {
       kind: 'unavailable';
@@ -433,6 +451,8 @@ export type ContextGraphRegistrationBinding =
       detail?: string;
       /** Set where the failed lookup's own error says which dependency could not answer. */
       dependency?: ContextGraphReadAuthorityDependency;
+      /** Set where a `finalized-name-absence-unaccepted` producer classifies its `detail`. */
+      detailCode?: ContextGraphFinalizedAbsenceDetailCode;
     };
 
 export type FinalizedContextGraphAuthorityTargetV1 =
@@ -460,40 +480,6 @@ export type FinalizedContextGraphAuthorityTargetsResolutionV1 = Readonly<
     }
   | { kind: 'legacy-current' }
 >;
-
-function contextGraphBindingAbortReason(signal: AbortSignal): Error {
-  if (signal.reason instanceof Error) return signal.reason;
-  const error = new Error(String(signal.reason ?? 'Context Graph binding resolution aborted'));
-  error.name = 'AbortError';
-  return error;
-}
-
-function raceContextGraphBindingAgainstAbort<T>(
-  work: Promise<T>,
-  signal: AbortSignal | undefined,
-): Promise<T> {
-  if (!signal) return work;
-  if (signal.aborted) return Promise.reject(contextGraphBindingAbortReason(signal));
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      cleanup();
-      reject(contextGraphBindingAbortReason(signal));
-    };
-    const cleanup = () => signal.removeEventListener('abort', onAbort);
-    signal.addEventListener('abort', onAbort, { once: true });
-    work.then(
-      (value) => {
-        cleanup();
-        resolve(value);
-      },
-      (error) => {
-        cleanup();
-        reject(error);
-      },
-    );
-    if (signal.aborted) onAbort();
-  });
-}
 
 function localContextGraphIdFromTerm(raw: unknown): string | undefined {
   const uri = typeof raw === 'string' ? raw.replace(/^<|>$/g, '') : '';
@@ -917,25 +903,6 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     }> = {},
   ): Promise<FinalizedContextGraphAuthorityTargetsResolutionV1> {
     const { onRpcRead, durableBindingHints, ...chainReadOptions } = options;
-    const uniqueContextGraphIds = [...new Set(contextGraphIds)];
-    const bindingTargets = uniqueContextGraphIds.map((contextGraphId) => {
-      const hintedBinding = durableBindingHints?.get(contextGraphId);
-      const durableHint = hintedBinding?.contextGraphId === contextGraphId
-        ? hintedBinding
-        : undefined;
-      const { localId, subscription, expectedNameHash } =
-        resolveFinalizedContextGraphNameBindingV1(this, contextGraphId, durableHint);
-      const authoritativeOnChainId = this.contextGraphBindingState
-        .authorityIndexOnChainIdFor(localId, subscription ?? durableHint);
-      return {
-        contextGraphId,
-        expectedNameHash,
-        expectedOnChainId: authoritativeOnChainId === undefined
-          ? undefined
-          : BigInt(authoritativeOnChainId),
-      } as const;
-    });
-
     const indexReader = this.chain.contextGraphAuthorityIndexRevisionReader;
     if (indexReader === undefined) return { kind: 'legacy-current' };
 
@@ -944,45 +911,36 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     // commitments make that lookup deliberately ambiguous even though the
     // locally persisted binding remains authoritative. The caller still owns
     // a finalized numeric snapshot batch and validates its id/name evidence.
-    const targets = new Map<string, FinalizedContextGraphAuthorityTargetV1>();
-    const reverseBindingTargets = bindingTargets.filter((target) => {
-      if (target.expectedOnChainId === undefined) return true;
-      targets.set(target.contextGraphId, Object.freeze({
-        kind: 'durable-binding' as const,
-        expectedNameHash: target.expectedNameHash,
-        expectedOnChainId: target.expectedOnChainId,
-      }));
-      return false;
-    });
+    const plan = finalizedTargetPlan(
+      this, this.contextGraphBindingState.authorityIndexOnChainIdFor.bind(this.contextGraphBindingState),
+      contextGraphIds, durableBindingHints,
+    );
+    const { targets, reverseBindingTargets } = plan;
     if (reverseBindingTargets.length === 0) {
       return { kind: 'finalized-index', targets };
     }
 
-    const resolveSnapshots = indexReader
-      .resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes;
+    const resolveSnapshots = indexReader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes;
     if (resolveSnapshots !== undefined) {
       options.signal?.throwIfAborted();
       onRpcRead?.();
-      const snapshotsByNameHash = await resolveSnapshots.call(
-        indexReader,
-        reverseBindingTargets.map(({ expectedNameHash }) => expectedNameHash),
-        chainReadOptions,
+      // Registration classification gates private catalog admission and read
+      // access. A background reconciliation must not sit behind the ordinary
+      // background RPC reserve until the authority read's fail-closed deadline
+      // expires; use the same bounded foreground authority lane as explicit
+      // security reads, while retaining the caller's cancellation signal.
+      const snapshotsByNameHash = await withRpcRequestContext(
+        { requestClass: 'foreground', admissionPriority: 'authority', signal: options.signal },
+        () => resolveSnapshots.call(
+          indexReader,
+          reverseBindingTargets.map(({ expectedNameHash }) => expectedNameHash),
+          chainReadOptions,
+        ),
       );
       // Custom readers may not honor cancellation or may return a superset.
       // Publish only exact logical targets after the caller's final fence.
       options.signal?.throwIfAborted();
-      for (const { contextGraphId, expectedNameHash } of reverseBindingTargets) {
-        const finalizedSnapshot = snapshotsByNameHash.get(expectedNameHash);
-        if (finalizedSnapshot !== undefined) {
-          targets.set(contextGraphId, Object.freeze({
-            kind: 'resolved-snapshot' as const,
-            expectedNameHash,
-            expectedOnChainId: BigInt(finalizedSnapshot.contextGraphId),
-            finalizedSnapshot,
-          }));
-        }
-      }
-      return { kind: 'finalized-index', targets };
+      return projectFinalizedTargets(plan, snapshotsByNameHash);
     }
 
     if (reverseBindingTargets.length === 1) {
@@ -1112,6 +1070,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     options: {
       signal?: AbortSignal;
       registrationTimeoutMs?: number;
+      /** Return atomic name/policy evidence to this scoped read only. */
+      retainFinalizedSnapshot?: boolean;
       /**
        * Freshly loaded durable subscription row for this exact candidate.
        * This may establish only the immutable numeric binding; current policy
@@ -1120,6 +1080,10 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
       /** Read-authority-only proof that exact RFC-64 absence was accepted. */
       allowAcceptedRfc64FinalizedAbsence?: boolean;
+      /** Read/sync-only proof from this receiver's durable private approval. */
+      allowApprovedPrivateReplicaFinalizedAbsence?: boolean;
+      /** Bounded read/sync callers may reuse a locally fenced absence proof. */
+      freshness?: 'live' | 'bounded';
     } = {},
   ): Promise<ContextGraphRegistrationBinding> {
     const route = selectContextGraphRegistrationRoute(this, contextGraphId);
@@ -1187,7 +1151,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     ) {
       try {
         if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId)) {
-          return { kind: 'unregistered' };
+          return { kind: 'unregistered', unregisteredEvidence: 'local-create' };
         }
       } catch (err) {
         return {
@@ -1215,6 +1179,116 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       ?? (hasBindingCandidate
         ? chainAuthorityReadBudgetsOf(this).requestTimeoutMs
         : CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS);
+
+    /**
+     * Bind an unregistered result to the current durable private-join proof.
+     *
+     * Finalized-index adapters use this proof after exact finalized absence.
+     * Legacy adapters use it only after their compatibility lookup has already
+     * returned unregistered. In both cases, retaining the source-qualified
+     * peer gate on the typed result is what keeps SWM consumers from either
+     * widening through merged metadata or rejecting a valid approved join.
+     */
+    const resolveApprovedPrivateReplicaUnregisteredBinding = async (
+      source: 'legacy-current' | 'finalized-absence',
+    ):
+      Promise<ContextGraphRegistrationBinding | null> => {
+      if (options.allowApprovedPrivateReplicaFinalizedAbsence !== true) return null;
+      const approved = this.localApprovedAgentByCG?.get(contextGraphId);
+      if (approved === undefined) return null;
+      let proof: ApprovedPrivateReplicaProofOutcome;
+      try {
+        proof = await resolveApprovedPrivateReplicaAuthorityWithinRuns(this, contextGraphId, approved, {
+          approvalStillHolds: () => this.localApprovedAgentByCG.get(contextGraphId)?.toLowerCase()
+            === approved.toLowerCase(),
+          readMetadataRevision: () => this.contextGraphMetaProjection
+            .readContextGraphAuthorityFactsRevision(contextGraphId),
+        }, {
+          timeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
+          signal: options.signal,
+          onRerun: (cause, run) => this.log.info(
+            createOperationContext('system'),
+            `Approved member proof for "${contextGraphId}" runs again (${cause}, run ${run})`,
+          ),
+        });
+      } catch (err) {
+        return {
+          kind: 'unavailable',
+          reason: 'finalized-name-absence-unaccepted',
+          detail: err instanceof Error ? err.message : String(err),
+          dependency: contextGraphReadAuthorityDependencyOf(err),
+          detailCode: isBoundedOperationTimeoutError(err) ? 'replica-proof-timeout' : 'replica-proof-error',
+        };
+      }
+      if (proof.kind !== 'proved') {
+        // Approval removal while the proof was in flight restores ordinary
+        // legacy behaviour. A still-present marker with no matching proof is
+        // an authority failure and must not fall through to merged metadata.
+        return this.localApprovedAgentByCG.has(contextGraphId)
+          ? {
+              kind: 'unavailable',
+              reason: 'finalized-name-absence-unaccepted',
+              detail: 'local private join approval has no current source-qualified replica proof',
+              detailCode: proof.kind === 'absent' ? 'replica-proof-absent' : 'replica-metadata-moved',
+            }
+          : null;
+      }
+      const privateResolution = proof.resolution;
+
+      options.signal?.throwIfAborted();
+      // Registration can start while either store-backed proof is in flight.
+      // Never publish unregistered authority or the legacy registered-metadata
+      // compatibility result across that boundary.
+      const bindingId = localTarget?.localId ?? contextGraphId;
+      if (
+        this.contextGraphRegistrationsInFlight?.has(contextGraphId)
+        || this.contextGraphBindingState.hasBindingCandidate(
+          bindingId,
+          this.subscribedContextGraphs.get(bindingId),
+        )
+      ) {
+        return {
+          kind: 'unavailable',
+          reason: 'finalized-name-absence-unaccepted',
+          detail: 'Context Graph binding changed during private replica registration discovery',
+          detailCode: 'replica-binding-changed',
+        };
+      }
+      if (privateResolution.kind === 'confirmed-registered-meta') {
+        return source === 'legacy-current'
+          ? {
+              kind: 'unregistered',
+              approvedPrivateReplicaAuthority: privateResolution.authority,
+            }
+          : {
+              kind: 'unavailable',
+              reason: 'finalized-name-absence-unaccepted',
+              detail: 'exact private metadata claims a registered Context Graph; finalized absence cannot authorize it as an unregistered replica',
+              detailCode: 'replica-registered-metadata',
+            };
+      }
+      const privateAuthority: ApprovedPrivateReplicaAuthority = privateResolution.authority;
+      return {
+        kind: 'unregistered',
+        // The legacy adapter lane permits participant reads, but cannot prove
+        // chain absence. Only the finalized lane may exempt VM catch-up.
+        ...(source === 'legacy-current' ? {} : {
+          unregisteredEvidence: 'approved-private-replica-finalized-absence' as const,
+        }),
+        approvedPrivateReplicaAuthority: privateAuthority,
+      };
+    };
+
+    const resolveLegacyUnregisteredBinding = async ():
+      Promise<ContextGraphRegistrationBinding> => {
+      // An accepted owner policy remains stronger than participant-only
+      // authority. Its caller rechecks policy activation after this await.
+      if (options.allowAcceptedRfc64FinalizedAbsence === true) {
+        return { kind: 'unregistered' };
+      }
+      return (await resolveApprovedPrivateReplicaUnregisteredBinding('legacy-current'))
+        ?? { kind: 'unregistered' };
+    };
 
     // A durable numeric binding is already authoritative and must stay on the
     // zero-RPC fast path. Invalid durable values may be repaired only by the
@@ -1249,12 +1323,17 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
               signal: options.signal,
             },
           );
-          if (binding === null) return { kind: 'unregistered' };
-          return {
-            kind: 'registered',
-            onChainId: BigInt(binding.onChainId),
-            provenance: binding.provenance,
-          };
+          if (binding !== null) {
+            return {
+              kind: 'registered',
+              onChainId: BigInt(binding.onChainId),
+              provenance: binding.provenance,
+            };
+          }
+          // A retained local row without an admitted binding is not proof
+          // that a graph is unregistered. Continue to the finalized capability
+          // discriminator below; only its explicit legacy-current result may
+          // reach the compatibility lane.
         } catch (err) {
           return {
             kind: 'unavailable',
@@ -1266,10 +1345,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       }
     }
 
-    // A canonical decimal is a direct chain slot unless a real local graph
-    // with that exact (numeric-looking) name already exists. Apply this before
-    // local-subscription routing so HTTP admission followed by subscribe keeps
-    // the same numeric identity on its first policy/VM read.
+    // A canonical decimal names a chain slot unless an exact local graph exists.
     if (
       !strictFinalizedDurableBindingRepair
       && isCanonicalPositiveContextGraphId(contextGraphId)
@@ -1300,14 +1376,10 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       }
     }
 
-    // Production adapters resolve every non-authoritative name through the
-    // finalized authority index. The index establishes only the immutable
-    // name -> numeric slot binding; resolveRegisteredContextGraphAuthority()
-    // deliberately performs fresh/current policy and roster reads afterward.
-    // A positive index result owns the immutable binding. Finalized absence
-    // may lag a just-registered current graph, so only an independently
-    // accepted owner-signed unregistered policy may consume it as absence;
-    // every other absence/failure stays unavailable and cannot fall through.
+    // Non-authoritative names require the finalized index. Only a scoped read
+    // may consume its same-request policy evidence; other callers re-read policy.
+    // Finalized absence needs independently accepted unregistered authority.
+    // Every other absence/failure stays unavailable and cannot fall through.
     const indexReader = this.chain.contextGraphAuthorityIndexRevisionReader;
     if (indexReader !== undefined) {
       try {
@@ -1345,41 +1417,52 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
               }]]),
             }
           : undefined;
-        const flightKey = repairHints === undefined
-          ? `registration-binding:${contextGraphId}`
-          : `registration-binding-repair:${contextGraphId}:${durableBinding?.onChainId ?? ''}:${durableBinding?.onChainHash ?? ''}`;
-        const resolution = await finalizedAuthorityColdResolutionOf(this).read(
+        // Keep graph IDs, repair hints and freshness distinct even with delimiters.
+        const flightKey = JSON.stringify([
+          'registration-binding', contextGraphId, options.freshness ?? 'live',
+          repairHints === undefined ? null : [durableBinding?.onChainId ?? null, durableBinding?.onChainHash ?? null],
+        ]);
+        const coldResolution = finalizedAuthorityColdResolutionOf(this);
+        // Eligible readers may use retained evidence during cooldown, but a
+        // cache miss must defer; only normal circuit admission may reach RPC.
+        const mayServeAcceptedUnregisteredProjection =
+          options.allowAcceptedRfc64FinalizedAbsence === true
+          || (
+            options.allowApprovedPrivateReplicaFinalizedAbsence === true
+            && this.localApprovedAgentByCG?.has(contextGraphId) === true
+          );
+        const resolution = await coldResolution.read(
           flightKey,
-          async (flightSignal) => {
-            try {
-              return await this.rfc64AuthorityReadCoordinatorV1.runForeground(
-                flightSignal,
-                (readSignal, evidence) => this.resolveFinalizedContextGraphAuthorityTargetsV1(
-                  [contextGraphId],
-                  {
-                    ...evidence.agentResolverReadOptions(readSignal),
-                    ...repairHints,
-                  },
-                ),
-              );
-            } finally {
-              // The index reader's drain is global — one activity set shared with
-              // the bulk catalog lane — so it must run OUTSIDE the foreground
-              // permit: holding the permit across it would make every sibling
-              // registration read wait on unrelated bulk index activity inside
-              // this boundary's policy-read budget. It stays inside the flight,
-              // so a detached resolution retires only once its physical index
-              // work has settled.
-              await indexReader.whenIdle();
-            }
-          },
+          (flightSignal) => this.rfc64AuthorityReadCoordinatorV1.runForeground(
+            flightSignal,
+            (readSignal, evidence) => this.resolveFinalizedContextGraphAuthorityTargetsV1(
+              [contextGraphId],
+              {
+                ...evidence.agentResolverReadOptions(readSignal),
+                ...(options.freshness === undefined
+                  ? {}
+                  : { freshness: options.freshness }),
+                ...repairHints,
+              },
+            ),
+            mayServeAcceptedUnregisteredProjection
+              ? { retainedFallback: (signal) => peekFinalizedTargets(
+                  finalizedTargetPlan(
+                    this, this.contextGraphBindingState.authorityIndexOnChainIdFor.bind(this.contextGraphBindingState),
+                    [contextGraphId], repairHints?.durableBindingHints,
+                  ),
+                  this.chain.contextGraphAuthorityIndexRevisionReader,
+                  { signal, ...(options.freshness === undefined ? {} : { freshness: options.freshness }) },
+                ) }
+              : undefined,
+          ),
           {
             label: `resolveFinalizedContextGraphRegistrationBinding(${contextGraphId})`,
             requestTimeoutMs: registrationResolutionTimeoutMs,
             signal: options.signal,
           },
         );
-        const finalizedBinding = ((): ContextGraphRegistrationBinding | null => {
+        const finalizedBinding = await (async (): Promise<ContextGraphRegistrationBinding | null> => {
           // An older reader object without any finalized name capability is
           // an explicitly legacy adapter and may use the compatibility path.
           if (resolution.kind === 'legacy-current') {
@@ -1392,14 +1475,37 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           }
           const target = resolution.targets.get(contextGraphId);
           if (target === undefined) {
-            return !strictFinalizedDurableBindingRepair
+            // An already accepted owner policy is stronger and may be public
+            // or carry a wider signed private roster. Preserve that canonical
+            // path instead of masking it with this receiver's local approval.
+            if (
+              !strictFinalizedDurableBindingRepair
               && options.allowAcceptedRfc64FinalizedAbsence === true
-              ? { kind: 'unregistered' } as const
-              : {
-                  kind: 'unavailable' as const,
-                  reason: 'finalized-name-absence-unaccepted' as const,
-                  detail: 'finalized name absence has no accepted owner-signed unregistered authority',
-                };
+            ) {
+              return {
+                kind: 'unregistered',
+                unregisteredEvidence: 'accepted-rfc64-finalized-absence',
+              };
+            }
+            // A locally approved private replica may use exact finalized name
+            // absence only while its current approval, metadata, membership,
+            // and receiver delegation all still validate. This is participant
+            // read/sync authority, not a generic accepted owner policy.
+            if (
+              !strictFinalizedDurableBindingRepair
+              && !hasBindingCandidate
+              && options.allowApprovedPrivateReplicaFinalizedAbsence === true
+            ) {
+              const privateBinding =
+                await resolveApprovedPrivateReplicaUnregisteredBinding('finalized-absence');
+              if (privateBinding !== null) return privateBinding;
+            }
+            return {
+              kind: 'unavailable' as const,
+              reason: 'finalized-name-absence-unaccepted' as const,
+              detail: 'finalized name absence has no accepted unregistered authority',
+              detailCode: 'no-accepted-authority' as const,
+            };
           }
           if (
             target.expectedOnChainId <= 0n
@@ -1420,6 +1526,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
             kind: 'registered',
             onChainId: target.expectedOnChainId,
             provenance: localTarget === null ? 'name-hash' : 'reverse-name-hash',
+            ...(options.retainFinalizedSnapshot && target.kind === 'resolved-snapshot'
+              ? { finalizedSnapshot: target.finalizedSnapshot } : {}),
           } as const;
         })();
         if (finalizedBinding !== null) return finalizedBinding;
@@ -1460,7 +1568,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
             signal: options.signal,
           },
         );
-        if (binding === null) return { kind: 'unregistered' };
+        if (binding === null) return resolveLegacyUnregisteredBinding();
         return {
           kind: 'registered',
           onChainId: BigInt(binding.onChainId),
@@ -1477,7 +1585,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     }
 
     const resolveByNameHash = this.chain.resolveContextGraphIdByNameHash;
-    if (typeof resolveByNameHash !== 'function') return { kind: 'unregistered' };
+    if (typeof resolveByNameHash !== 'function') return resolveLegacyUnregisteredBinding();
     try {
       const nameHash = this.contextGraphNameCommitment(contextGraphId);
       const onChainId = await runBoundedOperation(
@@ -1489,7 +1597,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         },
       );
       return onChainId === null || onChainId <= 0n
-        ? { kind: 'unregistered' }
+        ? resolveLegacyUnregisteredBinding()
         : { kind: 'registered', onChainId, provenance: 'name-hash' };
     } catch (err) {
       return {
@@ -1504,8 +1612,9 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async resolveContextGraphNumericIdForPolicy(
     this: DKGAgent,
     contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
   ): Promise<bigint | null> {
-    const binding = await this.resolveContextGraphRegistrationBinding(contextGraphId);
+    const binding = await this.resolveContextGraphRegistrationBinding(contextGraphId, options);
     return binding.kind === 'registered' ? binding.onChainId : null;
   }
 
@@ -1532,20 +1641,28 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     // the list is empty and matches nothing, but the store is still read, so
     // a failing store fails closed instead of reading as an unregistered graph.
     const result = await this.store.query(
-      contextGraphOnChainIdBindingQuery(contextGraphId, { onChainIds: this.provenOnChainIdsFor(contextGraphId) }),
+      contextGraphOnChainIdBindingQuery(contextGraphId, {
+        onChainIds: this.provenOnChainIdsFor(contextGraphId),
+        includeConflicts: true,
+      }),
       {
         signal: options.signal,
         source: options.source ?? 'agent.contextGraph.onChainId',
       },
     );
     if (result.type !== 'bindings') return null;
+    let resolvedId: string | null = null;
     for (const binding of result.bindings) {
       const value = binding['id'];
       if (typeof value !== 'string') continue;
       const proven = this.provenOnChainContextGraphClaim(contextGraphId, value.replace(/^"|"$/g, ''));
-      if (proven !== null) return { onChainId: proven.onChainId, provenance: 'ontology' };
+      if (proven === null) continue;
+      if (resolvedId !== null && resolvedId !== proven.onChainId) {
+        throw new Error(`Context Graph "${contextGraphId}" has conflicting proven on-chain ids ${resolvedId} and ${proven.onChainId}`);
+      }
+      resolvedId = proven.onChainId;
     }
-    return null;
+    return resolvedId === null ? null : { onChainId: resolvedId, provenance: 'ontology' };
   }
 
   /**
@@ -2162,7 +2279,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
    *   sub-graphs on gossip publish, SWM write, and finalization replay paths:
    *   `gossip-publish-handler.ts`, `workspace-handler.ts`, and
    *   `finalization-handler.ts` call `ensureSubGraph()` and backfill the full
-   *   `_meta` registration when it is missing.
+   *   `_meta` registration when it is missing. Shared-memory sync does the same
+   *   when it stores a sub-graph's rows (`synced-sub-graph-registration.ts`).
    * - Because `subGraphName` is carried on the wire (in the workspace publish request
    *   and the N-Quads' named-graph field), replicated data is routed into the correct
    *   sub-graph named graph on receiving nodes — not into the root data graph.
@@ -2225,6 +2343,15 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     description?: string;
   }>> {
     return (await this.getCgMeta(contextGraphId)).subGraphs;
+  }
+
+  /**
+   * Whether a write may go into `subGraphName`: registered here, or found and
+   * registered by asking the graph's owner and connected peers (#3293).
+   */
+  async resolveSubGraphRegistration(this: DKGAgent, contextGraphId: string, subGraphName: string): Promise<UnregisteredSubGraphResolution> {
+    if (await hasSubGraphRegistration(this.store, contextGraphId, subGraphName)) return { registered: true };
+    return resolveUnregisteredSubGraphFromPeers(this, contextGraphId, subGraphName);
   }
 
   /**
@@ -2389,7 +2516,6 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     }
 
     await this.store.insert(quads);
-    this.contextGraphMetaProjection.markDirtyFromQuads(quads);
     await gm.ensureNewContextGraph(opts.id);
 
     this.subscribeToContextGraph(opts.id, { syncMode: 'always-on' });

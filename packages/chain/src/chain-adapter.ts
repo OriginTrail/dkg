@@ -1,15 +1,18 @@
+import type { ChainEvent } from './knowledge-asset-update-identity.js';
+export type { ChainEvent } from './knowledge-asset-update-identity.js';
+import type { ContextGraphAuthorityIndexRevisionReader } from './context-graph-authority-index-reader.js';
+export type { ContextGraphAuthorityIndexRevisionReader } from './context-graph-authority-index-reader.js';
 import type {
   RandomSamplingAvailability,
 } from './random-sampling-availability.js';
 import type { RandomSamplingReadContextReader } from './random-sampling-read-context.js';
+import type { KnowledgeAssetVersionSnapshotReadOptions } from './ka-version-snapshot-report.js';
 import type { ethers } from 'ethers';
 import type { RpcRequestClass } from './rpc-request-transport.js';
 import type { RpcUsageWindow } from './rpc-usage.js';
 import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-authority-index-snapshot.js';
 import type { ContextGraphAuthorityProjectionServedEvidence } from
   './context-graph-authority-index-projection.js';
-import type { ContextGraphAuthorityIndexId } from
-  './context-graph-authority-index-id.js';
 export type { ContextGraphAuthorityIndexId } from
   './context-graph-authority-index-id.js';
 
@@ -502,12 +505,6 @@ export interface KAUpdateVerification {
   merkleRootCount?: bigint;
 }
 
-export interface ChainEvent {
-  type: string;
-  blockNumber: number;
-  data: Record<string, unknown>;
-}
-
 /**
  * A process-local, non-serializable lease over one conservative background
  * event-scan boundary. It has no chain-head, finality or authorization
@@ -646,65 +643,6 @@ export interface ContextGraphFinalizedCreation {
   readonly accessPolicy: 0 | 1;
 }
 
-/**
- * Logical finalized-authority capability. Callers provide the complete target
- * set for one operation; the chain implementation owns validation, projection,
- * and the single finalized anchor.
- */
-export interface ContextGraphAuthorityIndexRevisionReader {
-  /**
-   * Resolve one RFC-64 authority binding at the index's finalized anchor.
-   * This intentionally differs from the public current-state name resolver.
-   */
-  resolveFinalizedContextGraphIdByNameHash?(
-    nameHash: string,
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<bigint | null>;
-  /**
-   * Resolve many unique name commitments from one finalized index projection.
-   * Missing and zero-hash commitments are omitted; ambiguity fails closed.
-   */
-  resolveFinalizedContextGraphIdsByNameHashes?(
-    nameHashes: readonly string[],
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<ReadonlyMap<string, bigint>>;
-  /**
-   * Resolve a name commitment and its complete authority state atomically at
-   * one finalized anchor. RFC-64 consumers should prefer this over composing
-   * the single-name ID resolver with a later snapshot read.
-   */
-  resolveFinalizedContextGraphAuthoritySnapshotByNameHash?(
-    nameHash: string,
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<ContextGraphAuthoritySnapshot | null>;
-  /**
-   * Resolve many name commitments and their complete authority state from one
-   * finalized index projection. Missing and zero-hash commitments are omitted;
-   * ambiguity fails the whole projection closed.
-   */
-  resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes?(
-    nameHashes: readonly string[],
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<ReadonlyMap<string, ContextGraphAuthoritySnapshot>>;
-  readContextGraphAuthorityIndexRevisions(
-    contextGraphIds: readonly ContextGraphAuthorityIndexId[],
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, string>>;
-  /**
-   * Read complete authority snapshots for many graphs at one finalized anchor.
-   * Responsibility selection and immediate authority acceptance share this
-   * projection. Optional so older/custom adapters retain their point-read path.
-   */
-  readContextGraphAuthorityIndexSnapshots?(
-    contextGraphIds: readonly ContextGraphAuthorityIndexId[],
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<ReadonlyMap<
-    ContextGraphAuthorityIndexId,
-    ContextGraphAuthoritySnapshot
-  >>;
-  /** Await the physical shared-index scans underlying detached/cancelled waiters. */
-  whenIdle(): Promise<void>;
-}
 
 export class ContextGraphChainScanPartialError extends Error {
   readonly partialResults: ContextGraphOnChain[];
@@ -897,8 +835,8 @@ export interface ContextGraphStorageRange {
   /** `getLatestContextGraphId()` at the anchor: the highest id minted so far. */
   readonly latestId: bigint;
   /**
-   * Entries in ascending id order for `[fromId, nextId)`. An id the chain
-   * proves nonexistent (`ERC721NonexistentToken`) is omitted, not an error.
+   * Entries for `[fromId, nextId)`, ascending and with no gap: the range ends
+   * before the first id that is nonexistent on chain or could not be read.
    */
   readonly entries: readonly ContextGraphStorageEntry[];
   /**
@@ -1430,6 +1368,19 @@ export interface ChainReadOptions {
   signal?: AbortSignal;
 }
 
+/** Read options for resolving one publish transaction's receipt. */
+export interface PublishReceiptReadOptions extends ChainReadOptions {
+  /**
+   * The caller never reads `blockTimestamp`. The adapter then skips the extra
+   * block-header lookup that only that field needs, which keeps the lookup at
+   * the single receipt round trip this surface documents, and reports the
+   * field as `0` ("not read"), the value it already reports when the header is
+   * unavailable. Receipt, block number, transaction index and every parsed
+   * publish fact are unchanged.
+   */
+  readonly skipBlockTimestamp?: boolean;
+}
+
 /**
  * One coherent finalized Knowledge Asset version and the immutable physical
  * evidence that produced it. The binding fields are optional only for legacy
@@ -1480,8 +1431,8 @@ export interface ContextGraphLiveAuthorityReadOptions extends ChainReadOptions {
   freshness?: 'live' | 'bounded';
 }
 
-/** Options honored only by finalized Context Graph authority projections. */
-export interface ContextGraphAuthorityReadOptions extends ChainReadOptions {
+/** Finalized authority projection reads; freshness defaults to live. */
+export interface ContextGraphAuthorityReadOptions extends ChainReadOptions, Pick<ContextGraphLiveAuthorityReadOptions, 'freshness'> {
   /**
    * Finalized Context Graph authority reads only: told how the read was
    * answered. FOUR ways, and a consumer that assumes three will read the
@@ -1540,6 +1491,25 @@ export interface KnowledgeAssetUpdateContext {
   merkleLeafCount: number;
 }
 
+/** How a chain adapter's operational wallets, the payers of its transactions, sign. */
+export interface OperationalSigning {
+  /** An external signer signs for every operational wallet; the node holds none of their keys. */
+  readonly external: boolean;
+  /** The operational wallets, the first one primary. */
+  readonly payerAddresses: readonly string[];
+}
+
+/**
+ * The operational signing `chain` reports, or `undefined` for an adapter that
+ * does not report one (one without the capability): callers take such an
+ * adapter to sign with local wallets, and cannot list its payers.
+ */
+export function operationalSigningOf(
+  chain: Pick<ChainAdapter, 'operationalSigning'> | undefined,
+): OperationalSigning | undefined {
+  return typeof chain?.operationalSigning === 'function' ? chain.operationalSigning() : undefined;
+}
+
 /**
  * Chain-agnostic adapter interface for interacting with the DKG Trust Layer.
  *
@@ -1547,6 +1517,9 @@ export interface KnowledgeAssetUpdateContext {
  * Publishers reserve ID ranges via their signer address, then batch-mint KAs from those ranges.
  */
 export interface ChainAdapter {
+  /** Complete coherent public chain evidence for explicit snapshot recovery. */
+  readPublicGraphSnapshot?(contextGraphId: string, onChainId: string, options?: ChainReadOptions): Promise<import('./public-graph-snapshot.js').PublicGraphSnapshot>;
+
   chainType: 'evm' | 'solana';
   chainId: string;
   /**
@@ -1607,7 +1580,7 @@ export interface ChainAdapter {
    */
   resolvePublishByTxHash?(
     txHash: string,
-    options?: ChainReadOptions,
+    options?: PublishReceiptReadOptions,
   ): Promise<OnChainPublishResult | null>;
 
   /**
@@ -1754,9 +1727,9 @@ export interface ChainAdapter {
     /**
      * Read ContextGraphStorage slots `[fromId, fromId + maxIds)` (capped at
      * `getLatestContextGraphId()`) with view calls pinned to one block: the
-     * node's finality anchor (`chain.finalityConfirmations`). Ids are
-     * sequential, so this enumerates every Context Graph that exists on chain
-     * without event logs or archive state. Stateless: callers own any cursor.
+     * node's finality anchor (`chain.finalityConfirmations`). Ids are sequential,
+     * so this lists every Context Graph without event logs or archive state.
+     * Stateless: callers own any cursor. Rejects only when `fromId` is unreadable.
      */
     readContextGraphStorageRange?(
       options: ContextGraphStorageRangeOptions,
@@ -2007,6 +1980,15 @@ export interface ChainAdapter {
     types: Record<string, Array<{ name: string; type: string }>>,
     value: Record<string, unknown>,
   ): Promise<string>;
+
+  /**
+   * How the operational wallets (the payers of transactions) sign, and which
+   * they are. When an external signer signs for them the node holds none of
+   * their keys, and such a paying wallet never authors an asset: callers must
+   * not fall back to it as the author. Optional: see {@link operationalSigningOf}
+   * for an adapter without it.
+   */
+  operationalSigning?(): OperationalSigning;
 
   /**
    * Return `true` iff `address` has deployed bytecode on this chain.
@@ -2383,24 +2365,31 @@ export interface ChainAdapter {
    * or not at all. `null` means no endpoint could produce the view, and the caller must not
    * conclude anything from that.
    *
-   * PR #2300 r11 — it also carries the version's ATTRIBUTION, and it is taken from the MOST
-   * ADVANCED endpoint rather than the first that answers. Both follow from the same requirement:
-   * a caller deciding "is this recovered transaction still current" must not mix a root from one
-   * view with an author, a publisher or a block height from another, and a healthy-but-lagging
-   * endpoint answering first would make an old transaction look current.
+   * Attribution and block evidence belong to that same observation. Configured
+   * RPCs are primary-first fallbacks: the first endpoint supplying a complete
+   * view is authoritative, and unused fallbacks are not queried (GH#3098).
+   * This establishes currency at the selected endpoint's confirmation-depth
+   * block, not freshness against every configured RPC. Consumers still enforce
+   * their known receipt/event/version floors and defer when the view is behind.
    *
    * The pinned height uses `chain.finalityConfirmations`: confirmation 1 is the current head,
    * and larger values pin `head - confirmations + 1`.
+   *
+   * `options.onUnavailable` receives why a `null` was answered (each endpoint that was asked and
+   * supplied no view, host only, with a closed class). It is diagnostic: the `null` means the
+   * same without it.
    */
   readKnowledgeAssetVersionSnapshot?(
     kaId: bigint,
-    options?: ChainReadOptions,
+    options?: KnowledgeAssetVersionSnapshotReadOptions,
   ): Promise<KnowledgeAssetVersionSnapshot | null>;
 
   /**
    * Cheap lease validation for a previously-read coherent snapshot. A true
-   * result proves that the same finalized block hash and exact physical KAS
-   * binding generation are still current. Missing evidence is always false.
+   * result proves that the first usable configured endpoint still reports the
+   * same confirmation-depth block hash and exact physical KAS binding generation.
+   * A usable differing header returns false immediately; only unavailable or
+   * unusable endpoint evidence advances to a fallback. Missing evidence is false.
    */
   knowledgeAssetVersionSnapshotIsCurrent?(
     kaId: bigint,

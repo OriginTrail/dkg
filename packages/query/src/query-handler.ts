@@ -1,5 +1,5 @@
 import type { PeerId } from '@origintrail-official/dkg-core';
-import { contextGraphDataUri, assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
+import { assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 import {
   isStoreSchedulerBusyError,
   quadsToNQuads,
@@ -59,6 +59,8 @@ class UalResolutionError extends Error {
  * engine, and enforces result size limits.
  */
 export interface QueryHandlerDeps {
+  /** Recheck local evidence policy before a read and before releasing its result. */
+  assertReadEvidence?: (contextGraphId?: string) => Promise<void>;
   /**
    * #1105: optional resolver consulted when a CG has NO explicit
    * `queryAccess.contextGraphs` entry and `defaultPolicy` is 'deny'.
@@ -147,6 +149,10 @@ export class QueryHandler {
 
     // Dispatch to lookup handler
     try {
+      // UAL resolution is unscoped until the engine resolves it. Refuse it
+      // conservatively when any imported graph needs unsupported acceptance.
+      const evidenceScope = request.lookupType === 'ENTITY_BY_UAL' ? undefined : contextGraphId;
+      await this.deps.assertReadEvidence?.(evidenceScope);
       const limit = Math.min(request.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
       const timeout = Math.min(request.timeout ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
       const contextGraphPolicy = this.contextGraphPolicy(contextGraphId);
@@ -176,6 +182,7 @@ export class QueryHandler {
           response = errorResponse(opId, 'UNSUPPORTED_LOOKUP', `Unknown lookup type: ${request.lookupType}`);
       }
 
+      await this.deps.assertReadEvidence?.(evidenceScope);
       return this.enforceResultSize(response);
     } catch (err) {
       const busyError = storeSchedulerBusyCause(err);
@@ -386,11 +393,8 @@ export class QueryHandler {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing rdfType');
     }
 
-    const dataGraph = assertSafeIri(contextGraphDataUri(contextGraphId));
-    // Per-KA VM read-both: published data lives in …/_verifiable_memory/{addr}/{number} + (legacy) root.
-    const sparql = `SELECT DISTINCT ?entity WHERE { GRAPH ?g { ?entity a <${assertSafeIri(rdfType)}> } FILTER(STRSTARTS(STR(?g), "${dataGraph}/_verifiable_memory/") || STR(?g) = "${dataGraph}") } LIMIT ${limit}`;
-
-    const result = await this.queryEngine.query(sparql);
+    const sparql = `SELECT DISTINCT ?entity WHERE { ?entity a <${assertSafeIri(rdfType)}> } LIMIT ${limit}`;
+    const result = await this.queryEngine.query(sparql, { contextGraphId, view: 'verifiable-memory' });
     const entityUris = result.bindings.map(b => b['entity']);
 
     return {
@@ -411,10 +415,8 @@ export class QueryHandler {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing entityUri');
     }
 
-    const dataGraph = assertSafeIri(contextGraphDataUri(contextGraphId));
-    // Per-KA VM read-both: published data lives in …/_verifiable_memory/{addr}/{number} + (legacy) root.
-    const sparql = `SELECT ?p ?o WHERE { GRAPH ?g { <${assertSafeIri(entityUri)}> ?p ?o } FILTER(STRSTARTS(STR(?g), "${dataGraph}/_verifiable_memory/") || STR(?g) = "${dataGraph}") }`;
-    const result = await this.queryEngine.query(sparql);
+    const sparql = `SELECT ?p ?o WHERE { <${assertSafeIri(entityUri)}> ?p ?o }`;
+    const result = await this.queryEngine.query(sparql, { contextGraphId, view: 'verifiable-memory' });
 
     const ntriples = result.bindings
       .map(b => `<${entityUri}> <${b['p']}> ${formatObject(b['o'])} .`)

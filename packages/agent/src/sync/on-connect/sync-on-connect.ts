@@ -1,4 +1,4 @@
-import { createOperationContext, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
+import { advertisesSyncProtocol, createOperationContext, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
 import type { PeerCapabilityRegistry } from '../../p2p/peer-capability.js';
 import { peerCapabilitySink, type SyncOnConnectInput } from './sync-on-connect-compat.js';
 export type { SyncOnConnectContext, LegacySyncOnConnectContext, SyncOnConnectInput } from './sync-on-connect-compat.js';
@@ -134,7 +134,7 @@ export interface SyncOnConnectBaseContext extends CompatiblePeerSyncContext {
   logInfo: (ctx: OperationContext, message: string) => void;
   /**
    * Optional. Called when the peer is reachable but does not currently
-   * advertise PROTOCOL_SYNC. The orchestrator (`DKGAgent`) uses this to
+   * advertise either sync id. The orchestrator (`DKGAgent`) uses this to
    * remember the peer so it can retry later — either when libp2p's
    * `peer:update` event reports a new protocol list, or when the periodic
    * sync reconciler ticks. See packages/agent/src/dkg-agent.ts.
@@ -327,7 +327,7 @@ async function runSessionSelectedSharedMemoryRetry(
   try {
     const protocols = await getPeerProtocols(remotePeer);
     signal.throwIfAborted();
-    if (!protocols.includes(PROTOCOL_SYNC)) {
+    if (!advertisesSyncProtocol(protocols)) {
       logInfo(
         ctx,
         `Peer ${shortPeer} does not support sync protocol (protocols: ${protocols.join(', ')})`,
@@ -521,7 +521,7 @@ async function runSessionSyncOnConnect(
 
     peerCapabilities.observe(remotePeer, { source: 'identify-snapshot', protocols });
 
-    const hasSync = protocols.includes(PROTOCOL_SYNC);
+    const hasSync = advertisesSyncProtocol(protocols);
     if (!hasSync) {
       logInfo(ctx, `Peer ${shortPeer} does not support sync protocol (protocols: ${protocols.join(', ')})`);
       context.onPeerSkippedNoSync?.(remotePeer, protocols);

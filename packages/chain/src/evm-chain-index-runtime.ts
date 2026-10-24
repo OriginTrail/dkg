@@ -28,6 +28,7 @@ import { ethers, type JsonRpcProvider } from 'ethers';
 import type {
   ChainEventLogAuthoritySource,
   ChainEventLogBinding,
+  ChainEventLogEventScanIdentity,
   ChainEventLogHubRotationWindow,
 } from './chain-event-log-binding.js';
 import {
@@ -526,6 +527,17 @@ export function createEvmChainIndexRuntime(
     .getEvent('ContextGraphCreated')?.topicHash.toLowerCase();
   const contextGraphKaTopic0 = options.contextGraphStorage?.contractInterface
     .getEvent('KnowledgeAssetRegisteredToContextGraph')?.topicHash.toLowerCase();
+  // The two ContextGraphStorage families lend together or not at all, as they
+  // did before the knowledge-asset lease existed.
+  const contextGraphLeaseAddress = contextGraphCreatedTopic0 !== undefined
+    && contextGraphKaTopic0 !== undefined
+    ? contextGraphStorageNormalized
+    : undefined;
+  const knowledgeAssetStorageNormalized = options.knowledgeAssetStorage === undefined
+    ? undefined
+    : normalizeChainEventLogAddress(options.knowledgeAssetStorage.address);
+  const knowledgeAssetUpdatedTopic0 = options.knowledgeAssetStorage?.contractInterface
+    .getEvent('KnowledgeAssetUpdated')?.topicHash.toLowerCase();
 
   /**
    * The publisher may borrow a boundary only for ONE exact event family. The
@@ -533,33 +545,42 @@ export function createEvmChainIndexRuntime(
    * during a reorg pass, so contract/binding identity alone cannot prove that
    * the rows iterated before an awaited dispatch are still the held rows.
    */
-  async function readEventScanLease(identity: Readonly<{
-    eventType: 'ContextGraphCreated' | 'KnowledgeAssetRegisteredToContextGraph';
-    contextGraphStorageAddress: string;
-    topic0: string;
-  }>): Promise<Readonly<{
+  async function readEventScanLease(
+    identity: ChainEventLogEventScanIdentity,
+  ): Promise<Readonly<{
     throughBlockNumber: number;
     holds(): Promise<boolean>;
   }> | undefined> {
     const event = identity.eventType === 'ContextGraphCreated'
       ? {
           family: 'context-graph-authority' as const,
+          address: contextGraphLeaseAddress,
+          requestedAddress: identity.contextGraphStorageAddress,
           topic0: contextGraphCreatedTopic0,
         }
       : identity.eventType === 'KnowledgeAssetRegisteredToContextGraph'
         ? {
             family: 'context-graph-ka' as const,
+            address: contextGraphLeaseAddress,
+            requestedAddress: identity.contextGraphStorageAddress,
             topic0: contextGraphKaTopic0,
           }
-        : undefined;
+        : identity.eventType === 'KnowledgeAssetUpdated'
+          ? {
+              family: 'knowledge-asset' as const,
+              address: knowledgeAssetStorageNormalized,
+              requestedAddress: identity.knowledgeAssetStorageAddress,
+              topic0: knowledgeAssetUpdatedTopic0,
+            }
+          : undefined;
     if (
       event === undefined
-      || contextGraphStorageNormalized === undefined
+      || event.address === undefined
       || event.topic0 === undefined
-      || normalizeChainEventLogAddress(identity.contextGraphStorageAddress)
-        !== contextGraphStorageNormalized
+      || normalizeChainEventLogAddress(event.requestedAddress) !== event.address
       || identity.topic0.toLowerCase() !== event.topic0
     ) return undefined;
+    const familyAddress = event.address;
 
     const state = await options.store.load(options.scope);
     if (state === undefined) return undefined;
@@ -575,7 +596,7 @@ export function createEvmChainIndexRuntime(
     const coverage = findChainEventLogCoverage(
       state.coverage,
       event.family,
-      contextGraphStorageNormalized,
+      familyAddress,
     );
     if (coverage === undefined) return undefined;
 
@@ -601,7 +622,7 @@ export function createEvmChainIndexRuntime(
         const currentCoverage = findChainEventLogCoverage(
           current.coverage,
           event.family,
-          contextGraphStorageNormalized,
+          familyAddress,
         );
         return currentCoverage !== undefined
           && currentCoverage.coveredThroughBlock >= horizon
@@ -691,10 +712,14 @@ export function createEvmChainIndexRuntime(
     subscription,
     readHubRotationWindow,
   };
+  // Each identity is still checked against its own family inside the reader,
+  // so a runtime with only one of the two contracts lends only that family.
   if (
-    contextGraphStorageNormalized !== undefined
-    && contextGraphCreatedTopic0 !== undefined
-    && contextGraphKaTopic0 !== undefined
+    contextGraphLeaseAddress !== undefined
+    || (
+      knowledgeAssetStorageNormalized !== undefined
+      && knowledgeAssetUpdatedTopic0 !== undefined
+    )
   ) {
     binding.readEventScanLease = readEventScanLease;
   }

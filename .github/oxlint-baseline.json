@@ -297,9 +297,6 @@
       "bench/publish-async-get.bench.ts": {
         "{\"message\":\"Variable 'payload' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'payload' is declared here\",\"source\":\"payload\"}]}": 1
       },
-      "ccl_v0_1/tests/run_inline_surface_tests.js": {
-        "{\"message\":\"Parameter 'graph' is declared but never used. Unused parameters should start with a '_'.\",\"evidence\":[{\"label\":\"'graph' is declared here\",\"source\":\"graph\"}]}": 1
-      },
       "demo/agent-a.mjs": {
         "{\"message\":\"Variable 'gotCircuit' is assigned a value but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'gotCircuit' is declared here\",\"source\":\"gotCircuit\"},{\"label\":\"it was last assigned here\",\"source\":\"gotCircuit\"}]}": 1
       },
@@ -1783,6 +1780,9 @@
       },
       "packages/adapter-prime-agent/extension/src/extension.ts": {
         "{\"message\":\"Identifier 'existsSync' is imported but never used.\",\"evidence\":[{\"label\":\"'existsSync' is imported here\",\"source\":\"existsSync\"}]}": 1
+      },
+      "packages/agent/ccl_v0_1/tests/run_inline_surface_tests.js": {
+        "{\"message\":\"Parameter 'graph' is declared but never used. Unused parameters should start with a '_'.\",\"evidence\":[{\"label\":\"'graph' is declared here\",\"source\":\"graph\"}]}": 1
       },
       "packages/agent/src/ccl-fact-resolution.ts": {
         "{\"message\":\"Identifier 'contextGraphDataUri' is imported but never used.\",\"evidence\":[{\"label\":\"'contextGraphDataUri' is imported here\",\"source\":\"contextGraphDataUri\"}]}": 1,

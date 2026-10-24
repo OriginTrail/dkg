@@ -1,12 +1,20 @@
+import { QueryResultTooLargeError } from './query-result-size-error.js';
+import { selectContentPartitions, type ContentPartition } from './content-partition-policy.js';
+import { classifyScopedContentGraph, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
+import { createQueryStoreReadContext, createStoreReadLane, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
+import { stripSparqlLiteralValue } from './query-binding.js';
+import { readScopedContentGraphCatalog, readRegisteredViewSubGraphs, readChildContextGraphAuthority } from './scoped-content-graph-catalog.js';
+import { resolveLegacyRouteScope } from './legacy-route-scope.js';
+import { resolveQueryReadPlan, type QueryReadPlan } from './query-read-plan.js';
+import { storeOptions } from './query-store-options.js';
 import {
-  asGraphWriteRevisionSource,
-  isSparqlHttpResponseError,
+  asGraphWriteRevisionSource, asQueryReadAdmissionCapability,
+  isSparqlHttpResponseError, StoreResponseTooLargeError,
 } from '@origintrail-official/dkg-storage';
 import type {
   TripleStore,
   Quad,
   QueryResult as StoreQueryResult,
-  QueryOptions as StoreQueryOptions,
 } from '@origintrail-official/dkg-storage';
 import {
   ExactGraphReadError,
@@ -30,11 +38,10 @@ import {
   contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiableMemoryUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer,
   contextGraphLayerUriCandidates, contextGraphLayerPrefixCandidates,
   contextGraphAssertionPrefixCandidates,
-  contextGraphSubGraphUri, contextGraphMetaUri, contextGraphSharedMemoryMetaUri, assertionLifecycleUri,
-  contextGraphSubGraphMetaUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri,
+  contextGraphSubGraphUri, contextGraphMetaUri, assertionLifecycleUri,
+  contextGraphPrivateUri, contextGraphSubGraphPrivateUri,
   assertSafeIri, escapeSparqlLiteral, validateSubGraphName,
   ASSERTION_NAMED_GRAPH_PREFIX,
-  isAssertionScopedChildGraph,
   type GetView,
   REMOVED_VIEWS,
   TrustLevel,
@@ -55,7 +62,6 @@ import {
   constrainGraphVariablesToAllowedSet,
   prepareGraphScope,
   requireGraphScopeRewrite,
-  rewriteGraphRoute,
   rewriteGraphSet,
   transitionGraphScope,
   wrapWithGraph,
@@ -63,9 +69,10 @@ import {
 } from './sparql-graph-scope.js';
 import { injectMinTrustFilter } from './sparql-min-trust.js';
 import { CallerSparqlRejectedError } from './caller-sparql-error.js';
-import { raceAgainstCallerAbort } from './caller-abort.js';
-import { ScopedContentGraphDiscoveryMemo } from './scoped-content-graph-discovery-memo.js';
+import { ScopedContentGraphDiscoveryMemo, type ScopedContentGraphDiscoverySnapshot } from './scoped-content-graph-discovery-memo.js';
 
+import { ScopedQueryViolationError } from './scoped-query-error.js';
+import { assertWithheldGraphQuery } from './withheld-graph-scope.js';
 export { ScopedQueryViolationError } from './scoped-query-error.js';
 
 /** Upstream statuses that mean the SUBMITTED query was malformed. */
@@ -83,67 +90,6 @@ export interface ViewResolution {
    * assertions) and verifiable-memory (multiple quorum graphs).
    */
   graphPrefixes: string[];
-}
-
-function storeOptions(options: QueryOptions | undefined): StoreQueryOptions | undefined {
-  if (!options?.signal && !options?.priority && !options?.source) return undefined;
-  return {
-    signal: options.signal,
-    priority: options.priority,
-    source: options.source,
-  };
-}
-
-function sharedDiscoveryStoreOptions(
-  options: StoreQueryOptions | undefined,
-): StoreQueryOptions | undefined {
-  if (!options?.priority && !options?.source) return undefined;
-  return {
-    priority: options.priority,
-    source: options.source,
-  };
-}
-
-interface StoreReadLane {
-  query(sparql: string): Promise<StoreQueryResult>;
-  listGraphsByPrefix(prefix: string): Promise<string[]>;
-  listGraphFamily(rootGraph: string): Promise<string[]>;
-}
-
-interface QueryStoreReadContext extends StoreReadLane {
-  readonly signal: AbortSignal | undefined;
-  readonly shared: StoreReadLane & { readonly cacheKey: string };
-}
-
-function createStoreReadLane(
-  store: TripleStore,
-  options: StoreQueryOptions | undefined,
-): StoreReadLane {
-  return {
-    query: (sparql) => store.query(sparql, options),
-    listGraphsByPrefix: (prefix) => listGraphsByPrefix(store, prefix, options),
-    listGraphFamily: (rootGraph) => listGraphFamily(store, rootGraph, options),
-  };
-}
-
-function createQueryStoreReadContext(
-  store: TripleStore,
-  queryOptions: QueryOptions | undefined,
-): QueryStoreReadContext {
-  const options = storeOptions(queryOptions);
-  const lane = createStoreReadLane(store, options);
-  const sharedOptions = sharedDiscoveryStoreOptions(options);
-  return {
-    ...lane,
-    signal: options?.signal,
-    shared: {
-      ...createStoreReadLane(store, sharedOptions),
-      cacheKey: JSON.stringify([
-        sharedOptions?.priority ?? 'normal',
-        sharedOptions?.source ?? null,
-      ]),
-    },
-  };
 }
 
 /**
@@ -361,6 +307,8 @@ export function resolveViewGraphs(
   }
 }
 
+type ScopedQueryReadPlan = Extract<QueryReadPlan, { kind: 'scoped' }>;
+
 /**
  * Local-only query engine that executes SPARQL against this node's own
  * triple store. No remote query capability — by design (Spec §1.6 Store
@@ -388,7 +336,6 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     if (prepared.wordTokens.has('SERVICE')) {
       throw new Error('SPARQL rejected: SERVICE clauses are not allowed');
     }
-    const reads = createQueryStoreReadContext(this.store, options);
     const guard = validateReadOnlySparql(prepared);
     if (!guard.safe) {
       throw new Error(`SPARQL rejected: ${guard.reason}`);
@@ -397,243 +344,92 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // Active UCHAR syntax is materialized once, immediately before the final
     // caller query crosses the store boundary.
     const initialGraphScope = prepareGraphScope(prepared);
-    let routedScope = initialGraphScope;
-
-    // ── V10 view-based routing ────────────────────────────────────────
-    const effectiveContextGraphId = options?.contextGraphId;
-    if (effectiveContextGraphId) {
-      assertNoCallerDatasetClauses(initialGraphScope);
-    }
-
+    if (options?.contextGraphId) assertNoCallerDatasetClauses(initialGraphScope);
     if (options?.subGraphName) {
-      const v = validateSubGraphName(options.subGraphName);
-      if (!v.valid) throw new Error(`Invalid sub-graph name for query: ${v.reason}`);
+      const validation = validateSubGraphName(options.subGraphName);
+      if (!validation.valid) throw new Error(`Invalid sub-graph name for query: ${validation.reason}`);
     }
-
-    if (effectiveContextGraphId && !options?.view) {
-      const dataGraph = options?.subGraphName
-        ? contextGraphSubGraphUri(effectiveContextGraphId, options.subGraphName)
-        : contextGraphDataUri(effectiveContextGraphId);
-      const sharedMemoryGraph = contextGraphSharedMemoryUri(effectiveContextGraphId, options?.subGraphName);
-      // Per-KA SWM: when a route targets SWM, expand the allow-set with the discovered
-      // …/_shared_memory/{addr}/{number} graphs so GRAPH-variable scans bind them.
-      const swmRouted = (options?.includeSharedMemory ?? options?.includeWorkspace) || options?.graphSuffix === '_shared_memory';
-      const swmPerKaGraphs = swmRouted
-        ? await this.discoverGraphsByPrefix(`${sharedMemoryGraph}/`, reads)
-        : [];
-      // Per-KA VM: published data is in …/_verifiable_memory/{addr}/{number}; bind those too
-      // for GRAPH-variable scans on any route that reads the data graph.
-      const dataRouted = options?.graphSuffix !== '_shared_memory';
-      const vmPerKaGraphs = dataRouted
-        ? await this.discoverGraphsByPrefix(
-            `${dataGraph}/_verifiable_memory/`,
-            reads,
-          )
-        : [];
-      const allowedGraphs = options?.includeSharedMemory ?? options?.includeWorkspace
-        ? [dataGraph, ...vmPerKaGraphs, sharedMemoryGraph, ...swmPerKaGraphs]
-        : options?.graphSuffix === '_shared_memory'
-          ? [sharedMemoryGraph, ...swmPerKaGraphs]
-          : [dataGraph, ...vmPerKaGraphs];
-      // Authenticated callers that scope a query to a `contextGraphId`
-      // already have read access to that CG; refusing them visibility
-      // into the same CG's metadata graphs breaks every legitimate
-      // metadata read:
-      //   - `/_meta` — curator lookup, allowedAgent list, registration
-      //     status (invite-flow `assert_curator_triple_landed` probe,
-      //     CG Overview UI, downstream sync code)
-      //   - `/_shared_memory_meta` — workspaceOwner / promote-time
-      //     ownership metadata (devnet-test-swm-ownership-restart
-      //     `wait_for_owner_meta` probe, ACL enforcement on replicas).
-      //
-      // Privacy fence: a caller that explicitly narrowed routing to
-      // SWM-only via `graphSuffix: '_shared_memory'` does NOT gain
-      // access to the CG-level `_meta` (curator / allowedAgent /
-      // registrationStatus). They asked for SWM, they get SWM
-      // (including `_shared_memory_meta` for the workspaceOwner /
-      // ownership ACL probe). All other scoped routes expose both
-      // `_meta` and `_shared_memory_meta` for the legitimate metadata
-      // reads called out above.
-      //
-      // Sub-graph metadata uses `contextGraphSubGraphMetaUri`
-      // (`/<sub>/_meta`) — the same path the storage layer
-      // (`graph-manager.ts`) writes to — not the
-      // `/context/<sub>/_meta` shape produced by `contextGraphMetaUri`
-      // when a subGraphId is passed.
-      //
-      // Metadata graphs are always part of the scoped explicit allow-set:
-      // UI helpers enumerate sub-graph metadata with `GRAPH ?g` under a
-      // contextGraphId, while explicit GRAPH IRIs still need the same static
-      // route checks. Broader content-partition scans are handled later and
-      // require an explicit count-query opt-in.
-      const subGraphName = options?.subGraphName;
-      const isSwmOnlyRoute = options?.graphSuffix === '_shared_memory';
-      const metaAllowList = [
-        ...(isSwmOnlyRoute
-          ? []
-          : subGraphName
-            ? [
-                // Sub-graph metadata graph (`<cg>/<sub>/_meta`).
-                contextGraphSubGraphMetaUri(effectiveContextGraphId, subGraphName),
-                // Root CG metadata graph (`<cg>/_meta`). Canonical KA provenance
-                // (`rootEntity` / `partOf` / `confirmed` status) is written to the
-                // ROOT `_meta` even for sub-graph publishes — see
-                // `finalization-handler.ts` (the confirmed-meta writes hardcode
-                // `<cg>/_meta`). A sub-graph-scoped reader (e.g. the EPCIS events
-                // query) joins provenance from there, so the root `_meta` must be
-                // admitted alongside the sub-graph `_meta`. Both are within the
-                // same `contextGraphId`, so this does not cross the privacy
-                // boundary (which is the CG scope itself).
-                contextGraphMetaUri(effectiveContextGraphId),
-              ]
-            : [contextGraphMetaUri(effectiveContextGraphId)]),
-        contextGraphSharedMemoryMetaUri(effectiveContextGraphId, subGraphName),
-      ];
-      // `_private` is excluded from the allow-set by default (it is more
-      // sensitive than the `_meta` graphs above). Only callers that opt in
-      // via `includePrivate` may name the CG's own private partition — the
-      // EPCIS events query does this to surface private-anchored events to
-      // the hosting node. This stays strictly within the queried CG, so it
-      // is not a cross-CG leak, and it does not widen any other caller.
-      const privateAllowList = options?.includePrivate
-        ? [
-            subGraphName
-              ? contextGraphSubGraphPrivateUri(effectiveContextGraphId, subGraphName)
-              : contextGraphPrivateUri(effectiveContextGraphId),
-            ...(await this.discoverGraphScopedPrivateGraphs(
-              effectiveContextGraphId,
-              reads,
-              subGraphName,
-            )),
-          ]
-        : [];
-      const explicitAllowedGraphs = [...allowedGraphs, ...metaAllowList, ...privateAllowList];
-      const shouldExpandGraphVariables =
-        options?.includeContextGraphPartitions === true
-        && initialGraphScope.graphVariables.length > 0;
-      const variableAllowedGraphs = shouldExpandGraphVariables
-        ? await this.resolveScopedGraphVariableAllowList(
-            effectiveContextGraphId,
-            explicitAllowedGraphs,
-            { subGraphName, isSwmOnlyRoute },
-            reads,
-          )
-        : explicitAllowedGraphs;
-      // Explicit GRAPH IRIs remain limited to the static route-specific
-      // allow-list. GRAPH variables only gain known same-CG content
-      // partitions for callers that explicitly opt into broad count scans;
-      // legacy scoped routes keep their selected memory-layer contract.
-      assertExplicitGraphIrisAllowed(initialGraphScope, explicitAllowedGraphs);
-      routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(
-        initialGraphScope,
-        variableAllowedGraphs,
-      ));
+    const admission = asQueryReadAdmissionCapability(this.store);
+    const plan = resolveQueryReadPlan(initialGraphScope, options,
+      this.store.graphEnumerationVisibility ? admission : null);
+    const reads = createQueryStoreReadContext(this.store, options);
+    if (options?.withheldGraphRoots?.length && plan.kind !== 'unscoped') {
+      throw new Error('withheldGraphRoots applies only to queries without a contextGraphId');
     }
-
-    if (options?.view) {
-      if (!effectiveContextGraphId) {
-        throw new Error(
-          `view '${options.view}' requires a contextGraphId to scope the query`,
-        );
-      }
-      // GH #184 — `subGraphName` + `view` is now supported: the view scopes to
-      // the named sub-graph's per-layer partitions (handled in queryWithView /
-      // resolveViewGraphs). Validate the name shape before routing.
-      if (options.subGraphName) {
-        const v = validateSubGraphName(options.subGraphName);
-        if (!v.valid) throw new Error(v.reason);
-      }
-      return this.queryWithView(
-        initialGraphScope,
-        options.view,
-        effectiveContextGraphId,
-        options,
-        reads,
-      );
-    }
-
-    // ── Legacy routing (V9 compat) ────────────────────────────────────
-    let effectiveScope = routedScope;
-
-    if (effectiveContextGraphId) {
-      const dataGraph = options?.subGraphName
-        ? contextGraphSubGraphUri(effectiveContextGraphId, options.subGraphName)
-        : contextGraphDataUri(effectiveContextGraphId);
-      const sharedMemoryGraph = contextGraphSharedMemoryUri(effectiveContextGraphId, options?.subGraphName);
-      if (options?.includeSharedMemory ?? options?.includeWorkspace) {
-        // Per-KA VM: read-both the published per-KA …/_verifiable_memory/{addr}/{number} + root.
-        const vmGraphsInc = await this.discoverGraphsByPrefix(
-          `${dataGraph}/_verifiable_memory/`,
-          reads,
-        );
-        const dataScope = requireGraphScopeRewrite(rewriteGraphRoute(
-          routedScope,
-          vmGraphsInc.length > 0 ? [dataGraph, ...vmGraphsInc] : [],
-          dataGraph,
-          'deduplicated-values-union',
-        ));
-        // Per-KA SWM: union the discovered …/_shared_memory/{addr}/{number} graphs.
-        const swmGraphs = await this.discoverGraphsByPrefix(
-          `${sharedMemoryGraph}/`,
-          reads,
-        );
-        const sharedMemoryScope = requireGraphScopeRewrite(rewriteGraphRoute(
-          routedScope,
-          swmGraphs,
-          sharedMemoryGraph,
-          'union-only',
-        ));
-        // Both are graph-wrapped forms of the CALLER's query, so they carry
-        // the same provenance as execAndNormalize (PR #2330 review — this
-        // branch previously bypassed the marker, leaving the original 500 for
-        // any `includeSharedMemory` request with malformed SPARQL).
-        const dataResult = await this.execCallerQuery(dataScope, reads);
-        const smResult = await this.execCallerQuery(sharedMemoryScope, reads);
-        return mergeSharedMemoryAndDataResults(dataResult, smResult);
-      }
-      if (options?.graphSuffix === '_shared_memory') {
-        // Uniform layout: SWM is per-KA …/_shared_memory/{addr}/{number}. Discover the
-        // per-KA graphs under the prefix and union them (the legacy bucket is now empty).
-        const swmGraphs = await this.discoverGraphsByPrefix(
-          `${sharedMemoryGraph}/`,
-          reads,
-        );
-        effectiveScope = requireGraphScopeRewrite(rewriteGraphRoute(
-          routedScope,
-          swmGraphs,
-          sharedMemoryGraph,
-          'union-only',
-        ));
-      } else {
-        // Per-KA VM: read-both the published per-KA …/_verifiable_memory/{addr}/{number} + root.
-        const vmGraphs = await this.discoverGraphsByPrefix(
-          `${dataGraph}/_verifiable_memory/`,
-          reads,
-        );
-        effectiveScope = requireGraphScopeRewrite(rewriteGraphRoute(
-          routedScope,
-          vmGraphs.length > 0 ? [dataGraph, ...vmGraphs] : [],
-          dataGraph,
-          'deduplicated-values-union',
-        ));
+    switch (plan.kind) {
+      case 'scoped': return this.queryScoped(initialGraphScope, options, plan, reads);
+      case 'view': return this.queryWithView(initialGraphScope, plan.options.view,
+        plan.options.contextGraphId, plan.options, reads, reads.catalog);
+      case 'unscoped': {
+        // The store answers over its dataset without the withheld graphs.
+        const withheld = options?.withheldGraphRoots ?? [];
+        if (withheld.length) assertWithheldGraphQuery(initialGraphScope);
+        return this.execWithExclusions(initialGraphScope, withheld.length
+          ? createStoreReadLane(this.store, { ...storeOptions(options), withheldGraphRoots: withheld }) : reads,
+        options?.excludeGraphPrefixes);
       }
     }
+  }
 
-    const result = await this.execAndNormalize(effectiveScope, reads);
-
-    // Strip results originating from excluded graphs (e.g. private CGs).
-    if (options?.excludeGraphPrefixes?.length && result.bindings.length > 0) {
-      return this.filterExcludedGraphs(result, options.excludeGraphPrefixes);
+  private queryScoped(scope: PreparedGraphScope, options: QueryOptions | undefined,
+    plan: ScopedQueryReadPlan, reads: QueryStoreReadContext): Promise<QueryResult> {
+    const execute = (discovery: ScopedContentGraphDiscoverySnapshot | null) => {
+      const lane = discovery ? { query: reads.query,
+        listGraphsByPrefix: async (prefix: string) => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads;
+      const variableContentGraphs = discovery ? selectContentPartitions(
+        discovery.partitions, plan.draftAccess, plan.graphs.subGraphName) : [];
+      return this.executeScoped(scope, plan, lane, variableContentGraphs, reads.catalog);
+    };
+    switch (plan.discovery.catalog.kind) {
+      case 'none': return execute(null);
+      case 'shared': return this.resolveScopedContentGraphDiscovery(plan.contextGraphId, reads).then(execute);
+      case 'admission-owned': return plan.discovery.catalog.owner.withQueryReadAdmission(async () =>
+        execute(await this.discoverScopedContentGraphDiscovery(plan.contextGraphId, reads.catalog)), storeOptions(options));
     }
+  }
 
-    return result;
+  private async executeScoped(initialGraphScope: PreparedGraphScope,
+    plan: ScopedQueryReadPlan, reads: StoreReadLane, variableContentGraphs: readonly string[], catalogReads: StoreReadLane): Promise<QueryResult> {
+    const { staticContentGraphs, subGraphName, metaAllowList, staticPrivateAllowList } = plan.graphs;
+    const partitions = new Map<string, string[]>();
+    for (const { root, prefix } of plan.discovery.contentPrefixes) {
+      partitions.set(root, await this.discoverGraphsByPrefix(prefix, reads));
+    }
+    const allowedGraphs = staticContentGraphs.flatMap(graph => [graph, ...(partitions.get(graph) ?? [])]);
+    const privateAllowList = plan.discovery.privatePartitions
+      ? [...staticPrivateAllowList, ...(await this.discoverGraphScopedPrivateGraphs(plan.contextGraphId, catalogReads, subGraphName))]
+      : staticPrivateAllowList;
+    const explicitAllowedGraphs = [...allowedGraphs, ...metaAllowList, ...privateAllowList];
+    const variableAllowedGraphs = [...new Set([...explicitAllowedGraphs, ...variableContentGraphs])];
+    // Explicit IRIs retain static route authority; only opted-in variables gain
+    // classified same-CG content selected for this caller and sub-graph.
+    assertExplicitGraphIrisAllowed(initialGraphScope, explicitAllowedGraphs);
+    const routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(initialGraphScope, variableAllowedGraphs));
+    const resolve = (target: { root: string; family: 'data' | 'shared-memory' }) => resolveLegacyRouteScope(
+      routedScope, target.root, target.family, prefix => this.discoverGraphsByPrefix(prefix, reads),
+      plan.fallbackPolicy);
+    const route = plan.execution;
+    if (route.kind === 'combined') {
+      const dataScope = await resolve(route.data);
+      const sharedScope = await resolve(route.sharedMemory);
+      const dataResult = await this.execCallerQuery(dataScope, reads);
+      const smResult = await this.execCallerQuery(sharedScope, reads);
+      return mergeSharedMemoryAndDataResults(dataResult, smResult);
+    }
+    return this.execWithExclusions(await resolve(route.target), reads, plan.excludedGraphPrefixes);
+  }
+
+  private async execWithExclusions(scope: PreparedGraphScope, reads: StoreReadLane, excludedGraphPrefixes: readonly string[] = []): Promise<QueryResult> {
+    const result = await this.execAndNormalize(scope, reads);
+    return excludedGraphPrefixes.length && result.bindings.length > 0
+      ? this.filterExcludedGraphs(result, excludedGraphPrefixes) : result;
   }
 
   /**
    * Remove bindings that contain values matching excluded graph URI prefixes.
    * This prevents private CG data from leaking into unscoped queries.
    */
-  private filterExcludedGraphs(result: QueryResult, prefixes: string[]): QueryResult {
+  private filterExcludedGraphs(result: QueryResult, prefixes: readonly string[]): QueryResult {
     const filtered = result.bindings.filter((binding) => {
       for (const value of Object.values(binding)) {
         if (typeof value !== 'string') continue;
@@ -656,9 +452,13 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     view: GetView,
     contextGraphId: string,
     options: QueryOptions,
-    reads: QueryStoreReadContext,
+    reads: StoreReadLane,
+    catalogReads: StoreReadLane,
   ): Promise<QueryResult> {
     const sparql = initialScope.source;
+    const fanOut = !options.subGraphName && !options.verifiedGraph
+      && !(view === 'working-memory' && options.assertionName);
+    const subGraphs = fanOut ? await readRegisteredViewSubGraphs(contextGraphId, catalogReads.query) : [];
     // Uniform layout (rc.17): a by-name working-memory read must target the per-KA
     // graph `…/_working_memory/{addr}/{number}` the data was written to. Resolve the
     // KA number from the `dkg:kaId` stamped on the lifecycle URN in `_meta` and pass
@@ -670,7 +470,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         contextGraphId,
         options.agentAddress,
         options.assertionName,
-        reads,
+        catalogReads,
         options.subGraphName,
       );
     }
@@ -717,12 +517,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // `verifiedGraph` VM read — it is already pinned to one graph (like a
     // by-name WM read); fanning out would broaden it across every sub-graph's
     // VM partition and return unrelated rows.
-    if (!options.subGraphName && !options.verifiedGraph && !(view === 'working-memory' && options.assertionName)) {
-      const subNames = await this.discoverRegisteredSubGraphNames(
-        contextGraphId,
-        reads,
-      );
-      for (const sub of subNames) {
+    if (fanOut) {
+      for (const sub of subGraphs) {
         const subResolution = resolveViewGraphs(view, contextGraphId, {
           agentAddress: options.agentAddress,
           subGraphName: sub,
@@ -752,8 +548,9 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       )));
     }
 
-    // De-dup so a sub-graph never gets unioned twice.
-    const dedupedGraphs = [...new Set(allGraphs)];
+    // Parent authorization never grants access to a registered child context graph.
+    const children = await readChildContextGraphAuthority(contextGraphId, catalogReads.query);
+    const dedupedGraphs = [...new Set(allGraphs)].filter(graph => !isKnownChildContextGraphPartition(graph, children));
     allGraphs.length = 0;
     allGraphs.push(...dedupedGraphs);
 
@@ -913,7 +710,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // rows, reject the unsupported shape explicitly so the caller gets a
     // clear error instead of wrong data.
     if (hasCrossGraphUnsafeModifier(scope)) {
-      throw new Error(
+      throw new ScopedQueryViolationError(
         'Multi-graph query combines an inner UNION with a solution-set ' +
           'modifier (DISTINCT/ORDER BY/LIMIT/OFFSET/GROUP BY/aggregate). ' +
           'This shape cannot be evaluated across graphs without corrupting ' +
@@ -934,20 +731,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
   private async discoverGraphsByPrefix(
     prefix: string,
-    reads: QueryStoreReadContext | StoreReadLane,
+    reads: StoreReadLane,
   ): Promise<string[]> {
-    // GraphSetIndexStore coalesces refreshes by priority. Never let that shared
-    // upstream flight capture one HTTP caller's disconnect signal; race the
-    // individual caller locally while priority/source stay on the shared lane.
-    const sharedReads = 'shared' in reads ? reads.shared : reads;
-    const callerSignal = 'shared' in reads ? reads.signal : undefined;
-    const allGraphs = await raceAgainstCallerAbort(
-      sharedReads.listGraphsByPrefix(prefix),
-      callerSignal,
-    );
-    return allGraphs.filter(
-      (g) => g.startsWith(prefix) && !g.includes('/_meta') && !g.includes('/staging/'),
-    );
+    const allGraphs = await reads.listGraphsByPrefix(prefix);
+    return filterRouteGraphsByPrefix(allGraphs, prefix);
   }
 
   /**
@@ -1076,165 +863,47 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     return undefined;
   }
 
-  private async resolveScopedGraphVariableAllowList(
-    contextGraphId: string,
-    staticAllowedGraphs: string[],
-    opts: { subGraphName?: string; isSwmOnlyRoute: boolean },
-    reads: QueryStoreReadContext,
-  ): Promise<string[]> {
-    if (opts.isSwmOnlyRoute) {
-      return staticAllowedGraphs;
-    }
-
-    const allowed = new Set(staticAllowedGraphs);
-    const scopedContentGraphs = await this.resolveScopedContentGraphAllowList(
-      contextGraphId,
-      reads,
-      opts.subGraphName,
-    );
-    for (const graph of scopedContentGraphs) {
-      allowed.add(graph);
-    }
-
-    return [...allowed];
-  }
-
-  private async resolveScopedContentGraphAllowList(
+  private async resolveScopedContentGraphDiscovery(
     contextGraphId: string,
     reads: QueryStoreReadContext,
-    subGraphName?: string,
-  ): Promise<readonly string[]> {
-    const contentKey = JSON.stringify([contextGraphId, subGraphName ?? null]);
+  ): Promise<ScopedContentGraphDiscoverySnapshot> {
     const graphPrefix = `did:dkg:context-graph:${contextGraphId}`;
     return this.scopedContentGraphDiscoveryMemo.get({
-      contentKey,
+      contextKey: contextGraphId,
       laneKey: reads.shared.cacheKey,
       graphPrefix,
       signal: reads.signal,
-      load: () => this.discoverScopedContentGraphAllowList(
+      load: () => this.discoverScopedContentGraphDiscovery(
         contextGraphId,
         reads.shared,
-        subGraphName,
       ),
     });
   }
 
-  private async discoverScopedContentGraphAllowList(
+  private async discoverScopedContentGraphDiscovery(
     contextGraphId: string,
     reads: StoreReadLane,
-    subGraphName?: string,
-  ): Promise<string[]> {
-    const allowed = new Set<string>();
-    const registeredSubGraphs = subGraphName
-      ? new Set([subGraphName])
-      : await this.discoverRegisteredSubGraphNames(contextGraphId, reads);
-    const registeredAssertionGraphs = await this.discoverRegisteredAssertionGraphs(
-      contextGraphId,
-      reads,
-    );
-    const knownChildContextGraphs = await this.discoverKnownChildContextGraphUris(
-      contextGraphId,
-      reads,
-    );
-    const allGraphs = await reads.listGraphFamily(
-      `did:dkg:context-graph:${contextGraphId}`,
-    );
-
-    for (const graph of allGraphs) {
-      if (
-        isScopedContentGraph(
-          graph,
-          contextGraphId,
-          registeredSubGraphs,
-          registeredAssertionGraphs,
-          knownChildContextGraphs,
-          subGraphName,
-        )
-      ) {
-        allowed.add(graph);
-      }
+  ): Promise<ScopedContentGraphDiscoverySnapshot> {
+    const visible = this.store.graphEnumerationVisibility;
+    // A filtered wrapper enumerates first, so authority fences observe child
+    // registrations that occurred during enumeration. Complete visibility uses
+    // one catalog query for inventory and authority under the same admission.
+    const filteredInventory = visible ? undefined
+      : await reads.listGraphsByPrefix(contextGraphDataUri(contextGraphId));
+    const catalog = await readScopedContentGraphCatalog(contextGraphId, reads.query, Boolean(visible));
+    const inventory = (visible
+      ? [...catalog.graphs].filter(graph => visible.call(this.store, graph))
+      : filteredInventory!).filter(graph =>
+        // Canonical root VM partitions retain the legacy read-both contract.
+        graph.startsWith(`${contextGraphDataUri(contextGraphId)}/_verifiable_memory/`)
+        || !isKnownChildContextGraphPartition(graph, catalog.childContextGraphs));
+    const partitions: ContentPartition[] = [];
+    for (const graph of inventory) {
+      const partition = classifyScopedContentGraph(graph, contextGraphId,
+        catalog.subGraphs, catalog.assertionGraphs, catalog.childContextGraphs);
+      if (partition) partitions.push(partition);
     }
-
-    return [...allowed];
-  }
-
-  private async discoverRegisteredSubGraphNames(
-    contextGraphId: string,
-    reads: StoreReadLane,
-  ): Promise<Set<string>> {
-    const names = new Set<string>();
-    const metaGraph = contextGraphMetaUri(contextGraphId);
-    const result = await reads.query(
-      `SELECT ?name WHERE {
-        GRAPH <${assertSafeIri(metaGraph)}> {
-          ?subGraph a <http://dkg.io/ontology/SubGraph> ;
-                    <http://schema.org/name> ?name .
-        }
-      }`,
-    );
-    if (result.type !== 'bindings') return names;
-
-    for (const row of result.bindings) {
-      const name = stripSparqlLiteralValue(row['name']);
-      if (validateSubGraphName(name).valid) {
-        names.add(name);
-      }
-    }
-    return names;
-  }
-
-  private async discoverRegisteredAssertionGraphs(
-    contextGraphId: string,
-    reads: StoreReadLane,
-  ): Promise<Set<string>> {
-    const graphs = new Set<string>();
-    const metaGraph = contextGraphMetaUri(contextGraphId);
-    const result = await reads.query(
-      `SELECT ?graph WHERE {
-        GRAPH <${assertSafeIri(metaGraph)}> {
-          ?assertion <http://dkg.io/ontology/assertionGraph> ?graph .
-        }
-      }`,
-    );
-    if (result.type !== 'bindings') return graphs;
-
-    for (const row of result.bindings) {
-      const graph = row['graph'];
-      if (typeof graph === 'string' && graph.length > 0) {
-        graphs.add(graph);
-      }
-    }
-    return graphs;
-  }
-
-  private async discoverKnownChildContextGraphUris(
-    contextGraphId: string,
-    reads: StoreReadLane,
-  ): Promise<Set<string>> {
-    const rootPrefix = `${contextGraphDataUri(contextGraphId)}/`;
-    const result = await reads.query(
-      `SELECT DISTINCT ?ctxGraph WHERE {
-        GRAPH ?g {
-          {
-            ?ctxGraph <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://dkg.network/ontology#ContextGraph> .
-          } UNION {
-            ?ctxGraph <https://dkg.network/ontology#registrationStatus> ?status .
-          }
-        }
-        FILTER(STR(?g) = CONCAT(STR(?ctxGraph), "/_meta"))
-        FILTER(STRSTARTS(STR(?ctxGraph), "${escapeSparqlLiteral(rootPrefix)}"))
-      }`,
-    );
-    const uris = new Set<string>();
-    if (result.type !== 'bindings') return uris;
-
-    for (const row of result.bindings) {
-      const uri = row['ctxGraph'];
-      if (typeof uri === 'string' && uri.length > 0) {
-        uris.add(uri);
-      }
-    }
-    return uris;
+    return { inventory, partitions };
   }
 
   /**
@@ -1254,6 +923,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     try {
       return await reads.query(sparql);
     } catch (err) {
+      if (err instanceof StoreResponseTooLargeError) throw new QueryResultTooLargeError(err);
       if (isSparqlHttpResponseError(err) && MALFORMED_CALLER_QUERY_STATUSES.has(err.status)) {
         throw new CallerSparqlRejectedError(err.message, err.status, { cause: err });
       }
@@ -1445,101 +1115,6 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
 }
 
-function isScopedContentGraph(
-  graph: string,
-  contextGraphId: string,
-  registeredSubGraphs: Set<string>,
-  registeredAssertionGraphs: Set<string>,
-  knownChildContextGraphs: Set<string>,
-  subGraphName?: string,
-): boolean {
-  const root = contextGraphDataUri(contextGraphId);
-  if (graph === root) return !subGraphName;
-  if (!graph.startsWith(`${root}/`)) return false;
-  if (isKnownChildContextGraphPartition(graph, knownChildContextGraphs)) return false;
-
-  const tail = graph.slice(root.length + 1);
-  if (
-    !tail ||
-    isMetadataGraphTail(tail) ||
-    isPrivateGraphTail(tail) ||
-    isRulesGraphTail(tail) ||
-    isStagingGraphTail(tail)
-  ) {
-    return false;
-  }
-
-  if (!subGraphName) {
-    if (tail.startsWith('_shared_memory/')) return true;
-    if (tail.startsWith('_verifiable_memory/')) return !isMetadataGraphTail(tail);
-    if (tail.startsWith('_working_memory/')) return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs);
-  }
-
-  const slash = tail.indexOf('/');
-  const firstSegment = slash >= 0 ? tail.slice(0, slash) : tail;
-  const remaining = slash >= 0 ? tail.slice(slash + 1) : '';
-  if (subGraphName && firstSegment !== subGraphName) return false;
-  if (!registeredSubGraphs.has(firstSegment) || !validateSubGraphName(firstSegment).valid) {
-    return false;
-  }
-
-  if (!remaining) return true;
-  if (remaining.startsWith('_shared_memory/')) return true;
-  if (remaining.startsWith('_verifiable_memory/')) return !isMetadataGraphTail(remaining);
-  if (remaining.startsWith('_working_memory/')) return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs);
-  return false;
-}
-
-function isRegisteredAssertionGraphOrScopedChild(
-  graph: string,
-  registeredAssertionGraphs: Set<string>,
-): boolean {
-  if (registeredAssertionGraphs.has(graph)) return true;
-  for (const registeredGraph of registeredAssertionGraphs) {
-    if (isAssertionScopedChildGraph(graph, registeredGraph)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function isMetadataGraphTail(tail: string): boolean {
-  return (
-    tail === '_meta' ||
-    tail === '_shared_memory_meta' ||
-    tail.endsWith('/_meta') ||
-    tail.endsWith('/_shared_memory_meta') ||
-    tail.includes('/_meta/') ||
-    tail.includes('/_shared_memory_meta/')
-  );
-}
-
-function isPrivateGraphTail(tail: string): boolean {
-  return tail === '_private' || tail.startsWith('_private/') || tail.endsWith('/_private') || tail.includes('/_private/');
-}
-
-function isRulesGraphTail(tail: string): boolean {
-  return tail === '_rules' || tail.startsWith('_rules/') || tail.endsWith('/_rules') || tail.includes('/_rules/');
-}
-
-function isKnownChildContextGraphPartition(graph: string, knownChildContextGraphs: Set<string>): boolean {
-  for (const childContextGraph of knownChildContextGraphs) {
-    if (graph === childContextGraph || graph.startsWith(`${childContextGraph}/`)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function isStagingGraphTail(tail: string): boolean {
-  return tail.startsWith('_verifiable_memory/staging/') || tail.includes('/_verifiable_memory/staging/');
-}
-
-function stripSparqlLiteralValue(value: string | undefined): string {
-  if (!value) return '';
-  return value.replace(/^"/, '').replace(/"(?:\^\^<[^>]+>|@[a-zA-Z-]+)?$/, '');
-}
-
 function parseCanonicalIntegerBinding(value: string | undefined): bigint | undefined {
   const lexical = stripSparqlLiteralValue(value);
   if (!/^(?:0|[1-9][0-9]*)$/.test(lexical)) return undefined;
@@ -1548,28 +1123,6 @@ function parseCanonicalIntegerBinding(value: string | undefined): bigint | undef
   } catch {
     return undefined;
   }
-}
-
-async function listGraphsByPrefix(
-  store: TripleStore,
-  prefix: string,
-  options?: StoreQueryOptions,
-): Promise<string[]> {
-  return store.listGraphsByPrefix
-    ? store.listGraphsByPrefix(prefix, options)
-    : (await store.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
-}
-
-async function listGraphFamily(
-  store: TripleStore,
-  rootGraph: string,
-  options?: StoreQueryOptions,
-): Promise<string[]> {
-  const graphs = await listGraphsByPrefix(store, `${rootGraph}/`, options);
-  if (await store.hasGraph(rootGraph, options)) {
-    graphs.unshift(rootGraph);
-  }
-  return graphs;
 }
 
 function mergeSharedMemoryAndDataResults(
@@ -1663,4 +1216,9 @@ function hasCrossGraphUnsafeModifier(scope: PreparedGraphScope): boolean {
     ) return true;
   }
   return false;
+}
+
+/** Route visibility is derived from inventory, independently of content authority. */
+function filterRouteGraphsByPrefix(graphs: readonly string[], prefix: string): string[] {
+  return graphs.filter(g => g.startsWith(prefix) && !g.includes('/_meta') && !g.includes('/staging/'));
 }

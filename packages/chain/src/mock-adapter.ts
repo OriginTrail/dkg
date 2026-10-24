@@ -54,6 +54,7 @@ import {
   ChallengeNoLongerActiveError,
 } from './chain-adapter.js';
 import { ethers } from 'ethers';
+import { ChainWriteAheadHookError } from './write-ahead-hook-error.js';
 import {
   isNonexistentContextGraphStorageRevert,
   readContextGraphStorageRangeV1,
@@ -670,9 +671,10 @@ export class MockChainAdapter implements ChainAdapter {
       // Codex PR #241 iter-7: `await` an async WAL hook.
       await params.onBroadcast?.({ txHash: mockUpdateTxHash });
     } catch (hookErr) {
-      throw new Error(
+      throw new ChainWriteAheadHookError(
         `chain:writeahead hook failed before updateKnowledgeCollectionV10 broadcast (mock): ` +
         `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+        hookErr,
       );
     }
 
@@ -2190,9 +2192,10 @@ export class MockChainAdapter implements ChainAdapter {
       // completion before the mock "broadcasts".
       await params.onBroadcast?.({ txHash: mockPublishTxHash });
     } catch (hookErr) {
-      throw new Error(
+      throw new ChainWriteAheadHookError(
         `chain:writeahead hook failed before createKnowledgeAssets broadcast (mock): ` +
         `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+        hookErr,
       );
     }
 

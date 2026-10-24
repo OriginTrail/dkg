@@ -27,48 +27,13 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { getMetrics } from '@origintrail-official/dkg-core';
+import { boundedRpcMethodLabel } from './rpc-method-labels.js';
+export { KNOWN_RPC_METHODS, boundedRpcMethodLabel } from './rpc-method-labels.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES,
   type ContextGraphAuthorityRpcSite,
 } from './context-graph-authority-rpc-sites.js';
-
-/**
- * The JSON-RPC methods our own code (via ethers v6) can issue. Used to BOUND
- * the metric label — anything outside maps to 'other' so the label set can
- * never grow unbounded. (Methods are self-generated, not peer input, so this is
- * defensive; the raw method still appears verbatim in the rpc_usage log lines,
- * where cardinality is not a concern.)
- */
-export const KNOWN_RPC_METHODS: ReadonlySet<string> = new Set([
-  'eth_chainId',
-  'eth_blockNumber',
-  'eth_call',
-  'eth_estimateGas',
-  'eth_gasPrice',
-  'eth_maxPriorityFeePerGas',
-  'eth_feeHistory',
-  'eth_getBalance',
-  'eth_getTransactionCount',
-  'eth_getCode',
-  'eth_getStorageAt',
-  'eth_getLogs',
-  'eth_getBlockByNumber',
-  'eth_getBlockByHash',
-  'eth_getTransactionByHash',
-  'eth_getTransactionReceipt',
-  'eth_sendRawTransaction',
-  'eth_newFilter',
-  'eth_getFilterChanges',
-  'eth_uninstallFilter',
-  'net_version',
-  'web3_clientVersion',
-]);
-
-/** Bound a method name for use as a metric label (unknown → 'other'). */
-export function boundedRpcMethodLabel(method: string): string {
-  return KNOWN_RPC_METHODS.has(method) ? method : 'other';
-}
 
 /** Fixed process-level source roles. Values never derive from operator or peer input. */
 export const RPC_USAGE_ADAPTER_ROLES = Object.freeze([
@@ -535,6 +500,10 @@ const RPC_USAGE_SNAPSHOT_RAW_CONSUMERS = [
   'DKGKnowledgeAssets.ownerOf',
   'rss.getNodeChallenge',
   'rss.getNodeEpochProofPeriodScore',
+
+  // Background views coalesced into one request, and the bytecode check before it.
+  'multicall3.aggregate3',
+  'multicall3.getCode',
 ] as const;
 
 const RPC_USAGE_SNAPSHOT_HUB_CONTRACT_NAMES = [
@@ -576,8 +545,12 @@ const RPC_USAGE_SNAPSHOT_HUB_ASSET_NAMES = [
  * labels. Membership only — the snapshot SHAPE is versioned separately by
  * `schemaVersion`, so a reader that pins a label vocabulary must gate on this
  * field rather than infer stability from the shape version.
+ *
+ * v3 adds `multicall3.aggregate3` and `multicall3.getCode`: one aggregate
+ * request now carries background views that v2 counted one request each under
+ * their own labels.
  */
-export const RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION = 2 as const;
+export const RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION = 3 as const;
 
 /** Complete closed vocabulary that the cumulative diagnostic may serialize. */
 export const RPC_USAGE_SNAPSHOT_CONSUMERS: readonly string[] = Object.freeze(

@@ -16,39 +16,31 @@ import { describe, it, expect, afterAll, beforeAll } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { makeTestKaNumberAllocator, makeTestKaNumberStore } from './_helpers/ka-allocator.js';
+import { makeTestKaNumberStore } from './_helpers/ka-allocator.js';
+import {
+  RealChainAgents,
+  createIndexedEVMAdapter,
+  dialableAddress,
+  pollUntil,
+  sleep,
+} from './_helpers/real-chain-agent.js';
 import { KaNumberAllocator } from '../src/allocator.js';
-import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.js';
-import { DKGAgent } from '../src/index.js';
+import type { DKGAgent } from '../src/index.js';
 import type { ContextGraphSubscriptionRecord } from '../src/index.js';
 import {
-  getSharedContext,
   takeSnapshot,
   revertSnapshot,
   HARDHAT_KEYS,
 } from '../../chain/test/evm-test-context.js';
-import { makeAdapterConfig } from '../../chain/test/hardhat-harness.js';
-import { MemoryAuthorityIndexStore } from '../../chain/test/helpers/context-graph-authority-index.js';
-import { EVMChainAdapter } from '../../chain/src/evm-adapter.js';
+import type { EVMChainAdapter } from '../../chain/src/evm-adapter.js';
 
 const NAME = 'http://schema.org/name';
 const CURATOR_ENTITY = 'urn:dkg:e2e-2827:curator-after-join';
 const MEMBER_ENTITY = 'urn:dkg:e2e-2827:member-after-join';
 
-function sleep(ms: number) { return new Promise((resolve) => setTimeout(resolve, ms)); }
-
-/**
- * A daemon wires the finalized Context Graph authority index into its chain
- * adapter; the plain test adapter does not, and without it a member resolves
- * authority through the legacy path and never reaches the #2827 failure.
- */
-function createIndexedEVMAdapter(privateKey: string): EVMChainAdapter {
-  const { rpcUrl, hubAddress } = getSharedContext();
-  return new EVMChainAdapter({
-    ...makeAdapterConfig(rpcUrl, hubAddress, privateKey),
-    localContextGraphAuthorityIndexStore: new MemoryAuthorityIndexStore(),
-  });
-}
+// Both agents run on indexed chain adapters (see the shared fixture): without the
+// authority index a member resolves authority through the legacy path and never
+// reaches the #2827 failure.
 
 /**
  * Count the live name-hash registry lookups an adapter makes. For a graph that
@@ -66,31 +58,6 @@ function countLiveNameHashLookups(adapter: EVMChainAdapter): { readonly calls: n
     };
   }
   return counter;
-}
-
-function makeChainConfig(operationalKey: string) {
-  const { rpcUrl, hubAddress } = getSharedContext();
-  return {
-    rpcUrl,
-    hubAddress,
-    operationalKeys: [operationalKey],
-    chainId: 'evm:31337',
-  };
-}
-
-async function pollUntil<T>(
-  fn: () => Promise<T>,
-  pred: (value: T) => boolean,
-  timeoutMs = 30_000,
-  stepMs = 500,
-): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  let last = await fn();
-  while (!pred(last) && Date.now() < deadline) {
-    await sleep(stepMs);
-    last = await fn();
-  }
-  return last;
 }
 
 async function sharedMemoryNames(agent: DKGAgent, contextGraphId: string, subject: string): Promise<string[]> {
@@ -151,11 +118,15 @@ async function joinAndApprove(input: {
   await pollUntil(
     () => curator.listPendingJoinRequests(contextGraphId),
     (rows) => rows.some((row: any) => String(row.agentAddress).toLowerCase() === memberAgent),
+    30_000,
+    500,
   );
   await curator.approveJoinRequest(contextGraphId, memberAgent, curatorAgent);
   const status = await pollUntil(
     () => member.getJoinRequestStatus(contextGraphId, memberAgent),
     (value) => value === 'approved',
+    30_000,
+    500,
   );
   expect(status, 'join status on the member').toBe('approved');
 }
@@ -167,6 +138,7 @@ async function expectMemberAllowlist(member: DKGAgent, contextGraphId: string, a
       .map((address) => address.toLowerCase()),
     (addresses) => agents.every((agent) => addresses.includes(agent)),
     60_000,
+    500,
   );
   expect(allowed, 'member allowlist').toEqual(expect.arrayContaining(agents));
 }
@@ -196,12 +168,11 @@ async function shareAndExpectDelivery(input: {
 
 describe('E2E: SWM after a join on a public, unregistered context graph (#2827)', () => {
   const tempDirs: string[] = [];
-  const agents: DKGAgent[] = [];
+  const pool = new RealChainAgents();
 
   afterAll(async () => {
-    for (const agent of agents) {
-      try { await agent.stop(); } catch { /* already stopped */ }
-    }
+    // Stopped in the order they were created, as this suite always did.
+    await pool.stopAll('oldest-first');
     await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
@@ -215,21 +186,17 @@ describe('E2E: SWM after a join on a public, unregistered context graph (#2827)'
     // The member's KA-number sequence survives its restart, as the daemon's
     // SQLite store does: a restarted author never reissues a KA number.
     const memberKaNumbers = makeTestKaNumberStore();
-    const createMember = (chainAdapter: EVMChainAdapter) => DKGAgent.create({
-      ...TEST_SNAPSHOT_CONFIG,
-      kaNumberAllocator: new KaNumberAllocator(memberKaNumbers),
+    const createMember = (chainAdapter: EVMChainAdapter) => pool.create({
       name: 'PublicMember',
-      listenPort: 0,
-      skills: [],
+      operationalKey: HARDHAT_KEYS.EXTRA1,
       chainAdapter,
-      nodeRole: 'edge',
+      kaNumberAllocator: new KaNumberAllocator(memberKaNumbers),
       dataDir: memberDataDir,
       contextGraphSubscriptionStore: {
         loadAll: async () => [...memberPersistedSubscriptions.values()],
         save: async (record) => { memberPersistedSubscriptions.set(record.id, { ...record }); },
         delete: async (id) => { memberPersistedSubscriptions.delete(id); },
       },
-      chainConfig: makeChainConfig(HARDHAT_KEYS.EXTRA1),
     });
 
     // Two edges on indexed chain adapters, with distinct operational keys (so
@@ -239,24 +206,17 @@ describe('E2E: SWM after a join on a public, unregistered context graph (#2827)'
     const memberLookups = countLiveNameHashLookups(memberChain);
     expect(curatorChain.contextGraphAuthorityIndexRevisionReader).toBeDefined();
     expect(memberChain.contextGraphAuthorityIndexRevisionReader).toBeDefined();
-    const curator = await DKGAgent.create({
-      ...TEST_SNAPSHOT_CONFIG,
-      kaNumberAllocator: makeTestKaNumberAllocator(),
+    const curator = await pool.create({
       name: 'PublicCurator',
-      listenPort: 0,
-      skills: [],
+      operationalKey: HARDHAT_KEYS.CORE_OP,
       chainAdapter: curatorChain,
-      nodeRole: 'edge',
       dataDir: curatorDataDir,
-      chainConfig: makeChainConfig(HARDHAT_KEYS.CORE_OP),
     });
-    agents.push(curator);
     let member = await createMember(memberChain);
-    agents.push(member);
     await curator.start();
     await member.start();
     await sleep(800);
-    const curatorAddr = curator.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
+    const curatorAddr = dialableAddress(curator);
     await member.connectTo(curatorAddr);
     await sleep(1_500);
     expect(member.node.libp2p.getPeers().length).toBeGreaterThanOrEqual(1);
@@ -288,7 +248,6 @@ describe('E2E: SWM after a join on a public, unregistered context graph (#2827)'
     const restartedMemberChain = createIndexedEVMAdapter(HARDHAT_KEYS.EXTRA1);
     const restartedMemberLookups = countLiveNameHashLookups(restartedMemberChain);
     member = await createMember(restartedMemberChain);
-    agents.push(member);
     await member.start();
     await member.connectTo(curatorAddr);
     await expectMemberAllowlist(member, contextGraphId, [curatorAgent, memberAgent]);

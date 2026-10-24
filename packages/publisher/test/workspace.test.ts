@@ -41,6 +41,10 @@ import {
   encodeRootlessWorkspaceRequest,
   rootlessSharedMemoryGraphFromWire,
 } from './_helpers/rootless-workspace.js';
+import {
+  buildPublicQuadsWithByteSize,
+  encodedPublicByteLength,
+} from './_helpers/public-nquads.js';
 import type { V10ACKProvider, V10ACKProviderParams } from '../src/publisher.js';
 
 // RC11 / PR1: in-memory 3-of-N ACK provider that signs the V10 ACK
@@ -86,59 +90,6 @@ async function sealForQuads(quads: Quad[], contextGraphId: string | bigint) {
 
 function q(s: string, p: string, o: string, g = ''): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
-}
-
-const nquadsEncoder = new TextEncoder();
-
-function serializePublicQuad(quad: Quad): string {
-  return `<${quad.subject}> <${quad.predicate}> ${
-    quad.object.startsWith('"') ? quad.object : `<${quad.object}>`
-  } <${quad.graph}> .`;
-}
-
-function encodedPublicByteLength(quads: Quad[]): number {
-  return nquadsEncoder.encode(quads.map(serializePublicQuad).join('\n')).length;
-}
-
-function buildPublicQuadsWithByteSize(targetBytes: number, graph = ''): Quad[] {
-  const quads: Quad[] = [];
-  const maxSafeLiteralBytes = 50_000;
-
-  for (let i = 0; i < 1_000; i++) {
-    const subject = `urn:test:oversized-swm:${i}`;
-    const predicate = 'http://schema.org/description';
-    const emptyLine = serializePublicQuad({
-      subject,
-      predicate,
-      object: '""',
-      graph,
-    });
-    const currentBytes = encodedPublicByteLength(quads);
-    const separatorBytes = quads.length === 0 ? 0 : 1;
-    const bytesNeededInsideLiteral =
-      targetBytes - currentBytes - separatorBytes - nquadsEncoder.encode(emptyLine).length;
-    const literalBytes =
-      bytesNeededInsideLiteral >= 0 && bytesNeededInsideLiteral <= maxSafeLiteralBytes
-        ? bytesNeededInsideLiteral
-        : maxSafeLiteralBytes;
-
-    quads.push({
-      subject,
-      predicate,
-      object: `"${'x'.repeat(literalBytes)}"`,
-      graph,
-    });
-
-    const size = encodedPublicByteLength(quads);
-    if (size >= targetBytes) {
-      if (size !== targetBytes) {
-        throw new Error(`oversized SWM fixture byte-size drift: expected ${targetBytes}, got ${size}`);
-      }
-      return quads;
-    }
-  }
-
-  throw new Error(`failed to build public quads with byte size ${targetBytes}`);
 }
 
 async function signWorkspaceMessage(

@@ -437,6 +437,30 @@ describe('on-demand agents phonebook on a fresh Edge', () => {
     await expect(isolated.run()).resolves.toBeDefined();
   });
 
+  it('asks the Core again when the Edge\'s own busy sync slot turned the fetch away, and resolves the curator', async () => {
+    let turnedAway = 0;
+    const edge = await createFreshEdge('PhonebookLocallyDeferred', {
+      agentsSync: async () => {
+        // The Edge's scheduler refused the sync before it reached the Core.
+        if (turnedAway < 2) {
+          turnedAway += 1;
+          return { ...durableResult(0), completedPhases: 0, checkpointAdvances: 0, deferredBackpressure: 1 };
+        }
+        const quads = publisherProfileQuads();
+        await edge.agent.store.insert(quads);
+        return durableResult(quads.length);
+      },
+    });
+    agents.push(edge.agent);
+
+    edge.agent.subscribeToContextGraph(CG, { syncMode: 'always-on' });
+    await vi.waitFor(() => expect(edge.fetchLogLines()).toHaveLength(1), { timeout: 10_000 });
+
+    expect(edge.agentsFetches().map(([peerId]) => peerId)).toEqual([CORE, CORE, CORE]);
+    expect(edge.fetchLogLines()[0]).toContain('curatorResolved=1/1');
+    expect(edge.fetchLogLines()[0]).toContain('outcome=complete');
+  });
+
   it('needs no phonebook for a graph this node curates or one without an owner wallet', async () => {
     const edge = await createFreshEdge('PhonebookOwnerWallet');
     agents.push(edge.agent);
@@ -608,6 +632,7 @@ describe('on-demand agents phonebook across stop()', () => {
       remoteCuratorWallet: () => OWNER,
       isActiveSubscription: () => true,
       phonebookHasWallet: async () => false,
+      recipientKeyKnown: async () => false,
       readAccessPolicy: async () => 'public',
       listConnectedPeers: () => [{ peerId: CORE, core: true }],
       preparePeer: async () => true,

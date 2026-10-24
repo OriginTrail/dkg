@@ -9,6 +9,7 @@ import {
   NetworkAdmissionCoordinator,
   NetworkAdmissionProbeError,
   NetworkAdmissionRejectedError,
+  type NetworkAdmissionCoordinatorOptions,
 } from '../src/p2p/network-admission-coordinator.js';
 import {
   createNetworkAdmissionProtocolCheck,
@@ -96,6 +97,7 @@ function buildCoordinator(input: {
   now?: () => number;
   onPeerRejected?: (peerId: string, quarantineMs: number) => void;
   onPeerVerified?: (peerId: string) => void;
+  log?: NetworkAdmissionCoordinatorOptions['log'];
 }) {
   const admission = new NetworkAdmissionService({
     networkId: input.identity?.networkId,
@@ -127,6 +129,7 @@ function buildCoordinator(input: {
     ...(input.onPeerRejected !== undefined ? { onPeerRejected: input.onPeerRejected } : {}),
     ...(input.onPeerVerified !== undefined ? { onPeerVerified: input.onPeerVerified } : {}),
     ...(input.probeTimeoutMs !== undefined ? { probeTimeoutMs: input.probeTimeoutMs } : {}),
+    ...(input.log !== undefined ? { log: input.log } : {}),
   });
 
   return {
@@ -173,6 +176,61 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(fixture.close).not.toHaveBeenCalled();
     expect(fixture.abort).not.toHaveBeenCalled();
     expect(fixture.deletePeerFromPeerStore).not.toHaveBeenCalled();
+  });
+
+  // GH#1578 - the connection-open caller no longer logs this error class, so
+  // the coordinator's warning is the only diagnostic a failed probe gets.
+  it.each([
+    {
+      failure: 'a transport error',
+      probe: async (): Promise<Uint8Array> => { throw new Error('stream timeout'); },
+      diagnostic: 'failed retryably: stream timeout',
+      backoff: '(automatic probes paused for 100ms)',
+    },
+    {
+      failure: 'an empty response',
+      probe: async (): Promise<Uint8Array> => new Uint8Array(),
+      diagnostic: 'failed retryably: identity probe ended without a response',
+      backoff: '(automatic probes paused for 100ms)',
+    },
+    {
+      failure: 'an unreadable response',
+      probe: async (): Promise<Uint8Array> => new TextEncoder().encode('NOT_JSON'),
+      diagnostic: 'returned unreadable response: ',
+      backoff: '(automatic probes paused for 250ms)',
+    },
+  ])('logs one warning for $failure and none for the backed-off skips after it', async ({ probe, diagnostic, backoff }) => {
+    const sendIdentityProbe = vi.fn(probe);
+    const log = { info: vi.fn(), warn: vi.fn() };
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      now: () => 1_000,
+      probeBackoff: {
+        transientBaseMs: 100,
+        transientMaxMs: 100,
+        unreadableResponseMs: 250,
+      },
+      log,
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toBeInstanceOf(NetworkAdmissionProbeError);
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    const warning = log.warn.mock.calls[0][1] as string;
+    expect(warning).toContain(`Network identity probe for ${REMOTE_PEER_ID.slice(-8)} ${diagnostic}`);
+    expect(warning.endsWith(backoff)).toBe(true);
+
+    for (let reconnect = 0; reconnect < 3; reconnect += 1) {
+      const skipped = await fixture.coordinator
+        .ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect'))
+        .catch((err: unknown) => err);
+      expect(skipped).toBeInstanceOf(NetworkAdmissionProbeError);
+      expect((skipped as Error).message).toContain('retryable probe backed off');
+    }
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+    expect(log.warn).toHaveBeenCalledTimes(1);
   });
 
   it('keeps active retryable probe backoff on the retryable error path', async () => {

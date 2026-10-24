@@ -9,9 +9,9 @@
  * via applyMixins(); see evm-adapter.ts for the assembly.
  */
 
-import { EVMChainAdapterBase, decodeConvictionCostCovered } from './evm-adapter-base.js';
+import { EVMChainAdapterBase, decodeConvictionCostCovered, type EvmSigner } from './evm-adapter-base.js';
 import { numericChainIdOf } from './evm-adapter-storage-reads.js';
-import { ethers, Wallet, Contract } from 'ethers';
+import { ethers, Contract } from 'ethers';
 import type {
   BatchMintParams,
   BatchMintResult,
@@ -19,6 +19,7 @@ import type {
   CanonicalFinalizationReceiptReadOptions,
   CanonicalFinalizationReceiptResolution,
   ChainReadOptions,
+  PublishReceiptReadOptions,
   FinalizedChainProofSnapshot,
   KAUpdateVerification,
   OnChainPublishResult,
@@ -32,13 +33,17 @@ import type {
 import { publisherPublishPlanByteSize } from './chain-adapter.js';
 import { floorPublishTokenAmount, computeUpdateACKDigest, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import { resolveQuotedPublisherCandidatePricing } from './publisher-plan.js';
-import { errorMessage } from './evm-adapter-errors.js';
+import { reconcilePublisherCandidateFunding, type PublisherPcaPricingEvidence } from './evm-publisher-funding.js';
+import { errorCode, errorMessage } from './evm-adapter-errors.js';
+import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
-import {
-} from './evm-adapter-constants.js';
 
-type PublisherCandidatePlan = PublisherPublishPlan & { signer: Wallet; address: string };
+type PublisherCandidatePlan = PublisherPublishPlan & {
+  signer: EvmSigner;
+  address: string;
+  pcaPricing: PublisherPcaPricingEvidence;
+};
 
 /**
  * GH#2270 PR-3 r2 — does this error mean "that ERC-721 token does not exist"?
@@ -110,7 +115,7 @@ export class PublishMethods extends EVMChainAdapterBase {
   }
 
   private async _publisherCandidatePlan(
-    signer: Wallet,
+    signer: EvmSigner,
     request: PublisherPublishPlanRequest,
     quote: (epochs: number, purpose: 'pca' | 'direct') => Promise<bigint>,
   ): Promise<PublisherCandidatePlan> {
@@ -138,7 +143,35 @@ export class PublishMethods extends EVMChainAdapterBase {
       publisherAddress: signer.address,
       publishEpochs: pricing.publishEpochs,
       tokenAmount: pricing.tokenAmount,
+      pcaPricing: diagnostics?.pcaProbeError !== undefined && (
+        isRetryableRpcError(diagnostics.pcaProbeError)
+        || errorCode(diagnostics.pcaProbeError) === 'CALL_EXCEPTION'
+      )
+        ? { kind: 'unavailable', error: diagnostics.pcaProbeError }
+        : { kind: 'available' },
     };
+  }
+
+  /** Reconcile an earlier pricing probe with fresh, candidate-specific evidence.
+   * A failed planning read is not itself proof that the final funding read is
+   * unknown: the wallet may have no gas, no PCA, or a recovered PCA read. */
+  private async _selectFundedPublisherPlanOrThrow(
+    plans: PublisherCandidatePlan[],
+    request: PublisherPublishPlanRequest,
+    quote: (epochs: number, purpose: 'pca' | 'direct') => Promise<bigint>,
+  ): Promise<PublisherCandidatePlan> {
+    return reconcilePublisherCandidateFunding({
+      candidates: plans,
+      assess: (currentPlans) => this._assessFundedCandidates(currentPlans, (plan) => ({
+        kind: 'native+trac',
+        nativeFloorWei: this.minPublisherNativeWei,
+        tracFloorWei: this.minPublisherTracWei,
+        requiredTracWei: plan.tokenAmount,
+        pca: { kind: 'publish', epochs: plan.publishEpochs },
+      }), { preferIdle: false }),
+      reprice: (plan) => this._publisherCandidatePlan(plan.signer, request, quote),
+      conviction: () => this.publisherConvictionPlanReader(),
+    });
   }
 
   /**
@@ -174,21 +207,11 @@ export class PublishMethods extends EVMChainAdapterBase {
         request.publisherAddress,
       );
       const plan = await this._publisherCandidatePlan(signer, request, quote);
-      await this.selectFundedSignerOrThrow(
-        [signer],
-        {
-          kind: 'native+trac',
-          nativeFloorWei: this.minPublisherNativeWei,
-          tracFloorWei: this.minPublisherTracWei,
-          requiredTracWei: plan.tokenAmount,
-          pca: { kind: 'publish', epochs: plan.publishEpochs },
-        },
-        { preferIdle: false },
-      );
+      const selected = await this._selectFundedPublisherPlanOrThrow([plan], request, quote);
       return {
-        publisherAddress: plan.publisherAddress,
-        publishEpochs: plan.publishEpochs,
-        tokenAmount: plan.tokenAmount,
+        publisherAddress: selected.publisherAddress,
+        publishEpochs: selected.publishEpochs,
+        tokenAmount: selected.tokenAmount,
       };
     }
 
@@ -202,19 +225,9 @@ export class PublishMethods extends EVMChainAdapterBase {
       for (const signer of authorized) {
         plans.push(await this._publisherCandidatePlan(signer, request, quote));
       }
-      return this._selectFundedCandidateOrThrow(
-        plans,
-        (plan) => ({
-          kind: 'native+trac',
-          nativeFloorWei: this.minPublisherNativeWei,
-          tracFloorWei: this.minPublisherTracWei,
-          requiredTracWei: plan.tokenAmount,
-          pca: { kind: 'publish', epochs: plan.publishEpochs },
-        }),
-        { preferIdle: false },
-      );
+      return this._selectFundedPublisherPlanOrThrow(plans, request, quote);
     });
-    // Do not expose the internal Wallet carried only for cursor advancement.
+    // Do not expose the internal signer carried only for cursor advancement.
     return {
       publisherAddress: selectedPlan.publisherAddress,
       publishEpochs: selectedPlan.publishEpochs,
@@ -532,7 +545,7 @@ export class PublishMethods extends EVMChainAdapterBase {
 
   async resolvePublishByTxHash(
     txHash: string,
-    options: ChainReadOptions = {},
+    options: PublishReceiptReadOptions = {},
   ): Promise<OnChainPublishResult | null> {
     await this.init();
 
@@ -728,7 +741,7 @@ export class PublishMethods extends EVMChainAdapterBase {
    */
   private async readPublishReceipt(
     txHash: string,
-    options: ChainReadOptions,
+    options: PublishReceiptReadOptions,
     logLabel?: string,
   ): Promise<{
     receipt: ethers.TransactionReceipt | null;
@@ -740,15 +753,11 @@ export class PublishMethods extends EVMChainAdapterBase {
     });
     if (!receipt || receipt.status !== 1) return { receipt, publish: null };
 
-    const v10 = this.contracts.knowledgeAssetStorage
-      ? await this.parseV10PublishReceipt(receipt, options)
-      : null;
-    if (v10) return { receipt, publish: v10 };
-
-    const v9 = this.contracts.knowledgeAssetsStorage
-      ? await this.parseV9PublishReceipt(receipt, options)
-      : null;
-    return { receipt, publish: v9 };
+    const facts = (this.contracts.knowledgeAssetStorage
+      ? this.decodeV10PublishReceipt(receipt) : null)
+      ?? (this.contracts.knowledgeAssetsStorage
+        ? this.decodeV9PublishReceipt(receipt) : null);
+    return { receipt, publish: facts ? await this.enrichPublishReceipt(receipt, facts, options) : null };
   }
 
   /**
@@ -824,10 +833,28 @@ export class PublishMethods extends EVMChainAdapterBase {
       : { status: 'rejected' };
   }
 
+  /** Apply header-read policy once, outside either event-format decoder. */
+  private async enrichPublishReceipt(
+    receipt: Pick<ethers.TransactionReceipt, 'blockNumber' | 'blockHash'>,
+    facts: Omit<OnChainPublishResult, 'blockTimestamp'>,
+    options: PublishReceiptReadOptions,
+  ): Promise<OnChainPublishResult> {
+    const blockTimestamp = options.skipBlockTimestamp === true ? 0
+      : await this.getFinalizedBlockTimestamp(receipt.blockNumber, receipt.blockHash, options);
+    return { ...facts, blockTimestamp };
+  }
+
   async parseV10PublishReceipt(
     receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
-    options: ChainReadOptions = {},
+    options: PublishReceiptReadOptions = {},
   ): Promise<OnChainPublishResult | null> {
+    const facts = this.decodeV10PublishReceipt(receipt);
+    return facts ? this.enrichPublishReceipt(receipt, facts, options) : null;
+  }
+
+  private decodeV10PublishReceipt(
+    receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
+  ): Omit<OnChainPublishResult, 'blockTimestamp'> | null {
     const kas = this.contracts.knowledgeAssetStorage;
     if (!kas) return null;
 
@@ -871,13 +898,6 @@ export class PublishMethods extends EVMChainAdapterBase {
       publisherAddress = receipt.from ?? authorAddress ?? '';
     }
 
-    // When the caller already checked receipt finality, naming this exact hash
-    // reuses that header timestamp; direct parsers safely fall through to RPC.
-    const blockTimestamp = await this.getFinalizedBlockTimestamp(
-      receipt.blockNumber,
-      receipt.blockHash,
-      options,
-    );
     const convictionCostCovered = decodeConvictionCostCovered(receipt.logs);
 
     return {
@@ -890,7 +910,6 @@ export class PublishMethods extends EVMChainAdapterBase {
       txHash: receipt.hash,
       blockNumber: receipt.blockNumber,
       txIndex: receipt.index,
-      blockTimestamp,
       publisherAddress,
       authorAddress,
       ...(convictionCostCovered ? { convictionCostCovered } : {}),
@@ -899,8 +918,15 @@ export class PublishMethods extends EVMChainAdapterBase {
 
   async parseV9PublishReceipt(
     receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
-    options: ChainReadOptions = {},
+    options: PublishReceiptReadOptions = {},
   ): Promise<OnChainPublishResult | null> {
+    const facts = this.decodeV9PublishReceipt(receipt);
+    return facts ? this.enrichPublishReceipt(receipt, facts, options) : null;
+  }
+
+  private decodeV9PublishReceipt(
+    receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
+  ): Omit<OnChainPublishResult, 'blockTimestamp'> | null {
     const storage = this.contracts.knowledgeAssetsStorage;
     if (!storage) return null;
 
@@ -937,13 +963,6 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     if (!foundBatchCreated) return null;
 
-    // When the caller already checked receipt finality, naming this exact hash
-    // reuses that header timestamp; direct parsers safely fall through to RPC.
-    const blockTimestamp = await this.getFinalizedBlockTimestamp(
-      receipt.blockNumber,
-      receipt.blockHash,
-      options,
-    );
 
     return {
       batchId,
@@ -953,7 +972,6 @@ export class PublishMethods extends EVMChainAdapterBase {
       txHash: receipt.hash,
       blockNumber: receipt.blockNumber,
       txIndex: receipt.index,
-      blockTimestamp,
       publisherAddress,
     };
   }
@@ -1226,7 +1244,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       throw new Error('KnowledgeAssetsLifecycle contract not deployed — cannot update via V10 path.');
     }
 
-    let signer: Wallet | undefined;
+    let signer: EvmSigner | undefined;
 
     // Look up the on-chain publisher to select the correct signer.
     const kas = this.contracts.knowledgeAssetStorage;
@@ -1417,7 +1435,7 @@ export class PublishMethods extends EVMChainAdapterBase {
           false,
           ctx.sendContractTransaction,
         );
-        return this.populateAndSignV10WithAllowanceRecovery(
+        return this.signPreparedTransaction(await this.prepareV10WithAllowanceRecovery(
           signer,
           ka as Contract,
           'update',
@@ -1426,7 +1444,7 @@ export class PublishMethods extends EVMChainAdapterBase {
           newTokenAmount,
           'approve V10 update TRAC (forced re-approve, #888)',
           ctx.sendContractTransaction,
-        );
+        ));
       },
       (preBroadcastTxHash) => {
         throw new Error(

@@ -9,7 +9,46 @@ import {
   PUBLISH_AUTHOR_NOT_CUSTODIAL_MESSAGE_MARKER,
   formatPublishAuthorNotCustodialMessage,
   messageIndicatesPublishAuthorNotCustodial,
+  RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE,
+  isRfc64LegacySwmBoundaryRetirementInProgressError,
+  UNSCOPED_QUERY_INVALIDATED_CODE,
+  UNSCOPED_QUERY_INVALIDATED_MESSAGE,
 } from '../src/errors.js';
+
+describe('GH#3049 legacy SWM retirement fence code (cross-package contract)', () => {
+  it('keeps its wire value: the agent throws it, the publisher and the daemon worker match it', () => {
+    expect(RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE).toBe('RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS');
+  });
+
+  it('recognises a coded error structurally, with or without being an Error', () => {
+    const coded = { code: RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE };
+    expect(isRfc64LegacySwmBoundaryRetirementInProgressError(coded)).toBe(true);
+    expect(isRfc64LegacySwmBoundaryRetirementInProgressError(
+      Object.assign(new Error('x'), coded),
+    )).toBe(true);
+  });
+
+  it.each([
+    ['the same words without the code', new Error('RFC-64 legacy SWM boundary retirement is in progress; retry promotion')],
+    ['another code', Object.assign(new Error('x'), { code: 'SOMETHING_ELSE' })],
+    ['a prefix of the code', { code: 'RFC64_LEGACY_SWM_BOUNDARY' }],
+    ['null', null],
+    ['undefined', undefined],
+    ['a string', RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE],
+    ['an object whose code getter throws', new Proxy({}, { get() { throw new Error('hostile getter'); } })],
+  ])('does not recognise %s', (_name, value) => {
+    expect(isRfc64LegacySwmBoundaryRetirementInProgressError(value)).toBe(false);
+  });
+});
+
+describe('unscoped query invalidation (cross-package contract)', () => {
+  it('keeps its wire code and sentence: the agent throws them, the daemon answers with them', () => {
+    expect(UNSCOPED_QUERY_INVALIDATED_CODE).toBe('UNSCOPED_QUERY_INVALIDATED');
+    expect(UNSCOPED_QUERY_INVALIDATED_MESSAGE).toBe(
+      'Unscoped query dataset or read authority changed; retry the query or specify contextGraphId',
+    );
+  });
+});
 
 describe('DKGError hierarchy', () => {
   it('DKGUserError extends DKGError', () => {

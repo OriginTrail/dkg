@@ -1,3 +1,5 @@
+import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
+import { SUB_GRAPH_NOT_FOUND_CODE } from '@origintrail-official/dkg-publisher';
 // daemon/routes/memory.ts
 //
 // Route handlers for shared-memory / workspace write + publish + conditional-write, memory turn/search.
@@ -59,7 +61,6 @@ import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   enrichEvmError,
   MockChainAdapter,
-  withRpcUsageSite,
 } from '@origintrail-official/dkg-chain';
 import {
   DKGAgent,
@@ -67,7 +68,8 @@ import {
   createSwmCatchupPeerSelector,
   loadOpWallets,
 } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, advertisesSyncProtocol } from '@origintrail-official/dkg-core';
+import { memorySearchPlans, memorySearchVectorScope } from "./memory-search-scope.js";
 import { buildAutoRegisterFailureBody } from "./shared-assertion-helpers.js";
 import {
   DashboardDB,
@@ -128,7 +130,7 @@ import {
   type DurableCatchupLegState,
   type DurableLegDiagnostics,
 } from '../../catchup-runner.js';
-import { authenticatedAgentAddress, loadTokens, httpAuthGuard } from '../../auth.js';
+import { loadTokens, httpAuthGuard } from '../../auth.js';
 import { recordAssertionActivity } from '../activity-notification.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
@@ -240,7 +242,6 @@ import {
   sleep,
   deriveBlockExplorerUrl,
   respondIfChainRpcTransportError,
-  respondContextGraphReadAuthorityUnavailable,
 } from '../http-utils.js';
 import { handleQueryCatalogRoutes } from './query-catalog.js';
 import {
@@ -346,7 +347,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import { actorFromRequestContext, type RequestContext } from './context.js';
 import {
   API_QUERY_CALLER_DISCONNECTED,
   createStoreQueryRequestLifecycle,
@@ -498,25 +499,6 @@ function uniquePeerIds(peerIds: readonly string[]): string[] {
   return out;
 }
 
-/**
- * Read-authority reasons that answer "may this NODE read the context graph?"
- * rather than "may this AGENT read it?".
- *
- * `resolveContextGraphReadAuthorityDecision` only consults `callerAgentAddress`
- * on its chain-registered, RFC-64 and agent-gated-local branches. Everything
- * below falls through to node-scoped facts (peer allowlist, local subscription,
- * the node's own default agent), so an agent-scoped caller must NOT inherit
- * them — doing so is the cross-CG read hole `/api/memory/search` is gated for.
- */
-const NODE_SCOPED_READ_AUTHORITY_REASONS: ReadonlySet<string> = new Set([
-  'legacy-peer-allowlist',
-  'legacy-peer-invitation',
-  'legacy-local-agent-participant',
-  'legacy-local-identity-participant',
-  'legacy-subscription',
-  'legacy-edge-subscription',
-]);
-
 export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -545,12 +527,12 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     apiPortRef,
     url,
     path,
-    requestAgentAddress,
-    authentication,
     emitMemoryGraphChanged,
     emitNotification,
   } = ctx;
-  const writePreflightCallerAgentAddress = authenticatedAgentAddress(authentication);
+  const actor = actorFromRequestContext(ctx);
+  const { authentication, effectiveAgentAddress: requestAgentAddress } = actor;
+  const writePreflightCallerAgentAddress = actor.authenticatedAgentAddress;
   const writePreflightContextGraphOpts = {
     callerAgentAddress: writePreflightCallerAgentAddress,
     allowLocalExactFallback: !writePreflightCallerAgentAddress,
@@ -669,7 +651,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
       if (!check) {
         check = Promise.resolve()
           .then(() => agent.getPeerProtocols(peerId))
-          .then((protocols) => protocols.includes(PROTOCOL_SYNC))
+          .then((protocols) => advertisesSyncProtocol(protocols))
           .catch(() => undefined);
         protocolChecks.set(peerId, check);
       }
@@ -1723,6 +1705,10 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
       if (err?.code === "OVERSIZED_RDF_LITERAL") {
         return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(err));
       }
+      // A sub-graph neither this node nor the graph's peers hold (#3293).
+      if (err?.code === SUB_GRAPH_NOT_FOUND_CODE) {
+        return jsonResponse(res, 400, { code: err.code, error: err.message });
+      }
       return jsonResponse(res, 500, { error: `Failed to write turn to ${targetLayer}: ${err.message}` });
     }
     emitMemoryGraphChanged?.({
@@ -1746,6 +1732,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
           entityUri: turnUri,
           contextGraphId: resolvedContextGraphId,
           memoryLayer: targetLayer,
+          agentAddress: actor.effectiveAgentAddress,
           model: embeddingProvider.model,
           snippet,
           label: extractResult.subjectIri,
@@ -1819,63 +1806,10 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     // `canReadContextGraph` boolean, because the boolean collapses three
     // outcomes into two and loses the one fact an agent-scoped caller needs:
     // WHY the read was allowed.
-    const callerAgentAddress = authenticatedAgentAddress(authentication);
+    const callerAgentAddress = actor.authenticatedAgentAddress;
     const isNodeAdmin = authentication.principal.kind === 'nodeOperator';
+    if (!(await requireContextGraphReadAuthority(ctx, contextGraphId, CG_AUTH_RPC_SITES.memorySearch))) return;
     if (!isNodeAdmin) {
-      const authority = await withRpcUsageSite(
-        CG_AUTH_RPC_SITES.memorySearch,
-        () => agent.resolveContextGraphReadAuthority(contextGraphId, {
-          callerAgentAddress,
-        }),
-      );
-
-      // `unavailable` means the authority itself could not be established
-      // (chain RPC failed, metadata not yet synced) — NOT that the caller is
-      // forbidden. Collapsing it into 403 turns a transient blip into a
-      // terminal error on a route that previously had no chain dependency at
-      // all, and no sane client retries a 403.
-      if (authority.outcome === 'unavailable') {
-        // Response shape follows issue #2641 / PR #2649, which establishes the
-        // convention for this outcome on `/api/query`: a retryable 503 with
-        // `Retry-After`, and deliberately NO context-graph id, authority
-        // source or internal reason in the body — those would turn an
-        // outage response into the same enumeration oracle the denial path
-        // is careful about. The attribution goes to the daemon log (#2834).
-        return respondContextGraphReadAuthorityUnavailable(res, authority);
-      }
-
-      // An `allowed` outcome is not automatically a CALLER-scoped allow.
-      // `resolveContextGraphReadAuthorityDecision` only consults
-      // `callerAgentAddress` on the chain-registered, RFC-64 and
-      // agent-gated-local branches. For an unregistered legacy private CG
-      // whose `_meta` carries a peer allowlist but no agent gate,
-      // `getContextGraphAgentGateAddresses` returns null (`ungated`), both
-      // caller-consulting branches are skipped, and the resolver allows on
-      // NODE-scoped facts — this node's peerId is in the allowlist, this node
-      // holds a subscription, this node's own default agent is a participant.
-      // Those are answers to "may this NODE read?", not "may this AGENT read?".
-      // Honouring them for an agent-scoped token is exactly the cross-CG hole
-      // this route is being fixed for.
-      const boundToCaller = !(
-        callerAgentAddress !== undefined
-        && NODE_SCOPED_READ_AUTHORITY_REASONS.has(authority.reason)
-      );
-      if (authority.outcome !== 'allowed' || !boundToCaller) {
-        // On the 403-vs-empty-200 choice: `DKGAgent.query` denies private-CG
-        // reads with a form-matched EMPTY result so denial is indistinguishable
-        // from no-match. This route deliberately differs, and the tradeoff is
-        // real rather than absent: a 403 does disclose "this node knows that
-        // id, and you are excluded", which an empty 200 would not. We accept
-        // that here because the caller supplied an explicit `contextGraphId`
-        // (so it already asserted the id) and because an operator debugging a
-        // roster misconfiguration otherwise gets a silent empty result with no
-        // signal. Flip this to `jsonResponse(res, 200, { results: [] })` if the
-        // enumeration oracle is judged to outweigh the operability.
-        return jsonResponse(res, 403, {
-          error: `Not authorized to search context graph "${contextGraphId}".`,
-        });
-      }
-
       // Shared memory carries a SECOND gate. `DKGAgent.query` requires
       // `canUseSharedMemoryForContextGraph` — which additionally demands
       // confirmed SWM metadata — for any shared-memory-targeting read
@@ -1914,6 +1848,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
           memoryLayers,
           limit: resultLimit,
           minSimilarity: 0.3,
+          workingMemoryScope: memorySearchVectorScope(agent, actor),
         });
         for (const vr of vectorResults) {
           const idx = results.length;
@@ -1971,50 +1906,9 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
         LIMIT ${resultLimit}
       `;
 
-    // Working memory is per-agent, so the `wm` view needs an address:
-    //   - an agent-scoped caller reads its OWN working memory, and
-    //     `DKGAgent.query`'s A-1 check rejects anything else;
-    //   - a node operator spans every agent registered on this node;
-    //   - an anonymous / auth-disabled caller supplies no address, so the
-    //     engine falls back to the node's default agent — the same contract
-    //     `/api/query` applies.
-    // `swm` and `vm` are context-graph-wide by design and take no address.
-    //
-    // IMPORTANT — what the node-operator exemption does NOT buy. Skipping the
-    // route's own gate above only skips THIS route's 403. Every `agent.query`
-    // below still runs `DKGAgent.query`'s own `canReadContextGraph`
-    // (`dkg-agent-query.ts`), and a node token resolves `callerAgentAddress`
-    // to `undefined`, so that check falls back to NODE-LOCAL authority —
-    // whether any agent registered here is in the CG's roster. There is no
-    // admin bypass inside the engine.
-    //
-    // So for a context graph this node HOLDS but none of its agents are
-    // rostered for, the route admits the request and the engine returns an
-    // empty result. A node operator therefore gets a cross-AGENT view within
-    // the context graphs this node may read — not an unconditional cross-CG
-    // one. An earlier revision of this comment claimed the latter; it was
-    // wrong, and the tests could not catch it because the fake `agent.query`
-    // has no authority check of its own.
-    const workingMemoryAddresses: Array<string | undefined> = callerAgentAddress
-      ? [callerAgentAddress]
-      : isNodeAdmin
-        ? (agent.listLocalAgents().map((a) => a.agentAddress) as string[])
-        : [undefined];
-    const searchPlans: Array<{ view: 'working-memory' | 'shared-working-memory' | 'verifiable-memory'; agentAddress?: string }> = [];
-    for (const layer of memoryLayers) {
-      if (layer === 'wm') {
-        // A node operator with no registered agents still gets the engine
-        // default rather than silently skipping the whole layer.
-        const addresses = workingMemoryAddresses.length > 0 ? workingMemoryAddresses : [undefined];
-        for (const agentAddress of addresses) {
-          searchPlans.push({ view: 'working-memory', agentAddress });
-        }
-        continue;
-      }
-      searchPlans.push({
-        view: layer === 'swm' ? 'shared-working-memory' : 'verifiable-memory',
-      });
-    }
+    const searchPlans = memorySearchPlans(
+      memoryLayers, actor, () => agent.listLocalAgents(),
+    );
 
     // Untrusted, planner-heavy API reads belong on the BACKGROUND admission
     // lane, and must be cancelled when the HTTP caller goes away — otherwise a

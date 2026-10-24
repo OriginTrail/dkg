@@ -88,6 +88,10 @@ describe('network admission integration', () => {
       const foreignAddr = foreign.multiaddrs.find((addr) => addr.includes('/tcp/') && !addr.includes('/p2p-circuit'));
       expect(foreignAddr).toBeDefined();
 
+      // Exercise local's signed-mismatch verdict in one direction, as in the
+      // connect-race fixture. A reciprocal rejection could otherwise close the
+      // stream before local receives foreign's proof, producing a probe error.
+      foreign.networkAdmission.markVerifiedSameNetwork(local.peerId);
       const denyDial = vi.spyOn(local.node, 'denyPeerAfterNetworkMismatch');
 
       await expect(local.connectTo(foreignAddr!))

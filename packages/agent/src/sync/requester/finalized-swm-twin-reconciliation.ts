@@ -301,6 +301,17 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
   );
 
   return withKeyedLocks(params.writeLocks, [lockKey], async () => {
+    // VM-first arrival has nothing to retire without an exact SWM head. Check
+    // under the shared SWM write lock before rereading the complete VM payload;
+    // a later SWM arrival runs its own symmetric reconciliation after commit.
+    const vmArrivalHead = evidence.arrival === 'vm'
+      ? await readExactSwmHead(params.store, {
+          metaGraph: evidence.swmMetaGraph,
+          headSubject: evidence.headSubject,
+        })
+      : undefined;
+    if (vmArrivalHead === null) return 'head-missing-or-ambiguous';
+
     // A public-byte match alone is insufficient: VM graph names are stable
     // across assertion versions and a private-only update can preserve every
     // public quad. Require the current VM control plane to prove the exact
@@ -313,7 +324,7 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
       return 'vm-metadata-mismatch';
     }
 
-    const head = await readExactSwmHead(params.store, {
+    const head = vmArrivalHead ?? await readExactSwmHead(params.store, {
       metaGraph: evidence.swmMetaGraph,
       headSubject: evidence.headSubject,
     });
@@ -323,7 +334,6 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
       // under the same KA lock; a missing head here means a concurrent VM-first
       // reconciliation completed after that lock was released. Suppressing the
       // outer bulk metadata append prevents resurrection of a dangling head.
-      if (evidence.arrival === 'vm') return 'head-missing-or-ambiguous';
       const swmQuads = await readExactGraph(params.store, evidence.swmGraph);
       if (swmQuads.length === 0) return 'already-retired-finalized';
       if (workspacePublicQuadsDigest(swmQuads) !== vmDigest) return 'content-mismatch';

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-
 /**
  * Context-graph lifecycle methods (create / register / invite / remove /
  * rename / allowed-agents) extracted from dkg-agent.ts as a mixin holder.
@@ -136,6 +135,10 @@ import {
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
 import { replaceContextGraphMetadataFact } from './context-graph-metadata-fact.js';
+import { addExternalAuthorCuratorAsParticipant, isExternalAuthorCurator } from './external-author-curator.js';
+import { heldAuthorSigner } from './author-signer.js';
+import { rfc64AuthorDigestSignerV1 } from './rfc64/control-envelope-signer-v1.js';
+import { addRegistrationParticipantAgent, type RegistrationRoster } from './context-graph-registration-roster.js';
 import {
   RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1,
   mintRfc64UnregisteredReplicaAuthoritySeedV1,
@@ -239,7 +242,7 @@ import {
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -612,13 +615,18 @@ export class ContextGraphMethods extends DKGAgentBase {
       // Resolve the key only after the authenticated effective principal has
       // been proven to own the namespace. A sibling tenant must never be able
       // to make this node sign authority with another local agent's key.
-      const signerRecord = ownerAddress === effectiveCallerAddress
-        ? this.getWorkspaceSigningAgentForAddress(ownerAddress)
-        : null;
-      if (requiresAuthenticatedReplicaAuthority && signerRecord === null) {
+      // The owner's key held on the node signs the seed; when the authority is
+      // required, an author key the external signer holds signs it there.
+      const ownerSigner = ownerAddress !== undefined && ownerAddress === effectiveCallerAddress
+        ? await heldAuthorSigner(this, requiresAuthenticatedReplicaAuthority ? this.config?.authorSigners : undefined, ownerAddress)
+        : undefined;
+      const signDigest = ownerSigner === undefined || ownerAddress === undefined
+        ? undefined
+        : rfc64AuthorDigestSignerV1(ownerAddress, ownerSigner);
+      if (requiresAuthenticatedReplicaAuthority && signDigest === undefined) {
         throw new Error(
           `Context graph "${opts.id}" requires an authenticated RFC-64 replica authority, ` +
-          `but this node has no custodial signing key for ${ownerAddress}.`,
+          `but this node holds no signing key for ${ownerAddress}.`,
         );
       }
       if (
@@ -626,10 +634,9 @@ export class ContextGraphMethods extends DKGAgentBase {
         && networkId !== 'none'
         && ownerAddress !== undefined
         && /^0x[0-9a-f]{40}$/iu.test(ownerAddress)
-        && signerRecord !== null
+        && signDigest !== undefined
       ) {
         const owner = ownerAddress as EvmAddressV1;
-        const wallet = new ethers.Wallet(signerRecord.privateKey);
         const seed = await mintRfc64UnregisteredReplicaAuthoritySeedV1({
           networkId: networkId as NetworkIdV1,
           contextGraphId: opts.id as ContextGraphIdV1,
@@ -640,10 +647,7 @@ export class ContextGraphMethods extends DKGAgentBase {
             normalisedPublishAuthorityAccountId?.toString(10) ?? '0',
           memberAddresses: [],
           rosterVersion: '0',
-          signer: Object.freeze({
-            issuer: owner,
-            signDigest: (digest: Uint8Array) => wallet.signMessage(digest),
-          }),
+          signer: Object.freeze({ issuer: owner, signDigest }),
         });
         mintedReplicaAuthoritySeed = Object.freeze({ networkId: networkId as NetworkIdV1, seed });
         // DEPRECATED compat path: the ontology system graph is being retired as
@@ -797,7 +801,6 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     await this.store.insert(quads);
     this.invalidateListContextGraphsCache();
-    this.contextGraphMetaProjection.markDirtyFromQuads(quads);
     await gm.ensureNewContextGraph(opts.id);
 
     // Force the triple-store flush BEFORE the SQLite caches are written.
@@ -1456,6 +1459,12 @@ export class ContextGraphMethods extends DKGAgentBase {
         `${MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS} addresses after merging local allowedAgents.`,
       );
     }
+    // Adds a curator that is not the registration's chain signer as a participant agent.
+    const roster: RegistrationRoster = {
+      insert: (quads) => this.store.insert(quads),
+      markDirty: (contextGraphId) => this.contextGraphMetaProjection.markDirty(contextGraphId),
+      participantAgents: (contextGraphId) => this.getContextGraphParticipantAgentAddresses(contextGraphId),
+    };
     let publishAuthority: string | undefined;
     if (publishPolicy === EVM_PUBLISH_CURATED) {
       if (isPcaCurated) {
@@ -1516,6 +1525,7 @@ export class ContextGraphMethods extends DKGAgentBase {
       //
       //   owner mode: local curator == tx signer == PCA owner
       //   agent mode: local curator == tx signer == registered PCA agent
+      //   external signer: author-key curator != tx signer (owner or agent); see external-author-curator.ts
       //
       // The advertised publishAuthority remains the live PCA owner in both
       // modes, as required by ContextGraphs._validatePCACoherence. In agent
@@ -1531,7 +1541,8 @@ export class ContextGraphMethods extends DKGAgentBase {
 
         const normalizedChainSigner = ethers.getAddress(chainSigner);
         const signerIsOwner = normalizedChainSigner.toLowerCase() === publishAuthority.toLowerCase();
-        if (ownerAddress.toLowerCase() !== normalizedChainSigner.toLowerCase()) {
+        const externalAuthorCurator = await isExternalAuthorCurator(this.config?.authorSigners, this.chain, ownerAddress, normalizedChainSigner);
+        if (ownerAddress.toLowerCase() !== normalizedChainSigner.toLowerCase() && !externalAuthorCurator) {
           throw new Error(
             `Context graph "${id}" cannot be PCA-registered: local curator ${ownerAddress} differs from registration chain signer ${normalizedChainSigner}. The local curator must control the wallet that will own the on-chain Context Graph NFT.`,
           );
@@ -1553,12 +1564,13 @@ export class ContextGraphMethods extends DKGAgentBase {
               `(registered account: ${signerAccountId}). The signer must own the PCA or be registered to that exact account.`,
             );
           }
-          this.log.info(
+          if (!externalAuthorCurator) this.log.info(
             ctx,
             `PCA-curated CG "${id}": registered agent ${normalizedChainSigner} will own the Context Graph NFT; ` +
             `PCA account ${publishAuthorityAccountId} owner ${publishAuthority} remains the live publish authority.`,
           );
         }
+        if (externalAuthorCurator) participantAgents = await addExternalAuthorCuratorAsParticipant(roster, id, ownerAddress, normalizedChainSigner, (message) => this.log.info(ctx, message));
       } else if (publishAuthority && ownerAddress.toLowerCase() !== publishAuthority.toLowerCase()) {
         // EOA mode: publishAuthority is the chain signer; local curator must
         // equal it unless the explicit auto-promotion path below is allowed.
@@ -1621,28 +1633,10 @@ export class ContextGraphMethods extends DKGAgentBase {
           `Local DKG_CURATOR stays ${ownerAddress}; on-chain NFT mints to ${publishAuthority}. ` +
           `Pass { strictEoaCuratorMatch: true } to suppress this relaxation.`,
         );
-        // Persist the calling agent as a local participant agent
-        // so SWM writes pass the agent gate. Idempotent — RDF
-        // triples deduplicate.
-        await this.store.insert([
-          {
-            subject: contextGraphUri,
-            predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
-            object: `"${ethers.getAddress(ownerAddress)}"`,
-            graph: cgMetaGraph,
-          },
-        ]);
-        this.contextGraphMetaProjection.markDirty(id);
-        // Re-fetch participantAgents so the on-chain
-        // registration also lists the calling agent (matches
-        // what the local agent gate now enforces).
-        participantAgents = await this.getContextGraphParticipantAgentAddresses(id);
-        if (participantAgents.length > MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS) {
-          throw new Error(
-            `Context graph "${id}" cannot be registered on-chain: participantAgents cannot exceed ` +
-            `${MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS} addresses after auto-adding the calling agent as a participant.`,
-          );
-        }
+        // Persist the calling agent as a local participant agent so SWM
+        // writes pass the agent gate, and list it in the on-chain
+        // registration too (matches what the local agent gate now enforces).
+        participantAgents = await addRegistrationParticipantAgent(roster, id, ownerAddress, 'auto-adding the calling agent');
         // Treat the chain signer as the local on-chain owner from
         // here on — downstream PCA/signer parity checks compare
         // against this value.
@@ -1898,7 +1892,6 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     await this.store.insert(quadsToInsert);
     this.invalidateListContextGraphsCache();
-    this.contextGraphMetaProjection.markDirtyFromQuads(quadsToInsert);
 
     // Issue #865 — log a clear warning AFTER the allowlist quad has
     // landed on a CG with an explicit `accessPolicy="public"` triple.
@@ -2200,7 +2193,6 @@ export class ContextGraphMethods extends DKGAgentBase {
     }
     this.invalidateListContextGraphsCache();
 
-    this.contextGraphMetaProjection.markDirtyFromQuads(quadsToInsert);
 
     // Private admission changes the release-native RFC-64 roster even when
     // the graph was registered before this member joined. Advance the

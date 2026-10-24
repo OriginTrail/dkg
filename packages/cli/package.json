@@ -1,7 +1,8 @@
 {
   "name": "@origintrail-official/dkg",
-  "version": "10.0.20",
+  "version": "10.0.25",
   "type": "module",
+  "dkgBuildIdentity": "compiler",
   "engines": {
     "node": ">=22.13.0 <23.0.0 || >=23.4.0"
   },
@@ -27,7 +28,7 @@
     "preinstall": "node ./scripts/verify-node-sqlite-runtime.mjs",
     "build": "pnpm run build:prerequisites && pnpm run build:prepared",
     "build:prerequisites": "node scripts/build-prerequisites.mjs",
-    "build:prepared": "tsc && pnpm run test:types && node scripts/test-catchup-worker-package-boundary.mjs && node ../../scripts/copy-cli-runtime-assets.mjs",
+    "build:prepared": "pnpm run build:compile && pnpm run test:types && node scripts/test-catchup-worker-package-boundary.mjs && node ../../scripts/copy-cli-runtime-assets.mjs",
     "prepack": "node ../../scripts/copy-cli-runtime-assets.mjs",
     "benchmark:catchup-runner": "node scripts/catchup-runner-benchmark.cjs",
     "benchmark:daemon-responsiveness": "node scripts/daemon-responsiveness-benchmark.cjs",
@@ -41,7 +42,8 @@
     "test:types": "tsc --project tsconfig.type-tests.json",
     "test:benchmark:publish-async-get": "vitest run --config vitest.benchmark.config.ts",
     "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs cli",
-    "clean": "node -e \"const fs=require('fs');for(const d of['dist','network']){fs.rmSync(d,{recursive:true,force:true})};fs.rmSync('tsconfig.tsbuildinfo',{force:true})\""
+    "clean": "node -e \"const fs=require('fs');for(const d of['dist','network']){fs.rmSync(d,{recursive:true,force:true})};fs.rmSync('tsconfig.tsbuildinfo',{force:true})\"",
+    "build:compile": "node ../../scripts/stamp-cli-build-info.mjs --compile"
   },
   "dependencies": {
     "@iarna/toml": "^2.2.5",
@@ -53,8 +55,10 @@
     "@origintrail-official/dkg-chain": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-epcis": "workspace:*",
+    "@origintrail-official/dkg-http-utils": "workspace:*",
     "@origintrail-official/dkg-local-llm": "workspace:*",
     "@origintrail-official/dkg-mcp": "workspace:*",
+    "@origintrail-official/dkg-node-store": "workspace:*",
     "@origintrail-official/dkg-node-ui": "workspace:*",
     "@origintrail-official/dkg-okf": "workspace:*",
     "@origintrail-official/dkg-publisher": "workspace:*",

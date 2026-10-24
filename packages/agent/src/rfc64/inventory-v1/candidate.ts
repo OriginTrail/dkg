@@ -1,3 +1,6 @@
+import { inventoryPersistenceFailure, inheritInventoryPersistenceFailure } from '../inventory-persistence-failure.js';
+import { type Rfc64SwmAuthorInventoryOperationsV1 } from './swm-author-inventory-contracts.js';
+export { createRfc64SwmAuthorInventoryOperationsViewV1, type Rfc64SwmAuthorInventoryOperationsV1 } from './swm-author-inventory-contracts.js';
 import { randomBytes } from 'node:crypto';
 
 import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
@@ -49,6 +52,7 @@ import {
   type SignedAuthorCatalogHeadEnvelopeV1,
   type SubGraphNameV1,
   type SwmAuthorInventorySnapshotV1,
+  type SwmAuthorInventoryRowV1,
   type VerifiedAuthorCatalogDirectoryPathV1,
   type VerifiedCgSharedProjectionV1,
   type VerifiedTransferredCatalogBundleV1,
@@ -329,20 +333,6 @@ export class InventoryV1CandidateError extends Error {
   }
 }
 
-export interface Rfc64SwmAuthorInventoryOperationsV1 {
-  readSwmAuthorInventorySnapshotV1(
-    inventoryScopeDigest: Digest32V1,
-    authorAddress: EvmAddressV1,
-  ): SwmAuthorInventorySnapshotV1 | null;
-  compareAndSwapSwmAuthorInventoryV1(
-    input: CompareAndSwapSwmAuthorInventoryInputV1,
-  ): SwmAuthorInventoryCasResultV1;
-  compareAndSwapMergeSwmAuthorInventoryV1(
-    input: CompareAndSwapMergeSwmAuthorInventoryInputV1,
-  ): SwmAuthorInventoryCasResultV1;
-  deleteSwmAuthorInventoryV1(input: DeleteSwmAuthorInventoryInputV1): void;
-}
-
 export interface Rfc64InventoryV1CandidateApi
   extends Rfc64SwmAuthorInventoryOperationsV1,
     Rfc64FinalizedPrivatePlacementRepairOperationsV1,
@@ -489,41 +479,6 @@ export function createRfc64InventoryOperationsViewV1(
     compareAndSwapAppliedCatalogHeadV1: fence(
       inventory.compareAndSwapAppliedCatalogHeadV1.bind(inventory),
     ),
-  });
-}
-
-/** Build the feature-owned non-owning SWM author-inventory capability. */
-export function createRfc64SwmAuthorInventoryOperationsViewV1(
-  inventory: Rfc64SwmAuthorInventoryOperationsV1,
-  requireOwnerOpen: () => void,
-): Rfc64SwmAuthorInventoryOperationsV1 {
-  return Object.freeze({
-    readSwmAuthorInventorySnapshotV1: (
-      inventoryScopeDigest: Digest32V1,
-      authorAddress: EvmAddressV1,
-    ): SwmAuthorInventorySnapshotV1 | null => {
-      requireOwnerOpen();
-      return inventory.readSwmAuthorInventorySnapshotV1(
-        inventoryScopeDigest,
-        authorAddress,
-      );
-    },
-    compareAndSwapSwmAuthorInventoryV1: (
-      input: CompareAndSwapSwmAuthorInventoryInputV1,
-    ): SwmAuthorInventoryCasResultV1 => {
-      requireOwnerOpen();
-      return inventory.compareAndSwapSwmAuthorInventoryV1(input);
-    },
-    compareAndSwapMergeSwmAuthorInventoryV1: (
-      input: CompareAndSwapMergeSwmAuthorInventoryInputV1,
-    ): SwmAuthorInventoryCasResultV1 => {
-      requireOwnerOpen();
-      return inventory.compareAndSwapMergeSwmAuthorInventoryV1(input);
-    },
-    deleteSwmAuthorInventoryV1: (input: DeleteSwmAuthorInventoryInputV1): void => {
-      requireOwnerOpen();
-      inventory.deleteSwmAuthorInventoryV1(input);
-    },
   });
 }
 
@@ -697,6 +652,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
   #startupPurgeDone = false;
   #committedOverruns = 0;
   #available = true;
+  #unavailableCause: unknown;
   #closed = false;
   #activeWriteDeadline: number | null = null;
   /** Cleared by every applied-head write attempt and every reopen. */
@@ -706,7 +662,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     private database: DatabaseSync,
     private readonly onRequireReopen: (database: DatabaseSync) => DatabaseSync,
     private readonly monotonicNow: () => number = () => performance.now(),
-    private readonly onRejectReopened: (database: DatabaseSync) => void = closeRejectedDatabase,
+    private readonly onRejectReopened: (database: DatabaseSync, cause?: unknown) => void = closeRejectedDatabase,
   ) {}
 
   /** Number of committed write operations whose successful COMMIT crossed a hard budget. */
@@ -897,6 +853,36 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     } finally {
       this.#appliedCatalogHeadsSnapshot = null;
     }
+  }
+
+  listSwmAuthorInventoryScopesV1(): ReturnType<Rfc64SwmAuthorInventoryOperationsV1['listSwmAuthorInventoryScopesV1']> {
+    this.assertOpen();
+    return this.readTransaction(() => this.swmAuthorInventoryPersistenceV1().listScopes());
+  }
+
+  readSwmAuthorInventoryHeadDigestV1(
+    inventoryScopeDigest: Digest32V1,
+    authorAddress: EvmAddressV1,
+  ): Digest32V1 | null {
+    this.assertOpen();
+    const persistence = this.swmAuthorInventoryPersistenceV1();
+    const key = encodeSwmAuthorInventoryKeyV1(
+      inventoryScopeDigest, authorAddress, swmAuthorInventoryErrorV1,
+    );
+    return this.readTransaction(() => persistence.readHeadDigest(key));
+  }
+
+  readSwmAuthorInventoryRowV1(
+    inventoryScopeDigest: Digest32V1,
+    authorAddress: EvmAddressV1,
+    kaUal: SwmAuthorInventoryRowV1['kaUal'],
+  ): Readonly<SwmAuthorInventoryRowV1> | null {
+    this.assertOpen();
+    const persistence = this.swmAuthorInventoryPersistenceV1();
+    const key = encodeSwmAuthorInventoryKeyV1(
+      inventoryScopeDigest, authorAddress, swmAuthorInventoryErrorV1,
+    );
+    return this.readTransaction(() => persistence.readRow(key, kaUal));
   }
 
   readSwmAuthorInventorySnapshotV1(
@@ -2443,7 +2429,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
         const overBudget = cause instanceof LatencyBudgetSignal || rollback.overran;
         if (rollback.failed || overBudget) {
           try {
-            this.requireReopen(writeDeadline);
+            this.requireReopen();
           } catch (reopenCause) {
             if (overBudget) throw latencyBudgetError(cause);
             throw reopenCause;
@@ -2463,7 +2449,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
         const overBudget = cause instanceof LatencyBudgetSignal || rollback.overran;
         if (rollback.failed || overBudget) {
           try {
-            this.requireReopen(writeDeadline);
+            this.requireReopen();
           } catch (reopenCause) {
             if (overBudget) throw latencyBudgetError(cause);
             throw reopenCause;
@@ -2489,13 +2475,13 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
           // post-call budget check failed. Its durable outcome is therefore
           // known committed even if the mandatory verified reopen later fails.
           this.#committedOverruns += 1;
-          this.reopenAfterKnownCommit(writeDeadline);
+          this.reopenAfterKnownCommit();
           return result;
         }
         // Never issue ROLLBACK after an indeterminate COMMIT. Close the low-level
         // handle, perform the foundation's full verified reopen, and inspect only
         // the immutable key set captured by the failed attempt.
-        this.requireReopen(writeDeadline);
+        this.requireReopen();
         if (indeterminate === undefined) {
           throw databaseError(
             `${label} COMMIT failed without an exact-key outcome resolver`,
@@ -2503,13 +2489,15 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
           );
         }
         let resolution: IndeterminateCommitResolutionV1;
+        let resolutionStarted = false;
         try {
           this.assertWriteDeadline('before indeterminate COMMIT resolution');
+          resolutionStarted = true;
           resolution = indeterminate.resolve(result);
           this.assertWriteDeadline('after indeterminate COMMIT resolution');
         } catch (resolutionCause) {
           if (resolutionCause instanceof LatencyBudgetSignal) {
-            this.requireReopen(writeDeadline);
+            if (resolutionStarted) this.requireReopen();
             throw latencyBudgetError(resolutionCause);
           }
           throw resolutionCause;
@@ -2545,7 +2533,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
         || transactionElapsed >= WRITE_TRANSACTION_LATENCY_BUDGET_MS
       ) {
         this.#committedOverruns += 1;
-        this.reopenAfterKnownCommit(writeDeadline);
+        this.reopenAfterKnownCommit();
       }
       return result;
     } finally {
@@ -2580,12 +2568,11 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     return this.statement(() => this.database.prepare(sql));
   }
 
-  private requireReopen(writeDeadline = this.#activeWriteDeadline): void {
+  private requireReopen(): void {
     if (this.#closed || !this.#available) {
-      throw new InventoryV1CandidateError(
-        'candidate-database-error',
-        'candidate inventory is unavailable and cannot reopen',
-      );
+      throw inheritInventoryPersistenceFailure(new InventoryV1CandidateError(
+        'candidate-database-error', 'candidate inventory is unavailable and cannot reopen',
+        { cause: this.#unavailableCause }), this.#closed ? undefined : this.#unavailableCause);
     }
     this.invalidateTraversals();
     // A new low-level handle: nothing listed through the old one is reused.
@@ -2597,23 +2584,28 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     this.#available = false;
     let reopened: DatabaseSync | null = null;
     try {
+      // Repair has its own bounded lifetime. The failed operation's deadline
+      // remains unchanged for its outcome, exact-key resolution and retry.
       const beforeReopen = this.monotonicNow();
+      const repairDeadline = beforeReopen + WRITE_TRANSACTION_LATENCY_BUDGET_MS;
       reopened = this.onRequireReopen(previous);
       if (reopened === previous) {
         throw new Error('verified reopen provider returned the abandoned low-level handle');
       }
       const afterReopen = this.monotonicNow();
-      assertReopenDeadline(beforeReopen, writeDeadline, 'before verified reopen');
-      assertReopenDeadline(afterReopen, writeDeadline, 'after verified reopen');
-      assertUsableReopenedDatabase(reopened, this.monotonicNow, writeDeadline);
+      assertReopenDeadline(beforeReopen, repairDeadline, 'before verified reopen');
+      assertReopenDeadline(afterReopen, repairDeadline, 'after verified reopen');
+      assertUsableReopenedDatabase(reopened, this.monotonicNow, repairDeadline);
       this.database = reopened;
       this.#available = true;
+      this.#unavailableCause = undefined;
     } catch (cause) {
+      this.#unavailableCause = cause instanceof LatencyBudgetSignal ? latencyBudgetError(cause) : cause;
       // A lifecycle owner may attach the replacement before returning it.
       // Detach first and close second so a rejected identity/probe/deadline
       // result can never leave the foundation pointing at a stale handle.
       if (reopened !== null) {
-        try { this.onRejectReopened(reopened); } catch { /* remain unavailable */ }
+        try { this.onRejectReopened(reopened, this.#unavailableCause); } catch { /* remain unavailable */ }
       }
       // Direct/internal providers are required to abandon the prior handle,
       // but a malformed provider might return before doing so.
@@ -2625,11 +2617,9 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
       ) {
         throw cause;
       }
-      throw new InventoryV1CandidateError(
-        'candidate-database-error',
-        'verified low-level inventory reopen failed; the foundation remains unavailable',
-        { cause },
-      );
+      throw inheritInventoryPersistenceFailure(new InventoryV1CandidateError(
+        'candidate-database-error', 'verified low-level inventory reopen failed; the foundation remains unavailable',
+        { cause }), this.#unavailableCause);
     }
   }
 
@@ -2638,9 +2628,9 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
    * reopen fails. Preserve its result, but make every subsequent API fail
    * closed through #available/the owning foundation's closed connection.
    */
-  private reopenAfterKnownCommit(writeDeadline: number): void {
+  private reopenAfterKnownCommit(): void {
     try {
-      this.requireReopen(writeDeadline);
+      this.requireReopen();
     } catch {
       // requireReopen already marked the candidate adapter unavailable and the
       // foundation callback closed/detached the low-level connection.
@@ -2711,12 +2701,10 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
 
   private assertOpen(): void {
     if (this.#closed || !this.#available) {
-      throw new InventoryV1CandidateError(
-        'candidate-database-error',
-        this.#closed
-          ? 'candidate inventory adapter is closed'
+      throw inheritInventoryPersistenceFailure(new InventoryV1CandidateError(
+        'candidate-database-error', this.#closed ? 'candidate inventory adapter is closed'
           : 'candidate inventory adapter is unavailable after failed verified reopen',
-      );
+        { cause: this.#unavailableCause }), this.#closed ? undefined : this.#unavailableCause);
     }
   }
 
@@ -3336,7 +3324,7 @@ function isSqliteUniqueOrPrimaryKeyConstraint(cause: unknown): boolean {
 function assertUsableReopenedDatabase(
   value: unknown,
   monotonicNow: () => number,
-  writeDeadline: number | null,
+  repairDeadline: number,
 ): asserts value is DatabaseSync {
   if (
     typeof value !== 'object'
@@ -3348,7 +3336,7 @@ function assertUsableReopenedDatabase(
     throw new Error('verified reopen provider returned an invalid low-level handle');
   }
   const startedAt = monotonicNow();
-  assertReopenDeadline(startedAt, writeDeadline, 'before verified reopen SQL probe');
+  assertReopenDeadline(startedAt, repairDeadline, 'before verified reopen SQL probe');
   const probe = (value as DatabaseSync).prepare(
     'SELECT 1 AS rfc64_verified_reopen_probe',
   ).get() as Record<string, unknown> | undefined;
@@ -3358,7 +3346,7 @@ function assertUsableReopenedDatabase(
       callCompleted: true,
     });
   }
-  assertReopenDeadline(completedAt, writeDeadline, 'after verified reopen SQL probe');
+  assertReopenDeadline(completedAt, repairDeadline, 'after verified reopen SQL probe');
   if (probe?.rfc64_verified_reopen_probe !== 1) {
     throw new Error('verified reopen provider returned a nonfunctional low-level handle');
   }
@@ -3366,11 +3354,11 @@ function assertUsableReopenedDatabase(
 
 function assertReopenDeadline(
   now: number,
-  writeDeadline: number | null,
+  repairDeadline: number,
   label: string,
 ): void {
-  if (writeDeadline !== null && now >= writeDeadline) {
-    throw new LatencyBudgetSignal(`${label} reached the absolute 30000 ms write deadline`);
+  if (now >= repairDeadline) {
+    throw new LatencyBudgetSignal(`${label} reached the absolute 30000 ms repair deadline`);
   }
 }
 
@@ -3384,15 +3372,15 @@ function normalizeCandidateError(message: string, cause: unknown): InventoryV1Ca
 }
 
 function databaseError(message: string, cause: unknown): InventoryV1CandidateError {
-  return new InventoryV1CandidateError('candidate-database-error', message, { cause });
+  return inventoryPersistenceFailure(new InventoryV1CandidateError('candidate-database-error', message, { cause }));
 }
 
 function latencyBudgetError(cause: unknown): InventoryV1CandidateError {
-  return new InventoryV1CandidateError(
+  return inventoryPersistenceFailure(new InventoryV1CandidateError(
     'latency-budget-exceeded',
     'SQL-1 latency budget was exceeded; the result was discarded and verified reopen is required',
     { cause },
-  );
+  ));
 }
 
 function invalidLoad(message: string): never {

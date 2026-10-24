@@ -1,35 +1,26 @@
 name: Chain RPC transport on Node 26
 
-# Node 26's fetch (undici 8) negotiates HTTP/2 on its own, and Node 22 and 24
-# do not (#2828). The required lanes run Node 22, so the transport cases that
-# need undici 8 run here whenever the chain RPC dispatcher changes.
+# The primary CI workflow owns PR/full/merge-group selection. Manual diagnosis
+# and release-candidate dispatch use this same implementation, without a second
+# independently triggered PR execution.
 on:
-  pull_request:
-    paths:
-      - 'packages/chain/src/rpc-http1-dispatcher.ts'
-      - 'packages/chain/test/rpc-http1-dispatcher.unit.test.ts'
-      - 'packages/chain/test/helpers/local-tls.ts'
-      - 'packages/chain/test/helpers/chain-rpc-fetch-child.mjs'
-      - 'packages/chain/test/fixtures/localhost-tls/**'
-      # Inputs that decide installation and test discovery.
-      - 'pnpm-lock.yaml'
-      - 'packages/chain/package.json'
-      - 'packages/chain/vitest.unit.config.ts'
-      - '.github/workflows/chain-rpc-node26.yml'
+  workflow_call:
+    outputs:
+      evidence:
+        description: Actual runtime and executed Node 26 transport assertions
+        value: ${{ jobs.transport.outputs.evidence }}
   workflow_dispatch:
 
 permissions:
   contents: read
-
-concurrency:
-  group: chain-rpc-node26-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 
 jobs:
   transport:
     name: Chain RPC transport (Node 26)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      evidence: ${{ steps.transport.outputs.evidence }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
@@ -41,7 +32,15 @@ jobs:
           cache: pnpm
       - name: Install test dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
-      - name: Verify chain RPC calls stay on HTTP/1.1 through the configured dispatcher
+      - name: Verify required Node 26 transport assertions executed
+        id: transport
         env:
           DKG_REQUIRE_UNDICI8_FETCH: '1'
-        run: pnpm --dir packages/chain exec vitest run --config vitest.unit.config.ts test/rpc-http1-dispatcher.unit.test.ts
+        run: node scripts/ci/run-chain-rpc-node26.mjs "${RUNNER_TEMP}/chain-rpc-node26"
+      - name: Preserve runtime and assertion evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: chain-rpc-node26
+          path: ${{ runner.temp }}/chain-rpc-node26
+          if-no-files-found: error

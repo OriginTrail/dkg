@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api-wrapper.js';
 import type { AgentIdentity } from '../api.js';
+import { currentApiToken } from '../lib/apiToken.js';
 
 type CurrentAgentState = {
   data: AgentIdentity | null;
@@ -22,8 +23,7 @@ let stateAuthKey = '';
 const listeners = new Set<() => void>();
 
 function currentAuthKey() {
-  if (typeof window === 'undefined') return '';
-  const token = (window as any).__DKG_TOKEN__;
+  const token = currentApiToken();
   return token ? `Bearer ${token}` : '';
 }
 

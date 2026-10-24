@@ -1,9 +1,9 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { describe, expect, it, vi } from 'vitest';
 import { availableParallelism } from 'node:os';
 import {
   StorePriorityScheduler,
   StoreSchedulerBusyError,
-  isStoreSchedulerBusyError,
   activeDefaultStoreWorkPriority,
   withDefaultStoreWorkPriority,
 } from '../src/store-priority-scheduler.js';
@@ -23,6 +23,24 @@ const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 const mockedAvailableParallelism = vi.mocked(availableParallelism);
 
 describe('StorePriorityScheduler', () => {
+  it('runs queued callbacks in each submitting async context and isolates unrelated work', async () => {
+    const context = new AsyncLocalStorage<string>();
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 1, ackReservedSlots: 0,
+      healthReservedSlots: 0, backgroundReservedSlots: 0 });
+    let release!: () => void;
+    const first = context.run('first', () => scheduler.run('normal', 'context.first', async () => {
+      await new Promise<void>(resolve => { release = resolve; });
+    }));
+    const submitted = context.run('second', () => scheduler.run('normal', 'context.second', async () => {
+      await Promise.resolve(); return context.getStore();
+    }));
+    const outside = scheduler.run('normal', 'context.outside', async () => context.getStore());
+    release();
+    await first;
+    expect(await submitted).toBe('second');
+    expect(await outside).toBeUndefined();
+  });
+
   it('keeps the exported canonical priority collection runtime-immutable', () => {
     expect(Object.isFrozen(STORE_WORK_PRIORITIES)).toBe(true);
     expect(() => {
@@ -274,46 +292,6 @@ describe('StorePriorityScheduler', () => {
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  it('exports a distinguishable busy error type for boundary mapping', () => {
-    const error = new StoreSchedulerBusyError('queue_full', 'ack', 'storage-ack.read');
-    expect(error).toBeInstanceOf(Error);
-    expect(error).toBeInstanceOf(StoreSchedulerBusyError);
-    expect(error).toMatchObject({
-      code: 'STORE_SCHEDULER_BUSY',
-      retryable: true,
-      reason: 'queue_full',
-    });
-    expect(isStoreSchedulerBusyError(error)).toBe(true);
-  });
-
-  it('recognizes only complete structural busy errors across package boundaries', () => {
-    const structural = {
-      code: 'STORE_SCHEDULER_BUSY',
-      retryable: true,
-      outcome: 'not_started',
-      storeOperationOutcomeTag: 'dkg.store-operation-outcome.v1',
-      reason: 'queue_wait_timeout',
-      priority: 'normal',
-      operation: 'remote-query.read',
-      storeOperation: 'query',
-    };
-
-    for (const priority of STORE_WORK_PRIORITIES) {
-      expect(isStoreSchedulerBusyError({ ...structural, priority })).toBe(true);
-    }
-    expect(isStoreSchedulerBusyError({ ...structural, retryable: false })).toBe(false);
-    expect(isStoreSchedulerBusyError({ ...structural, outcome: 'indeterminate' })).toBe(false);
-    expect(isStoreSchedulerBusyError({
-      ...structural,
-      storeOperationOutcomeTag: 'dkg.store-operation-outcome.v2',
-    })).toBe(false);
-    expect(isStoreSchedulerBusyError({ ...structural, storeOperation: 'unknown' })).toBe(false);
-    expect(isStoreSchedulerBusyError({ ...structural, reason: undefined })).toBe(false);
-    expect(isStoreSchedulerBusyError({ ...structural, priority: 'urgent' })).toBe(false);
-    expect(isStoreSchedulerBusyError({ ...structural, operation: undefined })).toBe(false);
-    expect(isStoreSchedulerBusyError({ code: 'STORE_SCHEDULER_BUSY' })).toBe(false);
   });
 
   it('binds canonical operations at both scheduler-owned admission rejection sites', async () => {

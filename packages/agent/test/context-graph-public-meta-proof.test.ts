@@ -61,6 +61,7 @@ describe('approved-member acceptance (#2831 review)', () => {
   it('is public only from a plaintext transport authority, and cannot be built directly', async () => {
     for (const transport of [
       { kind: 'private-roster' as const, participantAgents: [] },
+      { kind: 'approved-private-replica' as const, allowedPeers: [] },
       { kind: 'legacy-unregistered' as const },
       { kind: 'unavailable' as const, reason: 'chain-access-policy-unavailable' as const },
     ]) {

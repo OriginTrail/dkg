@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import {
   PROTOCOL_NETWORK_IDENTITY,
+  createOperationContext,
+  isTransportTimeoutError,
   type DkgNetworkIdentity,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
@@ -48,6 +50,8 @@ export interface NetworkAdmissionCoordinatorOptions {
     warn(ctx: OperationContext, message: string): void;
   };
   probeTimeoutMs?: number;
+  /** One longer retry for a transport deadline; caller cancellation still wins. Default 15s. */
+  probeRetryTimeoutMs?: number;
 }
 
 export interface NetworkAdmissionAttemptOptions {
@@ -150,6 +154,16 @@ class InFlightAdmissionAttempt {
   }
 }
 
+/**
+ * A retryable identity-probe failure.
+ *
+ * Logging contract: the coordinator logs the failed probe itself, once, with
+ * its reason and the backoff it starts. A backed-off skip throws this error
+ * too, but no new probe ran: it repeats the reason of the probe that opened
+ * the backoff window. Callers handle the error without logging it again
+ * (GH#1578: one warning per failed probe, not one per connection callback).
+ * A new throw site must keep that contract or use another error type.
+ */
 export class NetworkAdmissionProbeError extends Error {
   readonly code = 'NETWORK_ADMISSION_PROBE_FAILED';
 
@@ -190,6 +204,7 @@ export class NetworkAdmissionCoordinator {
   private readonly onPeerVerified?: (peerId: string) => void;
   private readonly log?: NetworkAdmissionCoordinatorOptions['log'];
   private readonly probeTimeoutMs: number;
+  private readonly probeRetryTimeoutMs: number;
   private readonly inFlight = new Map<CanonicalPeerId, InFlightAdmissionAttempt>();
 
   constructor(options: NetworkAdmissionCoordinatorOptions) {
@@ -207,6 +222,7 @@ export class NetworkAdmissionCoordinator {
     this.onPeerVerified = options.onPeerVerified;
     this.log = options.log;
     this.probeTimeoutMs = options.probeTimeoutMs ?? 3_000;
+    this.probeRetryTimeoutMs = options.probeRetryTimeoutMs ?? 15_000;
   }
 
   get enabled(): boolean {
@@ -242,12 +258,16 @@ export class NetworkAdmissionCoordinator {
         throw new Error('network identity is not configured');
       }
       const request = parseNetworkIdentityRequest(data);
+      const ctx = createOperationContext('connect');
+      const startedAt = performance.now();
+      notifyBestEffort(() => this.log?.info(ctx, `Network identity request received from ${request.requesterPeerId.slice(-8)}`));
       const response = await signNetworkIdentityResponse({
         request,
         identity: this.identity,
         responderPeerId: this.selfPeerId,
         sign: this.sign,
       });
+      notifyBestEffort(() => this.log?.info(ctx, `Network identity response signed in ${Math.round(performance.now() - startedAt)}ms`));
       return new TextEncoder().encode(JSON.stringify(response));
     });
   }
@@ -376,13 +396,28 @@ export class NetworkAdmissionCoordinator {
     }
   }
 
+  /**
+   * Suffix for the one warning a failed probe gets. The skips inside the
+   * backoff window are not logged, so that warning states the window.
+   */
+  private describeProbeBackoff(remotePeer: CanonicalPeerId): string {
+    const backoff = this.admission.getRetryableProbeBackoff(remotePeer);
+    return backoff ? ` (automatic probes paused for ${backoff.retryAfterMs}ms)` : '';
+  }
+
   private throwTransientProbeFailure(
     remotePeer: CanonicalPeerId,
     ctx: OperationContext,
     message: string,
   ): never {
-    this.admission.rememberRetryableProbeFailure(remotePeer, message, 'transient');
-    this.log?.warn(ctx, `Network identity probe for ${remotePeer.slice(-8)} failed retryably: ${message}`);
+    // Connection liveness permits an earlier re-probe, never admission without
+    // a signed identity. Disconnected peers retain exponential suppression.
+    const connected = [...this.getConnections()].some(({ remotePeer: peer }) => peer.toString() === remotePeer);
+    this.admission.rememberRetryableProbeFailure(remotePeer, message, 'transient', connected ? 3_000 : undefined);
+    this.log?.warn(
+      ctx,
+      `Network identity probe for ${remotePeer.slice(-8)} failed retryably: ${message}${this.describeProbeBackoff(remotePeer)}`,
+    );
     throw new NetworkAdmissionProbeError(remotePeer, message);
   }
 
@@ -407,11 +442,16 @@ export class NetworkAdmissionCoordinator {
     let response: Uint8Array;
     if (signal.aborted) throw abortErrorFromSignal(signal.reason);
     try {
-      response = await this.sendIdentityProbe(
-        remotePeer,
-        new TextEncoder().encode(JSON.stringify(request)),
-        { timeoutMs: this.probeTimeoutMs, signal },
-      );
+      const data = new TextEncoder().encode(JSON.stringify(request));
+      try {
+        response = await this.sendIdentityProbe(remotePeer, data, { timeoutMs: this.probeTimeoutMs, signal });
+      } catch (error) {
+        if (signal.aborted) throw abortErrorFromSignal(signal.reason);
+        if (!isTransportTimeoutError(error)) throw error;
+        // A busy peer can miss the first deadline. The same shared owner makes
+        // exactly one longer attempt before recording any failure/backoff.
+        response = await this.sendIdentityProbe(remotePeer, data, { timeoutMs: this.probeRetryTimeoutMs, signal });
+      }
     } catch (err) {
       if (signal.aborted) throw abortErrorFromSignal(signal.reason);
       const message = err instanceof Error ? err.message : String(err);
@@ -442,7 +482,10 @@ export class NetworkAdmissionCoordinator {
       // bytes, and the backoff reason is re-interpolated into later thrown
       // errors and logs. The raw message is still logged once, below.
       this.admission.rememberRetryableProbeFailure(remotePeer, 'unreadable response', 'unreadable-response');
-      this.log?.warn(ctx, `Network identity probe for ${remotePeer.slice(-8)} returned unreadable response: ${message}`);
+      this.log?.warn(
+        ctx,
+        `Network identity probe for ${remotePeer.slice(-8)} returned unreadable response: ${message}${this.describeProbeBackoff(remotePeer)}`,
+      );
       throw new NetworkAdmissionProbeError(remotePeer, message);
     }
 

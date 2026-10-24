@@ -236,6 +236,7 @@ test('leaf and shared package snapshots include conservative downstream consumer
 
   const core = pullRequestPlan([change('packages/core/src/index.ts')]);
   assert.deepEqual(selectedLanes(core), [
+    'chain_rpc_node26',
     'tornado_core',
     'tornado_blazegraph',
     'tornado_publisher',
@@ -291,7 +292,21 @@ test('control-plane changes force full Node/EVM CI without overriding the Solidi
     'scripts/lib/ci-delta.mjs',
     'scripts/lib/ci-results.mjs',
     'scripts/lib/ci-routing.mjs',
-    'scripts/unrelated-maintenance.mjs',
+    'scripts/testing/package.json',
+    'scripts/test-evm-integration.sh',
+    'test-policy/coverage-baselines.json',
+    // The CLI build copies these assets into the output every lane restores.
+    'scripts/copy-cli-runtime-assets.mjs',
+    'scripts/build.mjs',
+    // A repository script no build-only family lists fails closed.
+    'scripts/new-helper.sh',
+    // What the CLI's install hooks run, in every job's install.
+    'packages/cli/scripts/verify-node-sqlite-runtime.mjs',
+    'packages/cli/scripts/bundle-markitdown-binaries.mjs',
+    'packages/cli/scripts/markitdown-bundle-validation.mjs',
+    'packages/cli/markitdown-build-info.json',
+    'packages/cli/markitdown-targets.json',
+    'packages/cli/scripts/markitdown-entry.py',
   ];
 
   for (const filePath of controlPlanePaths) {

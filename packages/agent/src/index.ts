@@ -1,3 +1,11 @@
+export { normalizePublicSnapshotSyncOptions } from './public-snapshot-options.js';
+export type { PublicSnapshotSyncOptions } from './dkg-agent-public-snapshot.js';
+export { isPublicSnapshotMode, type PublicSnapshotMode } from './public-snapshot-mode.js';
+export {
+  QueryResultTooLargeError,
+  isQueryResultTooLargeError,
+  type QueryResultTooLargeErrorLike,
+} from '@origintrail-official/dkg-query';
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 export {
   authorityIndexTrustDomain,
@@ -19,6 +27,7 @@ export {
 export {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   generateAgentToken, hashAgentToken,
+  agentKeystorePath, readAgentKeystore, assertKeystoreHoldsNoPayerKey,
   ensureWorkspaceEncryptionKey,
   appendCustodialWorkspaceEncryptionKey,
   revokeCustodialWorkspaceEncryptionKey,
@@ -171,6 +180,12 @@ export {
   ContextGraphMembershipPersistShutdownTimeoutError,
   CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_ERROR_CODE,
 } from './context-graph-membership-persist-scheduler.js';
+export {
+  ContextGraphSubscriptionPersistQueueClosedError,
+  ContextGraphSubscriptionPersistQueueFullError,
+  ContextGraphSubscriptionPersistShutdownTimeoutError,
+  CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_ERROR_CODE,
+} from './context-graph-subscription-persist-scheduler.js';
 export { buildEndorsementQuads, DKG_ENDORSES, DKG_ENDORSED_AT } from './endorse.js';
 export {
   CclEvaluator,
@@ -207,6 +222,7 @@ export {
 } from './ccl-policy.js';
 export { ContextGraphPolicyAuthorizationError } from './dkg-agent-ownership.js';
 export { DKGAgent } from './dkg-agent.js';
+export { resolveWorkingMemoryIdentityAliases } from './working-memory-identity.js';
 export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
 export {
   CONTEXT_GRAPH_STORAGE_DISCOVERY_ID_BUDGET,
@@ -257,6 +273,13 @@ export type {
   Rfc64PublicCatalogAuthorRepairStatusV1,
   Rfc64SwmCatalogProjectionSupervisorStatusV1,
 } from './dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
+export type {
+  CatalogHeadDeliveryStatusV1,
+} from './internal/catalog-head-delivery-report.js';
+export type {
+  FinalizedPrivatePlacementQueueStatusV1,
+} from './internal/catalog-placement-timing.js';
+export { committedSharePendingCatalogHandoff, type CommittedSharePendingCatalogHandoff } from './internal/promote/inventory-recovery-failure.js';
 export type {
   Rfc64CatalogShadowExecutionStatusV1,
 } from './rfc64/catalog-shadow-observability-v1.js';
@@ -368,7 +391,9 @@ export type {
   UnavailableContextGraphReadAuthorityDecision,
 } from './context-graph-read-authority.js';
 export type {
+  ContextGraphAuthorityFailureSite,
   ContextGraphAuthorityReadMode,
+  ContextGraphFinalizedAbsenceDetailCode,
   LiveOnChainAccessPolicyUnavailable,
   LiveOnChainAccessPolicyUnavailableReason,
   RegisteredContextGraphAuthority,
@@ -377,6 +402,15 @@ export type {
 } from './registered-context-graph-authority.js';
 export type { ContextGraphRegistrationBinding } from './dkg-agent-cg-registry.js';
 export type { FinalizedContextGraphAuthoritySnapshotReadV1 } from './dkg-agent-cg-resolve.js';
+export type {
+  ContextGraphReadinessMetadataV1,
+  InspectedContextGraphReadinessV1,
+  InspectedPrivateEmptyVmReadinessV1,
+  PreparedPrivateEmptyVmReadinessV1,
+  ProvenRegisteredPrivateEmptyVmInspectionV1,
+  SynchronousReadinessCommitResult,
+} from './dkg-agent-registered-private-empty-vm.js';
+export { isRegisteredPrivateEmptyVmReadinessCandidateV1 } from './dkg-agent-registered-private-empty-vm.js';
 export {
   ContextGraphNotFoundError,
   InvalidContentError,
@@ -519,6 +553,8 @@ export {
 // registry-scale per-peer fan-out and must be bounded by the SAME knob, without
 // deep-importing the compiled `dist/` module.
 export { mapWithConcurrency } from './map-with-concurrency.js';
+// Deprecated compatibility codecs for third-party subscription-store adapters.
+// The recovery runtime does not import this historical persistence surface.
 export {
   createVmReconcilePeerTopology,
   createVmReconcileCleanMissPeerIds,
@@ -615,6 +651,7 @@ export {
   mergeFleetSharedMemoryDiagnostics,
   mergeSamePeerSharedMemoryDiagnostics,
   selectSwmSnapshotCoverage,
+  sharedMemoryRoundFoundNothingMissing,
 } from './sync/shared-memory-diagnostics.js';
 // 2026-07-08 sync-storm mitigation (#1233) — resolve the opt-in `agents/_meta`
 // fetch flag. Exported on the public surface so the CLI daemon lifecycle resolves

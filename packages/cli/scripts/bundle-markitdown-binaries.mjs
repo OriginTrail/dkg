@@ -149,9 +149,13 @@ export function readCliVersion(packageDir = DEFAULT_PACKAGE_DIR) {
   return String(pkg.version ?? '').trim();
 }
 
+// A workspace checkout, where the postinstall skips the implicit release
+// download, rather than an installed package: the CLI's tsconfig.json marks
+// it, and the published package leaves tsconfig.json out (the markitdown
+// binaries test packs the CLI to check). CI plans full CI for a change to
+// tsconfig.json, since every job's install runs this hook.
 export function isWorkspaceCheckout(packageDir = DEFAULT_PACKAGE_DIR) {
-  const dir = resolvePackageDir(packageDir);
-  return existsSync(join(dir, 'src')) && existsSync(join(dir, 'tsconfig.json'));
+  return existsSync(join(resolvePackageDir(packageDir), 'tsconfig.json'));
 }
 
 export function getSupportedTarget(platform = process.platform, arch = process.arch) {

@@ -6,6 +6,7 @@ on:
       - 'packages/cli/src/mcp-*.ts'
       - 'packages/cli/test/fixtures/mcp-config-wsl.fixture.ts'
       - 'packages/cli/scripts/run-mcp-config-wsl.sh'
+      - 'packages/cli/.gitattributes'
       - 'packages/cli/package.json'
       - 'packages/cli/test/mcp-config-metadata.test.ts'
       - 'packages/cli/vitest.unit.config.ts'

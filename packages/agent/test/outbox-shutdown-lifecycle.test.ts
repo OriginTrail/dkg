@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { RandomSamplingRuntime } from '../src/random-sampling-runtime.js';
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { describe, expect, it, vi } from 'vitest';
@@ -5,6 +6,7 @@ import { startProverLoop, type TickOutcome } from '@origintrail-official/dkg-ran
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { GossipSession } from '../src/gossip-session.js';
 import { StorageACKRegistrationRuntime } from '../src/p2p/storage-ack-registration-runtime.js';
 import { RandomSamplingShutdownTimeoutError } from '../src/random-sampling-bind.js';
 import { VmReconcileSchedulingRuntime } from '../src/chain-reconciler.js';
@@ -13,6 +15,7 @@ import {
   ContextGraphMembershipPersistScheduler,
   ContextGraphMembershipPersistShutdownTimeoutError,
 } from '../src/context-graph-membership-persist-scheduler.js';
+import { ContextGraphSubscriptionPersistScheduler } from '../src/context-graph-subscription-persist-scheduler.js';
 import {
   VmReconcileQueueClosedError,
   VmReconcileShutdownTimeoutError,
@@ -29,14 +32,19 @@ import { Rfc64BackgroundWorkDispatcherV1 } from
 function syntheticShutdownAgent(): any {
   const agent = Object.create(DKGAgent.prototype) as any;
   agent.chain = new MockChainAdapter();
+  agent.workLifetime = new AgentWorkLifetime();
   agent.peerSyncSession = PeerSyncSession.stopped();
   agent.lastSyncDisconnectedAt = new Map();
   agent.selectedSwmBootstrapAdmission = new SelectedSwmBootstrapAdmission();
   // Object.create deliberately bypasses DKGAgentBase field initializers. Keep
   // the synthetic shutdown fixture aligned with the production lifecycle
   // owners that stop() fences before dependency teardown.
+  agent.gossipSession = new GossipSession();
   agent.rfc64BackgroundWorkDispatcherV1 = new Rfc64BackgroundWorkDispatcherV1();
   agent.storageACKRegistrationRuntime = new StorageACKRegistrationRuntime();
+  // stop() closes and drains this scheduler unconditionally: production always
+  // constructs it, so the fixture does too.
+  agent.contextGraphSubscriptionPersistence = new ContextGraphSubscriptionPersistScheduler();
   return agent;
 }
 
@@ -440,10 +448,10 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     const closeStore = vi.fn(async () => {});
     const stopNode = vi.fn(async () => {});
     const agent = syntheticShutdownAgent();
+    agent.workLifetime.track(physical);
     Object.assign(agent, {
       started: true,
       chainPoller: null,
-      vmReconcilePhysicalRuns: new Set([physical]),
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
       messenger: { stopOutboxDrain: vi.fn(async () => {}) },
@@ -458,7 +466,10 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     });
 
     try {
-      await expect(agent.stop()).rejects.toBeInstanceOf(VmReconcileShutdownTimeoutError);
+      const stopping = agent.stop();
+      expect(agent.workLifetime.closed).toBe(true);
+      expect(agent.workLifetime.generation).toBe(1);
+      await expect(stopping).rejects.toBeInstanceOf(VmReconcileShutdownTimeoutError);
       expect(stopNode).not.toHaveBeenCalled();
       expect(closeStore).not.toHaveBeenCalled();
 
@@ -482,10 +493,10 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     const closeStore = vi.fn(async () => {});
     const stopNode = vi.fn(async () => {});
     const agent = syntheticShutdownAgent();
+    agent.workLifetime.track(physicalCommit);
     Object.assign(agent, {
       started: true,
       chainPoller: null,
-      graphScopedStorePhysicalRuns: new Set([physicalCommit]),
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
       messenger: { stopOutboxDrain: vi.fn(async () => {}) },
@@ -624,4 +635,37 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       expect.stringContaining('outbox retry drain failed during shutdown: drain failed'),
     );
   });
+});
+
+
+it.each([false, true])('drains the registered sync cache before teardown even when authority close fails=%s', async authorityFails => {
+  const agent = syntheticShutdownAgent();
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const closeAndDrain = vi.fn(() => held), stopNode = vi.fn(async () => {}), closeStore = vi.fn(async () => {});
+  Object.assign(agent, {
+    started: true, chainPoller: null, coreHostRecordingsClosed: false,
+    drainCoreHostRecordings: vi.fn(async () => {}), messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+    clearStorageACKRegistrationRetry: vi.fn(), storageACKRegistrationRetryInFlight: false,
+    inFlightSubstrateFanOutCount: () => 0, router: { closePooling: vi.fn(async () => {}) },
+    node: { libp2p: { getPeers: () => [] }, stop: stopNode }, finalizationRuntime: new FinalizationRuntime(),
+    store: { close: closeStore }, log: { warn: vi.fn() }, syncResponderPreparedCacheOwner: { closeAndDrain },
+  });
+  if (authorityFails) agent.chain.contextGraphAuthorityIndexSnapshots = {
+    close: vi.fn(async () => { throw new Error('authority-close-fixture'); }),
+  };
+  let stopped = false;
+  const stopping = agent.stop().then(() => { stopped = true; });
+  try {
+    expect(closeAndDrain).toHaveBeenCalledOnce();
+    // Let every other shutdown await progress while the cache drain is held.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(stopped).toBe(false);
+    expect(stopNode).not.toHaveBeenCalled(); expect(closeStore).not.toHaveBeenCalled();
+    expect(agent.started).toBe(true);
+    await agent.start();
+    expect(agent.syncResponderPreparedCacheOwner.closeAndDrain).toBe(closeAndDrain);
+    expect(stopped).toBe(false);
+  } finally { release(); await stopping; }
+  expect(stopped).toBe(true); expect(closeStore).toHaveBeenCalledOnce();
 });

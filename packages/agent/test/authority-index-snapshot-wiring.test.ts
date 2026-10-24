@@ -19,6 +19,7 @@ import {
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { resolveAuthorityIndexConfig } from '../src/authority-index-config.js';
+import { finalizedAuthorityColdResolutionOf } from '../src/finalized-authority-cold-resolution.js';
 import {
   AUTHORITY_INDEX_SNAPSHOT_MAX_RESPONSE_BYTES,
   createAuthorityIndexSnapshotClient,
@@ -277,6 +278,50 @@ describe('authority index snapshot production wiring', () => {
     expect(closeStore).toHaveBeenCalledOnce();
   }, 20_000);
 
+  it.each([true, false])('owns one shared reader drain after fencing producers (snapshot lifecycle=%s)', async (hasSnapshots) => {
+    const producer = Promise.withResolvers<void>();
+    const physical = Promise.withResolvers<void>();
+    const whenIdle = vi.fn(() => physical.promise);
+    const snapshots = capability();
+    const chain = new MockChainAdapter('mock:31337');
+    if (hasSnapshots) Reflect.set(chain, 'contextGraphAuthorityIndexSnapshots', snapshots);
+    Reflect.set(chain, 'contextGraphAuthorityIndexRevisionReader', { whenIdle });
+    const agent = await DKGAgent.create({
+      name: 'SharedReaderShutdown', nodeRole: 'edge', listenHost: '127.0.0.1', listenPort: 0,
+      chainAdapter: chain, store: new OxigraphStore(), randomSamplingUseWorkerThread: false,
+    });
+    agents.push(agent);
+    await agent.start();
+    const cold = finalizedAuthorityColdResolutionOf(agent);
+    const dispatcher = Reflect.get(agent, 'rfc64BackgroundWorkDispatcherV1');
+    const closeBackground = dispatcher.closeAndDrain.bind(dispatcher);
+    const fence = vi.spyOn(dispatcher, 'closeAndDrain').mockImplementation(async () => {
+      await closeBackground();
+      await producer.promise;
+    });
+    const closeStore = vi.spyOn(agent.store, 'close');
+    let stopped = false;
+    const stopping = agent.stop().then(() => { stopped = true; });
+    try {
+      expect(fence).toHaveBeenCalledOnce();
+      await expect(cold.read('after-stop', async () => 'late', {
+        label: 'closed', requestTimeoutMs: 100,
+      })).rejects.toThrow('closed');
+      expect(whenIdle).not.toHaveBeenCalled();
+      producer.resolve();
+      await vi.waitFor(() => expect(whenIdle).toHaveBeenCalledOnce());
+      expect(stopped).toBe(false);
+      expect(closeStore).not.toHaveBeenCalled();
+    } finally {
+      producer.resolve();
+      physical.resolve();
+      await stopping;
+    }
+    expect(whenIdle).toHaveBeenCalledOnce();
+    expect(snapshots.close).toHaveBeenCalledTimes(hasSnapshots ? 1 : 0);
+    expect(closeStore).toHaveBeenCalledOnce();
+  });
+
   it('passes snapshot bootstrap into a constructed EVM adapter and primes the pinned transport address', async () => {
     const authorityIndexStore = localAuthorityIndexStore();
     const store = new OxigraphStore();
@@ -360,6 +405,26 @@ describe('authority index snapshot production wiring', () => {
       await store.close();
       chain.destroy();
     }
+  });
+
+  it.each([
+    [undefined, false],
+    [false, false],
+    [true, true],
+  ] as const)('passes boundedAuthorityReads=%s through normal agent construction', async (configured, expected) => {
+    const agent = await DKGAgent.create({
+      name: 'BoundedAuthorityConstruction',
+      store: new OxigraphStore(),
+      chainConfig: {
+        ...evmChainConfig,
+        ...(configured === undefined ? {} : { boundedAuthorityReads: configured }),
+      },
+    });
+    agents.push(agent);
+    const chain = (agent as any).chain;
+    // Construct without starting: this tests the configuration path without
+    // contacting the deliberately unreachable RPC endpoint.
+    expect(chain.contextGraphBoundedAuthorityReadsEnabled).toBe(expected);
   });
 
   it('keeps snapshot fetch fenced until the agent transport has started', async () => {

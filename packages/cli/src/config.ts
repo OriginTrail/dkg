@@ -1,3 +1,4 @@
+import type { SharedMemoryPublicSnapshotStorageConfig } from '@origintrail-official/dkg-publisher';
 import { normalizeOxigraphMemoryLimits, oxigraphMemorySupportError } from './oxigraph-memory-limits.js';
 import { resolveBooleanEnvOverride } from './boolean-env-override.js';
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
@@ -10,7 +11,6 @@ import type {
   DKGAgentConfig,
   SyncAdmissionConfig,
   SyncContextGraphPriorityConfig,
-  SyncResponderSnapshotLimitsConfig,
 } from '@origintrail-official/dkg-agent';
 // The config loader must stay off the agent package ROOT at runtime: that entry
 // loads the whole agent runtime (libp2p, sync lanes, the process-wide
@@ -55,7 +55,7 @@ import {
   resolveContextGraphAuthorityIndexTickMs,
   resolveFinalityConfirmations,
   resolveReceiptTimeoutMs,
-  type ApprovalPolicy,
+  type ApprovalPolicy, type ChainSignerSettings,
   type RpcRequestGovernorPolicyInput,
 } from '@origintrail-official/dkg-chain';
 import { runtimeAssetRoots } from './runtime-assets.js';
@@ -243,6 +243,8 @@ export interface NetworkConfig {
     finalityConfirmations?: number;
     /** See `ChainConfig.indexTickMs`. */
     indexTickMs?: number;
+    /** See `ChainConfig.boundedAuthorityReads`. */
+    boundedAuthorityReads?: boolean;
     /** See `ChainConfig.authorityReadTimeoutMs`. */
     authorityReadTimeoutMs?: number;
     /** See `ChainConfig.authorityColdResolutionTimeoutMs`. */
@@ -353,7 +355,7 @@ export interface ApprovalPolicyConfig {
 
 export type ApprovalPolicyConfigInput = ApprovalPolicyConfig | ApprovalPolicyMode;
 
-export interface ChainConfig {
+export interface ChainConfig extends ChainSignerSettings {
   /** 'evm' for real blockchain, omit or 'mock' for in-memory (testing only) */
   type: 'evm' | 'mock';
   /** JSON-RPC endpoint URL */
@@ -439,6 +441,12 @@ export interface ChainConfig {
    */
   indexTickMs?: number;
   /**
+   * Permit bounded Context Graph authority reads at read-only gates when the
+   * local index has a provably fresh answer. Live mutation and key gates keep
+   * reading the chain. Defaults to false in the adapter.
+   */
+  boundedAuthorityReads?: boolean;
+  /**
    * Request-scoped deadline (ms) for one on-chain Context Graph authority
    * read: liveness, access/publish policy, participant roster, or the
    * finalized-index snapshot behind a query, share, or SWM sync decision. A
@@ -482,19 +490,7 @@ export interface LargeLiteralStorageConfig {
   directory?: string;
 }
 
-export interface SharedMemoryPublicSnapshotStorageConfig {
-  enabled?: boolean;
-  directory?: string;
-  gc?: {
-    enabled?: boolean;
-    intervalMs?: number;
-    triggerFreeBytes?: number;
-    targetFreeBytes?: number;
-    hardReserveBytes?: number;
-    minAgeMs?: number;
-    staleTempAgeMs?: number;
-  };
-}
+export type { SharedMemoryPublicSnapshotStorageConfig } from '@origintrail-official/dkg-publisher';
 
 /** Optional LLM config for the Node UI chatbot (OpenAI-compatible API). */
 export interface LlmConfig {
@@ -638,7 +634,7 @@ export interface LoggingConfig {
   kaPublishLifecycleDebug?: boolean;
 }
 
-export interface DkgConfig {
+export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLimits' | 'preparedContentCache'> {
   name: string;
   /**
    * Selects which bundled network/<name>.json overlay this node should use.
@@ -768,16 +764,13 @@ export interface DkgConfig {
   queryAccess?: QueryAccessConfig;
   autoUpdate?: AutoUpdateConfig;
   /**
-   * Chain config. Field-merged on top of `network/<env>.json#chain` via
-   * `resolveChainConfig()`, so an operator can override individual fields
-   * (e.g. just `rpcUrl` to point at a private RPC) without having to
-   * restate `hubAddress` and `chainId`. Fields omitted here inherit the
-   * network defaults — including future hub rotations propagated by the
-   * auto-updater pulling a fresh network/<env>.json.
+   * Field-merged over network/<env>.json#chain by resolveChainConfig().
+   * Operators can override one field; omitted fields follow updated defaults.
    */
   chain?: Partial<ChainConfig>;
   /** Optional LLM for the Node UI chatbot (natural language → SPARQL, answers). */
   llm?: LlmConfig;
+  entitySearch?: { embedding: import('./entity-search/types.js').EntityEmbeddingConfig };
   /** Block explorer URL for TX links (default: derived from chainId). */
   blockExplorerUrl?: string;
   /** Triple store backend override (default: oxigraph-worker with file persistence). */
@@ -855,8 +848,6 @@ export interface DkgConfig {
   syncGlobalQueueLimit?: number;
   /** Optional partitioned fast/slow sync admission. Omit for the legacy shared limiter. */
   syncAdmission?: SyncAdmissionConfig;
-  /** Retained sync responder snapshot limits (rows and estimated bytes). */
-  syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
   /**
    * Local sync scheduling priority by Context Graph ID. Higher runs first.
    * System Context Graphs default to a deprioritized priority so they run
@@ -1036,23 +1027,23 @@ export interface DkgConfig {
     /** GH#2270 — hard ceiling on the (jittered) retry delay. Default 60000. */
     retryBackoffMaxMs?: number;
   };
-  /**
-   * Async promote queue worker (WM → SWM). Unlike `publisher` which is
-   * opt-in, the promote worker is **on by default** — without it, jobs
-   * enqueued via `POST /api/knowledge-assets/{name}/swm/share-async` sit in
-   * `queued` forever. Set `enabled: false` to disable when running a
-   * read-only / forensic node where you don't want the worker mutating
-   * SWM. See `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md` and the
-   * `dkg-node` skill (§8 "Async promote queue") for the full contract.
-   */
+  /** WM → SWM worker, enabled by default; see docs/promote-queue-operations.md. */
   promoteQueue?: {
+    /** Default 5. Attempt budget; typed prerequisites also retain their retry window. */
+    maxRetries?: number;
+    /** Default 60_000ms; exponential retry curve base. */
+    retryBaseMs?: number;
+    /** Default 900_000ms; maximum retry delay including jitter. */
+    retryMaxMs?: number;
+    /** Default 0.2; symmetric jitter ratio in [0, 1]. */
+    retryJitterRatio?: number;
     /** Default `true`. Set `false` to disable the in-daemon worker. */
     enabled?: boolean;
     /** Default 4. Number of concurrent worker slots polling the queue. */
     workerConcurrency?: number;
-    /** Default 100ms. Polling interval per slot. */
+    /** Default 100ms. Idle full scans are bounded to once per second. */
     pollIntervalMs?: number;
-    /** Default 60_000ms (1 min). Must be >0 and shorter than the queue's 5-min lease when enabled. */
+    /** Default 60_000ms. Must be shorter than the queue's 15-minute lease when enabled. */
     heartbeatIntervalMs?: number;
     /** Default 30_000ms. Max time `stop()` waits for in-flight promotes to drain on shutdown. */
     shutdownTimeoutMs?: number;
@@ -1063,7 +1054,11 @@ export interface DkgConfig {
      */
     postCommitRecoveryIntervalMs?: number;
   };
-  /** Allowed CORS origins. Defaults to '*' when apiHost is '127.0.0.1', otherwise restrictive. */
+  /**
+   * Allowed CORS origins. When unset, only the API port's loopback origins
+   * (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`)
+   * are allowed; `apiHost: '0.0.0.0'` keeps the legacy `'*'`.
+   */
   corsOrigins?: string | string[];
   /** HTTP rate limiting settings. */
   rateLimit?: { requestsPerMinute?: number; exempt?: string[] };
@@ -1912,6 +1907,17 @@ export function resolveChainConfig(
   const indexTickMs: unknown = operatorHasIndexTickMs ? cfg.indexTickMs : net?.indexTickMs;
   if (operatorHasIndexTickMs || indexTickMs !== undefined) {
     merged.indexTickMs = resolveContextGraphAuthorityIndexTickMs(indexTickMs);
+  }
+  const operatorHasBoundedAuthorityReads = cfg !== undefined && cfg !== null
+    && Object.prototype.hasOwnProperty.call(cfg, 'boundedAuthorityReads');
+  const boundedAuthorityReads: unknown = operatorHasBoundedAuthorityReads
+    ? cfg.boundedAuthorityReads
+    : net?.boundedAuthorityReads;
+  if (operatorHasBoundedAuthorityReads || boundedAuthorityReads !== undefined) {
+    if (typeof boundedAuthorityReads !== 'boolean') {
+      throw new TypeError('chain.boundedAuthorityReads must be a boolean');
+    }
+    merged.boundedAuthorityReads = boundedAuthorityReads;
   }
   // Presence matters for both authority deadlines: an explicit null/zero is an
   // operator error, not a request to fall back to the network or agent default.

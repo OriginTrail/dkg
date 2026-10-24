@@ -11,6 +11,7 @@ import {
   parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1,
   type Digest32V1,
   type SwmAuthorInventorySnapshotV1,
+  type SwmAuthorInventoryRowV1,
 } from '@origintrail-official/dkg-core';
 
 import {
@@ -87,6 +88,29 @@ type SwmAuthorInventoryCommitPlanV1 =
       current: StoredSwmAuthorInventoryCommitV1 | null;
     }>;
 
+/** Validate indexed identity before using a durable head as a discovery hint. */
+function decodeStoredHead(row: SqlRowV1, scopeDigest: Uint8Array, author: Uint8Array) {
+  const envelopeBytes = assertBoundedSqlBlobV1(
+    row.signed_head_envelope,
+    1,
+    4 * 1024,
+    'stored SWM author inventory head envelope',
+  );
+  const head = parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1(envelopeBytes);
+  const scope = deriveSwmAuthorInventoryScopeFromHeadV1(head.payload);
+  if (
+    computeSwmAuthorInventoryScopeDigestV1(scope) !== sqlBlobToDigest32V1(scopeDigest)
+    || head.payload.authorAddress !== sqlBlobToEvmAddressV1(author)
+    || head.objectDigest !== sqlBlobToDigest32V1(row.current_head_digest)
+    || head.payload.version !== sqlBlobToDecimalU64V1(row.inventory_version_u64be)
+    || head.payload.totalRows !== sqlBlobToDecimalU64V1(row.total_rows_u64be)
+    || head.payload.rowsDigest !== sqlBlobToDigest32V1(row.rows_digest)
+  ) {
+    throw new Error('stored head columns do not match the signed envelope');
+  }
+  return { head, scope };
+}
+
 /** Pure, shared state machine for normal apply and indeterminate-COMMIT recovery. */
 function planSwmAuthorInventoryCommitV1(
   current: StoredSwmAuthorInventoryCommitV1 | null,
@@ -147,6 +171,53 @@ export class SwmAuthorInventoryPersistenceV1 {
     return this.readStored(key)?.snapshot ?? null;
   }
 
+  /** Bounded local lookup only; it does not establish whole-inventory completeness. */
+  readRow(
+    key: EncodedSwmAuthorInventoryKeyV1,
+    kaUal: SwmAuthorInventoryRowV1['kaUal'],
+  ): Readonly<SwmAuthorInventoryRowV1> | null {
+    assertCanonicalDeterministicUalV1(kaUal);
+    const query = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.getSwmAuthorRow);
+    const stored = this.host.statement(() => query.get({
+      scope: key.scope, author: key.author, kaUal,
+    }) as SqlRowV1 | undefined);
+    if (stored === undefined) return null;
+    try {
+      const row = decodeStoredSwmAuthorInventoryRowV1(stored);
+      if (row.kaUal !== kaUal) throw new Error('stored row does not match its requested key');
+      return row;
+    } catch (cause) {
+      throw this.host.error('swm-inventory-database-corrupt', 'stored SWM author row is not canonical', { cause });
+    }
+  }
+
+  /** Local scheduling hint only; it does not authenticate or materialize rows. */
+  readHeadDigest(key: EncodedSwmAuthorInventoryKeyV1): Digest32V1 | null {
+    const query = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.getSwmAuthorHead);
+    const row = this.host.statement(() => query.get({
+      scope: key.scope, author: key.author,
+    }) as SqlRowV1 | undefined);
+    if (row === undefined) return null;
+    try {
+      return sqlBlobToDigest32V1(row.current_head_digest);
+    } catch (cause) {
+      throw this.host.error('swm-inventory-database-corrupt', 'stored SWM author head digest is invalid', { cause });
+    }
+  }
+
+  listScopes() {
+    const query = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.listSwmAuthorHeads);
+    const rows = this.host.statement(() => query.all() as SqlRowV1[]);
+    try {
+      return Object.freeze(rows.map(row => decodeStoredHead(row,
+        assertBoundedSqlBlobV1(row.inventory_scope_digest, 32, 32, 'inventory scope'),
+        assertBoundedSqlBlobV1(row.author_address, 20, 20, 'inventory author'),
+      ).scope));
+    } catch (cause) {
+      throw this.host.error('swm-inventory-database-corrupt', 'stored SWM author discovery head is invalid', { cause });
+    }
+  }
+
   private readStored(
     key: EncodedSwmAuthorInventoryKeyV1,
   ): StoredSwmAuthorInventoryCommitV1 | null {
@@ -162,24 +233,7 @@ export class SwmAuthorInventoryPersistenceV1 {
       author: key.author,
     }) as SqlRowV1[]);
     try {
-      const envelopeBytes = assertBoundedSqlBlobV1(
-        headRow.signed_head_envelope,
-        1,
-        4 * 1024,
-        'stored SWM author inventory head envelope',
-      );
-      const head = parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1(envelopeBytes);
-      const scope = deriveSwmAuthorInventoryScopeFromHeadV1(head.payload);
-      if (
-        computeSwmAuthorInventoryScopeDigestV1(scope) !== sqlBlobToDigest32V1(key.scope)
-        || head.payload.authorAddress !== sqlBlobToEvmAddressV1(key.author)
-        || head.objectDigest !== sqlBlobToDigest32V1(headRow.current_head_digest)
-        || head.payload.version !== sqlBlobToDecimalU64V1(headRow.inventory_version_u64be)
-        || head.payload.totalRows !== sqlBlobToDecimalU64V1(headRow.total_rows_u64be)
-        || head.payload.rowsDigest !== sqlBlobToDigest32V1(headRow.rows_digest)
-      ) {
-        throw new Error('stored head columns do not match the signed envelope');
-      }
+      const { head } = decodeStoredHead(headRow, key.scope, key.author);
       const rows = Object.freeze(
         storedRows
           .map(decodeStoredSwmAuthorInventoryRowV1)

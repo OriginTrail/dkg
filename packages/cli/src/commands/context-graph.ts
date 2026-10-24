@@ -338,13 +338,17 @@ contextGraphCmd
       // delegation directly to the curator. Returns delivery count so we can
       // warn on no-curator.
       const result = await client.requestJoin(contextGraphId, signed.delegation, curatorPeerId);
-      if (result.delivered === 0) {
+      if (result.delivered === 0 && result.queued !== true) {
         console.error(`Could not deliver join request to curator for "${contextGraphId}". No reachable curator found.`);
         process.exit(1);
       }
       if (result.status === 'approved' || result.status === 'already-member' || result.autoApproved || result.alreadyMember) {
         console.log(`Join approved for "${contextGraphId}".`);
         console.log(`  Open it with: dkg context-graph info ${contextGraphId}`);
+      } else if (result.queued === true) {
+        console.log(`Join request queued for "${contextGraphId}". Delivery will retry automatically.`);
+        console.log('  Waiting for curator approval. Check status with:');
+        console.log(`  dkg context-graph info ${contextGraphId}`);
       } else {
         console.log(`Join request sent for "${contextGraphId}" (delivered to ${result.delivered} peer${result.delivered === 1 ? '' : 's'}).`);
         console.log('  Waiting for curator approval. Check status with:');

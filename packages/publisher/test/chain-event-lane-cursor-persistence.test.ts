@@ -30,6 +30,54 @@ function legacyCursorStore(initial?: number) {
 }
 
 describe('ChainEventPoller cursor persistence', () => {
+  it('advances a legacy aggregate cursor when two lanes could each scan under a lease', async () => {
+    const cursor = legacyCursorStore();
+    // One chain index covers both VM lanes' event families.
+    const { adapter, filters } = makeChain({
+      head: 100,
+      eventScanLease: () => ({ throughBlockNumber: 100, holds: async () => true }),
+      events: [
+        {
+          type: 'KnowledgeAssetRegisteredToContextGraph',
+          blockNumber: 50,
+          data: { contextGraphId: '1', kaId: '1', txHash: '0xtx', txIndex: 0 },
+        },
+        {
+          type: 'KnowledgeAssetUpdated',
+          blockNumber: 60,
+          data: { merkleRoot: '0x' + '44'.repeat(32), batchId: '1' },
+        },
+      ],
+    });
+    const dispatched: string[] = [];
+    let now = 0;
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 12_000,
+      clock: () => now,
+      cursorPersistence: cursor,
+      onKARegisteredToContextGraph: async () => { dispatched.push('registered'); },
+      onCollectionUpdated: async () => { dispatched.push('updated'); },
+    });
+    const poll = () => (poller as unknown as { poll(): Promise<void> }).poll();
+
+    await poll();
+    now = 12_000;
+    await poll();
+    now = 24_000;
+    await poll();
+
+    // Each event is dispatched once and the aggregate cursor reaches the head;
+    // the update lane revisits its reorg window without redispatching a replay.
+    expect(dispatched.sort()).toEqual(['registered', 'updated']);
+    expect(cursor.saved.at(-1)).toBe(100);
+    expect(filters.filter((filter) => filter.eventTypes.includes('KnowledgeAssetRegisteredToContextGraph')))
+      .toHaveLength(1);
+    expect(filters.filter((filter) => filter.eventTypes.includes('KnowledgeAssetUpdated')))
+      .toHaveLength(3);
+  });
+
   it('saves and restores a legacy aggregate cursor when active lanes can safely share it', async () => {
     const cursor = {
       loaded: undefined as number | undefined,

@@ -1,3 +1,5 @@
+import type { PromoteNoEffectProof } from './promote-no-effect-rejection.js';
+import type { PromoteRecoveryBinding } from './promote-recovery-binding.js';
 /**
  * Async Promote Queue — public types.
  *
@@ -44,7 +46,7 @@ export type PromoteJobState = (typeof PROMOTE_JOB_STATES)[number];
  * legacy job). Bump this constant any time the on-disk job shape or
  * the recovery invariants change.
  */
-export const ASYNC_PROMOTE_QUEUE_FORMAT_VERSION = 3;
+export const ASYNC_PROMOTE_QUEUE_FORMAT_VERSION = 4;
 
 /**
  * Oldest persisted job format safe for automatic startup reclaim when the
@@ -70,16 +72,30 @@ export type PromoteFailureClassification = 'transient' | 'cap_exceeded' | 'fatal
  * A promote request — the payload the queue persists for the worker to
  * replay. Validated at the HTTP layer; the queue stores it verbatim.
  */
-export interface PromoteRequest {
+interface PromoteRequestScope {
   contextGraphId: string;
   subGraphName?: string;
   assertionName: string;
-  entities: readonly string[] | 'all';
   /** Worker-facing storage namespace used to locate the WM draft; conflict keys canonicalize separately. */
   agentAddress?: string;
   /** Signing author used by finalize/seal during promote replay. */
   authorAgentAddress?: string;
 }
+
+export interface OrdinaryPromoteRequest extends PromoteRequestScope {
+  recoveryBinding?: undefined;
+  entities: readonly string[] | 'all';
+}
+
+/** Internal immutable synchronous-recovery authority; never client supplied. */
+export interface BoundPromoteRequest extends PromoteRequestScope {
+  recoveryBinding: PromoteRecoveryBinding;
+  entities: 'all';
+  agentAddress: string;
+}
+
+export type PromoteRequest = OrdinaryPromoteRequest | BoundPromoteRequest;
+export type BoundPromoteJob = PromoteJob & { request: BoundPromoteRequest; formatVersion: 4 };
 
 /**
  * Per-attempt lease metadata. Present only when state is `running`.
@@ -108,6 +124,8 @@ export interface PromoteAttemptError {
    * never reach the queue row. The recovery sweep keys on it.
    */
   diagnosticCode?: string;
+  /** Producer certificate; only the fenced first failed attempt may retire its owner. */
+  noEffectProof?: PromoteNoEffectProof;
 }
 
 export interface PromoteAttemptState {
@@ -221,6 +239,11 @@ export interface PromotePostCommitRecoveryEvent {
   nextRetryAt?: number;
 }
 
+/** The exact failure transition acknowledged after the queue's write and flush. */
+export type PromoteFailureTransition =
+  | Readonly<{ state: 'failed_retrying'; jobId: string; attemptCount: number; nextRetryAt: number }>
+  | Readonly<{ state: 'failed'; jobId: string; attemptCount: number; retiredNoEffect?: true }>;
+
 export type PromoteStats = Record<PromoteJobState, number>;
 
 export interface AsyncPromoteQueue {
@@ -232,6 +255,8 @@ export interface AsyncPromoteQueue {
   readonly effectiveLeaseMs: number;
   // RFC §3.1
   enqueue(request: PromoteRequest): Promise<string>;
+  /** Persist ownership and the inline lease together, before content mutation. */
+  enqueueAndClaim?(request: BoundPromoteRequest, workerId: string): Promise<BoundPromoteJob>;
   // RFC §3.2
   getStatus(jobId: string): Promise<PromoteJob | null>;
   // RFC §3.3
@@ -246,7 +271,7 @@ export interface AsyncPromoteQueue {
   heartbeat(jobId: string, claimToken: string): Promise<void>;
   recordCommitMarker(jobId: string, claimToken: string, step: PromoteCommitMarkerStep): Promise<void>;
   succeed(jobId: string, claimToken: string, result: PromoteResult): Promise<void>;
-  fail(jobId: string, claimToken: string, error: PromoteAttemptError): Promise<void>;
+  fail(jobId: string, claimToken: string, error: PromoteAttemptError): Promise<PromoteFailureTransition>;
   // Startup / lifecycle.
   recoverOnStartup(): Promise<PromoteRecoverySummary>;
   /**
@@ -285,6 +310,8 @@ export interface PromoteTerminalJobClearer {
 }
 
 export interface AsyncPromoteQueueConfig {
+  /** Queue admission budget, including mutex wait. Defaults to 10 seconds. */
+  admissionTimeoutMs?: number;
   /** Defaults to `urn:dkg:promote-queue:control-plane` per RFC §4.1. */
   graphUri?: string;
   /** Defaults to 5 — promote retries are cheap. RFC §4.2. */
@@ -300,9 +327,13 @@ export interface AsyncPromoteQueueConfig {
   /**
    * Backoff curve for `failed_retrying` jobs. Receives the next attempt
    * count (1-indexed — first retry is attempt 1) and returns ms-from-now.
-   * Default: `min(60_000 * 2^(attempt-1), 15 * 60_000)`.
+   * Default: `min(60_000 * 2^(attempt-1), 15 * 60_000)`, varied by up to +-20 %
+   * so jobs that failed together do not return together (GH#3067). A curve the
+   * caller supplies is used as given.
    */
   backoff?: (attemptCount: number) => number;
+  /** Random source of the default backoff's jitter, in [0, 1). Defaults to `Math.random`. */
+  rand?: () => number;
 }
 
 /**
@@ -316,11 +347,21 @@ export class PromoteJobConflictError extends Error {
   constructor(
     readonly existingJobId: string,
     readonly key: { contextGraphId: string; subGraphName?: string; assertionName: string; agentAddress?: string },
+    readonly observedAdmission = false,
   ) {
     const lane = key.agentAddress ? `, agentAddress=${key.agentAddress}` : '';
     super(
-      `Promote job already active for (${key.contextGraphId}, ${key.subGraphName ?? '<no-sub>'}, ${key.assertionName}${lane}): ${existingJobId}`,
+      observedAdmission ? `Previously observed share admission: ${existingJobId}; inspect job status for its current state`
+      : `Promote job already active for (${key.contextGraphId}, ${key.subGraphName ?? '<no-sub>'}, ${key.assertionName}${lane}): ${existingJobId}`,
     );
+  }
+}
+
+/** Cancellation conflicts with a queue-owned lifecycle obligation or active lease. */
+export class PromoteJobCancellationConflictError extends Error {
+  override readonly name = 'PromoteJobCancellationConflictError';
+  constructor(readonly jobId: string, reason: string) {
+    super(`Cannot cancel job ${jobId}: ${reason}`);
   }
 }
 
@@ -337,5 +378,13 @@ export class PromoteJobLeaseError extends Error {
     reason: string,
   ) {
     super(`Stale promote lease for ${jobId}: ${reason}`);
+  }
+}
+
+/** Atomic admission may have committed; callers must observe this owner before retrying. */
+export class PromoteAdmissionUncertainError extends Error {
+  override readonly name = 'PromoteAdmissionUncertainError';
+  constructor(readonly jobId: string, cause: unknown) {
+    super('Durable share admission could not be confirmed', { cause });
   }
 }

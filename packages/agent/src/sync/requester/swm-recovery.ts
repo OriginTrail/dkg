@@ -1,3 +1,4 @@
+import { snapshotOperation, type WorkspaceSnapshotScope } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   withKeyedLocks,
@@ -20,7 +21,7 @@ import {
 } from './swm-recovery-apply.js';
 import {
   collectPublicSnapshotMetadata,
-  syncPublicSnapshotsForMeta,
+  syncPublicSnapshotsInScope,
   type PublicSnapshotMetadata,
 } from './shared-memory-sync.js';
 import { preparePrivateSwmSnapshotWalk } from './private-swm-snapshot-walk-registry.js';
@@ -53,7 +54,8 @@ import {
   sharedMemoryWorkOutcome,
   type SharedMemoryWorkOutcome,
 } from '../shared-memory-completion.js';
-import type { SharedMemoryPhaseFailureCause } from '../shared-memory-diagnostics.js';
+import type { RecoverContextGraphSwmResult } from '../shared-memory-completion.js';
+export type { RecoverContextGraphSwmResult } from '../shared-memory-completion.js';
 
 /**
  * recovery entry point. Recovers a CG's
@@ -183,33 +185,6 @@ export interface RecoverContextGraphSwmDeps {
   /** Backstop against a misbehaving responder that never reports `completed`. */
   readonly maxPagesPerPhase?: number;
 }
-
-interface RecoverContextGraphSwmResultFields {
-  /** Attribution for the single incomplete recovery phase emitted by the lifecycle. */
-  readonly localYieldFailedPhases?: number;
-  readonly replacedRoots: number;
-  readonly replacedGraphs: number;
-  readonly insertedDataQuads: number;
-  readonly insertedMetaQuads: number;
-  readonly droppedDataTriples: number;
-  /** Verified immutable snapshot refs ready in the local cache after this round. */
-  readonly readySnapshots: number;
-  /** Manifest-bound progress across rounds; retry accounting, not permission to reuse a ref. */
-  readonly cumulativeResolvedSnapshots?: number;
-  /** Total immutable snapshot refs declared by the recovered SWM metadata. */
-  readonly totalSnapshots: number;
-}
-
-/** Recovery completion cannot simultaneously carry a local-yield outcome. */
-export type RecoverContextGraphSwmResult = RecoverContextGraphSwmResultFields & (
-  | { readonly completed: true; readonly localYield?: never; readonly phaseFailureCause?: never }
-  | {
-      readonly completed: false;
-      readonly localYield?: true;
-      /** Direct internal cause consumed by lifecycle aggregation. */
-      readonly phaseFailureCause: SharedMemoryPhaseFailureCause;
-    }
-);
 
 export interface SwmRecoveryProgress {
   readonly completedRound: number;
@@ -364,9 +339,7 @@ async function fetchPhaseFully(
   };
 }
 
-export async function recoverContextGraphSwm(
-  deps: RecoverContextGraphSwmDeps,
-): Promise<RecoverContextGraphSwmResult> {
+export const recoverContextGraphSwm = snapshotOperation<RecoverContextGraphSwmDeps, RecoverContextGraphSwmResult>(async deps => {
   const admittedDeps: AdmittedRecoverContextGraphSwmDeps = {
     ...deps,
     workAdmission: deps.workAdmission ?? composeSyncWorkAdmission({
@@ -378,9 +351,9 @@ export async function recoverContextGraphSwm(
   return withKeyedLocks(
     deps.writeLocks,
     [contextGraphSwmRecoveryWriteLockKey(deps.contextGraphId)],
-    () => recoverContextGraphSwmUnlocked(admittedDeps, boundary),
+    () => recoverContextGraphSwmUnlocked(admittedDeps, boundary, deps.publicSnapshotStore),
   );
-}
+});
 
 /**
  * Recovery-level lock key. Per-KA materialization keeps using the canonical
@@ -394,6 +367,7 @@ export function contextGraphSwmRecoveryWriteLockKey(contextGraphId: string): str
 async function recoverContextGraphSwmUnlocked(
   deps: AdmittedRecoverContextGraphSwmDeps,
   boundary: RecoveryExecutionAdmission,
+  snapshotScope: WorkspaceSnapshotScope | undefined,
 ): Promise<RecoverContextGraphSwmResult> {
   boundary.assertCurrent();
   const wsGraph = contextGraphWorkspaceGraphUri(deps.contextGraphId);
@@ -471,6 +445,8 @@ async function recoverContextGraphSwmUnlocked(
   const incrementallyReadyGraphs = new Set<string>();
   /** Graph keys whose ASSERTION GRAPH was actually (re)written this run. */
   const rewrittenGraphKeys = new Set<string>();
+  /** Graph keys whose exact content the store already held, so this run wrote none of it. */
+  const heldGraphKeys = new Set<string>();
   let incrementallyReplacedGraphs = 0;
   let incrementallyInsertedDataQuads = 0;
   let incrementallyInsertedMetaQuads = 0;
@@ -527,13 +503,14 @@ async function recoverContextGraphSwmUnlocked(
           incrementallyInsertedMetaQuads += insertableMeta.length;
           rewrittenGraphKeys.add(graphKey);
         }
+        heldGraphKeys.add(graphKey);
         incrementallyReadyGraphs.add(graphKey);
         continue;
       }
       const asset = await boundary.read(() => materializeGraphScopedSwmRecoveryAsset({
         descriptor,
         fetchedDataQuads: [],
-        publicSnapshotStore: deps.publicSnapshotStore,
+        publicSnapshotStore: snapshotScope,
       }));
       // Admit the retry-safe graph+metadata sequence once. A lease revoked
       // before admission prevents every mutation; one revoked after graph
@@ -625,7 +602,7 @@ async function recoverContextGraphSwmUnlocked(
       };
     }
     boundary.assertCurrent();
-    const snapshotSync = await syncPublicSnapshotsForMeta({
+    const snapshotSync = await syncPublicSnapshotsInScope({
       ctx: deps.ctx,
       remotePeerId: deps.remotePeerId,
       contextGraphId: deps.contextGraphId,
@@ -634,8 +611,8 @@ async function recoverContextGraphSwmUnlocked(
       ...(privatePreparation?.kind === 'prepared'
         ? { snapshotWalk: privatePreparation.plan }
         : { metaQuads: activeGraphMeta }),
-      publicSnapshotStore: deps.publicSnapshotStore,
-      // Raw ports: syncPublicSnapshotsForMeta is the sole owner of admission,
+      publicSnapshotStore: snapshotScope,
+      // Raw ports: syncPublicSnapshotsInScope is the sole owner of admission,
       // post-read checks, signal attachment, and checkpoint commits.
       fetchSyncPages: deps.fetchSyncPages,
       deleteCheckpoint: deps.deleteCheckpoint,
@@ -739,6 +716,9 @@ async function recoverContextGraphSwmUnlocked(
     const retainedReady = retainedSnapshotRef !== undefined
       && snapshotWalkProgress?.isResolved(retainedSnapshotRef) === true;
     if (incrementallyReadyGraphs.has(graphKey) || retainedReady) {
+      // A ref an earlier round resolved was re-validated as still materialized
+      // before this round's walk, which then skipped it.
+      if (!incrementallyReadyGraphs.has(graphKey)) heldGraphKeys.add(graphKey);
       graphAssets.push(Object.freeze({
         descriptor,
         kind: rewrittenGraphKeys.has(graphKey)
@@ -750,7 +730,7 @@ async function recoverContextGraphSwmUnlocked(
     const asset = await boundary.read(() => materializeGraphScopedSwmRecoveryAsset({
       descriptor,
       fetchedDataQuads: dataQuads,
-      publicSnapshotStore: deps.publicSnapshotStore,
+      publicSnapshotStore: snapshotScope,
     }));
     graphAssets.push(Object.freeze({
       kind: 'replace',
@@ -803,6 +783,7 @@ async function recoverContextGraphSwmUnlocked(
     insertedDataQuads: applied.insertedRootQuads + applied.insertedGraphQuads,
     insertedMetaQuads: applied.insertedMetaQuads,
     droppedDataTriples: processed.droppedDataTriples,
+    alreadyHeldGraphs: heldGraphKeys.size,
     ...snapshotProgress,
     completed: true,
   };

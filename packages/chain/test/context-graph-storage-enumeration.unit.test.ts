@@ -4,51 +4,27 @@ import { ethers } from 'ethers';
 import { describe, expect, it } from 'vitest';
 
 import { EVMChainAdapter } from '../src/evm-adapter.js';
+import { loadAbi } from '../src/evm-adapter-abi.js';
 import { MockChainAdapter, MOCK_DEFAULT_SIGNER } from '../src/mock-adapter.js';
 import {
   CONTEXT_GRAPH_STORAGE_ENUMERATION_CONCURRENCY,
+  CONTEXT_GRAPH_STORAGE_ENUMERATION_IDS_PER_REQUEST,
   CONTEXT_GRAPH_STORAGE_ENUMERATION_MAX_IDS_PER_READ,
   ContextGraphStorageEnumerationError,
+  contextGraphStorageBatchCalls,
+  decodeContextGraphStorageBatch,
   decodeContextGraphStorageEntryV1,
   isContextGraphStorageEnumerationReadRetryable,
   isNonexistentContextGraphStorageRevert,
   readContextGraphStorageRangeV1,
+  type ContextGraphStorageBatchedRead,
   type ContextGraphStorageRangePorts,
 } from '../src/evm-context-graph-storage-enumeration.js';
+import { RpcRequestGovernorQueueFullError } from '../src/rpc-request-governor.js';
 import { minimalConfig, seam } from './context-graph-registry-scan-fixture.js';
-
-const STORAGE = '0xC6C6c6C6C6c6c6c6C6c6C6c6c6C6C6C6c6c6C6c6';
-const OWNER = '0x64529c023d853371228923B4FdA5FB22F929bf51';
-const AUTHORITY = '0xbBE5eF8eC201677BBe3e4FAAbE73556b84a6eA13';
-const ANCHOR_HASH = `0x${'ab'.repeat(32)}`;
-
-interface FakeGraph {
-  owner?: string;
-  active?: boolean;
-  createdAt?: number;
-  accessPolicy?: number;
-  publishPolicy?: number;
-  publishAuthority?: string;
-  nameHash?: string;
-}
-
-function nameHashFor(id: number): string {
-  return ethers.keccak256(ethers.toUtf8Bytes(`graph-${id}`));
-}
-
-function tuple(graph: FakeGraph): unknown[] {
-  return [
-    graph.owner ?? OWNER,
-    [],
-    0n,
-    graph.active ?? true,
-    BigInt(graph.createdAt ?? 1_790_152_299),
-    BigInt(graph.accessPolicy ?? 0),
-    BigInt(graph.publishPolicy ?? 1),
-    graph.publishAuthority ?? ethers.ZeroAddress,
-    0n,
-  ];
-}
+import {
+  STORAGE, OWNER, AUTHORITY, ANCHOR_HASH, type FakeGraph, nameHashFor, tuple, graphsUpTo, idsOf, sequence,
+} from './context-graph-storage-enumeration-fixture.js';
 
 function nonexistent(id: bigint) {
   return Object.assign(new Error('execution reverted'), {
@@ -159,17 +135,60 @@ describe('readContextGraphStorageRangeV1', () => {
     expect(range.nextId).toBe(3n);
   });
 
-  it('propagates every other read failure so no cursor advances over a gap', async () => {
-    const { ports } = fakePorts(new Map([[1, {}], [2, {}]]), 2);
+  it('ends the range before an id that could not be read, so no cursor advances over a gap', async () => {
+    const { ports } = fakePorts(new Map([[1, {}], [2, {}], [3, {}], [4, {}]]), 4);
     const failing: ContextGraphStorageRangePorts = {
       ...ports,
       readNameHash: async (id) => {
-        if (id === 2n) throw Object.assign(new Error('boom'), { code: 'SERVER_ERROR' });
+        if (id === 3n) throw Object.assign(new Error('boom'), { code: 'SERVER_ERROR' });
         return ethers.ZeroHash;
       },
     };
-    await expect(readContextGraphStorageRangeV1(failing, { fromId: 1n, maxIds: 2 }))
+
+    // The ids read before the failed one are kept; nothing after it is returned.
+    const range = await readContextGraphStorageRangeV1(failing, { fromId: 1n, maxIds: 4 });
+    expect(range.entries.map((entry) => entry.contextGraphId)).toEqual(['1', '2']);
+    expect(range.nextId).toBe(3n);
+    expect(range.latestId).toBe(4n);
+
+    // The failure itself is what a read starting at that id reports.
+    await expect(readContextGraphStorageRangeV1(failing, { fromId: 3n, maxIds: 2 }))
       .rejects.toThrow('boom');
+  });
+
+  it('reports the failure with the lowest id when several ids could not be read', async () => {
+    const { ports } = fakePorts(new Map([[1, {}], [2, {}], [3, {}]]), 3);
+    const failing: ContextGraphStorageRangePorts = {
+      ...ports,
+      readContextGraph: async (id, blockTag) => {
+        // The later id fails first; the first id's failure is the one that counts.
+        if (id === 1n) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          throw new Error('first id unreadable');
+        }
+        if (id === 2n) throw new Error('second id unreadable');
+        return ports.readContextGraph(id, blockTag);
+      },
+    };
+
+    await expect(readContextGraphStorageRangeV1(failing, { fromId: 1n, maxIds: 3 }))
+      .rejects.toThrow('first id unreadable');
+  });
+
+  it('ends at a nonexistent id below a failed one without reporting the failure', async () => {
+    const { ports } = fakePorts(new Map([[2, {}], [3, {}]]), 3);
+    const failing: ContextGraphStorageRangePorts = {
+      ...ports,
+      readNameHash: async (id) => {
+        if (id === 2n) throw new Error('boom');
+        return ethers.ZeroHash;
+      },
+    };
+
+    const range = await readContextGraphStorageRangeV1(failing, { fromId: 1n, maxIds: 3 });
+
+    expect(range.entries).toEqual([]);
+    expect(range.nextId).toBe(1n);
   });
 
   it('rejects out-of-contract arguments before any chain read', async () => {
@@ -193,6 +212,249 @@ describe('readContextGraphStorageRangeV1', () => {
     controller.abort(new Error('stop'));
     await expect(readContextGraphStorageRangeV1(ports, { fromId: 1n, maxIds: 1, signal: controller.signal }))
       .rejects.toThrow('stop');
+  });
+});
+
+/**
+ * Ports of an adapter that can aggregate: `fakePorts` plus one request for a
+ * run of ids, with every request and every read of a single id recorded.
+ */
+function aggregatingPorts(
+  graphs: Map<number, FakeGraph>,
+  latestId: number,
+  options: {
+    /** Ids the request has no usable answer for. */
+    unanswered?: number[];
+    /** Ids the request answers with a tuple that does not decode. */
+    garbled?: number[];
+    /** Ids that cannot be read on their own either. */
+    unreadable?: number[];
+    /** What the request starting at this id rejects with. */
+    refuseFrom?: { id: number; error: unknown };
+    /** The adapter has no aggregate to offer. */
+    unavailable?: boolean;
+  } = {},
+) {
+  const { ports, blockTags } = fakePorts(graphs, latestId);
+  const requests: number[][] = [];
+  const singleReads: number[] = [];
+  const aggregating: ContextGraphStorageRangePorts = {
+    ...ports,
+    readContextGraph: async (id, blockTag) => {
+      singleReads.push(Number(id));
+      if (options.unreadable?.includes(Number(id))) throw new Error(`id ${id} is unreadable`);
+      return ports.readContextGraph(id, blockTag);
+    },
+    readEntriesBatch: async (ids, blockTag) => {
+      blockTags.push(blockTag);
+      requests.push(ids.map(Number));
+      if (options.unavailable) return undefined;
+      if (options.refuseFrom?.id === Number(ids[0])) throw options.refuseFrom.error;
+      return ids.map((id): ContextGraphStorageBatchedRead => {
+        const graph = graphs.get(Number(id));
+        if (!graph) return 'nonexistent';
+        if (options.unanswered?.includes(Number(id))) return undefined;
+        if (options.garbled?.includes(Number(id))) {
+          return { contextGraph: tuple({ ...graph, owner: ethers.ZeroAddress }), nameHash: ethers.ZeroHash };
+        }
+        return { contextGraph: tuple(graph), nameHash: graph.nameHash ?? ethers.ZeroHash };
+      });
+    },
+  };
+  return { ports: aggregating, plainPorts: ports, requests, singleReads, blockTags };
+}
+
+describe('readContextGraphStorageRangeV1 with an aggregating adapter', () => {
+  it('answers a whole range from one request, with no read per id', async () => {
+    const graphs = graphsUpTo(20);
+    const { ports, plainPorts, requests, singleReads, blockTags } = aggregatingPorts(graphs, 20);
+
+    const range = await readContextGraphStorageRangeV1(ports, { fromId: 1n, maxIds: 20 });
+
+    expect(requests).toEqual([sequence(1, 20)]);
+    expect(singleReads).toEqual([]);
+    expect(new Set(blockTags)).toEqual(new Set([1_000]));
+    // Exactly what the same range reads one id at a time.
+    expect(range).toEqual(await readContextGraphStorageRangeV1(plainPorts, { fromId: 1n, maxIds: 20 }));
+    expect(range.nextId).toBe(21n);
+  });
+
+  it('sends one request per run of ids, in id order', async () => {
+    const perRequest = CONTEXT_GRAPH_STORAGE_ENUMERATION_IDS_PER_REQUEST;
+    expect(perRequest).toBe(32);
+    const { ports, requests, singleReads } = aggregatingPorts(graphsUpTo(70), 70);
+
+    const range = await readContextGraphStorageRangeV1(ports, { fromId: 1n, maxIds: 100 });
+
+    expect(requests).toEqual([sequence(1, 32), sequence(33, 64), sequence(65, 70)]);
+    expect(singleReads).toEqual([]);
+    expect(idsOf(range)).toEqual(sequence(1, 70));
+  });
+
+  it('reads an id the request did not answer on its own, and keeps the others from the request', async () => {
+    const { ports, requests, singleReads } = aggregatingPorts(graphsUpTo(10), 10, { unanswered: [5] });
+
+    const range = await readContextGraphStorageRangeV1(ports, { fromId: 1n, maxIds: 10 });
+
+    expect(requests).toHaveLength(1);
+    expect(singleReads).toEqual([5]);
+    expect(idsOf(range)).toEqual(sequence(1, 10));
+    expect(range.entries[4]!.nameHash).toBe(nameHashFor(5).toLowerCase());
+  });
+
+  it('reads an id on its own when its answer in the request does not decode', async () => {
+    const { ports, singleReads } = aggregatingPorts(graphsUpTo(6), 6, { garbled: [2] });
+
+    const range = await readContextGraphStorageRangeV1(ports, { fromId: 1n, maxIds: 6 });
+
+    expect(singleReads).toEqual([2]);
+    expect(idsOf(range)).toEqual(sequence(1, 6));
+    expect(range.entries[1]!.owner).toBe(OWNER.toLowerCase());
+  });
+
+  it('keeps the ids before one that cannot be read at all, and reads nothing past it one by one', async () => {
+    const { ports, singleReads } = aggregatingPorts(graphsUpTo(10), 10, {
+      unanswered: [5, 8],
+      unreadable: [5],
+    });
+
+    const range = await readContextGraphStorageRangeV1(ports, { fromId: 1n, maxIds: 10 });
+
+    // 1..4 came from the request; 5 failed on its own, so the range ends there.
+    expect(idsOf(range)).toEqual([1, 2, 3, 4]);
+    expect(range.nextId).toBe(5n);
+    expect(singleReads.filter((id) => id === 5)).toEqual([5]);
+    // The failure is reported by the read that starts at the failed id.
+    await expect(readContextGraphStorageRangeV1(ports, { fromId: 5n, maxIds: 6 }))
+      .rejects.toThrow('id 5 is unreadable');
+  });
+
+  it('ends the range at an id the request proves nonexistent and asks for nothing after it', async () => {
+    const graphs = graphsUpTo(70);
+    graphs.delete(10);
+    const { ports, requests, singleReads } = aggregatingPorts(graphs, 70);
+
+    const range = await readContextGraphStorageRangeV1(ports, { fromId: 1n, maxIds: 70 });
+
+    expect(idsOf(range)).toEqual(sequence(1, 9));
+    expect(range.nextId).toBe(10n);
+    expect(requests).toEqual([sequence(1, 32)]);
+    expect(singleReads).toEqual([]);
+  });
+
+  it('reads every id one by one when the adapter has no aggregate to offer, asking once', async () => {
+    const { ports, plainPorts, requests, singleReads } = aggregatingPorts(graphsUpTo(40), 40, {
+      unavailable: true,
+    });
+
+    const range = await readContextGraphStorageRangeV1(ports, { fromId: 1n, maxIds: 40 });
+
+    expect(requests).toEqual([sequence(1, 32)]);
+    expect([...singleReads].sort((a, b) => a - b)).toEqual(sequence(1, 40));
+    expect(range).toEqual(await readContextGraphStorageRangeV1(plainPorts, { fromId: 1n, maxIds: 40 }));
+  });
+
+  it('rejects when the first request is refused, without reading any id on its own', async () => {
+    const refusal = new RpcRequestGovernorQueueFullError(256);
+    const { ports, singleReads } = aggregatingPorts(graphsUpTo(40), 40, {
+      refuseFrom: { id: 1, error: refusal },
+    });
+
+    await expect(readContextGraphStorageRangeV1(ports, { fromId: 1n, maxIds: 40 }))
+      .rejects.toBe(refusal);
+    expect(singleReads).toEqual([]);
+  });
+
+  it('keeps what earlier requests read when a later request is refused', async () => {
+    const { ports, requests, singleReads } = aggregatingPorts(graphsUpTo(70), 70, {
+      unanswered: [3],
+      refuseFrom: { id: 33, error: new RpcRequestGovernorQueueFullError(256) },
+    });
+
+    const range = await readContextGraphStorageRangeV1(ports, { fromId: 1n, maxIds: 70 });
+
+    expect(idsOf(range)).toEqual(sequence(1, 32));
+    expect(range.nextId).toBe(33n);
+    expect(requests).toEqual([sequence(1, 32), sequence(33, 64)]);
+    // Only the id the first request left open; nothing from the refused run.
+    expect(singleReads).toEqual([3]);
+  });
+
+  it('honours cancellation before a request is sent', async () => {
+    const { ports, requests } = aggregatingPorts(graphsUpTo(40), 40);
+    const controller = new AbortController();
+    const cancelling: ContextGraphStorageRangePorts = {
+      ...ports,
+      readEntriesBatch: async (ids, blockTag) => {
+        const batch = await ports.readEntriesBatch!(ids, blockTag);
+        controller.abort(new Error('pass ended'));
+        return batch;
+      },
+    };
+
+    await expect(readContextGraphStorageRangeV1(cancelling, {
+      fromId: 1n,
+      maxIds: 40,
+      signal: controller.signal,
+    })).rejects.toThrow('pass ended');
+    expect(requests).toEqual([sequence(1, 32)]);
+  });
+});
+
+describe('the aggregate request for a run of ids', () => {
+  const storageInterface = new ethers.Interface(loadAbi('ContextGraphStorage'));
+  const nonexistentToken = new ethers.Interface(['error ERC721NonexistentToken(uint256 tokenId)']);
+  const encoded = (graph: FakeGraph) => ({
+    contextGraph: {
+      success: true,
+      returnData: storageInterface.encodeFunctionResult('getContextGraph', tuple(graph)),
+    },
+    nameHash: {
+      success: true,
+      returnData: storageInterface.encodeFunctionResult('getNameHash', [graph.nameHash ?? ethers.ZeroHash]),
+    },
+  });
+
+  it('carries getContextGraph then getNameHash for every id', () => {
+    const calls = contextGraphStorageBatchCalls(storageInterface, STORAGE, [7n, 8n]);
+
+    expect(calls.map(({ target }) => target)).toEqual([STORAGE, STORAGE, STORAGE, STORAGE]);
+    expect(calls.map(({ callData }) => {
+      const fragment = storageInterface.getFunction(callData.slice(0, 10))!;
+      return [fragment.name, storageInterface.decodeFunctionData(fragment, callData)[0]];
+    })).toEqual([
+      ['getContextGraph', 7n], ['getNameHash', 7n], ['getContextGraph', 8n], ['getNameHash', 8n],
+    ]);
+  });
+
+  it('decodes an answered id into the entry a read of that id gives', () => {
+    const graph = { nameHash: nameHashFor(7), accessPolicy: 1, publishPolicy: 0, publishAuthority: AUTHORITY };
+    const { contextGraph, nameHash } = encoded(graph);
+
+    const [read] = decodeContextGraphStorageBatch(storageInterface, [7n], [contextGraph, nameHash]);
+
+    expect(read).not.toBe('nonexistent');
+    const answered = read as { contextGraph: unknown; nameHash: unknown };
+    expect(decodeContextGraphStorageEntryV1(7n, answered.contextGraph, answered.nameHash))
+      .toEqual(decodeContextGraphStorageEntryV1(7n, tuple(graph), graph.nameHash));
+  });
+
+  it('takes only the id-exact nonexistent revert as proof that an id was never minted', () => {
+    const { contextGraph, nameHash } = encoded({});
+    const revertFor = (id: bigint) => ({
+      success: false,
+      returnData: nonexistentToken.encodeErrorResult('ERC721NonexistentToken', [id]),
+    });
+    const answerOf = (results: Array<{ success: boolean; returnData: string }>) =>
+      decodeContextGraphStorageBatch(storageInterface, [7n], results)[0];
+
+    expect(answerOf([revertFor(7n), nameHash])).toBe('nonexistent');
+    // Anything else is not an answer: the id is read on its own.
+    expect(answerOf([revertFor(8n), nameHash])).toBeUndefined();
+    expect(answerOf([{ success: false, returnData: '0x' }, nameHash])).toBeUndefined();
+    expect(answerOf([contextGraph, { success: false, returnData: '0x' }])).toBeUndefined();
+    expect(answerOf([{ success: true, returnData: '0x1234' }, nameHash])).toBeUndefined();
+    expect(answerOf([contextGraph])).toBeUndefined();
   });
 });
 
@@ -341,6 +603,19 @@ describe('EVMChainAdapter.readContextGraphStorageRange', () => {
     const range = await adapter.readContextGraphStorageRange({ fromId: 1n, maxIds: 1 });
     expect(provider.getBlock.calls).toEqual([['latest']]);
     expect(range.anchorBlockNumber).toBe(77);
+  });
+
+  it('fails closed, before any view, when the anchor block cannot be read', async () => {
+    const { adapter, provider, blockTags } = makeStorageAdapter({
+      head: 77,
+      graphs: new Map([[1, {}]]),
+      latestId: 1,
+    });
+    provider.getBlock.setImpl(async () => null as never);
+
+    await expect(adapter.readContextGraphStorageRange({ fromId: 1n, maxIds: 1 }))
+      .rejects.toThrow(/Context Graph storage enumeration anchor unavailable/);
+    expect(blockTags).toEqual([]);
   });
 
   it('fails over a data-less CALL_EXCEPTION from a backend behind the anchor', async () => {

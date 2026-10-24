@@ -11,11 +11,14 @@
  */
 import { ethers, ErrorFragment, Interface } from 'ethers';
 import {
+  PCA_FUNDING_UNKNOWN_CODE,
+  PCA_FUNDING_UNKNOWN_MESSAGE,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   NO_FUNDED_PUBLISHER_WALLET_MESSAGE_PREFIX,
   messageIndicatesNoFundedPublisherWallet,
 } from '@origintrail-official/dkg-core';
 import { loadAbi, loadVendoredAbis } from './evm-adapter-abi.js';
+import { isRemoteSignerError } from './remote-signer-errors.js';
 
 export function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -53,6 +56,19 @@ function* wrappedRpcErrorRecords(err: unknown): Generator<Record<string, unknown
       pending.push({ value: record[key], depth: depth + 1 });
     }
   }
+}
+
+/**
+ * True when `err`, or an error it wraps anywhere in the wrapper graph the
+ * selectors here walk, is a failure of an external signer. Such a failure is
+ * final: no contract-error recovery may read its text as a revert and ask the
+ * signer for another signature.
+ */
+export function isCausedByRemoteSigner(err: unknown): boolean {
+  for (const record of wrappedRpcErrorRecords(err)) {
+    if (isRemoteSignerError(record)) return true;
+  }
+  return false;
 }
 
 export function errorStatus(err: unknown): number | undefined {
@@ -136,6 +152,13 @@ export const HUB_STALE_ERROR_MARKERS = [
   'Only Contracts in Hub',
   'UnauthorizedAccess(Only Contracts in Hub)',
 ];
+
+/** A write reverted because a cached contract is no longer registered in the Hub; never a signer failure. */
+export function isHubStaleError(err: unknown): boolean {
+  if (isCausedByRemoteSigner(err)) return false;
+  const message = err instanceof Error ? err.message : '';
+  return HUB_STALE_ERROR_MARKERS.some((marker) => message.includes(marker));
+}
 
 let _errorInterface: Interface | null = null;
 let _pcaLogicInterface: Interface | null = null;
@@ -332,6 +355,8 @@ export function enrichEvmError(err: unknown): string | null {
  */
 export function isTooLowAllowanceError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
+  // A signer's refusal is never a revert, whatever its text says.
+  if (isCausedByRemoteSigner(err)) return false;
   const e = err as {
     revert?: { name?: unknown };
     message?: unknown;
@@ -392,6 +417,17 @@ export class InsufficientPublisherFundsError extends Error {
     super(message, options);
     this.name = 'InsufficientPublisherFundsError';
     this.balances = balances;
+  }
+}
+
+/** A strict publish cannot prove PCA coverage while its chain reads are unavailable. */
+export class PcaFundingUnknownError extends Error {
+  readonly code = PCA_FUNDING_UNKNOWN_CODE;
+  readonly readCode?: string;
+  constructor(readCode?: string) {
+    super(PCA_FUNDING_UNKNOWN_MESSAGE);
+    this.name = 'PcaFundingUnknownError';
+    this.readCode = readCode;
   }
 }
 
