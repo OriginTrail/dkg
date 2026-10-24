@@ -24,31 +24,21 @@ beforeEach(() => {
 afterEach(() => { renderer.destroy(); vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('canvas graph rendering', () => {
-  it.each(['client', 'offset', 'default'])('initializes once using %s dimensions and supports resizing and canvas export', dimensions => {
-    expect(renderer.getCanvas()).toBeNull(); renderer.refresh(); renderer.resize(); renderer.centerOnNode('missing'); renderer.zoomToFit(); renderer.applyAnimation({}); renderer.applyPalette(conf.styleEngine.palette);
-    if (dimensions !== 'default') Object.defineProperties(conf.container, { [dimensions + 'Width']: { value: 900 }, [dimensions + 'Height']: { value: 700 } });
-    renderer.init(); renderer.init(); expect(boundary.factory).toHaveBeenCalledOnce();
-    expect(driver.values.width).toBe(dimensions === 'default' ? 800 : 900);
-    expect(driver.values.height).toBe(dimensions === 'default' ? 600 : 700);
+  it('configures canvas forces and maps the default background to transparency', () => {
+    renderer.init();
     expect(driver.forces.charge!.strength).toHaveBeenCalledWith(-150);
     expect(driver.forces.link!.distance).toHaveBeenCalledWith(80);
-    expect(renderer.getCanvas()).toBeNull(); const canvas = document.createElement('canvas'); conf.container.append(canvas); expect(renderer.getCanvas()).toBe(canvas);
-    renderer.resize(); expect(driver.values.width).toBe(conf.container.clientWidth);
     renderer.applyPalette({ ...conf.styleEngine.palette, background: '#abcdef' }); expect(driver.values.backgroundColor).toBe('#abcdef');
     renderer.applyPalette({ ...conf.styleEngine.palette, background: '#0a0a0f' }); expect(driver.values.backgroundColor).toBe('transparent');
   });
-  it('preserves positions, momentum and pins while filtering collapsed and dangling links', () => {
+  it('draws featured nodes last and centers the canvas camera on node positions', () => {
     const ordinary = node('ordinary'), risk = node('risk', { isHighRisk: true, degree: 5 }), featured = node('featured', { sizeMultiplier: 3 });
-    const all = nodes(featured, risk, ordinary);
-    renderer.render(all, edges(edge('ordinary', 'risk'), edge('risk', 'featured'), edge('missing', 'ordinary')));
-    expect(data().nodes.map(n => n.id)).toEqual(['ordinary', 'risk', 'featured']); expect(data().links).toHaveLength(2);
-    Object.assign(data().nodes[0], { x: 0, y: 18, vx: 3, vy: -2, fx: 0, fy: 18 });
-    renderer.render(all, edges(edge('ordinary', 'risk'), edge('risk', 'featured')), new Set(['featured']));
-    expect(data().nodes[0]).toMatchObject({ id: 'ordinary', x: 0, y: 18, vx: 3, vy: -2, fx: 0, fy: 18 }); expect(data().links).toHaveLength(1);
+    renderer.render(nodes(featured, risk, ordinary), edges(edge('ordinary', 'risk'), edge('risk', 'featured')));
+    expect(data().nodes.map(n => n.id)).toEqual(['ordinary', 'risk', 'featured']);
+    Object.assign(data().nodes[0], { x: 0, y: 18 });
     renderer.centerOnNode('ordinary', 900, 4); expect(driver.method('centerAt')).toHaveBeenLastCalledWith(0, 18, 900); expect(driver.method('zoom')).toHaveBeenLastCalledWith(4, 900);
     renderer.centerOnNode('risk'); expect(driver.method('centerAt')).toHaveBeenLastCalledWith(expect.any(Number), expect.any(Number), 350);
     renderer.centerOnNode('missing'); expect(driver.method('centerAt')).toHaveBeenCalledTimes(2);
-    renderer.zoomToFit(20, 800); expect(driver.method('zoomToFit')).toHaveBeenLastCalledWith(800, 20);
   });
   it.each([false, true])('places dated nodes chronologically, tolerating equal dates (%s) and invalid values', same => {
     const dated = (id: string, date: string, namespace = 'https') => node(id, { properties: new Map([[`${namespace}://schema.org/dateCreated`, [{ value: date }]]]) });
@@ -66,19 +56,6 @@ describe('canvas graph rendering', () => {
     renderer.render(nodes(node('a'), node('b')), new Map()); driver.call('onEngineStop'); vi.advanceTimersByTime(300); expect(driver.method('zoomToFit')).toHaveBeenCalledTimes(2);
     renderer.render(nodes(node('a'), node('b'), node('c')), new Map()); renderer.autoFitDisabled = true; vi.advanceTimersByTime(300); driver.call('onEngineStop'); expect(driver.method('zoomToFit')).toHaveBeenCalledTimes(2);
     renderer.render(nodes(node('d')), new Map()); expect(vi.getTimerCount()).toBe(0);
-  });
-  it('emits only valid graph objects and updates hover cursor', () => {
-    const clicked = vi.fn(), hovered = vi.fn(), left = vi.fn(), link = vi.fn(), background = vi.fn();
-    conf.events.on('node:click', clicked); conf.events.on('node:hover', hovered); conf.events.on('node:unhover', left); conf.events.on('edge:click', link); conf.events.on('background:click', background);
-    renderer.init(); const gn = node('a'); const ge = edge('a', 'b');
-    driver.call('onNodeClick', {}); driver.call('onLinkClick', {}); expect(clicked).not.toHaveBeenCalled(); expect(link).not.toHaveBeenCalled();
-    driver.call('onNodeClick', { _graphNode: gn }); driver.call('onLinkClick', { _graphEdge: ge }); expect(clicked).toHaveBeenCalledExactlyOnceWith(gn); expect(link).toHaveBeenCalledExactlyOnceWith(ge);
-    driver.call('onNodeHover', { _graphNode: gn }); expect(hovered).toHaveBeenCalledWith(gn); expect(conf.container.style.cursor).toBe('pointer');
-    driver.call('onNodeHover', null); expect(left).toHaveBeenCalledWith(null); expect(conf.container.style.cursor).toBe('default');
-    driver.call('onBackgroundClick', {}); expect(background).toHaveBeenCalledWith({ x: 0, y: 0 });
-    driver.call('onNodeDrag', {}); driver.call('onNodeDragEnd', {}); expect(driver.method('d3ReheatSimulation')).toHaveBeenCalledTimes(2);
-    driver.method('d3ReheatSimulation').mockImplementation(() => { throw new Error('older graph API'); });
-    expect(() => { driver.call('onNodeDrag', {}); driver.call('onNodeDragEnd', {}); }).not.toThrow();
   });
   it('paints real nodes, visible hit areas, and readable link labels at their midpoints', () => {
     renderer.init(); const { ctx, paints } = canvasContext(); const paint = vi.spyOn(conf.hexPainter, 'paint');

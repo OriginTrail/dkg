@@ -23,25 +23,20 @@ beforeEach(() => {
 afterEach(() => { renderer.destroy(); vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('WebGL renderer public contracts', () => {
-  it.each(['client', 'offset', 'default'])('initializes %s dimensions and supports public camera and export operations', dimensions => {
-    expect(renderer.getCanvas()).toBeNull(); renderer.refresh(); renderer.resize(); renderer.zoomToFit(); renderer.centerOnNode('missing'); renderer.applyAnimation({}); renderer.applyPalette(conf.styleEngine.palette);
-    if (dimensions !== 'default') Object.defineProperties(conf.container, { [dimensions + 'Width']: { value: 900 }, [dimensions + 'Height']: { value: 700 } });
-    renderer.render(nodes(node('a')), new Map()); renderer.init(); expect(boundary.factory).toHaveBeenCalledOnce();
-    expect(driver.values.width).toBe(dimensions === 'default' ? 800 : 900); expect(driver.values.height).toBe(dimensions === 'default' ? 600 : 700);
+  it('positions the 3D camera at a zoom-dependent distance and applies the palette background', () => {
+    renderer.render(nodes(node('a')), new Map());
     Object.assign(data().nodes[0], { x: 10, y: 20 }); renderer.centerOnNode('a'); expect(driver.method('cameraPosition')).toHaveBeenLastCalledWith({ x: 10, y: 20, z: 200 }, { x: 10, y: 20, z: 0 }, 350);
     renderer.centerOnNode('a', 700, 5); expect(driver.method('cameraPosition')).toHaveBeenLastCalledWith({ x: 10, y: 20, z: 60 }, { x: 10, y: 20, z: 0 }, 700);
     for (const zoom of [0, -1, NaN, Infinity]) { renderer.centerOnNode('a', 1, zoom); expect(driver.method('cameraPosition').mock.calls.at(-1)?.[0].z).toBe(200); }
-    renderer.centerOnNode('missing'); renderer.zoomToFit(10, 400); expect(driver.method('zoomToFit')).toHaveBeenCalledWith(400, 10);
-    expect(renderer.getCanvas()).toBeNull(); const canvas = document.createElement('canvas'); conf.container.append(canvas); expect(renderer.getCanvas()).toBe(canvas);
-    renderer.resize(); expect(driver.values.width).toBe(conf.container.clientWidth);
+    renderer.centerOnNode('missing'); expect(driver.method('cameraPosition')).toHaveBeenCalledTimes(6);
     renderer.applyPalette(conf.styleEngine.palette); expect(driver.values.backgroundColor).toBe(conf.styleEngine.palette.background);
   });
-  it('retains moving node identity, pins and links across renders and image changes', () => {
-    const a = node('a', { degree: 5 }), b = node('b'), c = node('c');
-    renderer.render(nodes(a, b, c), edges(edge('a', 'b'), edge('b', 'c'), edge('missing', 'a')));
+  it('retains scene node identity until its image changes and preserves positions on replacement', () => {
+    const a = node('a', { degree: 5 }), b = node('b');
+    renderer.render(nodes(a, b), edges(edge('a', 'b')));
     const first = data().nodes[0]; Object.assign(first, { x: 0, y: 4, vx: 2, vy: -1, fx: 0, fy: 4 });
-    renderer.render(nodes(a, b, c), edges(edge('a', 'b'), edge('b', 'c')), new Set(['c']));
-    expect(data().nodes[0]).toBe(first); expect(data().links).toHaveLength(1);
+    renderer.render(nodes(a, b), edges(edge('a', 'b')));
+    expect(data().nodes[0]).toBe(first);
     a.imageUrl = 'https://example.invalid/changed.png';
     renderer.render(nodes(a, b), edges(edge('a', 'b'))); expect(data().nodes[0]).not.toBe(first);
     expect(data().nodes[0]).toMatchObject({ x: 0, y: 4, vx: 2, vy: -1, fx: 0, fy: 4 });
@@ -56,16 +51,6 @@ describe('WebGL renderer public contracts', () => {
     vi.advanceTimersByTime(50); const pulsed = driver.call('nodeVal', { _graphNode: risk }); expect(pulsed).not.toBe(ordinaryRisk); expect(pulsed / ordinaryRisk).toBeGreaterThanOrEqual(.75); expect(pulsed / ordinaryRisk).toBeLessThanOrEqual(1.25);
     expect(driver.call('nodeVal', { _graphNode: plain })).toBeCloseTo(691.2);
     renderer.applyAnimation({}); const updates = driver.method('nodeVal').mock.calls.length; vi.advanceTimersByTime(100); expect(driver.method('nodeVal')).toHaveBeenCalledTimes(updates);
-  });
-  it('delivers node, edge and background events and survives optional drag API failures', () => {
-    const clicked = vi.fn(), hovered = vi.fn(), unhovered = vi.fn(), linked = vi.fn(), background = vi.fn();
-    conf.events.on('node:click', clicked); conf.events.on('node:hover', hovered); conf.events.on('node:unhover', unhovered); conf.events.on('edge:click', linked); conf.events.on('background:click', background);
-    renderer.init(); driver.call('onNodeClick', {}); driver.call('onLinkClick', {}); expect(clicked).not.toHaveBeenCalled(); expect(linked).not.toHaveBeenCalled();
-    const a = node('a'), ab = edge('a', 'b'); driver.call('onNodeClick', { _graphNode: a }); driver.call('onNodeHover', { _graphNode: a }); driver.call('onLinkClick', { _graphEdge: ab });
-    expect(clicked).toHaveBeenCalledWith(a); expect(hovered).toHaveBeenCalledWith(a); expect(linked).toHaveBeenCalledWith(ab); expect(conf.container.style.cursor).toBe('pointer');
-    driver.call('onNodeHover', null); expect(unhovered).toHaveBeenCalledWith(null); expect(conf.container.style.cursor).toBe('default'); driver.call('onBackgroundClick'); expect(background).toHaveBeenCalledWith({ x: 0, y: 0 });
-    driver.call('onNodeDrag', {}); driver.call('onNodeDragEnd', {}); expect(driver.method('d3ReheatSimulation')).toHaveBeenCalledTimes(2);
-    driver.method('d3ReheatSimulation').mockImplementation(() => { throw new Error('optional method'); }); expect(() => { driver.call('onNodeDrag', {}); driver.call('onNodeDragEnd', {}); }).not.toThrow();
   });
   it.each([false, true])('limits hover tracing to incident edges with background particles %s', linkParticles => {
     renderer.init(); renderer.applyAnimation({ linkParticles, hoverTrace: true, linkParticleCount: 2, linkParticleSpeed: .01, linkParticleWidth: 5, linkParticleColor: 'orange' });

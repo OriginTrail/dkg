@@ -40,7 +40,6 @@ let container: HTMLDivElement; const views: RdfGraphViz[] = [];
 const make = (options?: RdfGraphVizConfig) => { const viz = new RdfGraphViz(container, options); views.push(viz); return viz; };
 const backend = () => boundary.instances.at(-1)!;
 const rendered = (): Parameters<RendererBackend['render']> => backend().render.mock.calls.at(-1)!;
-const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
 class Observer { static callback: () => void; observe = vi.fn(); disconnect = vi.fn(); constructor(callback: () => void) { Observer.callback = callback; } }
 beforeEach(() => {
   vi.useFakeTimers(); boundary.instances.length = 0; container = document.createElement('div'); document.body.append(container);
@@ -127,11 +126,11 @@ describe('exports and view integration', () => {
     expect(await viz.exportImage()).toBe(blob); expect(toBlob).toHaveBeenCalledWith(expect.any(Function), 'image/png');
     toBlob.mockImplementation(callback => callback(null)); await expect(viz.exportImage()).rejects.toThrow('toBlob returned null');
   });
-  it('filters nodes and edges through timeline interaction and cleans playback on view replacement', async () => {
+  it('filters nodes and edges through timeline interaction and cleans playback on view replacement', () => {
     const viz = make(); viz.playTimeline(); viz.pauseTimeline(); expect(viz.timelineOverlay).toBeNull(); expect(viz.getDateRange()).toBeNull();
     viz.loadTriples([triple('urn:a', 'urn:b'), triple('urn:b', 'urn:c'), { subject: 'urn:a', predicate: 'https://schema.org/dateCreated', object: '2025-01-01' }, { subject: 'urn:b', predicate: 'https://schema.org/dateCreated', object: '2025-01-02' }]);
     const changed = vi.fn(); viz.on('temporal:change', changed); viz.setTimeCursor(new Date('2024-01-01')); expect(changed).toHaveBeenLastCalledWith({ cursor: new Date('2024-01-01'), visibleCount: 3, totalDated: 0 });
-    viz.applyView({ name: 'timeline', temporal: { enabled: true, showUndated: false, playSpeed: 20 } }); await flush();
+    viz.applyView({ name: 'timeline', temporal: { enabled: true, showUndated: false, playSpeed: 20 } });
     expect(viz.temporalFilter.datedNodeCount).toBe(2); expect(viz.getDateRange()).toEqual([new Date('2025-01-01'), new Date('2025-01-02')]); expect(viz.timelineOverlay?.mounted).toBe(true);
     const slider = container.querySelector<HTMLInputElement>('input[type=range]')!; slider.value = String(new Date('2025-01-01').getTime()); slider.dispatchEvent(new Event('input'));
     expect([...rendered()[0].keys()]).toEqual(['urn:a']); expect(rendered()[1].size).toBe(0); expect(container.querySelector('.gv-tl-count')?.textContent).toBe('1'); expect(changed).toHaveBeenLastCalledWith({ cursor: new Date('2025-01-01'), visibleCount: 1, totalDated: 2 });
@@ -140,11 +139,11 @@ describe('exports and view integration', () => {
     const old = viz.timelineOverlay; viz.applyView({ name: 'replacement', temporal: { enabled: true } }); expect(old?.mounted).toBe(false); expect(container.querySelectorAll('.gv-timeline-overlay')).toHaveLength(1);
     viz.applyView({ name: 'no overlay' }); expect(viz.timelineOverlay).toBeNull(); expect(container.querySelector('.gv-timeline-overlay')).toBeNull();
   });
-  it.each([false, true])('applies palette, trust, animation and KA options with explicit overrides %s', explicit => {
+  it.each([false, true])('applies palette, trust, animation and KA options with explicit overrides %s', async explicit => {
     const viz = make();
     viz.applyView({ name: 'assets', palette: 'light', trust: { enabled: true, ...(explicit ? { style: 'glow' as const, showBadge: false } : {}) }, animation: { drift: true }, knowledgeAssets: { enabled: true, ...(explicit ? { membershipPredicate: 'urn:member', showBoundaries: false, boundaryOpacity: .2 } : {}) } });
     viz.loadTriples([{ subject: 'urn:a', predicate: explicit ? 'urn:member' : 'dkg:partOfAsset', object: 'urn:asset' }]);
-    return flush().then(() => {
+    await vi.waitFor(() => {
       expect(backend().applyAnimation).toHaveBeenCalledWith({ drift: true }); expect(backend().applyPalette).toHaveBeenCalledWith(viz.styleEngine.palette);
       expect(backend().setKaGroups).toHaveBeenCalledWith(new Map([['urn:asset', new Set(['urn:a'])]]), !explicit, explicit ? .2 : .06);
       expect(container.style.getPropertyValue('--gv-bg')).not.toBe('');
@@ -154,7 +153,12 @@ describe('exports and view integration', () => {
     vi.stubGlobal('ResizeObserver', undefined); const viz = make(); viz.loadTriples([triple('urn:a', 'urn:b')]); viz.applyView({ name: 'undated', temporal: { enabled: true } }); expect(viz.timelineOverlay).toBeNull(); expect(rendered()[0].size).toBe(2);
   });
   it('applies constructor camera ownership after asynchronous 3D initialization', async () => {
-    const viz = make({ renderer: '3d', autoFitDisabled: true }); viz.loadTriples([triple('urn:a', 'urn:b')]); viz.refresh(); Observer.callback(); await vi.dynamicImportSettled(); await flush();
-    expect(backend().autoFitDisabled).toBe(true); expect(rendered()[0].size).toBe(2);
+    const viz = make({ renderer: '3d', autoFitDisabled: true }); viz.loadTriples([triple('urn:a', 'urn:b')]); viz.refresh(); Observer.callback();
+    await vi.dynamicImportSettled();
+    await vi.waitFor(() => {
+      expect(backend().autoFitDisabled).toBe(true);
+      expect(backend().render).toHaveBeenCalled();
+      expect(rendered()[0].size).toBe(2);
+    });
   });
 });
