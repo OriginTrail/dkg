@@ -236,8 +236,9 @@ export default defineConfig({
           'test/import-artifact-routes.test.ts',
           'test/shared-memory-catchup-durable.test.ts',
           'test/skill-endpoint.test.ts',
-          // R6-B — metric COUNT getter TTL memo. Pure logic, no hardhat.
+          // Reconciled metric-count snapshot and exact-query parity. No hardhat.
           'test/metrics-queries.test.ts',
+          'test/store-count-metrics.test.ts',
           // #1066 Item 1 — metrics presence gate. Pure logic (injected clock).
           'test/metrics-presence.test.ts',
           'test/rpc-usage-log.test.ts',

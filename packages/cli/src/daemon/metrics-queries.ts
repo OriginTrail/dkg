@@ -24,10 +24,9 @@ const CONTEXT_GRAPH_RESERVED_SUFFIXES = [
 const WALLET_SCOPED_CONTEXT_GRAPH_RE = /^0x[a-fA-F0-9]{40}\/.+$/;
 
 /**
- * Total triples across the default graph and all named graphs. Run on the 30s
- * metrics-collector cadence via `getTotalTriples` (see the metrics source in
- * `lifecycle.ts`). It is the heaviest read the collector issues and the one the
- * store-read-latency benchmark tracks.
+ * Total triples across the default graph and all named graphs. This standalone
+ * query remains the canonical benchmark probe; production metrics use the
+ * combined, low-frequency snapshot below.
  */
 export const GET_TOTAL_TRIPLES_SPARQL =
   'SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }';
@@ -56,26 +55,186 @@ export const GET_CONFIRMED_KCS_SPARQL =
 export const GET_TENTATIVE_KCS_SPARQL =
   'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "tentative" } }';
 
+/**
+ * One exact store-count snapshot. The subqueries intentionally preserve the
+ * established count semantics above; combining them removes four HTTP
+ * round-trips and gives the reconciler one all-or-nothing result.
+ */
+export const GET_STORE_COUNT_SNAPSHOT_SPARQL = `SELECT ?totalTriples ?totalKCs ?totalKAs ?confirmedKCs ?tentativeKCs WHERE {
+  { SELECT (COUNT(*) AS ?totalTriples) WHERE {
+      { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } }
+  } }
+  { SELECT (COUNT(DISTINCT ?kc) AS ?totalKCs) WHERE {
+      GRAPH ?g { ?kc <http://dkg.io/ontology/status> ?status }
+  } }
+  { SELECT (COUNT(DISTINCT ?ka) AS ?totalKAs) WHERE { GRAPH ?g {
+      { ?ka <http://dkg.io/ontology/partOf> ?kc }
+      UNION
+      { ?ka <http://dkg.io/ontology/status> ?status .
+        ?ka <http://dkg.io/ontology/rootEntity> ?rootEntity .
+        FILTER NOT EXISTS { ?token <http://dkg.io/ontology/partOf> ?ka } }
+  } } }
+  { SELECT (COUNT(DISTINCT ?kc) AS ?confirmedKCs) WHERE {
+      GRAPH ?g { ?kc <http://dkg.io/ontology/status> "confirmed" }
+  } }
+  { SELECT (COUNT(DISTINCT ?kc) AS ?tentativeKCs) WHERE {
+      GRAPH ?g { ?kc <http://dkg.io/ontology/status> "tentative" }
+  } }
+}`;
+
+const STORE_METRICS_HEALTH_SPARQL = 'ASK {}';
+export const STORE_COUNT_RECONCILE_INTERVAL_MS = 5 * 60_000;
+export const STORE_COUNT_HEALTH_INTERVAL_MS = 30_000;
+
+export interface StoreCountSnapshot {
+  readonly totalTriples: number;
+  readonly totalKCs: number;
+  readonly totalKAs: number;
+  readonly confirmedKCs: number;
+  readonly tentativeKCs: number;
+}
+
+export interface StoreCountMetricsOptions {
+  /** Exact full-store reconciliation cadence. Defaults to five minutes. */
+  reconcileIntervalMs?: number;
+  /** Cheap liveness-probe cadence while a reconciled snapshot is reused. */
+  healthIntervalMs?: number;
+  /** Monotonic clock injection for deterministic tests. */
+  now?: () => number;
+}
+
 type MetricsCountQuery = (
   sparql: string,
-  options: { source: string },
-) => Promise<{ bindings?: ReadonlyArray<Record<string, string | undefined>> } | undefined>;
+  options: { source: string; priority: 'background' | 'health' },
+) => Promise<{
+  type?: string;
+  value?: boolean;
+  bindings?: ReadonlyArray<Record<string, string | undefined>>;
+} | undefined>;
 
 /**
  * The store counts of the daemon's metrics source, read through the agent's
  * query API with no context graph. Unscoped reads leave core-cache-marked
  * graphs out, so after a core-cache snapshot job these count everything else.
  */
-export function createStoreCountMetrics(query: MetricsCountQuery) {
-  const count = (sparql: string, source: string) => async () =>
-    parseRdfInt((await query(sparql, { source }))?.bindings?.[0]?.c);
-  return {
-    getTotalTriples: count(GET_TOTAL_TRIPLES_SPARQL, 'daemon.metrics.totalTriples'),
-    getTotalKCs: count(GET_TOTAL_KCS_SPARQL, 'daemon.metrics.totalKCs'),
-    getTotalKAs: count(GET_TOTAL_KAS_SPARQL, 'daemon.metrics.totalKAs'),
-    getConfirmedKCs: count(GET_CONFIRMED_KCS_SPARQL, 'daemon.metrics.confirmedKCs'),
-    getTentativeKCs: count(GET_TENTATIVE_KCS_SPARQL, 'daemon.metrics.tentativeKCs'),
+export function createStoreCountMetrics(
+  query: MetricsCountQuery,
+  options: StoreCountMetricsOptions = {},
+) {
+  const reconcileIntervalMs = finiteInterval(
+    options.reconcileIntervalMs,
+    STORE_COUNT_RECONCILE_INTERVAL_MS,
+    'reconcileIntervalMs',
+  );
+  const healthIntervalMs = finiteInterval(
+    options.healthIntervalMs,
+    STORE_COUNT_HEALTH_INTERVAL_MS,
+    'healthIntervalMs',
+  );
+  const now = options.now ?? (() => performance.now());
+  let snapshot: { value: StoreCountSnapshot; reconciledAt: number } | null = null;
+  let reconcileInflight: Promise<StoreCountSnapshot> | null = null;
+  let healthInflight: Promise<void> | null = null;
+  let lastHealthyAt: number | null = null;
+  let lastReconcileError: unknown;
+  let lastReconcileFailureAt: number | null = null;
+
+  const reconcile = (): Promise<StoreCountSnapshot> => {
+    if (reconcileInflight) return reconcileInflight;
+    const run = query(GET_STORE_COUNT_SNAPSHOT_SPARQL, {
+      source: 'daemon.metrics.storeCountReconcile',
+      priority: 'background',
+    }).then((result) => {
+      const row = result?.bindings?.[0];
+      if (!row) throw new Error('Store metrics reconciliation returned no binding');
+      const value = Object.freeze({
+        totalTriples: parseRdfInt(row.totalTriples),
+        totalKCs: parseRdfInt(row.totalKCs),
+        totalKAs: parseRdfInt(row.totalKAs),
+        confirmedKCs: parseRdfInt(row.confirmedKCs),
+        tentativeKCs: parseRdfInt(row.tentativeKCs),
+      });
+      const reconciledAt = now();
+      snapshot = { value, reconciledAt };
+      lastHealthyAt = reconciledAt;
+      lastReconcileError = undefined;
+      lastReconcileFailureAt = null;
+      return value;
+    }).catch((error) => {
+      lastReconcileError = error;
+      lastReconcileFailureAt = now();
+      throw error;
+    }).finally(() => {
+      if (reconcileInflight === run) reconcileInflight = null;
+    });
+    reconcileInflight = run;
+    return run;
   };
+
+  const assertHealthy = (): Promise<void> => {
+    const checkedAt = now();
+    if (
+      lastHealthyAt !== null
+      && checkedAt >= lastHealthyAt
+      && checkedAt - lastHealthyAt < healthIntervalMs
+    ) return Promise.resolve();
+    if (healthInflight) return healthInflight;
+    const run = query(STORE_METRICS_HEALTH_SPARQL, {
+      source: 'daemon.metrics.storeHealth',
+      priority: 'health',
+    }).then(() => {
+      lastHealthyAt = now();
+    }).finally(() => {
+      if (healthInflight === run) healthInflight = null;
+    });
+    healthInflight = run;
+    return run;
+  };
+
+  const read = async (): Promise<StoreCountSnapshot> => {
+    const checkedAt = now();
+    if (snapshot === null) {
+      if (
+        lastReconcileFailureAt !== null
+        && checkedAt >= lastReconcileFailureAt
+        && checkedAt - lastReconcileFailureAt < healthIntervalMs
+      ) throw lastReconcileError;
+      return reconcile();
+    }
+    await assertHealthy();
+    if (
+      lastReconcileFailureAt !== null
+      && checkedAt >= lastReconcileFailureAt
+      && checkedAt - lastReconcileFailureAt < healthIntervalMs
+    ) throw lastReconcileError;
+    if (
+      checkedAt < snapshot.reconciledAt
+      || checkedAt - snapshot.reconciledAt >= reconcileIntervalMs
+    ) {
+      // Dashboard reads stay O(1): refresh at background priority and keep the
+      // last exact snapshot only while the endpoint remains demonstrably live.
+      void reconcile().catch(() => undefined);
+    }
+    if (lastReconcileError !== undefined) throw lastReconcileError;
+    return snapshot.value;
+  };
+
+  return {
+    getTotalTriples: async () => (await read()).totalTriples,
+    getTotalKCs: async () => (await read()).totalKCs,
+    getTotalKAs: async () => (await read()).totalKAs,
+    getConfirmedKCs: async () => (await read()).confirmedKCs,
+    getTentativeKCs: async () => (await read()).tentativeKCs,
+    reconcileStoreCounts: reconcile,
+  };
+}
+
+function finiteInterval(value: number | undefined, fallback: number, label: string): number {
+  const interval = value ?? fallback;
+  if (!Number.isFinite(interval) || interval < 0) {
+    throw new RangeError(`${label} must be a finite non-negative number`);
+  }
+  return interval;
 }
 
 type MetricSubscriptionCandidate = {
