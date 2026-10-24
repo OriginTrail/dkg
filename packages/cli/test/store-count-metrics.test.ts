@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   MetricsCollector,
+  type MetricSnapshotRow,
   type MetricsSource,
 } from '@origintrail-official/dkg-node-ui';
 import { createStoreCountMetrics } from '../src/daemon/metrics-queries.js';
@@ -8,12 +9,34 @@ import { createStoreCountMetrics } from '../src/daemon/metrics-queries.js';
 const COLLECTOR_CACHE_TTL_MS = 30_000;
 const countRow = (value: string) => ({ bindings: [{
   totalTriples: value,
-  totalKCs: value,
-  totalKAs: value,
-  confirmedKCs: value,
-  tentativeKCs: value,
+  totalKCs: '3',
+  totalKAs: '4',
+  confirmedKCs: '1',
+  tentativeKCs: '2',
 }] });
 const askRow = (value: boolean) => ({ bindings: [{ result: String(value) }] });
+
+function collectorFixture(counts: ReturnType<typeof createStoreCountMetrics>, now: () => number) {
+  const source: MetricsSource = {
+    getPeerCount: () => 0,
+    getDirectPeerCount: () => 0,
+    getRelayedPeerCount: () => 0,
+    getMeshPeerCount: () => 0,
+    getContextGraphCount: async () => 2,
+    getStoreCountSnapshot: counts.getStoreCountSnapshot,
+    getStoreBytes: async () => null,
+    getRpcLatencyMs: async () => 0,
+    isRpcHealthy: async () => true,
+  };
+  const persisted: MetricSnapshotRow[] = [];
+  const db = {
+    insertSnapshot(snapshot: MetricSnapshotRow) { persisted.push(snapshot); },
+  } as unknown as ConstructorParameters<typeof MetricsCollector>[0];
+  return {
+    collector: new MetricsCollector(db, source, undefined, () => true, { cacheClock: now }),
+    persisted,
+  };
+}
 
 describe('createStoreCountMetrics snapshot lifecycle', () => {
   it('reconciles once, validates retained counts, and awaits an expired replacement', async () => {
@@ -33,7 +56,9 @@ describe('createStoreCountMetrics snapshot lifecycle', () => {
       reconcileIntervalMs: 100,
     });
 
-    expect((await metrics.getStoreCountSnapshot()).totalTriples).toBe(5);
+    expect(await metrics.getStoreCountSnapshot()).toEqual({
+      totalTriples: 5, totalKCs: 3, totalKAs: 4, confirmedKCs: 1, tentativeKCs: 2,
+    });
     expect(query).toHaveBeenCalledTimes(1);
     expect((await metrics.getStoreCountSnapshot()).totalTriples).toBe(5);
     expect(query.mock.calls[1]?.[0]).toBe('ASK {}');
@@ -87,30 +112,7 @@ describe('createStoreCountMetrics snapshot lifecycle', () => {
       now: () => now,
       reconcileIntervalMs: 100,
     });
-    const source: MetricsSource = {
-      getPeerCount: () => 0,
-      getDirectPeerCount: () => 0,
-      getRelayedPeerCount: () => 0,
-      getMeshPeerCount: () => 0,
-      getContextGraphCount: async () => 2,
-      getStoreCountSnapshot: counts.getStoreCountSnapshot,
-      getStoreBytes: async () => null,
-      getRpcLatencyMs: async () => 0,
-      isRpcHealthy: async () => true,
-    };
-    const persisted: Array<{ total_triples: number | null }> = [];
-    const db = {
-      insertSnapshot(snapshot: { total_triples: number | null }) {
-        persisted.push(snapshot);
-      },
-    } as unknown as ConstructorParameters<typeof MetricsCollector>[0];
-    const collector = new MetricsCollector(
-      db,
-      source,
-      undefined,
-      () => true,
-      { cacheClock: () => now },
-    );
+    const { collector, persisted } = collectorFixture(counts, () => now);
 
     expect((await collector.collectAndStore()).total_triples).toBe(5);
     expect(reconciliations).toBe(1);
@@ -140,5 +142,44 @@ describe('createStoreCountMetrics snapshot lifecycle', () => {
     now += 1;
     expect((await collector.collect()).total_triples).toBe(7);
     expect(reconciliations).toBe(3);
+  });
+
+  it('persists unavailable counts after an exact refresh fails and recovers with a fresh snapshot', async () => {
+    let now = 1_000;
+    let failRefresh = false;
+    let value = '5';
+    const query = vi.fn(async (sparql: string) => {
+      if (sparql === 'ASK {}') return askRow(true);
+      if (failRefresh) throw new Error('exact reconciliation timed out');
+      return countRow(value);
+    });
+    const counts = createStoreCountMetrics(query, {
+      now: () => now,
+      reconcileIntervalMs: COLLECTOR_CACHE_TTL_MS,
+    });
+    const { collector, persisted } = collectorFixture(counts, () => now);
+    const expected = {
+      total_triples: 5, total_kcs: 3, total_kas: 4,
+      confirmed_kcs: 1, tentative_kcs: 2, contextGraph_count: 2,
+    };
+    expect(await collector.collectAndStore()).toMatchObject(expected);
+
+    now += COLLECTOR_CACHE_TTL_MS;
+    failRefresh = true;
+    await collector.collectAndStore();
+    expect(query.mock.calls[1]?.[0]).toBe('ASK {}');
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(persisted.at(-1)).toMatchObject({
+      total_triples: null, total_kcs: null, total_kas: null,
+      confirmed_kcs: null, tentative_kcs: null, contextGraph_count: 2,
+    });
+
+    failRefresh = false;
+    value = '8';
+    now += COLLECTOR_CACHE_TTL_MS;
+    await collector.collectAndStore();
+    expect(query).toHaveBeenCalledTimes(4);
+    expect(query.mock.calls[3]?.[0]).not.toBe('ASK {}');
+    expect(persisted.at(-1)).toMatchObject({ ...expected, total_triples: 8 });
   });
 });

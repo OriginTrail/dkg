@@ -261,6 +261,7 @@ describe('createStoreCountMetrics', () => {
       await store.insert([
         { subject: 'did:dkg:evm:31337/0xab/1', predicate: `${DKG}status`, object: '"confirmed"', graph: 'did:dkg:context-graph:local/_meta' },
         { subject: 'did:dkg:evm:31337/0xab/1/1', predicate: `${DKG}partOf`, object: 'did:dkg:evm:31337/0xab/1', graph: 'did:dkg:context-graph:local/_meta' },
+        { subject: 'did:dkg:evm:31337/0xab/1/2', predicate: `${DKG}partOf`, object: 'did:dkg:evm:31337/0xab/1', graph: 'did:dkg:context-graph:local/_meta' },
         { subject: 'did:dkg:evm:31337/0xcd/2', predicate: `${DKG}status`, object: '"tentative"', graph: 'did:dkg:context-graph:imported/_meta' },
         { subject: 'did:dkg:evm:31337/0xcd/2', predicate: `${DKG}rootEntity`, object: 'urn:entity', graph: 'did:dkg:context-graph:imported/_meta' },
       ]);
@@ -271,15 +272,15 @@ describe('createStoreCountMetrics', () => {
           confirmed: counts.confirmedKCs, tentative: counts.tentativeKCs,
         };
       };
-      expect(await read()).toEqual({ triples: 4, kcs: 2, kas: 2, confirmed: 1, tentative: 1 });
+      expect(await read()).toEqual({ triples: 5, kcs: 2, kas: 3, confirmed: 1, tentative: 1 });
       // The real query engine normalizes ASK to `{ bindings: [{ result: 'true' }] }`.
       // Prove that shape authorizes reuse without another exact COUNT.
       now += 30;
-      expect(await read()).toEqual({ triples: 4, kcs: 2, kas: 2, confirmed: 1, tentative: 1 });
+      expect(await read()).toEqual({ triples: 5, kcs: 2, kas: 3, confirmed: 1, tentative: 1 });
       await markCoreTrustedGraph(store, 'imported');
       now += 270;
-      // Two local triples plus the trust marker; nothing from the marked graph.
-      expect(await read()).toEqual({ triples: 3, kcs: 1, kas: 1, confirmed: 1, tentative: 0 });
+      // Three local triples plus the trust marker; nothing from the marked graph.
+      expect(await read()).toEqual({ triples: 4, kcs: 1, kas: 2, confirmed: 1, tentative: 0 });
     } finally {
       await store.close();
     }
