@@ -11,7 +11,9 @@ Start with a contribution your agent can inspect and use: a small project fact w
 
 The tutorial uses public sample data and covers private drafts and optional sharing. Publishing a Knowledge Asset on-chain is a separate continuation. Commands use a POSIX shell; Windows users can follow them in WSL2.
 
-Prerequisites: Node.js 22.13+ (or 23.4+), npm 10+, and a supported agent runtime if you want the conversational step. The command surface below is based on DKG 10.0.23. Check [feature availability](../references/availability.md) before using newer features.
+Prerequisites: Node.js 22.23.4+, 24.22.1+ or 26.12.1+, npm 10+, and a supported agent runtime if you want the conversational step. The command surface below is based on DKG 10.0.23. Check [feature availability](../references/availability.md) before using newer features.
+
+DKG starts on Node.js 22.13+ (or 23.4+), but older releases miss the [2026-10-21 Node.js security fixes](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases), and `dkg start` and `dkg doctor` warn about them.
 
 ## 1. Install and choose your connection
 
