@@ -2480,7 +2480,7 @@ export function logPath(): string { return join(dkgDir(), 'daemon.log'); }
 export async function ensureDkgDir(): Promise<void> { await mkdir(dkgDir(), { recursive: true }); }
 
 /** Reject a misplaced trust policy instead of silently ignoring it. */
-export function assertAuthorityIndexConfigPlacement(config: Pick<DkgConfig, 'core'>): void {
+export function assertAuthorityIndexConfigPlacement(config: { core?: unknown }): void {
   if (config.core !== null && typeof config.core === 'object'
     && Object.hasOwn(config.core, 'authorityIndex')) {
     throw new TypeError(

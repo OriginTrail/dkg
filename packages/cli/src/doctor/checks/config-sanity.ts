@@ -149,7 +149,7 @@ export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]>
 
   // `loadConfig` throws on this too, so the daemon refuses to start.
   try {
-    assertAuthorityIndexConfigPlacement(parsed as Pick<DkgConfig, 'core'>);
+    assertAuthorityIndexConfigPlacement(parsed);
   } catch {
     findings.push({
       check: 'config-sanity',
