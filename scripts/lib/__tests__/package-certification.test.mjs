@@ -16,6 +16,7 @@ test('portable bundle and complete observed receipt verify against independently
 });
 for (const [name, damage] of [
   ['changed tarball', f => fs.appendFileSync(path.join(f.bundle, f.manifest.packages[0].tarball), 'tamper')],
+  ['wrong tool revision', f => { f.receipt.toolRevision = 'b'.repeat(40); }],
   ['wrong digest', f => { f.manifest.packageSetDigest = 'bad'; }],
   ['missing package', f => { f.manifest.packages.pop(); }],
   ['duplicate package', f => { f.manifest.packages.push(f.manifest.packages[0]); }],

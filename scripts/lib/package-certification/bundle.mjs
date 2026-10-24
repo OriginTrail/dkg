@@ -147,7 +147,7 @@ export function verifyCertificate(bundle, receiptFile, expected) {
   assert.equal(receipt.profile, expected.profile, 'wrong profile');
   assert.equal(receipt.outcome, 'PASS', 'certification did not pass');
   assert.deepEqual(receipt.errors, [], 'receipt contains errors');
-  assert.match(receipt.toolRevision, /^[a-f0-9]{40}$/);
+  assert.equal(receipt.toolRevision, expected.toolRevision ?? expected.commit, 'wrong certification tool revision');
   assert.match(receipt.runId, /^[a-z0-9-]+$/);
   assert.ok(Date.parse(receipt.startedAt) <= Date.parse(receipt.endedAt), 'invalid receipt interval');
   assert.deepEqual(receipt.requiredCases, CASES, 'wrong required cases');
@@ -173,7 +173,8 @@ export function verifyCertificate(bundle, receiptFile, expected) {
     assert.equal(report.packageSetDigest, manifest.packageSetDigest);
     assert.equal(report.runtime.os, 'linux');
     assert.ok(['arm64', 'x64'].includes(report.runtime.arch));
-    assert.match(report.runtime.node, /^v22\./);
+    assert.match(report.runtime.node, /^v22\.\d+\.\d+$/);
+    assert.ok(Number(report.runtime.node.split('.')[1]) >= 13, 'unsupported installed Node runtime');
     assert.match(report.runtime.npm, /^\d+\./);
     assert.deepEqual(report.cases.map(c => c.id), CASES, 'missing/duplicate/zero executed cases');
     for (const result of report.cases) {
