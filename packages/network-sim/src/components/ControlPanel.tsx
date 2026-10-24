@@ -405,9 +405,8 @@ function SimulateTab() {
   const elapsed = stats
     ? ((stats.finishedAt ?? Date.now()) - stats.startedAt) / 1000
     : 0;
-  const actualOps = stats?.completed ?? 0;
   const succeeded = stats ? Math.max(0, stats.completed - stats.errors) : 0;
-  const pct = stats ? Math.min(100, Math.round((actualOps / stats.total) * 100)) : 0;
+  const pct = stats ? Math.min(100, Math.round((stats.completed / stats.total) * 100)) : 0;
 
   return (
     <div className="tab-form">
@@ -500,7 +499,7 @@ function SimulateTab() {
               <span className="sim-stat-label">errors</span>
             </div>
             <div className="sim-stat">
-              <span className="sim-stat-value">{elapsed > 0 ? (actualOps / elapsed).toFixed(1) : '0'}</span>
+              <span className="sim-stat-value">{elapsed > 0 ? (stats.completed / elapsed).toFixed(1) : '0'}</span>
               <span className="sim-stat-label">ops/sec</span>
             </div>
             <div className="sim-stat">
