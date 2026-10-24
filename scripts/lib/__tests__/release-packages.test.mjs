@@ -55,8 +55,6 @@ const REPO_CHECKOUT_AVAILABLE = GIT_AVAILABLE && spawnSync('git', [
 ], { encoding: 'utf8' }).stdout?.trim() === 'true';
 
 
-const SCRIPT_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../release-packages.mjs');
-
 function writePackage(root, rel, pkg) {
   const filePath = path.join(root, rel, 'package.json');
   fs.mkdirSync(path.dirname(filePath), { recursive: true });

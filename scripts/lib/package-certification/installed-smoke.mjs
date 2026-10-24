@@ -235,5 +235,12 @@ try {
   process.exitCode = 1;
 } finally {
   try { await stop(); } catch (error) { report.cleanupError = error.message; process.exitCode = 1; }
+  // daemon-worker writes its structured runtime log beneath DKG_HOME. Retain
+  // this log separately from the private disposable wallet/store directory.
+  if (fs.existsSync('/install/data/daemon.log')) {
+    const logName = `${layout}-daemon-runtime.log`;
+    fs.copyFileSync('/install/data/daemon.log', `${evidence}/${logName}`);
+    report.logs.push(logName);
+  }
   save();
 }

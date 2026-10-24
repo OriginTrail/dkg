@@ -66,10 +66,13 @@ export function validatePackedManifest(pkg, expected, names) {
   assert.equal(pkg.version, expected.version, `wrong version: ${pkg.name}`);
   assert.notEqual(pkg.private, true, 'private package in prepared set');
   assert.deepEqual(dependencies(pkg), expected.dependencies, `wrong internal/dependency relationships: ${pkg.name}`);
-  for (const deps of Object.values(dependencies(pkg))) for (const [name, spec] of Object.entries(deps)) {
+  for (const [field, deps] of Object.entries(dependencies(pkg))) for (const [name, spec] of Object.entries(deps)) {
     assert.ok(!/^(workspace:|link:|file:|\/|\.\.?\/)/.test(spec), `local dependency escaped: ${pkg.name} ${name}`);
     if (name.startsWith('@origintrail-official/')) {
-      assert.ok(names.has(name), `internal package absent: ${name}`);
+      // Private build/test workspaces can remain in devDependencies: npm does
+      // not install a dependency's devDependencies. Runtime/peer/optional edges
+      // must all resolve within the complete public candidate set.
+      assert.ok(field === 'devDependencies' || names.has(name), `internal package absent: ${name}`);
       assert.equal(spec, expected.version, `internal dependency must resolve exact candidate: ${name}`);
     }
   }

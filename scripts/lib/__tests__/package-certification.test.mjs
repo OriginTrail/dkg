@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { verifyCertificate, verifyBundle, digest, readJson, tarFiles, fileIdentity, hash } from '../package-certification/bundle.mjs';
+import { verifyCertificate, verifyBundle, digest, readJson, tarFiles, fileIdentity, hash, dependencies, validatePackedManifest } from '../package-certification/bundle.mjs';
 import { preparedRelease, checkRegistrySet } from '../package-certification/publish.mjs';
 import { fixture, writeJson, archive } from './package-certification-fixture.mjs';
 import { startRegistry } from '../package-certification/registry.mjs';
@@ -66,6 +66,16 @@ for (const [name, damage] of [
 });
 test('tar reader refuses unsafe package paths and invalid checksums', () => {
   assert.throws(() => tarFiles(archive({ '../escape': 'bad' })), /unsafe/);
+});
+test('private build-only workspace references are rewritten but never accepted as runtime dependencies', () => {
+  const name = '@origintrail-official/dkg-chain', privateName = '@origintrail-official/dkg-evm-module';
+  const pkg = { name, version: '10.0.25', devDependencies: { [privateName]: '10.0.25' } };
+  const validate = candidate => validatePackedManifest(candidate, { name, version: pkg.version, dependencies: dependencies(candidate) }, new Set([name]));
+  validate(pkg);
+  assert.throws(() => validate({ ...pkg, devDependencies: { [privateName]: 'workspace:*' } }), /local dependency escaped/);
+  for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies']) {
+    assert.throws(() => validate({ ...pkg, [field]: pkg.devDependencies }), /internal package absent/);
+  }
 });
 test('self-consistent missing runtime asset is rejected by independent asset contract', t => {
   const f = fixture(t);
