@@ -110,6 +110,8 @@ export interface RealChainAgentOptions {
    * and runs no mDNS, so it reaches only the peers a suite connects it to.
    */
   readonly bootstrapPeers?: DKGAgentConfig['bootstrapPeers'];
+  /** Left unset when omitted: what the daemon sets for an Edge whose relays are all public. */
+  readonly publicAddressesOnly?: DKGAgentConfig['publicAddressesOnly'];
 }
 
 /** What `startNode` returns: the started agent, its chain adapter and its default agent address. */
@@ -146,6 +148,7 @@ export class RealChainAgents {
       ...(options.relayPeers === undefined ? {} : { relayPeers: options.relayPeers }),
       ...(options.announceAddresses === undefined ? {} : { announceAddresses: options.announceAddresses }),
       ...(options.bootstrapPeers === undefined ? {} : { bootstrapPeers: options.bootstrapPeers }),
+      ...(options.publicAddressesOnly === undefined ? {} : { publicAddressesOnly: options.publicAddressesOnly }),
       chainConfig: realChainConfig(options.operationalKey),
     });
     this.agents.push(agent);

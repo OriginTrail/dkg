@@ -67,6 +67,7 @@ import {
   classifySwmCatchupPeerOutcome,
   createSwmCatchupPeerSelector,
   loadOpWallets,
+  swmCatchupOwnerPeerIds,
 } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphMetaUri, advertisesSyncProtocol } from '@origintrail-official/dkg-core';
 import { retrieveMemorySearch } from "./memory-search-retrieval.js";
@@ -768,11 +769,9 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
         continue;
       }
       const baseCandidatePeers = await candidatePeersForContextGraph(cgId);
-      // An explicit peerId is an operator-directed bounded probe. libp2p's
-      // identify-backed peerStore can lag a live connection, so an absent
-      // protocol advertisement must not suppress the wire negotiation the
-      // operator requested. Default peer enumeration remains conservative and
-      // filters peers that are known not to advertise the current sync wire.
+      // An explicit peerId is an operator-directed bounded probe. libp2p's identify-backed peerStore can lag a live
+      // connection, so an absent protocol advertisement must not suppress the wire negotiation the operator requested.
+      // Default peer enumeration remains conservative and filters peers known not to advertise the current sync wire.
       const unsupportedPeers = peerIdParam
         ? new Set<string>()
         : await unsupportedPeersForContextGraph(cgId, baseCandidatePeers);
@@ -783,6 +782,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
             candidatePeers: baseCandidatePeers,
             unsupportedPeers,
             privateCuratorPeerIds,
+            ownerPeerIds: await swmCatchupOwnerPeerIds(agent, cgId),
           }).selectedPeers
         : [];
       const durableSelectedPeers = includeDurable

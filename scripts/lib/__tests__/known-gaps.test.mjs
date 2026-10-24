@@ -137,12 +137,12 @@ test('only a member\'s refused write is #3264: the owner\'s refusal with the sam
     caseId, node: { label: 'node9 (member2)' },
     record: {
       author, graph, sub: null, value: `${author.role} live root (1)`,
-      error: 'the author refused the asset: HTTP 404', errorCode: 'CONTEXT_GRAPH_NOT_FOUND', definitionHeld: false, definitionHistory: { seen: false },
+      error: 'the author refused the asset: HTTP 404', errorCode: 'CONTEXT_GRAPH_NOT_FOUND', definitionHeld: false,
     },
   });
   // Through pairResult, the known gaps and the case verdicts, as the suite reports them.
-  report.reportPair(refused(1, { role: 'owner', label: 'node7 (owner)', member: false }), { boundMs: 60_000 });
-  report.reportPair(refused(2, { role: 'member1', label: 'node8 (member1)', member: true }), { boundMs: 60_000 });
+  report.reportPair(refused(1, { role: 'owner', label: 'node7 (owner)', member: false }), { boundMs: 60_000, definitionSeen: false });
+  report.reportPair(refused(2, { role: 'member1', label: 'node8 (member1)', member: true }), { boundMs: 60_000, definitionSeen: false });
   assert.deepEqual(report.summary('Results'), ['1']);
   assert.ok(lines.includes('  [FAIL] case 1: "owner live root (1)" by node7 (owner) in registered root at node9 (member2): not written, the author refused the asset: HTTP 404'), lines.join('\n'));
   assert.ok(lines.some(line => line.startsWith('  [XFAIL] case 2: "member1 live root (1)" by node8 (member1) in registered root at node9 (member2): not written,')), lines.join('\n'));

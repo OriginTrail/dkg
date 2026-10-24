@@ -85,6 +85,8 @@ describe('RFC-64 catalog authority refresh construction binding', () => {
       scheduler: {
         setInterval: () => 1 as unknown as ReturnType<typeof setInterval>,
         clearInterval: vi.fn(),
+        setTimeout: () => 2 as unknown as ReturnType<typeof setTimeout>,
+        clearTimeout: vi.fn(),
       },
     });
 
