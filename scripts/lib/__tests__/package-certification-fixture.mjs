@@ -21,7 +21,7 @@ export function archive(files) {
   }
   return gzipSync(Buffer.concat([...records, Buffer.alloc(1024)]));
 }
-export function fixture(t) {
+export function fixture(t, { expected: suppliedExpected, inputRoot } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'package-certification-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const bundle = path.join(root, 'bundle');
@@ -30,17 +30,18 @@ export function fixture(t) {
   fs.mkdirSync(path.join(bundle, 'tarballs'));
   fs.mkdirSync(path.join(bundle, 'inputs'));
   const inputs = BUILD_INPUTS.map(name => {
-    fs.writeFileSync(path.join(bundle, 'inputs', name), 'fixture');
-    return { path: `inputs/${name}`, sha256: hash('fixture') };
+    const bytes = inputRoot ? fs.readFileSync(path.join(inputRoot, name)) : Buffer.from('fixture');
+    fs.writeFileSync(path.join(bundle, 'inputs', name), bytes);
+    return { path: `inputs/${name}`, sha256: hash(bytes) };
   });
-  const commit = 'a'.repeat(40), version = '10.0.25';
+  const commit = suppliedExpected?.commit ?? 'a'.repeat(40), version = suppliedExpected?.version ?? '10.0.25';
   const buildIdentity = { commit, commitShort: commit.slice(0, 8), dirty: false, buildTime: '2026-10-24T00:00:00.000Z', distTag: 'monorepo', ciRun: null };
-  const expected = { commit, version, profile: PROFILE, sourceInputsDigest: hash('tracked'), inputHashes: Object.fromEntries(inputs.map(i => [i.path, i.sha256])), familyPolicy: { libp2p: '3.5.1' }, requiredAssets: { [CLI]: ['build-info.json', 'dist/cli.js'] }, packages: [
+  const expected = suppliedExpected ?? { commit, version, profile: PROFILE, sourceInputsDigest: hash('tracked'), inputHashes: Object.fromEntries(inputs.map(i => [i.path, i.sha256])), familyPolicy: { libp2p: '3.5.1' }, requiredAssets: { [CLI]: ['build-info.json', 'dist/cli.js'] }, packages: [
     { name: CLI, version, dependencies: { dependencies: { '@origintrail-official/dkg-core': version }, optionalDependencies: {}, peerDependencies: {}, devDependencies: {} } },
     { name: '@origintrail-official/dkg-core', version, dependencies: { dependencies: { libp2p: '3.5.1' }, optionalDependencies: {}, peerDependencies: {}, devDependencies: {} } },
   ] };
   const packages = expected.packages.map((pkg, i) => {
-    const files = { 'package.json': JSON.stringify({ name: pkg.name, version, ...pkg.dependencies }), 'dist/cli.js': 'export {};', ...(i === 0 ? { 'build-info.json': JSON.stringify(buildIdentity) } : {}) };
+    const files = { ...Object.fromEntries((expected.requiredAssets[pkg.name] ?? []).map(asset => [asset, 'fixture asset'])), 'package.json': JSON.stringify({ name: pkg.name, version, ...pkg.dependencies }), 'dist/cli.js': 'export {};', ...(pkg.name === CLI ? { 'build-info.json': JSON.stringify(buildIdentity) } : {}) };
     const tarball = `tarballs/${i}.tgz`;
     fs.writeFileSync(path.join(bundle, tarball), archive(files));
     return { name: pkg.name, version, tarball, ...fileIdentity(path.join(bundle, tarball)), files: Object.fromEntries(Object.entries(files).map(([name, text]) => [name, hash(text)])) };
@@ -51,7 +52,7 @@ export function fixture(t) {
   const receiptFile = path.join(attempt, 'receipt.json');
   const receipt = { schemaVersion: 1, runId: 'test-run', profile: PROFILE, commit, toolRevision: commit, packageSetDigest: manifest.packageSetDigest, outcome: 'PASS', errors: [], startedAt: buildIdentity.buildTime, endedAt: buildIdentity.buildTime, requiredCases: CASES, layouts: [], evidence: [] };
   for (const layout of LAYOUTS) {
-    const tree = { layout, packages: [...packages.map(p => ({ path: `node_modules/${p.name}`, name: p.name, version, integrity: p.integrity, filesDigest: digest(p.files) })), { name: 'libp2p', version: '3.5.1', path: 'node_modules/libp2p' }] };
+    const tree = { layout, packages: [...packages.map(p => ({ path: `node_modules/${p.name}`, name: p.name, version, integrity: p.integrity, filesDigest: digest(p.files) })), ...Object.entries(expected.familyPolicy).map(([name, version]) => ({ name, version, path: `node_modules/${name}` }))] };
     const report = {
       profile: PROFILE, layout, runId: receipt.runId, packageSetDigest: manifest.packageSetDigest,
       runtime: { os: 'linux', arch: 'arm64', node: 'v22.23.4', npm: '10.9.8' },

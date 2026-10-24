@@ -33,6 +33,27 @@ export function checkRegistrySet(manifest, readDist, { allowMissing = false } = 
     return { pkg, exists: true };
   });
 }
+// Publication exposes a dist-tag immediately. Publish every internal runtime
+// dependency first so a failed later command cannot strand an exposed consumer.
+function publicationOrder(manifest) {
+  const packages = new Map(manifest.packages.map(pkg => [pkg.name, pkg]));
+  const policies = new Map(manifest.expectedPackages.map(pkg => [pkg.name, pkg.dependencies]));
+  const active = new Set(), visited = new Set(), ordered = [];
+  const visit = name => {
+    if (visited.has(name)) return;
+    assert.ok(!active.has(name), `cyclic internal publication dependency: ${name}`);
+    active.add(name);
+    const deps = policies.get(name);
+    for (const dependency of Object.keys({ ...deps.dependencies, ...deps.optionalDependencies, ...deps.peerDependencies }).sort()) {
+      if (packages.has(dependency)) visit(dependency);
+    }
+    active.delete(name);
+    visited.add(name);
+    ordered.push(packages.get(name));
+  };
+  for (const pkg of manifest.packages) visit(pkg.name);
+  return ordered;
+}
 function mutate(command, args) {
   const result = spawnSync(command, args, { stdio: 'inherit' });
   if (result.error || result.status !== 0) throw new Error('npm mutation failed; inspect npm output and obtain a fresh OTP if needed');
@@ -58,30 +79,29 @@ export function preparedRelease({
   // Preflight EVERY package before even the first mutation. A matching version
   // alone cannot make a partial publication safe to resume.
   const state = checkRegistrySet(manifest, readDist, { allowMissing: mode === 'publish' });
-  const progress = { mode, dryRun, reused: state.filter(s => mode === 'publish' && s.exists).map(s => s.pkg.name), completed: [], planned: [] };
-  for (const { pkg, exists } of state) {
-    if (mode === 'publish' && exists) continue;
-    for (const channel of tags) progress.planned.push({ package: pkg.name, tag: channel });
-  }
+  const existing = new Set(state.filter(s => s.exists).map(s => s.pkg.name));
+  const ordered = mode === 'publish' ? publicationOrder(manifest) : manifest.packages;
+  const operations = ordered.filter(pkg => mode !== 'publish' || !existing.has(pkg.name)).flatMap(pkg => tags.map(channel => ({
+    pkg, channel, tarball: path.join(bundle, pkg.tarball),
+    args: mode === 'publish'
+      ? ['publish', path.join(bundle, pkg.tarball), '--access', 'public', '--tag', channel]
+      : ['dist-tag', 'add', `${pkg.name}@${pkg.version}`, channel],
+  })));
+  const describe = ({ pkg, channel }) => ({ package: pkg.name, tag: channel });
+  const progress = { mode, dryRun, reused: state.filter(s => mode === 'publish' && s.exists).map(s => s.pkg.name), completed: [], planned: operations.map(describe) };
   // Recheck package AND evidence bytes after acquisition and immediately before
   // mutation; no build-info generation/build/repack exists in this path.
   verify();
   try {
-    for (const { pkg, exists } of state) {
-      if (mode === 'publish' && exists) continue;
-      for (const channel of tags) {
-        const tarball = path.join(bundle, pkg.tarball);
-        assert.deepEqual(fileIdentity(tarball), { size: pkg.size, sha256: pkg.sha256, integrity: pkg.integrity }, `tarball changed before mutation: ${pkg.name}`);
-        const args = mode === 'publish'
-          ? ['publish', tarball, '--access', 'public', '--tag', channel]
-          : ['dist-tag', 'add', `${pkg.name}@${pkg.version}`, channel];
-        // Neither dry-run nor errors interpolate OTPs or registry credentials.
-        log(`${dryRun ? 'Would' : 'Will'} ${mode} ${pkg.name}@${pkg.version} (${channel})`);
-        if (dryRun) continue;
-        runner('npm', [...args, ...(registry ? ['--registry', registry] : []), ...(otp ? [`--otp=${otp}`] : [])]);
-        progress.completed.push({ package: pkg.name, tag: channel });
-        assert.deepEqual(fileIdentity(tarball), { size: pkg.size, sha256: pkg.sha256, integrity: pkg.integrity }, `tarball changed during publication: ${pkg.name}`);
-      }
+    for (const operation of operations) {
+      const { pkg, channel, tarball, args } = operation;
+      assert.deepEqual(fileIdentity(tarball), { size: pkg.size, sha256: pkg.sha256, integrity: pkg.integrity }, `tarball changed before mutation: ${pkg.name}`);
+      // Neither dry-run nor errors interpolate OTPs or registry credentials.
+      log(`${dryRun ? 'Would' : 'Will'} ${mode} ${pkg.name}@${pkg.version} (${channel})`);
+      if (dryRun) continue;
+      runner('npm', [...args, ...(registry ? ['--registry', registry] : []), ...(otp ? [`--otp=${otp}`] : [])]);
+      progress.completed.push(describe(operation));
+      assert.deepEqual(fileIdentity(tarball), { size: pkg.size, sha256: pkg.sha256, integrity: pkg.integrity }, `tarball changed during publication: ${pkg.name}`);
     }
   } catch (cause) {
     // Do not repeat runner exceptions: npm wrappers can include their secret args.

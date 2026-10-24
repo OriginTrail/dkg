@@ -181,11 +181,20 @@ for (const mode of ['publish', 'promote']) for (const matches of [true, false]) 
     }
   });
 }
-test('publisher receives exact verified tarballs; no build/repack commands', t => {
-  const f = fixture(t), calls = [];
-  const progress = preparedRelease(releaseOptions(f, { runner: (...args) => calls.push(args) }));
+test('publication plan exposes consumers only after their candidate dependencies; uses exact tarballs', t => {
+  const f = fixture(t), calls = [], available = new Set();
+  const progress = preparedRelease(releaseOptions(f, { runner: (command, args) => {
+    const pkg = f.manifest.packages.find(p => path.join(f.bundle, p.tarball) === args[1]);
+    const policy = f.expected.packages.find(p => p.name === pkg.name);
+    for (const name of Object.keys(policy.dependencies.dependencies)) {
+      if (name.startsWith('@origintrail-official/')) assert.ok(available.has(name), `unpublished dependency: ${name}`);
+    }
+    available.add(pkg.name);
+    calls.push([command, args]);
+  } }));
   assert.equal(progress.completed.length, 2);
-  assert.deepEqual(calls.map(([, args]) => args[1]), f.manifest.packages.map(p => path.join(f.bundle, p.tarball)));
+  assert.deepEqual(progress.completed, progress.planned);
+  assert.deepEqual(calls.map(([, args]) => args[1]), [...f.manifest.packages].reverse().map(p => path.join(f.bundle, p.tarball)));
   assert.ok(calls.every(([command, args]) => command === 'npm' && args[0] === 'publish'));
 });
 test('validation and authorization failures invoke no mutating runner', t => {
@@ -215,16 +224,21 @@ test('partial publication reports exact completed set and only reuses matching b
       published.set(pkg.name, { integrity: pkg.integrity });
     } }));
   } catch (e) { error = e; }
-  assert.deepEqual(error.progress.completed, [{ package: f.manifest.packages[0].name, tag: 'canary' }]);
+  assert.deepEqual(error.progress.completed, error.progress.planned.slice(0, 1));
+  assert.deepEqual(error.progress.completed, [{ package: f.manifest.packages[1].name, tag: 'canary' }]);
   assert.ok(!error.message.includes('secret'));
   const resumed = preparedRelease(releaseOptions(f, { readDist: p => published.get(p.name) ?? null, runner: () => {} }));
-  assert.deepEqual(resumed.reused, [f.manifest.packages[0].name]);
-  assert.deepEqual(resumed.completed, [{ package: f.manifest.packages[1].name, tag: 'canary' }]);
+  assert.deepEqual(resumed.reused, [f.manifest.packages[1].name]);
+  assert.deepEqual(resumed.completed, [{ package: f.manifest.packages[0].name, tag: 'canary' }]);
 });
 test('partial promotion reports non-atomic progress; dry-run is nonmutating and secret-free', t => {
   const f = fixture(t), lines = []; let count = 0;
   const options = releaseOptions(f, { mode: 'promote', readDist: p => ({ integrity: p.integrity }), otp: 'secret', tags: ['testnet', 'mainnet'], runner: () => { if (++count === 2) throw new Error('expired'); }, log: line => lines.push(line) });
-  assert.throws(() => preparedRelease(options), error => error.progress.completed.length === 1);
+  assert.throws(() => preparedRelease(options), error => {
+    assert.equal(error.progress.planned.length, 4);
+    assert.deepEqual(error.progress.completed, error.progress.planned.slice(0, 1));
+    return true;
+  });
   preparedRelease({ ...options, dryRun: true, runner: () => assert.fail('dry-run mutated') });
   assert.ok(lines.every(line => !line.includes('secret')));
 });
@@ -251,4 +265,12 @@ test('candidate registry serves actual bytes and refuses scope fallback or runti
     server.setInstalling(false);
     assert.equal((await fetch(`${base}@origintrail-official%2fdkg`)).status, 403);
   } finally { await server.close(); }
+});
+
+test('cyclic internal runtime dependencies fail publication before mutation', t => {
+  const initial = fixture(t);
+  const expected = structuredClone(initial.expected);
+  expected.packages[1].dependencies.optionalDependencies[expected.packages[0].name] = expected.version;
+  const f = fixture(t, { expected });
+  assert.throws(() => preparedRelease(releaseOptions(f, { runner: () => assert.fail('cycle mutated') })), /cyclic internal publication dependency/);
 });

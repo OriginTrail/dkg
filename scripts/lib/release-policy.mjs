@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runCapture } from './release-process.mjs';
+import { run } from './release-process.mjs';
 
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -147,7 +147,7 @@ export function findReleaseVersionMismatches(version, rootDir = ROOT_DIR) {
     }));
 }
 
-export function verifyReleaseTag({ tag, version, bases = ['origin/main'], runner = runCapture } = {}) {
+export function verifyReleaseTag({ tag, version, bases = ['origin/main'], runner = run } = {}) {
   if (typeof tag !== 'string' || tag.length === 0) {
     throw new Error('--tag is required (e.g. v10.0.4)');
   }

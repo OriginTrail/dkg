@@ -244,6 +244,9 @@ Publication passes the exact manifest-bound tarball paths to npm, never workspac
 directories. Before its first mutation it verifies every existing registry
 version's `dist.integrity`; a matching version can be reused after partial
 publication, but a same-version integrity mismatch aborts the entire operation.
+Publication orders internal runtime dependencies before their consumers, so an
+exposed CLI tag never depends on candidate packages still awaiting publication.
+Cycles fail before mutation. Dry-run and execution use the same ordered plan.
 Promotion requires all versions to exist with matching integrity before its first
 tag update. Both paths recheck package/evidence bytes immediately before mutation.
 Cross-package changes are **not atomic**: failures report exact completed/reused
