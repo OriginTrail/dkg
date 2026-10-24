@@ -160,9 +160,6 @@ export function createStoreCountMetrics(
   const read = async (): Promise<StoreCountSnapshot> => {
     const current = reconciled;
     if (current === null) return reconcile();
-    // The collector owns the 30-second request cache and in-flight
-    // coalescing. Every cache miss validates the retained exact snapshot once.
-    await assertHealthy();
     const refreshedAt = now();
     if (
       refreshedAt < current.reconciledAt
@@ -173,6 +170,9 @@ export function createStoreCountMetrics(
       // the previous snapshot and strand the refreshed value in memory.
       return reconcile();
     }
+    // The collector owns the 30-second request cache and in-flight coalescing.
+    // Only reuse needs a probe; reconciliation itself establishes availability.
+    await assertHealthy();
     return current.value;
   };
 

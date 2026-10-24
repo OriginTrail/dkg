@@ -67,6 +67,7 @@ describe('createStoreCountMetrics snapshot lifecycle', () => {
     value = 6;
     const refresh = metrics.getStoreCountSnapshot();
     await vi.waitFor(() => expect(reconciliations).toBe(2));
+    expect(query).toHaveBeenCalledTimes(3); // Exact refresh needs no additional ASK.
     let settled = false;
     void refresh.finally(() => { settled = true; });
     await Promise.resolve();
@@ -110,7 +111,7 @@ describe('createStoreCountMetrics snapshot lifecycle', () => {
     });
     const counts = createStoreCountMetrics(query, {
       now: () => now,
-      reconcileIntervalMs: 100,
+      reconcileIntervalMs: 2 * COLLECTOR_CACHE_TTL_MS,
     });
     const { collector, persisted } = collectorFixture(counts, () => now);
 
@@ -121,7 +122,7 @@ describe('createStoreCountMetrics snapshot lifecycle', () => {
     expect((await collector.collect()).total_triples).toBe(5);
     expect(query).toHaveBeenCalledTimes(1);
 
-    now += 101;
+    now += COLLECTOR_CACHE_TTL_MS + 1;
     const refresh = collector.collectAndStore();
     await vi.waitFor(() => expect(reconciliations).toBe(2));
     expect(persisted).toHaveLength(1);
@@ -155,7 +156,7 @@ describe('createStoreCountMetrics snapshot lifecycle', () => {
     });
     const counts = createStoreCountMetrics(query, {
       now: () => now,
-      reconcileIntervalMs: COLLECTOR_CACHE_TTL_MS,
+      reconcileIntervalMs: 2 * COLLECTOR_CACHE_TTL_MS,
     });
     const { collector, persisted } = collectorFixture(counts, () => now);
     const expected = {
@@ -165,10 +166,14 @@ describe('createStoreCountMetrics snapshot lifecycle', () => {
     expect(await collector.collectAndStore()).toMatchObject(expected);
 
     now += COLLECTOR_CACHE_TTL_MS;
+    expect(await collector.collect()).toMatchObject(expected);
+    expect(query.mock.calls[1]?.[0]).toBe('ASK {}');
+
+    now += COLLECTOR_CACHE_TTL_MS;
     failRefresh = true;
     await collector.collectAndStore();
-    expect(query.mock.calls[1]?.[0]).toBe('ASK {}');
     expect(query).toHaveBeenCalledTimes(3);
+    expect(query.mock.calls[2]?.[0]).not.toBe('ASK {}');
     expect(persisted.at(-1)).toMatchObject({
       total_triples: null, total_kcs: null, total_kas: null,
       confirmed_kcs: null, tentative_kcs: null, contextGraph_count: 2,
