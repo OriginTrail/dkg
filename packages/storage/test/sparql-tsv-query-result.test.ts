@@ -38,8 +38,8 @@ describe('SPARQL TSV SELECT decoding', () => {
       expect(decodeSparqlTsvSelectResult(body)).toEqual(expected);
       const bytes = new TextEncoder().encode(body);
       const chunks: Uint8Array[] = [];
-      for (let offset = 0; offset < bytes.length; offset += 1_048_573) {
-        chunks.push(bytes.subarray(offset, offset + 1_048_573));
+      for (let offset = 0; offset < bytes.length; offset += 16_384) {
+        chunks.push(bytes.subarray(offset, offset + 16_384));
       }
       await expect(decodeSparqlTsvSelectResponse(chunkedResponse(chunks), {
         maxResponseBytes: bytes.length,
@@ -168,6 +168,26 @@ describe('SPARQL TSV SELECT decoding', () => {
       bindings: [{ name: '"Živjo 🌍"' }],
     });
   });
+
+  it.each(['\n', '\r', '\r\n'])(
+    'preserves %j boundaries, empty rows, and an unterminated row at every split', async (delimiter) => {
+      const body = `?v${delimiter}"first"${delimiter}${delimiter}"last"`;
+      const bytes = new TextEncoder().encode(body);
+      const expected = {
+        type: 'bindings', variables: ['v'], bindings: [{ v: '"first"' }, {}, { v: '"last"' }],
+      };
+      expect(decodeSparqlTsvSelectResult(body)).toEqual(expected);
+      for (let split = 0; split <= bytes.length; split += 1) {
+        await expect(decodeSparqlTsvSelectResponse(chunkedResponse([
+          bytes.subarray(0, split), new Uint8Array(), bytes.subarray(split),
+        ]))).resolves.toEqual(expected);
+      }
+      const terminated = new TextEncoder().encode(body + delimiter);
+      await expect(decodeSparqlTsvSelectResponse(chunkedResponse(
+        Array.from(terminated, byte => Uint8Array.of(byte)),
+      ))).resolves.toEqual(expected);
+    },
+  );
 
   it('enforces maxResponseBytes while streaming and from Content-Length', async () => {
     const bytes = new TextEncoder().encode('?x\n"value"\n');

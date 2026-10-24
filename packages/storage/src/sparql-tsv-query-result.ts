@@ -66,40 +66,45 @@ export function decodeSparqlTsvSelectResult(text: string): SelectResult {
 }
 
 class SparqlTsvLineFramer {
-  private pending = '';
+  private pending: string[] = [];
+  private skipLeadingLf = false;
 
   constructor(private readonly consumeLine: (line: string) => void) {}
 
   feed(text: string): void {
     if (text.length === 0) return;
-    this.pending += text;
-    // Oxigraph's normal framing is LF-only. Native split is materially faster
-    // than walking every UTF-16 code unit in JavaScript, especially when a
-    // fetch chunk contains hundreds of rows. Keep the uncommon CR/CRLF path
-    // complete without penalizing that hot path.
-    if (!this.pending.includes('\r')) {
-      const lines = this.pending.split('\n');
-      this.pending = lines.pop()!;
-      for (const line of lines) this.consumeLine(line);
-      return;
+    if (this.skipLeadingLf) {
+      this.skipLeadingLf = false;
+      if (text.startsWith('\n')) text = text.slice(1);
+      if (text.length === 0) return;
     }
-
-    const trailingCr = this.pending.endsWith('\r');
-    const complete = trailingCr ? this.pending.slice(0, -1) : this.pending;
-    const lines = complete.split(/\r\n|\n|\r/);
-    this.pending = `${lines.pop()!}${trailingCr ? '\r' : ''}`;
-    for (const line of lines) this.consumeLine(line);
+    // Scan only the new fragment. Rescanning the accumulated unfinished row
+    // makes large literals quadratic when HTTP delivers many small chunks.
+    // Preserve native split's fast LF path, joining fragments once per row.
+    this.skipLeadingLf = text.endsWith('\r');
+    const lines = text.includes('\r') ? text.split(/\r\n|\n|\r/) : text.split('\n');
+    if (lines.length > 1) {
+      if (this.pending.length > 0) {
+        this.pending.push(lines[0]!);
+        this.consumeLine(this.pending.join(''));
+        this.pending = [];
+      } else {
+        this.consumeLine(lines[0]!);
+      }
+      for (let index = 1; index < lines.length - 1; index += 1) {
+        this.consumeLine(lines[index]!);
+      }
+    }
+    const remainder = lines[lines.length - 1]!;
+    if (remainder.length > 0) this.pending.push(remainder);
   }
 
   finish(): void {
-    // At EOF, a pending CR is a line terminator; a non-empty remainder is the
-    // final unterminated line. A final terminator never invents an empty row.
-    if (this.pending.endsWith('\r')) {
-      this.consumeLine(this.pending.slice(0, -1));
-    } else if (this.pending.length > 0) {
-      this.consumeLine(this.pending);
-    }
-    this.pending = '';
+    // Terminators were already consumed, including a trailing CR. Only an
+    // unterminated non-empty row remains; do not invent an extra empty row.
+    if (this.pending.length > 0) this.consumeLine(this.pending.join(''));
+    this.pending = [];
+    this.skipLeadingLf = false;
   }
 }
 
