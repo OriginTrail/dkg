@@ -21,3 +21,5 @@ export {
   type SparqlQueryVariable,
   type SparqlGraphTarget,
 } from './sparql-query.js';
+
+export { boundPreparedSelect, type SparqlSolutionModifiers } from './sparql-solution-modifiers.js';

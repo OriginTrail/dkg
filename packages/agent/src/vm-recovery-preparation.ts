@@ -72,7 +72,7 @@ export type VmRecoveryPreparationLimits = {
 export interface VmRecoveryPreparationScope {
   readonly localCgId: string;
   readonly onChainCgId: bigint;
-  /** `vmReconcileLifecycleGeneration` at the time the owning pass started. */
+  /** `AgentWorkLifetime.generation` at the time the owning pass started. */
   readonly generation: number;
   /** The recovery operation's cancellation signal. */
   readonly signal?: AbortSignal;

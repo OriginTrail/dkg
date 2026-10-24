@@ -29,7 +29,7 @@ import {
   shouldApplyMaterialization,
   withMaterializationLock,
   writeMaterializedVersion,
-  validatePublishRequest, parseSimpleNQuads, generateSubGraphRegistration,
+  validatePublishRequest, parseSimpleNQuads, ensureSubGraphRegistration,
   type KAMetadata,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
@@ -491,25 +491,14 @@ export class GossipPublishHandler {
       // Auto-register sub-graph in _meta AFTER validation passes.
       // This prevents polluting metadata when invalid messages are rejected.
       if (subGraphName) {
-        const sgUri = contextGraphSubGraphUri(request.contextGraphId, subGraphName);
-        const metaGraph = `did:dkg:context-graph:${assertSafeIri(request.contextGraphId)}/_meta`;
-        const alreadyRegistered = await this.store.query(
-          `ASK { GRAPH <${metaGraph}> {
-            <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> ;
-              <http://schema.org/name> ${JSON.stringify(subGraphName)} ;
-              <http://dkg.io/ontology/createdBy> ?createdBy .
-          } }`,
-          { source: 'agent.gossipPublish.subGraphRegistration' },
-        );
-        if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
-          const regQuads = generateSubGraphRegistration({
-            contextGraphId: request.contextGraphId,
-            subGraphName,
-            createdBy: request.publisherAddress || 'gossip-discovery',
-            timestamp: new Date(),
-          });
-          await this.store.insert(regQuads);
-          this.callbacks.markCgMetaDirtyFromQuads?.(regQuads);
+        const registration = await ensureSubGraphRegistration(this.store, {
+          contextGraphId: request.contextGraphId,
+          subGraphName,
+          createdBy: request.publisherAddress || 'gossip-discovery',
+          timestamp: new Date(),
+        }, { source: 'agent.gossipPublish.subGraphRegistration' });
+        if (registration.registered) {
+          this.callbacks.markCgMetaDirtyFromQuads?.(registration.quads);
           this.log.info(ctx, `Auto-registered sub-graph "${subGraphName}" in context graph "${request.contextGraphId}" from gossip`);
         }
       }

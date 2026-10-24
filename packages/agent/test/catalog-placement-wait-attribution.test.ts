@@ -274,6 +274,7 @@ describe('catalog placement wait attribution', () => {
       passRunning: true,
       lastPassDurationMs: null,
       cooldownSkips: 0,
+      failures: { failedMarkers: 0, parkedMarkers: 0, oldestFailureAgeMs: null, maxConsecutiveFailures: 0, kinds: [] },
     });
     releaseBlocker();
     await blocked.whenAttempted;

@@ -5,6 +5,7 @@ import type { PersistedLiftJob } from './lift-job.js';
 import { getLiftJobTransactionEvidence } from './async-lift-publisher-utils.js';
 import { LiftJobCompletionTiming } from './lift-job-completion-timing.js';
 import type { LiftJobTailStepObserver } from './lift-job-tail-steps.js';
+import { completionTrace } from './async-lift-completion-trace.js';
 
 const sharedByStore = new WeakMap<TripleStore, Map<string, LiftJobChainObservations>>();
 
@@ -69,6 +70,7 @@ export class LiftJobChainObservations {
     this.receipt(jobId, txHash, at);
     const entry = this.entries.get(jobId);
     if (entry?.txHash !== txHash.toLowerCase() || !Number.isFinite(at)) return;
+    if (entry.finalityObservedAt === undefined) completionTrace.finalityObserved(jobId, entry.txHash);
     entry.finalityObservedAt ??= at;
     this.completion.finality(jobId);
   }

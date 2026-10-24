@@ -251,14 +251,15 @@ export interface AsyncLiftPublisher {
   readonly reconciliationScheduling?: {
     /**
      * EXCLUSIVE, ATOMIC attachment of the scheduling listeners — deliberately not pub/sub.
-     * Scheduling has exactly one owner (the runner driving this publisher), so attaching TAKES
-     * OVER both callbacks together: a later attachment supersedes the earlier one wholesale —
+     * Scheduling has one owner per in-process store/queue, so attaching TAKES
+     * OVER all callbacks together: a later attachment supersedes the earlier one wholesale —
      * the safe handover when a new runner incarnation starts while its predecessor is still
      * stopping — and ownership can never be split between incarnations. The returned detach
      * releases only the caller's OWN attachment (a stale detach from a superseded owner is a
-     * no-op).
+     * no-op). Publisher instances sharing the documented store/decorator identity and graph
+     * share this attachment; independent connections and processes retain polling fallback.
      *
-     * Both pokes are scheduling-only and establish nothing — the invited operation re-checks
+     * All pokes are scheduling-only and establish nothing — the invited operation re-checks
      * its own guards. `onReconciliationDemand` fires when a tx-bearing job stops being
      * executor-owned (a detached receipt settles, or `processNext` hands back a live broadcast
      * after an ambiguous send) — only once the work is visible to a
@@ -270,6 +271,8 @@ export interface AsyncLiftPublisher {
     attachScheduler(scheduler: {
       onReconciliationDemand(): void;
       onWalletRelease(walletId: string): void;
+      /** Accepted work is durable (or processing resumed); wake claim loops, preserving their guards. */
+      onWorkAvailable?(): void;
     }): () => void;
     /**
      * Run one reconcile pass and report BOTH what it settled and whether actionable live work
@@ -290,6 +293,8 @@ export interface AsyncLiftPublisher {
     recover(): Promise<{ reconciled: number; pendingWork: boolean }>;
   };
   getStats(): Promise<Record<LiftJobState, number>>;
+  /** Single admission owner; older structural publishers may omit live claim control. */
+  readonly claimControl?: import('./async-lift-claim-gate.js').AsyncLiftClaimControl;
   pause(): Promise<void>;
   resume(): Promise<void>;
   cancel(jobId: string): Promise<void>;
@@ -567,9 +572,26 @@ export type AsyncKnowledgeAssetVmPublishPreflightResult =
   | { readonly action: 'execute' }
   | { readonly action: 'noop'; readonly reason?: string };
 
+/** Unmarked legacy results remain eligible for recovery, never certified completion. */
+export type AsyncKnowledgeAssetVmPublishExecutionResult =
+  | (PublishResult & { readonly localFinalizationComplete?: undefined })
+  | AsyncKnowledgeAssetVmPublishCertifiedResult;
+
+/** Process-local completion evidence returned by the named-KA executor. */
+export interface AsyncKnowledgeAssetVmPublishCertifiedResult extends PublishResult {
+  /**
+   * Process-local evidence from the executor: all required local finalization writes succeeded,
+   * or catalog placement has a durable independent repair owner. Existing best-effort gossip
+   * remains best-effort. The certificate requires a confirmed on-chain result.
+   */
+  readonly localFinalizationComplete: true;
+  readonly status: 'confirmed';
+  readonly onChainResult: NonNullable<PublishResult['onChainResult']>;
+}
+
 /** Cohesive lifecycle boundary for one named-KA async queue job. */
 export interface AsyncKnowledgeAssetVmPublishJobHandler {
-  execute(input: AsyncKnowledgeAssetVmPublishExecutionInput): Promise<PublishResult>;
+  execute(input: AsyncKnowledgeAssetVmPublishExecutionInput): Promise<AsyncKnowledgeAssetVmPublishExecutionResult>;
   preflight?(
     input: AsyncKnowledgeAssetVmPublishPreflightInput,
   ): Promise<AsyncKnowledgeAssetVmPublishPreflightResult>;

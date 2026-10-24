@@ -172,6 +172,7 @@ describe('DKGAgent assertion promote boundary', () => {
     ['chain-participant-authority-unavailable', true],
     ['chain-participant-authority-invalid', false],
     ['rfc64-private-read-roster-unavailable', true],
+    ['approved-member-metadata-pending', true],
   ] as const;
 
   it('enumerates every gate reason in the promotion retry policy cases', () => {

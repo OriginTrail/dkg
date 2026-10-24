@@ -9,6 +9,7 @@
  * via applyMixins(); see evm-adapter.ts for the assembly.
  */
 
+import { numericChainIdOf } from './configured-chain-id.js';
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { Contract, ethers, type JsonRpcProvider } from 'ethers';
 import type {
@@ -33,27 +34,7 @@ import { withRpcUsageConsumer } from './rpc-usage.js';
 /** One in-place retry per endpoint for transient transport blips before fallback. */
 const VERSION_SNAPSHOT_TRANSIENT_RETRY_DELAY_MS = 250;
 
-/**
- * The numeric chain id this adapter is configured for, parsed from ids like `evm:31337`. Returns
- * undefined for a configuration that names no numeric chain, where no comparison is possible.
- */
-/**
- * r17 (3814893080) / r19 (3816490449) — EXPORTED so every pinned-snapshot reader can perform the
- * same check. `ensureConfiguredStaticChainIdValidated` is a no-op under `staticNetwork: false`,
- * which these readers support, so each reader must compare the endpoint's chain id
- * itself. Sharing the parse is what keeps the two readers from drifting apart again.
- */
-export function numericChainIdOf(chainId: string | undefined): bigint | undefined {
-  if (!chainId) return undefined;
-  const tail = chainId.includes(':') ? chainId.split(':').pop() : chainId;
-  if (!tail || !/^[0-9]+$/.test(tail)) return undefined;
-  try {
-    const numeric = BigInt(tail);
-    return numeric > 0n ? numeric : undefined;
-  } catch {
-    return undefined;
-  }
-}
+export { numericChainIdOf } from './configured-chain-id.js';
 
 export class StorageReadMethods extends EVMChainAdapterBase {
   // =====================================================================

@@ -1,3 +1,4 @@
+import { parseExactPullSource } from '@origintrail-official/dkg-publisher';
 import { Command } from 'commander';
 import { toErrorMessage } from '@origintrail-official/dkg-core';
 import {
@@ -159,6 +160,15 @@ function publishNextCommand(name: string, contextGraphId: string, opts: ActionOp
   return `dkg ka publish-async ${name} --context-graph-id ${contextGraphId}${subGraphName(opts) ? ` --sub-graph-name ${subGraphName(opts)}` : ''}`;
 }
 
+/** A committed share whose recovery job still owes its catalog handoff: name the job and how to follow it. */
+function printPendingCatalogHandoff(result: Pick<KnowledgeAssetShareResponse, 'catalogHandoff'>): void {
+  const handoff = result.catalogHandoff;
+  if (handoff?.state !== 'pending') return;
+  console.log(`  Catalog:        handoff pending (${handoff.reason})`);
+  console.log(`  Recovery job:   ${handoff.recoveryJobId}`);
+  console.log(`  Follow:         dkg ka share-job ${handoff.recoveryJobId}`);
+}
+
 function assertSharePromotedContent(result: KnowledgeAssetShareResponse, name: string, contextGraphId: string): void {
   assertNoLifecycleErrors(result, `Knowledge asset share completed partially for "${name}" in ${contextGraphId}`);
   if (result.swmShared !== true) {
@@ -267,6 +277,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       if (result.assertionUri) console.log(`  Assertion URI:  ${result.assertionUri}`);
       if (result.merkleRoot) console.log(`  Merkle root:    ${result.merkleRoot}`);
       if (result.shareOperationId) console.log(`  Share op:       ${result.shareOperationId}`);
+      printPendingCatalogHandoff(result);
       if (opts.share === true && result.promotedCount === 0) {
         console.log('  Note:           No new triples promoted; the KA may already be shared.');
       }
@@ -384,6 +395,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       if (result.sealed !== undefined) console.log(`  Sealed:         ${result.sealed}`);
       if (result.publishReady !== undefined) console.log(`  Publish ready:  ${result.publishReady}`);
       if (result.shareOperationId) console.log(`  Share op:       ${result.shareOperationId}`);
+      printPendingCatalogHandoff(result);
       if (result.publishReady === true) console.log(`  Next:           ${publishNextCommand(name, contextGraphId, opts)}`);
     }));
 
@@ -518,6 +530,9 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       .description('Seed a fresh WM draft from SWM or VM state')
       .requiredOption('--layer <layer>', 'Source layer: swm or vm')
       .option('--on-conflict <mode>', 'Draft conflict mode: reject or replace (default: reject)')
+      .option('--recover-exact-ual <ual>', 'Verify the existing draft against this pinned KA; never writes')
+      .option('--recover-exact-root <root>', 'Merkle root retained with the pinned source before the original pull')
+      .option('--recover-exact-version <version>', 'Assertion version for exact recovery (requires --recover-exact-ual)')
       .option('--json', 'Print JSON'),
   ))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
@@ -527,8 +542,16 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       if (onConflict !== undefined && onConflict !== 'reject' && onConflict !== 'replace') {
         throw new Error('--on-conflict must be reject or replace');
       }
+      let recoverExact;
+      try {
+        recoverExact = parseExactPullSource(opts.recoverExactUal !== undefined || opts.recoverExactVersion !== undefined || opts.recoverExactRoot !== undefined
+          ? { kaUal: opts.recoverExactUal, assertionVersion: opts.recoverExactVersion, merkleRoot: opts.recoverExactRoot } : undefined, onConflict);
+      } catch {
+        throw new Error('Exact recovery requires --recover-exact-ual, --recover-exact-version and --recover-exact-root and reject conflict mode');
+      }
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetPullFrom(requiredContextGraphId(opts), name, layer, {
+        ...(recoverExact ? { recoverExact } : {}),
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
         ...(onConflict ? { onConflict } : {}),
       });

@@ -93,6 +93,11 @@ export const PROTOCOL_SWM_SENDER_KEY = '/dkg/10.0.1/swm-sender-key';
 // or below `DKG_SWM_SUBSTRATE_MAX_MEMBERS`. See RFC-003 §6 for the
 // full transport policy.
 export const PROTOCOL_SWM_UPDATE = '/dkg/10.0.1/swm-update';
+// A Core relays a member's author-signed share of a public graph, the
+// envelope bytes unchanged, to the graph's owner, which needs the author's
+// signed share to keep its seal. One attempt, no outbox; a node without this
+// protocol refuses the stream. See the agent's `swm/owner-share-forward.ts`.
+export const PROTOCOL_SWM_UPDATE_RELAYED = '/dkg/10.0.1/swm-update-relayed';
 // rc.9 PR-D (SWM reliable fan-out plan, Step 1b): NEW protocol — no
 // rc.8 predecessor. Per-recipient acknowledgement that the receiver
 // successfully applied a SWM share via the GOSSIP path. Receivers
@@ -107,6 +112,12 @@ export const PROTOCOL_SWM_UPDATE = '/dkg/10.0.1/swm-update';
 // up at the deadline, falling back to runSyncOnConnect for offline
 // peers. See RFC-003 §4.2 + §5.2 for the full ack-quorum policy.
 export const PROTOCOL_SWM_SHARE_ACK = '/dkg/10.0.1/swm-share-ack';
+// A public graph's owner tells its followers that the graph's shared memory
+// changed (a share it applied from another peer); a follower then pulls that
+// scope from it through its ordinary sync. The notice carries no data, and a
+// node without this protocol refuses the stream. See the agent's
+// `swm/shared-memory-change-notice.ts`.
+export const PROTOCOL_SWM_CHANGE_NOTICE = '/dkg/10.0.1/swm-change-notice';
 
 // OT-RFC-38 LU-6 (cores host curated SWM substrate): NEW protocol.
 // Members fetch opaque ciphertext envelopes from a core that has

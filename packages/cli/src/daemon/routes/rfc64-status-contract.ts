@@ -173,6 +173,7 @@ export function sanitizeRfc64FinalizedPrivatePlacementQueueV1(
     || !isNullableNonNegativeSafeIntegerV1(input.lastPassDurationMs)
   ) return null;
   return Object.freeze({
+    ...(input.failures === undefined ? {} : { failures: sanitizePrivatePlacementFailures(input.failures) }),
     depth: input.depth as number,
     ...(input.pending === undefined ? {} : { pending: input.pending }),
     ...(input.oldestPendingAgeMs === undefined ? {} : { oldestPendingAgeMs: input.oldestPendingAgeMs }),
@@ -201,6 +202,20 @@ export function sanitizeRfc64AuthorCatalogCapacityV1(
   return Object.freeze({
     scopesAtCap: input.scopesAtCap as number,
     parkedPlacements: input.parkedPlacements as number,
+  });
+}
+
+/** GH#3134 — the sweeps of finalized assets' inventory rows, only as a pair of counts. */
+export function sanitizeRfc64FinalizedRowHealV1(
+  input: unknown,
+): Readonly<{ finalizedRowHealPasses: number; finalizedRowsHealed: number }> | null {
+  if (
+    !isRecordV1(input)
+    || !hasNonNegativeSafeIntegersV1(input, ['finalizedRowHealPasses', 'finalizedRowsHealed'])
+  ) return null;
+  return Object.freeze({
+    finalizedRowHealPasses: input.finalizedRowHealPasses as number,
+    finalizedRowsHealed: input.finalizedRowsHealed as number,
   });
 }
 
@@ -238,4 +253,31 @@ function hasConsistentShadowSafetyEvidenceV1(
     && isNonNegativeSafeIntegerV1(authoritativeApplyCount)
     && receiver.stagingObserved === (staged > 0)
     && receiver.stageOnlyInvariantSatisfied === (authoritativeApplyCount === 0);
+}
+
+// The HTTP boundary independently validates every kind in the public agent contract.
+const PRIVATE_PLACEMENT_FAILURE_KINDS = {
+  queue_wait: true, queue_full: true, store_timeout_not_started: true, store_timeout_indeterminate: true,
+  transport: true, cancelled: true, integrity: true, lane_inactive: true, catalog_full: true, unknown: true,
+  policy_conflict: true, version_conflict: true, signer_mismatch: true, persistence_unavailable: true,
+} satisfies Record<NonNullable<FinalizedPrivatePlacementQueueStatusV1['failures']>['kinds'][number]['kind'], true>;
+
+/** Rebuild the bounded aggregate; no marker identity or dependency text crosses the route. */
+function sanitizePrivatePlacementFailures(input: unknown): NonNullable<FinalizedPrivatePlacementQueueStatusV1['failures']> | undefined {
+  if (!isRecordV1(input) || !hasNonNegativeSafeIntegersV1(input,
+    ['failedMarkers', 'parkedMarkers', 'maxConsecutiveFailures'])
+    || !isNullableNonNegativeSafeIntegerV1(input.oldestFailureAgeMs)
+    || !Array.isArray(input.kinds) || input.kinds.length > Object.keys(PRIVATE_PLACEMENT_FAILURE_KINDS).length) return undefined;
+  const allowed = new Set(Object.keys(PRIVATE_PLACEMENT_FAILURE_KINDS));
+  const counts: NonNullable<FinalizedPrivatePlacementQueueStatusV1['failures']>['kinds'][number][] = [];
+  for (const row of input.kinds) {
+    if (!isRecordV1(row) || typeof row.kind !== 'string' || !allowed.delete(row.kind)
+      || !isNonNegativeSafeIntegerV1(row.count)) return undefined;
+    counts.push(Object.freeze({ kind: row.kind as typeof counts[number]['kind'], count: row.count }));
+  }
+  if (Number(input.parkedMarkers) > Number(input.failedMarkers) || counts.reduce((sum, row) => sum + row.count, 0) !== input.failedMarkers) return undefined;
+  return Object.freeze({ failedMarkers: input.failedMarkers as number, parkedMarkers: input.parkedMarkers as number,
+    maxConsecutiveFailures: input.maxConsecutiveFailures as number, oldestFailureAgeMs: input.oldestFailureAgeMs,
+    kinds: Object.freeze(counts),
+  });
 }

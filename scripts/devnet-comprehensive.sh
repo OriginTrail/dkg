@@ -213,6 +213,15 @@ if [ "${SKIP_RFC38_EXTRAS:-0}" != "1" ]; then
   register "rfc38-all" "rfc38-extras" "$REPO_ROOT/scripts/devnet-test-rfc38-all.sh"
 fi
 
+# Group: issue-3251 — in a context graph whose members reach only its owner
+# (through a relay; no link between the members, no Core carrying the graph),
+# every subscribed member must hold every write within a bound, whoever wrote
+# it: live, at subscribe, after restarts, minutes later, with a member's only
+# sync slot busy, on unregistered, registered and private graphs. It adds three
+# temporary nodes (7 to 10) and removes them again. It runs before the rc.12
+# probes, one of which adds a node 7 of its own, and before the soak.
+register "issue-3251-member-sharing" "issue-3251" "$REPO_ROOT/scripts/devnet-test-issue-3251-member-sharing.mjs"
+
 # Group: rc.12 feature probes
 if [ "${SKIP_PROBES:-0}" != "1" ]; then
   for p in hub-rotation multi-rpc-failover libp2p-tunables cg-phonebook ack-rejection-reasons; do

@@ -4,8 +4,9 @@
  *
  * A suite that asserts "the daemon logged no persistence trouble during this
  * run" must not compare match COUNTS before and after: a daemon that restarts
- * three times can rotate its log in between (`rotateDaemonLogIfNeeded` rewrites
- * an oversized `daemon.log` in place, keeping only its tail), which removes old
+ * three times can rotate its log in between (`rotateDaemonLogIfNeeded` renames
+ * an oversized `daemon.log` to `daemon.log.1` and starts a new one, or, when the
+ * rename fails, rewrites it in place keeping only its tail), which removes old
  * matching lines and would make "skip the first N matches" swallow fresh ones.
  * Instead the window is delimited by a BYTE OFFSET recorded before the first
  * action, guarded by a fingerprint of the bytes just before it:

@@ -21,6 +21,7 @@ vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
 });
 
 import type { DKGAgent } from '../src/index.js';
+import { catalogRepairDiagnosticV1, catalogRepairErrorSummaryV1 } from '../src/rfc64/catalog-repair-diagnostics-v1.js';
 import {
   Rfc64CatalogMutationMemoryV1,
   installRfc64CatalogMutationMemoryV1,
@@ -322,8 +323,11 @@ describe('RFC-64 catalog placement over a remembered catalog', () => {
     await upsert(agent, await asset(3));
     expect(memory.retained.states).toBe(1);
     // An older version of a row on another coordinate is not a placement.
-    await expect(upsert(agent, { ...(await asset(2)), assertionCoordinate: 'elsewhere' as never }))
-      .rejects.toThrow(/not a newer assertion version on the same coordinate/u);
+    const conflict = await upsert(agent, { ...(await asset(2)), assertionCoordinate: 'private-coordinate' as never })
+      .catch((error: unknown) => error);
+    expect(conflict).toBeInstanceOf(Error);
+    expect(catalogRepairDiagnosticV1(conflict).kind).toBe('version_conflict');
+    expect(catalogRepairErrorSummaryV1(conflict)).not.toContain('private-coordinate');
     expect(memory.retained).toEqual({ scopes: 0, states: 0, bytes: 0 });
 
     // A delayed confirmation of the older version is complete as it stands, and changes nothing.

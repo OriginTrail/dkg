@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -202,7 +203,7 @@ function refreshWorker(liveRoot: string) {
       }) satisfies SnapshotRead,
     },
     vmRefreshQueue: queue,
-    vmReconcilePhysicalRuns: new Set<Promise<unknown>>(),
+    workLifetime: new AgentWorkLifetime(),
     log: {
       debug: () => {},
       info: (_ctx: unknown, line: string) => { lines.info.push(line); },
