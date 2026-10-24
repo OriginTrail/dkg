@@ -95,5 +95,11 @@ export function createGraphs(devnet, edges, { stamp, sub, say }) {
     return Date.now();
   }
 
-  return { coreNodes, createGraph, keepCoresOut, coresFollowing, subscribe };
+  /** A node stops following a graph; what it holds of it stays. */
+  async function unsubscribe(node, graph) {
+    const answer = await api(node, 'POST', '/api/context-graph/unsubscribe', { contextGraphId: graph.id });
+    if (answer.status !== 200) throw new Error(`${node.label} could not unsubscribe from ${graph.key}: ${brief(answer)}`);
+  }
+
+  return { coreNodes, createGraph, keepCoresOut, coresFollowing, subscribe, unsubscribe };
 }

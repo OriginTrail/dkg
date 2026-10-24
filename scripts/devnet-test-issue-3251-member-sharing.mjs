@@ -75,12 +75,21 @@
 //      override config), and its catch-up asks one peer at a time, the owner
 //      first (DKG_CATCHUP_MAX_CONCURRENT_PEERS=1), and member 2 subscribes to
 //      the large graph once its general slot is free: so the owner's transfer
-//      is the pull that takes the general slot. The transfer is meant to hold
-//      it through the bound of every write: a write member 2 does not hold by
-//      then fails the case. A write received after the transfer gave up the
-//      slot, a transfer that took a reserved slot, or a transfer never
-//      admitted, fails the case as not exercised; a running catch-up job alone
-//      proves nothing
+//      is the pull that takes the general slot. The three writes are made as
+//      soon as the trace shows the transfer in the slot. How long the transfer
+//      holds it is not known in advance, and a write may take up to its bound
+//      to arrive: when a write arrives only after the transfer gave up the slot
+//      (the attempt proves nothing), or the transfer gave it up before the
+//      writes could start, member 2 leaves that graph and the case makes
+//      another attempt, up to MEMBER_SHARING_BUSY_ATTEMPTS in all: a new large
+//      graph, sized from the rate member 2's trace measured for the last
+//      transfer to hold the slot past the window the last writes needed
+//      (within what the owner holds well), and the three writes again. The
+//      last attempt is judged as the case. A write member 2 does not hold
+//      within its bound fails the case at once, whatever the slot did. A write
+//      received after the transfer gave up the slot, a transfer that took a
+//      reserved slot, or a transfer never admitted, fails the case as not
+//      exercised; a running catch-up job alone proves nothing
 //   7  cases 1, 2 and 3 on a public graph registered on chain, and cases 1
 //      and 3 on a private graph whose members joined through the signed
 //      request flow. A member's write into a private graph sets up its sender
@@ -123,8 +132,9 @@
 //   MEMBER_SHARING_NODES         temporary nodes owner,member1,member2 (default: the
 //                                first three of 7, 8, 9, 10 with no folder and no
 //                                listener on their API or libp2p port)
-//   MEMBER_SHARING_BIG_ASSETS    assets of the large graph of case 6 (64)
+//   MEMBER_SHARING_BIG_ASSETS    assets of the large graph of case 6's first attempt (64)
 //   MEMBER_SHARING_BIG_TRIPLES   triples per asset of that graph (2000)
+//   MEMBER_SHARING_BUSY_ATTEMPTS attempts case 6 may make (3)
 //   MEMBER_SHARING_KEEP_NODES=1  leave the temporary nodes running (debugging)
 //
 // Run against a running devnet: scripts/devnet-test-issue-3251-member-sharing.mjs
@@ -160,14 +170,13 @@ const SYNCED_MS = positive('MEMBER_SHARING_SYNCED_SECS', 90) * 1000;
 // without it the member's own writes into the graph are refused.
 const DEFINITION_MS = 90_000;
 const LATER_MS = positive('MEMBER_SHARING_LATER_SECS', 300) * 1000;
-// Case 6's transfer must hold member 2's general slot through the bound of
-// every write it makes, about 75 s, or a write that member 2 does not hold
-// while the slot is busy can only be reported as not exercised. Its length
-// follows the number of assets (about 1.2 to 1.7 s each from the owner over
-// the relay), not their size: 64 assets took 109 s, 16 assets of 8000 triples
-// 39 s.
+// Case 6's transfer must hold member 2's general slot until the writes made
+// while it does have arrived, or the attempt proves nothing and the next one
+// transfers another large graph, sized from what member 2's trace measured
+// (busy-member.mjs), up to MEMBER_SHARING_BUSY_ATTEMPTS attempts in all.
 const BIG_ASSETS = Math.round(positive('MEMBER_SHARING_BIG_ASSETS', 64));
 const BIG_TRIPLES = Math.round(positive('MEMBER_SHARING_BIG_TRIPLES', 2000));
+const BUSY_ATTEMPTS = Math.round(positive('MEMBER_SHARING_BUSY_ATTEMPTS', 3));
 const SUB = 's';
 const STAMP = `${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}-${process.pid}`;
 const STARTED = Date.now();
@@ -212,6 +221,19 @@ async function precondition(caseId, when) {
   return false;
 }
 
+/**
+ * The large graph of case 6's attempt `attempt`: the owner's, kept away from
+ * the Cores, filled with `size` ({ assets, triples per asset }).
+ */
+async function largeGraph(attempt, size) {
+  const graph = await graphs.createGraph(attempt === 1 ? 'large' : `large${attempt}`, { accessPolicy: 0, publishPolicy: 1, register: false });
+  await graphs.keepCoresOut(graph);
+  const started = Date.now();
+  await fillBigGraph(io, edges.owner, graph, { ...size, stamp: STAMP });
+  say(`large graph ${graph.key} written: ${size.assets} assets of ${size.triples} triples in ${seconds(Date.now() - started)} s (${elapsed()})`);
+  return { ...graph, size };
+}
+
 /** Waits for the watches, then reports each pair under its case, with its author's history with the definition as it stands now. */
 async function settle(handles) {
   for (const pair of await watched(handles)) {
@@ -251,13 +273,10 @@ async function run() {
       scenarios.push(new GraphScenario(await graphs.createGraph(key, body), { cases: OTHER_CASES, authors, sub: SUB }));
     } catch (error) { fail(7, `the ${key} graph could not be set up: ${error?.message ?? error}; no case runs on it`); }
   }
-  // The large graph of case 6; a failure here fails case 6 only.
+  // The large graph of case 6's first attempt; a failure here fails case 6 only.
   let big = null;
   try {
-    big = await graphs.createGraph('large', { accessPolicy: 0, publishPolicy: 1, register: false });
-    await graphs.keepCoresOut(big);
-    await fillBigGraph(io, owner, big, { assets: BIG_ASSETS, triples: BIG_TRIPLES, stamp: STAMP });
-    say(`large graph written: ${BIG_ASSETS} assets of ${BIG_TRIPLES} triples (${elapsed()})`);
+    big = await largeGraph(1, { assets: BIG_ASSETS, triples: BIG_TRIPLES });
   } catch (error) {
     fail(6, `the large graph could not be set up: ${error?.message ?? error}; case 6 did not run`);
     big = null;
@@ -290,7 +309,9 @@ async function run() {
   await settle(live);
 
   // Case 6: member 2's only general sync slot busy with a large transfer of another graph.
-  if (big) await busyMember({ devnet, edges, graphs, io, report, precondition, boundMs: BOUND_MS, sub: SUB }, pub.graph, big);
+  if (big) {
+    await busyMember({ devnet, edges, graphs, io, report, precondition, boundMs: BOUND_MS, sub: SUB, attempts: BUSY_ATTEMPTS, largeGraph }, pub.graph, big);
+  }
 
   // Case 5: members that subscribed LATER_MS ago.
   const since = Math.max(...members.map(member => pub.subscribedAt.get(member)));
