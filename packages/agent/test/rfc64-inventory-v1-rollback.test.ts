@@ -338,6 +338,17 @@ describe('RFC-64 inventory pre-migration copy', () => {
     expect(headerUserVersion(databasePath(dataDir))).toBe(4);
   });
 
+  it('keeps in the copy the rows a crashed writer committed only to the log', async () => {
+    const dataDir = dataDirectory();
+    await writeV5(dataDir);
+    await crashAfterCommitting(databasePath(dataDir), 'SELECT 1', laterRepair);
+    expect(fs.statSync(`${databasePath(dataDir)}-wal`).size).toBeGreaterThan(0);
+
+    close(await open(dataDir));
+
+    expect(repairCount(copyPath(dataDir, 5))).toBe(2);
+  });
+
   it('keeps no copy of a database whose objects are not its version\'s schema', async () => {
     const dataDir = dataDirectory();
     createRawDatabase(databasePath(dataDir), [
@@ -584,6 +595,27 @@ describe('RFC-64 inventory rollback', () => {
     expect(refusal.reason).toBe('unrecognized-schema');
     expect(sha256(databasePath(dataDir))).toBe(before);
     expect(fs.statSync(copyPath(dataDir, 5)).size).toBe(100);
+  });
+
+  it('refuses a retry while another connection keeps the lowered log out of the database file', async () => {
+    const dataDir = dataDirectory();
+    await writeV6(dataDir);
+    const reader = new DatabaseSync(databasePath(dataDir));
+    holders.push(reader);
+    reader.prepare('SELECT count(*) AS count FROM sqlite_schema').get();
+
+    // The down-migration commits, but its log cannot reach the file while the reader stays open.
+    await expect(prepareRfc64InventoryForRollbackV1(dataDir, 5)).rejects.toThrow(
+      'was lowered to schema v5, but finishing that failed: its file header was not updated');
+    expect(headerUserVersion(databasePath(dataDir))).toBe(6);
+    expect((await refusalOf(prepareRfc64InventoryForRollbackV1(dataDir, 5))).reason).toBe('in-use');
+    holders.splice(holders.indexOf(reader), 1);
+    reader.close();
+
+    const prepared = await prepareRfc64InventoryForRollbackV1(dataDir, 5);
+    prepared.release();
+    expect(prepared).toMatchObject({ outcome: 'compatible', fromVersion: 5 });
+    expectOpensAsV5(databasePath(dataDir));
   });
 
   it('restores a copy for a target older than the down-migrations reach', async () => {

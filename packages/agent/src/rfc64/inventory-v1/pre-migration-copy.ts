@@ -36,7 +36,7 @@ export const INVENTORY_V1_OBJECTS_BY_USER_VERSION: ReadonlyMap<number, Readonly<
 );
 
 /** The database's objects, outside SQLite's own, are exactly `expected`. */
-export function hasExactInventoryV1Objects(
+function hasExactInventoryV1Objects(
   database: DatabaseSync,
   expected: Readonly<Record<string, string>>,
 ): boolean {

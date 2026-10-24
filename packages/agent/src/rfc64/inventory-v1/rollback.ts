@@ -26,11 +26,7 @@ import {
   type SqliteModuleV1,
 } from './open.js';
 import { InventoryV1OpenError } from './open-error.js';
-import {
-  hasExactInventoryV1Objects,
-  INVENTORY_V1_OBJECTS_BY_USER_VERSION,
-  listInventoryV1PreMigrationCopies,
-} from './pre-migration-copy.js';
+import { INVENTORY_V1_OBJECTS_BY_USER_VERSION, listInventoryV1PreMigrationCopies } from './pre-migration-copy.js';
 import { INVENTORY_SCHEMA_DOWNGRADES_V1, type InventorySchemaMigrationV1 } from './schema-migrations.js';
 import { INVENTORY_V1_APPLICATION_ID, INVENTORY_V1_USER_VERSION } from './sql.js';
 
@@ -134,7 +130,7 @@ function isRestorableCopy(sqlite: SqliteModuleV1, copy: PreMigrationCopyV1): boo
     const quickCheck = database.prepare('PRAGMA quick_check').all();
     return expected !== undefined
       && quickCheck.length === 1 && Object.values(quickCheck[0]!)[0] === 'ok'
-      && hasExactInventoryV1Objects(database, expected)
+      && schemaMatches(readIdentity(database).userObjects, expected)
       && database.prepare('PRAGMA foreign_key_check').all().length === 0;
   } catch {
     return false;
@@ -408,6 +404,11 @@ export async function prepareRfc64InventoryForRollbackV1(
       throw unrecognizedSchema(databasePath, null, maxUserVersion);
     }
     userVersion = readUserVersionFoldingLog(sqlite, databasePath);
+    // Another connection can keep the log from folding into the main file,
+    // whose header is what the target release checks first.
+    if (readValidSqliteHeaderIdentity(databasePath)?.userVersion !== userVersion) {
+      throw new InventoryV1OpenError('database-busy', 'its write-ahead log could not be folded into the database file');
+    }
     if (userVersion <= maxUserVersion) return prepared('compatible', userVersion);
 
     const chain = downgradeChain(userVersion, maxUserVersion);
