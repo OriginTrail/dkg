@@ -10,7 +10,7 @@ import {
   analyzeSparqlOperation,
   classifySparqlOperation,
 } from '@origintrail-official/dkg-core';
-import type { PreparedSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
+import type { PreparedSparql } from '@origintrail-official/dkg-core/sparql-lexer';
 import type { QueryResult } from './query-engine.js';
 import { emptyImplicitGroupSolution } from './sparql-empty-aggregate.js';
 
