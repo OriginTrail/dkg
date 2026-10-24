@@ -6,27 +6,14 @@
  * `config.json` still wins over a valid `config.yaml`. Each format is parsed
  * with the parser the daemon uses for it.
  */
-import { isAbsolute, join, relative, sep } from 'node:path';
-import yaml from 'js-yaml';
+import { isAbsolute, relative, sep } from 'node:path';
+import { configFileSources, parseConfigText, type ConfigFileSource } from '../config-file-source.js';
+export { parseConfigText, type ConfigFileSource } from '../config-file-source.js';
 import type { DoctorDeps } from './types.js';
-
-export interface ConfigFileSource {
-  path: string;
-  format: 'json' | 'yaml';
-}
 
 /** The file the daemon would load, or `null` when neither exists. */
 export function resolveConfigFile(deps: Pick<DoctorDeps, 'dkgHome' | 'exists'>): ConfigFileSource | null {
-  const candidates: ConfigFileSource[] = [
-    { path: join(deps.dkgHome, 'config.json'), format: 'json' },
-    { path: join(deps.dkgHome, 'config.yaml'), format: 'yaml' },
-  ];
-  return candidates.find((candidate) => deps.exists(candidate.path)) ?? null;
-}
-
-/** Parse a config file's text. Throws on a syntax error. */
-export function parseConfigText(source: ConfigFileSource, raw: string): unknown {
-  return source.format === 'json' ? JSON.parse(raw) : yaml.load(raw);
+  return configFileSources(deps.dkgHome).find((candidate) => deps.exists(candidate.path)) ?? null;
 }
 
 export function isConfigMapping(value: unknown): value is Record<string, unknown> {

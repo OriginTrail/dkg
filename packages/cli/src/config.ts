@@ -6,7 +6,7 @@ import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origint
 import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import yaml from 'js-yaml';
+import { configFileSources, parseConfigText } from './config-file-source.js';
 import type {
   DKGAgentConfig,
   SyncAdmissionConfig,
@@ -2427,24 +2427,22 @@ export class DkgHomeFiles {
   get apiPortPath(): string { return join(this.home, 'api.port'); }
   get tokenPath(): string { return dkgAuthTokenPath(this.home); }
 
-  configExists(): boolean { return existsSync(this.configPath) || existsSync(this.configYamlPath); }
+  configExists(): boolean { return configFileSources(this.home).some((source) => existsSync(source.path)); }
 
   readConfigSync(): unknown {
-    if (existsSync(this.configPath)) return JSON.parse(readFileSync(this.configPath, 'utf-8'));
-    if (existsSync(this.configYamlPath)) return yaml.load(readFileSync(this.configYamlPath, 'utf-8'));
+    for (const source of configFileSources(this.home)) {
+      if (existsSync(source.path)) return parseConfigText(source, readFileSync(source.path, 'utf-8'));
+    }
     return null;
   }
 
   async loadConfig(): Promise<DkgConfig> {
-    try {
-      return mergePersistedConfig(JSON.parse(await readFile(this.configPath, 'utf-8')));
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
-    }
-    try {
-      return mergePersistedConfig(yaml.load(await readFile(this.configYamlPath, 'utf-8')));
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
+    for (const source of configFileSources(this.home)) {
+      try {
+        return mergePersistedConfig(parseConfigText(source, await readFile(source.path, 'utf-8')));
+      } catch (err) {
+        if (!isEnoent(err)) throw err;
+      }
     }
     return { ...DEFAULT_CONFIG };
   }
