@@ -164,6 +164,9 @@ import {
   type SyncPageResult,
 } from './sync/requester/page-fetch.js';
 import {
+  describeSyncPeerGraphHold, observeSyncPageFetch, syncPeerGraphHoldScope, syncPeerGraphHoldsFor, SyncPeerGraphHeldError,
+} from './sync/requester/peer-graph-holds.js';
+import {
   composeSyncWorkAdmission,
   createSyncFetchSharingIdentity,
   type SyncFetchSharingIdentity,
@@ -5645,6 +5648,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       maxAcceptedQuads,
       maxAcceptedHeapBytesEstimate,
     } = options;
+    // A whole-graph fetch this peer could not serve is not sent again until its
+    // hold ends. Every caller comes through here, so every caller is covered.
+    const holds = syncPeerGraphHoldsFor(this);
+    const holdScope = syncPeerGraphHoldScope({ includeSharedMemory, phase, assetUals, recovery, sinceBatchId });
+    const held = holdScope === undefined ? undefined : holds.current(remotePeerId, contextGraphId, holdScope);
+    if (held) return Promise.reject(new SyncPeerGraphHeldError(held));
     const effectiveWorkAdmission = workAdmission ?? composeSyncWorkAdmission({
       deadline,
       fetchSharingIdentity: defaultPageFetchSharingIdentity,
@@ -5819,11 +5828,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }
       }
     });
-    sharedFetch.catch(() => {
-      // The shared fetch can reject after every waiter has already detached.
-      // Keep that from becoming unhandled while still propagating failures to
-      // active waiters through the original promise.
-    });
+    // The shared fetch can reject after every waiter has already detached.
+    // Observing it keeps that from becoming unhandled while failures still
+    // reach active waiters through the original promise; a peer that could not
+    // serve a whole-graph durable fetch is held for it.
+    void observeSyncPageFetch(
+      holds, { peerId: remotePeerId, contextGraphId, scope: holdScope }, sharedFetch,
+      (hold) => this.log.warn(ctx, describeSyncPeerGraphHold(hold)),
+    );
     entry = { promise: sharedFetch, controller, waiters: 0, ownerSource: pageFetchSource };
     if (coalescingKey && fetchSharingIdentity) {
       coalescingLane = inFlight.get(fetchSharingIdentity);
