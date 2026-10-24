@@ -141,6 +141,8 @@ dkg start     # starts the node daemon on http://127.0.0.1:9200
 
 `dkg init` asks which network to join — **mainnet-gnosis** (default), **mainnet-base**, or **testnet**. Mainnet nodes have no faucet; testnet nodes auto-fund their wallets when the faucet is reachable. Pass `--network <name>` to skip the prompt.
 
+To run the node from a container image instead, see [Run From A Container Image](docs/use-dkg/run-node.md#run-from-a-container-image).
+
 For a Core Node, choose the `core` role during setup or pass it explicitly:
 
 ```bash
