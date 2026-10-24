@@ -108,6 +108,7 @@ export interface N8nPermission {
   workflowSha256: string;
   inputSchema: OutputSchema;
   outputSchema: OutputSchema;
+  result?: { nodes: string[]; ports?: string[]; traceNodes?: string[]; sinks?: { node: string; port: number; name: string }[]; allowObservation?: boolean };
 }
 
 export interface QueryPermission { selector: string; outputSchema: OutputSchema }

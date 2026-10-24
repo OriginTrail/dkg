@@ -161,7 +161,7 @@ DKG node, places the capability on the existing canvas and invokes the same
 Program path. The bridge is a loopback-only account-A fixture, using public kit
 selectors; production identity integration is separate work.
 
-The **Workflow builder** tab lets the account owner drag installed KA blocks,
+The **CSV KA builder** tab keeps the original four-component editor. It lets the account owner drag installed KA blocks,
 connect compatible ports and configure mapping or a Google Sheet title. Save
 creates a private, finalized Program KA whose source includes the graph/layout
 and whose explicit child grants pin the selected capability versions. Open reads
@@ -174,6 +174,98 @@ Google-containing workflows require the private operator export key for both
 save and run. Invalid CSV, missing mapped columns or incompatible Google headers
 stop before downstream calls with a confirmed result the user can correct.
 Uncertain outcomes retain the original invocation for reconciliation.
+
+## Thirty native components and nOS Studio
+
+The **Workflow builder** tab now opens **n8n KA Studio**, with thirty separately
+registered component Programs. Every leaf KA declares its exact native workflow
+ID, definition hash, bounded input/output schemas and selected result nodes in
+its owner-approved n8n grant. Credentials stay in the local n8n installation.
+
+| Group | Components |
+| --- | --- |
+| Data | Edit Fields, Filter, Sort, Limit, Remove Duplicates, Split Out, Aggregate, Summarize, Rename Keys, Date & Time |
+| Files | Extract From File, Convert to File, XML, HTML, Markdown, Crypto, Compression |
+| Integrations | HTTP Request, Google Sheets, Google Drive |
+| Flow | IF, Switch, Merge, Compare Datasets, Loop Over Items, Execute Sub-workflow, Stop And Error |
+| Events | Webhook, Schedule Trigger, Wait |
+
+Provision the installed local n8n runtime with its official CLI while that owned
+instance is stopped. The installer first takes a SQLite backup, reads credential
+references (never tokens), imports native templates and publishes action flows.
+Schedule components remain inactive until a saved workflow is activated.
+
+```sh
+node examples/n8n-capability/setup-components-local.mjs /tmp/n8n-ka-state --install \
+  --node /path/to/node24 --n8n-cli /path/to/n8n/bin/n8n
+node examples/n8n-capability/serve.mjs /tmp/n8n-ka-state
+```
+
+In nOS choose **Data + branching**, **CSV → Google Sheet**, **Loop example** or
+**Schedule example**, or drag your own blocks. Click a block to edit its fields.
+Connect named outputs to inputs A/B; the Connections panel offers the same
+controls with select menus. A loop needs a `loop` path returning from its body,
+and a `done` path for subsequent steps. Uploading a CSV supplies a file record
+to the real Extract From File node. **Save workflow KA** pins the graph and
+selected child grants; **Run workflow** executes that saved revision. **Invoke
+this KA** exercises a selected action independently. **View KA in DKG** reads
+its exact source from this node's private Working Memory.
+
+Advanced graphs compile to native n8n connections, so n8n owns branches, joins,
+loops and waits. The parent Program's declared children retain the selected KA
+approval pins and caller checks. A graph run produces one DKG receipt with the
+verified n8n execution ID and native per-block trace. Those native steps are not
+separate child Program receipts. The retained CSV KA builder still composes
+individual `invoke_program` calls and returns separate child DKG receipts.
+
+The native adapter journals an early acknowledgement before polling results.
+An interrupted invocation resumes inspection of that same provider execution;
+it never re-posts a webhook after a recorded acknowledgement. Missing
+acknowledgements remain uncertain and retain their request identity. Native
+errors, empty branches and oversized outputs are explicit results.
+
+**Activate events** enables a Webhook or Schedule root for 30 minutes or five
+events. Native Schedule executions only emit scoped timer events. The local
+worker invokes the DKG Program with a deterministic event identity, checking
+current parent/child approvals before any downstream native actions. Webhook
+callers POST `{ "invocationId": "<fresh UUID>", "items": [{...}] }` to the
+activation endpoint shown in the UI. Retrying that event identity reconciles
+the same invocation. Deactivation removes event access and unpublishes timers.
+Google event activation requires the operator export key; its fingerprint, not
+the key, is persisted. Event inputs/results and native workflow IDs are journalled
+in the private `studio.sqlite` database for recovery across service restarts.
+
+PoC bounds: eight blocks, one loop, twenty input/output records, 8 KiB serialized
+record sets, 4 KiB file uploads, three-second Wait, 24 saved graph revisions.
+Each component currently offers a reviewed subset of its native operations.
+HTTP Request targets the local `/spike/ka/demo-data` JSON API (GET/POST);
+additional destinations require a reviewed operator installation. Execute
+Sub-workflow invokes the installed native echo example. Google Sheets creates
+one spreadsheet per input batch and appends scalar rows using RAW cell input.
+Google Drive uploads a small file and needs a separate Drive OAuth connection;
+the catalog marks missing connections unavailable. No new Google export is
+performed during service startup.
+
+The preview gateway can serve a built development snapshot plus only the kit,
+KA Studio and activated event routes. It preserves exact Host/Origin checks,
+bounded request bodies and rate limits; n8n's editor/admin API stays local.
+
+```sh
+node examples/n8n-capability/cloudflare-preview.mjs /tmp/owned-preview-state
+```
+
+Credential-free native smoke checks use a separate fixture installation, never
+the Google-connected state:
+
+```sh
+node examples/n8n-capability/setup-components-local.mjs /tmp/n8n-component-fixture --fixture --install \
+  --node /path/to/node24 --n8n-cli /path/to/n8n/bin/n8n
+# Start fixture n8n on 45780 with broker port 45781, then:
+node examples/n8n-capability/verify-components-native.mjs /tmp/n8n-component-fixture http://127.0.0.1:45780 /path/to/n8n/package.json
+node examples/n8n-capability/verify-studio-native.mjs /tmp/n8n-component-fixture --prepare
+# Import/publish the four generated studio-fixtures with the official CLI and restart that fixture.
+node examples/n8n-capability/verify-studio-native.mjs /tmp/n8n-component-fixture http://127.0.0.1:45780
+```
 
 ```sh
 node examples/n8n-capability/verify-workflows.mjs /tmp/n8n-ka-state

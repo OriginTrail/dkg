@@ -6,12 +6,16 @@ import { timingSafeEqual } from 'node:crypto';
 import { persistProgramKnowledgeAsset } from '../../packages/cli/dist/semantic-runtime-execution-persistence.js';
 import { createWorkflowService } from './workflow-service.mjs';
 import { WORKFLOW_PREFIX } from './workflow-definition.mjs';
+import { createStudioProvider } from './studio-provider.mjs';
+import { createStudioService } from './studio-service.mjs';
+import { normalizeComponentInput } from './component-registry.mjs';
+import { STUDIO_PREFIX } from './studio-definition.mjs';
 
 const SR = 'https://origintrail.io/semantic-runtime/v1#';
 const prefix = '/spike/ka/accounts/account-a/capabilities';
 const json = (res, status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); };
 
-export function createCapabilityBridge({ agent, client, graphId, owner, config, definitions = [], exportTokenFile }) {
+export function createCapabilityBridge({ agent, client, graphId, owner, config, definitions = [], exportTokenFile, studioOptions }) {
   function authorizeExport(req) {
     const supplied = req.headers['x-dkg-export-token'];
     let authorized = false;
@@ -31,14 +35,16 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
       const kaRef = iriValue(row.program);
       const definition = definitions.find(item => item.kaRef === kaRef);
       const binding = config.programBindings?.find(item => item.operationIri === kaRef && item.contextGraphId === graphId && item.enabled && item.n8n);
-      if (!binding && !definition) continue;
+      if (!definition) continue;
       const source = await client.programs.getSource({ graphId, programIri: kaRef, programLayer: 'wm' });
       if (binding && source.sourceHash !== binding.program.sourceHash) continue;
       const available = !!binding && definition?.enabled !== false;
       capabilities.push({ kaRef, graphId, sourceHash: source.sourceHash, name: source.label ?? 'n8n capability', version: source.version,
         kind: definition?.kind ?? 'text', available,
-        ...(definition?.kind === 'google-sheets-export' ? { requiresExportAuthorization: true,
-          ...(!available ? { unavailableReason: 'Connect a Google Sheets OAuth credential in n8n to enable this KA.' } : {}) } : {}) });
+        ...(definition?.kind === 'component' ? { descriptor: definition.descriptor } : {}),
+        ...((definition?.requiresExportAuthorization || definition?.kind === 'google-sheets-export') ? { requiresExportAuthorization: true } : {}),
+        ...(!available && definition?.descriptor?.connection ? { unavailableReason: 'Connect ' + definition.descriptor.name + ' OAuth in local n8n, then refresh the operator installation.' } : {}),
+        ...(definition?.kind === 'google-sheets-export' && !available ? { unavailableReason: 'Connect a Google Sheets OAuth credential in n8n to enable this KA.' } : {}) });
     }
     return capabilities;
   }
@@ -57,6 +63,9 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
     },
     loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner),
   });
+  const provider = studioOptions ? createStudioProvider({ ...studioOptions, config, graphId, owner }) : null;
+  const studio = provider ? createStudioService({ graphId, owner, client, provider, exportTokenFile, listCapabilities: list,
+    loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner) }) : null;
   async function invoke(capability, input, invocationId) {
     const result = await client.programs.invoke({ graphId, operationIri: capability.kaRef, inputs: [input], invocationId });
     const stored = await loadExecutionOutputs(agent, graphId, result.executionIri, 'wm', owner);
@@ -69,20 +78,55 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
   }
   async function handle(req, res, path) {
     if (!path.startsWith('/spike/ka/')) return false;
+    if (path === '/spike/ka/demo-data' && ['GET', 'POST'].includes(req.method)) {
+      let body = '', size = 0;
+      for await (const chunk of req) { size += chunk.length; if (size > 4096) { json(res, 413, { error: 'Small JSON only.' }); return true; } body += chunk; }
+      json(res, 200, { source: 'nOS local demo API', items: [{ name: 'Ana', value: 12 }, { name: 'Luka', value: 7 }], ...(body ? { received: JSON.parse(body) } : {}) }); return true;
+    }
+    if (studio && /^\/spike\/ka\/events\/[a-f0-9-]{36}$/.test(path) && req.method === 'POST') {
+      try { let body = '', size = 0; for await (const chunk of req) { size += chunk.length; if (size > 16384) throw new Error('Request too large'); body += chunk; }
+        json(res, 200, await studio.event(path.split('/').at(-1), JSON.parse(body))); }
+      catch (e) { json(res, e.status ?? 400, { code: e.code ?? 'EVENT_UNCONFIRMED', error: 'The event did not confirm a result. Retain its invocationId.' }); }
+      return true;
+    }
     const origin = req.headers.origin;
     if (origin && !['http://127.0.0.1:4620', 'http://localhost:4620'].includes(origin)) { json(res, 403, { error: 'Local console origin required' }); return true; }
     const identity = req.headers.authorization;
-    const routes = [prefix, prefix + '/invoke', prefix + '/inspect', prefix + '/workflows', prefix + '/workflows/save', prefix + '/workflows/run'];
+    const routes = [prefix, prefix + '/invoke', prefix + '/inspect', prefix + '/workflows', prefix + '/workflows/save', prefix + '/workflows/run',
+      ...['', '/save', '/run', '/invoke', '/activation', '/history'].map(s => prefix + '/studio' + s)];
     if (!['Bearer l1-owner-a', 'Bearer l1-viewer-a'].includes(identity)
       || !routes.includes(path)) { json(res, 403, { error: 'Account access denied' }); return true; }
     try {
-      if (path === prefix && req.method === 'GET') json(res, 200, { capabilities: await list(), canInvoke: identity === 'Bearer l1-owner-a' });
+      if (studio && path.startsWith(prefix + '/studio')) {
+        const route = path.slice((prefix + '/studio').length), authorize = () => authorizeExport(req);
+        if (route === '' && req.method === 'GET') json(res, 200, { capabilities: (await list()).filter(c => c.kind === 'component'), workflows: await studio.list(), canInvoke: identity === 'Bearer l1-owner-a' });
+        else if (route === '/history' && req.method === 'GET') {
+          const params = new URL(req.url, 'http://127.0.0.1:4631').searchParams; json(res, 200, await studio.history(params.get('kaRef')));
+        } else if (['/save', '/run', '/invoke', '/activation'].includes(route) && req.method === 'POST') {
+          if (identity !== 'Bearer l1-owner-a') { json(res, 403, { error: 'Owner access required.' }); return true; }
+          let body = '', size = 0; for await (const chunk of req) { size += chunk.length; if (size > 16384) throw new Error('Request too large'); body += chunk; }
+          const value = JSON.parse(body);
+          if (route === '/save') json(res, 200, await studio.save(value, authorize));
+          else if (route === '/run') json(res, 200, await studio.run(value, authorize));
+          else if (route === '/activation') json(res, 200, await studio.activate(value, authorize));
+          else {
+            const selected = (await list()).find(c => c.kind === 'component' && c.kaRef === value.kaRef && c.sourceHash === value.sourceHash && c.available);
+            if (!selected) throw Object.assign(new Error('Component revision unavailable.'), { code: 'WORKFLOW_CAPABILITY_CHANGED', status: 409 });
+            if (selected.requiresExportAuthorization) authorize();
+            let input; try { input = normalizeComponentInput(selected.descriptor, value.input); }
+            catch (e) { throw Object.assign(e, { code: 'INVALID_WORKFLOW', status: 400 }); }
+            json(res, 200, await invoke(selected, input, value.invocationId));
+          }
+        } else json(res, 405, { error: 'Method unavailable.' });
+      }
+      else if (path === prefix && req.method === 'GET') json(res, 200, { capabilities: (await list()).filter(c => c.kind !== 'component'), canInvoke: identity === 'Bearer l1-owner-a' });
       else if (path === prefix + '/workflows' && req.method === 'GET') json(res, 200, { workflows: await workflows.list() });
       else if (path === prefix + '/inspect' && req.method === 'GET') {
         const params = new URL(req.url, 'http://127.0.0.1:4631').searchParams;
         const kaRef = params.get('kaRef'), sourceHash = params.get('sourceHash');
         if (!sourceHash || !/^[a-f0-9]{64}$/.test(sourceHash)) { json(res, 400, { error: 'An exact KA revision is required.' }); return true; }
-        const selected = kaRef?.startsWith(WORKFLOW_PREFIX) ? (await workflows.get(kaRef, sourceHash)).workflow
+        const selected = kaRef?.startsWith(STUDIO_PREFIX) && studio ? (await studio.get(kaRef, sourceHash)).workflow
+          : kaRef?.startsWith(WORKFLOW_PREFIX) ? (await workflows.get(kaRef, sourceHash)).workflow
           : (await list()).find(item => item.kaRef === kaRef && item.sourceHash === sourceHash);
         if (!selected) { json(res, 404, { error: 'KA revision unavailable.' }); return true; }
         const source = await client.programs.getSource({ graphId, programIri: kaRef, programLayer: 'wm' });
@@ -113,5 +157,5 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
       error: ['INVALID_WORKFLOW', 'WORKFLOW_CAPABILITY_CHANGED'].includes(error.code) ? error.message : 'The DKG request did not confirm a result' }); }
     return true;
   }
-  return { list, invoke, workflows, handle };
+  return { list, invoke, workflows, studio, handle, close() { studio?.stop(); provider?.close(); } };
 }

@@ -5,16 +5,34 @@ import type { SemanticN8nConfig, SemanticN8nGrant, SemanticQueryOutputSchema } f
 import { assertSemanticQueryOutput, queryOutputSchemaSha256 } from './semantic-runtime-query-pins.js';
 
 export const N8N_TOOL_IRI = 'urn:dkg:tool:n8n';
+export const n8nObservationScope = (graph: string, executor: string, workflow: string): string =>
+  'nOS scope ' + createHash('sha256').update(JSON.stringify([graph, executor.toLowerCase(), workflow])).digest('hex').slice(0, 20);
 const id = (value: unknown): value is string => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(value);
 const hash = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 export const n8nRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const closed = (value: Record<string, unknown>, keys: string[]) => Object.keys(value).every(key => keys.includes(key));
 
 export function validateN8nGrant(value: unknown): asserts value is SemanticN8nGrant {
-  if (!n8nRecord(value) || !closed(value, ['toolIri', 'workflowId', 'workflowSha256', 'inputSchema', 'outputSchema'])
+  if (!n8nRecord(value) || !closed(value, ['toolIri', 'workflowId', 'workflowSha256', 'inputSchema', 'outputSchema', 'result'])
     || value.toolIri !== N8N_TOOL_IRI || !id(value.workflowId) || !hash(value.workflowSha256)) throw new Error('INVALID_N8N_GRANT');
   queryOutputSchemaSha256(value.inputSchema as SemanticQueryOutputSchema);
   queryOutputSchemaSha256(value.outputSchema as SemanticQueryOutputSchema);
+  if (value.result !== undefined) {
+    const result = value.result;
+    const names = (v: unknown, max: number): v is string[] => Array.isArray(v) && v.length > 0 && v.length <= max
+      && v.every(n => typeof n === 'string' && /^[A-Za-z0-9 _.-]{1,80}$/.test(n)) && new Set(v).size === v.length;
+    if (!n8nRecord(result) || !closed(result, ['nodes', 'ports', 'traceNodes', 'sinks', 'allowObservation'])
+      || !names(result.nodes, 16) || result.ports !== undefined && !names(result.ports, 4)
+      || result.ports !== undefined && result.nodes.length !== 1
+      || result.traceNodes !== undefined && !names(result.traceNodes, 16)
+      || result.allowObservation !== undefined && typeof result.allowObservation !== 'boolean') throw new Error('INVALID_N8N_GRANT');
+    if (result.sinks !== undefined && (result.ports !== undefined || !Array.isArray(result.sinks)
+      || result.sinks.length < 1 || result.sinks.length > 16
+      || !result.sinks.every(s => n8nRecord(s) && closed(s, ['node', 'port', 'name'])
+        && typeof s.node === 'string' && (result.nodes as string[]).includes(s.node)
+        && Number.isInteger(s.port) && Number(s.port) >= 0 && Number(s.port) < 4 && names([s.name], 1))
+      || new Set(result.sinks.map(s => s.name)).size !== result.sinks.length)) throw new Error('INVALID_N8N_GRANT');
+  }
 }
 
 export function validateN8nConfig(value: unknown): asserts value is SemanticN8nConfig {

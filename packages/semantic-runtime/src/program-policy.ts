@@ -60,6 +60,14 @@ export interface SemanticN8nGrant {
   workflowSha256: string;
   inputSchema: SemanticQueryOutputSchema;
   outputSchema: SemanticQueryOutputSchema;
+  /** Read native node results after an early webhook acknowledgement. */
+  result?: {
+    nodes: string[];
+    ports?: string[];
+    traceNodes?: string[];
+    sinks?: { node: string; port: number; name: string }[];
+    allowObservation?: boolean;
+  };
 }
 
 /** Operator installation. Credentials never belong to a Program or approval. */

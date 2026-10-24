@@ -290,7 +290,8 @@ export function createProgramToolDispatcher(
       if (outcome?.state === 'prepared') {
         await broker.dispatchPrepared(effectId, Date.now());
         outcome = broker.readOutcome(effectId);
-      } else if (tool.operation === 'dkg/asset-create' && ['unknown', 'reconciling', 'manual_review_required'].includes(outcome?.state ?? '')) {
+      } else if ((tool.operation === 'dkg/asset-create' || tool.operation === 'n8n/workflow' && !!bound?.binding.n8n?.result)
+        && ['unknown', 'reconciling', 'manual_review_required'].includes(outcome?.state ?? '')) {
         await broker.resumeUnknown(effectId, Date.now());
         outcome = broker.readOutcome(effectId);
       }

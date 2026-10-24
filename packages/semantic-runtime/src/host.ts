@@ -46,6 +46,8 @@ export interface SemanticRuntimeConfig {
   programBindings?: SemanticProgramBinding[];
   /** Optional loopback n8n installation and exact graph/executor/workflow pins. */
   n8n?: SemanticN8nConfig;
+  /** Separate native-component installation; keeps existing adapter pins stable. */
+  n8nNative?: SemanticN8nConfig;
   /** Trusted outbound routes. The authenticated local agent signs; the target authorizes. */
   programRoutes?: Array<{
     contextGraphId: string;

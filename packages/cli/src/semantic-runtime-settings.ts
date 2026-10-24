@@ -12,6 +12,7 @@ export function validateSemanticRuntimeConfig(config: SemanticRuntimeConfig): vo
 
 export function validateSemanticRuntimeSettings(config: SemanticRuntimeConfig): void {
   if (config.n8n !== undefined) validateN8nConfig(config.n8n);
+  if (config.n8nNative !== undefined) validateN8nConfig(config.n8nNative);
   if (config.programPolicy !== undefined) validateSemanticProgramPolicy(config.programPolicy);
   validatePositiveInteger(config.watchdogMs, 'semanticRuntime.watchdogMs', 60_000);
   validatePositiveInteger(config.startupTimeoutMs, 'semanticRuntime.startupTimeoutMs', 120_000);

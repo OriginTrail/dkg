@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -17,6 +16,7 @@ import { startConfiguredSemanticRuntime } from '../../packages/cli/dist/semantic
 import { programSource } from './workflow.mjs';
 import { createCapabilityBridge } from './bridge.mjs';
 import { csvProgramSource } from './csv-workflows.mjs';
+import { componentProgramSource } from './component-registry.mjs';
 
 const require = createRequire(new URL('../../packages/cli/package.json', import.meta.url));
 const { Wallet } = require('ethers');
@@ -26,7 +26,10 @@ const { grant, ...connection } = JSON.parse(readFileSync(join(state, 'n8n.json')
 const graphId = 'n8n-capability-poc', kaRef = 'urn:demo:n8n:normalize-text:1';
 const csvFile = join(state, 'csv-components.json');
 const csv = existsSync(csvFile) ? JSON.parse(readFileSync(csvFile, 'utf8')) : { components: [] };
-const definitions = [{ kind: 'text', kaRef, name: 'Normalize text', enabled: true, grant }, ...csv.components];
+const componentsFile = join(state, 'components.json');
+const componentManifest = existsSync(componentsFile) ? JSON.parse(readFileSync(componentsFile, 'utf8')) : { components: [] };
+const legacyDefinitions = [{ kind: 'text', kaRef, name: 'Normalize text', enabled: true, grant }, ...csv.components];
+const definitions = [...legacyDefinitions, ...componentManifest.components];
 const nodeUrl = 'http://127.0.0.1:4631';
 mkdirSync(join(state, 'dkg'), { recursive: true, mode: 0o700 });
 const dashDb = new DashboardDB({ dataDir: join(state, 'dkg') });
@@ -36,10 +39,10 @@ const agent = await DKGAgent.create({ name: 'n8n-ka-poc', dataDir: join(state, '
   kaNumberAllocator: new KaNumberAllocator(protocolStores.kaNumberStore),
   nodeRole: 'edge', chainAdapter: new MockChainAdapter(), rfc64CatalogActivation: { enabled: false } });
 await agent.start();
-let server, runtime, nonceDb;
+let server, runtime, nonceDb, bridge;
 async function stop() {
   if (server) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
-  await runtime?.stop(); nonceDb?.close(); await agent.stop(); dashDb.close();
+  bridge?.close(); await runtime?.stop(); nonceDb?.close(); await agent.stop(); dashDb.close();
 }
 try {
   const identity = agent.listLocalAgents().find(item => item.name === 'n8n-ka-poc-owner') ?? await agent.registerAgent('n8n-ka-poc-owner');
@@ -48,7 +51,9 @@ try {
   if (!await agent.contextGraphExists(graphId)) await agent.createContextGraph({ id: graphId, name: 'n8n capability PoC',
     private: true, accessPolicy: 1, allowedAgents: [owner], callerAgentAddress: owner });
   const semanticRuntime = { enabled: true, startupTimeoutMs: 30000, watchdogMs: 1000,
-    n8n: { ...connection, workflows: definitions.filter(item => item.enabled).map(item => ({ contextGraphId: graphId, executorAgentAddress: owner,
+    n8n: { ...connection, workflows: legacyDefinitions.filter(item => item.enabled).map(item => ({ contextGraphId: graphId, executorAgentAddress: owner,
+      workflowId: item.grant.workflowId, workflowSha256: item.grant.workflowSha256 })) },
+    n8nNative: { ...connection, workflows: componentManifest.components.filter(item => item.enabled).map(item => ({ contextGraphId: graphId, executorAgentAddress: owner,
       workflowId: item.grant.workflowId, workflowSha256: item.grant.workflowSha256 })) } };
   runtime = await startConfiguredSemanticRuntime(semanticRuntime, { dataDirectory: join(state, 'runtime'), log: () => {} });
   const config = { name: 'n8n-ka-poc', apiPort: 4631, listenPort: 0, nodeRole: 'edge', semanticRuntime };
@@ -56,8 +61,15 @@ try {
   nonceDb = new Database(join(state, 'http-nonces.db'));
   const nonces = new SqliteAgentHttpNonceStore(nonceDb);
   const client = new GraphComputer({ nodeUrl, peerId: agent.peerId, signer, retries: 0 });
-  const bridge = createCapabilityBridge({ agent, client, graphId, owner, config: semanticRuntime,
-    definitions, exportTokenFile: csv.exportTokenFile });
+  const credentialDb = new Database(join(state, 'n8n/.n8n/database.sqlite'), { readonly: true });
+  let headerCredential; const credentials = {};
+  for (const row of credentialDb.prepare('SELECT nodes FROM workflow_entity').all()) for (const node of JSON.parse(row.nodes)) {
+    headerCredential = node.credentials?.httpHeaderAuth ?? headerCredential;
+    for (const kind of ['googleSheetsOAuth2Api', 'googleDriveOAuth2Api']) if (node.credentials?.[kind]) credentials[kind] = node.credentials[kind];
+  }
+  credentialDb.close();
+  bridge = createCapabilityBridge({ agent, client, graphId, owner, config: semanticRuntime,
+    definitions, exportTokenFile: csv.exportTokenFile, ...(componentManifest.installed ? { studioOptions: { state, headerCredential, credentials } } : {}) });
   server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', nodeUrl), path = url.pathname;
@@ -82,7 +94,7 @@ try {
     catch (error) { if (error.code !== 'PROGRAM_NOT_FOUND') throw error; }
     if (program) program = { graphId, programIri, programLayer: 'wm', authorAgentAddress: program.authorAgentAddress, sourceHash: program.sourceHash };
     else program = await client.programs.upload({ graphId, programIri, name: definition.kind + '-' + definition.grant.workflowSha256.slice(0, 12), label: definition.name, language: 'typescript-v1',
-      source: definition.kind === 'text' ? programSource : csvProgramSource(definition.kind), version: '1.0.0', requiredTools: [definition.grant.toolIri], requestedPermissions: { graphId, n8n: definition.grant } });
+      source: definition.kind === 'text' ? programSource : definition.kind === 'component' ? componentProgramSource(definition.descriptor.id) : csvProgramSource(definition.kind), version: '1.0.0', requiredTools: [definition.grant.toolIri], requestedPermissions: { graphId, n8n: definition.grant } });
     if (!definition.enabled) continue;
     let approval;
     try { approval = await client.programs.getApproval({ graphId, operationIri: programIri }); }
@@ -95,14 +107,9 @@ try {
   writeFileSync(join(state, 'client.json'), JSON.stringify({ nodeUrl, peerId: agent.peerId, graphId, kaRef, keyFile }, null, 2), { mode: 0o600 });
   const capabilities = await bridge.list();
   if (!capabilities.length) throw new Error('Capability KA is missing from DKG query results');
-  const invocationId = randomUUID();
-  const normalize = capabilities.find(item => item.kaRef === kaRef);
-  const evidence = await bridge.invoke(normalize, { text: '  hello dkg  ' }, invocationId);
-  const replay = await bridge.invoke(normalize, { text: '  hello dkg  ' }, invocationId);
-  if (JSON.stringify(evidence) !== JSON.stringify(replay)) throw new Error('Completed invocation did not replay its receipt');
-  writeFileSync(join(state, 'evidence.json'), JSON.stringify({ ...evidence, completedReplayVerified: true,
-    chain: 'MockChainAdapter; no on-chain transactions', nodeUrl }, null, 2));
-  console.log(JSON.stringify({ ready: true, ...evidence, completedReplayVerified: true, nodeUrl }));
+  console.log(JSON.stringify({ ready: true, nodeUrl, capabilities: capabilities.length,
+    nativeComponents: capabilities.filter(c => c.kind === 'component').length, nativeAvailable: capabilities.filter(c => c.kind === 'component' && c.available).length,
+    chain: 'MockChainAdapter; private Working Memory; no on-chain transactions' }));
   let stopping = false;
   const shutdown = async () => { if (stopping) return; stopping = true; await stop(); };
   process.once('SIGINT', () => void shutdown()); process.once('SIGTERM', () => void shutdown());

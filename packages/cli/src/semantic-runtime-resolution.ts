@@ -1,4 +1,5 @@
 import { createN8nWorkflowAdapter } from './semantic-runtime-n8n-adapter.js';
+import { createNativeN8nWorkflowAdapter } from './semantic-runtime-n8n-native-adapter.js';
 import { programToolDefinition } from './semantic-runtime-tool-catalog.js';
 import { createLocalLlmProgramAdapter, type LocalLlmProgramProvider } from './semantic-runtime-local-llm-adapter.js';
 import { createHash } from 'node:crypto';
@@ -290,7 +291,10 @@ export async function resolveProgramTools(context: ProgramToolContext) {
     registry.register(createAssetCreationAdapter(agent, contextGraphId, executionLayer, operatorAddress, assetStore, bound.assertAuthorized));
   }
   if (bound?.binding.n8n) {
-    registry.register(createN8nWorkflowAdapter(contextGraphId, operatorAddress, bound.binding.n8n, config?.n8n, bound.assertAuthorized));
+    if (bound.binding.n8n.result && !assetStore) throw new SemanticProgramError('N8N_JOURNAL_UNAVAILABLE', 'Native n8n results require durable runtime storage', 409);
+    registry.register(bound.binding.n8n.result
+      ? createNativeN8nWorkflowAdapter(contextGraphId, operatorAddress, bound.binding.n8n, config?.n8nNative ?? config?.n8n, bound.assertAuthorized, assetStore!)
+      : createN8nWorkflowAdapter(contextGraphId, operatorAddress, bound.binding.n8n, config?.n8n, bound.assertAuthorized));
   }
   if (bound?.binding.localLlm) {
     registry.register(createLocalLlmProgramAdapter(contextGraphId, operatorAddress,
