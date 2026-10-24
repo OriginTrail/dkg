@@ -88,11 +88,17 @@ async function startStatusServer(
   // beforeReply is awaited inside the route after the store fields are read and
   // the reachability check has started, as the real status blocks await I/O: a
   // count can settle meanwhile, and a test can see every request reach it.
-  // agentOverrides replaces agent members a test needs to stub.
+  // agentOverrides replaces agent members a test needs to stub; authentication
+  // is the caller every request is from (anonymous unless a test says otherwise).
   {
     beforeReply,
     agentOverrides = {},
-  }: { beforeReply?: () => Promise<void>; agentOverrides?: Record<string, unknown> } = {},
+    authentication = requestAuthentication({ kind: 'anonymous' }),
+  }: {
+    beforeReply?: () => Promise<void>;
+    agentOverrides?: Record<string, unknown>;
+    authentication?: ReturnType<typeof requestAuthentication>;
+  } = {},
 ): Promise<{
   server: Server;
   baseUrl: string;
@@ -140,7 +146,7 @@ async function startStatusServer(
       nodeVersion: '0.0.0-test',
       nodeCommit: '',
       admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
-      authentication: requestAuthentication({ kind: 'anonymous' }),
+      authentication,
     } as unknown as RequestContext);
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -754,6 +760,21 @@ describe('dkg status against the status route', () => {
     }
   });
 
+  it("prints the daemon's Node.js release for a node operator only", async () => {
+    const operator = await startStatusServer(async () => COUNT_66, LOCAL_STORE, {
+      authentication: requestAuthentication({ kind: 'nodeOperator' }),
+    });
+    const anonymous = await startStatusServer(async () => COUNT_66, LOCAL_STORE);
+
+    try {
+      expect(await runStatusCommand(operator.baseUrl)).toContain(`  Runtime:   Node.js ${process.version}`);
+      expect(await runStatusCommand(anonymous.baseUrl)).not.toContain('Runtime:');
+    } finally {
+      await closeServer(operator.server);
+      await closeServer(anonymous.server);
+    }
+  });
+
   it('reports subscriptions known only by their name hash, as a count, and prints it', async () => {
     const nameHash = `0x${'6d'.repeat(32)}`;
     const { server, baseUrl } = await startStatusServer(async () => COUNT_66, LOCAL_STORE, { agentOverrides: {
@@ -1110,6 +1131,31 @@ describe('/api/status store reachability check', () => {
     } finally {
       answer.resolve(ASK_TRUE);
       await closeServer(server);
+    }
+  });
+});
+
+describe('/api/status runtime', () => {
+  afterEach(cleanUpStoreQuads);
+
+  it('reports the Node.js release of the daemon to a caller that may administer the node, and null to others', async () => {
+    const callers = [
+      ['nodeOperator', requestAuthentication({ kind: 'nodeOperator' }), { nodeVersion: process.version }],
+      ['auth disabled', requestAuthentication({ kind: 'anonymous', mode: 'disabled' }), { nodeVersion: process.version }],
+      ['anonymous', requestAuthentication({ kind: 'anonymous' }), null],
+      ['agent', requestAuthentication({ kind: 'agent', agentAddress: '0x00000000000000000000000000000000000000a1' }), null],
+    ] as const;
+
+    for (const [caller, authentication, runtime] of callers) {
+      const { server, baseUrl } = await startStatusServer(async () => COUNT_66, LOCAL_STORE, { authentication });
+      try {
+        const response = await fetch(`${baseUrl}/api/status`);
+        const body = await response.json() as { runtime?: unknown };
+        expect(response.status, caller).toBe(200);
+        expect(body.runtime, caller).toEqual(runtime);
+      } finally {
+        await closeServer(server);
+      }
     }
   });
 });

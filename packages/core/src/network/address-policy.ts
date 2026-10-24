@@ -40,6 +40,15 @@ export function isLocalOrInternalHostname(host: string): boolean {
   return false;
 }
 
+/**
+ * What a peer on a public network can dial: a public address, or a circuit.
+ * Loopback, private (RFC 1918), shared (100.64/10), link-local and
+ * unique-local addresses reach nobody outside the node's own networks.
+ */
+export function isPublicOrCircuitAddress(addr: string): boolean {
+  return addr.includes('/p2p-circuit') || isPublicLikeAddress(addr);
+}
+
 export function isPublicLikeAddress(addr: string): boolean {
   if (isLoopbackAddress(addr) || isUnspecifiedAddress(addr)) return false;
   const dnsMatch = addr.match(/^\/(?:dns|dns4|dns6|dnsaddr)\/([^/]+)\//);

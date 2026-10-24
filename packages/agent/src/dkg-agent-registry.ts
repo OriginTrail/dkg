@@ -137,7 +137,7 @@ import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck, type SkillAclCheck } from './messaging.js';
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
-import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, collectPublishableMultiaddrs, type AgentProfileConfig } from './profile.js';
+import { AGENT_REGISTRY_CONTEXT_GRAPH, advertisedRelayAddress, canonicalAgentDidSubject, collectPublishableMultiaddrs, type AgentProfileConfig } from './profile.js';
 import {
   signAgentDelegation,
   verifyAgentDelegation,
@@ -526,7 +526,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
       framework: this.config.framework,
       nodeRole: this.config.nodeRole ?? 'edge',
       publicKey: pubKeyBase64,
-      relayAddress: relayAddrs?.[0],
+      relayAddress: advertisedRelayAddress(relayAddrs, this.node.multiaddrs),
       agentAddress: this.defaultAgentAddress,
       multiaddrs: collectPublishableMultiaddrs(this.node.multiaddrs),
       lastSeen: new Date().toISOString(),

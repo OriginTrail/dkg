@@ -134,7 +134,7 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
-
+import { withCallerJoinState } from './internal/context-graph-authority/approved-member-metadata-pending.js';
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck } from './messaging.js';
@@ -623,7 +623,7 @@ async function applyContextGraphListPrivacy(
   const annotated = await mapContextGraphListRows(visibleRows, async (r) => {
     const curatorMatch = agent.curatorDidMatchesChecksumAgent(r.curator, checksum);
     const allowlisted = await agent.callerIsAllowlistedAgentParticipant(r.id, checksum);
-    return { ...r, callerInvolved: curatorMatch || allowlisted };
+    return withCallerJoinState(agent, { ...r, callerInvolved: curatorMatch || allowlisted }, checksum);
   });
 
   return annotated
@@ -2989,7 +2989,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       // `callerInvolved` must reflect ONLY the provided caller wallet.
       // Using local node identity (`creatorIsSelf`) leaks curated rows to unrelated callers.
       if (!allowlistRead.ok) return { row: r, privacy };
-      return { row: { ...r, callerInvolved: allowlistRead.value }, privacy };
+      return { row: await withCallerJoinState(this, { ...r, callerInvolved: allowlistRead.value }, checksum), privacy };
     });
     const annotated = annotatedSettled.map((entry, index) => {
       if (entry.status === 'fulfilled') return entry.value;
