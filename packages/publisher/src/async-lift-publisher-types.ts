@@ -1,5 +1,5 @@
+import type { VmPublishAdmissionJournalReader } from './async-lift-control-plane.js';
 import type {
-  AdmissionJournalEntry,
   KnowledgeAssetVmPublishRequest,
   LiftJob,
   PersistedLiftJob,
@@ -15,9 +15,8 @@ import type {
   LiftPublishRequestMetadata,
   LiftPublishSnapshotRequest,
 } from './lift-job.js';
-import type {
-  LiftJobRetryProjection,
-} from './async-lift-retry-disposition.js';
+import type { LiftJobRetryBlocker, LiftJobRetryProjection } from './async-lift-retry-disposition.js';
+import type { LiftJobTailStepObserver } from './lift-job-tail-steps.js';
 import type { DKGPublisher } from './dkg-publisher.js';
 import type { PublishOptions, PublishResult } from './publisher.js';
 import type { AsyncLiftPublishFailureInput } from './async-lift-publish-result.js';
@@ -56,6 +55,11 @@ export class LiftJobPendingChainProofError extends Error {
     message: string,
     readonly existingJobId: string,
     readonly retryable: boolean,
+    /**
+     * GH#2942 - why THIS job is held, in the same vocabulary `retryState.blocker` uses. Optional
+     * and additive: a thrower that has no blocker to give (or an older one) keeps the generic text.
+     */
+    readonly blocker?: LiftJobRetryBlocker,
   ) {
     super(message);
     this.name = 'LiftJobPendingChainProofError';
@@ -97,6 +101,24 @@ export type ActiveLiftJobClaim = LiftJobClaimed & {
 };
 
 /**
+ * GH#2940 — facts the CALLER proved about a failed execution attempt, beyond the error value.
+ *
+ * The thrown error alone cannot say whether a transaction left this node: the pre-send write-ahead
+ * is the only witness, and it lives in the caller's recorder closure. This carries the witness to
+ * the one place that records the failure, so nothing is ever inferred from which record fields
+ * happen to be absent afterwards.
+ */
+export interface ExecutionFailureEvidence {
+  /**
+   * The write-ahead never durably recorded a transaction (`not-reached` or
+   * `rolled-back-pre-send`), so no PUBLISH transaction was signed-and-sent (a TRAC approval or a
+   * context-graph registration may have preceded it; neither is a publish). Absent or false means a
+   * publish transaction may be on the wire, and the failure keeps its chain-proof classification.
+   */
+  readonly neverDispatched?: boolean;
+}
+
+/**
  * The mutation authority for one acquired claim.
  *
  * Runtime workers retain this session rather than a bare job id. Every mutation is fenced by
@@ -110,7 +132,11 @@ export interface ActiveLiftJobClaimSession {
     publishResult: PublishResult,
     options?: { publicByteSize?: number },
   ): Promise<LiftJob>;
-  recordExecutionFailure(failedFromState: LiftJobState, error: unknown): Promise<LiftJob>;
+  recordExecutionFailure(
+    failedFromState: LiftJobState,
+    error: unknown,
+    evidence?: ExecutionFailureEvidence,
+  ): Promise<LiftJob>;
 }
 
 /** Explicit by-id compatibility surface for control-plane callers, never runtime workers. */
@@ -185,7 +211,7 @@ export interface AsyncLiftPublisher {
    */
   update(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
   getStatus(jobId: string): Promise<PersistedLiftJob | null>;
-  list(filter?: { status?: LiftJobState }): Promise<PersistedLiftJob[]>;
+  list(filter?: { status?: LiftJobState; contextGraphId?: string }): Promise<PersistedLiftJob[]>;
   inspectPreparedPayload(jobId: string): Promise<AsyncPreparedPublishPayload | null>;
   processNext(walletId: string): Promise<PersistedLiftJob | null>;
   /** @deprecated Prefer `administrative.recordPublishResultById`; workers use a claim session. */
@@ -208,6 +234,12 @@ export interface AsyncLiftPublisher {
    * it. Same concurrency contract as {@link recover}.
    */
   reconcileTransactions?(): Promise<number>;
+  /**
+   * The latest re-check of this HELD job that did not settle it, when this process holds one for this
+   * exact incarnation (GH#2945). In memory only: absent before the first re-check and after a restart,
+   * and only the publisher that runs the chain-proof dispatcher has it. Older implementations can omit it.
+   */
+  lastChainProofCheck?(job: PersistedLiftJob): AsyncLiftLastChainCheck | undefined;
   /** Wait until every receipt task detached after RPC acceptance has stopped. Older implementations can omit it. */
   drainDetachedExecutions?(): Promise<void>;
   /**
@@ -219,14 +251,15 @@ export interface AsyncLiftPublisher {
   readonly reconciliationScheduling?: {
     /**
      * EXCLUSIVE, ATOMIC attachment of the scheduling listeners — deliberately not pub/sub.
-     * Scheduling has exactly one owner (the runner driving this publisher), so attaching TAKES
-     * OVER both callbacks together: a later attachment supersedes the earlier one wholesale —
+     * Scheduling has one owner per in-process store/queue, so attaching TAKES
+     * OVER all callbacks together: a later attachment supersedes the earlier one wholesale —
      * the safe handover when a new runner incarnation starts while its predecessor is still
      * stopping — and ownership can never be split between incarnations. The returned detach
      * releases only the caller's OWN attachment (a stale detach from a superseded owner is a
-     * no-op).
+     * no-op). Publisher instances sharing the documented store/decorator identity and graph
+     * share this attachment; independent connections and processes retain polling fallback.
      *
-     * Both pokes are scheduling-only and establish nothing — the invited operation re-checks
+     * All pokes are scheduling-only and establish nothing — the invited operation re-checks
      * its own guards. `onReconciliationDemand` fires when a tx-bearing job stops being
      * executor-owned (a detached receipt settles, or `processNext` hands back a live broadcast
      * after an ambiguous send) — only once the work is visible to a
@@ -238,6 +271,8 @@ export interface AsyncLiftPublisher {
     attachScheduler(scheduler: {
       onReconciliationDemand(): void;
       onWalletRelease(walletId: string): void;
+      /** Accepted work is durable (or processing resumed); wake claim loops, preserving their guards. */
+      onWorkAvailable?(): void;
     }): () => void;
     /**
      * Run one reconcile pass and report BOTH what it settled and whether actionable live work
@@ -258,6 +293,8 @@ export interface AsyncLiftPublisher {
     recover(): Promise<{ reconciled: number; pendingWork: boolean }>;
   };
   getStats(): Promise<Record<LiftJobState, number>>;
+  /** Single admission owner; older structural publishers may omit live claim control. */
+  readonly claimControl?: import('./async-lift-claim-gate.js').AsyncLiftClaimControl;
   pause(): Promise<void>;
   resume(): Promise<void>;
   cancel(jobId: string): Promise<void>;
@@ -340,42 +377,7 @@ export interface VmPublishIntentRecoveryPublisher extends AsyncLiftPublisher {
   lookupKnowledgeAssetVmPublishJobByIntent(facts: IntentLookupInput): Promise<IntentLookupResult>;
 }
 
-/** #1829 — read query for the append-only journal (facts-pure, or by jobId). */
-export interface JournalReadInput {
-  readonly contextGraphId: string;
-  readonly name: string;
-  readonly subGraphName?: string;
-  readonly agentAddress?: string;
-  /** Optional per-version filter WITHIN the lineage; never the lineage key itself. */
-  readonly intentKey?: string;
-}
-
-/**
- * #1829 — result of a journal read. `entries` are seq-ordered; `maxSeq` is -1 for an
- * empty lineage. `complete` = `entries.length === maxSeq + 1` (no seq gap) — authoritative
- * on oxigraph-worker; best-effort on external SPARQL backends (no fsync, so the
- * highest-seq entry can be lost on a crash without a gap being visible). `txHashes` are
- * ATTEMPTED submissions — a reconciler MUST verify each against chain; a hash here is
- * never proof the tx was sent (a pre-flush 'broadcast' entry can survive a rolled-back
- * attempt).
- */
-export interface JournalReadResult {
-  readonly entries: readonly AdmissionJournalEntry[];
-  readonly maxSeq: number;
-  readonly complete: boolean;
-  readonly txHashes: readonly string[];
-}
-
-/**
- * #1829 — read-only append-only journal reader. Segregated off the base contract (like
- * the #1828 recovery lookup): only the daemon control instance serves it.
- */
-export interface VmPublishAdmissionJournalReader {
-  /** Facts-pure lineage read (derives lineageKey from facts, never the ephemeral index). */
-  readJournalByIntent(facts: JournalReadInput): Promise<JournalReadResult>;
-  /** All journal entries bearing this jobId (a successor job continues the lineage seq). */
-  readJournalByJob(jobId: string): Promise<JournalReadResult>;
-}
+export type { JournalReadInput, JournalReadResult, VmPublishAdmissionJournalReader } from './async-lift-control-plane.js';
 
 /**
  * #1837 — atomic by-jobId terminal cleanup. Segregated off the base contract (like the
@@ -425,12 +427,10 @@ export interface VmPublisherControl
     AsyncLiftRetryStateReader {}
 
 /**
- * PR #2300 r2 (🟡 3809616683) — the canonical facts UPDATE recognition established for the
- * `recovered` verdict, carried ON the verdict so the named finalizer consumes the SAME
- * verification instead of re-proving the transaction. This is what replaced the shared-verifier
- * memo: no cache, no shared instance, no temporal coupling — the evidence travels with the
- * verdict that earned it. The CREATE side deliberately does NOT get an equivalent: its
- * `publishProof` remains the finalizer's own canonical-receipt read (settled position).
+ * The canonical facts a chain verdict established, carried ON that verdict so the named
+ * finalizer consumes the SAME verification instead of re-proving the transaction. There is no
+ * cache, shared instance, or temporal coupling: evidence travels only with the verdict that
+ * earned it.
  */
 export interface CanonicalUpdateEvidence {
   /** The chain-verified new root — already proven equal to the root the queued seal intended. */
@@ -448,9 +448,35 @@ export interface CanonicalUpdateEvidence {
   readonly merkleRootCount?: string;
 }
 
+/**
+ * The exact canonical CREATE receipt already read and finality-gated by the generic verdict.
+ *
+ * The chain package owns the live receipt shape; this publisher-owned projection uses only
+ * persisted-safe primitives so it can cross the resolver boundary without coupling the publisher
+ * back to a concrete chain adapter. Every field needed by the named finalizer is carried, and the
+ * finalizer re-binds it to the lookup and immutable queued seal before consuming it.
+ */
+export interface CanonicalCreateEvidence {
+  readonly txHash: LiftJobHex;
+  readonly blockNumber: number;
+  readonly blockHash: LiftJobHex;
+  readonly txIndex: number;
+  readonly merkleRoot: LiftJobHex;
+  readonly publisherAddress: LiftJobHex;
+  readonly authorAddress: LiftJobHex;
+  readonly batchId: `${bigint}`;
+  readonly kaId: `${bigint}`;
+  readonly startKAId: `${bigint}`;
+  readonly endKAId: `${bigint}`;
+  readonly knowledgeAssetsContract: LiftJobHex;
+  readonly chainId: string;
+}
+
 export interface AsyncLiftPublisherRecoveryResult {
   inclusion: LiftJobInclusionMetadata;
   finalization: LiftJobFinalizationInput;
+  /** Present exactly when the verdict came from a canonical, finalized CREATE receipt. */
+  canonicalCreate?: CanonicalCreateEvidence;
   /** Present exactly when the verdict came from canonical UPDATE recognition. */
   canonicalUpdate?: CanonicalUpdateEvidence;
 }
@@ -493,6 +519,8 @@ export interface AsyncKnowledgeAssetVmPublishExecutionInput {
   readonly validation: LiftJobValidationMetadata;
   readonly resolved: LiftResolvedPublishSlice;
   readonly publishOptions: PublishOptions;
+  /** GH#3081 — observation only: where the executor reports each step it ends after the confirmation. */
+  readonly onPostConfirmationStep?: LiftJobTailStepObserver;
   readonly publisher?: DKGPublisher;
 }
 
@@ -544,9 +572,26 @@ export type AsyncKnowledgeAssetVmPublishPreflightResult =
   | { readonly action: 'execute' }
   | { readonly action: 'noop'; readonly reason?: string };
 
+/** Unmarked legacy results remain eligible for recovery, never certified completion. */
+export type AsyncKnowledgeAssetVmPublishExecutionResult =
+  | (PublishResult & { readonly localFinalizationComplete?: undefined })
+  | AsyncKnowledgeAssetVmPublishCertifiedResult;
+
+/** Process-local completion evidence returned by the named-KA executor. */
+export interface AsyncKnowledgeAssetVmPublishCertifiedResult extends PublishResult {
+  /**
+   * Process-local evidence from the executor: all required local finalization writes succeeded,
+   * or catalog placement has a durable independent repair owner. Existing best-effort gossip
+   * remains best-effort. The certificate requires a confirmed on-chain result.
+   */
+  readonly localFinalizationComplete: true;
+  readonly status: 'confirmed';
+  readonly onChainResult: NonNullable<PublishResult['onChainResult']>;
+}
+
 /** Cohesive lifecycle boundary for one named-KA async queue job. */
 export interface AsyncKnowledgeAssetVmPublishJobHandler {
-  execute(input: AsyncKnowledgeAssetVmPublishExecutionInput): Promise<PublishResult>;
+  execute(input: AsyncKnowledgeAssetVmPublishExecutionInput): Promise<AsyncKnowledgeAssetVmPublishExecutionResult>;
   preflight?(
     input: AsyncKnowledgeAssetVmPublishPreflightInput,
   ): Promise<AsyncKnowledgeAssetVmPublishPreflightResult>;
@@ -589,7 +634,42 @@ export type AsyncLiftChainProofResolution =
    */
   | { status: 'not-found' }
   /** Publisher-only: nothing was established. Never absence, never proof. */
-  | { status: 'inconclusive' };
+  | { status: 'inconclusive'; reason?: AsyncLiftChainProofInconclusiveReason };
+
+/**
+ * Why a lookup established nothing, when the resolver KNOWS (GH#2945). Closed and optional: a resolver
+ * that cannot say omits it, and the publisher copies only these exact literals. Absent means "not
+ * classified" - never "the chain RPC was fine".
+ *  - `rpc-unavailable`: the chain RPC could not answer (every endpoint failed, a bounded request timed out,
+ *    or the local request governor was full).
+ *  - `absence-unproven`: the chain has no record of the transaction, but the proof that would let this node
+ *    release the job is not established (absence is never proof for an UPDATE; for a CREATE the signed nonce
+ *    is not provably spent, the pinned identity is minted or unreadable, or the snapshot could not be read).
+ */
+export type AsyncLiftChainProofInconclusiveReason = 'rpc-unavailable' | 'absence-unproven';
+
+/**
+ * What the most recent re-check of a held job found, as the publisher saw it (GH#2945): the chain's
+ * verdict status, or the resolver's reason when an `inconclusive` verdict carried one; `deadline` when
+ * the pass's time budget ended before an answer; `error` when the re-check threw (the lookup, the claim
+ * transaction or applying its answer). Codes only - provider text can carry RPC URLs or keys.
+ */
+export type AsyncLiftChainCheckOutcome =
+  | AsyncLiftChainProofResolution['status']
+  | AsyncLiftChainProofInconclusiveReason
+  | 'deadline'
+  | 'error';
+
+/** The latest NON-SETTLING re-check of one held job incarnation, in this process's memory only. */
+export interface AsyncLiftLastChainCheck {
+  readonly outcome: AsyncLiftChainCheckOutcome;
+  /**
+   * When this node recorded it - when the re-check finished, after its answer was applied or declined
+   * (the publisher's clock, epoch ms): the age of the observation. Not a liveness claim: a paused
+   * dispatcher, a pass that did not reach this job and the idle cadence all leave an older one in place.
+   */
+  readonly at: number;
+}
 
 /**
  * GH#2270 PR-3 — everything a chain-proof lookup needs, and nothing else.
@@ -698,9 +778,9 @@ export type AsyncKnowledgeAssetVmPublishRecoveryResolver = (
   lookup: AsyncLiftChainProofLookup,
   /**
    * PR #2300 r2 — the dispatcher's verdict recovery, when this finalize follows one. For an
-   * UPDATE whose verdict carried {@link CanonicalUpdateEvidence}, the resolver consumes it
-   * directly instead of re-verifying the transaction; the LIVE interrupted lane passes nothing
-   * (no verdict ran) and the resolver verifies once itself.
+   * CREATE or UPDATE whose verdict carried canonical evidence, the resolver consumes it directly
+   * instead of re-reading the transaction; the LIVE interrupted lane passes nothing (no verdict
+   * ran) and the resolver performs its existing canonical read itself.
    */
   verdictRecovery?: AsyncLiftPublisherRecoveryResult,
   /**

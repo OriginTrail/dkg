@@ -48,7 +48,26 @@ await publisher.writeConditionalToWorkspace('urn:contextGraph:example', quads, {
 
 ## Internal Dependencies
 
+Successful `assertionWrite` calls add an `AssertionWritten` activity to the context graph's `_meta` graph alongside the payload insert. Each activity identifies the writer, timestamp, assertion and every physical WM graph receiving payload quads, and records the total number of payload quads submitted in that call. Repeated writes have separate activities even when the store deduplicates their data. Assertion history reports these activities as `written` within WM while the lifecycle state remains unchanged. Setting `provenanceEvents: false` continues to omit lifecycle events while retaining payload and lifecycle state.
+
 - `@origintrail-official/dkg-core` — P2P networking, protocol streams, crypto
 - `@origintrail-official/dkg-chain` — on-chain KC creation and finalization
 - `@origintrail-official/dkg-query` — entity resolution during publishing
 - `@origintrail-official/dkg-storage` — triple persistence
+
+### Retrying an interrupted WM pull-from
+
+If a pull-from stops after archiving a completed SWM assertion and while clearing
+its active seal, repeat the same pull-from after the store is healthy. The retry
+can use the private recovery archive only after verifying the named asset's
+identity, completed share, current SWM head and operation, public digest, and
+public/private content against the archived seal. A conflicting draft still
+requires the explicit `onConflict: "replace"` option; recovery does not imply
+permission to replace a draft.
+
+The SWM-share retry advertised for `KA_PROMOTE_RECOVERY_REQUIRED` applies to an
+unfinished promote with its active seal intact. It cannot reconstruct a removed
+active seal after a completed share. In that interrupted-pull case, use pull-from
+again. Missing, corrupt, or superseded recovery evidence remains blocked; do not
+clear lifecycle metadata to bypass the guard. Ordinary create/write/discard
+operations do not receive this archive-based exception.

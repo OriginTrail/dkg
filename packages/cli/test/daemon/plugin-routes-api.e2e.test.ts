@@ -1,17 +1,12 @@
-/** Route-plugins live-daemon E2E: spawns one daemon with the sample-fixture plugins and asserts HTTP behaviour.
- *  Patterned after `daemon-http-behavior-extra.test.ts` (edge-role node, no profile registration). */
+/** Route-plugins live-daemon E2E: spawns two daemons (async publisher off and on) with the sample-fixture plugins and
+ *  asserts HTTP behaviour. The shared live-daemon harness lets each daemon bind port 0 and reads the port from its api.port. */
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
-import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tmpdir } from 'node:os';
-import { ethers } from 'ethers';
-import { getSharedContext, HARDHAT_KEYS } from '../../../chain/test/evm-test-context.js';
+import { startLiveDaemon, stopLiveDaemon, type LiveDaemon } from '../helpers/live-daemon.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const CLI_ENTRY = join(__dirname, '..', '..', 'dist', 'cli.js');
 const FIXTURE_DIR = resolvePath(
   __dirname,
   '..',
@@ -23,230 +18,26 @@ const FIXTURE_DIR = resolvePath(
 const ECHO_FIXTURE = join(FIXTURE_DIR, 'index.js');
 const THROW_FIXTURE = join(FIXTURE_DIR, 'throwing.js');
 
-interface Daemon {
-  home: string;
-  apiPort: number;
-  listenPort: number;
-  child: ChildProcess;
-  token: string;
-  exitCode?: number | null;
-  signal?: NodeJS.Signals | null;
-}
+let daemon: LiveDaemon | undefined;
+let publisherDaemon: LiveDaemon | undefined;
 
-function uniquePort(base: number): number {
-  return base + Math.floor(Math.random() * 1000);
-}
-
-// Bases must be ≥1000 apart so the two `uniquePort` rolls never overlap (each samples [base, base+1000)).
-const API_PORT_BASE = 19900; // -> [19900, 20899]
-const LISTEN_PORT_BASE = 21000; // -> [21000, 21999]
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-async function writeDaemonConfig(
-  home: string,
-  apiPort: number,
-  listenPort: number,
-  publisherEnabled: boolean,
-): Promise<void> {
-  const { rpcUrl, hubAddress } = getSharedContext();
-  await writeFile(
-    join(home, 'config.json'),
-    JSON.stringify({
-      name: 'plugin-routes-e2e',
-      apiPort,
-      listenPort,
-      apiHost: '127.0.0.1',
-      nodeRole: 'edge',
-      relay: 'none',
-      auth: { enabled: true },
-      store: {
-        backend: 'oxigraph-worker',
-        options: { path: join(home, 'store.nq') },
-      },
-      chain: {
-        type: 'evm',
-        rpcUrl,
-        hubAddress,
-        chainId: 'evm:31337',
-      },
-      contextGraphs: [],
-      routePlugins: [ECHO_FIXTURE, THROW_FIXTURE],
-      ...(publisherEnabled ? { publisher: { enabled: true } } : {}),
-    }),
-  );
-  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
-  await writeFile(
-    join(home, 'wallets.json'),
-    JSON.stringify({
-      wallets: [{ address: coreOp.address, privateKey: coreOp.privateKey }],
-    }, null, 2) + '\n',
-    { mode: 0o600 },
-  );
-  if (publisherEnabled) {
-    await writeFile(
-      join(home, 'publisher-wallets.json'),
-      JSON.stringify({
-        wallets: [{ address: coreOp.address, privateKey: coreOp.privateKey }],
-      }, null, 2) + '\n',
-      { mode: 0o600 },
-    );
-  }
-}
-
-async function startDaemon(publisherEnabled = false): Promise<Daemon> {
-  if (!existsSync(CLI_ENTRY)) {
-    throw new Error(
-      `CLI not built at ${CLI_ENTRY}. Run "pnpm --filter @origintrail-official/dkg build" first.`,
-    );
-  }
+beforeAll(async () => {
+  // Route-plugin loading is fail-soft, so a missing fixture would otherwise show up as confusing 404s.
   if (!existsSync(ECHO_FIXTURE) || !existsSync(THROW_FIXTURE)) {
     throw new Error(`Sample route-plugin fixtures missing under ${FIXTURE_DIR}`);
   }
-  const home = await mkdtemp(join(tmpdir(), 'dkg-plugin-routes-e2e-'));
-  const apiPort = uniquePort(API_PORT_BASE);
-  const listenPort = uniquePort(LISTEN_PORT_BASE);
-  await writeDaemonConfig(home, apiPort, listenPort, publisherEnabled);
-
-  // Pipe daemon stdio to a file so startup failures (port bind, plugin load, chain init) surface in error messages.
-  const stdioLog = join(home, 'daemon-stdio.log');
-  const logHandle = await open(stdioLog, 'a');
-  const child = spawn('node', [CLI_ENTRY, 'daemon-worker'], {
-    env: {
-      ...process.env,
-      DKG_HOME: home,
-      DKG_API_PORT: String(apiPort),
-      DKG_NO_BLUE_GREEN: '1',
-      DKG_DISABLE_TELEMETRY: '1',
-    },
-    stdio: ['ignore', logHandle.fd, logHandle.fd],
-  });
-
-  const readDaemonStdioTail = async (n = 80): Promise<string> => {
-    try {
-      const buf = await readFile(stdioLog, 'utf-8');
-      const lines = buf.split('\n');
-      return lines.slice(-n).join('\n').trim();
-    } catch {
-      return '<could not read daemon stdio log>';
-    }
-  };
-
-  const daemon: Daemon = {
-    home,
-    apiPort,
-    listenPort,
-    child,
-    token: '',
-  };
-  child.once('exit', (code, signal) => {
-    daemon.exitCode = code;
-    daemon.signal = signal;
-  });
-
-  // afterAll can't reach our resources until we return — clean up on throw so a flaky startup doesn't leak the daemon / port.
-  try {
-    for (let i = 0; i < 90; i++) {
-      // Cover signal-exit too: `exitCode === null` with `signalCode !== null` means the daemon was killed mid-startup.
-      if (child.exitCode !== null || child.signalCode !== null) {
-        const tail = await readDaemonStdioTail();
-        throw new Error(
-          `Daemon exited early (code=${child.exitCode}, signal=${child.signalCode}).\n--- daemon stdio tail ---\n${tail}`,
-        );
-      }
-      try {
-        const res = await fetch(`http://127.0.0.1:${apiPort}/api/status`);
-        if (res.ok) break;
-      } catch {
-        /* not ready yet */
-      }
-      await sleep(500);
-      if (i === 89) {
-        const tail = await readDaemonStdioTail();
-        throw new Error(
-          `Daemon did not become ready within 45s.\n--- daemon stdio tail ---\n${tail}`,
-        );
-      }
-    }
-    // Close the parent's handle; the child still owns its dup'd fd so the log keeps growing until daemon exit.
-    await logHandle.close();
-
-    const raw = await readFile(join(home, 'auth.token'), 'utf-8');
-    const token = raw
-      .split('\n')
-      .map((l) => l.trim())
-      .find((l) => l.length > 0 && !l.startsWith('#'));
-    if (!token) throw new Error('No auth token found in auth.token');
-    daemon.token = token;
-
-    if (publisherEnabled) {
-      for (let i = 0; i < 60; i += 1) {
-        const res = await fetch(`http://127.0.0.1:${apiPort}/api/status`);
-        const body = await res.json().catch(() => ({})) as {
-          asyncPublisher?: { available?: boolean; reason?: string };
-        };
-        if (body.asyncPublisher?.available === true) break;
-        if (body.asyncPublisher?.reason !== 'publisher_starting') {
-          throw new Error(
-            `Async publisher failed readiness: ${body.asyncPublisher?.reason ?? res.status}`,
-          );
-        }
-        await sleep(100);
-        if (i === 59) throw new Error('Async publisher did not become ready in time');
-      }
-    }
-
-    return daemon;
-  } catch (err) {
-    // Both fields null = still alive; signal-exits leave exitCode null but set signalCode.
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill('SIGTERM');
-      await Promise.race([
-        new Promise<void>((resolve) => child.once('exit', () => resolve())),
-        sleep(5_000),
-      ]);
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill('SIGKILL');
-      }
-    }
-    await logHandle.close().catch(() => {});
-    await rm(home, { recursive: true, force: true }).catch(() => {});
-    throw err;
-  }
-}
-
-async function stopDaemon(d: Daemon | null): Promise<void> {
-  if (!d) return;
-  if (d.child.exitCode === null) {
-    const exited = new Promise<void>((resolve) => {
-      d.child.once('exit', () => resolve());
-    });
-    d.child.kill('SIGTERM');
-    await Promise.race([exited, sleep(10_000)]);
-    if (d.child.exitCode === null) d.child.kill('SIGKILL');
-  }
-  await rm(d.home, { recursive: true, force: true }).catch(() => {});
-}
-
-let daemon: Daemon | null = null;
-let publisherDaemon: Daemon | null = null;
-
-beforeAll(async () => {
-  daemon = await startDaemon();
-  publisherDaemon = await startDaemon(true);
+  const extraConfig = { routePlugins: [ECHO_FIXTURE, THROW_FIXTURE] };
+  daemon = await startLiveDaemon({ extraConfig });
+  publisherDaemon = await startLiveDaemon({ publisherEnabled: true, extraConfig });
 }, 90_000);
 
 afterAll(async () => {
-  await stopDaemon(daemon);
-  await stopDaemon(publisherDaemon);
-  daemon = null;
-  publisherDaemon = null;
+  await stopLiveDaemon(daemon);
+  await stopLiveDaemon(publisherDaemon);
 }, 20_000);
 
 function urlFor(path: string, target = daemon): string {
-  return `http://127.0.0.1:${target!.apiPort}${path}`;
+  return `${target!.base}${path}`;
 }
 
 describe('Route plugins — live daemon E2E', () => {

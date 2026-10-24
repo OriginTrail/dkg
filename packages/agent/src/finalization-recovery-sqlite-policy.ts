@@ -1,6 +1,8 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type {
-  FinalizationRecoveryReceiveInput,
+import {
+  FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD,
+  type FinalizationRecoveryFailureCode,
+  type FinalizationRecoveryReceiveInput,
 } from './finalization-recovery-store.js';
 
 const DEFAULT_MAX_ENTRIES = 128;
@@ -16,8 +18,12 @@ const DEFAULT_RAW_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_TERMINAL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_TERMINAL_ENTRIES = 128;
 const DEFAULT_MAX_TERMINAL_BYTES = 16 * 1024 * 1024;
+const DEFAULT_DISPLACE_MIN_AGE_MS = 5 * 60 * 1000;
+// The local copy could not be prepared for the finalization.
+const DEFAULT_DISPLACEABLE_FAILURE_SIGNATURES: readonly FinalizationRecoveryFailureCode[] =
+  Object.freeze(['workspace-unavailable']);
 
-export interface SqliteFinalizationRecoveryStoreOptions {
+export interface FinalizationRecoveryRetentionOptions {
   maxEntries?: number;
   maxTotalBytes?: number;
   maxEnvelopeBytes?: number;
@@ -31,6 +37,12 @@ export interface SqliteFinalizationRecoveryStoreOptions {
   terminalTtlMs?: number;
   maxTerminalEntries?: number;
   maxTerminalBytes?: number;
+  /** Consecutive identical failures after which a live entry may be displaced. */
+  displaceAfterFailureStreak?: number;
+  /** Minimum age of a live entry before it may be displaced. */
+  displaceMinAgeMs?: number;
+  /** Failure signatures whose entries may be displaced; empty disables displacement. */
+  displaceableFailureSignatures?: readonly FinalizationRecoveryFailureCode[];
   now?: () => number;
 }
 
@@ -48,6 +60,9 @@ export interface FinalizationRecoveryRetentionPolicy {
   terminalTtlMs: number;
   maxTerminalEntries: number;
   maxTerminalBytes: number;
+  displaceAfterFailureStreak: number;
+  displaceMinAgeMs: number;
+  displaceableFailureSignatures: readonly FinalizationRecoveryFailureCode[];
   now: () => number;
 }
 
@@ -63,7 +78,7 @@ function positiveInteger(value: number | undefined, fallback: number): number {
 }
 
 export function resolveFinalizationRecoveryRetentionPolicy(
-  options: SqliteFinalizationRecoveryStoreOptions,
+  options: FinalizationRecoveryRetentionOptions,
 ): FinalizationRecoveryRetentionPolicy {
   return {
     maxEntries: positiveInteger(options.maxEntries, DEFAULT_MAX_ENTRIES),
@@ -103,6 +118,17 @@ export function resolveFinalizationRecoveryRetentionPolicy(
       options.maxTerminalBytes,
       DEFAULT_MAX_TERMINAL_BYTES,
     ),
+    displaceAfterFailureStreak: positiveInteger(
+      options.displaceAfterFailureStreak,
+      FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD,
+    ),
+    displaceMinAgeMs: Number.isSafeInteger(options.displaceMinAgeMs)
+      && (options.displaceMinAgeMs ?? -1) >= 0
+      ? options.displaceMinAgeMs!
+      : DEFAULT_DISPLACE_MIN_AGE_MS,
+    displaceableFailureSignatures: Object.freeze([
+      ...(options.displaceableFailureSignatures ?? DEFAULT_DISPLACEABLE_FAILURE_SIGNATURES),
+    ]),
     now: options.now ?? Date.now,
   };
 }
@@ -147,7 +173,9 @@ export function pruneFinalizationRecoveryRowsWithinTransaction(
 export function hasFinalizationRecoveryDeferredCapacity(
   database: DatabaseSync,
   policy: FinalizationRecoveryRetentionPolicy,
-  input: FinalizationRecoveryReceiveInput,
+  input: Pick<FinalizationRecoveryReceiveInput, 'contextGraphId' | 'sourcePeerId'> & {
+    readonly rawMessage: { readonly byteLength: number };
+  },
 ): boolean {
   const total = database.prepare(`
     SELECT COUNT(*) AS count, COALESCE(SUM(length(raw_envelope)), 0) AS bytes
@@ -189,12 +217,15 @@ export function readFinalizationRecoveryDeferredCapacity(
   };
 }
 
-export function hasFinalizationRecoveryCapacity(
+export type FinalizationRecoveryCapacityShortfall = 'total' | 'context-graph' | 'peer';
+
+/** The first live-inbox limit `input` would exceed, if any. */
+export function finalizationRecoveryCapacityShortfall(
   database: DatabaseSync,
   policy: FinalizationRecoveryRetentionPolicy,
   input: FinalizationRecoveryReceiveInput,
   replacingKey?: string,
-): boolean {
+): FinalizationRecoveryCapacityShortfall | undefined {
   const live = database.prepare(`
     SELECT COUNT(*) AS count, COALESCE(SUM(length(raw_envelope)), 0) AS bytes
     FROM finalization_inbox_v1
@@ -204,22 +235,31 @@ export function hasFinalizationRecoveryCapacity(
   if (
     Number(live?.count ?? 0) >= policy.maxEntries
     || Number(live?.bytes ?? 0) + input.rawMessage.byteLength > policy.maxTotalBytes
-  ) return false;
+  ) return 'total';
   const graphCount = database.prepare(`
     SELECT COUNT(*) AS count FROM finalization_inbox_v1
     WHERE (state IN ('RECEIVED','VERIFIED','REORGED') OR publisher_upgrade_pending = 1)
       AND context_graph_id = ? AND (? IS NULL OR key != ?)
   `).get(input.contextGraphId, replacingKey ?? null, replacingKey ?? null);
-  if (Number(graphCount?.count ?? 0) >= policy.maxPerContextGraph) return false;
+  if (Number(graphCount?.count ?? 0) >= policy.maxPerContextGraph) return 'context-graph';
   if (input.sourcePeerId) {
     const peerCount = database.prepare(`
       SELECT COUNT(*) AS count FROM finalization_inbox_v1
       WHERE (state IN ('RECEIVED','VERIFIED','REORGED') OR publisher_upgrade_pending = 1)
         AND source_peer_id = ? AND (? IS NULL OR key != ?)
     `).get(input.sourcePeerId, replacingKey ?? null, replacingKey ?? null);
-    if (Number(peerCount?.count ?? 0) >= policy.maxPerPeer) return false;
+    if (Number(peerCount?.count ?? 0) >= policy.maxPerPeer) return 'peer';
   }
-  return true;
+  return undefined;
+}
+
+export function hasFinalizationRecoveryCapacity(
+  database: DatabaseSync,
+  policy: FinalizationRecoveryRetentionPolicy,
+  input: FinalizationRecoveryReceiveInput,
+  replacingKey?: string,
+): boolean {
+  return finalizationRecoveryCapacityShortfall(database, policy, input, replacingKey) === undefined;
 }
 
 export function readFinalizationRecoveryCapacity(

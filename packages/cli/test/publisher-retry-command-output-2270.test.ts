@@ -90,3 +90,59 @@ describe('dkg publisher retry output (#2270)', () => {
     expect(out).toMatch(/0 with nothing to retry/);
   });
 });
+
+// GH#2942 -- `dkg publisher job` is where an operator reads why a held job is held. The daemon
+// derives `retryState` (and its `blocker`) beside the job; printing only the job dropped exactly
+// the part that says what is missing and what an operator can and cannot do about it.
+describe('dkg publisher job output (#2942)', () => {
+  beforeEach(() => {
+    vi.spyOn(process, 'exit').mockImplementation(((code?: string | number | null) => {
+      throw new Error(`process.exit:${code}`);
+    }) as never);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const JOB = { jobId: 'job-1', status: 'failed', timestamps: { acceptedAt: 1_700_000_000_000 } };
+  const RETRY_STATE = {
+    autoRetryEligible: false,
+    waitingReason: 'pending_chain_proof',
+    blocker: { code: 'nonce_missing', summary: 'A CREATE needs the nonce its transaction reserved.', missing: ['nonce'] },
+  };
+
+  async function runJob(args: string[], client: Record<string, unknown>): Promise<Record<string, any>> {
+    const logs: string[] = [];
+    vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
+      logs.push(a.map(String).join(' '));
+    });
+    vi.spyOn(ApiClient, 'connect').mockResolvedValue(client as any);
+    const program = new Command();
+    program.exitOverride();
+    registerPublisherCommand(program);
+    await program.parseAsync(['publisher', 'job', ...args], { from: 'user' });
+    return JSON.parse(logs.join('\n'));
+  }
+
+  it('prints the derived retryState beside the job, leaving the job fields untouched', async () => {
+    const out = await runJob(['job-1'], {
+      publisherJob: async () => ({ job: JOB, retryState: RETRY_STATE }),
+    });
+
+    expect(out.retryState).toEqual(RETRY_STATE);
+    expect(out.jobId).toBe('job-1');
+    expect(out.status).toBe('failed');
+    // The existing rendering of timestamps is unchanged.
+    expect(out.timestamps.acceptedAt).toBe(new Date(1_700_000_000_000).toISOString());
+  });
+
+  it('prints it with --payload too', async () => {
+    const out = await runJob(['job-1', '--payload'], {
+      publisherJobPayload: async () => ({ job: JOB, payload: { quads: [] }, retryState: RETRY_STATE }),
+    });
+
+    expect(out.retryState).toEqual(RETRY_STATE);
+    expect(out.payload).toEqual({ quads: [] });
+  });
+});

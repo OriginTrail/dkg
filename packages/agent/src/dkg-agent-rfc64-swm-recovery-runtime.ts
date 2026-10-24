@@ -2,6 +2,8 @@
 
 /** Canonical live RFC-64 graph-complete SWM recovery runtime. */
 
+import type { ContextGraphPolicyV1 } from '@origintrail-official/dkg-core';
+
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
@@ -30,6 +32,11 @@ interface Rfc64SwmRecoveryRuntimeSelectionV1 {
   readonly eligibleContextGraphs: readonly string[];
   readonly subscriptionDriven: boolean;
 }
+
+type Rfc64DynamicallyAcceptedRecoveryPolicyV1 = Readonly<Pick<
+  ContextGraphPolicyV1,
+  'accessPolicy' | 'source'
+>>;
 
 export interface Rfc64CatalogSubscriptionTransitionV1 {
   readonly previousSubscribed: boolean;
@@ -98,6 +105,9 @@ export interface Rfc64SwmRecoveryRuntimePortsV1 {
       contextGraphId: string,
     ) => Readonly<Rfc64CatalogAuthorityPolicyV1>;
     resolveRecoveryConfig: () => Readonly<Rfc64RuntimeCatalogBootstrapConfigV1> | undefined;
+    resolveDynamicallyAcceptedPolicy: (
+      contextGraphId: string,
+    ) => Rfc64DynamicallyAcceptedRecoveryPolicyV1 | null;
   }>;
   readonly admission: Readonly<{
     invalidateContextGraph: (contextGraphId: string) => readonly string[];
@@ -222,9 +232,22 @@ export class Rfc64SwmRecoveryRuntimeV1 {
     selected: boolean,
   ): Readonly<Rfc64SwmRecoveryRuntimeAuthorityV1> {
     const config = this.ports.authority.resolveRecoveryConfig();
+    const configuredLane = resolveRfc64SwmRecoveryLaneV1(config, contextGraphId);
+    const acceptedPolicy = configuredLane === undefined
+      ? this.ports.authority.resolveDynamicallyAcceptedPolicy(contextGraphId)
+      : null;
+    const dynamicLane = acceptedPolicy === null
+      ? undefined
+      : acceptedPolicy.accessPolicy === 0
+        ? 'selected-public' as const
+        : 'ordinary-private' as const;
     return projectRfc64SwmRecoveryAuthorityForSelectionV1({
       contextGraphId,
-      lane: resolveRfc64SwmRecoveryLaneV1(config, contextGraphId),
+      // Static bootstrap remains authoritative when present. The fallback is
+      // only for a release-native policy that crossed the accepted-current
+      // dynamic boundary after construction. Receiver/selection authority
+      // still decides whether the resolved lane is active.
+      lane: configuredLane ?? dynamicLane,
       configuredAuthority: this.ports.authority.resolveConfigured(contextGraphId),
       selection: { selected },
     });

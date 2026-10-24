@@ -192,6 +192,17 @@ describe('SWM Sender Key crypto', () => {
     expect(base).toBe(reordered);
     expect(computeSwmSenderKeyMembershipHash({
       contextGraphId: 'cg-private',
+      subGraphName: 'chat',
+      members: [
+        { agentAddress: '0x1111111111111111111111111111111111111111', recipientKeyId: 'a' },
+        { agentAddress: '0x2222222222222222222222222222222222222222', recipientKeyId: 'b' },
+        // One authenticated key can have several peer-bound transport
+        // variants, but remains one logical Sender Key member.
+        { agentAddress: '0x1111111111111111111111111111111111111111', recipientKeyId: 'a' },
+      ],
+    })).toBe(base);
+    expect(computeSwmSenderKeyMembershipHash({
+      contextGraphId: 'cg-private',
       subGraphName: 'tasks',
       members: [
         { agentAddress: '0x1111111111111111111111111111111111111111', recipientKeyId: 'a' },

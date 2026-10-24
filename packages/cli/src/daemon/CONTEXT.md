@@ -54,7 +54,7 @@ explicitly claims HEAD so liveness probes never reach plugins). Other methods
 go through auth. Plugins do not get a per-plugin auth surface — finer-grained
 policy reads `ctx.actor.authentication` / `ctx.actor.effectiveAgentAddress`
 (or the deprecated plugin projections while migrating). See
-`ARCHITECTURE.md` "Auth boundary — `httpAuthGuard`" for the full breakdown.
+`docs/ARCHITECTURE.md` "Auth boundary — `httpAuthGuard`" for the full breakdown.
 
 **Operator state**:
 Per-install daemon state in `~/.dkg/` — PID file, log file, API port marker,

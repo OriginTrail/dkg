@@ -7,8 +7,10 @@ import { loadAbi } from '../src/evm-adapter-abi.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_EVENT_NAMES,
   contextGraphAuthorityEventTopics,
-  normalizeContextGraphAuthorityIndexLog,
+  decodeContextGraphAuthorityIndexLog,
 } from '../src/evm-context-graph-authority-source.js';
+import { reduceContextGraphAuthorityIndexPage } from
+  '../src/context-graph-authority-index-reducer.js';
 
 const OWNER = `0x${'11'.repeat(20)}`;
 const NEXT_OWNER = `0x${'22'.repeat(20)}`;
@@ -51,10 +53,10 @@ describe('ContextGraphStorage authority ABI source', () => {
       owner: OWNER,
       nameHash: NAME_HASH,
       participantAgents: [AGENT],
-      accessPolicy: 1,
-      publishPolicy: 0,
+      accessPolicy: 1n,
+      publishPolicy: 0n,
       publishAuthority: AUTHORITY,
-      publishAuthorityAccountId: '7',
+      publishAuthorityAccountId: 7n,
     }],
     ['Transfer', [OWNER, NEXT_OWNER, 9n], {
       name: 'Transfer', contextGraphId: 9n, from: OWNER, to: NEXT_OWNER,
@@ -62,15 +64,15 @@ describe('ContextGraphStorage authority ABI source', () => {
     ['PublishPolicyUpdated', [9n, 1, ethers.ZeroAddress, 0n], {
       name: 'PublishPolicyUpdated',
       contextGraphId: 9n,
-      publishPolicy: 1,
-      publishAuthority: null,
-      publishAuthorityAccountId: '0',
+      publishPolicy: 1n,
+      publishAuthority: ethers.ZeroAddress,
+      publishAuthorityAccountId: 0n,
     }],
     ['PublishAuthorityUpdated', [9n, AUTHORITY, 7n], {
       name: 'PublishAuthorityUpdated',
       contextGraphId: 9n,
       publishAuthority: AUTHORITY,
-      publishAuthorityAccountId: '7',
+      publishAuthorityAccountId: 7n,
     }],
     ['AgentParticipantAdded', [9n, AGENT], {
       name: 'AgentParticipantAdded', contextGraphId: 9n, agent: AGENT,
@@ -81,12 +83,12 @@ describe('ContextGraphStorage authority ABI source', () => {
     ['ContextGraphDeactivated', [9n], {
       name: 'ContextGraphDeactivated', contextGraphId: 9n,
     }],
-  ] as const)('decodes a real %s log into the closed index event', (
+  ] as const)('decodes a real %s log into the raw index DTO', (
     name,
     values,
     expected,
   ) => {
-    expect(normalizeContextGraphAuthorityIndexLog(
+    expect(decodeContextGraphAuthorityIndexLog(
       STORAGE,
       encodedLog(name, values, 4),
     )).toEqual({
@@ -94,6 +96,33 @@ describe('ContextGraphStorage authority ABI source', () => {
       blockHash: BLOCK_HASH,
       index: 4,
       ...expected,
+    });
+  });
+
+  it('canonicalizes raw ABI scalars once at the page-reduction boundary', () => {
+    const raw = decodeContextGraphAuthorityIndexLog(
+      STORAGE,
+      encodedLog('ContextGraphCreated', [
+        9n, OWNER, NAME_HASH, [AGENT], 0n, 1, 0, AUTHORITY, 7n,
+      ], 4),
+    );
+    expect(raw).toMatchObject({
+      accessPolicy: 1n,
+      publishPolicy: 0n,
+      publishAuthorityAccountId: 7n,
+    });
+
+    const state = reduceContextGraphAuthorityIndexPage({
+      deploymentBlockNumber: 123,
+      throughBlockNumber: 123,
+      throughBlockHash: BLOCK_HASH,
+      events: [raw],
+    }).checkpoint.states[0];
+    expect(state).toMatchObject({
+      accessPolicy: 1,
+      publishPolicy: 0,
+      publishAuthorityAccountId: '7',
+      participantAgents: [AGENT],
     });
   });
 });

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
 import { PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS, SYNC_RECONNECT_FLAP_GRACE_MS } from '../src/dkg-agent-constants.js';
 import {
@@ -35,7 +36,7 @@ describe('sync-on-connect churn gates', () => {
       remotePeer: PEER_A,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [configuredGraph],
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags,
@@ -61,7 +62,7 @@ describe('sync-on-connect churn gates', () => {
       remotePeer: PEER_A,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['selected-cg'],
       getDurableSyncContextGraphs: () => ['selected-cg'],
       syncFromPeer,
@@ -86,7 +87,7 @@ describe('sync-on-connect churn gates', () => {
       remotePeer: PEER_A,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       getDurableSyncContextGraphs: () => [],
       syncFromPeer,
@@ -235,11 +236,13 @@ describe('sync-on-connect churn gates', () => {
     // The third argument is the bounded admission origin (issue #2006): the
     // reconciler's queue pressure must be attributable to `reconcile`, not
     // indistinguishable from sync-on-connect. Selected/ordinary phase history
-    // exists only inside a queued peer job.
+    // exists only inside a queued peer job. The fourth, `null`, is the graph
+    // scope: the reconciler always syncs the peer's whole scope.
     expect(trySyncFromPeer.calls).toEqual([[
       PEER_A,
       expect.any(Function),
       'reconcile',
+      null,
     ]]);
   });
 
@@ -706,7 +709,7 @@ describe('sync-on-connect churn gates', () => {
       remotePeer: PEER_A,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['cg-a'],
       syncFromPeer: async () => emptyDetailedSync({
         insertedTriples: 3,
@@ -756,7 +759,7 @@ describe('sync-on-connect churn gates', () => {
       remotePeer: PEER_A,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['cg-a'],
       syncFromPeer: async () => emptyDetailedSync({
         failedPeers: 1,
@@ -793,7 +796,7 @@ describe('sync-on-connect churn gates', () => {
       remotePeer: PEER_A,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['unreachable-cg', 'denied-cg'],
       syncFromPeer: async () => emptyDetailedSync({
         failedPeers: 1,
@@ -849,7 +852,7 @@ describe('sync-on-connect churn gates', () => {
       remotePeer: PEER_A,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => contextGraphs,
       syncFromPeer,
       refreshMetaSyncedFlags,
@@ -887,7 +890,7 @@ describe('sync-on-connect churn gates', () => {
       remotePeer: PEER_A,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['unauthorized-cg'],
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags: async () => undefined,
@@ -912,7 +915,7 @@ describe('sync-on-connect churn gates', () => {
       remotePeer: PEER_A,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['eligible-cg'],
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags: async () => undefined,
@@ -934,7 +937,7 @@ describe('sync-on-connect churn gates', () => {
       remotePeer: PEER_A,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['eligible-cg'],
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags: async () => undefined,

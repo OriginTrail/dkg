@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { DkgDaemonClient } from '../src/dkg-client.js';
+import { DkgDaemonClient, DkgDaemonHttpError, DkgDaemonOutcomeUnknownError } from '../src/dkg-client.js';
 
 describe('DkgDaemonClient', () => {
   let client: DkgDaemonClient;
@@ -1301,6 +1301,121 @@ describe('DkgDaemonClient', () => {
         alsoPublishVm: [],
       } as any)).rejects.toThrow('alsoPublishVm must be a boolean or publish-options object');
       expect(fetchCalls).toHaveLength(0);
+    });
+  });
+
+  // -- Per-route timeout classes ------------------------------------------------
+  // Real, small deadlines: a 20 ms default class and a 1 s long-mutation class. The
+  // stub daemon answers after `latencyMs` unless the request's signal aborts first,
+  // in which case it rejects with the abort reason, as fetch does.
+  describe('per-route timeout classes', () => {
+    const quads = [{ subject: 's', predicate: 'p', object: 'o', graph: '' }];
+    const slowDaemon = (latencyMs: number, status = 200, response: unknown = { kaId: '7', status: 'confirmed' }) => {
+      globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        fetchCalls.push([input, init]);
+        return new Promise<Response>((resolve, reject) => {
+          const timer = setTimeout(
+            () => resolve(new Response(JSON.stringify(response), { status })),
+            latencyMs,
+          );
+          init?.signal?.addEventListener('abort', () => {
+            clearTimeout(timer);
+            reject(init.signal!.reason);
+          }, { once: true });
+        });
+      }) as typeof fetch;
+    };
+    const timed = (longMutationTimeoutMs = 1_000) =>
+      new DkgDaemonClient({ baseUrl: 'http://localhost:9200', apiToken: '', timeoutMs: 20, longMutationTimeoutMs });
+
+    it('a publish that outlasts the default timeout is not reported as failed', async () => {
+      slowDaemon(80);
+      await expect(timed().knowledgeAssetPublish('cg-1', 'f')).resolves.toEqual({ kaId: '7', status: 'confirmed' });
+    });
+
+    it('a quick mutation with the same latency still times out (control)', async () => {
+      slowDaemon(80);
+      await expect(timed().knowledgeAssetWrite('cg-1', 'f', quads)).rejects.toMatchObject({ name: 'TimeoutError' });
+    });
+
+    it('share, import-file and a sharing create take the long class too', async () => {
+      slowDaemon(80);
+      const client = timed();
+      await expect(client.knowledgeAssetShare('cg-1', 'f')).resolves.toBeDefined();
+      await expect(client.promoteAssertion('cg-1', 'f')).resolves.toBeDefined();
+      await expect(client.importAssertionFile('cg-1', 'f', Buffer.from('# doc'), 'doc.md')).resolves.toBeDefined();
+      // Quads seal and, by the client default, share inside the create request.
+      await expect(client.createKnowledgeAsset('cg-1', 'f', { quads })).resolves.toBeDefined();
+      await expect(client.createKnowledgeAsset('cg-1', 'f', { alsoPublishVm: {} })).resolves.toBeDefined();
+    });
+
+    it('a create that neither shares nor publishes keeps the default class', async () => {
+      slowDaemon(80);
+      await expect(timed().createKnowledgeAsset('cg-1', 'f', { quads, alsoShareSwm: false }))
+        .rejects.toMatchObject({ name: 'TimeoutError' });
+    });
+
+    it('a long mutation past its deadline reports outcome unknown, pointing at the history tool', async () => {
+      slowDaemon(400);
+      const err = await timed(100).knowledgeAssetPublish('cg-1', 'f').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(DkgDaemonOutcomeUnknownError);
+      expect(err).toMatchObject({ code: 'OUTCOME_UNKNOWN', path: '/api/knowledge-assets/f/vm/publish', timeoutMs: 100 });
+      expect((err as Error).message).toContain('dkg_knowledge_asset_history');
+      const importErr = await timed(100).importAssertionFile('cg-1', 'f', Buffer.from('# doc'), 'doc.md')
+        .catch((e: unknown) => e);
+      expect(importErr).toBeInstanceOf(DkgDaemonOutcomeUnknownError);
+    });
+
+    it('a daemon answer on a long mutation keeps its HTTP error', async () => {
+      slowDaemon(0, 409, { code: 'VM_PUBLISH_PRECONDITION', error: 'not shared' });
+      const err = await timed().knowledgeAssetPublish('cg-1', 'f').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(DkgDaemonHttpError);
+      expect(err).toMatchObject({ status: 409 });
+    });
+
+    // Node's fetch (undici) stops waiting on its own after 300 s without headers or body
+    // progress; that surfaces as a TypeError whose cause carries the undici code.
+    const undiciTimeout = (message: string, code: string) =>
+      Object.assign(new TypeError(message), { cause: { code } });
+
+    it("treats Node fetch's own headers timeout on a long mutation as outcome unknown", async () => {
+      const err = undiciTimeout('fetch failed', 'UND_ERR_HEADERS_TIMEOUT');
+      globalThis.fetch = (async () => { throw err; }) as typeof fetch;
+      await expect(timed().knowledgeAssetPublish('cg-1', 'f')).rejects.toBeInstanceOf(DkgDaemonOutcomeUnknownError);
+      // Outside the long class it stays the raw transport error.
+      await expect(timed().knowledgeAssetWrite('cg-1', 'f', quads)).rejects.toBe(err);
+    });
+
+    it("treats Node fetch's own body timeout on a long mutation as outcome unknown", async () => {
+      const err = undiciTimeout('terminated', 'UND_ERR_BODY_TIMEOUT');
+      globalThis.fetch = (async () => ({
+        ok: true,
+        status: 200,
+        json: async () => { throw err; },
+      }) as unknown as Response) as typeof fetch;
+      await expect(timed().knowledgeAssetShare('cg-1', 'f')).rejects.toBeInstanceOf(DkgDaemonOutcomeUnknownError);
+    });
+
+    it('passes a hostile transport error on a long mutation through untouched', async () => {
+      const hostileCause = new Proxy({}, { get: () => { throw new Error('hostile getter'); } });
+      const transportError = Object.assign(new TypeError('unclassified transport error'), { cause: hostileCause });
+      globalThis.fetch = (async () => { throw transportError; }) as typeof fetch;
+      await expect(timed().knowledgeAssetPublish('cg-1', 'f')).rejects.toBe(transportError);
+    });
+
+    it('a daemon answer on import-file keeps its HTTP error', async () => {
+      slowDaemon(0, 413, { error: 'file too large' });
+      const err = await timed().importAssertionFile('cg-1', 'f', Buffer.from('# doc'), 'doc.md')
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(DkgDaemonHttpError);
+      expect(err).toMatchObject({ status: 413, body: { error: 'file too large' } });
+      expect((err as Error).message).toContain('DKG daemon /api/knowledge-assets/f/wm/import-file responded 413');
+    });
+
+    it('never lets the long class fall below an explicit default timeout', async () => {
+      slowDaemon(80);
+      const client = new DkgDaemonClient({ baseUrl: 'http://localhost:9200', apiToken: '', timeoutMs: 1_000, longMutationTimeoutMs: 20 });
+      await expect(client.knowledgeAssetPublish('cg-1', 'f')).resolves.toBeDefined();
     });
   });
 });

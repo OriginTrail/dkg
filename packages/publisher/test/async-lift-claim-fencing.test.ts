@@ -1,3 +1,5 @@
+import { StoreReadTransportFailure } from '@origintrail-official/dkg-storage';
+import type { AsyncLiftJournalCompletion } from '../src/async-lift-journal-completion.js';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
@@ -122,15 +124,15 @@ describe('async-lift claim fencing', () => {
     const firstBefore = await publisher.getStatus(firstId);
     const secondBefore = await publisher.getStatus(secondId);
     if (!secondBefore) throw new Error('expected second job');
-    const coordinator = (publisher as unknown as {
-      claimCoordinator: AsyncLiftClaimCoordinator;
-    }).claimCoordinator;
+    const { claimCoordinator: coordinator, journalCompletion: completion } = publisher as unknown as {
+      claimCoordinator: AsyncLiftClaimCoordinator; journalCompletion: AsyncLiftJournalCompletion;
+    };
 
-    await expect(coordinator.runJobTransaction(firstId, async (transaction) => {
+    await expect(completion.runPublicOperation((owner) => coordinator.runJobTransaction(owner, firstId, async (transaction) => {
       if (transaction.kind !== 'present') throw new Error('expected first job');
       // The scope is bound to job-a even though job-b has the same broad LiftJob type.
       return await transaction.scope.commit(secondBefore, 'reaccept');
-    })).rejects.toThrow('cannot replace LiftJob job-a with job-b');
+    }))).rejects.toThrow('cannot replace LiftJob job-a with job-b');
 
     expect(await publisher.getStatus(firstId)).toEqual(firstBefore);
     expect(await publisher.getStatus(secondId)).toEqual(secondBefore);
@@ -166,14 +168,14 @@ describe('async-lift claim fencing', () => {
         updatedAt: now,
       },
     };
-    const coordinator = (publisher as unknown as {
-      claimCoordinator: AsyncLiftClaimCoordinator;
-    }).claimCoordinator;
+    const { claimCoordinator: coordinator, journalCompletion: completion } = publisher as unknown as {
+      claimCoordinator: AsyncLiftClaimCoordinator; journalCompletion: AsyncLiftJournalCompletion;
+    };
 
-    await expect(coordinator.runJobTransaction(jobId, async (transaction) => {
+    await expect(completion.runPublicOperation((owner) => coordinator.runJobTransaction(owner, jobId, async (transaction) => {
       if (transaction.kind !== 'present') throw new Error('expected job');
       return await transaction.scope.commit(illegal, 'broadcast');
-    })).rejects.toThrow(
+    }))).rejects.toThrow(
       'Invalid LiftJob transition: accepted -> broadcast. Allowed: claimed, failed',
     );
 
@@ -212,18 +214,18 @@ describe('async-lift claim fencing', () => {
       idGenerator: () => 'job-removed-scope',
       now: () => now,
     });
-    const coordinator = (publisher as unknown as {
-      claimCoordinator: AsyncLiftClaimCoordinator;
-    }).claimCoordinator;
+    const { claimCoordinator: coordinator, journalCompletion: completion } = publisher as unknown as {
+      claimCoordinator: AsyncLiftClaimCoordinator; journalCompletion: AsyncLiftJournalCompletion;
+    };
 
-    await coordinator.runJobTransaction(jobId, async (transaction) => {
+    await completion.runPublicOperation((owner) => coordinator.runJobTransaction(owner, jobId, async (transaction) => {
       if (transaction.kind !== 'present') throw new Error('expected job');
       const { current, scope } = transaction;
       await scope.commitRemoval();
       await expect(scope.commit(current, 'reaccept')).rejects.toThrow(
         `LiftJob transition scope for ${jobId} is closed`,
       );
-    });
+    }));
 
     expect(await publisher.getStatus(jobId)).toBeNull();
   });
@@ -239,11 +241,11 @@ describe('async-lift claim fencing', () => {
         timestamps: { acceptedAt: now, claimedAt: now, broadcastAt: now, updatedAt: now },
       } as never,
     });
-    const coordinator = (publisher as unknown as {
-      claimCoordinator: AsyncLiftClaimCoordinator;
-    }).claimCoordinator;
+    const { claimCoordinator: coordinator, journalCompletion: completion } = publisher as unknown as {
+      claimCoordinator: AsyncLiftClaimCoordinator; journalCompletion: AsyncLiftJournalCompletion;
+    };
 
-    await coordinator.runJobTransaction(jobId, async (transaction) => {
+    await completion.runPublicOperation((owner) => coordinator.runJobTransaction(owner, jobId, async (transaction) => {
       if (transaction.kind !== 'compatibility') throw new Error('expected compatibility job');
       expect(Object.keys(transaction.scope).sort()).toEqual([
         'commitProofFailure',
@@ -255,7 +257,7 @@ describe('async-lift claim fencing', () => {
       expect('commit' in transaction.scope).toBe(false);
       expect('commitProofInclusion' in transaction.scope).toBe(false);
       await transaction.scope.commitRemoval();
-    });
+    }));
 
     expect(await publisher.getStatus(jobId)).toBeNull();
   });
@@ -466,7 +468,7 @@ describe('async-lift claim fencing', () => {
     const firstClaim = await publisher.claimNext('wallet-a');
     if (!firstClaim) throw new Error('expected first claim');
     const staleSession = publisher.openClaimSession(firstClaim);
-    await staleSession.recordExecutionFailure('claimed', new Error('workspace unavailable'));
+    await staleSession.recordExecutionFailure('claimed', new StoreReadTransportFailure(new TypeError('fetch failed')));
     await expect(staleSession.recordExecutionFailure('claimed', new Error('overwrite attempt')))
       .rejects.toBeInstanceOf(StaleLiftJobClaimError);
 
@@ -645,8 +647,8 @@ describe('async-lift claim fencing', () => {
   it('always releases the processing marker when claim execution escapes with a persistence fault', async () => {
     let failNextJobWrite = false;
     let jobId = '';
-    const originalReplaceSubject = store.replaceSubject.bind(store);
-    store.replaceSubject = async (...args) => {
+    const originalReplaceSubject = store.replaceSubjectAndInsert.bind(store);
+    store.replaceSubjectAndInsert = async (...args) => {
       if (failNextJobWrite && args[1].includes(jobId)) {
         failNextJobWrite = false;
         throw new Error('injected job persistence fault');
@@ -680,8 +682,8 @@ describe('async-lift claim fencing', () => {
   it('preserves the durable broadcast when publish-result persistence faults after send', async () => {
     let failNextJobWrite = false;
     let jobId = '';
-    const originalReplaceSubject = store.replaceSubject.bind(store);
-    store.replaceSubject = async (...args) => {
+    const originalReplaceSubject = store.replaceSubjectAndInsert.bind(store);
+    store.replaceSubjectAndInsert = async (...args) => {
       if (failNextJobWrite && args[1].includes(jobId)) {
         failNextJobWrite = false;
         throw new Error('injected post-send result persistence fault');
