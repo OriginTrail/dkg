@@ -53,6 +53,7 @@ export default defineConfig({
           'test/vm-publish-intent-backfill.test.ts',
           'test/agent-connect-routes.test.ts',
           'test/preferred-relays.test.ts',
+          'test/lan-addresses.test.ts',
           'test/reconcile-503-mapping.test.ts',
           'test/sealed-create-retry-route.test.ts',
           'test/config.test.ts',
@@ -73,6 +74,8 @@ export default defineConfig({
           'test/semantic-runtime-routes.test.ts',
           'test/semantic-runtime-safe-llm-adapter.test.ts',
           'test/semantic-runtime-local-llm-adapter.test.ts',
+          'test/semantic-runtime-n8n-adapter.test.ts',
+          'test/semantic-runtime-n8n-native.test.ts',
           'test/semantic-runtime-remote-execute-adapter.test.ts',
           'test/status-route-rpc.test.ts',
           // Pure: in-process status route and a chain adapter over scripted endpoints.
@@ -191,6 +194,7 @@ export default defineConfig({
           'test/auto-update-workspace-clean.test.ts',
           'test/maintenance-update-gate.test.ts',
           'test/node-runtime-preflight.test.ts',
+          'test/outbound-brotli-refusal.test.ts',
           'test/dkg-doctor.test.ts',
           'test/metrics-collector-config.test.ts',
           'test/init.test.ts',
@@ -228,6 +232,8 @@ export default defineConfig({
           // `/api/status` → `eventLoopDelay`: the gauge with a fake histogram
           // plus one real-histogram smoke test, and the route block shape.
           'test/event-loop-delay-monitor.test.ts',
+          // The periodic `resource_usage` line: its fields and its schedule.
+          'test/resource-usage-log.test.ts',
           'test/supervisor-liveness.test.ts',
           'test/liveness-diagnostics.test.ts',
           'test/liveness-supervisor-log.test.ts',
@@ -249,6 +255,7 @@ export default defineConfig({
           'test/async-promote-bookkeeping-recovery.test.ts',
           'test/async-promote-queue-e2e.test.ts',
           'test/knowledge-assets-1116-share-errors.test.ts',
+          'test/knowledge-asset-pull-recovery.test.ts',
           'test/knowledge-assets-sub-graph-refusal.test.ts',
           'test/import-artifact-routes.test.ts',
           'test/shared-memory-catchup-durable.test.ts',

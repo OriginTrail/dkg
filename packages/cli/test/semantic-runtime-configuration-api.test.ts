@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { n8nWorkflowSha256 } from '../src/semantic-runtime-n8n-contract.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -372,6 +373,125 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     const result = await f.manager.programs.invoke(operation);
     expect(result.outputs).toEqual([6]); expect(result.trace?.calls).toEqual([expect.objectContaining({ kind: 'program', target: f.program.programIri,
       status: 'succeeded', result: 6, durationMs: expect.any(Number), executionIri: expect.stringMatching(/^urn:sr:execution:/) })]);
+  });
+
+  it('invokes an n8n-backed Program KA from a signed client and a parent Program, with durable replay and revocation', async () => {
+    const n8nTool = 'urn:dkg:tool:n8n';
+    const definition = { versionId: 'reviewed-version-1', nodes: [{ id: 'normalize', name: 'Normalize', type: 'n8n-nodes-base.set', typeVersion: 3.4,
+      parameters: {} }], connections: {}, settings: { executionOrder: 'v1' } };
+    const schema = { type: 'object', required: ['text'], additionalProperties: false,
+      properties: { text: { type: 'string', maxLength: 256 } } };
+    const n8n = { toolIri: n8nTool, workflowId: 'normalize', workflowSha256: n8nWorkflowSha256(definition), inputSchema: schema, outputSchema: schema };
+    const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
+      export function run(input: unknown) { return invoke_tool('${n8nTool}', input); }`, { graphId: graph, n8n }, [n8nTool]);
+    const apiTokenFile = join(f.target.dir, 'n8n-api'), webhookTokenFile = join(f.target.dir, 'n8n-webhook');
+    writeFileSync(apiTokenFile, 'private-api-token-for-local-test', { mode: 0o600 });
+    writeFileSync(webhookTokenFile, 'private-webhook-token-for-local-test', { mode: 0o600 });
+    f.target.config.semanticRuntime.n8n = { baseUrl: 'http://127.0.0.1:5679', apiTokenFile, webhookTokenFile,
+      workflows: [{ contextGraphId: graph, executorAgentAddress: owner, workflowId: 'normalize', workflowSha256: n8n.workflowSha256 }] };
+    let dispatches = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: URL, init: RequestInit) => {
+      const u = new URL(String(url));
+      if (u.pathname === '/api/v1/workflows/normalize') return Response.json({ ...definition, id: 'normalize', active: true });
+      if (u.pathname === '/webhook/dkg-capability-normalize') {
+        dispatches++; const { input } = JSON.parse(String(init.body));
+        return Response.json({ executionId: String(dispatches), output: { text: input.text.trim().toUpperCase() } });
+      }
+      return Response.json({ id: u.pathname.split('/').pop(), workflowId: 'normalize', status: 'success', workflowVersionId: 'reviewed-version-1', workflowData: definition });
+    }));
+    try {
+      const approval = await f.approve();
+      expect(approval.resolution?.executable).toBe(true);
+      await f.client.routes.create({ ...f.operation, targetPeerId: f.agent.peerId });
+      const prepared = f.client.programs.prepareInvocation({ ...f.operation, inputs: [{ text: '  hello dkg  ' }] });
+      const result = await f.client.programs.invoke(prepared);
+      expect(result.outputs).toMatchObject([{ kind: 'n8n-result', n8nExecutionId: '1', output: { text: 'HELLO DKG' } }]);
+      expect(await f.client.programs.invoke(prepared)).toEqual(result); expect(dispatches).toBe(1);
+      await expect(f.client.programs.invoke({ ...prepared, inputs: [{ text: 'different' }] })).rejects.toMatchObject({ status: 409 });
+      await expect(f.client.programs.invoke({ ...f.operation, inputs: [{ text: 10 }] })).rejects.toMatchObject({ status: 422 });
+      expect(dispatches).toBe(1);
+      const parent = await f.manager.programs.upload({ graphId: sourceGraph, language: 'typescript-v1', requiredTools: [],
+        permittedPrograms: [f.program.programIri], source: `import { invoke_program } from '${toolApi}';
+          export function run(input: unknown) { return invoke_program('${f.program.programIri}', [input]); }` });
+      const parentOperation = { graphId: graph, operationIri: 'urn:test:n8n-parent' };
+      await f.manager.programs.approve({ ...parentOperation, program: parent, allowedCallers: [caller], typescript: { children: [f.operation] } });
+      await f.client.routes.create({ ...parentOperation, targetPeerId: f.agent.peerId });
+      const parentResult = await f.client.programs.invoke({ ...parentOperation, inputs: [{ text: '  composed  ' }] });
+      expect(parentResult.outputs).toMatchObject([{ output: { text: 'COMPOSED' } }]); expect(dispatches).toBe(2);
+      const receipt = await f.store.query(`SELECT ?output WHERE { GRAPH ?g { <${result.executionIri}> <${SR}output> ?output } }`);
+      expect(JSON.stringify(receipt)).toContain('HELLO DKG');
+      await f.manager.programs.revoke({ ...f.operation, expectedRevision: approval.revision });
+      await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ status: 403 }); expect(dispatches).toBe(2);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it.each(['complete', 'new-call', 'missing-acknowledgement'])('reconciles native results without dispatching new work (%s)', async mode => {
+    const extraCall = mode === 'new-call';
+    const n8nTool = 'urn:dkg:tool:n8n', workflowId = 'native-inspection';
+    const definition = { versionId: 'published-native-1', nodes: [{ id: 'component', name: 'Component',
+      type: 'n8n-nodes-base.set', typeVersion: 3.4, parameters: { hidden: 'reviewed' } }],
+      connections: {}, settings: { executionOrder: 'v1' } };
+    const string = { type: 'string', maxLength: 8192 };
+    const outputSchema = { type: 'object', additionalProperties: false, required: ['ok', 'itemsJson', 'portsJson', 'error'],
+      properties: { ok: { type: 'boolean' }, itemsJson: string, portsJson: string, error: string } };
+    const inputSchema = { type: 'object', additionalProperties: false, required: ['text'], properties: { text: string } };
+    const n8n = { toolIri: n8nTool, workflowId, workflowSha256: n8nWorkflowSha256(definition), inputSchema, outputSchema,
+      result: { nodes: ['Component'] } };
+    const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
+      export async function run(input: unknown) {
+        const value = await invoke_tool('${n8nTool}', input);
+        ${extraCall ? `await invoke_tool('${n8nTool}', input);` : ''}
+        return value;
+      }`, { graphId: graph, n8n }, [n8nTool]);
+    const apiTokenFile = join(f.target.dir, 'native-api'), webhookTokenFile = join(f.target.dir, 'native-webhook');
+    writeFileSync(apiTokenFile, 'unit-native-api-fixture'); writeFileSync(webhookTokenFile, 'unit-native-webhook-fixture');
+    f.target.config.semanticRuntime.n8nNative = { baseUrl: 'http://127.0.0.1:5679', apiTokenFile, webhookTokenFile,
+      workflows: [{ contextGraphId: graph, executorAgentAddress: owner, workflowId, workflowSha256: n8n.workflowSha256 }] };
+    let dispatches = 0, interrupted = true, publishedVersion = definition.versionId;
+    vi.stubGlobal('fetch', vi.fn(async (url: URL, _init: RequestInit) => {
+      const u = new URL(String(url));
+      if (u.pathname.startsWith('/api/v1/workflows/')) return Response.json({ ...definition, versionId: publishedVersion, id: workflowId, active: true });
+      if (u.pathname.startsWith('/webhook/')) {
+        dispatches++;
+        if (mode === 'missing-acknowledgement') throw new Error('acknowledgement-lost');
+        return Response.json({ executionId: '42' });
+      }
+      if (interrupted) throw new Error('interrupted-after-durable-ack');
+      const snapshot = structuredClone(definition); snapshot.nodes[0]!.parameters = {} as any;
+      return Response.json({ id: '42', workflowId, workflowVersionId: definition.versionId, status: 'success', workflowData: snapshot,
+        data: { resultData: { runData: { Component: [{ data: { main: [[{ json: { value: 12 } }]] } }] } } } });
+    }));
+    try {
+      await f.approve();
+      await f.client.routes.create({ ...f.operation, targetPeerId: f.agent.peerId });
+      const prepared = f.client.programs.prepareInvocation({ ...f.operation, inputs: [{ text: 'original' }] });
+      await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_REQUIRES_RECONCILIATION' });
+      expect(dispatches).toBe(1);
+      const oldRuntime = f.target.runtime!;
+      await oldRuntime.stop(); runtimes.delete(oldRuntime); f.target.runtime = null;
+      await f.target.boot(true);
+      await expect(f.client.programs.invoke({ ...prepared, inputs: [{ text: 'changed' }] })).rejects.toMatchObject({ code: 'INVOCATION_LAYER_CONFLICT' });
+      if (mode === 'missing-acknowledgement') {
+        await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_NOT_RETRYABLE' });
+        expect(dispatches).toBe(1);
+        return;
+      }
+      interrupted = false;
+      publishedVersion = 'foreign-version';
+      await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_REQUIRES_RECONCILIATION' });
+      expect(dispatches).toBe(1);
+      publishedVersion = definition.versionId;
+      if (extraCall) {
+        await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_REQUIRES_RECONCILIATION' });
+      } else {
+        const result = await f.client.programs.invoke(prepared);
+        expect(result.outputs).toMatchObject([{ n8nExecutionId: '42', output: { ok: true, itemsJson: '[{"value":12}]' } }]);
+        expect(await f.client.programs.invoke(prepared)).toEqual(result);
+        const stored = await f.store.query(`SELECT ?output WHERE { GRAPH ?g { <${result.executionIri}> <${SR}output> ?output } }`);
+        expect(JSON.stringify(stored)).toContain('n8nExecutionId');
+      }
+      expect(dispatches).toBe(1);
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it('stores requests, approves and executes signed remote reads without data graph membership', async () => {

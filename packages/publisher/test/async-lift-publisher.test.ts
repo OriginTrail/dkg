@@ -2,7 +2,7 @@ import type { WorkerLiftJobClaimSession } from '../src/lift-job-transition-scope
 import type { AsyncLiftJournalCompletion, JournalOperation } from '../src/async-lift-journal-completion.js';
 import type { ActiveLiftJobClaim } from '../src/async-lift-publisher-types.js';
 import { beforeAll, beforeEach, afterAll, describe, expect, it } from 'vitest';
-import { GraphManager, OxigraphStore, PrivateContentStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, PrivateContentStore, StoreReadTransportFailure } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -904,6 +904,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     'chain-access-policy-timeout',
     'chain-participant-authority-unavailable',
     'rfc64-private-read-roster-unavailable',
+    'approved-member-metadata-pending',
   ])('retries transient authority reason %s from validated without inventing broadcast evidence', async (reason) => {
     const publisher = createPublisher({
       config: {
@@ -1957,7 +1958,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(processed?.failure?.code).toBe('canonicalization_failed');
   });
 
-  it('classifies transient shared-memory resolution failures as retryable validation failures', async () => {
+  it.each([true, false])('classifies shared-memory resolution failures using typed evidence: %s', async (typed) => {
     const publisher = createPublisher({
       config: {
         publishExecutor: async () => {
@@ -1973,7 +1974,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const originalQuery = store.query.bind(store);
     store.query = async (sparql: string) => {
       if (sparql.includes('_shared_memory_meta')) {
-        throw new Error('shared memory store timeout');
+        throw typed ? new StoreReadTransportFailure(new TypeError('fetch failed')) : new Error('shared memory store timeout');
       }
       return originalQuery(sparql);
     };
@@ -1981,8 +1982,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const processed = await publisher.processNext('wallet-1');
 
     expect(processed?.status).toBe('failed');
-    expect(processed?.failure?.code).toBe('workspace_unavailable');
-    expect(processed?.failure?.retryable).toBe(true);
+    expect(processed?.failure?.code).toBe(typed ? 'workspace_unavailable' : 'validation_unknown');
+    expect(processed?.failure?.retryable).toBe(typed);
   });
 
   it('lists and counts jobs by status', async () => {

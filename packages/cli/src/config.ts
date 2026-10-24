@@ -729,15 +729,15 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
    */
   preferredRelays?: string[];
   /**
-   * Transport-level network peer isolation: refuse to dial, store or accept
-   * the relays of the other bundled DKG networks and peers that failed the
-   * network-identity proof. Defaults to true. Set false (or
-   * DKG_NETWORK_PEER_ISOLATION_ENABLED=0, which wins) to fall back to
-   * admission-only isolation without a new release.
+   * Transport-level network peer isolation: refuse to dial, store or accept the relays of the other bundled
+   * DKG networks and peers that failed the network-identity proof. Defaults to true. Set false (or
+   * DKG_NETWORK_PEER_ISOLATION_ENABLED=0, which wins) to fall back to admission-only isolation without a new release.
    */
   networkPeerIsolationEnabled?: boolean;
   /** Public multiaddrs to announce (for VPS/cloud nodes where the public IP is not on the interface). */
   announceAddresses?: string[];
+  /** Keep LAN and VPN addresses in use on an Edge with public relays; see `lan-addresses.ts`. Default false. */
+  lanAddressesEnabled?: boolean;
   /** Bootstrap peer multiaddrs to connect to on startup (for direct peer discovery without relay). */
   bootstrapPeers?: string[];
   /** V10: context graphs to subscribe. */

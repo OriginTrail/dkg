@@ -3,14 +3,22 @@ import type { ExecutionReceiptJournal, ReceiptProgress } from '@origintrail-offi
 import { Parser } from 'n3';
 import { sparqlIri } from '@origintrail-official/dkg-core';
 import { type PersistenceEvidence, type SemanticMemoryLayer, SemanticProgramError } from './semantic-runtime-types.js';
-import { historyIsAtLayer, historyLayerLabel } from './semantic-runtime-values.js';
+import { historyIsAtLayer, historyLayerLabel, XSD_DATE_TIME } from './semantic-runtime-values.js';
 
 type Triple = { subject: string; predicate: string; object: string };
 function tripleKey(q: Triple): string {
   const [parsed] = new Parser({ format: 'N-Triples' }).parse(
     `${sparqlIri(q.subject)} ${sparqlIri(q.predicate)} ${q.object.startsWith('"') ? q.object : sparqlIri(q.object)} .`);
   const term = parsed.object;
-  return JSON.stringify([parsed.subject.value, parsed.predicate.value, term.termType, term.value,
+  // Oxigraph strips trailing fractional zeroes from UTC dateTime literals.
+  // Compare that lossless form, preserving precision beyond milliseconds.
+  const value = term.termType === 'Literal' && term.datatype.value === XSD_DATE_TIME
+    ? term.value.replace(/\.(\d+)(?=Z$)/, (_match, fraction: string) => {
+      const significant = fraction.replace(/0+$/, '');
+      return significant ? `.${significant}` : '';
+    })
+    : term.value;
+  return JSON.stringify([parsed.subject.value, parsed.predicate.value, term.termType, value,
     term.termType === 'Literal' ? term.language.toLowerCase() : '', term.termType === 'Literal' ? term.datatype.value : '']);
 }
 
@@ -69,7 +77,9 @@ export async function persistKnowledgeAsset(
       if (written.size !== expected.size || [...written].some(q => !expected.has(q))) conflict(`${errors.subject} write is incomplete or conflicts`);
       await assertAuthorized();
       save({ phase: 'finalize' });
-      await agent.assertion.finalize(contextGraphId, name, lane);
+      // Lane selection does not select the signing author. Seal as the same
+      // approved executor whose namespace was reserved by create().
+      await agent.assertion.finalize(contextGraphId, name, { ...lane, authorAgentAddress: agentAddress });
       history = await read();
     } else if (actual.size !== expected.size) conflict(`${errors.subject} sealed content differs from the expected receipt`);
     if (!history?.wmCurrentAssertion) uncertain();

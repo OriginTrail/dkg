@@ -1,3 +1,5 @@
+import { createN8nWorkflowAdapter } from './semantic-runtime-n8n-adapter.js';
+import { createNativeN8nWorkflowAdapter } from './semantic-runtime-n8n-native-adapter.js';
 import { programToolDefinition } from './semantic-runtime-tool-catalog.js';
 import { createLocalLlmProgramAdapter, type LocalLlmProgramProvider } from './semantic-runtime-local-llm-adapter.js';
 import { createHash } from 'node:crypto';
@@ -164,7 +166,8 @@ export async function resolveProgramTools(context: ProgramToolContext) {
     for (const toolIri of program.requiredTools) {
       const definition = programToolDefinition(toolIri === bound.binding.assetCreation?.toolIri
         ? 'assetCreation' : toolIri === bound.binding.sparqlRead?.toolIri ? 'sparqlRead'
-          : toolIri === bound.binding.localLlm?.toolIri ? 'localLlm' : 'query');
+          : toolIri === bound.binding.n8n?.toolIri ? 'n8n'
+            : toolIri === bound.binding.localLlm?.toolIri ? 'localLlm' : 'query');
       toolDefinitions.set(toolIri, new Map([[JSON.stringify(definition), definition]]));
       descriptors.push(toolIri, definition.operation, definition.version, definition.wit);
     }
@@ -286,6 +289,12 @@ export async function resolveProgramTools(context: ProgramToolContext) {
   }
   if (bound?.binding.assetCreation) {
     registry.register(createAssetCreationAdapter(agent, contextGraphId, executionLayer, operatorAddress, assetStore, bound.assertAuthorized));
+  }
+  if (bound?.binding.n8n) {
+    if (bound.binding.n8n.result && !assetStore) throw new SemanticProgramError('N8N_JOURNAL_UNAVAILABLE', 'Native n8n results require durable runtime storage', 409);
+    registry.register(bound.binding.n8n.result
+      ? createNativeN8nWorkflowAdapter(contextGraphId, operatorAddress, bound.binding.n8n, config?.n8nNative ?? config?.n8n, bound.assertAuthorized, assetStore!)
+      : createN8nWorkflowAdapter(contextGraphId, operatorAddress, bound.binding.n8n, config?.n8n, bound.assertAuthorized));
   }
   if (bound?.binding.localLlm) {
     registry.register(createLocalLlmProgramAdapter(contextGraphId, operatorAddress,

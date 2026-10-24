@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import type { SemanticProgramPolicy, SemanticProgramBinding } from './program-policy.js';
+import type { SemanticProgramPolicy, SemanticProgramBinding, SemanticN8nConfig } from './program-policy.js';
 
 import {
   MESSAGE_TYPE,
@@ -44,6 +44,10 @@ export interface SemanticRuntimeConfig {
   programPolicy?: SemanticProgramPolicy;
   /** Tenant-approved fixed query operations with invoke-only caller grants. */
   programBindings?: SemanticProgramBinding[];
+  /** Optional loopback n8n installation and exact graph/executor/workflow pins. */
+  n8n?: SemanticN8nConfig;
+  /** Separate native-component installation; keeps existing adapter pins stable. */
+  n8nNative?: SemanticN8nConfig;
   /** Trusted outbound routes. The authenticated local agent signs; the target authorizes. */
   programRoutes?: Array<{
     contextGraphId: string;

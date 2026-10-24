@@ -14,6 +14,8 @@ export const PROGRAM_TOOL_CATALOG = [
     definition: { operation: 'llm/safe', version: '1', wit: 'origintrail:semantic-runtime/safe-llm@0.1.0' } },
 ] as const;
 
-export function programToolDefinition(kind: typeof PROGRAM_TOOL_CATALOG[number]['kind']) {
+// SDK/operator configuration only until the editor can configure a workflow grant.
+export function programToolDefinition(kind: typeof PROGRAM_TOOL_CATALOG[number]['kind'] | 'n8n') {
+  if (kind === 'n8n') return { operation: 'n8n/workflow', version: '1', wit: 'origintrail:semantic-runtime/n8n-workflow@0.1.0' };
   return PROGRAM_TOOL_CATALOG.find(tool => tool.kind === kind)!.definition;
 }

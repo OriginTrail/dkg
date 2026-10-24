@@ -1,3 +1,4 @@
+import { LIFT_VALIDATION_STAGES, LIFT_VALIDATION_CAUSES } from './lift-validation-error.js';
 import {
   LIFT_JOB_FAILURE_CODES,
   LIFT_JOB_FAILURE_MODES,
@@ -595,6 +596,10 @@ const failureParser = objectParser<LiftJobFailureMetadata>({
   rpcResponseRef: optional(stringParser),
   revertReasonRef: optional(stringParser),
   timeout: optional(timeoutParser),
+  validationDiagnostic: optional(objectParser({
+    stage: optional(enumParser(LIFT_VALIDATION_STAGES)),
+    cause: enumParser(LIFT_VALIDATION_CAUSES),
+  })),
 });
 
 /** One exhaustive field schema shared by the explicit v0 and v1 durable envelopes. */

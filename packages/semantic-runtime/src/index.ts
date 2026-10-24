@@ -128,6 +128,6 @@ export {
   type SemanticProjectionSink,
 } from './projection.js';
 
-export type { SemanticTypeScriptGrant, SemanticSparqlReadGrant, SemanticProgramBinding, SemanticProgramPolicy, SemanticProgramPin, SemanticDisclosurePolicy, SemanticQueryPin, SemanticQueryOutputSchema } from './program-policy.js';
+export type { SemanticN8nGrant, SemanticN8nConfig, SemanticTypeScriptGrant, SemanticSparqlReadGrant, SemanticProgramBinding, SemanticProgramPolicy, SemanticProgramPin, SemanticDisclosurePolicy, SemanticQueryPin, SemanticQueryOutputSchema } from './program-policy.js';
 export { TypeScriptProgramHost, type CompiledTypeScriptProgram } from './typescript-programs.js';
 export { ProgramTraceRecorder, readProgramTrace, type ProgramExecutionTrace, type ProgramCallTrace } from './program-trace.js';
