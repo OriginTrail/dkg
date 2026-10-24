@@ -146,33 +146,61 @@ def test_recall_decodes_wire_quads_and_snapshots_only_facts(provider_factory):
     assert "legacy fact" in provider.system_prompt_block()
 
 
-def test_prefetch_scopes_search_escapes_input_and_decodes_both_shapes(provider_factory):
+def test_prefetch_reads_scoped_working_memory_bindings(provider_factory):
     provider = provider_factory()
     provider_factory.get.return_value = {"results": {"bindings": [{"s": {"value": "urn:example#Alice"}, "p": {"value": "https://example/name"}, "o": {"value": "Alice"}}, {}]}}
     assert "Alice — name — Alice" in provider.prefetch('a"\\\nb')
     assert provider_factory.get.call_args.args == (
         "/api/knowledge-assets/memory/wm/quads?contextGraphId=agent-context",)
+
+
+def test_prefetch_without_assertion_scopes_search_and_escapes_input(provider_factory):
+    provider = provider_factory()
+    bindings = {"results": {"bindings": [{"s": {"value": "urn:example#Alice"}, "p": {"value": "https://example/name"}, "o": {"value": "Alice"}}, {}]}}
     provider._assertion_id = ""
-    provider_factory.post.return_value = provider_factory.get.return_value
+    provider_factory.post.return_value = bindings
     assert "Alice — name — Alice" in provider.prefetch('a"\\\nb')
     payload = provider_factory.post.call_args.args[1]
     assert payload["contextGraphId"] == "agent-context"
     assert 'a\\"\\\\ b' in payload["sparql"]
+
+
+@pytest.mark.parametrize("query", ["tea", "", "nonexistent"])
+def test_prefetch_filters_content_quads_and_limits_results(provider_factory, query):
+    provider = provider_factory()
+    provider._assertion_id = ""
     provider_factory.post.return_value = {"quads": [{"subject": "urn:ignore", "predicate": "urn:other", "object": "tea"},
         {"subject": "urn:miss", "predicate": "urn:hermes:content", "object": "coffee"}] + [
         {"subject": f"urn:fact:{i}", "predicate": "urn:hermes:content", "object": f"tea {i}"} for i in range(15)]}
-    prefetched = provider.prefetch("tea")
-    assert "tea 9" in prefetched and "tea 10" not in prefetched and "coffee" not in prefetched
+    prefetched = provider.prefetch(query)
     assert "assertionName" not in provider_factory.post.call_args.args[1]
-    assert "coffee" in provider.prefetch("")
-    assert provider.prefetch("nonexistent") == ""
+    if query == "tea":
+        assert "tea 9" in prefetched and "tea 10" not in prefetched and "coffee" not in prefetched
+    elif query == "":
+        assert "coffee" in prefetched
+    else:
+        assert prefetched == ""
+
+
+def test_prefetch_returns_empty_on_query_transport_failure(provider_factory):
+    provider = provider_factory()
+    provider._assertion_id = ""
     provider_factory.post.side_effect = RuntimeError("unavailable")
     assert provider.prefetch("tea") == ""
-    provider._offline = True
+
+
+@pytest.mark.parametrize("unavailable", ["offline", "missing-client"])
+def test_prefetch_without_connectivity_avoids_transport(provider_factory, unavailable):
+    provider = provider_factory()
+    if unavailable == "offline":
+        provider._offline = True
+    else:
+        provider._client = None
+    provider_factory.get.reset_mock()
+    provider_factory.post.reset_mock()
     assert provider.prefetch("tea") == ""
-    provider._offline = False
-    provider._client = None
-    assert provider.prefetch("tea") == ""
+    provider_factory.get.assert_not_called()
+    provider_factory.post.assert_not_called()
 
 
 @pytest.mark.parametrize("outcome", [{"success": True}, {"success": False}, RuntimeError("offline")])

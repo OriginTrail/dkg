@@ -97,18 +97,68 @@ def test_search_distinguishes_failed_queries_from_successful_empty_results(provi
     assert [hit["score"] for hit in fallback["hits"]] == [1.0, 0.5]
     provider_factory.post.return_value = {"bindings": []}
     assert tool(provider, "memory_search", {"query": "tea"}) == {"query": "tea", "count": 0, "scope": "team", "hits": []}
+
+
+@pytest.mark.parametrize("limit,sources,scores", [
+    (0, ["user"], [1.0]),
+    ("invalid", ["user", "memory"], [1.0, 0.5]),
+])
+def test_offline_search_ranks_cached_hits_before_applying_limit(provider_factory, limit, sources, scores):
+    provider = provider_factory({"context_graph": "team"})
     provider._offline = True
-    result = tool(provider, "memory_search", {"query": "tea leaves", "limit": 0})
-    assert result["count"] == 1 and result["hits"][0]["source"] == "user"
-    provider._cache["user"] = "bad cache"
-    assert tool(provider, "memory_search", {"query": "tea"})["count"] == 1
-    assert tool(provider, "memory_search", {"query": "a b"})["count"] == 0
-    assert "at least 2" in tool(provider, "memory_search", {"query": "a"})["error"]
-    provider._offline = False
-    assert tool(provider, "memory_search", {"query": "a b"}) == {"query": "a b", "count": 0, "scope": None, "hits": []}
-    assert "not a supported parameter" in tool(provider, "memory_search", {"query": "tea", "context_graph": "team"})["error"]
+    provider._cache = {"memory": [None, {"content": "tea"}, {"content": "other"}], "user": [{"content": "tea leaves"}]}
+    provider_factory.get.reset_mock()
+    provider_factory.post.reset_mock()
+    result = tool(provider, "memory_search", {"query": "tea leaves", "limit": limit})
+    assert result["offline"] is True
+    assert result["count"] == len(sources)
+    assert [hit["source"] for hit in result["hits"]] == sources
+    assert [hit["score"] for hit in result["hits"]] == scores
+    provider_factory.post.assert_not_called()
+
+
+def test_offline_search_ignores_malformed_cache_entries(provider_factory):
+    provider = provider_factory()
+    provider._offline = True
+    provider._cache = {"user": "bad cache", "memory": [None, {"content": "tea"}, {"content": "other"}]}
+    result = tool(provider, "memory_search", {"query": "tea"})
+    assert result["count"] == 1 and result["hits"][0]["source"] == "memory"
+
+
+@pytest.mark.parametrize("offline", [False, True])
+def test_search_with_no_usable_terms_returns_no_hits(provider_factory, offline):
+    provider = provider_factory()
+    provider._offline = offline
+    provider._cache = {"memory": [{"content": "tea"}]}
+    provider_factory.get.reset_mock()
+    provider_factory.post.reset_mock()
+    result = tool(provider, "memory_search", {"query": "a b"})
+    assert result["count"] == 0 and result["hits"] == []
+    if not offline:
+        assert result == {"query": "a b", "count": 0, "scope": None, "hits": []}
+    provider_factory.get.assert_not_called()
+    provider_factory.post.assert_not_called()
+
+
+@pytest.mark.parametrize("args,error", [
+    ({"query": "a"}, "at least 2"),
+    ({"query": "tea", "context_graph": "team"}, "not a supported parameter"),
+])
+def test_search_rejects_invalid_arguments_without_querying(provider_factory, args, error):
+    provider = provider_factory()
+    provider_factory.get.reset_mock()
+    provider_factory.post.reset_mock()
+    assert error in tool(provider, "memory_search", args)["error"]
+    provider_factory.post.assert_not_called()
+
+
+def test_search_without_a_client_falls_back_to_cached_hits(provider_factory):
+    provider = provider_factory()
     provider._client = None
-    assert tool(provider, "memory_search", {"query": "tea"})["offline"]
+    provider._cache = {"memory": [{"content": "tea"}]}
+    result = tool(provider, "memory_search", {"query": "tea"})
+    assert result["offline"] is True and result["count"] == 1
+    assert result["hits"][0]["source"] == "memory"
 
 
 def test_context_graph_list_filters_caller_scope_but_preserves_legacy_rows(provider_factory):
