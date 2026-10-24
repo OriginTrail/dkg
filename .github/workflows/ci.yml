@@ -20,13 +20,23 @@ on:
   # develop branch that batches unrelated failures into one large PR.
   merge_group:
   workflow_dispatch:
+    inputs:
+      profile:
+        description: Execution profile (nightly-equivalent includes managed-local UI and 1000 property trials)
+        type: choice
+        options: [standard, nightly-equivalent]
+        default: standard
+      seed:
+        description: Optional signed 32-bit property seed (nightly default is the recorded run number)
+        type: string
+        required: false
   schedule:
     - cron: '23 2 * * *'
 
 concurrency:
-  # Per-PR / per-branch lock: cancels any earlier in-flight run for the
-  # same ref as soon as a newer commit arrives.
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Keep campaigns independent of ordinary pushes/PRs; supersede duplicate
+  # campaigns on the same ref, without disabling ordinary cancellation.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.profile == 'nightly-equivalent')) && 'nightly-equivalent' || 'standard' }}
   cancel-in-progress: true
 
 # Minimum-needed token scope. All jobs only check out and run tests; nothing
@@ -39,10 +49,6 @@ concurrency:
 # here is the single highest-leverage defence-in-depth control.
 permissions:
   contents: read
-
-env:
-  DKG_PROPERTY_RUNS: ${{ github.event_name == 'schedule' && '1000' || '100' }}
-  DKG_PROPERTY_SEED: ${{ github.event_name == 'schedule' && github.run_number || '640905' }}
 
 jobs:
   # ------------------------------------------------------------------
@@ -58,6 +64,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
+      profile: ${{ steps.profile.outputs.profile }}
+      profile_json: ${{ steps.profile.outputs.profile_json }}
+      property_runs: ${{ steps.profile.outputs.property_runs }}
+      property_seed: ${{ steps.profile.outputs.property_seed }}
+      managed_local: ${{ steps.profile.outputs.managed_local }}
+      subject: ${{ steps.profile.outputs.subject }}
       full_ci: ${{ steps.plan.outputs.full_ci }}
       run_node: ${{ steps.plan.outputs.run_node }}
       node_test_artifacts: ${{ steps.plan.outputs.node_test_artifacts }}
@@ -84,6 +96,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
           # The PR checkout is a synthetic merge commit; depth 2 normally
           # includes that commit and both parents without cloning full history.
           fetch-depth: 2
@@ -175,6 +188,17 @@ jobs:
       - name: Validate npm metadata points to v10
         run: node candidate/scripts/check-npm-metadata.mjs
 
+      # Lane selection is already finalized by the immutable controller.
+      # This candidate script resolves execution settings, never the plan.
+      - name: Resolve execution profile and exact subject
+        id: profile
+        working-directory: candidate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PROFILE_INPUT: ${{ inputs.profile || '' }}
+          SEED_INPUT: ${{ inputs.seed || '' }}
+        run: node scripts/ci/resolve-ci-profile.mjs
+
   # Source-only transport regressions use the supported runtime independently.
   chain-rpc-node26:
     needs: changes
@@ -210,6 +234,11 @@ jobs:
   # cache repeated builds on the same branch are fast.
   # ------------------------------------------------------------------
   build:
+    env:
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     outputs:
       test_matrices: ${{ steps.test-matrices.outputs.matrices }}
     name: Build packages
@@ -221,6 +250,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - name: Emit canonical test matrices
         id: test-matrices
         run: node scripts/ci/emit-test-matrices.mjs
@@ -409,6 +439,11 @@ jobs:
   # time on their critical path.
   # ------------------------------------------------------------------
   evm-node-test-artifacts:
+    env:
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: Compile EVM test artifacts (0.8.20/london)
     needs: changes
     if: needs.changes.outputs.node_test_artifacts == 'true'
@@ -418,6 +453,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -437,6 +473,11 @@ jobs:
           if-no-files-found: error
 
   evm-devnet-test-artifacts:
+    env:
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: Compile devnet EVM artifacts (0.8.24/cancun)
     needs: changes
     if: needs.changes.outputs.kosava_node_ui_e2e == 'true'
@@ -446,6 +487,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -471,6 +513,10 @@ jobs:
   # ------------------------------------------------------------------
   tornado-core:
     env:
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
       DKG_CI_COVERAGE: '1'
       DKG_CI_ROW: ${{ matrix.row }}
     name: "Tornado: ${{ matrix.label }}"
@@ -485,6 +531,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -544,6 +591,11 @@ jobs:
   # tests `describe.skipIf`-skip, so local `pnpm test` needs no Docker.
   # ------------------------------------------------------------------
   tornado-blazegraph:
+    env:
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: "Tornado: storage Blazegraph integration (live server)"
     needs: [changes, build]
     if: needs.changes.outputs.tornado_blazegraph == 'true'
@@ -558,6 +610,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -636,6 +689,10 @@ jobs:
   # ------------------------------------------------------------------
   tornado-publisher:
     env:
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
       DKG_CI_COVERAGE: '1'
       DKG_CI_ROW: ${{ matrix.row }}
     name: "Tornado: publisher [${{ matrix.shard }}/${{ matrix.shards }}]"
@@ -650,6 +707,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -668,6 +726,15 @@ jobs:
       - uses: ./.github/actions/restore-evm-node-test-artifacts
       - name: "Publisher tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
+      - name: Upload lift campaign progress
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lift-campaign-${{ matrix.shard }}-of-${{ matrix.shards }}
+          path: packages/publisher/test-results/lift-lifecycle-campaign.json
+          retention-days: 14
+          if-no-files-found: ignore
+          overwrite: true
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit
@@ -684,6 +751,10 @@ jobs:
   # ------------------------------------------------------------------
   tornado-agent:
     env:
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
       DKG_CI_COVERAGE: '1'
       DKG_CI_ROW: ${{ matrix.row }}
     name: "Tornado: agent [${{ matrix.shard }}/${{ matrix.shards }}]"
@@ -699,6 +770,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -751,6 +823,10 @@ jobs:
   # ------------------------------------------------------------------
   bura-cli:
     env:
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
       DKG_CI_COVERAGE: '1'
       DKG_CI_ROW: ${{ matrix.row }}
     name: "Bura: cli [${{ matrix.shard }}/${{ matrix.shards }}]"
@@ -765,6 +841,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -795,6 +872,11 @@ jobs:
           artifact-name: vitest-cli-${{ matrix.shard }}-of-${{ matrix.shards }}
 
   bura-blazegraph-arm64:
+    env:
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: "Bura: Blazegraph arm64 image (native)"
     needs: changes
     if: needs.changes.outputs.bura_blazegraph_arm64 == 'true'
@@ -804,11 +886,16 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - name: "Verify provisioned Blazegraph image contract on arm64"
         run: bash scripts/ci/verify-blazegraph-image-contract.sh
 
   bura-supporting:
     env:
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
       DKG_CI_COVERAGE: '1'
       DKG_CI_ROW: ${{ matrix.row }}
     name: "Bura: query"
@@ -823,6 +910,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -855,6 +943,10 @@ jobs:
   # ------------------------------------------------------------------
   kosava-node-ui:
     env:
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
       DKG_CI_COVERAGE: '1'
       DKG_CI_ROW: ${{ matrix.row }}
     name: "Kosava: node-ui"
@@ -869,6 +961,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -913,7 +1006,11 @@ jobs:
   # (see `ciChromium`) since we only `playwright install chromium`.
   kosava-node-ui-e2e:
     env:
-      PW_DEVNET_LOCAL: ${{ github.event_name == 'schedule' && '1' || '0' }}
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
+      PW_DEVNET_LOCAL: ${{ needs.changes.outputs.managed_local }}
     name: "Kosava: node-ui e2e [${{ matrix.shard }}/7] (Playwright real-node devnet)"
     needs: [changes, build, evm-devnet-test-artifacts]
     if: needs.changes.outputs.kosava_node_ui_e2e == 'true'
@@ -930,6 +1027,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -956,6 +1054,9 @@ jobs:
         run: pnpm --dir packages/node-ui exec playwright test --config playwright.pr3236.config.ts
       - name: "node-ui real-node Playwright e2e (shard ${{ matrix.shard }}/7)"
         run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright test --shard=${{ matrix.shard }}/7
+      - name: Clean up only Playwright-owned devnet processes
+        if: always()
+        run: pnpm --dir packages/node-ui exec tsx -e "import('./e2e/global-teardown.ts').then(m => m.default())"
       - name: Record first-attempt browser failures separately from retries
         if: always()
         run: node scripts/ci/browser-quality.mjs packages/node-ui/playwright-report/results.json packages/node-ui/playwright-report/quality.json
@@ -966,6 +1067,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: node-ui-playwright-report-${{ matrix.shard }}-of-7
+          overwrite: true
           path: |
             packages/node-ui/playwright-report/
             packages/node-ui/test-results/
@@ -976,7 +1078,7 @@ jobs:
       # didn't come up. Upload them so a red run is debuggable without a
       # local repro.
       - name: Upload devnet logs on failure
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: node-ui-devnet-logs-${{ matrix.shard }}-of-7
@@ -989,6 +1091,10 @@ jobs:
 
   kosava-supporting:
     env:
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
       DKG_CI_COVERAGE: '1'
       DKG_CI_ROW: ${{ matrix.row }}
     name: "Kosava: adapters + utilities + demo"
@@ -1003,6 +1109,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -1065,6 +1172,10 @@ jobs:
   # ------------------------------------------------------------------
   kosava-hardhat-plugins:
     env:
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
       DKG_CI_COVERAGE: '1'
       DKG_CI_ROW: ${{ matrix.row }}
     name: "Kosava: random-sampling + kafka-plugin (real Hardhat)"
@@ -1079,6 +1190,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -1116,6 +1228,11 @@ jobs:
   # copy-paste away.
   # ------------------------------------------------------------------
   abi-freshness:
+    env:
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: "Tornado: ABI freshness (committed abi/ vs hardhat compile)"
     needs: changes
     if: needs.changes.outputs.abi_freshness == 'true'
@@ -1125,6 +1242,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -1196,6 +1314,11 @@ jobs:
   #                                the safety-net job unsharded).
   # ------------------------------------------------------------------
   solidity:
+    env:
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: "Tornado: Solidity [${{ matrix.shard }}/4]"
     needs: changes
     runs-on: ubuntu-latest
@@ -1211,6 +1334,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
@@ -1334,6 +1458,11 @@ jobs:
   # not on the critical path so ~20-25 min here is acceptable.
   # ------------------------------------------------------------------
   solidity-coverage:
+    env:
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: "Tornado: Solidity coverage (push safety net)"
     needs: changes
     runs-on: ubuntu-latest
@@ -1343,6 +1472,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -1406,6 +1536,11 @@ jobs:
   # solhint is also a npm devDep and is pulled by the standard install.
   # ------------------------------------------------------------------
   tornado-static-analysis:
+    env:
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: "Tornado: static analysis (informational)"
     needs: changes
     runs-on: ubuntu-latest
@@ -1421,6 +1556,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -1552,6 +1688,11 @@ jobs:
     uses: ./.github/workflows/rfc64-inventory-windows.yml
 
   coverage-results:
+    env:
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: Verify merged package coverage
     if: always()
     needs: [changes, tornado-core, tornado-publisher, tornado-agent, bura-cli, bura-supporting, kosava-node-ui, kosava-supporting, kosava-hardhat-plugins]
@@ -1561,6 +1702,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
           fetch-depth: 2
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -1598,7 +1740,56 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  profile-results:
+    env:
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
+    name: Verify execution profile
+    if: always()
+    needs: [changes, tornado-publisher, kosava-node-ui-e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - run: mkdir -p nightly-evidence
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: always() && needs.changes.outputs.profile == 'nightly-equivalent'
+        continue-on-error: true
+        with:
+          pattern: node-ui-playwright-report-*
+          path: nightly-evidence
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: always() && needs.changes.outputs.profile == 'nightly-equivalent'
+        continue-on-error: true
+        with:
+          pattern: lift-campaign-*
+          path: nightly-evidence
+      - name: Verify actual required execution and retain all failures
+        if: always()
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: node scripts/ci/nightly-profile-results.mjs nightly-evidence
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: nightly-profile-summary
+          path: nightly-profile-summary.json
+          retention-days: 14
+          if-no-files-found: error
+          overwrite: true
+
   ci-gate:
+    env:
+      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
+      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
+      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
+      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: CI gate
     if: always()
     needs:
@@ -1623,6 +1814,7 @@ jobs:
       - solidity-coverage
       - tornado-static-analysis
       - coverage-results
+      - profile-results
       - inventory-windows
     runs-on: ubuntu-latest
     timeout-minutes: 3
@@ -1643,11 +1835,20 @@ jobs:
             scripts/lib/ci-results.mjs
             scripts/lib/ci-routing.mjs
           sparse-checkout-cone-mode: false
+      # As with coverage, require the execution verifier before the trusted
+      # aggregate. A skipped/missing verifier cannot certify this profile.
+      - name: Require the execution profile verdict
+        if: always()
+        env:
+          PROFILE_RESULT: ${{ needs.profile-results.result }}
+        run: test "$PROFILE_RESULT" = success
       - name: Require the coverage verdict
+        if: always()
         env:
           COVERAGE_RESULT: ${{ needs.coverage-results.result }}
         run: test "$COVERAGE_RESULT" = success
       - name: Verify selected lanes completed
+        if: always()
         env:
           EVENT_NAME: ${{ github.event_name }}
           PLAN_JSON: ${{ needs.changes.outputs.plan_json }}

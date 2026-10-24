@@ -19,11 +19,12 @@
  * Reuse is a TWO-step probe (api.port file + tcp connect) so a stale
  * port file from a crashed daemon is correctly treated as "down".
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { connect } from 'node:net';
 import { spawn } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stripVTControlCharacters } from 'node:util';
 import { devnetApiFetch } from './helpers/devnet.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -79,6 +80,7 @@ export interface PlaywrightManagedMarker {
   numNodes: string;
   /** Nodes already reachable before this bootstrap spawned devnet.sh */
   preExistingNodes: number[];
+  preExistingHardhat?: boolean;
 }
 
 function tailFile(path: string, bytes: number): string {
@@ -230,17 +232,20 @@ function spawnDevnet(): Promise<SpawnResult> {
   });
 }
 
-function clearMarker(): void {
-  try { rmSync(MARKER_FILE, { force: true }); } catch { /* best-effort */ }
-}
-
 function writeMarker(preExistingNodes: number[]): void {
+  let preExistingHardhat = false;
+  try {
+    const pid = Number(stripVTControlCharacters(readFileSync(resolve(DEVNET_DIR, 'hardhat.pid'), 'utf8')).trim());
+    if (Number.isInteger(pid) && pid > 0) { process.kill(pid, 0); preExistingHardhat = true; }
+  } catch { /* no running chain owned before bootstrap */ }
   const marker: PlaywrightManagedMarker = {
     startedAtMs: Date.now(),
     nodeNum: NODE_NUM,
     numNodes: NUM_NODES,
     preExistingNodes,
+    preExistingHardhat,
   };
+  mkdirSync(DEVNET_DIR, { recursive: true });
   writeFileSync(MARKER_FILE, JSON.stringify(marker, null, 2));
 }
 
@@ -297,6 +302,9 @@ async function main(): Promise<void> {
     `)...`,
   );
 
+  // Record ownership BEFORE starting children. A timeout/cancellation during
+  // bootstrap must leave enough information for the workflow's always-cleanup.
+  writeMarker(preExistingNodes);
   const spawnResult = await spawnDevnet();
 
   // The script may have returned non-zero from a post-boot assertion
@@ -309,7 +317,6 @@ async function main(): Promise<void> {
   try {
     port = await waitForReady(`node${NODE_NUM}`);
   } catch (err) {
-    clearMarker();
     const tail = tailFile(DAEMON_LOG_FILE, 4096).trim();
     const detail = tail
       ? `\n\n----- last 4 KiB of ${DAEMON_LOG_FILE} -----\n${tail}\n----- end -----`
@@ -328,7 +335,6 @@ async function main(): Promise<void> {
   // the gap resurface later as a confusing QuorumUnmet / peer-connectivity error.
   const meshNodes = await waitForMesh(NUM_NODES_INT, 60_000);
   if (meshNodes.length < NUM_NODES_INT) {
-    clearMarker();
     const tail = tailFile(DAEMON_LOG_FILE, 4096).trim();
     const detail = tail
       ? `\n\n----- last 4 KiB of ${DAEMON_LOG_FILE} -----\n${tail}\n----- end -----`
@@ -339,10 +345,6 @@ async function main(): Promise<void> {
       `the full relay-hub mesh for VM-publish quorum and peer-connectivity. ${detail}`,
     );
   }
-
-  // Marker is written only after readiness is confirmed so a crashed
-  // bootstrap never leaves a stale "we own this devnet" flag behind.
-  writeMarker(preExistingNodes);
 
   if (spawnResult.exitCode !== 0) {
     console.warn(
@@ -356,7 +358,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  clearMarker();
   console.error('[playwright] devnet bootstrap FAILED:', err?.stack || err);
   process.exit(1);
 });

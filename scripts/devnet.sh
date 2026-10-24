@@ -275,7 +275,7 @@ start_hardhat() {
       );
       child.unref();
       if (!child.pid) process.exit(1);
-      console.log(child.pid);
+      process.stdout.write(String(child.pid) + "\n");
     ')
   echo "$hh_pid" > "$pidfile"
   log "Hardhat node started (PID $hh_pid)"
