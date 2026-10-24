@@ -1,4 +1,4 @@
-import { buildEpcisEventDiscoveryPattern } from './epcis-event-discovery.js';
+import { buildEpcisEventDiscoveryPattern, buildEpcisEventTypePreferencePattern } from './epcis-event-discovery.js';
 import {
   EPCIS_DECLARED_EVENT_TYPE,
   EPCIS_CURRENT_PREFIX,
@@ -125,6 +125,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   // discriminator. Historical rows without that declaration keep their behavior.
   sharedRequiredPatterns.push(`OPTIONAL { ?event <${EPCIS_DECLARED_EVENT_TYPE}> ?_declaredEventType . }`);
   filterClauses.push('FILTER(!BOUND(?_declaredEventType) || ?eventType = ?_declaredEventType)');
+  sharedRequiredPatterns.push(buildEpcisEventTypePreferencePattern());
 
   // External classes need both EPCIS timing fields to distinguish events from
   // ordinary RDF. Date filtering also needs eventTime; bind each field once.

@@ -1,5 +1,5 @@
 import { sparqlIri } from '@origintrail-official/dkg-core';
-import { EPCIS_NAMESPACES, epcisPropertyIris, standardEpcisEventIris } from './epcis-vocabulary.js';
+import { EPCIS_NAMESPACES, EPCIS_STANDARD_EVENT_TYPES, epcisPropertyIris, standardEpcisEventIris } from './epcis-vocabulary.js';
 
 interface EventDiscoveryContext {
   metaGraph: string;
@@ -36,4 +36,21 @@ export function buildEpcisEventDiscoveryPattern({ metaGraph, source, partition }
       FILTER(?_standardEventType IN (${standardTypes})) }`;
   const legacyType = `(${standardType} || ((${gs1Type}) && ${timingEvidence} && ${noStandardType}))`;
   return `FILTER(BOUND(?_declaredEventType) || (${legacyType} && (${rootEvidence.join(' || ')})))`;
+}
+
+/**
+ * Equivalent standard classes must consume one pagination slot. Prefer the
+ * later accepted namespace when both are asserted, but never override an
+ * explicit capture discriminator or collapse distinct extension IRIs.
+ * Keep this inside the same data GRAPH as the event's rdf:type bindings.
+ */
+export function buildEpcisEventTypePreferencePattern(): string {
+  const equivalentTypes = EPCIS_STANDARD_EVENT_TYPES.flatMap(name => {
+    const iris = standardEpcisEventIris(name);
+    return iris.flatMap((iri, index) => iris.slice(index + 1).map(preferred =>
+      `(?eventType = ${sparqlIri(iri)} && EXISTS { ?event a ${sparqlIri(preferred)} . })`));
+  }).join(' || ');
+  // Use constant type tests: Blazegraph does not reliably correlate an outer
+  // eventType through a VALUES-bound alias pair inside FILTER NOT EXISTS.
+  return `FILTER(BOUND(?_declaredEventType) || !(${equivalentTypes}))`;
 }

@@ -210,6 +210,45 @@ it('projects and filters official-context EPCIS properties', async () => {
   }
 }, 30_000);
 
+it.each(['public', 'private'].flatMap(visibility =>
+  ['ObjectEvent', 'TransformationEvent'].map(type => ({ visibility, type })),
+))('paginates equivalent $type namespace aliases once in $visibility data', async ({ visibility, type }) => {
+  const store = create();
+  const contextGraphId = `${CG}-type-aliases`;
+  const publicGraph = contextGraphDataUri(contextGraphId);
+  const graph = visibility === 'private' ? contextGraphPrivateUri(contextGraphId) : publicGraph;
+  const ids = ['urn:alias:a-unmarked', 'urn:alias:b-declared-legacy', 'urn:alias:c-declared-current'];
+  try {
+    await store.insert([
+      ...ids.flatMap(subject => [
+        { subject, predicate: RDF_TYPE, object: `${EPCIS}${type}`, graph },
+        { subject, predicate: RDF_TYPE, object: `${EPCIS_CURRENT}${type}`, graph },
+        { subject: 'urn:document', predicate: `${EPCIS_CURRENT}eventList`, object: subject, graph },
+      ]),
+      { subject: ids[1], predicate: `${DKG}epcisEventType`, object: `${EPCIS}${type}`, graph },
+      { subject: ids[2], predicate: `${DKG}epcisEventType`, object: `${EPCIS_CURRENT}${type}`, graph },
+      ...(visibility === 'private' ? ids.map(subject => ({
+        subject, predicate: `${DKG}privateDataAnchor`, object: '"true"', graph: publicGraph,
+      })) : []),
+    ]);
+    for (const eventType of [undefined, type, `${EPCIS}${type}`, `${EPCIS_CURRENT}${type}`]) {
+      const rows = [];
+      for (let offset = 0; offset <= ids.length; offset++) {
+        const result = await store.query(buildEpcisQuery({ eventType, limit: 1, offset }, contextGraphId));
+        if (result.type !== 'bindings') throw new Error('Expected event bindings');
+        rows.push(...result.bindings);
+      }
+      expect(rows.map(row => row.event)).toEqual(ids);
+      expect(rows.map(row => row.eventType)).toEqual([`${EPCIS_CURRENT}${type}`, `${EPCIS}${type}`, `${EPCIS_CURRENT}${type}`]);
+      expect(rows.map(row => toEpcisEvent(row).type)).toEqual([type, type, type]);
+    }
+  } finally {
+    await store.dropGraph(publicGraph);
+    if (graph !== publicGraph) await store.dropGraph(graph);
+    await store.close();
+  }
+}, 30_000);
+
 it('paginates admitted events with missing and malformed times deterministically', async () => {
   const store = create();
   const graph = contextGraphDataUri(CG);
