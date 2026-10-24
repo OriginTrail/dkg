@@ -2,10 +2,17 @@
  * Unit tests for sim-engine: devnetAuthTokenPath, fmtError, and HTTP handler.
  * E2E test (when devnet is running) is in sim-engine.e2e.test.ts.
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Readable } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { devnetAuthTokenPath, fmtError, handleSimRequest } from '../src/server/sim-engine.js';
+
+vi.mock('node:fs/promises', () => ({ readFile: vi.fn().mockRejectedValue(new Error('no fixture token')) }));
+const requests: IncomingMessage[] = [];
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ exists: true })));
+});
 
 function mockReq(options: { url: string; method: string; body?: string }): IncomingMessage {
   const req = Object.assign(
@@ -16,6 +23,7 @@ function mockReq(options: { url: string; method: string; body?: string }): Incom
     req.push(options.body);
     req.push(null);
   }
+  requests.push(req);
   return req;
 }
 
@@ -74,6 +82,8 @@ function parseJsonBody(res: ReturnType<typeof mockRes>): unknown {
 // devnetAuthTokenPath
 // ---------------------------------------------------------------------------
 
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+
 describe('sim-engine', () => {
   describe('devnetAuthTokenPath', () => {
     it('uses nodeN not node-N so devnet dirs match', () => {
@@ -119,6 +129,10 @@ describe('sim-engine', () => {
       const req = mockReq({ url: '/sim/stop', method: 'POST' });
       const res = mockRes();
       await handleSimRequest(req, res);
+      await vi.runAllTimersAsync();
+      requests.splice(0).forEach(request => request.emit('close'));
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
     });
 
     it('GET /sim/status returns 200 and body shape when idle', async () => {
@@ -186,7 +200,7 @@ describe('sim-engine', () => {
       const body = parseJsonBody(res) as { started: boolean; name: string };
       expect(body.started).toBe(true);
       expect(body.name).toBeDefined();
-      // Sim runs in background; ensureContextGraph will fail (no nodes) and sim may error out - we stop in afterEach
+      // The daemon boundary is stubbed; afterEach aborts and drains the background run.
     });
 
     it('POST /sim/stop when not running returns 200 stopped: false', async () => {
