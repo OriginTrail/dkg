@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
-import { contextGraphDataUri, contextGraphMetaUri, contextGraphPrivateUri } from '@origintrail-official/dkg-core';
+import { contextGraphDataUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphSharedMemoryUri } from '@origintrail-official/dkg-core';
 import { OxigraphStore, BlazegraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { buildEpcisQuery } from '../src/query-builder.js';
 import { handleCaptureAsync, handleEventsQuery, toEpcisEvent } from '../src/handlers.js';
@@ -27,8 +27,16 @@ function eventRows(id: string, eventType: string, time?: string, offset?: string
   ];
 }
 
+const blazegraphUrl = process.env.BLAZEGRAPH_TEST_URL;
+if (process.env.DKG_REQUIRE_BLAZEGRAPH === '1' && !blazegraphUrl) throw new Error('BLAZEGRAPH_TEST_URL is required');
+const backends: Array<{ name: string; create: () => OxigraphStore | BlazegraphStore }> = [
+  { name: 'Oxigraph', create: () => new OxigraphStore() },
+];
+if (blazegraphUrl) backends.push({ name: 'Blazegraph', create: () => new BlazegraphStore(blazegraphUrl) });
+
+describe.each(backends)('$name capture/query', ({ create }) => {
 it('excludes the EPCISDocument container from an unfiltered event query', async () => {
-  const store = new OxigraphStore();
+  const store = create();
   const graph = contextGraphDataUri(CG);
   try {
     await store.insert([
@@ -49,7 +57,7 @@ it('excludes the EPCISDocument container from an unfiltered event query', async 
 });
 
 it.each(['public', 'private'] as const)('requires positive root evidence for unmarked standard events in %s data', async (visibility) => {
-  const store = new OxigraphStore();
+  const store = create();
   const publicGraph = contextGraphDataUri(CG);
   const graph = visibility === 'private' ? contextGraphPrivateUri(CG) : publicGraph;
   const metaGraph = contextGraphMetaUri(CG);
@@ -78,7 +86,7 @@ it.each(['public', 'private'] as const)('requires positive root evidence for unm
 });
 
 it('projects and filters official-context EPCIS properties', async () => {
-  const store = new OxigraphStore();
+  const store = create();
   const graph = contextGraphDataUri(CG);
   const subject = 'urn:event:current-vocabulary';
   try {
@@ -127,14 +135,106 @@ it('projects and filters official-context EPCIS properties', async () => {
   }
 });
 
-const blazegraphUrl = process.env.BLAZEGRAPH_TEST_URL;
-if (process.env.DKG_REQUIRE_BLAZEGRAPH === '1' && !blazegraphUrl) throw new Error('BLAZEGRAPH_TEST_URL is required');
-const backends: Array<{ name: string; create: () => OxigraphStore | BlazegraphStore }> = [
-  { name: 'Oxigraph', create: () => new OxigraphStore() },
-];
-if (blazegraphUrl) backends.push({ name: 'Blazegraph', create: () => new BlazegraphStore(blazegraphUrl) });
+it('paginates admitted events with missing and malformed times deterministically', async () => {
+  const store = create();
+  const graph = contextGraphDataUri(CG);
+  const ids = ['valid', 'invalid', 'missing'];
+  try {
+    await store.insert([
+      ...eventRows('valid', `${EPCIS}ObjectEvent`, '2024-03-01T08:00:00Z'),
+      ...eventRows('invalid', `${EPCIS}ObjectEvent`, 'not-a-date'),
+      ...eventRows('missing', `${EPCIS}ObjectEvent`),
+      ...ids.map((id) => ({ subject: `urn:event:${id}`, predicate: `${DKG}epcisEventType`, object: `${EPCIS}ObjectEvent`, graph })),
+    ]);
+    for (let repeat = 0; repeat < 2; repeat++) {
+      const pages = [];
+      for (let offset = 0; offset < ids.length; offset++) {
+        const result = await store.query(buildEpcisQuery({ limit: 1, offset }, CG));
+        if (result.type !== 'bindings') throw new Error('Expected event bindings');
+        pages.push(...result.bindings.map((row) => row.event));
+      }
+      expect(pages).toEqual(ids.map((id) => `urn:event:${id}`));
+    }
+  } finally { await store.dropGraph(graph); await store.close(); }
+});
 
-describe.each(backends)('$name capture/query', ({ create }) => {
+it.each([EPCIS, EPCIS_CURRENT])('admits anchored private SWM events with timing evidence in %s', async (namespace) => {
+  const store = create();
+  const publicGraph = contextGraphSharedMemoryUri(CG);
+  const privateGraph = contextGraphPrivateUri(CG);
+  try {
+    await store.insert([
+      ...['event', 'non-event'].flatMap((id) => [
+        { subject: `urn:private:${id}`, predicate: RDF_TYPE, object: `${namespace}ObjectEvent`, graph: privateGraph },
+        { subject: `urn:private:${id}`, predicate: `${DKG}privateDataAnchor`, object: '"true"', graph: publicGraph },
+      ]),
+      { subject: 'urn:private:event', predicate: `${namespace}eventTime`, object: '"2024-03-01T08:00:00Z"', graph: privateGraph },
+      { subject: 'urn:public:unmarked', predicate: RDF_TYPE, object: `${namespace}ObjectEvent`, graph: publicGraph },
+      { subject: 'urn:public:unmarked', predicate: `${namespace}eventTime`, object: '"2024-03-01T08:00:00Z"', graph: publicGraph },
+    ]);
+    const result = await store.query(buildEpcisQuery({ finalized: false }, CG));
+    if (result.type !== 'bindings') throw new Error('Expected event bindings');
+    expect(result.bindings.map((row) => row.event)).toEqual(['urn:private:event']);
+  } finally {
+    await store.dropGraph(publicGraph); await store.dropGraph(privateGraph); await store.close();
+  }
+});
+
+it('projects a matched parent while preserving complete EPC lists on matching events', async () => {
+  const store = create();
+  const graph = contextGraphDataUri(CG);
+  const subject = 'urn:event:multi-valued';
+  try {
+    await store.insert([
+      ...eventRows('multi-valued', `${EPCIS}ObjectEvent`),
+      { subject, predicate: `${DKG}epcisEventType`, object: `${EPCIS}ObjectEvent`, graph },
+      ...['parentID', 'childEPCs', 'inputEPCList', 'outputEPCList'].flatMap((field) => [
+        { subject, predicate: `${EPCIS}${field}`, object: 'urn:A', graph },
+        { subject, predicate: `${EPCIS_CURRENT}${field}`, object: 'urn:B', graph },
+      ]),
+    ]);
+    const result = await store.query(buildEpcisQuery({ parentID: 'urn:A', childEPC: 'urn:A', inputEPC: 'urn:A', outputEPC: 'urn:A' }, CG));
+    if (result.type !== 'bindings') throw new Error('Expected event bindings');
+    expect(result.bindings).toHaveLength(1);
+    const event = toEpcisEvent(result.bindings[0]);
+    expect(event.parentID).toBe('urn:A');
+    for (const field of ['childEPCs', 'inputEPCList', 'outputEPCList']) {
+      expect((event[field] as string[]).sort()).toEqual(['urn:A', 'urn:B']);
+    }
+  } finally { await store.dropGraph(graph); await store.close(); }
+});
+
+it('captures the current namespace using the canonical standard discriminator', async () => {
+  const store = create();
+  const graph = contextGraphDataUri(CG);
+  const eventID = 'urn:event:current-captured';
+  const document = {
+    '@context': { '@vocab': EPCIS_CURRENT, eventID: '@id' },
+    type: 'EPCISDocument', schemaVersion: '2.0', creationDate: '2024-03-01T08:00:00Z',
+    epcisBody: { eventList: [{ eventID, type: `${EPCIS_CURRENT}ObjectEvent`, action: 'OBSERVE',
+      epcList: ['urn:item:current'], eventTime: '2024-03-01T08:00:00Z', eventTimeZoneOffset: '+00:00' }] },
+  };
+  try {
+    await handleCaptureAsync({ epcisDocument: { public: document } }, {
+      contextGraphId: CG,
+      publisher: { publishAsync: async (_cg, content) => {
+        const nquads = await jsonld.toRDF((content as { public: unknown }).public, { format: 'application/n-quads' });
+        await store.update(`INSERT DATA { GRAPH <${graph}> { ${nquads} } }`);
+        return { captureID: 'capture-current' };
+      } },
+    });
+    const declared = await store.query(`SELECT ?type ?declared WHERE { GRAPH <${graph}> {
+      <${eventID}> a ?type ; <${DKG}epcisEventType> ?declared . } }`);
+    expect(declared.type === 'bindings' && declared.bindings).toEqual([
+      { type: `${EPCIS}ObjectEvent`, declared: `${EPCIS}ObjectEvent` },
+    ]);
+    const result = await store.query(buildEpcisQuery({}, CG));
+    if (result.type !== 'bindings') throw new Error('Expected event bindings');
+    expect(result.bindings.map((row) => row.event)).toEqual([eventID]);
+    expect(toEpcisEvent(result.bindings[0]).type).toBe('ObjectEvent');
+  } finally { await store.dropGraph(graph); await store.close(); }
+});
+
 describe.each(['urn:epcis:CustomEvent', 'https://example.org/CustomEvent'])('external event class %s', (eventType) => {
   it.each(DATE_CASES)('requires event shape and preserves exact filtering $name', async ({ filters, expected }) => {
     const store = create();

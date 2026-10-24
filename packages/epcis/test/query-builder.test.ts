@@ -75,8 +75,8 @@ describe('buildEpcisQuery', () => {
   it('filters by parentID', () => {
     const sparql = buildEpcisQuery({ parentID: 'urn:epc:id:sscc:4012345.0000000001' }, CONTEXT_GRAPH_ID);
 
-    expect(sparql).toContain('VALUES ?_epcis_parentID_filter { epcis:parentID epcisCurrent:parentID }');
-    expect(sparql).toContain('FILTER(STR(?_parentIDMatch) = "urn:epc:id:sscc:4012345.0000000001")');
+    expect(sparql).toContain('VALUES ?_epcis_parentID_value { epcis:parentID epcisCurrent:parentID }');
+    expect(sparql).toContain('FILTER(STR(?parentID) = "urn:epc:id:sscc:4012345.0000000001")');
   });
 
   it('filters by childEPC', () => {
@@ -164,7 +164,7 @@ describe('buildEpcisQuery', () => {
     expect(sparql).toContain('OPTIONAL { VALUES ?_epcis_eventTimeZoneOffset_value { epcis:eventTimeZoneOffset epcisCurrent:eventTimeZoneOffset }');
     expect(sparql).toContain('SELECT ?event ?eventType ?eventTime ?eventTimeZoneOffset ?bizStep');
     expect(sparql).toContain('GROUP BY ?event ?eventType ?eventTime ?eventTimeZoneOffset ?bizStep');
-    expect(sparql).toContain('ORDER BY DESC(xsd:dateTime(STR(?eventTime))) ?event');
+    expect(sparql).toContain('ORDER BY DESC(COALESCE(xsd:dateTime(STR(?eventTime)), "0001-01-01T00:00:00Z"^^xsd:dateTime)) ?event');
   });
 
   it('uses default pagination (limit 100, offset 0)', () => {
@@ -263,7 +263,7 @@ describe('buildEpcisQuery', () => {
   it('orders by eventTime descending with secondary sort on ?event for deterministic pagination', () => {
     const sparql = buildEpcisQuery({ epc: 'urn:test' }, CONTEXT_GRAPH_ID);
 
-    expect(sparql).toContain('ORDER BY DESC(xsd:dateTime(STR(?eventTime))) ?event');
+    expect(sparql).toContain('ORDER BY DESC(COALESCE(xsd:dateTime(STR(?eventTime)), "0001-01-01T00:00:00Z"^^xsd:dateTime)) ?event');
   });
 
   it('uses finalized public partition by default and unions anchored private payloads', () => {

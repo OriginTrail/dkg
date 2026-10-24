@@ -2,6 +2,8 @@ import { expect, it } from 'vitest';
 import { resolveEpcisEventType, resolveEpcisQueryEventType, compactEpcisEventType } from '../src/epcis-vocabulary.js';
 
 it.each([
+  { input: 'https://ref.gs1.org/epcis/ObjectEvent', kind: 'standard', iri: 'https://gs1.github.io/EPCIS/ObjectEvent', response: 'ObjectEvent' },
+  { input: 'https://ref.gs1.org/epcis/CustomEvent', kind: 'gs1-extension', iri: 'https://ref.gs1.org/epcis/CustomEvent', response: 'https://ref.gs1.org/epcis/CustomEvent' },
   { input: 'ObjectEvent', kind: 'standard', iri: 'https://gs1.github.io/EPCIS/ObjectEvent', response: 'ObjectEvent' },
   { input: 'https://gs1.github.io/EPCIS/ObjectEvent', kind: 'standard', iri: 'https://gs1.github.io/EPCIS/ObjectEvent', response: 'ObjectEvent' },
   { input: 'https://gs1.github.io/EPCIS/CustomEvent', kind: 'gs1-extension', iri: 'https://gs1.github.io/EPCIS/CustomEvent', response: 'https://gs1.github.io/EPCIS/CustomEvent' },

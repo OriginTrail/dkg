@@ -1,8 +1,7 @@
 import {
   EPCIS_DECLARED_EVENT_TYPE,
   EPCIS_CURRENT_PREFIX,
-  EPCIS_NAMESPACES,
-  EPCIS_STANDARD_EVENT_TYPES,
+  standardEpcisEventIris,
   EPCIS_TYPE_PREFIX,
   resolveEpcisQueryEventType,
 } from './epcis-vocabulary.js';
@@ -68,8 +67,8 @@ function extensionLocalNameFilter(predicateVariable: string, localName: string):
 }
 
 /** VALUES keeps vocabulary alternatives out of Blazegraph's nested UNION path. */
-function epcisPropertyPattern(property: string, object: string, purpose = 'value'): string {
-  const predicate = `?_epcis_${property}_${purpose}`;
+function epcisPropertyPattern(property: string, object: string, bindingSuffix = 'value'): string {
+  const predicate = `?_epcis_${property}_${bindingSuffix}`;
   return `{ VALUES ${predicate} { epcis:${property} epcisCurrent:${property} }
       ?event ${predicate} ${object} . }`;
 }
@@ -141,21 +140,21 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   let noFilterEventPattern: string | undefined;
   let privateNoFilterEventPattern: string | undefined;
   if (!eventTypeIri) {
-    const standardTypes = EPCIS_NAMESPACES
-      .flatMap((prefix) => EPCIS_STANDARD_EVENT_TYPES.map((type) => sparqlIri(`${prefix}${type}`)))
-      .join(', ');
-    noFilterEventPattern = `FILTER(BOUND(?_declaredEventType)
-      || EXISTS { ?_eventList (epcis:eventList|epcisCurrent:eventList) ?event }
-      || (?eventType IN (${standardTypes})
-        && EXISTS { GRAPH <${metaGraph}> { ?_rootPublication dkg:rootEntity ?event . } }))`;
-    privateNoFilterEventPattern = partition === 'swm'
-      ? `FILTER(BOUND(?_declaredEventType)
-        || EXISTS { ?_eventList (epcis:eventList|epcisCurrent:eventList) ?event }
-        || (?eventType IN (${standardTypes})
-          && (EXISTS { GRAPH <${metaGraph}> { ?_rootPublication dkg:rootEntity ?event . } }
-            || EXISTS { VALUES ?_privateEventEvidencePred { epcis:eventTime epcisCurrent:eventTime }
-              ?event ?_privateEventEvidencePred ?_privateEventEvidence . })))`
-      : noFilterEventPattern;
+    const standardTypes = standardEpcisEventIris().map(sparqlIri).join(', ');
+    const declaredEvidence = 'BOUND(?_declaredEventType)';
+    const eventListEvidence = 'EXISTS { ?_eventList (epcis:eventList|epcisCurrent:eventList) ?event }';
+    const publicationEvidence = `EXISTS { GRAPH <${metaGraph}> { ?_rootPublication dkg:rootEntity ?event . } }`;
+    const privateTimeEvidence = `EXISTS { VALUES ?_privateEventEvidencePred { epcis:eventTime epcisCurrent:eventTime }
+      ?event ?_privateEventEvidencePred ?_privateEventEvidence . }`;
+    const evidenceFilter = (allowPrivateTime: boolean): string => {
+      const rootEvidence = [publicationEvidence, ...(allowPrivateTime ? [privateTimeEvidence] : [])];
+      return `FILTER(${[declaredEvidence, eventListEvidence,
+        `(?eventType IN (${standardTypes}) && (${rootEvidence.join(' || ')}))`].join(' || ')})`;
+    };
+    noFilterEventPattern = evidenceFilter(false);
+    // The extra shape evidence applies only to anchored private SWM payloads.
+    // Sharing it with the public body would admit unmarked public resources.
+    privateNoFilterEventPattern = evidenceFilter(partition === 'swm');
   }
 
   // eventID filter — matches the RDF subject (the event's @id / rootEntity)
@@ -166,7 +165,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   // eventType filter — narrow to a specific EPCIS event type
   if (eventTypeIri) {
     const eventTypeIris = eventType?.kind === 'standard'
-      ? EPCIS_NAMESPACES.map((prefix) => `${prefix}${eventType.name}`)
+      ? standardEpcisEventIris(eventType.name)
       : [eventTypeIri];
     filterClauses.push(`FILTER(?eventType IN (${eventTypeIris.map(sparqlIri).join(', ')}))`);
   }
@@ -194,10 +193,14 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
 
   // Parent ID filter (AggregationEvent)
   if (params.parentID) {
-    sharedRequiredPatterns.push(epcisPropertyPattern('parentID', '?_parentIDMatch', 'filter'));
-    filterClauses.push(`FILTER(STR(?_parentIDMatch) = "${escapeSparql(params.parentID)}")`);
+    sharedRequiredPatterns.push(epcisPropertyPattern('parentID', '?parentID'));
+    filterClauses.push(`FILTER(STR(?parentID) = "${escapeSparql(params.parentID)}")`);
+  } else {
+    optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('parentID', '?parentID')}`);
   }
 
+  // List filters select whole events (EPCIS 2.0 section 8.2.7.1); keep all
+  // values in the returned event, including EPCs that did not match.
   // Child EPCs filter (AggregationEvent)
   if (params.childEPC) {
     sharedRequiredPatterns.push(epcisPropertyPattern('childEPCs', '?_childEPCMatch', 'filter'));
@@ -270,7 +273,6 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   } else {
     optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('readPoint', '?readPoint')}`);
   }
-  optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('parentID', '?parentID')}`);
   optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('childEPCs', '?childEPCs')}`);
   optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('inputEPCList', '?inputEPCList')}`);
   optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('outputEPCList', '?outputEPCList')}`);
@@ -348,7 +350,7 @@ WHERE {
   }
 }
 GROUP BY ?event ?eventType ?eventTime ?eventTimeZoneOffset ?bizStep ?bizLocation ?disposition ?readPoint ?action ?parentID ?configurationId ?shipmentId ?ual
-ORDER BY DESC(xsd:dateTime(STR(?eventTime))) ?event
+ORDER BY DESC(COALESCE(xsd:dateTime(STR(?eventTime)), "0001-01-01T00:00:00Z"^^xsd:dateTime)) ?event
 LIMIT ${limit}
 OFFSET ${offset}`;
 }

@@ -16,6 +16,12 @@ export type ResolvedEpcisEventType =
   | { kind: 'standard'; iri: string; name: StandardEpcisEventType }
   | { kind: 'gs1-extension' | 'external'; iri: string };
 
+/** Accepted namespace spellings for one standard type, or every standard type. */
+export function standardEpcisEventIris(name?: StandardEpcisEventType): string[] {
+  return EPCIS_NAMESPACES.flatMap((prefix) =>
+    (name ? [name] : EPCIS_STANDARD_EVENT_TYPES).map((type) => `${prefix}${type}`));
+}
+
 /** Resolve only valid capture discriminators to their canonical identity. */
 export function resolveEpcisEventType(value: string): ResolvedEpcisEventType | undefined {
   const name = EPCIS_STANDARD_EVENT_TYPES.find((name) =>
