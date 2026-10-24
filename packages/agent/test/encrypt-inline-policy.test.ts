@@ -8,12 +8,14 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { resolvePublishTargetCuration } from '../src/publish-target-curation.js';
 import {
   ACK_PROTOCOL_VERSION_V2_LU11,
   ciphertextChunkStoreGraph,
   ciphertextChunkStoreSubject,
   CIPHERTEXT_CHUNK_PREDICATE,
   computeGossipSigningPayloadV2,
+  createOperationContext,
   decodeGossipEnvelope,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -1788,5 +1790,23 @@ describe('curated inline context per publish attempt', () => {
     expect(encrypt).not.toHaveBeenCalled();
     expect(host.createAndDistributeSwmSenderKeyEpoch).toHaveBeenCalledTimes(3);
     expect(host.resolveWorkspaceAgentRecipientsForCurrentAuthority).toHaveBeenCalledTimes(6);
+  });
+});
+
+describe('resolvePublishTargetCuration', () => {
+  it('selects a chain-confirmed curated explicit target when the source policy is unknown, and says so', async () => {
+    const log = { info: vi.fn(), warn: vi.fn() };
+    const agent = {
+      readLiveOnChainAccessPolicy: vi.fn(async () => 1),
+      resolveOnChainAccessPolicyState: vi.fn(async () => 'unknown'),
+      isPrivateContextGraph: vi.fn(async () => false),
+    };
+
+    await expect(resolvePublishTargetCuration(agent as never, log as never, createOperationContext('publish'), {
+      contextGraphId: 'source-cg', explicitPolicyTargetContextGraphId: '42', logPrefix: 'LU-5',
+    })).resolves.toBe(true);
+
+    expect(agent.readLiveOnChainAccessPolicy).toHaveBeenCalledWith('42', expect.anything());
+    expect(log.warn).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('selecting encrypted direct publish payload'));
   });
 });

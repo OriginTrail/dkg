@@ -664,3 +664,9 @@ export {
 export { resolveSyncAgentsMeta, parseBooleanEnv } from './sync/agents-meta-policy.js';
 
 export type { CoreChainCacheNetwork } from './core-chain-cache-config.js';
+export {
+  KA_MINT_RECONCILE_INCOMPLETE_CODE,
+  KA_MINT_RECONCILE_REFUSED_CODE,
+  type KnowledgeAssetMintReconcileInput,
+  type KnowledgeAssetMintReconcileResult,
+} from './knowledge-asset-mint-reconcile.js';

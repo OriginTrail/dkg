@@ -160,6 +160,8 @@ import {
   type PublisherAddressResolution,
   type PublisherSigner,
 } from './publisher-planning.js';
+import { mintOrAdoptKnowledgeAssets, sealedMintAdoption, type MintRecording } from './adopt-existing-mint.js';
+import { graphScopeTargetsChain } from './graph-scope-chain-target.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
@@ -705,46 +707,6 @@ interface GraphScopedPublishDescriptor {
 type GraphScopedPublicationOperation =
   | { kind: 'initial'; options: InitialPublishOptions }
   | { kind: 'update'; options: UpdateOptions };
-
-/**
- * Return the numeric EIP-155 suffix carried by a DKG chain label.
- *
- * UALs in persisted jobs use both bare numeric labels (`31337`) and
- * namespaced labels (`evm:31337`, `base:8453`).  The adapter exposes the
- * authoritative numeric network through `getEvmChainId()`, so representation
- * aliases must compare by that value rather than by their raw strings.
- */
-function numericEvmChainId(chainId: string): bigint | undefined {
-  const match = /(?:^|:)([0-9]+)$/.exec(chainId.trim());
-  if (!match) return undefined;
-  try {
-    return BigInt(match[1]);
-  } catch {
-    return undefined;
-  }
-}
-
-function graphScopeTargetsChain(
-  scopeChainId: string,
-  adapterChainId: string,
-  evmChainId?: bigint,
-): boolean {
-  // DKG chain labels are protocol namespaces, not necessarily EIP-155 aliases.
-  // For example, `otp:20430` identifies the NeuroWeb test network while the
-  // backing EVM currently reports chain id 31337.  An exact adapter-label match
-  // is therefore authoritative and must win before numeric alias comparison.
-  if (scopeChainId === adapterChainId) return true;
-  const scopeNumericId = numericEvmChainId(scopeChainId);
-  // If the raw labels differ, accept representation aliases only when their
-  // numeric EIP-155 ids agree (for example `31337` and `evm:31337`).
-  if (scopeNumericId !== undefined && evmChainId !== undefined) {
-    return scopeNumericId === evmChainId;
-  }
-  const adapterNumericId = evmChainId ?? numericEvmChainId(adapterChainId);
-  return scopeNumericId !== undefined
-    && adapterNumericId !== undefined
-    && scopeNumericId === adapterNumericId;
-}
 
 /**
  * Resolve the all-or-nothing V2 content envelope carried by a publish/update.
@@ -2043,7 +2005,7 @@ export class DKGPublisher implements Publisher {
     // r12 (3878010163) — the lifecycle hooks enter as the ONE shared contract (intersected,
     // not re-declared field by field), so a hook added to PublishLifecycleHooks is available
     // at this public entry point without editing this list.
-    options?: PublishLifecycleHooks & {
+    options?: PublishLifecycleHooks & Pick<PublishOptions, 'adoptExistingMint'> & {
       operationCtx?: OperationContext;
       clearSharedMemoryAfter?: boolean;
       /** Triggers remap: moves data from the default data graph to `/context/{id}`. */
@@ -2283,6 +2245,7 @@ export class DKGPublisher implements Publisher {
       privateMerkleRoot: options?.privateMerkleRoot,
       privateTripleCount: options?.privateTripleCount,
       pricingPolicy: options?.pricingPolicy,
+      adoptExistingMint: options?.adoptExistingMint,
       [INTERNAL_ORIGIN_TOKEN]: true,
       [PUBLIC_ACK_STAGING_MODE_TOKEN]: 'inline-small-swm',
       ...(hasTrustedCatalogTriples ? { [TRUSTED_CATALOG_ORIGIN_TOKEN]: true } : {}),
@@ -2636,6 +2599,10 @@ export class DKGPublisher implements Publisher {
     const normalizedAllowedPeers = [...new Set((allowedPeers ?? []).map((p) => p.trim()).filter(Boolean))];
     const normalizedPublisherPeerId = publisherPeerId.trim();
     const graphPublish = resolveGraphScopedPublishDescriptor({ kind: 'initial', options });
+    // A sealed publish adopts its own late mint; reconcile (adoptOnly) records it and sends nothing.
+    const sealedAdoption = sealedMintAdoption(this.store, graphPublish, { contextGraphId, subGraphName: options.subGraphName,
+      existingOnly: options.adoptExistingMint, log: (message) => this.log.info(ctx, message) });
+    const adoptOnly = sealedAdoption?.existingOnly;
     assertPublicationPricingPolicyApplicable(pricingPolicy, {
       kind: 'initial',
       graphScoped: graphPublish !== undefined,
@@ -2665,7 +2632,7 @@ export class DKGPublisher implements Publisher {
     // can be resolved at all, the on-chain branch throws
     // `PublisherWalletRequiredError` instead of silently degrading.
     const hasAttributionOverride = options.publisherNodeIdentityIdOverride !== undefined;
-    const publisherPlanning = await this.publisherPlanner.prepare(publisherContextGraphId);
+    const publisherPlanning = await (adoptOnly ? this.publisherPlanner.prepareMintAdoption(publisherContextGraphId) : this.publisherPlanner.prepare(publisherContextGraphId));
     const chainV10Ready = publisherPlanning.chainV10Ready;
     const canAttemptOnChainPublish = publisherPlanning.canAttemptOnChainPublish;
 
@@ -3100,7 +3067,7 @@ export class DKGPublisher implements Publisher {
     const precomputedTokenAmount = finalizedPublisherPlan.tokenAmount;
 
     let stagingQuads: Uint8Array | undefined;
-    if (useEncryptedInline) {
+    if (useEncryptedInline && !adoptOnly) {
       // MEMBER-SIDE ENCRYPTION STAYS. The private (non-catalog) data is still
       // AEAD-encrypted and distributed to CG members — via the chunked SWM
       // fan-out when wired (preferred), else the single-blob hook. This is
@@ -3264,9 +3231,7 @@ export class DKGPublisher implements Publisher {
     // (the agent wires it eagerly), but those are intentional local
     // publishes and must not fail before the local branch below can run.
     const v10ACKProvider = options.v10ACKProvider;
-    const shouldCollectV10ACKs =
-      v10ACKProvider !== undefined &&
-      canAttemptOnChainPublish;
+    const shouldCollectV10ACKs = v10ACKProvider !== undefined && canAttemptOnChainPublish && !adoptOnly;
     let v10ACKs: V10CoreNodeACK[] | undefined;
     if (shouldCollectV10ACKs) {
       onPhase?.('collect_v10_acks', 'start');
@@ -3501,7 +3466,7 @@ export class DKGPublisher implements Publisher {
 
     onPhase?.('chain', 'start');
 
-    let onChainResult: OnChainPublishResult | undefined;
+    let onChainResult: OnChainPublishResult | undefined, recording: MintRecording | undefined;
     let status: 'tentative' | 'confirmed' = 'tentative';
     ensurePublishOperationIdentity();
     // The operation id may be needed earlier as an encryption nonce domain,
@@ -3751,19 +3716,16 @@ export class DKGPublisher implements Publisher {
       try {
         onPhase?.('chain:sign', 'start');
         signStarted = true;
-        if (!publisherSigner) throw new PublisherWalletRequiredError('publish');
-        this.log.info(
-          ctx,
-          `Signing on-chain publish (attributionId=${attributionIdentityId}${hasAttributionOverride ? ' [override]' : ''}, signer=${publisherSigner.address}, source=${publisherSigner.source})`,
-        );
+        if (!publisherSigner && !adoptOnly) throw new PublisherWalletRequiredError('publish');
+        if (publisherSigner) this.log.info(ctx, `Signing on-chain publish (attributionId=${attributionIdentityId}${hasAttributionOverride ? ' [override]' : ''}, signer=${publisherSigner.address}, source=${publisherSigner.source})`);
 
         onPhase?.('chain:sign', 'end');
         signStarted = false;
         onPhase?.('chain:submit', 'start');
         submitStarted = true;
-        this.log.info(ctx, `Submitting V10 on-chain publish tx (${kaCount} KAs, networkVisibleByteSize=${publicationPricing.networkVisibleByteSize}${useCuratedCatalog ? ' [catalog]' : ''}, billableByteSize=${publicationPricing.billableByteSize}, pricingPolicy=${publicationPricing.policy}, tokenAmount=${tokenAmount})`);
+        this.log.info(ctx, adoptOnly ? 'Recording the existing mint of the sealed reservation (no transaction)' : `Submitting V10 on-chain publish tx (${kaCount} KAs, networkVisibleByteSize=${publicationPricing.networkVisibleByteSize}${useCuratedCatalog ? ' [catalog]' : ''}, billableByteSize=${publicationPricing.billableByteSize}, pricingPolicy=${publicationPricing.policy}, tokenAmount=${tokenAmount})`);
 
-        if (!v10ACKs || v10ACKs.length === 0) {
+        if (!adoptOnly && (!v10ACKs || v10ACKs.length === 0)) {
           throw new Error('V10 ACKs required for on-chain publish — no ACKs collected');
         }
         if (typeof this.chain.isV10Ready !== 'function' || !this.chain.isV10Ready()) {
@@ -3925,14 +3887,14 @@ export class DKGPublisher implements Publisher {
               billableByteSize: publicationPricing.billableByteSize.toString(),
               pricingPolicy: publicationPricing.policy,
               tokenAmount: tokenAmount.toString(),
-              ackCount: v10ACKs.length,
+              ackCount: v10ACKs?.length ?? 0,
               merkleLeafCount: kcMerkleLeafCount,
             },
           });
-          onChainResult = await this.chain.createKnowledgeAssets!({
+          ({ result: onChainResult, recording } = await mintOrAdoptKnowledgeAssets(this.chain, {
             publishOperationId,
             contextGraphId: v10CgId,
-            publisherAddress: publisherSigner.address,
+            publisherAddress: publisherSigner?.address,
             reservedKaId,
             merkleRoot: kcMerkleRoot,
             knowledgeAssetsAmount: kaCount,
@@ -3961,7 +3923,7 @@ export class DKGPublisher implements Publisher {
               },
               schemeVersion: effectiveSchemeVersion,
             },
-            ackSignatures: v10ACKs.map(ack => ({
+            ackSignatures: (v10ACKs ?? []).map(ack => ({
               identityId: ack.nodeIdentityId,
               r: ack.signatureR,
               vs: ack.signatureVS,
@@ -3972,7 +3934,7 @@ export class DKGPublisher implements Publisher {
             ...(writeAhead.onBeforeReplacementBroadcast
               ? { onBeforeReplacementBroadcast: writeAhead.onBeforeReplacementBroadcast }
               : {}),
-          });
+          }, sealedAdoption));
         } finally {
           if (writeAhead.didWriteAhead()) onPhase?.('chain:writeahead', 'end');
         }
@@ -3985,7 +3947,7 @@ export class DKGPublisher implements Publisher {
           bestEffortNotify(onPublishConfirmed, { txHash: onChainResult.txHash });
         }
 
-        onChainResult.tokenAmount = tokenAmount;
+        if (!recording.adopted) onChainResult.tokenAmount = tokenAmount; // an adopted mint keeps its original cost
 
         const kaId = onChainResult.kaId ?? onChainResult.batchId;
         if (reservedKaId !== undefined && kaId !== reservedKaId) {
@@ -4090,7 +4052,7 @@ export class DKGPublisher implements Publisher {
             q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
           );
         }
-        if (graphPublish) {
+        if (graphPublish && !recording.keepsExistingRecord) {
           await replaceLocallyTrustedKnowledgeAssetControls(
             this.store,
             graphPublish.scope.ual,
@@ -4130,7 +4092,7 @@ export class DKGPublisher implements Publisher {
         } else {
           await this.store.insert(vmQuads);
         }
-        await this.store.insert(confirmedQuads);
+        if (!recording.keepsExistingRecord) await this.store.insert(confirmedQuads);
         // GH #1078 — supersede/persist private slices only now that the chain
         // has confirmed (before returning 'confirmed', so no read sees the KA
         // confirmed without its private data).

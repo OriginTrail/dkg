@@ -4,10 +4,9 @@ import type { ChainEvent } from './knowledge-asset-update-identity.js';
 export type { ChainEvent } from './knowledge-asset-update-identity.js';
 import type { ContextGraphAuthorityIndexRevisionReader } from './context-graph-authority-index-reader.js';
 export type { ContextGraphAuthorityIndexRevisionReader } from './context-graph-authority-index-reader.js';
-import type {
-  RandomSamplingAvailability,
-} from './random-sampling-availability.js';
+import type { RandomSamplingAvailability } from './random-sampling-availability.js';
 import type { RandomSamplingReadContextReader } from './random-sampling-read-context.js';
+import type { KnowledgeAssetMintLookup } from './knowledge-asset-mint-evidence.js';
 import type { KnowledgeAssetVersionSnapshotReadOptions } from './ka-version-snapshot-report.js';
 import type { ethers } from 'ethers';
 import type { RpcRequestClass } from './rpc-request-transport.js';
@@ -1525,7 +1524,7 @@ export function operationalSigningOf(
  * V9 introduces publisher-namespaced UALs: did:dkg:{chainId}/{publisherAddress}/{localKAId}
  * Publishers reserve ID ranges via their signer address, then batch-mint KAs from those ranges.
  */
-export interface ChainAdapter {
+export interface ChainAdapter extends KnowledgeAssetMintLookup {
   /** Complete coherent public chain evidence for explicit snapshot recovery. */
   readPublicGraphSnapshot?(contextGraphId: string, onChainId: string, options?: ChainReadOptions): Promise<import('./public-graph-snapshot.js').PublicGraphSnapshot>;
 

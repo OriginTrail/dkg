@@ -5,7 +5,7 @@
  * split into focused sibling modules to stay within AI context windows:
  *   - evm-adapter-base.ts        shared state + constructor + plumbing
  *   - evm-adapter-{identity,publish,context-graph,conviction,ack-sign,
- *     random-sampling,storage-reads,events}.ts   per-domain method groups
+ *     random-sampling,storage-reads,events,ka-mint}.ts   per-domain method groups
  *   - evm-adapter-{abi,errors,rpc,allowance,types,constants}.ts  free helpers
  *
  * The class is assembled below from EVMChainAdapterBase + the holder mixins
@@ -26,6 +26,7 @@ import { RandomSamplingMethods } from './evm-adapter-random-sampling.js';
 import { StorageReadMethods } from './evm-adapter-storage-reads.js';
 import { PublicGraphSnapshotMethods } from './evm-adapter-public-graph-snapshot.js';
 import { EventsMethods } from './evm-adapter-events.js';
+import { KnowledgeAssetMintMethods } from './evm-adapter-ka-mint.js';
 
 // --- Re-exports preserving the previously module-local public API. ---
 export {
@@ -60,5 +61,5 @@ export type { EVMAdapterConfig, EVMAdapterOptions } from './evm-adapter-types.js
  */
 export class EVMChainAdapter extends EVMChainAdapterBase implements ChainAdapter {}
 type PublicConvictionMethods = Pick<ConvictionMethods, keyof ConvictionMethods>;
-export interface EVMChainAdapter extends IdentityMethods, PublishMethods, ContextGraphMethods, PublicConvictionMethods, AckSignMethods, RandomSamplingMethods, StorageReadMethods, EventsMethods, PublicGraphSnapshotMethods {}
-applyMixins(EVMChainAdapter, [IdentityMethods, PublishMethods, ContextGraphMethods, ConvictionMethods, AckSignMethods, RandomSamplingMethods, StorageReadMethods, EventsMethods, PublicGraphSnapshotMethods]);
+export interface EVMChainAdapter extends IdentityMethods, PublishMethods, ContextGraphMethods, PublicConvictionMethods, AckSignMethods, RandomSamplingMethods, StorageReadMethods, EventsMethods, PublicGraphSnapshotMethods, KnowledgeAssetMintMethods {}
+applyMixins(EVMChainAdapter, [IdentityMethods, PublishMethods, ContextGraphMethods, ConvictionMethods, AckSignMethods, RandomSamplingMethods, StorageReadMethods, EventsMethods, PublicGraphSnapshotMethods, KnowledgeAssetMintMethods]);

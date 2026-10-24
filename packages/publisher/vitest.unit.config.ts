@@ -102,6 +102,7 @@ export default defineConfig({
       'test/promote-replay-safety.test.ts',
       'test/promote-post-commit-recovery.test.ts',
       'test/completed-vm-supersession.test.ts',
+      'test/publish-adopt-existing-mint.test.ts',
       'test/promote-operation-intent.test.ts',
       'test/ka-graph-skolemization.test.ts',
       'test/ka-graph-workspace-snapshot.test.ts',

@@ -57,6 +57,9 @@ import {
 } from './chain-adapter.js';
 import { ethers } from 'ethers';
 import { ChainWriteAheadHookError } from './write-ahead-hook-error.js';
+import { kaIdAlreadyMintedRevert } from './ka-id-already-minted.js';
+import type { KnowledgeAssetMintLookupOptions } from './knowledge-asset-mint-evidence.js';
+import { resolveMockKnowledgeAssetMint } from './mock-knowledge-asset-mint.js';
 import {
   isNonexistentContextGraphStorageRevert,
   readContextGraphStorageRangeV1,
@@ -527,6 +530,16 @@ export class MockChainAdapter implements ChainAdapter {
     _options: ChainReadOptions = {},
   ): Promise<boolean> {
     return !(receipt.txHash !== undefined && this.unfinalizedTxHashes.has(receipt.txHash));
+  }
+
+  async resolveKnowledgeAssetMint(kaId: bigint, options: KnowledgeAssetMintLookupOptions = {}) {
+    const id = kaId.toString();
+    return resolveMockKnowledgeAssetMint({
+      kaId, txHash: options.txHash, events: this.events, blockHash: mockBlockHash,
+      minted: this.unknownMintedIds.has(id) ? null : this.collections.has(kaId) || this.mintedKaIds.has(id),
+      isFinal: (txHash) => !this.unfinalizedTxHashes.has(txHash),
+      knowledgeAssetsContract: await this.getDKGKnowledgeAssetsAddress(),
+    });
   }
 
   /**
@@ -2161,35 +2174,21 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   async createKnowledgeAssets(params: V10PublishParams): Promise<OnChainPublishResult> {
-    // Deliberately tolerant of `contextGraphId === 0n`. The real EVM
-    // adapter rejects that at `evm-adapter.ts:createKnowledgeAssets`
-    // pre-tx, which is the authoritative fail-loud boundary. The mock is
-    // used by ~680 unit tests that publish with descriptive CG-name
-    // strings and rely on the silent `0n` fallback to exercise the data
-    // flow without migrating every fixture to on-chain numeric ids.
+    // Deliberately tolerant of `contextGraphId === 0n`, which the real EVM
+    // adapter rejects pre-tx: mock fixtures publish with descriptive CG names.
     if (params.ackSignatures.length < this.minimumRequiredSignatures) {
       throw new Error('MinSignaturesRequirementNotMet');
     }
+    // The contract's re-mint guard reverts at gas estimation, before any broadcast.
+    const reminted = params.reservedKaId !== undefined && this.collections.has(params.reservedKaId);
+    if (reminted) throw kaIdAlreadyMintedRevert(params.reservedKaId!);
 
-    // P-1 review (follow-up): mirror the EVM adapter's write-ahead
-    // hook so mock-backed publisher tests observe the same phase
-    // boundary contract (`chain:writeahead:start` fires only when a
-    // concrete broadcast is imminent).
-    //
-    // Codex iter-5/iter-6: fail closed on hook error — matching the
-    // real EVM adapter's refactored send path. WAL persistence
-    // failures MUST abort the broadcast.
-    //
-    // Codex iter-6: make the pre-broadcast hash equal the hash the
-    // adapter will eventually return in the result (via `txResult`)
-    // by deriving both from `peekTxHash()`. This lets recovery tests
-    // match "persisted before send" against "confirmed after send"
-    // without two separate hash namespaces, and gives each publish
-    // a unique breadcrumb (previously keyed only on `nextBatchId`).
+    // P-1: mirror the EVM write-ahead hook. It fires only when a broadcast is
+    // imminent, a hook failure aborts it (fail closed), and its hash is the one
+    // `txResult` returns (both `peekTxHash()`), so recovery tests can match them.
     const mockPublishTxHash = this.peekTxHash();
     try {
-      // Codex PR #241 iter-7: `await` so async WAL writes run to
-      // completion before the mock "broadcasts".
+      // `await` so async WAL writes complete before the mock "broadcasts".
       await params.onBroadcast?.({ txHash: mockPublishTxHash });
     } catch (hookErr) {
       throw new ChainWriteAheadHookError(
@@ -2258,6 +2257,7 @@ export class MockChainAdapter implements ChainAdapter {
       contextGraphId: params.contextGraphId.toString(),
       authorAddress: params.author.address,
       authorSchemeVersion: params.author.schemeVersion,
+      tokenAmount: params.tokenAmount.toString(),
     });
 
     const result = this.txResult(true);
@@ -2304,7 +2304,7 @@ export class MockChainAdapter implements ChainAdapter {
    */
   /** Preview the txHash that the next txResult() call will produce (read-only). */
   private peekTxHash(): string {
-    return `0x${this.nextBlock.toString(16).padStart(64, '0')}${this.txIndexInBlock.toString(16).padStart(4, '0')}`;
+    return `0x${this.nextBlock.toString(16).padStart(60, '0')}${this.txIndexInBlock.toString(16).padStart(4, '0')}`;
   }
 
   private pushEvent(type: string, data: Record<string, unknown>): void {
@@ -2314,7 +2314,7 @@ export class MockChainAdapter implements ChainAdapter {
   private txResult(success: boolean): TxResult {
     const blockNumber = this.nextBlock;
     const txIndex = this.txIndexInBlock++;
-    const hash = `0x${blockNumber.toString(16).padStart(64, '0')}${txIndex.toString(16).padStart(4, '0')}`;
+    const hash = `0x${blockNumber.toString(16).padStart(60, '0')}${txIndex.toString(16).padStart(4, '0')}`;
 
     if (this.autoMine) this.advanceBlock();
     return { hash, blockNumber, txIndex, success };

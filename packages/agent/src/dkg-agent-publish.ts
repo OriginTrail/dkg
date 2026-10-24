@@ -488,6 +488,9 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
+import { adoptOnlyInlineHooks, resolvePublishTargetCuration } from './publish-target-curation.js';
+import { KA_MINT_RECONCILE_REFUSED_CODE } from './knowledge-asset-mint-reconcile.js';
+import { sealChainTargetMismatch } from './seal-chain-target.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
@@ -4142,95 +4145,9 @@ export class PublishMethods extends DKGAgentBase {
     setupRound = 1,
   ): Promise<{ chainKey: Uint8Array; aeadCgId: string; senderAddress: string } | undefined> {
     const ctx = createOperationContext('publish');
-    const targetCgId = explicitPolicyTargetContextGraphId ?? contextGraphId;
-    const probeIsCurated = async (cgId: string, opts?: { rawOnChainSlot?: boolean }): Promise<boolean | null> => {
-      // Consume the SHARED tri-state resolver (the same one behind the
-      // SWM-gossip gate) so the publish-inline path can never DIVERGE from it,
-      // and — critically (#884 review 🔴 GZh-c) — so a genuine UNKNOWN is
-      // PRESERVED here instead of collapsing to "not public ⇒ plaintext". The
-      // resolver already does the live-on-chain proof, identity binding, and
-      // bounded reads; a thrown RPC rejection is caught below and also
-      // fails closed.
-      let policyState: 0 | 1 | 'unregistered' | 'unknown';
-      try {
-        policyState = await withRpcUsageSite(CG_AUTH_RPC_SITES.curatedProbe, async () => {
-          if (opts?.rawOnChainSlot && /^\d+$/.test(cgId.trim())) {
-            const policy = await this.readLiveOnChainAccessPolicy(cgId.trim(), ctx);
-            return policy === 0 || policy === 1 ? policy : 'unknown';
-          }
-          return this.resolveOnChainAccessPolicyState(cgId, ctx);
-        });
-      } catch (err) {
-        this.log.warn(ctx, `${logPrefix}: chain access-policy probe for ${cgId} failed — treating as UNKNOWN (fail-closed): ${err instanceof Error ? err.message : String(err)}`);
-        return null;
-      }
-      // PUBLIC on-chain ⇒ never curated for SWM-encryption purposes, even with
-      // an allowedAgent list (that governs publish authority). Decide this
-      // BEFORE `isPrivateContextGraph`, whose allowlist-implies-private
-      // heuristic would otherwise force encrypted inline payloads onto a public
-      // CG and diverge from the plaintext SWM-gossip path.
-      if (policyState === 0) return false;
-      // PRIVATE on-chain ⇒ curated ⇒ encrypted inline payload.
-      if (policyState === 1) return true;
-      if (policyState === 'unknown') {
-        // Resolvable on-chain but UNPROVABLE (not live / stale mapping / no
-        // liveness probe / timeout). A positive LOCAL curated signal is a safe
-        // downgrade-to-encrypted (never a leak), so honor it; otherwise keep
-        // the UNKNOWN so the caller REFUSES (throws "publish access-policy is
-        // unknown") rather than silently choosing plaintext for what may be a
-        // private CG.
-        try {
-          if (await this.isPrivateContextGraph(cgId)) return true;
-        } catch { /* can't add a positive curated signal — stay unknown */ }
-        return null;
-      }
-      // 'unregistered': no on-chain slot at all (a pure-local CG). Fall back to
-      // the local allowlist-implies-private heuristic; absent that, keep the
-      // long-standing plaintext-inline default for local-only workspaces.
-      try {
-        if (await this.isPrivateContextGraph(cgId)) return true;
-      } catch { /* fall through to the plaintext-inline default */ }
-      return false;
-    };
-    const explicitRawTarget = explicitPolicyTargetContextGraphId !== undefined && /^\d+$/.test(targetCgId.trim());
-    let sourceIsCurated: boolean | null;
-    let targetIsCurated: boolean | null;
-    if (targetCgId !== contextGraphId && explicitRawTarget) {
-      targetIsCurated = await probeIsCurated(targetCgId, { rawOnChainSlot: true });
-      sourceIsCurated = targetIsCurated == null ? null : await probeIsCurated(contextGraphId);
-    } else {
-      sourceIsCurated = await probeIsCurated(contextGraphId);
-      targetIsCurated = targetCgId === contextGraphId
-        ? sourceIsCurated
-        : await probeIsCurated(targetCgId);
-    }
-    if (targetIsCurated == null || (targetCgId !== contextGraphId && sourceIsCurated == null && !targetIsCurated)) {
-      throw new Error(
-        `${logPrefix}: publish access-policy is unknown — ` +
-        `source CG "${contextGraphId}" curated=${sourceIsCurated ?? 'unknown'}, ` +
-        `target CG "${targetCgId}" curated=${targetIsCurated ?? 'unknown'}. ` +
-        `Refusing to choose plaintext vs encrypted inline payload without chain-confirmed policy.`,
-      );
-    }
-    if (targetCgId !== contextGraphId && sourceIsCurated == null && targetIsCurated) {
-      this.log.warn(
-        ctx,
-        `${logPrefix}: source CG "${contextGraphId}" access-policy is unknown, but explicit target ` +
-        `on-chain CG "${targetCgId}" is chain-confirmed curated; selecting encrypted direct publish payload.`,
-      );
-    }
-    if (targetCgId !== contextGraphId && sourceIsCurated != null && sourceIsCurated !== targetIsCurated) {
-      throw new Error(
-        `${logPrefix}: remap publish source/target access-policy mismatch — ` +
-        `source CG "${contextGraphId}" curated=${sourceIsCurated}, ` +
-        `target CG "${targetCgId}" curated=${targetIsCurated}. ` +
-        `Refusing to publish: encrypting against the wrong CG's policy ` +
-        `would either leak plaintext (curated→public) or be rejected by ` +
-        `cores (public→curated). Reconcile the source and target ` +
-        `access policies before retrying.`,
-      );
-    }
-    if (!targetIsCurated) return undefined;
+    if (!(await resolvePublishTargetCuration(this, this.log, ctx, {
+      contextGraphId, explicitPolicyTargetContextGraphId, logPrefix,
+    }))) return undefined;
 
     const senderAddress = authorAgentAddress
       ?? this.defaultAgentAddress
@@ -5875,6 +5792,7 @@ export class PublishMethods extends DKGAgentBase {
       pricingPolicy?: PublishOptions['pricingPolicy'];
       clearSharedMemoryAfter?: boolean;
       publisherOverride?: DKGPublisher;
+      adoptExistingMint?: PublishOptions['adoptExistingMint'];
     },
   ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
     const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
@@ -5920,26 +5838,8 @@ export class PublishMethods extends DKGAgentBase {
     //    points at. This is the cross-deployment safety the EIP-712
     //    domain is buying us; surface as an early 4xx-equivalent
     //    rather than a tx revert.
-    if (
-      typeof this.chain.getEvmChainId === 'function' &&
-      typeof this.chain.getKnowledgeAssetsLifecycleAddress === 'function'
-    ) {
-      const liveChainId = await this.chain.getEvmChainId();
-      const liveKav10 = await this.chain.getKnowledgeAssetsLifecycleAddress();
-      if (liveChainId !== seal.chainId) {
-        throw new Error(
-          `publishFromFinalizedAssertion: seal binds chainId=${seal.chainId.toString()} but daemon ` +
-            `is configured for chainId=${liveChainId.toString()}. The author signature is not valid ` +
-            `against this chain. Re-finalize the assertion against the target chain.`,
-        );
-      }
-      if (liveKav10.toLowerCase() !== seal.kav10Address.toLowerCase()) {
-        throw new Error(
-          `publishFromFinalizedAssertion: seal binds KAv10=${seal.kav10Address} but daemon ` +
-            `is configured for KAv10=${liveKav10}. The signature is not valid against this deployment.`,
-        );
-      }
-    }
+    const chainTargetMismatch = await sealChainTargetMismatch(this.chain, seal);
+    if (chainTargetMismatch) throw new Error(`publishFromFinalizedAssertion: ${chainTargetMismatch}`);
 
     // #1116 (round 9, reviewer 🔴 #1/#2) — MARKER GATE. A valid seal is no longer
     // SUFFICIENT to publish: it must be backed by a LIVE complete full share
@@ -6013,6 +5913,10 @@ export class PublishMethods extends DKGAgentBase {
       vmCurrentAssertion: vmCurrent,
       pricingPolicy: opts?.pricingPolicy,
     });
+    if (opts?.adoptExistingMint && operationPlan.kind === 'update') {
+      throw Object.assign(new Error(`"${name}" already has a confirmed VM version; recording a mint must not send an update.`),
+        { code: KA_MINT_RECONCILE_REFUSED_CODE });
+    }
     const stampedNumberStr = stripLit(pointerRow?.['kaNum']);
 
     if (graphScope.agentAddress.toLowerCase() !== seal.authorAddress.toLowerCase()) {
@@ -6261,6 +6165,7 @@ export class PublishMethods extends DKGAgentBase {
             reservedKaId: recoveredReservedKaId ?? 0n,
           },
           publisherOverride: publisher,
+          adoptExistingMint: opts?.adoptExistingMint,
         },
       );
 
@@ -6748,6 +6653,8 @@ export class PublishMethods extends DKGAgentBase {
       /** Author scheme version override (defaults to AUTHOR_SCHEME_VERSION_V1). */
       schemeVersion?: number;
       publisherOverride?: DKGPublisher;
+      /** Record the seal's existing mint instead of minting (see `PublishOptions.adoptExistingMint`). */
+      adoptExistingMint?: PublishOptions['adoptExistingMint'];
     },
   ): Promise<PublishResult> {
    return withSpan('agent.publish_from_swm', async (span) => {
@@ -6781,7 +6688,9 @@ export class PublishMethods extends DKGAgentBase {
 
     const onChainId = ctxGraphIdStr ?? (await this.getContextGraphOnChainId(contextGraphId)) ?? undefined;
 
-    const v10ACKProvider = this.createV10ACKProvider(contextGraphId);
+    // Recording an existing mint sends nothing: no ACK round, sender-key setup or member ciphertext.
+    const adoptOnly = options?.adoptExistingMint !== undefined;
+    const v10ACKProvider = adoptOnly ? undefined : this.createV10ACKProvider(contextGraphId);
 
     // RFC-001 §9.x — selection-based publish bridge. If the caller
     // already sealed the content (named-assertion lifecycle) they
@@ -6834,11 +6743,14 @@ export class PublishMethods extends DKGAgentBase {
     // (`onChainId`) so consumers using the canonical chain id can
     // decrypt — without this, remap publishes (source SWM cg != target
     // chain cg) produced undecryptable payloads.
-    const { encryptInlinePayload, encryptInlineChunked } = await this._resolveInlineEncryption(
-      contextGraphId, options?.subGraphName, options?.authorAgentAddress, ctxGraphIdStr,
-      onChainId ? { aeadBindingContextGraphId: onChainId } : undefined,
-    );
-    if (encryptInlinePayload) {
+    // Adopt-only resolves the access policy alone: the recorded catalog depends on it, sender keys do not.
+    const { encryptInlinePayload, encryptInlineChunked } = adoptOnly
+      ? await adoptOnlyInlineHooks(this, this.log, ctx, { contextGraphId, explicitPolicyTargetContextGraphId: ctxGraphIdStr, logPrefix: 'LU-5' })
+      : await this._resolveInlineEncryption(
+        contextGraphId, options?.subGraphName, options?.authorAgentAddress, ctxGraphIdStr,
+        onChainId ? { aeadBindingContextGraphId: onChainId } : undefined,
+      );
+    if (encryptInlinePayload && !adoptOnly) {
       this.log.info(ctx, `LU-5: curated CG ${contextGraphId} — wrapping inline ACK payload with chain-key AEAD`);
     }
     if (encryptInlineChunked) {
@@ -6884,6 +6796,7 @@ export class PublishMethods extends DKGAgentBase {
       privateTripleCount: options?.privateTripleCount,
       encryptInlinePayload,
       encryptInlineChunked,
+      adoptExistingMint: options?.adoptExistingMint,
     });
 
     if (
