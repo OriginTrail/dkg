@@ -47,3 +47,30 @@ test('completion accepts only a zero exit and readiness errors also close the ch
   await assert.rejects(live.ready(() => { throw new Error('invalid manifest'); }), /invalid manifest/);
   await live.closed;
 });
+
+test('external cancellation aborts a pending readiness probe and awaits teardown', async t => {
+  const live = ownProcess(child("console.log('READY'); setInterval(() => {}, 1000);"));
+  t.after(() => live.stop());
+  await live.ready(({ stdout }) => stdout().includes('READY') ? true : undefined, { timeoutMs: 2000 });
+  const controller = new AbortController();
+  let probeSignal;
+  const ready = live.ready(({ signal }) => {
+    probeSignal = signal;
+    controller.abort(new Error('cancelled fixture'));
+    return new Promise(() => {});
+  }, { signal: controller.signal, timeoutMs: 2000 });
+  await assert.rejects(ready, /cancelled fixture/);
+  assert.equal(probeSignal.aborted, true);
+  assert.ok((await live.closed).signal);
+});
+
+test('custom termination target preserves graceful stop and escalation policy', async t => {
+  const spawned = child("process.on('SIGTERM', () => {}); console.log('READY'); setInterval(() => {}, 1000);");
+  const signals = [];
+  const live = ownProcess(spawned, { graceMs: 30, kill: signal => { signals.push(signal); spawned.kill(signal); } });
+  t.after(() => live.stop());
+  await live.ready(({ stdout }) => stdout().includes('READY') ? true : undefined, { timeoutMs: 2000 });
+  await live.stop();
+  assert.deepEqual(signals, process.platform === 'win32' ? ['SIGTERM'] : ['SIGTERM', 'SIGKILL']);
+  assert.equal((await live.closed).signal, process.platform === 'win32' ? 'SIGTERM' : 'SIGKILL');
+});

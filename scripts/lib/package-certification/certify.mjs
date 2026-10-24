@@ -9,19 +9,15 @@ import { run } from '../release-process.mjs';
 import { requireCleanSource } from './source.mjs';
 import { startRegistry } from './registry.mjs';
 import { recordAttempt } from './attempt.mjs';
+import { ownProcess } from '../../testing/owned-process.mjs';
 
 const scripts = path.dirname(fileURLToPath(import.meta.url));
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function execute(command, args, { cwd, log, signal, timeout = 20 * 60_000 } = {}) {
   signal?.throwIfAborted();
   const fd = fs.openSync(log, 'a');
   const child = spawn(command, args, { cwd, signal, killSignal: 'SIGKILL', env: { ...process.env, PATH: `${path.dirname(process.execPath)}:${process.env.PATH}` }, stdio: ['ignore', fd, fd] });
   fs.closeSync(fd);
-  const timer = setTimeout(() => child.kill('SIGKILL'), timeout);
-  try {
-    const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', resolve); });
-    assert.equal(code, 0, `${command} failed (${code}); see ${path.basename(log)}`);
-  } finally { clearTimeout(timer); }
+  await ownProcess(child, { label: `${command}; see ${path.basename(log)}` }).waitForExit(timeout);
 }
 async function startChain(rootDir, output, signal) {
   signal.throwIfAborted();
@@ -31,33 +27,22 @@ async function startChain(rootDir, output, signal) {
     cwd: rootDir, detached: true, env: { ...process.env, PATH: `${path.dirname(process.execPath)}:${process.env.PATH}` }, stdio: ['ignore', fd, fd],
   });
   fs.closeSync(fd);
-  let spawnError;
-  const exited = new Promise(resolve => {
-    child.once('exit', resolve);
-    child.once('error', error => { spawnError = error; resolve(); });
-  });
-  const stop = async () => {
+  const killGroup = signal => {
     if (!child.pid) return;
-    try { process.kill(-child.pid, 'SIGTERM'); } catch { /* already exited */ }
-    const timeout = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* exited */ } }, 30_000);
-    await exited;
-    clearTimeout(timeout);
-    // The fixture controller may exit before a descendant. Reap its owned
-    // process group even when the direct child has already terminated.
-    try { process.kill(-child.pid, 'SIGKILL'); } catch { /* group exited */ }
+    try { process.kill(-child.pid, signal); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+  };
+  const owner = ownProcess(child, { label: 'Hardhat fixture; see chain.log', graceMs: 30_000, kill: killGroup });
+  const stop = async () => {
+    try { await owner.stop(); }
+    finally { killGroup('SIGKILL'); } // Reap descendants even if the controller already closed.
   };
   try {
-    for (let i = 0; i < 600; i++) {
-      signal.throwIfAborted();
-      if (spawnError) throw spawnError;
-      assert.equal(child.signalCode, null, 'Hardhat fixture terminated; see chain.log');
-      assert.equal(child.exitCode, null, 'Hardhat fixture exited; see chain.log');
-      if (fs.existsSync(contextFile)) return { ...readJson(contextFile), stop };
-      await sleep(500);
-    }
-    throw new Error('Hardhat fixture startup timed out');
+    const context = await owner.ready(() => fs.existsSync(contextFile) ? readJson(contextFile) : undefined,
+      { timeoutMs: 300_000, intervalMs: 500, signal });
+    return { ...context, stop };
   } catch (error) { await stop(); throw error; }
 }
+
 export async function certifyInstall({ rootDir, bundle, output, expected, image = 'node:22.23.4-bookworm-slim', negativeControl }) {
   const manifest = verifyBundle(bundle, expected);
   assert.equal(requireCleanSource(rootDir), expected.commit, 'controller checkout is not intended candidate');
@@ -107,9 +92,10 @@ export async function certifyInstall({ rootDir, bundle, output, expected, image 
         registry.setInstalling(true);
         containers.add(container);
         await docker(['run', '-d', '--name', container, '--network', egress, '--mount', `type=bind,src=${bundle},dst=/bundle,readonly`, '--mount', `type=bind,src=${output},dst=/evidence`, image, 'node', '-e', 'setInterval(()=>{},100000)']);
-        await docker(['exec', container, 'mkdir', '-p', '/harness']);
-        for (const file of ['installed-smoke.mjs', 'bundle.mjs', 'npm-cache.mjs']) await docker(['cp', path.join(scripts, file), `${container}:/harness/${file}`]);
-        await docker(['exec', container, 'node', '/harness/installed-smoke.mjs', 'install', layout, runId, chain.hubAddress], `${layout}-observer.log`);
+        await docker(['exec', container, 'mkdir', '-p', '/harness/lib/package-certification', '/harness/testing']);
+        for (const file of ['installed-smoke.mjs', 'bundle.mjs', 'npm-cache.mjs']) await docker(['cp', path.join(scripts, file), `${container}:/harness/lib/package-certification/${file}`]);
+        await docker(['cp', path.join(scripts, '../../testing/owned-process.mjs'), `${container}:/harness/testing/owned-process.mjs`]);
+        await docker(['exec', container, 'node', '/harness/lib/package-certification/installed-smoke.mjs', 'install', layout, runId, chain.hubAddress], `${layout}-observer.log`);
         receipt.timings[`${layout}-install`] = Date.now() - installStart;
         registry.setInstalling(false);
         await docker(['network', 'disconnect', egress, container]);
@@ -117,16 +103,8 @@ export async function certifyInstall({ rootDir, bundle, output, expected, image 
         const inspection = JSON.parse(run('docker', ['inspect', container]))[0];
         assert.deepEqual(Object.keys(inspection.NetworkSettings.Networks), [isolated]);
         fs.writeFileSync(path.join(output, `${layout}-isolation.json`), JSON.stringify({ networks: ['internal-only'], mounts: inspection.Mounts.map(m => ({ destination: m.Destination, readOnly: !m.RW })) }, null, 2));
-        if (negativeControl) {
-          const base = layout === 'edge-global' ? '/install/prefix/lib' : '/install/slot';
-          // Deliberate damage AFTER successful npm installation. This exercises
-          // the actual installed boundary, not just a synthetic verifier fixture.
-          const tree = readJson(path.join(output, `${layout}-tree.json`));
-          const ui = tree.packages.find(pkg => pkg.name === '@origintrail-official/dkg-node-ui');
-          await docker(['exec', container, 'rm', `${base}/${ui.path}/dist-ui/index.html`]);
-        }
         const smokeStart = Date.now();
-        await docker(['exec', container, 'node', '/harness/installed-smoke.mjs', 'smoke', layout, runId, chain.hubAddress], `${layout}-observer.log`);
+        await docker(['exec', container, 'node', '/harness/lib/package-certification/installed-smoke.mjs', 'smoke', layout, runId, chain.hubAddress, ...(negativeControl ? [negativeControl] : [])], `${layout}-observer.log`);
         receipt.timings[`${layout}-smoke`] = Date.now() - smokeStart;
       } catch (error) { receipt.errors.push({ layout, message: error.message }); }
       finally {

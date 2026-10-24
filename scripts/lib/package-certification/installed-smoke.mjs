@@ -8,14 +8,19 @@ import { spawn, spawnSync } from 'node:child_process';
 import { CASES, CLI, PROFILE, digest, hash, readJson, validateTree, validateRdfReadback } from './bundle.mjs';
 
 import { readNpmCache } from './npm-cache.mjs';
+import { ownProcess } from '../../testing/owned-process.mjs';
 
-const [operation, layout, runId, hubAddress] = process.argv.slice(2);
+const [operation, layout, runId, hubAddress, negativeControl] = process.argv.slice(2);
 const manifest = readJson('/bundle/manifest.json');
 const evidence = '/evidence';
 const prefix = '/install/prefix';
 const slot = '/install/slot';
-const root = layout === 'edge-global' ? `${prefix}/lib` : slot;
-const executable = layout === 'edge-global' ? `${prefix}/bin/dkg` : `${slot}/node_modules/.bin/dkg`;
+const layoutConfig = {
+  'core-slot': { root: slot, executable: `${slot}/node_modules/.bin/dkg`, npmArgs: [] },
+  'edge-global': { root: `${prefix}/lib`, executable: `${prefix}/bin/dkg`, npmArgs: ['--global', '--prefix', prefix] },
+}[layout];
+assert.ok(layoutConfig, 'unknown installation layout');
+const { root, executable, npmArgs } = layoutConfig;
 const cliRoot = `${root}/node_modules/${CLI}`;
 const reportFile = `${evidence}/${layout}-report.json`;
 const report = operation === 'install' ? {
@@ -31,7 +36,6 @@ const env = {
   DO_NOT_TRACK: '1', OPENUI_TELEMETRY_DISABLED: '1',
 };
 const save = () => fs.writeFileSync(reportFile, `${JSON.stringify(report, null, 2)}\n`);
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function capture(command, args, log, timeout = 15 * 60_000) {
   const result = spawnSync(command, args, { cwd: slot, env, encoding: 'utf8', timeout, maxBuffer: 64 * 1024 * 1024 });
   if (log) {
@@ -100,22 +104,18 @@ function installedTree() {
 let daemon;
 async function stop() {
   if (!daemon) return;
-  const child = daemon;
+  const owner = daemon;
   daemon = undefined;
-  if (child.exitCode !== null) throw new Error(`daemon exited before graceful stop: ${child.exitCode}`);
-  const ended = new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
-  child.kill('SIGTERM');
-  let timer;
-  const result = await Promise.race([ended, new Promise(resolve => { timer = setTimeout(() => resolve(null), 30_000); })]);
-  clearTimeout(timer);
-  if (!result) { child.kill('SIGKILL'); await ended; throw new Error('graceful shutdown timed out'); }
+  assert.ok(owner.child.exitCode === null && owner.child.signalCode === null, 'daemon exited before graceful stop');
+  await owner.stop();
+  const result = await owner.closed;
   assert.equal(result.code, 0, `daemon did not exit gracefully (${result.signal})`);
 }
-async function api(route, body, timeout = 30_000) {
+async function api(route, body, timeout = 30_000, signal) {
   const response = await fetch(`http://127.0.0.1:19200${route}`, {
     method: body === undefined ? 'GET' : 'POST',
     headers: { 'content-type': 'application/json' },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(timeout),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout),
   });
   const text = await response.text();
   assert.ok(response.ok, `${route} HTTP ${response.status}: ${text.slice(0, 2000)}`);
@@ -125,24 +125,26 @@ async function start(attempt) {
   const logName = `${layout}-daemon-${attempt}.log`;
   report.logs.push(logName);
   const fd = fs.openSync(`${evidence}/${logName}`, 'w');
-  daemon = spawn(executable, ['daemon-worker'], { cwd: slot, env, stdio: ['ignore', fd, fd] });
+  const child = spawn(executable, ['daemon-worker'], { cwd: slot, env, stdio: ['ignore', fd, fd] });
   fs.closeSync(fd);
-  const deadline = Date.now() + 60_000;
-  while (Date.now() < deadline) {
-    assert.equal(daemon.exitCode, null, `daemon exited during startup (${daemon.exitCode}); see ${logName}`);
-    try {
-      const identity = await api('/api/status', undefined, 1000);
+  const owner = ownProcess(child, { label: `installed daemon; see ${logName}`, graceMs: 30_000 });
+  daemon = owner;
+  try {
+    return await owner.ready(async ({ signal }) => {
+      let identity;
+      try { identity = await api('/api/status', undefined, 1000, signal); }
+      catch { return undefined; } // Retry only acquisition, never product assertions.
       assert.equal(identity.version, manifest.version);
       for (const key of ['commit', 'buildTime', 'distTag']) assert.equal(identity[key], manifest.buildIdentity[key], `status ${key} mismatch`);
       assert.equal(identity.storeBackend, 'oxigraph-worker');
       return identity;
-    } catch (error) {
-      if (error.code === 'ERR_ASSERTION' && !error.message.includes('HTTP')) throw error;
-    }
-    await sleep(500);
+    }, { timeoutMs: 60_000, intervalMs: 500 });
+  } catch (error) {
+    if (child.exitCode !== null || child.signalCode !== null) daemon = undefined;
+    throw error;
   }
-  throw new Error('daemon startup timeout');
 }
+
 async function readFixture(field) {
   const response = await api('/api/query', {
     contextGraphId: 'package-certification', view: 'working-memory',
@@ -159,11 +161,11 @@ try {
     fs.writeFileSync(`${slot}/package.json`, '{"name":"package-certificate-slot","version":"1.0.0","private":true}');
     report.runtime.npm = capture('npm', ['--version']);
     await observe('install', () => {
-      capture('npm', ['install', ...(layout === 'edge-global' ? ['--global', '--prefix', prefix] : []), `${CLI}@${manifest.version}`, '--registry=http://fixture:4873/registry/', '--foreground-scripts', '--no-audit', '--no-fund'], `${layout}-install.log`);
+      capture('npm', ['install', ...npmArgs, `${CLI}@${manifest.version}`, '--registry=http://fixture:4873/registry/', '--foreground-scripts', '--no-audit', '--no-fund'], `${layout}-install.log`);
       assert.ok(fs.existsSync(executable), 'installed dkg executable absent');
     });
     await observe('dependency-policy', async () => {
-      capture('npm', ['ls', '--all', '--long', '--json', ...(layout === 'edge-global' ? ['--global', '--prefix', prefix] : [])], `${layout}-npm-ls.json`);
+      capture('npm', ['ls', '--all', '--long', '--json', ...npmArgs], `${layout}-npm-ls.json`);
       await captureCacheArchives();
       const tree = installedTree();
       fs.writeFileSync(`${evidence}/${layout}-tree.json`, `${JSON.stringify(tree, null, 2)}\n`);
@@ -175,6 +177,12 @@ try {
       assert.equal(capture(executable, ['--version'], `${layout}-version.log`), manifest.version);
       assert.deepEqual(readJson(`${cliRoot}/build-info.json`), manifest.buildIdentity);
     });
+    if (negativeControl) {
+      assert.equal(negativeControl, 'missing-ui', 'unknown negative control');
+      const tree = readJson(`${evidence}/${layout}-tree.json`);
+      const ui = tree.packages.find(pkg => pkg.name === '@origintrail-official/dkg-node-ui');
+      fs.unlinkSync(path.join(root, ui.path, 'dist-ui/index.html'));
+    }
     await observe('runtime-assets', () => {
       const tree = installedTree(); // Repeat after any deliberate damage.
       validateTree(tree, manifest);
