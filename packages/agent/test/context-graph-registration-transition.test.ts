@@ -61,10 +61,9 @@ async function hasOnChainBinding(agent: RegistrationAgent, id: string): Promise<
   return result.type === 'boolean' && result.value;
 }
 
-async function fixture(id: string): Promise<{
+async function bareAgent(id: string): Promise<{
   agent: RegistrationAgent;
   chain: MockChainAdapter;
-  ownerAddress: string;
 }> {
   const chain = new MockChainAdapter();
   const agent = await DKGAgent.create({
@@ -80,6 +79,15 @@ async function fixture(id: string): Promise<{
     onMessage: vi.fn(),
     publish: vi.fn(async () => undefined),
   };
+  return { agent, chain };
+}
+
+async function fixture(id: string): Promise<{
+  agent: RegistrationAgent;
+  chain: MockChainAdapter;
+  ownerAddress: string;
+}> {
+  const { agent, chain } = await bareAgent(id);
   const ownerAddress = chain.signerAddress;
   await agent.createContextGraph({
     id,
@@ -169,6 +177,46 @@ describe('Context Graph registration durability transition', () => {
 
     expect(await registrationStatus(agent, id)).toBe('pending');
     expect(await hasOnChainBinding(agent, id)).toBe(true);
+  });
+
+  it('waits out a busy store at the create existence check and declaration write', async () => {
+    const id = 'registration-busy-create';
+    const { agent, chain } = await bareAgent(id);
+    const graphUri = `did:dkg:context-graph:${id}`;
+    const refused: string[] = [];
+    const originalQuery = agent.store.query.bind(agent.store);
+    agent.store.query = async (sparql, options) => {
+      if (
+        options?.source === 'agent.contextGraph.exists'
+        && sparql.includes(`<${graphUri}>`)
+        && !refused.includes('exists')
+      ) {
+        refused.push('exists');
+        throw new StoreSchedulerBusyError('queue_full', 'normal', options.source);
+      }
+      return originalQuery(sparql, options);
+    };
+    const originalInsert = agent.store.insert.bind(agent.store);
+    agent.store.insert = async (quads: Quad[], options) => {
+      if (
+        !refused.includes('declaration')
+        && quads.some((quad) => quad.subject === graphUri && quad.predicate === DKG_ONTOLOGY.RDF_TYPE)
+      ) {
+        refused.push('declaration');
+        throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'insert');
+      }
+      await originalInsert(quads, options);
+    };
+
+    await agent.createContextGraph({
+      id,
+      name: id,
+      private: true,
+      callerAgentAddress: chain.signerAddress,
+    });
+
+    expect(refused).toEqual(['exists', 'declaration']);
+    await expect(agent.contextGraphExists(id)).resolves.toBe(true);
   });
 
   it('waits out a busy store before the pending marker and submits one transaction', async () => {

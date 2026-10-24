@@ -474,8 +474,17 @@ export class ContextGraphMethods extends DKGAgentBase {
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const cgMetaGraph = contextGraphMetaGraphUri(opts.id);
     const now = new Date().toISOString();
+    // The caller waits on a create, so its existence check and declaration
+    // write outlast a short burst of background store work instead of failing
+    // on the first busy refusal. Both are idempotent and a refused step never ran.
+    const admitStoreStep = <T>(step: () => Promise<T>): Promise<T> => retryStoreAdmission(step, {
+      onRetry: (operation, delayMs) => this.log.info(
+        ctx,
+        `Context graph "${opts.id}" create: the store refused ${operation} while busy; retrying in ${delayMs} ms`,
+      ),
+    });
 
-    const exists = await this.contextGraphExists(opts.id);
+    const exists = await admitStoreStep(() => this.contextGraphExists(opts.id));
     if (exists) {
       throw new Error(`Context graph "${opts.id}" already exists`);
     }
@@ -800,9 +809,9 @@ export class ContextGraphMethods extends DKGAgentBase {
       { subject: activityUri, predicate: DKG_ONTOLOGY.PROV_ENDED_AT_TIME, object: `"${now}"`, graph: defGraph },
     );
 
-    await this.store.insert(quads);
+    await admitStoreStep(() => this.store.insert(quads));
     this.invalidateListContextGraphsCache();
-    await gm.ensureNewContextGraph(opts.id);
+    await admitStoreStep(() => gm.ensureNewContextGraph(opts.id));
 
     // Force the triple-store flush BEFORE the SQLite caches are written.
     // Without this, a daemon crash within 50ms of the insert would lose the
@@ -810,7 +819,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     // would survive — leaving ghost CGs that show up in the dashboard but
     // don't exist in the graph. Awaiting flush here makes the create durable
     // before the caller is told it succeeded.
-    await this.store.flush?.();
+    await admitStoreStep(async () => { await this.store.flush?.(); });
 
     // From this boundary onward the graph exists durably. Origin is an
     // immutable fact, so publish its runtime projection before any best-effort
