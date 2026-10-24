@@ -13,6 +13,7 @@ import {
   isContextGraphAuthorityUnavailableMarker,
   isRetryableContextGraphAuthorityUnavailableReason,
 } from '../context-graph-authority/context-graph-authority.js';
+import { isTransientInventorySignerFailure } from './share-inventory-signing-capability.js';
 import type { DKGAgent } from '../../dkg-agent.js';
 import type { AssertionPromoteOptions } from '../../dkg-agent-types.js';
 type GossipSigner = Awaited<
@@ -22,6 +23,7 @@ type GossipSigner = Awaited<
 type AssertionPromotePreCommitOptions = Pick<
   AssertionPromoteOptions,
   | 'subGraphName'
+  | 'authorAgentAddress'
   | 'awaitCuratorAck'
   | 'curatorAckTimeoutMs'
   | 'accessPolicy'
@@ -163,7 +165,11 @@ export async function prepareAssertionPromote(
   recipientRetryTiming?: PromoteRecipientRetryTiming,
 ): Promise<AssertionPromotePreCommitResult> {
   return resolvePromoteAuthority(async () => {
-    const gossipSigner = await host.resolveWorkspaceGossipSigningAgent(input.contextGraphId);
+    const gossipSigner = await host.resolveWorkspaceGossipSigningAgent(input.contextGraphId).catch(error => {
+      // Account discovery is read-only and precedes curator dispatch and publisher mutation.
+      if (isTransientInventorySignerFailure(error)) throw createPromoteRetryableFailure(error);
+      throw error;
+    });
     const confirmBeforeCommit = await host.buildCuratorAckConfirmer(
       input.contextGraphId,
       gossipSigner,
@@ -191,6 +197,7 @@ export async function prepareAssertionPromote(
           ? { subGraphName: input.options.subGraphName }
           : {}),
         publisherPeerId: input.publisherPeerId,
+        authorAgentAddress: input.options?.authorAgentAddress,
         senderAgentAddress: gossipSigner?.agentAddress,
         confirmBeforeCommit: confirmBeforeCommit === undefined
           ? undefined

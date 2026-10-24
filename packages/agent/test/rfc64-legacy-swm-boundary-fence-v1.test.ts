@@ -53,6 +53,11 @@ function refusalOf(action: () => void): Error & Record<string, unknown> {
 
 const tick = () => new Promise<void>((resolve) => { setImmediate(resolve); });
 
+/** What a fence that gave up was still waiting on; other kinds carry no such field. */
+const waitingOn = (event: Rfc64LegacySwmFenceEventV1) => (
+  event.kind === 'wait-exceeded' ? event.waitingOn : undefined
+);
+
 describe('RFC-64 legacy SWM fence coordinator', () => {
   it('names the caller, the scope and the age of the fence in a refusal', async () => {
     let now = 1_000;
@@ -171,7 +176,7 @@ describe('RFC-64 legacy SWM fence coordinator', () => {
     );
 
     await expect(waiting).resolves.toEqual({ ran: false });
-    expect(events.map((event) => [event.kind, event.source, event.waitingOn])).toEqual([
+    expect(events.map((event) => [event.kind, event.source, waitingOn(event)])).toEqual([
       ['wait-exceeded', 'finalized-vm-retirement', 'mutation-chain'],
     ]);
     // The asset's own fence is gone. The lease's fence over the graph is what still refuses.
@@ -262,6 +267,67 @@ describe('RFC-64 legacy SWM fence coordinator', () => {
       await holder;
       await expect(graphWide).resolves.toEqual({ ran: true, value: undefined });
       expect(ran).toBe(true);
+    });
+
+    it('lets a lease that applies a new head go ahead of waiting replays, and keeps each kind in order', async () => {
+      const fence = createRfc64LegacySwmFenceCoordinatorV1();
+      const order: string[] = [];
+      const lease = gate();
+      const holder = runRfc64LegacySwmRetirementV1(
+        fence, { source: 'receiver-lease', contextGraphId: OTHER_CG }, () => lease.promise,
+      );
+      const asked = (name: string, contextGraphId: string, yieldsNodeWideTurn: boolean) => (
+        runRfc64LegacySwmRetirementV1(
+          fence,
+          { source: 'receiver-lease', contextGraphId, yieldsNodeWideTurn },
+          async () => { order.push(name); },
+        )
+      );
+      const waiting = [
+        asked('replay-1', 'replayed-graph-1', true),
+        asked('replay-2', 'replayed-graph-2', true),
+        asked('new-1', 'new-graph-1', false),
+        runRfc64LegacySwmRetirementV1(
+          fence, { source: 'republish-retirement', contextGraphId: CG }, async () => { order.push('republish'); },
+        ),
+        asked('new-2', 'new-graph-2', false),
+      ];
+      await tick();
+      expect(order).toEqual([]);
+
+      lease.open();
+      await Promise.all([holder, ...waiting]);
+      expect(order).toEqual(['new-1', 'republish', 'new-2', 'replay-1', 'replay-2']);
+      expect(fence.nodeWideTurnHeld).toBe(false);
+      expect(fence.nodeWideWaiters).toEqual([]);
+    });
+
+    it('gives a replay the node-wide turn at once when it is free', async () => {
+      const fence = createRfc64LegacySwmFenceCoordinatorV1();
+      let ran = false;
+      const replay = runRfc64LegacySwmRetirementV1(
+        fence,
+        { source: 'receiver-lease', contextGraphId: CG, yieldsNodeWideTurn: true },
+        async () => { ran = true; },
+      );
+      // Free turn: it joins its graph's chain inside the call.
+      expect(fence.nodeWideTurnHeld).toBe(true);
+      await expect(replay).resolves.toEqual({ ran: true, value: undefined });
+      expect(ran).toBe(true);
+      await tick();
+      expect(fence.nodeWideTurnHeld).toBe(false);
+    });
+
+    it('passes the node-wide turn on when the work in it fails', async () => {
+      const fence = createRfc64LegacySwmFenceCoordinatorV1();
+      const failing = runRfc64LegacySwmRetirementV1(
+        fence, { source: 'receiver-lease', contextGraphId: OTHER_CG }, async () => { throw new Error('lease work failed'); },
+      );
+      const next = runRfc64LegacySwmRetirementV1(
+        fence, { source: 'receiver-lease', contextGraphId: CG }, async () => 'next',
+      );
+      await expect(failing).rejects.toThrow('lease work failed');
+      await expect(next).resolves.toEqual({ ran: true, value: 'next' });
     });
 
     it('lets the retirement of an asset pass a whole-graph retirement that still waits for another graph', async () => {
@@ -370,7 +436,7 @@ describe('RFC-64 legacy SWM fence coordinator', () => {
       await expect(runRfc64LegacySwmRetirementV1(
         fence, { source: 'republish-retirement', contextGraphId: CG }, async () => { ran = true; },
       )).resolves.toEqual({ ran: false });
-      expect(events.map((event) => [event.kind, event.source, event.waitingOn])).toEqual([
+      expect(events.map((event) => [event.kind, event.source, waitingOn(event)])).toEqual([
         ['wait-exceeded', 'republish-retirement', 'mutation-chain'],
       ]);
 
@@ -556,7 +622,7 @@ describe('RFC-64 legacy SWM boundary behind the fence coordinator', () => {
       .rejects.toThrow('RFC-64 legacy SWM boundary lease was not acquired in time');
 
     expect(readRfc64LegacySwmBoundaryCountV1(owner, BOUNDARY_CG)).toBe(1);
-    expect(events.map((event) => [event.kind, event.source, event.scope, event.waitingOn])).toEqual([
+    expect(events.map((event) => [event.kind, event.source, event.scope, waitingOn(event)])).toEqual([
       ['wait-exceeded', 'finalized-vm-retirement', 'asset', 'preparations'],
       ['wait-exceeded', 'republish-retirement', 'graph', 'preparations'],
       ['wait-exceeded', 'receiver-lease', 'graph', 'preparations'],
@@ -604,7 +670,7 @@ describe('RFC-64 legacy SWM boundary behind the fence coordinator', () => {
     // The share is still in flight: the retirement waits for it and gives up at the bound.
     await expect(retireRfc64LegacySwmAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1'))
       .resolves.toBe('not-run');
-    expect(events.map((event) => [event.kind, event.waitingOn])).toEqual([['wait-exceeded', 'preparations']]);
+    expect(events.map((event) => [event.kind, waitingOn(event)])).toEqual([['wait-exceeded', 'preparations']]);
     expect(readRfc64LegacySwmBoundaryCountV1(owner, BOUNDARY_CG)).toBe(1);
 
     share.settle(true);

@@ -1,3 +1,4 @@
+import { isCoreChainCacheProtocol } from '../core-chain-cache-config.js';
 import {
   QuietRetryableHandlerError,
   createOperationContext,
@@ -38,11 +39,13 @@ export function translateNetworkAdmissionErrorAtProtocolBoundary(
 
 /** Build the admission callback installed into ProtocolRouter by lifecycle. */
 export function createNetworkAdmissionProtocolCheck(
-  coordinator: Pick<NetworkAdmissionCoordinator, 'ensureAdmitted'>,
+  coordinator: Pick<NetworkAdmissionCoordinator, 'ensureAdmitted' | 'ensureCacheAdmitted'>,
 ): NonNullable<ProtocolRouterOptions['isPeerAccepted']> {
-  return async (peerId, _protocolId, direction, options) => {
+  return async (peerId, protocolId, direction, options) => {
     try {
-      return await coordinator.ensureAdmitted(
+      const admit = isCoreChainCacheProtocol(protocolId)
+        ? coordinator.ensureCacheAdmitted.bind(coordinator) : coordinator.ensureAdmitted.bind(coordinator);
+      return await admit(
         peerId,
         createOperationContext('connect'),
         options,
@@ -66,7 +69,7 @@ export function createNetworkAdmissionProtocolCheck(
  * I/O order the way a probing check there would.
  */
 export function createNetworkAdmissionRouterPolicy(
-  coordinator: Pick<NetworkAdmissionCoordinator, 'ensureAdmitted' | 'isRejectedPeer'>,
+  coordinator: Pick<NetworkAdmissionCoordinator, 'ensureAdmitted' | 'ensureCacheAdmitted' | 'isRejectedPeer'>,
 ): NetworkAdmissionRouterPolicy {
   return {
     isPeerAccepted: createNetworkAdmissionProtocolCheck(coordinator),

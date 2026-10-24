@@ -91,6 +91,10 @@ jobs:
       # This immutable controller is the authority for test selection. A
       # policy update intentionally uses a new reviewed commit SHA; never use
       # the merge candidate or a mutable branch here.
+      # Rotation shims:
+      # - jobs.changes.steps.plan publisher campaign full-CI fallback
+      # Remove that exact-path fallback after rotating to protected policy
+      # that routes both publisher-live-control parent and worker to bura_cli.
       - name: Checkout trusted CI controller
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -143,6 +147,20 @@ jobs:
           PLAN_EVENT="${EVENT_NAME}"
           if [[ "${EVENT_NAME}" == "pull_request" && "${DELTA_ENABLED}" != "true" ]]; then
             PLAN_EVENT="pull_request_delta_disabled"
+          fi
+
+          # The pinned controller predates this campaign route. Widen only
+          # exact parent/worker changes until its protected-policy rotation;
+          # the controller still generates and validates the entire plan.
+          if [[ "${PLAN_EVENT}" == "pull_request" ]]; then
+            while IFS= read -r -d '' changed; do
+              case "${changed}" in
+                scripts/repro/publisher-live-control-restart.test.mts|scripts/repro/publisher-live-control-worker.mts)
+                  PLAN_EVENT="pull_request_delta_disabled"
+                  break
+                  ;;
+              esac
+            done < "${CHANGES_FILE}"
           fi
 
           node trusted-ci/scripts/ci/plan-ci.mjs \
@@ -318,6 +336,10 @@ jobs:
         run: node scripts/ci/fetch-trusted-controller.mjs
       - name: Test repository scripts
         run: pnpm run test:scripts
+      - name: Test share recovery evidence reducers
+        run: |
+          node --test scripts/testnet-share-recovery/*.test.mjs
+          python3 -m unittest discover -s scripts/testnet-share-recovery -p test_payload_evidence.py
       - name: Verify every test has an execution route
         run: pnpm test:inventory
       - name: Upload test execution inventory
@@ -583,6 +605,9 @@ jobs:
           DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-epcis exec vitest run test/external-event-query.test.ts
           DKG_REQUIRE_BLAZEGRAPH=1 pnpm test:conformance
           pnpm --filter @origintrail-official/dkg-storage exec vitest run --no-file-parallelism test/blazegraph.integration.test.ts test/term-canon-blazegraph-oracle.test.ts test/rfc64-semantic-read-gateway.blazegraph.integration.test.ts test/rfc64-shared-projection-stream.blazegraph.integration.test.ts
+          pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts
+          DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run test/scoped-catalog-backend.test.ts
+          pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts
           pnpm --filter @origintrail-official/dkg-agent exec vitest run --config vitest.blazegraph.config.ts
           DKG_RFC64_GATE1_STORE_BACKEND=blazegraph node --import tsx --test devnet/rfc64-gate1-public-open/rollout-store-fixture.test.ts devnet/rfc64-gate1-public-open/rollout-transition.test.ts
 
@@ -665,7 +690,8 @@ jobs:
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_agent == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Inventory policy grants native runs headroom for coverage/report cleanup.
+    timeout-minutes: ${{ matrix.timeoutMinutes }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['tornado-agent'] }}
@@ -700,6 +726,12 @@ jobs:
       - name: "RFC-64 Gate 1 live evidence generate and verify (Oxigraph)"
         if: matrix.sidecars
         run: pnpm test:gate1:rfc64-public-open-harness
+      # The parent kills only its disposable worker, then reopens the actual
+      # SQLite/Oxigraph files and replays with fresh loopback peers. No devnet.
+      - name: "RFC-64 catalog durable-head process-death recovery"
+        if: matrix.sidecars
+        timeout-minutes: 4
+        run: node --experimental-sqlite --import tsx scripts/repro/rfc64-catalog-durable-head.mts
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit
@@ -752,6 +784,10 @@ jobs:
         run: bash scripts/ci/verify-blazegraph-image-contract.sh
       - name: "CLI tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
+      - name: "Publisher pause/resume process-death durability (Oxigraph)"
+        if: matrix.shard == 1
+        timeout-minutes: 3
+        run: node --experimental-sqlite --import tsx scripts/repro/publisher-live-control-restart.test.mts
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit
@@ -915,6 +951,9 @@ jobs:
         run: tar -xzf /tmp/evm-devnet-test-artifacts.tgz
       - name: Install Playwright Chromium
         run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium --with-deps
+      - name: node-ui memory preview and WebGL regressions
+        if: matrix.shard == 1
+        run: pnpm --dir packages/node-ui exec playwright test --config playwright.pr3236.config.ts
       - name: "node-ui real-node Playwright e2e (shard ${{ matrix.shard }}/7)"
         run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright test --shard=${{ matrix.shard }}/7
       - name: Record first-attempt browser failures separately from retries

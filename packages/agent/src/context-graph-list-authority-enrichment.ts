@@ -67,6 +67,13 @@ export type ListContextGraphsRow = {
   onChainId?: string;
   callerInvolved?: boolean;
   /**
+   * `approved-metadata-pending` while the curator has approved the caller's
+   * join and the graph's member list naming the caller is still on its way
+   * (#3421). `callerInvolved` stays `false` until it arrives; another join
+   * request is not needed.
+   */
+  joinState?: 'approved-metadata-pending';
+  /**
    * `false` when the node knows this graph only by its on-chain name hash:
    * `id` and `name` are then that hash, never a guessed cleartext. Subscribing
    * by the hash lets the node resolve and verify the cleartext id.

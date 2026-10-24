@@ -55,8 +55,8 @@ describe('runPromoteJob diagnostics', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw failure;
       },
       now: fixture.clock.now,
@@ -108,8 +108,8 @@ describe('runPromoteJob diagnostics', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw failure;
       },
       now: fixture.clock.now,
@@ -136,8 +136,8 @@ describe('runPromoteJob diagnostics', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
       },
       now: fixture.clock.now,
@@ -174,8 +174,8 @@ describe('runPromoteJob diagnostics', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
       },
       now: fixture.clock.now,
@@ -221,8 +221,8 @@ describe('runPromoteJob diagnostics', () => {
         job,
         queue,
         workerId: 'worker-test',
-        runPromote: async (_request, markPromoteStarted) => {
-          await markPromoteStarted();
+        runPromote: async (_request) => {
+
           throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
         },
         now: fixture.clock.now,
@@ -251,8 +251,8 @@ describe('runPromoteJob diagnostics', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         return { promotedCount: 2 };
       },
       now: fixture.clock.now,
@@ -263,7 +263,7 @@ describe('runPromoteJob diagnostics', () => {
       },
     });
 
-    expect(result).toEqual({ outcome: 'succeeded' });
+    expect(result).toEqual({ outcome: 'succeeded', result: { promotedCount: 2 } });
     expect(logs).toContain(`memoryGraphChanged emit failed for ${job.jobId}: event stream closed`);
   });
 
@@ -280,8 +280,8 @@ describe('runPromoteJob diagnostics', () => {
       job,
       queue: failingQueue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         // Hold the promote open until one heartbeat has failed.
         await heartbeatFailed.promise;
         return { promotedCount: 1 };
@@ -291,7 +291,7 @@ describe('runPromoteJob diagnostics', () => {
       log: (message) => { logs.push(message); },
     });
 
-    expect(result).toEqual({ outcome: 'succeeded' });
+    expect(result).toEqual({ outcome: 'succeeded', result: { promotedCount: 1 } });
     expect(logs).toContain(`Heartbeat error for ${job.jobId}: store unavailable`);
   });
 

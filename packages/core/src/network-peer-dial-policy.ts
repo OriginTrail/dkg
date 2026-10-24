@@ -72,6 +72,9 @@ export interface NetworkPeerDialPolicyOptions {
    * which network a relay belongs to.
    */
   configuredRelayPeerIds?: Iterable<string>;
+  /** Additional static-list exemptions, without relay selection or exemption
+   * from dynamic identity-mismatch denial. */
+  staticDialExemptionPeerIds?: Iterable<string>;
   /**
    * Relay peer ids declared by the OTHER DKG networks bundled with this build.
    * Unparseable ids (e.g. placeholder relays of a not-yet-deployed network)
@@ -170,6 +173,7 @@ export class NetworkPeerDialPolicy {
     this.configuredRelayPeerIds = canonicalPeerIdSet(options.configuredRelayPeerIds);
     const otherNetworkRelayPeerIds = canonicalPeerIdSet(options.otherNetworkRelayPeerIds);
     for (const exempt of this.configuredRelayPeerIds) otherNetworkRelayPeerIds.delete(exempt);
+    for (const exempt of canonicalPeerIdSet(options.staticDialExemptionPeerIds)) otherNetworkRelayPeerIds.delete(exempt);
     if (this.selfPeerId) otherNetworkRelayPeerIds.delete(this.selfPeerId);
     this.otherNetworkRelayPeerIds = otherNetworkRelayPeerIds;
     this.defaultMismatchDenyMs = positiveIntegerOr(options.defaultMismatchDenyMs, NETWORK_MISMATCH_DENY_DEFAULT_MS);

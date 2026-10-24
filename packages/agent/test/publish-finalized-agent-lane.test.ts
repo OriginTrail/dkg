@@ -146,11 +146,14 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
         publicQuads: [],
       };
     };
-    agent.removeRfc64SwmAuthorInventoryShadowV1 = async (input: any) => {
+    agent.commitRfc64ConfirmedInventoryRemovalV1 = async (input: any) => {
       rfc64SwmInventoryRemovalCalls.push(input);
       throw new Error('simulated escaped RFC-64 SWM inventory removal failure');
     };
-    agent.resolveRfc64CatalogAuthoringLaneV1 = () => null;
+    // Keep the public catalog obligation active so the simulated removal failure is exercised.
+    agent.resolveRfc64CatalogAuthoringLaneV1 = () => ({
+      kind: 'public', projectionTargetPolicy: 'exact-replacement', acceptsFinalizedVmRepair: false,
+    });
 
     // GH#1778 — a genuinely absent name still yields "is not finalized":
     // resolveAssertionAuthor finds no seal, returns undefined, and the caller

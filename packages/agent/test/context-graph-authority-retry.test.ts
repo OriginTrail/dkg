@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
+  DKGEvent,
   contextGraphAppTopic,
   contextGraphFinalizationTopic,
   contextGraphPublishTopic,
@@ -775,6 +776,10 @@ describe('Context Graph subscription authority retry', () => {
     });
     mockLivePolicy(agent, 0);
     const retry = vi.spyOn(agent, 'retryUnavailableContextGraphSubscriptionAuthorities');
+    // The daemon catches up a subscription that comes back unsynced; it learns
+    // of every activation, whichever path made it, through this event.
+    const activations: unknown[] = [];
+    agent.eventBus.on(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, (data) => activations.push(data));
 
     await agent.start();
     await vi.waitFor(() => expect(attempt).toBe(2));
@@ -797,6 +802,7 @@ describe('Context Graph subscription authority retry', () => {
     );
 
     expect(retry).toHaveBeenCalledOnce();
+    expect(activations).toEqual([{ contextGraphId }]);
     // Startup scans once; the serialized save also validates wire aliases.
     // Its exact-local hosting read follows the two recovery-owned point reads.
     expect(loadAll).toHaveBeenCalledTimes(2);

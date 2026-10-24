@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { daemonState } from '../src/daemon/state.js';
+import { createPromoteWorkerSupervisor } from '../src/daemon/worker/async-promote-worker.js';
 import { createServer, type Server } from 'node:http';
 import { copyFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -25,6 +27,7 @@ import { ensureOkfCliBuilt, makeBundle, makeOkfCliHome, parseJsonTail, runCli } 
 // verified native managed server; the default uses the persistent worker store.
 describe.sequential('OKF subgraph lifecycle roundtrip', { timeout: 120_000 }, () => {
   let agent: DKGAgent;
+  let shareWorker: ReturnType<typeof createPromoteWorkerSupervisor>;
   let server: Server;
   let home: string;
   let bundle: string;
@@ -60,6 +63,9 @@ describe.sequential('OKF subgraph lifecycle roundtrip', { timeout: 120_000 }, ()
       ...(managed ? { store: await createTripleStore(managed.storeConfig) } : {}),
     });
     await agent.start();
+    shareWorker = createPromoteWorkerSupervisor({ agent, log: () => undefined });
+    await shareWorker.start();
+    daemonState.promoteWorkerAvailable = true;
     await agent.createContextGraph({ id: cg, name: cg });
     await agent.createSubGraph(cg, sub);
     const tracker = new OperationTracker(null);
@@ -91,6 +97,8 @@ describe.sequential('OKF subgraph lifecycle roundtrip', { timeout: 120_000 }, ()
 
   afterAll(async () => {
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+    daemonState.promoteWorkerAvailable = false;
+    await shareWorker?.stop();
     await agent?.stop();
     await managed?.handle.stop();
     for (const dir of [home, bundle, root]) if (dir) await rm(dir, { recursive: true, force: true });

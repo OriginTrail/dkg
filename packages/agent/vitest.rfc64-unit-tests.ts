@@ -1,15 +1,24 @@
 export const RFC64_UNIT_TESTS = [
+  "test/rfc64-private-placement-restart.integration.test.ts",
   "test/rfc64-catalog-repair-backoff.test.ts",
+  "test/finalized-private-repair-retry.test.ts",
+  "test/finalized-private-placement-owner-lanes.test.ts",
   "test/rfc64-catalog-repair-pressure.test.ts",
   "test/rfc64-catalog-repair-diagnostics.test.ts",
   // #3134 — a full author catalog refuses a new asset once, visibly, and is not retried on a timer.
   "test/rfc64-author-catalog-capacity.test.ts",
   "test/rfc64-full-catalog-parking.test.ts",
   "test/rfc64-full-author-catalog.test.ts",
+  // #3134 — an author's row leaves its SWM inventory when the node retires the asset's finalized twin.
+  "test/rfc64-finalized-twin-inventory-row.integration.test.ts",
+  "test/rfc64-finalized-row-heal.test.ts",
   "test/rfc64-inventory-v1-scalars.test.ts",
   "test/rfc64-legacy-swm-boundary-v1.test.ts",
   "test/rfc64-legacy-swm-boundary-codec-v1.test.ts",
   "test/rfc64-legacy-swm-boundary-fence-v1.test.ts",
+  // #3052 — a promote waits for the legacy SWM fence in front of it to drop, within two bounds.
+  "test/rfc64-legacy-swm-promote-admission.test.ts",
+  "test/rfc64-legacy-swm-promote-admission-schedules.test.ts",
   "test/rfc64-inventory-v1-lifecycle.test.ts",
   "test/rfc64-inventory-v1-candidates.test.ts",
   "test/rfc64-inventory-v1-applied-head.test.ts",
@@ -18,6 +27,8 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-swm-catalog-durable-asset-resolver-v1.test.ts",
   "test/rfc64-swm-inventory-catalog-reconciler-v1.test.ts",
   "test/rfc64-swm-inventory-settlement-outlook-v1.test.ts",
+  "test/rfc64-swm-inventory-failed-observation.test.ts",
+  "test/rfc64-swm-inventory-observation-retry.test.ts",
   "test/rfc64-swm-inventory-shadow-runtime-v1.test.ts",
   "test/rfc64-catalog-shadow-observability-v1.test.ts",
   "test/rfc64-catalog-upsert-planner-v1.test.ts",
@@ -47,6 +58,10 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-public-catalog-current-head-discovery-v1.test.ts",
   "test/rfc64-public-catalog-receiver-v1.test.ts",
   "test/rfc64-receiver-task-lifecycle-scoped-idle-v1.test.ts",
+  // A lease turn applies the newest delivered head of its scope.
+  "test/rfc64-receiver-lease-coalescing.test.ts",
+  // An announced head no provider serves is re-pulled with a doubling delay, then left quiet.
+  "test/rfc64-announced-current-head-retry-v1.test.ts",
   "test/rfc64-public-catalog-reconciliation-outcome-v1.test.ts",
   "test/rfc64-public-catalog-reconciliation-failure-v1.test.ts",
   "test/rfc64-public-catalog-service-v1.test.ts",
@@ -65,6 +80,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-catalog-native-scoped-read-provider-v1.test.ts",
   "test/rfc64-public-catalog-native-reconciler-v1.test.ts",
   "test/rfc64-public-catalog-native-gate1.integration.test.ts",
+  "test/rfc64-public-catalog-durability.integration.test.ts",
   // #3198: a store that returns a typed literal in its own lexical form still holds the projection.
   "test/rfc64-projection-store-read-back-v1.test.ts",
   // A member holds two roster generations after a sync that followed a roster change: the newest is read.
@@ -100,6 +116,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-unregistered-replica-authority.integration.test.ts",
   "test/rfc64-replay-worklist.integration.test.ts",
   "test/rfc64-catalog-replay-connection-runtime-v1.test.ts",
+  "test/rfc64-catalog-head-replay-peers.test.ts",
   "test/rfc64-catalog-replay-recovery-runtime-v1.test.ts",
   "test/rfc64-catalog-operational-applied-heads-v1.test.ts",
   "test/private-catalog-subscription-readiness-v1.test.ts",

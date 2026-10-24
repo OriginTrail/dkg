@@ -280,11 +280,14 @@ export async function connectLibp2pCandidate(
 
     options.log?.(`Preconnecting relay: ${candidate.relayAddress}`);
     await host.dial(multiaddr(candidate.relayAddress), { signal });
-    const target = peerIdFromString(candidate.targetPeerId);
-    await host.peerStore.merge(target, { multiaddrs: [multiaddr(candidate.address)] });
     options.log?.(`Dialing circuit: ${candidate.address}`);
     await host.dial(multiaddr(candidate.address), { signal });
     await observeConnection(host, expectedPeerId!, signal);
+    // Keep only a circuit that reached the target. One through a relay the
+    // target holds no reservation on would stay in the peer store, and every
+    // later dial of the peer would try it again.
+    const target = peerIdFromString(candidate.targetPeerId);
+    await host.peerStore.merge(target, { multiaddrs: [multiaddr(candidate.address)] });
   } finally {
     clearTimeout(timeout);
   }
@@ -383,6 +386,8 @@ export async function connectLibp2pPeer(
     } catch (error) {
       if (options.signal?.aborted) throw error;
       lastCandidateError = error;
+      // The caller sees the last candidate's error only; say what each one hit.
+      options.log?.(`Connection candidate ${candidate.address} failed: ${error instanceof Error ? error.message : String(error)}`);
       if (relayFallback) relayFallbackBudgetMs -= Date.now() - startedAt;
     }
   }

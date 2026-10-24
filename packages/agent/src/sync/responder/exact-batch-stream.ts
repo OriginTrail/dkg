@@ -10,31 +10,17 @@ import {
   EXACT_BATCH_STREAM_WINDOW_SIZE, ExactBatchSendWindow, type ExactBatchFrame,
 } from '../exact-batch-stream-contract.js';
 import type { ExactBatchAgentSession } from '../requester/exact-batch-stream.js';
-import { ExactBatchAssetMissingError, type ExactAssetExportCache, type ExactAssetExportFallbackReason,
-  type ExactAssetExportStage } from './exact-asset-export-cache.js';
-import type { SyncRowSnapshotBudgetError } from './snapshot-budget.js';
-import type { ExperimentalExactBatchResponderResources } from './sync-handler.js';
+
+import { ExactBatchAssetMissingError } from './exact-asset-export-cache.js';
+import type { PublicAssetResponderOptions } from './public-asset-responder.js';
 
 const EMPTY = new Uint8Array(0);
-export interface ExactBatchResponderBindingOptions {
+export interface ExactBatchResponderBindingOptions extends Omit<PublicAssetResponderOptions, 'isPublicContextGraph'> {
+  readonly resolvePublicContextGraphAuthority: (contextGraphId: string, signal: AbortSignal) => Promise<'public' | 'non-public' | 'unavailable'>;
+  readonly onRefusal?: (stage: 'authorization' | 'public-authority' | 'serving' | 'export', code: 'BUSY' | 'DENIED' | 'ASSET_MISSING') => void;
   readonly localPeerId: string;
   readonly store: TripleStore;
-  /** Shared existing responder budget/cache, not a second unaccounted cache. */
-  readonly exportCache: ExactAssetExportCache;
-  readonly admission: Pick<ExperimentalExactBatchResponderResources, 'withPreAuthorizationAdmission' | 'withAuthorizedResponseAdmission'>;
   readonly parseSyncRequest: (bytes: Uint8Array) => SyncRequestEnvelope;
-  readonly authorizeSyncRequest: (request: SyncRequestEnvelope, peerId: string, options: { signal?: AbortSignal }) => Promise<boolean>;
-  /** Positive normal CG policy read: the experimental pilot serves public CGs only. */
-  readonly resolvePublicContextGraphAuthority: (contextGraphId: string, signal: AbortSignal) => Promise<'public' | 'non-public' | 'unavailable'>;
-  readonly servingWithheld?: (contextGraphId: string) => boolean;
-  /** Closed, request-free reason for a pre-export refusal. */
-  readonly onRefusal?: (stage: 'authorization' | 'public-authority' | 'serving' | 'export', code: 'BUSY' | 'DENIED' | 'ASSET_MISSING') => void;
-  readonly onStage?: (stage: 'metadata' | 'export' | 'encode' | 'send' | 'source-fence' | 'ack-wait' | ExactAssetExportStage, assetIndex: number, durationMs: number, context: OperationContext) => void;
-  /** Successful cache lease export count, never a peer/body authority claim. */
-  readonly onExport?: (assetIndex: number, wholePayloadExports: 0 | 1, context: OperationContext) => void;
-  readonly onPayload?: (assetIndex: number, plainBytes: number, encodedBytes: number, context: OperationContext) => void;
-  /** Local closed reason bound to the request's operation and canonical asset index. */
-  readonly onFallback?: (reason: ExactAssetExportFallbackReason, assetIndex: number, context: OperationContext, budgetReason?: SyncRowSnapshotBudgetError['reason']) => unknown;
 }
 type Authorized = { readonly request: SyncRequestEnvelope; readonly assetUals: readonly string[]; readonly context: OperationContext };
 class AuthorizedExactBatchContext {
@@ -137,7 +123,7 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
         // becomes private. This never enters the private/member join lane.
         await requirePublicAuthority(request.contextGraphId, session.signal);
         let started = performance.now();
-        const lease = await options.exportCache.acquireEncoded({ contextGraphId: request.contextGraphId, assetUal,
+        const lease = await options.exportCache.acquireEncoded({ contextGraphId: request.contextGraphId, assetUal, readPriority: 'normal',
           signal: session.signal,
           // A definitive policy change during an already prepared export is
           // fenced by the cache as a changed source, before ASSET_END.

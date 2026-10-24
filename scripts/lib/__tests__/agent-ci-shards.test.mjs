@@ -54,7 +54,7 @@ test('agent shards match actual Vitest discovery exactly once and separate the u
   }
   assert.equal(new Set(executableFiles).size, executableFiles.length);
   assert.deepEqual(executableFiles.sort(), discovered.get(AGENT_INTEGRATION_CONFIG));
-  assert.deepEqual(shards.map((shard) => shard.reservedOverheadMs), [0, 0, 0, 0, 0, 0, 0, 0, 0, 40_000]);
+  assert.deepEqual(shards.map((shard) => shard.reservedOverheadMs), [0, 0, 0, 0, 0, 0, 0, 0, 0, 160_000]);
   assert.deepEqual(planAgentShards(AGENT_REPO_ROOT, { discover }), shards);
   assert.ok(timings.bodyWeightsMs['test/rfc64-inventory-v1-lifecycle.test.ts'] > 100_000);
 });
