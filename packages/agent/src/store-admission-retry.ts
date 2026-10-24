@@ -24,6 +24,23 @@ export interface StoreAdmissionRetryOptions {
 }
 
 /**
+ * The retrier for one request the caller waits on, such as a context graph
+ * create or registration. Each step passed to it must be idempotent; every
+ * repeat is logged under `request`, so an operator can see a request outlast
+ * a burst of background store work instead of failing on its first refusal.
+ */
+export function storeAdmissionRetrier(
+  request: string,
+  log: (message: string) => void,
+): <T>(step: () => Promise<T>) => Promise<T> {
+  return (step) => retryStoreAdmission(step, {
+    onRetry: (operation, delayMs) => log(
+      `${request}: the store refused ${operation} while busy; retrying in ${delayMs} ms`,
+    ),
+  });
+}
+
+/**
  * Run `step` again when the store scheduler refused it before it started
  * (`queue_full` or `queue_wait_timeout`). Only that refusal is retried: the
  * scheduler guarantees the refused operation never ran, so a step built from
