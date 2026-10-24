@@ -5,7 +5,8 @@ import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fixture as packageCertificateFixture } from './package-certification-fixture.mjs';
 import ts from 'typescript';
 
 import {
@@ -342,15 +343,22 @@ test('verifyReleaseTag flags a tag/version mismatch and a missing local tag', ()
 // Regression for the release-blocking promote crash: `run()` with stdio:'inherit'
 // returned null stdout and threw AFTER the first successful `npm dist-tag add`,
 // so a non-dry-run promote moved exactly one tag and exited 1. Exercise the real
-// CLI end-to-end against a stubbed `npm` binary.
-test('promote survives interactive npm calls for the whole package set', () => {
+// publication runner against a stubbed `npm` binary after real certificate verification.
+test('promote survives interactive npm calls for the whole certified package set', (t) => {
+  const fixture = packageCertificateFixture(t);
   const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-npm-shim-'));
   try {
     const logPath = path.join(shimDir, 'calls.log');
     fs.writeFileSync(path.join(shimDir, 'npm'), '#!/bin/sh\necho "$@" >> "$NPM_SHIM_LOG"\n');
     fs.chmodSync(path.join(shimDir, 'npm'), 0o755);
     const result = spawnSync(process.execPath, [
-      SCRIPT_PATH, 'promote', '--version', '0.0.0-shimtest', '--tags', 'faketag', '--otp', '000000',
+      '--input-type=module', '-e', `
+        import { preparedRelease } from ${JSON.stringify(pathToFileURL(path.join(REPO_ROOT, 'scripts/lib/package-certification/publish.mjs')).href)};
+        preparedRelease({
+          mode: 'promote', bundle: ${JSON.stringify(fixture.bundle)}, receiptFile: ${JSON.stringify(fixture.receiptFile)},
+          expected: ${JSON.stringify(fixture.expected)}, tags: ['faketag'], otp: '000000',
+          authorize: () => {}, readDist: pkg => ({ integrity: pkg.integrity }), log: () => {},
+        });`,
     ], {
       encoding: 'utf8',
       env: { ...process.env, PATH: `${shimDir}:${process.env.PATH}`, NPM_SHIM_LOG: logPath },
@@ -359,7 +367,7 @@ test('promote survives interactive npm calls for the whole package set', () => {
     const calls = fs.readFileSync(logPath, 'utf8').trim().split('\n');
     assert.ok(calls.length >= 2, `expected one npm call per publishable package, got ${calls.length}`);
     for (const call of calls) {
-      assert.match(call, /^dist-tag add @origintrail-official\/\S+@0\.0\.0-shimtest faketag --otp=000000$/);
+      assert.match(call, /^dist-tag add @origintrail-official\/\S+@10\.0\.25 faketag --otp=000000$/);
     }
   } finally {
     fs.rmSync(shimDir, { recursive: true, force: true });
