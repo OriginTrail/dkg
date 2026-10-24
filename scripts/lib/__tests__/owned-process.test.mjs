@@ -1,11 +1,37 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import ts from 'typescript';
 import { ownProcess } from '../../testing/owned-process.mjs';
 
 function child(code) {
   return spawn(process.execPath, ['-e', code], { stdio: ['ignore', 'pipe', 'pipe'] });
 }
+
+test('typed process consumers can supply termination and readiness cancellation', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'owned-process-types-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.symlinkSync(path.resolve(import.meta.dirname, '../../../node_modules'), path.join(root, 'node_modules'), 'junction');
+  const consumer = path.join(root, 'consumer.mts');
+  const module = path.resolve(import.meta.dirname, '../../testing/owned-process.mjs').replaceAll('\\', '/');
+  fs.writeFileSync(consumer, `import type { ChildProcess } from 'node:child_process';
+import { ownProcess } from ${JSON.stringify(module)};
+declare const child: ChildProcess;
+const controller = new AbortController();
+const owner = ownProcess(child, { kill: signal => { const typed: NodeJS.Signals = signal; child.kill(typed); } });
+const ready: Promise<number> = owner.ready(({ signal }) => signal.aborted ? undefined : 1, { signal: controller.signal });
+void ready;
+`);
+  const program = ts.createProgram([consumer], { module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    target: ts.ScriptTarget.ES2022, noEmit: true, strict: true, skipLibCheck: false });
+  const diagnostics = ts.getPreEmitDiagnostics(program);
+  assert.equal(diagnostics.length, 0, ts.formatDiagnosticsWithColorAndContext(diagnostics, {
+    getCanonicalFileName: file => file, getCurrentDirectory: () => root, getNewLine: () => '\n',
+  }));
+});
 
 test('spawn errors and early closes retain diagnostics and prevent readiness', async () => {
   const missing = ownProcess(spawn('/definitely-not-a-dkg-test-executable', [], { stdio: ['ignore', 'pipe', 'pipe'] }));

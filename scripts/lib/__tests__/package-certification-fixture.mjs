@@ -2,9 +2,26 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { gzipSync } from 'node:zlib';
+import assert from 'node:assert/strict';
 import { BUILD_INPUTS, CASES, CLI, LAYOUTS, PROFILE, digest, hash, fileIdentity } from '../package-certification/bundle.mjs';
 
 export const writeJson = (file, value) => fs.writeFileSync(file, JSON.stringify(value, null, 2));
+export function releaseGitFixture(expected) {
+  const tag = `v${expected.version}`, object = 'c'.repeat(40);
+  const responses = new Map([
+    [`rev-parse --verify refs/tags/${tag}`, object],
+    [`cat-file -t refs/tags/${tag}`, 'tag'],
+    [`cat-file tag refs/tags/${tag}`, '-----BEGIN SSH SIGNATURE-----'],
+    [`merge-base --is-ancestor ${tag}^{commit} origin/main`, ''],
+    [`ls-remote origin refs/tags/${tag}`, `${object}\trefs/tags/${tag}`],
+    [`rev-parse ${tag}^{commit}`, expected.commit],
+  ]);
+  return { tag, gitRunner: (command, args) => {
+    assert.equal(command, 'git');
+    assert.ok(responses.has(args.join(' ')), `unexpected git operation: ${args.join(' ')}`);
+    return responses.get(args.join(' '));
+  } };
+}
 export function archive(files) {
   const records = [];
   for (const [name, value] of Object.entries(files)) {

@@ -94,7 +94,7 @@ export async function certifyInstall({ rootDir, bundle, output, expected, image 
         containers.add(container);
         await docker(['run', '-d', '--name', container, '--network', egress, '--mount', `type=bind,src=${bundle},dst=/bundle,readonly`, '--mount', `type=bind,src=${output},dst=/evidence`, image, 'node', '-e', 'setInterval(()=>{},100000)']);
         await docker(['exec', container, 'mkdir', '-p', '/harness/lib/package-certification', '/harness/testing']);
-        for (const file of ['installed-smoke.mjs', 'bundle.mjs', 'npm-cache.mjs']) await docker(['cp', path.join(scripts, file), `${container}:/harness/lib/package-certification/${file}`]);
+        for (const file of ['installed-smoke.mjs', 'bundle.mjs', 'npm-cache.mjs', 'installed-tree.mjs']) await docker(['cp', path.join(scripts, file), `${container}:/harness/lib/package-certification/${file}`]);
         await docker(['cp', path.join(scripts, '../../testing/owned-process.mjs'), `${container}:/harness/testing/owned-process.mjs`]);
         await docker(['exec', container, 'node', '/harness/lib/package-certification/installed-smoke.mjs', 'install', layout, runId, chain.hubAddress], `${layout}-observer.log`);
         receipt.timings[`${layout}-install`] = Date.now() - installStart;

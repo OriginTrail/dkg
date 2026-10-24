@@ -61,21 +61,17 @@ function mutate(command, args) {
 export function preparedRelease({
   mode, bundle, receiptFile, expected, rootDir, tag, tags, registry, otp,
   dryRun = false, readDist = pkg => registryDist(pkg, registry), runner = mutate,
-  verify = () => verifyCertificate(bundle, receiptFile, expected),
   gitRunner = (cmd, args) => run(cmd, args, { cwd: rootDir }),
-  authorize = () => {
-    const problems = verifyReleaseTag({ tag, version: expected.version, runner: gitRunner });
-    assert.deepEqual(problems, [], 'release signed-tag/version/ancestry preflight failed');
-    assert.equal(gitRunner('git', ['rev-parse', `${tag}^{commit}`]), expected.commit, 'tag does not identify prepared source');
-  },
   log = console.log,
 }) {
   assert.ok(['publish', 'promote'].includes(mode));
   validateRegistry(registry);
   assert.ok(tags?.length > 0 && new Set(tags).size === tags.length && tags.every(t => /^[a-z][a-z0-9-]*$/.test(t)), 'invalid/duplicate dist-tags');
   if (mode === 'publish') assert.equal(tags.length, 1, 'publish accepts exactly one initial dist-tag');
-  const { manifest } = verify();
-  authorize();
+  const { manifest } = verifyCertificate(bundle, receiptFile, expected);
+  const problems = verifyReleaseTag({ tag, version: expected.version, runner: gitRunner });
+  assert.deepEqual(problems, [], 'release signed-tag/version/ancestry preflight failed');
+  assert.equal(gitRunner('git', ['rev-parse', `${tag}^{commit}`]), expected.commit, 'tag does not identify prepared source');
   // Preflight EVERY package before even the first mutation. A matching version
   // alone cannot make a partial publication safe to resume.
   const state = checkRegistrySet(manifest, readDist, { allowMissing: mode === 'publish' });
@@ -91,7 +87,7 @@ export function preparedRelease({
   const progress = { mode, dryRun, reused: state.filter(s => mode === 'publish' && s.exists).map(s => s.pkg.name), completed: [], planned: operations.map(describe) };
   // Recheck package AND evidence bytes after acquisition and immediately before
   // mutation; no build-info generation/build/repack exists in this path.
-  verify();
+  verifyCertificate(bundle, receiptFile, expected);
   try {
     for (const operation of operations) {
       const { pkg, channel, tarball, args } = operation;

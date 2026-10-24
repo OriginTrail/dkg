@@ -352,10 +352,11 @@ test('promote survives interactive npm calls for the whole certified package set
     const result = spawnSync(process.execPath, [
       '--input-type=module', '-e', `
         import { preparedRelease } from ${JSON.stringify(pathToFileURL(path.join(REPO_ROOT, 'scripts/lib/package-certification/publish.mjs')).href)};
+        import { releaseGitFixture } from ${JSON.stringify(new URL('./package-certification-fixture.mjs', import.meta.url).href)};
         preparedRelease({
           mode: 'promote', bundle: ${JSON.stringify(fixture.bundle)}, receiptFile: ${JSON.stringify(fixture.receiptFile)},
           expected: ${JSON.stringify(fixture.expected)}, tags: ['faketag'], otp: '000000',
-          authorize: () => {}, readDist: pkg => ({ integrity: pkg.integrity }), log: () => {},
+          ...releaseGitFixture(${JSON.stringify(fixture.expected)}), readDist: pkg => ({ integrity: pkg.integrity }), log: () => {},
         });`,
     ], {
       encoding: 'utf8',

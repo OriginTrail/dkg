@@ -3,7 +3,7 @@ import path from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { registryDist, preparedRelease } from '../package-certification/publish.mjs';
-import { fixture } from './package-certification-fixture.mjs';
+import { fixture, releaseGitFixture } from './package-certification-fixture.mjs';
 
 function npmShim(t, f, response) {
   const directory = path.join(f.root, 'bin');
@@ -48,7 +48,7 @@ for (const mode of ['publish', 'promote']) for (const [name, kind, result] of ca
     else assert.throws(() => registryDist(pkg));
     let mutations = 0;
     const options = { mode, bundle: f.bundle, receiptFile: f.receiptFile, expected: f.expected,
-      tags: ['canary'], authorize: () => {}, runner: () => { mutations++; }, log: () => {},
+      tags: ['canary'], ...releaseGitFixture(f.expected), runner: () => { mutations++; }, log: () => {},
     };
     if (kind === 'error' || (kind === 'absent' && mode === 'promote')) {
       assert.throws(() => preparedRelease(options));

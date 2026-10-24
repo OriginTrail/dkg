@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { verifyCertificate, verifyBundle, digest, readJson, tarFiles, fileIdentity, hash, dependencies, validatePackedManifest } from '../package-certification/bundle.mjs';
 import { preparedRelease, checkRegistrySet } from '../package-certification/publish.mjs';
-import { fixture, writeJson, archive } from './package-certification-fixture.mjs';
+import { fixture, writeJson, archive, releaseGitFixture } from './package-certification-fixture.mjs';
 import { startRegistry } from '../package-certification/registry.mjs';
 import { archiveRecords } from '../package-certification/npm-cache.mjs';
 
@@ -156,7 +156,7 @@ for (const [name, alter, message] of [
   assert.throws(() => verifyBundle(f.bundle, f.expected), message);
 });
 function releaseOptions(f, extra = {}) {
-  return { mode: 'publish', bundle: f.bundle, receiptFile: f.receiptFile, expected: f.expected, tags: ['canary'], authorize: () => {}, readDist: () => null, log: () => {}, ...extra };
+  return { mode: 'publish', bundle: f.bundle, receiptFile: f.receiptFile, expected: f.expected, tags: ['canary'], ...releaseGitFixture(f.expected), readDist: () => null, log: () => {}, ...extra };
 }
 for (const mode of ['publish', 'promote']) for (const matches of [true, false]) {
   test(`${mode} default authorization ${matches ? 'accepts' : 'rejects'} the resolved tag subject`, t => {
@@ -170,7 +170,7 @@ for (const mode of ['publish', 'promote']) for (const matches of [true, false]) 
       [`rev-parse ${tag}^{commit}`, matches ? f.expected.commit : 'b'.repeat(40)],
     ]);
     let reads = 0, mutations = 0;
-    const options = releaseOptions(f, { mode, tag, authorize: undefined,
+    const options = releaseOptions(f, { mode, tag,
       gitRunner: (command, args) => {
         assert.equal(command, 'git');
         assert.ok(responses.has(args.join(' ')), `unexpected git operation: ${args.join(' ')}`);
@@ -209,7 +209,7 @@ test('publication plan exposes consumers only after their candidate dependencies
 test('validation and authorization failures invoke no mutating runner', t => {
   const f = fixture(t); let mutations = 0;
   const runner = () => { mutations++; };
-  assert.throws(() => preparedRelease(releaseOptions(f, { runner, authorize: () => { throw new Error('wrong tag source'); } })));
+  assert.throws(() => preparedRelease(releaseOptions(f, { runner, gitRunner: () => { throw new Error('tag unavailable'); } })));
   fs.appendFileSync(path.join(f.bundle, f.manifest.packages[1].tarball), 'damaged');
   assert.throws(() => preparedRelease(releaseOptions(f, { runner })));
   assert.equal(mutations, 0);
