@@ -45,6 +45,8 @@ describe('SPARQL TSV SELECT decoding', () => {
         maxResponseBytes: bytes.length,
       })).resolves.toEqual(expected);
     },
+    // Keep the stack-overflow-sized payload under V8 coverage on slower CI runners.
+    30_000,
   );
 
   it('normalizes every supported term kind and preserves unbound cells', () => {
