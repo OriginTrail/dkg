@@ -77,9 +77,7 @@
 // is reported): a check that fails for the reason of an open issue, with
 // evidence of that reason, prints as XFAIL with the issue and does not fail
 // its case; the same check holding prints as XPASS, so that the gap can be
-// retired. #3264: a subscriber that never obtains the definition (its
-// listing shows no access policy, and it never did), and its synced flag
-// (cases 2, 7, 8). #3293: a subscriber that holds the definition but whose
+// retired. #3293: a subscriber that holds the definition but whose
 // write into the sub-graph is refused with HTTP 500 naming the unregistered
 // sub-graph, its listing naming none (cases 2, 7). #3294: the curator's
 // promotion of another Edge's report refused with HTTP 409
@@ -88,6 +86,8 @@
 // #3296: a late Edge that held every report when its second subscribe was
 // accepted, never marked synced because its catch-up inserted no data (its
 // log shows the catch-up's shared-memory passes, none with data; case 8).
+// #3264, a subscriber that never obtained the definition, is retired: its
+// checks are reported as they are.
 //
 // Cases (each line of the report names the case, the report, the node and
 // what did not hold):
@@ -422,8 +422,8 @@ async function listsSubGraph(node, graph) {
 /**
  * A subscriber's subscribe as a client makes it, and its checks from that
  * moment: the graph's definition within DEFINITION_MS (under `caseId`) and
- * its synced flag within SYNCED_MS (case 8), with the known gaps applied
- * (#3264). Resolves once both have settled.
+ * its synced flag within SYNCED_MS (case 8), with the known gaps applied.
+ * Resolves once both have settled.
  */
 async function subscribeChecked(node, graph, caseId) {
   const observer = io.observeSubscription(node, graph, await graphs.subscribe(node, graph));
@@ -505,7 +505,7 @@ async function shareReport(caseId, author, graph, what, readyBy = 0) {
 /**
  * A settled subscription of a member to the registered public graph: the
  * definition under `definitionCase` (a pass is quiet), the synced flag under
- * case 8, each with the known gaps applied (#3264).
+ * case 8, each with the known gaps applied.
  */
 function reportSubscription(handle, observation, definitionCase) {
   if (!observation) return fail(definitionCase, `${handle.node.label}: its subscription to ${handle.graph.key} was not observed`);

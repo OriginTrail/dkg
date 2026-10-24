@@ -137,6 +137,8 @@ describe('a confirmed publication and its catalog placement', () => {
 
       const job = await path.job(jobId);
       expect(job?.status).toBe('finalized');
+      expect(await agent.assertion.history(CONTEXT_GRAPH_ID, asset.assertionCoordinate, { agentAddress: AUTHOR }))
+        .toMatchObject({ state: 'published', publishedUal: asset.seal.kaUal });
       expect(job?.timestamps).toMatchObject({ finalityObservedAt: 1_000, finalizedAt: 1_000 });
       expect(await path.postFinalityWaitMs(jobId)).toBe(0);
 
@@ -281,7 +283,7 @@ describe('a confirmed publication and its catalog placement', () => {
       expect(parked.entries()).toBe(1);
       expect(fixture.queue()).toMatchObject({ pending: 6, oldestPendingAgeMs: 1_000, passRunning: true });
       expect(Object.keys(fixture.queue()!).sort()).toEqual([
-        'cooldownSkips', 'depth', 'lastPassDurationMs', 'oldestPendingAgeMs', 'oldestWaiterAgeMs',
+        'cooldownSkips', 'depth', 'failures', 'lastPassDurationMs', 'oldestPendingAgeMs', 'oldestWaiterAgeMs',
         'passRunning', 'pending', 'waiters',
       ]);
 
@@ -509,10 +511,29 @@ describe('a confirmed publication and its catalog placement', () => {
     }
   }, 120_000);
 
-  it('finalizes a publication whose marker could not be stored, and says that nothing owes its placement', async () => {
-    // What happens when the marker write itself fails: the observer logs and the publication
-    // finalizes with no obligation behind it. This row records that behaviour; it does not
-    // endorse it. Making the write a condition of the terminal record is a follow-up.
+  it('retries a failed public catalog removal before finalizing the recovered publication', async () => {
+    const fixture = await startPlacementAgentV1({ name: 'terminal-public-removal-fails' });
+    const { agent } = fixture;
+    const asset = await seedPlacementAssetV1(agent, 'public-unremoved', 98n);
+    fixture.lane.acceptsFinalizedVmRepair = false;
+    const path = createPublicationPathV1(fixture);
+    const jobId = await path.failAfterBroadcast(asset);
+    const remove = vi.spyOn(agent, 'commitRfc64ConfirmedInventoryRemovalV1').mockRejectedValue(new Error('inventory store refused removal'));
+    fixture.clock.now = 1_000;
+    expect(await path.publisher.recover()).toBe(0);
+    expect((await path.job(jobId))?.status).toBe('failed');
+    expect(remove).toHaveBeenCalledOnce();
+    expect(fixture.events()).not.toContain('recovery-finalized:repair-public-unremoved');
+
+    remove.mockRestore();
+    // A failed tx-bearing claim retains the ordinary chain-proof retry backoff.
+    fixture.clock.now = 60_000;
+    expect(await path.publisher.recover()).toBe(1);
+    expect((await path.job(jobId))?.status).toBe('finalized');
+    expect(fixture.events()).toContain('recovery-finalized:repair-public-unremoved');
+  }, 120_000);
+
+  it('keeps a publication recoverable until its catalog placement is durably owed', async () => {
     const fixture = await startPlacementAgentV1({ name: 'terminal-marker-write-fails' });
     const { agent } = fixture;
     const asset = await seedPlacementAssetV1(agent, 'unrecorded', 97n);
@@ -522,15 +543,14 @@ describe('a confirmed publication and its catalog placement', () => {
     const jobId = await path.enqueue(asset);
     await path.broadcast('wallet-1');
     await path.publisher.drainDetachedExecutions();
-    expect(await path.publisher.recover()).toBe(1);
+    expect(await path.publisher.recover()).toBe(0);
 
-    expect((await path.job(jobId))?.status).toBe('finalized');
-    // The failed write is not a failed publication: both completion paths ran to their end.
+    expect((await path.job(jobId))?.status).toBe('broadcast');
+    // Neither completion path can discharge an obligation whose marker was never written.
     expect(fixture.events()).toEqual([
       'executor-settled:repair-unrecorded',
       'finality-observed:repair-unrecorded',
       'vm-materialization:promoted',
-      'recovery-finalized:repair-unrecorded',
     ]);
     expect(fixture.markers()).toEqual([]);
     expect(fixture.catalogRows()).toBeNull();
@@ -543,6 +563,13 @@ describe('a confirmed publication and its catalog placement', () => {
       'Confirmed queued publish but RFC-64 finalized-private placement was not recorded, so nothing owes it: '
       + 'the marker store refused the write',
     ]);
+    fixture.failMarkerWrite = undefined;
+    fixture.clock.now += 2_000;
+    expect(await path.publisher.recover()).toBe(1);
+    expect((await path.job(jobId))?.status).toBe('finalized');
+    expect(fixture.events()).toContain('marker-stored:repair-unrecorded');
+    expect(fixture.events()).toContain('recovery-finalized:repair-unrecorded');
+
   }, 120_000);
 });
 

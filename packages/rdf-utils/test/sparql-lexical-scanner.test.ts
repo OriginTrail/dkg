@@ -5,6 +5,7 @@ import {
   type PreparedSparql,
   type ValidPreparedSparql,
 } from '../src/sparql-lexical-scanner.js';
+import { isSparqlVariableNameRaw } from '../src/sparql-lexical-primitives.js';
 import {
   indexSparqlStructure,
   sparqlTokenIndexesAtDepth,
@@ -17,6 +18,15 @@ function validPrepared(source: string): ValidPreparedSparql {
 }
 
 describe('canonical SPARQL lexical scanner', () => {
+  it('validates raw VARNAMEs with the canonical Unicode grammar', () => {
+    for (const name of ['x', '1count', '_value', 'café', 'δοκιμή', '𐀀name', 'a·b']) {
+      expect(isSparqlVariableNameRaw(name), name).toBe(true);
+    }
+    for (const name of ['', '?x', '$x', String.raw`\u0078`, 'a-b', 'a.b', '\ud800']) {
+      expect(isSparqlVariableNameRaw(name), name).toBe(false);
+    }
+  });
+
   it('scans large ordinary IRIs without changing their lexical value', () => {
     const body = `urn:large:${'segment/'.repeat(16_384)}tail`;
     const prepared = prepareSparql(`SELECT * WHERE { GRAPH <${body}> { ?s ?p ?o } }`);

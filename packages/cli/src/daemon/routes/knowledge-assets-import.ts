@@ -31,7 +31,7 @@ import {
   isDkgContentHash,
   verifyDkgContentHash,
 } from "@origintrail-official/dkg-core";
-import { findReservedSubjectPrefix, isSkolemizedUri, listAssertionScopedGraphUris } from "@origintrail-official/dkg-publisher";
+import { findReservedSubjectPrefix, isSkolemizedUri, listAssertionScopedGraphUris, SubGraphNotFoundError } from "@origintrail-official/dkg-publisher";
 import { deleteByPatternWithoutCount } from "@origintrail-official/dkg-storage";
 import type { RequestContext } from "./context.js";
 import {
@@ -47,7 +47,6 @@ import {
   MAX_UPLOAD_BYTES,
   type ImportFileExtractionPayload,
   buildImportFileResponse,
-  unregisteredSubGraphError,
 } from "../http-utils.js";
 import {
   ImportArtifactRouteError,
@@ -822,16 +821,11 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
 
   if (subGraphName) {
     try {
-      const registeredSubGraphs: Array<{ name: string }> =
-        await agent.listSubGraphs(contextGraphId!);
-      if (
-        !registeredSubGraphs.some(
-          (subGraph) => subGraph.name === subGraphName,
-        )
-      ) {
-        return jsonResponse(res, 400, {
-          error: unregisteredSubGraphError(contextGraphId!, subGraphName),
-        });
+      // Registered here, or found at the graph's peers like every other write (#3293).
+      const resolution = await agent.resolveSubGraphRegistration(contextGraphId!, subGraphName);
+      if (!resolution.registered) {
+        const refusal = new SubGraphNotFoundError(contextGraphId!, subGraphName, resolution.detail);
+        return jsonResponse(res, 400, { code: refusal.code, error: refusal.message });
       }
     } catch (err: any) {
       return jsonResponse(res, 500, {

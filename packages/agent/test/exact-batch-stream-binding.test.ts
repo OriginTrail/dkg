@@ -437,7 +437,7 @@ describe('exact batch normal verifier/materializer binding', () => {
         query.mockImplementation(async (sparql, options) => {
           if (options?.source !== 'sync.responder.exactAssetExport.metadata') return original(sparql, options);
           expect(sparql).toContain('LIMIT 129');
-          expect(options).toMatchObject({ priority: 'background', signal, maxResponseBytes: EXACT_BATCH_MAX_FRAME_BYTES });
+          expect(options).toMatchObject({ priority: 'normal', signal, maxResponseBytes: EXACT_BATCH_MAX_FRAME_BYTES });
           if (kind === 'byte-limit') throw new StoreResponseTooLargeError(EXACT_BATCH_MAX_FRAME_BYTES, EXACT_BATCH_MAX_FRAME_BYTES + 1);
           return { type: 'bindings', bindings: kind === 'row-limit'
             ? Array.from({ length: 129 }, () => ({ predicate: 'urn:overflow', object: '"value"' }))

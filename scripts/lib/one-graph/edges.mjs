@@ -26,14 +26,15 @@ export const ROLES = Object.freeze(['curator', 'edgeA', 'edgeB', 'late']);
 
 // Every node folder this suite creates carries this file, apart from the
 // member-sharing suite's mark, so that neither suite takes the other's nodes
-// for its own. TemporaryEdges.start writes it: `<stamp> <role>`, the stamp of
-// the run that started the node, which ends with that run's process id
-// (`<time>-<pid>`).
+// for its own (TemporaryEdges.markName). addnode writes it as soon as it has
+// created the folder, `<stamp> <role> starting`, and TemporaryEdges.start
+// rewrites it `<stamp> <role> started` once the node is up; the stamp of the
+// run that started the node ends with that run's process id (`<time>-<pid>`).
 const OWN_MARK = '.one-graph-promotion';
 
 /** The run a node's mark names: { stamp, pid, role }, or null when it names none. */
 export function markOwner(text) {
-  const parts = /^(\S+-(\d+)) (\S+)\s*$/.exec(String(text ?? ''));
+  const parts = /^(\S+-(\d+)) (\S+)(?: (?:starting|started))?\s*$/.exec(String(text ?? ''));
   return parts ? { stamp: parts[1], pid: Number(parts[2]), role: parts[3] } : null;
 }
 
@@ -56,8 +57,8 @@ export class OneGraphEdges extends TemporaryEdges {
     this.late = null;
   }
 
-  /** This suite's own mark in a node folder. */
-  ownMark(number) { return join(this.devnet.nodeDir(number), OWN_MARK); }
+  /** This suite's own mark in a node folder, which addnode writes and `claims` reads. */
+  get markName() { return OWN_MARK; }
 
   /**
    * Nodes an earlier run of this suite left behind (it was killed, say):

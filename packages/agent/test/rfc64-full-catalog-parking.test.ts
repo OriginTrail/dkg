@@ -141,10 +141,13 @@ function supervisor(model: ReturnType<typeof node>, options: { readHead?: boolea
   const reconcile = vi.fn(async (): Promise<null> => null);
   const owner = new Rfc64SwmCatalogProjectionOwnerV1({
     resolvePartition: () => ({ retryIntervalMs: 5_000, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }) as never,
+    listDurableInventoryScopes: () => [],
     listLocalAuthorAddresses: () => [AUTHOR],
     acceptsPublicRootLane: () => true,
     acceptsFinalizedPrivateLane: () => laneActive,
     readRepairRevision: () => revision,
+    readPrivateFailure: () => null,
+    writePrivateFailures: () => {},
     listFinalizedPrivateRepairs: () => model.state.markers,
     repairFinalizedPrivatePlacement: model.place,
     reconcile,
@@ -193,8 +196,11 @@ describe('finalized-private placements of a full author catalog', () => {
       .filter((kaUal) => kaUal === NEW_A.kaUal || kaUal === NEW_B.kaUal);
     const headReadsBefore = model.readAppliedCatalogHead.mock.calls.length;
     await s.advance(HOUR - 5_000);
-    // Hundreds of passes: the other scope's failing marker kept its ordinary back-off ...
-    expect(model.state.attempts.filter((kaUal) => kaUal === failingElsewhere.kaUal).length).toBeGreaterThan(50);
+    // The unrelated unknown failure stays retryable under the bounded private backoff.
+    // Hundreds of supervisor passes must not produce hundreds of failed placements.
+    const unrelatedAttempts = model.state.attempts.filter((kaUal) => kaUal === failingElsewhere.kaUal).length;
+    expect(unrelatedAttempts).toBeGreaterThan(1);
+    expect(unrelatedAttempts).toBeLessThanOrEqual(12);
     // ... and the two parked markers cost each of the 719 passes one applied-head row read for
     // their scope, and nothing else.
     expect(fullScopeAttempts()).toEqual([NEW_A.kaUal]);

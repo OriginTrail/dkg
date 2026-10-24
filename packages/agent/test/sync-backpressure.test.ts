@@ -1581,7 +1581,7 @@ describe('sync global backpressure', () => {
     try {
       delete process.env.DKG_EXACT_BATCH_STREAM_ENABLED;
       delete process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM;
-      expect(resolveExactBatchStreamEnabled()).toBe(false);
+      expect(resolveExactBatchStreamEnabled()).toBe(true);
 
       process.env.DKG_EXACT_BATCH_STREAM_ENABLED = '1';
       expect(resolveExactBatchStreamEnabled()).toBe(true);
@@ -1885,10 +1885,12 @@ describe('sync global backpressure', () => {
       // The scheduler-level ceilings are what a shared lane's ceiling resolves
       // to, so dropping either one from the publish would silently take the
       // depth branches back out of service. They include the reserved
-      // shared-memory slot and its queue (#3251): 2 + 16 queued, 1 + 1 running.
+      // shared-memory slot and its queue (#3251) and the reserved
+      // control-plane slot, which has no queue (#3280): 2 + 16 queued,
+      // 1 + 1 + 1 running.
       expect(snapshot).toMatchObject({
         capacityModel: 'shared',
-        totals: { queueLimit: 18, inflightLimit: 2 },
+        totals: { queueLimit: 18, inflightLimit: 3 },
       });
       // Scoping this to one lane would be decorative: under `shared` every
       // field below resolves from scheduler-level capacity, so it is identical
@@ -1898,7 +1900,7 @@ describe('sync global backpressure', () => {
       // fact: the admission just made is active in the lane it was sent to.
       expect(snapshot!.lanes.length).toBeGreaterThan(0);
       for (const lane of snapshot!.lanes) {
-        expect(lane).toMatchObject({ capacityModel: 'shared', queueLimit: 18, inflightLimit: 2 });
+        expect(lane).toMatchObject({ capacityModel: 'shared', queueLimit: 18, inflightLimit: 3 });
       }
       const durable = snapshot!.lanes.find((lane) => lane.lane === 'durable');
       expect(durable).toMatchObject({

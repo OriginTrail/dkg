@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import { PromoteJobLeaseError, type PromoteAttemptError } from '@origintrail-official/dkg-publisher';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { PromoteJobLeaseError, TripleStoreAsyncPromoteQueue, type PromoteAttemptError, type PromoteFailureTransition } from '@origintrail-official/dkg-publisher';
 import {
   createPromoteWorkerSupervisor,
   type PromoteWorkerLogger,
@@ -17,15 +21,18 @@ const EVENT = 'async_promote_failure_bookkeeping_uncertain';
 const SECRET = 'private-bookkeeping-payload-token';
 const fixtures: AsyncPromoteWorkerFixture[] = [];
 const supervisors: PromoteWorkerSupervisor[] = [];
+const directories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(supervisors.splice(0).map((supervisor) => supervisor.stop()));
   vi.restoreAllMocks();
   await Promise.all(fixtures.splice(0).map((fixture) => fixture.store.close()));
+  vi.useRealTimers();
+  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-async function setup(log?: PromoteWorkerLogger) {
-  const fixture = createAsyncPromoteWorkerFixture({ maxRetries: 5, leaseMs: 1_000 });
+async function setup(log?: PromoteWorkerLogger, store?: OxigraphStore) {
+  const fixture = createAsyncPromoteWorkerFixture({ maxRetries: 5, leaseMs: 1_000, store });
   fixtures.push(fixture);
   const { queue, clock, logs } = fixture;
   // Keep authoritative reads available when injecting failure into the worker's observation.
@@ -35,7 +42,7 @@ async function setup(log?: PromoteWorkerLogger) {
     .mockRejectedValueOnce(retryableBookkeepingFailure())
     .mockResolvedValue({ promotedCount: 1 });
   const supervisor = createPromoteWorkerSupervisor({
-    agent: { promoteQueue: queue, assertion: { promote } } as unknown as DKGAgent,
+    agent: { promoteQueue: queue, assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote } } as unknown as DKGAgent,
     workerConcurrency: 1,
     pollIntervalMs: 1_000_000,
     postCommitRecoveryIntervalMs: 0,
@@ -71,6 +78,62 @@ function diagnostic(logs: string[], stage: string) {
 }
 
 describe('GH#2892 supervisor failure bookkeeping boundaries', () => {
+  it.each(['retrying', 'terminal', 'lost acknowledgement'] as const)(
+    'reopens the %s failure from disk before writer shutdown and retains its claim fence', async (kind) => {
+      // Background debounce must not supply a missing durability barrier. Only
+      // explicit queue flushes can make this test's file advance.
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const directory = mkdtempSync(join(tmpdir(), 'dkg-promote-failure-reopen-'));
+      directories.push(directory);
+      const path = join(directory, 'store.nq');
+      const h = await setup(undefined, new OxigraphStore(path));
+      if (kind === 'terminal') h.promote.mockReset().mockRejectedValue(new Error('Unknown assertion'));
+      let transition: PromoteFailureTransition | undefined;
+      let oldToken = '';
+      vi.spyOn(h.queue, 'fail').mockImplementation(async (id, token, error) => {
+        oldToken = token;
+        transition = await h.fail(id, token, error);
+        if (kind === 'lost acknowledgement') throw new Error(SECRET);
+        return transition;
+      });
+      await h.run();
+      expect(transition).toMatchObject({
+        jobId: h.jobId, state: kind === 'terminal' ? 'failed' : 'failed_retrying', attemptCount: 1,
+      });
+      expect(h.supervisor.getCounters()).toMatchObject({
+        failedRetrying: kind === 'retrying' ? 1 : 0,
+        failedTerminal: kind === 'terminal' ? 1 : 0,
+      });
+      if (kind === 'lost acknowledgement') diagnostic(h.logs, 'record_failure');
+
+      // Do not close h.store first: close() flushes and would mask fail() returning
+      // before its durable write. This independent native store reads disk now.
+      const reopenedStore = new OxigraphStore(path);
+      const reopened = new TripleStoreAsyncPromoteQueue(reopenedStore, { now: h.clock.now, backoff: () => 60_000 });
+      try {
+        const persisted = await reopened.getStatus(h.jobId);
+        expect(persisted).toMatchObject({ state: transition!.state, attempt: { count: transition!.attemptCount } });
+        expect(persisted?.lease).toBeUndefined();
+        expect(persisted?.attempt.lastError?.classification).toBe(kind === 'terminal' ? 'fatal' : 'transient');
+        await expect(reopened.fail(h.jobId, oldToken, {
+          message: 'stale failure', retryable: false, classification: 'fatal', recordedAt: h.clock.now(),
+        })).rejects.toBeInstanceOf(PromoteJobLeaseError);
+        expect(await reopened.claimNext('restarted-worker')).toBeNull();
+        h.clock.advance(59_999);
+        expect(await reopened.claimNext('restarted-worker')).toBeNull();
+        h.clock.advance(1);
+        const claimed = await reopened.claimNext('restarted-worker');
+        if (kind === 'terminal') expect(claimed).toBeNull();
+        else {
+          expect(persisted?.attempt.nextRetryAt).toBe(transition!.state === 'failed_retrying' ? transition!.nextRetryAt : undefined);
+          expect(claimed).toMatchObject({ jobId: h.jobId, state: 'running', attempt: { count: 2 } });
+          expect(claimed?.lease?.claimToken).not.toBe(oldToken);
+        }
+        expect(h.promote).toHaveBeenCalledTimes(1);
+      } finally { await reopenedStore.close(); }
+    },
+  );
+
   it.each(['retrying', 'terminal'] as const)('consumes a persisted %s transition without observing the outcome again', async (kind) => {
     const h = await setup();
     if (kind === 'terminal') h.promote.mockReset().mockRejectedValue(new Error('Unknown assertion'));

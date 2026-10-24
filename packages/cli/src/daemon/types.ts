@@ -27,6 +27,12 @@ export interface CatchupJob {
   durablePlane?: 'required' | 'not-applicable';
   /** The verified cleartext id the job continued under (name-hash requests). */
   resolvedContextGraphId?: string;
+  /**
+   * The job's walk found the graph's selected SWM lane not active, so it asked
+   * a peer nothing through it: this node had not put the graph's RFC-64
+   * authority in place yet.
+   */
+  selectedLaneFoundInactive?: true;
 }
 
 export interface CatchupTracker {

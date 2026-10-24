@@ -8,8 +8,7 @@ import {
   catchupDataTriples, definitionInTime, heldAtSubscribe, memberPublishOutcome, postPromotionCheck, promotionOutcome, promotionResult,
   subGraphWriteResult, syncedAfterRemedyResult, syncedAtEndResult,
 } from '../qa/one-graph-promotion.mjs';
-import { freshSubscription, subscriptionResults } from '../qa/member-sharing.mjs';
-import { classify, KNOWN_GAPS } from '../qa/known-gaps.mjs';
+import { classify } from '../qa/known-gaps.mjs';
 import { createReport } from '../member-sharing/report.mjs';
 import { createReports } from '../one-graph/reports.mjs';
 import { pollUntil } from '../one-graph/poll.mjs';
@@ -129,18 +128,6 @@ test('#3294: the curator\'s promotion of another Edge\'s report refused as not r
   assert.equal(ownResult(confirmed).check, 'curator-promotion');
   assert.equal(verdictOf(ownResult({ status: 200, json: { status: 'confirmed', ual: 'u', authorAddress: curatorNode.agentAddress } })), 'pass');
   assert.equal(verdictOf(ownResult(notResident)), 'fail');
-});
-
-test('#3264 covers this suite\'s subscription checks of a member that never obtains the definition', () => {
-  const deadline = { readable: true, defined: false, entry: { id: 'g', subscribed: true, synced: false } };
-  const observation = { ...freshSubscription(), atDefinitionDeadline: deadline, atSyncedDeadline: deadline, done: true };
-  const { definition, synced } = subscriptionResults(observation, { registered: true, private: false, member: true, definitionMs: 90_000, syncedMs: 90_000 });
-  assert.deepEqual([verdictOf(definition), gapOf(definition)], ['xfail', '#3264']);
-  assert.deepEqual([verdictOf(synced), gapOf(synced)], ['xfail', '#3264']);
-  // Held in time: the gap's check held.
-  const timely = subscriptionResults({ ...freshSubscription(), definedAt: 2000, syncedAt: 3000, done: true }, { registered: true, private: false, member: true, definitionMs: 90_000, syncedMs: 90_000 });
-  assert.equal(verdictOf(timely.definition), 'xpass');
-  assert.ok(KNOWN_GAPS.every(gap => typeof gap.what === 'string' && gap.what.length > 0));
 });
 
 test('an expected failure of a known gap does not fail its case, and the summary names the gap', () => {

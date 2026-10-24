@@ -79,6 +79,10 @@ test('an Edge\'s status shows the profile\'s switches as the node honours them',
 
 test('a node\'s mark names the run that started it, and whether that run still runs', () => {
   assert.deepEqual(markOwner('20261016T123857Z-37695 curator\n'), { stamp: '20261016T123857Z-37695', pid: 37695, role: 'curator' });
+  // As addnode writes it, and as the start rewrites it once the node is up.
+  assert.deepEqual(markOwner('20261016T123857Z-37695 edgeA starting\n'), { stamp: '20261016T123857Z-37695', pid: 37695, role: 'edgeA' });
+  assert.deepEqual(markOwner('20261016T123857Z-37695 edgeA started\n'), { stamp: '20261016T123857Z-37695', pid: 37695, role: 'edgeA' });
+  assert.equal(markOwner('20261016T123857Z-37695 edgeA started late'), null);
   for (const text of ['', 'garbage', 'S curator', '20261016T123857Z-37695', undefined]) assert.equal(markOwner(text), null, String(text));
   assert.equal(processAlive(process.pid), true);
   const ended = spawnSync(process.execPath, ['-e', '']).pid;
@@ -108,7 +112,9 @@ test('a run reclaims only nodes of its own suite whose run has ended; a running 
       `removed node8, left by run 20261016T110000Z-${ended} of this suite, which has ended`,
       'node10 carries this suite\'s mark but it names no run: left alone',
     ]);
-    // The mark a started node gets is this suite's own, never the member-sharing suite's.
+    // The mark a started node gets is this suite's own, never the member-sharing suite's: addnode is told
+    // its name, and a start claims the node by it.
+    assert.equal(edges.markName, '.one-graph-promotion');
     assert.equal(edges.ownMark(7), join(nodeDir(7), '.one-graph-promotion'));
     // A run whose owner cannot be told ended keeps its node; once it ends, the node is reclaimed.
     removed.length = 0;
@@ -116,6 +122,11 @@ test('a run reclaims only nodes of its own suite whose run has ended; a running 
     assert.deepEqual(removed, []);
     edges.reclaimLeftovers({ isAlive: () => false });
     assert.deepEqual(removed, [7, 8]);
+    // A start claims a node by this suite's mark, which addnode wrote with the run's stamp.
+    edges.stamp = '20261016T120000Z-1';
+    writeFileSync(join(nodeDir(9), '.one-graph-promotion'), '20261016T120000Z-1 edgeB starting\n');
+    assert.equal(edges.claims({ number: 9 }), true);
+    assert.equal(edges.claims({ number: 10 }), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

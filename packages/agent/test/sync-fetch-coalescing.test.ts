@@ -187,15 +187,15 @@ describe('exact VM recovery lifecycle', () => {
     );
     try {
       await agent.start();
-      const initialGeneration = (agent as any).vmReconcileLifecycleGeneration;
+      const initialGeneration = (agent as any).workLifetime.generation;
       await agent.stop();
       expect((agent as any).vmReconcileRotationClosed).toBe(true);
-      expect((agent as any).vmReconcileLifecycleGeneration).toBe(initialGeneration + 1);
+      expect((agent as any).workLifetime.generation).toBe(initialGeneration + 1);
       expect((agent as any).contextGraphMembershipPersistence.status().closed).toBe(true);
 
       await agent.start();
       expect((agent as any).vmReconcileRotationClosed).toBe(false);
-      expect((agent as any).vmReconcileLifecycleGeneration).toBe(initialGeneration + 1);
+      expect((agent as any).workLifetime.generation).toBe(initialGeneration + 1);
       expect((agent as any).vmReconcileScheduling.snapshot().closed).toBe(false);
       expect((agent as any).contextGraphMembershipPersistence.status().closed).toBe(false);
       const upsertsBeforeRestartProbe = membershipUpsert.mock.calls.length;
@@ -1377,6 +1377,70 @@ describe('DKGAgent sync fetch coalescing', () => {
       // The fresh sync's own metadata and data fetches, after the running sync's.
       expect(fetches).toEqual(['meta', 'data', 'meta', 'data']);
     } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('leaves the only general slot to a transfer while a reserved-slot-only shared-memory sync runs (#3251)', async () => {
+    // The Edge safety-net pull asks for the reserved slot only: on a node with
+    // one sync slot and no queue, the large transfers keep that slot.
+    const agent = await createAgentWithSend(
+      async () => new Uint8Array(0),
+      { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
+    );
+    const sharedMemorySyncPlan = {
+      targets: [{ contextGraphId: 'in-use-cg', lane: 'selected-public' }],
+    };
+    let metaFetch = deferred<SyncPageResult>();
+    (agent as any).listSubGraphs = async () => [];
+    (agent as any).getOrCreateSyncVerifyWorker = () => ({
+      processSharedMemoryBatch: async () => ({
+        verifiedData: [],
+        verifiedMeta: [],
+        totalFetchedDataQuads: 0,
+        totalFetchedMetaQuads: 0,
+        droppedDataTriples: 0,
+        emptyResponses: 1,
+        entityCreators: [],
+      }),
+    });
+    const transfer = () => withGlobalSyncBackpressure(
+      {
+        policy: resolveSyncGlobalBackpressure((agent as any).config),
+        ctx: createOperationContext('sync'),
+        label: 'durable:large-cg:peer',
+        lane: 'durable',
+        source: 'vm-recovery',
+      },
+      async () => 'transferred',
+    );
+    const pullWhileTransferring = async (options: Record<string, unknown>) => {
+      metaFetch = deferred<SyncPageResult>();
+      let metaRequested!: () => void;
+      const requested = new Promise<void>((resolve) => { metaRequested = resolve; });
+      stubLifecycleFetch(agent, async ({ phase }) => {
+        if (phase !== 'meta') return emptySyncPage(phase);
+        metaRequested();
+        return metaFetch.promise;
+      });
+      const pull = (agent as any).syncSharedMemoryFromPeerDetailed(
+        PEER_A,
+        ['in-use-cg'],
+        { sharedMemorySyncPlan, source: 'reconcile', ...options },
+      );
+      await requested;
+      const outcome = await transfer().catch((error: SyncBackpressureBusyError) => error.reason);
+      metaFetch.resolve(emptySyncPage('meta'));
+      await expect(pull).resolves.toMatchObject({ failedPeers: 0 });
+      return outcome;
+    };
+
+    try {
+      // An ordinary pull takes the free general slot first.
+      expect(await pullWhileTransferring({})).toBe('queue_full');
+      expect(await pullWhileTransferring({ reservedSlotOnly: true })).toBe('transferred');
+    } finally {
+      metaFetch.resolve(emptySyncPage('meta'));
       await agent.stop().catch(() => {});
     }
   });

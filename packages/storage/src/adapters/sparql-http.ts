@@ -1,3 +1,9 @@
+import { isReadOnlyStoreOperation } from '../store-operation-outcome.js';
+import { classifyStoreReadTransport } from '../store-read-transport-failure.js';
+import { normalizeNonNegativeNumber, normalizeSampleRate, normalizeQuerySource } from "./sparql-telemetry-options.js";
+import { refuseWithheldGraphQuery } from '../withheld-graph-query.js';
+import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
+import { prepareAtomicGraphReplace, prepareAtomicGraphAndSubjectReplace, prepareAtomicSubjectReplace, prepareAtomicSubjectAndInsert } from './atomic-write-plans.js';
 import { SparqlHttpResponseError, isDefinitiveSparqlUpdateRejectionV1 } from './sparql-http-response-error.js';
 /**
  * SparqlHttpStore — TripleStore adapter for any SPARQL 1.1 Protocol endpoint.
@@ -34,7 +40,7 @@ import type {
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
-import { decodeSparqlJsonQueryResult } from '../sparql-json-query-result.js';
+import { decodeSparqlHttpQueryResponse, sparqlQueryResponseAccept } from './sparql-query-response.js';
 import {
   externalStorePriorityScheduler,
   type StorePriorityScheduler,
@@ -45,12 +51,7 @@ import {
   type GraphWriteScope,
 } from '../graph-write-gen.js';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
-import {
-  buildAtomicGraphAndSubjectReplaceUpdate,
-  buildAtomicGraphReplaceUpdate,
-  buildAtomicSubjectReplaceUpdate,
-  isAtomicGraphReplaceStagingGraph,
-} from '../atomic-graph-replace.js';
+import { isAtomicGraphReplaceStagingGraph } from '../atomic-graph-replace.js';
 import {
   buildRfc64AuthorCommitCasUpdateV1,
   type Rfc64AuthorCommitCasInputV1,
@@ -226,6 +227,7 @@ export interface SparqlHttpStoreOptions {
 export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapability {
   readonly queryResponseLimitMode = 'pre-materialization' as const;
   readonly writeRevisionCoverage = 'process-local' as const;
+  readonly graphEnumerationVisibility = (graph: string): boolean => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph);
   readonly queryCancellation = 'interruptible' as const;
   /**
    * RFC-64 stream capability installed only for a storage-created managed
@@ -844,12 +846,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       // closed (before any request) so callers take their non-atomic fallback.
       throw new UnsupportedTripleStoreCapabilityError('replaceGraph', 'SparqlHttpStore');
     }
-    assertQuadLiteralsMutf8Safe(quads, {
-      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
-      label: 'SparqlHttpStore.replaceGraph',
-    });
-    const plan = buildAtomicGraphReplaceUpdate(graphUri, quads);
-    statements.checkIris.replaceGraph(graphUri, quads);
+    const plan = prepareAtomicGraphReplace('sparql-http', graphUri, quads);
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri] },
       update: plan.update,
@@ -863,6 +860,14 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
         }
         : undefined,
     });
+  }
+
+  async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
+    if (!this.supportsConsistency('atomic-update')) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'SparqlHttpStore');
+    const plan = buildAtomicAssetGroupUpdate(assets);
+    statements.checkIris.replaceAssetGroup(assets);
+    await this.runRemoteGraphMutation({ scope: { kind: 'graphs', graphs: plan.graphs },
+      update: plan.update, options: options ?? {}, operation: 'replaceAssetGroup' });
   }
 
   async replaceGraphAndSubject(
@@ -879,23 +884,8 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
         'SparqlHttpStore',
       );
     }
-    assertQuadLiteralsMutf8Safe([...graphQuads, ...metadataQuads], {
-      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
-      label: 'SparqlHttpStore.replaceGraphAndSubject',
-    });
-    const plan = buildAtomicGraphAndSubjectReplaceUpdate(
-      graphUri,
-      graphQuads,
-      metaGraphUri,
-      metadataSubject,
-      metadataQuads,
-    );
-    statements.checkIris.replaceGraphAndSubject(
-      graphUri,
-      graphQuads,
-      metaGraphUri,
-      metadataSubject,
-      metadataQuads,
+    const plan = prepareAtomicGraphAndSubjectReplace(
+      'sparql-http', graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads,
     );
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri, metaGraphUri] },
@@ -922,17 +912,33 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       // any request so callers take their non-atomic delete-then-insert fallback.
       throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'SparqlHttpStore');
     }
-    assertQuadLiteralsMutf8Safe(quads, {
-      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
-      label: 'SparqlHttpStore.replaceSubject',
-    });
-    const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
-    statements.checkIris.replaceSubject(graphUri, subject, quads);
+    const update = prepareAtomicSubjectReplace('sparql-http', graphUri, subject, quads);
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri] },
       update,
       options: { ...options, source: options?.source ?? 'sparql-http.replaceSubject' },
       operation: 'replaceSubject',
+    });
+  }
+
+  async replaceSubjectAndInsert(
+    graphUri: string,
+    subject: string,
+    replacementQuads: DKGQuad[],
+    insertQuads: DKGQuad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (!this.supportsConsistency('atomic-update')) {
+      throw new UnsupportedTripleStoreCapabilityError('replaceSubjectAndInsert', 'SparqlHttpStore');
+    }
+    const update = prepareAtomicSubjectAndInsert(
+      'sparql-http', graphUri, subject, replacementQuads, insertQuads,
+    );
+    await this.runRemoteGraphMutation({
+      scope: { kind: 'graphs', graphs: [graphUri] },
+      update,
+      options: { ...options, source: options?.source ?? 'sparql-http.replaceSubjectAndInsert' },
+      operation: 'replaceSubjectAndInsert',
     });
   }
 
@@ -1052,6 +1058,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
   }
 
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {
+    refuseWithheldGraphQuery(options, 'SparqlHttpStore');
     return this.queryWithOperation(sparql, options);
   }
 
@@ -1068,7 +1075,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     const isConstruct = operation.kind === 'read'
       && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE');
     const canonicalOperation = storeOperation ?? (isConstruct ? 'construct' : 'query');
-    return this.runStoreWork(canonicalOperation, options, async (lifecycleSignal, work) => {
+    const result = this.runStoreWork(canonicalOperation, options, async (lifecycleSignal, work) => {
       const effectiveOptions: SparqlHttpQueryOptions = {
         ...options,
         signal: lifecycleSignal,
@@ -1091,30 +1098,18 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
           );
         }
 
+        const mode = isAsk ? 'ask-json' : this.managedOxigraph ? 'select-tsv' : 'select-json';
         return await this.postQuery(
           trimmed,
-          'application/sparql-results+json',
+          sparqlQueryResponseAccept(mode),
           'query',
           canonicalOperation,
           effectiveOptions,
-          async (res) => {
-            if (!res.ok) {
-              const text = await readSparqlResponseText(res, {
-                maxResponseBytes: effectiveOptions.maxResponseBytes,
-                managedOxigraph: this.managedOxigraph,
-                operation: canonicalOperation,
-                tolerateReadFailure: true,
-              });
-              throw new SparqlHttpResponseError('query', res.status, text.slice(0, 300));
-            }
-
-            const text = await readSparqlResponseText(res, {
-              maxResponseBytes: effectiveOptions.maxResponseBytes,
-              managedOxigraph: this.managedOxigraph,
-              operation: canonicalOperation,
-            });
-            return decodeSparqlJsonQueryResult(text, isAsk ? 'ask' : 'select');
-          },
+          (res) => decodeSparqlHttpQueryResponse(res, {
+            mode, operation: canonicalOperation,
+            maxResponseBytes: effectiveOptions.maxResponseBytes,
+            managedOxigraph: this.managedOxigraph,
+          }),
           readPolicy,
         );
       } finally {
@@ -1125,6 +1120,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
         });
       }
     });
+    return operation.kind === 'read' && (storeOperation === undefined || isReadOnlyStoreOperation(storeOperation)) ? classifyStoreReadTransport(result) : result;
   }
 
   private async queryConstruct(
@@ -1205,7 +1201,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     return r.type === 'bindings'
       ? r.bindings
           .map((b) => b.g)
-          .filter((graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph))
+          .filter(this.graphEnumerationVisibility)
       : [];
   }
 
@@ -1346,23 +1342,6 @@ function resolveConsistencyProfile(
     );
   }
   return profile;
-}
-
-function normalizeNonNegativeNumber(value: number | undefined, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0
-    ? value
-    : fallback;
-}
-
-function normalizeSampleRate(value: number | undefined, fallback: number): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
-  return Math.min(1, Math.max(0, value));
-}
-
-function normalizeQuerySource(source: string | undefined): string {
-  const trimmed = source?.trim();
-  if (!trimmed) return 'unknown';
-  return trimmed.replace(/[^\w:./-]/g, '_').slice(0, 120) || 'unknown';
 }
 
 function inferQueryOperation(sparql: string): SparqlHttpSlowQueryEvent['operation'] {

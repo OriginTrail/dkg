@@ -493,7 +493,7 @@ describe('async-lift reconciliation demand channel', () => {
   });
 
   it('runs exactly one queue inventory per reconcile pass across all three lanes', async () => {
-    // r3-1 follow-up (branarakic 3873026014) — the lanes share one list() snapshot; per-tick
+    // r3-1 follow-up (branarakic 3873026014) — the lanes share one recovery-state snapshot; per-tick
     // inventory cost must not scale with the number of lanes.
     const publisher = createPublisher({
       chainProofResolver: async () => ({ status: 'pending-mempool' }),
@@ -507,11 +507,14 @@ describe('async-lift reconciliation demand channel', () => {
       broadcast: { txHash: KA_VM_EXECUTOR_TX_HASH, walletId: 'wallet-1', operationKind: 'create' },
     });
 
-    const listSpy = vi.spyOn(publisher, 'list');
+    const querySpy = vi.spyOn(store, 'query');
     const outcome = await publisher.reconciliationScheduling.reconcile();
     expect(outcome).toEqual({ reconciled: 0, pendingWork: true });
-    expect(listSpy).toHaveBeenCalledTimes(1);
-    listSpy.mockRestore();
+    expect(querySpy.mock.calls.filter(([, options]) =>
+      options?.source === 'publisher.asyncLift.reconciliationInventory',
+    )).toHaveLength(1);
+    expect(querySpy.mock.calls.some(([, options]) => options?.source === 'publisher.asyncLift.list')).toBe(false);
+    querySpy.mockRestore();
   });
 
   it('suppresses pending work and reconciliation while processNext still owns a live broadcast', async () => {

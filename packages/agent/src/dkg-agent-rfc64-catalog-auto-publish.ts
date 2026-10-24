@@ -1,3 +1,8 @@
+import type { AfterDurableSwmPromotionParamsV1, ObserveRfc64DurableSwmPromotionParamsV1, ObserveRfc64ConfirmedVmParamsV1, ConfirmedInventoryRemovalOutcomeV1 } from './internal/promote/swm-handoff-types.js';
+export type { AfterDurableSwmPromotionParamsV1, ObserveRfc64DurableSwmPromotionParamsV1, ObserveRfc64ConfirmedVmParamsV1, ConfirmedInventoryRemovalOutcomeV1, BoundDurableSwmPromotionParamsV1 } from './internal/promote/swm-handoff-types.js';
+import { repairConfirmedPlacement } from './internal/confirmed-placement-repair.js';
+import { requireInventoryRemovalLane, SwmInventoryWriteFailure, type SwmInventoryWriteOutcome } from './internal/swm-inventory-write.js';
+import { finishDurableShare } from './internal/promote/durable-share-inventory.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -10,7 +15,6 @@
 import {
   assertAssertionCoordinateV1,
   assertContextGraphIdV1,
-  assertSubGraphNameV1,
   assertSwmAuthorInventoryShareOperationIdV1,
   canonicalGraphScopedAuthorSealFromAssertionSealV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
@@ -30,25 +34,23 @@ import {
   type CountV1,
   type Digest32V1,
   type EvmAddressV1,
-  type OperationContext,
   type SubGraphNameV1,
   type SwmAuthorInventoryRowV1,
   type SwmAuthorInventoryScopeV1,
   type SwmAuthorInventorySnapshotV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, isStoreOperationNotStarted, isStoreSchedulerBusyError, type Quad } from '@origintrail-official/dkg-storage';
 import {
   verifyControlEnvelopeIssuerSignatureV1,
-  withOwnedRpcRequestContext,
 } from '@origintrail-official/dkg-chain';
 import {
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
   resolveKnowledgeAssetOperationPublicQuads,
   resolvePublishedKnowledgeAssetWorkspaceHead,
-  runPromoteCommittedFinalization,
   workspaceHeadIncludesShareOperationId,
 } from '@origintrail-official/dkg-publisher';
+import { observeDurableSwmPromotionV1 } from './internal/durable-swm-promotion-observer.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
@@ -77,14 +79,13 @@ import {
 import { resolveDurableGraphScopedAuthorSealCandidateV1 } from
   './durable-author-seal-resolver-v1.js';
 import { throwIfRfc64AbortedV1 as throwIfAbortedV1 } from './rfc64/abort-v1.js';
-import { rfc64SwmInventorySettlementCanConvergeV1 } from './rfc64/swm-inventory-settlement-outlook-v1.js';
 import {
-  snapshotRfc64FinalizedPrivatePlacementRepairV1,
   type Rfc64FinalizedPrivatePlacementRepairV1,
 } from './rfc64/finalized-private-placement-repair-store-v1.js';
 import { loadExactAppliedCatalogRowsV1 } from
   './rfc64/applied-catalog-authority-transition-v1.js';
-import { catalogPlacementTimingV1, type CatalogPlacementAttemptV1 } from './internal/catalog-placement-timing.js';
+import type { CatalogPlacementAttemptV1 } from './internal/catalog-placement-timing.js';
+import { transferConfirmedVmCatalogV1, observeConfirmedVmTransfer, ConfirmedVmOwnershipFailure, type ConfirmedVmOwnershipOutcome } from './internal/confirmed-vm-catalog-observer.js';
 
 export type {
   Rfc64SwmAuthorInventoryShadowMutationResultV1,
@@ -191,28 +192,6 @@ export interface RemoveRfc64SwmAuthorInventoryShadowParamsV1 {
   readonly contextGraphId: string;
   readonly subGraphName?: string | null;
   readonly seal: AssertionSeal;
-}
-
-export interface ObserveRfc64DurableSwmPromotionParamsV1
-  extends RecordRfc64SwmAuthorInventoryShadowParamsV1 {
-  readonly ctx: OperationContext;
-}
-
-export interface AfterDurableSwmPromotionParamsV1
-  extends Omit<RecordRfc64SwmAuthorInventoryShadowParamsV1, 'shareOperationId'> {
-  readonly shareOperationId: string | null;
-  readonly ctx: OperationContext;
-}
-
-export interface ObserveRfc64ConfirmedVmParamsV1 {
-  readonly contextGraphId: string;
-  readonly subGraphName?: string | null;
-  readonly assertionCoordinate: string;
-  readonly shareOperationId?: string;
-  readonly seal: AssertionSeal;
-  readonly assertionUri: string;
-  readonly ctx: OperationContext;
-  readonly publicationLabel: 'publish' | 'queued publish';
 }
 
 export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
@@ -596,30 +575,18 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
    * boundary: a storage failure proven never to have started keeps its raw type
    * (the queue retries it directly), anything else becomes a post-commit
    * failure, and a replay of the same committed operation repairs both. The
-   * RFC-64 shadow observer is scheduled regardless and sits OUTSIDE that
-   * boundary: it is admitted to a bounded detached scheduler that cannot throw,
-   * so it cannot delay an already-committed user operation, and it does not
-   * depend on the pointer.
+   * Bound synchronous jobs await the authorized inventory CAS under the asset
+   * write lock before completion. Other callers retain the detached RFC-64
+   * shadow observer, scheduled even when the pointer stamp fails.
    */
   async afterDurableSwmPromotionV1(
     this: DKGAgent,
     params: AfterDurableSwmPromotionParamsV1,
   ): Promise<void> {
-    try {
-      await runPromoteCommittedFinalization(() => this._stampSwmPointer(
-        params.contextGraphId,
-        params.assertionCoordinate,
-        params.lifecycleAgentAddress,
-        params.subGraphName ?? undefined,
-      ));
-    } finally {
-      if (params.shareOperationId !== null) {
-        this.scheduleRfc64SwmInventoryObserverV1({
-          ...params,
-          shareOperationId: params.shareOperationId,
-        });
-      }
-    }
+    await finishDurableShare(this, params, () => this._stampSwmPointer(
+      params.contextGraphId, params.assertionCoordinate, params.lifecycleAgentAddress,
+      params.subGraphName ?? undefined,
+    ), (observation) => this.scheduleRfc64SwmInventoryObserverV1(observation));
   }
 
   /**
@@ -636,104 +603,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: ObserveRfc64DurableSwmPromotionParamsV1,
   ): Promise<void> {
-    const observerRuntime = rfc64SwmInventoryShadowRuntimeV1(this);
-    const observerSignal = observerRuntime.shutdownSignal;
-    return withOwnedRpcRequestContext({
-      requestClass: 'background',
-      signal: observerSignal,
-    }, async () => {
-      const shutdownSignal = observerSignal;
-      try {
-        if (shutdownSignal.aborted) return;
-        let result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
-        let lastResponsibilityFailure: unknown = null;
-        for (const delayMs of observerRuntime.responsibilitySettlementRetryDelaysMs) {
-          if (result.status !== 'dormant' || (
-            result.dormantReason !== 'inactive-lane'
-            && result.dormantReason !== 'authority-transition'
-          )) break;
-          if (shutdownSignal.aborted) return;
-          // Registered-chain conditions outlast this window; the refresh owner retries them.
-          if (!rfc64SwmInventorySettlementCanConvergeV1(
-            this.rfc64CatalogAuthorityRefreshFailureReasonV1(params.contextGraphId),
-          )) break;
-          // A durable promotion can race the asynchronous default-responsibility
-          // and authority transition for a newly created CG. Refresh and retry
-          // that normal lifecycle boundary for a bounded settlement window before
-          // classifying the row as deliberately unselected. The durable workspace
-          // and VM-confirmation fence are re-read by every retry, so this cannot
-          // resurrect a finalized public row.
-          let responsibility: Awaited<ReturnType<
-            DKGAgent['reconcileRfc64CatalogResponsibilityV1']
-          >>;
-          try {
-            responsibility = await this.reconcileRfc64CatalogResponsibilityV1(
-              params.contextGraphId,
-            );
-            lastResponsibilityFailure = null;
-          } catch (cause) {
-            lastResponsibilityFailure = cause;
-            if (shutdownSignal.aborted) return;
-            if (!await observerRuntime.waitForResponsibilitySettlement(
-              delayMs,
-              shutdownSignal,
-            )) return;
-            continue;
-          }
-          if (responsibility.mode === 'legacy' || (
-            result.dormantReason === 'inactive-lane'
-            && (responsibility.selectionSource !== 'default'
-              || responsibility.mode !== 'catalog')
-          )) {
-            break;
-          }
-          if (!await observerRuntime.waitForResponsibilitySettlement(
-            delayMs,
-            shutdownSignal,
-          )) return;
-          result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
-        }
-        if (
-          result.status === 'dormant'
-          && (result.dormantReason === 'inactive-lane'
-            || result.dormantReason === 'authority-transition')
-          && lastResponsibilityFailure !== null
-        ) {
-          throw lastResponsibilityFailure;
-        }
-        if (result.status === 'dormant'
-          && result.dormantReason === 'authority-transition') {
-          this.log.warn(
-            params.ctx,
-            'RFC-64 SWM inventory authority did not settle after bounded post-commit retries',
-          );
-        }
-        if (result.status === 'applied' || result.status === 'existing') {
-          const projection = {
-            contextGraphId: params.contextGraphId as ContextGraphIdV1,
-            authorAddress: params.lifecycleAgentAddress.toLowerCase() as EvmAddressV1,
-            ctx: params.ctx,
-          } as const;
-          if (!this.requestRfc64SwmCatalogProjectionV1(projection)) {
-            // The authority can turn over between the durable inventory CAS and
-            // projection admission. Reconcile once and retry the exact scope;
-            // ordinary supervisor backoff owns any later transient failure.
-            const responsibility = await this.reconcileRfc64CatalogResponsibilityV1(
-              params.contextGraphId,
-            );
-            if (responsibility.active && responsibility.mode !== 'legacy') {
-              this.requestRfc64SwmCatalogProjectionV1(projection);
-            }
-          }
-        }
-      } catch (cause) {
-        if (shutdownSignal.aborted) return;
-        this.log.warn(
-          params.ctx,
-          `RFC-64 SWM inventory/catalog lifecycle escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`,
-        );
-      }
-    });
+    await observeDurableSwmPromotionV1(this, params, (message) => this.log.warn(params.ctx, message));
   }
 
   /** Await a point-in-time observer snapshot for tests and controlled drains. */
@@ -760,128 +630,45 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: ObserveRfc64DurableSwmPromotionParamsV1,
   ): void {
-    rfc64SwmInventoryShadowRuntimeV1(this).scheduleInventoryWrite({
+    rfc64SwmInventoryShadowRuntimeV1(this).scheduleInventoryObservation({
       contextGraphId: params.contextGraphId,
       subGraphName: params.subGraphName,
       authorAddress: params.lifecycleAgentAddress,
       assertionCoordinate: params.assertionCoordinate,
-    }, () => this.observeRfc64DurableSwmPromotionV1(params));
+    }, params.shareOperationId, () => observeDurableSwmPromotionV1(this, params, (message) => this.log.warn(params.ctx, message)), (reason) => {
+      this.log.warn(params.ctx, `RFC-64 SWM inventory preparation-read retries exhausted (${reason}): ${params.contextGraphId} ${params.assertionCoordinate} ${params.shareOperationId}`);
+    });
   }
 
-  /**
-   * Canonical post-confirmation observer. A public SWM-only lane retracts the
-   * pending row, and the publication waits for that. A finalized private lane
-   * keeps its tier-neutral row, stores the durable marker of its now-chain-backed
-   * placement and asks the catalog supervisor for it: the publication waits
-   * for that one write, never for a placement attempt or the start of one.
-   */
-  async observeRfc64ConfirmedVmV1(
-    this: DKGAgent,
-    params: ObserveRfc64ConfirmedVmParamsV1,
-  ): Promise<void> {
-    const subGraphName = params.subGraphName ?? null;
-    const contextGraphId = params.contextGraphId;
-    const assertionCoordinate = params.assertionCoordinate;
-    let confirmedSeal: ReturnType<typeof canonicalGraphScopedAuthorSealFromAssertionSealV1>;
+  /** Legacy best-effort observer around the throwing ownership transfer. */
+  async observeRfc64ConfirmedVmV1(this: DKGAgent, params: ObserveRfc64ConfirmedVmParamsV1): Promise<boolean> {
+    return observeConfirmedVmTransfer(this.log, params, () => this.transferRfc64ConfirmedVmV1(params));
+  }
+
+  async transferRfc64ConfirmedVmV1(this: DKGAgent, params: ObserveRfc64ConfirmedVmParamsV1): Promise<ConfirmedVmOwnershipOutcome> {
+    let lane: ReturnType<DKGAgent['resolveRfc64CatalogAuthoringLaneV1']>;
     try {
-      assertContextGraphIdV1(contextGraphId, 'confirmed publish contextGraphId');
-      assertAssertionCoordinateV1(
-        assertionCoordinate,
-        'confirmed publish assertionCoordinate',
-      );
-      if (subGraphName !== null) {
-        assertSubGraphNameV1(subGraphName, 'confirmed publish subGraphName');
+      lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, params.subGraphName);
+    } catch (cause) { throw new ConfirmedVmOwnershipFailure('authority', cause); }
+    if (lane === null) return 'inactive';
+    if (params.expectedWorkspaceAccessPolicy !== undefined) {
+      if (!rfc64CatalogLaneAcceptsWorkspaceHeadV1(lane, params.expectedWorkspaceAccessPolicy)) {
+        throw Object.assign(new Error('Confirmed share catalog policy differs from its binding'), { code: 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT' });
       }
-      confirmedSeal = canonicalGraphScopedAuthorSealFromAssertionSealV1(params.seal);
-    } catch (cause) {
-      this.log.warn(
-        params.ctx,
-        `Confirmed ${params.publicationLabel} for <${params.assertionUri}> but RFC-64 post-confirmation observer input was invalid: ${cause instanceof Error ? cause.message : String(cause)}`,
-      );
-      return;
+      if (lane.kind === 'private' && !lane.acceptsFinalizedVmRepair) return 'pending';
     }
-    const placementWait = catalogPlacementTimingV1(this).beginWait(confirmedSeal, params.ctx);
-    const shadowRuntime = rfc64SwmInventoryShadowRuntimeV1(this);
-    const assetKey = rfc64SwmInventoryAssetKeyV1({
-      contextGraphId,
-      subGraphName,
-      authorAddress: confirmedSeal.authorAddress,
-      assertionCoordinate,
-    });
-    let finalizedPrivateInventoryScope: SwmAuthorInventoryScopeV1 | null = null;
-    try {
-      const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, subGraphName);
-      if (lane?.acceptsFinalizedVmRepair === true) {
-        finalizedPrivateInventoryScope = Object.freeze({
-          ...lane.scopeBase,
-          authorAddress: confirmedSeal.authorAddress,
-        }) as SwmAuthorInventoryScopeV1;
-      }
-    } catch (cause) {
-      this.log.warn(
-        params.ctx,
-        `Confirmed ${params.publicationLabel} but RFC-64 catalog authority was unavailable: ${cause instanceof Error ? cause.message : String(cause)}`,
-      );
-      return;
-    }
-    // Fence every confirmed version, including confirmation-gated finalized
-    // private repairs, until the asset-tail repair and queued observers drain.
-    // Newer assertion versions use distinct fence entries and remain eligible.
-    // The fence is set before the first await and outlives this call.
-    if (params.shareOperationId !== undefined) {
-      shadowRuntime.markVmConfirmed(
-        assetKey,
-        confirmedSeal.assertionVersion,
-        params.shareOperationId,
-      );
-    }
-    let markerStored = false;
-    try {
-      if (finalizedPrivateInventoryScope !== null) {
-        const persistence = this.rfc64PersistenceV1;
-        if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
-        const repair = snapshotRfc64FinalizedPrivatePlacementRepairV1({
-          version: 1,
-          contextGraphId: contextGraphId as ContextGraphIdV1,
-          authorAddress: confirmedSeal.authorAddress,
-          inventoryScope: finalizedPrivateInventoryScope,
-          assertionCoordinate,
-          assertionVersion: confirmedSeal.assertionVersion,
-          kaUal: confirmedSeal.kaUal,
-          sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(confirmedSeal),
-        });
-        // GH#3081 — the terminal boundary of a confirmed private publication.
-        // This durable marker is the restart boundary: pre-confirmation rows
-        // have none, while every post-confirmation placement survives a crash
-        // or transient signing/catalog failure. The supervisor alone owns the
-        // attempt, its retries and its drain: nothing here waits for it, or
-        // queues on the asset tail that a running placement holds.
-        await persistence.finalizedPrivatePlacementRepairs.put(repair);
-        markerStored = true;
-        placementWait.requested();
-        const request = this.requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair, seal: confirmedSeal, ctx: params.ctx }, placementWait.observer);
-        if (!request.accepted) this.log.warn(params.ctx, `Confirmed ${params.publicationLabel} for <${params.assertionUri}>: the RFC-64 catalog supervisor did not accept its placement now; the durable marker stays for its next pass or start`);
-      } else {
-        const write = { contextGraphId, subGraphName, authorAddress: confirmedSeal.authorAddress, assertionCoordinate };
-        await shadowRuntime.runInventoryWriteExclusive(write, async () => {
-          const result = await this.removeRfc64SwmAuthorInventoryShadowV1({ contextGraphId, subGraphName, seal: params.seal });
-          if (result.status === 'applied' || result.status === 'absent') {
-            this.requestRfc64SwmCatalogProjectionV1({
-              contextGraphId: contextGraphId as ContextGraphIdV1,
-              authorAddress: confirmedSeal.authorAddress,
-              ctx: params.ctx,
-            });
-          }
-        });
-      }
-    } catch (cause) {
-      placementWait.observer.released(); // A request that threw has no waiter to release it later.
-      const failed = finalizedPrivateInventoryScope === null ? 'SWM inventory shadow removal escaped its failure boundary'
-        : markerStored ? 'finalized-private placement could not be requested; its durable marker stays for the next pass or start'
-          : 'finalized-private placement was not recorded, so nothing owes it';
-      this.log.warn(params.ctx, `Confirmed ${params.publicationLabel} but RFC-64 ${failed}: ${cause instanceof Error ? cause.message : String(cause)}`);
-    }
-    placementWait.end(this.log);
+    return transferConfirmedVmCatalogV1({
+      owner: this,
+      log: this.log,
+      finalizedPrivateScopeBase: lane.acceptsFinalizedVmRepair ? lane.scopeBase : null,
+      storeRepair: async (repair) => {
+        if (this.rfc64PersistenceV1 === undefined) throw new Error('RFC-64 persistence is unavailable');
+        await this.rfc64PersistenceV1.finalizedPrivatePlacementRepairs.put(repair);
+      },
+      requestPlacement: (request, observer) => this.requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1(request, observer),
+      removeInventory: (request) => this.observeRfc64ConfirmedInventoryRemovalV1(request),
+      requestProjection: (request) => this.requestRfc64SwmCatalogProjectionV1(request),
+    }, params);
   }
 
   /** Idempotent durable repair body owned by the catalog supervisor, charged to the attempt it admitted. */
@@ -892,24 +679,8 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   ): Promise<'repaired' | 'already-complete'> {
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
-    const assetKey = rfc64SwmInventoryAssetKeyV1({
-      contextGraphId: repair.contextGraphId,
-      authorAddress: repair.authorAddress,
-      assertionCoordinate: repair.assertionCoordinate,
-    });
-    let outcome: 'repaired' | 'already-complete' | null = null;
-    await rfc64SwmInventoryShadowRuntimeV1(this).runExclusive(assetKey, async () => {
-      const applied = await this.publishRfc64FinalizedPrivateCatalogPlacementV1(repair, placement);
-      if (applied === null) {
-        await persistence.finalizedPrivatePlacementRepairs.delete(repair);
-        outcome = 'already-complete';
-        return;
-      }
-      await persistence.finalizedPrivatePlacementRepairs.delete(repair);
-      outcome = 'repaired';
-    });
-    if (outcome === null) throw new Error('RFC-64 finalized-private placement repair did not run');
-    return outcome;
+    return repairConfirmedPlacement(this, repair, persistence.finalizedPrivatePlacementRepairs,
+      () => this.publishRfc64FinalizedPrivateCatalogPlacementV1(repair, placement));
   }
 
   readRfc64SwmAuthorInventorySnapshotV1(
@@ -1065,137 +836,118 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     });
   }
 
-  /**
-   * Observe an already-durable WM→SWM commit without participating in its outcome.
-   * Unsupported/unselected graphs are dormant; every attempted failure is
-   * counted and logged, then returned instead of crossing back into the user write.
-   */
-  async recordRfc64SwmAuthorInventoryShadowV1(
-    this: DKGAgent,
-    params: RecordRfc64SwmAuthorInventoryShadowParamsV1,
-  ): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
+  /** Prepare and commit inventory with scope fencing; throws without suppressing failures. */
+  async commitRfc64SwmAuthorInventoryV1(
+    this: DKGAgent, params: RecordRfc64SwmAuthorInventoryShadowParamsV1,
+  ): Promise<SwmInventoryWriteOutcome> {
     let kaUal: string | null = null;
+    let phase: SwmInventoryWriteFailure['phase'] = 'authority';
+    const dormant = (dormantReason: Extract<SwmInventoryWriteOutcome, { status: 'dormant' }>['dormantReason']): SwmInventoryWriteOutcome =>
+      ({ status: 'dormant', dormantReason, attempts: 0, headObjectDigest: null, kaUal });
     try {
-      if (this.resolveRfc64CatalogAuthoringLaneV1(
-        params.contextGraphId,
-        params.subGraphName,
-      ) === null) {
-        return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
-          shadowResult('dormant', 'upsert', 0, null, null, 'inactive-lane'),
-          params.contextGraphId,
-          null,
-        );
-      }
-      const prepared = await this.prepareRfc64SwmAuthorInventoryRowV1(
-        params,
-        { allowTerminalStale: false },
-      );
-      if (prepared.status === 'stale') {
-        const dormantReason = prepared.reason === 'policy-mismatch'
-          ? 'policy-mismatch'
-          : 'vm-confirmed';
-        return shadowResult('dormant', 'upsert', 0, null, null, dormantReason);
-      }
+      if (this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, params.subGraphName) === null) return dormant('inactive-lane');
+      phase = 'preparation-read';
+      const prepared = await this.prepareRfc64SwmAuthorInventoryRowV1(params, { allowTerminalStale: false });
+      if (prepared.status === 'stale') return dormant(prepared.reason === 'policy-mismatch' ? 'policy-mismatch' : 'vm-confirmed');
       kaUal = prepared.row.kaUal;
+      phase = 'authority';
       const persistence = this.rfc64PersistenceV1;
       if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
       const signer = this.createRfc64CatalogAuthorSignerV1(prepared.scope.authorAddress);
       const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(prepared.scope);
       const maintained = await rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
-        `${inventoryScopeDigest}\n${prepared.scope.authorAddress}`,
-        async () => {
-          // Authority may advance while workspace/seal evidence is loading.
-          // Re-resolve it under the exact source-scope lock so no old-generation
-          // writer can commit after promotion has taken its stable snapshot.
-          const currentLane = this.resolveRfc64CatalogAuthoringLaneV1(
-            params.contextGraphId,
-            params.subGraphName,
-          );
-          if (
-            currentLane === null
-            || currentLane.kind !== prepared.laneKind
-          ) throw new Rfc64SwmInventoryAuthorityTransitionV1();
-          const currentScope = Object.freeze({
-            ...currentLane.scopeBase,
-            authorAddress: prepared.scope.authorAddress,
-          }) as SwmAuthorInventoryScopeV1;
-          if (
-            computeSwmAuthorInventoryScopeDigestV1(currentScope)
-            !== inventoryScopeDigest
-          ) throw new Rfc64SwmInventoryAuthorityTransitionV1();
-          return maintainRfc64SwmAuthorInventoryV1(
-            persistence.swmAuthorInventory,
-            {
-              scope: currentScope,
-              row: prepared.row,
-              issuedAt: prepared.issuedAt,
-              signer: Object.freeze({
-                issuer: signer.address as EvmAddressV1,
-                signDigest: signer.signMessage,
-              }),
-            },
-          );
-        },
-      );
-      return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
-        shadowResult(
-          maintained.status,
-          'upsert',
-          maintained.attempts,
-          maintained.snapshot.head.objectDigest,
-          null,
-        ),
-        params.contextGraphId,
-        kaUal,
-      );
+        `${inventoryScopeDigest}\n${prepared.scope.authorAddress}`, async () => {
+          // Recheck authority under the source-scope lock, before the CAS phase.
+          const currentLane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, params.subGraphName);
+          if (currentLane === null || currentLane.kind !== prepared.laneKind) throw new Rfc64SwmInventoryAuthorityTransitionV1();
+          const currentScope = Object.freeze({ ...currentLane.scopeBase, authorAddress: prepared.scope.authorAddress }) as SwmAuthorInventoryScopeV1;
+          if (computeSwmAuthorInventoryScopeDigestV1(currentScope) !== inventoryScopeDigest) throw new Rfc64SwmInventoryAuthorityTransitionV1();
+          phase = 'inventory-maintenance';
+          return maintainRfc64SwmAuthorInventoryV1(persistence.swmAuthorInventory, {
+            scope: currentScope, row: prepared.row, issuedAt: prepared.issuedAt,
+            signer: Object.freeze({ issuer: signer.address as EvmAddressV1, signDigest: signer.signMessage }),
+          });
+        });
+      return { status: maintained.status, attempts: maintained.attempts,
+        headObjectDigest: maintained.snapshot.head.objectDigest, kaUal };
     } catch (cause) {
-      if (cause instanceof Rfc64SwmInventoryAuthorityTransitionV1) {
-        return shadowResult('dormant', 'upsert', 0, null, null, 'authority-transition');
-      }
-      return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
-        this.failRfc64SwmAuthorInventoryShadowV1('upsert', cause),
-        params.contextGraphId,
-        kaUal,
-      );
+      if (cause instanceof Rfc64SwmInventoryAuthorityTransitionV1) return dormant('authority-transition');
+      throw new SwmInventoryWriteFailure(phase, kaUal, cause);
     }
   }
 
-  /** Remove one pending SWM-inventory row after its lane-specific confirmation work. */
-  async removeRfc64SwmAuthorInventoryShadowV1(
-    this: DKGAgent,
-    params: RemoveRfc64SwmAuthorInventoryShadowParamsV1,
+  /** Best-effort observation wraps the throwing domain write; never owns share completion. */
+  async recordRfc64SwmAuthorInventoryShadowV1(
+    this: DKGAgent, params: RecordRfc64SwmAuthorInventoryShadowParamsV1,
   ): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
-    let row: Readonly<{ scope: SwmAuthorInventoryScopeV1; expectedRow: Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 }>;
     try {
-      const lane = this.resolveRfc64CatalogAuthoringLaneV1(
-        params.contextGraphId,
-        params.subGraphName,
-      );
-      if (lane === null) {
-        return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
-          shadowResult('dormant', 'remove', 0, null, null, 'inactive-lane'),
-          params.contextGraphId,
-          null,
-        );
-      }
+      const result = await this.commitRfc64SwmAuthorInventoryV1(params);
+      return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
+        shadowResult(result.status, 'upsert', result.attempts, result.headObjectDigest, null, result.dormantReason),
+        params.contextGraphId, result.kaUal);
+    } catch (error) {
+      const cause = error instanceof SwmInventoryWriteFailure ? error.cause : error;
+      const failed = this.failRfc64SwmAuthorInventoryShadowV1('upsert', cause);
+      const preparationRejected = error instanceof SwmInventoryWriteFailure && error.phase === 'preparation-read'
+        && isStoreSchedulerBusyError(cause) && isStoreOperationNotStarted(cause, 'query');
+      return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
+        preparationRejected ? { ...failed, status: 'failed', action: 'upsert', failurePhase: 'preparation-read' } : failed,
+        params.contextGraphId, error instanceof SwmInventoryWriteFailure ? error.kaUal : null);
+    }
+  }
+
+  /** Throwing removal boundary used by durable confirmation ownership. */
+  async commitRfc64ConfirmedInventoryRemovalV1(this: DKGAgent, params: RemoveRfc64SwmAuthorInventoryShadowParamsV1): Promise<ConfirmedInventoryRemovalOutcomeV1> {
+    let phase: SwmInventoryWriteFailure['phase'] = 'authority';
+    try {
+      const lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, params.subGraphName);
+      if (lane === null) return { status: 'inactive' };
+      phase = 'preparation-read';
       assertContextGraphIdV1(params.contextGraphId, 'SWM inventory contextGraphId');
       const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(params.seal);
-      row = Object.freeze({
-        scope: Object.freeze({ ...lane.scopeBase, authorAddress: seal.authorAddress }) as SwmAuthorInventoryScopeV1,
-        expectedRow: Object.freeze({
-          assertionVersion: seal.assertionVersion,
-          kaUal: seal.kaUal,
-          sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal),
-        }),
-      });
-    } catch (cause) {
-      return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
-        this.failRfc64SwmAuthorInventoryShadowV1('remove', cause),
-        params.contextGraphId,
-        null,
-      );
+      const scope = Object.freeze({ ...lane.scopeBase, authorAddress: seal.authorAddress }) as SwmAuthorInventoryScopeV1;
+      const expectedRow = Object.freeze({ assertionVersion: seal.assertionVersion, kaUal: seal.kaUal,
+        sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal) });
+      phase = 'inventory-maintenance';
+      return await this.removeRfc64SwmAuthorInventoryConfirmedRowV1({ scope, expectedRow });
+    } catch (cause) { throw new SwmInventoryWriteFailure(phase, params.seal.kaUal ?? null, cause); }
+  }
+
+  private async observeRfc64ConfirmedInventoryRemovalV1(this: DKGAgent, params: RemoveRfc64SwmAuthorInventoryShadowParamsV1): Promise<ConfirmedInventoryRemovalOutcomeV1> {
+    let outcome: ConfirmedInventoryRemovalOutcomeV1;
+    try { outcome = await this.commitRfc64ConfirmedInventoryRemovalV1(params); }
+    catch (cause) {
+      this.observeRfc64RemovalAccountingV1(() => this.recordRfc64SwmAuthorInventoryShadowStatsV1(
+        this.failRfc64SwmAuthorInventoryShadowV1('remove', cause instanceof SwmInventoryWriteFailure ? cause.cause : cause),
+        params.contextGraphId, params.seal.kaUal ?? null));
+      throw cause;
     }
-    return this.removeRfc64SwmAuthorInventoryRowV1({ contextGraphId: params.contextGraphId, ...row });
+    this.observeRfc64RemovalAccountingV1(() => this.recordRfc64ConfirmedInventoryRemovalOutcomeV1(params, outcome));
+    return outcome;
+  }
+
+  private observeRfc64RemovalAccountingV1(this: DKGAgent, record: () => unknown): void {
+    try { record(); } catch (cause) {
+      this.log.warn(createOperationContext('publish'), `RFC-64 removal accounting failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  }
+
+  recordRfc64ConfirmedInventoryRemovalOutcomeV1(this: DKGAgent, params: RemoveRfc64SwmAuthorInventoryShadowParamsV1,
+    removed: ConfirmedInventoryRemovalOutcomeV1): Rfc64SwmAuthorInventoryShadowMutationResultV1 {
+    return this.recordRfc64SwmAuthorInventoryShadowStatsV1(removed.status === 'inactive'
+      ? shadowResult('dormant', 'remove', 0, null, null, 'inactive-lane')
+      : shadowResult(removed.status, 'remove', removed.attempts, removed.snapshot?.head.objectDigest ?? null, null),
+    params.contextGraphId, removed.status === 'inactive' ? null : params.seal.kaUal ?? null);
+  }
+
+  /** Best-effort observation retains the legacy result and failure counters. */
+  async removeRfc64SwmAuthorInventoryShadowV1(this: DKGAgent, params: RemoveRfc64SwmAuthorInventoryShadowParamsV1): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
+    try {
+      const removed = await this.commitRfc64ConfirmedInventoryRemovalV1(params);
+      return this.recordRfc64ConfirmedInventoryRemovalOutcomeV1(params, removed);
+    }
+    catch (cause) { return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
+      this.failRfc64SwmAuthorInventoryShadowV1('remove', cause instanceof SwmInventoryWriteFailure ? cause.cause : cause), params.contextGraphId, params.seal.kaUal ?? null); }
   }
 
   /**
@@ -1243,13 +995,9 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         // A VM confirmation may begin under owner authority and reach this
         // lock after registration. Never mutate that obsolete generation: the
         // promotion pass will observe the durable VM confirmation and omit it.
-        const currentLane = this.resolveRfc64CatalogAuthoringLaneV1(
-          params.scope.contextGraphId,
-          params.scope.subGraphName,
-        );
-        if (currentLane === null) {
-          throw new Error('RFC-64 SWM inventory authority changed before removal');
-        }
+        const currentLane = requireInventoryRemovalLane(this.resolveRfc64CatalogAuthoringLaneV1(
+          params.scope.contextGraphId, params.scope.subGraphName,
+        ), () => this.requiresRfc64ShareInventoryV1(params.scope.contextGraphId, params.scope.subGraphName ?? undefined));
         const currentScope = Object.freeze({
           ...currentLane.scopeBase,
           authorAddress: params.scope.authorAddress,

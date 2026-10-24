@@ -19,7 +19,11 @@
  * eight cores. The peer that served a scope's seed leads every later window
  * for that scope: the metadata bootstrap selects from the same windows, runs
  * once per activation or subscribe, and would otherwise be handed the window
- * after the one that reached the author.
+ * after the one that reached the author. The replica fetch itself does not
+ * wait for a retry to move the rotation on: one window keeps only a few slots
+ * for non-core peers, in peer-id order, so an author that sorts after them is
+ * missed on every first attempt. It asks the next windows of the rotation
+ * before it reports a miss, bounded in peers and by the fan-out budget.
  *
  * Provider side: serve the seed from the keyed store. The ontology system
  * graph is consulted only as a DEPRECATED backward-compat fallback for graphs
@@ -45,6 +49,7 @@ import { rememberBounded } from './bounded-map.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
+  RFC64_UNREGISTERED_AUTHORITY_FANOUT_TIMEOUT_MS_V1,
   RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1,
   RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1,
   authenticateRfc64UnregisteredAuthorityEnvelopeV1,
@@ -79,6 +84,12 @@ const BASE64URL_LITERAL_V1 = /^"([A-Za-z0-9_-]+)"(?:\^\^<[^>]+>)?$/u;
  * reach it.
  */
 export const RFC64_UNREGISTERED_AUTHORITY_RESERVED_NON_CORE_PEERS_V1 = 2;
+/**
+ * How many distinct peers one replica fetch may ask across the windows it
+ * takes. An edge has fewer connections than this, so its first attempt asks
+ * every connected peer; a node with more keeps rotating across attempts.
+ */
+export const RFC64_UNREGISTERED_AUTHORITY_FETCH_MAX_PEERS_V1 = 4 * RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1;
 /** Hard bound on remembered per-scope attempt counters; the oldest is evicted first. */
 const MAX_PEER_WINDOW_SCOPES_V1 = 1_024;
 
@@ -89,6 +100,16 @@ export interface Rfc64UnregisteredAuthoritySeedPeerSelectionOptionsV1 {
    * group's window; without it the selection is the deterministic first window.
    */
   readonly contextGraphId?: string;
+  /**
+   * A smaller window than {@link RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1}
+   * for a caller that asks fewer peers per attempt (the sub-graph lookup of a
+   * write, a Core's fetch of a hosted graph's definition). The selection owns
+   * the rotation, so successive attempts still tile every connected peer: a
+   * caller that cut the full window down itself would rotate twice and could
+   * skip peers for good. At least one slot stays with non-core peers while any
+   * are connected (the reserved count, or half the window when that is less).
+   */
+  readonly maxPeers?: number;
 }
 
 /** Per-agent, per-scope count of peer-window selections (rotation state). */
@@ -251,12 +272,16 @@ export class Rfc64SeedFetchMethods extends DKGAgentBase {
     const admitted = new Set([...connected].filter(
       (peerId) => coordinator === undefined || !coordinator.isRejectedPeer(peerId),
     ));
-    const cap = RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1;
+    const cap = options.maxPeers === undefined
+      ? RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1
+      : Math.max(1, Math.min(RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1, Math.floor(options.maxPeers)));
+    const reservedNonCores = Math.min(RFC64_UNREGISTERED_AUTHORITY_RESERVED_NON_CORE_PEERS_V1, Math.max(1, Math.floor(cap / 2)));
     const { contextGraphId } = options;
 
+    const attempt = contextGraphId === undefined ? 0 : nextPeerWindowAttempt(this, contextGraphId);
     // 1. Provider hint: pins the accepted policy manifest names for this graph
     //    are the peers most likely to hold the complete graph (and its `_meta`).
-    const selected: string[] = [];
+    const hints: string[] = [];
     if (contextGraphId !== undefined) {
       // Absent on partially wired agents (mixin-prototype tests); a real agent
       // always constructs the runtime before start.
@@ -265,24 +290,24 @@ export class Rfc64SeedFetchMethods extends DKGAgentBase {
         | undefined;
       const pinned = runtime?.resolveConfiguredCompleteProviderPeerIds(contextGraphId) ?? [];
       for (const providerPeerId of pinned) {
-        if (selected.length >= cap) break;
-        if (admitted.has(providerPeerId) && !selected.includes(providerPeerId)) {
-          selected.push(providerPeerId);
-        }
+        if (admitted.has(providerPeerId) && !hints.includes(providerPeerId)) hints.push(providerPeerId);
       }
     }
+    // 2. The peer that last served this scope's seed.
     const seedSource = contextGraphId === undefined
       ? undefined
       : rfc64SeedSourcePeersV1.get(this)?.get(contextGraphId);
-    if (
-      seedSource !== undefined
-      && selected.length < cap
-      && admitted.has(seedSource)
-      && !selected.includes(seedSource)
-    ) {
-      selected.push(seedSource);
+    if (seedSource !== undefined && admitted.has(seedSource) && !hints.includes(seedSource)) {
+      hints.push(seedSource);
     }
-    const hinted = new Set(selected);
+    // Hints lead the window. When they would fill it while other peers are
+    // connected, they leave one slot and rotate among themselves, so no
+    // connected peer stays out of reach of every attempt (a small window of a
+    // graph with several pinned providers would otherwise never move).
+    const hinted = new Set(hints);
+    const othersConnected = [...admitted].some((peerId) => !hinted.has(peerId));
+    const hintTake = hints.length >= cap && othersConnected ? cap - 1 : Math.min(hints.length, cap);
+    const selected: string[] = rotatedPeerWindow(hints, hintTake, attempt);
     const isCore = (peerId: string) => this.peerCapabilityRegistry?.supportsCore(peerId) === true;
     const cores: string[] = [];
     const nonCores: string[] = [];
@@ -297,14 +322,9 @@ export class Rfc64SeedFetchMethods extends DKGAgentBase {
     const remaining = cap - selected.length;
     let nonCoreTake = nonCores.length === 0
       ? 0
-      : Math.min(
-        nonCores.length,
-        RFC64_UNREGISTERED_AUTHORITY_RESERVED_NON_CORE_PEERS_V1,
-        remaining,
-      );
+      : Math.min(nonCores.length, reservedNonCores, remaining);
     const coreTake = Math.min(cores.length, remaining - nonCoreTake);
     nonCoreTake = Math.min(nonCores.length, remaining - coreTake);
-    const attempt = contextGraphId === undefined ? 0 : nextPeerWindowAttempt(this, contextGraphId);
     selected.push(
       ...rotatedPeerWindow(cores, coreTake, attempt),
       ...rotatedPeerWindow(nonCores, nonCoreTake, attempt),
@@ -318,6 +338,12 @@ export class Rfc64SeedFetchMethods extends DKGAgentBase {
    * before writing); acceptance stays inside reconcileRfc64CatalogAccessAuthorityV1.
    * Throws only on caller abort or a persistence failure; per-peer failures and
    * misses resolve to an outcome so callers can keep the initial denial.
+   *
+   * A window that serves no seed is not yet a miss: the next windows of the
+   * scope's rotation are asked, each peer once, until one serves the seed,
+   * every connected peer was asked, {@link RFC64_UNREGISTERED_AUTHORITY_FETCH_MAX_PEERS_V1}
+   * were asked, or the fan-out budget is spent (no window starts after it).
+   * The caller is a subscribe, and a miss refuses it.
    */
   async fetchRfc64UnregisteredAuthoritySeedFromPeersV1(
     this: DKGAgent,
@@ -331,31 +357,46 @@ export class Rfc64SeedFetchMethods extends DKGAgentBase {
     if (await this.readRfc64UnregisteredAuthoritySeedV1({ ...scope, signal }) !== null) {
       return 'already-present';
     }
-    const peerIds = this.resolveRfc64UnregisteredAuthoritySeedPeersV1({
-      contextGraphId: scope.contextGraphId,
-    });
-    if (peerIds.length === 0) return 'no-connected-peers';
 
-    const fetched = await service.fetchUnregisteredAuthorityFromPeers({
-      networkId: scope.networkId,
-      contextGraphId: scope.contextGraphId,
-      peerIds,
-      signal,
-    });
-    if (fetched === null) return 'not-found';
-    await this.persistVerifiedRfc64UnregisteredAuthoritySeedV1({
-      networkId: scope.networkId,
-      contextGraphId: scope.contextGraphId,
-      canonicalEnvelopeBytes: fetched.seed.canonicalBytes,
-      signal,
-    });
-    rememberSeedSourcePeer(this, scope.contextGraphId, fetched.remotePeerId);
-    this.log.info(
+    const asked = new Set<string>();
+    const startedAtMs = Date.now();
+    while (asked.size < RFC64_UNREGISTERED_AUTHORITY_FETCH_MAX_PEERS_V1) {
+      const peerIds = this.resolveRfc64UnregisteredAuthoritySeedPeersV1({
+        contextGraphId: scope.contextGraphId,
+      }).filter((peerId) => !asked.has(peerId))
+        .slice(0, RFC64_UNREGISTERED_AUTHORITY_FETCH_MAX_PEERS_V1 - asked.size);
+      if (peerIds.length === 0) break;
+      for (const peerId of peerIds) asked.add(peerId);
+
+      const fetched = await service.fetchUnregisteredAuthorityFromPeers({
+        networkId: scope.networkId,
+        contextGraphId: scope.contextGraphId,
+        peerIds,
+        signal,
+      });
+      if (fetched !== null) {
+        await this.persistVerifiedRfc64UnregisteredAuthoritySeedV1({
+          networkId: scope.networkId,
+          contextGraphId: scope.contextGraphId,
+          canonicalEnvelopeBytes: fetched.seed.canonicalBytes,
+          signal,
+        });
+        rememberSeedSourcePeer(this, scope.contextGraphId, fetched.remotePeerId);
+        this.log.info(
+          createOperationContext('system'),
+          `RFC-64 unregistered authority seed for ${contextGraphId} obtained from peer `
+          + `${fetched.remotePeerId} (policy ${fetched.seed.policyDigest})`,
+        );
+        return 'fetched';
+      }
+      if (Date.now() - startedAtMs >= RFC64_UNREGISTERED_AUTHORITY_FANOUT_TIMEOUT_MS_V1) break;
+    }
+    if (asked.size === 0) return 'no-connected-peers';
+    this.log.debug(
       createOperationContext('system'),
-      `RFC-64 unregistered authority seed for ${contextGraphId} obtained from peer `
-      + `${fetched.remotePeerId} (policy ${fetched.seed.policyDigest})`,
+      `RFC-64 unregistered authority seed for ${contextGraphId}: none of ${asked.size} connected peer(s) served it`,
     );
-    return 'fetched';
+    return 'not-found';
   }
 
   /**

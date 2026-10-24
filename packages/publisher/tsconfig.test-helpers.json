@@ -7,13 +7,16 @@
   },
   "include": [
     "src",
+    "test/_helpers/store-read-transport-types.ts",
     "test/_helpers/promote-failure-transition-types.ts",
     "test/_helpers/claim-fencing-types.ts",
     "test/_helpers/ack-peer-selection-types.ts",
+    "test/_helpers/ack-diagnostics-types.ts",
     "test/helpers/chain-event-lane-fixture.ts",
     "test/chain-event-lane-scheduler.test.ts",
     "test/chain-event-lane-cursor-persistence.test.ts",
     "test/chain-event-lane-head-bound.test.ts",
+    "test/chain-event-lane-lease-retry.test.ts",
     "../../scripts/testing/ka-vm-publish.ts",
     "test/_helpers/legacy-raw-lift.ts",
     "test/_helpers/publisher-inventory.ts",
@@ -25,11 +28,20 @@
     "test/_helpers/receipt-hint-scenario.ts",
     "test/_helpers/workspace-operation-equivalence-types.ts",
     "test/_helpers/workspace-snapshot-lifecycle-types.ts",
-    "test/_helpers/collection-update-callback-types.ts"
+    "test/_helpers/collection-update-callback-types.ts",
+    "test/_helpers/async-lift-execution-result-types.ts",
+    "test/_helpers/promote-admission-types.ts",
+    "test/_helpers/assertion-draft-recovery-types.ts"
   ],
   "references": [
-    { "path": "../core" },
-    { "path": "../storage" },
-    { "path": "../chain" }
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../storage"
+    },
+    {
+      "path": "../chain"
+    }
   ]
 }

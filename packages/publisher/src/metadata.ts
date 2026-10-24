@@ -1,3 +1,4 @@
+import { readStoredAssertionVersions } from './materialization-assertion-version.js';
 import { formatUncheckedWorkspaceOperationSubject } from './workspace-metadata-subjects.js';
 import { nextEventId } from './assertion-lifecycle-events.js';
 export { generateAssertionWrittenMetadata, type AssertionWrittenMeta } from './assertion-lifecycle-events.js';
@@ -1326,7 +1327,6 @@ const SKOLEM_INFIX = '/.well-known/genid/';
 // writes, and have every writer refuse to apply a state OLDER than what is
 // already materialised. This gives the projection the same ordering guarantee
 // the chain log already has, regardless of interleaving.
-const ASSERTION_VERSION_PRED = `${DKG}assertionVersion`;
 
 export interface MaterializedVersion {
   blockNumber: number;
@@ -1378,19 +1378,8 @@ export async function shouldApplyMaterialization(
   if (incomingAssertionVersion !== undefined) {
     assertSafeGraphIriForSparql(metaGraph);
     assertSafeGraphIriForSparql(ual);
-    const assertionVersions = await store.query(
-      `SELECT ?v WHERE { GRAPH <${metaGraph}> { <${ual}> <${ASSERTION_VERSION_PRED}> ?v } }`,
-      options,
-    );
-    if (assertionVersions.type === 'bindings') {
-      for (const row of assertionVersions.bindings) {
-        const raw = row.v;
-        const lexical = raw?.match(/^"([^"\\]*(?:\\.[^"\\]*)*)"(?:\^\^.*|@.*)?$/)?.[1] ?? raw;
-        if (lexical === undefined || !/^\d+$/.test(lexical)) {
-          throw new Error(`Invalid stored assertionVersion metadata for ${ual}: ${raw ?? '<missing>'}`);
-        }
-        if (BigInt(lexical) > incomingAssertionVersion) return false;
-      }
+    for (const version of await readStoredAssertionVersions(store, metaGraph, ual, options)) {
+      if (version > incomingAssertionVersion) return false;
     }
   }
   const current = await readMaterializedVersion(store, metaGraph, ual, options);

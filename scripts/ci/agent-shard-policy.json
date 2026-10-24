@@ -20,7 +20,7 @@
         { "report": "agent-7.xml", "reservedOverheadMs": 0 },
         { "report": "agent-8.xml", "reservedOverheadMs": 0 },
         { "report": "agent-9.xml", "reservedOverheadMs": 0 },
-        { "report": "agent-10.xml", "reservedOverheadMs": 40000 }
+        { "report": "agent-10.xml", "reservedOverheadMs": 160000 }
       ]
     }
   ]

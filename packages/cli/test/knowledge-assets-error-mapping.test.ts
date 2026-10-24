@@ -5,6 +5,16 @@ import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-asse
 import { respondAssertionCodeError, respondAssertionError } from '../src/daemon/routes/knowledge-assets-error-mapping.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
+import { inventoryHandoffPendingFailure } from '../../agent/src/internal/promote/inventory-recovery-failure.js';
+
+import { withDurableShareOwner } from './_helpers/durable-share-owner.js';
+import { daemonState } from '../src/daemon/state.js';
+import type { OxigraphStore } from '@origintrail-official/dkg-storage';
+const shareStores: OxigraphStore[] = [];
+afterEach(async () => {
+  daemonState.promoteWorkerAvailable = false;
+  await Promise.all(shareStores.splice(0).map(store => store.close()));
+});
 
 function fakeResponse() {
   const record = { status: 0, body: '', ended: false, headers: {} as Record<string, string> };
@@ -132,7 +142,7 @@ describe('knowledge-assets mutation error mapping', () => {
 
       expect(record.status).toBe(503);
       expect(record.headers['Retry-After']).toBe('1');
-      expect(JSON.parse(record.body)).toEqual({
+      expect(JSON.parse(record.body)).toMatchObject({
         code: 'PROMOTE_RETRYABLE_FAILURE',
         error: '[promote:encodeWorkspaceGossipPayload] A promote prerequisite is temporarily unavailable',
         retryable: true,
@@ -199,6 +209,21 @@ describe('knowledge-assets mutation error mapping', () => {
       expect(record.body).not.toContain('chain-participant-authority-unavailable');
     });
 
+    it.each(['inactive-lane', 'authority-transition', 'projection-admission', 'confirmed-ownership'] as const)(
+      'logs the pending inventory handoff step %s as closed-set tokens', (reason) => {
+        const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        const { record, res } = fakeResponse();
+
+        respondAssertionError(res, inventoryHandoffPendingFailure(reason, `inventory handoff pending: ${reason}`),
+          { contextGraphId: 'cg', name: 'same-asset', phase: 'swm-share' });
+
+        expect(record.status).toBe(503);
+        expect(loggedEvents(stderr)).toEqual([expect.objectContaining({
+          code: 'PROMOTE_RETRYABLE_FAILURE', causeCode: 'SWM_INVENTORY_HANDOFF_PENDING', causeReason: reason,
+        })]);
+        expect(record.body).not.toContain('inventory handoff pending');
+      });
+
     it.each([
       ['no cause', undefined],
       ['a cause that is not an object', 'store connection reset'],
@@ -225,6 +250,46 @@ describe('knowledge-assets mutation error mapping', () => {
       }]);
     });
 
+    it.each([
+      'transport-unavailable', 'transport-changed', 'revision-moved', 'recipient-set-changed',
+    ])('logs the closed recipient authority site %s without changing the response', (site) => {
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const { failure, cause } = shareRecipientOutage();
+      Object.assign(cause, { site });
+      const { record, res } = fakeResponse();
+      respondAssertionError(res, failure);
+      expect(loggedEvents(stderr)).toEqual([expect.objectContaining({ causeSite: site })]);
+      expect(record.status).toBe(503);
+      expect(record.headers['Retry-After']).toBe('1');
+      expect(record.body).not.toContain(site);
+    });
+
+    it.each([
+      ['an unknown plain token', { site: 'private-recipient-key' }],
+      ['raw dependency text', { site: 'https://rpc.example/SECRET' }],
+      ['a non-string', { site: 42 }],
+      ['a throwing getter', Object.defineProperty({}, 'site', { get() { throw new Error('SECRET'); } })],
+    ])('omits recipient site for %s', (_label, siteFields) => {
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const { failure, cause } = shareRecipientOutage();
+      Object.defineProperties(cause, Object.getOwnPropertyDescriptors(siteFields));
+      const { record, res } = fakeResponse();
+      respondAssertionError(res, failure);
+      expect(record.status).toBe(503);
+      expect(loggedEvents(stderr)[0]).not.toHaveProperty('causeSite');
+      expect(stderr.mock.calls.map(([line]) => String(line)).join('')).not.toContain('SECRET');
+      expect(record.body).not.toContain('SECRET');
+    });
+    it.each([undefined, 'STORE_SCHEDULER_BUSY'])('omits a recognized site for unrelated cause code %s', (code) => {
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const { failure, cause } = shareRecipientOutage();
+      Object.assign(cause, { code, site: 'revision-moved' });
+      const { record, res } = fakeResponse();
+      respondAssertionError(res, failure);
+      expect(record.status).toBe(503);
+      expect(loggedEvents(stderr)[0]).not.toHaveProperty('causeSite');
+      expect(record.body).not.toContain('revision-moved');
+    });
     it('reports an untagged or non-text message as an unknown step', () => {
       const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
       const { record, res } = fakeResponse();
@@ -255,6 +320,7 @@ describe('knowledge-assets mutation error mapping', () => {
         }),
         assertion: { promote },
       };
+      withDurableShareOwner(agent, shareStores);
       const { record, res } = fakeResponse();
       const rawPath = '/api/knowledge-assets/shared-right-after-registration/swm/share';
       const url = new URL(`http://127.0.0.1${rawPath}`);
@@ -276,7 +342,7 @@ describe('knowledge-assets mutation error mapping', () => {
       expect(promote).toHaveBeenCalledTimes(1);
       expect(record.status).toBe(503);
       expect(record.headers['Retry-After']).toBe('1');
-      expect(JSON.parse(record.body)).toEqual({
+      expect(JSON.parse(record.body)).toMatchObject({
         code: 'PROMOTE_RETRYABLE_FAILURE',
         error: '[promote:encodeWorkspaceGossipPayload] A promote prerequisite is temporarily unavailable',
         retryable: true,

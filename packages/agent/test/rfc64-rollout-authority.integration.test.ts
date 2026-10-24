@@ -2409,7 +2409,10 @@ describe('RFC-64 rollout authority integration', () => {
       remotePeerId,
       expect.any(Function),
       0,
-      { authorityScopeChanged: true },
+      {
+        authorityScopeChanged: true,
+        authorityScopeContextGraphIds: new Set(contextGraphIds),
+      },
     );
     // Unchanged direct reconciliations must not create another timer.
     for (const contextGraphId of contextGraphIds) {
@@ -2417,6 +2420,58 @@ describe('RFC-64 rollout authority integration', () => {
     }
     await new Promise<void>((resolve) => setTimeout(resolve, 3_100));
     expect(queueSync).toHaveBeenCalledOnce();
+  });
+
+  it('catches up only the graph whose authority changed from each connected peer', async () => {
+    const unchangedContextGraphId = `${AUTHOR}/authority-catchup-unchanged` as ContextGraphIdV1;
+    const changedContextGraphId = `${AUTHOR}/authority-catchup-changed` as ContextGraphIdV1;
+    const remotePeerIds = [
+      '12D3KooWAuthorityCatchupPeerA',
+      '12D3KooWAuthorityCatchupPeerB',
+    ];
+    const edge = await startAgent({
+      name: 'authority-accepted-graph-catchup',
+      config: {
+        ...custodialAuthorConfig(),
+        rfc64CatalogDeploymentProfile: DEPLOYMENT,
+        syncOnConnectEnabled: true,
+      },
+    });
+    (edge as any).defaultAgentAddress = AUTHOR;
+    await edge.createContextGraph({
+      id: unchangedContextGraphId,
+      name: 'Authority catch-up unchanged',
+      accessPolicy: 0,
+      callerAgentAddress: AUTHOR,
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    // No peer is connected yet, so the first graph's catch-up has nobody to ask.
+    await new Promise<void>((resolve) => setTimeout(resolve, 3_100));
+
+    vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue(
+      remotePeerIds.map((peerId) => ({ toString: () => peerId })) as never,
+    );
+    vi.spyOn(edge.networkAdmissionCoordinator, 'isAcceptedPeer').mockReturnValue(true);
+    vi.spyOn(edge, 'getSyncReconcilerProbe').mockResolvedValue({
+      protocolsKey: null,
+      connectionKey: null,
+    });
+    const trySync = vi.spyOn(edge, 'trySyncFromPeer').mockResolvedValue('synced');
+    await edge.createContextGraph({
+      id: changedContextGraphId,
+      name: 'Authority catch-up changed',
+      accessPolicy: 0,
+      callerAgentAddress: AUTHOR,
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    await new Promise<void>((resolve) => setTimeout(resolve, 3_100));
+
+    await vi.waitFor(() => expect(trySync).toHaveBeenCalledTimes(remotePeerIds.length));
+    expect(trySync.mock.calls.map(([peerId]) => peerId).sort()).toEqual([...remotePeerIds].sort());
+    for (const [, , source, graphScope] of trySync.mock.calls) {
+      expect(source).toBe('on-connect');
+      expect(graphScope).toEqual(new Set([changedContextGraphId]));
+    }
   });
 
   it('fails closed when an unregistered graph has no authenticated owner', async () => {
@@ -7196,7 +7251,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     // Finalized RFC-64 authority is sufficient at the transport boundary, so
     // catalog-owned SWM no longer waits for a legacy metadata bootstrap read.
-    expect(internals.sharedMemoryGossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(true);
+    await vi.waitFor(() => expect(internals.sharedMemoryGossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(true));
 
     // Catalog mode owns the root lane, but named subgraphs still require the
     // authorized member transport. queueSharedMemoryGossipSubscription remains

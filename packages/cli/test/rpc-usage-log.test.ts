@@ -453,7 +453,7 @@ describe('emitRpcUsage ← DKGAgent.drainRpcUsage — the REAL daemon boundary e
     // is silently dead.
     const { DKGAgent } = await import('@origintrail-official/dkg-agent');
     const chain = { drainRpcUsage: () => ({ byMethod: { eth_call: 11 }, ethCallByConsumer: {}, lifetimeTotal: 11 }) };
-    const agentLike = { drainRpcUsage: () => DKGAgent.prototype.drainRpcUsage.call({ chain } as never) };
+    const agentLike = { drainRpcUsage: () => DKGAgent.prototype.drainRpcUsage.call({ chain, config: { coreChainCacheNetworks: [] } } as never) };
     const emitted: string[] = [];
     const n = emitRpcUsage(agentLike, (l) => emitted.push(l), 60, 'base:8453');
     expect(n).toBe(1);

@@ -42,6 +42,7 @@ import {
 } from './_helpers/async-promote-worker-fixture.js';
 import { createClaimFailureBackoff } from '../src/daemon/worker/claim-failure-backoff.js';
 import { promoteJobToView } from '../src/daemon/routes/promote-job-view.js';
+import { promoteAttemptAuthorityReason } from '../src/daemon/worker/async-promote-attempt-diagnostics.js';
 
 const PROMOTE_RETRYABLE_FAILURE_CODE = 'PROMOTE_RETRYABLE_FAILURE';
 
@@ -103,14 +104,45 @@ describe('runPromoteJob', () => {
     ({ queue, logs, makeRequest, enqueueAndClaim } = fixture);
   });
 
+  it('retries a definitely-not-started marker write without running promotion twice', async () => {
+    const job = await enqueueAndClaim();
+    const marker = queue.recordCommitMarker.bind(queue);
+    const writes = vi.spyOn(queue, 'recordCommitMarker').mockRejectedValueOnce(
+      new StoreOperationTimeoutError({ backend: 'blazegraph', operation: 'replaceSubject', outcome: 'not_started' }),
+    );
+    writes.mockImplementationOnce(marker);
+    const promote = vi.fn(async (_request: PromoteRequest) => {
+       return { promotedCount: 1 };
+    });
+    expect(await runPromoteJob({ job, queue, workerId: 'worker-test', runPromote: promote,
+      now: fixture.clock.now, heartbeatIntervalMs: 0, bookkeepingRetryIntervalMs: 0,
+      sleep: async () => undefined, log: message => logs.push(message),
+    })).toMatchObject({ outcome: 'succeeded' });
+    expect(promote).toHaveBeenCalledTimes(1);
+    expect(writes.mock.calls.filter(call => call[2] === 'promoteStarted')).toHaveLength(2);
+    expect((await queue.getStatus(job.jobId))?.state).toBe('succeeded');
+  });
+
+  it('classifies a legacy marker failure before invoking promotion and records an unacknowledged start', async () => {
+    const job = await enqueueAndClaim();
+    vi.spyOn(queue, 'recordCommitMarker').mockRejectedValueOnce(new Error('marker acknowledgement unavailable'));
+    const promote = vi.fn(async () => ({ promotedCount: 1 }));
+    const result = await runPromoteJob({ job, queue, workerId: 'worker-test', runPromote: promote,
+      now: fixture.clock.now, heartbeatIntervalMs: 0, log: message => logs.push(message) });
+    expect(result.outcome).toBe('failed_terminal');
+    expect(promote).not.toHaveBeenCalled();
+    expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
+    expect(promoteFailureDiagnostics(logs)).toEqual([expect.objectContaining({ promoteStartedMarkerPersisted: false })]);
+  });
+
   it('on success, records the recovery commit marker and transitions to succeeded', async () => {
     const job = await enqueueAndClaim();
     const result = await runPromoteJob({
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         return { promotedCount: 42 };
       },
       now: fixture.clock.now,
@@ -160,8 +192,8 @@ describe('runPromoteJob', () => {
       job,
       queue: failingQueue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         return { promotedCount: 99 };
       },
       now: fixture.clock.now,
@@ -196,8 +228,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         return { promotedCount: 7 };
       },
       now: fixture.clock.now,
@@ -223,8 +255,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         return { promotedCount: 0 };
       },
       now: fixture.clock.now,
@@ -241,8 +273,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw new Error('fetch failed');
       },
       now: fixture.clock.now,
@@ -275,8 +307,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw { code: PROMOTE_RETRYABLE_FAILURE_CODE };
       },
       now: fixture.clock.now,
@@ -305,8 +337,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw createPromoteRetryableFailure(Object.assign(new Error('private detail'), {
           code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
           reason: 'finalized-name-absence-unaccepted',
@@ -328,6 +360,86 @@ describe('runPromoteJob', () => {
     expect(diagnostic).not.toHaveProperty('authoritySite');
   });
 
+  // #3421 — the job view named a retryable attempt's cause only as "a promote
+  // prerequisite is temporarily unavailable"; it now says which one.
+  it('keeps the authority reason of a retryable attempt on the job and shows it in the view', async () => {
+    const job = await enqueueAndClaim();
+    const result = await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request) => {
+        throw createPromoteRetryableFailure(Object.assign(new Error('private detail'), {
+          code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+          reason: 'approved-member-metadata-pending',
+        }));
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+
+    expect(result.outcome).toBe('failed_retrying');
+    const [stored] = await queue.list({});
+    expect(stored.attempt.lastError).toMatchObject({
+      classification: 'transient',
+      retryable: true,
+      authorityReason: 'approved-member-metadata-pending',
+    });
+    expect(promoteJobToView(stored).lastError).toMatchObject({
+      code: 'transient',
+      retryable: true,
+      diagnosticCode: PROMOTE_RETRYABLE_FAILURE_CODE,
+      authorityReason: 'approved-member-metadata-pending',
+    });
+    expect(JSON.stringify(stored.attempt.lastError)).not.toContain('private detail');
+    expect(promoteFailureDiagnostics(logs)[0]).toMatchObject({ authorityReason: 'approved-member-metadata-pending' });
+  });
+
+  it.each([
+    {
+      case: 'a reason outside the closed set',
+      thrown: () => createPromoteRetryableFailure(Object.assign(new Error('x'), {
+        code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+        reason: 'not-a-known-reason',
+      })),
+    },
+    {
+      case: 'an error that is not a retryable prerequisite',
+      thrown: () => Object.assign(new Error('x'), {
+        code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+        reason: 'approved-member-metadata-pending',
+      }),
+    },
+  ])('keeps no authority reason for $case', async ({ thrown }) => {
+    const job = await enqueueAndClaim();
+    await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request) => { throw thrown(); },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+
+    const [stored] = await queue.list({});
+    expect(stored.attempt.lastError).toBeDefined();
+    expect(stored.attempt.lastError).not.toHaveProperty('authorityReason');
+    expect(promoteJobToView(stored).lastError).not.toHaveProperty('authorityReason');
+  });
+
+  it('reads no authority reason from a failure whose cause cannot be read', () => {
+    const hostile = Object.defineProperty(new Error('x'), 'cause', {
+      get() { throw new Error('hostile getter'); },
+    });
+    expect(promoteAttemptAuthorityReason(hostile, {
+      classification: 'transient',
+      retryable: true,
+      diagnostic: { name: 'PromoteRetryableFailureError', code: PROMOTE_RETRYABLE_FAILURE_CODE },
+    })).toEqual({});
+  });
+
   // GH#3067 — the log said which authority reason ended an attempt but not
   // which check raised it, so a loop failure and a failed chain read looked alike.
   describe('throw site and store failure of an attempt (GH#3067)', () => {
@@ -337,8 +449,8 @@ describe('runPromoteJob', () => {
         job,
         queue,
         workerId: 'worker-test',
-        runPromote: async (_request, markPromoteStarted) => {
-          await markPromoteStarted();
+        runPromote: async (_request) => {
+
           throw thrown;
         },
         now: fixture.clock.now,
@@ -463,8 +575,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw createPromoteRetryableFailure(Object.assign(
           new Error('RFC-64 legacy SWM boundary retirement is in progress; retry promotion'),
           { code: 'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS' },
@@ -502,9 +614,9 @@ describe('runPromoteJob', () => {
           job: claimed,
           queue,
           workerId: 'worker-test',
-          runPromote: async (request, markPromoteStarted) => {
+          runPromote: async (request) => {
             seen.push(request);
-            await markPromoteStarted();
+
             if (refuse) throw fenceFailure();
             return { promotedCount: 1 };
           },
@@ -548,8 +660,8 @@ describe('runPromoteJob', () => {
           job: claimed!,
           queue,
           workerId: 'worker-test',
-          runPromote: async (_request, markPromoteStarted) => {
-            await markPromoteStarted();
+          runPromote: async (_request) => {
+
             throw fenceFailure();
           },
           now: fixture.clock.now,
@@ -598,8 +710,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw createPromoteRetryableFailure(Object.assign(new Error('private detail'), { code }));
       },
       now: fixture.clock.now,
@@ -619,8 +731,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw createPromoteRetryableFailure(Object.assign(new Error('private graph id'), {
           code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
           reason: 'local-existence-unavailable',
@@ -653,8 +765,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw replaySafeFailure;
       },
       now: fixture.clock.now,
@@ -709,7 +821,7 @@ describe('runPromoteJob', () => {
     expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
     expect(promoteFailureDiagnostics(logs)).toEqual([
       expect.objectContaining({
-        promoteStartedMarkerPersisted: false,
+        promoteStartedMarkerPersisted: true,
         swmCommitObserved: false,
         classification: 'fatal',
         retryable: false,
@@ -764,8 +876,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw createPromotePostCommitFailure(new Error('durable tail failed'));
       },
       now: fixture.clock.now,
@@ -810,7 +922,7 @@ describe('createPromoteWorkerSupervisor', () => {
   function makeAgentStub(promote: (req: PromoteRequest) => Promise<{ promotedCount: number }>) {
     return {
       promoteQueue: queue,
-      assertion: {
+      assertion: { prepareQueuedShare: async (job: any) => ({ job }),
         async promote(
           cgId: string,
           name: string,
@@ -936,7 +1048,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: firstClaimLeaseless,
-        assertion: { promote: async () => ({ promotedCount: 1 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 1 }) },
       } as any,
       workerConcurrency: 1,
       pollIntervalMs: 1_000_000,
@@ -1197,7 +1309,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: wrappedQueue,
-        assertion: { promote: async () => ({ promotedCount: 0 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 0 }) },
       } as any,
       workerConcurrency: 4,
       pollIntervalMs: 60_000,
@@ -1223,7 +1335,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: wrappedQueue,
-        assertion: { promote: async () => ({ promotedCount: 0 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 0 }) },
       } as any,
       workerConcurrency: 4,
       pollIntervalMs: 60_000,
@@ -1267,7 +1379,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: wrappedQueue,
-        assertion: { promote: async () => ({ promotedCount: 0 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 0 }) },
       } as any,
       workerConcurrency: 1,
       pollIntervalMs: 60_000,
@@ -1303,7 +1415,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: wrappedQueue,
-        assertion: { promote: async () => ({ promotedCount: 0 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 0 }) },
       } as any,
       workerConcurrency: 1,
       pollIntervalMs: 60_000,
@@ -1448,7 +1560,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: wrappedQueue,
-        assertion: { promote: async () => ({ promotedCount: 1 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 1 }) },
       } as any,
       workerConcurrency: 1,
       pollIntervalMs: 1_000_000,
@@ -1497,7 +1609,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: wrappedQueue,
-        assertion: {
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }),
           async promote() {
             promoteStarted.resolve();
             return releasePromote.promise;
@@ -1547,7 +1659,7 @@ describe('createPromoteWorkerSupervisor', () => {
     nowFn += 60_000; // lease expired
 
     const sup = createPromoteWorkerSupervisor({
-      agent: { promoteQueue: recoverableQueue, assertion: { promote: async () => ({ promotedCount: 1 }) } } as any,
+      agent: { promoteQueue: recoverableQueue, assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 1 }) } } as any,
       workerConcurrency: 1,
       pollIntervalMs: 1_000_000,
       heartbeatIntervalMs: 0,
@@ -1566,7 +1678,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const shortLeaseQueue = new TripleStoreAsyncPromoteQueue(store, { leaseMs: 1_000 });
     const agent = {
       promoteQueue: shortLeaseQueue,
-      assertion: { promote: async () => ({ promotedCount: 1 }) },
+      assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 1 }) },
     } as any;
 
     expect(() => createPromoteWorkerSupervisor({
@@ -1592,7 +1704,7 @@ describe('createPromoteWorkerSupervisor', () => {
             throw new Error('must not poll after failed recovery');
           },
         },
-        assertion: { promote: async () => ({ promotedCount: 1 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 1 }) },
       } as any,
       workerConcurrency: 1,
       pollIntervalMs: 1,

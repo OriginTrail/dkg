@@ -12,7 +12,20 @@ export default defineConfig({
     include: runsDaemonHttpBehavior
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
+          'test/async-share-bound-recovery.test.ts',
+          'test/write-preflight-diagnostics.test.ts',
+          'test/durable-synchronous-share.test.ts',
+          'test/durable-private-payload-recovery.test.ts',
+          'test/durable-gossip-signer-lookup.test.ts',
+          'test/durable-share-preparation-race.test.ts',
+          'test/durable-inventory-worker.test.ts',
+          'test/durable-superseded-vm-ownership.test.ts',
+          'test/durable-unregistered-author-process.test.ts',
+          'test/promote-route-not-persisted.test.ts',
+          'test/public-snapshot-job.test.ts',
+          'test/core-chain-cache-config.test.ts',
           'test/mcp-config-document.test.ts',
+          'test/mcp-launch-command.test.ts',
           'test/mcp-physical-config.test.ts',
           'test/mcp-config-metadata.test.ts',
           'test/api-client.test.ts',
@@ -34,10 +47,13 @@ export default defineConfig({
           // POST routes (pure handler, no hardhat). Belongs in the fast lane
           // alongside its clear-job sibling above.
           'test/publisher-admin-body-boundary.test.ts',
+          'test/publisher-live-control.test.ts',
+          'test/publisher-live-control-route.test.ts',
           // #1828 — daemon-boot intent-index backfill wiring (fail-open contract).
           'test/vm-publish-intent-backfill.test.ts',
           'test/agent-connect-routes.test.ts',
           'test/preferred-relays.test.ts',
+          'test/lan-addresses.test.ts',
           'test/reconcile-503-mapping.test.ts',
           'test/sealed-create-retry-route.test.ts',
           'test/config.test.ts',
@@ -45,9 +61,12 @@ export default defineConfig({
           // Pure: in-process status route and a chain adapter over scripted endpoints.
           'test/status-chain-rpc.test.ts',
           'test/backpressure-route.test.ts',
+          'test/notifications-route-bounded.test.ts',
       'test/status-route-store-quads.test.ts',
       'test/store-reachability.test.ts',
       'test/query-route-lifecycle.test.ts',
+      'test/bounded-query.test.ts',
+      'test/entity-search.test.ts',
       'test/query-catalog-profile-route.test.ts',
           'test/context-graph-route-read-authority.test.ts',
           'test/knowledge-assets-local-curator-read.test.ts',
@@ -74,6 +93,7 @@ export default defineConfig({
           'test/daemon/routes/plugins.test.ts',
           'test/daemon-pca-routes.test.ts',
           'test/knowledge-assets-error-mapping.test.ts',
+          'test/promote-admission-route.test.ts',
           'test/daemon-identity-wallet-routes.test.ts',
           // The dashboard shell carries the operator token only for trusted
           // local requests (loopback socket and loopback Host). Pure helpers
@@ -83,6 +103,7 @@ export default defineConfig({
           // handlers plus one live daemon on the mock chain; no hardhat.
           'test/node-admin-scope-routes.test.ts',
           'test/daemon-operator-scope-live.test.ts',
+          'test/private-access-route.test.ts',
           // R8 — #1085 /register policy-matrix route tests, extracted from
           // daemon-http-behavior-extra so they run here (pure route handler,
           // no hardhat/daemon spawn) instead of the daemon-http lane.
@@ -90,12 +111,27 @@ export default defineConfig({
           // Private-CG bootstrap readiness: clean-empty responses are only
           // terminal when authoritative metadata has been confirmed.
           'test/context-graph-subscribe-readiness.test.ts',
+          'test/approved-member-empty-graph-first-write.test.ts',
+          'test/context-graph-empty-vm-readiness.test.ts',
+          'test/context-graph-subscribe-empty-vm.test.ts',
           // A public graph its subscribe job left unproven gets the job again
           // (#3207). The real catch-up worker behind a fake thread; no hardhat.
           'test/context-graph-readiness-repeat.test.ts',
+          // So does a registered public graph whose job ran before its RFC-64
+          // authority was accepted (#3281). Same worker and fake thread.
+          'test/context-graph-readiness-repeat-authority.test.ts',
+          // A member that already holds the graph is proven synced by a
+          // catch-up that finds nothing missing (#3296). Same worker and fake thread.
+          'test/context-graph-held-content-readiness.test.ts',
           // A persisted subscription restored unsynced gets a catch-up job
           // (#3251). Agent double and stub runner; no hardhat.
           'test/context-graph-activation-catchup.test.ts',
+          // A write into a graph this node is still catching up waits for the
+          // catch-up, bounded; a restarted owner's first write into its own
+          // registered graph goes through. Same worker and fake thread.
+          'test/context-graph-write-readiness.test.ts',
+          'test/context-graph-owner-write-after-restart.test.ts',
+          'test/context-graph-write-readiness-shutdown.test.ts',
           'test/context-graph-authority-attribution.test.ts',
           'test/context-graph-catchup-readiness.test.ts',
           // Subscribing by an on-chain name hash (Base #33): route, catch-up
@@ -134,6 +170,7 @@ export default defineConfig({
           'test/auto-update-workspace-clean.test.ts',
           'test/maintenance-update-gate.test.ts',
           'test/node-runtime-preflight.test.ts',
+          'test/outbound-brotli-refusal.test.ts',
           'test/dkg-doctor.test.ts',
           'test/metrics-collector-config.test.ts',
           'test/init.test.ts',
@@ -171,7 +208,12 @@ export default defineConfig({
           // `/api/status` → `eventLoopDelay`: the gauge with a fake histogram
           // plus one real-histogram smoke test, and the route block shape.
           'test/event-loop-delay-monitor.test.ts',
+          // The periodic `resource_usage` line: its fields and its schedule.
+          'test/resource-usage-log.test.ts',
           'test/supervisor-liveness.test.ts',
+          'test/liveness-diagnostics.test.ts',
+          'test/liveness-supervisor-log.test.ts',
+          'test/foreground-supervisor-command.test.ts',
           'test/promote-async-routes.test.ts',
           'test/promote-async-daemon-lifecycle.test.ts',
           'test/daemon-ka-transport.test.ts',
@@ -179,6 +221,8 @@ export default defineConfig({
           // including preserving a known transaction hash on endpoint exhaustion.
           'test/chain-rpc-transport-status.test.ts',
           'test/async-promote-worker.test.ts',
+          'test/async-share-evidence-worker.test.ts',
+          'test/share-reconciliation-route.test.ts',
           // #2315 — privacy-bounded diagnostics and hostile logger isolation.
           'test/async-promote-worker-diagnostics.test.ts',
           'test/async-promote-error-classification.test.ts',
@@ -187,11 +231,14 @@ export default defineConfig({
           'test/async-promote-bookkeeping-recovery.test.ts',
           'test/async-promote-queue-e2e.test.ts',
           'test/knowledge-assets-1116-share-errors.test.ts',
+          'test/knowledge-asset-pull-recovery.test.ts',
+          'test/knowledge-assets-sub-graph-refusal.test.ts',
           'test/import-artifact-routes.test.ts',
           'test/shared-memory-catchup-durable.test.ts',
           'test/skill-endpoint.test.ts',
-          // R6-B — metric COUNT getter TTL memo. Pure logic, no hardhat.
+          // Reconciled metric-count snapshot and exact-query parity. No hardhat.
           'test/metrics-queries.test.ts',
+          'test/store-count-metrics.test.ts',
           // #1066 Item 1 — metrics presence gate. Pure logic (injected clock).
           'test/metrics-presence.test.ts',
           'test/rpc-usage-log.test.ts',
@@ -299,6 +346,7 @@ export default defineConfig({
           'test/context-graph-join-request-route.test.ts',
           'test/assertion-cli-smoke.test.ts',
           'test/knowledge-asset-cli-smoke.test.ts',
+          'test/knowledge-asset-share-catalog-handoff.test.ts',
           'test/okf-subcommands.test.ts',
           'test/okf-private-lifecycle.test.ts',
           'test/okf-subgraph-roundtrip.test.ts',

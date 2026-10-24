@@ -237,3 +237,16 @@ export function resetCatchupJobLedger(): void {
 export function catchupLedgerSize(): number {
   return ledger.size;
 }
+
+/**
+ * Whether a walk job for the graph is queued or running, under the id it was
+ * asked for or the cleartext id it continued under. A write that finds the
+ * graph not proven synced yet waits for it (`context-graph-write-readiness.ts`).
+ */
+export function catchupJobInFlightFor(contextGraphId: string): boolean {
+  for (const { job } of ledger.values()) {
+    if (isTerminalCatchupJobState(job.status)) continue;
+    if (job.contextGraphId === contextGraphId || job.resolvedContextGraphId === contextGraphId) return true;
+  }
+  return false;
+}

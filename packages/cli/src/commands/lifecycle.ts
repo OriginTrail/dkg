@@ -433,6 +433,8 @@ program
       console.log(`  Network:   ${s.networkId ?? '—'}`);
       console.log(`  PeerId:    ${s.peerId}`);
       console.log(`  Uptime:    ${uptime}`);
+      // Sent only to a node-operator token: the Node.js release the daemon runs on.
+      if (s.runtime?.nodeVersion) console.log(`  Runtime:   Node.js ${s.runtime.nodeVersion}`);
       console.log(`  Peers:     ${s.connectedPeers}`);
       console.log(`  Relay:     ${s.relayConnected ? 'connected' : 'not connected'}`);
       // Backend visibility: local backends print just the name (file

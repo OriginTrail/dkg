@@ -199,6 +199,7 @@ test('repository support paths route to the lanes that execute them', () => {
     ['scripts/devnet-test-invite-flow.sh', []],
     ['scripts/import-ontology.mjs', []],
     ['scripts/repro/wm-persistence-regression.mjs', []],
+    ['scripts/repro/rfc64-catalog-durable-head.mts', ['tornado_blazegraph', 'tornado_agent']],
     ['scripts/devnet-publish-helpers.sh', ['bura_cli']],
     // The chain lane runs the ABI sync script (sync-chain-abis.unit.test.ts).
     ['scripts/sync-chain-abis.mjs', ['tornado_core']],
@@ -389,10 +390,19 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   const loadedBy = trace.loaded;
 
   for (const [target, requirement, why] of [
+    ['packages/node-ui/e2e/bootstrap-devnet-runtime.ts', 'kosava_node_ui_e2e', 'the bootstrap failure child fixture imports production orchestration'],
+    ['packages/node-ui/e2e/helpers/devnet.ts', 'kosava_node_ui_e2e', 'bootstrap orchestration reads the selected directory through its devnet helper'],
+    ['packages/node-ui/src/ui/agent-identity-api.ts', 'evm:chain', 'the wallet integration suite loads shared identity transport through the API'],
+    ['packages/node-ui/src/ui/assertion-identity.ts', 'evm:chain', 'the wallet integration suite loads the API assertion decoder'],
+    ['packages/node-ui/src/ui/assertions-page.ts', 'evm:chain', 'the wallet integration suite loads shared assertion discovery through the API'],
+    ['packages/node-ui/src/ui/query-bindings.ts', 'evm:chain', 'assertion discovery decodes terms through the shared binding codec'],
+    ['packages/node-ui/src/rdf-literal.ts', 'evm:chain', 'shared assertion discovery decodes reserved UAL literals'],
+    ['packages/publisher/src/materialization-assertion-version.ts', 'kosava_node_ui', 'the UI metadata regression loads the shared assertion version reader'],
     ['packages/query/README.md', 'bura_query', 'the query security tests read the README'],
     ['packages/cli/src/extraction/markdown-extractor.ts', 'tornado_agent', 'agent tests import CLI source'],
     ['packages/cli/src/daemon.ts', 'kosava_node_ui', 'node-ui tests scan the CLI daemon sources'],
     ['packages/agent/src/dkg-agent-join.ts', 'tornado_core', 'the chain RPC-site census reads agent sources'],
+    ['packages/agent/src/remote-query-handler.ts', 'tornado_core', 'the chain RPC-site census reads the extracted remote query authority check'],
     ['packages/agent/src/sync/exact-assets.ts', 'tornado_agent', 'the Agent stream receiver loads exact asset parsing'],
     ['packages/agent/src/sync/exact-batch-stream-contract.ts', 'tornado_agent', 'the Agent stream tests load the proof contract'],
     ['packages/agent/src/sync/wire-compression.ts', 'tornado_agent', 'the Agent stream receiver loads wire compression'],
@@ -503,14 +513,17 @@ test('a document a test reads is a CI input; other documentation stays docs-only
   }
 });
 
-test('the Blazegraph lane follows the agent lane, whose live suites its job runs', () => {
+test('the Blazegraph lane covers agent live suites and scoped query catalogs', () => {
   // The Blazegraph job runs the agent's live Blazegraph suites, so every plan
   // that runs the agent lane selects the Blazegraph lane too: its output
   // starts the job, and the gate requires it.
   const job = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')).jobs['tornado-blazegraph'];
   assert.equal(job.if, "needs.changes.outputs.tornado_blazegraph == 'true'");
   assert.ok(job.steps.some(({ run = '' }) => run.includes('dkg-agent exec vitest run --config vitest.blazegraph.config.ts')));
+  assert.ok(job.steps.some(({ run = '' }) => run.includes('DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run test/scoped-catalog-backend.test.ts')));
   for (const filePath of [
+    'packages/query/src/scoped-content-graph-catalog.ts',
+    'packages/query/test/scoped-catalog-backend.test.ts',
     'packages/agent/test-live/rfc64-legacy-swm-boundary-v1.blazegraph.test.ts',
     'packages/agent/src/dkg-agent.ts',
     'packages/core/src/index.ts',
@@ -521,6 +534,23 @@ test('the Blazegraph lane follows the agent lane, whose live suites its job runs
     assert.equal(plan.lanes.tornado_blazegraph, true, filePath);
   }
   assert.equal(pullRequestPlan([change('packages/network-sim/src/index.ts')]).lanes.tornado_blazegraph, false);
+});
+
+test('primary persistence integration keeps the Agent wrapper in the Agent layer', () => {
+  const wrapper = 'packages/agent/src/internal/context-graph-cache-invalidating-store.ts';
+  const traceTest = (file, lane) => traceLaneLoads(new Map([
+    [file, new Map([[lane, 'primary persistence integration']])],
+  ]));
+  const publisher = traceTest('packages/publisher/test/async-lift-primary-persistence.blazegraph.integration.test.ts', 'tornado_publisher');
+  assert.deepEqual([...publisher.loaded.keys()].filter(file => file.startsWith('packages/agent/')), []);
+  const agent = traceTest('packages/agent/test-live/primary-persistence-cache-wrapper.blazegraph.test.ts', 'tornado_agent');
+  assert.equal(agent.loaded.get(wrapper)?.has('tornado_agent'), true);
+  assert.equal(agent.loaded.get('packages/publisher/test/_helpers/primary-persistence-blazegraph.ts')?.has('tornado_agent'), true);
+  const plan = pullRequestPlan([change(wrapper)]);
+  assert.equal(plan.mode, 'delta');
+  assert.equal(plan.lanes.tornado_agent, true);
+  assert.equal(plan.lanes.tornado_blazegraph, true);
+  assert.equal(plan.lanes.tornado_publisher, false);
 });
 
 test('identity-wallet browser actions select the real-EVM chain scope', () => {

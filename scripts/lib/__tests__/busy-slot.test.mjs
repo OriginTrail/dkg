@@ -1,235 +1,265 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
-import { admissionClass, admissionRecords, candidateAdmissions, startInterval } from '../qa/admission-identity.mjs';
-import { busySlotCovered, heldTransfer, receivedWhileHeld, singleSlotProblem } from '../qa/busy-slot.mjs';
+import { traceAdmissions } from '../qa/admission-trace.mjs';
+import { admissionsBySlot, busySlotCovered, heldTransfer, receivedWhileHeld, singleSlotProblem, transferChain, transferSettled, TRANSFER_READMIT_MS } from '../qa/busy-slot.mjs';
 
-// A reading of member 2's sync slots with its intended policy: one slot, no queue.
-const POLICY = { capacityModel: 'shared', inflightLimit: 1, queueLimit: 0 };
-const every = (a, b) => Array.from({ length: (b - a) / 1000 + 1 }, (_, i) => a + i * 1000);
-// The identity of a transfer that started at `ms`, as a reading that answered at once names it.
-const startedAt = ms => ({ from: ms - 1, to: ms, operations: ['shared-memory'] });
+// Member 2's intended general pool: one slot, no queue (as the trace records it).
+const POLICY = { limit: 1, queueLimit: 0, partitioned: false };
+const LARGE = 'shared-memory:0xabc/issue-3251-large-1:Owner123';
+const PUBLIC = 'shared-memory:0xabc/issue-3251-public-1:Owner123';
+const isLarge = admission => admission.label.includes(':0xabc/issue-3251-large-1:');
+const isPublic = admission => admission.label.includes(':0xabc/issue-3251-public-1:');
+// The lines the agent's trace writes (packages/agent/src/sync/admission-trace.ts).
+const line = (event, id, label, at, slot = 'general', policy = POLICY) => JSON.stringify({ event, id, label, slot, ...policy, at });
+const holding = (at, ...ids) => JSON.stringify({ event: 'holding', ids, at });
+const trace = (...lines) => traceAdmissions(lines.join('\n'));
+/** A `holding` line every second from `from` to `to` for each admission id. */
+const heartbeats = (from, to, ...ids) => Array.from({ length: Math.floor((to - from) / 1000) + 1 }, (_, i) => holding(from + i * 1000, ...ids));
 
-// The node log keeps local time in whole seconds; `T` places a time of a test on a local clock.
-const BASE = new Date(2026, 9, 15, 9, 52, 0).getTime();
-const T = ms => BASE + ms;
-const pad = n => String(n).padStart(2, '0');
-const logTime = ms => {
-  const d = new Date(T(ms));
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-};
-const OPERATION = '8a1576fb-b2e7-4de1-b383-944426cefe26';
-const running = (ms, label) => `${logTime(ms)} sync ${OPERATION} [DKGAgent] Sync backpressure running ${label} (global inflight=1/1, queued=0/0)`;
-const LARGE = '0xabc/issue-3251-large-1';
-const PUBLIC = '0xabc/issue-3251-public-1';
-const isLarge = record => record.label.includes(`:${LARGE}:`);
-
-test('admission records are read from the node log, each with its label and class', () => {
-  const big = 'shared-memory:0xabc/issue-3251-large-1:YeJDmN71';
-  const log = [
-    '2026-10-15 09:49:10 sync 85005448 [DKGAgent] Sync backpressure running shared-memory:0xabc/issue-3251-public-1:YeJDmN71 (global inflight=1/1, queued=0/0)',
-    `2026-10-15 09:49:12 sync 9a [DKGAgent] Sync backpressure running ${big} (global inflight=1/1, queued=0/0)`,
-    `2026-10-15 09:49:13 sync 9b [DKGAgent] Sync backpressure rejected ${big} (global inflight=1/1, queued=0/0)`,
-    `[2026-10-15T07:49:14.000Z] not the agent log format: Sync backpressure running ${big}`,
-    `2026-10-15 09:50:02 sync 9c [DKGAgent] Sync backpressure running ${big} (global inflight=1/1, queued=0/0)`,
-  ].join('\n');
-  const admissionStarts = (text, needle) => admissionRecords(text).filter(record => record.label.includes(needle)).map(record => record.startMs);
-  assert.deepEqual(admissionStarts(log, big), [new Date('2026-10-15T09:49:12').getTime(), new Date('2026-10-15T09:50:02').getTime()]);
-  // Any operation on the graph: the label holds the graph id between colons.
-  assert.deepEqual(admissionStarts(log, ':0xabc/issue-3251-large-1:'), admissionStarts(log, big));
-  assert.deepEqual(admissionStarts(log, ':0xabc/issue-3251-large-2:'), []);
-  // The needle must be in the admitted label, not elsewhere on the line.
-  assert.deepEqual(admissionStarts('2026-10-15 09:49:12 sync 9a [DKGAgent] Sync backpressure running shared-memory:other:Y (note :0xabc/issue-3251-large-1:)', ':0xabc/issue-3251-large-1:'), []);
-  assert.deepEqual(admissionStarts('', big), []);
-  assert.deepEqual(admissionStarts(undefined, big), []);
-  // Every admission is a record, whatever its graph; the class is the one the node reports.
-  assert.deepEqual(admissionRecords(log).map(record => [record.label, record.operation]),
-    [['shared-memory:0xabc/issue-3251-public-1:YeJDmN71', 'shared-memory'], [big, 'shared-memory'], [big, 'shared-memory']]);
-  assert.deepEqual(['durable:control-plane', 'changelog:x:y', 'swm-recovery:x:y', 'catalog:x', 'shared-memory'].map(admissionClass),
-    ['durable', 'changelog', 'swm-recovery', 'sync', 'shared-memory']);
+test('the trace pairs each admission\'s start with its release, by its id, and extends it by the holding lines that list it', () => {
+  const admissions = trace(
+    line('start', '41-1', LARGE, 100_000),
+    'not a trace line',
+    JSON.stringify({ event: 'start', id: 7, label: LARGE, at: 1 }),
+    line('release', '41-9', PUBLIC, 100_200),
+    line('start', '41-2', PUBLIC, 100_300, 'shared-memory'),
+    holding(101_000, '41-1', '41-2', '41-404'),
+    line('release', '41-1', LARGE, 101_500),
+    holding(102_000, '41-1', '41-2'),
+    line('start', '41-1', LARGE, 102_600),
+    line('release', '41-1', LARGE, 102_700),
+    JSON.stringify({ event: 'holding', ids: 'not a list', at: 103_000 }),
+    '',
+  );
+  // A release without its start, an id no start names, a start that repeats an id, a second release and a holding
+  // line after the release change nothing.
+  assert.deepEqual(admissions, [
+    { id: '41-1', label: LARGE, slot: 'general', policy: POLICY, startedAt: 100_000, releasedAt: 101_500, heldUntil: 101_500 },
+    { id: '41-2', label: PUBLIC, slot: 'shared-memory', policy: POLICY, startedAt: 100_300, releasedAt: null, heldUntil: 102_000 },
+  ]);
+  // A trace written without the policy or the slot names none.
+  assert.deepEqual(trace(JSON.stringify({ event: 'start', id: '41-6', label: LARGE, at: 1 }))[0],
+    { id: '41-6', label: LARGE, slot: 'unknown', policy: { limit: null, queueLimit: null, partitioned: false }, startedAt: 1, releasedAt: null, heldUntil: 1 });
+  assert.deepEqual(traceAdmissions(''), []);
+  assert.deepEqual(traceAdmissions(undefined), []);
 });
 
-test('a reading names when its oldest running admission started, between its request and its answer', () => {
-  assert.deepEqual(startInterval({ sentAt: 10_000, at: 10_040, inflight: 1, oldestActiveAgeMs: 3_000 }), { from: 6_999, to: 7_040 });
-  // Without the moment of the request, the answer's moment stands for both.
-  assert.deepEqual(startInterval({ at: 10_000, inflight: 1, oldestActiveAgeMs: 3_000 }), { from: 6_999, to: 7_000 });
-  for (const reading of [{ at: 10_000, inflight: 0, oldestActiveAgeMs: 0 }, { at: 10_000, unreadable: 'HTTP 503' }, { at: 10_000, inflight: 1 }, undefined]) {
-    assert.equal(startInterval(reading), null, JSON.stringify(reading));
-  }
+test('the transfer holds the slot only when the trace shows an admission of the large graph in the general slot, held for a while and still holding', () => {
+  const now = 106_500;
+  const held = trace(line('start', '41-1', PUBLIC, 90_000), line('release', '41-1', PUBLIC, 90_100), line('start', '41-2', LARGE, 100_000), ...heartbeats(101_000, 106_000, '41-2'));
+  assert.deepEqual(heldTransfer(held, isLarge, { now }), { transfer: { id: '41-2', label: LARGE, slot: 'general', policy: POLICY, startedAt: 100_000, releasedAt: null, heldUntil: 106_000 } });
+  // A pull that has held the slot for less than five seconds may end at once: not yet the transfer.
+  const young = trace(line('start', '41-2', LARGE, 104_000), ...heartbeats(105_000, 106_000, '41-2'));
+  assert.equal(heldTransfer(young, isLarge, { now }).why, 'its transfer of the large graph has held the general slot for less than 5 s');
+  // No line of the last three seconds lists it: its release may have been lost, or the node died.
+  const silent = trace(line('start', '41-2', LARGE, 95_000), ...heartbeats(96_000, 103_000, '41-2'));
+  assert.equal(heldTransfer(silent, isLarge, { now }).why, 'no transfer of it holds a slot now: each gave it up, or no recent trace line shows it holding');
+  // A running catch-up job without an admission of the large graph does not make member 2 busy.
+  assert.equal(heldTransfer(trace(line('start', '41-1', PUBLIC, 90_000)), isLarge, { now }).why, 'no transfer of it was admitted to a sync slot');
+  assert.equal(heldTransfer([], isLarge, { now }).why, 'no transfer of it was admitted to a sync slot');
+  // A transfer that has already given up the slot holds nothing.
+  const ended = trace(line('start', '41-2', LARGE, 100_000), line('release', '41-2', LARGE, 100_500), line('start', '41-3', PUBLIC, 101_000));
+  assert.equal(heldTransfer(ended, isLarge, { now }).why, 'no transfer of it holds a slot now: each gave it up, or no recent trace line shows it holding');
+  // A transfer in a reserved shared-memory slot leaves the general slot to others: it is not the case.
+  const reserved = trace(line('start', '41-4', LARGE, 100_000, 'shared-memory'), ...heartbeats(101_000, 106_000, '41-4'));
+  assert.equal(heldTransfer(reserved, isLarge, { now }).why, 'its transfer of the large graph holds a reserved shared-memory slot, not the general one');
+  // A node that writes no trace.
+  assert.equal(heldTransfer(null, isLarge, { now }).why, 'the node writes no admission trace (DKG_SYNC_ADMISSION_TRACE)');
+  // Of two admissions of the large graph that qualify, the latest is the transfer.
+  const two = trace(line('start', '41-2', LARGE, 99_000), line('start', '41-3', LARGE, 100_000), ...heartbeats(101_000, 106_000, '41-2', '41-3'));
+  assert.equal(heldTransfer(two, isLarge, { now }).transfer.id, '41-3');
+  // One in the general slot qualifies beside one in a reserved slot.
+  const beside = trace(line('start', '41-2', LARGE, 100_000), line('start', '41-3', LARGE, 100_100, 'shared-memory'), ...heartbeats(101_000, 106_000, '41-2', '41-3'));
+  assert.equal(heldTransfer(beside, isLarge, { now }).transfer.id, '41-2');
 });
 
-test('a running catch-up job without an admitted transfer does not make member 2 busy', () => {
-  const window = { from: 100_000, until: 140_000 };
-  // The regression: the job is running, the slot sampler sees work in flight,
-  // but no transfer of the large graph was ever admitted.
-  const samples = every(100_000, 140_000).map(at => ({ at, ...POLICY, inflight: 1, oldestActiveAgeMs: at - 95_000 }));
-  assert.deepEqual(busySlotCovered({ transfer: null, samples, ...window }),
-    { held: false, reason: 'no transfer of it was admitted to a sync slot', provenUntil: null });
-  assert.equal(busySlotCovered({ transfer: undefined, samples, ...window }).held, false);
+test('case 6 counts only on one general sync slot and no queue; the reserved slots beside it are the fixes', () => {
+  assert.equal(singleSlotProblem(POLICY), null);
+  // DKG_SYNC_GLOBAL_MAX_INFLIGHT=8 inherited by the node: spare general slots, so a busy slot proves nothing.
+  assert.equal(singleSlotProblem({ ...POLICY, limit: 8 }), 'the node runs 8 general sync slot(s), not one');
+  assert.equal(singleSlotProblem({ ...POLICY, queueLimit: 4 }), 'the node has a general sync queue of 4, not none');
+  assert.equal(singleSlotProblem({ ...POLICY, partitioned: true }), 'its general sync slots are partitioned, not one pool');
+  assert.equal(singleSlotProblem({ limit: null, queueLimit: null, partitioned: false }), 'its trace names no sync policy');
+  assert.equal(singleSlotProblem(undefined), 'its trace names no sync policy');
+  // The transfer's own record decides.
+  const spare = trace(line('start', '41-2', LARGE, 100_000, 'general', { limit: 8, queueLimit: 0, partitioned: false }), ...heartbeats(101_000, 106_000, '41-2'));
+  assert.equal(heldTransfer(spare, isLarge, { now: 106_500 }).why, 'the node runs 8 general sync slot(s), not one');
+  // The diagnostics report one pool of 3 slots and a queue of 16 for this node (#3258, #3302); the trace shows the
+  // general pool (1 slot, no queue) holding the transfer while a pull of the public graph runs in the reserved slot.
+  const fixed = trace(
+    line('start', '41-2', LARGE, 100_000), ...heartbeats(101_000, 106_000, '41-2'),
+    line('start', '41-3', PUBLIC, 106_200, 'shared-memory'), line('start', '41-4', 'durable:control-plane', 106_300, 'control-plane'),
+    holding(107_000, '41-2', '41-3', '41-4'), line('release', '41-3', PUBLIC, 107_400, 'shared-memory'), holding(108_000, '41-2', '41-4'),
+  );
+  assert.equal(heldTransfer(fixed, isLarge, { now: 106_500 }).transfer.id, '41-2');
+  const busy = busySlotCovered({ transfer: heldTransfer(fixed, isLarge, { now: 106_500 }).transfer, admissions: fixed, until: 107_500 });
+  assert.deepEqual(busy, { held: true, provenUntil: 108_000 });
+  assert.equal(receivedWhileHeld(107_500, busy), true);
+  assert.deepEqual(admissionsBySlot(fixed, isPublic, 106_000, 107_500), { 'shared-memory': 1 });
 });
 
-test('the slot is busy only while the admitted transfer is the work that holds it, through the whole window', () => {
-  const start = 95_000;
-  const window = { from: 100_000, until: 140_000 };
-  const holding = at => ({ at, ...POLICY, inflight: 1, oldestActiveAgeMs: at - start });
-  const held = busySlotCovered({ transfer: startedAt(start), samples: every(99_000, 141_000).map(holding), ...window });
-  assert.deepEqual(held, { held: true, provenUntil: 140_000 });
-  // A second admission beside it (the reserved shared-memory slot of a fix) is younger: still the same holder.
-  assert.equal(busySlotCovered({ transfer: startedAt(start), samples: every(100_000, 140_000).map(at => ({ ...holding(at), inflight: 2 })), ...window }).held, true);
-  // The transfer ends at 120 s: from then on the slot is free.
-  const freed = every(100_000, 140_000).map(at => (at < 120_000 ? holding(at) : { at, ...POLICY, inflight: 0, oldestActiveAgeMs: 0 }));
-  assert.deepEqual(busySlotCovered({ transfer: startedAt(start), samples: freed, ...window }), { held: false, reason: 'the sync slot was free', provenUntil: 119_000 });
-  // Other work holds the slot (its admission started at 118 s).
-  const other = every(100_000, 140_000).map(at => (at < 120_000 ? holding(at) : { ...holding(at), oldestActiveAgeMs: at - 118_000 }));
-  assert.deepEqual(busySlotCovered({ transfer: startedAt(start), samples: other, ...window }), { held: false, reason: 'the slot was held by other work', provenUntil: 119_000 });
-  // A later reading may name the start a little apart from the confirming one (its latency, the clock's drift),
-  // but not as far as work admitted after the transfer.
-  assert.equal(busySlotCovered({ transfer: startedAt(start), samples: every(100_000, 140_000).map(at => ({ ...holding(at), oldestActiveAgeMs: at - start - 200 })), ...window }).held, true);
-  assert.equal(busySlotCovered({ transfer: startedAt(start), samples: every(100_000, 140_000).map(at => ({ ...holding(at), oldestActiveAgeMs: at - start - 900 })), ...window }).reason,
-    'the slot was held by other work');
-  // No reading for 12 s, an unreadable reading, no reading at the end, and no reading at all prove nothing.
-  const gap = every(100_000, 140_000).filter(at => at < 110_000 || at > 120_000).map(holding);
-  assert.equal(busySlotCovered({ transfer: startedAt(start), samples: gap, ...window }).reason, 'no reading of the sync slot for 12 s');
-  const unreadable = every(100_000, 140_000).map(at => (at === 125_000 ? { at, unreadable: 'HTTP 503' } : holding(at)));
-  assert.equal(busySlotCovered({ transfer: startedAt(start), samples: unreadable, ...window }).reason, 'the sync slot could not be read (HTTP 503)');
-  const short = every(100_000, 130_000).map(holding);
-  assert.deepEqual(busySlotCovered({ transfer: startedAt(start), samples: short, ...window }), { held: false, reason: 'no reading of the sync slot for the last 10 s', provenUntil: 130_000 });
-  assert.deepEqual(busySlotCovered({ transfer: startedAt(start), samples: [], ...window }), { held: false, reason: 'no reading of the sync slot in the window', provenUntil: null });
+test('a receipt counts only up to the last trace line that shows the transfer holding the slot', () => {
+  const transfer = { id: '41-2', label: LARGE, startedAt: 95_000 };
+  // Still holding, as the holding lines after the window show: every receipt in it counts.
+  const holdingTrace = trace(line('start', '41-2', LARGE, 95_000), ...heartbeats(96_000, 141_000, '41-2'));
+  const held = busySlotCovered({ transfer, admissions: holdingTrace, until: 140_000 });
+  assert.deepEqual(held, { held: true, provenUntil: 141_000 });
+  for (const receivedAt of [100_000, 139_999, 140_000, 141_000]) assert.equal(receivedWhileHeld(receivedAt, held), true);
+  assert.equal(receivedWhileHeld(141_001, held), false);
+  // Released at 120 s: receipts until then count, later ones do not.
+  const released = busySlotCovered({ transfer, admissions: trace(line('start', '41-2', LARGE, 95_000), ...heartbeats(96_000, 119_000, '41-2'), line('release', '41-2', LARGE, 120_000)), until: 140_000 });
+  assert.deepEqual(released, { held: false, reason: 'the transfer gave up the slot', provenUntil: 120_000 });
+  assert.equal(receivedWhileHeld(119_000, released), true);
+  assert.equal(receivedWhileHeld(120_000, released), true);
+  assert.equal(receivedWhileHeld(120_001, released), false);
+  // Without a transfer, or with a trace that lost it, nothing counts.
+  const none = busySlotCovered({ transfer: null, admissions: [], until: 140_000 });
+  assert.deepEqual(none, { held: false, reason: 'no transfer of it was admitted to a sync slot', provenUntil: null });
+  assert.equal(receivedWhileHeld(100_000, none), false);
+  assert.deepEqual(busySlotCovered({ transfer, admissions: null, until: 140_000 }),
+    { held: false, reason: 'the trace no longer shows the transfer', provenUntil: null });
 });
 
-test('a reading taken before the window is no evidence, not even a free slot before the admission', () => {
-  // The finding: a free reading at 99 s, busy readings from 100 s to 110 s, writes and receipts in [101 s, 110 s].
-  const start = 100_000;
-  const busy = at => ({ at, ...POLICY, inflight: 1, oldestActiveAgeMs: at - start });
-  const samples = [{ at: 99_000, ...POLICY, inflight: 0, oldestActiveAgeMs: 0 }, ...every(100_000, 110_000).map(busy)];
-  assert.deepEqual(busySlotCovered({ transfer: startedAt(start), samples, from: 101_000, until: 110_000 }), { held: true, provenUntil: 110_000 });
-  // The second example: admission at 98.5 s, a free reading at 98 s, busy readings from 99 s to 110 s, window [100 s, 110 s].
-  const later = [{ at: 98_000, ...POLICY, inflight: 0, oldestActiveAgeMs: 0 }, ...every(99_000, 110_000).map(at => ({ ...busy(at), oldestActiveAgeMs: at - 98_500 }))];
-  assert.equal(busySlotCovered({ transfer: startedAt(98_500), samples: later, from: 100_000, until: 110_000 }).held, true);
-  // Inside the window a free reading still fails it.
-  const inside = every(100_000, 110_000).map(at => (at === 105_000 ? { at, ...POLICY, inflight: 0, oldestActiveAgeMs: 0 } : busy(at)));
-  assert.equal(busySlotCovered({ transfer: startedAt(start), samples: inside, from: 101_000, until: 110_000 }).reason, 'the sync slot was free');
+test('a lost release or a dead process ends the evidence at the last line that shows the transfer holding', () => {
+  // The review's example: the large transfer runs from 100,000 to 100,500 ms, but its release cannot be written. A
+  // pull of the public graph runs from 101,000 to 106,000 ms and delivers the writes; the trace is read at 107,000 ms.
+  // The holding lines name what holds a slot, so none after the transfer ended lists it.
+  const lost = trace(
+    line('start', '41-2', LARGE, 100_000), holding(100_400, '41-2'),
+    line('start', '41-3', PUBLIC, 101_000), ...heartbeats(101_400, 105_400, '41-3'), line('release', '41-3', PUBLIC, 106_000),
+  );
+  const confirmed = { id: '41-2', label: LARGE, startedAt: 100_000 };
+  const busy = busySlotCovered({ transfer: confirmed, admissions: lost, until: 106_000 });
+  assert.deepEqual(busy, { held: false, reason: 'no trace line shows the transfer holding the slot after then', provenUntil: 100_400 });
+  for (const receivedAt of [102_000, 105_000, 106_000]) assert.equal(receivedWhileHeld(receivedAt, busy), false);
+  // The node died at 103 s and came back as another process: nothing of the old one runs after its last line.
+  const restarted = trace(
+    line('start', '41-2', LARGE, 95_000), ...heartbeats(96_000, 103_000, '41-2'),
+    line('start', '77-1', PUBLIC, 110_000), ...heartbeats(111_000, 120_000, '77-1'),
+  );
+  const afterRestart = busySlotCovered({ transfer: { id: '41-2', label: LARGE, startedAt: 95_000 }, admissions: restarted, until: 120_000 });
+  assert.equal(afterRestart.provenUntil, 103_000);
+  assert.equal(receivedWhileHeld(112_000, afterRestart), false);
 });
 
-test('case 6 counts only on one sync slot and no queue, whatever the environment gave the node', () => {
-  assert.equal(singleSlotProblem({ at: 1, ...POLICY, inflight: 1 }), null);
-  // DKG_SYNC_GLOBAL_MAX_INFLIGHT=8 inherited by the node: spare slots, so a busy slot proves nothing.
-  assert.equal(singleSlotProblem({ ...POLICY, inflightLimit: 8 }), 'the node runs 8 sync slot(s), not one');
-  assert.equal(singleSlotProblem({ ...POLICY, queueLimit: 4 }), 'the node has a sync queue of 4, not none');
-  assert.equal(singleSlotProblem({ ...POLICY, capacityModel: 'partitioned' }), 'the sync slots are not one shared pool (partitioned)');
-  assert.equal(singleSlotProblem({ ...POLICY, inflightLimit: null }), 'the node runs an unknown number of sync slot(s), not one');
-  assert.equal(singleSlotProblem({ at: 1, unreadable: 'HTTP 401' }), 'the sync slots could not be read (HTTP 401)');
-  assert.equal(singleSlotProblem(undefined), 'the sync slots could not be read (no reading)');
-  // In the window, every reading must show it.
-  const start = 95_000;
-  const spare = every(100_000, 110_000).map(at => ({ at, ...POLICY, inflightLimit: 8, inflight: 1, oldestActiveAgeMs: at - start }));
-  assert.deepEqual(busySlotCovered({ transfer: startedAt(start), samples: spare, from: 100_000, until: 110_000 }),
-    { held: false, reason: 'the node runs 8 sync slot(s), not one', provenUntil: null });
-  const queued = every(100_000, 110_000).map(at => ({ at, ...POLICY, queueLimit: 20, inflight: 1, oldestActiveAgeMs: at - start }));
-  assert.equal(busySlotCovered({ transfer: startedAt(start), samples: queued, from: 100_000, until: 110_000 }).reason, 'the node has a sync queue of 20, not none');
+test('another admission in the one general slot while the transfer held it contradicts the trace: nothing counts', () => {
+  const contradicted = trace(
+    line('start', '41-2', LARGE, 100_000), line('start', '41-3', PUBLIC, 103_000), ...heartbeats(101_000, 110_000, '41-2', '41-3'),
+  );
+  const busy = busySlotCovered({ transfer: { id: '41-2', label: LARGE, startedAt: 100_000 }, admissions: contradicted, until: 108_000 });
+  assert.deepEqual(busy, { held: false, reason: `the trace shows ${PUBLIC} in the one general slot while the transfer held it`, provenUntil: null });
+  assert.equal(receivedWhileHeld(104_000, busy), false);
+  // A general admission that ended as the transfer started, or started once it ended, is no contradiction.
+  const sequence = trace(
+    line('start', '41-1', PUBLIC, 90_000), line('release', '41-1', PUBLIC, 100_000),
+    line('start', '41-2', LARGE, 100_000), ...heartbeats(101_000, 109_000, '41-2'), line('release', '41-2', LARGE, 110_000),
+    line('start', '41-3', PUBLIC, 110_000), line('release', '41-3', PUBLIC, 111_000),
+  );
+  assert.deepEqual(busySlotCovered({ transfer: { id: '41-2', label: LARGE, startedAt: 100_000 }, admissions: sequence, until: 108_000 }), { held: true, provenUntil: 110_000 });
+  // Pulls in reserved slots beside the transfer are the fix, not a contradiction.
+  assert.deepEqual(admissionsBySlot(sequence, isPublic, 100_500, 108_000), {});
+  assert.deepEqual(admissionsBySlot(sequence, isPublic, 89_000, 112_000), { general: 2 });
 });
 
-test('a pull admitted once the large transfer ended is not the transfer (the example of the review)', () => {
-  // The large transfer runs from 100,000 to 100,500 ms. A pull of the public
-  // graph is admitted at 101,000 ms; the readings from 102,000 to 106,000 ms
-  // show that pull in the slot.
-  const pull = at => ({ sentAt: T(at - 5), at: T(at), ...POLICY, inflight: 1, oldestActiveAgeMs: at - 101_000, oldestOperations: ['shared-memory'] });
-  const samples = every(102_000, 106_000).map(pull);
-  // Identified by its start (a reading at 100,200 ms named it), the transfer is not what those readings show.
-  const transfer = heldTransferAt({ sentAt: T(100_195), at: T(100_200), oldestActiveAgeMs: 200 });
-  assert.deepEqual(busySlotCovered({ transfer, samples, from: T(101_500), until: T(106_000) }),
-    { held: false, reason: 'the slot was held by other work', provenUntil: null });
-  // Nor can it be confirmed at all: by the time it had run for a second it was gone,
-  const log = [running(100_000, `shared-memory:${LARGE}:Owner123`), running(101_000, `shared-memory:${PUBLIC}:Owner123`)].join('\n');
-  assert.equal(heldTransfer({ sentAt: T(100_495), at: T(100_500), ...POLICY, inflight: 1, oldestActiveAgeMs: 500 }, admissionRecords(log), isLarge).why,
-    'the running work had run for less than 1 s');
-  // and no reading of the pull confirms a transfer: the log cannot tell which of the two started then.
-  for (const reading of samples) {
-    assert.equal(heldTransfer(reading, admissionRecords(log), isLarge).why, 'its log cannot tell the transfer from other work admitted at about the same time');
-  }
-  // The judgement this replaces (the log's start within 2.5 s of a reading's) took every one of them for the transfer.
-  assert.ok(samples.every(sample => Math.abs(sample.at - sample.oldestActiveAgeMs - T(100_000)) <= 2500));
+test('the same pull taking the general slot again at once continues the transfer (gate run of 556ad8d48)', () => {
+  // Member 2's trace in that run, in ms from the transfer's start: the owner's pull of the large graph released the slot
+  // after 18,074 ms (its round ended incomplete) and took it again 1 ms later until 25,528 ms; then the Cores' pulls of
+  // the large graph. The writes were shared from about 6 s on and arrived at about 19 s and 22 s.
+  const CORE_LARGE = 'shared-memory:0xabc/issue-3251-large-1:Core456';
+  const gate = trace(
+    line('start', '95-81', LARGE, 0), ...heartbeats(1_000, 18_000, '95-81'), line('release', '95-81', LARGE, 18_074),
+    line('start', '95-83', LARGE, 18_075), ...heartbeats(19_000, 25_000, '95-83'), line('release', '95-83', LARGE, 25_528),
+    line('start', '95-87', CORE_LARGE, 25_530), line('release', '95-87', CORE_LARGE, 25_565),
+  );
+  // Case 6 confirmed the transfer 6 s in, from the lines written by then.
+  const transfer = heldTransfer(trace(line('start', '95-81', LARGE, 0), ...heartbeats(1_000, 6_000, '95-81')), isLarge, { now: 6_000 }).transfer;
+  assert.equal(transfer.id, '95-81');
+  assert.deepEqual(transferChain(transfer, gate).map(admission => admission.id), ['95-81', '95-83']);
+  const busy = busySlotCovered({ transfer, admissions: gate, until: 23_000 });
+  assert.deepEqual(busy, { held: true, provenUntil: 25_528 });
+  for (const receivedAt of [19_000, 22_000]) assert.equal(receivedWhileHeld(receivedAt, busy), true);
+  // With case 6's predicate the Cores' pulls of the large graph that follow at once continue it too.
+  assert.deepEqual(transferChain(transfer, gate, { isTransfer: isLarge }).map(admission => admission.id), ['95-81', '95-83', '95-87']);
+  assert.deepEqual(busySlotCovered({ transfer, admissions: gate, until: 25_550, isTransfer: isLarge }), { held: true, provenUntil: 25_565 });
+  // Past the last release the evidence ends, as for one admission.
+  const later = busySlotCovered({ transfer, admissions: gate, until: 30_000, isTransfer: isLarge });
+  assert.deepEqual(later, { held: false, provenUntil: 25_565, reason: 'the transfer gave up the slot' });
+  assert.equal(receivedWhileHeld(26_000, later), false);
 });
 
-// The identity a reading of the transfer gives, without the checks that need a long transfer.
-function heldTransferAt({ sentAt, at, oldestActiveAgeMs }) {
-  return { ...startInterval({ sentAt, at, inflight: 1, oldestActiveAgeMs }), operations: ['shared-memory'] };
-}
-
-test('a reading confirms the transfer only when the log ties its start to the large graph and nothing else', () => {
-  // Two pulls of the large graph from two peers, admitted in the same second (seen on a devnet), then the transfer runs.
-  const log = [
-    running(4_000, `shared-memory:${PUBLIC}:Owner123`),
-    running(6_100, 'durable:control-plane'),
-    running(6_200, `shared-memory:${LARGE}:CoreAbcd`),
-    running(6_400, `shared-memory:${LARGE}:Owner123`),
-  ].join('\n');
-  const records = admissionRecords(log);
-  const reading = (at, extra = {}) => ({ sentAt: T(at - 8), at: T(at), ...POLICY, inflight: 1, oldestActiveAgeMs: at - 6_400, oldestOperations: ['shared-memory'], ...extra });
-  const held = heldTransfer(reading(9_400), records, isLarge);
-  assert.deepEqual(held, { transfer: { from: T(6_391), to: T(6_400), operations: ['shared-memory'] } });
-  // Either pull of the large graph can be the running one; the control-plane admission of that second is another class.
-  assert.deepEqual(candidateAdmissions(reading(9_400), records).map(record => record.label), [`shared-memory:${LARGE}:CoreAbcd`, `shared-memory:${LARGE}:Owner123`]);
-  // A node that names no class of its running work: the control-plane admission could be it, so nothing is confirmed.
-  assert.equal(heldTransfer(reading(9_400, { oldestOperations: undefined }), records, isLarge).why,
-    'its log cannot tell the transfer from other work admitted at about the same time');
-  // What does not confirm it.
-  assert.equal(heldTransfer(undefined, records, isLarge).why, 'no reading yet');
-  assert.equal(heldTransfer(reading(9_400, { inflightLimit: 8 }), records, isLarge).why, 'the node runs 8 sync slot(s), not one');
-  assert.equal(heldTransfer(reading(9_400, { inflight: 0 }), records, isLarge).why, 'its slot was free');
-  assert.equal(heldTransfer(reading(9_400, { sentAt: T(9_000) }), records, isLarge).why, 'no reading came soon enough to tell when the running work started');
-  assert.equal(heldTransfer(reading(7_300), records, isLarge).why, 'the running work had run for less than 1 s');
-  // The pull of the public graph at 4 s still in the slot, and work the log does not name.
-  assert.equal(heldTransfer(reading(9_400, { oldestActiveAgeMs: 5_400 }), records, isLarge).why, 'its slot was held by other work');
-  assert.equal(heldTransfer(reading(9_400, { oldestActiveAgeMs: 7_400 }), records, isLarge).why, 'its log shows no admission that started when the running work did');
+test('only an immediate re-admission of the same pull in the general slot, with nothing else in the slot, continues the transfer', () => {
+  const start = line('start', '41-2', LARGE, 100_000);
+  const held = [...heartbeats(101_000, 109_000, '41-2'), line('release', '41-2', LARGE, 110_000)];
+  const transfer = { id: '41-2', label: LARGE, startedAt: 100_000 };
+  const gaveUp = { held: false, provenUntil: 110_000, reason: 'the transfer gave up the slot' };
+  // Too late: the slot stood free for longer than a pull takes to come back.
+  const late = trace(start, ...held, line('start', '41-3', LARGE, 110_000 + TRANSFER_READMIT_MS + 1), ...heartbeats(111_000, 125_000, '41-3'));
+  assert.deepEqual(busySlotCovered({ transfer, admissions: late, until: 120_000 }), gaveUp);
+  // Without case 6's predicate only the same pull continues it, not another peer's pull of the large graph.
+  const otherPeer = trace(start, ...held, line('start', '41-3', 'shared-memory:0xabc/issue-3251-large-1:Core456', 110_001), ...heartbeats(111_000, 125_000, '41-3'));
+  assert.deepEqual(transferChain(transfer, otherPeer).map(admission => admission.id), ['41-2']);
+  assert.deepEqual(transferChain(transfer, otherPeer, { isTransfer: isLarge }).map(admission => admission.id), ['41-2', '41-3']);
+  // A pull of another graph, or the same pull in a reserved slot, never continues it.
+  const otherGraph = trace(start, ...held, line('start', '41-3', PUBLIC, 110_001), ...heartbeats(111_000, 125_000, '41-3'));
+  assert.deepEqual(transferChain(transfer, otherGraph, { isTransfer: isLarge }).map(admission => admission.id), ['41-2']);
+  const reserved = trace(start, ...held, line('start', '41-3', LARGE, 110_001, 'shared-memory'), ...heartbeats(111_000, 125_000, '41-3'));
+  assert.deepEqual(busySlotCovered({ transfer, admissions: reserved, until: 120_000, isTransfer: isLarge }), gaveUp);
+  // Another admission in the general slot between the two contradicts the trace: nothing counts.
+  const between = trace(start, ...held, line('start', '41-9', PUBLIC, 110_050), line('release', '41-9', PUBLIC, 110_100),
+    line('start', '41-3', LARGE, 110_200), ...heartbeats(111_000, 125_000, '41-3'));
+  assert.deepEqual(busySlotCovered({ transfer, admissions: between, until: 120_000 }),
+    { held: false, reason: `the trace shows ${PUBLIC} in the one general slot while the transfer held it`, provenUntil: null });
+  // A re-admission whose own release was lost ends the evidence at its last holding line.
+  const lost = trace(start, ...held, line('start', '41-3', LARGE, 110_001), ...heartbeats(111_000, 115_000, '41-3'));
+  assert.deepEqual(busySlotCovered({ transfer, admissions: lost, until: 120_000 }),
+    { held: false, provenUntil: 115_000, reason: 'no trace line shows the transfer holding the slot after then' });
+  // The first admission's release was lost: nothing can continue it.
+  const unreleased = trace(start, ...heartbeats(101_000, 109_000, '41-2'), line('start', '41-3', LARGE, 110_001), ...heartbeats(111_000, 125_000, '41-3'));
+  assert.deepEqual(transferChain(transfer, unreleased).map(admission => admission.id), ['41-2']);
 });
 
-test('in the window, work of another class fails the transfer; a reading too slow to tell is no evidence', () => {
-  const start = 95_000;
-  const transfer = startedAt(start);
-  const holding = at => ({ sentAt: at - 10, at, ...POLICY, inflight: 1, oldestActiveAgeMs: at - start, oldestOperations: ['shared-memory'] });
-  // The evidence runs to the request of the last reading of the transfer: here one taken after the window.
-  assert.deepEqual(busySlotCovered({ transfer, samples: every(100_000, 111_000).map(holding), from: 100_000, until: 110_000 }), { held: true, provenUntil: 110_990 });
-  // The oldest running work is of another class: it is not the transfer, whatever its age says.
-  const durable = every(100_000, 110_000).map(at => (at >= 105_000 ? { ...holding(at), oldestOperations: ['durable'] } : holding(at)));
-  assert.deepEqual(busySlotCovered({ transfer, samples: durable, from: 100_000, until: 110_000 }), { held: false, reason: 'the slot was held by other work', provenUntil: 103_990 });
-  // A reading that took 3 s cannot tell the transfer from work admitted just after it: no evidence either way,
-  assert.deepEqual(busySlotCovered({ transfer, samples: every(100_000, 111_000).map(at => (at === 106_000 ? { ...holding(at), sentAt: at - 3_000 } : holding(at))), from: 100_000, until: 110_000 }),
-    { held: true, provenUntil: 110_990 });
-  // so a stretch of them is a gap.
-  const slow = every(100_000, 115_000).map(at => (at > 105_000 ? { ...holding(at), sentAt: at - 3_000 } : holding(at)));
-  assert.deepEqual(busySlotCovered({ transfer, samples: slow, from: 100_000, until: 115_000 }),
-    { held: false, reason: 'no reading of the sync slot for 6 s (5 more came too slowly to tell which work held it)', provenUntil: 104_990 });
-  assert.deepEqual(busySlotCovered({ transfer, samples: slow.filter(sample => sample.at > 105_000 && sample.at <= 108_000), from: 105_500, until: 108_000 }),
-    { held: false, reason: 'no reading of the sync slot for 3 s (3 more came too slowly to tell which work held it)', provenUntil: null });
+test('the trace is read for judgement once the transfer as far as it continues reached past the window', () => {
+  const transfer = { id: '41-2', label: LARGE, startedAt: 100_000 };
+  const until = 120_000;
+  // Still holding with a line after the window, or released after it: ready.
+  assert.equal(transferSettled(transfer, trace(line('start', '41-2', LARGE, 100_000), ...heartbeats(101_000, 121_000, '41-2')), { until, now: 121_100 }), true);
+  assert.equal(transferSettled(transfer, trace(line('start', '41-2', LARGE, 100_000), line('release', '41-2', LARGE, 120_500)), { until, now: 120_600 }), true);
+  // Holding, but no line after the window yet: wait for one.
+  assert.equal(transferSettled(transfer, trace(line('start', '41-2', LARGE, 100_000), ...heartbeats(101_000, 119_000, '41-2')), { until, now: 119_500 }), false);
+  // Released before the window ended: wait until the pull had its chance to take the slot again, then judge.
+  const released = trace(line('start', '41-2', LARGE, 100_000), line('release', '41-2', LARGE, 115_000));
+  assert.equal(transferSettled(transfer, released, { until, now: 115_000 + TRANSFER_READMIT_MS }), false);
+  assert.equal(transferSettled(transfer, released, { until, now: 115_000 + TRANSFER_READMIT_MS + 1 }), true);
+  // Taken again: the re-admission decides.
+  const again = trace(line('start', '41-2', LARGE, 100_000), line('release', '41-2', LARGE, 115_000), line('start', '41-3', LARGE, 115_001), ...heartbeats(116_000, 119_000, '41-3'));
+  assert.equal(transferSettled(transfer, again, { until, now: 120_000 }), false);
+  // A trace that no longer shows the transfer has nothing to wait for.
+  assert.equal(transferSettled(transfer, [], { until, now: 120_000 }), true);
+  assert.equal(transferSettled(transfer, null, { until, now: 120_000 }), true);
 });
 
-test('a receipt counts only when a reading taken at or after it still showed the transfer (the examples of the review)', () => {
-  const start = 95_000;
-  const transfer = startedAt(start);
-  const holding = at => ({ at, ...POLICY, inflight: 1, oldestActiveAgeMs: at - start, oldestOperations: ['shared-memory'] });
-  // The last reading of the transfer is at 100.0 s; the transfer ends at 100.1 s, a pull of the public graph
-  // is admitted at 100.2 s and delivers the write at 100.9 s; the next reading shows the pull.
-  const pull = { at: 101_000, ...POLICY, inflight: 1, oldestActiveAgeMs: 800, oldestOperations: ['shared-memory'] };
-  const replaced = busySlotCovered({ transfer, samples: [...every(97_000, 100_000).map(holding), pull], from: 97_000, until: 102_000 });
-  assert.deepEqual(replaced, { held: false, reason: 'the slot was held by other work', provenUntil: 100_000 });
-  assert.equal(receivedWhileHeld(100_900, replaced), false);
-  // The second example: the last reading of the transfer at 10.0 s, the transfer ends at 10.1 s, both reads
-  // find the write at 10.5 s, and the next reading shows a free slot.
-  const short = at => ({ at, ...POLICY, inflight: 1, oldestActiveAgeMs: at - 5_000, oldestOperations: ['shared-memory'] });
-  const freed = busySlotCovered({ transfer: startedAt(5_000), samples: [...every(7_000, 10_000).map(short), { at: 11_000, ...POLICY, inflight: 0, oldestActiveAgeMs: 0 }], from: 7_000, until: 12_000 });
-  assert.deepEqual(freed, { held: false, reason: 'the sync slot was free', provenUntil: 10_000 });
-  assert.equal(receivedWhileHeld(10_500, freed), false);
-  // The grace this replaces (one second past the last reading of the transfer) took both.
-  assert.ok(100_900 <= replaced.provenUntil + 1000 && 10_500 <= freed.provenUntil + 1000);
-  // Between two readings of the transfer the same admission held the slot throughout, also up to the last one.
-  const through = busySlotCovered({ transfer, samples: every(100_000, 111_000).map(holding), from: 100_000, until: 110_500 });
-  assert.deepEqual(through, { held: true, provenUntil: 111_000 });
-  for (const receivedAt of [100_000, 105_500, 110_500]) assert.equal(receivedWhileHeld(receivedAt, through), true);
-  assert.equal(receivedWhileHeld(105_500, { held: false, reason: 'no transfer of it was admitted to a sync slot', provenUntil: null }), false);
-  // A reading counts from the moment its request went out: one answered after the receipt but asked before it proves nothing about it.
-  const asked = at => ({ ...holding(at), sentAt: at - 40 });
-  const ended = busySlotCovered({ transfer, samples: every(100_000, 105_000).map(asked), from: 100_000, until: 106_000 });
-  assert.deepEqual(ended, { held: false, reason: 'no reading of the sync slot was taken at or after the end of the window', provenUntil: 104_960 });
-  assert.equal(receivedWhileHeld(104_960, ended), true);
-  assert.equal(receivedWhileHeld(104_980, ended), false);
+test('a continuation that starts and ends in the same millisecond is taken once, and the chain ends', () => {
+  // transferChain runs synchronously: a chain that never ended would hang this process, so it runs in a child with a
+  // deadline. The transfer releases at 110,000 ms; the same pull takes the slot again at 110,001 ms and releases it
+  // in that millisecond; a Core's pull of the large graph follows at once.
+  const code = `
+    const { traceAdmissions } = await import(${JSON.stringify(new URL('../qa/admission-trace.mjs', import.meta.url).href)});
+    const { transferChain } = await import(${JSON.stringify(new URL('../qa/busy-slot.mjs', import.meta.url).href)});
+    const lines = ${JSON.stringify([
+      line('start', '41-2', LARGE, 100_000), line('release', '41-2', LARGE, 110_000),
+      line('start', '41-3', LARGE, 110_001), line('release', '41-3', LARGE, 110_001),
+      line('start', '41-4', 'shared-memory:0xabc/issue-3251-large-1:Core456', 110_001),
+      line('release', '41-4', 'shared-memory:0xabc/issue-3251-large-1:Core456', 110_050),
+    ])};
+    const isLarge = admission => admission.label.includes(':0xabc/issue-3251-large-1:');
+    const transfer = { id: '41-2', label: ${JSON.stringify(LARGE)} };
+    console.log(JSON.stringify([
+      transferChain(transfer, traceAdmissions(lines.join('\\n'))).map(admission => admission.id),
+      transferChain(transfer, traceAdmissions(lines.join('\\n')), { isTransfer: isLarge }).map(admission => admission.id),
+    ]));
+  `;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(child.status, 0, child.error?.message ?? child.stderr);
+  assert.deepEqual(JSON.parse(child.stdout), [['41-2', '41-3'], ['41-2', '41-3', '41-4']]);
 });

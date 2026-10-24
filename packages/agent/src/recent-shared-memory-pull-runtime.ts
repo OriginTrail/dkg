@@ -9,11 +9,19 @@
  * the graph is not catalog-owned), plus, for a catalog-owned graph, a head
  * replay of the graph's catalog from the connected peers, which carries the
  * root scope.
+ *
+ * The owner of a graph pulls it too. A member that reaches the graph only
+ * through Cores (a relay-only Edge) shares into it through them, and the
+ * owner holds such a share only once it fetched it from one of them.
+ *
+ * A member of a curated public graph keeps the graph in use (#3421): one of
+ * its agents is on the graph's allowlist, and the graph is not its own. When
+ * no owner is connected, the owner is reached through the route a share to
+ * it takes (`swm/relay-only-share-routes.ts`).
  */
 
 import {
   createOperationContext,
-  deriveCuratorDidFromCgId,
   DKGEvent,
   SYSTEM_CONTEXT_GRAPHS,
   type OperationContext,
@@ -21,13 +29,12 @@ import {
 import type { ContextGraphSub, DKGAgentConfig, SharedMemorySyncResult } from './dkg-agent-types.js';
 import { resolveBoundedCuratorSyncPeer } from './dkg-agent-cg-resolve.js';
 import type { DKGAgent } from './dkg-agent.js';
-import {
-  durableSyncEnabled,
-  syncOnConnectEnabled,
-  syncReconcilerEnabled,
-} from './internal/lifecycle-sync-policy.js';
+import { durableSyncEnabled, syncOnConnectEnabled } from './internal/lifecycle-sync-policy.js';
+import { listsLocalAllowedAgent } from './internal/local-private-member.js';
+import { routeShareToGraphOwner, type GraphOwnerRoutePorts } from './swm/relay-only-share-routes.js';
 import type { SyncAdmissionSource } from './sync/policy.js';
 import {
+  RECENT_SHARED_MEMORY_MAX_GRAPHS,
   RECENT_SHARED_MEMORY_PULL_TICK_MS,
   RecentSharedMemoryPulls,
   type RecentSharedMemoryPullOptions,
@@ -48,7 +55,6 @@ interface RecentSharedMemoryPullAgent {
     readonly libp2p: { getPeers(): ReadonlyArray<{ toString(): string }> };
   };
   readonly subscribedContextGraphs: ReadonlyMap<string, ContextGraphSub>;
-  readonly localAgents: ReadonlyMap<string, unknown>;
   readonly preferredSyncPeers: Map<string, string>;
   readonly networkAdmissionCoordinator: { isAcceptedPeer(peerId: string): boolean };
   readonly eventBus: {
@@ -56,15 +62,18 @@ interface RecentSharedMemoryPullAgent {
     off(event: string, handler: (data: unknown) => void): void;
   };
   readonly log: { debug(ctx: OperationContext, message: string): void };
+  readonly localAgents: ReadonlyMap<string, unknown>;
   isPrivateContextGraph(contextGraphId: string): Promise<boolean>;
   isCuratorOf(contextGraphId: string): Promise<boolean>;
+  getCgMeta(contextGraphId: string): Promise<Parameters<typeof listsLocalAllowedAgent>[0]>;
+  graphOwnerRoutePortsV1(): GraphOwnerRoutePorts;
   canUseSharedMemoryForContextGraph(contextGraphId: string): Promise<boolean>;
   selectCatchupPeers(peers: Array<{ toString(): string }>): Array<{ toString(): string }>;
   rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId: string): boolean;
   syncSharedMemoryFromPeerDetailed(
     remotePeerId: string,
     contextGraphIds: string[],
-    options?: { source?: SyncAdmissionSource },
+    options?: { source?: SyncAdmissionSource; reservedSlotOnly?: boolean },
   ): Promise<SharedMemorySyncResult>;
   requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
     contextGraphId: string,
@@ -82,14 +91,17 @@ export interface RecentSharedMemoryPullRuntime {
 }
 
 /**
- * On for Edges whose automatic sync of shared memory is on (the switches the
- * peer reconciler obeys). Cores host every public graph and receive its
- * writes as hosts, so they do not run it.
+ * On for Edges whose sync of shared memory is on: sync on connect, durable
+ * sync and shared memory on connect. The periodic peer reconciler is not one
+ * of them: a node that runs without it (so that it does not compete with a
+ * large transfer for a single sync slot) has nothing else that pulls a graph
+ * it already synced, and the pull runs in a reserved shared-memory slot, not
+ * a general one. Cores host every public graph and receive its writes as
+ * hosts, so they do not run it.
  * Env DKG_RECENT_SHARED_MEMORY_PULL_ENABLED=0 turns it off.
  */
 export function recentSharedMemoryPullsEnabled(config: DKGAgentConfig): boolean {
   return (config.nodeRole ?? 'edge') === 'edge'
-    && syncReconcilerEnabled(config)
     && syncOnConnectEnabled(config)
     && durableSyncEnabled(config)
     && (config.syncSharedMemoryOnConnect ?? true)
@@ -103,7 +115,8 @@ function errorMessage(error: unknown): string {
 /**
  * Start the safety net next to the peer reconciler when
  * {@link recentSharedMemoryPullsEnabled}: the reconciler re-pulls a synced
- * peer only every 10 to 15 min. Returns null when it does not run.
+ * peer only every 10 to 15 min, and not at all where it is switched off.
+ * Returns null when it does not run.
  */
 export function startRecentSharedMemoryPullsIfEnabled(
   agentObject: DKGAgent | object,
@@ -129,17 +142,7 @@ export function startRecentSharedMemoryPulls(
   const ownerTtlMs = options.ownerTtlMs ?? RECENT_SHARED_MEMORY_OWNER_TTL_MS;
   const owners = new Map<string, { readonly peerId?: string; readonly at: number }>();
 
-  // Who owns the graph decides whether to pull it at all, so only what the
-  // graph id says (its owner wallet is a local agent) or, for an id without
-  // one, the curator the graph's metadata names counts. Where to pull from is
-  // a routing preference and may come from weaker hints (`ownerPeerOf`).
-  const ownedHere = async (contextGraphId: string): Promise<boolean> => {
-    const ownerDid = deriveCuratorDidFromCgId(contextGraphId);
-    if (ownerDid === null) return agent.isCuratorOf(contextGraphId);
-    const owner = ownerDid.slice('did:dkg:agent:'.length).toLowerCase();
-    return [...agent.localAgents.keys()].some((address) => address.toLowerCase() === owner);
-  };
-
+  // Where to pull from is a routing preference and may come from weak hints.
   const ownerPeerOf = async (contextGraphId: string): Promise<string | undefined> => {
     const cached = owners.get(contextGraphId);
     if (cached !== undefined && now() - cached.at < ownerTtlMs) return cached.peerId;
@@ -153,18 +156,38 @@ export function startRecentSharedMemoryPulls(
     return resolution.peerId;
   };
 
+  const subscribedAlwaysOn = (contextGraphId: string): boolean => {
+    const subscription = agent.subscribedContextGraphs.get(contextGraphId);
+    return !SYSTEM_CONTEXT_GRAPH_IDS.has(contextGraphId)
+      && subscription?.subscribed === true && subscription.syncMode === 'always-on';
+  };
+  // A member of a public graph, not its owner: one of this node's agents is on its allowlist.
+  const isMember = async (contextGraphId: string): Promise<boolean> => (
+    !(await agent.isPrivateContextGraph(contextGraphId))
+    && listsLocalAllowedAgent(await agent.getCgMeta(contextGraphId), [...agent.localAgents.keys()])
+    && !(await agent.isCuratorOf(contextGraphId))
+  );
+
   const pulls = new RecentSharedMemoryPulls({
     eligible: async (contextGraphId) => {
-      if (SYSTEM_CONTEXT_GRAPH_IDS.has(contextGraphId)) return false;
-      const subscription = agent.subscribedContextGraphs.get(contextGraphId);
-      if (subscription?.subscribed !== true || subscription.syncMode !== 'always-on') return false;
-      if (await agent.isPrivateContextGraph(contextGraphId)) return false;
-      // The owner holds every write its members send it.
-      return !(await ownedHere(contextGraphId));
+      if (!subscribedAlwaysOn(contextGraphId)) return false;
+      // The graph's owner as well: see the module comment.
+      return !(await agent.isPrivateContextGraph(contextGraphId));
     },
+    memberGraphs: async () => {
+      const members: string[] = [];
+      for (const contextGraphId of agent.subscribedContextGraphs.keys()) {
+        if (members.length >= RECENT_SHARED_MEMORY_MAX_GRAPHS) break;
+        if (subscribedAlwaysOn(contextGraphId) && await isMember(contextGraphId).catch(() => false)) {
+          members.push(contextGraphId);
+        }
+      }
+      return members;
+    },
+    connectOwner: async (contextGraphId) => routeShareToGraphOwner(agent.graphOwnerRoutePortsV1(), contextGraphId),
     sources: async (contextGraphId) => {
       // Authority not confirmed yet: the sync would only be refused. Next interval.
-      if (!(await agent.canUseSharedMemoryForContextGraph(contextGraphId))) return { owners: [], others: [] };
+      if (!(await agent.canUseSharedMemoryForContextGraph(contextGraphId))) return null;
       const owner = await ownerPeerOf(contextGraphId);
       const connected = agent.selectCatchupPeers([...agent.node.libp2p.getPeers()])
         .map((peer) => peer.toString())
@@ -175,8 +198,13 @@ export function startRecentSharedMemoryPulls(
       };
     },
     pull: async (contextGraphId, peerId) => {
+      // A pull reads the graph's whole shared memory from the peer. On a node
+      // with one general sync slot and no queue, that slot is for the large
+      // transfers: holding it would refuse each of them for the whole pull.
+      // A pull that gets no reserved slot within 60 s waits for the next interval.
       const shared = await agent.syncSharedMemoryFromPeerDetailed(peerId, [contextGraphId], {
         source: 'reconcile',
+        reservedSlotOnly: true,
       });
       if (!agent.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
         // The catalog owns this graph's root scope: replay its heads.

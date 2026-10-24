@@ -13,40 +13,6 @@
 // Retiring a gap is removing its entry, and its tests.
 
 /**
- * #3264: a member of a registered public graph never obtains the graph's
- * definition: only the owner holds the declaration, and a member asks only
- * the peers it is connected to for it. A member that reaches only the owner
- * (member-sharing), or that reaches the network through relays and never the
- * owner (one-graph promotion), is left without it. It covers checks of a
- * member, never of the owner, on a graph that is registered on chain and
- * public: the member's definition (the gap itself), its `synced` flag, and
- * its own writes into the graph. On a private graph the member joins through the signed request flow,
- * which #3264 is not about. A failure of one is the gap only with evidence of
- * the gap's state and of what preceded it: the member lacked the definition
- * (in the same listing, or right after its write was refused, which also
- * takes the refusal's structured code, never the wording of its message), and
- * it was never seen holding it before. A member that holds the definition,
- * that held it and lost it, or whose state is not known, fails.
- */
-const REGISTERED_DEFINITION = {
-  issue: '#3264',
-  what: 'a member of a registered public graph never obtains the graph\'s definition from the peers it reaches',
-  covers: ({ check, evidence }) => evidence?.registered === true && evidence?.private === false && evidence?.member === true
-    && ['definition', 'synced', 'write-refused'].includes(check),
-  isTheGap: ({ check }) => check === 'definition',
-  failure({ check, evidence }) {
-    const refusedAsUnknown = check !== 'write-refused' || evidence.errorCode === 'CONTEXT_GRAPH_NOT_FOUND';
-    if (evidence.definitionHeld === false && evidence.definitionSeen === false && refusedAsUnknown) {
-      return { expected: true, because: { synced: 'it holds no definition of the graph', 'write-refused': 'the author holds no definition of the graph' }[check] };
-    }
-    if (evidence.definitionHeld === false && evidence.definitionSeen === true) {
-      return { expected: false, because: `${check === 'write-refused' ? 'the author' : 'it'} held the definition before and lost it, so this is not #3264` };
-    }
-    return { expected: false, because: check === 'synced' && evidence.definitionHeld === true ? 'it holds the definition, so this is not #3264' : undefined };
-  },
-};
-
-/**
  * #3293: an Edge that holds a registered graph's definition does not know the
  * graph's sub-graphs (the declaration it pulls carries no sub-graph
  * registration), and its first write into a sub-graph fails with HTTP 500
@@ -134,7 +100,13 @@ const HELD_DATA_NEVER_SYNCED = {
   },
 };
 
-export const KNOWN_GAPS = [REGISTERED_DEFINITION, SUB_GRAPH_UNREGISTERED, MEMBER_PROMOTION, HELD_DATA_NEVER_SYNCED];
+/**
+ * The open gaps. #3264 (a member of a registered graph that reaches only the
+ * owner never obtained the graph's definition) was retired once its checks
+ * held in every run: the member now takes the definition from a Core that
+ * hosts the graph, or from the chain.
+ */
+export const KNOWN_GAPS = [SUB_GRAPH_UNREGISTERED, MEMBER_PROMOTION, HELD_DATA_NEVER_SYNCED];
 
 /**
  * A check's result with the known gaps applied: { verdict: 'pass' | 'quiet' |

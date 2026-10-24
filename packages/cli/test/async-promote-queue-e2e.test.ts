@@ -121,6 +121,7 @@ describe('async-promote queue — end-to-end (routes + worker + queue)', () => {
       },
       resolveAgentByToken: (token: string) => (token === requestToken ? tokenAgentAddress : undefined),
       assertion: {
+        prepareQueuedShare: async (job: any) => ({ job }),
         async promote(
           contextGraphId: string,
           name: string,

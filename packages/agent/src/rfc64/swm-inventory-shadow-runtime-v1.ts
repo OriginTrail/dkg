@@ -1,3 +1,6 @@
+import { AsyncResource } from 'node:async_hooks';
+import { Rfc64SwmInventoryObservationRetryV1, type Rfc64SwmInventoryObservationVerdictV1 } from './swm-inventory-observation-retry-v1.js';
+
 import { Rfc64SerializedScopeRuntimeV1 } from './serialized-scope-runtime-v1.js';
 
 // A freshly-created private CG can durably accept its first shares before the
@@ -48,14 +51,26 @@ function inventoryLaneKeyV1(lane: Readonly<Rfc64SwmInventoryAuthorLaneV1>): stri
 }
 export const RFC64_SWM_INVENTORY_MAX_CONFIRMED_TOMBSTONES_V1 = 4_096;
 
-export type Rfc64SwmAuthorInventoryShadowMutationResultV1 = Readonly<{
-  status: 'dormant' | 'applied' | 'existing' | 'absent' | 'failed';
-  action: 'upsert' | 'remove';
+type Rfc64SwmInventoryShadowResultDetailsV1 = Readonly<{
   attempts: number;
   headObjectDigest: string | null;
   error: string | null;
   dormantReason?: 'inactive-lane' | 'authority-transition' | 'vm-confirmed' | 'policy-mismatch';
 }>;
+
+/** A definitely-not-started query refusal before any inventory mutation was attempted. */
+export type Rfc64SwmInventoryPreparationReadFailureV1 = Rfc64SwmInventoryShadowResultDetailsV1 & Readonly<{
+  status: 'failed';
+  action: 'upsert';
+  failurePhase: 'preparation-read';
+}>;
+
+export type Rfc64SwmAuthorInventoryShadowMutationResultV1 = Rfc64SwmInventoryPreparationReadFailureV1
+  | (Rfc64SwmInventoryShadowResultDetailsV1 & Readonly<{
+    status: 'dormant' | 'applied' | 'existing' | 'absent' | 'failed';
+    action: 'upsert' | 'remove';
+    failurePhase?: never;
+  }>);
 
 export interface Rfc64SwmAuthorInventoryShadowStatusV1 {
   readonly attemptedUpserts: number;
@@ -90,10 +105,11 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     lastHeadDigest: null as string | null,
     lastError: null as string | null,
   };
-  readonly #inFlight = new Set<Promise<void>>();
-  readonly #assetTails = new Map<string, Promise<void>>();
+  readonly #observationRetries = new Rfc64SwmInventoryObservationRetryV1();
+  readonly #inFlight = new Set<Promise<unknown>>();
+  readonly #assetTails = new Map<string, Promise<unknown>>();
   /** Per author key, the registered inventory writes still queued or running. */
-  readonly #authorWork = new Map<string, Set<Promise<void>>>();
+  readonly #authorWork = new Map<string, Set<Promise<unknown>>>();
   readonly #scopeRuntime = new Rfc64SerializedScopeRuntimeV1(
     'RFC-64 SWM inventory scope operation aborted',
   );
@@ -138,7 +154,7 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     return true;
   }
 
-  runExclusive(assetKey: string, observer: () => Promise<void>): Promise<void> {
+  runExclusive<T>(assetKey: string, observer: () => Promise<T>): Promise<T> {
     if (this.#closed) {
       return Promise.reject(new Error('RFC-64 SWM inventory observer runtime is closed'));
     }
@@ -155,7 +171,22 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     return true;
   }
 
-  runInventoryWriteExclusive(write: Readonly<Rfc64SwmInventoryWriteV1>, observer: () => Promise<void>): Promise<void> {
+  /** Retry only pre-mutation refusals; sleeping obligations hold no asset/author/worker slot. */
+  scheduleInventoryObservation(
+    write: Readonly<Rfc64SwmInventoryWriteV1>,
+    shareOperationId: string,
+    observer: () => Promise<Rfc64SwmInventoryObservationVerdictV1>,
+    exhausted: (reason: 'attempts' | 'capacity') => void,
+  ): boolean {
+    if (this.#closed) return false;
+    const assetKey = rfc64SwmInventoryAssetKeyV1(write);
+    this.#observationRetries.schedule(JSON.stringify([assetKey, shareOperationId]),
+      () => this.enqueue(assetKey, observer, false, [], inventoryLaneKeyV1(write)),
+      this.shutdownSignal, exhausted);
+    return true;
+  }
+
+  runInventoryWriteExclusive<T>(write: Readonly<Rfc64SwmInventoryWriteV1>, observer: () => Promise<T>): Promise<T> {
     if (this.#closed) {
       return Promise.reject(new Error('RFC-64 SWM inventory observer runtime is closed'));
     }
@@ -225,6 +256,7 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
   }
 
   async drain(): Promise<void> {
+    await this.#observationRetries.drain();
     await Promise.allSettled([...this.#inFlight]);
   }
 
@@ -238,7 +270,7 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
 
   /** Reopen the fully drained feature owner for same-instance restart. */
   reopen(): void {
-    if (this.#inFlight.size > 0 || this.#pendingExecutions.length > 0) {
+    if (this.#observationRetries.size > 0 || this.#inFlight.size > 0 || this.#pendingExecutions.length > 0) {
       throw new Error('RFC-64 SWM inventory observer runtime cannot reopen before drain');
     }
     this.#closeAbort = new AbortController();
@@ -247,7 +279,7 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
   }
 
   get inFlightCount(): number {
-    return this.#inFlight.size;
+    return this.#inFlight.size + this.#observationRetries.waitingCount;
   }
 
   status(): Readonly<Rfc64SwmAuthorInventoryShadowStatusV1> {
@@ -281,13 +313,13 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     stats.lastError = result.error;
   }
 
-  private enqueue(
+  private enqueue<T>(
     assetKey: string,
-    observer: () => Promise<void>,
+    observer: () => Promise<T>,
     priority: boolean,
-    after: readonly Promise<void>[] = [],
+    after: readonly Promise<unknown>[] = [],
     authorKey?: string,
-  ): Promise<void> {
+  ): Promise<T> {
     const tail = this.#assetTails.get(assetKey);
     const predecessor = after.length === 0
       ? tail
@@ -297,12 +329,12 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
       : predecessor.catch(() => undefined).then(
         () => this.runBounded(observer, priority),
       );
-    let authorWork: Set<Promise<void>> | undefined;
+    let authorWork: Set<Promise<unknown>> | undefined;
     if (authorKey !== undefined) {
       authorWork = this.#authorWork.get(authorKey) ?? new Set();
       this.#authorWork.set(authorKey, authorWork);
     }
-    let tracked!: Promise<void>;
+    let tracked!: Promise<T>;
     tracked = pending.finally(() => {
       this.#inFlight.delete(tracked);
       if (this.#assetTails.get(assetKey) === tracked) {
@@ -318,11 +350,12 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     return tracked;
   }
 
-  private runBounded(observer: () => Promise<void>, priority: boolean): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      const start = (): void => {
+  private runBounded<T>(observer: () => Promise<T>, priority: boolean): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      // A queued observer must retain its caller's store/RPC context, not inherit the releaser's.
+      const start = AsyncResource.bind((): void => {
         this.#activeExecutions += 1;
-        let execution: Promise<void>;
+        let execution: Promise<T>;
         try {
           execution = observer();
         } catch (cause) {
@@ -333,8 +366,8 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
           queueMicrotask(() => this.pump());
         };
         void execution.then(
-          () => {
-            resolve();
+          (result) => {
+            resolve(result);
             finish();
           },
           (cause) => {
@@ -342,7 +375,7 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
             finish();
           },
         );
-      };
+      });
       if (priority) this.#pendingExecutions.unshift(start);
       else this.#pendingExecutions.push(start);
       this.pump();

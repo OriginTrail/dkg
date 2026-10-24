@@ -22,10 +22,12 @@ import type { DKGAgent } from '../src/dkg-agent.js';
 import { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
 import {
   RFC64_UNREGISTERED_AUTHORITY_COMPAT_NEGATIVE_TTL_MS_V1,
+  RFC64_UNREGISTERED_AUTHORITY_FETCH_MAX_PEERS_V1,
   RFC64_UNREGISTERED_AUTHORITY_RESERVED_NON_CORE_PEERS_V1,
   Rfc64SeedFetchMethods,
 } from '../src/dkg-agent-rfc64-seed-fetch.js';
 import {
+  RFC64_UNREGISTERED_AUTHORITY_FANOUT_TIMEOUT_MS_V1,
   RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1,
   RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1,
 } from '../src/rfc64/unregistered-authority-transport-v1.js';
@@ -530,6 +532,65 @@ describe('Rfc64SeedFetchMethods replica peer selection', () => {
     expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1()).toEqual(attempt1);
   });
 
+  it('rotates a smaller window the same way, keeping a slot for a peer that is not a core', () => {
+    // A caller that asks fewer peers per attempt (a write's sub-graph lookup, a
+    // Core's fetch of a hosted definition) gets the smaller window from the
+    // selection itself: one rotation, so successive attempts still tile every
+    // connected peer, and a non-core slot, so an edge behind the cores is reached.
+    const cores = Array.from({ length: 6 }, (_, index) => `peer-core-${index}`);
+    const edges = Array.from({ length: 8 }, (_, index) => `peer-edge-${index}`);
+    const { agent } = createFetchAgent({
+      libp2p: libp2pWith({ self: 'peer-self', peers: [...cores, ...edges] }),
+      corePeerIds: cores,
+    });
+    const scope = { contextGraphId: CONTEXT_GRAPH_ID, maxPeers: 3 };
+    const seen = new Set<string>();
+    const windows = Array.from({ length: 8 }, () => agent.resolveRfc64UnregisteredAuthoritySeedPeersV1(scope));
+    for (const window of windows) {
+      expect(window).toHaveLength(3);
+      expect(window.filter((peerId) => cores.includes(peerId))).toHaveLength(2);
+      expect(window.filter((peerId) => edges.includes(peerId))).toHaveLength(1);
+      for (const peerId of window) seen.add(peerId);
+    }
+    // Eight attempts of one edge slot reach every edge; three of two core slots every core.
+    expect(seen.size).toBe(cores.length + edges.length);
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID, maxPeers: 1 })).toHaveLength(1);
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID, maxPeers: 100 })).toHaveLength(CAP);
+  });
+
+  it('leaves one slot of a window that provider hints would fill, and rotates the hints', () => {
+    // Pinned providers lead the window, but a graph with as many pins as the
+    // window would otherwise never reach another connected peer, the one
+    // holding the registration a write names, for instance.
+    const providers = ['peer-provider-a', 'peer-provider-b', 'peer-provider-c'];
+    const { agent } = createFetchAgent({
+      libp2p: libp2pWith({ self: 'peer-self', peers: [...providers, 'peer-edge-holder'] }),
+      completeProviders: { [CONTEXT_GRAPH_ID]: providers },
+    });
+    const seenProviders = new Set<string>();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const window = agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID, maxPeers: 2 });
+      expect(window).toHaveLength(2);
+      expect(window[1]).toBe('peer-edge-holder');
+      expect(providers).toContain(window[0]);
+      seenProviders.add(window[0]!);
+    }
+    expect(seenProviders.size).toBe(providers.length);
+    const three = agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID, maxPeers: 3 });
+    expect(three.slice(0, 2).every((peerId) => providers.includes(peerId))).toBe(true);
+    expect(three[2]).toBe('peer-edge-holder');
+    // Pins that fit the window with room to spare are all taken, as before.
+    const whole = agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID });
+    expect(whole).toEqual([...providers, 'peer-edge-holder']);
+    // With no other peer connected, the hints fill the window.
+    const only = createFetchAgent({
+      libp2p: libp2pWith({ self: 'peer-self', peers: providers }),
+      completeProviders: { [CONTEXT_GRAPH_ID]: providers },
+    }).agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID, maxPeers: 2 });
+    expect(only).toHaveLength(2);
+    expect(only.every((peerId) => providers.includes(peerId))).toBe(true);
+  });
+
   it('asks connected configured complete providers first and ignores absent or rejected pins', () => {
     const { agent } = createFetchAgent({
       libp2p: libp2pWith({
@@ -757,5 +818,103 @@ describe('Rfc64SeedFetchMethods replica fetch outcomes', () => {
       .toEqual(['peer-edge-author', 'peer-core-a']);
     expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: graphs[0]! }))
       .toEqual(['peer-core-a', 'peer-edge-author']);
+  });
+
+  /** Connected peers of a node and a service that only the author can answer. */
+  function peersAndAuthor(input: Readonly<{
+    readonly cores: readonly string[];
+    readonly edges: readonly string[];
+    readonly author?: string;
+    readonly seed?: Awaited<ReturnType<typeof mintSeed>>;
+    readonly onFetch?: () => void;
+  }>) {
+    const libp2p = {
+      peerId: { toString: () => 'peer-self' },
+      getPeers: () => [...input.cores, ...input.edges].map((peerId) => ({ toString: () => peerId })),
+    };
+    const fetchUnregisteredAuthorityFromPeers = vi.fn(async ({ peerIds }: { peerIds: readonly string[] }) => {
+      input.onFetch?.();
+      return input.author !== undefined && input.seed !== undefined && peerIds.includes(input.author)
+        ? {
+            remotePeerId: input.author,
+            seed: { canonicalBytes: input.seed.canonicalEnvelopeBytes, policyDigest: input.seed.policyDigest },
+          }
+        : null;
+    });
+    const fetch = createFetchAgent({
+      service: { fetchUnregisteredAuthorityFromPeers },
+      libp2p,
+      corePeerIds: input.cores,
+    });
+    const askedPerCall = () => fetchUnregisteredAuthorityFromPeers.mock.calls.map(([call]) => [...call.peerIds]);
+    return { ...fetch, fetchUnregisteredAuthorityFromPeers, askedPerCall };
+  }
+
+  it('asks the next windows before a miss, so an author that sorts after the non-core slots is reached at once', async () => {
+    // The Base mainnet edge: four cores (none speaks the seed exchange), four
+    // public edges without the seed, and the author of a new graph, which this
+    // node dialed, sorting after all of them. The first window keeps four
+    // slots for non-cores in peer-id order, so it never holds the author.
+    const cores = ['peer-core-0', 'peer-core-1', 'peer-core-2', 'peer-core-3'];
+    const edges = ['peer-edge-a', 'peer-edge-b', 'peer-edge-c', 'peer-edge-d', 'peer-edge-z'];
+    const seed = await mintSeed();
+    const { agent, persist, fetchUnregisteredAuthorityFromPeers, askedPerCall } = peersAndAuthor({
+      cores, edges, author: 'peer-edge-z', seed,
+    });
+
+    await expect(agent.fetchRfc64UnregisteredAuthoritySeedFromPeersV1(CONTEXT_GRAPH_ID))
+      .resolves.toBe('fetched');
+
+    expect(fetchUnregisteredAuthorityFromPeers).toHaveBeenCalledTimes(2);
+    expect(askedPerCall()).toEqual([
+      [...cores, 'peer-edge-a', 'peer-edge-b', 'peer-edge-c', 'peer-edge-d'],
+      ['peer-edge-z'],
+    ]);
+    expect(persist).toHaveBeenCalledOnce();
+    // The author leads the next window, the metadata bootstrap's included.
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID })[0])
+      .toBe('peer-edge-z');
+  });
+
+  it('asks each connected peer once and at most the fetch bound of peers before it reports a miss', async () => {
+    const few = peersAndAuthor({ cores: ['peer-core-0'], edges: ['peer-edge-a', 'peer-edge-b'] });
+    await expect(few.agent.fetchRfc64UnregisteredAuthoritySeedFromPeersV1(CONTEXT_GRAPH_ID))
+      .resolves.toBe('not-found');
+    // Every connected peer fits one window: the rotation offers no new peer.
+    expect(few.askedPerCall()).toEqual([['peer-core-0', 'peer-edge-a', 'peer-edge-b']]);
+    expect(String(few.log.debug.mock.calls.at(-1)?.[1])).toContain('none of 3 connected peer(s)');
+
+    const cores = ['peer-core-0', 'peer-core-1', 'peer-core-2', 'peer-core-3'];
+    const edges = Array.from({ length: 60 }, (_, index) => `peer-edge-${String(index).padStart(2, '0')}`);
+    const many = peersAndAuthor({ cores, edges });
+    await expect(many.agent.fetchRfc64UnregisteredAuthoritySeedFromPeersV1(CONTEXT_GRAPH_ID))
+      .resolves.toBe('not-found');
+    const asked = many.askedPerCall().flat();
+    expect(asked).toHaveLength(RFC64_UNREGISTERED_AUTHORITY_FETCH_MAX_PEERS_V1);
+    expect(new Set(asked).size).toBe(asked.length);
+    for (const call of many.askedPerCall()) {
+      expect(call.length).toBeGreaterThan(0);
+      expect(call.length).toBeLessThanOrEqual(RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1);
+    }
+    // The cores are asked in the first window only; the edges follow in order.
+    expect(asked.slice(0, cores.length)).toEqual(cores);
+    expect(asked.slice(cores.length)).toEqual(edges.slice(0, RFC64_UNREGISTERED_AUTHORITY_FETCH_MAX_PEERS_V1 - cores.length));
+  });
+
+  it('starts no window once the fan-out budget is spent', async () => {
+    const cores = ['peer-core-0', 'peer-core-1', 'peer-core-2', 'peer-core-3'];
+    const edges = ['peer-edge-a', 'peer-edge-b', 'peer-edge-c', 'peer-edge-d', 'peer-edge-z'];
+    const seed = await mintSeed();
+    let nowMs = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
+    const slow = peersAndAuthor({
+      cores, edges, author: 'peer-edge-z', seed,
+      onFetch: () => { nowMs += RFC64_UNREGISTERED_AUTHORITY_FANOUT_TIMEOUT_MS_V1; },
+    });
+
+    await expect(slow.agent.fetchRfc64UnregisteredAuthoritySeedFromPeersV1(CONTEXT_GRAPH_ID))
+      .resolves.toBe('not-found');
+    expect(slow.fetchUnregisteredAuthorityFromPeers).toHaveBeenCalledOnce();
+    expect(slow.persist).not.toHaveBeenCalled();
   });
 });

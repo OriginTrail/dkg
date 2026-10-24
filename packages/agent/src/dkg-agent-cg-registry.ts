@@ -131,7 +131,9 @@ import {
   type WorkspaceAgentRecipientResolverInput,
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
+  hasSubGraphRegistration, type UnregisteredSubGraphResolution,
 } from '@origintrail-official/dkg-publisher';
+import { resolveUnregisteredSubGraphFromPeers } from './peer-sub-graph-registration.js';
 import { join } from 'node:path';
 import {
   DKGQueryEngine, QueryHandler,
@@ -435,6 +437,8 @@ export type ContextGraphRegistrationBinding =
       kind: 'registered';
       onChainId: bigint;
       provenance: 'authoritative' | 'ontology' | 'reverse-name-hash' | 'numeric-id' | 'name-hash';
+      /** Same-request atomic evidence; never a persisted permission. */
+      finalizedSnapshot?: ContextGraphAuthoritySnapshot;
     }
   | {
       kind: 'unavailable';
@@ -1066,6 +1070,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     options: {
       signal?: AbortSignal;
       registrationTimeoutMs?: number;
+      /** Return atomic name/policy evidence to this scoped read only. */
+      retainFinalizedSnapshot?: boolean;
       /**
        * Freshly loaded durable subscription row for this exact candidate.
        * This may establish only the immutable numeric binding; current policy
@@ -1339,10 +1345,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       }
     }
 
-    // A canonical decimal is a direct chain slot unless a real local graph
-    // with that exact (numeric-looking) name already exists. Apply this before
-    // local-subscription routing so HTTP admission followed by subscribe keeps
-    // the same numeric identity on its first policy/VM read.
+    // A canonical decimal names a chain slot unless an exact local graph exists.
     if (
       !strictFinalizedDurableBindingRepair
       && isCanonicalPositiveContextGraphId(contextGraphId)
@@ -1373,14 +1376,10 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       }
     }
 
-    // Production adapters resolve every non-authoritative name through the
-    // finalized authority index. The index establishes only the immutable
-    // name -> numeric slot binding; resolveRegisteredContextGraphAuthority()
-    // deliberately performs fresh/current policy and roster reads afterward.
-    // A positive index result owns the immutable binding. Finalized absence
-    // may lag a just-registered current graph, so only an independently
-    // accepted owner-signed unregistered policy may consume it as absence;
-    // every other absence/failure stays unavailable and cannot fall through.
+    // Non-authoritative names require the finalized index. Only a scoped read
+    // may consume its same-request policy evidence; other callers re-read policy.
+    // Finalized absence needs independently accepted unregistered authority.
+    // Every other absence/failure stays unavailable and cannot fall through.
     const indexReader = this.chain.contextGraphAuthorityIndexRevisionReader;
     if (indexReader !== undefined) {
       try {
@@ -1527,6 +1526,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
             kind: 'registered',
             onChainId: target.expectedOnChainId,
             provenance: localTarget === null ? 'name-hash' : 'reverse-name-hash',
+            ...(options.retainFinalizedSnapshot && target.kind === 'resolved-snapshot'
+              ? { finalizedSnapshot: target.finalizedSnapshot } : {}),
           } as const;
         })();
         if (finalizedBinding !== null) return finalizedBinding;
@@ -2342,6 +2343,15 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     description?: string;
   }>> {
     return (await this.getCgMeta(contextGraphId)).subGraphs;
+  }
+
+  /**
+   * Whether a write may go into `subGraphName`: registered here, or found and
+   * registered by asking the graph's owner and connected peers (#3293).
+   */
+  async resolveSubGraphRegistration(this: DKGAgent, contextGraphId: string, subGraphName: string): Promise<UnregisteredSubGraphResolution> {
+    if (await hasSubGraphRegistration(this.store, contextGraphId, subGraphName)) return { registered: true };
+    return resolveUnregisteredSubGraphFromPeers(this, contextGraphId, subGraphName);
   }
 
   /**
