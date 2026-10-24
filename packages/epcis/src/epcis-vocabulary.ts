@@ -16,6 +16,11 @@ export type ResolvedEpcisEventType =
   | { kind: 'standard'; iri: string; name: StandardEpcisEventType }
   | { kind: 'gs1-extension' | 'external'; iri: string };
 
+/** Accepted namespace spellings for EPCIS properties; rendering belongs to the query builder. */
+export function epcisPropertyIris(...properties: string[]): string[] {
+  return properties.flatMap((property) => EPCIS_NAMESPACES.map((prefix) => `${prefix}${property}`));
+}
+
 /** Accepted namespace spellings for one standard type, or every standard type. */
 export function standardEpcisEventIris(name?: StandardEpcisEventType): string[] {
   return EPCIS_NAMESPACES.flatMap((prefix) =>

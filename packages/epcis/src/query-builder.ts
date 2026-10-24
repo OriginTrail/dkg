@@ -2,6 +2,8 @@ import {
   EPCIS_DECLARED_EVENT_TYPE,
   EPCIS_CURRENT_PREFIX,
   standardEpcisEventIris,
+  EPCIS_NAMESPACES,
+  epcisPropertyIris,
   EPCIS_TYPE_PREFIX,
   resolveEpcisQueryEventType,
 } from './epcis-vocabulary.js';
@@ -66,10 +68,14 @@ function extensionLocalNameFilter(predicateVariable: string, localName: string):
   return `FILTER(REPLACE(STR(?${predicateVariable}), "^.*[/#]", "") = "${localName}")`;
 }
 
+function propertyAlternatives(...properties: string[]): string {
+  return epcisPropertyIris(...properties).map(sparqlIri).join(' ');
+}
+
 /** VALUES keeps vocabulary alternatives out of Blazegraph's nested UNION path. */
 function epcisPropertyPattern(property: string, object: string, bindingSuffix = 'value'): string {
   const predicate = `?_epcis_${property}_${bindingSuffix}`;
-  return `{ VALUES ${predicate} { epcis:${property} epcisCurrent:${property} }
+  return `{ VALUES ${predicate} { ${propertyAlternatives(property)} }
       ?event ${predicate} ${object} . }`;
 }
 
@@ -134,7 +140,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
 
   // Declared captures include every accepted namespace. A document's
   // `eventList` is the positive discriminator for unmarked JSON-LD events;
-  // finalized standard direct-RDF event roots are identified by publication
+  // legacy direct-RDF event roots are identified by publication
   // metadata. Keep this filter inside each GRAPH block so the event-list
   // lookup uses the same named graph as the event row.
   let noFilterEventPattern: string | undefined;
@@ -142,14 +148,25 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   if (!eventTypeIri) {
     const standardTypes = standardEpcisEventIris().map(sparqlIri).join(', ');
     const declaredEvidence = 'BOUND(?_declaredEventType)';
-    const eventListEvidence = 'EXISTS { ?_eventList (epcis:eventList|epcisCurrent:eventList) ?event }';
+    const eventListEvidence = `EXISTS { VALUES ?_eventListPred { ${propertyAlternatives('eventList')} }
+      ?_eventList ?_eventListPred ?event . }`;
     const publicationEvidence = `EXISTS { GRAPH <${metaGraph}> { ?_rootPublication dkg:rootEntity ?event . } }`;
-    const privateTimeEvidence = `EXISTS { VALUES ?_privateEventEvidencePred { epcis:eventTime epcisCurrent:eventTime }
+    const privateTimeEvidence = `EXISTS { VALUES ?_privateEventEvidencePred { ${propertyAlternatives('eventTime')} }
       ?event ?_privateEventEvidencePred ?_privateEventEvidence . }`;
+    // Membership proves which subject is an event, not which of its RDF
+    // classes is the event discriminator. Prefer its standard EPCIS class;
+    // legacy GS1 extensions need timing shape and no standard discriminator.
+    const standardType = `?eventType IN (${standardTypes})`;
+    const gs1Type = EPCIS_NAMESPACES.map((prefix) =>
+      `STRSTARTS(STR(?eventType), "${prefix}")`).join(' || ');
+    const timingEvidence = ['eventTime', 'eventTimeZoneOffset'].map((field) =>
+      `EXISTS ${epcisPropertyPattern(field, `?_typeEvidence_${field}`, 'evidence')}`).join(' && ');
+    const noStandardType = `NOT EXISTS { ?event a ?_standardEventType .
+      FILTER(?_standardEventType IN (${standardTypes})) }`;
+    const legacyType = `(${standardType} || ((${gs1Type}) && ${timingEvidence} && ${noStandardType}))`;
     const evidenceFilter = (allowPrivateTime: boolean): string => {
-      const rootEvidence = [publicationEvidence, ...(allowPrivateTime ? [privateTimeEvidence] : [])];
-      return `FILTER(${[declaredEvidence, eventListEvidence,
-        `(?eventType IN (${standardTypes}) && (${rootEvidence.join(' || ')}))`].join(' || ')})`;
+      const rootEvidence = [eventListEvidence, publicationEvidence, ...(allowPrivateTime ? [privateTimeEvidence] : [])];
+      return `FILTER(${declaredEvidence} || (${legacyType} && (${rootEvidence.join(' || ')})))`;
     };
     noFilterEventPattern = evidenceFilter(false);
     // The extra shape evidence applies only to anchored private SWM payloads.
@@ -178,7 +195,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   // the two predicate variables never collide when both are set.
   if (params.epc) {
     const epcValue = escapeSparql(params.epc);
-    sharedRequiredPatterns.push(`{ VALUES ?_epcPred { epcis:epcList epcisCurrent:epcList epcis:childEPCs epcisCurrent:childEPCs }
+    sharedRequiredPatterns.push(`{ VALUES ?_epcPred { ${propertyAlternatives('epcList', 'childEPCs')} }
       ?event ?_epcPred ?_epcValue . FILTER(STR(?_epcValue) = "${epcValue}") }`);
   }
 
@@ -186,7 +203,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   // own variable name to avoid collision with the epc filter above)
   if (params.anyEPC) {
     const epcValue = escapeSparql(params.anyEPC);
-    sharedRequiredPatterns.push(`{ VALUES ?_anyEpcPred { epcis:epcList epcisCurrent:epcList epcis:childEPCs epcisCurrent:childEPCs epcis:parentID epcisCurrent:parentID epcis:inputEPCList epcisCurrent:inputEPCList epcis:outputEPCList epcisCurrent:outputEPCList }
+    sharedRequiredPatterns.push(`{ VALUES ?_anyEpcPred { ${propertyAlternatives('epcList', 'childEPCs', 'parentID', 'inputEPCList', 'outputEPCList')} }
       ?event ?_anyEpcPred ?_anyEpcValue . FILTER(STR(?_anyEpcValue) = "${epcValue}") }`);
   }
   optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('epcList', '?epc')}`);

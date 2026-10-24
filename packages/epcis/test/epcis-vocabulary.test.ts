@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { resolveEpcisEventType, resolveEpcisQueryEventType, compactEpcisEventType } from '../src/epcis-vocabulary.js';
+import { resolveEpcisEventType, resolveEpcisQueryEventType, compactEpcisEventType, epcisPropertyIris } from '../src/epcis-vocabulary.js';
 
 it.each([
   { input: 'https://ref.gs1.org/epcis/ObjectEvent', kind: 'standard', iri: 'https://gs1.github.io/EPCIS/ObjectEvent', response: 'ObjectEvent' },
@@ -20,4 +20,11 @@ it.each(['not an event name', 'urn:bad type', 'https://example.org/Event>'])('re
 it('keeps historical local extension aliases query-only', () => {
   expect(resolveEpcisEventType('CustomEvent')).toBeUndefined();
   expect(resolveEpcisQueryEventType('CustomEvent')).toEqual({ kind: 'gs1-extension', iri: 'https://gs1.github.io/EPCIS/CustomEvent' });
+});
+
+it('expands property alternatives in stable property-major namespace order', () => {
+  expect(epcisPropertyIris('eventList', 'eventTime')).toEqual([
+    'https://gs1.github.io/EPCIS/eventList', 'https://ref.gs1.org/epcis/eventList',
+    'https://gs1.github.io/EPCIS/eventTime', 'https://ref.gs1.org/epcis/eventTime',
+  ]);
 });

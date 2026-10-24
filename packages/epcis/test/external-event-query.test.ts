@@ -85,6 +85,58 @@ it.each(['public', 'private'] as const)('requires positive root evidence for unm
   }
 });
 
+it.each(['public', 'private'] as const)('paginates unmarked multiply typed members once in %s data', async (visibility) => {
+  const store = create();
+  const publicGraph = contextGraphDataUri(CG);
+  const graph = visibility === 'private' ? contextGraphPrivateUri(CG) : publicGraph;
+  try {
+    await store.insert([
+      ...['member', 'second'].flatMap(id => eventRows(id, `${EPCIS}ObjectEvent`, '2024-03-01T08:00:00Z', '+00:00')
+        .map(q => ({ ...q, graph }))),
+      ...['https://example.org/TrackedEntity', `${EPCIS}SensorElement`, `${EPCIS}AuxiliaryEvent`].map(object =>
+        ({ subject: 'urn:event:member', predicate: RDF_TYPE, object, graph })),
+      ...['member', 'second'].map(id => ({ subject: 'urn:document', predicate: `${EPCIS}eventList`, object: `urn:event:${id}`, graph })),
+      ...(visibility === 'private' ? ['member', 'second'].map(id => ({
+        subject: `urn:event:${id}`, predicate: `${DKG}privateDataAnchor`, object: '"true"', graph: publicGraph,
+      })) : []),
+    ]);
+    const pages = [];
+    for (let offset = 0; offset < 3; offset++) {
+      const result = await store.query(buildEpcisQuery({ limit: 1, offset }, CG));
+      if (result.type !== 'bindings') throw new Error('Expected event bindings');
+      pages.push(...result.bindings.map(row => ({ event: row.event, type: row.eventType })));
+    }
+    expect(pages).toEqual(['member', 'second'].map(id => ({ event: `urn:event:${id}`, type: `${EPCIS}ObjectEvent` })));
+  } finally {
+    await store.dropGraph(publicGraph);
+    if (graph !== publicGraph) await store.dropGraph(graph);
+    await store.close();
+  }
+});
+
+it.each([EPCIS, EPCIS_CURRENT])('discovers published legacy GS1 extension roots in %s', async namespace => {
+  const store = create();
+  const graph = contextGraphDataUri(CG), metaGraph = contextGraphMetaUri(CG);
+  const type = `${namespace}CustomEvent`;
+  try {
+    await store.insert([
+      ...eventRows('custom', type, '2024-03-01T08:00:00Z', '+00:00')
+        .map(q => ({ ...q, predicate: q.predicate.replace(EPCIS, namespace) })),
+      { subject: 'urn:event:custom', predicate: RDF_TYPE, object: 'https://example.org/TrackedEntity', graph },
+      ...['EPCISDocument', 'SensorElement'].map(name => ({ subject: `urn:${name}`, predicate: RDF_TYPE, object: `${namespace}${name}`, graph })),
+      ...['urn:event:custom', 'urn:EPCISDocument', 'urn:SensorElement'].map((object, i) => ({
+        subject: `urn:publication:${i}`, predicate: `${DKG}rootEntity`, object, graph: metaGraph,
+      })),
+    ]);
+    for (const eventType of [undefined, type, ...(namespace === EPCIS ? ['CustomEvent'] : [])]) {
+      const result = await store.query(buildEpcisQuery({ eventType }, CG));
+      if (result.type !== 'bindings') throw new Error('Expected event bindings');
+      expect(result.bindings.map(row => ({ event: row.event, type: row.eventType })))
+        .toEqual([{ event: 'urn:event:custom', type }]);
+    }
+  } finally { await store.dropGraph(graph); await store.dropGraph(metaGraph); await store.close(); }
+});
+
 it('projects and filters official-context EPCIS properties', async () => {
   const store = create();
   const graph = contextGraphDataUri(CG);
@@ -124,11 +176,31 @@ it('projects and filters official-context EPCIS properties', async () => {
       disposition: 'https://ref.gs1.org/cbv/Disp-in_progress',
       readPoint: { id: 'urn:read:point' }, bizLocation: { id: 'urn:business:location' },
     })]);
+    // A distinguishable event makes ignored filters observable.
+    const other = 'urn:event:other-current-vocabulary';
+    await store.insert([
+      { subject: other, predicate: RDF_TYPE, object: `${EPCIS_CURRENT}AggregationEvent`, graph },
+      { subject: 'urn:document', predicate: `${EPCIS_CURRENT}eventList`, object: other, graph },
+      ...Object.entries({ eventTime: '"2020-03-01T08:00:00Z"', eventTimeZoneOffset: '"+00:00"',
+        action: '"OBSERVE"', epcList: 'urn:other:epc', parentID: 'urn:other:parent', childEPCs: 'urn:other:child',
+        inputEPCList: 'urn:other:input', outputEPCList: 'urn:other:output',
+        bizStep: 'https://ref.gs1.org/cbv/BizStep-shipping', disposition: 'https://ref.gs1.org/cbv/Disp-active',
+        readPoint: 'urn:other:read', bizLocation: 'urn:other:location',
+      }).map(([field, object]) => ({ subject: other, predicate: `${EPCIS_CURRENT}${field}`, object, graph })),
+    ]);
+    expect((await query()).body.epcisBody.queryResults.resultsBody.eventList).toHaveLength(2);
     for (const params of [
       'eventType=ObjectEvent', 'eventType=https://ref.gs1.org/epcis/ObjectEvent', 'MATCH_epc=urn:epc:item',
       'MATCH_anyEPC=urn:epc:child', 'GE_eventTime=2024-03-01T00:00:00Z', 'EQ_action=ADD',
-      'EQ_bizStep=receiving', 'EQ_disposition=in_progress',
+      'EQ_bizStep=receiving', 'EQ_disposition=in_progress', 'MATCH_parentID=urn:epc:parent',
+      'childEPC=urn:epc:child', 'MATCH_inputEPC=urn:epc:input', 'MATCH_outputEPC=urn:epc:output',
+      'EQ_readPoint=urn:read:point', 'EQ_bizLocation=urn:business:location',
     ]) expect((await query(params)).body.epcisBody.queryResults.resultsBody.eventList).toEqual(events);
+    for (const params of ['EQ_action=DELETE', 'MATCH_epc=urn:epc:absent', 'MATCH_anyEPC=urn:epc:absent',
+      'MATCH_parentID=urn:absent', 'childEPC=urn:absent', 'MATCH_inputEPC=urn:absent', 'MATCH_outputEPC=urn:absent']) {
+      expect((await query(params)).body.epcisBody.queryResults.resultsBody.eventList).toEqual([]);
+    }
+
   } finally {
     await store.dropGraph(graph);
     await store.close();
@@ -187,6 +259,11 @@ it('projects a matched parent while preserving complete EPC lists on matching ev
   try {
     await store.insert([
       ...eventRows('multi-valued', `${EPCIS}ObjectEvent`),
+      ...eventRows('non-matching', `${EPCIS}ObjectEvent`),
+      { subject: 'urn:event:non-matching', predicate: `${DKG}epcisEventType`, object: `${EPCIS}ObjectEvent`, graph },
+      ...['parentID', 'childEPCs', 'inputEPCList', 'outputEPCList'].map(field => ({
+        subject: 'urn:event:non-matching', predicate: `${EPCIS}${field}`, object: 'urn:C', graph,
+      })),
       { subject, predicate: `${DKG}epcisEventType`, object: `${EPCIS}ObjectEvent`, graph },
       ...['parentID', 'childEPCs', 'inputEPCList', 'outputEPCList'].flatMap((field) => [
         { subject, predicate: `${EPCIS}${field}`, object: 'urn:A', graph },
@@ -196,6 +273,7 @@ it('projects a matched parent while preserving complete EPC lists on matching ev
     const result = await store.query(buildEpcisQuery({ parentID: 'urn:A', childEPC: 'urn:A', inputEPC: 'urn:A', outputEPC: 'urn:A' }, CG));
     if (result.type !== 'bindings') throw new Error('Expected event bindings');
     expect(result.bindings).toHaveLength(1);
+    expect(result.bindings[0].event).toBe(subject);
     const event = toEpcisEvent(result.bindings[0]);
     expect(event.parentID).toBe('urn:A');
     for (const field of ['childEPCs', 'inputEPCList', 'outputEPCList']) {
