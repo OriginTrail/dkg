@@ -12,7 +12,7 @@ let frames: Map<number, FrameRequestCallback>;
 let nextFrame: number;
 let now: number;
 const frame = () => { const pending = [...frames.values()]; frames.clear(); pending.forEach(callback => callback(now)); };
-const data = () => driver.values.get('graphData') as { nodes: any[]; links: any[] };
+const data = () => driver.values.graphData!;
 beforeEach(() => {
   vi.useFakeTimers(); now = 100; vi.spyOn(performance, 'now').mockImplementation(() => now);
   frames = new Map(); nextFrame = 0;
@@ -28,14 +28,14 @@ describe('canvas graph rendering', () => {
     expect(renderer.getCanvas()).toBeNull(); renderer.refresh(); renderer.resize(); renderer.centerOnNode('missing'); renderer.zoomToFit(); renderer.applyAnimation({}); renderer.applyPalette(conf.styleEngine.palette);
     if (dimensions !== 'default') Object.defineProperties(conf.container, { [dimensions + 'Width']: { value: 900 }, [dimensions + 'Height']: { value: 700 } });
     renderer.init(); renderer.init(); expect(boundary.factory).toHaveBeenCalledOnce();
-    expect(driver.values.get('width')).toBe(dimensions === 'default' ? 800 : 900);
-    expect(driver.values.get('height')).toBe(dimensions === 'default' ? 600 : 700);
-    expect(driver.forces.get('charge').strength).toHaveBeenCalledWith(-150);
-    expect(driver.forces.get('link').distance).toHaveBeenCalledWith(80);
+    expect(driver.values.width).toBe(dimensions === 'default' ? 800 : 900);
+    expect(driver.values.height).toBe(dimensions === 'default' ? 600 : 700);
+    expect(driver.forces.charge!.strength).toHaveBeenCalledWith(-150);
+    expect(driver.forces.link!.distance).toHaveBeenCalledWith(80);
     expect(renderer.getCanvas()).toBeNull(); const canvas = document.createElement('canvas'); conf.container.append(canvas); expect(renderer.getCanvas()).toBe(canvas);
-    renderer.resize(); expect(driver.values.get('width')).toBe(conf.container.clientWidth);
-    renderer.applyPalette({ ...conf.styleEngine.palette, background: '#abcdef' }); expect(driver.values.get('backgroundColor')).toBe('#abcdef');
-    renderer.applyPalette({ ...conf.styleEngine.palette, background: '#0a0a0f' }); expect(driver.values.get('backgroundColor')).toBe('transparent');
+    renderer.resize(); expect(driver.values.width).toBe(conf.container.clientWidth);
+    renderer.applyPalette({ ...conf.styleEngine.palette, background: '#abcdef' }); expect(driver.values.backgroundColor).toBe('#abcdef');
+    renderer.applyPalette({ ...conf.styleEngine.palette, background: '#0a0a0f' }); expect(driver.values.backgroundColor).toBe('transparent');
   });
   it('preserves positions, momentum and pins while filtering collapsed and dangling links', () => {
     const ordinary = node('ordinary'), risk = node('risk', { isHighRisk: true, degree: 5 }), featured = node('featured', { sizeMultiplier: 3 });
@@ -53,11 +53,11 @@ describe('canvas graph rendering', () => {
   it.each([false, true])('places dated nodes chronologically, tolerating equal dates (%s) and invalid values', same => {
     const dated = (id: string, date: string, namespace = 'https') => node(id, { properties: new Map([[`${namespace}://schema.org/dateCreated`, [{ value: date }]]]) });
     renderer.render(nodes(dated('early', '2025-01-01', 'http'), dated('late', same ? '2025-01-01' : '2025-12-31'), dated('invalid', 'not-a-date'), node('undated')), new Map());
-    const early = data().nodes.find(n => n.id === 'early'), late = data().nodes.find(n => n.id === 'late');
+    const early = data().nodes.find(n => n.id === 'early')!, late = data().nodes.find(n => n.id === 'late')!;
     expect(early.x).toBe(-200); expect(late.x).toBe(same ? -200 : 200);
     early.x = -100; early.vx = undefined; late.fx = 5; late.vx = 7;
-    driver.forces.get('chronoX')(.5); expect(early.vx).toBe(-2.5); expect(late.vx).toBe(7);
-    renderer.render(nodes(node('no-date')), new Map()); expect(driver.forces.get('chronoX')).toBeNull();
+    driver.forces.chronoX!(.5); expect(early.vx).toBe(-2.5); expect(late.vx).toBe(7);
+    renderer.render(nodes(node('no-date')), new Map()); expect(driver.forces.chronoX!).toBeNull();
   });
   it('fits once per topology, coalesces pending fits, and respects explicit camera ownership', () => {
     renderer.render(nodes(node('a')), new Map()); renderer.render(nodes(node('a')), new Map());
@@ -104,27 +104,27 @@ describe('canvas graph rendering', () => {
   });
   it.each([false, true])('traces only hovered incident edges with background particles %s', linkParticles => {
     renderer.init(); renderer.applyAnimation({ hoverTrace: true, linkParticles, linkParticleCount: 2, linkParticleSpeed: .01, linkParticleWidth: 5, linkParticleColor: 'orange' });
-    const sample = () => ['linkDirectionalParticles', 'linkDirectionalParticleSpeed', 'linkDirectionalParticleWidth', 'linkDirectionalParticleColor'].map(key => driver.call(key, { source: 'a', target: 'b' }));
+    const sample = () => (['linkDirectionalParticles', 'linkDirectionalParticleSpeed', 'linkDirectionalParticleWidth', 'linkDirectionalParticleColor'] as const).map(key => driver.call(key, { source: 'a', target: 'b' }));
     expect(sample()).toEqual([linkParticles ? 2 : 0, .01, 5, 'orange']);
     driver.call('onNodeHover', { _graphNode: node('a') }); expect(sample()).toEqual([4, .02, 3, '#60a0ff']);
-    for (const key of ['linkDirectionalParticles', 'linkDirectionalParticleSpeed', 'linkDirectionalParticleWidth', 'linkDirectionalParticleColor']) expect(driver.call(key, { source: { id: 'z' }, target: { id: 'a' } })).toBe(driver.call(key, { source: 'a', target: 'z' }));
+    for (const key of ['linkDirectionalParticles', 'linkDirectionalParticleSpeed', 'linkDirectionalParticleWidth', 'linkDirectionalParticleColor'] as const) expect(driver.call(key, { source: { id: 'z' }, target: { id: 'a' } })).toBe(driver.call(key, { source: 'a', target: 'z' }));
     driver.call('onNodeHover', { _graphNode: node('z') }); expect(sample()).toEqual([linkParticles ? 2 : 0, .01, 5, 'orange']);
-    renderer.applyAnimation({ linkParticles: true }); expect(driver.values.get('linkDirectionalParticles')).toBe(1); expect(driver.call('linkDirectionalParticleColor')).toBe('rgba(100,150,255,0.6)');
-    renderer.applyAnimation({}); expect(driver.values.get('linkDirectionalParticles')).toBe(0);
+    renderer.applyAnimation({ linkParticles: true }); expect(driver.values.linkDirectionalParticles).toBe(1); expect(driver.call('linkDirectionalParticleColor')).toBe('rgba(100,150,255,0.6)');
+    renderer.applyAnimation({}); expect(driver.values.linkDirectionalParticles).toBe(0);
   });
   it('repaints without rebuilding data, debounces fallback frames and cools the simulation', () => {
     renderer.init(); renderer.refresh(); expect(driver.method('refresh')).toHaveBeenCalledOnce(); expect(driver.method('graphData')).not.toHaveBeenCalled();
-    driver.absent.add('refresh'); renderer.refresh(); renderer.refresh(); expect(frames.size).toBe(1); frame(); expect(driver.values.get('cooldownTicks')).toBe(3); vi.advanceTimersByTime(60); expect(driver.values.get('cooldownTicks')).toBe(0);
-    renderer.applyAnimation({ drift: true }); renderer.refresh(); frame(); expect(driver.values.get('cooldownTicks')).toBe(Infinity);
+    driver.omit('refresh'); renderer.refresh(); renderer.refresh(); expect(frames.size).toBe(1); frame(); expect(driver.values.cooldownTicks).toBe(3); vi.advanceTimersByTime(60); expect(driver.values.cooldownTicks).toBe(0);
+    renderer.applyAnimation({ drift: true }); renderer.refresh(); frame(); expect(driver.values.cooldownTicks).toBe(Infinity);
     renderer.refresh(); renderer.destroy(); frame(); expect(driver.method('_destructor')).toHaveBeenCalledOnce();
   });
   it('repaints loaded images without interrupting drift and tolerates missing optional force APIs', () => {
-    driver.forces.clear(); driver.absent.add('d3AlphaTarget'); driver.absent.add('refresh');
+    driver.clearForces(); driver.omit('d3AlphaTarget'); driver.omit('refresh');
     const register = vi.spyOn(conf.hexPainter, 'setImageLoadCallback'); renderer.init(); renderer.applyAnimation({ drift: true, driftAlpha: .02 });
-    register.mock.calls[0][0](); frame(); expect(driver.values.get('cooldownTicks')).toBe(Infinity);
+    register.mock.calls[0][0](); frame(); expect(driver.values.cooldownTicks).toBe(Infinity);
     vi.advanceTimersByTime(300); expect(driver.method('zoomToFit')).toHaveBeenCalledOnce();
     renderer.applyAnimation({ riskPulse: true }); driver.method('d3ReheatSimulation').mockImplementation(() => { throw new Error('optional API'); }); expect(frame).not.toThrow();
-    renderer.applyAnimation({}); renderer.refresh(); frame(); renderer.applyAnimation({ drift: true }); vi.advanceTimersByTime(60); expect(driver.values.get('cooldownTicks')).toBe(Infinity);
+    renderer.applyAnimation({}); renderer.refresh(); frame(); renderer.applyAnimation({ drift: true }); vi.advanceTimersByTime(60); expect(driver.values.cooldownTicks).toBe(Infinity);
   });
   it('draws padded KA convex hulls and ignores missing, small or collinear groups', () => {
     renderer.render(nodes(node('a'), node('b'), node('c'), node('d'), node('inside'), node('line')), new Map());
@@ -148,6 +148,6 @@ it('ignores a canceled pulse callback and a pending automatic fit after camera o
 it('does not paint unresolved link endpoints and pulls an unpositioned date node toward its chronology', () => {
   const dateNode = (id: string, date: string) => node(id, { properties: new Map([['https://schema.org/dateCreated', [{ value: date }]]]) });
   renderer.render(nodes(dateNode('a', '2025-01-01'), dateNode('b', '2025-01-02')), new Map());
-  const first = data().nodes[0]; first.x = undefined; first.vx = undefined; driver.forces.get('chronoX')(.5); expect(first.vx).toBe(-5);
+  const first = data().nodes[0]; first.x = undefined; first.vx = undefined; driver.forces.chronoX!(.5); expect(first.vx).toBe(-5);
   const { ctx } = canvasContext(); driver.call('linkCanvasObject', { _graphEdge: edge('a', 'b'), source: 'a', target: 'b' }, ctx, 1); expect(ctx.fillText).not.toHaveBeenCalled();
 });

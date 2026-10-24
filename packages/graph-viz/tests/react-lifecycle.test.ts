@@ -23,7 +23,7 @@ beforeEach(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement('div'); document.body.appendChild(container); root = createRoot(container);
 });
-afterEach(() => { act(() => root.unmount()); container.remove(); });
+afterEach(() => { act(() => root.unmount()); container.remove(); vi.useRealTimers(); });
 
 describe('React graph updates', () => {
   it('uses the latest click handler without rebuilding data on a view-only update', async () => {
@@ -124,10 +124,14 @@ it('permits selection and hover state updates without application event callback
 });
 
 it('does not apply a superseded parse result or schedule an initial fit after unmount', async () => {
+  vi.useFakeTimers();
   await act(async () => root.render(React.createElement(RdfGraph, {})));
   let resolve!: () => void; state.viz.loadNTriples.mockImplementationOnce(() => new Promise<void>(done => { resolve = done; }));
   await act(async () => root.render(React.createElement(RdfGraph, { data: 'pending', initialFit: true, viewConfig: { name: 'old' } })));
   const applied = state.viz.applyView.mock.calls.length; act(() => root.unmount());
   await act(async () => { resolve(); });
-  expect(state.viz.applyView).toHaveBeenCalledTimes(applied); expect(state.viz.zoomToFit).not.toHaveBeenCalled();
+  expect(vi.getTimerCount()).toBe(0);
+  await act(async () => vi.advanceTimersByTimeAsync(1000));
+  expect(state.viz.applyView).toHaveBeenCalledTimes(applied);
+  expect(state.viz.zoomToFit).not.toHaveBeenCalled();
 });
