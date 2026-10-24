@@ -1,4 +1,5 @@
-import type { Quad } from '@origintrail-official/dkg-storage';
+import type { DraftAccessPolicy } from './content-partition-policy.js';
+import type { Quad, StoreWorkPriority } from '@origintrail-official/dkg-storage';
 import type { GetView } from '@origintrail-official/dkg-core';
 import { TrustLevel } from '@origintrail-official/dkg-core';
 
@@ -10,6 +11,18 @@ export interface QueryResult {
 export interface QueryOptions {
   contextGraphId?: string;
   timeout?: number;
+  /** Reject compatibility routing that would omit selected graphs. */
+  requireCompleteGraphScope?: boolean;
+  /** Bound HTTP store responses before parsing; embedded stores remain post-checked. */
+  maxResponseBytes?: number;
+  /** Independent bound on hydrated literal bytes; defaults to maxResponseBytes. */
+  maxLiteralHydrationBytes?: number;
+  /** Cancel queued and in-flight store work when the caller goes away. */
+  signal?: AbortSignal;
+  /** Store admission lane. External/API reads should use `background`. */
+  priority?: StoreWorkPriority;
+  /** Bounded operation label propagated to store diagnostics and slow-query telemetry. */
+  source?: string;
   /** When set to '_shared_memory', query runs over the context graph's shared memory graph only. */
   graphSuffix?: '_shared_memory';
   /** When true and contextGraphId is set, query runs over both data and shared memory graphs (union). */
@@ -24,6 +37,8 @@ export interface QueryOptions {
    * to their selected graph set unless this is true.
    */
   includeContextGraphPartitions?: boolean;
+  /** Internal draft policy derived from caller identity; never accept from HTTP input. */
+  draftAccess?: DraftAccessPolicy;
   /**
    * Opt-in: allow the scoped query to explicitly reference the context
    * graph's own `_private` partition (`<cg>/_private`, or the sub-graph
@@ -69,6 +84,13 @@ export interface QueryOptions {
    */
   excludeGraphPrefixes?: string[];
   /**
+   * Graph IRIs a query without `contextGraphId` must not read, each with every
+   * graph below it (`<iri>/...`). The store answers over its default graph and
+   * every other named graph, whatever the query's patterns; FROM / FROM NAMED
+   * are refused with `WithheldGraphQueryError`. Rejected on scoped queries.
+   */
+  withheldGraphRoots?: readonly string[];
+  /**
    * Per-subject trust floor for `verifiable-memory`. Values above
    * `SelfAttested` require every matched subject to carry an explicit
    * `http://dkg.io/ontology/trustLevel` literal at or above `minTrust`.
@@ -86,7 +108,58 @@ export interface QueryOptions {
   _minTrust?: TrustLevel;
 }
 
+export interface ResolvedKnowledgeAssetBase {
+  ual: string;
+  contextGraphId: string;
+  quads: Quad[];
+}
+
+/** The original public result contract of {@link QueryEngine.resolveKA}. */
+export interface LegacyResolveKAResult {
+  rootEntity: string;
+  rootEntities: string[];
+  contextGraphId: string;
+  quads: Quad[];
+}
+
+/** Current V10 KA model: one exact graph identified by UAL + assertion version. */
+export interface ResolvedGraphKnowledgeAsset extends ResolvedKnowledgeAssetBase {
+  contentScopeVersion: 2;
+  assertionVersion: string;
+  assertionGraph: string;
+  rootEntities: [];
+  rootEntity?: never;
+}
+
+/** Existing V10 root-scoped KAs remain queryable but are never writable. */
+export interface ResolvedLegacyKnowledgeAsset
+  extends ResolvedKnowledgeAssetBase, LegacyResolveKAResult {
+  contentScopeVersion: 1;
+  rootEntity: string;
+  rootEntities: string[];
+  assertionVersion?: never;
+  assertionGraph?: never;
+}
+
+export type ResolvedKnowledgeAsset =
+  | ResolvedGraphKnowledgeAsset
+  | ResolvedLegacyKnowledgeAsset;
+
 export interface QueryEngine {
   query(sparql: string, options?: QueryOptions): Promise<QueryResult>;
-  resolveKA(ual: string): Promise<{ rootEntity: string; rootEntities: string[]; contextGraphId: string; quads: Quad[] }>;
+  /**
+   * Backwards-compatible legacy resolver. Its required root fields remain
+   * source-compatible with callers published before graph-scoped KAs existed.
+   */
+  resolveKA(ual: string): Promise<LegacyResolveKAResult>;
+  /**
+   * Graph-aware resolver for current callers. Optional so third-party
+   * QueryEngine implementations are not broken by the additive API.
+   */
+  resolveKnowledgeAsset?(ual: string): Promise<ResolvedKnowledgeAsset>;
+}
+
+/** Query engine surface for callers that understand graph-scoped KAs. */
+export interface GraphAwareQueryEngine extends QueryEngine {
+  resolveKnowledgeAsset(ual: string): Promise<ResolvedKnowledgeAsset>;
 }

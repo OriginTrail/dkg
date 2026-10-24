@@ -2,6 +2,7 @@
  * Devnet API helpers for Playwright e2e — WM → SWM → VM publish flows.
  * Mirrors patterns from `devnet/rich-scenario/automated.test.ts`.
  */
+import { contextGraphDataUri } from '@origintrail-official/dkg-core';
 import { devnetApiFetch, readDevnetNode } from './devnet.js';
 import { withSwmLock } from './swm-lock.js';
 
@@ -22,7 +23,7 @@ export const VM_SEED_SUBJECT_PREFIX = 'urn:e2e:ui:entity:';
 
 export function buildTestQuads(cgId: string, stamp: number, label: string): PublishQuads[] {
   const subject = `${VM_SEED_SUBJECT_PREFIX}${stamp}`;
-  const graph = `did:dkg:context-graph:${cgId}`;
+  const graph = contextGraphDataUri(cgId);
   return [
     {
       subject,
@@ -185,7 +186,7 @@ export async function createSubGraph(opts: {
   }
 }
 
-/** Quads targeting a NAMED sub-graph's data graph (`<cg>/<subGraph>`). */
+/** Quads targeting the canonical physical data graph for a named sub-graph. */
 export function buildSubGraphQuads(
   cgId: string,
   subGraphName: string,
@@ -193,7 +194,7 @@ export function buildSubGraphQuads(
   label: string,
 ): PublishQuads[] {
   const subject = `urn:e2e:ui:sg:${subGraphName}:${stamp}`;
-  const graph = `did:dkg:context-graph:${cgId}/${subGraphName}`;
+  const graph = contextGraphDataUri(cgId, subGraphName);
   return [
     {
       subject,

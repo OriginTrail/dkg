@@ -14,6 +14,7 @@ import {
 import { FileStore } from '../src/file-store.js';
 import type { ExtractionStatusRecord } from '../src/extraction-status.js';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
@@ -57,7 +58,7 @@ describe('import artifact daemon routes', () => {
         await handleKnowledgeAssetsRoutes({
           req,
           res,
-          agent: args.agent,
+          agent: { resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'node', source: 'legacy-local', reason: 'fixture-node', metadataBootstrap: 'eligible' }), ...args.agent },
           publisherControl: {},
           publisherRuntime: null,
           config: {},
@@ -82,8 +83,8 @@ describe('import artifact daemon routes', () => {
           apiPortRef: { value: 0 },
           url,
           path: url.pathname,
-          requestToken: undefined,
           requestAgentAddress: 'did:dkg:agent:test',
+          authentication: requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
           emitMemoryGraphChanged: (event) => events.push(event),
         } as any);
         if (!res.writableEnded) {

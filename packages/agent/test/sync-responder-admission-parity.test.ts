@@ -99,6 +99,7 @@ describe('sync responder graph admission planner', () => {
     const canonicalData = cgPrefix;
     const perCgData = `${cgPrefix}/context/1`;
     const perCgMeta = `${cgPrefix}/context/1/_meta`;
+    const subGraphControlMeta = `${cgPrefix}/ai-tools/_meta`;
     const privateGraph = `${cgPrefix}/_private/secret`;
     const wmAssertion = `${cgPrefix}/assertion/0xabc/wm-draft`;
     const vmAssertion = `${cgPrefix}/assertion/0xabc/vm-final`;
@@ -111,6 +112,7 @@ describe('sync responder graph admission planner', () => {
       q(cgMeta, cgPrefix, `${DKG_NS}createdAt`, '"2026-06-01T00:00:00Z"'),
       q(perCgData, 'urn:per-cg:data', 'http://schema.org/name', '"per-cg-data"'),
       q(perCgMeta, 'urn:per-cg:meta', `${DKG_NS}merkleRoot`, '"per-cg-meta"'),
+      q(subGraphControlMeta, 'urn:dkg:migration:swm-attr-agent-did', `${DKG_NS}appliedAt`, '"local-control-row"'),
       q(privateGraph, 'urn:private:data', 'http://schema.org/name', '"private-leak"'),
       q(wmAssertion, 'urn:assertion:wm', 'http://schema.org/name', '"wm-assertion-leak"'),
       q(vmAssertion, 'urn:assertion:vm', 'http://schema.org/name', '"vm-assertion"'),
@@ -135,6 +137,7 @@ describe('sync responder graph admission planner', () => {
     expect(graphs.has(canonicalData)).toBe(true);
     expect(graphs.has(perCgData)).toBe(true);
     expect(graphs.has(perCgMeta)).toBe(true);
+    expect(graphs.has(subGraphControlMeta)).toBe(false);
     expect(graphs.has(vmAssertion)).toBe(true);
     expect(graphs.has(cgMeta)).toBe(false);
     expect(graphs.has(privateGraph)).toBe(false);
@@ -144,6 +147,7 @@ describe('sync responder graph admission planner', () => {
     expect(out).not.toContain('"wm-assertion-leak"');
     expect(out).not.toContain('"private-leak"');
     expect(out).not.toContain('"child-leak"');
+    expect(out).not.toContain('"local-control-row"');
   });
 
   it('keeps parent durable partitions when a child CG has a reserved partition name', async () => {
@@ -229,6 +233,9 @@ describe('sync responder graph admission planner', () => {
       q(cgMeta, `${cgPrefix}/context`, SCHEMA_NAME, '"context"'),
       q(cgMeta, 'did:dkg:activity:1', 'http://schema.org/name', '"activity"'),
       q(cgMeta, 'did:dkg:join-request:1', 'http://schema.org/name', '"join"'),
+      // Even a malformed moderation row that also matches a normally admitted
+      // lifecycle branch must remain curator-local.
+      q(cgMeta, 'did:dkg:join-request:1', `${DKG_NS}memoryLayer`, `"${MemoryLayer.VerifiableMemory}"`),
       q(cgMeta, 'urn:lifecycle:vm', `${DKG_NS}memoryLayer`, `"${MemoryLayer.VerifiableMemory}"`),
       q(cgMeta, 'urn:lifecycle:vm', `${DKG_NS}assertionGraph`, vmAssertion),
       q(cgMeta, 'urn:lifecycle:vm', `${DKG_NS}assertionName`, '"final"'),
@@ -255,7 +262,7 @@ describe('sync responder graph admission planner', () => {
     expect(out).toContain(`${DKG_NS}SubGraph`);
     expect(out).toContain(SCHEMA_NAME);
     expect(out).toContain('did:dkg:activity:1');
-    expect(out).toContain('did:dkg:join-request:1');
+    expect(out).not.toContain('did:dkg:join-request:1');
     expect(out).toContain('urn:lifecycle:vm');
     expect(out).toContain(vmAssertion);
     expect(out).toContain('urn:event:vm');

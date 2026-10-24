@@ -12,12 +12,26 @@ import {
   contextGraphSubGraphMetaUri,
   contextGraphSubGraphPrivateUri,
   contextGraphCatalogUri,
+  canonicalKnowledgeAssetGraphIdentitySuffix,
+  knowledgeAssetAgentAddressesEqual,
+  getMetrics,
   isSafeIri,
   assertSafeIri,
   sparqlString,
+  validateNewContextGraphId,
+  validateContextGraphId,
+  contextGraphStorageOwnerCandidates,
 } from '@origintrail-official/dkg-core';
 
 const CG_PREFIX = 'did:dkg:context-graph:';
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const ROOT_CONTEXT_GRAPH_TYPES = Object.freeze([
+  'https://dkg.network/ontology#ContextGraph',
+  'http://dkg.io/ontology/ContextGraph',
+] as const);
+const SYSTEM_ONTOLOGY_GRAPH = contextGraphDataUri('ontology');
+const SYSTEM_AGENTS_GRAPH = contextGraphDataUri('agents');
+const MAX_CONTEXT_GRAPH_DECLARATION_BATCH = 256;
 
 export type NonEmptyGraphList = [string, ...string[]];
 export type SharedMemoryReadSelection = 'all' | { rootEntities: readonly string[] };
@@ -46,6 +60,17 @@ export interface SwmKaGraphBound {
   startNumber: bigint;
   endNumber: bigint;
 }
+
+/** Exact identity of one named KA lifecycle's shared-memory graph. */
+export interface NamedKnowledgeAssetGraphIdentity {
+  agentAddress: string;
+  kaNumber: bigint;
+}
+
+/** Semantic SWM read boundary: either the complete family or one named lifecycle. */
+export type SharedMemoryGraphScope =
+  | { kind: 'complete-family' }
+  | { kind: 'named-lifecycle'; identity: NamedKnowledgeAssetGraphIdentity };
 
 const SWM_CHILD_AGENT_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const SWM_CHILD_KA_NUMBER = /^\d+$/;
@@ -84,10 +109,42 @@ export interface LoadSelectedSharedMemoryQuadsOptions {
   querySource?: QueryOptions['source'];
   queryOptions?: QueryOptions;
   quadFilter?: (quad: Quad) => boolean;
+  /**
+   * Optional hard materialization budget for expensive SWM slices. When set,
+   * the store is read in bounded SELECT pages and the loader rejects before
+   * retaining more than `maxRows` or `maxBytesEstimate`. This is an explicit
+   * backpressure boundary: callers must retry/defer, never treat the error as an
+   * empty or complete snapshot.
+   */
+  resultBudget?: SharedMemoryResultBudget;
   rootEntitiesErrorMessage?: (input: {
     inputCount: number;
     hadInput: boolean;
   }) => string;
+}
+
+export interface SharedMemoryResultBudget {
+  pageRows: number;
+  maxRows: number;
+  maxBytesEstimate: number;
+}
+
+export class SharedMemoryResultBudgetError extends Error {
+  readonly code = 'SHARED_MEMORY_RESULT_BUDGET' as const;
+  readonly retryable = true as const;
+
+  constructor(
+    readonly reason: 'rows' | 'bytes',
+    readonly rows: number,
+    readonly bytesEstimate: number,
+    readonly limit: number,
+  ) {
+    super(
+      `Shared-memory result exceeded ${reason} budget ` +
+      `(rows=${rows}, bytesEstimate=${bytesEstimate}, limit=${limit})`,
+    );
+    this.name = 'SharedMemoryResultBudgetError';
+  }
 }
 
 export interface LoadSelectedVerifiableMemoryQuadsOptions {
@@ -114,6 +171,87 @@ async function listGraphsByPrefix(
   return store.listGraphsByPrefix
     ? store.listGraphsByPrefix(prefix, options)
     : (await store.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
+}
+
+/**
+ * Return the root id represented by one known storage partition. The graph
+ * walk is retained for legacy/storage-only roots, but slash-bearing ids are
+ * intentionally handled by the declaration query below: a URI such as
+ * `owner/name` can also be a subgraph and cannot be classified by path alone.
+ */
+function contextGraphIdFromStorageGraph(graph: string): string | undefined {
+  if (!graph.startsWith(CG_PREFIX)) return undefined;
+  const rest = graph.slice(CG_PREFIX.length);
+  if (rest.length === 0) return undefined;
+  if (rest.endsWith('/_shared_memory_meta')) return rest.slice(0, -20);
+  if (rest.endsWith('/_shared_memory')) return rest.slice(0, -15);
+  if (rest.endsWith('/_private')) return rest.slice(0, -9);
+  if (rest.endsWith('/_meta')) return rest.slice(0, -6);
+  return rest;
+}
+
+function stripIriTerm(value: string): string {
+  return value.startsWith('<') && value.endsWith('>')
+    ? value.slice(1, -1)
+    : value;
+}
+
+/**
+ * Resolve ambiguous slash-bearing storage ids through authoritative root
+ * declarations. This is deliberately a bounded VALUES query: it avoids a
+ * store-wide semantic scan while ensuring subgraph metadata cannot be
+ * mistaken for a context-graph root.
+ */
+async function listDeclaredSlashContextGraphs(
+  store: TripleStore,
+  candidates: ReadonlySet<string>,
+  options?: QueryOptions,
+): Promise<string[]> {
+  const candidateUris = [...candidates]
+    .map((id) => contextGraphDataUri(id))
+    .filter((uri) => isSafeIri(uri));
+  const rootTypes = ROOT_CONTEXT_GRAPH_TYPES.map((iri) => `<${iri}>`).join(' ');
+  const declared = new Set<string>();
+
+  for (let offset = 0; offset < candidateUris.length; offset += MAX_CONTEXT_GRAPH_DECLARATION_BATCH) {
+    const values = candidateUris
+      .slice(offset, offset + MAX_CONTEXT_GRAPH_DECLARATION_BATCH)
+      .map((uri) => `<${uri}>`)
+      .join(' ');
+    const result = await store.query(
+      `SELECT DISTINCT ?ctxGraph WHERE {
+        VALUES ?ctxGraph { ${values} }
+        VALUES ?rootType { ${rootTypes} }
+        {
+          GRAPH <${SYSTEM_ONTOLOGY_GRAPH}> {
+            ?ctxGraph <${RDF_TYPE}> ?rootType .
+          }
+        }
+        UNION
+        {
+          GRAPH <${SYSTEM_AGENTS_GRAPH}> {
+            ?ctxGraph <${RDF_TYPE}> ?rootType .
+          }
+        }
+        UNION
+        {
+          GRAPH ?metaGraph {
+            ?ctxGraph <${RDF_TYPE}> ?rootType .
+          }
+          FILTER(STR(?metaGraph) = CONCAT(STR(?ctxGraph), "/_meta"))
+        }
+      }`,
+      options,
+    );
+    if (result.type !== 'bindings') continue;
+    for (const row of result.bindings) {
+      const uri = stripIriTerm(row.ctxGraph ?? '');
+      if (!uri.startsWith(CG_PREFIX)) continue;
+      const id = uri.slice(CG_PREFIX.length);
+      if (id.includes('/') && validateContextGraphId(id).valid) declared.add(id);
+    }
+  }
+  return [...declared];
 }
 
 /**
@@ -146,9 +284,10 @@ async function listGraphsByPrefix(
  * paths (recompute mismatch → reject/retry, never accept-with-wrong-data).
  *
  * This resolver is COMPLETE and therefore safe everywhere, including the
- * merkle-defining publish reads and the StorageACK decline lanes. Pruning lives in
- * `resolveKaBoundedSharedMemoryReadGraphs`, which is not part of the package's
- * public surface — read its contract before reaching for it.
+ * merkle-defining publish reads and the StorageACK decline lanes. Generic pruning
+ * lives in `resolveKaBoundedSharedMemoryReadGraphs`, which is not part of the
+ * package's public surface. The public exact-named-lifecycle API below is a
+ * separate semantic boundary, not a range-pruning escape hatch.
  */
 export async function resolveSharedMemoryReadGraphs(
   store: TripleStore,
@@ -193,7 +332,6 @@ async function resolveSwmReadGraphs(
   const stagingPrefix = `${bucketGraph}/staging/`;
   const under = await listGraphsByPrefix(store, `${bucketGraph}/`, options);
   const out = new Set<string>([bucketGraph]);
-  const boundAddress = bound?.agentAddress.toLowerCase();
   for (const graph of under) {
     if (graph.startsWith(stagingPrefix)) continue;
     if (!isSafeIri(graph)) continue;
@@ -201,7 +339,7 @@ async function resolveSwmReadGraphs(
       const child = parseBoundableSwmChildGraph(bucketGraph, graph);
       if (
         child &&
-        (child.agentAddress.toLowerCase() !== boundAddress ||
+        (!knowledgeAssetAgentAddressesEqual(child.agentAddress, bound.agentAddress) ||
           child.kaNumber < bound.startNumber ||
           child.kaNumber > bound.endNumber)
       ) {
@@ -230,13 +368,22 @@ export async function loadSelectedSharedMemoryQuads(
   selection: SharedMemoryReadSelection,
   options: LoadSelectedSharedMemoryQuadsOptions = {},
 ): Promise<Quad[]> {
-  return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, undefined);
+  return loadSharedMemoryQuadsForScope(
+    store,
+    bucketGraph,
+    selection,
+    { kind: 'complete-family' },
+    options,
+  );
 }
 
 /**
  * Load the SWM quad slice pruned to ONE author's per-KA under-graphs (#1549).
  *
- * UNSAFE ON ITS OWN, and deliberately NOT re-exported from `src/index.ts`. The
+ * UNSAFE as a generic merkle accelerator. It is module-exported for direct
+ * tests and internal imports, but is not re-exported from the package entrypoint.
+ * Exact lifecycle callers use the scoped public loader below. Generic merkle
+ * callers must use the widening wrapper below. The
  * pruned graph set is a strict subset of the set `loadSelectedSharedMemoryQuads`
  * reads, and INV-1 — "a root's quads live only under its own KA number" — is
  * REFUTED under root recurrence, so this read can legitimately miss quads the
@@ -252,7 +399,123 @@ export async function loadKaBoundedSharedMemoryQuads(
   kaGraphBound: SwmKaGraphBound,
   options: LoadSelectedSharedMemoryQuadsOptions = {},
 ): Promise<Quad[]> {
-  return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, kaGraphBound);
+  return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, {
+    kind: 'bounded',
+    bound: kaGraphBound,
+  });
+}
+
+/**
+ * Load shared memory through one explicit semantic scope.
+ *
+ * Higher layers do not translate scope into concrete graph policy: complete
+ * family and exact named-lifecycle dispatch both stay owned by storage.
+ */
+export async function loadSharedMemoryQuadsForScope(
+  store: TripleStore,
+  bucketGraph: string,
+  selection: SharedMemoryReadSelection,
+  scope: SharedMemoryGraphScope,
+  options: LoadSelectedSharedMemoryQuadsOptions = {},
+): Promise<Quad[]> {
+  return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, scope);
+}
+
+interface NamedLifecycleGraphResolution {
+  canonicalGraph: string;
+  legacyCompatibleReadGraphs: string[];
+}
+
+/**
+ * Legacy read compatibility only: find every historical checksum-casing alias
+ * for the same logical lifecycle. This scan must never influence where new
+ * data is written.
+ */
+async function resolveNamedLifecycleReadPolicy(
+  store: TripleStore,
+  bucketGraph: string,
+  identity: NamedKnowledgeAssetGraphIdentity,
+  options?: QueryOptions,
+): Promise<NamedLifecycleGraphResolution> {
+  const canonicalGraph = canonicalSharedMemoryScopeWriteGraph(bucketGraph, {
+    kind: 'named-lifecycle',
+    identity,
+  });
+  const legacyCompatibleReadGraphs = (await listGraphsByPrefix(store, `${bucketGraph}/`, options))
+    .filter((graph) => {
+      const child = parseBoundableSwmChildGraph(bucketGraph, graph);
+      return child !== undefined
+        && knowledgeAssetAgentAddressesEqual(child.agentAddress, identity.agentAddress)
+        && child.kaNumber === identity.kaNumber;
+    });
+  return { canonicalGraph, legacyCompatibleReadGraphs };
+}
+
+/** Resolve the concrete graph set for an explicit semantic SWM scope. */
+export async function resolveSharedMemoryScopeGraphs(
+  store: TripleStore,
+  bucketGraph: string,
+  scope: SharedMemoryGraphScope,
+  options?: QueryOptions,
+): Promise<NonEmptyGraphList> {
+  if (scope.kind === 'complete-family') {
+    return resolveSharedMemoryReadGraphs(store, bucketGraph, options);
+  }
+  const { canonicalGraph, legacyCompatibleReadGraphs } = await resolveNamedLifecycleReadPolicy(
+    store,
+    bucketGraph,
+    scope.identity,
+    options,
+  );
+  // Read every historical checksum-casing alias for compatibility. An absent
+  // lifecycle still resolves to the canonical candidate so callers receive a
+  // safe empty result without widening to the bucket or sibling lifecycles.
+  return legacyCompatibleReadGraphs.length > 0
+    ? legacyCompatibleReadGraphs as NonEmptyGraphList
+    : [canonicalGraph];
+}
+
+/** Resolve the single canonical graph to WRITE for a semantic scope. */
+export function canonicalSharedMemoryScopeWriteGraph(
+  bucketGraph: string,
+  scope: SharedMemoryGraphScope,
+): string {
+  assertSafeIri(bucketGraph);
+  if (scope.kind === 'complete-family') return bucketGraph;
+  const { agentAddress, kaNumber } = scope.identity;
+  if (!SWM_CHILD_AGENT_ADDRESS.test(agentAddress) || kaNumber < 0n) {
+    throw new Error('Named KA graph identity must contain a 20-byte EVM address and non-negative KA number');
+  }
+  const graph = `${bucketGraph}/${canonicalKnowledgeAssetGraphIdentitySuffix(agentAddress, kaNumber)}`;
+  assertSafeIri(graph);
+  return graph;
+}
+
+/**
+ * @deprecated New canonical-only writers should use the synchronous
+ * `canonicalSharedMemoryScopeWriteGraph` after explicitly converging aliases.
+ * This compatibility resolver deliberately retains its original store-aware
+ * behavior: prefer the canonical graph when it exists, otherwise keep writing
+ * to the stable existing alias chosen by the old API.
+ */
+export async function resolveSharedMemoryScopeWriteGraph(
+  store: TripleStore,
+  bucketGraph: string,
+  scope: SharedMemoryGraphScope,
+  options?: QueryOptions,
+): Promise<string> {
+  if (scope.kind === 'complete-family') {
+    return canonicalSharedMemoryScopeWriteGraph(bucketGraph, scope);
+  }
+  const { canonicalGraph, legacyCompatibleReadGraphs } = await resolveNamedLifecycleReadPolicy(
+    store,
+    bucketGraph,
+    scope.identity,
+    options,
+  );
+  return legacyCompatibleReadGraphs.find((graph) => graph === canonicalGraph)
+    ?? legacyCompatibleReadGraphs.slice().sort()[0]
+    ?? canonicalGraph;
 }
 
 /** Query-source tags for the three read lanes a bounded slice can take. */
@@ -263,6 +526,13 @@ export interface SwmSliceSourceTags {
   widened: QueryOptions['source'];
   /** the initial read when no bound is supplied */
   unbounded: QueryOptions['source'];
+}
+
+export interface LoadSharedMemorySliceWithKaBoundFallbackOptions {
+  sources: SwmSliceSourceTags;
+  createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>;
+  queryOptions?: Omit<QueryOptions, 'source'>;
+  resultBudget?: SharedMemoryResultBudget;
 }
 
 /**
@@ -281,20 +551,50 @@ export interface SwmSliceSourceTags {
  * With no bound this is a single complete read (safe by construction). With a
  * bound the result is exactly what the unbounded read would have produced on any
  * input — never accept→defer, sometimes defer→accept under recurrence.
+ * `queryOptions` is applied to graph discovery and every bounded or widened read.
  */
-export async function loadSharedMemorySliceWithKaBoundFallback(
+export function loadSharedMemorySliceWithKaBoundFallback(
+  store: TripleStore,
+  bucketGraph: string,
+  selection: SharedMemoryReadSelection,
+  kaGraphBound: SwmKaGraphBound | undefined,
+  options: LoadSharedMemorySliceWithKaBoundFallbackOptions,
+): Promise<{ quads: Quad[]; accepted: Quad[] | null }>;
+/** @deprecated Use the named options object. Retained for package compatibility. */
+export function loadSharedMemorySliceWithKaBoundFallback(
   store: TripleStore,
   bucketGraph: string,
   selection: SharedMemoryReadSelection,
   kaGraphBound: SwmKaGraphBound | undefined,
   sources: SwmSliceSourceTags,
   createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>,
+  loadOptions?: Pick<LoadSelectedSharedMemoryQuadsOptions, 'queryOptions' | 'resultBudget'>,
+): Promise<{ quads: Quad[]; accepted: Quad[] | null }>;
+export async function loadSharedMemorySliceWithKaBoundFallback(
+  store: TripleStore,
+  bucketGraph: string,
+  selection: SharedMemoryReadSelection,
+  kaGraphBound: SwmKaGraphBound | undefined,
+  optionsOrSources: LoadSharedMemorySliceWithKaBoundFallbackOptions | SwmSliceSourceTags,
+  legacyCreateAccept?: () => Promise<(quads: Quad[]) => Quad[] | null>,
+  legacyLoadOptions: Pick<LoadSelectedSharedMemoryQuadsOptions, 'queryOptions' | 'resultBudget'> = {},
 ): Promise<{ quads: Quad[]; accepted: Quad[] | null }> {
+  const options = normalizeLoadSharedMemorySliceOptions(
+    optionsOrSources,
+    legacyCreateAccept,
+    legacyLoadOptions,
+  );
+  const { sources, createAccept, queryOptions = {}, resultBudget } = options;
+  const loadOptions = { queryOptions, resultBudget };
   const readComplete = (source: QueryOptions['source']): Promise<Quad[]> =>
-    loadSelectedSharedMemoryQuads(store, bucketGraph, selection, { querySource: source });
+    loadSelectedSharedMemoryQuads(store, bucketGraph, selection, {
+      ...loadOptions,
+      querySource: source,
+    });
 
   let quads = kaGraphBound
     ? await loadKaBoundedSharedMemoryQuads(store, bucketGraph, selection, kaGraphBound, {
+        ...loadOptions,
         querySource: sources.bounded,
       })
     : await readComplete(sources.unbounded);
@@ -315,54 +615,166 @@ export async function loadSharedMemorySliceWithKaBoundFallback(
   return { quads, accepted };
 }
 
-async function loadSharedMemoryQuadsInternal(
-  store: TripleStore,
-  bucketGraph: string,
+function normalizeLoadSharedMemorySliceOptions(
+  optionsOrSources: LoadSharedMemorySliceWithKaBoundFallbackOptions | SwmSliceSourceTags,
+  legacyCreateAccept: (() => Promise<(quads: Quad[]) => Quad[] | null>) | undefined,
+  legacyLoadOptions: Pick<LoadSelectedSharedMemoryQuadsOptions, 'queryOptions' | 'resultBudget'>,
+): LoadSharedMemorySliceWithKaBoundFallbackOptions {
+  if ('sources' in optionsOrSources) return optionsOrSources;
+  if (!legacyCreateAccept) {
+    throw new TypeError('loadSharedMemorySliceWithKaBoundFallback requires createAccept');
+  }
+  return {
+    sources: optionsOrSources,
+    createAccept: legacyCreateAccept,
+    ...legacyLoadOptions,
+  };
+}
+
+function sharedMemorySelectionGraphPattern(
   selection: SharedMemoryReadSelection,
   options: LoadSelectedSharedMemoryQuadsOptions,
-  kaGraphBound: SwmKaGraphBound | undefined,
-): Promise<Quad[]> {
-  let innerGraphPattern: string;
+): string {
   if (selection === 'all') {
-    innerGraphPattern = '?s ?p ?o';
-  } else {
-    const roots = [...new Set(
-      selection.rootEntities
-        .map((r) => String(r).trim())
-        .filter((r) => isSafeIri(r)),
-    )];
-    if (roots.length === 0) {
-      const hadInput = selection.rootEntities.length > 0;
-      const message = options.rootEntitiesErrorMessage?.({
-        inputCount: selection.rootEntities.length,
-        hadInput,
-      }) ?? (
-        hadInput
-          ? `No valid rootEntities provided (all ${selection.rootEntities.length} entries failed IRI validation)`
-          : 'No rootEntities provided'
-      );
-      throw new Error(message);
-    }
-    const values = roots.map((r) => `<${r}>`).join(' ');
-    innerGraphPattern = `VALUES ?root { ${values} }
+    return '?s ?p ?o';
+  }
+  const roots = [...new Set(
+    selection.rootEntities
+      .map((r) => String(r).trim())
+      .filter((r) => isSafeIri(r)),
+  )];
+  if (roots.length === 0) {
+    const hadInput = selection.rootEntities.length > 0;
+    const message = options.rootEntitiesErrorMessage?.({
+      inputCount: selection.rootEntities.length,
+      hadInput,
+    }) ?? (
+      hadInput
+        ? `No valid rootEntities provided (all ${selection.rootEntities.length} entries failed IRI validation)`
+        : 'No rootEntities provided'
+    );
+    throw new Error(message);
+  }
+  const values = roots.map((r) => `<${r}>`).join(' ');
+  return `VALUES ?root { ${values} }
           ?s ?p ?o .
           FILTER(
             ?s = ?root
             || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
           )`;
-  }
+}
+
+async function loadSharedMemoryQuadsInternal(
+  store: TripleStore,
+  bucketGraph: string,
+  selection: SharedMemoryReadSelection,
+  options: LoadSelectedSharedMemoryQuadsOptions,
+  graphScope:
+    | { kind: 'bounded'; bound: SwmKaGraphBound }
+    | SharedMemoryGraphScope,
+): Promise<Quad[]> {
+  const innerGraphPattern = sharedMemorySelectionGraphPattern(selection, options);
 
   const queryOptions = mergeQueryOptions(options.queryOptions, options.querySource);
-  const swmGraphs = kaGraphBound
-    ? await resolveKaBoundedSharedMemoryReadGraphs(store, bucketGraph, kaGraphBound, queryOptions)
-    : await resolveSharedMemoryReadGraphs(store, bucketGraph, queryOptions);
+  let swmGraphs: NonEmptyGraphList;
+  if (graphScope?.kind === 'bounded') {
+    swmGraphs = await resolveKaBoundedSharedMemoryReadGraphs(
+      store,
+      bucketGraph,
+      graphScope.bound,
+      queryOptions,
+    );
+  } else {
+    swmGraphs = await resolveSharedMemoryScopeGraphs(
+      store,
+      bucketGraph,
+      graphScope,
+      queryOptions,
+    );
+  }
   const graphValues = swmGraphs.map((g) => `<${g}>`).join(' ');
+  if (options.resultBudget) {
+    return loadSharedMemoryQuadsPaged(
+      store,
+      graphValues,
+      innerGraphPattern,
+      queryOptions,
+      options,
+    );
+  }
   const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE {
         VALUES ?g { ${graphValues} }
         GRAPH ?g { ${innerGraphPattern} }
       }`, queryOptions);
   if (result.type !== 'quads') return [];
   return options.quadFilter ? result.quads.filter(options.quadFilter) : result.quads;
+}
+
+function normalizePositiveInteger(value: number, fallback: number): number {
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+function estimateQuadHeapBytes(quad: Quad): number {
+  // V8 strings are up to two bytes/code-unit. Include a fixed object/field
+  // allowance so the bound remains conservative without allocating a serialized
+  // N-Quads copy merely to measure it.
+  return 96 + 2 * (
+    quad.subject.length + quad.predicate.length + quad.object.length + quad.graph.length
+  );
+}
+
+async function loadSharedMemoryQuadsPaged(
+  store: TripleStore,
+  graphValues: string,
+  innerGraphPattern: string,
+  queryOptions: QueryOptions | undefined,
+  options: LoadSelectedSharedMemoryQuadsOptions,
+): Promise<Quad[]> {
+  const configured = options.resultBudget!;
+  const pageRows = normalizePositiveInteger(configured.pageRows, 1_000);
+  const maxRows = normalizePositiveInteger(configured.maxRows, pageRows);
+  const maxBytesEstimate = normalizePositiveInteger(configured.maxBytesEstimate, 64 * 1024 * 1024);
+  const quads: Quad[] = [];
+  let rawRows = 0;
+  let bytesEstimate = 0;
+  const source = queryOptions?.source ?? 'unknown';
+  const observeMaterialization = () => {
+    getMetrics().storeQueryResultRows.record(rawRows, { source });
+    getMetrics().storeQueryResultBytesEstimate.record(bytesEstimate, { source });
+  };
+
+  for (let offset = 0; ; offset += pageRows) {
+    const result = await store.query(`SELECT DISTINCT ?s ?p ?o WHERE {
+      VALUES ?g { ${graphValues} }
+      GRAPH ?g { ${innerGraphPattern} }
+    }
+    ORDER BY ?s ?p ?o
+    OFFSET ${offset}
+    LIMIT ${pageRows}`, queryOptions);
+    if (result.type !== 'bindings' || result.bindings.length === 0) break;
+
+    for (const row of result.bindings) {
+      const subject = row['s'];
+      const predicate = row['p'];
+      const object = row['o'];
+      if (!subject || !predicate || !object) continue;
+      rawRows += 1;
+      if (rawRows > maxRows) {
+        observeMaterialization();
+        throw new SharedMemoryResultBudgetError('rows', rawRows, bytesEstimate, maxRows);
+      }
+      const quad: Quad = { subject, predicate, object, graph: '' };
+      bytesEstimate += estimateQuadHeapBytes(quad);
+      if (bytesEstimate > maxBytesEstimate) {
+        observeMaterialization();
+        throw new SharedMemoryResultBudgetError('bytes', rawRows, bytesEstimate, maxBytesEstimate);
+      }
+      if (!options.quadFilter || options.quadFilter(quad)) quads.push(quad);
+    }
+    if (result.bindings.length < pageRows) break;
+  }
+  observeMaterialization();
+  return quads;
 }
 
 /**
@@ -492,6 +904,23 @@ export class ContextGraphManager {
     await this.store.createGraph(contextGraphSharedMemoryMetaUri(contextGraphId, subGraphName));
   }
 
+  /** Reject an ID that would alias one of the storage-owned partitions. */
+  assertNewContextGraphId(contextGraphId: string): void {
+    const validation = validateNewContextGraphId(contextGraphId);
+    if (!validation.valid) {
+      throw new Error(`Invalid context graph ID: ${validation.reason}`);
+    }
+  }
+
+  /**
+   * Create the storage partitions for a newly-authored context graph.
+   * Existing read and sync paths intentionally keep using ensureContextGraph.
+   */
+  async ensureNewContextGraph(contextGraphId: string): Promise<void> {
+    this.assertNewContextGraphId(contextGraphId);
+    await this.ensureContextGraph(contextGraphId);
+  }
+
   async ensureContextGraph(contextGraphId: string): Promise<void> {
     if (this.ensuredContextGraphs.has(contextGraphId)) return;
     await this.store.createGraph(this.dataGraphUri(contextGraphId));
@@ -502,27 +931,66 @@ export class ContextGraphManager {
     this.ensuredContextGraphs.add(contextGraphId);
   }
 
-  async listContextGraphs(): Promise<string[]> {
-    const graphs = await listGraphsByPrefix(this.store, CG_PREFIX);
+  async listContextGraphs(options?: QueryOptions): Promise<string[]> {
+    const graphs = await listGraphsByPrefix(this.store, CG_PREFIX, options);
     const contextGraphs = new Set<string>();
+    const slashCandidates = new Set<string>();
+
+    // Context graphs ensured by this manager are already unambiguous. Keep
+    // these entries even when a freshly-created root has not written its
+    // registration marker yet.
+    for (const id of this.ensuredContextGraphs) contextGraphs.add(id);
+
     for (const g of graphs) {
-      if (g.startsWith(CG_PREFIX)) {
-        const rest = g.slice(CG_PREFIX.length);
-        const id = rest.endsWith('/_meta')
-          ? rest.slice(0, -6)
-          : rest.endsWith('/_private')
-            ? rest.slice(0, -9)
-            : rest.endsWith('/_shared_memory_meta')
-              ? rest.slice(0, -20)
-              : rest.endsWith('/_shared_memory')
-                ? rest.slice(0, -15)
-                : rest;
-        if (!id.includes('/')) {
-          contextGraphs.add(id);
-        }
+      const id = contextGraphIdFromStorageGraph(g);
+      if (id === undefined) continue;
+      if (!id.includes('/')) contextGraphs.add(id);
+
+      // Build the complete set of possible owner interpretations for an
+      // ambiguous URI, then admit only interpretations backed by a root
+      // ContextGraph declaration. A plain path-prefix filter cannot make this
+      // distinction: `owner/name` is also the storage URI of subgraph `name`
+      // under root `owner`.
+      const owners = contextGraphStorageOwnerCandidates(g);
+      for (const owner of owners ?? []) {
+        if (owner.includes('/')) slashCandidates.add(owner);
       }
     }
+
+    for (const id of await listDeclaredSlashContextGraphs(this.store, slashCandidates, options)) {
+      contextGraphs.add(id);
+    }
+
     return [...contextGraphs];
+  }
+
+  /**
+   * Enumerate every legal Context Graph owner interpretation represented by
+   * persisted storage graphs. This is an inventory boundary only: callers
+   * still resolve read authority for every returned candidate.
+   */
+  async listStoredContextGraphOwnerCandidates(options: QueryOptions = {}): Promise<string[]> {
+    options.signal?.throwIfAborted();
+    const graphUris = await listGraphsByPrefix(this.store, CG_PREFIX, {
+      ...options,
+      source: options.source ?? 'storage.contextGraphOwnerCandidates',
+    });
+    const candidates = new Set<string>();
+    let visited = 0;
+    for (const graph of graphUris) {
+      // Preserve cancellation responsiveness without imposing a cardinality
+      // limit: ordinary per-KA graph growth can legitimately be large.
+      if (visited++ % 512 === 511) await new Promise<void>((resolve) => setImmediate(resolve));
+      options.signal?.throwIfAborted();
+      if (!graph.startsWith(CG_PREFIX)) continue;
+      const owners = contextGraphStorageOwnerCandidates(graph);
+      if (owners === undefined) {
+        throw new Error('Cannot authorize unscoped query: unrecognized stored Context Graph owner');
+      }
+      for (const id of owners) candidates.add(id);
+    }
+    options.signal?.throwIfAborted();
+    return [...candidates];
   }
 
   /**

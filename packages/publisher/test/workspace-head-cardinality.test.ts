@@ -1,0 +1,608 @@
+import { describe, expect, it } from 'vitest';
+import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  KnowledgeAssetOperationPublicSnapshotNotFoundError,
+  KnowledgeAssetWorkspaceHeadCorruptError,
+  isKnowledgeAssetWorkspaceHeadCorruptError,
+  resolveKnowledgeAssetWorkspaceHead,
+  resolveKnowledgeAssetWorkspaceHeadPublicQuads,
+  storeKnowledgeAssetOperationPublicQuads,
+  storeKnowledgeAssetWorkspaceHead,
+} from '../src/index.js';
+// Deliberately imported from the MODULE, not the package barrel: the typed
+// resolution wrapper is intra-package API (each internal caller owns its own
+// corruption policy) and is not exported for external consumers.
+import { tryResolveKnowledgeAssetWorkspaceHead } from '../src/workspace-resolution.js';
+import {
+  publisherWorkspaceOperationSemanticsKey,
+  selectEquivalentWorkspaceOperation,
+  workspaceHeadIncludesShareOperationId,
+  type PublisherWorkspaceOperationSemantics,
+} from '../src/workspace-operation-equivalence.js';
+
+// GH#2273: SWM catch-up union-inserts a peer's head `shareOperationId` row
+// beside the local one (shared-memory-sync bulk insert holds no lock and
+// performs no delete), leaving ONE head subject carrying TWO operation ids.
+// `resolveKnowledgeAssetWorkspaceHead` was `LIMIT 1` over that state, so every
+// consumer — gossip monotonicity, finalization, access decisions, and the
+// async VM-publish preflight — received an ARBITRARY answer that could change
+// between calls. These rows pin the corrected contract: head-id cardinality
+// is measured as COUNT(DISTINCT shareOperationId) ON THE HEAD SUBJECT, and
+// more than one distinct id is accepted only when every referenced operation
+// proves the same content and access envelope. Missing or disagreeing aliases
+// still fail closed as KA_WORKSPACE_HEAD_CORRUPT.
+//
+// The predicate is deliberately NOT `bindings.length` of the main resolver
+// query: that query carries three OPTIONALs on the operation subject
+// (privateMerkleRoot / publishedAt / accessPolicy), so binding count is a
+// cross-product. Two `publishedAt` rows on ONE operation subject — reachable
+// in production when two cores ACK the same content with different clocks and
+// a third node unions both via sync — must keep resolving (see the
+// duplicate-publishedAt row below, which kills a bindings.length
+// implementation).
+
+const CONTEXT_GRAPH = 'head-cardinality';
+const UAL = 'did:dkg:base:8453/0x70997970c51812dc3a010c7d01b50e0d17dc79c8/7';
+// Format contract with workspace-resolution.ts (module-private helpers):
+// head subject = `<ual>#dkg-swm-head`, operation subject =
+// `urn:dkg:share:<contextGraphId>:<shareOperationId>`.
+const HEAD_SUBJECT = `${UAL}#dkg-swm-head`;
+const DKG = 'http://dkg.io/ontology/';
+const XSD = 'http://www.w3.org/2001/XMLSchema#';
+
+const LOCAL_OP = 'op-a';
+// The realistic foreign id shape: deterministic storage-ACK mint on a
+// receiving core (storage-ack-handler.ts), served back to the author by the
+// SWM responder after a restart.
+const REMOTE_OP = 'storage-ack-2273b';
+
+const CONTENT: Quad[] = [
+  { subject: 'urn:entity:1', predicate: 'urn:predicate:value', object: '"one"', graph: '' },
+  { subject: 'urn:entity:2', predicate: 'urn:predicate:value', object: '"two"', graph: '' },
+];
+
+interface Harness {
+  store: OxigraphStore;
+  graphManager: GraphManager;
+  metaGraph: string;
+}
+
+function makeHarness(): Harness {
+  const store = new OxigraphStore();
+  const graphManager = new GraphManager(store);
+  return { store, graphManager, metaGraph: graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH) };
+}
+
+interface SeedOperationOverrides {
+  readonly quads?: readonly Quad[];
+  readonly privateMerkleRoot?: Uint8Array;
+  readonly privateTripleCount?: number;
+  readonly publisherPeerId?: string;
+  readonly accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  readonly allowedPeers?: readonly string[];
+}
+
+async function seedOperation(
+  h: Harness,
+  shareOperationId: string,
+  overrides: SeedOperationOverrides = {},
+): Promise<void> {
+  await storeKnowledgeAssetOperationPublicQuads({
+    store: h.store,
+    graphManager: h.graphManager,
+    contextGraphId: CONTEXT_GRAPH,
+    shareOperationId,
+    kaUal: UAL,
+    assertionVersion: 1,
+    quads: overrides.quads ?? CONTENT,
+    publisherPeerId: overrides.publisherPeerId ?? 'peer-1',
+    ...(overrides.privateMerkleRoot === undefined
+      ? {}
+      : { privateMerkleRoot: overrides.privateMerkleRoot }),
+    ...(overrides.privateTripleCount === undefined
+      ? {}
+      : { privateTripleCount: overrides.privateTripleCount }),
+    ...(overrides.accessPolicy === undefined ? {} : { accessPolicy: overrides.accessPolicy }),
+    ...(overrides.allowedPeers === undefined ? {} : { allowedPeers: overrides.allowedPeers }),
+    timestamp: new Date('2026-08-16T00:00:00.000Z'),
+  });
+}
+
+async function seedHealthyHead(h: Harness, overrides: SeedOperationOverrides = {}): Promise<void> {
+  await seedOperation(h, LOCAL_OP, overrides);
+  await storeKnowledgeAssetWorkspaceHead({
+    store: h.store,
+    graphManager: h.graphManager,
+    contextGraphId: CONTEXT_GRAPH,
+    kaUal: UAL,
+    assertionVersion: 1,
+    shareOperationId: LOCAL_OP,
+  });
+}
+
+/**
+ * The corruption is fabricated with a RAW insert because that is exactly what
+ * produces it in production: `storeKnowledgeAssetWorkspaceHead` is
+ * delete-then-insert (cannot stack), while the sync bulk insert is a bare
+ * set-union onto the same subject.
+ */
+async function unionInsertSecondHeadId(h: Harness): Promise<void> {
+  await h.store.insert([{
+    subject: HEAD_SUBJECT,
+    predicate: `${DKG}shareOperationId`,
+    object: JSON.stringify(REMOTE_OP),
+    graph: h.metaGraph,
+  }]);
+}
+
+function resolveHead(h: Harness) {
+  return resolveKnowledgeAssetWorkspaceHead({
+    store: h.store,
+    graphManager: h.graphManager,
+    contextGraphId: CONTEXT_GRAPH,
+    kaUal: UAL,
+  });
+}
+
+describe('workspace operation semantic model', () => {
+  const semantics: PublisherWorkspaceOperationSemantics = Object.freeze({
+    publicQuadsDigest: `sha256:${'1'.repeat(64)}`,
+    publicTripleCount: 2,
+    privateMerkleRoot: `0x${'2'.repeat(64)}`,
+    privateTripleCount: 1,
+    publisherIdentity: 'peer-a',
+    access: Object.freeze({
+      kind: 'persisted',
+      accessPolicy: 'allowList',
+      allowedPeers: Object.freeze(['peer-a', 'peer-b']),
+    }),
+  });
+
+  it.each([
+    ['publicQuadsDigest', `sha256:${'3'.repeat(64)}`],
+    ['publicTripleCount', 3],
+    ['privateMerkleRoot', `0x${'4'.repeat(64)}`],
+    ['privateTripleCount', 2],
+    ['publisherIdentity', 'peer-c'],
+    ['access', { kind: 'persisted', accessPolicy: 'ownerOnly', allowedPeers: [] }],
+    ['access', { kind: 'persisted', accessPolicy: 'allowList', allowedPeers: ['peer-a', 'peer-c'] }],
+  ] satisfies ReadonlyArray<readonly [keyof PublisherWorkspaceOperationSemantics, unknown]>) (
+    'includes semantic field %s in equivalence', (field, value) => {
+      expect(publisherWorkspaceOperationSemanticsKey({
+        ...semantics,
+        [field]: value,
+      } as PublisherWorkspaceOperationSemantics))
+        .not.toBe(publisherWorkspaceOperationSemanticsKey(semantics));
+    },
+  );
+
+  it('excludes operation id and timestamp provenance from equivalence', () => {
+    expect(selectEquivalentWorkspaceOperation([
+      { semantics, provenance: { shareOperationId: 'originator', publishedAtMs: 1 } },
+      { semantics, provenance: { shareOperationId: 'storage-ack', publishedAtMs: 2 } },
+    ], publisherWorkspaceOperationSemanticsKey).map(({ provenance }) => provenance.shareOperationId))
+      .toEqual(['storage-ack', 'originator']);
+  });
+
+});
+
+describe('isKnowledgeAssetWorkspaceHeadCorruptError boundary predicate', () => {
+  it('recognizes the class, a code-preserving re-wrap, and survives hostile inspection', () => {
+    expect(isKnowledgeAssetWorkspaceHeadCorruptError(
+      new KnowledgeAssetWorkspaceHeadCorruptError('x'),
+    )).toBe(true);
+    // A re-wrap that kept the code but lost class identity (the dual-package /
+    // wrapper case the predicate exists for).
+    expect(isKnowledgeAssetWorkspaceHeadCorruptError(
+      Object.assign(new Error('wrapped'), { code: 'KA_WORKSPACE_HEAD_CORRUPT' }),
+    )).toBe(true);
+    expect(isKnowledgeAssetWorkspaceHeadCorruptError(
+      Object.assign(new Error('other'), { code: 'PUBLISH_INTENT_STALE' }),
+    )).toBe(false);
+    expect(isKnowledgeAssetWorkspaceHeadCorruptError(null)).toBe(false);
+    expect(isKnowledgeAssetWorkspaceHeadCorruptError(undefined)).toBe(false);
+    // The predicate runs inside catch paths against arbitrary thrown values;
+    // inspecting the value must never itself throw and mask the original
+    // failure — a throwing `code` getter is the hostile shape.
+    const hostile = {};
+    Object.defineProperty(hostile, 'code', {
+      get() { throw new Error('inspection trap'); },
+    });
+    expect(isKnowledgeAssetWorkspaceHeadCorruptError(hostile)).toBe(false);
+  });
+});
+
+describe('tryResolveKnowledgeAssetWorkspaceHead typed boundary', () => {
+  it('maps missing, resolved and corrupt onto the discriminated result', async () => {
+    const h = makeHarness();
+    expect(await tryResolveKnowledgeAssetWorkspaceHead({
+      store: h.store, graphManager: h.graphManager, contextGraphId: CONTEXT_GRAPH, kaUal: UAL,
+    })).toEqual({ status: 'missing' });
+    await seedHealthyHead(h);
+    const resolved = await tryResolveKnowledgeAssetWorkspaceHead({
+      store: h.store, graphManager: h.graphManager, contextGraphId: CONTEXT_GRAPH, kaUal: UAL,
+    });
+    expect(resolved.status).toBe('resolved');
+    if (resolved.status !== 'resolved') throw new Error('unreachable');
+    expect(resolved.head.shareOperationId).toBe(LOCAL_OP);
+    await unionInsertSecondHeadId(h);
+    const corrupt = await tryResolveKnowledgeAssetWorkspaceHead({
+      store: h.store, graphManager: h.graphManager, contextGraphId: CONTEXT_GRAPH, kaUal: UAL,
+    });
+    expect(corrupt.status).toBe('corrupt');
+    if (corrupt.status !== 'corrupt') throw new Error('unreachable');
+    expect(corrupt.error).toBeInstanceOf(KnowledgeAssetWorkspaceHeadCorruptError);
+  });
+
+  it('classifies only resolver-proven corruption; store failures propagate — even code-colliding ones', async () => {
+    // The typed wrapper is deliberately NARROWER than the exported boundary
+    // predicate: within this module the resolver is the sole authority on
+    // corruption and always throws the concrete class, so a lower storage
+    // layer that throws a code-colliding error BEFORE the resolver ever
+    // inspected head rows is a STORE failure and must keep propagating as
+    // one — treating it as domain corruption would misreport an outage as
+    // malformed workspace-head data. The loose `.code` predicate remains the
+    // recognition rule for boundaries the error crosses AFTER propagation.
+    const h = makeHarness();
+    const codeCollidingStore = new Proxy(h.store, {
+      get(target, prop, receiver) {
+        if (prop === 'query') {
+          return async () => {
+            throw Object.assign(
+              new Error('storage layer failure that happens to collide on code'),
+              { code: 'KA_WORKSPACE_HEAD_CORRUPT' },
+            );
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    await expect(tryResolveKnowledgeAssetWorkspaceHead({
+      store: codeCollidingStore as never,
+      graphManager: h.graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: UAL,
+    })).rejects.toThrow('collide on code');
+
+    const failingStore = new Proxy(h.store, {
+      get(target, prop, receiver) {
+        if (prop === 'query') {
+          return async () => { throw new Error('store outage'); };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    await expect(tryResolveKnowledgeAssetWorkspaceHead({
+      store: failingStore as never,
+      graphManager: h.graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: UAL,
+    })).rejects.toThrow('store outage');
+  });
+});
+
+describe('graph-scoped SWM head shareOperationId cardinality', () => {
+  it('resolves a healthy single-operation head (guard polarity control)', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    const head = await resolveHead(h);
+    expect(head?.shareOperationId).toBe(LOCAL_OP);
+    expect(head?.assertionVersion).toBe('1');
+    expect(head).toMatchObject({
+      access: { kind: 'legacy-default', accessPolicy: 'public', allowedPeers: [] },
+      accessPolicy: 'public',
+      accessPolicyExplicit: false,
+      allowedPeers: [],
+    });
+  });
+
+  it('collapses two operation ids that prove the same exact record', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    await seedOperation(h, REMOTE_OP);
+    await unionInsertSecondHeadId(h);
+    const head = await resolveHead(h);
+    // Equal timestamps use the operation id as a deterministic final tie-break.
+    expect(head?.shareOperationId).toBe(REMOTE_OP);
+    expect(head?.operationAliases.map((alias) => alias.shareOperationId)).toEqual([
+      REMOTE_OP,
+      LOCAL_OP,
+    ]);
+    expect(head?.shareOperationIds).toEqual([LOCAL_OP, REMOTE_OP]);
+    const idDescriptor = Object.getOwnPropertyDescriptor(head, 'shareOperationId');
+    expect(idDescriptor?.value).toBe(REMOTE_OP);
+    expect(idDescriptor?.get).toBeUndefined();
+    const idsDescriptor = Object.getOwnPropertyDescriptor(head, 'shareOperationIds');
+    expect(idsDescriptor?.value).toEqual([LOCAL_OP, REMOTE_OP]);
+    expect(idsDescriptor?.get).toBeUndefined();
+    expect(workspaceHeadIncludesShareOperationId(head!, LOCAL_OP)).toBe(true);
+    expect(workspaceHeadIncludesShareOperationId(head!, REMOTE_OP)).toBe(true);
+    expect(workspaceHeadIncludesShareOperationId(head!, 'unrelated-op')).toBe(false);
+    expect(head?.publicTripleCount).toBe(CONTENT.length);
+  });
+
+  it('resolves snapshot bytes through a locator-bearing alias when the display alias has none', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    await seedOperation(h, REMOTE_OP);
+    await unionInsertSecondHeadId(h);
+    const remoteSubject = `urn:dkg:share:${CONTEXT_GRAPH}:${REMOTE_OP}`;
+    await h.store.deleteByPattern({
+      graph: h.metaGraph,
+      subject: remoteSubject,
+      predicate: `${DKG}publicSnapshotGraph`,
+    });
+    const head = await resolveHead(h);
+    expect(head?.shareOperationId).toBe(REMOTE_OP);
+    expect(head?.operationAliases).toHaveLength(2);
+    if (!head) throw new Error('expected resolved workspace head');
+    const snapshot = await resolveKnowledgeAssetWorkspaceHeadPublicQuads({
+      store: h.store,
+      graphManager: h.graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      head,
+    });
+    expect(snapshot.publicQuadsDigest).toBe(head.publicQuadsDigest);
+    expect(snapshot.quads).toHaveLength(CONTENT.length);
+    expect(snapshot.quads).toEqual(expect.arrayContaining(CONTENT));
+  });
+
+  it('falls back after the preferred alias snapshot is missing from its usable locator', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    await seedOperation(h, REMOTE_OP);
+    await unionInsertSecondHeadId(h);
+    const head = await resolveHead(h);
+    if (!head) throw new Error('expected resolved workspace head');
+    expect(head.operationAliases[0]?.shareOperationId).toBe(REMOTE_OP);
+    const preferred = head.operationAliases[0]!.snapshotLocator;
+    expect(preferred.kind).toBe('graph');
+    if (preferred.kind !== 'graph') throw new Error('expected graph locator');
+    await h.store.dropGraph(preferred.graph);
+
+    await expect(resolveKnowledgeAssetWorkspaceHeadPublicQuads({
+      store: h.store,
+      graphManager: h.graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      head,
+    })).resolves.toMatchObject({
+      publicQuadsDigest: head.publicQuadsDigest,
+      quads: expect.arrayContaining(CONTENT),
+    });
+  });
+
+  it('fails closed when an operation carries both graph and store snapshot locators', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    await h.store.insert([{
+      subject: `urn:dkg:share:${CONTEXT_GRAPH}:${LOCAL_OP}`,
+      predicate: `${DKG}publicSnapshotRef`,
+      object: JSON.stringify(`sha256:${'a'.repeat(64)}`),
+      graph: h.metaGraph,
+    }]);
+    await expect(resolveHead(h)).rejects.toThrow(/two public snapshot locations/);
+  });
+
+  it('fails closed when an operation snapshot graph does not match its operation id', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    const operationSubject = `urn:dkg:share:${CONTEXT_GRAPH}:${LOCAL_OP}`;
+    await h.store.deleteByPattern({
+      graph: h.metaGraph,
+      subject: operationSubject,
+      predicate: `${DKG}publicSnapshotGraph`,
+    });
+    await h.store.insert([{
+      subject: operationSubject,
+      predicate: `${DKG}publicSnapshotGraph`,
+      object: 'urn:dkg:workspace:wrong-operation:snapshot',
+      graph: h.metaGraph,
+    }]);
+    await expect(resolveHead(h)).rejects.toThrow(/public snapshot graph mismatch/);
+  });
+
+  it('reports a missing snapshot only after exhausting every equivalent alias', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    await seedOperation(h, REMOTE_OP);
+    await unionInsertSecondHeadId(h);
+    const head = await resolveHead(h);
+    if (!head) throw new Error('expected resolved workspace head');
+    for (const alias of head.operationAliases) {
+      if (alias.snapshotLocator.kind === 'graph') {
+        await h.store.dropGraph(alias.snapshotLocator.graph);
+      }
+    }
+    await expect(resolveKnowledgeAssetWorkspaceHeadPublicQuads({
+      store: h.store,
+      graphManager: h.graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      head,
+    })).rejects.toThrow(KnowledgeAssetOperationPublicSnapshotNotFoundError);
+  });
+
+  it('classifies malformed commitment metadata as corruption before a missing graph', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    const head = await resolveHead(h);
+    if (!head) throw new Error('expected resolved workspace head');
+    const operationSubject = `urn:dkg:share:${CONTEXT_GRAPH}:${LOCAL_OP}`;
+    await h.store.deleteByPattern({
+      graph: h.metaGraph,
+      subject: operationSubject,
+      predicate: `${DKG}publicQuadsCount`,
+    });
+    await h.store.insert([{
+      subject: operationSubject,
+      predicate: `${DKG}publicQuadsCount`,
+      object: '"not-an-integer"',
+      graph: h.metaGraph,
+    }]);
+    const locator = head.operationAliases[0].snapshotLocator;
+    if (locator.kind !== 'graph') throw new Error('expected graph locator');
+    await h.store.dropGraph(locator.graph);
+
+    const error = await resolveKnowledgeAssetWorkspaceHeadPublicQuads({
+      store: h.store,
+      graphManager: h.graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      head,
+    }).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(KnowledgeAssetOperationPublicSnapshotNotFoundError);
+    expect((error as Error).message).toContain('snapshot is missing or corrupt');
+  });
+
+  it('exposes an explicit allow-list as a persisted access-envelope state', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h, { accessPolicy: 'allowList', allowedPeers: ['peer-b', 'peer-a'] });
+    await expect(resolveHead(h)).resolves.toMatchObject({
+      access: {
+        kind: 'persisted',
+        accessPolicy: 'allowList',
+        allowedPeers: ['peer-a', 'peer-b'],
+      },
+      accessPolicy: 'allowList',
+      accessPolicyExplicit: true,
+      allowedPeers: ['peer-a', 'peer-b'],
+    });
+  });
+
+  it.each([
+    {
+      label: 'public for a public-only assertion',
+      local: {},
+      remote: { accessPolicy: 'public' as const },
+      effectivePolicy: 'public' as const,
+    },
+    {
+      label: 'ownerOnly for a private assertion',
+      local: { privateTripleCount: 1, privateMerkleRoot: new Uint8Array(32).fill(1) },
+      remote: {
+        privateTripleCount: 1,
+        privateMerkleRoot: new Uint8Array(32).fill(1),
+        accessPolicy: 'ownerOnly' as const,
+      },
+      effectivePolicy: 'ownerOnly' as const,
+    },
+  ])('treats an omitted policy as effective $label', async ({
+    local,
+    remote,
+    effectivePolicy,
+  }) => {
+    const h = makeHarness();
+    await seedHealthyHead(h, local);
+    await seedOperation(h, REMOTE_OP, remote);
+    await unionInsertSecondHeadId(h);
+    await expect(resolveHead(h)).resolves.toMatchObject({
+      shareOperationId: REMOTE_OP,
+      shareOperationIds: [LOCAL_OP, REMOTE_OP],
+      access: { kind: 'persisted', accessPolicy: effectivePolicy, allowedPeers: [] },
+    });
+  });
+
+  it.each([
+    {
+      field: 'public content digest',
+      local: {},
+      remote: { quads: CONTENT.map((quad, index) => index === 0 ? { ...quad, object: '"changed"' } : quad) },
+    },
+    {
+      field: 'private commitment',
+      local: { privateTripleCount: 1, privateMerkleRoot: new Uint8Array(32).fill(1) },
+      remote: { privateTripleCount: 1, privateMerkleRoot: new Uint8Array(32).fill(2) },
+    },
+    { field: 'publisher identity', local: {}, remote: { publisherPeerId: 'peer-2' } },
+    {
+      field: 'allowed-peer set',
+      local: { accessPolicy: 'allowList', allowedPeers: ['peer-a'] },
+      remote: { accessPolicy: 'allowList', allowedPeers: ['peer-b'] },
+    },
+    { field: 'effective access policy', local: {}, remote: { accessPolicy: 'ownerOnly' } },
+  ] satisfies ReadonlyArray<{
+    field: string;
+    local: SeedOperationOverrides;
+    remote: SeedOperationOverrides;
+  }>)('fails closed when equivalent aliases disagree on $field', async ({ local, remote }) => {
+    const h = makeHarness();
+    await seedHealthyHead(h, local);
+    await seedOperation(h, REMOTE_OP, remote);
+    await unionInsertSecondHeadId(h);
+
+    await expect(resolveHead(h)).rejects.toThrow(KnowledgeAssetWorkspaceHeadCorruptError);
+    await expect(resolveHead(h)).rejects.toThrow(/ambiguous shareOperationId/);
+  });
+
+  it('fails closed when the head carries two operation ids even if the second operation subject is absent', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    await unionInsertSecondHeadId(h);
+    // Pre-fix this state silently resolved to the SURVIVING operation: the
+    // main query joins head→operation on the id, so the danging second id
+    // contributed no binding and LIMIT 1 saw exactly one solution. The head
+    // row set is corrupt all the same — a later arrival of the second
+    // operation subject would flip the resolver's answer — so cardinality
+    // must be measured on the HEAD ROWS, not on the join result.
+    await expect(resolveHead(h)).rejects.toThrow(KnowledgeAssetWorkspaceHeadCorruptError);
+  });
+
+  it('fails closed when the head carries two assertionVersion values (same corruption class)', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    // Union residue can stack a second VERSION row just as it stacks a second
+    // operation id (the materializer's needsRepair flags versions > 1 for the
+    // same reason). Pre-refactor the joined LIMIT-1 read picked one version
+    // arbitrarily — the overwrite-with-older hazard for the gossip
+    // monotonicity gate. The phased resolver requires exactly one distinct
+    // value per REQUIRED head predicate, so this is the same corrupt outcome.
+    await h.store.insert([{
+      subject: HEAD_SUBJECT,
+      predicate: `${DKG}assertionVersion`,
+      object: `"2"^^<${XSD}integer>`,
+      graph: h.metaGraph,
+    }]);
+    await expect(resolveHead(h)).rejects.toThrow(KnowledgeAssetWorkspaceHeadCorruptError);
+    await expect(resolveHead(h)).rejects.toThrow(/assertionVersion/);
+  });
+
+  it('still resolves when one operation subject carries duplicate optional rows (kills a bindings-length guard)', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    // Two cores ACKing the same content mint the SAME deterministic operation
+    // subject but stamp their own clocks; a node that unions both peers' meta
+    // ends with two publishedAt rows on ONE operation. The resolver's main
+    // query then yields TWO bindings for a head with exactly ONE operation
+    // id. A guard on bindings.length would fail this healthy head closed;
+    // the cardinality guard must not.
+    const operationSubject = `urn:dkg:share:${CONTEXT_GRAPH}:${LOCAL_OP}`;
+    await h.store.insert([{
+      subject: operationSubject,
+      predicate: `${DKG}publishedAt`,
+      object: `"2026-08-16T00:00:05.000Z"^^<${XSD}dateTime>`,
+      graph: h.metaGraph,
+    }]);
+    const head = await resolveHead(h);
+    expect(head?.shareOperationId).toBe(LOCAL_OP);
+    // The tolerated duplicate canonicalizes to the EARLIEST stamp — stable
+    // under later re-stamp unions (this timestamp orders RFC64 inventory), and
+    // an explicit rule rather than whichever binding the store returned first.
+    expect(head?.publishedAt).toBe(Date.parse('2026-08-16T00:00:00.000Z').toString());
+  });
+
+  it('fails closed when the operation carries duplicate singleton metadata (accessPolicy)', async () => {
+    // The envelope predicates are declared SINGLETON: two accessPolicy rows on
+    // one operation are the same union-residue corruption class as two head
+    // ids, and an arbitrary pick here would drive an ACCESS decision. Only
+    // publishedAt (canonicalized) and allowedPeer (set-valued) tolerate
+    // duplicates.
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    const operationSubject = `urn:dkg:share:${CONTEXT_GRAPH}:${LOCAL_OP}`;
+    await h.store.insert([
+      { subject: operationSubject, predicate: `${DKG}accessPolicy`, object: '"public"', graph: h.metaGraph },
+      { subject: operationSubject, predicate: `${DKG}accessPolicy`, object: '"ownerOnly"', graph: h.metaGraph },
+    ]);
+    await expect(resolveHead(h)).rejects.toThrow(KnowledgeAssetWorkspaceHeadCorruptError);
+    await expect(resolveHead(h)).rejects.toThrow(/accessPolicy/);
+  });
+});

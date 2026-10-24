@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-
 /**
  * Workspace-encryption / sender-key subsystem extracted from dkg-agent.ts as
  * a mixin holder: recipient/gate resolution, on-chain access-policy reads,
@@ -9,6 +8,8 @@
  * composed class.
  */
 
+
+import { collectProjectedDelegatees } from './internal/workspace-projected-delegatees.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -94,15 +95,18 @@ import {
   type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
+  tryCanonicalPeerIdString,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, createRpcTimeoutError, enrichEvmError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
   ACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   resolveWorkspaceAgentRecipients,
+  isWorkspaceAgentEncryptionKeyMissingError,
+  WorkspaceAgentEncryptionKeyMissingError,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
   canonicalPublishPayload,
   resolveLiftWorkspaceSlice,
@@ -116,8 +120,7 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
-  type LiftRequest, type LiftRequestAuthorSeal,
+  type CollectedACK,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
@@ -133,6 +136,33 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+import {
+  resolveActivePublicContextGraphChainProof as resolveStrictActivePublicChainProof,
+  type ActivePublicContextGraphChainProof,
+} from './active-public-context-graph-chain-proof.js';
+import {
+  resolveContextGraphAgentGateAuthorityDecision,
+} from './internal/context-graph-authority/context-graph-agent-gate-authority.js';
+import {
+  resolveLiveOnChainAccessPolicyState as resolveLiveAccessPolicyState,
+  type LiveOnChainAccessPolicyState,
+} from './internal/context-graph-authority/context-graph-access-policy.js';
+import {
+  createContextGraphAuthorityError,
+  createRecipientAuthorityChangedError,
+  isContextGraphAuthorityUnavailableMarker,
+  isRetryableContextGraphAuthorityUnavailableReason,
+  type ContextGraphAgentGateAuthority,
+} from './internal/context-graph-authority/context-graph-authority.js';
+import type { RegisteredContextGraphAuthority } from './registered-context-graph-authority.js';
+import {
+  resolveSwmMemberRecoveryAuthorityDecision,
+  resolveSwmRegisteredAuthorityDecision,
+  resolveSwmTransportAuthorityDecision,
+  type SwmRegisteredAuthorityReadOptions,
+  type SwmTransportAuthority,
+} from './internal/context-graph-authority/swm-transport-authority.js';
+import { noRosterFrom } from './internal/context-graph-authority/unanswered-authority-read.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -209,6 +239,7 @@ import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
+import { SyncTargetSupersededError } from './sync/error-tags.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
@@ -231,9 +262,10 @@ import {
   type KeystoreEntry,
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
+import { externalAuthorGossipSigner, localGossipSigner, signGossipEnvelopeInTime, type WorkspaceGossipSigner } from './external-author-signing.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
-import { reconcileContextGraph, ReconcileCoalescer, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
+import { FinalizationHandler } from './finalization-handler.js';
+import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
@@ -280,6 +312,7 @@ import {
   SYNC_MIN_GRAPH_BUDGET_MS,
   DEBUG_SYNC_PROGRESS,
   DEFAULT_SWM_TTL_MS,
+  SWM_RECIPIENT_KEY_FETCH_WAIT_MS,
   SWM_CLEANUP_INTERVAL_MS,
   SYNC_DENIED_RESPONSE,
   GOSSIP_DIAL_COOLDOWN_MS,
@@ -306,7 +339,12 @@ import {
   CHAIN_POLICY_READ_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
+import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
+import {
+  isBoundedOperationTimeoutError,
+  runBoundedOperation,
+} from './bounded-operation.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
   ContextGraphNotFoundError,
@@ -318,7 +356,6 @@ import {
   type LocalSwmSenderKeySendState,
   type LocalSwmSenderKeyReceiveState,
   type PendingSenderKeyEntry,
-  type RandomSamplingStartResult,
   type ACKSignerResolution,
   type SyncRequestEnvelope,
   type CclPublishedResultEntry,
@@ -350,9 +387,6 @@ import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
-  partitionPublishAsyncQuads,
-  signWithPrivateKey,
-  preSignedAttestationToLiftSeal,
   normalizeAgentDid,
   joinDelegationScope,
   normalizeSyncPhase,
@@ -371,6 +405,7 @@ import {
   sliceIntoCiphertextChunks,
 } from './dkg-agent-helpers.js';
 import {
+  computeSwmSenderKeyRecipientRouteHash,
   swmSenderStateKey,
   swmReceiverStateKey,
   serializeSwmSenderSendState,
@@ -383,7 +418,309 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 
+import {
+  isCanonicalPositiveContextGraphId,
+  localContextGraphIdMatchesCommittedNameHash,
+} from './context-graph-binding-state.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
+
 const KA_LIFECYCLE_ASSET_UAL_RESOLVE_TIMEOUT_MS = 50;
+const SWM_RECIPIENT_AUTHORITY_STABILITY_ATTEMPTS = 3;
+
+/** One completed collect, with the check that nothing it depends on moved since it started. */
+interface RecipientSnapshot {
+  readonly resolution: WorkspaceAgentRecipientResolution;
+  readonly stayedCurrent: () => boolean;
+}
+
+type ContextGraphSlotBindingOutcome =
+  | { kind: 'match' }
+  | { kind: 'mismatch' }
+  | { kind: 'unprovable' }
+  | { kind: 'transportFailure'; error: unknown };
+
+export type ContextGraphSlotBindingMode =
+  | 'legacy-policy'
+  | 'chain-attested-repair'
+  | 'retryable-durable';
+
+type PublicPolicySlotBindingMode = Exclude<
+  ContextGraphSlotBindingMode,
+  'retryable-durable'
+>;
+
+function mapContextGraphSlotBindingOutcome(
+  outcome: ContextGraphSlotBindingOutcome,
+  mode: ContextGraphSlotBindingMode,
+): boolean {
+  if (outcome.kind === 'match') return true;
+  if (outcome.kind === 'unprovable') return mode === 'legacy-policy';
+  if (outcome.kind === 'transportFailure' && mode !== 'legacy-policy') {
+    throw outcome.error;
+  }
+  return false;
+}
+
+function evaluateContextGraphSlotBindingCommitment(
+  contextGraphId: string,
+  onChainId: string,
+  onChainHash: string | null,
+  allowNumericSelfAddress: boolean,
+  isWireIdKeyedSubscription: (localId: string) => boolean,
+  warn: (message: string) => void,
+): ContextGraphSlotBindingOutcome {
+  let numericId: bigint;
+  try {
+    numericId = BigInt(onChainId);
+  } catch {
+    return { kind: 'unprovable' };
+  }
+  if (numericId <= 0n) return { kind: 'unprovable' };
+
+  const trimmed = contextGraphId.trim();
+  if (
+    allowNumericSelfAddress
+    && /^\d+$/.test(trimmed)
+    && trimmed === numericId.toString()
+  ) {
+    return { kind: 'match' };
+  }
+  if (!onChainHash || !/^0x[0-9a-fA-F]{64}$/.test(onChainHash)) {
+    warn(
+      `isContextGraphPublicOnChain(${contextGraphId}): locally-mapped on-chain id ${onChainId} has NO `
+      + 'valid committed name-hash — cannot affirmatively bind identity (slot reused on a fresh chain?). '
+      + 'Treating CG as NOT public (fail-closed).',
+    );
+    return { kind: 'mismatch' };
+  }
+  if (localContextGraphIdMatchesCommittedNameHash(
+    trimmed,
+    onChainHash,
+    isWireIdKeyedSubscription,
+  )) return { kind: 'match' };
+
+  warn(
+    `isContextGraphPublicOnChain(${contextGraphId}): locally-mapped on-chain id ${onChainId} commits `
+    + `name-hash ${onChainHash.toLowerCase()} that does not match this CG's local identity — `
+    + 'local mapping is STALE (slot reused on a fresh chain?). Treating CG as NOT public (fail-closed).',
+  );
+  return { kind: 'mismatch' };
+}
+
+async function evaluateContextGraphSlotBinding(
+  chain: ChainAdapter,
+  contextGraphId: string,
+  onChainId: string,
+  opCtx: OperationContext | undefined,
+  signal: AbortSignal | undefined,
+  allowNumericSelfAddress: boolean,
+  isWireIdKeyedSubscription: (localId: string) => boolean,
+  warn: (ctx: OperationContext, message: string) => void,
+  raceRead: <T>(
+    start: () => Promise<T>,
+    label: string,
+    readSignal?: AbortSignal,
+  ) => Promise<T | typeof TIMEOUT_SENTINEL>,
+  /** The deadline `raceRead` applies; quoted in the fail-closed diagnostic. */
+  readTimeoutMs: number = CHAIN_POLICY_READ_TIMEOUT_MS,
+): Promise<ContextGraphSlotBindingOutcome> {
+  let numericId: bigint;
+  try {
+    numericId = BigInt(onChainId);
+  } catch {
+    return { kind: 'unprovable' };
+  }
+  if (numericId <= 0n) return { kind: 'unprovable' };
+
+  const trimmed = contextGraphId.trim();
+  if (
+    allowNumericSelfAddress
+    && /^\d+$/.test(trimmed)
+    && trimmed === numericId.toString()
+  ) {
+    return { kind: 'match' };
+  }
+  const getNameHash = chain.getContextGraphNameHash;
+  if (typeof getNameHash !== 'function') return { kind: 'unprovable' };
+
+  let onChainHash: string | null | typeof TIMEOUT_SENTINEL;
+  try {
+    onChainHash = await raceRead(
+      () => signal
+        ? getNameHash.call(chain, numericId, { signal })
+        : getNameHash.call(chain, numericId),
+      `getContextGraphNameHash(${onChainId})`,
+      signal,
+    );
+  } catch (error) {
+    warn(
+      opCtx ?? createOperationContext('share'),
+      `isContextGraphPublicOnChain(${contextGraphId}): getContextGraphNameHash(${onChainId}) failed — `
+      + 'cannot verify local-mapping identity, treating CG as NOT public (fail-closed): '
+      + `${error instanceof Error ? error.message : String(error)}`,
+    );
+    return { kind: 'transportFailure', error };
+  }
+  if (onChainHash === TIMEOUT_SENTINEL) {
+    warn(
+      opCtx ?? createOperationContext('share'),
+      `isContextGraphPublicOnChain(${contextGraphId}): getContextGraphNameHash(${onChainId}) timed out after `
+      + `${readTimeoutMs}ms — cannot verify local-mapping identity, `
+      + 'treating CG as NOT public (fail-closed)',
+    );
+    return {
+      kind: 'transportFailure',
+      error: createRpcTimeoutError(
+        `getContextGraphNameHash(${onChainId}) timed out after ${readTimeoutMs}ms`,
+      ),
+    };
+  }
+  return evaluateContextGraphSlotBindingCommitment(
+    contextGraphId,
+    onChainId,
+    onChainHash,
+    allowNumericSelfAddress,
+    isWireIdKeyedSubscription,
+    (message) => warn(opCtx ?? createOperationContext('share'), message),
+  );
+}
+
+const LIVE_AUTHORITY_FALLBACK_WARN_INTERVAL_MS = 60_000;
+
+/**
+ * Bind an optional chain point read. Options are passed ONLY when a signal is
+ * present, so the call keeps the arity callers and spies have always observed.
+ */
+function bindOptionalChainRead<T>(
+  chain: unknown,
+  read: ((numericId: bigint, options?: { signal?: AbortSignal }) => Promise<T>) | undefined,
+): ((numericId: bigint, signal?: AbortSignal) => Promise<T>) | undefined {
+  if (typeof read !== 'function') return undefined;
+  return (numericId, signal) => signal
+    ? read.call(chain, numericId, { signal })
+    : read.call(chain, numericId);
+}
+
+/**
+ * Bind the one-read authority WITH the caller's freshness choice.
+ *
+ * Separate from {@link bindOptionalChainRead} because only this read honours
+ * `freshness`; the point reads it falls back to are always live. That is the
+ * safe direction — a node whose adapter cannot serve the single tuple simply
+ * keeps today's behaviour rather than inheriting a bounded answer from a path
+ * that never offered one.
+ */
+function bindLiveAuthorityRead<T>(
+  chain: unknown,
+  read: ((
+    numericId: bigint,
+    options?: { signal?: AbortSignal; freshness?: 'live' | 'bounded' },
+  ) => Promise<T>) | undefined,
+  freshness: 'live' | 'bounded',
+): ((numericId: bigint, signal?: AbortSignal) => Promise<T>) | undefined {
+  if (typeof read !== 'function') return undefined;
+  return (numericId, signal) => read.call(chain, numericId, {
+    ...(signal ? { signal } : {}),
+    freshness,
+  });
+}
+
+/**
+ * The recipient-key failure a sender reports once fetching cannot help: why
+ * the keys are unknown and what gets them here (#2849).
+ */
+function withMemberKeyHint(
+  error: WorkspaceAgentEncryptionKeyMissingError,
+): WorkspaceAgentEncryptionKeyMissingError {
+  const { agentAddresses } = error;
+  const one = agentAddresses.length === 1;
+  return new WorkspaceAgentEncryptionKeyMissingError(
+    agentAddresses,
+    `${new WorkspaceAgentEncryptionKeyMissingError(agentAddresses).message}: this node has neither `
+      + (one ? 'a join request from the agent nor its profile. Have the member' : 'join requests from these agents nor their profiles. Have each member')
+      + ' join through an invite, or retry once '
+      + (one ? 'its profile has' : 'their profiles have')
+      + ' reached this node (profiles are re-published about every 20 minutes).',
+  );
+}
+
+function hasExactRecipientAgentRoster(
+  resolution: Extract<WorkspaceAgentRecipientResolution, { readonly requiresEncryption: true }>,
+  participantAgents: readonly string[],
+): boolean {
+  try {
+    const resolvedAgents = new Set(
+      resolution.recipients.map(({ agentAddress }) => ethers.getAddress(agentAddress).toLowerCase()),
+    );
+    const currentAgents = new Set(
+      participantAgents.map((address) => ethers.getAddress(address).toLowerCase()),
+    );
+    return currentAgents.size === resolvedAgents.size
+      && [...currentAgents].every((address) => resolvedAgents.has(address));
+  } catch {
+    return false;
+  }
+}
+
+function hasExactWorkspaceRecipientSet(
+  left: Extract<WorkspaceAgentRecipientResolution, { readonly requiresEncryption: true }>,
+  right: Extract<WorkspaceAgentRecipientResolution, { readonly requiresEncryption: true }>,
+): boolean {
+  const canonical = (recipient: WorkspaceAgentRecipient): string => [
+    ethers.getAddress(recipient.agentAddress).toLowerCase(),
+    recipient.recipientKeyId,
+    recipient.peerId ?? '',
+  ].join('\u0000');
+  try {
+    const leftRecipients = left.recipients.map(canonical).sort();
+    const rightRecipients = right.recipients.map(canonical).sort();
+    return leftRecipients.length === rightRecipients.length
+      && leftRecipients.every((recipient, index) => recipient === rightRecipients[index]);
+  } catch {
+    return false;
+  }
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  const leftSet = new Set(left);
+  const rightSet = new Set(right);
+  return leftSet.size === rightSet.size && [...leftSet].every((value) => rightSet.has(value));
+}
+
+type PendingSenderKeyDrainAuthority = {
+  readonly contextGraphId: string;
+  readonly subGraphName?: string;
+  /** Connection-open authority covers every subgraph of one resolved CG. */
+  readonly allSubgraphs?: boolean;
+  readonly recipientAgentAddress: string;
+  readonly recipientKeyId: string;
+  readonly recipientPeerId: string;
+  /** Foreground publish additionally fences the exact local sender epoch. */
+  readonly senderAgentAddress?: string;
+  readonly epochId?: string;
+};
+
+function pendingSenderKeyEntryMatchesDrainAuthority(
+  entry: PendingSenderKeyEntry,
+  authority: PendingSenderKeyDrainAuthority,
+): boolean {
+  return entry.contextGraphId === authority.contextGraphId
+    && (
+      authority.allSubgraphs === true
+      || (entry.subGraphName ?? undefined) === (authority.subGraphName ?? undefined)
+    )
+    && entry.recipientAgentAddress === authority.recipientAgentAddress
+    && entry.recipientKeyId === authority.recipientKeyId
+    && entry.recipientPeerId === authority.recipientPeerId
+    && (
+      authority.senderAgentAddress === undefined
+      || entry.senderAgentAddress === authority.senderAgentAddress
+    )
+    && (authority.epochId === undefined || entry.epochId === authority.epochId);
+}
 
 export class WorkspaceCryptoMethods extends DKGAgentBase {
   getWorkspaceGossipSigningAgent(this: DKGAgent): (AgentKeyRecord & { privateKey: string }) | null {
@@ -437,64 +774,153 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     return null;
   }
 
+  protected async resolveContextGraphAgentGateAuthority(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ContextGraphAgentGateAuthority> {
+    return withRpcUsageSite(CG_AUTH_RPC_SITES.gate, () => resolveContextGraphAgentGateAuthorityDecision({
+      contextGraphId,
+      getTransportAuthority: () => this.resolveSwmTransportAuthority(
+        contextGraphId,
+        { signal: options.signal },
+      ),
+      readRosterRevision: () => this.contextGraphMetaProjection.peerGateRevision.read(contextGraphId),
+      getLegacyMeta: () => this.getCgMeta(contextGraphId, { signal: options.signal }),
+      getSubscriptionAgents: () => (
+        this.subscribedContextGraphs.get(contextGraphId)?.participantAgents ?? []
+      ),
+    }));
+  }
+
+  /** Compatibility projection for admission callers that only need fail-closed gate values. */
   async getContextGraphAgentGateAddresses(
     this: DKGAgent,
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<string[] | null> {
-    const seen = new Set<string>();
-    const agents: string[] = [];
-    let sawAgentGate = false;
-    const meta = await this.getCgMeta(contextGraphId, { signal: options.signal });
-    const revoked = new Set(meta.revokedAgents.map((addr) => addr.toLowerCase()));
-    const add = (value: string | undefined) => {
-      if (!value || !ethers.isAddress(value)) return;
-      const checksum = ethers.getAddress(value);
-      const key = checksum.toLowerCase();
-      if (revoked.has(key)) return;
-      if (seen.has(key)) return;
-      seen.add(key);
-      agents.push(checksum);
-    };
-
-    const subscriptionAgents = this.subscribedContextGraphs.get(contextGraphId)?.participantAgents ?? [];
-    if (subscriptionAgents.length > 0) sawAgentGate = true;
-    for (const agentAddress of subscriptionAgents) {
-      add(agentAddress);
-    }
-
-    if (meta.allowedAgents.length > 0 || meta.participantAgents.length > 0) sawAgentGate = true;
-    for (const agent of meta.allowedAgents) add(agent);
-    for (const agent of meta.participantAgents) add(agent);
-
-    return sawAgentGate ? agents : null;
+    const authority = await this.resolveContextGraphAgentGateAuthority(contextGraphId, options);
+    if (authority.kind === 'ungated') return null;
+    if (authority.kind === 'available') return authority.agentAddresses;
+    return [];
   }
 
   /**
-   * R9 (SECURITY) — FRESH, `_meta`-only member-recovery gate.
+   * R9 (SECURITY) — authoritative member-recovery gate.
    *
-   * Resolves `allowedAgents ∪ participantAgents` minus `revokedAgents` from the
-   * CG `_meta` projection (store-backed, write-invalidated), with the
-   * network-influenced `subscribedContextGraphs` subscription cache
-   * DELIBERATELY OMITTED — that cache is poisonable, and folding it in is
-   * exactly what `member-recovery-auth.ts` forbids.
+   * Registered and active accepted-private graphs use their exact authority
+   * roster. Only a legacy unregistered graph (including accepted public, whose
+   * local gate controls recovery rather than reads) resolves the effective
+   * store-backed metadata projection of
+   * `allowedAgents ∪ participantAgents` minus `revokedAgents` from the CG
+   * metadata. The network-influenced `subscribedContextGraphs`
+   * subscription cache is DELIBERATELY OMITTED — that cache is poisonable, and
+   * folding it in is exactly what `member-recovery-auth.ts` forbids.
    *
-   * Unlike {@link getContextGraphAgentGateAddresses} (which feeds the normal
-   * fail-open sync path and DOES fold in the subscription cache), this read is
-   * used ONLY for `request.recovery` and is passed straight to
+   * Unlike {@link getContextGraphAgentGateAddresses} (which also feeds normal
+   * sync admission and may fold in the subscription cache only for graphs that
+   * are not registered on-chain), this read is used ONLY for `request.recovery`
+   * and is passed straight to
    * `isMemberRecoveryAuthorized`, which hard-denies on null/empty. Returns
-   * `null` when the CG has no `_meta` agent gate at all (⇒ hard-deny).
+   * `null` when the CG has no projected agent gate at all (⇒ hard-deny).
    */
   async getMemberRecoveryGate(
     this: DKGAgent,
     contextGraphId: string,
-    _options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal } = {},
   ): Promise<string[] | null> {
+    const recoveryAuthority = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.recoveryGate,
+      () => resolveSwmMemberRecoveryAuthorityDecision(
+        this,
+        contextGraphId,
+        { signal: options.signal },
+      ),
+    );
+    if (recoveryAuthority.kind === 'private-roster') {
+      return [...recoveryAuthority.participantAgents];
+    }
+    if (recoveryAuthority.kind !== 'legacy-unregistered') return null;
+
+    const metadataRevision = this.contextGraphMetaProjection
+      .readContextGraphAuthorityFactsRevision(contextGraphId);
+    const metadataGate = await this.getLocalMetadataMemberRecoveryGate(contextGraphId, options);
+
+    // Metadata is another async boundary. Re-resolve the authoritative state
+    // before returning it so a private policy activation/rotation or a chain
+    // registration that commits during the store read takes precedence over
+    // the now-stale local projection.
+    const currentRecoveryAuthority = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.recoveryGate,
+      () => resolveSwmMemberRecoveryAuthorityDecision(
+        this,
+        contextGraphId,
+        { signal: options.signal },
+      ),
+    );
+    if (currentRecoveryAuthority.kind === 'private-roster') {
+      return [...currentRecoveryAuthority.participantAgents];
+    }
+    if (currentRecoveryAuthority.kind !== 'legacy-unregistered') return null;
+    // A revocation or other authority-fact mutation during the metadata read
+    // invalidates the captured roster even if registration remained absent.
+    // Recovery is retryable, so fail closed instead of serving that snapshot.
+    return this.contextGraphMetaProjection
+      .readContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision
+      ? metadataGate
+      : null;
+  }
+
+  /**
+   * Authority source used while constructing or mutating a private roster.
+   * Registered private graphs retain their finalized chain participant set;
+   * unregistered graphs use the effective store-backed metadata projection.
+   * This deliberately ignores an accepted-private overlay roster so rotation
+   * does not ask the roster it is replacing to define its own successor.
+   */
+  async getMemberRecoveryRosterSource(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<string[] | null> {
+    const registered = await this.resolveSwmRegisteredAuthority(
+      contextGraphId,
+      { signal: options.signal },
+    );
+    if (registered.kind === 'private') return [...registered.participantAgents];
+    if (registered.kind !== 'unregistered') return noRosterFrom(contextGraphId, registered);
+    const metadataRevision = this.contextGraphMetaProjection
+      .readContextGraphAuthorityFactsRevision(contextGraphId);
+    const metadataGate = await this.getLocalMetadataMemberRecoveryGate(contextGraphId, options);
+    const currentRegistered = await this.resolveSwmRegisteredAuthority(
+      contextGraphId,
+      { signal: options.signal },
+    );
+    if (currentRegistered.kind === 'private') {
+      return [...currentRegistered.participantAgents];
+    }
+    if (currentRegistered.kind !== 'unregistered') return noRosterFrom(contextGraphId, currentRegistered);
+    return this.contextGraphMetaProjection
+      .readContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision
+      ? metadataGate
+      : null;
+  }
+
+  /**
+   * Fresh effective store-backed metadata member set. This deliberately stays
+   * separate from the transport-authoritative recovery decision.
+   */
+  async getLocalMetadataMemberRecoveryGate(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<string[] | null> {
+
     const seen = new Set<string>();
     const agents: string[] = [];
-    const meta = await this.getCgMeta(contextGraphId);
+    const meta = await this.getCgMeta(contextGraphId, { signal: options.signal });
     if (meta.allowedAgents.length === 0 && meta.participantAgents.length === 0) {
-      return null; // no _meta agent gate ⇒ hard-deny at the recovery gate
+      return null; // no projected agent gate ⇒ hard-deny at the recovery gate
     }
     const revoked = new Set(meta.revokedAgents.map((addr) => addr.toLowerCase()));
     const add = (value: string | undefined) => {
@@ -530,46 +956,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<Map<string, string[]>> {
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    // SELECT also returns `expiresAtMs` so we can filter expired rows in
-    // JS — pushing the FILTER into SPARQL would force a string→long
-    // cast that not every store backend handles uniformly.
-    // PR #448 review (round 4): without this, an approved delegation
-    // remained authorised forever even after `expiresAtMs` had passed.
-    // `approveJoinRequest()` re-validates expiry only at approval time;
-    // sync auth never checked it again, turning `expiresAtMs` into a
-    // one-time admission gate instead of an ongoing constraint.
-    const result = await this.store.query(
-      `SELECT ?agent ?peer ?expiresAt WHERE {
-        GRAPH <${cgMetaGraph}> {
-          ?d <${DKG_ONTOLOGY.DKG_DELEGATION_AGENT}> ?agent ;
-             <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER}> ?peer .
-          OPTIONAL { ?d <${DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT}> ?expiresAt }
-        }
-      }`,
-      { signal: options.signal },
-    );
-    const out = new Map<string, string[]>();
-    if (result.type !== 'bindings') return out;
-    const strip = (raw: unknown): string => {
-      if (typeof raw !== 'string') return '';
-      return raw.replace(/^"/, '').replace(/"(@[a-zA-Z-]+|\^\^<[^>]+>)?$/, '');
-    };
-    const nowMs = Date.now();
-    for (const row of result.bindings) {
-      const agent = strip(row['agent']).toLowerCase();
-      const peer = strip(row['peer']);
-      if (!agent || !peer) continue;
-      const expiresStr = strip(row['expiresAt']);
-      if (expiresStr) {
-        const expiresAt = Number(expiresStr);
-        if (Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt < nowMs) continue;
-      }
-      const list = out.get(agent) ?? [];
-      if (!list.includes(peer)) list.push(peer);
-      out.set(agent, list);
-    }
-    return out;
+    const meta = await this.getCgMeta(contextGraphId, { signal: options.signal });
+    return collectProjectedDelegatees(meta, 'allowedPeers', (value) => value);
   }
 
   /**
@@ -585,38 +973,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<Map<string, string[]>> {
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const result = await this.store.query(
-      `SELECT ?agent ?key ?expiresAt WHERE {
-        GRAPH <${cgMetaGraph}> {
-          ?d <${DKG_ONTOLOGY.DKG_DELEGATION_AGENT}> ?agent ;
-             <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY}> ?key .
-          OPTIONAL { ?d <${DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT}> ?expiresAt }
-        }
-      }`,
-      { signal: options.signal },
-    );
-    const out = new Map<string, string[]>();
-    if (result.type !== 'bindings') return out;
-    const strip = (raw: unknown): string => {
-      if (typeof raw !== 'string') return '';
-      return raw.replace(/^"/, '').replace(/"(@[a-zA-Z-]+|\^\^<[^>]+>)?$/, '');
-    };
-    const nowMs = Date.now();
-    for (const row of result.bindings) {
-      const agent = strip(row['agent']).toLowerCase();
-      const key = strip(row['key']).toLowerCase();
-      if (!agent || !key) continue;
-      const expiresStr = strip(row['expiresAt']);
-      if (expiresStr) {
-        const expiresAt = Number(expiresStr);
-        if (Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt < nowMs) continue;
-      }
-      const list = out.get(agent) ?? [];
-      if (!list.includes(key)) list.push(key);
-      out.set(agent, list);
-    }
-    return out;
+    const meta = await this.getCgMeta(contextGraphId, { signal: options.signal });
+    return collectProjectedDelegatees(meta, 'allowedKeys', (value) => value.toLowerCase());
   }
 
   hasLocalAgentInGate(this: DKGAgent, agentGateAddresses: readonly string[]): boolean {
@@ -686,21 +1044,38 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   /**
    * #884 review — bound a single chain policy/liveness read on the hot path.
    * Mirrors the `withTimeout` race in {@link getContextGraphOnChainPolicy}:
-   * resolves to {@link TIMEOUT_SENTINEL} if the underlying RPC HANGS past
-   * {@link CHAIN_POLICY_READ_TIMEOUT_MS}, so callers fail closed instead of
+   * resolves to {@link TIMEOUT_SENTINEL} if the underlying RPC HANGS past the
+   * request-scoped authority deadline (`chainAuthorityReadBudgets`, default
+   * {@link CHAIN_POLICY_READ_TIMEOUT_MS}), so callers fail closed instead of
    * blocking forever. The timer is `unref`'d so a dead RPC never keeps the
    * process alive.
+   *
+   * `start` receives the bounded signal so the deadline reaches the read
+   * itself: a hung RPC is cancelled rather than merely abandoned, and a
+   * timed-out caller leaves any flight it was sharing.
    */
-  private raceChainPolicyRead<T>(p: Promise<T>): Promise<T | typeof TIMEOUT_SENTINEL> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<typeof TIMEOUT_SENTINEL>((resolve) => {
-      timer = setTimeout(() => resolve(TIMEOUT_SENTINEL), CHAIN_POLICY_READ_TIMEOUT_MS);
-      timer.unref?.();
-    });
-    return Promise.race([
-      p.finally(() => { if (timer) clearTimeout(timer); }),
-      timeout,
-    ]);
+  private async raceChainPolicyRead<T>(
+    start: (signal: AbortSignal) => Promise<T>,
+    label: string,
+    signal?: AbortSignal,
+  ): Promise<T | typeof TIMEOUT_SENTINEL> {
+    try {
+      // This remains inside the caller's ordinary RATE budget, but it must
+      // not wait behind a harness-sized queue longer than its 2.5s fail-closed
+      // deadline. Background callers retain their background class and its
+      // budget; there the governor admits the read ahead of ordinary
+      // background work and does not hold it for the start-up delay.
+      return await withRpcRequestContext({ admissionPriority: 'authority' }, () => (
+        runBoundedOperation(start, {
+          label,
+          timeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
+          signal,
+        })
+      ));
+    } catch (error) {
+      if (isBoundedOperationTimeoutError(error)) return TIMEOUT_SENTINEL;
+      throw error;
+    }
   }
 
   /**
@@ -709,94 +1084,340 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * to a less-protected path" decision (SWM-plaintext gate + publish-inline
    * curated probe), so both branches can never diverge.
    *
-   * Returns the access-policy enum (`0` = public, `1` = private/curated) ONLY
-   * after {@link ChainAdapter.isContextGraphActiveOnChain} proves the slot is
-   * actually live on-chain; otherwise returns `null` (= UNKNOWN, caller fails
-   * closed). This is essential because `getContextGraphAccessPolicy` returns
+   * Returns an available access-policy enum (`0` = public, `1` =
+   * private/curated) ONLY after
+   * {@link ChainAdapter.isContextGraphActiveOnChain} proves the slot is
+   * actually live on-chain; otherwise preserves a typed unavailable reason.
+   * This is essential because `getContextGraphAccessPolicy` returns
    * Solidity's default `0` (= public) for UNKNOWN ids, and the local
    * access-policy cache can be seeded by best-effort probes of arbitrary ids —
    * so neither is trustworthy without a liveness proof. Both the liveness and
    * the policy reads are bounded by {@link raceChainPolicyRead} so a hung RPC
-   * fails closed (`null`) instead of blocking the hot path. A genuine RPC
+   * fails closed instead of blocking the hot path. A genuine RPC
    * rejection propagates to the caller (which logs + fails closed in its own
-   * idiom). `null` is returned when: the id is non-numeric/≤0, no liveness
-   * probe is implemented, the slot is not live, a read times out, or the
-   * policy getter is missing / returns an out-of-range value.
+   * idiom). The canonical reason distinguishes retryable bounded timeouts
+   * from terminal unknown policy; diagnostics retain the timed-out read name.
    */
+  protected async resolveLiveOnChainAccessPolicyState(this: DKGAgent,
+    onChainId: string,
+    opCtx?: OperationContext,
+    options: { signal?: AbortSignal; freshness?: 'live' | 'bounded' } = {},
+  ): Promise<LiveOnChainAccessPolicyState> {
+    const readLiveness = this.chain.isContextGraphActiveOnChain;
+    const readAccessPolicy = this.chain.getContextGraphAccessPolicy;
+    const readLiveAuthority = this.chain.getContextGraphLiveAuthority;
+    return resolveLiveAccessPolicyState(
+      {
+        readTimeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
+        // Defaults to live. Only a caller that has said its decision can wait
+        // for the next read is allowed to ask the index.
+        readLiveAuthority: bindLiveAuthorityRead(
+          this.chain, readLiveAuthority, options.freshness ?? 'live',
+        ),
+        isContextGraphActiveOnChain: bindOptionalChainRead(this.chain, readLiveness),
+        getContextGraphAccessPolicy: bindOptionalChainRead(this.chain, readAccessPolicy),
+        runBoundedRead: async (start, label, signal) => {
+          const value = await this.raceChainPolicyRead(start, label, signal);
+          return value === TIMEOUT_SENTINEL
+            ? { kind: 'timeout' }
+            : { kind: 'value', value };
+        },
+        claimMissingLivenessWarning: () => {
+          if (this.warnedMissingCgLivenessProbe) return false;
+          this.warnedMissingCgLivenessProbe = true;
+          return true;
+        },
+        // Unlike the static condition above this one comes and goes (a node
+        // throttling at the JSON-RPC level reaches it too), so it is limited
+        // by time rather than to once per process.
+        claimLiveAuthorityFallbackWarning: () => {
+          const now = Date.now();
+          if (now - this.lastLiveAuthorityFallbackWarnAt < LIVE_AUTHORITY_FALLBACK_WARN_INTERVAL_MS) return false;
+          this.lastLiveAuthorityFallbackWarnAt = now;
+          return true;
+        },
+        warn: (ctx, message) => this.log.warn(ctx, message),
+        cacheAccessPolicy: (id, policy) => this.onChainAccessPolicyCache.set(id, policy),
+      },
+      onChainId,
+      opCtx,
+      options,
+    );
+  }
+
+  /** Compatibility projection for fail-closed policy consumers. */
   async readLiveOnChainAccessPolicy(this: DKGAgent,
     onChainId: string,
     opCtx?: OperationContext,
+    options: { signal?: AbortSignal; freshness?: 'live' | 'bounded' } = {},
   ): Promise<0 | 1 | null> {
-    let numericId: bigint;
-    try {
-      numericId = BigInt(onChainId);
-    } catch {
-      return null;
-    }
-    if (numericId <= 0n) return null;
+    const state = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.livePolicy,
+      () => this.resolveLiveOnChainAccessPolicyState(onChainId, opCtx, options),
+    );
+    return state.kind === 'available' ? state.accessPolicy : null;
+  }
 
-    if (typeof this.chain.isContextGraphActiveOnChain !== 'function') {
-      // #884 review (🔴 GZEqN): don't strand public CGs SILENTLY. An adapter
-      // that exposes getContextGraphAccessPolicy but NOT the liveness probe
-      // can't prove a slot live, so we fail closed (encrypted) — but emit a
-      // one-shot loud diagnostic so operators/integrators get a runtime signal
-      // that on-chain-public detection is disabled for this adapter, instead
-      // of silently keeping every public CG on the encrypted path. (The
-      // interface documents this fail-closed-on-absence contract; we can't
-      // make the probe a hard type-level requirement without breaking the many
-      // minimal publish-only ChainAdapter implementations.)
-      if (typeof this.chain.getContextGraphAccessPolicy === 'function' && !this.warnedMissingCgLivenessProbe) {
-        this.warnedMissingCgLivenessProbe = true;
-        this.log.warn(
-          opCtx ?? createOperationContext('share'),
-          `Chain adapter implements getContextGraphAccessPolicy but not isContextGraphActiveOnChain — ` +
-          `cannot PROVE on-chain context-graph liveness, so public-on-chain CGs will be kept on the ` +
-          `ENCRYPTED SWM path (fail-closed). Implement isContextGraphActiveOnChain to enable ` +
-          `public-CG plaintext detection.`,
-        );
+  async resolveActivePublicContextGraphChainProof(
+    this: DKGAgent,
+    contextGraphId: string,
+    operationContext: OperationContext,
+    signal?: AbortSignal,
+  ): Promise<ActivePublicContextGraphChainProof> {
+    return resolveStrictActivePublicChainProof(
+      (id, resolverOperationContext) => this.resolveFinalizedOnChainAccessPolicyState(
+        id,
+        resolverOperationContext,
+        signal,
+      ),
+      contextGraphId,
+      operationContext,
+    );
+  }
+
+  /**
+   * Metadata-bootstrap authority proof. Indexed adapters resolve identity,
+   * liveness, and policy from one finalized snapshot; legacy adapters retain
+   * the strict current-state repair path explicitly at this boundary.
+   */
+  async resolveFinalizedOnChainAccessPolicyState(this: DKGAgent,
+    contextGraphId: string,
+    opCtx?: OperationContext,
+    /**
+     * Caller deadline. Once it aborts, no further chain read starts, and the
+     * finalized-index read this call queued on the shared authority
+     * coordinator is dropped from the queue, or cancelled if already running.
+     */
+    signal?: AbortSignal,
+  ): Promise<0 | 1 | 'unregistered' | 'unknown'> {
+    signal?.throwIfAborted();
+    // Retired name-hash id: answer for the graph it names (see supersedingContextGraphIdFor).
+    const supersedingId = this.supersedingContextGraphIdFor?.(contextGraphId);
+    if (supersedingId) {
+      return this.resolveFinalizedOnChainAccessPolicyState(supersedingId, opCtx, signal);
+    }
+    const trimmed = contextGraphId.trim();
+    let onChainId: string | null = null;
+    let resolvedFromLocalCg = false;
+    if (
+      this.chain?.contextGraphAuthorityIndexRevisionReader !== undefined
+      && typeof this.resolveContextGraphRegistrationBinding === 'function'
+      && !isCanonicalPositiveContextGraphId(trimmed)
+    ) {
+      // An indexed adapter takes the identity from the finalized registration
+      // binding too, never from a live registry range scan (#2827 follow-up).
+      // Finalized absence is `unregistered`, as a scan's miss was; any other
+      // unanswered read is `unknown`.
+      const binding = await this.resolveContextGraphRegistrationBinding(contextGraphId, { signal });
+      if (binding.kind === 'registered') {
+        onChainId = binding.onChainId.toString();
+        resolvedFromLocalCg = true;
+      } else if (
+        binding.kind === 'unavailable'
+        && binding.reason !== 'finalized-name-absence-unaccepted'
+      ) {
+        return 'unknown';
       }
-      return null;
+    } else if (typeof this.getContextGraphOnChainId === 'function') {
+      onChainId = await this.getContextGraphOnChainId(contextGraphId, { signal });
+      if (onChainId) resolvedFromLocalCg = true;
     }
-    const live = await this.raceChainPolicyRead(
-      this.chain.isContextGraphActiveOnChain(numericId),
-    );
-    if (live === TIMEOUT_SENTINEL) {
-      this.log.warn(
-        opCtx ?? createOperationContext('share'),
-        `readLiveOnChainAccessPolicy(${onChainId}): isContextGraphActiveOnChain timed out after ` +
-        `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — treating on-chain access policy as UNKNOWN (fail-closed)`,
-      );
-      return null;
+    if (!onChainId && /^\d+$/.test(trimmed)) {
+      if (typeof this.contextGraphExists === 'function') {
+        try {
+          if (!(await this.contextGraphExists(trimmed))) onChainId = trimmed;
+        } catch {
+          return 'unknown';
+        }
+      } else {
+        onChainId = trimmed;
+      }
     }
-    if (live !== true) return null;
+    if (!onChainId) return 'unregistered';
 
-    // #884 review (🔴 GZEqI): the slot is LIVE, but DO NOT trust the
-    // onChainAccessPolicyCache for this security-downgrade decision. The cache
-    // is keyed by numeric on-chain id with no chain/deployment epoch, so after
-    // a devnet reset or numeric-id reuse a value cached as public (`0`) on the
-    // OLD chain would survive and force a NEW, possibly-private CG that now
-    // occupies the same slot onto the plaintext path. Always read the access
-    // policy FRESH from chain here (one bounded eth_call — correctness over a
-    // saved RPC). The cache is still WRITTEN below (a fresh, live-verified
-    // value is strictly an improvement for the other, decrypt-gated readers).
-    const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
-    if (typeof getAccessPolicy !== 'function') return null;
-    const policy = await this.raceChainPolicyRead(
-      getAccessPolicy.call(this.chain, numericId),
+    try {
+      const parsed = BigInt(onChainId);
+      if (
+        parsed <= 0n
+        || parsed > ethers.MaxUint256
+        || parsed.toString(10) !== onChainId
+      ) return 'unknown';
+    } catch {
+      return 'unknown';
+    }
+
+    // The id lookup above may itself have waited on the chain.
+    signal?.throwIfAborted();
+    const indexedSnapshot = await this.readRfc64BatchedFinalizedAuthoritySnapshotV1(
+      onChainId,
+      signal,
     );
-    if (policy === TIMEOUT_SENTINEL) {
+    if (indexedSnapshot === undefined) {
+      // Preserve the exact address resolution above when a legacy adapter has
+      // no finalized-index capability. Re-resolving through the generic
+      // policy helper can reinterpret a numeric local CG as a raw slot after
+      // a stateful resolver changes, bypassing its required name-hash proof.
+      if (resolvedFromLocalCg && !(await this.localCgMatchesOnChainSlot(
+        contextGraphId,
+        onChainId,
+        opCtx,
+        { bindingMode: 'chain-attested-repair', signal },
+      ))) return 'unknown';
+      const policy = await this.readLiveOnChainAccessPolicy(onChainId, opCtx, { signal });
+      return policy === 0 || policy === 1 ? policy : 'unknown';
+    }
+    if (
+      indexedSnapshot === null
+      || indexedSnapshot.contextGraphId !== onChainId
+      || indexedSnapshot.active !== true
+    ) return 'unknown';
+
+    if (resolvedFromLocalCg) {
+      const bindingOutcome = evaluateContextGraphSlotBindingCommitment(
+        contextGraphId,
+        onChainId,
+        indexedSnapshot.nameHash,
+        false,
+        (localId) => this.isWireIdKeyedSubscription(localId),
+        (message) => this.log.warn(
+          opCtx ?? createOperationContext('share'),
+          message,
+        ),
+      );
+      if (!mapContextGraphSlotBindingOutcome(
+        bindingOutcome,
+        'chain-attested-repair',
+      )) return 'unknown';
+    }
+
+    const accessPolicy = indexedSnapshot.accessPolicy;
+    if (accessPolicy !== 0 && accessPolicy !== 1) return 'unknown';
+    this.onChainAccessPolicyCache.set(onChainId, accessPolicy);
+    return accessPolicy;
+  }
+
+  /**
+   * Registered-chain authority for the SWM consumers that need the raw roster,
+   * the agent gate and member recovery (#2827). The policy, and why the
+   * finalized authority index is the only registration evidence, live in
+   * {@link resolveSwmRegisteredAuthorityDecision}.
+   */
+  resolveSwmRegisteredAuthority(this: DKGAgent,
+    contextGraphId: string,
+    options: SwmRegisteredAuthorityReadOptions = {},
+  ): Promise<RegisteredContextGraphAuthority> {
+    return resolveSwmRegisteredAuthorityDecision(this, contextGraphId, options);
+  }
+
+  /**
+   * How SWM on this graph may travel, for both ends of the wire
+   * ({@link resolveSwmTransportAuthorityDecision}).
+   */
+  resolveSwmTransportAuthority(this: DKGAgent,
+    contextGraphId: string,
+    options: SwmRegisteredAuthorityReadOptions = {},
+  ): Promise<SwmTransportAuthority> {
+    return resolveSwmTransportAuthorityDecision(this, contextGraphId, options);
+  }
+
+  /**
+   * Resolve the transport peer gate that applies to inbound SWM traffic.
+   *
+   * Ordinary graphs retain the legacy merged metadata projection. A graph
+   * carrying a durable local join approval must instead use the peer roster
+   * from the same source-qualified proof that authorized its private replica;
+   * falling back to the merged projection there would let an unrelated
+   * AGENTS/ONTOLOGY row widen the inbound gate. Registration (or a proven
+   * public policy) supersedes that participant proof and keeps the established
+   * registered/public behaviour.
+   */
+  async resolveApprovedPrivateReplicaSwmAllowedPeersOverride(this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<string[] | undefined> {
+    if (!this.localApprovedAgentByCG.has(contextGraphId)) {
+      return undefined;
+    }
+
+    const transport = await this.resolveSwmTransportAuthority(contextGraphId, {
+      authorityReadMode: 'finalized-index-or-live',
+    });
+    switch (transport.kind) {
+      case 'approved-private-replica':
+        // An empty proved list is an authoritative open peer gate. Keep it
+        // distinct from `undefined` (this override does not apply) so the
+        // SharedMemoryHandler projection wrapper never falls back to a merged
+        // secondary-source row.
+        return [...new Set(transport.allowedPeers)];
+      case 'plaintext':
+      case 'private-roster':
+        return undefined;
+      case 'unavailable':
+        throw createContextGraphAuthorityError(
+          `Context graph "${contextGraphId}" SWM peer gate authority is unavailable (${transport.reason})`,
+          transport,
+        );
+      case 'legacy-unregistered':
+        // The approval may have been removed while the authority read was in
+        // flight. Only that transition restores ordinary legacy behaviour.
+        if (!this.localApprovedAgentByCG.has(contextGraphId)) {
+          return undefined;
+        }
+        throw createContextGraphAuthorityError(
+          `Context graph "${contextGraphId}" still has a local join approval but no approved private replica authority`,
+          {
+            reason: 'finalized-name-absence-unaccepted',
+            detail: 'approved private replica authority did not survive current SWM authority resolution',
+          },
+        );
+    }
+  }
+
+  /** List/null adapter for SWM consumers that do not consume meta records. */
+  async resolveSwmAllowedPeersForCurrentAuthority(this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<string[] | null> {
+    const approvedReplicaOverride =
+      await this.resolveApprovedPrivateReplicaSwmAllowedPeersOverride(contextGraphId);
+    if (approvedReplicaOverride === undefined) {
+      return this.getContextGraphAllowedPeers(contextGraphId);
+    }
+    return approvedReplicaOverride.length > 0 ? approvedReplicaOverride : null;
+  }
+
+  /**
+   * Whether SWM on this graph is public-readable, so plaintext may be both
+   * sent and accepted. One predicate for both ends of the wire: the sender's
+   * recipient resolver and the receiver's plaintext oracle.
+   *
+   * Without an active accepted owner-signed public policy it is exactly the
+   * live on-chain probe (isContextGraphPublicOnChain). With one, it is the
+   * `plaintext` transport authority of {@link resolveSwmTransportAuthority},
+   * the same answer the sender's recipient selection uses.
+   */
+  async isContextGraphSwmPublic(this: DKGAgent,
+    contextGraphId: string,
+    opCtx?: OperationContext,
+  ): Promise<boolean> {
+    if (!this.hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1(contextGraphId)) {
+      return this.isContextGraphPublicOnChain(contextGraphId, opCtx);
+    }
+    try {
+      const transport = await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.publicProbe,
+        () => this.resolveSwmTransportAuthority(
+          contextGraphId,
+          { authorityReadMode: 'finalized-index-or-live' },
+        ),
+      );
+      return transport.kind === 'plaintext';
+    } catch (err) {
       this.log.warn(
         opCtx ?? createOperationContext('share'),
-        `readLiveOnChainAccessPolicy(${onChainId}): getContextGraphAccessPolicy timed out after ` +
-        `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — treating on-chain access policy as UNKNOWN (fail-closed)`,
+        `isContextGraphSwmPublic(${contextGraphId}) could not resolve registered authority — `
+        + `treating the graph as NOT public (fail-closed): ${err instanceof Error ? err.message : String(err)}`,
       );
-      return null;
+      return false;
     }
-    if (policy === 0 || policy === 1) {
-      this.onChainAccessPolicyCache.set(onChainId, policy);
-      return policy;
-    }
-    return null;
   }
 
   /**
@@ -843,6 +1464,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async isContextGraphPublicOnChain(this: DKGAgent,
     contextGraphId: string,
     opCtx?: OperationContext,
+    options: { slotBindingMode?: PublicPolicySlotBindingMode } = {},
   ): Promise<boolean> {
     try {
       // DEFINITIVELY public iff the live-proven on-chain policy is `0`. Every
@@ -853,7 +1475,10 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // resolver collapses unknown↔not-public ONLY for this boolean predicate;
       // the publish-inline probe consumes the tri-state directly so it can
       // REFUSE (rather than choose plaintext) on a genuine UNKNOWN.
-      return (await this.resolveOnChainAccessPolicyState(contextGraphId, opCtx)) === 0;
+      return (await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.publicProbe,
+        () => this.resolveOnChainAccessPolicyState(contextGraphId, opCtx, options),
+      )) === 0;
     } catch (err) {
       // Fail closed (curated/encrypted) on any lookup failure, but not
       // silently — surface WHY the public override was skipped so operators
@@ -903,7 +1528,13 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async resolveOnChainAccessPolicyState(this: DKGAgent,
     contextGraphId: string,
     opCtx?: OperationContext,
+    options: {
+      slotBindingMode?: PublicPolicySlotBindingMode;
+    } = {},
   ): Promise<0 | 1 | 'unregistered' | 'unknown'> {
+    // Retired name-hash id: answer for the graph it names (see supersedingContextGraphIdFor).
+    const supersedingId = this.supersedingContextGraphIdFor?.(contextGraphId);
+    if (supersedingId) return this.resolveOnChainAccessPolicyState(supersedingId, opCtx, options);
     const trimmed = contextGraphId.trim();
 
     // Resolve a CANDIDATE on-chain id. Local-id resolution is authoritative
@@ -961,7 +1592,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // to re-bind.) An affirmative name-hash mismatch is a STALE mapping → treat
     // as 'unknown' (fail closed), not 'unregistered' (which would re-enable the
     // plaintext default for a graph we just proved we can't trust).
-    if (resolvedFromLocalCg && !(await this.localCgMatchesOnChainSlot(contextGraphId, onChainId, opCtx))) {
+    if (resolvedFromLocalCg && !(await this.localCgMatchesOnChainSlot(
+      contextGraphId,
+      onChainId,
+      opCtx,
+      { bindingMode: options.slotBindingMode },
+    ))) {
       return 'unknown';
     }
 
@@ -996,134 +1632,78 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    *     hash-shaped cleartext id can't borrow a reused slot's commitment.
    * A genuinely reused slot commits a DIFFERENT name that matches neither.
    *
-   * Returns `false` (→ caller fails closed) on an AFFIRMATIVE mismatch (the
-   * committed hash matches neither derivation); whenever the hash cannot be
-   * verified once the adapter EXPOSES `getContextGraphNameHash` (RPC rejection or
-   * read timeout — #884 review 🔴 GZ8L_); AND when the slot has NO committed
-   * name-hash at all (`null` / empty — #884 review 🔴 GaZk2). A missing
-   * commitment is NOT an identity proof: a devnet-reset slot reused by a
-   * different no-commitment public CG would otherwise disable encryption for the
-   * wrong local graph, so a downgrade decision requires an affirmative binding.
-   * Returns `true` (proceed to the liveness/policy gate) where the adapter
-   * cannot supply the anchor at all (no `getContextGraphNameHash` getter), AND
-   * for a DIRECT NUMERIC SELF-ADDRESS — a local id that IS its own numeric
-   * on-chain slot (`onChainId === id`, e.g. a CG mirroring a raw slot created
-   * via the low-level `createOnChainContextGraph` path). The latter is the
-   * caller naming the slot directly, not a cleartext→numeric remapping, so it is
-   * treated like the bare-numeric raw-slot path (not identity-bound) and gated
-   * by liveness + fresh policy alone.
+   * The explicit binding mode owns both numeric self-address handling and
+   * outcome mapping. `legacy-policy` preserves compatibility,
+   * `chain-attested-repair` requires a committed mapping proof.
+   * `retryable-durable` preserves the established raw numeric self-address
+   * while propagating transport failures for every other identity read so
+   * bounded durable verification can retry a fresh read.
    */
   async localCgMatchesOnChainSlot(this: DKGAgent,
     contextGraphId: string,
     onChainId: string,
     opCtx?: OperationContext,
+    options: {
+      bindingMode?: ContextGraphSlotBindingMode;
+      /** @deprecated Use `bindingMode: 'chain-attested-repair'`. */
+      requireCommittedNameHash?: boolean;
+      signal?: AbortSignal;
+    } = {},
   ): Promise<boolean> {
-    const getNameHash = this.chain.getContextGraphNameHash;
-    if (typeof getNameHash !== 'function') return true;
-    let numericId: bigint;
-    try {
-      numericId = BigInt(onChainId);
-    } catch {
-      return true;
-    }
-    if (numericId <= 0n) return true;
-
-    const trimmed = contextGraphId.trim();
-    // DIRECT NUMERIC SELF-ADDRESS: a local CG whose own id IS its numeric
-    // on-chain slot (`getContextGraphOnChainId('42') === '42'` — e.g. a CG
-    // created to mirror a raw slot via the low-level createOnChainContextGraph
-    // path, whose local id is the numeric id itself) is NOT a cleartext→numeric
-    // indirection. It is the caller naming the slot directly, identical to the
-    // bare-numeric raw-slot path which is intentionally NOT identity-bound
-    // (#884 review GZEqF test). There is no separate committed cleartext name to
-    // bind against here (any curator name-hash is unrelated to the numeric id),
-    // so name-hash binding is inapplicable — defer to the liveness + fresh-policy
-    // gate. The stale-mapping risk the name-hash defends against (#884 review
-    // 🔴 GaZk2) only exists for a cleartext id that REMAPS to a different slot.
-    if (/^\d+$/.test(trimmed) && trimmed === onChainId.trim()) return true;
-    // A locally-resolved (cleartext) id can be committed two ways, and both are
-    // legitimate (#884 review 🔴 GZumc + 🔴 GaJf_), so accept a match against EITHER:
-    //   - CLEARTEXT (always): a curator-created CG stores its cleartext id (even
-    //     one that happens to look like a 0x+64-hex string), and registration
-    //     commits keccak256(utf8(cleartextId)). → keccak(utf8(trimmed)).
-    //   - WIRE-FORM (conditional): a host-only/core subscription is keyed by the
-    //     wire id ITSELF (cleartext never left the curator), so the local id
-    //     already IS the committed nameHash. → trimmed verbatim.
-    // The WIRE-FORM branch is only added when LOCAL metadata AFFIRMATIVELY proves
-    // this subscription is wire-id keyed (#884 review 🔴 GaZky). Accepting the
-    // verbatim value for EVERY 0x+64-hex id would make the gate ambiguous between
-    // a real host-mode wire id and a user-chosen cleartext id that merely looks
-    // hash-shaped — a reused/unrelated slot whose committed nameHash equalled
-    // that raw string would then falsely pass. A genuinely reused slot commits a
-    // DIFFERENT name that matches NEITHER accepted form, so this still fails
-    // closed on a true stale mapping while never forcing a wire-keyed host CG
-    // down the fail-closed path forever.
-    const acceptable = new Set<string>();
-    try {
-      acceptable.add(ethers.keccak256(ethers.toUtf8Bytes(trimmed)).toLowerCase());
-    } catch {
-      return true;
-    }
-    if (/^0x[0-9a-fA-F]{64}$/.test(trimmed) && this.isWireIdKeyedSubscription(trimmed)) {
-      acceptable.add(trimmed.toLowerCase());
-    }
-
-    let onChainHash: string | null | typeof TIMEOUT_SENTINEL;
-    try {
-      onChainHash = await this.raceChainPolicyRead(getNameHash.call(this.chain, numericId));
-    } catch (err) {
-      // #884 review (🔴 GZ8L_): the adapter EXPOSES the name-hash getter (we
-      // passed the typeof check above), so an RPC REJECTION means we cannot
-      // VERIFY that the persisted local mapping still points at THIS CG. Fail
-      // closed — a transient flake must not re-enable the plaintext downgrade
-      // for a possibly devnet-reset / reused slot. (Fail-open is reserved for
-      // the explicit opt-out `null` below, where there is no commitment to
-      // check.)
-      this.log.warn(
-        opCtx ?? createOperationContext('share'),
-        `isContextGraphPublicOnChain(${contextGraphId}): getContextGraphNameHash(${onChainId}) failed — ` +
-        `cannot verify local-mapping identity, treating CG as NOT public (fail-closed): ${err instanceof Error ? err.message : String(err)}`,
+    const compatibilityBindingMode = options.requireCommittedNameHash === undefined
+      ? undefined
+      : options.requireCommittedNameHash
+        ? 'chain-attested-repair'
+        : 'legacy-policy';
+    if (
+      compatibilityBindingMode !== undefined
+      && options.bindingMode !== undefined
+      && options.bindingMode !== compatibilityBindingMode
+    ) {
+      throw new TypeError(
+        'requireCommittedNameHash contradicts the explicit Context Graph binding mode',
       );
-      return false;
     }
-    if (onChainHash === TIMEOUT_SENTINEL) {
-      // Same as a rejection: the getter exists but the hash couldn't be read in
-      // time, so the mapping identity is UNVERIFIED → fail closed.
-      this.log.warn(
-        opCtx ?? createOperationContext('share'),
-        `isContextGraphPublicOnChain(${contextGraphId}): getContextGraphNameHash(${onChainId}) timed out after ` +
-        `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — cannot verify local-mapping identity, treating CG as NOT public (fail-closed)`,
-      );
-      return false;
-    }
-    // MISSING commitment (`null` / empty): the slot has NO on-chain name-hash.
-    // This is NOT an affirmative identity proof and must NOT re-enable the
-    // plaintext downgrade (#884 review 🔴 GaZk2). After a devnet reset the
-    // persisted `localId → onChainId` mapping can point at a DIFFERENT public CG
-    // that ALSO never committed a name-hash; trusting `null` would then disable
-    // SWM encryption for the WRONG local graph. A downgrade (encrypt→plaintext)
-    // decision requires an AFFIRMATIVE binding, so a missing commitment fails
-    // closed. (Fail-open is reserved for the no-getter case above, where the
-    // adapter cannot supply the anchor at all — distinct from a present getter
-    // returning "no commitment".)
-    if (!onChainHash) {
-      this.log.warn(
-        opCtx ?? createOperationContext('share'),
-        `isContextGraphPublicOnChain(${contextGraphId}): locally-mapped on-chain id ${onChainId} has NO ` +
-        `committed name-hash — cannot affirmatively bind identity (slot reused on a fresh chain?). ` +
-        `Treating CG as NOT public (fail-closed).`,
-      );
-      return false;
-    }
-    if (acceptable.has(onChainHash.toLowerCase())) return true;
-
-    this.log.warn(
-      opCtx ?? createOperationContext('share'),
-      `isContextGraphPublicOnChain(${contextGraphId}): locally-mapped on-chain id ${onChainId} commits ` +
-      `name-hash ${onChainHash.toLowerCase()} ≠ this CG's expected wire id(s) ${[...acceptable].join(' | ')} — ` +
-      `local mapping is STALE (slot reused on a fresh chain?). Treating CG as NOT public (fail-closed).`,
+    const bindingMode = options.bindingMode ?? compatibilityBindingMode ?? 'legacy-policy';
+    const outcome = await evaluateContextGraphSlotBinding(
+      this.chain,
+      contextGraphId,
+      onChainId,
+      opCtx,
+      options.signal,
+      // The deprecated strict option accepted a direct numeric self-address;
+      // preserve that exact compatibility while the new repair mode remains
+      // stricter for callers that opt into it directly.
+      options.requireCommittedNameHash === true
+        || bindingMode !== 'chain-attested-repair',
+      (localId) => this.isWireIdKeyedSubscription(localId),
+      (ctx, message) => this.log.warn(ctx, message),
+      (start, label, signal) => this.raceChainPolicyRead(start, label, signal),
+      chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
     );
-    return false;
+    return mapContextGraphSlotBindingOutcome(outcome, bindingMode);
+  }
+
+  /**
+   * Strict durable-sync identity proof. Unlike the legacy policy probe, this
+   * rejects malformed or unprovable mappings and propagates chain transport
+   * failures so authentication can retry a fresh read.
+   */
+  async requireLocalCgMatchesOnChainSlot(this: DKGAgent,
+    contextGraphId: string,
+    onChainId: string,
+    opCtx?: OperationContext,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<boolean> {
+    // Retired name-hash id: stand down, never write (see supersedingContextGraphIdFor).
+    const supersedingId = this.supersedingContextGraphIdFor?.(contextGraphId);
+    if (supersedingId) throw new SyncTargetSupersededError(contextGraphId, supersedingId);
+    return this.localCgMatchesOnChainSlot(
+      contextGraphId,
+      onChainId,
+      opCtx,
+      { bindingMode: 'retryable-durable', signal: options.signal },
+    );
   }
 
   /**
@@ -1132,21 +1712,18 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * rather than a user-chosen cleartext id that merely looks hash-shaped.
    *
    * Host-only auto-subscribe paths (chain-event + discovery-beacon) stage the
-   * wire id AS the local id and record `onChainHash === id` (and the reverse
-   * index `wireIdToLocalCgId[id] === id`). Only that self-referential local
-   * commitment licenses {@link localCgMatchesOnChainSlot} to accept the verbatim
-   * id against the on-chain name-hash; without it the id is treated as cleartext
-   * and must match `keccak256(utf8(id))`, so a reused slot cannot impersonate a
-   * wire-keyed CG just by sharing a hash-shaped string.
+   * wire id AS the local id and explicitly record `onChainHash === id`. Only
+   * that self-referential subscription commitment licenses
+   * {@link localCgMatchesOnChainSlot} to accept the verbatim id against the
+   * on-chain name-hash. The general reverse index is deliberately insufficient:
+   * every subscription is indexed there, including hash-shaped cleartext ids.
    */
   isWireIdKeyedSubscription(this: DKGAgent, localId: string): boolean {
     if (!/^0x[0-9a-fA-F]{64}$/.test(localId)) return false;
     const lower = localId.toLowerCase();
     const sub =
       this.subscribedContextGraphs?.get(localId) ?? this.subscribedContextGraphs?.get(lower);
-    if (sub?.onChainHash && sub.onChainHash.toLowerCase() === lower) return true;
-    const reverse = this.wireIdToLocalCgId?.get(lower);
-    return !!reverse && reverse.toLowerCase() === lower;
+    return !!sub?.onChainHash && sub.onChainHash.toLowerCase() === lower;
   }
 
   /**
@@ -1159,48 +1736,313 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * ("not DKG-agent gated"), which surfaced as an HTTP 500 on WM→SWM
    * promote.
    *
-   * Gate BEFORE delegating to the store resolver: a public CG takes the
-   * plaintext path without resolving recipient keys at all. This also
+   * Resolve the canonical registered authority BEFORE delegating to the store
+   * resolver: a public CG takes the plaintext path without resolving recipient
+   * keys at all. This also
    * avoids the resolver's "Missing public encryption key" throw for an
    * allowlisted agent whose key isn't locally available — irrelevant for
-   * a public CG that never encrypts. Curated / invite-only / unknown CGs
-   * fall through to the normal (encrypted) recipient resolution.
+   * a public CG that never encrypts. Private graphs resolve recipients from
+   * the live roster; unavailable registered authority fails closed. An
+   * unregistered graph whose accepted owner-signed policy is public is
+   * treated like an on-chain public one. An approved private replica retains
+   * the full effective metadata roster, while any explicit graph peer
+   * allowlist restricts the recipient keys available to every roster member.
    */
   async resolveWorkspaceRecipientsGated(this: DKGAgent,
     input: WorkspaceAgentRecipientResolverInput,
   ): Promise<WorkspaceAgentRecipientResolution> {
-    if (await this.isContextGraphPublicOnChain(input.contextGraphId, createOperationContext('share'))) {
+    // Hydrate durable sender-key state before resolving recipients. The
+    // publisher invokes the encryptor synchronously after this resolver, so
+    // this keeps state I/O out of the authority-fenced interval between the
+    // final recipient recheck and sender-key epoch selection/creation.
+    await this.loadSwmSenderKeyState();
+    return this.resolveWorkspaceAgentRecipientsForCurrentAuthority(input);
+  }
+
+  /**
+   * Resolve encryption recipients from registered-chain authority. The
+   * local store remains the source of authenticated encryption keys and peer
+   * routing, but only the chain roster selects which agents are resolved. When
+   * the graph also has a peer allowlist, recipient routing must satisfy that
+   * second, conjunctive authority gate. Every chain-authorized agent must have
+   * at least one usable recipient key on an allowed peer before publishing can
+   * proceed, otherwise either an unauthorized peer receives the sender key or
+   * an authorized member cannot read the resulting write.
+   *
+   * "Whether the author may share plaintext" follows from the immutable
+   * on-chain access policy alone (the contract has no access-policy update),
+   * so a finalized, name-bound PUBLIC snapshot answers it without a live RPC.
+   * The PRIVATE roster is an encryption-key decision and is always read from
+   * current chain state (`requireLiveRosterForPrivate`), never from the index.
+   */
+  async resolveWorkspaceAgentRecipientsForCurrentAuthority(this: DKGAgent,
+    input: WorkspaceAgentRecipientResolverInput,
+  ): Promise<WorkspaceAgentRecipientResolution> {
+    // The receiver decides plaintext from this same transport authority
+    // (isContextGraphSwmPublic), so the two ends cannot disagree (#2827).
+    const transport = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.recipients,
+      () => this.resolveSwmTransportAuthority(input.contextGraphId, {
+        authorityReadMode: 'finalized-index-or-live',
+        requireLiveRosterForPrivate: true,
+      }),
+    );
+    if (transport.kind === 'plaintext') {
       return { requiresEncryption: false, recipients: [] };
     }
-    // #884 review (🔴): do NOT add a local-metadata fallback here (e.g.
-    // honoring a local `accessPolicy="public"` triple). A local policy literal
-    // is intent, not authoritative on-chain state — a pre-registration graph
-    // or a stale local graph after a devnet reset would then bypass SWM
-    // encryption purely from local metadata and leak allowlisted traffic in
-    // plaintext. When the on-chain probe above cannot establish that the CG is
-    // a LIVE public slot (unknown / not live / RPC flake), fail closed: keep
-    // the encrypted path. A genuinely-public CG resolves correctly through
-    // isContextGraphPublicOnChain's live proof; a transient RPC flake yields a
-    // transient encrypted-path retry, never a plaintext leak.
-    return resolveWorkspaceAgentRecipients(this.store, input);
+    const projection = this.contextGraphMetaProjection;
+    // Legacy and approved graphs read more than keys and routes, so the
+    // node-wide revision still fences them. A private roster does not use it.
+    const nodeWideSnapshot = (
+      resolution: WorkspaceAgentRecipientResolution,
+      revision: number,
+    ): RecipientSnapshot => ({
+      resolution,
+      stayedCurrent: () => revision === projection.readAuthorityFactsRevision,
+    });
+    let resolveKeys: () => Promise<RecipientSnapshot>;
+    if (transport.kind === 'legacy-unregistered') {
+      resolveKeys = async () => {
+        const attemptRevision = projection.readAuthorityFactsRevision;
+        return nodeWideSnapshot(await resolveWorkspaceAgentRecipients(this.store, input), attemptRevision);
+      };
+    } else if (transport.kind === 'approved-private-replica') {
+      // Resolve the complete effective metadata roster first. Participant
+      // approval authorizes this receiver; it is not a replacement roster.
+      // The peer gate comes from the same source-qualified, revision-fenced
+      // proof as the transport classification, never the merged projection.
+      resolveKeys = async () => {
+        const attemptRevision = projection.readAuthorityFactsRevision;
+        const resolution = await resolveWorkspaceAgentRecipients(this.store, input);
+        if (!resolution.requiresEncryption) {
+          throw new Error(
+            `Approved private replica "${input.contextGraphId}" resolved a plaintext SWM roster`,
+          );
+        }
+        if (transport.allowedPeers.length === 0) return nodeWideSnapshot(resolution, attemptRevision);
+
+        const allowedPeerSet = new Set(transport.allowedPeers);
+        const effectiveAgentAddresses = new Set(
+          resolution.recipients.map(({ agentAddress }) => agentAddress.toLowerCase()),
+        );
+        const authorizedRecipients = resolution.recipients.filter((recipient) => (
+          recipient.peerId !== undefined && allowedPeerSet.has(recipient.peerId)
+        ));
+        const authorizedAgentAddresses = new Set(
+          authorizedRecipients.map(({ agentAddress }) => agentAddress.toLowerCase()),
+        );
+        for (const agentAddress of effectiveAgentAddresses) {
+          if (!authorizedAgentAddresses.has(agentAddress)) {
+            throw new Error(
+              `Approved private replica "${input.contextGraphId}" requires encrypted SWM gossip but `
+              + `effective DKG agent ${ethers.getAddress(agentAddress)} has no recipient key `
+              + 'advertised by a peer in the context graph allowlist',
+            );
+          }
+        }
+        const [firstRecipient, ...remainingRecipients] = authorizedRecipients;
+        if (!firstRecipient) {
+          throw new Error(
+            `Approved private replica "${input.contextGraphId}" requires encrypted SWM gossip but has no allowed DKG agent recipients`,
+          );
+        }
+        const authorizedResolution = {
+          requiresEncryption: true,
+          recipients: [firstRecipient, ...remainingRecipients],
+        } as const;
+        return nodeWideSnapshot(authorizedResolution, attemptRevision);
+      };
+    } else {
+      if (transport.kind === 'unavailable') {
+        const message =
+          `Registered context graph "${input.contextGraphId}" authority is unavailable (${transport.reason})`;
+        throw createContextGraphAuthorityError(message, { ...transport, site: 'transport-unavailable' });
+      }
+      const participantAgents = transport.participantAgents;
+      if (participantAgents.length === 0) {
+        throw new Error(
+          `Registered context graph "${input.contextGraphId}" requires encrypted SWM gossip but its authoritative chain roster is empty or unavailable`,
+        );
+      }
+
+      // Resolve only the live chain-authorized addresses. Filtering a completed
+      // local resolution afterward is too late: stale removed members can have
+      // malformed/missing key metadata that makes the local resolver throw
+      // before the chain intersection is reached, blocking every post-revoke
+      // write until the local cleanup retry succeeds.
+      resolveKeys = async () => {
+        // The registered/accepted private roster, local peer gate, and verified
+        // recipient-key routes are conjunctive authorities, each fenced by what
+        // it changes with: the roster by the transport re-read, the peer gate and
+        // the keys and routes by their own revisions, which are checked
+        // synchronously right after that re-read. Capture them before every
+        // attempt so a phonebook-hydration retry owns a new snapshot.
+        await projection.recipientKeyRouteFence.ensureReady();
+        const attemptRevision = projection.recipientKeyRouteFence.revision;
+        const attemptGate = projection.peerGateRevision.read(input.contextGraphId);
+        const allowedPeers = await this.getContextGraphAllowedPeers(input.contextGraphId);
+        const allowedPeerSet = allowedPeers === null ? null : new Set(allowedPeers);
+        const recipients: WorkspaceAgentRecipient[] = [];
+        // Every member without a key is named at once, so one phonebook fetch
+        // can cover them all (#2849). Any other key failure still stops here.
+        const missingKeys: string[] = [];
+        for (const agentAddress of participantAgents) {
+          let agentRecipients: WorkspaceAgentRecipient[];
+          try {
+            agentRecipients = await projection.recipientKeyCollect.resolve(agentAddress);
+          } catch (error) {
+            if (!isWorkspaceAgentEncryptionKeyMissingError(error)) throw error;
+            missingKeys.push(...error.agentAddresses);
+            continue;
+          }
+          const authorizedRecipients = allowedPeerSet === null
+            ? agentRecipients
+            : agentRecipients.filter((recipient) => (
+              recipient.peerId !== undefined && allowedPeerSet.has(recipient.peerId)
+            ));
+          if (authorizedRecipients.length === 0) {
+            throw new Error(
+              `Registered context graph "${input.contextGraphId}" requires encrypted SWM gossip but `
+              + `chain-authorized DKG agent ${ethers.getAddress(agentAddress)} has no recipient key `
+              + 'advertised by a peer in the context graph allowlist',
+            );
+          }
+          recipients.push(...authorizedRecipients);
+        }
+        if (missingKeys.length > 0) throw new WorkspaceAgentEncryptionKeyMissingError(missingKeys);
+        const [firstRecipient, ...remainingRecipients] = recipients;
+        if (!firstRecipient) {
+          throw new Error(
+            `Registered context graph "${input.contextGraphId}" requires encrypted SWM gossip but has no chain-authorized DKG agent recipients`,
+          );
+        }
+        return {
+          resolution: { requiresEncryption: true, recipients: [firstRecipient, ...remainingRecipients] },
+          stayedCurrent: () => projection.recipientKeyRouteFence.hasPendingWrites !== true
+            && attemptRevision === projection.recipientKeyRouteFence.revision
+            && attemptGate === projection.peerGateRevision.read(input.contextGraphId),
+        };
+      };
+    }
+    // A member added by address before it joined is known here only by its
+    // profile, which an Edge fetches on demand (#2849). One fetch asks for
+    // every member whose key is missing, then the keys are resolved once more.
+    // Every member still needs a key, so a share that cannot get one stays
+    // closed.
+    const resolveWithPhonebookHydration = async (): Promise<RecipientSnapshot> => {
+      try {
+        return await resolveKeys();
+      } catch (error) {
+        if (!isWorkspaceAgentEncryptionKeyMissingError(error)) throw error;
+        if (typeof this.ensureAgentsInOnDemandPhonebook !== 'function') {
+          throw withMemberKeyHint(error);
+        }
+        await this.ensureAgentsInOnDemandPhonebook(
+          error.agentAddresses.map((address) => address.toLowerCase()),
+          AbortSignal.timeout(SWM_RECIPIENT_KEY_FETCH_WAIT_MS),
+        );
+      }
+      try {
+        return await resolveKeys();
+      } catch (error) {
+        throw isWorkspaceAgentEncryptionKeyMissingError(error) ? withMemberKeyHint(error) : error;
+      }
+    };
+    let snapshot = await resolveWithPhonebookHydration();
+
+    if (
+      transport.kind === 'private-roster'
+      || transport.kind === 'approved-private-replica'
+      || transport.kind === 'legacy-unregistered'
+    ) {
+      // Key and phonebook lookup are asynchronous. Re-read the paired
+      // transport decision after them so an accepted-private (or registered)
+      // roster rotation cannot return keys for a member removed meanwhile.
+      // Each snapshot checks what it depends on, so a window whose snapshot
+      // moved collects again and is accepted when the exact (agent,key,peer) set
+      // and the transport authority are stable. The last window never accepts a
+      // snapshot whose check failed (GH#3067).
+      for (
+        let attempt = 0;
+        attempt < SWM_RECIPIENT_AUTHORITY_STABILITY_ATTEMPTS;
+        attempt += 1
+      ) {
+        const currentTransport = await withRpcUsageSite(
+          CG_AUTH_RPC_SITES.recipients,
+          () => this.resolveSwmTransportAuthority(input.contextGraphId, {
+            authorityReadMode: 'finalized-index-or-live',
+            requireLiveRosterForPrivate: true,
+          }),
+        );
+        if (currentTransport.kind === 'unavailable') {
+          throw createContextGraphAuthorityError(
+            `Context graph "${input.contextGraphId}" recipient authority is unavailable (${currentTransport.reason})`,
+            { ...currentTransport, site: 'transport-unavailable' },
+          );
+        }
+        const transportStayedCurrent = transport.kind === 'private-roster'
+          ? currentTransport.kind === 'private-roster'
+            && snapshot.resolution.requiresEncryption
+            && hasExactRecipientAgentRoster(snapshot.resolution, currentTransport.participantAgents)
+          : transport.kind === 'approved-private-replica'
+            ? currentTransport.kind === 'approved-private-replica'
+              && sameStringSet(transport.allowedPeers, currentTransport.allowedPeers)
+            : currentTransport.kind === 'legacy-unregistered';
+        if (transportStayedCurrent && snapshot.stayedCurrent()) break;
+
+        if (!transportStayedCurrent) {
+          throw createRecipientAuthorityChangedError(input.contextGraphId, 'transport-changed');
+        }
+        if (attempt + 1 >= SWM_RECIPIENT_AUTHORITY_STABILITY_ATTEMPTS) {
+          throw createRecipientAuthorityChangedError(input.contextGraphId, 'revision-moved');
+        }
+
+        const retried = await resolveWithPhonebookHydration();
+        const recipientSnapshotStayedCurrent = snapshot.resolution.requiresEncryption
+          ? retried.resolution.requiresEncryption
+            && hasExactWorkspaceRecipientSet(snapshot.resolution, retried.resolution)
+          : !retried.resolution.requiresEncryption;
+        if (!recipientSnapshotStayedCurrent) {
+          throw createRecipientAuthorityChangedError(input.contextGraphId, 'recipient-set-changed');
+        }
+        snapshot = retried;
+      }
+    }
+    return snapshot.resolution;
   }
 
   async encryptWorkspacePayloadWithSenderKey(this: DKGAgent,
     input: WorkspaceSenderKeyEncryptInput,
   ): Promise<Uint8Array> {
-    await this.loadSwmSenderKeyState();
+    let resolution = input.resolution;
+    if (!this.swmSenderKeyStateLoaded) {
+      await this.loadSwmSenderKeyState();
+      // Recipient authority may have changed while durable state was loading.
+      // Resolve once against the now-hydrated state and proceed only when the
+      // exact agent/key/peer snapshot is unchanged. The production publisher
+      // avoids this compatibility reread by hydrating in
+      // resolveWorkspaceRecipientsGated above.
+      const currentResolution = await this.resolveWorkspaceAgentRecipientsForCurrentAuthority({
+        contextGraphId: input.contextGraphId,
+      });
+      if (
+        !currentResolution.requiresEncryption
+        || !hasExactWorkspaceRecipientSet(resolution, currentResolution)
+      ) {
+        throw createContextGraphAuthorityError(
+          `Context graph "${input.contextGraphId}" authority changed while sender-key state was loading`,
+          {
+            reason: 'chain-participant-authority-unavailable',
+            detail: 'retry recipient resolution before creating or reusing a sender-key epoch',
+          },
+        );
+      }
+      resolution = currentResolution;
+    }
     const ctx = createOperationContext('share', input.operationId);
     const sender = this.getLocalSigningAgentForAddress(input.senderAgentAddress);
     if (!sender) {
       throw new Error(`Cannot create SWM Sender Key epoch: no local custodial signing key for agent ${input.senderAgentAddress}`);
-    }
-
-    const resolution = await resolveWorkspaceAgentRecipients(this.store, { contextGraphId: input.contextGraphId });
-    if (!resolution.requiresEncryption) {
-      return input.plaintext;
-    }
-    if (resolution.recipients.length === 0) {
-      throw new Error(`Context graph "${input.contextGraphId}" requires Sender Key SWM but has no DKG agent recipients`);
     }
 
     const senderAddress = ethers.getAddress(sender.agentAddress);
@@ -1222,9 +2064,19 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         recipientKeyId: recipient.recipientKeyId,
       })),
     });
+    const recipientRouteHash = computeSwmSenderKeyRecipientRouteHash({
+      contextGraphId: input.contextGraphId,
+      subGraphName: input.subGraphName,
+      recipients: resolution.recipients,
+    });
     const stateKey = swmSenderStateKey(input.contextGraphId, input.subGraphName, senderAddress);
     let state = this.swmSenderKeySendStates.get(stateKey);
-    if (!state || state.membershipHash !== membershipHash) {
+    if (
+      !state
+      || state.membershipHash !== membershipHash
+      || state.recipientRouteHash !== recipientRouteHash
+      || state.chainKeyMatchesIndex !== true
+    ) {
       const pruned = this.prunePendingSenderKeysForEpochRotation({
         contextGraphId: input.contextGraphId,
         subGraphName: input.subGraphName,
@@ -1249,11 +2101,21 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       this.swmSenderKeySendStates.set(stateKey, state);
       await this.saveSwmSenderKeyState();
     } else {
-      await this.drainPendingSenderKeyForRecipients(resolution.recipients, ctx);
+      await this.drainPendingSenderKeyForRecipients(resolution.recipients, ctx, {
+        contextGraphId: input.contextGraphId,
+        subGraphName: input.subGraphName,
+        senderAgentAddress: state.senderAgentAddress,
+        epochId: state.epochId,
+      });
     }
 
+    // Shares into one graph overlap. Each takes its key and index here, before the next
+    // await, so that no two encrypt with the same pair and the key keeps step with the index.
+    const { chainKey, nextMessageIndex: messageIndex } = state;
+    state.chainKey = ratchetSwmSenderChainKey(chainKey);
+    state.nextMessageIndex = messageIndex + 1;
     const encrypted = await encryptSwmSenderKeyMessage({
-      chainKey: state.chainKey,
+      chainKey,
       plaintext: input.plaintext,
       senderSigningSecretKey: state.senderSigningSecretKey,
       contextGraphId: state.contextGraphId,
@@ -1261,10 +2123,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       senderAgentAddress: state.senderAgentAddress,
       epochId: state.epochId,
       membershipHash: state.membershipHash,
-      messageIndex: state.nextMessageIndex,
+      messageIndex,
     });
-    state.chainKey = encrypted.nextChainKey;
-    state.nextMessageIndex += 1;
     await this.saveSwmSenderKeyState();
     this.logSwmSenderKeyDebugEncryptedPayload(ctx, encrypted.message);
 
@@ -1297,6 +2157,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       senderAgentAddress,
       epochId,
       membershipHash: input.membershipHash,
+      recipientRouteHash: computeSwmSenderKeyRecipientRouteHash({
+        contextGraphId: input.contextGraphId,
+        subGraphName: input.subGraphName,
+        recipients: input.recipients,
+      }),
+      chainKeyMatchesIndex: true,
       chainKey,
       nextMessageIndex: 0,
       senderSigningSecretKey: senderSigningKeypair.secretKey,
@@ -1336,7 +2202,20 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         });
         const packageBytes = encodeSwmSenderKeyPackage(pkg);
 
-        if (this.hasLocalAgent(recipientAgentAddress)) {
+        const recipientIsLocal = this.hasLocalAgent(recipientAgentAddress);
+        let targetsLocalPeer = recipient.peerId === undefined;
+        if (recipientIsLocal && recipient.peerId !== undefined) {
+          const localPeerId = this.node.peerId.toString();
+          const canonicalRecipientPeerId = tryCanonicalPeerIdString(recipient.peerId);
+          const canonicalLocalPeerId = tryCanonicalPeerIdString(localPeerId);
+          targetsLocalPeer = recipient.peerId === localPeerId
+            || (
+              canonicalRecipientPeerId !== null
+              && canonicalLocalPeerId !== null
+              && canonicalRecipientPeerId === canonicalLocalPeerId
+            );
+        }
+        if (recipientIsLocal && targetsLocalPeer) {
           try {
             await this.acceptSwmSenderKeyPackage(pkg, this.node.peerId.toString(), input.ctx);
             return { kind: 'success', agentAddress: recipientAgentAddress };
@@ -1375,7 +2254,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
           this.log.warn(
             input.ctx,
             `SWM sender-key setup for ${recipientAgentAddress} keyId=${recipient.recipientKeyId} ` +
-            `queued (no advertised peerId) — will deliver when recipient connects`,
+            `queued (no advertised peerId) — will deliver after a verified peer route is learned`,
           );
           return { kind: 'success', agentAddress: recipientAgentAddress };
         }
@@ -1426,6 +2305,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
               senderAgentAddress: senderAgentAddress.toLowerCase(),
               recipientAgentAddress: recipientAgentAddress.toLowerCase(),
               recipientKeyId: recipient.recipientKeyId,
+              recipientPeerId: recipient.peerId,
               epochId: state.epochId,
               contextGraphId: state.contextGraphId,
               subGraphName: state.subGraphName,
@@ -1449,6 +2329,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
               senderAgentAddress: senderAgentAddress.toLowerCase(),
               recipientAgentAddress: recipientAgentAddress.toLowerCase(),
               recipientKeyId: recipient.recipientKeyId,
+              recipientPeerId: recipient.peerId,
               epochId: state.epochId,
               contextGraphId: state.contextGraphId,
               subGraphName: state.subGraphName,
@@ -1472,6 +2353,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
               senderAgentAddress: senderAgentAddress.toLowerCase(),
               recipientAgentAddress: recipientAgentAddress.toLowerCase(),
               recipientKeyId: recipient.recipientKeyId,
+              recipientPeerId: recipient.peerId,
               epochId: state.epochId,
               contextGraphId: state.contextGraphId,
               subGraphName: state.subGraphName,
@@ -1494,6 +2376,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
                 senderAgentAddress: senderAgentAddress.toLowerCase(),
                 recipientAgentAddress: recipientAgentAddress.toLowerCase(),
                 recipientKeyId: recipient.recipientKeyId,
+                recipientPeerId: recipient.peerId,
                 epochId: state.epochId,
                 contextGraphId: state.contextGraphId,
                 subGraphName: state.subGraphName,
@@ -1619,25 +2502,35 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   /**
    * PR-2 (SWM-fanout plan): enqueue a sender-key package whose recipient
    * has no advertised `dkg:peerId` (so we can't even ask the messenger
-   * to queue it). Older epochs for the same `(sender, recipient)` pair
-   * are evicted — a newer epoch supersedes them by definition.
+   * to queue it). Older epochs for the same `(sender, recipient, context
+   * graph, subgraph)` scope are evicted — a newer epoch supersedes them by
+   * definition. Other graph/subgraph obligations remain independent.
    *
-   * Per-key dedup: `(senderAgentAddress, recipientKeyId, epochId)`
-   * matches an existing row, we replace it (idempotent re-enqueue).
+   * Per-route dedup: `(senderAgentAddress, recipientKeyId,
+   * recipientPeerId, epochId)` matches an existing row, we replace it
+   * (idempotent re-enqueue). Distinct peers advertising the same key retain
+   * independent delivery obligations.
    */
   enqueuePendingSenderKey(this: DKGAgent, entry: PendingSenderKeyEntry): void {
     const recipientKey = entry.recipientAgentAddress.toLowerCase();
     const existing = this.pendingSenderKeyByAgent.get(recipientKey) ?? [];
-    // Drop older epochs for the same (sender, recipient) pair; the newer
-    // epoch's membership-hash supersedes them. Keep entries for OTHER
-    // senders / recipients unchanged.
+    // Drop older epochs only within the same sender + graph/subgraph scope;
+    // the newer epoch's membership hash supersedes those rows. The map key
+    // already scopes recipient agent. Keep every other scope unchanged.
     const filtered = existing.filter((e) => {
       if (e.senderAgentAddress !== entry.senderAgentAddress) return true;
+      if (
+        e.contextGraphId !== entry.contextGraphId
+        || (e.subGraphName ?? undefined) !== (entry.subGraphName ?? undefined)
+      ) {
+        return true;
+      }
       if (e.epochId === entry.epochId) {
-        // Same epoch: dedupe by recipientKeyId — caller may re-enqueue
-        // on retry. Replace by dropping the old slot; the new one is
-        // appended below.
-        return e.recipientKeyId !== entry.recipientKeyId;
+        // Same epoch: dedupe only the exact key + peer route. A successful
+        // ACK from one peer must never overwrite a retry owed to another peer
+        // that advertises the same agent/key pair.
+        return e.recipientKeyId !== entry.recipientKeyId
+          || e.recipientPeerId !== entry.recipientPeerId;
       }
       return false;
     });
@@ -1671,20 +2564,23 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   }
 
   async drainPendingSenderKeyQueueForPeer(this: DKGAgent, input: {
-    peerId: string;
-    recipientAgentAddress: string;
+    authority: PendingSenderKeyDrainAuthority;
     ctx?: OperationContext;
   }): Promise<number> {
-    const recipientAgentAddress = input.recipientAgentAddress.toLowerCase();
+    const authority: PendingSenderKeyDrainAuthority = {
+      ...input.authority,
+      recipientAgentAddress: input.authority.recipientAgentAddress.toLowerCase(),
+      senderAgentAddress: input.authority.senderAgentAddress?.toLowerCase(),
+    };
+    const recipientAgentAddress = authority.recipientAgentAddress;
     const existingDrain = this.pendingSenderKeyDrainByAgent.get(recipientAgentAddress);
     if (existingDrain) {
       await existingDrain;
       if (!this.pendingSenderKeyByAgent.has(recipientAgentAddress)) return 0;
-      return this.drainPendingSenderKeyQueueForPeer(input);
+      return this.drainPendingSenderKeyQueueForPeer({ authority, ctx: input.ctx });
     }
     const drain = this.drainPendingSenderKeyQueueForPeerLocked({
-      peerId: input.peerId,
-      recipientAgentAddress,
+      authority,
       ctx: input.ctx,
     }).finally(() => {
       if (this.pendingSenderKeyDrainByAgent.get(recipientAgentAddress) === drain) {
@@ -1696,28 +2592,82 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   }
 
   async drainPendingSenderKeyQueueForPeerLocked(this: DKGAgent, input: {
-    peerId: string;
-    recipientAgentAddress: string;
+    authority: PendingSenderKeyDrainAuthority;
     ctx?: OperationContext;
   }): Promise<number> {
-    const recipientAgentAddress = input.recipientAgentAddress;
+    const { authority } = input;
+    const recipientAgentAddress = authority.recipientAgentAddress;
     const queue = this.pendingSenderKeyByAgent.get(recipientAgentAddress);
     if (!queue || queue.length === 0) return 0;
 
     let drained = 0;
-    const remaining: PendingSenderKeyEntry[] = [];
+    // `sendReliable` yields. Enqueue/epoch rotation can replace the live array
+    // while this drain is in flight, so record outcomes against the exact
+    // snapshot objects instead of later overwriting the whole map entry. At
+    // commit, only original objects still present in the live queue are
+    // transformed; concurrently inserted replacements/new scopes survive and
+    // originals concurrently superseded by a new epoch are not resurrected.
+    const outcomes = new Map<PendingSenderKeyEntry, PendingSenderKeyEntry | null>();
+    const commitOutcomes = () => {
+      const live = this.pendingSenderKeyByAgent.get(recipientAgentAddress) ?? [];
+      const reconciled: PendingSenderKeyEntry[] = [];
+      for (const liveEntry of live) {
+        if (!outcomes.has(liveEntry)) {
+          reconciled.push(liveEntry);
+          continue;
+        }
+        const replacement = outcomes.get(liveEntry);
+        if (replacement) reconciled.push(replacement);
+      }
+      if (reconciled.length === 0) {
+        this.pendingSenderKeyByAgent.delete(recipientAgentAddress);
+      } else {
+        this.pendingSenderKeyByAgent.set(recipientAgentAddress, reconciled);
+      }
+    };
     for (let i = 0; i < queue.length; i += 1) {
       const entry = queue[i];
+      // A row may only be consumed by the caller's exact current-authority
+      // route and graph scope. Legacy/no-peer rows are expanded into explicit
+      // peer-bound obligations before reaching this drain. Foreground callers
+      // additionally bind the current sender + epoch; connection-open callers
+      // explicitly authorize every subgraph for one resolved CG.
+      if (!pendingSenderKeyEntryMatchesDrainAuthority(entry, authority)) {
+        outcomes.set(entry, entry);
+        continue;
+      }
+      // Authority can change while this route waits for the per-agent drain
+      // lock, or while a preceding row is in flight. Re-resolve immediately
+      // before every send so a stale caller snapshot can never consume a row.
+      let routeStillCurrent = false;
+      try {
+        const resolution = await this.resolveWorkspaceAgentRecipientsForCurrentAuthority({
+          contextGraphId: entry.contextGraphId,
+        });
+        routeStillCurrent = resolution.requiresEncryption
+          && resolution.recipients.some((recipient) => (
+            recipient.agentAddress.toLowerCase() === entry.recipientAgentAddress
+            && recipient.recipientKeyId === entry.recipientKeyId
+            && recipient.peerId === entry.recipientPeerId
+          ));
+      } catch {
+        // Fail closed. The queued obligation remains available for a later
+        // current-authority retry.
+      }
+      if (!routeStillCurrent) {
+        outcomes.set(entry, entry);
+        continue;
+      }
       try {
         const sendResult = await this.messenger.sendReliable(
-          input.peerId,
+          authority.recipientPeerId,
           PROTOCOL_SWM_SENDER_KEY,
           entry.packageBytes,
           { messageId: this.swmSenderKeyPendingMessageId(entry) },
         );
         if (!sendResult.delivered) {
           if (sendResult.queued || ('inFlight' in sendResult && sendResult.inFlight)) {
-            remaining.push(entry);
+            outcomes.set(entry, entry);
             continue;
           }
           throw new Error(`Unexpected undelivered Sender Key retry result: ${sendResult.error}`);
@@ -1728,7 +2678,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         } catch {
           // Malformed/legacy ACK: no positive acceptance yet. Keep the
           // row queued so a mixed-version rollout cannot strand the recipient.
-          remaining.push(this.rotateSwmSenderKeyPendingMessageId(entry));
+          outcomes.set(entry, this.rotateSwmSenderKeyPendingMessageId(entry));
           continue;
         }
         if (
@@ -1737,61 +2687,143 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         ) {
           // Malformed/legacy ACK: no positive acceptance yet. Keep the
           // row queued so a mixed-version rollout cannot strand the recipient.
-          remaining.push(this.rotateSwmSenderKeyPendingMessageId(entry));
+          outcomes.set(entry, this.rotateSwmSenderKeyPendingMessageId(entry));
           continue;
         }
         if (ack.accepted) {
           drained += 1;
+          outcomes.set(entry, null);
         } else if (this.isRetryableSwmSenderKeySetupAckReason(ack.reasonCode)) {
-          remaining.push(this.rotateSwmSenderKeyPendingMessageId(entry));
+          outcomes.set(entry, this.rotateSwmSenderKeyPendingMessageId(entry));
         } else {
           const reason = ack.reason ?? 'unknown reason';
           const reasonCode = ack.reasonCode ?? 'legacy-unknown';
           this.log.warn(
             input.ctx ?? SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
             `SWM sender-key pending retry for ${entry.recipientAgentAddress} keyId=${entry.recipientKeyId} ` +
-            `peerId=${input.peerId} contextGraph=${entry.contextGraphId}${entry.subGraphName ? `/${entry.subGraphName}` : ''} ` +
+            `peerId=${authority.recipientPeerId} contextGraph=${entry.contextGraphId}${entry.subGraphName ? `/${entry.subGraphName}` : ''} ` +
             `dropped after terminal rejection (${reasonCode}): ${reason}`,
           );
           // Terminal rejection: keep it out of the queue, but do not
           // report it as a successful drain.
+          outcomes.set(entry, null);
         }
       } catch (err) {
-        remaining.push(...queue.slice(i));
-        if (remaining.length === 0) {
-          this.pendingSenderKeyByAgent.delete(recipientAgentAddress);
-        } else {
-          this.pendingSenderKeyByAgent.set(recipientAgentAddress, remaining);
+        outcomes.set(entry, entry);
+        for (const unprocessed of queue.slice(i + 1)) {
+          outcomes.set(unprocessed, unprocessed);
         }
+        commitOutcomes();
         await this.saveSwmSenderKeyState();
         const message = err instanceof Error ? err.message : String(err);
         this.log.warn(
           input.ctx ?? SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
           `SWM sender-key pending retry for ${entry.recipientAgentAddress} keyId=${entry.recipientKeyId} ` +
-          `peerId=${input.peerId} contextGraph=${entry.contextGraphId}${entry.subGraphName ? `/${entry.subGraphName}` : ''} ` +
+          `peerId=${authority.recipientPeerId} contextGraph=${entry.contextGraphId}${entry.subGraphName ? `/${entry.subGraphName}` : ''} ` +
           `failed before the Messenger substrate queued a retry: ${message}`,
         );
         throw err;
       }
     }
 
-    if (remaining.length === 0) {
-      this.pendingSenderKeyByAgent.delete(recipientAgentAddress);
-    } else {
-      this.pendingSenderKeyByAgent.set(recipientAgentAddress, remaining);
-    }
+    commitOutcomes();
     await this.saveSwmSenderKeyState();
     return drained;
   }
 
   /**
-   * Drain queued sender-key packages whose recipient agent is one of
-   * the agent addresses advertised by `peerId`. Returns the number of
-   * rows successfully delivered (acked) and removed.
+   * Upgrade legacy/no-peer pending rows into one durable obligation per exact
+   * `(agent, key, peer)` route in a current authority-fenced recipient
+   * snapshot. The replacement is synchronous so drains can never observe a
+   * partially expanded multi-peer obligation.
+   */
+  expandUnboundPendingSenderKeyRoutes(this: DKGAgent, input: {
+    recipients: readonly WorkspaceAgentRecipient[];
+    contextGraphId: string;
+    subGraphName?: string;
+    allSubgraphs?: boolean;
+    senderAgentAddress?: string;
+    epochId?: string;
+  }): number {
+    const peersByAgentAndKey = new Map<string, Set<string>>();
+    for (const recipient of input.recipients) {
+      if (!recipient.peerId) continue;
+      const routeKey = `${recipient.agentAddress.toLowerCase()}\0${recipient.recipientKeyId}`;
+      const peers = peersByAgentAndKey.get(routeKey) ?? new Set<string>();
+      peers.add(recipient.peerId);
+      peersByAgentAndKey.set(routeKey, peers);
+    }
+    if (peersByAgentAndKey.size === 0) return 0;
+
+    const boundRouteIdentity = (entry: PendingSenderKeyEntry, peerId: string) => JSON.stringify([
+      entry.senderAgentAddress,
+      entry.recipientKeyId,
+      peerId,
+      entry.epochId,
+      entry.contextGraphId,
+      entry.subGraphName ?? null,
+    ]);
+    const senderAgentAddress = input.senderAgentAddress?.toLowerCase();
+    let expanded = 0;
+    for (const [recipientAgentAddress, queue] of this.pendingSenderKeyByAgent.entries()) {
+      const existingBoundRoutes = new Set(
+        queue
+          .flatMap((entry) => entry.recipientPeerId === undefined
+            ? []
+            : [boundRouteIdentity(entry, entry.recipientPeerId)]),
+      );
+      let changed = false;
+      const replacement: PendingSenderKeyEntry[] = [];
+      for (const entry of queue) {
+        const matchesScope = entry.contextGraphId === input.contextGraphId
+          && (input.allSubgraphs
+            || (entry.subGraphName ?? undefined) === (input.subGraphName ?? undefined))
+          && (senderAgentAddress === undefined || entry.senderAgentAddress === senderAgentAddress)
+          && (input.epochId === undefined || entry.epochId === input.epochId);
+        if (entry.recipientPeerId !== undefined || !matchesScope) {
+          replacement.push(entry);
+          continue;
+        }
+
+        const peers = peersByAgentAndKey.get(
+          `${entry.recipientAgentAddress}\0${entry.recipientKeyId}`,
+        );
+        if (!peers || peers.size === 0) {
+          replacement.push(entry);
+          continue;
+        }
+
+        changed = true;
+        expanded += 1;
+        for (const peerId of peers) {
+          const identity = boundRouteIdentity(entry, peerId);
+          if (existingBoundRoutes.has(identity)) continue;
+          replacement.push({ ...entry, recipientPeerId: peerId });
+          existingBoundRoutes.add(identity);
+        }
+      }
+      if (changed) {
+        if (replacement.length === 0) {
+          this.pendingSenderKeyByAgent.delete(recipientAgentAddress);
+        } else {
+          this.pendingSenderKeyByAgent.set(recipientAgentAddress, replacement);
+        }
+      }
+    }
+    return expanded;
+  }
+
+  /**
+   * Drain queued sender-key packages whose exact current recipient route is
+   * the newly connected `peerId`. Returns the number of rows successfully
+   * delivered (acked) and removed.
    *
    * Fired from the `connection:open` listener — see line 2382 — so the
    * cost lives on the cold path of "we just connected to a new peer",
-   * not on every share. Each successful `sendReliable` with
+   * not on every share. Every context graph represented by either a bound or
+   * legacy row is resolved first; bound rows never bypass that authority read.
+   * Legacy/no-peer rows are expanded only from that graph's current,
+   * authority-fenced recipient snapshot. Each successful `sendReliable` with
    * `delivered=true && ack.accepted=true` deletes the row and counts as
    * drained; soft (`delivered=false`) and explicitly retryable delivered
    * rejections leave it queued for the next attempt; terminal delivered
@@ -1801,20 +2833,89 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     await this.loadSwmSenderKeyState();
     if (this.pendingSenderKeyByAgent.size === 0) return 0;
     let drained = 0;
-    let agentAddresses: string[] = [];
-    try {
-      const profile = await this.discovery.findAgentByPeerId(peerId);
-      if (profile?.agentAddress) {
-        agentAddresses = [profile.agentAddress.toLowerCase()];
-      }
-    } catch {
-      // Resolution failure is benign — we'll try again on the next
-      // connection:open burst. Don't propagate.
-    }
-    if (agentAddresses.length === 0) return 0;
+    const pendingContextGraphIds = new Set(
+      [...this.pendingSenderKeyByAgent.values()]
+        .flatMap((queue) => queue
+          .filter((entry) => entry.recipientPeerId === undefined || entry.recipientPeerId === peerId)
+          .map((entry) => entry.contextGraphId)),
+    );
+    let expandedRows = 0;
 
-    for (const recipientAgentAddress of agentAddresses) {
-      drained += await this.drainPendingSenderKeyQueueForPeer({ peerId, recipientAgentAddress, ctx });
+    for (const contextGraphId of pendingContextGraphIds) {
+      let resolution: WorkspaceAgentRecipientResolution;
+      try {
+        resolution = await this.resolveWorkspaceAgentRecipientsForCurrentAuthority({
+          contextGraphId,
+        });
+      } catch {
+        // Authority/key resolution failure is benign on connection-open. No
+        // row for this CG — including already bound rows — may bypass it.
+        continue;
+      }
+      if (!resolution.requiresEncryption) continue;
+
+      expandedRows += this.expandUnboundPendingSenderKeyRoutes({
+        recipients: resolution.recipients,
+        contextGraphId,
+        allSubgraphs: true,
+      });
+
+      const routes = new Map<string, PendingSenderKeyDrainAuthority>();
+      for (const recipient of resolution.recipients) {
+        if (recipient.peerId !== peerId) continue;
+        const recipientAgentAddress = recipient.agentAddress.toLowerCase();
+        const authority: PendingSenderKeyDrainAuthority = {
+          contextGraphId,
+          allSubgraphs: true,
+          recipientAgentAddress,
+          recipientKeyId: recipient.recipientKeyId,
+          recipientPeerId: peerId,
+        };
+        const queue = this.pendingSenderKeyByAgent.get(recipientAgentAddress);
+        if (!queue?.some((entry) => (
+          pendingSenderKeyEntryMatchesDrainAuthority(entry, authority)
+        ))) continue;
+        routes.set(
+          `${recipientAgentAddress}\0${recipient.recipientKeyId}\0${peerId}`,
+          authority,
+        );
+      }
+      for (const authority of routes.values()) {
+        drained += await this.drainPendingSenderKeyQueueForPeer({ authority, ctx });
+      }
+    }
+    if (expandedRows > 0) {
+      // A connection can teach us routes for another peer. Persist that legacy
+      // migration even when this peer had no exact authorized row to drain.
+      await this.saveSwmSenderKeyState();
+    }
+    return drained;
+  }
+
+  /**
+   * A delivered Sender Key setup can receive a retryable authority denial.
+   * That leaves a durable pending row but does not create a Messenger outbox
+   * retry, and an already-connected recipient may never produce another
+   * connection:open event. Retry only peer-bound rows on the ordinary outbox
+   * cadence. The drain below re-resolves current graph authority and the exact
+   * recipient key/peer route before sending any package.
+   */
+  public async drainPendingSenderKeysForConnectedPeers(this: DKGAgent): Promise<number> {
+    await this.loadSwmSenderKeyState();
+    if (this.pendingSenderKeyByAgent.size === 0 || !this.node.isStarted) return 0;
+
+    const pendingPeers = new Set(
+      [...this.pendingSenderKeyByAgent.values()]
+        .flatMap((queue) => queue.flatMap((entry) =>
+          entry.recipientPeerId === undefined ? [] : [entry.recipientPeerId])),
+    );
+    if (pendingPeers.size === 0) return 0;
+
+    let drained = 0;
+    for (const peer of this.node.libp2p.getPeers()) {
+      const peerId = peer.toString();
+      if (!pendingPeers.has(peerId)) continue;
+      drained += await this.drainPendingSenderKeyForPeer(peerId);
     }
     return drained;
   }
@@ -1827,24 +2928,47 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    */
   async drainPendingSenderKeyForRecipients(this: DKGAgent,
     recipients: readonly WorkspaceAgentRecipient[],
-    ctx?: OperationContext,
+    ctx: OperationContext | undefined,
+    scope: {
+      contextGraphId: string;
+      subGraphName?: string;
+      senderAgentAddress: string;
+      epochId: string;
+    },
   ): Promise<number> {
     if (this.pendingSenderKeyByAgent.size === 0) return 0;
 
-    const peerByAgent = new Map<string, string>();
+    const senderAgentAddress = scope.senderAgentAddress.toLowerCase();
+    this.expandUnboundPendingSenderKeyRoutes({
+      recipients,
+      contextGraphId: scope.contextGraphId,
+      subGraphName: scope.subGraphName,
+      senderAgentAddress,
+      epochId: scope.epochId,
+    });
+
+    const routes = new Map<string, PendingSenderKeyDrainAuthority>();
     for (const recipient of recipients) {
       if (!recipient.peerId) continue;
       const recipientAgentAddress = recipient.agentAddress.toLowerCase();
       if (!this.pendingSenderKeyByAgent.has(recipientAgentAddress)) continue;
-      if (!peerByAgent.has(recipientAgentAddress)) {
-        peerByAgent.set(recipientAgentAddress, recipient.peerId);
-      }
+      const authority: PendingSenderKeyDrainAuthority = {
+        contextGraphId: scope.contextGraphId,
+        subGraphName: scope.subGraphName,
+        senderAgentAddress,
+        epochId: scope.epochId,
+        recipientAgentAddress,
+        recipientKeyId: recipient.recipientKeyId,
+        recipientPeerId: recipient.peerId,
+      };
+      const routeKey = `${recipientAgentAddress}\0${recipient.recipientKeyId}\0${recipient.peerId}`;
+      routes.set(routeKey, authority);
     }
-    if (peerByAgent.size === 0) return 0;
+    if (routes.size === 0) return 0;
 
     let drained = 0;
-    for (const [recipientAgentAddress, peerId] of peerByAgent.entries()) {
-      drained += await this.drainPendingSenderKeyQueueForPeer({ peerId, recipientAgentAddress, ctx });
+    for (const authority of routes.values()) {
+      drained += await this.drainPendingSenderKeyQueueForPeer({ authority, ctx });
     }
     if (drained > 0 && ctx) {
       this.log.info(ctx, `SWM sender-key pending retry drained ${drained} queued package(s) during publish`);
@@ -1948,6 +3072,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // Late deliveries now reach quorum the same way fast
       // ones do.
       this.maybeEmitSwmShareAck(outcome).catch(() => { /* swallowed; logged inside */ });
+      this.noticeSwmFollowersAfterApplyV1(outcome, fromPeerId, data);
       return new Uint8Array();
     }
     if (outcome.retryable) {
@@ -2098,8 +3223,42 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       );
     }
 
-    const agentGateAddresses = await this.getContextGraphAgentGateAddresses(pkg.contextGraphId);
+    const agentGateAuthority = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.senderKeyAccept,
+      () => this.resolveContextGraphAgentGateAuthority(pkg.contextGraphId),
+    );
+    if (agentGateAuthority.kind === 'unavailable') {
+      // Not knowing the gate is not evidence that either endpoint is outside
+      // it. Answering `sender-not-allowed` here made an authority failure look
+      // like a membership decision (#2827). A transient failure asks the
+      // sender to retain and retry the package; one that needs a software or
+      // configuration change is terminal, classified exactly as the promote
+      // retry is (isRetryableContextGraphAuthorityUnavailableReason).
+      throw new SwmSenderKeySetupRejectionError(
+        isRetryableContextGraphAuthorityUnavailableReason(agentGateAuthority.reason)
+          ? 'agent-gate-pending'
+          : 'agent-gate-unavailable',
+        `Context graph "${pkg.contextGraphId}" agent gate authority is unavailable (${agentGateAuthority.reason})`,
+      );
+    }
+    const agentGateAddresses = agentGateAuthority.kind === 'available'
+      ? agentGateAuthority.agentAddresses
+      : null;
     if (!agentGateAddresses) {
+      // A cold private member can receive Sender Key setup after the finalized
+      // chain binding but before its accepted RFC-64 roster or legacy `_meta`
+      // projection is materialized. The chain policy is affirmative authority
+      // that this graph is private, but it does not authorize either endpoint;
+      // ask the sender to retain and retry the exact package until the local
+      // gate arrives. Unknown/public policy remains a terminal fail-closed
+      // rejection so an arbitrary ungated graph cannot create retry state.
+      const policy = await this.getContextGraphOnChainPolicy(pkg.contextGraphId);
+      if (policy.accessPolicy === 1) {
+        throw new SwmSenderKeySetupRejectionError(
+          'agent-gate-pending',
+          `Context graph "${pkg.contextGraphId}" private agent gate is not materialized yet`,
+        );
+      }
       throw new SwmSenderKeySetupRejectionError(
         'not-agent-gated',
         `Context graph "${pkg.contextGraphId}" is not DKG-agent gated`,
@@ -2116,6 +3275,30 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       throw new SwmSenderKeySetupRejectionError(
         'recipient-not-allowed',
         `Recipient agent ${recipientAgentAddress} is not allowed for context graph "${pkg.contextGraphId}"`,
+      );
+    }
+    let allowedPeers: string[] | null;
+    try {
+      allowedPeers = await this.resolveSwmAllowedPeersForCurrentAuthority(pkg.contextGraphId);
+    } catch (error) {
+      if (!isContextGraphAuthorityUnavailableMarker(error)) throw error;
+      throw new SwmSenderKeySetupRejectionError(
+        isRetryableContextGraphAuthorityUnavailableReason(error.reason)
+          ? 'agent-gate-pending'
+          : 'agent-gate-unavailable',
+        `Context graph "${pkg.contextGraphId}" SWM peer gate authority is unavailable (${error.reason})`,
+      );
+    }
+    if (allowedPeers !== null && !allowedPeers.includes(fromPeerId)) {
+      throw new SwmSenderKeySetupRejectionError(
+        'sender-not-allowed',
+        `Sender peer ${fromPeerId} is not allowed for context graph "${pkg.contextGraphId}"`,
+      );
+    }
+    if (allowedPeers !== null && !allowedPeers.includes(this.peerId)) {
+      throw new SwmSenderKeySetupRejectionError(
+        'recipient-not-allowed',
+        `Recipient peer ${this.peerId} is not allowed for context graph "${pkg.contextGraphId}"`,
       );
     }
     if (!this.hasLocalAgent(recipientAgentAddress)) {
@@ -2504,47 +3687,72 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async saveSwmSenderKeyState(this: DKGAgent): Promise<void> {
     const path = this.swmSenderKeyStatePath();
     if (!path) return;
-    const { mkdir, writeFile, chmod } = await import('node:fs/promises');
-    const { dirname } = await import('node:path');
-    await mkdir(dirname(path), { recursive: true });
-    const payload = {
-      version: 1,
-      send: [...this.swmSenderKeySendStates.values()].map(serializeSwmSenderSendState),
-      receive: [...this.swmSenderKeyReceiveStates.values()].map(serializeSwmSenderReceiveState),
-      pending: [...this.pendingSenderKeyByAgent.values()]
-        .flatMap((queue) => queue.map(serializePendingSenderKeyEntry)),
-    };
-    await writeFile(path, JSON.stringify(payload, null, 2), { mode: 0o600 });
-    try {
-      await chmod(path, 0o600);
-    } catch {
-      // Best-effort on platforms/filesystems that do not support chmod.
-    }
+    const save = this.swmSenderKeyStateSaveQueue.then(async () => {
+      const { mkdir, writeFile, chmod } = await import('node:fs/promises');
+      const { dirname } = await import('node:path');
+      await mkdir(dirname(path), { recursive: true });
+      // Capture inside the serialized section. A caller queued behind an
+      // in-flight write must persist the state current when its turn begins,
+      // not a stale snapshot captured while the older write was outstanding.
+      const payload = {
+        version: 1,
+        send: [...this.swmSenderKeySendStates.values()].map(serializeSwmSenderSendState),
+        receive: [...this.swmSenderKeyReceiveStates.values()].map(serializeSwmSenderReceiveState),
+        pending: [...this.pendingSenderKeyByAgent.values()]
+          .flatMap((queue) => queue.map(serializePendingSenderKeyEntry)),
+      };
+      await writeFile(path, JSON.stringify(payload, null, 2), { mode: 0o600 });
+      try {
+        await chmod(path, 0o600);
+      } catch {
+        // Best-effort on platforms/filesystems that do not support chmod.
+      }
+    });
+    // A failed save is still reported to its caller, but must not poison the
+    // queue and suppress every later persistence attempt.
+    this.swmSenderKeyStateSaveQueue = save.catch(() => undefined);
+    await save;
   }
 
-  async resolveWorkspaceGossipSigningAgent(this: DKGAgent,
-    contextGraphId: string,
-  ): Promise<(AgentKeyRecord & { privateKey: string }) | null> {
-    const allowedAgents = await this.getContextGraphAgentGateAddresses(contextGraphId);
-    if (!allowedAgents) {
-      return this.getWorkspaceGossipSigningAgent();
+  async resolveWorkspaceGossipSigningAgent(this: DKGAgent, contextGraphId: string): Promise<WorkspaceGossipSigner | null> {
+    const authority = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.signer,
+      () => this.resolveContextGraphAgentGateAuthority(contextGraphId),
+    );
+    if (authority.kind === 'ungated') {
+      const local = this.getWorkspaceGossipSigningAgent();
+      if (local) return localGossipSigner(local.agentAddress, local.privateKey);
+      return (await externalAuthorGossipSigner(this.config?.authorSigners, this.localAgents.values(), { preferred: this.defaultAgentAddress })) ?? null;
+    }
+    if (authority.kind === 'unavailable') {
+      const message =
+        `Cannot gossip SWM write for context graph "${contextGraphId}": signing authority is unavailable (${authority.reason})`;
+      throw createContextGraphAuthorityError(message, authority);
+    }
+
+    const allowedAgents = authority.agentAddresses;
+
+    // An available-but-empty gate is authoritative (for example an empty
+    // chain roster or a fully revoked legacy gate), so retrying cannot help.
+    if (allowedAgents.length === 0) {
+      throw new Error(
+        `Cannot gossip SWM write for context graph "${contextGraphId}": authoritative signing roster is empty`,
+      );
     }
 
     const allowedSet = new Set(allowedAgents.map((agent) => agent.toLowerCase()));
     for (const record of this.localAgents.values()) {
       if (record.privateKey && allowedSet.has(record.agentAddress.toLowerCase())) {
-        return { ...record, privateKey: record.privateKey };
+        return localGossipSigner(record.agentAddress, record.privateKey);
       }
     }
+    const external = await externalAuthorGossipSigner(this.config?.authorSigners, this.localAgents.values(), { allowed: allowedSet });
+    if (external) return external;
 
     throw new Error(`Cannot gossip SWM write for agent-gated context graph "${contextGraphId}": no local allowed signing agent key`);
   }
 
-  async encodeWorkspaceGossipMessage(this: DKGAgent,
-    contextGraphId: string,
-    message: Uint8Array,
-    resolvedSigner?: (AgentKeyRecord & { privateKey: string }) | null,
-  ): Promise<Uint8Array> {
+  async encodeWorkspaceGossipMessage(this: DKGAgent, contextGraphId: string, message: Uint8Array, resolvedSigner?: WorkspaceGossipSigner | null): Promise<Uint8Array> {
     const signer = resolvedSigner === undefined
       ? await this.resolveWorkspaceGossipSigningAgent(contextGraphId)
       : resolvedSigner;
@@ -2560,7 +3768,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       timestamp,
       payload,
     );
-    const signature = await new ethers.Wallet(signer.privateKey).signMessage(signingPayload);
+    const signature = await signGossipEnvelopeInTime(signer, signingPayload, timestamp);
     return encodeGossipEnvelope({
       version: GOSSIP_ENVELOPE_VERSION,
       type: GOSSIP_TYPE_WORKSPACE_PUBLISH,

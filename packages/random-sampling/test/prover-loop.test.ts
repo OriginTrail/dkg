@@ -82,6 +82,34 @@ describe('startProverLoop', () => {
     await loop.stop();
   });
 
+  it('exposes one stable physical shutdown without closing underneath a live tick', async () => {
+    let settleTick!: (outcome: TickOutcome) => void;
+    const tick = vi.fn(() => new Promise<TickOutcome>((resolve) => {
+      settleTick = resolve;
+    }));
+    const close = vi.fn(async () => undefined);
+    const prover: TickableProver = { tick, close };
+    const loop = startProverLoop({
+      prover,
+      intervalMs: 60_000,
+    });
+    loop.start();
+    await vi.waitFor(() => expect(tick).toHaveBeenCalledOnce());
+
+    const stopping = loop.stop();
+    expect(loop.stop()).toBe(stopping);
+    let stopped = false;
+    void stopping.then(() => { stopped = true; });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(stopped).toBe(false);
+    expect(close).not.toHaveBeenCalled();
+
+    settleTick({ kind: 'period-closed' });
+    await expect(stopping).resolves.toBeUndefined();
+    expect(loop.stop()).toBe(stopping);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it('catches tick rejections and keeps the loop alive', async () => {
     let throwOnce = true;
     const prover = fakeProver(async () => {

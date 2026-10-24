@@ -20,6 +20,25 @@ import {
   shouldPreserveSessionForIntegrationSelection,
 } from './selection.js';
 import type { LocalAgentAttachmentDraft, LocalAgentMessage } from './types.js';
+import { agentLogoDataUri } from './agentLogos.js';
+
+/**
+ * The agent's own mark, drawn as a mask so it inherits the panel's text colour
+ * in both themes. Purely decorative — the agent name sits right next to it, so
+ * it is hidden from assistive tech rather than duplicating that name.
+ */
+function AgentLogo({ integrationId }: { integrationId: string }): React.ReactElement | null {
+  const uri = agentLogoDataUri(integrationId);
+  if (!uri) return null;
+  return (
+    <span
+      className="v10-local-agent-logo"
+      aria-hidden="true"
+      data-agent-logo={integrationId}
+      style={{ maskImage: `url("${uri}")`, WebkitMaskImage: `url("${uri}")` }}
+    />
+  );
+}
 
 export function ConnectedAgentsTab(props: {
   integrations: LocalAgentIntegration[];
@@ -32,8 +51,10 @@ export function ConnectedAgentsTab(props: {
   onConnectIntegration: (id: string) => void;
   onDisconnectIntegration: (id: string) => void;
   onRefreshIntegration: (id: string) => void;
+  onClearIntegrationSession: (id: string) => void;
   connectBusyId: string | null;
   refreshBusyId: string | null;
+  clearBusyId: string | null;
   connectNotice: string | null;
   connectError: string | null;
   localMessages: LocalAgentMessage[];
@@ -68,8 +89,10 @@ export function ConnectedAgentsTab(props: {
     onConnectIntegration,
     onDisconnectIntegration,
     onRefreshIntegration,
+    onClearIntegrationSession,
     connectBusyId,
     refreshBusyId,
+    clearBusyId,
     connectNotice,
     connectError,
     localMessages,
@@ -241,7 +264,7 @@ export function ConnectedAgentsTab(props: {
     localHistoryLoaded,
     localMessagesCount: localMessages.length,
   });
-  const inputDisabled = localSending || !selected?.chatReady;
+  const inputDisabled = localSending || !selected?.chatReady || selected.busy === true;
   // Single source of truth for "is the user allowed to fire a send right
   // now". Both the button click AND the keyboard Enter / Cmd+Enter
   // handlers gate on this — earlier the button correctly disabled while
@@ -279,6 +302,7 @@ export function ConnectedAgentsTab(props: {
                 aria-selected={isActive}
               >
                 <span className={`v10-agents-stat-dot ${bridgeStatusDotClass(integration)}`} />
+                <AgentLogo integrationId={integration.id} />
                 <span>{integration.name}</span>
               </button>
               {isActive && (
@@ -287,9 +311,12 @@ export function ConnectedAgentsTab(props: {
                   statusLabel={localAgentToolbarLabel(integration, showingSessionHistory)}
                   statusDotClass={bridgeStatusDotClass(integration)}
                   refreshBusy={refreshBusyId === integration.id}
-                  canDisconnect={integration.persistentChat}
+                  clearBusy={clearBusyId === integration.id}
+                  canDisconnect={integration.connectSupported && integration.persistentChat}
+                  canClearSession={integration.id === 'local-llm'}
                   onRefresh={() => onRefreshIntegration(integration.id)}
                   onDisconnect={() => onDisconnectIntegration(integration.id)}
+                  onClearSession={() => onClearIntegrationSession(integration.id)}
                 />
               )}
             </div>
@@ -322,7 +349,10 @@ export function ConnectedAgentsTab(props: {
               <div key={integration.id} className="v10-local-agent-detail v10-local-agent-choice">
                 <div className="v10-local-agent-detail-head">
                   <div>
-                    <div className="v10-local-agent-title">{integration.name}</div>
+                    <div className="v10-local-agent-title">
+                      <AgentLogo integrationId={integration.id} />
+                      {integration.name}
+                    </div>
                     <div className="v10-local-agent-subtitle">{integration.description}</div>
                   </div>
                   <span className={`v10-local-agent-status-pill ${integration.status}`}>
@@ -359,6 +389,41 @@ export function ConnectedAgentsTab(props: {
                         Release Notes
                       </a>
                     </div>
+                  </>
+                )}
+                {integration.id === 'prime-agent' && (
+                  <>
+                    <p className="v10-local-agent-copy">
+                      Connect a local Prime Agent through the node, then this tab becomes the persistent chat surface for it. Prime Agent publishes a bridge per live session; the first chat pins one session, and you can switch explicitly when several are live.
+                    </p>
+                    {/*
+                      Sessions are ephemeral by nature, so "none live" is normal
+                      rather than broken. Say that plainly instead of showing an
+                      error state the operator cannot act on.
+                    */}
+                    {typeof integration.sessionCount === 'number' && (
+                      <p
+                        className="v10-local-agent-copy"
+                        data-testid={`local-agent-sessions-${integration.id}`}
+                      >
+                        {integration.sessionCount === 0
+                          ? 'No live session. Start a Prime Agent session, then refresh — the extension publishes its bridge on session start.'
+                          : integration.sessionCount === 1
+                          ? '1 live session.'
+                          : `${integration.sessionCount} live sessions — choose which session this chat should use.`}
+                      </p>
+                    )}
+                    {integration.connectSupported && (
+                      <div className="v10-local-agent-actions">
+                        <button
+                          className="v10-agent-send-btn secondary"
+                          onClick={() => onConnectIntegration(integration.id)}
+                          disabled={connectBusyId === integration.id}
+                        >
+                          {connectBusyId === integration.id ? 'Connecting...' : 'Connect Prime Agent'}
+                        </button>
+                      </div>
+                    )}
                   </>
                 )}
                 {integration.id === 'hermes' && (
@@ -401,6 +466,34 @@ export function ConnectedAgentsTab(props: {
                   : showingStoredSessions
                   ? `${selected.name} has saved sessions on this node. Open one from Sessions or reconnect from the + tab to resume live chat here.`
                   : `${selected.name} is temporarily unavailable. Refresh after it recovers to resume chatting here.`}
+              </div>
+            )}
+
+            {selected.id === 'prime-agent' && selected.busy === true && (
+              <div
+                className="v10-local-agent-warning connecting"
+                role="status"
+                data-testid="prime-agent-active-turn-status"
+              >
+                {selected.detail}
+              </div>
+            )}
+
+            {selected.id === 'prime-agent' && (selected.liveSessions?.length ?? 0) > 1 && (
+              <div className="v10-composer-target" data-testid="prime-agent-session-picker">
+                <span className="v10-local-agent-target-label">Prime session</span>
+                <Select
+                  className="v10-local-agent-target-select"
+                  value={selectedSessionId ?? selected.defaultSessionId ?? ''}
+                  onChange={(sessionId) => onSelectIntegration(selected.id, { sessionId })}
+                  options={selected.liveSessions!.map((session, index) => ({
+                    value: session.sessionId,
+                    label: session.sessionName?.trim()
+                      || `${index === 0 ? 'Most recent' : `Session ${index + 1}`} · ${session.sessionId.slice(0, 8)}…`,
+                  }))}
+                  ariaLabel="Prime Agent session"
+                  disabled={localSending || selected.busy === true}
+                />
               </div>
             )}
 
@@ -508,6 +601,14 @@ export function ConnectedAgentsTab(props: {
                           {attachment.fileName}
                         </span>
                       ))}
+                    </div>
+                  )}
+                  {message.role === 'assistant' && (message.toolCalls?.length || message.traceFile) && (
+                    <div className="v10-local-agent-copy" data-testid="local-llm-turn-metadata">
+                      {message.toolCalls?.length
+                        ? `Tools: ${message.toolCalls.map((call) => call.name).join(', ')}`
+                        : 'Tools: none'}
+                      {message.traceFile ? ` · Trace: ${message.traceFile}` : ''}
                     </div>
                   )}
                   {message.ts && (

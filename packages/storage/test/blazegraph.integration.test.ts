@@ -1,3 +1,8 @@
+import { randomUUID } from 'node:crypto';
+import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../src/atomic-asset-group.js';
+import { buildBulkAssetGroupPlan } from '../src/adapters/bulk-asset-group.js';
+import { parseNQuadsTextTolerant } from '../src/nquads-text.js';
+import { quadsToNQuads } from '../src/bounded-rdf.js';
 /**
  * BlazegraphStore INTEGRATION tests — run against a REAL Blazegraph server.
  *
@@ -21,9 +26,30 @@
  * BLAZEGRAPH_TEST_URL example:
  *   http://127.0.0.1:9999/bigdata/namespace/kb/sparql
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
-import type { Quad } from '../src/triple-store.js';
+import { compileRfc64SemanticAuthorCommitV1 } from '../src/rfc64-semantic-author-commit-v1.js';
+import { normalizeRfc64AuthorCommitCasV1 } from '../src/rfc64-author-commit-cas.js';
+import type {
+  Quad,
+} from '../src/triple-store.js';
+import type { Rfc64SemanticAuthorCommitInputV1 } from
+  '../src/rfc64-semantic-author-commit-v1.js';
+import {
+  assertCanonicalDeterministicUalV1,
+  deriveCanonicalGraphScopedAuthorSealPlacementV1,
+  deriveRfc64SharedProjectionGraphIriV1,
+  projectCanonicalGraphScopedAuthorSealRowsV1,
+  projectRfc64SemanticRecordStoreRowsV1,
+  renderRfc64SemanticStoreRowV1,
+  type CanonicalGraphScopedAuthorSealCoordinateV1,
+  type CanonicalGraphScopedAuthorSealV1,
+  type ContextGraphIdV1,
+  type Digest32V1,
+  type EvmAddressV1,
+  type NetworkIdV1,
+  type Rfc64SemanticRecordV1,
+} from '@origintrail-official/dkg-core';
 
 const BLAZEGRAPH_URL = process.env.BLAZEGRAPH_TEST_URL;
 
@@ -63,6 +89,164 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
   afterAll(async () => {
     if (store) await store.dropGraph(GRAPH).catch(() => {});
   });
+
+  it('replaces values and preserves exact content on replay', async () => {
+    const store = new BlazegraphStore(BLAZEGRAPH_URL!, { timeout: 10_000 });
+    const root = `urn:group-test:${randomUUID()}`, meta = `${root}:meta`;
+    const member = (id: number, value: string, version: string): AtomicAssetReplacement => ({
+      graphUri: `${root}:${id}`, metaGraphUri: meta, metadataSubject: `${root}:asset:${id}`,
+      graphQuads: [{ graph: `${root}:${id}`, subject: `${root}:entity:${id}`, predicate: 'urn:p', object: JSON.stringify(value) }],
+      metadataQuads: [{ graph: meta, subject: `${root}:asset:${id}`, predicate: 'urn:version', object: JSON.stringify(version) }],
+    });
+    const unrelated = { graph: meta, subject: `${root}:unrelated`, predicate: 'urn:p', object: '"keep"' };
+    const select = `SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g IN (<${root}:1>, <${root}:2>, <${meta}>)) } ORDER BY ?g ?s ?p ?o`;
+    try {
+      const members = [member(1, 'new-first', '2'), member(2, 'new-second', '2')];
+      const expected = { type: 'bindings', variables: ['g', 's', 'p', 'o'], bindings: [...members.flatMap(a => [...a.graphQuads, ...a.metadataQuads]), unrelated]
+        .map(q => ({ g: q.graph, s: q.subject, p: q.predicate, o: q.object })) };
+      const sorted = (result: typeof expected) => ({ ...result, bindings: [...result.bindings].sort((a, b) =>
+        JSON.stringify(a).localeCompare(JSON.stringify(b))) });
+      await store.insert([...[member(1, 'old-first', '1'), member(2, 'old-second', '1')]
+        .flatMap(a => [...a.graphQuads, ...a.metadataQuads]), unrelated]);
+      await store.replaceAssetGroup(members);
+      expect(sorted(await store.query(select) as typeof expected)).toEqual(sorted(expected));
+      await store.replaceAssetGroup(members);
+      expect(sorted(await store.query(select) as typeof expected)).toEqual(sorted(expected));
+    } finally {
+      await store.update([`${root}:1`, `${root}:2`, meta].map(g => `DROP SILENT GRAPH <${g}>`).join(';'));
+      await store.close();
+    }
+  });
+
+  it('rolls back every fallback destination after a later statement fails', async () => {
+    const root = `urn:fallback-rollback:${randomUUID()}`, meta = `${root}:meta`;
+    const member = (id: number, value: string): AtomicAssetReplacement => ({
+      graphUri: `${root}:${id}`, metaGraphUri: meta, metadataSubject: `${root}:asset:${id}`,
+      graphQuads: [{ graph: `${root}:${id}`, subject: `${root}:entity:${id}`, predicate: 'urn:p', object: value }],
+      metadataQuads: [{ graph: meta, subject: `${root}:asset:${id}`, predicate: 'urn:version', object: '"2"' }],
+    });
+    const members = [member(1, '"01"^^<http://www.w3.org/2001/XMLSchema#integer>'), member(2, '"replacement"')];
+    members[0]!.graphQuads.push({ ...members[0]!.graphQuads[0]!, object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>' });
+    expect(buildBulkAssetGroupPlan(members)).toBeNull();
+    const plan = buildAtomicAssetGroupUpdate(members);
+    const select = `SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g IN (<${root}:1>, <${root}:2>, <${meta}>)) } ORDER BY ?g ?s ?p ?o`;
+    let intercept: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      await store.insert([...[member(1, '"original-one"'), member(2, '"original-two"')]
+        .flatMap(a => [...a.graphQuads, ...a.metadataQuads]),
+        { graph: meta, subject: `${root}:unrelated`, predicate: 'urn:p', object: '"keep"' }]);
+      const before = await store.query(select), transport = globalThis.fetch;
+      let injected = false;
+      intercept = vi.spyOn(globalThis, 'fetch').mockImplementation((url, init) => {
+        if (init?.body === plan.update) {
+          injected = true;
+          // CREATE on the nonempty metadata graph fails at execution time,
+          // after every generated CLEAR/DELETE/INSERT has been evaluated.
+          return transport(url, { ...init, body: `${plan.update}; CREATE GRAPH <${meta}>` });
+        }
+        return transport(url, init);
+      });
+      await expect(store.replaceAssetGroup(members)).rejects.toThrow();
+      expect(injected).toBe(true);
+      expect(await store.query(select)).toEqual(before);
+    } finally {
+      intercept?.mockRestore();
+      await store.update([`${root}:1`, `${root}:2`, meta].map(g => `DROP SILENT GRAPH <${g}>`).join(';'));
+    }
+  });
+
+  it.each([0, 1, 2, 3].flatMap(index => ['absent', 'partial'].map(mode => ({ index, mode }))))(
+    'preserves every destination when staging member $index is $mode', async ({ index, mode }) => {
+    const root = `urn:incomplete-group:${randomUUID()}`, meta = `${root}:meta`;
+    const member = (id: number, value: string): AtomicAssetReplacement => ({
+      graphUri: `${root}:${id}`, metaGraphUri: meta, metadataSubject: `${root}:asset:${id}`,
+      graphQuads: [{ graph: `${root}:${id}`, subject: `${root}:entity:${id}`, predicate: 'urn:p', object: JSON.stringify(value) }],
+      metadataQuads: [{ graph: meta, subject: `${root}:asset:${id}`, predicate: 'urn:version', object: JSON.stringify(value) }],
+    });
+    const members = [member(1, 'new'), member(2, 'new')].map(a => ({ ...a,
+      graphQuads: [...a.graphQuads, { ...a.graphQuads[0]!, predicate: 'urn:second' }],
+      metadataQuads: [...a.metadataQuads, { ...a.metadataQuads[0]!, predicate: 'urn:second' }],
+    }));
+    const plan = buildBulkAssetGroupPlan(members)!;
+    const select = `SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g IN (<${root}:1>, <${root}:2>, <${meta}>)) } ORDER BY ?g ?s ?p ?o`;
+    try {
+      await store.insert([...[member(1, 'old'), member(2, 'old')].flatMap(a => [...a.graphQuads, ...a.metadataQuads]),
+        { graph: meta, subject: `${root}:unrelated`, predicate: 'urn:p', object: '"keep"' }]);
+      const before = await store.query(select);
+      const staged = parseNQuadsTextTolerant(plan.nquads), graphs = [...new Set(staged.map(q => q.graph))];
+      expect(graphs).toHaveLength(4);
+      const omitted = staged.find(q => q.graph === graphs[index])!;
+      const uploaded = staged.filter(q => mode === 'absent' ? q.graph !== graphs[index] : q !== omitted);
+      expect(uploaded.filter(q => q.graph === graphs[index])).toHaveLength(mode === 'partial' ? 1 : 0);
+      const response = await fetch(BLAZEGRAPH_URL!, { method: 'POST', headers: { 'Content-Type': 'text/x-nquads' },
+        body: quadsToNQuads(uploaded) });
+      await response.text(); expect(response.ok).toBe(true);
+      await store.update(plan.update);
+      expect(await store.query(plan.receiptQuery)).toEqual({ type: 'boolean', value: false });
+      expect(await store.query(select)).toEqual(before);
+    } finally {
+      await store.update(plan.cleanup);
+      await store.update([`${root}:1`, `${root}:2`, meta].map(g => `DROP SILENT GRAPH <${g}>`).join(';'));
+    }
+  });
+
+  it('runs live requests under the configured deadline and recovers after pre-dispatch cancellation', async () => {
+    const deadlineStore = new BlazegraphStore(BLAZEGRAPH_URL as string, { timeout: 5_000 });
+    const controller = new AbortController();
+    const reason = new Error('cancel live probe');
+    controller.abort(reason);
+
+    await expect(
+      deadlineStore.query('ASK { ?s ?p ?o }', { signal: controller.signal }),
+    ).rejects.toBe(reason);
+
+    const result = await deadlineStore.query('ASK { ?s ?p ?o }');
+    expect(result.type).toBe('boolean');
+    await deadlineStore.close();
+  });
+
+  it(
+    'honours X-BIGDATA-MAX-QUERY-MILLIS on the supported live Blazegraph image',
+    async () => {
+      const GRAPH_DEADLINE = `${GRAPH}:deadline`;
+      const quads = makeQuads(150).map((quad) => ({ ...quad, graph: GRAPH_DEADLINE }));
+      await store.insert(quads);
+
+      try {
+        // ORDER BY forces Blazegraph to buffer the complete Cartesian result,
+        // so it cannot finish or commit a successful response before the tiny
+        // server deadline. This direct POST deliberately has no adapter/client
+        // abort: it proves the external contract the adapter relies on rather
+        // than merely proving that our mock observed a header.
+        const expensiveQuery = `SELECT ?s1 ?s2 ?s3 WHERE {
+          GRAPH <${GRAPH_DEADLINE}> {
+            ?s1 <${PRED}> ?o1 .
+            ?s2 <${PRED}> ?o2 .
+            ?s3 <${PRED}> ?o3 .
+          }
+        } ORDER BY ?s1 ?s2 ?s3`;
+        const startedAt = Date.now();
+        const response = await fetch(BLAZEGRAPH_URL as string, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/sparql-query; charset=utf-8',
+            Accept: 'application/sparql-results+json',
+            'X-BIGDATA-MAX-QUERY-MILLIS': '25',
+          },
+          body: expensiveQuery,
+          signal: AbortSignal.timeout(5_000),
+        });
+        const body = await response.text();
+
+        expect(response.ok, body.slice(0, 500)).toBe(false);
+        expect(Date.now() - startedAt).toBeLessThan(5_000);
+        expect(body).toMatch(/(?:timeout|cancel|deadline|max query)/i);
+      } finally {
+        await store.dropGraph(GRAPH_DEADLINE).catch(() => {});
+      }
+    },
+    15_000,
+  );
 
   it(
     'large DELETE DATA (publish path) succeeds — the form-content-limit regression',
@@ -222,4 +406,320 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
     },
     60_000,
   );
+
+  it(
+    'allows exactly one of two concurrently dispatched RFC-64 author commits',
+    async () => {
+      const projectionGraph = `${GRAPH}:rfc64:projection`;
+      const sealGraph = `${GRAPH}:rfc64:seals`;
+      const headGraph = `${GRAPH}:rfc64:heads`;
+      const stateGraph = `${GRAPH}:rfc64:state`;
+      const author = `urn:bg-int:${RUN}:rfc64:author`;
+      const seal = `urn:bg-int:${RUN}:rfc64:seal`;
+      const mutation = `urn:bg-int:${RUN}:rfc64:mutation`;
+      const cgMutation = `urn:bg-int:${RUN}:rfc64:cg-mutation`;
+      const appliedSet = `urn:bg-int:${RUN}:rfc64:applied-set`;
+      const oldHead = `urn:bg-int:${RUN}:rfc64:head:old`;
+      const newHead = `urn:bg-int:${RUN}:rfc64:head:new`;
+      const pValue = 'urn:bg-int:rfc64:value';
+      const pHead = 'urn:bg-int:rfc64:current-head';
+      const pGeneration = 'urn:bg-int:rfc64:generation';
+      const graphs = [projectionGraph, sealGraph, headGraph, stateGraph];
+      const input = {
+        sharedProjectionGraph: projectionGraph,
+        sharedProjectionQuads: [
+          { subject: `${author}:ka:1`, predicate: pValue, object: '"new-1"', graph: projectionGraph },
+          { subject: `${author}:ka:2`, predicate: pValue, object: '"new-2"', graph: projectionGraph },
+        ],
+        authorSealGraph: sealGraph,
+        authorSealSubject: seal,
+        authorSealQuads: [
+          { subject: seal, predicate: pValue, object: '"new-seal"', graph: sealGraph },
+        ],
+        currentHead: {
+          graphUri: headGraph,
+          subject: author,
+          predicate: pHead,
+          expectedObject: oldHead,
+          expectedQuads: [{ subject: author, predicate: pHead, object: oldHead, graph: headGraph }],
+          quads: [{ subject: author, predicate: pHead, object: newHead, graph: headGraph }],
+        },
+        subgraphMutationGeneration: {
+          graphUri: stateGraph,
+          subject: mutation,
+          predicate: pGeneration,
+          expectedObject: '"1"',
+          expectedQuads: [{ subject: mutation, predicate: pGeneration, object: '"1"', graph: stateGraph }],
+          quads: [{ subject: mutation, predicate: pGeneration, object: '"2"', graph: stateGraph }],
+        },
+        contextGraphMutationGeneration: {
+          graphUri: stateGraph,
+          subject: cgMutation,
+          predicate: pGeneration,
+          expectedObject: '"10"',
+          expectedQuads: [{ subject: cgMutation, predicate: pGeneration, object: '"10"', graph: stateGraph }],
+          quads: [{ subject: cgMutation, predicate: pGeneration, object: '"11"', graph: stateGraph }],
+        },
+        appliedSet: {
+          graphUri: stateGraph,
+          subject: appliedSet,
+          predicate: pValue,
+          expectedObject: oldHead,
+          expectedQuads: [{ subject: appliedSet, predicate: pValue, object: oldHead, graph: stateGraph }],
+          quads: [{ subject: appliedSet, predicate: pValue, object: newHead, graph: stateGraph }],
+        },
+      };
+
+      try {
+        await store.insert([
+          { subject: `${author}:ka:old`, predicate: pValue, object: '"old"', graph: projectionGraph },
+          { subject: seal, predicate: pValue, object: '"old-seal"', graph: sealGraph },
+          { subject: author, predicate: pHead, object: oldHead, graph: headGraph },
+          { subject: mutation, predicate: pGeneration, object: '"1"', graph: stateGraph },
+          { subject: cgMutation, predicate: pGeneration, object: '"10"', graph: stateGraph },
+          { subject: appliedSet, predicate: pValue, object: oldHead, graph: stateGraph },
+        ]);
+
+        const competingHead = `urn:bg-int:${RUN}:rfc64:head:competing`;
+        const competing = {
+          ...input,
+          currentHead: {
+            ...input.currentHead,
+            quads: [{ subject: author, predicate: pHead, object: competingHead, graph: headGraph }],
+          },
+          sharedProjectionQuads: [
+            { subject: `${author}:ka:competing`, predicate: pValue, object: '"competing"', graph: projectionGraph },
+          ],
+          authorSealQuads: [
+            { subject: seal, predicate: pValue, object: '"competing-seal"', graph: sealGraph },
+          ],
+          subgraphMutationGeneration: {
+            ...input.subgraphMutationGeneration,
+            quads: [{ subject: mutation, predicate: pGeneration, object: '"3"', graph: stateGraph }],
+          },
+          contextGraphMutationGeneration: {
+            ...input.contextGraphMutationGeneration,
+            quads: [{ subject: cgMutation, predicate: pGeneration, object: '"12"', graph: stateGraph }],
+          },
+          appliedSet: {
+            ...input.appliedSet,
+            quads: [{ subject: appliedSet, predicate: pValue, object: competingHead, graph: stateGraph }],
+          },
+        };
+        const results = await Promise.all([
+          store.rfc64AuthorCommitCasV1(input),
+          store.rfc64AuthorCommitCasV1(competing),
+        ]);
+        expect(results.sort()).toEqual(['committed', 'conflict']);
+        const head = await store.query(
+          `SELECT ?o WHERE { GRAPH <${headGraph}> { <${author}> <${pHead}> ?o } }`,
+        );
+        const winner = head.type === 'bindings' ? head.bindings[0]?.o : undefined;
+        expect([newHead, competingHead]).toContain(winner);
+        expect(await store.countQuads(projectionGraph)).toBe(winner === newHead ? 2 : 1);
+        const control = await store.query(
+          `SELECT ?seal ?subgraphGeneration ?contextGraphGeneration ?applied WHERE {
+            GRAPH <${sealGraph}> { <${seal}> <${pValue}> ?seal }
+            GRAPH <${stateGraph}> {
+              <${mutation}> <${pGeneration}> ?subgraphGeneration .
+              <${cgMutation}> <${pGeneration}> ?contextGraphGeneration .
+              <${appliedSet}> <${pValue}> ?applied .
+            }
+          }`,
+        );
+        expect(control.type === 'bindings' ? control.bindings : []).toEqual([
+          winner === newHead
+            ? {
+                seal: '"new-seal"',
+                subgraphGeneration: '"2"',
+                contextGraphGeneration: '"11"',
+                applied: newHead,
+              }
+            : {
+                seal: '"competing-seal"',
+                subgraphGeneration: '"3"',
+                contextGraphGeneration: '"12"',
+                applied: competingHead,
+              },
+        ]);
+      } finally {
+        await Promise.all(graphs.map((graph) => store.dropGraph(graph).catch(() => {})));
+      }
+    },
+    60_000,
+  );
+
+  it(
+    'executes compiler-shaped semantic records and rejects a same-digest different-version predecessor',
+    async () => {
+      const fixture = semanticAuthorCommitFixture();
+      const compiled = compileRfc64SemanticAuthorCommitV1(fixture.input);
+      const graphs = [...normalizeRfc64AuthorCommitCasV1(compiled).referencedGraphs];
+      try {
+        await store.insert([
+          ...semanticRows(fixture.unexpectedHead),
+          ...fixture.expectedTail.flatMap(semanticRows),
+        ]);
+        await expect(store.rfc64AuthorCommitCasV1(compiled)).resolves.toBe('conflict');
+        expect(await store.countQuads(fixture.projectionGraph)).toBe(0);
+        expect(await store.countQuads(fixture.sealGraph)).toBe(0);
+
+        await Promise.all(graphs.map((graph) => store.dropGraph(graph).catch(() => {})));
+        await store.insert([
+          ...semanticRows(fixture.expectedHead),
+          ...fixture.expectedTail.flatMap(semanticRows),
+        ]);
+        await expect(store.rfc64AuthorCommitCasV1(compiled)).resolves.toBe('committed');
+        expect(await store.countQuads(fixture.projectionGraph)).toBe(1);
+        expect(await store.countQuads(fixture.sealGraph)).toBe(14);
+      } finally {
+        await Promise.all(graphs.map((graph) => store.dropGraph(graph).catch(() => {})));
+      }
+    },
+    60_000,
+  );
 });
+
+function semanticAuthorCommitFixture(): Readonly<{
+  input: Rfc64SemanticAuthorCommitInputV1;
+  expectedHead: Extract<Rfc64SemanticRecordV1, { recordType: 'CurrentAuthorCatalogRefV1' }>;
+  unexpectedHead: Extract<Rfc64SemanticRecordV1, { recordType: 'CurrentAuthorCatalogRefV1' }>;
+  expectedTail: readonly Rfc64SemanticRecordV1[];
+  projectionGraph: string;
+  sealGraph: string;
+}> {
+  const networkId = 'otp:20430' as NetworkIdV1;
+  const contextGraphId = (
+    '0x0123456789abcdef0123456789abcdef01234567/99'
+  ) as ContextGraphIdV1;
+  const author = '0x89abcdef0123456789abcdef0123456789abcdef' as EvmAddressV1;
+  const digest = (value: string) => `0x${value.repeat(64)}` as Digest32V1;
+  const projectionGraph = deriveRfc64SharedProjectionGraphIriV1(
+    { contextGraphId, subGraphName: null },
+    assertCanonicalDeterministicUalV1(`did:dkg:${networkId}/${author}/7`),
+  );
+  const coordinate = Object.freeze({
+    contextGraphId,
+    subGraphName: null,
+    authorAddress: author,
+    assertionCoordinate: 'blazegraph-semantic-fixture',
+  }) as CanonicalGraphScopedAuthorSealCoordinateV1;
+  const placement = deriveCanonicalGraphScopedAuthorSealPlacementV1(coordinate);
+  const seal = Object.freeze({
+    assertedAtChainId: '20430',
+    assertedAtKav10Address: '0x4444444444444444444444444444444444444444',
+    assertionFinalizedAt: '2026-08-29T10:00:00.123Z',
+    assertionMerkleRoot: digest('e'),
+    assertionVersion: '1',
+    authorAddress: author,
+    authorAttestationR: digest('1'),
+    authorAttestationVS: digest('2'),
+    authorSchemeVersion: '1',
+    contentScopeVersion: '2',
+    kaUal: `did:dkg:${networkId}/${author}/7`,
+    privateMerkleRoot: null,
+    privateTripleCount: '0',
+    publicTripleCount: '1',
+    reservedKaId: ((BigInt(author) << 96n) | 7n).toString(),
+  }) as CanonicalGraphScopedAuthorSealV1;
+  const expectedHead = semanticRecord('CurrentAuthorCatalogRefV1', {
+    networkId,
+    contextGraphId,
+    governanceChainId: null,
+    governanceContractAddress: null,
+    ownershipTransitionDigest: null,
+    subGraphName: null,
+    authorAddress: author,
+    catalogEra: '1',
+    catalogVersion: '4',
+    catalogHeadDigest: digest('a'),
+  });
+  const nextHead = semanticRecord('CurrentAuthorCatalogRefV1', {
+    ...expectedHead.value,
+    catalogVersion: '5',
+    catalogHeadDigest: digest('b'),
+  });
+  const unexpectedHead = semanticRecord('CurrentAuthorCatalogRefV1', {
+    ...expectedHead.value,
+    catalogVersion: '3',
+  });
+  const expectedSubgraph = semanticRecord('SubgraphMutationGuardV1', {
+    networkId,
+    contextGraphId,
+    subGraphName: null,
+    generation: '4',
+  });
+  const nextSubgraph = semanticRecord('SubgraphMutationGuardV1', {
+    ...expectedSubgraph.value,
+    generation: '5',
+  });
+  const expectedContextGraph = semanticRecord('ContextGraphMutationGuardV1', {
+    networkId,
+    contextGraphId,
+    generation: '8',
+  });
+  const nextContextGraph = semanticRecord('ContextGraphMutationGuardV1', {
+    ...expectedContextGraph.value,
+    generation: '9',
+  });
+  const expectedApplied = semanticRecord('AppliedSubgraphSetRefV1', {
+    networkId,
+    contextGraphId,
+    generation: '8',
+    subgraphIndexEra: '1',
+    subgraphIndexVersion: '3',
+    subgraphCount: '1',
+    appliedDirectoryRootDigest: digest('c'),
+  });
+  const nextApplied = semanticRecord('AppliedSubgraphSetRefV1', {
+    ...expectedApplied.value,
+    generation: '9',
+    appliedDirectoryRootDigest: digest('d'),
+  });
+  return Object.freeze({
+    input: Object.freeze({
+      sharedProjectionGraph: projectionGraph,
+      sharedProjectionQuads: Object.freeze([{
+        subject: 'urn:test:blazegraph-semantic',
+        predicate: 'urn:test:value',
+        object: '"new"',
+        graph: projectionGraph,
+      }]),
+      authorSealGraph: placement.metaGraph,
+      authorSealSubject: placement.subject,
+      authorSealQuads: projectCanonicalGraphScopedAuthorSealRowsV1(seal, coordinate),
+      expectedCurrentHead: expectedHead,
+      nextCurrentHead: nextHead,
+      expectedSubgraphMutation: expectedSubgraph,
+      nextSubgraphMutation: nextSubgraph,
+      expectedContextGraphMutation: expectedContextGraph,
+      nextContextGraphMutation: nextContextGraph,
+      expectedAppliedSet: expectedApplied,
+      nextAppliedSet: nextApplied,
+    }),
+    expectedHead,
+    unexpectedHead,
+    expectedTail: Object.freeze([
+      expectedSubgraph,
+      expectedContextGraph,
+      expectedApplied,
+    ]),
+    projectionGraph,
+    sealGraph: placement.metaGraph,
+  });
+}
+
+function semanticRows(record: Rfc64SemanticRecordV1): Quad[] {
+  return projectRfc64SemanticRecordStoreRowsV1(record)
+    .map(renderRfc64SemanticStoreRowV1);
+}
+
+function semanticRecord<Type extends Rfc64SemanticRecordV1['recordType']>(
+  recordType: Type,
+  value: Extract<Rfc64SemanticRecordV1, { recordType: Type }>['value'],
+): Extract<Rfc64SemanticRecordV1, { recordType: Type }> {
+  return Object.freeze({ recordType, value: Object.freeze(value) }) as Extract<
+    Rfc64SemanticRecordV1,
+    { recordType: Type }
+  >;
+}

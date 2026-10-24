@@ -288,15 +288,15 @@ export async function publishManifest(
   });
 
   if (opts.autoShare !== false) {
-    try {
-      await opts.client.promoteAssertion({
-        contextGraphId: opts.contextGraphId,
-        assertionName: assertion,
-        subGraphName: 'meta',
-        entities: [mUri, ...Object.values(templateUris)],
-      });
-    } catch {
-      // Promote failure is non-fatal; manifest is in WM and can be promoted later.
+    const share = await opts.client.knowledgeAssetShare({
+      contextGraphId: opts.contextGraphId,
+      name: assertion,
+      subGraphName: 'meta',
+    });
+    if (!share.swmShared || !share.sealed || !share.publishReady) {
+      throw new Error(
+        'Manifest atomic share did not reach SWM as sealed and publish-ready',
+      );
     }
   }
 

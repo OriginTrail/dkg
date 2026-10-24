@@ -147,11 +147,28 @@ describe('verifySyncedData — collapsed P3.1 shape', () => {
     expect(res.meta).toContainEqual(q(lifecycle, `${DKG}rootEntity`, ROOT_A, META));
   });
 
-  it('collapsed KC without any rootEntity rows is still accepted on trust (genesis/system meta)', () => {
+  it('rejects unscoped merkle metadata in normal CGs instead of accepting it on trust', () => {
     const meta = [q(UAL, `${DKG}merkleRoot`, `"${'22'.repeat(32)}"`, META)];
     const res = verifyBoth(dataA, meta);
-    expect(res.rejected).toBe(0);
-    expect(res.data).toEqual(dataA);
+    expect(res.rejected).toBe(1);
+    expect(res.data).toEqual([]);
+    expect(res.meta).toEqual([]);
+  });
+
+  it('fails the whole batch when malformed legacy metadata cannot scope its data', () => {
+    const meta = [q(UAL, `${DKG}merkleRoot`, '"not-a-root"', META)];
+    const res = verifyBoth(dataA, meta);
+    expect(res.rejected).toBe(1);
+    expect(res.data).toEqual([]);
+    expect(res.meta).toEqual([]);
+  });
+
+  it('rejects normal-CG data paired only with non-integrity metadata', () => {
+    const meta = [q('urn:cg:config', `${DKG}name`, '"Config only"', META)];
+    const res = verifyBoth(dataA, meta);
+    expect(res.rejected).toBe(1);
+    expect(res.data).toEqual([]);
+    expect(res.meta).toEqual([]);
   });
 
   it('acceptUnverified (system context graphs) still passes everything through', () => {

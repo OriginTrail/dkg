@@ -1,0 +1,14 @@
+[run]
+branch = true
+source = hermes-plugin
+relative_files = true
+
+[report]
+precision = 2
+fail_under = 34
+
+[json]
+output = coverage-python/coverage.json
+
+[xml]
+output = coverage-python/coverage.xml

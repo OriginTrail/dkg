@@ -1,12 +1,6 @@
 export {
   DashboardDB,
-  SqliteMessageIdempotencyStore,
-  SqliteProtocolOutboxStore,
-  type SqliteProtocolOutboxStoreOptions,
-  SqliteSyncCheckpointStore,
-  SqliteChangelogCursorStore,
-  SqliteChangelogEraGuard,
-  SqliteKaNumberStore,
+  SCHEMA_VERSION,
   // Notifications-pane redesign (V16): activity-digest primitives shared
   // with the daemon's `assertion_activity` emitters + scoped read path.
   ACTIVITY_DIGEST_WINDOW_MS,
@@ -14,12 +8,29 @@ export {
   buildActivityDigestKey,
   parseActivityDigestKey,
 } from './db.js';
+// Protocol persistence lives in `@origintrail-official/dkg-node-store`. It is
+// re-exported here unchanged as a compatibility surface, so importers of this
+// package keep working (Phase 1 of the extraction moves the store classes,
+// not the SQLite file). The daemon imports them from node-store directly.
 export {
+  SqliteMessageIdempotencyStore,
+  SqliteProtocolOutboxStore,
+  type SqliteProtocolOutboxStoreOptions,
+  SqliteSyncCheckpointStore,
+  SqliteChangelogCursorStore,
+  SqliteChangelogEraGuard,
+  SqliteKaNumberStore,
   SqliteChainEventCursorStore,
+  SqliteContextGraphAuthorityIndexStore,
+  SqliteContextGraphAuthorityHistoryStore,
   SqliteContextGraphRegistryScanCursorStore,
-} from './chain-cursor-stores.js';
+  SqliteContextGraphStorageDiscoveryStore,
+  /** Durable side of the node's ONE chain log. Opaque: it interprets no topic. */
+  SqliteChainEventLogStore,
+} from '@origintrail-official/dkg-node-store';
 export type {
   DashboardDBOptions,
+  LogVolumePruneResult,
   MetricSnapshotRow,
   OperationRow,
   OperationPhaseRow,
@@ -32,6 +43,14 @@ export type {
   QueryHistoryRow,
   SavedQueryRow,
   ContextGraphSubscriptionRow,
+  ContextGraphReadinessProvenance,
+  StoredContextGraphJoinPolicy,
+  ContextGraphJoinPolicyAuditInput,
+  ContextGraphJoinPolicyRateReservationInput,
+  ContextGraphJoinPolicyRateReservationResult,
+  ContextGraphAutomaticApprovalCommitInput,
+  ContextGraphAutomaticApprovalRepairInput,
+  ContextGraphAutomaticApprovalRepairRecord,
   ContextGraphMemberPrincipalType,
   ContextGraphMemberStatus,
   ContextGraphMemberRow,
@@ -55,7 +74,7 @@ export { LogPushWorker } from './gelf-push-worker.js';
 export type { LogPushWorkerOptions } from './gelf-push-worker.js';
 export { OtlpLogWorker } from './otlp-log-worker.js';
 export type { OtlpLogWorkerOptions } from './otlp-log-worker.js';
-export { ChatMemoryManager } from './chat-memory.js';
+export { ChatMemoryManager, AGENT_CONTEXT_GRAPH, CHAT_TURNS_ASSERTION } from './chat-memory.js';
 export type {
   MemoryToolContext,
   MemoryStats,
@@ -70,6 +89,9 @@ export { resolveCapabilities } from './llm/capability-resolver.js';
 export type { LlmConfig, LlmChatRequest, LlmChatMessage, LlmStreamEvent, LlmCompletionResult, LlmCapabilities } from './llm/types.js';
 export {
   initTelemetry, shutdownTelemetry, isTelemetryConfigured,
+  // Flush-only hook for the daemon's terminal shutdown point: exports what has
+  // been recorded while leaving the provider live (shutdownTelemetry does not).
+  flushTelemetry, TERMINAL_FLUSH_BUDGET_MS,
   // Back-compat shims for the pre-#1317 telemetry API (no-ops / legacy config).
   recordGauge, setOperationSpan,
 } from './telemetry.js';

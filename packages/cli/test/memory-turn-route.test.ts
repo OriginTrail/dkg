@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
+import { SubGraphNotFoundError, SUB_GRAPH_NOT_FOUND_CODE } from '@origintrail-official/dkg-publisher';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 function fakeRes() {
   const res: any = { statusCode: 0, body: '', headers: {} as Record<string, string>, writableEnded: false };
@@ -58,8 +60,8 @@ function buildTurnCtx(body: unknown, agent: Record<string, any>, requestAgentAdd
     apiPortRef: { value: 0 },
     url,
     path: url.pathname,
-    requestToken: 'agent-token',
     requestAgentAddress,
+    authentication: requestAuthentication({ kind: 'agent', agentAddress: requestAgentAddress, token: 'agent-token' }),
     emitMemoryGraphChanged: vi.fn(),
     emitNotification: vi.fn(),
   } as unknown as RequestContext;
@@ -115,5 +117,42 @@ describe('/api/memory/turn route', () => {
       ]),
       { subGraphName: 'team-memory', agentAddress: requestAgentAddress },
     );
+  });
+
+  it('answers a turn into a sub-graph nobody holds with 400 SUB_GRAPH_NOT_FOUND, not 500 (#3293)', async () => {
+    const requestAgentAddress = '0x00000000000000000000000000000000000000aa';
+    const write = vi.fn(async () => undefined);
+    const agent = {
+      peerId: 'default-peer',
+      resolveAgentByToken: vi.fn((token: string | undefined) =>
+        token === 'agent-token' ? requestAgentAddress : undefined),
+      async listContextGraphs() {
+        return [{ id: 'cg', name: 'cg', subscribed: true, synced: true }];
+      },
+      async contextGraphExists(contextGraphId: string) {
+        return contextGraphId === 'cg';
+      },
+      assertion: {
+        create: vi.fn(async () => {
+          throw new SubGraphNotFoundError('cg', 'team-memory', 'none of the 1 peer(s) of the context graph asked holds it');
+        }),
+        write,
+      },
+    };
+    const { ctx, res } = buildTurnCtx({
+      contextGraphId: 'cg',
+      markdown: '# Agent lane turn',
+      subGraphName: 'team-memory',
+      turnId: 'turn-2',
+    }, agent, requestAgentAddress);
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toMatchObject({
+      code: SUB_GRAPH_NOT_FOUND_CODE,
+      error: expect.stringContaining('Sub-graph "team-memory" has not been registered in context graph "cg"'),
+    });
+    expect(write).not.toHaveBeenCalled();
   });
 });

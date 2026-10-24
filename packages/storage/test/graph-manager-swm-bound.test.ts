@@ -2,11 +2,16 @@ import { describe, it, expect } from 'vitest';
 import * as storageIndex from '../src/index.js';
 import {
   createTripleStore,
+  loadSharedMemoryQuadsForScope,
   loadSelectedSharedMemoryQuads,
   loadSharedMemorySliceWithKaBoundFallback,
+  canonicalSharedMemoryScopeWriteGraph,
+  resolveSharedMemoryScopeWriteGraph,
+  resolveSharedMemoryScopeGraphs,
   resolveSharedMemoryReadGraphs,
   type Quad,
   type SwmKaGraphBound,
+  SharedMemoryResultBudgetError,
 } from '../src/index.js';
 // The unsafe bounded primitives are deliberately NOT re-exported from `src/index.ts`
 // (pruning is not part of the package's public surface — see the API-surface test at
@@ -234,6 +239,86 @@ describe('resolveSharedMemoryReadGraphs — bound only prunes real SWM children 
 });
 
 describe('the generic SWM loader cannot be pruned (bound is not an option)', () => {
+  it('keeps deprecated replacement writes on an existing checksum alias without stale reads', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('named-exact-casing');
+    const root = 'urn:test:named:root';
+    const exact = `${swm}/${AUTHOR_A_MIXED}/7`;
+    const sameAuthorSibling = `${swm}/${AUTHOR_A_MIXED}/8`;
+    try {
+      await store.insert([
+        { subject: root, predicate: 'urn:p', object: '"bucket"', graph: swm },
+        { subject: root, predicate: 'urn:p', object: '"exact"', graph: exact },
+        { subject: root, predicate: 'urn:p', object: '"same-author-sibling"', graph: sameAuthorSibling },
+      ]);
+
+      const scope = {
+        kind: 'named-lifecycle',
+        identity: { agentAddress: AUTHOR_A, kaNumber: 7n },
+      } as const;
+      const quads = await loadSharedMemoryQuadsForScope(
+        store,
+        swm,
+        { rootEntities: [root] },
+        scope,
+      );
+      expect(quads.map((quad) => quad.object)).toEqual(['"exact"']);
+      expect(canonicalSharedMemoryScopeWriteGraph(swm, scope)).toBe(
+        `${swm}/${AUTHOR_A}/7`,
+      );
+      const replacementGraph = await resolveSharedMemoryScopeWriteGraph(store, swm, scope, {
+        source: 'test.deprecated-write-resolver',
+      });
+      expect(replacementGraph).toBe(exact);
+
+      await store.deleteByPattern({ graph: replacementGraph, subject: root });
+      await store.insert([
+        { subject: root, predicate: 'urn:p', object: '"replacement"', graph: replacementGraph },
+      ]);
+      const replaced = await loadSharedMemoryQuadsForScope(
+        store,
+        swm,
+        { rootEntities: [root] },
+        scope,
+      );
+      expect(replaced.map((quad) => quad.object)).toEqual(['"replacement"']);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('reads every legacy casing alias but never chooses a write target from store order', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('named-aliases');
+    const root = 'urn:test:named:aliases';
+    const upperAlias = `${swm}/${AUTHOR_A_MIXED.toUpperCase().replace('0X', '0x')}/7`;
+    const mixedAlias = `${swm}/${AUTHOR_A_MIXED}/7`;
+    const canonical = `${swm}/${AUTHOR_A}/7`;
+    const scope = {
+      kind: 'named-lifecycle',
+      identity: { agentAddress: AUTHOR_A_MIXED, kaNumber: 7n },
+    } as const;
+    try {
+      await store.insert([
+        { subject: root, predicate: 'urn:p', object: '"upper"', graph: upperAlias },
+        { subject: root, predicate: 'urn:p', object: '"mixed"', graph: mixedAlias },
+      ]);
+
+      const quads = await loadSharedMemoryQuadsForScope(
+        store,
+        swm,
+        { rootEntities: [root] },
+        scope,
+      );
+
+      expect(quads.map((quad) => quad.object).sort()).toEqual(['"mixed"', '"upper"']);
+      expect(canonicalSharedMemoryScopeWriteGraph(swm, scope)).toBe(canonical);
+    } finally {
+      await store.close();
+    }
+  });
+
+
   // `kaGraphBound` was removed from `LoadSelectedSharedMemoryQuadsOptions`, so the
   // four production callers — two of them merkle-DEFINING, one the ACK decline lane
   // — get a compile error if they try to prune. This pins the runtime half: even if
@@ -297,6 +382,13 @@ describe('the generic SWM loader cannot be pruned (bound is not an option)', () 
     expect(storageIndex).not.toHaveProperty('resolveKaBoundedSharedMemoryReadGraphs');
     // The safe, fallback-owning primitive IS public.
     expect(typeof storageIndex.loadSharedMemorySliceWithKaBoundFallback).toBe('function');
+    // Named publish flows get a scoped API, not a second range-shaped loader.
+    expect(typeof storageIndex.loadSharedMemoryQuadsForScope).toBe('function');
+    expect(storageIndex).not.toHaveProperty('loadGraphQualifiedSharedMemoryQuads');
+    expect(storageIndex).not.toHaveProperty('migrateSharedMemoryRootClosureToNamedLifecycle');
+    expect(typeof storageIndex.canonicalSharedMemoryScopeWriteGraph).toBe('function');
+    expect(typeof storageIndex.resolveSharedMemoryScopeWriteGraph).toBe('function');
+    expect(storageIndex).not.toHaveProperty('loadNamedKnowledgeAssetSharedMemoryQuads');
   });
 });
 
@@ -322,8 +414,10 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
       const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
         store, swm, { rootEntities: [r] },
         { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n },
-        SOURCES,
-        async () => (qs) => { accepts += 1; return qs; },
+        {
+          sources: SOURCES,
+          createAccept: async () => (qs) => { accepts += 1; return qs; },
+        },
       );
 
       // Bounded read excluded the out-of-range graph, and the accept predicate
@@ -352,12 +446,42 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
       const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
         store, swm, { rootEntities: [r] },
         { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n },
-        SOURCES,
-        async () => (qs) => (qs.some((q) => q.object === outObj) ? qs : null),
+        {
+          sources: SOURCES,
+          createAccept: async () => (qs) => (qs.some((q) => q.object === outObj) ? qs : null),
+        },
       );
 
       expect(accepted).not.toBeNull();
       expect(quads.map((q) => q.object).sort()).toEqual(['"in"', '"out"']);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('deprecated positional options preserve bounded widening behavior', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('fb-legacy');
+    const root = 'urn:fb:legacy';
+    const widenedObject = '"widened"';
+    try {
+      await store.insert([
+        { subject: root, predicate: 'urn:p', object: '"bounded"', graph: `${swm}/${AUTHOR_A_MIXED}/7` },
+        { subject: root, predicate: 'urn:p', object: widenedObject, graph: `${swm}/${AUTHOR_B}/12` },
+      ]);
+
+      const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
+        store,
+        swm,
+        { rootEntities: [root] },
+        { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n },
+        SOURCES,
+        async () => (candidate) =>
+          candidate.some((quad) => quad.object === widenedObject) ? candidate : null,
+      );
+
+      expect(quads.map((quad) => quad.object).sort()).toEqual(['"bounded"', widenedObject]);
+      expect(accepted).toEqual(quads);
     } finally {
       await store.close();
     }
@@ -377,13 +501,65 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
       const { quads } = await loadSharedMemorySliceWithKaBoundFallback(
         store, swm, { rootEntities: [r] },
         undefined,
-        SOURCES,
-        async () => (qs) => { accepts += 1; return qs; },
+        {
+          sources: SOURCES,
+          createAccept: async () => (qs) => { accepts += 1; return qs; },
+        },
       );
 
       // Unbounded ⇒ both authors read; accept applied exactly once.
       expect(quads.map((q) => q.object).sort()).toEqual(['"a"', '"b"']);
       expect(accepts).toBe(1);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+describe('bounded SWM result materialization', () => {
+  it('rejects before retaining a result beyond the configured row budget', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('result-budget');
+    const root = 'urn:budget:root';
+    try {
+      await store.insert([
+        { subject: root, predicate: 'urn:p:1', object: '"one"', graph: swm },
+        { subject: root, predicate: 'urn:p:2', object: '"two"', graph: swm },
+      ]);
+
+      await expect(loadSelectedSharedMemoryQuads(
+        store,
+        swm,
+        { rootEntities: [root] },
+        { resultBudget: { pageRows: 1, maxRows: 1, maxBytesEstimate: 1024 * 1024 } },
+      )).rejects.toBeInstanceOf(SharedMemoryResultBudgetError);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('rejects a large retained result by bytes even while below the row budget', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('result-byte-budget');
+    const root = 'urn:budget:large-root';
+    try {
+      await store.insert([{
+        subject: root,
+        predicate: 'urn:p:large',
+        object: `"${'x'.repeat(2_048)}"`,
+        graph: swm,
+      }]);
+
+      await expect(loadSelectedSharedMemoryQuads(
+        store,
+        swm,
+        { rootEntities: [root] },
+        { resultBudget: { pageRows: 10, maxRows: 100, maxBytesEstimate: 128 } },
+      )).rejects.toMatchObject({
+        name: 'SharedMemoryResultBudgetError',
+        reason: 'bytes',
+        limit: 128,
+      });
     } finally {
       await store.close();
     }

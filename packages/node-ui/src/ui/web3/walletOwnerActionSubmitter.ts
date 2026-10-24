@@ -8,10 +8,8 @@
 import {
   erc20Abi,
   formatUnits,
-  getAddress,
   parseUnits,
   type Address,
-  type Chain,
   type Hex,
   type TransactionReceipt,
 } from 'viem';
@@ -23,35 +21,27 @@ import {
   type PcaRemoveAgentResult,
   type PcaTopUpResult,
 } from '../api.js';
-import { useWalletStore, type WalletState } from '../stores/wallet.js';
 import {
-  publicClientFor as defaultPublicClientFor,
-  synthesizeChain,
-  walletClientFromProvider as defaultWalletClientFromProvider,
-} from './clients.js';
-import { numericChainId } from './chainId.js';
-import type { Eip1193Provider } from './eip6963.js';
+  browserWalletAddress,
+  loadBrowserWalletRuntime,
+  submitBrowserWalletTransaction,
+  type BrowserWalletClient,
+  type BrowserWalletConnectionPolicy,
+  type BrowserWalletPublicClient,
+  type BrowserWalletRuntimeContext,
+  type BrowserWalletRuntimeDeps,
+  type BrowserWalletRuntimeState,
+} from './browserWalletTransaction.js';
 import { extractAccountId, publishingConvictionNftAbi } from './pcaContract.js';
-import { WalletReceiptRevertedError, WalletReceiptWaitError, WalletTxStepError } from './walletTxError.js';
+import { WalletReceiptWaitError } from './walletTxError.js';
 import type { OwnerActionSubmitter } from '../pca/ownerActions.js';
-import { eqAddress } from '../pca/address.js';
+import { useWalletStore } from '../stores/wallet.js';
 
 const MAX_UINT72 = (1n << 72n) - 1n;
 const MAX_UINT96 = (1n << 96n) - 1n;
 
-type WalletRuntimeState = Pick<
-  WalletState,
-  'provider' | 'address' | 'chainId' | 'expectedChainId' | 'bootstrap'
->;
-
-export interface MinimalPublicClient {
-  readContract: (args: any) => Promise<unknown>;
-  waitForTransactionReceipt: (args: { hash: Hex }) => Promise<TransactionReceipt>;
-}
-
-export interface MinimalWalletClient {
-  writeContract: (args: any) => Promise<Hex>;
-}
+export type MinimalPublicClient = BrowserWalletPublicClient;
+export type MinimalWalletClient = BrowserWalletClient;
 
 export type WalletTxProgressState = 'skipped' | 'active' | 'submitted' | 'confirmed' | 'failed';
 
@@ -62,20 +52,13 @@ export interface WalletTxProgressEvent {
   error?: unknown;
 }
 
-export interface WalletOwnerActionSubmitterDeps {
-  getWalletState?: () => WalletRuntimeState;
-  publicClientFor?: (chainId: string | number, rpcUrls: string[]) => MinimalPublicClient;
-  walletClientFromProvider?: (chain: Chain, provider: Eip1193Provider) => MinimalWalletClient;
+export interface WalletOwnerActionSubmitterDeps extends Partial<BrowserWalletRuntimeDeps<PcaContracts>> {
   onProgress?: (event: WalletTxProgressEvent) => void;
 }
 
-interface WalletTxContext {
-  provider: Eip1193Provider;
+interface WalletTxContext extends BrowserWalletRuntimeContext<PcaContracts> {
+  runtimeDeps: BrowserWalletRuntimeDeps<PcaContracts>;
   owner: Address;
-  expectedChainId: number;
-  chain: Chain;
-  publicClient: MinimalPublicClient;
-  walletClient: MinimalWalletClient;
   nft: Address;
   token: Address;
 }
@@ -101,16 +84,8 @@ export class WalletOwnerActionAbortError extends WalletOwnerActionSubmitterError
   }
 }
 
-function currentState(deps: WalletOwnerActionSubmitterDeps): WalletRuntimeState {
-  return deps.getWalletState?.() ?? useWalletStore.getState();
-}
-
 function normalizeAddress(value: string, field: string): Address {
-  try {
-    return getAddress(value) as Address;
-  } catch {
-    throw new WalletOwnerActionSubmitterError(`${field} must be a valid EVM address.`);
-  }
+  return browserWalletAddress(value, field, (message) => new WalletOwnerActionSubmitterError(message));
 }
 
 function parseAccountId(accountId: string): bigint {
@@ -171,75 +146,45 @@ function blockNumberOf(receipt: Pick<TransactionReceipt, 'blockNumber'>): number
   return receipt.blockNumber == null ? undefined : Number(receipt.blockNumber);
 }
 
+const connectionPolicy: BrowserWalletConnectionPolicy = {
+  error: (message) => new WalletOwnerActionSubmitterError(message),
+  unavailableError: (message) => new WalletOwnerActionUnavailableError(message),
+  abortedError: (message) => new WalletOwnerActionAbortError(message),
+  messages: {
+    disconnected: 'Connect the PCA owner wallet before signing.',
+    wrongNetwork: "Switch the connected wallet to this node's PCA network.",
+    providerChanged: 'Wallet provider changed before the signature prompt. Reconnect and retry.',
+    addressChanged: 'Connected wallet changed before the signature prompt. Reconnect the owner wallet.',
+    networkChanged: 'Wallet network changed before the signature prompt. Switch back and retry.',
+    accountChanged: 'Wallet account changed before the signature prompt. Reconnect the owner wallet.',
+  },
+};
+
 function loadContext(deps: WalletOwnerActionSubmitterDeps): WalletTxContext {
-  const state = currentState(deps);
-  if (!state.provider || !state.address) {
-    throw new WalletOwnerActionUnavailableError('Connect the PCA owner wallet before signing.');
+  const getWalletState = deps.getWalletState ?? (() => {
+    const { provider, address, chainId } = useWalletStore.getState();
+    return { provider, address, chainId } satisfies BrowserWalletRuntimeState;
+  });
+  const bootstrap = deps.bootstrap ?? useWalletStore.getState().bootstrap;
+  if (!bootstrap) {
+    throw connectionPolicy.unavailableError('PCA contract addresses are not bootstrapped yet.');
   }
-  if (!state.bootstrap) {
-    throw new WalletOwnerActionUnavailableError('PCA contract addresses are not bootstrapped yet.');
-  }
-  const expectedChainId = numericChainId(state.bootstrap.chainId);
-  if (state.chainId !== expectedChainId) {
-    throw new WalletOwnerActionUnavailableError("Switch the connected wallet to this node's PCA network.");
-  }
-  const owner = normalizeAddress(state.address, 'Connected wallet');
-  const nft = normalizeAddress(state.bootstrap.nft, 'PCA NFT contract');
-  const token = normalizeAddress(state.bootstrap.token, 'TRAC token contract');
-  const chain = synthesizeChain(state.bootstrap.chainId, state.bootstrap.rpcUrls);
-  const publicClient = deps.publicClientFor?.(state.bootstrap.chainId, state.bootstrap.rpcUrls)
-    ?? defaultPublicClientFor(state.bootstrap.chainId, state.bootstrap.rpcUrls);
-  const walletClient = deps.walletClientFromProvider?.(chain, state.provider)
-    ?? defaultWalletClientFromProvider(chain, state.provider);
-  return {
-    provider: state.provider,
-    owner,
-    expectedChainId,
-    chain,
-    publicClient,
-    walletClient,
-    nft,
-    token,
+  const runtimeDeps: BrowserWalletRuntimeDeps<PcaContracts> = {
+    bootstrap,
+    getWalletState,
+    ...(deps.publicClientFor ? { publicClientFor: deps.publicClientFor } : {}),
+    ...(deps.walletClientFromProvider
+      ? { walletClientFromProvider: deps.walletClientFromProvider }
+      : {}),
   };
-}
-
-async function assertStillConnected(ctx: WalletTxContext, deps: WalletOwnerActionSubmitterDeps): Promise<void> {
-  const state = currentState(deps);
-  if (state.provider !== ctx.provider) {
-    throw new WalletOwnerActionAbortError('Wallet provider changed before the signature prompt. Reconnect and retry.');
-  }
-  if (!eqAddress(state.address, ctx.owner)) {
-    throw new WalletOwnerActionAbortError('Connected wallet changed before the signature prompt. Reconnect the owner wallet.');
-  }
-  if (state.chainId !== ctx.expectedChainId) {
-    throw new WalletOwnerActionAbortError('Wallet network changed before the signature prompt. Switch back and retry.');
-  }
-
-  const accounts = (await ctx.provider.request({ method: 'eth_accounts' })) as string[];
-  if (!eqAddress(accounts?.[0], ctx.owner)) {
-    throw new WalletOwnerActionAbortError('Wallet account changed before the signature prompt. Reconnect the owner wallet.');
-  }
-  const chainHex = (await ctx.provider.request({ method: 'eth_chainId' })) as string;
-  if (parseInt(chainHex, 16) !== ctx.expectedChainId) {
-    throw new WalletOwnerActionAbortError('Wallet network changed before the signature prompt. Switch back and retry.');
-  }
-}
-
-async function waitForSuccess(
-  ctx: WalletTxContext,
-  hash: Hex,
-  step: 'approve' | 'action',
-): Promise<TransactionReceipt> {
-  let receipt: TransactionReceipt;
-  try {
-    receipt = await ctx.publicClient.waitForTransactionReceipt({ hash });
-  } catch (cause) {
-    throw new WalletReceiptWaitError(hash, cause, step);
-  }
-  if (receipt.status !== 'success') {
-    throw new WalletReceiptRevertedError(hash);
-  }
-  return receipt;
+  const runtime = loadBrowserWalletRuntime(runtimeDeps, connectionPolicy);
+  return {
+    ...runtime,
+    runtimeDeps,
+    owner: runtime.account,
+    nft: normalizeAddress(runtime.bootstrap.nft, 'PCA NFT contract'),
+    token: normalizeAddress(runtime.bootstrap.token, 'TRAC token contract'),
+  };
 }
 
 async function allowance(ctx: WalletTxContext): Promise<bigint> {
@@ -260,30 +205,26 @@ async function approveExactIfNeeded(
     deps.onProgress?.({ step: 'approve', state: 'skipped' });
     return;
   }
-  await assertStillConnected(ctx, deps);
-  deps.onProgress?.({ step: 'approve', state: 'active' });
-  let hash: Hex;
-  try {
-    hash = await ctx.walletClient.writeContract({
-      account: ctx.owner,
+  await submitBrowserWalletTransaction(
+    ctx,
+    ctx.runtimeDeps,
+    connectionPolicy,
+    walletClient => walletClient.writeContract({
+      account: ctx.account,
       chain: ctx.chain,
       address: ctx.token,
       abi: erc20Abi,
       functionName: 'approve',
       args: [ctx.nft, amount],
-    });
-  } catch (cause) {
-    deps.onProgress?.({ step: 'approve', state: 'failed', error: cause });
-    throw new WalletTxStepError('approve', cause);
-  }
-  deps.onProgress?.({ step: 'approve', state: 'submitted', txHash: hash });
-  try {
-    await waitForSuccess(ctx, hash, 'approve');
-  } catch (cause) {
-    deps.onProgress?.({ step: 'approve', state: 'failed', txHash: hash, error: cause });
-    throw cause;
-  }
-  deps.onProgress?.({ step: 'approve', state: 'confirmed', txHash: hash });
+    }),
+    'approve',
+    {
+      signing: () => deps.onProgress?.({ step: 'approve', state: 'active' }),
+      submitted: (txHash) => deps.onProgress?.({ step: 'approve', state: 'submitted', txHash }),
+      confirmed: (txHash) => deps.onProgress?.({ step: 'approve', state: 'confirmed', txHash }),
+      failed: (error, txHash) => deps.onProgress?.({ step: 'approve', state: 'failed', txHash, error }),
+    },
+  );
   if ((await allowance(ctx)) < amount) {
     throw new WalletOwnerActionSubmitterError('TRAC approval confirmed but allowance is still too low.');
   }
@@ -292,34 +233,31 @@ async function approveExactIfNeeded(
 async function writePcaContract(
   ctx: WalletTxContext,
   deps: WalletOwnerActionSubmitterDeps,
-  functionName: 'createAccount' | 'topUp' | 'registerAgent' | 'deregisterAgent',
-  args: readonly unknown[],
+  request:
+    | { functionName: 'createAccount'; args: readonly [bigint, bigint] }
+    | { functionName: 'topUp'; args: readonly [bigint, bigint] }
+    | { functionName: 'registerAgent'; args: readonly [bigint, Address] }
+    | { functionName: 'deregisterAgent'; args: readonly [bigint, Address] },
 ): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
-  await assertStillConnected(ctx, deps);
-  deps.onProgress?.({ step: 'action', state: 'active' });
-  let hash: Hex;
-  try {
-    hash = await ctx.walletClient.writeContract({
-      account: ctx.owner,
+  return submitBrowserWalletTransaction(
+    ctx,
+    ctx.runtimeDeps,
+    connectionPolicy,
+    walletClient => walletClient.writeContract({
+      account: ctx.account,
       chain: ctx.chain,
       address: ctx.nft,
       abi: publishingConvictionNftAbi,
-      functionName,
-      args,
-    });
-  } catch (cause) {
-    deps.onProgress?.({ step: 'action', state: 'failed', error: cause });
-    throw new WalletTxStepError('action', cause);
-  }
-  deps.onProgress?.({ step: 'action', state: 'submitted', txHash: hash });
-  try {
-    const receipt = await waitForSuccess(ctx, hash, 'action');
-    deps.onProgress?.({ step: 'action', state: 'confirmed', txHash: hash });
-    return { hash, receipt };
-  } catch (cause) {
-    deps.onProgress?.({ step: 'action', state: 'failed', txHash: hash, error: cause });
-    throw cause;
-  }
+      ...request,
+    }),
+    'action',
+    {
+      signing: () => deps.onProgress?.({ step: 'action', state: 'active' }),
+      submitted: (txHash) => deps.onProgress?.({ step: 'action', state: 'submitted', txHash }),
+      confirmed: (txHash) => deps.onProgress?.({ step: 'action', state: 'confirmed', txHash }),
+      failed: (error, txHash) => deps.onProgress?.({ step: 'action', state: 'failed', txHash, error }),
+    },
+  );
 }
 
 /**
@@ -336,7 +274,10 @@ export function walletOwnerActionSubmitter(
       const amount = parsePositiveTokenAmount(args.tokens, 'tokens');
       const ctx = loadContext(deps);
       await approveExactIfNeeded(ctx, deps, amount);
-      const { hash, receipt } = await writePcaContract(ctx, deps, 'createAccount', [amount, primaryNode]);
+      const { hash, receipt } = await writePcaContract(ctx, deps, {
+        functionName: 'createAccount',
+        args: [amount, primaryNode],
+      });
       let accountId: string;
       try {
         accountId = extractAccountId(receipt, ctx.nft, ctx.owner).toString();
@@ -358,7 +299,10 @@ export function walletOwnerActionSubmitter(
       const id = parseAccountId(accountId);
       const agent = normalizeAddress(address, 'Publishing wallet');
       const ctx = loadContext(deps);
-      const { hash, receipt } = await writePcaContract(ctx, deps, 'registerAgent', [id, agent]);
+      const { hash, receipt } = await writePcaContract(ctx, deps, {
+        functionName: 'registerAgent',
+        args: [id, agent],
+      });
       return {
         accountId,
         agent,
@@ -373,7 +317,10 @@ export function walletOwnerActionSubmitter(
       const id = parseAccountId(accountId);
       const agent = normalizeAddress(address, 'Publishing wallet');
       const ctx = loadContext(deps);
-      const { hash, receipt } = await writePcaContract(ctx, deps, 'deregisterAgent', [id, agent]);
+      const { hash, receipt } = await writePcaContract(ctx, deps, {
+        functionName: 'deregisterAgent',
+        args: [id, agent],
+      });
       return {
         accountId,
         agent,
@@ -388,7 +335,10 @@ export function walletOwnerActionSubmitter(
       const amount = parsePositiveTokenAmount(tokens, 'tokens');
       const ctx = loadContext(deps);
       await approveExactIfNeeded(ctx, deps, amount);
-      const { hash, receipt } = await writePcaContract(ctx, deps, 'topUp', [id, amount]);
+      const { hash, receipt } = await writePcaContract(ctx, deps, {
+        functionName: 'topUp',
+        args: [id, amount],
+      });
       // H-D must persist/reconcile by this top-up txHash. Unlike create, topUp
       // mints no NFT and has no accountId extraction path.
       return {

@@ -33,9 +33,12 @@ export function AgentTabMenu(props: {
   statusLabel: string;
   statusDotClass: string;
   refreshBusy: boolean;
+  clearBusy?: boolean;
   canDisconnect: boolean;
+  canClearSession?: boolean;
   onRefresh: () => void;
   onDisconnect: () => void;
+  onClearSession?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   // Default left-anchored. After the popover opens we measure whether it
@@ -171,6 +174,20 @@ export function AgentTabMenu(props: {
           >
             {props.refreshBusy ? 'Refreshing…' : 'Refresh'}
           </button>
+          {props.canClearSession && (
+            <button
+              type="button"
+              role="menuitem"
+              className="v10-agent-tab-menu-item"
+              disabled={props.clearBusy}
+              onClick={() => {
+                closeAndReturnFocus();
+                props.onClearSession?.();
+              }}
+            >
+              {props.clearBusy ? 'Clearing…' : 'Clear session'}
+            </button>
+          )}
           {props.canDisconnect && (
             <button
               type="button"

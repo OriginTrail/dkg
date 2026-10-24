@@ -1,3 +1,5 @@
+import { isPublicSnapshotMode } from '@origintrail-official/dkg-agent/public-snapshot-mode';
+import { handleGenuiRender } from './query-genui.js';
 // daemon/routes/query.ts
 //
 // Route handlers for SPARQL query, GenUI render, catchup-status, verify, endorse, CCL policy + eval.
@@ -17,6 +19,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import { respondToQueryFailure } from "./query-error.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFile,
@@ -57,7 +60,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, classifySparqlOperation } from '@origintrail-official/dkg-core';
 import {
   findReservedSubjectPrefix,
   isSkolemizedUri,
@@ -69,7 +72,6 @@ import {
   handleNodeUIRequest,
   ChatMemoryManager,
   LogPushWorker,
-  LlmClient,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
 import {
@@ -106,9 +108,17 @@ import {
   slotEntryPoint,
   CLI_NPM_PACKAGE,
 } from '../../config.js';
+import {
+  type ApiQueryPriority,
+} from '../api-query-priority.js';
+export {
+  configureApiQueryPriority,
+  resolveApiQueryPriority,
+} from '../api-query-priority.js';
+export type { ApiQueryPriority } from '../api-query-priority.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { authenticatedAgentAddress, canAdministerNode, loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -185,14 +195,12 @@ import {
   parseRequiredSignatures,
   normalizeDetectedContentType,
   currentBundledMarkItDownAssetName,
-  bindingValue,
   carryForwardBundledMarkItDownBinary,
 } from '../manifest.js';
 import {
   resolveNameToPeerId,
   jsonResponse,
   safeDecodeURIComponent,
-  safeParseJson,
   validateOptionalSubGraphName,
   validateRequiredContextGraphId,
   validateEntities,
@@ -212,12 +220,14 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
   classifyClientError,
   sanitizeRevertMessage,
+  respondIfStoreUnavailable,
+  isContextGraphReadAuthorityUnavailable,
+  respondIfContextGraphReadAuthorityUnavailable,
 } from '../http-utils.js';
 import {
   normalizeRepo,
@@ -322,7 +332,17 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import { actorFromRequestContext, type RequestContext } from './context.js';
+import { mayFollowOnChainIdToRow } from '../context-graph-on-chain-id-gate.js';
+import {
+  admitContextGraphFollow,
+  type ContextGraphFollowCaller,
+} from '../context-graph-subscription-admission.js';
+import {
+  API_QUERY_CALLER_DISCONNECTED,
+  createStoreQueryRequestLifecycle,
+  type StoreQueryRequestLifecycle,
+} from '../store-query-lifecycle.js';
 
 
 // Keep these in sync with VerifyCollector's hard enforcement in
@@ -330,6 +350,49 @@ import type { RequestContext } from './context.js';
 // HTTP input is rejected before the agent starts VERIFY work.
 const VERIFY_COLLECTION_TIMEOUT_MIN_MS = 1_000;
 const VERIFY_COLLECTION_TIMEOUT_MAX_MS = 30 * 60 * 1000;
+export interface ApiQueryRequestLifecycle extends StoreQueryRequestLifecycle {
+  readonly priority: ApiQueryPriority;
+  readonly source: 'api.query';
+}
+
+/**
+ * Own the HTTP-disconnect signal and the exact store-admission options passed
+ * by `/api/query`. Exported so the route boundary can be tested without
+ * replacing the real query engine with a hand-typed error stub.
+ */
+export function createApiQueryRequestLifecycle(
+  req: IncomingMessage,
+  res: ServerResponse,
+): ApiQueryRequestLifecycle {
+  return createStoreQueryRequestLifecycle(req, res, 'api.query') as ApiQueryRequestLifecycle;
+}
+
+type LegacyApiQueryResult = {
+  bindings: Array<Record<string, string>>;
+  quads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
+};
+
+export type PublicApiQueryResult = import('@origintrail-official/dkg-core').PublicQueryResult<
+  Record<string, string>,
+  { subject: string; predicate: string; object: string; graph: string }
+>;
+
+/** Normalize the legacy engine shape at the public daemon boundary. */
+export function normalizePublicApiQueryResult(
+  sparql: string,
+  result: LegacyApiQueryResult,
+): PublicApiQueryResult {
+  const operation = classifySparqlOperation(sparql);
+  if (operation.kind === 'read' && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE')) {
+    return { type: 'quads', quads: result.quads ?? [], bindings: [] };
+  }
+  if (operation.kind === 'read' && operation.form === 'ASK') {
+    const raw = result.bindings[0]?.result;
+    const value = String(raw).toLowerCase() === 'true';
+    return { type: 'boolean', value, bindings: [{ result: String(value) }] };
+  }
+  return { type: 'bindings', bindings: result.bindings };
+}
 
 function parseVerifyTimeoutMs(
   raw: unknown,
@@ -356,6 +419,59 @@ function parseVerifyTimeoutMs(
   return { value };
 }
 
+/**
+ * The latest catch-up job for a Context Graph id that `caller` may see. The
+ * id as given wins; an on-chain id (`32`, `#32`) then finds the job of the row
+ * it names, under its cleartext id or its name hash (adoption can move a job
+ * between the two). A job names its graph, so a job that names a cleartext id
+ * the caller did not give is returned only to a caller who may follow the id
+ * there: an on-chain id that finds a cleartext row, or a name hash this node
+ * resolved. A refusal returns `undefined`, which the route answers exactly as
+ * an id with no job.
+ */
+export async function latestCatchupJobIdFor(
+  agent: DKGAgent,
+  catchupTracker: CatchupTracker,
+  contextGraphId: string,
+  caller: ContextGraphFollowCaller,
+): Promise<string | undefined> {
+  const direct = catchupTracker.latestByContextGraph.get(contextGraphId);
+  if (direct !== undefined) {
+    // A job found by a resolved name hash names the cleartext id: the one it
+    // continued under, or, once the hash resolved, the one its identity note
+    // reports. A lookup by the cleartext id itself follows nothing.
+    const cleartextId = catchupTracker.jobs.get(direct)?.resolvedContextGraphId
+      ?? agent.resolveContextGraphIdAlias?.(contextGraphId)
+      ?? null;
+    if (cleartextId === null || cleartextId === contextGraphId) return direct;
+    return await admitContextGraphFollow(agent, cleartextId, caller) === 'allowed' ? direct : undefined;
+  }
+  const lookup = agent.lookupContextGraphOnChainIdReference?.(contextGraphId);
+  if (lookup?.kind !== 'held') return undefined;
+  const jobId = catchupTracker.latestByContextGraph.get(lookup.contextGraphId)
+    ?? catchupTracker.latestByContextGraph.get(lookup.nameHash);
+  if (jobId === undefined) return undefined;
+  return await mayFollowOnChainIdToRow(agent, lookup, caller) ? jobId : undefined;
+}
+
+/**
+ * Whether `caller` may read `job` by its job id. The id is no proof: while the
+ * name hash a job was created under is unresolved, any caller can learn it.
+ * Once the job names a cleartext id other than the one it was created under,
+ * only a caller who may follow the hash to that id sees the job. A refusal is
+ * answered exactly as an unknown job id.
+ */
+async function mayReadCatchupJobById(
+  agent: DKGAgent,
+  job: CatchupJob,
+  caller: ContextGraphFollowCaller,
+): Promise<boolean> {
+  const cleartextId = job.resolvedContextGraphId
+    ?? agent.resolveContextGraphIdAlias?.(job.contextGraphId)
+    ?? null;
+  if (cleartextId === null || cleartextId === job.contextGraphId) return true;
+  return await admitContextGraphFollow(agent, cleartextId, caller) === 'allowed';
+}
 
 export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
   const {
@@ -363,7 +479,6 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     res,
     agent,
     publisherControl,
-    config,
     startedAt,
     dashDb,
     opWallets,
@@ -380,13 +495,12 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     assertionImportLocks,
     vectorStore,
     embeddingProvider,
-    validTokens,
     apiHost,
     apiPortRef,
     url,
     path,
-    requestToken,
     requestAgentAddress,
+    authentication,
     emitMemoryGraphChanged,
   } = ctx;
 
@@ -397,7 +511,19 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     const body = await readBody(req);
     const parsed = JSON.parse(body);
     const sparql = parsed.sparql;
-    const contextGraphId = parsed.contextGraphId;
+    // `all` is the legacy CLI/UI spelling for an unscoped query. Treating it
+    // as a real Context Graph id sends the request through the chain-backed
+    // private-graph authorizer before the SPARQL parser runs. Besides being
+    // semantically wrong, that made malformed-query HTTP status depend on an
+    // unrelated authority RPC finishing first. The existing unscoped agent
+    // path owns dataset privacy (including private-CG exclusion), so normalize
+    // only this exact compatibility sentinel at the route boundary.
+    const contextGraphId = parsed.contextGraphId === 'all'
+      ? undefined
+      : parsed.contextGraphId;
+    if (parsed.chainEvidenceMode !== undefined && !isPublicSnapshotMode(parsed.chainEvidenceMode)) {
+      return jsonResponse(res, 400, { error: 'Invalid chainEvidenceMode; expected core-cache or rpc-only' });
+    }
     const graphSuffix = parsed.graphSuffix;
     const includeSharedMemory =
       parsed.includeSharedMemory ?? parsed.includeWorkspace;
@@ -478,6 +604,9 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       details: { sparql: sparql.slice(0, 200) },
     });
     tracker.startPhase(ctx, "parse");
+    // Declared outside the try so the catch can tell a caller abort apart from
+    // a genuine server-side failure.
+    let queryLifecycle: ApiQueryRequestLifecycle | undefined;
     try {
       tracker.completePhase(ctx, "parse");
       tracker.startPhase(ctx, "execute");
@@ -493,63 +622,14 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       // in the body). `resolveAgentByToken` returns `undefined` for
       // node-level tokens, so only genuine agent-scoped identities
       // ever reach the A-1 guard.
-      const callerAgentAddress = requestToken
-        ? agent.resolveAgentByToken(requestToken)
-        : undefined;
-      // A-1 follow-up review (iteration 2): close the auth-disabled WM
-      // hole WITHOUT regressing existing node-token clients.
-      //
-      // When we reach this line with `callerAgentAddress === undefined`,
-      // the caller is one of:
-      //
-      //   (a) node-level admin (`~/.dkg/auth.token`, a token present in
-      //       `validTokens`). Admin is already trusted to run as any
-      //       local agent — `packages/adapter-openclaw` relies on this
-      //       by passing a session-specific `agentAddress` alongside the
-      //       admin token. Keep the legacy "skip the A-1 guard" here.
-      //
-      //   (b) unauthenticated (auth disabled at daemon level, OR no
-      //       Authorization header, OR a bogus / mismatched bearer that
-      //       the auth middleware never validated because `authEnabled`
-      //       is false). This is the hole Codex flagged: a raw
-      //       `Authorization: Bearer junk` used to set `requestToken`
-      //       truthy, sliding past a `!requestToken` check and letting
-      //       foreign WM reads through.
-      //
-      //   (c) auth-enabled + rejected — we never reach this line
-      //       because `httpAuthGuard` has already 401'd the request.
-      //
-      // Gate the 403 on "not a known admin token" (i.e. the caller is
-      // not in `validTokens`), which fails closed for (b) regardless of
-      // what garbage they put in the header, and leaves (a) alone.
-      //
-      // Codex PR #242 iter-8: `validTokens` contains BOTH the
-      // node-level admin token (`~/.dkg/auth.token`) AND any
-      // per-agent tokens the node has issued. Treating every
-      // validToken as "admin" means an authenticated agent could
-      // use its OWN token to skip the A-1 guard and read another
-      // local agent's WM via `agentAddress`. Restrict the admin
-      // bypass to tokens that are NOT bound to a specific agent
-      // (`resolveAgentByToken(token) === undefined`), which is the
-      // current signal for "node-level / admin-scoped".
-      //
-      // Codex PR #242 iter-8 re-review: the A-1 fallback 403 must
-      // also NOT fire for authenticated agent callers. An agent
-      // querying its OWN WM (`callerAgentAddress === agentAddress`)
-      // was previously being rejected here unless the target happened
-      // to be the node default / peerId alias, and genuine cross-agent
-      // reads were surfacing as a 403 (leaking existence) instead of
-      // the intended silent empty-per-kind result from
-      // `DKGAgent.query`. Only gate the self-alias fallback when the
-      // caller has no recognised identity at all — neither a
-      // node-level admin token nor an agent-scoped bearer. Authenticated
-      // agent callers flow straight into `agent.query()` below, which
-      // enforces the isolation invariant by returning an empty-per-kind
-      // result for any target that is not `callerAgentAddress`.
+      const callerAgentAddress = authenticatedAgentAddress(authentication);
+      // The authentication boundary distinguishes agent, node-operator, and anonymous callers.
+      // Node operators retain the cross-agent OpenClaw use case; authenticated agents flow into
+      // DKGAgent.query's isolation check; only anonymous working-memory requests need this local
+      // self-alias fallback gate.
       const isAdminToken =
-        !!requestToken
-        && validTokens.has(requestToken)
-        && callerAgentAddress === undefined;
+        canAdministerNode(authentication)
+        && authentication.principal.kind === 'nodeOperator';
       const hasRecognisedIdentity = isAdminToken || callerAgentAddress !== undefined;
       if (
         !hasRecognisedIdentity &&
@@ -578,257 +658,102 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
           });
         }
       }
-      const result = await agent.query(sparql, {
-        contextGraphId,
-        graphSuffix,
-        includeSharedMemory,
-        includeContextGraphPartitions,
-        view,
-        agentAddress,
-        verifiedGraph,
-        assertionName,
-        subGraphName,
-        callerAgentAddress,
-        // the daemon admin
-        // token is the authorisation anchor for cross-agent WM reads
-        // (adapter-openclaw and the CLI rely on this). Pass it through
-        // so DKGAgent.query knows to skip the multi-agent signed-proof
-        // gate. Per-agent tokens still go through the regular caller-
-        // matches-target invariant inside DKGAgent.query.
-        // NOTE: `adminAuthenticated` pass-through scoped out for the same
-        // reason as `agentAuthSignature` above — DKGAgent.query on this
-        // branch doesn't accept it; it's landing via the agent-side fixes.
-        minTrust: minTrust as TrustLevel | undefined,
-        operationCtx: ctx,
-      });
+      // API reads are untrusted, potentially planner-heavy work. Keep them on
+      // the background lane so a slow dashboard/plugin query cannot occupy the
+      // normal slots needed by promotion, reconciliation, gossip validation,
+      // and SWM catch-up (issue #1989). Thread connection cancellation all the
+      // way to the SPARQL adapter: if the HTTP caller times out or disconnects,
+      // its queued/in-flight store request must not remain as orphan work.
+      queryLifecycle = createApiQueryRequestLifecycle(req, res);
+
+      let result;
+      try {
+        result = await agent.query(sparql, {
+          contextGraphId,
+          chainEvidenceMode: parsed.chainEvidenceMode,
+          graphSuffix,
+          includeSharedMemory,
+          includeContextGraphPartitions,
+          view,
+          agentAddress,
+          verifiedGraph,
+          assertionName,
+          subGraphName,
+          callerAgentAddress,
+          signal: queryLifecycle.signal,
+          priority: queryLifecycle.priority,
+          source: queryLifecycle.source,
+          // the daemon admin
+          // token is the authorisation anchor for cross-agent WM reads
+          // (adapter-openclaw and the CLI rely on this). Pass it through
+          // so DKGAgent.query knows to skip the multi-agent signed-proof
+          // gate. Per-agent tokens still go through the regular caller-
+          // matches-target invariant inside DKGAgent.query.
+          // NOTE: `adminAuthenticated` pass-through scoped out for the same
+          // reason as `agentAuthSignature` above — DKGAgent.query on this
+          // branch doesn't accept it; it's landing via the agent-side fixes.
+          minTrust: minTrust as TrustLevel | undefined,
+          operationCtx: ctx,
+        });
+      } finally {
+        queryLifecycle?.dispose();
+      }
       const execDur = Date.now() - execT0;
       tracker.completePhase(ctx, "execute");
-      tracker.complete(ctx, { tripleCount: result?.bindings?.length ?? 0 });
+      const publicResult = normalizePublicApiQueryResult(sparql, result);
+      const resultCount = publicResult.type === 'bindings'
+        ? publicResult.bindings.length
+        : publicResult.type === 'quads'
+          ? publicResult.quads.length
+          : publicResult.type === 'boolean'
+            ? 1
+            : 0;
+      tracker.complete(ctx, { tripleCount: resultCount });
       return jsonResponse(res, 200, {
-        result,
+        result: publicResult,
         phases: { execute: execDur, serverTotal: Date.now() - serverT0 },
       });
     } catch (err: any) {
-      tracker.fail(ctx, err);
-      const msg = err?.message ?? "";
-      if (
-        msg.startsWith("SPARQL rejected:") ||
-        msg.startsWith("Parse error") ||
-        // #889: oxigraph surfaces SPARQL syntax errors as
-        // `error at <line>:<col>: expected one of ...` (e.g. a missing
-        // closing brace or an incomplete triple). These are client input
-        // errors, not server faults — classify them as 400 to match the
-        // existing `SPARQL rejected:` / `must start with ...` handling
-        // instead of letting them fall through to a 500.
-        /^error at \d+:\d+:/.test(msg) ||
-        /must start with (SELECT|CONSTRUCT|ASK|DESCRIBE)/i.test(msg) ||
-        msg.includes("was removed in V10") ||
-        msg.includes("agentAddress is required") ||
-        msg.includes("requires a contextGraphId") ||
-        msg.includes("cannot be combined with") ||
-        msg.startsWith("Scoped query violation:") ||
-        // A-1 review: DKGAgent.query throws these when the caller sends
-        // a non-string `agentAddress` / `callerAgentAddress` in the
-        // body. Classify as 400 so malformed input is a clean client
-        // error instead of a 500.
-        msg.startsWith("query: 'agentAddress' must be a string") ||
-        msg.startsWith("query: 'callerAgentAddress' must be a string") ||
-        // P-13 review: `resolveViewGraphs` validates `minTrust` now,
-        // so direct callers that forward a string / out-of-range
-        // value get a 400 instead of a 500.
-        msg.startsWith("Invalid minTrust")
-      ) {
-        return jsonResponse(res, 400, { error: msg });
+      if (err?.code === API_QUERY_CALLER_DISCONNECTED) {
+        tracker.cancel(ctx, err);
+        if (!res.writableEnded) res.end();
+        return;
       }
+      if (isContextGraphReadAuthorityUnavailable(err)) {
+        // The authority resolver folds ANY failure of its sources — including
+        // the abort raised when this caller disconnected — into `unavailable`,
+        // which drops the API_QUERY_CALLER_DISCONNECTED code checked above. An
+        // aborted request is a cancellation, not a retryable server failure:
+        // classify it as such instead of writing a 503 to a dead socket.
+        if (queryLifecycle?.signal.aborted) {
+          tracker.cancel(ctx, err);
+          if (!res.writableEnded) res.end();
+          return;
+        }
+        respondIfContextGraphReadAuthorityUnavailable(res, err, ctx);
+        tracker.fail(ctx, err);
+        return;
+      }
+      const storeUnavailableOutcome = respondIfStoreUnavailable(res, err);
+      if (storeUnavailableOutcome !== null) {
+        // Pre-dispatch shedding is a cancellation; a store deadline may have
+        // executed and remains an operation failure even though both map to a
+        // retryable 503 for the caller.
+        if (storeUnavailableOutcome === 'not_started') tracker.cancel(ctx, err);
+        else tracker.fail(ctx, err);
+        return;
+      }
+      tracker.fail(ctx, err);
+      // #1758 — one policy module answers a failed query: a rejection of the
+      // caller's own SPARQL is a 400, a withheld unscoped result a retryable
+      // 503. See ./query-error.ts.
+      if (respondToQueryFailure(res, err)) return;
       throw err;
     }
   }
 
-  // POST /api/genui/render  { contextGraphId, entityUri, libraryPrompt }
-  //
-  // Streams OpenUI Lang deltas over Server-Sent Events. The UI registers
-  // the component library client-side with @openuidev/react-lang and
-  // passes its `library.prompt()` text up; the daemon does the heavy
-  // lifting — resolving triples, reading the profile hint for the entity's
-  // rdf:type, composing the messages, and piping LlmClient stream events.
-  if (req.method === "POST" && path === "/api/genui/render") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = safeParseJson(body, res);
-    if (!parsed) return;
-    const { contextGraphId, entityUri, libraryPrompt } = parsed;
-    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
-    if (typeof entityUri !== "string" || !entityUri.trim()) {
-      return jsonResponse(res, 400, { error: 'Missing "entityUri"' });
-    }
-    if (typeof libraryPrompt !== "string" || !libraryPrompt.trim()) {
-      return jsonResponse(res, 400, { error: 'Missing "libraryPrompt"' });
-    }
-    if (!config.llm?.apiKey) {
-      return jsonResponse(res, 503, {
-        error: 'LLM not configured. Set an API key in Settings to enable GenUI.',
-      });
-    }
-
-    // Fetch entity triples.
-    // The entity's data lives in the sub-graph's named assertion graph, so
-    // we must wrap the pattern in GRAPH ?g — otherwise we'd only see the
-    // default graph, which is empty for these imports. DISTINCT because
-    // promoted triples can appear under both WM and SWM/VM named graphs
-    // for the same sub-graph.
-    let triples: Array<{ p: string; o: string }> = [];
-    let entityRdfType: string | null = null;
-    try {
-      // Stripping angle brackets is only ergonomic ("accept <uri> or uri"),
-      // not sanitisation — a crafted input containing `>` or whitespace can
-      // still break out of the interpolated `<…>`. `sparqlIri` runs
-      // `assertSafeIri` before wrapping.
-      const entityIri = entityUri.replace(/^<|>$/g, '');
-      let safeEntityIri: string;
-      try {
-        safeEntityIri = sparqlIri(entityIri);
-      } catch {
-        return jsonResponse(res, 400, {
-          error: `Unsafe entityUri: ${entityUri}`,
-        });
-      }
-      const triplesResult = await agent.query(
-        `SELECT DISTINCT ?p ?o WHERE { GRAPH ?g { ${safeEntityIri} ?p ?o } } LIMIT 200`,
-        { contextGraphId },
-      );
-      // `agent.query()` can return bindings as SPARQL-JSON objects
-      // (`{value, type, …}`) once the result has passed through the
-      // normaliser — stringifying them directly produces "[object Object]"
-      // and wrecks the downstream rdf:type lookup / LLM prompt. See
-      // `bindingValue` near the top of this file.
-      triples = (triplesResult?.bindings ?? []).map((row: any) => ({
-        p: bindingValue(row.p),
-        o: bindingValue(row.o),
-      }));
-      const typeT = triples.find(
-        (t) => t.p === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
-      );
-      if (typeT) entityRdfType = typeT.o;
-    } catch (err: any) {
-      return jsonResponse(res, 500, {
-        error: `Failed to fetch entity triples: ${err.message}`,
-      });
-    }
-
-    if (triples.length === 0) {
-      return jsonResponse(res, 404, {
-        error: `No triples found for <${entityUri}> in ${contextGraphId}`,
-      });
-    }
-
-    // Fetch the profile's detailHint for this type from the `meta` sub-graph.
-    // Same GRAPH ?g reasoning as above — the profile lives in a named
-    // assertion graph under `.../meta/assertion/...`, not in the default.
-    let detailHint: string | null = null;
-    let entityTypeLabel: string | null = null;
-    if (entityRdfType) {
-      // `entityRdfType` came from the quadstore as the value of `rdf:type`,
-      // so it's normally a safe IRI — but crafted imported data could in
-      // principle smuggle unsafe chars through. Validate before interpolating.
-      let safeTypeIri: string | null = null;
-      try {
-        safeTypeIri = sparqlIri(entityRdfType);
-      } catch {
-        safeTypeIri = null;
-      }
-      if (safeTypeIri) {
-        try {
-          const hintResult = await agent.query(
-            `
-              SELECT ?hint ?label WHERE {
-                GRAPH ?g {
-                  ?binding <http://dkg.io/ontology/profile/forType> ${safeTypeIri} ;
-                           <http://dkg.io/ontology/profile/detailHint> ?hint .
-                  OPTIONAL { ?binding <http://dkg.io/ontology/profile/label> ?label }
-                }
-              } LIMIT 1
-            `,
-            { contextGraphId, subGraphName: 'meta' },
-          );
-          const row = hintResult?.bindings?.[0];
-          if (row) {
-            const hintRaw = bindingValue(row.hint);
-            detailHint = hintRaw.replace(/^"|"$/g, '').replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
-            if (row.label) {
-              const labelRaw = bindingValue(row.label);
-              entityTypeLabel = labelRaw.replace(/^"|"$/g, '').replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
-            }
-          }
-        } catch {
-          // meta sub-graph may be missing — fall through, LLM still has triples.
-        }
-      }
-    }
-
-    // Compose the prompt
-    const systemPrompt =
-      libraryPrompt +
-      `\n\n# Task\n` +
-      `You will be given an RDF entity from a DKG context graph, described by its triples (predicate -> object). ` +
-      `Compose a single OpenUI Lang response that renders a rich, domain-appropriate detail view of this entity ` +
-      `using only components from the library above.\n` +
-      `\n## Rules\n` +
-      `- Output OpenUI Lang only. No prose, no markdown fences, no commentary.\n` +
-      `- Use the EntityDetail root if the library declares one; otherwise start with whatever the library's root wants.\n` +
-      `- Extract display values from the literal objects (strip XSD datatype suffixes).\n` +
-      `- If URI objects look like "urn:dkg:...", treat them as links to other entities.\n` +
-      `- Prefer grouping: header card -> stats grid -> related lists.\n` +
-      `- Keep it compact — no more than ~12 child blocks.\n`;
-
-    const userMessage = [
-      `Entity URI: ${entityUri}`,
-      entityRdfType ? `rdf:type: ${entityRdfType}${entityTypeLabel ? ` (${entityTypeLabel})` : ''}` : '',
-      detailHint ? `\nProfile hint for this type:\n${detailHint}` : '',
-      `\nTriples (${triples.length}):\n` + triples.slice(0, 120).map(t => `  ${t.p}  ${t.o}`).join('\n'),
-      triples.length > 120 ? `  … (${triples.length - 120} more triples truncated)` : '',
-    ].filter(Boolean).join('\n');
-
-    // Start SSE stream
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-    });
-
-    const client = new LlmClient();
-    const sendEvent = (type: string, data: unknown) => {
-      res.write(`event: ${type}\n`);
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
-    };
-
-    sendEvent('start', { entityUri, entityRdfType, entityTypeLabel });
-    try {
-      const events = client.stream({
-        config: config.llm!,
-        request: {
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userMessage },
-          ],
-          stream: true,
-          temperature: 0.3,
-          maxTokens: 1500,
-        },
-      });
-      for await (const ev of events) {
-        if (ev.type === 'text_delta') {
-          sendEvent('delta', { text: ev.delta });
-        } else if (ev.type === 'final') {
-          sendEvent('final', { content: ev.message.content ?? '' });
-        } else if (ev.type === 'error') {
-          sendEvent('error', { error: ev.error });
-        }
-      }
-      sendEvent('done', {});
-    } catch (err: any) {
-      sendEvent('error', { error: err?.message ?? String(err) });
-    } finally {
-      res.end();
-    }
+  if (req.method === 'POST' && path === '/api/genui/render') {
+    await handleGenuiRender(ctx);
     return;
   }
 
@@ -914,20 +839,30 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       });
     }
 
+    const caller = {
+      isNodeAdmin: canAdministerNode(authentication),
+      agentAddress: actorFromRequestContext(ctx).effectiveAgentAddress,
+    };
     const jobId =
       jobIdParam ??
-      (contextGraphId ? catchupTracker.latestByContextGraph.get(contextGraphId) : undefined);
+      (contextGraphId
+        ? await latestCatchupJobIdFor(agent, catchupTracker, contextGraphId, caller)
+        : undefined);
     if (!jobId) {
       return jsonResponse(res, 404, { error: "No catch-up job found" });
     }
     const job = catchupTracker.jobs.get(jobId);
-    if (!job) {
+    if (!job || (jobIdParam !== null && !await mayReadCatchupJobById(agent, job, caller))) {
       return jsonResponse(res, 404, {
         error: `Catch-up job "${jobId}" not found`,
       });
     }
 
-    return jsonResponse(res, 200, toCatchupStatusResponse(job));
+    return jsonResponse(res, 200, toCatchupStatusResponse(
+      job,
+      agent.getRfc64SelectedSwmGraphSyncStatus(job.resolvedContextGraphId ?? job.contextGraphId),
+      agent.describeContextGraphIdentity?.(job.contextGraphId),
+    ));
   }
 
   // POST /api/verify
@@ -1096,183 +1031,4 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     }
   }
 
-  // POST /api/ccl/policy/publish
-  if (req.method === "POST" && path === "/api/ccl/policy/publish") {
-    const body = await readBody(req, SMALL_BODY_BYTES * 4);
-    const {
-      contextGraphId,
-      name,
-      version,
-      content,
-      description,
-      contextType,
-      language,
-      format,
-    } = JSON.parse(body);
-    if (!contextGraphId || !name || !version || !content) {
-      return jsonResponse(res, 400, {
-        error: "Missing required fields: contextGraphId, name, version, content",
-      });
-    }
-    const result = await agent.publishCclPolicy({
-      contextGraphId,
-      name,
-      version,
-      content,
-      description,
-      contextType,
-      language,
-      format,
-    });
-    return jsonResponse(res, 200, result);
-  }
-
-  // POST /api/ccl/policy/approve
-  if (req.method === "POST" && path === "/api/ccl/policy/approve") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const { contextGraphId, policyUri, contextType } = JSON.parse(body);
-    if (!contextGraphId || !policyUri) {
-      return jsonResponse(res, 400, {
-        error: "Missing required fields: contextGraphId, policyUri",
-      });
-    }
-    try {
-      const result = await agent.approveCclPolicy({
-        contextGraphId,
-        policyUri,
-        contextType,
-        callerAgentAddress: requestAgentAddress,
-      });
-      return jsonResponse(res, 200, result);
-    } catch (err: any) {
-      const msg = err?.message ?? "";
-      if (/Only the contextGraph owner can manage policies/.test(msg)) {
-        return jsonResponse(res, 403, { error: msg });
-      }
-      throw err;
-    }
-  }
-
-  // POST /api/ccl/policy/revoke
-  if (req.method === "POST" && path === "/api/ccl/policy/revoke") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const { contextGraphId, policyUri, contextType } = JSON.parse(body);
-    if (!contextGraphId || !policyUri) {
-      return jsonResponse(res, 400, {
-        error: "Missing required fields: contextGraphId, policyUri",
-      });
-    }
-    try {
-      const result = await agent.revokeCclPolicy({
-        contextGraphId,
-        policyUri,
-        contextType,
-        callerAgentAddress: requestAgentAddress,
-      });
-      return jsonResponse(res, 200, result);
-    } catch (err: any) {
-      const msg = err?.message ?? "";
-      if (/Only the contextGraph owner can manage policies/.test(msg)) {
-        return jsonResponse(res, 403, { error: msg });
-      }
-      throw err;
-    }
-  }
-
-  // GET /api/ccl/policy/list
-  if (req.method === "GET" && path === "/api/ccl/policy/list") {
-    const policies = await agent.listCclPolicies({
-      contextGraphId: url.searchParams.get("contextGraphId") ?? undefined,
-      name: url.searchParams.get("name") ?? undefined,
-      contextType: url.searchParams.get("contextType") ?? undefined,
-      status: url.searchParams.get("status") ?? undefined,
-      includeBody: url.searchParams.get("includeBody") === "true",
-    });
-    return jsonResponse(res, 200, { policies });
-  }
-
-  // GET /api/ccl/policy/resolve?contextGraphId=&name=&contextType=
-  if (req.method === "GET" && path === "/api/ccl/policy/resolve") {
-    const contextGraphId = url.searchParams.get("contextGraphId");
-    const name = url.searchParams.get("name");
-    if (!contextGraphId || !name) {
-      return jsonResponse(res, 400, {
-        error: "Missing required query params: contextGraphId, name",
-      });
-    }
-    const policy = await agent.resolveCclPolicy({
-      contextGraphId,
-      name,
-      contextType: url.searchParams.get("contextType") ?? undefined,
-      includeBody: url.searchParams.get("includeBody") === "true",
-    });
-    return jsonResponse(res, 200, { policy });
-  }
-
-  // POST /api/ccl/eval
-  if (req.method === "POST" && path === "/api/ccl/eval") {
-    const body = await readBody(req, SMALL_BODY_BYTES * 8);
-    const {
-      contextGraphId,
-      name,
-      facts,
-      contextType,
-      view,
-      snapshotId,
-      scopeUal,
-      publishResult,
-    } = JSON.parse(body);
-    if (!contextGraphId || !name) {
-      return jsonResponse(res, 400, {
-        error: "Missing required fields: contextGraphId, name",
-      });
-    }
-    if (facts != null && !Array.isArray(facts)) {
-      return jsonResponse(res, 400, {
-        error: "facts must be an array when provided",
-      });
-    }
-    const result = publishResult
-      ? await agent.evaluateAndPublishCclPolicy({
-          contextGraphId,
-          name,
-          facts,
-          contextType,
-          view,
-          snapshotId,
-          scopeUal,
-        })
-      : await agent.evaluateCclPolicy({
-          contextGraphId,
-          name,
-          facts,
-          contextType,
-          view,
-          snapshotId,
-          scopeUal,
-        });
-    return jsonResponse(res, 200, result);
-  }
-
-  // GET /api/ccl/results?contextGraphId=&...
-  if (req.method === "GET" && path === "/api/ccl/results") {
-    const contextGraphId = url.searchParams.get("contextGraphId");
-    if (!contextGraphId) {
-      return jsonResponse(res, 400, {
-        error: "Missing required query param: contextGraphId",
-      });
-    }
-    const evaluations = await agent.listCclEvaluations({
-      contextGraphId,
-      policyUri: url.searchParams.get("policyUri") ?? undefined,
-      snapshotId: url.searchParams.get("snapshotId") ?? undefined,
-      view: url.searchParams.get("view") ?? undefined,
-      contextType: url.searchParams.get("contextType") ?? undefined,
-      resultKind:
-        (url.searchParams.get("resultKind") as "derived" | "decision" | null) ??
-        undefined,
-      resultName: url.searchParams.get("resultName") ?? undefined,
-    });
-    return jsonResponse(res, 200, { evaluations });
-  }
 }

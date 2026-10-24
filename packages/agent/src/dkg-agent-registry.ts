@@ -81,6 +81,7 @@ import {
   InMemoryProtocolOutboxStore,
   type MessageIdempotencyStore,
   type ProtocolOutboxStore,
+  type ProtocolOutboxMetadata,
   type ProtocolOutboxEntry,
   encryptV10PublishPayload,
   encryptChunked,
@@ -95,7 +96,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, PcaUnavailableError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type NodePublishingConvictionAccount, type PcaAccountRelation, type ShardingTableNode, type PcaContracts, type PcaRpcMethod } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, PcaUnavailableError, enrichEvmError, buildKnowledgeAssetUal, operationalSigningOf, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type NodePublishingConvictionAccount, type PcaAccountRelation, type ShardingTableNode, type PcaContracts, type PcaRpcMethod, type BrowserWalletRpcMethod, type IdentityWalletContracts } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -115,8 +116,7 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
-  type LiftRequest, type LiftRequestAuthorSeal,
+  type CollectedACK,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
@@ -224,7 +224,8 @@ import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
 import {
-  generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
+  assertAgentNameFree, generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey, writeKeystoreEntry,
+  agentKeystorePath, readAgentKeystore, assertKeystoreHoldsNoPayerKey,
   ensureWorkspaceEncryptionKey,
   hashAgentToken,
   activeWorkspaceEncryptionKeys,
@@ -237,9 +238,11 @@ import {
   type KeystoreEntry,
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
+import { externalSignerAgentPublicKey, signsThroughExternalSigner } from './external-author-signing.js';
+import { externalSignerDefaultAgent } from './default-agent.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
-import { reconcileContextGraph, ReconcileCoalescer, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
+import { FinalizationHandler } from './finalization-handler.js';
+import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
@@ -324,7 +327,6 @@ import {
   type LocalSwmSenderKeySendState,
   type LocalSwmSenderKeyReceiveState,
   type PendingSenderKeyEntry,
-  type RandomSamplingStartResult,
   type ACKSignerResolution,
   type SyncRequestEnvelope,
   type CclPublishedResultEntry,
@@ -356,9 +358,6 @@ import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
-  partitionPublishAsyncQuads,
-  signWithPrivateKey,
-  preSignedAttestationToLiftSeal,
   normalizeAgentDid,
   joinDelegationScope,
   normalizeSyncPhase,
@@ -422,6 +421,50 @@ function parseExplicitConnectTarget(multiaddress: string, admissionEnabled: bool
 }
 
 export class AgentRegistryMethods extends DKGAgentBase {
+  async ensureProfilePublished(this: DKGAgent): Promise<void> {
+    if (this.profileManager.profileKcId !== null) return;
+    if (this.ensureProfilePublishedInFlight) {
+      return this.ensureProfilePublishedInFlight;
+    }
+
+    let tracked: Promise<void>;
+    const publish = (async () => {
+      // Re-check inside the coalesced operation in case another serialized
+      // publisher completed between the fast-path check and this turn.
+      if (this.profileManager.profileKcId === null) {
+        await this.publishProfile();
+      }
+    })();
+    tracked = publish.finally(() => {
+      if (this.ensureProfilePublishedInFlight === tracked) {
+        this.ensureProfilePublishedInFlight = undefined;
+      }
+    });
+    this.ensureProfilePublishedInFlight = tracked;
+    return tracked;
+  }
+
+  async reannounceApprovalAuthorityProfile(this: DKGAgent): Promise<void> {
+    if (this.approvalAuthorityProfileReannouncementInFlight) {
+      return this.approvalAuthorityProfileReannouncementInFlight;
+    }
+
+    let tracked: Promise<void>;
+    const publish = (async () => {
+      // A locally persisted profile is not proof that the peer receiving a
+      // private join approval has observed it. Explicitly re-publish so the
+      // joining peer can resolve the curator's current authority and keys.
+      await this.publishProfile();
+    })();
+    tracked = publish.finally(() => {
+      if (this.approvalAuthorityProfileReannouncementInFlight === tracked) {
+        this.approvalAuthorityProfileReannouncementInFlight = undefined;
+      }
+    });
+    this.approvalAuthorityProfileReannouncementInFlight = tracked;
+    return tracked;
+  }
+
   async publishProfile(this: DKGAgent): Promise<PublishResult> {
     // Tail-chain serialization: every caller waits for the prior
     // `publishProfile()` to settle (success or failure) before
@@ -454,23 +497,25 @@ export class AgentRegistryMethods extends DKGAgentBase {
     // access control stay consistent.
     //
     // The `subscribed === true` filter is what Codex review on PR #431
-    // (round 3) flagged. `discoverContextGraphsFromStore()` seeds entries
-    // for OPEN CGs we merely learned about with `subscribed: false` (we
-    // don't auto-subscribe public CGs — explicit user opt-in only). Without
-    // this filter, those discovery-only entries would be advertised in
-    // `contextGraphsServed`, so other peers would route join attempts to a
-    // node that doesn't actually host the CG. The curated/private discovery
-    // path immediately calls `subscribeToContextGraph()` (which flips
-    // `subscribed: true`) before adding to the gossip mesh, so this filter
-    // does not regress invited-curated discovery.
+    // (round 3) flagged. Edge discovery seeds OPEN entries as catalogue-only,
+    // so advertising every known row would route peers to an edge that does
+    // not host the CG. Cores currently auto-subscribe newly discovered graphs
+    // as an ACK-custody compatibility bridge, so their public discoveries are
+    // intentionally advertised. Curated graphs remain excluded by the policy
+    // check below regardless of role.
     //
     // System CGs (`agents`, `ontology`) are excluded — they are universal
     // and don't need to be re-advertised in every profile.
+    //
+    // `isPrivateContextGraph` is false when no policy is known yet, so a graph
+    // is advertised only when its policy is proven public: by a definition, or
+    // by a bound slot the chain proves public (a Core's chain discoveries). A
+    // joiner still waiting for its curator's `_meta` has no proven policy.
     const publicServed: string[] = [];
     for (const [id, sub] of this.subscribedContextGraphs) {
       if (id === SYSTEM_CONTEXT_GRAPHS.AGENTS || id === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) continue;
       if (!sub.subscribed) continue;
-      if (await this.isPrivateContextGraph(id)) continue;
+      if (await this.contextGraphAccessPolicyState(id, { onChainId: sub.onChainId }) !== 'public') continue;
       publicServed.push(id);
     }
 
@@ -599,36 +644,33 @@ export class AgentRegistryMethods extends DKGAgentBase {
   // Agent Registry — multi-agent identity management
   // ---------------------------------------------------------------------------
 
-  /**
-   * Register a new agent on this node.
-   * - Custodial (publicKey omitted): node generates secp256k1 keypair
-   * - Self-sovereign (publicKey provided): agent holds its own key
-   */
+  /** Register an agent: custodial (node-held key), self-sovereign (`publicKey`) or by `address` held by the external signer. */
   async registerAgent(this: DKGAgent,
     name: string,
     opts?: {
       publicKey?: string;
+      /** An author key of the node's external signer; registered self-sovereign (the node stores no key). */
+      address?: string;
       framework?: string;
       encryptionKeyAlgorithm?: typeof WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519;
       publicEncryptionKey?: string;
       encryptionKeyProof?: string;
     },
   ): Promise<AgentKeyRecord> {
-    for (const existing of this.localAgents.values()) {
-      if (existing.name === name) {
-        throw new Error(`Agent name "${name}" already registered on this node`);
-      }
-    }
-    if (opts?.publicKey && (opts.publicEncryptionKey || opts.encryptionKeyProof) && !(opts.publicEncryptionKey && opts.encryptionKeyProof)) {
+    assertAgentNameFree(this.localAgents.values(), name);
+    const publicKey = opts?.address === undefined ? opts?.publicKey : await externalSignerAgentPublicKey(this.config?.authorSigners, opts.address, name, opts.publicKey);
+    // Again after the signer answered: a concurrent registration may have taken the name meanwhile.
+    assertAgentNameFree(this.localAgents.values(), name);
+    if (publicKey && (opts?.publicEncryptionKey || opts?.encryptionKeyProof) && !(opts.publicEncryptionKey && opts.encryptionKeyProof)) {
       throw new Error('Self-sovereign agents must provide both publicEncryptionKey and encryptionKeyProof');
     }
 
-    const record = opts?.publicKey
+    const record = publicKey
       ? registerSelfSovereignAgent(
         name,
-        opts.publicKey,
-        opts.framework,
-        opts.publicEncryptionKey && opts.encryptionKeyProof
+        publicKey,
+        opts?.framework,
+        opts?.publicEncryptionKey && opts.encryptionKeyProof
           ? {
             encryptionKeyAlgorithm: opts.encryptionKeyAlgorithm ?? WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
             publicEncryptionKey: opts.publicEncryptionKey,
@@ -865,7 +907,10 @@ export class AgentRegistryMethods extends DKGAgentBase {
    * @param address Ethereum address of the registered agent.
    */
   getCustodialAgentPrivateKey(this: DKGAgent, address: string): string | undefined {
-    const record = this.localAgents.get(address);
+    const record = this.localAgents.get(address)
+      ?? (ethers.isAddress(address)
+        ? this.localAgents.get(ethers.getAddress(address))
+        : undefined);
     if (!record || record.mode !== 'custodial') return undefined;
     return record.privateKey;
   }
@@ -875,7 +920,12 @@ export class AgentRegistryMethods extends DKGAgentBase {
    * Returns undefined if the agent is unknown to this node.
    */
   getLocalAgentMode(this: DKGAgent, address: string): 'custodial' | 'self-sovereign' | undefined {
-    return this.localAgents.get(address)?.mode;
+    return (
+      this.localAgents.get(address)
+      ?? (ethers.isAddress(address)
+        ? this.localAgents.get(ethers.getAddress(address))
+        : undefined)
+    )?.mode;
   }
 
   /**
@@ -1116,8 +1166,12 @@ export class AgentRegistryMethods extends DKGAgentBase {
     const graph = DKGAgentBase.AGENT_SYSTEM_GRAPH;
     const DKG = 'https://dkg.network/ontology#';
 
-    // Load raw tokens and custodial keys from the on-disk keystore
+    // Load raw tokens and custodial keys from the on-disk keystore. A payer of
+    // the external signer never signs as an agent: refuse its key kept there.
     const keystore = await this.loadKeystore();
+    const keystorePath = this.keystorePath();
+    const signing = operationalSigningOf(this.chain);
+    if (keystorePath && signing?.external) assertKeystoreHoldsNoPayerKey(keystore, signing.payerAddresses, keystorePath);
 
     // Encryption keys live in BOTH the keystore (private halves; authoritative
     // for keys we own) and RDF (public halves + proofs + revocations; what we
@@ -1329,11 +1383,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
     }
     if (!opKey) return;
 
-    const record = agentFromPrivateKey(
-      opKey,
-      this.config.name ?? 'owner',
-      this.config.framework,
-    );
+    const record = agentFromPrivateKey(opKey, this.config.name ?? 'owner', this.config.framework);
 
     this.localAgents.set(record.agentAddress, record);
     this.agentTokenIndex.set(record.authToken, record.agentAddress);
@@ -1346,25 +1396,34 @@ export class AgentRegistryMethods extends DKGAgentBase {
     this.log.info(ctx, `Auto-registered default agent "${record.name}" → ${record.agentAddress}`);
   }
 
+  /**
+   * Settle the node's default agent once at start, after `loadAgentsFromStore` restored the persisted one,
+   * and persist it when it changes: with an external signer, the account `externalSignerDefaultAgent` picks;
+   * otherwise the persisted default, else the first agent, else one from the operational key.
+   */
+  async reconcileDefaultAgent(this: DKGAgent): Promise<void> {
+    const authors = signsThroughExternalSigner(this.chain) ? this.config?.authorSigners : undefined;
+    if (this.localAgents.size === 0 && authors === undefined) return this.autoRegisterDefaultAgent();
+    const previous = this.defaultAgentAddress;
+    const kept = previous ?? this.localAgents.values().next().value?.agentAddress;
+    const target = authors === undefined ? kept : await externalSignerDefaultAgent(this, authors, kept, this.config.name ?? 'owner', this.config.framework);
+    if (target === undefined || target.toLowerCase() === previous?.toLowerCase()) return;
+    this.defaultAgentAddress = target;
+    await this.markDefaultAgent(target).catch(() => {});
+    this.log.info(createOperationContext('system'), `Default agent is now ${target}${previous === undefined ? '' : ` (was ${previous})`}`);
+  }
+
   // ---------------------------------------------------------------------------
   // Agent keystore — secrets kept out of queryable RDF
   // ---------------------------------------------------------------------------
 
   keystorePath(this: DKGAgent): string | null {
-    if (!this.config.dataDir) return null;
-    return `${this.config.dataDir}/agent-keystore.json`;
+    return this.config.dataDir ? agentKeystorePath(this.config.dataDir) : null;
   }
 
   async loadKeystore(this: DKGAgent): Promise<Record<string, KeystoreEntry>> {
     const ksPath = this.keystorePath();
-    if (!ksPath) return {};
-    try {
-      const { readFile } = await import('node:fs/promises');
-      const raw = await readFile(ksPath, 'utf-8');
-      return JSON.parse(raw);
-    } catch {
-      return {};
-    }
+    return ksPath ? readAgentKeystore(ksPath) : {};
   }
 
   /**
@@ -1378,15 +1437,8 @@ export class AgentRegistryMethods extends DKGAgentBase {
     const ksPath = this.keystorePath();
     if (!ksPath) return;
     try {
-      const { readFile, writeFile, mkdir, chmod } = await import('node:fs/promises');
-      const { dirname } = await import('node:path');
-      let existing: Record<string, KeystoreEntry> = {};
-      try {
-        const raw = await readFile(ksPath, 'utf-8');
-        existing = JSON.parse(raw);
-      } catch { /* first write */ }
       const defaultActive = activeWorkspaceEncryptionKeys(record)[0];
-      existing[record.agentAddress.toLowerCase()] = {
+      await writeKeystoreEntry(ksPath, record.agentAddress, {
         authToken: record.authToken,
         ...(record.privateKey ? { privateKey: record.privateKey } : {}),
         ...(record.workspaceEncryptionKeys.length
@@ -1396,10 +1448,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
         ...(defaultActive?.publicEncryptionKey ? { publicEncryptionKey: defaultActive.publicEncryptionKey } : {}),
         ...(defaultActive?.privateEncryptionKey ? { privateEncryptionKey: defaultActive.privateEncryptionKey } : {}),
         ...(defaultActive?.encryptionKeyProof ? { encryptionKeyProof: defaultActive.encryptionKeyProof } : {}),
-      };
-      await mkdir(dirname(ksPath), { recursive: true });
-      await writeFile(ksPath, JSON.stringify(existing, null, 2), { mode: 0o600 });
-      await chmod(ksPath, 0o600);
+      });
     } catch {
       // Non-fatal — agent still works, just won't survive restart
     }
@@ -1468,8 +1517,12 @@ export class AgentRegistryMethods extends DKGAgentBase {
    * Check whether any locally registered agent is the curator/creator
    * of the given context graph.
    */
-  async isCuratorOf(this: DKGAgent, contextGraphId: string): Promise<boolean> {
-    const owner = await this.getContextGraphOwner(contextGraphId);
+  async isCuratorOf(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<boolean> {
+    const owner = await this.getContextGraphOwner(contextGraphId, options);
     if (!owner) return false;
     // Mirror the comparison in PROTOCOL_JOIN_REQUEST. `normalizeAgentDid`
     // collapses EVM-address case drift but preserves peer-ID case.
@@ -1516,7 +1569,17 @@ export class AgentRegistryMethods extends DKGAgentBase {
 
   /** True when the adapter can serve the daemon's PCA browser-read RPC bridge. */
   get supportsPublishingConvictionRpc(): boolean {
-    return typeof this.chain.requestPublishingConvictionRpc === 'function';
+    return typeof this.chain.getPublishingConvictionContracts === 'function'
+      && (
+        typeof this.chain.requestBrowserWalletRpc === 'function'
+        || typeof this.chain.requestPublishingConvictionRpc === 'function'
+      );
+  }
+
+  /** True when identity bootstrap and its read bridge are independently available. */
+  get supportsIdentityWalletManagement(): boolean {
+    return typeof this.chain.getIdentityWalletContracts === 'function'
+      && typeof this.chain.requestBrowserWalletRpc === 'function';
   }
 
   // OT-RFC-51: `primaryNode` (the node identityId this PCA's committed TRAC
@@ -1630,6 +1693,38 @@ export class AgentRegistryMethods extends DKGAgentBase {
     return this.chain.removeOperationalWallet(address, options);
   }
 
+  async getIdentityWalletContracts(this: DKGAgent): Promise<IdentityWalletContracts | null> {
+    if (typeof this.chain.getIdentityWalletContracts !== 'function') return null;
+    return this.chain.getIdentityWalletContracts();
+  }
+
+  async requestBrowserWalletRpc(
+    this: DKGAgent,
+    method: BrowserWalletRpcMethod,
+    params?: unknown[],
+  ): Promise<unknown> {
+    if (typeof this.chain.requestBrowserWalletRpc === 'function') {
+      return this.chain.requestBrowserWalletRpc(method, params);
+    }
+    if (typeof this.chain.requestPublishingConvictionRpc === 'function') {
+      return this.chain.requestPublishingConvictionRpc(method, params);
+    }
+    throw new Error('Browser wallet RPC is not available on this deployment.');
+  }
+
+  /** @deprecated Use requestBrowserWalletRpc for browser-read features. */
+  async requestPublishingConvictionRpc(
+    this: DKGAgent,
+    method: PcaRpcMethod,
+    params?: unknown[],
+  ): Promise<unknown> {
+    if (
+      typeof this.chain.requestBrowserWalletRpc !== 'function'
+      && typeof this.chain.requestPublishingConvictionRpc !== 'function'
+    ) throw new PcaUnavailableError();
+    return this.requestBrowserWalletRpc(method, params);
+  }
+
   /** Enumerate registered publishing agents (operational wallets) for a PCA.
    *  `null` when the adapter lacks the surface (daemon maps null → 503). */
   async getPublishingConvictionAgents(this: DKGAgent,
@@ -1677,18 +1772,6 @@ export class AgentRegistryMethods extends DKGAgentBase {
   async getPublishingConvictionContracts(this: DKGAgent): Promise<PcaContracts | null> {
     if (typeof this.chain.getPublishingConvictionContracts !== 'function') return null;
     return this.chain.getPublishingConvictionContracts();
-  }
-
-  /** Daemon-internal JSON-RPC read bridge for PCA browser reads. The daemon
-   *  route owns the method allowlist and response shaping; the adapter owns the
-   *  provider/failover execution. */
-  async requestPublishingConvictionRpc(
-    this: DKGAgent,
-    method: PcaRpcMethod,
-    params?: unknown[],
-  ): Promise<unknown> {
-    if (typeof this.chain.requestPublishingConvictionRpc !== 'function') throw new PcaUnavailableError();
-    return this.chain.requestPublishingConvictionRpc(method, params);
   }
 
   // ---------------------------------------------------------------------------
@@ -1751,8 +1834,8 @@ export class AgentRegistryMethods extends DKGAgentBase {
           `(messageId=${messageId.slice(0, 8)}, ` +
           `next attempt at ${new Date(result.nextAttemptAtMs ?? Date.now()).toISOString()}, ` +
           `lastError=${result.error ?? 'unknown'}). ` +
-          `Will retry on the periodic tick (every ${MESSAGE_OUTBOX_TICK_MS / 1000}s) ` +
-          `or opportunistically on the next direct re-connect from the recipient's peer.`,
+          `Will retry only when its persisted backoff is due on the periodic tick ` +
+          `(every ${MESSAGE_OUTBOX_TICK_MS / 1000}s); reconnects do not wake the outbox.`,
       );
       return {
         delivered: false,
@@ -1772,21 +1855,19 @@ export class AgentRegistryMethods extends DKGAgentBase {
   }
 
   /**
-   * Snapshot of the substrate outbox for diagnostics. Used by the
-   * `GET /api/chat/outbox` route + the MCP `dkg_outbox_status` tool
-   * so operators can see what's pending after a long recipient
-   * outage. Returns the generic `ProtocolOutboxEntry` shape from
-   * the substrate (rc.9 PR-3) rather than the chat-specific
-   * `ChatOutboxRetryEntry` that rc.8 used — same fields are
-   * exposed (`peer`, `messageId`, `attempts`, `firstFailureAt`,
-   * `nextAttemptAt`, `lastError`), but filtered to the chat
-   * protocol so the existing operator surface still talks about
-   * "the chat outbox".
+   * Legacy payload-bearing outbox inspection, filtered to chat messages.
+   * Bounded-only stores deliberately return `undefined`; operational
+   * diagnostics should use {@link listMessageOutboxMetadata}.
    */
-  listMessageOutbox(this: DKGAgent): ProtocolOutboxEntry[] {
+  listMessageOutbox(this: DKGAgent): ProtocolOutboxEntry[] | undefined {
     return this.messenger
       .listOutbox()
-      .filter((entry) => entry.protocol === PROTOCOL_MESSAGE);
+      ?.filter((entry) => entry.protocol === PROTOCOL_MESSAGE);
+  }
+
+  /** Chat retry diagnostics without loading queued envelope payloads. */
+  listMessageOutboxMetadata(this: DKGAgent): ProtocolOutboxMetadata[] {
+    return this.messenger.listOutboxMetadata().filter(entry => entry.protocol === PROTOCOL_MESSAGE);
   }
 
   onChat(this: DKGAgent, handler: ChatHandler): void {
@@ -1954,18 +2035,45 @@ export class AgentRegistryMethods extends DKGAgentBase {
     // caller's deadline by a wide margin. Using one signal threads the
     // remaining budget through both phases.
     this.log.info(ctx, `Resolving ${peerIdStr} via PeerResolver...`);
-    const addrs = await this.peerResolver.resolve(peerIdStr, {
-      signal,
-      perStepTimeoutMs: Math.max(0, timeoutMs - (Date.now() - startedAt)),
-    });
-    if (addrs.length === 0) {
+    let outcome: Awaited<ReturnType<typeof this.peerResolver.connect>>;
+    try {
+      outcome = await this.peerResolver.connect(peerIdStr, {
+        signal,
+        perStepTimeoutMs: Math.max(0, timeoutMs - (Date.now() - startedAt)),
+        log: (message) => this.log.info(ctx, message),
+      });
+    } catch (err: any) {
+      // Codex PR #499 round 5 (dkg-agent.ts:4096): the shared signal
+      // covers BOTH resolution and dial. If most of the budget went
+      // into resolve() and dial() then aborts on the same signal, we
+      // must classify that as CONNECT_TIMEOUT (504, retriable), not
+      // DIAL_FAILED (502, transport failure). Without this split, a
+      // peer that resolves right before the deadline gets misclassified
+      // and the UI's retry logic stops working.
+      //
+      // Only the caller-owned signal defines an overall timeout. A candidate
+      // can abort on its local cap without changing the API classification.
+      if (signal.aborted) {
+        const error = new Error(
+          `CONNECT_TIMEOUT: dial to ${peerIdStr} aborted after ` +
+            `${Date.now() - startedAt}ms of ${timeoutMs}ms budget ` +
+            `(resolution succeeded, dial timed out)`,
+        );
+        (error as any).code = 'CONNECT_TIMEOUT';
+        throw error;
+      }
+      const error = new Error(
+        `DIAL_FAILED: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      (error as any).code = 'DIAL_FAILED';
+      throw error;
+    }
+    if (outcome.status === 'unresolved') {
       // Codex PR #499 round 5: distinguish "abort/timeout swallowed by
       // best-effort resolver" from "genuine negative lookup". Without
       // this, transient routing failures (DHT timeout, network blip)
       // surface as 404 PEER_NOT_FOUND in /api/connect — which the UI
-      // treats as terminal. Mapping aborted-signal → CONNECT_TIMEOUT
-      // (504) preserves the retriable-vs-terminal distinction that
-      // PR #431's inline walk had.
+      // treats as terminal.
       if (signal.aborted) {
         const error = new Error(
           `CONNECT_TIMEOUT: PeerResolver did not return addresses for ${peerIdStr} ` +
@@ -1980,43 +2088,10 @@ export class AgentRegistryMethods extends DKGAgentBase {
       (error as any).code = 'PEER_NOT_FOUND';
       throw error;
     }
-    this.log.info(ctx, `Resolved ${peerIdStr} → ${addrs.length} addr(s); dialling...`);
-
-    // peerStore is already primed by the resolver. dial(peerId) finds
-    // the addresses there and goes — same AbortSignal so the overall
-    // budget is honoured end-to-end.
-    try {
-      await this.node.libp2p.dial(peerId, { signal });
-    } catch (err: any) {
-      // Codex PR #499 round 5 (dkg-agent.ts:4096): the shared signal
-      // covers BOTH resolution and dial. If most of the budget went
-      // into resolve() and dial() then aborts on the same signal, we
-      // must classify that as CONNECT_TIMEOUT (504, retriable), not
-      // DIAL_FAILED (502, transport failure). Without this split, a
-      // peer that resolves right before the deadline gets misclassified
-      // and the UI's retry logic stops working.
-      //
-      // signal.aborted is the definitive check — it's our signal, so
-      // an abort means the timeout fired. Also accept AbortError-named
-      // errors (libp2p's transport layer surfaces those via DOMException
-      // when the dial is cancelled).
-      const isAbort =
-        signal.aborted ||
-        err?.name === 'AbortError' ||
-        err?.code === 'ABORT_ERR';
-      if (isAbort) {
-        const error = new Error(
-          `CONNECT_TIMEOUT: dial to ${peerIdStr} aborted after ` +
-            `${Date.now() - startedAt}ms of ${timeoutMs}ms budget ` +
-            `(resolution succeeded, dial timed out)`,
-        );
-        (error as any).code = 'CONNECT_TIMEOUT';
-        throw error;
-      }
-      const error = new Error(`DIAL_FAILED: ${err?.message ?? String(err)}`);
-      (error as any).code = 'DIAL_FAILED';
-      throw error;
-    }
+    this.log.info(
+      ctx,
+      `Resolved and connected to ${peerIdStr} via ${outcome.resolvedAddresses.length} addr(s)`,
+    );
     await this.assertPeerAdmittedForExplicitConnect(peerIdStr, ctx, {
       signal,
       timeoutMs: remainingTimeoutMs(),

@@ -4,8 +4,122 @@ import {
   createSwmCatchupPeerSelector,
   SWM_CATCHUP_PEER_NEGATIVE_TTL_MS,
 } from '../src/swm/swm-catchup-peer-selection.js';
+import {
+  sharedMemoryCompletionFields,
+  sharedMemoryWorkOutcome,
+  type SharedMemoryWorkOutcome,
+} from '../src/sync/shared-memory-completion.js';
+import {
+  emptySharedMemorySyncResult,
+  mergeSamePeerSharedMemoryDiagnostics,
+  mergeFleetSharedMemoryDiagnostics,
+  readSharedMemoryPhaseFailureAttribution,
+  recordSharedMemoryPhaseFailure,
+} from '../src/sync/shared-memory-diagnostics.js';
 
 describe('SWM catchup peer selection', () => {
+  it('initializes zero counters and retains an explicitly failed peer', () => {
+    for (const failedPeers of [0, 1]) {
+      const result = emptySharedMemorySyncResult(failedPeers);
+      for (const [field, value] of Object.entries(result)) {
+        expect(value, field).toBe(field === 'failedPeers' ? failedPeers : 0);
+      }
+      expect(readSharedMemoryPhaseFailureAttribution(result)).toEqual({
+        localBudget: 0, transport: 0, materialization: 0,
+      });
+    }
+  });
+
+  it('merges same-peer counters without synthesizing snapshot coverage', () => {
+    const prior = emptySharedMemorySyncResult(1);
+    const next = emptySharedMemorySyncResult(1);
+    Object.assign(prior, { insertedTriples: 2, bytesReceived: 3, metadataContinuationYields: 1 });
+    Object.assign(next, { insertedTriples: 5, bytesReceived: 7, resolvedMetadataContinuationYields: 1 });
+    recordSharedMemoryPhaseFailure(prior, 'local-budget');
+    recordSharedMemoryPhaseFailure(next, 'materialization', 2);
+    const coverage = {
+      contextGraphId: 'cg', peerIdSuffix: 'authority', snapshotsResolved: 1,
+      snapshotsTotal: 2, manifestComplete: false, missingCount: 1,
+      missingSample: ['root'], materializationFailures: 0, fromAuthority: true,
+    };
+    prior.swmCoverage = coverage;
+    next.swmCoverage = { ...coverage, fromAuthority: false, snapshotsResolved: 9,
+      snapshotsTotal: 10, manifestComplete: true };
+    for (const result of [mergeSamePeerSharedMemoryDiagnostics(prior, next),
+      mergeSamePeerSharedMemoryDiagnostics(next, prior)]) {
+      expect(result).toMatchObject({ insertedTriples: 7, bytesReceived: 10,
+        failedPeers: 1, failedPhases: 3, localYieldFailedPhases: 1,
+        metadataContinuationYields: 1, resolvedMetadataContinuationYields: 1 });
+      expect(result.swmCoverage).toBe(coverage);
+      expect(readSharedMemoryPhaseFailureAttribution({ ...result })).toEqual({
+        localBudget: 1, transport: 0, materialization: 2,
+      });
+      expect(JSON.stringify(result)).not.toContain('shared-memory-phase-failure-attribution');
+    }
+  });
+
+  it.each([
+    ['same peer', mergeSamePeerSharedMemoryDiagnostics],
+    ['fleet', mergeFleetSharedMemoryDiagnostics],
+  ] as const)('preserves an independent target failure when merging a local yield across %s', (_scope, merge) => {
+    const yielded = emptySharedMemorySyncResult();
+    recordSharedMemoryPhaseFailure(yielded, 'local-budget');
+    const failed = emptySharedMemorySyncResult();
+    recordSharedMemoryPhaseFailure(failed, 'transport');
+    for (const merged of [merge(yielded, failed), merge(failed, yielded)]) {
+      const outcome = classifySwmCatchupPeerOutcome(merged);
+      expect(outcome).toBe('transportFailed');
+      expect(merged.failedPhases).toBe(2);
+      expect(merged.localYieldFailedPhases).toBe(1);
+      const selector = createSwmCatchupPeerSelector();
+      if (outcome) selector.record('cg', 'peer', outcome, 100);
+      expect(selector.get('cg', 'peer', 101)).toBe('transportFailed');
+      expect(selector.select({ contextGraphId: 'cg', candidatePeers: ['peer', 'unknown'], now: 101 }))
+        .toMatchObject({ selectedPeers: ['unknown'], skippedNegativePeers: ['peer'] });
+    }
+    expect(classifySwmCatchupPeerOutcome(merge(yielded, yielded))).toBeUndefined();
+  });
+
+  it('derives legacy counters from one structured cause model', () => {
+    const result = emptySharedMemorySyncResult();
+    recordSharedMemoryPhaseFailure(result, 'local-budget');
+    recordSharedMemoryPhaseFailure(result, 'transport', 2);
+    recordSharedMemoryPhaseFailure(result, 'materialization');
+
+    expect(result).toMatchObject({
+      localYield: true,
+      failedPhases: 4,
+      localYieldFailedPhases: 1,
+    });
+    expect(readSharedMemoryPhaseFailureAttribution(result)).toEqual({
+      localBudget: 1,
+      transport: 2,
+      materialization: 1,
+    });
+    expect(readSharedMemoryPhaseFailureAttribution({ ...result })).toEqual({
+      localBudget: 1,
+      transport: 2,
+      materialization: 1,
+    });
+    expect(JSON.parse(JSON.stringify(result))).not.toHaveProperty(
+      'shared-memory-phase-failure-attribution',
+    );
+  });
+
+  it('does not treat an unattributed failed phase as a local yield', () => {
+    expect(classifySwmCatchupPeerOutcome({ localYield: true, failedPhases: 1 }))
+      .toBe('transportFailed');
+  });
+
+  it('round-trips every coherent work outcome through compatibility fields', () => {
+    const outcomes: SharedMemoryWorkOutcome[] = [
+      'completed', 'timed-out', 'local-budget-yield', 'incomplete',
+    ];
+    expect(outcomes.map((outcome) => (
+      sharedMemoryWorkOutcome(sharedMemoryCompletionFields(outcome))
+    ))).toEqual(outcomes);
+  });
+
   it('filters peers known not to advertise the current sync protocol', () => {
     const selector = createSwmCatchupPeerSelector({ fallbackProbeLimit: 3 });
 
@@ -92,10 +206,42 @@ describe('SWM catchup peer selection', () => {
     }).selectedPeers).toEqual(['peer-a']);
   });
 
+  it('keeps direct classifier-to-record composition neutral for local yields', () => {
+    const selector = createSwmCatchupPeerSelector({ maxEntries: 1 });
+    selector.record('cg', 'known-peer', 'good', 100);
+    const outcome = classifySwmCatchupPeerOutcome({ localYield: true as const });
+    if (outcome) selector.record('cg', 'new-peer', outcome, 101);
+    expect(selector.get('cg', 'known-peer', 102)).toBe('good');
+    expect(selector.select({ contextGraphId: 'cg', candidatePeers: ['new-peer'], now: 102 }).skippedNegativePeers).toEqual([]);
+    expect(selector.get('cg', 'new-peer', 102)).toBeUndefined();
+    if (outcome) selector.record('cg', 'known-peer', outcome, 103);
+    expect(selector.get('cg', 'known-peer', 104)).toBe('good');
+  });
+
   it('classifies detailed sync outcomes for cache accounting', () => {
     expect(classifySwmCatchupPeerOutcome({ fetchedDataTriples: 1 })).toBe('good');
     expect(classifySwmCatchupPeerOutcome({ deniedPhases: 1 })).toBe('denied');
     expect(classifySwmCatchupPeerOutcome({ failedPeers: 1 })).toBe('transportFailed');
+    const localYield = classifySwmCatchupPeerOutcome({
+      localYield: true as const,
+    });
+    expect(localYield).toBeUndefined();
+    expect(classifySwmCatchupPeerOutcome({
+      localYield: true as const,
+      fetchedMetaTriples: 1,
+      failedPhases: 1,
+    })).toBe('good');
+    const selector = createSwmCatchupPeerSelector();
+    selector.record('cg', 'healthy-peer', 'good', 100);
+    if (localYield) selector.record('cg', 'healthy-peer', localYield, 101);
+    expect(selector.get('cg', 'healthy-peer', 102)).toBe('good');
+    expect(classifySwmCatchupPeerOutcome({
+      failedPhases: 1,
+      backoffWorthyFailures: 1,
+    })).toBe('transportFailed');
+    expect(classifySwmCatchupPeerOutcome({
+      failedPhases: 1,
+    })).toBe('transportFailed');
     expect(classifySwmCatchupPeerOutcome({})).toBe('empty');
   });
 });

@@ -9,19 +9,13 @@
  * Scope: N-Quads parsing/serialization helpers, JSON-LD conversion, and the
  * Merkle-root sync verifier used exclusively by `DKGAgent` internals.
  *
- * Note: `parseNQuads`, `splitNQuadLine`, `stripLiteral`, `verifySyncedData`
- * and related helpers are intentionally duplicated (not shared) with
- * `sync-verify-worker-impl.ts`. That duplication pre-dates this extraction
- * and is out of scope here; see the worker for the parallel implementation.
+ * Durable Merkle verification is shared with the worker implementation so
+ * main-thread fallbacks and production sync cannot drift.
  */
 
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { Logger, OperationContext } from '@origintrail-official/dkg-core';
-import { appendInPlace } from './sync/append-in-place.js';
-import {
-  computeFlatKCRootV10 as computeFlatKCRoot,
-  skolemizeByEntity,
-} from '@origintrail-official/dkg-publisher';
+import { selectVerifiedDurableSyncQuads } from './sync/durable-integrity.js';
 
 export type JsonLdDocument = Record<string, unknown> | Record<string, unknown>[];
 export type JsonLdContent = JsonLdDocument | { public?: JsonLdDocument; private?: JsonLdDocument };
@@ -221,9 +215,9 @@ export async function jsonLdToQuads(
  * Verify synced data by recomputing merkle roots from the received
  * triples and comparing them to the claimed roots in the meta graph.
  *
- * Returns only the verified data and meta triples; unverifiable KCs
- * (those without a merkle root in the meta) are passed through
- * since they may be system/genesis data.
+ * Returns only verified data and metadata. Normal context graphs fail closed
+ * when data has no Merkle-bound KA descriptor; system/genesis callers must
+ * opt into the explicit `acceptUnverified` override.
  */
 export function verifySyncedData(
   dataQuads: Quad[],
@@ -232,199 +226,14 @@ export function verifySyncedData(
   log: Logger,
   acceptUnverified = false,
 ): { data: Quad[]; meta: Quad[]; rejected: number } {
-  if (metaQuads.length === 0) {
-    // No meta graph → no verification possible. Accept data as-is
-    // (covers system contextGraphs that don't have KC metadata).
-    return { data: dataQuads, meta: metaQuads, rejected: 0 };
+  const result = selectVerifiedDurableSyncQuads(dataQuads, metaQuads, acceptUnverified);
+  for (const entry of result.logs) {
+    if (entry.level === 'warn') log.warn(ctx, entry.message);
+    else log.debug(ctx, entry.message);
   }
-
-  // Extract KC UALs and their claimed merkle roots from meta triples
-  const kcMerkleRoots = new Map<string, string>();
-  const kcRootEntities = new Map<string, string[]>();
-
-  for (const q of metaQuads) {
-    if (q.predicate === `${DKG_NS}merkleRoot`) {
-      kcMerkleRoots.set(q.subject, stripLiteral(q.object));
-    }
-  }
-
-  // Find KA → KC relationships and root entities. Read-both (RFC
-  // ka-metadata-trim P3.1): legacy rows tie a token subject `<ual>/<n>` to
-  // its KC via `dkg:partOf`; collapsed-shape rows carry ALL member
-  // `dkg:rootEntity` rows directly on the merkleRoot-bearing UAL subject
-  // with NO partOf edge. kaRootEntity is a multi-map because the collapsed
-  // UAL subject holds every member root; legacy token subjects carry one
-  // row each, so legacy behaviour is unchanged. Keep this in sync with the
-  // identical logic in sync-verify-worker-impl.ts verifySyncedData.
-  const kaToKc = new Map<string, string>();
-  const kaRootEntity = new Map<string, string[]>();
-
-  for (const q of metaQuads) {
-    if (q.predicate === `${DKG_NS}partOf`) {
-      kaToKc.set(q.subject, stripLiteral(q.object));
-    }
-    if (q.predicate === `${DKG_NS}rootEntity`) {
-      const entity = stripLiteral(q.object);
-      const list = kaRootEntity.get(q.subject);
-      if (list) list.push(entity);
-      else kaRootEntity.set(q.subject, [entity]);
-    }
-  }
-
-  // Self-map collapsed rows: a merkleRoot-bearing subject that carries its
-  // own rootEntity rows IS the KA (P3.1 — no token edge to join through).
-  // Keying on kcMerkleRoots guards against non-KA rootEntity carriers
-  // (lifecycle URNs, SWM op rows, …) minting bogus KCs. Without this,
-  // collapsed-shape KCs built no kaToKc entry and fell into the
-  // "no KA info — accept on trust" branch, skipping Merkle verification.
-  for (const kcUal of kcMerkleRoots.keys()) {
-    if (kaRootEntity.has(kcUal) && !kaToKc.has(kcUal)) kaToKc.set(kcUal, kcUal);
-  }
-
-  // Build KC → rootEntities[] map
-  for (const [kaUri, kcUri] of kaToKc) {
-    const rootsForKa = kaRootEntity.get(kaUri);
-    if (!rootsForKa || !kcMerkleRoots.has(kcUri)) continue;
-    let list = kcRootEntities.get(kcUri);
-    if (!list) { list = []; kcRootEntities.set(kcUri, list); }
-    for (const re of rootsForKa) {
-      // Dedupe: pre-trim stores (and multi-root dual-shape writes) carry the
-      // same root on BOTH the aggregate UAL row and its `<ual>/<n>` token
-      // row — double-counting a partition would corrupt the recomputed root.
-      if (!list.includes(re)) list.push(re);
-    }
-  }
-
-  if (kcMerkleRoots.size === 0) {
-    return { data: dataQuads, meta: metaQuads, rejected: 0 };
-  }
-
-  // Detect root entities shared across multiple KCs. When an entity has been
-  // published more than once (e.g. profile updates), the data graph contains
-  // the union of all versions' triples under the same root entity, making
-  // per-KC Merkle verification impossible without KC-level graph isolation.
-  const rootEntityToKCs = new Map<string, string[]>();
-  for (const [kcUal, entities] of kcRootEntities) {
-    for (const re of entities) {
-      if (!rootEntityToKCs.has(re)) rootEntityToKCs.set(re, []);
-      rootEntityToKCs.get(re)!.push(kcUal);
-    }
-  }
-  const overlappingKCs = new Set<string>();
-  for (const [, kcUals] of rootEntityToKCs) {
-    if (kcUals.length > 1) {
-      for (const u of kcUals) overlappingKCs.add(u);
-    }
-  }
-
-  // Partition data triples by root entity
-  const partitioned = skolemizeByEntity(dataQuads);
-
-  // Verify each KC
-  const verifiedKcUals = new Set<string>();
-  let rejected = 0;
-
-  for (const [kcUal, claimedHex] of kcMerkleRoots) {
-    const rootEntities = kcRootEntities.get(kcUal) ?? [];
-    if (rootEntities.length === 0) {
-      // No KA info — can't verify, accept on trust
-      verifiedKcUals.add(kcUal);
-      continue;
-    }
-
-    if (overlappingKCs.has(kcUal)) {
-      // Root entity is shared with other KCs (multi-version entity). Local
-      // partition contains mixed triples so Merkle re-computation would fail.
-      // Accept and defer to chain-level verification (Tier 2).
-      log.debug(ctx, `Skipping Merkle check for ${kcUal}: root entity shared across ${rootEntityToKCs.get(rootEntities[0])!.length} KCs`);
-      verifiedKcUals.add(kcUal);
-      continue;
-    }
-
-    try {
-      const allQuadsForKC: Quad[] = [];
-      for (const re of rootEntities) {
-        const quads = partitioned.get(re) ?? [];
-        appendInPlace(allQuadsForKC, quads);
-      }
-
-      // Collect private merkle roots from KA metadata for this KC
-      const kcPrivateRoots: Uint8Array[] = [];
-      for (const [kaUri, kcUri] of kaToKc) {
-        if (kcUri !== kcUal) continue;
-        for (const mq of metaQuads) {
-          if (mq.subject === kaUri && mq.predicate === `${DKG_NS}privateMerkleRoot`) {
-            const hex = stripLiteral(mq.object).replace(/^0x/, '');
-            if (hex.length === 64) {
-              const bytes = new Uint8Array(32);
-              for (let i = 0; i < 32; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-              kcPrivateRoots.push(bytes);
-            }
-          }
-        }
-      }
-
-      const flatRoot = computeFlatKCRoot(allQuadsForKC, kcPrivateRoots);
-      const flatHex = Array.from(flatRoot).map(b => b.toString(16).padStart(2, '0')).join('');
-
-      // PoS content-binding: `computeFlatKCRoot` now returns the STRUCTURED root
-      // (private data anchored as a sibling). The legacy "without private root
-      // anchoring" fallback is removed — a non-anchoring root is a genuine
-      // mismatch (pre-mainnet cutover clears/re-publishes old KCs).
-      if (flatHex === claimedHex) {
-        verifiedKcUals.add(kcUal);
-      } else if (acceptUnverified) {
-        log.debug(ctx, `Merkle mismatch for ${kcUal} (system context graph, accepted): claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
-        rejected++;
-      } else {
-        log.warn(ctx, `Merkle mismatch for ${kcUal}: claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
-        rejected++;
-      }
-    } catch {
-      log.warn(ctx, `Merkle verification error for ${kcUal}, rejecting`);
-      rejected++;
-    }
-  }
-
-  // Collect triples belonging to verified KCs only
-  const verifiedRootEntities = new Set<string>();
-  for (const kcUal of verifiedKcUals) {
-    for (const re of (kcRootEntities.get(kcUal) ?? [])) {
-      verifiedRootEntities.add(re);
-    }
-  }
-
-  // When acceptUnverified is set (system context graphs), accept all data
-  // rather than dropping profiles that fail merkle verification.
-  if (acceptUnverified && rejected > 0 && verifiedKcUals.size < kcMerkleRoots.size) {
-    log.debug(ctx, `Accepting ${rejected} unverified KC(s) (system context graph)`);
-    return { data: dataQuads, meta: metaQuads, rejected: 0 };
-  }
-
-  // Keep data triples whose root entity belongs to a verified KC,
-  // plus any triples not associated with any KC (genesis/system data)
-  const allKnownRootEntities = new Set<string>();
-  for (const entities of kcRootEntities.values()) {
-    for (const re of entities) allKnownRootEntities.add(re);
-  }
-
-  const verifiedData = dataQuads.filter(q => {
-    if (allKnownRootEntities.has(q.subject)) {
-      return verifiedRootEntities.has(q.subject);
-    }
-    for (const re of verifiedRootEntities) {
-      if (q.subject.startsWith(re)) return true;
-    }
-    return true;
-  });
-
-  // Keep meta triples for verified KCs + unrelated meta triples
-  const verifiedMeta = metaQuads.filter(q => {
-    if (kcMerkleRoots.has(q.subject)) return verifiedKcUals.has(q.subject);
-    const kcUri = kaToKc.get(q.subject);
-    if (kcUri) return verifiedKcUals.has(kcUri);
-    return true;
-  });
-
-  return { data: verifiedData, meta: verifiedMeta, rejected };
+  return {
+    data: result.dataIndexes.map((index) => dataQuads[index]!),
+    meta: result.metaIndexes.map((index) => metaQuads[index]!),
+    rejected: result.rejected,
+  };
 }

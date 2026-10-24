@@ -1,10 +1,11 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { DKGNode } from '../src/node.js';
 import { ProtocolRouter, DEFAULT_MAX_READ_BYTES } from '../src/protocol-router.js';
 import { GossipSubManager } from '../src/gossipsub-manager.js';
 import { DKGEvent, TypedEventBus } from '../src/event-bus.js';
 import { PeerDiscoveryManager } from '../src/discovery.js';
 import { multiaddr } from '@multiformats/multiaddr';
+import { peerIdFromString } from '@libp2p/peer-id';
 
 async function connectNodes(a: DKGNode, b: DKGNode): Promise<void> {
   const bAddr = b.multiaddrs[0];
@@ -55,6 +56,41 @@ describe('DKGNode', () => {
     const peers = node1.libp2p.getPeers().map((p) => p.toString());
     expect(peers).toContain(node2.peerId);
   }, 10000);
+
+  it('advertises a protocol registered after peers have already identified', async () => {
+    const node1 = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
+    const node2 = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
+    nodes.push(node1, node2);
+    await node1.start();
+    await node2.start();
+    // Install the listener before dialing. Otherwise a slow initial Identify
+    // exchange could include lateProtocol and make this test pass without Push.
+    const initialIdentify = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        node1.libp2p.removeEventListener('peer:identify', onIdentify);
+        reject(new Error('Initial peer identification timed out'));
+      }, 6_000);
+      const onIdentify = (event: CustomEvent<{ peerId: { toString(): string } }>) => {
+        if (event.detail.peerId.toString() !== node2.peerId) return;
+        clearTimeout(timeout);
+        node1.libp2p.removeEventListener('peer:identify', onIdentify);
+        resolve();
+      };
+      node1.libp2p.addEventListener('peer:identify', onIdentify);
+    });
+    await node1.libp2p.dial(multiaddr(node2.multiaddrs[0]));
+    await initialIdentify;
+
+    const remotePeer = peerIdFromString(node2.peerId);
+    const lateProtocol = '/test/late-sync-advertisement/1.0.0';
+    const initialProtocols = (await node1.libp2p.peerStore.get(remotePeer)).protocols;
+    expect(initialProtocols.length).toBeGreaterThan(0);
+    expect(initialProtocols).not.toContain(lateProtocol);
+    new ProtocolRouter(node2).register(lateProtocol, async () => new Uint8Array());
+    await vi.waitFor(async () => {
+      expect((await node1.libp2p.peerStore.get(remotePeer)).protocols).toContain(lateProtocol);
+    }, { timeout: 6_000, interval: 100 });
+  }, 10_000);
 
   it('getConnections returns ConnectionInfo with direct transport for local peers', async () => {
     const node1 = new DKGNode({
@@ -240,6 +276,108 @@ describe('GossipSubManager', () => {
       await n.stop();
     }
     nodes.length = 0;
+  });
+
+  it('contains rejected async handlers at the gossip boundary', async () => {
+    let listener!: (event: {
+      detail: { topic: string; data: Uint8Array; from: string };
+    }) => void;
+    const pubsub = {
+      addEventListener: (_event: string, handler: typeof listener) => { listener = handler; },
+      subscribe: () => {},
+      unsubscribe: () => {},
+      publish: async () => {},
+      getTopics: () => [],
+    };
+    const node = { libp2p: { services: { pubsub } } } as unknown as DKGNode;
+    const manager = new GossipSubManager(node, new TypedEventBus());
+    const topic = 'dkg/context-graph/test/finalization';
+    let resolveLogged!: (args: unknown[]) => void;
+    const logged = new Promise<unknown[]>((resolve) => { resolveLogged = resolve; });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation((...args) => {
+      resolveLogged(args);
+    });
+    try {
+      manager.onMessage(topic, async () => {
+        throw new Error('store remains busy');
+      });
+      listener({
+        detail: { topic, data: new Uint8Array(), from: 'peer-a' },
+      });
+
+      await expect(logged).resolves.toEqual([
+        `[GossipSub] handler error on topic "${topic}":`,
+        'store remains busy',
+      ]);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('invokes in registration order without awaiting async completion', async () => {
+    let listener!: (event: {
+      detail: { topic: string; data: Uint8Array; from: string };
+    }) => void;
+    const pubsub = {
+      addEventListener: (_event: string, handler: typeof listener) => { listener = handler; },
+      subscribe: () => {},
+      unsubscribe: () => {},
+      publish: async () => {},
+      getTopics: () => [],
+    };
+    const node = { libp2p: { services: { pubsub } } } as unknown as DKGNode;
+    const manager = new GossipSubManager(node, new TypedEventBus());
+    const topic = 'dkg/context-graph/test/finalization';
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    const firstCompletion = new Promise<void>((resolve) => { releaseFirst = resolve; });
+
+    manager.onMessage(topic, async () => {
+      order.push('first-started');
+      await firstCompletion;
+      order.push('first-finished');
+    });
+    manager.onMessage(topic, () => {
+      order.push('second');
+    });
+
+    listener({
+      detail: { topic, data: new Uint8Array(), from: 'peer-a' },
+    });
+    expect(order).toEqual(['first-started', 'second']);
+
+    releaseFirst();
+    await firstCompletion;
+    await Promise.resolve();
+    expect(order).toEqual(['first-started', 'second', 'first-finished']);
+  });
+
+  it('ignores incidental truthy returns from synchronous handlers', async () => {
+    let listener!: (event: {
+      detail: { topic: string; data: Uint8Array; from: string };
+    }) => void;
+    const pubsub = {
+      addEventListener: (_event: string, handler: typeof listener) => { listener = handler; },
+      subscribe: () => {},
+      unsubscribe: () => {},
+      publish: async () => {},
+      getTopics: () => [],
+    };
+    const node = { libp2p: { services: { pubsub } } } as unknown as DKGNode;
+    const manager = new GossipSubManager(node, new TypedEventBus());
+    const topic = 'dkg/context-graph/test/finalization';
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      manager.onMessage(topic, () => 1);
+      listener({
+        detail: { topic, data: new Uint8Array(), from: 'peer-a' },
+      });
+      await Promise.resolve();
+
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 
   it('publishes and receives messages', async () => {

@@ -54,6 +54,7 @@ async function createAgent(): Promise<{ agent: DKGAgent; internals: DKGAgentInte
   const agent = await DKGAgent.create({
     name: `SwmAgentGateAccess-${Math.random().toString(36).slice(2)}`,
     chainAdapter: new MockChainAdapter(),
+    rfc64CatalogActivation: { enabled: false },
   });
   const gossip = new FakeGossip();
   Object.defineProperty(agent, 'peerId', { value: LOCAL_PEER_ID, configurable: true });
@@ -84,6 +85,18 @@ async function insertAccessMeta(
       subject: contextGraphUri,
       predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
       object: `"${options.accessPolicy ?? 'private'}"`,
+      graph: metaGraph,
+    },
+    {
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_CREATOR,
+      object: `did:dkg:agent:${LOCAL_PEER_ID}`,
+      graph: metaGraph,
+    },
+    {
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_CURATOR,
+      object: 'did:dkg:agent:0x0000000000000000000000000000000000000001',
       graph: metaGraph,
     },
   ];

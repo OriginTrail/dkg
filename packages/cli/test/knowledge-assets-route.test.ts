@@ -41,6 +41,8 @@ import {
   postJson,
   getJson,
   postMultipart,
+  caseVariantAddress,
+  sleep,
   type LiveDaemon,
 } from './helpers/live-daemon.js';
 
@@ -83,7 +85,53 @@ async function postJsonAsAgent(authToken: string, path: string, body: unknown) {
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
     body: JSON.stringify(body),
   });
-  return { status: r.status, body: (await r.json().catch(() => ({}))) as Record<string, any> };
+  return {
+    status: r.status,
+    body: (await r.json().catch(() => ({}))) as Record<string, any>,
+    retryAfter: r.headers.get('retry-after'),
+  };
+}
+/** POST with the node token, keeping the Retry-After header `postJson` drops. */
+function postJsonAsNode(path: string, body: unknown) {
+  return postJsonAsAgent(String(daemon.token), path, body);
+}
+/** Observe an admitted share's owner; retry HTTP only before durable admission. */
+async function shareToSwm(
+  post: (path: string, body: unknown) => ReturnType<typeof postJsonAsAgent>,
+  name: string,
+  body: { contextGraphId: string } & Record<string, unknown>,
+  get: (path: string) => ReturnType<typeof getJsonAsAgent> = path => getJsonAsAgent(String(daemon.token), path),
+) {
+  const path = `/api/knowledge-assets/${name}/swm/share`;
+  let res = await post(path, body);
+  for (let repeats = 0; repeats < 5 && res.status === 503; repeats++) {
+    if (res.body.recoveryJobId) {
+      expect(res.body.recoveryState).toBe('pending');
+      const deadline = Date.now() + 90_000;
+      while (Date.now() < deadline) {
+        const status = await get(res.body.recoveryStatusUrl);
+        expect(status.status).toBe(200);
+        expect(['queued', 'running', 'failed_retrying', 'succeeded']).toContain(status.body.state);
+        if (status.body.state === 'succeeded') {
+          const descriptor = await get(`/api/knowledge-assets/${name}?contextGraphId=${encodeURIComponent(body.contextGraphId)}`);
+          expect(descriptor.status).toBe(200);
+          expect(descriptor.body.status).toBe('swm-shared');
+          // Expose the actual job response; do not fabricate a synchronous body
+          // or replay the POST after recovery to make HTTP assertions pass.
+          return { ...status, retryAfter: null, recovered: true };
+        }
+        await sleep(500);
+      }
+      throw new Error(`Durable share did not complete: ${JSON.stringify(res.body)}`);
+    }
+    if (res.body.code !== 'PROMOTE_RETRYABLE_FAILURE') break;
+    expect(res.body).toMatchObject({ retryable: true, retryAction: 'resume_existing_knowledge_asset',
+      retryPhase: 'swm-share', contextGraphId: body.contextGraphId, retryKnowledgeAssetName: name });
+    expect(res.retryAfter).toBe('1');
+    await sleep(1000);
+    res = await post(path, body);
+  }
+  return { ...res, recovered: false };
 }
 async function getJsonAsAgent(authToken: string, path: string) {
   const r = await fetch(`${daemon.base}${path}`, { headers: { Authorization: `Bearer ${authToken}` } });
@@ -233,22 +281,20 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(descriptor.body.wmCurrentAssertion).toBeTruthy();
     });
 
-    it('atomic create canonicalizes a mixed-case self authorAgentAddress before sealing', async () => {
+    it('atomic create canonicalizes a differently-cased self authorAgentAddress before sealing', async () => {
       const agent = await registerAgentClient('ka-atomic-author-case');
       const cg = `ka-atomic-author-case-${Date.now().toString(36)}`;
       await createRegisteredAgentContextGraph(agent, cg);
-      const mixedCaseAgent = `0x${agent.agentAddress.slice(2).toUpperCase()}`;
-      expect(mixedCaseAgent).not.toBe(agent.agentAddress);
 
       const res = await agent.post('/api/knowledge-assets', {
         contextGraphId: cg,
         name: 'agent-case-atomic',
         quads: [{ subject: 'ex:Case', predicate: 'ex:p', object: '"x"' }],
         finalize: true,
-        authorAgentAddress: mixedCaseAgent,
+        authorAgentAddress: caseVariantAddress(agent.agentAddress),
       });
 
-      expect(res.status, `mixed-case atomic create: ${JSON.stringify(res.body)}`).toBe(201);
+      expect(res.status, `differently-cased atomic create: ${JSON.stringify(res.body)}`).toBe(201);
       expect(String(res.body.authorAddress).toLowerCase()).toBe(agent.agentAddress.toLowerCase());
     });
 
@@ -343,6 +389,48 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(JSON.stringify(body.quads)).toContain('ex:new');
       expect(JSON.stringify(body.quads)).not.toContain('ex:old');
     });
+
+    it('returns a typed conflict when discarding a shared KA without an active WM draft', async () => {
+      const name = 'shared-discard-guard';
+      await createKa(REG, name);
+      await write(REG, name, [{ subject: 'ex:shared', predicate: 'ex:p', object: '"x"' }]);
+      const finalized = await postJson(daemon, `/api/knowledge-assets/${name}/wm/finalize`, { contextGraphId: REG });
+      expect(finalized.status, `finalize: ${JSON.stringify(finalized.body)}`).toBe(200);
+      const shared = await shareToSwm(postJsonAsNode, name, { contextGraphId: REG });
+      expect(shared.status, `share: ${JSON.stringify(shared.body)}`).toBe(200);
+
+      const discarded = await postJson(daemon, `/api/knowledge-assets/${name}/wm/discard`, { contextGraphId: REG });
+      expect(discarded.status, `discard: ${JSON.stringify(discarded.body)}`).toBe(409);
+      expect(discarded.body.code).toBe('KA_WM_LIFECYCLE_REQUIRED');
+      expect(String(discarded.body.error)).toMatch(/active Working Memory draft/i);
+
+      // The rejected discard must leave the shared asset as it was.
+      const descriptor = await getJson(daemon, `/api/knowledge-assets/${name}?contextGraphId=${REG}`);
+      expect(descriptor.status).toBe(200);
+      expect(descriptor.body.status).toBe('swm-shared');
+    });
+
+    it('returns the same typed conflict for wm/write on a shared KA and does not reopen it', async () => {
+      const name = 'shared-write-guard';
+      await createKa(REG, name);
+      await write(REG, name, [{ subject: 'ex:shared', predicate: 'ex:p', object: '"x"' }]);
+      const finalized = await postJson(daemon, `/api/knowledge-assets/${name}/wm/finalize`, { contextGraphId: REG });
+      expect(finalized.status, `finalize: ${JSON.stringify(finalized.body)}`).toBe(200);
+      const shared = await shareToSwm(postJsonAsNode, name, { contextGraphId: REG });
+      expect(shared.status, `share: ${JSON.stringify(shared.body)}`).toBe(200);
+
+      // The mapping sits in the shared WM error handler, so it covers this verb too.
+      const rejected = await write(REG, name, [{ subject: 'ex:late', predicate: 'ex:p', object: '"y"' }]);
+      expect(rejected.status, `write: ${JSON.stringify(rejected.body)}`).toBe(409);
+      expect(rejected.body.code).toBe('KA_WM_LIFECYCLE_REQUIRED');
+
+      // wm/write creates a missing or discarded KA before appending. A shared
+      // one must not be turned back into a fresh draft by the rejected write.
+      const descriptor = await getJson(daemon, `/api/knowledge-assets/${name}?contextGraphId=${REG}`);
+      expect(descriptor.status).toBe(200);
+      expect(descriptor.body.status).toBe('swm-shared');
+      expect(JSON.stringify((await wmQuads(REG, name)).body)).not.toContain('ex:late');
+    });
   });
 
   // ── wm/quads ──────────────────────────────────────────────────────
@@ -384,6 +472,29 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(String(res.body.merkleRoot)).toMatch(/^0x[0-9a-f]{8,}$/);
       expect(String(res.body.authorAddress)).toMatch(/^0x[0-9a-fA-F]{40}$/);
       expect(res.body.assertionUri).toMatch(/^did:dkg:/);
+    });
+
+    // GH#1759 — finalizing a draft with no quads is a client precondition
+    // failure, not a server fault. It used to fall through
+    // `respondAssertionError` to a generic 500 because the engine threw an
+    // untagged Error and the message matched none of the 400 substrings.
+    it('returns 409 ASSERTION_EMPTY when finalizing a draft with no quads', async () => {
+      await createKa(REG, 'fin-empty');
+      const res = await postJson(daemon, '/api/knowledge-assets/fin-empty/wm/finalize', { contextGraphId: REG });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('ASSERTION_EMPTY');
+      expect(String(res.body.error)).toContain('it has no quads');
+    });
+
+    it('still seals normally after the empty draft is given a quad', async () => {
+      await createKa(REG, 'fin-empty-then-filled');
+      const empty = await postJson(daemon, '/api/knowledge-assets/fin-empty-then-filled/wm/finalize', { contextGraphId: REG });
+      expect(empty.status).toBe(409);
+
+      await write(REG, 'fin-empty-then-filled', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);
+      const sealed = await postJson(daemon, '/api/knowledge-assets/fin-empty-then-filled/wm/finalize', { contextGraphId: REG });
+      expect(sealed.status).toBe(200);
+      expect(String(sealed.body.merkleRoot)).toMatch(/^0x[0-9a-f]{8,}$/);
     });
 
     it('rejects a malformed pre-signed attestation (bad signature.r) before finalize', async () => {
@@ -519,11 +630,14 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
     it('advances the SWM pointer (real promote→share)', async () => {
       await createKa(REG, 'share');
       await write(REG, 'share', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);
-      await postJson(daemon, '/api/knowledge-assets/share/wm/finalize', { contextGraphId: REG });
-      const res = await postJson(daemon, '/api/knowledge-assets/share/swm/share', { contextGraphId: REG });
-      expect(res.status).toBe(200);
-      expect(res.body.swmShared).toBe(true);
-      expect(res.body.promotedCount).toBeGreaterThan(0);
+      const finalized = await postJson(daemon, '/api/knowledge-assets/share/wm/finalize', { contextGraphId: REG });
+      expect(finalized.status, `finalize failed: ${JSON.stringify(finalized.body)}`).toBe(200);
+      const res = await shareToSwm(postJsonAsNode, 'share', { contextGraphId: REG });
+      expect(res.status, `share failed: ${JSON.stringify(res.body)}`).toBe(200);
+      if (!res.recovered) {
+        expect(res.body.swmShared).toBe(true);
+        expect(res.body.promotedCount).toBeGreaterThan(0);
+      }
     });
 
     it('agent-scoped token full share auto-seals as the token agent', async () => {
@@ -541,12 +655,14 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(draft.status, `agent draft: ${JSON.stringify(draft.body)}`).toBe(201);
       expect(draft.body.status).toBe('draft-open');
 
-      const res = await agent.post(`/api/knowledge-assets/${name}/swm/share`, { contextGraphId: cg });
+      const res = await shareToSwm(agent.post, name, { contextGraphId: cg }, agent.get);
 
       expect(res.status, `agent share: ${JSON.stringify(res.body)}`).toBe(200);
-      expect(res.body.swmShared).toBe(true);
-      expect(res.body.sealed).toBe(true);
-      expect(res.body.publishReady).toBe(true);
+      if (!res.recovered) {
+        expect(res.body.swmShared).toBe(true);
+        expect(res.body.sealed).toBe(true);
+        expect(res.body.publishReady).toBe(true);
+      }
       const descriptor = await agent.get(
         `/api/knowledge-assets/${name}?contextGraphId=${cg}&agentAddress=${agent.agentAddress}`,
       );
@@ -573,30 +689,40 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       });
 
       it('a bare FULL share (no skipSeal) → 200 sealed:true / publishReady:true', async () => {
-        await createKa(REG, 'share-full-default');
-        await write(REG, 'share-full-default', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);
-        const res = await postJson(daemon, '/api/knowledge-assets/share-full-default/swm/share', {
-          contextGraphId: REG,
-        });
-        expect(res.status).toBe(200);
-        expect(res.body.swmShared).toBe(true);
-        expect(res.body.promotedCount).toBeGreaterThan(0);
-        expect(res.body.sealed).toBe(true);
-        expect(res.body.publishReady).toBe(true);
+        const created = await createKa(REG, 'share-full-default');
+        expect(created.status, `full share create: ${JSON.stringify(created.body)}`).toBe(201);
+        const written = await write(REG, 'share-full-default', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);
+        expect(written.status, `full share write: ${JSON.stringify(written.body)}`).toBe(200);
+        const res = await shareToSwm(postJsonAsNode, 'share-full-default', { contextGraphId: REG });
+        expect(res.status, `full share: ${JSON.stringify(res.body)}`).toBe(200);
+        if (!res.recovered) {
+          expect(res.body.swmShared).toBe(true);
+          expect(res.body.promotedCount).toBeGreaterThan(0);
+          expect(res.body.sealed).toBe(true);
+          expect(res.body.publishReady).toBe(true);
+        }
       });
 
-      it('a skipSeal:true full share → 200 sealed:false / publishReady:false (unsealed in SWM)', async () => {
+      it('a skipSeal:true full share is rejected before SWM mutation', async () => {
         await createKa(REG, 'share-skip-seal');
         await write(REG, 'share-skip-seal', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);
         const res = await postJson(daemon, '/api/knowledge-assets/share-skip-seal/swm/share', {
           contextGraphId: REG,
           skipSeal: true,
         });
-        expect(res.status).toBe(200);
-        expect(res.body.swmShared).toBe(true);
-        expect(res.body.promotedCount).toBeGreaterThan(0);
-        expect(res.body.sealed).toBe(false);
-        expect(res.body.publishReady).toBe(false);
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('UNSEALED_SHARE_UNSUPPORTED');
+      });
+
+      it('rejects root-entity selection before SWM mutation', async () => {
+        await createKa(REG, 'share-subset-rejected');
+        await write(REG, 'share-subset-rejected', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);
+        const res = await postJson(daemon, '/api/knowledge-assets/share-subset-rejected/swm/share', {
+          contextGraphId: REG,
+          entities: ['ex:A'],
+        });
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('KA_ATOMIC_SHARE_REQUIRED');
       });
 
       // UNSEALED_SHARE_BLOCKED → 409: NOT covered here. It needs a residual
@@ -660,7 +786,8 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       await createKa(PUBREG, 'pub-noshare');
       // A UNIQUE subject so a later cross-match can't accidentally share it.
       await write(PUBREG, 'pub-noshare', [{ subject: 'ex:noshare-only', predicate: 'ex:p', object: '"x"' }]);
-      await postJson(daemon, '/api/knowledge-assets/pub-noshare/wm/finalize', { contextGraphId: PUBREG });
+      const finalized = await postJson(daemon, '/api/knowledge-assets/pub-noshare/wm/finalize', { contextGraphId: PUBREG });
+      expect(finalized.status, `finalize failed: ${JSON.stringify(finalized.body)}`).toBe(200);
       const res = await postJson(daemon, '/api/knowledge-assets/pub-noshare/vm/publish', { contextGraphId: PUBREG });
       expect(res.status).toBe(409);
       expect(res.body.code).toBe('PUBLISH_NOT_FULL_SHARE');
@@ -711,8 +838,10 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       // devnet-tier case below.)
       await createKa(REG, 'pub-real');
       await write(REG, 'pub-real', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);
-      await postJson(daemon, '/api/knowledge-assets/pub-real/wm/finalize', { contextGraphId: REG });
-      await postJson(daemon, '/api/knowledge-assets/pub-real/swm/share', { contextGraphId: REG });
+      const finalized = await postJson(daemon, '/api/knowledge-assets/pub-real/wm/finalize', { contextGraphId: REG });
+      expect(finalized.status, `finalize failed: ${JSON.stringify(finalized.body)}`).toBe(200);
+      const shared = await shareToSwm(postJsonAsNode, 'pub-real', { contextGraphId: REG });
+      expect(shared.status, `share: ${JSON.stringify(shared.body)}`).toBe(200);
       const res = await postJson(daemon, '/api/knowledge-assets/pub-real/vm/publish', { contextGraphId: REG });
       expect(res.status).toBeGreaterThanOrEqual(500);
     });
@@ -730,8 +859,10 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       await createKa(LOCAL_AUTOREG, 'pub-autoreg');
       // Unique subject so the SWM selection can't cross-match another KA's quad.
       await write(LOCAL_AUTOREG, 'pub-autoreg', [{ subject: 'ex:autoreg-only', predicate: 'ex:p', object: '"x"' }]);
-      await postJson(daemon, '/api/knowledge-assets/pub-autoreg/wm/finalize', { contextGraphId: LOCAL_AUTOREG });
-      await postJson(daemon, '/api/knowledge-assets/pub-autoreg/swm/share', { contextGraphId: LOCAL_AUTOREG });
+      const finalized = await postJson(daemon, '/api/knowledge-assets/pub-autoreg/wm/finalize', { contextGraphId: LOCAL_AUTOREG });
+      expect(finalized.status, `finalize failed: ${JSON.stringify(finalized.body)}`).toBe(200);
+      const shared = await shareToSwm(postJsonAsNode, 'pub-autoreg', { contextGraphId: LOCAL_AUTOREG });
+      expect(shared.status, `share: ${JSON.stringify(shared.body)}`).toBe(200);
 
       const res = await postJson(daemon, '/api/knowledge-assets/pub-autoreg/vm/publish', { contextGraphId: LOCAL_AUTOREG });
 
@@ -762,7 +893,8 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       // Unique subject so the seal's selection can't cross-match another KA's shared quad.
       await write(LOCAL_NOSHARE, 'pub-noshare-unreg', [{ subject: 'ex:noshare-unreg-only', predicate: 'ex:p', object: '"x"' }]);
       // FINALIZE (seals the WM draft) but DELIBERATELY do NOT swm/share → SWM stays empty.
-      await postJson(daemon, '/api/knowledge-assets/pub-noshare-unreg/wm/finalize', { contextGraphId: LOCAL_NOSHARE });
+      const finalized = await postJson(daemon, '/api/knowledge-assets/pub-noshare-unreg/wm/finalize', { contextGraphId: LOCAL_NOSHARE });
+      expect(finalized.status, `finalize failed: ${JSON.stringify(finalized.body)}`).toBe(200);
 
       const res = await postJson(daemon, '/api/knowledge-assets/pub-noshare-unreg/vm/publish', { contextGraphId: LOCAL_NOSHARE });
 
@@ -809,13 +941,43 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       // different on-chain identity — is devnet-tier: custodial agents on one
       // node all author under the node-owner address.)
       await createKa(LOCAL, 'scoped');
-      const mine = await getJson(daemon, `/api/knowledge-assets/scoped?contextGraphId=${LOCAL}&agentAddress=${ownerAddress}`);
-      expect(mine.status).toBe(200);
-      expect(String(mine.body.agentAddress).toLowerCase()).toBe(ownerAddress.toLowerCase());
+      // The canonical per-layer graph URI exposes a lowercase address while
+      // historical lifecycle URNs preserve the writer's EIP-55 casing. Drive
+      // the lowercase form explicitly so this remains a casing-compatibility
+      // regression even if the create response changes its presentation.
+      const canonicalOwnerAddress = ownerAddress.toLowerCase();
+      const mine = await getJson(daemon, `/api/knowledge-assets/scoped?contextGraphId=${LOCAL}&agentAddress=${canonicalOwnerAddress}`);
+      expect(mine.status, `owner-scoped descriptor: ${JSON.stringify(mine.body)}`).toBe(200);
+      expect(String(mine.body.agentAddress).toLowerCase()).toBe(canonicalOwnerAddress);
 
       const reg = await postJson(daemon, '/api/agent/register', { name: 'ka-agent-b', framework: 'test' });
       const other = await getJson(daemon, `/api/knowledge-assets/scoped?contextGraphId=${LOCAL}&agentAddress=${reg.body.agentAddress}`);
       expect(other.status).toBe(404);
+    });
+
+    it('resolves a finalized rootless KA by its author-scoped UAL', async () => {
+      const name = `rootless-ual-${Date.now().toString(36)}`;
+      const created = await createKa(REG, name, {
+        quads: [{ subject: 'ex:rootless-ual', predicate: 'ex:p', object: '"value"' }],
+        finalize: true,
+      });
+      expect(created.status, `create+finalize: ${JSON.stringify(created.body)}`).toBe(201);
+
+      const byName = await getJson(
+        daemon,
+        `/api/knowledge-assets/${encodeURIComponent(name)}?contextGraphId=${encodeURIComponent(REG)}`,
+      );
+      expect(byName.status, `name descriptor: ${JSON.stringify(byName.body)}`).toBe(200);
+      const reservedUal = String(byName.body.reservedUal ?? '');
+      expect(reservedUal).toMatch(/^did:dkg:[^/]+\/0x[0-9a-f]{40}\/[0-9]+$/);
+
+      const byUal = await getJson(
+        daemon,
+        `/api/knowledge-assets/${encodeURIComponent(reservedUal)}?contextGraphId=${encodeURIComponent(REG)}`,
+      );
+      expect(byUal.status, `UAL descriptor: ${JSON.stringify(byUal.body)}`).toBe(200);
+      expect(byUal.body.name).toBe(name);
+      expect(String(byUal.body.reservedUal).toLowerCase()).toBe(reservedUal.toLowerCase());
     });
 
     it('agent-token reads and discards its own WM draft without an explicit agentAddress query param', async () => {
@@ -861,13 +1023,13 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       // finalized + shared to SWM earlier in this suite, so pulling from SWM
       // re-opens its WM draft and re-seeds its one entity (ex:A).
       const res = await postJson(daemon, '/api/knowledge-assets/share/wm/pull-from', { contextGraphId: REG, layer: 'swm' });
-      expect(res.status).toBe(200);
+      expect(res.status, `pull-from failed: ${JSON.stringify(res.body)}`).toBe(200);
       expect(res.body.wmDraft).toBe('open');
       expect(res.body.seededFrom).toEqual({ layer: 'swm' });
       expect(res.body.fromLayer).toBe('swm');
       expect(typeof res.body.seeded).toBe('number');
       expect(res.body.seeded).toBeGreaterThanOrEqual(1);
-      expect(res.body.entities).toBeGreaterThanOrEqual(1);
+      expect(res.body.seededPublic).toBeGreaterThanOrEqual(1);
     });
 
     it('agent-token pulls from its own SWM lane without an explicit agentAddress body field', async () => {
@@ -882,10 +1044,9 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       });
       expect(writeRes.status, `write: ${JSON.stringify(writeRes.body)}`).toBe(200);
 
-      const shareRes = await agent.post(`/api/knowledge-assets/${name}/swm/share`, {
-        contextGraphId: cg,
-        skipSeal: true,
-      });
+      // This share follows a registration directly, where a prerequisite read
+      // of the share is most likely to be briefly unavailable.
+      const shareRes = await shareToSwm(agent.post, name, { contextGraphId: cg }, agent.get);
       expect(shareRes.status, `share: ${JSON.stringify(shareRes.body)}`).toBe(200);
 
       const pullRes = await agent.post(`/api/knowledge-assets/${name}/wm/pull-from`, {
@@ -1048,6 +1209,15 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(res.status).toBe(200);
       expect(res.body.state).toBe('queued');
       expect(res.body.jobId).toMatch(/^[0-9a-f-]{36}$/);
+    });
+
+    it('rejects root-entity selection instead of enqueueing a partial KA', async () => {
+      const res = await postJson(daemon, '/api/knowledge-assets/async/swm/share-async', {
+        contextGraphId: LOCAL,
+        entities: ['ex:A'],
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('KA_ATOMIC_SHARE_REQUIRED');
     });
 
     it('GET swm/share-jobs returns a jobs array', async () => {

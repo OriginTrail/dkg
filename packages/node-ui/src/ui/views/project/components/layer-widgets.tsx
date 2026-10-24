@@ -1,9 +1,9 @@
 import React, { useId, useMemo, useState, useCallback } from 'react';
 import type { ReactNode } from 'react';
-import { listAssertions, promoteAssertion, describePromoteError, knowledgeAssetFinalize, publishAssertionsToVm, partialPublishWarning, type ConvictionCostCovered } from '../../../api.js';
+import { listAssertions, promoteAssertion, describePromoteError, publishAssertionsToVm, partialPublishWarning, outcomeUnknownPublishNote, type ConvictionCostCovered } from '../../../api.js';
 import type { MemoryEntity } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
-import { LAYER_CONFIG, entityMeta, layerNoun } from '../helpers.js';
+import { LAYER_CONFIG, entityMeta, layerNoun, VM_TRIPLE_STAT } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { useVmPublishGate } from '../../../pages/conviction/useVmPublishGate.js';
 import { PublishEligibilityChipView } from '../../../pages/conviction/PublishEligibilityChip.js';
@@ -92,7 +92,10 @@ export function LayerStatsWidget({ entities, entityCount, triples, layer }: {
         layer={layer}
         items={[
           { id: 'entities', label: layerNoun(layer, entityCount), value: entityCount },
-          { id: 'triples', label: 'Triples', value: triples },
+          { id: 'triples', value: triples, ...(layer === 'vm' ? VM_TRIPLE_STAT : {
+            label: 'Stored triples',
+            tooltip: 'Promotion normalizes draft blank nodes and can leave draft residue; publication adds provenance. Raw triple counts are not expected to match across memory layers.',
+          }) },
           { id: 'connections', label: 'Connections', value: totalConns },
           { id: 'avg', label: 'Avg. connections / entity', value: avgConns },
           ...(docCount > 0 ? [{ id: 'documents', label: 'Documents', value: docCount }] : []),
@@ -188,36 +191,29 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
     let currentAssertion: string | null = null;
     void run(
       async () => {
-        // Seal each draft before sharing — promote moves content OUT of Working Memory, after
-        // which it can no longer be finalized, and a later vm/publish requires a finalized
-        // assertion. The seal is CG-independent (#1116) and promote is off-chain, so no
-        // client-side CG pre-registration is needed. (See OT-RFC-44 Design B.)
-        const assertions = await listAssertions(contextGraphId, 'wm');
-        let promoted = 0;
+        // The share route seals and transfers each complete KA atomically. It is
+        // off-chain, so no client-side CG pre-registration is needed.
+        const assertions = await listAssertions(contextGraphId, 'wm', { includeCounts: false });
         let noopCount = 0;
         for (const a of assertions) {
           currentAssertion = a.name;
-          // Seal the draft first; tolerate already-sealed / nothing-to-seal so re-runs and
-          // empty drafts don't abort the batch (surface real errors).
-          try {
-            await knowledgeAssetFinalize(contextGraphId, a.name, a.subGraph ? { subGraphName: a.subGraph } : {});
-          } catch (e: any) {
-            const m = String(e?.message ?? '');
-            if (!/already|finaliz|sealed|promoted|no quads|reserved/i.test(m)) throw e;
-          }
           // PR #710 — thread `subGraph` so sub-graph-scoped assertions hit the correct
           // daemon lookup key `(cg, name, subGraph)`.
-          const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
-          promoted += res.promotedCount;
+          const res = await promoteAssertion(
+            contextGraphId,
+            a.name,
+            a.subGraph ? { subGraphName: a.subGraph } : {},
+          );
           if (res.promotedCount === 0) noopCount += 1;
         }
         // Issue #864 — flag the "nothing was actually moved" case so users on the bulk-promote
         // widget aren't lied to by a "Promoted 0 triples" success toast.
-        if (promoted > 0) {
-          const tail = noopCount > 0 ? ` (${noopCount} had nothing to promote)` : '';
-          return `Promoted ${promoted} triple${promoted !== 1 ? 's' : ''} to Shared Memory${tail}`;
+        const sharedCount = assertions.length - noopCount;
+        if (sharedCount > 0) {
+          const tail = noopCount > 0 ? ` (${noopCount} already shared or still committing)` : '';
+          return `Shared ${sharedCount} complete Knowledge Asset${sharedCount !== 1 ? 's' : ''} to Shared Memory${tail}`;
         }
-        return 'No triples were promoted — every assertion was already in Shared Memory or its content is still being committed.';
+        return 'No Knowledge Assets were newly shared — all were already in Shared Memory or still committing.';
       },
       (err: any) => {
         const typed = describePromoteError(currentAssertion ?? 'an assertion', err);
@@ -228,13 +224,12 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
 
   if (count === 0) return null;
   const color = '#f59e0b';
-  const noun = layerNoun('wm', count).toLowerCase();
 
   return (
     <LayerActionShell
-      title="Promote"
-      footnote={`Moves ${noun} from this layer to Shared Working Memory.`}
-      context={<>{count} {noun} in this layer can be promoted to Shared Working Memory for collaborative review.</>}
+      title="Share complete Knowledge Assets"
+      footnote="Shares each complete owning Knowledge Asset atomically to Shared Working Memory."
+      context={<>Shares all eligible complete Working Memory Knowledge Assets in this context graph, including assets outside the loaded preview.</>}
       result={result}
       error={error}
     >
@@ -245,7 +240,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
         disabled={busy}
         onClick={promote}
       >
-        {busy ? '...' : '✓ Promote All → Shared'}
+        {busy ? '...' : '✓ Share Complete KAs → Shared'}
       </button>
     </LayerActionShell>
   );
@@ -276,18 +271,21 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
         // per-assertion vm/publish path. No pre-register: the daemon runs preconditions first
         // and only auto-registers on its CG_NOT_REGISTERED retry, so a doomed publish never
         // burns gas.
-        const assertions = await listAssertions(contextGraphId, 'swm');
+        const assertions = await listAssertions(contextGraphId, 'swm', { includeCounts: false });
         // Shared batch loop (api.ts publishAssertionsToVm) — uniform partial/error accounting.
         const r = await publishAssertionsToVm(contextGraphId, assertions);
+        const unknownNote = outcomeUnknownPublishNote(r);
+        const unknownTail = unknownNote ? ` — ⚠ ${unknownNote}` : '';
         if (r.published > 0) {
           const tail = r.failures.length ? ` (${r.failures.length} assertion${r.failures.length === 1 ? '' : 's'} could not be published)` : '';
           const partialTail = r.partial > 0 ? ` — ⚠ ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
           // B8 (#1365 r3) — the CONFIRMED discount aggregated across the BATCH. Absent → hidden.
           setCostCovered(r.convictionCostCovered ?? null);
-          return `Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}`;
+          return `Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}${unknownTail}`;
         }
         if (assertions.length === 0) return 'Nothing to publish — promote assertions to Shared Memory first.';
-        throw new Error(r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed');
+        if (unknownNote && r.failures.length === 0) return `⚠ ${unknownNote}`;
+        throw new Error(`${r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed'}${unknownTail}`);
       },
       // Publish-appropriate: the raw message (matches the old catch, which fell through
       // describePromoteError → null for publish errors). Never says "an assertion".
@@ -296,13 +294,12 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
   }, [contextGraphId, run, gate.blocked]);
 
   if (count === 0) return null;
-  const noun = layerNoun('swm', count).toLowerCase();
 
   return (
     <LayerActionShell
       title="Publish"
-      footnote={`Moves ${noun} from this layer to Verifiable Memory.`}
-      context={<>{count} {noun} in this layer can be published to Verifiable Memory on-chain.</>}
+      footnote="Publishes all eligible complete Shared Working Memory Knowledge Assets in this context graph on-chain."
+      context={<>Publishes all eligible complete Shared Working Memory Knowledge Assets, including assets outside the loaded preview. On-chain publishing incurs a cost.</>}
       result={result}
       error={error}
       extras={
@@ -342,10 +339,12 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
 
 // ─── Horizontal widget strip (stats + types + CTA) for the Entities tab ──
 
-export function LayerWidgetStrip({ layer, entities, entityCount, tripleCount, contextGraphId, onComplete }: {
+export function LayerWidgetStrip({ layer, entities, entityCount, actionEntityCount = entityCount, tripleCount, contextGraphId, onComplete }: {
   layer: 'wm' | 'swm' | 'vm';
   entities: MemoryEntity[];
   entityCount: number;
+  /** Explicit bulk lifecycle scope; may be narrower than the visible entity set. */
+  actionEntityCount?: number;
   tripleCount: number;
   contextGraphId?: string;
   onComplete?: () => void;
@@ -376,8 +375,8 @@ export function LayerWidgetStrip({ layer, entities, entityCount, tripleCount, co
             layer === 'wm'
               ? 'Import data or chat with agents to populate Working Memory.'
               : layer === 'swm'
-                ? 'Promote entities from Working Memory to share them with the team.'
-                : 'Publish entities from Shared Working Memory to verify them on-chain.'
+                ? 'Seal and share complete Knowledge Assets from Working Memory with the team.'
+                : 'Publish complete Knowledge Assets from Shared Working Memory to verify them on-chain.'
           }
         />
       </div>
@@ -389,11 +388,11 @@ export function LayerWidgetStrip({ layer, entities, entityCount, tripleCount, co
         <LayerStatsWidget entities={entities} entityCount={entityCount} triples={tripleCount} layer={layer} />
         <TypeBreakdownWidget entities={entities} />
       </div>
-      {(layer === 'wm' || layer === 'swm') && contextGraphId && (
+      {(layer === 'wm' || layer === 'swm') && contextGraphId && actionEntityCount > 0 && (
         <div className="v10-layer-widgets-strip-action">
           {layer === 'wm'
-            ? <PromoteWidget count={entityCount} contextGraphId={contextGraphId} onComplete={onComplete} onResult={setLastAction} />
-            : <PublishVmWidget count={entityCount} contextGraphId={contextGraphId} onComplete={onComplete} onResult={setLastAction} />}
+            ? <PromoteWidget count={actionEntityCount} contextGraphId={contextGraphId} onComplete={onComplete} onResult={setLastAction} />
+            : <PublishVmWidget count={actionEntityCount} contextGraphId={contextGraphId} onComplete={onComplete} onResult={setLastAction} />}
         </div>
       )}
     </div>

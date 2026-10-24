@@ -1,7 +1,6 @@
 /**
  * OTLP/HTTP log exporter — ships structured log records to an OpenTelemetry
- * collector (or any OTLP/HTTP logs endpoint) as a second, opt-in sink
- * alongside the always-on local SQLite store.
+ * collector (or any OTLP/HTTP logs endpoint) as an opt-in remote sink.
  *
  * Why hand-rolled rather than @opentelemetry/sdk-logs: as of 2026 the OTel JS
  * Logs SDK is still "Development" (Traces/Metrics are Stable). We emit the
@@ -19,7 +18,13 @@
  *  - Transport is outbound HTTPS push only — no inbound scrape endpoint.
  */
 
-import type { LogRecord } from '@origintrail-official/dkg-core';
+import {
+  normalizeLogLevel,
+  type CanonicalLogRecord,
+  type LogLevel,
+  type LogRecord,
+} from '@origintrail-official/dkg-core';
+export type { LogLevel } from '@origintrail-official/dkg-core';
 import { buildTelemetryResourceAttrs } from './telemetry-resource.js';
 
 // OpenTelemetry severity numbers (logs data model).
@@ -30,7 +35,6 @@ const OTEL_SEVERITY: Record<string, { num: number; text: string }> = {
   error: { num: 17, text: 'ERROR' },
 };
 
-export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 const LEVEL_RANK: Record<LogLevel, number> = { debug: 0, info: 1, warn: 2, error: 3 };
 
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
@@ -104,7 +108,7 @@ function attr(key: string, value: string | undefined): OtlpAttribute | null {
 }
 
 export class OtlpLogWorker {
-  private buffer: Array<{ r: LogRecord; tsMs: number }> = [];
+  private buffer: Array<{ r: CanonicalLogRecord; tsMs: number }> = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   private stopped = false;
   private flushing = false;
@@ -161,9 +165,11 @@ export class OtlpLogWorker {
 
   /** Append a record. Filters below minLevel; never awaits the network. */
   push(record: LogRecord): void {
-    if ((LEVEL_RANK[record.level as LogLevel] ?? LEVEL_RANK.info) < this.minRank) return;
+    const level = normalizeLogLevel(record.level);
+    const rank = LEVEL_RANK[level];
+    if (rank < this.minRank) return;
     if (this.buffer.length >= this.maxBuffer) this.buffer.shift();
-    this.buffer.push({ r: record, tsMs: Date.now() });
+    this.buffer.push({ r: { ...record, level }, tsMs: Date.now() });
   }
 
   start(): void {
@@ -245,7 +251,7 @@ export class OtlpLogWorker {
     }
   }
 
-  private requeue(batch: Array<{ r: LogRecord; tsMs: number }>): void {
+  private requeue(batch: Array<{ r: CanonicalLogRecord; tsMs: number }>): void {
     this.buffer.unshift(...batch);
     while (this.buffer.length > this.maxBuffer) this.buffer.shift();
   }
@@ -282,7 +288,7 @@ export class OtlpLogWorker {
     }
   }
 
-  private buildPayload(batch: Array<{ r: LogRecord; tsMs: number }>): string {
+  private buildPayload(batch: Array<{ r: CanonicalLogRecord; tsMs: number }>): string {
     return encodeOtlpLogPayload(batch, this.resourceAttrs, this.scopeVersion);
   }
 }
@@ -300,7 +306,7 @@ export function encodeOtlpLogPayload(
   scopeVersion?: string,
 ): string {
   const logRecords = batch.map(({ r, tsMs }) => {
-    const sev = OTEL_SEVERITY[r.level] ?? OTEL_SEVERITY.info;
+    const sev = OTEL_SEVERITY[normalizeLogLevel(r.level)];
     const nano = String(tsMs * 1_000_000);
     return {
       timeUnixNano: nano,

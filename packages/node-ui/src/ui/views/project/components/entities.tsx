@@ -1,19 +1,18 @@
-import React, { useMemo, useState, useCallback } from 'react';
+import React, { useMemo } from 'react';
 import type { ReactNode } from 'react';
-import { useFetch } from '../../../hooks.js';
 import { encodeDocTabId, resolveDocRef } from '../../../lib/doc-tab-id.js';
-import { truncateMiddle } from '../../../lib/truncate.js';
-import { listAssertions, promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetFinalize, knowledgeAssetPublishWithSeal, publishAssertionsToVm, partialPublishWarning, fetchAssertionUals, type AssertionInfo } from '../../../api.js';
 import { useMemoryEntities, type TrustLevel, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
 import { useTabsStore } from '../../../stores/tabs.js';
 import type { SwmAttributionsResult } from '../../../hooks/useSwmAttributions.js';
-import { LAYER_CONFIG, SOURCE_CONTENT_TYPE, MARKDOWN_FORM, SOURCE_FILE, DKG_SIZE, entityAuthorUri, entityMeta, layerNoun, useLayerTriples, entityTimestamp, formatRelativeTime, type LayerContentTab } from '../helpers.js';
+import { LAYER_CONFIG, VM_TRIPLE_STAT, SOURCE_CONTENT_TYPE, MARKDOWN_FORM, SOURCE_FILE, DKG_SIZE, entityAuthorUri, entityMeta, layerNoun, useLayerTriples, entityTimestamp, formatRelativeTime, type LayerContentTab } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { LayerGraphPanel } from './graph.js';
 import { LayerWidgetStrip } from './layer-widgets.js';
+import { AssertionsList } from './assertions.js';
+export { AssertionsList } from './assertions.js';
 
 // ─── Enhanced Entity list (sorted by triple count, with type pill) ──────
 
@@ -22,6 +21,16 @@ const TRUST_BADGE_CONFIG: Record<TrustLevel, { layerKey: 'wm' | 'swm' | 'vm'; ic
   shared:   { layerKey: 'swm', icon: '◈', label: 'Shared'   },
   verified: { layerKey: 'vm',  icon: '◉', label: 'Verifiable' },
 };
+
+const QUERY_CATALOG_CONFIGURATION_TYPES = new Set([
+  'http://dkg.io/ontology/profile/QueryCatalog',
+  'http://dkg.io/ontology/profile/SavedQuery',
+]);
+
+/** Query-catalog entities are opt-in configuration UI, not implicit bulk lifecycle targets. */
+export function isQueryCatalogConfigurationEntity(entity: MemoryEntity): boolean {
+  return entity.types.some(type => QUERY_CATALOG_CONFIGURATION_TYPES.has(type));
+}
 
 export function EntityList({
   entities,
@@ -170,6 +179,8 @@ export function LayerContent({
   onNodeClick,
   footer,
   swmAttribution,
+  showQueryCatalog = false,
+  onShowQueryCatalogChange,
 }: {
   layer: 'wm' | 'swm' | 'vm';
   entities: MemoryEntity[];
@@ -187,9 +198,19 @@ export function LayerContent({
    *  through to `LayerGraphPanel` to avoid a duplicate SPARQL query
    *  when the same data is already loaded for the Overview feed. */
   swmAttribution?: SwmAttributionsResult;
+  /** Opt-in visibility for the query-catalog KA stored in the reserved meta subgraph. */
+  showQueryCatalog?: boolean;
+  onShowQueryCatalogChange?: (show: boolean) => void;
 }) {
   const config = LAYER_CONFIG[layer];
   const itemsLabel = layerNoun(layer, 2);
+  // The visibility checkbox is presentation-only. Catalog KAs remain
+  // shareable/publishable through their explicit assertion-row action, but
+  // revealing them must not widen the existing bulk mutation CTA.
+  const bulkActionEntityCount = useMemo(
+    () => entities.filter(entity => !isQueryCatalogConfigurationEntity(entity)).length,
+    [entities],
+  );
   const vmLayerStatus = memory.layerStatus?.vm ?? (memory.loading ? 'loading' : memory.error ? 'error' : 'ok');
   const isInitialVerifiableMemoryLoad = layer === 'vm' && vmLayerStatus === 'loading' && entities.length === 0;
   const isVerifiableMemoryUnavailable = layer === 'vm' && vmLayerStatus === 'error' && entities.length === 0;
@@ -222,6 +243,16 @@ export function LayerContent({
           className={`v10-layer-expand-tab ${activeTab === 'docs' ? 'active' : ''}`}
           onClick={handleTab('docs')}
         >Documents</button>
+        {layer !== 'vm' && onShowQueryCatalogChange && (
+          <label className="v10-query-catalog-visibility">
+            <input
+              type="checkbox"
+              checked={showQueryCatalog}
+              onChange={(event) => onShowQueryCatalogChange(event.target.checked)}
+            />
+            <span>Show query catalog</span>
+          </label>
+        )}
       </div>
 
       {activeTab === 'items' && (
@@ -259,6 +290,7 @@ export function LayerContent({
                 layer={layer}
                 entities={entities}
                 entityCount={entityCount}
+                actionEntityCount={bulkActionEntityCount}
                 tripleCount={tripleCount}
                 contextGraphId={contextGraphId}
                 onComplete={memory.refresh}
@@ -280,6 +312,7 @@ export function LayerContent({
           <AssertionsList
             contextGraphId={contextGraphId}
             layer={layer}
+            includeQueryCatalog={showQueryCatalog}
             onComplete={memory.refresh}
             scrollKey={`layer:${layer}:assertions`}
           />
@@ -344,7 +377,7 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
           tone="vm"
           icon={LAYER_CONFIG.vm.icon}
           title="No Knowledge Assets yet."
-          description="Publish entities from Shared Working Memory to verify them on-chain."
+          description="Publish complete Knowledge Assets from Shared Working Memory to verify them on-chain."
         />
       </div>
     );
@@ -366,7 +399,7 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
         layer="vm"
         items={[
           { id: 'assets', value: totalAssets, label: 'Knowledge Assets' },
-          { id: 'triples', value: tripleCount.toLocaleString(), label: 'Verifiable Triples' },
+          { id: 'triples', value: tripleCount.toLocaleString(), ...VM_TRIPLE_STAT },
           { id: 'types', value: typeCount, label: 'Entity Types' },
         ]}
       />
@@ -392,253 +425,6 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
   );
 }
 
-// Small helper: compute unique triples for a given layer slice of memory.
-
-export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }: {
-  contextGraphId: string;
-  layer: 'wm' | 'swm';
-  onComplete: () => void;
-  scrollKey?: string;
-}) {
-  const { data: assertions, loading, refresh } = useFetch(
-    () => listAssertions(contextGraphId, layer),
-    [contextGraphId, layer],
-    0
-  );
-  // Deterministic Option-1 UAL per assertion (dkg:reservedUal), shown next to
-  // the filename. Refreshes alongside the list.
-  const { data: ualMap } = useFetch(
-    () => fetchAssertionUals(contextGraphId),
-    [contextGraphId, layer],
-    0
-  );
-  const [busy, setBusy] = useState<string | null>(null);
-  const [result, setResult] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const handlePromote = useCallback(async (assertion: AssertionInfo) => {
-    // PR #710 Fix D — busy / React keys must use `graphUri`, not
-    // `name`. A root + sub-graph pair can share a name and would
-    // otherwise both highlight as busy on a single click. `graphUri`
-    // is produced by the daemon and uniquely identifies the row.
-    setBusy(assertion.graphUri);
-    setResult(null);
-    setError(null);
-    try {
-      // VM is the on-chain layer; finalize/publish need the CG registered, so
-      // auto-register transparently first.
-      // No client-side CG pre-registration: the seal is CG-independent (#1116 —
-      // finalize works on an unregistered CG with no chain write), WM→SWM promote is
-      // off-chain, and /vm/publish owns register-then-mint (it registers ONLY after
-      // publish preconditions pass, so a doomed publish never burns registration gas).
-      if (layer === 'wm') {
-        // Seal the draft before sharing — promote moves content out of WM and a
-        // later vm/publish requires a finalized assertion, so finalize must run
-        // here. Tolerate already-sealed / nothing-to-seal.
-        try {
-          await knowledgeAssetFinalize(contextGraphId, assertion.name, assertion.subGraph ? { subGraphName: assertion.subGraph } : {});
-        } catch (e: any) {
-          const m = String(e?.message ?? '');
-          if (!/already|finaliz|sealed|promoted|no quads|reserved/i.test(m)) throw e;
-        }
-        // PR #710 Fix A — sub-graph slug threads into the daemon's
-        // `(cg, name, subGraph)` lookup so a row clicked from a
-        // sub-graph partition resolves to that partition's
-        // assertion, not a same-named root one.
-        const res = await promoteAssertion(contextGraphId, assertion.name, 'all', assertion.subGraph);
-        // Issue #864 — fan the promote response through the central
-        // describe helper so 0-count returns get an actionable hint
-        // instead of the misleading "Promoted 0 triples" toast.
-        const outcome = describePromoteResult(assertion.name, res);
-        setResult(outcome.message);
-      } else {
-        // Publish THIS assertion as one Knowledge Asset (Design B, any entity
-        // count) via the shared knowledgeAssetPublishWithSeal wrapper — gets the
-        // seal-in-SWM retry + 207 partial-publish handling like the other CTAs.
-        const res = await knowledgeAssetPublishWithSeal(contextGraphId, assertion.name, assertion.subGraph ? { subGraphName: assertion.subGraph } : {});
-        setResult(
-          res.contextGraphError
-            ? `Published ${assertion.name} on-chain — ⚠ ${partialPublishWarning(res.contextGraphError)}`
-            : `Published ${assertion.name} to Verifiable Memory`,
-        );
-      }
-      refresh();
-      onComplete();
-    } catch (err: any) {
-      const typed = describePromoteError(assertion.name, err);
-      setError(typed ? typed.message : (err?.message ?? 'Action failed'));
-    } finally {
-      setBusy(null);
-    }
-  }, [contextGraphId, layer, refresh, onComplete]);
-
-  const handlePromoteAll = useCallback(async () => {
-    if (!assertions?.length) return;
-    setBusy('__all__');
-    setResult(null);
-    setError(null);
-    // Issue #864 (Codex review on #874) — track the in-flight
-    // assertion so mid-loop failures surface "<name>: …" instead of
-    // "selected assertion …".
-    let currentAssertion: string | null = null;
-    try {
-      // No client-side CG pre-registration (see handleAction): the seal is
-      // CG-independent (#1116), promote is off-chain, and /vm/publish registers-then-
-      // mints only after preconditions pass.
-      if (layer === 'wm') {
-        let total = 0;
-        let noopCount = 0;
-        for (const a of assertions) {
-          currentAssertion = a.name;
-          try {
-            await knowledgeAssetFinalize(contextGraphId, a.name, a.subGraph ? { subGraphName: a.subGraph } : {});
-          } catch (e: any) {
-            const m = String(e?.message ?? '');
-            if (!/already|finaliz|sealed|promoted|no quads|reserved/i.test(m)) throw e;
-          }
-          // PR #710 — see comment on the single-row handler above.
-          const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
-          total += res.promotedCount;
-          if (res.promotedCount === 0) noopCount += 1;
-        }
-        // Issue #864 — distinguish "some moved, some no-ops" from
-        // "literally nothing moved" so the user gets the truth.
-        if (total > 0) {
-          const tail = noopCount > 0 ? ` (${noopCount} had nothing to promote)` : '';
-          setResult(`Promoted ${total} triples across ${assertions.length} assertion${assertions.length !== 1 ? 's' : ''}${tail}`);
-        } else {
-          setResult('No triples were promoted — every assertion was already in Shared Memory or its content is still being committed.');
-        }
-      } else {
-        // Publish each shared assertion as its own Knowledge Asset (Design B) via the
-        // shared batch loop (api.ts publishAssertionsToVm) — seal-retry + 207 partial
-        // handling, uniform with the other batch-publish CTAs (carries the partial detail).
-        const r = await publishAssertionsToVm(contextGraphId, assertions);
-        if (r.published > 0) {
-          const tail = r.failures.length ? ` (${r.failures.length} could not be published)` : '';
-          const partialTail = r.partial > 0 ? ` — ⚠ ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
-          setResult(`Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}`);
-        } else {
-          throw new Error(r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed');
-        }
-      }
-      refresh();
-      onComplete();
-    } catch (err: any) {
-      const typed = describePromoteError(currentAssertion ?? 'selected assertion', err);
-      setError(typed ? typed.message : (err?.message ?? 'Action failed'));
-    } finally {
-      setBusy(null);
-    }
-  }, [assertions, contextGraphId, layer, refresh, onComplete]);
-
-  const scrollRootStyle = { flex: 1, overflow: 'auto' } as const;
-
-  if (loading) {
-    return (
-      <div className="v10-layer-empty-shell" style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
-        <EmptyState
-          compact
-          tone={toneForLayer(layer)}
-          icon={LAYER_CONFIG[layer].icon}
-          title="Loading assertions..."
-        />
-      </div>
-    );
-  }
-
-  if (!assertions?.length) {
-    return (
-      <div className="v10-layer-empty-shell" style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
-        <EmptyState
-          tone={toneForLayer(layer)}
-          icon={LAYER_CONFIG[layer].icon}
-          title={layer === 'swm'
-            ? 'No Shared Working Memory assertions listed yet.'
-            : 'No Working Memory assertions yet.'}
-          description={layer === 'swm'
-            ? 'Promoted assertion contents are available as Shared Working Memory entities. The assertion list will populate once promoted assertions are exposed by the node.'
-            : 'Create or import data to stage assertions in Working Memory.'}
-        />
-      </div>
-    );
-  }
-
-  const actionLabel = layer === 'wm' ? 'Promote → Shared' : 'Publish to VM';
-  const actionAllLabel = layer === 'wm' ? 'Promote All → Shared' : 'Publish all to Verifiable Memory';
-
-  return (
-    <div style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
-      <div style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border-subtle)' }}>
-        <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{assertions.length} assertion{assertions.length !== 1 ? 's' : ''}</span>
-        <button
-          className={`v10-layer-expand-footer-btn ${layer === 'wm' ? 'promote' : 'publish'}`}
-          disabled={busy !== null}
-          onClick={handlePromoteAll}
-          style={{ opacity: busy === '__all__' ? 0.5 : 1 }}
-        >
-          {busy === '__all__' ? '...' : actionAllLabel}
-        </button>
-      </div>
-      {result && (
-        <div
-          data-testid={layer === 'wm' ? 'assertion-promote-result' : 'assertion-publish-result'}
-          style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-success)' }}
-        >
-          ✓ {result}
-        </div>
-      )}
-      {error && (
-        <div
-          data-testid={layer === 'wm' ? 'assertion-promote-result' : 'assertion-publish-result'}
-          style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-danger)' }}
-        >
-          ✕ {error}
-        </div>
-      )}
-      {assertions.map(a => (
-        <div key={a.graphUri} className="v10-item-row" data-testid="assertion-list-row">
-          <span className="v10-item-icon">▤</span>
-          <div className="v10-item-info">
-            <div className="v10-item-name" style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{a.name}</div>
-            {ualMap?.[a.name] && (
-              <div
-                className="v10-item-ual"
-                style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-tertiary)', opacity: 0.7, wordBreak: 'break-all', marginTop: 1 }}
-                title={ualMap[a.name]}
-              >
-                {ualMap[a.name]}
-              </div>
-            )}
-            <div className="v10-item-meta-row">
-              {a.tripleCount != null && <span className="v10-item-count">{a.tripleCount} triples</span>}
-              {a.subGraph && (
-                <span
-                  className="v10-item-count v10-item-subgraph"
-                  title={`In sub-graph: ${a.subGraph}`}
-                >
-                  › {truncateMiddle(a.subGraph, 18)}
-                </span>
-              )}
-            </div>
-          </div>
-          <button
-            data-testid="assertion-row-action"
-            className={`v10-layer-expand-footer-btn ${layer === 'wm' ? 'promote' : 'publish'}`}
-            disabled={busy !== null}
-            onClick={ev => { ev.stopPropagation(); handlePromote(a); }}
-            style={{ opacity: busy === a.graphUri ? 0.5 : 1, flexShrink: 0 }}
-          >
-            {busy === a.graphUri ? '...' : actionLabel}
-          </button>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ─── Full Layer Detail View (WM / SWM / VM) ─────────────────
-
 export function LayerDetailView({
   layer,
   memory,
@@ -648,6 +434,8 @@ export function LayerDetailView({
   activeTab,
   onTabChange,
   swmAttribution,
+  showQueryCatalog = false,
+  onShowQueryCatalogChange,
 }: {
   layer: 'wm' | 'swm' | 'vm';
   memory: ReturnType<typeof useMemoryEntities>;
@@ -659,6 +447,8 @@ export function LayerDetailView({
   /** Codex Code6 (PR #656) — pass-through of the parent's shared
    *  SWM attribution result. */
   swmAttribution?: SwmAttributionsResult;
+  showQueryCatalog?: boolean;
+  onShowQueryCatalogChange?: (show: boolean) => void;
 }) {
   const config = LAYER_CONFIG[layer];
   // No wrapper here: `LayerGraphPanel` already injects `trustLayer:
@@ -694,6 +484,8 @@ export function LayerDetailView({
           onSelectEntity={onSelectEntity}
           onNodeClick={onNodeClick}
           swmAttribution={swmAttribution}
+          showQueryCatalog={showQueryCatalog}
+          onShowQueryCatalogChange={onShowQueryCatalogChange}
         />
       </div>
     </div>

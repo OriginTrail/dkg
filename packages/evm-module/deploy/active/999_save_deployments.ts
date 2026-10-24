@@ -3,7 +3,7 @@ import { DeployFunction } from 'hardhat-deploy/types';
 
 const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   if (hre.network.config.environment !== 'development') {
-    hre.helpers.saveDeploymentsJson('deployments');
+    hre.helpers.saveDeploymentsJson();
   }
 };
 

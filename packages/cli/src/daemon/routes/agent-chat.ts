@@ -56,7 +56,12 @@ const daemonRequire = createRequire(import.meta.url);
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
+import {
+  DKGAgent,
+  isRootlessUpdateError,
+  loadOpWallets,
+  type RootlessUpdateErrorCode,
+} from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
@@ -69,6 +74,13 @@ import {
   LlmClient,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
+
+const ROOTLESS_UPDATE_HTTP_STATUS = {
+  ROOTLESS_UPDATE_INVALID_KA_ID: 422,
+  ROOTLESS_KA_NOT_MATERIALIZED: 422,
+  ROOTLESS_UPDATE_TARGET_CORRUPT: 422,
+  ROOTLESS_UPDATE_TARGET_NOT_CONFIRMED: 422,
+} as const satisfies Record<RootlessUpdateErrorCode, number>;
 import {
   loadConfig,
   saveConfig,
@@ -106,7 +118,7 @@ import {
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -211,11 +223,11 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
 } from '../http-utils.js';
+import { requireNodeAdmin } from '../node-admin-guard.js';
 import {
   normalizeRepo,
   isValidRepoSpec,
@@ -322,12 +334,14 @@ import {
 import { authorizeAgentScopedAuthorClaim } from './shared-assertion-helpers.js';
 import { classifyAgentConnectError } from './agent-connect-error.js';
 import type { RequestContext } from './context.js';
-import type { PublishOptions } from '@origintrail-official/dkg-publisher';
+import { actorFromRequestContext } from './context.js';
+import { handleAgentsListRoute } from './agents-list.js';
+import type { UpdateOptions } from '@origintrail-official/dkg-publisher';
 
 function parsePrecomputedUpdateAttestation(
   raw: unknown,
   res: ServerResponse,
-): PublishOptions['precomputedUpdateAttestation'] | undefined {
+): UpdateOptions['precomputedUpdateAttestation'] | undefined {
   if (raw === undefined) return undefined;
   if (raw === null || typeof raw !== 'object') {
     jsonResponse(res, 400, {
@@ -429,21 +443,28 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     apiPortRef,
     url,
     path,
-    requestToken,
-    requestAgentAddress,
   } = ctx;
+  const actor = actorFromRequestContext(ctx);
+  const {
+    authentication,
+    authenticatedAgentAddress,
+    effectiveAgentAddress: requestAgentAddress,
+  } = actor;
 
 
-  // POST /api/agent/register — register a new agent on this node
+  // POST /api/agent/register — register a new agent on this node. Node-admin
+  // only: registration mints a new API token (and, for custodial agents, a
+  // node-held key), which is an operator decision.
   if (req.method === "POST" && path === "/api/agent/register") {
+    if (!requireNodeAdmin(authentication, res, 'POST /api/agent/register', 'register agents')) return;
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = JSON.parse(body);
-    const { name, publicKey, framework } = parsed;
+    const { name, publicKey, framework, address } = parsed;
     if (!name || typeof name !== "string") {
       return jsonResponse(res, 400, { error: 'Missing required field "name"' });
     }
     try {
-      const record = await agent.registerAgent(name, { publicKey, framework });
+      const record = await agent.registerAgent(name, { publicKey, framework, address });
       validTokens.add(record.authToken);
       const response: Record<string, unknown> = {
         agentAddress: record.agentAddress,
@@ -469,14 +490,13 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   // routes (e.g. memory.ts, query.ts) already use for caller-vs-target
   // gating.
   function authorizeKeyManagementOnAddress(targetAddress: string): { ok: true } | { ok: false; status: number; body: Record<string, unknown> } {
-    const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
-    if (!tokenAgentAddress) return { ok: true };
-    if (tokenAgentAddress.toLowerCase() === targetAddress.toLowerCase()) return { ok: true };
+    if (!authenticatedAgentAddress) return { ok: true };
+    if (authenticatedAgentAddress.toLowerCase() === targetAddress.toLowerCase()) return { ok: true };
     return {
       ok: false,
       status: 403,
       body: {
-        error: `Agent token for ${tokenAgentAddress} cannot manage encryption keys for ${targetAddress}. ` +
+        error: `Agent token for ${authenticatedAgentAddress} cannot manage encryption keys for ${targetAddress}. ` +
           'Use a node-level admin token (~/.dkg/auth.token) to manage other agents on this node.',
       },
     };
@@ -589,8 +609,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   // agent's; gating to admin avoids a non-default-agent token tricking
   // the daemon into republishing on demand for spam.
   if (req.method === "POST" && path === "/api/agent/publish-profile") {
-    const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
-    if (tokenAgentAddress) {
+    if (!canAdministerNode(authentication)) {
       return jsonResponse(res, 403, {
         error: 'POST /api/agent/publish-profile requires a node-level admin token; agent-scoped tokens cannot trigger a profile republish.',
       });
@@ -605,8 +624,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
 
   // GET /api/agent/identity — current agent identity for the requesting token
   if (req.method === "GET" && path === "/api/agent/identity") {
-    const token = extractBearerToken(req.headers.authorization);
-    const agentAddress = agent.resolveAgentAddress(token);
+    const agentAddress = requestAgentAddress;
     const localAgents = agent.listLocalAgents();
     const current = localAgents.find((a) => a.agentAddress === agentAddress);
     return jsonResponse(res, 200, {
@@ -620,54 +638,10 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   }
 
   // GET /api/agents — enriched with live connection health
-  // Optional query params: ?framework=X &skill_type=X
+  // Optional query params: ?framework=X &skill_type=X &connectionStatus=X
+  //                        &local=true|false &limit=N &cursor=X   (GH#310)
   if (req.method === "GET" && path === "/api/agents") {
-    const frameworkFilter = url.searchParams.get("framework") || undefined;
-    const skillTypeFilter = url.searchParams.get("skill_type") || undefined;
-    const agents = await agent.findAgents({
-      ...(frameworkFilter ? { framework: frameworkFilter } : {}),
-    });
-    // If skill_type filter is requested, find agents offering that skill and intersect
-    let filteredAgents = agents;
-    if (skillTypeFilter) {
-      const offerings = await agent.findSkills({ skillType: skillTypeFilter });
-      const agentUris = new Set(offerings.map((o: any) => o.agentUri));
-      filteredAgents = agents.filter((a: any) => agentUris.has(a.agentUri));
-    }
-    const allConns = agent.node.libp2p.getConnections();
-    const connByPeer = new Map<
-      string,
-      { transport: string; direction: string; sinceMs: number }
-    >();
-    for (const c of allConns) {
-      const pid = c.remotePeer.toString();
-      if (!connByPeer.has(pid)) {
-        connByPeer.set(pid, {
-          transport: c.remoteAddr?.toString().includes("/p2p-circuit")
-            ? "relayed"
-            : "direct",
-          direction: c.direction,
-          sinceMs: c.timeline?.open ? Date.now() - c.timeline.open : 0,
-        });
-      }
-    }
-    const myPeerId = agent.peerId;
-    const healthMap = agent.getPeerHealth();
-    const enriched = filteredAgents.map((a: any) => {
-      const isSelf = a.peerId === myPeerId;
-      const conn = connByPeer.get(a.peerId);
-      const health = healthMap.get(a.peerId);
-      return {
-        ...a,
-        connectionStatus: isSelf ? "self" : conn ? "connected" : "disconnected",
-        connectionTransport: conn?.transport ?? null,
-        connectionDirection: conn?.direction ?? null,
-        connectedSinceMs: conn?.sinceMs ?? null,
-        lastSeen: isSelf ? Date.now() : (health?.lastSeen ?? null),
-        latencyMs: health?.latencyMs ?? null,
-      };
-    });
-    return jsonResponse(res, 200, { agents: enriched });
+    return handleAgentsListRoute(ctx);
   }
 
   // GET /api/peer-info?peerId=<id>
@@ -953,11 +927,19 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     return jsonResponse(res, 200, { connected: true });
   }
 
-  // POST /api/update  { kaId, contextGraphId, quads, privateQuads?, precomputedUpdateAttestation? }
+  // POST /api/update  { kaId, contextGraphId, quads?, privateQuads?, precomputedUpdateAttestation? }
   if (req.method === "POST" && path === "/api/update") {
     const body = await readBody(req);
     const parsed = JSON.parse(body);
-    const { kaId, quads, privateQuads } = parsed;
+    const { kaId } = parsed;
+    if (parsed.quads !== undefined && !Array.isArray(parsed.quads)) {
+      return jsonResponse(res, 400, { error: '"quads" must be an array when provided' });
+    }
+    if (parsed.privateQuads !== undefined && !Array.isArray(parsed.privateQuads)) {
+      return jsonResponse(res, 400, { error: '"privateQuads" must be an array when provided' });
+    }
+    const quads = Array.isArray(parsed.quads) ? parsed.quads : [];
+    const privateQuads = Array.isArray(parsed.privateQuads) ? parsed.privateQuads : [];
     const contextGraphId = parsed.contextGraphId;
     const precomputedUpdateAttestation = parsePrecomputedUpdateAttestation(
       parsed.precomputedUpdateAttestation,
@@ -966,18 +948,17 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     if (parsed.precomputedUpdateAttestation !== undefined && !precomputedUpdateAttestation) {
       return;
     }
-    const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
     if (!authorizeAgentScopedAuthorClaim(
       res,
-      tokenAgentAddress,
+      authenticatedAgentAddress,
       precomputedUpdateAttestation?.authorAddress,
       "precomputedUpdateAttestation.authorAddress",
     )) {
       return;
     }
-    if (!kaId || !contextGraphId || !quads?.length) {
+    if (!kaId || !contextGraphId || (quads.length === 0 && privateQuads.length === 0)) {
       return jsonResponse(res, 400, {
-        error: 'Missing "kaId", "contextGraphId", or "quads"',
+        error: 'Missing "kaId", "contextGraphId", or update content in "quads"/"privateQuads"',
       });
     }
     let kcIdBigInt: bigint;
@@ -1058,8 +1039,26 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
       // those to 422 (Unprocessable Entity) so the API surfaces a proper 4xx
       // instead of letting it bubble to the generic 500 handler.
       const message = err instanceof Error ? err.message : String(err);
-      if ((err as any)?.code === "OVERSIZED_RDF_LITERAL") {
+      const errorCode = typeof err === 'object' && err !== null
+        ? Reflect.get(err, 'code')
+        : undefined;
+      if (errorCode === "OVERSIZED_RDF_LITERAL") {
         return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(err));
+      }
+      if (errorCode === "KA_NAMED_GRAPH_SHARE_UNSUPPORTED") {
+        return jsonResponse(res, 400, { error: message });
+      }
+      if (errorCode === "KA_UPDATE_AUTHOR_NOT_OWNER") {
+        return jsonResponse(res, 403, { error: message, code: "KA_UPDATE_AUTHOR_NOT_OWNER" });
+      }
+      if (errorCode === "LEGACY_KA_READ_ONLY") {
+        return jsonResponse(res, 409, { error: message, code: "LEGACY_KA_READ_ONLY" });
+      }
+      if (isRootlessUpdateError(err)) {
+        return jsonResponse(res, ROOTLESS_UPDATE_HTTP_STATUS[err.code], {
+          error: message,
+          code: err.code,
+        });
       }
       if (message.includes('precomputedUpdateAttestation')) {
         return jsonResponse(res, 422, { error: message });
@@ -1084,6 +1083,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
  */
 export function buildSloPayload(agent: {
   getMessengerSloStats: () => Record<string, unknown>;
+  getMessengerOutboxStats?: DKGAgent['getMessengerOutboxStats'];
   getSwmGossipStats: () => {
     publishFailures: Record<string, number>;
     publishFailuresOverflow: number;
@@ -1138,6 +1138,7 @@ export function buildSloPayload(agent: {
   };
 }): {
   protocols: Record<string, unknown>;
+  outbox?: ReturnType<DKGAgent['getMessengerOutboxStats']>;
   gossip: {
     publishFailures: Record<string, number>;
     publishFailuresOverflow: number;
@@ -1187,8 +1188,10 @@ export function buildSloPayload(agent: {
   const swmHandler = agent.getSwmHandlerStats();
   const substrateFanout = agent.getSwmSubstrateFanoutStats?.();
   const shareAckQuorum = agent.getSwmAckQuorumStats?.();
+  const outbox = agent.getMessengerOutboxStats?.();
   return {
     protocols: agent.getMessengerSloStats(),
+    ...(outbox !== undefined ? { outbox } : {}),
     gossip: agent.getSwmGossipStats(),
     swm: {
       ...swmHandler,

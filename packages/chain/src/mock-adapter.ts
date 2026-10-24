@@ -1,10 +1,17 @@
+import { normalizeContextGraphNameHashBatch } from './context-graph-name-hash-resolver.js';
 import type {
   ChainAdapter,
   IdentityProof,
   ReservedRange,
   BatchMintParams,
   BatchMintResult,
+  CanonicalFinalizationReceiptReadOptions,
+  CanonicalFinalizationReceiptResolution,
+  ChainReadOptions,
+  ContextGraphAuthorityReadOptions,
+  ContextGraphLiveAuthorityReadOptions,
   CreateKCParams,
+  FinalizedChainProofSnapshot,
   UpdateKCParams,
   TxResult,
   ChainEvent,
@@ -28,9 +35,18 @@ import type {
   ShardingTableNode,
   PcaContracts,
   PcaRpcMethod,
+  BrowserWalletRpcMethod,
+  IdentityWalletContracts,
+  PublishTransactionResolution,
   VerifyACKIdentityResult,
+  KnowledgeAssetUpdateContext,
+  ContextGraphAuthoritySnapshot,
+  ContextGraphFinalizedCreation,
 } from './chain-adapter.js';
-import type { RpcUsageWindow } from './rpc-usage.js';
+import type { RandomSamplingReadContextReader } from './random-sampling-read-context.js';
+import type { ContextGraphLiveAuthority } from './chain-adapter.js';
+import type { RandomSamplingAvailability } from './random-sampling-availability.js';
+import { emptyRpcUsageWindow, type RpcUsageWindow } from './rpc-usage.js';
 import {
   NoEligibleContextGraphError,
   NoEligibleKnowledgeCollectionError,
@@ -38,13 +54,153 @@ import {
   ChallengeNoLongerActiveError,
 } from './chain-adapter.js';
 import { ethers } from 'ethers';
+import { ChainWriteAheadHookError } from './write-ahead-hook-error.js';
+import {
+  isNonexistentContextGraphStorageRevert,
+  readContextGraphStorageRangeV1,
+} from './evm-context-graph-storage-enumeration.js';
 
 export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
+/** Fixed ContextGraphStorage address the mock reports for its enumeration. */
+export const MOCK_CONTEXT_GRAPH_STORAGE_ADDRESS = '0x' + 'c6'.repeat(20);
+
+export interface MockChainAdapterOptions {
+  /** Seed the first CG allocation for fixtures that model an existing registry. */
+  initialContextGraphId?: bigint;
+}
 
 interface MockBatch {
   merkleRoot: Uint8Array;
   kaCount: number;
   publisherAddress: string;
+}
+
+/**
+ * GH#2270 — the states a transaction can be in that the mock's publish event
+ * log cannot express on its own.
+ *
+ * - `pending`  the node accepted it; no receipt yet.
+ * - `reverted` mined with a failure receipt.
+ * - `mined`    mined and successful, but carrying no publish event.
+ */
+type MockTransactionState = 'pending' | 'reverted' | 'mined';
+
+interface MockKnowledgeCollection {
+  /**
+   * r21 (🔴 3816664744) — the block this collection's CURRENT version was written at. The
+   * coherent snapshot used to report a constant 1 while returning the up-to-date root and count,
+   * so a recovered materialization carried an ordering block from a different point in mock-chain
+   * history than the state it described. Stamped on every write, like a real chain.
+   */
+  versionBlockNumber: number;
+  merkleRoot: Uint8Array;
+  kaCount: number;
+  updateContext: KnowledgeAssetUpdateContext;
+  /** Publisher EOA from `createKnowledgeAssets`; default to mock signer for V8 paths. */
+  publisherAddress: string;
+  /**
+   * Verified author identity from the V10.1 author attestation, mirrored
+   * from the EIP-712 EOA-recovered (or EIP-1271-verified) address. Empty
+   * string for legacy V8 / V9 publishes that pre-date author attestation
+   * — `getLatestMerkleRootAuthor` returns the zero address in that case
+   * to match on-chain behaviour for un-attested writes.
+   */
+  authorAddress: string;
+  /** On-chain context graph id (0n when the mock V8 path didn't carry one). */
+  cgId: bigint;
+  /** Mock Chronos epoch where this KC became active. */
+  startEpoch: bigint;
+  /**
+   * OT-RFC-49 — curated `_catalog` commitment (REPLACED the ciphertext-chunks
+   * pair). `bytes32(0)` + 0 when omitted (default for legacy and public-CG
+   * entries; matches the Solidity default-zero mapping).
+   */
+  catalogRoot: Uint8Array;
+  catalogLeafCount: number;
+}
+
+interface MockContextGraph {
+  manager: string;
+  participantAgents: string[];
+  metadataBatchId: bigint;
+  accessPolicy: number;
+  publishPolicy: number;
+  publishAuthority?: string;
+  publishAuthorityAccountId: bigint;
+  active: boolean;
+  /** Creation time in unix seconds, as `ContextGraphStorage` records it. */
+  createdAt?: number;
+  batches: bigint[];
+  // OT-RFC-38 / LU-6 Phase B — curator-committed wire id.
+  // `null` indicates the curator opted out at create time.
+  nameHash?: string | null;
+  ownershipEra: bigint;
+  policyVersion: bigint;
+  rosterVersion: bigint;
+  authoritySourceBlockNumber: number;
+  authoritySourceBlockHash: string;
+}
+
+function createLegacyUpdateContext(
+  knowledgeAssetsCount: number,
+  currentEpoch: bigint,
+): KnowledgeAssetUpdateContext {
+  return {
+    merkleRootsCount: 1n,
+    minted: BigInt(knowledgeAssetsCount),
+    byteSize: 0n,
+    endEpoch: currentEpoch + 1n,
+    tokenAmount: 0n,
+    isImmutable: false,
+    merkleLeafCount: 0,
+  };
+}
+
+function createV10UpdateContext(
+  params: Pick<V10PublishParams,
+    'byteSize' | 'epochs' | 'tokenAmount' | 'isImmutable' | 'merkleLeafCount'>,
+  currentEpoch: bigint,
+): KnowledgeAssetUpdateContext {
+  return {
+    merkleRootsCount: 1n,
+    minted: 1n,
+    byteSize: params.byteSize,
+    endEpoch: currentEpoch + BigInt(params.epochs),
+    tokenAmount: params.tokenAmount,
+    isImmutable: params.isImmutable,
+    merkleLeafCount: params.merkleLeafCount,
+  };
+}
+
+function createFixtureUpdateContext(input: {
+  chunkCount: number;
+  merkleLeafCount?: number;
+  byteSize?: bigint;
+  startEpoch?: bigint;
+  endEpoch?: bigint;
+  tokenAmount?: bigint;
+}, currentEpoch: bigint): KnowledgeAssetUpdateContext {
+  const startEpoch = input.startEpoch ?? currentEpoch;
+  return {
+    merkleRootsCount: 1n,
+    minted: 1n,
+    byteSize: input.byteSize ?? 0n,
+    endEpoch: input.endEpoch ?? (startEpoch + 1n),
+    tokenAmount: input.tokenAmount ?? 1n,
+    isImmutable: false,
+    merkleLeafCount: input.merkleLeafCount ?? input.chunkCount,
+  };
+}
+
+function applyV10UpdateContext(
+  context: KnowledgeAssetUpdateContext,
+  params: Pick<V10UpdateKAParams,
+    'newByteSize' | 'newMerkleLeafCount' | 'boundNewTokenAmount' | 'newTokenAmount'>,
+): void {
+  context.byteSize = params.newByteSize;
+  context.merkleLeafCount = params.newMerkleLeafCount;
+  context.tokenAmount = params.boundNewTokenAmount ?? params.newTokenAmount ?? context.tokenAmount;
+  context.merkleRootsCount += 1n;
 }
 
 /**
@@ -69,39 +225,27 @@ export class MockChainAdapter implements ChainAdapter {
   private namespaceNextId = new Map<string, bigint>();
   private namespaceOwner = new Map<string, string>();
   private batches = new Map<bigint, MockBatch>();
-  private collections = new Map<bigint, {
-    merkleRoot: Uint8Array;
-    kaCount: number;
-    /** V10 flat-KC merkle leaf count (sorted + deduped). 0 for legacy V8 entries. */
-    merkleLeafCount: number;
-    /** Publisher EOA from `createKnowledgeAssets`; default to mock signer for V8 paths. */
-    publisherAddress: string;
-    /**
-     * Verified author identity from the V10.1 author attestation, mirrored
-     * from the EIP-712 EOA-recovered (or EIP-1271-verified) address. Empty
-     * string for legacy V8 / V9 publishes that pre-date author attestation
-     * — `getLatestMerkleRootAuthor` returns the zero address in that case
-     * to match on-chain behaviour for un-attested writes.
-     */
-    authorAddress: string;
-    /** On-chain context graph id (0n when the mock V8 path didn't carry one). */
-    cgId: bigint;
-    /** Mock Chronos epoch where this KC became active. */
-    startEpoch: bigint;
-    /** Exclusive mock Chronos epoch where this KC expires. */
-    endEpoch: bigint;
-    /** Token amount paid for the KC lifetime. Used to model per-epoch CG value. */
-    tokenAmount: bigint;
-    /**
-     * OT-RFC-49 — curated `_catalog` commitment (REPLACED the ciphertext-chunks
-     * pair). `bytes32(0)` + 0 when omitted (default for legacy and public-CG
-     * entries; matches the Solidity default-zero mapping).
-     */
-    catalogRoot: Uint8Array;
-    catalogLeafCount: number;
-  }>();
+  private collections = new Map<bigint, MockKnowledgeCollection>();
   private contextGraphRegistry = new Map<string, Record<string, string>>();
   private events: ChainEvent[] = [];
+  /**
+   * GH#2270 — transactions this mock knows about that its event log does NOT
+   * represent as a publish. Without it the mock can only say "confirmed
+   * publish" or "never heard of it", so every test of the recovery path would
+   * read a mid-flight transaction as proven absent — the exact fabrication the
+   * tri-state exists to prevent. Populated only through
+   * {@link __setTransactionState}.
+   */
+  private transactionStates = new Map<string, MockTransactionState>();
+  /**
+   * GH#2270 PR-3 r1 — per-wallet finalized account nonce, declared by tests. Empty by default:
+   * the mock has no finality, so it reports `null` and recovery stays fail-closed.
+   */
+  private finalizedAccountNonces = new Map<string, number>();
+  private unfinalizedTxHashes = new Set<string>();
+  /** GH#2270 PR-3 r2 — ids a test declared minted, and ids the mock must refuse to answer for. */
+  private mintedKaIds = new Set<string>();
+  private unknownMintedIds = new Set<string>();
   /** Reserved UAL ranges per publisher address for verifyPublisherOwnsRange */
   private reservedRangesByPublisher = new Map<string, Array<{ startId: bigint; endId: bigint }>>();
   /** Publisher addresses this mock is explicitly allowed to attribute V10 publishes to. */
@@ -115,10 +259,19 @@ export class MockChainAdapter implements ChainAdapter {
   // on-chain shape. Multiaddrs are not stored on Profile (RFC 04 §5.2).
   private relayCapableByIdentity = new Map<bigint, boolean>();
 
-  constructor(chainId = 'mock:31337', signerAddress = MOCK_DEFAULT_SIGNER) {
+  constructor(
+    chainId = 'mock:31337',
+    signerAddress = MOCK_DEFAULT_SIGNER,
+    options: Readonly<MockChainAdapterOptions> = {},
+  ) {
     this.chainId = chainId;
     this.signerAddress = signerAddress;
     this.allowedPublisherAddresses = new Set([ethers.getAddress(signerAddress).toLowerCase()]);
+    const initialContextGraphId = options.initialContextGraphId ?? 1n;
+    if (initialContextGraphId < 1n) {
+      throw new TypeError('Mock initial context graph id must be positive');
+    }
+    this.nextContextGraphId = initialContextGraphId;
   }
 
   async getIdentityId(): Promise<bigint> {
@@ -132,7 +285,7 @@ export class MockChainAdapter implements ChainAdapter {
 
   /** RPC-usage capability: the mock has no RPC transport → always-empty window. */
   drainRpcUsage(): RpcUsageWindow {
-    return { byMethod: {}, ethCallByConsumer: {}, lifetimeTotal: 0 };
+    return emptyRpcUsageWindow();
   }
 
   async ensureProfile(_options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint> {
@@ -267,6 +420,7 @@ export class MockChainAdapter implements ChainAdapter {
       endKAId: params.endKAId.toString(),
       kaCount,
       txHash: this.peekTxHash(),
+      txIndex: this.txIndexInBlock,
     });
 
     return {
@@ -279,22 +433,207 @@ export class MockChainAdapter implements ChainAdapter {
     const created = this.events.find((event) =>
       (event.type === 'KCCreated' || event.type === 'KnowledgeBatchCreated') && event.data.txHash === txHash,
     );
-    if (!created) return null;
+    const txIndex = created?.data.txIndex;
+    if (!created || typeof txIndex !== 'number' || !Number.isSafeInteger(txIndex) || txIndex < 0) {
+      return null;
+    }
 
     return {
       batchId: BigInt(String(created.data.kaId ?? created.data.batchId ?? '0')),
+      kaId: created.data.kaId != null ? BigInt(String(created.data.kaId)) : undefined,
+      merkleRoot: created.data.merkleRoot != null ? fromHex(String(created.data.merkleRoot)) : undefined,
       startKAId: created.data.startKAId != null ? BigInt(String(created.data.startKAId)) : undefined,
       endKAId: created.data.endKAId != null ? BigInt(String(created.data.endKAId)) : undefined,
       txHash,
       blockNumber: created.blockNumber,
+      txIndex,
       blockTimestamp: Math.floor(Date.now() / 1000),
       publisherAddress: String(created.data.publisherAddress ?? this.signerAddress),
+      authorAddress: created.data.authorAddress != null
+        ? String(created.data.authorAddress)
+        : created.data.publisherAddress != null
+          ? String(created.data.publisherAddress)
+          : undefined,
       tokenAmount: created.data.tokenAmount != null ? BigInt(String(created.data.tokenAmount)) : undefined,
+    };
+  }
+
+  async resolvePublishTransaction(
+    txHash: string,
+    _options: ChainReadOptions = {},
+  ): Promise<PublishTransactionResolution> {
+    // PR #2300 r1 — parity with the EVM adapter's finality gate: a MINED verdict (confirmed,
+    // reverted, unrecognized) is only emitted for a receipt whose block is final and canonical;
+    // until then the honest answer is `pending`. The mock mines-and-finalizes instantly by
+    // default, so nothing changes for a test that does not declare otherwise; the seam below
+    // declares the not-yet-final window.
+    const unfinalized = this.unfinalizedTxHashes.has(txHash);
+    const publish = await this.resolvePublishByTxHash(txHash);
+    if (publish) {
+      // Parity with the EVM adapter: the phase classifies the pending answer, scheduling-only.
+      return unfinalized
+        ? { status: 'pending-awaiting-confirmation' }
+        : { status: 'confirmed', publish };
+    }
+
+    switch (this.transactionStates.get(txHash)) {
+      case 'pending': return { status: 'pending-mempool' };
+      // The declared reverted/mined states imply a receipt exists, so their unfinalized window
+      // is the awaiting-confirmation shape — a classification, not a fabricated chain fact.
+      case 'reverted': return unfinalized ? { status: 'pending-awaiting-confirmation' } : { status: 'reverted' };
+      case 'mined': return unfinalized ? { status: 'pending-awaiting-confirmation' } : { status: 'unrecognized' };
+      // Nothing in the event log, nothing declared: the mock genuinely does not
+      // have this transaction, which is what `not-found` asserts.
+      default: return { status: 'not-found' };
+    }
+  }
+
+  /**
+   * Test seam (double-underscore convention, off the ChainAdapter interface) —
+   * declare a transaction the mock knows about but did not mine as a publish.
+   * A hash left undeclared and absent from the event log reads as `not-found`,
+   * the mock's only proven absence.
+   */
+  __setTransactionState(txHash: string, state: MockTransactionState): void {
+    this.transactionStates.set(txHash, state);
+  }
+
+  /** Test seam — undo {@link __setTransactionState} for one hash. */
+  __clearTransactionState(txHash: string): void {
+    this.transactionStates.delete(txHash);
+  }
+
+  /**
+   * PR #2300 r1 test seam — declare that this transaction's receipt sits in a block that is not
+   * yet final (or was reorged out of its height). Every mined verdict for it reads `pending`
+   * until the seam is cleared, mirroring the EVM adapter's finality gate.
+   */
+  __setTransactionUnfinalized(txHash: string, unfinalized = true): void {
+    if (unfinalized) this.unfinalizedTxHashes.add(txHash);
+    else this.unfinalizedTxHashes.delete(txHash);
+  }
+
+  /**
+   * PR #2300 r2 — see {@link ChainAdapter.isReceiptBlockFinalAndCanonical}. The mock's finality
+   * is its per-transaction seam, so the advisory `txHash` is the key here: a receipt whose
+   * transaction is declared unfinalized is not final; everything else is finalized-instantly,
+   * which is the mock's block model.
+   */
+  async isReceiptBlockFinalAndCanonical(
+    receipt: { txHash?: string; blockNumber: number; blockHash: string },
+    _options: ChainReadOptions = {},
+  ): Promise<boolean> {
+    return !(receipt.txHash !== undefined && this.unfinalizedTxHashes.has(receipt.txHash));
+  }
+
+  /**
+   * GH#2270 PR-3 r4 — see {@link ChainAdapter.readFinalizedChainProofSnapshot}. The mock's one
+   * finality seam is the declared finalized nonce (`__setFinalizedAccountNonce` declares the
+   * chain FACT, and survives PR #2300 r1's deletion of the granular read methods it once also
+   * fed), so the snapshot exists exactly when a test has declared one for this address. The
+   * minted half reads the same minted seams (`collections` / `__setKnowledgeAssetMinted` /
+   * `__setKnowledgeAssetMintedUnknown`) in the SAME call, which is the parity the capability
+   * exists for.
+   */
+  async readFinalizedChainProofSnapshot(
+    params: { address: string; kaId: bigint },
+    _options: ChainReadOptions = {},
+  ): Promise<FinalizedChainProofSnapshot | null> {
+    const accountNonce = this.finalizedAccountNonces.get(params.address.toLowerCase());
+    if (accountNonce === undefined) return null;
+    const blockNumber = this.nextBlock;
+    const kaMinted = this.unknownMintedIds.has(params.kaId.toString())
+      ? null
+      : this.collections.has(params.kaId) || this.mintedKaIds.has(params.kaId.toString());
+    return { blockNumber, blockHash: mockBlockHash(blockNumber), accountNonce, kaMinted };
+  }
+
+  /**
+   * Test seam — declare that the mock CANNOT answer for this id, the fail-closed shape a real
+   * deployment produces when the storage contract is absent or the read is ambiguous.
+   */
+  __setKnowledgeAssetMintedUnknown(kaId: bigint): void {
+    this.unknownMintedIds.add(kaId.toString());
+  }
+
+  /** Test seam — declare an id as already minted without driving a full publish. */
+  __setKnowledgeAssetMinted(kaId: bigint): void {
+    this.mintedKaIds.add(kaId.toString());
+  }
+
+  /**
+   * Test seam — declare the wallet's account nonce at the finalized block. Pass `undefined` to go
+   * back to "this deployment cannot answer", which is the mock's default.
+   */
+  __setFinalizedAccountNonce(address: string, nonce: number | undefined): void {
+    if (nonce === undefined) this.finalizedAccountNonces.delete(address.toLowerCase());
+    else this.finalizedAccountNonces.set(address.toLowerCase(), nonce);
+  }
+
+  async resolveCanonicalFinalizationReceipt(
+    txHash: string,
+    options: CanonicalFinalizationReceiptReadOptions = {},
+  ): Promise<CanonicalFinalizationReceiptResolution> {
+    const publish = await this.resolvePublishByTxHash(txHash);
+    const txIndex = publish?.txIndex;
+    if (
+      !publish?.merkleRoot
+      || !publish.publisherAddress
+      || !Number.isSafeInteger(txIndex)
+      || Number(txIndex) < 0
+    ) {
+      // GH#2270 — the same seam `resolvePublishTransaction` reads, mapped onto
+      // this surface's vocabulary. `rejected` covers both a failure receipt and
+      // a mined tx carrying no parseable publish, exactly as the EVM adapter
+      // fuses them here.
+      switch (this.transactionStates.get(txHash)) {
+        case 'pending': return { status: 'pending' };
+        case 'reverted':
+        case 'mined': return { status: 'rejected' };
+        default: return { status: 'not-found' };
+      }
+    }
+    const blockHash = mockBlockHash(publish.blockNumber);
+    if (
+      (options.expectedBlockHash !== undefined
+        && options.expectedBlockHash.toLowerCase() !== blockHash.toLowerCase())
+      || (options.expectedBlockNumber !== undefined
+        && options.expectedBlockNumber !== publish.blockNumber)
+    ) {
+      return { status: 'reorged' };
+    }
+    const kaId = publish.kaId ?? publish.batchId;
+    return {
+      status: 'confirmed',
+      receipt: {
+        txHash,
+        blockNumber: publish.blockNumber,
+        blockHash,
+        txIndex: Number(txIndex),
+        merkleRoot: publish.merkleRoot,
+        publisherAddress: publish.publisherAddress,
+        ...(publish.authorAddress ? { authorAddress: publish.authorAddress } : {}),
+        batchId: publish.batchId,
+        kaId,
+        startKAId: publish.startKAId ?? kaId,
+        endKAId: publish.endKAId ?? kaId,
+        ...(publish.knowledgeAssetsContract
+          ? { knowledgeAssetsContract: publish.knowledgeAssetsContract }
+          : {}),
+      },
     };
   }
 
   async getRequiredPublishTokenAmount(_publicByteSize: bigint, _epochs: number): Promise<bigint> {
     return 1n;
+  }
+
+  async getKnowledgeAssetOwner(kaId: bigint): Promise<string> {
+    const collection = this.collections.get(kaId);
+    if (!collection || collection.authorAddress === ethers.ZeroAddress) {
+      throw new Error(`Mock Knowledge Asset ${kaId.toString()} does not exist`);
+    }
+    return ethers.getAddress(collection.authorAddress);
   }
 
   async verifyPublisherOwnsRange(
@@ -332,9 +671,10 @@ export class MockChainAdapter implements ChainAdapter {
       // Codex PR #241 iter-7: `await` an async WAL hook.
       await params.onBroadcast?.({ txHash: mockUpdateTxHash });
     } catch (hookErr) {
-      throw new Error(
+      throw new ChainWriteAheadHookError(
         `chain:writeahead hook failed before updateKnowledgeCollectionV10 broadcast (mock): ` +
         `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+        hookErr,
       );
     }
 
@@ -342,7 +682,10 @@ export class MockChainAdapter implements ChainAdapter {
     const collection = this.collections.get(params.kaId);
     if (collection) {
       collection.merkleRoot = params.newMerkleRoot;
-      collection.merkleLeafCount = params.newMerkleLeafCount;
+      // r21 (🔴 3816664744) — an update MOVES the version, so it re-stamps the ordering block.
+      // Without this the snapshot would report a fresh root against the creation block.
+      collection.versionBlockNumber = this.nextBlock;
+      applyV10UpdateContext(collection.updateContext, params);
     }
     const hintedPublisherAddress = params.publisherAddress
       ? ethers.getAddress(params.publisherAddress)
@@ -359,6 +702,7 @@ export class MockChainAdapter implements ChainAdapter {
       publisherAddress,
       txHash,
       txIndex,
+      merkleRootCount: collection?.updateContext.merkleRootsCount.toString(),
     });
 
     return {
@@ -380,7 +724,14 @@ export class MockChainAdapter implements ChainAdapter {
       verified: true,
       onChainMerkleRoot: fromHex(match.data.newMerkleRoot as string),
       blockNumber: match.blockNumber,
+      // GH#2270 PR-3 r4 — parity with the EVM adapter, which returns the receipt's blockHash.
+      // Update-job recovery evidence requires the canonical block hash, so a mock without one
+      // silently disqualified every update-recovery path from being drivable in tests.
+      blockHash: mockBlockHash(match.blockNumber),
       txIndex: typeof match.data.txIndex === 'number' ? match.data.txIndex : 0,
+      merkleRootCount: match.data.merkleRootCount
+        ? BigInt(String(match.data.merkleRootCount))
+        : undefined,
     };
   }
 
@@ -389,16 +740,15 @@ export class MockChainAdapter implements ChainAdapter {
   async createKnowledgeAsset(params: CreateKCParams): Promise<TxResult> {
     const kaId = this.nextBatchId++;
     this.collections.set(kaId, {
+      versionBlockNumber: this.nextBlock,
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsCount,
-      merkleLeafCount: 0,
+      updateContext: createLegacyUpdateContext(params.knowledgeAssetsCount, this.rsEpoch),
       publisherAddress: this.signerAddress,
       // Legacy V8 path — no attestation, mirror the on-chain `address(0)`.
       authorAddress: ethers.ZeroAddress,
       cgId: 0n,
       startEpoch: this.rsEpoch,
-      endEpoch: this.rsEpoch + 1n,
-      tokenAmount: 0n,
       catalogRoot: new Uint8Array(32),
       catalogLeafCount: 0,
     });
@@ -419,6 +769,11 @@ export class MockChainAdapter implements ChainAdapter {
     }
 
     existing.merkleRoot = params.newMerkleRoot;
+    // r21 (🔴 3816664744) — the legacy V8 update moves the version too, so it re-stamps the
+    // ordering block alongside the V10 path. Leaving it out would make the snapshot's block
+    // depend on WHICH update entry point a fixture happened to use.
+    const legacyCollection = this.collections.get(params.kaId);
+    if (legacyCollection) legacyCollection.versionBlockNumber = this.nextBlock;
     this.pushEvent('KCUpdated', {
       kaId: params.kaId.toString(),
       newMerkleRoot: toHex(params.newMerkleRoot),
@@ -489,6 +844,55 @@ export class MockChainAdapter implements ChainAdapter {
 
   async hasContextGraphRegistryScanWatermark(): Promise<boolean> {
     return false;
+  }
+
+  /** The mock's registry scans above always return nothing, as on mainnet. */
+  async hasContextGraphNameRegistry(): Promise<boolean> {
+    return false;
+  }
+
+  /**
+   * ContextGraphStorage id enumeration over the in-memory graphs, through the
+   * same range semantics as the EVM adapter. The anchor is the last mined block.
+   */
+  async readContextGraphStorageRange(
+    options: import('./chain-adapter.js').ContextGraphStorageRangeOptions,
+  ): Promise<import('./chain-adapter.js').ContextGraphStorageRange> {
+    const anchorBlockNumber = Math.max(0, this.nextBlock - 1);
+    const latestId = this.nextContextGraphId - 1n;
+    const nonexistent = (contextGraphId: bigint) => Object.assign(
+      new Error(`ERC721NonexistentToken(${contextGraphId})`),
+      {
+        code: 'CALL_EXCEPTION',
+        revert: { name: 'ERC721NonexistentToken', args: [contextGraphId] },
+      },
+    );
+    return readContextGraphStorageRangeV1({
+      storageAddress: MOCK_CONTEXT_GRAPH_STORAGE_ADDRESS,
+      readAnchor: async () => ({
+        number: anchorBlockNumber,
+        hash: mockBlockHash(anchorBlockNumber),
+      }),
+      readLatestId: async () => latestId,
+      readContextGraph: async (contextGraphId) => {
+        const cg = this.contextGraphs.get(contextGraphId);
+        if (!cg) throw nonexistent(contextGraphId);
+        return [
+          cg.manager,
+          cg.participantAgents,
+          cg.metadataBatchId,
+          cg.active,
+          BigInt(cg.createdAt ?? 0),
+          cg.accessPolicy,
+          cg.publishPolicy,
+          cg.publishAuthority ?? ethers.ZeroAddress,
+          cg.publishAuthorityAccountId,
+        ];
+      },
+      readNameHash: async (contextGraphId) =>
+        this.contextGraphs.get(contextGraphId)?.nameHash ?? ethers.ZeroHash,
+      isNonexistentContextGraph: isNonexistentContextGraphStorageRevert,
+    }, options);
   }
 
   // --- V10 Publishing Conviction NFT (DKGPublishingConvictionNFT) ---
@@ -777,7 +1181,18 @@ export class MockChainAdapter implements ChainAdapter {
     };
   }
 
-  async requestPublishingConvictionRpc(method: PcaRpcMethod, _params: unknown[] = []): Promise<unknown> {
+  async getIdentityWalletContracts(): Promise<IdentityWalletContracts> {
+    return {
+      profile: ethers.getAddress('0x' + '33'.repeat(20)),
+      identity: ethers.getAddress('0x' + '44'.repeat(20)),
+      storage: ethers.getAddress('0x' + '55'.repeat(20)),
+      chainId: this.chainId,
+      rpcUrls: [],
+      walletRpcUrls: [],
+    };
+  }
+
+  async requestBrowserWalletRpc(method: BrowserWalletRpcMethod, _params: unknown[] = []): Promise<unknown> {
     switch (method) {
       case 'eth_chainId': {
         const tail = this.chainId.includes(':') ? this.chainId.split(':').pop()! : this.chainId;
@@ -793,6 +1208,11 @@ export class MockChainAdapter implements ChainAdapter {
       case 'eth_getTransactionByHash':
         return null;
     }
+  }
+
+  /** @deprecated Use the feature-neutral browser-wallet RPC bridge. */
+  async requestPublishingConvictionRpc(method: PcaRpcMethod, params: unknown[] = []): Promise<unknown> {
+    return this.requestBrowserWalletRpc(method, params);
   }
 
   /** Mirrors `agentToAccountId`; `0n` for unregistered → publisher SDK
@@ -828,8 +1248,8 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   /**
-   * Mock owner-lookup for the daemon's curated-CG registration
-   * preflight (`local curator == ownerOf(pcaAccountId)`).
+   * Mock owner lookup for the daemon's curated-CG registration coherence
+   * preflight. Caller authorization (owner or exact-PCA agent) is separate.
    */
   async getPublishingConvictionAccountOwner(accountId: bigint): Promise<string> {
     const acct = this.convictionAccounts.get(accountId);
@@ -883,20 +1303,7 @@ export class MockChainAdapter implements ChainAdapter {
 
   // --- On-Chain Context Graphs (ContextGraphs contract) ---
 
-  private contextGraphs = new Map<bigint, {
-    manager: string;
-    participantAgents: string[];
-    metadataBatchId: bigint;
-    accessPolicy: number;
-    publishPolicy: number;
-    publishAuthority?: string;
-    publishAuthorityAccountId: bigint;
-    active: boolean;
-    batches: bigint[];
-    // OT-RFC-38 / LU-6 Phase B — curator-committed wire id.
-    // `null` indicates the curator opted out at create time.
-    nameHash?: string | null;
-  }>();
+  private contextGraphs = new Map<bigint, MockContextGraph>();
   private nextContextGraphId = 1n;
 
   async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
@@ -982,8 +1389,14 @@ export class MockChainAdapter implements ChainAdapter {
       publishAuthority,
       publishAuthorityAccountId,
       active: true,
+      createdAt: Math.floor(Date.now() / 1000),
       batches: [],
       nameHash,
+      ownershipEra: 0n,
+      policyVersion: 0n,
+      rosterVersion: 0n,
+      authoritySourceBlockNumber: this.nextBlock,
+      authoritySourceBlockHash: mockBlockHash(this.nextBlock),
     });
 
     this.pushEvent('ContextGraphCreated', {
@@ -1198,6 +1611,39 @@ export class MockChainAdapter implements ChainAdapter {
     return true;
   }
 
+  /** The mock exposes the same cohesive solved-period capability as EVM. */
+  getRandomSamplingReadContextReader(): RandomSamplingReadContextReader {
+    const getBindingId = () => 'mock-random-sampling:mock-random-sampling-storage';
+    const isCurrent = (bindingId: string): boolean =>
+      this.isRandomSamplingReady() && bindingId === getBindingId();
+    return Object.freeze({
+      getRandomSamplingBindingId: getBindingId,
+      readRandomSamplingContext: async () => {
+        if (!this.isRandomSamplingReady()) return undefined;
+        return Object.freeze({
+          bindingId: getBindingId(),
+          chronosEpoch: await this.getCurrentEpoch(),
+        });
+      },
+      isRandomSamplingBindingCurrent: isCurrent,
+    });
+  }
+
+  async getCurrentEpoch(): Promise<bigint> {
+    return this.rsEpoch;
+  }
+
+  async resolveRandomSamplingAvailability(identityId: bigint): Promise<RandomSamplingAvailability> {
+    try {
+      if (!this.isRandomSamplingReady()) {
+        return { kind: 'unavailable', reason: 'contracts_not_deployed' };
+      }
+      return { kind: 'available', member: await this.isShardingTableMember(identityId) };
+    } catch (error) {
+      return { kind: 'indeterminate', error };
+    }
+  }
+
   async verify(params: VerifyParams): Promise<TxResult> {
     const cg = this.contextGraphs.get(params.contextGraphId);
     if (!cg || !cg.active) {
@@ -1273,6 +1719,7 @@ export class MockChainAdapter implements ChainAdapter {
       endKAId: endId.toString(),
       kaCount: params.kaCount,
       txHash: publishTxHash,
+      txIndex: this.txIndexInBlock,
     });
     this.pushEvent('KCCreated', {
       kaId: batchId.toString(),
@@ -1282,6 +1729,7 @@ export class MockChainAdapter implements ChainAdapter {
       endKAId: endId.toString(),
       kaCount: params.kaCount,
       txHash: publishTxHash,
+      txIndex: this.txIndexInBlock,
     });
 
     const tx = this.txResult(true);
@@ -1315,7 +1763,10 @@ export class MockChainAdapter implements ChainAdapter {
    * (`0`=public, `1`=curated). Unknown ids yield `0` to match the
    * Solidity default-zero mapping.
    */
-  async getContextGraphAccessPolicy(contextGraphId: bigint): Promise<number> {
+  async getContextGraphAccessPolicy(
+    contextGraphId: bigint,
+    _options: ChainReadOptions = {},
+  ): Promise<number> {
     const cg = this.contextGraphs.get(contextGraphId);
     if (!cg) return 0;
     const ap = (cg as { accessPolicy?: number }).accessPolicy;
@@ -1331,7 +1782,10 @@ export class MockChainAdapter implements ChainAdapter {
    * proof callers require before trusting {@link getContextGraphAccessPolicy}
    * (which is permissively default-`0` for unknown ids).
    */
-  async isContextGraphActiveOnChain(contextGraphId: bigint): Promise<boolean> {
+  async isContextGraphActiveOnChain(
+    contextGraphId: bigint,
+    _options: ChainReadOptions = {},
+  ): Promise<boolean> {
     return this.contextGraphs.has(contextGraphId);
   }
 
@@ -1371,6 +1825,242 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   /**
+   * Live single-read mirror, composed from the three point reads so tests that
+   * stub any of them keep observing exactly the calls they did before.
+   */
+  async getContextGraphLiveAuthority(
+    contextGraphId: bigint,
+    options: ContextGraphLiveAuthorityReadOptions = {},
+  ): Promise<ContextGraphLiveAuthority | null> {
+    options.signal?.throwIfAborted();
+    // Sequential and conditional on purpose: the three-read path this mirrors
+    // never read the policy of an inactive graph nor the roster of a public
+    // one, and suites that stub the point reads observe exactly those calls.
+    // Never `null`: the mock has no "minted but burned" state, and a graph the
+    // mock does not know is exactly what a stubbed liveness probe describes.
+    // Same call arity as the point-read wiring this replaces: options only when
+    // a signal is present. Note the agent now always supplies one on this path
+    // (the read is shared in flight, so a timed-out caller must be able to
+    // leave it), so a spy should pin the id rather than the whole call.
+    const readOptions = options.signal === undefined ? undefined : { signal: options.signal };
+    const live = await (readOptions === undefined
+      ? this.isContextGraphActiveOnChain(contextGraphId)
+      : this.isContextGraphActiveOnChain(contextGraphId, readOptions));
+    if (!live) return { active: false, accessPolicy: 0, participantAgents: [] };
+    const accessPolicy = await (readOptions === undefined
+      ? this.getContextGraphAccessPolicy(contextGraphId)
+      : this.getContextGraphAccessPolicy(contextGraphId, readOptions));
+    if (accessPolicy !== 1) return { active: true, accessPolicy, participantAgents: [] };
+    const participantAgents = await this.getContextGraphParticipantAgents(contextGraphId);
+    return { active: true, accessPolicy, participantAgents };
+  }
+
+  /** Offline-development mirror of the finalized RFC-64 authority snapshot. */
+  async getContextGraphAuthoritySnapshot(
+    contextGraphId: bigint,
+    options: ContextGraphAuthorityReadOptions = {},
+  ): Promise<ContextGraphAuthoritySnapshot> {
+    options.signal?.throwIfAborted();
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (cg === undefined) {
+      throw new Error(`Mock: Context Graph ${contextGraphId.toString()} is not registered`);
+    }
+    const numericChainId = this.chainId.split(':').at(-1);
+    if (numericChainId === undefined || !/^(0|[1-9][0-9]*)$/u.test(numericChainId)) {
+      throw new Error(`Mock: chainId ${this.chainId} has no canonical numeric authority id`);
+    }
+    return Object.freeze({
+      chainId: numericChainId,
+      governanceContract: `0x${'1'.padStart(40, '0')}`,
+      contextGraphId: contextGraphId.toString(10),
+      owner: cg.manager.toLowerCase(),
+      active: cg.active,
+      accessPolicy: cg.accessPolicy,
+      publishPolicy: cg.publishPolicy,
+      publishAuthority: cg.publishAuthority === undefined
+        || cg.publishAuthority === ethers.ZeroAddress
+        ? null
+        : cg.publishAuthority.toLowerCase(),
+      publishAuthorityAccountId: cg.publishAuthorityAccountId.toString(10),
+      participantAgents: Object.freeze(cg.participantAgents
+        .map((address) => address.toLowerCase())
+        .sort()),
+      nameHash: cg.nameHash ?? ethers.ZeroHash,
+      ownershipEra: cg.ownershipEra.toString(10),
+      policyVersion: cg.policyVersion.toString(10),
+      rosterVersion: cg.rosterVersion.toString(10),
+      sourceBlockNumber: cg.authoritySourceBlockNumber.toString(10),
+      sourceBlockHash: cg.authoritySourceBlockHash,
+    });
+  }
+
+  async getContextGraphFinalizedCreation(
+    contextGraphId: bigint,
+    options: ContextGraphAuthorityReadOptions = {},
+  ): Promise<ContextGraphFinalizedCreation | undefined> {
+    options.signal?.throwIfAborted();
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (cg === undefined || typeof cg.nameHash !== 'string'
+      || cg.nameHash === ethers.ZeroHash) return undefined;
+    if (cg.accessPolicy !== 0 && cg.accessPolicy !== 1) return undefined;
+    return Object.freeze({
+      nameHash: cg.nameHash,
+      accessPolicy: cg.accessPolicy as 0 | 1,
+    });
+  }
+
+  async addContextGraphParticipantAgent(contextGraphId: bigint, agent: string): Promise<TxResult> {
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (!cg) throw new Error(`Mock: context graph ${contextGraphId} does not exist`);
+    if (!ethers.isAddress(agent)) throw new Error(`Mock: invalid participant agent ${agent}`);
+    const normalized = ethers.getAddress(agent);
+    if (normalized === ethers.ZeroAddress) throw new Error('Mock: zero participant agent');
+    if (cg.participantAgents.some((value) => value.toLowerCase() === normalized.toLowerCase())) {
+      throw new Error(`Mock: participant agent ${normalized} already exists`);
+    }
+    if (cg.participantAgents.length >= 256) throw new Error('Mock: participantAgents cap');
+    cg.participantAgents.push(normalized);
+    this.advanceContextGraphAuthorityGeneration(cg, { roster: true });
+    this.pushEvent('AgentParticipantAdded', {
+      contextGraphId: contextGraphId.toString(),
+      agent: normalized,
+    });
+    return this.txResult(true);
+  }
+
+  async removeContextGraphParticipantAgent(contextGraphId: bigint, agent: string): Promise<TxResult> {
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (!cg) throw new Error(`Mock: context graph ${contextGraphId} does not exist`);
+    if (!ethers.isAddress(agent)) throw new Error(`Mock: invalid participant agent ${agent}`);
+    const normalized = ethers.getAddress(agent);
+    const index = cg.participantAgents.findIndex(
+      (value) => value.toLowerCase() === normalized.toLowerCase(),
+    );
+    if (index < 0) throw new Error(`Mock: participant agent ${normalized} not found`);
+    cg.participantAgents.splice(index, 1);
+    this.advanceContextGraphAuthorityGeneration(cg, { roster: true });
+    this.pushEvent('AgentParticipantRemoved', {
+      contextGraphId: contextGraphId.toString(),
+      agent: normalized,
+    });
+    return this.txResult(true);
+  }
+
+  /** Test seam for the ownership-transfer event counted by the EVM authority snapshot. */
+  async __transferContextGraphOwnership(
+    contextGraphId: bigint,
+    newOwner: string,
+  ): Promise<TxResult> {
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (!cg) throw new Error(`Mock: context graph ${contextGraphId} does not exist`);
+    if (!ethers.isAddress(newOwner)) throw new Error(`Mock: invalid context graph owner ${newOwner}`);
+    const normalized = ethers.getAddress(newOwner);
+    if (normalized === ethers.ZeroAddress) throw new Error('Mock: zero context graph owner');
+    const previousOwner = cg.manager;
+    const rotateOwnerAuthority = previousOwner.toLowerCase()
+      === (cg.publishAuthority ?? ethers.ZeroAddress).toLowerCase()
+      && previousOwner.toLowerCase() !== normalized.toLowerCase();
+    cg.manager = normalized;
+    this.advanceContextGraphAuthorityGeneration(cg, { ownership: true });
+    this.pushEvent('Transfer', {
+      contextGraphId: contextGraphId.toString(),
+      from: previousOwner,
+      to: normalized,
+    });
+    if (rotateOwnerAuthority) {
+      cg.publishAuthority = normalized;
+      cg.publishAuthorityAccountId = 0n;
+      // ContextGraphStorage._update emits this second policy event in the same
+      // transaction, so the EVM-derived policyVersion advances twice while the
+      // policy source remains this transaction's block/hash.
+      this.advanceContextGraphAuthorityGeneration(cg, { policy: true });
+      this.pushEvent('PublishAuthorityUpdated', {
+        contextGraphId: contextGraphId.toString(),
+        publishAuthority: normalized,
+        publishAuthorityAccountId: '0',
+      });
+    }
+    return this.txResult(true);
+  }
+
+  /** Test seam for the publish-policy update event counted by the EVM authority snapshot. */
+  async __updateContextGraphPublishPolicy(
+    contextGraphId: bigint,
+    publishPolicy: number,
+  ): Promise<TxResult> {
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (!cg) throw new Error(`Mock: context graph ${contextGraphId} does not exist`);
+    if (publishPolicy !== 0 && publishPolicy !== 1) {
+      throw new Error('Mock: invalid publishPolicy');
+    }
+    cg.publishPolicy = publishPolicy;
+    if (publishPolicy === 1) {
+      cg.publishAuthority = ethers.ZeroAddress;
+      cg.publishAuthorityAccountId = 0n;
+    } else if (cg.publishAuthority === undefined || cg.publishAuthority === ethers.ZeroAddress) {
+      cg.publishAuthority = ethers.getAddress(this.signerAddress);
+    }
+    this.advanceContextGraphAuthorityGeneration(cg, { policy: true });
+    this.pushEvent('PublishPolicyUpdated', {
+      contextGraphId: contextGraphId.toString(),
+      publishPolicy,
+    });
+    return this.txResult(true);
+  }
+
+  /** Test seam for the publish-authority update event counted by the EVM authority snapshot. */
+  async __updateContextGraphPublishAuthority(
+    contextGraphId: bigint,
+    publishAuthority: string,
+    publishAuthorityAccountId = 0n,
+  ): Promise<TxResult> {
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (!cg) throw new Error(`Mock: context graph ${contextGraphId} does not exist`);
+    if (cg.publishPolicy !== 0) {
+      throw new Error('Mock: open policy cannot set a publishAuthority');
+    }
+    if (!ethers.isAddress(publishAuthority)) {
+      throw new Error(`Mock: invalid publishAuthority ${publishAuthority}`);
+    }
+    const normalized = ethers.getAddress(publishAuthority);
+    if (normalized === ethers.ZeroAddress) throw new Error('Mock: zero publishAuthority');
+    if (publishAuthorityAccountId !== 0n) {
+      const pcaOwner = await this.getPublishingConvictionAccountOwner(publishAuthorityAccountId);
+      if (normalized.toLowerCase() !== pcaOwner.toLowerCase()) {
+        throw new Error('Mock: PCA publishAuthority must match account owner');
+      }
+    }
+    cg.publishAuthority = normalized;
+    cg.publishAuthorityAccountId = publishAuthorityAccountId;
+    this.advanceContextGraphAuthorityGeneration(cg, { policy: true });
+    this.pushEvent('PublishAuthorityUpdated', {
+      contextGraphId: contextGraphId.toString(),
+      publishAuthority: normalized,
+      publishAuthorityAccountId: publishAuthorityAccountId.toString(),
+    });
+    return this.txResult(true);
+  }
+
+  private advanceContextGraphAuthorityGeneration(
+    cg: MockContextGraph,
+    dimensions: Readonly<{ ownership?: boolean; policy?: boolean; roster?: boolean }>,
+  ): void {
+    const ownershipChanged = dimensions.ownership === true;
+    const policyChanged = dimensions.policy === true || ownershipChanged;
+    const rosterChanged = dimensions.roster === true || ownershipChanged;
+    if (ownershipChanged) cg.ownershipEra += 1n;
+    if (rosterChanged) cg.rosterVersion += 1n;
+    if (policyChanged) {
+      cg.policyVersion += 1n;
+      // Match the EVM adapter: this source identifies the last policy event,
+      // not the last roster event. A roster-only change must preserve the policy
+      // digest so accepted-current authority can advance on rosterVersion alone.
+      cg.authoritySourceBlockNumber = this.nextBlock;
+      cg.authoritySourceBlockHash = mockBlockHash(this.nextBlock);
+    }
+  }
+
+  /**
    * OT-RFC-38 / LU-6 Phase B — mock mirror of
    * `ContextGraphStorage.getNameHash(uint256)`. Returns `null` for
    * unregistered ids OR for ids the curator opted out of committing
@@ -1381,6 +2071,45 @@ export class MockChainAdapter implements ChainAdapter {
     const cg = this.contextGraphs.get(contextGraphId);
     if (!cg) return null;
     return cg.nameHash ?? null;
+  }
+
+  /** Offline-development parity for the EVM current-state name-hash reverse lookup. */
+  async resolveContextGraphIdByNameHash(nameHash: string): Promise<bigint | null> {
+    if (!ethers.isHexString(nameHash, 32)) {
+      throw new TypeError('resolveContextGraphIdByNameHash requires a bytes32 nameHash');
+    }
+    const normalized = nameHash.toLowerCase();
+    if (normalized === ethers.ZeroHash) return null;
+    const matches = [...this.contextGraphs.entries()]
+      .filter(([, cg]) => cg.nameHash === normalized)
+      .map(([id]) => id);
+    if (matches.length === 0) return null;
+    if (matches.length !== 1) {
+      throw new Error(
+        `resolveContextGraphIdByNameHash: ambiguous ${normalized}; ` +
+        `getNameHash commits it to ${matches.length} numeric ids`,
+      );
+    }
+    return matches[0];
+  }
+
+  async resolveContextGraphIdsByNameHashes(
+    nameHashes: readonly string[],
+    options: ChainReadOptions = {},
+  ): Promise<ReadonlyMap<string, bigint | null>> {
+    options.signal?.throwIfAborted();
+    const names = normalizeContextGraphNameHashBatch(nameHashes);
+    const bindings = new Map<string, bigint | null>(names.map((name) => [name, null]));
+    for (const [id, graph] of this.contextGraphs) {
+      options.signal?.throwIfAborted();
+      const name = graph.nameHash?.toLowerCase();
+      if (!name || name === ethers.ZeroHash || !bindings.has(name)) continue;
+      if (bindings.get(name) !== null) {
+        throw new Error(`resolveContextGraphIdsByNameHashes: ambiguous ${name}`);
+      }
+      bindings.set(name, id);
+    }
+    return bindings;
   }
 
   // --- V10 Publish (KnowledgeAssetsV10 → KnowledgeCollectionStorage) ---
@@ -1463,9 +2192,10 @@ export class MockChainAdapter implements ChainAdapter {
       // completion before the mock "broadcasts".
       await params.onBroadcast?.({ txHash: mockPublishTxHash });
     } catch (hookErr) {
-      throw new Error(
+      throw new ChainWriteAheadHookError(
         `chain:writeahead hook failed before createKnowledgeAssets broadcast (mock): ` +
         `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+        hookErr,
       );
     }
 
@@ -1484,15 +2214,14 @@ export class MockChainAdapter implements ChainAdapter {
     // fixtures that never set reservedKaId are unaffected).
     const kaId = params.reservedKaId ?? this.nextBatchId++;
     this.collections.set(kaId, {
+      versionBlockNumber: this.nextBlock,
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsAmount,
-      merkleLeafCount: params.merkleLeafCount,
+      updateContext: createV10UpdateContext(params, this.rsEpoch),
       publisherAddress,
       authorAddress: ethers.getAddress(params.author.address),
       cgId: params.contextGraphId,
       startEpoch: this.rsEpoch,
-      endEpoch: this.rsEpoch + BigInt(params.epochs),
-      tokenAmount: params.tokenAmount,
       catalogRoot: params.catalogRoot && params.catalogRoot.length === 32
         ? params.catalogRoot
         : new Uint8Array(32),
@@ -1521,6 +2250,7 @@ export class MockChainAdapter implements ChainAdapter {
       merkleRoot: toHex(params.merkleRoot),
       byteSize: params.byteSize.toString(),
       txHash,
+      txIndex: this.txIndexInBlock,
       publisherAddress,
       startKAId: startKAId.toString(),
       endKAId: endKAId.toString(),
@@ -1681,6 +2411,7 @@ export class MockChainAdapter implements ChainAdapter {
     knowledgeAssetStorageContract?: string;
     chunks: Array<{ chunkId: bigint; chunk: string }>;
     merkleLeafCount?: number;
+    byteSize?: bigint;
     publisherAddress?: string;
     startEpoch?: bigint;
     endEpoch?: bigint;
@@ -1695,9 +2426,17 @@ export class MockChainAdapter implements ChainAdapter {
       cgId: input.contextGraphId,
     });
     this.collections.set(input.kaId, {
+      versionBlockNumber: this.nextBlock,
       merkleRoot: fromHex(input.merkleRootHex),
       kaCount: input.chunks.length,
-      merkleLeafCount: input.merkleLeafCount ?? input.chunks.length,
+      updateContext: createFixtureUpdateContext({
+        chunkCount: input.chunks.length,
+        merkleLeafCount: input.merkleLeafCount,
+        byteSize: input.byteSize,
+        startEpoch: input.startEpoch,
+        endEpoch: input.endEpoch,
+        tokenAmount: input.tokenAmount,
+      }, this.rsEpoch),
       publisherAddress: input.publisherAddress ?? this.signerAddress,
       // `__registerKC` is a Random-Sampling test bridge that bypasses the
       // V10 publish path entirely; no attestation is signed, so mirror
@@ -1705,8 +2444,6 @@ export class MockChainAdapter implements ChainAdapter {
       authorAddress: ethers.ZeroAddress,
       cgId: input.contextGraphId,
       startEpoch: input.startEpoch ?? this.rsEpoch,
-      endEpoch: input.endEpoch ?? ((input.startEpoch ?? this.rsEpoch) + 1n),
-      tokenAmount: input.tokenAmount ?? 1n,
       catalogRoot: new Uint8Array(32),
       catalogLeafCount: 0,
     });
@@ -1775,10 +2512,13 @@ export class MockChainAdapter implements ChainAdapter {
       const collection = this.collections.get(kaId);
       if (!collection) return false;
       if (collection.cgId <= 0n) return false;
-      if (this.rsEpoch < collection.startEpoch || this.rsEpoch >= collection.endEpoch) return false;
-      const lifetime = collection.endEpoch - collection.startEpoch;
+      if (
+        this.rsEpoch < collection.startEpoch ||
+        this.rsEpoch >= collection.updateContext.endEpoch
+      ) return false;
+      const lifetime = collection.updateContext.endEpoch - collection.startEpoch;
       if (lifetime <= 0n) return false;
-      return collection.tokenAmount / lifetime > 0n;
+      return collection.updateContext.tokenAmount / lifetime > 0n;
     });
     if (kcEntries.length === 0) {
       throw new NoEligibleContextGraphError();
@@ -1807,7 +2547,9 @@ export class MockChainAdapter implements ChainAdapter {
       proofingPeriodDurationInBlocks: MockChainAdapter.RS_MOCK_PERIOD_DURATION_IN_BLOCKS,
       solved: false,
       isCurated: false,
-      challengeLeafCount: BigInt(challengeCollection?.merkleLeafCount ?? chunkIds.length),
+      challengeLeafCount: BigInt(
+        challengeCollection?.updateContext.merkleLeafCount ?? chunkIds.length,
+      ),
       challengeRoot: fromHex(kcEntry.merkleRootHex),
     };
     this.rsChallenges.set(identityId, challenge);
@@ -1912,10 +2654,43 @@ export class MockChainAdapter implements ChainAdapter {
     return entry.merkleRoot;
   }
 
+  async getMerkleRootCount(kaId: bigint): Promise<bigint> {
+    return (await this.getKnowledgeAssetUpdateContext(kaId)).merkleRootsCount;
+  }
+
+  /** GH#2270 PR #2300 — the mock has ONE state, so its view is coherent and current by construction. */
+  async readKnowledgeAssetVersionSnapshot(
+    kaId: bigint,
+  ): Promise<{
+    latestRoot: string;
+    rootCount: bigint;
+    latestAuthor: string;
+    latestPublisher: string;
+    blockNumber: number;
+  } | null> {
+    try {
+      return {
+        latestRoot: ethers.hexlify(await this.getLatestMerkleRoot(kaId)),
+        rootCount: await this.getMerkleRootCount(kaId),
+        latestAuthor: await this.getLatestMerkleRootAuthor(kaId),
+        latestPublisher: await this.getLatestMerkleRootPublisher(kaId),
+        blockNumber: this.collections.get(kaId)?.versionBlockNumber ?? this.nextBlock,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async getKnowledgeAssetUpdateContext(kaId: bigint): Promise<KnowledgeAssetUpdateContext> {
+    const entry = this.collections.get(kaId);
+    if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
+    return { ...entry.updateContext };
+  }
+
   async getMerkleLeafCount(kaId: bigint): Promise<number> {
     const entry = this.collections.get(kaId);
     if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return entry.merkleLeafCount;
+    return entry.updateContext.merkleLeafCount;
   }
 
   async getCatalogRoot(kaId: bigint): Promise<Uint8Array> {
@@ -1987,6 +2762,10 @@ function toHex(bytes: Uint8Array): string {
   return '0x' + Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
+}
+
+function mockBlockHash(blockNumber: number): string {
+  return `0x${blockNumber.toString(16).padStart(64, '0')}`;
 }
 
 function fromHex(hex: string): Uint8Array {

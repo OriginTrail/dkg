@@ -19,6 +19,12 @@
 # Environment:
 #   DEVNET_DIR    Base directory for devnet data (default: .devnet)
 #   HARDHAT_PORT  Hardhat node port (default: 8545)
+#   DEVNET_BLAZEGRAPH_PORT
+#                 Host port for the devnet Blazegraph container (default: 9999)
+#   DEVNET_OXIGRAPH_SERVER_PORT_5 / DEVNET_OXIGRAPH_SERVER_PORT_6
+#                 Host ports for edge-node Oxigraph containers (defaults: 7878/7879)
+#   DEVNET_DOCKER_NAME_PREFIX
+#                 Prefix for devnet store container names (default: devnet)
 #   UI_PORT       node-ui Vite port (default: 5173)
 #   UI_NODE_ID    Which devnet node the UI talks to (default: 1)
 #   NUM_CORE_NODES
@@ -30,6 +36,24 @@
 #                 Context graph used by /api/epcis/capture when publisher is enabled
 #   DEVNET_SWM_SYNC_ON_CONNECT=0
 #                 Skip peer-connect SWM catch-up, useful for bulk SWM benchmarks
+#   DEVNET_SNAPSHOT_GC_{HARD_RESERVE,TRIGGER_FREE,TARGET_FREE}_BYTES
+#                 Local snapshot-store watermarks (defaults: 256 MiB, 512 MiB,
+#                 and 1 GiB) so devnet keeps capacity admission without
+#                 requiring production-scale free disk.
+#   DEVNET_SNAPSHOT_GC_FINALIZED_CLEANUP=1
+#                 Opt every node into the finalized-snapshot collector
+#                 (sharedMemoryPublicSnapshotStorage.gc.finalizedCleanupEnabled).
+#   DEVNET_SNAPSHOT_GC_FINALIZED_RETENTION_MS
+#                 Grace period after a confirmed publish before a snapshot may
+#                 be reclaimed (only written with FINALIZED_CLEANUP=1; the node
+#                 default is 24 hours).
+#   DEVNET_SNAPSHOT_GC_INTERVAL_MS
+#                 How often the snapshot collector runs (only written when set;
+#                 the node default is 5 minutes).
+#   DEVNET_RPC_BUDGET=shipped
+#                 Keep each node's shipped chain RPC request budget. By default
+#                 (`local`) nodes get a budget sized for the one local chain
+#                 they share: see devnet_chain_config_block.
 #
 set -euo pipefail
 
@@ -66,16 +90,23 @@ NUM_OP_WALLETS=3
 # overwhelming the prover loop. Set to 0 to disable (fall back to per-tx
 # mining) for tests that need deterministic block-per-tx semantics.
 HARDHAT_BLOCK_INTERVAL_MS="${HARDHAT_BLOCK_INTERVAL_MS:-1000}"
-BLAZEGRAPH_PORT=9999
-BLAZEGRAPH_CONTAINER="devnet-blazegraph"
+DEVNET_DOCKER_NAME_PREFIX="${DEVNET_DOCKER_NAME_PREFIX:-devnet}"
+DEVNET_SNAPSHOT_GC_HARD_RESERVE_BYTES="${DEVNET_SNAPSHOT_GC_HARD_RESERVE_BYTES:-268435456}"
+DEVNET_SNAPSHOT_GC_TRIGGER_FREE_BYTES="${DEVNET_SNAPSHOT_GC_TRIGGER_FREE_BYTES:-536870912}"
+DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES="${DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES:-1073741824}"
+DEVNET_RPC_BUDGET="${DEVNET_RPC_BUDGET:-local}"
+BLAZEGRAPH_PORT="${DEVNET_BLAZEGRAPH_PORT:-9999}"
+BLAZEGRAPH_CONTAINER="${DEVNET_DOCKER_NAME_PREFIX}-blazegraph"
+BLAZEGRAPH_LOG_MAX_SIZE="200m"
+BLAZEGRAPH_LOG_MAX_FILE="20"
 # Webapp context path: the 2.1.5 Docker image serves under /bigdata; a native
 # 2.1.6 JAR (the Apple-silicon workaround) serves under /blazegraph. Override with
 # DEVNET_BLAZEGRAPH_CTX to match whichever Blazegraph is actually running.
 BLAZEGRAPH_CTX="${DEVNET_BLAZEGRAPH_CTX:-bigdata}"
-OXIGRAPH_SERVER_PORT_5=7878
-OXIGRAPH_SERVER_PORT_6=7879
-OXIGRAPH_CONTAINER_5="devnet-oxigraph-5"
-OXIGRAPH_CONTAINER_6="devnet-oxigraph-6"
+OXIGRAPH_SERVER_PORT_5="${DEVNET_OXIGRAPH_SERVER_PORT_5:-7878}"
+OXIGRAPH_SERVER_PORT_6="${DEVNET_OXIGRAPH_SERVER_PORT_6:-7879}"
+OXIGRAPH_CONTAINER_5="${DEVNET_DOCKER_NAME_PREFIX}-oxigraph-5"
+OXIGRAPH_CONTAINER_6="${DEVNET_DOCKER_NAME_PREFIX}-oxigraph-6"
 
 # Hardhat default accounts (first 10 of the well-known mnemonic)
 # "test test test test test test test test test test test junk"
@@ -329,11 +360,13 @@ deploy_contracts() {
   # NEVER lower this (e.g. to 1). The devnet MUST exercise the real 3-of-N
   # StorageACK quorum so publish/consensus behaviour matches mainnet. A lower
   # value silently hides quorum bugs and produces false "publishing works"
-  # signals. A publisher collects StorageACKs from its PEERS only (it does NOT
-  # sign its own quorum), so a VM publish needs `minimumRequiredSignatures`
-  # OTHER reachable core nodes — i.e. >= minSig + 1 core nodes total (>= 4 for
-  # minSig=3). Verified empirically: with only 3 core nodes a publish aborts
-  # with "need 3 ACKs but only 2 core peers connected — quorum impossible".
+  # signals. A publisher collects StorageACKs from Core nodes only, and a
+  # publishing Core also counts its own StorageACK (it stores the copy and
+  # signs through its local endpoint; the chain requires distinct identities).
+  # So an Edge publish needs `minimumRequiredSignatures` reachable cores and a
+  # Core publish needs minSig - 1 OTHER reachable cores. The devnet runs
+  # >= minSig + 1 core nodes (4 for minSig=3), which leaves an Edge publish one
+  # spare core.
   # DO NOT CHANGE THIS VALUE. ── important ──
   local ps_addr
   ps_addr=$(node -e "
@@ -361,10 +394,50 @@ deploy_contracts() {
 
 BLAZEGRAPH_AVAILABLE=false
 
+# Prints the named metadata fields, one value per line — callers ask for
+# fields by NAME; the JSON contract has no positional output form.
+read_blazegraph_metadata() {
+  node "$REPO_ROOT/packages/cli/blazegraph-image-metadata.cjs" \
+    "$REPO_ROOT/blazegraph-image.json" "$@"
+}
+
+create_blazegraph_namespace() {
+  local ns="$1"
+  local namespace_xml response_code
+  if ! namespace_xml="$(
+    node "$REPO_ROOT/packages/cli/blazegraph-image-metadata.cjs" --namespace-xml "$ns"
+  )"; then
+    log "WARNING: Failed to render Blazegraph namespace properties: $ns"
+    return 1
+  fi
+  if ! response_code="$(
+    curl -sS -o /dev/null -w '%{http_code}' -X POST \
+      "http://127.0.0.1:$BLAZEGRAPH_PORT/bigdata/namespace" \
+      -H "Content-Type: application/xml" \
+      --data-binary "$namespace_xml"
+  )"; then
+    log "WARNING: Failed to create Blazegraph namespace: $ns (request failed)"
+    return 1
+  fi
+  case "$response_code" in
+    2??)
+      log "Created Blazegraph namespace: $ns"
+      return 0
+      ;;
+    409)
+      log "Blazegraph namespace already exists: $ns"
+      return 0
+      ;;
+    *)
+      log "WARNING: Failed to create Blazegraph namespace: $ns (HTTP ${response_code:-unknown})"
+      return 1
+      ;;
+  esac
+}
+
 start_blazegraph() {
-  # Use an EXTERNAL Blazegraph already serving on the port (e.g. a native arm64 JAR
-  # started out-of-band because the amd64 Docker image only runs under glacial qemu
-  # on Apple silicon). Skips Docker entirely; namespaces are the operator's job here.
+  # Use an EXTERNAL Blazegraph already serving on the port. Skips Docker entirely;
+  # namespaces are the operator's job here.
   if curl -sf --max-time 4 "http://127.0.0.1:${BLAZEGRAPH_PORT}/${BLAZEGRAPH_CTX}/status" >/dev/null 2>&1; then
     log "Blazegraph already serving on :${BLAZEGRAPH_PORT}/${BLAZEGRAPH_CTX} (external) — using it (skip Docker)"
     BLAZEGRAPH_AVAILABLE=true
@@ -384,10 +457,20 @@ start_blazegraph() {
     docker rm -f "$BLAZEGRAPH_CONTAINER" > /dev/null 2>&1 || true
   fi
 
+  local blazegraph_image blazegraph_container_port
+  if ! blazegraph_image="$(read_blazegraph_metadata image)" \
+    || ! blazegraph_container_port="$(read_blazegraph_metadata containerPort)"; then
+    log "ERROR: Could not read the pinned Blazegraph image metadata"
+    return 1
+  fi
+
   log "Starting Blazegraph (Docker) on port $BLAZEGRAPH_PORT..."
   if ! docker run -d --name "$BLAZEGRAPH_CONTAINER" \
-    -p "$BLAZEGRAPH_PORT:8080" \
-    lyrasis/blazegraph:2.1.5 > /dev/null 2>&1; then
+    --log-driver local \
+    --log-opt "max-size=$BLAZEGRAPH_LOG_MAX_SIZE" \
+    --log-opt "max-file=$BLAZEGRAPH_LOG_MAX_FILE" \
+    -p "127.0.0.1:$BLAZEGRAPH_PORT:$blazegraph_container_port" \
+    "$blazegraph_image" > /dev/null 2>&1; then
     log "WARNING: Failed to start Blazegraph container — nodes 3-4 will use Oxigraph"
     return 0
   fi
@@ -397,22 +480,12 @@ start_blazegraph() {
     if curl -s "http://127.0.0.1:$BLAZEGRAPH_PORT/bigdata/status" > /dev/null 2>&1; then
       log "Blazegraph ready"
       BLAZEGRAPH_AVAILABLE=true
-      # Create per-node namespaces for nodes 3–4 (Blazegraph)
+      # Create per-node namespaces for nodes 3–4 (Blazegraph). The
+      # namespace-properties XML comes from the shared contract module —
+      # no inline copy to drift.
       for n in 3 4; do
         local ns="node${n}"
-        curl -s -X POST "http://127.0.0.1:$BLAZEGRAPH_PORT/bigdata/namespace" \
-          -H "Content-Type: application/xml" \
-          -d "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>
-<!DOCTYPE properties SYSTEM \"http://java.sun.com/dtd/properties.dtd\">
-<properties>
-  <entry key=\"com.bigdata.rdf.sail.namespace\">$ns</entry>
-  <entry key=\"com.bigdata.rdf.store.AbstractTripleStore.quads\">true</entry>
-  <entry key=\"com.bigdata.rdf.store.AbstractTripleStore.statementIdentifiers\">false</entry>
-  <entry key=\"com.bigdata.rdf.store.AbstractTripleStore.textIndex\">false</entry>
-  <entry key=\"com.bigdata.rdf.sail.truthMaintenance\">false</entry>
-  <entry key=\"com.bigdata.rdf.store.AbstractTripleStore.axiomsClass\">com.bigdata.rdf.axioms.NoAxioms</entry>
-</properties>" > /dev/null 2>&1
-        log "Created Blazegraph namespace: $ns"
+        create_blazegraph_namespace "$ns" || true
       done
       return 0
     fi
@@ -429,11 +502,11 @@ start_oxigraph_servers() {
     return 0
   fi
   if ! docker_responsive 3; then
-    log "Docker not responsive within 3s — nodes 5-6 will use Oxigraph (in-process) instead of Oxigraph server"
+    log "Docker not responsive within 3s — nodes 5-6 will use daemon-managed Oxigraph instead of external Oxigraph"
     return 0
   fi
   if ! docker image inspect oxigraph/oxigraph:latest > /dev/null 2>&1; then
-    log "Oxigraph Docker image not found locally — nodes 5-6 will use in-process Oxigraph (pull oxigraph/oxigraph:latest to enable)"
+    log "Oxigraph Docker image not found locally — nodes 5-6 will use daemon-managed Oxigraph (pull oxigraph/oxigraph:latest to enable the external endpoint)"
     return 0
   fi
 
@@ -453,7 +526,7 @@ start_oxigraph_servers() {
       oxigraph/oxigraph:latest serve --bind 0.0.0.0:7878 > /dev/null 2>&1; then
       log "Oxigraph server started ($name)"
     else
-      log "WARNING: Failed to start Oxigraph server $name — nodes 5-6 will use in-process Oxigraph"
+      log "WARNING: Failed to start external Oxigraph server $name — nodes 5-6 will use daemon-managed Oxigraph"
       return 0
     fi
   done
@@ -508,6 +581,43 @@ stop_blazegraph() {
   fi
 }
 
+# The "chain" member of one node's config.json.
+#
+# A node's shipped RPC request budget is sized for a public provider it shares
+# with other users: 10 requests/second, with background work held back for a
+# random part of the first 30 seconds so that nodes restarting together do not
+# all ask at once. Every devnet node talks to one local chain, where neither
+# limit protects anything, so a node gets a budget sized for that chain.
+#
+# DEVNET_RPC_BUDGET=shipped leaves the block out, for a run that is meant to
+# exercise the shipped budget. A node on another version (DEVNET_VERSION_LAYOUT)
+# keeps its shipped budget as well: only the code under test is known to read
+# this block.
+devnet_chain_config_block() {
+  local hub_addr="$1" version_ref="$2" rpc_budget=""
+  case "$DEVNET_RPC_BUDGET" in
+    local)
+      if [ "$version_ref" = "current" ]; then
+        rpc_budget=',
+    "rpcRequestBudget": { "maxRequestsPerSecond": 1000, "burstRequests": 1000, "startupJitterMs": 0 }'
+      fi
+      ;;
+    shipped) ;;
+    *)
+      echo "[devnet] DEVNET_RPC_BUDGET must be 'local' or 'shipped' (got '$DEVNET_RPC_BUDGET')" >&2
+      return 1
+      ;;
+  esac
+  cat <<EOCHAIN
+"chain": {
+    "type": "evm",
+    "rpcUrl": "http://127.0.0.1:${HARDHAT_PORT}",
+    "hubAddress": "${hub_addr}",
+    "chainId": "evm:31337"${rpc_budget}
+  }
+EOCHAIN
+}
+
 create_node_config() {
   local node_num="$1"
   local node_dir="$DEVNET_DIR/node${node_num}"
@@ -548,8 +658,11 @@ create_node_config() {
   #             backend and deterministically reproduces SPARQL-over-HTTP-only
   #             bugs such as #996 — which the old `oxigraph-worker` default hid.)
   #   Node 3-4: blazegraph (if Docker) else oxigraph  (in-process baseline)
-  #   Node 5-6: sparql-http → external Dockerized Oxigraph  (EXTRA coverage of the
-  #             generic external-endpoint path; Docker-only, optional)
+  #   Node 5-6: sparql-http → external Dockerized Oxigraph when available;
+  #             otherwise daemon-managed oxigraph-server on distinct ports.
+  #             Do not omit the store block here: the implicit embedded fallback
+  #             persists by dumping the complete store through one JS string and
+  #             cannot restart a >=512 MiB devnet dataset.
   local store_block=""
   if [ "$node_num" -ge 1 ] && [ "$node_num" -le 2 ]; then
     # The managed oxigraph-server defaults to port 7878; multiple nodes on one
@@ -572,7 +685,28 @@ create_node_config() {
     if [ "$OXIGRAPH_SERVER_AVAILABLE" = true ]; then
       local ox_port_var="OXIGRAPH_SERVER_PORT_${node_num}"
       local ox_port="${!ox_port_var}"
-      store_block="\"store\": { \"backend\": \"sparql-http\", \"options\": { \"queryEndpoint\": \"http://127.0.0.1:${ox_port}/query\", \"updateEndpoint\": \"http://127.0.0.1:${ox_port}/update\" } },"
+      # Declare the transactional guarantee this endpoint actually has. The
+      # container is the same Oxigraph the managed path spawns (which
+      # self-declares `atomic-readback`), but an explicitly configured
+      # sparql-http endpoint defaults to `best-effort` — it cannot know what is
+      # behind it. RFC-64 durable sync requires atomic data/metadata
+      # replacement, so without this nodes 5-6 refuse every graph-scoped
+      # materialization with VM_ATOMIC_REPLACE_UNSUPPORTED and converge nothing
+      # while nodes 1-2 pass — a matrix hole that looks like a product failure.
+      #
+      # `atomic-update` is the minimum that lifts that refusal
+      # (SparqlHttpStore.replaceGraphAndSubject gates on it). `atomic-readback`
+      # is declared deliberately instead: one Oxigraph process does guarantee
+      # read-after-write, and it additionally exercises the receipt-bearing
+      # author-commit CAS lane (rfc64AuthorCommitCasV1) over sparql-http, which
+      # this matrix otherwise never covers. A failure in that lane on nodes 5-6
+      # is therefore a real finding, not devnet drift. Note the certifications
+      # reserved for the daemon-spawned runtime (shared projection stream,
+      # exact-bindings and semantic reads) stay off here by design, so these
+      # nodes remain an external-endpoint cell rather than a managed twin.
+      store_block="\"store\": { \"backend\": \"sparql-http\", \"options\": { \"queryEndpoint\": \"http://127.0.0.1:${ox_port}/query\", \"updateEndpoint\": \"http://127.0.0.1:${ox_port}/update\", \"consistencyProfile\": \"atomic-readback\" } },"
+    else
+      store_block="\"store\": { \"backend\": \"oxigraph-server\", \"options\": { \"port\": $(( ${DEVNET_OXIGRAPH_BASE:-7900} + node_num )) } },"
     fi
   fi
 
@@ -605,6 +739,24 @@ create_node_config() {
     rs_block="\"randomSampling\": { \"walPath\": \"${node_dir}/random-sampling.wal\", \"tickIntervalMs\": 5000 },"
   fi
 
+  # Optional snapshot collector tuning; nothing is written unless requested.
+  local snapshot_gc_extra=""
+  if [ "${DEVNET_SNAPSHOT_GC_FINALIZED_CLEANUP:-}" = "1" ]; then
+    snapshot_gc_extra="${snapshot_gc_extra},
+      \"finalizedCleanupEnabled\": true"
+    if [ -n "${DEVNET_SNAPSHOT_GC_FINALIZED_RETENTION_MS:-}" ]; then
+      snapshot_gc_extra="${snapshot_gc_extra},
+      \"finalizedRetentionMs\": ${DEVNET_SNAPSHOT_GC_FINALIZED_RETENTION_MS}"
+    fi
+  fi
+  if [ -n "${DEVNET_SNAPSHOT_GC_INTERVAL_MS:-}" ]; then
+    snapshot_gc_extra="${snapshot_gc_extra},
+      \"intervalMs\": ${DEVNET_SNAPSHOT_GC_INTERVAL_MS}"
+  fi
+
+  local chain_block
+  chain_block="$(devnet_chain_config_block "$hub_addr" "$(node_version_ref "$node_num" "$node_role")")"
+
   cat > "$node_dir/config.json" <<EOCONF
 {
   "name": "devnet-node-${node_num}",
@@ -614,7 +766,17 @@ create_node_config() {
   ${relay_value}
   ${store_block}
   "contextGraphs": ["devnet-test", "devnet-isolation"],
+  "localBootstrapContextGraphs": ["devnet-test", "devnet-isolation"],
   ${swm_sync_block}
+  "sharedMemoryPublicSnapshotStorage": {
+    "enabled": true,
+    "directory": "${node_dir}/swm-public-snapshots",
+    "gc": {
+      "hardReserveBytes": ${DEVNET_SNAPSHOT_GC_HARD_RESERVE_BYTES},
+      "triggerFreeBytes": ${DEVNET_SNAPSHOT_GC_TRIGGER_FREE_BYTES},
+      "targetFreeBytes": ${DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES}${snapshot_gc_extra}
+    }
+  },
   "publisher": {
     "enabled": true,
     "pollIntervalMs": 12000,
@@ -624,12 +786,7 @@ create_node_config() {
   ${rs_block}
   ${publisher_block}
   ${epcis_block}
-  "chain": {
-    "type": "evm",
-    "rpcUrl": "http://127.0.0.1:${HARDHAT_PORT}",
-    "hubAddress": "${hub_addr}",
-    "chainId": "evm:31337"
-  }
+  ${chain_block}
 }
 EOCONF
 
@@ -799,6 +956,13 @@ node_cli_entry() {
   version_cli_entry "$(node_version_ref "$node_num" "$role")"
 }
 
+# Modern compilers own their output identity. Historical checkouts receive
+# truthful metadata from the identity captured before their build begins.
+write_devnet_version_build_info() {
+  local dest="$1" before="${2:-}"
+  node "$(dirname "${BASH_SOURCE[0]}")/stamp-cli-build-info.mjs" --ensure-devnet "$dest" "$before"
+}
+
 # Check out <ref> as a worktree under DEVNET_VERSIONS_DIR and build it once.
 prepare_version() {
   local ref="$1"
@@ -808,7 +972,8 @@ prepare_version() {
     return 1
   fi
   local dest="$DEVNET_VERSIONS_DIR/$ref"
-  if [ -f "$dest/packages/cli/dist/cli.js" ] && [ "${DEVNET_VERSION_REBUILD:-0}" != "1" ]; then
+  if [ -f "$dest/packages/cli/dist/cli.js" ] && [ "${DEVNET_VERSION_REBUILD:-0}" != "1" ] &&
+    node "$(dirname "${BASH_SOURCE[0]}")/stamp-cli-build-info.mjs" --check-devnet-cache "$dest"; then
     log "Version '$ref' already prepared at $dest"
     return 0
   fi
@@ -817,8 +982,11 @@ prepare_version() {
     log "Checking out version '$ref' as a worktree at $dest ..."
     git -C "$REPO_ROOT" worktree add --force "$dest" "$ref"
   fi
+  local before
+  before="$(node "$(dirname "${BASH_SOURCE[0]}")/stamp-cli-build-info.mjs" --capture-devnet "$dest")"
   log "Building version '$ref' (runs once, then cached) ..."
   ( cd "$dest" && pnpm install --prefer-offline && pnpm run build )
+  write_devnet_version_build_info "$dest" "$before"
   log "Version '$ref' prepared at $dest"
 }
 
@@ -878,7 +1046,13 @@ start_node() {
     const fs = require('fs');
     const dir = process.env.DEVNET_DIR;
     const cfgPath = process.env.NODE_DIR + '/config.json';
-    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    // The members a test set when it added this node (addnode's
+    // DEVNET_ADDNODE_CONFIG_OVERRIDES), applied here only, on every start: the
+    // defaults below are derived from them (an overridden nodeRole or
+    // authorityIndex), and they win over the values generated below.
+    const overridesPath = process.env.NODE_DIR + '/addnode-overrides.json';
+    const overrides = fs.existsSync(overridesPath) ? JSON.parse(fs.readFileSync(overridesPath, 'utf8')) : {};
+    const cfg = { ...JSON.parse(fs.readFileSync(cfgPath, 'utf8')), ...overrides };
     if (process.env.RELAY_ARG) cfg.relay = process.env.RELAY_ARG;
     const n = Number(process.env.NODE_NUM);
     // Bootstrap targets are the CORE nodes among 1..n-1, read from each node's
@@ -895,6 +1069,22 @@ start_node() {
       try { const m = fs.readFileSync(dir + '/node' + c + '/multiaddr', 'utf8').trim(); if (m) peers.push(m); } catch {}
     }
     if (peers.length) cfg.bootstrapPeers = peers;
+    // The isolated Hardhat chain has no authority history on the public
+    // network relays. Pin an edge's snapshot trust to the local Core mesh so
+    // unregistered-CG subscription can prove finalized name absence without
+    // repeatedly cold-scanning the same chain on every receiver. Preserve an
+    // explicit operator override when adding a node to an existing devnet.
+    // The daemon rejects a trust list longer than eight Cores
+    // (CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_TRUSTED_PEERS), so a larger
+    // Core mesh trusts its first eight; bootstrapPeers above stays complete.
+    if (cfg.nodeRole === 'edge' && peers.length && !cfg.authorityIndex) {
+      cfg.authorityIndex = {
+        mode: 'core-snapshot',
+        trustedCorePeers: peers.slice(0, 8),
+        maxTailBlocks: 2000,
+      };
+    }
+    Object.assign(cfg, overrides);
     fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
   "
 
@@ -943,7 +1133,10 @@ start_node() {
       auth_args=(-H "Authorization: Bearer $auth_token")
     fi
   fi
-  local max_wait=${DEVNET_NODE_READY_TIMEOUT:-30}
+  # 120 s, not 30: a Core that restarts into a running network has taken 70 s
+  # to answer on a busy machine, and a restart that gives up early aborts the
+  # suite that asked for it. The loop ends as soon as the node answers.
+  local max_wait=${DEVNET_NODE_READY_TIMEOUT:-120}
   [ "$node_num" -eq 1 ] && max_wait=$(( max_wait > 120 ? max_wait : 120 ))
   local ready=false
   # CRITICAL: declare loop variable `local` so we don't clobber the OUTER
@@ -1264,7 +1457,7 @@ cmd_start() {
   # their absence a hard failure for full-matrix CI.
   local bg_state ox_extra
   if [ "$BLAZEGRAPH_AVAILABLE" = true ]; then bg_state="blazegraph"; else bg_state="oxigraph in-process (blazegraph Docker unavailable)"; fi
-  if [ "$OXIGRAPH_SERVER_AVAILABLE" = true ]; then ox_extra="sparql-http → external Oxigraph"; else ox_extra="(skipped — external Oxigraph Docker unavailable)"; fi
+  if [ "$OXIGRAPH_SERVER_AVAILABLE" = true ]; then ox_extra="sparql-http → external Oxigraph"; else ox_extra="oxigraph-server managed fallback (external Docker unavailable)"; fi
   log "Store-backend matrix:  nodes 1-2: oxigraph-server (managed, no Docker)  |  nodes 3-4: $bg_state  |  nodes 5-6: $ox_extra"
   if [ "$BLAZEGRAPH_AVAILABLE" != true ] || [ "$OXIGRAPH_SERVER_AVAILABLE" != true ]; then
     if [ "${DEVNET_REQUIRE_ALL_BACKENDS:-0}" = "1" ]; then
@@ -1774,7 +1967,7 @@ cmd_start() {
       [ "$BLAZEGRAPH_AVAILABLE" = true ] && store_label="blazegraph" || store_label="oxigraph"
     fi
     if [ "$i" -ge 5 ]; then
-      [ "$OXIGRAPH_SERVER_AVAILABLE" = true ] && store_label="oxigraph-server" || store_label="oxigraph-worker"
+      [ "$OXIGRAPH_SERVER_AVAILABLE" = true ] && store_label="sparql-http → external Oxigraph" || store_label="oxigraph-server"
     fi
     log "Node $i ($role, $store_label): http://127.0.0.1:$api_port/ui"
   done
@@ -2019,6 +2212,8 @@ cmd_clean() {
 # itself so it can assert on every step.
 #
 # Usage: devnet.sh addnode <num> [core|edge]
+#   DEVNET_ADDNODE_CONFIG_OVERRIDES='{"key": value, ...}'  config.json members
+#                                   to set before the node's first start
 cmd_addnode() {
   local node_num="${2:-}"
   local role="${3:-core}"
@@ -2047,6 +2242,24 @@ cmd_addnode() {
 
   log "Adding node $node_num (role=$role)..."
   DEVNET_NODE_ROLE_OVERRIDE="$role" create_node_config "$node_num"
+
+  # A test that needs the new node to differ from the first second it runs
+  # (the addresses it announces, for one: what a peer has once learnt about a
+  # node it keeps) passes a JSON object here. addnode checks it and keeps it
+  # beside the node's config; start_node applies it, on the first start and on
+  # every later one (see there).
+  if [ -n "${DEVNET_ADDNODE_CONFIG_OVERRIDES:-}" ]; then
+    if ! node -e '
+      const overrides = JSON.parse(process.env.DEVNET_ADDNODE_CONFIG_OVERRIDES);
+      if (overrides === null || typeof overrides !== "object" || Array.isArray(overrides)) throw new Error("not a JSON object");
+    '; then
+      echo "[devnet] DEVNET_ADDNODE_CONFIG_OVERRIDES must be a JSON object; node${node_num} was not started"
+      rm -rf "$DEVNET_DIR/node${node_num}"
+      exit 1
+    fi
+    printf '%s\n' "$DEVNET_ADDNODE_CONFIG_OVERRIDES" > "$DEVNET_DIR/node${node_num}/addnode-overrides.json"
+    log "Node $node_num config: DEVNET_ADDNODE_CONFIG_OVERRIDES kept for every start"
+  fi
 
   # Reuse the cluster's shared auth token so the test can talk to the new
   # node with the same bearer used everywhere else.
@@ -2105,6 +2318,10 @@ cmd_stop_node() {
   stop_devnet_node_processes "$node_num"
   log "Node $node_num stopped."
 }
+
+if [ "${DEVNET_SOURCE_ONLY:-0}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 case "${1:-}" in
   start)            cmd_start ;;

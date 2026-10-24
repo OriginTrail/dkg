@@ -3,6 +3,15 @@ import { currentTraceIds } from './telemetry-api.js';
 
 export type OperationName = 'publish' | 'update' | 'query' | 'resolve' | 'connect' | 'sync' | 'system' | 'share' | 'publishFromSWM' | 'gossip' | 'ka-update' | 'reconstruct' | 'init' | 'verify' | 'migrate-swm-attr';
 
+export const LOG_LEVELS = ['debug', 'info', 'warn', 'error'] as const;
+export type LogLevel = typeof LOG_LEVELS[number];
+
+export function normalizeLogLevel(level: string): LogLevel {
+  return (LOG_LEVELS as readonly string[]).includes(level)
+    ? level as LogLevel
+    : 'info';
+}
+
 export interface OperationContext {
   operationId: string;
   operationName: OperationName;
@@ -12,12 +21,16 @@ export interface OperationContext {
 
 /**
  * The canonical structured log record emitted on every Logger call. This is
- * the single shape that flows to the local dashboard DB and to any remote
- * shipper (syslog, OTLP). Keep it stable — redaction and the OTLP exporter
- * both consume it.
+ * the single shape that flows to any configured sink. The daemon uses it for
+ * remote shippers (syslog, OTLP) and its file-backed local debug path.
+ * Keep it stable — redaction and the exporters consume it.
  */
-export interface LogRecord {
-  level: string;
+export interface LogRecord<Level extends string = string> {
+  /**
+   * Kept string-typed for source compatibility with published callers and
+   * serialized records. Logger-created records use CanonicalLogRecord.
+   */
+  level: Level;
   operationName: string;
   operationId: string;
   sourceOperationId?: string;
@@ -28,7 +41,42 @@ export interface LogRecord {
   spanId?: string;
 }
 
-export type LogSink = (entry: LogRecord) => void;
+export type CanonicalLogRecord = LogRecord<LogLevel>;
+
+export type LogSink = (entry: CanonicalLogRecord) => void;
+
+export interface LogRecordFormatOptions {
+  timestamp?: Date;
+  timestampStyle?: 'local' | 'iso-bracketed';
+  includeLevel?: boolean;
+  trailingNewline?: boolean;
+}
+
+/**
+ * Canonical text rendering for structured log records. Callers select the
+ * timestamp and level decorations required by their existing output surface;
+ * the operation/source/module/message layout stays owned here.
+ */
+export function formatLogRecord(
+  record: LogRecord,
+  options: LogRecordFormatOptions = {},
+): string {
+  const timestamp = options.timestamp ?? new Date();
+  const renderedTimestamp = options.timestampStyle === 'iso-bracketed'
+    ? `[${timestamp.toISOString()}]`
+    : formatTimestamp(timestamp);
+  const source = record.sourceOperationId
+    ? ` [from:${record.sourceOperationId}]`
+    : '';
+  const level = options.includeLevel
+    ? ` [${record.level.toUpperCase()}]`
+    : '';
+  const newline = options.trailingNewline ? '\n' : '';
+  return (
+    `${renderedTimestamp} ${record.operationName} ${record.operationId}` +
+    `${source} [${record.module}] ${record.message}${level}${newline}`
+  );
+}
 
 /**
  * Structured logger that prefixes every message with a timestamp,
@@ -53,7 +101,7 @@ export class Logger {
    * span's trace/span id when one is recording (no-op/empty otherwise), so logs
    * emitted inside an instrumented boundary correlate to its trace.
    */
-  private emit(level: string, ctx: OperationContext, message: string): void {
+  private emit(level: LogLevel, ctx: OperationContext, message: string): void {
     if (!Logger.sink) return;
     Logger.sink({
       level,
@@ -71,24 +119,32 @@ export class Logger {
   }
 
   info(ctx: OperationContext, message: string): void {
-    process.stdout.write(`${this.format(ctx, message)}\n`);
+    process.stdout.write(this.format('info', ctx, message));
     this.emit('info', ctx, message);
   }
 
   warn(ctx: OperationContext, message: string): void {
-    process.stderr.write(`${this.format(ctx, message)} [WARN]\n`);
+    process.stderr.write(this.format('warn', ctx, message));
     this.emit('warn', ctx, message);
   }
 
   error(ctx: OperationContext, message: string): void {
-    process.stderr.write(`${this.format(ctx, message)} [ERROR]\n`);
+    process.stderr.write(this.format('error', ctx, message));
     this.emit('error', ctx, message);
   }
 
-  private format(ctx: OperationContext, message: string): string {
-    const ts = formatTimestamp(new Date());
-    const src = ctx.sourceOperationId ? ` [from:${ctx.sourceOperationId}]` : '';
-    return `${ts} ${ctx.operationName} ${ctx.operationId}${src} [${this.prefix}] ${message}`;
+  private format(level: LogLevel, ctx: OperationContext, message: string): string {
+    return formatLogRecord({
+      level,
+      operationName: ctx.operationName,
+      operationId: ctx.operationId,
+      sourceOperationId: ctx.sourceOperationId,
+      module: this.prefix,
+      message,
+    }, {
+      includeLevel: level === 'warn' || level === 'error',
+      trailingNewline: true,
+    });
   }
 }
 

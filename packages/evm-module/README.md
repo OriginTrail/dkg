@@ -54,11 +54,18 @@ Any drift fails the PR with an explicit remediation message.
 > `hardhat-abi-exporter`. Use `npx hardhat compile` (no `--config`) when you
 > need to regenerate `abi/*.json`.
 
-If you change a `.sol` file, regenerate and commit ABIs in the same change:
+`@origintrail-official/dkg-chain` ships its own byte-for-byte copy of the ABIs
+it loads under `packages/chain/abi/` and reads that copy first, because this
+package is private and npm consumers cannot fall back to it.
+`scripts/sync-chain-abis.mjs` refreshes the copy, and
+`packages/chain/test/vendored-abi-sync.unit.test.ts` fails while it lags.
+
+If you change a `.sol` file, regenerate and commit both sets of ABIs in the same change:
 
 ```bash
 cd packages/evm-module && npx hardhat compile && cd -
-git add packages/evm-module/abi/
+node scripts/sync-chain-abis.mjs
+git add packages/evm-module/abi/ packages/chain/abi/
 ```
 
 ## Static analysis

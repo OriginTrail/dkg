@@ -318,6 +318,45 @@ decisions: []
     });
 
 
+    it('adds the calling agent as a participant agent when the chain signer is promoted to on-chain owner', async () => {
+      const chain = new AsyncSignerAddressContextGraphChainAdapter();
+      const agent = await DKGAgent.create({
+        name: 'EoaPromotionRosterBot',
+        store: new OxigraphStore(),
+        chainAdapter: chain,
+        nodeRole: 'core',
+      });
+      await agent.start();
+      const caller = new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address;
+
+      // Public with a curated publish policy: the caller is not allow-listed at
+      // create time, so the promotion is what makes it a participant.
+      await agent.createContextGraph({ id: 'eoa-promotion-roster', name: 'EOA promotion roster', callerAgentAddress: caller });
+      await expect(agent.registerContextGraph('eoa-promotion-roster', { callerAgentAddress: caller, publishPolicy: 0 }))
+        .resolves.toMatchObject({ onChainId: expect.any(String) });
+      expect(chain.createOnChainContextGraphCalls.at(-1)).toMatchObject({
+        accessPolicy: 0,
+        publishPolicy: 0,
+        publishAuthority: ethers.getAddress(chain.signerAddress),
+        participantAgents: [caller],
+      });
+      expect(await agent.getContextGraphParticipantAgentAddresses('eoa-promotion-roster')).toEqual([caller]);
+
+      // A graph that already lists as many participant agents as a registration may carry.
+      await agent.createContextGraph({ id: 'eoa-promotion-roster-cap', name: 'EOA promotion roster cap', callerAgentAddress: caller });
+      await agent.store.insert(Array.from({ length: 256 }, (_, i) => ({
+        subject: 'did:dkg:context-graph:eoa-promotion-roster-cap',
+        predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
+        object: `"0x${(i + 1).toString(16).padStart(40, '0')}"`,
+        graph: contextGraphMetaUri('eoa-promotion-roster-cap'),
+      })));
+      const calls = chain.createOnChainContextGraphCalls.length;
+      await expect(agent.registerContextGraph('eoa-promotion-roster-cap', { callerAgentAddress: caller, publishPolicy: 0 }))
+        .rejects.toThrow(/participantAgents cannot exceed 256 addresses after auto-adding the calling agent as a participant/);
+      expect(chain.createOnChainContextGraphCalls).toHaveLength(calls);
+      await agent.stop().catch(() => {});
+    });
+
     it('uses best-effort adapter publisher-address inference for curated CG registration', async () => {
       const chain = new SignerListContextGraphChainAdapter();
       const agent = await DKGAgent.create({
@@ -393,13 +432,10 @@ decisions: []
     });
 
 
-    // Codex PR #502 round-5: PCA registration must fail-closed when the
-    // chain adapter exposes `getPublishingConvictionAccountOwner()` but
-    // doesn't surface its tx signer in any introspectable way. Without
-    // this guard, a custom adapter could sneak past the
-    // "chain signer == PCA owner" invariant and the registration tx
-    // would still mint the governance NFT to whatever address the
-    // adapter actually signs with.
+    // PCA registration must fail closed when the adapter exposes the PCA
+    // owner but not its tx signer. Without signer introspection the agent
+    // cannot prove either owner mode or exact-PCA registered-agent mode, and
+    // cannot keep local curator ownership aligned with the minted CG NFT.
     it('rejects PCA registration when chain adapter does not expose its tx signer', async () => {
       const pcaOwner = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
       const pcaAccountId = 242n;
@@ -434,20 +470,18 @@ decisions: []
       await expect(agent.registerContextGraph('reject-pca-signerless-adapter', {
         callerAgentAddress: pcaOwner,
         publishAuthorityAccountId: pcaAccountId,
-      })).rejects.toThrow(/does not expose its registration-tx signer|invariant cannot be verified/);
+      })).rejects.toThrow(/does not expose its registration-tx signer|owner\/agent authorization cannot be verified/);
 
       expect(chain.createOnChainContextGraphCalls).toHaveLength(0);
       await agent.stop().catch(() => {});
     });
 
 
-    // Codex PR #502 round-4: rejects PCA registration when the chain
-    // signer (registration-tx msg.sender) doesn't match the PCA owner.
-    // Without this guard, `ContextGraphs.createContextGraph` on-chain
-    // mints the governance NFT to msg.sender while local metadata says
-    // the PCA owner is the curator — phantom-owner bug breaking later
-    // `onlyContextGraphOwner` ops.
-    it('rejects PCA registration when chain signer differs from PCA owner', async () => {
+    // Keep the local curator and registration signer aligned even after
+    // #1366 permits exact-PCA registered agents to create waived CGs. A
+    // different signer would own the on-chain Context Graph NFT while local
+    // metadata names the PCA owner as curator.
+    it('rejects PCA registration when local curator differs from the chain signer', async () => {
       const pcaOwner = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
       const pcaAccountId = 142n;
       // Chain signer is INTENTIONALLY different from the PCA owner —
@@ -476,7 +510,7 @@ decisions: []
       await expect(agent.registerContextGraph('reject-pca-signer-mismatch', {
         callerAgentAddress: pcaOwner,
         publishAuthorityAccountId: pcaAccountId,
-      })).rejects.toThrow(/chain signer .* differs from PCA owner|governance NFT mints to/);
+      })).rejects.toThrow(/local curator .* differs from registration chain signer|wallet that will own the on-chain Context Graph NFT/);
 
       expect(chain.createOnChainContextGraphCalls).toHaveLength(0);
       await agent.stop().catch(() => {});

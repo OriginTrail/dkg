@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
+import {
+  registerSyncHandler,
+  SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT,
+} from '../src/sync/responder/sync-handler.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { QueryOptions, QueryResult, Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
@@ -24,10 +27,32 @@ function baseStore(overrides: Partial<TripleStore> = {}): TripleStore {
     dropGraph: async () => {},
     listGraphs: async () => [],
     deleteBySubjectPrefix: async () => 0,
-    countQuads: async () => 0,
+    // Exact-graph responder paging inventories a listed graph before issuing
+    // its bounded row query. Tests that expose a graph therefore model one row
+    // by default so their query gates still exercise responder admission.
+    countQuads: async (graph) => graph ? 1 : 0,
     close: async () => {},
     ...overrides,
   };
+}
+
+function exactGraphRowResult(): QueryResult {
+  return {
+    type: 'bindings',
+    bindings: [{
+      s: '<urn:test:sync-protection>',
+      p: 'http://schema.org/name',
+      o: '"name"',
+    }],
+  };
+}
+
+function emptyBindingsResult(): QueryResult {
+  return { type: 'bindings', bindings: [] };
+}
+
+function isExactGraphRowQuery(sparql: string): boolean {
+  return sparql.includes('SELECT ?s ?p ?o WHERE');
 }
 
 function deferred<T>() {
@@ -83,6 +108,7 @@ function captureHandler(
     ) => Promise<boolean>;
     logWarn?: (ctx: OperationContext, message: string) => void;
     publicSnapshotStore?: WorkspacePublicSnapshotStore;
+    contextGraphPriorities?: Record<string, number>;
   } = {},
 ) {
   let captured: ((
@@ -104,6 +130,7 @@ function captureHandler(
     authorizeSyncRequest: options.authorizeSyncRequest ?? (async () => true),
     logWarn: options.logWarn ?? noopLog,
     logDebug: noopLog,
+    contextGraphPriorities: options.contextGraphPriorities,
   });
 
   return {
@@ -115,6 +142,221 @@ function captureHandler(
 }
 
 describe('sync responder protection', () => {
+  it.each([
+    ['omitted priorities', undefined],
+    ['all-zero priorities', { 'sync-protection': 0 }],
+  ])('preserves one continuous same-peer admission with %s', async (_label, priorities) => {
+    const queryGates: Array<ReturnType<typeof deferred<QueryResult>>> = [];
+    let authStarted = 0;
+    const cap = captureHandler(baseStore({
+      listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
+      query: async (sparql: string) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
+        const gate = deferred<QueryResult>();
+        queryGates.push(gate);
+        return gate.promise;
+      },
+    }), {
+      contextGraphPriorities: priorities,
+      authorizeSyncRequest: async () => {
+        authStarted += 1;
+        return true;
+      },
+    });
+
+    const first = cap.invoke(makeEnvelope(), REMOTE_A);
+    while (queryGates.length < 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    const second = cap.invoke(makeEnvelope(), REMOTE_A);
+    for (let i = 0; i < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(authStarted).toBe(1);
+
+    queryGates.shift()?.resolve(exactGraphRowResult());
+    await first;
+    while (authStarted < 2) await new Promise((resolve) => setTimeout(resolve, 0));
+    while (queryGates.length < 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    queryGates.shift()?.resolve(exactGraphRowResult());
+    await second;
+  });
+
+  it('prioritizes only authorized responder work while keeping pre-authorization FIFO', async () => {
+    const queryGates: Array<ReturnType<typeof deferred<QueryResult>>> = [];
+    const queryOrder: string[] = [];
+    const authOrder: string[] = [];
+    const store = baseStore({
+      listGraphs: async () => [
+        'did:dkg:context-graph:block-a',
+        'did:dkg:context-graph:block-b',
+        'did:dkg:context-graph:block-c',
+        'did:dkg:context-graph:low',
+        'did:dkg:context-graph:high',
+      ],
+      query: async (sparql: string) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
+        const contextGraphId = ['block-a', 'block-b', 'block-c', 'low', 'high']
+          .find((id) => sparql.includes(`context-graph:${id}`)) ?? 'unknown';
+        queryOrder.push(contextGraphId);
+        const gate = deferred<QueryResult>();
+        queryGates.push(gate);
+        return gate.promise;
+      },
+    });
+    const cap = captureHandler(store, {
+      contextGraphPriorities: { high: 100, low: -10 },
+      authorizeSyncRequest: async (request) => {
+        authOrder.push(request.contextGraphId);
+        return true;
+      },
+    });
+    const request = (contextGraphId: string, peerId: string) => cap.invoke({
+      ...makeEnvelope(),
+      contextGraphId,
+    }, peerId);
+
+    const blockers = [
+      request('block-a', REMOTE_A),
+      request('block-b', REMOTE_B),
+      request('block-c', REMOTE_C),
+    ];
+    for (let i = 0; i < 100 && queryGates.length < 3; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(queryGates).toHaveLength(3);
+    const low = request('low', REMOTE_D);
+    const high = request('high', '12D3KooWResponderCapPeerE');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(authOrder.slice(0, 3)).toEqual(['block-a', 'block-b', 'block-c']);
+
+    queryGates.shift()?.resolve(exactGraphRowResult());
+    for (let i = 0; i < 100 && !queryOrder.includes('high'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(queryOrder).toContain('high');
+    expect(queryOrder).not.toContain('low');
+
+    for (const gate of queryGates.splice(0)) gate.resolve(exactGraphRowResult());
+    for (let i = 0; i < 100 && !queryOrder.includes('low'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(queryOrder).toContain('low');
+    for (const gate of queryGates.splice(0)) gate.resolve(exactGraphRowResult());
+    await Promise.all([...blockers, low, high]);
+  });
+
+  it('does not give an unauthorized elevated-CG claim priority before authorization', async () => {
+    const authOrder: string[] = [];
+    const queryOrder: string[] = [];
+    const queryGates = new Map<string, ReturnType<typeof deferred<QueryResult>>>();
+    const graphIds = ['block-a', 'block-b', 'block-c', 'default', 'elevated'];
+    const cap = captureHandler(baseStore({
+      listGraphs: async () => graphIds.map((id) => `did:dkg:context-graph:${id}`),
+      query: async (sparql: string) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
+        const contextGraphId = graphIds.find((id) => sparql.includes(`context-graph:${id}`)) ?? 'unknown';
+        queryOrder.push(contextGraphId);
+        const gate = deferred<QueryResult>();
+        queryGates.set(contextGraphId, gate);
+        return gate.promise;
+      },
+    }), {
+      contextGraphPriorities: { elevated: 1_000 },
+      authorizeSyncRequest: async (request) => {
+        authOrder.push(request.contextGraphId);
+        return request.contextGraphId !== 'elevated';
+      },
+    });
+
+    const invoke = (contextGraphId: string, peerId: string) => cap.invoke({
+      ...makeEnvelope(),
+      contextGraphId,
+    }, peerId);
+    const blockers = [
+      invoke('block-a', REMOTE_A),
+      invoke('block-b', REMOTE_B),
+      invoke('block-c', REMOTE_C),
+    ];
+    for (let i = 0; i < 100 && queryGates.size < 3; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(queryGates.size).toBe(3);
+
+    const defaultRequest = invoke('default', REMOTE_D);
+    const elevatedClaim = invoke('elevated', '12D3KooWResponderCapPeerE');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(authOrder).toEqual(['block-a', 'block-b', 'block-c']);
+
+    queryGates.get('block-a')?.resolve(exactGraphRowResult());
+    for (let i = 0; i < 100 && !queryOrder.includes('default'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(authOrder).toContain('default');
+    expect(authOrder).not.toContain('elevated');
+    expect(queryOrder).toContain('default');
+
+    queryGates.get('block-b')?.resolve(exactGraphRowResult());
+    for (let i = 0; i < 100 && !authOrder.includes('elevated'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    const denied = await elevatedClaim;
+    expect(authOrder.slice(-2)).toEqual(['default', 'elevated']);
+    expect(queryOrder).not.toContain('elevated');
+    expect(new TextDecoder().decode(denied)).toBe('sync-denied');
+
+    queryGates.get('block-c')?.resolve(exactGraphRowResult());
+    queryGates.get('default')?.resolve(exactGraphRowResult());
+    await Promise.all([...blockers, defaultRequest]);
+  });
+
+  // A request whose Context Graph carries a non-default priority is admitted in
+  // two stages, and the authorized stage reserves its queue slot up front —
+  // that reservation counts against the per-peer queue limit. So a reservation
+  // left behind by a request that never reaches the authorized stage is not a
+  // leak the peer can wait out: once SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT of
+  // them pile up, every later request from that peer is refused as "peer queue
+  // full" while its queue is in fact empty, and the peer never recovers.
+  //
+  // Both cases below short-circuit before the authorized stage. Drive more of
+  // them than the per-peer limit through ONE responder — a fresh handler would
+  // get a fresh limiter and hide the leak — then prove the peer is still served.
+  it.each([
+    ['denied before the authorized stage', false],
+    ['whose authorization throws', true],
+  ])('releases the handoff reservation for a request %s', async (_label, authorizationThrows) => {
+    const shortCircuitedRequests = SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT + 1;
+    let authCalls = 0;
+    let served = 0;
+    const cap = captureHandler(baseStore({
+      listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
+      query: async (sparql: string) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
+        served += 1;
+        return exactGraphRowResult();
+      },
+    }), {
+      contextGraphPriorities: { 'sync-protection': 5 },
+      authorizeSyncRequest: async () => {
+        authCalls += 1;
+        if (authCalls > shortCircuitedRequests) return true;
+        if (authorizationThrows) throw new Error('authorization exploded');
+        return false;
+      },
+    });
+
+    for (let i = 0; i < shortCircuitedRequests; i++) {
+      const response = await cap.invoke(makeEnvelope(), REMOTE_A)
+        .catch((error: unknown) => error);
+      // Capacity is never the reason these fail: a busy rejection here would
+      // mean the previous requests never gave their reserved slots back.
+      expect(String(response instanceof Error ? response.message : ''))
+        .not.toMatch(/queue full/);
+      if (!authorizationThrows) {
+        expect(new TextDecoder().decode(response as Uint8Array)).toBe('sync-denied');
+      }
+    }
+
+    await expect(cap.invoke(makeEnvelope(), REMOTE_A)).resolves.toBeInstanceOf(Uint8Array);
+    expect(served).toBe(1);
+  });
+
   it('caps durable page computation at three globally and one per peer', async () => {
     const releases: Array<() => void> = [];
     let completed = 0;
@@ -122,7 +364,8 @@ describe('sync responder protection', () => {
     let maxInFlight = 0;
     const store = baseStore({
       listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
-      query: async () => {
+      query: async (sparql: string) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
         inFlight += 1;
         maxInFlight = Math.max(maxInFlight, inFlight);
         const gate = deferred<void>();
@@ -131,7 +374,7 @@ describe('sync responder protection', () => {
           gate.resolve();
         });
         await gate.promise;
-        return { type: 'bindings', bindings: [] } satisfies QueryResult;
+        return exactGraphRowResult();
       },
     });
     const cap = captureHandler(store);
@@ -161,6 +404,70 @@ describe('sync responder protection', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     await Promise.all(requests);
+  });
+
+  it('admits SWM and VM together from one peer while serializing each plane', async () => {
+    const authGates: Array<ReturnType<typeof deferred<boolean>>> = [];
+    const startedPlanes: string[] = [];
+    const cap = captureHandler(baseStore(), {
+      authorizeSyncRequest: async (request) => {
+        startedPlanes.push(request.includeSharedMemory ? 'swm' : 'vm');
+        const gate = deferred<boolean>();
+        authGates.push(gate);
+        return gate.promise;
+      },
+    });
+
+    const firstVm = cap.invoke(makeEnvelope(), REMOTE_A);
+    const swm = cap.invoke({ ...makeEnvelope(), includeSharedMemory: true }, REMOTE_A);
+    const secondVm = cap.invoke(makeEnvelope(), REMOTE_A);
+    while (startedPlanes.length < 2) await new Promise((resolve) => setTimeout(resolve, 0));
+    for (let i = 0; i < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(startedPlanes).toEqual(['vm', 'swm']);
+
+    authGates[0]?.resolve(false);
+    await firstVm;
+    while (startedPlanes.length < 3) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(startedPlanes).toEqual(['vm', 'swm', 'vm']);
+
+    authGates[1]?.resolve(false);
+    authGates[2]?.resolve(false);
+    await Promise.all([swm, secondVm]);
+  });
+
+  it('overlaps authorized SWM and VM responses through priority handoff and serializes each plane', async () => {
+    const gates: Array<ReturnType<typeof deferred<QueryResult>>> = [];
+    const startedPlanes: string[] = [];
+    const cap = captureHandler(baseStore({
+      listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH, `${SYNC_PROTECTION_DATA_GRAPH}/_shared_memory`],
+      query: async (sparql) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
+        startedPlanes.push(sparql.includes('/_shared_memory') ? 'swm' : 'vm');
+        const gate = deferred<QueryResult>();
+        gates.push(gate);
+        return gate.promise;
+      },
+    }), { contextGraphPriorities: { 'sync-protection': 5 }, authorizeSyncRequest: async () => true });
+    const firstVm = cap.invoke(makeEnvelope(), REMOTE_A);
+    const firstSwm = cap.invoke({ ...makeEnvelope(), includeSharedMemory: true }, REMOTE_A);
+    for (let i = 0; i < 100 && gates.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(startedPlanes).toEqual(['vm', 'swm']);
+    const secondVm = cap.invoke(makeEnvelope(), REMOTE_A);
+    const secondSwm = cap.invoke({ ...makeEnvelope(), includeSharedMemory: true }, REMOTE_A);
+    for (let i = 0; i < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(startedPlanes).toEqual(['vm', 'swm']);
+    gates[0]!.resolve(exactGraphRowResult());
+    await firstVm;
+    for (let i = 0; i < 100 && gates.length < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(startedPlanes).toEqual(['vm', 'swm', 'vm']);
+    gates[1]!.resolve(exactGraphRowResult());
+    await firstSwm;
+    for (let i = 0; i < 100 && gates.length < 4; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(startedPlanes).toEqual(['vm', 'swm', 'vm', 'swm']);
+    gates[2]!.resolve(exactGraphRowResult());
+    gates[3]!.resolve(exactGraphRowResult());
+    await Promise.all([secondVm, secondSwm]);
   });
 
   it('applies per-peer backpressure before authorization work starts', async () => {
@@ -347,7 +654,8 @@ describe('sync responder protection', () => {
     let authStarted = 0;
     const cap = captureHandler(baseStore({
       listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
-      query: async (_sparql: string, options?: QueryOptions) => {
+      query: async (sparql: string, options?: QueryOptions) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
         querySignal = options?.signal;
         queryCalls += 1;
         return rowGate.promise;
@@ -433,11 +741,12 @@ describe('sync responder protection', () => {
     const releases: Array<() => void> = [];
     const store = baseStore({
       listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
-      query: async () => {
+      query: async (sparql: string) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
         const gate = deferred<void>();
         releases.push(() => gate.resolve());
         await gate.promise;
-        return { type: 'bindings', bindings: [] } satisfies QueryResult;
+        return exactGraphRowResult();
       },
     });
     const cap = captureHandler(store);
@@ -461,11 +770,12 @@ describe('sync responder protection', () => {
     const releases: Array<() => void> = [];
     const store = baseStore({
       listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
-      query: async () => {
+      query: async (sparql: string) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
         const gate = deferred<void>();
         releases.push(() => gate.resolve());
         await gate.promise;
-        return { type: 'bindings', bindings: [] } satisfies QueryResult;
+        return exactGraphRowResult();
       },
     });
     const cap = captureHandler(store);
@@ -491,11 +801,12 @@ describe('sync responder protection', () => {
     const releases: Array<() => void> = [];
     const store = baseStore({
       listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
-      query: async () => {
+      query: async (sparql: string) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
         const gate = deferred<void>();
         releases.push(() => gate.resolve());
         await gate.promise;
-        return { type: 'bindings', bindings: [] } satisfies QueryResult;
+        return exactGraphRowResult();
       },
     });
     const cap = captureHandler(store);
@@ -526,11 +837,12 @@ describe('sync responder protection', () => {
     const releases: Array<() => void> = [];
     const store = baseStore({
       listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
-      query: async () => {
+      query: async (sparql: string) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
         const gate = deferred<void>();
         releases.push(() => gate.resolve());
         await gate.promise;
-        return { type: 'bindings', bindings: [] } satisfies QueryResult;
+        return exactGraphRowResult();
       },
     });
     const cap = captureHandler(store);
@@ -557,7 +869,12 @@ describe('sync responder protection', () => {
     let querySignal: AbortSignal | undefined;
     const store = baseStore({
       listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
-      query: async (_sparql: string, options?: QueryOptions) => {
+      // Force the bounded page path. Small graphs are intentionally assembled
+      // by a signal-independent shared snapshot owner and raced by each waiter;
+      // only the store-bounded fallback carries the stream signal itself.
+      countQuads: async (graph) => graph ? 1_000_000_000 : 0,
+      query: async (sparql: string, options?: QueryOptions) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
         querySignal = options?.signal;
         await new Promise((_resolve, reject) => {
           options?.signal?.addEventListener('abort', () => reject(new Error('aborted by test')), { once: true });

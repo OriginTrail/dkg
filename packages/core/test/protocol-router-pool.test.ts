@@ -34,6 +34,10 @@ const PEER_OLD = '12D3KooWGRUkpYzqu7w17X8YBaPDB6c7TuD3KSGmZSEpCpVjMx9V';
 class FakeStream {
   writeStatus: 'open' | 'closing' | 'closed' = 'open';
   readonly sent: Uint8Array[] = [];
+  /** Async-iterator pulls — 0 proves the frame decoder never touched the stream. */
+  reads = 0;
+  /** Typed observer invoked on every async-iterator pull (ordering tests). */
+  onRead?: () => void;
   private readBuf: Uint8Array[] = [];
   private waiters: Array<(v: IteratorResult<Uint8Array>) => void> = [];
   private closeListeners: EventListener[] = [];
@@ -102,6 +106,8 @@ class FakeStream {
   [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
     return {
       next: () => {
+        this.reads += 1;
+        this.onRead?.();
         if (this.readBuf.length > 0) {
           return Promise.resolve({ value: this.readBuf.shift()!, done: false });
         }
@@ -575,7 +581,7 @@ describe('ProtocolRouter pooled overlay', () => {
       libp2p: {
         dialProtocol: async () => {
           dialCalls += 1;
-          // Assert the resolver ran BEFORE the dial.
+          // Assert canonical address discovery ran BEFORE the protocol dial.
           expect(resolveCalls.length).toBeGreaterThan(0);
           const s = new FakeStream();
           return s as unknown as import('@libp2p/interface').Stream;
@@ -750,6 +756,214 @@ describe('ProtocolRouter pooled inbound handler', () => {
     inboundStream.endRemote();
     await inboundRun;
     await router.closePooling();
+  });
+
+  type PooledInboundHandlerFn = (
+    stream: import('@libp2p/interface').Stream,
+    connection: { remotePeer: { toString: () => string; toMultihash: () => { bytes: Uint8Array } } },
+  ) => void | Promise<void>;
+
+  /**
+   * Shared harness for pooled INBOUND admission cases: builds a router over a
+   * stub node, enables pooling for one logical protocol, captures the wire
+   * handler, and exposes invoke/decode/close so each test states only its
+   * policy configuration and assertions.
+   */
+  function makePooledInboundFixture(
+    routerOptions?: ConstructorParameters<typeof ProtocolRouter>[1],
+    logicalProtocolId = '/dkg/10.0.1/message',
+  ) {
+    let inboundHandler: PooledInboundHandlerFn | null = null;
+    const node = {
+      libp2p: {
+        dialProtocol: async () => {
+          throw new Error('not used');
+        },
+        handle: (_protocolId: string, handler: PooledInboundHandlerFn) => {
+          if (_protocolId === POOLED_MESSAGE_PROTOCOL) {
+            inboundHandler = handler;
+          }
+        },
+        unhandle: () => undefined,
+        getConnections: () => [],
+        peerStore: { get: async () => ({ addresses: [] }) },
+      },
+    } as unknown as DKGNode;
+    const router = new ProtocolRouter(node, routerOptions);
+    router.enablePooling(logicalProtocolId, {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+    return {
+      router,
+      register(handler: () => Promise<Uint8Array>): void {
+        router.register(logicalProtocolId, handler);
+      },
+      invoke(stream: FakeStream, peer = PEER_NEW): Promise<void> {
+        if (!inboundHandler) throw new Error('pool wire handler not captured');
+        return Promise.resolve(
+          inboundHandler(stream as unknown as import('@libp2p/interface').Stream, {
+            remotePeer: {
+              toString: () => peer,
+              toMultihash: () => ({ bytes: new Uint8Array() }),
+            },
+          }),
+        );
+      },
+      async decodeSent(stream: FakeStream): Promise<{ type: FrameType; payload: Uint8Array }[]> {
+        const parsed: { type: FrameType; payload: Uint8Array }[] = [];
+        for await (const f of decodeFrames(
+          (async function* () {
+            for (const c of stream.sent) yield c;
+          })(),
+        )) {
+          parsed.push(f);
+        }
+        return parsed;
+      },
+      close: () => router.closePooling(),
+    };
+  }
+
+  it('aborts a known-rejected peer\'s pooled inbound stream before reading any frames', async () => {
+    // The pooled counterpart of the one-shot pre-read gate. `reads === 0` is
+    // the discriminator: the frame decoder never pulled from the stream, so a
+    // cached-rejected peer cannot push bounded REQUEST frames at us — nor get
+    // its PINGs answered, since keepalive service also sits behind the loop.
+    let handlerCalls = 0;
+    let probeCalls = 0;
+    const fixture = makePooledInboundFixture({
+      isPeerAccepted: () => {
+        probeCalls += 1;
+        return true;
+      },
+      isPeerKnownRejected: () => true,
+    });
+    fixture.register(async () => {
+      handlerCalls += 1;
+      return new TextEncoder().encode('should-not-run');
+    });
+
+    const stream = new FakeStream();
+    const run = fixture.invoke(stream);
+    await flush();
+    // Frames offered after accept must never be consumed.
+    stream.feed(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('hi')));
+    stream.feed(encodeFrame(FrameType.PING));
+    await flush();
+
+    expect(stream.reads).toBe(0);
+    expect(handlerCalls).toBe(0);
+    expect(probeCalls).toBe(0);
+    // No ERROR frame, no PONG — nothing is written to a gated stream.
+    expect(stream.sent.length).toBe(0);
+    expect(stream.writeStatus).toBe('closed');
+    await run;
+    await fixture.close();
+  });
+
+  it('reads BEFORE probing when the gate does not recognize the pooled peer', async () => {
+    // False-when-unsure, with the order actually asserted: the first iterator
+    // pull must precede the admission probe. Probe-before-read is the exact
+    // I/O inversion this branch exists to avoid — an admission probe dials
+    // outbound toward a sender that may still be mid-write to us.
+    const order: string[] = [];
+    let gateCalls = 0;
+    const fixture = makePooledInboundFixture({
+      isPeerAccepted: () => {
+        order.push('probe');
+        return true;
+      },
+      isPeerKnownRejected: () => {
+        gateCalls += 1;
+        return false;
+      },
+    });
+    fixture.register(async () => new TextEncoder().encode('ok'));
+
+    const stream = new FakeStream();
+    stream.onRead = () => {
+      if (!order.includes('read')) order.push('read');
+    };
+    const run = fixture.invoke(stream);
+    await flush();
+    stream.feed(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('hi')));
+    await flush();
+
+    expect(gateCalls).toBe(1); // once per accepted stream
+    expect(order).toEqual(['read', 'probe']);
+    const parsed = await fixture.decodeSent(stream);
+    expect(parsed[0]?.type).toBe(FrameType.RESPONSE);
+    stream.endRemote();
+    await run;
+    await fixture.close();
+  });
+
+  it('fails closed when the pooled gate itself throws', async () => {
+    // The gate's contract says it must not throw; this pins what happens when
+    // that contract is violated anyway. Failing open would silently disable
+    // the protection, and propagating the throw would leak the stream
+    // un-aborted through the accept path's logger — so a throwing gate must
+    // produce exactly the same pre-read abort as a rejected verdict.
+    let handlerCalls = 0;
+    let probeCalls = 0;
+    const fixture = makePooledInboundFixture({
+      isPeerAccepted: () => {
+        probeCalls += 1;
+        return true;
+      },
+      isPeerKnownRejected: () => {
+        throw new Error('cache unavailable');
+      },
+    });
+    fixture.register(async () => {
+      handlerCalls += 1;
+      return new TextEncoder().encode('should-not-run');
+    });
+
+    const stream = new FakeStream();
+    const run = fixture.invoke(stream);
+    await flush();
+    stream.feed(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('hi')));
+    await flush();
+
+    expect(stream.reads).toBe(0);
+    expect(handlerCalls).toBe(0);
+    expect(probeCalls).toBe(0);
+    expect(stream.sent.length).toBe(0);
+    expect(stream.writeStatus).toBe('closed');
+    await run;
+    await fixture.close();
+  });
+
+  it('never consults the pooled gate for admission-exempt logical protocols', async () => {
+    // Exemptions are keyed by the LOGICAL protocol id — the same id the
+    // pooled full-admission check uses — not the wire id the pool listens on.
+    let gateCalls = 0;
+    const fixture = makePooledInboundFixture({
+      isPeerAccepted: () => false,
+      isPeerKnownRejected: () => {
+        gateCalls += 1;
+        return true;
+      },
+      admissionExemptProtocols: ['/dkg/10.0.1/message'],
+    });
+    fixture.register(async () => new TextEncoder().encode('exempt-ok'));
+
+    const stream = new FakeStream();
+    const run = fixture.invoke(stream);
+    await flush();
+    stream.feed(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('hi')));
+    await flush();
+
+    expect(gateCalls).toBe(0);
+    const parsed = await fixture.decodeSent(stream);
+    expect(parsed[0]?.type).toBe(FrameType.RESPONSE);
+    expect(new TextDecoder().decode(parsed[0].payload)).toBe('exempt-ok');
+    stream.endRemote();
+    await run;
+    await fixture.close();
   });
 
   it('removes the node stop listener after successful pooled inbound handling', async () => {

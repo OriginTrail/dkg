@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Worker } from 'node:worker_threads';
-import { OxigraphWorkerStore, type Quad } from '../src/index.js';
+import {
+  OxigraphWorkerStore,
+  asGraphWriteRevisionSource,
+  type Quad,
+} from '../src/index.js';
 
 // Regression tests for unexpected-worker-exit recovery. The production
 // failure: ERR_WORKER_OUT_OF_MEMORY kills ONLY the worker thread, the daemon
@@ -106,9 +110,16 @@ describe('OxigraphWorkerStore respawn after unexpected worker exit', () => {
       // insert() only schedules the worker's 50ms debounced flush; force the
       // data to disk so the respawned worker hydrates it back.
       await store.flush();
+      const revisions = asGraphWriteRevisionSource(store)!;
+      expect(revisions.writeRevisionCoverage).toBe('all-writers');
+      const beforeCrash = revisions.getWriteRevision('urn:test:');
+      expect(beforeCrash.stable).toBe(true);
 
       const before = internals(store).worker;
       await killWorker(store);
+      const replacing = revisions.getWriteRevision('urn:test:');
+      expect(replacing.stable).toBe(false);
+      expect(replacing.generation).toBeGreaterThan(beforeCrash.generation);
 
       // Same store OBJECT (every daemon alias keeps working), new thread.
       expect(internals(store).worker).not.toBe(before);
@@ -116,6 +127,9 @@ describe('OxigraphWorkerStore respawn after unexpected worker exit', () => {
       // Reads see the persisted data again — the exact op that used to fail
       // forever with "the store is closed".
       expect(await store.countQuads('urn:test:g')).toBe(10);
+      const recovered = revisions.getWriteRevision('urn:test:');
+      expect(recovered.stable).toBe(true);
+      expect(recovered.generation).toBeGreaterThan(replacing.generation);
       // A disk-persisted store recovers fully: the state model is back to 'live'
       // (this is the branch finding 1 deliberately keeps auto-respawning).
       expect(internals(store).lifecycle).toBe('live');
@@ -267,6 +281,9 @@ describe('OxigraphWorkerStore in-memory fail-closed on unexpected worker exit', 
       await store.insert(quads(7));
       // Sanity: the data really is there before the crash.
       expect(await store.countQuads('urn:test:g')).toBe(7);
+      const revisions = asGraphWriteRevisionSource(store)!;
+      const beforeCrash = revisions.getWriteRevision('urn:test:');
+      expect(beforeCrash.stable).toBe(true);
 
       const before = internals(store).worker;
       await killWorker(store);
@@ -276,6 +293,13 @@ describe('OxigraphWorkerStore in-memory fail-closed on unexpected worker exit', 
       expect(internals(store).lifecycle).toBe('in_memory_lost');
       expect(internals(store).respawnPromise).toBeNull();
       expect(internals(store).worker).toBe(before); // no fresh (empty) thread
+
+      // An unchanged, stable revision would tell a generation-bound cache that
+      // nothing was written. The contents are gone, so the revision moves and
+      // never reads as stable again.
+      const afterLoss = revisions.getWriteRevision('urn:test:');
+      expect(afterLoss.stable).toBe(false);
+      expect(afterLoss.generation).toBeGreaterThan(beforeCrash.generation);
 
       // The regression this guards: a read here used to RESOLVE with 0 (an
       // empty respawned store), reporting SUCCESS while all 7 rows were gone.

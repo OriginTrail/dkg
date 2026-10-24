@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import {
   skolemize,
   isBlankNode,
@@ -13,11 +14,16 @@ import {
   computeKCRootV10 as computeKCRoot,
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
+  appendMissingGeneratedPrivateCatalogFloor,
+  prepareGeneratedPrivateCatalogFloor,
+  replaceCatalogPartitionWithGeneratedPrivateFloor,
+  replaceGeneratedPrivateCatalogFloor,
   catalogTripleKey,
   validatePublishRequest,
   assertTrustedCatalogTriplesAreGeneratedFloor,
 } from '../src/index.js';
 import type { ValidationOptions } from '../src/validation.js';
+import type { PrepareGeneratedPrivateCatalogFloorOptions } from '../src/index.js';
 
 const CONTEXT_GRAPH = 'agent-registry';
 const GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
@@ -136,6 +142,101 @@ describe('merkle', () => {
     const r2 = computePublicRoot([q('did:dkg:agent:QmBot2', 'http://ex.org/p', '"b"')])!;
     const kcRoot = computeKCRoot([r1, r2]);
     expect(kcRoot).toHaveLength(32);
+  });
+});
+
+describe('generated private catalog preparation', () => {
+  it('rejects unsafe generated subjects and non-empty graph IRIs', () => {
+    expect(() => generatedPrivateCatalogFloorQuads(
+      'bad> <urn:p> <urn:o> . <urn:x',
+    )).toThrow(/Unsafe or empty IRI/);
+    expect(() => appendMissingGeneratedPrivateCatalogFloor(
+      'safe-cg',
+      [],
+      'urn:unsafe> <urn:p>',
+    )).toThrow(/Unsafe or empty IRI/);
+  });
+
+  it('preserves the public preparation API for default append and explicit replacement', () => {
+    const contextGraphId = 'private-catalog-api-cg';
+    const cgDid = `did:dkg:context-graph:${contextGraphId}`;
+    const content = q(cgDid, 'urn:test:private-note', '"keep encrypted"');
+    const staleFloor = generatedPrivateCatalogFloorQuads(contextGraphId, 'urn:stale');
+    const defaultOptions: PrepareGeneratedPrivateCatalogFloorOptions = {};
+    const replaceOptions: PrepareGeneratedPrivateCatalogFloorOptions = {
+      graph: cgDid,
+      mode: 'replace-generated',
+    };
+
+    const appended = prepareGeneratedPrivateCatalogFloor(
+      contextGraphId,
+      [content, staleFloor[0]],
+      defaultOptions,
+    );
+    const replaced = prepareGeneratedPrivateCatalogFloor(
+      contextGraphId,
+      [content, ...staleFloor],
+      replaceOptions,
+    );
+
+    expect(appended.quads[0]).toBe(content);
+    expect(appended.quads[1]).toBe(staleFloor[0]);
+    expect(replaced.quads).toEqual([
+      content,
+      ...generatedPrivateCatalogFloorQuads(contextGraphId, cgDid),
+    ]);
+  });
+
+  it('fills a partial legacy floor without duplicating existing triples', () => {
+    const contextGraphId = 'private-catalog-cg';
+    const floor = generatedPrivateCatalogFloorQuads(contextGraphId);
+    const legacyFloorQuad = { ...floor[0], graph: 'urn:legacy:catalog' };
+    const content = q('urn:test:shipment:1', 'http://schema.org/name', '"Shipment 1"');
+
+    const prepared = appendMissingGeneratedPrivateCatalogFloor(
+      contextGraphId,
+      [content, legacyFloorQuad],
+    );
+
+    expect(prepared.quads[0]).toBe(content);
+    expect(prepared.quads[1]).toBe(legacyFloorQuad);
+    for (const key of generatedPrivateCatalogTripleKeys(contextGraphId)) {
+      expect(prepared.quads.filter((quad) => catalogTripleKey(quad) === key)).toHaveLength(1);
+    }
+    expect(prepared.trustedNonManifestCatalogTriples)
+      .toEqual(generatedPrivateCatalogTripleKeys(contextGraphId));
+  });
+
+  it('replaces the complete catalog partition and preserves private CG-DID data', () => {
+    const contextGraphId = 'private-catalog-cg';
+    const cgDid = `did:dkg:context-graph:${contextGraphId}`;
+    const privateCgDidQuad = q(cgDid, 'urn:test:private-note', '"keep encrypted"');
+    const recommendedCatalogQuad = q(
+      cgDid,
+      DKG_ONTOLOGY.DCT_PUBLISHER,
+      'urn:test:publisher',
+      'urn:stale',
+    );
+    const staleFloor = generatedPrivateCatalogFloorQuads(contextGraphId, 'urn:stale');
+
+    const prepared = replaceCatalogPartitionWithGeneratedPrivateFloor(
+      contextGraphId,
+      [privateCgDidQuad, recommendedCatalogQuad, ...staleFloor],
+      cgDid,
+    );
+    const deprecatedAlias = replaceGeneratedPrivateCatalogFloor(
+      contextGraphId,
+      [privateCgDidQuad, recommendedCatalogQuad, ...staleFloor],
+      cgDid,
+    );
+
+    expect(prepared.quads[0]).toBe(privateCgDidQuad);
+    expect(prepared.quads.slice(1)).toEqual(
+      generatedPrivateCatalogFloorQuads(contextGraphId, cgDid),
+    );
+    expect(prepared.quads).not.toContainEqual(recommendedCatalogQuad);
+    expect(prepared.quads.filter((quad) => quad.graph === 'urn:stale')).toHaveLength(0);
+    expect(deprecatedAlias).toEqual(prepared);
   });
 });
 

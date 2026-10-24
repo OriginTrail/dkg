@@ -4,6 +4,17 @@
 export const echoPlugin = {
   name: 'sample-fixture-echo',
   async handle(ctx) {
+    if (ctx.req.method === 'GET' && ctx.path === '/api/sample-fixture/publisher-context') {
+      ctx.res.writeHead(200, { 'Content-Type': 'application/json' });
+      ctx.res.end(JSON.stringify({
+        publisherRuntimePresent: ctx.publisherRuntime !== null,
+        publisherAvailability: ctx.publisherAvailability,
+        runtimeAliasMatchesCanonical: ctx.publisherRuntime === ctx.publisherState.runtime,
+        availabilityAliasMatchesCanonical:
+          ctx.publisherAvailability === ctx.publisherState.availability,
+      }));
+      return;
+    }
     if (ctx.req.method !== 'POST' || ctx.path !== '/api/sample-fixture/echo') return;
     const chunks = [];
     for await (const c of ctx.req) chunks.push(c);

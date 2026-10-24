@@ -1,14 +1,16 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as configModule from '../src/config.js';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ApiClient } from '../src/api-client.js';
+import { ApiClient, DaemonOutcomeUnknownError } from '../src/api-client.js';
 import type { KnowledgeAssetFinalizedPublishOptions } from '../src/api-client.js';
 
 const PORT = 8899;
 const originalDkgHome = process.env.DKG_HOME;
 const originalDkgApiPort = process.env.DKG_API_PORT;
+const originalDkgAuthToken = process.env.DKG_AUTH_TOKEN;
 
 interface FetchCall {
   url: string;
@@ -73,12 +75,14 @@ describe('ApiClient', () => {
     const options: KnowledgeAssetFinalizedPublishOptions = {
       clearAfter: true,
       publishEpochs: 1,
+      pricingPolicy: 'full-content',
       publisherNodeIdentityIdOverride: 0n,
     };
 
     expect(options).toMatchObject({
       clearAfter: true,
       publishEpochs: 1,
+      pricingPolicy: 'full-content',
       publisherNodeIdentityIdOverride: 0n,
     });
   });
@@ -86,6 +90,7 @@ describe('ApiClient', () => {
   beforeEach(async () => {
     client = new ApiClient(PORT, 'test-token');
     tempDir = await mkdtemp(join(tmpdir(), 'api-client-test-'));
+    delete process.env.DKG_AUTH_TOKEN;
   });
 
   afterEach(async () => {
@@ -94,7 +99,31 @@ describe('ApiClient', () => {
     else process.env.DKG_HOME = originalDkgHome;
     if (originalDkgApiPort === undefined) delete process.env.DKG_API_PORT;
     else process.env.DKG_API_PORT = originalDkgApiPort;
+    if (originalDkgAuthToken === undefined) delete process.env.DKG_AUTH_TOKEN;
+    else process.env.DKG_AUTH_TOKEN = originalDkgAuthToken;
     await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('constructs direct remote clients without reading the local DKG home', async () => {
+    const home = vi.fn(() => { throw new Error('unexpected local-home context'); });
+    vi.resetModules();
+    vi.doMock('../src/config.js', () => ({
+      ...configModule,
+      DkgHomeFiles: class {
+        constructor() { home(); }
+      },
+    }));
+    try {
+      const { ApiClient: RemoteApiClient } = await import('../src/api-client.js');
+      const mockedConfig = await import('../src/config.js');
+      expect(() => new mockedConfig.DkgHomeFiles()).toThrow('unexpected local-home context');
+      home.mockClear();
+      expect(() => new RemoteApiClient('https://remote.example')).not.toThrow();
+      expect(home).not.toHaveBeenCalled();
+    } finally {
+      vi.doUnmock('../src/config.js');
+      vi.resetModules();
+    }
   });
 
   describe('GET endpoints', () => {
@@ -108,6 +137,133 @@ describe('ApiClient', () => {
       expect(calls).toHaveLength(1);
       expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/status`);
       expect((calls[0].opts.headers as any).Authorization).toBeUndefined();
+    });
+
+    it('status({ includeStoreQuads: true }) asks the public route to refresh the store count', async () => {
+      const body = { name: 'test', peerId: 'peer1', uptimeMs: 1000, connectedPeers: 2, relayConnected: true, multiaddrs: [] };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+
+      await client.status({ includeStoreQuads: true });
+      await client.status({ includeStoreQuads: false });
+
+      expect(calls.map((call) => call.url)).toEqual([
+        `http://127.0.0.1:${PORT}/api/status?includeStoreQuads=true`,
+        `http://127.0.0.1:${PORT}/api/status`,
+      ]);
+      expect((calls[0].opts.headers as any).Authorization).toBeUndefined();
+    });
+
+    it('status({ probeStore: true }) asks the public route for a reachability check, alone or with a count', async () => {
+      const body = { name: 'test', peerId: 'peer1', uptimeMs: 1000, connectedPeers: 2, relayConnected: true, multiaddrs: [] };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+
+      await client.status({ probeStore: true });
+      await client.status({ includeStoreQuads: true, probeStore: true });
+
+      expect(calls.map((call) => call.url)).toEqual([
+        `http://127.0.0.1:${PORT}/api/status?probeStore=true`,
+        `http://127.0.0.1:${PORT}/api/status?includeStoreQuads=true&probeStore=true`,
+      ]);
+      expect((calls[0].opts.headers as any).Authorization).toBeUndefined();
+    });
+
+    it('normalizes catch-up jobStatus from a pre-field daemon response', async () => {
+      globalThis.fetch = mockFetchOk({
+        jobId: 'legacy-job',
+        contextGraphId: 'cg-legacy',
+        includeWorkspace: true,
+        status: 'unreachable',
+        queuedAt: 1,
+      });
+
+      const result = await client.catchupStatus('cg-legacy');
+
+      expect(result.status).toBe('unreachable');
+      expect(result.jobStatus).toBe('unreachable');
+      expect(result.includeSharedMemory).toBe(true);
+    });
+
+    it('preserves the precise catch-up jobStatus from an upgraded daemon', async () => {
+      globalThis.fetch = mockFetchOk({
+        jobId: 'partial-job',
+        contextGraphId: 'cg-partial',
+        includeWorkspace: true,
+        status: 'unreachable',
+        jobStatus: 'partial',
+        queuedAt: 1,
+      });
+
+      const result = await client.catchupStatus('cg-partial');
+
+      expect(result.status).toBe('unreachable');
+      expect(result.jobStatus).toBe('partial');
+    });
+
+    it.each(['persisted', 'persisted-env-token', 'fallback-json', 'fallback-yaml'] as const)(
+      'connect() keeps every local read in one home across a delayed read (%s)', async (mode) => {
+        const otherHome = join(tempDir, 'other-home');
+        await mkdir(otherHome);
+        process.env.DKG_HOME = tempDir;
+        delete process.env.DKG_API_PORT;
+        await writeFile(join(tempDir, 'daemon.pid'), '12345');
+        await writeFile(join(tempDir, 'auth.token'), 'home-a-token\n');
+        await writeFile(join(otherHome, 'auth.token'), 'home-b-token\n');
+        await writeFile(join(otherHome, 'config.json'), JSON.stringify({ name: 'node-b', apiPort: 9444, apiHost: '192.0.2.20' }));
+        if (mode === 'fallback-yaml') {
+          await writeFile(join(tempDir, 'config.yaml'), 'name: node-a\napiPort: 9317\napiHost: 192.0.2.10\n');
+        } else {
+          await writeFile(join(tempDir, 'config.json'), JSON.stringify({ name: 'node-a', apiPort: 9317, apiHost: '192.0.2.10' }));
+        }
+        if (mode === 'persisted-env-token') process.env.DKG_AUTH_TOKEN = 'token-a';
+        if (mode.startsWith('persisted')) await writeFile(join(tempDir, 'api.port'), '9317');
+        let release!: () => void;
+        let markEntered!: () => void;
+        const gate = new Promise<void>((resolve) => { release = resolve; });
+        const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+        const readPort = configModule.DkgHomeFiles.prototype.readApiPort;
+        const read = vi.spyOn(configModule.DkgHomeFiles.prototype, 'readApiPort').mockImplementation(async function () {
+          const value = await readPort.call(this);
+          markEntered();
+          await gate;
+          return value;
+        });
+        const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { agents: [] } });
+        globalThis.fetch = fetch;
+        try {
+          const connecting = ApiClient.connect({ allowConfigFallback: true });
+          await entered;
+          process.env.DKG_HOME = otherHome;
+          if (mode === 'persisted-env-token') process.env.DKG_AUTH_TOKEN = 'token-b';
+          release();
+          const connected = await connecting;
+          await connected.agents();
+          expect(calls[0].url).toBe('http://192.0.2.10:9317/api/agents');
+          expect(new Headers(calls[0].opts.headers).get('Authorization')).toBe(mode === 'persisted-env-token' ? 'Bearer token-a' : 'Bearer home-a-token');
+          if (!mode.startsWith('persisted')) {
+            expect(connected.controlPlaneWarning).toContain('api.port');
+            expect(connected.controlPlaneWarning).not.toContain('daemon.pid');
+          }
+        } finally {
+          release();
+          read.mockRestore();
+        }
+      },
+    );
+
+    it('connect() gives DKG_AUTH_TOKEN precedence over the selected home token file', async () => {
+      process.env.DKG_HOME = tempDir;
+      process.env.DKG_API_PORT = String(PORT);
+      process.env.DKG_AUTH_TOKEN = 'environment-token';
+      await writeFile(join(tempDir, 'auth.token'), 'file-token\n', 'utf8');
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { agents: [] } });
+      globalThis.fetch = fetch;
+
+      const connected = await ApiClient.connect();
+      await connected.agents();
+
+      expect((calls[0].opts.headers as any).Authorization).toBe('Bearer environment-token');
     });
 
     it('connect() can use the selected home config for status when control-plane files are missing', async () => {
@@ -248,7 +404,10 @@ describe('ApiClient', () => {
       globalThis.fetch = fetch;
 
       await expect(ApiClient.connect({ allowConfigFallback: true }))
-        .rejects.toThrow('Daemon is not running. Start it with: dkg start');
+        .rejects.toThrow(`Daemon is not running at ${tempDir}.\n`
+          + 'DKG_HOME selects the node directory checked by this command.\n'
+          + 'Start a daemon in that directory with: dkg start\n'
+          + 'For an existing devnet, set DKG_HOME to its node directory (for example .devnet/node1), then rerun this command.');
       expect(calls).toHaveLength(0);
       expect(existsSync(join(tempDir, 'api.port'))).toBe(false);
       expect(existsSync(join(tempDir, 'daemon.pid'))).toBe(false);
@@ -275,23 +434,98 @@ describe('ApiClient', () => {
       delete process.env.DKG_API_PORT;
       await writeFile(join(tempDir, 'config.json'), JSON.stringify({ name: 'isolated', apiPort: 9317 }));
       await writeFile(join(tempDir, 'auth.token'), 'local-token\n', 'utf8');
-      const { fetch, calls } = createRejectingFetch(new TypeError('fetch failed'));
+      const { fetch, calls } = createRejectingFetch(Object.assign(
+        new TypeError('request transport failed'),
+        { cause: { code: 'ECONNREFUSED' } },
+      ));
       globalThis.fetch = fetch;
 
       const connected = await ApiClient.connect({ allowConfigFallback: true });
 
-      await expect(connected.status()).rejects.toThrow('Daemon is not running. Start it with: dkg start');
+      // A client reports the home it connected through, even if a later command
+      // changes the process-wide selection before this request fails.
+      process.env.DKG_HOME = join(tempDir, 'another-node');
+      await expect(connected.status()).rejects.toThrow(`Daemon is not running at ${tempDir}.`);
       expect(calls).toHaveLength(1);
       expect(calls[0].url).toBe('http://127.0.0.1:9317/api/status');
       expect((calls[0].opts.headers as any).Authorization).toBeUndefined();
     });
 
+    it('classifies a fetch-failure message even when the transport omits an error code', async () => {
+      process.env.DKG_HOME = tempDir;
+      delete process.env.DKG_API_PORT;
+      await writeFile(join(tempDir, 'config.json'), JSON.stringify({ name: 'isolated', apiPort: 9317 }));
+      const { fetch } = createRejectingFetch(new TypeError('fetch failed'));
+      globalThis.fetch = fetch;
+
+      const connected = await ApiClient.connect({ allowConfigFallback: true });
+      await expect(connected.status()).rejects.toThrow(`Daemon is not running at ${tempDir}.`);
+    });
+
+    it('does not let a hostile nested error getter escape transport classification', async () => {
+      process.env.DKG_HOME = tempDir;
+      delete process.env.DKG_API_PORT;
+      await writeFile(join(tempDir, 'config.json'), JSON.stringify({ name: 'isolated', apiPort: 9317 }));
+      const hostileCause = new Proxy({}, {
+        get: () => { throw new Error('hostile getter'); },
+      });
+      const transportError = Object.assign(new TypeError('unclassified transport error'), {
+        cause: hostileCause,
+      });
+      const { fetch } = createRejectingFetch(transportError);
+      globalThis.fetch = fetch;
+
+      const connected = await ApiClient.connect({ allowConfigFallback: true });
+      await expect(connected.status()).rejects.toBe(transportError);
+    });
+
     it('agents() calls /api/agents', async () => {
       const body = { agents: [{ agentUri: 'urn:a', name: 'A', peerId: 'p1' }] };
-      const { fetch } = createTrackingFetch({ ok: true, status: 200, body });
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
       globalThis.fetch = fetch;
       const result = await client.agents();
       expect(result.agents).toHaveLength(1);
+      // The parameterless call keeps the bare path — no stray '?' that a
+      // strict daemon-side unknown-parameter check could trip over.
+      expect(calls[0].url.endsWith('/api/agents')).toBe(true);
+    });
+
+    it('agents() forwards the GH#310 filters and pagination params', async () => {
+      const body = { agents: [], nextCursor: 'next-1' };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+      const result = await client.agents({
+        framework: 'eliza',
+        skillType: 'ImageAnalysis',
+        connectionStatus: 'connected',
+        local: true,
+        limit: 5,
+        cursor: 'c123',
+      });
+      // Exact query entries — substring checks are spoofable by a prefixed
+      // key, and the parameter NAMES are the contract (the daemon 400s on
+      // unknown names). The route's parameter is snake_case skill_type; the
+      // option is camelCase.
+      const entries = Object.fromEntries(new URLSearchParams(calls[0].url.split('?')[1] ?? ''));
+      expect(entries).toEqual({
+        framework: 'eliza',
+        skill_type: 'ImageAnalysis',
+        connectionStatus: 'connected',
+        local: 'true',
+        limit: '5',
+        cursor: 'c123',
+      });
+      expect(result.nextCursor).toBe('next-1');
+    });
+
+    it('agents({ local: false }) sends local=false, not nothing', async () => {
+      // false must reach the daemon — dropping it silently would flip the
+      // call from "everyone else's agents" to "everyone's agents".
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { agents: [] } });
+      globalThis.fetch = fetch;
+      await client.agents({ local: false });
+      expect(Object.fromEntries(new URLSearchParams(calls[0].url.split('?')[1] ?? '')))
+        .toEqual({ local: 'false' });
     });
 
     it('skills() calls /api/skills', async () => {
@@ -308,6 +542,27 @@ describe('ApiClient', () => {
       globalThis.fetch = fetch;
       const result = await client.listContextGraphs();
       expect(result.contextGraphs).toHaveLength(1);
+    });
+
+    it('getContextGraphJoinPolicy() GETs the encoded per-CG endpoint', async () => {
+      const body = {
+        contextGraphId: '0xOwner/private graph',
+        mode: 'open',
+        maxMembers: 50,
+        maxApprovalsPerHour: 20,
+        updatedAt: 1_752_490_123_456,
+      };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+
+      const result = await client.getContextGraphJoinPolicy('0xOwner/private graph');
+      const updatedAt: number | null | undefined = result.updatedAt;
+      expect(result).toEqual(body);
+      expect(updatedAt).toBe(1_752_490_123_456);
+      expect(calls[0].url).toBe(
+        `http://127.0.0.1:${PORT}/api/context-graph/0xOwner%2Fprivate%20graph/join-policy`,
+      );
+      expect(calls[0].opts.method).toBeUndefined();
     });
 
     it('contextGraphExists() calls correct URL with encoded id', async () => {
@@ -331,9 +586,151 @@ describe('ApiClient', () => {
       expect(url).toContain('contextType=review');
       expect(url).toContain('includeBody=true');
     });
+
+    // #1828 (otReviewAgent): the recovery-lookup client wrapper is the public
+    // surface callers use — assert endpoint spelling, param encoding, optional
+    // forwarding, and response passthrough at the client boundary.
+    it('publisherJobByIntent() GETs /api/publisher/job-by-intent with all facts encoded', async () => {
+      const body = { result: 'active', job: { jobId: 'job-1' }, superseded: [] };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+
+      const result = await client.publisherJobByIntent({
+        contextGraphId: 'music social',
+        name: 'albums/2026',
+        subGraphName: 'research',
+        agentAddress: '0x1111111111111111111111111111111111111111',
+        intentKey: `sha256:${'ab'.repeat(32)}`,
+      });
+
+      expect(result).toEqual(body);
+      expect(calls).toHaveLength(1);
+      const url = calls[0].url;
+      expect(url.startsWith(`http://127.0.0.1:${PORT}/api/publisher/job-by-intent?`)).toBe(true);
+      expect(url).toContain('contextGraphId=music+social');
+      expect(url).toContain('name=albums%2F2026');
+      expect(url).toContain('subGraphName=research');
+      expect(url).toContain('agentAddress=0x1111111111111111111111111111111111111111');
+      expect(url).toContain(`intentKey=sha256%3A${'ab'.repeat(32)}`);
+    });
+
+    it('publisherJobByIntent() omits optional facts when not provided', async () => {
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { result: 'none' } });
+      globalThis.fetch = fetch;
+      await client.publisherJobByIntent({ contextGraphId: 'cg', name: 'albums' });
+
+      const url = calls[0].url;
+      expect(url).toContain('contextGraphId=cg');
+      expect(url).toContain('name=albums');
+      expect(url).not.toContain('subGraphName=');
+      expect(url).not.toContain('agentAddress=');
+      expect(url).not.toContain('intentKey=');
+    });
+  });
+
+  describe('PUT endpoints', () => {
+    it('setContextGraphJoinPolicy() enables bounded open enrollment with explicit acknowledgement', async () => {
+      const response = {
+        contextGraphId: 'private/cg',
+        mode: 'open',
+        maxMembers: 12,
+        maxApprovalsPerHour: 4,
+      };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: response });
+      globalThis.fetch = fetch;
+
+      await client.setContextGraphJoinPolicy('private/cg', {
+        mode: 'open',
+        maxMembers: 12,
+        maxApprovalsPerHour: 4,
+        acknowledgeOpenEnrollment: true,
+      });
+
+      expect(calls[0].url).toBe(
+        `http://127.0.0.1:${PORT}/api/context-graph/private%2Fcg/join-policy`,
+      );
+      expect(calls[0].opts.method).toBe('PUT');
+      expect((calls[0].opts.headers as any).Authorization).toBe('Bearer test-token');
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({
+        mode: 'open',
+        maxMembers: 12,
+        maxApprovalsPerHour: 4,
+        acknowledgeOpenEnrollment: true,
+      });
+    });
+
+    it('setContextGraphJoinPolicy() sends only manual mode when disabling open enrollment', async () => {
+      const { fetch, calls } = createTrackingFetch({
+        ok: true,
+        status: 200,
+        body: { contextGraphId: 'private/cg', mode: 'manual' },
+      });
+      globalThis.fetch = fetch;
+
+      await client.setContextGraphJoinPolicy('private/cg', { mode: 'manual' });
+
+      expect(calls[0].opts.method).toBe('PUT');
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({ mode: 'manual' });
+    });
   });
 
   describe('POST endpoints', () => {
+    it('subscribeToContextGraph() forwards explicit sync lifetime', async () => {
+      const { fetch, calls } = createTrackingFetch({
+        ok: true,
+        status: 200,
+        body: { subscribed: 'cg-selected', syncMode: 'on-demand' },
+      });
+      globalThis.fetch = fetch;
+
+      await client.subscribeToContextGraph('cg-selected', {
+        includeSharedMemory: true,
+        syncMode: 'on-demand',
+        forceCatchup: true,
+      });
+
+      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/context-graph/subscribe`);
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({
+        contextGraphId: 'cg-selected',
+        includeWorkspace: true,
+        syncMode: 'on-demand',
+        forceCatchup: true,
+      });
+    });
+
+    it('subscribeToContextGraph() preserves the omitted-options legacy contract', async () => {
+      const { fetch, calls } = createTrackingFetch({
+        ok: true,
+        status: 200,
+        body: { subscribed: 'cg-legacy-direct', syncMode: 'always-on' },
+      });
+      globalThis.fetch = fetch;
+
+      await client.subscribeToContextGraph('cg-legacy-direct');
+
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({
+        contextGraphId: 'cg-legacy-direct',
+        syncMode: 'always-on',
+      });
+    });
+
+    it('subscribe() keeps the legacy restart-durable lifetime explicit', async () => {
+      const { fetch, calls } = createTrackingFetch({
+        ok: true,
+        status: 200,
+        body: { subscribed: 'cg-legacy', syncMode: 'always-on' },
+      });
+      globalThis.fetch = fetch;
+
+      await client.subscribe('cg-legacy', { includeWorkspace: true });
+
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({
+        contextGraphId: 'cg-legacy',
+        includeWorkspace: true,
+        syncMode: 'always-on',
+      });
+    });
+
     it('sendChat() sends correct body', async () => {
       const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { delivered: true } });
       globalThis.fetch = fetch;
@@ -654,8 +1051,30 @@ describe('ApiClient', () => {
 
   describe('shutdown', () => {
     it('does not throw even if connection closes', async () => {
-      globalThis.fetch = (async () => { throw new Error('connection reset'); }) as any;
+      globalThis.fetch = (async () => {
+        throw Object.assign(new Error('fetch failed'), { cause: { code: 'ECONNRESET' } });
+      }) as any;
       await expect(client.shutdown()).resolves.toBeUndefined();
+    });
+
+    it('propagates a definite HTTP rejection', async () => {
+      const { fetch } = createTrackingFetch({
+        ok: false,
+        status: 401,
+        body: { error: 'Unauthorized' },
+      });
+      globalThis.fetch = fetch;
+      await expect(client.shutdown()).rejects.toMatchObject({
+        message: 'Unauthorized',
+        httpStatus: 401,
+      });
+    });
+
+    it('propagates a definite pre-request connection failure', async () => {
+      globalThis.fetch = (async () => {
+        throw Object.assign(new Error('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
+      }) as any;
+      await expect(client.shutdown()).rejects.toMatchObject({ message: 'fetch failed' });
     });
   });
 
@@ -794,6 +1213,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       alsoPublishVm: {
         clearAfter: false,
         publishEpochs: 9,
+        pricingPolicy: 'full-content',
         publisherNodeIdentityIdOverride: 7n,
       },
     });
@@ -806,6 +1226,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       alsoPublishVm: {
         clearSharedMemoryAfter: false,
         publishEpochs: 9,
+        pricingPolicy: 'full-content',
         publisherNodeIdentityIdOverride: '7',
       },
     });
@@ -892,17 +1313,13 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     let calls = track({ swmShared: true, promotedCount: 2 });
     await client.knowledgeAssetShare('cg', 'f', {
       subGraphName: 'notes',
-      entities: ['urn:entity:1'],
       awaitCuratorAck: true,
-      skipSeal: true,
     });
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/swm/share`);
     expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
       contextGraphId: 'cg',
       subGraphName: 'notes',
-      entities: ['urn:entity:1'],
       awaitCuratorAck: true,
-      skipSeal: true,
     });
 
     calls = track({ kaId: '7', status: 'confirmed' });
@@ -946,28 +1363,120 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(publishAsyncBody.options).not.toHaveProperty('subGraphName');
   });
 
-  it('knowledgeAssetFinalize can target WM or SWM layer', async () => {
-    const calls = track({ merkleRoot: '0xabc', eip712Digest: '0xdig' });
-    await client.knowledgeAssetFinalize('cg', 'f', { layer: 'swm', subGraphName: 'notes' });
-    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/wm/finalize`);
-    expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
-      contextGraphId: 'cg',
-      layer: 'swm',
-      subGraphName: 'notes',
+  // GH#1786 — the selector must be serialized TOP-LEVEL and must never end up inside
+  // `options`: `parseHttpFinalizedPublishOptions` ignores unknown nested keys, so a
+  // nested selector would be silently dropped and publish a different author.
+  it('serializes selectedAuthorAgentAddress top-level on both publish lanes', async () => {
+    const selected = '0x00000000000000000000000000000000000000b7';
+
+    let calls = track({ kaId: '7', status: 'confirmed' });
+    await client.knowledgeAssetPublish('cg', 'f', {
+      selectedAuthorAgentAddress: selected,
+      publishEpochs: 12,
     });
+    let body = JSON.parse(calls[0].opts.body as string);
+    expect(body).toMatchObject({
+      contextGraphId: 'cg',
+      selectedAuthorAgentAddress: selected,
+      options: { publishEpochs: 12 },
+    });
+    expect(body.options).not.toHaveProperty('selectedAuthorAgentAddress');
+
+    calls = track({ jobId: 'job-1', status: 'accepted' });
+    await client.knowledgeAssetPublishAsync('cg', 'f', {
+      selectedAuthorAgentAddress: selected,
+      publishEpochs: 12,
+    });
+    body = JSON.parse(calls[0].opts.body as string);
+    expect(body).toMatchObject({
+      contextGraphId: 'cg',
+      selectedAuthorAgentAddress: selected,
+      options: { publishEpochs: 12 },
+    });
+    expect(body.options).not.toHaveProperty('selectedAuthorAgentAddress');
+  });
+
+  // GH#1786 — the OLDER public wrapper over the same endpoint must expose the selector too:
+  // a typed SDK caller holding only `publishFromFinalizedAssertion` would otherwise have to
+  // cast to `any` to send the very field the AMBIGUOUS_ASSERTION_AUTHOR 409 tells it to
+  // retry with. Be precise about what this test can and cannot prove: no tsconfig in this
+  // repo includes `test/` (every package is `include: ["src"]`), so nothing HERE guards the
+  // TYPE. That is structural instead — all three public entry points take their selector
+  // from the one `KnowledgeAssetPublishAuthorSelection` contract, so it cannot go missing
+  // from one of them, and deleting it outright fails the package typecheck at the
+  // destructures. What this DOES pin is the forwarding: the wrapper currently passes
+  // `options` straight through, but the sibling `publishAssertion` builds its downstream
+  // options from an explicit key-by-key spread, and a refactor of this wrapper into that
+  // shape would silently drop the selector and publish a different author with a 200.
+  it('publishFromFinalizedAssertion forwards the selector top-level, like knowledgeAssetPublish', async () => {
+    const selected = '0x00000000000000000000000000000000000000b7';
+    const calls = track({ kaId: '7', status: 'confirmed' });
+
+    await client.publishFromFinalizedAssertion('cg', 'f', {
+      selectedAuthorAgentAddress: selected,
+      subGraphName: 'notes',
+      publishEpochs: 12,
+      pricingPolicy: 'full-content',
+    });
+
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/vm/publish`);
+    const body = JSON.parse(calls[0].opts.body as string);
+    expect(body).toMatchObject({
+      contextGraphId: 'cg',
+      subGraphName: 'notes',
+      selectedAuthorAgentAddress: selected,
+      options: { publishEpochs: 12, pricingPolicy: 'full-content' },
+    });
+    // Same nesting hazard as the direct lane: a selector inside `options` is silently
+    // ignored by parseHttpFinalizedPublishOptions and would publish a different author.
+    expect(body.options).not.toHaveProperty('selectedAuthorAgentAddress');
+  });
+
+  it('forwards an explicitly empty selector so the daemon can reject it, and omits it when absent', async () => {
+    // Presence, not truthiness: silently dropping a malformed selector client-side
+    // would let normal author resolution publish a DIFFERENT author with 200 instead
+    // of the daemon's 400.
+    let calls = track({ kaId: '7', status: 'confirmed' });
+    await client.knowledgeAssetPublish('cg', 'f', { selectedAuthorAgentAddress: '' });
+    expect(JSON.parse(calls[0].opts.body as string)).toHaveProperty('selectedAuthorAgentAddress', '');
+
+    calls = track({ jobId: 'job-1', status: 'accepted' });
+    await client.knowledgeAssetPublishAsync('cg', 'f', { selectedAuthorAgentAddress: '' });
+    expect(JSON.parse(calls[0].opts.body as string)).toHaveProperty('selectedAuthorAgentAddress', '');
+
+    calls = track({ kaId: '7', status: 'confirmed' });
+    await client.knowledgeAssetPublish('cg', 'f', {});
+    expect(JSON.parse(calls[0].opts.body as string)).not.toHaveProperty('selectedAuthorAgentAddress');
+  });
+
+  it('knowledgeAssetShare rejects root selection and unsealed sharing before HTTP serialization', async () => {
+    const calls = track({ swmShared: true, promotedCount: 1 });
+    await expect(client.knowledgeAssetShare('cg', 'f', {
+      entities: ['urn:entity:1'],
+    })).rejects.toThrow('Knowledge Assets are shared atomically');
+    await expect(client.knowledgeAssetShare('cg', 'f', {
+      skipSeal: true,
+    })).rejects.toThrow('always seal-before-share');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('knowledgeAssetFinalize rejects the legacy SWM write bridge before HTTP serialization', async () => {
+    const calls = track({ merkleRoot: '0xabc', eip712Digest: '0xdig' });
+    await expect(
+      client.knowledgeAssetFinalize('cg', 'f', { layer: 'swm', subGraphName: 'notes' }),
+    ).rejects.toMatchObject({ code: 'LEGACY_KA_READ_ONLY' });
+    expect(calls).toHaveLength(0);
   });
 
   it('knowledgeAssetShareAsync and share job helpers use lifecycle routes', async () => {
     let calls = track({ jobId: 'share-job-1', state: 'queued' });
     await client.knowledgeAssetShareAsync('cg', 'f', {
       subGraphName: 'notes',
-      entities: ['urn:entity:1'],
     });
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/swm/share-async`);
     expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
       contextGraphId: 'cg',
       subGraphName: 'notes',
-      entities: ['urn:entity:1'],
     });
 
     calls = track({ jobs: [] });
@@ -993,11 +1502,61 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(calls[0].opts.method).toBe('POST');
   });
 
+  it('#1837 clear-job helpers POST the terminal-clear routes with correct encoding and body', async () => {
+    // SWM share-job clear: jobId is percent-encoded in the path, empty JSON body.
+    let calls = track({ outcome: 'cleared', jobId: 'share/job 1' });
+    await client.knowledgeAssetClearShareJob('share/job 1');
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/swm/share-jobs/share%2Fjob%201/clear`);
+    expect(calls[0].opts.method).toBe('POST');
+    expect(JSON.parse(calls[0].opts.body as string)).toEqual({});
+
+    // Publisher clear-job: jobId travels in the body, not the path.
+    calls = track({ outcome: 'already_absent', jobId: 'lift job 7' });
+    await client.publisherClearJob('lift job 7');
+    expect(calls[0].url).toBe(`${base}/api/publisher/clear-job`);
+    expect(calls[0].opts.method).toBe('POST');
+    expect(JSON.parse(calls[0].opts.body as string)).toEqual({ jobId: 'lift job 7' });
+  });
+
+  it('publisherRetryJob serializes a safe exact job selection and rejects unsafe ids before HTTP', async () => {
+    const calls = track({ retried: 1, blockedPendingRecovery: 0, skipped: 0 });
+    await client.publisherRetryJob('lift-job-7');
+    expect(calls[0].url).toBe(`${base}/api/publisher/retry`);
+    expect(calls[0].opts.method).toBe('POST');
+    expect(JSON.parse(calls[0].opts.body as string)).toEqual({ status: 'failed', jobId: 'lift-job-7' });
+
+    await expect(client.publisherRetryJob('')).rejects.toThrow('jobId must be 1-256 characters');
+    await expect(client.publisherRetryJob('lift job 7')).rejects
+      .toThrow('contain only ASCII letters');
+    await expect(client.publisherRetryJob('a'.repeat(257))).rejects
+      .toThrow('jobId must be 1-256 characters');
+    expect(calls).toHaveLength(1);
+  });
+
+  // GH#2270 follow-up (🟡 3824484894) — the escape-hatch option is the CHANGED public behaviour,
+  // and only the unchanged default was covered. Removing or inverting the conditional spread would
+  // have sent the plain body while every existing row stayed green — and the plain body is exactly
+  // what cannot clear a held job.
+  it('publisherClearJob serializes the pending-transaction override only when asked', async () => {
+    const calls = track({ outcome: 'cleared', jobId: 'lift job 7' });
+    await client.publisherClearJob('lift job 7', { allowPendingTransaction: true });
+    expect(JSON.parse(calls[0].opts.body as string))
+      .toEqual({ jobId: 'lift job 7', allowPendingTransaction: true });
+
+    // The discriminating half: an explicit false must not opt in, so a caller cannot request the
+    // destructive override by passing the option around with a falsy value.
+    await client.publisherClearJob('lift job 7', { allowPendingTransaction: false });
+    expect(JSON.parse(calls[1].opts.body as string)).toEqual({ jobId: 'lift job 7' });
+  });
+
   it('knowledgeAssetShareAsync rejects unsupported sync-only options before HTTP serialization', async () => {
     const calls = track({ jobId: 'should-not-reach', state: 'queued' });
     await expect(client.knowledgeAssetShareAsync('cg', 'f', {
       skipSeal: true,
-    } as any)).rejects.toThrow('skipSeal is not supported for async share');
+    } as any)).rejects.toThrow('skipSeal is not supported');
+    await expect(client.knowledgeAssetShareAsync('cg', 'f', {
+      entities: ['urn:entity:1'],
+    })).rejects.toThrow('Knowledge Assets are shared atomically');
     await expect(client.knowledgeAssetShareAsync('cg', 'f', {
       awaitCuratorAck: true,
     } as any)).rejects.toThrow('awaitCuratorAck is not supported for async share');
@@ -1073,7 +1632,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       'cg',
       'asset2',
       [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: '' }],
-      { clearAfter: false, subGraphName: 'sg2' },
+      { clearAfter: false, subGraphName: 'sg2', pricingPolicy: 'full-content' },
     );
     // 1st call creates (finalize+share to SWM); the sequence ENDS at the per-KA vm/publish route
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets`);
@@ -1088,6 +1647,191 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(last.opts.method).toBe('POST');
     const published = JSON.parse(last.opts.body as string);
     expect(published.subGraphName).toBe('sg2');
-    expect(published.options).toEqual({ clearSharedMemoryAfter: false });
+    expect(published.options).toEqual({
+      clearSharedMemoryAfter: false,
+      pricingPolicy: 'full-content',
+    });
+  });
+});
+
+// Real, small deadlines: a 20 ms read class and a 1 s long class. The stub daemon
+// answers after `latencyMs` unless the request's signal aborts first, in which case
+// it rejects with the abort reason, as fetch does.
+describe('ApiClient per-route timeout classes', () => {
+  const originalFetch = globalThis.fetch;
+  const quads = [{ subject: 's', predicate: 'p', object: 'o' }];
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'api-client-timeouts-'));
+  });
+
+  afterEach(async () => {
+    globalThis.fetch = originalFetch;
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  const slowDaemon = (latencyMs: number, status = 200, body: unknown = { kaId: '7', status: 'confirmed' }) => {
+    globalThis.fetch = ((_url: string | URL | Request, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(new Response(JSON.stringify(body), { status })), latencyMs);
+      init?.signal?.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(init.signal!.reason);
+      }, { once: true });
+    })) as typeof fetch;
+  };
+  const timed = (longTimeoutMs = 1_000) =>
+    new ApiClient(PORT, 'test-token', { readTimeoutMs: 20, longTimeoutMs });
+
+  it('a publish that outlasts the read timeout is not reported as failed', async () => {
+    slowDaemon(80);
+    await expect(timed().knowledgeAssetPublish('cg', 'asset')).resolves.toEqual({ kaId: '7', status: 'confirmed' });
+  });
+
+  it('a GET read with the same latency still times out (control)', async () => {
+    slowDaemon(80);
+    await expect(timed().getKnowledgeAsset('cg', 'asset')).rejects.toMatchObject({ name: 'TimeoutError' });
+  });
+
+  it('share, import-file, a sharing create and other writes take the long class', async () => {
+    slowDaemon(80);
+    const client = timed();
+    const filePath = join(tempDir, 'doc.md');
+    await writeFile(filePath, '# doc');
+    await expect(client.knowledgeAssetShare('cg', 'asset')).resolves.toBeDefined();
+    await expect(client.promoteAssertion('asset', { contextGraphId: 'cg' })).resolves.toBeDefined();
+    await expect(client.importAssertionFile('asset', { filePath, contextGraphId: 'cg' })).resolves.toBeDefined();
+    await expect(client.createKnowledgeAsset('cg', 'asset', { quads, alsoShareSwm: true })).resolves.toBeDefined();
+    // Chain-bound writes such as registration must not inherit the read deadline.
+    await expect(client.registerContextGraph('cg')).resolves.toBeDefined();
+  });
+
+  it('a long mutation past its deadline reports outcome unknown, pointing at ka history', async () => {
+    slowDaemon(400);
+    const err = await timed(100).knowledgeAssetPublish('cg', 'asset', { subGraphName: 'sg' })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DaemonOutcomeUnknownError);
+    expect(err).toMatchObject({ code: 'OUTCOME_UNKNOWN', method: 'POST', path: '/api/knowledge-assets/asset/vm/publish' });
+    expect((err as Error).message).toContain('dkg ka history asset --context-graph-id cg --sub-graph-name sg');
+  });
+
+  it('other writes past the long deadline keep the plain timeout error', async () => {
+    slowDaemon(400);
+    // A create that neither shares nor publishes has nothing long in flight.
+    const err = await timed(100).createKnowledgeAsset('cg', 'asset', { quads }).catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(DaemonOutcomeUnknownError);
+    expect(err).toMatchObject({ name: 'TimeoutError' });
+  });
+
+  it('a daemon answer on a long mutation keeps its HTTP error', async () => {
+    slowDaemon(0, 409, { code: 'VM_PUBLISH_PRECONDITION', error: 'not shared' });
+    const err = await timed().knowledgeAssetPublish('cg', 'asset').catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(DaemonOutcomeUnknownError);
+    expect(err).toMatchObject({ httpStatus: 409, message: 'not shared' });
+  });
+
+  it.each([
+    ['headers', 'fetch failed', 'UND_ERR_HEADERS_TIMEOUT'],
+    ['body', 'terminated', 'UND_ERR_BODY_TIMEOUT'],
+  ])("treats Node fetch's own %s timeout on a long mutation as outcome unknown", async (_phase, message, code) => {
+    // Node's fetch (undici) stops waiting on its own after 300 s without headers or
+    // body progress; that surfaces as a TypeError whose cause carries the undici code.
+    const undiciTimeout = Object.assign(new TypeError(message), { cause: { code } });
+    globalThis.fetch = (async () => { throw undiciTimeout; }) as typeof fetch;
+    await expect(timed().knowledgeAssetPublish('cg', 'asset')).rejects.toBeInstanceOf(DaemonOutcomeUnknownError);
+    // Outside the long mutations it stays the raw transport error.
+    await expect(timed().getKnowledgeAsset('cg', 'asset')).rejects.toBe(undiciTimeout);
+  });
+
+  it('passes a hostile transport error on a long mutation through untouched', async () => {
+    const hostileCause = new Proxy({}, { get: () => { throw new Error('hostile getter'); } });
+    const transportError = Object.assign(new TypeError('unclassified transport error'), { cause: hostileCause });
+    globalThis.fetch = (async () => { throw transportError; }) as typeof fetch;
+    await expect(timed().knowledgeAssetPublish('cg', 'asset')).rejects.toBe(transportError);
+  });
+
+  it('gives /api/verify its own collection window plus a margin', async () => {
+    slowDaemon(150);
+    // 150 ms outlasts the 100 ms long class; the request-carried window covers it.
+    await expect(timed(100).verify({
+      contextGraphId: 'cg',
+      verifiableMemoryId: 'vm-1',
+      batchId: '1',
+      timeoutMs: 1_000,
+    })).resolves.toBeDefined();
+  });
+
+  it('bounds the EPCIS by-path read with the read deadline', async () => {
+    slowDaemon(80);
+    await expect(timed().queryEpcisEventsByPath('/api/epcis/events')).rejects.toMatchObject({ name: 'TimeoutError' });
+  });
+
+  it('keeps an EPCIS by-path error answer as an HTTP error', async () => {
+    slowDaemon(0, 404, { error: 'no such page' });
+    await expect(timed().queryEpcisEventsByPath('/api/epcis/events?page=9'))
+      .rejects.toMatchObject({ httpStatus: 404, message: 'no such page' });
+  });
+
+  it('a list read that outlasts the read timeout is not cut short', async () => {
+    slowDaemon(80, 200, { contextGraphs: [], accounts: [], jobs: [] });
+    const client = timed();
+    await expect(client.listContextGraphs()).resolves.toBeDefined();
+    await expect(client.listPcas()).resolves.toBeDefined();
+    await expect(client.publisherJobs('queued')).resolves.toBeDefined();
+  });
+
+  describe('deadline values', () => {
+    let deadlines: number[];
+
+    beforeEach(() => {
+      deadlines = [];
+      const timeout = AbortSignal.timeout.bind(AbortSignal);
+      vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+        deadlines.push(ms);
+        return timeout(ms);
+      });
+      slowDaemon(0);
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+    });
+
+    const readAll = async (client: ApiClient) => {
+      await client.listContextGraphs();
+      await client.listPcas();
+      await client.publisherJobs('queued');
+      await client.getPcaInfo('1');
+      await client.getKnowledgeAsset('cg', 'asset');
+      await client.registerContextGraph('cg');
+    };
+
+    // The shared policy's own tests (packages/core) cover its values, floors
+    // and validation; these check the client routes every request through it.
+    it('gives the graph, PCA and publisher-job lists 60 s, other reads 30 s and writes 240 s', async () => {
+      vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '');
+      vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', '');
+      await readAll(new ApiClient(PORT, 'test-token'));
+      expect(deadlines).toEqual([60_000, 60_000, 60_000, 30_000, 30_000, 240_000]);
+    });
+
+    it('takes the deadlines from the environment unless explicit options win', async () => {
+      vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '45000');
+      vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', ' 600000 ');
+      await readAll(new ApiClient(PORT, 'test-token'));
+      expect(deadlines).toEqual([60_000, 60_000, 60_000, 45_000, 45_000, 600_000]);
+      deadlines.length = 0;
+      await readAll(new ApiClient(PORT, 'test-token', { readTimeoutMs: 20, longTimeoutMs: 1_000 }));
+      expect(deadlines).toEqual([60_000, 60_000, 60_000, 20, 20, 1_000]);
+    });
+
+    it('refuses to construct with an invalid timeout override', () => {
+      vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '30s');
+      expect(() => new ApiClient(PORT, 'test-token')).toThrow(/DKG_API_READ_TIMEOUT_MS must be a whole number of milliseconds/);
+      vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '');
+      vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', '0');
+      expect(() => new ApiClient(PORT, 'test-token')).toThrow(/DKG_API_LONG_TIMEOUT_MS must be a whole number of milliseconds/);
+    });
   });
 });

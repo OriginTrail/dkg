@@ -1,8 +1,9 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
+import { MemoryWorkspaceSnapshotStore } from './_helpers/memory-workspace-snapshot-store.js';
 
 function recorder<A extends unknown[], R>(impl: (...a: A) => R) {
   const calls: A[] = [];
@@ -12,7 +13,14 @@ function recorder<A extends unknown[], R>(impl: (...a: A) => R) {
   };
   return Object.assign(fn, { calls });
 }
-import { DKGAgent, type ContextGraphSub, type ContextGraphSubscriptionStore } from '../src/index.js';
+import {
+  DKGAgent,
+  type ContextGraphMembershipRecord,
+  type ContextGraphMembershipStore,
+  type ContextGraphSub,
+  type ContextGraphSubscriptionRecord,
+  type ContextGraphSubscriptionStore,
+} from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { OxigraphStore, SharedMemoryLiteralBlobStore, SparqlHttpStore, registerTripleStoreAdapter, type TripleStore, type TripleStoreConfig } from '@origintrail-official/dkg-storage';
 import { SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphSharedMemoryUri, contextGraphMetaGraphUri, Logger } from '@origintrail-official/dkg-core';
@@ -63,6 +71,7 @@ async function createTestAgent(opts?: {
   store?: TripleStore;
   storeConfig?: TripleStoreConfig;
   contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
+  nodeRole?: 'edge' | 'core';
 }) {
   const agent = await DKGAgent.create({
     kaNumberAllocator: makeTestKaNumberAllocator(),
@@ -72,7 +81,9 @@ async function createTestAgent(opts?: {
     ...(opts?.store ? { store: opts.store } : {}),
     ...(opts?.storeConfig ? { storeConfig: opts.storeConfig } : {}),
     chainAdapter: opts?.chainAdapter ?? createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+    rfc64CatalogActivation: { enabled: false },
     contextGraphSubscriptionStore: opts?.contextGraphSubscriptionStore,
+    ...(opts?.nodeRole ? { nodeRole: opts.nodeRole } : {}),
   });
   return { agent, store: opts?.store ?? agent.store };
 }
@@ -299,7 +310,128 @@ describe('implicit SWM context graph metadata', () => {
       synced: true,
       metaSynced: true,
     });
+    const publicMetaProof = await result.store.query(`ASK WHERE {
+      GRAPH <${contextGraphMetaGraphUri(contextGraphId)}> {
+        <${contextGraphDataGraphUri(contextGraphId)}>
+          <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> ;
+          <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> "public" .
+      }
+    }`);
+    expect(publicMetaProof).toEqual({ type: 'boolean', value: true });
+    const registryResolve = vi.spyOn(
+      (agent as any).chain,
+      'resolveContextGraphIdByNameHash',
+    ).mockRejectedValue(new Error('registry RPC unavailable'));
+    await expect(agent.resolveContextGraphRegistrationBinding(contextGraphId))
+      .resolves.toEqual({ kind: 'unregistered', unregisteredEvidence: 'local-create' });
+    expect(registryResolve).not.toHaveBeenCalled();
   }, 15000);
+
+  it('restores implicit SWM provenance without RDF or registry availability', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-implicit-swm-provenance-'));
+    const contextGraphId = 'lazy-swm-restart';
+    const caller = new ethers.Wallet(HARDHAT_KEYS.DEPLOYER).address;
+    const persistedMemberships = new Map<
+      string,
+      ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }
+    >();
+    const persistedOrigins = new Map<string, {
+      contextGraphId: string;
+      source: 'local-create' | 'implicit-swm-write';
+      createdAt: number;
+    }>();
+    const membershipStore: ContextGraphMembershipStore = {
+      loadAll: async () => [...persistedMemberships.values()].map((row) => ({ ...row })),
+      localOrigins: {
+        loadLocalOrigins: async () => [...persistedOrigins.values()].map((row) => ({ ...row })),
+        recordLocalOrigin: async (record) => {
+          if (!persistedOrigins.has(record.contextGraphId)) {
+            persistedOrigins.set(record.contextGraphId, { ...record });
+          }
+        },
+      },
+      upsert: async (record) => {
+        persistedMemberships.set(
+          `${record.contextGraphId}\0${record.principalType}\0${record.principalId}`,
+          { ...record },
+        );
+      },
+      delete: async (id, principalType, principalId) => {
+        persistedMemberships.delete(`${id}\0${principalType}\0${principalId}`);
+      },
+    };
+    let first: DKGAgent | undefined;
+
+    try {
+      first = await DKGAgent.create({
+        kaNumberAllocator: makeTestKaNumberAllocator(),
+        name: 'ImplicitSwmProvenanceFirst',
+        listenPort: 0,
+        listenHost: '127.0.0.1',
+        dataDir,
+        // This test persists local-origin authority, not snapshot capacity.
+        // Keep an unrelated host disk reserve from blocking its tiny SWM write.
+        publicSnapshotStore: new MemoryWorkspaceSnapshotStore(),
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+        rfc64CatalogActivation: { enabled: false },
+        contextGraphMembershipStore: membershipStore,
+      });
+      agent = first;
+      await first.start();
+      await first.share(contextGraphId, [{
+        subject: 'urn:lazy-swm-restart:root',
+        predicate: 'http://schema.org/name',
+        object: '"Lazy SWM Restart"',
+        graph: '',
+      }], { callerAgentAddress: caller });
+      await first.stop();
+      first = undefined;
+      agent = undefined;
+
+      expect([...persistedMemberships.values()]).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          contextGraphId,
+          principalType: 'agent',
+          source: 'implicit-swm-write',
+          status: 'active',
+        }),
+      ]));
+      expect([...persistedOrigins.values()]).toEqual([
+        expect.objectContaining({
+          contextGraphId,
+          source: 'implicit-swm-write',
+        }),
+      ]);
+
+      const offlineChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+      const registryResolve = vi.spyOn(offlineChain, 'resolveContextGraphIdByNameHash')
+        .mockRejectedValue(new Error('registry RPC unavailable'));
+      const restarted = await DKGAgent.create({
+        kaNumberAllocator: makeTestKaNumberAllocator(),
+        name: 'ImplicitSwmProvenanceRestarted',
+        listenPort: 0,
+        listenHost: '127.0.0.1',
+        dataDir,
+        chainAdapter: offlineChain,
+        rfc64CatalogActivation: { enabled: false },
+        contextGraphSubscriptionRehydrationEnabled: false,
+        contextGraphMembershipStore: membershipStore,
+      });
+      agent = restarted;
+      await restarted.start();
+
+      await expect(restarted.resolveContextGraphRegistrationBinding(contextGraphId))
+        .resolves.toEqual({ kind: 'unregistered', unregisteredEvidence: 'local-create' });
+      await expect(restarted.getContextGraphOnChainPolicy(contextGraphId))
+        .resolves.toEqual({});
+      expect(registryResolve).not.toHaveBeenCalled();
+    } finally {
+      await first?.stop().catch(() => {});
+      await agent?.stop().catch(() => {});
+      agent = undefined;
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it('does not overwrite an explicitly created context graph on later SWM writes', async () => {
     const result = await createTestAgent();
@@ -408,6 +540,50 @@ describe('discoverContextGraphsFromStore', () => {
     expect(sub!.name).toBe('Discovered ContextGraph');
   }, 15000);
 
+  it('shares one discovery pass across concurrent peer-connect callers', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const contextGraphUri = contextGraphDataGraphUri('single-flight-discovery');
+    await store.insert([
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: ontologyGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Single Flight"', graph: ontologyGraph },
+    ]);
+
+    const originalQuery = store.query.bind(store);
+    let releaseFirstQuery!: () => void;
+    const firstQueryBlocked = new Promise<void>((resolve) => { releaseFirstQuery = resolve; });
+    let enteredFirstQuery!: () => void;
+    const firstQueryEntered = new Promise<void>((resolve) => { enteredFirstQuery = resolve; });
+    let discoveryQueries = 0;
+    vi.spyOn(store, 'query').mockImplementation(async (...args) => {
+      const source = args[1]?.source;
+      if (typeof source === 'string' && source.startsWith('agent.contextGraph.discovery.')) {
+        discoveryQueries++;
+        if (discoveryQueries === 1) {
+          enteredFirstQuery();
+          await firstQueryBlocked;
+        }
+      }
+      return originalQuery(...args);
+    });
+
+    const first = agent.discoverContextGraphsFromStore();
+    await firstQueryEntered;
+    const second = agent.discoverContextGraphsFromStore();
+    releaseFirstQuery();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([1, 1]);
+    // One pass reads ontology definitions, `_meta` bindings, ontology bindings
+    // and `_meta` definitions.
+    expect(discoveryQueries).toBe(4);
+    await expect(agent.discoverContextGraphsFromStore()).resolves.toBe(0);
+    expect(discoveryQueries).toBe(8);
+  }, 15000);
+
   it('does not re-discover already known contextGraphs', async () => {
     const store = new OxigraphStore();
     const result = await createTestAgent({ store });
@@ -464,7 +640,7 @@ describe('listContextGraphs merge', () => {
       name: 'Chain Only',
       subscribed: true,
       synced: false,
-      onChainId: '0xabc123',
+      onChainId: '701',
     });
 
     const contextGraphs = await agent.listContextGraphs();
@@ -596,6 +772,95 @@ describe('listContextGraphs merge', () => {
     expect(entry!.callerInvolved).toBeUndefined();
   }, 15000);
 
+  it('batch-enriches mixed listing sources and keeps a finalized miss absent', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    const ontologyId = 'listing-batch-ontology';
+    const metaId = 'listing-batch-meta';
+    const storageId = 'listing-batch-storage';
+    const justRegisteredId = 'listing-batch-just-registered';
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    await store.insert([
+      {
+        subject: contextGraphDataGraphUri(ontologyId),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: contextGraphDataGraphUri(justRegisteredId),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: contextGraphDataGraphUri(justRegisteredId),
+        predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
+        object: '"registered"',
+        graph: contextGraphMetaGraphUri(justRegisteredId),
+      },
+      {
+        subject: contextGraphDataGraphUri(metaId),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: contextGraphMetaGraphUri(metaId),
+      },
+      {
+        subject: 'urn:listing-batch-storage:root',
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Storage row"',
+        graph: contextGraphSharedMemoryUri(storageId),
+      },
+    ]);
+    (agent as any).subscribedContextGraphs.set(metaId, {
+      name: 'Meta row',
+      subscribed: true,
+      synced: true,
+    } satisfies ContextGraphSub);
+
+    const finalizedBatch = vi.fn(async (nameHashes: readonly string[]) => new Map([
+      [agent!.contextGraphNameCommitment(ontologyId), 901n],
+      [agent!.contextGraphNameCommitment(metaId), 902n],
+      [agent!.contextGraphNameCommitment(storageId), 903n],
+    ].filter(([nameHash]) => nameHashes.includes(nameHash as string)) as Array<[
+      string,
+      bigint,
+    ]>));
+    Object.defineProperty(agent.chain, 'contextGraphAuthorityIndexRevisionReader', {
+      configurable: true,
+      value: {
+        resolveFinalizedContextGraphIdsByNameHashes: finalizedBatch,
+        readContextGraphAuthorityIndexRevisions: async () => new Map(),
+        whenIdle: async () => undefined,
+      },
+    });
+    const currentResolver = vi.spyOn(agent, 'getContextGraphOnChainId')
+      .mockImplementation(async (contextGraphId) => (
+        contextGraphId === justRegisteredId ? '904' : null
+      ));
+
+    const rows = await agent.listContextGraphs();
+    expect(rows.find((row) => row.id === ontologyId)?.onChainId).toBe('901');
+    expect(rows.find((row) => row.id === metaId)?.onChainId).toBe('902');
+    expect(rows.find((row) => row.id === storageId)?.onChainId).toBe('903');
+    expect(rows.find((row) => row.id === justRegisteredId)?.onChainId).toBeUndefined();
+    expect(finalizedBatch).toHaveBeenCalledOnce();
+    expect(finalizedBatch.mock.calls[0]?.[0]).toEqual(expect.arrayContaining([
+      agent.contextGraphNameCommitment(ontologyId),
+      agent.contextGraphNameCommitment(metaId),
+      agent.contextGraphNameCommitment(storageId),
+      agent.contextGraphNameCommitment(justRegisteredId),
+    ]));
+    // A durable local `registered` marker cannot reopen current-state
+    // resolution after a successful finalized batch omitted the graph. The
+    // complete listing stays on one authority horizon and performs no scalar
+    // RPC fallback for any row.
+    expect(currentResolver).not.toHaveBeenCalled();
+  }, 15000);
+
   it('listContextGraphs sets callerInvolved from curator wallet match', async () => {
     const result = await createTestAgent();
     agent = result.agent;
@@ -639,7 +904,7 @@ describe('listContextGraphs merge', () => {
     expect(unauthenticated.find(p => p.id === 'my-curated')).toBeUndefined();
   }, 15000);
 
-  it('does not reject the whole list when one row enrichment fails', async () => {
+  it('does not reject the whole list when one row chain enrichment is abandoned', async () => {
     const store = sparqlHttpStoreBackedBy(new OxigraphStore());
     const result = await createTestAgent({ store });
     agent = result.agent;
@@ -686,7 +951,12 @@ describe('listContextGraphs merge', () => {
     ]);
 
     (agent as any).getContextGraphOnChainId = recorder(async (id: string) => {
-      if (id === 'broken-enrichment-row') return new Promise<undefined>(() => {});
+      if (id === 'broken-enrichment-row') {
+        throw Object.assign(
+          new Error('Context Graph name-hash resolution has no active waiters'),
+          { name: 'AbortError' },
+        );
+      }
       return undefined;
     });
 
@@ -857,7 +1127,7 @@ describe('listContextGraphs merge', () => {
       name: 'Policy Unknown Tail',
       subscribed: true,
       synced: false,
-      onChainId: '0xabc123',
+      onChainId: '702',
     } satisfies ContextGraphSub);
 
     const scoped = await agent.listContextGraphs({ callerAgentAddress: ethers.Wallet.createRandom().address });
@@ -880,7 +1150,7 @@ describe('listContextGraphs merge', () => {
       name: 'Unscoped No Legacy Fallback',
       subscribed: true,
       synced: false,
-      onChainId: '0xabc123',
+      onChainId: '703',
     } satisfies ContextGraphSub, { persist: false });
 
     const isPrivateOrig = (agent as any).isPrivateContextGraph.bind(agent);
@@ -1312,6 +1582,7 @@ describe('listContextGraphs merge', () => {
       listenHost: '127.0.0.1',
       storeConfig: { backend },
       chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      rfc64CatalogActivation: { enabled: false },
     });
     agent = created;
     await agent.start();
@@ -1741,7 +2012,7 @@ describe('listContextGraphs merge', () => {
     }
   }, 15000);
 
-  it('still applies auth budget to async membership work on pre-dispatch stores', async () => {
+  it('still applies auth budget when cancelled async membership work rejects with an abandonment error', async () => {
     const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
     const originalAuthBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS;
     Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
@@ -1773,7 +2044,14 @@ describe('listContextGraphs merge', () => {
         if (contextGraphId === id && ethers.getAddress(caller) === ethers.getAddress(member)) {
           targetCalls += 1;
           signalSeen = options?.signal;
-          return new Promise<boolean>(() => {});
+          return new Promise<boolean>((_resolve, reject) => {
+            const rejectAbandoned = () => reject(new Error('membership lookup has no active waiters'));
+            if (options?.signal?.aborted) {
+              rejectAbandoned();
+              return;
+            }
+            options?.signal?.addEventListener('abort', rejectAbandoned, { once: true });
+          });
         }
         return originalAllowlist(contextGraphId, caller, options);
       });
@@ -2020,7 +2298,7 @@ describe('listContextGraphs merge', () => {
       name: 'Cache Invalidated',
       subscribed: true,
       synced: false,
-      onChainId: '0xabc123',
+      onChainId: '704',
     } satisfies ContextGraphSub, { persist: false });
 
     const afterInvalidation = await agent.listContextGraphs({ callerAgentAddress: null });
@@ -2224,11 +2502,21 @@ describe('discoverContextGraphsFromChain', () => {
     await agent?.stop().catch(() => {});
   });
 
-  it('discovers on-chain contextGraphs with cleartext name and auto-subscribes', async () => {
+  it('catalogues revealed on-chain context graphs without subscribing or persisting them', async () => {
+    const persisted = new Map<string, any>();
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [...persisted.values()],
+      save: async (record) => {
+        persisted.set(record.id, { ...record });
+      },
+      delete: async (contextGraphId) => {
+        persisted.delete(contextGraphId);
+      },
+    };
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     (chain as any).listContextGraphsFromChain = async () => ([
       {
-        contextGraphId: '0xdeadbeef00000000000000000000000000000000000000000000000000000001',
+        contextGraphId: '801',
         name: 'test-revealed',
         creator: '0x1234',
         accessPolicy: 0,
@@ -2237,7 +2525,10 @@ describe('discoverContextGraphsFromChain', () => {
       },
     ] satisfies ContextGraphOnChain[]);
 
-    const result = await createTestAgent({ chainAdapter: chain });
+    const result = await createTestAgent({
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: subscriptionStore,
+    });
     agent = result.agent;
     await agent.start();
 
@@ -2247,16 +2538,29 @@ describe('discoverContextGraphsFromChain', () => {
     const subs = agent.getSubscribedContextGraphs();
     const entry = subs.get('test-revealed');
     expect(entry).toBeDefined();
-    expect(entry!.subscribed).toBe(true);
+    expect(entry!.subscribed).toBe(false);
     expect(entry!.synced).toBe(false);
-    expect(entry!.onChainId).toBe('0xdeadbeef00000000000000000000000000000000000000000000000000000001');
+    expect(entry!.onChainId).toBe('801');
+    expect((agent as any).config.syncContextGraphs ?? []).not.toContain('test-revealed');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(persisted.has('test-revealed')).toBe(false);
+
+    agent.subscribeToContextGraph('test-revealed');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(agent.getSubscribedContextGraphs().get('test-revealed')?.subscribed).toBe(true);
+    expect((agent as any).config.syncContextGraphs ?? []).toContain('test-revealed');
+    expect(persisted.get('test-revealed')).toMatchObject({
+      id: 'test-revealed',
+      subscribed: true,
+      syncScoped: true,
+    });
   }, 15000);
 
-  it('skips auto-subscribe to revealed curated chain entries when not curator', async () => {
+  it('skips revealed curated chain entries when not curator', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     (chain as any).listContextGraphsFromChain = async () => ([
       {
-        contextGraphId: '0xcafebabe00000000000000000000000000000000000000000000000000000003',
+        contextGraphId: '803',
         name: 'leaked-curated',
         creator: '0x000000000000000000000000000000000000dEaD',
         accessPolicy: 1,
@@ -2276,11 +2580,60 @@ describe('discoverContextGraphsFromChain', () => {
     expect(subs.get('leaked-curated')).toBeUndefined();
   }, 15000);
 
+  it('keeps the curated replay gate ahead of an existing durable on-chain binding', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const contextGraphId = '804';
+    const contextGraphName = 'durable-private-replay';
+    const revealed: ContextGraphOnChain = {
+      contextGraphId,
+      name: contextGraphName,
+      creator: '0x000000000000000000000000000000000000dEaD',
+      accessPolicy: 1,
+      blockNumber: 100,
+      metadataRevealed: true,
+    };
+    let acknowledged = 0;
+    (chain as any).scanContextGraphRegistryPages = async function* () {
+      yield {
+        contextGraphs: [revealed],
+        ack: async () => { acknowledged += 1; },
+      };
+    };
+
+    const store = new OxigraphStore();
+    await store.insert([{
+      subject: contextGraphDataGraphUri(contextGraphName),
+      predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+      object: `"${contextGraphId}"`,
+      graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+    }]);
+    const saved: ContextGraphSubscriptionRecord[] = [];
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async (record) => { saved.push(record); },
+      delete: async () => {},
+    };
+    const result = await createTestAgent({
+      chainAdapter: chain,
+      store,
+      contextGraphSubscriptionStore: subscriptionStore,
+      nodeRole: 'core',
+    });
+    agent = result.agent;
+    await agent.start();
+
+    await expect(agent.discoverContextGraphsFromChain({ mode: 'incremental' }))
+      .resolves.toBe(0);
+    expect(acknowledged).toBe(1);
+    expect(agent.getSubscribedContextGraphs().get(contextGraphName)).toBeUndefined();
+    expect(saved.filter((record) => record.id === contextGraphName)).toEqual([]);
+  }, 15000);
+
   it('skips hash-only on-chain contextGraphs without metadata', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     (chain as any).listContextGraphsFromChain = async () => ([
       {
-        contextGraphId: '0xdeadbeef00000000000000000000000000000000000000000000000000000002',
+        contextGraphId: '802',
         creator: '0x1234',
         accessPolicy: 0,
         blockNumber: 100,
@@ -2304,7 +2657,7 @@ describe('discoverContextGraphsFromChain', () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     (chain as any).listContextGraphsFromChain = async () => ([
       {
-        contextGraphId: '0xaaa',
+        contextGraphId: '804',
         creator: '0x1234',
         accessPolicy: 0,
         blockNumber: 50,
@@ -2320,7 +2673,7 @@ describe('discoverContextGraphsFromChain', () => {
       name: 'Known',
       subscribed: true,
       synced: true,
-      onChainId: '0xaaa',
+      onChainId: '804',
     });
 
     const discovered = await agent.discoverContextGraphsFromChain();
@@ -2363,6 +2716,14 @@ describe('discoverContextGraphsFromChain', () => {
       mode: 'seedFromCursor',
       pageBudget: 11,
     })).toBe(0);
+    expect(await agent.discoverContextGraphsFromChain({
+      mode: 'seedLiveTail',
+      pageBudget: 1,
+    })).toBe(0);
+    expect(await agent.repairContextGraphRegistry({
+      pageBudget: 3,
+      minimumIntervalMs: 1234,
+    })).toBe(0);
 
     expect(listCalls).toEqual([
       undefined,
@@ -2372,7 +2733,92 @@ describe('discoverContextGraphsFromChain', () => {
       { mode: 'incremental', pageBudget: 7 },
       { mode: 'seedFull' },
       { mode: 'seedFromCursor', pageBudget: 11 },
+      { mode: 'seedLiveTail', pageBudget: 1 },
+      { mode: 'repair', pageBudget: 3, minimumIntervalMs: 1234 },
     ]);
+  }, 15000);
+
+  it('reports bounded repair progress after each acknowledged repair page', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    let acknowledged = 0;
+    (chain as any).listContextGraphsFromChain = async () => [];
+    (chain as any).scanContextGraphRegistryPages = async function* () {
+      yield {
+        contextGraphs: [],
+        scanProgress: {
+          mode: 'repair',
+          page: 1,
+          pageBudget: 30,
+          fromBlock: 100,
+          toBlock: 199,
+          targetBlock: 199,
+          completesGeneration: true,
+        },
+        ack: async () => {
+          acknowledged += 1;
+        },
+      };
+    };
+    const entries: Array<{ level: string; message: string }> = [];
+    Logger.setSink((entry) => entries.push({ level: entry.level, message: entry.message }));
+    try {
+      const result = await createTestAgent({ chainAdapter: chain });
+      agent = result.agent;
+      await agent.start();
+
+      await expect(agent.repairContextGraphRegistry({
+        pageBudget: 30,
+        minimumIntervalMs: 0,
+      })).resolves.toBe(0);
+    } finally {
+      Logger.setSink(null);
+    }
+
+    expect(acknowledged).toBe(1);
+    expect(entries.some((entry) =>
+      entry.level === 'info'
+      && entry.message.includes('outcome=succeeded pages=1/1/30 range=[100,199] target=199 complete=true'),
+    )).toBe(true);
+  }, 15000);
+
+  it('reports identifier-free bounded repair progress when page acknowledgement fails', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    (chain as any).scanContextGraphRegistryPages = async function* () {
+      yield {
+        contextGraphs: [],
+        scanProgress: {
+          mode: 'repair',
+          page: 1,
+          pageBudget: 30,
+          fromBlock: 200,
+          toBlock: 299,
+          targetBlock: 999,
+          completesGeneration: false,
+        },
+        ack: async () => { throw new Error('checkpoint store unavailable'); },
+      };
+    };
+    const entries: Array<{ level: string; message: string }> = [];
+    Logger.setSink((entry) => entries.push({ level: entry.level, message: entry.message }));
+    try {
+      const result = await createTestAgent({ chainAdapter: chain });
+      agent = result.agent;
+      await agent.start();
+
+      await expect(agent.repairContextGraphRegistry({
+        pageBudget: 30,
+        minimumIntervalMs: 0,
+      })).rejects.toThrow('checkpoint store unavailable');
+    } finally {
+      Logger.setSink(null);
+    }
+
+    expect(entries.some((entry) =>
+      entry.level === 'info'
+      && entry.message.includes(
+        'outcome=failed pages=0/1/30 range=[200,299] target=999 complete=false',
+      ),
+    )).toBe(true);
   }, 15000);
 
   it('keeps legacy chain discovery scan options as explicit cursor-mode aliases', async () => {
@@ -2409,7 +2855,7 @@ describe('discoverContextGraphsFromChain', () => {
     const listCalls: unknown[] = [];
     const entries: ContextGraphOnChain[] = [
       {
-        contextGraphId: '0xfeed000000000000000000000000000000000000000000000000000000000010',
+        contextGraphId: '810',
         name: 'legacy-list-incremental',
         creator: '0x1234',
         accessPolicy: 0,
@@ -2417,7 +2863,7 @@ describe('discoverContextGraphsFromChain', () => {
         metadataRevealed: true,
       },
       {
-        contextGraphId: '0xfeed000000000000000000000000000000000000000000000000000000000011',
+        contextGraphId: '811',
         name: 'legacy-list-seed',
         creator: '0x1234',
         accessPolicy: 0,
@@ -2447,13 +2893,13 @@ describe('discoverContextGraphsFromChain', () => {
       { incremental: true, pageBudget: 5 },
       { seedIncrementalWatermark: true },
     ]);
-    expect(agent.getSubscribedContextGraphs().has('legacy-list-incremental')).toBe(true);
-    expect(agent.getSubscribedContextGraphs().has('legacy-list-seed')).toBe(true);
+    expect(agent.getSubscribedContextGraphs().get('legacy-list-incremental')?.subscribed).toBe(false);
+    expect(agent.getSubscribedContextGraphs().get('legacy-list-seed')?.subscribed).toBe(false);
   }, 15000);
 
   it('applies cursor scan pages once and acknowledges after local discovery work', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-    const contextGraphId = '0xfeed000000000000000000000000000000000000000000000000000000000001';
+    const contextGraphId = '821';
     const revealed: ContextGraphOnChain = {
       contextGraphId,
       name: 'paged-revealed',
@@ -2495,6 +2941,7 @@ describe('discoverContextGraphsFromChain', () => {
     expect(ackedCounts).toEqual([1, 2]);
     const entry = agent.getSubscribedContextGraphs().get('paged-revealed');
     expect(entry).toBeDefined();
+    expect(entry!.subscribed).toBe(false);
     expect(entry!.onChainId).toBe(contextGraphId);
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const contextGraphUri = contextGraphDataGraphUri('paged-revealed');
@@ -2514,7 +2961,7 @@ describe('discoverContextGraphsFromChain', () => {
   it('propagates cursor scan page apply failures without acknowledging progress', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const revealed: ContextGraphOnChain = {
-      contextGraphId: '0xfeed000000000000000000000000000000000000000000000000000000000002',
+      contextGraphId: '822',
       name: 'apply-failure-revealed',
       creator: '0x1234',
       accessPolicy: 0,
@@ -2551,7 +2998,7 @@ describe('discoverContextGraphsFromChain', () => {
 
   it('retries cursor pages after partial local apply without acknowledging until RDF binding exists', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-    const contextGraphId = '0xfeed000000000000000000000000000000000000000000000000000000000003';
+    const contextGraphId = '823';
     const revealed: ContextGraphOnChain = {
       contextGraphId,
       name: 'retry-safe-revealed',
@@ -2618,6 +3065,298 @@ describe('discoverContextGraphsFromChain', () => {
     if (onChainIdBinding.type === 'boolean') {
       expect(onChainIdBinding.value).toBe(true);
     }
+  }, 15000);
+
+  it('waits for the active core subscription snapshot before acknowledging a registry page', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const revealed: ContextGraphOnChain = {
+      contextGraphId: '825',
+      name: 'strict-subscription-boundary',
+      creator: '0x1234',
+      accessPolicy: 0,
+      blockNumber: 100,
+      metadataRevealed: true,
+    };
+    let acked = 0;
+    (chain as any).scanContextGraphRegistryPages = async function* () {
+      yield { contextGraphs: [revealed], ack: async () => { acked += 1; } };
+    };
+    let releaseFirstSave: (() => void) | undefined;
+    const firstSave = new Promise<void>((resolve) => { releaseFirstSave = resolve; });
+    let saves = 0;
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async (record) => {
+        if (record.id !== revealed.name) return;
+        saves += 1;
+        if (saves === 1) await firstSave;
+      },
+      delete: async () => {},
+    };
+    const result = await createTestAgent({
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: subscriptionStore,
+      nodeRole: 'core',
+    });
+    agent = result.agent;
+    await agent.start();
+
+    const discovery = agent.discoverContextGraphsFromChain({ mode: 'incremental' });
+    while (saves === 0) await Promise.resolve();
+    expect(acked).toBe(0);
+    releaseFirstSave?.();
+    await expect(discovery).resolves.toBe(1);
+    expect(saves).toBe(1);
+    expect(acked).toBe(1);
+  }, 15000);
+
+  it('replays when cancellation lands after durable application but before page acknowledgement', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const revealed: ContextGraphOnChain = {
+      contextGraphId: '832',
+      name: 'post-application-cancellation',
+      creator: '0x1234',
+      accessPolicy: 0,
+      blockNumber: 100,
+      metadataRevealed: true,
+    };
+    let acknowledged = 0;
+    (chain as any).scanContextGraphRegistryPages = async function* () {
+      yield {
+        contextGraphs: [revealed],
+        ack: async () => { acknowledged += 1; },
+      };
+    };
+    const controller = new AbortController();
+    const stop = new Error('post-application stop');
+    let abortAfterSave = true;
+    let saves = 0;
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async (record) => {
+        if (record.id !== revealed.name) return;
+        saves += 1;
+        if (abortAfterSave) controller.abort(stop);
+      },
+      delete: async () => {},
+    };
+    const result = await createTestAgent({
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: subscriptionStore,
+      nodeRole: 'core',
+    });
+    agent = result.agent;
+    await agent.start();
+
+    await expect(agent.discoverContextGraphsFromChain({
+      mode: 'incremental',
+      signal: controller.signal,
+    })).rejects.toBe(stop);
+    expect(saves).toBe(1);
+    expect(acknowledged).toBe(0);
+
+    abortAfterSave = false;
+    await expect(agent.discoverContextGraphsFromChain({ mode: 'incremental' }))
+      .resolves.toBe(0);
+    expect(saves).toBe(2);
+    expect(acknowledged).toBe(1);
+  }, 15000);
+
+  it.each(['subscription', 'binding'] as const)(
+    'rejects stale discovery persistence after a concurrent %s generation change',
+    async (mutation) => {
+      const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+      const revealed: ContextGraphOnChain = {
+        contextGraphId: mutation === 'subscription' ? '829' : '830',
+        name: `stale-${mutation}-discovery`,
+        creator: '0x1234',
+        accessPolicy: 0,
+        blockNumber: 100,
+        metadataRevealed: true,
+      };
+      let acked = 0;
+      (chain as any).scanContextGraphRegistryPages = async function* () {
+        yield { contextGraphs: [revealed], ack: async () => { acked += 1; } };
+      };
+      const saved: ContextGraphSubscriptionRecord[] = [];
+      const subscriptionStore: ContextGraphSubscriptionStore = {
+        loadAll: async () => [],
+        save: async (record) => {
+          if (record.id === revealed.name) saved.push(record);
+        },
+        delete: async () => {},
+      };
+      const result = await createTestAgent({
+        chainAdapter: chain,
+        contextGraphSubscriptionStore: subscriptionStore,
+        nodeRole: 'core',
+      });
+      agent = result.agent;
+      await agent.start();
+
+      let releaseQueue: (() => void) | undefined;
+      const queueGate = new Promise<void>((resolve) => { releaseQueue = resolve; });
+      const blocker = (agent as any).enqueueContextGraphSubscriptionPersistWrite(
+        revealed.name,
+        async () => queueGate,
+      ) as Promise<void>;
+      const discovery = agent.discoverContextGraphsFromChain({ mode: 'incremental' });
+      while (!agent.getSubscribedContextGraphs().has(revealed.name)) await Promise.resolve();
+
+      if (mutation === 'subscription') {
+        const current = agent.getSubscribedContextGraphs().get(revealed.name)!;
+        (agent as any).setContextGraphSubscription(revealed.name, {
+          ...current,
+          subscribed: false,
+          coreHosted: false,
+        }, { persist: false });
+      } else {
+        (agent as any).contextGraphBindingState.bump(revealed.name);
+      }
+      releaseQueue?.();
+      await blocker;
+
+      await expect(discovery).rejects.toThrow('changed before its strict subscription snapshot');
+      expect(saved).toEqual([]);
+      expect(acked).toBe(0);
+    },
+    15000,
+  );
+
+  it('acknowledges on-demand rows while durably flushing only host state', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const memberName = 'on-demand-member-boundary';
+    const hostName = 'on-demand-host-boundary';
+    const revealed = [
+      {
+        contextGraphId: '827',
+        name: memberName,
+        creator: '0x1234',
+        accessPolicy: 0,
+        blockNumber: 100,
+        metadataRevealed: true,
+      },
+      {
+        contextGraphId: '828',
+        name: hostName,
+        creator: '0x1234',
+        accessPolicy: 0,
+        blockNumber: 100,
+        metadataRevealed: true,
+      },
+    ] satisfies ContextGraphOnChain[];
+    let acknowledged = 0;
+    (chain as any).scanContextGraphRegistryPages = async function* () {
+      yield {
+        contextGraphs: revealed,
+        ack: async () => {
+          acknowledged += 1;
+        },
+      };
+    };
+    const targetSaves: ContextGraphSubscriptionRecord[] = [];
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async (record) => {
+        if (record.id === memberName || record.id === hostName) targetSaves.push(record);
+      },
+      delete: async () => {},
+    };
+    const result = await createTestAgent({
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: subscriptionStore,
+      nodeRole: 'edge',
+    });
+    agent = result.agent;
+    await agent.start();
+    (agent as any).setContextGraphSubscription(memberName, {
+      name: memberName,
+      subscribed: true,
+      synced: false,
+      syncMode: 'on-demand',
+    }, { persist: false });
+    (agent as any).setContextGraphSubscription(hostName, {
+      name: hostName,
+      subscribed: false,
+      synced: false,
+      coreHosted: true,
+      syncMode: 'on-demand',
+    }, { persist: false });
+
+    await expect(agent.discoverContextGraphsFromChain({ mode: 'incremental' }))
+      .resolves.toBe(2);
+
+    expect(acknowledged).toBe(1);
+    expect(targetSaves).toEqual([
+      expect.objectContaining({
+        id: hostName,
+        subscribed: false,
+        coreHosted: true,
+      }),
+    ]);
+  }, 15000);
+
+  it('leaves the page unacknowledged on subscription failure and repairs it on replay', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const revealed: ContextGraphOnChain = {
+      contextGraphId: '826',
+      name: 'subscription-replay-boundary',
+      creator: '0x1234',
+      accessPolicy: 0,
+      blockNumber: 100,
+      metadataRevealed: true,
+    };
+    let acked = 0;
+    const events: string[] = [];
+    (chain as any).scanContextGraphRegistryPages = async function* () {
+      yield {
+        contextGraphs: [revealed],
+        ack: async () => {
+          acked += 1;
+          events.push('page-acked');
+        },
+      };
+    };
+    let failing = true;
+    const saved: ContextGraphSubscriptionRecord[] = [];
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async (record) => {
+        if (record.id === revealed.name && failing) {
+          throw new Error('subscription store unavailable');
+        }
+        if (record.id === revealed.name) {
+          saved.push(record);
+          events.push('subscription-saved');
+        }
+      },
+      delete: async () => {},
+    };
+    const result = await createTestAgent({
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: subscriptionStore,
+      nodeRole: 'core',
+    });
+    agent = result.agent;
+    await agent.start();
+
+    await expect(agent.discoverContextGraphsFromChain({ mode: 'incremental' }))
+      .rejects.toThrow('subscription store unavailable');
+    expect(acked).toBe(0);
+    // The ontology binding was durable before the subscription failed. The
+    // replay fast path must still flush the active subscription, then ACK.
+    failing = false;
+    await expect(agent.discoverContextGraphsFromChain({ mode: 'incremental' }))
+      .resolves.toBe(0);
+    expect(acked).toBe(1);
+    expect(saved).toEqual([
+      expect.objectContaining({
+        id: revealed.name,
+        subscribed: true,
+        onChainId: revealed.contextGraphId,
+      }),
+    ]);
+    expect(events).toEqual(['subscription-saved', 'page-acked']);
   }, 15000);
 
   it('warns once for repeated chain scan failures and logs recovery', async () => {
@@ -2695,7 +3434,7 @@ describe('discoverContextGraphsFromChain', () => {
       err.name = 'ContextGraphChainScanPartialError';
       err.partialResults = [
         {
-          contextGraphId: '0xfeedbeef00000000000000000000000000000000000000000000000000000001',
+          contextGraphId: '824',
           name: 'partial-revealed',
           creator: '0x1234',
           accessPolicy: 0,
@@ -2730,8 +3469,8 @@ describe('discoverContextGraphsFromChain', () => {
 
     const entry = agent!.getSubscribedContextGraphs().get('partial-revealed');
     expect(entry).toBeDefined();
-    expect(entry!.onChainId).toBe('0xfeedbeef00000000000000000000000000000000000000000000000000000001');
-    expect((agent as any).chainContextGraphScanFailure?.count).toBe(2);
+    expect(entry!.onChainId).toBe('824');
+    expect((agent as any).chainContextGraphScanFailures.get('live')?.count).toBe(2);
     const warnings = entries.filter((entry) =>
       entry.level === 'warn' && entry.message.includes('Chain context graph scan failed'),
     );
@@ -2739,6 +3478,65 @@ describe('discoverContextGraphsFromChain', () => {
     expect(entries.some((entry) =>
       entry.level === 'info' && entry.message.includes('Chain context graph scan recovered'),
     )).toBe(false);
+  }, 15000);
+
+  it('tracks live and repair scan failure recovery independently', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    let liveFails = true;
+    let repairFails = true;
+    (chain as any).listContextGraphsFromChain = async () => [];
+    (chain as any).scanContextGraphRegistryPages = async function* (options: { mode: string }) {
+      if (options.mode === 'repair' ? repairFails : liveFails) {
+        throw new Error(`${options.mode} unavailable`);
+      }
+      yield* [];
+    };
+    const entries: Array<{ level: string; message: string }> = [];
+    Logger.setSink((entry) => entries.push({ level: entry.level, message: entry.message }));
+    try {
+      const result = await createTestAgent({ chainAdapter: chain });
+      agent = result.agent;
+      await agent.start();
+
+      await expect(agent.discoverContextGraphsFromChain({
+        mode: 'incremental',
+        throwOnChainScanFailure: true,
+      })).rejects.toThrow('incremental unavailable');
+      await expect(agent.repairContextGraphRegistry({
+        pageBudget: 1,
+        minimumIntervalMs: 0,
+      })).rejects.toThrow('repair unavailable');
+      expect(entries.some((entry) =>
+        entry.level === 'info'
+        && entry.message.includes(
+          'outcome=failed pages=0/0/1 range=[none,none] target=none complete=false',
+        ),
+      )).toBe(true);
+
+      liveFails = false;
+      await expect(agent.discoverContextGraphsFromChain({
+        mode: 'incremental',
+        throwOnChainScanFailure: true,
+      })).resolves.toBe(0);
+
+      expect(entries.some((entry) =>
+        entry.message.includes('Chain context graph scan recovered after 1 failed attempt(s)'),
+      )).toBe(true);
+      expect(entries.some((entry) =>
+        entry.message.includes('Chain context graph repair scan recovered'),
+      )).toBe(false);
+
+      repairFails = false;
+      await expect(agent.repairContextGraphRegistry({
+        pageBudget: 1,
+        minimumIntervalMs: 0,
+      })).resolves.toBe(0);
+      expect(entries.some((entry) =>
+        entry.message.includes('Chain context graph repair scan recovered after 1 failed attempt(s)'),
+      )).toBe(true);
+    } finally {
+      Logger.setSink(null);
+    }
   }, 15000);
 });
 
@@ -2760,6 +3558,7 @@ describe('discoverContextGraphsFromStore', () => {
     await store.insert([
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: contextGraphMetaGraphUri(curatedId) },
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Curated Meta Only"', graph: contextGraphMetaGraphUri(curatedId) },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"private"', graph: contextGraphMetaGraphUri(curatedId) },
     ]);
 
     const discovered = await agent.discoverContextGraphsFromStore();
@@ -2769,11 +3568,12 @@ describe('discoverContextGraphsFromStore', () => {
     expect(entry).toBeDefined();
     expect(entry!.name).toBe('Curated Meta Only');
     expect(entry!.subscribed).toBe(false);
-    // `synced=false` — discovery from the _meta store gives us the
-    // definition triple but not actual CG data. `metaSynced=true` is
-    // the right flag for "we have the curated _meta allowlist."
+    expect((agent as any).config.syncContextGraphs ?? []).not.toContain(curatedId);
+    // Discovery itself does not certify authenticated metadata. The existing
+    // refreshMetaSyncedFlags path is the single authority that promotes this
+    // after confirming the local _meta state.
     expect(entry!.synced).toBe(false);
-    expect(entry!.metaSynced).toBe(true);
+    expect(entry!.metaSynced).toBe(false);
   }, 15000);
 });
 
@@ -2820,14 +3620,21 @@ describe('hash-vs-name duplication regression', () => {
     await agent?.stop().catch(() => {});
   });
 
-  it('chain discovery then ontology sync produces one merged entry, no ghost 0x contextGraph', async () => {
+  it('chain discovery then ontology sync produces one merged entry, no on-chain-id ghost', async () => {
     const localName = 'merged-contextGraph';
-    const expectedHash = ethers.keccak256(ethers.toUtf8Bytes(localName));
+    const onChainId = '825';
+    const onChainNameHash = ethers.keccak256(ethers.toUtf8Bytes(localName));
 
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const resolveContextGraphIdByNameHash = recorder(async (candidate: string) => {
+      return candidate === onChainNameHash.toLowerCase()
+        ? BigInt(onChainId)
+        : null;
+    });
+    (chain as any).resolveContextGraphIdByNameHash = resolveContextGraphIdByNameHash;
     (chain as any).listContextGraphsFromChain = async () => ([
       {
-        contextGraphId: expectedHash,
+        contextGraphId: onChainNameHash,
         name: localName,
         creator: '0x1234',
         accessPolicy: 0,
@@ -2852,19 +3659,26 @@ describe('hash-vs-name duplication regression', () => {
     ]);
     const storeDiscovered = await agent.discoverContextGraphsFromStore();
     expect(storeDiscovered).toBeLessThanOrEqual(1);
+    expect(resolveContextGraphIdByNameHash.calls).toContainEqual([
+      onChainNameHash.toLowerCase(),
+    ]);
 
     const contextGraphs = await agent.listContextGraphs();
-    const matches = contextGraphs.filter(p => p.id === localName || p.id === expectedHash);
+    const matches = contextGraphs.filter(
+      p => p.id === localName || p.id === onChainId || p.id === onChainNameHash,
+    );
     expect(matches.length).toBe(1);
     expect(matches[0].id).toBe(localName);
-    expect(matches[0].subscribed).toBe(true);
+    expect(matches[0].subscribed).toBe(false);
     // Chain + ontology discovery only deliver definition metadata —
     // no actual CG data has been pulled from a peer, so `synced`
     // stays false until the catchup runner flips it.
     expect(matches[0].synced).toBe(false);
     expect(matches[0].callerInvolved).toBeUndefined();
 
-    const ghosts = contextGraphs.filter(p => p.id.startsWith('0x'));
+    const ghosts = contextGraphs.filter(
+      p => p.id === onChainId || p.id === onChainNameHash,
+    );
     expect(ghosts.length).toBe(0);
   }, 15000);
 });
@@ -2893,14 +3707,30 @@ describe('runImmediatePostApprovalSync', () => {
       peersSucceeded: number;
       dataSynced: number;
       sharedMemorySynced: number;
+      sharedMemoryCompletedCleanly?: boolean;
       denied: boolean;
     };
+    runCatchupResults?: Array<{
+      peersSucceeded: number;
+      dataSynced: number;
+      sharedMemorySynced: number;
+      sharedMemoryCompletedCleanly?: boolean;
+      denied: boolean;
+    }>;
     runCatchupThrows?: Error;
     broadcastThrows?: Error;
+    refreshMetaResults?: Array<boolean | Error>;
   }) {
     const calls = {
       ensureAdmittedCalls: [] as string[],
       ensurePeerConnectedCalls: [] as string[],
+      refreshMetaCalls: [] as Array<{
+        cg: string;
+        peer?: string;
+        force?: boolean;
+        approvedAgentAddress?: string;
+        expectedDelegateePeerId?: string;
+      }>,
       runCatchupCalls: [] as Array<{ cg: string; includeSwm: boolean; peers: string[] }>,
       broadcastCalls: [] as Array<{ cg: string; includeSwm: boolean }>,
     };
@@ -2916,6 +3746,41 @@ describe('runImmediatePostApprovalSync', () => {
       (opts.connectedPeers ?? []).map((pid) => ({
         remotePeer: { toString: () => pid },
       }));
+    let metaConfirmed = false;
+    (a as any).refreshMetaFromCurator = async (
+      cg: string,
+      refreshOpts?: {
+        trustedCuratorPeerId?: string;
+        force?: boolean;
+        approvedMember?: {
+          proof: {
+            approvedAgentAddress: string;
+            expectedDelegateePeerId?: string;
+          };
+          accessPolicy: 'public' | 'unproven';
+        };
+      },
+    ) => {
+      calls.refreshMetaCalls.push({
+        cg,
+        peer: refreshOpts?.trustedCuratorPeerId,
+        force: refreshOpts?.force,
+        approvedAgentAddress: refreshOpts?.approvedMember?.proof.approvedAgentAddress,
+        expectedDelegateePeerId: refreshOpts?.approvedMember?.proof.expectedDelegateePeerId,
+      });
+      const outcome = opts.refreshMetaResults?.[calls.refreshMetaCalls.length - 1] ?? true;
+      if (outcome instanceof Error) throw outcome;
+      if (outcome) metaConfirmed = true;
+      return outcome;
+    };
+    (a as any).hasConfirmedMetaState = async () => metaConfirmed;
+    // A refresh that succeeded stored the member proof it required, which is
+    // what join completion confirms.
+    (a as any).hasConfirmedApprovedMemberMetaState = async () => metaConfirmed;
+    // The real acceptance resolver builds the member proof; only the
+    // transport read behind its policy is stubbed.
+    (a as any).resolveSwmTransportAuthority = async () => ({ kind: 'plaintext' });
+    (a as any).refreshMetaSyncedFlags = async () => undefined;
     (a as any).runCatchupOverPeers = async (
       cg: string,
       includeSwm: boolean,
@@ -2927,14 +3792,18 @@ describe('runImmediatePostApprovalSync', () => {
         peers: peers.map((p) => p.toString()),
       });
       if (opts.runCatchupThrows) throw opts.runCatchupThrows;
+      const sequencedResult = opts.runCatchupResults?.[calls.runCatchupCalls.length - 1];
+      const configuredResult = sequencedResult ?? opts.runCatchupResult;
       return {
         connectedPeers: 1,
         syncCapablePeers: 1,
         peersTried: 1,
-        peersSucceeded: opts.runCatchupResult?.peersSucceeded ?? 0,
-        dataSynced: opts.runCatchupResult?.dataSynced ?? 0,
-        sharedMemorySynced: opts.runCatchupResult?.sharedMemorySynced ?? 0,
-        denied: opts.runCatchupResult?.denied ?? false,
+        peersSucceeded: configuredResult?.peersSucceeded ?? 0,
+        dataSynced: configuredResult?.dataSynced ?? 0,
+        sharedMemorySynced: configuredResult?.sharedMemorySynced ?? 0,
+        sharedMemoryCompletedCleanly:
+          configuredResult?.sharedMemoryCompletedCleanly ?? false,
+        denied: configuredResult?.denied ?? false,
         diagnostics: { noProtocolPeers: 0 } as any,
       };
     };
@@ -2958,10 +3827,22 @@ describe('runImmediatePostApprovalSync', () => {
       runCatchupResult: { peersSucceeded: 1, dataSynced: 7, sharedMemorySynced: 11, denied: false },
     });
 
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-success',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
+
     await (agent as any).runImmediatePostApprovalSync('test-cg-success', CURATOR_PEER);
 
     expect(calls.ensureAdmittedCalls).toEqual([CURATOR_PEER]);
     expect(calls.ensurePeerConnectedCalls).toEqual([CURATOR_PEER]);
+    expect(calls.refreshMetaCalls).toEqual([{
+      cg: 'test-cg-success',
+      peer: CURATOR_PEER,
+      force: true,
+      approvedAgentAddress: agent.getDefaultAgentAddress()?.toLowerCase(),
+      expectedDelegateePeerId: agent.peerId,
+    }]);
     expect(calls.runCatchupCalls).toHaveLength(1);
     expect(calls.runCatchupCalls[0]).toMatchObject({
       cg: 'test-cg-success',
@@ -2969,6 +3850,102 @@ describe('runImmediatePostApprovalSync', () => {
       peers: [CURATOR_PEER],
     });
     expect(calls.broadcastCalls).toHaveLength(0);
+  }, 15000);
+
+  it('retries curator directly while graph-aligned durable progress is increasing', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const calls = installStubs(agent, {
+      connectedPeers: [CURATOR_PEER],
+      runCatchupResults: [
+        {
+          peersSucceeded: 0,
+          dataSynced: 32_000,
+          sharedMemorySynced: 50_000,
+          sharedMemoryCompletedCleanly: true,
+          denied: false,
+        },
+        { peersSucceeded: 1, dataSynced: 18_000, sharedMemorySynced: 0, denied: false },
+      ],
+    });
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-bounded-progress',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
+
+    await (agent as any).runImmediatePostApprovalSync('test-cg-bounded-progress', CURATOR_PEER);
+
+    expect(calls.runCatchupCalls).toEqual([
+      { cg: 'test-cg-bounded-progress', includeSwm: true, peers: [CURATOR_PEER] },
+      { cg: 'test-cg-bounded-progress', includeSwm: false, peers: [CURATOR_PEER] },
+    ]);
+    expect(calls.broadcastCalls).toHaveLength(0);
+  }, 15000);
+
+  it('keeps requesting SWM after partial inserts until the curator completes it cleanly', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const calls = installStubs(agent, {
+      connectedPeers: [CURATOR_PEER],
+      runCatchupResults: [
+        {
+          peersSucceeded: 0,
+          dataSynced: 32_000,
+          sharedMemorySynced: 50_000,
+          sharedMemoryCompletedCleanly: false,
+          denied: false,
+        },
+        {
+          peersSucceeded: 1,
+          dataSynced: 18_000,
+          sharedMemorySynced: 10_000,
+          sharedMemoryCompletedCleanly: true,
+          denied: false,
+        },
+      ],
+    });
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-partial-swm',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
+
+    await (agent as any).runImmediatePostApprovalSync('test-cg-partial-swm', CURATOR_PEER);
+
+    expect(calls.runCatchupCalls).toEqual([
+      { cg: 'test-cg-partial-swm', includeSwm: true, peers: [CURATOR_PEER] },
+      { cg: 'test-cg-partial-swm', includeSwm: true, peers: [CURATOR_PEER] },
+    ]);
+    expect(calls.broadcastCalls).toHaveLength(0);
+  }, 15000);
+
+  it('stops curator-direct retries and falls back when a round makes no progress', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const calls = installStubs(agent, {
+      connectedPeers: [CURATOR_PEER],
+      runCatchupResults: [
+        { peersSucceeded: 0, dataSynced: 32_000, sharedMemorySynced: 50_000, denied: false },
+        { peersSucceeded: 0, dataSynced: 0, sharedMemorySynced: 0, denied: false },
+      ],
+    });
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-no-progress',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
+
+    await (agent as any).runImmediatePostApprovalSync('test-cg-no-progress', CURATOR_PEER);
+
+    expect(calls.runCatchupCalls).toHaveLength(2);
+    expect(calls.broadcastCalls).toEqual([{
+      cg: 'test-cg-no-progress',
+      includeSwm: true,
+    }]);
   }, 15000);
 
   it('falls back to broadcast when curator is not in connected peers after ensurePeerConnected', async () => {
@@ -2980,6 +3957,11 @@ describe('runImmediatePostApprovalSync', () => {
       connectedPeers: [],
     });
 
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-missing-peer',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
+
     await (agent as any).runImmediatePostApprovalSync('test-cg-missing-peer', CURATOR_PEER);
 
     expect(calls.ensureAdmittedCalls).toEqual([CURATOR_PEER]);
@@ -2990,6 +3972,59 @@ describe('runImmediatePostApprovalSync', () => {
       cg: 'test-cg-missing-peer',
       includeSwm: true,
     });
+  }, 15000);
+
+  it('retries metadata and falls back after curator data succeeds without authoritative metadata', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const calls = installStubs(agent, {
+      connectedPeers: [CURATOR_PEER],
+      refreshMetaResults: [false, false],
+      runCatchupResult: { peersSucceeded: 1, dataSynced: 7, sharedMemorySynced: 11, denied: false },
+    });
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-missing-authoritative-meta',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
+
+    await (agent as any).runImmediatePostApprovalSync(
+      'test-cg-missing-authoritative-meta',
+      CURATOR_PEER,
+    );
+
+    expect(calls.refreshMetaCalls).toHaveLength(2);
+    expect(calls.runCatchupCalls).toHaveLength(1);
+    expect(calls.broadcastCalls).toEqual([{
+      cg: 'test-cg-missing-authoritative-meta',
+      includeSwm: true,
+    }]);
+  }, 15000);
+
+  it('falls back to broadcast when the curator metadata refresh throws', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const calls = installStubs(agent, {
+      connectedPeers: [CURATOR_PEER],
+      refreshMetaResults: [new Error('curator metadata unavailable')],
+      runCatchupResult: { peersSucceeded: 1, dataSynced: 7, sharedMemorySynced: 11, denied: false },
+    });
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-refresh-throws',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
+
+    await (agent as any).runImmediatePostApprovalSync('test-cg-refresh-throws', CURATOR_PEER);
+
+    expect(calls.refreshMetaCalls).toHaveLength(1);
+    expect(calls.runCatchupCalls).toHaveLength(0);
+    expect(calls.broadcastCalls).toEqual([{
+      cg: 'test-cg-refresh-throws',
+      includeSwm: true,
+    }]);
   }, 15000);
 
   // 🔴 Regression for the Lex-on-PR-#517 round-2 / Codex finding: the
@@ -3037,6 +4072,11 @@ describe('runImmediatePostApprovalSync', () => {
       runCatchupResult: { peersSucceeded: 1, dataSynced: 7, sharedMemorySynced: 11, denied: false },
     });
 
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-admission-denied',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
+
     await (agent as any).runImmediatePostApprovalSync('test-cg-admission-denied', CURATOR_PEER);
 
     expect(calls.ensureAdmittedCalls).toEqual([CURATOR_PEER]);
@@ -3060,6 +4100,11 @@ describe('runImmediatePostApprovalSync', () => {
       },
       connectedPeers: [CURATOR_PEER],
     });
+
+    (agent as any).localApprovedAgentByCG.set(
+      'test-cg-throw',
+      agent.getDefaultAgentAddress()?.toLowerCase(),
+    );
 
     await (agent as any).runImmediatePostApprovalSync('test-cg-throw', CURATOR_PEER);
 

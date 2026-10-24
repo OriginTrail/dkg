@@ -22,9 +22,17 @@
  * tests in `packages/publisher/test/draft-lifecycle.test.ts`).
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { createServer, type Server } from 'node:http';
+import { OxigraphStore, StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
+import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
+
+import { randomUUID } from 'node:crypto';
+import { TripleStoreAsyncPromoteQueue } from '@origintrail-official/dkg-publisher';
+import { daemonState } from '../src/daemon/state.js';
 
 const CG_ID = 'issue-864-cg';
 const ASSERTION_NAME = 'orphan-assertion';
@@ -53,8 +61,11 @@ class FakeAssertionNotPersistedError extends Error {
 describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persisted envelope', () => {
   let server: Server | undefined;
   let baseUrl: string;
+  let store: OxigraphStore;
 
   afterEach(async () => {
+    daemonState.promoteWorkerAvailable = false;
+    await store?.close();
     if (server) {
       await new Promise<void>((resolve, reject) => {
         server!.close((err) => (err ? reject(err) : resolve()));
@@ -70,7 +81,11 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
       publishReady?: boolean;
     }>,
   ) {
+    store = new OxigraphStore();
+    daemonState.promoteWorkerAvailable = true;
+    const queue = new TripleStoreAsyncPromoteQueue(store);
     const agent = {
+      promoteQueue: queue,
       async listContextGraphs() {
         return [{
           id: CG_ID,
@@ -85,6 +100,12 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
       },
       resolveAgentByToken: () => undefined,
       assertion: {
+        admitDurableShare: (request: any, workerId: string) => queue.enqueueAndClaim(request, workerId),
+        prepareDurableShare: async () => ({ agentAddress: 'did:dkg:agent:test',
+          recoveryBinding: { version: 1, sealDigest: `0x${'11'.repeat(32)}`, inventoryRequired: false,
+            intent: { version: 1, operationId: randomUUID(), timestampMs: Date.now(),
+              confirmationRequired: false, accessPolicy: 'public', allowedPeers: [] } },
+        }),
         promote,
       },
     };
@@ -119,8 +140,8 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
           apiPortRef: { value: 0 },
           url,
           path: url.pathname,
-          requestToken: undefined,
           requestAgentAddress: 'did:dkg:agent:test',
+          authentication: requestAuthentication({ kind: 'anonymous' }),
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);
@@ -159,6 +180,10 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
 
     expect(res.status).toBe(409);
     expect(res.body).toEqual({
+      recoveryJobId: expect.any(String),
+      recoveryState: 'inspection-required',
+      recoveryStatusUrl: `/api/knowledge-assets/swm/share-jobs/${res.body.recoveryJobId}`,
+      retryable: false,
       // The publisher's full error message is forwarded so debug
       // tools / curl users get the same explanation the UI builds
       // via `describePromoteError`.
@@ -211,6 +236,31 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
     expect(res.status).toBe(200);
     // KA swm/share wraps the promotedCount in the share envelope.
     expect(res.body).toEqual({ swmShared: true, promotedCount: 49 });
+  });
+
+  it('preserves the retryable 503 contract for a committed exact SWM replacement timeout', async () => {
+    await startWithPromoteImpl(async () => {
+      throw classifyExactSwmGraphReplaceFailure(
+        new StoreOperationTimeoutError({
+          backend: 'managed-oxigraph',
+          operation: 'replaceGraph',
+          timeoutMs: 30_000,
+          outcome: 'indeterminate',
+        }),
+      );
+    });
+
+    const res = await postPromote({ contextGraphId: CG_ID, entities: 'all' });
+
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({
+      code: 'STORE_OPERATION_TIMEOUT',
+      retryable: true,
+      outcome: 'indeterminate',
+      backend: 'managed-oxigraph',
+      operation: 'replaceGraph',
+      timeoutMs: 30_000,
+    });
   });
 
   it('returns 200 with an explicit non-share outcome when promote moves zero rows', async () => {

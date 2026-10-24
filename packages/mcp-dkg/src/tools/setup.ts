@@ -1,7 +1,7 @@
 /**
  * Context-graph and sub-graph setup tools.
  *
- * Wave-2 P0 + P2 adds (audit §7 items 1, 8, 9). These three tools cover
+ * Wave-2 P0 + P2 adds (audit §7 items 1, 8, 9). These tools cover
  * the SKILL.md Quickstart Step 1 ("create a project") and Step 3 ("join
  * a peer-shared CG") plus the sub-graph staging primitive that the
  * other write tools previously consumed indirectly via
@@ -159,6 +159,71 @@ export function registerSetupTools(
         );
       } catch (e) {
         return errResult(`Failed to create context graph: ${formatError(e)}`);
+      }
+    },
+  );
+
+  // ── dkg_context_graph_register ──────────────────────────────────
+  server.registerTool(
+    'dkg_context_graph_register',
+    {
+      title: 'Register Context Graph On-chain',
+      description:
+        'Register an existing local context graph on-chain so it can publish to Verifiable Memory. ' +
+        'Idempotent when the graph is already registered. `sharing` and `contribution` override the ' +
+        'stored policies when supplied. To use a Publishing Conviction Account, pass its positive decimal ' +
+        '`pcaAccountId`; the registration is forced to curated contribution. The transaction signer must ' +
+        'own that PCA or be a currently registered agent of that exact PCA. An eligible active PCA consumes ' +
+        'one quota-backed registration-deposit waiver, so the signer needs native gas but no separate liquid ' +
+        'TRAC registration deposit.',
+      inputSchema: {
+        contextGraphId: z.string().min(1).describe(EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION),
+        sharing: z
+          .enum(['open', 'invite-only'])
+          .optional()
+          .describe('Optional registration override: "open" = accessPolicy 0, "invite-only" = accessPolicy 1.'),
+        contribution: z
+          .enum(['open', 'curators-only'])
+          .optional()
+          .describe('Optional registration override: "open" = publishPolicy 1, "curators-only" = publishPolicy 0.'),
+        pcaAccountId: z
+          .string()
+          .regex(/^[1-9]\d*$/, 'pcaAccountId must be a positive decimal integer')
+          .optional()
+          .describe('Publishing Conviction Account id. Forces curated contribution and requires this node signer to own or be registered to that exact PCA.'),
+      },
+    },
+    async ({ contextGraphId, sharing, contribution, pcaAccountId }): Promise<ToolResult> => {
+      const cgId = contextGraphId.trim();
+      if (!cgId) return errResult('"contextGraphId" is required.');
+      if (pcaAccountId !== undefined && contribution === 'open') {
+        return errResult('"pcaAccountId" is only valid with curated contribution; use contribution="curators-only".');
+      }
+      const accessPolicy = sharing === undefined ? undefined : sharing === 'open' ? 0 : 1;
+      const publishPolicy = pcaAccountId !== undefined
+        ? 0
+        : contribution === undefined
+          ? undefined
+          : contribution === 'open'
+            ? 1
+            : 0;
+      try {
+        const result = await client.registerContextGraph({
+          id: cgId,
+          ...(accessPolicy !== undefined ? { accessPolicy } : {}),
+          ...(publishPolicy !== undefined ? { publishPolicy } : {}),
+          ...(pcaAccountId !== undefined ? { pcaAccountId } : {}),
+        });
+        if (result.alreadyRegistered) {
+          return ok(`Context graph '${cgId}' is already registered on-chain.`);
+        }
+        return ok(
+          `Registered context graph '${result.registered}' on-chain.` +
+            (result.onChainId ? `\nOn-chain ID: ${result.onChainId}` : '') +
+            (result.txHash ? `\nTransaction: ${result.txHash}` : ''),
+        );
+      } catch (e) {
+        return errResult(`Failed to register context graph: ${formatError(e)}`);
       }
     },
   );

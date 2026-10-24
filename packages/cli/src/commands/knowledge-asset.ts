@@ -104,11 +104,6 @@ function parseFinalizeAuthorOptions(opts: ActionOpts): {
   };
 }
 
-function parseShareEntities(opts: ActionOpts): string[] | undefined {
-  if (!opts.entity || opts.entity.length === 0) return undefined;
-  return opts.entity.map(String);
-}
-
 function parseShareJobStates(raw: unknown): KnowledgeAssetShareJobState[] | undefined {
   if (raw === undefined) return undefined;
   const states = String(raw)
@@ -162,6 +157,15 @@ function addFinalizeAuthorOptions(command: Command): Command {
 
 function publishNextCommand(name: string, contextGraphId: string, opts: ActionOpts): string {
   return `dkg ka publish-async ${name} --context-graph-id ${contextGraphId}${subGraphName(opts) ? ` --sub-graph-name ${subGraphName(opts)}` : ''}`;
+}
+
+/** A committed share whose recovery job still owes its catalog handoff: name the job and how to follow it. */
+function printPendingCatalogHandoff(result: Pick<KnowledgeAssetShareResponse, 'catalogHandoff'>): void {
+  const handoff = result.catalogHandoff;
+  if (handoff?.state !== 'pending') return;
+  console.log(`  Catalog:        handoff pending (${handoff.reason})`);
+  console.log(`  Recovery job:   ${handoff.recoveryJobId}`);
+  console.log(`  Follow:         dkg ka share-job ${handoff.recoveryJobId}`);
 }
 
 function assertSharePromotedContent(result: KnowledgeAssetShareResponse, name: string, contextGraphId: string): void {
@@ -272,6 +276,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       if (result.assertionUri) console.log(`  Assertion URI:  ${result.assertionUri}`);
       if (result.merkleRoot) console.log(`  Merkle root:    ${result.merkleRoot}`);
       if (result.shareOperationId) console.log(`  Share op:       ${result.shareOperationId}`);
+      printPendingCatalogHandoff(result);
       if (opts.share === true && result.promotedCount === 0) {
         console.log('  Note:           No new triples promoted; the KA may already be shared.');
       }
@@ -346,15 +351,15 @@ export function registerKnowledgeAssetCommand(program: Command): void {
   addFinalizeAuthorOptions(addSubGraphOption(addContextGraphOption(
     kaCmd
       .command('finalize <name>')
-      .description('Finalize/seal a Knowledge Asset from WM, or from SWM with --layer swm')
-      .option('--layer <layer>', 'Layer to finalize: wm or swm (default: wm)'),
+      .description('Finalize/seal a Knowledge Asset from WM')
+      .option('--layer <layer>', 'Deprecated compatibility option: wm (swm is read-only)'),
   )))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
+      const authorOptions = parseFinalizeAuthorOptions(opts);
       const layer = opts.layer === undefined ? undefined : String(opts.layer);
       if (layer !== undefined && layer !== 'wm' && layer !== 'swm') {
         throw new Error('--layer must be wm or swm');
       }
-      const authorOptions = parseFinalizeAuthorOptions(opts);
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetFinalize(requiredContextGraphId(opts), name, {
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
@@ -371,18 +376,14 @@ export function registerKnowledgeAssetCommand(program: Command): void {
     kaCmd
       .command('share <name>')
       .description('Share a finalized Knowledge Asset from WM to SWM')
-      .option('--entity <uri...>', 'Share only specific root entities (defaults to all)')
-      .option('--await-curator-ack', 'Require curator acknowledgement')
-      .option('--skip-seal', 'Share without sealing; not publishable until finalized/sealed later'),
+      .option('--await-curator-ack', 'Require curator acknowledgement'),
   ))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
       const contextGraphId = requiredContextGraphId(opts);
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetShare(contextGraphId, name, {
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
-        ...(parseShareEntities(opts) ? { entities: parseShareEntities(opts) } : {}),
         ...(opts.awaitCuratorAck === true ? { awaitCuratorAck: true } : {}),
-        ...(opts.skipSeal === true ? { skipSeal: true } : {}),
       });
       assertSharePromotedContent(result, name, contextGraphId);
       console.log('Knowledge asset shared to SWM:');
@@ -393,20 +394,19 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       if (result.sealed !== undefined) console.log(`  Sealed:         ${result.sealed}`);
       if (result.publishReady !== undefined) console.log(`  Publish ready:  ${result.publishReady}`);
       if (result.shareOperationId) console.log(`  Share op:       ${result.shareOperationId}`);
+      printPendingCatalogHandoff(result);
       if (result.publishReady === true) console.log(`  Next:           ${publishNextCommand(name, contextGraphId, opts)}`);
     }));
 
   addSubGraphOption(addContextGraphOption(
     kaCmd
       .command('share-async <name>')
-      .description('Enqueue an async WM-to-SWM share job for a Knowledge Asset')
-      .option('--entity <uri...>', 'Share only specific root entities (defaults to all)'),
+      .description('Enqueue an async WM-to-SWM share job for a Knowledge Asset'),
   ))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetShareAsync(requiredContextGraphId(opts), name, {
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
-        ...(parseShareEntities(opts) ? { entities: parseShareEntities(opts) } : {}),
       });
       console.log('Knowledge asset share job accepted:');
       console.log(`  Job ID:  ${result.jobId}`);

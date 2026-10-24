@@ -1,0 +1,777 @@
+import { EventEmitter } from 'node:events';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { Logger, type CanonicalLogRecord, type OperationContext } from '@origintrail-official/dkg-core';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  CclResourceNotFoundError,
+  ContextGraphPolicyAuthorizationError,
+} from '@origintrail-official/dkg-agent';
+import {
+  OxigraphStore,
+  SparqlHttpResponseError,
+  StoreOperationTimeoutError,
+  StoreSchedulerBusyError,
+} from '@origintrail-official/dkg-storage';
+import { captureUnscopedQueryConsistency } from '../../agent/src/unscoped-query-consistency.js';
+import {
+  configureApiQueryPriority,
+  createApiQueryRequestLifecycle,
+  handleQueryRoutes,
+  normalizePublicApiQueryResult,
+  resolveApiQueryPriority,
+} from '../src/daemon/routes/query.js';
+import { handleCclRoutes } from '../src/daemon/routes/ccl.js';
+import { respondToQueryFailure } from '../src/daemon/routes/query-error.js';
+import {
+  respondIfStoreUnavailable,
+  respondWithDaemonError,
+} from '../src/daemon/http-utils.js';
+import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
+
+class RequestStub extends EventEmitter {
+  aborted = false;
+  method = 'POST';
+  __dkgPrebufferedBody: Buffer;
+
+  constructor(body: Record<string, unknown> = {
+    sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+  }) {
+    super();
+    this.__dkgPrebufferedBody = Buffer.from(JSON.stringify(body));
+  }
+}
+
+class ResponseStub extends EventEmitter {
+  destroyed = false;
+  headersSent = false;
+  writableEnded = false;
+  statusCode = 0;
+  headers: Record<string, string> = {};
+  body = '';
+
+  writeHead(status: number, headers: Record<string, string>): this {
+    this.statusCode = status;
+    this.headers = headers;
+    this.headersSent = true;
+    return this;
+  }
+
+  end(body?: string): this {
+    this.body = body ?? '';
+    this.writableEnded = true;
+    return this;
+  }
+}
+
+/** The error a call throws: the cases below feed real agent errors to the daemon mapping. */
+function thrownBy(run: () => unknown): unknown {
+  try { run(); } catch (error) { return error; }
+  throw new Error('expected the call to throw');
+}
+
+function queryRouteContext(
+  req: RequestStub,
+  res: ResponseStub,
+  agent: Record<string, unknown>,
+  tracker: Record<string, unknown>,
+): RequestContext {
+  return {
+    req,
+    res,
+    agent: { resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'node', source: 'legacy-local', reason: 'fixture-node', metadataBootstrap: 'eligible' }), ...agent },
+    tracker,
+    validTokens: new Set<string>(),
+    url: new URL('http://127.0.0.1/api/query'),
+    path: '/api/query',
+    requestAgentAddress: '',
+    authentication: requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
+  } as unknown as RequestContext;
+}
+
+function cclRouteContext(
+  path: string,
+  body: Record<string, unknown>,
+  agent: Record<string, unknown>,
+): { req: RequestStub; res: ResponseStub; ctx: RequestContext } {
+  const req = new RequestStub(body);
+  const res = new ResponseStub();
+  const ctx = queryRouteContext(req, res, agent, {});
+  ctx.path = path;
+  ctx.url = new URL(`http://127.0.0.1${path}`);
+  ctx.requestAgentAddress = '0x1111111111111111111111111111111111111111';
+  return { req, res, ctx };
+}
+
+describe('/api/query request lifecycle', () => {
+  it.each([
+    {
+      path: '/api/ccl/policy/approve',
+      method: 'approveCclPolicy',
+      body: { contextGraphId: 'cg', policyUri: 'did:dkg:policy:missing' },
+      resource: 'policy' as const,
+      message: 'CCL policy not found: did:dkg:policy:missing',
+    },
+    {
+      path: '/api/ccl/policy/revoke',
+      method: 'revokeCclPolicy',
+      body: { contextGraphId: 'cg', policyUri: 'did:dkg:policy:missing' },
+      resource: 'policy_binding' as const,
+      message: 'No active CCL policy binding found',
+    },
+    {
+      path: '/api/ccl/eval',
+      method: 'evaluateCclPolicy',
+      body: { contextGraphId: 'cg', name: 'missing' },
+      resource: 'approved_policy' as const,
+      message: 'No approved policy found for cg/missing',
+    },
+  ])('maps typed CCL absence to 404 for $path', async ({
+    path,
+    method,
+    body,
+    resource,
+    message,
+  }) => {
+    const error = new CclResourceNotFoundError(resource, message);
+    const agent = { [method]: vi.fn(async () => { throw error; }) };
+    const { ctx, res } = cclRouteContext(path, body, agent);
+
+    await handleCclRoutes(ctx);
+
+    expect(res.statusCode).toBe(404);
+    expect(JSON.parse(res.body)).toEqual({
+      error: message,
+      code: 'CCL_RESOURCE_NOT_FOUND',
+      resource,
+    });
+  });
+
+  it.each([
+    ['/api/ccl/policy/approve', 'approveCclPolicy'],
+    ['/api/ccl/policy/revoke', 'revokeCclPolicy'],
+  ])('maps typed CCL policy authorization failure to 403 for %s', async (path, method) => {
+    const error = new ContextGraphPolicyAuthorizationError(
+      'Only the contextGraph owner can manage policies for "cg".',
+    );
+    const { ctx, res } = cclRouteContext(
+      path,
+      { contextGraphId: 'cg', policyUri: 'did:dkg:policy:one' },
+      { [method]: vi.fn(async () => { throw error; }) },
+    );
+
+    await handleCclRoutes(ctx);
+
+    expect(res.statusCode).toBe(403);
+    expect(JSON.parse(res.body)).toEqual({ error: error.message });
+  });
+
+  it('does not map an untyped error to 404 merely because its text says not found', async () => {
+    const error = new Error('CCL policy not found: did:dkg:policy:missing');
+    const { ctx, res } = cclRouteContext(
+      '/api/ccl/policy/approve',
+      { contextGraphId: 'cg', policyUri: 'did:dkg:policy:missing' },
+      { approveCclPolicy: vi.fn(async () => { throw error; }) },
+    );
+
+    await expect(handleCclRoutes(ctx)).rejects.toBe(error);
+    respondWithDaemonError(res as unknown as ServerResponse, error);
+    expect(res.statusCode).toBe(500);
+  });
+
+  it('keeps an existing policy with a missing body on the integrity-error path', async () => {
+    const error = new Error('CCL policy body missing: did:dkg:policy:incomplete');
+    const { ctx, res } = cclRouteContext(
+      '/api/ccl/eval',
+      { contextGraphId: 'cg', name: 'incomplete' },
+      { evaluateCclPolicy: vi.fn(async () => { throw error; }) },
+    );
+
+    await expect(handleCclRoutes(ctx)).rejects.toBe(error);
+    respondWithDaemonError(res as unknown as ServerResponse, error);
+    expect(res.statusCode).toBe(500);
+    expect(JSON.parse(res.body)).toEqual({ error: error.message });
+  });
+
+  it('normalizes prefixed SELECT, ASK, and graph results at the daemon boundary', () => {
+    expect(normalizePublicApiQueryResult(
+      'PREFIX ex: <urn:ex:> SELECT ?s WHERE { ?s ex:p ?o }',
+      { bindings: [{ s: 'urn:s' }] },
+    )).toEqual({ type: 'bindings', bindings: [{ s: 'urn:s' }] });
+    expect(normalizePublicApiQueryResult(
+      'PREFIX ex: <urn:ex:> ASK { ?s ex:p ?o }',
+      { bindings: [{ result: 'true' }] },
+    )).toEqual({ type: 'boolean', value: true, bindings: [{ result: 'true' }] });
+    expect(normalizePublicApiQueryResult(
+      'PREFIX ex: <urn:ex:> DESCRIBE ?s WHERE { ?s ex:p ?o }',
+      {
+        bindings: [],
+        quads: [{ subject: 'urn:s', predicate: 'urn:ex:p', object: 'urn:o', graph: 'urn:g' }],
+      },
+    )).toEqual({
+      type: 'quads',
+      quads: [{ subject: 'urn:s', predicate: 'urn:ex:p', object: 'urn:o', graph: 'urn:g' }],
+      bindings: [],
+    });
+  });
+
+  const originalPriority = process.env.DKG_API_QUERY_PRIORITY;
+
+  afterEach(() => {
+    if (originalPriority === undefined) delete process.env.DKG_API_QUERY_PRIORITY;
+    else process.env.DKG_API_QUERY_PRIORITY = originalPriority;
+    configureApiQueryPriority(originalPriority, {
+      info: () => {},
+      warn: () => {},
+    });
+  });
+
+  it('resolves the lane once, logs it, and warns when an incident override is invalid', () => {
+    expect(resolveApiQueryPriority(undefined)).toBe('background');
+    expect(resolveApiQueryPriority('background')).toBe('background');
+    expect(resolveApiQueryPriority('normal')).toBe('normal');
+    expect(resolveApiQueryPriority(' NORMAL ')).toBe('normal');
+    expect(resolveApiQueryPriority('ack')).toBe('background');
+
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+    };
+    expect(configureApiQueryPriority('normal', logger)).toBe('normal');
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('priority: normal'));
+    expect(logger.warn).not.toHaveBeenCalled();
+
+    expect(configureApiQueryPriority('noraml', logger)).toBe('background');
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Invalid DKG_API_QUERY_PRIORITY="noraml"'),
+    );
+    expect(logger.info).toHaveBeenLastCalledWith(expect.stringContaining('priority: background'));
+  });
+
+  it('forwards the exact lane/source and aborts the signal on request disconnect', () => {
+    process.env.DKG_API_QUERY_PRIORITY = 'normal';
+    configureApiQueryPriority(process.env.DKG_API_QUERY_PRIORITY, {
+      info: () => {},
+      warn: () => {},
+    });
+    const req = new RequestStub();
+    const res = new ResponseStub();
+    const lifecycle = createApiQueryRequestLifecycle(
+      req as unknown as IncomingMessage,
+      res as unknown as ServerResponse,
+    );
+
+    expect(lifecycle.priority).toBe('normal');
+    expect(lifecycle.source).toBe('api.query');
+    expect(lifecycle.signal.aborted).toBe(false);
+
+    req.emit('aborted');
+
+    expect(lifecycle.signal.aborted).toBe(true);
+    expect(lifecycle.signal.reason).toMatchObject({
+      code: 'API_QUERY_CALLER_DISCONNECTED',
+      message: 'API query caller disconnected',
+    });
+    lifecycle.dispose();
+    expect(req.listenerCount('aborted')).toBe(0);
+    expect(res.listenerCount('close')).toBe(0);
+  });
+
+  it('maps scheduler admission shedding to retryable HTTP 503', () => {
+    const res = new ResponseStub();
+    const error = new StoreSchedulerBusyError(
+      'queue_wait_timeout',
+      'background',
+      'api.query',
+    );
+
+    expect(respondIfStoreUnavailable(
+      res as unknown as ServerResponse,
+      error,
+    )).toBe('not_started');
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['Retry-After']).toBe('1');
+    expect(JSON.parse(res.body)).toMatchObject({
+      code: 'STORE_SCHEDULER_BUSY',
+      reason: 'queue_wait_timeout',
+      priority: 'background',
+      retryable: true,
+      outcome: 'not_started',
+    });
+  });
+
+  it('maps store deadlines to retryable HTTP 503', () => {
+    const res = new ResponseStub();
+    const error = new StoreOperationTimeoutError({
+      backend: 'oxigraph-server',
+      operation: 'query',
+      timeoutMs: 30_000,
+    });
+
+    expect(respondIfStoreUnavailable(
+      res as unknown as ServerResponse,
+      error,
+    )).toBe('indeterminate');
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['Retry-After']).toBe('1');
+    expect(JSON.parse(res.body)).toMatchObject({
+      code: 'STORE_OPERATION_TIMEOUT',
+      retryable: true,
+      outcome: 'indeterminate',
+      backend: 'oxigraph-server',
+      operation: 'query',
+    });
+  });
+
+  it('does not reclassify unrelated route errors', () => {
+    const res = new ResponseStub();
+    expect(respondIfStoreUnavailable(
+      res as unknown as ServerResponse,
+      new Error('parse failed'),
+    )).toBeNull();
+    expect(respondIfStoreUnavailable(
+      res as unknown as ServerResponse,
+      {
+        code: 'STORE_SCHEDULER_BUSY',
+        reason: 'queue_full',
+        priority: 'background',
+      },
+    )).toBeNull();
+    expect(res.writableEnded).toBe(false);
+  });
+
+  it.each([undefined, 'core-cache', 'rpc-only', 'auto', null, 1])('validates query evidence mode %s before execution', async chainEvidenceMode => {
+    const res = new ResponseStub();
+    const agent = { query: vi.fn(async (_sparql: string, _options: unknown) => ({ type: 'bindings', bindings: [] })) };
+    const tracker = { start: vi.fn(), startPhase: vi.fn(), completePhase: vi.fn(), complete: vi.fn(), fail: vi.fn(), cancel: vi.fn() };
+    await handleQueryRoutes(queryRouteContext(new RequestStub({ sparql: 'SELECT ?s WHERE { ?s ?p ?o }', chainEvidenceMode }), res, agent, tracker));
+    const valid = chainEvidenceMode === undefined || chainEvidenceMode === 'core-cache' || chainEvidenceMode === 'rpc-only';
+    expect(res.statusCode).toBe(valid ? 200 : 400);
+    expect(agent.query).toHaveBeenCalledTimes(valid ? 1 : 0);
+    if (valid) expect(agent.query.mock.calls[0]?.[1]).toMatchObject({ chainEvidenceMode });
+  });
+
+  it('passes the lifecycle admission options through the actual route handoff', async () => {
+    const req = new RequestStub();
+    const res = new ResponseStub();
+    let receivedOptions: Record<string, unknown> | undefined;
+    const agent = {
+      query: vi.fn(async (_sparql: string, options: Record<string, unknown>) => {
+        receivedOptions = options;
+        return { type: 'bindings', bindings: [] };
+      }),
+    };
+    const tracker = {
+      start: vi.fn(),
+      startPhase: vi.fn(),
+      completePhase: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+      cancel: vi.fn(),
+    };
+
+    await handleQueryRoutes(queryRouteContext(req, res, agent, tracker));
+
+    expect(agent.query).toHaveBeenCalledTimes(1);
+    expect(receivedOptions).toMatchObject({
+      priority: 'background',
+      source: 'api.query',
+    });
+    expect(receivedOptions?.signal).toBeInstanceOf(AbortSignal);
+    expect((receivedOptions?.signal as AbortSignal).aborted).toBe(false);
+    expect(res.statusCode).toBe(200);
+    expect(tracker.complete).toHaveBeenCalledTimes(1);
+    expect(tracker.fail).not.toHaveBeenCalled();
+  });
+
+  it('normalizes the legacy all sentinel before the agent query boundary', async () => {
+    const req = new RequestStub({
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      contextGraphId: 'all',
+    });
+    const res = new ResponseStub();
+    let receivedOptions: Record<string, unknown> | undefined;
+    const agent = {
+      query: vi.fn(async (_sparql: string, options: Record<string, unknown>) => {
+        receivedOptions = options;
+        if (options.contextGraphId !== undefined) {
+          throw new Error('scoped authorization must not run for all');
+        }
+        return { type: 'bindings', bindings: [] };
+      }),
+    };
+    const tracker = {
+      start: vi.fn(),
+      startPhase: vi.fn(),
+      completePhase: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+      cancel: vi.fn(),
+    };
+
+    await handleQueryRoutes(queryRouteContext(req, res, agent, tracker));
+
+    expect(agent.query).toHaveBeenCalledOnce();
+    expect(receivedOptions).toHaveProperty('contextGraphId', undefined);
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('tracks not-started store failures as cancellation and indeterminate failures as failure', async () => {
+    for (const outcome of ['not_started', 'indeterminate'] as const) {
+      const req = new RequestStub();
+      const res = new ResponseStub();
+      const tracker = {
+        start: vi.fn(),
+        startPhase: vi.fn(),
+        completePhase: vi.fn(),
+        complete: vi.fn(),
+        fail: vi.fn(),
+        cancel: vi.fn(),
+      };
+      const error = new StoreOperationTimeoutError({
+        backend: 'oxigraph-server',
+        operation: 'query',
+        outcome,
+      });
+
+      await handleQueryRoutes(queryRouteContext(req, res, {
+        query: vi.fn(async () => { throw error; }),
+      }, tracker));
+
+      expect(res.statusCode).toBe(503);
+      expect(JSON.parse(res.body)).toMatchObject({ outcome });
+      expect(tracker.cancel).toHaveBeenCalledTimes(outcome === 'not_started' ? 1 : 0);
+      expect(tracker.fail).toHaveBeenCalledTimes(outcome === 'indeterminate' ? 1 : 0);
+    }
+  });
+
+  it.each([
+    {
+      contextGraphId: 'registered-public',
+      source: 'registered-chain',
+      reason: 'chain-access-policy-timeout',
+    },
+    {
+      contextGraphId: 'unknown-graph',
+      source: 'legacy-local',
+      reason: 'pending-authoritative-metadata',
+    },
+  ])(
+    'maps unavailable read authority to one retryable response without exposing $source details',
+    async ({ contextGraphId, source, reason }) => {
+      const req = new RequestStub({
+        sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+        contextGraphId,
+      });
+      const res = new ResponseStub();
+      const tracker = {
+        start: vi.fn(),
+        startPhase: vi.fn(),
+        completePhase: vi.fn(),
+        complete: vi.fn(),
+        fail: vi.fn(),
+        cancel: vi.fn(),
+      };
+      const authorityUnavailable = Object.assign(
+        new Error(`Internal authority detail for ${contextGraphId}`),
+        {
+          code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE',
+          retryable: true,
+          contextGraphId,
+          source,
+          reason,
+          dependency: 'store',
+        },
+      );
+      const records: CanonicalLogRecord[] = [];
+      Logger.setSink((record) => { records.push(record); });
+      const quiet = [
+        vi.spyOn(process.stdout, 'write').mockImplementation(() => true),
+        vi.spyOn(process.stderr, 'write').mockImplementation(() => true),
+      ];
+
+      try {
+        await handleQueryRoutes(queryRouteContext(req, res, {
+          query: vi.fn(async () => { throw authorityUnavailable; }),
+        }, tracker));
+      } finally {
+        Logger.setSink(null);
+        for (const spy of quiet) spy.mockRestore();
+      }
+
+      expect(res.statusCode).toBe(503);
+      expect(res.headers['Retry-After']).toBe('3');
+      expect(JSON.parse(res.body)).toEqual({
+        error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
+        code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE',
+        retryable: true,
+      });
+      expect(tracker.fail).toHaveBeenCalledWith(expect.anything(), authorityUnavailable);
+      expect(tracker.cancel).not.toHaveBeenCalled();
+      expect(tracker.complete).not.toHaveBeenCalled();
+      // #2834: the response names the tracked operation, whose log line carries the attribution.
+      const tracked = tracker.start.mock.calls[0]![0] as OperationContext;
+      expect(res.headers['x-dkg-operation-id']).toBe(tracked.operationId);
+      const lines = records.filter((record) => record.operationId === tracked.operationId);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]!.message).toContain(`source=${source} reason=${reason} dependency=store`);
+      expect(lines[0]!.message).not.toContain(contextGraphId);
+    },
+  );
+
+  it('maps a GenUI entity-query store timeout through the route as retryable 503', async () => {
+    const req = new RequestStub({
+      contextGraphId: 'cg-1',
+      entityUri: 'urn:entity:1',
+      libraryPrompt: 'Render the entity',
+    });
+    const res = new ResponseStub();
+    const timeout = new StoreOperationTimeoutError({
+      backend: 'oxigraph-server',
+      operation: 'query',
+      timeoutMs: 30_000,
+    });
+    const ctx = queryRouteContext(req, res, {
+      query: vi.fn(async () => { throw timeout; }),
+    }, {});
+    ctx.path = '/api/genui/render';
+    ctx.url = new URL('http://127.0.0.1/api/genui/render');
+    ctx.config = { llm: { apiKey: 'test-key' } } as RequestContext['config'];
+
+    await handleQueryRoutes(ctx);
+
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['Retry-After']).toBe('1');
+    expect(JSON.parse(res.body)).toMatchObject({
+      code: 'STORE_OPERATION_TIMEOUT',
+      retryable: true,
+      outcome: 'indeterminate',
+      backend: 'oxigraph-server',
+      operation: 'query',
+    });
+  });
+
+  it('aborts the route signal on disconnect and maps canonical shedding to 503', async () => {
+    const disconnectReq = new RequestStub();
+    const disconnectRes = new ResponseStub();
+    let receivedSignal: AbortSignal | undefined;
+    let queryStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      queryStarted = resolve;
+    });
+    const disconnectTracker = {
+      start: vi.fn(),
+      startPhase: vi.fn(),
+      completePhase: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+      cancel: vi.fn(),
+    };
+    const disconnectRoute = handleQueryRoutes(queryRouteContext(
+      disconnectReq,
+      disconnectRes,
+      {
+        query: vi.fn(async (_sparql: string, options: Record<string, unknown>) => {
+          receivedSignal = options.signal as AbortSignal;
+          queryStarted();
+          return new Promise((_resolve, reject) => {
+            receivedSignal?.addEventListener(
+              'abort',
+              () => reject(receivedSignal?.reason),
+              { once: true },
+            );
+          });
+        }),
+      },
+      disconnectTracker,
+    ));
+    await started;
+
+    disconnectReq.aborted = true;
+    disconnectReq.emit('aborted');
+    await disconnectRoute;
+
+    expect(receivedSignal?.aborted).toBe(true);
+    expect(disconnectTracker.cancel).toHaveBeenCalledTimes(1);
+    expect(disconnectTracker.fail).not.toHaveBeenCalled();
+    expect(disconnectRes.writableEnded).toBe(true);
+
+    const busyReq = new RequestStub();
+    const busyRes = new ResponseStub();
+    let busyOptions: Record<string, unknown> | undefined;
+    const busyTracker = {
+      start: vi.fn(),
+      startPhase: vi.fn(),
+      completePhase: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+      cancel: vi.fn(),
+    };
+    await handleQueryRoutes(queryRouteContext(
+      busyReq,
+      busyRes,
+      {
+        query: vi.fn(async (_sparql: string, options: Record<string, unknown>) => {
+          busyOptions = options;
+          throw new StoreSchedulerBusyError(
+            'queue_wait_timeout',
+            'background',
+            'api.query',
+          );
+        }),
+      },
+      busyTracker,
+    ));
+
+    expect(busyOptions).toMatchObject({
+      priority: 'background',
+      source: 'api.query',
+    });
+    expect(busyOptions?.signal).toBeInstanceOf(AbortSignal);
+    expect(busyRes.statusCode).toBe(503);
+    expect(busyRes.headers['Retry-After']).toBe('1');
+    expect(JSON.parse(busyRes.body)).toMatchObject({
+      code: 'STORE_SCHEDULER_BUSY',
+      retryable: true,
+    });
+    expect(busyTracker.cancel).toHaveBeenCalledTimes(1);
+    expect(busyTracker.fail).not.toHaveBeenCalled();
+  });
+
+  // GH#1758 / PR #2330 review — the adapter, the engine marker and the
+  // classifier are each covered, but nothing proved `/api/query` USES the
+  // marker. Reverting the route to inline message matching would leave all of
+  // those green while a malformed caller query escaped as HTTP 500 again.
+  it('renders a marked caller-SPARQL rejection as HTTP 400', async () => {
+    const req = new RequestStub();
+    const res = new ResponseStub();
+    const tracker = {
+      start: vi.fn(),
+      startPhase: vi.fn(),
+      completePhase: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+      cancel: vi.fn(),
+    };
+
+    // Structurally complete marker — what DKGQueryEngine throws when the store
+    // rejects caller-supplied SPARQL with 400/422.
+    const marked = Object.assign(
+      new Error('SPARQL HTTP query failed (400): error at 1:15: expected one of REDUCED'),
+      { code: 'CALLER_SPARQL_REJECTED', status: 400 },
+    );
+
+    await handleQueryRoutes(queryRouteContext(req, res, {
+      query: vi.fn(async () => { throw marked; }),
+    }, tracker));
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toMatchObject({ error: marked.message });
+  });
+
+  it('does NOT render an UNMARKED typed store rejection as a caller error', async () => {
+    // The converse: an engine-generated query rejected by the backend is an
+    // integration fault and must stay a server error, even at 400 and even
+    // when its body reads like a legacy client-error family.
+    const req = new RequestStub();
+    const res = new ResponseStub();
+    const tracker = {
+      start: vi.fn(),
+      startPhase: vi.fn(),
+      completePhase: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+      cancel: vi.fn(),
+    };
+
+    const unmarked = new SparqlHttpResponseError('query', 400, 'Query must start with SELECT');
+
+    await expect(handleQueryRoutes(queryRouteContext(req, res, {
+      query: vi.fn(async () => { throw unmarked; }),
+    }, tracker))).rejects.toBe(unmarked);
+
+    expect(res.statusCode).not.toBe(400);
+  });
+
+  it('answers an unscoped query that lost its consistency check with a retryable 503', async () => {
+    // The agent's own error, produced the way a live node produces it: a local
+    // write lands inside the interval the query has to hold unchanged. A
+    // hand-typed copy would keep this green if the agent's marker drifted.
+    const store = new OxigraphStore();
+    let invalidated: unknown;
+    try {
+      const assertUnchanged = captureUnscopedQueryConsistency(store, () => 0);
+      await store.insert([{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: 'urn:g' }]);
+      invalidated = thrownBy(assertUnchanged);
+    } finally { await store.close(); }
+
+    const req = new RequestStub();
+    const res = new ResponseStub();
+    const tracker = {
+      start: vi.fn(),
+      startPhase: vi.fn(),
+      completePhase: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+      cancel: vi.fn(),
+    };
+
+    await handleQueryRoutes(queryRouteContext(req, res, {
+      query: vi.fn(async () => { throw invalidated; }),
+    }, tracker));
+
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['Retry-After']).toBe('1');
+    const answer = JSON.parse(res.body);
+    expect(answer).toEqual({
+      error: 'Unscoped query dataset or read authority changed; retry the query or specify contextGraphId',
+      code: 'UNSCOPED_QUERY_INVALIDATED',
+      retryable: true,
+    });
+    // The sentence is the one the agent threw: the text of the answer did not
+    // change with its status.
+    expect(answer.error).toBe((invalidated as Error).message);
+    // The query ran and its result was discarded: a failed operation, not a
+    // cancelled one.
+    expect(tracker.fail).toHaveBeenCalledTimes(1);
+    expect(tracker.cancel).not.toHaveBeenCalled();
+  });
+
+  it('gives the same answer to a copy of that error that lost its message at a package boundary', () => {
+    const res = new ResponseStub();
+    // Error.message is non-enumerable, so a spread or serialized copy has none.
+    expect(respondToQueryFailure(res as unknown as ServerResponse, {
+      code: 'UNSCOPED_QUERY_INVALIDATED', retryable: true,
+    })).toBe(true);
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['Retry-After']).toBe('1');
+    expect(JSON.parse(res.body)).toEqual({
+      error: 'Unscoped query dataset or read authority changed; retry the query or specify contextGraphId',
+      code: 'UNSCOPED_QUERY_INVALIDATED',
+      retryable: true,
+    });
+  });
+
+  it.each([
+    ['the same code without the retryable mark', { code: 'UNSCOPED_QUERY_INVALIDATED' }],
+    // Retrying cannot give a store the coverage an unscoped query needs.
+    ['a store that can never serve an unscoped query', thrownBy(() => captureUnscopedQueryConsistency({}, () => 0))],
+    ['no error object at all', undefined],
+  ])('leaves %s to the top-level mapping, which offers no retry', async (_label, error) => {
+    const unanswered = new ResponseStub();
+    expect(respondToQueryFailure(unanswered as unknown as ServerResponse, error)).toBe(false);
+    expect(unanswered.headersSent).toBe(false);
+
+    // Through the route: it rethrows, and the daemon's top-level mapping answers 500.
+    const res = new ResponseStub();
+    const thrown = error ?? new Error('unclassified');
+    await expect(handleQueryRoutes(queryRouteContext(new RequestStub(), res, {
+      query: vi.fn(async () => { throw thrown; }),
+    }, {
+      start: vi.fn(), startPhase: vi.fn(), completePhase: vi.fn(), complete: vi.fn(), fail: vi.fn(), cancel: vi.fn(),
+    }))).rejects.toBe(thrown);
+    respondWithDaemonError(res as unknown as ServerResponse, thrown);
+    expect(res.statusCode).toBe(500);
+    expect(res.headers['Retry-After']).toBeUndefined();
+  });
+});

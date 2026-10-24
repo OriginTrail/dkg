@@ -22,6 +22,10 @@
 
 import type { LogRecord } from './logger.js';
 
+export type LogRedactor = <Level extends string>(
+  record: LogRecord<Level>,
+) => LogRecord<Level>;
+
 /**
  * Default sensitive key names whose values are scrubbed from log messages
  * before forwarding. Matched case-insensitively.
@@ -160,7 +164,7 @@ const JWT_SOURCE = '\\beyJ[A-Za-z0-9_-]{6,}\\.[A-Za-z0-9_-]{6,}\\.[A-Za-z0-9_-]{
  * Compile a redactor once, then reuse it on the hot path (one per shipper).
  * `extraKeys` are operator-configured additional sensitive key names.
  */
-export function createLogRedactor(extraKeys: readonly string[] = []): (record: LogRecord) => LogRecord {
+export function createLogRedactor(extraKeys: readonly string[] = []): LogRedactor {
   const keys = extraKeys.length ? [...DEFAULT_SENSITIVE_KEYS, ...extraKeys] : DEFAULT_SENSITIVE_KEYS;
   const phraseSet = new Set(PHRASE_KEYS.map((k) => k.toLowerCase()));
   // Phrase keys get the multi-word matcher; everything else (incl. extraKeys)
@@ -169,7 +173,7 @@ export function createLogRedactor(extraKeys: readonly string[] = []): (record: L
   const keyRegex = buildKeyRegex(singleKeys);
   const phraseRegex = buildPhraseKeyRegex(PHRASE_KEYS);
   const jwtRegex = new RegExp(JWT_SOURCE, 'g');
-  return (record: LogRecord): LogRecord => {
+  return <Level extends string>(record: LogRecord<Level>): LogRecord<Level> => {
     if (!record || !record.message) return record;
     const redacted = redactMessage(record.message, keyRegex, jwtRegex, phraseRegex);
     if (redacted === record.message) return record; // no change → no alloc
@@ -178,6 +182,9 @@ export function createLogRedactor(extraKeys: readonly string[] = []): (record: L
 }
 
 /** One-shot convenience (recompiles each call — do not use on the hot path). */
-export function redactLogEntry(record: LogRecord, extraKeys: readonly string[] = []): LogRecord {
+export function redactLogEntry<Level extends string>(
+  record: LogRecord<Level>,
+  extraKeys: readonly string[] = [],
+): LogRecord<Level> {
   return createLogRedactor(extraKeys)(record);
 }

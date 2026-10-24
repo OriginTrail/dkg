@@ -1,0 +1,13 @@
+{
+  "name": "@origintrail-official/dkg-devnet-rfc64-persistence-lifecycle",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@origintrail-official/dkg-agent": "workspace:*",
+    "@origintrail-official/dkg-chain": "workspace:*",
+    "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-storage": "workspace:*",
+    "ethers": "^6.16.0"
+  }
+}

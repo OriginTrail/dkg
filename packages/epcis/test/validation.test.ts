@@ -1,3 +1,5 @@
+import schema from '../src/schemas/epcis-json-schema.json' with { type: 'json' };
+import { epcisDocumentForValidation } from '../src/capture-event-types.js';
 import { describe, it, expect } from 'vitest';
 import {
   createValidator,
@@ -15,6 +17,21 @@ import {
 
 describe('EPCIS validation', () => {
   const validator = createValidator();
+
+  it('adapts only event-list discriminators without changing the document or bundled schema', () => {
+    const canonical = 'https://gs1.github.io/EPCIS/ObjectEvent';
+    const extension = Object.freeze({ type: canonical, category: ['ObjectEvent'] });
+    const event = Object.freeze({ ...VALID_OBJECT_EVENT_DOC.epcisBody!.eventList[0], type: canonical, 'https://example.org/detail': extension });
+    const document = Object.freeze({ ...VALID_OBJECT_EVENT_DOC, epcisBody: Object.freeze({ eventList: Object.freeze([event]) }) });
+    const schemaBefore = structuredClone(schema);
+    expect(epcisDocumentForValidation(document)).toMatchObject({
+      epcisBody: { eventList: [{ type: 'ObjectEvent', 'https://example.org/detail': { type: canonical, category: ['ObjectEvent'] } }] },
+    });
+    expect(validator.validate(document).valid).toBe(true);
+    expect(document.epcisBody.eventList[0].type).toBe(canonical);
+    expect(document.epcisBody.eventList[0]['https://example.org/detail']).toBe(extension);
+    expect(schema).toEqual(schemaBefore);
+  });
 
   it('accepts a valid ObjectEvent document', () => {
     const result = validator.validate(VALID_OBJECT_EVENT_DOC);
@@ -84,6 +101,21 @@ describe('EPCIS resource-exhaustion guard (CodeQL js/resource-exhaustion-from-de
     expect(result.valid).toBe(false);
     expect(result.errors?.[0] ?? '').toMatch(/exceeds maximum node count/);
     expect(elapsed).toBeLessThan(1000);
+  });
+
+  it('fails fast instead of accumulating errors across a wide invalid event list', () => {
+    const document = {
+      ...VALID_OBJECT_EVENT_DOC,
+      epcisBody: {
+        eventList: Array.from({ length: 10_000 }, () => ({ type: 'ObjectEvent' })),
+      },
+    };
+
+    const result = validator.validate(document);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors?.length ?? 0).toBeGreaterThan(0);
+    expect(result.errors?.length ?? 0).toBeLessThan(20);
   });
 
   it('accepts documents at the boundary of the limits (depth = MAX, nodes < MAX)', () => {

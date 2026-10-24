@@ -1,23 +1,118 @@
 export * from './types.js';
+export { gzipBounded, gunzipBounded, BoundedGzipLimitError, BoundedGzipCapacityError, type BoundedGzipOptions } from './bounded-gzip.js';
 export * from './constants.js';
+export * from './storage-ack-protocols.js';
+export * from './context-graph-storage-uri.js';
+export * from './context-graph-snapshot-uri.js';
+export * from './context-graph-on-chain-binding.js';
+export * from './context-graph-metadata-placement.js';
+export * from './agent-identity.js';
+export * from './agents-list-wire.js';
 export * from './assertion-scoped-graphs.js';
 export * from './protocol-limits.js';
+export * from './context-graph-join-policy.js';
 export * from './catalog.js';
 export { parseDotenvValue } from './dotenv.js';
 export * from './memory-model.js';
+export * from './ka-content-scope.js';
+export * from './rfc64-shared-projection-address-v1.js';
+export * from './graph-knowledge-asset-metadata.js';
 export * from './trust.js';
 export * from './sparql-operation.js';
+export * from './code-point-order.js';
+export { BoundedLruCache } from './bounded-lru-cache.js';
+export * from './coalescing-recurring-task.js';
+export { applyMixins } from './apply-mixins.js';
+export * from './query-result.js';
 export * from './publisher-extension.js';
 export * from './imported-artifact-bytes.js';
 export * from './imported-artifact-metadata.js';
+export * from './sync-control-object.js';
+export * from './sync-checkpoint-state.js';
+export * from './cg-policy-objects.js';
+export * from './administrative-authority-objects.js';
+export * from './author-catalog-authority-objects.js';
+export {
+  MAX_DECIMAL_U64,
+  MAX_DECIMAL_U256,
+  assertCanonicalChainId,
+  assertCanonicalDecimalU64,
+  assertCanonicalDecimalU256,
+  assertCanonicalDigest,
+  assertCanonicalEvmAddress,
+  assertCanonicalHexBytes,
+  assertCanonicalKaId,
+  assertCanonicalTimestampMs,
+  parseCanonicalDecimalU64,
+  parseCanonicalDecimalU256,
+} from './sync-wire-scalars.js';
+export type {
+  BatchIdV1,
+  BlockNumberV1,
+  ByteLengthV1,
+  ChainIdV1,
+  CountV1,
+  DecimalU64V1,
+  DecimalU256V1,
+  Digest32V1,
+  EndKaIdV1,
+  EvmAddressV1,
+  IndexV1,
+  KaIdV1,
+  ReservedKaIdV1,
+  StartKaIdV1,
+  TimestampMsV1,
+} from './sync-wire-scalars.js';
+export * from './ka-transfer-descriptor.js';
+export * from './ka-bundle-v1.js';
+export * from './ka-chunk-tree.js';
+export * from './ka-chunk-proof.js';
+export * from './cg-shared-projection.js';
+export {
+  FinalizedVmSetAccumulatorV1,
+  FinalizedVmSetV1Error,
+  computeFinalizedVmSetEvidenceV1,
+  computeFinalizedVmSetLeafDigestV1,
+  type FinalizedVmLaneV1,
+  type FinalizedVmSetEvidenceV1,
+  type FinalizedVmSetRowV1,
+  type FinalizedVmSetScopeV1,
+  type FinalizedVmSetV1ErrorCode,
+} from './finalized-vm-set-v1.js';
+export * from './author-catalog-codec.js';
+export * from './author-catalog-objects.js';
+export * from './author-catalog-directory.js';
+export * from './swm-author-inventory-v1.js';
+export * from './rfc64-semantic-addresses-v1.js';
+export * from './rfc64-semantic-records-v1.js';
+export * from './rfc64-semantic-read-manifest-v1.js';
+export * from './rfc64-author-seal-read-manifest-v1.js';
+export * from './rfc64-shared-projection-stream-manifest-v1.js';
+export {
+  isClosedDataRecord,
+  readOwnEnumerableDataProperty,
+  snapshotDenseDataArray,
+  snapshotExactDataRecord,
+  type ClosedDataPrototypePolicy,
+  type ClosedDataReject,
+  type ClosedDataSnapshotOptions,
+} from './sync-wire-objects.js';
+export * from './typed-rdf-store-row-v1.js';
 export * from './event-bus.js';
+export * from './backpressure-observability.js';
 export {
   Logger,
   createOperationContext,
+  formatLogRecord,
   type OperationContext,
   type OperationName,
   type LogSink,
   type LogRecord,
+  type LogRecordFormatOptions,
+  type CanonicalLogRecord,
+  type LogLevel,
+  LOG_LEVELS,
+  normalizeLogLevel,
 } from './logger.js';
 export {
   KA_LIFECYCLE_ROLES,
@@ -34,6 +129,8 @@ export {
   type KaLifecycleStage,
 } from './ka-lifecycle-logger.js';
 export { createLogRedactor, redactLogEntry, redactMessage, DEFAULT_SENSITIVE_KEYS, REDACTED } from './log-redaction.js';
+export { createBoundedKeyedLimiter, type BoundedKeyedLimiterOptions } from './bounded-denial-logger.js';
+export type { LogRedactor } from './log-redaction.js';
 export {
   getTracer, withSpan, linkedSpan, currentTraceIds, activeSpanContext,
   getMetrics, rebuildMetrics, type WithSpanOpts, type DkgMetrics,
@@ -41,9 +138,6 @@ export {
 export * from './crypto/index.js';
 export * from './proto/index.js';
 export {
-  DKGNode,
-  type RelayStats,
-  type RelayReservationDetail,
   // Capacity helpers + constants from PR #524 (libp2p reachability hardening PR1).
   // Re-exported here so dashboards / route handlers can import them
   // without reaching into the deep import path.
@@ -53,7 +147,6 @@ export {
   RELAY_RESERVATION_TTL_MS,
   EDGE_NODE_MAX_CONNECTIONS,
   deriveRelayCaps,
-  checkFdLimit,
   validateRelayServerCapacity,
   type RelayCapacityValidation,
   type DerivedRelayCaps,
@@ -62,6 +155,11 @@ export {
   MAX_RELAY_RESERVATION_COUNT,
   validateRelayReservationCount,
   type RelayReservationCountValidation,
+} from './relay-capacity-policy.js';
+export {
+  DKGNode,
+  type RelayStats,
+  type RelayReservationDetail,
   // Single-source-of-truth interface for the small / sparse-network
   // tunables forwarded `DkgConfig.network` → `DKGAgentConfig` →
   // `DKGNodeConfig`, plus the choke-point helper every forwarder
@@ -77,6 +175,16 @@ export {
   isPublicLikeAddress,
   isLocalOrInternalHostname,
 } from './node.js';
+export {
+  isIpLoopbackAddress,
+  isLocalhostAddress,
+  isLocalhostHostname,
+  isLoopbackAddress,
+  isUnspecifiedAddress,
+} from './network/address-policy.js';
+// Transport-level network isolation. `peerIdFromRelayAddress` is shared with
+// the CLI, which derives other-network relay ids from bundled network configs.
+export { peerIdFromRelayAddress } from './network-peer-dial-policy.js';
 // NOTE: `isFinitePositiveInteger`, `buildPeerStoreOverrides`, and
 // `buildKadDHTOptions` are intentionally NOT re-exported. They are
 // implementation details of `DKGNode.start()`; the wiring test in
@@ -91,17 +199,29 @@ export {
 // deep-import it from `../src/node.js`.
 export {
   type Network,
+  type PeerConnectionNetwork,
   type NodeIdentity,
   type Address,
   type DialOpts,
+  type PeerConnectOpts,
   type ProtocolHandler,
   LibP2PNetwork,
+  canonicalPeerIdString,
+  tryCanonicalPeerIdString,
+  type CanonicalPeerId,
   type NetworkStateRegistry,
   StubNetworkStateRegistry,
   type AgentDirectoryLookup,
   type PeerResolverDeps,
+  type PeerConnectionOutcome,
+  connectLibp2pCandidate,
+  parseLibp2pConnectCandidate,
+  Libp2pConnectCandidateParseError,
+  type Libp2pConnectCandidate,
+  type Libp2pConnectHost,
   type PeerResolverLogger,
   type ResolveOpts,
+  type ConnectOpts,
   PeerResolver,
   dkgGossipMsgId,
   dkgGossipMsgIdRaw,
@@ -113,6 +233,9 @@ export {
   ProtocolRouter,
   QuietRetryableHandlerError,
   type AdmissionCheckOptions,
+  type DuplexStreamOptions,
+  type DuplexStreamRequest,
+  type ProtocolRegistrationOptions,
   type ProtocolRouterOptions,
   type SendOptions,
   DEFAULT_MAX_READ_BYTES,
@@ -120,6 +243,26 @@ export {
   isRecoverableSendError,
   isProtocolUnsupportedError,
 } from './protocol-router.js';
+// Explicit experimental capability only; importing Core installs no handler.
+export {
+  EXPERIMENTAL_EXACT_BATCH_STREAM_PROTOCOL,
+  EXPERIMENTAL_EXACT_BATCH_STREAM_WINDOW_SIZE,
+  exchangeExperimentalExactBatch,
+  registerExperimentalExactBatchResponder,
+  ExperimentalExactBatchUnsupportedError,
+  ExactBatchResponderRefusal,
+  type ExactBatchTransportSession,
+  type ExactBatchTransportOptions,
+  type ExactBatchTransportEvent,
+  type ExactBatchResponderAuthorization,
+} from './experimental-exact-batch-stream.js';
+export {
+  EXACT_BATCH_STREAM_PROTOCOL, EXACT_BATCH_STREAM_WINDOW_SIZE, EXACT_BATCH_FRAME_KIND,
+  EXACT_BATCH_BATCH_INDEX, EXACT_BATCH_FRAME_HEADER_BYTES, EXACT_BATCH_MAX_FRAME_BYTES,
+  EXACT_BATCH_MAX_REQUEST_BYTES, EXACT_BATCH_MAX_ASSETS, EXACT_BATCH_MAX_CHUNKS_PER_ASSET,
+  EXACT_BATCH_REFUSALS, encodeExactBatchFrame, decodeExactBatchFrames, validateExactBatchFrame,
+  type ExactBatchFrame, type ExactBatchFrameKind, type ExactBatchRefusal,
+} from './experimental-exact-batch-wire.js';
 export {
   MessageStreamPool,
   POOLED_MESSAGE_PROTOCOL,
@@ -163,7 +306,14 @@ export {
   isEntityPredicate,
   isAssertionEntityPredicate,
 } from './entity-predicate.js';
-export { withRetry, type RetryOptions } from './retry.js';
+export {
+  withRetry,
+  withRetryContext,
+  type RetryAttemptContext,
+  type RetryOptions,
+} from './retry.js';
+export { resolveWithinAbort } from './abort-boundary.js';
+export { isTransportTimeoutError, startRequestAbortLifecycle, type RequestAbortLifecycle } from './request-abort-lifecycle.js';
 export {
   RetryQueue,
   type RetryEntry,
@@ -175,16 +325,32 @@ export {
   type MessageDirection,
   type IdempotencyCheckResult,
   type ProtocolOutboxStore,
+  type LegacyProtocolOutboxStore,
+  type CompatibleProtocolOutboxStore,
   type ProtocolOutboxEntry,
+  type ProtocolOutboxMetadata,
+  type ProtocolOutboxPageBudget,
+  type ProtocolOutboxPage,
+  type ProtocolOutboxQueueStats,
+  type ProtocolOutboxPolicyConfiguration,
+  type ProtocolOutboxStorePolicy,
+  type BoundedProtocolOutboxStore,
+  type ProtocolOutboxPersistence,
+  type ProtocolOutboxInspection,
+  type ProtocolOutboxPayloadInspection,
   type KaNumberStore,
   RESPONSE_CACHE_BYTES,
   RESPONSE_GONE_MARKER,
 } from './messenger-types.js';
 export {
   ProtocolOutbox,
+  BoundedProtocolOutbox,
+  assertBoundedProtocolOutboxStore,
+  protocolOutboxPayloadInspection,
   type ProtocolOutboxOptions,
   DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS,
   DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS,
+  validateProtocolOutboxPageBudget,
   InMemoryProtocolOutboxStore,
   InMemoryMessageIdempotencyStore,
 } from './protocol-outbox.js';
@@ -235,7 +401,17 @@ export {
   sparqlString,
   sparqlInt,
   assertSafeRdfTerm,
+  UnsafeSparqlValueError,
 } from './sparql-safe.js';
+export {
+  formatIriPrefix,
+  formatSparqlTerm,
+  SparqlTermValidationError,
+  unwrapIri,
+  type SparqlTermContext,
+  type SparqlTermKind,
+  type SparqlTermPosition,
+} from './sparql-terms.js';
 export {
   JAVA_WRITE_UTF_MAX_BYTES,
   DKG_RDF_LITERAL_SAFE_MUTF8_BYTES,
@@ -257,9 +433,27 @@ export {
   SwmGossipPayloadTooLargeError,
   toErrorMessage,
   hasErrorCode,
+  PCA_FUNDING_UNKNOWN_CODE,
+  PCA_FUNDING_UNKNOWN_MESSAGE,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   NO_FUNDED_PUBLISHER_WALLET_MESSAGE_PREFIX,
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_MESSAGE_MARKER,
+  AMBIGUOUS_ASSERTION_AUTHOR_CODE,
+  ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
+  PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE,
+  ASYNC_PUBLISH_FOREIGN_AUTHOR_CODE,
+  RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE,
+  isRfc64LegacySwmBoundaryRetirementInProgressError,
+  QUERY_ACCESS_DENIED_CODE,
+  QUERY_ACCESS_DENIED_MESSAGE,
+  QueryAccessDeniedError,
+  isQueryAccessDeniedError,
+  UNSCOPED_QUERY_INVALIDATED_CODE,
+  UNSCOPED_QUERY_INVALIDATED_MESSAGE,
   messageIndicatesNoFundedPublisherWallet,
+  messageIndicatesPublishAuthorNotCustodial,
+  formatPublishAuthorNotCustodialMessage,
 } from './errors.js';
 export {
   dkgHomeDir,
@@ -290,5 +484,58 @@ export {
   buildAssertionSealQuads,
   buildAssertionPublishReceiptQuads,
   parseAssertionSealQuads,
+  parseGraphScopedAssertionSealCandidate,
+  type GraphScopedAssertionSealCandidate,
+  type AssertionSealBuildArgs,
   type AssertionSeal,
 } from './assertion-seal.js';
+export {
+  CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_DIGEST_DOMAIN_V1,
+  MAX_CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_BYTES_V1,
+  MAX_SEAL_TRIPLE_COUNT_V1,
+  CanonicalGraphScopedAuthorSealError,
+  assertCanonicalGraphScopedAuthorSealV1,
+  canonicalGraphScopedAuthorSealFromAssertionSealV1,
+  canonicalizeCanonicalGraphScopedAuthorSealV1,
+  canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
+  parseCanonicalGraphScopedAuthorSealV1,
+  computeCanonicalGraphScopedAuthorSealDigestV1,
+  assertCanonicalGraphScopedAuthorSealCoordinateV1,
+  deriveCanonicalGraphScopedAuthorSealPlacementV1,
+  projectCanonicalGraphScopedAuthorSealRowsV1,
+  projectCanonicalGraphScopedAuthorSealStoreRowsV1,
+  renderCanonicalAuthorSealStoreRowV1,
+  canonicalizeAuthorSealStoreRoundTripRowV1,
+  decodeCanonicalGraphScopedAuthorSealRowsV1,
+  decodeCanonicalGraphScopedAuthorSealRenderedRowsV1,
+  classifyCanonicalGraphScopedAuthorSealRowsV1,
+  type Hex32V1,
+  type PositiveDecimalU64V1,
+  type SealTripleCountV1,
+  type CanonicalIsoUtcMillisV1,
+  type CanonicalGraphScopedAuthorSealV1,
+  type CanonicalGraphScopedAuthorSealCoordinateV1,
+  type CanonicalGraphScopedAuthorSealRowV1,
+  type CanonicalAuthorSealStoreObjectV1,
+  type CanonicalAuthorSealStoreRowV1,
+  type CanonicalGraphScopedAuthorSealPlacementV1,
+  type DecodedCanonicalGraphScopedAuthorSealRowsV1,
+  type ClassifiedCanonicalGraphScopedAuthorSealRowsV1,
+  type CanonicalGraphScopedAuthorSealErrorCode,
+} from './canonical-graph-scoped-author-seal.js';
+export * from './catalog-seal-binding.js';
+export * from './transferred-catalog-bundle.js';
+export * from './vm-update-convergence.js';
+export * from './ka-ual-identity.js';
+export {
+  MAX_NODE_TIMER_DELAY_MS,
+  assertNodeTimerDelayMs,
+  resolveNodeTimerDelayMs,
+} from './node-timer.js';
+export * from './query-catalog-parameters.js';
+export * from './query-catalog.js';
+
+export { checkFdLimit, type FdLimitLogLevel } from './fd-limit.js';
+
+export * from './bulk-graph-wire.js';
+export * from './bulk-graph-transport.js';

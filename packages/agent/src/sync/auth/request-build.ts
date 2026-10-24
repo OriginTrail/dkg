@@ -1,4 +1,13 @@
 import { ethers } from 'ethers';
+import {
+  SYNC_BYTE_BUDGET_MAX_ROWS,
+  SYNC_BYTE_BUDGET_PAGE_MODE,
+  SYNC_PAGE_SIZE,
+} from '../../dkg-agent-constants.js';
+import { requireExactAssetUals } from '../exact-assets.js';
+import { encodePipeSyncRequestTail } from './pipe-request-tail.js';
+import { EXACT_SYNC_GZIP_ENCODING, resolveExactSyncGzipProfile } from '../wire-compression.js';
+import type { SyncRequestSigner } from './request-signing.js';
 
 // 'catalog' (§7) — the public facet open-serve: served to ANYONE
 // without the allowlist gate, bounded to exactly the `_catalog` named graph.
@@ -29,6 +38,18 @@ export interface SyncRequestEnvelope {
   authPurpose?: string;
   authSelector?: string;
   /**
+   * Additive, UNSIGNED response-shaping capability. The signed `limit` remains
+   * at or below the legacy 500-row cap, so old responders can authenticate and
+   * serve the request unchanged. New responders may honor `pageRowsHint`, but
+   * only under their own hard row and byte caps. This cannot expand the caller's
+   * authorization scope; it only changes how much already-authorized durable
+   * data is returned in one response.
+   */
+  pageMode?: typeof SYNC_BYTE_BUDGET_PAGE_MODE;
+  pageRowsHint?: number;
+  /** Unsigned response field, including signed envelopes; old peers keep plain pages. */
+  responseEncoding?: typeof EXACT_SYNC_GZIP_ENCODING;
+  /**
    * Phase C — optional, UNSIGNED delta-sync hint. When set, the responder
    * returns only Knowledge Assets whose KC `dkg:batchId` is strictly greater
    * than this value (the requester's per-CG high-water mark). Encoded as a
@@ -41,6 +62,14 @@ export interface SyncRequestEnvelope {
    * full scan; new responders honor it and return a delta.
    */
   sinceBatchId?: string;
+  /**
+   * Additive, UNSIGNED exact-KA response filter. It can only narrow an already
+   * authorized Context Graph read. Upgraded responders serve metadata and data
+   * for these UALs only; old responders ignore it, while the upgraded requester
+   * accepts and filters only a bounded legacy prefix that covers every requested
+   * descriptor. An over-limit or incomplete legacy response remains fail-closed.
+   */
+  assetUals?: string[];
   /**
    * R9 (SECURITY) — member SWM recovery marker. When set, the recovery path
    * serves PLAINTEXT member-to-member, so the responder MUST authorize it via
@@ -73,6 +102,7 @@ interface BuildSyncRequestParams {
   authPurpose?: string;
   authSelector?: string;
   sinceBatchId?: string;
+  assetUals?: string[];
   syncSessionId?: string;
   needsAuth: boolean;
   /**
@@ -86,7 +116,7 @@ interface BuildSyncRequestParams {
    */
   recovery?: boolean;
   /**
-   * Force the authenticated envelope to be signed by `claimedAgentPrivateKey`
+   * Force the authenticated envelope to be signed by `claimedAgentSigner`
    * even when the node also has an on-chain identity signer. Use this for
    * protocols whose responder authorizes the recovered signer as the claimed
    * agent itself, not as the node identity/op-key.
@@ -115,8 +145,13 @@ interface BuildSyncRequestParams {
    * envelope tampering can't steer the responder's delegation lookup.
    */
   claimedAgentAddress?: string;
-  /** Private key matching `claimedAgentAddress`, used as a fallback signer when no chain identity is available. */
-  claimedAgentPrivateKey?: string;
+  /**
+   * The signing capability of `claimedAgentAddress` (see
+   * `claimedAgentSyncRequestSigner`), used when no chain identity signs and
+   * whenever the agent's own signature is required. Its signature must recover
+   * to `claimedAgentAddress`.
+   */
+  claimedAgentSigner?: SyncRequestSigner;
 }
 
 export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): Promise<Uint8Array> {
@@ -132,6 +167,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     authPurpose,
     authSelector,
     sinceBatchId,
+    assetUals: rawAssetUals,
     syncSessionId,
     needsAuth,
     recovery,
@@ -140,7 +176,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     getIdentityId,
     signMessage,
     claimedAgentAddress,
-    claimedAgentPrivateKey,
+    claimedAgentSigner,
   } = params;
 
   // R9: recovery serves plaintext member-to-member and is authorized by the
@@ -153,6 +189,30 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
   if (forceClaimedAgentSignature && !needsAuth) {
     throw new Error(`Cannot build agent-signed sync request for "${contextGraphId}": forced agent signing requires an authenticated envelope`);
   }
+
+  const requestedLimit = Number.isSafeInteger(limit)
+    ? Math.max(1, Math.min(limit, SYNC_BYTE_BUDGET_MAX_ROWS))
+    : SYNC_PAGE_SIZE;
+  const assetUals = rawAssetUals === undefined ? undefined : requireExactAssetUals(rawAssetUals);
+  // Cold public recovery still uses an authenticated envelope. This hint is
+  // independent of needsAuth and is appended after the unchanged digest;
+  // responder authorization must succeed before any compression or export.
+  const responseEncoding = resolveExactSyncGzipProfile({
+    includeSharedMemory, phase, assetUals, responseEncoding: EXACT_SYNC_GZIP_ENCODING,
+  })?.responseEncoding;
+  // Advertise byte-budget page mode for durable DATA and META (#1916/#1923).
+  // Additive/rolling-upgrade safe both directions: an OLD responder ignores the
+  // meta pageMode (its meta path is not byte-budget-gated → serves legacy meta),
+  // and a NEW responder treats a request WITHOUT meta pageMode as non-negotiated
+  // (plain meta serializer). The signed `limit` still rides the 500-row legacy
+  // cap below, so digests stay wire-compatible.
+  const useByteBudgetPage = (phase === 'data' || phase === 'meta')
+    && (
+      requestedLimit > SYNC_PAGE_SIZE
+      // Exact DATA must remain on the responder's bounded page-only path after
+      // adaptive transport fallback reduces the row hint below the legacy cap.
+      || (phase === 'data' && assetUals !== undefined)
+    );
 
   if (!needsAuth) {
     const prefix = includeSharedMemory ? `workspace:${contextGraphId}` : contextGraphId;
@@ -167,17 +227,32 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
           // wire and the responder routes to readCatalogPage instead of falling
           // back to the DEFAULT data phase (which is gated and serves nothing).
           ? '|catalog'
-          : '';
-    // Trailing keyed tokens are additive; old responders ignore the extra parts.
-    const sessionSuffix = syncSessionId ? `|session|${syncSessionId}` : '';
-    const sinceSuffix = sinceBatchId ? `|since|${sinceBatchId}` : '';
-    return new TextEncoder().encode(`${prefix}|${offset}|${limit}${phaseSuffix}${sessionSuffix}${sinceSuffix}`);
+          // Byte-budget tokens make the otherwise implicit DATA phase explicit,
+          // so upgraded parsers have an unambiguous start for the keyed tail.
+          : useByteBudgetPage
+            ? '|data'
+            : '';
+    const tail = encodePipeSyncRequestTail({
+      responseEncoding,
+      pageMode: useByteBudgetPage ? SYNC_BYTE_BUDGET_PAGE_MODE : undefined,
+      pageRowsHint: useByteBudgetPage ? requestedLimit : undefined,
+      syncSessionId,
+      sinceBatchId,
+      assetUals,
+    });
+    return new TextEncoder().encode(
+      `${prefix}|${offset}|${requestedLimit}${phaseSuffix}${tail}`,
+    );
   }
 
   const request: SyncRequestEnvelope = {
     contextGraphId,
     offset,
-    limit,
+    // Keep this signed field within the legacy cap. An old responder clamps to
+    // the same value before verifying the digest, so rolling upgrades remain
+    // wire-compatible even when the additive hint below asks a new responder
+    // for a larger byte-bounded page.
+    limit: Math.min(requestedLimit, SYNC_PAGE_SIZE),
     includeSharedMemory,
     targetPeerId,
     requesterPeerId,
@@ -212,11 +287,36 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     request.authPurpose,
     request.authSelector,
   );
+  // The claimed agent's signature, which must recover to the claimed agent.
+  const signAsClaimedAgent = claimedAgentAddress && claimedAgentSigner
+    ? async (): Promise<string> => {
+      const signature = await claimedAgentSigner(digest);
+      if (ethers.verifyMessage(digest, signature).toLowerCase() !== claimedAgentAddress.toLowerCase()) {
+        throw new Error(
+          `Cannot build authenticated sync request for "${contextGraphId}": the signature does not recover to claimed agent ${claimedAgentAddress}`,
+        );
+      }
+      return signature;
+    }
+    : undefined;
+  const setClaimedAgentSignature = (signature: string): void => {
+    const sig = ethers.Signature.from(signature);
+    request.requesterIdentityId = '0';
+    // requesterAgentAddress was already set above (and bound into the digest).
+    request.requesterSignatureR = ethers.hexlify(sig.r);
+    request.requesterSignatureVS = ethers.hexlify(sig.yParityAndS);
+  };
 
   // Phase C: ride the envelope unsigned, after the digest (cannot influence
   // authorization; only narrows the responder's result set).
   if (syncSessionId) request.syncSessionId = syncSessionId;
   if (sinceBatchId) request.sinceBatchId = sinceBatchId;
+  if (assetUals) request.assetUals = assetUals;
+  if (responseEncoding) request.responseEncoding = responseEncoding;
+  if (useByteBudgetPage) {
+    request.pageMode = SYNC_BYTE_BUDGET_PAGE_MODE;
+    request.pageRowsHint = requestedLimit;
+  }
   // R9: unsigned recovery marker (only ever escalates strictness — see field
   // docs). The responder authorizes against the recovered signer, not this flag.
   if (recovery) request.recovery = true;
@@ -225,34 +325,24 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
   // responder matches against the members-only agent gate. So a recovery
   // request MUST be signed by the member agent's OWN key (edge path) — the node
   // identity op-key would recover to a non-member and be hard-denied. Force the
-  // edge path and require the agent key locally (the recovering node IS the
-  // member, so it holds the key).
+  // edge path and require the agent's signature (the recovering node IS the
+  // member, so it holds the key, or its external signer does).
   const mustSignWithClaimedAgent = Boolean(recovery || forceClaimedAgentSignature);
   const identityId = mustSignWithClaimedAgent ? 0n : await getIdentityId();
   if (mustSignWithClaimedAgent) {
-    if (!claimedAgentAddress || !claimedAgentPrivateKey) {
+    if (!signAsClaimedAgent) {
       const requestType = recovery ? 'member-recovery' : 'agent-signed';
       throw new Error(`Cannot build ${requestType} sync request for "${contextGraphId}": missing claimed agent signing key`);
     }
-    const wallet = new ethers.Wallet(claimedAgentPrivateKey);
-    const sig = ethers.Signature.from(await wallet.signMessage(digest));
-    request.requesterIdentityId = '0';
-    // requesterAgentAddress was already set above (and bound into the digest);
-    // the responder enforces recoveredAddress === member gate entry.
-    request.requesterSignatureR = ethers.hexlify(sig.r);
-    request.requesterSignatureVS = ethers.hexlify(sig.yParityAndS);
+    // The responder enforces recoveredAddress === member gate entry.
+    setClaimedAgentSignature(await signAsClaimedAgent());
   } else if (identityId > 0n && typeof signMessage === 'function') {
     const signature = await signMessage(digest);
     request.requesterIdentityId = identityId.toString();
     request.requesterSignatureR = ethers.hexlify(signature.r);
     request.requesterSignatureVS = ethers.hexlify(signature.vs);
-  } else if (claimedAgentAddress && claimedAgentPrivateKey) {
-    const wallet = new ethers.Wallet(claimedAgentPrivateKey);
-    const sig = ethers.Signature.from(await wallet.signMessage(digest));
-    request.requesterIdentityId = '0';
-    // requesterAgentAddress was already set above (and bound into the digest).
-    request.requesterSignatureR = ethers.hexlify(sig.r);
-    request.requesterSignatureVS = ethers.hexlify(sig.yParityAndS);
+  } else if (signAsClaimedAgent) {
+    setClaimedAgentSignature(await signAsClaimedAgent());
   }
 
   if (needsAuth && (!request.requesterSignatureR || !request.requesterSignatureVS)) {

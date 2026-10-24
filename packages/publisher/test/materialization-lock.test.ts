@@ -103,6 +103,55 @@ describe('withMaterializationLock — serialises check + write per (metaGraph, u
     });
     expect(secondRan).toBe(true);
   });
+
+  it('lets an aborted waiter leave without bypassing the active same-key writer', async () => {
+    let releaseOwner!: () => void;
+    const ownerGate = new Promise<void>((resolve) => { releaseOwner = resolve; });
+    const owner = withMaterializationLock(LABEL_META, UAL, async () => ownerGate);
+    const controller = new AbortController();
+    let waiterRan = false;
+    const waiter = withMaterializationLock(LABEL_META, UAL, async () => {
+      waiterRan = true;
+    }, { signal: controller.signal });
+
+    await Promise.resolve();
+    controller.abort();
+    await expect(waiter).rejects.toMatchObject({ name: 'AbortError' });
+    expect(waiterRan).toBe(false);
+
+    let successorRan = false;
+    const successor = withMaterializationLock(LABEL_META, UAL, async () => {
+      successorRan = true;
+    });
+    await Promise.resolve();
+    expect(successorRan).toBe(false);
+
+    releaseOwner();
+    await Promise.all([owner, successor]);
+    expect(successorRan).toBe(true);
+  });
+
+  it('waits for an entered atomic writer even when its signal aborts', async () => {
+    const controller = new AbortController();
+    let release!: () => void;
+    let entered!: () => void;
+    const enteredGate = new Promise<void>((resolve) => { entered = resolve; });
+    const workGate = new Promise<void>((resolve) => { release = resolve; });
+    let settled = false;
+    const owner = withMaterializationLock(LABEL_META, UAL, async () => {
+      entered();
+      await workGate;
+      return 'committed';
+    }, { signal: controller.signal }).finally(() => { settled = true; });
+
+    await enteredGate;
+    controller.abort();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    release();
+    await expect(owner).resolves.toBe('committed');
+  });
 });
 
 /**
@@ -260,4 +309,43 @@ describe('restateLabelGraphForUpdate — TOCTOU lock holds under concurrent writ
     expect(await readMaterializedVersion(store, LABEL_META, UAL))
       .toEqual({ blockNumber: 300, txIndex: 7 });
   });
+});
+
+describe('group materialization locks', () => {
+  it('deduplicates reversed inputs and shares exclusion with singleton writers', async () => {
+    const { withMaterializationLocks } = await import('../src/materialization-lock-group.js');
+    const a = { metaGraph: 'urn:group-lock', ual: 'a' }, b = { ...a, ual: 'b' };
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const order: string[] = [];
+    const first = withMaterializationLocks([b, a, b], async () => { order.push('group'); await gate; order.push('released'); });
+    const singleton = withMaterializationLock(a.metaGraph, a.ual, async () => { order.push('single'); });
+    const reverse = withMaterializationLocks([a, b], async () => { order.push('reverse'); });
+    expect(order).toEqual(['group']);
+    release(); await Promise.all([first, singleton, reverse]);
+    expect(order).toEqual(['group', 'released', 'single', 'reverse']);
+  });
+});
+
+it('finishes opposite-order groups contending on a held singleton member', async () => {
+  const { withMaterializationLocks } = await import('../src/materialization-lock-group.js');
+  const a = { metaGraph: 'urn:interleaved-group-lock', ual: 'a' }, b = { ...a, ual: 'b' };
+  const stop = new AbortController();
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const order: string[] = [];
+  const single = withMaterializationLock(b.metaGraph, b.ual, async () => { order.push('single'); await held; });
+  const reversed = withMaterializationLocks([b, a], async () => { order.push('reversed'); }, { signal: stop.signal });
+  const forward = withMaterializationLocks([a, b], async () => { order.push('forward'); }, { signal: stop.signal });
+  const completed = Promise.all([single, reversed, forward]);
+  const deadline = setTimeout(() => stop.abort(new Error('group lock deadline')), 1000);
+  try {
+    expect(order).toEqual(['single']);
+    release();
+    await completed;
+    expect(order).toEqual(['single', 'reversed', 'forward']);
+  } finally {
+    clearTimeout(deadline); stop.abort(); release();
+    await Promise.allSettled([single, reversed, forward]);
+  }
 });

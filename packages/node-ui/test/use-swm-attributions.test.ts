@@ -190,3 +190,74 @@ describe('useSwmAttributions — B2 POST body scoping', () => {
     expect(body).not.toHaveProperty('contextGraphId');
   });
 });
+
+
+// PR #2333 review — the helper was well covered but the user-visible wiring was
+// not, so a regression that recomputed node colours from the raw hash instead
+// of consuming the collision-resolved legend colour would go unnoticed. These
+// agents all hash to the SAME palette slot under the old scheme, so at least
+// one must receive a probed slot for the assertions below to mean anything.
+const COLLIDING_AGENTS = [
+  'did:dkg:agent:0xa4c123b1612dd272d1371c17149d439536b3216f',
+  'did:dkg:agent:0x5fc324bdb2e1142a21c402364f9572b85a8e48f6',
+  'did:dkg:agent:0x49ddb14f71010b93b7d946bf54074e3248c801be',
+];
+
+describe('useSwmAttributions — legend and node colours agree (GH#1128)', () => {
+  let root: Root;
+  let container: HTMLDivElement;
+  let originalFetch: typeof globalThis.fetch | undefined;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        result: {
+          bindings: COLLIDING_AGENTS.map((agent, i) => ({
+            op: { value: `urn:op:${i}` },
+            root: { value: `urn:e:${i}` },
+            agent: { value: agent },
+            publishedAt: { value: '2026-05-22T10:00:00Z' },
+            g: { value: 'did:dkg:context-graph:cg-1/_shared_memory_meta' },
+          })),
+        },
+      }),
+    })) as any;
+  });
+
+  afterEach(async () => {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    if (originalFetch) globalThis.fetch = originalFetch;
+  });
+
+  it('gives colliding agents distinct legend colours, and tints each root to match', async () => {
+    let latest: SwmAttributionsResult | null = null;
+    function Probe() {
+      latest = useSwmAttributions('cg-1');
+      return null;
+    }
+    await act(async () => { root.render(React.createElement(Probe)); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    const palette = latest!.palette;
+    expect(palette.length).toBe(COLLIDING_AGENTS.length);
+
+    // 1. The legend itself must not repeat a colour.
+    expect(new Set(palette.map((e) => e.color)).size).toBe(palette.length);
+
+    // 2. Every single-agent root must be tinted with ITS OWN legend colour —
+    //    the half of #1128 that a helper-only test cannot see.
+    const colorFor = new Map(palette.map((e) => [e.agent, e.color]));
+    for (const [uri, list] of latest!.attributions) {
+      if (list.length !== 1) continue;
+      expect(latest!.nodeColors[uri]).toBe(colorFor.get(list[0]!.agent));
+    }
+    expect(Object.keys(latest!.nodeColors).length).toBeGreaterThan(0);
+  });
+});

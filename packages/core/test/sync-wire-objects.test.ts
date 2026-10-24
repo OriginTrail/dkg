@@ -1,0 +1,121 @@
+import { describe, expect, it } from 'vitest';
+
+import {
+  assertExactKeys,
+  isClosedDataRecord,
+  isPlainRecord,
+  snapshotExactDataRecord,
+} from '../src/sync-wire-objects.js';
+
+describe('RFC-64 sync wire object helpers', () => {
+  it('accepts ordinary and null-prototype records', () => {
+    const nullPrototype = Object.create(null) as Record<string, unknown>;
+    nullPrototype.value = 'ok';
+
+    expect(isPlainRecord({ value: 'ok' })).toBe(true);
+    expect(isPlainRecord(nullPrototype)).toBe(true);
+    expect(() => assertExactKeys(nullPrototype, ['value'], 'fixture')).not.toThrow();
+  });
+
+  it('makes the ordinary-only versus null-prototype policy explicit', () => {
+    const nullPrototype = Object.assign(Object.create(null), { value: 'ok' });
+    expect(isClosedDataRecord(nullPrototype, 'ordinary-or-null')).toBe(true);
+    expect(isClosedDataRecord(nullPrototype, 'ordinary-only')).toBe(false);
+    expect(() => snapshotExactDataRecord(
+      nullPrototype,
+      ['value'],
+      'fixture',
+      { prototypePolicy: 'ordinary-only' },
+    )).toThrow(/plain data object/u);
+    expect(snapshotExactDataRecord(
+      { value: 'ok' },
+      ['value'],
+      'fixture',
+      { prototypePolicy: 'ordinary-only' },
+    )).toEqual({ value: 'ok' });
+  });
+
+  it('rejects null, arrays, and class instances as non-plain records', () => {
+    class Fixture {
+      value = 'ok';
+    }
+
+    expect(isPlainRecord(null)).toBe(false);
+    expect(isPlainRecord([])).toBe(false);
+    expect(isPlainRecord(new Fixture())).toBe(false);
+  });
+
+  it('rejects unknown, missing, and symbol keys', () => {
+    expect(() => assertExactKeys({ value: 'ok', extra: true }, ['value'], 'fixture')).toThrow(
+      /unknown or missing fields/,
+    );
+    expect(() => assertExactKeys({}, ['value'], 'fixture')).toThrow(
+      /unknown or missing fields/,
+    );
+
+    const symbolRecord = { value: 'ok' } as Record<PropertyKey, unknown>;
+    symbolRecord[Symbol('hidden')] = true;
+    expect(() => assertExactKeys(symbolRecord, ['value'], 'fixture')).toThrow(
+      /symbol properties/,
+    );
+  });
+
+  it('validates exact keys independently of insertion/schema order and freezes the snapshot', () => {
+    const snapshot = snapshotExactDataRecord({ z: 1, a: 2 }, ['a', 'z'], 'fixture');
+    expect(snapshot).toEqual({ a: 2, z: 1 });
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.getPrototypeOf(snapshot)).toBe(null);
+    expect(() => snapshotExactDataRecord({ a: 1, z: 2 }, ['a', 'a'], 'fixture'))
+      .toThrow(/unknown or missing fields/);
+  });
+
+  it('keeps wide-schema validation exact, including duplicate schema keys', () => {
+    const keys = Array.from({ length: 32 }, (_, index) => `field${index}`);
+    const record = Object.fromEntries(keys.map((key, index) => [key, index]));
+    expect(snapshotExactDataRecord(record, [...keys].reverse(), 'fixture')).toEqual(record);
+    const duplicate = [...keys];
+    duplicate[31] = duplicate[0];
+    expect(() => snapshotExactDataRecord(record, duplicate, 'fixture'))
+      .toThrow(/unknown or missing fields/);
+    const substituted = { ...record, extra: true };
+    delete substituted.field0;
+    expect(() => snapshotExactDataRecord(substituted, keys, 'fixture'))
+      .toThrow(/unknown or missing fields/);
+  });
+
+  it('rejects non-enumerable and accessor property descriptors', () => {
+    const nonEnumerable = {} as Record<string, unknown>;
+    Object.defineProperty(nonEnumerable, 'value', {
+      enumerable: false,
+      value: 'ok',
+    });
+    expect(() => assertExactKeys(nonEnumerable, ['value'], 'fixture')).toThrow(
+      /enumerable data properties/,
+    );
+
+    const accessor = {} as Record<string, unknown>;
+    Object.defineProperty(accessor, 'value', {
+      enumerable: true,
+      get: () => 'ok',
+    });
+    expect(() => assertExactKeys(accessor, ['value'], 'fixture')).toThrow(
+      /enumerable data properties/,
+    );
+  });
+
+  it('keeps closed-data helpers compatible at the root and canonical subpath', async () => {
+    const root = await import('../src/index.js') as Record<string, unknown>;
+    const subpath = await import(
+      '@origintrail-official/dkg-core/closed-data-snapshot'
+    ) as Record<string, unknown>;
+    for (const helper of [
+      'isClosedDataRecord',
+      'readOwnEnumerableDataProperty',
+      'snapshotDenseDataArray',
+      'snapshotExactDataRecord',
+    ]) {
+      expect(root[helper], `${helper} root compatibility export`).toBeTypeOf('function');
+      expect(subpath[helper], `${helper} package subpath export`).toBeTypeOf('function');
+    }
+  }, 15_000);
+});

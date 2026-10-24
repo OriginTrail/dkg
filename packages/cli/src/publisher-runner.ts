@@ -1,13 +1,102 @@
 import { join } from 'node:path';
+import { ethers } from 'ethers';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
-import { EVMChainAdapter, NoChainAdapter, mergeRpcUsageWindows, type ChainAdapter, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
-import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type ACKTransport, type ACKTransportFactory, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type V10ACKProviderParams, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
+import {
+  EVMChainAdapter,
+  NoChainAdapter,
+  RpcRequestGovernor,
+  buildKnowledgeAssetUal,
+  mergeRpcUsageWindows,
+  withRpcUsageAdapterRole,
+  type CanonicalFinalizationReceipt,
+  type ChainAdapter,
+  type ChainEventLogBindingSource,
+  type OnChainPublishResult,
+  type RpcUsageWindow,
+} from '@origintrail-official/dkg-chain';
+import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  TypedEventBus,
+  type Ed25519Keypair,
+} from '@origintrail-official/dkg-core';
+import {
+  ACKCollector,
+  AsyncLiftRunner,
+  type AsyncLiftRunnerConfig,
+  DKGPublisher,
+  FileWorkspacePublicSnapshotStore,
+  snapshotReferenceCheck,
+  TripleStoreAsyncLiftPublisher,
+  wrapAsRpcPreconditionIfApplicable,
+  type ACKTransport,
+  type ACKTransportFactory,
+  type AsyncKnowledgeAssetVmPublishRecoveryEvidence,
+  type AsyncKnowledgeAssetVmPublishRecoveryResolver,
+  type AsyncLiftDetailedRetrier,
+  type AsyncLiftPublishExecutionInput,
+  type AsyncLiftPublisher,
+  type AsyncLiftPublisherConfig,
+  type AsyncLiftChainProofLookup,
+  type AsyncLiftUpdateChainProofLookup,
+  type AsyncLiftChainProofResolution,
+  type AsyncLiftPublisherRecoveryResult,
+  type CanonicalCreateEvidence,
+  type VmPublisherControl,
+  type LiftJobHex,
+  type PersistedLiftJob,
+  type PublishOptions,
+  type V10ACKProviderParams,
+  type SnapshotPageIndexStore,
+  type WorkspacePublicSnapshotStore,
+} from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
-import { loadNetworkConfig, resolveReadyChainConfig, type DkgConfig } from './config.js';
+import {
+  loadNetworkConfig,
+  loadResolvedNetworkConfig,
+  isPublisherRuntimeEnabled,
+  resolvePublisherRetryTuning,
+  resolveReadyChainConfig,
+  type DkgConfig,
+  type PublisherRetryTuning,
+} from './config.js';
+import {
+  bindRuntimeRpcRequestGovernor,
+  projectRuntimeEvmChainConfig,
+  type RuntimeEvmChainConfig,
+} from './runtime-chain-config.js';
 import { loadPublisherWallets } from './publisher-wallets.js';
+import { PublisherStartupAdmission } from './publisher-startup-admission.js';
+// GH#2270 PR-3 r3 — chain-proof POLICY lives in its own module; this file stays the
+// composition root that hands it the adapters and wires the result into the publisher.
+import {
+  asLiftJobBigInt,
+  asLiftJobHex,
+  chainAdaptersForWallets,
+  createChainProofResolver,
+  hasChainPublishLookup,
+  hasChainRecoveryCapabilityFor,
+  mapOnChainPublishResultToLiftRecovery,
+  verifyCanonicalUpdateFacts,
+  type PublisherChainAdapters,
+} from './publisher-chain-proof.js';
 
 export type { ACKTransportFactory } from '@origintrail-official/dkg-publisher';
+
+/** Single construction boundary for every async-publisher wallet adapter. */
+export function createPublisherWalletChain(
+  chainBase: RuntimeEvmChainConfig | undefined,
+  privateKey: string,
+  chainEventLogBindingSource?: ChainEventLogBindingSource,
+): ChainAdapter {
+  return chainBase
+    ? withRpcUsageAdapterRole('publisher_wallet', () => new EVMChainAdapter({
+      ...chainBase,
+      privateKey,
+      allowNoAdminSigner: true,
+      chainEventLogBindingSource,
+    }))
+    : new NoChainAdapter();
+}
 
 export interface PublisherRuntime {
   readonly runner: AsyncLiftRunner;
@@ -17,6 +106,15 @@ export interface PublisherRuntime {
   readonly stop: () => Promise<void>;
   /** RpcUsageDrainable: merged window across every per-wallet chain adapter. */
   readonly drainRpcUsage: () => RpcUsageWindow;
+  /**
+   * GH#2270 follow-up (🔴 3822987482) — can THIS runtime settle a held job signed by this
+   * wallet, for this operation kind? The daemon's ADMISSION instance is a separate, deliberately
+   * resolver-less publisher (it runs no scheduler), so asking it whether an automatic exit exists
+   * always answered "no" — every pending-chain-proof rejection claimed there was no automatic
+   * recovery even on a node where recovery was configured and running. Admission now asks the
+   * live runtime through this probe instead of inferring from its own wiring.
+   */
+  readonly canSettleHeldJob: (walletId: string, operationKind: 'create' | 'update' | undefined) => boolean;
 }
 
 export interface PublisherRuntimeWallet {
@@ -24,8 +122,97 @@ export interface PublisherRuntimeWallet {
   readonly identityId: bigint;
 }
 
+export type AsyncPublisherUnavailableReason =
+  | 'publisher_disabled'
+  | 'publisher_starting'
+  | 'no_publisher_wallets'
+  | 'publisher_startup_failed';
+
+type PublisherDisabledAvailability = {
+  available: false;
+  reason: 'publisher_disabled';
+  retryable: false;
+  operatorActionRequired: true;
+};
+
+type PublisherStartingAvailability = {
+  available: false;
+  reason: 'publisher_starting';
+  retryable: true;
+  operatorActionRequired: false;
+};
+
+type NoPublisherWalletsAvailability = {
+  available: false;
+  reason: 'no_publisher_wallets';
+  retryable: false;
+  operatorActionRequired: true;
+};
+
+type PublisherStartupFailedAvailability = {
+  available: false;
+  reason: 'publisher_startup_failed';
+  retryable: false;
+  operatorActionRequired: true;
+};
+
+type AsyncPublisherUnavailableAvailability =
+  | PublisherDisabledAvailability
+  | PublisherStartingAvailability
+  | NoPublisherWalletsAvailability
+  | PublisherStartupFailedAvailability;
+
+export type AsyncPublisherAvailability =
+  | { available: true }
+  | AsyncPublisherUnavailableAvailability;
+
+function unavailablePublisherAvailability(reason: 'publisher_disabled'): PublisherDisabledAvailability;
+function unavailablePublisherAvailability(reason: 'publisher_starting'): PublisherStartingAvailability;
+function unavailablePublisherAvailability(reason: 'no_publisher_wallets'): NoPublisherWalletsAvailability;
+function unavailablePublisherAvailability(reason: 'publisher_startup_failed'): PublisherStartupFailedAvailability;
+function unavailablePublisherAvailability(reason: AsyncPublisherUnavailableReason): AsyncPublisherUnavailableAvailability;
+function unavailablePublisherAvailability(
+  reason: AsyncPublisherUnavailableReason,
+): AsyncPublisherUnavailableAvailability {
+  switch (reason) {
+    case 'publisher_starting':
+      return { available: false, reason, retryable: true, operatorActionRequired: false };
+    case 'publisher_disabled':
+    case 'no_publisher_wallets':
+    case 'publisher_startup_failed':
+      return { available: false, reason, retryable: false, operatorActionRequired: true };
+  }
+}
+
+/**
+ * Canonical readiness boundary for every async-ingress route. Lifecycle may
+ * supply an explicit starting/failure state; otherwise the runtime/config
+ * shape is classified consistently for direct route tests and embedded users.
+ */
+export function resolveAsyncPublisherAvailability(args: {
+  config: DkgConfig;
+  runtime: PublisherRuntime | null;
+  lifecycleReason?: AsyncPublisherUnavailableReason;
+}): AsyncPublisherAvailability {
+  if (args.runtime?.walletIds.length) return { available: true };
+  const reason = args.lifecycleReason
+    ?? (args.runtime
+      ? 'no_publisher_wallets'
+      : args.config.publisher?.enabled
+        ? 'publisher_startup_failed'
+        : 'publisher_disabled');
+  return unavailablePublisherAvailability(reason);
+}
+
 export interface PublisherInspector {
-  readonly publisher: AsyncLiftPublisher;
+  /**
+   * GH#2270 — also the detailed retrier, so `dkg publisher retry` reports the same three
+   * counts with or without a running daemon. `AsyncLiftRetryStateReader` is deliberately NOT
+   * exposed here: this instance is built without the operator's `config.publisher` retry
+   * knobs, so its `autoRetryEligible` could contradict the lane that actually runs. The
+   * detailed retry counts carry no such dependency (the manual path ignores the kill-switch).
+   */
+  readonly publisher: AsyncLiftPublisher & AsyncLiftDetailedRetrier;
   readonly stop: () => Promise<void>;
 }
 
@@ -40,48 +227,91 @@ interface ConfiguredPublisherWallet extends PublisherRuntimeWallet {
   readonly chain: ChainAdapter;
 }
 
+/** Resolve the operator maintenance switch once at a CLI/daemon boundary. */
+export function resolvePublisherStartPaused(value: string | undefined): boolean {
+  return value === '1';
+}
+
+/**
+ * r4 (🟡 3872361426) — the runner's scheduling knobs and error sink travel the construction
+ * chain as ONE value with the runner's own field names, resolved once at each production
+ * boundary (daemon config, standalone CLI args) and spread intact into `new AsyncLiftRunner`.
+ * A knob added to this Pick reaches the runner without touching any intermediate factory —
+ * the per-field relay this replaces is how configured knobs got dropped silently (#1836).
+ */
+export type PublisherRunnerSchedulingOptions = Pick<
+  AsyncLiftRunnerConfig,
+  'pollIntervalMs' | 'errorBackoffMs' | 'recoveryIntervalMs' | 'activeRecoveryIntervalMs' | 'onError'
+>;
+
 export async function startPublisherRuntimeIfEnabled(args: {
   dataDir: string;
   config: DkgConfig;
   store: TripleStore;
   keypair: Ed25519Keypair;
-  chainBase?: {
-    rpcUrl: string;
-    rpcUrls?: string[];
-    hubAddress: string;
-    tokenAddress?: string;
-    chainId?: string;
-  };
+  chainBase?: RuntimeEvmChainConfig;
+  /** Borrow the agent adapter's current one-log generation; never ownership. */
+  chainEventLogBindingSource?: ChainEventLogBindingSource;
   log: (message: string) => void;
   ackTransportFactory?: ACKTransportFactory;
   publishEncryptionFactory?: PublishEncryptionFactory;
-  knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
-  knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
+  knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
+  publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  startupSignal?: AbortSignal;
 }): Promise<PublisherRuntime | null> {
-  if (!args.config.publisher?.enabled) {
+  if (!isPublisherRuntimeEnabled(args.config.publisher)) {
     return null;
   }
 
+  let runtime: PublisherRuntime | undefined;
+  const stopStartingRunner = () => {
+    // stop() latches stopping synchronously, including during start's recovery
+    // await. Final stop/adapter cleanup follows once start has settled.
+    void runtime?.runner.stop().catch(() => {});
+  };
   try {
-    const runtime = await createPublisherRuntimeFromAgent({
+    args.startupSignal?.throwIfAborted();
+    runtime = await createPublisherRuntimeFromAgent({
       dataDir: args.dataDir,
       store: args.store,
       keypair: args.keypair,
       chainBase: args.chainBase,
-      pollIntervalMs: args.config.publisher.pollIntervalMs,
-      errorBackoffMs: args.config.publisher.errorBackoffMs,
+      chainEventLogBindingSource: args.chainEventLogBindingSource,
+      // The daemon boundary: config resolves into the runner's own option shape ONCE, here.
+      runnerOptions: {
+        pollIntervalMs: args.config.publisher.pollIntervalMs,
+        errorBackoffMs: args.config.publisher.errorBackoffMs,
+        recoveryIntervalMs: args.config.publisher.recoveryIntervalMs,
+        activeRecoveryIntervalMs: args.config.publisher.activeRecoveryIntervalMs,
+        // Runner errors (wallet loop + reconciliation) were previously swallowed after their
+        // backoff; a chronically failing reconcile pass then looks exactly like a slow publisher.
+        onError: (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          args.log(`[publisher] runner error: ${message}`);
+        },
+      },
       maxRetries: args.config.publisher.maxRetries,
+      // GH#2270 — this is the ONE runtime whose retry scheduler and claim-time
+      // sweep actually run, so the kill-switch and backoff knobs are dead
+      // config unless they travel this hop (the #1836 bug class).
+      retryTuning: resolvePublisherRetryTuning(args.config.publisher),
       config: args.config,
       ackTransportFactory: args.ackTransportFactory,
       publishEncryptionFactory: args.publishEncryptionFactory,
-      knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor,
-      knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight,
+      knowledgeAssetVmPublishHandler: args.knowledgeAssetVmPublishHandler,
+      publicSnapshotStore: args.publicSnapshotStore,
+      startPaused: resolvePublisherStartPaused(process.env.DKG_PUBLISHER_START_PAUSED),
+      startupSignal: args.startupSignal,
     });
+    args.startupSignal?.throwIfAborted();
+    args.startupSignal?.addEventListener('abort', stopStartingRunner, { once: true });
     await runtime.runner.start();
+    args.startupSignal?.throwIfAborted();
     logPublisherWalletAttribution(runtime.wallets, args.log);
     args.log(`Async publisher runner started (${runtime.walletIds.length} wallet${runtime.walletIds.length === 1 ? '' : 's'})`);
     return runtime;
   } catch (err: any) {
+    await runtime?.stop().catch(() => {});
     const message = err?.message ?? String(err);
     if (message.includes('No publisher wallets configured')) {
       args.log(`Publisher startup skipped: ${message}`);
@@ -89,6 +319,85 @@ export async function startPublisherRuntimeIfEnabled(args: {
       return null;
     }
     throw err;
+  } finally {
+    args.startupSignal?.removeEventListener('abort', stopStartingRunner);
+  }
+}
+
+export type PublisherStartupOutcome =
+  | {
+      runtime: PublisherRuntime;
+      availability: Extract<AsyncPublisherAvailability, { available: true }>;
+    }
+  | {
+      runtime: null;
+      availability: PublisherDisabledAvailability;
+    }
+  | {
+      runtime: null;
+      availability: NoPublisherWalletsAvailability;
+    }
+  | {
+      runtime: null;
+      availability: PublisherStartupFailedAvailability;
+      error: unknown;
+    };
+
+export type PublisherState =
+  | PublisherStartupOutcome
+  | {
+      runtime: null;
+      availability: PublisherStartingAvailability;
+    };
+
+/**
+ * Initial daemon state before the deferred publisher bootstrap settles. Routes
+ * receive this whole discriminated value, so runtime and readiness cannot
+ * disagree in a request context.
+ */
+export function createInitialPublisherState(config: DkgConfig): PublisherState {
+  if (!isPublisherRuntimeEnabled(config.publisher)) {
+    return {
+      runtime: null,
+      availability: unavailablePublisherAvailability('publisher_disabled'),
+    };
+  }
+  return {
+    runtime: null,
+    availability: unavailablePublisherAvailability('publisher_starting'),
+  };
+}
+
+/**
+ * Explicit daemon-startup boundary. The compatibility helper above retains its
+ * historical nullable return, while lifecycle code consumes this discriminant
+ * and never has to guess which unavailable state a null runtime represents.
+ */
+export async function startPublisherRuntimeWithOutcome(
+  args: Parameters<typeof startPublisherRuntimeIfEnabled>[0],
+): Promise<PublisherStartupOutcome> {
+  if (!isPublisherRuntimeEnabled(args.config.publisher)) {
+    return {
+      runtime: null,
+      availability: unavailablePublisherAvailability('publisher_disabled'),
+    };
+  }
+
+  try {
+    const runtime = await startPublisherRuntimeIfEnabled(args);
+    if (!runtime) {
+      return {
+        runtime: null,
+        availability: unavailablePublisherAvailability('no_publisher_wallets'),
+      };
+    }
+    return { runtime, availability: { available: true } };
+  } catch (error) {
+    return {
+      runtime: null,
+      availability: unavailablePublisherAvailability('publisher_startup_failed'),
+      error,
+    };
   }
 }
 
@@ -96,23 +405,24 @@ interface PublisherRuntimeBaseArgs {
   dataDir: string;
   keypair: Ed25519Keypair;
   store: TripleStore;
-  chainBase?: {
-    rpcUrl: string;
-    rpcUrls?: string[];
-    hubAddress: string;
-    tokenAddress?: string;
-    chainId?: string;
-  };
-  pollIntervalMs?: number;
-  errorBackoffMs?: number;
+  chainBase?: RuntimeEvmChainConfig;
+  chainEventLogBindingSource?: ChainEventLogBindingSource;
+  /** Already resolved at the calling boundary; passed through intact to `new AsyncLiftRunner`. */
+  runnerOptions?: PublisherRunnerSchedulingOptions;
   maxRetries?: number;
+  /** GH#2270 — validated `config.publisher` retry knobs; unset knobs keep the library defaults. */
+  retryTuning?: PublisherRetryTuning;
   ackTransportFactory?: ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
   publishEncryptionFactory?: PublishEncryptionFactory;
-  knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
-  knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
+  knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   closeStoreOnStop: boolean;
+  // #1829 — daemon-only append-only journal writes (OFF for standalone `dkg publisher run`).
+  journalWrites?: boolean;
+  /** Explicit startup mode resolved by the CLI or daemon boundary. */
+  startPaused?: boolean;
+  startupSignal?: AbortSignal;
 }
 
 export async function createPublisherRuntime(args: {
@@ -120,6 +430,8 @@ export async function createPublisherRuntime(args: {
   config: DkgConfig;
   pollIntervalMs?: number;
   errorBackoffMs?: number;
+  recoveryIntervalMs?: number;
+  activeRecoveryIntervalMs?: number;
   maxRetries?: number;
 }): Promise<PublisherRuntime> {
   const publisherWallets = await loadPublisherWallets(args.dataDir);
@@ -127,28 +439,39 @@ export async function createPublisherRuntime(args: {
     throw new Error('No publisher wallets configured. Use `dkg publisher wallet add <privateKey>` first.');
   }
 
-  const network = await loadNetworkConfig(args.config.networkConfig);
+  const { network } = await loadResolvedNetworkConfig(args.config, loadNetworkConfig);
   const keypair = await loadOrCreateAgentWallet(args.dataDir);
   const store = await createPublisherStore(args.dataDir, args.config);
-  const publicSnapshotStore = createPublicSnapshotStore(args.dataDir, args.config);
+  const publicSnapshotStore = createPublicSnapshotStore(args.dataDir, args.config, { store });
   // Field-merge config + network/<env>.json#chain, then guard for the
   // strict { rpcUrl, hubAddress, chainId? } shape the publisher runtime
   // expects. If either required field is missing, pass undefined and let
   // the runtime fall back to NoChainAdapter (publisher won't have on-chain
   // finality but still functions).
   const merged = resolveReadyChainConfig(args.config, network);
-  const chainBase = merged?.rpcUrl && merged?.hubAddress
-    ? { rpcUrl: merged.rpcUrl, rpcUrls: merged.rpcUrls, hubAddress: merged.hubAddress, tokenAddress: merged.tokenAddress, chainId: merged.chainId }
-    : undefined;
+  const projectedChainBase = projectRuntimeEvmChainConfig(merged);
+  const chainBase = projectedChainBase === undefined
+    ? undefined
+    : bindRuntimeRpcRequestGovernor(
+        projectedChainBase,
+        new RpcRequestGovernor(merged?.rpcRequestBudget),
+      );
   return createPublisherRuntimeFromBase({
     dataDir: args.dataDir,
     keypair: keypair.keypair,
     store,
     chainBase,
-    pollIntervalMs: args.pollIntervalMs,
-    errorBackoffMs: args.errorBackoffMs,
+    // The standalone boundary: explicit CLI arguments win over config.json, resolved ONCE here.
+    runnerOptions: {
+      pollIntervalMs: args.pollIntervalMs,
+      errorBackoffMs: args.errorBackoffMs,
+      recoveryIntervalMs: args.recoveryIntervalMs ?? args.config.publisher?.recoveryIntervalMs,
+      activeRecoveryIntervalMs: args.activeRecoveryIntervalMs ?? args.config.publisher?.activeRecoveryIntervalMs,
+    },
     maxRetries: args.maxRetries ?? args.config.publisher?.maxRetries,
+    retryTuning: resolvePublisherRetryTuning(args.config.publisher),
     publicSnapshotStore,
+    startPaused: resolvePublisherStartPaused(process.env.DKG_PUBLISHER_START_PAUSED),
     closeStoreOnStop: true,
   });
 }
@@ -158,7 +481,7 @@ export async function createPublisherInspector(args: {
   config: DkgConfig;
 }): Promise<PublisherInspector> {
   const store = await createPublisherStore(args.dataDir, args.config);
-  return createPublisherInspectorFromStore(store, true, createPublicSnapshotStore(args.dataDir, args.config));
+  return createPublisherInspectorFromStore(store, true, createPublicSnapshotStore(args.dataDir, args.config, { store }));
 }
 
 export function createPublisherInspectorFromStore(
@@ -176,183 +499,327 @@ export function createPublisherInspectorFromStore(
   };
 }
 
+/**
+ * GH#2270 follow-up (🔴 3822987482, 🟡 3823952750) — the admission-to-runtime capability
+ * bridge, as a named function so the seam itself is testable.
+ *
+ * The daemon builds its admission publisher BEFORE the runtime exists, and admission is what
+ * answers "does this held job have an automatic exit". Reading that from the admission instance's
+ * own wiring always said no, because that instance deliberately holds no resolver. This closes
+ * over the late-bound state instead, so it answers `false` until the runtime is up and delegates
+ * to it thereafter — forwarding both the wallet and the operation kind, since the runtime's answer
+ * is per wallet AND per operation.
+ */
+/**
+ * GH#2270 follow-up (🔴 3824531105) — the RUNTIME half of the capability bridge, as a named
+ * factory so the production answer is reachable by a test rather than only by booting a daemon.
+ *
+ * This is the one function both sides use: the runtime's own publisher takes it as
+ * `chainProofCapableForWallet`, and the runtime handle exposes it as `canSettleHeldJob` for the
+ * daemon's admission instance to ask. Sharing it by identity is what keeps those two answers from
+ * drifting; exporting it is what lets a test prove the answer is right rather than merely present.
+ */
+export function createRuntimeRecoveryCapability(
+  chainAdapters: PublisherChainAdapters,
+): (walletId: string, operationKind: 'create' | 'update' | undefined) => boolean {
+  return (walletId, operationKind) => {
+    const chain = chainAdapters.get(walletId);
+    return chain !== undefined && hasChainRecoveryCapabilityFor(chain, operationKind);
+  };
+}
+
+export function createAdmissionRecoveryCapabilityProbe(
+  readState: () => { runtime?: { canSettleHeldJob: (w: string, k: 'create' | 'update' | undefined) => boolean } | null },
+): (walletId: string, operationKind: 'create' | 'update' | undefined) => boolean {
+  return (walletId, operationKind) => readState().runtime?.canSettleHeldJob(walletId, operationKind) ?? false;
+}
+
 export function createPublisherControlFromStore(
   store: TripleStore,
-  publicSnapshotStore?: WorkspacePublicSnapshotStore,
-): AsyncLiftPublisher {
-  return new TripleStoreAsyncLiftPublisher(store, { publicSnapshotStore });
+  options: {
+    publicSnapshotStore?: WorkspacePublicSnapshotStore;
+    maxRetries?: number;
+    /**
+     * GH#2270 — the same knobs the runtime instance gets. This instance runs no
+     * scheduler, but it DERIVES the `retryState` the job-detail routes serve, and that
+     * derivation reads `autoRetryEnabled`: without the knob the route would report a job
+     * as auto-retry-eligible on a node where the operator switched the lane off (#1836).
+     */
+    retryTuning?: PublisherRetryTuning;
+    /**
+     * GH#2270 follow-up (🔴 3822987482) — the capability oracle for the LIVE runtime. This
+     * instance deliberately holds no resolver, but it is the one that answers admission, so it
+     * must ask the lane that would actually do the work rather than infer from its own wiring.
+     * Late-bound on purpose: the runtime starts after this instance is built.
+     */
+    chainProofCapableForWallet?: (
+      walletId: string,
+      operationKind: 'create' | 'update' | undefined,
+    ) => boolean;
+  } = {},
+): VmPublisherControl {
+  // The daemon admission instance also serves the #1828 recovery lookup (route)
+  // and the boot index backfill — segregated capabilities the base
+  // AsyncLiftPublisher runtime contract intentionally does NOT carry.
+  return new TripleStoreAsyncLiftPublisher(store, {
+    chainProofCapableForWallet: options.chainProofCapableForWallet,
+    publicSnapshotStore: options.publicSnapshotStore,
+    maxRetries: options.maxRetries,
+    ...options.retryTuning,
+    // #1829 — daemon admission instance: enable append-only journal writes. Left OFF
+    // for the CLI inspector + standalone runner so a second OS process never races the
+    // node-local per-lineageKey seq allocation.
+    journalWrites: true,
+  });
 }
 
 export async function createPublisherRuntimeFromAgent(args: {
   dataDir: string;
   store: TripleStore;
   keypair: Ed25519Keypair;
-  chainBase?: {
-    rpcUrl: string;
-    rpcUrls?: string[];
-    hubAddress: string;
-    tokenAddress?: string;
-    chainId?: string;
-  };
-  pollIntervalMs?: number;
-  errorBackoffMs?: number;
+  chainBase?: RuntimeEvmChainConfig;
+  /** Late-bound because the owning adapter may rebuild after Hub rotation. */
+  chainEventLogBindingSource?: ChainEventLogBindingSource;
+  /** Resolved by the caller's boundary (daemon config or test); passed through intact. */
+  runnerOptions?: PublisherRunnerSchedulingOptions;
   maxRetries?: number;
+  retryTuning?: PublisherRetryTuning;
   config?: Pick<DkgConfig, 'sharedMemoryPublicSnapshotStorage'>;
   ackTransportFactory?: ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
   publishEncryptionFactory?: PublishEncryptionFactory;
-  knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
-  knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
+  knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
+  publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  startPaused?: boolean;
+  startupSignal?: AbortSignal;
 }): Promise<PublisherRuntime> {
   return createPublisherRuntimeFromBase({
     dataDir: args.dataDir,
     keypair: args.keypair,
     store: args.store,
     chainBase: args.chainBase,
-    pollIntervalMs: args.pollIntervalMs,
-    errorBackoffMs: args.errorBackoffMs,
+    chainEventLogBindingSource: args.chainEventLogBindingSource,
+    runnerOptions: args.runnerOptions,
     maxRetries: args.maxRetries,
+    retryTuning: args.retryTuning,
     ackTransportFactory: args.ackTransportFactory,
     v10ACKProviderFactory: args.v10ACKProviderFactory,
     publishEncryptionFactory: args.publishEncryptionFactory,
-    knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor,
-    knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight,
-    publicSnapshotStore: createPublicSnapshotStore(args.dataDir, args.config),
+    knowledgeAssetVmPublishHandler: args.knowledgeAssetVmPublishHandler,
+    publicSnapshotStore: args.publicSnapshotStore
+      ?? createPublicSnapshotStore(args.dataDir, args.config, { store: args.store }),
     closeStoreOnStop: false,
+    // #1829 — this is the daemon publisher runtime (processes named-KA jobs), so it
+    // journals. Standalone `dkg publisher run` (createPublisherRuntime) does not set this.
+    journalWrites: true,
+    startPaused: args.startPaused,
+    startupSignal: args.startupSignal,
   });
 }
 
-async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): Promise<PublisherRuntime> {
-  const publisherWallets = await loadPublisherWallets(args.dataDir);
-  if (publisherWallets.wallets.length === 0) {
-    throw new Error('No publisher wallets configured. Use `dkg publisher wallet add <privateKey>` first.');
-  }
-
-  const eventBus = new TypedEventBus();
-  const wallets: ConfiguredPublisherWallet[] = [];
-
-  for (const wallet of publisherWallets.wallets) {
-    const chain = args.chainBase
-      ? new EVMChainAdapter({
-          rpcUrl: args.chainBase.rpcUrl,
-          rpcUrls: args.chainBase.rpcUrls,
-          privateKey: wallet.privateKey,
-          hubAddress: args.chainBase.hubAddress,
-          tokenAddress: args.chainBase.tokenAddress,
-          chainId: args.chainBase.chainId,
-          allowNoAdminSigner: true,
-        })
-      : new NoChainAdapter();
-    const identityId = await chain.getIdentityId();
-    wallets.push({
-      address: wallet.address,
-      identityId,
-      chain,
-      publisher: new DKGPublisher({
-        store: args.store,
-        chain,
-        eventBus,
-        keypair: args.keypair,
-        publisherNodeIdentityId: identityId,
-        publisherPrivateKey: wallet.privateKey,
-        publicSnapshotStore: args.publicSnapshotStore,
-      }),
-    });
-  }
-
-  const publishers = new Map<string, DKGPublisher>(
-    wallets.map((wallet) => [wallet.address, wallet.publisher]),
-  );
-  const hasChainRecovery = [...publishers.values()].some((p) => {
-    const chain = (p as unknown as { chain?: { resolvePublishByTxHash?: unknown } }).chain;
-    return typeof chain?.resolvePublishByTxHash === 'function';
-  });
-
-  const asyncPublisher = new TripleStoreAsyncLiftPublisher(args.store, {
-    chainRecoveryResolver: hasChainRecovery ? createChainRecoveryResolver(publishers) : undefined,
-    maxRetries: args.maxRetries,
-    publicSnapshotStore: args.publicSnapshotStore,
-    knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight
-      ? async (input) => {
-          const publisher = publishers.get(input.walletId);
-          if (!publisher) {
-            throw new Error(`No publisher configured for wallet ${input.walletId}`);
-          }
-          return args.knowledgeAssetVmPublishPreflight!({ ...input, publisher });
-        }
-      : undefined,
-    knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor
-      ? async (input) => {
-          const publisher = publishers.get(input.walletId);
-          if (!publisher) {
-            throw new Error(`No publisher configured for wallet ${input.walletId}`);
-          }
-          return args.knowledgeAssetVmPublishExecutor!({ ...input, publisher });
-        }
-      : undefined,
-    publishExecutor: async ({ walletId, publishOptions }: AsyncLiftPublishExecutionInput) => {
-      const publisher = publishers.get(walletId);
-      if (!publisher) {
-        throw new Error(`No publisher configured for wallet ${walletId}`);
-      }
-      const encryption = await args.publishEncryptionFactory?.(publishOptions);
-      // GH #1121 — the agent-resolved, chainKey-bound AEAD closure MUST win over
-      // any callback already on publishOptions. The async-lift mapper now
-      // pre-populates a fail-closed default `encryptInlinePayload` for non-public
-      // CGs (so plaintext can never silently ship); that default must only apply
-      // when the real factory yields nothing — otherwise it would shadow the
-      // real curated-publish encryption and make every private async publish
-      // throw. Hence: real factory first, mapper default as the fallback.
-      const publishOptionsWithEncryption: PublishOptions = {
-        ...publishOptions,
-        encryptInlinePayload: encryption?.encryptInlinePayload ?? publishOptions.encryptInlinePayload,
-        encryptInlineChunked: encryption?.encryptInlineChunked ?? publishOptions.encryptInlineChunked,
-      };
-      const v10ACKProvider = publishOptionsWithEncryption.v10ACKProvider
-        ?? args.v10ACKProviderFactory?.()
-        ?? createV10ACKProviderForPublisher(publisher, args.ackTransportFactory?.());
-      const publishOptionsWithACKs = v10ACKProvider
-        ? { ...publishOptionsWithEncryption, v10ACKProvider }
-        : publishOptionsWithEncryption;
-      // Capability gate: use `isV10Ready()` (the authoritative V10 runtime
-      // signal) rather than probing for `createKnowledgeAssets`. Since the
-      // interface made the method required, `NoChainAdapter` now implements
-      // it as a throwing stub, so a `typeof === 'function'` probe would
-      // mis-route no-chain mode into the V10 ACK-gated path and crash.
-      const chain = (publisher as unknown as { chain?: { isV10Ready?: () => boolean } }).chain;
-      if (chain?.isV10Ready?.() && !publishOptionsWithACKs.v10ACKProvider) {
-        throw new Error(
-          'Async publisher cannot publish to a V10 ACK-gated chain without a v10ACKProvider. ' +
-          'Use the synchronous agent publish path or add ACK collection support to the async runtime.',
-        );
-      }
-      return await publisher.publish(publishOptionsWithACKs);
-    },
-  });
-
-  const validWalletIds = [...publishers.keys()];
-
-  const runner = new AsyncLiftRunner({
-    publisher: asyncPublisher,
-    walletIds: validWalletIds,
-    pollIntervalMs: args.pollIntervalMs,
-    errorBackoffMs: args.errorBackoffMs,
-    hasIncludedRecoveryResolver: hasChainRecovery,
-  });
-
-  return {
-    runner,
-    publisher: asyncPublisher,
-    walletIds: validWalletIds,
-    wallets: wallets.map(({ address, identityId }) => ({ address, identityId })),
-    drainRpcUsage: () => mergeRpcUsageWindows(...wallets.map((w) => w.chain.drainRpcUsage?.())),
-    stop: async () => {
-      await runner.stop();
-      if (args.closeStoreOnStop) {
-        await args.store.close();
-      }
-    },
+/**
+ * Bind every named-KA queue lifecycle callback to the wallet that owns the
+ * claimed job. Keeping this as one handler prevents execution, preflight, and
+ * recovery from accidentally selecting different publisher instances.
+ */
+export function scopeKnowledgeAssetVmPublishHandler(
+  publishers: Map<string, DKGPublisher>,
+  handler: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'],
+): AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'] {
+  if (!handler) return undefined;
+  const publisherFor = (walletId: string): DKGPublisher => {
+    const publisher = publishers.get(walletId);
+    if (!publisher) throw new Error(`No publisher configured for wallet ${walletId}`);
+    return publisher;
   };
+  return {
+    execute: (input) => handler.execute({ ...input, publisher: publisherFor(input.walletId) }),
+    preflight: handler.preflight
+      ? (input) => handler.preflight!({ ...input, publisher: publisherFor(input.walletId) })
+      : undefined,
+    finalizeRecovered: handler.finalizeRecovered
+      ? (input) => handler.finalizeRecovered!({ ...input, publisher: publisherFor(input.walletId) })
+      : undefined,
+  };
+}
+
+async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): Promise<PublisherRuntime> {
+  const startup = new PublisherStartupAdmission(args.startupSignal);
+  const ownedChains: ChainAdapter[] = [];
+  try {
+    startup.assertActive();
+    const publisherWallets = await loadPublisherWallets(args.dataDir);
+    if (publisherWallets.wallets.length === 0) {
+      throw new Error('No publisher wallets configured. Use `dkg publisher wallet add <privateKey>` first.');
+    }
+
+    const eventBus = new TypedEventBus();
+    const wallets: ConfiguredPublisherWallet[] = [];
+
+    for (const wallet of publisherWallets.wallets) {
+      startup.assertActive();
+      const chain = createPublisherWalletChain(
+        args.chainBase,
+        wallet.privateKey,
+        args.chainEventLogBindingSource,
+      );
+      ownedChains.push(chain);
+      const identityId = await startup.readIdentity(() => chain.getIdentityId());
+      wallets.push({
+        address: wallet.address,
+        identityId,
+        chain,
+        publisher: new DKGPublisher({
+          store: args.store,
+          chain,
+          eventBus,
+          keypair: args.keypair,
+          publisherNodeIdentityId: identityId,
+          publisherPrivateKey: wallet.privateKey,
+          publicSnapshotStore: args.publicSnapshotStore,
+        }),
+      });
+    }
+
+    const publishers = new Map<string, DKGPublisher>(
+      wallets.map((wallet) => [wallet.address, wallet.publisher]),
+    );
+    // GH#2270 PR-3 r2 — the recovery factories take adapters, not publishers. Built here, from the
+    // wallets, where `chain` is a public field rather than something to assert through.
+    const chainAdapters = chainAdaptersForWallets(wallets);
+    const hasChainRecovery = [...chainAdapters.values()].some(hasChainPublishLookup);
+    // GH#2270 follow-up (🟡 3823952723) — ONE closure, used by both the runtime's own publisher and
+    // the runtime handle the daemon's admission instance asks. These two answers are required to be
+    // identical; computing them twice is precisely the drift this bridge exists to prevent, so they
+    // share function identity rather than a copied body.
+    const canSettleHeldJob = createRuntimeRecoveryCapability(chainAdapters);
+
+    const scopedKnowledgeAssetVmPublishHandler = scopeKnowledgeAssetVmPublishHandler(
+      publishers,
+      args.knowledgeAssetVmPublishHandler,
+    );
+    // PR #2300 r2 (🟡 3809616683) — no shared verifier instance: the `recovered` verdict CARRIES
+    // its canonical update evidence to the finalizer, so a recognized update is verified once per
+    // recovery by construction, with no cache and no temporal coupling between the factories.
+    const asyncPublisher = new TripleStoreAsyncLiftPublisher(args.store, {
+      chainProofResolver: hasChainRecovery ? createChainProofResolver(chainAdapters) : undefined,
+      // Receipt waiting is detached only when this runtime has the independent chain-proof lane
+      // that can move the resulting tx-bearing `broadcast` record. Direct library consumers retain
+      // the historical blocking `processNext()` contract by default.
+      detachReceiptReconciliation: hasChainRecovery,
+      // r20 (🔴 3815617109) — `hasChainRecovery` is `.some(...)`, so on a node mixing a capable
+      // adapter with a legacy one the resolvers are installed for the whole node. The honesty
+      // contract is per JOB, so admission must ask about the wallet that actually signs it rather
+      // than inherit the node-wide answer.
+      chainProofCapableForWallet: canSettleHeldJob,
+      knowledgeAssetVmPublishRecoveryResolver: hasChainRecovery
+        ? createKnowledgeAssetVmPublishRecoveryResolver(chainAdapters)
+        : undefined,
+      maxRetries: args.maxRetries,
+      // GH#2270 — spread rather than four copied fields, so a knob added to
+      // PublisherRetryTuning reaches the constructor without a further edit here.
+      ...args.retryTuning,
+      publicSnapshotStore: args.publicSnapshotStore,
+      journalWrites: args.journalWrites ?? false,
+      knowledgeAssetVmPublishHandler: scopedKnowledgeAssetVmPublishHandler,
+      publishExecutor: async ({ walletId, publishOptions }: AsyncLiftPublishExecutionInput) => {
+        const publisher = publishers.get(walletId);
+        if (!publisher) {
+          throw new Error(`No publisher configured for wallet ${walletId}`);
+        }
+        const encryption = await args.publishEncryptionFactory?.(publishOptions);
+        // GH #1121 — the agent-resolved, chainKey-bound AEAD closure MUST win over
+        // any callback already on publishOptions. The async-lift mapper now
+        // pre-populates a fail-closed default `encryptInlinePayload` for non-public
+        // CGs (so plaintext can never silently ship); that default must only apply
+        // when the real factory yields nothing — otherwise it would shadow the
+        // real curated-publish encryption and make every private async publish
+        // throw. Hence: real factory first, mapper default as the fallback.
+        const publishOptionsWithEncryption: PublishOptions = {
+          ...publishOptions,
+          encryptInlinePayload: encryption?.encryptInlinePayload ?? publishOptions.encryptInlinePayload,
+          encryptInlineChunked: encryption?.encryptInlineChunked ?? publishOptions.encryptInlineChunked,
+        };
+        const v10ACKProvider = publishOptionsWithEncryption.v10ACKProvider
+          ?? args.v10ACKProviderFactory?.()
+          ?? createV10ACKProviderForPublisher(publisher, args.ackTransportFactory?.());
+        const publishOptionsWithACKs = v10ACKProvider
+          ? { ...publishOptionsWithEncryption, v10ACKProvider }
+          : publishOptionsWithEncryption;
+        // Capability gate: use `isV10Ready()` (the authoritative V10 runtime
+        // signal) rather than probing for `createKnowledgeAssets`. Since the
+        // interface made the method required, `NoChainAdapter` now implements
+        // it as a throwing stub, so a `typeof === 'function'` probe would
+        // mis-route no-chain mode into the V10 ACK-gated path and crash.
+        const chain = (publisher as unknown as { chain?: { isV10Ready?: () => boolean } }).chain;
+        if (chain?.isV10Ready?.() && !publishOptionsWithACKs.v10ACKProvider) {
+          throw new Error(
+            'Async publisher cannot publish to a V10 ACK-gated chain without a v10ACKProvider. ' +
+            'Use the synchronous agent publish path or add ACK collection support to the async runtime.',
+          );
+        }
+        return await publisher.publish(publishOptionsWithACKs);
+      },
+    });
+
+    const validWalletIds = [...publishers.keys()];
+
+    const runner = new AsyncLiftRunner({
+      publisher: asyncPublisher,
+      walletIds: validWalletIds,
+      // The boundary-resolved scheduling options land here INTACT — no per-field relay to forget.
+      ...args.runnerOptions,
+      // Operator-only maintenance seam. Recovery still reconciles signed transactions, but wallet
+      // loops cannot claim released jobs while a closed run is being removed from the queue.
+      startPaused: args.startPaused ?? false,
+      hasIncludedRecoveryResolver: hasChainRecovery,
+    });
+
+    startup.assertActive();
+    return {
+      runner,
+      publisher: asyncPublisher,
+      walletIds: validWalletIds,
+      wallets: wallets.map(({ address, identityId }) => ({ address, identityId })),
+      drainRpcUsage: () => mergeRpcUsageWindows(
+        ...wallets.map((w) => w.chain.drainRpcUsage?.()),
+      ),
+      // The SAME question the runtime's own publisher answers, from the same adapter map, so the
+      // daemon's admission instance and the lane that would do the work cannot disagree.
+      canSettleHeldJob,
+      stop: async () => {
+        try {
+          await runner.stop();
+        } finally {
+          // Wallet adapters borrow the agent's binding but own their own Hub
+          // pollers and providers. Stopping one releases only those local
+          // resources; it cannot stop the borrowed runtime or close its store.
+          destroyPublisherChains(ownedChains);
+          if (args.closeStoreOnStop) {
+            await args.store.close();
+          }
+        }
+      },
+    };
+  } catch (error) {
+    destroyPublisherChains(ownedChains);
+    if (args.closeStoreOnStop) await args.store.close().catch(() => {});
+    throw error;
+  } finally {
+    startup.dispose();
+  }
+}
+
+function destroyPublisherChains(chains: readonly ChainAdapter[]): void {
+  for (const chain of chains) {
+    try {
+      const destroy = (chain as { destroy?: () => void }).destroy;
+      if (typeof destroy === 'function') destroy.call(chain);
+    } catch {
+      // Retire every owned adapter even if one cleanup fails. In particular,
+      // preserve the original bootstrap error and the daemon's borrowed store.
+    }
+  }
 }
 
 function logPublisherWalletAttribution(
@@ -506,41 +973,335 @@ function createV10ACKProviderForPublisher(
   };
 }
 
-function createChainRecoveryResolver(
-  publishers: Map<string, DKGPublisher>,
-): (job: LiftJobBroadcast | LiftJobIncluded) => Promise<AsyncLiftPublisherRecoveryResult | null> {
-  return async (job) => {
-    const publisher = publishers.get(job.broadcast.walletId);
-    if (!publisher) return null;
-    const chain = (publisher as unknown as { chain?: { resolvePublishByTxHash?: (txHash: string) => Promise<any> } }).chain;
-    if (!chain?.resolvePublishByTxHash) return null;
-    let result: any;
-    try {
-      result = await chain.resolvePublishByTxHash(job.broadcast.txHash);
-    } catch {
-      // Transient RPC/provider errors — treat as inconclusive (null) so the
-      // recovery timeout mechanism handles it rather than crashing the daemon.
-      return null;
-    }
-    if (!result) return null;
 
+export function createKnowledgeAssetVmPublishRecoveryResolver(
+  adapters: PublisherChainAdapters,
+): AsyncKnowledgeAssetVmPublishRecoveryResolver {
+  return async (job, lookup, verdictRecovery, options) => {
+    // GH#2270 PR-3 r4 — an UPDATE transaction has no publish receipt to resolve canonically; its
+    // proof is the update-verification machinery, against the exact root the queued seal
+    // intended. PR #2300 r2 — when the dispatcher's verdict already CARRIES the canonical
+    // evidence, it is consumed directly (one verification per recovery, no shared state); the
+    // LIVE interrupted lane arrives with no verdict and verifies once here, behind the same
+    // finality gate.
+    if (lookup.operationKind === 'update') {
+      return resolveCanonicalUpdateRecoveryEvidence(job, lookup, adapters, verdictRecovery, options);
+    }
+    // The generic CREATE verdict already read this exact receipt and gated its block for
+    // canonical finality. Carrying those immutable facts into this same-operation finalizer
+    // removes a second receipt+header round trip. A verdict-less LIVE interrupted lane (or an
+    // adapter that cannot project the strict receipt) keeps the established live read below.
+    const carried = verdictRecovery?.canonicalCreate;
+    const recovered = carried
+      ? recoverCanonicalCreateFromVerdict(job, lookup, verdictRecovery, carried)
+      : await resolveCanonicalOnChainPublish(lookup, adapters, options);
+    if (!recovered) return null;
+    const evidence = mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
+      recovered.receipt,
+      recovered.chainId,
+      recovered.knowledgeAssetsContract,
+    );
+    if (!evidence) return null;
+
+    // The chain receipt identifies the minted token by its packed id, so the
+    // generic recovery mapper correctly reconstructs the public
+    // contract/token UAL. A graph-scoped named-KA job, however, persisted its
+    // exact WM/SWM/VM graphs under the immutable author/KA-number UAL. Preserve
+    // that queued identity for local materialization; the agent independently
+    // binds it to the receipt's packed batch/start/end id and signed author.
+    const request = job.request?.jobType === 'knowledge-asset-vm-publish'
+      ? job.request.knowledgeAssetVmPublish
+      : undefined;
+    if (
+      request?.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
+      || request.kaUal === undefined
+    ) {
+      return evidence;
+    }
     return {
-      inclusion: {
-        txHash: result.txHash as `0x${string}`,
-        blockNumber: result.blockNumber,
-        blockTimestamp: result.blockTimestamp,
-      },
+      ...evidence,
       finalization: {
-        mode: 'published',
-        txHash: result.txHash as `0x${string}`,
-        batchId: result.batchId.toString() as `${bigint}`,
-        startKAId: result.startKAId?.toString() as `${bigint}` | undefined,
-        endKAId: result.endKAId?.toString() as `${bigint}` | undefined,
-        publisherAddress: result.publisherAddress as `0x${string}`,
+        ...evidence.finalization,
+        ual: request.kaUal,
       },
     };
   };
 }
+
+/**
+ * Re-bind transported CREATE evidence to both the current lookup and the immutable named-KA seal.
+ * A present-but-inconsistent carrier is refused rather than silently repaired from another read:
+ * it means the verdict and finalizer disagree about which operation they are settling. Only true
+ * absence of the optional carrier selects the compatibility fallback above.
+ */
+function recoverCanonicalCreateFromVerdict(
+  job: PersistedLiftJob,
+  lookup: AsyncLiftChainProofLookup,
+  verdictRecovery: AsyncLiftPublisherRecoveryResult,
+  evidence: CanonicalCreateEvidence,
+): {
+  receipt: CanonicalFinalizationReceipt;
+  chainId: string;
+  knowledgeAssetsContract: string;
+} | null {
+  const request = job.request?.jobType === 'knowledge-asset-vm-publish'
+    ? job.request.knowledgeAssetVmPublish
+    : undefined;
+  const sameHex = (left: string, right: string) => left.toLowerCase() === right.toLowerCase();
+  if (
+    lookup.operationKind !== 'create'
+    || !request
+    || !request.sealMerkleRoot
+    || !request.seal?.authorAddress
+    || request.seal.reservedKaId === undefined
+    || !verdictRecovery.inclusion.blockHash
+    || !verdictRecovery.finalization.txHash
+    || !verdictRecovery.finalization.publisherAddress
+    || verdictRecovery.finalization.batchId === undefined
+    || verdictRecovery.finalization.startKAId === undefined
+    || verdictRecovery.finalization.endKAId === undefined
+    || !sameHex(evidence.txHash, lookup.txHash)
+    || !sameHex(verdictRecovery.inclusion.txHash, lookup.txHash)
+    || !sameHex(verdictRecovery.inclusion.blockHash, evidence.blockHash)
+    || !sameHex(verdictRecovery.finalization.txHash, lookup.txHash)
+    || verdictRecovery.inclusion.blockNumber !== evidence.blockNumber
+    || !sameHex(verdictRecovery.finalization.publisherAddress, evidence.publisherAddress)
+    || !sameHex(lookup.walletId, evidence.publisherAddress)
+    || verdictRecovery.finalization.batchId !== evidence.batchId
+    || verdictRecovery.finalization.startKAId !== evidence.startKAId
+    || verdictRecovery.finalization.endKAId !== evidence.endKAId
+    || !sameHex(request.sealMerkleRoot, evidence.merkleRoot)
+    || !sameHex(request.seal.authorAddress, evidence.authorAddress)
+    || request.seal.reservedKaId !== evidence.kaId
+    || (lookup.publishIdentityKaId !== undefined
+      && lookup.publishIdentityKaId !== evidence.kaId)
+  ) return null;
+
+  let batchId: bigint;
+  let kaId: bigint;
+  let startKAId: bigint;
+  let endKAId: bigint;
+  try {
+    batchId = BigInt(evidence.batchId);
+    kaId = BigInt(evidence.kaId);
+    startKAId = BigInt(evidence.startKAId);
+    endKAId = BigInt(evidence.endKAId);
+  } catch {
+    return null;
+  }
+  if (
+    !ethers.isHexString(evidence.txHash, 32)
+    || !ethers.isHexString(evidence.blockHash, 32)
+    || !ethers.isHexString(evidence.merkleRoot, 32)
+    || !ethers.isAddress(evidence.publisherAddress)
+    || !ethers.isAddress(evidence.authorAddress)
+    || !ethers.isAddress(evidence.knowledgeAssetsContract)
+    || !Number.isSafeInteger(evidence.blockNumber)
+    || evidence.blockNumber < 0
+    || !Number.isSafeInteger(evidence.txIndex)
+    || evidence.txIndex < 0
+  ) return null;
+  return {
+    receipt: {
+      txHash: evidence.txHash,
+      blockNumber: evidence.blockNumber,
+      blockHash: evidence.blockHash,
+      txIndex: evidence.txIndex,
+      merkleRoot: ethers.getBytes(evidence.merkleRoot),
+      publisherAddress: evidence.publisherAddress,
+      authorAddress: evidence.authorAddress,
+      batchId,
+      kaId,
+      startKAId,
+      endKAId,
+      knowledgeAssetsContract: evidence.knowledgeAssetsContract,
+    },
+    chainId: evidence.chainId,
+    knowledgeAssetsContract: evidence.knowledgeAssetsContract,
+  };
+}
+
+/**
+ * GH#2270 PR-3 r4 — recovery evidence for a queued named-KA UPDATE. PR #2300 r1 (🟡 3809054830):
+ * the ESTABLISHMENT lives in the shared {@link CanonicalUpdateVerifier} — the same verification
+ * the dispatcher's verdict came from, so a recovery that reached this finalizer never re-proves
+ * the transaction, and the two consumers cannot drift on the binding rules. This is only the
+ * mapping of those verified facts to the named lane's evidence shape: singleton batch range
+ * pinned to the reserved id, the graph-local queued UAL for materialization, and the publish
+ * proof carrying the chain-verified root plus the request's sealed author. Every gap answers
+ * `null`, and the publisher keeps the job held — including facts verified without a canonical
+ * block hash or tx index, which cannot make durable evidence.
+ */
+async function resolveCanonicalUpdateRecoveryEvidence(
+  job: PersistedLiftJob,
+  lookup: AsyncLiftUpdateChainProofLookup,
+  adapters: PublisherChainAdapters,
+  verdictRecovery: AsyncLiftPublisherRecoveryResult | undefined,
+  options?: { readonly signal?: AbortSignal },
+): Promise<AsyncKnowledgeAssetVmPublishRecoveryEvidence | null> {
+  const request = job.request?.jobType === 'knowledge-asset-vm-publish'
+    ? job.request.knowledgeAssetVmPublish
+    : undefined;
+  if (
+    request?.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
+    || request.kaUal === undefined
+    || lookup.publishIdentityKaId === undefined
+  ) {
+    return null;
+  }
+  // PR #2300 r2 — the verdict's canonical evidence is the SAME verification this recovery was
+  // dispatched on; consume it rather than re-proving the transaction. The kaId comes from the
+  // lookup the verification was bound to. Only a verdict-less arrival (the LIVE interrupted
+  // lane) verifies here — once, behind the same finality gate.
+  let kaId: bigint;
+  try {
+    kaId = BigInt(lookup.publishIdentityKaId);
+  } catch {
+    return null;
+  }
+  const facts = verdictRecovery?.canonicalUpdate
+    ? {
+        kaId,
+        onChainRoot: verdictRecovery.canonicalUpdate.onChainRoot,
+        blockNumber: verdictRecovery.inclusion.blockNumber,
+        ...(verdictRecovery.canonicalUpdate.merkleRootCount !== undefined
+          ? { merkleRootCount: verdictRecovery.canonicalUpdate.merkleRootCount }
+          : {}),
+        blockHash: verdictRecovery.canonicalUpdate.blockHash,
+        txIndex: verdictRecovery.canonicalUpdate.txIndex,
+      }
+    : await verifyCanonicalUpdateFacts(lookup, adapters, options);
+  if (!facts) return null;
+  if (facts.txIndex === undefined) return null;
+  const blockHash = facts.blockHash ? asLiftJobHex(facts.blockHash) : null;
+  if (!blockHash) return null;
+  const authorAddress = asLiftJobHex(request.seal.authorAddress);
+  const publisherAddress = asLiftJobHex(lookup.walletId);
+  if (!authorAddress || !publisherAddress) return null;
+
+  return {
+    inclusion: {
+      txHash: lookup.txHash,
+      blockNumber: facts.blockNumber,
+      blockHash,
+    },
+    finalization: {
+      mode: 'published',
+      txHash: lookup.txHash,
+      ual: request.kaUal,
+      batchId: facts.kaId.toString() as `${bigint}`,
+      startKAId: facts.kaId.toString() as `${bigint}`,
+      endKAId: facts.kaId.toString() as `${bigint}`,
+      publisherAddress,
+    },
+    publishProof: {
+      merkleRoot: facts.onChainRoot,
+      authorAddress,
+      txIndex: facts.txIndex,
+      ...(facts.merkleRootCount !== undefined ? { merkleRootCount: facts.merkleRootCount } : {}),
+      operationKind: 'update',
+    },
+  };
+}
+
+async function resolveCanonicalOnChainPublish(
+  lookup: AsyncLiftChainProofLookup,
+  adapters: PublisherChainAdapters,
+  options?: { readonly signal?: AbortSignal },
+): Promise<{
+  receipt: CanonicalFinalizationReceipt;
+  chainId: string;
+  knowledgeAssetsContract: string;
+} | null> {
+  const chain = adapters.get(lookup.walletId);
+  if (!chain?.resolveCanonicalFinalizationReceipt) return null;
+
+  let resolution;
+  try {
+    resolution = await chain.resolveCanonicalFinalizationReceipt(lookup.txHash, options);
+  } catch {
+    return null;
+  }
+  if (resolution.status !== 'confirmed') return null;
+
+  // r14 (3814018304) — the same finality rule every other mined verdict in this chain follows. This
+  // is the CREATE branch's own resolver path: it reads a canonical receipt directly rather than
+  // going through the gated verdict, so without this it could begin finalizing from a receipt a
+  // reorg can still rewrite while every finality row on the update branch stayed green.
+  if (!chain.isReceiptBlockFinalAndCanonical) return null;
+  try {
+    // r25 (🔴 3820711175) — the finality gate takes the pass deadline like every other read on
+    // this branch; it was the one left detached after the receipt lookup was threaded.
+    const final = await chain.isReceiptBlockFinalAndCanonical({
+      txHash: lookup.txHash,
+      blockNumber: resolution.receipt.blockNumber,
+      blockHash: resolution.receipt.blockHash,
+    }, options);
+    if (!final) return null;
+  } catch {
+    return null;
+  }
+
+  let knowledgeAssetsContract = resolution.receipt.knowledgeAssetsContract;
+  if (!knowledgeAssetsContract && chain.getDKGKnowledgeAssetsAddress) {
+    try {
+      knowledgeAssetsContract = await chain.getDKGKnowledgeAssetsAddress();
+    } catch {
+      return null;
+    }
+  }
+  return knowledgeAssetsContract
+    ? { receipt: resolution.receipt, chainId: chain.chainId, knowledgeAssetsContract }
+    : null;
+}
+
+
+function mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
+  receipt: CanonicalFinalizationReceipt,
+  chainId: string,
+  knowledgeAssetsContract: string,
+): AsyncKnowledgeAssetVmPublishRecoveryEvidence | null {
+  const txHash = asLiftJobHex(receipt.txHash);
+  const blockHash = asLiftJobHex(receipt.blockHash);
+  const merkleRoot = asLiftJobHex(ethers.hexlify(receipt.merkleRoot));
+  const publisherAddress = asLiftJobHex(receipt.publisherAddress);
+  const authorAddress = receipt.authorAddress
+    ? asLiftJobHex(receipt.authorAddress)
+    : null;
+  if (
+    !txHash
+    || !blockHash
+    || !merkleRoot
+    || !publisherAddress
+    || !authorAddress
+    || !ethers.isHexString(blockHash, 32)
+    || !ethers.isHexString(merkleRoot, 32)
+    || !ethers.isAddress(publisherAddress)
+    || !ethers.isAddress(authorAddress)
+    || !Number.isSafeInteger(receipt.blockNumber)
+    || receipt.blockNumber < 0
+    || !Number.isSafeInteger(receipt.txIndex)
+    || receipt.txIndex < 0
+  ) return null;
+  return {
+    inclusion: {
+      txHash,
+      blockNumber: receipt.blockNumber,
+      blockHash,
+    },
+    finalization: {
+      mode: 'published',
+      txHash,
+      ual: buildKnowledgeAssetUal(chainId, knowledgeAssetsContract, receipt.kaId),
+      batchId: receipt.batchId.toString() as `${bigint}`,
+      startKAId: receipt.startKAId.toString() as `${bigint}`,
+      endKAId: receipt.endKAId.toString() as `${bigint}`,
+      publisherAddress,
+    },
+    publishProof: { merkleRoot, authorAddress, txIndex: receipt.txIndex, operationKind: 'create' },
+  };
+}
+
 
 async function createPublisherStore(dataDir: string, config: DkgConfig): Promise<TripleStore> {
   if (config.store) {
@@ -579,12 +1340,22 @@ function defaultLargeLiteralStorage(dataDir: string, config: DkgConfig) {
 export function createPublicSnapshotStore(
   dataDir: string,
   config?: Pick<DkgConfig, 'sharedMemoryPublicSnapshotStorage'>,
+  options: {
+    pageIndexStore?: SnapshotPageIndexStore;
+    log?: (message: string) => void;
+    store?: TripleStore;
+  } = {},
 ): WorkspacePublicSnapshotStore | undefined {
   const snapshotConfig = config?.sharedMemoryPublicSnapshotStorage;
   if (snapshotConfig?.enabled === false) {
     return undefined;
   }
-  return new FileWorkspacePublicSnapshotStore(snapshotConfig?.directory ?? join(dataDir, 'swm-public-snapshots'));
+  return new FileWorkspacePublicSnapshotStore(
+    snapshotConfig?.directory ?? join(dataDir, 'swm-public-snapshots'),
+    options.pageIndexStore,
+    { gc: snapshotConfig?.gc, log: options.log,
+      isSnapshotReferenced: options.store ? snapshotReferenceCheck(options.store) : undefined },
+  );
 }
 
 function isLocalOxigraphStoreConfig(storeConfig: { backend?: unknown }): boolean {

@@ -9,12 +9,32 @@ name: Observability artifacts
 # smoke-tests the operator-facing render mode (concrete datasource UIDs +
 # node-label profile), so a regression there can't hide behind the
 # committed-defaults check.
+#
+# The W1 sync-measurement artifacts (tools/observability/w1/) get two further
+# steps, because "generated" is not "correct" and neither one is "valid
+# PromQL": verify-w1-render.mjs asserts the semantic contract (instrument
+# inventory, dual native/translated metric spellings, the source-family
+# mapping, the all-source denominators, a node filter on every selector, both
+# observation windows, and report/fixture expression identity), and a PINNED
+# promtool container really PARSES the emitted rule fixture. Without those the
+# path filter below would trigger on a W1 edit while validating none of its
+# contents.
 on:
   pull_request:
     paths:
       - 'tools/observability/**'
       # the gate must also verify itself when the gate changes
       - '.github/workflows/observability-artifacts.yml'
+      # …and it must run when the SOURCES it mirrors change, not only when the
+      # mirror does. verify-w1-render.mjs holds its own copies of the W1
+      # instrument inventory (names + units) and the eight-member source
+      # vocabulary, so a rename of `dkg.sync.attempt.request_bytes` or a new
+      # SYNC_ADMISSION_SOURCES member in a PR that never touches
+      # tools/observability would leave every W1 query stale AND skip the only
+      # check that could say so. A verifier that mirrors a contract has to be
+      # triggered by that contract.
+      - 'packages/core/src/telemetry-api.ts'
+      - 'packages/agent/src/sync/policy.ts'
   workflow_dispatch:
 
 concurrency:
@@ -42,6 +62,17 @@ jobs:
       - name: Verify committed artifacts match the generator
         run: node tools/observability/generate-observability.mjs --check
 
+      # The step above normalizes CRLF/LF before comparing, so a Windows
+      # checkout (core.autocrlf=true rewrites every artifact to CRLF — the
+      # metrics dashboard alone holds ~660 pairs) is not permanently red. But a
+      # comparison that answered "equal" to EVERYTHING would also pass that
+      # step, forever. This one builds its own CRLF and LF artifact trees plus
+      # four corrupted ones and runs the real command against each, pinning
+      # both directions — which also exercises the CRLF path here on Linux,
+      # where git only ever produces LF.
+      - name: Verify check mode is line-ending agnostic but still catches drift
+        run: node tools/observability/verify-check-mode.mjs
+
       # verify-profile-render.mjs PARSES the rendered JSON and asserts the
       # whole profile-sensitive surface (every metrics target, the $node
       # variable, per-node alert exprs + summaries, notification group-bys,
@@ -57,3 +88,62 @@ jobs:
             --vm-uid test-vm-uid --loki-uid test-loki-uid --prom-node-label service_instance_id
           node tools/observability/verify-profile-render.mjs /tmp/render \
             --prom-node-label service_instance_id --vm-uid test-vm-uid --loki-uid test-loki-uid
+
+      # W1 decision queries: the semantic contract behind the numbers, checked
+      # per selector rather than by sampling. Run against BOTH renders so the
+      # W1 queries are proven to follow --prom-node-label like every other
+      # profile-sensitive surface (the /tmp/render tree is produced by the
+      # step above).
+      - name: Verify the W1 sync-measurement artifacts
+        run: |
+          set -euo pipefail
+          node tools/observability/verify-w1-render.mjs tools/observability
+          node tools/observability/verify-w1-render.mjs /tmp/render --prom-node-label service_instance_id
+
+      # Real PromQL validation. `promtool` is not installed on the developer
+      # host, so the container IS the reproducible path on both Windows and
+      # Linux; the tag is readability, the DIGEST is the reproducibility
+      # contract. `--entrypoint promtool` is REQUIRED: the image entrypoint is
+      # ["/bin/prometheus"], so the un-overridden form fails with
+      # `prometheus: error: unexpected promtool`.
+      - name: Parse the W1 rule fixture (pinned promtool)
+        run: |
+          set -euo pipefail
+          docker run --rm -v "${PWD}/tools/observability:/w" --entrypoint promtool \
+            prom/prometheus@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218 \
+            check rules /w/w1/w1-rules.yaml
+
+      # `check rules` proves the expressions PARSE. It is blind to what they
+      # RETURN, and the defect that motivated these tests parsed perfectly:
+      # PromQL binary `+` yields an EMPTY result when either operand is empty,
+      # so the byte totals went blank in any window where no response ever
+      # arrived — while real request bytes had been recorded.
+      #
+      # The `${node:regex}` Grafana variable is substituted with `.*` first: it
+      # is a dashboard placeholder, not PromQL, and against real series it
+      # matches nothing — so without this every rule would evaluate empty and
+      # the tests would pass vacuously. ONLY that variable is substituted; the
+      # expression structure under test is the committed one.
+      - name: Unit-test the W1 rule semantics (pinned promtool)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/w1-promtool
+          # `[$]` is a literal dollar. A bare backslash-dollar inside single
+          # quotes trips SC2016, and in BRE `$` is only an anchor at
+          # end-of-pattern anyway, so this form is both lint-clean and exact.
+          # (Do not start a comment line with the linter's name — it is then
+          # parsed as a directive, which is how this step first failed.)
+          sed 's/[$]{node:regex}/.*/g' tools/observability/w1/w1-rules.yaml > /tmp/w1-promtool/w1-rules.yaml
+          cp tools/observability/w1/w1-rules.test.yaml /tmp/w1-promtool/
+          # Fail loudly if the substitution did nothing — a silently unchanged
+          # file would make every assertion below vacuous. Written as `if`
+          # rather than `grep … && { exit 1; }`: under `set -e` that form
+          # returns 1 from the whole list on the SUCCESS path (grep finds
+          # nothing), which would fail the step exactly when it should pass.
+          if grep -q 'node:regex' /tmp/w1-promtool/w1-rules.yaml; then
+            echo 'placeholder substitution failed; tests would be vacuous' >&2
+            exit 1
+          fi
+          docker run --rm -v /tmp/w1-promtool:/t:ro --entrypoint promtool \
+            prom/prometheus@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218 \
+            test rules /t/w1-rules.test.yaml

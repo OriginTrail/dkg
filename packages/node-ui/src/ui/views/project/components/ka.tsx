@@ -1,6 +1,6 @@
 import React, { useMemo, useState, Suspense } from 'react';
 import { api } from '../../../api-wrapper.js';
-import { promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublishWithSeal, SwmSubsetNotSealableError, partialPublishWarning, PARTIAL_PUBLISH_STATUS_SUFFIX, type PromoteOutcome, type PublishResult } from '../../../api.js';
+import { promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublish, partialPublishWarning, PARTIAL_PUBLISH_STATUS_SUFFIX, type PromoteOutcome, type PublishResult } from '../../../api.js';
 import { useMemoryEntities, canonicalEntityUri, isFirstClassEntity, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { decodeRdfStringLiteral } from '../../../../rdf-literal.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
@@ -53,8 +53,8 @@ export function SubGraphBadge({
 
 // ─── Verify on DKG CTA ───────────────────────────────────────
 // Two-step progression driven by the profile:
-//   WM  -> SWM  : promoteAssertion(sourceAssertion, [uri])         ("Propose…")
-//   SWM -> VM   : knowledgeAssetPublishWithSeal(sourceAssertion)   ("Ratify…")
+//   WM  -> SWM  : promoteAssertion(sourceAssertion)                ("Propose…")
+//   SWM -> VM   : knowledgeAssetPublish(sourceAssertion)           ("Ratify…")
 // The SWM→VM step publishes the entity's owning NAMED assertion as one
 // Knowledge Asset via the canonical per-KA /vm/publish (named-only, #1087).
 // Labels, hints and the promote-path assertion name all come from the
@@ -126,7 +126,7 @@ export function VerifyOnDkgButton({
     ? {
         kind: 'promote' as const,
         label:    binding.promoteLabel ?? 'Promote to Shared Memory',
-        hint:     binding.promoteHint  ?? 'Shares this entity with the team.',
+        hint:     binding.promoteHint  ?? 'Shares the complete owning Knowledge Asset with the team.',
         busyCopy: 'Sharing…',
         disabled: !sgBinding?.binding.sourceAssertion,
         disabledReason: !sgBinding?.binding.sourceAssertion
@@ -136,7 +136,7 @@ export function VerifyOnDkgButton({
     : {
         kind: 'publish' as const,
         label:    binding.publishLabel ?? 'Verify on DKG',
-        hint:     binding.publishHint  ?? 'Anchors this entity on-chain.',
+        hint:     binding.publishHint  ?? 'Publishes the complete owning Knowledge Asset on-chain.',
         busyCopy: 'Anchoring…',
         // Named-only publish (#1087): /vm/publish is keyed by a named SWM
         // assertion. We publish the entity's owning assertion (its
@@ -157,17 +157,13 @@ export function VerifyOnDkgButton({
     const assertionName = sgBinding?.binding.sourceAssertion ?? 'assertion';
     try {
       if (action.kind === 'promote') {
-        // PR #710 — `sgBinding.sourceAssertion` is itself
-        // sub-graph-scoped (the binding came from a SubGraphBinding
-        // for slug `sgBinding.subGraph`), so we thread that slug as
-        // the 4th arg. Without it the daemon's `(cg, name, subGraph)`
-        // lookup falls back to the root-bucket assertion of the same
-        // name (404 or wrong-target).
+        // Share the entity's complete owning Knowledge Asset. The sub-graph
+        // slug is part of the daemon lookup key, so it must travel with the
+        // source assertion; root-entity subset selection is intentionally gone.
         const r = await promoteAssertion(
           contextGraphId,
           sgBinding!.binding.sourceAssertion!,
-          [entity.uri],
-          sgBinding!.subGraph,
+          sgBinding!.subGraph ? { subGraphName: sgBinding!.subGraph } : {},
         );
         // Issue #864 — fan the promote response through the central
         // describe helper so 0-count returns get an actionable hint
@@ -175,14 +171,13 @@ export function VerifyOnDkgButton({
         setResult(describePromoteResult(assertionName, r));
       } else {
         // Named-only publish (#1087): publish the entity's owning SWM assertion
-        // as one Knowledge Asset via the canonical per-KA /vm/publish (with the
-        // §4.4 catch→seal→retry safety net). We do NOT pre-register the CG: the
-        // daemon's /vm/publish checks the local preconditions first and only
+        // as one Knowledge Asset via the canonical per-KA /vm/publish. We do
+        // NOT pre-register the CG: the daemon checks local preconditions first and only
         // auto-registers (with the stored publish policy) on its
         // `CG_NOT_REGISTERED` retry path, so a doomed publish never burns gas.
         // The CTA is disabled above when no sourceAssertion resolves, so
         // `sgBinding.sourceAssertion` is present here.
-        const r = await knowledgeAssetPublishWithSeal(
+        const r = await knowledgeAssetPublish(
           contextGraphId,
           sgBinding!.binding.sourceAssertion!,
           sgBinding!.subGraph ? { subGraphName: sgBinding!.subGraph } : {},
@@ -193,12 +188,9 @@ export function VerifyOnDkgButton({
     } catch (err: any) {
       // Issue #864 — `ASSERTION_NOT_PERSISTED` (HTTP 409) gets a
       // typed message that points the user at the re-import path
-      // instead of the raw backend error string. A subset-share that can't be
-      // sealed in place surfaces the "share the full asset first" hint.
+      // instead of the raw backend error string.
       const typed = action.kind === 'promote' ? describePromoteError(assertionName, err) : null;
-      const message = err instanceof SwmSubsetNotSealableError
-        ? err.message
-        : (typed ? typed.message : (err?.message ?? 'Action failed'));
+      const message = typed ? typed.message : (err?.message ?? 'Action failed');
       setError(message);
     } finally {
       setBusy(false);
@@ -730,5 +722,3 @@ export function TrailEvent({
     </div>
   );
 }
-
-

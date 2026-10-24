@@ -1,11 +1,46 @@
 import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import { DKGEvent, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import {
+  authoritativeSyncPeerId,
+  classifyDurableProgress,
+  normalizeDurableSyncResult,
+  normalizeSyncAdmissionSource,
+  type DKGAgent,
+  type CatchupPassDecisionReason,
+  type DurableProgressClassification,
+  type DurableSyncDiagnostics,
+  type DurableSyncResult,
+  type SharedMemorySyncResult,
+  type SwmSnapshotCoverage,
+  type SyncPeerResolution,
+} from '@origintrail-official/dkg-agent';
+import { advertisesSyncProtocol, createOperationContext } from '@origintrail-official/dkg-core';
 
 const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
 const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
+const DURABLE_CATCHUP_PHASE_HEADROOM_MS = 1_000;
+const MIN_DURABLE_CATCHUP_PHASE_BUDGET_MS = 1_000;
+const DURABLE_CATCHUP_SETTLEMENT_GRACE_MS = 30_000;
+
+import type { CatchupPhaseProgress, CatchupPlaneCompletionEvidence } from './catchup-proof.js';
+import {
+  SelectedLaneActivationWait,
+  legacySharedMemoryLaneAllowed,
+  selectedSharedMemoryLaneActive,
+} from './catchup-selected-lane.js';
+
+export {
+  addCatchupPlaneEvidence,
+  catchupPeerPlaneEvidence,
+  catchupPlaneCompletedWithoutFailure,
+  catchupPlaneProvenByAuthorityHostedEmpty,
+  catchupPlaneProvenByData,
+  catchupPlaneProvenBySelectedScope,
+  catchupPlaneProvenByUnanimousEmpty,
+  catchupPlaneReady,
+} from './catchup-proof.js';
+export type { CatchupPhaseProgress, CatchupPlaneCompletionEvidence, CatchupPlaneRoundDiagnostics } from './catchup-proof.js';
 
 export interface CatchupJobResult {
   connectedPeers: number;
@@ -23,14 +58,34 @@ export interface CatchupJobResult {
   peersResponded: number;
   /**
    * Subset of `peersTried` whose per-peer sync round finished without a
-   * transport failure, without an explicit ACL denial, and with either real
+   * transport failure, timeout, or explicit ACL denial, and with either real
    * progress or a clean non-metadata-only empty completion.
    */
   peersSucceeded: number;
+  /**
+   * Sync-capable peers this run deliberately never contacted because an earlier
+   * wave already proved every requested plane. These are neither failures nor
+   * successes; they exist so status mapping and operators can tell an
+   * early-stopped run from a run where peers were unreachable.
+   */
+  peersNotAttempted?: number;
+  /** Context Graph phases deferred by this node's local sync scheduler. */
+  deferredBackpressure: number;
   dataSynced: number;
   sharedMemorySynced: number;
   denied: boolean;
   deniedPeers: number;
+  /**
+   * Per-plane evidence produced before peer results are aggregated. Aggregate
+   * diagnostics intentionally retain every timeout/denial for observability,
+   * but readiness must not let one bad peer mask another peer that completed
+   * the same plane cleanly and stored verified data.
+   */
+  cleanPlaneCompletions?: {
+    /** Always carries `verifiedPrivateOnlyPeers`; only the durable plane can produce it. */
+    durable: CatchupPlaneCompletionEvidence & { verifiedPrivateOnlyPeers: number };
+    sharedMemory: CatchupPlaneCompletionEvidence;
+  };
   diagnostics?: {
     noProtocolPeers: number;
     durable: {
@@ -45,10 +100,17 @@ export interface CatchupJobResult {
       checkpointAdvances: number;
       emptyResponses: number;
       metaOnlyResponses: number;
+      /** Cryptographically verified V2 responses whose public graph is intentionally empty. */
+      verifiedPrivateOnlyResponses: number;
       dataRejectedMissingMeta: number;
       rejectedKcs: number;
       failedPeers: number;
       failedPhases: number;
+      deferredBackpressure: number;
+      deniedPhases?: number;
+      /** A resolvable curator never cleanly answered this plane; see
+       * `catchupPlaneProvenByUnanimousEmpty`. */
+      authorityUnanswered?: boolean;
     };
     sharedMemory: {
       fetchedMetaTriples: number;
@@ -64,6 +126,36 @@ export interface CatchupJobResult {
       droppedDataTriples: number;
       failedPeers: number;
       failedPhases: number;
+      deferredBackpressure: number;
+      deniedPhases?: number;
+      /** A resolvable curator never cleanly answered this plane; see
+       * `catchupPlaneProvenByUnanimousEmpty`. */
+      authorityUnanswered?: boolean;
+      /**
+       * Public-SWM snapshot coverage for this graph, selected WHOLE from one
+       * peer round by `selectSwmSnapshotCoverage`. The counts, the peer they
+       * are attributed to and the missing sample are never mixed across peers.
+       */
+      swmCoverage?: SwmSnapshotCoverage;
+      /** Plane-neutral evidence that local admission yielded. */
+      localYield?: true;
+      /** Snapshot phases left incomplete specifically by a local yield; zero on clean results. */
+      snapshotPlaneIncomplete: number;
+      /** Extra passes over the peer set beyond the first. */
+      continuationPasses: number;
+      /**
+       * Why the bounded repeat stopped, as the policy's own closed union — so a
+       * new reason cannot reach the terminal message unnoticed.
+       */
+      continuationStopReason?: CatchupPassDecisionReason;
+      /**
+       * `bytesReceived` split into its replay half (metadata + aggregate data,
+       * which every pass re-fetches in full) and its useful half (snapshot
+       * content), so the cost of repeating the walk stays measurable instead of
+       * being merged into one scalar. The two sum to `bytesReceived`.
+       */
+      replayPhaseBytesReceived: number;
+      snapshotPhaseBytesReceived: number;
     };
   };
 }
@@ -71,61 +163,519 @@ export interface CatchupJobResult {
 export interface CatchupRunRequest {
   contextGraphId: string;
   includeSharedMemory: boolean;
+  /** Host agent owns one durable transfer across every peer-shaped Worker round. */
+  graphOwnedDurableRecovery?: boolean;
 }
 
-export interface CatchupPhaseProgress {
-  timedOutPhases?: number;
-  resumedPhases?: number;
-  completedPhases?: number;
-  checkpointAdvances?: number;
-  failedPeers?: number;
-  failedPhases?: number;
-  insertedTriples?: number;
-  insertedDataTriples?: number;
-  insertedMetaTriples?: number;
-  metaOnlyResponses?: number;
+/**
+ * Why the host bridge did not run a requested catch-up plane.
+ *
+ * - `catalog-authoritative`: legacy durable sync drops a catalog-authoritative
+ *   graph before sending any request (`syncFromPeerDetailed`).
+ * - `selected-lane-refused`: no accepted RFC-64 public policy was active for the
+ *   graph, also after the job's wait for one, or the recovery lease revoked it.
+ */
+export type CatchupPlaneNotAttemptedReason =
+  | 'catalog-authoritative'
+  | 'selected-lane-refused';
+
+/**
+ * A plane the host declined to run. Neither reason is an answer from the peer,
+ * so the worker records the plane as not attempted: never as a response and
+ * never as a transport failure.
+ */
+export interface CatchupPlaneNotAttempted {
+  readonly kind: 'catchup-plane-not-attempted';
+  readonly reason: CatchupPlaneNotAttemptedReason;
+}
+
+/** The host explicitly switched a selected request to the agent's legacy SWM lane. */
+export interface CatchupLegacySharedMemoryFallback {
+  readonly kind: 'legacy-shared-memory-fallback';
+  readonly shared: SharedMemorySyncResult;
+}
+
+export function isCatchupPlaneNotAttempted(value: unknown): value is CatchupPlaneNotAttempted {
+  return typeof value === 'object'
+    && value !== null
+    && (value as { kind?: unknown }).kind === 'catchup-plane-not-attempted';
+}
+
+function catchupPlaneNotAttempted(
+  reason: CatchupPlaneNotAttemptedReason,
+): CatchupPlaneNotAttempted {
+  return { kind: 'catchup-plane-not-attempted', reason };
+}
+
+/**
+ * Ask the agent for its canonical durable-lane decision. The compatibility
+ * fallback below is only for an older agent that does not expose this method.
+ */
+async function legacyDurableSyncAllowed(agent: any, contextGraphId: string): Promise<boolean> {
+  if (typeof agent.canUseLegacyDurableSyncForContextGraphV1 === 'function') {
+    return agent.canUseLegacyDurableSyncForContextGraphV1(contextGraphId);
+  }
+  if (typeof agent.resolveRfc64CatalogReceiverAuthorityV1 !== 'function'
+    || agent.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed) return true;
+  // An approved private member can use the legacy member lane for root SWM
+  // while RFC-64 has no private receiver authority. Its finalized VM must be
+  // allowed through the same member proof; otherwise catch-up permanently
+  // leaves the durable plane unverified even when the curator can serve it.
+  return typeof agent.rfc64PrivateRootSwmOnLegacyLaneV1 === 'function'
+    && await agent.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId) === true;
+}
+
+/** `Rfc64SwmRecoveryTargetRevokedErrorV1`, thrown by a selected lane whose lease is not current. */
+function isRfc64SwmRecoveryLeaseRefusal(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && (error as { code?: unknown }).code === 'RFC64_SWM_RECOVERY_TARGET_REVOKED';
+}
+
+export type DurableLegDiagnostics = DurableSyncDiagnostics
+  & Pick<DurableSyncResult, 'deniedPhases'>;
+
+export interface DurableLegSummary {
+  insertedTriples: number;
+  diagnostics: DurableLegDiagnostics;
+  complete: boolean;
+  state: DurableCatchupLegState;
+  failureReasons: DurableCatchupFailureReason[];
+}
+
+export type DurableCatchupLegState =
+  | 'complete'
+  | 'incomplete-progress'
+  | 'failed'
+  | 'indeterminate'
+  | 'legacy';
+
+export type DurableCatchupFailureCode =
+  | 'failedPeers'
+  | 'failedPhases'
+  | 'deniedPhases'
+  | 'rejectedKcs'
+  | 'dataRejectedMissingMeta'
+  | 'incompleteWithoutProgress'
+  | 'indeterminateSettlement';
+
+export type DurableCatchupFailureReason =
+  | { code: DurableCatchupFailureCode; count: number }
+  | { code: 'exception'; message: string };
+
+/** The only agent capabilities required by the route-level durable leg. */
+export interface DurableCatchupAgent {
+  syncFromPeerDetailed?: OmitThisParameter<DKGAgent['syncFromPeerDetailed']>;
+  syncFromPeer?: OmitThisParameter<DKGAgent['syncFromPeer']>;
+}
+
+export interface DurableCatchupLegResult {
+  insertedTriples: number;
+  state: DurableCatchupLegState;
+  complete?: boolean;
+  diagnostics?: DurableLegDiagnostics;
+  failureReasons?: DurableCatchupFailureReason[];
+}
+
+export interface DurableCatchupAttempt {
+  durableState?: DurableCatchupLegState;
+  durableComplete?: boolean;
+  durableError?: string;
+  error?: string;
+}
+
+export interface DurableCatchupRequestOutcome {
+  attempts: DurableCatchupAttempt[];
+  perContextGraphCompletion: Array<boolean | undefined>;
+  complete?: boolean;
+  allPeersFailed: boolean;
+  noEligibleAttempts: boolean;
+  incomplete: boolean;
+  responseStatus: 200 | 503;
+  errorBody: {
+    errorCode:
+      | 'DURABLE_CATCHUP_ALL_PEERS_FAILED'
+      | 'DURABLE_CATCHUP_NO_ELIGIBLE_PEERS'
+      | 'DURABLE_CATCHUP_INCOMPLETE';
+    error: string;
+    retryable: true;
+  } | undefined;
+}
+
+async function awaitLegacyDurableWithinBoundary<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  if (signal.aborted) throw signal.reason;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    void operation.then(resolve, reject).finally(() => {
+      signal.removeEventListener('abort', onAbort);
+    });
+  });
+}
+
+class DurableSettlementIndeterminateError extends Error {
+  constructor(peerId: string, contextGraphId: string) {
+    super(
+      `Durable catchup from ${peerId} for ${contextGraphId} did not settle within `
+      + `${DURABLE_CATCHUP_SETTLEMENT_GRACE_MS}ms after cancellation; `
+      + 'the atomic commit outcome is indeterminate',
+    );
+    this.name = 'DurableSettlementIndeterminateError';
+  }
+}
+
+async function awaitDetailedDurableSettlement<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+  peerId: string,
+  contextGraphId: string,
+  atomicCommitStarted: () => boolean,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    const cleanup = () => {
+      signal.removeEventListener('abort', onAbort);
+      if (graceTimer !== undefined) clearTimeout(graceTimer);
+    };
+    const settleResolve = (value: T) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+    const settleReject = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onAbort = () => {
+      if (graceTimer !== undefined || settled) return;
+      if (!atomicCommitStarted()) {
+        settleReject(signal.reason);
+        return;
+      }
+      graceTimer = setTimeout(() => {
+        settleReject(new DurableSettlementIndeterminateError(peerId, contextGraphId));
+      }, DURABLE_CATCHUP_SETTLEMENT_GRACE_MS);
+    };
+
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    void operation.then(
+      settleResolve,
+      settleReject,
+    );
+  });
+}
+
+/**
+ * Adapt the agent's typed durable result for operator-facing catch-up APIs.
+ * Whole-leg completion comes only from the explicit agent contract; phase
+ * counters remain diagnostics and can describe safely committed prefixes.
+ */
+export function summarizeDurableLeg(result: DurableSyncResult): DurableLegSummary {
+  const normalized = normalizeDurableSyncResult(result);
+  const { insertedTriples, complete, ...diagnostics } = normalized;
+  const failureReasons = [
+    ['failedPeers', diagnostics.failedPeers],
+    ['failedPhases', diagnostics.failedPhases],
+    ['deniedPhases', diagnostics.deniedPhases],
+    ['rejectedKcs', diagnostics.rejectedKcs],
+    ['dataRejectedMissingMeta', diagnostics.dataRejectedMissingMeta],
+  ].flatMap(([code, count]) => Number(count) > 0 ? [{
+      code: code as DurableCatchupFailureCode,
+      count: Number(count),
+    }] : []);
+  const committedProgress = insertedTriples > 0
+    || diagnostics.insertedDataTriples > 0
+    || diagnostics.insertedMetaTriples > 0
+    || diagnostics.checkpointAdvances > 0;
+  if (!complete && !committedProgress && failureReasons.length === 0) {
+    // A timeout/backpressure stop before the first durable boundary is not a
+    // successful no-op. Give the HTTP adapter a typed failure reason so
+    // durable-only automation keeps retrying instead of treating 200/ok as an
+    // already-synchronized graph. Safely committed prefixes remain observable
+    // as retryable progress and intentionally do not enter this branch.
+    failureReasons.push({ code: 'incompleteWithoutProgress', count: 1 });
+  }
+  const state: DurableCatchupLegState = complete && failureReasons.length === 0
+    ? 'complete'
+    : failureReasons.length > 0
+      ? 'failed'
+      : 'incomplete-progress';
+  return {
+    insertedTriples,
+    diagnostics,
+    complete: state === 'complete',
+    state,
+    failureReasons,
+  };
+}
+
+/** Convert typed leg failures to the legacy operator-facing message at the HTTP boundary. */
+export function formatDurableCatchupFailure(
+  reasons: readonly DurableCatchupFailureReason[] | undefined,
+): string | undefined {
+  if (!reasons || reasons.length === 0) return undefined;
+  const exception = reasons.find(
+    (reason): reason is Extract<DurableCatchupFailureReason, { code: 'exception' }> => (
+      reason.code === 'exception'
+    ),
+  );
+  if (exception) return exception.message;
+  return `Durable sync did not complete (${reasons
+    .map((reason) => reason.code === 'exception'
+      ? reason.message
+      : `${reason.code}=${reason.count}`)
+    .join(', ')})`;
+}
+
+/**
+ * Execute one durable route leg behind a typed capability boundary. Detailed
+ * agents expose completion/diagnostics; older agents retain the legacy count.
+ */
+export async function runDurableCatchupLeg(
+  agent: DurableCatchupAgent,
+  peerId: string,
+  contextGraphId: string,
+  overallTimeoutMs: number,
+): Promise<DurableCatchupLegResult> {
+  const timeoutError = new Error(
+    `Durable catchup from ${peerId} for ${contextGraphId} timed out after ${overallTimeoutMs}ms`,
+  );
+  timeoutError.name = 'AbortError';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(timeoutError), overallTimeoutMs);
+  const phaseTimeoutMs = Math.max(
+    MIN_DURABLE_CATCHUP_PHASE_BUDGET_MS,
+    overallTimeoutMs - DURABLE_CATCHUP_PHASE_HEADROOM_MS,
+  );
+  try {
+    if (typeof agent.syncFromPeerDetailed === 'function') {
+      let atomicCommitStarted = false;
+      // Cancellable work stops at the route deadline. A dispatched atomic
+      // commit retains a bounded grace window to report its truthful outcome;
+      // if the detailed adapter still does not settle, return an explicit
+      // indeterminate state instead of hanging forever or claiming zero work.
+      const detailed = await awaitDetailedDurableSettlement(
+        agent.syncFromPeerDetailed(
+          peerId,
+          [contextGraphId],
+          undefined,
+          undefined,
+          undefined,
+          {
+            totalTimeoutMs: phaseTimeoutMs,
+            signal: controller.signal,
+            onAtomicCommitStarted: () => {
+              atomicCommitStarted = true;
+            },
+          },
+        ),
+        controller.signal,
+        peerId,
+        contextGraphId,
+        () => atomicCommitStarted,
+      );
+      const summary = summarizeDurableLeg(detailed);
+      return {
+        insertedTriples: summary.insertedTriples,
+        state: summary.state,
+        complete: summary.complete,
+        diagnostics: summary.diagnostics,
+        ...(summary.failureReasons.length > 0 ? { failureReasons: summary.failureReasons } : {}),
+      };
+    }
+
+    const insertedTriples = typeof agent.syncFromPeer === 'function'
+      // Legacy implementations do not expose the detailed lane's atomic
+      // settlement contract and may ignore AbortSignal entirely. Keep the
+      // route hard-bounded instead of allowing a stale adapter to pin the
+      // whole catch-up request forever.
+      ? await awaitLegacyDurableWithinBoundary(
+        agent.syncFromPeer(
+          peerId,
+          [contextGraphId],
+          undefined,
+          undefined,
+          {
+            totalTimeoutMs: phaseTimeoutMs,
+            signal: controller.signal,
+          },
+        ),
+        controller.signal,
+      )
+      : 0;
+    return {
+      insertedTriples,
+      state: 'legacy',
+    };
+  } catch (error) {
+    if (error instanceof DurableSettlementIndeterminateError) {
+      return {
+        insertedTriples: 0,
+        state: 'indeterminate',
+        complete: false,
+        failureReasons: [{
+          code: 'indeterminateSettlement',
+          count: 1,
+        }],
+      };
+    }
+    return {
+      insertedTriples: 0,
+      state: 'failed',
+      complete: false,
+      failureReasons: [{
+        code: 'exception',
+        message: error instanceof Error ? error.message : String(error),
+      }],
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export function durableCatchupCompletionFor(
+  attempts: readonly DurableCatchupAttempt[],
+): boolean | undefined {
+  if (attempts.some((attempt) => attempt.durableComplete === true)) return true;
+  return attempts.length > 0 && attempts.every((attempt) => attempt.durableComplete !== undefined)
+    ? false
+    : undefined;
+}
+
+/**
+ * Aggregate completion across every requested CG. A complete subset must not
+ * manufacture a complete whole-request verdict when another CG had no result.
+ */
+export function classifyDurableCatchupRequest(
+  perContextGraphAttempts: ReadonlyArray<readonly DurableCatchupAttempt[]>,
+  includeDurable: boolean,
+  includeSharedMemory: boolean,
+): DurableCatchupRequestOutcome {
+  const attempts = includeDurable ? perContextGraphAttempts.flatMap((parts) => [...parts]) : [];
+  const perContextGraphCompletion = perContextGraphAttempts.map(durableCatchupCompletionFor);
+  const missingContextGraphAttempt = includeDurable
+    && !includeSharedMemory
+    && perContextGraphAttempts.length > 0
+    && perContextGraphAttempts.some((parts) => parts.length === 0);
+  const everyContextGraphCompletionKnown = perContextGraphCompletion.length > 0
+    && perContextGraphCompletion.every((value) => value !== undefined);
+  const complete = missingContextGraphAttempt
+    ? false
+    : includeDurable && everyContextGraphCompletionKnown
+      ? perContextGraphCompletion.every((value) => value === true)
+      : undefined;
+  const allPeersFailed = includeDurable
+    && !includeSharedMemory
+    && attempts.length > 0
+    && attempts.every((attempt) => (
+      attempt.durableState === 'failed'
+      || (attempt.durableState === undefined && Boolean(attempt.error))
+    ));
+  const noEligibleAttempts = missingContextGraphAttempt && attempts.length === 0;
+  const incomplete = includeDurable
+    && !includeSharedMemory
+    && complete === false
+    && !allPeersFailed;
+
+  return {
+    attempts,
+    perContextGraphCompletion,
+    complete,
+    allPeersFailed,
+    noEligibleAttempts,
+    incomplete,
+    responseStatus: allPeersFailed || noEligibleAttempts ? 503 : 200,
+    errorBody: allPeersFailed
+      ? {
+        errorCode: 'DURABLE_CATCHUP_ALL_PEERS_FAILED',
+        error: 'Durable catchup failed for every selected peer',
+        retryable: true,
+      }
+      : noEligibleAttempts
+        ? {
+          errorCode: 'DURABLE_CATCHUP_NO_ELIGIBLE_PEERS',
+          error: 'Durable catchup had no eligible peer for any requested context graph',
+          retryable: true,
+        }
+      : incomplete
+        ? {
+          errorCode: 'DURABLE_CATCHUP_INCOMPLETE',
+          error: 'Durable catchup committed partial progress but did not reach the terminal boundary',
+          retryable: true,
+        }
+        : undefined,
+  };
 }
 
 export function catchupPeerSucceeded(
-  durable: CatchupPhaseProgress,
+  durable: CatchupPhaseProgress | null | undefined,
   shared: CatchupPhaseProgress | null | undefined,
   peerDenied: boolean,
+  durableComplete?: boolean,
+  sharedCompletion?: {
+    progress: DurableProgressClassification;
+    /** This lane requires an explicit terminal boundary, not just clean I/O. */
+    terminalBoundaryRequired: boolean;
+  },
 ): boolean {
-  if (!catchupPeerResponded(durable, shared) || peerDenied) return false;
-  const peerTransportFailed = (durable.failedPeers ?? 0) > 0 || (shared ? (shared.failedPeers ?? 0) > 0 : false);
-  if (peerTransportFailed) return false;
-  const peerPhaseFailed = (durable.failedPhases ?? 0) > 0 || (shared ? (shared.failedPhases ?? 0) > 0 : false);
-  if (peerPhaseFailed) return false;
-  const durableProgress = (durable.insertedDataTriples ?? durable.insertedTriples ?? 0) > 0
-    || (durable.checkpointAdvances ?? 0) > 0
-    || ((durable.completedPhases ?? 0) > 0 && (durable.resumedPhases ?? 0) > 0);
+  const durableProgress = classifyDurableProgress(durable, { complete: durableComplete });
   const sharedProgress = shared
-    ? (shared.insertedDataTriples ?? shared.insertedTriples ?? 0) > 0
-      || (shared.checkpointAdvances ?? 0) > 0
-      || ((shared.completedPhases ?? 0) > 0 && (shared.resumedPhases ?? 0) > 0)
-    : false;
-  const peerMadeProgress = durableProgress || sharedProgress;
-  const peerMetadataOnly = !peerMadeProgress && (
-    (durable.insertedMetaTriples ?? 0) > 0
-    || (durable.metaOnlyResponses ?? 0) > 0
-    || (shared ? (shared.insertedMetaTriples ?? 0) > 0 : false)
-  );
-  const peerTimedOut = (durable.timedOutPhases ?? 0) > 0 || (shared ? (shared.timedOutPhases ?? 0) > 0 : false);
-  return peerMadeProgress || (!peerTimedOut && !peerMetadataOnly);
+    ? sharedCompletion?.progress ?? classifyDurableProgress(shared)
+    : null;
+  if (
+    !catchupPeerResponded(durable, shared)
+    || peerDenied
+    || durableProgress.denied
+    || Boolean(sharedProgress?.denied)
+  ) return false;
+  if (durableProgress.deferredByBackpressure || sharedProgress?.deferredByBackpressure) return false;
+  const peerTransportFailed = durableProgress.transportFailed || Boolean(sharedProgress?.transportFailed);
+  if (peerTransportFailed) return false;
+  const peerPhaseFailed = durableProgress.phaseFailed || Boolean(sharedProgress?.phaseFailed);
+  if (peerPhaseFailed) return false;
+  if (durableProgress.integrityRejected || sharedProgress?.integrityRejected) return false;
+  if (sharedCompletion?.terminalBoundaryRequired
+    && !sharedCompletion.progress.completedWithoutFailure) return false;
+  const peerMadeProgress = durableProgress.madeReadinessProgress
+    || Boolean(sharedProgress?.madeReadinessProgress);
+  const peerMetadataOnly = !peerMadeProgress
+    && (durableProgress.hasMetadataEvidence || Boolean(sharedProgress?.hasMetadataEvidence));
+  const peerTimedOut = durableProgress.timedOut || Boolean(sharedProgress?.timedOut);
+  return !peerTimedOut && (peerMadeProgress || !peerMetadataOnly);
 }
 
 export function catchupPeerResponded(
-  durable: CatchupPhaseProgress,
+  durable: CatchupPhaseProgress | null | undefined,
   shared: CatchupPhaseProgress | null | undefined,
 ): boolean {
-  const durableFailed = (durable.failedPeers ?? 0) > 0;
-  const sharedFailed = shared ? (shared.failedPeers ?? 0) > 0 : false;
-  return shared ? !durableFailed || !sharedFailed : !durableFailed;
+  // A plane the walk deliberately skipped (already proven by an earlier peer)
+  // is absent, not silent: it must not be read as this peer having answered.
+  const phaseResponded = (phase: CatchupPhaseProgress | null | undefined): boolean => {
+    if (!phase) return false;
+    const progress = classifyDurableProgress(phase);
+    if (progress.transportFailed) return false;
+    if (!progress.deferredByBackpressure) return true;
+    return (phase.bytesReceived ?? 0) > 0
+      || (phase.completedPhases ?? 0) > 0
+      || (phase.emptyResponses ?? 0) > 0
+      || (phase.insertedMetaTriples ?? 0) > 0
+      || (phase.insertedDataTriples ?? phase.insertedTriples ?? 0) > 0;
+  };
+  return phaseResponded(durable) || phaseResponded(shared);
 }
 
 export interface CatchupRunner {
   run(request: CatchupRunRequest): Promise<CatchupJobResult>;
   close(): Promise<void>;
+  selectedLaneFoundInactive?(contextGraphId: string): boolean;
 }
 
 type PendingRun = {
@@ -156,7 +706,7 @@ async function waitForSyncProtocolFromPeerProtocols(
 ): Promise<boolean> {
   for (let attempt = 0; attempt < SYNC_PROTOCOL_CHECK_ATTEMPTS; attempt += 1) {
     const protocols: string[] = await getPeerProtocols(peerId).catch((): string[] => []);
-    if (protocols.includes(PROTOCOL_SYNC)) {
+    if (advertisesSyncProtocol(protocols)) {
       return true;
     }
     if (attempt < SYNC_PROTOCOL_CHECK_ATTEMPTS - 1) {
@@ -170,6 +720,9 @@ class WorkerCatchupRunner implements CatchupRunner {
   private readonly worker: Worker;
   private nextRunId = 0;
   private readonly pendingRuns = new Map<number, PendingRun>();
+  /** Set once the worker dies; every later run fails fast instead of hanging. */
+  private workerFailure: Error | undefined;
+  private readonly selectedLaneWait = new SelectedLaneActivationWait();
 
   constructor(private readonly agent: DKGAgent) {
     const jsWorkerUrl = new URL('./catchup-runner-worker-impl.js', import.meta.url);
@@ -190,21 +743,53 @@ class WorkerCatchupRunner implements CatchupRunner {
       }
     });
     this.worker.on('error', (error) => {
-      for (const [, pending] of this.pendingRuns) pending.reject(error);
-      this.pendingRuns.clear();
+      this.fail(error);
+    });
+    // `close()` terminates the worker, which emits 'exit' — never 'error'. A
+    // crashed or terminated worker is also permanent: the runner is constructed
+    // once per daemon and `postMessage` to a dead worker neither throws nor
+    // delivers. Without this, an in-flight run stayed pending forever AND every
+    // later run did too, so the daemon's fire-and-forget subscribe jobs were
+    // pinned at `running` with no `finishedAt` for the rest of the process's
+    // life — and the route's dedupe then hands that stuck job back on every
+    // re-subscribe, so an operator cannot even retrigger.
+    this.worker.on('exit', (code) => {
+      this.fail(new Error(`Catch-up worker exited (code ${code}) before the run completed`));
     });
   }
 
+  /** Latch the terminal failure and settle everything waiting on the worker. */
+  private fail(error: Error): void {
+    this.workerFailure ??= error;
+    const pending = [...this.pendingRuns.values()];
+    this.pendingRuns.clear();
+    for (const run of pending) run.reject(error);
+  }
+
   run(request: CatchupRunRequest): Promise<CatchupJobResult> {
+    if (this.workerFailure) return Promise.reject(this.workerFailure);
     const runId = this.nextRunId++;
     return new Promise<CatchupJobResult>((resolve, reject) => {
       this.pendingRuns.set(runId, { resolve, reject });
-      this.worker.postMessage({ type: 'run', runId, request });
+      this.worker.postMessage({
+        type: 'run',
+        runId,
+        request: {
+          ...request,
+          graphOwnedDurableRecovery:
+            typeof this.agent.syncDurableRecoveryContextGraph === 'function',
+        },
+      });
     });
   }
 
   async close(): Promise<void> {
+    this.selectedLaneWait.close();
     await this.worker.terminate();
+  }
+
+  selectedLaneFoundInactive(contextGraphId: string): boolean {
+    return this.selectedLaneWait.foundInactive(contextGraphId);
   }
 
   private async handleInvoke(message: Extract<WorkerMessage, { type: 'invoke' }>): Promise<void> {
@@ -224,24 +809,82 @@ class WorkerCatchupRunner implements CatchupRunner {
     const agent = this.agent as any;
     switch (method) {
       case 'prepareCatchup': {
-        const [contextGraphId] = args as [string];
+        const [contextGraphId, includeSharedMemory = true] = args as [string, boolean?];
+        if (includeSharedMemory) this.selectedLaneWait.begin(contextGraphId);
         const isPrivateContextGraph = await agent.isPrivateContextGraph(contextGraphId);
-        const preferredPeerId = await agent.resolvePreferredSyncPeerId(contextGraphId);
-        if (preferredPeerId) {
-          await agent.ensurePeerConnected(preferredPeerId);
-        }
+        // ONE resolution, two notions. Ranking uses whatever peer is available;
+        // letting one peer's answer stand for the whole graph requires the
+        // stricter notion, because a join-approval bootstrap hint is
+        // authenticated but can be stale — it orders the walk without being
+        // allowed to end it. Resolving twice would read `_meta` twice (and run
+        // the registry fallback twice for a wallet-address curator) per
+        // catch-up, and the resolver evicts the bootstrap hint once metadata
+        // confirms a curator, so the second call is not the same call.
+        const resolution: SyncPeerResolution =
+          typeof agent.resolveSyncPeerWithProvenance === 'function'
+            ? await agent.resolveSyncPeerWithProvenance(contextGraphId)
+            : {
+              peerId: await agent.resolvePreferredSyncPeerId(contextGraphId),
+              // An agent without the provenance resolver cannot establish
+              // authority, and must not be assumed to have it.
+              provenance: 'bootstrap-hint',
+            };
+        const preferredPeerId = resolution.peerId;
+        // The agent's own definition of "may end the walk", not a restatement
+        // of it: a renamed or added provenance value has to break here rather
+        // than silently downgrade every curator to non-authoritative.
+        const authoritativePeerId = authoritativeSyncPeerId(resolution);
+        const authoritativeSharedMemoryPeerIds: readonly string[] =
+          includeSharedMemory
+          && typeof agent.resolveRfc64CompleteSwmProviderPeerIdsV1 === 'function'
+            ? agent.resolveRfc64CompleteSwmProviderPeerIdsV1(contextGraphId)
+            : [];
+        // Connection attempts only expand the candidate set. A stale curator
+        // address (for example, a relayed peer returning NO_RESERVATION) must
+        // not abort a public multi-peer repair before already-connected peers
+        // can contribute their RFC-64 snapshot union. Private graphs remain
+        // fail-closed in selectCatchupPeers; with no eligible curator they
+        // simply produce an unreachable bounded job.
+        await Promise.allSettled([
+          ...(preferredPeerId === undefined
+            ? []
+            : [agent.ensurePeerConnected(preferredPeerId)]),
+          ...authoritativeSharedMemoryPeerIds.map(
+            (peerId) => agent.ensurePeerConnected(peerId),
+          ),
+        ]);
         await agent.primeCatchupConnections();
 
-        const peerIds = agent.selectCatchupPeers(
-          [...new Map(
-            agent.node.libp2p.getConnections().map((connection: any) => [connection.remotePeer.toString(), connection.remotePeer]),
-          ).values()],
+        // The agent's own admission predicate, the one the in-process catch-up
+        // selects from, never a copy of it: a still-open connection to a peer
+        // that failed the network-identity proof (another DKG network's relay,
+        // say) must not become a sync peer, and filtering here also keeps it out
+        // of the prioritized curator/SWM-provider slots below. The daemon's
+        // agent is always this package's DKGAgent, so there is no fallback: an
+        // agent without the predicate fails the preparation instead of handing
+        // every live connection to selection.
+        const admittedPeers = await this.agent.listAdmittedConnectedPeers(createOperationContext('sync'));
+
+        const selectedPeerIds = agent.selectCatchupPeers(
+          admittedPeers,
           preferredPeerId,
           isPrivateContextGraph,
         ).map((peer: { toString(): string }) => peer.toString());
+        const prioritizedPeerIds = [...new Set([
+          ...authoritativeSharedMemoryPeerIds,
+          ...(preferredPeerId === undefined ? [] : [preferredPeerId]),
+        ])];
+        const selectedPeerIdSet = new Set(selectedPeerIds);
+        const prioritizedPeerIdSet = new Set(prioritizedPeerIds);
+        const peerIds = [
+          ...prioritizedPeerIds.filter((peerId) => selectedPeerIdSet.has(peerId)),
+          ...selectedPeerIds.filter((peerId: string) => !prioritizedPeerIdSet.has(peerId)),
+        ];
 
         return {
           preferredPeerId,
+          authoritativePeerId,
+          authoritativeSharedMemoryPeerIds,
           isPrivateContextGraph,
           peerIds,
           connectedPeers: peerIds.length,
@@ -255,32 +898,159 @@ class WorkerCatchupRunner implements CatchupRunner {
         return agent.waitForSyncProtocol({ toString: () => peerId });
       }
       case 'syncDurable': {
+        const [peerId, contextGraphId, priority, source] = args as [
+          string, string, number | undefined, unknown,
+        ];
+        if (!(await legacyDurableSyncAllowed(agent, contextGraphId))) {
+          return this.durableNotAttempted(contextGraphId);
+        }
+        return agent.syncFromPeerDetailed(
+          peerId,
+          [contextGraphId],
+          undefined,
+          undefined,
+          undefined,
+          {
+            ...(priority === undefined ? {} : { priority }),
+            // This RPC argument crossed a structured-clone boundary, so its
+            // compile-time type guaranteed nothing. Clamp it to the closed
+            // diagnostic set HERE, at the untrusted edge, so every in-process
+            // caller past it is typed `SyncAdmissionSource`.
+            source: normalizeSyncAdmissionSource(
+              typeof source === 'string' ? source : undefined,
+            ),
+          },
+        );
+      }
+      case 'syncDurableRecovery': {
         const [peerId, contextGraphId] = args as [string, string];
-        return agent.syncFromPeerDetailed(peerId, [contextGraphId]);
+        if (!(await legacyDurableSyncAllowed(agent, contextGraphId))) {
+          return this.durableNotAttempted(contextGraphId);
+        }
+        const recovery = await this.agent.syncDurableRecoveryContextGraph(contextGraphId, {
+          candidatePeerIds: [peerId],
+          candidatesAreSyncCapable: true,
+        });
+        return recovery.result;
       }
       case 'syncSharedMemory': {
-        const [peerId, contextGraphId] = args as [string, string];
-        return agent.syncSharedMemoryFromPeerDetailed(peerId, [contextGraphId]);
+        const [peerId, contextGraphId, priority, source, selected] = args as [
+          string, string, number | undefined, unknown, unknown,
+        ];
+        const admission = {
+          ...(priority === undefined ? {} : { priority }),
+          source: normalizeSyncAdmissionSource(
+            typeof source === 'string' ? source : undefined,
+          ),
+        };
+        const runLegacyFallback = async (): Promise<CatchupLegacySharedMemoryFallback> => ({
+          kind: 'legacy-shared-memory-fallback',
+          shared: await agent.syncSharedMemoryFromPeerDetailed(
+            peerId,
+            [contextGraphId],
+            admission,
+          ),
+        });
+        // One bridge operation owns producer selection. The Worker supplies a
+        // closed boolean, and only literal `true` may enter the selected lane;
+        // malformed structured-clone values retain ordinary behavior.
+        if (selected === true) {
+          // Checked on every call, never once per job: a first subscribe
+          // commits the graph's RFC-64 authority in the background while the
+          // job is still preparing, and a later peer's call must then run.
+          // The walk can be over before that commit, so the calls of a job
+          // whose graph has an accepted public policy wait for it, together
+          // and bounded (`SelectedLaneActivationWait`).
+          if (!selectedSharedMemoryLaneActive(agent, contextGraphId)) {
+            if (await legacySharedMemoryLaneAllowed(agent, contextGraphId)) {
+              return runLegacyFallback();
+            }
+            if (!await this.selectedLaneWait.untilActive(agent, contextGraphId)) {
+              return this.selectedLaneNotAttempted(
+                contextGraphId,
+                'has no active RFC-64 public policy',
+              );
+            }
+          }
+          try {
+            return await agent.syncSelectedSharedMemoryFromPeerDetailed(
+              peerId,
+              [contextGraphId],
+              {
+                ...admission,
+                selectedSwmPriority: true,
+                requestedScope: {
+                  kind: 'selected-public',
+                  targets: [{ contextGraphId, lane: 'selected-public' }],
+                },
+              },
+            );
+          } catch (error) {
+            // Revoked after the check above. The lease refused the lane for
+            // this graph, which says nothing about the peer. A stale lease
+            // can also follow a selected-provider refresh: only a now-inactive
+            // selected lane permits legacy fallback. Any other error keeps
+            // its failure semantics.
+            if (!isRfc64SwmRecoveryLeaseRefusal(error)) throw error;
+            if (!selectedSharedMemoryLaneActive(agent, contextGraphId)
+              && await legacySharedMemoryLaneAllowed(agent, contextGraphId)) {
+              return runLegacyFallback();
+            }
+            return this.selectedLaneNotAttempted(
+              contextGraphId,
+              'refused by its RFC-64 recovery lease',
+            );
+          }
+        }
+        return agent.syncSharedMemoryFromPeerDetailed(
+          peerId,
+          [contextGraphId],
+          admission,
+        );
+      }
+      case 'logCatchupPass': {
+        // The pass loop runs inside the Worker, which has no logger of its own,
+        // so the line is FORMATTED there — where the coverage records live — and
+        // only emitted here. Deliberately `info`: an operator diagnosing a job
+        // that will not converge needs this without raising the log level, and a
+        // catch-up emits at most a handful of these.
+        const [message] = args as [string];
+        agent.log.info(createOperationContext('sync'), message);
+        return null;
       }
       case 'finalizeCatchup': {
-        const [contextGraphId, dataSynced, sharedMemorySynced] = args as [string, number, number];
+        const [contextGraphId] = args as [string, number, number];
         await agent.refreshMetaSyncedFlags([contextGraphId]);
-        if (dataSynced > 0 || sharedMemorySynced > 0) {
-          agent.markContextGraphSubscriptionState?.(contextGraphId, {
-            synced: true,
-            ...(sharedMemorySynced > 0 ? { sharedMemorySynced: true } : {}),
-          });
-          agent.eventBus.emit(DKGEvent.PROJECT_SYNCED, {
-            contextGraphId,
-            dataSynced,
-            sharedMemorySynced,
-          });
-        }
+        // Readiness is classified by the daemon route after the worker returns
+        // its complete per-plane diagnostics. Insert counts alone can describe
+        // an early page followed by a timeout; marking here would persist a
+        // false-ready window before the route can reject that partial result.
         return null;
       }
       default:
         throw new Error(`Unknown catch-up worker invoke method: ${method}`);
     }
+  }
+
+  /** The agent would drop this graph from legacy durable sync without a request. */
+  private durableNotAttempted(contextGraphId: string): CatchupPlaneNotAttempted {
+    (this.agent as any).log?.debug?.(
+      createOperationContext('sync'),
+      `Catch-up for "${contextGraphId}": catalog-authoritative graph, legacy durable sync not attempted`,
+    );
+    return catchupPlaneNotAttempted('catalog-authoritative');
+  }
+
+  /** The selected SWM lane cannot run for this graph on this call. */
+  private selectedLaneNotAttempted(
+    contextGraphId: string,
+    cause: string,
+  ): CatchupPlaneNotAttempted {
+    (this.agent as any).log?.debug?.(
+      createOperationContext('sync'),
+      `Catch-up for "${contextGraphId}": selected SWM lane ${cause}; not attempted`,
+    );
+    return catchupPlaneNotAttempted('selected-lane-refused');
   }
 }
 
@@ -290,6 +1060,7 @@ class InlineCatchupRunner implements CatchupRunner {
   run(request: CatchupRunRequest): Promise<CatchupJobResult> {
     return this.agent.syncContextGraphFromConnectedPeers(request.contextGraphId, {
       includeSharedMemory: request.includeSharedMemory,
+      mode: 'foreground',
     }) as Promise<CatchupJobResult>;
   }
 

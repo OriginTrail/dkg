@@ -43,6 +43,7 @@ import {
   type PromoteRequest,
 } from '@origintrail-official/dkg-publisher';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 import { daemonState } from '../src/daemon/state.js';
 import {
   createPromoteWorkerSupervisor,
@@ -105,6 +106,7 @@ describe('async-promote queue — end-to-end (routes + worker + queue)', () => {
     let inFlight = 0;
     return {
       promoteQueue: queue,
+      resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: tokenAgentAddress ? 'caller' : 'node', source: 'legacy-local', reason: 'fixture-node', metadataBootstrap: 'eligible' }),
       async listContextGraphs() {
         return ['team-graph', 'graphify', 'cg'].map((id) => ({
           id,
@@ -217,8 +219,10 @@ describe('async-promote queue — end-to-end (routes + worker + queue)', () => {
           apiPortRef: { value: 0 },
           url,
           path: url.pathname,
-          requestToken,
           requestAgentAddress: 'did:dkg:agent:test',
+          authentication: tokenAgentAddress
+            ? requestAuthentication({ kind: 'agent', agentAddress: tokenAgentAddress, token: requestToken })
+            : requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);
@@ -365,7 +369,7 @@ describe('async-promote queue — end-to-end (routes + worker + queue)', () => {
 
   it('cap_exceeded: gossip-too-large error settles immediately in terminal failed (no retries)', async () => {
     promoteHandler = async () => {
-      throw new Error('Promoted assertion too large for gossip (12000 KB, limit 10 MB)');
+      throw new Error('Promoted assertion too large for gossip (6000 KB, limit 4 MB)');
     };
     await startServerAndSupervisor();
     const { body } = await post('/api/knowledge-assets/giant/swm/share-async', {

@@ -1,0 +1,213 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import { CoalescingRecurringTask } from '../src/coalescing-recurring-task.js';
+import { resolveRfc64RuntimeCatalogBootstrapConfigV1 } from
+  '../src/rfc64/public-catalog-activation-config-v1.js';
+import { boundedRfc64SupervisorErrorV1 } from
+  '../src/rfc64/supervisor-status-v1.js';
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe('coalescing recurring task', () => {
+  it('drops overlapping requests when the workload selects fixed-cadence semantics', async () => {
+    let release!: () => void;
+    let markStarted!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let passes = 0;
+    const runner = new CoalescingRecurringTask({
+      requestWhileRunning: 'drop',
+      runPass: async () => {
+        passes += 1;
+        markStarted();
+        await gate;
+      },
+      onError: () => undefined,
+      closingMessage: 'test closing',
+    });
+
+    expect(runner.request()).toBe(true);
+    await started;
+    expect(runner.running).toBe(true);
+    expect(runner.scheduled).toBe(false);
+    expect(runner.request()).toBe(false);
+    release();
+    await runner.whenIdle();
+    expect(passes).toBe(1);
+    await runner.close();
+    expect(runner.running).toBe(false);
+    expect(runner.scheduled).toBe(false);
+  });
+
+  it('does not let frequent live work postpone a failed scope periodic retry', async () => {
+    vi.useFakeTimers();
+    const dirty = new Set(['failed-scope', 'live-scope']);
+    const attempts = new Map<string, number>();
+    const runner = new CoalescingRecurringTask({
+      retryIntervalMs: 1_000,
+      runPass: async () => {
+        for (const scope of dirty) {
+          dirty.delete(scope);
+          attempts.set(scope, (attempts.get(scope) ?? 0) + 1);
+        }
+      },
+      onError: () => undefined,
+      beforePeriodicPass: () => {
+        dirty.add('failed-scope');
+        dirty.add('live-scope');
+      },
+      closingMessage: 'test closing',
+    });
+
+    runner.request();
+    await runner.whenIdle();
+    expect(attempts.get('failed-scope')).toBe(1);
+    expect(runner.scheduled).toBe(true);
+
+    for (let index = 0; index < 3; index += 1) {
+      await vi.advanceTimersByTimeAsync(250);
+      dirty.add('live-scope');
+      runner.request();
+      await runner.whenIdle();
+    }
+    expect(attempts.get('failed-scope')).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(250);
+    await runner.whenIdle();
+    expect(attempts.get('failed-scope')).toBe(2);
+    expect(attempts.get('live-scope')).toBeGreaterThanOrEqual(4);
+    await runner.close();
+  });
+
+  it('lets a pass retire periodic rearming until a new explicit request', async () => {
+    vi.useFakeTimers();
+    let passes = 0;
+    const runner = new CoalescingRecurringTask({
+      retryIntervalMs: 1_000,
+      runPass: async () => {
+        passes += 1;
+        return 'idle';
+      },
+      onError: () => undefined,
+      closingMessage: 'test closing',
+    });
+
+    expect(runner.schedule()).toBe(true);
+    expect(runner.scheduled).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    await runner.whenIdle();
+    expect(runner.scheduled).toBe(false);
+    expect(passes).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(passes).toBe(1);
+
+    expect(runner.request()).toBe(true);
+    await runner.whenIdle();
+    expect(passes).toBe(2);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(passes).toBe(2);
+    await runner.close();
+  });
+
+  it('clears an armed periodic deadline when an explicit pass becomes idle', async () => {
+    vi.useFakeTimers();
+    let passes = 0;
+    const runner = new CoalescingRecurringTask({
+      retryIntervalMs: 1_000,
+      runPass: async () => {
+        passes += 1;
+        return passes === 1 ? 'rearm' : 'idle';
+      },
+      onError: () => undefined,
+      closingMessage: 'test closing',
+    });
+
+    runner.request();
+    await runner.whenIdle();
+    expect(runner.scheduled).toBe(true);
+
+    runner.request();
+    await runner.whenIdle();
+    expect(passes).toBe(2);
+    expect(runner.scheduled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(passes).toBe(2);
+    await runner.close();
+  });
+
+  it('drains close-triggered cancellation without reporting a workload failure', async () => {
+    const onError = vi.fn();
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const runner = new CoalescingRecurringTask({
+      runPass: async (signal) => {
+        markStarted();
+        await new Promise<void>((_resolve, reject) => {
+          const onAbort = () => reject(signal.reason);
+          signal.addEventListener('abort', onAbort, { once: true });
+          if (signal.aborted) onAbort();
+        });
+      },
+      onError,
+      closingMessage: 'test closing',
+    });
+
+    runner.request();
+    await started;
+    await expect(runner.close()).resolves.toBeUndefined();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('reports a genuine workload rejection that settles while close starts', async () => {
+    const onError = vi.fn();
+    const failure = new Error('persistence failed');
+    let rejectPass!: (reason: unknown) => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const pass = new Promise<void>((_resolve, reject) => { rejectPass = reject; });
+    const runner = new CoalescingRecurringTask({
+      runPass: async () => {
+        markStarted();
+        await pass;
+      },
+      onError,
+      closingMessage: 'test closing',
+    });
+
+    runner.request();
+    await started;
+    rejectPass(failure);
+    await runner.close();
+
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(failure);
+  });
+
+  it('normalizes current and legacy bootstrap fields through one boundary', () => {
+    const current = Object.freeze({
+      acceptedPolicies: Object.freeze([]),
+      retryIntervalMs: 250,
+    });
+    const legacy = Object.freeze({
+      acceptedPublicPolicies: Object.freeze([]),
+      retryIntervalMs: 500,
+    });
+
+    expect(resolveRfc64RuntimeCatalogBootstrapConfigV1(current, legacy)).toBe(current);
+    expect(resolveRfc64RuntimeCatalogBootstrapConfigV1(undefined, legacy)).toEqual({
+      acceptedPolicies: [],
+      retryIntervalMs: 500,
+    });
+    expect(resolveRfc64RuntimeCatalogBootstrapConfigV1(undefined, undefined)).toBeUndefined();
+  });
+
+  it('bounds supervisor errors by UTF-8 bytes without splitting characters', () => {
+    const bounded = boundedRfc64SupervisorErrorV1(new Error('🙂'.repeat(300)));
+    expect(new TextEncoder().encode(bounded).byteLength).toBe(1_024);
+    expect(bounded).toBe('🙂'.repeat(256));
+  });
+});

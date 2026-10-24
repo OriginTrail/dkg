@@ -1,3 +1,31 @@
+import {
+  DEFAULT_RELAY_SERVER_CAPACITY,
+  RELAY_DEFAULT_DURATION_LIMIT_MS,
+  RELAY_RESERVATION_TTL_MS,
+  EDGE_NODE_MAX_CONNECTIONS,
+  DEFAULT_RELAY_RESERVATION_COUNT,
+  validateRelayReservationCount,
+  validateRelayServerCapacity,
+  deriveRelayCaps,
+} from './relay-capacity-policy.js';
+export {
+  RELAY_CAPACITY_MULTIPLIER,
+  DEFAULT_RELAY_SERVER_CAPACITY,
+  RELAY_DEFAULT_DURATION_LIMIT_MS,
+  RELAY_RESERVATION_TTL_MS,
+  EDGE_NODE_MAX_CONNECTIONS,
+  DEFAULT_RELAY_RESERVATION_COUNT,
+  MAX_RELAY_RESERVATION_COUNT,
+  type RelayReservationCountValidation,
+  validateRelayReservationCount,
+  type DerivedRelayCaps,
+  type RelayCapacityValidation,
+  MAX_RELAY_SERVER_CAPACITY,
+  validateRelayServerCapacity,
+  deriveRelayCaps,
+} from './relay-capacity-policy.js';
+import { checkFdLimit } from './fd-limit.js';
+export { checkFdLimit, type FdLimitLogLevel } from './fd-limit.js';
 import { createLibp2p, type Libp2p } from 'libp2p';
 import { tcp } from '@libp2p/tcp';
 import { webSockets } from '@libp2p/websockets';
@@ -7,9 +35,8 @@ import { bootstrap } from '@libp2p/bootstrap';
 import { kadDHT, type KadDHT } from '@libp2p/kad-dht';
 import { gossipsub, type GossipSub } from '@libp2p/gossipsub';
 import { mdns } from '@libp2p/mdns';
-import { identify } from '@libp2p/identify';
+import { identify, identifyPush } from '@libp2p/identify';
 import { ping, type Ping } from '@libp2p/ping';
-import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import { circuitRelayServer } from '@libp2p/circuit-relay-v2';
 import { dcutr } from '@libp2p/dcutr';
 import { autoNAT } from '@libp2p/autonat';
@@ -24,7 +51,17 @@ import { RelayMetricsAdapter, RELAY_V2_STOP_CODEC } from './libp2p-metrics-adapt
 import { readRelayReservations, readConnectionStreams } from './relay-internal-shapes.js';
 import { RelayFlapGuard, buildRelayFlapConnectionGater } from './relay-flap-guard.js';
 import { buildActiveRelayNetworkPolicy } from './relay-network-policy.js';
-import { parseCircuitRelayPeerIds, type RelayedConnectionGater } from './relay-path.js';
+import { buildRelayClientTransport } from './relay-client-transport.js';
+import { NetworkPeerDialPolicy, peerIdFromRelayAddress } from './network-peer-dial-policy.js';
+import { combineConnectionGaters, type SyncConnectionGater } from './connection-gater-combiner.js';
+import { parseCircuitRelayPeerIds } from './relay-path.js';
+import { isPublicLikeAddress } from './network/address-policy.js';
+import type { ConfiguredRelayTarget } from './network/relay-target.js';
+
+export {
+  isLocalOrInternalHostname,
+  isPublicLikeAddress,
+} from './network/address-policy.js';
 
 export interface DKGServices extends Record<string, unknown> {
   dht: KadDHT;
@@ -104,6 +141,40 @@ export function connectionsBusyAppProtocols(conns: readonly unknown[]): string[]
 }
 
 /**
+ * Best-effort reset of busy application streams before the relay watchdog
+ * closes their transport. Stream discovery stays behind
+ * `readConnectionStreams`, because libp2p may temporarily expose a missing
+ * stream array or an incompletely negotiated stream during teardown.
+ * Returns the number of distinct streams whose abort function was invoked.
+ */
+export function abortWatchdogBusyStreams(
+  conns: readonly unknown[],
+  reason: Error,
+): number {
+  const reaped = new Set<unknown>();
+  let aborted = 0;
+  for (const connection of conns) {
+    for (const stream of readConnectionStreams(connection) ?? []) {
+      if (reaped.has(stream)) continue;
+      const { protocol, abort } = stream;
+      if (typeof protocol !== 'string'
+        || !isWatchdogBusyProtocol(protocol)
+        || typeof abort !== 'function') {
+        continue;
+      }
+      reaped.add(stream);
+      try {
+        abort.call(stream, reason);
+        aborted += 1;
+      } catch {
+        // Best-effort; connection teardown remains the final reaper.
+      }
+    }
+  }
+  return aborted;
+}
+
+/**
  * Per-relay forced-redial bookkeeping (one object per relay instead of
  * parallel maps, so the invariants live in one place): `strikes` counts
  * consecutive futile forced redials, `cooldownUntil` suppresses the forced
@@ -140,67 +211,6 @@ const RELAY_BUSY_DEFERRAL_MAX_TICKS = 30;
  */
 const RELAY_FORCED_REDIAL_MAX_STRIKES = 5;
 const RELAY_FORCED_REDIAL_COOLDOWN_MS = 10 * 60_000;
-
-/**
- * Default relay server capacity — the number of simultaneous circuit-relay v2
- * reservations a Core Node will hold. All other relay-related caps (HOP/STOP
- * stream limits, connectionManager.maxConnections) derive from this at a 1:2
- * ratio so capacity=1024 → 2048 stream caps + 2048 max conns.
- *
- * Bumped from the previous hardcoded 256 (libp2p's stock default for the
- * relay-v2 server is even lower — 15) which capped a single Core Node at
- * ~256 concurrent edge agents. That was below the natural hundreds-to-
- * thousands-of-agents trajectory the network is designed for; PR #510's
- * agent-debug-chat exercised this directly and showed the cap was already
- * a meaningful ceiling at ~5 active edges. See operator docs for the
- * `ulimit -n` requirement.
- */
-export const DEFAULT_RELAY_SERVER_CAPACITY = 1024;
-/** Multiplier for derived stream + connection caps (capacity × 2). */
-export const RELAY_CAPACITY_MULTIPLIER = 2;
-/**
- * Per-circuit duration limit. Bumped from libp2p's 5-minute default to 30
- * minutes so chat-style intermittent traffic (5-15 minute silent gaps are
- * normal) doesn't tear circuits down underneath the application — this was
- * the proximate cause of the May 2026 NO_RESERVATION blackout pair (Miles
- * ↔ Lex) that motivated PRs #517, #521, and this one. Reservation TTL
- * itself stays at the libp2p default (2h) but is set explicitly below for
- * operator visibility.
- */
-export const RELAY_DEFAULT_DURATION_LIMIT_MS = 30 * 60 * 1000;
-export const RELAY_RESERVATION_TTL_MS = 2 * 60 * 60 * 1000;
-/** maxConnections for nodes that don't run a relay server (edge default). */
-export const EDGE_NODE_MAX_CONNECTIONS = 500;
-
-/**
- * Default number of relay reservations an edge node tries to hold
- * simultaneously. The previous default (1) was a single point of failure:
- * if the only reserved relay went unreachable, the edge dropped off the
- * network until the watchdog redialed and re-reserved. Holding 3 in
- * parallel gives N-2 tolerance — two relays can blink concurrently and
- * incoming dialers can still find a working circuit.
- *
- * Implementation: each `/p2p-circuit` listen address triggers a separate
- * reservation slot in libp2p's transport reservation store, so the
- * config translates to N duplicate `/p2p-circuit` entries in the
- * libp2p `addresses.listen` array, paired with `reservationConcurrency:
- * N` on the circuit-relay transport so they're attempted in parallel.
- *
- * NOTE: libp2p auto-renews each reservation 5 minutes before expiry
- * (REFRESH_TIMEOUT in @libp2p/circuit-relay-v2/transport/reservation-store.js),
- * so no application-level proactive renewal is needed in our watchdog.
- * The watchdog still handles the harder failure mode of a fully-dropped
- * relay connection, which auto-renewal can't recover from.
- */
-export const DEFAULT_RELAY_RESERVATION_COUNT = 3;
-/**
- * Hard cap on `relayReservationCount` to keep operators from accidentally
- * configuring an edge node to hammer the network. Reserving on more than
- * ~16 relays at a time is a smell — it costs memory + control-stream
- * keepalive on every reserved relay, and the marginal failure-tolerance
- * benefit past 4-5 is minimal.
- */
-export const MAX_RELAY_RESERVATION_COUNT = 16;
 
 /**
  * Permissive validator for the small / sparse-network tunables
@@ -315,203 +325,6 @@ export function buildKadDHTOptions(
     : { protocol };
 }
 
-/**
- * Validate an operator-supplied `relayReservationCount`. Same shape +
- * defensive surface as `validateRelayServerCapacity` (rejects 0,
- * negatives, NaN, Infinity, fractional, non-numbers). Additionally
- * caps at `MAX_RELAY_RESERVATION_COUNT` to avoid the
- * everyone-reserves-on-everyone failure mode on large networks.
- */
-export type RelayReservationCountValidation =
-  | { ok: true; value: number }
-  | { ok: false; reason: string };
-export function validateRelayReservationCount(
-  input: unknown,
-): RelayReservationCountValidation | null {
-  if (input == null) return null;
-  if (typeof input !== 'number') {
-    return { ok: false, reason: `expected number, got ${typeof input}` };
-  }
-  if (!Number.isFinite(input)) {
-    return { ok: false, reason: `expected finite number, got ${input}` };
-  }
-  if (!Number.isInteger(input)) {
-    return { ok: false, reason: `expected integer, got ${input}` };
-  }
-  if (input < 1) {
-    return { ok: false, reason: `expected >= 1, got ${input}` };
-  }
-  if (input > MAX_RELAY_RESERVATION_COUNT) {
-    return {
-      ok: false,
-      reason: `expected <= ${MAX_RELAY_RESERVATION_COUNT}, got ${input}`,
-    };
-  }
-  return { ok: true, value: input };
-}
-
-export interface DerivedRelayCaps {
-  maxReservations: number;
-  maxConnections: number;
-  maxInboundHopStreams: number;
-  maxOutboundHopStreams: number;
-  maxOutboundStopStreams: number;
-  maxInboundStopStreams: number;
-}
-
-/**
- * Validate an operator-supplied `relayServerCapacity` value. Capacity comes
- * from external config (config.json, env, etc.) so this defends against
- * `0`, negatives, NaN, Infinity, fractional values, non-numbers, and empty
- * strings — any of which would silently produce invalid limits or libp2p
- * startup failures (a `0` capacity, for instance, would cap streams /
- * connections at 0 and brick the relay; a fractional value would propagate
- * into libp2p's `maxConnections` which expects an integer).
- *
- * Returns `null` when the input is unset (so callers can apply their own
- * default). Returns an `{ ok: false }` verdict with a human-readable
- * reason for invalid input — the caller (start()) downgrades to the
- * default and emits an operator-facing warning.
- */
-export type RelayCapacityValidation =
-  | { ok: true; value: number }
-  | { ok: false; reason: string };
-/**
- * Largest `relayServerCapacity` that keeps every derived cap within
- * JavaScript's safe-integer range. `deriveRelayCaps` produces values up
- * to `capacity * RELAY_CAPACITY_MULTIPLIER` and feeds them straight to
- * libp2p config, so the safe ceiling is `MAX_SAFE_INTEGER /
- * RELAY_CAPACITY_MULTIPLIER`. Operator-supplied values above this would
- * silently lose precision when scaled (Codex review on PR #524 round 4
- * — the previous `Number.isInteger` check accepts e.g.
- * `9007199254740993` which fails round-trip equality with itself).
- */
-export const MAX_RELAY_SERVER_CAPACITY = Math.floor(Number.MAX_SAFE_INTEGER / RELAY_CAPACITY_MULTIPLIER);
-export function validateRelayServerCapacity(input: unknown): RelayCapacityValidation | null {
-  if (input == null) return null;
-  if (typeof input !== 'number') {
-    return { ok: false, reason: `expected number, got ${typeof input}` };
-  }
-  if (!Number.isFinite(input)) {
-    return { ok: false, reason: `expected finite number, got ${input}` };
-  }
-  // `isSafeInteger` instead of `isInteger` — the latter accepts values
-  // above 2^53 that have already lost their integer identity (e.g.
-  // `9007199254740993 === 9007199254740992`), which would corrupt the
-  // multiplied caps `deriveRelayCaps` hands to libp2p.
-  if (!Number.isSafeInteger(input)) {
-    return { ok: false, reason: `expected safe integer, got ${input}` };
-  }
-  if (input < 1) {
-    return { ok: false, reason: `expected >= 1, got ${input}` };
-  }
-  if (input > MAX_RELAY_SERVER_CAPACITY) {
-    return {
-      ok: false,
-      reason: `expected <= ${MAX_RELAY_SERVER_CAPACITY} (so capacity × ${RELAY_CAPACITY_MULTIPLIER} stays a safe integer), got ${input}`,
-    };
-  }
-  return { ok: true, value: input };
-}
-
-/**
- * Derive the full relay-related cap set from a single capacity value. The
- * 1:2 ratio is intentional: each reservation costs one long-lived control
- * connection, plus circuits going through this relay open additional
- * HOP+STOP streams (multiplexed) and other peers can connect for non-relay
- * reasons (DHT, gossip, direct dials). Doubling the capacity for streams
- * and connections gives realistic headroom without overcommitting.
- *
- * Throws on invalid input (non-finite, non-integer, < 1) — `start()`
- * gates this with `validateRelayServerCapacity()` so the throw is purely
- * a defensive backstop for direct callers.
- */
-export function deriveRelayCaps(capacity: number): DerivedRelayCaps {
-  if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > MAX_RELAY_SERVER_CAPACITY) {
-    throw new TypeError(
-      `deriveRelayCaps: capacity must be a safe positive integer ` +
-        `<= ${MAX_RELAY_SERVER_CAPACITY}, got ${capacity}`,
-    );
-  }
-  const streamCap = capacity * RELAY_CAPACITY_MULTIPLIER;
-  return {
-    maxReservations: capacity,
-    maxConnections: streamCap,
-    maxInboundHopStreams: streamCap,
-    maxOutboundHopStreams: streamCap,
-    maxOutboundStopStreams: streamCap,
-    maxInboundStopStreams: streamCap,
-  };
-}
-
-/**
- * Severity of a `checkFdLimit` log emission. The "ok" path is
- * deliberately `info` — emitting it via `console.warn` would make the
- * level unreliable for operator alerting (every healthy startup would
- * trip warning-level filters). Only the under-provisioned and
- * unreadable-limit paths are `warn`.
- */
-export type FdLimitLogLevel = 'info' | 'warn';
-
-/**
- * Emit an informational/warning log at relay startup about the host's
- * `ulimit -n` (RLIMIT_NOFILE) versus what the configured maxConnections
- * actually needs. We can read this losslessly from
- * `process.report.getReport().userLimits.open_files` on POSIX (libp2p
- * Core Nodes are POSIX-only in practice).
- *
- * Why this matters: libp2p's maxConnections is an upper bound libp2p
- * tracks internally; if the kernel rejects the underlying socket() with
- * EMFILE before libp2p hits its own cap, the only signal is opaque
- * "peer rejected" errors in logs. Surfacing the discrepancy at startup
- * gives operators a loud, actionable signal.
- *
- * The callback receives `(level, msg)` so consumers can route each
- * emission to the appropriate logger sink (info vs warn). Mapping the
- * "ok" line to `info` keeps the warn channel meaningful for alerting.
- */
-export function checkFdLimit(
-  maxConnections: number,
-  log: (level: FdLimitLogLevel, msg: string) => void,
-): void {
-  const recommended = Math.max(4096, maxConnections * RELAY_CAPACITY_MULTIPLIER);
-  try {
-    const report = (process as any).report?.getReport?.();
-    const openFiles = report?.userLimits?.open_files;
-    const soft = openFiles?.soft;
-    if (typeof soft === 'number') {
-      if (soft < recommended) {
-        log(
-          'warn',
-          `relay server enabled with maxConnections=${maxConnections}, ` +
-            `but host ulimit -n soft=${soft} is below the recommended ${recommended} ` +
-            `(= max(4096, maxConnections × 2)). The kernel will reject new ` +
-            `socket() calls with EMFILE once the daemon hits the limit, ` +
-            `manifesting as silent peer rejections. Bump with ` +
-            `'ulimit -n ${recommended}' (shell), 'LimitNOFILE=${recommended}' (systemd unit), ` +
-            `or '--ulimit nofile=${recommended}:${recommended}' (Docker).`,
-        );
-      } else {
-        log(
-          'info',
-          `relay server: ulimit -n soft=${soft} >= recommended ${recommended}, ok`,
-        );
-      }
-    } else {
-      log(
-        'warn',
-        `relay server: could not read host ulimit -n via process.report.userLimits; ` +
-          `ensure ulimit -n >= ${recommended} on this host`,
-      );
-    }
-  } catch (err: any) {
-    log(
-      'warn',
-      `relay server: error reading ulimit -n (${err?.message ?? String(err)}); ` +
-        `ensure ulimit -n >= ${recommended} on this host`,
-    );
-  }
-}
 
 interface RelayTarget {
   peerId: ReturnType<typeof peerIdFromString>;
@@ -534,47 +347,6 @@ interface RelayTarget {
  * Circuit-relay addresses are checked separately by callers because the
  * "peer record is dialable" signal merges both classes.
  */
-export function isLocalOrInternalHostname(host: string): boolean {
-  if (typeof host !== 'string' || host.length === 0) return true;
-  const h = host.toLowerCase();
-  if (h === 'localhost') return true;
-  if (h.endsWith('.local') || h.endsWith('.localhost')) return true;
-  if (h.endsWith('.test') || h.endsWith('.example')) return true;
-  if (h.endsWith('.invalid') || h.endsWith('.localdomain')) return true;
-  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(h)) return true;
-  if (/^\[?[0-9a-f:]+\]?$/.test(h) && h.includes(':')) return true;
-  if (!h.includes('.')) return true;
-  return false;
-}
-
-export function isPublicLikeAddress(addr: string): boolean {
-  const dnsMatch = addr.match(/^\/(?:dns|dns4|dns6|dnsaddr)\/([^/]+)\//);
-  if (dnsMatch) return !isLocalOrInternalHostname(dnsMatch[1]);
-  const ipv4 = addr.match(/^\/ip4\/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\//);
-  if (ipv4) {
-    const o = ipv4[1].split('.').map(Number);
-    if (o.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return false;
-    if (o[0] === 0 || o[0] === 127) return false;
-    if (o[0] === 10) return false;
-    if (o[0] === 172 && o[1] >= 16 && o[1] <= 31) return false;
-    if (o[0] === 192 && o[1] === 168) return false;
-    if (o[0] === 169 && o[1] === 254) return false;
-    if (o[0] === 100 && o[1] >= 64 && o[1] <= 127) return false;
-    if (o[0] >= 224) return false;
-    return true;
-  }
-  const ipv6 = addr.match(/^\/ip6\/([^/]+)\//);
-  if (ipv6) {
-    const ip = ipv6[1].toLowerCase();
-    if (ip === '::' || ip === '::1') return false;
-    if (ip.startsWith('fe80')) return false;
-    if (/^f[cd]/.test(ip)) return false;
-    if (ip.startsWith('ff')) return false;
-    return true;
-  }
-  return false;
-}
-
 /**
  * True when the node advertises at least one DIRECT (non-circuit) public
  * self-address — i.e. peers can dial it without a relay hop. Such a node does
@@ -642,6 +414,13 @@ export class DKGNode {
    * the config.
    */
   private relayCapacity: number | null = null;
+  /**
+   * Transport-level network isolation for the running libp2p instance
+   * (other-network relays + identity-rejected peers). Null when the node has
+   * no `networkIdentity`, runs with `networkPeerIsolation: false`, or is not
+   * started.
+   */
+  private networkPeerDialPolicy: NetworkPeerDialPolicy | null = null;
   /**
    * AbortController whose signal is wired into long-await sites
    * (currently: `ProtocolRouter.readAll` via `stopSignal` below). PR-6:
@@ -974,45 +753,41 @@ export class DKGNode {
       : undefined;
     const activeRelayNetworkPolicy = buildActiveRelayNetworkPolicy(
       activeNetworkRelayPeerIds,
-      (message) => console.warn(`[${new Date().toISOString()}] ${message}`),
+      { log: (message) => console.warn(`[${new Date().toISOString()}] ${message}`) },
     );
-    const activeRelayDiscoveryFilter = activeRelayNetworkPolicy?.discoveryFilter;
+    // The relay-path policy above only gates `/p2p-circuit` paths. This one
+    // refuses DIRECT dials to peers known to belong to another DKG network
+    // (other bundled networks' relays, peers that failed the identity proof)
+    // and keeps their addresses out of the peer store, so kad-dht, circuit
+    // relay discovery and the reconnect queue cannot keep re-dialing them.
+    // `networkPeerIsolation: false` is the operator kill switch: the node then
+    // keeps exactly the pre-existing gater.
+    const networkPeerDialPolicy = activeNetworkRelayPeerIds && this.config.networkPeerIsolation !== false
+      ? new NetworkPeerDialPolicy({
+          selfPeerId: selfPeerIdEarly.toString(),
+          configuredRelayPeerIds: activeNetworkRelayPeerIds,
+          otherNetworkRelayPeerIds: (this.config.otherNetworkRelays ?? [])
+            .map((address) => peerIdFromRelayAddress(address))
+            .filter((peerId): peerId is string => peerId !== undefined),
+          log: (message) => console.log(`[${new Date().toISOString()}] ${message}`),
+          warn: (message) => console.warn(`[${new Date().toISOString()}] ${message}`),
+        })
+      : null;
 
     // TCP keepAlive helps prevent idle relay connections from being dropped by
     // middleboxes or remote timeouts (common cause of ECONNRESET).
     const transports: any[] = [
       tcp({ dialOpts: { keepAlive: true } }),
       webSockets(),
-      // STOP stream caps default to 300 in libp2p; on a Core Node holding
-      // 1024+ reservations that's a lower ceiling than maxReservations
-      // implies. Bump the transport-side caps to match the server-side
-      // capacity. Edge nodes keep the upstream defaults (passing
-      // undefined here is the same as omitting the field).
-      //
-      // reservationConcurrency controls how many reservations libp2p will
-      // attempt in parallel on different relays. Default upstream is 1,
-      // which serializes our N pending /p2p-circuit slots and effectively
-      // collapses multi-reservation back to single-reservation. Set to
-      // relayReservationCount so all N slots are attempted concurrently
-      // at startup. Only set on EDGE nodes with relayPeers — core /
-      // relay-server nodes don't multi-reserve through other relays.
-      circuitRelayTransport(
-        relayCaps
-          ? {
-              maxInboundStopStreams: relayCaps.maxInboundStopStreams,
-              maxOutboundStopStreams: relayCaps.maxOutboundStopStreams,
-              ...(activeRelayDiscoveryFilter ? { discoveryFilter: activeRelayDiscoveryFilter } : {}),
-              ...(isEdgeWithRelays
-                ? { reservationConcurrency: relayReservationCount }
-                : {}),
-            }
-          : isEdgeWithRelays
-            ? {
-                reservationConcurrency: relayReservationCount,
-                ...(activeRelayDiscoveryFilter ? { discoveryFilter: activeRelayDiscoveryFilter } : {}),
-              }
-            : undefined,
-      ),
+      // Stop-stream caps, parallel reservations (edges with relayPeers only)
+      // and the relay allowlist are applied in relay-client-transport.ts.
+      buildRelayClientTransport({
+        relayCaps,
+        reservationConcurrency: isEdgeWithRelays ? relayReservationCount : undefined,
+        networkPolicy: activeRelayNetworkPolicy,
+        log: (message) => console.log(`[${new Date().toISOString()}] ${message}`),
+        warn: (message) => console.warn(`[${new Date().toISOString()}] ${message}`),
+      }),
     ];
 
     // Nodes that already know their NAT status skip autoNAT probing:
@@ -1030,7 +805,7 @@ export class DKGNode {
       !(usableRelayCandidates.length > 0 || enableRelay);
 
     const services: Record<string, any> = {
-      identify: identify(),
+      identify: identify(), identifyPush: identifyPush(),
       ping: ping(),
       dht: kadDHT(buildKadDHTOptions(
         this.config,
@@ -1116,7 +891,13 @@ export class DKGNode {
           // 2h) so operators tuning relay behaviour see the value
           // here instead of having to grep upstream.
           reservationTtl: RELAY_RESERVATION_TTL_MS,
-          defaultDataLimit: BigInt(1 << 24),
+          // Durable graph syncs regularly exceed the previous 16 MiB
+          // per-circuit ceiling. Hitting that ceiling resets an otherwise
+          // healthy relayed connection mid-page and forces the requester to
+          // retry from its last safe graph checkpoint. Raising the forwarding
+          // allowance does not pre-allocate memory; it only permits a circuit
+          // to carry a realistic multi-KA catch-up before its 30-minute limit.
+          defaultDataLimit: BigInt(256 * 1024 * 1024),
         },
       });
       // Route the ulimit log emission to the appropriate console sink
@@ -1213,7 +994,10 @@ export class DKGNode {
       streamMuxers: [yamux()],
       peerDiscovery,
       services,
-      connectionGater: this.createRelayConnectionGater(activeRelayNetworkPolicy?.connectionGater),
+      connectionGater: this.createConnectionGater(
+        activeRelayNetworkPolicy?.connectionGater,
+        networkPeerDialPolicy?.connectionGater,
+      ),
       connectionManager: {
         minConnections: 0,
         // Core Nodes scale this with relayServerCapacity (default
@@ -1228,6 +1012,7 @@ export class DKGNode {
       ...(this.relayMetrics ? { metrics: () => this.relayMetrics! } : {}),
     } as any);
     this.stopAbortController = startStopAbortController;
+    this.networkPeerDialPolicy = networkPeerDialPolicy;
 
     this.setupConnectionObservability();
 
@@ -1570,6 +1355,22 @@ export class DKGNode {
           this.relayForcedRedialState.set(relayPidStr, { ...redialState, strikes, busyDeferralTicks: 0 });
         }
 
+        // Past the busy-deferral cap, reap the stuck application streams while
+        // the transport is still writable. Letting `Connection.close()` abort
+        // them concurrently with the underlying socket close can make Yamux's
+        // reset frame race the socket teardown (`StreamStateError: Cannot write
+        // to a stream that is closing`). Besides surfacing as an unhandled
+        // rejection, that race defeats the cap's explicit stuck-stream-reaper
+        // purpose. Aborting first gives the reset a turn to flush before the
+        // connection itself is closed.
+        if (busyProtocols.length > 0) {
+          abortWatchdogBusyStreams(
+            [...conns, ...relayedConns],
+            new Error('relay watchdog busy-deferral cap reached'),
+          );
+          await new Promise(r => setTimeout(r, 0));
+        }
+
         for (const c of conns) {
           try {
             await c.close();
@@ -1661,7 +1462,10 @@ export class DKGNode {
     }
   }
 
-  private createRelayConnectionGater(activeRelayGater?: RelayedConnectionGater): ConnectionGater {
+  private createConnectionGater(
+    activeRelayGater?: SyncConnectionGater,
+    networkPeerGater?: SyncConnectionGater,
+  ): ConnectionGater {
     const ts = () => new Date().toISOString();
     // The gater hooks live in a pure builder (relay-flap-guard.ts) so the wiring
     // is unit-tested (relay-flap-guard.test.ts) — a hook arg-shape or plumbing
@@ -1670,14 +1474,11 @@ export class DKGNode {
       this.relayFlapGuard,
       (message) => console.warn(`[${ts()}] ${message}`),
     );
-    return {
-      denyInboundRelayedConnection: (relay, remotePeer) =>
-        activeRelayGater?.denyInboundRelayedConnection(relay, remotePeer) ||
-        flapGater.denyInboundRelayedConnection(relay, remotePeer),
-      denyDialMultiaddr: (multiaddr) =>
-        activeRelayGater?.denyDialMultiaddr(multiaddr) ||
-        flapGater.denyDialMultiaddr(multiaddr),
-    } as ConnectionGater;
+    // Consulted in this order; the first denial wins. The network policies are
+    // absent without a network identity (or with the peer-isolation kill
+    // switch off), so such a node keeps exactly the flap guard's hooks and
+    // libp2p's defaults for the rest, including its store-every-address filter.
+    return combineConnectionGaters([activeRelayGater, networkPeerGater, flapGater]);
   }
 
   /**
@@ -1742,6 +1543,10 @@ export class DKGNode {
             relayPeerId: relayPath.relayPeerId,
             remotePeerId: pid,
             durationMs,
+            // libp2p's connection:close event carries no reliable failure
+            // reason. A one-shot DKG request/response relay circuit normally
+            // closes in <1s, so duration alone must never poison the route.
+            confirmedFailure: false,
           });
           if (result.enteredQuarantine) {
             console.warn(
@@ -1824,6 +1629,7 @@ export class DKGNode {
     this.relayMetrics = null;
     this.relayCapacity = null;
     this.relayReservationCountTarget = 1;
+    this.networkPeerDialPolicy = null;
     const node = this.node;
     try {
       await node.stop();
@@ -1855,6 +1661,37 @@ export class DKGNode {
 
   get isStarted(): boolean {
     return this.node !== null;
+  }
+
+  /**
+   * Relay candidates after the node startup pipeline has parsed addresses,
+   * canonicalized peer ids, removed self references, and merged duplicates.
+   * Consumers must use this snapshot rather than reinterpret raw relayPeers.
+   */
+  getConfiguredRelayTargets(): ConfiguredRelayTarget[] {
+    return this.relayTargets.map(({ peerId, addrs }) => ({
+      peerId: peerId.toString(),
+      addresses: addrs.map((addr) => addr.toString()),
+    }));
+  }
+
+  /**
+   * Refuse connections with a peer that failed the network-identity proof, in
+   * both directions, and stop storing its addresses, for `durationMs`: pass the
+   * admission quarantine just applied so the two windows cannot drift (default
+   * 5 min). Call this BEFORE closing the peer's connections: libp2p's reconnect
+   * queue reacts to the disconnect by redialing keep-alive-tagged peers.
+   * Returns false when transport isolation is inactive (not started, no
+   * `networkIdentity`, or `networkPeerIsolation: false`) or the id is this
+   * node's own or unparseable.
+   */
+  denyPeerAfterNetworkMismatch(peerId: string, durationMs?: number): boolean {
+    return this.networkPeerDialPolicy?.denyAfterNetworkMismatch(peerId, durationMs) ?? false;
+  }
+
+  /** Lift a mismatch dial denial once the peer proved it belongs to this network. */
+  clearPeerNetworkMismatchDenial(peerId: string): void {
+    this.networkPeerDialPolicy?.clearNetworkMismatchDenial(peerId);
   }
 
   /**

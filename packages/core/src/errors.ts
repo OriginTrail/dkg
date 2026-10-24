@@ -23,7 +23,43 @@ export class DKGError extends Error {
  * node-ui. dkg-chain re-exports NO_FUNDED_PUBLISHER_WALLET_CODE for chain-side
  * imports.
  */
+/** Safe cross-package contract for inconclusive strict PCA funding reads. */
+export const PCA_FUNDING_UNKNOWN_CODE = 'PCA_FUNDING_UNKNOWN';
+export const PCA_FUNDING_UNKNOWN_MESSAGE = 'PCA funding verification is inconclusive; retry when chain reads recover.';
+
 export const NO_FUNDED_PUBLISHER_WALLET_CODE = 'NO_FUNDED_PUBLISHER_WALLET';
+
+/**
+ * GH#1786 — the node cannot re-sign an `UpdateAuthorAttestation` for this author (no
+ * custodial key on file, and the author is not the publisher EOA).
+ *
+ * Shared here for the same reason as the funded-wallet code above: it crosses packages. The
+ * agent raises it, the daemon route maps it to a 409, and the publisher's async-job
+ * classifier must recognise it as a PERMANENT author-capability failure. Without that last
+ * consumer it falls through to the retryable `rpc_unavailable` default and the queue keeps
+ * resetting a job that can never finalize — the forever-retry trap #1013/#1121 fixed for
+ * unfundable publishes.
+ */
+export const PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE = 'PUBLISH_AUTHOR_NOT_CUSTODIAL';
+
+/**
+ * The rest of the publish-author-selection error protocol (GH#1778, GH#1786). Same reason as
+ * the code above: the agent raises these, the daemon route turns each into a specific 409
+ * body, and clients branch on the wire code. They were literals on both sides of that
+ * boundary — a rename or typo in the agent would silently bypass the daemon mapper and fall
+ * through to an opaque 500, with no compiler or test to catch it. The VALUES are the wire
+ * contract and must not change; the names are what consumers should import.
+ */
+export const AMBIGUOUS_ASSERTION_AUTHOR_CODE = 'AMBIGUOUS_ASSERTION_AUTHOR';
+export const ASSERTION_AUTHOR_NOT_RESIDENT_CODE = 'ASSERTION_AUTHOR_NOT_RESIDENT';
+export const PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE = 'PUBLISH_AUTHOR_SELECTION_CONFLICT';
+/**
+ * GH#3294 — the queued VM publish lane cannot take another node's KA. A node
+ * that holds an author's seal and share (a curator keeps both from the share)
+ * does not hold the author's lifecycle record, which the queued lane checks;
+ * the synchronous `vm/publish` publishes from the seal and the share.
+ */
+export const ASYNC_PUBLISH_FOREIGN_AUTHOR_CODE = 'ASYNC_PUBLISH_FOREIGN_AUTHOR';
 
 /** The literal prefix every InsufficientPublisherFundsError message starts with.
  *  The chain formatter builds the message from this; consumers that only have a
@@ -42,6 +78,70 @@ const NO_FUNDED_PUBLISHER_WALLET_MARKER = new RegExp(
 export function messageIndicatesNoFundedPublisherWallet(message: unknown): boolean {
   return typeof message === 'string' && NO_FUNDED_PUBLISHER_WALLET_MARKER.test(message);
 }
+
+/** The literal fragment every non-custodial-author publish message contains. The agent
+ *  builds its message from {@link formatPublishAuthorNotCustodialMessage}; consumers holding
+ *  only a (possibly re-wrapped, code-stripped) message match on it via
+ *  {@link messageIndicatesPublishAuthorNotCustodial}. Emitter and classifier share this
+ *  constant so re-wording the message can never silently un-classify the failure. */
+export const PUBLISH_AUTHOR_NOT_CUSTODIAL_MESSAGE_MARKER =
+  'cannot re-sign UpdateAuthorAttestation';
+
+const PUBLISH_AUTHOR_NOT_CUSTODIAL_MARKER = new RegExp(
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_MESSAGE_MARKER,
+  'i',
+);
+
+/** The canonical CONDITION sentence for {@link PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE}: what is
+ *  true, and why. Built here, beside the marker it must keep containing, rather than inline at
+ *  the throw site — so a re-wording cannot un-classify the failure downstream.
+ *
+ *  Deliberately transport-neutral. Remediation ("call X instead") is presentation owned by the
+ *  layer that has an endpoint to name; this package is shared with non-HTTP consumers and
+ *  must not encode one API's route names. Throw sites append their own guidance. */
+export function formatPublishAuthorNotCustodialMessage(authorAddress: string): string {
+  return `${PUBLISH_AUTHOR_NOT_CUSTODIAL_MESSAGE_MARKER} for author ${authorAddress} — no `
+    + `custodial key on file and it is not the publisher EOA.`;
+}
+
+/** True iff a message string indicates a non-custodial-author publish failure — the
+ *  fallback used when the structured `.code` was lost to a re-wrap. */
+export function messageIndicatesPublishAuthorNotCustodial(message: unknown): boolean {
+  return typeof message === 'string' && PUBLISH_AUTHOR_NOT_CUSTODIAL_MARKER.test(message);
+}
+
+/**
+ * GH#3049 — a root promote, or the SWM staging of an update, is refused while the RFC-64 legacy
+ * SWM boundary retirement holds its fence (the asset's, or the context graph's). The fence is transient: it ends with
+ * the retirement. The refusal carries this code and each consumer decides what it means for it:
+ * the agent's promote callback makes it a retryable promote failure, the publisher's async-lift
+ * classifier records an update refused at staging as `workspace_unavailable` (auto-retry), and
+ * the daemon's promote worker names it in its attempt log. Shared here because it crosses those
+ * packages; the wire value is part of the contract.
+ */
+export const RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE =
+  'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS';
+
+/** Structural and throw-safe: it holds across duplicated module copies and for a hostile `code` getter. */
+export function isRfc64LegacySwmBoundaryRetirementInProgressError(error: unknown): boolean {
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) return false;
+  try {
+    return Reflect.get(error, 'code') === RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * An unscoped query whose dataset or read-authority facts changed while it ran: the agent
+ * withholds the result and raises this code with `retryable: true`, and the daemon answers a
+ * retryable 503 that carries the same sentence. Shared here because it crosses those packages:
+ * each side imports the code and the sentence, so neither can drift from the other. Both
+ * values are part of the wire contract.
+ */
+export const UNSCOPED_QUERY_INVALIDATED_CODE = 'UNSCOPED_QUERY_INVALIDATED';
+export const UNSCOPED_QUERY_INVALIDATED_MESSAGE =
+  'Unscoped query dataset or read authority changed; retry the query or specify contextGraphId';
 
 /**
  * An error caused by invalid user input or a pre-condition that the user
@@ -124,4 +224,15 @@ export function hasErrorCode(err: unknown, code: string): boolean {
     'code' in err &&
     (err as NodeJS.ErrnoException).code === code
   );
+}
+
+/** Strict query denial is opt-in; legacy callers retain empty-per-form results. */
+export const QUERY_ACCESS_DENIED_CODE = 'QUERY_ACCESS_DENIED';
+export const QUERY_ACCESS_DENIED_MESSAGE = 'Context Graph read denied';
+export class QueryAccessDeniedError extends Error {
+  readonly code = QUERY_ACCESS_DENIED_CODE;
+  constructor() { super(QUERY_ACCESS_DENIED_MESSAGE); this.name = 'QueryAccessDeniedError'; }
+}
+export function isQueryAccessDeniedError(error: unknown): error is { code: typeof QUERY_ACCESS_DENIED_CODE } {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === QUERY_ACCESS_DENIED_CODE;
 }

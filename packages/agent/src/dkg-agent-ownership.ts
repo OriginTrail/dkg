@@ -115,8 +115,7 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
-  type LiftRequest, type LiftRequestAuthorSeal,
+  type CollectedACK,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
@@ -229,8 +228,8 @@ import {
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
-import { reconcileContextGraph, ReconcileCoalescer, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
+import { FinalizationHandler } from './finalization-handler.js';
+import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
@@ -315,7 +314,6 @@ import {
   type LocalSwmSenderKeySendState,
   type LocalSwmSenderKeyReceiveState,
   type PendingSenderKeyEntry,
-  type RandomSamplingStartResult,
   type ACKSignerResolution,
   type SyncRequestEnvelope,
   type CclPublishedResultEntry,
@@ -347,9 +345,6 @@ import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
-  partitionPublishAsyncQuads,
-  signWithPrivateKey,
-  preSignedAttestationToLiftSeal,
   normalizeAgentDid,
   joinDelegationScope,
   normalizeSyncPhase,
@@ -379,6 +374,16 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+
+/** A caller is authenticated but does not own the context graph policy boundary. */
+export class ContextGraphPolicyAuthorizationError extends Error {
+  readonly code = 'CCL_POLICY_FORBIDDEN' as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'ContextGraphPolicyAuthorizationError';
+  }
+}
 
 export class OwnershipMethods extends DKGAgentBase {
   public async getCclPolicyByUri(this: DKGAgent, policyUri: string, opts: { includeBody?: boolean } = {}): Promise<CclPolicyRecord | null> {
@@ -426,7 +431,10 @@ export class OwnershipMethods extends DKGAgentBase {
       throw new Error(`ContextGraph "${contextGraphId}" has no registered owner; cannot manage policies.`);
     }
     if (!this.isCallerOrNodeOwner(owner, callerAgentAddress)) {
-      throw new Error(`Only the contextGraph owner can manage policies for "${contextGraphId}". Owner=${owner}, caller=${`did:dkg:agent:${callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`}`);
+      throw new ContextGraphPolicyAuthorizationError(
+        `Only the contextGraph owner can manage policies for "${contextGraphId}". ` +
+          `Owner=${owner}, caller=${`did:dkg:agent:${callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`}`,
+      );
     }
   }
 
@@ -533,9 +541,10 @@ export class OwnershipMethods extends DKGAgentBase {
    *   3. `signerAddress` property (mock adapter and parity tests).
    *   4. `getOperationalPrivateKey()` (legacy adapters).
    *
-   * Returning `undefined` triggers the round-5 "fail closed" branch
-   * in `registerContextGraph`: PCA registration is rejected because
-   * the invariant cannot be verified.
+   * Returning `undefined` triggers the fail-closed branch in
+   * `registerContextGraph`: PCA registration is rejected because neither
+   * owner nor exact-PCA agent authorization can be verified and the local
+   * curator cannot be aligned with the minted CG NFT owner.
    */
   async getRegistrationTxSignerAddress(this: DKGAgent): Promise<string | undefined> {
     const chain = this.chain;
@@ -615,45 +624,38 @@ export class OwnershipMethods extends DKGAgentBase {
   // `registerContextGraph`.
 
   /**
-   * Return true when `senderPeerId` is currently acting as the curator
-   * of `contextGraphId`. Used as a minimal anti-spoof gate on join
-   * lifecycle notifications (approve/reject) — those arrive unsigned
-   * over p2p, so without this check any peer that knows a local
-   * agent's address could forge a rejection and drive our UI into a
-   * false "denied" state (Codex tier-4k N27).
-   *
-   * Resolution order:
-   *  1. If the CG's recorded curator is a peer-ID DID
-   *     (`did:dkg:agent:<libp2p-peer-id>`, legacy/creator path), match
-   *     directly against `senderPeerId`.
-   *  2. Otherwise the CG was registered with a wallet-scoped curator
-   *     (`did:dkg:agent:0x…`). Consult the agent registry and accept
-   *     the sender iff the curator agent's currently advertised peer
-   *     ID matches. Registry lookup is cheap (local graph query).
-   *
-   * A missing curator / registry failure is treated as "not curator"
-   * — we'd rather drop a real rejection than surface a forged one.
-   */
-  /**
    * Authorise the sender of a join-approved/rejected notification for
    * `(contextGraphId, agentAddress)`. Tries two sources, in order:
    *
-   *   1. `joinRequestAcceptedBy` — peers that returned `{ok: true}`
-   *      to our broadcast in `forwardJoinRequest`. This is the only
-   *      check that works for the freshly-rejected case (no _meta
-   *      access yet).
-   *   2. `senderIsContextGraphCurator` — meta-graph curator lookup
-   *      with registry fallback. This catches the case where we
-   *      restarted between submit and decision (in-memory map lost),
-   *      or where we're an already-approved member receiving a later
-   *      decision (we have meta access from the prior approval).
+   *   1. The invite-supplied curator persisted with this exact requester
+   *      generation. Persisting it before transport both closes the
+   *      immediate-decision race and survives requester restart.
+   *   2. `joinRequestAcceptedBy` — the legacy in-memory record of peers that
+   *      accepted or durably queued this exact request generation.
+   *   3. `senderIsContextGraphCurator` — meta-graph curator lookup with
+   *      registry fallback for already-approved members.
    */
   public async isTrustedJoinDecisionSender(this: DKGAgent,
     contextGraphId: string,
     agentAddress: string,
+    requestGeneration: string,
     senderPeerId: string,
   ): Promise<boolean> {
-    const acceptedKey = `${contextGraphId}::${agentAddress.toLowerCase()}`;
+    const requesterState = await this.readRequesterJoinRequestState(
+      contextGraphId,
+      agentAddress,
+    );
+    if (
+      requesterState?.requestGeneration === requestGeneration &&
+      requesterState.curatorPeerId === senderPeerId
+    ) {
+      return true;
+    }
+    const acceptedKey = this.joinRequestTrackingKey(
+      contextGraphId,
+      agentAddress,
+      requestGeneration,
+    );
     const accepted = this.joinRequestAcceptedBy.get(acceptedKey);
     if (accepted?.has(senderPeerId)) return true;
     return this.senderIsContextGraphCurator(contextGraphId, senderPeerId);
@@ -679,7 +681,11 @@ export class OwnershipMethods extends DKGAgentBase {
     return false;
   }
 
-  async getContextGraphOwner(this: DKGAgent, contextGraphId: string): Promise<string | null> {
+  async getContextGraphOwner(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<string | null> {
     // Prefer the curator (wallet-scoped owner) so per-agent authorization
     // works on multi-agent nodes. Fall back to the creator (libp2p peer ID)
     // for legacy CGs created before the curator triple existed.
@@ -691,9 +697,9 @@ export class OwnershipMethods extends DKGAgentBase {
     // that preference, the LIMIT-1 lookup here would non-deterministically
     // pick a foreign curator and lock the real local curator out of
     // manage-participants / rename / policy operations.
-    const curatorOwner = await this.getContextGraphCurator(contextGraphId);
+    const curatorOwner = await this.getContextGraphCurator(contextGraphId, options);
     if (curatorOwner) return curatorOwner;
-    const fromCreator = await this.getContextGraphCreator(contextGraphId);
+    const fromCreator = await this.getContextGraphCreator(contextGraphId, options);
     if (fromCreator) return fromCreator;
     // Final fallback: V10 wallet-scoped cgId convention (`0x.../<name>`)
     // encodes the curator structurally, which lets us answer for CGs
@@ -711,7 +717,7 @@ export class OwnershipMethods extends DKGAgentBase {
     // create stray `_meta` rows for graphs that were never created
     // here. The fallback is meant to rescue real-but-half-registered
     // graphs, not impersonate ownership of unknown ones.
-    const exists = await this.contextGraphExists(contextGraphId);
+    const exists = await this.contextGraphExists(contextGraphId, options);
     if (!exists) return null;
     return deriveCuratorDidFromCgId(contextGraphId);
   }
@@ -868,8 +874,12 @@ export class OwnershipMethods extends DKGAgentBase {
    * Emitted approve/revoke binding metadata must use this value so remote
    * peers validating via `gossip-publish-handler` see a matching owner.
    */
-  async getContextGraphCreator(this: DKGAgent, contextGraphId: string): Promise<string | null> {
-    return (await this.getCgMeta(contextGraphId)).creator ?? null;
+  async getContextGraphCreator(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<string | null> {
+    return (await this.getCgMeta(contextGraphId, { signal: options.signal })).creator ?? null;
   }
 
   public async listCclPolicyBindings(this: DKGAgent, opts: {

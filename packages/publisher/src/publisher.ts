@@ -1,7 +1,21 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { OnChainPublishResult } from '@origintrail-official/dkg-chain';
+import type { OnChainPublishResult, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
+
+/**
+ * GH#2270 PR #2300 — what the durable write-ahead records: the chain's own
+ * {@link PreBroadcastSignal} (the signed transaction's hash and reserved nonce) plus the branch
+ * that produced it. The split is the layering: the adapter knows the TRANSACTION, the publisher
+ * knows WHICH OPERATION it signed, and recovery needs both — absence-release is create-only, and a
+ * persisted job cannot be re-classified after the fact. It lives HERE, beside the publish contract
+ * that exposes it (r4, 3811993670), so the concrete implementation depends on the contract and not
+ * the other way round.
+ */
+export interface PreBroadcastRecord extends PreBroadcastSignal {
+  readonly operationKind: 'create' | 'update';
+}
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { TrustedCatalogTripleKeys } from './catalog-trust.js';
+import type { PublicationPricingPolicy } from './publication-pricing.js';
 
 export const DEFAULT_PUBLISH_EPOCHS = 12;
 /** PublishIntent encodes epochs as uint32; reject larger overrides before wire encoding. */
@@ -88,6 +102,15 @@ export interface V10ACKProviderBaseParams {
   merkleLeafCount: number;
   /** Canonical KA UAL used by receiver-side lifecycle logs. */
   assetUal?: string;
+  /** Complete rootless-KA content envelope; omitted together for legacy ACKs. */
+  contentScopeVersion?: number;
+  kaUal?: string;
+  assertionVersion?: string;
+  publicTripleCount?: number;
+  privateMerkleRoot?: Uint8Array;
+  privateTripleCount?: number;
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers?: string[];
 }
 
 export type V10ACKProviderParams =
@@ -177,6 +200,13 @@ export type V10UpdateACKProvider = (params: {
   /** Source SWM graph id (defaults to contextGraphId). */
   swmGraphId?: string;
   subGraphName?: string;
+  /** Complete rootless-KA envelope; omitted together for legacy updates. */
+  contentScopeVersion?: number;
+  kaUal?: string;
+  assertionVersion?: string;
+  publicTripleCount?: number;
+  privateMerkleRoot?: Uint8Array;
+  privateTripleCount?: number;
 }) => Promise<V10CoreNodeACK[]>;
 
 /**
@@ -187,10 +217,57 @@ export type ParticipantSignatureProvider = (
   merkleRoot: string,
 ) => Promise<ReceiverSignature[]>;
 
-export interface PublishOptions {
+/** Pre-computed author seal for an initial on-chain publication. */
+export interface PrecomputedPublishAttestation {
+  expectedMerkleRoot: Uint8Array;
+  authorAddress: string;
+  signature: { r: Uint8Array; vs: Uint8Array };
+  schemeVersion: number;
+  /** Packed KA id covered by the author attestation. */
+  reservedKaId: bigint;
+}
+
+/** Pre-computed owner seal for an on-chain update. */
+export interface PrecomputedUpdateAttestation {
+  expectedNewMerkleRoot: Uint8Array;
+  authorAddress: string;
+  signature: { r: Uint8Array; vs: Uint8Array };
+  schemeVersion: number;
+}
+
+
+/**
+ * r10 (3877910013) — the canonical transaction-lifecycle hook contract: the subset of
+ * {@link BasePublicationOptions} that must travel UNCHANGED through every publish boundary (agent
+ * queued execution, update forwarding, publisher entry points). Boundaries carry this as one
+ * unit via the internal `pickPublishLifecycleHooks` helper instead of naming fields by hand.
+ */
+export type PublishLifecycleHooks = Pick<
+  BasePublicationOptions,
+  'onPhase' | 'onBeforeBroadcast' | 'onBroadcastAccepted' | 'onPublishConfirmed'
+>;
+
+/** Fields genuinely shared by initial publications and updates. */
+export interface BasePublicationOptions {
   contextGraphId: string;
   quads: Quad[];
   privateQuads?: Quad[];
+  /**
+   * Content-scope discriminator for the rootless KA model. Supplying any of
+   * the graph-scope fields requires version 2; legacy root-scoped KAs are
+   * deliberately read-only and cannot enter publish/update mutation paths.
+   */
+  contentScopeVersion?: number;
+  /** Canonical deterministic `did:dkg:<chain>/<author>/<number>` identity. */
+  kaUal?: string;
+  /** One-based assertion/Merkle-root version for this exact KA graph. */
+  assertionVersion?: string | number | bigint;
+  /** Exact public triple count committed by the graph-scoped envelope. */
+  publicTripleCount?: number;
+  /** Optional expected single KA-level private commitment. */
+  privateMerkleRoot?: Uint8Array;
+  /** Exact private triple count committed by `privateMerkleRoot`. */
+  privateTripleCount?: number;
   /** Publisher peer ID used for KC ownership/access metadata. */
   publisherPeerId?: string;
   /** KC-level private access policy metadata. */
@@ -206,8 +283,48 @@ export interface PublishOptions {
    * revealing others). Off by default — the flat hash is simpler and cheaper.
    */
   entityProofs?: boolean;
-  /** Optional callback invoked at each phase boundary for instrumentation. */
+  /**
+   * Optional callback invoked at each phase boundary for INSTRUMENTATION ONLY.
+   *
+   * GH#2270 PR-3 r2 — nothing durable may hang off this. Phases are strings on a 2-argument
+   * callback with no schema, so a listener that needed a fact had to parse it back out of a
+   * name and depend on emission order; `onBeforeBroadcast` below is where a durability hook
+   * belongs.
+   */
   onPhase?: PhaseCallback;
+  /**
+   * GH#2270 PR-3 r2 — the durable pre-send write-ahead boundary, typed and awaited.
+   *
+   * Invoked with the SIGNED transaction's identity strictly before it goes on the wire, and
+   * fail-closed: a throw aborts the broadcast with the transaction still local. A caller that
+   * cannot persist the signal therefore never has one on chain it does not know about.
+   *
+   * GH#2940 — the async publisher reads this hook as its PROOF about the publish transaction: a
+   * hook that never durably recorded (never reached, or rejected and rolled back) means no
+   * publish transaction was signed-and-sent, and a typed storage rejection on such an attempt is
+   * retried as the same job instead of being held for chain proof. An executor that may send a
+   * publish transaction MUST therefore await this hook before the send; one that does not is
+   * outside that proof. (Earlier transactions — a TRAC approval, a context-graph registration —
+   * are not publish transactions and are not covered by it.)
+   */
+  onBeforeBroadcast?: (record: PreBroadcastRecord) => Promise<void> | void;
+  /**
+   * Notification that an RPC endpoint accepted the exact signed transaction
+   * recorded by {@link onBeforeBroadcast}. The adapter awaits this callback so
+   * durable queue owners can checkpoint acceptance before detaching receipt
+   * reconciliation. It remains post-send and non-fail-closed: callback failure
+   * can never undo or reject an already accepted transaction.
+   */
+  onBroadcastAccepted?: (record: PreBroadcastRecord) => Promise<void> | void;
+  /**
+   * GH#2359 item 2 — notification that the publish transaction's receipt was CONFIRMED and
+   * parsed (an on-chain result exists), fired before any local post-receipt work. This is a
+   * SCHEDULING hint only: it carries the transaction hash and nothing else, so a listener can
+   * go prove the transaction with its own canonical chain reads immediately instead of waiting
+   * for the executor's local tail. It authorizes nothing by itself. Post-receipt and
+   * non-fail-closed: listener failure can never affect the publish.
+   */
+  onPublishConfirmed?: (confirmation: { readonly txHash: string }) => void | Promise<void>;
   /**
    * Skip the publisher-level context-graph graph creation/ensure step.
    * Only callers that already validated the target context graph should set
@@ -225,15 +342,6 @@ export interface PublishOptions {
    * convention-based partitions — no on-chain enforcement in V10.0.
    */
   subGraphName?: string;
-  /** @deprecated V9 receiver signatures removed — use v10ACKProvider instead. */
-  receiverSignatureProvider?: ReceiverSignatureProvider;
-  /**
-   * V10 ACK provider: collects core node StorageACKs via P2P.
-   * When provided, ACKs are collected and stored in the result.
-   */
-  v10ACKProvider?: V10ACKProvider;
-  /** V10 update ACK provider — quorum signatures before on-chain update. */
-  v10UpdateACKProvider?: V10UpdateACKProvider;
   /**
    * When publishing into a specific context graph (publishFromSharedMemory),
    * this overrides contextGraphId as the ACK domain and on-chain contextGraphId.
@@ -245,9 +353,11 @@ export interface PublishOptions {
    */
   onChainContextGraphId?: string | bigint;
   /**
-   * Internal/private-CG catalog path: exact generated catalog triples that ride
-   * in the KC Merkle root but are not user KA manifest roots. Public callers
-   * should not set this for arbitrary metadata.
+   * Internal/private-CG catalog capability: the exact deterministic floor keys.
+   * Legacy publishes use them to recognize combined-model catalog rows. V2
+   * graph-scoped publishes use them to derive a detached catalog commitment;
+   * the generated floor is never appended to the atomic KA graph or KC root.
+   * Public callers must not set this for arbitrary metadata.
    */
   trustedNonManifestCatalogTriples?: TrustedCatalogTripleKeys;
   /**
@@ -340,73 +450,45 @@ export interface PublishOptions {
    * so concurrent publishes with conflicting overrides are safe.
    */
   publisherNodeIdentityIdOverride?: bigint;
-  /**
-   * RFC-001 §9.x — pre-computed AuthorAttestation produced at the
-   * `agent.assertion.finalize()` boundary. This is the canonical
-   * (and, post-Phase-C, the *only*) way to attribute authorship for
-   * an on-chain publish.
-   *
-   * The caller has already:
-   *   1. Computed `expectedMerkleRoot` over the same quads it is
-   *      now asking the publisher to publish (computed via
-   *      `computeFlatKCRoot` / `skolemizeByEntity` semantics).
-   *   2. Signed (or collected a signature for) the typed data
-   *      `buildAuthorAttestationTypedData({ chainId, kav10Address,
-   *      merkleRoot: expectedMerkleRoot, authorAddress, reservedKaId })`
-   *      (#1116: the attestation no longer binds `contextGraphId`).
-   *
-   * The publisher independently re-derives `kcMerkleRoot` from the
-   * supplied `quads` and asserts equality with
-   * `expectedMerkleRoot`. Mismatch = throw, because either the
-   * caller's compute path drifted from the publisher's, or the
-   * quads were mutated between finalize and publish.
-   *
-   * The compact `(r, vs)` and `authorAddress` are forwarded to
-   * KAv10 verbatim. The publisher NEVER signs the AuthorAttestation
-   * itself.
-   *
-   * For publish flows where no agent is provided, the agent layer
-   * falls back to signing with the publisher's own EOA (via
-   * `signAuthorAttestationAsPublisher`) at finalize-time, so the
-   * publisher EOA still becomes `KC.author` in that case — but the
-   * signature is produced by the agent layer, not by `publish()`.
-   */
-  precomputedAttestation?: {
-    expectedMerkleRoot: Uint8Array;
-    authorAddress: string;
-    signature: { r: Uint8Array; vs: Uint8Array };
-    schemeVersion: number;
-    /**
-     * OT-RFC-43 §F2 — the packed reservedKaId the agent signed the
-     * AuthorAttestation over. The publisher REBUILDS the digest with this exact
-     * value to verify the seal, and mints with it, so the on-chain id matches
-     * the recovered signature. The agent is the single allocation point.
-     */
-    reservedKaId: bigint;
-  };
-  /**
-   * RFC-001 greenfield — owner seal for on-chain `update`, produced before
-   * the hosted API call (mirror of `precomputedAttestation` on publish).
-   * Publisher verifies `expectedNewMerkleRoot` and forwards `(authorR, authorVS)`
-   * to the chain adapter; it never signs the update attestation itself.
-   */
-  precomputedUpdateAttestation?: {
-    expectedNewMerkleRoot: Uint8Array;
-    authorAddress: string;
-    signature: { r: Uint8Array; vs: Uint8Array };
-    schemeVersion: number;
-  };
-  /**
-   * OT-RFC-43 A2 (decision 1) — precomputed packed kaId
-   * `(uint160(author) << 96) | number` reserved at `assertionFinalize`
-   * (ALLOCATE-AT-FINALIZE). When supplied, the publisher's `ensureReservedKaId`
-   * REUSES this id and SKIPS allocation, so a finalize→publish for one KA mints
-   * exactly the stamped id with no second allocation. Undefined for direct /
-   * mock publishes — the publisher then keeps its allocate-at-publish behavior
-   * (back-compat).
-   */
-  reservedKaId?: bigint;
 }
+
+/** Options for minting a new publication. */
+export interface InitialPublishOptions extends BasePublicationOptions {
+  /** @deprecated V9 receiver signatures removed — use v10ACKProvider instead. */
+  receiverSignatureProvider?: ReceiverSignatureProvider;
+  /** V10 ACK provider: collects core node StorageACKs via P2P. */
+  v10ACKProvider?: V10ACKProvider;
+  /** Pre-computed author seal for an initial on-chain publication. */
+  precomputedAttestation?: PrecomputedPublishAttestation;
+  /** Packed KA id allocated at assertion-finalize time. */
+  reservedKaId?: bigint;
+  /**
+   * Select an alternate token-pricing basis. `full-content` is supported for
+   * graph-scoped initial publications and charges for canonical public plus
+   * private RDF bytes. It does not change ACK payloads, replication, catalog
+   * commitments, or the on-chain byte-size attestation.
+   */
+  pricingPolicy?: PublicationPricingPolicy;
+}
+
+/** Options for updating an existing asset. */
+export interface UpdateOptions extends BasePublicationOptions {
+  /** V10 update ACK provider — quorum signatures before on-chain update. */
+  v10UpdateACKProvider?: V10UpdateACKProvider;
+  /** Pre-computed owner seal for an on-chain update. */
+  precomputedUpdateAttestation?: PrecomputedUpdateAttestation;
+}
+
+/**
+ * Historical broad publication options shape.
+ *
+ * @deprecated Prefer {@link InitialPublishOptions} for `publish` and
+ * {@link UpdateOptions} for `update`. This compatibility export intentionally
+ * retains both established field sets so existing annotations and indexed
+ * access types continue to compile; the operation-specific entry points above
+ * remain narrow and enforce their own contracts.
+ */
+export type PublishOptions = InitialPublishOptions & UpdateOptions;
 
 export interface PublishResult {
   kaId: bigint;
@@ -434,11 +516,20 @@ export interface PublishResult {
   v10Origin?: boolean;
   /** Sub-graph the data was published into (for gossip propagation). */
   subGraphName?: string;
+  /** Complete rootless-KA content envelope; omitted together for legacy results. */
+  contentScopeVersion?: number;
+  assertionVersion?: string;
+  publicTripleCount?: number;
+  privateMerkleRoot?: Uint8Array;
+  privateTripleCount?: number;
+  /** Effective access envelope persisted for graph-scoped KAs. */
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers?: string[];
 }
 
 export interface Publisher {
-  publish(options: PublishOptions): Promise<PublishResult>;
-  update(kaId: bigint, options: PublishOptions): Promise<PublishResult>;
+  publish(options: InitialPublishOptions): Promise<PublishResult>;
+  update(kaId: bigint, options: UpdateOptions): Promise<PublishResult>;
   skolemizeByEntity(quads: Quad[]): KAManifestEntry[];
   /** @deprecated Use skolemizeByEntity. */
   autoPartition(quads: Quad[]): KAManifestEntry[];

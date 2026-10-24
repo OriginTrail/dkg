@@ -47,6 +47,23 @@ dkg ka publish-async notes -c my-project
 dkg query my-project -q "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10"
 ```
 
+## Node UI metrics collection
+
+Operators can disable local dashboard snapshots independently from
+OpenTelemetry metric export; see the
+[Node UI metrics operator guide](../../docs/use-dkg/node-ui-metrics.md).
+
+## API query admission priority
+
+`POST /api/query` reads use the store scheduler's `background` lane by default
+so slow external reads cannot consume the capacity reserved for normal node
+work. Set `DKG_API_QUERY_PRIORITY=normal` before starting the daemon to restore
+the previous admission behavior during a canary rollback. Invalid non-empty
+values fail safe to `background` with a startup warning, and the daemon logs
+the effective lane once at boot. A background query that is shed before
+execution returns HTTP 503 with `Retry-After: 1` and
+`code: "STORE_SCHEDULER_BUSY"`.
+
 ## Running a Core Node (relay operator)
 
 A Core Node is a publicly-reachable host that runs a libp2p circuit-relay v2
@@ -255,7 +272,7 @@ modes auto-renewal can't recover from:
 | `dkg ka write <name> -c <cg> --input-file <rdf>` | Append RDF payload quads into WM |
 | `dkg ka import-file <name> -c <cg> --input-file <file>` | Import a document into WM through extraction |
 | `dkg ka extraction-status <name> -c <cg>` | Check document extraction status |
-| `dkg ka finalize <name> -c <cg> [--layer wm\|swm]` | Seal a WM draft, or seal SWM content with `--layer swm` |
+| `dkg ka finalize <name> -c <cg>` | Seal a WM draft; existing root-scoped SWM assets remain read-only |
 | `dkg ka share <name> -c <cg> [--entity <uri...>]` | Share finalized WM to Shared Working Memory |
 | `dkg ka share-async <name> -c <cg>` | Enqueue async WM-to-SWM share |
 | `dkg ka share-jobs [--context-graph-id <cg>]` | List async SWM share jobs |
@@ -279,10 +296,62 @@ modes auto-renewal can't recover from:
 | `dkg wallet` | Show operational wallet addresses and balances |
 | `dkg set-ask <amount>` | Set the node's on-chain ask (TRAC per KB·epoch) |
 | `dkg openclaw setup` | Install and configure the OpenClaw adapter |
+| `dkg llm [prompt...]` | Ground a local OpenAI-compatible model in the DKG MCP tools; no prompt starts interactive chat |
 | `dkg update` | Update the node software from npm (blue-green slots for Core nodes) |
 | `dkg rollback` | Roll back to the previous software slot |
 
+Graceful shutdown keeps a 15-second hard-stop safety budget by default. Nodes
+that must drain longer RPC callbacks may set `DKG_SHUTDOWN_HARD_TIMEOUT_MS` to
+an integer from `5000` through `300000` before `dkg start`. Invalid, blank,
+fractional, or out-of-range values fail startup; the watchdog cannot be
+disabled through this setting.
+
 Run `dkg <command> --help` for per-command options.
+
+### Local LLM over DKG MCP
+
+Start a supported OpenAI-compatible local endpoint with llama.cpp or Ollama,
+then run:
+
+```bash
+# Interactive, read-only by default
+dkg llm --interactive --model local-model
+
+# One-shot query-catalog discovery against a selected Context Graph
+dkg llm --project my-project "Which saved queries are available?"
+
+# Ollama example (llama.cpp remains available on the default port 8080)
+dkg llm --interactive \
+  --llama-url http://127.0.0.1:11434/v1/chat/completions \
+  --model qwen3:8b
+```
+
+The existing `--llama-url` option accepts either backend. The daemon and Node
+UI use the equivalent `DKG_LLM_URL`, `DKG_LLM_MODEL`, and
+`DKG_LLM_BACKEND=ollama` environment variables.
+Before using Ollama, complete the full guide's canonical
+[Ollama setup procedure](../../docs/use-dkg/local-llm.md#install-and-run-ollama);
+package quickstarts intentionally do not duplicate its operating policy.
+
+`--project` explicitly pins the LLM session; inherited `DKG_PROJECT` and the
+MCP config's first Context Graph are not silent agent scopes. Without a pin,
+name the exact Context Graph in each scoped request. Catalog selectors retain
+the graph scope of the `dkg_query_catalog_list` evidence that returned them.
+
+Each turn receives at most eight relevant MCP schemas and 18,000 serialized
+schema bytes by default instead of the complete tool surface. Relevance is
+ranked from the live MCP tool names, descriptions, and input schemas; use
+`--max-tools` and `--max-tool-json-bytes` to change the bounds. The command
+validates tool arguments, permits one repair retry, bounds chat history, and
+writes a redacted owner-only text trace under `<DKG_HOME>/logs/local-llm`.
+
+Mutation tools are unavailable unless the operator passes `--allow-write`;
+even then, the prompt must explicitly request the mutation. Extra MCP adapters
+can be loaded with `--adapter`. `--domain-profile profile.json` supplies its
+literal routing keywords, read/write tool ranking hints, and system-context
+addendum without adding domain IDs or benchmark answers to the built-in core.
+For small experiments, `--tool` and `--system-context-file` expose the same
+seams separately.
 
 NPM/dist-tag auto-update is the recommended production path. Advanced Core nodes
 can opt into daemon-polled git updates with `autoUpdate.source: "git"`,
@@ -377,20 +446,33 @@ not truncate the previous state file.
 When the daemon is running, it exposes a local HTTP API (default: `http://localhost:9200`). Key endpoint groups:
 
 - `GET /api/status`, `GET /api/info` — node status and health
-- `POST /api/agent/register`, `GET /api/agent/identity` — agent identity
+- `POST /api/agent/register` (node-admin token), `GET /api/agent/identity` — agent identity
 - `POST /api/context-graph/create`, `/register`, `/invite`, `GET /api/context-graph/list` — context graph management
 - `POST /api/knowledge-assets`, `/{name}/wm/write`, `/{name}/swm/share`, `/{name}/vm/publish`, `/{name}/vm/publish-async`, `/{name}/wm/discard`, `/{name}/wm/import-file`, `GET /api/knowledge-assets/{name}` — named knowledge asset lifecycle
 - `POST /api/query`, `POST /api/query-remote` — SPARQL querying
 - `POST /api/endorse`, `POST /api/verify`, `POST /api/update` — Verifiable Memory trust operations
 - `GET /api/peers`, `GET /api/connections`, `GET /api/agents` — network introspection
 - `GET /api/wallets/balances`, `GET /api/chain/rpc-health` — wallet and chain health
+- `GET /api/diagnostics/backpressure` — node-admin scheduler pressure snapshot
 - `GET /api/events` — Server-Sent Events stream for real-time notifications
+
+`GET /api/info` retains its legacy `chain.rpcUrl`, `chain.rpcUrls`, and
+`chain.hubAddress` keys for response-shape compatibility. RPC endpoint values
+are never returned (`rpcUrl` is `null`, `rpcUrls` is empty, and
+`rpcEndpointsRedacted` is `true`) because configured URLs can contain provider
+credentials. The public Hub contract address remains available, while
+`rpcEndpointCount` reports the number of configured endpoints.
 
 > The V9 `GET /api/apps` endpoint (and the `/apps/*` iframe host) was retired in
 > V10 along with the installable apps framework — the daemon now returns
 > `410 Gone` on those paths. See [Extending the Node](#extending-the-node) below.
 
 All endpoints (except public paths like `/api/status`, `/api/chain/rpc-health`, and `/.well-known/skill.md`) require an API token via `Authorization: Bearer <token>` header.
+
+`GET /api/diagnostics/backpressure` specifically requires the node-level admin
+token; agent-scoped tokens cannot inspect node-wide scheduler work. See the
+[backpressure observability operator guide](../../docs/use-dkg/backpressure-observability.md)
+for state definitions, log behavior, metrics, and response safety boundaries.
 
 The full API surface — including request bodies, response shapes, and error codes — is documented in [`skills/dkg-node/SKILL.md`](./skills/dkg-node/SKILL.md).
 
@@ -443,8 +525,10 @@ records include operation, iteration, error message, root entity, marker, contex
 graph, and a reproduction command. Warmups are excluded from summaries.
 
 The repository-level ESBench workflow for this same benchmark feature is
-documented in `BENCHMARKING.md`. It uses a deterministic layered DKG client, not
-a live daemon, so the generated reports avoid auth tokens and local node paths.
+documented in the repository's
+[`bench/README.md`](../../bench/README.md).
+It uses a deterministic layered DKG client, not a live daemon, so the generated
+reports avoid auth tokens and local node paths.
 `pnpm bench:html` writes the combined ESBench report plus one focused HTML page
 for each benchmark flow and payload size. The full default matrix includes the
 `200mb` scene; set `DKG_ESBENCH_PAYLOAD_SIZES=10kb` or another comma-separated
@@ -514,6 +598,19 @@ partial run and leave diagnostics enabled. The JSON report records interval
 throughput, write latency percentiles, per-node `store.nq`/snapshot/log/process
 samples, and appended daemon-log counters. A Markdown summary is written to
 `<output>.analysis.md` by default, or to `--analysis-output <path>`.
+
+## MCP client config updates
+
+`dkg mcp setup` and `dkg mcp uninstall` preserve existing config permissions,
+ACLs and extended attributes when replacing a config. On Linux, updating an
+existing file requires GNU coreutils `cp` (or `gcp`) with `--preserve` and xattr
+support. Minimal BusyBox installations must install `coreutils`, for example
+`apk add coreutils` on Alpine. The CLI checks the capability before writing and
+leaves the original file unchanged when it is unavailable. macOS uses its system
+metadata-preserving copy. Windows uses Windows PowerShell and the native file
+replacement API, preserving the existing access policy before writing contents.
+Windows-side targets selected from WSL use that same Windows mechanism through
+`wslpath` and Windows PowerShell; Linux-native targets retain Linux metadata.
 
 ## Extending the Node
 
@@ -637,4 +734,5 @@ for the design rationale, threat model, and stability guarantees.
 - `@origintrail-official/dkg-publisher` — publish pipeline (SWM → VM)
 - `@origintrail-official/dkg-storage` — triple-store adapters
 - `@origintrail-official/dkg-chain` — blockchain abstraction
+- `@origintrail-official/dkg-node-store` — durable protocol state (outbox, sync checkpoints, cursors, KA numbers, chain log) the daemon composes
 - `@origintrail-official/dkg-node-ui` — web dashboard serving

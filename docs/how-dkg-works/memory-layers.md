@@ -9,13 +9,21 @@ doc_type: concept
 
 ![DKG memory layers](../.gitbook/assets/DKG-memory-layers.png)
 
-DKG V10 separates memory by scope and trust into three memory layers. Every piece of knowledge starts private and can be promoted toward verification as it matures.
+The three memory layers describe how knowledge moves from work in progress to collaboration and durable publication. They let you develop a finding privately, bring it into a team's shared work, and give others a published record they can cite and check.
 
-* **Working Memory (WM)** — _Private, local, free._ Your agent's scratchpad. Write drafts, ingest documents, stage knowledge before sharing it. Nothing leaves your node. No gas, no cost, no coordination overhead. This is where all knowledge starts.
-* **Shared Working Memory (SWM)** — _Collaborative, gossip-replicated, no chain required._ Selectively share knowledge with specific peers — other agents, teammates, or nodes — without publishing to a blockchain. Multiple agents can read from and write to the same Context Graph. This is where collective intelligence happens before anything needs to be verified.
-* **Verifiable Memory (VM)** — _**Blockchain-anchored, cryptographically provable.**_ Promote knowledge that needs to last and be trusted. Once anchored on-chain, it's immutable, queryable by anyone, and carries a provenance trace from the agent that published it. Trust level is explicit: self-attested, endorsed, partially-verified, or consensus-verified. This is where knowledge graduates from working context to ground truth.
+* **Working Memory (WM)** holds private drafts at your node. Import a document, record an observation, or revise a Knowledge Asset before deciding to share it.
+* **Shared Working Memory (SWM)** makes selected knowledge available to authorized participants. Agents can inspect one another's contributions, connect related findings, and continue the work across nodes and frameworks.
+* **Verifiable Memory (VM)** stores published knowledge on the network with on-chain commitments. Each published version can be checked against its commitment, and later updates preserve the asset's identity while recording new content commitments.
 
-<table><thead><tr><th width="168">Layer</th><th width="228">Scope</th><th width="106">Cost</th><th>Use</th></tr></thead><tbody><tr><td>Working Memory (WM)</td><td>Private to an agent/node</td><td>Free</td><td>Drafts, session notes, local imports.</td></tr><tr><td>Shared Working Memory (SWM)</td><td>Visible to allowed peers</td><td>Free</td><td>Team-visible findings and shared context.</td></tr><tr><td>Verifiable Memory (VM)</td><td>On-chain anchored</td><td>Gas/TRAC</td><td>Durable final records and verifiable Knowledge Assets.</td></tr></tbody></table>
+| Layer | Use | Visibility | On-chain publication cost |
+| --- | --- | --- | --- |
+| Working Memory | Drafts, imports, work in progress | Local node and authorized agent scope | None |
+| Shared Working Memory | Collaborative findings and shared context | Context Graph's authorized participants | None for sharing a KA |
+| Verifiable Memory | Published records with durable provenance | Context Graph's access policy | Gas/TRAC |
+
+Local compute, storage, and model-provider charges are separate. Graph registration and read-authority resolution can also involve chain dependencies; “no publication fee” does not mean every sharing prerequisite is independent of the chain. See [funding](../use-dkg/funding.md) and [collaboration prerequisites](../build/collaborate.md#prerequisites).
+
+Visibility and verification are separate choices. Publication preserves the graph's access policy; it does not automatically make private knowledge public. A content commitment supports integrity checks, while factual review and corroboration depend on the evidence and the graph's policy.
 
 The normal lifecycle is:
 
@@ -40,14 +48,14 @@ The Knowledge Asset lifecycle is the write path agents should prefer. Use `dkg k
 Operational implications:
 
 * Knowledge Asset names should be stable, lowercase slugs.
-* Writes are additive; discard and recreate if a stable Knowledge Asset needs replacement.
+* Writes are additive. Use the [edit lifecycle](../use-dkg/knowledge-asset-lifecycle.md#editing-a-published-knowledge-asset) to revise an existing shared or published asset; preserve its identity and provenance.
 * Sharing may target all roots or an explicit set of root entities.
 * Publishing costs funds and clears/finalizes selected shared memory.
 * Agents should keep provenance triples with durable claims when writing shared decisions, findings, tasks, or code context.
 
 ## Example
 
-An autoresearch agent may write every experiment note to Working Memory. When the result is useful to the team, it shares the Knowledge Asset to Shared Working Memory so peer agents can query it. When trusted verifiers reproduce the result, and the team wants durable provenance, the selected graph data can be published to Verifiable Memory.
+A research agent records an experiment in Working Memory, including its inputs and source observations. It shares a useful result so a second agent can compare it with other experiments. The team can publish the resulting finding with durable provenance, giving the next investigation a record to cite and check. Knowledge continues to be useful after publication: other participants can build on it and publish their own contributions.
 
 That same flow is useful outside research:
 

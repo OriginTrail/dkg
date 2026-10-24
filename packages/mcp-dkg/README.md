@@ -138,7 +138,7 @@ autoShare: true
 
 `.dkg/` is gitignored repo-wide so this file stays local to each operator. The `tokenFile` path is resolved relative to the YAML; default of `~/.dkg/auth.token` matches what `dkg start` writes on first boot.
 
-## Tool surface (29 tools)
+## Tool surface (33 tools)
 
 All tools are available the moment `dkg mcp setup` registers the MCP with your client. They group into seven categories tracking how a session typically uses memory: check health, discover the graph, set it up, drive the knowledge-asset lifecycle (create → write → finalize → share → publish), recall from it, query it, and message other agents.
 
@@ -166,6 +166,7 @@ All tools are available the moment `dkg mcp setup` registers the MCP with your c
 | Tool | What it does |
 |---|---|
 | `dkg_context_graph_create` | Create a context graph (called "projects" in the DKG node UI). The `id` slug is auto-derived from `name` when omitted. Idempotent — pre-existing CGs are returned unchanged. |
+| `dkg_context_graph_register` | Register an existing context graph on-chain. Supports policy overrides and PCA-backed registration by the PCA owner or a wallet registered to that exact PCA. An eligible PCA uses a quota-backed registration-deposit waiver. |
 | `dkg_subscribe` | Subscribe to a context graph so its data syncs locally from peers. Defaults to also syncing Shared Working Memory; pass `includeSharedMemory: false` to skip SWM. |
 | `dkg_sub_graph_create` | Create a named sub-graph inside a context graph (e.g. `code`, `tasks`, `meta`). Idempotent — pre-existing sub-graphs are silently reused. |
 
@@ -178,7 +179,7 @@ The lifecycle tool family that lets agents stage memory, seal it, share it, publ
 | `dkg_knowledge_asset_create` | 1 | Create an empty Working Memory assertion graph (knowledge asset). Idempotent — duplicate names land as `alreadyExists: true`. Name validation matches the daemon's `validateAssertionName`: any IRI-safe name up to 256 chars (no `/`, no whitespace, no `` <>"{}|^`\ `` characters), and not a reserved B3 KA id — NOT restricted to a lowercase-hyphen slug. |
 | `dkg_knowledge_asset_write` | 2 | Append RDF quads into an existing WM assertion. Set-merge — duplicates collapse. To replace, call `dkg_knowledge_asset_discard` first or mint a unique name. |
 | `dkg_knowledge_asset_finalize` | 3 | **Seal** the WM draft (the "git commit"): compute the merkleRoot over the whole assertion, build + sign an EIP-712 AuthorAttestation, stamp the seal. Returns `merkleRoot`, `authorAddress`, `schemeVersion`, `chainId`, `kav10Address`, `eip712Digest`. Seals the entire draft — no subset parameter. |
-| `dkg_knowledge_asset_share` | 4 | Share a WM assertion (or specific root entities) from private WM to Shared Working Memory so teammates see it (formerly "promote"). Omit `entities` for a full share, which auto-seals best-effort; a subset share is SWM-only and not publishable to VM as a subset. |
+| `dkg_knowledge_asset_share` | 4 | Atomically seal and share the complete KA triple set from private WM to Shared Working Memory. Root-entity subsets and unsealed shares are unsupported. |
 | `dkg_knowledge_asset_publish` | 5 | **Mint / update on chain** (the sealed assertion → Verifiable Memory). Takes no selector (the seal commits the whole assertion). Returns the **UAL** + `kaId` + `txHash` — see "The canonical round-trip" below. |
 | `dkg_knowledge_asset_pull_from` | edit-loop | Seed a fresh WM draft from the current SWM or VM state (the "git checkout"). Body `{ layer: "swm" \| "vm", onConflict?: "reject" \| "replace" }`; `409 WM_DRAFT_CONFLICT` on a dirty draft unless `replace`. |
 | `dkg_knowledge_asset_discard` | rollback | Discard a WM assertion without sharing it. Idempotent — no-op on a missing assertion. Use before re-writing an assertion whose name you want to keep stable. |
@@ -202,6 +203,19 @@ The canonical per-KA sealed publish is `dkg_knowledge_asset_publish` (step 5 of 
 | `dkg_memory_search` | Trust-weighted free-text recall across WM/SWM/VM in the agent-context graph (and an optional project graph). Higher-trust layers (VM > SWM > WM) collapse lower-trust hits for the same entity URI. Each hit surfaces `contextGraphId`, `layer`, and `trustWeight`. Use this for "ask my memory anything" recall. |
 | `dkg_query` | Execute SPARQL SELECT / ASK / CONSTRUCT against a context graph. Known prefixes are auto-prepended. Scope with `view`: `"working-memory"` (default), `"shared-working-memory"`, or `"verifiable-memory"`. Set `includeSharedMemory: true` alongside `view: "working-memory"` to query WM ∪ SWM in one call. |
 
+### Query catalog
+
+These tools use the same versioned query-catalog contract as the DKG CLI and
+Node UI. Runtime parameters are rendered according to their declared RDF-term
+type; callers never interpolate raw strings into SPARQL.
+
+| Tool | What it does |
+|---|---|
+| `dkg_query_catalog_context_graphs` | Inspect accessible Context Graphs and return only graphs that actually contain saved catalog entries. Read-only. |
+| `dkg_query_catalog_list` | List saved queries with stable selectors, declared parameters, execution views, and sub-graph scopes. Read-only. |
+| `dkg_query_catalog_run` | Execute one saved query by selector, slug, or exact name. Parameter values are validated and safely rendered before the canonical `/api/query` call. Read-only. |
+| `dkg_query_catalog_save` | Save an immutable parameterized query revision through the guarded profile-catalog route. Exact retries are idempotent; changed definitions create new revisions. Mutates local DKG state and should only be called on an explicit user request. |
+
 ### Messaging (agent-to-agent)
 
 | Tool | What it does |
@@ -217,7 +231,7 @@ Lifted from the repo-root README's [DKG V10 as agent memory quickstart](../../RE
 2. `dkg_knowledge_asset_write` with one or more quads (additive set-merge).
 3. `dkg_memory_search` with a keyword from the write — the just-written triple comes back from the WM layer with `trustWeight` set.
 4. *(optional)* `dkg_knowledge_asset_finalize` to **seal** the draft (the EIP-712 "git commit" — note: this is the rc.17 *seal* verb, distinct from the on-chain mint in step 6).
-5. *(optional)* `dkg_knowledge_asset_share` to advance the lifecycle to SWM and gossip to peers (a full share auto-seals best-effort, so step 4 can be skipped for the common case).
+5. *(optional)* `dkg_knowledge_asset_share` to atomically seal, advance the complete KA to SWM, and gossip it to peers (step 4 can be skipped when the default authorship options are sufficient).
 6. *(optional)* `dkg_knowledge_asset_publish` to **mint on chain** (costs TRAC + gas, clears SWM). The response carries the asset's **UAL** (`did:dkg:<chainId>/<addr>/<number>`) plus `kaId` and `txHash` — store the UAL to reference the asset later.
 
 For ad-hoc filtering or non-text-search queries, `dkg_query` is the lower-level SPARQL surface. To put fresh quads on chain, author them as a named knowledge asset and publish through the lifecycle (`create → write → finalize → share → publish`).
@@ -279,6 +293,7 @@ Per-turn state is kept in `~/.cache/dkg-mcp/sessions/*.json`; safe to delete at 
 - **"No project specified"** → set `contextGraph: <id>` in `.dkg/config.yaml`, or pass `projectId` on each tool call, or export `DKG_PROJECT`.
 - **HTTP 401 from MCP tools** → token mismatch. `dkg auth show` returns the expected value; confirm it matches `~/.dkg/auth.token`. On CI / containers / proxied environments where `dkg init` can't run, the env-var fallbacks are `DKG_API` (daemon URL, default `http://localhost:9200`), `DKG_TOKEN` (bearer), `DKG_PROJECT` (default context graph), `DKG_AGENT_URI` (operator agent URI). A stale exported `DKG_PROJECT` from a prior session can silently mis-route writes — unset it if you switch projects.
 - **HTTP 404 on `/api/context-graph/list`** → you're on an older daemon; the client automatically falls back to the legacy endpoint.
+- **`TimeoutError` from a tool on a slow node** → reads wait 30 s (the context-graph and sub-graph lists 60 s) and writes 240 s. Raise them with `DKG_API_READ_TIMEOUT_MS` / `DKG_API_LONG_TIMEOUT_MS` (milliseconds) in the MCP client's `env` block; see [Client request timeouts](../../docs/references/cli.md#client-request-timeouts).
 - **`tools/list` is missing tools after `dkg mcp setup`** → the client's MCP config still points at a prior install. Re-run `dkg mcp setup --force` to refresh stale entries.
 - **Daemon unreachable** → `dkg status`; if it errors, `dkg logs` and `cat ~/.dkg/daemon.log`. Stale pid → `cat ~/.dkg/daemon.pid` and kill it, then `dkg start` again.
 - **Port 9200 already in use** → another node is running. `dkg stop` once, or override via `dkg init` and pick a different API port.
@@ -289,12 +304,13 @@ Per-turn state is kept in `~/.cache/dkg-mcp/sessions/*.json`; safe to delete at 
 
 | File | Purpose |
 |---|---|
-| `src/index.ts` | Stdio MCP server entrypoint. Boots `McpServer` and registers the 29 tools. |
+| `src/index.ts` | Stdio MCP server entrypoint. Boots `McpServer` and registers the 33 tools. |
 | `src/tools.ts` | Read tools (`dkg_list_context_graphs`, `dkg_sub_graph_list`, `dkg_query`, `dkg_get_entity`, `dkg_get_entity_sources`, `dkg_list_activity`, `dkg_get_agent`). |
+| `src/tools/query-catalog.ts` | Versioned query-catalog list/run/save MCP facade shared with the CLI and Node UI contract. |
 | `src/tools/assertions.ts` | Knowledge-asset lifecycle (`dkg_knowledge_asset_*` × 13: create/write/finalize/share/publish/pull_from/discard/query/history/import_file + import_artifact_resolve/read_markdown + semantic_enrichment_write). |
 | `src/tools/health.ts` | `dkg_status`, `dkg_peer_info`, `dkg_wallet_balances`. |
 | `src/tools/memory-search.ts` | `dkg_memory_search` with WM/SWM/VM fan-out and trust-weighted ranking. |
-| `src/tools/setup.ts` | `dkg_context_graph_create`, `dkg_subscribe`, `dkg_sub_graph_create`. |
+| `src/tools/setup.ts` | `dkg_context_graph_create`, `dkg_context_graph_register`, `dkg_subscribe`, `dkg_sub_graph_create`. |
 | `src/tools/chat.ts` | `dkg_send_message`, `dkg_check_inbox`. |
 | `src/client.ts` | `DkgClient` HTTP wrapper. Re-exported as `@origintrail-official/dkg-mcp/client`. |
 | `src/manifest/{publish,fetch,install}.ts` | Project manifest publish/install pipeline. Re-exported as `@origintrail-official/dkg-mcp/manifest/*` and consumed by the umbrella CLI's daemon routes. |

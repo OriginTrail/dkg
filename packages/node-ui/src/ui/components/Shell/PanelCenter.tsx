@@ -1,10 +1,8 @@
-import React, { Suspense, useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
+import { createRecoverableLazyView } from './RecoverableLazyView.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { DashboardView } from '../../views/DashboardView.js';
-import { ProjectView } from '../../views/ProjectView.js';
 import { ContextGraphPrimerView } from '../../views/ContextGraphPrimerView.js';
-import { MemoryLayerView } from '../../views/MemoryLayerView.js';
-import { MemoryStackView } from '../../views/MemoryStackView.js';
 import { authHeaders, fileUrl } from '../../api.js';
 import { DOC_TAB_PREFIX, decodeDocTabId } from '../../lib/doc-tab-id.js';
 import { CONTEXT_GRAPH_PRIMER_TAB_ID } from '../../lib/contextGraphPrimer.js';
@@ -16,29 +14,41 @@ const CLOSE_ICON = (
   </svg>
 );
 
-const OperationsView = React.lazy(() =>
-  import('../../pages/Operations.js').then((m) => ({ default: m.OperationsPage }))
-);
+const OperationsView = createRecoverableLazyView(() =>
+  import('../../pages/Operations.js').then((m) => m.OperationsPage)
+, 'operations');
 
-const AgentHubView = React.lazy(() =>
-  import('../../pages/AgentHub.js').then((m) => ({ default: m.AgentHubPage }))
-);
+const AgentHubView = createRecoverableLazyView(() =>
+  import('../../pages/AgentHub.js').then((m) => m.AgentHubPage)
+, 'agent hub');
 
-const SettingsView = React.lazy(() =>
-  import('../../pages/Settings.js').then((m) => ({ default: m.SettingsPage }))
-);
+const SettingsView = createRecoverableLazyView(() =>
+  import('../../pages/Settings.js').then((m) => m.SettingsPage)
+, 'settings');
 
-const AgentProfilePage = React.lazy(() =>
-  import('../AgentProfilePage.js').then((m) => ({ default: m.AgentProfilePage }))
-);
+const AgentProfilePage = createRecoverableLazyView(() =>
+  import('../AgentProfilePage.js').then((m) => m.AgentProfilePage)
+, 'account');
 
-const PublishingConvictionView = React.lazy(() =>
-  import('../../pages/PublishingConviction.js').then((m) => ({ default: m.PublishingConvictionPage }))
-);
+const PublishingConvictionView = createRecoverableLazyView(() =>
+  import('../../pages/PublishingConviction.js').then((m) => m.PublishingConvictionPage)
+, 'Publisher Conviction');
 
-const ConvictionDetailView = React.lazy(() =>
-  import('../../pages/conviction/ConvictionDetailView.js').then((m) => ({ default: m.ConvictionDetailView }))
-);
+const ConvictionDetailView = createRecoverableLazyView(() =>
+  import('../../pages/conviction/ConvictionDetailView.js').then((m) => m.ConvictionDetailView)
+, 'account');
+
+const ProjectView = createRecoverableLazyView(() =>
+  import('../../views/ProjectView.js').then((m) => m.ProjectView)
+, 'project');
+
+const MemoryLayerView = createRecoverableLazyView(() =>
+  import('../../views/MemoryLayerView.js').then((m) => m.MemoryLayerView)
+, ({ layer }) => ({ wm: 'working memory', swm: 'shared memory', vm: 'verifiable memory' })[layer]);
+
+const MemoryStackView = createRecoverableLazyView(() =>
+  import('../../views/MemoryStackView.js').then((m) => m.MemoryStackView)
+, 'memory stack');
 
 function TabBar() {
   const { tabs, activeTabId, setActiveTab, closeTab } = useTabsStore();
@@ -281,35 +291,19 @@ function ViewContainer() {
   if (activeTabId === 'dashboard') return <DashboardView />;
 
   if (activeTabId === 'operations') {
-    return (
-      <Suspense fallback={<div className="lazy-spinner">Loading operations...</div>}>
-        <OperationsView />
-      </Suspense>
-    );
+    return <OperationsView />;
   }
 
   if (activeTabId === 'agent-hub') {
-    return (
-      <Suspense fallback={<div className="lazy-spinner">Loading agent hub...</div>}>
-        <AgentHubView />
-      </Suspense>
-    );
+    return <AgentHubView />;
   }
 
   if (activeTabId === 'settings') {
-    return (
-      <Suspense fallback={<div className="lazy-spinner">Loading settings...</div>}>
-        <SettingsView />
-      </Suspense>
-    );
+    return <SettingsView />;
   }
 
   if (activeTabId === 'conviction') {
-    return (
-      <Suspense fallback={<div className="lazy-spinner">Loading Publisher Conviction...</div>}>
-        <PublishingConvictionView />
-      </Suspense>
-    );
+    return <PublishingConvictionView />;
   }
 
   if (activeTabId === 'memory-stack') return <MemoryStackView />;
@@ -323,11 +317,7 @@ function ViewContainer() {
 
   if (activeTabId.startsWith('conviction:')) {
     const accountId = activeTabId.slice('conviction:'.length);
-    return (
-      <Suspense fallback={<div className="lazy-spinner">Loading account...</div>}>
-        <ConvictionDetailView accountId={accountId} />
-      </Suspense>
-    );
+    return <ConvictionDetailView accountId={accountId} />;
   }
 
   if (activeTabId.startsWith('agent:')) {
@@ -340,11 +330,7 @@ function ViewContainer() {
       const cgId = raw.slice(0, pipeIdx);
       const agentSlug = raw.slice(pipeIdx + 1);
       const agentUri = agentSlug.includes(':') ? agentSlug : `urn:dkg:agent:${agentSlug}`;
-      return (
-        <Suspense fallback={<div className="lazy-spinner">Loading agent…</div>}>
-          <AgentProfilePage contextGraphId={cgId} agentUri={agentUri} />
-        </Suspense>
-      );
+      return <AgentProfilePage contextGraphId={cgId} agentUri={agentUri} />;
     }
   }
 

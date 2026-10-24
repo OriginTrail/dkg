@@ -8,8 +8,7 @@
  * is unchanged.
  *
  * Topical buckets, in declaration order:
- *  - Publish-payload normalisation / partitioning.
- *  - EIP-712 sign + attestation byte ↔ hex conversions.
+ *  - Publish-payload normalisation.
  *  - Agent-DID and join-delegation scope normalisation.
  *  - Sync-phase normalisation.
  *  - ChainAdapter publisher-address discovery (probes the various
@@ -21,22 +20,22 @@
 import { ethers } from 'ethers';
 import { join } from 'node:path';
 import {
-  skolemizeByEntity,
   FileWorkspacePublicSnapshotStore,
-  type LiftRequestAuthorSeal,
+  snapshotReferenceCheck,
   type SharedMemoryPublicSnapshotStorageConfig,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import type {
   Quad,
   TripleStoreConfig,
+  TripleStore,
   LargeLiteralStorageConfig,
 } from '@origintrail-official/dkg-storage';
-import type { AuthorAttestationTypedData } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { SyncPhase } from './sync/auth/request-build.js';
-import { PRIVATE_DATA_ANCHOR, CIPHERTEXT_CHUNK_SIZE_BYTES } from './dkg-agent-constants.js';
+import { CIPHERTEXT_CHUNK_SIZE_BYTES } from './dkg-agent-constants.js';
 import { InvalidContentError, type PublishAsyncQuadEnvelope } from './dkg-agent-types.js';
+export { normalizeAgentDid } from '@origintrail-official/dkg-core';
 
 // ── Publish-payload normalisation ─────────────────────────────────────
 
@@ -74,108 +73,7 @@ export function assertQuadArray(value: unknown, fieldName: string): Quad[] {
   return value.map((quad) => ({ ...quad, graph: quad.graph ?? '' })) as Quad[];
 }
 
-export function partitionPublishAsyncQuads(publicQuads: Quad[], privateQuads: Quad[]): {
-  publicQuads: Quad[];
-  privateQuadsByRoot: Map<string, Quad[]>;
-  roots: string[];
-} {
-  const privateByRoot = skolemizeByEntity(privateQuads);
-  let stagedPublicQuads = [...publicQuads];
-  let publicByRoot = skolemizeByEntity(stagedPublicQuads);
-
-  for (const rootEntity of privateByRoot.keys()) {
-    // GH #1122 / Codex #1132 review: stamp `dkg:privateDataAnchor "true"` for
-    // EVERY root that has private staging, INCLUDING mixed public+private roots
-    // — not just private-only roots. Partition-aware readers (EPCIS, Kafka
-    // discovery) bridge public→private via this anchor; before the #1122
-    // canonicalRootIri→identity flip the anchor was stamped on the canonical
-    // subject for mixed roots, but identity made `stampCanonicalAnchorsInWorkspace`
-    // a no-op, so mixed roots silently lost the anchor and their private data
-    // disappeared from those readers. Idempotent: skip if already anchored.
-    const alreadyAnchored = stagedPublicQuads.some(
-      (q) => q.subject === rootEntity && q.predicate === PRIVATE_DATA_ANCHOR,
-    );
-    if (!alreadyAnchored) {
-      stagedPublicQuads.push({
-        subject: rootEntity,
-        predicate: PRIVATE_DATA_ANCHOR,
-        object: '"true"',
-        graph: '',
-      });
-    }
-  }
-
-  publicByRoot = skolemizeByEntity(stagedPublicQuads);
-  const roots = [...publicByRoot.keys()];
-  if (roots.length === 0) {
-    throw new InvalidContentError('Content produced no publishable root entities');
-  }
-
-  return {
-    publicQuads: stagedPublicQuads,
-    privateQuadsByRoot: privateByRoot,
-    roots,
-  };
-}
-
-// ── EIP-712 sign + attestation byte ↔ hex conversions ────────────────
-
-/** Sign EIP-712 typed data with a raw private key, returning compact (r, vs). */
-export async function signWithPrivateKey(
-  privateKey: string,
-  typedData: AuthorAttestationTypedData,
-): Promise<{ r: Uint8Array; vs: Uint8Array }> {
-  const wallet = new ethers.Wallet(privateKey.startsWith('0x') ? privateKey : '0x' + privateKey);
-  const sigHex = await wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
-  const sig = ethers.Signature.from(sigHex);
-  return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
-}
-
-/** Bytes → hex for lift-queue persistence. Inverse: `liftSealToPrecomputedAttestation`. */
-export function preSignedAttestationToLiftSeal(input: {
-  expectedMerkleRoot: Uint8Array;
-  authorAddress: string;
-  signature: { r: Uint8Array; vs: Uint8Array };
-  schemeVersion: number;
-  // OT-RFC-43 §F2 — the packed reservedKaId the caller signed into the digest.
-  // Carried onto the persisted seal so the deferred-broadcast mint reuses the
-  // exact id the author attested. A pre-§F2 caller that omits it persists no
-  // reservedKaId, falling back to the legacy 0n read (and the mint's rejection).
-  reservedKaId?: bigint;
-}): LiftRequestAuthorSeal {
-  return {
-    merkleRoot: ethers.hexlify(input.expectedMerkleRoot) as `0x${string}`,
-    authorAddress: input.authorAddress as `0x${string}`,
-    signature: {
-      r: ethers.hexlify(input.signature.r) as `0x${string}`,
-      vs: ethers.hexlify(input.signature.vs) as `0x${string}`,
-    },
-    schemeVersion: input.schemeVersion,
-    ...(input.reservedKaId !== undefined
-      ? { reservedKaId: `${input.reservedKaId}` as `${bigint}` }
-      : {}),
-  };
-}
-
 // ── DID + delegation-scope normalisation ──────────────────────────────
-
-/**
- * Normalise an `did:dkg:agent:<id>` DID for case-insensitive equality
- * comparison. The agent ID can be either an Ethereum address (which IS
- * case-insensitive on the wire — checksum is purely advisory per
- * EIP-55) or a libp2p peer ID (which is NOT case-insensitive — base58
- * has uppercase characters that carry information). The previous
- * approach lower-cased the entire DID, which works in practice because
- * peer IDs round-trip the same way on both sides of a comparison, but
- * is semantically wrong: a non-EVM owner DID could in principle be
- * stored with one case and read back with another. Make the
- * normalisation explicit and only touch the EVM-address suffix.
- */
-export function normalizeAgentDid(did: string): string {
-  const m = did.match(/^did:dkg:agent:(0x[0-9a-fA-F]{40})$/);
-  if (m) return `did:dkg:agent:${m[1].toLowerCase()}`;
-  return did;
-}
 
 /**
  * Scope string for join-request delegations. Authorises the named node
@@ -231,18 +129,26 @@ export function recoverCompactSigner(message: Uint8Array, compact: { r: Uint8Arr
   return ethers.verifyMessage(message, signature);
 }
 
-export function adapterOperationalPrivateKeyAddress(chain: ChainAdapter): string | undefined {
+/**
+ * An adapter's local operational key, if it exposes one: none without a
+ * `getOperationalPrivateKey`, or when that throws (an adapter that signs
+ * through an external signer has no key to expose) or returns no key.
+ */
+export function adapterOperationalPrivateKey(chain: ChainAdapter): string | undefined {
   const operationalKeyGetter = (chain as unknown as { getOperationalPrivateKey?: () => unknown })
     .getOperationalPrivateKey;
   if (typeof operationalKeyGetter !== 'function') return undefined;
   try {
     const privateKey = operationalKeyGetter.call(chain);
-    return typeof privateKey === 'string' && privateKey.length > 0
-      ? privateKeyAddress(privateKey)
-      : undefined;
+    return typeof privateKey === 'string' && privateKey.length > 0 ? privateKey : undefined;
   } catch {
     return undefined;
   }
+}
+
+/** The address of an adapter's local operational key, if it exposes a valid one. */
+export function adapterOperationalPrivateKeyAddress(chain: ChainAdapter): string | undefined {
+  return privateKeyAddress(adapterOperationalPrivateKey(chain));
 }
 
 export function adapterHasOperationalPrivateKey(chain: ChainAdapter): boolean {
@@ -381,9 +287,14 @@ export function defaultLargeLiteralStorage(
 export function createPublicSnapshotStore(
   dataDir: string | undefined,
   config: SharedMemoryPublicSnapshotStorageConfig | undefined,
+  store?: TripleStore,
 ): WorkspacePublicSnapshotStore | undefined {
   if (!dataDir || config?.enabled === false) return undefined;
-  return new FileWorkspacePublicSnapshotStore(config?.directory ?? join(dataDir, 'swm-public-snapshots'));
+  return new FileWorkspacePublicSnapshotStore(
+    config?.directory ?? join(dataDir, 'swm-public-snapshots'),
+    undefined,
+    { gc: config?.gc, isSnapshotReferenced: store ? snapshotReferenceCheck(store) : undefined },
+  );
 }
 
 export function applyDefaultLargeLiteralStorage(

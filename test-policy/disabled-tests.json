@@ -1,0 +1,492 @@
+[
+  {
+    "key": "devnet/_bootstrap/rfc64-evidence.test.ts:D1:929f7836832d753cc4a60c8bab00d3667fb84bd8",
+    "path": "devnet/_bootstrap/rfc64-evidence.test.ts",
+    "api": "it.runIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "devnet/_bootstrap/rfc64-evidence.test.ts:D1:cde01fae9b7e0cd067c5ec0f14b0dd0f9f33b33a",
+    "path": "devnet/_bootstrap/rfc64-evidence.test.ts",
+    "api": "it.runIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "devnet/_bootstrap/rfc64-evidence.test.ts:D1:e5e75c235b36e17136807bc9a98b7f6f7d28a0e4",
+    "path": "devnet/_bootstrap/rfc64-evidence.test.ts",
+    "api": "it.runIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "devnet/rich-scenario/automated.test.ts:D1:e51902d584c88d885e1f077b07881efeeef0340a",
+    "path": "devnet/rich-scenario/automated.test.ts",
+    "api": "it.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/adapter-openclaw/test/setup.part-21.test.ts:D1:e51902d584c88d885e1f077b07881efeeef0340a",
+    "path": "packages/adapter-openclaw/test/setup.part-21.test.ts",
+    "api": "it.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/finalization-recovery-sqlite-store.test.ts:D1:0585c96fd9e9774a6d6eec42996949bea9733d29",
+    "path": "packages/agent/test/finalization-recovery-sqlite-store.test.ts",
+    "api": "it.skipIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/rfc64-agent-inventory-lifecycle.test.ts:D1:735b53b3e021e81dba7e9a19cf2803197591ed7f",
+    "path": "packages/agent/test/rfc64-agent-inventory-lifecycle.test.ts",
+    "api": "it.runIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/rfc64-agent-inventory-lifecycle.test.ts:D1:95c5347f833db7b6ff5faa721c77cc96277baf38",
+    "path": "packages/agent/test/rfc64-agent-inventory-lifecycle.test.ts",
+    "api": "it.runIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/rfc64-agent-inventory-lifecycle.test.ts:D1:b259ccc51bbb468d482c8454ad61fbc4354da28a",
+    "path": "packages/agent/test/rfc64-agent-inventory-lifecycle.test.ts",
+    "api": "it.runIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/rfc64-control-object-store-lifecycle-v1.test.ts:D1:0a9ac3b72d4e110ba5041a6f1fa4979fcf4eb95e",
+    "path": "packages/agent/test/rfc64-control-object-store-lifecycle-v1.test.ts",
+    "api": "it.runIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/rfc64-control-object-store-lifecycle-v1.test.ts:D1:4ecbc554f2adb386f918467cf9091ece2bb44249",
+    "path": "packages/agent/test/rfc64-control-object-store-lifecycle-v1.test.ts",
+    "api": "it.runIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/rfc64-control-object-store-lifecycle-v1.test.ts:D1:c095c8188724308267b79937c41c5c7a5ae3e966",
+    "path": "packages/agent/test/rfc64-control-object-store-lifecycle-v1.test.ts",
+    "api": "it.runIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/rfc64-control-object-store-v1.test.ts:D1:467f062a7c73dfcf5a7a1ec7d2d9f94218a47763",
+    "path": "packages/agent/test/rfc64-control-object-store-v1.test.ts",
+    "api": "it.runIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/rfc64-control-object-store-v1.test.ts:D1:70dcddf34e74c68c92cfcd794d5a6bfb6b6ad6a4",
+    "path": "packages/agent/test/rfc64-control-object-store-v1.test.ts",
+    "api": "it.runIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/rfc64-dkg-agent-native-wiring.integration.test.ts:D1:1e5675010afe4d4105491c82634f64d40dea461c",
+    "path": "packages/agent/test/rfc64-dkg-agent-native-wiring.integration.test.ts",
+    "api": "describe.skipIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/rfc64-dkg-agent-native-wiring.integration.test.ts:D1:e51902d584c88d885e1f077b07881efeeef0340a",
+    "path": "packages/agent/test/rfc64-dkg-agent-native-wiring.integration.test.ts",
+    "api": "it.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/rfc64-inventory-v1-candidate-faults.test.ts:D1:e2f9c27ffa49b18fb4029845c9135c646c7f819c",
+    "path": "packages/agent/test/rfc64-inventory-v1-candidate-faults.test.ts",
+    "api": "it.skipIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/rfc64-inventory-v1-lifecycle.test.ts:D1:137d83f16f6b941062cc8fea9ce91041a999733b",
+    "path": "packages/agent/test/rfc64-inventory-v1-lifecycle.test.ts",
+    "api": "it.runIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/rfc64-inventory-v1-lifecycle.test.ts:D1:58c5ed3c2864d7dbf40f386ec034459306669435",
+    "path": "packages/agent/test/rfc64-inventory-v1-lifecycle.test.ts",
+    "api": "describe.runIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/rfc64-inventory-v1-lifecycle.test.ts:D1:74d21aac0ac552c1979ae7e9c24c0a421626bfb8",
+    "path": "packages/agent/test/rfc64-inventory-v1-lifecycle.test.ts",
+    "api": "it.runIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/rfc64-inventory-v1-lifecycle.test.ts:D1:9c3ab89a36b2e33230b1d512650478dbba4c3156",
+    "path": "packages/agent/test/rfc64-inventory-v1-lifecycle.test.ts",
+    "api": "it.runIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/rfc64-inventory-v1-lifecycle.test.ts:D1:ae12a22cd071181ce2f1aebadd072b5c5529a281",
+    "path": "packages/agent/test/rfc64-inventory-v1-lifecycle.test.ts",
+    "api": "it.runIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/rfc64-inventory-v1-lifecycle.test.ts:D1:bb2ea6c87963f861e2f4caa37f11bf0d5669569c",
+    "path": "packages/agent/test/rfc64-inventory-v1-lifecycle.test.ts",
+    "api": "describe.runIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/sync-responder-perf.test.ts:D1:39b4f2d67059fef688fa447025a80a0a8f9504bb",
+    "path": "packages/agent/test/sync-responder-perf.test.ts",
+    "api": "describe.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/sync-responder-rootless-perf.test.ts:D1:39b4f2d67059fef688fa447025a80a0a8f9504bb",
+    "path": "packages/agent/test/sync-responder-rootless-perf.test.ts",
+    "api": "describe.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/test/wm-multi-agent-isolation-extra.test.ts:D1:6fb93c014d11be5a4088db74ddfe92f0b92671d0",
+    "path": "packages/agent/test/wm-multi-agent-isolation-extra.test.ts",
+    "api": "it.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/vitest.config.ts:D2:ab1a4126b744e2e7fce7fa65d927570bb4f1866e",
+    "path": "packages/agent/vitest.config.ts",
+    "api": "vitest.exclude",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/vitest.config.ts:D2:e5fdff8235f27ed1a5342f85057e3ecc8828e485",
+    "path": "packages/agent/vitest.config.ts",
+    "api": "vitest.exclude",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/agent/vitest.config.ts:D2:ea75527f8a2d507a04edee80016a28b6d95a7eb9",
+    "path": "packages/agent/vitest.config.ts",
+    "api": "vitest.exclude",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/chain/test/write-tx-safety-invariants.unit.test.ts:D1:476f62bd1298623583d327a0aec20e4dcc15ef78",
+    "path": "packages/chain/test/write-tx-safety-invariants.unit.test.ts",
+    "api": "describe.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/chain/vitest.config.ts:D2:3e8d8ae382cb3cd094d3d88943b18c216e297c17",
+    "path": "packages/chain/vitest.config.ts",
+    "api": "vitest.exclude",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/cli/test/blazegraph-integration.test.ts:D1:bf619c10cf5a97e53ff8aca0daa42d16e2c125b2",
+    "path": "packages/cli/test/blazegraph-integration.test.ts",
+    "api": "describe.skipIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/cli/test/document-processor-e2e.test.ts:D1:6e8acc0c3bd2c7706b3c4f000718039aad0926af",
+    "path": "packages/cli/test/document-processor-e2e.test.ts",
+    "api": "describe.skipIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/cli/test/document-processor-e2e.test.ts:D1:cb70e88af2b15e6071e81be3ef4ad8d95647f8a2",
+    "path": "packages/cli/test/document-processor-e2e.test.ts",
+    "api": "describe.skipIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/cli/test/oxigraph-binary.test.ts:D1:651794b694e53e8b6b4f401089db2a2904301629",
+    "path": "packages/cli/test/oxigraph-binary.test.ts",
+    "api": "it.skipIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/cli/test/oxigraph-server.test.ts:D1:5b1435cbf10c4777a3a2c04e3fb6c933ba18af1e",
+    "path": "packages/cli/test/oxigraph-server.test.ts",
+    "api": "it.runIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/cli/test/oxigraph-server.test.ts:D1:b539d159a0765a7d598299fb841bb2150097b448",
+    "path": "packages/cli/test/oxigraph-server.test.ts",
+    "api": "describe.skipIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/cli/test/publisher-findings.local.test.ts:D1:494f9562640f17e8d3039c5c153072371748a5ee",
+    "path": "packages/cli/test/publisher-findings.local.test.ts",
+    "api": "describe.skipIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/evm-module/test/gas/RandomSampling-bit-gas.test.ts:D1:39b4f2d67059fef688fa447025a80a0a8f9504bb",
+    "path": "packages/evm-module/test/gas/RandomSampling-bit-gas.test.ts",
+    "api": "describe.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/evm-module/test/integration/Profile.test.ts:D1:6838ce07f0ad6a999ca65c85022d9ffaaba8604f",
+    "path": "packages/evm-module/test/integration/Profile.test.ts",
+    "api": "it.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/evm-module/test/integration/RandomSampling.test.ts:D1:166912203820c06eba85e429c7ad4208bca32ec7",
+    "path": "packages/evm-module/test/integration/RandomSampling.test.ts",
+    "api": "describe.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/evm-module/test/unit/Ask.test.ts:D1:f7014b3df42058915a0e7a276e2ece8c92cb17fe",
+    "path": "packages/evm-module/test/unit/Ask.test.ts",
+    "api": "describe.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/evm-module/test/unit/ContextGraphStorage.test.ts:D1:e51902d584c88d885e1f077b07881efeeef0340a",
+    "path": "packages/evm-module/test/unit/ContextGraphStorage.test.ts",
+    "api": "it.skip",
+    "count": 2,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/evm-module/test/unit/RandomSampling.test.ts:D1:e51902d584c88d885e1f077b07881efeeef0340a",
+    "path": "packages/evm-module/test/unit/RandomSampling.test.ts",
+    "api": "it.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/network-sim/test/sim-engine.e2e.test.ts:D1:8316c117c77a21c4449e20d8252571643eb7b466",
+    "path": "packages/network-sim/test/sim-engine.e2e.test.ts",
+    "api": "it.skipIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/network-sim/test/sim-engine.e2e.test.ts:D1:a35d9ba16c956730f6b7c727a42c966ea5030d42",
+    "path": "packages/network-sim/test/sim-engine.e2e.test.ts",
+    "api": "it.skipIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/node-ui/e2e/helpers/devnet.ts:D1:6eefed8775d72a25b76210d07d9cc9ace516fec3",
+    "path": "packages/node-ui/e2e/helpers/devnet.ts",
+    "api": "test.skip",
+    "count": 3,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/node-ui/e2e/specs/devnet-local/wm-swm-vm-lifecycle.devnet.spec.ts:D1:5da43496b3fff4b52186412ead637fd28730133d",
+    "path": "packages/node-ui/e2e/specs/devnet-local/wm-swm-vm-lifecycle.devnet.spec.ts",
+    "api": "test.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/node-ui/e2e/specs/devnet-local/wm-swm-vm-lifecycle.devnet.spec.ts:D1:e2e0e1a711caccb5381820ad29d19ef5d752ce75",
+    "path": "packages/node-ui/e2e/specs/devnet-local/wm-swm-vm-lifecycle.devnet.spec.ts",
+    "api": "test.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/node-ui/e2e/specs/devnet/wm-swm-vm-ui-cycle.devnet.spec.ts:D1:02e207f7be9f72a11790811f6e8b49459d05d4a7",
+    "path": "packages/node-ui/e2e/specs/devnet/wm-swm-vm-ui-cycle.devnet.spec.ts",
+    "api": "test.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/node-ui/e2e/specs/devnet/wm-swm-vm-ui-cycle.devnet.spec.ts:D1:8fd764dca0477a514b658cca9118cf1353028d6a",
+    "path": "packages/node-ui/e2e/specs/devnet/wm-swm-vm-ui-cycle.devnet.spec.ts",
+    "api": "test.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/node-ui/e2e/specs/publishing-conviction.spec.ts:D1:068f33df4dcb38151eb9c7039aff30efb5545a68",
+    "path": "packages/node-ui/e2e/specs/publishing-conviction.spec.ts",
+    "api": "test.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/node-ui/e2e/specs/publishing-conviction.spec.ts:D1:51e38c877bcf9f74a1b8bcf6a8cb675f3171d05e",
+    "path": "packages/node-ui/e2e/specs/publishing-conviction.spec.ts",
+    "api": "test.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/node-ui/test/ui-compat.test.ts:D1:735cc8cbbb60dd0a75616584ee2232eb70663830",
+    "path": "packages/node-ui/test/ui-compat.test.ts",
+    "api": "describe.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/node-ui/test/ui-compat.test.ts:D1:92919ac5ab1e7dd8cfe367bcce2b8637a87d6ffd",
+    "path": "packages/node-ui/test/ui-compat.test.ts",
+    "api": "describe.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/publisher/test/agent-provenance-e2e.test.ts:D1:9435af03619120b1cd7cd9d0be6568d7984c531b",
+    "path": "packages/publisher/test/agent-provenance-e2e.test.ts",
+    "api": "it.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/publisher/test/async-lift-subtraction.test.ts:D1:041f7e942ea362434cc6c8578b5854c0f0100763",
+    "path": "packages/publisher/test/async-lift-subtraction.test.ts",
+    "api": "it.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/publisher/test/e2e.test.ts:D1:44ee6845b106b853f127846b0bfb6e2694c71627",
+    "path": "packages/publisher/test/e2e.test.ts",
+    "api": "it.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/publisher/test/ka-update.test.ts:D1:f19869308fbcb3af394c5640e0fb044eeaf5aee2",
+    "path": "packages/publisher/test/ka-update.test.ts",
+    "api": "it.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/publisher/test/publish-lifecycle.test.ts:D1:c64ee087a78b315e4e6217179901157b1b1f0974",
+    "path": "packages/publisher/test/publish-lifecycle.test.ts",
+    "api": "it.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/publisher/test/publisher-no-random-wallet.test.ts:D1:93c67e808158dac7206b74ac70e85bbd160cdc96",
+    "path": "packages/publisher/test/publisher-no-random-wallet.test.ts",
+    "api": "it.skip",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/publisher/vitest.config.ts:D2:0fc6ac9eab7bbf78207ea34ab0b72f59e211e4cb",
+    "path": "packages/publisher/vitest.config.ts",
+    "api": "vitest.exclude",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/random-sampling/test/proof-worker.test.ts:D1:d8f1dadd8a12b2b253f32ce5e112b0241b50f060",
+    "path": "packages/random-sampling/test/proof-worker.test.ts",
+    "api": "describe.skipIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/storage/test/blazegraph.integration.test.ts:D1:a5735faf3c4a78821d1f1ee2b0ab6b19b6ef1aec",
+    "path": "packages/storage/test/blazegraph.integration.test.ts",
+    "api": "describe.skipIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/storage/test/changelog.integration.test.ts:D1:c7d6c954ff66d4cef475880a0d35d4e401251baf",
+    "path": "packages/storage/test/changelog.integration.test.ts",
+    "api": "describe.skipIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/storage/test/rfc64-semantic-read-gateway.blazegraph.integration.test.ts:D1:3b7e2367b0753200379a18450bd5f477d36aa8ec",
+    "path": "packages/storage/test/rfc64-semantic-read-gateway.blazegraph.integration.test.ts",
+    "api": "describe.skipIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/storage/test/rfc64-shared-projection-stream.blazegraph.integration.test.ts:D1:f75c56764c6924a6d5e179727702a12134fe06a0",
+    "path": "packages/storage/test/rfc64-shared-projection-stream.blazegraph.integration.test.ts",
+    "api": "describe.skipIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/storage/test/term-canon-blazegraph-oracle.test.ts:D1:94ff6d27291388dc284a869db8a4ff02bc58ae1f",
+    "path": "packages/storage/test/term-canon-blazegraph-oracle.test.ts",
+    "api": "describe.skipIf",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "vitest.config.ts:D2:d38ea1556a79c1359c0ba8deb6d268a9838c949a",
+    "path": "vitest.config.ts",
+    "api": "vitest.exclude",
+    "count": 1,
+    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
+  },
+  {
+    "key": "packages/chain/vitest.config.ts:D2:3654cb00d59f8292b1f3b452aa48f36656769815",
+    "path": "packages/chain/vitest.config.ts",
+    "api": "vitest.exclude",
+    "count": 1,
+    "reason": "Existing reviewed routing from testnet-canary f2cacb9c6 / PR #2473: evm-adapter remains required in the dedicated EVM scope. Real manifest/discovery tests enforce that execution route."
+  }
+]

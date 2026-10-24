@@ -418,9 +418,37 @@
   gap: 12px;
 }
 .v10-local-agent-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   font-size: 13px;
   font-weight: 700;
   color: var(--text-primary);
+}
+/* Vendor mark, painted as a mask so one asset tracks the active theme. The
+   mask-image itself is set inline from the agent's data URI. */
+.v10-local-agent-logo {
+  flex: 0 0 auto;
+  /* 18px, not 14: the Hermes mark is a detailed portrait that collapses into a
+     blob below ~18px. The others read fine smaller, but one size keeps the row
+     rhythm even. */
+  width: 18px;
+  height: 18px;
+  background-color: currentColor;
+  opacity: 0.72;
+  mask-size: contain;
+  mask-repeat: no-repeat;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+}
+/* The tab strip is a 32px row with the status dot and the name already in it,
+   so the mark drops to 14px there and tightens its gap. */
+.v10-agent-subtab .v10-local-agent-logo {
+  width: 14px;
+  height: 14px;
+  margin-left: -2px;
 }
 .v10-local-agent-subtitle {
   margin-top: 4px;

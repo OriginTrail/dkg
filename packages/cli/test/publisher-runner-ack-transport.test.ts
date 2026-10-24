@@ -23,6 +23,7 @@ import {
   type PublishOptions,
   type V10ACKProviderParams,
 } from '@origintrail-official/dkg-publisher';
+import { seedLegacyRawLiftTestJob } from '../../publisher/test/_helpers/legacy-raw-lift.js';
 import { createTripleStore } from '@origintrail-official/dkg-storage';
 import { addPublisherWallet } from '../src/publisher-wallets.js';
 import { createPublisherRuntimeFromAgent } from '../src/publisher-runner.js';
@@ -144,12 +145,11 @@ describe('publisher runner ACK transport handoff', () => {
         store,
         keypair,
         chainBase: undefined,
-        pollIntervalMs: 10,
-        errorBackoffMs: 10,
+        runnerOptions: { pollIntervalMs: 10, errorBackoffMs: 10 },
         ackTransportFactory,
       });
 
-      const jobId = await runtime.publisher.lift({
+      const jobId = await seedLegacyRawLiftTestJob(store, {
         swmId: 'swm-main',
         shareOperationId: write.shareOperationId,
         roots: ['urn:local:/ack-transport'],

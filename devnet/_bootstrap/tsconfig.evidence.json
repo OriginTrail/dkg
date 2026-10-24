@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rootDir": "../..",
+    "sourceMap": false,
+    "types": ["node", "vitest"]
+  },
+  "include": [
+    "rdf-canonize.d.ts",
+    "rfc64-evidence.ts",
+    "rfc64-evidence.test.ts"
+  ]
+}

@@ -13,16 +13,26 @@
  *    reordering hole). Enforced by the in-process write mutex.
  *  - seq reseeds from the durable high-water mark on restart → no reuse/rollback.
  */
-import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
-import { ChangelogStore, CHANGELOG_GRAPH, asChangelogReader, type ChangelogEraGuard } from '../src/changelog-store.js';
+import { SparqlHttpStore } from '../src/adapters/sparql-http.js';
+import {
+  ChangelogStore, CHANGELOG_GRAPH, CHANGELOG_LOOKUP_BATCH, asChangelogReader, type ChangelogEraGuard,
+} from '../src/changelog-store.js';
 import { createTripleStore } from '../src/triple-store.js';
 import type { Quad, QueryOptions, QueryResult, TripleStore, UpdateOptions } from '../src/triple-store.js';
+import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
+import { StoreOperationTimeoutError } from '../src/store-operation-timeout.js';
+import type {
+  Rfc64AuthorCommitCasInputV1,
+  Rfc64AuthorCommitCasSemanticInputV1,
+  Rfc64AuthorCommitCasResultV1,
+} from '../src/rfc64-author-commit-cas.js';
 
 const G1 = 'http://ex.org/g1';
 const G2 = 'http://ex.org/g2';
@@ -32,9 +42,52 @@ function q(subject: string, graph: string, object = '"x"'): Quad {
   return { subject, predicate: 'http://ex.org/p', object, graph };
 }
 
+function rfc64AuthorCommitInput(): Rfc64AuthorCommitCasSemanticInputV1 {
+  const stateGraph = 'urn:test:changelog:rfc64:state';
+  const transition = (role: string) => ({
+    graphUri: stateGraph,
+    subject: `urn:test:changelog:rfc64:${role}`,
+    predicate: 'urn:test:changelog:rfc64:value',
+    expectedObject: null,
+    expectedQuads: null,
+    quads: [q(`urn:test:changelog:rfc64:${role}`, stateGraph, `"${role}"`)],
+  });
+  return {
+    sharedProjectionGraph: 'did:dkg:context-graph:changelog-rfc64/_shared_memory',
+    sharedProjectionQuads: [q(
+      'urn:test:changelog:rfc64:projection',
+      'did:dkg:context-graph:changelog-rfc64/_shared_memory',
+    )],
+    authorSealGraph: 'urn:test:changelog:rfc64:seals',
+    authorSealSubject: 'urn:test:changelog:rfc64:seal',
+    authorSealQuads: [q(
+      'urn:test:changelog:rfc64:seal',
+      'urn:test:changelog:rfc64:seals',
+      '"seal"',
+    )],
+    currentHead: {
+      graphUri: 'urn:test:changelog:rfc64:heads',
+      subject: 'urn:test:changelog:rfc64:author',
+      predicate: 'urn:test:changelog:rfc64:current-head',
+      expectedObject: null,
+      expectedQuads: null,
+      quads: [{
+        subject: 'urn:test:changelog:rfc64:author',
+        predicate: 'urn:test:changelog:rfc64:current-head',
+        object: 'urn:test:changelog:rfc64:catalog:new',
+        graph: 'urn:test:changelog:rfc64:heads',
+      }],
+    },
+    subgraphMutationGeneration: transition('subgraph-generation'),
+    contextGraphMutationGeneration: transition('context-graph-generation'),
+    appliedSet: transition('applied-set'),
+  };
+}
+
 /** Delegating TripleStore that records insert() call shapes and can inject failures. */
 class SpyStore implements TripleStore {
   readonly insertCalls: Quad[][] = [];
+  readonly queryCalls: string[] = [];
   failNextInsert = false;
   constructor(private readonly inner: TripleStore) {}
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
@@ -48,7 +101,10 @@ class SpyStore implements TripleStore {
   delete(quads: Quad[], options?: QueryOptions) { return this.inner.delete(quads, options); }
   deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions) { return this.inner.deleteByPattern(pattern, options); }
   deleteBySubjectPrefix(g: string, p: string, options?: QueryOptions) { return this.inner.deleteBySubjectPrefix(g, p, options); }
-  query(sparql: string, options?: QueryOptions): Promise<QueryResult> { return this.inner.query(sparql, options); }
+  query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+    this.queryCalls.push(sparql);
+    return this.inner.query(sparql, options);
+  }
   hasGraph(g: string, options?: QueryOptions) { return this.inner.hasGraph(g, options); }
   createGraph(g: string) { return this.inner.createGraph(g); }
   dropGraph(g: string, options?: QueryOptions) { return this.inner.dropGraph(g, options); }
@@ -57,6 +113,137 @@ class SpyStore implements TripleStore {
   countQuads(g?: string, options?: QueryOptions) { return this.inner.countQuads(g, options); }
   close() { return this.inner.close(); }
 }
+
+class Rfc64CapableSpyStore extends SpyStore {
+  rfc64AuthorCommitCalls = 0;
+
+  async rfc64AuthorCommitCasV1(): Promise<Rfc64AuthorCommitCasResultV1> {
+    this.rfc64AuthorCommitCalls += 1;
+    return 'committed';
+  }
+}
+
+class NotStartedTimeoutAtomicReplaceStore extends SpyStore {
+  async replaceGraph(): Promise<void> {
+    throw this.notStarted('replaceGraph');
+  }
+
+  async replaceGraphAndSubject(): Promise<void> {
+    throw this.notStarted('replaceGraphAndSubject');
+  }
+
+  async replaceSubject(): Promise<void> {
+    throw this.notStarted('replaceSubject');
+  }
+
+  private notStarted(operation: string): StoreOperationTimeoutError {
+    return new StoreOperationTimeoutError({
+      backend: 'managed-test-store',
+      operation,
+      outcome: 'not_started',
+    });
+  }
+}
+
+describe('ChangelogStore — pre-execution atomic replace rejection', () => {
+  for (const adapter of [
+    {
+      name: 'BlazegraphStore',
+      create: (scheduler: StorePriorityScheduler): TripleStore => new BlazegraphStore(
+        'http://blazegraph.test/sparql',
+        { scheduler, timeout: 1_000 },
+      ),
+    },
+    {
+      name: 'SparqlHttpStore',
+      create: (scheduler: StorePriorityScheduler): TripleStore => new SparqlHttpStore({
+        queryEndpoint: 'http://sparql.test/query',
+        updateEndpoint: 'http://sparql.test/update',
+        consistencyProfile: 'atomic-update',
+        scheduler,
+        timeout: 1_000,
+      }),
+    },
+  ]) {
+    it(`does not request reconciliation for a real ${adapter.name} admission rejection`, async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+        new Error('adapter closure must not dispatch'),
+      );
+      const scheduler = new StorePriorityScheduler({
+        maxConcurrent: 1,
+        ackReservedSlots: 0,
+        healthReservedSlots: 0,
+        backgroundReservedSlots: 0,
+        queueLimits: 1,
+        queueWaitTimeoutMs: 10,
+      });
+      const inner = adapter.create(scheduler);
+      const log = new ChangelogStore(inner);
+      let releaseBlocker!: () => void;
+      let blocker: Promise<void> | undefined;
+
+      try {
+        blocker = scheduler.run('normal', 'test.atomic-replace-blocker', async () => {
+          await new Promise<void>((resolve) => { releaseBlocker = resolve; });
+        });
+        await Promise.resolve();
+
+        for (const [storeOperation, work] of [
+          ['replaceGraph', () => log.replaceGraph(G1, [q('http://ex.org/a', G1)])],
+          ['replaceGraphAndSubject', () => log.replaceGraphAndSubject(
+            G1,
+            [q('http://ex.org/a', G1)],
+            G2,
+            'http://ex.org/meta',
+            [q('http://ex.org/meta', G2)],
+          )],
+          ['replaceSubject', () => log.replaceSubject(
+            G1,
+            'http://ex.org/a',
+            [q('http://ex.org/a', G1)],
+          )],
+        ] as const) {
+          await expect(work()).rejects.toMatchObject({
+            code: 'STORE_SCHEDULER_BUSY',
+            outcome: 'not_started',
+            storeOperation,
+          });
+        }
+
+        expect(log.needsReconcile).toBe(false);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        releaseBlocker?.();
+        if (blocker) await blocker;
+        await inner.close();
+        fetchSpy.mockRestore();
+      }
+    });
+  }
+
+  it('uses the shared not-started outcome for managed-store refusals', async () => {
+    const base = new OxigraphStore();
+    const log = new ChangelogStore(new NotStartedTimeoutAtomicReplaceStore(base));
+
+    await expect(log.replaceGraph(G1, [q('http://ex.org/a', G1)]))
+      .rejects.toMatchObject({ outcome: 'not_started', storeOperation: 'replaceGraph' });
+    await expect(log.replaceGraphAndSubject(
+      G1,
+      [q('http://ex.org/a', G1)],
+      G2,
+      'http://ex.org/meta',
+      [q('http://ex.org/meta', G2)],
+    )).rejects.toMatchObject({
+      outcome: 'not_started',
+      storeOperation: 'replaceGraphAndSubject',
+    });
+    await expect(log.replaceSubject(G1, 'http://ex.org/a', [q('http://ex.org/a', G1)]))
+      .rejects.toMatchObject({ outcome: 'not_started', storeOperation: 'replaceSubject' });
+
+    expect(log.needsReconcile).toBe(false);
+    await base.close();
+  });
+});
 
 describe('ChangelogStore — upsert marker atomicity', () => {
   it('appends the marker in the SAME inner.insert() call as the data (one transaction)', async () => {
@@ -141,6 +328,165 @@ describe('ChangelogStore — sequence semantics', () => {
   });
 });
 
+describe('ChangelogStore — page reads are direct entry lookups (O(delta), never a log scan)', () => {
+  let base: OxigraphStore;
+  let spy: SpyStore;
+  let log: ChangelogStore;
+  beforeEach(() => { base = new OxigraphStore(); spy = new SpyStore(base); log = new ChangelogStore(spy); });
+  afterEach(async () => { await base.close(); });
+
+  const changelogReads = () => spy.queryCalls.filter((sparql) => sparql.includes(CHANGELOG_GRAPH));
+
+  it('serves a page by looking up the window\'s entry IRIs instead of scanning the whole log', async () => {
+    for (const g of [G1, G2, G3]) await log.insert([q(`http://ex.org/${g}`, g)]);
+    spy.queryCalls.length = 0;
+    const page = await log.readChanges(1, 100);
+    expect(page).toEqual([
+      { seq: 2, graph: G2, op: 'upsert' },
+      { seq: 3, graph: G3, op: 'upsert' },
+    ]);
+    const reads = changelogReads();
+    expect(reads).toHaveLength(2);
+    expect(reads[0]).toContain('VALUES ?e');
+    expect(reads[0]).toContain('<urn:dkg:changelog:e:2>');
+    expect(reads[0]).toContain('<urn:dkg:changelog:e:3>');
+    expect(reads[0]).not.toContain('<urn:dkg:changelog:e:1>');
+    expect(reads[0]).not.toContain('<urn:dkg:changelog:e:4>');
+    // The window reached this writer's head: one entry probe past it confirms
+    // that no other writer appended above.
+    expect(reads[1]).toContain('<urn:dkg:changelog:e:4>');
+    expect(reads[1]).not.toContain('<urn:dkg:changelog:e:5>');
+    expect(reads.some((sparql) => sparql.includes('FILTER('))).toBe(false);
+  });
+
+  it('a caught-up (or ahead) cursor costs one entry probe past the head, never a log scan', async () => {
+    await log.insert([q('http://ex.org/a', G1)]);
+    spy.queryCalls.length = 0;
+    expect(await log.readChanges(1, 100)).toEqual([]);
+    expect(await log.readChanges(50, 100)).toEqual([]);
+    const reads = changelogReads();
+    expect(reads).toHaveLength(2);
+    expect(reads[0]).toContain('<urn:dkg:changelog:e:2>');
+    expect(reads[0]).not.toContain('<urn:dkg:changelog:e:3>');
+    expect(reads[1]).toContain('<urn:dkg:changelog:e:51>');
+    expect(reads[1]).not.toContain('<urn:dkg:changelog:e:52>');
+    expect(reads.some((sparql) => sparql.includes('FILTER('))).toBe(false);
+  });
+
+  it('caps the window at the head and at the limit', async () => {
+    for (const g of [G1, G2, G3]) await log.insert([q(`http://ex.org/${g}`, g)]);
+    spy.queryCalls.length = 0;
+    expect((await log.readChanges(0, 2)).map((c) => c.seq)).toEqual([1, 2]);
+    expect(changelogReads()[0]).not.toContain('<urn:dkg:changelog:e:3>');
+    expect((await log.readChanges(2, 100)).map((c) => c.seq)).toEqual([3]);
+  });
+
+  it('spans several lookup batches for a page wider than one batch', async () => {
+    const graphs = Array.from({ length: CHANGELOG_LOOKUP_BATCH * 2 + 3 }, (_, i) => `http://ex.org/w${i}`);
+    // One insert ⇒ one transaction ⇒ contiguous seqs 1..N in graph order.
+    await log.insert(graphs.map((g) => q(`${g}/s`, g)));
+    spy.queryCalls.length = 0;
+    const page = await log.readChanges(0, graphs.length);
+    expect(page.map((c) => c.seq)).toEqual(graphs.map((_, i) => i + 1));
+    expect(page.map((c) => c.graph)).toEqual(graphs);
+    expect(changelogReads().filter((sparql) => sparql.includes('VALUES ?e'))).toHaveLength(3);
+    expect(changelogReads().some((sparql) => sparql.includes('FILTER('))).toBe(false);
+  });
+
+  it('a hole in the log (marker removed out-of-band) widens the window instead of running the range scan, never a short page', async () => {
+    const graphs = [G1, G2, G3, 'http://ex.org/g4', 'http://ex.org/g5'];
+    for (const g of graphs) await log.insert([q(`${g}/s`, g)]);
+    // Remove seq 3's marker behind the decorator's back (a reconcile-owed shape).
+    await base.deleteByPattern({ subject: 'urn:dkg:changelog:e:3', graph: CHANGELOG_GRAPH });
+    spy.queryCalls.length = 0;
+    // Three distinct seqs were asked for: the hole at 3 is covered by widening to 4.
+    expect((await log.readChanges(0, 3)).map((c) => c.seq)).toEqual([1, 2, 4]);
+    expect((await log.readChanges(2, 100)).map((c) => c.seq)).toEqual([4, 5]);
+    expect((await log.readChanges(0, 100)).map((c) => c.seq)).toEqual([1, 2, 4, 5]);
+    expect((await log.readChanges(3, 100)).map((c) => c.seq)).toEqual([4, 5]);
+    const reads = changelogReads();
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((sparql) => sparql.includes('VALUES ?e'))).toBe(true);
+    expect(reads.some((sparql) => sparql.includes('FILTER('))).toBe(false);
+  });
+
+  it('a seq carried by two markers (writer overlap across a release swap) stays on the lookup path', async () => {
+    for (const g of [G1, G2, G3]) await log.insert([q(`${g}/s`, g)]);
+    // A second writer process seeded at head=2 appended its own seq 3 for another graph.
+    await base.insert([
+      { subject: 'urn:dkg:changelog:e:3', predicate: 'urn:dkg:changelog#seq', object: '"3"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: CHANGELOG_GRAPH },
+      { subject: 'urn:dkg:changelog:e:3', predicate: 'urn:dkg:changelog#graph', object: 'http://ex.org/twin', graph: CHANGELOG_GRAPH },
+      { subject: 'urn:dkg:changelog:e:3', predicate: 'urn:dkg:changelog#op', object: '"upsert"', graph: CHANGELOG_GRAPH },
+    ]);
+    spy.queryCalls.length = 0;
+    const page = await log.readChanges(0, 100);
+    expect(page.map((c) => c.seq)).toEqual([1, 2, 3, 3]);
+    expect(new Set(page.filter((c) => c.seq === 3).map((c) => c.graph))).toEqual(new Set([G3, 'http://ex.org/twin']));
+    expect(changelogReads().some((sparql) => sparql.includes('FILTER('))).toBe(false);
+  });
+
+  it('forwards the caller\'s query source to every entry lookup, holes included', async () => {
+    const sources: Array<string | undefined> = [];
+    const tap = new (class extends SpyStore {
+      override query(sparql: string, options?: QueryOptions) {
+        sources.push(options?.source);
+        return super.query(sparql, options);
+      }
+    })(base);
+    const tapped = new ChangelogStore(tap);
+    for (const g of [G1, G2, G3]) await tapped.insert([q(`${g}/s`, g)]);
+    await base.deleteByPattern({ subject: 'urn:dkg:changelog:e:2', graph: CHANGELOG_GRAPH });
+    sources.length = 0;
+    expect((await tapped.readChanges(0, 100, { source: 'sync.responder.readChanges' })).map((c) => c.seq)).toEqual([1, 3]);
+    expect(sources.length).toBeGreaterThan(1);
+    expect(new Set(sources)).toEqual(new Set(['sync.responder.readChanges']));
+  });
+
+  it('serves markers another writer appended above this instance\'s counter', async () => {
+    // Two decorators over one store: b seeds its counter while the log is empty,
+    // then a (an overlapping worker across a release swap) appends seq 1.
+    const a = new ChangelogStore(spy);
+    const b = new ChangelogStore(spy);
+    await b.changelogHead();
+    await a.insert([q('http://ex.org/s', G1)]);
+    spy.queryCalls.length = 0;
+    expect(await b.readChanges(0, 100)).toEqual([{ seq: 1, graph: G1, op: 'upsert' }]);
+    // b adopted the durable head, so the head it reports to peers covers the
+    // record it just served.
+    expect((await b.changelogHead()).seq).toBe(1);
+    expect(changelogReads().some((sparql) => sparql.includes('FILTER('))).toBe(false);
+  });
+
+  it('never reports a page as drained while durable markers remain above this instance\'s counter', async () => {
+    const a = new ChangelogStore(spy);
+    const b = new ChangelogStore(spy);
+    for (const g of [G1, G2, G3]) await a.insert([q(`${g}/s`, g)]);
+    await b.changelogHead();                                             // b seeds at 3
+    await a.insert([q('http://ex.org/g4/s', 'http://ex.org/g4')]);      // seq 4
+    await a.insert([q('http://ex.org/g5/s', 'http://ex.org/g5')]);      // seq 5
+    expect((await b.readChanges(0, 100)).map((c) => c.seq)).toEqual([1, 2, 3, 4, 5]);
+    expect((await b.changelogHead()).seq).toBe(5);
+    // b's next marker lands above everything already in the log, and a sees it.
+    await b.insert([q('http://ex.org/g6/s', 'http://ex.org/g6')]);
+    expect((await b.changelogHead()).seq).toBe(6);
+    expect((await a.readChanges(5, 100)).map((c) => c.seq)).toEqual([6]);
+    expect((await a.changelogHead()).seq).toBe(6);
+  });
+
+  it('a disabled decorator keeps the passthrough range-scan semantics', async () => {
+    const on = new ChangelogStore(spy);
+    for (const g of [G1, G2]) await on.insert([q(`${g}/s`, g)]);
+    const off = new ChangelogStore(spy, { enabled: false });
+    await off.insert([q('http://ex.org/a', G3)]);          // writes no marker
+    spy.queryCalls.length = 0;
+    expect((await off.readChanges(0, 100)).map((c) => c.seq)).toEqual([1, 2]);
+    const reads = changelogReads();
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toContain('FILTER(?seq > 0)');
+    expect(reads[0]).not.toContain('VALUES ?e');
+  });
+});
+
 describe('ChangelogStore — drop / delete op attribution', () => {
   let base: OxigraphStore;
   let log: ChangelogStore;
@@ -203,6 +549,23 @@ describe('ChangelogStore — restart reseed & reserved-graph hiding', () => {
     expect(graphs).not.toContain(CHANGELOG_GRAPH);
     // hasGraph on the reserved plane reads as invisible upward.
     expect(await log.hasGraph(CHANGELOG_GRAPH)).toBe(false);
+    await base.close();
+  });
+
+  it('normalizes an unsorted inner catalog while excluding reserved graphs', async () => {
+    const base = new OxigraphStore();
+    const log = new ChangelogStore(base);
+    await log.insert([
+      q('http://ex.org/z', G2),
+      q('http://ex.org/a', G1),
+      q('http://ex.org/duplicate', G1),
+    ]);
+
+    const graphs = await log.listGraphsSorted();
+    expect(graphs).toEqual([G1, G2]);
+    expect(Object.isFrozen(graphs)).toBe(true);
+    expect(new Set(graphs).size).toBe(graphs.length);
+    expect(graphs).not.toContain(CHANGELOG_GRAPH);
     await base.close();
   });
 });
@@ -334,8 +697,10 @@ describe('ChangelogStore — reserved-graph write protection', () => {
     // aimed at it would erase or corrupt the log, so it is rejected outright.
     await expect(log.dropGraph(CHANGELOG_GRAPH)).rejects.toThrow(/reserved/i);
     await expect(log.deleteByPattern({ graph: CHANGELOG_GRAPH })).rejects.toThrow(/reserved/i);
+    await expect(log.deleteByPatternWithoutCount({ graph: CHANGELOG_GRAPH })).rejects.toThrow(/reserved/i);
     await expect(log.deleteBySubjectPrefix(CHANGELOG_GRAPH, 'x')).rejects.toThrow(/reserved/i);
     expect(spy.insertCalls.length).toBe(callsBefore); // nothing reached the store
+    expect(await log.headSeq()).toBe(1); // log intact
     await base.close();
   });
 
@@ -367,6 +732,8 @@ describe('ChangelogStore — reserved-graph write protection', () => {
     await log.insert([q('http://ex.org/a', G1)]); // seq 1
     await expect(log.deleteByPattern({ predicate: 'urn:dkg:changelog#seq' })).rejects.toThrow(/reserved/i);
     await expect(log.deleteByPattern({ subject: 'urn:dkg:changelog:e:1' })).rejects.toThrow(/reserved/i);
+    await expect(log.deleteByPatternWithoutCount({ predicate: 'urn:dkg:changelog#seq' })).rejects.toThrow(/reserved/i);
+    await expect(log.deleteByPatternWithoutCount({ subject: 'urn:dkg:changelog:e:1' })).rejects.toThrow(/reserved/i);
     expect(await log.headSeq()).toBe(1); // log intact
     await base.close();
   });
@@ -385,6 +752,52 @@ describe('ChangelogStore — reserved-graph write protection', () => {
       `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${CHANGELOG_GRAPH}> { ?s ?p ?o } }`,
     );
     expect(res.type).toBe('bindings');
+    await base.close();
+  });
+
+  it('rejects every RFC-64 manifest role that targets the reserved changelog plane', async () => {
+    const base = new OxigraphStore();
+    const inner = new Rfc64CapableSpyStore(base);
+    const log = new ChangelogStore(inner);
+    await log.insert([q('http://ex.org/seed', G1)]);
+    const recordsBefore = await log.readChanges(0, 100);
+    const baseInput = rfc64AuthorCommitInput();
+    const reservedQuad = (subject: string, object = '"reserved"') =>
+      q(subject, CHANGELOG_GRAPH, object);
+    const cases: Array<readonly [string, Rfc64AuthorCommitCasInputV1]> = [
+      ['projection', {
+        ...baseInput,
+        sharedProjectionGraph: CHANGELOG_GRAPH,
+        sharedProjectionQuads: [reservedQuad('urn:test:changelog:rfc64:projection')],
+      }],
+      ['author seal', {
+        ...baseInput,
+        authorSealGraph: CHANGELOG_GRAPH,
+        authorSealQuads: [reservedQuad(baseInput.authorSealSubject, '"seal"')],
+      }],
+      ...([
+        'currentHead',
+        'subgraphMutationGeneration',
+        'contextGraphMutationGeneration',
+        'appliedSet',
+      ] as const).map((role) => [role, {
+        ...baseInput,
+        [role]: {
+          ...baseInput[role],
+          graphUri: CHANGELOG_GRAPH,
+          quads: role === 'currentHead'
+            ? [{ ...baseInput.currentHead.quads[0]!, graph: CHANGELOG_GRAPH }]
+            : [reservedQuad(baseInput[role].subject, `"${role}"`)],
+        },
+      }] as const),
+    ];
+
+    for (const [role, input] of cases) {
+      await expect(log.rfc64AuthorCommitCasV1(input), role).rejects.toThrow(/reserved/i);
+      expect(inner.rfc64AuthorCommitCalls, role).toBe(0);
+      expect(await log.headSeq(), role).toBe(1);
+      expect(await log.readChanges(0, 100), role).toEqual(recordsBefore);
+    }
     await base.close();
   });
 });
@@ -441,6 +854,28 @@ describe('ChangelogStore — delete-path op attribution & reconcile', () => {
     expect(await log.deleteByPattern({ subject: 'http://ex.org/b', graph: G1 })).toBeGreaterThan(0);
     expect((await log.readChanges(0, 100)).map((c) => c.op)).toEqual(['upsert', 'upsert', 'drop']);
     expect(log.needsReconcile).toBe(false); // graph-hinted path is fully attributed
+  });
+
+  it('no-count deleteByPattern emits a conservative marker and preserves drop attribution', async () => {
+    await log.insert([q('http://ex.org/a', G1), q('http://ex.org/b', G1)]);
+
+    await log.deleteByPatternWithoutCount({ subject: 'http://ex.org/a', graph: G1 });
+    await log.deleteByPatternWithoutCount({ subject: 'http://ex.org/b', graph: G1 });
+
+    expect((await log.readChanges(0, 100)).map((c) => c.op)).toEqual([
+      'upsert',
+      'upsert',
+      'drop',
+    ]);
+    expect(log.needsReconcile).toBe(false);
+  });
+
+  it('no-count graph-less delete flags reconcile without requiring a count', async () => {
+    await log.insert([q('http://ex.org/s1', G1)]);
+
+    await log.deleteByPatternWithoutCount({ predicate: 'http://ex.org/p' });
+
+    expect(log.needsReconcile).toBe(true);
   });
 });
 
@@ -583,6 +1018,44 @@ describe('ChangelogStore — era foundation & reader capability', () => {
     const h2 = await log.changelogHead();
     expect(h2.era).toBe(h1.era); // era is immutable while the log lives
     expect(h2.seq).toBe(2);
+    await base.close();
+  });
+
+  it('serves the seeded live head from memory while headSeq remains a durable diagnostic', async () => {
+    const base = new OxigraphStore();
+    const spy = new SpyStore(base);
+    const log = new ChangelogStore(spy);
+
+    expect((await log.changelogHead()).seq).toBe(0);
+    const durableHeadQueries = () => spy.queryCalls.filter((query) => query.includes('MAX(?seq)')).length;
+    expect(durableHeadQueries()).toBe(1); // one-time restart seed
+
+    await log.insert([q('http://ex.org/a', G1)]);
+    await log.insert([q('http://ex.org/b', G2)]);
+    expect((await log.changelogHead()).seq).toBe(2);
+    expect((await log.changelogHead({ source: 'sync.head', priority: 'ack' })).seq).toBe(2);
+    expect(durableHeadQueries()).toBe(1); // no per-request SPARQL aggregation
+
+    expect(await log.headSeq()).toBe(2);
+    expect(durableHeadQueries()).toBe(2); // explicit diagnostic still reads storage
+    await base.close();
+  });
+
+  it('preserves cancellation on the query-free seeded head path', async () => {
+    const base = new OxigraphStore();
+    const spy = new SpyStore(base);
+    const log = new ChangelogStore(spy);
+
+    await log.changelogHead();
+    const durableHeadQueries = () => spy.queryCalls.filter((query) => query.includes('MAX(?seq)')).length;
+    expect(durableHeadQueries()).toBe(1);
+
+    const controller = new AbortController();
+    const reason = new Error('changelog head cancelled');
+    controller.abort(reason);
+
+    await expect(log.changelogHead({ signal: controller.signal })).rejects.toBe(reason);
+    expect(durableHeadQueries()).toBe(1); // cancellation must not restore the per-request aggregate
     await base.close();
   });
 

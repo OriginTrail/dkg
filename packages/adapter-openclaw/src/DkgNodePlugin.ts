@@ -29,6 +29,7 @@ import {
 import {
   DkgDaemonClient,
   DkgDaemonHttpError,
+  DkgDaemonOutcomeUnknownError,
   normalizeContextGraphId,
   type LocalAgentIntegrationRecord,
   type LocalAgentIntegrationTransport,
@@ -73,6 +74,7 @@ import {
   queryCatalogSlug,
   readOnlySparqlOperation,
 } from './dkg-node-plugin-query-catalog.js';
+import { prepareQueryCatalogExecution } from '@origintrail-official/dkg-core/query-catalog';
 import {
   channelConfigFingerprint,
   extractUserTextFromContent,
@@ -98,7 +100,7 @@ import type { DkgToolHost } from './tools/tool-host.js';
 import { buildNodeTools } from './tools/node-tools.js';
 import { buildContextGraphTools } from './tools/context-graph-tools.js';
 import { buildQueryTools } from './tools/query-tools.js';
-import { buildMessagingTools } from './tools/messaging-tools.js';
+import {  buildMessagingTools } from './tools/messaging-tools.js';
 import { buildAssertionTools } from './tools/assertion-tools.js';
 import { buildMemoryTools } from './tools/memory-tools.js';
 
@@ -111,36 +113,31 @@ import { buildMemoryTools } from './tools/memory-tools.js';
 // canonical fixture at `tests/fixtures/share-seal-warnings.json`. Update the
 // fixture + all three adapters together; the parity tests flag any mismatch.
 
-// publishReady:false after a FULL share that opted out of sealing (skip_seal:true)
-// — a later finalize(layer:swm) DOES seal it.
+// Defensive mixed-version warning for a non-ready atomic share.
 export const SHARE_NOT_PUBLISH_READY_WARNING =
-  'Shared to SWM but NOT publish-ready (sealed:false). Seal it with ' +
-  'dkg_knowledge_asset_finalize (layer:swm works after sharing), then publish.';
+  'The atomic SWM share did not become publish-ready (sealed:false). Keep the ' +
+  'Working Memory draft and retry the complete Knowledge Asset share; do not publish it.';
 
-// A SUBSET share is publishReady:false too, but unlike a skip_seal full share it
-// is NOT sealable — finalize(layer:swm) now REJECTS it with SWM_SUBSET_NOT_SEALABLE.
-// Surface the real recovery (full share / new asset) instead of "seal it".
+// Defensive mixed-version classification for a legacy partial-share outcome.
 export const SHARE_SUBSET_NOT_PUBLISH_READY_WARNING =
-  'Shared a SUBSET to SWM for peer visibility. A subset is NOT sealable/' +
-  'publishable (finalize layer:swm will reject it). To publish on-chain, share ' +
-  'the full asset (entities:"all"), or model this subset as its own knowledge asset.';
+  'A legacy partial-share outcome was reported. Root-scoped subsets are read-only ' +
+  'and not publishable; model the intended data as its own Knowledge Asset and share it atomically.';
 
-// A FULL share can come back sealed:true but publishReady:false when NOT every
-// sealed root reached SWM (promotedAllRoots false — e.g. foreign-owned roots were
-// skipped). The engine did NOT set the swmShareComplete marker, so finalize(layer:
-// swm) would REJECT — do NOT recommend it here. Re-sharing the full asset recovers.
+// A sealed atomic share can still report incomplete delivery; retry from WM.
 export const SHARE_INCOMPLETE_PROMOTE_WARNING =
-  'Sealed, but not all roots reached SWM (some roots may be owned by other ' +
-  'agents) — not yet publishable; re-share the full asset so every sealed root ' +
-  'is in SWM.';
+  'The complete sealed Knowledge Asset did not reach SWM and is not publish-ready; ' +
+  'keep the Working Memory draft and retry the atomic share.';
+
+export const ATOMIC_SHARE_SIGNING_RECOVERY =
+  'Resolve the local signing capability, then retry the complete atomic ' +
+  'Knowledge Asset share from Working Memory.';
 
 /**
  * #1116: pick the not-publish-ready share warning from the share outcome. Returns
  * `undefined` when the share IS publish-ready (no warning). Precedence:
- *  1. sealed:true + publishReady:false → incomplete full promote (marker NOT set;
- *     finalize layer:swm would reject) → re-share the full asset.
- *  2. sealed:false + SUBSET → not sealable.
- *  3. sealed:false + FULL (skip_seal) → sealable later (finalize layer:swm works).
+ *  1. sealed:true + publishReady:false → incomplete atomic delivery.
+ *  2. sealed:false + legacy subset response → legacy read-only warning.
+ *  3. sealed:false + atomic response → retry the complete share from WM.
  * Duplicated byte-identical on MCP (TS) + Hermes (Python).
  */
 export function classifyShareWarning(outcome: {
@@ -155,8 +152,8 @@ export function classifyShareWarning(outcome: {
 }
 
 /**
- * #1116: extract the daemon's recovery hint from a 409 UNSEALED_SHARE_BLOCKED
- * share failure. The DkgDaemonClient throws a typed {@link DkgDaemonHttpError}
+ * #1116: normalize a 409 UNSEALED_SHARE_BLOCKED share failure to the
+ * supported atomic recovery. The DkgDaemonClient throws a typed {@link DkgDaemonHttpError}
  * carrying the response `status` and parsed JSON `body`, so branch structurally
  * on the status + body code (no JSON-from-message parsing). Returns undefined
  * for any other error (caller falls back to the generic daemonError).
@@ -168,9 +165,9 @@ function extractUnsealedShareRecovery(err: unknown): string | undefined {
     typeof err.body === 'object' &&
     err.body !== null
   ) {
-    const body = err.body as { code?: string; recovery?: string };
-    if (body.code === 'UNSEALED_SHARE_BLOCKED' && typeof body.recovery === 'string' && body.recovery) {
-      return body.recovery;
+    const body = err.body as { code?: string };
+    if (body.code === 'UNSEALED_SHARE_BLOCKED') {
+      return ATOMIC_SHARE_SIGNING_RECOVERY;
     }
   }
   return undefined;
@@ -2445,6 +2442,11 @@ export class DkgNodePlugin {
   }
 
   private daemonError(err: any): OpenClawToolResult {
+    // A long mutation that timed out after reaching the daemon may still land, and
+    // a blind retry can 409 against it: report the unknown outcome, not a failure.
+    if (err instanceof DkgDaemonOutcomeUnknownError) {
+      return this.json({ outcomeUnknown: true, warning: err.message });
+    }
     const msg = err.message ?? String(err);
     if (msg.includes('fetch failed') || msg.includes('ECONNREFUSED')) {
       return this.error(
@@ -2881,60 +2883,9 @@ export class DkgNodePlugin {
       // cross-agent WM read with a malformed value would otherwise get the
       // node's own WM back — wrong namespace, wrong data, no error.
       // `undefined` (field genuinely absent) still takes the default.
-      if (args.agent_address !== undefined) {
-        if (typeof args.agent_address !== 'string') {
-          return this.error('"agent_address" must be a string.');
-        }
-        if (args.agent_address.trim() === '') {
-          return this.error('"agent_address" must be a non-empty string.');
-        }
-      }
-      let agentAddress = typeof args.agent_address === 'string'
-        ? args.agent_address.trim()
-        : undefined;
-      if (view === 'working-memory' && agentAddress === undefined) {
-        // Mirror the daemon's writer-side `defaultAgentAddress ?? peerId`
-        // priority. First try the identity endpoint; if it has not resolved
-        // yet, ensure the peerId fallback has had a chance to populate.
-        if (this.nodeAgentAddress === undefined) {
-          await this.ensureNodeAgentAddress().catch(() => {});
-        }
-        agentAddress = this.resolveDefaultAgentAddress();
-        if (agentAddress === undefined) {
-          await this.ensureNodePeerId().catch(() => {});
-          agentAddress = this.resolveDefaultAgentAddress();
-        }
-        if (agentAddress === undefined) {
-          return this.error(
-            '"view: working-memory" requires an agent identity. Supply `agent_address` explicitly, ' +
-              "or retry once the node's agent address or peer ID is available.",
-          );
-        }
-      }
-      if (view === 'working-memory' && agentAddress !== undefined) {
-        // T48/T53 — `toAgentPeerId` strips the legacy `did:dkg:agent:`
-        // prefix (raw eth and raw peerId are pass-through). The daemon's
-        // own contract (`packages/agent/src/dkg-agent.ts:2647-2696`)
-        // accepts BOTH self-aliases for the default agent: when the
-        // keystore is present, writes go to `defaultAgentAddress` (eth)
-        // and reads must use eth; on fresh/auth-disabled/no-keystore
-        // nodes, the daemon's writer-side resolves to `peerId` and reads
-        // must use peerId. Don't hard-reject non-eth values — that
-        // would break legitimate WM reads on no-keystore nodes.
-        const stripped = toAgentPeerId(agentAddress);
-        // T65 — If the post-strip value is eth-shaped, normalize to
-        // EIP-55 checksum form. The daemon stores chat-turn graph URIs
-        // under `agent.defaultAgentAddress` which ethers `verifyWallet
-        // .address` produces in EIP-55 form, and SPARQL graph URIs are
-        // case-sensitive. A caller-supplied lowercase wallet address
-        // would otherwise miss the daemon's checksum-case URI prefix
-        // and silently return zero bindings even when data exists.
-        // Non-eth-shaped values (peerIds, anything else) pass through
-        // verbatim — daemon contract still accepts them as self-aliases.
-        agentAddress = isValidEthAddressString(stripped)
-          ? toEip55Checksum(stripped)
-          : stripped;
-      }
+      const resolvedAgentAddress = await this.resolveQueryAgentAddress(args.agent_address, view);
+      if (resolvedAgentAddress.error) return resolvedAgentAddress.error;
+      const agentAddress = resolvedAgentAddress.value;
       const result = await this.client.query(sparql, {
         contextGraphId,
         view,
@@ -2944,6 +2895,47 @@ export class DkgNodePlugin {
     } catch (err: any) {
       return this.daemonError(err);
     }
+  }
+
+  private async resolveQueryAgentAddress(
+    rawAgentAddress: unknown,
+    view: GetView | undefined,
+  ): Promise<{ value?: string; error?: OpenClawToolResult }> {
+    if (rawAgentAddress !== undefined && typeof rawAgentAddress !== 'string') {
+      return { error: this.error('"agent_address" must be a string.') };
+    }
+    if (typeof rawAgentAddress === 'string' && rawAgentAddress.trim() === '') {
+      return { error: this.error('"agent_address" must be a non-empty string.') };
+    }
+
+    let agentAddress = typeof rawAgentAddress === 'string'
+      ? rawAgentAddress.trim()
+      : undefined;
+    if (view === 'working-memory' && agentAddress === undefined) {
+      if (this.nodeAgentAddress === undefined) {
+        await this.ensureNodeAgentAddress().catch(() => {});
+      }
+      agentAddress = this.resolveDefaultAgentAddress();
+      if (agentAddress === undefined) {
+        await this.ensureNodePeerId().catch(() => {});
+        agentAddress = this.resolveDefaultAgentAddress();
+      }
+      if (agentAddress === undefined) {
+        return {
+          error: this.error(
+            '"view: working-memory" requires an agent identity. Supply `agent_address` explicitly, ' +
+              "or retry once the node's agent address or peer ID is available.",
+          ),
+        };
+      }
+    }
+    if (view === 'working-memory' && agentAddress !== undefined) {
+      const stripped = toAgentPeerId(agentAddress);
+      agentAddress = isValidEthAddressString(stripped)
+        ? toEip55Checksum(stripped)
+        : stripped;
+    }
+    return { value: agentAddress };
   }
 
   private async handleQueryCatalogList(args: Record<string, unknown>): Promise<OpenClawToolResult> {
@@ -2992,10 +2984,26 @@ export class DkgNodePlugin {
       }
 
       const savedQuery = matches[0];
-      const queryOpts = savedQuery.subGraph && savedQuery.subGraph !== CONTEXT_GRAPH_QUERY_SUBGRAPH
-        ? { contextGraphId, subGraphName: savedQuery.subGraph }
-        : { contextGraphId };
-      const result = await this.client.query(savedQuery.sparql, queryOpts);
+      const rawParameters = args.parameters;
+      if (rawParameters !== undefined && (!rawParameters || typeof rawParameters !== 'object' || Array.isArray(rawParameters))) {
+        return this.error('"parameters" must be an object keyed by saved-query parameter name.');
+      }
+      const execution = prepareQueryCatalogExecution(
+        savedQuery,
+        (rawParameters ?? {}) as Record<string, unknown>,
+      );
+      const resolvedAgentAddress = await this.resolveQueryAgentAddress(
+        args.agent_address,
+        execution.view,
+      );
+      if (resolvedAgentAddress.error) return resolvedAgentAddress.error;
+      const queryOpts = {
+        contextGraphId,
+        ...(execution.subGraphName ? { subGraphName: execution.subGraphName } : {}),
+        ...(execution.view ? { view: execution.view } : {}),
+        ...(resolvedAgentAddress.value ? { agentAddress: resolvedAgentAddress.value } : {}),
+      };
+      const result = await this.client.query(execution.sparql, queryOpts);
       return this.json({
         contextGraphId,
         savedQuery,
@@ -3029,6 +3037,17 @@ export class DkgNodePlugin {
       const catalogName = optionalString(args.catalog_name) ?? USER_QUERY_CATALOG_NAME;
       const catalogDescription = optionalString(args.catalog_description) ?? USER_QUERY_CATALOG_DESCRIPTION;
       const resultColumn = optionalString(args.result_column)?.replace(/^\?/, '');
+      let requestedView: GetView | undefined;
+      if (args.execution_view !== undefined) {
+        if (typeof args.execution_view !== 'string') {
+          return this.error('"execution_view" must be working-memory, shared-working-memory, or verifiable-memory.');
+        }
+        const normalizedView = args.execution_view.trim();
+        if (!GET_VIEWS.includes(normalizedView as GetView)) {
+          return this.error('"execution_view" must be working-memory, shared-working-memory, or verifiable-memory.');
+        }
+        requestedView = normalizedView as GetView;
+      }
       const rank = Date.now();
       const { savedQuery, quads } = buildQueryCatalogSaveWrite({
         contextGraphId,
@@ -3042,6 +3061,8 @@ export class DkgNodePlugin {
         resultColumn,
         rank,
         catalogRank: 50,
+        parameters: args.parameters,
+        view: requestedView,
       });
       const write = await this.client.writeQueryCatalog(contextGraphId, quads);
       return this.json({
@@ -3057,10 +3078,15 @@ export class DkgNodePlugin {
 
   private async handleFindAgents(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
-      const filter: { framework?: string; skill_type?: string } = {};
-      if (args.framework) filter.framework = String(args.framework);
-      if (args.skill_type) filter.skill_type = String(args.skill_type);
-      const result = await this.client.getAgents(Object.keys(filter).length ? filter : undefined);
+      // ONE boundary policy for every filter: forward the model's value
+      // VERBATIM and let the daemon validate — it 400s on bad values and
+      // unknown names, and that 400 comes back through daemonError() as the
+      // caller's signal. Raw values go through the query escape hatch, NOT
+      // through the strictly-typed getAgents(): coercing (parseInt, boolean
+      // folding) or dropping a bad value would turn the daemon's 400 into a
+      // silently different query — `limit: 0` becoming "no limit" is the
+      // full ~150 KB registry.
+      const result = await this.client.getAgentsUnvalidated(args);
       return this.json(result);
     } catch (err: any) {
       return this.daemonError(err);
@@ -3593,6 +3619,12 @@ export class DkgNodePlugin {
       const name = String(args.name ?? '').trim();
       if (!contextGraphId) return this.error('"context_graph_id" is required.');
       if (!name) return this.error('"name" is required.');
+      if (args.layer === 'swm') {
+        return this.error('Legacy root-scoped Knowledge Assets are read-only.');
+      }
+      if (args.layer !== undefined && args.layer !== 'wm') {
+        return this.error('Only Working Memory finalization is supported.');
+      }
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
       const authorAgentAddress = args.author_agent_address ? String(args.author_agent_address) : undefined;
       // CONTRACT §C: present-but-invalid is a tool error, never silent-default.
@@ -3605,20 +3637,6 @@ export class DkgNodePlugin {
         }
         schemeVersion = raw;
       }
-      // #1116: optional `layer` selects WHERE the content to seal lives. Default
-      // (omitted) seals the open WM draft; "swm" seals an asset already shared to
-      // SWM. Present-but-invalid is a tool error, never a silent default. Check
-      // `typeof === 'string'` BEFORE trimming/enum-checking — `String(args.layer)`
-      // would coerce a non-string like ['swm'] to "swm" and FORWARD it (parity
-      // with the Hermes direct-validation fix; not a String() coercion bypass).
-      let layer: 'wm' | 'swm' | undefined;
-      if (args.layer !== undefined) {
-        const raw = typeof args.layer === 'string' ? args.layer.trim() : args.layer;
-        if (raw !== 'wm' && raw !== 'swm') {
-          return this.error('"layer" must be "wm" or "swm".');
-        }
-        layer = raw;
-      }
       // Seal the WHOLE WM draft (CONTRACT §1 Stage3 — there is no subset scope on
       // finalize). The author defaults to the request token's agent when
       // `author_agent_address` is omitted; pre-signed attestations are not surfaced
@@ -3627,7 +3645,6 @@ export class DkgNodePlugin {
         subGraphName,
         authorAgentAddress,
         schemeVersion,
-        layer,
       });
       return this.json(result);
     } catch (err: any) {
@@ -3641,51 +3658,25 @@ export class DkgNodePlugin {
       const name = String(args.name ?? '').trim();
       if (!contextGraphId) return this.error('"context_graph_id" is required.');
       if (!name) return this.error('"name" is required.');
+      if (Array.isArray(args.entities)) {
+        return this.error('Knowledge Assets are shared atomically; root-entity selection is not supported.');
+      }
+      if (args.entities !== undefined && args.entities !== 'all') {
+        return this.error('"entities" is retired; omit it to share the complete Knowledge Asset.');
+      }
+      if (args.skip_seal === true) {
+        return this.error('Knowledge Assets are always sealed before sharing.');
+      }
+      if (args.skip_seal !== undefined && args.skip_seal !== false) {
+        return this.error('"skip_seal" must be a boolean when supplied.');
+      }
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
-      // CONTRACT §B: `entities` accepts "all" | string[] | omitted. Omitted ⇒
-      // undefined (daemon defaults to a full share); the "all" string sentinel is
-      // passed through unchanged (the daemon reads parsed.entities and treats
-      // "all" as a full share). A non-empty string[] passes through as the subset.
-      // An empty array is rejected client-side (the daemon REST 400s "all"→[] /
-      // empty selections) — fail fast with a clear message, never coerce.
-      let entities: string[] | 'all' | undefined;
-      const raw = args.entities;
-      if (raw === undefined || raw === null) {
-        entities = undefined;
-      } else if (raw === 'all') {
-        entities = 'all';
-      } else if (Array.isArray(raw) && raw.length > 0 && raw.every((e) => typeof e === 'string')) {
-        // FIX K: trim each root-entity URI before forwarding — a whitespace-padded
-        // entity (" urn:a ") would otherwise reach the daemon with the spaces and
-        // resolve to the wrong (or no) root. Parity with Hermes.
-        entities = raw.map((e) => String(e).trim());
-      } else {
-        return this.error('"entities" must be omitted, the string "all", or a non-empty array of root entity URIs.');
-      }
-      // #1116: a full share SEALS BY DEFAULT; `skip_seal:true` shares unsealed.
-      // Present-but-invalid is a tool error, never a silent default.
-      let skipSeal: boolean | undefined;
-      if (args.skip_seal !== undefined) {
-        if (typeof args.skip_seal !== 'boolean') {
-          return this.error('"skip_seal" must be a boolean.');
-        }
-        skipSeal = args.skip_seal;
-      }
-      // WM → SWM. The KA `swm/share` route is the same engine call
-      // (`agent.assertion.promote`) the legacy promote used.
       const result = await this.client.knowledgeAssetShare(contextGraphId, name, {
-        entities,
         subGraphName,
-        skipSeal,
       });
-      // #1116: surface the seal outcome. `sealed`/`publishReady` flow through the
-      // JSON; ALSO add the explicit warning when the share is NOT publish-ready.
-      // classifyShareWarning picks the right of the three warnings from
-      // {sealed, publishReady, isSubset}. A subset is a non-empty specific array
-      // (an empty array was rejected above; "all"/undefined is a full share).
       const seal = result as { publishReady?: boolean; sealed?: boolean };
       const warning = result
-        ? classifyShareWarning({ sealed: seal.sealed, publishReady: seal.publishReady, isSubset: Array.isArray(entities) })
+        ? classifyShareWarning({ sealed: seal.sealed, publishReady: seal.publishReady, isSubset: false })
         : undefined;
       if (warning) {
         return this.json({ ...result, warning });
@@ -3694,8 +3685,8 @@ export class DkgNodePlugin {
     } catch (err: any) {
       // #1116: a default (sealing) share that cannot seal fails CLOSED — the
       // daemon returns 409 UNSEALED_SHARE_BLOCKED with a recovery hint and WM
-      // preserved. The client throws an Error whose message carries the response
-      // body; surface the recovery text verbatim when present.
+      // preserved. Normalize old-daemon hints that recommend retired
+      // skipSeal/SWM-write modes to the supported atomic recovery.
       const recovery = extractUnsealedShareRecovery(err);
       if (recovery) return this.error(recovery);
       return this.daemonError(err);

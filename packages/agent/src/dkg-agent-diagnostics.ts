@@ -13,7 +13,7 @@
  * public surface and delegate here.
  */
 
-import { createOperationContext, PROTOCOL_MESSAGE, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { advertisesSyncProtocol, createOperationContext, PROTOCOL_MESSAGE } from '@origintrail-official/dkg-core';
 import type { DKGNode, Logger } from '@origintrail-official/dkg-core';
 import type { SharedMemoryHandler } from '@origintrail-official/dkg-publisher';
 import type { Messenger } from './p2p/messenger.js';
@@ -188,6 +188,7 @@ export async function getPeerDiagnostics(
       // `connection.limits` (presence ⇒ limited). Defensive cast
       // against future shape drift.
       limited: Boolean((c as unknown as { limits?: unknown }).limits),
+      allowance: readConnectionAllowance((c as unknown as { limits?: unknown }).limits),
       streams: c.streams?.length ?? 0,
       openedAt: c.timeline?.open ?? null,
     };
@@ -252,8 +253,7 @@ export async function getPeerDiagnostics(
   // top-level summary's shape so tooling can render a per-
   // protocol view with zero extra plumbing.
   const peerEntries = deps.messenger
-    .listOutbox()
-    .filter((entry) => entry.peer === peerKey)
+    .listOutboxMetadata(peerKey)
     .sort((a, b) => a.firstFailureAt - b.firstFailureAt);
   const chatPending = peerEntries.filter((entry) => entry.protocol === PROTOCOL_MESSAGE);
   const byProtocol: Record<string, { pendingCount: number; oldestFirstFailureAt: number | null; attempts: number[] }> = {};
@@ -283,8 +283,9 @@ export async function getPeerDiagnostics(
   // after sync moved off the messenger substrate), so a node
   // advertising the current protocol is reported sync-capable. Hard
   // cutover — peers on the older `/sync` wire ID are no longer
-  // compatible and intentionally report syncCapable=false.
-  const syncCapable = protocols.includes(PROTOCOL_SYNC);
+  // compatible and intentionally report syncCapable=false. The pooled
+  // overlay id (`/dkg/10.0.3/sync`) counts too (#2822).
+  const syncCapable = advertisesSyncProtocol(protocols);
   const syncCapability: PeerDiagnostics['syncStatus']['capability'] = peerStoreSnapshot == null
     ? 'unknown'
     : syncCapable
@@ -380,4 +381,17 @@ export async function pingPeers(
 
   deps.log.info(ctx, `Peer health ping: ${alive}/${peers.length} peers alive`);
   return alive;
+}
+
+/**
+ * The remaining allowance of a relayed connection in a JSON-safe shape. libp2p
+ * reports the bytes as a bigint and leaves out a limit the relay did not set.
+ */
+function readConnectionAllowance(limits: unknown): PeerConnectionSnapshot['allowance'] {
+  if (limits === undefined || limits === null || typeof limits !== 'object') return null;
+  const { bytes, seconds } = limits as { bytes?: unknown; seconds?: unknown };
+  return {
+    bytes: typeof bytes === 'bigint' || (typeof bytes === 'number' && Number.isFinite(bytes)) ? String(bytes) : null,
+    seconds: typeof seconds === 'number' && Number.isFinite(seconds) ? seconds : null,
+  };
 }

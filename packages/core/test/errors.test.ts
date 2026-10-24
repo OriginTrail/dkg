@@ -6,7 +6,49 @@ import {
   PayloadTooLargeError,
   toErrorMessage,
   hasErrorCode,
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_MESSAGE_MARKER,
+  formatPublishAuthorNotCustodialMessage,
+  messageIndicatesPublishAuthorNotCustodial,
+  RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE,
+  isRfc64LegacySwmBoundaryRetirementInProgressError,
+  UNSCOPED_QUERY_INVALIDATED_CODE,
+  UNSCOPED_QUERY_INVALIDATED_MESSAGE,
 } from '../src/errors.js';
+
+describe('GH#3049 legacy SWM retirement fence code (cross-package contract)', () => {
+  it('keeps its wire value: the agent throws it, the publisher and the daemon worker match it', () => {
+    expect(RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE).toBe('RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS');
+  });
+
+  it('recognises a coded error structurally, with or without being an Error', () => {
+    const coded = { code: RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE };
+    expect(isRfc64LegacySwmBoundaryRetirementInProgressError(coded)).toBe(true);
+    expect(isRfc64LegacySwmBoundaryRetirementInProgressError(
+      Object.assign(new Error('x'), coded),
+    )).toBe(true);
+  });
+
+  it.each([
+    ['the same words without the code', new Error('RFC-64 legacy SWM boundary retirement is in progress; retry promotion')],
+    ['another code', Object.assign(new Error('x'), { code: 'SOMETHING_ELSE' })],
+    ['a prefix of the code', { code: 'RFC64_LEGACY_SWM_BOUNDARY' }],
+    ['null', null],
+    ['undefined', undefined],
+    ['a string', RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE],
+    ['an object whose code getter throws', new Proxy({}, { get() { throw new Error('hostile getter'); } })],
+  ])('does not recognise %s', (_name, value) => {
+    expect(isRfc64LegacySwmBoundaryRetirementInProgressError(value)).toBe(false);
+  });
+});
+
+describe('unscoped query invalidation (cross-package contract)', () => {
+  it('keeps its wire code and sentence: the agent throws them, the daemon answers with them', () => {
+    expect(UNSCOPED_QUERY_INVALIDATED_CODE).toBe('UNSCOPED_QUERY_INVALIDATED');
+    expect(UNSCOPED_QUERY_INVALIDATED_MESSAGE).toBe(
+      'Unscoped query dataset or read authority changed; retry the query or specify contextGraphId',
+    );
+  });
+});
 
 describe('DKGError hierarchy', () => {
   it('DKGUserError extends DKGError', () => {
@@ -73,5 +115,43 @@ describe('hasErrorCode', () => {
   it('returns false for non-Error values', () => {
     expect(hasErrorCode('string', 'ENOENT')).toBe(false);
     expect(hasErrorCode(null, 'ENOENT')).toBe(false);
+  });
+});
+
+// GH#1786 — the non-custodial-author failure crosses packages: the agent throws it, the
+// daemon maps it to a 409, and the publisher's async-job classifier must see it as PERMANENT
+// or the queue resets a job that can never finalize (the forever-retry trap #1013/#1121).
+// `.code` survives most paths, but a re-wrap can strip it, so there is a message fallback —
+// and THAT is what drifts. These pin the emitter and the matcher to one shared marker.
+describe('publish-author-not-custodial cross-package message contract', () => {
+  it('formats a message the classifier recognizes (emitter/matcher cannot drift)', () => {
+    const message = formatPublishAuthorNotCustodialMessage('0xA32f1cc125401B55911678847426759094055B2d');
+    expect(messageIndicatesPublishAuthorNotCustodial(message)).toBe(true);
+    // The address is in the message: it is the actionable part for the operator.
+    expect(message).toContain('0xA32f1cc125401B55911678847426759094055B2d');
+    // Transport-neutral: this package is shared with non-HTTP consumers, so the CONDITION
+    // lives here but naming a route to call instead is the throw site's presentation. A
+    // regression that folds remediation back into core would fail here.
+    expect(message).not.toContain('/api/');
+  });
+
+  it('still matches when the message is re-wrapped with a prefix and lowercased', () => {
+    // Both real re-wrap shapes: the agent's own call-site prefix, and a lowercased copy
+    // (the publisher classifier lowercases before matching).
+    const inner = formatPublishAuthorNotCustodialMessage('0xabc');
+    expect(messageIndicatesPublishAuthorNotCustodial(
+      `publishFromFinalizedAssertion (update path): ${inner}`,
+    )).toBe(true);
+    expect(messageIndicatesPublishAuthorNotCustodial(inner.toLowerCase())).toBe(true);
+  });
+
+  it('does not match unrelated publish failures or non-strings', () => {
+    expect(messageIndicatesPublishAuthorNotCustodial('RPC submit timed out after 30s')).toBe(false);
+    expect(messageIndicatesPublishAuthorNotCustodial(
+      'No operational wallet has enough funds to publish to Verifiable Memory',
+    )).toBe(false);
+    expect(messageIndicatesPublishAuthorNotCustodial(undefined)).toBe(false);
+    expect(messageIndicatesPublishAuthorNotCustodial(null)).toBe(false);
+    expect(messageIndicatesPublishAuthorNotCustodial({ message: PUBLISH_AUTHOR_NOT_CUSTODIAL_MESSAGE_MARKER })).toBe(false);
   });
 });

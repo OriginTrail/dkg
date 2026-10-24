@@ -1,0 +1,352 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://origintrail.io/schemas/integration/v0.1.0.json",
+  "title": "DKG Integration Registry Entry",
+  "description": "A single integration listed in the official DKG integrations registry. Entries live in integrations/<slug>.json in this repo and are consumed by `dkg integration` CLI/UI surfaces to discover, install, and manage integrations built on top of DKG v10 public interfaces.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "slug",
+    "name",
+    "description",
+    "category",
+    "maintainer",
+    "repo",
+    "commit",
+    "license",
+    "memoryLayers",
+    "v10PrimitivesUsed",
+    "publicInterfacesUsed",
+    "install",
+    "security",
+    "trustTier"
+  ],
+  "properties": {
+    "$schema": {
+      "description": "Editor-tooling hint. Not enforced by the registry; contributors may point it at the local schema file or the canonical URL.",
+      "type": "string"
+    },
+    "schemaVersion": {
+      "description": "Which version of this JSON Schema the entry targets. Semver.",
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "slug": {
+      "description": "URL-safe, globally unique integration identifier. Must match the registry normalization rule: lowercase, ASCII-only, hyphen-separated, stopwords stripped (the/a/an/of/for/and/or/to/in/on/with), length 3-60. The filename must be integrations/<slug>.json.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+      "minLength": 3,
+      "maxLength": 60
+    },
+    "name": {
+      "description": "Human-readable integration name shown in `dkg integration search` and the dashboard.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "description": {
+      "description": "One- or two-sentence blurb shown in listings. Plain prose, no marketing.",
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 400
+    },
+    "category": {
+      "description": "Free-text tags for filtering in search. Keep short and lowercase.",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 6,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9-]*$",
+        "maxLength": 32
+      }
+    },
+    "maintainer": {
+      "description": "Who is responsible for this integration. Required: a GitHub handle or team.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["github"],
+      "properties": {
+        "github": {
+          "type": "string",
+          "pattern": "^@[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)?$",
+          "description": "GitHub user or team handle, e.g. @brana or @OriginTrail/core-developers."
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "contact": {
+          "type": "string",
+          "description": "Email, Discord handle, or other contact (optional).",
+          "maxLength": 120
+        }
+      }
+    },
+    "repo": {
+      "description": "HTTPS URL of the integration's source repository.",
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://"
+    },
+    "commit": {
+      "description": "Full 40-character git SHA the registry entry pins to. Updates require a new registry PR.",
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "license": {
+      "description": "SPDX license identifier (must match the LICENSE file in the pinned commit).",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9.+-]+( WITH [A-Za-z0-9.+-]+)?$"
+    },
+    "requiresDkgNodeVersion": {
+      "description": "Semver range the DKG node must satisfy for this integration. Example: '>=10.0.0'.",
+      "type": "string",
+      "maxLength": 60
+    },
+    "memoryLayers": {
+      "description": "Which memory layers the integration touches.",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["WM", "SWM", "VM"]
+      }
+    },
+    "v10PrimitivesUsed": {
+      "description": "Which v10 primitives the integration exercises. Helps the committee assess faithfulness to the model.",
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "UAL",
+          "KnowledgeAsset",
+          "KnowledgeCollection",
+          "ContextGraph",
+          "SubGraph",
+          "Assertion",
+          "Integration",
+          "Curator",
+          "Entity"
+        ]
+      }
+    },
+    "publicInterfacesUsed": {
+      "description": "Which supported public interfaces the integration CONSUMES from the local DKG node (independent of how the integration itself is distributed). Values: 'http-api' (calls /api/... endpoints), 'cli' (shells out to the `dkg` binary), 'mcp' (consumes the DKG MCP server as a client). An integration that IS an MCP server but talks to the node over HTTP should list only 'http-api' here — what it exposes to its own clients is captured by `install.kind`. Anything outside this list is a scope violation (see bounty doc Section 5).",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["http-api", "cli", "mcp"]
+      }
+    },
+    "targetAgents": {
+      "description": "Which agent frameworks or clients the integration targets.",
+      "type": "array",
+      "items": {
+        "enum": [
+          "OpenClaw",
+          "ElizaOS",
+          "Hermes",
+          "AutoResearch",
+          "Cursor",
+          "Claude Code",
+          "Claude Desktop",
+          "generic-MCP",
+          "generic-HTTP",
+          "generic-CLI"
+        ]
+      }
+    },
+    "install": {
+      "description": "How `dkg integration install <slug>` should materialize this integration. Exactly one kind.",
+      "oneOf": [
+        { "$ref": "#/$defs/installMcp" },
+        { "$ref": "#/$defs/installService" },
+        { "$ref": "#/$defs/installCli" },
+        { "$ref": "#/$defs/installAgentPlugin" },
+        { "$ref": "#/$defs/installManual" }
+      ]
+    },
+    "security": {
+      "description": "Security declarations. CI cross-checks a subset against the published package; the rest is authoritative prose for the review committee.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["networkEgress", "writeAuthority"],
+      "properties": {
+        "networkEgress": {
+          "description": "Every external host (beyond the local DKG node) the integration contacts. Use '*' only with justification in notes.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 120 }
+        },
+        "writeAuthority": {
+          "description": "Every DKG endpoint or CLI command the integration invokes that mutates state. Curator-authority ops (PUBLISH, SHARE) must appear here if used.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 200 }
+        },
+        "credentialsHandled": {
+          "description": "Third-party credentials the integration asks the user to provide (e.g. SLACK_BOT_TOKEN). Do NOT list the DKG auth token here; it is handled by the installer.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 80 }
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      }
+    },
+    "trustTier": {
+      "description": "Assigned by the review committee. Contributors submit as 'community'; the committee may upgrade.",
+      "enum": ["community", "verified", "featured"]
+    },
+    "designBrief": {
+      "description": "URL of the design brief Markdown document (bounty doc Section 8).",
+      "type": "string",
+      "format": "uri"
+    },
+    "demo": {
+      "description": "URL of a recorded walkthrough or live endpoint (bounty doc Section 8).",
+      "type": "string",
+      "format": "uri"
+    },
+    "promotionPath": {
+      "description": "How Working/Shared artifacts mature toward Verified Memory and downstream oracle consumption (bounty doc Section 9, criterion 4). Prose, 1-4 sentences.",
+      "type": "string",
+      "maxLength": 2000
+    },
+    "fitNotes": {
+      "description": "Optional prose on LLM-Wiki / autoresearch fit.",
+      "type": "string",
+      "maxLength": 2000
+    }
+  },
+
+  "$defs": {
+    "installMcp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "command", "supportedClients"],
+      "properties": {
+        "kind": { "const": "mcp" },
+        "command": { "type": "string", "minLength": 1 },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "envRequired": {
+          "description": "Environment variables the MCP server expects. DKG_AUTH_TOKEN and DKG_API_URL are auto-filled by the installer if listed; others prompt the user.",
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" }
+        },
+        "supportedClients": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["cursor", "claude-code", "claude-desktop", "dkg-node"] }
+        }
+      }
+    },
+
+    "installService": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "runtime"],
+      "properties": {
+        "kind": { "const": "service" },
+        "runtime": { "enum": ["docker", "npm-global", "binary"] },
+        "docker": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["image", "version"],
+          "properties": {
+            "image": { "type": "string", "minLength": 1 },
+            "version": { "type": "string", "minLength": 1 },
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$",
+              "description": "Optional image digest. Strongly recommended for verified/featured tier."
+            },
+            "composeUrl": { "type": "string", "format": "uri" }
+          }
+        },
+        "npmGlobal": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["package", "version"],
+          "properties": {
+            "package": { "type": "string", "minLength": 1 },
+            "version": { "type": "string", "minLength": 1 },
+            "binary": { "type": "string", "description": "The CLI binary name shipped by this package, if different from the package name." }
+          }
+        },
+        "binary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url"],
+          "properties": {
+            "url": { "type": "string", "format": "uri" },
+            "checksumSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+          }
+        },
+        "envRequired": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" }
+        },
+        "portsOpened": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1, "maximum": 65535 }
+        }
+      }
+    },
+
+    "installCli": {
+      "description": "A CLI tool installed globally and invoked on demand by the operator. Intended for ad-hoc, one-shot integrations (demos, templates, utilities).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "package", "version", "binary"],
+      "properties": {
+        "kind": { "const": "cli" },
+        "package": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "binary": { "type": "string", "minLength": 1 },
+        "envRequired": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" }
+        },
+        "usageHint": {
+          "type": "string",
+          "maxLength": 400,
+          "description": "Short post-install message showing the operator how to invoke the CLI."
+        }
+      }
+    },
+
+    "installAgentPlugin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "framework", "package", "version"],
+      "properties": {
+        "kind": { "const": "agent-plugin" },
+        "framework": { "enum": ["openclaw", "elizaos", "hermes", "autoresearch"] },
+        "package": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "frameworkSetupDocs": { "type": "string", "format": "uri" }
+      }
+    },
+
+    "installManual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "docsUrl"],
+      "properties": {
+        "kind": { "const": "manual" },
+        "docsUrl": { "type": "string", "format": "uri" },
+        "oneLiner": { "type": "string", "maxLength": 400 }
+      }
+    }
+  }
+}

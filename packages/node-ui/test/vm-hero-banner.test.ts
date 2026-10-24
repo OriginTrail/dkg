@@ -87,7 +87,7 @@ describe('VerifiableMemoryHeroBanner', () => {
     expect(container.textContent).toContain('Verifiable Memory');
     expect(container.textContent).toContain('Nothing published yet');
     expect(container.textContent).toContain('No Knowledge Assets yet.');
-    expect(container.textContent).toContain('Publish entities from Shared Working Memory');
+    expect(container.textContent).toContain('Publish complete Knowledge Assets from Shared Working Memory');
     expect(container.querySelectorAll('.v10-vm-hero-stat')).toHaveLength(0);
 
     await unmount();

@@ -1,3 +1,4 @@
+import { buildInitChainOverrides } from '../init-chain-config.js';
 import { Command } from 'commander';
 import { readFileSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -25,7 +26,7 @@ import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
-  loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig, validateNetworkConfigReadiness,
+  loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig, resolveKnownNetworkConfigName, resolveNetworkConfigName, validateNetworkConfigReadiness,
   releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo, classifyMonorepoInit, sharedHomeInitGate,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
@@ -90,14 +91,9 @@ import {
   isCliKnownTransactionError,
   isCliRetryableRpcError,
   createCliEvmProviders,
-  getCliReceiptWithFailover,
-  assertCliSuccessfulReceipt,
   sendCliRawTransactionWithFailover,
   CLI_RPC_READ_STALL_TIMEOUT_MS,
   CLI_RPC_BROADCAST_TIMEOUT_MS,
-  CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
-  CLI_RPC_RECEIPT_POLL_INTERVAL_MS,
-  CLI_RPC_RECEIPT_TIMEOUT_MS,
 } from '../cli-rpc.js';
 import {
   appendSupervisorLog,
@@ -109,11 +105,10 @@ import {
 
 /**
  * Decide whether `dkg init` is SWITCHING an existing node to a different
- * network (vs a fresh install or a same-network re-init). Only an EXPLICIT
- * prior `networkConfig` that differs from the selection counts as a switch:
+ * network (vs a fresh install or a same-network re-init). A known prior
+ * effective network that differs from the selection counts as a switch:
  *   - fresh node (no networkConfig)               → not a switch (no chain to lose)
- *   - legacy node (no networkConfig, custom chain) → not a switch (preserve the
- *     operator's chain/RPC override — its true network is unknown)
+ *   - legacy node with a known chain              → compare its inferred network
  *   - node with networkConfig === selected        → not a switch (preserve overrides)
  *   - node with networkConfig !== selected        → SWITCH (drop the stale chain)
  *
@@ -123,10 +118,10 @@ import {
  * Pure + exported so the decision is unit-testable.
  */
 export function isInitNetworkSwitch(
-  existingNetworkConfig: string | undefined,
+  existingNetwork: string | undefined,
   selectedNetwork: string,
 ): boolean {
-  const prior = existingNetworkConfig?.trim();
+  const prior = existingNetwork?.trim();
   return !!prior && selectedNetwork !== prior;
 }
 
@@ -299,8 +294,9 @@ program
     await ensureDkgDir();
     const existing = await loadConfig();
     // Distinguish a genuinely fresh install (→ default mainnet) from a
-    // legacy node whose config predates `networkConfig` (→ testnet,
-    // preserved). `loadConfig` merges over defaults, so it can't tell us —
+    // legacy node whose config predates `networkConfig` (→ infer from a
+    // known chain, else preserve the testnet fallback). `loadConfig` merges
+    // over defaults, so it can't tell us —
     // probe the home directly (both json + yaml, like the daemon does).
     const configExisted = existsSync(join(dkgDir(), 'config.json'))
       || existsSync(join(dkgDir(), 'config.yaml'));
@@ -316,11 +312,22 @@ program
     // chosen network drives every downstream default (role, relay, context
     // graphs, auto-update, and the blockchain-config prompts below). Default:
     // mainnet-gnosis for a fresh node, the existing network on re-init, and
-    // testnet for a legacy config that never set one. `--network` (or `-y`)
-    // skips the prompt.
+    // the chain-inferred network (or testnet fallback) for a legacy config.
+    // `--network` (or `-y`) skips the prompt.
     const explicitNetwork = typeof opts.network === 'string' ? opts.network.trim() : '';
+    // Keep the setup default and switch evidence separate. An unknown legacy
+    // chain still defaults to the project network for the prompt, but that
+    // fallback is not proof that the existing node actually belonged to it.
+    // Only explicit or uniquely chain-inferred state may cause us to discard
+    // operator RPC/hub overrides as a real network switch.
+    const knownExistingNetwork = configExisted
+      ? resolveKnownNetworkConfigName(existing)
+      : undefined;
+    const existingNetwork = configExisted
+      ? knownExistingNetwork ?? resolveNetworkConfigName(existing)
+      : undefined;
     const networkDefault = resolveSetupNetworkName({
-      existingNetworkConfig: existing.networkConfig,
+      existingNetworkConfig: existingNetwork,
       configExisted,
     });
     let selectedNetwork: string;
@@ -472,14 +479,15 @@ program
     // network defaults so an operator who's only customised RPC keeps that
     // override even after `dkg init` re-prompts.
     //
-    // EXCEPT on a network SWITCH (an existing node with an explicit
-    // networkConfig that differs from the selection): the existing `chain`
-    // block belongs to the OLD network (e.g. Base-mainnet hub/RPC/chainId) and
+    // EXCEPT on a network SWITCH (an existing node whose effective explicit
+    // or chain-inferred network differs from the selection): the existing `chain`
+    // block contains OLD-network values (e.g. Base-mainnet hub/RPC/chainId) that
     // must NOT pre-fill or persist — otherwise the node would run the new
     // network's relays/genesis against the old chain (the Frankenstein config).
-    // See isInitNetworkSwitch — a fresh/legacy node is NOT a switch, so its
-    // chain field-merge (incl. operator RPC overrides) is preserved.
-    const isNetworkSwitch = isInitNetworkSwitch(existing.networkConfig, selectedNetwork);
+    // See isInitNetworkSwitch — a same-network legacy node preserves its
+    // chain field-merge (including operator RPC overrides). The builder carries
+    // only explicitly classified portable operator tuning across a switch.
+    const isNetworkSwitch = isInitNetworkSwitch(knownExistingNetwork, selectedNetwork);
     const chainDefaults = resolveChainConfig(isNetworkSwitch ? undefined : existing, network);
     const defaultRpcUrl = chainDefaults?.rpcUrl;
     const defaultRpcUrls = chainDefaults?.rpcUrls?.join(', ') ?? '';
@@ -489,18 +497,15 @@ program
     console.log('\nBlockchain Configuration:');
     const rpcUrl = await ask('RPC URL', defaultRpcUrl);
     const rpcUrlsInput = await ask('Backup RPC URLs (comma-separated, optional; type "none" to clear)', defaultRpcUrls);
-    const clearRpcUrls = rpcUrlsInput.trim().toLowerCase() === 'none';
-    const rpcUrls = clearRpcUrls ? [] : rpcUrlsInput.split(',').map((s) => s.trim()).filter(Boolean);
     const hubAddress = await ask('Hub contract address', defaultHubAddress);
     const chainIdStr = await ask('Chain ID', defaultChainId);
 
-    const chainSection = rpcUrl && hubAddress ? {
-      type: 'evm' as const,
-      rpcUrl,
-      ...(clearRpcUrls || rpcUrls.length ? { rpcUrls } : {}),
-      hubAddress,
-      chainId: chainIdStr || undefined,
-    } : undefined;
+    const chainSection = buildInitChainOverrides(
+      { rpcUrl, rpcUrlsInput, hubAddress, chainId: chainIdStr || undefined },
+      resolveChainConfig(undefined, network),
+      existing.chain,
+      { isNetworkSwitch },
+    );
 
     // API authentication
     console.log('\nAPI Authentication:');
@@ -531,7 +536,7 @@ program
       autoUpdate,
       // On a network switch, never fall back to the stale existing chain
       // block — let an empty chainSection inherit the new network's chain.
-      chain: isNetworkSwitch ? chainSection : (chainSection ?? existing.chain),
+      chain: chainSection,
       auth: { enabled: enableAuth, tokens: existing.auth?.tokens },
       // Persist the chosen backend. `storeBlock === null` from the
       // wizard means "use the local default" — we explicitly clear any
@@ -541,12 +546,13 @@ program
     };
     await saveConfig(config);
 
-    // Generate wallets eagerly so they're available for faucet funding
+    // Generate wallets eagerly so they're available for faucet funding (none
+    // when the node signs through an external signer, chain.signer).
     let walletAddresses: string[] = [];
     try {
-      const { loadOpWallets } = await import('@origintrail-official/dkg-agent');
-      const opWallets = await loadOpWallets(dkgDir());
-      walletAddresses = getFundableWalletAddresses(opWallets);
+      const { loadLocalOpWalletsUnlessExternal } = await import('../local-op-wallets.js');
+      const opWallets = await loadLocalOpWalletsUnlessExternal(dkgDir());
+      walletAddresses = opWallets === undefined ? [] : getFundableWalletAddresses(opWallets);
     } catch (err: any) {
       console.warn(`\nWarning: could not generate wallets (${err?.message ?? String(err)}).`);
       console.warn('Wallets will be auto-generated on first "dkg start".');

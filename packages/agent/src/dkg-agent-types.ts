@@ -1,3 +1,4 @@
+import type { PreparedContentCacheConfig } from './sync/responder/prepared-content-cache.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -15,6 +16,16 @@
  */
 
 import type { ethers } from 'ethers';
+import type { SharedMemorySyncDiagnostics } from './sync/shared-memory-diagnostics.js';
+import type { ChainAuthorityReadBudgets } from './chain-authority-read-budgets.js';
+export type {
+  SharedMemorySyncDiagnostics,
+  SharedMemorySyncResult,
+  SwmSnapshotCoverage,
+} from './sync/shared-memory-diagnostics.js';
+import type {
+  MessengerOutboxDrainOptions,
+} from './p2p/outbox-drain-types.js';
 import type {
   Quad,
   TripleStore,
@@ -25,19 +36,41 @@ import type {
   OperationContext,
   AuthorAttestationTypedData,
   DkgNetworkIdentity,
+  BoundedProtocolOutboxStore,
   MessageIdempotencyStore,
-  ProtocolOutboxStore,
   SwmSenderKeyPackageAckReasonCode,
+  ContextGraphJoinPolicyMode as CoreContextGraphJoinPolicyMode,
+  ContextGraphJoinPolicyRecord as CoreContextGraphJoinPolicyRecord,
+  CatalogSealDeploymentProfileV1,
+  ContextGraphIdV1,
+  DecimalU64V1,
+  EvmAddressV1,
+  NetworkIdV1,
+  SubGraphNameV1,
+  TimestampMsV1,
+  UnsignedContextGraphPolicyEnvelopeV1,
+  UnsignedMemberRosterEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import type {
+  PublicationPricingPolicy,
   PhaseCallback,
-  LiftTransitionType,
-  LiftAuthorityProof,
   SharedMemoryPublicSnapshotStorageConfig,
   StorageAckTiming,
+  StorageAckTimingInput,
+  WorkspacePublicSnapshotStore,
   CursorPersistence as ChainEventCursorPersistence,
 } from '@origintrail-official/dkg-publisher';
-import type { ApprovalPolicy, ChainAdapter, ContextGraphRegistryScanCursorStore } from '@origintrail-official/dkg-chain';
+import type {
+  ApprovalPolicy,
+  ChainAdapter,
+  ChainEventLogStore,
+  ContextGraphAuthorityHistoryStore,
+  ContextGraphAuthorityIndexStore,
+  ContextGraphRegistryScanCursorStore,
+  ExternalAuthorSigners,
+  RpcRequestAdmission,
+} from '@origintrail-official/dkg-chain';
+import type { AgentChainSignerSource } from './agent-chain-signer-source.js';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
 import type { CclFactResolutionMode } from './ccl-fact-resolution.js';
@@ -46,8 +79,27 @@ import type { JsonLdContent } from './dkg-agent-utils.js';
 import type { SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import type { KaNumberAllocator } from './allocator.js';
 import type { SyncPhase } from './sync/auth/request-build.js';
+import type { ContextGraphDormancyProjection } from './context-graph-subscription-dormancy.js';
+import type {
+  Rfc64CatalogActivationInputV1,
+  Rfc64PublicCatalogActivationInputV1,
+  ResolvedRfc64CatalogActivationsV1,
+  ResolvedRfc64CatalogAuthoringPolicyV1,
+} from './rfc64/public-catalog-activation-config-v1.js';
+import type {
+  SyncAdmissionConfig,
+  SyncContextGraphPriorityConfig,
+  SyncResponderSnapshotLimitsConfig,
+} from './sync/policy.js';
+import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
+import type { FinalizationRecoveryStoreFactory } from './finalization-recovery-store.js';
+import type { AuthorityIndexConfig } from './authority-index-config.js';
+import type { ContextGraphStorageDiscoveryStore } from './context-graph-storage-discovery.js';
 
 // ── File-local structural types ─────────────────────────────────────
+
+/** Public options distinguish ordinary promotion from immutable bound replay. */
+export type { AssertionPromoteOptions } from './internal/promote/assertion-promote-input.js';
 
 /**
  * Pre-signed AuthorAttestation payload supplied at finalize-time by
@@ -65,6 +117,8 @@ import type { SyncPhase } from './sync/auth/request-build.js';
  */
 export type PreSignedAuthorAttestation = {
   address: string;
+  /** Optional caller commitment checked against the canonicalized KA before sealing. */
+  expectedMerkleRoot?: Uint8Array;
   /**
    * OT-RFC-43 §F2 — the packed reservedKaId the self-sovereign author signed the
    * AuthorAttestation over `(uint160(address)<<96)|uint96(number)`. Required: the
@@ -81,6 +135,10 @@ export type LocalSwmSenderKeySendState = {
   senderAgentAddress: string;
   epochId: string;
   membershipHash: string;
+  /** Exact transport-route snapshot seeded for this epoch. State saved before route-aware rotation has none and rotates once. */
+  recipientRouteHash?: string;
+  /** Set on an epoch whose `chainKey` is always the key of `nextMessageIndex`. State saved without it rotates once. */
+  chainKeyMatchesIndex?: true;
   chainKey: Uint8Array;
   nextMessageIndex: number;
   senderSigningSecretKey: Uint8Array;
@@ -108,10 +166,10 @@ export type LocalSwmSenderKeyReceiveState = {
  * connection:open or a subsequent publish that re-resolves the
  * recipient set).
  *
- * Keyed in-memory by lowercased `recipientAgentAddress`. The triple
- * `(senderAgentAddress, recipientKeyId, epochId)` dedupes within an
- * agent's queue; newer epochs supersede older ones for the same
- * `(senderAgentAddress, recipientAgentAddress)` pair.
+ * Keyed in-memory by lowercased `recipientAgentAddress`. The tuple
+ * `(senderAgentAddress, recipientKeyId, recipientPeerId, epochId)`
+ * dedupes within an agent's queue; newer epochs supersede older ones for
+ * the same sender, recipient, context-graph, and subgraph scope.
  */
 export type PendingSenderKeyEntry = {
   /** Lower-cased EIP-55 sender agent address. */
@@ -119,6 +177,13 @@ export type PendingSenderKeyEntry = {
   /** Lower-cased EIP-55 recipient agent address (matches the map key). */
   recipientAgentAddress: string;
   recipientKeyId: string;
+  /**
+   * Exact peer route that still owes a positive setup ACK. Absent only for
+   * legacy rows and packages queued before any peer route was advertised;
+   * those drain only after the current verified recipient projection binds
+   * this exact key to a peer.
+   */
+  recipientPeerId?: string;
   epochId: string;
   contextGraphId: string;
   subGraphName?: string;
@@ -134,14 +199,13 @@ export type PendingSenderKeyEntry = {
   createdAtMs: number;
 };
 
-export type RandomSamplingStartResult = 'started' | 'retryable' | 'disabled';
-
 export type ACKSignerResolution = {
   wallet: ethers.Wallet | null;
   retryable: boolean;
 };
 
 export interface SyncRequestEnvelope {
+  responseEncoding?: 'gzip-nquads-v1';
   contextGraphId: string;
   offset: number;
   limit: number;
@@ -150,6 +214,13 @@ export interface SyncRequestEnvelope {
   snapshotRef?: string;
   authPurpose?: string;
   authSelector?: string;
+  /**
+   * Additive unsigned response-shaping capability. The authenticated legacy
+   * `limit` remains capped at 500; upgraded responders may honor this hint only
+   * under their own hard row/byte caps. Kept in lockstep with request-build.ts.
+   */
+  pageMode?: 'byte-budget-v1';
+  pageRowsHint?: number;
   targetPeerId?: string;
   requesterPeerId?: string;
   requestId?: string;
@@ -166,6 +237,8 @@ export interface SyncRequestEnvelope {
    * like `phase`/`snapshotRef`), so it's additive and backward-compatible.
    */
   sinceBatchId?: string;
+  /** Additive exact-KA response filter; present-but-invalid parses fail closed. */
+  assetUals?: string[];
   /**
    * R9 (SECURITY) — UNSIGNED member-recovery marker. When set, the responder
    * authorizes via the strict members-only `isMemberRecoveryAuthorized`
@@ -305,6 +378,8 @@ export interface PublishOpts {
   subGraphName?: string;
   /** Optional on-chain publish lifetime override in epochs. */
   publishEpochs?: number;
+  /** Optional token-pricing basis for graph-scoped initial publications. */
+  pricingPolicy?: PublicationPricingPolicy;
   /** Optional known numeric on-chain context graph id for direct publish callers. */
   onChainContextGraphId?: string;
   /** RFC-001 §4 per-publish attribution override; `0n` = mode d. */
@@ -312,12 +387,16 @@ export interface PublishOpts {
 }
 
 export interface PublishAsyncOpts extends PublishOpts {
-  namespace?: string;
-  scope?: string;
-  transitionType?: LiftTransitionType;
-  authority?: LiftAuthorityProof;
-  /** Prior KC reference; required for MUTATE/REVOKE. */
-  priorVersion?: string;
+  /** @deprecated Raw-root lifts were removed; async publish always creates one KA. */
+  namespace?: never;
+  /** @deprecated Raw-root lifts were removed; async publish always creates one KA. */
+  scope?: never;
+  /** @deprecated Use the named KA mutation API for updates or revocation. */
+  transitionType?: never;
+  /** @deprecated Authorship is carried by the canonical KA seal. */
+  authority?: never;
+  /** @deprecated Use the named KA mutation API for updates. */
+  priorVersion?: never;
   /** V10 selective-disclosure: per-entity kaRoot instead of flat-hash KC. */
   entityProofs?: boolean;
   localOnly?: boolean;
@@ -339,6 +418,20 @@ export interface PublishAsyncOpts extends PublishOpts {
   };
   /** Caller signs typed-data built by the daemon. Requires `authorAgentAddress`. */
   authorSignTypedData?: (typedData: AuthorAttestationTypedData) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
+  /**
+   * GH#2270 follow-up (3825162149) — the AUTHENTICATED identity admitting this job, for
+   * authorization only. A host that authenticated a caller (an EPCIS capture route, a plugin with
+   * a token) passes it here so that caller keeps the by-id force-clear its job may later need.
+   *
+   * Deliberately NOT the author: `authorAgentAddress` and `preSignedAuthorAttestation.authorAddress`
+   * name who SIGNED the assertion, which under curated publishing may be a third party who
+   * enqueued nothing. Granting a destructive clear to them would hand the double-publish decision
+   * to someone who never asked for the publish.
+   *
+   * Omitted → the job is admitted by the node itself (an internal producer such as the Kafka
+   * stream), and the node's default agent owns it; see `publishAsync`.
+   */
+  admittedByAgentAddress?: string;
 }
 
 export interface PublishAsyncQuadEnvelope {
@@ -383,6 +476,8 @@ export interface PeerConnectionSnapshot {
    * limited connections not being reused by `dialProtocol`.
    */
   limited: boolean;
+  /** What is left on a relayed connection as libp2p reports it (bytes as a decimal string); null on a direct one. */
+  allowance: { bytes: string | null; seconds: number | null } | null;
   /** Active stream count (multiplexer-level). */
   streams: number;
   /** UNIX-ms when the connection was opened, or `null` if libp2p didn't expose it. */
@@ -502,7 +597,7 @@ export interface PeerDiagnostics {
   health: PeerHealth | null;
   /** Protocols this peer's identify-handshake advertised. */
   protocols: string[];
-  /** Convenience flag — peer speaks `PROTOCOL_SYNC`. */
+  /** Convenience flag — peer speaks `PROTOCOL_SYNC` (legacy or pooled id). */
   syncCapable: boolean;
   /**
    * Raw sync catch-up health. Sync no longer lives on the messenger
@@ -526,7 +621,7 @@ export interface PeerDiagnostics {
  * Per-peer sync-reconciler backoff state. `failures` is the count of
  * consecutive reconciler attempts that did NOT produce a successful sync;
  * `nextRetryAt` is the epoch-ms before which the reconciler skips this peer.
- * Reset on a successful sync (`onPeerSynced`) and on `connection:close`.
+ * Reset on a successful sync (`onSyncAccounting`) and on `connection:close`.
  * See `SYNC_BACKOFF_BASE_MS`.
  */
 export type SyncReconcilerBackoff = {
@@ -575,9 +670,20 @@ export interface ChatSendResult {
 
 // ── Context-graph surface ───────────────────────────────────────────
 
-/** Tracks the subscription and sync state of a context graph. */
+/**
+ * Lifetime of an edge node's active Context Graph synchronization intent.
+ *
+ * `on-demand` remains active only for the current process. `always-on` is
+ * restart-durable through the configured subscription store. Persisted rows
+ * written before this distinction existed are therefore implicitly
+ * `always-on` for backward compatibility.
+ */
+export type ContextGraphSyncMode = 'on-demand' | 'always-on';
+
 export interface ContextGraphSub {
   name?: string;
+  /** Requested synchronization lifetime, normalized before entering live state. */
+  syncMode: ContextGraphSyncMode;
   /** GossipSub topics are active for this context graph. */
   subscribed: boolean;
   /** Definition triples exist in the local triple store. */
@@ -655,6 +761,42 @@ export interface ContextGraphSub {
   pendingMeta?: boolean;
 }
 
+/**
+ * Mutation input normalized at the one live-subscription state boundary.
+ *
+ * Callers that predate explicit lifetimes remain compatible; live state never
+ * observes the optional form because the mutation boundary inherits the
+ * previous mode or applies the restart-durable legacy default.
+ */
+export type ContextGraphSubInput = Omit<ContextGraphSub, 'syncMode'> & {
+  syncMode?: ContextGraphSyncMode;
+};
+
+/**
+ * Metadata that passive discovery is allowed to contribute to the local
+ * Context Graph catalogue.
+ *
+ * Discovery deliberately cannot choose membership, sync, hosting, or VM
+ * reconciliation state. Those transitions belong to explicit edge intent or
+ * to the temporary core compatibility activation performed by DKGAgent after
+ * recording a newly discovered graph (remove with host-mode separation #1611).
+ */
+export interface ContextGraphDiscoveryMetadata {
+  name?: string;
+  onChainId?: string;
+  onChainHash?: string;
+  participantAgents?: string[];
+}
+
+export interface ContextGraphDiscoveryOptions {
+  /**
+   * Whether a newly discovered core subscription joins the ordinary catch-up
+   * scope. Chain registry discovery historically installed gossip handlers
+   * without joining that scope, so its caller passes false.
+   */
+  trackSyncScope?: boolean;
+}
+
 export interface ContextGraphSubscriptionRecord {
   id: string;
   name?: string;
@@ -676,14 +818,145 @@ export interface ContextGraphSubscriptionRecord {
   syncScoped: boolean;
 }
 
+/**
+ * Exact durable identity carried from one freshly loaded subscription row into
+ * bootstrap authority resolution. It may shortcut or repair name-to-id
+ * discovery, but never substitutes for fresh policy or roster authority.
+ */
+export interface DurableContextGraphSubscriptionBinding {
+  contextGraphId: string;
+  onChainId?: string;
+  onChainHash?: string;
+}
+
+/** @deprecated Compatibility shape for retired negative-cache store adapters. */
+export interface VmReconcilePeerTopologyPeer {
+  peerId: string;
+  core: boolean;
+}
+
+/** @deprecated Compatibility shape; VM recovery no longer reads a miss cache. */
+export type VmReconcilePeerTopology =
+  | { kind: 'unreadable' }
+  | {
+    kind: 'readable';
+    preferredPeerId: string | null;
+    privateOnly: boolean;
+    /** Ranked provider order; array position is the rank. */
+    peers: VmReconcilePeerTopologyPeer[];
+  };
+
+/** @deprecated Historical shape for retired negative-cache store adapters. */
+export interface VmReconcilePeerTopologyEvidence {
+  topology: VmReconcilePeerTopology;
+  cleanMissPeerIds: string[];
+}
+
 export interface ContextGraphSubscriptionStore {
   loadAll(): Promise<ContextGraphSubscriptionRecord[]>;
   load?(contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null>;
   save(record: ContextGraphSubscriptionRecord): Promise<void>;
   delete(contextGraphId: string): Promise<void>;
+  /** @deprecated Compatibility only; VM recovery never calls this hook. */
+  loadVmReconcileNegative?(cacheKey: string): Promise<VmReconcileNegativeRecord | null>;
+  /** @deprecated Compatibility only; VM recovery never calls this hook. */
+  saveVmReconcileNegative?(record: VmReconcileNegativeRecord): Promise<void>;
+  /** @deprecated Compatibility only; VM recovery never calls this hook. */
+  deleteVmReconcileNegative?(cacheKey: string): Promise<void>;
+  /** @deprecated Compatibility only; VM recovery never calls this hook. */
+  deleteVmReconcileNegativesForContextGraph?(contextGraphId: string): Promise<void>;
 }
 
-export interface ContextGraphSubscriptionRehydrationStatus {
+/** @deprecated Retained for custom subscription stores; the runtime no longer consumes these records. */
+export interface VmReconcileNegativeRecord {
+  cacheKey: string;
+  localCgId: string;
+  failures: number;
+  nextRetryAt: number;
+  swmGen: string;
+  candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
+  peerTopologyKey: string;
+  peerTopology?: VmReconcilePeerTopology;
+  cleanMissPeerIds?: string[];
+}
+
+/**
+ * Durable cursor store owned by selected-only VM reconciliation.
+ *
+ * This deliberately does not extend `ContextGraphSubscriptionStore`: selecting
+ * a public CG for RFC-64 convergence grants neither membership nor Core custody
+ * and therefore must not acquire a subscription-store dependency.
+ */
+export interface SelectedVmReconcileCursorStore {
+  loadSelectedVmReconcileCursor?(
+    deploymentId: string,
+    contextGraphId: string,
+    onChainContextGraphId: string,
+  ): Promise<SelectedVmReconcileCursorRecord | null>;
+  saveSelectedVmReconcileCursor?(record: SelectedVmReconcileCursorRecord): Promise<void>;
+}
+
+/**
+ * Restart-durable VM progress for an operator-selected RFC-64 public CG.
+ *
+ * This is deliberately not a ContextGraph subscription record: selection
+ * grants neither membership nor Core custody. The local and numeric chain ids
+ * jointly identify the cursor inside one exact chain deployment. A chain/HUB
+ * redeploy therefore cannot reuse progress from an unrelated VM inventory.
+ */
+export interface SelectedVmReconcileCursorRecord {
+  deploymentId: string;
+  contextGraphId: string;
+  onChainContextGraphId: string;
+  nameHash: string;
+  watermark: number;
+}
+
+/** Fences for experimental transport reuse; never asset or absence authority. */
+export interface VmReconcilePublicCoreHolderCredit {
+  readonly deploymentId: string;
+  readonly lifecycleGeneration: number;
+  readonly bindingGeneration: number;
+  readonly selectedBindingGeneration: number | undefined;
+  readonly candidatePeerIds: readonly string[];
+}
+
+/** Process-local evidence for one chain-ordinal exact-recovery rotation. */
+export interface VmReconcileRotationRecord {
+  localCgId: string;
+  onChainCgId: string;
+  ordinal: number;
+  fingerprint: string;
+  phase: 'collecting' | 'backoff';
+  /** Retry suppression is distinct from authenticated clean-absence proof. */
+  backoffKind?: 'clean-absence' | 'incomplete-cycle';
+  candidatePeerIds: Set<string>;
+  /** Peers physically attempted during the current proof cycle. */
+  attemptedPeerIds: Set<string>;
+  cleanAbsentPeerIds: Set<string>;
+  /**
+   * A process-local curator lookup completed (or its bounded cached roster was
+   * reused). This is not cryptographic or network-wide completeness evidence;
+   * observed roster changes invalidate the cycle and backoff is time-bounded.
+   */
+  curatorRosterConfirmed: boolean;
+  /** Monotonic bound after which a partial clean-absence proof restarts. */
+  collectionDeadlineAt: number;
+  /** Cursor only; every physical attempt advances it, regardless of outcome. */
+  lastAttemptedPeerId?: string;
+  /**
+   * Peers whose last attempt for this target ended without a verdict on their
+   * data and left the target its turn at them (a busy answer, a broken
+   * stream). Ordering only: never read as attempted, present or absent.
+   */
+  streamSetbackPeerIds?: Set<string>;
+  failures: number;
+  nextRetryAt: number;
+}
+
+export interface ContextGraphSubscriptionRehydrationStatus extends ContextGraphDormancyProjection {
+  /** Whether persisted subscription activation was enabled for this boot. */
+  rehydrationEnabled: boolean;
   /** Non-system persisted rows governed by the rehydration cap. */
   persistedTotal: number;
   /** Persisted system rows seen during rehydration; excluded from cap math. */
@@ -694,12 +967,21 @@ export interface ContextGraphSubscriptionRehydrationStatus {
   dormant: number;
   activationCap: number;
   capDisabled: boolean;
-  dormantIds: string[];
   /** Startup rehydration completion timestamp; remains stable after boot. */
   completedAt: number;
   /** Most recent timestamp for post-boot diagnostic count/id updates. */
   updatedAt: number;
 }
+
+/**
+ * Mutable process-local rehydration counters. Dormancy itself has one source
+ * of truth (`contextGraphSubscriptionDormancyById`) and is projected only when
+ * diagnostics cross the public API boundary.
+ */
+export type ContextGraphSubscriptionRehydrationInternalStatus = Omit<
+  ContextGraphSubscriptionRehydrationStatus,
+  keyof ContextGraphDormancyProjection | 'dormant'
+>;
 
 export interface ContextGraphWritePreflightProbe {
   /**
@@ -748,6 +1030,40 @@ export interface ContextGraphWritePreflightProbe {
 
 export type ContextGraphMemberPrincipalType = 'node' | 'agent' | 'identity';
 export type ContextGraphMemberStatus = 'active' | 'removed' | 'pending';
+export const CONTEXT_GRAPH_MEMBERSHIP_SOURCES = [
+  'local-create',
+  'implicit-swm-write',
+  'allowed-peer',
+  'allowed-agent',
+  'participant-agent',
+  'on-chain-registration',
+  'join-approved',
+  'join-rejected',
+  'join-request',
+  'join-request-outbox-response',
+  'subscription',
+  'rehydrated-subscription',
+  // Retained for custom-store migration fixtures and legacy integrations.
+  'pre-existing',
+] as const;
+export type KnownContextGraphMembershipSource =
+  typeof CONTEXT_GRAPH_MEMBERSHIP_SOURCES[number];
+/**
+ * Public persistence integrations have always been allowed to attach their
+ * own provenance label. Keep that source-compatible contract while treating
+ * only the known internal vocabulary as trusted protocol evidence.
+ */
+export type ContextGraphMembershipSource = string;
+
+const contextGraphMembershipSourceSet: ReadonlySet<string> =
+  new Set(CONTEXT_GRAPH_MEMBERSHIP_SOURCES);
+
+/** Decode the closed source vocabulary at durable or external boundaries. */
+export function isContextGraphMembershipSource(
+  source: unknown,
+): source is KnownContextGraphMembershipSource {
+  return typeof source === 'string' && contextGraphMembershipSourceSet.has(source);
+}
 
 export interface ContextGraphMembershipRecord {
   contextGraphId: string;
@@ -755,14 +1071,160 @@ export interface ContextGraphMembershipRecord {
   principalId: string;
   role?: string;
   status: ContextGraphMemberStatus;
-  source?: string;
+  source?: ContextGraphMembershipSource;
   displayName?: string;
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * Immutable node-local evidence that a Context Graph originated on this node.
+ * This is deliberately keyed only by Context Graph id: membership principals
+ * and their roles remain mutable and must never own creation provenance.
+ */
+export type LocalContextGraphOriginSource =
+  | 'local-create'
+  | 'implicit-swm-write';
+
+export interface LocalContextGraphOriginRecord {
+  contextGraphId: string;
+  source: LocalContextGraphOriginSource;
+  createdAt: number;
+}
+
+/**
+ * Paired graph-level persistence capability for immutable local-origin facts.
+ * Implementations are selected only when both methods are available.
+ */
+export interface LocalContextGraphOriginPersistence {
+  loadLocalOrigins(): Promise<LocalContextGraphOriginRecord[]>;
+  recordLocalOrigin(record: LocalContextGraphOriginRecord): Promise<void>;
+}
+
 export interface ContextGraphMembershipStore {
+  /**
+   * Optional graph-level origin journal. Presence statically guarantees the
+   * complete read/write capability; absence selects the legacy membership-row
+   * compatibility path.
+   */
+  localOrigins?: LocalContextGraphOriginPersistence;
+  /**
+   * Load persisted membership facts for restart recovery. Optional so custom
+   * stores written before membership rehydration remain source-compatible.
+   */
+  loadAll?(): Promise<Array<ContextGraphMembershipRecord & {
+    firstSeenAt?: number;
+    updatedAt: number;
+  }>>;
   upsert(record: ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }): Promise<void>;
   delete(contextGraphId: string, principalType: ContextGraphMemberPrincipalType, principalId: string): Promise<void>;
+}
+
+/**
+ * Curator-controlled admission policy for a single private context graph.
+ *
+ * `manual` is the fail-closed default. `open` means that a valid incoming
+ * join request may be admitted without a human click, subject to the owner,
+ * privacy, revocation, encryption-key, capacity, and rate checks enforced by
+ * the agent at decision time.
+ */
+export type ContextGraphJoinPolicyMode = CoreContextGraphJoinPolicyMode;
+export type ContextGraphJoinPolicyRecord = CoreContextGraphJoinPolicyRecord;
+
+export type ContextGraphJoinPolicyAuditEventType =
+  | 'join_policy_changed'
+  | 'join_auto_reservation'
+  | 'join_auto_decision'
+  | 'join_admission_committed'
+  | 'join_admission_throttled'
+  | 'join_admission_failed';
+
+export interface ContextGraphJoinPolicyAuditEvent {
+  timestamp: number;
+  contextGraphId: string;
+  eventType: ContextGraphJoinPolicyAuditEventType;
+  actor?: string;
+  agentAddress?: string;
+  outcome: string;
+  reason?: string;
+  /** SHA-256 digest of the signed request; the raw signature is never logged. */
+  requestDigest?: string;
+  policyVersion?: number;
+  details?: Record<string, unknown>;
+}
+
+export interface ContextGraphJoinPolicyRateReservation {
+  allowed: boolean;
+  contextGraphApprovalsLastHour: number;
+  nodeApprovalsLastHour: number;
+  reason?: 'context-graph-rate-limit' | 'node-rate-limit';
+}
+
+/**
+ * Durable policy + audit adapter. Production backs this with node-ui.db.
+ * The rate reservation must atomically count and, when allowed, append the
+ * reservation row so concurrent admissions cannot overrun either ceiling.
+ */
+export interface ContextGraphJoinPolicyStore {
+  load(contextGraphId: string): Promise<ContextGraphJoinPolicyRecord | null>;
+  save(record: ContextGraphJoinPolicyRecord): Promise<void>;
+  appendAudit(event: ContextGraphJoinPolicyAuditEvent): Promise<void>;
+  /** Atomically persist a policy transition and its security audit event. */
+  saveWithAudit(
+    record: ContextGraphJoinPolicyRecord,
+    event: ContextGraphJoinPolicyAuditEvent,
+  ): Promise<void>;
+  getAutomaticApprovalUsage(
+    contextGraphId: string,
+    timestamp: number,
+  ): Promise<{
+    contextGraphApprovalsLastHour: number;
+    nodeApprovalsLastHour: number;
+  }>;
+  reserveAutomaticApproval(input: {
+    contextGraphId: string;
+    timestamp: number;
+    contextGraphLimit: number;
+    nodeLimit: number;
+    actor: string;
+    agentAddress: string;
+    requestDigest: string;
+    policyVersion: number;
+    /** Monotonic generation of the exact policy that authorized this request. */
+    policyEpoch: number;
+  }): Promise<ContextGraphJoinPolicyRateReservation>;
+  /**
+   * Durably mark the exact reservation before crossing the membership
+   * mutation boundary. This distinguishes an admission repair from an unused
+   * or abandoned rate-limit reservation after a daemon restart.
+   */
+  markAutomaticApprovalRepairPending(input: {
+    contextGraphId: string;
+    requestDigest: string;
+    policyEpoch: number;
+  }): Promise<boolean>;
+  /** Load an unfinished post-mutation repair without relying on delegation validity. */
+  getAutomaticApprovalRepair(
+    contextGraphId: string,
+    requestDigest: string,
+  ): Promise<{
+    policyEpoch: number;
+    actor: string;
+    agentAddress: string;
+  } | null>;
+  /**
+   * Idempotently record the durable admission authorized by the exact policy
+   * snapshot that reserved it. Returns false when no matching reservation
+   * exists; callers must never infer recency from wall-clock timestamps.
+   */
+  commitAutomaticApproval(input: {
+    contextGraphId: string;
+    timestamp: number;
+    actor: string;
+    agentAddress: string;
+    requestDigest: string;
+    policyEpoch: number;
+    details?: Record<string, unknown>;
+  }): Promise<boolean>;
 }
 
 // ── Sync diagnostics ────────────────────────────────────────────────
@@ -779,28 +1241,15 @@ export interface DurableSyncDiagnostics {
   checkpointAdvances: number;
   emptyResponses: number;
   metaOnlyResponses: number;
+  /** Cryptographically verified V2 responses whose public graph is intentionally empty. */
+  verifiedPrivateOnlyResponses: number;
   dataRejectedMissingMeta: number;
   rejectedKcs: number;
   failedPeers: number;
   failedPhases: number;
   backoffWorthyFailures?: number;
-}
-
-export interface SharedMemorySyncDiagnostics {
-  fetchedMetaTriples: number;
-  fetchedDataTriples: number;
-  insertedMetaTriples: number;
-  insertedDataTriples: number;
-  bytesReceived: number;
-  resumedPhases: number;
-  timedOutPhases: number;
-  completedPhases: number;
-  checkpointAdvances: number;
-  emptyResponses: number;
-  droppedDataTriples: number;
-  failedPeers: number;
-  failedPhases: number;
-  backoffWorthyFailures?: number;
+  /** Context Graph admissions deferred by local scheduler pressure. */
+  deferredBackpressure?: number;
 }
 
 export interface CatchupSyncDiagnostics {
@@ -812,11 +1261,13 @@ export interface CatchupSyncDiagnostics {
 export interface DurableSyncResult extends DurableSyncDiagnostics {
   insertedTriples: number;
   deniedPhases: number;
-}
-
-export interface SharedMemorySyncResult extends SharedMemorySyncDiagnostics {
-  insertedTriples: number;
-  deniedPhases: number;
+  /**
+   * True only when every requested Context Graph reached a verified terminal
+   * state in this invocation. Committed prefixes remain observable through the
+   * counters while this stays false, so callers never have to infer whole-run
+   * completeness from per-phase progress.
+   */
+  complete: boolean;
 }
 
 // ── DKGAgent configuration ──────────────────────────────────────────
@@ -861,12 +1312,149 @@ export interface ReplicationEvent {
 
 export type ReplicationEventSink = (event: ReplicationEvent) => void;
 
+export interface Rfc64CatalogAccessPolicyAuthorityConfigV1 {
+  readonly localAgentAddress: EvmAddressV1;
+  /** Exact authenticated libp2p-peer to agent-wallet binding. */
+  readonly resolveRemoteAgentAddress: (
+    remotePeerId: string,
+    contextGraphId: ContextGraphIdV1,
+  ) => Promise<EvmAddressV1 | null>;
+}
+
+/**
+ * Opt-in RFC-64 SWM author-catalog production. Peer fan-out is an availability
+ * hint; the durable applied-head pointer remains the correctness source for
+ * pull discovery. Finalized VM inventory remains on chain.
+ */
+export interface Rfc64PublicCatalogAutoPublishConfigV1 {
+  readonly peers: readonly string[];
+  readonly catalogIssuerDelegationEffectiveAt?: TimestampMsV1;
+  readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
+}
+
+/**
+ * Policy-neutral selected-CG authoring controls. Announcement destinations
+ * are deliberately absent: the accepted CG policy owns those per graph.
+ */
+export interface Rfc64CatalogAutoPublishConfigV1 {
+  readonly catalogIssuerDelegationEffectiveAt?: TimestampMsV1;
+  readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
+}
+
+export interface Rfc64PublicCatalogBootstrapScopeV1 {
+  readonly networkId: NetworkIdV1;
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly subGraphName: SubGraphNameV1 | null;
+  readonly authorAddress: EvmAddressV1;
+  readonly catalogEra: DecimalU64V1;
+}
+
+export interface Rfc64PublicCatalogBootstrapTargetV1 {
+  readonly authorAddress: EvmAddressV1;
+  /** Ordered provider failover candidates for this exact author catalog. */
+  readonly providers: readonly string[];
+}
+
+export interface Rfc64PublicCatalogBootstrapPolicyV1 {
+  /** Exact verified control object; its digest is recomputed during snapshotting. */
+  readonly policyEnvelope: UnsignedContextGraphPolicyEnvelopeV1;
+  /** Author catalogs under the policy graph/era. */
+  readonly targets: readonly Rfc64PublicCatalogBootstrapTargetV1[];
+  /**
+   * Operator-pinned peers that each serve a complete public-SWM snapshot for
+   * this exact accepted policy generation.  Unlike a catalog target provider,
+   * one of these peers may settle the graph-wide SWM catch-up plane by itself.
+   * Omission preserves the ordinary multi-provider union walk.
+   */
+  readonly completeSwmProviders?: readonly string[];
+}
+
+/**
+ * Explicit V1 cold-start manifest. Policies are operator-pinned outputs of an
+ * independent finality/administrative verifier; the catalog lane only consumes
+ * them. A zero retry interval performs one startup pass, which is useful for
+ * deterministic harnesses. Omission defaults to a 30-second refresh pass.
+ */
+export interface Rfc64PublicCatalogBootstrapConfigV1 {
+  readonly acceptedPublicPolicies: readonly Rfc64PublicCatalogBootstrapPolicyV1[];
+  readonly retryIntervalMs?: number;
+}
+
+/**
+ * One policy-neutral, operator-verified RFC-64 catalog selection.  The
+ * canonical roster envelope is present exactly for invite-only policies; its
+ * payload is bound to the exact policy object digest before agent startup.
+ */
+export interface Rfc64CatalogBootstrapPolicyV1 {
+  readonly policyEnvelope: UnsignedContextGraphPolicyEnvelopeV1;
+  readonly rosterEnvelope?: UnsignedMemberRosterEnvelopeV1;
+  readonly targets: readonly Rfc64PublicCatalogBootstrapTargetV1[];
+  /** One to eight graph-complete providers for selected private recovery. */
+  readonly completeSwmProviders?: readonly string[];
+}
+
+/** Explicit policy-neutral cold-start manifest used by additive `rfc64Catalog`. */
+export interface Rfc64CatalogBootstrapConfigV1 {
+  readonly acceptedPolicies: readonly Rfc64CatalogBootstrapPolicyV1[];
+  readonly retryIntervalMs?: number;
+}
+
+export type { FinalizationRecoveryStoreFactory } from './finalization-recovery-store.js';
+
 export interface DKGAgentConfig {
   name: string;
+  /**
+   * Construction seam for the durable finalization inbox. Embedders and tests
+   * may supply a policy-specific store; omission opens the standard SQLite
+   * store in dataDir.
+   */
+  finalizationRecoveryStoreFactory?: FinalizationRecoveryStoreFactory;
   /** Selected genesis document. Defaults to the compatibility Base testnet genesis. */
   genesisId?: string;
   /** Active network identity used to isolate libp2p and app workflow boundaries. */
   networkIdentity?: DkgNetworkIdentity;
+  /**
+   * Locally trusted RFC-64 catalog-seal deployment tuple. This deterministic
+   * override is intended for chain-free devnets; production nodes normally
+   * derive the same tuple from their configured chain adapter. It is snapshotted
+   * and validated during `DKGAgent.create()` and is never accepted from catalog
+   * announcement wire data.
+   */
+  rfc64CatalogDeploymentProfile?: CatalogSealDeploymentProfileV1;
+  /**
+   * Compatibility-only manual peer/agent authority. Omission derives private
+   * RFC-64 authority from the local operational agent and verified DKG agent
+   * directory; unknown remote identities remain fail-closed.
+   */
+  rfc64CatalogAccessPolicyAuthority?: Rfc64CatalogAccessPolicyAuthorityConfigV1;
+  /**
+   * Optional policy-neutral compatibility seed and rollout override. Runtime
+   * CG responsibility selects public and invite-only catalog lanes by default.
+   * Existing selected-public callers may continue to use
+   * `rfc64PublicCatalogActivation` for one compatibility release.
+   */
+  rfc64CatalogActivation?: Rfc64CatalogActivationInputV1;
+  /**
+   * Deprecated selected-public compatibility seed. It remains mutually
+   * exclusive with the older loose deployment/auto-publish/bootstrap controls,
+   * but its accepted manifest no longer owns runtime CG selection.
+   */
+  rfc64PublicCatalogActivation?: Rfc64PublicCatalogActivationInputV1;
+  /**
+   * Opaque process-local activation-resolution handle for daemon embedders.
+   * It must be passed intact from `resolveRfc64CatalogActivationsV1`; spreading
+   * or deserializing it is not a supported runtime boundary. Mutually exclusive
+   * with raw activation and loose compatibility controls.
+   */
+  rfc64CatalogActivations?: ResolvedRfc64CatalogActivationsV1;
+  /**
+   * Legacy all-accepted-public-CG producer configuration. Omission preserves
+   * existing publication behavior. New daemons should use the unified
+   * selected-public activation above.
+   */
+  rfc64PublicCatalogAutoPublish?: Rfc64PublicCatalogAutoPublishConfigV1;
+  /** Deprecated static bootstrap; omission uses normal announcements/reconnect discovery. */
+  rfc64PublicCatalogBootstrap?: Rfc64PublicCatalogBootstrapConfigV1;
   /**
    * public-projection enable flag. When set, a private CG's confirmed VM
    * publishes emit/refresh a verifiable public projection (the floor: existence,
@@ -899,6 +1487,30 @@ export interface DKGAgentConfig {
   bootstrapPeers?: string[];
   /** Multiaddrs of relay nodes for NAT traversal. */
   relayPeers?: string[];
+  /**
+   * The relay multiaddrs from the network file. An edge without
+   * `authorityIndex` seeds its authority index from these relays, each pinned
+   * by the PeerID in its multiaddr, and falls back to local history. Distinct
+   * from `relayPeers`, the connectivity set, which may carry operator relays
+   * the network never vouched for. Empty or absent keeps the edge on local
+   * history; the daemon passes none for `relay: "none"`.
+   */
+  networkRelays?: readonly string[];
+  /**
+   * Relay multiaddrs declared by the OTHER DKG networks bundled with this
+   * build (the daemon derives them from network/*.json). With a network
+   * identity the node refuses to dial these peers, store their addresses or
+   * accept their connections. `relayPeers` win over this static list only: a
+   * `relayPeers` entry that fails the network-identity proof is refused like
+   * any other peer (`DKGNodeConfig.otherNetworkRelays`).
+   */
+  otherNetworkRelays?: readonly string[];
+  /**
+   * Transport-level network peer isolation (`DKGNodeConfig.networkPeerIsolation`).
+   * Default true; false is the operator kill switch, leaving other networks'
+   * peers to network admission alone.
+   */
+  networkPeerIsolation?: boolean;
   /** Legacy ACK candidate allowlist. When set, unlisted connected peers are not dialed for ACKs. */
   ackCandidatePeerIds?: string[];
   /**
@@ -929,24 +1541,90 @@ export interface DKGAgentConfig {
   largeLiteralStorage?: LargeLiteralStorageConfig;
   /** Out-of-Oxigraph immutable public SWM operation snapshots. Defaults on when dataDir is set. */
   sharedMemoryPublicSnapshotStorage?: SharedMemoryPublicSnapshotStorageConfig;
+  /** Optional caller-owned snapshot store, used by the daemon to inject durable page indexing. */
+  publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  /** Construct after the RDF store exists; an explicit publicSnapshotStore takes precedence. */
+  publicSnapshotStoreFactory?: (store: TripleStore) => WorkspacePublicSnapshotStore | undefined;
+  /**
+   * Max automatic-retry budget stamped onto async VM-publish jobs admitted
+   * through this agent's `publishAsync` (EPCIS / Kafka plugin paths). Mirrors
+   * the daemon's `publisher.maxRetries`. Nullish → the publisher's built-in
+   * default; `0` disables auto-retry. (#1836)
+   */
+  publisherMaxRetries?: number;
   importedArtifactByteStore?: ImportedArtifactByteStore;
   /** When false, peer-connect sync skips SWM catch-up and relies on gossip for new SWM writes. */
   syncSharedMemoryOnConnect?: boolean;
-  /** Emergency switch for the periodic sync reconciler. Env DKG_SYNC_RECONCILER_ENABLED wins. */
+  /**
+   * Emergency switch for the periodic peer-sync reconciler only. Env
+   * DKG_SYNC_RECONCILER_ENABLED wins. It does not affect chain-driven VM
+   * reconciliation, which has its own `vmReconcilerEnabled` switch.
+   */
   syncReconcilerEnabled?: boolean;
+  /**
+   * Switch for chain-driven VM reconciliation (core-hosted recording, the
+   * KA-registered nudge and the VM reconcile sweep). Env
+   * DKG_VM_RECONCILER_ENABLED wins; default on. A core with it off declines
+   * every StorageACK, because it could not promote the ACKed data to VM.
+   */
+  vmReconcilerEnabled?: boolean;
+  /**
+   * Opt-in switch: prepare the sizing metadata of the next public-graph recovery
+   * batch while the current exact batch transfers, and size candidates with
+   * bounded in-order reads. Advisory planning evidence only. Env
+   * DKG_VM_RECOVERY_PREFETCH_ENABLED wins; default off.
+   */
+  vmRecoveryPrefetchEnabled?: boolean;
+  /** Period between automatic sync-reconciler passes. Default: 5 minutes. */
+  syncReconcilerIntervalMs?: number;
+  /** Age after which a peer is eligible for automatic sync retry. Default: 10 minutes. */
+  syncStalenessThresholdMs?: number;
+  /** Initial per-peer automatic sync retry delay. Default: 5 minutes. */
+  syncBackoffBaseMs?: number;
+  /** Maximum per-peer automatic sync retry delay. Default: 60 minutes. */
+  syncBackoffMaxMs?: number;
+  /** Fractional retry jitter from 0 through 1. Default: 0.25. */
+  syncBackoffJitter?: number;
   /** Emergency switch for all peer-connect sync triggers. Env DKG_SYNC_ON_CONNECT_ENABLED wins. */
   syncOnConnectEnabled?: boolean;
+  /**
+   * Include `agents` and `ontology` in automatic peer-connect/reconciler
+   * durable sync. Defaults true on Core and false on Edge. Explicit catch-up
+   * remains available. Env DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT wins.
+   */
+  syncSystemContextGraphsOnConnect?: boolean;
+  /**
+   * Fetch the `agents` phonebook once, bounded and on demand, when a public
+   * wallet-scoped Context Graph needs its owner's profile to reach holders
+   * (subscribe, saved-subscription restore, or VM recovery with an empty
+   * curator tier). Default true; inert when `agents` already syncs on every
+   * connect (see `syncSystemContextGraphsOnConnect`). Env
+   * DKG_ON_DEMAND_AGENTS_PHONEBOOK wins.
+   */
+  onDemandAgentsPhonebook?: boolean;
   /** Emergency switch for durable/SWM sync execution. Env DKG_DURABLE_SYNC_ENABLED wins. */
   durableSyncEnabled?: boolean;
   /**
-   * Global cap for concurrent sync jobs. Defaults to 2; set 0 to disable.
+   * Global cap for concurrent sync jobs. Defaults to 10; set 0 to disable.
    * Env DKG_SYNC_GLOBAL_MAX_INFLIGHT wins.
    */
   syncGlobalMaxInflight?: number;
   /** Backwards-compatible alias for syncGlobalMaxInflight. Env DKG_SYNC_GLOBAL_LIMIT wins. */
   syncGlobalLimit?: number;
-  /** Max sync jobs waiting behind the global cap. Defaults to 2x the inflight cap. */
+  /** Hard cap for queued sync jobs. Shared mode defaults to 2x the inflight cap. */
   syncGlobalQueueLimit?: number;
+  /** Optional partitioned fast/slow sync admission. Omit for the legacy shared limiter. */
+  syncAdmission?: SyncAdmissionConfig;
+  /** Daemon-local retained responder snapshot row/estimated-byte policy. */
+  syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
+  /** Opt-in persistent verified public assertion bytes, never cached authority. */
+  preparedContentCache?: PreparedContentCacheConfig;
+  /**
+   * Local requester/responder priority by Context Graph ID. Higher runs first.
+   * System Context Graphs default to a deprioritized priority so they run
+   * last; an explicit entry here (including 0) overrides that default.
+   */
+  syncContextGraphPriorities?: SyncContextGraphPriorityConfig;
   /** StorageACK handler deadline override in milliseconds. Env DKG_STORAGE_ACK_HANDLER_DEADLINE_MS wins. */
   storageAckHandlerDeadlineMs?: number;
   /**
@@ -1068,7 +1746,7 @@ export interface DKGAgentConfig {
    * legacy loose aliases below so the handler deadline and publisher send
    * timeout are treated as one invariant.
    */
-  storageAckTiming?: StorageAckTiming;
+  storageAckTiming?: StorageAckTimingInput;
   /**
    * @deprecated Use `storageAckTiming.handlerDeadlineMs`. Kept as a
    * compatibility alias and normalized by `DKGAgent.create`.
@@ -1089,27 +1767,58 @@ export interface DKGAgentConfig {
    */
   publisherAddress?: string;
   /**
-   * EVM chain configuration. If omitted, publishing won't have on-chain finality.
-   * `adminPrivateKey` is the private key for the profile admin wallet used
-   * only for profile/key-management transactions. Nodes may omit it when they
-   * already have an on-chain identity and do not need profile creation/key-repair
-   * privileges; profile mutation paths will fail fast if admin authority is
-   * required but unavailable.
-   * `operationalKeys` are the private keys for operational wallets.
-   * The first key is the primary signer (identity, staking); all are used
-   * round-robin for publish TXs to avoid nonce collisions on parallel publishes.
+   * EVM chain configuration; without it publishing has no on-chain finality. `adminPrivateKey`:
+   * profile admin key, only for profile/key-management txs (optional; those paths fail fast without
+   * it). One source of operational wallets (`AgentChainSignerSource`): `operationalKeys` (first =
+   * primary signer; all pay publish txs round-robin), or `signers` (external only, not with a
+   * supplied `chainAdapter`), or neither. External author keys are `authorSigners`, beside it.
    */
   chainConfig?: {
     rpcUrl: string;
     rpcUrls?: string[];
+    /** Shared transport budget injected by the daemon composition root. */
+    rpcRequestAdmission?: RpcRequestAdmission;
     /** Public RPC URLs safe for wallet_addEthereumChain. Never use private operator RPC URLs here. */
     walletRpcUrls?: string[];
     hubAddress: string;
     /** Optional TRAC token contract override. When omitted, the adapter resolves Hub.Token. */
     tokenAddress?: string;
     adminPrivateKey?: string;
-    operationalKeys: string[];
     chainId?: string;
+    /** Overall submitted-transaction receipt deadline (default 10 minutes). */
+    receiptTimeoutMs?: number;
+    /**
+     * Operator-selected receipt confirmation depth. Lower values are faster but
+     * increase reorganization risk; 1 gives no successor-block buffer. Defaults to 1.
+     */
+    finalityConfirmations?: number;
+    /**
+     * `chain.indexTickMs`: how long one completed finalized Context Graph
+     * authority projection answers reads before it is refreshed. Cache service
+     * is always capped at the five-minute RFC-64 accepted-authority interval.
+     * Defaults to 6000.
+     */
+    indexTickMs?: number;
+    /** Enable bounded authority reads at read-only gates; defaults to false. */
+    boundedAuthorityReads?: boolean;
+    /**
+     * `chain.authorityReadTimeoutMs`: request-scoped deadline (ms) for one
+     * on-chain Context Graph authority read (liveness, policy, roster, or the
+     * finalized-index snapshot behind a query/share/SWM decision). A read that
+     * misses it fails closed for that request. Env
+     * `DKG_CHAIN_AUTHORITY_READ_TIMEOUT_MS` wins. Defaults to 2500.
+     */
+    authorityReadTimeoutMs?: number;
+    /**
+     * `chain.authorityColdResolutionTimeoutMs`: budget (ms) for the detached
+     * cold finalized-authority resolution that keeps running after a request
+     * deadline trips so its result reaches the chain reader's projection
+     * cache. Never below `authorityReadTimeoutMs`. Env
+     * `DKG_CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_MS` wins. Defaults to 20000.
+     */
+    authorityColdResolutionTimeoutMs?: number;
+    /** Optional operator cap for transaction fee-per-gas fields (wei). */
+    maxFeePerGasWei?: bigint;
     /**
      * Optional V10 allowance-sizing policy. Threaded straight through to
      * the `EVMChainAdapter`; see `ApprovalPolicy` in
@@ -1127,10 +1836,12 @@ export interface DKGAgentConfig {
      */
     minPublisherNativeWei?: bigint;
     minPublisherTracWei?: bigint;
-  };
+  } & AgentChainSignerSource;
+  /** Author keys of an external signer, which never pay: agents registered by their addresses sign through it, with or without `chainConfig`. Its default author authors the node's own publishes only when its operational wallets sign externally too. */
+  authorSigners?: ExternalAuthorSigners;
   /** Cross-agent query access configuration. */
   queryAccess?: QueryAccessConfig;
-  /** Additional context graph IDs to sync on peer connect (beyond system context graphs). */
+  /** User-selected context graph IDs to sync automatically on peer connect. */
   syncContextGraphs?: string[];
   /** TTL for shared memory data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */
   sharedMemoryTtlMs?: number;
@@ -1197,6 +1908,17 @@ export interface DKGAgentConfig {
   };
   /** Durable local store for subscribed context-graph runtime state. */
   contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
+  /** Durable progress owned by selected-only VM reconciliation. */
+  selectedVmReconcileCursorStore?: SelectedVmReconcileCursorStore;
+  /**
+   * Whether durable context-graph subscription rows become live subscriptions
+   * during startup. Defaults to `true`. When `false`, startup still opens the
+   * same durable stores and leaves every row and RDF graph intact. Canonical
+   * saved numeric identity is restored into inactive rows before discovery;
+   * subscription, hosting, readiness, gossip and automatic sync stay disabled.
+   * Explicit subscriptions made after boot continue to work normally.
+   */
+  contextGraphSubscriptionRehydrationEnabled?: boolean;
   /** Durable local store for paged sync checkpoints. Defaults to in-memory. */
   syncCheckpointStore?: SyncCheckpointStore;
   /** OT-RFC-59 durable per-(peer,CG) changelog cursor store. Defaults to in-memory. */
@@ -1205,6 +1927,25 @@ export interface DKGAgentConfig {
   chainEventCursorStore?: ChainEventCursorPersistence;
   /** Durable ContextGraphNameRegistry discovery cursor store. Defaults to in-memory adapter state. */
   contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
+  /**
+   * Durable ContextGraphStorage enumeration checkpoint (cursor plus the chain
+   * facts below it), scoped to one chain deployment. Defaults to in-memory, in
+   * which case each process re-enumerates from id 1.
+   */
+  contextGraphStorageDiscoveryStore?: ContextGraphStorageDiscoveryStore;
+  /** Process-owned local durable finalized Context Graph authority-history checkpoints. */
+  localContextGraphAuthorityHistoryStore?: ContextGraphAuthorityHistoryStore;
+  /** Process-owned durable contract-wide Context Graph authority index. */
+  localContextGraphAuthorityIndexStore?: ContextGraphAuthorityIndexStore;
+  /**
+   * Durable backing for the node's ONE chain log. Giving it to the agent is
+   * what starts the single background tick: the agent's own chain adapter owns
+   * it, and every other adapter in the process reads the same log rather than
+   * opening a scanner of its own.
+   */
+  chainEventLogStore?: ChainEventLogStore;
+  /** Opt in to trusted core bootstrap and a bounded chain tail on edges. */
+  authorityIndex?: AuthorityIndexConfig;
   /**
    * Intentional cap on how many persisted context-graph subscriptions are
    * *activated* (gossip-subscribed + sync-tracked) when rehydrating at startup.
@@ -1216,8 +1957,22 @@ export interface DKGAgentConfig {
    * `DEFAULT_MAX_REHYDRATED_SUBSCRIPTIONS`. `0` disables the cap.
    */
   maxRehydratedContextGraphSubscriptions?: number;
+  /**
+   * How long (ms) startup rehydration may wait on the chain for persisted
+   * subscriptions' read authority before the agent finishes starting. Rows it
+   * has not resolved by then stay dormant as `authorityUnavailable`, and the
+   * background authority recovery resolves and activates them after start, so
+   * a large backlog of persisted rows no longer holds the node's start (and
+   * its API) for minutes. Rows with a durable join approval are always
+   * resolved during startup. Default
+   * `DEFAULT_REHYDRATION_STARTUP_AUTHORITY_BUDGET_MS` (10 s). `0` removes the
+   * budget: startup resolves every row, as before.
+   */
+  contextGraphSubscriptionRehydrationAuthorityBudgetMs?: number;
   /** Durable local cache for nodes/agents known to be members of a context graph. */
   contextGraphMembershipStore?: ContextGraphMembershipStore;
+  /** Durable, fail-closed per-CG curator join policy and admission audit store. */
+  contextGraphJoinPolicyStore?: ContextGraphJoinPolicyStore;
   /**
    * Universal Messenger substrate stores (rc.9 plan PR-2). When
    * supplied, the `Messenger` instance gets durable receiver-side
@@ -1244,11 +1999,18 @@ export interface DKGAgentConfig {
    * Best-effort: the agent never awaits or throws on the sink.
    */
   onReplicationEvent?: ReplicationEventSink;
+  /** In-process outbox admission bounds; default 100 entries / 10 MiB / 4 workers (DEFAULT_OUTBOX_DRAIN_MAX_PAYLOAD_BYTES). */
+  messengerOutboxDrain?: MessengerOutboxDrainOptions;
   messengerStores?: {
     idempotencyStore: MessageIdempotencyStore;
-    outboxStore: ProtocolOutboxStore;
+    outboxStore: BoundedProtocolOutboxStore;
   };
 }
+
+export type {
+  MessengerOutboxDrainOptions,
+  MessengerOutboxStats,
+} from './p2p/outbox-drain-types.js';
 
 export interface DKGAgentACKTransportOptions {
   sendTimeoutMs?: number;
@@ -1256,6 +2018,36 @@ export interface DKGAgentACKTransportOptions {
 }
 
 export type ResolvedDKGAgentConfig =
-  Omit<DKGAgentConfig, 'storageAckTiming' | 'ackHandlerDeadlineMs' | 'ackSendTimeoutMs'> & {
+  Omit<
+    DKGAgentConfig,
+    | 'storageAckTiming'
+    | 'ackHandlerDeadlineMs'
+    | 'ackSendTimeoutMs'
+    | 'syncReconcilerIntervalMs'
+    | 'syncStalenessThresholdMs'
+    | 'syncBackoffBaseMs'
+    | 'syncBackoffMaxMs'
+    | 'syncBackoffJitter'
+    | 'rfc64CatalogActivation'
+    | 'rfc64CatalogActivations'
+    | 'rfc64PublicCatalogActivation'
+    | 'rfc64PublicCatalogAutoPublish'
+    | 'rfc64PublicCatalogBootstrap'
+    | 'rfc64CatalogDeploymentProfile'
+    | 'contextGraphSubscriptionRehydrationEnabled'
+  > & {
+    contextGraphSubscriptionRehydrationEnabled: boolean;
     storageAckTiming: StorageAckTiming;
+    syncReconcilerTiming: SyncReconcilerTiming;
+    /** Resolved once per boot from `chainConfig` and the environment overrides. */
+    chainAuthorityReadBudgets: ChainAuthorityReadBudgets;
+    rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
+    rfc64CatalogBootstrap?: Readonly<Rfc64CatalogBootstrapConfigV1>;
+    /** Graphs the manual peer table of `rfc64Catalog.accessPolicyAuthority` covers. */
+    rfc64CatalogManualTrustRootContextGraphs?: readonly string[];
+    /** Sole immutable restart-stable D17/D18 runtime authority for this boot. */
+    rfc64CatalogExecutionPlan: import('./rfc64/catalog-rollout-authority-v1.js')
+      .Rfc64CatalogExecutionPlanV1;
+    rfc64CatalogAuthoringPolicy?: ResolvedRfc64CatalogAuthoringPolicyV1;
+    rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
   };

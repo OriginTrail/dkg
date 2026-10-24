@@ -15,6 +15,7 @@ import type { ProverLogger, TickOutcome } from './prover.js';
 
 export interface TickableProver {
   tick(): Promise<TickOutcome>;
+  cancel?(reason?: unknown): void;
   close(): Promise<void>;
 }
 
@@ -53,9 +54,9 @@ export interface ProverLoopHandle {
   /** Idempotent: subsequent calls are no-ops. */
   start(): void;
   /**
-   * Idempotent. Cancels the timer, waits up to ~5s for a mid-flight
-   * tick to settle, then closes the prover (releases worker thread,
-   * WAL handles).
+   * Idempotent. Cancels the timer and handle-owned work, then returns the one
+   * stable physical-close promise. The owning lifecycle may apply its own
+   * bounded wait without changing when the prover is actually safe to release.
    */
   stop(): Promise<void>;
   /** Snapshot of recent activity for observability surfaces. */
@@ -67,6 +68,8 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
   let started = false;
   let stopping = false;
   let inflight = false;
+  let inflightRun: Promise<void> | null = null;
+  let stopPromise: Promise<void> | null = null;
   let totalTicks = 0;
   let lastTickAt: string | null = null;
   let lastOutcome: TickOutcome | null = null;
@@ -74,46 +77,53 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
   let lastSubmittedTxHash: string | null = null;
   let lastSubmittedAt: string | null = null;
 
-  const runOnce = async (): Promise<void> => {
-    if (inflight || stopping) return;
+  const runOnce = (): Promise<void> => {
+    if (inflight || stopping) return Promise.resolve();
     inflight = true;
     totalTicks += 1;
     lastTickAt = new Date().toISOString();
-    try {
-      const outcome = await opts.prover.tick();
-      lastOutcome = outcome;
-      if (outcome.kind === 'submitted') {
-        submittedCount += 1;
-        lastSubmittedTxHash = outcome.txHash;
-        lastSubmittedAt = lastTickAt;
-      }
+    const run = (async (): Promise<void> => {
       try {
-        opts.onTick?.(outcome);
+        const outcome = await opts.prover.tick();
+        lastOutcome = outcome;
+        if (outcome.kind === 'submitted') {
+          submittedCount += 1;
+          lastSubmittedTxHash = outcome.txHash;
+          lastSubmittedAt = lastTickAt;
+        }
+        try {
+          opts.onTick?.(outcome);
+        } catch (err) {
+          opts.log?.warn('rs.loop.onTick-threw', {
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
       } catch (err) {
-        opts.log?.warn('rs.loop.onTick-threw', {
-          err: err instanceof Error ? err.message : String(err),
+        const error = err instanceof Error ? err : new Error(String(err));
+        lastOutcome = { kind: 'error', error };
+        // The orchestrator already maps known errors to TickOutcome
+        // variants. An exception here means an unmapped path
+        // (typically a transient adapter / RPC issue). Log and keep
+        // the timer alive so the next tick has a chance.
+        opts.log?.error('rs.loop.tick-threw', {
+          err: error.message,
         });
+        try {
+          opts.onTick?.(lastOutcome);
+        } catch (hookErr) {
+          opts.log?.warn('rs.loop.onTick-threw', {
+            err: hookErr instanceof Error ? hookErr.message : String(hookErr),
+          });
+        }
+      } finally {
+        inflight = false;
       }
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      lastOutcome = { kind: 'error', error };
-      // The orchestrator already maps known errors to TickOutcome
-      // variants. An exception here means an unmapped path
-      // (typically a transient adapter / RPC issue). Log and keep
-      // the timer alive so the next tick has a chance.
-      opts.log?.error('rs.loop.tick-threw', {
-        err: error.message,
-      });
-      try {
-        opts.onTick?.(lastOutcome);
-      } catch (hookErr) {
-        opts.log?.warn('rs.loop.onTick-threw', {
-          err: hookErr instanceof Error ? hookErr.message : String(hookErr),
-        });
-      }
-    } finally {
-      inflight = false;
-    }
+    })();
+    inflightRun = run;
+    void run.finally(() => {
+      if (inflightRun === run) inflightRun = null;
+    });
+    return run;
   };
 
   return {
@@ -128,18 +138,31 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
         (timer as { unref?: () => void }).unref?.();
       }
     },
-    async stop() {
-      if (stopping) return;
+    stop() {
+      if (stopPromise) return stopPromise;
       stopping = true;
       if (timer) {
         clearInterval(timer);
         timer = null;
       }
-      const deadline = Date.now() + 5_000;
-      while (inflight && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      await opts.prover.close();
+      opts.prover.cancel?.(new DOMException(
+        'Random Sampling prover loop stopped',
+        'AbortError',
+      ));
+      const running = inflightRun;
+      stopPromise = (async () => {
+        // Never release builder / WAL resources underneath a tick. The owner
+        // may stop waiting at a bounded deadline, but this physical shutdown
+        // remains attached until the tick retires and close finishes.
+        if (running) await running;
+        await opts.prover.close();
+      })();
+      void stopPromise.catch((err) => {
+        opts.log?.error('rs.loop.shutdown-failed', {
+          err: err instanceof Error ? err.message : String(err),
+        });
+      });
+      return stopPromise;
     },
     getStatus(): ProverLoopStatus {
       return {

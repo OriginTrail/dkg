@@ -48,6 +48,47 @@ describe('validateLiftPublishPayload', () => {
     };
   }
 
+  function graphInput(): LiftValidationInput {
+    const input = baseInput();
+    return {
+      ...input,
+      request: {
+        ...input.request,
+        roots: [],
+        contentScopeVersion: 2,
+        kaUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+        assertionVersion: '1',
+        publicTripleCount: 3,
+        privateMerkleRoot: `0x${'12'.repeat(32)}`,
+        privateTripleCount: 1,
+      },
+    };
+  }
+
+  it('validates a complete graph-scoped KA without deriving root entities', () => {
+    const input = graphInput();
+    const validated = validateLiftPublishPayload(input);
+
+    expect(validated.validation).toMatchObject({
+      canonicalRoots: [],
+      canonicalRootMap: {},
+      swmQuadCount: 4,
+    });
+    expect(validated.resolved).toEqual(input.resolved);
+  });
+
+  it('rejects root manifests and count drift in graph-scoped jobs', () => {
+    const input = graphInput();
+    expect(() => validateLiftPublishPayload({
+      ...input,
+      request: { ...input.request, roots: ['urn:legacy:root'] },
+    })).toThrow('Graph-scoped Lift validation rejects root entities');
+    expect(() => validateLiftPublishPayload({
+      ...input,
+      request: { ...input.request, publicTripleCount: 2 },
+    })).toThrow('Graph-scoped Lift validation public triple count mismatch');
+  });
+
   // GH #1122 — the async lift now PRESERVES caller root IRIs (parity with sync),
   // so the "canonical" root is the caller root itself (identity).
   it('validates lift payloads while preserving caller root IRIs (GH #1122 parity)', () => {

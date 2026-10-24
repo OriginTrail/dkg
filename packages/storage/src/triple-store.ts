@@ -17,6 +17,26 @@ import {
   ChangelogStore,
   type ChangelogStoreOptions,
 } from './changelog-store.js';
+import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
+import type { StoreOperation } from './store-operation-outcome.js';
+import type {
+  Rfc64AuthorCommitCasInputV1,
+  Rfc64AuthorCommitCasResultV1,
+} from './rfc64-author-commit-cas.js';
+import type {
+  CanonicalAuthorSealStoreRowV1,
+  Rfc64SharedProjectionStreamOperationV1,
+  Rfc64SemanticReadOperationV1,
+} from '@origintrail-official/dkg-core';
+import type {
+  Rfc64ExactBindingsReadOperationV1,
+  Rfc64SemanticReadCapabilityResultV1,
+} from './rfc64-exact-bindings-read-capability.js';
+import {
+  getManagedOxigraphRuntimeConstructionAuthorityV1,
+} from './managed-oxigraph-runtime-store.js';
+
+import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 
 export interface Quad {
   subject: string;
@@ -28,6 +48,8 @@ export interface Quad {
 export interface SelectResult {
   type: 'bindings';
   bindings: Array<Record<string, string>>;
+  /** SELECT projection reported by the backend when it exposes one. */
+  variables?: string[];
 }
 
 export interface ConstructResult {
@@ -42,18 +64,37 @@ export interface AskResult {
 
 export type QueryResult = SelectResult | ConstructResult | AskResult;
 export type QueryCancellationMode = 'interruptible' | 'pre-dispatch';
-export type StoreWorkPriority = 'ack' | 'normal' | 'background';
+export const STORE_WORK_PRIORITIES = Object.freeze([
+  'ack',
+  'health',
+  'normal',
+  'background',
+] as const);
+export type StoreWorkPriority = (typeof STORE_WORK_PRIORITIES)[number];
+
+export function isStoreWorkPriority(value: unknown): value is StoreWorkPriority {
+  return typeof value === 'string'
+    && (STORE_WORK_PRIORITIES as readonly string[]).includes(value);
+}
 
 export interface StorePressureSnapshot {
   ackInflight: number;
+  healthInflight?: number;
   normalInflight: number;
   backgroundInflight: number;
   ackQueued: number;
+  healthQueued?: number;
   normalQueued: number;
   backgroundQueued: number;
   maxConcurrent: number;
   ackReservedSlots: number;
+  normalReservedSlots?: number;
+  healthReservedSlots?: number;
   backgroundReservedSlots?: number;
+  /** Operations of the normal lane admitted at once. */
+  normalInflightLimit?: number;
+  /** Operations of the background lane admitted at once. */
+  backgroundInflightLimit?: number;
 }
 
 export interface QueryOptions {
@@ -61,7 +102,8 @@ export interface QueryOptions {
   source?: string;
   /**
    * Store admission priority. ACK verification uses `ack` so it can bypass
-   * queued background scans; sync/catch-up work may use `background`.
+   * queued background scans; liveness probes use `health`; sync/catch-up work
+   * may use `background`.
    */
   priority?: StoreWorkPriority;
   /**
@@ -70,9 +112,51 @@ export interface QueryOptions {
    * dispatching or after returning from their blocking native call.
    */
   signal?: AbortSignal;
+  /**
+   * Optional pre-parse cap for remote response bodies. HTTP adapters stream
+   * and reject above this bound before JSON/N-Quads materialization.
+   */
+  maxResponseBytes?: number;
+  /** Independent bound on hydrated literal bytes; defaults to maxResponseBytes. */
+  maxLiteralHydrationBytes?: number;
+  /**
+   * Named graphs the query must not read: each IRI and every graph below it. The
+   * query runs over the default graph and every other named graph, replacing any
+   * dataset it names; a store that cannot restrict its dataset refuses it.
+   */
+  withheldGraphRoots?: readonly string[];
 }
 
 export type TripleStoreQueryOptions = QueryOptions;
+
+/** Optional backend-owned admission spanning a mutation and decorator bookkeeping.
+ * Each backend request retains its own scheduler slot. Query options remain
+ * telemetry/cancellation values and never confer continuation authority.
+ */
+export interface LogicalStoreMutationCapability {
+  runLogicalMutation<T>(
+    operation: StoreOperation,
+    options: QueryOptions | undefined,
+    work: (options: QueryOptions | undefined) => Promise<T>,
+  ): Promise<T>;
+}
+
+/**
+ * Enforces query maxResponseBytes while reading the response body, before
+ * JSON or RDF result materialization. Successful SELECT/ASK/CONSTRUCT/DESCRIBE
+ * responses above the supplied byte limit reject with StoreResponseTooLargeError.
+ * Error response bodies must also stay bounded before failure formatting.
+ */
+export interface BoundedQueryResponseCapability {
+  readonly queryResponseLimitMode: 'pre-materialization';
+  query(sparql: string, options?: QueryOptions): Promise<QueryResult>;
+}
+
+export interface Rfc64SharedProjectionStreamCapabilityOptionsV1 {
+  /** Gateway-derived minimum of signed, operator, and protocol ceilings. */
+  readonly byteCeiling: number;
+  readonly signal?: AbortSignal;
+}
 
 /**
  * Options for a server-side `update()`. A superset of {@link QueryOptions} with an
@@ -92,6 +176,16 @@ export interface UpdateOptions extends QueryOptions {
 }
 
 export interface TripleStore {
+  /** Execute a fresh read plan in one admission, at the supplied priority and
+   * original deadline. Reads still go through this store's decorators; no
+   * authorization or results may be cached by this capability. Implementations
+   * serialize underlying reads and retain ownership through cancellation.
+   */
+  withQueryReadAdmission?<T>(work: () => Promise<T>, options?: QueryOptions): Promise<T>;
+  readonly runLogicalMutation?: LogicalStoreMutationCapability['runLogicalMutation'];
+  /** Present only when query response limits are enforced before decoding. */
+  readonly queryResponseLimitMode?: BoundedQueryResponseCapability['queryResponseLimitMode'];
+
   /**
    * Whether `query(..., { signal })` can reject while a query is already in
    * flight (`interruptible`) or can only observe cancellation before dispatch
@@ -109,11 +203,124 @@ export interface TripleStore {
   insert(quads: Quad[], options?: QueryOptions): Promise<void>;
   delete(quads: Quad[], options?: QueryOptions): Promise<void>;
   deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number>;
+  /**
+   * Delete every matching quad without calculating the exact number removed.
+   *
+   * Remote SPARQL adapters can execute this as one UPDATE instead of the
+   * count-before / update / count-after sequence required by
+   * {@link deleteByPattern}. Optional so third-party stores remain compatible;
+   * callers should use {@link deleteByPatternWithoutCount}, which falls back to
+   * the counted operation when this capability is unavailable.
+   */
+  deleteByPatternWithoutCount?(
+    pattern: Partial<Quad>,
+    options?: QueryOptions,
+  ): Promise<void>;
   query(sparql: string, options?: QueryOptions): Promise<QueryResult>;
+  /** Execute one member of the certified closed RFC-64 exact-bindings union. */
+  readonly rfc64ExactBindingsReadCertifiedV1?: boolean;
+  rfc64ExactBindingsReadV1?(
+    operation: Rfc64ExactBindingsReadOperationV1,
+    options?: Pick<QueryOptions, 'signal'>,
+  ): Promise<readonly CanonicalAuthorSealStoreRowV1[]>;
+  /** Legacy semantic-only capability retained for the V1 compatibility window. */
+  readonly rfc64SemanticReadCertifiedV1?: boolean;
+  rfc64SemanticReadV1?(
+    operation: Rfc64SemanticReadOperationV1,
+    options?: Pick<QueryOptions, 'signal'>,
+  ): Promise<Rfc64SemanticReadCapabilityResultV1>;
+  /** Certified exact, non-materialized RFC-64 shared-projection stream. */
+  readonly rfc64SharedProjectionStreamCertifiedV1?: boolean;
+  rfc64SharedProjectionStreamV1?(
+    operation: Rfc64SharedProjectionStreamOperationV1,
+    options: Rfc64SharedProjectionStreamCapabilityOptionsV1,
+  ): Promise<AsyncIterable<Uint8Array>>;
 
   hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;
   dropGraph(graphUri: string, options?: QueryOptions): Promise<void>;
+  /**
+   * Atomically replace one named graph with the supplied complete quad set.
+   *
+   * Every quad MUST target `graphUri`. On success readers observe the complete
+   * new graph (or no graph for an empty set); on failure they observe either the
+   * complete prior graph or the complete new graph, never a DROP/INSERT prefix.
+   * Optional because third-party adapters may not provide a transactional
+   * SPARQL Update boundary. Rootless KA mutation paths require this capability
+   * and fail closed when it is unavailable.
+   */
+  replaceGraph?(graphUri: string, quads: Quad[], options?: QueryOptions): Promise<void>;
+  /** One transaction for distinct assertion/metadata pairs. Refusal must precede mutation. */
+  replaceAssetGroup?(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void>;
+
+  /**
+   * Atomically replace one complete named graph and every row for one subject
+   * in a second named graph. Implementations MUST guarantee one commit boundary
+   * for both replacements; generic update() support is not sufficient.
+   */
+  replaceGraphAndSubject?(
+    graphUri: string,
+    graphQuads: Quad[],
+    metaGraphUri: string,
+    metadataSubject: string,
+    metadataQuads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void>;
+  /**
+   * Atomically replace every row for one subject inside a shared named graph,
+   * leaving all other subjects in that graph untouched. Implementations MUST
+   * guarantee ONE commit boundary, so a concurrent reader observes the subject
+   * fully in its prior or its new state, never transiently empty (#1863).
+   *
+   * STRICT single-subject payload: EVERY quad in `quads` MUST target `graphUri`
+   * and carry `subject` as its subject (implementations reject anything else),
+   * and `subject` must be a canonical skolem IRI (not a blank node). Co-located
+   * writes for another subject (e.g. an immutable request record re-asserted
+   * beside a mutable job record) are the caller's own separate write, sequenced
+   * so the reader never observes a dangling reference. Optional because generic
+   * `update()` support is NOT sufficient — a non-transactional SPARQL endpoint
+   * would apply the delete and the insert sequentially — so callers fall back
+   * (delete-then-insert) when it is absent or refuses.
+   */
+  replaceSubject?(
+    graphUri: string,
+    subject: string,
+    quads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void>;
+  /**
+   * Replace one subject and add disjoint companion subjects in the same graph
+   * in ONE transaction. Companion rows are additive, never replaced. Both groups
+   * must be blank-node free and validated before mutation. Unsupported backends
+   * refuse before dispatch; execution failures propagate without fallback.
+   */
+  replaceSubjectAndInsert?(
+    graphUri: string,
+    subject: string,
+    replacementQuads: Quad[],
+    insertQuads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void>;
+  /**
+   * RFC-64 `SYNC_AUTHOR_COMMIT_CAS_V1`: atomically replace one complete shared
+   * projection, its author-seal subject, the guarded author current-head
+   * pointer, and bounded mutation/applied-set subjects.
+   *
+   * Implementations MUST refuse before mutation unless the whole generated
+   * update is one backend transaction. `conflict` proves no semantic target was
+   * changed; execution failures remain indeterminate and propagate.
+   */
+  rfc64AuthorCommitCasV1?(
+    input: Rfc64AuthorCommitCasInputV1,
+    options?: QueryOptions,
+  ): Promise<Rfc64AuthorCommitCasResultV1>;
+  /** Optional projection of a freshly queried nonempty graph inventory into
+   * this store's enumeration visibility. Every decorator must compose its own
+   * rules and its inner store's predicate; never unwrap to discover this capability.
+   * Absence requires normal filtered enumeration. Visibility changes must obey
+   * the same all-writers revision contract as enumeration when revisions exist.
+   */
+  readonly graphEnumerationVisibility?: (graph: string) => boolean;
   listGraphs(options?: QueryOptions): Promise<string[]>;
   listGraphsByPrefix?(prefix: string, options?: QueryOptions): Promise<string[]>;
 
@@ -150,9 +357,84 @@ export interface TripleStore {
 }
 
 /**
+ * Public boundary implemented by every TripleStore decorator. Capability
+ * discovery may traverse only this accessor; decorator-private fields are not
+ * part of the contract.
+ */
+export interface TripleStoreDecorator extends TripleStore {
+  readonly innerStore: TripleStore;
+}
+
+/** Resolve one optional capability through the documented decorator chain. */
+export function findTripleStoreCapability<T>(
+  store: unknown,
+  isCapability: (candidate: unknown) => candidate is T,
+): T | null {
+  let candidate = store;
+  const seen = new Set<unknown>();
+  for (let depth = 0; candidate && depth < 16; depth += 1) {
+    if (isCapability(candidate)) return candidate;
+    if (typeof candidate !== 'object' || seen.has(candidate)) return null;
+    seen.add(candidate);
+    if (!('innerStore' in candidate)) return null;
+    candidate = (candidate as { innerStore?: unknown }).innerStore;
+  }
+  return null;
+}
+
+/** Keep the outer decorator path, discovering only the backend's lifetime owner. */
+export function runLogicalStoreMutation<T>(
+  store: unknown, operation: StoreOperation, options: QueryOptions | undefined,
+  work: (options: QueryOptions | undefined) => Promise<T>,
+): Promise<T> {
+  const owner = findTripleStoreCapability(store, (candidate): candidate is LogicalStoreMutationCapability =>
+    typeof candidate === 'object' && candidate !== null
+      && typeof (candidate as Partial<LogicalStoreMutationCapability>).runLogicalMutation === 'function');
+  return owner ? owner.runLogicalMutation(operation, options, work) : work(options);
+}
+
+/** Discover response-limit enforcement without bypassing the outer query path. */
+export function asBoundedQueryResponseCapability(store: unknown): BoundedQueryResponseCapability | null {
+  return findTripleStoreCapability(store, (candidate): candidate is BoundedQueryResponseCapability => (
+    typeof candidate === 'object'
+    && candidate !== null
+    && (candidate as Partial<BoundedQueryResponseCapability>).queryResponseLimitMode === 'pre-materialization'
+    && typeof (candidate as Partial<BoundedQueryResponseCapability>).query === 'function'
+  ));
+}
+
+/**
+ * Delete matching quads when the caller does not consume an exact count.
+ *
+ * The call deliberately stays on the outermost decorator so graph indexes,
+ * changelogs, literal translation, and cache invalidation still observe the
+ * mutation. Stores that have not implemented the optional fast path retain
+ * the old semantics through the counted fallback.
+ */
+export async function deleteByPatternWithoutCount<Pattern>(
+  store: {
+    deleteByPattern(pattern: Pattern, options?: QueryOptions): Promise<unknown>;
+    deleteByPatternWithoutCount?(
+      pattern: Pattern,
+      options?: QueryOptions,
+    ): Promise<void>;
+  },
+  pattern: Pattern,
+  options?: QueryOptions,
+): Promise<void> {
+  if (typeof store.deleteByPatternWithoutCount === 'function') {
+    await store.deleteByPatternWithoutCount(pattern, options);
+    return;
+  }
+  await store.deleteByPattern(pattern, options);
+}
+
+/**
  * Run a server-side update whose affected named graphs are known by the caller.
- * Returns `false` when the store does not support `update()` so feature code can
- * apply its own fallback policy without duplicating method binding or hint wiring.
+ * Returns `false` when the store does not support `update()` directly, or when
+ * a decorator reports that its wrapped store lacks the capability. Genuine
+ * update execution errors propagate so feature code cannot mask an outage or
+ * partially executed mutation as a compatibility fallback.
  */
 export async function tryUpdateWithTouchedGraphs(
   store: TripleStore,
@@ -162,8 +444,146 @@ export async function tryUpdateWithTouchedGraphs(
 ): Promise<boolean> {
   const update = store.update;
   if (typeof update !== 'function') return false;
-  await update.call(store, sparql, { ...options, touchedGraphs });
-  return true;
+  try {
+    await update.call(store, sparql, { ...options, touchedGraphs });
+    return true;
+  } catch (error) {
+    if (
+      error instanceof UnsupportedTripleStoreCapabilityError &&
+      error.capability === 'update'
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Attempt an atomic complete named-graph replacement.
+ *
+ * `false` means the capability is genuinely unavailable and no mutation was
+ * started. Execution failures propagate, including indeterminate remote-store
+ * failures, so callers never mistake an outage for a safe compatibility path.
+ */
+export async function tryReplaceGraphAtomically(
+  store: TripleStore,
+  graphUri: string,
+  quads: Quad[],
+  options: QueryOptions = {},
+): Promise<boolean> {
+  const replaceGraph = store.replaceGraph;
+  if (typeof replaceGraph !== 'function') return false;
+  try {
+    await replaceGraph.call(store, graphUri, quads, options);
+    return true;
+  } catch (error) {
+    if (
+      error instanceof UnsupportedTripleStoreCapabilityError &&
+      error.capability === 'replaceGraph'
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Attempt one atomic complete-graph + metadata-subject replacement.
+ *
+ * `false` is a clean capability refusal raised before mutation. Execution
+ * failures propagate because a remote response can be indeterminate.
+ */
+export async function tryReplaceGraphAndSubjectAtomically(
+  store: TripleStore,
+  graphUri: string,
+  graphQuads: Quad[],
+  metaGraphUri: string,
+  metadataSubject: string,
+  metadataQuads: Quad[],
+  options: QueryOptions = {},
+): Promise<boolean> {
+  const replace = store.replaceGraphAndSubject;
+  if (typeof replace !== 'function') return false;
+  try {
+    await replace.call(
+      store,
+      graphUri,
+      graphQuads,
+      metaGraphUri,
+      metadataSubject,
+      metadataQuads,
+      options,
+    );
+    return true;
+  } catch (error) {
+    if (
+      error instanceof UnsupportedTripleStoreCapabilityError &&
+      error.capability === 'replaceGraphAndSubject'
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Attempt one atomic single-subject replace inside a shared named graph.
+ *
+ * Returns `false` when the store does not implement `replaceSubject`, or when a
+ * decorator reports the wrapped store cannot guarantee it (a clean preflight
+ * capability refusal raised before mutation) — the caller then takes its
+ * non-atomic delete-then-insert fallback. Genuine execution failures propagate
+ * so a caller never mistakes an outage or a partial mutation for "unsupported".
+ */
+export async function tryReplaceSubjectAtomically(
+  store: TripleStore,
+  graphUri: string,
+  subject: string,
+  quads: Quad[],
+  options: QueryOptions = {},
+): Promise<boolean> {
+  const replaceSubject = store.replaceSubject;
+  if (typeof replaceSubject !== 'function') return false;
+  try {
+    await replaceSubject.call(store, graphUri, subject, quads, options);
+    return true;
+  } catch (error) {
+    if (
+      error instanceof UnsupportedTripleStoreCapabilityError &&
+      error.capability === 'replaceSubject'
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Attempt the certified RFC-64 author-publication CAS boundary.
+ *
+ * `null` is a clean capability refusal raised before mutation. A returned
+ * `conflict` is also known not to have mutated semantic targets. Every other
+ * failure propagates because the backend may have committed before its
+ * response was lost.
+ */
+export async function tryRfc64AuthorCommitCasV1(
+  store: TripleStore,
+  input: Rfc64AuthorCommitCasInputV1,
+  options: QueryOptions = {},
+): Promise<Rfc64AuthorCommitCasResultV1 | null> {
+  const commit = store.rfc64AuthorCommitCasV1;
+  if (typeof commit !== 'function') return null;
+  try {
+    return await commit.call(store, input, options);
+  } catch (error) {
+    if (
+      error instanceof UnsupportedTripleStoreCapabilityError
+      && error.capability === 'rfc64AuthorCommitCasV1'
+    ) {
+      return null;
+    }
+    throw error;
+  }
 }
 
 export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'oxigraph-worker' | 'blazegraph' | 'sparql-http' | string;
@@ -258,6 +678,7 @@ export interface TripleStoreConfig {
 
 type AdapterFactory = (
   options?: Record<string, unknown>,
+  constructionAuthority?: object,
 ) => Promise<TripleStore>;
 
 const adapterRegistry = new Map<string, AdapterFactory>();
@@ -279,7 +700,8 @@ export async function createTripleStore(
         `Registered: [${[...adapterRegistry.keys()].join(', ')}]`,
     );
   }
-  const store = await factory(resolveAdapterOptions(config));
+  const constructionAuthority = getManagedOxigraphRuntimeConstructionAuthorityV1(config);
+  const store = await factory(resolveAdapterOptions(config), constructionAuthority);
   const largeLiteralStorage = resolveLargeLiteralStorageOptions(config);
   const withLargeLiteralStorage = largeLiteralStorage
     ? new SharedMemoryLiteralBlobStore(store, largeLiteralStorage)
@@ -308,7 +730,14 @@ function resolveAdapterOptions(config: TripleStoreConfig): Record<string, unknow
   ) {
     return config.options;
   }
-  return { ...config.options, managedByDkg: false };
+  // The outer GraphSetIndexStore replaces the adapter-local graph-list cache,
+  // so clear only that cache-ownership flag. A daemon-supervised Oxigraph
+  // process carries separate storage-issued runtime provenance; never derive
+  // that consistency proof from persisted namespace ownership.
+  return Object.freeze({
+    ...config.options,
+    managedByDkg: false,
+  });
 }
 
 function wrapGraphSetIndex(

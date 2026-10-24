@@ -26,6 +26,42 @@ const fetchTelemetrySettingsMock = vi.fn();
 const updateTelemetrySettingsMock = vi.fn();
 const shutdownNodeMock = vi.fn();
 
+vi.mock('../src/ui/pages/identity-wallets/IdentityWalletsSection.js', () => ({
+  IdentityWalletsSection: () =>
+    React.createElement(
+      'section',
+      { className: 'card', 'data-testid': 'identity-wallets-section' },
+      React.createElement(
+        'div',
+        { className: 'card-header' },
+        React.createElement('h2', { className: 'card-title' }, 'Node Identity Wallets'),
+      ),
+      React.createElement(
+        'div',
+        { className: 'card-body' },
+        React.createElement(
+          'button',
+          { type: 'button', 'data-testid': 'add-operational' },
+          'Add operational wallet',
+        ),
+      ),
+    ),
+}));
+
+vi.mock('../src/ui/pages/conviction/PcaSettingsCard.js', () => ({
+  PcaSettingsCard: () =>
+    React.createElement(
+      'section',
+      { className: 'card', 'data-testid': 'pca-unavailable' },
+      React.createElement(
+        'div',
+        { className: 'card-header' },
+        React.createElement('h2', { className: 'card-title' }, 'Publisher Conviction'),
+      ),
+      React.createElement('div', { className: 'card-body' }, 'PCA unavailable on this deployment'),
+    ),
+}));
+
 vi.mock('../src/ui/api.js', async () => {
   const actual = await vi.importActual<any>('../src/ui/api.js');
   return {
@@ -105,6 +141,7 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
     const c = await render();
     expect(cardTitles(c)).toEqual([
       'Node Identity',
+      'Node Identity Wallets',
       'Blockchain Config',
       // PCA card inserted directly after Blockchain Config (UX §3.2).
       'Publisher Conviction',
@@ -112,6 +149,13 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
       'Local Data Retention',
       'Danger Zone',
     ]);
+  });
+
+  it('keeps identity-wallet controls reachable from Settings independently of PCA', async () => {
+    const c = await render();
+    expect(c.querySelector('[data-testid="pca-unavailable"]')).toBeTruthy();
+    expect(c.querySelector('[data-testid="identity-wallets-section"]')).toBeTruthy();
+    expect(c.querySelector('[data-testid="add-operational"]')).toBeTruthy();
   });
 
   it('does NOT render any removed section (LLM, Background Sync, Developer, Privacy & Memory)', async () => {
@@ -139,6 +183,7 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
     // size-rotated, independent of the retention window).
     expect(c.textContent ?? '').not.toMatch(/daemon\.log/i);
     expect(c.textContent ?? '').toMatch(/pruned automatically/i);
+    expect(c.textContent ?? '').toMatch(/routine logs also have a size safety cap/i);
   });
 
   it('reducing retention shows the reduce-confirm group, focuses Prune & Save, and Escape-free Cancel dismisses it', async () => {

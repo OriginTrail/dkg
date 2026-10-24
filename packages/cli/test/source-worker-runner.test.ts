@@ -27,7 +27,7 @@ describe('source worker runner (real daemon)', () => {
 
   beforeAll(async () => {
     console.log = () => undefined;
-    daemon = await startLiveDaemon();
+    daemon = await startLiveDaemon({ publisherEnabled: true });
     const created = await postJson(daemon, '/api/context-graph/create', { id: CG, name: CG, accessPolicy: 0 });
     expect(created.status, `CG create failed: ${JSON.stringify(created.body)}`).toBeLessThan(300);
     const sg = await postJson(daemon, '/api/sub-graph/create', { contextGraphId: CG, subGraphName: 'sg-1' });

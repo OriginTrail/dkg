@@ -69,31 +69,31 @@ describe('endpoint-stickiness carve-outs: tip-sensitive reads pass skipPreferred
     a.readProvider = readProvider;
 
     // eth_blockNumber → TIP → skipPreferred (transparent).
-    await a.requestPublishingConvictionRpc('eth_blockNumber', []);
-    expect(readProvider.calls.find((c: any[]) => c[0] === 'pca rpc eth_blockNumber')![2])
+    await a.requestBrowserWalletRpc('eth_blockNumber', []);
+    expect(readProvider.calls.find((c: any[]) => c[0] === 'browser wallet rpc eth_blockNumber')![2])
       .toMatchObject({ skipPreferred: true });
 
     // EVERY latest-family eth_getBlockByNumber tag → TIP → skipPreferred (a
     // regression dropping any one of them from PCA_TIP_BLOCK_TAGS is caught here).
     for (const blockTag of ['latest', 'pending', 'safe', 'finalized']) {
       readProvider.calls.length = 0;
-      await a.requestPublishingConvictionRpc('eth_getBlockByNumber', [blockTag, false]);
-      expect(readProvider.calls.find((c: any[]) => c[0] === 'pca rpc eth_getBlockByNumber')![2])
+      await a.requestBrowserWalletRpc('eth_getBlockByNumber', [blockTag, false]);
+      expect(readProvider.calls.find((c: any[]) => c[0] === 'browser wallet rpc eth_getBlockByNumber')![2])
         .toMatchObject({ skipPreferred: true });
     }
 
     readProvider.calls.length = 0;
     // eth_getTransactionReceipt → NOT a tip read → STICKY (no skipPreferred), so a
     // lagging primary's null doesn't short-circuit the backup that has the receipt.
-    await a.requestPublishingConvictionRpc('eth_getTransactionReceipt', ['0xhash']);
-    const receiptCall = readProvider.calls.find((c: any[]) => c[0] === 'pca rpc eth_getTransactionReceipt');
+    await a.requestBrowserWalletRpc('eth_getTransactionReceipt', ['0xhash']);
+    const receiptCall = readProvider.calls.find((c: any[]) => c[0] === 'browser wallet rpc eth_getTransactionReceipt');
     expect(receiptCall).toBeDefined();
     expect(receiptCall![2]?.skipPreferred).toBeUndefined();
 
     readProvider.calls.length = 0;
     // eth_getBlockByNumber(concrete block) → NOT tip → STICKY.
-    await a.requestPublishingConvictionRpc('eth_getBlockByNumber', ['0x7b', false]);
-    const exactBlockCall = readProvider.calls.find((c: any[]) => c[0] === 'pca rpc eth_getBlockByNumber' && !c[2]?.skipPreferred);
+    await a.requestBrowserWalletRpc('eth_getBlockByNumber', ['0x7b', false]);
+    const exactBlockCall = readProvider.calls.find((c: any[]) => c[0] === 'browser wallet rpc eth_getBlockByNumber' && !c[2]?.skipPreferred);
     expect(exactBlockCall).toBeDefined();
 
     // eth_call with NO block tag (defaults to latest) OR ANY latest-family tag → TIP
@@ -101,15 +101,15 @@ describe('endpoint-stickiness carve-outs: tip-sensitive reads pass skipPreferred
     const callObj = { to: '0xC', data: '0x' };
     for (const callParams of [[callObj], [callObj, 'latest'], [callObj, 'pending'], [callObj, 'safe'], [callObj, 'finalized']]) {
       readProvider.calls.length = 0;
-      await a.requestPublishingConvictionRpc('eth_call', callParams);
-      expect(readProvider.calls.find((c: any[]) => c[0] === 'pca rpc eth_call')![2])
+      await a.requestBrowserWalletRpc('eth_call', callParams);
+      expect(readProvider.calls.find((c: any[]) => c[0] === 'browser wallet rpc eth_call')![2])
         .toMatchObject({ skipPreferred: true });
     }
 
     readProvider.calls.length = 0;
     // eth_call at a CONCRETE historical block → the answer can't change → STICKY.
-    await a.requestPublishingConvictionRpc('eth_call', [{ to: '0xC', data: '0x' }, '0x7b']);
-    const exactCall = readProvider.calls.find((c: any[]) => c[0] === 'pca rpc eth_call');
+    await a.requestBrowserWalletRpc('eth_call', [{ to: '0xC', data: '0x' }, '0x7b']);
+    const exactCall = readProvider.calls.find((c: any[]) => c[0] === 'browser wallet rpc eth_call');
     expect(exactCall![2]?.skipPreferred).toBeUndefined();
   });
 
@@ -127,7 +127,9 @@ describe('endpoint-stickiness carve-outs: tip-sensitive reads pass skipPreferred
     // eslint-disable-next-line no-empty
     for await (const _ of a.listenForEvents({ eventTypes: ['KnowledgeBatchCreated'], fromBlock: 0 })) { void _; }
     expect(readContractWith.calls).toHaveLength(1);
-    expect(readContractWith.calls[0][3]).toMatchObject({ policy: 'wideLogScan', skipPreferred: true });
+    // Uncapped per attempt: each physical eth_getLogs of the (possibly split)
+    // range carries the wide-scan deadline itself.
+    expect(readContractWith.calls[0][3]).toMatchObject({ policy: 'durablePagedLogScan', skipPreferred: true });
   });
 });
 
@@ -150,6 +152,18 @@ describe('getBlockTimestamp: a null (unimported) receipt block fails over instea
     const backupGetBlock = recorder(async () => ({ timestamp: 42 }));
     const a = makeTwoEndpointAdapter({ getBlock: primaryGetBlock }, { getBlock: backupGetBlock });
     expect(await a.getBlockTimestamp(123n)).toBe(42); // NOT 0 — the backup served the block
+    expect(primaryGetBlock.calls).toHaveLength(1);
+    expect(backupGetBlock.calls).toHaveLength(1);
+  });
+
+  it('primary aborts the receipt-block request → fails over to the backup timestamp', async () => {
+    const abort = new Error('This operation was aborted');
+    abort.name = 'AbortError';
+    const primaryGetBlock = recorder(async () => { throw abort; });
+    const backupGetBlock = recorder(async () => ({ timestamp: 42 }));
+    const a = makeTwoEndpointAdapter({ getBlock: primaryGetBlock }, { getBlock: backupGetBlock });
+
+    await expect(a.getBlockTimestamp(123n)).resolves.toBe(42);
     expect(primaryGetBlock.calls).toHaveLength(1);
     expect(backupGetBlock.calls).toHaveLength(1);
   });
@@ -181,22 +195,46 @@ describe('getBlockTimestamp: a null (unimported) receipt block fails over instea
     await expect(a.getBlockTimestamp(123n)).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
   });
 
+  it('retries an all-429 receipt-block pass and returns the recovered timestamp', async () => {
+    const retryable429 = () => { const e: any = new Error('429 too many requests'); e.status = 429; return e; };
+    const primary = recorder(async () => { throw retryable429(); });
+    let backupAttempt = 0;
+    const backup = recorder(async () => {
+      backupAttempt += 1;
+      if (backupAttempt === 1) throw retryable429();
+      return { timestamp: 42 };
+    });
+    const a = makeTwoEndpointAdapter({ getBlock: primary }, { getBlock: backup });
+
+    await expect(a.getBlockTimestamp(123n)).resolves.toBe(42);
+    expect(primary.calls).toHaveLength(2);
+    expect(backup.calls).toHaveLength(2);
+  });
+
   it('MIXED null + transport error PROPAGATES regardless of endpoint order (order-independent, round-6 🔴)', async () => {
     const retryable429 = () => { const e: any = new Error('429 too many requests'); e.status = 429; return e; };
     // Order A: primary transport error, backup null. A transport failure occurred,
     // so we canNOT conclude "block not imported anywhere" → propagate (not 0).
+    const orderAThrottle = recorder(async () => { throw retryable429(); });
+    const orderANull = recorder(async () => null);
     const orderA = makeTwoEndpointAdapter(
-      { getBlock: recorder(async () => { throw retryable429(); }) },
-      { getBlock: recorder(async () => null) },
+      { getBlock: orderAThrottle },
+      { getBlock: orderANull },
     );
     await expect(orderA.getBlockTimestamp(123n)).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    expect(orderAThrottle.calls).toHaveLength(1);
+    expect(orderANull.calls).toHaveLength(1);
     // Order B: primary null, backup transport error — SAME endpoint states, so the
     // result must be identical (before the fix this returned 0 vs threw by order).
+    const orderBNull = recorder(async () => null);
+    const orderBThrottle = recorder(async () => { throw retryable429(); });
     const orderB = makeTwoEndpointAdapter(
-      { getBlock: recorder(async () => null) },
-      { getBlock: recorder(async () => { throw retryable429(); }) },
+      { getBlock: orderBNull },
+      { getBlock: orderBThrottle },
     );
     await expect(orderB.getBlockTimestamp(123n)).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    expect(orderBNull.calls).toHaveLength(1);
+    expect(orderBThrottle.calls).toHaveLength(1);
   });
 });
 
@@ -220,7 +258,7 @@ describe('PCA proxy nullable lookups fail over on null instead of returning a la
     const primarySend = recorder(async () => null);   // lagging: no receipt yet
     const backupSend = recorder(async () => receipt); // has it
     const a = makePca({ send: primarySend }, { send: backupSend });
-    expect(await a.requestPublishingConvictionRpc('eth_getTransactionReceipt', ['0xhash'])).toBe(receipt);
+    expect(await a.requestBrowserWalletRpc('eth_getTransactionReceipt', ['0xhash'])).toBe(receipt);
     expect(primarySend.calls).toHaveLength(1);
     expect(backupSend.calls).toHaveLength(1);
   });
@@ -229,7 +267,7 @@ describe('PCA proxy nullable lookups fail over on null instead of returning a la
     const primarySend = recorder(async () => null);
     const backupSend = recorder(async () => null);
     const a = makePca({ send: primarySend }, { send: backupSend });
-    expect(await a.requestPublishingConvictionRpc('eth_getTransactionReceipt', ['0xhash'])).toBeNull();
+    expect(await a.requestBrowserWalletRpc('eth_getTransactionReceipt', ['0xhash'])).toBeNull();
     expect(primarySend.calls).toHaveLength(1); // both endpoints were tried before returning null
     expect(backupSend.calls).toHaveLength(1);
   });
@@ -239,26 +277,26 @@ describe('PCA proxy nullable lookups fail over on null instead of returning a la
     // primary must not hide a finalized block a backup already has.
     const block = { number: '0x7b', hash: '0xabc' };
     const a = makePca({ send: recorder(async () => null) }, { send: recorder(async () => block) });
-    expect(await a.requestPublishingConvictionRpc('eth_getBlockByNumber', ['finalized', false])).toBe(block);
+    expect(await a.requestBrowserWalletRpc('eth_getBlockByNumber', ['finalized', false])).toBe(block);
   });
 
   it('eth_getTransactionByHash and a concrete eth_getBlockByNumber ALSO fail over on null (round-6 🟡 coverage)', async () => {
     const tx = { hash: '0xhash', blockNumber: '0x7b' };
     const txAdapter = makePca({ send: recorder(async () => null) }, { send: recorder(async () => tx) });
-    expect(await txAdapter.requestPublishingConvictionRpc('eth_getTransactionByHash', ['0xhash'])).toBe(tx);
+    expect(await txAdapter.requestBrowserWalletRpc('eth_getTransactionByHash', ['0xhash'])).toBe(tx);
 
     const block = { number: '0x7b', timestamp: '0x1' };
     const blockAdapter = makePca({ send: recorder(async () => null) }, { send: recorder(async () => block) });
-    expect(await blockAdapter.requestPublishingConvictionRpc('eth_getBlockByNumber', ['0x7b', false])).toBe(block);
+    expect(await blockAdapter.requestBrowserWalletRpc('eth_getBlockByNumber', ['0x7b', false])).toBe(block);
   });
 
   it('MIXED null + transport error PROPAGATES regardless of endpoint order (order-independent, round-6 🔴)', async () => {
     const retryable429 = () => { const e: any = new Error('429 too many requests'); e.status = 429; return e; };
     const orderA = makePca({ send: recorder(async () => { throw retryable429(); }) }, { send: recorder(async () => null) });
-    await expect(orderA.requestPublishingConvictionRpc('eth_getTransactionReceipt', ['0xhash']))
+    await expect(orderA.requestBrowserWalletRpc('eth_getTransactionReceipt', ['0xhash']))
       .rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
     const orderB = makePca({ send: recorder(async () => null) }, { send: recorder(async () => { throw retryable429(); }) });
-    await expect(orderB.requestPublishingConvictionRpc('eth_getTransactionReceipt', ['0xhash']))
+    await expect(orderB.requestBrowserWalletRpc('eth_getTransactionReceipt', ['0xhash']))
       .rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
   });
 });

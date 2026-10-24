@@ -79,7 +79,6 @@ describe('Gossip (03 §10–11): malformed publish broadcast', () => {
     const handler = new GossipPublishHandler(store, undefined, new Map(), {
       contextGraphExists: async () => false,
       getContextGraphOwner: async () => null,
-      subscribeToContextGraph: () => {},
       setContextGraphSubscription: () => {},
     });
     const countBefore = await totalQuadCount(store);
@@ -97,7 +96,6 @@ describe('Gossip (03 §10–11): malformed publish broadcast', () => {
     const handler = new GossipPublishHandler(store, undefined, new Map(), {
       contextGraphExists: async () => true,
       getContextGraphOwner: async () => null,
-      subscribeToContextGraph: () => {},
       setContextGraphSubscription: () => {},
     });
     const countBefore = await totalQuadCount(store);
@@ -132,7 +130,6 @@ describe('Gossip (03 §10–11): malformed publish broadcast', () => {
     const handler = new GossipPublishHandler(store, undefined, new Map(), {
       contextGraphExists: async () => true,
       getContextGraphOwner: async () => null,
-      subscribeToContextGraph: () => {},
       setContextGraphSubscription: () => {},
     });
     const countBefore = await totalQuadCount(store);

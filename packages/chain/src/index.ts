@@ -1,24 +1,261 @@
+export * from './public-graph-snapshot.js';
 export * from './chain-adapter.js';
+export {
+  CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_BYTES,
+  CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MIN_TAIL_BLOCKS,
+  CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_TAIL_BLOCKS,
+  CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_TRUSTED_PEERS,
+  CONTEXT_GRAPH_AUTHORITY_INDEX_BOOTSTRAP_TIMEOUT_MS,
+  ContextGraphAuthorityIndexSnapshotExportError,
+  ContextGraphAuthorityIndexBootstrapUnavailableError,
+  decodeContextGraphAuthorityIndexSnapshot,
+  normalizeContextGraphAuthorityIndexSnapshot,
+  type ContextGraphAuthorityIndexSnapshotRequest,
+  type ContextGraphAuthorityIndexSnapshot,
+  type ContextGraphAuthorityIndexBootstrap,
+  type ContextGraphAuthorityIndexSnapshots,
+} from './context-graph-authority-index-snapshot.js';
+export { assertContextGraphAuthorityIndexId } from
+  './context-graph-authority-index-id.js';
+export {
+  resolveContextGraphAuthorityIndexTickMs,
+  type ContextGraphAuthorityProjectionServedEvidence,
+} from './context-graph-authority-index-projection.js';
+export {
+  type ContextGraphAuthorityHistoryCheckpointV1,
+  type ContextGraphAuthorityHistoryState,
+  type ContextGraphAuthorityHistoryStore,
+} from './context-graph-authority-history.js';
+export {
+  createContextGraphAuthorityIndexCheckpoint,
+  type ContextGraphAuthorityIndexStore,
+} from './context-graph-authority-index-checkpoint.js';
+export {
+  bindContextGraphAuthorityReader,
+  type ContextGraphAuthorityReader,
+  type ContextGraphAuthorityReaderCapability,
+} from './context-graph-authority-reader.js';
+export {
+  resolvePublicFinalizedMaterializationAuthority,
+  type PublicFinalizedMaterializationAuthorityRequest,
+  type PublicFinalizedMaterializationAuthorityResult,
+  type PublicFinalizedMaterializationAuthorityUnavailableReason,
+  type PublicFinalizedMaterializationVersionSnapshot,
+} from './public-finalized-materialization-authority.js';
+export {
+  CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1,
+  CONTROL_EIP1271_CALL_FROM_V1,
+  CONTROL_EIP1271_ENDPOINT_ATTEMPT_POLICY_V1,
+  CONTROL_EIP1271_GAS_LIMIT_V1,
+  CONTROL_EIP1271_MAX_ATTEMPTS_V1,
+  CONTROL_EIP1271_MAX_CONCURRENT_CALLS_PER_CHAIN_V1,
+  CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1,
+  CONTROL_EIP1271_MAX_RETURN_BYTES_V1,
+  CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1,
+  CONTROL_SIGNATURE_VERIFICATION_ERROR_CODES_V1,
+  CURRENT_FINALIZED_EVM_CALL_ERROR_CODES_V1,
+  EIP1271_CANONICAL_ABI_RETURN_V1,
+  EIP1271_MAGIC_VALUE_V1,
+  ControlSignatureVerificationErrorV1,
+  CurrentFinalizedEvmCallErrorV1,
+  assertVerifiedControlEnvelopeIssuerSignatureV1,
+  readVerifiedControlEnvelopeIssuerSignatureV1,
+  verifyControlEnvelopeIssuerSignatureV1,
+  verifyEip191ControlEnvelopeIssuerSignatureV1,
+  type ControlSignatureVerificationDispositionV1,
+  type ControlSignatureVerificationErrorCodeV1,
+  type ControlSignatureVerificationReasonV1,
+  type CurrentFinalizedEvmCallErrorCodeV1,
+  type CurrentFinalizedEvmCallRequestV1,
+  type CurrentFinalizedEvmCallResultV1,
+  type CurrentFinalizedEvmCallV1,
+  type VerifiedControlEnvelopeIssuerSignatureV1,
+  type VerifiedControlEnvelopeIssuerSignatureSnapshotV1,
+  type VerifyControlEnvelopeIssuerSignatureOptionsV1,
+} from './control-object-signature-verifier.js';
+export {
+  createCurrentFinalizedEvmCallRouterV1,
+  type CurrentFinalizedEvmChainAdapterRegistrationV1,
+  type CurrentFinalizedEvmChainAdapterV1,
+} from './current-finalized-evm-call.js';
+export {
+  type StrictCurrentFinalizedEvmSnapshotRequestV1,
+  type StrictCurrentFinalizedEvmSnapshotScopeV1,
+  type StrictCurrentFinalizedEvmSnapshotSessionV1,
+} from './current-finalized-evm-snapshot.js';
+export {
+  FINALIZED_CONTEXT_GRAPH_NAME_HASH_MAX_RETURN_BYTES_V1,
+  FINALIZED_CONTEXT_GRAPH_TUPLE_MAX_RETURN_BYTES_V1,
+  createFinalizedContextGraphRpcResolverV1,
+  readFinalizedContextGraphEmptyVmFactsInSnapshotV1,
+  type FinalizedContextGraphEmptyVmFactsV1,
+} from './finalized-context-graph-rpc-resolver.js';
+export {
+  FinalizedVmChainInventoryValidationErrorV1,
+  snapshotFinalizedVmChainInventoryV1,
+  type FinalizedVmChainCandidateV1,
+  type FinalizedVmChainInventoryV1,
+  type FinalizedVmChainInventorySnapshotOptionsV1,
+} from './finalized-vm-chain-inventory.js';
+export {
+  FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
+  FinalizedVmChainInventoryLimitErrorV1,
+  createFinalizedVmChainScannerV1,
+  scanFinalizedVmChainInventoryInSnapshotV1,
+  type FinalizedVmChainScanRequestV1,
+  type FinalizedVmChainScannerConfigV1,
+  type FinalizedVmChainSessionScannerConfigV1,
+  type FinalizedVmChainScannerV1,
+} from './finalized-vm-chain-scanner.js';
+export {
+  CURRENT_FINALIZED_EVM_BLOCK_REFERENCE_PROFILES_V1,
+  createStrictCurrentFinalizedEvmChainAdapterV1,
+  createStrictCurrentFinalizedEvmReadV1,
+  type CurrentFinalizedEvmBlockReferenceProfileV1,
+  type StrictCurrentFinalizedEvmRpcConfigV1,
+} from './strict-current-finalized-evm-rpc.js';
+export { createStrictCurrentFinalizedEvmSnapshotScopeV1 } from './strict-current-finalized-evm-snapshot-factory.js';
+export {
+  FINALIZED_CHAIN_READ_MAX_CONCURRENT_PER_CHAIN_V1,
+  FINALIZED_CHAIN_READ_OWNERS,
+  acquireFinalizedChainRead,
+  finalizedChainReadRegistryDepth,
+  isFinalizedChainAdmissionContention,
+  type FinalizedChainReadOwnerV1,
+} from './finalized-chain-read-admission.js';
+export type { EndpointAdmissionPolicyV1 } from './nonqueueing-admission.js';
+export {
+  type StrictCurrentFinalizedEvmReadCallV1,
+  type StrictCurrentFinalizedEvmReadRequestV1,
+  type StrictCurrentFinalizedEvmReadResultV1,
+  type StrictCurrentFinalizedEvmReadV1,
+} from './current-finalized-evm-read-model.js';
+export {
+  FinalizedContextGraphReadErrorV1,
+  composeFinalizedContextGraphReadV1,
+  resolveFinalizedContextGraphReadWithSignalV1,
+  resolveFinalizedContextGraphReadV1,
+  snapshotFinalizedContextGraphReadV1,
+  validateFinalizedContextGraphReadRequestV1,
+  type FinalizedContextGraphBindingV1,
+  type FinalizedContextGraphReadErrorCodeV1,
+  type FinalizedContextGraphReadRequestV1,
+  type FinalizedContextGraphReadResolverV1,
+  type FinalizedContextGraphReadResolverWithSignalV1,
+  type FinalizedContextGraphReadV1,
+  type UntrustedFinalizedContextGraphFieldsV1,
+} from './finalized-context-graph-read.js';
+export {
+  resolveQuotedPublisherCandidatePricing,
+  resolveLegacyPublisherCandidatePricing,
+  type QuotedPublisherCandidatePricing,
+  type QuotedPublisherCandidatePricingRequest,
+  type LegacyPublisherCandidatePricing,
+  type LegacyPublisherCandidatePricingRequest,
+  type PublisherConvictionPlanReader,
+  type LegacyPublisherConvictionPlanReader,
+} from './publisher-plan.js';
 // RPC-usage accounting: ONLY the typed window contract is public API (consumed
 // by the ChainAdapter.drainRpcUsage capability, the agent boundary, and the
-// daemon's rpc_usage log emission). The parsing/label-bounding helpers stay
-// package-internal (imported via ./rpc-usage.js) so the transport accounting
-// implementation can change without a public-API break.
+// daemon's rpc_usage log emission). Endpoint-slot normalization is shared with
+// downstream formatters so producer and consumer use one bounded vocabulary.
 export {
+  createRpcUsageRecorder,
   emptyRpcUsageWindow,
   mergeRpcUsageWindows,
+  RPC_ENDPOINT_SLOT_LABELS,
+  RPC_USAGE_ADAPTER_ROLES,
+  RPC_USAGE_SNAPSHOT_CONSUMERS,
+  RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION,
   normalizeRpcUsageWindow,
+  normalizeRpcUsageAdapterRole,
+  normalizeRpcEndpointSlotLabel,
+  boundedRpcUsageSnapshotConsumerLabel,
   rpcUsageWindowTotal,
+  snapshotProcessRpcUsage,
+  RpcUsageTracker,
+  RpcUsageCumulativeAccumulator,
+  // Call-site attribution: splits a funnel read (`cgStorage.getContextGraph`)
+  // by the caller that wanted it. See `withRpcUsageSite`.
+  withRpcUsageSite,
+  withRpcUsageConsumer,
+  withRpcUsageAdapterRole,
+  type RpcEndpointSlotLabel,
+  type RpcUsageAdapterRole,
+  type RpcUsageAttribution,
+  type RpcUsageCumulativeSnapshot,
+  type RpcUsageSnapshotClock,
+  type RpcUsageSnapshotCompleteness,
+  type RpcUsageSnapshotSourcePopulation,
   type NormalizedRpcUsageWindow,
   type RpcUsageDrainable,
+  type RpcUsageRecorder,
   type RpcUsageWindow,
 } from './rpc-usage.js';
+// Observation-only split of physical RPC attempts into local admission wait and
+// endpoint latency. Process-cumulative, bounded and secret-free; consumers diff
+// two non-draining snapshots.
+export {
+  RPC_TIMING_BUCKET_UPPER_MS,
+  diffRpcRequestTiming,
+  snapshotRpcRequestTiming,
+  type RpcRequestTimingClassSnapshot,
+  type RpcRequestTimingSnapshot,
+  type RpcTimingDistribution,
+  type RpcTimingRequestClass,
+} from './rpc-request-timing.js';
+// The bounded census of call sites that reach `cgStorage.getContextGraph`.
+export {
+  CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES,
+  type ContextGraphAuthorityRpcSite,
+} from './context-graph-authority-rpc-sites.js';
+export {
+  type RandomSamplingReadContext,
+  type RandomSamplingBlockContext,
+  type RandomSamplingReadContextReader,
+} from './random-sampling-read-context.js';
+export {
+  activeRpcRequestContext,
+  activeRpcRequestAbortSignal,
+  boundedRetryFetchRequest,
+  createBatchedRpcRequestProvider,
+  createRpcRequestProvider,
+  withOwnedRpcRequestContext,
+  withRpcRequestContext,
+  withRpcRequestTimeout,
+  type RpcRequestAdmissionPriority,
+  type RpcRequestClass,
+  type RpcRequestAdmission,
+  type RpcRequestContext,
+  type RpcRequestContextInput,
+  type RpcRequestProviderConfig,
+} from './rpc-request-transport.js';
+export {
+  DEFAULT_RPC_REQUEST_GOVERNOR_POLICY,
+  RpcRequestGovernor,
+  RpcRequestGovernorQueueFullError,
+  isRpcRequestGovernorQueueFullError,
+  resolveRpcRequestGovernorPolicy,
+  type RpcRequestGovernorPolicy,
+  type RpcRequestGovernorPolicyInput,
+  type RpcRequestGovernorClock,
+  type RpcRequestGovernorWindow,
+} from './rpc-request-governor.js';
+export {
+  drainRpcReadBatchingWindow,
+  type RpcReadBatchingWindow,
+} from './evm-background-read-batching.js';
 export { MockChainAdapter, MOCK_DEFAULT_SIGNER } from './mock-adapter.js';
+export type { MockChainAdapterOptions } from './mock-adapter.js';
 export {
   EVMChainAdapter,
   type EVMAdapterConfig,
+  type EVMAdapterOptions,
   decodeEvmError,
   enrichEvmError,
+  classifyRpcRetryDisposition,
+  isRpcEndpointFailoverEligible,
   isRetryableRpcError,
   isKnownTransactionError,
   resolveRpcUrls,
@@ -29,15 +266,84 @@ export {
   isNoFundedPublisherWalletError,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   type PublisherWalletBalance,
+  type RpcRetryDisposition,
 } from './evm-adapter.js';
 export { NoChainAdapter } from './no-chain-adapter.js';
 export {
+  OperationalKeyUnavailableError,
+  isExternalEvmSigner,
+  type AuthorSigner,
+  type EvmSigner,
+  type ExternalAuthorSigners,
+  type ExternalEvmSigner,
+  type ExternalOperationalSignerSource,
+  type LocalOperationalSignerSource,
+  type OperationalSignerSource,
+} from './evm-signer.js';
+export {
+  RemoteSigner,
+  RemoteSignerClient,
+  type RemoteSignerApi,
+  type RemoteSignerClientOptions,
+} from './remote-signer.js';
+export {
+  DEFAULT_REMOTE_SIGNER_TIMEOUT_MS,
+  type RemoteSignerTransportOptions,
+} from './remote-signer-transport.js';
+export {
+  RemoteSignerError,
+  isRemoteSignerError,
+  type RemoteSignerErrorCode,
+  type RemoteSignerFailureCode,
+  type RemoteSignerFailureLike,
+} from './remote-signer-errors.js';
+export {
+  RemoteAuthorSigners,
+  connectRemoteSigners,
+  type ConnectRemoteSignersOptions,
+  type RemoteSignerAuthorOptions,
+  type RemoteSigners,
+} from './remote-signer-connect.js';
+export {
+  connectConfiguredRemoteSigners,
+  resolveChainSignerConfig,
+  type ChainSignerConfig,
+  type ChainSignerSettings,
+  type ConnectConfiguredRemoteSignersOptions,
+  type LocalChainSignerConfig,
+  type RemoteChainSignerAuthorConfig,
+  type RemoteChainSignerConfig,
+  type ResolvedRemoteSignerConfig,
+} from './remote-signer-config.js';
+export {
+  createRpcReadDescriptor,
+  type RpcReadDescriptor,
+  type RpcReadDescriptorInput,
+} from './rpc-failover-client.js';
+export {
   ChainRpcTransportError,
+  RpcEndpointsExhaustedError,
   isChainRpcTransportError,
+  isRpcEndpointsExhaustedError,
+  isTransientRpcTransportFailureWithoutTransaction,
   createRpcTimeoutError,
   type ChainRpcTransportCode,
   type ChainRpcTransportErrorLike,
+  type RpcEndpointExhaustionKind,
+  type RpcEndpointsExhaustedErrorLike,
 } from './chain-rpc-transport-error.js';
+export {
+  CHAIN_WRITE_AHEAD_HOOK_FAILED_CODE,
+  ChainWriteAheadHookError,
+  getChainWriteAheadHookCause,
+  isChainWriteAheadHookError,
+  type ChainWriteAheadHookErrorLike,
+} from './write-ahead-hook-error.js';
+export {
+  classifyContextGraphRegistrationFailure,
+  markContextGraphRegistrationNotSubmitted,
+  type ContextGraphRegistrationFailureDisposition,
+} from './context-graph-registration-error.js';
 export {
   // Surfaced for the daemon /api/status counter + the CLI failover loop.
   // Test-only hook exported so cross-package route tests can reset the exact
@@ -50,9 +356,77 @@ export {
   noteRpcExhaustion,
   notePreferredEndpoint,
   noteRpcServed,
+  // GH#2942 — the publisher persists a transport failure's message and must reduce any URL in
+  // it (a configured RPC URL can carry an API key) to its host first.
+  hostOnlyRpcText,
 } from './rpc-failover-log.js';
+export {
+  // Why a KA version snapshot could not be established: which endpoint gave no view (host
+  // only) and a closed class. The agent names it; `/api/status` reads the process-wide record.
+  describeKnowledgeAssetVersionSnapshotUnavailable,
+  getKnowledgeAssetVersionSnapshotHealth,
+  _resetKnowledgeAssetVersionSnapshotHealthForTest,
+  type KnowledgeAssetVersionSnapshotEndpointFailure,
+  type KnowledgeAssetVersionSnapshotEndpointFailureClass,
+  type KnowledgeAssetVersionSnapshotFailingEndpoint,
+  type KnowledgeAssetVersionSnapshotHealth,
+  type KnowledgeAssetVersionSnapshotReadOptions,
+  type KnowledgeAssetVersionSnapshotReadStage,
+  type KnowledgeAssetVersionSnapshotUnavailable,
+  type KnowledgeAssetVersionSnapshotUnavailableReason,
+} from './ka-version-snapshot-report.js';
 export {
   HubResolutionCache,
   type HubResolutionCacheOptions,
 } from './hub-resolution-cache.js';
 export { PcaUnavailableError, isPcaUnavailableError } from './pca-errors.js';
+export { numericChainIdOf } from './evm-adapter-storage-reads.js';
+export {
+  DEFAULT_FINALITY_CONFIRMATIONS,
+  MIN_RPC_RECEIPT_TIMEOUT_MS,
+  RPC_RECEIPT_TIMEOUT_MS,
+  resolveFinalityConfirmations,
+  resolveReceiptTimeoutMs,
+} from './evm-adapter-constants.js';
+export {
+  waitForTransactionReceiptWithFailover,
+  type TransactionReceiptEndpoint,
+  type TransactionReceiptWaitOptions,
+} from './transaction-receipt-failover.js';
+
+export {
+  readRandomSamplingAvailability,
+  type RandomSamplingAvailability,
+  type RandomSamplingAvailabilityReader,
+  type RandomSamplingAvailabilityResolver,
+  type LegacyRandomSamplingAvailabilityReader,
+} from './random-sampling-availability.js';
+
+/** Store contract supplied by the daemon to the one-log runtime. */
+export type { ChainEventLogStore } from './chain-index/chain-event-log.js';
+
+/**
+ * How the process hands that log DOWN to each adapter. There is one log per
+ * node and many adapters, so this is a binding, never a construction.
+ */
+export type {
+  ChainEventLogBinding,
+  ChainEventLogBindingSource,
+  ChainEventLogEventScanIdentity,
+  ChainEventLogEventScanLease,
+  ChainEventLogIndexedEventType,
+  ChainEventLogHubRotation,
+  ChainEventLogHubRotationWindow,
+} from './chain-event-log-binding.js';
+
+/** The ONE construction of that log. Exactly one adapter per process owns it. */
+export {
+  createEvmChainIndexRuntime,
+  type EvmChainIndexContract,
+  type EvmChainIndexRuntime,
+  type EvmChainIndexRuntimeOptions,
+} from './evm-chain-index-runtime.js';
+
+export { normalizeKnowledgeAssetUpdateIdentity, type KnowledgeAssetUpdateIdentity, type KnowledgeAssetUpdateMetadata } from './knowledge-asset-update-identity.js';
+
+export { isPublicGraphSnapshotScope } from './public-graph-snapshot-scope.js';

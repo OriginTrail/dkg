@@ -1,0 +1,915 @@
+#!/usr/bin/env node
+/**
+ * Public Context Graph sync proof.
+ *
+ * Answers ONE product question end to end, through the real daemon HTTP API
+ * that a real agent uses — no library shortcuts, no fixtures:
+ *
+ *   "Can any agent subscribing to a public Context Graph reliably converge to
+ *    both the shared working memory (SWM) and the finalized verifiable
+ *    memory (VM) corpus?"
+ *
+ * It covers both PUBLIC policy cells:
+ *   - public/open     accessPolicy=0 publishPolicy=1
+ *   - public/curated  accessPolicy=0 publishPolicy=0
+ *
+ * and three receiver shapes:
+ *   - LIVE      subscribed before the content was published
+ *   - LATE      subscribed after the content was published (cold backfill)
+ *   - AUTHOR    the publishing node itself (control)
+ *
+ * Emits deterministic JSON evidence to artifacts/. Content digests are over
+ * the exact sorted quad set, so two runs of the same scenario are comparable.
+ *
+ * Usage:
+ *   node devnet/public-cg-sync-proof/proof.mjs
+ *
+ * DESTRUCTIVE PHASE: with RESILIENCE=1 the author-outage case STOPS node 1 and
+ * does not restart it — `scripts/devnet.sh` exposes `stop-node` but no
+ * `start-node`. The devnet is left degraded, and the next run fails its health
+ * check with a confusing `fetch failed`. Restart the devnet between RESILIENCE
+ * runs, or pass SKIP_OUTAGE=1. The outage case is deliberately last so
+ * everything before it still runs.
+ * Env:
+ *   DEVNET_DIR      devnet data dir (default .devnet-1009)
+ *   API_PORT_BASE   node 1 API port (default 9400)
+ *   NUM_NODES       nodes to consider (default 4)
+ *   CONVERGE_MS     per-assertion convergence budget (default 90000)
+ */
+
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO = join(HERE, '..', '..');
+const DEVNET_DIR = process.env.DEVNET_DIR || join(REPO, '.devnet-1009');
+const PORT_BASE = Number(process.env.API_PORT_BASE || 9400);
+const NUM_NODES = Number(process.env.NUM_NODES || 4);
+const CONVERGE_MS = Number(process.env.CONVERGE_MS || 90_000);
+const POLL_MS = 3000;
+
+const nodeUrl = (n) => `http://127.0.0.1:${PORT_BASE + n - 1}`;
+
+function adminToken() {
+  const p = join(DEVNET_DIR, 'node1', 'auth.token');
+  if (!existsSync(p)) throw new Error(`no devnet auth token at ${p}`);
+  const lines = readFileSync(p, 'utf-8').split('\n').map((l) => l.trim());
+  const tok = lines.filter((l) => l && !l.startsWith('#')).pop();
+  if (!tok) throw new Error(`empty auth token at ${p}`);
+  return tok;
+}
+
+async function api(node, path, { method = 'GET', bearer, body, timeoutMs = 180_000 } = {}) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${nodeUrl(node)}${path}`, {
+      method,
+      signal: ctrl.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    const text = await res.text();
+    let json;
+    try { json = JSON.parse(text); } catch { json = { _raw: text }; }
+    return { ok: res.ok, status: res.status, json };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function sparql(node, bearer, query) {
+  const r = await api(node, '/api/query', { method: 'POST', bearer, body: { sparql: query }, timeoutMs: 60_000 });
+  if (!r.ok) throw new Error(`sparql on node${node}: ${r.status} ${JSON.stringify(r.json).slice(0, 300)}`);
+  return r.json?.result?.bindings ?? [];
+}
+
+/** Exact quad set for one subject, across whichever graph family holds it. */
+async function readSubject(node, bearer, subject, graphFilter) {
+  const q = `SELECT ?g ?p ?o WHERE { GRAPH ?g { <${subject}> ?p ?o } `
+    + (graphFilter ? `FILTER(CONTAINS(STR(?g), "${graphFilter}")) ` : '')
+    + `}`;
+  const b = await sparql(node, bearer, q);
+  return b.map((x) => ({ g: x.g, p: x.p, o: x.o }));
+}
+
+function digestQuads(quads) {
+  // Digest over the exact sorted (predicate, object) set — graph URI is
+  // intentionally excluded so AUTHOR (_verifiable_memory) and RECEIVER
+  // (whatever graph it landed in) are comparable on CONTENT.
+  const norm = quads.map((q) => `${q.p}\u0000${q.o}`).sort();
+  return {
+    count: norm.length,
+    digest: createHash('sha256').update(norm.join('')).digest('hex'),
+  };
+}
+
+async function waitFor(label, fn, budgetMs = CONVERGE_MS) {
+  const start = Date.now();
+  let last;
+  while (Date.now() - start < budgetMs) {
+    try {
+      last = await fn();
+      if (last?.done) return { ...last, waitedMs: Date.now() - start };
+    } catch (e) {
+      last = { done: false, note: `err: ${e.message}` };
+    }
+    await new Promise((r) => setTimeout(r, POLL_MS));
+  }
+  return { ...(last ?? {}), done: false, waitedMs: Date.now() - start, timedOut: true };
+}
+
+/**
+ * Stop one devnet node by killing only processes whose DKG_HOME points inside
+ * this devnet's data dir. Never match by port or process name — the operator
+ * may be running production nodes on this machine, and a name/port match would
+ * happily take one of those down.
+ */
+async function stopNode(n) {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const run = promisify(execFile);
+  const home = join(DEVNET_DIR, `node${n}`);
+  try {
+    const { stdout } = await run('/bin/sh', ['-c', `pgrep -f "cli.js" || true`]);
+    const pids = stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+    const mine = [];
+    for (const pid of pids) {
+      try {
+        const { stdout: env } = await run('/bin/sh', ['-c', `ps eww -p ${pid} 2>/dev/null | tr ' ' '\\n' | grep '^DKG_HOME=' || true`]);
+        if (env.includes(`DKG_HOME=${home}`)) mine.push(pid);
+      } catch { /* process vanished between listing and inspection */ }
+    }
+    if (!mine.length) return false;
+    await run('/bin/sh', ['-c', `kill ${mine.join(' ')} 2>/dev/null || true`]);
+    await new Promise((r) => setTimeout(r, 4000));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Bring a stopped devnet node back up via `scripts/devnet.sh restart-node`,
+ * which reuses the same start path as a full devnet boot and preserves the
+ * node's wallets, store backend and CG metadata.
+ *
+ * This is what makes the HOLD-OUT case possible: stop a node BEFORE publishing
+ * so it cannot receive gossip, publish, then bring it back and require it to
+ * reconstruct the corpus from the remaining holders. Without it, every node on
+ * a single-box devnet is pre-populated by gossip and the convergence
+ * assertions measure nothing.
+ */
+async function restartNode(n, timeoutMs = 180_000) {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const run = promisify(execFile);
+  // Pass the FULL port/topology env, not just DEVNET_DIR + API_PORT_BASE.
+  // `restart-node` re-derives every port from these; omitting LIBP2P_PORT_BASE
+  // silently brings the node back on the DEFAULT libp2p port, where none of its
+  // peers will find it — the node looks healthy on its API while being
+  // partitioned from the network.
+  const env = {
+    ...process.env,
+    DEVNET_DIR,
+    API_PORT_BASE: String(PORT_BASE),
+    LIBP2P_PORT_BASE: process.env.LIBP2P_PORT_BASE ?? '10400',
+    ...(process.env.DEVNET_OXIGRAPH_BASE ? { DEVNET_OXIGRAPH_BASE: process.env.DEVNET_OXIGRAPH_BASE } : {}),
+    ...(process.env.DEVNET_DOCKER_NAME_PREFIX ? { DEVNET_DOCKER_NAME_PREFIX: process.env.DEVNET_DOCKER_NAME_PREFIX } : {}),
+    ...(process.env.NUM_CORE_NODES ? { NUM_CORE_NODES: process.env.NUM_CORE_NODES } : {}),
+  };
+  try {
+    await run('/bin/sh', ['-c', `cd ${REPO} && ./scripts/devnet.sh restart-node ${n}`], {
+      env, timeout: timeoutMs, maxBuffer: 1024 * 1024 * 8,
+    });
+  } catch {
+    // restart-node can exit non-zero on a slow boot while still coming up;
+    // the readiness poll below is the real check.
+  }
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const r = await api(n, '/api/status', { timeoutMs: 5000 });
+      if (r.ok) return true;
+    } catch { /* not up yet */ }
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  return false;
+}
+
+const results = [];
+function record(r) {
+  results.push(r);
+  const icon = r.pass === true ? 'PASS' : r.pass === false ? 'FAIL' : 'INFO';
+  console.log(`[${icon}] ${r.check}${r.detail ? ` — ${r.detail}` : ''}`);
+}
+
+async function main() {
+  const stamp = Number(process.env.PROOF_STAMP || Date.now());
+  const TOK = adminToken();
+  console.log(`# public CG sync proof  stamp=${stamp}  nodes=${NUM_NODES}  base=${PORT_BASE}`);
+
+  // ---- node health + peer identity --------------------------------------
+  // peerIds[n] is node n's libp2p peer id, used to tell whether a receiver
+  // was chosen as a storage host for a publish (see CONFOUND CONTROL below).
+  const peerIds = {};
+  for (let n = 1; n <= NUM_NODES; n += 1) {
+    let r;
+    try {
+      r = await api(n, '/api/status', { bearer: TOK, timeoutMs: 10_000 });
+    } catch (e) {
+      // A prior RESILIENCE run stops node 1 and cannot restart it (devnet.sh
+      // has no start-node). Say so plainly instead of surfacing a bare
+      // "fetch failed" from deep in the first request.
+      throw new Error(
+        `node${n} is not reachable at ${nodeUrl(n)} (${e instanceof Error ? e.message : String(e)}). `
+        + `If a previous RESILIENCE=1 run stopped it, restart the devnet: `
+        + `./scripts/devnet.sh stop && ./scripts/devnet.sh start ${NUM_NODES}`,
+      );
+    }
+    if (!r.ok) throw new Error(`node${n} unhealthy: ${r.status}`);
+    peerIds[n] = r.json?.peerId ?? r.json?.network?.peerId ?? r.json?.libp2p?.peerId ?? null;
+  }
+  record({
+    check: 'devnet health',
+    pass: true,
+    detail: `${NUM_NODES} nodes responding; peerIds resolved=${Object.values(peerIds).filter(Boolean).length}/${NUM_NODES}`,
+  });
+
+  // ---- agents ------------------------------------------------------------
+  // AUTHOR on node1, LIVE receiver on node2, LATE receiver on node3.
+  const mkAgent = async (node, label) => {
+    const r = await api(node, '/api/agent/register', {
+      method: 'POST', bearer: TOK,
+      body: { name: `proof-${label}-${stamp}`, framework: 'public-cg-sync-proof' },
+    });
+    if (!r.ok) throw new Error(`register ${label} on node${node}: ${r.status} ${JSON.stringify(r.json).slice(0, 200)}`);
+    return { node, label, address: r.json.agentAddress, token: r.json.authToken };
+  };
+
+  const author = await mkAgent(1, 'author');
+  const live = await mkAgent(2, 'live');
+  let late = await mkAgent(3, 'late');
+  record({ check: 'agents registered', pass: true, detail: `author=node1 live=node2 late=node3` });
+
+  const cells = [
+    { key: 'public-open', accessPolicy: 0, publishPolicy: 1 },
+    { key: 'public-curated', accessPolicy: 0, publishPolicy: 0 },
+  ];
+
+  const evidence = { stamp, cells: {} };
+
+  for (const cell of cells) {
+    console.log(`\n=== CELL ${cell.key} (accessPolicy=${cell.accessPolicy} publishPolicy=${cell.publishPolicy}) ===`);
+    const cgId = `${author.address}/proof-${cell.key}-${stamp}`;
+    const cellEv = { cgId, accessPolicy: cell.accessPolicy, publishPolicy: cell.publishPolicy, steps: {} };
+
+    // ---- create + register on-chain -------------------------------------
+    const create = await api(1, '/api/context-graph/create', {
+      method: 'POST', bearer: author.token,
+      body: {
+        id: cgId,
+        name: `Proof ${cell.key} ${stamp}`,
+        description: 'public CG sync proof',
+        accessPolicy: cell.accessPolicy,
+        publishPolicy: cell.publishPolicy,
+        // NOTE: deliberately NO `allowedAgents` here. A member roster implies
+        // PRIVATE access (accessPolicy=1) and the register leg refuses the
+        // combination with an explicit public accessPolicy=0. Curated
+        // *contribution* on a publicly-readable CG is governed by
+        // publishPolicy=0 (+ optional pcaAccountId), not by a roster.
+        register: true,
+      },
+    });
+    if (!create.ok || !create.json.registered) {
+      record({ check: `${cell.key}: CG registered on-chain`, pass: false, detail: JSON.stringify(create.json).slice(0, 240) });
+      evidence.cells[cell.key] = { ...cellEv, aborted: 'cg-create-failed' };
+      continue;
+    }
+    const onChainId = create.json.onChainId;
+    cellEv.onChainId = onChainId;
+    record({ check: `${cell.key}: CG registered on-chain`, pass: true, detail: `onChainId=${onChainId}` });
+
+    // ---- LIVE receiver subscribes BEFORE publication ---------------------
+    const sub = await api(2, '/api/context-graph/subscribe', {
+      method: 'POST', bearer: live.token, body: { contextGraphId: cgId },
+    });
+    record({
+      check: `${cell.key}: LIVE receiver subscribed (pre-publication)`,
+      pass: sub.ok,
+      detail: sub.ok ? `catchup=${sub.json?.catchup?.status}` : JSON.stringify(sub.json).slice(0, 200),
+    });
+
+    // ---- author publishes to SWM ----------------------------------------
+    const kaName = `proof-ka-${cell.key}-${stamp}`;
+    const subject = `urn:proof:${stamp}:${cell.key}`;
+    const graph = `did:dkg:context-graph:${cgId}`;
+    const quads = [
+      { subject, predicate: 'https://schema.org/name', object: `"ProofAsset-${cell.key}-${stamp}"`, graph },
+      { subject, predicate: 'https://schema.org/description', object: `"public CG sync proof ${cell.key}"`, graph },
+    ];
+    const share = await api(1, '/api/knowledge-assets', {
+      method: 'POST', bearer: author.token,
+      body: { name: kaName, contextGraphId: cgId, alsoShareSwm: true, quads },
+    });
+    if (!share.ok) {
+      record({ check: `${cell.key}: author shared KA to SWM`, pass: false, detail: JSON.stringify(share.json).slice(0, 240) });
+      evidence.cells[cell.key] = { ...cellEv, aborted: 'swm-share-failed' };
+      continue;
+    }
+    const authorSwm = digestQuads(await readSubject(1, author.token, subject));
+    cellEv.steps.swmShare = { status: share.json.status, sealed: share.json.sealed, authorContent: authorSwm };
+    record({ check: `${cell.key}: author shared KA to SWM`, pass: true, detail: `status=${share.json.status} quads=${authorSwm.count}` });
+
+    // ---- ASSERTION 1: LIVE receiver converges on SWM ---------------------
+    const liveSwm = await waitFor(`${cell.key} live SWM`, async () => {
+      const q = await readSubject(2, live.token, subject);
+      const d = digestQuads(q);
+      return { done: d.count > 0 && d.digest === authorSwm.digest, observed: d };
+    });
+    cellEv.steps.liveSwmConvergence = liveSwm;
+    record({
+      check: `${cell.key}: LIVE receiver converged on SWM`,
+      pass: liveSwm.done === true,
+      detail: liveSwm.done
+        ? `exact match, ${liveSwm.observed.count} quads in ${liveSwm.waitedMs}ms`
+        : `TIMEOUT after ${liveSwm.waitedMs}ms (observed ${liveSwm.observed?.count ?? 0} quads)`,
+    });
+
+    // ---- author publishes to VM (finalize on-chain) ----------------------
+    const vm = await api(1, `/api/knowledge-assets/${encodeURIComponent(kaName)}/vm/publish`, {
+      method: 'POST', bearer: author.token, body: { contextGraphId: cgId },
+    });
+    if (!vm.ok) {
+      record({ check: `${cell.key}: author published to VM`, pass: false, detail: JSON.stringify(vm.json).slice(0, 240) });
+      evidence.cells[cell.key] = { ...cellEv, aborted: 'vm-publish-failed' };
+      continue;
+    }
+    const authorVm = digestQuads(await readSubject(1, author.token, subject, '_verifiable_memory'));
+    // CONFOUND CONTROL. Note: storage ACK does NOT itself deliver VM — the ACK
+    // path persists into SWM only (publisher/src/storage-ack-handler.ts:1182-1188);
+    // a VM graph URI is built only on the UPDATE path (:1837-1843). We still
+    // classify the receiver against the ACK set, because a peer that handled the
+    // publish is not an arm's-length subscriber and we do not want to credit a
+    // pass to it. VM delivery itself comes from the durable peer-sync lane, which
+    // re-verifies the peer-served dkg:transactionHash against chain
+    // (sync/requester/graph-scoped-materialization.ts:141-204).
+    const ackPeers = vm.json.storageAckPeerIds ?? [];
+    const liveWasHost = ackPeers.includes(peerIds[2] ?? '__none__');
+    cellEv.steps.vmPublish = {
+      status: vm.json.status, ual: vm.json.ual, txHash: vm.json.txHash,
+      blockNumber: vm.json.blockNumber,
+      storageAckPeers: ackPeers.length,
+      liveReceiverPeerId: peerIds[2] ?? null,
+      liveReceiverWasStorageHost: liveWasHost,
+      authorContent: authorVm,
+    };
+    if (liveWasHost) {
+      record({
+        check: `${cell.key}: NOTE — LIVE receiver was in the publish ACK set`,
+        pass: null,
+        detail: 'not an arm\'s-length subscriber; the LATE non-host row below is the decisive one',
+      });
+    }
+    record({
+      check: `${cell.key}: author published to VM`,
+      pass: vm.json.status === 'confirmed',
+      detail: `status=${vm.json.status} block=${vm.json.blockNumber} acks=${(vm.json.storageAckPeerIds ?? []).length}`,
+    });
+
+    // ---- ASSERTION 2: LIVE receiver converges on VM ----------------------
+    // Nudge the chain-reconcile sweep (node-admin scope), then poll.
+    await api(2, '/api/context-graph/reconcile', {
+      method: 'POST', bearer: TOK, body: { contextGraphId: cgId },
+    }).catch(() => {});
+    const liveVm = await waitFor(`${cell.key} live VM`, async () => {
+      const rec = await api(2, '/api/context-graph/reconcile', {
+        method: 'POST', bearer: TOK, body: { contextGraphId: cgId }, timeoutMs: 60_000,
+      });
+      const q = await readSubject(2, live.token, subject, '_verifiable_memory');
+      const d = digestQuads(q);
+      return {
+        done: d.count > 0 && d.digest === authorVm.digest,
+        observed: d,
+        reconcile: rec.ok ? {
+          status: rec.json.status, headOrdinal: rec.json.headOrdinal,
+          watermarkAfter: rec.json.watermarkAfter,
+          unresolvedOrdinals: rec.json.unresolvedOrdinals,
+        } : { error: rec.status },
+      };
+    });
+    cellEv.steps.liveVmConvergence = liveVm;
+    record({
+      check: `${cell.key}: LIVE receiver has VM content`,
+      pass: liveVm.done === true,
+      detail: liveVm.done
+        ? `exact match, ${liveVm.observed.count} quads in ${liveVm.waitedMs}ms`
+          + (liveWasHost ? ' (receiver was in the publish ACK set — not arm\'s length)' : '')
+        : `TIMEOUT after ${liveVm.waitedMs}ms — reconcile=${JSON.stringify(liveVm.reconcile)}`,
+    });
+
+    // ---- ASSERTION 2b: the SYNC MECHANISM itself actually worked ---------
+    // Content presence alone is satisfiable by hosting. The chain-reconcile
+    // watermark advancing to the chain head is what proves a *subscriber*
+    // reconstructed VM. A stuck watermark with content present means the
+    // content arrived by another route and subscriber sync is still broken.
+    const wm = liveVm.reconcile ?? {};
+    const watermarkAdvanced = typeof wm.watermarkAfter === 'number'
+      && typeof wm.headOrdinal === 'number'
+      && wm.headOrdinal > 0
+      && wm.watermarkAfter >= wm.headOrdinal
+      && (wm.unresolvedOrdinals ?? 0) === 0;
+    cellEv.steps.liveVmWatermark = { ...wm, watermarkAdvanced };
+    record({
+      check: `${cell.key}: LIVE receiver VM SYNC MECHANISM advanced (watermark reached chain head)`,
+      pass: watermarkAdvanced,
+      detail: watermarkAdvanced
+        ? `watermark=${wm.watermarkAfter}/${wm.headOrdinal}, 0 unresolved`
+        : `STUCK — status=${wm.status} watermark=${wm.watermarkAfter}/${wm.headOrdinal} unresolved=${wm.unresolvedOrdinals}`,
+    });
+
+    // ---- LATE receiver subscribes AFTER publication (cold backfill) ------
+    // Pick the late receiver AFTER the publish, choosing a node that is
+    // provably NOT in the storage-ACK set. Choosing up front is what made
+    // earlier runs inconclusive: on a small devnet the ACK set can cover
+    // every candidate, and a host receives VM during publish regardless of
+    // whether subscriber sync works.
+    // Must also differ from the LIVE receiver's node: reusing it would mean the
+    // "late" node had already synced this CG as LIVE, so a pass would not be an
+    // independent observation.
+    const nonHostNode = Object.keys(peerIds)
+      .map(Number)
+      .filter((n) => n !== 1 && n !== live.node && peerIds[n] && !ackPeers.includes(peerIds[n]))
+      .sort((a, b) => a - b)[0];
+    if (nonHostNode && nonHostNode !== late.node) {
+      late = await mkAgent(nonHostNode, `late-nonhost-${cell.key}`);
+      record({
+        check: `${cell.key}: selected node${nonHostNode} as LATE receiver (provably NOT a storage host)`,
+        pass: true,
+        detail: `ACK set covers ${ackPeers.length} peers; node${nonHostNode} is not among them`,
+      });
+    } else if (!nonHostNode) {
+      record({
+        check: `${cell.key}: no non-host node available — devnet too small for a decisive VM test`,
+        pass: null,
+        detail: `every peer is in the ACK set; scale the devnet or raise node count`,
+      });
+    }
+    const lateSub = await api(late.node, '/api/context-graph/subscribe', {
+      method: 'POST', bearer: late.token, body: { contextGraphId: cgId },
+    });
+    record({
+      check: `${cell.key}: LATE receiver subscribed (post-publication)`,
+      pass: lateSub.ok,
+      detail: lateSub.ok ? `catchup=${lateSub.json?.catchup?.status}` : JSON.stringify(lateSub.json).slice(0, 200),
+    });
+
+    // ---- ASSERTION 3: LATE receiver backfills SWM ------------------------
+    const lateSwm = await waitFor(`${cell.key} late SWM`, async () => {
+      const d = digestQuads(await readSubject(late.node, late.token, subject));
+      return { done: d.count > 0, observed: d };
+    });
+    cellEv.steps.lateSwmBackfill = lateSwm;
+    record({
+      check: `${cell.key}: LATE receiver backfilled content published before it subscribed`,
+      pass: lateSwm.done === true,
+      detail: lateSwm.done
+        ? `${lateSwm.observed.count} quads in ${lateSwm.waitedMs}ms`
+        : `TIMEOUT after ${lateSwm.waitedMs}ms`,
+    });
+
+    // ---- ASSERTION 3b: THE DECISIVE VM TEST -----------------------------
+    // The LATE receiver subscribes AFTER publication, so it is normally NOT
+    // in the publish storage-ACK set — i.e. a genuine non-host subscriber.
+    // If VM reaches it at all, it must arrive via the durable peer-sync lane
+    // (default-on, serves confirmed _verifiable_memory graphs), NOT via the
+    // chain-reconcile path (which defers forever) and NOT via hosting.
+    // This is the experiment that decides whether subscriber VM sync works.
+    const lateWasHost = ackPeers.includes(peerIds[late.node] ?? '__none__');
+    const lateVm = await waitFor(`${cell.key} late VM`, async () => {
+      const d = digestQuads(await readSubject(late.node, late.token, subject, '_verifiable_memory'));
+      return { done: d.count > 0 && d.digest === authorVm.digest, observed: d };
+    });
+    cellEv.steps.lateVmBackfill = { ...lateVm, lateReceiverWasStorageHost: lateWasHost };
+    record({
+      check: `${cell.key}: LATE (non-host) receiver obtained VM via durable peer sync`,
+      pass: lateVm.done === true,
+      detail: lateVm.done
+        ? `${lateVm.observed.count} quads in ${lateVm.waitedMs}ms`
+          + (lateWasHost ? ' (WAS a storage host — not decisive)' : ' (NOT a host — decisive: durable sync delivered VM)')
+        : `TIMEOUT after ${lateVm.waitedMs}ms`
+          + (lateWasHost ? ' (was a host)' : ' (NOT a host — decisive: no path delivered VM)'),
+    });
+
+    // ---- ASSERTION 4 (curated only): non-curator publication is refused --
+    if (cell.publishPolicy === 0) {
+      // CORRECTED against observed behaviour. The RFC-64 doc says accessPolicy
+      // governs SWM submission and publishPolicy governs VM admission only.
+      // That is NOT what this implementation does: creating a curated CG stamps
+      // the curator into allowedAgents, which makes the CG AGENT-GATED, and
+      // resolveWorkspaceGossipSigningAgent (dkg-agent-crypto.ts:2505) then
+      // refuses an SWM gossip write from any agent outside that set:
+      //   "Cannot gossip SWM write for agent-gated context graph ...:
+      //    no local allowed signing agent key"
+      // So a non-curator can wm-seal LOCALLY (the create succeeds, status
+      // 'wm-sealed') but cannot SHARE to SWM. Asserting only that the create
+      // returns 200 is a false pass — it never exercises the gossip path.
+      const badKa = `proof-intruder-${cell.key}-${stamp}`;
+      const intruderSubject = `urn:proof:${stamp}:${cell.key}:intruder`;
+      const staged = await api(2, '/api/knowledge-assets', {
+        method: 'POST', bearer: live.token,
+        body: {
+          name: badKa, contextGraphId: cgId, alsoShareSwm: true,
+          quads: [{ subject: intruderSubject, predicate: 'https://schema.org/name', object: '"intruder"', graph }],
+        },
+      });
+      // Assert the REAL boundary: local wm-seal succeeds, SWM gossip does not.
+      const stagedStatus = staged.json?.status ?? null;
+      const wmOnly = staged.ok && stagedStatus === 'wm-sealed';
+      const gossiped = staged.ok && stagedStatus === 'swm-shared';
+      record({
+        check: `${cell.key}: non-curator write stays LOCAL (wm-sealed), not gossiped to SWM`,
+        pass: wmOnly || !staged.ok,
+        detail: wmOnly
+          ? "status='wm-sealed' — agent gate held, no SWM gossip"
+          : gossiped
+            ? "status='swm-shared' — AGENT GATE DID NOT HOLD, non-curator gossiped to SWM"
+            : `create refused (${staged.status})`,
+      });
+      // And prove the gate directly: an explicit swm/share must be refused.
+      const explicitShare = await api(2, `/api/knowledge-assets/${encodeURIComponent(badKa)}/swm/share`, {
+        method: 'POST', bearer: live.token, body: { contextGraphId: cgId },
+      });
+      const gateHeld = !explicitShare.ok
+        && /agent-gated|allowed signing agent/i.test(JSON.stringify(explicitShare.json));
+      cellEv.steps.nonCuratorSwmGate = {
+        createStatus: stagedStatus,
+        shareOk: explicitShare.ok,
+        shareBody: JSON.stringify(explicitShare.json).slice(0, 240),
+      };
+      record({
+        check: `${cell.key}: explicit SWM share by a non-curator is refused by the agent gate`,
+        pass: gateHeld,
+        detail: gateHeld
+          ? 'refused: no local allowed signing agent key'
+          : `NOT REFUSED — http=${explicitShare.status} ${JSON.stringify(explicitShare.json).slice(0, 160)}`,
+      });
+
+      // THE ACTUAL CURATED GATE: non-curator VM publication must be refused.
+      const attempt = await api(2, `/api/knowledge-assets/${encodeURIComponent(badKa)}/vm/publish`, {
+        method: 'POST', bearer: live.token, body: { contextGraphId: cgId },
+      });
+      const refusedHttp = !attempt.ok;
+      const notConfirmed = attempt.json?.status !== 'confirmed';
+      const refused = refusedHttp || notConfirmed;
+      cellEv.steps.nonCuratorVmRefused = {
+        httpOk: attempt.ok, status: attempt.status,
+        publishStatus: attempt.json?.status ?? null,
+        body: JSON.stringify(attempt.json).slice(0, 300),
+      };
+      record({
+        check: `${cell.key}: non-curator VM publication refused`,
+        pass: refused,
+        detail: refused
+          ? `rejected (http=${attempt.status} status=${attempt.json?.status ?? 'n/a'})`
+          : `ACCEPTED AND CONFIRMED ON-CHAIN — curated VM gating did not refuse`,
+      });
+    }
+
+    evidence.cells[cell.key] = cellEv;
+  }
+
+  // ========================================================================
+  // RESILIENCE — the assertions that separate "it works" from "it works
+  // reliably". Everything above runs on a healthy network with tiny assets;
+  // none of it would notice a publisher dying, a receiver crashing mid-sync,
+  // or a corpus large enough to matter. Gated by RESILIENCE=1 because these
+  // stop and start real nodes.
+  // ========================================================================
+  if (process.env.RESILIENCE === '1') {
+    console.log(`\n=== RESILIENCE ===`);
+    const rEv = {};
+    const cgId = `${author.address}/proof-resilience-${stamp}`;
+    const graph = `did:dkg:context-graph:${cgId}`;
+
+    const create = await api(1, '/api/context-graph/create', {
+      method: 'POST', bearer: author.token,
+      body: {
+        id: cgId, name: `Proof resilience ${stamp}`, description: 'resilience',
+        accessPolicy: 0, publishPolicy: 1, register: true,
+      },
+    });
+    record({
+      check: 'resilience: CG registered on-chain',
+      pass: Boolean(create.ok && create.json.registered),
+      detail: create.json?.onChainId ? `onChainId=${create.json.onChainId}` : JSON.stringify(create.json).slice(0, 200),
+    });
+
+    // ---- SCALE: many KAs with realistic quad counts and literal sizes ----
+    // Defaults are deliberately modest so the gate stays runnable; raise via
+    // env for a soak. The point is to leave the 2-quad regime that every
+    // earlier assertion lived in, where paging, batching and memory limits
+    // are all trivially satisfied.
+    const KA_COUNT = Number(process.env.SCALE_KAS || 25);
+    const QUADS_PER_KA = Number(process.env.SCALE_QUADS || 40);
+    const LITERAL_BYTES = Number(process.env.SCALE_LITERAL_BYTES || 512);
+    const filler = 'x'.repeat(LITERAL_BYTES);
+
+    const scaleSubjects = [];
+    let scalePublished = 0;
+    const scaleStart = Date.now();
+    for (let i = 0; i < KA_COUNT; i += 1) {
+      const subject = `urn:proof:${stamp}:scale:${i}`;
+      const quads = Array.from({ length: QUADS_PER_KA }, (_, q) => ({
+        subject,
+        predicate: `https://schema.org/p${q}`,
+        object: `"${filler}-${i}-${q}"`,
+        graph,
+      }));
+      const r = await api(1, '/api/knowledge-assets', {
+        method: 'POST', bearer: author.token,
+        body: { name: `scale-${i}-${stamp}`, contextGraphId: cgId, alsoShareSwm: true, quads },
+      });
+      if (r.ok) { scalePublished += 1; scaleSubjects.push(subject); }
+      else if (i === 0) {
+        record({ check: 'resilience: scale publish', pass: false, detail: JSON.stringify(r.json).slice(0, 240) });
+        break;
+      }
+    }
+    const scaleMs = Date.now() - scaleStart;
+    rEv.scale = { kaCount: KA_COUNT, quadsPerKa: QUADS_PER_KA, literalBytes: LITERAL_BYTES, published: scalePublished, ms: scaleMs };
+    record({
+      check: `resilience: published ${KA_COUNT} KAs x ${QUADS_PER_KA} quads (~${LITERAL_BYTES}B literals)`,
+      pass: scalePublished === KA_COUNT,
+      detail: `${scalePublished}/${KA_COUNT} in ${scaleMs}ms (~${Math.round(scaleMs / Math.max(scalePublished, 1))}ms/KA)`,
+    });
+
+    // A fresh subscriber must reconstruct the WHOLE corpus, not just some of
+    // it. Peer-set-dependent completeness is exactly the weakness here:
+    // "whatever peers happened to serve me" can silently be a subset.
+    const scaleReceiver = Object.keys(peerIds).map(Number).find((n) => n !== 1 && n !== live.node) ?? 3;
+    const sr = await mkAgent(scaleReceiver, `scale-recv-${stamp}`);
+    const expectTotal = scalePublished * QUADS_PER_KA;
+    // Baseline BEFORE subscribing: on a small devnet a node may already hold
+    // the corpus via gossip, in which case "convergence" measures nothing.
+    // sparql-scan-allow: R2 -- bounded by the VALUES ?s list above (exact subjects this run published); the lint cannot see through the template interpolation
+    const preB = await sparql(scaleReceiver, sr.token, `SELECT (COUNT(*) AS ?n) WHERE {
+      VALUES ?s { ${scaleSubjects.map((x) => `<${x}>`).join(' ')} }
+      GRAPH ?g { ?s ?p ?o }
+      FILTER(CONTAINS(STR(?g), "proof-resilience-${stamp}"))
+    }`);
+    const scalePreCount = Number(String(preB[0]?.n ?? '0').replace(/"/g, '').split('^')[0]) || 0;
+    record({
+      check: `resilience: scale receiver baseline before subscribe`,
+      pass: null,
+      detail: scalePreCount >= expectTotal
+        ? `ALREADY had ${scalePreCount}/${expectTotal} — convergence below is NOT decisive`
+        : `had ${scalePreCount}/${expectTotal} before subscribing`,
+    });
+    await api(scaleReceiver, '/api/context-graph/subscribe', {
+      method: 'POST', bearer: sr.token, body: { contextGraphId: cgId },
+    });
+    // Count ONLY the published content subjects. Counting every quad whose
+    // graph matches the CG also sweeps in _meta / _shared_memory_meta, which
+    // inflates the total past the target and lets the check pass WITHOUT the
+    // corpus actually being complete. Bind the subjects explicitly instead.
+    // Bind the exact published subjects with VALUES rather than scanning every
+    // graph and filtering by string. An all-variable triple inside GRAPH ?g
+    // enumerates every graph x every triple — the #1597 listGraphs-storm shape
+    // the SPARQL scalability lint exists to catch. VALUES makes the scan
+    // proportional to what this run published, not to store size.
+    const scaleSubjectValues = scaleSubjects.map((s) => `<${s}>`).join(' ');
+    // sparql-scan-allow: R2 -- bounded by the VALUES ?s list above (exact subjects this run published); the lint cannot see through the template interpolation
+    const contentCountQuery = `SELECT (COUNT(*) AS ?n) WHERE {
+      VALUES ?s { ${scaleSubjectValues} }
+      GRAPH ?g { ?s ?p ?o }
+      FILTER(CONTAINS(STR(?g), "proof-resilience-${stamp}"))
+    }`;
+    const corpus = await waitFor('scale corpus', async () => {
+      const b = await sparql(scaleReceiver, sr.token, contentCountQuery);
+      const n = Number(String(b[0]?.n ?? '0').replace(/"/g, '').split('^')[0]) || 0;
+      // EXACT, not >=. A superset means something is wrong, not something is fine.
+      return { done: n === expectTotal, observed: n };
+    }, Math.max(CONVERGE_MS, 180_000));
+    rEv.scaleConvergence = corpus;
+    record({
+      check: `resilience: fresh subscriber reconstructed the FULL ${expectTotal}-quad corpus`,
+      pass: corpus.done === true,
+      detail: corpus.done
+        ? `${corpus.observed}/${expectTotal} quads in ${corpus.waitedMs}ms`
+        : `INCOMPLETE — ${corpus.observed ?? 0}/${expectTotal} quads after ${corpus.waitedMs}ms`,
+    });
+
+    // ---- IDEMPOTENCE: repeated reconcile must not duplicate content ------
+    const beforeN = corpus.observed ?? 0;
+    for (let i = 0; i < 3; i += 1) {
+      await api(scaleReceiver, '/api/context-graph/reconcile', {
+        method: 'POST', bearer: TOK, body: { contextGraphId: cgId }, timeoutMs: 60_000,
+      }).catch(() => {});
+    }
+    const afterB = await sparql(scaleReceiver, sr.token, contentCountQuery);
+    const afterN = Number(String(afterB[0]?.n ?? '0').replace(/"/g, '').split('^')[0]) || 0;
+    rEv.idempotence = { beforeN, afterN };
+    record({
+      check: 'resilience: repeated reconciliation is idempotent (no duplicate activation)',
+      pass: afterN === beforeN,
+      detail: afterN === beforeN ? `stable at ${afterN} quads across 3 reconciles` : `DRIFT ${beforeN} -> ${afterN}`,
+    });
+
+    // ---- PUBLISHER OUTAGE: content must survive its author leaving -------
+    // The author is stopped AFTER replication. A subscriber that has never
+    // seen this CG must still converge, served by the remaining holders.
+    const outageReceiver = Object.keys(peerIds).map(Number)
+      .find((n) => n !== 1 && n !== live.node && n !== scaleReceiver);
+    if (outageReceiver && process.env.SKIP_OUTAGE !== '1') {
+      const stopped = await stopNode(1);
+      record({
+        check: 'resilience: author node stopped after replication',
+        pass: stopped,
+        detail: stopped ? 'node1 down' : 'could not stop node1 — outage case skipped',
+      });
+      if (stopped) {
+        const or = await mkAgent(outageReceiver, `outage-recv-${stamp}`);
+        await api(outageReceiver, '/api/context-graph/subscribe', {
+          method: 'POST', bearer: or.token, body: { contextGraphId: cgId },
+        }).catch(() => {});
+        // Same tightening, and record the PRE-subscribe baseline: if the node
+        // already held the corpus, convergence proves nothing about serving
+        // from remaining holders.
+        const baselineB = await sparql(outageReceiver, or.token, contentCountQuery);
+        const baseline = Number(String(baselineB[0]?.n ?? '0').replace(/"/g, '').split('^')[0]) || 0;
+        const survived = await waitFor('outage convergence', async () => {
+          const b = await sparql(outageReceiver, or.token, contentCountQuery);
+          const n = Number(String(b[0]?.n ?? '0').replace(/"/g, '').split('^')[0]) || 0;
+          return { done: n === expectTotal, observed: n, baseline };
+        }, Math.max(CONVERGE_MS, 180_000));
+        rEv.authorOutage = survived;
+        record({
+          check: 'resilience: subscriber converges with the AUTHOR OFFLINE (served by other holders)',
+          pass: survived.done === true,
+          detail: survived.done
+            ? `${survived.observed}/${expectTotal} quads in ${survived.waitedMs}ms, author down`
+              + ` (had ${survived.baseline ?? 0} before subscribing`
+              + `${(survived.baseline ?? 0) >= expectTotal ? ' — ALREADY COMPLETE, not decisive' : ''})`
+            : `INCOMPLETE — ${survived.observed ?? 0}/${expectTotal} after ${survived.waitedMs}ms with author down`,
+        });
+
+        // Restore the author. Leaving it down poisons every later phase and the
+        // next run of this harness, which then fails its health check for a
+        // reason that looks nothing like the actual cause.
+        const authorBack = await restartNode(1);
+        record({
+          check: 'resilience: author node restarted (devnet left healthy)',
+          pass: authorBack,
+          detail: authorBack ? 'node1 back online' : 'node1 did NOT come back — restart the devnet before the next run',
+        });
+      }
+    }
+
+    // ---- HOLD-OUT: the only decisive corpus-reconstruction test -------
+    // Everything above is undermined on a single-box devnet because public CG
+    // gossip reaches every running node, so a "fresh" subscriber already holds
+    // the corpus and convergence measures nothing. The only way to produce a
+    // genuinely absent node is to STOP it before publication, publish while it
+    // is down, then bring it back and require it to reconstruct from the
+    // remaining holders. `scripts/devnet.sh restart-node <n>` makes this
+    // possible while preserving the node's wallets and store.
+    const holdoutNode = Object.keys(peerIds).map(Number)
+      .filter((n) => n !== 1 && n !== live.node)
+      .sort((a, b) => b - a)[0];
+    if (holdoutNode && process.env.SKIP_HOLDOUT !== '1') {
+      const hoCg = `${author.address}/proof-holdout-${stamp}`;
+      const hoGraph = `did:dkg:context-graph:${hoCg}`;
+      const hoSubject = `urn:proof:${stamp}:holdout`;
+      const hoStopped = await stopNode(holdoutNode);
+      record({
+        check: `resilience/holdout: node${holdoutNode} stopped BEFORE publication`,
+        pass: hoStopped,
+        detail: hoStopped ? `node${holdoutNode} down — cannot receive gossip` : 'could not stop; hold-out skipped',
+      });
+
+      if (hoStopped) {
+        const hoCreate = await api(1, '/api/context-graph/create', {
+          method: 'POST', bearer: author.token,
+          body: {
+            id: hoCg, name: `Proof holdout ${stamp}`, description: 'hold-out',
+            accessPolicy: 0, publishPolicy: 1, register: true,
+          },
+        });
+        const HO_KAS = Number(process.env.HOLDOUT_KAS || 5);
+        const HO_QUADS = Number(process.env.HOLDOUT_QUADS || 20);
+        let hoPublished = 0;
+        for (let i = 0; i < HO_KAS; i += 1) {
+          const subject = `${hoSubject}:${i}`;
+          const quads = Array.from({ length: HO_QUADS }, (_, q) => ({
+            subject, predicate: `https://schema.org/h${q}`,
+            object: `"holdout-${stamp}-${i}-${q}"`, graph: hoGraph,
+          }));
+          const r = await api(1, '/api/knowledge-assets', {
+            method: 'POST', bearer: author.token,
+            body: { name: `holdout-${i}-${stamp}`, contextGraphId: hoCg, alsoShareSwm: true, quads },
+          });
+          if (r.ok) hoPublished += 1;
+        }
+        const hoExpect = hoPublished * HO_QUADS;
+        record({
+          check: `resilience/holdout: published ${HO_KAS} KAs while node${holdoutNode} was down`,
+          pass: Boolean(hoCreate.ok && hoCreate.json.registered && hoPublished === HO_KAS),
+          detail: `${hoPublished}/${HO_KAS} KAs, ${hoExpect} content quads`,
+        });
+
+        const hoBack = await restartNode(holdoutNode);
+        record({
+          check: `resilience/holdout: node${holdoutNode} restarted`,
+          pass: hoBack,
+          detail: hoBack ? 'back online' : 'did not come back within budget',
+        });
+
+        if (hoBack) {
+          const hoAgent = await mkAgent(holdoutNode, `holdout-${stamp}`);
+          // Same bounding as the scale corpus: bind the exact hold-out subjects.
+          const hoSubjectValues = Array.from(
+            { length: hoPublished }, (_, i) => `<${hoSubject}:${i}>`,
+          ).join(' ');
+          // sparql-scan-allow: R2 -- bounded by the VALUES ?s list above (exact hold-out subjects); lint cannot resolve the template interpolation
+          const hoCountQuery = `SELECT (COUNT(*) AS ?n) WHERE {
+            VALUES ?s { ${hoSubjectValues} }
+            GRAPH ?g { ?s ?p ?o }
+            FILTER(CONTAINS(STR(?g), "proof-holdout-${stamp}"))
+          }`;
+          const preB = await sparql(holdoutNode, hoAgent.token, hoCountQuery);
+          const preN = Number(String(preB[0]?.n ?? '0').replace(/"/g, '').split('^')[0]) || 0;
+          // INFO, not a gate. The hold-out is proven by ORDERING, not by this
+          // number: the CG is created AFTER the node is stopped, so any content
+          // it holds must have arrived post-restart — it did not exist before.
+          // Once catch-up is working it can materialize the corpus between
+          // restart and this measurement (observed: 3019ms before the
+          // materialization fix, <5ms after), so a non-zero baseline here means
+          // "converged very fast", not "leaked".
+          record({
+            check: `resilience/holdout: node${holdoutNode} baseline after restart`,
+            pass: null,
+            detail: preN === 0
+              ? '0 quads at first measurement — converged after subscribe'
+              : `${preN}/${hoExpect} already present — converged before the baseline could be read`,
+          });
+
+          await api(holdoutNode, '/api/context-graph/subscribe', {
+            method: 'POST', bearer: hoAgent.token, body: { contextGraphId: hoCg },
+          });
+          const hoConv = await waitFor('holdout convergence', async () => {
+            const b = await sparql(holdoutNode, hoAgent.token, hoCountQuery);
+            const n = Number(String(b[0]?.n ?? '0').replace(/"/g, '').split('^')[0]) || 0;
+            return { done: n === hoExpect, observed: n };
+          }, Math.max(CONVERGE_MS, 180_000));
+          rEv.holdout = { node: holdoutNode, expect: hoExpect, pre: preN, ...hoConv };
+          record({
+            check: `resilience/holdout: node absent during publication reconstructs the FULL corpus`,
+            // Decisive on ordering alone: the CG did not exist while the node
+            // was down, so holding the exact corpus now proves reconstruction.
+            pass: hoConv.done === true,
+            detail: hoConv.done
+              ? `${hoConv.observed}/${hoExpect} quads in ${hoConv.waitedMs}ms from remaining holders`
+              : `INCOMPLETE — ${hoConv.observed ?? 0}/${hoExpect} after ${hoConv.waitedMs}ms`,
+          });
+        }
+      }
+    }
+
+    evidence.resilience = rEv;
+  }
+
+  // ---- summary -----------------------------------------------------------
+  const passed = results.filter((r) => r.pass === true).length;
+  const failed = results.filter((r) => r.pass === false);
+  evidence.summary = {
+    total: results.filter((r) => typeof r.pass === 'boolean').length,
+    passed,
+    failed: failed.length,
+    failedChecks: failed.map((f) => f.check),
+  };
+  evidence.checks = results;
+
+  const outDir = join(HERE, 'artifacts');
+  mkdirSync(outDir, { recursive: true });
+  const raw = `${JSON.stringify(evidence, null, 2)}\n`;
+  writeFileSync(join(outDir, 'proof-result.json'), raw);
+  writeFileSync(join(outDir, 'proof-digest.txt'),
+    `${createHash('sha256').update(raw).digest('hex')}\n`);
+
+  console.log(`\n=== SUMMARY: ${passed}/${evidence.summary.total} checks passed ===`);
+  for (const f of failed) console.log(`  FAILED: ${f.check}`);
+  console.log(`evidence: ${join(outDir, 'proof-result.json')}`);
+
+  process.exit(failed.length === 0 ? 0 : 1);
+}
+
+main().catch((e) => {
+  console.error(`FATAL: ${e.stack || e.message}`);
+  process.exit(2);
+});

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { mergeRpcUsageWindows } from '@origintrail-official/dkg-chain';
-import { formatRpcUsageLines, emitRpcUsage, startRpcUsageTelemetry } from '../src/daemon/rpc-usage-log.js';
+import { mergeRpcUsageWindows, RpcRequestGovernor } from '@origintrail-official/dkg-chain';
+import { createDaemonRpcTelemetrySource, formatRpcUsageLines, emitRpcUsage, startRpcUsageTelemetry } from '../src/daemon/rpc-usage-log.js';
 
 /**
  * The rpc_usage line format is a CONTRACT with the Grafana dashboards (parsed
@@ -8,6 +8,31 @@ import { formatRpcUsageLines, emitRpcUsage, startRpcUsageTelemetry } from '../sr
  * pin it: one logfmt line per method, delta counts, token-safe values.
  */
 describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => {
+  it('composes live adapter windows and retains the governor drain receiver', async () => {
+    let publisherCount = 5;
+    const governor = new RpcRequestGovernor({ maxRequestsPerSecond: 10 }, {
+      clock: {
+        now: () => 0,
+        random: () => 0,
+        setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimeout: (timer) => clearTimeout(timer),
+      },
+    });
+    const source = createDaemonRpcTelemetrySource([
+      () => ({ byMethod: { eth_call: publisherCount }, lifetimeTotal: publisherCount }),
+      () => undefined,
+      () => ({ byMethod: { eth_call: 2 }, lifetimeTotal: 2 }),
+    ], governor);
+    expect(source.drainRpcUsage?.().byMethod).toEqual({ eth_call: 7 });
+    publisherCount = 9;
+    expect(source.drainRpcUsage?.().byMethod).toEqual({ eth_call: 11 });
+    await governor.acquire('foreground');
+    expect(source.drainRpcRequestGovernor?.().foregroundAdmitted).toBe(1);
+    expect(source.drainRpcRequestGovernor?.().foregroundAdmitted).toBe(0);
+    expect(source.drainRpcReadBatching?.()).toMatchObject({ batches: 0, readsByLabel: {} });
+    expect(createDaemonRpcTelemetrySource([]).drainRpcRequestGovernor).toBeUndefined();
+  });
+
   it('emits one logfmt line per method with count/window/chain', () => {
     const lines = formatRpcUsageLines(
       { byMethod: { eth_call: 42, eth_getLogs: 7 }, ethCallByConsumer: {}, lifetimeTotal: 49 },
@@ -23,6 +48,36 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
 
   it('returns [] for an empty window (idle node logs nothing, not zeros)', () => {
     expect(formatRpcUsageLines({ byMethod: {}, ethCallByConsumer: {}, lifetimeTotal: 123 }, 60, 'base:8453')).toEqual([]);
+  });
+
+  it('emits transport-governor state even when the raw-request window is idle', () => {
+    const lines = formatRpcUsageLines(
+      { byMethod: {}, lifetimeTotal: 12 },
+      60,
+      'base:84532',
+      {
+        maxRequestsPerSecond: 10,
+        backgroundMaxRequestsPerSecond: 2,
+        availableTokens: 8.5,
+        backgroundAvailableTokens: 0.25,
+        foregroundQueued: 0,
+        backgroundQueued: 4,
+        foregroundAdmitted: 3,
+        backgroundAdmitted: 2,
+        foregroundDeferred: 0,
+        backgroundDeferred: 5,
+        rejected: 1,
+        cancelled: 2,
+        startupDelayRemainingMs: 900,
+      },
+    );
+    expect(lines).toEqual([
+      'rpc_request_governor max_rps=10 background_max_rps=2 available=8.5 ' +
+      'background_available=0.25 foreground_queued=0 background_queued=4 ' +
+      'foreground_admitted=3 background_admitted=2 foreground_deferred=0 ' +
+      'background_deferred=5 rejected=1 cancelled=2 startup_delay_ms=900 ' +
+      'window_s=60 chain=base:84532',
+    ]);
   });
 
   it('preserves aggregate lines for legacy windows without consumer attribution', () => {
@@ -52,11 +107,12 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
     const lines = formatRpcUsageLines(
       {
         byMethod: { eth_call: 42, eth_getLogs: 7 },
-        ethCallByConsumer: {
-          'pcaNFT.getAccountInfo': 30,
-          'Hub.getContractAddress_Token': 12,
-          unsafe_consumer: 0,
-        },
+        ethCallByConsumer: {},
+        attributions: [
+          { method: 'eth_call', consumer: 'pcaNFT.getAccountInfo', count: 30 },
+          { method: 'eth_call', consumer: 'Hub.getContractAddress_Token', count: 12 },
+          { method: 'eth_call', consumer: 'unsafe_consumer', count: 0 },
+        ],
         lifetimeTotal: 49,
       },
       60,
@@ -87,6 +143,154 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
     expect(lines).toEqual([
       'rpc_usage method=eth_call count=2 window_s=60',
       'rpc_usage_by_consumer method=eth_call consumer=other count=2 window_s=60',
+    ]);
+  });
+
+  it('drops unsupported attribution methods before log formatting', () => {
+    const lines = formatRpcUsageLines(
+      {
+        byMethod: { eth_call: 1 },
+        attributions: [{
+          method: 'eth_call\nlevel=error',
+          consumer: 'malicious',
+          count: 1,
+        } as never],
+        lifetimeTotal: 1,
+      },
+      60,
+    );
+
+    expect(lines).toEqual(['rpc_usage method=eth_call count=1 window_s=60']);
+    expect(lines.join('\n')).not.toContain('level=error');
+  });
+
+  it('emits bounded eth_getLogs consumer and endpoint-slot attribution', () => {
+    const lines = formatRpcUsageLines(
+      {
+        byMethod: { eth_getLogs: 7 },
+        attributions: [
+          { method: 'eth_getLogs', consumer: 'getContextGraphAuthoritySnapshot', endpointSlot: 'primary', count: 2 },
+          { method: 'eth_getLogs', consumer: 'getContextGraphAuthoritySnapshot', endpointSlot: 'fallback_1', count: 3 },
+          { method: 'eth_getLogs', consumer: 'unattributed', endpointSlot: 'fallback_2', count: 2 },
+        ],
+        lifetimeTotal: 7,
+      },
+      60,
+      'base:84532',
+    );
+
+    expect(lines).toContain(
+      'rpc_usage method=eth_getLogs count=7 window_s=60 chain=base:84532',
+    );
+    expect(lines).toContain(
+      'rpc_usage_by_consumer method=eth_getLogs consumer=getContextGraphAuthoritySnapshot endpoint_slot=primary count=2 window_s=60 chain=base:84532',
+    );
+    expect(lines).toContain(
+      'rpc_usage_by_consumer method=eth_getLogs consumer=getContextGraphAuthoritySnapshot endpoint_slot=fallback_1 count=3 window_s=60 chain=base:84532',
+    );
+    expect(lines).toContain(
+      'rpc_usage_by_consumer method=eth_getLogs consumer=unattributed endpoint_slot=fallback_2 count=2 window_s=60 chain=base:84532',
+    );
+    expect(lines).toHaveLength(4);
+    for (const line of lines) {
+      expect(line).toMatch(/^rpc_usage(_by_consumer)?( [a-z_]+=[A-Za-z0-9_.:-]+)+$/);
+    }
+  });
+
+  it('emits header consumer attribution including the explicit remainder', () => {
+    const lines = formatRpcUsageLines(
+      {
+        byMethod: { eth_getBlockByNumber: 5, eth_blockNumber: 2 },
+        attributions: [
+          { method: 'eth_getBlockByNumber', consumer: 'chainIndex.head', count: 3 },
+          { method: 'eth_getBlockByNumber', consumer: 'unattributed', count: 2 },
+          { method: 'eth_blockNumber', consumer: 'receiptFinality.head', count: 2 },
+        ],
+        lifetimeTotal: 7,
+      },
+      60,
+      'base:84532',
+    );
+
+    expect(lines).toContain(
+      'rpc_usage_by_consumer method=eth_getBlockByNumber consumer=chainIndex.head count=3 window_s=60 chain=base:84532',
+    );
+    expect(lines).toContain(
+      'rpc_usage_by_consumer method=eth_getBlockByNumber consumer=unattributed count=2 window_s=60 chain=base:84532',
+    );
+    expect(lines).toContain(
+      'rpc_usage_by_consumer method=eth_blockNumber consumer=receiptFinality.head count=2 window_s=60 chain=base:84532',
+    );
+  });
+
+  it('never emits endpoint URLs and aggregates invalid external slots under other', () => {
+    const endpointUrl = 'https://secret-token.example/rpc';
+    const lines = formatRpcUsageLines(
+      {
+        byMethod: { eth_getLogs: 3 },
+        ethGetLogsByConsumerAndEndpointSlot: {
+          authority: {
+            [endpointUrl]: 2,
+            'attacker.example': 1,
+          },
+        },
+        lifetimeTotal: 3,
+      },
+      60,
+    );
+
+    expect(lines).toEqual([
+      'rpc_usage method=eth_getLogs count=3 window_s=60',
+      'rpc_usage_by_consumer method=eth_getLogs consumer=authority endpoint_slot=other count=3 window_s=60',
+    ]);
+    expect(lines.join('\n')).not.toContain(endpointUrl);
+    expect(lines.join('\n')).not.toContain('attacker.example');
+  });
+});
+
+describe('formatRpcUsageLines — reads that left in aggregate requests', () => {
+  const usage = {
+    byMethod: { eth_call: 9 },
+    ethCallByConsumer: { 'multicall3.aggregate3': 9 },
+    lifetimeTotal: 9,
+  };
+
+  it('adds one summary line and one line per read label, after the request counts', () => {
+    const lines = formatRpcUsageLines(usage, 60, 'base:8453', undefined, {
+      batches: 8,
+      failedBatches: 1,
+      refusedBatches: 0,
+      calls: 74,
+      directReads: 3,
+      readsByLabel: { 'kas.getLatestMerkleRoot': 27, 'cgStorage.getContextGraphKaAt': 54, 'kas.unused': 0 },
+    });
+
+    expect(lines).toEqual([
+      'rpc_usage method=eth_call count=9 window_s=60 chain=base:8453',
+      'rpc_usage_by_consumer method=eth_call consumer=multicall3.aggregate3 count=9 window_s=60 chain=base:8453',
+      'rpc_read_batching batches=8 failed_batches=1 refused_batches=0 calls=74 reads=81 direct_reads=3 window_s=60 chain=base:8453',
+      'rpc_batched_reads consumer=kas.getLatestMerkleRoot count=27 window_s=60 chain=base:8453',
+      'rpc_batched_reads consumer=cgStorage.getContextGraphKaAt count=54 window_s=60 chain=base:8453',
+    ]);
+    for (const line of lines) expect(line).toMatch(/^[a-z_]+( [a-z_]+=[A-Za-z0-9_.:-]+)+$/);
+  });
+
+  it('emits nothing for a window without an aggregate request', () => {
+    const idle = { batches: 0, failedBatches: 0, refusedBatches: 0, calls: 0, directReads: 0, readsByLabel: {} };
+
+    expect(formatRpcUsageLines(usage, 60, 'base:8453', undefined, idle)).toHaveLength(2);
+    expect(formatRpcUsageLines(usage, 60, 'base:8453')).toHaveLength(2);
+  });
+
+  it('keeps a read label that is not token-safe out of the line', () => {
+    const lines = formatRpcUsageLines(usage, 60, undefined, undefined, {
+      batches: 0, failedBatches: 0, refusedBatches: 1, calls: 0, directReads: 0,
+      readsByLabel: { 'bad label="x"': 2 },
+    });
+
+    expect(lines.slice(2)).toEqual([
+      'rpc_read_batching batches=0 failed_batches=0 refused_batches=1 calls=0 reads=2 direct_reads=0 window_s=60',
+      'rpc_batched_reads consumer=other count=2 window_s=60',
     ]);
   });
 });
@@ -124,6 +328,58 @@ describe('composite daemon source — agent + publisher-runtime windows merged a
 });
 
 describe('emitRpcUsage — the complete daemon emission step (drain → format → emit)', () => {
+  it('drains the process governor exactly once through its separate owner', () => {
+    const emitted: string[] = [];
+    const drainRpcUsage = vi.fn(() => ({ byMethod: { eth_call: 1 }, lifetimeTotal: 1 }));
+    const drainRpcRequestGovernor = vi.fn(() => ({
+      maxRequestsPerSecond: 10,
+      backgroundMaxRequestsPerSecond: 2,
+      availableTokens: 9,
+      backgroundAvailableTokens: 1,
+      foregroundQueued: 0,
+      backgroundQueued: 0,
+      foregroundAdmitted: 1,
+      backgroundAdmitted: 0,
+      foregroundDeferred: 0,
+      backgroundDeferred: 0,
+      rejected: 0,
+      cancelled: 0,
+      startupDelayRemainingMs: 0,
+    }));
+    expect(emitRpcUsage(
+      { drainRpcUsage, drainRpcRequestGovernor },
+      (line) => emitted.push(line),
+      60,
+      'base:8453',
+    )).toBe(2);
+    expect(drainRpcUsage).toHaveBeenCalledTimes(1);
+    expect(drainRpcRequestGovernor).toHaveBeenCalledTimes(1);
+    expect(emitted.some((line) => line.startsWith('rpc_request_governor '))).toBe(true);
+  });
+
+  it('drains the read batching window once and survives its drain failing', () => {
+    const emitted: string[] = [];
+    const drainRpcUsage = () => ({ byMethod: { eth_call: 2 }, lifetimeTotal: 2 });
+    const drainRpcReadBatching = vi.fn(() => ({
+      batches: 2, failedBatches: 0, refusedBatches: 0, calls: 6, directReads: 0,
+      readsByLabel: { 'kas.getLatestMerkleRoot': 6 },
+    }));
+
+    expect(emitRpcUsage({ drainRpcUsage, drainRpcReadBatching }, (line) => emitted.push(line), 60)).toBe(3);
+    expect(drainRpcReadBatching).toHaveBeenCalledTimes(1);
+    expect(emitted.slice(1)).toEqual([
+      'rpc_read_batching batches=2 failed_batches=0 refused_batches=0 calls=6 reads=6 direct_reads=0 window_s=60',
+      'rpc_batched_reads consumer=kas.getLatestMerkleRoot count=6 window_s=60',
+    ]);
+
+    const usageOnly: string[] = [];
+    expect(emitRpcUsage({
+      drainRpcUsage,
+      drainRpcReadBatching: () => { throw new Error('batching window down'); },
+    }, (line) => usageOnly.push(line), 60)).toBe(1);
+    expect(usageOnly).toEqual(['rpc_usage method=eth_call count=2 window_s=60']);
+  });
+
   it('drains the agent source and emits one line per method', () => {
     const emitted: string[] = [];
     const agentLike = {
@@ -153,6 +409,37 @@ describe('emitRpcUsage — the complete daemon emission step (drain → format �
         60,
       ),
     ).toBe(0);
+  });
+
+  it('drains and emits usage/governor independently when either source fails', () => {
+    const governorWindow = {
+      maxRequestsPerSecond: 10,
+      backgroundMaxRequestsPerSecond: 2,
+      availableTokens: 9,
+      backgroundAvailableTokens: 1,
+      foregroundQueued: 0,
+      backgroundQueued: 0,
+      foregroundAdmitted: 1,
+      backgroundAdmitted: 0,
+      foregroundDeferred: 0,
+      backgroundDeferred: 0,
+      rejected: 0,
+      cancelled: 0,
+      startupDelayRemainingMs: 0,
+    };
+    const governorOnly: string[] = [];
+    expect(emitRpcUsage({
+      drainRpcUsage: () => { throw new Error('usage down'); },
+      drainRpcRequestGovernor: () => governorWindow,
+    }, (line) => governorOnly.push(line), 60)).toBe(1);
+    expect(governorOnly[0]).toMatch(/^rpc_request_governor /);
+
+    const usageOnly: string[] = [];
+    expect(emitRpcUsage({
+      drainRpcUsage: () => ({ byMethod: { eth_call: 2 }, lifetimeTotal: 2 }),
+      drainRpcRequestGovernor: () => { throw new Error('governor down'); },
+    }, (line) => usageOnly.push(line), 60)).toBe(1);
+    expect(usageOnly).toEqual(['rpc_usage method=eth_call count=2 window_s=60']);
   });
 });
 

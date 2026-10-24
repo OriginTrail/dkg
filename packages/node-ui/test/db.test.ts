@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { DashboardDB, SqliteChainEventCursorStore, SqliteContextGraphRegistryScanCursorStore, SqliteKaNumberStore, SqliteSyncCheckpointStore, SqliteChangelogCursorStore, SqliteChangelogEraGuard, buildActivityDigestKey, ACTIVITY_DIGEST_WINDOW_MS, ASSERTION_ACTIVITY_TYPE } from '../src/db.js';
+import { SqliteChainEventLogStore } from '@origintrail-official/dkg-node-store';
+import { DashboardDB, SqliteContextGraphAuthorityIndexStore, SqliteSyncCheckpointStore, buildActivityDigestKey, ACTIVITY_DIGEST_WINDOW_MS, ASSERTION_ACTIVITY_TYPE, SCHEMA_VERSION } from '../src/db.js';
 
 let db: DashboardDB;
 let dir: string;
@@ -86,7 +87,7 @@ describe('DashboardDB — metric snapshots', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
 
     const cols = (db.db.prepare('PRAGMA table_info(metric_snapshots)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -142,7 +143,7 @@ describe('DashboardDB — metric snapshots', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
 
     const newSnapshotCols = (db.db.prepare('PRAGMA table_info(metric_snapshots)').all() as { name: string }[])
       .map(c => c.name);
@@ -369,6 +370,319 @@ describe('DashboardDB — retention', () => {
 
     db2.close();
   });
+
+  it('caps routine logs incrementally while preserving warning and error history', () => {
+    const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-volume-'));
+    const volumeDb = new DashboardDB({
+      dataDir: volumeDir,
+      retentionDays: 365,
+      routineLogRowCap: 3,
+      logVolumePruneBatchRows: 2,
+    });
+    try {
+      const insert = volumeDb.db.prepare(
+        `INSERT INTO logs (ts, level, module, message) VALUES (?, ?, 'sync', ?)`,
+      );
+      for (let i = 0; i < 7; i += 1) {
+        insert.run(1_000 + i, i % 2 === 0 ? 'debug' : 'info', `routine-${i}`);
+      }
+      insert.run(2_000, 'warn', 'keep-warn');
+      insert.run(2_001, 'error', 'keep-error');
+
+      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 2, status: 'more' });
+      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 2, status: 'done' });
+
+      const rows = volumeDb.db.prepare(
+        `SELECT level, message FROM logs ORDER BY id ASC`,
+      ).all() as Array<{ level: string; message: string }>;
+      expect(rows.filter((row) => row.level === 'debug' || row.level === 'info')).toEqual([
+        { level: 'debug', message: 'routine-4' },
+        { level: 'info', message: 'routine-5' },
+        { level: 'debug', message: 'routine-6' },
+      ]);
+      expect(rows).toContainEqual({ level: 'warn', message: 'keep-warn' });
+      expect(rows).toContainEqual({ level: 'error', message: 'keep-error' });
+    } finally {
+      volumeDb.close();
+      rmSync(volumeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('seeds and prunes populated pre-V35 routine logs during a V34 upgrade', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+    const raw = new Database(dbPath);
+    raw.exec(`
+      DROP TRIGGER IF EXISTS track_routine_log_insert;
+      DROP TRIGGER IF EXISTS track_routine_log_delete;
+      DROP TRIGGER IF EXISTS track_routine_log_level_to_protected;
+      DROP TRIGGER IF EXISTS track_routine_log_level_to_routine;
+      DROP INDEX IF EXISTS idx_logs_routine_id;
+      DROP TABLE IF EXISTS log_retention_state;
+    `);
+    const insert = raw.prepare(
+      `INSERT INTO logs (ts, level, module, message) VALUES (?, ?, 'pre-v35', ?)`,
+    );
+    insert.run(Date.now(), 'info', 'routine-0');
+    insert.run(Date.now() + 1, 'debug', 'routine-1');
+    insert.run(Date.now() + 2, 'info', 'routine-2');
+    insert.run(Date.now() + 3, 'debug', 'routine-3');
+    insert.run(Date.now() + 4, 'warn', 'keep-warn');
+    insert.run(Date.now() + 5, 'error', 'keep-error');
+    raw.pragma('user_version = 34');
+    raw.close();
+
+    db = new DashboardDB({
+      dataDir: dir,
+      retentionDays: 365,
+      routineLogRowCap: 2,
+      logVolumePruneBatchRows: 10,
+    });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(db.db.prepare(`
+      SELECT routine_count FROM log_retention_state WHERE singleton_id = 1
+    `).get()).toEqual({ routine_count: 4 });
+
+    expect(db.pruneLogVolumeBatch()).toMatchObject({ deleted: 2 });
+    expect(db.db.prepare(`
+      SELECT level, message FROM logs ORDER BY id ASC
+    `).all()).toEqual([
+      { level: 'info', message: 'routine-2' },
+      { level: 'debug', message: 'routine-3' },
+      { level: 'warn', message: 'keep-warn' },
+      { level: 'error', message: 'keep-error' },
+    ]);
+    expect(db.db.prepare(`
+      SELECT routine_count FROM log_retention_state WHERE singleton_id = 1
+    `).get()).toEqual({ routine_count: 2 });
+  });
+
+  it('repairs a lost V35 retention trigger when DashboardDB reopens', () => {
+    db.db.exec('DROP TRIGGER track_routine_log_insert');
+    db.db.prepare(`
+      INSERT INTO logs (ts, level, module, message)
+      VALUES (?, 'info', 'restore-test', 'untracked-before-reopen')
+    `).run(Date.now());
+    expect(db.db.prepare(`
+      SELECT routine_count FROM log_retention_state WHERE singleton_id = 1
+    `).get()).toEqual({ routine_count: 0 });
+
+    db.close();
+    db = new DashboardDB({ dataDir: dir, retentionDays: 365 });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(db.db.prepare(`
+      SELECT routine_count FROM log_retention_state WHERE singleton_id = 1
+    `).get()).toEqual({ routine_count: 1 });
+
+    db.db.prepare(`
+      INSERT INTO logs (ts, level, module, message)
+      VALUES (?, 'debug', 'restore-test', 'tracked-after-reopen')
+    `).run(Date.now() + 1);
+    expect(db.db.prepare(`
+      SELECT routine_count FROM log_retention_state WHERE singleton_id = 1
+    `).get()).toEqual({ routine_count: 2 });
+  });
+
+  it('preserves ambiguous pre-upgrade compatibility rows below the public cap', () => {
+    const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-legacy-compat-'));
+    const dbPath = join(volumeDir, 'node-ui.db');
+    let volumeDb = new DashboardDB({ dataDir: volumeDir, retentionDays: 365 });
+    try {
+      volumeDb.close();
+      const preUpgrade = new Database(dbPath);
+      preUpgrade.prepare(
+        `INSERT INTO logs (ts, level, module, message) VALUES (?, 'info', 'third-party', ?)`,
+      ).run(Date.now(), 'public-compatibility-record');
+      preUpgrade.close();
+
+      volumeDb = new DashboardDB({
+        dataDir: volumeDir,
+        retentionDays: 365,
+        routineLogRowCap: 10,
+        logVolumePruneBatchRows: 2,
+      });
+      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 0, status: 'done' });
+      expect(volumeDb.db.prepare(
+        `SELECT module, message FROM logs`,
+      ).all()).toEqual([
+        { module: 'third-party', message: 'public-compatibility-record' },
+      ]);
+    } finally {
+      if (volumeDb.db.open) volumeDb.close();
+      rmSync(volumeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('bounds routine compatibility writes through the published row cap', () => {
+    const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-compat-cap-'));
+    const volumeDb = new DashboardDB({
+      dataDir: volumeDir,
+      retentionDays: 365,
+      routineLogRowCap: 2,
+      // Deprecated option remains a source/runtime-compatible alias.
+      logVolumePruneBatchRows: 10,
+    });
+    try {
+      const rawInsert = volumeDb.db.prepare(
+        `INSERT INTO logs (ts, level, module, message) VALUES (?, 'info', 'legacy-caller', ?)`,
+      );
+      rawInsert.run(Date.now(), 'preexisting-0');
+      rawInsert.run(Date.now() + 1, 'preexisting-1');
+      rawInsert.run(Date.now() + 2, 'preexisting-2');
+      expect(volumeDb.pruneLogVolumeBatch()).toMatchObject({ deleted: 1, status: 'done' });
+      for (let i = 0; i < 6; i += 1) {
+        volumeDb.insertLog({
+          ts: Date.now() + i,
+          level: 'info',
+          module: 'compatibility',
+          message: `routine-${i}`,
+        });
+      }
+      volumeDb.insertLog({
+        ts: Date.now() + 10,
+        level: 'warn',
+        module: 'compatibility',
+        message: 'keep-warning',
+      });
+
+      const rows = volumeDb.db.prepare(
+        `SELECT level, message FROM logs ORDER BY id ASC`,
+      ).all() as Array<{ level: string; message: string }>;
+      expect(rows.filter((row) => row.level === 'info')).toEqual([
+        { level: 'info', message: 'routine-4' },
+        { level: 'info', message: 'routine-5' },
+      ]);
+      expect(rows).toContainEqual({ level: 'warn', message: 'keep-warning' });
+    } finally {
+      volumeDb.close();
+      rmSync(volumeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps pace when the compatibility cleanup batch is smaller than the old guard cadence', () => {
+    const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-small-compat-batch-'));
+    const volumeDb = new DashboardDB({
+      dataDir: volumeDir,
+      retentionDays: 365,
+      routineLogRowCap: 100,
+      logVolumePruneBatchRows: 1,
+    });
+    try {
+      // Compile-time compatibility guard: published callers may still pass a
+      // string-typed value even when its runtime value is canonical.
+      const configuredLevel: string = 'info';
+      volumeDb.insertLog({
+        ts: Date.now(),
+        level: configuredLevel,
+        module: 'legacy-caller',
+        message: 'configured-level',
+      });
+      for (let i = 0; i < 500; i += 1) {
+        volumeDb.insertLog({
+          ts: Date.now() + i + 1,
+          level: 'info',
+          module: 'legacy-caller',
+          message: `routine-${i}`,
+        });
+      }
+      volumeDb.insertLog({
+        ts: Date.now() + 1_000,
+        level: 'warn',
+        module: 'legacy-caller',
+        message: 'keep-warning',
+      });
+
+      const counts = volumeDb.db.prepare(`
+        SELECT
+          SUM(CASE WHEN level NOT IN ('warn', 'error') THEN 1 ELSE 0 END) AS routine,
+          SUM(CASE WHEN level = 'warn' THEN 1 ELSE 0 END) AS warnings
+        FROM logs
+      `).get() as { routine: number; warnings: number };
+      expect(counts).toEqual({ routine: 100, warnings: 1 });
+    } finally {
+      volumeDb.close();
+      rmSync(volumeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a committed insert as successful when inline retention fails', () => {
+    const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-retention-failure-'));
+    const volumeDb = new DashboardDB({
+      dataDir: volumeDir,
+      retentionDays: 365,
+      routineLogRowCap: 0,
+      logVolumePruneBatchRows: 1,
+    });
+    try {
+      volumeDb.db.exec(`
+        CREATE TRIGGER fail_inline_log_retention
+        BEFORE DELETE ON logs
+        BEGIN
+          SELECT RAISE(ABORT, 'forced retention failure');
+        END
+      `);
+
+      expect(() => volumeDb.insertLog({
+        ts: Date.now(),
+        level: 'info',
+        module: 'compatibility',
+        message: 'committed-before-maintenance',
+      })).not.toThrow();
+      expect(volumeDb.db.prepare(
+        `SELECT level, message FROM logs`,
+      ).all()).toEqual([
+        { level: 'info', message: 'committed-before-maintenance' },
+      ]);
+
+      volumeDb.db.exec('DROP TRIGGER fail_inline_log_retention');
+      expect(volumeDb.pruneLogVolumeBatch()).toEqual({ deleted: 1, status: 'done' });
+    } finally {
+      volumeDb.close();
+      rmSync(volumeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns multi-megabyte free pages to the OS after the final volume batch', () => {
+    const volumeDir = mkdtempSync(join(tmpdir(), 'dkg-db-log-compact-'));
+    const dbPath = join(volumeDir, 'node-ui.db');
+    const volumeDb = new DashboardDB({
+      dataDir: volumeDir,
+      retentionDays: 365,
+      routineLogRowCap: 2,
+      logVolumePruneBatchRows: 10,
+    });
+    try {
+      const payload = 'x'.repeat(256 * 1024);
+      const insert = volumeDb.db.prepare(
+        `INSERT INTO logs (ts, level, module, message) VALUES (?, ?, 'sync', ?)`,
+      );
+      for (let i = 0; i < 30; i += 1) {
+        insert.run(1_000 + i, 'debug', `${i}:${payload}`);
+      }
+      insert.run(2_000, 'warn', 'keep-warn');
+      volumeDb.db.pragma('wal_checkpoint(TRUNCATE)');
+      const beforeBytes = statSync(dbPath).size;
+
+      let compacted = false;
+      for (let i = 0; i < 10; i += 1) {
+        const result = volumeDb.pruneLogVolumeBatch();
+        compacted ||= result.status === 'done-compacted';
+        if (result.status === 'done' || result.status === 'done-compacted') break;
+      }
+
+      const afterBytes = statSync(dbPath).size;
+      const levels = volumeDb.db.prepare(
+        `SELECT level, COUNT(*) AS count FROM logs GROUP BY level`,
+      ).all() as Array<{ level: string; count: number }>;
+      expect(compacted).toBe(true);
+      expect(afterBytes).toBeLessThan(beforeBytes / 2);
+      expect(levels).toContainEqual({ level: 'debug', count: 2 });
+      expect(levels).toContainEqual({ level: 'warn', count: 1 });
+    } finally {
+      volumeDb.close();
+      rmSync(volumeDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('DashboardDB — operation phases', () => {
@@ -467,6 +781,47 @@ describe('DashboardDB — operation stats', () => {
     expect(summary.totalTracCost).toBeCloseTo(0.5);
   });
 
+  it('keeps cancelled operations visible without depressing health success rates', () => {
+    db.insertOperation({
+      operation_id: 'st-cancelled',
+      operation_name: 'query',
+      started_at: Date.now(),
+    });
+    db.cancelOperation({
+      operation_id: 'st-cancelled',
+      duration_ms: 25,
+      error_message: 'API query caller disconnected',
+    });
+
+    const { summary, timeSeries } = db.getOperationStats({
+      periodMs: 86_400_000,
+      bucketMs: 1_000_000_000_000,
+    });
+    expect(summary.totalCount).toBe(11);
+    expect(summary.successCount).toBe(8);
+    expect(summary.errorCount).toBe(2);
+    expect(summary.successRate).toBeCloseTo(0.8);
+    expect(timeSeries).toHaveLength(1);
+    expect(timeSeries[0].count).toBe(11);
+    expect(timeSeries[0].successRate).toBeCloseTo(0.8);
+
+    const perType = db.getPerTypeTimeSeries({
+      periodMs: 86_400_000,
+      bucketMs: 1_000_000_000_000,
+    });
+    expect(perType.series.query[0].count).toBe(4);
+    expect(perType.series.query[0].successRate).toBeCloseTo(1 / 3);
+
+    const queryRate = db.getSuccessRatesByType(86_400_000)
+      .find((row) => row.type === 'query');
+    expect(queryRate).toMatchObject({
+      total: 4,
+      success: 1,
+      error: 2,
+    });
+    expect(queryRate!.rate).toBeCloseTo(1 / 3);
+  });
+
   it('filters stats by operation name', () => {
     const { summary } = db.getOperationStats({ name: 'publish', periodMs: 86_400_000, bucketMs: 3_600_000 });
     expect(summary.totalCount).toBe(7);
@@ -545,7 +900,7 @@ describe('DashboardDB — V15 migration: drop FTS5 logs index', () => {
 
     const upgraded = new DashboardDB({ dataDir: upgradeDir });
     try {
-      expect(upgraded.db.pragma('user_version', { simple: true })).toBe(24);
+      expect(upgraded.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
 
       const ftsTables = upgraded.db.prepare(
         `SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name LIKE 'logs_fts%'`,
@@ -604,6 +959,468 @@ describe('DashboardDB — V15 migration: drop FTS5 logs index', () => {
     } finally {
       vacuumDb.close();
     }
+  });
+});
+
+describe('DashboardDB — chain log KA point-read index', () => {
+  const KA_INDEX = 'idx_chain_events_scope_address_ka';
+
+  function kaIndexColumns(handle: Database.Database): string[] {
+    return (handle.pragma(`index_info(${KA_INDEX})`) as Array<{ name: string }>)
+      .map((column) => column.name);
+  }
+
+  function kaIndexCount(handle: Database.Database): number {
+    return (handle.prepare(`
+      SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'index' AND name = ?
+    `).get(KA_INDEX) as { c: number }).c;
+  }
+
+  it('creates the index on a fresh database', () => {
+    expect(kaIndexColumns(db.db))
+      .toEqual(['scope', 'address', 'topic0', 'topic2', 'block_number', 'log_index']);
+  });
+
+  it('adds the index to a current-version database that predates it, keeping its rows', () => {
+    // Exactly what a node-ui.db written by a V38 binary without this index
+    // looks like: same user_version, chain log populated, index absent.
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+    const raw = new Database(dbPath);
+    raw.exec(`DROP INDEX ${KA_INDEX}`);
+    raw.prepare(`
+      INSERT INTO chain_events (
+        scope, block_number, log_index, block_hash, tx_hash, address,
+        topic0, topic1, topic2, topic3, data, settled
+      ) VALUES ('scope', 7, 0, '0xb', '0xt', '0xa', '0x0', '0x1', '0x2', NULL, '0x', 1)
+    `).run();
+    expect(raw.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(kaIndexCount(raw)).toBe(0);
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(kaIndexColumns(db.db))
+      .toEqual(['scope', 'address', 'topic0', 'topic2', 'block_number', 'log_index']);
+    expect((db.db.prepare('SELECT COUNT(*) AS c FROM chain_events').get() as { c: number }).c)
+      .toBe(1);
+
+    // Idempotent: every later open re-runs the same statement.
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    expect(kaIndexCount(db.db)).toBe(1);
+  });
+
+  it('creates the index when a pre-chain-log database is upgraded', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+    const raw = new Database(dbPath);
+    raw.exec(`
+      DROP TABLE chain_index_cursor;
+      DROP TABLE chain_events;
+      DROP TABLE chain_index_coverage;
+    `);
+    raw.pragma('user_version = 37');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(kaIndexCount(db.db)).toBe(1);
+  });
+
+  /** A current-version database whose KA index is gone, with one registration row. */
+  function withoutKaIndex(): void {
+    db.close();
+    const raw = new Database(join(dir, 'node-ui.db'));
+    raw.exec(`DROP INDEX ${KA_INDEX}`);
+    raw.prepare(`
+      INSERT INTO chain_events (
+        scope, block_number, log_index, block_hash, tx_hash, address,
+        topic0, topic1, topic2, topic3, data, settled
+      ) VALUES ('scope', 7, 0, '0xb', '0xt', '0xa', '0x0', '0x1', '0x2', NULL, '0x', 1)
+    `).run();
+    raw.close();
+  }
+
+  async function kaPointRead(handle: DashboardDB) {
+    return new SqliteChainEventLogStore(handle).readEvents('scope', {
+      fromBlockNumber: 0, throughBlockNumber: 10, addresses: ['0xa'], topic0: ['0x0'], topic2: ['0x2'],
+    });
+  }
+
+  it('starts without the index when the disk is full, and builds it on a later start', async () => {
+    withoutKaIndex();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const exec = Database.prototype.exec;
+    const full = vi.spyOn(Database.prototype, 'exec').mockImplementation(function (this: Database.Database, sql: string) {
+      if (sql.includes(`CREATE INDEX IF NOT EXISTS ${KA_INDEX}`)) {
+        throw new Database.SqliteError('database or disk is full', 'SQLITE_FULL');
+      }
+      return exec.call(this, sql);
+    });
+    let warnings: string[];
+    try {
+      db = new DashboardDB({ dataDir: dir });
+    } finally {
+      warnings = warn.mock.calls.map((call) => String(call[0]));
+      full.mockRestore();
+      warn.mockRestore();
+    }
+    expect(warnings.join('\n'))
+      .toMatch(/could not build idx_chain_events_scope_address_ka.*database or disk is full/);
+    expect(kaIndexCount(db.db)).toBe(0);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    // The rest of the chain log came up, and the KA read is served unpinned.
+    await expect(kaPointRead(db)).resolves.toHaveLength(1);
+
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    expect(kaIndexColumns(db.db))
+      .toEqual(['scope', 'address', 'topic0', 'topic2', 'block_number', 'log_index']);
+    await expect(kaPointRead(db)).resolves.toHaveLength(1);
+  });
+
+  it('starts when SQLite itself refuses to build the index', () => {
+    // A real failure, not a mocked one: another schema object already holds
+    // the index's name, so CREATE INDEX IF NOT EXISTS errors.
+    withoutKaIndex();
+    const raw = new Database(join(dir, 'node-ui.db'));
+    raw.exec(`CREATE TABLE ${KA_INDEX} (placeholder INTEGER)`);
+    raw.close();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let warnings: string[];
+    try {
+      db = new DashboardDB({ dataDir: dir });
+    } finally {
+      warnings = warn.mock.calls.map((call) => String(call[0]));
+      warn.mockRestore();
+    }
+    expect(warnings.join('\n')).toMatch(/there is already a table named/);
+    expect(kaIndexCount(db.db)).toBe(0);
+  });
+});
+
+describe('DashboardDB — V27 join-approval ledger migration', () => {
+  it('repairs a missing audit-cap trigger on a current-version database', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+
+    const raw = new Database(dbPath);
+    expect(raw.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    raw.exec('DROP TRIGGER IF EXISTS cap_cg_join_policy_audit_rows;');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'trigger' AND name = 'cap_cg_join_policy_audit_rows'
+    `).get()).toBeTruthy();
+  });
+
+  it('upgrades a V27 ledger with the durable repair marker', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec(`
+      DROP INDEX IF EXISTS idx_cg_join_approval_ledger_repair;
+      ALTER TABLE context_graph_join_approval_ledger DROP COLUMN repair_pending;
+    `);
+    raw.pragma('user_version = 27');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    const columns = db.db.pragma(
+      'table_info(context_graph_join_approval_ledger)',
+    ) as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toContain('repair_pending');
+  });
+
+  it('upgrades a V24 database and makes the typed reservation ledger usable', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec(`
+      DROP TRIGGER IF EXISTS cap_cg_join_policy_audit_rows;
+      DROP TABLE IF EXISTS context_graph_join_policy_audit;
+      DROP TABLE IF EXISTS context_graph_join_approval_ledger;
+    `);
+    raw.pragma('user_version = 24');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(db.db.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name = 'context_graph_join_policy_audit'
+    `).get()).toBeTruthy();
+    expect(db.db.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name = 'context_graph_join_approval_ledger'
+    `).get()).toBeTruthy();
+    expect(db.db.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'trigger' AND name = 'cap_cg_join_policy_audit_rows'
+    `).get()).toBeTruthy();
+
+    const now = Date.now();
+    const reservation = db.reserveContextGraphAutomaticApproval({
+      contextGraphId: 'cg-v24-upgrade',
+      timestamp: now,
+      contextGraphLimit: 1,
+      nodeLimit: 1,
+      actor: 'did:dkg:agent:owner',
+      agentAddress: '0x0000000000000000000000000000000000000001',
+      requestDigest: 'v24-upgrade-request',
+      policyVersion: 1,
+      policyEpoch: now,
+    });
+    expect(reservation).toMatchObject({ allowed: true });
+    expect(db.commitContextGraphAutomaticApproval({
+      contextGraphId: 'cg-v24-upgrade',
+      timestamp: now + 1,
+      actor: 'did:dkg:agent:owner',
+      agentAddress: '0x0000000000000000000000000000000000000001',
+      requestDigest: 'v24-upgrade-request',
+      policyEpoch: now,
+    })).toBe(true);
+    expect(db.listContextGraphJoinPolicyAudit('cg-v24-upgrade').map((row) => row.event_type))
+      .toEqual(['join_auto_reservation', 'join_admission_committed']);
+    expect(db.db.prepare(`
+      SELECT policy_epoch, state, reserved_at, committed_at
+      FROM context_graph_join_approval_ledger
+      WHERE context_graph_id = ? AND request_digest = ?
+    `).get('cg-v24-upgrade', 'v24-upgrade-request')).toEqual({
+      policy_epoch: now,
+      state: 'committed',
+      reserved_at: now,
+      committed_at: now + 1,
+    });
+  });
+
+  it('replaces the V26 trigger now that live reservations no longer depend on audit', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec(`
+      DROP TABLE IF EXISTS context_graph_join_approval_ledger;
+      DROP TRIGGER IF EXISTS cap_cg_join_policy_audit_rows;
+      CREATE TRIGGER cap_cg_join_policy_audit_rows
+      AFTER INSERT ON context_graph_join_policy_audit
+      BEGIN
+        DELETE FROM context_graph_join_policy_audit
+        WHERE id <= NEW.id - 100000
+          AND event_type NOT IN (
+            'join_admission_committed',
+            'join_policy_changed'
+          )
+          AND NOT (
+            event_type = 'join_auto_reservation'
+            AND outcome = 'reserved'
+            AND ts >= (CAST(strftime('%s', 'now') AS INTEGER) * 1000 - 3600000)
+          );
+      END;
+    `);
+    raw.prepare(`
+      INSERT INTO context_graph_join_policy_audit (
+        ts, context_graph_id, event_type, outcome
+      ) VALUES (?, ?, 'join_admission_committed', 'approved')
+    `).run(Date.now(), 'cg-v26-preserved-proof');
+    raw.pragma('user_version = 26');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    const trigger = db.db.prepare(`
+      SELECT sql FROM sqlite_master
+      WHERE type = 'trigger' AND name = 'cap_cg_join_policy_audit_rows'
+    `).get() as { sql: string };
+    expect(trigger.sql).toContain("'join_admission_committed'");
+    expect(trigger.sql).toContain("'join_policy_changed'");
+    expect(trigger.sql).not.toContain("'join_auto_reservation'");
+    expect(db.listContextGraphJoinPolicyAudit('cg-v26-preserved-proof')).toHaveLength(1);
+  });
+
+  it('projects V26 reservation and commit audit rows into typed ledger state', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    const now = Date.now();
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec('DROP TABLE IF EXISTS context_graph_join_approval_ledger;');
+    const insert = raw.prepare(`
+      INSERT INTO context_graph_join_policy_audit (
+        ts, context_graph_id, event_type, actor, agent_address, outcome,
+        request_digest, policy_version, details
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    insert.run(
+      now,
+      'cg-v26-ledger-migration',
+      'join_auto_reservation',
+      'did:dkg:agent:owner',
+      '0x0000000000000000000000000000000000000001',
+      'reserved',
+      'legacy-request',
+      1,
+      JSON.stringify({ policyEpoch: 777 }),
+    );
+    insert.run(
+      now + 1,
+      'cg-v26-ledger-migration',
+      'join_admission_committed',
+      'did:dkg:agent:owner',
+      '0x0000000000000000000000000000000000000001',
+      'approved',
+      'legacy-request',
+      1,
+      JSON.stringify({ policyEpoch: 777 }),
+    );
+    raw.pragma('user_version = 26');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.prepare(`
+      SELECT policy_epoch, state, reserved_at, committed_at, actor,
+             agent_address, policy_version
+      FROM context_graph_join_approval_ledger
+      WHERE context_graph_id = ? AND request_digest = ?
+    `).get('cg-v26-ledger-migration', 'legacy-request')).toEqual({
+      policy_epoch: 777,
+      state: 'committed',
+      reserved_at: now,
+      committed_at: now + 1,
+      actor: 'did:dkg:agent:owner',
+      agent_address: '0x0000000000000000000000000000000000000001',
+      policy_version: 1,
+    });
+    expect(db.commitContextGraphAutomaticApproval({
+      contextGraphId: 'cg-v26-ledger-migration',
+      timestamp: now + 2,
+      actor: 'did:dkg:agent:caller',
+      agentAddress: '0x0000000000000000000000000000000000000002',
+      requestDigest: 'legacy-request',
+      policyEpoch: 777,
+    })).toBe(true);
+    expect(db.listContextGraphJoinPolicyAudit('cg-v26-ledger-migration').filter(
+      (row) => row.event_type === 'join_admission_committed',
+    )).toHaveLength(1);
+  });
+
+  it('caps audit flood noise while ledger reservations keep enforcing limits', () => {
+    const now = Date.now();
+    db.appendContextGraphJoinPolicyAudit({
+      timestamp: now,
+      contextGraphId: 'cg-old-noise',
+      eventType: 'join_auto_decision',
+      outcome: 'pending',
+    });
+    db.appendContextGraphJoinPolicyAudit({
+      timestamp: now,
+      contextGraphId: 'cg-proof',
+      eventType: 'join_admission_committed',
+      outcome: 'approved',
+      requestDigest: 'committed-request',
+    });
+    db.appendContextGraphJoinPolicyAudit({
+      timestamp: now,
+      contextGraphId: 'cg-proof',
+      eventType: 'join_policy_changed',
+      outcome: 'open',
+    });
+    expect(db.reserveContextGraphAutomaticApproval({
+      contextGraphId: 'cg-reservation-cap-v27',
+      timestamp: now,
+      contextGraphLimit: 1,
+      nodeLimit: 100,
+      actor: 'did:dkg:agent:owner',
+      agentAddress: '0x0000000000000000000000000000000000000001',
+      requestDigest: 'live-reservation',
+      policyVersion: 1,
+      policyEpoch: now,
+    })).toMatchObject({ allowed: true });
+
+    // Advance the AUTOINCREMENT high-water so one insert crosses the cap
+    // without allocating 100k fixture rows. The first four rows are all below
+    // the trigger cutoff. Audit reservations may now be removed because the
+    // dedicated ledger, rather than an audit event name/JSON shape, owns quota.
+    db.db.prepare(`UPDATE sqlite_sequence SET seq = 100004 WHERE name = ?`)
+      .run('context_graph_join_policy_audit');
+    db.appendContextGraphJoinPolicyAudit({
+      timestamp: now,
+      contextGraphId: 'cg-new-noise',
+      eventType: 'join_admission_failed',
+      outcome: 'pending',
+    });
+
+    const retained = db.db.prepare(`
+      SELECT context_graph_id, event_type
+      FROM context_graph_join_policy_audit
+      ORDER BY id ASC
+    `).all() as Array<{ context_graph_id: string; event_type: string }>;
+    expect(retained).not.toContainEqual({
+      context_graph_id: 'cg-old-noise',
+      event_type: 'join_auto_decision',
+    });
+    expect(retained).not.toContainEqual({
+      context_graph_id: 'cg-reservation-cap-v27',
+      event_type: 'join_auto_reservation',
+    });
+    expect(retained).toEqual(expect.arrayContaining([
+      { context_graph_id: 'cg-proof', event_type: 'join_admission_committed' },
+      { context_graph_id: 'cg-proof', event_type: 'join_policy_changed' },
+      { context_graph_id: 'cg-new-noise', event_type: 'join_admission_failed' },
+    ]));
+
+    expect(db.reserveContextGraphAutomaticApproval({
+      contextGraphId: 'cg-reservation-cap-v27',
+      timestamp: now + 1,
+      contextGraphLimit: 1,
+      nodeLimit: 100,
+      actor: 'did:dkg:agent:owner',
+      agentAddress: '0x0000000000000000000000000000000000000002',
+      requestDigest: 'rate-limited-request',
+      policyVersion: 1,
+      policyEpoch: now,
+    })).toMatchObject({ allowed: false, reason: 'context-graph-rate-limit' });
+  });
+
+  it('still applies time retention to volume-cap-exempt proof events', () => {
+    expect(db.reserveContextGraphAutomaticApproval({
+      timestamp: 1,
+      contextGraphId: 'cg-expired-proof',
+      contextGraphLimit: 1,
+      nodeLimit: 1,
+      actor: 'did:dkg:agent:owner',
+      agentAddress: '0x0000000000000000000000000000000000000001',
+      requestDigest: 'expired-ledger-state',
+      policyVersion: 1,
+      policyEpoch: 1,
+    })).toMatchObject({ allowed: true });
+    db.appendContextGraphJoinPolicyAudit({
+      timestamp: 1,
+      contextGraphId: 'cg-expired-proof',
+      eventType: 'join_admission_committed',
+      outcome: 'approved',
+    });
+    db.appendContextGraphJoinPolicyAudit({
+      timestamp: 1,
+      contextGraphId: 'cg-expired-proof',
+      eventType: 'join_policy_changed',
+      outcome: 'manual',
+    });
+
+    db.prune();
+    expect(db.listContextGraphJoinPolicyAudit('cg-expired-proof')).toHaveLength(0);
+    expect(db.db.prepare(`
+      SELECT COUNT(*) AS count FROM context_graph_join_approval_ledger
+      WHERE context_graph_id = 'cg-expired-proof'
+    `).get()).toEqual({ count: 0 });
   });
 });
 
@@ -755,6 +1572,117 @@ describe('DashboardDB — context graph subscriptions', () => {
   });
 });
 
+describe('DashboardDB — legacy VM reconcile negative records', () => {
+  it('opens and prunes an older database without decoding obsolete records', () => {
+    (db as any).db.exec(`INSERT INTO vm_reconcile_negative_cache VALUES (
+      'old', 'cg', 1, 0, 'obsolete', 'unparseable', 'unparseable', 0
+    )`);
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    expect(() => db.prune()).not.toThrow();
+    // The inactive legacy table is ignored, including malformed encodings.
+    expect((db as any).db.prepare('SELECT COUNT(*) AS n FROM vm_reconcile_negative_cache')
+      .get().n).toBe(1);
+  });
+});
+
+describe('DashboardDB — selected-only VM reconcile cursors', () => {
+  it('creates the deployment-scoped cursor table when upgrading an existing V31 database', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.setRetentionDays(42);
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec('DROP TABLE selected_vm_reconcile_cursors;');
+    raw.pragma('user_version = 31');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(db.getRetentionDays()).toBe(42);
+
+    db.upsertSelectedVmReconcileCursor({
+      deployment_id: 'evm:84532:hub=0xupgrade',
+      context_graph_id: 'selected-upgrade',
+      on_chain_context_graph_id: '298',
+      name_hash: `0x${'22'.repeat(32)}`,
+      watermark: 9,
+      updated_at: 400,
+    });
+    expect(db.getSelectedVmReconcileCursor(
+      'evm:84532:hub=0xupgrade',
+      'selected-upgrade',
+      '298',
+    )).toMatchObject({
+      watermark: 9,
+      updated_at: 400,
+    });
+  });
+
+  it('keeps progress independent per deployment, local CG, and numeric chain binding across reopen', () => {
+    db.upsertSelectedVmReconcileCursor({
+      deployment_id: 'evm:84532:hub=0xaaa',
+      context_graph_id: 'selected-public',
+      on_chain_context_graph_id: '298',
+      name_hash: `0x${'11'.repeat(32)}`,
+      watermark: 7,
+      updated_at: 100,
+    });
+    db.upsertSelectedVmReconcileCursor({
+      deployment_id: 'evm:84532:hub=0xbbb',
+      context_graph_id: 'selected-public',
+      on_chain_context_graph_id: '298',
+      name_hash: `0x${'11'.repeat(32)}`,
+      watermark: 2,
+      updated_at: 200,
+    });
+    db.upsertSelectedVmReconcileCursor({
+      deployment_id: 'evm:84532:hub=0xaaa',
+      context_graph_id: 'selected-public',
+      on_chain_context_graph_id: '299',
+      name_hash: `0x${'11'.repeat(32)}`,
+      watermark: 3,
+      updated_at: 300,
+    });
+
+    expect(db.getSelectedVmReconcileCursor(
+      'evm:84532:hub=0xaaa',
+      'selected-public',
+      '298',
+    )).toMatchObject({
+      deployment_id: 'evm:84532:hub=0xaaa',
+      on_chain_context_graph_id: '298',
+      watermark: 7,
+    });
+    expect(db.getSelectedVmReconcileCursor(
+      'evm:84532:hub=0xbbb',
+      'selected-public',
+      '298',
+    )).toMatchObject({
+      deployment_id: 'evm:84532:hub=0xbbb',
+      on_chain_context_graph_id: '298',
+      watermark: 2,
+    });
+    expect(db.getSelectedVmReconcileCursor(
+      'evm:84532:hub=0xaaa',
+      'selected-public',
+      '299',
+    )).toMatchObject({ watermark: 3 });
+    expect(db.getContextGraphSubscription('selected-public')).toBeUndefined();
+
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.getSelectedVmReconcileCursor(
+      'evm:84532:hub=0xaaa',
+      'selected-public',
+      '298',
+    )).toMatchObject({
+      watermark: 7,
+    });
+  });
+
+});
+
 describe('DashboardDB — V17 subscription columns migration (Phase B)', () => {
   let db: DashboardDB;
   let dir: string;
@@ -785,7 +1713,7 @@ describe('DashboardDB — V17 subscription columns migration (Phase B)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
 
     const cols = (db.db.prepare('PRAGMA table_info(context_graph_subscriptions)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -806,7 +1734,7 @@ describe('DashboardDB — V17 subscription columns migration (Phase B)', () => {
       .map((c) => c.name);
     expect(cols).toContain('on_chain_hash');
     expect(cols).toContain('last_reconciled_ordinal');
-    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
   });
 });
 
@@ -890,7 +1818,7 @@ describe('DashboardDB — V19 core_hosted column migration (Phase D)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
 
     const cols = (db.db.prepare('PRAGMA table_info(context_graph_subscriptions)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -919,7 +1847,7 @@ describe('DashboardDB — V20 ka_numbers table migration (B2 KA-number allocator
   });
 
   it('fresh install lands at the current schema and already carries the ka_numbers table', () => {
-    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
 
     const table = db.db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='ka_numbers'",
@@ -956,7 +1884,7 @@ describe('DashboardDB — V20 ka_numbers table migration (B2 KA-number allocator
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
 
     const table = db.db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='ka_numbers'",
@@ -976,66 +1904,6 @@ describe('DashboardDB — V20 ka_numbers table migration (B2 KA-number allocator
   });
 });
 
-describe('SqliteKaNumberStore — bigint counter (codex PR #976 F6)', () => {
-  let db: DashboardDB;
-  let dir: string;
-  let store: SqliteKaNumberStore;
-
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'dkg-ka-number-store-test-'));
-    db = new DashboardDB({ dataDir: dir });
-    store = new SqliteKaNumberStore(db);
-  });
-
-  afterEach(() => {
-    db.close();
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  const AUTHOR = '0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1';
-
-  it('allocate / peekNext return bigint, not number', () => {
-    const a = store.allocate(AUTHOR);
-    expect(typeof a).toBe('bigint');
-    expect(a).toBe(0n);
-
-    expect(typeof store.peekNext(AUTHOR)).toBe('bigint');
-    expect(store.peekNext(AUTHOR)).toBe(1n);
-
-    expect(store.allocate(AUTHOR)).toBe(1n);
-    expect(store.allocate(AUTHOR)).toBe(2n);
-  });
-
-  it('reconcileFloor accepts bigint and raises but never lowers', () => {
-    store.reconcileFloor(AUTHOR, 41n);
-    expect(store.peekNext(AUTHOR)).toBe(41n);
-    expect(store.allocate(AUTHOR)).toBe(41n);
-
-    // Stale floor must not pull the sequence backwards.
-    store.reconcileFloor(AUTHOR, 5n);
-    expect(store.peekNext(AUTHOR)).toBe(42n);
-  });
-
-  it('stays exact past Number.MAX_SAFE_INTEGER (no silent precision loss)', () => {
-    // This is the F6 invariant against the REAL sqlite path. Pre-fix
-    // the store returned JS `number`, so values past 2^53 would round
-    // to the nearest even — successive `allocate()` calls could either
-    // return the same value twice (kaId collision) or skip one.
-    const past = BigInt(Number.MAX_SAFE_INTEGER); // 2^53 - 1
-    store.reconcileFloor(AUTHOR, past);
-    const a = store.allocate(AUTHOR);
-    const b = store.allocate(AUTHOR);
-    const c = store.allocate(AUTHOR);
-    expect(a).toBe(past);
-    expect(b).toBe(past + 1n);
-    expect(c).toBe(past + 2n);
-    expect(a).not.toBe(b);
-    expect(b).not.toBe(c);
-    // peekNext is also exact.
-    expect(store.peekNext(AUTHOR)).toBe(past + 3n);
-  });
-});
-
 describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
   let now = Date.now();
 
@@ -1043,13 +1911,8 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
     now = Date.now();
   });
 
-  const checkpointStore = () => new SqliteSyncCheckpointStore(db, {
-    clock: () => now,
-    ttlMs: 24 * 60 * 60 * 1000,
-  });
-
   it('fresh install carries the sync_checkpoints table and expiry index', () => {
-    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
     const tables = db.db.prepare(
       `SELECT name FROM sqlite_master WHERE type='table' AND name='sync_checkpoints'`,
     ).all();
@@ -1058,51 +1921,15 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
     ).all();
     expect(tables).toHaveLength(1);
     expect(indexes).toHaveLength(1);
-  });
-
-  it('round-trips, overwrites, deletes, and expires checkpoints', () => {
-    const store = checkpointStore();
-    store.set('peer|cg|durable|data', 500);
-    expect(store.get('peer|cg|durable|data')).toEqual({
-      offset: 500,
-      updatedAtMs: now,
-      expiresAtMs: now + 24 * 60 * 60 * 1000,
-    });
-
-    store.set('peer|cg|durable|data', 750);
-    expect(store.get('peer|cg|durable|data')).toEqual({
-      offset: 750,
-      updatedAtMs: now,
-      expiresAtMs: now + 24 * 60 * 60 * 1000,
-    });
-
-    store.delete('peer|cg|durable|data');
-    expect(store.get('peer|cg|durable|data')).toBeUndefined();
-
-    store.set('peer|cg|durable|meta', 100);
-    now += 24 * 60 * 60 * 1000 + 1;
-    expect(store.get('peer|cg|durable|meta')).toBeUndefined();
-  });
-
-  it('persists non-expired checkpoints across DashboardDB reopen and prunes stale rows', () => {
-    const store = checkpointStore();
-    store.set('peer|cg|swm|data', 42);
-    store.set('peer|cg|swm|meta', 43);
-    db.close();
-
-    db = new DashboardDB({ dataDir: dir });
-    const reopened = new SqliteSyncCheckpointStore(db, { clock: () => now });
-    expect(reopened.get('peer|cg|swm|data')).toEqual({
-      offset: 42,
-      updatedAtMs: now,
-      expiresAtMs: now + 24 * 60 * 60 * 1000,
-    });
-
-    now += 24 * 60 * 60 * 1000 + 1;
-    expect(reopened.get('peer|cg|swm|data')).toBeUndefined();
-    expect(reopened.pruneExpired(now)).toBe(1);
-    const count = (db.db.prepare(`SELECT COUNT(*) AS c FROM sync_checkpoints`).get() as { c: number }).c;
-    expect(count).toBe(0);
+    const columns = new Set(
+      (db.db.prepare('PRAGMA table_info(sync_checkpoints)').all() as Array<{ name: string }>)
+        .map((column) => column.name),
+    );
+    expect(columns).toContain('responder_session_id');
+    expect(columns).toContain('responder_session_expires_at');
+    expect(columns).toContain('manifest_digest');
+    expect(columns).toContain('manifest_prefix_digest');
+    expect(columns).toContain('terminal');
   });
 
   it('creates sync_checkpoints when upgrading a pre-V21 DB', () => {
@@ -1115,7 +1942,7 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
     expect(db.db.prepare(
       `SELECT name FROM sqlite_master WHERE type='table' AND name='sync_checkpoints'`,
     ).all()).toHaveLength(1);
@@ -1123,90 +1950,97 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
       `SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_cursors'`,
     ).all()).toHaveLength(1);
   });
-});
 
-describe('DashboardDB — chain RPC cursor stores', () => {
-  it('persists chain-event lane cursors by scope across reopen', async () => {
-    const store = new SqliteChainEventCursorStore(db, { scope: 'evm:1:hub=0xabc' });
-
-    await store.saveLane('contextGraphDiscovery', 1234);
-    await store.saveLane('vmReconcile', 5678);
-    expect(await store.loadLane('contextGraphDiscovery')).toBe(1234);
-    expect(await store.loadLane('vmReconcile')).toBe(5678);
-    expect(db.db.prepare(
-      `SELECT value FROM runtime_cursors
-       WHERE namespace = 'chainEventPoller.cursor'
-         AND scope = 'evm:1:hub=0xabc'
-         AND key = 'contextGraphDiscovery'`,
-    ).get()).toEqual({ value: 1234 });
-    expect(await new SqliteChainEventCursorStore(db, { scope: 'evm:2:hub=0xabc' }).loadLane('contextGraphDiscovery')).toBeUndefined();
-
-    await store.saveLane('contextGraphDiscovery', 0);
-    await store.saveLane('contextGraphDiscovery', -1);
-    await store.saveLane('contextGraphDiscovery', 1.5);
-    await store.saveLane('contextGraphDiscovery', Number.MAX_SAFE_INTEGER + 1);
-    expect(await store.loadLane('contextGraphDiscovery')).toBe(1234);
-
-    db.db.prepare(
-      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
-    ).run('chainEventPoller.cursor:evm:1:hub=0xabc:badLane', '0');
-    expect(await store.loadLane('badLane')).toBeUndefined();
-    db.db.prepare(
-      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
-    ).run('chainEventPoller.cursor:evm:1:hub=0xabc:legacyLane', '2468');
-    expect(await store.loadLane('legacyLane')).toBe(2468);
-
+  it('adds responder-session columns when upgrading a V29 checkpoint table', () => {
+    const dbPath = join(dir, 'node-ui.db');
     db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec(`
+      DROP TABLE sync_checkpoints;
+      CREATE TABLE sync_checkpoints (
+        key TEXT PRIMARY KEY,
+        offset INTEGER NOT NULL CHECK (offset >= 0),
+        updated_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
+      CREATE INDEX idx_sync_checkpoints_expires_at
+        ON sync_checkpoints(expires_at);
+    `);
+    raw.pragma('user_version = 29');
+    raw.close();
+
     db = new DashboardDB({ dataDir: dir });
-    const reopened = new SqliteChainEventCursorStore(db, { scope: 'evm:1:hub=0xabc' });
-    expect(await reopened.loadLane('contextGraphDiscovery')).toBe(1234);
-    expect(await reopened.loadLane('vmReconcile')).toBe(5678);
-    expect(await reopened.loadLane('legacyLane')).toBe(2468);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    const columns = new Set(
+      (db.db.prepare('PRAGMA table_info(sync_checkpoints)').all() as Array<{ name: string }>)
+        .map((column) => column.name),
+    );
+    expect(columns).toContain('responder_session_id');
+    expect(columns).toContain('responder_session_expires_at');
+    expect(columns).toContain('manifest_digest');
+    expect(columns).toContain('manifest_prefix_digest');
+    expect(columns).toContain('terminal');
   });
 
-  it('persists registry scan cursors by deployment key and ignores corrupt values', async () => {
-    const store = new SqliteContextGraphRegistryScanCursorStore(db);
-    const key = {
-      chainId: 'evm:1',
-      deploymentId: 'evm:1:hub=0xabc',
-      registryAddress: '0x3333333333333333333333333333333333333333',
-    };
-
-    await store.save(key, 5000);
-    expect(await store.load(key)).toBe(5000);
-    expect(db.db.prepare(
-      `SELECT value FROM runtime_cursors
-       WHERE namespace = 'contextGraphRegistryScan.cursor'
-         AND scope = ?
-         AND key = ?`,
-    ).get(`${key.chainId}:${key.deploymentId}`, key.registryAddress.toLowerCase())).toEqual({ value: 5000 });
-    await store.save(key, 0);
-    await store.save(key, -1);
-    await store.save(key, 1.5);
-    await store.save(key, Number.MAX_SAFE_INTEGER + 1);
-    expect(await store.load(key)).toBe(5000);
-    expect(await store.load({ ...key, registryAddress: '0x4444444444444444444444444444444444444444' })).toBeUndefined();
-
-    db.db.prepare(
-      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
-    ).run(
-      `contextGraphRegistryScan.cursor:${key.chainId}:${key.deploymentId}:0x5555555555555555555555555555555555555555`,
-      'not-a-number',
-    );
-    expect(await store.load({ ...key, registryAddress: '0x5555555555555555555555555555555555555555' })).toBeUndefined();
-    db.db.prepare(
-      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
-    ).run(
-      `contextGraphRegistryScan.cursor:${key.chainId}:${key.deploymentId}:0x6666666666666666666666666666666666666666`,
-      '6000',
-    );
-    expect(await store.load({ ...key, registryAddress: '0x6666666666666666666666666666666666666666' })).toBe(6000);
-
+  it('invalidates unversioned V32 durable DATA progress during the V34 upgrade', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    const key = 'peer|cg|durable|data';
     db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec(`
+      ALTER TABLE sync_checkpoints DROP COLUMN manifest_digest;
+      ALTER TABLE sync_checkpoints DROP COLUMN manifest_prefix_digest;
+      ALTER TABLE sync_checkpoints DROP COLUMN terminal;
+    `);
+    raw.prepare(`
+      INSERT INTO sync_checkpoints (
+        key, offset, updated_at, expires_at,
+        responder_session_id, responder_session_expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(key, 8192, now, now + 60_000, 'legacy-session', now + 30_000);
+    raw.pragma('user_version = 32');
+    raw.close();
+
     db = new DashboardDB({ dataDir: dir });
-    const reopened = new SqliteContextGraphRegistryScanCursorStore(db);
-    expect(await reopened.load(key)).toBe(5000);
-    expect(await reopened.load({ ...key, registryAddress: '0x6666666666666666666666666666666666666666' })).toBe(6000);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(new SqliteSyncCheckpointStore(db, { clock: () => now }).get(key)).toBeUndefined();
+    const columns = new Set(
+      (db.db.prepare('PRAGMA table_info(sync_checkpoints)').all() as Array<{ name: string }>)
+        .map((column) => column.name),
+    );
+    expect(columns).toContain('manifest_digest');
+    expect(columns).toContain('manifest_prefix_digest');
+    expect(columns).toContain('terminal');
+    expect(columns).toContain('responder_session_offset');
+  });
+});
+
+describe('DashboardDB — authority index schema migration', () => {
+  it('migrates V35 to the authority index schema without disturbing existing data', async () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.db.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`)
+      .run('v35-representative-setting', 'preserved');
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec('DROP TABLE context_graph_authority_indexes');
+    raw.pragma('user_version = 35');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(db.db.prepare(`SELECT value FROM settings WHERE key = ?`)
+      .get('v35-representative-setting')).toEqual({ value: 'preserved' });
+
+    const store = new SqliteContextGraphAuthorityIndexStore(db);
+    const scope = 'evm:84532:v35-migration';
+    const checkpoint = { version: 1, cursor: { throughBlockNumber: 42 } };
+    expect(await store.compareAndSwap(scope, undefined, checkpoint)).toBe(1);
+    expect(await store.load(scope)).toEqual({ token: 1, value: checkpoint });
+    expect(await store.invalidate(scope, 1)).toBe(2);
+    expect(await store.compareAndSwap(scope, 2, checkpoint)).toBe(3);
   });
 });
 
@@ -1257,6 +2091,77 @@ describe('DashboardDB — context graph memberships', () => {
     const remaining = db.listContextGraphMembers('project-a');
     expect(remaining).toHaveLength(1);
     expect(remaining[0].principal_id).toBe('peer-1');
+  });
+
+  it('keeps local graph origin immutable when membership rows change', () => {
+    db.recordLocalContextGraphOrigin({
+      context_graph_id: 'origin-project',
+      source: 'local-create',
+      created_at: 1000,
+    });
+    db.upsertContextGraphMember({
+      context_graph_id: 'origin-project',
+      principal_type: 'agent',
+      principal_id: '0x1111111111111111111111111111111111111111',
+      role: 'curator',
+      status: 'active',
+      source: 'local-create',
+      updated_at: 1000,
+    });
+    db.upsertContextGraphMember({
+      context_graph_id: 'origin-project',
+      principal_type: 'agent',
+      principal_id: '0x1111111111111111111111111111111111111111',
+      role: 'participant',
+      status: 'active',
+      source: 'allowed-agent',
+      updated_at: 2000,
+    });
+    // Replays and a different creation path cannot replace the first fact.
+    db.recordLocalContextGraphOrigin({
+      context_graph_id: 'origin-project',
+      source: 'implicit-swm-write',
+      created_at: 3000,
+    });
+
+    expect(db.listLocalContextGraphOrigins()).toContainEqual({
+      context_graph_id: 'origin-project',
+      source: 'local-create',
+      created_at: 1000,
+    });
+    expect(db.listContextGraphMembers('origin-project')).toContainEqual(
+      expect.objectContaining({
+        source: 'allowed-agent',
+        updated_at: 2000,
+      }),
+    );
+  });
+
+  it('migrates trusted V36 membership provenance into the graph-level journal', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.upsertContextGraphMember({
+      context_graph_id: 'legacy-origin-project',
+      principal_type: 'agent',
+      principal_id: '0x2222222222222222222222222222222222222222',
+      role: 'curator',
+      status: 'active',
+      source: 'local-create',
+      first_seen_at: 1234,
+      updated_at: 2345,
+    });
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec('DROP TABLE local_context_graph_origins');
+    raw.pragma('user_version = 36');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.listLocalContextGraphOrigins()).toContainEqual({
+      context_graph_id: 'legacy-origin-project',
+      source: 'local-create',
+      created_at: 1234,
+    });
   });
 });
 
@@ -1564,7 +2469,7 @@ describe('DashboardDB — V11→V13 chat schema migration chain', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
 
     const cols = (db.db.prepare('PRAGMA table_info(chat_messages)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -1630,7 +2535,7 @@ describe('DashboardDB — V16 notifications.context_graph_id migration (A1)', ()
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
 
     const cols = (db.db.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -1659,7 +2564,7 @@ describe('DashboardDB — V16 notifications.context_graph_id migration (A1)', ()
     const cols = (db.db.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>)
       .map((c) => c.name);
     expect(cols).toContain('context_graph_id');
-    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
   });
 
   it('insertNotification writes context_graph_id to the column; omitted → NULL', () => {
@@ -1902,7 +2807,7 @@ describe('DashboardDB — replication telemetry (Phase F)', () => {
     raw.pragma('user_version = 17');
     raw.close();
     const upgraded = new DashboardDB({ dataDir: dir });
-    expect(upgraded.db.pragma('user_version', { simple: true })).toBe(24);
+    expect(upgraded.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
     // insert works → table exists
     upgraded.insertReplicationEvent({ ts: now, context_graph_id: 'cg', action: 'promote' });
     expect(upgraded.getReplicationSummary(60_000).promotes).toBe(1);
@@ -1910,53 +2815,13 @@ describe('DashboardDB — replication telemetry (Phase F)', () => {
   });
 });
 
-describe('SqliteChangelogCursorStore — OT-RFC-59 durable (era,seq) cursor (SC5)', () => {
-  it('upserts per (peer,cg), keeps keys independent, is durable across reopen, validates seq', () => {
-    const store = new SqliteChangelogCursorStore(db);
-    expect(store.get('peerA', 'cg1')).toBeUndefined();
-    store.set('peerA', 'cg1', 'era-1', 5);
-    expect(store.get('peerA', 'cg1')).toMatchObject({ era: 'era-1', seq: 5 });
-    // upsert (same key) replaces era + seq
-    store.set('peerA', 'cg1', 'era-2', 9);
-    expect(store.get('peerA', 'cg1')).toMatchObject({ era: 'era-2', seq: 9 });
-    // distinct (peer,cg) keys are independent (seq is per-responder-node)
-    store.set('peerB', 'cg1', 'era-x', 3);
-    store.set('peerA', 'cg2', 'era-y', 7);
-    expect(store.get('peerB', 'cg1')!.seq).toBe(3);
-    expect(store.get('peerA', 'cg2')!.seq).toBe(7);
-    expect(store.get('peerA', 'cg1')!.seq).toBe(9);
-    // seq 0 is valid (first contact / reseed); negative rejected
-    store.set('peerC', 'cg1', 'era-1', 0);
-    expect(store.get('peerC', 'cg1')!.seq).toBe(0);
-    expect(() => store.set('peerC', 'cg1', 'era-1', -1)).toThrow(/Invalid changelog cursor seq/);
-    // durable across a fresh DashboardDB on the same dir (never TTL-pruned)
-    const db2 = new DashboardDB({ dataDir: dir });
-    const store2 = new SqliteChangelogCursorStore(db2);
-    expect(store2.get('peerA', 'cg1')).toMatchObject({ era: 'era-2', seq: 9 });
-  });
-});
-
-describe('SqliteChangelogEraGuard — OT-RFC-59 §6 P0 durable era guard', () => {
-  it('round-trips (era, highSeq) as a singleton, is durable across reopen, validates highSeq', async () => {
-    const guard = new SqliteChangelogEraGuard(db);
-    expect(await guard.load()).toBeNull();
-    await guard.save('era-1', 10);
-    expect(await guard.load()).toEqual({ era: 'era-1', highSeq: 10 });
-    // singleton: a second save REPLACES (not a second row) — this is the node-global high-water
-    await guard.save('era-2', 42);
-    expect(await guard.load()).toEqual({ era: 'era-2', highSeq: 42 });
-    await expect(guard.save('era-2', -1)).rejects.toThrow(/Invalid changelog era high_seq/);
-    // survives a fresh DashboardDB on the same dir (the whole point — outlives a store.nq restore)
-    const guard2 = new SqliteChangelogEraGuard(new DashboardDB({ dataDir: dir }));
-    expect(await guard2.load()).toEqual({ era: 'era-2', highSeq: 42 });
-  });
-
+describe('DashboardDB — V23/V24 changelog tables', () => {
   it('an existing pre-v24 db upgrades and gains the changelog_era + changelog_cursors tables', () => {
     // Fresh db is already at current version; assert both OT-RFC-59 tables exist after migration.
     const tables = (db.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>)
       .map((t) => t.name);
     expect(tables).toContain('changelog_cursors');
     expect(tables).toContain('changelog_era');
-    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
   });
 });

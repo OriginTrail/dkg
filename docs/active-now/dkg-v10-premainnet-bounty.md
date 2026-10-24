@@ -1,8 +1,16 @@
 ---
 icon: bug
+status: historical
+version: v10
+audience: human
+doc_type: historical
 ---
 
 # OriginTrail DKG V10 Pre-Mainnet Bug Bounty
+
+{% hint style="warning" %}
+**Historical program record.** The pre-mainnet Phase 1 window ended on June 17, 2026, and this page is retained for reference. Use [GitHub Private Vulnerability Reporting](https://github.com/OriginTrail/dkg/security/advisories/new) for current security reports.
+{% endhint %}
 
 **Trust the source — including the source code.** _Break the DKG V10 economic contracts before they go live. Open to anyone._
 

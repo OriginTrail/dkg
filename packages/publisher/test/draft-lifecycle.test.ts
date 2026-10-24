@@ -1,6 +1,11 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import {
+  GraphManager,
+  OxigraphStore,
+  StoreOperationTimeoutError,
+  isStoreOperationTimeoutError,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 import {
   DKG_GOSSIP_MAX_MESSAGE_BYTES,
   TypedEventBus,
@@ -8,20 +13,31 @@ import {
   contextGraphAssertionUri,
   contextGraphDataUri,
   contextGraphMetaUri,
-  contextGraphSharedMemoryUri,
   contextGraphLayerUri,
+  contextGraphPrivateUri,
   MemoryLayer,
+  ASSERTION_SEAL_PREDICATES,
   assertionLifecycleUri,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+  decodeWorkspacePublishRequest,
+  generateWorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
-  AssertionNotPersistedError,
+  type DurableRootPromotionAtomicCompanionResolver,
+  type DurableRootPromotionIdentity,
+  getPromoteFailureDisposition,
+  createPromoteRetryableFailure,
   assertionScopedGraphUri,
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
+  resolveKnowledgeAssetOperationPublicQuads,
+  resolveKnowledgeAssetWorkspaceHead,
 } from '../src/index.js';
 import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { finalizeRootlessAssertionForTest } from './_helpers/rootless-lifecycle.js';
 
 const CG_ID = 'test-assertion-cg';
 const SWM_GRAPH = `did:dkg:context-graph:${CG_ID}/_shared_memory`;
@@ -33,9 +49,13 @@ const ACCESS_POLICY_PREDICATE = 'https://dkg.network/ontology#accessPolicy';
 const ALLOWED_AGENT_PREDICATE = 'https://dkg.network/ontology#allowedAgent';
 const AGENT = '0x1234567890abcdef1234567890abcdef12345678';
 const AGENT_B = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
-const PEER = '12D3KooWPromoteBoundary';
-const PEER_B = '12D3KooWPromoteBoundaryB';
+const PEER = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+const PEER_B = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+const PROMOTE_RECIPIENT_PEER = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
+const PROMOTE_CHANGED_PEER = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
 const ASSERTION_NAME = 'my-assertion';
+const SHARE_OPERATION_ID_PREDICATE = 'http://dkg.io/ontology/shareOperationId';
+const PROMOTE_OPERATION_INTENT_PREDICATE = 'http://dkg.io/ontology/promoteOperationIntent';
 
 const TRIPLES = [
   { subject: 'urn:test:entity:alice', predicate: 'http://schema.org/name', object: '"Alice"' },
@@ -102,18 +122,117 @@ describe('Working Memory Assertion Lifecycle', () => {
   let store: OxigraphStore;
   let publisher: DKGPublisher;
 
-  beforeEach(async () => {
-    store = new OxigraphStore();
+  const createPublisher = async (
+    writeLocks?: Map<string, Promise<void>>,
+    publisherStore: OxigraphStore = store,
+    resolveDurableRootPromotionAtomicCompanion?: DurableRootPromotionAtomicCompanionResolver,
+  ): Promise<DKGPublisher> => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
-    publisher = new DKGPublisher({
-      store,
+    return new DKGPublisher({
+      store: publisherStore,
       chain,
       eventBus: new TypedEventBus(),
       keypair,
       publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
       publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+      ...(writeLocks ? { writeLocks } : {}),
+      ...(resolveDurableRootPromotionAtomicCompanion
+        ? { resolveDurableRootPromotionAtomicCompanion }
+        : {}),
     });
+  };
+
+  const finalizeAssertion = (
+    name = ASSERTION_NAME,
+    agentAddress = AGENT,
+    options: {
+      contextGraphId?: string;
+      subGraphName?: string;
+      publisher?: DKGPublisher;
+    } = {},
+  ) => finalizeRootlessAssertionForTest({
+    publisher: options.publisher ?? publisher,
+    store,
+    contextGraphId: options.contextGraphId ?? CG_ID,
+    name,
+    agentAddress,
+    subGraphName: options.subGraphName,
+  });
+
+  const readShareOperationId = async (
+    name = ASSERTION_NAME,
+    agentAddress = AGENT,
+  ): Promise<string | undefined> => {
+    const lifecycle = assertionLifecycleUri(CG_ID, agentAddress, name);
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    const result = await store.query(
+      `SELECT ?id WHERE { GRAPH <${metaGraph}> { ` +
+        `<${lifecycle}> <${SHARE_OPERATION_ID_PREDICATE}> ?id } } LIMIT 1`,
+    );
+    const object = result.type === 'bindings' ? result.bindings[0]?.['id'] : undefined;
+    return object?.match(/^"(.*)"$/)?.[1] ?? object;
+  };
+
+  const hasPromoteOperationIntent = async (): Promise<boolean> => {
+    const lifecycle = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
+    const result = await store.query(
+      `ASK { GRAPH <${contextGraphMetaUri(CG_ID)}> { ` +
+        `<${lifecycle}> <${PROMOTE_OPERATION_INTENT_PREDICATE}> ?intent } }`,
+    );
+    return result.type === 'boolean' && result.value;
+  };
+
+  const expectExactSwmGraph = async (graphUri: string): Promise<void> => {
+    expect(await store.countQuads(graphUri)).toBe(TRIPLES.length);
+    for (const quad of TRIPLES) {
+      await expect(store.query(
+        `ASK { GRAPH <${graphUri}> { ` +
+          `<${quad.subject}> <${quad.predicate}> ${quad.object} } }`,
+      )).resolves.toEqual({ type: 'boolean', value: true });
+    }
+  };
+
+  const withInjectedOperationSnapshotFailure = async <T>(
+    operation: () => Promise<T>,
+  ): Promise<T> => {
+    const insert = store.insert.bind(store);
+    let injected = false;
+    store.insert = async (quads) => {
+      if (
+        !injected
+        && quads.some((quad) =>
+          quad.graph.includes('/_shared_memory_snapshots/') && quad.graph.endsWith('/ka'))
+      ) {
+        injected = true;
+        throw new Error('injected operation snapshot failure');
+      }
+      return insert(quads);
+    };
+    try {
+      return await operation();
+    } finally {
+      store.insert = insert;
+      if (!injected) throw new Error('operation snapshot failure injection was not reached');
+    }
+  };
+
+  beforeEach(async () => {
+    store = new OxigraphStore();
+    publisher = await createPublisher();
+  });
+
+  it('uses one canonical write-lock domain per store', async () => {
+    const isolatedStore = new OxigraphStore();
+    const suppliedLocks = new Map<string, Promise<void>>();
+    const configuredPublisher = await createPublisher(suppliedLocks, isolatedStore);
+    const defaultPublisher = await createPublisher(undefined, isolatedStore);
+
+    expect(configuredPublisher.writeLocks).toBe(suppliedLocks);
+    expect(defaultPublisher.writeLocks).toBe(suppliedLocks);
+    await expect(
+      createPublisher(new Map<string, Promise<void>>(), isolatedStore),
+    ).rejects.toThrow('must share the same writeLocks map');
   });
 
   it('create returns the correct assertion graph URI', async () => {
@@ -258,7 +377,7 @@ describe('Working Memory Assertion Lifecycle', () => {
       expect.objectContaining({ graph: 'urn:test:graph:one' }),
       expect.objectContaining({ graph: 'urn:test:graph:two' }),
     ]));
-    await expect(publisher.assertionPromote(CG_ID, name, AGENT)).rejects.toMatchObject({
+    await expect(finalizeAssertion(name)).rejects.toMatchObject({
       code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED',
       namedGraphs: ['urn:test:graph:one', 'urn:test:graph:two'],
     });
@@ -288,6 +407,7 @@ describe('Working Memory Assertion Lifecycle', () => {
         graph: '',
       }),
     ]);
+    await finalizeAssertion(name);
     const promoted = await publisher.assertionPromote(CG_ID, name, AGENT);
     expect(promoted.promotedCount).toBe(1);
   });
@@ -311,10 +431,38 @@ describe('Working Memory Assertion Lifecycle', () => {
         graph: namedGraph,
       }),
     ]);
-    await expect(publisher.assertionPromote(CG_ID, name, AGENT)).rejects.toMatchObject({
+    await expect(finalizeAssertion(name)).rejects.toMatchObject({
       code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED',
       namedGraphs: [namedGraph],
     });
+  });
+
+  it('rejects private named-graph writes before leaving draft residue', async () => {
+    const name = 'private-named-graph';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+
+    await expect(
+      publisher.assertionWritePrivate(CG_ID, name, AGENT, [{
+        subject: 'urn:test:entity:private',
+        predicate: 'http://schema.org/name',
+        object: '"Private"',
+        graph: 'urn:test:graph:private',
+      }]),
+    ).rejects.toMatchObject({
+      code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED',
+      namedGraphs: ['urn:test:graph:private'],
+    });
+    expect(await publisher.assertionQueryPrivate(CG_ID, name, AGENT)).toEqual([]);
+
+    await publisher.assertionWritePrivate(CG_ID, name, AGENT, [{
+      subject: 'urn:test:entity:private',
+      predicate: 'http://schema.org/name',
+      object: '"Private"',
+      graph: '',
+    }]);
+    expect(await publisher.assertionQueryPrivate(CG_ID, name, AGENT)).toEqual([
+      expect.objectContaining({ subject: 'urn:test:entity:private', graph: '' }),
+    ]);
   });
 
   it('discard removes KA-scoped named graph draft content', async () => {
@@ -366,6 +514,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
 
+    const finalized = await finalizeAssertion();
     const result = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
     expect(result.promotedCount).toBe(3);
 
@@ -373,7 +522,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(assertionQuads.length).toBe(0);
 
     const swmResult = await store.query(
-      `SELECT ?s ?p ?o WHERE { GRAPH <${SWM_GRAPH}> { ?s ?p ?o } }`,
+      `SELECT ?s ?p ?o WHERE { GRAPH <${finalized.sharedGraphUri}> { ?s ?p ?o } }`,
     );
     expect(swmResult.type).toBe('bindings');
     if (swmResult.type === 'bindings') {
@@ -381,33 +530,276 @@ describe('Working Memory Assertion Lifecycle', () => {
     }
   });
 
-  it('promote strips generated private-CG catalog floor from SWM and WM when trusted', async () => {
+  it('replays an indeterminate committed exact SWM replacement to convergence', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    await store.insert([{
+      subject: 'urn:test:stale-swm-row',
+      predicate: 'http://schema.org/name',
+      object: '"Stale"',
+      graph: finalized.sharedGraphUri,
+    }]);
+    const failure = new StoreOperationTimeoutError({
+      backend: 'managed-oxigraph',
+      operation: 'replaceGraph',
+      storeOperation: 'replaceGraph',
+      outcome: 'indeterminate',
+    });
+    const replaceGraph = store.replaceGraph.bind(store);
+    let injected = false;
+    const replaceGraphSpy = vi.spyOn(store, 'replaceGraph').mockImplementation(
+      async (graphUri, quads) => {
+        if (!injected && graphUri === finalized.sharedGraphUri) {
+          injected = true;
+          await replaceGraph(graphUri, quads);
+          throw failure;
+        }
+        return replaceGraph(graphUri, quads);
+      },
+    );
+
+    try {
+      let rejection: unknown;
+      try {
+        await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
+      } catch (error) {
+        rejection = error;
+      }
+      expect(rejection).toBe(failure);
+      expect(isStoreOperationTimeoutError(rejection)).toBe(true);
+      expect(getPromoteFailureDisposition(rejection)?.diagnostic.name)
+        .toBe('PromoteReplaySafeError');
+      expect(injected).toBe(true);
+      await expectExactSwmGraph(finalized.sharedGraphUri);
+      expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toHaveLength(
+        TRIPLES.length,
+      );
+
+      const replayed = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
+      expect(replayed).toMatchObject({ promotedCount: 0, promotedAllRoots: true });
+      await expectExactSwmGraph(finalized.sharedGraphUri);
+      expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toHaveLength(0);
+    } finally {
+      replaceGraphSpy.mockRestore();
+    }
+  });
+
+  it('replays an indeterminate uncommitted exact SWM replacement to convergence', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    const staleQuad = {
+      subject: 'urn:test:stale-swm-row',
+      predicate: 'http://schema.org/name',
+      object: '"Stale"',
+      graph: finalized.sharedGraphUri,
+    };
+    await store.insert([staleQuad]);
+    const failure = new StoreOperationTimeoutError({
+      backend: 'managed-oxigraph',
+      operation: 'replaceGraph',
+      storeOperation: 'replaceGraph',
+      outcome: 'indeterminate',
+    });
+    const replaceGraph = store.replaceGraph.bind(store);
+    let injected = false;
+    const replaceGraphSpy = vi.spyOn(store, 'replaceGraph').mockImplementation(
+      async (graphUri, quads) => {
+        if (!injected && graphUri === finalized.sharedGraphUri) {
+          injected = true;
+          throw failure;
+        }
+        return replaceGraph(graphUri, quads);
+      },
+    );
+
+    try {
+      let rejection: unknown;
+      try {
+        await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
+      } catch (error) {
+        rejection = error;
+      }
+      expect(rejection).toBe(failure);
+      expect(isStoreOperationTimeoutError(rejection)).toBe(true);
+      expect(getPromoteFailureDisposition(rejection)?.diagnostic.name)
+        .toBe('PromoteReplaySafeError');
+      expect(injected).toBe(true);
+      expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
+      await expect(store.query(
+        `ASK { GRAPH <${finalized.sharedGraphUri}> { ` +
+          `<${staleQuad.subject}> <${staleQuad.predicate}> ${staleQuad.object} } }`,
+      )).resolves.toEqual({ type: 'boolean', value: true });
+      expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toHaveLength(
+        TRIPLES.length,
+      );
+
+      const replayed = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
+      expect(replayed).toMatchObject({ promotedCount: TRIPLES.length, promotedAllRoots: true });
+      await expectExactSwmGraph(finalized.sharedGraphUri);
+      expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toHaveLength(0);
+    } finally {
+      replaceGraphSpy.mockRestore();
+    }
+  });
+
+  it('full promote drops a fully consumed blank-node WM graph instead of shape-deleting it', async () => {
+    const name = 'full-blank-node-promote';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      { subject: 'urn:test:root', predicate: 'urn:test:contains', object: '_:item' },
+      { subject: '_:item', predicate: 'http://schema.org/name', object: '"Item"' },
+      { subject: '_:item', predicate: 'urn:test:child', object: '_:child' },
+      { subject: '_:child', predicate: 'http://schema.org/name', object: '"Child"' },
+    ]);
+
+    const finalized = await finalizeAssertion(name);
+    const wmGraph = finalized.graphUri;
+    const dropped: string[] = [];
+    const wmShapeDeletes: Quad[][] = [];
+    const realDropGraph = store.dropGraph.bind(store);
+    const realDelete = store.delete.bind(store);
+    store.dropGraph = async (graph) => {
+      dropped.push(graph);
+      return realDropGraph(graph);
+    };
+    store.delete = async (quads) => {
+      if (quads.some((quad) => quad.graph === wmGraph)) wmShapeDeletes.push(quads);
+      return realDelete(quads);
+    };
+
+    const result = await publisher.assertionPromote(CG_ID, name, AGENT);
+
+    expect(result.promotedCount).toBe(4);
+    expect(dropped).toContain(wmGraph);
+    expect(wmShapeDeletes).toHaveLength(0);
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toHaveLength(0);
+  });
+
+  it('finalize excludes reserved WM bookkeeping so full promote drops the exact KA graph', async () => {
+    const name = 'reserved-row-promote';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      { subject: 'urn:test:root', predicate: 'http://schema.org/name', object: '"Root"' },
+    ]);
+
+    const sourceWmGraph = contextGraphAssertionUri(CG_ID, AGENT, name);
+    // The import-file handler writes `urn:dkg:file:` / `urn:dkg:extraction:`
+    // descriptor + provenance rows straight into the mutable WM assertion
+    // graph. Rootless finalization filters them before sealing and relocates
+    // only the exact user RDF set into the canonical UAL-derived WM graph.
+    await store.insert([{
+      subject: 'urn:dkg:file:report-descriptor',
+      predicate: 'http://schema.org/name',
+      object: '"report.pdf"',
+      graph: sourceWmGraph,
+    }]);
+
+    const finalized = await finalizeAssertion(name);
+    const wmGraph = finalized.graphUri;
+    expect(finalized.publicQuads.map((quad) => quad.subject))
+      .not.toContain('urn:dkg:file:report-descriptor');
+    expect(await store.hasGraph(sourceWmGraph)).toBe(false);
+
+    const dropped: string[] = [];
+    const wmShapeDeletes: Quad[][] = [];
+    const realDropGraph = store.dropGraph.bind(store);
+    const realDelete = store.delete.bind(store);
+    store.dropGraph = async (graph) => {
+      dropped.push(graph);
+      return realDropGraph(graph);
+    };
+    store.delete = async (quads) => {
+      if (quads.some((quad) => quad.graph === wmGraph)) wmShapeDeletes.push(quads);
+      return realDelete(quads);
+    };
+
+    await publisher.assertionPromote(CG_ID, name, AGENT);
+
+    expect(dropped).toContain(wmGraph);
+    expect(wmShapeDeletes).toHaveLength(0);
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toHaveLength(0);
+  });
+
+  it('promote retains trusted generated private-CG catalog floor in the exact sealed SWM graph', async () => {
     const name = 'private-catalog-promote';
     const cgDid = contextGraphDataUri(CG_ID);
+    const catalogFloor = generatedPrivateCatalogFloorQuads(CG_ID);
     await publisher.assertionCreate(CG_ID, name, AGENT);
     await publisher.assertionWrite(CG_ID, name, AGENT, [
       { subject: 'urn:test:entity:catalog-content', predicate: 'http://schema.org/name', object: '"Content"' },
-      ...generatedPrivateCatalogFloorQuads(CG_ID),
+      ...catalogFloor,
     ]);
     await store.insert([onChainIdQuad('1')]);
     (publisher as any).chain.getContextGraphAccessPolicy = async () => 1;
     (publisher as any).chain.getContextGraphNameHash = async () => ethers.keccak256(ethers.toUtf8Bytes(CG_ID));
 
+    const finalized = await finalizeAssertion(name);
     const result = await publisher.assertionPromote(CG_ID, name, AGENT, {
       publisherPeerId: PEER,
       trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CG_ID),
       onChainContextGraphId: '1',
     });
 
-    expect(result.promotedCount).toBe(1);
+    expect(result.promotedCount).toBe(1 + catalogFloor.length);
     const swmCatalog = await store.query(
-      `SELECT ?p ?o WHERE { GRAPH <${SWM_GRAPH}> { <${cgDid}> ?p ?o } }`,
+      `SELECT ?p ?o WHERE { GRAPH <${finalized.sharedGraphUri}> { <${cgDid}> ?p ?o } }`,
     );
     expect(swmCatalog.type).toBe('bindings');
-    if (swmCatalog.type === 'bindings') expect(swmCatalog.bindings).toHaveLength(0);
+    if (swmCatalog.type === 'bindings') expect(swmCatalog.bindings).toHaveLength(catalogFloor.length);
 
     const remaining = await publisher.assertionQuery(CG_ID, name, AGENT);
     expect(remaining).toHaveLength(0);
+  });
+
+  it('returns the encryption-time recipient projection for promotion fan-out', async () => {
+    const name = 'promotion-recipient-snapshot';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [{
+      subject: 'urn:test:promotion-snapshot',
+      predicate: 'http://schema.org/name',
+      object: '"Snapshot"',
+    }]);
+    await finalizeAssertion(name);
+
+    let advertisedPeer = PROMOTE_RECIPIENT_PEER;
+    let resolverCalls = 0;
+    const recipient = generateWorkspaceRecipientEncryptionKey(
+      `did:dkg:agent:${AGENT}`,
+      `did:dkg:agent:${AGENT}#promotion-snapshot-x25519`,
+    );
+    publisher.setWorkspaceAgentRecipientResolver(async () => {
+      resolverCalls += 1;
+      return {
+        requiresEncryption: true,
+        recipients: [{ ...recipient, agentAddress: AGENT, peerId: advertisedPeer }],
+      };
+    });
+    publisher.setWorkspaceSenderKeyEncryptor(async (input) => {
+      expect(input.resolution.recipients[0]?.peerId).toBe(PROMOTE_RECIPIENT_PEER);
+      advertisedPeer = PROMOTE_CHANGED_PEER;
+      return input.plaintext;
+    });
+
+    const result = await publisher.assertionPromote(CG_ID, name, AGENT, {
+      publisherPeerId: PEER,
+      senderAgentAddress: AGENT,
+    });
+
+    expect(resolverCalls).toBe(1);
+    expect(result.gossipPayload).toEqual({
+      message: expect.any(Uint8Array),
+      fanout: {
+        kind: 'captured',
+        snapshot: {
+          source: 'agent-roster',
+          members: [PROMOTE_RECIPIENT_PEER],
+          complete: true,
+        },
+      },
+    });
+    expect(result.gossipMessage).toBe(result.gossipPayload?.message);
   });
 
   it('rejects generated private-CG catalog floor stripping without private CG proof', async () => {
@@ -417,6 +809,7 @@ describe('Working Memory Assertion Lifecycle', () => {
       { subject: 'urn:test:entity:catalog-content', predicate: 'http://schema.org/name', object: '"Content"' },
       ...generatedPrivateCatalogFloorQuads(CG_ID),
     ]);
+    await finalizeAssertion(name);
 
     await expect(
       publisher.assertionPromote(CG_ID, name, AGENT, {
@@ -426,27 +819,29 @@ describe('Working Memory Assertion Lifecycle', () => {
     ).rejects.toThrow(/trustedNonManifestCatalogTriples is only allowed/);
   });
 
-  it('promote strips finalized private-CG catalog floor for local private CGs before first registration', async () => {
+  it('promote retains finalized private-CG catalog floor for local private CGs before first registration', async () => {
     const name = 'private-catalog-promote-local-private';
     const cgDid = contextGraphDataUri(CG_ID);
+    const catalogFloor = generatedPrivateCatalogFloorQuads(CG_ID);
     await store.insert([localPrivateContextGraphQuad()]);
     await publisher.assertionCreate(CG_ID, name, AGENT);
     await publisher.assertionWrite(CG_ID, name, AGENT, [
       { subject: 'urn:test:entity:catalog-content', predicate: 'http://schema.org/name', object: '"Content"' },
-      ...generatedPrivateCatalogFloorQuads(CG_ID),
+      ...catalogFloor,
     ]);
 
+    const finalized = await finalizeAssertion(name);
     const result = await publisher.assertionPromote(CG_ID, name, AGENT, {
       publisherPeerId: PEER,
       trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CG_ID),
     });
 
-    expect(result.promotedCount).toBe(1);
+    expect(result.promotedCount).toBe(1 + catalogFloor.length);
     const swmCatalog = await store.query(
-      `SELECT ?p ?o WHERE { GRAPH <${SWM_GRAPH}> { <${cgDid}> ?p ?o } }`,
+      `SELECT ?p ?o WHERE { GRAPH <${finalized.sharedGraphUri}> { <${cgDid}> ?p ?o } }`,
     );
     expect(swmCatalog.type).toBe('bindings');
-    if (swmCatalog.type === 'bindings') expect(swmCatalog.bindings).toHaveLength(0);
+    if (swmCatalog.type === 'bindings') expect(swmCatalog.bindings).toHaveLength(catalogFloor.length);
   });
 
   it('rejects generated private-CG catalog floor stripping with a borrowed private on-chain id', async () => {
@@ -459,6 +854,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     await store.insert([onChainIdQuad('2')]);
     (publisher as any).chain.getContextGraphAccessPolicy = async () => 1;
     (publisher as any).chain.getContextGraphNameHash = async () => null;
+    await finalizeAssertion(name);
 
     await expect(
       publisher.assertionPromote(CG_ID, name, AGENT, {
@@ -479,6 +875,7 @@ describe('Working Memory Assertion Lifecycle', () => {
       { subject: 'urn:test:entity:catalog-content', predicate: 'http://schema.org/name', object: '"Content"' },
       ...generatedPrivateCatalogFloorQuads(CG_ID),
     ]);
+    await finalizeAssertion(name);
 
     await expect(
       publisher.assertionPromote(CG_ID, name, AGENT, {
@@ -496,6 +893,7 @@ describe('Working Memory Assertion Lifecycle', () => {
       { subject: 'urn:test:entity:catalog-content', predicate: 'http://schema.org/name', object: '"Content"' },
       ...generatedPrivateCatalogFloorQuads(CG_ID),
     ]);
+    await finalizeAssertion(name);
 
     await expect(
       publisher.assertionPromote(CG_ID, name, AGENT, {
@@ -505,13 +903,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     ).rejects.toThrow(/trustedNonManifestCatalogTriples is only allowed/);
   });
 
-  // Issue #864 — when the assertion data graph is empty but `_meta` says
-  // an extraction completed with N > 0 triples, the legacy
-  // `{ promotedCount: 0 }` return hid the inconsistency behind a
-  // misleading "Promoted 0 triples" toast. The publisher now throws
-  // `AssertionNotPersistedError` so the daemon route can map it to a
-  // 409 with an actionable hint.
-  it('promote throws AssertionNotPersistedError when _meta says extraction completed but data graph is empty', async () => {
+  it('blocks an unsealed empty draft even when legacy extraction metadata claims content', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
 
     // Simulate the post-import-file state: extraction metadata landed in
@@ -536,36 +928,17 @@ describe('Working Memory Assertion Lifecycle', () => {
       },
     ]);
 
-    await expect(
-      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT),
-    ).rejects.toBeInstanceOf(AssertionNotPersistedError);
-
-    // Re-run to capture the structured fields the daemon route reads
-    // when building its 409 response body.
-    try {
-      await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
-      throw new Error('expected promote to throw');
-    } catch (err: unknown) {
-      expect(err).toBeInstanceOf(AssertionNotPersistedError);
-      const typed = err as AssertionNotPersistedError;
-      expect(typed.code).toBe('ASSERTION_NOT_PERSISTED');
-      expect(typed.contextGraphId).toBe(CG_ID);
-      expect(typed.assertionGraph).toBe(graphUri);
-      expect(typed.expectedTripleCount).toBe(49);
-    }
+    await expect(publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT)).rejects.toMatchObject({
+      code: 'UNSEALED_SHARE_BLOCKED',
+    });
   });
 
-  // Issue #864 — guard the legitimate empty-promote path. When there's
-  // no extraction metadata in `_meta` at all, an empty data graph is a
-  // perfectly valid no-op (e.g. a `create` with no subsequent `write`,
-  // or a re-promote of an already-promoted assertion). The publisher
-  // must keep returning `{ promotedCount: 0 }` instead of throwing, so
-  // existing polling/retry call-sites don't regress.
-  it('promote returns { promotedCount: 0 } when data graph is empty and _meta has no extraction record', async () => {
+  it('blocks an unsealed empty draft when no extraction metadata exists', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
 
-    const result = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
-    expect(result.promotedCount).toBe(0);
+    await expect(publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT)).rejects.toMatchObject({
+      code: 'UNSEALED_SHARE_BLOCKED',
+    });
   });
 
   // Codex review on #898 — `assertionPromote` empties the assertion
@@ -577,7 +950,7 @@ describe('Working Memory Assertion Lifecycle', () => {
   // successful promote was misclassified as ASSERTION_NOT_PERSISTED.
   // The lifecycle marker is flipped to "SWM" by `assertionPromote`, so
   // the second promote must short-circuit cleanly to a no-op.
-  it('promote is a no-op (no AssertionNotPersistedError) when re-running after a successful promote', async () => {
+  it('promote is idempotent only while the already-shared exact graph still matches its seal', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
 
@@ -602,19 +975,1353 @@ describe('Working Memory Assertion Lifecycle', () => {
       },
     ]);
 
+    const finalized = await finalizeAssertion();
     const first = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER });
     expect(first.promotedCount).toBeGreaterThan(0);
 
     // Stale second click — must be a harmless no-op, not an error.
     const second = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER });
     expect(second.promotedCount).toBe(0);
+    expect(second.shareOperationId).toBe(first.shareOperationId);
+    expect(second.gossipPayload?.message).toBeInstanceOf(Uint8Array);
+    expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(true);
+
+    await store.insert([{
+      subject: 'urn:test:tampered',
+      predicate: 'http://schema.org/name',
+      object: '"Tampered"',
+      graph: finalized.sharedGraphUri,
+    }]);
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+    ).rejects.toThrow(/triple-count mismatch/);
+    expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
   });
 
-  // Issue #864 — same shape as the previous test but exercises the
-  // partial-metadata case: status present, count = 0 → not an
-  // inconsistency, still a legitimate no-op (e.g. a Phase-1 file with
-  // no extractable structural content).
-  it('promote returns { promotedCount: 0 } when _meta says completed but structuralTripleCount is 0', async () => {
+  it.each([false, true])('validates exact VM before a stale promote no-op (leftover WM: %s)', async (leftoverWm) => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER });
+
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      CG_ID,
+      MemoryLayer.VerifiableMemory,
+      createGraphKnowledgeAssetScope(finalized.kaUal, finalized.assertionVersion),
+    );
+    await store.insert(finalized.publicQuads.map((quad) => ({ ...quad, graph: vmGraph })));
+    await store.dropGraph(finalized.sharedGraphUri);
+    const lifecycle = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    const memoryLayerPredicate = 'http://dkg.io/ontology/memoryLayer';
+    await store.deleteByPattern({ graph: metaGraph, subject: lifecycle, predicate: memoryLayerPredicate });
+    await store.insert([{
+      subject: lifecycle,
+      predicate: memoryLayerPredicate,
+      object: `"${MemoryLayer.VerifiableMemory}"`,
+      graph: metaGraph,
+    }]);
+
+    if (leftoverWm) {
+      // An older promotion could expose its marker before WM cleanup. A queued
+      // retry may therefore outlive a confirmed publish while this copy remains.
+      const wmGraph = await publisher.wmGraphUri(CG_ID, AGENT, ASSERTION_NAME);
+      await store.insert(finalized.publicQuads.map((quad) => ({ ...quad, graph: wmGraph })));
+    }
+
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+    ).resolves.toMatchObject({ promotedCount: 0, promotedAllRoots: false });
+    expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toEqual([]);
+    expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+    expect(await store.query(`ASK { GRAPH <${metaGraph}> {
+      <${lifecycle}> <${memoryLayerPredicate}> "${MemoryLayer.VerifiableMemory}"
+    } }`)).toMatchObject({ type: 'boolean', value: true });
+
+    await store.delete([{ ...finalized.publicQuads[0]!, graph: vmGraph }]);
+    await store.insert([{
+      subject: 'urn:test:tampered-vm',
+      predicate: 'http://schema.org/name',
+      object: '"Tampered"',
+      graph: vmGraph,
+    }]);
+    if (leftoverWm) {
+      const wmGraph = await publisher.wmGraphUri(CG_ID, AGENT, ASSERTION_NAME);
+      await store.insert(finalized.publicQuads.map((quad) => ({ ...quad, graph: wmGraph })));
+    }
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+    ).rejects.toThrow(/Merkle mismatch/);
+    // Never delete the remaining WM copy when VM cannot prove the sealed payload.
+    expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT))
+      .toHaveLength(leftoverWm ? finalized.publicQuads.length : 0);
+  });
+
+  it('validates promote-scoped recipients without replacing the configured resolver', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    const configuredFailure = new Error('configured resolver still owns ordinary calls');
+    const configuredResolver = vi.fn(async () => { throw configuredFailure; });
+    publisher.setWorkspaceAgentRecipientResolver(configuredResolver);
+
+    await expect(publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER,
+      // Deliberately model an invalid JavaScript callback at the runtime boundary.
+      resolveWorkspaceRecipients: async () => ({ requiresEncryption: true, recipients: [] }) as any,
+    })).rejects.toThrow('has no valid DKG agent recipients');
+    expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+
+    const scopedResolver = vi.fn(async () => ({ requiresEncryption: false as const, recipients: [] as const }));
+    await expect(publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER, resolveWorkspaceRecipients: scopedResolver,
+    })).resolves.toMatchObject({ promotedAllRoots: true });
+    expect(scopedResolver).toHaveBeenCalledExactlyOnceWith({ contextGraphId: CG_ID });
+    expect(configuredResolver).not.toHaveBeenCalled();
+
+    const nextName = `${ASSERTION_NAME}-configured`;
+    await publisher.assertionCreate(CG_ID, nextName, AGENT);
+    await publisher.assertionWrite(CG_ID, nextName, AGENT, TRIPLES);
+    const nextFinalized = await finalizeAssertion(nextName);
+    await expect(publisher.assertionPromote(CG_ID, nextName, AGENT, {
+      publisherPeerId: PEER,
+    })).rejects.toBe(configuredFailure);
+    expect(configuredResolver).toHaveBeenCalledExactlyOnceWith({ contextGraphId: CG_ID });
+    expect(await store.hasGraph(nextFinalized.sharedGraphUri)).toBe(false);
+  });
+
+  it.each(['recipient', 'curator'] as const)(
+    'preserves a retry certified by the %s prerequisite before replacing SWM',
+    async (stage) => {
+      await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+      await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+      const finalized = await finalizeAssertion();
+      const authorityFailure = Object.assign(new Error('authority lookup timed out'), {
+        code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+        reason: 'chain-access-policy-timeout',
+        retryable: true,
+      });
+      const retryFailure = createPromoteRetryableFailure(authorityFailure);
+      const prerequisite = vi.fn(async () => { throw retryFailure; });
+
+      const failure = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        ...(stage === 'recipient' ? { resolveWorkspaceRecipients: prerequisite } : {}),
+        ...(stage === 'curator' ? {
+          confirmBeforeCommit: prerequisite,
+        } : {}),
+      }).catch((error: unknown) => error);
+
+      expect(prerequisite).toHaveBeenCalledTimes(1);
+      expect(failure).toBe(retryFailure);
+      expect(failure).toMatchObject({ cause: authorityFailure });
+      expect(getPromoteFailureDisposition(failure)).toMatchObject({
+        classification: 'transient', retryable: true,
+      });
+      expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+      expect((await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).length)
+        .toBe(TRIPLES.length);
+    },
+  );
+
+  it.each(['recipient', 'curator'] as const)(
+    'does not certify a terminal authority failure in the %s prerequisite',
+    async (stage) => {
+      await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+      await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+      const finalized = await finalizeAssertion();
+      const authorityFailure = Object.assign(new Error('unsupported authority'), {
+        code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+        reason: 'chain-participant-authority-unsupported',
+        retryable: false,
+      });
+      const prerequisite = vi.fn(async () => { throw authorityFailure; });
+      const failure = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        ...(stage === 'recipient' ? { resolveWorkspaceRecipients: prerequisite } : {}),
+        ...(stage === 'curator' ? {
+          confirmBeforeCommit: prerequisite,
+        } : {}),
+      }).catch((error: unknown) => error);
+      expect(failure).toBe(authorityFailure);
+      expect(prerequisite).toHaveBeenCalledTimes(1);
+      expect(getPromoteFailureDisposition(failure)).toBeUndefined();
+      expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+      expect((await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).length)
+        .toBe(TRIPLES.length);
+    },
+  );
+
+  it.each(['authority', 'retry-marker'] as const)(
+    'keeps failures of kind %s terminal after the exact SWM replacement',
+    async (kind) => {
+      await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+      await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+      const finalized = await finalizeAssertion();
+      const authorityFailure = Object.assign(new Error('authority lookup timed out'), {
+        code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+        reason: 'chain-access-policy-timeout',
+        retryable: true,
+      });
+      const injectedFailure = kind === 'authority'
+        ? authorityFailure
+        : createPromoteRetryableFailure(authorityFailure);
+      const insert = store.insert.bind(store);
+      let injected = false;
+      const insertSpy = vi.spyOn(store, 'insert').mockImplementation(async (quads) => {
+        if (!injected && quads.some((quad) =>
+          quad.graph.includes('/_shared_memory_snapshots/') && quad.graph.endsWith('/ka'))) {
+          injected = true;
+          await expectExactSwmGraph(finalized.sharedGraphUri);
+          throw injectedFailure;
+        }
+        return insert(quads);
+      });
+      let failure: unknown;
+      try {
+        failure = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+          publisherPeerId: PEER,
+        }).catch((error: unknown) => error);
+      } finally {
+        insertSpy.mockRestore();
+      }
+
+      expect(injected).toBe(true);
+      expect(failure).toMatchObject({ cause: injectedFailure });
+      expect(getPromoteFailureDisposition(failure)).toMatchObject({
+        classification: 'fatal', retryable: false,
+        diagnostic: { code: 'PROMOTE_POST_COMMIT_FAILURE' },
+      });
+      await expectExactSwmGraph(finalized.sharedGraphUri);
+    },
+  );
+
+  it('persists the share operation ID before curator confirmation can escape locally', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+
+    let confirmedOperationId: string | undefined;
+    const replaceGraph = store.replaceGraph.bind(store);
+    let crashedAfterConfirmation = false;
+    store.replaceGraph = async (graph, quads) => {
+      if (!crashedAfterConfirmation && graph === finalized.sharedGraphUri) {
+        crashedAfterConfirmation = true;
+        throw new Error('injected post-confirmation local crash');
+      }
+      return replaceGraph(graph, quads);
+    };
+    try {
+      await expect(
+        publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+          publisherPeerId: PEER,
+          confirmBeforeCommit: async () => {
+            confirmedOperationId = await readShareOperationId();
+            return { applied: true };
+          },
+        }),
+      ).rejects.toThrow('injected post-confirmation local crash');
+    } finally {
+      store.replaceGraph = replaceGraph;
+    }
+
+    expect(crashedAfterConfirmation).toBe(true);
+    expect(confirmedOperationId).toBeTruthy();
+    expect(await readShareOperationId()).toBe(confirmedOperationId);
+    const repaired = await publisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      {
+        publisherPeerId: PEER,
+        confirmBeforeCommit: async () => ({ applied: true }),
+      },
+    );
+    expect(repaired.shareOperationId).toBe(confirmedOperationId);
+  });
+
+  it('commits the root companion atomically with SWM after resolving it before confirmation', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+
+    const companionGraph = 'urn:test:root-promotion-companions';
+    const companionPredicate = 'urn:test:root-promotion-companion';
+    const identities: DurableRootPromotionIdentity[] = [];
+    const settle = vi.fn();
+    // The promote stays behind the resolver's admission wait until it ends.
+    let admit!: () => void;
+    const admission = new Promise<void>((resolve) => { admit = resolve; });
+    const awaitAdmission = vi.fn(() => admission);
+    const hookedPublisher = await createPublisher(undefined, store, Object.assign((
+      input: Readonly<DurableRootPromotionIdentity>,
+    ) => {
+      identities.push(input);
+      const subject = `urn:test:root-promotion:${input.shareOperationId}`;
+      return {
+        graphUri: companionGraph,
+        subject,
+        quads: [{
+          graph: companionGraph,
+          subject,
+          predicate: companionPredicate,
+          object: JSON.stringify(input.kaUal),
+        }],
+        settle,
+      };
+    }, { awaitAdmission }));
+    const confirmBeforeCommit = vi.fn(async () => {
+      expect(identities).toHaveLength(1);
+      expect(await store.hasGraph(companionGraph)).toBe(false);
+      expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+      return { applied: true };
+    });
+
+    const promoting = hookedPublisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      { publisherPeerId: PEER, confirmBeforeCommit },
+    );
+    await vi.waitFor(() => expect(awaitAdmission).toHaveBeenCalledOnce());
+    await new Promise<void>((resolve) => { setTimeout(resolve, 25); });
+    expect(identities).toHaveLength(0);
+    expect(confirmBeforeCommit).not.toHaveBeenCalled();
+    admit();
+    const promoted = await promoting;
+    expect(confirmBeforeCommit).toHaveBeenCalledTimes(1);
+    // The same contract as a share: the message and the payload it belongs to, which the promote returns.
+    expect(promoted.gossipPayload).toBeDefined();
+    expect(confirmBeforeCommit).toHaveBeenCalledWith(promoted.gossipPayload!.message, promoted.gossipPayload);
+    expect(settle).toHaveBeenCalledOnce();
+    expect(settle).toHaveBeenCalledWith(true);
+    expect(awaitAdmission).toHaveBeenCalledOnce();
+    expect(awaitAdmission).toHaveBeenCalledWith({ contextGraphId: CG_ID, kaUal: finalized.kaUal });
+    expect(identities).toEqual([expect.objectContaining({
+      contextGraphId: CG_ID,
+      assertionCoordinate: ASSERTION_NAME,
+      lifecycleAgentAddress: AGENT,
+      kaUal: finalized.kaUal,
+      assertionVersion: finalized.assertionVersion,
+      shareOperationId: promoted.shareOperationId,
+    })]);
+    await expectExactSwmGraph(finalized.sharedGraphUri);
+    await expect(store.query(
+      `ASK { GRAPH <${companionGraph}> { ` +
+        `<urn:test:root-promotion:${promoted.shareOperationId}> ` +
+        `<${companionPredicate}> ${JSON.stringify(finalized.kaUal)} } }`,
+    )).resolves.toEqual({ type: 'boolean', value: true });
+  });
+
+  it.each([
+    ['before commit', false],
+    ['on capability refusal', false],
+    ['after commit', true],
+    ['after indeterminate dispatch', undefined],
+  ] as const)('classifies a root-companion settlement failure %s', async (_label, committed) => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    const capabilityRefused = _label === 'on capability refusal';
+    const settlementFailure = capabilityRefused
+      ? new Error('settlement failed before dispatch')
+      : createPromoteRetryableFailure(new Error('settlement timed out'));
+    const settle = vi.fn(() => { throw settlementFailure; });
+    const companionGraph = 'urn:test:root-companion-settlement';
+    const companionSubject = 'urn:test:root-companion';
+    const hookedPublisher = await createPublisher(undefined, store, () => ({
+      graphUri: companionGraph,
+      subject: companionSubject,
+      quads: [{
+        graph: companionGraph, subject: companionSubject,
+        predicate: 'urn:test:state', object: '"committed"',
+      }],
+      settle,
+    }));
+    const atomicReplace = store.replaceGraphAndSubject!.bind(store);
+    const replaceSpy = vi.spyOn(store, 'replaceGraphAndSubject').mockImplementation(async (...args) => {
+      await atomicReplace(...args);
+      if (committed === undefined) {
+        throw new StoreOperationTimeoutError({
+          backend: 'managed-oxigraph',
+          operation: 'replaceGraphAndSubject',
+          outcome: 'indeterminate',
+        });
+      }
+    });
+    let failure: unknown;
+    try {
+      if (capabilityRefused) {
+        Object.defineProperty(store, 'replaceGraphAndSubject', { value: undefined, configurable: true });
+      }
+      failure = await hookedPublisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        confirmBeforeCommit: async () => {
+          if (committed === false && !capabilityRefused) throw new Error('confirmation failed before dispatch');
+          return { applied: true };
+        },
+      }).catch((error: unknown) => error);
+    } finally {
+      replaceSpy.mockRestore();
+    }
+    expect(settle).toHaveBeenCalledExactlyOnceWith(committed);
+    if (committed === false) {
+      expect(failure).toBe(settlementFailure);
+      expect(getPromoteFailureDisposition(failure)?.retryable).toBe(capabilityRefused ? undefined : true);
+      expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+      expect(await store.hasGraph(companionGraph)).toBe(false);
+    } else {
+      expect(failure).toMatchObject({ code: 'PROMOTE_POST_COMMIT_FAILURE', cause: settlementFailure });
+      expect(getPromoteFailureDisposition(failure)?.retryable).toBe(false);
+      await expectExactSwmGraph(finalized.sharedGraphUri);
+      expect(await store.hasGraph(companionGraph)).toBe(true);
+    }
+  });
+
+  it('settles before preserving even an undefined pre-commit rejection', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    const settle = vi.fn();
+    const hookedPublisher = await createPublisher(undefined, store, () => ({
+      graphUri: 'urn:test:root-companion-settlement',
+      subject: 'urn:test:root-companion',
+      quads: [],
+      settle,
+    }));
+    await expect(hookedPublisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER,
+      confirmBeforeCommit: async () => { throw undefined; },
+    })).rejects.toBeUndefined();
+    expect(settle).toHaveBeenCalledExactlyOnceWith(false);
+    expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+  });
+
+  it('fails closed without persisting SWM or its root companion on atomic capability refusal', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    const companionGraph = 'urn:test:refused-root-promotion-companions';
+    const settle = vi.fn();
+    const hookedPublisher = await createPublisher(undefined, store, (input) => {
+      const subject = `urn:test:refused-root-promotion:${input.shareOperationId}`;
+      return {
+        graphUri: companionGraph,
+        subject,
+        quads: [{
+          graph: companionGraph,
+          subject,
+          predicate: 'urn:test:root-promotion-companion',
+          object: JSON.stringify(input.kaUal),
+        }],
+        settle,
+      };
+    });
+    const ownDescriptor = Object.getOwnPropertyDescriptor(store, 'replaceGraphAndSubject');
+    Object.defineProperty(store, 'replaceGraphAndSubject', {
+      configurable: true,
+      writable: true,
+      value: undefined,
+    });
+    try {
+      await expect(hookedPublisher.assertionPromote(
+        CG_ID,
+        ASSERTION_NAME,
+        AGENT,
+        { publisherPeerId: PEER },
+      )).rejects.toMatchObject({ code: 'ATOMIC_GRAPH_AND_SUBJECT_REPLACE_UNSUPPORTED' });
+    } finally {
+      if (ownDescriptor === undefined) delete (store as Partial<OxigraphStore>).replaceGraphAndSubject;
+      else Object.defineProperty(store, 'replaceGraphAndSubject', ownDescriptor);
+    }
+    expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
+    expect(await store.hasGraph(companionGraph)).toBe(false);
+    expect(settle).toHaveBeenCalledOnce();
+    expect(settle).toHaveBeenCalledWith(false);
+  });
+
+  it('certifies an indeterminate atomic SWM-plus-companion commit as replay safe', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+    const companionGraph = 'urn:test:crashed-root-promotion-companions';
+    let companionSubject = '';
+    const settle = vi.fn();
+    const hookedPublisher = await createPublisher(undefined, store, (input) => {
+      companionSubject = `urn:test:crashed-root-promotion:${input.shareOperationId}`;
+      return {
+        graphUri: companionGraph,
+        subject: companionSubject,
+        quads: [{
+          graph: companionGraph,
+          subject: companionSubject,
+          predicate: 'urn:test:root-promotion-companion',
+          object: JSON.stringify(input.kaUal),
+        }],
+        settle,
+      };
+    });
+    const failure = new StoreOperationTimeoutError({
+      backend: 'managed-oxigraph',
+      operation: 'replaceGraphAndSubject',
+      storeOperation: 'replaceGraphAndSubject',
+      outcome: 'indeterminate',
+    });
+    const atomicReplace = store.replaceGraphAndSubject!.bind(store);
+    let injected = false;
+    const replaceSpy = vi.spyOn(store, 'replaceGraphAndSubject').mockImplementation(
+      async (...args) => {
+        await atomicReplace(...args);
+        if (!injected && args[0] === finalized.sharedGraphUri) {
+          injected = true;
+          throw failure;
+        }
+      },
+    );
+    let rejection: unknown;
+    try {
+      await hookedPublisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+      });
+    } catch (error) {
+      rejection = error;
+    } finally {
+      replaceSpy.mockRestore();
+    }
+    expect(rejection).toBe(failure);
+    expect(getPromoteFailureDisposition(rejection)?.diagnostic.name)
+      .toBe('PromoteReplaySafeError');
+    expect(injected).toBe(true);
+    expect(settle).toHaveBeenCalledOnce();
+    expect(settle).toHaveBeenCalledWith(undefined);
+    await expectExactSwmGraph(finalized.sharedGraphUri);
+    await expect(store.query(
+      `ASK { GRAPH <${companionGraph}> { <${companionSubject}> ?p ?o } }`,
+    )).resolves.toEqual({ type: 'boolean', value: true });
+
+    const replayed = await hookedPublisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      { publisherPeerId: PEER },
+    );
+    expect(replayed).toMatchObject({ promotedCount: 0, promotedAllRoots: true });
+  });
+
+  it('serializes concurrent promotes onto one durable share operation ID', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+
+    let confirmationCalls = 0;
+    let activeConfirmations = 0;
+    let maxActiveConfirmations = 0;
+    let releaseFirstConfirmation!: () => void;
+    const firstConfirmationReleased = new Promise<void>((resolve) => {
+      releaseFirstConfirmation = resolve;
+    });
+    let signalFirstConfirmation!: () => void;
+    const firstConfirmationStarted = new Promise<void>((resolve) => {
+      signalFirstConfirmation = resolve;
+    });
+    const confirmBeforeCommit = async (): Promise<{ applied: boolean }> => {
+      confirmationCalls += 1;
+      const call = confirmationCalls;
+      activeConfirmations += 1;
+      maxActiveConfirmations = Math.max(maxActiveConfirmations, activeConfirmations);
+      if (call === 1) {
+        signalFirstConfirmation();
+        await firstConfirmationReleased;
+      }
+      activeConfirmations -= 1;
+      return { applied: true };
+    };
+
+    const firstPromote = publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER,
+      confirmBeforeCommit,
+    });
+    await firstConfirmationStarted;
+    const secondOptions: NonNullable<Parameters<DKGPublisher['assertionPromote']>[3]> = {
+      publisherPeerId: PEER,
+      confirmBeforeCommit,
+    };
+    const secondPromote = publisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      secondOptions,
+    );
+    secondOptions.subGraphName = 'mutated-after-lock-selection';
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(confirmationCalls).toBe(1);
+    releaseFirstConfirmation();
+    const [first, second] = await Promise.all([firstPromote, secondPromote]);
+
+    expect(maxActiveConfirmations).toBe(1);
+    expect(confirmationCalls).toBe(2);
+    expect(first.shareOperationId).toBeTruthy();
+    expect(second.shareOperationId).toBe(first.shareOperationId);
+    expect(await readShareOperationId()).toBe(first.shareOperationId);
+  });
+
+  it('rejects a draft write queued behind a completed promote', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+
+    let releaseConfirmation!: () => void;
+    const confirmationReleased = new Promise<void>((resolve) => {
+      releaseConfirmation = resolve;
+    });
+    let signalConfirmationStarted!: () => void;
+    const confirmationStarted = new Promise<void>((resolve) => {
+      signalConfirmationStarted = resolve;
+    });
+    const promote = publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER,
+      confirmBeforeCommit: async () => {
+        signalConfirmationStarted();
+        await confirmationReleased;
+        return { applied: true };
+      },
+    });
+    await confirmationStarted;
+
+    const lateQuad = {
+      subject: 'urn:test:entity:late-draft',
+      predicate: 'http://schema.org/name',
+      object: '"Late draft"',
+    };
+    const write = publisher.assertionWrite(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      [lateQuad],
+    );
+
+    releaseConfirmation();
+    await expect(promote).resolves.toMatchObject({ promotedCount: TRIPLES.length });
+    await expect(write).rejects.toMatchObject({ code: 'KA_WM_LIFECYCLE_REQUIRED' });
+    expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toEqual([]);
+  });
+
+  it('serializes lifecycle mutations across publishers sharing one store', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+    const otherPublisher = await createPublisher();
+
+    let releaseConfirmation!: () => void;
+    const confirmationReleased = new Promise<void>((resolve) => {
+      releaseConfirmation = resolve;
+    });
+    let signalConfirmationStarted!: () => void;
+    const confirmationStarted = new Promise<void>((resolve) => {
+      signalConfirmationStarted = resolve;
+    });
+    const promote = publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER,
+      confirmBeforeCommit: async () => {
+        signalConfirmationStarted();
+        await confirmationReleased;
+        return { applied: true };
+      },
+    });
+    await confirmationStarted;
+
+    const write = otherPublisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, [{
+      subject: 'urn:test:entity:cross-instance-late-write',
+      predicate: 'http://schema.org/name',
+      object: '"Cross-instance late write"',
+    }]);
+    releaseConfirmation();
+
+    await expect(promote).resolves.toMatchObject({ promotedCount: TRIPLES.length });
+    await expect(write).rejects.toMatchObject({ code: 'KA_WM_LIFECYCLE_REQUIRED' });
+    expect(await otherPublisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toEqual([]);
+  });
+
+  it('freezes every destructive draft mutation while promote recovery is ambiguous', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        confirmBeforeCommit: async () => {
+          expect(await publisher.hasSwmShareComplete(
+            CG_ID,
+            ASSERTION_NAME,
+            AGENT,
+          )).toBe(false);
+          return { applied: false };
+        },
+      }),
+    ).rejects.toMatchObject({ name: 'CuratorUnconfirmedError' });
+    const operationId = await readShareOperationId();
+    expect(operationId).toBeTruthy();
+    const sealSubject = contextGraphAssertionUri(CG_ID, AGENT, ASSERTION_NAME);
+    const sealBefore = await store.query(
+      `ASK { GRAPH <${contextGraphMetaUri(CG_ID)}> { ` +
+        `<${sealSubject}> <${ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT}> ?root } }`,
+    );
+    expect(sealBefore).toEqual({ type: 'boolean', value: true });
+
+    const expectedRecoveryError = { code: 'KA_PROMOTE_RECOVERY_REQUIRED' };
+    await expect(
+      publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, [TRIPLES[0]!]),
+    ).rejects.toMatchObject(expectedRecoveryError);
+    await expect(
+      publisher.assertionWritePrivate(CG_ID, ASSERTION_NAME, AGENT, [{ ...TRIPLES[0]!, graph: '' }]),
+    ).rejects.toMatchObject(expectedRecoveryError);
+    await expect(
+      publisher.assertionDiscard(CG_ID, ASSERTION_NAME, AGENT),
+    ).rejects.toMatchObject(expectedRecoveryError);
+    await expect(
+      publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT),
+    ).rejects.toMatchObject(expectedRecoveryError);
+    await expect(
+      publisher.assertionPullFrom(CG_ID, ASSERTION_NAME, AGENT, 'swm'),
+    ).rejects.toMatchObject(expectedRecoveryError);
+    await expect(
+      publisher.clearAssertionSeal(CG_ID, ASSERTION_NAME, AGENT),
+    ).rejects.toMatchObject(expectedRecoveryError);
+    await expect(
+      publisher.clearWmDraftDataGraph(CG_ID, ASSERTION_NAME, AGENT),
+    ).rejects.toMatchObject(expectedRecoveryError);
+
+    expect(await readShareOperationId()).toBe(operationId);
+    expect(await hasPromoteOperationIntent()).toBe(true);
+    const remainingPublic = await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT);
+    expect(remainingPublic).toHaveLength(finalized.publicQuads.length);
+    expect(remainingPublic).toEqual(
+      expect.arrayContaining(finalized.publicQuads.map((quad) => expect.objectContaining(quad))),
+    );
+    expect(await publisher.assertionQueryPrivate(CG_ID, ASSERTION_NAME, AGENT)).toEqual([]);
+    expect(await store.query(
+      `ASK { GRAPH <${contextGraphMetaUri(CG_ID)}> { ` +
+        `<${sealSubject}> <${ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT}> ?root } }`,
+    )).toEqual(sealBefore);
+  });
+
+  it('snapshots caller-owned private quads before waiting for the lifecycle lock', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+
+    let releaseConfirmation!: () => void;
+    const confirmationReleased = new Promise<void>((resolve) => {
+      releaseConfirmation = resolve;
+    });
+    let signalConfirmationStarted!: () => void;
+    const confirmationStarted = new Promise<void>((resolve) => {
+      signalConfirmationStarted = resolve;
+    });
+    const promote = publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER,
+      confirmBeforeCommit: async () => {
+        signalConfirmationStarted();
+        await confirmationReleased;
+        return { applied: false, rejected: true };
+      },
+    });
+    await confirmationStarted;
+
+    const input: Quad[] = [{
+      subject: 'urn:test:private:stable',
+      predicate: 'http://schema.org/name',
+      object: '"Stable"',
+      graph: '',
+    }];
+    // Reopen the sealed, unpublished draft explicitly after rejection. Queue
+    // the write now so the snapshot still precedes the lifecycle-lock wait.
+    const discard = publisher.assertionDiscard(CG_ID, ASSERTION_NAME, AGENT);
+    const create = publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    const write = publisher.assertionWritePrivate(CG_ID, ASSERTION_NAME, AGENT, input);
+    input[0]!.subject = 'urn:dkg:file:mutated-after-validation';
+    input[0]!.graph = 'urn:test:named-after-validation';
+    releaseConfirmation();
+
+    await expect(promote).rejects.toMatchObject({ name: 'CuratorRejectedError' });
+    await discard;
+    await create;
+    await expect(write).resolves.toBeUndefined();
+    expect(await publisher.assertionQueryPrivate(CG_ID, ASSERTION_NAME, AGENT)).toEqual([
+      expect.objectContaining({ subject: 'urn:test:private:stable', graph: '' }),
+    ]);
+  });
+
+  it('rejects curator confirmation without a publisher peer before claiming an ID', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+
+    let confirmationCalls = 0;
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        confirmBeforeCommit: async () => {
+          confirmationCalls += 1;
+          return { applied: true };
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'KA_PROMOTE_PUBLISHER_PEER_REQUIRED' });
+
+    expect(confirmationCalls).toBe(0);
+    expect(await readShareOperationId()).toBeUndefined();
+    expect(await hasPromoteOperationIntent()).toBe(false);
+    expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).not.toHaveLength(0);
+  });
+
+  it('retires the prior completion marker before confirming a reopened draft', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+    await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER });
+    expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(true);
+
+    await publisher.assertionPullFrom(CG_ID, ASSERTION_NAME, AGENT, 'swm');
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, [{
+      subject: 'urn:test:entity:new-version',
+      predicate: 'http://schema.org/name',
+      object: '"New version"',
+    }]);
+    await finalizeAssertion();
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        confirmBeforeCommit: async () => {
+          expect(await publisher.hasSwmShareComplete(
+            CG_ID,
+            ASSERTION_NAME,
+            AGENT,
+          )).toBe(false);
+          return { applied: false };
+        },
+      }),
+    ).rejects.toMatchObject({ name: 'CuratorUnconfirmedError' });
+
+    expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
+    expect(await readShareOperationId()).toBeTruthy();
+  });
+
+  it('allows at most one cross-instance promote claim to reach confirmation', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+    // Distinct store object identities model independent processes while both
+    // proxies still delegate to the same backend. Same-store publisher objects
+    // cannot silently split their lock domain (tested above).
+    const independentStoreView = (): OxigraphStore => new Proxy(store, {
+      get(target, property) {
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const firstClaimPublisher = await createPublisher(undefined, independentStoreView());
+    const otherPublisher = await createPublisher(undefined, independentStoreView());
+
+    const insert = store.insert.bind(store);
+    const query = store.query.bind(store);
+    let initialClaimReads = 0;
+    let releaseInitialReads!: () => void;
+    const bothInitialReadsFinished = new Promise<void>((resolve) => {
+      releaseInitialReads = resolve;
+    });
+    let claimInsertions = 0;
+    let releaseClaims!: () => void;
+    const bothClaimsInserted = new Promise<void>((resolve) => {
+      releaseClaims = resolve;
+    });
+    store.query = async (sparql) => {
+      const result = await query(sparql);
+      if (
+        sparql.includes('CONSTRUCT { ?s ?p ?o }')
+        && sparql.includes('VALUES ?s')
+        && sparql.includes(assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME))
+      ) {
+        initialClaimReads += 1;
+        if (initialClaimReads === 2) releaseInitialReads();
+        await bothInitialReadsFinished;
+      }
+      return result;
+    };
+    store.insert = async (quads) => {
+      const isPromoteClaim = quads.some((quad) => quad.predicate === SHARE_OPERATION_ID_PREDICATE)
+        && quads.some((quad) => quad.predicate === PROMOTE_OPERATION_INTENT_PREDICATE);
+      await insert(quads);
+      if (isPromoteClaim) {
+        claimInsertions += 1;
+        if (claimInsertions === 2) releaseClaims();
+        await bothClaimsInserted;
+      }
+    };
+    let confirmationCalls = 0;
+    try {
+      const settled = await Promise.allSettled([
+        firstClaimPublisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+          publisherPeerId: PEER,
+          confirmBeforeCommit: async () => {
+            confirmationCalls += 1;
+            return { applied: true };
+          },
+        }),
+        otherPublisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+          publisherPeerId: PEER_B,
+          confirmBeforeCommit: async () => {
+            confirmationCalls += 1;
+            return { applied: true };
+          },
+        }),
+      ]);
+      expect(settled.filter((result) => result.status === 'fulfilled').length).toBeLessThanOrEqual(1);
+      expect(settled.filter((result) => result.status === 'rejected').length).toBeGreaterThanOrEqual(1);
+      for (const rejected of settled.filter((result) => result.status === 'rejected')) {
+        expect(rejected).toMatchObject({ reason: { code: 'KA_SHARE_OPERATION_ID_CONFLICT' } });
+      }
+    } finally {
+      store.insert = insert;
+      store.query = query;
+    }
+    expect(confirmationCalls).toBeLessThanOrEqual(1);
+    const ids = await store.query(
+      `SELECT ?id WHERE { GRAPH <${contextGraphMetaUri(CG_ID)}> { ` +
+        `<${assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME)}> ` +
+        `<${SHARE_OPERATION_ID_PREDICATE}> ?id } } LIMIT 2`,
+    );
+    expect(ids.type === 'bindings' ? ids.bindings : []).toHaveLength(confirmationCalls);
+    const intents = await store.query(
+      `SELECT ?intent WHERE { GRAPH <${contextGraphMetaUri(CG_ID)}> { ` +
+        `<${assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME)}> ` +
+        `<${PROMOTE_OPERATION_INTENT_PREDICATE}> ?intent } } LIMIT 2`,
+    );
+    expect(intents.type === 'bindings' ? intents.bindings : []).toHaveLength(confirmationCalls);
+  });
+
+  it('keeps a completed legacy promotion readable without replaying it', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+    const promoted = await publisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      { publisherPeerId: PEER },
+    );
+    expect(promoted.shareOperationId).toBeTruthy();
+    expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(true);
+
+    await store.deleteByPattern({
+      graph: contextGraphMetaUri(CG_ID),
+      subject: assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME),
+      predicate: PROMOTE_OPERATION_INTENT_PREDICATE,
+    });
+    let confirmationCalls = 0;
+    const retried = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER_B,
+      confirmBeforeCommit: async () => {
+        confirmationCalls += 1;
+        return { applied: true };
+      },
+    });
+
+    expect(retried).toMatchObject({
+      promotedCount: 0,
+      promotedAllRoots: false,
+      shareOperationId: promoted.shareOperationId,
+    });
+    expect(retried.gossipPayload).toBeUndefined();
+    expect(confirmationCalls).toBe(0);
+    expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(true);
+  });
+
+  it.each(['ordinary', 'durable'])('fails closed when a legacy durable operation ID has no immutable intent (%s)', async path => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+    await expect(withInjectedOperationSnapshotFailure(() => publisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      { publisherPeerId: PEER },
+    ))).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
+
+    const lifecycle = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
+    await store.deleteByPattern({
+      graph: contextGraphMetaUri(CG_ID),
+      subject: lifecycle,
+      predicate: PROMOTE_OPERATION_INTENT_PREDICATE,
+    });
+    await publisher.markSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT);
+    await expect(
+      path === 'ordinary' ? publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER })
+        : publisher.prepareAssertionPromoteRecovery(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }, false),
+    ).rejects.toMatchObject({ code: path === 'ordinary' ? 'KA_PROMOTE_OPERATION_INTENT_MISSING' : 'KA_PROMOTE_RECOVERY_BINDING_CONFLICT' });
+    expect(await readShareOperationId()).toBeTruthy();
+    expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
+  });
+
+  it.each(['ordinary', 'durable'])('clears a stale completion marker before rejecting corrupt recovery intent (%s)', async path => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+    await expect(withInjectedOperationSnapshotFailure(() => publisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      { publisherPeerId: PEER },
+    ))).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
+
+    const lifecycle = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    await publisher.markSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT);
+    await store.deleteByPattern({
+      graph: metaGraph,
+      subject: lifecycle,
+      predicate: PROMOTE_OPERATION_INTENT_PREDICATE,
+    });
+    await store.insert([{
+      graph: metaGraph,
+      subject: lifecycle,
+      predicate: PROMOTE_OPERATION_INTENT_PREDICATE,
+      object: '"not-json"',
+    }]);
+
+    await expect(
+      path === 'ordinary' ? publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER })
+        : publisher.prepareAssertionPromoteRecovery(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }, false),
+    ).rejects.toMatchObject({ code: 'KA_PROMOTE_OPERATION_INTENT_CORRUPT' });
+    expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
+  });
+
+  it('releases a provisional share operation ID after definitive curator rejection', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+
+    let rejectedOperationId: string | undefined;
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        confirmBeforeCommit: async () => {
+          rejectedOperationId = await readShareOperationId();
+          return { applied: false, rejected: true };
+        },
+      }),
+    ).rejects.toMatchObject({ name: 'CuratorRejectedError' });
+
+    expect(rejectedOperationId).toBeTruthy();
+    expect(await readShareOperationId()).toBeUndefined();
+    expect(await hasPromoteOperationIntent()).toBe(false);
+    const retried = await publisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      { publisherPeerId: PEER },
+    );
+    expect(retried.shareOperationId).toBeTruthy();
+    expect(retried.shareOperationId).not.toBe(rejectedOperationId);
+  });
+
+  it('retains a durable share operation ID when a later retry is rejected', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        confirmBeforeCommit: async () => ({ applied: false }),
+      }),
+    ).rejects.toMatchObject({ name: 'CuratorUnconfirmedError' });
+    const durableOperationId = await readShareOperationId();
+    expect(durableOperationId).toBeTruthy();
+
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        confirmBeforeCommit: async () => ({ applied: false, rejected: true }),
+      }),
+    ).rejects.toMatchObject({ name: 'CuratorRejectedError' });
+    expect(await readShareOperationId()).toBe(durableOperationId);
+
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+    ).rejects.toMatchObject({ code: 'KA_PROMOTE_CONFIRMATION_REQUIRED' });
+    const repaired = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+      publisherPeerId: PEER,
+      confirmBeforeCommit: async () => ({ applied: true }),
+    });
+    expect(repaired.shareOperationId).toBe(durableOperationId);
+  });
+
+  it('reuses the immutable promote envelope across ambiguous retries', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+
+    let firstMessage: Uint8Array | undefined;
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        accessPolicy: 'allowList',
+        allowedPeers: [PEER_B, PEER],
+        confirmBeforeCommit: async (message) => {
+          firstMessage = message;
+          return { applied: false };
+        },
+      }),
+    ).rejects.toMatchObject({ name: 'CuratorUnconfirmedError' });
+
+    let retryMessage: Uint8Array | undefined;
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER_B,
+        accessPolicy: 'public',
+        confirmBeforeCommit: async (message) => {
+          retryMessage = message;
+          return { applied: false };
+        },
+      }),
+    ).rejects.toMatchObject({ name: 'CuratorUnconfirmedError' });
+
+    expect(firstMessage).toBeDefined();
+    expect(retryMessage).toBeDefined();
+    const first = decodeWorkspacePublishRequest(firstMessage!);
+    const retry = decodeWorkspacePublishRequest(retryMessage!);
+    expect(retry.shareOperationId).toBe(first.shareOperationId);
+    expect(retry.operationId).toBe(first.operationId);
+    expect(String(retry.timestampMs)).toBe(String(first.timestampMs));
+    expect(retry.publisherPeerId).toBe(PEER);
+    expect(retry.accessPolicy).toBe('allowList');
+    expect(retry.allowedPeers).toEqual([PEER, PEER_B].sort());
+  });
+
+  it('fails closed when a lifecycle contains conflicting share operation IDs', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        confirmBeforeCommit: async () => ({ applied: false }),
+      }),
+    ).rejects.toMatchObject({ name: 'CuratorUnconfirmedError' });
+    const firstOperationId = await readShareOperationId();
+    expect(firstOperationId).toBeTruthy();
+
+    const lifecycle = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
+    await store.insert([{
+      subject: lifecycle,
+      predicate: SHARE_OPERATION_ID_PREDICATE,
+      object: '"conflicting-operation-id"',
+      graph: contextGraphMetaUri(CG_ID),
+    }]);
+
+    let confirmationCalled = false;
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+        publisherPeerId: PEER,
+        confirmBeforeCommit: async () => {
+          confirmationCalled = true;
+          return { applied: true };
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'KA_SHARE_OPERATION_ID_CONFLICT' });
+    expect(confirmationCalled).toBe(false);
+    expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toHaveLength(TRIPLES.length);
+    const swmExists = await store.query(
+      `ASK { GRAPH <${finalized.sharedGraphUri}> { ?s ?p ?o } }`,
+    );
+    expect(swmExists).toEqual({ type: 'boolean', value: false });
+    const ids = await store.query(
+      `SELECT ?id WHERE { GRAPH <${contextGraphMetaUri(CG_ID)}> { ` +
+        `<${lifecycle}> <${SHARE_OPERATION_ID_PREDICATE}> ?id } }`,
+    );
+    expect(ids.type === 'bindings' ? ids.bindings : []).toHaveLength(2);
+  });
+
+  it('clears an inherited completion marker before fallible SWM repair work', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+
+    await expect(
+      withInjectedOperationSnapshotFailure(() =>
+        publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+      ),
+    ).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
+    await publisher.markSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT);
+
+    await expect(
+      withInjectedOperationSnapshotFailure(() =>
+        publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+      ),
+    ).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
+    expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
+  });
+
+  it('preserves the durable share operation ID across an interrupted SWM repair', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+
+    const lifecycle = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
+    const insert = store.insert.bind(store);
+    await expect(
+      withInjectedOperationSnapshotFailure(() =>
+        publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+      ),
+    ).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
+    const durableOperationId = await readShareOperationId();
+    expect(durableOperationId).toBeTruthy();
+
+    store.insert = async (quads) => {
+      if (quads.some((quad) =>
+        quad.subject === lifecycle && quad.predicate === SHARE_OPERATION_ID_PREDICATE)) {
+        throw new Error('injected lifecycle repair failure');
+      }
+      return insert(quads);
+    };
+    try {
+      await expect(
+        publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+      ).rejects.toMatchObject({
+        code: 'PROMOTE_POST_COMMIT_FAILURE',
+        cause: { message: 'injected lifecycle repair failure' },
+      });
+    } finally {
+      store.insert = insert;
+    }
+    expect(await readShareOperationId()).toBe(durableOperationId);
+
+    const repaired = await publisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      { publisherPeerId: PEER },
+    );
+    expect(repaired.shareOperationId).toBe(durableOperationId);
+  });
+
+  it('repairs an interrupted exact-SWM commit before exposing the completion marker', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+
+    await expect(
+      withInjectedOperationSnapshotFailure(() =>
+        publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+      ),
+    ).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
+
+    expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(false);
+    expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(true);
+
+    // A marker written before the immutable snapshot/head tail is not proof of
+    // completion. Destructive mutation must still force promote recovery.
+    await publisher.markSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT);
+    await expect(
+      publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT),
+    ).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
+
+    const repaired = await publisher.assertionPromote(
+      CG_ID,
+      ASSERTION_NAME,
+      AGENT,
+      { publisherPeerId: PEER },
+    );
+    expect(repaired.promotedCount).toBe(0);
+    expect(repaired.shareOperationId).toBeTruthy();
+    expect(repaired.gossipPayload?.message).toBeInstanceOf(Uint8Array);
+    expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(true);
+
+    const graphManager = new GraphManager(store);
+    const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CG_ID,
+      shareOperationId: repaired.shareOperationId!,
+      kaUal: finalized.kaUal,
+      assertionVersion: finalized.assertionVersion,
+    });
+    expect(snapshot.quads).toHaveLength(finalized.publicQuads.length);
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG_ID,
+      kaUal: finalized.kaUal,
+    });
+    expect(head?.shareOperationId).toBe(repaired.shareOperationId);
+  });
+
+  it('does not borrow another KA tail to release a corrupt recovery claim', async () => {
+    const completedName = 'completed-tail-owner';
+    await publisher.assertionCreate(CG_ID, completedName, AGENT);
+    await publisher.assertionWrite(CG_ID, completedName, AGENT, [{
+      subject: 'urn:test:entity:completed-tail-owner',
+      predicate: 'http://schema.org/name',
+      object: '"Completed tail owner"',
+    }]);
+    await finalizeAssertion(completedName);
+    await publisher.assertionPromote(CG_ID, completedName, AGENT, { publisherPeerId: PEER });
+    const completedOperationId = await readShareOperationId(completedName);
+    expect(completedOperationId).toBeTruthy();
+
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
+    await expect(
+      withInjectedOperationSnapshotFailure(() =>
+        publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER }),
+      ),
+    ).rejects.toMatchObject({
+      code: 'PROMOTE_POST_COMMIT_FAILURE',
+      cause: { message: 'injected operation snapshot failure' },
+    });
+
+    const lifecycle = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    await store.deleteByPattern({
+      graph: metaGraph,
+      subject: lifecycle,
+      predicate: SHARE_OPERATION_ID_PREDICATE,
+    });
+    await store.insert([{
+      graph: metaGraph,
+      subject: lifecycle,
+      predicate: SHARE_OPERATION_ID_PREDICATE,
+      object: JSON.stringify(completedOperationId),
+    }]);
+    await publisher.markSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT);
+
+    await expect(
+      publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT),
+    ).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
+    expect(await readShareOperationId()).toBe(completedOperationId);
+  });
+
+  it('blocks an unsealed empty draft when legacy structuralTripleCount is zero', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     const graphUri = contextGraphAssertionUri(CG_ID, AGENT, ASSERTION_NAME);
     const metaGraph = contextGraphMetaUri(CG_ID);
@@ -633,11 +2340,12 @@ describe('Working Memory Assertion Lifecycle', () => {
       },
     ]);
 
-    const result = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
-    expect(result.promotedCount).toBe(0);
+    await expect(publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT)).rejects.toMatchObject({
+      code: 'UNSEALED_SHARE_BLOCKED',
+    });
   });
 
-  it('durable SWM ownership skips (advisory) cross-author promote after publisher restart with empty map', async () => {
+  it('keeps cross-author KAs with the same RDF subject isolated after publisher restart', async () => {
     const root = 'urn:test:entity:restart-owned';
     const firstAssertion = 'restart-owner-a';
     const secondAssertion = 'restart-owner-b';
@@ -646,6 +2354,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     await publisher.assertionWrite(CG_ID, firstAssertion, AGENT, [
       { subject: root, predicate: 'http://schema.org/name', object: '"Original"' },
     ]);
+    const firstFinalized = await finalizeAssertion(firstAssertion);
     await publisher.assertionPromote(CG_ID, firstAssertion, AGENT, { publisherPeerId: PEER });
 
     const ownerBefore = await store.query(
@@ -653,7 +2362,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     );
     expect(ownerBefore.type).toBe('bindings');
     if (ownerBefore.type === 'bindings') {
-      expect(ownerBefore.bindings.map((row) => row['creator'])).toEqual([`"${PEER}"`]);
+      expect(ownerBefore.bindings).toHaveLength(0);
     }
 
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
@@ -672,29 +2381,33 @@ describe('Working Memory Assertion Lifecycle', () => {
     await restartedPublisher.assertionWrite(CG_ID, secondAssertion, AGENT_B, [
       { subject: root, predicate: 'http://schema.org/name', object: '"Overwritten"' },
     ]);
-
-    // OT-RFC-46 §17.4 / rc.17 D6: a cross-author promote is no longer REJECTED — the
-    // foreign-owned root is skipped (workspaceOwner is now advisory, not a hard gate).
-    // Under the still-bucket SWM the skip preserves the owner's data (no clobber); the
-    // assertions below confirm SWM content and ownership are unchanged. Once SWM is
-    // per-KA (rc.17b) the co-claim coexists in its own graph instead of being skipped.
+    const secondFinalized = await finalizeAssertion(secondAssertion, AGENT_B, {
+      publisher: restartedPublisher,
+    });
     const promoteResult = await restartedPublisher.assertionPromote(
       CG_ID,
       secondAssertion,
       AGENT_B,
       { publisherPeerId: PEER_B },
     );
-    expect(promoteResult.promotedCount).toBe(0);
+    expect(promoteResult.promotedCount).toBe(1);
 
     const remaining = await restartedPublisher.assertionQuery(CG_ID, secondAssertion, AGENT_B);
-    expect(remaining).toHaveLength(1);
+    expect(remaining).toHaveLength(0);
 
-    const swmAfter = await store.query(
-      `SELECT ?o WHERE { GRAPH <${SWM_GRAPH}> { <${root}> <http://schema.org/name> ?o } }`,
+    const firstSwm = await store.query(
+      `SELECT ?o WHERE { GRAPH <${firstFinalized.sharedGraphUri}> { <${root}> <http://schema.org/name> ?o } }`,
     );
-    expect(swmAfter.type).toBe('bindings');
-    if (swmAfter.type === 'bindings') {
-      expect(swmAfter.bindings.map((row) => row['o'])).toEqual(['"Original"']);
+    expect(firstSwm.type).toBe('bindings');
+    if (firstSwm.type === 'bindings') {
+      expect(firstSwm.bindings.map((row) => row['o'])).toEqual(['"Original"']);
+    }
+    const secondSwm = await store.query(
+      `SELECT ?o WHERE { GRAPH <${secondFinalized.sharedGraphUri}> { <${root}> <http://schema.org/name> ?o } }`,
+    );
+    expect(secondSwm.type).toBe('bindings');
+    if (secondSwm.type === 'bindings') {
+      expect(secondSwm.bindings.map((row) => row['o'])).toEqual(['"Overwritten"']);
     }
 
     const ownerAfter = await store.query(
@@ -702,11 +2415,11 @@ describe('Working Memory Assertion Lifecycle', () => {
     );
     expect(ownerAfter.type).toBe('bindings');
     if (ownerAfter.type === 'bindings') {
-      expect(ownerAfter.bindings.map((row) => row['creator'])).toEqual([`"${PEER}"`]);
+      expect(ownerAfter.bindings).toHaveLength(0);
     }
   });
 
-  it('durable SWM ownership allows owner promote after publisher restart with empty map', async () => {
+  it('does not use publisherPeerId as ownership for distinct graph-scoped KAs', async () => {
     const root = 'urn:test:entity:restart-owned-upsert';
     const firstAssertion = 'restart-owner-upsert-a';
     const secondAssertion = 'restart-owner-upsert-b';
@@ -715,6 +2428,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     await publisher.assertionWrite(CG_ID, firstAssertion, AGENT, [
       { subject: root, predicate: 'http://schema.org/name', object: '"Original"' },
     ]);
+    const firstFinalized = await finalizeAssertion(firstAssertion);
     await publisher.assertionPromote(CG_ID, firstAssertion, AGENT, { publisherPeerId: PEER });
 
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
@@ -733,6 +2447,9 @@ describe('Working Memory Assertion Lifecycle', () => {
     await restartedPublisher.assertionWrite(CG_ID, secondAssertion, AGENT_B, [
       { subject: root, predicate: 'http://schema.org/name', object: '"Updated"' },
     ]);
+    const secondFinalized = await finalizeAssertion(secondAssertion, AGENT_B, {
+      publisher: restartedPublisher,
+    });
 
     const result = await restartedPublisher.assertionPromote(CG_ID, secondAssertion, AGENT_B, {
       publisherPeerId: PEER,
@@ -742,12 +2459,19 @@ describe('Working Memory Assertion Lifecycle', () => {
     const remaining = await restartedPublisher.assertionQuery(CG_ID, secondAssertion, AGENT_B);
     expect(remaining).toHaveLength(0);
 
-    const swmAfter = await store.query(
-      `SELECT ?o WHERE { GRAPH <${SWM_GRAPH}> { <${root}> <http://schema.org/name> ?o } }`,
+    const firstSwm = await store.query(
+      `SELECT ?o WHERE { GRAPH <${firstFinalized.sharedGraphUri}> { <${root}> <http://schema.org/name> ?o } }`,
     );
-    expect(swmAfter.type).toBe('bindings');
-    if (swmAfter.type === 'bindings') {
-      expect(swmAfter.bindings.map((row) => row['o'])).toEqual(['"Updated"']);
+    expect(firstSwm.type).toBe('bindings');
+    if (firstSwm.type === 'bindings') {
+      expect(firstSwm.bindings.map((row) => row['o'])).toEqual(['"Original"']);
+    }
+    const secondSwm = await store.query(
+      `SELECT ?o WHERE { GRAPH <${secondFinalized.sharedGraphUri}> { <${root}> <http://schema.org/name> ?o } }`,
+    );
+    expect(secondSwm.type).toBe('bindings');
+    if (secondSwm.type === 'bindings') {
+      expect(secondSwm.bindings.map((row) => row['o'])).toEqual(['"Updated"']);
     }
 
     const ownerAfter = await store.query(
@@ -755,11 +2479,11 @@ describe('Working Memory Assertion Lifecycle', () => {
     );
     expect(ownerAfter.type).toBe('bindings');
     if (ownerAfter.type === 'bindings') {
-      expect(ownerAfter.bindings.map((row) => row['creator'])).toEqual([`"${PEER}"`]);
+      expect(ownerAfter.bindings).toHaveLength(0);
     }
   });
 
-  it('durable SWM ownership collapses conflicts before owner promote after restart', async () => {
+  it('ignores legacy per-root ownership conflicts during graph-scoped promote', async () => {
     const root = 'urn:test:entity:restart-owned-conflict';
     const firstAssertion = 'restart-owner-conflict-a';
     const secondAssertion = 'restart-owner-conflict-b';
@@ -769,9 +2493,16 @@ describe('Working Memory Assertion Lifecycle', () => {
     await publisher.assertionWrite(CG_ID, firstAssertion, AGENT, [
       { subject: root, predicate: 'http://schema.org/name', object: '"Original"' },
     ]);
+    const firstFinalized = await finalizeAssertion(firstAssertion);
     await publisher.assertionPromote(CG_ID, firstAssertion, AGENT, { publisherPeerId: PEER });
 
     await store.insert([
+      {
+        subject: root,
+        predicate: 'http://dkg.io/ontology/workspaceOwner',
+        object: `"${PEER}"`,
+        graph: SWM_META_GRAPH,
+      },
       {
         subject: root,
         predicate: 'http://dkg.io/ontology/workspaceOwner',
@@ -808,50 +2539,70 @@ describe('Working Memory Assertion Lifecycle', () => {
     await restartedPublisher.assertionWrite(CG_ID, secondAssertion, AGENT_B, [
       { subject: root, predicate: 'http://schema.org/name', object: '"Effective owner update"' },
     ]);
+    const secondFinalized = await finalizeAssertion(secondAssertion, AGENT_B, {
+      publisher: restartedPublisher,
+    });
 
     const result = await restartedPublisher.assertionPromote(CG_ID, secondAssertion, AGENT_B, {
       publisherPeerId: PEER,
     });
     expect(result.promotedCount).toBe(1);
 
-    const swmAfter = await store.query(
-      `SELECT ?o WHERE { GRAPH <${SWM_GRAPH}> { <${root}> <http://schema.org/name> ?o } }`,
+    const firstSwm = await store.query(
+      `SELECT ?o WHERE { GRAPH <${firstFinalized.sharedGraphUri}> { <${root}> <http://schema.org/name> ?o } }`,
     );
-    expect(swmAfter.type).toBe('bindings');
-    if (swmAfter.type === 'bindings') {
-      expect(swmAfter.bindings.map((row) => row['o'])).toEqual(['"Effective owner update"']);
+    expect(firstSwm.type).toBe('bindings');
+    if (firstSwm.type === 'bindings') {
+      expect(firstSwm.bindings.map((row) => row['o'])).toEqual(['"Original"']);
+    }
+    const secondSwm = await store.query(
+      `SELECT ?o WHERE { GRAPH <${secondFinalized.sharedGraphUri}> { <${root}> <http://schema.org/name> ?o } }`,
+    );
+    expect(secondSwm.type).toBe('bindings');
+    if (secondSwm.type === 'bindings') {
+      expect(secondSwm.bindings.map((row) => row['o'])).toEqual(['"Effective owner update"']);
+    }
+    const legacyOwners = await store.query(
+      `SELECT ?creator WHERE { GRAPH <${SWM_META_GRAPH}> { <${root}> <http://dkg.io/ontology/workspaceOwner> ?creator } }`,
+    );
+    expect(legacyOwners.type).toBe('bindings');
+    if (legacyOwners.type === 'bindings') {
+      expect(new Set(legacyOwners.bindings.map((row) => row['creator'])))
+        .toEqual(new Set([`"${PEER}"`, `"${PEER_B}"`]));
     }
   });
 
-  it('promote accepts a payload above the old 512 KB cap and below 10 MB', async () => {
+  it('promote accepts a payload above the old 512 KB cap and below 4 MiB', async () => {
     await publisher.assertionCreate(CG_ID, 'large-promote', AGENT);
     const quads = largePayloadQuads('large-promote', 2 * 1024 * 1024);
     await publisher.assertionWrite(CG_ID, 'large-promote', AGENT, quads);
+    await finalizeAssertion('large-promote');
 
     const result = await publisher.assertionPromote(CG_ID, 'large-promote', AGENT, {
       publisherPeerId: PEER,
     });
 
     expect(result.promotedCount).toBe(quads.length);
-    expect(result.gossipMessage).toBeInstanceOf(Uint8Array);
-    expect(result.gossipMessage!.length).toBeGreaterThan(512 * 1024);
-    expect(result.gossipMessage!.length).toBeLessThan(DKG_GOSSIP_MAX_MESSAGE_BYTES);
+    expect(result.gossipPayload?.message).toBeInstanceOf(Uint8Array);
+    expect(result.gossipPayload!.message.length).toBeGreaterThan(512 * 1024);
+    expect(result.gossipPayload!.message.length).toBeLessThan(DKG_GOSSIP_MAX_MESSAGE_BYTES);
   });
 
-  it('promote rejects payloads above 10 MB before mutating WM or SWM', async () => {
+  it('promote rejects payloads above 4 MiB before mutating WM or SWM', async () => {
     await publisher.assertionCreate(CG_ID, 'too-large-promote', AGENT);
     const quads = largePayloadQuads('too-large-promote', DKG_GOSSIP_MAX_MESSAGE_BYTES + 1024 * 1024);
     await publisher.assertionWrite(CG_ID, 'too-large-promote', AGENT, quads);
+    const finalized = await finalizeAssertion('too-large-promote');
 
     await expect(
       publisher.assertionPromote(CG_ID, 'too-large-promote', AGENT, { publisherPeerId: PEER }),
-    ).rejects.toThrow(/Promoted assertion too large for gossip.*10\s*MB/i);
+    ).rejects.toThrow(/Promoted assertion too large for gossip.*4\s*MB/i);
 
     const assertionQuads = await publisher.assertionQuery(CG_ID, 'too-large-promote', AGENT);
     expect(assertionQuads.length).toBe(quads.length);
 
     const swmResult = await store.query(
-      `SELECT ?o WHERE { GRAPH <${SWM_GRAPH}> { <urn:test:entity:too-large-promote:0> <http://schema.org/description> ?o } }`,
+      `SELECT ?o WHERE { GRAPH <${finalized.sharedGraphUri}> { <urn:test:entity:too-large-promote:0> <http://schema.org/description> ?o } }`,
     );
     expect(swmResult.type).toBe('bindings');
     if (swmResult.type === 'bindings') {
@@ -859,18 +2610,16 @@ describe('Working Memory Assertion Lifecycle', () => {
     }
   });
 
-  it('promote with entity filter only moves selected entities', async () => {
+  it('rejects entity-filtered sharing because a graph-scoped KA is atomic', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
 
-    const result = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
+    await expect(publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
       entities: ['urn:test:entity:alice'],
-    });
-    expect(result.promotedCount).toBe(2);
+    })).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
 
     const remaining = await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT);
-    expect(remaining.length).toBe(1);
-    expect(remaining[0].subject).toBe('urn:test:entity:bob');
+    expect(remaining).toHaveLength(TRIPLES.length);
 
     const swmResult = await store.query(
       `SELECT ?s WHERE { GRAPH <${SWM_GRAPH}> { ?s ?p ?o } }`,
@@ -878,12 +2627,12 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(swmResult.type).toBe('bindings');
     if (swmResult.type === 'bindings') {
       const swmSubjects = new Set(swmResult.bindings.map((b) => b['s']));
-      expect(swmSubjects.has('urn:test:entity:alice')).toBe(true);
+      expect(swmSubjects.has('urn:test:entity:alice')).toBe(false);
       expect(swmSubjects.has('urn:test:entity:bob')).toBe(false);
     }
   });
 
-  it('promote with entity filter ignores unrelated named-graph draft content', async () => {
+  it('rejects entity-filtered sharing before touching mixed default/named-graph drafts', async () => {
     const name = 'subset-default-with-local-named-graph';
     const localNamedGraph = 'urn:test:graph:local-only';
     await publisher.assertionCreate(CG_ID, name, AGENT);
@@ -897,17 +2646,20 @@ describe('Working Memory Assertion Lifecycle', () => {
       },
     ]);
 
-    const result = await publisher.assertionPromote(CG_ID, name, AGENT, {
+    await expect(publisher.assertionPromote(CG_ID, name, AGENT, {
       entities: ['urn:test:entity:selected'],
-    });
-    expect(result.promotedCount).toBe(1);
+    })).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
 
-    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        subject: 'urn:test:entity:selected',
+        graph: '',
+      }),
       expect.objectContaining({
         subject: 'urn:test:entity:local-only',
         graph: localNamedGraph,
       }),
-    ]);
+    ]));
 
     const swmResult = await store.query(
       `SELECT ?s WHERE { GRAPH <${SWM_GRAPH}> { ?s ?p ?o } }`,
@@ -915,7 +2667,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(swmResult.type).toBe('bindings');
     if (swmResult.type === 'bindings') {
       const swmSubjects = new Set(swmResult.bindings.map((b) => b['s']));
-      expect(swmSubjects.has('urn:test:entity:selected')).toBe(true);
+      expect(swmSubjects.has('urn:test:entity:selected')).toBe(false);
       expect(swmSubjects.has('urn:test:entity:local-only')).toBe(false);
     }
   });
@@ -949,16 +2701,18 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(agentBQuads[0].subject).toBe('urn:test:bob');
   });
 
-  it('promote on empty assertion returns 0', async () => {
+  it('blocks promote on an unsealed empty assertion', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
-    const result = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
-    expect(result.promotedCount).toBe(0);
+    await expect(publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT)).rejects.toMatchObject({
+      code: 'UNSEALED_SHARE_BLOCKED',
+    });
   });
 
   it('RFC ka-metadata-trim P3.4: promote writes NO ShareTransition record', async () => {
     const SWM_META = `did:dkg:context-graph:${CG_ID}/_shared_memory_meta`;
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
     await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
 
     const result = await store.query(
@@ -1363,20 +3117,21 @@ describe('Working Memory Assertion Lifecycle', () => {
     }
   });
 
-  it('full lifecycle: create → write → promote → verify SWM → discard', async () => {
+  it('full lifecycle preserves promoted SWM and rejects post-promote discard', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
 
     let quads = await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT);
     expect(quads.length).toBe(3);
 
+    const finalized = await finalizeAssertion();
     await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
 
     quads = await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT);
     expect(quads.length).toBe(0);
 
     const swmResult = await store.query(
-      `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${SWM_GRAPH}> { ?s ?p ?o } }`,
+      `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${finalized.sharedGraphUri}> { ?s ?p ?o } }`,
     );
     expect(swmResult.type).toBe('bindings');
     if (swmResult.type === 'bindings') {
@@ -1384,7 +3139,51 @@ describe('Working Memory Assertion Lifecycle', () => {
       expect(count).toBe(3);
     }
 
+    await expect(
+      publisher.assertionDiscard(CG_ID, ASSERTION_NAME, AGENT),
+    ).rejects.toMatchObject({ code: 'KA_WM_LIFECYCLE_REQUIRED' });
+    const preservedSwm = await store.query(
+      `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${finalized.sharedGraphUri}> { ?s ?p ?o } }`,
+    );
+    expect(preservedSwm.type).toBe('bindings');
+    if (preservedSwm.type === 'bindings') {
+      const count = Number(String(preservedSwm.bindings[0]?.['c'] ?? '0').match(/\d+/)?.[0] ?? 0);
+      expect(count).toBe(3);
+    }
+  });
+
+  it('discard proceeds and archives the recovery seal when the SWM head is corrupt (GH#2273)', async () => {
+    // GH#2273 — the resolver fails closed on a corrupt SWM head, and the discard path
+    // resolves the head only to decide the advisory keep-the-recovery-seal boolean.
+    // Discard is a plausible operator remedy for a KA whose head is exactly in that
+    // corrupt state, so the throw must not abort it (pre-fix it did: the resolve had no
+    // catch, so this discard rejected with KA_WORKSPACE_HEAD_CORRUPT and the operator
+    // had no API-level way to clear the assertion). On corruption we cannot prove the
+    // seal does NOT match live SWM content, so the decision fails toward RETENTION: the
+    // seal is archived to the recovery subject rather than dropped.
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    const finalized = await finalizeAssertion();
+
+    // One dangling shareOperationId row with none of the other required head rows is
+    // the resolver's pre-existing "incomplete head or operation metadata" corrupt case
+    // — the cheapest corrupt-head shape to fabricate, and the catch under test treats
+    // every KnowledgeAssetWorkspaceHeadCorruptError alike.
+    await store.insert([{
+      subject: `${finalized.kaUal}#dkg-swm-head`,
+      predicate: SHARE_OPERATION_ID_PREDICATE,
+      object: '"phantom-op"',
+      graph: SWM_META_GRAPH,
+    }]);
+
     await publisher.assertionDiscard(CG_ID, ASSERTION_NAME, AGENT);
+
+    expect(await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT)).toHaveLength(0);
+    const recoverySubject = `${contextGraphAssertionUri(CG_ID, AGENT, ASSERTION_NAME)}/_recovery_seal`;
+    const archived = await store.query(
+      `ASK { GRAPH <${contextGraphPrivateUri(CG_ID)}> { <${recoverySubject}> ?p ?o } }`,
+    );
+    expect(archived).toEqual({ type: 'boolean', value: true });
   });
 });
 
@@ -1393,6 +3192,15 @@ describe('Working Memory Assertion sub-graph registration check', () => {
   const SG_NAME = 'code';
   let store: OxigraphStore;
   let publisher: DKGPublisher;
+
+  const finalizeSubGraphAssertion = () => finalizeRootlessAssertionForTest({
+    publisher,
+    store,
+    contextGraphId: SG_CG_ID,
+    name: ASSERTION_NAME,
+    agentAddress: AGENT,
+    subGraphName: SG_NAME,
+  });
 
   beforeEach(async () => {
     store = new OxigraphStore();
@@ -1470,7 +3278,7 @@ describe('Working Memory Assertion sub-graph registration check', () => {
     ).rejects.toThrow(/Sub-graph "code" has not been registered/);
   });
 
-  it('assertionQuery and assertionDiscard still work for legacy unregistered sub-graph graphs', async () => {
+  it('keeps legacy unregistered sub-graph graphs readable but rejects discard mutation', async () => {
     const graphUri = contextGraphAssertionUri(SG_CG_ID, AGENT, ASSERTION_NAME, SG_NAME);
     await store.createGraph(graphUri);
     await store.insert(TRIPLES.map((triple) => ({ ...triple, graph: graphUri })));
@@ -1478,9 +3286,11 @@ describe('Working Memory Assertion sub-graph registration check', () => {
     const quads = await publisher.assertionQuery(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME);
     expect(quads.length).toBe(3);
 
-    await publisher.assertionDiscard(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME);
+    await expect(
+      publisher.assertionDiscard(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME),
+    ).rejects.toMatchObject({ code: 'LEGACY_KA_READ_ONLY' });
     const afterDiscard = await publisher.assertionQuery(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME);
-    expect(afterDiscard.length).toBe(0);
+    expect(afterDiscard.length).toBe(3);
   });
 
   it('assertion ops succeed after the sub-graph is registered', async () => {
@@ -1499,12 +3309,11 @@ describe('Working Memory Assertion sub-graph registration check', () => {
   });
 
   it('assertionPromote routes promoted triples into the registered sub-graph shared memory', async () => {
-    const swmGraph = contextGraphSharedMemoryUri(SG_CG_ID, SG_NAME);
-
     await registerSubGraph();
     await publisher.assertionCreate(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME);
     await publisher.assertionWrite(SG_CG_ID, ASSERTION_NAME, AGENT, TRIPLES, SG_NAME);
 
+    const finalized = await finalizeSubGraphAssertion();
     const result = await publisher.assertionPromote(SG_CG_ID, ASSERTION_NAME, AGENT, { subGraphName: SG_NAME });
     expect(result.promotedCount).toBe(3);
 
@@ -1512,7 +3321,7 @@ describe('Working Memory Assertion sub-graph registration check', () => {
     expect(assertionQuads.length).toBe(0);
 
     const swmResult = await store.query(
-      `SELECT ?s ?p ?o WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
+      `SELECT ?s ?p ?o WHERE { GRAPH <${finalized.sharedGraphUri}> { ?s ?p ?o } }`,
     );
     expect(swmResult.type).toBe('bindings');
     if (swmResult.type === 'bindings') {
@@ -1539,6 +3348,14 @@ describe('Assertion Lifecycle Provenance (Event-Sourced, PROV-O)', () => {
   const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
   let store: OxigraphStore;
   let publisher: DKGPublisher;
+
+  const finalizeAssertion = () => finalizeRootlessAssertionForTest({
+    publisher,
+    store,
+    contextGraphId: CG_ID,
+    name: ASSERTION_NAME,
+    agentAddress: AGENT,
+  });
 
   beforeEach(async () => {
     store = new OxigraphStore();
@@ -1579,6 +3396,7 @@ describe('Assertion Lifecycle Provenance (Event-Sourced, PROV-O)', () => {
   // assertions in the tests below now pin the DERIVATION contract.
   const LAYER_BY_EVENT_TYPE: Record<string, { from: string; to: string }> = {
     AssertionCreated: { from: 'none', to: 'WM' },
+    AssertionWritten: { from: 'WM', to: 'WM' },
     AssertionPromoted: { from: 'WM', to: 'SWM' },
     AssertionUpdated: { from: 'VM', to: 'VM' },
     AssertionDiscarded: { from: 'WM', to: 'none' },
@@ -1642,6 +3460,7 @@ describe('Assertion Lifecycle Provenance (Event-Sourced, PROV-O)', () => {
   it('promote updates state to "promoted" and memoryLayer to "SWM"', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
     await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
 
     expect(await queryLifecycleState()).toBe('promoted');
@@ -1651,18 +3470,21 @@ describe('Assertion Lifecycle Provenance (Event-Sourced, PROV-O)', () => {
   it('promote appends an AssertionPromoted event (WM → SWM)', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
     await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
 
     const events = await queryEvents();
-    expect(events).toHaveLength(2);
-    expect(events[1].type).toBe('AssertionPromoted');
-    expect(events[1].fromLayer).toBe('WM');
-    expect(events[1].toLayer).toBe('SWM');
+    expect(events).toEqual([
+      { type: 'AssertionCreated', fromLayer: 'none', toLayer: 'WM' },
+      { type: 'AssertionWritten', fromLayer: 'WM', toLayer: 'WM' },
+      { type: 'AssertionPromoted', fromLayer: 'WM', toLayer: 'SWM' },
+    ]);
   });
 
-  it('promote records shareOperationId on the event; member entities on the stable lifecycle subject', async () => {
+  it('promote records shareOperationId without root-entity member metadata', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
     await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
 
     const uri = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
@@ -1676,9 +3498,8 @@ describe('Assertion Lifecycle Provenance (Event-Sourced, PROV-O)', () => {
         `SELECT ?opId WHERE { GRAPH <${META_GRAPH}> { <${eventUri}> <${DKG}shareOperationId> ?opId } } LIMIT 1`,
       );
       expect(opResult.type === 'bindings' && opResult.bindings.length).toBeGreaterThan(0);
-      // RFC ka-metadata-trim Phase 2: the event node no longer duplicates
-      // the member list — the SUBSTRATE-1 stamp on the stable lifecycle
-      // subject is the canonical member index (read-both for old rows).
+      // Rootless V2 keeps neither event-level nor lifecycle-level root member
+      // rows; the UAL-derived exact graph is the complete membership boundary.
       const eventEntityResult = await store.query(
         `SELECT ?entity WHERE { GRAPH <${META_GRAPH}> { <${eventUri}> <${DKG}rootEntity> ?entity } }`,
       );
@@ -1690,7 +3511,7 @@ describe('Assertion Lifecycle Provenance (Event-Sourced, PROV-O)', () => {
       );
       expect(subjectEntityResult.type).toBe('bindings');
       if (subjectEntityResult.type === 'bindings') {
-        expect(subjectEntityResult.bindings.length).toBeGreaterThanOrEqual(2);
+        expect(subjectEntityResult.bindings).toHaveLength(0);
       }
     }
   });
@@ -1717,6 +3538,7 @@ describe('Assertion Lifecycle Provenance (Event-Sourced, PROV-O)', () => {
   it('lifecycle record persists in _meta even after assertion graph is emptied', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
     await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
 
     const assertionQuads = await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT);
@@ -1732,9 +3554,11 @@ describe('Assertion Lifecycle Provenance (Event-Sourced, PROV-O)', () => {
     await publisher.assertionDiscard(CG_ID, ASSERTION_NAME, AGENT);
 
     const events = await queryEvents();
-    expect(events).toHaveLength(2);
-    expect(events[0].type).toBe('AssertionCreated');
-    expect(events[1].type).toBe('AssertionDiscarded');
+    expect(events).toEqual([
+      { type: 'AssertionCreated', fromLayer: 'none', toLayer: 'WM' },
+      { type: 'AssertionWritten', fromLayer: 'WM', toLayer: 'WM' },
+      { type: 'AssertionDiscarded', fromLayer: 'WM', toLayer: 'none' },
+    ]);
   });
 
   it('different agents have separate lifecycle records', async () => {
@@ -1742,6 +3566,7 @@ describe('Assertion Lifecycle Provenance (Event-Sourced, PROV-O)', () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT_B);
 
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await finalizeAssertion();
     await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
 
     expect(await queryLifecycleState()).toBe('promoted');

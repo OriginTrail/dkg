@@ -1,0 +1,931 @@
+/**
+ * GH#2270 — the canonical owner of FAILED-JOB POLICY: what a failed lift job may still do, and
+ * why it is sitting where it is. Every predicate whose answer depends on another's lives here, in
+ * ONE documented precedence — spread across modules they were exactly the kind of helpers that
+ * drift apart, each reading the same job and each free to disagree about it.
+ *
+ * The precedence, read top to bottom:
+ *   1. {@link isProvenIneffectiveLiftFailure} — does the failure code PROVE the transaction had
+ *      no effect? Then nothing below needs to account for it.
+ *   2. {@link isHeldForChainProof} — otherwise, is a transaction unaccounted for? A held job is
+ *      never republished, keeps its lifecycle subject, and survives bulk cleanup.
+ *   3. {@link classifyRetryAction} — the WRITE decision for a retry pass, over the job alone.
+ *   4. {@link isOccupyingLifecycleJob} / {@link isBulkClearableTerminalLiftJob} — the admission
+ *      and cleanup consequences of 2.
+ *   5. {@link describeRetryProjection} — the READ view of 3, plus the operator's kill-switch.
+ *
+ * `async-lift-publisher-utils.ts` keeps the STRUCTURAL helpers (is this job failed, what does it
+ * persist, how is it rebuilt). Nothing here is persisted, and the persisted job shape
+ * (`lift-job-types.ts`) stays free of derived fields.
+ */
+import {
+  compareAcceptedJobs,
+  getLiftJobTransactionEvidence,
+  liftJobCheckedNonce,
+  liftJobCheckedSigner,
+  liftJobOperationKindMarker,
+  isFailedJob,
+  pinnedPublishIdentityKaId,
+  isKnowledgeAssetVmPublishJobRequest,
+  queuedLiftOperationKind,
+  type PersistedFailedJob,
+} from './async-lift-publisher-utils.js';
+import { knowledgeAssetAgentAddressesEqual } from '@origintrail-official/dkg-core';
+import { getLiftJobFailurePolicy, isTerminalLiftJobState } from './lift-job.js';
+import type { LiftJobFailureCode, PersistedLiftJob } from './lift-job.js';
+import type {
+  PendingTransactionClearOverride,
+  TargetedLiftJobClearOptions,
+} from './terminal-job-clear.js';
+// Type-only, and erased at emit — the reverse edge (types importing `LiftJobRetryProjection`
+// from here) is type-only too, so nothing circular survives into the JavaScript. The verdict
+// vocabulary stays defined once, beside the resolver contract that produces it.
+import type { AsyncLiftChainProofResolution, AsyncLiftLastChainCheck } from './async-lift-publisher-types.js';
+
+/**
+ * Might a transaction have been submitted for this job? Keyed on persisted EVIDENCE, never on the
+ * failure code's `resolution`: `rpc_unavailable` is the broadcast-phase catch-all and carries
+ * `reset_to_accepted`, yet a transaction that LANDED and merely failed to record locally arrives
+ * under exactly that code — resolution cannot separate the two.
+ *
+ * Evidence is a persisted transaction hash from either carrier (the live `broadcast` metadata, or
+ * `recovery.txHashChecked`, which survives a reset that dropped the broadcast metadata), plus an
+ * `included` origin, which by definition had a transaction.
+ *
+ * It is deliberately NOT keyed on `failedFromState ∈ {broadcast, included}`: `quorum_unmet`'s only
+ * allowed state is 'broadcast' while its producer sits before the publish tx is signed (see the
+ * `autoRetry` qualification in lift-job-failures.ts), so a state-keyed predicate would classify
+ * every quorum failure as evidence-bearing and strand the GH#1620 lane. Pre-send-safe failures
+ * persist no txHash, and that is what makes them safe to re-run.
+ *
+ * Which hash a job carries is structural ({@link getLiftJobTransactionEvidence}); what carrying one
+ * MEANS is policy, which is why this lives here rather than beside the field accessor.
+ */
+export function hasBroadcastEvidence(job: PersistedFailedJob): boolean {
+  // A live broadcast record is unconditional: this job signed that transaction itself and nothing
+  // has accounted for it. Same for an `included` origin — inclusion implies a transaction.
+  if (job.broadcast?.txHash) return true;
+  if (job.failure.failedFromState === 'included') return true;
+  // GH#2270 PR-3 r3 — the INHERITED hash, carried in the recovery record by an earlier reset. It
+  // is evidence only while it remains an open question. Once the proof-first dispatcher has
+  // established the transaction's fate and released the job on the strength of it, the hash stays
+  // for audit but stops holding anything: continuing to read it as unaccounted would strand the
+  // job forever, because it can never be proven a second time — nothing new was ever sent.
+  const recovery = job.recovery;
+  if (!recovery?.txHashChecked) return false;
+  // Only a RESET record can carry the accounted mark; a finalized-from-chain record is not a
+  // job that is still waiting on anything.
+  return recovery.action !== 'reset_to_accepted' || recovery.txHashAccounted !== true;
+}
+
+/**
+ * Does this failure code PROVE the transaction had no effect, so the evidence such a job carries
+ * needs no further accounting?
+ *
+ * The decision itself lives in the failure registry (`provenIneffective`, required on every
+ * built-in entry), so a new code cannot be added without stating its chain effect — the same
+ * table-only strictness `autoRetry` uses. This function is just the reader; see the field's doc
+ * for the guarantee each `true` rests on.
+ */
+export function isProvenIneffectiveLiftFailure(code: LiftJobFailureCode): boolean {
+  return getLiftJobFailurePolicy(code).provenIneffective === true;
+}
+
+/**
+ * A failed job that may have a transaction on chain, with no proof either way. ONE property behind
+ * FIVE surfaces, so they cannot answer differently: admission keeps the job bound to its lifecycle
+ * subject (a re-submit gets `LiftJobPendingChainProofError` rather than a replacement job), the
+ * reaccept writer refuses it, a retry pass reports it as `blockedPendingRecovery`, bulk clear
+ * leaves it alone — and, since GH#2270 PR-3, the proof-first dispatcher takes exactly this
+ * population as its WORK QUEUE.
+ *
+ * That last one is what makes the hold releasable without an operator, and it is why the predicate
+ * must stay a single definition: the four surfaces that REFUSE to move a held job and the one that
+ * resolves it have to agree on which jobs those are, or a job could be chased by recovery while
+ * admission still treats it as free, or held forever by admission while nothing asks the chain.
+ *
+ * NOT limited to retryable failures. A TERMINAL diagnosis like `confirmation_mismatch` is precisely
+ * a job whose transaction is unaccounted for; letting its subject fall vacant is how the next
+ * re-submit publishes the same KA a second time.
+ */
+export function isHeldForChainProof(job: PersistedFailedJob): boolean {
+  return hasBroadcastEvidence(job) && !isProvenIneffectiveLiftFailure(job.failure.code);
+}
+
+/**
+ * PR #2300 r1 (🟡 3809054821) — does an AUTOMATIC lane exist that can move THIS held job, or is
+ * the operator's by-id clear its only exit? The pending-chain-proof 503 advertises `retryable`
+ * from this answer, per job, instead of a constant `true` that promised convergence to jobs no
+ * automatic lane can ever touch.
+ *
+ * The matrix, from the record alone (chain truth — did the transaction actually mine, was the
+ * slot consumed — is not observable here, and the cells say what each answer PROMISES):
+ *
+ *  - CREATE with a recorded nonce and a pinned identity → TRUE, and the promise is
+ *    unconditional: if the transaction mined, canonical recognition finalizes it; if it can never
+ *    mine, the three-proof absence release re-runs it. Every chain-truth world has an exit.
+ *  - CREATE without a nonce on EITHER carrier (the live `broadcast.nonce`, or the
+ *    `recovery.nonceChecked` an inherited hash carries; legacy pre-write-ahead records have
+ *    neither) or without a pinned identity → FALSE: recognition would move it only in the world where the
+ *    transaction mined, and no absence proof exists to release it in the other — a dropped
+ *    transaction leaves it holding until an operator clears it, so `retryable: true` would be a
+ *    promise the lane cannot keep.
+ *  - UPDATE whose recognition question is fully formed (pinned identity + intended root) → TRUE,
+ *    but the promise is CONDITIONAL and documented as such: canonical recognition converges iff
+ *    the transaction actually mined. An update has no absence lane at all (the ABA hazard), so a
+ *    dropped update keeps answering 503 until the operator acts — the record cannot distinguish
+ *    that world from the about-to-converge one, and this cell is where the honest per-job answer
+ *    bottoms out. The same holds for an update that carries an earlier attempt's INHERITED hash and
+ *    a later `reverted` verdict: a revert proves that transaction had no effect, not that the
+ *    queued request is still current, so recovery holds it (see `decideChainProofDisposition`)
+ *    until an operator acts.
+ *  - UPDATE without a derivable recognition identity, and any job whose lookup cannot even be
+ *    formed (no hash, no wallet) → FALSE: nothing automatic can ever ask a question about it.
+ */
+export function hasAutomaticRecoveryExit(job: PersistedFailedJob): boolean {
+  return describeAutomaticRecoveryExit(job).exit;
+}
+
+/**
+ * GH#2942 — one ingredient a held job's record lacks before an automatic lane could settle it.
+ * Order is the order they are reported in, and the first one names the headline blocker.
+ *  - `transaction_hash` / `signer_wallet` — nothing can be ASKED about the job at all.
+ *  - `claim_or_validation` / `publish_identity` — the chain can be asked, but a mined transaction
+ *    cannot be turned into a finalized job (or recognized as this job's effect).
+ *  - `operation_marker` — which operation signed is unknown, so no operation-specific proof applies.
+ *  - `nonce` (CREATE) — absence cannot be proven, so the job can finalize but never be released.
+ *  - `intended_root` (UPDATE) — the effect cannot be recognized.
+ */
+export type HeldRecoveryGap =
+  | 'transaction_hash'
+  | 'signer_wallet'
+  | 'claim_or_validation'
+  | 'publish_identity'
+  | 'operation_marker'
+  | 'nonce'
+  | 'intended_root';
+
+export type AutomaticRecoveryExit =
+  | { readonly exit: true }
+  | { readonly exit: false; readonly gaps: readonly [HeldRecoveryGap, ...HeldRecoveryGap[]] };
+
+/**
+ * {@link hasAutomaticRecoveryExit} with its reasons: EVERY ingredient the record lacks, so an
+ * operator is not told to fix one and then meets the next. The boolean is a view of this, so the
+ * two cannot drift.
+ *
+ * GH#2942 — and both now read the SAME carriers the dispatcher's lookup does. The wallet and nonce
+ * used to be read from the live `broadcast` metadata with the claim as a wallet fallback, while the
+ * lookup (`chainProofLookupFor`) reads `liftJobCheckedSigner` / `liftJobCheckedNonce` — the signer
+ * and nonce preserved WITH an inherited hash, and no claim fallback. So a pre-r21 record with an
+ * inherited hash and a claim wallet was promised an exit the dispatcher would never take, and a
+ * CREATE whose nonce survived only in the recovery record was denied one the dispatcher does.
+ *
+ * An operation-specific gap (nonce, intended root) is only reported once the operation is KNOWN:
+ * for an unmarked record there is no fact to apply a rule to.
+ */
+export function describeAutomaticRecoveryExit(job: PersistedFailedJob): AutomaticRecoveryExit {
+  const gaps: HeldRecoveryGap[] = [];
+  if (!getLiftJobTransactionEvidence(job)) gaps.push('transaction_hash');
+  // The wallet must come from the SAME carrier as the hash; the claim names the NEXT attempt's wallet.
+  if (!liftJobCheckedSigner(job)) gaps.push('signer_wallet');
+  // r15 (3814317413) — the promise must match what the DISPATCHER will actually do. It refuses to
+  // finalize a record that cannot form a published-finalized job (claim and validation are part of
+  // that shape), so a record missing them has no automatic exit however complete its proof looks:
+  // every tick would resolve `recovered` and then decline, leaving the operator-only clear the
+  // response said was unnecessary.
+  if (!job.claim || !job.validation) gaps.push('claim_or_validation');
+  if (pinnedPublishIdentityKaId(job) === undefined) gaps.push('publish_identity');
+  // PR #2300 r5 (3812123691) — the exit is OPERATION-SPECIFIC, so it may only be promised on
+  // authoritative evidence of which operation ran. `queuedLiftOperationKind` answers 'update' for
+  // an unmarked record as a SAFE fallback, not as a fact: if such a record was really a create,
+  // update recognition can never recognize it and update absence is deliberately inconclusive, so
+  // every chain outcome leaves it held. Promising a retry there sends the client into a loop.
+  // Unmarked means the operator's by-id clear, and the response now says so.
+  const operation = liftJobOperationKindMarker(job);
+  if (operation === undefined) {
+    gaps.push('operation_marker');
+  } else if (operation === 'create') {
+    if (liftJobCheckedNonce(job) === undefined) gaps.push('nonce');
+  } else {
+    const intendedRoot = (job.request as { knowledgeAssetVmPublish?: { sealMerkleRoot?: unknown } })
+      .knowledgeAssetVmPublish?.sealMerkleRoot;
+    if (!(typeof intendedRoot === 'string' && intendedRoot.length > 0)) gaps.push('intended_root');
+  }
+  const [first, ...rest] = gaps;
+  return first === undefined ? { exit: true } : { exit: false, gaps: [first, ...rest] };
+}
+
+/**
+ * The ONE gate of the automatic retry lane, shared by the scheduler (`scheduleRetryIfEligible`),
+ * the claim-time sweep (`reacceptDueFailedJobs`) and the read-only status projection, so what the
+ * projection reports and what the lane does cannot drift.
+ *
+ * `autoRetryEnabled` is the operator kill-switch; the rest is registry policy, the shared retry
+ * budget, and the hold — a job whose transaction is unaccounted for is never reaccepted
+ * automatically, whatever the registry says about its code.
+ */
+export function isAutomaticallyRetryableLiftJob(
+  job: PersistedFailedJob,
+  options: { readonly autoRetryEnabled: boolean },
+): boolean {
+  return options.autoRetryEnabled
+    && isAutoRetryLiftFailure(job)
+    && job.retries.retryCount < job.retries.maxRetries
+    && !isHeldForChainProof(job);
+}
+
+/**
+ * The CODE half of the gate above: is this the kind of failure the registry lets the publisher
+ * retry by itself? Independent of the operator's kill-switch, the budget and the hold, which is
+ * what lets the read view tell "this code is not in the lane" from "the lane is off".
+ */
+function isAutoRetryLiftFailure(job: PersistedFailedJob): boolean {
+  return getLiftJobFailurePolicy(job.failure.code).autoRetry === true
+    && job.failure.retryable
+    && job.failure.resolution === 'reset_to_accepted';
+}
+
+/**
+ * #1828 — whether a job still OCCUPIES its lifecycle subject: any non-terminal state, or a failed
+ * job admission would still bind rather than replace. Admission dedup
+ * (findActiveKnowledgeAssetVmPublishJob) and the intent-recovery lookup MUST both partition on this
+ * so they cannot drift — an occupying job is the live one to bind; everything else (finalized, and
+ * a failed job that is neither retryable nor held) is superseded.
+ *
+ * GH#2270 — neither the retry BUDGET nor the retryable flag alone decides occupancy any more:
+ *  - a RETRYABLE failed job holds its subject even with the budget spent, because a fresh client
+ *    re-submit re-arms one budget on the SAME jobId (admission's fresh-mandate reaccept);
+ *  - a job {@link isHeldForChainProof} holds it whatever its code says, INCLUDING a terminal
+ *    diagnosis: admission must answer that re-submit with a retryable pending-chain-proof
+ *    rejection, and the alternative is minting a REPLACEMENT job for a lifecycle whose transaction
+ *    may already be on chain — the double publish GH#2270 exists to prevent.
+ * A failure that proves its transaction had no effect (reverted, refused pre-acceptance) is not
+ * held, so it supersedes normally and the KA can be published again.
+ */
+export function isOccupyingLifecycleJob(job: PersistedLiftJob): boolean {
+  if (!isTerminalLiftJobState(job.status)) return true;
+  return isFailedJob(job) && (job.failure.retryable || isHeldForChainProof(job));
+}
+
+/**
+ * GH#2270 — which records may BIND each lifecycle, grouped BY that lifecycle.
+ *
+ * {@link isOccupyingLifecycleJob} answers "could this job bind a subject" from the job alone, which
+ * is not enough once a key has history: an ordinary FAILED job records what already happened, so a
+ * strictly NEWER record for the same key means the lifecycle moved on without it. Without that
+ * rule the widened occupancy resurrects history — a store written before this PR could let an
+ * exhausted failed job's subject fall vacant and mint a successor, and afterwards BOTH records read
+ * as occupying, so admission would fresh-mandate a superseded job back to life beside its own
+ * successor.
+ *
+ * A job {@link isHeldForChainProof} is EXEMPT from that demotion, and this is the sharp edge: a
+ * newer sibling is not chain proof. Whatever else happened on this lifecycle afterwards, that
+ * record's transaction is still unaccounted for, and the only things that may release it are
+ * recovery proving the transaction's fate or an operator clearing that exact job by id. So a held
+ * record keeps binding its lifecycle and keeps answering `LiftJobPendingChainProofError` — even
+ * behind a finalized successor, which is a completed publish, not evidence about the held one.
+ *
+ * Non-terminal jobs are never demoted either: two live jobs on one key is the broken invariant
+ * #1828 exists to surface as a conflict, not something to silently pick a winner from.
+ *
+ * The lifecycle KEY is the caller's to define, and it is a PARAMETER rather than a precondition in
+ * prose: a caller handing this a mixed list cannot make one lifecycle demote a record of another.
+ * `lifecycleKeyOf` returns null for a job that has no key (a non-VM or malformed request), which
+ * drops it from every group. Within a group the binding jobs are ordered so the FIRST is the one
+ * admission must answer for: held records first (they block), then the newest.
+ */
+export function selectLifecycleBindingJobs(
+  jobs: readonly PersistedLiftJob[],
+  lifecycleKeyOf: (job: PersistedLiftJob) => string | null,
+): Map<string, PersistedLiftJob[]> {
+  const groups = new Map<string, PersistedLiftJob[]>();
+  for (const job of jobs) {
+    const key = lifecycleKeyOf(job);
+    if (key === null) continue;
+    groups.set(key, [...(groups.get(key) ?? []), job]);
+  }
+
+  const binding = new Map<string, PersistedLiftJob[]>();
+  for (const [key, group] of groups) {
+    const newest = group.reduce((a, b) => (compareAcceptedJobs(a, b) >= 0 ? a : b));
+    const held = (job: PersistedLiftJob): boolean => isFailedJob(job) && isHeldForChainProof(job);
+    binding.set(key, group
+      .filter((job) => isOccupyingLifecycleJob(job)
+        && !(isFailedJob(job) && !held(job) && compareAcceptedJobs(job, newest) < 0))
+      .sort((a, b) => (held(a) === held(b) ? compareAcceptedJobs(b, a) : (held(a) ? -1 : 1))));
+  }
+  return binding;
+}
+
+/**
+ * #1837 — the single terminal-clear authority, reused by both `clear(status)` (bulk, through
+ * {@link isBulkClearableTerminalLiftJob}) and `clearTerminalJob(jobId)` so they cannot drift. A job
+ * is clearable iff it is in a native terminal state (finalized|failed) AND is not a
+ * `retry_recovery`-failed job — those may still carry a pending on-chain tx that periodic recovery
+ * will finalize, so ordinary and bulk cleanup do not remove them. The separately authorized,
+ * exact-job override below is their deliberate operator/owner exit. A `retry_recovery`-failed job
+ * is therefore treated as NONTERMINAL-for-routine-cleanup.
+ */
+export function isClearableTerminalLiftJob(job: PersistedLiftJob): boolean {
+  return isTerminalLiftJobState(job.status)
+    && !(isFailedJob(job) && job.failure.resolution === 'retry_recovery');
+}
+
+/**
+ * Can THIS node settle a held job itself — the CAPABILITY half of "does an automatic exit exist"?
+ *
+ * {@link hasAutomaticRecoveryExit} answers from the record alone (is there a question the chain
+ * could settle). This answers whether the components that would ask and act are wired up, per
+ * WALLET and per OPERATION, because both narrow what can actually be settled.
+ *
+ * 3825614002 — a publisher instance has a ROLE, and the role is now named and chosen ONCE, at
+ * construction. It used to be inferred inside the decision method from which collaborators
+ * happened to be installed, so the same oracle meant different things depending on whether a
+ * resolver sat beside it and a reader had to reconstruct constructor combinations to know which.
+ */
+export type HeldJobSettlementCapability = (
+  job: PersistedFailedJob,
+  walletId: string,
+  operationKind: 'create' | 'update' | undefined,
+) => boolean;
+
+/** Neither a local lane nor an oracle: this instance genuinely has no automatic exit to offer. */
+export const NO_HELD_JOB_SETTLEMENT: HeldJobSettlementCapability = () => false;
+
+/**
+ * The ADMISSION role: this instance holds no resolvers of its own and runs no scheduler, but it is
+ * the one that answers clients. It therefore asks the lane that would actually do the work, and
+ * that oracle IS the answer — not a narrowing of local wiring it does not have. Consulting a
+ * named-recovery resolver here would ask this instance about a collaborator only the runtime has.
+ */
+export function delegatedHeldJobSettlement(
+  capableForWallet: (walletId: string, operationKind: 'create' | 'update' | undefined) => boolean,
+): HeldJobSettlementCapability {
+  return (_job, walletId, operationKind) => capableForWallet(walletId, operationKind);
+}
+
+/**
+ * The RUNTIME role: this instance owns the lane. An oracle, when present, narrows the answer per
+ * wallet and operation; the local wiring still has to be complete on top of that.
+ *
+ * r12 (3813505773) — a named job needs the named recovery resolver whatever its kind. The create
+ * case looks exempt because the absence release is create-only and needs nothing but the reset, but
+ * that is only ONE of its outcomes: if the transaction MINED, settling it means building canonical
+ * evidence and repairing the lifecycle, which is exactly what that resolver does. Without it a
+ * mined create is held forever while the response promised convergence.
+ */
+export function localHeldJobSettlement(options: {
+  readonly capableForWallet?: (walletId: string, operationKind: 'create' | 'update' | undefined) => boolean;
+  readonly hasNamedRecoveryResolver: boolean;
+}): HeldJobSettlementCapability {
+  return (job, walletId, operationKind) => {
+    if (options.capableForWallet && !options.capableForWallet(walletId, operationKind)) return false;
+    if (!isKnowledgeAssetVmPublishJobRequest(job.request)) return true;
+    return options.hasNamedRecoveryResolver;
+  };
+}
+
+/**
+ * Pick the role from how this instance was wired. Deliberately the ONE place that reads collaborator
+ * presence for this purpose: after construction the decision asks the returned policy directly.
+ */
+export function resolveHeldJobSettlementCapability(wiring: {
+  readonly hasChainProofResolver: boolean;
+  readonly capableForWallet?: (walletId: string, operationKind: 'create' | 'update' | undefined) => boolean;
+  readonly hasNamedRecoveryResolver: boolean;
+}): HeldJobSettlementCapability {
+  if (!wiring.hasChainProofResolver) {
+    return wiring.capableForWallet
+      ? delegatedHeldJobSettlement(wiring.capableForWallet)
+      : NO_HELD_JOB_SETTLEMENT;
+  }
+  return localHeldJobSettlement({
+    ...(wiring.capableForWallet ? { capableForWallet: wiring.capableForWallet } : {}),
+    hasNamedRecoveryResolver: wiring.hasNamedRecoveryResolver,
+  });
+}
+
+/**
+ * Does this caller own the job's admission lane?
+ *
+ * The pending-transaction override below is destructive and `/api/publisher/clear-job` is open to
+ * every registered agent token, so an AGENT'S right to accept that risk is per job. The separately
+ * authenticated node operator owns the queue and is authorized independently.
+ *
+ * The owner is the AUTHENTICATED ENQUEUER, not the resolved author: curated publishing lets those
+ * differ (GH#1778), so a curator may submit for another author and it is the curator who admitted
+ * the job. A record with no admission has no agent to match — falling back to the author would
+ * grant the override to an identity that did not enqueue anything. Only the node-operator lane may
+ * clear such a legacy record.
+ *
+ * This boundary is generic over job kind on purpose (3824743779): it reads one typed job-level
+ * field and never inspects an operation payload, so a new job variant needs no case here.
+ *
+ * Attribution comes ONLY from an explicit stamp made at admission (3825162149). There is
+ * deliberately no fallback that reads the publish payload's `callerAgentAddress`: on the
+ * agent's own publish path that field is the AUTHOR, so such a fallback silently handed the
+ * destructive override to a curated-publish signer who enqueued nothing. A record with no
+ * stamp is denied instead, which is the conservative answer and the one this doc has always
+ * claimed.
+ */
+function ownsLiftJobAdmissionLane(job: PersistedLiftJob, agentAddress: string | undefined): boolean {
+  if (!agentAddress) return false;
+  const admittedBy = job.admission?.byAgentAddress;
+  if (typeof admittedBy !== 'string' || admittedBy.length === 0) return false;
+  // The REPOSITORY's identity equality, not a second definition. A bespoke
+  // `toLowerCase()` folded case for legacy non-EVM identities (peer IDs) too, which the
+  // canonical helper deliberately compares byte-for-byte: on a destructive authorization
+  // boundary that silently widened who counts as the owner.
+  return knowledgeAssetAgentAddressesEqual(admittedBy, agentAddress);
+}
+
+/**
+ * What the TARGETED by-id clear may remove.
+ *
+ * #1837's base predicate treats transaction-bearing jobs as nonterminal-for-cleanup, because
+ * periodic recovery may still finalize them from chain. That is right for bulk cleanup. The
+ * explicit agent-owner/node-operator override is the exit for one exact closed-run record:
+ * it accepts a pre-broadcast `validated` record, a `retry_recovery` failure, or a live
+ * `broadcast`/`included` record. The append-only journal remains, and no broad clear receives this
+ * authority. A `claimed` record stays denied because it can still be running before validation;
+ * an operator must stop the runner and let that claim resolve before clearing it.
+ *
+ * The exception is named rather than expressed as the base predicate's complement: written that
+ * way it would silently absorb every future reason a terminal job becomes protected. Additions to
+ * the base policy stay denied here until someone allows them on purpose.
+ *
+ * The caller must also be entitled to it: either the admission owner (see
+ * {@link ownsLiftJobAdmissionLane}) or the authenticated node operator.
+ */
+export function isTargetedClearableLiftJob(
+  job: PersistedLiftJob,
+  options: TargetedLiftJobClearOptions = {},
+): boolean {
+  if (isClearableTerminalLiftJob(job)) return true;
+  const rawOverride = options.pendingTransactionOverride;
+  if (!rawOverride || typeof rawOverride !== 'object') return false;
+  // Backward compatibility for the original public options shape. Legacy `requestedBy` is
+  // deliberately normalized to AGENT authority only: it can clear its own admission lane but
+  // can never acquire the node-wide capability introduced later.
+  const override: PendingTransactionClearOverride | null = 'requestedBy' in rawOverride
+    && !('kind' in rawOverride)
+    && typeof rawOverride.requestedBy === 'string'
+    && rawOverride.requestedBy.trim().length > 0
+    ? { kind: 'agent' as const, agentAddress: rawOverride.requestedBy }
+    : 'kind' in rawOverride
+      ? rawOverride
+      : null;
+  if (!override) return false;
+  // Authority and state eligibility are decided together, under the same job lock. An agent may
+  // accept risk only for the lane it admitted; a node operator owns the queue and may accept it
+  // for any job, including an unstamped pre-upgrade record.
+  switch (override.kind) {
+    case 'agent':
+      if (typeof override.agentAddress !== 'string'
+        || !ownsLiftJobAdmissionLane(job, override.agentAddress)) return false;
+      break;
+    case 'nodeOperator':
+      break;
+    default:
+      // Persisted/API inputs exist at runtime independently of this TypeScript union. Unknown
+      // legacy or malformed authority variants must never become a truthy destructive override.
+      return false;
+  }
+  if (job.status === 'validated' || job.status === 'broadcast' || job.status === 'included') return true;
+  return isTerminalLiftJobState(job.status)
+    && isFailedJob(job)
+    && job.failure.resolution === 'retry_recovery';
+}
+
+/**
+ * What BULK `clear(status)` may delete: terminal-clearable, MINUS a job {@link isHeldForChainProof}.
+ *
+ * Deleting a held job turns admission's `LiftJobPendingChainProofError` back into a fresh job for
+ * the same KA, so bulk cleanup is safe by default and the targeted lane above is where an operator
+ * accepts that risk deliberately, for one named job.
+ *
+ * A job whose failure PROVES its transaction had no effect is not held, so routine cleanup of
+ * reverted and unfunded attempts keeps working. Nothing is lost either way: the #1829 journal is
+ * append-only and a clear never touches it, so the txHash outlives the job record.
+ */
+export function isBulkClearableTerminalLiftJob(job: PersistedLiftJob): boolean {
+  return isClearableTerminalLiftJob(job) && !(isFailedJob(job) && isHeldForChainProof(job));
+}
+
+/**
+ * Why a job is not moving, when it is not moving:
+ *  - `backoff` — the publisher's own lane owns it; it fires at `nextRetryAt`.
+ *  - `pending_chain_proof` — a transaction may exist; no path may republish it until chain
+ *    proof says otherwise (GH#2270 PR-3 dispatches on that proof).
+ *  - `recovery` — `retry_recovery` resolution: `recover()` re-checks it forever, off-budget.
+ *  - `operator` — retryable and evidence-free, but nothing automatic will move it: the code is
+ *    not allow-listed, or the operator switched the lane off.
+ *  - `exhausted` — the shared retry budget is spent; a fresh client mandate re-arms exactly one.
+ */
+export type LiftJobRetryWaitingReason =
+  | 'backoff'
+  | 'pending_chain_proof'
+  | 'recovery'
+  | 'operator'
+  | 'exhausted';
+
+/**
+ * Read-only retry projection of a job. `autoRetryEligible` answers "will this node retry this
+ * job by itself?"; `waitingReason` is absent when the job is not waiting on a retry at all (it
+ * is still running, finalized, or failed terminally with nothing left to re-arm it).
+ */
+export interface LiftJobRetryProjection {
+  readonly autoRetryEligible: boolean;
+  readonly waitingReason?: LiftJobRetryWaitingReason;
+  /**
+   * GH#2942 — WHY the job is not moving, where the waiting reason alone is too coarse: a held job
+   * (what is missing, or whether this node can act on a complete record), a retryable job nothing
+   * automatic will move (which of three different reasons), or a spent budget. Absent where
+   * nothing blocks: a job on its own backoff, a terminal one, one owned by `recover()`. Derived on
+   * read from the record and the node's wiring, never persisted, and carrying only fixed text —
+   * no RPC URL, hash, payload or any other instance data.
+   */
+  readonly blocker?: LiftJobRetryBlocker;
+}
+
+/**
+ * The closed vocabulary of {@link LiftJobRetryBlocker}. A consumer must treat the SET as open: a
+ * later release may name a new reason, and an unknown code is still a reason to read `summary`.
+ *
+ * Held for chain proof, record incomplete (`LiftJobRetryBlocker.missing` lists every gap):
+ * `no_transaction_hash` · `no_signer_wallet` · `claim_or_validation_missing` ·
+ * `publish_identity_unpinned` · `operation_unmarked` · `nonce_missing` · `intended_root_missing`.
+ * Held, record complete: `recovery_not_configured` (this node cannot settle it) ·
+ * `chain_recheck_pending` (it re-checks on a bounded backoff).
+ * Retryable, evidence-free, nothing automatic: `not_auto_retryable` · `auto_retry_disabled` ·
+ * `retry_not_scheduled`. Out of budget: `retry_budget_spent`.
+ */
+export type LiftJobRetryBlockerCode =
+  | 'no_transaction_hash'
+  | 'no_signer_wallet'
+  | 'claim_or_validation_missing'
+  | 'publish_identity_unpinned'
+  | 'operation_unmarked'
+  | 'nonce_missing'
+  | 'intended_root_missing'
+  | 'recovery_not_configured'
+  | 'chain_recheck_pending'
+  | 'not_auto_retryable'
+  | 'auto_retry_disabled'
+  | 'retry_not_scheduled'
+  | 'retry_budget_spent';
+
+export interface LiftJobRetryBlocker {
+  readonly code: LiftJobRetryBlockerCode;
+  /** Fixed text for the code: what is wrong, and what an operator can and cannot do about it. */
+  readonly summary: string;
+  /** Held job with an incomplete record: EVERY gap, in the order the headline code was chosen. */
+  readonly missing?: readonly HeldRecoveryGap[];
+  /**
+   * `chain_recheck_pending` only, and only when the publisher runtime that runs the re-checks holds an
+   * observation for this exact incarnation (GH#2945): the latest re-check that did not settle the job.
+   * Never derived from the record, so it is attached by the daemon, not by {@link describeHeldBlocker}.
+   */
+  readonly lastCheck?: AsyncLiftLastChainCheck;
+}
+
+/**
+ * The text behind each code. A `Record` over the union, so a new code cannot be added without
+ * saying what an operator may do about it. Fixed strings only: the same text is served to every
+ * caller of every job, so nothing here may quote an instance.
+ *
+ * Two sentences recur on purpose, because they are the whole operator contract for a held job:
+ * no supported control writes evidence into a job (so an operator cannot supply a missing hash,
+ * signer, nonce or root), and clearing a job abandons this node's TRACKING of it — it neither
+ * cancels a transaction that was sent nor proves that none was.
+ */
+export const LIFT_JOB_RETRY_BLOCKER_SUMMARY: Record<LiftJobRetryBlockerCode, string> = {
+  no_transaction_hash:
+    'This held job has no transaction hash on its record, so chain recovery has nothing to look up. '
+    + 'No supported control can add one; the best-effort journal (`GET /api/publisher/journal`, '
+    + 'named-KA jobs) may still hold it for inspection. '
+    + 'An operator cannot manufacture a safe retry: clearing the job abandons tracking, it does not '
+    + 'prove that no transaction was sent.',
+  no_signer_wallet:
+    'The record names a transaction hash but not the wallet that signed it (a record written before '
+    + 'the signer was preserved), so chain recovery cannot ask the chain about it. No supported '
+    + 'control can add the signer; inspect the transaction on a block explorer. Clearing the job '
+    + 'abandons tracking, it does not prove that the transaction had no effect.',
+  claim_or_validation_missing:
+    'The record lacks the claim or validation facts a finalized publish is built from, so chain '
+    + 'recovery cannot finalize this job even if its transaction mined. No supported control can '
+    + 'add them; inspect the transaction yourself before deciding whether to clear the job.',
+  publish_identity_unpinned:
+    'The record has no pinned identity for the asset the transaction would have minted or updated, '
+    + 'so chain recovery cannot recognize its effect on chain. No supported control can add it; '
+    + 'inspect the transaction yourself before deciding whether to clear the job.',
+  operation_unmarked:
+    'The record does not say whether the signed transaction was a create or an update (it predates '
+    + 'the marker), so no operation-specific proof can be applied and none is guessed. Inspect the '
+    + 'transaction yourself before deciding whether to clear the job.',
+  nonce_missing:
+    'A CREATE needs the nonce its transaction reserved to prove it was never sent; the record has '
+    + 'none. Chain recovery will still finalize this job if the transaction mined, but can never '
+    + 'release it as unsent. No supported control can add the nonce; inspect the transaction yourself.',
+  intended_root_missing:
+    'An UPDATE needs the Merkle root it intended to install to recognize its effect on chain; the '
+    + 'record has none, so recovery cannot recognize it. Absence is never proof for an UPDATE, so '
+    + 'recovery will not release it either. Inspect the transaction yourself before deciding '
+    + 'whether to clear the job.',
+  recovery_not_configured:
+    'The record is complete, but this node has no chain-recovery capability for this job\'s wallet '
+    + 'and operation (no resolver, its chain adapter cannot answer, or the publisher runtime is not '
+    + 'running), so nothing will ask the chain. Restore chain access, the adapter capability or the '
+    + 'runtime rather than retrying: a retry is refused while a transaction may exist, and clearing '
+    + 'the job abandons tracking only.',
+  chain_recheck_pending:
+    'While the publisher runtime is running and not paused, chain recovery re-checks this job on a '
+    + 'bounded backoff. It finalizes the same job if the transaction mined, and releases a CREATE for '
+    + 'a re-run only once the transaction is proven never sent; an UPDATE whose transaction never '
+    + 'landed stays held, because absence is never proof for an UPDATE. On the job-detail routes, '
+    + 'when the running publisher holds an observation of the latest re-check it is reported as '
+    + '`retryState.blocker.lastCheck`; without one (no re-check yet, a restart, no running runtime, or '
+    + 'a surface that has no runtime reader) this cannot say whether the provider is unavailable, the '
+    + 'transaction is still pending, or the proof is inconclusive. Waiting is the safe move; no '
+    + 'operator action manufactures a safe retry.',
+  not_auto_retryable:
+    'This failure is not one the publisher retries by itself, and it persisted no transaction '
+    + 'evidence. `POST /api/publisher/retry` or re-submitting the identical request re-runs it as '
+    + 'the same job.',
+  auto_retry_disabled:
+    'Automatic retry is switched off on this node. A retry that was already scheduled fires again '
+    + 'once it is switched back on (the claim sweep releases a few per pass), but a job that failed '
+    + 'while it was off was never scheduled and is not released by switching it on: re-run it by '
+    + 'hand with `POST /api/publisher/retry` or by re-submitting the request.',
+  retry_not_scheduled:
+    'This failure is one the publisher retries by itself, but no retry was scheduled for it (it '
+    + 'failed while automatic retry was off, or was recorded by an older build). Re-run it by hand '
+    + 'with `POST /api/publisher/retry` or by re-submitting the request.',
+  retry_budget_spent:
+    'The shared retry budget (automatic and manual) is spent. Re-submitting the identical '
+    + '`vm/publish-async` request re-arms a full budget on this same job; nothing else does.',
+};
+
+const HELD_GAP_BLOCKER: Record<HeldRecoveryGap, LiftJobRetryBlockerCode> = {
+  transaction_hash: 'no_transaction_hash',
+  signer_wallet: 'no_signer_wallet',
+  claim_or_validation: 'claim_or_validation_missing',
+  publish_identity: 'publish_identity_unpinned',
+  operation_marker: 'operation_unmarked',
+  nonce: 'nonce_missing',
+  intended_root: 'intended_root_missing',
+};
+
+function blockerOf(code: LiftJobRetryBlockerCode, missing?: readonly HeldRecoveryGap[]): LiftJobRetryBlocker {
+  return { code, summary: LIFT_JOB_RETRY_BLOCKER_SUMMARY[code], ...(missing ? { missing } : {}) };
+}
+
+/**
+ * Why a held job is held, from its record and — when the caller can say — this node's recovery
+ * capability. An incomplete record is named by its gaps whatever the node could do; a complete one
+ * is `recovery_not_configured` or `chain_recheck_pending` by the capability. With no capability
+ * supplied, a complete record gets no blocker rather than a guess.
+ */
+export function describeHeldBlocker(
+  job: PersistedFailedJob,
+  canSettleHeldJob: ((job: PersistedFailedJob) => boolean) | undefined,
+): LiftJobRetryBlocker | undefined {
+  const exit = describeAutomaticRecoveryExit(job);
+  if (!exit.exit) return blockerOf(HELD_GAP_BLOCKER[exit.gaps[0]], exit.gaps);
+  if (!canSettleHeldJob) return undefined;
+  return blockerOf(canSettleHeldJob(job) ? 'chain_recheck_pending' : 'recovery_not_configured');
+}
+
+/**
+ * Why a retryable, evidence-free job has nothing automatic moving it. The ORDER is the point:
+ * a code that is not in the lane is blamed first, because switching the lane on cannot help it;
+ * a switched-off lane next; an unscheduled job last.
+ */
+function describeOperatorBlocker(
+  job: PersistedFailedJob,
+  options: { readonly autoRetryEnabled: boolean },
+): LiftJobRetryBlocker {
+  if (!isAutoRetryLiftFailure(job)) return blockerOf('not_auto_retryable');
+  if (!options.autoRetryEnabled) return blockerOf('auto_retry_disabled');
+  return blockerOf('retry_not_scheduled');
+}
+
+/**
+ * What a retry pass does with a failed job. Finer-grained than the three counts it feeds, so the
+ * read view can name the reason without re-deriving it: both `blocked_*` actions count as
+ * `blockedPendingRecovery`, both `skip_*` as `skipped`. INTERNAL vocabulary — the package's public
+ * surface exposes the counts and the projection, never these strings.
+ */
+export type FailedJobRetryAction =
+  | 'reaccept'
+  | 'blocked_recovery'
+  | 'blocked_pending_chain_proof'
+  | 'skip_terminal'
+  | 'skip_exhausted';
+
+/**
+ * Which count of one retry pass each action contributes to, co-located with the action it
+ * aggregates. A `Record` over the union is exhaustive at COMPILE time: a sixth action cannot be
+ * added without choosing its bucket here, where a reader can see the collapse, instead of falling
+ * into whatever the aggregation loop happened to do last.
+ */
+export const FAILED_JOB_RETRY_ACTION_COUNT: Record<
+  FailedJobRetryAction,
+  'retried' | 'blockedPendingRecovery' | 'skipped'
+> = {
+  reaccept: 'retried',
+  blocked_recovery: 'blockedPendingRecovery',
+  blocked_pending_chain_proof: 'blockedPendingRecovery',
+  skip_terminal: 'skipped',
+  skip_exhausted: 'skipped',
+};
+
+/**
+ * The WRITE decision, over the job alone: what a retry pass does with it. The operator's
+ * `autoRetryEnabled` knob is not an input and the signature has nowhere to put it — a manual retry
+ * does the same thing whether the automatic lane is on or off.
+ *
+ * Chain safety is decided before BOTH the terminal shortcut and the budget: a job whose transaction
+ * is unaccounted for is held whatever its code says (a terminal `confirmation_mismatch` is exactly
+ * such a job), and it can never be reaccepted because a budget happened to remain.
+ */
+export function classifyRetryAction(job: PersistedFailedJob): FailedJobRetryAction {
+  if (job.failure.resolution === 'retry_recovery') return 'blocked_recovery';
+  if (isHeldForChainProof(job)) return 'blocked_pending_chain_proof';
+  // A terminal failure with nothing to account for is not WAITING for anything — no lane,
+  // operator action or fresh mandate re-arms it; only a clear removes it.
+  if (!job.failure.retryable) return 'skip_terminal';
+  if (job.retries.retryCount >= job.retries.maxRetries) return 'skip_exhausted';
+  return 'reaccept';
+}
+
+/**
+ * The read view of {@link classifyRetryAction}: the same action, plus the operator's knob and the
+ * job's actual SCHEDULE.
+ *
+ * Being allow-listed is not the same as being scheduled. The claim-time sweep only reaccepts a job
+ * whose `nextRetryAt` is set and due, and that timestamp is assigned when the failure is RECORDED —
+ * so a job that failed while the kill-switch was off, or one persisted by a build that predates the
+ * lane, stays allow-listed forever and is never picked up. Reporting `backoff` there promises a
+ * retry no sweep will run.
+ *
+ * The check belongs HERE and not in {@link isAutomaticallyRetryableLiftJob}: that predicate runs at
+ * recording time, BEFORE the schedule exists, so requiring a schedule there would stop anything
+ * from ever being scheduled at all.
+ *
+ * An unscheduled job therefore reads `{autoRetryEligible: false, waitingReason: 'operator'}` — the
+ * honest answer, since nothing automatic will move it and `POST /api/publisher/retry` or a
+ * re-submit re-arms it. The manual paths are untouched: {@link classifyRetryAction} never consults
+ * the schedule, so a bulk retry still reaccepts such a job.
+ */
+export function describeRetryProjection(
+  job: PersistedFailedJob,
+  options: {
+    readonly autoRetryEnabled: boolean;
+    /**
+     * GH#2942 - can THIS node settle the held job (the capability half of "does an automatic exit
+     * exist")? Only a held job with a COMPLETE record consults it. Omitted, such a job gets no
+     * blocker rather than a guess, and the projection keeps the two keys it always had.
+     */
+    readonly canSettleHeldJob?: (job: PersistedFailedJob) => boolean;
+  },
+): LiftJobRetryProjection {
+  const autoRetryEligible = isAutomaticallyRetryableLiftJob(job, options)
+    && job.timestamps.nextRetryAt !== undefined;
+  return { autoRetryEligible, ...describeRetryAction(classifyRetryAction(job), job, autoRetryEligible, options) };
+}
+
+/**
+ * Why a classified action is waiting, and - where that reason is too coarse - what exactly it waits for.
+ * ONE exhaustive switch, so each `waitingReason` sits beside its `blocker`; a key is ABSENT (never
+ * `undefined`) where nothing applies, which is what keeps the serialized projection stable.
+ */
+function describeRetryAction(
+  action: FailedJobRetryAction,
+  job: PersistedFailedJob,
+  autoRetryEligible: boolean,
+  options: {
+    readonly autoRetryEnabled: boolean;
+    readonly canSettleHeldJob?: (job: PersistedFailedJob) => boolean;
+  },
+): { waitingReason?: LiftJobRetryWaitingReason; blocker?: LiftJobRetryBlocker } {
+  switch (action) {
+    case 'blocked_recovery':
+      return { waitingReason: 'recovery' };
+    case 'blocked_pending_chain_proof': {
+      const blocker = describeHeldBlocker(job, options.canSettleHeldJob);
+      return { waitingReason: 'pending_chain_proof', ...(blocker ? { blocker } : {}) };
+    }
+    case 'skip_exhausted':
+      return { waitingReason: 'exhausted', blocker: blockerOf('retry_budget_spent') };
+    case 'skip_terminal':
+      return {};
+    case 'reaccept':
+      // The ONE place the operator's kill-switch is allowed to matter: it separates a retry the
+      // node performs itself from one that waits for an operator or a client re-submit.
+      return autoRetryEligible
+        ? { waitingReason: 'backoff' }
+        : { waitingReason: 'operator', blocker: describeOperatorBlocker(job, options) };
+    default: {
+      // A new action must decide its own reason AND blocker here rather than inherit a silent default.
+      const unhandled: never = action;
+      return unhandled;
+    }
+  }
+}
+
+/**
+ * {@link describeRetryProjection} for any job. A job that has not failed has no retry projection:
+ * nothing is eligible, and it is not waiting on a retry.
+ */
+export function deriveLiftJobRetryProjection(
+  job: PersistedLiftJob,
+  options: Parameters<typeof describeRetryProjection>[1],
+): LiftJobRetryProjection {
+  if (!isFailedJob(job)) return { autoRetryEligible: false };
+  return describeRetryProjection(job, options);
+}
+
+/**
+ * GH#2270 PR-3 — what the dispatcher DOES with one held job once the chain has answered.
+ *
+ * The command, not the effect. Persistence, wallet locks and journal writes stay in the publisher;
+ * what is decided here is the mapping from a chain fact to a disposition, which is failed-job
+ * policy and belongs beside the predicates that define the hold in the first place. Splitting it
+ * out is also what makes the decision testable without a store: every row below is a pure
+ * (job, verdict) pair.
+ */
+export type ChainProofDisposition =
+  /** The chain carries the publish. Finalize this job from the evidence the verdict carries. */
+  | { readonly action: 'finalize' }
+  /**
+   * Nothing of this job's is on chain. Release it for a re-run under the same jobId, through the
+   * evidence-preserving reset — proven absence, or a revert of a transaction some EARLIER attempt
+   * sent (this job failed before signing anything of its own).
+   */
+  | { readonly action: 'reset' }
+  /**
+   * This job's OWN transaction reverted. Re-record it as `tx_reverted`: the registry's
+   * proven-ineffective verdict releases the hold through {@link isProvenIneffectiveLiftFailure},
+   * and the job stays terminal rather than being re-run on the node's money.
+   */
+  | { readonly action: 'refail_reverted'; readonly failedFromState: 'broadcast' | 'included' }
+  /** Nothing was established. Keep holding; the next pass asks again. */
+  | { readonly action: 'hold' };
+
+/**
+ * The dispatcher's decision table, over the job and the chain's verdict alone.
+ *
+ * `reverted` is the only verdict whose disposition depends on the JOB, and the question it asks is
+ * whose transaction reverted. A job that failed from 'broadcast'/'included' signed that one
+ * itself, so `tx_reverted` is a true statement about it and releases the hold the registry's way.
+ * A job holding an INHERITED hash failed before signing anything — the reverted transaction
+ * belongs to an earlier attempt, `LIFT_JOB_FAILURE_ALLOWED_STATES` rejects `tx_reverted` from a
+ * pre-send state for exactly that reason, and the honest release is the same reset a proven
+ * absence gets.
+ *
+ * `unrecognized` sits with `pending`/`inconclusive` and not with the absences: a mined transaction
+ * carrying no publish this adapter can parse is a fact about THAT transaction, not proof that no
+ * publish happened — an adapter with unwired publish contracts lands there too.
+ */
+export function decideChainProofDisposition(
+  job: PersistedFailedJob,
+  verdict: AsyncLiftChainProofResolution['status'],
+): ChainProofDisposition {
+  switch (verdict) {
+    case 'recovered':
+      return { action: 'finalize' };
+    case 'not-found':
+      // GH#2270 PR-3 r4 — release-by-absence is CREATE-ONLY, enforced HERE because this is the
+      // decision that authorises the reset write. The CLI resolver already refuses to earn a
+      // `not-found` for an update, but the resolver is replaceable wiring; an embedder's resolver
+      // that does not know the rule must not be able to release an update through this table. An
+      // update has no monotone register to prove absence against — "the intended root is not
+      // current" also describes our update landing and then being SUPERSEDED by a third party,
+      // and a release would re-apply the stale root over newer state (the ABA hazard). Held, with
+      // the operator's by-id clear as the exit.
+      return queuedLiftOperationKind(job) === 'update' ? { action: 'hold' } : { action: 'reset' };
+    case 'reverted':
+      if (job.failure.failedFromState === 'broadcast' || job.failure.failedFromState === 'included') {
+        return { action: 'refail_reverted', failedFromState: job.failure.failedFromState };
+      }
+      // r16 (3814610383) — the INHERITED-hash fall-through re-queues the job, and re-queuing an
+      // update replays its immutable request. A revert proves the earlier transaction had no
+      // effect; it says nothing about whether that request is still current, so replaying it can
+      // write a stale root over a newer third-party version — the same ABA hazard the `not-found`
+      // branch above refuses to take. The create-only rule therefore applies to both ways of
+      // reaching a reset, not just to absence.
+      return queuedLiftOperationKind(job) === 'update' ? { action: 'hold' } : { action: 'reset' };
+    case 'pending-mempool':
+    case 'pending-awaiting-confirmation':
+    case 'unrecognized':
+    case 'inconclusive':
+      return { action: 'hold' };
+    default: {
+      // A new verdict must choose its disposition here rather than inherit a silent hold.
+      const unhandled: never = verdict;
+      return unhandled;
+    }
+  }
+}

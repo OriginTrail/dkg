@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi, DKGAgentWallet, buildAgentProfile, collectPublishableMultiaddrs, CclEvaluator, DiscoveryClient, ProfileManager, encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret, DKGAgent, AGENT_REGISTRY_CONTEXT_GRAPH, parseCclPolicy, OxigraphStore, getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, contextGraphMetaUri, sparqlString, DKGQueryEngine, sha256, EVMChainAdapter, MockChainAdapter, createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS, mintTokens, ethers, tmpdir, mkdtemp, readFile, readdir, rm, join, fileURLToPath, _wrapAgentPublisherForSeal, CapturingContextGraphChainAdapter, AsyncSignerAddressContextGraphChainAdapter, SignerListContextGraphChainAdapter, PcaCuratedRegistrationChainAdapter, NonRegisteringACKChainAdapter, FlakyRegistrationACKChainAdapter, TransientIdentityFailureChainAdapter, BrandNewCoreTransientChainAdapter, PermanentProfileFailureChainAdapter, RetryPathPermanentFailureChainAdapter, ContextAuthorizedPublisherChainAdapter, buildSnapshotFactQuads, ReferenceEvaluator, loadYaml, CCL_FACT_NS, OperationalKeyOnlyPublishChainAdapter, ExternalOperationalKeyPublishChainAdapter, AddressOnlyExternalOperationalKeyPublishChainAdapter, AsyncAddressSignMessageAsPublishChainAdapter, GenericSignMessageExternalOperationalKeyPublishChainAdapter, MultiSignerGenericSignMessagePublishChainAdapter, SingleAddressMismatchedGenericSignMessagePublishChainAdapter, SingleSignerAdapterPublishChainAdapter, ReservingAuthorityContextGraphChainAdapter, type Quad, type ChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type OnChainPublishResult, type V10PublishDirectParams } from './agent.shared';
+import { describe, it, expect, beforeAll, afterAll, vi, DKGAgentWallet, buildAgentProfile, collectPublishableMultiaddrs, CclEvaluator, CclResourceNotFoundError, DiscoveryClient, ProfileManager, encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret, DKGAgent, AGENT_REGISTRY_CONTEXT_GRAPH, parseCclPolicy, OxigraphStore, getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, contextGraphMetaUri, sparqlString, DKGQueryEngine, sha256, EVMChainAdapter, MockChainAdapter, createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS, mintTokens, ethers, tmpdir, mkdtemp, readFile, readdir, rm, join, fileURLToPath, _wrapAgentPublisherForSeal, CapturingContextGraphChainAdapter, AsyncSignerAddressContextGraphChainAdapter, SignerListContextGraphChainAdapter, PcaCuratedRegistrationChainAdapter, NonRegisteringACKChainAdapter, FlakyRegistrationACKChainAdapter, TransientIdentityFailureChainAdapter, BrandNewCoreTransientChainAdapter, PermanentProfileFailureChainAdapter, RetryPathPermanentFailureChainAdapter, ContextAuthorizedPublisherChainAdapter, buildSnapshotFactQuads, ReferenceEvaluator, loadYaml, CCL_FACT_NS, OperationalKeyOnlyPublishChainAdapter, ExternalOperationalKeyPublishChainAdapter, AddressOnlyExternalOperationalKeyPublishChainAdapter, AsyncAddressSignMessageAsPublishChainAdapter, GenericSignMessageExternalOperationalKeyPublishChainAdapter, MultiSignerGenericSignMessagePublishChainAdapter, SingleAddressMismatchedGenericSignMessagePublishChainAdapter, SingleSignerAdapterPublishChainAdapter, ReservingAuthorityContextGraphChainAdapter, type Quad, type ChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type OnChainPublishResult, type V10PublishDirectParams } from './agent.shared';
 
 
 
@@ -198,6 +198,90 @@ decisions: []
       expect(listedEvals).toHaveLength(1);
       expect(listedEvals[0].evaluationUri).toBe(publishedEval.evaluationUri);
       expect(listedEvals[0].results).toEqual([]);
+
+      await agent.stop().catch(() => {});
+    });
+
+
+    it('types real missing-policy and missing-binding failures for HTTP boundaries', async () => {
+      const store = new OxigraphStore();
+      const agent = await DKGAgent.create({
+        name: 'MissingPolicyBot',
+        store,
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+      await agent.start();
+      await agent.createContextGraph({ id: 'ops-missing-policy', name: 'Missing Policy' });
+
+      const approveFailure = await agent.approveCclPolicy({
+        contextGraphId: 'ops-missing-policy',
+        policyUri: 'did:dkg:policy:missing',
+      }).catch((error: unknown) => error);
+      expect(approveFailure).toBeInstanceOf(CclResourceNotFoundError);
+      expect(approveFailure).toMatchObject({
+        name: 'CclResourceNotFoundError',
+        code: 'CCL_RESOURCE_NOT_FOUND',
+        resource: 'policy',
+      });
+      const revokeFailure = await agent.revokeCclPolicy({
+        contextGraphId: 'ops-missing-policy',
+        policyUri: 'did:dkg:policy:missing',
+      }).catch((error: unknown) => error);
+      expect(revokeFailure).toBeInstanceOf(CclResourceNotFoundError);
+      expect(revokeFailure).toMatchObject({
+        name: 'CclResourceNotFoundError',
+        code: 'CCL_RESOURCE_NOT_FOUND',
+        resource: 'policy_binding',
+      });
+
+      await agent.stop().catch(() => {});
+    });
+
+
+    it('treats an approved policy with a missing body as an integrity failure', async () => {
+      const store = new OxigraphStore();
+      const agent = await DKGAgent.create({
+        name: 'IncompletePolicyBot',
+        store,
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+      await agent.start();
+      await agent.createContextGraph({ id: 'ops-incomplete-policy', name: 'Incomplete Policy' });
+      const published = await agent.publishCclPolicy({
+        contextGraphId: 'ops-incomplete-policy',
+        name: 'incident-review',
+        version: '0.1.0',
+        content: `policy: incident-review
+version: 0.1.0
+rules: []
+decisions: []
+`,
+      });
+      await agent.approveCclPolicy({
+        contextGraphId: 'ops-incomplete-policy',
+        policyUri: published.policyUri,
+      });
+      await store.deleteByPattern({
+        subject: published.policyUri,
+        predicate: DKG_ONTOLOGY.DKG_POLICY_BODY,
+        graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+      });
+
+      let failure: unknown;
+      try {
+        await agent.evaluateCclPolicy({
+          contextGraphId: 'ops-incomplete-policy',
+          name: 'incident-review',
+          facts: [],
+        });
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toBeInstanceOf(CclResourceNotFoundError);
+      expect(failure).toMatchObject({
+        message: `CCL policy body missing: ${published.policyUri}`,
+      });
 
       await agent.stop().catch(() => {});
     });

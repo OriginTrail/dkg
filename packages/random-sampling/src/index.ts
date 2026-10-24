@@ -51,7 +51,10 @@ export {
 
 export {
   RandomSamplingProver,
+  createRandomSamplingRepairOperation,
   type RandomSamplingProverDeps,
+  type RandomSamplingRepairOperation,
+  type RandomSamplingRepairMaterial,
   type ProverLogger,
   type TickOutcome,
 } from './prover.js';

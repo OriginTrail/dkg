@@ -30,6 +30,7 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
+import { formatContextGraphInfo, formatContextGraphListTable } from '../context-graph-list-format.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
@@ -86,14 +87,9 @@ import {
   isCliKnownTransactionError,
   isCliRetryableRpcError,
   createCliEvmProviders,
-  getCliReceiptWithFailover,
-  assertCliSuccessfulReceipt,
   sendCliRawTransactionWithFailover,
   CLI_RPC_READ_STALL_TIMEOUT_MS,
   CLI_RPC_BROADCAST_TIMEOUT_MS,
-  CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
-  CLI_RPC_RECEIPT_POLL_INTERVAL_MS,
-  CLI_RPC_RECEIPT_TIMEOUT_MS,
 } from '../cli-rpc.js';
 import {
   appendSupervisorLog,
@@ -112,7 +108,7 @@ const contextGraphCmd = program
 
 contextGraphCmd
   .command('catchup-status <context-graph>')
-  .description('Show latest background catch-up status for a context graph')
+  .description('Show latest background catch-up status for a context graph (id, name hash or on-chain id, e.g. 32)')
   .option('--watch', 'Poll until the catch-up job reaches a terminal state')
   .option('--interval <seconds>', 'Polling interval for --watch', '2')
   .action(async (contextGraph: string, opts: CatchupStatusCommandOptions) => {
@@ -194,11 +190,11 @@ contextGraphCmd
 
 contextGraphCmd
   .command('register <id>')
-  .description('Register an existing context graph on-chain (unlocks Verifiable Memory, requires TRAC)')
+  .description('Register an existing context graph on-chain (unlocks Verifiable Memory; requires gas and either a TRAC deposit or eligible PCA waiver)')
   .option('--reveal', 'Deprecated: V10 ContextGraphs registration does not reveal cleartext metadata on-chain')
   .option('--access-policy <n>', 'Access policy: 0 = public/discoverable, 1 = private/curated', parseInt)
   .option('--publish-policy <n>', 'Publish policy: 0 = curated, 1 = open', parseInt)
-  .option('--pca-account-id <id>', 'Publishing Conviction Account id for PCA-curated registration')
+  .option('--pca-account-id <id>', 'Publishing Conviction Account id for curated registration by its owner or an exact-account registered agent')
   .action(async (id: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
@@ -339,17 +335,25 @@ contextGraphCmd
       // before any peers are connected.
       const signed = await client.signJoinRequest(contextGraphId);
       // Step 2: forward via P2P. The daemon delivers the signed
-      // delegation to the curator (direct dial first, then broadcast
-      // fallback for legacy invites). Returns delivery count so we can
+      // delegation directly to the curator. Returns delivery count so we can
       // warn on no-curator.
       const result = await client.requestJoin(contextGraphId, signed.delegation, curatorPeerId);
-      if (result.delivered === 0) {
+      if (result.delivered === 0 && result.queued !== true) {
         console.error(`Could not deliver join request to curator for "${contextGraphId}". No reachable curator found.`);
         process.exit(1);
       }
-      console.log(`Join request sent for "${contextGraphId}" (delivered to ${result.delivered} peer${result.delivered === 1 ? '' : 's'}).`);
-      console.log('  Waiting for curator approval. Check status with:');
-      console.log(`  dkg context-graph info ${contextGraphId}`);
+      if (result.status === 'approved' || result.status === 'already-member' || result.autoApproved || result.alreadyMember) {
+        console.log(`Join approved for "${contextGraphId}".`);
+        console.log(`  Open it with: dkg context-graph info ${contextGraphId}`);
+      } else if (result.queued === true) {
+        console.log(`Join request queued for "${contextGraphId}". Delivery will retry automatically.`);
+        console.log('  Waiting for curator approval. Check status with:');
+        console.log(`  dkg context-graph info ${contextGraphId}`);
+      } else {
+        console.log(`Join request sent for "${contextGraphId}" (delivered to ${result.delivered} peer${result.delivered === 1 ? '' : 's'}).`);
+        console.log('  Waiting for curator approval. Check status with:');
+        console.log(`  dkg context-graph info ${contextGraphId}`);
+      }
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -432,34 +436,100 @@ contextGraphCmd
     }
   });
 
+const joinPolicyCmd = contextGraphCmd
+  .command('join-policy')
+  .description('Inspect or change private Context Graph open enrollment (owner only)');
+
+joinPolicyCmd
+  .command('status <contextGraphId>')
+  .description('Show whether open enrollment is enabled for a private Context Graph')
+  .action(async (contextGraphId: string) => {
+    try {
+      const client = await ApiClient.connect();
+      const policy = await client.getContextGraphJoinPolicy(contextGraphId);
+      console.log(`Open enrollment policy for "${policy.contextGraphId || contextGraphId}":`);
+      console.log(`  Mode:                    ${policy.mode}`);
+      console.log(`  Members:                 ${policy.memberCount ?? 'unknown'}`);
+      console.log(`  Maximum members:         ${policy.maxMembers ?? 'not set'}`);
+      console.log(`  Approvals in last hour:  ${policy.approvalsLastHour ?? 'unknown'}`);
+      console.log(`  Maximum approvals/hour:  ${policy.maxApprovalsPerHour ?? 'not set'}`);
+      if (policy.mode === 'open') {
+        console.warn('WARNING: Anyone who knows this Context Graph ID can request private access through open enrollment and may gain publishing authority.');
+      } else {
+        console.log('  New join requests require manual approval. Existing members are not revoked.');
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+joinPolicyCmd
+  .command('open <contextGraphId>')
+  .description('Enable open enrollment for a private Context Graph (owner only; security-sensitive)')
+  .requiredOption('--max-members <positive>', 'Hard cap on total approved members', (value: string) => (
+    parsePositiveIntegerOption(value, '--max-members')
+  ))
+  .option(
+    '--max-approvals-per-hour <positive>',
+    'Rolling cap on automatic approvals per hour',
+    (value: string) => parsePositiveIntegerOption(value, '--max-approvals-per-hour'),
+    20,
+  )
+  .option('--yes', 'Acknowledge the open-enrollment security risk')
+  .action(async (contextGraphId: string, opts: ActionOpts) => {
+    try {
+      console.warn('WARNING: Anyone who knows this Context Graph ID can request private access through open enrollment and may gain publishing authority.');
+      if (!opts.yes) {
+        throw new Error('Open enrollment was not enabled. Re-run with --yes to acknowledge this risk.');
+      }
+
+      const maxMembers = Number(opts.maxMembers);
+      const maxApprovalsPerHour = Number(opts.maxApprovalsPerHour);
+      const client = await ApiClient.connect();
+      await client.setContextGraphJoinPolicy(contextGraphId, {
+        mode: 'open',
+        maxMembers,
+        maxApprovalsPerHour,
+        acknowledgeOpenEnrollment: true,
+      });
+      console.log(`Open enrollment enabled for "${contextGraphId}".`);
+      console.log(`  Maximum members:         ${maxMembers}`);
+      console.log(`  Maximum approvals/hour:  ${maxApprovalsPerHour}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+joinPolicyCmd
+  .command('manual <contextGraphId>')
+  .description('Disable open enrollment and require manual approval for future requests')
+  .action(async (contextGraphId: string) => {
+    try {
+      const client = await ApiClient.connect();
+      await client.setContextGraphJoinPolicy(contextGraphId, { mode: 'manual' });
+      console.log(`Open enrollment disabled for "${contextGraphId}"; future join requests require manual approval.`);
+      console.log('Existing members remain approved; disabling open enrollment does not revoke existing members.');
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
 contextGraphCmd
   .command('list')
-  .description('List all known context graphs')
-  .action(async () => {
+  .description('List all known context graphs, including those discovered on chain')
+  .option('--json', 'Print the raw /api/context-graph/list rows as JSON')
+  .action(async (opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
       const { contextGraphs } = await client.listContextGraphs();
-
-      if (contextGraphs.length === 0) {
-        console.log('No context graphs registered yet.');
+      if (opts.json) {
+        console.log(JSON.stringify(contextGraphs, null, 2));
         return;
       }
-
-      const idW = Math.max(4, ...contextGraphs.map(p => p.id.length));
-      const nameW = Math.max(4, ...contextGraphs.map(p => p.name.length));
-
-      const header = `  ${'ID'.padEnd(idW)}   ${'Name'.padEnd(nameW)}   Type       Creator`;
-      console.log(header);
-      console.log('  ' + '─'.repeat(header.length - 2));
-
-      for (const p of contextGraphs) {
-        const type = p.isSystem ? 'system' : 'user';
-        const creator = p.creator
-          ? (p.creator.length > 24 ? p.creator.slice(0, 12) + '...' + p.creator.slice(-8) : p.creator)
-          : '—';
-        console.log(`  ${p.id.padEnd(idW)}   ${p.name.padEnd(nameW)}   ${type.padEnd(9)}  ${creator}`);
-      }
-      console.log(`\n  ${contextGraphs.length} context graph(s)`);
+      for (const line of formatContextGraphListTable(contextGraphs)) console.log(line);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -468,23 +538,21 @@ contextGraphCmd
 
 contextGraphCmd
   .command('info <id>')
-  .description('Show details of a specific context graph')
+  .description('Show details of a specific context graph (by id or on-chain id, e.g. #32)')
   .action(async (id: string) => {
     try {
       const client = await ApiClient.connect();
       const { contextGraphs } = await client.listContextGraphs();
-      const p = contextGraphs.find((x: any) => x.id === id);
+      const onChainId = /^#?[1-9][0-9]*$/.test(id) ? id.replace(/^#/, '') : undefined;
+      const p = contextGraphs.find((x) => x.id === id)
+        ?? (onChainId === undefined
+          ? undefined
+          : contextGraphs.find((x) => (x.onChain?.id ?? x.onChainId) === onChainId));
       if (!p) {
         console.error(`Context graph "${id}" not found.`);
         process.exit(1);
       }
-      console.log(`  ID:          ${p.id}`);
-      console.log(`  URI:         ${p.uri}`);
-      console.log(`  Name:        ${p.name}`);
-      console.log(`  Description: ${p.description ?? '—'}`);
-      console.log(`  Type:        ${p.isSystem ? 'system' : 'user'}`);
-      console.log(`  Creator:     ${p.creator ?? '—'}`);
-      console.log(`  Created:     ${p.createdAt ?? '—'}`);
+      for (const line of formatContextGraphInfo(p)) console.log(line);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);

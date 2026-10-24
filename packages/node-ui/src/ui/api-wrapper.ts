@@ -1,5 +1,6 @@
 import * as realApi from './api.js';
 import { mockApi } from './mocks/provider.js';
+import { currentApiToken } from './lib/apiToken.js';
 
 let useMocks: boolean | null = null;
 let detectMockModePromise: Promise<boolean> | null = null;
@@ -7,10 +8,8 @@ const MOCK_MODE_DETECTION_TIMEOUT_MS = 5000;
 const MOCK_MODE_DETECTION_ATTEMPTS = 2;
 const MOCK_MODE_DETECTION_RETRY_MS = 250;
 
-// Subscribers (e.g. the MockModeBanner) that want to know when the UI has
-// fallen back to fabricated demo data so they can surface a visible indicator
-// (GH #904). The previous fallback set only a `console.warn` + a
-// `window.__DKG_USING_MOCKS__` flag — nothing the operator could see.
+// The App recovery guard subscribes so a failed status probe replaces every
+// operational route with the unavailable-node view.
 type MockModeListener = (usingMocks: boolean) => void;
 const mockModeListeners = new Set<MockModeListener>();
 
@@ -34,8 +33,7 @@ export function subscribeMockMode(listener: MockModeListener): () => void {
 }
 
 function authHeaders(): Record<string, string> {
-  if (typeof window === 'undefined') return {};
-  const token = (window as any).__DKG_TOKEN__;
+  const token = currentApiToken();
   if (!token) return {};
   return { Authorization: `Bearer ${token}` };
 }
@@ -65,7 +63,7 @@ async function probeMockMode(): Promise<boolean> {
   return true;
 }
 
-async function detectMockMode(): Promise<boolean> {
+export async function detectMockMode(): Promise<boolean> {
   if (useMocks !== null) return useMocks;
   if (detectMockModePromise) return detectMockModePromise;
   detectMockModePromise = (async () => {
@@ -83,8 +81,8 @@ async function detectMockMode(): Promise<boolean> {
         );
       }
     }
-    // Notify React subscribers so a visible demo-data indicator can render
-    // (GH #904) — the flag/console.warn alone are invisible to the operator.
+    // Notify the mounted recovery guard; console output alone cannot hide the
+    // fallback fixtures from the operator.
     mockModeListeners.forEach((listener) => listener(useMocks as boolean));
     return useMocks;
   })();

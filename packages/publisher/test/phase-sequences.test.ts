@@ -11,7 +11,6 @@ import {
   TypedEventBus,
   generateEd25519Keypair,
   createOperationContext,
-  encodeWorkspacePublishRequest,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
@@ -24,6 +23,7 @@ import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { wrapPublisherForTest } from './_helpers/seal.js';
 import { makeTestKaAllocator } from './_helpers/ka-allocator.js';
 import { hardhatACKProvider } from './_helpers/acks.js';
+import { encodeRootlessWorkspaceRequest } from './_helpers/rootless-workspace.js';
 
 let CONTEXT_GRAPH: string;
 let _kav10Address: string;
@@ -275,15 +275,14 @@ describe('Phase-sequence contracts', () => {
 
     const quads = [q(ENTITY, 'http://schema.org/name', '"WS draft"')];
     const nquads = quads
-      .map(t => `<${t.subject}> <${t.predicate}> ${t.object} .`)
+      .map(t => `<${t.subject}> <${t.predicate}> ${t.object} <${t.graph}> .`)
       .join('\n');
 
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       shareOperationId: 'ws-test-001',
       contextGraphId: CONTEXT_GRAPH,
       publisherPeerId: '12D3KooWTest',
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: ENTITY }],
       timestampMs: Date.now(),
     });
 
@@ -393,9 +392,12 @@ describe('Phase-sequence contracts', () => {
         publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
       });
 
-      (chain as unknown as { createKnowledgeAssets: (params: { onBroadcast?: () => void }) => Promise<never> }).createKnowledgeAssets =
+      // PR #2300 — the adapter contract now always hands the write-ahead a signed transaction, and
+      // the hook AWAITS it, so a double that calls it bare (or without awaiting) diverges from the
+      // production path: the durable boundary never runs and the phase it emits never appears.
+      (chain as unknown as { createKnowledgeAssets: (params: { onBroadcast?: (s: { txHash: string; nonce?: number }) => Promise<void> | void }) => Promise<never> }).createKnowledgeAssets =
         async (params) => {
-          params.onBroadcast?.();
+          await params.onBroadcast?.({ txHash: `0x${'ab'.repeat(32)}`, nonce: 1 });
           throw new Error('simulated publish broadcast failure');
         };
 
@@ -432,9 +434,9 @@ describe('Phase-sequence contracts', () => {
       const pub = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads: origQuads });
       expect(pub.status).toBe('confirmed');
 
-      (chain as unknown as { updateKnowledgeCollectionV10: (params: { onBroadcast?: () => void }) => Promise<never> }).updateKnowledgeCollectionV10 =
+      (chain as unknown as { updateKnowledgeCollectionV10: (params: { onBroadcast?: (s: { txHash: string; nonce?: number }) => Promise<void> | void }) => Promise<never> }).updateKnowledgeCollectionV10 =
         async (params) => {
-          params.onBroadcast?.();
+          await params.onBroadcast?.({ txHash: `0x${'cd'.repeat(32)}`, nonce: 2 });
           throw new Error('simulated update broadcast failure');
         };
       if (typeof (chain as { updateKnowledgeAssets?: unknown }).updateKnowledgeAssets === 'function') {

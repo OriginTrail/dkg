@@ -20,12 +20,13 @@ import {
  * silently re-break that CTA.
  */
 describe('describePromoteResult', () => {
-  it('returns kind="success" with a positive triple count message when promotedCount > 0', () => {
+  it('returns kind="success" with complete-KA scope and the affected triple count', () => {
     const out = describePromoteResult('character-sheet', { promotedCount: 7 });
     expect(out.kind).toBe('success');
     if (out.kind !== 'success') return;
     expect(out.promotedCount).toBe(7);
-    expect(out.message).toContain('Promoted 7 triples');
+    expect(out.message).toContain('Shared the complete Knowledge Asset');
+    expect(out.message).toContain('(7 triples)');
     expect(out.message).toContain('character-sheet');
   });
 
@@ -36,14 +37,14 @@ describe('describePromoteResult', () => {
     // The CTA now renders `outcome.message` verbatim instead of the
     // misleading "✓ 0 triples now in Shared Memory" toast.
     expect(out.message).toContain('character-sheet');
-    expect(out.message.toLowerCase()).toContain('no triples');
+    expect(out.message).toContain('not newly shared');
   });
 
   it('uses singular "triple" when promotedCount === 1', () => {
     const out = describePromoteResult('character-sheet', { promotedCount: 1 });
     expect(out.kind).toBe('success');
     if (out.kind !== 'success') return;
-    expect(out.message).toContain('Promoted 1 triple ');
+    expect(out.message).toContain('(1 triple)');
     expect(out.message).not.toContain('1 triples');
   });
 });
@@ -97,7 +98,7 @@ describe('describePromoteError', () => {
     expect(out.limitBytes).toBe(10 * 1024 * 1024);
     expect(out.message).toContain('skills-catalog-0001');
     expect(out.message.toLowerCase()).toContain('too large');
-    expect(out.message.toLowerCase()).toContain('fewer entities');
+    expect(out.message.toLowerCase()).toContain('smaller knowledge assets');
   });
 
   it('returns null for non-HttpError throwables (network errors, generic Error)', () => {

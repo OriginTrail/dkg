@@ -1,6 +1,28 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import type { ScopedContentGraphDiscoverySnapshot } from '../src/scoped-content-graph-discovery-memo.js';
+import { describe, it, expect, beforeEach, expectTypeOf } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Worker } from 'node:worker_threads';
+import {
+  GraphSetIndexStore,
+  OxigraphStore,
+  OxigraphWorkerStore,
+  asGraphWriteRevisionSource,
+  type Quad,
+  type QueryOptions as StoreQueryOptions,
+} from '@origintrail-official/dkg-storage';
+import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  MemoryLayer,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+} from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
+import type {
+  LegacyResolveKAResult,
+  QueryEngine,
+} from '../src/query-engine.js';
 import { validateReadOnlySparql } from '../src/sparql-guard.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
@@ -9,9 +31,20 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   return Object.assign(fn, { calls });
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 const CONTEXT_GRAPH = 'agent-registry';
 const GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const META = `${GRAPH}/_meta`;
+const ONTOLOGY_GRAPH = 'did:dkg:context-graph:ontology';
 const ENTITY = 'did:dkg:agent:QmImageBot';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const DKG_SUB_GRAPH = 'http://dkg.io/ontology/SubGraph';
@@ -20,6 +53,8 @@ const DKG_CONTEXT_GRAPH = 'https://dkg.network/ontology#ContextGraph';
 const DKG_REGISTRATION_STATUS = 'https://dkg.network/ontology#registrationStatus';
 const SCHEMA_NAME = 'http://schema.org/name';
 const COUNT_NAME = 'http://example.com/countName';
+const DKG = 'http://dkg.io/ontology/';
+const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 
 function q(s: string, p: string, o: string, g = GRAPH): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -29,6 +64,7 @@ function subGraphRegistration(name: string): Quad[] {
   const subGraphUri = `${GRAPH}/${name}`;
   return [
     q(subGraphUri, RDF_TYPE, DKG_SUB_GRAPH, META),
+    q(subGraphUri, `${DKG}parentContextGraph`, GRAPH, META),
     q(subGraphUri, SCHEMA_NAME, `"${name}"`, META),
     q(subGraphUri, 'http://dkg.io/ontology/createdBy', 'did:dkg:agent:test', META),
   ];
@@ -36,6 +72,38 @@ function subGraphRegistration(name: string): Quad[] {
 
 function assertionGraphRegistration(graph: string, name: string): Quad {
   return q(`urn:dkg:assertion:${name}`, DKG_ASSERTION_GRAPH, graph, META);
+}
+
+function graphScopedMetadata(
+  ual: string,
+  assertionVersion: string,
+  assertionGraph: string,
+  publicTripleCount: number,
+  subGraphName?: string,
+  metadataGraph = META,
+  privateTripleCount = 0,
+  privateMerkleRoot?: string,
+): Quad[] {
+  return [
+    q(
+      ual,
+      `${DKG}contentScopeVersion`,
+      `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD_INTEGER}>`,
+      metadataGraph,
+    ),
+    q(ual, `${DKG}kaUal`, ual, metadataGraph),
+    q(ual, `${DKG}assertionVersion`, `"${assertionVersion}"^^<${XSD_INTEGER}>`, metadataGraph),
+    q(ual, `${DKG}publicTripleCount`, `"${publicTripleCount}"^^<${XSD_INTEGER}>`, metadataGraph),
+    q(ual, `${DKG}privateTripleCount`, `"${privateTripleCount}"^^<${XSD_INTEGER}>`, metadataGraph),
+    q(ual, `${DKG}assertionGraph`, assertionGraph, metadataGraph),
+    q(ual, `${DKG}contextGraph`, GRAPH, metadataGraph),
+    ...(privateMerkleRoot
+      ? [q(ual, `${DKG}privateMerkleRoot`, JSON.stringify(privateMerkleRoot), metadataGraph)]
+      : []),
+    ...(subGraphName
+      ? [q(ual, `${DKG}subGraphName`, JSON.stringify(subGraphName), metadataGraph)]
+      : []),
+  ];
 }
 
 describe('DKGQueryEngine', () => {
@@ -48,6 +116,7 @@ describe('DKGQueryEngine', () => {
 
     // Seed data
     await store.insert([
+      q(GRAPH, RDF_TYPE, DKG_CONTEXT_GRAPH, ONTOLOGY_GRAPH),
       q(ENTITY, 'http://schema.org/name', '"ImageBot"'),
       q(ENTITY, 'http://schema.org/description', '"Analyzes images"'),
       q(
@@ -65,6 +134,197 @@ describe('DKGQueryEngine', () => {
     );
     expect(result.bindings).toHaveLength(1);
     expect(result.bindings[0]['name']).toBe('"ImageBot"');
+  });
+
+  it('keeps caller cancellation on execution reads but out of shareable graph discovery', async () => {
+    class OptionsRecordingStore extends OxigraphStore {
+      queryOptions: Array<Parameters<OxigraphStore['query']>[1]> = [];
+      discoveryOptions: StoreQueryOptions[] = [];
+      async query(sparql: string, options?: Parameters<OxigraphStore['query']>[1]) {
+        this.queryOptions.push(options);
+        return super.query(sparql, options);
+      }
+      async listGraphsByPrefix(
+        prefix: string,
+        options?: StoreQueryOptions,
+      ) {
+        this.discoveryOptions.push(options ?? {});
+        return (await super.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
+      }
+    }
+
+    const recordingStore = new OptionsRecordingStore();
+    const recordingEngine = new DKGQueryEngine(recordingStore);
+    await recordingStore.insert([
+      q('urn:options:s', 'http://schema.org/name', '"Options"', GRAPH),
+    ]);
+    const controller = new AbortController();
+
+    await recordingEngine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      {
+        contextGraphId: CONTEXT_GRAPH,
+        includeSharedMemory: true,
+        signal: controller.signal,
+        priority: 'background',
+        source: 'api.query',
+      },
+    );
+
+    expect(recordingStore.queryOptions).not.toHaveLength(0);
+    expect(recordingStore.queryOptions).toContainEqual(expect.objectContaining({
+      signal: controller.signal,
+      priority: 'background',
+      source: 'api.query',
+    }));
+    expect(recordingStore.discoveryOptions).not.toHaveLength(0);
+    for (const options of recordingStore.discoveryOptions) {
+      expect(options).toMatchObject({
+        priority: 'background',
+        source: 'api.query',
+      });
+      expect(options.signal).toBeUndefined();
+    }
+  });
+
+  it('keeps caller cancellation out of shared graph-discovery flights', async () => {
+    let releaseDiscovery!: () => void;
+    const discoveryGate = new Promise<void>((resolve) => {
+      releaseDiscovery = resolve;
+    });
+    let discoveryStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      discoveryStarted = resolve;
+    });
+
+    class SharedFlightRecordingStore extends OxigraphStore {
+      sharedOptions: Array<Parameters<OxigraphStore['query']>[1]> = [];
+      private held = false;
+
+      async query(sparql: string, options?: Parameters<OxigraphStore['query']>[1]) {
+        if (sparql.includes('ontology/SubGraph')) {
+          this.sharedOptions.push(options);
+          if (!this.held) {
+            this.held = true;
+            discoveryStarted();
+            await discoveryGate;
+          }
+        }
+        return super.query(sparql, options);
+      }
+    }
+
+    const sharedStore = new SharedFlightRecordingStore();
+    const sharedEngine = new DKGQueryEngine(sharedStore);
+    await sharedStore.insert([
+      q('urn:shared:s', 'http://schema.org/name', '"Shared"', GRAPH),
+    ]);
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const scopedQuery =
+      'SELECT ?sourceGraph ?name WHERE { GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name } }';
+    const common = {
+      contextGraphId: CONTEXT_GRAPH,
+      includeContextGraphPartitions: true,
+      priority: 'background' as const,
+      source: 'api.query',
+    };
+
+    const first = sharedEngine.query(scopedQuery, {
+      ...common,
+      signal: firstController.signal,
+    });
+    const firstRejected = expect(first).rejects.toThrow('first caller disconnected');
+    await started;
+    const second = sharedEngine.query(scopedQuery, {
+      ...common,
+      signal: secondController.signal,
+    });
+    await Promise.resolve();
+
+    firstController.abort(new Error('first caller disconnected'));
+    await firstRejected;
+    releaseDiscovery();
+
+    await expect(second).resolves.toBeDefined();
+    expect(sharedStore.sharedOptions).toHaveLength(1);
+    expect(sharedStore.sharedOptions[0]).toMatchObject({
+      priority: 'background',
+      source: 'api.query',
+    });
+    expect(sharedStore.sharedOptions[0]?.signal).toBeUndefined();
+    expect(secondController.signal.aborted).toBe(false);
+  });
+
+  it('keeps caller cancellation out of GraphSetIndexStore refresh flights', async () => {
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let refreshStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      refreshStarted = resolve;
+    });
+
+    class AbortAwareGraphListStore extends OxigraphStore {
+      readonly listGraphOptions: StoreQueryOptions[] = [];
+      private held = false;
+
+      override async listGraphs(options?: StoreQueryOptions): Promise<string[]> {
+        this.listGraphOptions.push(options ?? {});
+        if (!this.held) {
+          this.held = true;
+          refreshStarted();
+          await new Promise<void>((resolve, reject) => {
+            const onAbort = () => reject(options?.signal?.reason);
+            options?.signal?.addEventListener('abort', onAbort, { once: true });
+            void refreshGate.then(() => {
+              options?.signal?.removeEventListener('abort', onAbort);
+              resolve();
+            }, reject);
+          });
+        }
+        return super.listGraphs(options);
+      }
+    }
+
+    const inner = new AbortAwareGraphListStore();
+    await inner.insert([
+      q('urn:indexed:s', 'http://schema.org/name', '"Indexed"', GRAPH),
+    ]);
+    const indexedEngine = new DKGQueryEngine(new GraphSetIndexStore(inner));
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const common = {
+      contextGraphId: CONTEXT_GRAPH,
+      includeSharedMemory: true,
+      priority: 'background' as const,
+      source: 'api.query',
+    };
+
+    const first = indexedEngine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      { ...common, signal: firstController.signal },
+    );
+    const firstRejected = expect(first).rejects.toThrow('first caller disconnected');
+    await started;
+    const second = indexedEngine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      { ...common, signal: secondController.signal },
+    );
+
+    firstController.abort(new Error('first caller disconnected'));
+    await firstRejected;
+    releaseRefresh();
+
+    await expect(second).resolves.toBeDefined();
+    expect(inner.listGraphOptions).toHaveLength(1);
+    expect(inner.listGraphOptions[0]).toMatchObject({
+      priority: 'background',
+      source: 'api.query',
+    });
+    expect(inner.listGraphOptions[0].signal).toBeUndefined();
+    expect(secondController.signal.aborted).toBe(false);
   });
 
   it('returns all triples for entity', async () => {
@@ -100,6 +360,8 @@ describe('DKGQueryEngine', () => {
     ]);
 
     const result = await engine.resolveKA(ual);
+    expect(result.contentScopeVersion).toBe(1);
+    expect(result.ual).toBe(ual);
     expect(result.rootEntity).toBe(ENTITY);
     expect(result.rootEntities).toEqual([ENTITY]);
     expect(result.contextGraphId).toBe(CONTEXT_GRAPH);
@@ -122,6 +384,7 @@ describe('DKGQueryEngine', () => {
     ]);
 
     const result = await engine.resolveKA(ual);
+    expect(result.contentScopeVersion).toBe(1);
     // Pre-#968 this returned only bindings[0]; now every member root is read.
     expect(result.rootEntities).toEqual([ENTITY, ENTITY_2]);
     expect(result.rootEntity).toBe(ENTITY); // backward-compat: first member root
@@ -129,6 +392,450 @@ describe('DKGQueryEngine', () => {
     expect(subjects).toContain(ENTITY);
     expect(subjects).toContain(ENTITY_2);
     expect(subjects).toContain(`${ENTITY_2}/.well-known/genid/o1`);
+  });
+
+  it('treats persisted content-scope version zero as a legacy read', async () => {
+    const ual = 'did:dkg:mock:31337/43';
+    await store.insert([
+      q(ual, `${DKG}contentScopeVersion`, `"0"^^<${XSD_INTEGER}>`, META),
+      q(ual, `${DKG}rootEntity`, ENTITY, META),
+      q(ual, `${DKG}contextGraph`, GRAPH, META),
+    ]);
+
+    const result = await engine.resolveKA(ual);
+
+    expect(result.rootEntity).toBe(ENTITY);
+    expect(result.rootEntities).toEqual([ENTITY]);
+  });
+
+  it('ignores legacy control rows stored in an RDF payload graph', async () => {
+    const ual = 'did:dkg:mock:31337/44';
+    const attackerRoot = 'urn:attacker:root';
+    const payloadGraph = 'urn:attacker:payload';
+    await store.insert([
+      q(ual, `${DKG}rootEntity`, ENTITY, META),
+      q(ual, `${DKG}contextGraph`, GRAPH, META),
+      q(ual, `${DKG}rootEntity`, attackerRoot, payloadGraph),
+      q(ual, `${DKG}contextGraph`, GRAPH, payloadGraph),
+    ]);
+
+    const result = await engine.resolveKA(ual);
+
+    expect(result.rootEntities).toEqual([ENTITY]);
+  });
+
+  it('keeps the published resolveKA result root-compatible for legacy consumers', () => {
+    expectTypeOf<QueryEngine['resolveKA']>()
+      .returns.resolves.toEqualTypeOf<LegacyResolveKAResult>();
+  });
+
+  describe('graph-scoped resolveKnowledgeAsset', () => {
+    const UAL = 'did:dkg:31337/0x1111111111111111111111111111111111111111/7';
+
+    it('loads the complete exact VM graph without root metadata or subject-prefix filtering', async () => {
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      const payload = [
+        q('urn:asset:alpha', 'urn:predicate:name', '"Alpha"', vmGraph),
+        q('urn:unconnected:beta', 'urn:predicate:name', '"Beta"', vmGraph),
+        q('urn:unconnected:gamma', 'urn:predicate:value', '"disconnected payload"', vmGraph),
+      ];
+      await store.insert([
+        ...payload,
+        ...graphScopedMetadata(UAL, '1', vmGraph, payload.length),
+        q('urn:asset:alpha', 'urn:predicate:decoy', '"outside exact graph"', GRAPH),
+      ]);
+
+      await expect(engine.resolveKA(UAL)).rejects.toThrow(/resolveKnowledgeAsset/);
+      const result = await engine.resolveKnowledgeAsset(UAL);
+
+      expect(result.contentScopeVersion).toBe(GRAPH_KA_CONTENT_SCOPE_VERSION);
+      if (result.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+        throw new Error('Expected graph-scoped KA');
+      }
+      expect(result.ual).toBe(UAL);
+      expect(result.assertionVersion).toBe('1');
+      expect(result.assertionGraph).toBe(vmGraph);
+      expect(result.rootEntities).toEqual([]);
+      expect(result.quads).toHaveLength(payload.length);
+      expect(new Set(result.quads.map((quad) => quad.subject))).toEqual(
+        new Set(payload.map((quad) => quad.subject)),
+      );
+      expect(result.quads.every((quad) => quad.graph === vmGraph)).toBe(true);
+      expect(result.quads.some((quad) => quad.predicate === 'urn:predicate:decoy')).toBe(false);
+    });
+
+    it('ignores scope markers stored in another KA payload graph', async () => {
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      await store.insert([
+        q('urn:asset:trusted', 'urn:p', '"trusted"', vmGraph),
+        ...graphScopedMetadata(UAL, '1', vmGraph, 1),
+        q(
+          UAL,
+          `${DKG}contentScopeVersion`,
+          `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD_INTEGER}>`,
+          'urn:attacker:other-ka-payload',
+        ),
+      ]);
+
+      const result = await engine.resolveKnowledgeAsset(UAL);
+
+      expect(result.quads).toEqual([
+        q('urn:asset:trusted', 'urn:p', '"trusted"', vmGraph),
+      ]);
+    });
+
+    it.each([
+      ['current', 'https://dkg.network/ontology#'],
+      ['legacy', 'http://dkg.io/ontology/'],
+    ])('rejects a %s named-subgraph meta graph impersonating a registered root', async (_label, namespace) => {
+      const nestedContextGraphId = `${CONTEXT_GRAPH}/updates`;
+      const nestedContextGraphUri = `did:dkg:context-graph:${nestedContextGraphId}`;
+      const poisonedMetaGraph = `${nestedContextGraphUri}/_meta`;
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        nestedContextGraphId,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      const poisonedMetadata = graphScopedMetadata(
+        UAL,
+        '1',
+        vmGraph,
+        1,
+        undefined,
+        poisonedMetaGraph,
+      ).map((entry) => entry.predicate === `${DKG}contextGraph`
+        ? { ...entry, object: nestedContextGraphUri }
+        : entry);
+      await store.insert([
+        q(nestedContextGraphUri, RDF_TYPE, `${namespace}SubGraph`, META),
+        q(nestedContextGraphUri, `${namespace}parentContextGraph`, GRAPH, META),
+        q(nestedContextGraphUri, RDF_TYPE, DKG_CONTEXT_GRAPH, poisonedMetaGraph),
+        q('urn:poisoned:asset', 'urn:p', '"must-not-resolve"', vmGraph),
+        ...poisonedMetadata,
+      ]);
+
+      await expect(engine.resolveKnowledgeAsset(UAL)).rejects.toThrow(/KA not found/);
+    });
+
+    it('accepts the genesis agents root registration from the agents data graph', async () => {
+      const agentsContextGraphId = 'agents';
+      const agentsContextGraphUri = 'did:dkg:context-graph:agents';
+      const agentsMetaGraph = `${agentsContextGraphUri}/_meta`;
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        agentsContextGraphId,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      const metadata = graphScopedMetadata(
+        UAL,
+        '1',
+        vmGraph,
+        1,
+        undefined,
+        agentsMetaGraph,
+      ).map((entry) => entry.predicate === `${DKG}contextGraph`
+        ? { ...entry, object: agentsContextGraphUri }
+        : entry);
+      await store.insert([
+        q(agentsContextGraphUri, RDF_TYPE, DKG_CONTEXT_GRAPH, agentsContextGraphUri),
+        q('urn:agents-root:asset', 'urn:p', '"trusted"', vmGraph),
+        ...metadata,
+      ]);
+
+      const result = await engine.resolveKnowledgeAsset(UAL);
+
+      expect(result.contextGraphId).toBe(agentsContextGraphId);
+      expect(result.quads).toEqual([
+        q('urn:agents-root:asset', 'urn:p', '"trusted"', vmGraph),
+      ]);
+    });
+
+    it('accepts an independently registered slash-shaped wallet root', async () => {
+      const walletContextGraphId = '0x2222222222222222222222222222222222222222/project';
+      const walletContextGraphUri = `did:dkg:context-graph:${walletContextGraphId}`;
+      const walletMetaGraph = `${walletContextGraphUri}/_meta`;
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        walletContextGraphId,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      const metadata = graphScopedMetadata(
+        UAL,
+        '1',
+        vmGraph,
+        1,
+        undefined,
+        walletMetaGraph,
+      ).map((entry) => entry.predicate === `${DKG}contextGraph`
+        ? { ...entry, object: walletContextGraphUri }
+        : entry);
+      await store.insert([
+        q(walletContextGraphUri, RDF_TYPE, DKG_CONTEXT_GRAPH, walletMetaGraph),
+        q('urn:wallet-root:asset', 'urn:p', '"trusted"', vmGraph),
+        ...metadata,
+      ]);
+
+      const result = await engine.resolveKnowledgeAsset(UAL);
+
+      expect(result.contextGraphId).toBe(walletContextGraphId);
+      expect(result.quads).toEqual([
+        q('urn:wallet-root:asset', 'urn:p', '"trusted"', vmGraph),
+      ]);
+    });
+
+    it('rejects metadata when its partition is also a registered legacy root payload graph', async () => {
+      const aliasMetaGraph = `${META}/_meta`;
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      await store.insert([
+        q(META, RDF_TYPE, DKG_CONTEXT_GRAPH, aliasMetaGraph),
+        q('urn:poisoned:legacy-asset', 'urn:p', '"must-not-resolve"', vmGraph),
+        ...graphScopedMetadata(UAL, '1', vmGraph, 1),
+      ]);
+
+      await expect(engine.resolveKnowledgeAsset(UAL)).rejects.toThrow(/KA not found/);
+    });
+
+    it('pages exact-graph reads before materializing the resolved payload', async () => {
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      const payload = Array.from({ length: 257 }, (_, index) =>
+        q(`urn:paged:${index.toString().padStart(3, '0')}`, 'urn:p', `"${index}"`, vmGraph));
+      await store.insert([
+        ...payload,
+        ...graphScopedMetadata(UAL, '1', vmGraph, payload.length),
+      ]);
+      const trackedQuery = recorder(store.query.bind(store));
+      store.query = trackedQuery;
+
+      const result = await engine.resolveKnowledgeAsset(UAL);
+
+      expect(result.quads).toHaveLength(payload.length);
+      const exactReads = trackedQuery.calls
+        .map(([sparql]) => sparql)
+        .filter((sparql) =>
+          sparql.includes(`GRAPH <${vmGraph}>`) && sparql.includes('ORDER BY ?s ?p ?o'));
+      const exactCounts = trackedQuery.calls
+        .map(([sparql]) => sparql)
+        .filter((sparql) =>
+          sparql.includes(`GRAPH <${vmGraph}>`) && sparql.includes('COUNT(*)'));
+      expect(exactReads).toHaveLength(2);
+      expect(exactCounts).toHaveLength(2);
+      expect(exactReads[0]).toMatch(/LIMIT 256\s+OFFSET 0/);
+      expect(exactReads[1]).toMatch(/LIMIT 2\s+OFFSET 256/);
+    });
+
+    it('rejects a declared exact graph that exceeds the cumulative quad budget', async () => {
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      await store.insert(graphScopedMetadata(UAL, '1', vmGraph, 100_001));
+
+      await expect(engine.resolveKnowledgeAsset(UAL)).rejects.toThrow(/exceeds quad limit/);
+    });
+
+    it('derives the versioned VM graph inside the registered subgraph', async () => {
+      const assertionVersion = '2';
+      const subGraphName = 'updates';
+      const scope = createGraphKnowledgeAssetScope(UAL, assertionVersion);
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+        subGraphName,
+      );
+      await store.insert([
+        q('urn:update:subject', 'urn:update:predicate', '"v2"', vmGraph),
+        ...graphScopedMetadata(UAL, assertionVersion, vmGraph, 1, subGraphName),
+      ]);
+
+      const result = await engine.resolveKnowledgeAsset(UAL);
+
+      expect(result.contentScopeVersion).toBe(GRAPH_KA_CONTENT_SCOPE_VERSION);
+      if (result.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+        throw new Error('Expected graph-scoped KA');
+      }
+      expect(result.assertionVersion).toBe(assertionVersion);
+      expect(result.assertionGraph).toBe(vmGraph);
+      expect(result.quads).toEqual([
+        q('urn:update:subject', 'urn:update:predicate', '"v2"', vmGraph),
+      ]);
+    });
+
+    it('fails closed when metadata points away from the UAL-derived exact graph', async () => {
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      const attackerGraph = `${GRAPH}/_verifiable_memory/attacker/7`;
+      await store.insert([
+        q('urn:expected', 'urn:p', '"expected"', vmGraph),
+        q('urn:attacker', 'urn:p', '"attacker"', attackerGraph),
+        ...graphScopedMetadata(UAL, '1', attackerGraph, 1),
+      ]);
+
+      await expect(engine.resolveKnowledgeAsset(UAL)).rejects.toThrow(/assertionGraph mismatch/);
+    });
+
+    it('fails closed when the exact graph count differs from committed metadata', async () => {
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      await store.insert([
+        q('urn:only', 'urn:p', '"one"', vmGraph),
+        ...graphScopedMetadata(UAL, '1', vmGraph, 2),
+      ]);
+
+      await expect(engine.resolveKnowledgeAsset(UAL)).rejects.toThrow(/graph integrity mismatch/);
+    });
+
+    it('does not fall back to legacy resolution when a V2 marker has incomplete metadata', async () => {
+      await store.insert([
+        q(
+          UAL,
+          `${DKG}contentScopeVersion`,
+          `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD_INTEGER}>`,
+          META,
+        ),
+        q(UAL, `${DKG}contextGraph`, GRAPH, META),
+        q(UAL, `${DKG}rootEntity`, ENTITY, META),
+      ]);
+
+      await expect(engine.resolveKnowledgeAsset(UAL)).rejects.toThrow(/missing kaUal metadata/);
+    });
+
+    it('rejects V2 metadata that omits the private triple count', async () => {
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      const metadata = graphScopedMetadata(UAL, '1', vmGraph, 1)
+        .filter((entry) => entry.predicate !== `${DKG}privateTripleCount`);
+      await store.insert([
+        q('urn:asset', 'urn:p', '"value"', vmGraph),
+        ...metadata,
+      ]);
+
+      await expect(engine.resolveKnowledgeAsset(UAL)).rejects.toThrow(
+        /missing privateTripleCount metadata/,
+      );
+    });
+
+    it('rejects an empty V2 count envelope', async () => {
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      await store.insert(graphScopedMetadata(UAL, '1', vmGraph, 0));
+
+      await expect(engine.resolveKnowledgeAsset(UAL)).rejects.toThrow(/empty asset/);
+    });
+
+    it('requires a private commitment exactly when the V2 private count is positive', async () => {
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      await store.insert(graphScopedMetadata(UAL, '1', vmGraph, 0, undefined, META, 1));
+
+      await expect(engine.resolveKnowledgeAsset(UAL)).rejects.toThrow(
+        /requires exactly one privateMerkleRoot/,
+      );
+    });
+
+    it('rejects a V2 private commitment when the private count is zero', async () => {
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      await store.insert(
+        graphScopedMetadata(UAL, '1', vmGraph, 1, undefined, META, 0, 'ab'.repeat(32)),
+      );
+      await store.insert([q('urn:asset', 'urn:p', '"value"', vmGraph)]);
+
+      await expect(engine.resolveKnowledgeAsset(UAL)).rejects.toThrow(
+        /privateMerkleRoot without private content/,
+      );
+    });
+
+    it('accepts a legitimate private-only V2 envelope without materializing public quads', async () => {
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      await store.insert(
+        graphScopedMetadata(UAL, '1', vmGraph, 0, undefined, META, 1, 'cd'.repeat(32)),
+      );
+
+      const result = await engine.resolveKnowledgeAsset(UAL);
+
+      expect(result.quads).toEqual([]);
+    });
+
+    it('does not treat graph-scoped metadata outside a trusted meta partition as control data', async () => {
+      const scope = createGraphKnowledgeAssetScope(UAL, '1');
+      const vmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH,
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      const poisonedMetaGraph = 'urn:attacker:metadata';
+      await store.insert([
+        q('urn:asset', 'urn:p', '"value"', vmGraph),
+        ...graphScopedMetadata(UAL, '1', vmGraph, 1, undefined, poisonedMetaGraph),
+      ]);
+
+      await expect(engine.resolveKnowledgeAsset(UAL)).rejects.toThrow(/KA not found/);
+    });
+
+    it('does not hide a malformed scope marker behind the legacy fallback', async () => {
+      await store.insert([
+        q(UAL, `${DKG}contentScopeVersion`, '"not-an-integer"', META),
+        q(UAL, `${DKG}contextGraph`, GRAPH, META),
+        q(UAL, `${DKG}rootEntity`, ENTITY, META),
+      ]);
+
+      await expect(engine.resolveKnowledgeAsset(UAL)).rejects.toThrow(/invalid contentScopeVersion/);
+    });
   });
 
   it('throws on unknown UAL', async () => {
@@ -139,7 +846,7 @@ describe('DKGQueryEngine', () => {
 
   // ───────────────────────────────────────────────────────────────────
   // #789 Codex review: when a user query carries an inner UNION over a
-  // multi-graph view, `wrapWithGraphUnion` returns null (a nested
+  // multi-graph view, `wrapWithGraphUnion` reports the shape as unsupported (a nested
   // UnionNode would crash Blazegraph) and `queryMultipleGraphs` falls
   // back to per-graph execution. The fallback MUST merge results in a
   // FORM-AWARE way — flattening every form into `bindings` silently
@@ -228,6 +935,17 @@ describe('DKGQueryEngine', () => {
         ),
       ).rejects.toThrow(/cannot be evaluated across graphs/i);
     });
+
+    it('rejects a UCHAR-spelled LIMIT before the per-graph fallback can over-count', async () => {
+      await expect(
+        engine.query(
+          String.raw`SELECT ?s ?v WHERE {
+             { ?s <http://ex.org/p1> ?v } UNION { ?s <http://ex.org/p2> ?v }
+           } \u004cIMIT 1`,
+          { contextGraphId: CONTEXT_GRAPH, view: 'verifiable-memory' },
+        ),
+      ).rejects.toThrow(/cannot be evaluated across graphs/i);
+    });
   });
 
   // ───────────────────────────────────────────────────────────────────
@@ -265,6 +983,11 @@ describe('DKGQueryEngine', () => {
 
     const multiGraphQuery = () =>
       recStore.queries.find((s) => s.includes('VALUES ?__dkgViewGraph'));
+    // Authority discovery may UNION independent metadata branches. This guard
+    // concerns per-content-graph reads of the SWM view, not catalog queries.
+    const hasPerGraphSwmRead = () => recStore.queries.some(
+      (s) => /}\s*UNION\s*{\s*GRAPH\s*<[^>]*\/_shared_memory\//i.test(s),
+    );
 
     it('collapses N SWM graphs into one VALUES/GRAPH query and reads every triple', async () => {
       const quads: Quad[] = [];
@@ -284,9 +1007,8 @@ describe('DKGQueryEngine', () => {
       expect(multi).toBeDefined();
       expect(multi).toContain('GRAPH ?__dkgViewGraph {');
       expect(multi).toContain(swmGraph('0xowner', 0));
-      expect(
-        recStore.queries.some((s) => /}\s*UNION\s*{\s*GRAPH\s*</i.test(s)),
-      ).toBe(false);
+      expect(recStore.queries.filter(s => s.includes('VALUES ?__dkgViewGraph'))).toHaveLength(1);
+      expect(hasPerGraphSwmRead()).toBe(false);
     });
 
     it('preserves COUNT(*) aggregate semantics over the graph set', async () => {
@@ -369,7 +1091,8 @@ describe('DKGQueryEngine', () => {
       expect((result.quads ?? []).every((qd) => qd.predicate === 'urn:out')).toBe(true);
       // ...and it went through the ONE VALUES query, never a per-graph UNION.
       expect(multiGraphQuery()).toBeDefined();
-      expect(recStore.queries.some((s) => /}\s*UNION\s*{\s*GRAPH\s*</i.test(s))).toBe(false);
+      expect(recStore.queries.filter(s => s.includes('VALUES ?__dkgViewGraph'))).toHaveLength(1);
+      expect(hasPerGraphSwmRead()).toBe(false);
     });
 
     it('ASK over the SWM view uses the VALUES path and returns the boolean', async () => {
@@ -732,8 +1455,9 @@ describe('DKGQueryEngine', () => {
     // Regression guard for #774 finding #3 (also mis-attributed in the
     // issue body — diagnosed as "owner-peer not replicated to node 2";
     // the workspaceOwner triple IS in fact replicated, but the scoped
-    // query couldn't see it). `devnet-test-swm-ownership-restart.sh`
-    // `wait_for_owner_meta` probe queries
+    // query couldn't see it). Until graph-scoped KAs (10.0.7) moved SWM
+    // ownership into per-author graphs, the devnet ownership-restart
+    // script probed
     //
     //   GRAPH <…/_shared_memory_meta> {
     //     <root> <http://dkg.io/ontology/workspaceOwner> ?owner
@@ -741,11 +1465,8 @@ describe('DKGQueryEngine', () => {
     //
     // …with `contextGraphId` scope. Same reasoning as the `_meta`
     // allow: authenticated callers already have read access to the CG;
-    // refusing them visibility into the SWM ownership metadata breaks
-    // both replica ACL probes and downstream sync code. Add to the
-    // EXPLICIT-IRI allow set only; graph-variable expansion stays
-    // constrained to data + SWM data so `GRAPH ?g` cannot iterate into
-    // `_shared_memory_meta`.
+    // refusing them visibility into the SWM metadata breaks replica
+    // probes and downstream sync code.
     const swmMetaGraph = `${GRAPH}/_shared_memory_meta`;
     await store.insert([
       {
@@ -945,6 +1666,19 @@ describe('DKGQueryEngine', () => {
     ]);
   });
 
+  it('authorizes UCHAR payload inside an explicit scoped GRAPH IRI', async () => {
+    const result = await engine.query(
+      String.raw`SELECT ?name WHERE {
+        GRAPH <did:dkg:context-graph:\u0061gent-registry> {
+          ?s <http://schema.org/name> ?name
+        }
+      }`,
+      { contextGraphId: CONTEXT_GRAPH },
+    );
+
+    expect(result.bindings).toEqual([{ name: '"ImageBot"' }]);
+  });
+
   it('rejects prefixed explicit GRAPH targets outside the scoped graph set', async () => {
     const otherGraph = 'did:dkg:context-graph:other-agent-registry';
     await store.insert([
@@ -1003,6 +1737,121 @@ describe('DKGQueryEngine', () => {
     expect(result.bindings[0]['name']).toBe('"ImageBot"');
   });
 
+  it('does not re-inject the full graph allow-list when top-level VALUES already narrows GRAPH ?g', async () => {
+    class RecordingStore extends OxigraphStore {
+      queries: string[] = [];
+      async query(sparql: string, options?: Parameters<OxigraphStore['query']>[1]) {
+        this.queries.push(sparql);
+        return super.query(sparql, options);
+      }
+    }
+
+    const recordingStore = new RecordingStore();
+    const recordingEngine = new DKGQueryEngine(recordingStore);
+    // Mirror issue #1989's cardinality: the Blackbox metadata query returned
+    // 249 rows, of which 125 confirmed VM graphs were materialized locally.
+    // The caller selected only five of those graphs.
+    const vmGraphs = Array.from(
+      { length: 125 },
+      (_, index) => `${GRAPH}/_verifiable_memory/0xagent/${index + 128}`,
+    );
+    await recordingStore.insert(vmGraphs.map((graph, index) => (
+      q(`urn:vm:${index}`, 'http://schema.org/name', `"${index}"`, graph)
+    )));
+    recordingStore.queries.length = 0;
+
+    const sparql = `SELECT ?sourceGraph ?name WHERE {
+      VALUES ?sourceGraph { ${vmGraphs.slice(0, 5).map((graph) => `<${graph}>`).join(' ')} }
+      GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name }
+    } ORDER BY ?sourceGraph`;
+    const result = await recordingEngine.query(
+      sparql,
+      { contextGraphId: CONTEXT_GRAPH },
+    );
+
+    expect(result.bindings.map((row) => row['name'])).toEqual([
+      '"0"',
+      '"1"',
+      '"2"',
+      '"3"',
+      '"4"',
+    ]);
+    const executed = recordingStore.queries.at(-1) ?? '';
+    expect(executed.match(/VALUES\s+\?sourceGraph/gi)).toHaveLength(1);
+    expect(executed).toBe(sparql);
+    expect(executed).not.toContain(vmGraphs[5]);
+  });
+
+  it('retains the allow-list intersection when caller VALUES contains an out-of-scope graph', async () => {
+    class RecordingStore extends OxigraphStore {
+      queries: string[] = [];
+      async query(sparql: string, options?: Parameters<OxigraphStore['query']>[1]) {
+        this.queries.push(sparql);
+        return super.query(sparql, options);
+      }
+    }
+
+    const recordingStore = new RecordingStore();
+    const recordingEngine = new DKGQueryEngine(recordingStore);
+    const vm = `${GRAPH}/_verifiable_memory/0xagent/1`;
+    const foreign = 'did:dkg:context-graph:foreign/_verifiable_memory/0xagent/1';
+    await recordingStore.insert([
+      q('urn:vm:allowed', 'http://schema.org/name', '"allowed"', vm),
+      q('urn:vm:foreign', 'http://schema.org/name', '"foreign"', foreign),
+    ]);
+    recordingStore.queries.length = 0;
+
+    const result = await recordingEngine.query(
+      `SELECT ?sourceGraph ?name WHERE {
+        VALUES ?sourceGraph { <${vm}> <${foreign}> }
+        GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name }
+      }`,
+      { contextGraphId: CONTEXT_GRAPH },
+    );
+
+    expect(result.bindings).toEqual([{ sourceGraph: vm, name: '"allowed"' }]);
+    const executed = recordingStore.queries.at(-1) ?? '';
+    expect(executed.match(/VALUES\s+\?sourceGraph/gi)).toHaveLength(2);
+  });
+
+  it('rejects a default-graph pattern even when authorized VALUES makes graph injection redundant', async () => {
+    const vm = `${GRAPH}/_verifiable_memory/0xagent/guard-order-default`;
+    await store.insert([
+      q('urn:guard:default', 'http://schema.org/name', '"guard"', vm),
+    ]);
+
+    await expect(engine.query(
+      `SELECT ?sourceGraph ?name ?description WHERE {
+        VALUES ?sourceGraph { <${vm}> }
+        GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name }
+        ?s <http://schema.org/description> ?description
+      }`,
+      { contextGraphId: CONTEXT_GRAPH },
+    )).rejects.toThrow(
+      /Scoped query violation: GRAPH variables cannot be mixed with default-graph triple patterns/i,
+    );
+  });
+
+  it('rejects nested GRAPH use even when authorized VALUES makes graph injection redundant', async () => {
+    const vm = `${GRAPH}/_verifiable_memory/0xagent/guard-order-optional`;
+    await store.insert([
+      q('urn:guard:optional', 'http://schema.org/name', '"guard"', vm),
+    ]);
+
+    await expect(engine.query(
+      `SELECT ?sourceGraph ?name ?description WHERE {
+        VALUES ?sourceGraph { <${vm}> }
+        GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name }
+        OPTIONAL {
+          GRAPH ?sourceGraph { ?s <http://schema.org/description> ?description }
+        }
+      }`,
+      { contextGraphId: CONTEXT_GRAPH },
+    )).rejects.toThrow(
+      /Scoped query violation: GRAPH variables must appear at the top level/i,
+    );
+  });
+
   it('rejects mixed GRAPH-variable and default-graph triple patterns', async () => {
     await expect(
       engine.query(
@@ -1013,6 +1862,23 @@ describe('DKGQueryEngine', () => {
         { contextGraphId: CONTEXT_GRAPH },
       ),
     ).rejects.toThrow(/Scoped query violation: GRAPH variables cannot be mixed with default-graph triple patterns/i);
+  });
+
+  it.each([
+    `SELECT ?g ?name ?description WHERE {
+      GRAPH ?g { ?s <http://schema.org/name> ?name }
+      OPTIONAL { ?s <http://schema.org/description> ?description }
+    }`,
+    `SELECT ?g ?name WHERE {
+      GRAPH ?g { ?s <http://schema.org/name> ?name }
+      FILTER EXISTS { ?foreign <http://schema.org/name> ?name }
+    }`,
+  ])('rejects nested default-graph patterns alongside GRAPH variables', async (sparql) => {
+    await expect(
+      engine.query(sparql, { contextGraphId: CONTEXT_GRAPH }),
+    ).rejects.toThrow(
+      /Scoped query violation: GRAPH variables cannot be mixed with default-graph triple patterns/i,
+    );
   });
 
   it('constrains GRAPH variables with non-ASCII names to the scoped context graph data graph', async () => {
@@ -1206,11 +2072,11 @@ describe('DKGQueryEngine', () => {
     // Wrap the memoized partition-discovery routine directly — that is
     // what the in-flight cache de-dupes across concurrent scans.
     const discoveryTarget = engine as unknown as {
-      discoverScopedContentGraphAllowList: (...args: unknown[]) => Promise<string[]>;
+      discoverScopedContentGraphDiscovery: (...args: unknown[]) => Promise<ScopedContentGraphDiscoverySnapshot>;
     };
-    const origDiscovery = discoveryTarget.discoverScopedContentGraphAllowList.bind(engine);
+    const origDiscovery = discoveryTarget.discoverScopedContentGraphDiscovery.bind(engine);
     const partitionDiscoverySpy = recorder((...a: unknown[]) => origDiscovery(...a));
-    discoveryTarget.discoverScopedContentGraphAllowList = partitionDiscoverySpy;
+    discoveryTarget.discoverScopedContentGraphDiscovery = partitionDiscoverySpy;
     const sparql = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } } ORDER BY ?name`;
 
     const results = await Promise.all([
@@ -1229,7 +2095,50 @@ describe('DKGQueryEngine', () => {
     }
   });
 
-  it('does not reuse partition discovery after an in-flight count scan completes', async () => {
+  it('shares context discovery while keeping sub-graph authorization isolated', async () => {
+    const codeMemory = `${GRAPH}/code/_shared_memory/0xAgent/1`;
+    const decisionsMemory = `${GRAPH}/decisions/_shared_memory/0xAgent/1`;
+    await store.insert([
+      ...subGraphRegistration('code'),
+      ...subGraphRegistration('decisions'),
+      q('urn:code:memory', SCHEMA_NAME, '"CodeMemory"', codeMemory),
+      q('urn:decisions:memory', SCHEMA_NAME, '"DecisionsMemory"', decisionsMemory),
+    ]);
+
+    const discoveryTarget = engine as unknown as {
+      discoverScopedContentGraphDiscovery: (...args: unknown[]) => Promise<ScopedContentGraphDiscoverySnapshot>;
+    };
+    const original = discoveryTarget.discoverScopedContentGraphDiscovery.bind(engine);
+    const discoverySpy = recorder((...args: unknown[]) => original(...args));
+    discoveryTarget.discoverScopedContentGraphDiscovery = discoverySpy;
+    const sparql = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } }`;
+
+    const code = await engine.query(sparql, {
+      contextGraphId: CONTEXT_GRAPH,
+      subGraphName: 'code',
+      includeContextGraphPartitions: true,
+    });
+    expect(code.bindings.some((row) => row['g'] === codeMemory)).toBe(true);
+    expect(code.bindings.some((row) => row['g'] === decisionsMemory)).toBe(false);
+
+    const decisions = await engine.query(sparql, {
+      contextGraphId: CONTEXT_GRAPH,
+      subGraphName: 'decisions',
+      includeContextGraphPartitions: true,
+    });
+    expect(decisions.bindings.some((row) => row['g'] === decisionsMemory)).toBe(true);
+    expect(decisions.bindings.some((row) => row['g'] === codeMemory)).toBe(false);
+    expect(discoverySpy.calls).toHaveLength(1);
+
+    await engine.query(sparql, {
+      contextGraphId: CONTEXT_GRAPH,
+      subGraphName: 'code',
+      includeContextGraphPartitions: true,
+    });
+    expect(discoverySpy.calls).toHaveLength(1);
+  });
+
+  it('reuses completed partition discovery until the context-graph write generation changes', async () => {
     const codeSubGraph = `${GRAPH}/code`;
     const docsSubGraph = `${GRAPH}/docs`;
 
@@ -1243,17 +2152,32 @@ describe('DKGQueryEngine', () => {
     // discovery routine directly to pin "discovered once per completed
     // scan, re-discovered after the in-flight promise settles".
     const discoveryTarget = engine as unknown as {
-      discoverScopedContentGraphAllowList: (...args: unknown[]) => Promise<string[]>;
+      discoverScopedContentGraphDiscovery: (...args: unknown[]) => Promise<ScopedContentGraphDiscoverySnapshot>;
     };
-    const origDiscovery = discoveryTarget.discoverScopedContentGraphAllowList.bind(engine);
+    const origDiscovery = discoveryTarget.discoverScopedContentGraphDiscovery.bind(engine);
     const partitionDiscoverySpy = recorder((...a: unknown[]) => origDiscovery(...a));
-    discoveryTarget.discoverScopedContentGraphAllowList = partitionDiscoverySpy;
+    discoveryTarget.discoverScopedContentGraphDiscovery = partitionDiscoverySpy;
     const sparql = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } } ORDER BY ?name`;
     const first = await engine.query(
       sparql,
-      { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true },
+      {
+        contextGraphId: CONTEXT_GRAPH,
+        includeContextGraphPartitions: true,
+        source: 'dashboard.wm',
+      },
     );
     expect(first.bindings.some((row) => row['g'] === codeSubGraph)).toBe(true);
+    expect(partitionDiscoverySpy.calls).toHaveLength(1);
+
+    const unchanged = await engine.query(
+      sparql,
+      {
+        contextGraphId: CONTEXT_GRAPH,
+        includeContextGraphPartitions: true,
+        source: 'dashboard.vm',
+      },
+    );
+    expect(unchanged.bindings.some((row) => row['g'] === codeSubGraph)).toBe(true);
     expect(partitionDiscoverySpy.calls).toHaveLength(1);
 
     await store.insert([
@@ -1267,6 +2191,220 @@ describe('DKGQueryEngine', () => {
     );
     expect(partitionDiscoverySpy.calls).toHaveLength(2);
     expect(second.bindings.some((row) => row['g'] === docsSubGraph)).toBe(true);
+  });
+
+  it('revalidates every authorization discovery under a process-local revision', async () => {
+    const backend = new OxigraphStore();
+    const codeSubGraph = `${GRAPH}/code`;
+    const docsSubGraph = `${GRAPH}/docs`;
+    const codeRows = [
+      ...subGraphRegistration('code'),
+      q('urn:code:data', SCHEMA_NAME, '"CodeData"', codeSubGraph),
+    ];
+    await backend.insert(codeRows);
+
+    // Model an adapter-local generation that cannot observe another writer.
+    const maskedRevisionStore = new Proxy(backend, {
+      get(target, property) {
+        if (property === 'writeRevisionCoverage') return 'process-local';
+        if (property === 'getWriteRevision') {
+          return () => ({ generation: 0, stable: true });
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as unknown as OxigraphStore;
+    const externalWriterEngine = new DKGQueryEngine(maskedRevisionStore);
+    const discoveryTarget = externalWriterEngine as unknown as {
+      discoverScopedContentGraphDiscovery: (...args: unknown[]) => Promise<ScopedContentGraphDiscoverySnapshot>;
+    };
+    const original = discoveryTarget.discoverScopedContentGraphDiscovery.bind(externalWriterEngine);
+    const discoverySpy = recorder((...args: unknown[]) => original(...args));
+    discoveryTarget.discoverScopedContentGraphDiscovery = discoverySpy;
+    const sparql = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } } ORDER BY ?name`;
+    const options = { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true };
+
+    const initial = await externalWriterEngine.query(sparql, options);
+    expect(initial.bindings.some((row) => row['g'] === codeSubGraph)).toBe(true);
+    expect(discoverySpy.calls).toHaveLength(1);
+
+    // Bypass the engine-facing revision source to simulate another process.
+    await backend.delete(codeRows);
+    await backend.insert([
+      ...subGraphRegistration('docs'),
+      q('urn:docs:data', SCHEMA_NAME, '"DocsData"', docsSubGraph),
+    ]);
+
+    const revalidated = await externalWriterEngine.query(sparql, options);
+    expect(discoverySpy.calls).toHaveLength(2);
+    expect(revalidated.bindings.some((row) => row['g'] === docsSubGraph)).toBe(true);
+    expect(revalidated.bindings.some((row) => row['g'] === codeSubGraph)).toBe(false);
+  });
+
+  it('immediately excludes a parent partition reclassified by an external writer', async () => {
+    const backend = new OxigraphStore();
+    const collidingSubGraph = `${GRAPH}/code`;
+    await backend.insert([
+      ...subGraphRegistration('code'),
+      q('urn:code:data', SCHEMA_NAME, '"ParentData"', collidingSubGraph),
+    ]);
+    const maskedRevisionStore = new Proxy(backend, {
+      get(target, property) {
+        if (property === 'writeRevisionCoverage') return 'process-local';
+        if (property === 'getWriteRevision') {
+          return () => ({ generation: 0, stable: true });
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as unknown as OxigraphStore;
+    const externalWriterEngine = new DKGQueryEngine(maskedRevisionStore);
+    const sparql = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } }`;
+    const options = { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true };
+
+    const parentView = await externalWriterEngine.query(sparql, options);
+    expect(parentView.bindings.some((row) => row['g'] === collidingSubGraph)).toBe(true);
+
+    await backend.insert([
+      q(
+        collidingSubGraph,
+        RDF_TYPE,
+        DKG_CONTEXT_GRAPH,
+        `${collidingSubGraph}/_meta`,
+      ),
+    ]);
+    const afterReclassification = await externalWriterEngine.query(sparql, options);
+    expect(afterReclassification.bindings.some((row) => row['g'] === collidingSubGraph))
+      .toBe(false);
+    await backend.close();
+  });
+
+  it('invalidates scoped authorization discovery when a persistent worker restores older state', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'query-worker-respawn-'));
+    const persistPath = join(dir, 'store.nq');
+    const workerStore = new OxigraphWorkerStore(persistPath);
+    try {
+      const collidingSubGraph = `${GRAPH}/code`;
+      const childMarker = q(
+        collidingSubGraph,
+        RDF_TYPE,
+        DKG_CONTEXT_GRAPH,
+        `${collidingSubGraph}/_meta`,
+      );
+      await workerStore.insert([
+        ...subGraphRegistration('code'),
+        q('urn:code:data', SCHEMA_NAME, '"ParentData"', collidingSubGraph),
+        childMarker,
+      ]);
+      await workerStore.flush();
+      const restoredChildSnapshot = readFileSync(persistPath, 'utf8');
+
+      await workerStore.delete([childMarker]);
+      await workerStore.flush();
+      const workerEngine = new DKGQueryEngine(workerStore);
+      const discoveryTarget = workerEngine as unknown as {
+        discoverScopedContentGraphDiscovery: (...args: unknown[]) => Promise<ScopedContentGraphDiscoverySnapshot>;
+      };
+      const original = discoveryTarget.discoverScopedContentGraphDiscovery.bind(workerEngine);
+      const discoverySpy = recorder((...args: unknown[]) => original(...args));
+      discoveryTarget.discoverScopedContentGraphDiscovery = discoverySpy;
+      const sparql = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } }`;
+      const options = { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true };
+
+      const parentView = await workerEngine.query(sparql, options);
+      expect(parentView.bindings.some((row) => row['g'] === collidingSubGraph)).toBe(true);
+      expect(discoverySpy.calls).toHaveLength(1);
+      const revisions = asGraphWriteRevisionSource(workerStore)!;
+      const beforeCrash = revisions.getWriteRevision(GRAPH);
+      expect(beforeCrash.stable).toBe(true);
+
+      // Model the exact recovery hazard deterministically: the worker's live
+      // state allowed the parent partition, while the durable snapshot restored
+      // after its crash still classifies the same URI as a child context graph.
+      writeFileSync(persistPath, restoredChildSnapshot, 'utf8');
+      await (workerStore as unknown as { worker: Worker }).worker.terminate();
+      const replacing = revisions.getWriteRevision(GRAPH);
+      expect(replacing.stable).toBe(false);
+      expect(replacing.generation).toBeGreaterThan(beforeCrash.generation);
+
+      const restoredView = await workerEngine.query(sparql, options);
+      expect(discoverySpy.calls).toHaveLength(2);
+      expect(restoredView.bindings.some((row) => row['g'] === collidingSubGraph)).toBe(false);
+      const afterRecovery = revisions.getWriteRevision(GRAPH);
+      expect(afterRecovery.stable).toBe(true);
+      expect(afterRecovery.generation).toBeGreaterThan(replacing.generation);
+    } finally {
+      await workerStore.close().catch(() => undefined);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it('does not retain a discovery crossed by a local generation change', async () => {
+    const firstDiscovery = deferred<ScopedContentGraphDiscoverySnapshot>();
+    const secondDiscovery = deferred<ScopedContentGraphDiscoverySnapshot>();
+    let discoveryCalls = 0;
+    const target = engine as unknown as {
+      resolveScopedContentGraphDiscovery: (
+        contextGraphId: string,
+        reads: object,
+        subGraphName?: string,
+      ) => Promise<ScopedContentGraphDiscoverySnapshot>;
+      discoverScopedContentGraphDiscovery: (...args: unknown[]) => Promise<ScopedContentGraphDiscoverySnapshot>;
+    };
+    target.discoverScopedContentGraphDiscovery = async () => {
+      discoveryCalls += 1;
+      return discoveryCalls === 1 ? firstDiscovery.promise : secondDiscovery.promise;
+    };
+    const reads = {
+      signal: undefined,
+      shared: { cacheKey: '["normal",null]' },
+    };
+
+    const beforeWrite = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, reads);
+    expect(discoveryCalls).toBe(1);
+    await store.insert([q('urn:generation:bump', SCHEMA_NAME, '"bump"')]);
+    const afterWrite = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, reads);
+    expect(discoveryCalls).toBe(2);
+
+    secondDiscovery.resolve({ inventory: ['urn:graph:fresh'], partitions: [] });
+    await expect(afterWrite).resolves.toEqual({ inventory: ['urn:graph:fresh'], partitions: [] });
+    firstDiscovery.resolve({ inventory: ['urn:graph:stale'], partitions: [] });
+    await expect(beforeWrite).resolves.toEqual({ inventory: ['urn:graph:stale'], partitions: [] });
+
+    await expect(target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, reads))
+      .resolves.toEqual({ inventory: ['urn:graph:fresh'], partitions: [] });
+    expect(discoveryCalls).toBe(2);
+  });
+
+  it('keeps concurrent discovery isolated across execution lanes', async () => {
+    const laneA = deferred<ScopedContentGraphDiscoverySnapshot>();
+    const laneB = deferred<ScopedContentGraphDiscoverySnapshot>();
+    let discoveryCalls = 0;
+    const target = engine as unknown as {
+      resolveScopedContentGraphDiscovery: (
+        contextGraphId: string,
+        reads: object,
+        subGraphName?: string,
+      ) => Promise<ScopedContentGraphDiscoverySnapshot>;
+      discoverScopedContentGraphDiscovery: (...args: unknown[]) => Promise<ScopedContentGraphDiscoverySnapshot>;
+    };
+    target.discoverScopedContentGraphDiscovery = async () => {
+      discoveryCalls += 1;
+      return discoveryCalls === 1 ? laneA.promise : laneB.promise;
+    };
+
+    const first = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, {
+      signal: undefined,
+      shared: { cacheKey: '["normal","dashboard.wm"]' },
+    });
+    const second = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, {
+      signal: undefined,
+      shared: { cacheKey: '["normal","dashboard.vm"]' },
+    });
+    expect(discoveryCalls).toBe(2);
+    laneA.resolve({ inventory: ['urn:graph:a'], partitions: [] });
+    laneB.resolve({ inventory: ['urn:graph:b'], partitions: [] });
+    await Promise.all([first, second]);
   });
 
   it('does not bind same-prefix child context graphs as parent content partitions', async () => {

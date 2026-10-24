@@ -7,9 +7,19 @@
  * classification (`isRetryableRpcError`), and receipt / known-tx
  * assertions. Bodies are a 1:1 move from the original module.
  */
-import { ethers, FetchRequest } from 'ethers';
-import { enrichEvmError, errorCode, errorMessage, errorStatus } from './evm-adapter-errors.js';
+import { ethers } from 'ethers';
+import {
+  enrichEvmError,
+  errorCode,
+  errorMessage,
+  errorName,
+  errorStatus,
+} from './evm-adapter-errors.js';
 import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
+import { ContextGraphAuthorityIndexBootstrapUnavailableError } from
+  './context-graph-authority-index-snapshot.js';
+import { EvmLogRangeUnavailableError } from './evm-log-range.js';
+export { boundedRetryFetchRequest } from './rpc-request-transport.js';
 
 /**
  * Per-request retry bound for ethers' built-in `FetchRequest`. ethers v6
@@ -36,9 +46,6 @@ import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
  * `RPC_REQUEST_MAX_RETRIES * backoffCap` ≈ 7.5s of wall time under a fast-
  * failing endpoint — bounded, and well under the daemon route / test ceilings.
  */
-const RPC_REQUEST_MAX_RETRIES = 5;
-const RPC_REQUEST_RETRY_BACKOFF_CAP_MS = 1_500;
-
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -90,19 +97,6 @@ export function resolveRpcUrls(rpcUrl: string, rpcUrls?: string[]): string[] {
  * `maxRetries = 0` makes `retryFunc` return `false` on attempt 0 with NO sleep,
  * so the failure surfaces synchronously to the failover loop.
  */
-export function boundedRetryFetchRequest(
-  url: string,
-  maxRetries: number = RPC_REQUEST_MAX_RETRIES,
-): FetchRequest {
-  const req = new FetchRequest(url);
-  req.retryFunc = async (_attemptReq, _response, attempt) => {
-    if (attempt >= maxRetries) return false;
-    await sleep(Math.min(500 * (attempt + 1), RPC_REQUEST_RETRY_BACKOFF_CAP_MS));
-    return true;
-  };
-  return req;
-}
-
 /**
  * Is `err` a transient RPC failure worth retrying / failing over (vs a
  * deterministic chain revert / argument error)? Inspects ethers/fetch error
@@ -113,34 +107,61 @@ export function boundedRetryFetchRequest(
  * the SAME extraction instead of duplicating a narrower top-level-only subset
  * (Codex PR #901 round-4 :459).
  */
-export function isRetryableRpcError(err: unknown): boolean {
+export type RpcRetryDisposition = 'fail' | 'retry-later' | 'failover';
+
+/**
+ * Distinguish caller-level retry from endpoint failover. Local governor
+ * saturation and an already-exhausted provider set are retryable later, but
+ * another endpoint attempt in the same process cannot help them.
+ */
+export function classifyRpcRetryDisposition(err: unknown): RpcRetryDisposition {
+  // A failed trusted-core walk belongs to the bootstrap transport. Another RPC
+  // endpoint must not multiply its complete peer/deadline/CAS budget.
+  if (err instanceof ContextGraphAuthorityIndexBootstrapUnavailableError) return 'retry-later';
+  // One provider cannot serve this eth_getLogs range (history, archive or plan
+  // limit, or a span cap too small for the request budget). Another endpoint
+  // may: this must fail over whatever the provider's own error code was.
+  if (err instanceof EvmLogRangeUnavailableError) return 'failover';
   if (err instanceof Error) enrichEvmError(err);
   const code = errorCode(err);
   const status = errorStatus(err);
   const msg = errorMessage(err).toLowerCase();
+  const name = errorName(err);
 
   if (code === 'CALL_EXCEPTION' || code === 'INSUFFICIENT_FUNDS' || code === 'NONCE_EXPIRED'
     || code === 'RPC_RECEIPT_LOOKUP_FAILED'
     || code === 'REPLACEMENT_UNDERPRICED' || code === 'TRANSACTION_REPLACED'
     || code === 'ACTION_REJECTED' || code === 'INVALID_ARGUMENT' || code === 'UNPREDICTABLE_GAS_LIMIT') {
-    return false;
+    return 'fail';
   }
   if (msg.includes('execution reverted') || msg.includes('call exception')
     || msg.includes('insufficient funds') || msg.includes('invalid argument')
     || msg.includes('nonce too low') || msg.includes('replacement transaction underpriced')
     || msg.includes('intrinsic gas too low') || msg.includes('exceeds block gas limit')) {
-    return false;
+    return 'fail';
   }
 
-  if (status === 429 || (typeof status === 'number' && status >= 500)) return true;
+  if (code === 'RPC_REQUEST_GOVERNOR_QUEUE_FULL' || code === 'RPC_ENDPOINTS_EXHAUSTED') {
+    return 'retry-later';
+  }
+
+  // Node/undici/ethers surface an aborted fetch as DOMException
+  // `{ name: 'AbortError' }` (and some Node paths also stamp `ABORT_ERR`).
+  // At the chain-RPC boundary this is a transport interruption, not a
+  // deterministic EVM result. Treat it like the timeout/network cases below so
+  // the SAME signed transaction or point read fails over to another endpoint.
+  // This is especially important after `eth_sendRawTransaction`: an RPC can
+  // accept the tx and then abort the client response, so fail-fast would report
+  // publish failure even though the mint is already on chain.
+  if (name === 'AbortError' || code === 'ABORT_ERR') return 'failover';
+
+  if (status === 429 || (typeof status === 'number' && status >= 500)) return 'failover';
   if (code === 'TIMEOUT' || code === 'RPC_TIMEOUT' || code === 'TIMEOUT_ERROR' || code === 'SERVER_ERROR'
     || code === 'NETWORK_ERROR' || code === 'ECONNRESET' || code === 'ECONNREFUSED'
     || code === 'ETIMEDOUT' || code === 'ENOTFOUND' || code === 'EAI_AGAIN'
     || code === 'UNKNOWN_ERROR' || code === 'BAD_DATA'
-    // Our own synthetic "all configured RPC endpoints exhausted" code — by
-    // definition retryable, regardless of the aggregated message text.
-    || code === 'RPC_ENDPOINTS_EXHAUSTED') {
-    return true;
+    ) {
+    return 'failover';
   }
   // `no runners?!` is ethers' FallbackProvider error (provider-fallback.js)
   // when EVERY configured sub-provider is unavailable — i.e. all RPC endpoints
@@ -150,27 +171,90 @@ export function isRetryableRpcError(err: unknown): boolean {
   // would propagate it un-coded and `/api/context-graph/register` would 500
   // instead of the bounded 503 (#894 follow-up).
   return /timeout|timed out|network|socket|reset|econnreset|econnrefused|etimedout|enotfound|eai_again|rate limit|too many requests|429|503|502|500|gateway|temporarily unavailable|fetch failed|connection|no runners/i
-    .test(msg);
+    .test(msg)
+    ? 'failover'
+    : 'fail';
+}
+
+/** Caller-level retryability (including local capacity retry-later). */
+export function isRetryableRpcError(err: unknown): boolean {
+  return classifyRpcRetryDisposition(err) !== 'fail';
+}
+
+/** True only when another configured endpoint may improve this attempt. */
+export function isRpcEndpointFailoverEligible(err: unknown): boolean {
+  return classifyRpcRetryDisposition(err) === 'failover';
+}
+
+/** Canonical classifier for provider throttling, shared by failover policy. */
+export function isThrottleRpcError(err: unknown): boolean {
+  if (err instanceof Error) enrichEvmError(err);
+  const status = errorStatus(err);
+  const message = errorMessage(err).toLowerCase();
+  return status === 429 || /\b429\b|too many requests|rate[ -]?limit|throttl/.test(message);
 }
 
 export function assertSuccessfulReceipt(receipt: ethers.TransactionReceipt, label: string): void {
   if (receipt.status !== 0) return;
-  const err = new Error(`${label} tx ${receipt.hash} was mined but reverted (status=0)`);
-  (err as any).code = 'CALL_EXCEPTION';
-  (err as any).receipt = receipt;
+  const err = Object.assign(
+    new Error(`${label} tx ${receipt.hash} was mined but reverted (status=0)`),
+    {
+      code: 'CALL_EXCEPTION' as const,
+      receipt,
+    },
+  );
   throw err;
 }
 
+/**
+ * Rejection handler for the receipt wait of a transaction this process signed.
+ * A receipt carries neither the gas limit nor revert data, so a transaction
+ * that ran out of gas reads like any other mined revert. When the failed
+ * transaction left at most 1/32 of the limit it was signed with unused, append
+ * both numbers to the message.
+ *
+ * A call hands the contract it calls at most 63/64 of its remaining gas. A
+ * callee that runs out therefore leaves its caller 1/64 of what the caller
+ * had, and the caller reverts with that much unused. The writes seen running
+ * out did so two calls below the transaction's own frame, so two callers each
+ * kept 1/64: at most 1/32 of the limit together. A transaction that runs out
+ * in its own frame uses the whole limit.
+ *
+ * All 557 challenge creations that failed in 24 days of one test network's
+ * history used 97.91% to 100% of their limit. A 99% test saw 158 of them and
+ * 63/64 would see 547. An ordinary revert stops where its check fails and
+ * hands back the rest, which is most of a limit that carries headroom. Only a
+ * write sent on its bare estimate that reverts in its last steps comes this
+ * close. Not recognised: a callee three or more calls deep that runs out
+ * early in the transaction, which leaves up to 1/64 per level.
+ *
+ * Every error, changed or not, is rethrown as the same object.
+ */
+export function explainOutOfGasRevert(signedTx: string): (err: unknown) => never {
+  return (err) => {
+    const receipt = (err as { receipt?: { status?: unknown; gasUsed?: unknown } } | null)?.receipt;
+    if (err instanceof Error && receipt?.status === 0 && typeof receipt.gasUsed === 'bigint') {
+      let gasLimit = 0n;
+      try {
+        gasLimit = ethers.Transaction.from(signedTx).gasLimit;
+      } catch {
+        // Not a decodable signed transaction: leave the error as it is.
+      }
+      if (gasLimit > 0n && receipt.gasUsed * 32n >= gasLimit * 31n) {
+        err.message += `; it used ${receipt.gasUsed} of its ${gasLimit} gas limit, so it probably ran out of gas`;
+      }
+    }
+    throw err;
+  };
+}
+
 export function isKnownTransactionError(err: unknown): boolean {
-  const code = errorCode(err);
   const msg = errorMessage(err).toLowerCase();
-  return code === 'NONCE_EXPIRED'
-    || msg.includes('already known')
+  return msg.includes('already known')
     || msg.includes('known transaction')
     || msg.includes('already imported')
     || msg.includes('transaction already in mempool')
     || msg.includes('already exists')
     || msg.includes('already have transaction')
-    || msg.includes('nonce too low')
     || msg.includes('duplicate transaction');
 }

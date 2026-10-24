@@ -1,0 +1,488 @@
+import { executeGraphScopedPublication } from './graph-scoped-publication.js';
+import {
+  parseDeterministicKnowledgeAssetUal,
+} from '@origintrail-official/dkg-core';
+import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  tryReplaceGraphAndSubjectAtomically,
+  type AtomicAssetReplacement,
+  type Quad,
+  type QueryOptions,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
+import {
+  overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1,
+  readGraphKnowledgeAssetConfirmationKindV1,
+} from '@origintrail-official/dkg-publisher';
+import {
+  filterOversizedSyncQuads,
+  type OversizeGuardHooks,
+} from '../oversize-filter.js';
+import { parseGraphScopedDescriptor } from '../durable-integrity.js';
+import {
+  exactAssetCommitmentMatchesDescriptor,
+  type ExactAssetCommitment,
+} from '../exact-assets.js';
+
+/**
+ * Name the setting that grants the missing capability.
+ *
+ * The store refuses this write because its adapter reports no transactional
+ * replacement. For an explicitly configured `sparql-http` endpoint that is the
+ * `best-effort` default rather than a property of the server: the adapter
+ * cannot know what is behind the URL, so the operator declares it. Without
+ * this hint the failure reads as a product bug, which has cost real debugging
+ * sessions on nodes whose endpoint did support the guarantee all along.
+ */
+const ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1 = (capability: string): string => (
+  `Graph-scoped durable sync requires ${capability} support. An explicitly `
+  + 'configured sparql-http endpoint defaults to consistencyProfile '
+  + '"best-effort"; set store.options.consistencyProfile to "atomic-update" '
+  + '(or "atomic-readback" when the endpoint also guarantees read-after-write) '
+  + 'if it provides that guarantee.'
+);
+
+const TRANSACTION_HASH = 'http://dkg.io/ontology/transactionHash';
+
+export interface VerifiedGraphScopedAsset {
+  /** Lower-case 32-byte root validated once with the descriptor. */
+  readonly merkleRootHex: string;
+  /** Named VM scope validated at the durable verification boundary. */
+  subGraphName?: string;
+  contextGraphId: string;
+  ual: string;
+  assertionVersion: bigint;
+  assertionGraph: string;
+  metaGraph: string;
+  dataQuads: Quad[];
+  metadataQuads: Quad[];
+}
+
+export interface AuthenticatedGraphScopedAsset {
+  asset: VerifiedGraphScopedAsset;
+  /** Null only for explicit no-chain development mode. */
+  onChainContextGraphId: string | null;
+}
+
+export type VerifyContextGraphBinding = (
+  localContextGraphId: string,
+  onChainContextGraphId: bigint,
+  signal?: AbortSignal,
+) => Promise<boolean>;
+
+export type GraphScopedMaterializationOutcome =
+  | 'applied'
+  | 'stale'
+  | 'quarantined';
+
+export interface ChallengePinnedGraphScopedAsset {
+  readonly asset: VerifiedGraphScopedAsset;
+  readonly privateRoots: readonly Uint8Array[];
+}
+
+/**
+ * Authenticate historical proof material against the on-chain challenge pin
+ * and the KA's current CG binding without treating it as the live assertion.
+ * The caller consumes it ephemerally and never downgrades durable VM state.
+ */
+export async function authenticateChallengePinnedGraphScopedAsset(
+  chain: ChainAdapter,
+  asset: VerifiedGraphScopedAsset,
+  commitment: ExactAssetCommitment,
+  verifyContextGraphBinding?: VerifyContextGraphBinding,
+  options: { signal?: AbortSignal } = {},
+): Promise<ChallengePinnedGraphScopedAsset> {
+  const descriptor = parseGraphScopedDescriptor(asset.ual, asset.metadataQuads);
+  if (!exactAssetCommitmentMatchesDescriptor(commitment, descriptor)) {
+    throw Object.assign(
+      new Error(`Graph-scoped durable sync ${asset.ual} does not match the challenge pin`),
+      { code: 'VM_CHALLENGE_COMMITMENT_MISMATCH' },
+    );
+  }
+  if (chain.chainId === 'none' || !chain.getKAContextGraphId || !verifyContextGraphBinding) {
+    throw Object.assign(
+      new Error('Challenge-pinned durable sync requires chain context-graph verification'),
+      { code: 'VM_CHAIN_VERIFICATION_UNSUPPORTED' },
+    );
+  }
+  const identity = parseDeterministicKnowledgeAssetUal(asset.ual);
+  if (identity.chainId !== chain.chainId) {
+    throw new Error(
+      `Graph-scoped durable sync UAL chain ${identity.chainId} does not match local chain ${chain.chainId}`,
+    );
+  }
+  const kaId = (BigInt(identity.agentAddress) << 96n) | BigInt(identity.kaNumber);
+  const boundContextGraphId = await chain.getKAContextGraphId(kaId, {
+    signal: options.signal,
+  });
+  if (
+    boundContextGraphId <= 0n
+    || !(await verifyContextGraphBinding(
+      asset.contextGraphId,
+      boundContextGraphId,
+      options.signal,
+    ))
+  ) {
+    throw Object.assign(
+      new Error(
+        `Graph-scoped durable sync ${asset.ual} challenge material has a different context graph`,
+      ),
+      { code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' },
+    );
+  }
+  return Object.freeze({
+    asset,
+    privateRoots: Object.freeze(descriptor.privateRoot ? [descriptor.privateRoot] : []),
+  });
+}
+
+/**
+ * Bind the peer-verified payload to current chain truth before its structural
+ * metadata can influence local assertion ordering. No-chain development keeps
+ * the integrity-only behavior; production chains fail closed without the
+ * required constant-size chain views. Local-id matching stays in the agent's
+ * context-graph identity layer and is injected here as a focused verifier.
+ */
+export async function authenticateVerifiedGraphScopedAsset(
+  chain: ChainAdapter,
+  asset: VerifiedGraphScopedAsset,
+  verifyContextGraphBinding?: VerifyContextGraphBinding,
+  receivedAt = new Date(),
+  options: { signal?: AbortSignal } = {},
+): Promise<AuthenticatedGraphScopedAsset> {
+  const receivedAtMs = receivedAt.getTime();
+  if (!Number.isFinite(receivedAtMs)) {
+    throw new Error(`Graph-scoped durable sync ${asset.ual} has an invalid local receive time`);
+  }
+  // The timestamp is local receive time, not peer metadata. It is safe
+  // for discovery ordering and keeps graph-scoped KAs visible without trusting
+  // a peer-controlled dkg:publishedAt value. No-chain mode remains explicitly
+  // tentative because it has integrity verification but no chain provenance.
+  if (chain.chainId === 'none') {
+    return {
+      asset: {
+        ...asset,
+        metadataQuads: overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(asset.metadataQuads,
+          { ual: asset.ual, metaGraph: asset.metaGraph, receivedAt, subGraphName: asset.subGraphName }, { status: 'tentative' }),
+      },
+      onChainContextGraphId: null,
+    };
+  }
+  if (
+    !chain.getLatestMerkleRoot
+    || !chain.getMerkleRootCount
+    || !chain.getKAContextGraphId
+  ) {
+    throw Object.assign(
+      new Error(
+        'Graph-scoped durable sync requires chain root, assertion-count, and context-graph verification',
+      ),
+      { code: 'VM_CHAIN_VERIFICATION_UNSUPPORTED' },
+    );
+  }
+  const identity = parseDeterministicKnowledgeAssetUal(asset.ual);
+  if (identity.chainId !== chain.chainId) {
+    throw new Error(
+      `Graph-scoped durable sync UAL chain ${identity.chainId} does not match local chain ${chain.chainId}`,
+    );
+  }
+  const kaId = (BigInt(identity.agentAddress) << 96n) | BigInt(identity.kaNumber);
+  // What the asset claims as provenance is fixed by its own metadata, so the
+  // receipt of a first publish is requested with the views instead of after
+  // them. Only the request moves: this is awaited after the checks on the
+  // views, so a malformed claim and a failed receipt read are still reported
+  // there, and the receipt is still consulted last. A check that fails before
+  // that leaves it unawaited, so its rejection is observed here.
+  const provenance = resolveProvenance(chain, asset, options.signal);
+  provenance.catch(() => undefined);
+  const [latestRoot, rootCount, boundContextGraphId] = await Promise.all([
+    chain.getLatestMerkleRoot(kaId, { signal: options.signal }),
+    chain.getMerkleRootCount(kaId, { signal: options.signal }),
+    chain.getKAContextGraphId(kaId, { signal: options.signal }),
+  ]);
+  if (latestRoot.length !== 32 || Buffer.from(latestRoot).toString('hex') !== asset.merkleRootHex) {
+    throw Object.assign(
+      new Error(`Graph-scoped durable sync ${asset.ual} does not match the latest on-chain Merkle root`),
+      { code: 'VM_CHAIN_ROOT_MISMATCH' },
+    );
+  }
+  if (rootCount !== asset.assertionVersion) {
+    throw Object.assign(
+      new Error(
+        `Graph-scoped durable sync ${asset.ual} assertionVersion ${asset.assertionVersion} ` +
+        `does not match on-chain root count ${rootCount}`,
+      ),
+      { code: 'VM_CHAIN_ASSERTION_VERSION_MISMATCH' },
+    );
+  }
+  if (boundContextGraphId <= 0n) {
+    throw Object.assign(
+      new Error(
+        `Graph-scoped durable sync ${asset.ual} is bound to invalid context graph ${boundContextGraphId}`,
+      ),
+      { code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' },
+    );
+  }
+  if (!verifyContextGraphBinding) {
+    throw Object.assign(
+      new Error('Graph-scoped durable sync requires local-to-chain context-graph verification'),
+      { code: 'VM_CHAIN_VERIFICATION_UNSUPPORTED' },
+    );
+  }
+  if (!(await verifyContextGraphBinding(
+    asset.contextGraphId,
+    boundContextGraphId,
+    options.signal,
+  ))) {
+    throw Object.assign(
+      new Error(
+        `Graph-scoped durable sync ${asset.ual} is bound to context graph ${boundContextGraphId}, `
+        + `which does not match local context graph ${asset.contextGraphId}`,
+      ),
+      { code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' },
+    );
+  }
+  const claimed = await provenance;
+
+  let materializedBlock: number;
+  let materializedTxIndex: number;
+  if (claimed.kind === 'finalized-materialization') {
+    // RFC-64 finalized VM materialization deliberately has no receipt claim:
+    // it is reconstructed from a pinned finalized chain snapshot. A later
+    // durable-sync requester must not trust the serving peer's local
+    // materializedVersion, and the requester strips that field before this
+    // boundary. The independently read current root, root count, KA->CG
+    // binding, and local CG name binding above fully authenticate the exact
+    // current assertion. Use a neutral LOCAL ordering stamp; assertionVersion
+    // remains the authoritative stale-write guard for this receiptless lane.
+    materializedBlock = 0;
+    materializedTxIndex = 0;
+  } else if (claimed.kind === 'publish') {
+    const { transactionHash } = claimed;
+    // "No such publish" from the early request may only mean the endpoint had
+    // not seen the publish block yet when it was asked, while the views,
+    // answered after it, already reflect that block. Ask once more now, which
+    // is when the receipt was always read.
+    const resolved = claimed.receipt ?? await claimed.readReceipt();
+    const resolvedKaId = resolved?.kaId ?? resolved?.batchId;
+    if (
+      !resolved
+      || resolvedKaId !== kaId
+      || resolved.merkleRoot === undefined
+      || Buffer.from(resolved.merkleRoot).toString('hex') !== asset.merkleRootHex
+      || resolved.txHash.toLowerCase() !== transactionHash.toLowerCase()
+    ) {
+      throw Object.assign(
+        new Error(`Graph-scoped durable sync ${asset.ual} publish provenance is not chain-valid`),
+        { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
+      );
+    }
+    materializedBlock = resolved.blockNumber;
+    materializedTxIndex = resolved.txIndex ?? 0;
+  } else {
+    const { transactionHash } = claimed;
+    if (!chain.verifyKAUpdate || !chain.getLatestMerkleRootPublisher) {
+      throw Object.assign(
+        new Error('Graph-scoped durable sync requires receipt-backed update verification'),
+        { code: 'VM_CHAIN_PROVENANCE_UNSUPPORTED' },
+      );
+    }
+    const publisherAddress = await chain.getLatestMerkleRootPublisher(kaId, {
+      signal: options.signal,
+    });
+    const verified = await chain.verifyKAUpdate(
+      transactionHash,
+      kaId,
+      publisherAddress,
+      { signal: options.signal },
+    );
+    if (
+      !verified.verified
+      || verified.onChainMerkleRoot === undefined
+      || Buffer.from(verified.onChainMerkleRoot).toString('hex') !== asset.merkleRootHex
+      || (verified.merkleRootCount !== undefined
+        && verified.merkleRootCount !== asset.assertionVersion)
+      || verified.blockNumber === undefined
+    ) {
+      throw Object.assign(
+        new Error(`Graph-scoped durable sync ${asset.ual} update provenance is not chain-valid`),
+        { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
+      );
+    }
+    materializedBlock = verified.blockNumber;
+    materializedTxIndex = verified.txIndex ?? 0;
+  }
+  if (
+    !Number.isSafeInteger(materializedBlock)
+    || materializedBlock < 0
+    || !Number.isSafeInteger(materializedTxIndex)
+    || materializedTxIndex < 0
+  ) {
+    throw new Error(`Graph-scoped durable sync ${asset.ual} has invalid receipt ordering data`);
+  }
+  return {
+    asset: {
+      ...asset,
+      metadataQuads: overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(asset.metadataQuads,
+        { ual: asset.ual, metaGraph: asset.metaGraph, receivedAt, subGraphName: asset.subGraphName }, {
+          status: 'confirmed', materializedVersion: { blockNumber: materializedBlock, txIndex: materializedTxIndex },
+          confirmation: claimed.kind === 'finalized-materialization'
+            ? { kind: 'finalized-materialization' }
+            : { kind: 'transaction', transactionHash: claimed.transactionHash },
+        }),
+    },
+    onChainContextGraphId: boundContextGraphId.toString(),
+  };
+}
+
+/**
+ * Materialize one already-verified V2 KA as the current version-independent
+ * assertion graph and metadata subject. The per-KA lock and version gate make
+ * retrying or racing durable pages idempotent, while exact graph replacement
+ * heals replicas that were poisoned by the former insert-only path.
+ */
+export async function materializeVerifiedGraphScopedAsset(params: {
+  store: TripleStore;
+  asset: VerifiedGraphScopedAsset;
+  isCurrent?: () => boolean;
+  shouldQuarantineCommitted?: () => boolean;
+  /** Internal composition seam for callers that already hold this asset's shared lock. */
+  lockAlreadyHeldByCaller?: boolean;
+  options?: QueryOptions;
+  oversizeHooks?: OversizeGuardHooks;
+}): Promise<GraphScopedMaterializationOutcome> {
+  const {
+    store,
+    asset,
+    isCurrent,
+    shouldQuarantineCommitted,
+    lockAlreadyHeldByCaller = false,
+    options = {},
+    oversizeHooks,
+  } = params;
+  const assertCurrent = () => {
+    if (isCurrent?.() === false) {
+      const error = new Error(`Graph-scoped materialization lifecycle for ${asset.ual} is no longer current`);
+      error.name = 'AbortError';
+      throw error;
+    }
+  };
+  assertCurrent();
+  const filtered = filterOversizedSyncQuads([
+    ...asset.dataQuads,
+    ...asset.metadataQuads,
+  ]);
+  if (filtered.dropped.length > 0) {
+    oversizeHooks?.recordDrops(filtered.dropped, 'durable-sync:graph-scoped');
+    return 'quarantined';
+  }
+
+  const write = async (replacements: AtomicAssetReplacement[], commitOptions: QueryOptions, capability: string) => {
+    const replacement = replacements[0]!;
+    const replaced = await tryReplaceGraphAndSubjectAtomically(store, replacement.graphUri, replacement.graphQuads,
+      replacement.metaGraphUri, replacement.metadataSubject, replacement.metadataQuads, commitOptions);
+    if (!replaced) throw Object.assign(new Error(ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1(capability)),
+      { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' });
+  };
+  return executeGraphScopedPublication({ store, assets: [asset], options, assertCurrent,
+    shouldQuarantineCommitted, lockAlreadyHeldByCaller, requireCurrentMetadata: false,
+    stale: () => 'stale', complete: () => isCurrent?.() === false ? 'quarantined' : 'applied',
+    publish: (replacements, commitOptions) => write(replacements, commitOptions, 'atomic data/metadata replacement'),
+    quarantine: (replacements, commitOptions) => write(replacements, commitOptions, 'atomic stale-binding quarantine'),
+  });
+}
+
+type PublishReceipt = Awaited<ReturnType<NonNullable<ChainAdapter['resolvePublishByTxHash']>>>;
+
+/** A verified asset's provenance claim and, for a first publish, the receipt it names. */
+type Provenance =
+  | { readonly kind: 'finalized-materialization' }
+  | { readonly kind: 'update'; readonly transactionHash: string }
+  | {
+    readonly kind: 'publish';
+    readonly transactionHash: string;
+    /** What the receipt resolved to when it was requested with the views. */
+    readonly receipt: PublishReceipt;
+    /** The same read, again. */
+    readonly readReceipt: () => Promise<PublishReceipt>;
+  };
+
+/**
+ * Read what the asset's own metadata claims as its provenance and, for a
+ * first publish, request the receipt that claim names. It is started before
+ * the views have answered and awaited after their checks, so everything it
+ * rejects with is reported where it always was: a malformed claim, a chain
+ * that cannot resolve a publish, a failed receipt read. Nothing is requested
+ * for any other asset.
+ */
+async function resolveProvenance(
+  chain: ChainAdapter,
+  asset: VerifiedGraphScopedAsset,
+  signal: AbortSignal | undefined,
+): Promise<Provenance> {
+  const transactionHashes = asset.metadataQuads
+    .filter((quad) => quad.predicate === TRANSACTION_HASH)
+    .map((quad) => parseTransactionHashLiteral(quad.object));
+  if (transactionHashes.length > 1) {
+    throw Object.assign(
+      new Error(
+        `Graph-scoped durable sync ${asset.ual} allows at most one receipt transaction hash, `
+          + `got ${transactionHashes.length}`,
+      ),
+      { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
+    );
+  }
+  if (readGraphKnowledgeAssetConfirmationKindV1(asset.metadataQuads) === 'finalized-materialization') {
+    if (transactionHashes.length !== 0) {
+      throw Object.assign(
+        new Error(
+          `Graph-scoped durable sync ${asset.ual} finalized materialization must not claim a receipt`,
+        ),
+        { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
+      );
+    }
+    return { kind: 'finalized-materialization' };
+  }
+  if (transactionHashes.length !== 1) {
+    throw Object.assign(
+      new Error(
+        `Graph-scoped durable sync ${asset.ual} receipt-backed confirmation requires one transaction hash`,
+      ),
+      { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
+    );
+  }
+  const transactionHash = transactionHashes[0]!;
+  if (asset.assertionVersion !== 1n) return { kind: 'update', transactionHash };
+  const { resolvePublishByTxHash } = chain;
+  if (!resolvePublishByTxHash) {
+    throw Object.assign(
+      new Error('Graph-scoped durable sync requires receipt-backed publish verification'),
+      { code: 'VM_CHAIN_PROVENANCE_UNSUPPORTED' },
+    );
+  }
+  // Only the receipt's batch, root, hash and ordering are consumed, so the
+  // adapter's unused block-header lookup for `blockTimestamp` is skipped.
+  const readReceipt = () => resolvePublishByTxHash.call(chain, transactionHash, {
+    signal,
+    skipBlockTimestamp: true,
+  });
+  return { kind: 'publish', transactionHash, receipt: await readReceipt(), readReceipt };
+}
+
+function parseTransactionHashLiteral(raw: string): string {
+  const lexical = parseRdfLiteral(raw) ?? raw;
+  if (!/^0x[0-9a-f]{64}$/i.test(lexical)) {
+    throw new Error('Graph-scoped durable sync transactionHash must be a 32-byte hex literal');
+  }
+  return lexical;
+}
+
+function parseRdfLiteral(raw: string): string | undefined {
+  const encoded = /^("(?:\\.|[^"\\])*")/.exec(raw)?.[1];
+  if (encoded === undefined) return undefined;
+  try {
+    return JSON.parse(encoded);
+  } catch {
+    return undefined;
+  }
+}

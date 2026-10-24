@@ -74,6 +74,67 @@ export interface OversizeFilterResult {
   dropped: OversizeDrop[];
 }
 
+/**
+ * Maximum estimated serialized size handed to one TripleStore.insert call by
+ * sync ingest. This is intentionally adapter-neutral: it stays far below the
+ * managed Oxigraph HTTP limit and also bounds the N-Quads/SPARQL string that
+ * Blazegraph and generic SPARQL adapters materialize in JavaScript.
+ */
+export const SYNC_STORE_INSERT_BATCH_MAX_BYTES = 8 * 1024 * 1024;
+
+const SYNC_STORE_INSERT_QUAD_SYNTAX_BYTES = 256;
+
+/**
+ * Conservative cross-adapter serialized-size estimate. Generic SPARQL and
+ * Oxigraph use UTF-8; Blazegraph ASCII-escapes non-ASCII code points, so use
+ * the larger representation for every term.
+ */
+export function estimateSyncStoreInsertQuadBytes(quad: Quad): number {
+  let bytes = SYNC_STORE_INSERT_QUAD_SYNTAX_BYTES;
+  for (const value of [quad.subject, quad.predicate, quad.object, quad.graph ?? '']) {
+    let utf8Bytes = 0;
+    let blazegraphAsciiBytes = 0;
+    for (const char of value) {
+      const codePoint = char.codePointAt(0)!;
+      if (codePoint <= 0x7f) {
+        utf8Bytes += 1;
+        blazegraphAsciiBytes += 1;
+      } else if (codePoint <= 0x7ff) {
+        utf8Bytes += 2;
+        blazegraphAsciiBytes += 6;
+      } else if (codePoint <= 0xffff) {
+        utf8Bytes += 3;
+        blazegraphAsciiBytes += 6;
+      } else {
+        utf8Bytes += 4;
+        // Blazegraph's ASCII-safe N-Quads form uses a UTF-16 surrogate pair.
+        blazegraphAsciiBytes += 12;
+      }
+    }
+    bytes += Math.max(utf8Bytes, blazegraphAsciiBytes);
+  }
+  return bytes;
+}
+
+async function insertInBoundedBatches(
+  insert: (quads: Quad[]) => Promise<void>,
+  quads: readonly Quad[],
+): Promise<void> {
+  let batch: Quad[] = [];
+  let batchBytes = 0;
+  for (const quad of quads) {
+    const quadBytes = estimateSyncStoreInsertQuadBytes(quad);
+    if (batch.length > 0 && batchBytes + quadBytes > SYNC_STORE_INSERT_BATCH_MAX_BYTES) {
+      await insert(batch);
+      batch = [];
+      batchBytes = 0;
+    }
+    batch.push(quad);
+    batchBytes += quadBytes;
+  }
+  if (batch.length > 0) await insert(batch);
+}
+
 function isSharedMemoryGraph(graph: string | undefined): boolean {
   return !!graph && SHARED_MEMORY_SEGMENT_RE.test(graph);
 }
@@ -182,6 +243,12 @@ export interface OversizeGuardHooks {
  * class (permanent, size-based refusals) into converge-minus-poison; it must
  * never mask transient store failures.
  *
+ * Inserts are split into bounded byte-estimated batches. RDF inserts are
+ * idempotent, so a later batch failure remains safe to retry from the phase
+ * checkpoint; successful earlier batches do not duplicate graph state. The
+ * batching also releases shared store admission between chunks so reserved
+ * ACK/health work can proceed during a large catch-up.
+ *
  * Returns the quads actually handed to the store (post-filter) — callers use it
  * for cache-invalidation / meta-dirty marking. (The runners' inserted-count
  * SUMMARY metric still keys off pre-filter length, so it can slightly over-count
@@ -198,7 +265,7 @@ export async function insertWithOversizeGuard(
   if (dropped.length > 0) hooks.recordDrops(dropped, seam);
   if (kept.length === 0) return kept;
   try {
-    await insert(kept);
+    await insertInBoundedBatches(insert, kept);
     return kept;
   } catch (err) {
     if (!isOversizedRdfLiteralError(err)) throw err;
@@ -206,7 +273,8 @@ export async function insertWithOversizeGuard(
     if (backstop.dropped.length === 0) throw err; // not size-explicable → real error
     hooks.recordDrops(backstop.dropped, `${seam}:store-reject`);
     if (backstop.kept.length === 0) return [];
-    await insert(backstop.kept); // second oversize throw here propagates — no loop, loud failure
+    // Second oversize throw here propagates — no loop, loud failure.
+    await insertInBoundedBatches(insert, backstop.kept);
     return backstop.kept;
   }
 }

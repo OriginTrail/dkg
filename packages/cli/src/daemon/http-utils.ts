@@ -1,3 +1,7 @@
+import { classifyReconcileUnavailable } from './reconcile-unavailable.js';
+export { classifyReconcileUnavailable } from './reconcile-unavailable.js';
+import { normalizeContextGraphIdOrUri } from '../context-graph-identifiers.js';
+export { normalizeContextGraphIdOrUri } from '../context-graph-identifiers.js';
 // HTTP request/response utilities extracted from the legacy monolithic
 // `daemon.ts`. Body parsing, JSON validators, CORS resolution, the
 // loopback rate-limiter, plus small helpers used across route handlers.
@@ -12,16 +16,32 @@ import {
   validateContextGraphId,
   validateSubGraphName,
   isSafeIri,
+  PCA_FUNDING_UNKNOWN_CODE,
+  PCA_FUNDING_UNKNOWN_MESSAGE,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   messageIndicatesNoFundedPublisherWallet,
   Logger,
   createOperationContext,
+  type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { enrichEvmError, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
-import type { DKGAgent, ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-agent';
+import {
+  type DKGAgent,
+  type ContextGraphWritePreflightProbe,
+} from '@origintrail-official/dkg-agent';
+import {
+  STORE_OPERATION_TIMEOUT_CODE,
+  isStoreSchedulerBusyError,
+  isStoreOperationTimeoutError,
+} from '@origintrail-official/dkg-storage';
 import type { DkgConfig } from '../config.js';
+import {
+  createReadAuthorityDiagnostics,
+  decodeReadAuthorityAttribution,
+  type ContextGraphReadAuthorityAttribution,
+} from './read-authority-diagnostics.js';
 import { enforceSignedRequestPostBody } from '../auth.js';
-
+import { knownNotWritableAnswer, resolveAwaitingWriteReadiness, type ContextGraphSubscriptionReader, type KnownNotWritable, type WriteReadinessOutcome } from './context-graph-write-readiness.js';
 import type { CorsAllowlist } from './state.js';
 
 export function isPayloadTooLargeError(err: unknown): err is PayloadTooLargeError {
@@ -53,6 +73,137 @@ export function payloadTooLargeResponseBody(err: unknown): Record<string, unknow
 }
 
 /**
+ * Map transient triple-store pressure to one retryable HTTP contract across
+ * query and lifecycle routes. Scheduler shedding is known not to have started;
+ * a dispatched write timeout is indeterminate and clients must retry the same
+ * idempotency key / Knowledge Asset name rather than minting a new asset.
+ */
+export type StoreUnavailableOutcome = 'not_started' | 'indeterminate';
+
+export interface StoreUnavailableClassification {
+  outcome: StoreUnavailableOutcome;
+  body: Record<string, unknown>;
+}
+
+/**
+ * Pure store-failure classification. Routes with partial-success context can
+ * extend `body` before rendering it instead of losing that context through the
+ * ordinary all-or-nothing responder below.
+ */
+export function classifyStoreUnavailable(
+  err: unknown,
+): StoreUnavailableClassification | null {
+  if (isStoreSchedulerBusyError(err)) {
+    return {
+      outcome: 'not_started',
+      body: {
+        error: err.message ?? 'Store scheduler is temporarily busy; retry the request',
+        code: err.code,
+        reason: err.reason,
+        priority: err.priority,
+        retryable: true,
+        outcome: 'not_started',
+      },
+    };
+  }
+
+  if (!isStoreOperationTimeoutError(err)) return null;
+  const outcome = err.outcome ?? 'indeterminate';
+  return {
+    outcome,
+    body: {
+      error: typeof err.message === 'string'
+        ? err.message
+        : 'Triple-store operation exceeded its deadline',
+      code: STORE_OPERATION_TIMEOUT_CODE,
+      retryable: true,
+      outcome,
+      ...(typeof err.backend === 'string' ? { backend: err.backend } : {}),
+      ...(typeof err.operation === 'string' ? { operation: err.operation } : {}),
+      ...(typeof err.timeoutMs === 'number' ? { timeoutMs: err.timeoutMs } : {}),
+    },
+  };
+}
+
+/**
+ * Kept structural for the same package-boundary reason as
+ * CALLER_SPARQL_REJECTED in routes/query-error.ts: the agent emits this
+ * internal marker, while the daemon owns its public HTTP representation.
+ */
+export const CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE =
+  'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE';
+
+export function isContextGraphReadAuthorityUnavailable(err: unknown): boolean {
+  if ((typeof err !== 'object' && typeof err !== 'function') || err === null) return false;
+  try {
+    return Reflect.get(err, 'code') === CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE
+      && Reflect.get(err, 'retryable') === true;
+  } catch {
+    return false;
+  }
+}
+
+const readAuthorityDiagnostics = createReadAuthorityDiagnostics();
+
+/**
+ * Uniform retryable response for an unresolvable Context Graph read authority,
+ * the one renderer every route uses. The graph id, authority source and
+ * internal reason stay out of the body; the attribution goes to the daemon log
+ * under `ctx`'s operation id (#2834), which the response carries as
+ * `x-dkg-operation-id` for correlation.
+ */
+export function respondContextGraphReadAuthorityUnavailable(
+  res: ServerResponse,
+  attribution: ContextGraphReadAuthorityAttribution,
+  ctx: OperationContext = createOperationContext('query'),
+  code: typeof CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE | 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE' = CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
+): void {
+  readAuthorityDiagnostics.record(ctx, attribution);
+  jsonResponse(
+    res,
+    503,
+    {
+      error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
+      code,
+      retryable: true,
+    },
+    undefined,
+    { 'Retry-After': '3', 'x-dkg-operation-id': ctx.operationId },
+  );
+}
+
+/**
+ * Renders the read-authority 503 for the agent's thrown marker. Shared by
+ * every route that reaches `DKGAgent.query` with a scoped `contextGraphId`, so
+ * a chain/metadata outage is never reported as a 500.
+ */
+export function respondIfContextGraphReadAuthorityUnavailable(
+  res: ServerResponse,
+  err: unknown,
+  ctx?: OperationContext,
+): boolean {
+  if (!isContextGraphReadAuthorityUnavailable(err)) return false;
+  respondContextGraphReadAuthorityUnavailable(res, decodeReadAuthorityAttribution(err), ctx);
+  return true;
+}
+
+export function respondIfStoreUnavailable(
+  res: ServerResponse,
+  err: unknown,
+): StoreUnavailableOutcome | null {
+  const classified = classifyStoreUnavailable(err);
+  if (!classified) return null;
+  jsonResponse(
+    res,
+    503,
+    classified.body,
+    undefined,
+    { 'Retry-After': '1' },
+  );
+  return classified.outcome;
+}
+
+/**
  * True iff `err` is (or looks like) the funded-wallet-selection failure
  * (`InsufficientPublisherFundsError`, code `NO_FUNDED_PUBLISHER_WALLET`) —
  * code-first, with a message-marker fallback for a re-wrap that dropped `.code`.
@@ -73,11 +224,26 @@ export function noFundedPublisherWalletBody(message: string): { code: string; er
   return { code: NO_FUNDED_PUBLISHER_WALLET_CODE, error: message };
 }
 
+/** A strict PCA funding read was inconclusive, not a proved wallet shortfall.
+ * Use a fixed message: the underlying RPC error may contain private endpoint
+ * details and its transport code is intentionally not the public error code. */
+export function respondIfPcaFundingUnknown(res: ServerResponse, err: unknown): boolean {
+  if ((err as { code?: unknown } | null)?.code !== PCA_FUNDING_UNKNOWN_CODE) return false;
+  res.setHeader('Retry-After', '1');
+  jsonResponse(res, 503, {
+    code: PCA_FUNDING_UNKNOWN_CODE,
+    error: PCA_FUNDING_UNKNOWN_MESSAGE,
+    retryable: true,
+  });
+  return true;
+}
+
 /**
  * Map a thrown request error to the daemon's top-level HTTP response — the
  * single neutral place that rethrowing lifecycle publish routes
  * and the lifecycle catch agree on status codes: 413 payload-too-large; 400 for
- * SyntaxError / reserved-namespace / NO_FUNDED_PUBLISHER_WALLET; otherwise a 500
+ * SyntaxError / reserved-namespace / NO_FUNDED_PUBLISHER_WALLET; 503 for
+ * inconclusive PCA funding; otherwise a 500
  * with the EVM-decoded message. Unit-testable in isolation.
  */
 export function respondWithDaemonError(res: ServerResponse, err: any): void {
@@ -97,6 +263,16 @@ export function respondWithDaemonError(res: ServerResponse, err: any): void {
     // Funded-wallet selection found no operational wallet with gas + TRAC — a
     // user-actionable funding condition (4xx), not a server bug.
     jsonResponse(res, 400, noFundedPublisherWalletBody(typeof err?.message === 'string' ? err.message : String(err)));
+  } else if (respondIfPcaFundingUnknown(res, err)) {
+    // A rethrowing publish path has the same retryable verdict as /vm/publish.
+  } else if (respondIfStoreUnavailable(res, err)) {
+    // Store admission pressure and adapter deadlines are transient. The typed
+    // response preserves whether work never started or may have completed.
+  } else if (respondIfContextGraphReadAuthorityUnavailable(res, err)) {
+    // A scoped read whose authority source could not answer is retryable, not a
+    // server bug: any route that RE-THROWS gets the same uniform 503 the
+    // `/api/query` boundary returns instead of a 500 that also echoes the
+    // internal authority source/reason in its message.
   } else if (respondIfChainRpcTransportError(res, err)) {
     // Transient transport exhaustion (RPC_ENDPOINTS_EXHAUSTED /
     // RPC_RECEIPT_LOOKUP_FAILED → 503, TIMEOUT → 504) is retryable — a route
@@ -151,26 +327,6 @@ export async function resolveNameToPeerId(
   return match?.peerId ?? null;
 }
 
-/**
- * GH #306 / #787 — shape guard for the WRITE routes (wm/write,
- * shared-memory/write). The `graph` term is OPTIONAL here: those routes
- * legitimately accept `{subject,predicate,object}`
- * and fill the graph internally. Without this guard, a string-shaped quad
- * (e.g. an N-Quad line `"<s> <p> <o> ."`) slips past a bare `Array.isArray`
- * check and crashes the agent write path with a TypeError → HTTP 500 instead
- * of an actionable 4xx.
- */
-export function isWritableQuad(value: unknown): boolean {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v.subject === "string" &&
-    typeof v.predicate === "string" &&
-    typeof v.object === "string" &&
-    (v.graph === undefined || typeof v.graph === "string")
-  );
-}
-
 export function validateWritableQuadLiteralSizes(
   label: string,
   quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
@@ -186,62 +342,10 @@ export function validateWritableQuadLiteralSizes(
   }
 }
 
-/**
- * GH #306 / #787 (follow-up) — validate each quad's `object` term is either a
- * quoted RDF literal (`"…"`) or an absolute IRI. Shared by lifecycle write
- * routes and other quad-accepting validation paths: the shape guard
- * ({@link isWritableQuad}) only checks that fields
- * are strings, so an object that is neither a literal nor an IRI (e.g. a bare
- * word `hello` or a number `123`) slips past them and crashes the RDF parser
- * with an uncaught "No scheme found in an absolute IRI" → HTTP 500 instead of an
- * actionable 400.
- */
-export function validateQuadObjectTerms(
-  label: string,
-  quads: ReadonlyArray<{ object: string }>,
-): string | null {
-  const badIndex = quads.findIndex((q) => {
-    const object = q.object.trim();
-    return !object.startsWith('"') && !isSafeIri(object);
-  });
-  if (badIndex === -1) return null;
-  return `Invalid "${label}[${badIndex}].object": RDF object must be a quoted literal term or absolute IRI`;
-}
-
-/**
- * KA-number-floor reconcile resilience (follow-up to the "KA create 500-on-429"
- * fix). If `e` is a **transient** reconcile failure — the chain RPC couldn't serve
- * the one-time-per-author floor read (e.g. a 429 after the bounded retry in
- * `allocator.ts` is exhausted) — send a retryable **503** and return true;
- * otherwise return false so the caller falls through to its normal mapping.
- *
- * The transient-vs-deterministic verdict comes from `retryable` (derived from
- * `isTransientChainError`): the typed `KaFloorReconcileError` carries it, and the
- * finalize/selection re-wrap sites in `dkg-agent-publish.ts` tag the same marker.
- * A deterministic failure (`retryable === false`, e.g. a revert) is NOT a 503 —
- * advertising a retry would be pointless — so it falls through. The legacy
- * message-text match is honored ONLY when the error explicitly marks itself
- * retryable, so a bare re-wrapped message can never force a deterministic error
- * into a retryable 503 (PR #1319 review). Used by every route that can trigger the
- * reconcile (named create, one-shot publish, shared-memory publish, and the
- * WM-verb routes via `respondAssertionError`) so they answer consistently.
- */
 export function respondIfReconcileUnavailable(res: ServerResponse, e: any): boolean {
-  const msg = e?.message ?? String(e);
-  const isTyped = e?.code === "KA_FLOOR_RECONCILE_UNAVAILABLE";
-  // Message-text fallback (for errors re-wrapped on the way up) is accepted only
-  // when the error explicitly carries a retryable marker — never for a bare
-  // message, which might be hiding a deterministic revert.
-  const isMarkedLegacyTransient =
-    e?.retryable === true && /failed to reconcile KA-number floor/i.test(msg);
-  if ((!isTyped && !isMarkedLegacyTransient) || e?.retryable === false) {
-    return false;
-  }
-  jsonResponse(res, 503, {
-    error: msg,
-    code: "KA_FLOOR_RECONCILE_UNAVAILABLE",
-    retryable: true,
-  });
+  const body = classifyReconcileUnavailable(e);
+  if (!body) return false;
+  jsonResponse(res, 503, body);
   return true;
 }
 
@@ -261,6 +365,7 @@ export function sanitizeRpcMessage(msg: string): string {
  * keyed STRICTLY on `err.code` (never message text):
  *   - `RPC_ENDPOINTS_EXHAUSTED`   → 503 (all configured endpoints failed over)
  *   - `RPC_RECEIPT_LOOKUP_FAILED` → 503 (receipt lookup failed on every endpoint)
+ *   - `RPC_REQUEST_GOVERNOR_QUEUE_FULL` → 503 (operation outcome is conservative)
  *   - `TIMEOUT`                   → 504 (receipt wait / RPC request timed out)
  *
  * Returns `undefined` for anything else. On-chain reverts (`CALL_EXCEPTION`),
@@ -284,19 +389,37 @@ export function classifyChainRpcTransportStatus(
   const { code } = err;
   const msg = sanitizeRpcMessage(typeof err.message === "string" ? err.message : "");
   const txHash = typeof err.txHash === "string" && err.txHash ? err.txHash : "";
+  const transportBody = (error: string, responseCode: string): Record<string, unknown> => ({
+    error,
+    code: responseCode,
+    ...(txHash ? { txHash } : {}),
+  });
   // Exhaustive over ChainRpcTransportCode: a new code added to the boundary
   // without a case here is a COMPILE error (the `never` default), so the
   // classifier can never silently inherit timeout/504 semantics for a new code.
   switch (code) {
     case "RPC_ENDPOINTS_EXHAUSTED":
-      return { status: 503, body: { error: msg || "Configured chain RPC endpoints were exhausted.", code } };
+      return {
+        status: 503,
+        body: transportBody(msg || "Configured chain RPC endpoints were exhausted.", code),
+      };
     case "RPC_RECEIPT_LOOKUP_FAILED":
       return {
         status: 503,
-        body: {
-          error: msg || "Transaction receipt lookup failed on all configured chain RPC endpoints.",
+        body: transportBody(
+          msg || "Transaction receipt lookup failed on all configured chain RPC endpoints.",
           code,
-          ...(txHash ? { txHash } : {}),
+        ),
+      };
+    case "RPC_REQUEST_GOVERNOR_QUEUE_FULL":
+      return {
+        status: 503,
+        body: {
+          ...transportBody(msg || "Chain RPC request capacity is temporarily full.", code),
+          retryable: true,
+          // Admission failed for this raw attempt, but the containing operation
+          // may already have reached another endpoint (especially writes).
+          outcome: "indeterminate",
         },
       };
     case "RPC_TIMEOUT":
@@ -305,7 +428,7 @@ export function classifyChainRpcTransportStatus(
       // wire contract stable while the boundary stays namespaced internally.
       return {
         status: 504,
-        body: { error: msg || "Chain transaction timed out.", code: "TIMEOUT", ...(txHash ? { txHash } : {}) },
+        body: transportBody(msg || "Chain transaction timed out.", "TIMEOUT"),
       };
     default: {
       const _exhaustive: never = code;
@@ -333,6 +456,9 @@ export function respondIfChainRpcTransportError(
 ): boolean {
   const transport = classifyChainRpcTransportStatus(err);
   if (!transport) return false;
+  if (transport.body.code === 'RPC_REQUEST_GOVERNOR_QUEUE_FULL') {
+    res.setHeader('Retry-After', '1');
+  }
   jsonResponse(res, transport.status, extraBody ? { ...extraBody, ...transport.body } : transport.body);
   return true;
 }
@@ -428,10 +554,11 @@ export function jsonResponse(
   corsOrigin?: string | null,
   extraHeaders?: Record<string, string>,
 ): void {
-  const origin =
-    corsOrigin !== undefined
-      ? corsOrigin
-      : (((res as any).__corsOrigin as string | null) ?? null);
+  sendSerializedJsonResponse(res, status, serializeJsonResponse(status, data), corsOrigin, extraHeaders);
+}
+
+/** The body {@link jsonResponse} sends, for a route that must finish its answer before it decides to send it. */
+export function serializeJsonResponse(status: number, data: unknown): string {
   const scrubbed = scrubResponseBody(data);
   const rawBody = JSON.stringify(scrubbed, (_key, value) =>
     typeof value === "bigint" ? value.toString() : value,
@@ -510,7 +637,7 @@ export function jsonResponse(
   // the CodeQL silence on the flagged sink while making
   // success-path payload corruption impossible.
   const isErrorResponse = status >= 400;
-  const body = isErrorResponse
+  return isErrorResponse
     ? rawBody
         .replace(/\\n\s+at [^"\n]+/g, "")
         .replace(
@@ -519,6 +646,17 @@ export function jsonResponse(
         )
         .replace(/\s+at\s+[^\s()":]+:\d+:\d+/g, "")
     : rawBody;
+}
+
+/** Sends a body {@link serializeJsonResponse} made. */
+export function sendSerializedJsonResponse(
+  res: ServerResponse,
+  status: number,
+  body: string,
+  corsOrigin?: string | null,
+  extraHeaders?: Record<string, string>,
+): void {
+  const origin = corsOrigin !== undefined ? corsOrigin : (((res as any).__corsOrigin as string | null) ?? null);
   res.writeHead(status, {
     "Content-Type": "application/json",
     ...corsHeaders(origin),
@@ -601,13 +739,6 @@ export function validateRequiredContextGraphId(
   return true;
 }
 
-const CONTEXT_GRAPH_URI_PREFIX = "did:dkg:context-graph:";
-
-export function normalizeContextGraphIdOrUri(contextGraphId: string): string {
-  return contextGraphId.startsWith(CONTEXT_GRAPH_URI_PREFIX)
-    ? contextGraphId.slice(CONTEXT_GRAPH_URI_PREFIX.length)
-    : contextGraphId;
-}
 
 type ExistingContextGraphRow = {
   id?: unknown;
@@ -677,16 +808,9 @@ async function contextGraphRowIsWritable(
   return false;
 }
 
-function rejectKnownNonWritableContextGraph(
-  res: ServerResponse,
-  raw: string,
-): null {
-  jsonResponse(res, 400, {
-    code: "CONTEXT_GRAPH_NOT_WRITABLE",
-    error:
-      `Context graph "${raw}" is known but is not locally synced for writes. ` +
-      `Subscribe/sync the context graph first, then retry the write.`,
-  });
+function rejectKnownNonWritableContextGraph(res: ServerResponse, raw: string, outcome: WriteReadinessOutcome): null {
+  const answer = knownNotWritableAnswer(raw, outcome);
+  jsonResponse(res, answer.status, answer.body, undefined, answer.headers);
   return null;
 }
 
@@ -737,9 +861,21 @@ function exactProbeCanFastAccept(
   probe: ContextGraphWritePreflightProbe,
   requireLocalWritable: boolean,
   callerAgentAddress: string | null,
+  allowLocalExactFallback: boolean,
 ): boolean {
   if (!exactProbeIsLocallyWritable(probe, requireLocalWritable)) return false;
-  if (!callerAgentAddress) return probe.accessPolicy === "public";
+  if (!callerAgentAddress) {
+    // Node-admin / trusted-local routes already opt into the exact-local
+    // fallback below after listContextGraphs. When the exact probe has all of
+    // the same positive evidence up front, accept a known PRIVATE graph here
+    // instead of enumerating every context graph first. This does not broaden
+    // access: scoped agent callers never set allowLocalExactFallback, and an
+    // unavailable/unknown store cannot satisfy exactProbeIsLocallyWritable.
+    return (
+      probe.accessPolicy === "public" ||
+      (allowLocalExactFallback && probe.accessPolicy === "private")
+    );
+  }
   return probe.callerAuthorized === true;
 }
 
@@ -869,20 +1005,22 @@ async function rescueWriteTargetWithoutStore(
  *   - `accept`        — fast-accept; the caller returns the candidate id.
  *   - `rejectUnknown` — a definitive, store-backed deny of a non-bare id; the
  *                       caller returns 404.
- *   - `deferReject`   — a definitive deny of a BARE id; continue to the list leg
- *                       and reject only if that leg ALSO misses (a name may
- *                       resolve differently there).
- *   - `unavailable`   — the probe threw or degraded (`storeUnavailable`); this
- *                       is the ONLY verdict that makes the both-legs-failed
- *                       store-free rescue eligible. `errorMessage` feeds the 503.
- *   - `continueToList`— no probe, or a definitive miss with nothing to carry.
+ *   - canonical outcomes are fully reduced to accept/reject/unavailable here;
+ *     the HTTP resolver never re-interprets raw probe fields.
+ *   - the three `list*` variants are mutually exclusive: ordinary list/name
+ *     resolution, an authoritative exact deny deferred for bare-name suffix
+ *     resolution, or an unavailable exact probe whose list failure may use
+ *     the store-free rescue.
  */
 type ExactPreflightDecision =
   | { kind: "accept" }
   | { kind: "rejectUnknown" }
-  | { kind: "deferReject" }
-  | { kind: "unavailable"; errorMessage: string }
-  | { kind: "continueToList" };
+  | { kind: "rejectNonWritable" }
+  | { kind: "validationUnavailable"; errorMessage: string }
+  | { kind: "unavailableWithRescue"; errorMessage: string }
+  | { kind: "listFallback" }
+  | { kind: "listDeferredReject" }
+  | { kind: "listUnavailable"; errorMessage: string };
 
 /**
  * Run the exact write-preflight probe and reduce it to one {@link
@@ -903,17 +1041,33 @@ async function evaluateExactWritePreflight(
     callerAgentAddress: string | null;
     requireLocalWritable: boolean;
     isBareCandidateId: boolean;
+    allowLocalExactFallback: boolean;
   },
 ): Promise<ExactPreflightDecision> {
-  if (!agent.probeContextGraphWritePreflight) return { kind: "continueToList" };
-  const { callerAgentAddress, requireLocalWritable, isBareCandidateId } = opts;
+  const {
+    callerAgentAddress,
+    requireLocalWritable,
+    isBareCandidateId,
+    allowLocalExactFallback,
+  } = opts;
+  if (!agent.probeContextGraphWritePreflight) {
+    // Compatibility for narrow providers that do not expose the exact point
+    // capability. Production agents do expose it; their canonical path below
+    // never enumerates the catalog.
+    return { kind: "listFallback" };
+  }
   try {
     const probe = await agent.probeContextGraphWritePreflight(candidateId, {
       callerAgentAddress,
     });
     // Fast-accept wins even under a degraded store (it never rests on UNKNOWN
     // store fields), so check it before any deny/unavailable interpretation.
-    if (exactProbeCanFastAccept(probe, requireLocalWritable, callerAgentAddress)) {
+    if (exactProbeCanFastAccept(
+      probe,
+      requireLocalWritable,
+      callerAgentAddress,
+      allowLocalExactFallback,
+    )) {
       return { kind: "accept" };
     }
     if (probe.storeUnavailable === true) {
@@ -921,10 +1075,10 @@ async function evaluateExactWritePreflight(
       // fields to UNKNOWN. Deny-ish verdicts are NOT trustworthy from unknowns
       // (that would turn a store outage into a 400), so carry the store error
       // for the both-legs-failed 503 and leave the verdict to the list/rescue.
-      return {
-        kind: "unavailable",
-        errorMessage: probe.storeErrorMessage ?? "local store unavailable",
-      };
+      const errorMessage = probe.storeErrorMessage ?? "local store unavailable";
+      return isBareCandidateId
+        ? { kind: "listUnavailable", errorMessage }
+        : { kind: "unavailableWithRescue", errorMessage };
     }
     // Store answered definitively — a deny-ish verdict is authoritative. Bare
     // ids defer (the list leg may resolve the name); qualified ids reject now.
@@ -932,17 +1086,35 @@ async function evaluateExactWritePreflight(
       exactProbeIsStaleSubscription(probe) ||
       exactProbeIsAuthoritativeBearerDeny(probe, callerAgentAddress)
     ) {
-      return isBareCandidateId ? { kind: "deferReject" } : { kind: "rejectUnknown" };
+      return isBareCandidateId
+        ? { kind: "listDeferredReject" }
+        : { kind: "rejectUnknown" };
     }
-    return { kind: "continueToList" };
+    if (!isBareCandidateId) {
+      if (probe.exists === false) return { kind: "rejectUnknown" };
+      if (probe.exists !== true) {
+        return {
+          kind: "validationUnavailable",
+          errorMessage: "exact context graph existence was incomplete",
+        };
+      }
+      if (!exactProbeIsLocallyWritable(probe, requireLocalWritable)) {
+        return { kind: "rejectNonWritable" };
+      }
+      return {
+        kind: "validationUnavailable",
+        errorMessage: "exact context graph metadata was incomplete",
+      };
+    }
+    return { kind: "listFallback" };
   } catch (err) {
     // The exact probe could not answer local existence at all (store down / read
     // broke). The ONLY degraded case that makes the both-legs-failed rescue
     // eligible: there is no authoritative local-miss verdict to override.
-    return {
-      kind: "unavailable",
-      errorMessage: err instanceof Error ? err.message : String(err),
-    };
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    return isBareCandidateId
+      ? { kind: "listUnavailable", errorMessage }
+      : { kind: "unavailableWithRescue", errorMessage };
   }
 }
 
@@ -952,8 +1124,17 @@ async function evaluateExactWritePreflight(
  * The storage layer auto-materializes named graphs on first insert, so syntax
  * validation is not enough for mutation routes. This helper fail-closes before
  * callers reach agent/publisher/storage code that would create a shadow CG.
+ * A known graph that this node is still catching up is waited for, bounded,
+ * and resolved once more (`context-graph-write-readiness.ts`).
  */
-export async function resolveRequiredWriteContextGraphId(
+export function resolveRequiredWriteContextGraphId(...args: Parameters<typeof resolveWriteContextGraphIdOnce>): Promise<string | null> {
+  const [agent, , res] = args;
+  return resolveAwaitingWriteReadiness(agent, () => resolveWriteContextGraphIdOnce(...args),
+    (raw, outcome) => rejectKnownNonWritableContextGraph(res, raw, outcome), res);
+}
+
+/** One pass of {@link resolveRequiredWriteContextGraphId}: a known graph that is not writable here is returned, not answered. */
+async function resolveWriteContextGraphIdOnce(
   agent: {
     listContextGraphs(opts?: {
       callerAgentAddress?: string | null;
@@ -971,12 +1152,20 @@ export async function resolveRequiredWriteContextGraphId(
      * locally.
      */
     validateWriteTargetDuringStoreOutage?: (contextGraphId: string) => Promise<boolean>;
+    /** Live subscription rows: a write waits on them while this node catches its graph up. */
+    getSubscribedContextGraphs?: ContextGraphSubscriptionReader['getSubscribedContextGraphs'];
   },
   contextGraphId: unknown,
   res: ServerResponse,
   opts: {
     callerAgentAddress?: string | null;
     requireLocalWritable?: boolean;
+    /**
+     * Trusted local / node-admin routes may accept an exact, store-backed
+     * private graph without first enumerating all visible context graphs.
+     * Scoped agent routes must leave this false so their per-caller private
+     * authorization remains authoritative.
+     */
     allowLocalExactFallback?: boolean;
     /**
      * Test-only seam: override the store-outage rescue eth_call timeout so the
@@ -985,7 +1174,7 @@ export async function resolveRequiredWriteContextGraphId(
      */
     chainRescueTimeoutMs?: number;
   } = {},
-): Promise<string | null> {
+): Promise<string | KnownNotWritable | null> {
   if (!validateRequiredContextGraphId(contextGraphId, res)) return null;
 
   const raw = (contextGraphId as string).trim();
@@ -1010,20 +1199,52 @@ export async function resolveRequiredWriteContextGraphId(
     callerAgentAddress,
     requireLocalWritable,
     isBareCandidateId,
+    allowLocalExactFallback: opts.allowLocalExactFallback === true,
   });
   if (exactDecision.kind === "accept") return candidateId;
   if (exactDecision.kind === "rejectUnknown") {
     return rejectUnknownContextGraph(res, raw);
+  }
+  if (exactDecision.kind === "rejectNonWritable") {
+    return { notWritable: candidateId, raw };
+  }
+  if (exactDecision.kind === "validationUnavailable") {
+    return contextGraphValidationUnavailable(res, exactDecision.errorMessage);
+  }
+  // Qualified ids are already canonical and unambiguous. Never turn their
+  // point-validation into a full ONTOLOGY/AGENTS catalog scan: under store
+  // pressure that O(catalog) fallback was the operation that timed out and
+  // blocked an otherwise unrelated publish (#2066). Bare names still need the
+  // list leg below for suffix resolution and ambiguity reporting.
+  if (exactDecision.kind === "unavailableWithRescue") {
+    const message = `exact preflight failed: ${exactDecision.errorMessage}`;
+    if (await rescueWriteTargetWithoutStore(
+      agent,
+      candidateId,
+      message,
+      opts.chainRescueTimeoutMs,
+    )) {
+      return candidateId;
+    }
+    return contextGraphValidationUnavailable(res, message);
+  }
+  if (
+    exactDecision.kind !== "listFallback" &&
+    exactDecision.kind !== "listDeferredReject" &&
+    exactDecision.kind !== "listUnavailable"
+  ) {
+    return contextGraphValidationUnavailable(res, 'exact context graph preflight was inconclusive');
   }
   // Immutable carry-forward for the list leg. Track B (rescue gating): the
   // store-free on-chain rescue may run ONLY on an `unavailable` verdict — the
   // exact probe THREW or degraded (`storeUnavailable`) and so has no
   // authoritative local-miss to override. A definitive local miss (any other
   // kind) keeps the fail-closed 503 if the list leg then fails.
-  const deferredExactProbeReject = exactDecision.kind === "deferReject";
-  const exactProbeUnavailable = exactDecision.kind === "unavailable";
-  const exactProbeErrorMessage =
-    exactDecision.kind === "unavailable" ? exactDecision.errorMessage : null;
+  const deferredExactProbeReject = exactDecision.kind === "listDeferredReject";
+  const exactProbeUnavailable = exactDecision.kind === "listUnavailable";
+  const exactProbeErrorMessage = exactDecision.kind === "listUnavailable"
+    ? exactDecision.errorMessage
+    : null;
 
   let contextGraphs: ExistingContextGraphRow[];
   try {
@@ -1097,7 +1318,7 @@ export async function resolveRequiredWriteContextGraphId(
       !isShadowLikeBareContextGraphRow(exact)
     ) {
       if (requireLocalWritable && !exactWritable) {
-        return rejectKnownNonWritableContextGraph(res, raw);
+        return { notWritable: exact.id, raw };
       }
       return exact.id;
     }
@@ -1127,7 +1348,7 @@ export async function resolveRequiredWriteContextGraphId(
     }
     if (exact?.id && typeof exact.id === "string") {
       if (requireLocalWritable && !exactWritable) {
-        return rejectKnownNonWritableContextGraph(res, raw);
+        return { notWritable: exact.id, raw };
       }
       return exact.id;
     }
@@ -1135,7 +1356,7 @@ export async function resolveRequiredWriteContextGraphId(
 
   if (exact?.id && typeof exact.id === "string") {
     if (requireLocalWritable && !exactWritable) {
-      return rejectKnownNonWritableContextGraph(res, raw);
+      return { notWritable: exact.id, raw };
     }
     return exact.id;
   }
@@ -1450,7 +1671,6 @@ export function readBodyBuffer(
 
 // ─── CORS / rate-limit / validation helpers ───────────────────────────
 
-
 export function buildCorsAllowlist(
   config: DkgConfig,
   boundPort: number,
@@ -1489,6 +1709,8 @@ export function corsHeaders(origin?: string | null): Record<string, string> {
   const headers: Record<string, string> = {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    // Lets cross-origin clients read a 503's retry hint and its log correlation id (#2834).
+    "Access-Control-Expose-Headers": "Retry-After, x-dkg-operation-id",
   };
   if (origin !== "*") headers["Vary"] = "Origin";
   return headers;
@@ -1663,10 +1885,12 @@ export function applyServerLimits(
 
 /**
  * Cheap GET/HEAD paths exempt from concurrency admission control — liveness /
- * health / manifest handlers that must stay answerable under load (monitoring,
+ * manifest handlers that must stay answerable under load (monitoring,
  * `dkg status`, doctor, MCP setup probes), plus the long-lived `/api/events`
  * SSE stream (which must NOT hold an in-flight slot for the connection's whole
- * lifetime, or a few open dashboard tabs would exhaust the pool).
+ * lifetime, or a few open dashboard tabs would exhaust the pool). RPC health
+ * GET is intentionally absent because it performs outbound work; only its
+ * cheap HEAD form is exempt.
  *
  * NOTE: this is one of several HTTP path-category tables in the daemon (see
  * `auth.ts` public paths, `isLoopbackRateLimitExemptPath`, and the default
@@ -1675,7 +1899,6 @@ export function applyServerLimits(
  */
 const ADMISSION_EXEMPT_GET_PATHS: ReadonlySet<string> = new Set([
   '/api/status',
-  '/api/chain/rpc-health',
   '/api/events',
   '/.well-known/skill.md',
   '/.well-known/skill-importer.md',
@@ -1691,6 +1914,7 @@ const ADMISSION_EXEMPT_GET_PATHS: ReadonlySet<string> = new Set([
  */
 export function isAdmissionExempt(method: string | undefined, pathname: string): boolean {
   if (method === 'OPTIONS') return true;
+  if (method === 'HEAD' && pathname === '/api/chain/rpc-health') return true;
   if ((method === 'GET' || method === 'HEAD') && ADMISSION_EXEMPT_GET_PATHS.has(pathname)) return true;
   return false;
 }
@@ -1758,28 +1982,34 @@ export function shouldBypassRateLimitForLoopbackTraffic(ip: string, pathname: st
   return isLoopbackClientIp(ip) && isLoopbackRateLimitExemptPath(pathname);
 }
 
-export function isValidContextGraphId(id: string): boolean {
-  if (!id || typeof id !== "string") return false;
-  if (id.length > 256) return false;
-  // CLI-16 (
-  // reject path-traversal patterns where it actually matters — i.e.
-  // segments that the OS / URL resolver will interpret as the
-  // parent / current directory. The character whitelist below
-  // allows `.` and `/` because URNs / DIDs / URLs legitimately
-  // contain version markers like `v1..2`, schema fragments like
-  // `https://example.com/a..b`, etc.
-  //
-  // The earlier blanket `id.includes('..')` check broke those
-  // legitimate identifiers without adding any defence-in-depth: a
-  // segment-aware check is both stricter (still rejects every real
-  // traversal) and tighter (does not produce false-positive 4xx
-  // for valid context-graph IDs that happen to contain `..` inside
-  // a single segment).
-  for (const seg of id.split("/")) {
-    if (seg === "." || seg === "..") return false;
+// Host names of the loopback interface, compared on the host component only.
+const LOCAL_HOST_NAMES = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
+/**
+ * True when a `Host` header names the loopback interface: `127.0.0.1`,
+ * `localhost`, `::1` or `[::1]`, with any port. A missing header, a malformed
+ * port or any other host name is not local.
+ */
+export function hostIsLocal(host: string | undefined): boolean {
+  if (typeof host !== 'string') return false;
+  const value = host.trim().toLowerCase();
+  let name = value;
+  let port = '';
+  const colon = value.indexOf(':');
+  if (value.startsWith('[')) {
+    const close = value.indexOf(']');
+    if (close < 0) return false;
+    name = value.slice(0, close + 1);
+    const rest = value.slice(close + 1);
+    if (rest && !rest.startsWith(':')) return false;
+    port = rest.slice(1);
+  } else if (colon >= 0 && colon === value.lastIndexOf(':')) {
+    // One colon separates host and port; more than one is a bare IPv6 literal.
+    name = value.slice(0, colon);
+    port = value.slice(colon + 1);
   }
-  // Allow URNs, DIDs, simple slug-like identifiers, and URIs
-  return /^[\w:/.@\-]+$/.test(id);
+  if (port && !/^\d{1,5}$/.test(port)) return false;
+  return LOCAL_HOST_NAMES.has(name);
 }
 
 /**

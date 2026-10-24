@@ -240,6 +240,102 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     expect(container.textContent).not.toContain('Catalog Only CG');
   });
 
+  it('explains that discovered public graphs are browseable before subscription', async () => {
+    const { container } = await renderPanel();
+    const modeButtons = container.querySelectorAll('.v10-tree-mode-btn');
+
+    await act(async () => {
+      (modeButtons[1] as HTMLButtonElement).click();
+    });
+
+    expect(container.textContent).toContain('Public graphs appear here as soon as your node discovers them');
+    expect(container.textContent).toContain('subscribe by ID');
+  });
+
+  it('renders a successfully synchronized public graph in the Context Oracle', async () => {
+    const { container } = await renderPanel();
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    act(() => {
+      useProjectsStore.setState({
+        contextGraphs: [{
+          id: 'public-ready',
+          name: 'Public Ready Graph',
+          accessPolicy: 'public',
+          callerInvolved: false,
+          subscribed: true,
+          synced: true,
+          sharedMemorySynced: true,
+          metaSynced: true,
+        } as any],
+      });
+    });
+
+    const modeButtons = container.querySelectorAll('.v10-tree-mode-btn');
+    await act(async () => {
+      (modeButtons[1] as HTMLButtonElement).click();
+    });
+
+    expect(container.textContent).toContain('Public Ready Graph');
+  });
+
+  it('clears the previous project target when browsing a passive public catalogue result', async () => {
+    const { container } = await renderPanel();
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    const { useTabsStore } = await import('../src/ui/stores/tabs.js');
+    act(() => {
+      useProjectsStore.setState({
+        contextGraphs: [
+          {
+            id: 'private-active',
+            name: 'Previously Active Private Graph',
+            accessPolicy: 'private',
+            callerInvolved: true,
+            subscribed: true,
+            synced: true,
+          } as any,
+          {
+            id: 'public-passive',
+            name: 'Passive Public Graph',
+            accessPolicy: 'public',
+            callerInvolved: false,
+            subscribed: false,
+            synced: false,
+          } as any,
+        ],
+        activeProjectId: 'private-active',
+      });
+      useTabsStore.setState({
+        tabs: [{ id: 'dashboard', label: 'Dashboard', closable: false }],
+        activeTabId: 'dashboard',
+      });
+    });
+
+    const modeButtons = container.querySelectorAll('.v10-tree-mode-btn');
+    await act(async () => {
+      (modeButtons[1] as HTMLButtonElement).click();
+    });
+
+    const browseButton = container.querySelector(
+      'button[aria-label="Browse Passive Public Graph"]',
+    ) as HTMLButtonElement | null;
+    const subscribeButton = container.querySelector(
+      'button[aria-label="Subscribe to Passive Public Graph"]',
+    ) as HTMLButtonElement | null;
+    expect(browseButton).toBeTruthy();
+    expect(subscribeButton).toBeTruthy();
+
+    await act(async () => { browseButton!.click(); });
+    expect(useTabsStore.getState().activeTabId).toBe('project:public-passive');
+    expect(useProjectsStore.getState().activeProjectId).toBeNull();
+
+    await act(async () => { subscribeButton!.click(); });
+    expect(container.querySelector('[role="dialog"]')).toBeTruthy();
+    expect(
+      (container.querySelector('#dkg-cg-invite') as HTMLTextAreaElement).value,
+    ).toBe('public-passive');
+    expect(container.querySelector('.v10-modal-btn.primary')?.textContent).toBe('Subscribe');
+  });
+
   it('section headers point at their body containers via aria-controls', async () => {
     const { container } = await renderPanel();
     const headers = container.querySelectorAll('.v10-peer-group-header');

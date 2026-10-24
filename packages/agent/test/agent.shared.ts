@@ -4,6 +4,7 @@ import {
   buildAgentProfile,
   collectPublishableMultiaddrs,
   CclEvaluator,
+  CclResourceNotFoundError,
   DiscoveryClient,
   ProfileManager,
   encrypt,
@@ -40,7 +41,7 @@ import { wrapPublisherForTest, mockSealCtx } from '../../publisher/test/_helpers
 import { mockChainStubACKProvider } from '../../publisher/test/_helpers/acks.js';
 
 const require = createRequire(import.meta.url);
-const { Evaluator: ReferenceEvaluator, loadYaml } = require(fileURLToPath(new URL('../../../ccl_v0_1/evaluator/reference_evaluator.js', import.meta.url)));
+const { Evaluator: ReferenceEvaluator, loadYaml } = require(fileURLToPath(new URL('../ccl_v0_1/evaluator/reference_evaluator.js', import.meta.url)));
 const CCL_FACT_NS = 'https://example.org/ccl-fact#';
 
 /**
@@ -108,11 +109,11 @@ class PcaCuratedRegistrationChainAdapter extends AsyncSignerAddressContextGraphC
   constructor(
     private readonly accountOwners: Map<bigint, string>,
     signerAddress?: string,
+    private readonly agentAccounts: Map<string, bigint> = new Map(),
   ) {
-    // Forward an explicit signer to MockChainAdapter so tests can keep
-    // the "chain signer == PCA owner" invariant the agent enforces
-    // (Codex PR #502 round-4: msg.sender for the registration tx mints
-    // the on-chain governance NFT, so the PCA owner must control it).
+    // Forward an explicit signer to MockChainAdapter. PCA registration
+    // supports either an owner signer or a signer registered to the exact
+    // account; in both cases msg.sender owns the minted Context Graph NFT.
     super('mock:31337', signerAddress);
   }
 
@@ -122,6 +123,10 @@ class PcaCuratedRegistrationChainAdapter extends AsyncSignerAddressContextGraphC
       throw new Error(`No mock PCA owner for account ${accountId}`);
     }
     return owner;
+  }
+
+  async getConvictionAgentAccountId(agent: string): Promise<bigint> {
+    return this.agentAccounts.get(agent.toLowerCase()) ?? 0n;
   }
 }
 
@@ -331,7 +336,7 @@ function buildSnapshotFactQuads(opts: {
 }
 
 export { describe, it, expect, beforeAll, afterAll, vi };
-export { DKGAgentWallet, buildAgentProfile, collectPublishableMultiaddrs, CclEvaluator, DiscoveryClient, ProfileManager, encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret, DKGAgent, AGENT_REGISTRY_CONTEXT_GRAPH, parseCclPolicy };
+export { DKGAgentWallet, buildAgentProfile, collectPublishableMultiaddrs, CclEvaluator, CclResourceNotFoundError, DiscoveryClient, ProfileManager, encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret, DKGAgent, AGENT_REGISTRY_CONTEXT_GRAPH, parseCclPolicy };
 export { OxigraphStore, getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, contextGraphMetaUri, sparqlString, DKGQueryEngine, sha256 };
 export { EVMChainAdapter, MockChainAdapter, createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS, mintTokens, ethers, tmpdir, mkdtemp, readFile, readdir, rm, join, fileURLToPath };
 export { _wrapAgentPublisherForSeal, CapturingContextGraphChainAdapter, AsyncSignerAddressContextGraphChainAdapter, SignerListContextGraphChainAdapter, PcaCuratedRegistrationChainAdapter, NonRegisteringACKChainAdapter, FlakyRegistrationACKChainAdapter, TransientIdentityFailureChainAdapter, BrandNewCoreTransientChainAdapter, PermanentProfileFailureChainAdapter, RetryPathPermanentFailureChainAdapter, ContextAuthorizedPublisherChainAdapter, buildSnapshotFactQuads, ReferenceEvaluator, loadYaml, CCL_FACT_NS };

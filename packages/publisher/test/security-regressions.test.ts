@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach } from 'vitest';
 import { OxigraphStore, type Quad, GraphManager } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, encodeKAUpdateRequest, encodeWorkspacePublishRequest } from '@origintrail-official/dkg-core';
+import { TypedEventBus, encodeKAUpdateRequest } from '@origintrail-official/dkg-core';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
@@ -19,6 +19,10 @@ import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { wrapPublisherForTest } from './_helpers/seal.js';
 import { makeTestKaAllocator } from './_helpers/ka-allocator.js';
 import { hardhatACKProvider } from './_helpers/acks.js';
+import {
+  encodeRootlessWorkspaceRequest,
+  rootlessSharedMemoryGraphFromWire,
+} from './_helpers/rootless-workspace.js';
 
 let CONTEXT_GRAPH: string;
 let _kav10Address: string;
@@ -175,20 +179,18 @@ describe('Prefix deletion safety', () => {
     it('gossip upsert of urn:x:foo does NOT delete urn:x:foobar triples', async () => {
       const peerId = '12D3KooWPrefixTest';
 
-      const msg1 = encodeWorkspacePublishRequest({
+      const msg1 = encodeRootlessWorkspaceRequest({
         contextGraphId: CONTEXT_GRAPH,
         nquads: new TextEncoder().encode(`<urn:x:foo> <http://schema.org/name> "Foo" <${DATA_GRAPH}> .`),
-        manifest: [{ rootEntity: 'urn:x:foo', privateTripleCount: 0 }],
         publisherPeerId: peerId,
         shareOperationId: 'ws-prefix-1',
         timestampMs: Date.now(),
       });
       await handler.handle(msg1, peerId);
 
-      const msg2 = encodeWorkspacePublishRequest({
+      const msg2 = encodeRootlessWorkspaceRequest({
         contextGraphId: CONTEXT_GRAPH,
         nquads: new TextEncoder().encode(`<urn:x:foobar> <http://schema.org/name> "Foobar" <${DATA_GRAPH}> .`),
-        manifest: [{ rootEntity: 'urn:x:foobar', privateTripleCount: 0 }],
         publisherPeerId: peerId,
         shareOperationId: 'ws-prefix-2',
         timestampMs: Date.now(),
@@ -196,18 +198,17 @@ describe('Prefix deletion safety', () => {
       await handler.handle(msg2, peerId);
 
       // Upsert urn:x:foo
-      const msg3 = encodeWorkspacePublishRequest({
+      const msg3 = encodeRootlessWorkspaceRequest({
         contextGraphId: CONTEXT_GRAPH,
         nquads: new TextEncoder().encode(`<urn:x:foo> <http://schema.org/name> "Foo Updated" <${DATA_GRAPH}> .`),
-        manifest: [{ rootEntity: 'urn:x:foo', privateTripleCount: 0 }],
         publisherPeerId: peerId,
         shareOperationId: 'ws-prefix-3',
+        assertionVersion: '2',
         timestampMs: Date.now(),
       });
       await handler.handle(msg3, peerId);
 
-      const gm = new GraphManager(store);
-      const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
+      const wsGraph = rootlessSharedMemoryGraphFromWire(msg2);
 
       const foobarResult = await store.query(
         `SELECT ?o WHERE { GRAPH <${wsGraph}> { <urn:x:foobar> <http://schema.org/name> ?o } }`,
@@ -494,6 +495,16 @@ describe('EVMChainAdapter.verifyKAUpdate', () => {
     });
     expect(updateResult.status).toBe('confirmed');
 
+    // Verify the first update only after a later root exists. The adapter must
+    // read history at the receipt block; a latest-state read would report
+    // count=3 and make an otherwise-valid delayed gossip message look like
+    // assertion version 3 instead of 2.
+    const laterUpdate = await publisher.update(original.kaId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q('urn:verify:root', 'http://schema.org/name', '"Later"')],
+    });
+    expect(laterUpdate.status).toBe('confirmed');
+
     const verification = await chain.verifyKAUpdate(
       updateResult.onChainResult!.txHash,
       original.kaId,
@@ -503,6 +514,7 @@ describe('EVMChainAdapter.verifyKAUpdate', () => {
     expect(verification.verified).toBe(true);
     expect(verification.onChainMerkleRoot).toEqual(new Uint8Array(updateResult.merkleRoot));
     expect(verification.blockNumber).toBe(updateResult.onChainResult!.blockNumber);
+    expect(verification.merkleRootCount).toBe(2n);
   });
 
   it('rejects verification with wrong txHash', async () => {
@@ -528,7 +540,11 @@ describe('EVMChainAdapter.verifyKAUpdate', () => {
     });
     expect(updateResult.status).toBe('confirmed');
 
-    const verification = await chain.verifyKAUpdate('0xWRONG', original.kaId, wallet.address);
+    const verification = await chain.verifyKAUpdate(
+      original.onChainResult!.txHash,
+      original.kaId,
+      wallet.address,
+    );
     expect(verification.verified).toBe(false);
   });
 
@@ -712,8 +728,10 @@ describe('publisher.update() atomicity', () => {
       quads: [q('urn:atomic', 'http://schema.org/name', '"Original"')],
     });
 
-    // Attempt to update a non-existent batch — V10 catches KnowledgeAssetExpired
-    // as a definitive error and returns status: 'failed' (no throw, no store mutation)
+    // Attempt to update a non-existent batch. The pre-staging owner check
+    // (getKnowledgeAssetOwner -> ownerOf) reverts ERC721NonexistentToken, which
+    // update() maps to status: 'failed' (no throw, no store mutation). Expiry is
+    // a separate submit-time revert — see ka-update-submit-failure.test.ts.
     const failedUpdate = await publisher.update(999n, {
       contextGraphId: CONTEXT_GRAPH,
       quads: [q('urn:atomic', 'http://schema.org/name', '"Should not appear"')],
@@ -790,10 +808,9 @@ describe('Workspace peerId spoofing', () => {
     const victimPeerId = '12D3KooWVictim';
     const attackerPeerId = '12D3KooWAttacker';
 
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<urn:spoof> <http://schema.org/name> "Spoofed" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: 'urn:spoof', privateTripleCount: 0 }],
       publisherPeerId: victimPeerId,
       shareOperationId: 'ws-spoof-1',
       timestampMs: Date.now(),
@@ -801,8 +818,7 @@ describe('Workspace peerId spoofing', () => {
 
     await handler.handle(msg, attackerPeerId);
 
-    const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(msg);
     const result = await store.query(
       `ASK { GRAPH <${wsGraph}> { <urn:spoof> ?p ?o } }`,
     );
@@ -815,10 +831,9 @@ describe('Workspace peerId spoofing', () => {
   it('accepts message where publisherPeerId matches fromPeerId', async () => {
     const peerId = '12D3KooWLegit';
 
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<urn:legit> <http://schema.org/name> "Legit" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: 'urn:legit', privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-legit-1',
       timestampMs: Date.now(),
@@ -826,8 +841,7 @@ describe('Workspace peerId spoofing', () => {
 
     await handler.handle(msg, peerId);
 
-    const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(msg);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <urn:legit> <http://schema.org/name> ?o } }`,
     );

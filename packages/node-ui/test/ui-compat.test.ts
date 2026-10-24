@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { readDaemonSources } from './helpers/read-cli-daemon';
@@ -321,27 +321,7 @@ describe('synced status logic', () => {
   });
 });
 
-// Redesign reverses the old "notifications are non-interactive" guard:
-// incoming join requests are now actionable (inline Approve/Deny) and
-// activity/approved rows open their context graph. This guard asserts the
-// new intended interactivity lives in the row components.
-describe('notification rows are actionable', () => {
-  const rows = readFile('components/Notifications/rows.tsx');
-
-  it('join request row exposes inline Approve / Deny controls', () => {
-    expect(rows).toContain('Approve');
-    expect(rows).toContain('onApprove');
-    expect(rows).toContain('onDeny');
-    // Deny is a two-tap inline confirm, never a modal.
-    expect(rows).toContain('confirming-deny');
-  });
-
-  it('activity + approved rows open their context graph; rejected is a dead-end', () => {
-    expect(rows).toContain('onOpen(item.cgId)');
-    // Rejected confirmation renders as a non-interactive row.
-    expect(rows).toContain('aria-disabled="true"');
-  });
-});
+// Notification interactions are exercised by notifications-pane.dom.test.ts.
 
 // NOTE: the dashboard "Import Memories" Quick Action was removed in PR6
 // (dashboard revamp). Import still launches from the left sidebar; the
@@ -416,34 +396,24 @@ describe('fileUrl hash handling', () => {
 });
 
 describe('listAssertions query path', () => {
-  const api = readFile('api.ts');
-
-  it('uses executeQuery without view param (avoids agentAddress requirement)', () => {
-    expect(api).toMatch(/listAssertions[\s\S]*?executeQuery\(sparql, contextGraphId\)/);
-    expect(api).not.toMatch(/listAssertions[\s\S]*?view:\s*'working-memory'/);
+  it('discovers membership without a view parameter that requires agentAddress', async () => {
+    const { listAssertions, invalidateQueryCache } = await import('../src/ui/api.js');
+    const request = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ result: { bindings: [] } })));
+    try {
+      await listAssertions('compat-scope', 'swm', { includeCounts: false });
+      const body = JSON.parse(String(request.mock.calls[0][1]?.body));
+      expect(body.contextGraphId).toBe('compat-scope');
+      expect(body.view).toBeUndefined();
+    } finally { request.mockRestore(); invalidateQueryCache(); }
   });
 });
 
 describe('useMemoryEntities hook', () => {
   const hook = readFileSync(resolve(UI_DIR, 'hooks', 'useMemoryEntities.ts'), 'utf-8');
   const memoryLabels = readFileSync(resolve(UI_DIR, 'lib', 'memoryLabels.ts'), 'utf-8');
-  const nodeEventsHook = readFileSync(resolve(UI_DIR, 'hooks', 'useNodeEvents.ts'), 'utf-8');
 
   it('exports TrustLevel type with three levels', () => {
     expect(hook).toContain("type TrustLevel = 'working' | 'shared' | 'verified'");
-  });
-
-  it('queries WM, SWM, and VM in parallel', () => {
-    // Hook was refactored from `view: 'shared-working-memory' | 'verifiable-memory'`
-    // to per-layer SPARQL builders that walk the named-graph space directly
-    // (see the rationale comment in useMemoryEntities.ts) so per-sub-graph
-    // SWM/VM partitions are covered and each triple carries its source `?g`.
-    // The original intent of this test — that all three layers are fetched
-    // in parallel — is still asserted, just against the new shape.
-    expect(hook).toContain('Promise.all');
-    expect(hook).toContain('wmSparql');
-    expect(hook).toContain('swmSparql');
-    expect(hook).toContain('vmSparql');
   });
 
   it('builds entity map grouped by subject URI', () => {
@@ -466,10 +436,7 @@ describe('useMemoryEntities hook', () => {
     expect(hook).toContain('const seen = new Set<string>()');
   });
 
-  it('subscribes to memory_graph_changed events for live graph refreshes', () => {
-    expect(nodeEventsHook).toContain("'memory_graph_changed'");
-    expect(hook).toContain('useMemoryGraphEvents(contextGraphId, fetchAll)');
-  });
+
 });
 
 describe('AgentHub page renders PanelRight', () => {

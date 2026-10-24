@@ -1,23 +1,44 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
 import {
+  NODE_SQLITE_INSTALL_GUARD,
+  SUBCOMMAND_CHILD_COMMANDS,
   buildInfoPayload,
   discoverPublishablePackages,
+  findNodeSqliteEngineViolations,
+  findNodeSqliteInstallGuardViolations,
   findMissingCliPackAssets,
   findReleaseVersionMismatches,
+  verifyPack,
   verifyReleaseTag,
   writeBuildInfo,
 } from '../../release-packages.mjs';
 import { cliRuntimeAssetManifest, copyCliRuntimeAssets } from '../../copy-cli-runtime-assets.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+const require = createRequire(import.meta.url);
 const COPY_SCRIPT = path.join(REPO_ROOT, 'scripts', 'copy-cli-runtime-assets.mjs');
+const BLAZEGRAPH_METADATA_PARSER = path.join(REPO_ROOT, 'packages', 'cli', 'blazegraph-image-metadata.cjs');
+const BLAZEGRAPH_NAMESPACE_CONTRACT = path.join(
+  REPO_ROOT,
+  'packages',
+  'storage',
+  'blazegraph-namespace-contract.cjs',
+);
+const BLAZEGRAPH_RUNTIME_TYPES = path.join(REPO_ROOT, 'packages', 'cli', 'blazegraph-runtime-contract.d.cts');
+const VALID_BLAZEGRAPH_METADATA = `${JSON.stringify({
+  image: 'example/blazegraph@sha256:test',
+  containerPort: 80,
+  dataPath: '/data',
+})}\n`;
 
 const NPM_AVAILABLE = (() => {
   try {
@@ -26,6 +47,12 @@ const NPM_AVAILABLE = (() => {
     return false;
   }
 })();
+const TAR_AVAILABLE = spawnSync('tar', ['--version'], { encoding: 'utf8' }).status === 0;
+const GIT_AVAILABLE = spawnSync('git', ['--version'], { encoding: 'utf8' }).status === 0;
+const REPO_CHECKOUT_AVAILABLE = GIT_AVAILABLE && spawnSync('git', [
+  '-C', REPO_ROOT, 'rev-parse', '--is-inside-work-tree',
+], { encoding: 'utf8' }).stdout?.trim() === 'true';
+
 
 const SCRIPT_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../release-packages.mjs');
 
@@ -49,11 +76,137 @@ function withFixture(fn) {
   }
 }
 
+/** Git owns the source inventory; read working-tree contents so pending edits are exercised. */
+function materializeTrackedPackage(sourceRoot, relativePackage, destination) {
+  const tracked = spawnSync('git', ['-C', sourceRoot, 'ls-files', '-z', '--', relativePackage], { encoding: 'utf8' });
+  assert.equal(tracked.status, 0, `cannot enumerate tracked package inputs: ${tracked.stderr}`);
+  const files = tracked.stdout.split('\0').filter(Boolean);
+  assert.ok(files.length > 0, 'the source package must have tracked inputs');
+  for (const relative of files) {
+    const target = path.join(destination, path.relative(relativePackage, relative));
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(sourceRoot, relative), target);
+  }
+}
+
+function assertTypeScriptConsumer(consumerPath, compilerOptions = {}) {
+  const program = ts.createProgram([consumerPath], {
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    target: ts.ScriptTarget.ES2022,
+    noEmit: true,
+    strict: true,
+    skipLibCheck: false,
+    ...compilerOptions,
+  });
+  const diagnostics = ts.getPreEmitDiagnostics(program);
+  assert.equal(diagnostics.length, 0, ts.formatDiagnosticsWithColorAndContext(diagnostics, {
+    getCanonicalFileName: (file) => file,
+    getCurrentDirectory: () => path.dirname(consumerPath),
+    getNewLine: () => '\n',
+  }));
+}
+
+function packAndInstallFixture({
+  root,
+  fixtureName,
+  sourcePackageDir,
+  installedPackageName,
+  consumerDir = path.join(root, `${fixtureName}-consumer`),
+  npmArguments = [],
+}) {
+  const packDir = path.join(root, `${fixtureName}-pack`);
+  const extractedDir = path.join(root, `${fixtureName}-extracted`);
+  const installedPackageDir = path.join(
+    consumerDir,
+    'node_modules',
+    ...installedPackageName.split('/'),
+  );
+  fs.mkdirSync(packDir, { recursive: true });
+  fs.mkdirSync(extractedDir, { recursive: true });
+  fs.mkdirSync(path.dirname(installedPackageDir), { recursive: true });
+  const packed = spawnSync('npm', [
+    'pack',
+    sourcePackageDir,
+    '--pack-destination',
+    packDir,
+    '--json',
+    ...npmArguments,
+  ], {
+    cwd: root,
+    encoding: 'utf8',
+    shell: process.platform === 'win32',
+  });
+  assert.equal(packed.status, 0, `npm pack failed for ${installedPackageName}: ${packed.stderr}`);
+  // Lifecycle scripts may write to stdout even with npm's --json flag.
+  // Each fixture owns a fresh destination, so inspect the actual packed artifact.
+  const tarballs = fs.readdirSync(packDir).filter((entry) => entry.endsWith('.tgz'));
+  assert.equal(tarballs.length, 1, `expected one tarball for ${installedPackageName}`);
+  const [filename] = tarballs;
+  const extracted = spawnSync('tar', [
+    '-xzf',
+    path.join(packDir, filename),
+    '-C',
+    extractedDir,
+  ], { encoding: 'utf8' });
+  assert.equal(
+    extracted.status,
+    0,
+    `tar extraction failed for ${installedPackageName}: ${extracted.stderr}`,
+  );
+  fs.renameSync(path.join(extractedDir, 'package'), installedPackageDir);
+  return Object.freeze({ consumerDir, installedPackageDir });
+}
+
 test('discovers public OriginTrail packages only', () => withFixture((root) => {
   assert.deepEqual(
     discoverPublishablePackages(root).map((pkg) => pkg.name),
     ['@origintrail-official/dkg', '@origintrail-official/dkg-query'],
   );
+}));
+
+test('requires the declared Node.js range for publishable node:sqlite consumers', () => withFixture((root) => {
+  const queryDir = path.join(root, 'packages/query');
+  fs.mkdirSync(path.join(queryDir, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(queryDir, 'src/index.js'), "import 'node:sqlite';\n");
+  assert.deepEqual(findNodeSqliteEngineViolations(root).map((violation) => violation.name), [
+    '@origintrail-official/dkg-query',
+  ]);
+
+  writePackage(root, 'packages/query', {
+    name: '@origintrail-official/dkg-query',
+    version: '1.2.3',
+    engines: { node: '>=22.13.0 <23.0.0 || >=23.4.0' },
+  });
+  assert.deepEqual(findNodeSqliteEngineViolations(root), []);
+}));
+
+test('requires target-owned install guards for predecessor npm and git updaters', () => withFixture((root) => {
+  assert.deepEqual(
+    findNodeSqliteInstallGuardViolations(root).map((violation) => violation.path),
+    [
+      'package.json',
+      'packages/cli/package.json',
+      'packages/cli/scripts/verify-node-sqlite-runtime.mjs',
+    ],
+  );
+
+  writePackage(root, '.', {
+    name: 'dkg-v10',
+    version: '1.2.3',
+    private: true,
+    scripts: { preinstall: 'node packages/cli/scripts/verify-node-sqlite-runtime.mjs' },
+  });
+  writePackage(root, 'packages/cli', {
+    name: '@origintrail-official/dkg',
+    version: '1.2.3',
+    scripts: { preinstall: 'node ./scripts/verify-node-sqlite-runtime.mjs' },
+  });
+  const guardPath = path.join(root, 'packages/cli/scripts/verify-node-sqlite-runtime.mjs');
+  fs.mkdirSync(path.dirname(guardPath), { recursive: true });
+  fs.writeFileSync(guardPath, '#!/usr/bin/env node\n');
+
+  assert.deepEqual(findNodeSqliteInstallGuardViolations(root), []);
 }));
 
 test('finds every release package version mismatch, including private packages and the root', () => withFixture((root) => {
@@ -218,23 +371,45 @@ function writeCliPackFixture(root) {
   fs.writeFileSync(path.join(root, 'network', 'testnet.json'), '{}\n');
   fs.writeFileSync(path.join(root, 'network', 'mainnet-base.json'), '{}\n');
   fs.writeFileSync(path.join(root, 'project.json'), '{}\n');
+  fs.writeFileSync(path.join(root, 'blazegraph-image.json'), VALID_BLAZEGRAPH_METADATA);
+  const storageDir = path.join(root, 'packages', 'storage');
+  fs.mkdirSync(storageDir, { recursive: true });
+  fs.copyFileSync(
+    BLAZEGRAPH_NAMESPACE_CONTRACT,
+    path.join(storageDir, 'blazegraph-namespace-contract.cjs'),
+  );
 }
 
-test('flags a cli tarball missing network overlays + project.json + build-info.json (the 10.0.4 drop)', () => withFixture((root) => {
+test('flags a cli tarball missing required runtime assets (the 10.0.4 drop)', () => withFixture((root) => {
   writeCliPackFixture(root);
   const packReport = () => JSON.stringify([{ files: [{ path: 'dist/cli.js' }, { path: 'package.json' }] }]);
   const missing = findMissingCliPackAssets(root, packReport);
   assert.deepEqual(
     [...missing].sort(),
-    ['build-info.json', 'network/mainnet-base.json', 'network/testnet.json', 'project.json'],
+    [
+      'blazegraph-image-metadata.cjs',
+      'blazegraph-image.json',
+      'blazegraph-namespace-contract.cjs',
+      'blazegraph-runtime-contract.d.cts',
+      'build-info.json',
+      'network/mainnet-base.json',
+      'network/testnet.json',
+      'project.json',
+      'scripts/verify-node-sqlite-runtime.mjs',
+    ],
   );
 }));
 
-test('passes when the cli tarball includes every network overlay + project.json + build-info.json', () => withFixture((root) => {
+test('passes when the cli tarball includes every required runtime asset', () => withFixture((root) => {
   writeCliPackFixture(root);
   // npm reports Windows paths with backslashes — the check must normalize them.
   const packReport = () => JSON.stringify([{ files: [
     { path: 'project.json' },
+    { path: 'scripts/verify-node-sqlite-runtime.mjs' },
+    { path: 'blazegraph-image.json' },
+    { path: 'blazegraph-image-metadata.cjs' },
+    { path: 'blazegraph-namespace-contract.cjs' },
+    { path: 'blazegraph-runtime-contract.d.cts' },
     { path: 'build-info.json' },
     { path: 'network\\testnet.json' },
     { path: 'network/mainnet-base.json' },
@@ -244,10 +419,17 @@ test('passes when the cli tarball includes every network overlay + project.json 
 }));
 
 test('copyCliRuntimeAssets materializes package-local assets and mirrors (drops stale overlays)', () => withFixture((root) => {
+  const storageDir = path.join(root, 'packages', 'storage');
+  fs.mkdirSync(storageDir, { recursive: true });
+  fs.copyFileSync(
+    BLAZEGRAPH_NAMESPACE_CONTRACT,
+    path.join(storageDir, 'blazegraph-namespace-contract.cjs'),
+  );
   fs.mkdirSync(path.join(root, 'network'), { recursive: true });
   fs.writeFileSync(path.join(root, 'network', 'testnet.json'), '{"a":1}\n');
   fs.writeFileSync(path.join(root, 'network', 'mainnet-base.json'), '{"b":2}\n');
   fs.writeFileSync(path.join(root, 'project.json'), '{"name":"x"}\n');
+  fs.writeFileSync(path.join(root, 'blazegraph-image.json'), VALID_BLAZEGRAPH_METADATA);
   // A stale overlay left in the package from an earlier build/branch.
   fs.mkdirSync(path.join(root, 'packages', 'cli', 'network'), { recursive: true });
   fs.writeFileSync(path.join(root, 'packages', 'cli', 'network', 'devnet.json'), '{"stale":true}\n');
@@ -259,8 +441,42 @@ test('copyCliRuntimeAssets materializes package-local assets and mirrors (drops 
   assert.ok(fs.existsSync(path.join(cliNetwork, 'testnet.json')), 'testnet.json copied');
   assert.ok(fs.existsSync(path.join(cliNetwork, 'mainnet-base.json')), 'mainnet-base.json copied');
   assert.ok(fs.existsSync(path.join(root, 'packages', 'cli', 'project.json')), 'project.json copied');
+  assert.ok(
+    fs.existsSync(path.join(root, 'packages', 'cli', 'blazegraph-image.json')),
+    'blazegraph-image.json copied',
+  );
+  assert.equal(
+    fs.readFileSync(path.join(root, 'packages', 'cli', 'blazegraph-namespace-contract.cjs'), 'utf8'),
+    fs.readFileSync(BLAZEGRAPH_NAMESPACE_CONTRACT, 'utf8'),
+    'the package-local runtime contract is copied byte-for-byte from storage',
+  );
   assert.equal(fs.existsSync(path.join(cliNetwork, 'devnet.json')), false, 'stale overlay removed (mirror, not append)');
 }));
+
+test('CLI and storage published entries use one canonical namespace contract', () => {
+  const cliContract = require(BLAZEGRAPH_METADATA_PARSER);
+  const storageContract = require(BLAZEGRAPH_NAMESPACE_CONTRACT);
+  for (const input of ["Bob's Node / Main & Co", 'dkg.node_01', 'a'.repeat(160)]) {
+    assert.equal(
+      cliContract.normalizeBlazegraphNamespace(input),
+      storageContract.normalizeBlazegraphNamespace(input),
+    );
+  }
+  const namespace = storageContract.normalizeBlazegraphNamespace('Canonical Contract');
+  assert.equal(
+    cliContract.renderBlazegraphNamespaceXml(namespace),
+    storageContract.renderBlazegraphNamespaceXml(namespace),
+  );
+  assert.throws(
+    () => cliContract.assertBlazegraphNamespace('author:probe'),
+    /invalid/u,
+  );
+  assert.equal(
+    cliContract.normalizeBlazegraphNamespace,
+    storageContract.normalizeBlazegraphNamespace,
+    'the CLI facade must re-export the storage-owned implementation, not a copy',
+  );
+});
 
 test('copyCliRuntimeAssets fails loudly when a source asset is missing', () => withFixture((root) => {
   // network/ present but project.json absent
@@ -270,18 +486,54 @@ test('copyCliRuntimeAssets fails loudly when a source asset is missing', () => w
 }));
 
 test('packages/cli lifecycle is wired to the copy script (build + prepack)', () => {
+  const rootPkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
   const cliPkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'packages', 'cli', 'package.json'), 'utf8'));
+  assert.equal(
+    rootPkg.scripts.preinstall,
+    'node packages/cli/scripts/verify-node-sqlite-runtime.mjs',
+    'git-slot installs must run the target-owned node:sqlite guard',
+  );
+  assert.equal(
+    cliPkg.scripts.preinstall,
+    'node ./scripts/verify-node-sqlite-runtime.mjs',
+    'published CLI installs must run the target-owned node:sqlite guard',
+  );
   assert.match(cliPkg.scripts.prepack ?? '', /copy-cli-runtime-assets\.mjs/, 'prepack must run the copy script');
-  assert.match(cliPkg.scripts.build ?? '', /copy-cli-runtime-assets\.mjs/, 'build must run the copy script');
+  assert.match(cliPkg.scripts.build ?? '', /build:prepared/, 'build must run the prepared CLI phase');
+  assert.match(
+    cliPkg.scripts['build:prepared'] ?? '',
+    /copy-cli-runtime-assets\.mjs/,
+    'prepared CLI build must run the copy script',
+  );
 });
 
-test('the copy and the verifier consume one shared asset manifest', () => withFixture((root) => {
+test('the manifest distinguishes copied assets from complete pack requirements', () => withFixture((root) => {
   writeCliPackFixture(root);
-  const { relPaths } = cliRuntimeAssetManifest({ rootDir: root });
-  // What the copy materializes (project.json + every network overlay)…
-  assert.deepEqual(relPaths, ['project.json', 'network/mainnet-base.json', 'network/testnet.json']);
-  // …is exactly what the verifier requires, plus the generated build-info.json.
-  const spyReport = () => JSON.stringify([{ files: [...relPaths, 'build-info.json'].map((p) => ({ path: p })) }]);
+  const { copiedRuntimeAssets, requiredPackAssets } = cliRuntimeAssetManifest({ rootDir: root });
+  assert.deepEqual(copiedRuntimeAssets, [
+    'project.json',
+    'blazegraph-image.json',
+    'blazegraph-namespace-contract.cjs',
+    'network/mainnet-base.json',
+    'network/testnet.json',
+  ]);
+  assert.deepEqual(requiredPackAssets, [
+    'project.json',
+    'blazegraph-image.json',
+    'blazegraph-image-metadata.cjs',
+    'blazegraph-namespace-contract.cjs',
+    'blazegraph-runtime-contract.d.cts',
+    'network/mainnet-base.json',
+    'network/testnet.json',
+  ]);
+  assert.ok(copiedRuntimeAssets.every((asset) => requiredPackAssets.includes(asset)));
+  const spyReport = () => JSON.stringify([{
+    files: [
+      ...requiredPackAssets,
+      'build-info.json',
+      'scripts/verify-node-sqlite-runtime.mjs',
+    ].map((p) => ({ path: p })),
+  }]);
   assert.deepEqual(findMissingCliPackAssets(root, spyReport), []);
 }));
 
@@ -294,6 +546,10 @@ test('the shared manifest is fail-closed — matches the copier, not best-effort
   // overlays present but project.json missing
   fs.writeFileSync(path.join(root, 'network', 'testnet.json'), '{}\n');
   assert.throws(() => cliRuntimeAssetManifest({ rootDir: root }), /project\.json not found/);
+  fs.writeFileSync(path.join(root, 'project.json'), '{}\n');
+  assert.throws(() => cliRuntimeAssetManifest({ rootDir: root }), /blazegraph-image\.json not found/);
+  fs.writeFileSync(path.join(root, 'blazegraph-image.json'), '{"image":"example/blazegraph"}\n');
+  assert.throws(() => cliRuntimeAssetManifest({ rootDir: root }), /blazegraph-image\.json not found/);
 }));
 
 test('findMissingCliPackAssets cannot silently build a required list without network overlays', () => withFixture((root) => {
@@ -308,10 +564,155 @@ test('packages/cli ships the runtime assets in its published files list', () => 
   // Guards the REAL package manifest contract — the integration test uses its
   // own fixture files, so this is what fails if production `files` drops one.
   const cliPkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'packages', 'cli', 'package.json'), 'utf8'));
-  for (const entry of ['network', 'project.json', 'build-info.json']) {
+  for (const entry of [
+    'network',
+    'project.json',
+    'blazegraph-image.json',
+    'blazegraph-image-metadata.cjs',
+    'blazegraph-namespace-contract.cjs',
+    'blazegraph-runtime-contract.d.cts',
+    'build-info.json',
+  ]) {
     assert.ok((cliPkg.files ?? []).includes(entry), `packages/cli#files must ship ${entry}`);
   }
 });
+
+test('the packed CLI resolves the typed Blazegraph runtime subpath for a consumer', {
+  skip: NPM_AVAILABLE && TAR_AVAILABLE ? false : 'npm and tar are required',
+}, () => withFixture((root) => {
+  const consumerDir = path.join(root, 'consumer');
+  packAndInstallFixture({
+    root,
+    fixtureName: 'storage-types',
+    sourcePackageDir: path.join(REPO_ROOT, 'packages', 'storage'),
+    installedPackageName: '@origintrail-official/dkg-storage',
+    consumerDir,
+    npmArguments: ['--ignore-scripts'],
+  });
+  packAndInstallFixture({
+    root,
+    fixtureName: 'cli',
+    sourcePackageDir: path.join(REPO_ROOT, 'packages', 'cli'),
+    installedPackageName: '@origintrail-official/dkg',
+    consumerDir,
+  });
+
+  const consumerPath = path.join(consumerDir, 'consumer.mts');
+  fs.writeFileSync(consumerPath, [
+    "import contract from '@origintrail-official/dkg/blazegraph-runtime-contract';",
+    "const xml: string = contract.renderBlazegraphNamespaceXml('consumer');",
+    'const metadata: ReturnType<typeof contract.readBlazegraphImageMetadata> = {',
+    "  image: 'example/blazegraph@sha256:test',",
+    '  containerPort: 80,',
+    "  dataPath: '/data',",
+    '};',
+    'void xml;',
+    'void metadata;',
+    '',
+  ].join('\n'));
+  assertTypeScriptConsumer(consumerPath, { esModuleInterop: true });
+}));
+
+test('tracked package fixtures include unpublished build inputs and exclude generated state', {
+  skip: GIT_AVAILABLE ? false : 'git is required',
+}, () => withFixture((root) => {
+  const sourceRoot = path.join(root, 'source');
+  const relativePackage = 'packages/fixture';
+  const source = path.join(sourceRoot, relativePackage);
+  writePackage(sourceRoot, relativePackage, { name: 'fixture', files: ['dist'] });
+  fs.writeFileSync(path.join(source, 'tsconfig.build.json'), '{"compilerOptions":{}}');
+  fs.writeFileSync(path.join(sourceRoot, '.gitignore'), '.turbo/\ndist/\n*.tsbuildinfo\n');
+  assert.equal(spawnSync('git', ['init', '-q', sourceRoot]).status, 0);
+  assert.equal(spawnSync('git', ['-C', sourceRoot, 'add', '.gitignore', relativePackage]).status, 0);
+  // A pending edit must be used instead of the staged version.
+  const editedConfig = '{"compilerOptions":{"strict":true}}';
+  fs.writeFileSync(path.join(source, 'tsconfig.build.json'), editedConfig);
+  for (const generated of ['.turbo/cache', 'dist/index.js', 'tsconfig.tsbuildinfo']) {
+    fs.mkdirSync(path.dirname(path.join(source, generated)), { recursive: true });
+    fs.writeFileSync(path.join(source, generated), 'generated');
+  }
+  const target = path.join(root, 'checkout');
+  materializeTrackedPackage(sourceRoot, relativePackage, target);
+  assert.deepEqual(fs.readdirSync(target).sort(), ['package.json', 'tsconfig.build.json']);
+  assert.equal(fs.readFileSync(path.join(target, 'tsconfig.build.json'), 'utf8'), editedConfig);
+}));
+
+test('packing OpenClaw from source builds consumable JavaScript and declarations', {
+  skip: NPM_AVAILABLE && TAR_AVAILABLE && REPO_CHECKOUT_AVAILABLE ? false : 'npm, tar and a Git checkout are required',
+}, () => withFixture((root) => {
+  const source = path.join(REPO_ROOT, 'packages', 'adapter-openclaw');
+  const cleanPackage = path.join(root, 'packages', 'adapter-openclaw');
+  const manifest = JSON.parse(fs.readFileSync(path.join(source, 'package.json'), 'utf8'));
+  const { packageManager } = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
+  writePackage(root, '.', { name: 'openclaw-pack-fixture', private: true, packageManager });
+  materializeTrackedPackage(REPO_ROOT, 'packages/adapter-openclaw', cleanPackage);
+  fs.copyFileSync(path.join(REPO_ROOT, 'tsconfig.base.json'), path.join(root, 'tsconfig.base.json'));
+  // Use the installed build tools and built workspace dependencies. The adapter
+  // itself starts without any build output, independently of the CI build.
+  fs.symlinkSync(path.join(REPO_ROOT, 'node_modules'), path.join(root, 'node_modules'), 'junction');
+  assert.ok(fs.existsSync(path.join(cleanPackage, 'tsconfig.json')), 'unpublished build config is required');
+  assert.equal(fs.existsSync(path.join(cleanPackage, '.turbo')), false);
+  assert.equal(fs.existsSync(path.join(cleanPackage, 'dist')), false);
+  assert.equal(fs.existsSync(path.join(cleanPackage, 'tsconfig.tsbuildinfo')), false);
+
+  const { consumerDir, installedPackageDir } = packAndInstallFixture({
+    root,
+    fixtureName: 'openclaw',
+    sourcePackageDir: cleanPackage,
+    installedPackageName: manifest.name,
+  });
+  assert.ok(fs.existsSync(path.join(installedPackageDir, 'dist', 'index.js')));
+  assert.ok(fs.existsSync(path.join(installedPackageDir, 'dist', 'index.d.ts')));
+
+  const consumer = path.join(consumerDir, 'consumer.mjs');
+  fs.writeFileSync(consumer, [
+    "import { DkgDaemonClient } from '@origintrail-official/dkg-adapter-openclaw';",
+    "if (typeof DkgDaemonClient !== 'function') throw new Error('missing client export');",
+    '',
+  ].join('\n'));
+  const imported = spawnSync(process.execPath, [consumer], { cwd: consumerDir, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(imported.status, 0, `packed OpenClaw import failed: ${imported.stderr}`);
+
+  const typedConsumer = path.join(consumerDir, 'consumer.mts');
+  fs.writeFileSync(typedConsumer, [
+    "import { DkgDaemonClient, type DkgClientOptions } from '@origintrail-official/dkg-adapter-openclaw';",
+    'export function createClient(options: DkgClientOptions): DkgDaemonClient {',
+    '  return new DkgDaemonClient(options);',
+    '}',
+    '',
+  ].join('\n'));
+  assertTypeScriptConsumer(typedConsumer, { skipLibCheck: true });
+}));
+
+test('the packed storage package preserves representative legacy dist imports', {
+  skip: NPM_AVAILABLE && TAR_AVAILABLE ? false : 'npm and tar are required',
+}, () => withFixture((root) => {
+  const { consumerDir } = packAndInstallFixture({
+    root,
+    fixtureName: 'storage',
+    sourcePackageDir: path.join(REPO_ROOT, 'packages', 'storage'),
+    installedPackageName: '@origintrail-official/dkg-storage',
+    npmArguments: ['--ignore-scripts'],
+  });
+
+  const consumerPath = path.join(consumerDir, 'consumer.mjs');
+  fs.writeFileSync(consumerPath, [
+    "import { accessSync } from 'node:fs';",
+    "import { fileURLToPath } from 'node:url';",
+    "const resolved = import.meta.resolve('@origintrail-official/dkg-storage/dist/triple-store.js');",
+    "if (!resolved.endsWith('/dist/triple-store.js')) throw new Error(`unexpected resolution: ${resolved}`);",
+    'accessSync(fileURLToPath(resolved));',
+    "const manifest = import.meta.resolve('@origintrail-official/dkg-storage/package.json');",
+    "if (!manifest.endsWith('/package.json')) throw new Error(`unexpected manifest: ${manifest}`);",
+    'accessSync(fileURLToPath(manifest));',
+    '',
+  ].join('\n'));
+  const consumed = spawnSync(process.execPath, [consumerPath], {
+    cwd: consumerDir,
+    encoding: 'utf8',
+  });
+  assert.equal(consumed.status, 0, `packed storage consumer failed: ${consumed.stderr}`);
+}));
 
 test('findMissingCliPackAssets runs npm pack in the cli package dir (correct cwd)', () => withFixture((root) => {
   writeCliPackFixture(root);
@@ -322,6 +723,77 @@ test('findMissingCliPackAssets runs npm pack in the cli package dir (correct cwd
   };
   findMissingCliPackAssets(root, spyRunner);
   assert.equal(seenCwd, path.join(root, 'packages', 'cli'));
+}));
+
+// The install guards verify-pack checks first: both preinstall hooks and the
+// CLI's guard script.
+function writeInstallGuards(root) {
+  writePackage(root, '.', { name: 'dkg-v10', version: '1.2.3', private: true, scripts: { preinstall: NODE_SQLITE_INSTALL_GUARD.rootCommand } });
+  writePackage(root, 'packages/cli', { name: '@origintrail-official/dkg', version: '1.2.3', scripts: { preinstall: NODE_SQLITE_INSTALL_GUARD.cliCommand } });
+  const guard = path.join(root, 'packages', 'cli', ...NODE_SQLITE_INSTALL_GUARD.cliAsset.split('/'));
+  fs.mkdirSync(path.dirname(guard), { recursive: true });
+  fs.writeFileSync(guard, '');
+}
+
+// A publishable package that imports node:sqlite without the supported
+// engines range, which verify-pack checks second.
+function writeUndeclaredNodeSqliteConsumer(root) {
+  fs.mkdirSync(path.join(root, 'packages', 'query', 'src'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'packages', 'query', 'src', 'index.js'), "import 'node:sqlite';\n");
+}
+
+const refusePack = () => {
+  throw new Error('verify-pack ran the pack after a failed check');
+};
+
+test('verify-pack stops at a missing install guard, before the engines check and the pack', () => withFixture((root) => {
+  // The engines range is wrong too: the install guards are checked first, so
+  // only their violations are returned, and nothing is packed.
+  writeCliPackFixture(root);
+  writeUndeclaredNodeSqliteConsumer(root);
+  assert.equal(findNodeSqliteEngineViolations(root).length, 1);
+  assert.deepEqual(verifyPack({ rootDir: root, runner: refusePack }), {
+    installGuardViolations: findNodeSqliteInstallGuardViolations(root),
+    runtimeViolations: [],
+    missing: [],
+  });
+  assert.deepEqual(findNodeSqliteInstallGuardViolations(root).map(({ path: file }) => file), [
+    'package.json',
+    'packages/cli/package.json',
+    'packages/cli/scripts/verify-node-sqlite-runtime.mjs',
+  ]);
+}));
+
+test('verify-pack stops at a wrong node:sqlite engines range, before the pack', () => withFixture((root) => {
+  writeCliPackFixture(root);
+  writeInstallGuards(root);
+  writeUndeclaredNodeSqliteConsumer(root);
+  const { installGuardViolations, runtimeViolations, missing } = verifyPack({ rootDir: root, runner: refusePack });
+  assert.deepEqual(installGuardViolations, []);
+  assert.deepEqual(runtimeViolations.map(({ name, actual }) => [name, actual]), [['@origintrail-official/dkg-query', undefined]]);
+  assert.deepEqual(missing, []);
+}));
+
+test('verify-pack runs exactly the child commands it declares to the CI routing guard', () => withFixture((root) => {
+  // SUBCOMMAND_CHILD_COMMANDS is what the routing guard's execution graph
+  // reads for `release-packages.mjs verify-pack` (its route to the CLI's
+  // prepack), so the subcommand must run those commands and no others. The
+  // fixture passes the install-guard and engine checks so the pack runs.
+  writeCliPackFixture(root);
+  writeInstallGuards(root);
+  const observed = [];
+  const runner = (command, args, { cwd }) => {
+    observed.push({ command, args, cwd: path.relative(root, cwd).split(path.sep).join('/') });
+    return JSON.stringify([{ files: [] }]);
+  };
+  const { installGuardViolations, runtimeViolations, missing } = verifyPack({ rootDir: root, runner });
+  assert.deepEqual([installGuardViolations, runtimeViolations], [[], []]);
+  assert.ok(missing.length > 0, 'the check reads the pack report');
+  // The pack must stay a dry run in the CLI package: pinned here on its own,
+  // so a change to the declaration cannot move both sides of the check.
+  const pack = { command: 'npm', args: ['pack', '--dry-run', '--json'], cwd: 'packages/cli' };
+  assert.deepEqual(observed, [pack]);
+  assert.deepEqual(SUBCOMMAND_CHILD_COMMANDS['verify-pack'].map(({ command, args, cwd }) => ({ command, args: [...args], cwd })), [pack]);
 }));
 
 // The integration test the mocked-runner unit tests can't give: run the REAL
@@ -338,12 +810,43 @@ test('real npm pack --dry-run runs prepack and includes every runtime asset', { 
   fs.writeFileSync(path.join(root, 'network', 'testnet.json'), '{}\n');
   fs.writeFileSync(path.join(root, 'network', 'mainnet-base.json'), '{}\n');
   fs.writeFileSync(path.join(root, 'project.json'), '{}\n');
+  fs.writeFileSync(path.join(root, 'blazegraph-image.json'), VALID_BLAZEGRAPH_METADATA);
   const cliDir = path.join(root, 'packages', 'cli');
   fs.mkdirSync(cliDir, { recursive: true });
+  fs.copyFileSync(BLAZEGRAPH_METADATA_PARSER, path.join(cliDir, 'blazegraph-image-metadata.cjs'));
+  fs.copyFileSync(BLAZEGRAPH_RUNTIME_TYPES, path.join(cliDir, 'blazegraph-runtime-contract.d.cts'));
+  fs.mkdirSync(path.join(root, 'packages', 'storage'), { recursive: true });
+  fs.copyFileSync(
+    BLAZEGRAPH_NAMESPACE_CONTRACT,
+    path.join(root, 'packages', 'storage', 'blazegraph-namespace-contract.cjs'),
+  );
+  const storageDir = path.join(
+    root,
+    'node_modules',
+    '@origintrail-official',
+    'dkg-storage',
+  );
+  fs.mkdirSync(storageDir, { recursive: true });
+  fs.copyFileSync(BLAZEGRAPH_NAMESPACE_CONTRACT, path.join(storageDir, 'blazegraph-namespace-contract.cjs'));
+  fs.writeFileSync(path.join(storageDir, 'package.json'), `${JSON.stringify({
+    name: '@origintrail-official/dkg-storage',
+    version: '0.0.0-fixture',
+    exports: {
+      './blazegraph-namespace-contract': './blazegraph-namespace-contract.cjs',
+    },
+  }, null, 2)}\n`);
   fs.writeFileSync(path.join(cliDir, 'build-info.json'), '{}\n'); // generated by release:build-info
   fs.writeFileSync(path.join(cliDir, 'package.json'), `${JSON.stringify({
     name: '@origintrail-official/dkg', version: '0.0.0-fixture', private: true,
-    files: ['network', 'project.json', 'build-info.json'],
+    files: [
+      'network',
+      'project.json',
+      'blazegraph-image.json',
+      'blazegraph-image-metadata.cjs',
+      'blazegraph-namespace-contract.cjs',
+      'blazegraph-runtime-contract.d.cts',
+      'build-info.json',
+    ],
     scripts: { prepack: 'node ../../scripts/copy-cli-runtime-assets.mjs' },
   }, null, 2)}\n`);
 
@@ -358,7 +861,16 @@ test('real npm pack --dry-run runs prepack and includes every runtime asset', { 
       .flatMap((entry) => entry.files ?? [])
       .map((file) => file.path.replace(/\\/g, '/')),
   );
-  for (const asset of ['project.json', 'build-info.json', 'network/testnet.json', 'network/mainnet-base.json']) {
+  for (const asset of [
+    'project.json',
+    'blazegraph-image.json',
+    'blazegraph-image-metadata.cjs',
+    'blazegraph-namespace-contract.cjs',
+    'blazegraph-runtime-contract.d.cts',
+    'build-info.json',
+    'network/testnet.json',
+    'network/mainnet-base.json',
+  ]) {
     assert.ok(packed.has(asset), `real tarball missing ${asset}`);
   }
 }));

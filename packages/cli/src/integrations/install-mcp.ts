@@ -99,7 +99,13 @@ export async function installMcp(options: InstallMcpOptions): Promise<InstallMcp
 
   const serverBlock: Record<string, unknown> = {
     command: entry.install.command,
-    args: entry.install.args,
+    // `args` is optional in the registry schema, and legitimately so: a server
+    // launched by a binary already on PATH needs none, whereas an `npx`-style
+    // launcher carries the package here. Normalise to [] rather than letting
+    // JSON.stringify drop an `undefined` key — the emitted block stays
+    // well-formed either way, and judging whether a given command needs args is
+    // the entry author's call, not the installer's.
+    args: entry.install.args ?? [],
     env,
   };
 

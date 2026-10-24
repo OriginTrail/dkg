@@ -1,15 +1,44 @@
+import type { SharedMemoryPublicSnapshotStorageConfig } from '@origintrail-official/dkg-publisher';
+import { normalizeOxigraphMemoryLimits, oxigraphMemorySupportError } from './oxigraph-memory-limits.js';
+import { resolveBooleanEnvOverride } from './boolean-env-override.js';
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
+import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origintrail-official/dkg-publisher';
 import { join, dirname, basename } from 'node:path';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
-import type { DKGAgentConfig } from '@origintrail-official/dkg-agent';
+import type {
+  DKGAgentConfig,
+  SyncAdmissionConfig,
+  SyncContextGraphPriorityConfig,
+} from '@origintrail-official/dkg-agent';
+// The config loader must stay off the agent package ROOT at runtime: that entry
+// loads the whole agent runtime (libp2p, sync lanes, the process-wide
+// `sync-global` backpressure registration) into every config-only command, and
+// a CLI test that also loads agent sources directly then registers that
+// singleton twice. The light subpath carries only the budget resolver, like the
+// RFC-64 activation config below.
+import { resolveChainAuthorityTimeoutMs } from '@origintrail-official/dkg-agent/chain-authority-read-budgets';
+import {
+  resolveRfc64CatalogActivationsV1,
+  type Rfc64CatalogNormalizedActivationStateV1,
+  type ResolvedRfc64CatalogActivationConfigV1,
+  resolveRfc64PublicCatalogActivationChainIdentityV1,
+  resolveRfc64PublicCatalogActivationConfigV1,
+  type Rfc64CatalogActivationConfigV1,
+  type ResolvedRfc64PublicCatalogActivationConfigV1,
+  type Rfc64PublicCatalogActivationChainIdentityV1,
+  type Rfc64PublicCatalogActivationConfigV1,
+} from '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1';
 import {
   blueGreenSlotEntryPoint,
   blueGreenSlotReady,
   findPackageRepoDir,
   isDkgMonorepoRoot,
+  hasErrorCode,
   resolveDkgConfigHome,
+  dkgAuthTokenPath,
+  peerIdFromRelayAddress,
   SELECTABLE_SETUP_NETWORKS,
 } from '@origintrail-official/dkg-core';
 import {
@@ -19,6 +48,17 @@ import {
   STORAGE_ACK_TIMING_SAFETY_MARGIN_MS,
   type StorageAckTiming,
 } from '@origintrail-official/dkg-publisher';
+import {
+  DEFAULT_REPLENISH_TARGET_ALLOWANCE,
+  DEFAULT_REPLENISH_TARGET_MULTIPLE,
+  resolveRpcRequestGovernorPolicy,
+  resolveContextGraphAuthorityIndexTickMs,
+  resolveFinalityConfirmations,
+  resolveReceiptTimeoutMs,
+  type ApprovalPolicy, type ChainSignerSettings,
+  type RpcRequestGovernorPolicyInput,
+} from '@origintrail-official/dkg-chain';
+import { runtimeAssetRoots } from './runtime-assets.js';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -193,11 +233,31 @@ export interface NetworkConfig {
     hubAddress: string;
     tokenAddress?: string;
     chainId: string;
+    receiptTimeoutMs?: number;
+    /**
+     * Operator-selected mined-receipt confirmation depth; the receipt block
+     * itself counts as 1. Lower values reduce wallet wait time but increase the
+     * risk that a chain reorganization reverses an already accepted receipt.
+     * A value of 1 gives no successor-block buffer. Defaults to 1.
+     */
+    finalityConfirmations?: number;
+    /** See `ChainConfig.indexTickMs`. */
+    indexTickMs?: number;
+    /** See `ChainConfig.boundedAuthorityReads`. */
+    boundedAuthorityReads?: boolean;
+    /** See `ChainConfig.authorityReadTimeoutMs`. */
+    authorityReadTimeoutMs?: number;
+    /** See `ChainConfig.authorityColdResolutionTimeoutMs`. */
+    authorityColdResolutionTimeoutMs?: number;
+    /** Optional operator cap for transaction fee-per-gas fields (wei). */
+    maxFeePerGasWei?: bigint | string | number;
     /**
      * ContextGraphNameRegistry discovery scan `eth_getLogs` block-window.
      * Defaults to the EVM adapter's 2,000-block common provider cap.
      */
     cgRegistryScanPageSize?: number;
+    /** Node-process RPC transport budget; operator values override per field. */
+    rpcRequestBudget?: RpcRequestGovernorPolicyInput;
     /**
      * Network-level per-chain funding floors (wei). See
      * `ChainConfig.minPublisher*Wei`. Overlay JSON can only carry
@@ -248,32 +308,54 @@ export interface ApprovalPolicyConfig {
    *   - `per-publish` — approve exactly each publish's TRAC cost (with the
    *     on-chain `1n` floor). Cheapest blast radius, most approve-gas at
    *     scale. Backward-compatible.
-   *   - `replenishing` — approve a configurable ceiling (default 1000 TRAC),
-   *     refill when allowance drops below `target × refillBelowFraction`
-   *     (default 10%). One approve per ~9 publishes' worth of TRAC.
-   *     **Recommended for mainnet.**
+   *   - `replenishing` — approve a ceiling sized relative to this publish's
+   *     cost (`targetAllowanceMultiple`, default 20×), refill when allowance
+   *     drops below `target × refillBelowFraction` (default 10%). At the
+   *     defaults that is one approve per 19 publishes of comparable cost,
+   *     at any publish price. **Recommended for mainnet.**
    *   - `unlimited` — approve `MaxUint256` once per wallet, never again.
    *     Lowest gas, widest blast radius. Use only if you trust the V10 KA
    *     contract absolutely.
    */
   mode?: ApprovalPolicyMode;
   /**
-   * `replenishing` only. TRAC amount (decimal wei-TRAC string — `1000 *
-   * 10^18 = '1000000000000000000000'` for 1000 TRAC) to approve up to.
-   * Defaults to `'1000000000000000000000'` (1000 TRAC).
+   * `replenishing` only. ABSOLUTE ceiling as a decimal wei-TRAC string
+   * (`1000 * 10^18 = '1000000000000000000000'` for 1000 TRAC).
+   *
+   * **Overrides `targetAllowanceMultiple` when set.** Unset (the default)
+   * means the ceiling is derived from each publish's cost. Set this when
+   * you want standing exposure bounded by an absolute TRAC figure rather
+   * than by a multiple of whatever the triggering publish happened to
+   * cost — the derived ceiling tracks the most expensive recent publish,
+   * so a single outlier raises it.
    */
   targetAllowance?: string;
   /**
+   * `replenishing` only. Ceiling multiplier over the publish cost, used
+   * when no absolute `targetAllowance` is set: the adapter approves
+   * `publishCost × targetAllowanceMultiple`. Integer >= 1; defaults to
+   * `20`. Rejected at startup if it is anything else.
+   *
+   * Sizing relative to cost avoids a flat ceiling being simultaneously too
+   * large for a small node (blast radius) and too small for a busy one
+   * (constant re-approving), and needs no config change when TRAC prices
+   * move. Pair with `refillBelowFraction`: approves are amortised over
+   * roughly `multiple × (1 - refillBelowFraction) + 1` publishes of
+   * comparable cost — 19 at the defaults.
+   */
+  targetAllowanceMultiple?: number;
+  /**
    * `replenishing` only. Refill when current allowance drops below
-   * `targetAllowance × refillBelowFraction`. Float between 0 and 1.
-   * Defaults to `0.1` (refill at 10% remaining).
+   * `target × refillBelowFraction`, where `target` is the absolute
+   * `targetAllowance` or the derived `cost × targetAllowanceMultiple`.
+   * Float between 0 and 1. Defaults to `0.1` (refill at 10% remaining).
    */
   refillBelowFraction?: number;
 }
 
 export type ApprovalPolicyConfigInput = ApprovalPolicyConfig | ApprovalPolicyMode;
 
-export interface ChainConfig {
+export interface ChainConfig extends ChainSignerSettings {
   /** 'evm' for real blockchain, omit or 'mock' for in-memory (testing only) */
   type: 'evm' | 'mock';
   /** JSON-RPC endpoint URL */
@@ -306,6 +388,8 @@ export interface ChainConfig {
    * Defaults to the EVM adapter's 2,000-block common provider cap.
    */
   cgRegistryScanPageSize?: number;
+  /** Node-process RPC transport budget and foreground reservation. */
+  rpcRequestBudget?: RpcRequestGovernorPolicyInput;
   /**
    * Funding floors for funding-aware operational-wallet selection (wei of the
    * native gas token / TRAC). A wallet is preferred for a publish only when its
@@ -323,15 +407,81 @@ export interface ChainConfig {
    */
   minPublisherNativeWei?: bigint | string | number;
   minPublisherTracWei?: bigint | string | number;
+  /** Overall submitted-transaction receipt deadline (default 10 minutes). */
+  receiptTimeoutMs?: number;
+  /**
+   * Operator-selected canonical block confirmations required for a mined
+   * publish receipt. The receipt block itself counts as confirmation 1. Lower
+   * values reduce wallet wait time but increase the risk that a chain
+   * reorganization reverses an already accepted receipt. A value of 1 gives no
+   * successor-block buffer. Defaults to 1.
+   */
+  finalityConfirmations?: number;
+  /**
+   * How long (ms) one completed finalized Context Graph authority projection
+   * answers RFC-64 authority reads before the next read refreshes it from the
+   * chain. A lower value observes on-chain authority changes sooner and costs
+   * proportionally more RPC. After a failed refresh the previous projection
+   * keeps answering until it is `min(max(3 × indexTickMs, 15s), 5m)` old,
+   * then those reads fail closed. Values above five minutes do not extend
+   * cache service past the RFC-64 accepted-authority interval. A positive
+   * integer; defaults to 6000.
+   *
+   * ALSO the cadence of the node's one chain-index tick
+   * (`evm-adapter-base.ts:startChainIndexRuntime`), which runs whether or not
+   * anything reads it: one head read, one block-hash re-read and one
+   * `eth_getLogs` every T for the whole indexed event set. Lowering it to
+   * freshen authority answers therefore also buys a proportionally faster
+   * background scanner. The same T bounds how stale the log's Hub rotation
+   * window may be — `max(3T, 15s)`, with no five-minute ceiling: the ceiling
+   * above exists because a stale authority answer is still bounded by the
+   * RFC-64 accepted-authority interval, whereas a rotation listener that
+   * promises never to miss a rotation has no such backstop — before that
+   * listener goes back to scanning the chain for itself.
+   */
+  indexTickMs?: number;
+  /**
+   * Permit bounded Context Graph authority reads at read-only gates when the
+   * local index has a provably fresh answer. Live mutation and key gates keep
+   * reading the chain. Defaults to false in the adapter.
+   */
+  boundedAuthorityReads?: boolean;
+  /**
+   * Request-scoped deadline (ms) for one on-chain Context Graph authority
+   * read: liveness, access/publish policy, participant roster, or the
+   * finalized-index snapshot behind a query, share, or SWM sync decision. A
+   * read that misses it fails CLOSED for that request (HTTP 503 with a
+   * retryable `chain-access-policy-timeout` reason on the query path). Raise
+   * it on slow public RPC endpoints. The environment variable
+   * `DKG_CHAIN_AUTHORITY_READ_TIMEOUT_MS` wins over this value. A positive
+   * integer; defaults to 2500.
+   */
+  authorityReadTimeoutMs?: number;
+  /**
+   * Budget (ms) for the detached cold finalized-authority resolution. The
+   * first authority read of a graph the local finalized index has never
+   * projected walks the contract event log (many `eth_getLogs` calls) and
+   * routinely outlives `authorityReadTimeoutMs`. That request still fails
+   * closed on time, but the resolution keeps running under this budget as one
+   * flight per graph and populates the index, so the retry is answered from
+   * the snapshot without RPC. Never applied below `authorityReadTimeoutMs`.
+   * The environment variable `DKG_CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_MS`
+   * wins over this value. A positive integer; defaults to 20000.
+   */
+  authorityColdResolutionTimeoutMs?: number;
+  /** Optional operator cap for transaction fee-per-gas fields (wei). */
+  maxFeePerGasWei?: bigint | string | number;
 }
 
 export type ResolvedChainConfig = Partial<
-  Omit<ChainConfig, 'approvalPolicy' | 'minPublisherNativeWei' | 'minPublisherTracWei'>
+  Omit<ChainConfig, 'approvalPolicy' | 'minPublisherNativeWei' | 'minPublisherTracWei' | 'maxFeePerGasWei'>
 > & {
   approvalPolicy?: ApprovalPolicyConfig;
   /** Normalized funding floors — always bigint past resolution. */
   minPublisherNativeWei?: bigint;
   minPublisherTracWei?: bigint;
+  /** Normalized positive fee-per-gas cap. */
+  maxFeePerGasWei?: bigint;
 };
 
 export interface LargeLiteralStorageConfig {
@@ -340,10 +490,7 @@ export interface LargeLiteralStorageConfig {
   directory?: string;
 }
 
-export interface SharedMemoryPublicSnapshotStorageConfig {
-  enabled?: boolean;
-  directory?: string;
-}
+export type { SharedMemoryPublicSnapshotStorageConfig } from '@origintrail-official/dkg-publisher';
 
 /** Optional LLM config for the Node UI chatbot (OpenAI-compatible API). */
 export interface LlmConfig {
@@ -465,16 +612,35 @@ export interface GraphSetIndexConfig {
   revalidateMs?: number;
 }
 
+/**
+ * Selected-public RFC-64 activation. An accepted bootstrap manifest activates
+ * its selected CGs by default; an omitted block or explicit `enabled: false`
+ * leaves the catalog data plane fail-closed. The daemon adds only manifest
+ * graph IDs to durable synchronization.
+ */
+export type Rfc64PublicCatalogActivationConfig = Rfc64PublicCatalogActivationConfigV1;
+export type ResolvedRfc64PublicCatalogActivationConfig =
+  ResolvedRfc64PublicCatalogActivationConfigV1;
+export type Rfc64PublicCatalogActivationChainIdentity =
+  Rfc64PublicCatalogActivationChainIdentityV1;
+export type Rfc64CatalogActivationConfig = Rfc64CatalogActivationConfigV1;
+export type ResolvedRfc64CatalogActivationConfig =
+  ResolvedRfc64CatalogActivationConfigV1;
+export type Rfc64CatalogNormalizedActivationState =
+  Rfc64CatalogNormalizedActivationStateV1;
+
 export interface LoggingConfig {
   /** Emit detailed KA publish lifecycle logs. Default: false. */
   kaPublishLifecycleDebug?: boolean;
 }
 
-export interface DkgConfig {
+export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLimits' | 'preparedContentCache'> {
   name: string;
   /**
    * Selects which bundled network/<name>.json overlay this node should use.
-   * When omitted, runtime falls back to project.json#defaultNetwork.
+   * When omitted, legacy configs infer the overlay from chain.chainId when it
+   * matches a bundled network; otherwise runtime falls back to
+   * project.json#defaultNetwork.
    */
   networkConfig?: string;
   relay?: string;
@@ -483,6 +649,15 @@ export interface DkgConfig {
   apiHost?: string;
   listenPort: number;
   nodeRole: 'core' | 'edge';
+  /**
+   * Opt an edge into authority snapshots from explicitly trusted core PeerIDs.
+   * Local operator config only: network discovery/relay lists do not establish
+   * authority trust. Omission preserves the independent historical index.
+   * The edge scans at most maxTailBlocks after the snapshot (default 2,000;
+   * minimum 200, maximum 10,000), refreshing from a core when farther behind.
+   * Increment cacheEpoch to discard an old trusted snapshot without changing peers.
+   */
+  authorityIndex?: DKGAgentConfig['authorityIndex'];
   /**
    * Core-Node-specific operator tuning. Today only `allowDegradedRelay`;
    * future Core-only knobs (e.g. relay-target prioritisation) belong here
@@ -550,28 +725,52 @@ export interface DkgConfig {
    * (standing up a relay VM, sharing multiaddrs, monitoring).
    */
   preferredRelays?: string[];
+  /**
+   * Transport-level network peer isolation: refuse to dial, store or accept
+   * the relays of the other bundled DKG networks and peers that failed the
+   * network-identity proof. Defaults to true. Set false (or
+   * DKG_NETWORK_PEER_ISOLATION_ENABLED=0, which wins) to fall back to
+   * admission-only isolation without a new release.
+   */
+  networkPeerIsolationEnabled?: boolean;
   /** Public multiaddrs to announce (for VPS/cloud nodes where the public IP is not on the interface). */
   announceAddresses?: string[];
   /** Bootstrap peer multiaddrs to connect to on startup (for direct peer discovery without relay). */
   bootstrapPeers?: string[];
   /** V10: context graphs to subscribe. */
   contextGraphs?: string[];
+  /**
+   * @deprecated Compatibility authority seed / rollback controls. Omission
+   * enables release-native RFC-64 selection from ordinary CG responsibility.
+   */
+  rfc64PublicCatalog?: Rfc64PublicCatalogActivationConfig;
+  /**
+   * Optional RFC-64 authority seeds and emergency rollout controls. In
+   * 10.0.16, ordinary subscriptions, Core public hosting, and verified private
+   * membership select catalog mode without this block. Manual policy/roster
+   * material remains accepted for compatibility but no longer owns selection.
+   */
+  rfc64Catalog?: Rfc64CatalogActivationConfig;
+  /**
+   * Explicitly trusted context graphs that daemon startup may create locally
+   * instead of treating as remote subscription targets. Intended for local
+   * development/bootstrap environments; production networks should normally
+   * express their built-ins through network.defaultContextGraphs.
+   */
+  localBootstrapContextGraphs?: string[];
   /** Local daemon logging controls. */
   logging?: LoggingConfig;
   /** Cross-agent query access policy for inbound query-remote requests. */
   queryAccess?: QueryAccessConfig;
   autoUpdate?: AutoUpdateConfig;
   /**
-   * Chain config. Field-merged on top of `network/<env>.json#chain` via
-   * `resolveChainConfig()`, so an operator can override individual fields
-   * (e.g. just `rpcUrl` to point at a private RPC) without having to
-   * restate `hubAddress` and `chainId`. Fields omitted here inherit the
-   * network defaults — including future hub rotations propagated by the
-   * auto-updater pulling a fresh network/<env>.json.
+   * Field-merged over network/<env>.json#chain by resolveChainConfig().
+   * Operators can override one field; omitted fields follow updated defaults.
    */
   chain?: Partial<ChainConfig>;
   /** Optional LLM for the Node UI chatbot (natural language → SPARQL, answers). */
   llm?: LlmConfig;
+  entitySearch?: { embedding: import('./entity-search/types.js').EntityEmbeddingConfig };
   /** Block explorer URL for TX links (default: derived from chainId). */
   blockExplorerUrl?: string;
   /** Triple store backend override (default: oxigraph-worker with file persistence). */
@@ -586,27 +785,75 @@ export interface DkgConfig {
    * than the default (64).
    */
   maxRehydratedContextGraphSubscriptions?: number;
+  /**
+   * Restore persisted Context Graph subscriptions into live gossip and sync
+   * state on daemon boot. Defaults to true. Set false for a preserved-store,
+   * query-only boot; rows and RDF content are not deleted. Environment override:
+   * DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED.
+   */
+  contextGraphSubscriptionRehydrationEnabled?: boolean;
   /** Out-of-line storage for large public SWM RDF literal object terms. */
   largeLiteralStorage?: LargeLiteralStorageConfig;
   /** Out-of-line storage for immutable public SWM operation snapshots. */
   sharedMemoryPublicSnapshotStorage?: SharedMemoryPublicSnapshotStorageConfig;
   /** Disable expensive peer-connect SWM catch-up for bulk benchmark/devnet runs. */
   syncSharedMemoryOnConnect?: boolean;
-  /** Emergency switch for the periodic sync reconciler. Env DKG_SYNC_RECONCILER_ENABLED wins. */
+  /**
+   * Emergency switch for the periodic peer-sync reconciler only. Env
+   * DKG_SYNC_RECONCILER_ENABLED wins. Chain-driven VM reconciliation has its
+   * own `vmReconcilerEnabled` switch and is not affected by this one.
+   */
   syncReconcilerEnabled?: boolean;
+  /**
+   * Chain-driven VM reconciliation (core-hosted recording, KA-registered
+   * nudge, VM reconcile sweep). Env DKG_VM_RECONCILER_ENABLED wins; default
+   * on. A core with it off declines every StorageACK.
+   */
+  vmReconcilerEnabled?: boolean;
+  /** Period between automatic sync-reconciler passes. Default: 5 minutes. */
+  syncReconcilerIntervalMs?: number;
+  /** Age after which a peer is eligible for automatic sync retry. Default: 10 minutes. */
+  syncStalenessThresholdMs?: number;
+  /** Initial per-peer automatic sync retry delay. Default: 5 minutes. */
+  syncBackoffBaseMs?: number;
+  /** Maximum per-peer automatic sync retry delay. Default: 60 minutes. */
+  syncBackoffMaxMs?: number;
+  /** Fractional retry jitter from 0 through 1. Default: 0.25. */
+  syncBackoffJitter?: number;
   /** Emergency switch for all peer-connect sync triggers. Env DKG_SYNC_ON_CONNECT_ENABLED wins. */
   syncOnConnectEnabled?: boolean;
+  /**
+   * Include `agents` and `ontology` in automatic peer-connect/reconciler
+   * durable sync. Defaults true on Core and false on Edge. Explicit catch-up
+   * remains available. Env DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT wins.
+   */
+  syncSystemContextGraphsOnConnect?: boolean;
+  /**
+   * Fetch the `agents` phonebook once, bounded and on demand, when a public
+   * wallet-scoped Context Graph needs its owner's profile to reach holders.
+   * Default true; inert when `agents` already syncs on every connect. Set
+   * false to disable. Env DKG_ON_DEMAND_AGENTS_PHONEBOOK wins.
+   */
+  onDemandAgentsPhonebook?: boolean;
   /** Emergency switch for durable/SWM sync execution. Env DKG_DURABLE_SYNC_ENABLED wins. */
   durableSyncEnabled?: boolean;
   /**
-   * Global cap for concurrent sync jobs. Defaults to 2; set 0 to disable.
+   * Global cap for concurrent sync jobs. Defaults to 10; set 0 to disable.
    * Env DKG_SYNC_GLOBAL_MAX_INFLIGHT wins.
    */
   syncGlobalMaxInflight?: number;
   /** Backwards-compatible alias for syncGlobalMaxInflight. Env DKG_SYNC_GLOBAL_LIMIT wins. */
   syncGlobalLimit?: number;
-  /** Max sync jobs waiting behind the global cap. Defaults to 2x the inflight cap. */
+  /** Hard cap for queued sync jobs. Shared mode defaults to 2x the inflight cap. */
   syncGlobalQueueLimit?: number;
+  /** Optional partitioned fast/slow sync admission. Omit for the legacy shared limiter. */
+  syncAdmission?: SyncAdmissionConfig;
+  /**
+   * Local sync scheduling priority by Context Graph ID. Higher runs first.
+   * System Context Graphs default to a deprioritized priority so they run
+   * last; an explicit entry here (including 0) overrides that default.
+   */
+  syncContextGraphPriorities?: SyncContextGraphPriorityConfig;
   /** StorageACK handler deadline override in milliseconds. Env DKG_STORAGE_ACK_HANDLER_DEADLINE_MS wins. */
   storageAckHandlerDeadlineMs?: number;
   /**
@@ -647,7 +894,7 @@ export interface DkgConfig {
   /**
    * Opt-in telemetry streaming to a central network dashboard.
    * `enabled` is the master gate: when false, NOTHING is forwarded off the
-   * node (local logging — SQLite + daemon.log — is always on regardless).
+   * node (local daemon.log and dashboard operational history remain on).
    */
   telemetry?: {
     enabled?: boolean;
@@ -701,8 +948,12 @@ export interface DkgConfig {
       token?: string;
       /** PeriodicExportingMetricReader interval. Default 30000ms. */
       exportIntervalMs?: number;
+      /** Enable local Node UI SQLite metric snapshots. Default true. */
+      collectionEnabled?: boolean;
     };
   };
+  /** Automatic outbox retry admission: positive integers, default 100 entries / 10 MiB / 4 workers (DEFAULT_OUTBOX_DRAIN_MAX_PAYLOAD_BYTES). */
+  messengerOutboxDrain?: DKGAgentConfig['messengerOutboxDrain'];
   /** Shared memory (workspace) data TTL in milliseconds. Default: 30 days (2592000000). Set to 0 to disable cleanup. */
   sharedMemoryTtlMs?: number;
   /** @deprecated Legacy alias for sharedMemoryTtlMs */
@@ -723,35 +974,91 @@ export interface DkgConfig {
      */
     provenanceEvents?: boolean;
   };
-  /** Async publisher runtime options. */
+  /**
+   * Async publisher runtime options. The retry knobs below are validated by
+   * `resolvePublisherRetryTuning()` at the config boundary: the publisher
+   * constructor THROWS on out-of-range values and it is constructed during
+   * daemon boot, so an unchecked typo would surface as a startup failure
+   * carrying a library message instead of a config error naming the key.
+   */
   publisher?: {
     enabled?: boolean;
     pollIntervalMs?: number;
     errorBackoffMs?: number;
+    /**
+     * The IDLE sweep: how often to check submitted transactions for chain confirmation when the
+     * queue reports no transaction awaiting proof (crash recovery, missed wake-ups).
+     * Default 60000ms.
+     */
+    recoveryIntervalMs?: number;
+    /**
+     * The ACTIVE reconcile cadence: how often to re-check while at least one submitted
+     * transaction is still awaiting chain proof. The publisher additionally wakes reconciliation
+     * immediately when a receipt task settles, so this bounds only the re-check loop for
+     * transactions whose proof was not yet available. Default 5000ms.
+     */
+    activeRecoveryIntervalMs?: number;
+    /**
+     * Retry budget per job — ONE counter shared by the publisher's automatic
+     * retries and manual reaccepts, snapshot at admission. Default 10.
+     */
     maxRetries?: number;
+    /**
+     * GH#2270 — operator kill-switch for the publisher's OWN retry lane.
+     * `false` collapses it to pre-#2270 behaviour: nothing is scheduled and
+     * nothing already scheduled is swept (jobs scheduled while it was on
+     * strand until it is turned back on). Manual `dkg publisher retry` and
+     * admission reaccept are unaffected. Default `true`.
+     */
+    autoRetryEnabled?: boolean;
+    /**
+     * GH#2270 — symmetric jitter ratio `r` applied to the retry backoff as
+     * `delay · (1 + r·(2·rand()−1))`, i.e. the fraction of the delay the
+     * jitter may add or subtract. Must satisfy `0 <= r < 1`. Default 0.2.
+     */
+    retryJitterRatio?: number;
+    /**
+     * GH#2270 — first retry delay in ms; doubles per attempt up to
+     * `retryBackoffMaxMs`. Default 5000. May be set independently: the
+     * EFFECTIVE pair (explicit value + default for the unset knob) is
+     * validated as `max >= base` at the shared resolver.
+     */
+    retryBackoffBaseMs?: number;
+    /** GH#2270 — hard ceiling on the (jittered) retry delay. Default 60000. */
+    retryBackoffMaxMs?: number;
   };
-  /**
-   * Async promote queue worker (WM → SWM). Unlike `publisher` which is
-   * opt-in, the promote worker is **on by default** — without it, jobs
-   * enqueued via `POST /api/knowledge-assets/{name}/swm/share-async` sit in
-   * `queued` forever. Set `enabled: false` to disable when running a
-   * read-only / forensic node where you don't want the worker mutating
-   * SWM. See `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md` and the
-   * `dkg-node` skill (§8 "Async promote queue") for the full contract.
-   */
+  /** WM → SWM worker, enabled by default; see docs/promote-queue-operations.md. */
   promoteQueue?: {
+    /** Default 5. Attempt budget; typed prerequisites also retain their retry window. */
+    maxRetries?: number;
+    /** Default 60_000ms; exponential retry curve base. */
+    retryBaseMs?: number;
+    /** Default 900_000ms; maximum retry delay including jitter. */
+    retryMaxMs?: number;
+    /** Default 0.2; symmetric jitter ratio in [0, 1]. */
+    retryJitterRatio?: number;
     /** Default `true`. Set `false` to disable the in-daemon worker. */
     enabled?: boolean;
     /** Default 4. Number of concurrent worker slots polling the queue. */
     workerConcurrency?: number;
-    /** Default 100ms. Polling interval per slot. */
+    /** Default 100ms. Idle full scans are bounded to once per second. */
     pollIntervalMs?: number;
-    /** Default 60_000ms (1 min). Must be >0 and shorter than the queue's 5-min lease when enabled. */
+    /** Default 60_000ms. Must be shorter than the queue's 15-minute lease when enabled. */
     heartbeatIntervalMs?: number;
     /** Default 30_000ms. Max time `stop()` waits for in-flight promotes to drain on shutdown. */
     shutdownTimeoutMs?: number;
+    /**
+     * Default 30_000ms. Interval of the sweep that requeues terminal
+     * post-commit share failures for the publisher's idempotent replay
+     * (bounded by each job's retry budget). `0` keeps only the startup sweep.
+     */
+    postCommitRecoveryIntervalMs?: number;
   };
-  /** Allowed CORS origins. Defaults to '*' when apiHost is '127.0.0.1', otherwise restrictive. */
+  /**
+   * Allowed CORS origins. When unset, only the API port's loopback origins
+   * (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`)
+   * are allowed; `apiHost: '0.0.0.0'` keeps the legacy `'*'`.
+   */
   corsOrigins?: string | string[];
   /** HTTP rate limiting settings. */
   rateLimit?: { requestsPerMinute?: number; exempt?: string[] };
@@ -774,6 +1081,8 @@ export interface DkgConfig {
   storageAck?: {
     handlerDeadlineMs?: number;
     sendTimeoutMs?: number;
+    /** Maximum publisher-side StorageACK collection rounds in flight. Default 1. */
+    maxConcurrentCollections?: number;
   };
   /**
    * V10 Random Sampling prover (core-only). When the node is `core`
@@ -946,10 +1255,92 @@ export function resolveContextGraphs(config: DkgConfig): string[] {
   return config.contextGraphs ?? [];
 }
 
+const CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENV =
+  'DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED';
+
+/**
+ * Resolve the startup subscription-rehydration gate. The environment override
+ * wins so an operator can safely boot an existing store without rewriting its
+ * config file. Unknown values fail startup instead of silently choosing the
+ * network-active default.
+ */
+export function resolveContextGraphSubscriptionRehydrationEnabled(
+  configValue: unknown,
+  envValue: string | undefined = process.env[CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENV],
+): boolean {
+  return resolveBooleanEnvOverride({
+    envName: CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENV,
+    configName: 'contextGraphSubscriptionRehydrationEnabled',
+    envValue,
+    configValue,
+    defaultValue: true,
+  });
+}
+
+/**
+ * The GH#2270 retry knobs, validated but NOT defaulted: an unset knob stays
+ * `undefined` so the publisher library remains the single source of every
+ * default (same contract `publisher.maxRetries` has had since #1836).
+ *
+ * Validation DELEGATES to the publisher package's `resolveAsyncLiftRetryTuning`
+ * — the same resolver the `TripleStoreAsyncLiftPublisher` constructor runs — so
+ * ranges, the kill-switch's boolean-only rule, and the cross-field backoff
+ * invariant have exactly ONE owner. Because that owner exports the real
+ * defaults, a half-configured backoff pair is validated against the EFFECTIVE
+ * values instead of being rejected outright (the earlier set-together rule is
+ * gone), and an operator error names the `config.json` key.
+ */
+export type PublisherRetryTuning = AsyncLiftRetryTuning;
+
+/**
+ * The ONE definition of "the publisher runtime will start": the runner's
+ * gates and the boot-time validation gate both call this, so the set of
+ * configs that construct a publisher and the set that get validated cannot
+ * drift (truthiness, matching the pre-existing runtime behavior).
+ */
+export function isPublisherRuntimeEnabled(
+  publisher?: DkgConfig['publisher'] | null,
+): publisher is NonNullable<DkgConfig['publisher']> {
+  return Boolean(publisher?.enabled);
+}
+
+export function resolvePublisherRetryTuning(
+  publisher?: DkgConfig['publisher'] | null,
+  label = 'publisher',
+): PublisherRetryTuning {
+  // Pure label adapter: the WHOLE validation boundary, object shape
+  // included, is the publisher-owned resolver.
+  return resolveAsyncLiftRetryTuning(publisher, label);
+}
+
 /** Resolve context graphs from network config. */
 export function resolveNetworkDefaultContextGraphs(network: NetworkConfig | null | undefined): string[] {
   return network?.defaultContextGraphs ?? [];
 }
+
+/** Resolve the fail-closed operator activation into exact agent inputs. */
+export function resolveRfc64PublicCatalogActivation(
+  config: Pick<DkgConfig, 'rfc64PublicCatalog'>,
+  chainIdentity: Rfc64PublicCatalogActivationChainIdentity,
+): ResolvedRfc64PublicCatalogActivationConfig {
+  return resolveRfc64PublicCatalogActivationConfigV1(
+    config.rfc64PublicCatalog,
+    chainIdentity,
+  );
+}
+
+/** Resolve the policy-neutral union and the compatibility public projection. */
+export function resolveRfc64CatalogActivations(
+  config: Pick<DkgConfig, 'rfc64Catalog' | 'rfc64PublicCatalog'>,
+  chainIdentity: Rfc64PublicCatalogActivationChainIdentity,
+) {
+  return resolveRfc64CatalogActivationsV1({
+    catalog: config.rfc64Catalog,
+    publicCatalog: config.rfc64PublicCatalog,
+  }, chainIdentity);
+}
+
+export { resolveRfc64PublicCatalogActivationChainIdentityV1 };
 
 type NetworkReadinessValidation =
   | { ok: true; messages: [] }
@@ -1001,13 +1392,14 @@ export function resolveSharedMemoryTtlMs(config: DkgConfig): number | undefined 
  *   the chain adapter fall back to its built-in default
  *   (`DEFAULT_APPROVAL_POLICY`, currently `per-publish`).
  * - Throws a descriptive `Error` if the operator supplied an unparseable
- *   `targetAllowance` (e.g. `'one thousand TRAC'`). Fails fast at startup
- *   rather than silently falling back — config bugs are easier to find
- *   when they don't lurk for hours.
+ *   `targetAllowance` (e.g. `'one thousand TRAC'`), an out-of-range
+ *   `refillBelowFraction`, or a `targetAllowanceMultiple` that isn't an
+ *   integer >= 1. Fails fast at startup rather than silently falling back
+ *   — config bugs are easier to find when they don't lurk for hours.
  */
 export function resolveApprovalPolicy(
   policy: ApprovalPolicyConfig | undefined,
-): { mode: ApprovalPolicyMode; targetAllowance?: bigint; refillBelowFraction?: number } | undefined {
+): ApprovalPolicy | undefined {
   if (!policy) return undefined;
   const mode = policy.mode ?? 'per-publish';
   if (mode !== 'per-publish' && mode !== 'replenishing' && mode !== 'unlimited') {
@@ -1030,6 +1422,24 @@ export function resolveApprovalPolicy(
       );
     }
   }
+  // A multiple below 1 would put the derived ceiling under the publish
+  // floor on every call: the adapter's floor clamp would fire every time
+  // and `replenishing` would silently behave as `per-publish` — the
+  // operator's chosen mode quietly cancelled, visible only as an approve
+  // tx per publish on the gas bill. Throw rather than clamp, matching
+  // `finalityConfirmations` ("must be an integer >= 1") and the two
+  // sibling fields here, which all reject rather than repair.
+  if (policy.targetAllowanceMultiple !== undefined) {
+    if (
+      typeof policy.targetAllowanceMultiple !== 'number'
+      || !Number.isSafeInteger(policy.targetAllowanceMultiple)
+      || policy.targetAllowanceMultiple < 1
+    ) {
+      throw new Error(
+        `chain.approvalPolicy.targetAllowanceMultiple must be an integer >= 1 (got: ${JSON.stringify(policy.targetAllowanceMultiple)})`,
+      );
+    }
+  }
   if (policy.refillBelowFraction !== undefined) {
     if (
       typeof policy.refillBelowFraction !== 'number'
@@ -1045,8 +1455,35 @@ export function resolveApprovalPolicy(
   return {
     mode,
     targetAllowance,
+    targetAllowanceMultiple: policy.targetAllowanceMultiple,
     refillBelowFraction: policy.refillBelowFraction,
   };
+}
+
+/**
+ * Operator-visible migration warning for the one replenishing-policy shape
+ * whose meaning changed when relative sizing replaced the flat 1000 TRAC
+ * default. An explicit absolute target preserves the legacy ceiling; an
+ * explicit multiple opts into the new relative ceiling.
+ */
+export function approvalPolicyMigrationWarning(
+  policy: ApprovalPolicyConfig | undefined,
+): string | undefined {
+  if (
+    policy?.mode !== 'replenishing'
+    || policy.targetAllowance !== undefined
+    || policy.targetAllowanceMultiple !== undefined
+  ) {
+    return undefined;
+  }
+  const legacyTrac = DEFAULT_REPLENISH_TARGET_ALLOWANCE / (10n ** 18n);
+  return (
+    '[warn] chain.approvalPolicy mode=replenishing has no targetAllowance or '
+    + `targetAllowanceMultiple, so it now approves ${DEFAULT_REPLENISH_TARGET_MULTIPLE}x `
+    + `the triggering publish cost instead of the legacy flat ${legacyTrac.toString()} TRAC `
+    + 'ceiling. Set chain.approvalPolicy.targetAllowance explicitly to retain a flat ceiling, '
+    + 'or targetAllowanceMultiple to keep relative sizing.'
+  );
 }
 
 /**
@@ -1095,10 +1532,12 @@ export function parseWeiFloor(
 
 let _networkConfig: NetworkConfig | null = null;
 let _networkConfigName: string | null = null;
+let _bundledNetworkRegistry: Readonly<Record<string, NetworkConfig>> | null = null;
 
 export function _resetNetworkConfigCache(): void {
   _networkConfig = null;
   _networkConfigName = null;
+  _bundledNetworkRegistry = null;
 }
 
 export interface ProjectConfig {
@@ -1113,60 +1552,6 @@ export interface ProjectConfig {
 let _projectConfig: ProjectConfig | null = null;
 
 /**
- * Return true when `dir` is the published DKG CLI package root, as
- * determined by an adjacent `package.json` whose `name` is
- * `@origintrail-official/dkg`. This is resilient to `projectName`
- * renames in `project.json` and cannot be spoofed by an unrelated app.
- */
-function isDkgPackageRoot(dir: string): boolean {
-  try {
-    const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf-8'));
-    return pkg?.name === '@origintrail-official/dkg'
-      && existsSync(join(dir, 'project.json'));
-  } catch { return false; }
-}
-
-/**
- * Resolve candidate directories where repo-root files (project.json,
- * network/*.json) may live, in priority order.
- *
- * Ordering rationale:
- *   - In a monorepo checkout the DKG root is the single source of
- *     truth, so any detected monorepo ancestor MUST win. Otherwise,
- *     once `packages/cli/build` has copied `project.json` and
- *     `network/*.json` into `packages/cli/`, those stale artifacts
- *     would shadow edits made to the root files until the next
- *     rebuild — breaking the intended "edit root config, rerun" dev
- *     flow.
- *   - In a published npm install there is no monorepo ancestor, so
- *     we fall back to the package-local root (identified unambiguously
- *     by its `package.json.name`). This also guarantees we never
- *     accidentally read a consumer's own `project.json` from
- *     `node_modules/..`.
- */
-function candidateRoots(): string[] {
-  const thisDir = dirname(fileURLToPath(import.meta.url));
-  const out: string[] = [];
-
-  // Monorepo ancestors first (dev / source checkout). `dist/` and
-  // `src/` live at different depths, so both paths are tried.
-  const monorepoCandidates = [
-    join(thisDir, '..', '..', '..'),        // from dist/
-    join(thisDir, '..', '..', '..', '..'),  // from src/ during dev
-  ];
-  for (const dir of monorepoCandidates) {
-    if (isDkgMonorepoRoot(dir)) out.push(dir);
-  }
-
-  // Package-local root as the fallback — the only location that ever
-  // wins in a published install, and unambiguous via its package.json.
-  const pkgRoot = join(thisDir, '..');
-  if (isDkgPackageRoot(pkgRoot)) out.push(pkgRoot);
-
-  return out;
-}
-
-/**
  * Load project.json — the single source of truth for repo name,
  * branch, GitHub URL, and default network. Values here drive the
  * startup banner, auto-update fallbacks, and network selection.
@@ -1176,7 +1561,7 @@ function candidateRoots(): string[] {
  */
 export function loadProjectConfig(): ProjectConfig {
   if (_projectConfig) return _projectConfig;
-  for (const root of candidateRoots()) {
+  for (const root of runtimeAssetRoots()) {
     try {
       const raw = readFileSync(join(root, 'project.json'), 'utf-8');
       _projectConfig = JSON.parse(raw) as ProjectConfig;
@@ -1255,6 +1640,32 @@ function resolveOptionalAutoUpdateVerifyTagSignature(
 }
 
 /**
+ * Update-selection preferences shared by automatic polling and explicit
+ * `dkg update`. They resolve independently of the automatic-polling enabled
+ * gate so disabling polling does not discard manual update policy.
+ */
+export type ResolvedUpdatePreferences = {
+  source?: AutoUpdateConfig['source'];
+  allowPrerelease: boolean;
+  channel?: string;
+};
+
+export function resolveUpdatePreferences(
+  config: Pick<DkgConfig, 'autoUpdate'> | null | undefined,
+  network: Pick<NetworkConfig, 'autoUpdate'> | null | undefined,
+): ResolvedUpdatePreferences {
+  const cfg = config?.autoUpdate;
+  const net = network?.autoUpdate;
+  const source = cfg?.source ?? net?.source;
+  const channel = cfg?.channel ?? net?.channel;
+  return {
+    allowPrerelease: cfg?.allowPrerelease ?? net?.allowPrerelease ?? true,
+    ...(source ? { source } : {}),
+    ...(channel ? { channel } : {}),
+  };
+}
+
+/**
  * Field-level merge of the effective auto-update configuration.
  *
  * Precedence per field: `~/.dkg/config.json` → `network/<env>.json` →
@@ -1275,18 +1686,16 @@ export function resolveAutoUpdateConfig(
   const net = network?.autoUpdate;
   const enabled = cfg?.enabled ?? net?.enabled ?? false;
   if (!enabled) return null;
+  const preferences = resolveUpdatePreferences(config, network);
 
   const proj = loadProjectConfig();
   const repo = cfg?.repo ?? net?.repo ?? proj.repo;
   const branch = cfg?.branch ?? net?.branch ?? proj.defaultBranch;
   const ref = cfg?.ref ?? net?.ref;
-  const allowPrerelease = cfg?.allowPrerelease ?? net?.allowPrerelease ?? true;
   const sshKeyPath = cfg?.sshKeyPath ?? net?.sshKeyPath;
   const sshCommand = cfg?.sshCommand ?? net?.sshCommand;
   const checkIntervalMinutes = cfg?.checkIntervalMinutes ?? net?.checkIntervalMinutes ?? 30;
   const updateJitterMinutes = cfg?.updateJitterMinutes ?? net?.updateJitterMinutes;
-  const source = cfg?.source ?? net?.source;
-  const channel = cfg?.channel ?? net?.channel;
   const cfgHasVerifyTagSignature = !!cfg && Object.prototype.hasOwnProperty.call(cfg, 'verifyTagSignature');
   const netHasVerifyTagSignature = !!net && Object.prototype.hasOwnProperty.call(net, 'verifyTagSignature');
   const verifyTagSignature = resolveOptionalAutoUpdateVerifyTagSignature(
@@ -1313,14 +1722,14 @@ export function resolveAutoUpdateConfig(
     repo,
     branch,
     ...(ref ? { ref } : {}),
-    allowPrerelease,
+    allowPrerelease: preferences.allowPrerelease,
     ...(sshKeyPath ? { sshKeyPath } : {}),
     ...(sshCommand ? { sshCommand } : {}),
     checkIntervalMinutes,
     ...(updateJitterMinutes !== undefined ? { updateJitterMinutes } : {}),
     ...(buildTimeoutMs ? { buildTimeoutMs } : {}),
-    ...(source ? { source } : {}),
-    ...(channel ? { channel } : {}),
+    ...(preferences.source ? { source: preferences.source } : {}),
+    ...(preferences.channel ? { channel: preferences.channel } : {}),
     ...(verifyTagSignature !== undefined ? { verifyTagSignature } : {}),
   };
 }
@@ -1329,7 +1738,7 @@ export function resolveAutoUpdateSource(
   config: Pick<DkgConfig, 'autoUpdate'> | null | undefined,
   network: Pick<NetworkConfig, 'autoUpdate'> | null | undefined,
 ): AutoUpdateConfig['source'] {
-  return config?.autoUpdate?.source ?? network?.autoUpdate?.source;
+  return resolveUpdatePreferences(config, network).source;
 }
 
 /**
@@ -1456,6 +1865,78 @@ export function resolveChainConfig(
   if (approvalPolicy !== undefined) merged.approvalPolicy = approvalPolicy;
   const cgRegistryScanPageSize = cfg?.cgRegistryScanPageSize ?? net?.cgRegistryScanPageSize;
   if (cgRegistryScanPageSize !== undefined) merged.cgRegistryScanPageSize = cgRegistryScanPageSize;
+  if (cfg?.rpcRequestBudget !== undefined || net?.rpcRequestBudget !== undefined) {
+    // Validate each persisted source before object spread. A malformed block
+    // (notably JSON null) must not disappear during merge and silently restore
+    // the process defaults.
+    if (net?.rpcRequestBudget !== undefined) {
+      resolveRpcRequestGovernorPolicy(net.rpcRequestBudget);
+    }
+    if (cfg?.rpcRequestBudget !== undefined) {
+      resolveRpcRequestGovernorPolicy(cfg.rpcRequestBudget);
+    }
+    merged.rpcRequestBudget = resolveRpcRequestGovernorPolicy({
+      ...net?.rpcRequestBudget,
+      ...cfg?.rpcRequestBudget,
+    });
+  }
+  // Presence matters here: persisted `null` is an explicit invalid operator
+  // value and must not silently fall through to the network/default timeout.
+  const operatorHasReceiptTimeout = cfg !== undefined && cfg !== null
+    && Object.prototype.hasOwnProperty.call(cfg, 'receiptTimeoutMs');
+  const receiptTimeoutMs: unknown = operatorHasReceiptTimeout
+    ? cfg.receiptTimeoutMs
+    : net?.receiptTimeoutMs;
+  if (operatorHasReceiptTimeout || receiptTimeoutMs !== undefined) {
+    merged.receiptTimeoutMs = resolveReceiptTimeoutMs(receiptTimeoutMs);
+  }
+  // Presence matters: explicit null/zero must fail rather than silently
+  // falling through to the network or adapter default.
+  const operatorHasFinalityConfirmations = cfg !== undefined && cfg !== null
+    && Object.prototype.hasOwnProperty.call(cfg, 'finalityConfirmations');
+  const finalityConfirmations: unknown = operatorHasFinalityConfirmations
+    ? cfg.finalityConfirmations
+    : net?.finalityConfirmations;
+  if (operatorHasFinalityConfirmations || finalityConfirmations !== undefined) {
+    merged.finalityConfirmations = resolveFinalityConfirmations(finalityConfirmations);
+  }
+  // Presence matters: explicit null/zero must fail rather than silently
+  // falling through to the network or adapter default.
+  const operatorHasIndexTickMs = cfg !== undefined && cfg !== null
+    && Object.prototype.hasOwnProperty.call(cfg, 'indexTickMs');
+  const indexTickMs: unknown = operatorHasIndexTickMs ? cfg.indexTickMs : net?.indexTickMs;
+  if (operatorHasIndexTickMs || indexTickMs !== undefined) {
+    merged.indexTickMs = resolveContextGraphAuthorityIndexTickMs(indexTickMs);
+  }
+  const operatorHasBoundedAuthorityReads = cfg !== undefined && cfg !== null
+    && Object.prototype.hasOwnProperty.call(cfg, 'boundedAuthorityReads');
+  const boundedAuthorityReads: unknown = operatorHasBoundedAuthorityReads
+    ? cfg.boundedAuthorityReads
+    : net?.boundedAuthorityReads;
+  if (operatorHasBoundedAuthorityReads || boundedAuthorityReads !== undefined) {
+    if (typeof boundedAuthorityReads !== 'boolean') {
+      throw new TypeError('chain.boundedAuthorityReads must be a boolean');
+    }
+    merged.boundedAuthorityReads = boundedAuthorityReads;
+  }
+  // Presence matters for both authority deadlines: an explicit null/zero is an
+  // operator error, not a request to fall back to the network or agent default.
+  for (const key of ['authorityReadTimeoutMs', 'authorityColdResolutionTimeoutMs'] as const) {
+    const operatorHasValue = cfg !== undefined && cfg !== null
+      && Object.prototype.hasOwnProperty.call(cfg, key);
+    const value: unknown = operatorHasValue ? cfg[key] : net?.[key];
+    if (operatorHasValue || value !== undefined) {
+      merged[key] = resolveChainAuthorityTimeoutMs(value, `chain.${key}`);
+    }
+  }
+  const maxFeePerGasWei = parseWeiFloor(
+    cfg?.maxFeePerGasWei ?? net?.maxFeePerGasWei,
+    'chain.maxFeePerGasWei',
+  );
+  if (maxFeePerGasWei !== undefined) {
+    if (maxFeePerGasWei === 0n) throw new Error('chain.maxFeePerGasWei must be greater than zero');
+    merged.maxFeePerGasWei = maxFeePerGasWei;
+  }
   // Funding floors: local config wins, else the network overlay's per-chain
   // default (both default 0n downstream in the adapter when unset). Persisted
   // values arrive as string/number — normalize to bigint here, failing fast on
@@ -1504,7 +1985,7 @@ export async function loadNetworkConfig(network?: string): Promise<NetworkConfig
   if (_networkConfig && _networkConfigName === name) return _networkConfig;
   try {
     const file = `${name}.json`;
-    const candidates = candidateRoots().map(root => join(root, 'network', file));
+    const candidates = runtimeAssetRoots().map(root => join(root, 'network', file));
     for (const path of candidates) {
       try {
         const raw = await readFile(path, 'utf-8');
@@ -1519,8 +2000,205 @@ export async function loadNetworkConfig(network?: string): Promise<NetworkConfig
   }
 }
 
-export function resolveNetworkConfigName(config?: Pick<DkgConfig, 'networkConfig'> | null): string {
-  return config?.networkConfig?.trim() || loadProjectConfig().defaultNetwork;
+function loadBundledNetworkRegistry(): Readonly<Record<string, NetworkConfig>> {
+  if (_bundledNetworkRegistry) return _bundledNetworkRegistry;
+
+  _bundledNetworkRegistry = loadNetworkRegistryFromRoots(runtimeAssetRoots());
+  return _bundledNetworkRegistry;
+}
+
+/** Every valid network overlay bundled with this CLI, including entries that
+ * are intentionally omitted from the interactive setup menu. Persisted-config
+ * inference must use this registry rather than UI curation. */
+export function listBundledNetworkConfigNames(): readonly string[] {
+  return Object.keys(loadBundledNetworkRegistry()).sort();
+}
+
+/**
+ * Build the bundled registry entry-by-entry in root priority order.
+ *
+ * A malformed optional/experimental overlay must not make every known network
+ * unavailable. If a higher-priority root contains a bad copy of one entry, a
+ * valid package-local fallback for that same entry can still supply it.
+ */
+export function loadNetworkRegistryFromRoots(
+  roots: readonly string[],
+): Readonly<Record<string, NetworkConfig>> {
+  const registry: Record<string, NetworkConfig> = {};
+
+  for (const root of roots) {
+    const networkDir = join(root, 'network');
+    let entries;
+    try {
+      entries = readdirSync(networkDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      const name = entry.name.slice(0, -'.json'.length);
+      if (registry[name] !== undefined) continue;
+      try {
+        registry[name] = JSON.parse(
+          readFileSync(join(networkDir, entry.name), 'utf-8'),
+        ) as NetworkConfig;
+      } catch { /* isolate a malformed entry and continue */ }
+    }
+  }
+
+  return registry;
+}
+
+const NETWORK_PEER_ISOLATION_ENV = 'DKG_NETWORK_PEER_ISOLATION_ENABLED';
+
+/**
+ * Resolve the transport-level network peer isolation switch (default on). The
+ * environment override wins so an operator can turn it off for one boot
+ * without rewriting the config file. Same rule as every other env-overrides-
+ * config flag ({@link resolveBooleanEnvOverride}): 1, 0, true or false, and
+ * anything else, an empty value included, fails startup instead of silently
+ * picking a side.
+ */
+export function resolveNetworkPeerIsolationEnabled(
+  configValue: unknown,
+  envValue: string | undefined = process.env[NETWORK_PEER_ISOLATION_ENV],
+): boolean {
+  return resolveBooleanEnvOverride({
+    envName: NETWORK_PEER_ISOLATION_ENV,
+    configName: 'networkPeerIsolationEnabled',
+    envValue,
+    configValue,
+    defaultValue: true,
+  });
+}
+
+type NetworkRelayIdentity = Partial<Pick<NetworkConfig, 'networkId' | 'genesisId' | 'relays'>>;
+
+export interface OtherNetworkRelays {
+  /** Relay multiaddrs of the other bundled networks, one per distinct peer id. */
+  relays: string[];
+  /** Sorted names of the bundled networks those relays belong to. */
+  networkNames: string[];
+}
+
+/**
+ * Relays declared by the bundled network configs OTHER than the active one:
+ * peers this node must never dial (`DKGNodeConfig.otherNetworkRelays`), in
+ * both directions — a testnet node derives the mainnet relays exactly as a
+ * mainnet node derives the testnet ones.
+ *
+ * An entry counts as the active network when its name, networkId or genesisId
+ * matches, so a renamed copy of the active overlay is never "other". Relays
+ * whose peer id the active network or the node's effective relay set (config
+ * relay, preferred relays) also lists are dropped, as are unparseable ids such
+ * as the `PEER_ID_*` placeholders of a pre-deployment network.
+ */
+export function resolveOtherNetworkRelays(input: {
+  activeNetworkName: string;
+  activeNetwork: NetworkRelayIdentity | null | undefined;
+  localRelayPeers?: readonly string[];
+  registry?: Readonly<Record<string, NetworkRelayIdentity>>;
+}): OtherNetworkRelays {
+  const active = input.activeNetwork;
+  if (!active) return { relays: [], networkNames: [] };
+  const registry = input.registry ?? loadBundledNetworkRegistry();
+  const localPeerIds = new Set<string>();
+  for (const address of [...(active.relays ?? []), ...(input.localRelayPeers ?? [])]) {
+    const peerId = typeof address === 'string' ? peerIdFromRelayAddress(address) : undefined;
+    if (peerId) localPeerIds.add(peerId);
+  }
+
+  const seen = new Set<string>();
+  const relays: string[] = [];
+  const networkNames = new Set<string>();
+  for (const name of Object.keys(registry).sort()) {
+    const network = registry[name];
+    if (!network || name === input.activeNetworkName) continue;
+    if (network.networkId && network.networkId === active.networkId) continue;
+    if (network.genesisId && network.genesisId === active.genesisId) continue;
+    for (const address of Array.isArray(network.relays) ? network.relays : []) {
+      const peerId = typeof address === 'string' ? peerIdFromRelayAddress(address) : undefined;
+      if (!peerId || localPeerIds.has(peerId) || seen.has(peerId)) continue;
+      seen.add(peerId);
+      relays.push(address.trim());
+      networkNames.add(name);
+    }
+  }
+  return { relays, networkNames: [...networkNames] };
+}
+
+/**
+ * Infer an overlay from its canonical bundled network config's chain ID.
+ * Production reads network/*.json, so adding a network needs no second table.
+ * Tests and embedders may supply a registry explicitly.
+ */
+export interface NetworkChainIdentity {
+  chain?: { chainId?: string | null };
+}
+
+export function inferNetworkConfigNameFromChainId(
+  chainId: string | null | undefined,
+  registry: Readonly<Record<string, NetworkChainIdentity>> = loadBundledNetworkRegistry(),
+): string | undefined {
+  const normalized = chainId?.trim().toLowerCase();
+  if (!normalized) return undefined;
+
+  let matchedName: string | undefined;
+  for (const [name, network] of Object.entries(registry)) {
+    if (network.chain?.chainId?.trim().toLowerCase() !== normalized) continue;
+    // Ambiguous chain ownership is not safe to infer. Require an explicit
+    // networkConfig until the bundled registry is unique again.
+    if (matchedName && matchedName !== name) return undefined;
+    matchedName = name;
+  }
+  return matchedName;
+}
+
+/**
+ * Resolve only network identities that are actually known from persisted
+ * state. Unlike {@link resolveNetworkConfigName}, this does not collapse an
+ * unknown legacy chain into the project default. Setup uses the distinction
+ * when deciding whether it is safe to discard operator chain overrides.
+ */
+export function resolveKnownNetworkConfigName(
+  config?: Pick<DkgConfig, 'networkConfig' | 'chain'> | null,
+  registry: Readonly<Record<string, NetworkChainIdentity>> = loadBundledNetworkRegistry(),
+): string | undefined {
+  const explicitNetwork = config?.networkConfig?.trim();
+  if (explicitNetwork) return explicitNetwork;
+  return inferNetworkConfigNameFromChainId(config?.chain?.chainId, registry);
+}
+
+/**
+ * Resolve the bundled network overlay for both current and legacy configs.
+ *
+ * Older homes predate `networkConfig` and only persisted the selected chain.
+ * Falling straight through to project.json#defaultNetwork can silently place
+ * one of those homes on the wrong p2p overlay. Infer known bundled networks
+ * from chainId; explicit operator selection always takes precedence.
+ */
+export function resolveNetworkConfigName(
+  config?: Pick<DkgConfig, 'networkConfig' | 'chain'> | null,
+): string {
+  return resolveKnownNetworkConfigName(config) ?? loadProjectConfig().defaultNetwork;
+}
+
+export interface LoadedResolvedNetworkConfig {
+  name: string;
+  network: NetworkConfig | null;
+}
+
+/**
+ * Resolve legacy chain-only homes and load their effective overlay at one
+ * boundary. Callers that need network metadata should use this instead of
+ * manually composing resolveNetworkConfigName() and loadNetworkConfig().
+ */
+export async function loadResolvedNetworkConfig(
+  config?: Pick<DkgConfig, 'networkConfig' | 'chain'> | null,
+  loader: (name: string) => Promise<NetworkConfig | null> = loadNetworkConfig,
+): Promise<LoadedResolvedNetworkConfig> {
+  const name = resolveNetworkConfigName(config);
+  return { name, network: await loader(name) };
 }
 
 /**
@@ -1720,81 +2398,118 @@ export async function swapSlot(target: 'a' | 'b'): Promise<void> {
   } catch { /* link doesn't exist yet */ }
 
   try { await unlink(tmpLink); } catch { /* ok if missing */ }
-  await symlink(target, tmpLink);
+  try {
+    await symlink(target, tmpLink);
+  } catch (error) {
+    if (process.platform === 'win32' && hasErrorCode(error, 'EPERM')) {
+      throw Object.assign(new Error(
+        `Cannot create the DKG release-slot link at ${tmpLink}. Windows requires permission to create symbolic links. `
+        + 'Enable Developer Mode in Windows Settings (search for "Developer Mode"), then retry the command. '
+        + 'Alternatively, retry from an Administrator terminal. The active release was not changed.',
+        { cause: error },
+      ), { code: 'EPERM' });
+    }
+    throw error;
+  }
   await rename(tmpLink, currentLink);
   await writeFile(join(rDir, 'active'), target);
 }
 
-export function configPath(): string {
-  return join(dkgDir(), 'config.json');
+/** Immutable filesystem context for one selected local daemon home. */
+export class DkgHomeFiles {
+  constructor(readonly home: string = dkgDir()) { Object.freeze(this); }
+
+  get configPath(): string { return join(this.home, 'config.json'); }
+  get configYamlPath(): string { return join(this.home, 'config.yaml'); }
+  get pidPath(): string { return join(this.home, 'daemon.pid'); }
+  get apiPortPath(): string { return join(this.home, 'api.port'); }
+  get tokenPath(): string { return dkgAuthTokenPath(this.home); }
+
+  configExists(): boolean { return existsSync(this.configPath) || existsSync(this.configYamlPath); }
+
+  readConfigSync(): unknown {
+    if (existsSync(this.configPath)) return JSON.parse(readFileSync(this.configPath, 'utf-8'));
+    if (existsSync(this.configYamlPath)) return yaml.load(readFileSync(this.configYamlPath, 'utf-8'));
+    return null;
+  }
+
+  async loadConfig(): Promise<DkgConfig> {
+    try {
+      return mergePersistedConfig(JSON.parse(await readFile(this.configPath, 'utf-8')));
+    } catch (err) {
+      if (!isEnoent(err)) throw err;
+    }
+    try {
+      return mergePersistedConfig(yaml.load(await readFile(this.configYamlPath, 'utf-8')));
+    } catch (err) {
+      if (!isEnoent(err)) throw err;
+    }
+    return { ...DEFAULT_CONFIG };
+  }
+
+  async saveConfig(config: DkgConfig): Promise<void> {
+    await mkdir(this.home, { recursive: true });
+    await writeFile(this.configPath, JSON.stringify(config, null, 2) + '\n');
+  }
+
+  readPid(): Promise<number | null> { return this.readControlNumber(this.pidPath); }
+  readApiPort(): Promise<number | null> { return this.readControlNumber(this.apiPortPath); }
+  async writePid(pid: number): Promise<void> { await writeFile(this.pidPath, String(pid)); }
+  async writeApiPort(port: number): Promise<void> { await writeFile(this.apiPortPath, String(port)); }
+  removePid(): Promise<void> { return this.removeControlFile(this.pidPath); }
+  removeApiPort(): Promise<void> { return this.removeControlFile(this.apiPortPath); }
+
+  private async readControlNumber(path: string): Promise<number | null> {
+    try { return parseInt((await readFile(path, 'utf-8')).trim(), 10); }
+    catch { return null; }
+  }
+
+  private async removeControlFile(path: string): Promise<void> {
+    try { await unlink(path); }
+    catch (err) { if (!isEnoent(err)) throw err; }
+  }
 }
 
-export function configYamlPath(): string {
-  return join(dkgDir(), 'config.yaml');
-}
+// Compatibility helpers resolve a fresh home at their call boundary. Work that
+// spans multiple reads or writes retains a DkgHomeFiles instance instead.
+export function configPath(): string { return new DkgHomeFiles().configPath; }
+export function configYamlPath(): string { return new DkgHomeFiles().configYamlPath; }
+export function pidPath(): string { return new DkgHomeFiles().pidPath; }
+export function apiPortPath(): string { return new DkgHomeFiles().apiPortPath; }
+export function logPath(): string { return join(dkgDir(), 'daemon.log'); }
+export async function ensureDkgDir(): Promise<void> { await mkdir(dkgDir(), { recursive: true }); }
 
-export function pidPath(): string {
-  return join(dkgDir(), 'daemon.pid');
-}
-
-export function logPath(): string {
-  return join(dkgDir(), 'daemon.log');
-}
-
-export function apiPortPath(): string {
-  return join(dkgDir(), 'api.port');
-}
-
-export async function ensureDkgDir(): Promise<void> {
-  await mkdir(dkgDir(), { recursive: true });
+/** Reject a misplaced trust policy instead of silently ignoring it. */
+export function assertAuthorityIndexConfigPlacement(config: Pick<DkgConfig, 'core'>): void {
+  if (config.core !== null && typeof config.core === 'object'
+    && Object.hasOwn(config.core, 'authorityIndex')) {
+    throw new TypeError(
+      'core.authorityIndex is not supported. Move authorityIndex to the top level of config.json; '
+      + 'core-snapshot mode is an edge-node option.',
+    );
+  }
 }
 
 function mergePersistedConfig(raw: unknown): DkgConfig {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ...DEFAULT_CONFIG };
-  return { ...DEFAULT_CONFIG, ...(raw as Partial<DkgConfig>) };
+  const config = { ...DEFAULT_CONFIG, ...(raw as Partial<DkgConfig>) };
+  assertAuthorityIndexConfigPlacement(config);
+  return config;
 }
 
 function isEnoent(err: unknown): boolean {
   return !!err && typeof err === 'object' && (err as { code?: unknown }).code === 'ENOENT';
 }
 
-function readPersistedConfigSync(): unknown {
-  if (existsSync(configPath())) {
-    return JSON.parse(readFileSync(configPath(), 'utf-8'));
-  }
-  if (existsSync(configYamlPath())) {
-    return yaml.load(readFileSync(configYamlPath(), 'utf-8'));
-  }
-  return null;
-}
-
 export function readNodeRoleFromConfigSync(): 'edge' | 'core' {
   try {
-    const parsed = readPersistedConfigSync();
+    const parsed = new DkgHomeFiles().readConfigSync();
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return 'edge';
     return (parsed as { nodeRole?: unknown }).nodeRole === 'core' ? 'core' : 'edge';
-  } catch {
-    return 'edge';
-  }
+  } catch { return 'edge'; }
 }
 
-export async function loadConfig(): Promise<DkgConfig> {
-  try {
-    const raw = await readFile(configPath(), 'utf-8');
-    return mergePersistedConfig(JSON.parse(raw));
-  } catch (err) {
-    if (!isEnoent(err)) throw err;
-  }
-
-  try {
-    const raw = await readFile(configYamlPath(), 'utf-8');
-    return mergePersistedConfig(yaml.load(raw));
-  } catch (err) {
-    if (!isEnoent(err)) throw err;
-  }
-
-  return { ...DEFAULT_CONFIG };
-}
+export async function loadConfig(): Promise<DkgConfig> { return new DkgHomeFiles().loadConfig(); }
 
 // =====================================================================
 // External-backend config validation (RFC 120, plan PR 1 item 6)
@@ -1828,19 +2543,37 @@ export interface StoreConfigValidationError {
   message: string;
 }
 
-export function validateStoreConfig(config: DkgConfig): StoreConfigValidationError[] {
+/** Only the raw sections this validator inspects; values are narrowed at the boundary. */
+export interface StoreConfigValidationInput {
+  store?: unknown;
+  largeLiteralStorage?: unknown;
+  sharedMemoryPublicSnapshotStorage?: unknown;
+}
+
+export function validateStoreConfig(config: StoreConfigValidationInput, platform: NodeJS.Platform = process.platform): StoreConfigValidationError[] {
   const errors: StoreConfigValidationError[] = [];
-  const backend = config.store?.backend;
+  const store = isPlainConfigObject(config.store) ? config.store : undefined;
+  const backend = store?.backend;
+  const options = isPlainConfigObject(store?.options) ? store.options : {};
+  if (backend === 'oxigraph-server') {
+    const supportError = oxigraphMemorySupportError({ highMiB: options.memoryHighMiB, maxMiB: options.memoryMaxMiB }, platform);
+    if (supportError) {
+      errors.push({ field: 'store.options.memoryMaxMiB', message: supportError });
+    }
+    try {
+      normalizeOxigraphMemoryLimits({ highMiB: options.memoryHighMiB, maxMiB: options.memoryMaxMiB });
+    } catch (error) {
+      errors.push({ field: 'store.options.memoryMaxMiB', message: error instanceof Error ? error.message : String(error) });
+    }
+  }
   // Mirror of `isExternalBackend` from @origintrail-official/dkg-storage.
   // Duplicated here to keep config.ts free of upward dependencies on the
   // storage package (config.ts is leaf-imported by many other modules).
   const isExternal = backend === 'blazegraph' || backend === 'sparql-http';
   if (!isExternal) return errors;
 
-  const opts = (config.store?.options ?? {}) as Record<string, unknown>;
-
   if (backend === 'blazegraph') {
-    if (typeof opts.url !== 'string' || !opts.url.trim()) {
+    if (typeof options.url !== 'string' || !options.url.trim()) {
       errors.push({
         field: 'store.options.url',
         message:
@@ -1851,7 +2584,7 @@ export function validateStoreConfig(config: DkgConfig): StoreConfigValidationErr
       });
     }
   } else if (backend === 'sparql-http') {
-    if (typeof opts.queryEndpoint !== 'string' || !opts.queryEndpoint.trim()) {
+    if (typeof options.queryEndpoint !== 'string' || !options.queryEndpoint.trim()) {
       errors.push({
         field: 'store.options.queryEndpoint',
         message:
@@ -1861,8 +2594,9 @@ export function validateStoreConfig(config: DkgConfig): StoreConfigValidationErr
     }
   }
 
-  if (config.largeLiteralStorage?.enabled === true) {
-    const dir = config.largeLiteralStorage.directory;
+  const largeLiteralStorage = isPlainConfigObject(config.largeLiteralStorage) ? config.largeLiteralStorage : undefined;
+  if (largeLiteralStorage?.enabled === true) {
+    const dir = largeLiteralStorage.directory;
     if (typeof dir !== 'string' || !dir.trim()) {
       errors.push({
         field: 'largeLiteralStorage.directory',
@@ -1874,8 +2608,9 @@ export function validateStoreConfig(config: DkgConfig): StoreConfigValidationErr
     }
   }
 
-  if (config.sharedMemoryPublicSnapshotStorage?.enabled === true) {
-    const dir = config.sharedMemoryPublicSnapshotStorage.directory;
+  const snapshotStorage = isPlainConfigObject(config.sharedMemoryPublicSnapshotStorage) ? config.sharedMemoryPublicSnapshotStorage : undefined;
+  if (snapshotStorage?.enabled === true) {
+    const dir = snapshotStorage.directory;
     if (typeof dir !== 'string' || !dir.trim()) {
       errors.push({
         field: 'sharedMemoryPublicSnapshotStorage.directory',
@@ -1907,60 +2642,14 @@ export function exitOnStoreConfigErrors(
   process.exit(1);
 }
 
-export async function saveConfig(config: DkgConfig): Promise<void> {
-  await ensureDkgDir();
-  await writeFile(configPath(), JSON.stringify(config, null, 2) + '\n');
-}
-
-export function configExists(): boolean {
-  return existsSync(configPath()) || existsSync(configYamlPath());
-}
-
-export async function readPid(): Promise<number | null> {
-  try {
-    const raw = await readFile(pidPath(), 'utf-8');
-    return parseInt(raw.trim(), 10);
-  } catch {
-    return null;
-  }
-}
-
-export async function writePid(pid: number): Promise<void> {
-  await writeFile(pidPath(), String(pid));
-}
-
-export async function removePid(): Promise<void> {
-  const { unlink } = await import('node:fs/promises');
-  try {
-    await unlink(pidPath());
-  } catch (err) {
-    const code = err && typeof err === 'object' && 'code' in err ? (err as NodeJS.ErrnoException).code : undefined;
-    if (code !== 'ENOENT') throw err;
-  }
-}
-
-export async function readApiPort(): Promise<number | null> {
-  try {
-    const raw = await readFile(apiPortPath(), 'utf-8');
-    return parseInt(raw.trim(), 10);
-  } catch {
-    return null;
-  }
-}
-
-export async function writeApiPort(port: number): Promise<void> {
-  await writeFile(apiPortPath(), String(port));
-}
-
-export async function removeApiPort(): Promise<void> {
-  const { unlink } = await import('node:fs/promises');
-  try {
-    await unlink(apiPortPath());
-  } catch (err) {
-    const code = err && typeof err === 'object' && 'code' in err ? (err as NodeJS.ErrnoException).code : undefined;
-    if (code !== 'ENOENT') throw err;
-  }
-}
+export async function saveConfig(config: DkgConfig): Promise<void> { await new DkgHomeFiles().saveConfig(config); }
+export function configExists(): boolean { return new DkgHomeFiles().configExists(); }
+export async function readPid(): Promise<number | null> { return new DkgHomeFiles().readPid(); }
+export async function writePid(pid: number): Promise<void> { await new DkgHomeFiles().writePid(pid); }
+export async function removePid(): Promise<void> { await new DkgHomeFiles().removePid(); }
+export async function readApiPort(): Promise<number | null> { return new DkgHomeFiles().readApiPort(); }
+export async function writeApiPort(port: number): Promise<void> { await new DkgHomeFiles().writeApiPort(port); }
+export async function removeApiPort(): Promise<void> { await new DkgHomeFiles().removeApiPort(); }
 
 export function isProcessRunning(pid: number): boolean {
   try {

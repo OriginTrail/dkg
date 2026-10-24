@@ -29,7 +29,7 @@ dkg chat <name>                          # interactive chat with a peer
 dkg context-graph create <id>            # create a local context graph
 dkg context-graph register <id>          # register an existing CG on-chain (unlocks VM)
 dkg context-graph add-agent <id> --agent <addr>   # add an agent to a curated CG allowlist (replaces deprecated 'invite')
-dkg context-graph list                   # list subscribed context graphs
+dkg context-graph list                   # list known context graphs and subscription state
 dkg context-graph info <id>              # show context-graph details
 dkg context-graph agents <id>            # list agents in the CG allowlist
 dkg context-graph request-join <id> <curatorPeerId>   # request to join a curated CG (peer id from V10 invite)
@@ -40,8 +40,8 @@ dkg context-graph approve-join <id>      # approve a pending join request
 dkg ka create <name> -c <cg> --input-file <rdf-file> --share  # one-shot create/write/finalize/share; no VM publish
 dkg ka import-file <name> -c <cg> --input-file <file>         # import a document into WM
 dkg ka write <name> -c <cg> --input-file <rdf-file>           # append RDF payload quads to WM
-dkg ka finalize <name> -c <cg> [--layer wm|swm]               # seal WM, or seal SWM content
-dkg ka share <name> -c <cg> [--entity <uri...>]               # WM -> SWM
+dkg ka finalize <name> -c <cg>                                # seal the WM draft
+dkg ka share <name> -c <cg>                                   # WM -> SWM
 dkg ka share-async <name> -c <cg>                             # enqueue async WM -> SWM share
 dkg ka share-jobs [--context-graph-id <cg>]                   # list async share jobs
 dkg ka publish <name> -c <cg>                                 # sync SWM -> VM publish
@@ -87,6 +87,10 @@ dkg openclaw setup                       # install & configure the OpenClaw adap
 dkg hermes setup                         # install & configure the Hermes adapter
 dkg mcp setup                            # register the MCP server with Cursor / Claude Code / Claude Desktop / Windsurf / VSCode + Copilot / Cline / Codex CLI
 dkg mcp serve                            # run the MCP server on stdio (invoked by the client; not run manually)
+dkg mcp uninstall                        # confirm DKG registration removal per client
+dkg mcp uninstall --yes --client cursor  # remove native and Windows-via-WSL Cursor registrations
+dkg mcp uninstall --yes --client cursor:windows-wsl  # select only the Windows-via-WSL variant
+dkg mcp uninstall --dry-run              # preview removal without writing client configs
 
 # Community integrations (registry: OriginTrail/dkg-integrations)
 dkg integration list [--tier community]  # default tier filter is `verified`+
@@ -101,3 +105,95 @@ dkg update [--check] [--allow-prerelease]  # update node software
 dkg rollback                               # roll back to previous version
 ```
 
+Uninstall client IDs are `cursor`, `claude-code`, `claude-desktop`, `windsurf`,
+`vscode`, `cline`, and `codex-cli`. An ID selects all detected locations of that
+client. Append `:native` or `:windows-wsl` to select a specific location. IDs are
+independent of display labels; an unsupported selector is always an error,
+including on a machine with no detected clients. A supported but absent client
+is an idempotent no-op. Uninstall removes only the DKG entry in client configs.
+
+## Context Graph discovery and subscriptions
+
+Every node automatically subscribes to the two protocol control-plane Context
+Graphs: `agents` and `ontology`. Context Graphs selected in the node's
+`contextGraphs` configuration or a network overlay's `defaultContextGraphs` are
+also subscribed at startup because configuration is explicit operator intent.
+
+On edge nodes, other user Context Graphs learned from ontology gossip, the
+on-chain registry, or passive local-store discovery are catalogue entries only.
+They can appear in `dkg context-graph list`, but remain `subscribed: false` and
+do not enter member gossip or catch-up until an explicit subscription, local
+create/write, or approved join activates them:
+
+```bash
+dkg subscribe <context-graph-id>
+```
+
+`<context-graph-id>` may also be the on-chain id that `dkg context-graph list`
+shows in its `#` column (`dkg subscribe 32` or `dkg subscribe '#32'`). The node
+resolves it through ContextGraphStorage to the graph's name hash, or to its
+verified id when the node already knows it, and subscribes that; the number
+itself never becomes a subscription. An id that does not exist, a deactivated
+graph, a graph without a name hash, and a private graph are refused with the
+reason. `--save` stores the name hash or the verified id, not the number. A
+`#` needs quoting in most shells, and `32` alone still means the existing
+subscription literally named "32" if there is one. `POST
+/api/context-graph/unsubscribe` and `dkg context-graph catchup-status` accept
+the same on-chain ids; unsubscribing one that is not subscribed on the node
+answers 404 `CONTEXT_GRAPH_NOT_SUBSCRIBED`.
+
+Core nodes temporarily retain automatic subscription for newly discovered
+graphs because they are responsible for Storage ACK custody and the independent
+host-mode path does not yet replace every member-subscription handler. A
+successful public-graph ACK may additionally set the separate `coreHosted`
+flag; that durable hosting obligation is not the same as user membership.
+Remove this compatibility bridge only with host-mode separation in #1611.
+
+Nodes upgraded from an older release may already have durable user
+subscriptions that cannot be safely classified as manual or discovery-created.
+The upgrade deliberately preserves those rows. An operator can inspect active
+user subscriptions with `GET /api/context-graph/subscriptions` and deliberately
+clear the backlog with the node-admin API:
+
+```bash
+curl -X DELETE http://127.0.0.1:9200/api/context-graph/subscriptions \
+  -H 'Authorization: Bearer <node-admin-token>'
+```
+
+This cleanup clears every non-system, non-`coreHosted` user subscription,
+including legitimate subscriptions. It preserves `agents`, `ontology`, hosted
+core state, and the graph's VM/SWM data. Re-add wanted user subscriptions
+explicitly after cleanup.
+
+## Client request timeouts
+
+The CLI and the MCP server (`dkg mcp serve`) give each daemon request a
+deadline by route class:
+
+| Class | Requests | Default |
+| --- | --- | --- |
+| Read | every `GET` not listed below | 30 s |
+| List read | `GET /api/context-graph/list`, `/api/sub-graph/list`, `/api/pca`, `/api/publisher/jobs` | 60 s, and never less than the read deadline |
+| Long | every `POST`, `PUT` and `DELETE` | 240 s, and never less than the read deadline |
+
+The CLI's `dkg verify` waits for its signature collection window plus 30 s
+instead. A Knowledge Asset publish, share, file import, or a create that also
+shares or publishes, that gets no answer in time is reported as outcome
+unknown, not as failed: the daemon keeps working after the client stops
+waiting, so check `dkg ka history` (MCP: `dkg_knowledge_asset_history`) before
+retrying. Any other request that times out fails with a `TimeoutError`.
+
+On a slow node or store, override the read and long deadlines, in
+milliseconds, with environment variables (for the MCP server, in the MCP
+client's `env` block):
+
+```bash
+export DKG_API_READ_TIMEOUT_MS=60000    # every GET; the list reads also get at least this
+export DKG_API_LONG_TIMEOUT_MS=280000   # every POST, PUT and DELETE
+```
+
+Each must be a whole number from 1 to 2147483647; any other value is
+rejected, before a request is sent, with an error naming the variable. Unset
+or empty keeps the default. Node's `fetch` stops waiting for response headers
+after 300 s on its own, so a deadline above 300 s does not keep a request open
+longer.

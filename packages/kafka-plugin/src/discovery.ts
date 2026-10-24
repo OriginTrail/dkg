@@ -13,6 +13,11 @@ const PUBLISHED_AT = `${DKG_ONT}publishedAt`;
 const STATUS = `${DKG_ONT}status`;
 const SUB_GRAPH_NAME = `${DKG_ONT}subGraphName`;
 const PRIVATE_DATA_ANCHOR = `${DKG_ONT}privateDataAnchor`;
+const CONTENT_SCOPE_VERSION = `${DKG_ONT}contentScopeVersion`;
+const KA_UAL = `${DKG_ONT}kaUal`;
+const ASSERTION_VERSION = `${DKG_ONT}assertionVersion`;
+const ASSERTION_GRAPH = `${DKG_ONT}assertionGraph`;
+const PRIVATE_TRIPLE_COUNT = `${DKG_ONT}privateTripleCount`;
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const KAFKA_STREAM_TYPE = `${DKG_STREAMS}KafkaStream`;
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -91,78 +96,76 @@ export interface SingleQueryParams {
   ual: string;
 }
 
-export function buildListQuery({ contextGraphId, subGraphName, limit, offset }: ListQueryParams): string {
-  assertSafeCgId(contextGraphId);
-  if (subGraphName !== undefined) assertSafeSubGraphName(subGraphName);
+export interface PageContentTarget {
+  ual: string;
+  root: string;
+  contentGraph: string;
+}
+
+/**
+ * Select one logical Kafka stream across the read-only legacy layout and the
+ * V2 rootless layout. Only the fixed metadata graph is inspected to resolve
+ * graph names; the two GRAPH variables remain top-level so the scoped query
+ * engine can constrain them to this context graph's admitted VM/private set.
+ */
+function streamCandidatePattern(
+  contextGraphId: string,
+  subGraphName: string | undefined,
+  ualTerm: string,
+): string {
   const meta = metaUri(contextGraphId);
   const data = dataUri(contextGraphId, subGraphName);
   const privateGraph = privateUri(contextGraphId, subGraphName);
-  return `SELECT ?ual ?root ?receivedAt ?p ?o WHERE {
-  {
-    SELECT DISTINCT ?ual ?root ?receivedAt WHERE {
-      GRAPH <${meta}> {
-        { ?ka <${PART_OF}> ?ual . ?ka <${ROOT_ENTITY}> ?root . }
-        UNION
-        { ?ual <${ROOT_ENTITY}> ?root . }
-${registrationScopeClause('?ual', subGraphName, '        ')}
-        ?ual <${PUBLISHED_AT}> ?receivedAt .
-      }
-      {
-        GRAPH <${data}> {
-          ?root a <${KAFKA_STREAM_TYPE}> .
-        }
-      }
+  return `GRAPH <${meta}> {
+    {
+      { ?ka <${PART_OF}> ${ualTerm} . ?ka <${ROOT_ENTITY}> ?root . }
       UNION
-      {
-        GRAPH <${data}> {
-          ?root <${PRIVATE_DATA_ANCHOR}> "true" .
-        }
-        GRAPH <${privateGraph}> {
-          ?root a <${KAFKA_STREAM_TYPE}> .
-        }
+      { ${ualTerm} <${ROOT_ENTITY}> ?root . }
+      VALUES (?publicGraph ?contentGraph ?markerP ?markerO) {
+        (<${data}> <${data}> <${RDF_TYPE}> <${KAFKA_STREAM_TYPE}>)
+        (<${data}> <${privateGraph}> <${PRIVATE_DATA_ANCHOR}> "true")
       }
     }
-    ORDER BY DESC(?receivedAt)
-    LIMIT ${limit} OFFSET ${offset}
-  }
-  {
-    GRAPH <${data}> {
-      ?root a <${KAFKA_STREAM_TYPE}> .
-      ?root ?p ?o .
+    UNION
+    {
+      ${ualTerm} <${CONTENT_SCOPE_VERSION}> "2"^^<${XSD}integer> ;
+        <${KA_UAL}> ${ualTerm} ;
+        <${ASSERTION_VERSION}> ?assertionVersion ;
+        <${ASSERTION_GRAPH}> ?assertionGraph ;
+        <${PRIVATE_TRIPLE_COUNT}> ?privateCount .
+      FILTER(?privateCount >= 0)
+      BIND(?assertionGraph AS ?publicGraph)
+      BIND(IF(
+        ?privateCount > 0,
+        IRI(CONCAT(REPLACE(STR(?assertionGraph), "/_verifiable_memory/", "/_private/"), "/assertions/", STR(?assertionVersion))),
+        ?assertionGraph
+      ) AS ?contentGraph)
+      BIND(IF(?privateCount > 0, <${PRIVATE_DATA_ANCHOR}>, <${RDF_TYPE}>) AS ?markerP)
+      BIND(IF(?privateCount > 0, "true", <${KAFKA_STREAM_TYPE}>) AS ?markerO)
     }
+${registrationScopeClause(ualTerm, subGraphName, '    ')}
+    ${ualTerm} <${PUBLISHED_AT}> ?receivedAt .
   }
-  UNION
-  {
-    GRAPH <${data}> {
-      ?root <${PRIVATE_DATA_ANCHOR}> "true" .
-    }
-    GRAPH <${privateGraph}> { ?root ?p ?o . }
-  }
+  GRAPH ?publicGraph { ?root ?markerP ?markerO . }
+  GRAPH ?contentGraph { ?root a <${KAFKA_STREAM_TYPE}> . }`;
 }
-ORDER BY DESC(?receivedAt) ?ual ?root ?p ?o`;
+
+export function buildListQuery({ contextGraphId, subGraphName, limit, offset }: ListQueryParams): string {
+  assertSafeCgId(contextGraphId);
+  if (subGraphName !== undefined) assertSafeSubGraphName(subGraphName);
+  // sparql-scan-allow: R3 -- compatibility offset pagination runs only on the metadata selector and each payload fetch is capped at 1000 exact targets
+  return `SELECT DISTINCT ?ual ?root ?receivedAt ?contentGraph WHERE {
+  ${streamCandidatePattern(contextGraphId, subGraphName, '?ual')}
+}
+ORDER BY DESC(?receivedAt) ?ual ?root ?contentGraph
+LIMIT ${limit} OFFSET ${offset}`;
 }
 
 export function buildCountQuery({ contextGraphId, subGraphName }: CountQueryParams): string {
   assertSafeCgId(contextGraphId);
   if (subGraphName !== undefined) assertSafeSubGraphName(subGraphName);
-  const meta = metaUri(contextGraphId);
-  const data = dataUri(contextGraphId, subGraphName);
-  const privateGraph = privateUri(contextGraphId, subGraphName);
   return `SELECT (COUNT(DISTINCT ?ual) AS ?count) WHERE {
-  GRAPH <${meta}> {
-    { ?ka <${PART_OF}> ?ual . ?ka <${ROOT_ENTITY}> ?root . }
-    UNION
-    { ?ual <${ROOT_ENTITY}> ?root . }
-${registrationScopeClause('?ual', subGraphName, '    ')}
-  }
-  {
-    GRAPH <${data}> { ?root a <${KAFKA_STREAM_TYPE}> . }
-  }
-  UNION
-  {
-    GRAPH <${data}> { ?root <${PRIVATE_DATA_ANCHOR}> "true" . }
-    GRAPH <${privateGraph}> { ?root a <${KAFKA_STREAM_TYPE}> . }
-  }
+  ${streamCandidatePattern(contextGraphId, subGraphName, '?ual')}
 }`;
 }
 
@@ -170,39 +173,42 @@ export function buildSingleByUalQuery({ contextGraphId, subGraphName, ual }: Sin
   assertSafeCgId(contextGraphId);
   if (subGraphName !== undefined) assertSafeSubGraphName(subGraphName);
   assertSafeUal(ual);
-  const meta = metaUri(contextGraphId);
-  const data = dataUri(contextGraphId, subGraphName);
-  const privateGraph = privateUri(contextGraphId, subGraphName);
   // SELECT DISTINCT (mirrors buildListQuery's inner SELECT DISTINCT): on a
   // pre-trim / mixed-version store the bare UAL carries the collapsed
   // `dkg:rootEntity` aggregate row AND the legacy `<ual>/<n>` token carries
   // `dkg:partOf` + `dkg:rootEntity`, so BOTH meta-block UNION arms bind the
   // same ?root and every `?root ?p ?o` data triple would otherwise be returned
   // twice — turning scalar properties into duplicate arrays in bindingsToKa.
+  // sparql-scan-allow: R2 -- metadata binds one admitted exact content graph and one stream root before payload lookup
   return `SELECT DISTINCT ?root ?p ?o WHERE {
-  GRAPH <${meta}> {
-    { ?ka <${PART_OF}> <${ual}> . ?ka <${ROOT_ENTITY}> ?root . }
-    UNION
-    { <${ual}> <${ROOT_ENTITY}> ?root . }
-${registrationScopeClause(`<${ual}>`, subGraphName, '    ')}
-  }
-  {
-    GRAPH <${data}> {
-      ?root a <${KAFKA_STREAM_TYPE}> .
-      ?root ?p ?o .
-    }
-  }
-  UNION
-  {
-    GRAPH <${data}> {
-      ?root <${PRIVATE_DATA_ANCHOR}> "true" .
-    }
-    GRAPH <${privateGraph}> {
-      ?root a <${KAFKA_STREAM_TYPE}> .
-      ?root ?p ?o .
-    }
-  }
+  ${streamCandidatePattern(contextGraphId, subGraphName, `<${ual}>`)}
+  GRAPH ?contentGraph { ?root ?p ?o . }
 }`;
+}
+
+/** Fetch the RDF payloads for one already-paginated stream page in one query. */
+export function buildPageContentQuery(targets: readonly PageContentTarget[]): string {
+  const unique = new Map<string, PageContentTarget>();
+  for (const target of targets) {
+    assertSafeUal(target.ual);
+    assertSafeUal(target.root);
+    assertSafeUal(target.contentGraph);
+    unique.set(`${target.ual}\u0000${target.root}\u0000${target.contentGraph}`, target);
+  }
+  if (unique.size === 0) {
+    throw new Error('Page content query requires at least one stream target');
+  }
+  const rows = [...unique.values()]
+    .map((target) => `(<${target.ual}> <${target.root}> <${target.contentGraph}>)`)
+    .join('\n    ');
+  // sparql-scan-allow: R2 -- the finite VALUES page binds every exact admitted graph and stream root before payload lookup
+  return `SELECT DISTINCT ?ual ?root ?p ?o WHERE {
+  VALUES (?ual ?root ?contentGraph) {
+    ${rows}
+  }
+  GRAPH ?contentGraph { ?root ?p ?o . }
+}
+ORDER BY ?ual ?root ?p ?o`;
 }
 
 type BindingValue = unknown;

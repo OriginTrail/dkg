@@ -149,15 +149,18 @@ export async function installOntology(
     quads,
   });
 
-  // Auto-promote so other subscribed nodes (and their agents) see it.
-  try {
-    await post('/api/knowledge-assets/project-ontology/swm/share', {
-      contextGraphId,
-      subGraphName: 'meta',
-      entities: [ontologyUri, guideUri],
-    });
-  } catch {
-    // Promote failure is non-fatal — agent on this node can still use it.
+  // Atomically seal and share the complete ontology KA so subscribed peers see
+  // it. Installation must not report success when SWM delivery failed.
+  const share = await post<{
+    swmShared?: boolean;
+    sealed?: boolean;
+    publishReady?: boolean;
+  }>('/api/knowledge-assets/project-ontology/swm/share', {
+    contextGraphId,
+    subGraphName: 'meta',
+  });
+  if (!share.swmShared || !share.sealed || !share.publishReady) {
+    throw new Error('Project ontology atomic share did not reach Shared Working Memory');
   }
 
   return { ontologyUri, guideUri, tripleCount: quads.length };

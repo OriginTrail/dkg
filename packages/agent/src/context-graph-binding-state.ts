@@ -1,0 +1,421 @@
+// SPDX-License-Identifier: Apache-2.0
+
+import { ethers } from 'ethers';
+
+const CHAIN_ATTESTED_RESOLUTION_MAX_ENTRIES = 256;
+const CHAIN_ATTESTED_RESOLUTION_MISS_TTL_MS = 60_000;
+const CHAIN_ATTESTED_RESOLUTION_POSITIVE_TTL_MS = 5 * 60_000;
+
+type ChainAttestedResolutionEntry =
+  | {
+      readonly kind: 'resolved';
+      readonly localCgId: string;
+      readonly requiresSubscription: boolean;
+      readonly expiresAt: number;
+    }
+  | {
+      readonly kind: 'miss';
+      readonly expiresAt: number;
+    };
+
+export type ChainAttestedResolutionLookup =
+  | { readonly hit: false }
+  | { readonly hit: true; readonly localCgId?: string };
+
+export type AuthoritativeContextGraphBinding = {
+  bindingKind: 'authoritative';
+  onChainId: string;
+};
+
+export type ReverseNameHashContextGraphBinding = {
+  bindingKind: 'reverse-name-hash';
+  onChainId: string;
+  nameHash: string;
+};
+
+export type ContextGraphBinding =
+  | AuthoritativeContextGraphBinding
+  | ReverseNameHashContextGraphBinding;
+
+export type ContextGraphBindingTarget = ContextGraphBinding & {
+  bindingGeneration: number;
+};
+
+export type ContextGraphBindingTransition = {
+  previous: ContextGraphBinding | undefined;
+  current: ContextGraphBinding;
+  changed: boolean;
+  onChainIdChanged: boolean;
+};
+
+/** The durable portion of a subscription that owns an authoritative binding. */
+export type ContextGraphBindingSubscription = {
+  onChainId?: string;
+};
+
+export type ContextGraphBindingSubscriptionState = ContextGraphBindingSubscription & {
+  subscribed?: boolean;
+  coreHosted?: boolean;
+};
+
+export type ContextGraphBindingSubscriptionFacts = {
+  readonly reverseCandidateCleared: boolean;
+  readonly admitted: boolean;
+};
+
+/** Contract Context Graph ids are positive, canonically formatted decimals. */
+export function isCanonicalPositiveContextGraphId(value: unknown): value is string {
+  return typeof value === 'string' && /^[1-9][0-9]*$/.test(value);
+}
+
+/** Canonical positive decimal that is representable by an EVM uint256 slot. */
+export function isCanonicalAuthoritativeContextGraphId(
+  value: unknown,
+): value is string {
+  return isCanonicalPositiveContextGraphId(value)
+    // MaxUint256 has 78 decimal digits. Bound untrusted metadata before
+    // constructing a BigInt so an enormous all-digit value cannot monopolize
+    // the event loop or allocate proportionally to attacker-controlled input.
+    && value.length <= 78
+    && BigInt(value) <= ethers.MaxUint256;
+}
+
+/**
+ * The committed name hashes that name a local Context Graph id, lowercase:
+ * its commitment keccak256(utf8(id)), and for a host-wire row (keyed by its
+ * own committed hash) that hash too. None for an id that is not valid UTF-16.
+ */
+export function committedNameHashesNaming(
+  localCgId: string,
+  isWireIdKeyedSubscription: (localId: string) => boolean,
+): readonly string[] {
+  let commitment: string;
+  try {
+    commitment = ethers.keccak256(ethers.toUtf8Bytes(localCgId)).toLowerCase();
+  } catch {
+    return [];
+  }
+  return /^0x[0-9a-fA-F]{64}$/.test(localCgId) && isWireIdKeyedSubscription(localCgId)
+    ? [commitment, localCgId.toLowerCase()]
+    : [commitment];
+}
+
+/** Shared cleartext-or-host-wire identity proof for one committed name hash. */
+export function localContextGraphIdMatchesCommittedNameHash(
+  localCgId: string,
+  committedNameHash: string,
+  isWireIdKeyedSubscription: (localId: string) => boolean,
+): boolean {
+  return committedNameHashesNaming(localCgId, isWireIdKeyedSubscription)
+    .includes(committedNameHash.toLowerCase());
+}
+
+function requireCanonicalAuthoritativeContextGraphId(value: string): string {
+  if (!isCanonicalAuthoritativeContextGraphId(value)) {
+    throw new TypeError(`Invalid Context Graph on-chain id: ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
+function bindingsEqual(
+  left: ContextGraphBinding | undefined,
+  right: ContextGraphBinding,
+): boolean {
+  if (!left || left.bindingKind !== right.bindingKind) return false;
+  if (left.onChainId !== right.onChainId) return false;
+  return left.bindingKind === 'authoritative'
+    || left.nameHash === (right as ReverseNameHashContextGraphBinding).nameHash;
+}
+
+/**
+ * Single process-local owner for Context Graph binding provenance and fences.
+ *
+ * Authoritative ids remain stored on the durable subscription supplied by the
+ * caller. Reverse-name-hash candidates live only here, so they cannot leak into
+ * subscription persistence. Consumers ask this registry for the current typed
+ * binding or whether a captured target is still current; they never inspect a
+ * side map or reconstruct the provenance rules themselves.
+ */
+export class ContextGraphBindingState {
+  private readonly reverseCandidates = new Map<
+    string,
+    ReverseNameHashContextGraphBinding
+  >();
+
+  private readonly generations = new Map<string, number>();
+
+  /** Bounded, short-lived chain attestations keyed by numeric on-chain id. */
+  private readonly chainAttestedResolutions = new Map<
+    string,
+    ChainAttestedResolutionEntry
+  >();
+
+  /** Never reset: a deleted and recreated local id must not reuse an old fence. */
+  private nextGeneration = 0;
+
+  currentBindingFor(
+    localCgId: string,
+    subscription: ContextGraphBindingSubscription | undefined,
+  ): ContextGraphBinding | undefined {
+    if (subscription?.onChainId !== undefined) {
+      if (!isCanonicalAuthoritativeContextGraphId(subscription.onChainId)) return undefined;
+      return {
+        bindingKind: 'authoritative',
+        onChainId: subscription.onChainId,
+      };
+    }
+    return this.reverseCandidates.get(localCgId);
+  }
+
+  hasBindingCandidate(
+    localCgId: string,
+    subscription: ContextGraphBindingSubscription | undefined,
+  ): boolean {
+    return this.currentBindingFor(localCgId, subscription) !== undefined;
+  }
+
+  /**
+   * Return the durable on-chain id that may safely suppress authority work.
+   * Numeric local names and reverse candidates remain on the full-refresh
+   * path: only the authoritative binding used by reconciliation can prove
+   * that the scheduler is observing the same chain slot.
+   */
+  authorityIndexOnChainIdFor(
+    localCgId: string,
+    subscription: ContextGraphBindingSubscription | undefined,
+  ): string | undefined {
+    const current = this.currentBindingFor(localCgId, subscription);
+    return current?.bindingKind === 'authoritative'
+      && isCanonicalAuthoritativeContextGraphId(current.onChainId)
+      ? current.onChainId
+      : undefined;
+  }
+
+  matchesReverseCandidate(
+    localCgId: string,
+    subscription: ContextGraphBindingSubscription | undefined,
+    onChainId: string,
+  ): boolean {
+    const binding = this.currentBindingFor(localCgId, subscription);
+    return binding?.bindingKind === 'reverse-name-hash'
+      && binding.onChainId === onChainId;
+  }
+
+  /**
+   * Apply the binding-owned portion of one normalized subscription transition.
+   * The lifecycle layer supplies the canonical next commitment and consumes
+   * binding facts without reconstructing provenance. Consumer-specific cleanup
+   * policy remains outside this registry.
+   */
+  applySubscriptionTransition(
+    localCgId: string,
+    previous: ContextGraphBindingSubscriptionState | undefined,
+    next: ContextGraphBindingSubscriptionState,
+    nextNameHash: string,
+  ): ContextGraphBindingSubscriptionFacts {
+    const reverseCandidate = this.reverseCandidates.get(localCgId);
+    const admitted = next.subscribed === true || next.coreHosted === true;
+    const retainsReverseCandidate = previous !== undefined
+      && previous.onChainId === undefined
+      && next.onChainId === undefined
+      && admitted
+      && reverseCandidate?.nameHash === nextNameHash;
+    const reverseCandidateCleared = retainsReverseCandidate
+      ? false
+      : this.clear(localCgId);
+    if (!admitted) this.forgetChainAttestedResolutionsForLocalId(localCgId);
+    return {
+      reverseCandidateCleared,
+      admitted,
+    };
+  }
+
+  bindAuthoritative(
+    localCgId: string,
+    subscription: ContextGraphBindingSubscription,
+    newOnChainId: string,
+  ): ContextGraphBindingTransition {
+    const canonicalOnChainId = requireCanonicalAuthoritativeContextGraphId(newOnChainId);
+    const previous = this.currentBindingFor(localCgId, subscription);
+    const previousOnChainId = subscription.onChainId ?? previous?.onChainId;
+    const current: AuthoritativeContextGraphBinding = {
+      bindingKind: 'authoritative',
+      onChainId: canonicalOnChainId,
+    };
+    this.reverseCandidates.delete(localCgId);
+    const changed = !bindingsEqual(previous, current);
+    if (changed) {
+      this.forgetChainAttestedResolutionsForLocalId(localCgId);
+      this.bump(localCgId);
+    }
+    subscription.onChainId = canonicalOnChainId;
+    return {
+      previous,
+      current,
+      changed,
+      onChainIdChanged: previousOnChainId !== undefined
+        && previousOnChainId !== canonicalOnChainId,
+    };
+  }
+
+  bindReverseCandidate(
+    localCgId: string,
+    subscription: ContextGraphBindingSubscription,
+    newOnChainId: string,
+    nameHash: string,
+  ): ContextGraphBindingTransition {
+    const canonicalOnChainId = requireCanonicalAuthoritativeContextGraphId(newOnChainId);
+    const previous = this.currentBindingFor(localCgId, subscription);
+    if (subscription.onChainId !== undefined) {
+      requireCanonicalAuthoritativeContextGraphId(subscription.onChainId);
+      this.reverseCandidates.delete(localCgId);
+      return {
+        previous,
+        current: previous as AuthoritativeContextGraphBinding,
+        changed: false,
+        onChainIdChanged: false,
+      };
+    }
+    const current: ReverseNameHashContextGraphBinding = {
+      bindingKind: 'reverse-name-hash',
+      onChainId: canonicalOnChainId,
+      nameHash,
+    };
+    const changed = !bindingsEqual(previous, current);
+    if (changed) {
+      this.forgetChainAttestedResolutionsForLocalId(localCgId);
+      this.reverseCandidates.set(localCgId, current);
+      this.bump(localCgId);
+    }
+    return {
+      previous,
+      current,
+      changed,
+      onChainIdChanged: previous !== undefined && previous.onChainId !== canonicalOnChainId,
+    };
+  }
+
+  /** Clear a reverse candidate and invalidate work captured against it. */
+  clear(localCgId: string): boolean {
+    const cleared = this.reverseCandidates.delete(localCgId);
+    this.forgetChainAttestedResolutionsForLocalId(localCgId);
+    if (!cleared) return false;
+    this.bump(localCgId);
+    return true;
+  }
+
+  /** Invalidate every captured target even when there is no reverse candidate. */
+  invalidate(localCgId: string): number {
+    this.reverseCandidates.delete(localCgId);
+    this.forgetChainAttestedResolutionsForLocalId(localCgId);
+    return this.bump(localCgId);
+  }
+
+  /** Reclaim all process-local state after a subscription record is deleted. */
+  delete(localCgId: string): void {
+    this.reverseCandidates.delete(localCgId);
+    this.generations.delete(localCgId);
+    this.forgetChainAttestedResolutionsForLocalId(localCgId);
+  }
+
+  bump(localCgId: string): number {
+    const generation = ++this.nextGeneration;
+    this.generations.set(localCgId, generation);
+    return generation;
+  }
+
+  capture(localCgId: string): number {
+    return this.generations.get(localCgId) ?? 0;
+  }
+
+  isGenerationCurrent(localCgId: string, generation: number): boolean {
+    return this.capture(localCgId) === generation;
+  }
+
+  targetStillCurrent(
+    localCgId: string,
+    subscription: ContextGraphBindingSubscription | undefined,
+    target: ContextGraphBindingTarget,
+  ): boolean {
+    const current = this.currentBindingFor(localCgId, subscription);
+    return bindingsEqual(current, target)
+      && this.isGenerationCurrent(localCgId, target.bindingGeneration);
+  }
+
+  getChainAttestedResolution(
+    onChainId: string,
+    isSubscribed: (localCgId: string) => boolean,
+    now = Date.now(),
+  ): ChainAttestedResolutionLookup {
+    const entry = this.chainAttestedResolutions.get(onChainId);
+    if (!entry) return { hit: false };
+    if (entry.expiresAt <= now) {
+      this.chainAttestedResolutions.delete(onChainId);
+      return { hit: false };
+    }
+    if (
+      entry.kind === 'resolved'
+      && entry.requiresSubscription
+      && !isSubscribed(entry.localCgId)
+    ) {
+      this.chainAttestedResolutions.delete(onChainId);
+      return { hit: false };
+    }
+    this.chainAttestedResolutions.delete(onChainId);
+    this.chainAttestedResolutions.set(onChainId, entry);
+    return entry.kind === 'resolved'
+      ? { hit: true, localCgId: entry.localCgId }
+      : { hit: true };
+  }
+
+  rememberChainAttestedResolutionMiss(onChainId: string, now = Date.now()): void {
+    this.setChainAttestedResolution(onChainId, {
+      kind: 'miss',
+      expiresAt: now + CHAIN_ATTESTED_RESOLUTION_MISS_TTL_MS,
+    });
+  }
+
+  rememberChainAttestedResolution(
+    onChainId: string,
+    localCgId: string,
+    requiresSubscription: boolean,
+    now = Date.now(),
+  ): void {
+    this.setChainAttestedResolution(onChainId, {
+      kind: 'resolved',
+      localCgId,
+      requiresSubscription,
+      expiresAt: now + CHAIN_ATTESTED_RESOLUTION_POSITIVE_TTL_MS,
+    });
+  }
+
+  private setChainAttestedResolution(
+    onChainId: string,
+    entry: ChainAttestedResolutionEntry,
+  ): void {
+    this.chainAttestedResolutions.delete(onChainId);
+    this.chainAttestedResolutions.set(onChainId, entry);
+    while (this.chainAttestedResolutions.size > CHAIN_ATTESTED_RESOLUTION_MAX_ENTRIES) {
+      const oldest = this.chainAttestedResolutions.keys().next().value;
+      if (oldest === undefined) break;
+      this.chainAttestedResolutions.delete(oldest);
+    }
+  }
+
+  private forgetChainAttestedResolutionsForLocalId(localCgId: string): void {
+    for (const [onChainId, entry] of this.chainAttestedResolutions) {
+      if (entry.kind === 'resolved' && entry.localCgId === localCgId) {
+        this.chainAttestedResolutions.delete(onChainId);
+      }
+    }
+  }
+
+  /** Test/diagnostic visibility without exposing the backing maps. */
+  get size(): number {
+    return this.reverseCandidates.size;
+  }
+
+  get generationCount(): number {
+    return this.generations.size;
+  }
+}

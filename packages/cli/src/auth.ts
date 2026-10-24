@@ -8,10 +8,10 @@
 import { randomBytes, createHmac, timingSafeEqual, createHash } from 'node:crypto';
 import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
 import { readFileSync, statSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { dirname } from 'node:path';
 import { existsSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { dkgDir } from './config.js';
+import { DkgHomeFiles } from './config.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -24,66 +24,191 @@ export interface AuthConfig {
   tokens?: string[];
 }
 
+/** HTTP identity established by the CLI daemon's authentication boundary. */
+export type RequestPrincipal =
+  | { readonly kind: 'agent'; readonly agentAddress: string }
+  | { readonly kind: 'nodeOperator' }
+  | { readonly kind: 'anonymous' };
+
+type HttpCredentialDecision =
+  | { readonly allowed: false }
+  | {
+    readonly allowed: true;
+    readonly mode: 'disabled' | 'public';
+    /** Raw bearer header, whether accepted or not. Never use this as an authenticated credential. */
+    readonly presentedToken: string | undefined;
+    readonly acceptedToken: string | undefined;
+  }
+  | {
+    readonly allowed: true;
+    readonly mode: 'authenticated';
+    /** Raw bearer header; SSE query authentication may leave this undefined. */
+    readonly presentedToken: string | undefined;
+    readonly acceptedToken: string;
+  };
+
+type AcceptedHttpIdentity =
+  | {
+    readonly acceptedToken: string;
+    readonly principal: Extract<RequestPrincipal, { kind: 'agent' }>;
+  }
+  | {
+    readonly acceptedToken: string;
+    readonly principal: Extract<RequestPrincipal, { kind: 'nodeOperator' }>;
+  };
+
+type AnonymousHttpIdentity = {
+  readonly acceptedToken: undefined;
+  readonly principal: Extract<RequestPrincipal, { kind: 'anonymous' }>;
+};
+
+/**
+ * One correlated allow decision. Authenticated mode always carries an accepted credential, while
+ * an absent credential can only be anonymous. Public/disabled requests may still carry a valid
+ * optional bearer, but that bearer is classified at the same boundary before this value exists.
+ */
+export type AllowedHttpAuthentication = {
+  readonly allowed: true;
+  readonly presentedToken: string | undefined;
+} & (
+  | ({ readonly mode: 'authenticated' } & AcceptedHttpIdentity)
+  | ({ readonly mode: 'disabled' | 'public' } & (AcceptedHttpIdentity | AnonymousHttpIdentity))
+);
+
+export type HttpAuthenticationResult =
+  | { readonly allowed: false }
+  | AllowedHttpAuthentication;
+
+/**
+ * Build the one correlated authentication value carried by request context.
+ * Tests use the same factory so impossible principal/capability combinations cannot be assembled
+ * by independently mutating fixture fields.
+ */
+type CreateAllowedHttpAuthenticationInput =
+  | {
+    readonly mode: 'disabled' | 'public';
+    readonly presentedToken?: string;
+    readonly acceptedToken?: undefined;
+    readonly resolveAgentByToken?: never;
+  }
+  | {
+    readonly mode: AllowedHttpAuthentication['mode'];
+    readonly presentedToken?: string;
+    readonly acceptedToken: string;
+    readonly resolveAgentByToken: (token: string) => string | undefined;
+  };
+
+export function createAllowedHttpAuthentication(
+  input: CreateAllowedHttpAuthenticationInput,
+): AllowedHttpAuthentication {
+  if (input.acceptedToken !== undefined) {
+    const agentAddress = input.resolveAgentByToken(input.acceptedToken);
+    const identity: AcceptedHttpIdentity = agentAddress
+      ? { acceptedToken: input.acceptedToken, principal: { kind: 'agent', agentAddress } }
+      : { acceptedToken: input.acceptedToken, principal: { kind: 'nodeOperator' } };
+    return input.mode === 'authenticated'
+      ? {
+        allowed: true,
+        mode: 'authenticated',
+        presentedToken: input.presentedToken,
+        ...identity,
+      }
+      : {
+        allowed: true,
+        mode: input.mode,
+        presentedToken: input.presentedToken,
+        ...identity,
+      };
+  }
+  return {
+    allowed: true,
+    mode: input.mode,
+    presentedToken: input.presentedToken,
+    acceptedToken: undefined,
+    principal: { kind: 'anonymous' },
+  };
+}
+
+// Compile-time-only invariant assertions; deliberately never called.
+function assertAllowedHttpAuthenticationTypeInvariants(): void {
+  // @ts-expect-error authenticated mode cannot be anonymous or omit an accepted credential
+  const anonymousAuthenticated: AllowedHttpAuthentication = {
+    allowed: true, mode: 'authenticated', presentedToken: undefined,
+    acceptedToken: undefined, principal: { kind: 'anonymous' },
+  };
+  // @ts-expect-error an accepted credential cannot carry an anonymous principal
+  const acceptedAnonymous: AllowedHttpAuthentication = {
+    allowed: true, mode: 'public', presentedToken: 'token',
+    acceptedToken: 'token', principal: { kind: 'anonymous' },
+  };
+  // @ts-expect-error accepted credentials must be classified by a resolver
+  createAllowedHttpAuthentication({ mode: 'public', acceptedToken: 'token' });
+  void anonymousAuthenticated;
+  void acceptedAnonymous;
+}
+void assertAllowedHttpAuthenticationTypeInvariants;
+
+/** Node administration is a projection of the correlated authentication decision, never state. */
+export function canAdministerNode(authentication: AllowedHttpAuthentication): boolean {
+  return authentication.mode === 'disabled' || authentication.principal.kind === 'nodeOperator';
+}
+
+/** Authenticated agent identity projection shared by every route. */
+export function authenticatedAgentAddress(
+  authentication: AllowedHttpAuthentication,
+): string | undefined {
+  return authentication.principal.kind === 'agent'
+    ? authentication.principal.agentAddress
+    : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Token file management
 // ---------------------------------------------------------------------------
 
-function tokenFilePath(): string {
-  return join(dkgDir(), 'auth.token');
+function tokenFilePath(homeFiles = new DkgHomeFiles()): string {
+  return homeFiles.tokenPath;
 }
 
 function generateToken(): string {
   return randomBytes(32).toString('base64url');
 }
 
-/**
- * Load tokens from disk + config. Auto-generates a token file if none exists.
- * Returns the set of valid tokens.
- */
-export async function loadTokens(authConfig?: AuthConfig): Promise<Set<string>> {
+/** Shared token-file policy; daemon reconciliation is deliberately outside it. */
+async function loadOrCreateTokenFile(filePath: string, generateIfEmpty: boolean): Promise<Set<string>> {
   const tokens = new Set<string>();
-  const fileTokens = new Set<string>();
-  // auth.ts:203). Track config-pinned
-  // tokens separately from file-derived ones so reconciliation /
-  // rotation can preserve them when a token happens to live in BOTH
-  // sources (a real-world rollout shape — operators sync the same
-  // admin token across config and `auth.token`).
-  const configTokens = new Set<string>();
-
-  if (authConfig?.tokens) {
-    for (const t of authConfig.tokens) {
-      if (t.length > 0) {
-        tokens.add(t);
-        configTokens.add(t);
-      }
-    }
-  }
-
-  // Load or generate the file-based token
-  const filePath = tokenFilePath();
   if (existsSync(filePath)) {
     try {
       const raw = await readFile(filePath, 'utf-8');
       for (const line of raw.split('\n')) {
-        const t = line.trim();
-        if (t.length > 0 && !t.startsWith('#')) {
-          tokens.add(t);
-          fileTokens.add(t);
-        }
+        const token = line.trim();
+        if (token.length > 0 && !token.startsWith('#')) tokens.add(token);
       }
-    } catch {
-      // Unreadable — generate a fresh one
-    }
+    } catch { /* Unreadable files follow the same generation policy as empty files. */ }
   }
-
-  if (tokens.size === 0) {
+  if (tokens.size === 0 && generateIfEmpty) {
     const token = generateToken();
     tokens.add(token);
-    fileTokens.add(token);
     await mkdir(dirname(filePath), { recursive: true });
     await writeFile(filePath, `# DKG node API token — treat this like a password\n${token}\n`, { mode: 0o600 });
     await chmod(filePath, 0o600);
   }
+  return tokens;
+}
+
+/** Select the first file token without registering daemon hot-reload state. */
+export async function loadApiClientToken(homeFiles: DkgHomeFiles): Promise<string | undefined> {
+  return (await loadOrCreateTokenFile(tokenFilePath(homeFiles), true)).values().next().value;
+}
+
+/** Load daemon tokens from config and disk, generating only when both are empty. */
+export async function loadTokens(authConfig?: AuthConfig): Promise<Set<string>> {
+  const filePath = tokenFilePath();
+  // Keep config tokens first and retain their provenance when a token also
+  // appears in the file, so rotation/reconciliation cannot revoke a pinned token.
+  const configTokens = new Set(authConfig?.tokens?.filter((token) => token.length > 0));
+  const fileTokens = await loadOrCreateTokenFile(filePath, configTokens.size === 0);
+  const tokens = new Set([...configTokens, ...fileTokens]);
 
   // CLI-11: record the file snapshot so `verifyToken`'s mtime-gated
   // reconciliation knows which tokens originated on disk and can
@@ -821,20 +946,38 @@ function isPublicPath(method: string, pathname: string): boolean {
  * synchronously to a bare `boolean` so existing fast-path callers do
  * not pay an awaiting cost on hot routes.
  */
-export function httpAuthGuard(
+function evaluateHttpCredential(
   req: IncomingMessage,
   res: ServerResponse,
   authEnabled: boolean,
   validTokens: Set<string>,
   corsOrigin?: string | null,
-): boolean | Promise<boolean> {
-  if (!authEnabled) return true;
-  if (req.method === 'OPTIONS') return true;
+): HttpCredentialDecision | Promise<HttpCredentialDecision> {
+  const headerToken = extractBearerToken(req.headers.authorization);
+  if (!authEnabled) {
+    const acceptedToken = verifyToken(headerToken, validTokens) ? headerToken : undefined;
+    return {
+      allowed: true,
+      mode: 'disabled', presentedToken: headerToken, acceptedToken,
+    };
+  }
+  if (req.method === 'OPTIONS') {
+    return {
+      allowed: true,
+      mode: 'public', presentedToken: headerToken, acceptedToken: undefined,
+    };
+  }
 
   const pathname = new URL(req.url ?? '/', `http://${req.headers.host}`).pathname;
-  if (isPublicPath(req.method ?? '', pathname)) return true;
+  if (isPublicPath(req.method ?? '', pathname)) {
+    const acceptedToken = verifyToken(headerToken, validTokens) ? headerToken : undefined;
+    return {
+      allowed: true,
+      mode: 'public', presentedToken: headerToken, acceptedToken,
+    };
+  }
 
-  const token = extractBearerToken(req.headers.authorization);
+  const token = headerToken;
   let acceptedToken: string | undefined;
   if (verifyToken(token, validTokens)) {
     acceptedToken = token;
@@ -849,6 +992,10 @@ export function httpAuthGuard(
   }
 
   if (acceptedToken) {
+    const accepted: HttpCredentialDecision = {
+      allowed: true,
+      mode: 'authenticated', presentedToken: headerToken, acceptedToken,
+    };
     const now = Date.now();
 
     // CLI-10: stale-timestamp gate. If the client opted into the
@@ -872,7 +1019,7 @@ export function httpAuthGuard(
         res.end(
           JSON.stringify({ error: 'Stale or unparseable x-dkg-timestamp' }),
         );
-        return false;
+        return { allowed: false };
       }
     }
 
@@ -908,7 +1055,7 @@ export function httpAuthGuard(
         res.end(JSON.stringify({
           error: 'Signed-request mode requires x-dkg-timestamp, x-dkg-nonce, and x-dkg-signature.',
         }));
-        return false;
+        return { allowed: false };
       }
       // Pre-body replay rejection: an attacker swapping in a fresh
       // nonce still fails the post-body HMAC (nonce is bound), but
@@ -934,7 +1081,7 @@ export function httpAuthGuard(
           'Access-Control-Allow-Origin': corsOrigin ?? '*',
         });
         res.end(JSON.stringify({ error: 'Replayed nonce' }));
-        return false;
+        return { allowed: false };
       }
       // Stash the auth context so route handlers can call
       // verifyHttpSignedRequestAfterBody(req, rawBody) after
@@ -1044,7 +1191,7 @@ export function httpAuthGuard(
               error: `Signed request rejected: ${outcome.reason}`,
             }),
           );
-          return false;
+          return { allowed: false };
         }
         pending.verified = true;
       } else {
@@ -1082,10 +1229,10 @@ export function httpAuthGuard(
           req,
           res,
           corsOrigin ?? undefined,
-        );
+        ).then((allowed) => (allowed ? accepted : { allowed: false }));
       }
 
-      return true;
+      return accepted;
     }
 
     // the previous revision of this
@@ -1104,7 +1251,7 @@ export function httpAuthGuard(
     // responsible for whatever replay semantics they need at the
     // application layer.
 
-    return true;
+    return accepted;
   }
 
   res.writeHead(401, {
@@ -1114,7 +1261,66 @@ export function httpAuthGuard(
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   });
   res.end(JSON.stringify({ error: 'Unauthorized — provide a valid Bearer token in the Authorization header' }));
-  return false;
+  return { allowed: false };
+}
+
+/**
+ * Compatibility adapter for callers that only need an allow/deny result. The canonical evaluator
+ * still returns one explicit credential decision; this wrapper projects that decision to boolean.
+ */
+export function httpAuthGuard(
+  req: IncomingMessage,
+  res: ServerResponse,
+  authEnabled: boolean,
+  validTokens: Set<string>,
+  corsOrigin?: string | null,
+): boolean | Promise<boolean> {
+  const decision = evaluateHttpCredential(req, res, authEnabled, validTokens, corsOrigin);
+  return decision instanceof Promise
+    ? decision.then((resolved) => resolved.allowed)
+    : decision.allowed;
+}
+
+/**
+ * Canonical daemon authentication boundary. Credential acceptance, identity and authority all
+ * derive from the same explicit decision; route code never re-authenticates the request.
+ */
+export async function authenticateHttpRequest(input: {
+  readonly req: IncomingMessage;
+  readonly res: ServerResponse;
+  readonly authEnabled: boolean;
+  readonly validTokens: Set<string>;
+  readonly resolveAgentByToken: (token: string) => string | undefined;
+  readonly corsOrigin?: string | null;
+}): Promise<HttpAuthenticationResult> {
+  const credential = await evaluateHttpCredential(
+    input.req,
+    input.res,
+    input.authEnabled,
+    input.validTokens,
+    input.corsOrigin,
+  );
+  if (!credential.allowed) return credential;
+
+  if (credential.mode === 'authenticated') {
+    return createAllowedHttpAuthentication({
+      mode: credential.mode,
+      presentedToken: credential.presentedToken,
+      acceptedToken: credential.acceptedToken,
+      resolveAgentByToken: input.resolveAgentByToken,
+    });
+  }
+  return credential.acceptedToken === undefined
+    ? createAllowedHttpAuthentication({
+      mode: credential.mode,
+      presentedToken: credential.presentedToken,
+    })
+    : createAllowedHttpAuthentication({
+      mode: credential.mode,
+      presentedToken: credential.presentedToken,
+      acceptedToken: credential.acceptedToken,
+      resolveAgentByToken: input.resolveAgentByToken,
+    });
 }
 
 /**

@@ -33,7 +33,7 @@
  *
  * Mocks policy: ZERO blockchain mocks. The daemon is wired against the
  * SHARED HARDHAT NODE spun up by `packages/chain/test/hardhat-global-setup.ts`
- * on `process.env.HARDHAT_PORT` (9548 for the CLI lane). The daemon uses a
+ * on an OS-assigned port from the isolated context file. The daemon uses a
  * real `EVMChainAdapter` against that node with the real Hub address and the
  * pre-registered `CORE_OP` operational wallet (its identityId was posted on
  * chain by the harness' profile setup). None of the tests in this file
@@ -43,8 +43,10 @@
  * a real chain") enforced in CI.
  */
 
+import { TEST_SNAPSHOT_STORAGE } from '../../../scripts/testing/snapshot-storage.js';
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
+import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -56,6 +58,7 @@ import { ethers } from 'ethers';
 import { getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { ApiClient } from '../src/api-client.js';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 import { daemonState } from '../src/daemon/state.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -71,11 +74,29 @@ interface Daemon {
   signal?: NodeJS.Signals | null;
 }
 
-function uniquePort(base: number): number {
-  // Spread across test runs so parallel CI jobs don't collide. Vitest runs
-  // `maxWorkers: 1` for this package so within-process collisions are not a
-  // concern, but we still randomize to avoid reuse from a prior crash.
-  return base + Math.floor(Math.random() * 1000);
+async function freePort(excluded: ReadonlySet<number> = new Set()): Promise<number> {
+  // Ask the OS for an unused loopback port instead of drawing from a small
+  // random range. This file starts more than one daemon, so a random collision
+  // could make the readiness probe hit the module-level daemon and falsely
+  // report that the new child was ready.
+  for (;;) {
+    const server = createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        server.off('error', reject);
+        resolve();
+      });
+    });
+    const address = server.address();
+    await new Promise<void>((resolve, reject) => {
+      server.close((err) => (err ? reject(err) : resolve()));
+    });
+    if (!address || typeof address === 'string') {
+      throw new Error('free-port probe did not bind to a TCP port');
+    }
+    if (!excluded.has(address.port)) return address.port;
+  }
 }
 
 async function writeDaemonConfig(
@@ -89,6 +110,7 @@ async function writeDaemonConfig(
   await writeFile(
     join(home, 'config.json'),
     JSON.stringify({
+      sharedMemoryPublicSnapshotStorage: TEST_SNAPSHOT_STORAGE,
       name: 'daemon-extra-test',
       apiPort,
       listenPort,
@@ -148,8 +170,8 @@ async function startDaemon(opts: {
     );
   }
   const home = await mkdtemp(join(tmpdir(), 'dkg-daemon-extra-'));
-  const apiPort = opts.apiPort ?? uniquePort(19700);
-  const listenPort = opts.listenPort ?? uniquePort(19800);
+  const apiPort = opts.apiPort ?? (await freePort());
+  const listenPort = opts.listenPort ?? (await freePort(new Set([apiPort])));
   await writeDaemonConfig(home, apiPort, listenPort, opts.authEnabled, opts.extraConfig);
 
   const child = spawn('node', [CLI_ENTRY, 'daemon-worker'], {
@@ -866,8 +888,8 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           routePlugins: [],
           url,
           path: url.pathname,
-          requestToken: undefined,
           requestAgentAddress: '0x0000000000000000000000000000000000000001',
+          authentication: requestAuthentication({ kind: 'nodeOperator' }),
         } as any);
         if (!res.writableEnded) {
           res.statusCode = 404;
@@ -956,8 +978,8 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           routePlugins: [],
           url,
           path: url.pathname,
-          requestToken: undefined,
           requestAgentAddress: '0x0000000000000000000000000000000000000001',
+          authentication: requestAuthentication({ kind: 'nodeOperator' }),
         } as any);
         if (!res.writableEnded) {
           res.statusCode = 404;
@@ -1049,13 +1071,33 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
+          resolveContextGraphSubscriptionBootstrapAuthority: async () => ({
+            outcome: 'allowed' as const,
+            source: 'legacy-local' as const,
+            reason: 'test-public',
+            metadataBootstrap: 'eligible' as const,
+          }),
           getContextGraphAllowedAgents: async () => [],
           getSubscribedContextGraphs: () => new Map(),
-          subscribeToContextGraph: () => {},
+          subscribeToContextGraph: () => ({
+            subscribed: true,
+            synced: false,
+            syncMode: 'always-on' as const,
+          }),
           contextGraphHasLocalContent: async () => false,
           markContextGraphSubscriptionState: () => {
             throw new Error('timeout-only catchup must not mark subscription synced');
           },
+          reconcileRfc64CatalogResponsibilityV1: async () => undefined,
+          prepareContextGraphReadinessWithPrivateEmptyVmV1: async () => ({
+            inspectAndCommit: async (
+              _input: unknown,
+              commit: (completion: { proven: false; inspection: Record<string, unknown> }) => unknown,
+            ) => commit({ proven: false, inspection: {
+              kind: 'current', metadata: { kind: 'absent' },
+              authority: { outcome: 'allowed', source: 'legacy-local' },
+            } }),
+          }),
           resolveAgentByToken: () => undefined,
           getDefaultAgentAddress: () => '0x0000000000000000000000000000000000000001',
         };
@@ -1088,8 +1130,8 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           routePlugins: [],
           url,
           path: url.pathname,
-          requestToken: undefined,
           requestAgentAddress: '0x0000000000000000000000000000000000000001',
+          authentication: requestAuthentication({ kind: 'nodeOperator' }),
         } as any);
         if (!res.writableEnded) {
           res.statusCode = 404;
@@ -1127,6 +1169,253 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
         peersResponded: 1,
         peersSucceeded: 0,
         denied: false,
+      });
+    } finally {
+      daemonState.catchupRunner = previousCatchupRunner;
+      if (routeServer) {
+        await new Promise<void>((resolve, reject) => {
+          routeServer!.close((err) => (err ? reject(err) : resolve()));
+        });
+      }
+    }
+  });
+
+  it('marks local scheduler deferral retryable without setting shared-memory completion', async () => {
+    const contextGraphId = 'catchup-local-deferral-' + Math.random().toString(36).slice(2, 8);
+    const catchupTracker = { jobs: new Map<string, any>(), latestByContextGraph: new Map<string, string>() };
+    const previousCatchupRunner = daemonState.catchupRunner;
+    daemonState.catchupRunner = {
+      run: async () => ({
+        connectedPeers: 1,
+        syncCapablePeers: 1,
+        peersTried: 1,
+        peersResponded: 1,
+        peersSucceeded: 0,
+        deferredBackpressure: 1,
+        dataSynced: 1,
+        sharedMemorySynced: 0,
+        denied: false,
+        deniedPeers: 0,
+      }),
+      close: async () => {},
+    };
+    let markedSynced = false;
+
+    let routeServer: Server | null = null;
+    try {
+      routeServer = createServer(async (req, res) => {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        const agent = {
+          resolveContextGraphSubscriptionBootstrapAuthority: async () => ({
+            outcome: 'allowed' as const,
+            source: 'legacy-local' as const,
+            reason: 'test-public',
+            metadataBootstrap: 'eligible' as const,
+          }),
+          getContextGraphAllowedAgents: async () => [],
+          getSubscribedContextGraphs: () => new Map(),
+          subscribeToContextGraph: () => ({
+            subscribed: true,
+            synced: false,
+            syncMode: 'always-on' as const,
+          }),
+          contextGraphHasLocalContent: async () => true,
+          markContextGraphSubscriptionState: () => { markedSynced = true; },
+          resolveAgentByToken: () => undefined,
+          getDefaultAgentAddress: () => '0x0000000000000000000000000000000000000001',
+        };
+        await handleContextGraphRoutes({
+          req,
+          res,
+          agent,
+          publisherControl: {},
+          publisherRuntime: null,
+          config: {},
+          startedAt: Date.now(),
+          dashDb: {},
+          opWallets: {},
+          network: {},
+          tracker: {},
+          memoryManager: {},
+          bridgeAuthToken: undefined,
+          nodeVersion: 'test',
+          nodeCommit: 'test',
+          catchupTracker,
+          extractionRegistry: {},
+          fileStore: {},
+          extractionStatus: new Map(),
+          assertionImportLocks: new Map(),
+          vectorStore: {},
+          embeddingProvider: null,
+          validTokens: new Set(),
+          apiHost: '127.0.0.1',
+          apiPortRef: { value: 0 },
+          routePlugins: [],
+          url,
+          path: url.pathname,
+          requestAgentAddress: '0x0000000000000000000000000000000000000001',
+          authentication: requestAuthentication({ kind: 'nodeOperator' }),
+        } as any);
+        if (!res.writableEnded) {
+          res.statusCode = 404;
+          res.end();
+        }
+      });
+      await new Promise<void>((resolve) => routeServer!.listen(0, '127.0.0.1', resolve));
+      const address = routeServer.address();
+      if (!address || typeof address === 'string') throw new Error('route test server did not bind');
+
+      const subscribe = await fetch(`http://127.0.0.1:${address.port}/api/context-graph/subscribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contextGraphId, includeSharedMemory: true }),
+      });
+      const queued = await subscribe.json() as { catchup: { jobId: string } };
+      for (let i = 0; i < 20; i++) {
+        if (catchupTracker.jobs.get(queued.catchup.jobId)?.finishedAt) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      expect(catchupTracker.jobs.get(queued.catchup.jobId)).toMatchObject({
+        status: 'deferred',
+        error: 'Sync deferred by local scheduler backpressure; retry when capacity is available.',
+      });
+      expect(markedSynced).toBe(false);
+    } finally {
+      daemonState.catchupRunner = previousCatchupRunner;
+      if (routeServer) {
+        await new Promise<void>((resolve, reject) => {
+          routeServer!.close((err) => (err ? reject(err) : resolve()));
+        });
+      }
+    }
+  });
+
+  it('applies syncMode through the legacy /api/subscribe alias and reports the agent-normalized mode', async () => {
+    const contextGraphId = 'legacy-subscribe-mode-' + Math.random().toString(36).slice(2, 8);
+    const catchupTracker = {
+      jobs: new Map<string, any>(),
+      latestByContextGraph: new Map<string, string>(),
+    };
+    let requestedMode: string | undefined;
+    let runnerCalls = 0;
+    const previousCatchupRunner = daemonState.catchupRunner;
+    daemonState.catchupRunner = {
+      run: async () => {
+        runnerCalls += 1;
+        return {
+          connectedPeers: 0,
+          syncCapablePeers: 0,
+          peersTried: 0,
+          peersResponded: 0,
+          peersSucceeded: 0,
+          deferredBackpressure: 1,
+          dataSynced: 0,
+          sharedMemorySynced: 0,
+          denied: false,
+          deniedPeers: 0,
+        };
+      },
+      close: async () => {},
+    } as any;
+    let routeServer: Server | null = null;
+
+    try {
+      routeServer = createServer(async (req, res) => {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        const agent = {
+          resolveContextGraphSubscriptionBootstrapAuthority: async () => ({
+            outcome: 'allowed' as const,
+            source: 'legacy-local' as const,
+            reason: 'test-public',
+            metadataBootstrap: 'eligible' as const,
+          }),
+          getContextGraphAllowedAgents: async () => [],
+          getSubscribedContextGraphs: () => new Map(),
+          subscribeToContextGraph: (_id: string, opts: { syncMode: string }) => {
+            requestedMode = opts.syncMode;
+            return {
+              subscribed: true,
+              synced: false,
+              // The route must report the normalized mode returned by the
+              // agent, rather than independently reconstructing it.
+              syncMode: 'always-on' as const,
+            };
+          },
+          markContextGraphSubscriptionState: () => {},
+          resolveAgentByToken: () => undefined,
+          getDefaultAgentAddress: () => '0x0000000000000000000000000000000000000001',
+        };
+
+        await handleContextGraphRoutes({
+          req,
+          res,
+          agent,
+          publisherControl: {},
+          publisherRuntime: null,
+          config: {},
+          startedAt: Date.now(),
+          dashDb: {},
+          opWallets: {},
+          network: {},
+          tracker: {},
+          memoryManager: {},
+          bridgeAuthToken: undefined,
+          nodeVersion: 'test',
+          nodeCommit: 'test',
+          catchupTracker,
+          extractionRegistry: {},
+          fileStore: {},
+          extractionStatus: new Map(),
+          assertionImportLocks: new Map(),
+          vectorStore: {},
+          embeddingProvider: null,
+          validTokens: new Set(),
+          apiHost: '127.0.0.1',
+          apiPortRef: { value: 0 },
+          routePlugins: [],
+          url,
+          path: url.pathname,
+          requestAgentAddress: '0x0000000000000000000000000000000000000001',
+          authentication: requestAuthentication({ kind: 'nodeOperator' }),
+        } as any);
+        if (!res.writableEnded) {
+          res.statusCode = 404;
+          res.end();
+        }
+      });
+
+      await new Promise<void>((resolve) => routeServer!.listen(0, '127.0.0.1', resolve));
+      const address = routeServer.address();
+      if (!address || typeof address === 'string') {
+        throw new Error('legacy subscribe route test server did not bind to a TCP port');
+      }
+
+      const invalidResponse = await fetch(`http://127.0.0.1:${address.port}/api/subscribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contextGraphId, syncMode: null }),
+      });
+      expect(invalidResponse.status).toBe(400);
+      expect(await invalidResponse.json()).toMatchObject({
+        error: 'Invalid "syncMode" (expected "on-demand" or "always-on")',
+      });
+      expect(requestedMode).toBeUndefined();
+      expect(runnerCalls).toBe(0);
+      expect(catchupTracker.jobs.size).toBe(0);
+      expect(catchupTracker.latestByContextGraph.size).toBe(0);
+
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/subscribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contextGraphId, syncMode: 'on-demand' }),
+      });
+      expect(response.status).toBe(200);
+      expect(requestedMode).toBe('on-demand');
+      expect(await response.json()).toMatchObject({
+        subscribed: contextGraphId,
+        syncMode: 'always-on',
+        catchup: { status: 'queued' },
       });
     } finally {
       daemonState.catchupRunner = previousCatchupRunner;
@@ -1348,22 +1637,22 @@ describe('CLI-9 — /api/verify & /api/ccl error-code mapping', () => {
     expect(res.status).toBeLessThan(500);
   });
 
-  it('/api/ccl/eval with unknown policy returns 4xx, NOT 500', async () => {
+  it('/api/ccl/eval with unknown policy returns 404', async () => {
     const d = daemon!;
     const res = await fetch(urlFor(d, '/api/ccl/eval'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
       body: JSON.stringify({
         contextGraphId: 'no-such-cg',
-        policyUri: 'did:dkg:policy:does-not-exist',
+        name: 'does-not-exist',
         contextType: 'query',
       }),
     });
-    // Same class of bug — unknown policy → generic 500 with raw chain revert
-    // body per issue #159. Spec expects 4xx.
-    expect(res.status).not.toBe(500);
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(res.status).toBeLessThan(500);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({
+      code: 'CCL_RESOURCE_NOT_FOUND',
+      resource: 'approved_policy',
+    });
   });
 
   it('500 responses never leak raw chain-revert custom-error hex (PROD-BUG guard)', async () => {
@@ -1547,13 +1836,12 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
       'owning identity sees the seeded triple (proves A-1 isolation is active)',
     async () => {
       const d = daemon!;
-      const cgId = 'a1-wm-http-' + Math.random().toString(36).slice(2, 8);
-      const create = await fetch(urlFor(d, '/api/context-graph/create'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
-        body: JSON.stringify({ id: cgId, name: cgId }),
-      });
-      expect([200, 201]).toContain(create.status);
+      // This test exercises WM identity isolation, so use a system CG whose
+      // read authority is local and deterministic. A newly created ordinary
+      // CG first probes the shared Hardhat name registry; under shard load that
+      // probe can hit its 2.5 s fail-closed timeout, making both the cross-agent
+      // and owner reads return an unrelated empty result.
+      const cgId = SYSTEM_CONTEXT_GRAPHS.ONTOLOGY;
 
       // Codex review on PR #242: without seeded data in A's WM, an
       // empty `cross.bindings` is meaningless — it'd pass even if
@@ -1619,6 +1907,7 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
         contextGraphId: cgId,
         view: 'working-memory',
         agentAddress: defaultAgentAddress,
+        assertionName,
       });
       expect(cross.status).toBe(200);
       expect(cross.body?.result?.bindings ?? []).toEqual([]);
@@ -1637,6 +1926,7 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
           contextGraphId: cgId,
           view: 'working-memory',
           agentAddress: defaultAgentAddress,
+          assertionName,
         }),
       });
       expect(adminRes.status).toBe(200);
@@ -1664,6 +1954,7 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
           contextGraphId: cgId,
           view: 'working-memory',
           agentAddress: agentB.agentAddress,
+          assertionName,
         }),
       });
       expect(
@@ -1784,6 +2075,7 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
         agentAddress: defaultAgentAddress,
       });
       expect(askRes.status).toBe(200);
+      expect(askRes.body?.result).toMatchObject({ type: 'boolean', value: false });
       expect(
         askRes.body?.result?.bindings,
         `ASK deny should be shaped as [{result:'false'}] — got ${JSON.stringify(askRes.body?.result)}`,
@@ -1800,6 +2092,7 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
         agentAddress: defaultAgentAddress,
       });
       expect(constructRes.status).toBe(200);
+      expect(constructRes.body?.result?.type).toBe('quads');
       expect(constructRes.body?.result?.bindings ?? []).toEqual([]);
       expect(
         constructRes.body?.result?.quads,
@@ -1814,6 +2107,7 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
         agentAddress: defaultAgentAddress,
       });
       expect(selectRes.status).toBe(200);
+      expect(selectRes.body?.result?.type).toBe('bindings');
       expect(selectRes.body?.result?.bindings ?? null).toEqual([]);
     },
     60_000,
@@ -2146,21 +2440,27 @@ describe('CLI-13 / CLI-14 — shutdown signal exit codes & timer cleanup', () =>
   }, 120_000);
 });
 
-// Issue #1596: POST /api/subscribe must not 403 a caller off the allowlist when
-// the CG's explicit accessPolicy is "public". On a public CG the allowlist gates
-// PUBLISHERS, not subscribers, so an allowlist entry must not turn a public CG
-// into invite-only-to-join. An explicit-private CG must still 403. The route now
-// defers to the resolver's `isPrivateContextGraph` (the #865 single source of
-// truth) instead of gating on "allowlist non-empty" alone.
-describe('#1596 — subscribe allowlist gate respects explicit public accessPolicy', () => {
+// Issue #1596 + RFC-64 release certification: POST /api/subscribe delegates to
+// the unified read-authority boundary. Public CGs remain subscribable, while a
+// private CG with no local `_meta` allowlist must still deny a non-member before
+// any durable subscription or catch-up job is created.
+describe('#1596 — subscribe gate uses fail-closed read authority', () => {
   const CALLER = '0x0000000000000000000000000000000000000001';
-  const OTHER = '0x00000000000000000000000000000000000000ff';
 
   async function subscribeWith(opts: {
-    isPrivate: boolean | 'throw';
-    allowlist: string[];
-  }): Promise<{ status: number; subscribeCalled: boolean }> {
-    const contextGraphId = 'cg-1596-' + Math.random().toString(36).slice(2, 8);
+    authority: 'allowed' | 'denied' | 'unavailable' | 'throw';
+    contextGraphId?: string;
+    onChainId?: bigint;
+  }): Promise<{
+    status: number;
+    body: Record<string, unknown>;
+    retryAfter: string | null;
+    subscribeCalled: boolean;
+    subscribeOptions: Record<string, unknown> | undefined;
+    catchupJobs: number;
+  }> {
+    const contextGraphId = opts.contextGraphId
+      ?? 'cg-1596-' + Math.random().toString(36).slice(2, 8);
     const catchupTracker = {
       jobs: new Map<string, any>(),
       latestByContextGraph: new Map<string, string>(),
@@ -2185,20 +2485,49 @@ describe('#1596 — subscribe allowlist gate respects explicit public accessPoli
     } as any;
 
     let subscribeCalled = false;
+    let subscribeOptions: Record<string, unknown> | undefined;
+    let observedReadOpts: {
+      callerAgentAddress?: string;
+      allowSubscriptionFallback?: boolean;
+    } | undefined;
     let routeServer: Server | null = null;
     try {
       routeServer = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
-          getContextGraphAllowedAgents: async () => opts.allowlist,
-          isPrivateContextGraph: async () => {
-            if (opts.isPrivate === 'throw') throw new Error('policy read failed');
-            return opts.isPrivate;
+          resolveContextGraphSubscriptionBootstrapAuthority: async (
+            _id: string,
+            readOpts: {
+              callerAgentAddress?: string;
+              allowSubscriptionFallback?: boolean;
+            },
+          ) => {
+            observedReadOpts = readOpts;
+            if (opts.authority === 'throw') throw new Error('authority read failed');
+            return {
+              outcome: opts.authority,
+              source: 'registered-chain' as const,
+              reason: opts.authority === 'allowed'
+                ? 'chain-public'
+                : opts.authority === 'denied'
+                  ? 'agent-not-in-chain-roster'
+                  : 'chain-access-policy-unavailable',
+              metadataBootstrap: opts.authority === 'denied'
+                ? 'forbidden' as const
+                : 'eligible' as const,
+              ...(opts.onChainId === undefined ? {} : { onChainId: opts.onChainId }),
+            };
           },
           getDefaultAgentAddress: () => CALLER,
           getSubscribedContextGraphs: () => new Map(),
-          subscribeToContextGraph: () => {
+          subscribeToContextGraph: (_id: string, options: Record<string, unknown>) => {
             subscribeCalled = true;
+            subscribeOptions = options;
+            return {
+              subscribed: true,
+              synced: false,
+              syncMode: 'always-on' as const,
+            };
           },
           contextGraphHasLocalContent: async () => false,
           markContextGraphSubscriptionState: () => {},
@@ -2233,8 +2562,8 @@ describe('#1596 — subscribe allowlist gate respects explicit public accessPoli
           routePlugins: [],
           url,
           path: url.pathname,
-          requestToken: undefined,
           requestAgentAddress: CALLER,
+          authentication: requestAuthentication({ kind: 'nodeOperator' }),
         } as any);
         if (!res.writableEnded) {
           res.statusCode = 404;
@@ -2254,7 +2583,18 @@ describe('#1596 — subscribe allowlist gate respects explicit public accessPoli
           body: JSON.stringify({ contextGraphId, includeSharedMemory: false }),
         },
       );
-      return { status: response.status, subscribeCalled };
+      expect(observedReadOpts).toEqual({
+        callerAgentAddress: CALLER,
+        allowSubscriptionFallback: false,
+      });
+      return {
+        status: response.status,
+        body: await response.json() as Record<string, unknown>,
+        retryAfter: response.headers.get('retry-after'),
+        subscribeCalled,
+        subscribeOptions,
+        catchupJobs: catchupTracker.jobs.size,
+      };
     } finally {
       daemonState.catchupRunner = previousCatchupRunner;
       if (routeServer) {
@@ -2267,32 +2607,58 @@ describe('#1596 — subscribe allowlist gate respects explicit public accessPoli
 
   it('does NOT 403 a non-allowlisted caller on an explicit-public CG', async () => {
     const { status, subscribeCalled } = await subscribeWith({
-      isPrivate: false, // accessPolicy="public"
-      allowlist: [OTHER], // caller is NOT in it
+      authority: 'allowed',
     });
     expect(status).toBe(200);
     expect(subscribeCalled).toBe(true);
   });
 
-  it('still 403s a non-allowlisted caller on an explicit-private CG', async () => {
-    const { status, subscribeCalled } = await subscribeWith({
-      isPrivate: true, // accessPolicy="private" / curated
-      allowlist: [OTHER],
+  it('carries an admission-authorized numeric slot into the durable subscription boundary', async () => {
+    const result = await subscribeWith({
+      authority: 'allowed',
+      contextGraphId: '298',
+      onChainId: 298n,
     });
-    expect(status).toBe(403);
-    expect(subscribeCalled).toBe(false);
+    expect(result.status).toBe(200);
+    expect(result.subscribeOptions).toEqual({
+      syncMode: 'always-on',
+      onChainId: '298',
+    });
   });
 
-  it('keeps the allowlist gate CLOSED (403) when the privacy resolver read fails', async () => {
-    // Fix 1 fails closed: `isPrivateContextGraph(...).catch(() => true)`. A
-    // resolver error must keep the curated gate, never fall open to public —
-    // otherwise a future fail-open regression would silently pass the cases
-    // above while letting a non-allowlisted caller subscribe. (#1599 review.)
-    const { status, subscribeCalled } = await subscribeWith({
-      isPrivate: 'throw',
-      allowlist: [OTHER],
+  it('403s a private non-member even when no local allowlist is available', async () => {
+    const { status, subscribeCalled, catchupJobs } = await subscribeWith({
+      authority: 'denied',
     });
     expect(status).toBe(403);
     expect(subscribeCalled).toBe(false);
+    expect(catchupJobs).toBe(0);
+  });
+
+  it('returns a retryable 503 when typed read authority is unavailable', async () => {
+    const result = await subscribeWith({
+      authority: 'unavailable',
+    });
+    expect(result.status).toBe(503);
+    expect(result.body).toMatchObject({
+      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+      retryable: true,
+    });
+    expect(result.retryAfter).toBe('3');
+    expect(result.subscribeCalled).toBe(false);
+    expect(result.catchupJobs).toBe(0);
+  });
+
+  it('returns the same retryable 503 when authority resolution throws', async () => {
+    const result = await subscribeWith({
+      authority: 'throw',
+    });
+    expect(result.status).toBe(503);
+    expect(result.body).toMatchObject({
+      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+      retryable: true,
+    });
+    expect(result.subscribeCalled).toBe(false);
+    expect(result.catchupJobs).toBe(0);
   });
 });

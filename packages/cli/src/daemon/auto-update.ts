@@ -25,11 +25,10 @@ import {
 import {
   readFile, writeFile, mkdir, rm, chmod, copyFile, stat, rename, unlink,
 } from 'node:fs/promises';
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { randomUUID, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-
 import {
   dkgDir,
   releasesDir,
@@ -44,6 +43,7 @@ import {
   type DkgConfig,
   type ResolvedAutoUpdateConfig,
 } from '../config.js';
+import type { DaemonNodeCommand } from '../daemon-entrypoint.js';
 import { resolveAutoUpdateGitRef, resolveAutoUpdateGitRefPlan, type AutoUpdateGitRefPlan } from '../auto-update-ref.js';
 import {
   _autoUpdateIo,
@@ -69,6 +69,34 @@ import {
   nodeUiStaticIndexPath,
   runtimeBuildCommandFromPackageJson,
 } from '../node-ui-static.js';
+import { assertNodeRuntimeSupported, type NodeRuntimeProbe } from '../node-runtime-preflight.js';
+import {
+  fetchNpmDistTags,
+} from '../update/npm-registry.js';
+import { cleanGeneratedOutputs, cleanStaleWorkspacePackages } from './auto-update-workspace-clean.js';
+import {
+  checkForNpmVersionUpdate as checkForNpmVersionUpdateShared,
+  getCurrentCliVersion as getCurrentCliVersionShared,
+  resolveLatestNpmVersion as resolveLatestNpmVersionShared,
+  type NpmVersionResult,
+  type NpmVersionStatus,
+} from '../update/npm-version.js';
+export {
+  compareSemver,
+  isPrerelease,
+  isValidSemver,
+} from '../update/npm-registry.js';
+export { deriveUpdateCheckState } from '../update/npm-version.js';
+export type { NpmVersionResult, NpmVersionStatus } from '../update/npm-version.js';
+
+/** Per-invocation updater dependencies for inactive-slot preparation. */
+export interface PerformUpdateDependencies {
+  readonly cleanStaleWorkspacePackages: typeof cleanStaleWorkspacePackages;
+}
+
+const DEFAULT_PERFORM_UPDATE_DEPENDENCIES: PerformUpdateDependencies = Object.freeze({
+  cleanStaleWorkspacePackages,
+});
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -276,216 +304,51 @@ export async function writePendingUpdateState(
 
 // ─── NPM-based auto-update helpers ──────────────────────────────────
 
-/**
- * Query the NPM registry for the latest published version of the CLI package.
- * Uses `dist-tags.latest` by default; when `allowPrerelease` is true, also
- * checks `beta` / `next` tags and picks the highest semver. When `channel`
- * is set, follows ONLY that dist-tag instead (still honouring `allowPrerelease`).
- */
-export type NpmVersionResult =
-  | { version: string; error?: false }
-  | { version: null; error: true }
-  | { version: null; error: false };
-
-// Official semver.org grammar (anchored). Rejects malformed values that a
-// loose shape check would accept (e.g. `10.0.0-alpha..1` — empty prerelease
-// identifier) before they reach `compareSemver` (a non-numeric part makes it
-// return NaN, which is not `<= 0` and would slip the forward-only gate).
-const SEMVER_RE =
-  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
-
-/** True when `v` is a valid semver string. */
-export function isValidSemver(v: string): boolean {
-  return SEMVER_RE.test(v.trim());
+export function getCurrentCliVersion(): string {
+  return getCurrentCliVersionShared(_autoUpdateIo.readFileSync);
 }
 
-/**
- * True when `v` carries a prerelease component (the `-…` segment) — build
- * metadata (`+…`) is NOT a prerelease, so `1.0.0+mainnet-build.1` is stable
- * even though it contains a hyphen. Used for the `allowPrerelease` gate.
- */
-export function isPrerelease(v: string): boolean {
-  return v.trim().split("+")[0].includes("-");
+function loadNpmDistTagsForDaemon() {
+  return fetchNpmDistTags({ fetch: _autoUpdateIo.fetch });
 }
 
+async function readCurrentNpmVersionForDaemon(): Promise<string> {
+  try {
+    return (
+      await _autoUpdateIo.readFile(
+        join(_autoUpdateIo.dkgDir(), '.current-version'),
+        'utf-8',
+      )
+    ).trim();
+  } catch {
+    return getCurrentCliVersion();
+  }
+}
+
+/** Compatibility alias over the canonical update-module implementation. */
 export async function resolveLatestNpmVersion(
-  log: (msg: string) => void,
+  log: (message: string) => void,
   allowPrerelease = true,
   channel?: string,
 ): Promise<NpmVersionResult> {
-  const { fetch } = _autoUpdateIo;
-  const url = `https://registry.npmjs.org/${CLI_NPM_PACKAGE}`;
-  try {
-    const res = await fetch(url, {
-      headers: { Accept: "application/vnd.npm.install-v1+json" },
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!res.ok) {
-      log(
-        `Auto-update (npm): registry returned ${res.status} for ${CLI_NPM_PACKAGE}`,
-      );
-      return { version: null, error: true };
-    }
-    const data = (await res.json()) as { "dist-tags"?: Record<string, string> };
-    const tags = data["dist-tags"];
-    if (!tags) return { version: null, error: true };
-
-    // Channel pin: follow ONLY this dist-tag (e.g. "testnet"), ignoring the
-    // default latest/dev/beta/next set. Lets a cohort track its own release
-    // line without being captured by whatever `latest` points at.
-    if (channel) {
-      const pinned = tags[channel] ?? null;
-      if (!pinned) {
-        log(
-          `Auto-update (npm): channel "${channel}" has no published version, skipping`,
-        );
-        return { version: null, error: false };
-      }
-      if (!isValidSemver(pinned)) {
-        log(
-          `Auto-update (npm): channel "${channel}" → "${pinned}" is not a valid semver, skipping`,
-        );
-        return { version: null, error: false };
-      }
-      if (!allowPrerelease && isPrerelease(pinned)) {
-        log(
-          `Auto-update (npm): channel "${channel}" points at a pre-release and allowPrerelease=false, skipping`,
-        );
-        return { version: null, error: false };
-      }
-      return { version: pinned };
-    }
-
-    const stable = tags.latest ?? null;
-    if (!allowPrerelease) {
-      if (stable && !isPrerelease(stable)) return { version: stable };
-      log(
-        "Auto-update (npm): latest dist-tag is a pre-release and allowPrerelease=false, skipping",
-      );
-      return { version: null, error: false };
-    }
-
-    const candidates = [stable, tags.dev, tags.beta, tags.next].filter(
-      Boolean,
-    ) as string[];
-    if (candidates.length === 0) return { version: null, error: false };
-    candidates.sort((a, b) => compareSemver(b, a));
-    return { version: candidates[0] };
-  } catch (err: any) {
-    log(
-      `Auto-update (npm): registry check failed (${err?.message ?? String(err)})`,
-    );
-    return { version: null, error: true };
-  }
+  return resolveLatestNpmVersionShared(
+    log,
+    allowPrerelease,
+    channel,
+    loadNpmDistTagsForDaemon,
+  );
 }
 
-export function compareSemver(a: string, b: string): number {
-  const pa = a.replace(/^v/, "").split(/[-+]/)[0].split(".").map(Number);
-  const pb = b.replace(/^v/, "").split(/[-+]/)[0].split(".").map(Number);
-  for (let i = 0; i < 3; i++) {
-    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
-  }
-  const stripBuild = (s: string) => s.replace(/\+.*$/, "");
-  const preA = a.includes("-")
-    ? stripBuild(a.split("-").slice(1).join("-"))
-    : "";
-  const preB = b.includes("-")
-    ? stripBuild(b.split("-").slice(1).join("-"))
-    : "";
-  if (!preA && preB) return 1;
-  if (preA && !preB) return -1;
-  return preA.localeCompare(preB, undefined, { numeric: true });
-}
-
-export function getCurrentCliVersion(): string {
-  const { readFileSync } = _autoUpdateIo;
-  try {
-    const pkg = JSON.parse(
-      readFileSync(new URL("../../package.json", import.meta.url), "utf-8"),
-    );
-    return String(pkg.version ?? "").trim();
-  } catch {
-    return "";
-  }
-}
-
-export type NpmVersionStatus = {
-  status: "available" | "up-to-date" | "error" | "no-target";
-  version?: string;
-  /** Set on "no-target": the pinned channel that has no acceptable version. */
-  channel?: string;
-};
-
+/** Compatibility alias over the canonical update-module implementation. */
 export async function checkForNpmVersionUpdate(
   log: (msg: string) => void,
   allowPrerelease = true,
   channel?: string,
 ): Promise<NpmVersionStatus> {
-  const { dkgDir, readFile } = _autoUpdateIo;
-  const versionFile = join(dkgDir(), ".current-version");
-  let currentVersion = "";
-  try {
-    currentVersion = (await readFile(versionFile, "utf-8")).trim();
-  } catch {
-    currentVersion = getCurrentCliVersion();
-  }
-
-  if (!currentVersion) {
-    log("Auto-update (npm): unable to determine current version");
-    return { status: "error" };
-  }
-
-  const result = await resolveLatestNpmVersion(log, allowPrerelease, channel);
-  if (result.version === null) {
-    if (result.error) return { status: "error" };
-    // A pinned channel with no acceptable target (tag missing / prerelease
-    // rejected / non-semver) is NOT a clean "up-to-date" — surface it so a
-    // misconfigured or unpublished channel (e.g. mainnet) is visible rather
-    // than silently reported as current.
-    if (channel) return { status: "no-target", channel };
-    return { status: "up-to-date" };
-  }
-
-  // Never trust a non-semver target through the forward-only gate below
-  // (compareSemver would return NaN, which is not <= 0). The channel path
-  // already guards this upstream; this also covers the default tag set
-  // without changing its candidate selection.
-  if (!isValidSemver(result.version)) {
-    log(
-      `Auto-update (npm): resolved version "${result.version}" is not valid semver, skipping`,
-    );
-    return channel ? { status: "no-target", channel } : { status: "up-to-date" };
-  }
-
-  if (result.version === currentVersion) return { status: "up-to-date" };
-  if (compareSemver(result.version, currentVersion) <= 0)
-    return { status: "up-to-date" };
-
-  return { status: "available", version: result.version };
-}
-
-/**
- * Pure mapping from an {@link NpmVersionStatus} to the daemon's
- * `lastUpdateCheck` fields. Extracted so the runCheck → /api/status
- * derivation is unit-testable. The `no-target` case in particular MUST report
- * `upToDate: true` (there is no update to apply) so `/api/status` does not flip
- * to `updateAvailable: true`; `channelTargetMissing` carries the distinct
- * signal. Returns null for `error` — the caller leaves prior state unchanged.
- */
-export function deriveUpdateCheckState(
-  npmStatus: NpmVersionStatus,
-): { upToDate: boolean; channelTargetMissing: boolean; latestVersion: string } | null {
-  if (npmStatus.status === "error") return null;
-  if (npmStatus.status === "no-target")
-    return { upToDate: true, channelTargetMissing: true, latestVersion: "" };
-  return {
-    upToDate: npmStatus.status === "up-to-date",
-    channelTargetMissing: false,
-    // Only an "available" result has a newer version to report; clear it on
-    // up-to-date / no-target so `/api/status` never shows a stale latestVersion.
-    latestVersion:
-      npmStatus.status === "available" ? npmStatus.version ?? "" : "",
-  };
+  return checkForNpmVersionUpdateShared(log, allowPrerelease, channel, {
+    loadDistTags: loadNpmDistTagsForDaemon,
+    readCurrentVersion: readCurrentNpmVersionForDaemon,
+  });
 }
 
 /**
@@ -640,6 +503,11 @@ async function _performNpmUpdateInner(
         );
       }
     }
+  }
+
+  if (!assertNodeRuntimeSupported(log, (_autoUpdateIo as typeof _autoUpdateIo & { runtime?: NodeRuntimeProbe }).runtime)) {
+    log('Auto-update (npm): refusing slot activation because the current Node runtime cannot run node:sqlite.');
+    return "failed";
   }
 
   await writePendingUpdateState({
@@ -933,92 +801,6 @@ function sweepOrphanBuildProcesses(slotDir: string, log: (m: string) => void): v
 }
 
 /**
- * Wipe per-package `dist/` directories and `tsconfig.tsbuildinfo` files in
- * the slot before building. Called on the default (`forceClean: false`) path
- * because most upstream packages build with bare `tsc`, which does not
- * remove generated files when their source is deleted/renamed. Without this,
- * a fetch-and-rebuild cycle could leave stale `.js` in `dist/` and quietly
- * activate it on the next slot swap. The `forceClean: true` path runs
- * `git clean -fdx` instead (which already covers dist/), so this helper is
- * not called there. We deliberately do NOT touch:
- *   - `node_modules/` (preserved → pnpm install stays incremental)
- *   - `packages/evm-module/cache/` and `.../artifacts/` (Hardhat compile
- *     cache; cold solc builds on ARM64 routinely exceed the build-step
- *     timeout, so this cache is critical to keep)
- *
- * Implemented in pure Node (`readdir` + `rm`/`unlink`) so it has no
- * dependency on POSIX `find`/`rm`. If even the Node implementation fails
- * (e.g. EACCES on `packages/`), we fall back to `git clean -fdx` so we
- * never proceed to build/swap with potentially stale `dist/*.js` from a
- * previous commit. If the fallback also fails the caller throws — better
- * to fail the update than to silently activate stale code.
- */
-async function cleanGeneratedOutputs(
-  targetDir: string,
-  log: (m: string) => void,
-): Promise<void> {
-  const { execFile: execFileAsync, readdir, rm } = _autoUpdateIo;
-  try {
-    const packagesDir = join(targetDir, 'packages');
-    let pkgEntries: Array<{ name: string; isDirectory: () => boolean }>;
-    try {
-      pkgEntries = await readdir(packagesDir, { withFileTypes: true });
-    } catch (err: any) {
-      // No packages/ dir is unusual but not fatal — nothing to clean.
-      if (err?.code === 'ENOENT') {
-        log('Auto-update: no packages/ directory found; nothing to pre-clean.');
-        return;
-      }
-      throw err;
-    }
-    let removedDist = 0;
-    let removedTsBuildInfo = 0;
-    for (const entry of pkgEntries) {
-      if (!entry.isDirectory()) continue;
-      const distPath = join(packagesDir, entry.name, 'dist');
-      const tsBuildInfoPath = join(packagesDir, entry.name, 'tsconfig.tsbuildinfo');
-      // `rm({ recursive: true, force: true })` is a no-op on missing paths.
-      await rm(distPath, { recursive: true, force: true });
-      await rm(tsBuildInfoPath, { force: true });
-      removedDist += 1;
-      removedTsBuildInfo += 1;
-    }
-    // Also wipe packages/cli's generated repo-root copies. The cli build
-    // script (`packages/cli/package.json#build`) copies repo-root
-    // `network/*.json` into `packages/cli/network/` and `project.json` into
-    // `packages/cli/project.json`. Without this step, deleting or renaming a
-    // root network config (e.g. removing `network/devnet.json`) leaves the
-    // stale package-local copy in the inactive slot, and `candidateRoots()`
-    // picks it up after the swap (monorepo-root precedence saves us in dev,
-    // but published-NPM / detached layouts do not have a monorepo ancestor).
-    // Use `force: true` so missing paths are a no-op (e.g. fresh clone where
-    // these have never been generated).
-    const cliPkgDir = join(packagesDir, 'cli');
-    await rm(join(cliPkgDir, 'network'), { recursive: true, force: true });
-    await rm(join(cliPkgDir, 'project.json'), { force: true });
-    await rm(dirname(nodeUiStaticIndexPath(targetDir)), { recursive: true, force: true });
-    log(
-      `Auto-update: cleared stale dist/ (${removedDist} pkgs) + tsconfig.tsbuildinfo (${removedTsBuildInfo} pkgs) + cli/network/ + cli/project.json + node-ui/dist-ui before build (incremental caches preserved).`,
-    );
-  } catch (primaryErr: any) {
-    log(
-      `Auto-update: Node-based pre-build clean failed (${primaryErr?.message ?? String(primaryErr)}); falling back to git clean -fdx.`,
-    );
-    // Fallback wipes more than we'd like (also nukes node_modules + Hardhat
-    // cache, so the next build is cold) but is correct: the alternative is
-    // proceeding with possibly-stale dist/*.js, which is exactly the bug
-    // we're trying to prevent. If even this fails, throw — abort the update
-    // rather than swap a dirty slot.
-    await execFileAsync('git', ['clean', '-fdx'], {
-      cwd: targetDir,
-      encoding: 'utf-8',
-      timeout: 120_000,
-    });
-    log('Auto-update: fallback git clean -fdx completed.');
-  }
-}
-
-/**
  * Core blue-green update logic. Builds the new version in the inactive slot,
  * then atomically swaps the `releases/current` symlink.
  * Returns true if an update was applied (caller should SIGTERM to restart).
@@ -1037,6 +819,8 @@ export interface PerformUpdateOptions {
    * should set this explicitly.
    */
   forceClean?: boolean;
+  /** Typed per-run seam for updater workflow tests and embedded callers. */
+  dependencies?: PerformUpdateDependencies;
 }
 
 export async function performUpdate(
@@ -1076,6 +860,7 @@ async function _performUpdateInner(
   log: (msg: string) => void,
   opts: PerformUpdateOptions,
 ): Promise<UpdateStatus> {
+  const dependencies = opts.dependencies ?? DEFAULT_PERFORM_UPDATE_DEPENDENCIES;
   const { readFile, writeFile, mkdir, existsSync, exec: execAsync, execFile: execFileAsync, dkgDir, releasesDir, activeSlot, inactiveSlot, swapSlot, hasVerifiedBundledMarkItDownBinary, expectedBundledMarkItDownBuildMetadata } = _autoUpdateIo;
   const rDir = releasesDir();
   const activeDir = join(rDir, (await activeSlot()) ?? "a");
@@ -1289,7 +1074,7 @@ async function _performUpdateInner(
   // from an older commit (the bug this whole helper exists to prevent).
   if (!opts.forceClean) {
     try {
-      await cleanGeneratedOutputs(targetDir, log);
+      await cleanGeneratedOutputs(targetDir, log, _autoUpdateIo);
     } catch (cleanErr: any) {
       log(
         `Auto-update: pre-build clean failed in slot ${target} — ${cleanErr?.message ?? String(cleanErr)}. ` +
@@ -1302,6 +1087,7 @@ async function _performUpdateInner(
   const timeouts = resolveBuildTimeouts(au);
 
   try {
+    await dependencies.cleanStaleWorkspacePackages(targetDir, log);
     await runBuildStep(execAsync, "pnpm install --frozen-lockfile", {
       cwd: targetDir,
       timeoutMs: timeouts.install,
@@ -1482,6 +1268,11 @@ async function _performUpdateInner(
     return "failed";
   }
 
+  if (!assertNodeRuntimeSupported(log, (_autoUpdateIo as typeof _autoUpdateIo & { runtime?: NodeRuntimeProbe }).runtime)) {
+    log('Auto-update (git): refusing slot activation because the current Node runtime cannot run node:sqlite.');
+    return "failed";
+  }
+
   await writePendingUpdateState({
     target,
     commit: checkedOutCommit,
@@ -1543,20 +1334,19 @@ export async function performNpmUpdate(
  * version to `~/.dkg/previous-version` so `dkg rollback` (Edge
  * branch) has a target to reinstall.
  *
- * Tradeoffs accepted (per RFC §7.2):
- *   - Non-atomic: a mid-install crash leaves the global state
- *     half-updated. Recovery is `npm install -g` re-run.
- *   - Network-dependent rollback: requires the npm registry to
- *     have the previous version available.
+ * The npm mutation itself is not atomic, so completion is followed by an
+ * executable/version self-check. A failed check immediately reinstalls the
+ * recorded previous version before the daemon is allowed to restart.
  *
- * The function returns `'updated'` after the npm install completes;
- * the caller is responsible for stopping the running daemon so the
- * supervisor respawns from the new entry point (mirrors how the
- * Core path's swap-slot+restart sequence works).
+ * The function returns `'updated'` after the npm install and self-check
+ * complete; the caller is responsible for stopping the running daemon so
+ * the supervisor respawns from the new entry point (mirrors how the Core
+ * path's swap-slot+restart sequence works).
  *
- * Returns `'failed'` on any npm install failure; the previous-version
- * write is best-effort and a write failure does NOT block the install
- * (the operator can still rollback manually via
+ * Returns `'failed'` when the install or executable/version self-check
+ * fails, including after a rollback attempt. The previous-version write is
+ * best-effort and a write failure does NOT block the install (the operator
+ * can still rollback manually via
  * `npm install -g @origintrail-official/dkg@<known-version>`).
  */
 export async function performNpmUpdateEdge(
@@ -1575,7 +1365,13 @@ export async function performNpmUpdateEdge(
     return "failed";
   }
   try {
-    return await _performNpmUpdateInnerEdge(targetVersion, currentVersion, log);
+    const verificationCommand = _autoUpdateIo.resolveDaemonNodeCommand('--version');
+    return await _performNpmUpdateInnerEdge(
+      targetVersion,
+      currentVersion,
+      log,
+      verificationCommand,
+    );
   } finally {
     await releaseUpdateLock();
     _updateInProgress = false;
@@ -1586,11 +1382,12 @@ async function _performNpmUpdateInnerEdge(
   targetVersion: string,
   currentVersion: string | null,
   log: (msg: string) => void,
+  verificationCommand: DaemonNodeCommand,
 ): Promise<UpdateStatus> {
   // Destructure from `_autoUpdateIo` so unit tests can stub each
   // dependency — matches the existing `_performNpmUpdateInner`
   // (Core) pattern.
-  const { writeFile, exec: execAsyncIo, dkgDir } = _autoUpdateIo;
+  const { writeFile, exec: execAsyncIo, execFile: execFileAsyncIo, dkgDir } = _autoUpdateIo;
   const previousVersionPath = join(dkgDir(), "previous-version");
   if (currentVersion && currentVersion.length > 0) {
     try {
@@ -1613,18 +1410,11 @@ async function _performNpmUpdateInnerEdge(
 
   // 5-minute timeout covers slow network + npm registry round-trips on
   // CI / homegrown runners. Any longer is almost certainly a hung process.
-  const installCmd = `npm install -g ${CLI_NPM_PACKAGE}@${targetVersion}`;
+  const installCmd = globalCliInstallCommand(targetVersion);
   log(`Auto-update (npm-edge): running '${installCmd}'…`);
   try {
     const installStart = Date.now();
-    await execAsyncIo(installCmd, {
-      encoding: "utf-8",
-      timeout: 300_000,
-      // Allow npm's progress / warning output to surface in the daemon
-      // log — operators tailing the log get real-time feedback on slow
-      // installs. stderr → stdout merge mirrors how npm itself runs
-      // interactively.
-    });
+    await installGlobalCliVersion(execAsyncIo, targetVersion);
     const installMs = Date.now() - installStart;
     log(`Auto-update (npm-edge): npm install completed in ${installMs}ms.`);
   } catch (installErr: any) {
@@ -1640,11 +1430,122 @@ async function _performNpmUpdateInnerEdge(
     return "failed";
   }
 
-  log(
-    `Auto-update (npm-edge): ${CLI_NPM_PACKAGE}@${targetVersion} installed. ` +
-      "Stop the daemon to restart from the new entry point.",
+  const verificationOutcome = await verifyInstalledCliOrRollback({
+    execIo: execAsyncIo,
+    execFileIo: execFileAsyncIo,
+    targetVersion,
+    currentVersion,
+    verificationCommand,
+    log,
+  });
+  switch (verificationOutcome.kind) {
+    case 'targetVerified':
+      log(`Auto-update (npm-edge): self-check passed (${verificationOutcome.reported}).`);
+      log(
+        `Auto-update (npm-edge): ${CLI_NPM_PACKAGE}@${targetVersion} installed. ` +
+          "Stop the daemon to restart from the new entry point.",
+      );
+      return "updated";
+    case 'rollbackRestored':
+      log(`Auto-update (npm-edge): rollback restored ${verificationOutcome.reported}.`);
+      return 'failed';
+    case 'rollbackUnavailable':
+      log('Auto-update (npm-edge): previous version is unknown; automatic rollback is unavailable.');
+      return 'failed';
+    case 'rollbackFailed':
+      log(`Auto-update (npm-edge): CRITICAL rollback failed — ${verificationOutcome.error}.`);
+      return 'failed';
+  }
+}
+
+type EdgeExec = typeof _autoUpdateIo.exec;
+type EdgeExecFile = typeof _autoUpdateIo.execFile;
+
+type InstalledCliVerificationOutcome =
+  | { kind: 'targetVerified'; reported: string }
+  | { kind: 'rollbackRestored'; reported: string }
+  | { kind: 'rollbackUnavailable' }
+  | { kind: 'rollbackFailed'; error: string };
+
+function globalCliInstallCommand(version: string): string {
+  return `npm install -g ${CLI_NPM_PACKAGE}@${version}`;
+}
+
+async function installGlobalCliVersion(execIo: EdgeExec, version: string): Promise<void> {
+  await execIo(globalCliInstallCommand(version), {
+    encoding: 'utf-8',
+    timeout: 300_000,
+  });
+}
+
+function parseReportedDkgVersion(output: string): string | undefined {
+  return output.match(/(?:^|\s)v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?=\s|$)/)?.[1];
+}
+
+async function verifyGlobalDkgVersion(
+  execFileIo: EdgeExecFile,
+  verificationCommand: DaemonNodeCommand,
+  expectedVersion: string,
+  context: 'self-check' | 'rollback',
+): Promise<string> {
+  const { stdout, stderr } = await execFileIo(
+    verificationCommand.executable,
+    verificationCommand.args,
+    {
+      encoding: 'utf-8',
+      timeout: 30_000,
+    },
   );
-  return "updated";
+  const reported = `${stdout ?? ''} ${stderr ?? ''}`.trim();
+  const parsed = parseReportedDkgVersion(reported);
+  if (parsed !== expectedVersion) {
+    throw new Error(`${context} expected ${expectedVersion}, got ${parsed ?? (reported || 'empty version output')}`);
+  }
+  return reported;
+}
+
+async function verifyInstalledCliOrRollback(options: {
+  execIo: EdgeExec;
+  execFileIo: EdgeExecFile;
+  targetVersion: string;
+  currentVersion: string | null;
+  verificationCommand: DaemonNodeCommand;
+  log: (msg: string) => void;
+}): Promise<InstalledCliVerificationOutcome> {
+  const { execIo, execFileIo, targetVersion, currentVersion, verificationCommand, log } = options;
+  try {
+    const reported = await verifyGlobalDkgVersion(
+      execFileIo,
+      verificationCommand,
+      targetVersion,
+      'self-check',
+    );
+    return { kind: 'targetVerified', reported };
+  } catch (verifyErr: any) {
+    log(`Auto-update (npm-edge): post-install self-check failed — ${verifyErr?.message ?? verifyErr}.`);
+  }
+
+  if (!currentVersion) {
+    return { kind: 'rollbackUnavailable' };
+  }
+
+  const rollbackCmd = globalCliInstallCommand(currentVersion);
+  log(`Auto-update (npm-edge): rolling back with '${rollbackCmd}'…`);
+  try {
+    await installGlobalCliVersion(execIo, currentVersion);
+    const reported = await verifyGlobalDkgVersion(
+      execFileIo,
+      verificationCommand,
+      currentVersion,
+      'rollback',
+    );
+    return { kind: 'rollbackRestored', reported };
+  } catch (rollbackErr: any) {
+    return {
+      kind: 'rollbackFailed',
+      error: String(rollbackErr?.message ?? rollbackErr ?? 'unknown error'),
+    };
+  }
 }
 
 export async function checkForUpdate(

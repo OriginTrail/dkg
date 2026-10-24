@@ -1,6 +1,6 @@
 # CODEOWNERS — required reviewer routing for security-sensitive paths.
 #
-# Branch protection on `main` / `v10-rc` should have "Require review from
+# Branch protection on `main` / `testnet-canary` should have "Require review from
 # Code Owners" enabled (admin task — see
 # docs/security/SUPPLY_CHAIN_HARDENING.md §C). With that toggle on, any
 # PR that touches a path listed below requires an approving review from

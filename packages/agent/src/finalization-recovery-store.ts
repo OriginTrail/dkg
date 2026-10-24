@@ -1,0 +1,380 @@
+import {
+  VerifiedGraphScopedFinalizationEvidenceCodec,
+  type VerifiedGraphScopedFinalizationEvidence,
+} from './finalization-graph-envelope.js';
+
+export const FINALIZATION_INBOX_DATABASE_FILENAME = 'finalization-inbox-v1.sqlite3';
+
+export type FinalizationRecoveryState =
+  | 'RECEIVED'
+  | 'VERIFIED'
+  | 'REORGED'
+  | 'SETTLED'
+  | 'SUPERSEDED'
+  | 'REJECTED'
+  | 'UNSUPPORTED';
+
+export interface FinalizationRecoveryEntry {
+  key: string;
+  state: FinalizationRecoveryState;
+  chainId: string;
+  contextGraphId: string;
+  sourcePeerId?: string;
+  trustedPublisherPeerId?: string;
+  publisherUpgradePending: boolean;
+  ual: string;
+  txHash: string;
+  assertionVersion: string;
+  merkleRoot: string;
+  kaId: string;
+  batchId: string;
+  targetContextGraphId?: string;
+  envelopeSha256: string;
+  rawMessage: Uint8Array;
+  verifiedEvidence?: VerifiedGraphScopedFinalizationEvidence;
+  generation: number;
+  attemptCount: number;
+  failureSignature?: string;
+  failureStreak: number;
+  nextAttemptAt?: number;
+  lastError?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface FinalizationRecoveryReceiveInput {
+  key: string;
+  chainId: string;
+  contextGraphId: string;
+  sourcePeerId?: string;
+  ual: string;
+  txHash: string;
+  assertionVersion: string;
+  merkleRoot: string;
+  kaId: string;
+  batchId: string;
+  targetContextGraphId?: string;
+  rawMessage: Uint8Array;
+}
+
+export type FinalizationRecoveryReceiveResult =
+  | { status: 'inserted'; entry: FinalizationRecoveryEntry }
+  | { status: 'existing'; entry: FinalizationRecoveryEntry }
+  | { status: 'pending' }
+  | { status: 'conflict' }
+  | { status: 'capacity' }
+  | { status: 'closed' };
+
+export type FinalizationRecoveryVerifyResult =
+  | { status: 'verified'; entry: FinalizationRecoveryEntry }
+  | { status: 'existing'; entry: FinalizationRecoveryEntry }
+  | { status: 'conflict' }
+  | { status: 'missing' }
+  | { status: 'closed' };
+
+export type FinalizationRecoveryVerifiedEvidenceCommit =
+  | {
+      evidence: VerifiedGraphScopedFinalizationEvidence;
+      placement: 'original';
+    }
+  | {
+      evidence: VerifiedGraphScopedFinalizationEvidence;
+      placement: 'canonical-moved';
+      reason: string;
+    };
+
+export interface FinalizationRecoveryVerifiedEvidenceUpdate {
+  state: 'VERIFIED';
+  verifiedEvidence: VerifiedGraphScopedFinalizationEvidence;
+  generation: number;
+  attemptCount: number;
+  nextAttemptAt: number | null;
+  lastError: string | null;
+  failureSignature: string | null;
+  failureStreak: number;
+}
+
+export type FinalizationRecoveryVerifiedEvidenceTransitionPlan =
+  | { status: 'update'; fields: FinalizationRecoveryVerifiedEvidenceUpdate }
+  | { status: 'existing'; entry: FinalizationRecoveryEntry }
+  | { status: 'conflict' };
+
+/**
+ * Plans the domain transition before a store applies it atomically. Generation
+ * remains the compare-and-swap token; placement decides whether this commit
+ * preserves or advances it.
+ */
+export function planFinalizationRecoveryVerifiedEvidenceTransition(
+  current: FinalizationRecoveryEntry,
+  generation: number,
+  commit: FinalizationRecoveryVerifiedEvidenceCommit,
+): FinalizationRecoveryVerifiedEvidenceTransitionPlan {
+  const { evidence } = commit;
+  if (current.generation !== generation) return { status: 'conflict' };
+  if (current.verifiedEvidence) {
+    return VerifiedGraphScopedFinalizationEvidenceCodec.same(
+      current.verifiedEvidence,
+      evidence,
+    )
+      ? { status: 'existing', entry: current }
+      : { status: 'conflict' };
+  }
+  if (
+    (current.state !== 'RECEIVED' && current.state !== 'REORGED')
+    || (
+      commit.placement === 'canonical-moved'
+      && (current.state !== 'RECEIVED' || generation !== 0)
+    )
+    || current.txHash.toLowerCase() !== evidence.transactionHash.toLowerCase()
+    || current.assertionVersion !== evidence.assertionVersion
+  ) return { status: 'conflict' };
+
+  return {
+    status: 'update',
+    fields: {
+      state: 'VERIFIED',
+      verifiedEvidence: evidence,
+      generation: commit.placement === 'canonical-moved'
+        ? generation + 1
+        : generation,
+      attemptCount: commit.placement === 'canonical-moved'
+        ? 0
+        : current.attemptCount,
+      nextAttemptAt: commit.placement === 'canonical-moved'
+        ? null
+        : current.nextAttemptAt ?? null,
+      lastError: commit.placement === 'canonical-moved'
+        ? commit.reason
+        : current.lastError ?? null,
+      failureSignature: commit.placement === 'canonical-moved'
+        ? null
+        : current.failureSignature ?? null,
+      failureStreak: commit.placement === 'canonical-moved'
+        ? 0
+        : current.failureStreak,
+    },
+  };
+}
+
+export type FinalizationRecoverySettledPublisherUpgradeResult =
+  | { status: 'recorded' | 'existing'; entry: FinalizationRecoveryEntry }
+  | { status: 'conflict' | 'missing' | 'closed' };
+
+export type FinalizationRecoveryFailureCode =
+  | 'workspace-unavailable'
+  | 'publisher-authority-pending'
+  | 'receipt-pending'
+  | 'context-graph-binding-pending'
+  | 'evidence-commit-pending'
+  | 'apply-deferred'
+  | 'vm-metadata-pending'
+  | 'store-scheduler-busy'
+  | 'background-chain-unavailable'
+  | 'background-binding-pending'
+  | 'background-no-match'
+  | 'background-replay-failed'
+  | 'settled-upgrade-deferred'
+  | 'settled-reorg-deferred';
+
+/** Consecutive identical failures after which a failure counts as stable. */
+export const FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD = 3;
+
+/**
+ * Failures that clear on their own: a store scheduler that stays busy frees
+ * up once the background work in front of it drains. They retry on the
+ * ordinary bounded backoff and never count toward a stable-failure streak, so
+ * they cannot trigger the stable-failure retry delay or the streak-based
+ * rejection of a live entry.
+ */
+export const FINALIZATION_RECOVERY_TRANSIENT_FAILURE_CODES: ReadonlySet<FinalizationRecoveryFailureCode> =
+  new Set(['store-scheduler-busy']);
+
+export type FinalizationRecoveryAttemptPolicy =
+  | {
+      mode: 'ordinary';
+      retryDelayMs?: number;
+    }
+  | {
+      /**
+       * A failure that clears on its own. It neither extends nor resets
+       * another code's stable-failure streak.
+       */
+      mode: 'transient';
+      retryDelayMs: number;
+      failureCode: FinalizationRecoveryFailureCode;
+    }
+  | {
+      mode: 'stable-failure';
+      retryDelayMs: number;
+      failureCode: FinalizationRecoveryFailureCode;
+      stableFailureThreshold: number;
+      stableFailureRetryMs: number;
+      /** A stable live failure must be reconsidered no later than this time. */
+      retryDeadlineAt: number;
+    };
+
+export type FinalizationRecoveryAttemptResult =
+  | { status: 'updated'; entry: FinalizationRecoveryEntry }
+  | { status: 'stale' | 'closed' };
+
+export interface FinalizationRecoveryAttemptUpdate {
+  attemptCount: number;
+  lastError: string | null;
+  failureSignature: string | null;
+  failureStreak: number;
+  nextAttemptAt: number | null;
+}
+
+/** Pure retry policy over one durable entry snapshot. */
+export function planFinalizationRecoveryAttempt(
+  current: FinalizationRecoveryEntry,
+  lastError: string | undefined,
+  policy: FinalizationRecoveryAttemptPolicy,
+  now: number,
+): FinalizationRecoveryAttemptUpdate {
+  if (policy.mode === 'transient') {
+    // Older releases counted this code as a stable failure. That streak is no
+    // evidence of a stable failure, so it is dropped here.
+    const legacyStreak = current.failureSignature === policy.failureCode;
+    return {
+      attemptCount: current.attemptCount + 1,
+      lastError: lastError ?? null,
+      failureSignature: legacyStreak ? null : current.failureSignature ?? null,
+      failureStreak: legacyStreak ? 0 : current.failureStreak,
+      // This attempt ran, so a later due time left by an earlier stable
+      // failure (an entry woken early by chain reconciliation) is obsolete.
+      nextAttemptAt: now + Math.max(0, policy.retryDelayMs),
+    };
+  }
+  const failureSignature = policy.mode === 'stable-failure'
+    ? policy.failureCode
+    : undefined;
+  const failureStreak = failureSignature === undefined
+    ? 0
+    : current.failureSignature === failureSignature
+      ? current.failureStreak + 1
+      : 1;
+  let delayMs = policy.retryDelayMs;
+  if (
+    policy.mode === 'stable-failure'
+    && failureStreak >= policy.stableFailureThreshold
+  ) {
+    delayMs = Math.max(policy.retryDelayMs, policy.stableFailureRetryMs);
+  }
+  let nextAttemptAt = delayMs === undefined
+    ? current.nextAttemptAt ?? null
+    : Math.max(current.nextAttemptAt ?? 0, now + Math.max(0, delayMs));
+  if (
+    policy.mode === 'stable-failure'
+    && failureStreak >= policy.stableFailureThreshold
+    && nextAttemptAt !== null
+  ) {
+    // Only stable failures are capped. Once the deadline has elapsed this
+    // immediate due time is safe because replay's next pass terminally rejects
+    // the live entry. Ordinary and SETTLED retries retain their future backoff.
+    nextAttemptAt = Math.min(nextAttemptAt, Math.max(now, policy.retryDeadlineAt));
+  }
+  return {
+    attemptCount: current.attemptCount + 1,
+    lastError: lastError ?? null,
+    failureSignature: failureSignature ?? null,
+    failureStreak,
+    nextAttemptAt,
+  };
+}
+
+export interface FinalizationRecoveryHealth {
+  available: boolean;
+  closed: boolean;
+  ready?: boolean;
+  canonicalReceiptCapability?: 'supported' | 'unsupported' | 'not-configured' | 'unknown';
+  degradedReason?: string;
+  stateCounts: Partial<Record<FinalizationRecoveryState, number>>;
+  livePayloadBytes: number;
+  dueEntries: number;
+  deferredEntries?: number;
+  deferredPayloadBytes?: number;
+  oldestDueAgeMs?: number;
+  oldestPendingAgeMs?: number;
+  oldestDeferredAgeMs?: number;
+}
+
+export interface FinalizationRecoveryStore {
+  readonly closed: boolean;
+  /** Reloads one entry after waiting on an in-process serialization boundary. */
+  get(key: string): Promise<FinalizationRecoveryEntry | undefined>;
+  receive(input: FinalizationRecoveryReceiveInput): Promise<FinalizationRecoveryReceiveResult>;
+  /** Moves a bounded oldest-first deferred snapshot into the live inbox. */
+  promotePending(limit: number): Promise<number>;
+  /** Monotonically records publisher authority validated while an envelope is deferred. */
+  recordPendingTrustedPublisher(
+    key: string,
+    publisherPeerId: string,
+  ): Promise<boolean>;
+  recordTrustedPublisher(
+    key: string,
+    generation: number,
+    publisherPeerId: string,
+  ): Promise<boolean>;
+  /** Persists validated late-publisher authority without changing settled evidence. */
+  recordSettledPublisherUpgrade(
+    key: string,
+    generation: number,
+    publisherPeerId: string,
+  ): Promise<FinalizationRecoverySettledPublisherUpgradeResult>;
+  /** Caller-validated authority upgrade; SQLite only enforces monotonic CAS state. */
+  rearmSettledWithTrustedPublisher(
+    key: string,
+    generation: number,
+    publisherPeerId: string,
+    lastError: string,
+  ): Promise<boolean>;
+  /** Atomically records verified evidence and any canonical receipt move. */
+  commitVerifiedEvidence(
+    key: string,
+    generation: number,
+    commit: FinalizationRecoveryVerifiedEvidenceCommit,
+  ): Promise<FinalizationRecoveryVerifyResult>;
+  markReorged(key: string, generation: number, lastError: string): Promise<boolean>;
+  clearSettledRetry(key: string, generation: number): Promise<void>;
+  rejectSettled(key: string, generation: number, lastError: string): Promise<boolean>;
+  isAttemptDue(entry: FinalizationRecoveryEntry): boolean;
+  /**
+   * Returns a bounded, oldest-first snapshot of entries whose persisted retry
+   * gate is open. Callers must still rely on generation-checked transitions:
+   * live gossip or reconciliation may update an entry after this read.
+   */
+  listDue(limit: number): Promise<FinalizationRecoveryEntry[]>;
+  listForKnowledgeAsset(input: {
+    chainId: string;
+    contextGraphId: string;
+    ual: string;
+    kaId: string;
+  }): Promise<FinalizationRecoveryEntry[]>;
+  transition(
+    key: string,
+    generation: number,
+    state: Extract<
+      FinalizationRecoveryState,
+      'SETTLED' | 'SUPERSEDED' | 'REJECTED' | 'UNSUPPORTED'
+    >,
+    lastError?: string,
+  ): Promise<boolean>;
+  recordAttempt(
+    key: string,
+    generation: number,
+    lastError?: string,
+    policy?: FinalizationRecoveryAttemptPolicy,
+  ): Promise<FinalizationRecoveryAttemptResult>;
+  health(): Promise<FinalizationRecoveryHealth>;
+  close(): Promise<void>;
+}
+
+/**
+ * Creates the durable finalization inbox for one agent data directory.
+ * The factory must return a fresh, open store. The agent owns the returned
+ * store and closes it during normal startup rollback or shutdown.
+ */
+export type FinalizationRecoveryStoreFactory = (
+  dataDir: string,
+) => Promise<FinalizationRecoveryStore>;

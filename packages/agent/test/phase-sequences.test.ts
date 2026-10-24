@@ -44,7 +44,6 @@ describe('Gossip handler phase-sequence contract', () => {
       {
         contextGraphExists: async () => false,
         getContextGraphOwner: async () => null,
-        subscribeToContextGraph: () => {},
         setContextGraphSubscription: () => {},
       },
     );
@@ -71,7 +70,6 @@ describe('Gossip handler phase-sequence contract', () => {
       {
         contextGraphExists: async () => false,
         getContextGraphOwner: async () => null,
-        subscribeToContextGraph: () => {},
         setContextGraphSubscription: () => {},
       },
     );
@@ -109,7 +107,6 @@ describe('Gossip handler phase-sequence contract', () => {
       {
         contextGraphExists: async () => false,
         getContextGraphOwner: async () => null,
-        subscribeToContextGraph: () => {},
         setContextGraphSubscription: () => {},
       },
     );

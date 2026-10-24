@@ -1,107 +1,73 @@
 import type { DiscoveryClient } from '../discovery.js';
+import { orderCoresFirst } from './peer-selection.js';
 import {
-  type MultiaddrConnectTarget,
-} from './multiaddr-peer-target.js';
+  connectLibp2pCandidate,
+  type Libp2pConnectCandidate,
+  type PeerResolver,
+} from '@origintrail-official/dkg-core';
 
 interface Libp2pLike {
   getConnections(): Array<{ remotePeer: { toString(): string } }>;
-  dial(peer: unknown): Promise<unknown>;
+  dial(peer: unknown, options?: { signal?: AbortSignal }): Promise<unknown>;
   peerStore: {
     merge(peer: unknown, update: { multiaddrs: unknown[] }): Promise<void>;
   };
 }
 
 const CONNECT_WAIT_TIMEOUT_MS = 5000;
-const CONNECT_WAIT_INTERVAL_MS = 100;
 const DEBUG_SYNC_TRACE = process.env.DKG_DEBUG_SYNC_PROGRESS === '1' || process.env.DKG_DEBUG_SYNC === '1';
-
-async function waitForPeerConnection(
-  libp2p: Libp2pLike,
-  peerId: string,
-  timeoutMs = CONNECT_WAIT_TIMEOUT_MS,
-): Promise<boolean> {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    const connected = libp2p.getConnections().some((conn) => conn.remotePeer.toString() === peerId);
-    if (connected) {
-      return true;
-    }
-    await new Promise((resolve) => setTimeout(resolve, CONNECT_WAIT_INTERVAL_MS));
-  }
-  return false;
-}
 
 export async function connectToMultiaddr(
   libp2p: Libp2pLike,
-  connectTarget: MultiaddrConnectTarget,
+  connectTarget: Libp2pConnectCandidate,
   log?: (message: string) => void,
+  options?: { signal?: AbortSignal },
 ): Promise<void> {
   const debugLog = DEBUG_SYNC_TRACE ? log : undefined;
-  const { multiaddr } = await import('@multiformats/multiaddr');
-  const { multiaddress } = connectTarget;
-
-  if (connectTarget.kind === 'direct') {
-    debugLog?.(`Dialing direct invite multiaddr: ${multiaddress}`);
-    const directTargetPeerId = connectTarget.targetPeerId;
-    await libp2p.dial(multiaddr(multiaddress));
-    if (directTargetPeerId) {
-      const connected = await waitForPeerConnection(libp2p, directTargetPeerId);
-      debugLog?.(`Direct invite connection ${connected ? 'confirmed' : 'not observed before timeout'} for peer ${directTargetPeerId}`);
-      if (!connected) {
-        throw new Error(`Direct target peer ${directTargetPeerId} not observed before timeout`);
-      }
+  try {
+    await connectLibp2pCandidate(libp2p, connectTarget, {
+      expectedPeerId: connectTarget.targetPeerId,
+      signal: options?.signal,
+      timeoutMs: CONNECT_WAIT_TIMEOUT_MS,
+      log: debugLog,
+    });
+  } catch (error) {
+    if (options?.signal?.aborted) throw error;
+    if (error instanceof DOMException && error.name === 'AbortError' && connectTarget.targetPeerId) {
+      const label = connectTarget.kind === 'direct' ? 'Direct target' : 'Circuit target';
+      throw new Error(
+        `${label} peer ${connectTarget.targetPeerId} not observed before timeout`,
+        { cause: error },
+      );
     }
-    return;
-  }
-
-  const { relayMultiaddress, targetPeerId } = connectTarget;
-
-  debugLog?.(`Dialing relay from circuit invite: relay=${relayMultiaddress} targetPeer=${targetPeerId}`);
-  await libp2p.dial(multiaddr(relayMultiaddress));
-
-  const { peerIdFromString } = await import('@libp2p/peer-id');
-  const targetPid = peerIdFromString(targetPeerId);
-  debugLog?.(`Merging circuit target multiaddr into peerStore: targetPeer=${targetPeerId}`);
-  await libp2p.peerStore.merge(targetPid, { multiaddrs: [multiaddr(multiaddress)] });
-  debugLog?.(`Dialing final circuit target peer: ${targetPeerId}`);
-  await libp2p.dial(targetPid);
-  const connected = await waitForPeerConnection(libp2p, targetPeerId);
-  debugLog?.(`Circuit target connection ${connected ? 'confirmed' : 'not observed before timeout'} for peer ${targetPeerId}`);
-  if (!connected) {
-    throw new Error(`Circuit target peer ${targetPeerId} not observed before timeout`);
+    throw error;
   }
 }
 
 export async function ensurePeerConnected(
-  libp2p: Libp2pLike,
-  discovery: DiscoveryClient,
+  peerResolver: Pick<PeerResolver, 'connect'>,
   peerId: string,
+  options: { signal?: AbortSignal } = {},
 ): Promise<void> {
-  const existingConnections = libp2p.getConnections()
-    .filter((conn) => conn.remotePeer.toString() === peerId);
-  if (existingConnections.length > 0) {
-    return;
+  if (options.signal?.aborted) {
+    throw new DOMException('Peer connection aborted', 'AbortError');
   }
-
   try {
-    const { peerIdFromString } = await import('@libp2p/peer-id');
-    const pid = peerIdFromString(peerId);
-
-    try {
-      await libp2p.dial(pid);
-      return;
-    } catch {
-      const agent = await discovery.findAgentByPeerId(peerId);
-      if (!agent?.relayAddress) return;
-
-      const { multiaddr } = await import('@multiformats/multiaddr');
-      const circuitAddr = multiaddr(`${agent.relayAddress}/p2p-circuit/p2p/${peerId}`);
-      await libp2p.peerStore.merge(pid, { multiaddrs: [circuitAddr] });
-      await libp2p.dial(pid);
-    }
-  } catch {
+    await peerResolver.connect(peerId, options);
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
     // Non-fatal — peer may be unreachable.
   }
+}
+
+export interface PrimeCatchupConnectionsOptions {
+  /**
+   * New dials one walk may attempt. Omitted keeps the unbounded walk over the
+   * whole phonebook. When set, core-role profiles come first (`orderCoresFirst`),
+   * each group in discovery order; peers that are connected, are this node, or
+   * advertise no relay do not count.
+   */
+  readonly maxDials?: number;
 }
 
 export async function primeCatchupConnections(
@@ -109,17 +75,25 @@ export async function primeCatchupConnections(
   discovery: DiscoveryClient,
   selfPeerId: string,
   afterDialAdmissionProbe: (peerId: string) => void | Promise<void> = () => undefined,
+  options: PrimeCatchupConnectionsOptions = {},
 ): Promise<void> {
   try {
-    const agents = await discovery.findAgents();
+    const discovered = await discovery.findAgents();
+    const maxDials = options.maxDials;
+    const agents = maxDials === undefined
+      ? discovered
+      : orderCoresFirst(discovered, (agent) => agent.nodeRole === 'core');
     const { peerIdFromString } = await import('@libp2p/peer-id');
     const { multiaddr } = await import('@multiformats/multiaddr');
+    let dials = 0;
     for (const agent of agents) {
+      if (maxDials !== undefined && dials >= maxDials) break;
       if (agent.peerId === selfPeerId) continue;
       const existingConns = libp2p.getConnections()
         .filter((conn) => conn.remotePeer.toString() === agent.peerId);
       if (existingConns.length > 0) continue;
       if (!agent.relayAddress) continue;
+      dials += 1;
 
       try {
         const circuitAddr = multiaddr(`${agent.relayAddress}/p2p-circuit/p2p/${agent.peerId}`);

@@ -1,0 +1,38 @@
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+
+/** Execution surface: JS/TS cases, Python tests/drivers, shell test drivers, and YAML test cases. */
+export function isTestSurface(file) {
+  if (/\.(?:test|spec|test-d)\.[cm]?[jt]sx?$/.test(file)) return true;
+  if (file.endsWith('.py')) return /(?:^|\/)(?:test_[^/]*|[^/]*_test|run_all_tests)\.py$/.test(file);
+  if (file.endsWith('.sh')) return /(?:^|[/_.-])(?:test|tests|e2e|smoke|soak|verify)(?:[/_.-]|$)/.test(file);
+  if (/\.ya?ml$/.test(file)) return /(?:^|\/)(?:test|tests|cases)\//.test(file) || /\.test\.ya?ml$/.test(file);
+  return false;
+}
+
+/** Test files the inventory routes: tracked or unignored and present on disk, optionally under `paths`. */
+export function discoverTestSurface(root, paths = []) {
+  const listed = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', ...paths], { cwd: root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }).split('\0');
+  return [...new Set(listed)].filter(isTestSurface).filter((file) => existsSync(path.join(root, file)));
+}
+
+const matchesRoute = (file, route) => path.posix.matchesGlob(file, route.pattern);
+
+/** The route that owns a file: the first registration whose pattern matches it. */
+function routeFor(file, registrations) {
+  return registrations.find((route) => matchesRoute(file, route));
+}
+
+export function secondaryRoutes(files, registrations) {
+  for (const route of registrations) {
+    if (!route.reason || !route.command || !route.cadence) throw new Error(`incomplete test route ${route.pattern}`);
+    if (!files.some((file) => matchesRoute(file, route))) throw new Error(`stale test route: ${route.pattern}`);
+  }
+  const result = new Map();
+  for (const file of files) {
+    const route = routeFor(file, registrations);
+    if (route) result.set(file, { ...route, command: route.command.replaceAll('{file}', file) });
+  }
+  return result;
+}

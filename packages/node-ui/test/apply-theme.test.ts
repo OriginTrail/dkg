@@ -14,28 +14,34 @@ import { applyTheme } from '../src/ui/lib/applyTheme.js';
  *   - dark   → neither element carries the `light` class
  *   - toggling back to dark must remove the class from BOTH (no orphan
  *     class on `<html>` after a dark→light→dark cycle)
+ *   - `<html>` always carries `data-theme="light|dark"` so auto-themed
+ *     descendants follow the app setting instead of the OS preference
  */
 describe('applyTheme (BUG-004)', () => {
   beforeEach(() => {
     document.documentElement.classList.remove('light');
     document.body.classList.remove('light');
+    document.documentElement.removeAttribute('data-theme');
   });
 
   afterEach(() => {
     document.documentElement.classList.remove('light');
     document.body.classList.remove('light');
+    document.documentElement.removeAttribute('data-theme');
   });
 
   it('light: adds .light to BOTH documentElement AND body', () => {
     applyTheme('light');
     expect(document.documentElement.classList.contains('light')).toBe(true);
     expect(document.body.classList.contains('light')).toBe(true);
+    expect(document.documentElement.getAttribute('data-theme')).toBe('light');
   });
 
-  it('dark: ensures NEITHER element carries .light (clean dark baseline)', () => {
+  it('dark: keeps the clean no-.light baseline and publishes an explicit root marker', () => {
     applyTheme('dark');
     expect(document.documentElement.classList.contains('light')).toBe(false);
     expect(document.body.classList.contains('light')).toBe(false);
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
   });
 
   it('dark→light→dark: cleanly removes the class from documentElement (the BUG-004 reproducer)', () => {
@@ -47,6 +53,7 @@ describe('applyTheme (BUG-004)', () => {
     // so the rubber-band area kept a stale background colour.
     expect(document.documentElement.classList.contains('light')).toBe(false);
     expect(document.body.classList.contains('light')).toBe(false);
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
   });
 
   it('idempotent: applying the same theme twice does not stack duplicate tokens', () => {
@@ -84,8 +91,10 @@ describe('applyTheme (BUG-004)', () => {
     applyTheme('light', fakeDoc);
     expect(fakeHtml.classList.contains('light')).toBe(true);
     expect(fakeBody.classList.contains('light')).toBe(true);
+    expect(fakeHtml.getAttribute('data-theme')).toBe('light');
     // The real document must NOT have been touched.
     expect(document.documentElement.classList.contains('light')).toBe(false);
     expect(document.body.classList.contains('light')).toBe(false);
+    expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
   });
 });

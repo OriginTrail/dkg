@@ -12,7 +12,7 @@
  * comparisons are pure.
  */
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   DEFAULT_PROMOTE_CONTROL_GRAPH_URI,
@@ -25,6 +25,7 @@ import {
   serializeJob,
   uniquenessKey,
 } from '../src/async-promote-queue-utils.js';
+import { PROMOTE_PREREQUISITE_RETRY_WINDOW_MS } from '../src/async-promote-recovery-policy.js';
 import {
   ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
   PROMOTE_JOB_STATES,
@@ -36,6 +37,7 @@ import {
   type PromoteRequest,
 } from '../src/async-promote-queue-types.js';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
+import { PROMOTE_POST_COMMIT_FAILURE_MESSAGE } from '../src/promote-replay-safety.js';
 
 describe('TripleStoreAsyncPromoteQueue', () => {
   let store: OxigraphStore;
@@ -56,6 +58,51 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     });
   }
 
+  it('skips repeated idle scans, wakes immediately for enqueue, and expires external-write hints', async () => {
+    const queue = createQueue();
+    const detach = queue.workScheduling!.attachScheduler({ onWorkAvailable() {} });
+    await queue.claimNext('idle');
+    const query = vi.spyOn(store, 'query');
+    for (let i = 0; i < 10; i++) await queue.claimNext('idle');
+    expect(query).not.toHaveBeenCalled();
+    now += 1_000;
+    await queue.claimNext('idle');
+    expect(query).toHaveBeenCalled();
+    const id = await queue.enqueue(makeRequest());
+    expect((await queue.claimNext('awake'))?.jobId).toBe(id);
+    detach();
+  });
+
+  it('discovers externally persisted work when the reader idle hint expires', async () => {
+    const reader = createQueue();
+    const wake = vi.fn();
+    const detach = reader.workScheduling!.attachScheduler({ onWorkAvailable: wake });
+    try {
+      expect(await reader.claimNext('reader')).toBeNull();
+      const writer = createQueue();
+      const id = await writer.enqueue(makeRequest());
+      expect(wake).not.toHaveBeenCalled();
+      expect(await reader.claimNext('reader')).toBeNull();
+      now += 999;
+      expect(await reader.claimNext('reader')).toBeNull();
+      now += 1;
+      expect((await reader.claimNext('reader'))?.jobId).toBe(id);
+    } finally { detach(); await store.close(); }
+  });
+
+  it('never skips past the known retry deadline', async () => {
+    const queue = createQueue({ backoff: () => 400 });
+    queue.workScheduling!.attachScheduler({ onWorkAvailable() {} });
+    const id = await queue.enqueue(makeRequest());
+    const job = await queue.claimNext('worker');
+    await queue.fail(id, job!.lease!.claimToken, { message: 'retry', retryable: true, classification: 'transient', recordedAt: now });
+    expect(await queue.claimNext('worker')).toBeNull();
+    now += 399;
+    expect(await queue.claimNext('worker')).toBeNull();
+    now += 1;
+    expect((await queue.claimNext('worker'))?.jobId).toBe(id);
+  });
+
   function makeRequest(overrides: Partial<PromoteRequest> = {}): PromoteRequest {
     return {
       contextGraphId: 'graphify',
@@ -70,6 +117,81 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     now += ms;
   }
 
+  it.each([true, false])('returns the committed failure transition after flush (retryable=%s)', async (retryable) => {
+    const queue = createQueue({ backoff: () => 400 });
+    const id = await queue.enqueue(makeRequest());
+    const job = (await queue.claimNext('worker'))!;
+    let release!: () => void;
+    let entered!: () => void;
+    const flushing = new Promise<void>((resolve) => { entered = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const flush = vi.spyOn(store, 'flush').mockImplementation(async () => { entered(); await held; });
+    let settled = false;
+    const failure = queue.fail(id, job.lease!.claimToken, {
+      message: 'attempt failed', retryable, classification: retryable ? 'transient' : 'fatal', recordedAt: now,
+    }).then((transition) => { settled = true; return transition; });
+    try {
+      await flushing;
+      // Let the queue return if it skipped the held persistence acknowledgement.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(settled).toBe(false);
+      release();
+      expect(await failure).toEqual(retryable
+        ? { state: 'failed_retrying', jobId: id, attemptCount: 1, nextRetryAt: now + 400 }
+        : { state: 'failed', jobId: id, attemptCount: 1 });
+      expect((await queue.getStatus(id))?.state).toBe(retryable ? 'failed_retrying' : 'failed');
+    } finally { release(); flush.mockRestore(); await store.close(); }
+  });
+
+  it('does not acknowledge a failure transition when flush loses its acknowledgement', async () => {
+    const queue = createQueue();
+    const id = await queue.enqueue(makeRequest());
+    const job = (await queue.claimNext('worker'))!;
+    const failure = new Error('flush acknowledgement lost');
+    vi.spyOn(store, 'flush').mockRejectedValueOnce(failure);
+    await expect(queue.fail(id, job.lease!.claimToken, {
+      message: 'fatal', retryable: false, classification: 'fatal', recordedAt: now,
+    })).rejects.toBe(failure);
+    expect((await queue.getStatus(id))?.state).toBe('failed');
+    vi.restoreAllMocks();
+    await store.close();
+  });
+
+  it('claims from active rows after restart without transferring terminal history', async () => {
+    const queue = createQueue();
+    const cancelledId = await queue.enqueue(makeRequest());
+    await queue.cancel(cancelledId);
+    const terminal = (await queue.getStatus(cancelledId))!;
+    const history = Array.from({ length: 1_000 }, (_, i) => ({
+      ...terminal,
+      jobId: `history-${i}`,
+      state: i % 2 === 0 ? 'succeeded' as const : 'failed' as const,
+    }));
+    await store.insert(history.flatMap((job) => serializeJob(job, DEFAULT_PROMOTE_CONTROL_GRAPH_URI)));
+    const first = await queue.enqueue(makeRequest({ assertionName: 'active-first' }));
+    advance(1);
+    const second = await queue.enqueue(makeRequest({ assertionName: 'active-second' }));
+    const originalQuery = store.query.bind(store);
+    const candidateCounts: number[] = [];
+    store.query = async (...args) => {
+      const result = await originalQuery(...args);
+      if (args[1]?.source === 'publisher.asyncPromote.claimNext.candidates') {
+        if (result.type !== 'bindings') throw new Error('expected bindings');
+        candidateCounts.push(result.bindings.length);
+      }
+      return result;
+    };
+
+    const restarted = createQueue();
+    expect((await restarted.claimNext('worker-a'))?.jobId).toBe(first);
+    expect((await restarted.claimNext('worker-b'))?.jobId).toBe(second);
+    expect(await restarted.claimNext('worker-c')).toBeNull();
+    expect(candidateCounts).toEqual([2, 2, 2]);
+    expect(await restarted.list({ state: ['running', 'running'] })).toHaveLength(2);
+    expect(await restarted.list({ state: [] })).toHaveLength(1_003);
+    expect(await restarted.list({ state: ['failed', 'succeeded'] })).toHaveLength(1_001);
+  });
+
   /**
    * Wrap an OxigraphStore so the first `flush()` after `arm()` parks until
    * `releaseFlush()` is called. Used by the read/write race tests (5a–5c) to
@@ -79,19 +201,14 @@ describe('TripleStoreAsyncPromoteQueue', () => {
    */
   function makeFlushBlockingStore(base: OxigraphStore): {
     store: TripleStore;
-    arm: () => void;
-    flushStarted: Promise<void>;
-    releaseFlush: () => void;
+    arm: () => { flushStarted: Promise<void>; releaseFlush: () => void };
   } {
-    let blockNextFlush = false;
-    let flushStartedResolve!: () => void;
-    let releaseFlushResolve!: () => void;
-    const flushStarted = new Promise<void>((resolve) => {
-      flushStartedResolve = resolve;
-    });
-    const flushRelease = new Promise<void>((resolve) => {
-      releaseFlushResolve = resolve;
-    });
+    let activeGate: {
+      flushStarted: Promise<void>;
+      flushStartedResolve: () => void;
+      flushRelease: Promise<void>;
+      releaseFlush: () => void;
+    } | null = null;
     const store: TripleStore = {
       createGraph: (graphUri) => base.createGraph(graphUri),
       dropGraph: (graphUri) => base.dropGraph(graphUri),
@@ -105,10 +222,11 @@ describe('TripleStoreAsyncPromoteQueue', () => {
       countQuads: (graphUri) => base.countQuads(graphUri),
       close: () => base.close(),
       flush: async () => {
-        if (blockNextFlush) {
-          flushStartedResolve();
-          await flushRelease;
-          blockNextFlush = false;
+        const gate = activeGate;
+        if (gate) {
+          gate.flushStartedResolve();
+          await gate.flushRelease;
+          if (activeGate === gate) activeGate = null;
         }
         await base.flush?.();
       },
@@ -116,10 +234,18 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     return {
       store,
       arm: () => {
-        blockNextFlush = true;
+        if (activeGate) throw new Error('flush gate is already armed');
+        let flushStartedResolve!: () => void;
+        let releaseFlush!: () => void;
+        const flushStarted = new Promise<void>((resolve) => {
+          flushStartedResolve = resolve;
+        });
+        const flushRelease = new Promise<void>((resolve) => {
+          releaseFlush = resolve;
+        });
+        activeGate = { flushStarted, flushStartedResolve, flushRelease, releaseFlush };
+        return { flushStarted, releaseFlush };
       },
-      flushStarted,
-      releaseFlush: () => releaseFlushResolve(),
     };
   }
 
@@ -432,16 +558,16 @@ describe('TripleStoreAsyncPromoteQueue', () => {
 
   it('5b. list({ state: ["running"] }) waits for an in-flight claim flush before exposing the running row', async () => {
     const base = new OxigraphStore();
-    const { store: blockingStore, arm, flushStarted, releaseFlush } = makeFlushBlockingStore(base);
-    const queue = new TripleStoreAsyncPromoteQueue(blockingStore, {
+    const controlled = makeFlushBlockingStore(base);
+    const queue = new TripleStoreAsyncPromoteQueue(controlled.store, {
       now: () => now,
       idGenerator: () => `job-${++idCounter}`,
     });
 
     await queue.enqueue(makeRequest());
-    arm();
+    const gate = controlled.arm();
     const claimPromise = queue.claimNext('worker-1');
-    await flushStarted;
+    await gate.flushStarted;
 
     let listSettled = false;
     const listPromise = queue.list({ state: ['running'] }).finally(() => {
@@ -450,7 +576,7 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(listSettled).toBe(false);
 
-    releaseFlush();
+    gate.releaseFlush();
     const [claimed, running] = await Promise.all([claimPromise, listPromise]);
     expect(claimed?.state).toBe('running');
     expect(running).toHaveLength(1);
@@ -459,16 +585,17 @@ describe('TripleStoreAsyncPromoteQueue', () => {
 
   it('5c. getStats() waits for an in-flight claim flush before counting the running row', async () => {
     const base = new OxigraphStore();
-    const { store: blockingStore, arm, flushStarted, releaseFlush } = makeFlushBlockingStore(base);
+    const controlled = makeFlushBlockingStore(base);
+    const blockingStore = controlled.store;
     const queue = new TripleStoreAsyncPromoteQueue(blockingStore, {
       now: () => now,
       idGenerator: () => `job-${++idCounter}`,
     });
 
     await queue.enqueue(makeRequest());
-    arm();
+    const gate = controlled.arm();
     const claimPromise = queue.claimNext('worker-1');
-    await flushStarted;
+    await gate.flushStarted;
 
     let statsSettled = false;
     const statsPromise = queue.getStats().finally(() => {
@@ -477,7 +604,7 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(statsSettled).toBe(false);
 
-    releaseFlush();
+    gate.releaseFlush();
     const [claimed, stats] = await Promise.all([claimPromise, statsPromise]);
     expect(claimed?.state).toBe('running');
     expect(stats.running).toBe(1);
@@ -588,6 +715,28 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     expect(claimed?.lease?.claimToken).toMatch(/^worker-1:/);
   });
 
+  it('10a. default lease remains active past the recovery budget and expires after 15 minutes', async () => {
+    const queue = createQueue();
+    const jobId = await queue.enqueue(makeRequest());
+    const firstClaim = await queue.claimNext('worker-1');
+
+    expect(firstClaim?.jobId).toBe(jobId);
+    const firstClaimToken = firstClaim!.lease!.claimToken;
+
+    advance(11 * 60 * 1000);
+    await expect(queue.claimNext('worker-2')).resolves.toBeNull();
+    const stillRunning = await queue.getStatus(jobId);
+    expect(stillRunning?.state).toBe('running');
+    expect(stillRunning?.lease?.claimToken).toBe(firstClaimToken);
+
+    advance((4 * 60 * 1000) + 1);
+    const reclaimed = await queue.claimNext('worker-2');
+    expect(reclaimed?.jobId).toBe(jobId);
+    expect(reclaimed?.state).toBe('running');
+    expect(reclaimed?.lease?.workerId).toBe('worker-2');
+    expect(reclaimed?.lease?.claimToken).not.toBe(firstClaimToken);
+  });
+
   it('11. claimNext() returns null when paused; resume() restores', async () => {
     const queue = createQueue();
     await queue.enqueue(makeRequest());
@@ -614,6 +763,144 @@ describe('TripleStoreAsyncPromoteQueue', () => {
       recordedAt: now,
     });
     expect(await queue.claimNext('worker-1')).toBeNull(); // still backing off
+  });
+
+  it('labels each claimNext store read with its caller-provided operation class', async () => {
+    const sources: Array<string | undefined> = [];
+    const recordingStore = new Proxy(store, {
+      get(target, prop, receiver) {
+        if (prop === 'query') {
+          return (
+            sparql: Parameters<TripleStore['query']>[0],
+            options?: Parameters<TripleStore['query']>[1],
+          ) => {
+            sources.push(options?.source);
+            return target.query(sparql, options);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const queue = new TripleStoreAsyncPromoteQueue(recordingStore, {
+      now: () => now,
+      idGenerator: () => `job-${++idCounter}`,
+    });
+
+    await expect(queue.claimNext('worker-1')).resolves.toBeNull();
+    expect(sources).toEqual([
+      'publisher.asyncPromote.recoverExpired',
+      'publisher.asyncPromote.claimNext.candidates',
+    ]);
+  });
+
+  it('signals the scheduler only after enqueue and recovery persistence completes', async () => {
+    const controlled = makeFlushBlockingStore(store);
+    const queue = new TripleStoreAsyncPromoteQueue(controlled.store, {
+      now: () => now,
+      idGenerator: () => `job-${++idCounter}`,
+    });
+    const notifications: string[] = [];
+    const detach = queue.workScheduling.attachScheduler({
+      onWorkAvailable: () => notifications.push('wake'),
+    });
+
+    const enqueueGate = controlled.arm();
+    const enqueueing = queue.enqueue(makeRequest());
+    await enqueueGate.flushStarted;
+    expect(notifications).toEqual([]);
+    enqueueGate.releaseFlush();
+    const jobId = await enqueueing;
+    expect(notifications).toEqual(['wake']);
+
+    const claimed = await queue.claimNext('worker-1');
+    await queue.fail(jobId, claimed!.lease!.claimToken, {
+      message: 'fatal',
+      retryable: false,
+      classification: 'fatal',
+      recordedAt: now,
+    });
+    expect(notifications).toEqual(['wake']);
+
+    const recoveryGate = controlled.arm();
+    const recovering = queue.recover(jobId);
+    await recoveryGate.flushStarted;
+    expect(notifications).toEqual(['wake']);
+    recoveryGate.releaseFlush();
+    await recovering;
+    expect(notifications).toEqual(['wake', 'wake']);
+
+    detach();
+    await queue.enqueue(makeRequest({ assertionName: 'after-unsubscribe' }));
+    expect(notifications).toEqual(['wake', 'wake']);
+  });
+
+  it('does not signal the scheduler when enqueue persistence rejects', async () => {
+    const rejectingStore = new Proxy(store, {
+      get(target, prop, receiver) {
+        if (prop === 'flush') return async () => { throw new Error('flush rejected'); };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const queue = new TripleStoreAsyncPromoteQueue(rejectingStore, {
+      now: () => now,
+      idGenerator: () => `job-${++idCounter}`,
+    });
+    const notifications: string[] = [];
+    queue.workScheduling.attachScheduler({
+      onWorkAvailable: () => notifications.push('wake'),
+    });
+
+    await expect(queue.enqueue(makeRequest())).rejects.toMatchObject({
+      admissionOutcome: 'indeterminate', cause: new Error('flush rejected'),
+    });
+    expect(notifications).toEqual([]);
+  });
+
+  it('keeps committed enqueue and recovery successful when the scheduler throws', async () => {
+    const queue = createQueue();
+    let notifications = 0;
+    queue.workScheduling.attachScheduler({
+      onWorkAvailable: () => {
+        notifications += 1;
+        throw new Error('scheduler crashed');
+      },
+    });
+
+    const jobId = await queue.enqueue(makeRequest());
+    expect((await queue.getStatus(jobId))?.state).toBe('queued');
+
+    const claimed = await queue.claimNext('worker-1');
+    await queue.fail(jobId, claimed!.lease!.claimToken, {
+      message: 'fatal',
+      retryable: false,
+      classification: 'fatal',
+      recordedAt: now,
+    });
+    await expect(queue.recover(jobId)).resolves.toBeUndefined();
+    expect((await queue.getStatus(jobId))?.state).toBe('queued');
+    expect(notifications).toBe(2);
+  });
+
+  it('hands scheduler ownership over atomically and ignores stale detach', async () => {
+    const queue = createQueue();
+    const notifications: string[] = [];
+    const detachSuperseded = queue.workScheduling.attachScheduler({
+      onWorkAvailable: () => notifications.push('superseded'),
+    });
+    const detachCurrent = queue.workScheduling.attachScheduler({
+      onWorkAvailable: () => notifications.push('current'),
+    });
+
+    await queue.enqueue(makeRequest({ assertionName: 'first' }));
+    detachSuperseded();
+    await queue.enqueue(makeRequest({ assertionName: 'second' }));
+    expect(notifications).toEqual(['current', 'current']);
+
+    detachCurrent();
+    await queue.enqueue(makeRequest({ assertionName: 'detached' }));
+    expect(notifications).toEqual(['current', 'current']);
   });
 
   it('13. claimNext() does NOT pick a second job for the same (cgId, subGraphName, assertionName) while one is running', async () => {
@@ -880,6 +1167,44 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     const job = await queue.getStatus(jobId);
     expect(job?.state).toBe('failed');
     expect(job?.attempt.count).toBe(2); // maxRetries exhausted
+  });
+
+  it('20a. a typed prerequisite failure keeps retrying past maxRetries until the window after enqueue ends (GH#3052)', async () => {
+    const queue = createQueue({ maxRetries: 2, backoff: () => 1 });
+    const jobId = await queue.enqueue(makeRequest());
+    const failOnce = async (diagnosticCode?: string) => {
+      const claimed = await queue.claimNext('worker-1');
+      await queue.fail(jobId, claimed!.lease!.claimToken, {
+        message: 'A promote prerequisite is temporarily unavailable',
+        retryable: true,
+        classification: 'transient',
+        recordedAt: now,
+        ...(diagnosticCode === undefined ? {} : { diagnosticCode }),
+      });
+      advance(10);
+      return queue.getStatus(jobId);
+    };
+
+    await failOnce('PROMOTE_RETRYABLE_FAILURE');
+    // Attempts 2 and 3 are at and past the budget of 2: still retried, and the
+    // row's budget stays what it was.
+    for (const attempt of [2, 3]) {
+      const job = await failOnce('PROMOTE_RETRYABLE_FAILURE');
+      expect(job?.state).toBe('failed_retrying');
+      expect(job?.attempt).toMatchObject({ count: attempt, maxRetries: 2 });
+    }
+    // Any other retryable failure past the base budget ends the job as before.
+    const other = await failOnce();
+    expect(other?.state).toBe('failed');
+    expect(other?.attempt.lastError?.retryable).toBe(true);
+
+    // And so does a prerequisite failure once the window has passed.
+    await queue.recover(jobId);
+    advance(PROMOTE_PREREQUISITE_RETRY_WINDOW_MS);
+    expect((await failOnce('PROMOTE_RETRYABLE_FAILURE'))?.state).toBe('failed_retrying');
+    const late = await failOnce('PROMOTE_RETRYABLE_FAILURE');
+    expect(late?.state).toBe('failed');
+    expect(late?.attempt).toMatchObject({ count: 2, maxRetries: 2 });
   });
 
   it('21. claimNext() picks up a failed_retrying job once nextRetryAt has passed', async () => {
@@ -1601,5 +1926,268 @@ describe('TripleStoreAsyncPromoteQueue', () => {
 
     const jobs = await queue.list();
     expect(jobs.map((j) => j.request.assertionName)).toEqual(['valid']);
+  });
+  // ---------------------------------------------------------------------------
+  // Post-commit recovery sweep
+  // ---------------------------------------------------------------------------
+
+  /** Record the failure the worker persists for a publisher post-commit failure. */
+  async function failPostCommit(
+    queue: AsyncPromoteQueue,
+    jobId: string,
+    claimToken: string,
+    overrides: Partial<Parameters<AsyncPromoteQueue['fail']>[2]> = {},
+  ): Promise<void> {
+    await queue.fail(jobId, claimToken, {
+      message: PROMOTE_POST_COMMIT_FAILURE_MESSAGE,
+      retryable: false,
+      classification: 'fatal',
+      recordedAt: now,
+      diagnosticCode: 'PROMOTE_POST_COMMIT_FAILURE',
+      ...overrides,
+    });
+  }
+
+  it('34. recoverPostCommitFailures() requeues a post-commit failure with backoff and keeps its attempt count', async () => {
+    const queue = createQueue({ backoff: (attempt) => attempt * 1_000 });
+    const jobId = await queue.enqueue(makeRequest());
+    const claimed = await queue.claimNext('worker-1');
+    await failPostCommit(queue, jobId, claimed!.lease!.claimToken);
+    expect((await queue.getStatus(jobId))?.state).toBe('failed');
+
+    advance(10);
+    expect(await queue.recoverPostCommitFailures()).toEqual([{
+      jobId, action: 'requeued', attempt: 1, maxAttempts: 5, nextRetryAt: now + 1_000,
+    }]);
+    const requeued = (await queue.getStatus(jobId))!;
+    expect(requeued.state).toBe('failed_retrying');
+    expect(requeued.attempt).toMatchObject({ count: 1, maxRetries: 5, nextRetryAt: now + 1_000 });
+    expect(requeued.attempt.lastError?.diagnosticCode).toBe('PROMOTE_POST_COMMIT_FAILURE');
+    expect(requeued.attempt.lastError?.retryable).toBe(true);
+    expect(requeued.reason).toBeUndefined();
+    expect(requeued.lease).toBeUndefined();
+
+    // The replay honours the backoff and consumes the job's own retry budget.
+    expect(await queue.claimNext('worker-2')).toBeNull();
+    advance(1_000);
+    const replay = await queue.claimNext('worker-2');
+    expect(replay?.jobId).toBe(jobId);
+    expect(replay?.attempt.count).toBe(2);
+    expect(replay?.commitMarker?.promoteStarted).toBe(false);
+    // Idempotent: a sweep while the replay runs (or after it succeeds) is a no-op.
+    expect(await queue.recoverPostCommitFailures()).toEqual([]);
+    await queue.recordCommitMarker(jobId, replay!.lease!.claimToken, 'swmInserted');
+    await queue.succeed(jobId, replay!.lease!.claimToken, { promotedCount: 0, succeededAt: now });
+    expect(await queue.recoverPostCommitFailures()).toEqual([]);
+    expect((await queue.getStatus(jobId))?.state).toBe('succeeded');
+  });
+
+  it('34a. recoverPostCommitFailures() marks a spent replay budget exhausted exactly once, leaving operator recovery open', async () => {
+    const queue = createQueue({ maxRetries: 2, backoff: () => 100 });
+    const jobId = await queue.enqueue(makeRequest());
+    let claimed = await queue.claimNext('worker-1');
+    await failPostCommit(queue, jobId, claimed!.lease!.claimToken);
+    expect(await queue.recoverPostCommitFailures()).toMatchObject([{ action: 'requeued', attempt: 1, maxAttempts: 2 }]);
+    advance(100);
+    claimed = await queue.claimNext('worker-1');
+    expect(claimed?.attempt.count).toBe(2);
+    await failPostCommit(queue, jobId, claimed!.lease!.claimToken);
+
+    expect(await queue.recoverPostCommitFailures()).toEqual([
+      { jobId, action: 'exhausted', attempt: 2, maxAttempts: 2 },
+    ]);
+    const exhausted = (await queue.getStatus(jobId))!;
+    expect(exhausted.state).toBe('failed');
+    expect(exhausted.reason).toBe('automatic post-commit recovery exhausted after 2 attempts; needs operator inspection');
+    expect(exhausted.attempt.lastError?.diagnosticCode).toBe('PROMOTE_POST_COMMIT_FAILURE');
+    // The verdict is durable: later sweeps neither repeat it nor requeue the row.
+    expect(await queue.recoverPostCommitFailures()).toEqual([]);
+    expect((await queue.getStatus(jobId))?.state).toBe('failed');
+
+    // The manual command keeps working and grants a fresh budget.
+    await queue.recover(jobId);
+    const recovered = (await queue.getStatus(jobId))!;
+    expect(recovered.state).toBe('queued');
+    expect(recovered.attempt.count).toBe(0);
+    expect(recovered.reason).toBeUndefined();
+  });
+
+  it('34b. recoverPostCommitFailures() only touches post-commit failures without an operator reason', async () => {
+    const queue = createQueue();
+    const otherFatal = await queue.enqueue(makeRequest({ assertionName: 'other-fatal' }));
+    let claimed = await queue.claimNext('worker-1');
+    await queue.fail(otherFatal, claimed!.lease!.claimToken, {
+      message: 'assertion not found', retryable: false, classification: 'fatal', recordedAt: now,
+    });
+    const cancelled = await queue.enqueue(makeRequest({ assertionName: 'cancelled' }));
+    await queue.cancel(cancelled);
+    const ambiguous = await queue.enqueue(makeRequest({ assertionName: 'ambiguous' }));
+    claimed = await queue.claimNext('worker-1');
+    await queue.recordCommitMarker(ambiguous, claimed!.lease!.claimToken, 'swmInserted');
+    await failPostCommit(queue, ambiguous, claimed!.lease!.claimToken);
+    const otherDiagnostic = await queue.enqueue(makeRequest({ assertionName: 'other-diagnostic' }));
+    claimed = await queue.claimNext('worker-1');
+    await failPostCommit(queue, otherDiagnostic, claimed!.lease!.claimToken, {
+      diagnosticCode: 'PROMOTE_RETRYABLE_FAILURE',
+    });
+    const legacyRow = await queue.enqueue(makeRequest({ assertionName: 'legacy-row' }));
+    claimed = await queue.claimNext('worker-1');
+    await failPostCommit(queue, legacyRow, claimed!.lease!.claimToken);
+    const legacy = (await queue.getStatus(legacyRow))!;
+    await store.deleteByPattern({ subject: jobSubject(legacyRow), graph: DEFAULT_PROMOTE_CONTROL_GRAPH_URI });
+    await store.insert(serializeJob({ ...legacy, formatVersion: 1 }, DEFAULT_PROMOTE_CONTROL_GRAPH_URI));
+
+    expect(await queue.recoverPostCommitFailures()).toEqual([]);
+    for (const jobId of [otherFatal, cancelled, ambiguous, otherDiagnostic, legacyRow]) {
+      expect((await queue.getStatus(jobId))?.state).toBe('failed');
+    }
+    expect((await queue.getStatus(ambiguous))?.reason).toContain('partial promote ambiguity');
+  });
+
+  it('34c. recoverPostCommitFailures() recognizes rows recorded before the diagnostic code existed by the exact producer message', async () => {
+    const queue = createQueue();
+    const jobId = await queue.enqueue(makeRequest());
+    const claimed = await queue.claimNext('worker-1');
+    await queue.fail(jobId, claimed!.lease!.claimToken, {
+      message: PROMOTE_POST_COMMIT_FAILURE_MESSAGE, retryable: false, classification: 'fatal', recordedAt: now,
+    });
+    expect((await queue.getStatus(jobId))?.attempt.lastError?.diagnosticCode).toBeUndefined();
+    const lookalike = await queue.enqueue(makeRequest({ assertionName: 'lookalike' }));
+    const lookalikeClaim = await queue.claimNext('worker-1');
+    await queue.fail(lookalike, lookalikeClaim!.lease!.claimToken, {
+      message: `${PROMOTE_POST_COMMIT_FAILURE_MESSAGE} (mirrored by a caller)`,
+      retryable: false, classification: 'fatal', recordedAt: now,
+    });
+
+    expect(await queue.recoverPostCommitFailures()).toMatchObject([{ jobId, action: 'requeued' }]);
+    expect((await queue.getStatus(jobId))?.state).toBe('failed_retrying');
+    expect((await queue.getStatus(lookalike))?.state).toBe('failed');
+  });
+
+  it('34d. recoverPostCommitFailures() defers a row whose assertion is owned by another active job', async () => {
+    const queue = createQueue({ backoff: () => 100 });
+    const jobId = await queue.enqueue(makeRequest());
+    const claimed = await queue.claimNext('worker-1');
+    await failPostCommit(queue, jobId, claimed!.lease!.claimToken);
+    const replacement = await queue.enqueue(makeRequest());
+
+    expect(await queue.recoverPostCommitFailures()).toEqual([]);
+    expect((await queue.getStatus(jobId))?.state).toBe('failed');
+    expect((await queue.getStatus(jobId))?.reason).toBeUndefined();
+
+    // Once the conflicting job leaves the active states the row is recovered.
+    await queue.cancel(replacement);
+    expect(await queue.recoverPostCommitFailures()).toMatchObject([{ jobId, action: 'requeued' }]);
+    await expect(queue.enqueue(makeRequest())).rejects.toBeInstanceOf(PromoteJobConflictError);
+  });
+
+  // GH#3067 — shares that fail together (a saturated store, a flapping
+  // authority read) used to come back together: every retry delay was exactly
+  // 60/120/240/480 s. The DEFAULT curve now varies by up to 20 %; a backoff the
+  // caller injects is used as given.
+  describe('default retry backoff jitter (GH#3067)', () => {
+    async function failFirstAttempt(queue: AsyncPromoteQueue, assertionName = 'jitter'): Promise<{ jobId: string; delayMs: number }> {
+      const jobId = await queue.enqueue(makeRequest({ assertionName }));
+      const claimed = await queue.claimNext('worker-1');
+      await queue.fail(jobId, claimed!.lease!.claimToken, {
+        message: 'transient blip', retryable: true, classification: 'transient', recordedAt: now,
+      });
+      const nextRetryAt = (await queue.getStatus(jobId))!.attempt.nextRetryAt!;
+      return { jobId, delayMs: nextRetryAt - now };
+    }
+
+    it('J1. the lower end of the band is 80 % of the first delay', async () => {
+      const { delayMs } = await failFirstAttempt(createQueue({ rand: () => 0 }));
+      expect(delayMs).toBe(48_000);
+    });
+
+    it('J2. the upper end of the band is 120 % of the first delay', async () => {
+      const { delayMs } = await failFirstAttempt(createQueue({ rand: () => 0.999999 }));
+      expect(delayMs).toBe(72_000);
+    });
+
+    it('J3. a midpoint random value reproduces the unjittered 60/120/240/480 s schedule and the budget still ends at attempt 5', async () => {
+      const queue = createQueue({ rand: () => 0.5 });
+      const jobId = await queue.enqueue(makeRequest());
+      const delays: number[] = [];
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        const claimed = await queue.claimNext('worker-1');
+        expect(claimed).not.toBeNull();
+        await queue.fail(jobId, claimed!.lease!.claimToken, {
+          message: `attempt ${attempt}`, retryable: true, classification: 'transient', recordedAt: now,
+        });
+        const job = (await queue.getStatus(jobId))!;
+        if (job.state === 'failed') break;
+        delays.push(job.attempt.nextRetryAt! - now);
+        advance(job.attempt.nextRetryAt! - now + 1);
+      }
+      expect(delays).toEqual([60_000, 120_000, 240_000, 480_000]);
+      const job = (await queue.getStatus(jobId))!;
+      expect(job.state).toBe('failed');
+      expect(job.attempt.count).toBe(5);
+    });
+
+    it('J4. the persisted retry time is an integer even for a random value that does not divide the delay', async () => {
+      const { delayMs } = await failFirstAttempt(createQueue({ rand: () => 0.333333 }));
+      // 60 000 * (1 + 0.2 * (2 * 0.333333 - 1)) = 55 999.992, persisted as an xsd:integer.
+      expect(Number.isInteger(delayMs)).toBe(true);
+      expect(delayMs).toBe(56_000);
+    });
+
+    it('J5. jobs that fail together are scheduled apart', async () => {
+      const draws = [0.05, 0.31, 0.47, 0.62, 0.74, 0.83, 0.9, 0.97];
+      let next = 0;
+      const queue = createQueue({ rand: () => draws[next++ % draws.length] });
+      const delays = new Set<number>();
+      for (let i = 0; i < draws.length; i += 1) {
+        delays.add((await failFirstAttempt(queue, `spread-${i}`)).delayMs);
+      }
+      expect(delays.size).toBe(draws.length);
+      for (const delay of delays) {
+        expect(delay).toBeGreaterThanOrEqual(48_000);
+        expect(delay).toBeLessThanOrEqual(72_000);
+      }
+    });
+
+    it('J6. an injected backoff is used exactly as given', async () => {
+      const { delayMs } = await failFirstAttempt(createQueue({ backoff: () => 1_234, rand: () => 0 }));
+      expect(delayMs).toBe(1_234);
+    });
+
+    it('J7. the longest delay stays under the 15 minute ceiling however high the random value is', async () => {
+      const queue = createQueue({ maxRetries: 12, rand: () => 0.999999 });
+      const jobId = await queue.enqueue(makeRequest());
+      let longest = 0;
+      for (let attempt = 1; attempt <= 11; attempt += 1) {
+        const claimed = await queue.claimNext('worker-1');
+        await queue.fail(jobId, claimed!.lease!.claimToken, {
+          message: `attempt ${attempt}`, retryable: true, classification: 'transient', recordedAt: now,
+        });
+        const job = (await queue.getStatus(jobId))!;
+        const delay = job.attempt.nextRetryAt! - now;
+        longest = Math.max(longest, delay);
+        advance(delay + 1);
+      }
+      expect(longest).toBe(15 * 60_000);
+    });
+
+    it('J8. the post-commit recovery sweep uses the jittered curve too', async () => {
+      const queue = createQueue({ rand: () => 0 });
+      const jobId = await queue.enqueue(makeRequest());
+      const claimed = await queue.claimNext('worker-1');
+      await failPostCommit(queue, jobId, claimed!.lease!.claimToken);
+
+      expect(await queue.recoverPostCommitFailures()).toMatchObject([{ jobId, action: 'requeued', nextRetryAt: now + 48_000 }]);
+    });
+
+    it('J9. without an injected random source the default curve draws from Math.random', async () => {
+      const spy = vi.spyOn(Math, 'random').mockReturnValue(0);
+      try {
+        const { delayMs } = await failFirstAttempt(createQueue());
+        expect(delayMs).toBe(48_000);
+      } finally {
+        spy.mockRestore();
+      }
+    });
   });
 });

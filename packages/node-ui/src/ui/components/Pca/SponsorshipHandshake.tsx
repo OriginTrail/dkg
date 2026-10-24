@@ -1,6 +1,6 @@
 import React from 'react';
-import { WalletRow } from './WalletRow.js';
-import { CopyButton, useCopy } from './CopyButton.js';
+import { WalletRow } from '../Wallet/WalletRow.js';
+import { CopyButton, useCopy } from '../Wallet/CopyButton.js';
 
 /**
  * The asymmetric copy/paste packet between an edge node and a PCA owner (UX

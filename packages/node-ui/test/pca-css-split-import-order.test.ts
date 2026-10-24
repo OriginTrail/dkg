@@ -1,4 +1,4 @@
-// #1354 — the PCA stylesheet was split into six surface files whose combined
+// #1354 — the PCA stylesheet is split into surface files whose combined
 // cascade is correct ONLY when `styles.css` @imports them in source order with
 // `26-pca-followup-overrides.css` LAST (its equal-specificity overrides win by
 // source order alone). The other CSS tests read every file under `src/ui/styles`
@@ -38,12 +38,19 @@ describe('PCA CSS split — styles.css import order (#1354)', () => {
   const imports = stylesCssImports();
   const pcaImports = imports.filter((p) => p.includes('26-pca'));
 
-  it('imports exactly the six PCA split files, in cascade order', () => {
+  it('imports every PCA split file in cascade order', () => {
     expect(pcaImports).toEqual(EXPECTED_PCA_ORDER);
   });
 
   it('imports the follow-up override layer LAST among the PCA files', () => {
     expect(pcaImports[pcaImports.length - 1]).toBe('./styles/26-pca-followup-overrides.css');
+  });
+
+  it('loads node identity-wallet styles as an independent feature layer', () => {
+    const identityIdx = imports.indexOf('./styles/26-identity-wallets.css');
+    const walletIdx = imports.indexOf('./styles/26-wallet-primitives.css');
+    expect(walletIdx).toBeGreaterThanOrEqual(0);
+    expect(identityIdx).toBeGreaterThan(walletIdx);
   });
 
   it('no longer imports (or ships) the pre-split monolithic 26-pca.css', () => {

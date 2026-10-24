@@ -1,9 +1,8 @@
 import { Command } from 'commander';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { spawn, execSync } from 'node:child_process';
 import { createReadStream } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { readFile, writeFile, unlink, appendFile } from 'node:fs/promises';
 import { ethers } from 'ethers';
@@ -15,21 +14,21 @@ import {
   requestFaucetFunding,
   resolveDkgConfigHome,
   toErrorMessage,
-  hasErrorCode,
 } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
   loadConfig, saveConfig, configExists, configPath,
-  readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
+  readApiPort, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
-  releasesDir, activeSlot, swapSlot,
-  slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo,
+  activeSlot, swapSlot,
+  isStandaloneInstall, repoDir, isDkgMonorepo,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
-  readNodeRoleFromConfigSync,
   type AutoUpdateConfig,
 } from './config.js';
+import { resolveDaemonEntryPoint } from './daemon-entrypoint.js';
 import { ApiClient } from './api-client.js';
+import { isTerminalCatchupJobState } from './catchup-status.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from './cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from './store-wizard.js';
 import { runConfiguredSourceWorker } from './source-worker-runner.js';
@@ -51,6 +50,7 @@ import {
 } from './daemon/supervisor-liveness.js';
 import { migrateToBlueGreen, noteEdgeLegacyReleases } from './migration.js';
 import { ensureRollbackNodeUiBundle } from './rollback-node-ui.js';
+import { stopDaemonIfRunning } from './update/stop-daemon.js';
 
 function isDaemonUnreachable(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -183,47 +183,6 @@ async function loadQuadsFromInput(
   process.exit(1);
 }
 
-/**
- * Resolve the daemon entry point passed to spawned worker processes.
- *
- * OT-RFC-41 §4.1 / Bundle B1a: Edge nodes run from the npm-global
- * install (`import.meta.url`). Core nodes keep using blue-green
- * slots (`~/.dkg/releases/current`). The role gate is applied here
- * because the supervisor spawns workers via this entry point on
- * every restart — without the gate, an Edge node that had legacy
- * slots from a pre-rc.12 install would keep running the stale slot
- * forever even after `npm install -g` updated the global.
- */
-/**
- * Absolute path to THIS CLI's own entrypoint module, used to respawn the
- * daemon worker. `resolveDaemonEntryPoint` lives in `cli-helpers`, a sibling
- * of the entry module (`cli.ts` → `cli.js` after `tsc`), so the entry is
- * resolved relative to this file and the extension that actually exists is
- * picked: a built install runs `cli.js`, while running from source (tsx /
- * ts-node) runs `cli.ts`. Hardcoding `.js` would respawn a nonexistent
- * `src/cli.js` under source mode (#962 review). This mirrors the pre-split
- * behavior where the helper lived in `cli.ts` and returned its own
- * `import.meta.url` — i.e. the real current entrypoint in either mode.
- */
-function cliEntryPointPath(): string {
-  const builtEntry = fileURLToPath(new URL('./cli.js', import.meta.url));
-  if (existsSync(builtEntry)) return builtEntry;
-  const sourceEntry = fileURLToPath(new URL('./cli.ts', import.meta.url));
-  if (existsSync(sourceEntry)) return sourceEntry;
-  return builtEntry;
-}
-
-function resolveDaemonEntryPoint(): string {
-  if (process.env.DKG_NO_BLUE_GREEN) return cliEntryPointPath();
-  if (readNodeRoleFromConfigSync() === 'edge') return cliEntryPointPath();
-  const rDir = releasesDir();
-  if (existsSync(rDir)) {
-    const entry = slotEntryPoint(join(rDir, 'current'));
-    if (entry) return entry;
-  }
-  return cliEntryPointPath();
-}
-
 function probeHostForApiHost(apiHost: string | undefined): string {
   if (!apiHost || apiHost === '0.0.0.0') return '127.0.0.1';
   if (apiHost === '::') return '::1';
@@ -242,17 +201,28 @@ type CatchupStatusCommandOptions = { watch?: boolean; interval?: string | number
 
 function printCatchupStatus(status: Awaited<ReturnType<ApiClient['catchupStatus']>>) {
   console.log(`Context Graph: ${status.contextGraphId}`);
+  if (status.resolvedContextGraphId) {
+    console.log(`Resolved To:   ${status.resolvedContextGraphId}`);
+  }
   console.log(`Job:           ${status.jobId}`);
-  console.log(`Status:        ${status.status}`);
+  console.log(`Job Status:    ${status.jobStatus}`);
+  if (status.graphSync) {
+    console.log(`Graph Sync:    ${status.graphSync.state} (${status.graphSync.mechanism})`);
+  }
   console.log(`Shared Memory: ${status.includeWorkspace ? 'enabled' : 'disabled'}`);
   console.log(`Queued:        ${new Date(status.queuedAt).toISOString()}`);
   if (status.startedAt) console.log(`Started:       ${new Date(status.startedAt).toISOString()}`);
   if (status.finishedAt) console.log(`Finished:      ${new Date(status.finishedAt).toISOString()}`);
   if (status.result) {
     const totalConnectedPeers = status.result.totalPeers ?? status.result.connectedPeers;
+    const notAttempted = status.result.peersNotAttempted ?? 0;
     console.log(
-      `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${totalConnectedPeers}), data ${status.result.dataSynced}, shared memory ${status.result.sharedMemorySynced}`,
+      `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${totalConnectedPeers}`
+      + `${notAttempted > 0 ? `, ${notAttempted} not needed` : ''}), data ${status.result.dataSynced}, shared memory ${status.result.sharedMemorySynced}`,
     );
+    if (status.result.deferredBackpressure > 0) {
+      console.log(`Deferred:      ${status.result.deferredBackpressure} phase(s) by local scheduler backpressure`);
+    }
     if (status.result.diagnostics) {
       console.log(
         `Diagnostics:   no-protocol ${status.result.diagnostics.noProtocolPeers}, durable fetched meta/data ${status.result.diagnostics.durable.fetchedMetaTriples}/${status.result.diagnostics.durable.fetchedDataTriples}, inserted meta/data ${status.result.diagnostics.durable.insertedMetaTriples}/${status.result.diagnostics.durable.insertedDataTriples}`,
@@ -267,6 +237,9 @@ function printCatchupStatus(status: Awaited<ReturnType<ApiClient['catchupStatus'
   }
   if (status.error) {
     console.log(`Error:         ${status.error}`);
+  }
+  if (status.identity && status.identity.message !== status.error) {
+    console.log(`Identity:      ${status.identity.message}`);
   }
   if (
     status.result &&
@@ -284,7 +257,6 @@ async function runCatchupStatusCommand(contextGraph: string, opts: CatchupStatus
   const client = await ApiClient.connect();
   const watch = !!opts.watch;
   const intervalSeconds = Math.max(1, Number(opts.interval ?? 2));
-  const terminalStates = new Set(['done', 'failed', 'denied', 'unreachable']);
 
   do {
     const status = await client.catchupStatus(contextGraph);
@@ -293,7 +265,7 @@ async function runCatchupStatusCommand(contextGraph: string, opts: CatchupStatus
       console.log(`Watching catch-up status every ${intervalSeconds}s\n`);
     }
     printCatchupStatus(status);
-    if (!watch || terminalStates.has(status.status)) {
+    if (!watch || isTerminalCatchupJobState(status.jobStatus)) {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, intervalSeconds * 1000));
@@ -396,22 +368,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
 
-/** Returns true if daemon was stopped (or not running). False if it couldn't be stopped. */
-async function stopDaemonIfRunning(): Promise<boolean> {
-  const pid = await readPid();
-  if (!pid || !isProcessRunning(pid)) return true;
-  console.log('Stopping daemon...');
-  try { process.kill(pid, 'SIGTERM'); } catch (err) {
-    if (!hasErrorCode(err, 'ESRCH')) throw err;
-  }
-  for (let i = 0; i < 20; i++) {
-    await sleep(500);
-    if (!isProcessRunning(pid)) return true;
-  }
-  console.error('Daemon is still running after SIGTERM. Stop it manually before restarting.');
-  return false;
-}
-
 export {
   isDaemonUnreachable,
   VERIFY_COLLECTION_TIMEOUT_MIN_MS,
@@ -442,4 +398,3 @@ export {
   stopDaemonIfRunning,
 };
 export type { ActionOpts, CatchupStatusCommandOptions };
-

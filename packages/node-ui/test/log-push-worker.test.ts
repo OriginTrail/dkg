@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { createServer, type Server, type Socket } from 'node:net';
-import { LogPushWorker, type LogPushWorkerOptions } from '../src/gelf-push-worker.js';
+import { LogPushWorker } from '../src/gelf-push-worker.js';
 
 function makeEntry(overrides?: Partial<{
   level: string;

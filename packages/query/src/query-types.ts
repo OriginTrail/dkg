@@ -1,3 +1,5 @@
+import type { StoreSchedulerBusyReason } from '@origintrail-official/dkg-storage';
+
 export type LookupType =
   | 'ENTITY_BY_UAL'
   | 'ENTITIES_BY_TYPE'
@@ -7,11 +9,14 @@ export type LookupType =
 export type QueryStatus =
   | 'OK'
   | 'ERROR'
+  | 'BUSY'
   | 'ACCESS_DENIED'
   | 'RATE_LIMITED'
   | 'NOT_FOUND'
   | 'GAS_LIMIT_EXCEEDED'
   | 'UNSUPPORTED_LOOKUP';
+
+export type NonBusyQueryStatus = Exclude<QueryStatus, 'BUSY'>;
 
 export interface QueryRequest {
   operationId: string;
@@ -25,17 +30,53 @@ export interface QueryRequest {
   timeout?: number;
 }
 
-export interface QueryResponse {
+interface QueryResponseBase {
   operationId: string;
-  status: QueryStatus;
+  truncated: boolean;
+  resultCount: number;
+}
+
+export interface QueryNonBusyResponse extends QueryResponseBase {
+  status: NonBusyQueryStatus;
   ntriples?: string;
   bindings?: string;
   entityUris?: string[];
-  truncated: boolean;
-  resultCount: number;
   gasConsumed?: number;
   error?: string;
+  code?: never;
+  retryable?: never;
+  retryAfterMs?: never;
+  reason?: never;
 }
+
+export interface QueryBusyResponse extends QueryResponseBase {
+  status: 'BUSY';
+  error: string;
+  code: 'STORE_BUSY';
+  retryable: true;
+  retryAfterMs: number;
+  reason: StoreSchedulerBusyReason;
+  ntriples?: never;
+  bindings?: never;
+  entityUris?: never;
+  gasConsumed?: never;
+}
+
+export type QueryResponse = QueryNonBusyResponse | QueryBusyResponse;
+
+type AssertFalse<T extends false> = T;
+type IncompleteBusyResponse = QueryResponseBase & { status: 'BUSY' };
+type ContradictoryOkResponse = QueryResponseBase & {
+  status: 'OK';
+  code: 'STORE_BUSY';
+  retryable: true;
+};
+// Compile-only contract: intentionally private so fixture types do not enter the public API.
+// eslint-disable-next-line no-unused-vars
+type QueryResponseTypeAssertions = [
+  AssertFalse<IncompleteBusyResponse extends QueryResponse ? true : false>,
+  AssertFalse<ContradictoryOkResponse extends QueryResponse ? true : false>,
+];
 
 export interface ContextGraphQueryPolicy {
   policy: 'deny' | 'public' | 'allowList';

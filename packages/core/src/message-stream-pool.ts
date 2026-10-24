@@ -106,13 +106,33 @@ export interface PoolNode {
       protocols: string | string[],
       options?: { runOnLimitedConnection?: boolean; signal?: AbortSignal },
     ) => Promise<Stream>;
+    /**
+     * Raw connection-table walk used as a post-dial fallback. libp2p's
+     * peerId-keyed dial path can report "no valid addresses" while an
+     * inbound relay connection to the same peer is already open. Optional
+     * for structural test stubs; production DKGNode always exposes it.
+     */
+    getConnections?: () => ReadonlyArray<PoolReusableConnection>;
     handle: (
       protocolId: string,
-      handler: (stream: Stream, connection: { remotePeer: { toString: () => string } }) => void,
+      handler: (stream: Stream, connection: { remotePeer: PooledRemotePeerSource }) => void,
       opts?: { runOnLimitedConnection?: boolean },
     ) => void;
     unhandle: (protocolId: string) => void;
   };
+}
+
+interface PoolReusableConnection {
+  status?: string;
+  limits?: unknown;
+  remotePeer?: {
+    equals?: (other: unknown) => boolean;
+    toString?: () => string;
+  };
+  newStream: (
+    protocols: string | string[],
+    options?: { runOnLimitedConnection?: boolean; signal?: AbortSignal },
+  ) => Promise<Stream>;
 }
 
 /**
@@ -125,9 +145,50 @@ export interface PoolNode {
  * handlers, so calling `peerId.toBytes()` from a handler works on
  * both wire variants (Codex PR #560 round-3).
  */
+/**
+ * Canonical peer identity handed to pooled application handlers — the exact
+ * `{ toString, toBytes }` shape the one-shot path provides. Normalized ONCE
+ * from libp2p's `connection.remotePeer` at stream accept
+ * (`normalizePooledPeerId`); nothing downstream re-discovers the shape with
+ * casts, and the pre-read gate reads the same identity string the handler and
+ * the full admission check see.
+ */
+export interface PooledPeerId {
+  toString(): string;
+  toBytes(): Uint8Array;
+}
+
+/**
+ * What libp2p actually hands us at the transport boundary. Production
+ * `PeerId`s carry `toMultihash()`; minimal test doubles may carry only
+ * `toString()` — normalization preserves that tolerance by deferring the
+ * capability error to first `toBytes()` use, exactly as the previous
+ * router-side wrap did.
+ */
+export interface PooledRemotePeerSource {
+  toString(): string;
+  toMultihash?: () => { bytes: Uint8Array };
+  toBytes?: () => Uint8Array;
+}
+
+export function normalizePooledPeerId(remote: PooledRemotePeerSource): PooledPeerId {
+  return {
+    toString: () => remote.toString(),
+    toBytes: () => {
+      if (typeof remote.toMultihash === 'function') {
+        return remote.toMultihash().bytes;
+      }
+      if (typeof remote.toBytes === 'function') {
+        return remote.toBytes();
+      }
+      throw new Error('peerId.toBytes not available on pooled handler');
+    },
+  };
+}
+
 export type PooledStreamHandler = (
   requestData: Uint8Array,
-  peerId: unknown,
+  peerId: PooledPeerId,
   options?: { signal?: AbortSignal },
 ) => Promise<Uint8Array>;
 
@@ -179,6 +240,25 @@ export interface MessageStreamPoolOptions {
    * send budget.
    */
   primePeer?: (peerIdStr: string, opts: { signal?: AbortSignal }) => Promise<void>;
+  /**
+   * Optional synchronous pre-read gate for INBOUND pooled streams, consulted
+   * once per accepted stream — before the frame decoder buffers anything and
+   * before PING keepalives are answered. Return `true` to abort the stream.
+   *
+   * Contract mirrors `ProtocolRouterOptions.isPeerKnownRejected`: it must be
+   * synchronous, perform no I/O, and return `false` when unsure — full
+   * (potentially probing) admission still runs per REQUEST after a frame is
+   * read, exactly as before. A throw from the gate is treated as a rejection:
+   * failing open would silently disable the protection, and letting the throw
+   * escape would leak the stream un-aborted through the accept path's logger.
+   *
+   * When the pool is attached via `ProtocolRouter.enablePooling`, the router
+   * installs this itself (keyed by the pool's LOGICAL protocol id, honoring
+   * `admissionExemptProtocols`); `ProtocolRouterPoolingOptions` omits the field
+   * so a caller cannot supply a value the router would have to discard. Direct
+   * `MessageStreamPool` constructions may configure it freely.
+   */
+  rejectInboundStream?: (peerIdStr: string) => boolean;
 }
 
 interface PendingRequest {
@@ -263,6 +343,7 @@ export class MessageStreamPool {
   private readonly peerIdFromStringOverride?: (s: string) => unknown;
   private peerIdFromString?: (s: string) => unknown;
   private readonly primePeer?: (peerIdStr: string, opts: { signal?: AbortSignal }) => Promise<void>;
+  private readonly rejectInboundStream?: (peerIdStr: string) => boolean;
   private inboundHandler: PooledStreamHandler | null = null;
   private inboundRegistered = false;
   private closed = false;
@@ -296,6 +377,7 @@ export class MessageStreamPool {
     this.clock = options.clock ?? (() => Date.now());
     this.peerIdFromStringOverride = options.peerIdFromString;
     this.primePeer = options.primePeer;
+    this.rejectInboundStream = options.rejectInboundStream;
   }
 
   /** Protocol id this pool advertises on the wire. */
@@ -517,7 +599,7 @@ export class MessageStreamPool {
         // on the one-shot path. Codex PR #560 round-3 caught this:
         // previously only `.toString()` was threaded, which meant
         // pooled traffic broke handlers that worked on one-shot.
-        this.handleInboundStream(stream, connection.remotePeer).catch((err) => {
+        this.handleInboundStream(stream, normalizePooledPeerId(connection.remotePeer)).catch((err) => {
           // eslint-disable-next-line no-console
           console.error(
             `[MessageStreamPool] inbound stream error on ${this.protocolId}:`,
@@ -551,6 +633,28 @@ export class MessageStreamPool {
       ageMs: now - openedAt,
       lastActivityAgoMs: now - state.lastActivityAt,
     };
+  }
+
+  /**
+   * Close the stream held for `peerIdStr` once it is quiescent.
+   * Returns `true` when a live stream existed and was closed;
+   * `false` when the peer holds no stream OR the stream still has
+   * in-flight / queued work.
+   *
+   * The busy case is deliberately left alone rather than force-
+   * aborted: rejecting live requests here would reproduce the exact
+   * all-in-flight-requests-die failure the caller is trying to route
+   * around. Callers that want the stream gone stop feeding it new
+   * sends and invoke this again on their next pass — an active
+   * stream drains naturally (or hits the pool's own idle/reset
+   * teardown) and the retire lands then.
+   */
+  async closePeerIfIdle(peerIdStr: string, reason = 'peer stream retired'): Promise<boolean> {
+    const state = this.peers.get(peerIdStr);
+    if (!state || state.closed) return false;
+    if (state.inFlight !== null || state.queue.length > 0) return false;
+    await this.closePeer(state, reason);
+    return true;
   }
 
   /**
@@ -647,9 +751,30 @@ export class MessageStreamPool {
         }
       }
       const peerId = await this.resolvePeerId(peerIdStr);
-      const stream = await this.node.libp2p.dialProtocol(peerId, this.protocolId, {
-        runOnLimitedConnection: true,
-      });
+      let stream: Stream;
+      try {
+        stream = await this.node.libp2p.dialProtocol(peerId, this.protocolId, {
+          runOnLimitedConnection: true,
+        });
+      } catch (dialError) {
+        // A healthy inbound circuit-relay connection can exist in libp2p's
+        // raw connection table while dialProtocol still fails because its
+        // peerStore address view is empty or stale. This exact split-brain
+        // state was observed during the mainnet 500-KA fan-out gate: peer
+        // diagnostics showed two open relayed connections, yet the pooled
+        // inbox returned "no valid addresses for peer".
+        //
+        // No application bytes have been written yet, so it is safe to open
+        // the pooled protocol directly on an existing connection. We only do
+        // this AFTER the normal dial fails: that preserves direct-dial/DCUtR
+        // preference and avoids pruning a working limited connection during
+        // an automatic direct upgrade. If every live candidate misses, keep
+        // the original dial error so retry classification and diagnostics do
+        // not lose the root cause.
+        const reused = await this.openOnLiveConnection(peerIdStr, peerId);
+        if (!reused) throw dialError;
+        stream = reused;
+      }
       // Race-with-close guard. Codex PR #560 round-4 caught: while
       // `dialProtocol` was awaiting, `pool.close()` may have run.
       // `installState` after close would re-create per-peer state
@@ -691,6 +816,68 @@ export class MessageStreamPool {
       this.peerIdFromString = mod.peerIdFromString;
     }
     return this.peerIdFromString(peerIdStr);
+  }
+
+  /**
+   * Open the pooled protocol on an already-live connection to the target.
+   * Walk the raw table and filter locally: libp2p's peer-keyed lookup is the
+   * stale view in the failure mode this fallback exists to heal.
+   */
+  private async openOnLiveConnection(
+    peerIdStr: string,
+    peerId: unknown,
+  ): Promise<Stream | null> {
+    if (!this.node.libp2p.getConnections) return null;
+
+    let candidates: PoolReusableConnection[];
+    try {
+      // Invoke through `libp2p` rather than an unbound method reference;
+      // some libp2p implementations read private connection-manager state
+      // through `this`.
+      candidates = [...this.node.libp2p.getConnections()].filter((connection) => {
+        const remotePeer = connection.remotePeer;
+        if (!remotePeer) return false;
+        try {
+          if (remotePeer.equals?.(peerId) === true) return true;
+        } catch {
+          // Fall through to the stable string comparison below.
+        }
+        try {
+          return remotePeer.toString?.() === peerIdStr;
+        } catch {
+          return false;
+        }
+      });
+    } catch {
+      return null;
+    }
+
+    // Raw ordering is unspecified. Prefer direct connections, then relay-
+    // limited ones, while retaining freshness order inside each class.
+    candidates.sort((a, b) => Number(Boolean(a.limits)) - Number(Boolean(b.limits)));
+
+    for (const connection of candidates) {
+      if (connection.status && connection.status !== 'open') continue;
+      try {
+        const stream = await connection.newStream(this.protocolId, {
+          runOnLimitedConnection: true,
+          signal: this.node.stopSignal,
+        });
+        if (stream.writeStatus === 'closed' || stream.writeStatus === 'closing') {
+          try {
+            stream.abort(new Error('reused pooled stream returned in closed state'));
+          } catch {
+            // It is already unusable; try the next live connection.
+          }
+          continue;
+        }
+        return stream;
+      } catch {
+        // The connection may have closed between the table walk and
+        // newStream. Continue across other direct/relay paths.
+      }
+    }
+    return null;
   }
 
   private installState(peerIdStr: string, stream: Stream): PerPeerState {
@@ -904,7 +1091,7 @@ export class MessageStreamPool {
     }
   }
 
-  private async handleInboundStream(stream: Stream, remotePeer: unknown): Promise<void> {
+  private async handleInboundStream(stream: Stream, remotePeer: PooledPeerId): Promise<void> {
     const handler = this.inboundHandler;
     if (!handler) {
       // No application handler registered yet — reject the stream
@@ -915,6 +1102,32 @@ export class MessageStreamPool {
         // already torn down
       }
       return;
+    }
+
+    // Pre-read gate: a peer already classified as rejected does not get to
+    // buffer request frames or have its PINGs answered. Consulted once per
+    // accepted stream; peers classified mid-stream are still refused by the
+    // per-REQUEST admission check in the application handler below.
+    if (this.rejectInboundStream) {
+      // The same normalized identity the application handler and the full
+      // admission check receive for this stream's requests.
+      const remotePeerId = remotePeer.toString();
+      let rejected: boolean;
+      try {
+        rejected = this.rejectInboundStream(remotePeerId);
+      } catch {
+        // A throwing gate violates its contract; fail closed rather than
+        // leaking an un-gated stream (see MessageStreamPoolOptions doc).
+        rejected = true;
+      }
+      if (rejected) {
+        try {
+          stream.abort(new Error('pooled inbound stream rejected before read'));
+        } catch {
+          // already torn down
+        }
+        return;
+      }
     }
 
     // Track whether we exited via clean EOF or an error path so the

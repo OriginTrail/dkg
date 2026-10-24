@@ -3,11 +3,9 @@ import { createLogRedactor, type LogRecord } from '@origintrail-official/dkg-cor
 import { createDaemonLogSink, type RemoteLogShipper } from '../src/daemon/log-sink.js';
 
 /**
- * Review coverage gap (PR #1317): the daemon log-sink fan-out is the trust
- * boundary where the LOCAL DB keeps the full record but remote shippers get only
- * a REDACTED copy. These tests exercise the actual fan-out wiring (not just the
- * standalone redactor) so a regression that forwarded the raw record, or skipped
- * a shipper / redaction, fails the build.
+ * The daemon log sink is the trust boundary where the selected remote shipper gets
+ * only a REDACTED copy. Local logging is already handled by daemon.log and must
+ * not add a synchronous SQLite write per record.
  */
 function rec(over: Partial<LogRecord> = {}): LogRecord {
   return { level: 'info', operationName: 'publish', operationId: 'op-1', module: 'test', message: 'hello', ...over };
@@ -19,65 +17,108 @@ function shipper(): RemoteLogShipper & { sent: LogRecord[] } {
 
 const SECRET_MSG = 'loaded operationalWalletPrivateKey=0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef custom_secret=topsecret';
 
-describe('daemon log sink — full local, redacted remote', () => {
-  it('stores the ORIGINAL locally but ships a REDACTED copy to every active shipper', () => {
-    const stored: any[] = [];
-    const syslog = shipper();
+describe('daemon log sink — diagnostics plus selected remote exporter', () => {
+  it('ships one REDACTED copy to the selected shipper', () => {
     const otlp = shipper();
     const sink = createDaemonLogSink({
-      insertLog: (r) => stored.push(r),
+      writeLocalDebug: () => {},
+      insertDiagnosticLog: () => {},
       redact: createLogRedactor(['custom_secret']), // operator extra key honored
-      remoteShippers: () => [syslog, otlp],
+      remoteShipper: () => otlp,
+    });
+
+    sink(rec({ message: SECRET_MSG }));
+
+    expect(otlp.sent).toHaveLength(1);
+    expect(otlp.sent[0].message).toContain('[REDACTED]');
+    expect(otlp.sent[0].message).not.toContain('deadbeef');
+    expect(otlp.sent[0].message).not.toContain('topsecret');
+  });
+
+  it('does not persist routine logs or redact when no remote shipper is active', () => {
+    let redactions = 0;
+    const diagnostics: unknown[] = [];
+    const sink = createDaemonLogSink({
+      writeLocalDebug: () => {},
+      insertDiagnosticLog: (record) => diagnostics.push(record),
+      redact: (record) => {
+        redactions += 1;
+        return record;
+      },
+      remoteShipper: () => null, // exporter:'none' / disabled
+    });
+    sink(rec({ message: SECRET_MSG }));
+    expect(redactions).toBe(0);
+    expect(diagnostics).toEqual([]);
+  });
+
+  it('persists full-fidelity warning and error diagnostics with operation context', () => {
+    const diagnostics: unknown[] = [];
+    const sink = createDaemonLogSink({
+      writeLocalDebug: () => {},
+      insertDiagnosticLog: (record) => diagnostics.push(record),
+      redact: createLogRedactor(),
+      remoteShipper: () => null,
       now: () => 1234,
     });
 
-    sink(rec({ message: SECRET_MSG }));
+    sink(rec({ level: 'warn', message: 'warning' }));
+    sink(rec({ level: 'error', operationId: 'op-2', message: SECRET_MSG }));
 
-    // Local DB: full fidelity (the secret is intact for the operator's own debugging).
-    expect(stored).toHaveLength(1);
-    expect(stored[0].message).toBe(SECRET_MSG);
-    expect(stored[0].ts).toBe(1234);
-
-    // Both remote shippers: redacted, identical, secrets gone.
-    for (const s of [syslog, otlp]) {
-      expect(s.sent).toHaveLength(1);
-      expect(s.sent[0].message).toContain('[REDACTED]');
-      expect(s.sent[0].message).not.toContain('deadbeef');
-      expect(s.sent[0].message).not.toContain('topsecret');
-    }
+    expect(diagnostics).toEqual([
+      {
+        ts: 1234,
+        level: 'warn',
+        operation_name: 'publish',
+        operation_id: 'op-1',
+        module: 'test',
+        message: 'warning',
+      },
+      {
+        ts: 1234,
+        level: 'error',
+        operation_name: 'publish',
+        operation_id: 'op-2',
+        module: 'test',
+        message: SECRET_MSG,
+      },
+    ]);
   });
 
-  it('pushes to NO remote shipper when none are active (logs stay local)', () => {
-    const stored: any[] = [];
-    const sink = createDaemonLogSink({
-      insertLog: (r) => stored.push(r),
-      redact: createLogRedactor(),
-      remoteShippers: () => [null, undefined], // exporter:'none' / disabled
-    });
-    sink(rec({ message: SECRET_MSG }));
-    expect(stored).toHaveLength(1); // local copy still written
-  });
-
-  it('skips null shippers but still ships to the active one', () => {
+  it('tracks runtime disable and exporter selection without rewiring', () => {
+    const syslog = shipper();
     const otlp = shipper();
+    let active: RemoteLogShipper | null = null;
     const sink = createDaemonLogSink({
-      insertLog: () => {},
+      writeLocalDebug: () => {},
+      insertDiagnosticLog: () => {},
       redact: createLogRedactor(),
-      remoteShippers: () => [null, otlp], // syslog off, OTLP on
+      remoteShipper: () => active,
     });
+
     sink(rec({ message: SECRET_MSG }));
+    active = syslog;
+    sink(rec({ message: SECRET_MSG }));
+    active = otlp;
+    sink(rec({ message: SECRET_MSG }));
+
+    expect(syslog.sent).toHaveLength(1);
     expect(otlp.sent).toHaveLength(1);
+    expect(syslog.sent[0].message).not.toContain('deadbeef');
     expect(otlp.sent[0].message).not.toContain('deadbeef');
   });
 
-  it('a thrown DB write never breaks the node and remote shipping still happens', () => {
+  it('still exports a diagnostic when local persistence throws', () => {
     const otlp = shipper();
     const sink = createDaemonLogSink({
-      insertLog: () => { throw new Error('db down'); },
+      writeLocalDebug: () => {},
+      insertDiagnosticLog: () => { throw new Error('database locked'); },
       redact: createLogRedactor(),
-      remoteShippers: () => [otlp],
+      remoteShipper: () => otlp,
     });
-    expect(() => sink(rec({ message: SECRET_MSG }))).not.toThrow();
+
+    expect(() => sink(rec({ level: 'error', message: SECRET_MSG }))).not.toThrow();
     expect(otlp.sent).toHaveLength(1);
+    expect(otlp.sent[0].message).not.toContain('deadbeef');
   });
 });

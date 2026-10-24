@@ -42,7 +42,7 @@ describe('createKafkaPlugin factory wiring', () => {
       req, res,
       agent: { publishAsync },
       publisherControl: { getStatus: vi.fn() },
-      publisherRuntime: { walletIds: ['0xwallet'] },
+      publisherState: { runtime: { walletIds: ['0xwallet'] }, availability: { available: true } },
       config: {},
       path: '/api/kafka/streams/register',
     } as never);
@@ -63,7 +63,7 @@ describe('createKafkaPlugin factory wiring', () => {
       req, res,
       agent: { publishAsync },
       publisherControl: { getStatus: vi.fn() },
-      publisherRuntime: { walletIds: ['0xwallet'] },
+      publisherState: { runtime: { walletIds: ['0xwallet'] }, availability: { available: true } },
       config: {},
       path: '/api/kafka/streams/register',
     } as never);
@@ -79,7 +79,7 @@ describe('createKafkaPlugin factory wiring', () => {
       req, res,
       agent: { publishAsync },
       publisherControl: { getStatus: vi.fn() },
-      publisherRuntime: { walletIds: ['0xwallet'] },
+      publisherState: { runtime: { walletIds: ['0xwallet'] }, availability: { available: true } },
       config: {},
       path: '/custom/kafka/register',
     } as never);

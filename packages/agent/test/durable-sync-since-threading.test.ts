@@ -1,8 +1,36 @@
-import { describe, it, expect } from 'vitest';
-import { createOperationContext, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
-import { runDurableSync } from '../src/sync/requester/durable-sync.js';
+import { describe, it, expect, vi } from 'vitest';
+import {
+  MemoryLayer,
+  contextGraphDataGraphUri,
+  createGraphKnowledgeAssetScope,
+  createOperationContext,
+  knowledgeAssetLayerGraphUri,
+  SYSTEM_CONTEXT_GRAPHS,
+} from '@origintrail-official/dkg-core';
+import { generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
+import {
+  filterExactAssetDurablePayload,
+  runChallengeExactAssetFetch,
+  runDurableSync,
+  type DurableSyncChallengePinnedAuthenticationRequest,
+} from '../src/sync/requester/durable-sync.js';
+import {
+  createChallengePinnedExactAssetSelection,
+  createUalOnlyExactAssetSelection,
+  exactAssetUalsForSelection,
+  requireExactAssetSelection,
+  type ChallengePinnedExactAssetSelection,
+  type UalOnlyExactAssetSelection,
+} from '../src/sync/exact-assets.js';
+import { exactAssetFetchSessionPolicy } from '../src/sync/requester/exact-durable-fetch.js';
+import { normalizeDurableSyncContext, normalizeExactAssetFetchPolicy } from '../src/sync/requester/durable-sync-compat.js';
+import { createResponderPageOnlyExactGraphPlanMemo } from '../src/sync/responder/graph-plan.js';
+import { createSyncResponderSnapshotBudget } from '../src/sync/responder/snapshot-budget.js';
+import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
+import { SyncTargetSupersededError } from '../src/sync/error-tags.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import type { DurableBatchVerificationMode } from '../src/sync-verify-worker.js';
 
 interface FetchCall {
   contextGraphId: string;
@@ -10,28 +38,703 @@ interface FetchCall {
   graphUri: string;
   snapshotRef: string | undefined;
   sinceBatchId: string | undefined;
+  assetUals: string[] | undefined;
+  forceFreshSession: boolean | undefined;
 }
+
+describe('exact-asset rolling-upgrade filter', () => {
+  it('keeps multi-asset challenge pins atomic and rejects duplicate or parallel identities', () => {
+    const first = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
+    const second = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8';
+    const commitment = (assetUal: string, rootByte: string) => ({
+      assetUal,
+      merkleRootHex: rootByte.repeat(64),
+      merkleLeafCount: 1n,
+    });
+
+    const selection = createChallengePinnedExactAssetSelection([
+      commitment(second, '2'),
+      { ...commitment(first, '1'), merkleRootHex: `0x${'1'.repeat(64)}` },
+    ]);
+    expect(exactAssetUalsForSelection(selection)).toEqual([first, second]);
+    expect(selection).toMatchObject({
+      kind: 'challenge-pinned',
+      commitments: [
+        { assetUal: first, merkleRootHex: '1'.repeat(64) },
+        { assetUal: second, merkleRootHex: '2'.repeat(64) },
+      ],
+    });
+
+    expect(() => createChallengePinnedExactAssetSelection([
+      commitment(first, '1'),
+      commitment(first, '2'),
+    ])).toThrow('Duplicate challenge commitment');
+    expect(() => requireExactAssetSelection({
+      kind: 'challenge-pinned',
+      assetUals: [first, second],
+      commitments: [commitment(first, '1')],
+    })).toThrow('cannot include a parallel UAL list');
+  });
+
+  it('drops already-present KAs from an old responder full-CG response', () => {
+    const wanted = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
+    const existing = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8';
+    const wantedGraph = 'did:dkg:context-graph:cg/_verifiable_memory/0x0000000000000000000000000000000000000001/7';
+    const existingGraph = 'did:dkg:context-graph:cg/_verifiable_memory/0x0000000000000000000000000000000000000001/8';
+    const meta = [
+      { subject: wanted, predicate: 'http://dkg.io/ontology/assertionGraph', object: wantedGraph, graph: 'did:dkg:context-graph:cg/_meta' },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/kaUal', object: wanted, graph: 'did:dkg:context-graph:cg/_meta' },
+      { subject: existing, predicate: 'http://dkg.io/ontology/assertionGraph', object: existingGraph, graph: 'did:dkg:context-graph:cg/_meta' },
+    ] as Quad[];
+    const data = [
+      { subject: 'urn:wanted', predicate: 'urn:p', object: '"wanted"', graph: wantedGraph },
+      { subject: 'urn:existing', predicate: 'urn:p', object: '"existing"', graph: existingGraph },
+    ] as Quad[];
+
+    const filtered = filterExactAssetDurablePayload(
+      data,
+      meta,
+      createUalOnlyExactAssetSelection([wanted]),
+    );
+
+    expect(filtered.metaQuads.map((quad) => quad.subject)).toEqual([wanted, wanted]);
+    expect(filtered.dataQuads.map((quad) => quad.graph)).toEqual([wantedGraph]);
+    expect(filtered.descriptorCoverageComplete).toBe(true);
+  });
+
+  it('reports incomplete descriptor coverage from the same exact projection', () => {
+    const wanted = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
+    const missing = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8';
+    const graph = 'did:dkg:context-graph:cg/_verifiable_memory/0x0000000000000000000000000000000000000001/7';
+    const meta = [
+      { subject: wanted, predicate: 'http://dkg.io/ontology/assertionGraph', object: graph, graph: 'did:dkg:context-graph:cg/_meta' },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/kaUal', object: wanted, graph: 'did:dkg:context-graph:cg/_meta' },
+    ] as Quad[];
+
+    const filtered = filterExactAssetDurablePayload(
+      [],
+      meta,
+      createUalOnlyExactAssetSelection([wanted, missing]),
+    );
+    expect(filtered).toMatchObject({
+      descriptorCoverageComplete: false,
+      missingDescriptorUals: [missing],
+      mismatchedDescriptorUals: [],
+    });
+  });
+
+  it('declines a live v2 descriptor that does not match the v1 challenge commitment', () => {
+    const wanted = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
+    const graph = 'did:dkg:context-graph:cg/_verifiable_memory/0x0000000000000000000000000000000000000001/7';
+    const metaGraph = 'did:dkg:context-graph:cg/_meta';
+    const descriptor = (root: string, privateTripleCount = 0) => [
+      { subject: wanted, predicate: 'http://dkg.io/ontology/kaUal', object: wanted, graph: metaGraph },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/contentScopeVersion', object: '2', graph: metaGraph },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/assertionVersion', object: '2', graph: metaGraph },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/contextGraph', object: 'did:dkg:context-graph:cg', graph: metaGraph },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/assertionGraph', object: graph, graph: metaGraph },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/merkleRoot', object: root, graph: metaGraph },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/publicTripleCount', object: '1', graph: metaGraph },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/privateTripleCount', object: String(privateTripleCount), graph: metaGraph },
+      ...(privateTripleCount > 0 ? [{
+        subject: wanted,
+        predicate: 'http://dkg.io/ontology/privateMerkleRoot',
+        object: '33'.repeat(32),
+        graph: metaGraph,
+      }] : []),
+    ] as Quad[];
+    const meta = descriptor('22'.repeat(32));
+    const data = [
+      { subject: 'urn:v2', predicate: 'urn:p', object: '"current"', graph },
+    ] as Quad[];
+
+    const filtered = filterExactAssetDurablePayload(data, meta, createChallengePinnedExactAssetSelection([{
+      assetUal: wanted,
+      merkleRootHex: '11'.repeat(32),
+      merkleLeafCount: 1n,
+    }]));
+
+    expect(filtered).toEqual({
+      dataQuads: [],
+      metaQuads: [],
+      descriptorCoverageComplete: false,
+      returnedDescriptorCount: 0,
+      missingDescriptorUals: [],
+      mismatchedDescriptorUals: [wanted],
+    });
+
+    const matching = filterExactAssetDurablePayload(data, descriptor('11'.repeat(32)), createChallengePinnedExactAssetSelection([{
+      assetUal: wanted,
+      merkleRootHex: '11'.repeat(32),
+      merkleLeafCount: 1n,
+    }]));
+    expect(matching.dataQuads).toEqual(data);
+    expect(matching.descriptorCoverageComplete).toBe(true);
+
+    expect(filterExactAssetDurablePayload(
+      data,
+      descriptor('11'.repeat(32)),
+      createChallengePinnedExactAssetSelection([{
+        assetUal: wanted,
+        merkleRootHex: '11'.repeat(32),
+        merkleLeafCount: 2n,
+      }]),
+    ).descriptorCoverageComplete).toBe(false);
+    expect(filterExactAssetDurablePayload(
+      data,
+      descriptor('11'.repeat(32), 1),
+      createChallengePinnedExactAssetSelection([{
+        assetUal: wanted,
+        merkleRootHex: '11'.repeat(32),
+        merkleLeafCount: 1n,
+      }]),
+    ).descriptorCoverageComplete).toBe(true);
+    expect(filterExactAssetDurablePayload(
+      data,
+      descriptor('11'.repeat(32), 1),
+      createChallengePinnedExactAssetSelection([{
+        assetUal: wanted,
+        merkleRootHex: '11'.repeat(32),
+        merkleLeafCount: 2n,
+      }]),
+    ).descriptorCoverageComplete).toBe(false);
+  });
+
+  it('threads the exact selection into both fetch phases and filters an old-responder payload before verification', async () => {
+    const wanted = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
+    const extra = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8';
+    const wantedGraph = 'did:dkg:context-graph:mfacts/_verifiable_memory/0x0000000000000000000000000000000000000001/7';
+    const extraGraph = 'did:dkg:context-graph:mfacts/_verifiable_memory/0x0000000000000000000000000000000000000001/8';
+    const metaGraph = 'did:dkg:context-graph:mfacts/_meta';
+    // An OLD responder ignores the filter and returns the whole CG: both KAs.
+    const meta = [
+      { subject: wanted, predicate: 'http://dkg.io/ontology/assertionGraph', object: wantedGraph, graph: metaGraph },
+      { subject: wanted, predicate: 'http://dkg.io/ontology/kaUal', object: wanted, graph: metaGraph },
+      { subject: extra, predicate: 'http://dkg.io/ontology/assertionGraph', object: extraGraph, graph: metaGraph },
+      { subject: extra, predicate: 'http://dkg.io/ontology/kaUal', object: extra, graph: metaGraph },
+    ] as Quad[];
+    const data = [
+      { subject: 'urn:wanted', predicate: 'urn:p', object: '"wanted"', graph: wantedGraph },
+      { subject: 'urn:extra', predicate: 'urn:p', object: '"extra"', graph: extraGraph },
+    ] as Quad[];
+    const { calls, context, processCalls } = makeContext({
+      exactAssetSelectionFor: () => createUalOnlyExactAssetSelection([wanted]),
+      pageQuads: { data, meta },
+    });
+
+    await runDurableSync(context);
+
+    // Both phases must carry the exact filter on the wire…
+    const metaCall = calls.find((c) => c.phase === 'meta')!;
+    const dataCall = calls.find((c) => c.phase === 'data')!;
+    expect(metaCall.assetUals).toEqual([wanted]);
+    expect(dataCall.assetUals).toEqual([wanted]);
+    // …and the worker must only ever see the requested KA's quads, even though
+    // the (old) responder returned the extra KA too.
+    expect(processCalls).toHaveLength(1);
+    expect(processCalls[0]!.metaCount).toBe(2);
+    expect(processCalls[0]!.dataCount).toBe(1);
+  });
+
+  it('threads a challenge pin through the proof-only entry point before verification', async () => {
+    const wanted = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
+    const scope = createGraphKnowledgeAssetScope(wanted, '1');
+    const graph = knowledgeAssetLayerGraphUri(
+      'mfacts',
+      MemoryLayer.VerifiableMemory,
+      scope,
+    );
+    const data = [{
+      subject: 'urn:wanted',
+      predicate: 'urn:p',
+      object: '"wanted"',
+      graph,
+    }] as Quad[];
+    const root = new Uint8Array(32).fill(0x11);
+    const meta = generateGraphKnowledgeAssetMetadata({
+      ual: wanted,
+      contextGraphId: 'mfacts',
+      merkleRoot: root,
+      publisherPeerId: 'peer',
+      accessPolicy: 'public',
+      timestamp: new Date(0),
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+      assertionGraph: graph,
+    }, { status: 'tentative' });
+    const selection = (byte: string): ChallengePinnedExactAssetSelection =>
+      createChallengePinnedExactAssetSelection([{
+        assetUal: wanted,
+        merkleRootHex: byte.repeat(64),
+        merkleLeafCount: 1n,
+      }]);
+
+    const mismatch = makeContext({
+      pageQuads: { data, meta },
+    });
+    await expect(runChallengeExactAssetFetch(challengeContext(
+      mismatch.context,
+      selection('2'),
+    ))).rejects.toMatchObject({ code: 'SYNC_EXACT_DESCRIPTOR_MISMATCH' });
+    expect(mismatch.calls.map((call) => call.phase)).toEqual(['meta']);
+    expect(mismatch.processCalls).toHaveLength(0);
+    expect(mismatch.insertedBatches).toHaveLength(0);
+
+    const matching = makeContext({
+      pageQuads: { data, meta },
+    });
+    await runChallengeExactAssetFetch(challengeContext(
+      matching.context,
+      selection('1'),
+    ));
+    expect(matching.calls.map((call) => call.phase)).toEqual(['meta', 'data']);
+    expect(matching.processCalls).toHaveLength(1);
+  });
+
+  it('accepts a valid partial multi-asset challenge response as incomplete', async () => {
+    const firstUal = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
+    const absentUal = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8';
+    const graph = knowledgeAssetLayerGraphUri(
+      'mfacts',
+      MemoryLayer.VerifiableMemory,
+      createGraphKnowledgeAssetScope(firstUal, '1'),
+    );
+    const data = [{
+      subject: 'urn:first',
+      predicate: 'urn:value',
+      object: '"valid"',
+      graph,
+    }] as Quad[];
+    const meta = generateGraphKnowledgeAssetMetadata({
+      ual: firstUal,
+      contextGraphId: 'mfacts',
+      merkleRoot: new Uint8Array(32).fill(0x11),
+      publisherPeerId: 'peer',
+      accessPolicy: 'public',
+      timestamp: new Date(0),
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+      assertionGraph: graph,
+    }, { status: 'tentative' });
+    const selection = createChallengePinnedExactAssetSelection([
+      {
+        assetUal: firstUal,
+        merkleRootHex: '11'.repeat(32),
+        merkleLeafCount: 1n,
+      },
+      {
+        assetUal: absentUal,
+        merkleRootHex: '22'.repeat(32),
+        merkleLeafCount: 1n,
+      },
+    ]);
+    const { context, calls, processCalls } = makeContext({
+      pageQuads: { data, meta },
+      processResult: {
+        verifiedData: data,
+        verifiedMeta: meta,
+        verifiedGraphScopedDataGraphs: [graph],
+      },
+    });
+
+    const result = await runChallengeExactAssetFetch(challengeContext(
+      context,
+      selection,
+    ));
+
+    expect(result.disposition).toBe('incomplete');
+    expect(result.authenticatedAssets.map(({ asset }) => asset.ual)).toEqual([firstUal]);
+    expect(calls.map(({ phase }) => phase)).toEqual(['meta', 'data']);
+    expect(processCalls).toHaveLength(1);
+  });
+
+  it('returns every authenticated challenge asset explicitly without materializing live state', async () => {
+    const firstUal = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
+    const secondUal = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8';
+    const fixture = (assetUal: string, rootByte: number, privateRoot?: Uint8Array) => {
+      const scope = createGraphKnowledgeAssetScope(assetUal, '1');
+      const graph = knowledgeAssetLayerGraphUri(
+        'mfacts',
+        MemoryLayer.VerifiableMemory,
+        scope,
+      );
+      const root = new Uint8Array(32).fill(rootByte);
+      const data: Quad = {
+        subject: `urn:asset:${rootByte}`,
+        predicate: 'urn:value',
+        object: `"${rootByte}"`,
+        graph,
+      };
+      const meta = generateGraphKnowledgeAssetMetadata({
+        ual: assetUal,
+        contextGraphId: 'mfacts',
+        merkleRoot: root,
+        publisherPeerId: 'peer',
+        accessPolicy: 'public',
+        timestamp: new Date(0),
+        assertionVersion: '1',
+        publicTripleCount: 1,
+        privateTripleCount: privateRoot === undefined ? 0 : 1,
+        ...(privateRoot === undefined ? {} : { privateMerkleRoot: privateRoot }),
+        assertionGraph: graph,
+      }, { status: 'tentative' });
+      return { assetUal, data, graph, meta, root };
+    };
+    const privateRoot = new Uint8Array(32).fill(0x33);
+    const first = fixture(firstUal, 0x11, privateRoot);
+    const second = fixture(secondUal, 0x22);
+    const selection = createChallengePinnedExactAssetSelection([
+      {
+        assetUal: firstUal,
+        merkleRootHex: '11'.repeat(32),
+        merkleLeafCount: 1n,
+      },
+      {
+        assetUal: secondUal,
+        merkleRootHex: '22'.repeat(32),
+        merkleLeafCount: 1n,
+      },
+    ]);
+    let failSecondAsset = true;
+    const authenticateChallengePinnedAsset = vi.fn(async (
+      request: DurableSyncChallengePinnedAuthenticationRequest,
+    ) => {
+      if (request.asset.ual === secondUal && failSecondAsset) {
+        throw new Error('second challenge authentication timed out');
+      }
+      return {
+        asset: request.asset,
+        privateRoots: request.asset.ual === firstUal ? [privateRoot] : [],
+      };
+    });
+    const storeGraphScopedAsset = vi.fn(async () => {
+      throw new Error('challenge-pinned assets must not reach durable materialization');
+    });
+    const { context, calls } = makeContext({
+      pageQuads: {
+        data: [first.data, second.data],
+        meta: [...first.meta, ...second.meta],
+      },
+      processResult: {
+        verifiedData: [first.data, second.data],
+        verifiedMeta: [...first.meta, ...second.meta],
+        verifiedGraphScopedDataGraphs: [first.graph, second.graph],
+      },
+      storeGraphScopedAsset,
+    });
+    // Model a responder session retained inside the page-fetch layer. Without
+    // forceFreshSession, a later invocation receives only the suffix after the
+    // previous cursor even though no proof bytes were durably retained.
+    const fetchPage = context.fetchSyncPages;
+    const responderOffsets = new Map<'data' | 'meta', number>();
+    context.fetchSyncPages = async (request) => {
+      if (request.forceFreshSession) responderOffsets.set(request.phase, 0);
+      const full = await fetchPage(request);
+      const resumedFromOffset = responderOffsets.get(request.phase) ?? 0;
+      responderOffsets.set(request.phase, full.nextOffset);
+      return {
+        ...full,
+        quads: full.quads.slice(resumedFromOffset),
+        resumedFromOffset,
+        rawResumedFromOffset: resumedFromOffset,
+        responderSessionStartedFresh: request.forceFreshSession === true,
+      };
+    };
+
+    const firstAttempt = await runChallengeExactAssetFetch(challengeContext(
+      context,
+      selection,
+      authenticateChallengePinnedAsset,
+    ));
+    expect(firstAttempt.disposition).toBe('incomplete');
+    expect(firstAttempt.authenticatedAssets.map(({ asset }) => asset.ual)).toEqual([firstUal]);
+
+    failSecondAsset = false;
+    const detailed = await runChallengeExactAssetFetch(challengeContext(
+      context,
+      selection,
+      authenticateChallengePinnedAsset,
+    ));
+
+    expect(detailed.authenticatedAssets.map(({ asset }) => asset.ual)).toEqual([
+      firstUal,
+      secondUal,
+    ]);
+    expect(detailed.authenticatedAssets[0]?.privateRoots).toEqual([privateRoot]);
+    const repeated = await runChallengeExactAssetFetch(challengeContext(
+      context,
+      selection,
+      authenticateChallengePinnedAsset,
+    ));
+    expect(repeated.disposition).toBe('found');
+    expect(repeated.authenticatedAssets.map(({ asset }) => asset.ual)).toEqual([
+      firstUal,
+      secondUal,
+    ]);
+    expect(calls).toHaveLength(6);
+    expect(calls.every(({ forceFreshSession }) => forceFreshSession === true)).toBe(true);
+    expect(authenticateChallengePinnedAsset).toHaveBeenCalledTimes(6);
+    expect(storeGraphScopedAsset).not.toHaveBeenCalled();
+    expect(detailed.result.insertedTriples).toBe(0);
+  });
+
+  describe('a Context Graph id superseded mid-sync (Base #34 canary)', () => {
+    // A name-hash id this node adopted under its cleartext id while the sync
+    // for it was in flight. The error starts where production raises it: the
+    // identity proof inside asset authentication.
+    const retired = `0x${'b9'.repeat(32)}`;
+    const cleartext = 'acme-fun-facts';
+    const assetUal = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/9';
+    const stoppedLine = `Sync for context graph "${retired}" from peerR stopped: `
+      + `Context Graph ${retired} was superseded by cleartext adoption of "${cleartext}"`;
+
+    function retiredAssetContext(options: {
+      contextGraphIds?: string[];
+      storeGraphScopedAsset?: () => Promise<never>;
+    } = {}) {
+      const graph = knowledgeAssetLayerGraphUri(
+        retired,
+        MemoryLayer.VerifiableMemory,
+        createGraphKnowledgeAssetScope(assetUal, '1'),
+      );
+      const data = [{ subject: 'urn:fact', predicate: 'urn:value', object: '"42"', graph }] as Quad[];
+      const meta = generateGraphKnowledgeAssetMetadata({
+        ual: assetUal,
+        contextGraphId: retired,
+        merkleRoot: new Uint8Array(32).fill(0x44),
+        publisherPeerId: 'peer',
+        accessPolicy: 'public',
+        timestamp: new Date(0),
+        assertionVersion: '1',
+        publicTripleCount: 1,
+        privateTripleCount: 0,
+        assertionGraph: graph,
+      }, { status: 'tentative' });
+      const harness = makeContext({
+        contextGraphIds: options.contextGraphIds ?? [retired],
+        pageQuads: { data, meta },
+        processResult: { verifiedData: data, verifiedMeta: meta, verifiedGraphScopedDataGraphs: [graph] },
+        storeGraphScopedAsset: options.storeGraphScopedAsset,
+      });
+      const warnings: string[] = [];
+      const debugs: string[] = [];
+      harness.context.logWarn = (_ctx, message) => { warnings.push(message); };
+      harness.context.logDebug = (_ctx, message) => { debugs.push(message); };
+      return { ...harness, warnings, debugs };
+    }
+
+    it('stops the durable store quietly when authentication finds the id superseded', async () => {
+      const storeGraphScopedAsset = vi.fn(async () => {
+        throw new SyncTargetSupersededError(retired, cleartext);
+      });
+      const { context, warnings, debugs } = retiredAssetContext({ storeGraphScopedAsset });
+
+      const summary = await runDurableSync(context);
+
+      expect(storeGraphScopedAsset).toHaveBeenCalledTimes(1);
+      expect(warnings.filter((message) => message.includes(retired))).toEqual([]);
+      expect(debugs).toContain(stoppedLine);
+      expect(summary.backoffWorthyFailures).toBe(0);
+      expect(summary.failedPeers).toBe(0);
+      expect(summary.insertedTriples).toBe(0);
+    });
+
+    it('stops a challenge-pinned exact fetch quietly when authentication finds the id superseded', async () => {
+      const authenticate = vi.fn(async () => {
+        throw new SyncTargetSupersededError(retired, cleartext);
+      });
+      const { context, warnings, debugs } = retiredAssetContext();
+      const selection = createChallengePinnedExactAssetSelection([
+        { assetUal, merkleRootHex: '44'.repeat(32), merkleLeafCount: 1n },
+      ]);
+
+      const result = await runChallengeExactAssetFetch(challengeContext(context, selection, authenticate));
+
+      expect(authenticate).toHaveBeenCalledTimes(1);
+      expect(result.authenticatedAssets).toEqual([]);
+      expect(warnings.filter((message) => message.includes(retired))).toEqual([]);
+      expect(debugs).toContain(stoppedLine);
+      expect(result.result.backoffWorthyFailures).toBe(0);
+    });
+
+    it('moves on to the next graph after a superseded one', async () => {
+      const { context, calls, warnings, debugs } = retiredAssetContext({ contextGraphIds: [retired, 'mfacts'] });
+      const fetchPage = context.fetchSyncPages;
+      context.fetchSyncPages = async (request) => {
+        if (request.contextGraphId === retired) throw new SyncTargetSupersededError(retired, cleartext);
+        return fetchPage(request);
+      };
+
+      const summary = await runDurableSync(context);
+
+      expect(warnings.filter((message) => message.includes(retired))).toEqual([]);
+      expect(debugs).toContain(stoppedLine);
+      expect(calls.some(({ contextGraphId }) => contextGraphId === 'mfacts')).toBe(true);
+      expect(summary.backoffWorthyFailures).toBe(0);
+    });
+  });
+
+  it.each(['ordinary', 'vm-update-refresh'] as const)('lets the %s exact policy own both page session choices', async (purpose) => {
+    const selection = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/7']);
+    const policy = purpose === 'vm-update-refresh'
+      ? exactAssetFetchSessionPolicy(selection, purpose) : exactAssetFetchSessionPolicy(selection);
+    const { calls, context } = makeContext({ contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], pageQuads: { data: [], meta: [] } });
+    await runDurableSync({ ...context, exactAssetFetchPolicyFor: () => policy });
+    expect(calls.map(({ phase, assetUals, forceFreshSession }) => ({ phase, assetUals, forceFreshSession })))
+      .toEqual([
+        { phase: 'meta', assetUals: [...selection.assetUals], forceFreshSession: purpose === 'vm-update-refresh' },
+        { phase: 'data', assetUals: [...selection.assetUals], forceFreshSession: purpose === 'vm-update-refresh' },
+      ]);
+    expect(policy.allowDurableCheckpoints).toBe(true);
+  });
+
+  it('refuses challenge pins passed through the untyped refresh factory boundary', () => {
+    const pinned = createChallengePinnedExactAssetSelection([{ assetUal: 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7', merkleRootHex: '1'.repeat(64), merkleLeafCount: 1n }]);
+    expect(() => Reflect.apply(exactAssetFetchSessionPolicy, undefined, [pinned, 'vm-update-refresh']))
+      .toThrow('VM update refresh requires a UAL-only exact selection');
+  });
+
+  it('refreshes actual retained META/DATA responder plans through the modern callback', async () => {
+    const memo = createResponderPageOnlyExactGraphPlanMemo(10_000, 4, createSyncResponderSnapshotBudget({
+      maxRows: 16, maxBytesEstimate: 2 * 1024 * 1024, maxSnapshotRows: 16, maxSnapshotBytesEstimate: 1024 * 1024,
+    }));
+    const plan = (graph: string) => ({ entries: [{ graph, rowCount: 1 }], totalRows: 1,
+      pagedGraphs: new Set([graph]), cursors: new Map([[0, null]]) });
+    for (const phase of ['meta', 'data']) await memo.get(phase, async () => plan(`urn:older:${phase}`));
+    const observed: string[] = [];
+    const selection = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/7']);
+    const { context } = makeContext({ contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], pageQuads: { data: [], meta: [] } });
+    const fetch = context.fetchSyncPages;
+    context.fetchSyncPages = async (request) => {
+      const cached = await memo.get(request.phase, async () => plan(`urn:updated:${request.phase}`), { refresh: request.forceFreshSession === true });
+      observed.push(cached!.entries[0]!.graph);
+      return fetch(request);
+    };
+    await runDurableSync({ ...context, exactAssetFetchPolicyFor: () => exactAssetFetchSessionPolicy(selection) });
+    expect(observed).toEqual(['urn:older:meta', 'urn:older:data']);
+    observed.length = 0;
+    await runDurableSync({ ...context, exactAssetFetchPolicyFor: () => exactAssetFetchSessionPolicy(selection, 'vm-update-refresh') });
+    expect(observed).toEqual(['urn:updated:meta', 'urn:updated:data']);
+  });
+
+  it.each(['explicit-policy', 'deprecated-option'] as const)('refuses %s refresh on positional callbacks before reading cached older META/DATA', async (source) => {
+    const memo = createResponderPageOnlyExactGraphPlanMemo(10_000, 4, createSyncResponderSnapshotBudget({
+      maxRows: 16, maxBytesEstimate: 2 * 1024 * 1024, maxSnapshotRows: 16, maxSnapshotBytesEstimate: 1024 * 1024,
+    }));
+    const plan = (graph: string) => ({ entries: [{ graph, rowCount: 1 }], totalRows: 1,
+      pagedGraphs: new Set([graph]), cursors: new Map([[0, null]]) });
+    for (const phase of ['meta', 'data']) await memo.get(phase, async () => plan(`urn:older:${phase}`));
+    const selection = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/7']);
+    const { context, insertedBatches } = makeContext({ contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], pageQuads: { data: [], meta: [] } });
+    const { durableSyncBudget: _budget, fetchSyncPages: fetch, storeInsert, ...shared } = context;
+    const warnings: string[] = [];
+    const legacyFetch = vi.fn(async (...args: unknown[]) => {
+      const phase = args[4] as 'meta' | 'data';
+      await memo.get(phase, async () => plan(`urn:updated:${phase}`));
+      return fetch({ ctx: context.ctx, remotePeerId: context.remotePeerId, contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+        phase, graphUri: args[5] as string, fetchContext: { deadline: args[6] as number } });
+    });
+    const legacy = { ...shared, createContextGraphSyncDeadline: () => Date.now() + 10_000,
+      fetchSyncPages: legacyFetch, storeInsert: (quads: Quad[]) => storeInsert({ quads }),
+      exactAssetFetchPolicyFor: () => source === 'explicit-policy'
+        ? exactAssetFetchSessionPolicy(selection, 'vm-update-refresh')
+        : normalizeExactAssetFetchPolicy(undefined, () => selection, true)!,
+      logWarn: (_ctx: unknown, message: string) => warnings.push(message),
+    };
+    const result = await Reflect.apply(runDurableSync, undefined, [legacy]);
+    expect(result.failedPhases).toBe(1);
+    expect(warnings).toContainEqual(expect.stringContaining('VM update refresh requires a modern fetchSyncPages request callback'));
+    expect(legacyFetch).not.toHaveBeenCalled();
+    expect(insertedBatches).toEqual([]);
+    for (const phase of ['meta', 'data']) {
+      const cached = await memo.get(phase, async () => plan(`urn:unexpected:${phase}`));
+      expect(cached!.entries[0]!.graph).toBe(`urn:older:${phase}`);
+    }
+  });
+
+  it.each(['legacy-selection', 'bound-policy'] as const)('normalizes %s lazily before both ordinary page fetches', async (source) => {
+    const selection = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/7']);
+    const legacy = vi.fn(() => selection);
+    const policy = vi.fn(() => exactAssetFetchSessionPolicy(selection));
+    const { calls, context } = makeContext({ contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], pageQuads: { data: [], meta: [] } });
+    const normalized = normalizeDurableSyncContext({ ...context,
+      exactAssetSelectionFor: source === 'legacy-selection' ? legacy : undefined,
+      exactAssetFetchPolicyFor: source === 'bound-policy' ? policy : undefined,
+    });
+    expect(normalized).not.toHaveProperty('exactAssetSelectionFor');
+    expect(legacy).not.toHaveBeenCalled();
+    expect(policy).not.toHaveBeenCalled();
+    await runDurableSync(normalized);
+    expect(source === 'legacy-selection' ? legacy : policy).toHaveBeenCalledExactlyOnceWith(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    expect(calls.map(({ phase, assetUals, forceFreshSession }) => ({ phase, assetUals, forceFreshSession })))
+      .toEqual(['meta', 'data'].map((phase) => ({ phase, assetUals: [...selection.assetUals], forceFreshSession: false })));
+  });
+
+  it.each([true, false])('keeps explicit policy precedence with lazy legacy fallback (policy present: %s)', async (present) => {
+    const first = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/7']);
+    const second = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/8']);
+    const order: string[] = [];
+    const legacy = vi.fn(() => { order.push('legacy'); return first; });
+    const policy = vi.fn(() => { order.push('policy'); return present ? exactAssetFetchSessionPolicy(second, 'vm-update-refresh') : undefined; });
+    const { calls, context } = makeContext({ contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], pageQuads: { data: [], meta: [] } });
+    const normalized = normalizeDurableSyncContext({ ...context, exactAssetSelectionFor: legacy, exactAssetFetchPolicyFor: policy });
+    expect(order).toEqual([]);
+    await runDurableSync(normalized);
+    expect(order).toEqual(present ? ['policy'] : ['policy', 'legacy']);
+    expect(calls.map(({ assetUals, forceFreshSession }) => ({ assetUals, forceFreshSession })))
+      .toEqual(['meta', 'data'].map(() => ({ assetUals: [...(present ? second : first).assetUals], forceFreshSession: present })));
+  });
+
+  it('keeps lifecycle compatibility lazy and preserves a bound policy instead of another selection', () => {
+    const selection = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/7']);
+    const policy = exactAssetFetchSessionPolicy(selection, 'vm-update-refresh');
+    const legacy = vi.fn(() => { throw new Error('legacy selection must not be read'); });
+    expect(normalizeExactAssetFetchPolicy(policy, legacy)).toBe(policy);
+    expect(legacy).not.toHaveBeenCalled();
+  });
+
+  it('does not thread a filter when exactAssetSelectionFor is not wired', async () => {
+    const { calls, context } = makeContext();
+    await runDurableSync(context);
+    expect(calls.every((c) => c.assetUals === undefined)).toBe(true);
+  });
+});
 
 function makeContext(options: {
   sinceBatchIdFor?: (cg: string) => string | undefined;
+  exactAssetSelectionFor?: (cg: string) => UalOnlyExactAssetSelection | undefined;
+  pageQuads?: { data: Quad[]; meta: Quad[] };
   contextGraphIds?: string[];
   syncAgentsMeta?: boolean;
   processResult?: {
     verifiedData?: Quad[];
     verifiedMeta?: Quad[];
+    verifiedGraphScopedDataGraphs?: string[];
     totalFetchedDataQuads?: number;
     totalFetchedMetaQuads?: number;
   };
+  storeGraphScopedAsset?: () => Promise<never>;
 } = {}) {
   const calls: FetchCall[] = [];
-  const processCalls: Array<{ dataCount: number; metaCount: number; acceptUnverified: boolean }> = [];
+  const processCalls: Array<{
+    dataCount: number;
+    metaCount: number;
+    acceptUnverified: boolean;
+    mode: DurableBatchVerificationMode;
+  }> = [];
   const insertedBatches: Quad[][] = [];
   const deletedCheckpoints: string[] = [];
   const page = (phase: 'data' | 'meta'): SyncPageResult => ({
-    quads: phase === 'data' ? ([{ id: 'data' }] as never[]) : ([{ id: 'meta' }] as never[]),
+    quads: options.pageQuads
+      ? (options.pageQuads[phase] as never[])
+      : phase === 'data' ? ([{ id: 'data' }] as never[]) : ([{ id: 'meta' }] as never[]),
     bytesReceived: phase === 'data' ? 20 : 10,
     resumedFromOffset: 0,
-    nextOffset: phase === 'data' ? 1 : 2,
+    nextOffset: options.pageQuads
+      ? options.pageQuads[phase].length
+      : phase === 'data' ? 1 : 2,
     checkpointKey: `cp|${phase}`,
     completed: true,
     timedOut: false,
@@ -48,36 +751,54 @@ function makeContext(options: {
       remotePeerId: 'peerR',
       contextGraphIds: options.contextGraphIds ?? ['mfacts'],
       syncAgentsMeta: options.syncAgentsMeta,
-      createContextGraphSyncDeadline: () => Date.now() + 10_000,
-      fetchSyncPages: async (
-        _ctx: unknown,
-        _peer: string,
-        contextGraphId: string,
-        _swm: boolean,
-        phase: 'data' | 'meta',
-        graphUri: string,
-        _deadline: number,
-        snapshotRef?: string,
-        sinceBatchId?: string,
-      ) => {
-        calls.push({ contextGraphId, phase, graphUri, snapshotRef, sinceBatchId });
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 10_000),
+      fetchSyncPages: async ({
+        contextGraphId,
+        phase,
+        graphUri,
+        snapshotRef,
+        sinceBatchId,
+        exactAssetUals,
+        forceFreshSession,
+      }) => {
+        calls.push({
+          contextGraphId,
+          phase,
+          graphUri,
+          snapshotRef,
+          sinceBatchId,
+          assetUals: exactAssetUals,
+          forceFreshSession,
+        });
         return page(phase);
       },
       sinceBatchIdFor: options.sinceBatchIdFor,
-      processDurableBatchInWorker: async (dataQuads: Quad[], metaQuads: Quad[], _ctx: unknown, acceptUnverified: boolean) => {
-        processCalls.push({ dataCount: dataQuads.length, metaCount: metaQuads.length, acceptUnverified });
+      exactAssetSelectionFor: options.exactAssetSelectionFor,
+      processDurableBatchInWorker: async (
+        dataQuads: Quad[],
+        metaQuads: Quad[],
+        _ctx: unknown,
+        acceptUnverified: boolean,
+        mode: DurableBatchVerificationMode,
+      ) => {
+        processCalls.push({ dataCount: dataQuads.length, metaCount: metaQuads.length, acceptUnverified, mode });
         return {
           verifiedData,
           verifiedMeta,
+          verifiedGraphScopedDataGraphs:
+            options.processResult?.verifiedGraphScopedDataGraphs,
+          consumedUnpersistedMetaTriples: 0,
           totalFetchedDataQuads: options.processResult?.totalFetchedDataQuads ?? dataQuads.length,
           totalFetchedMetaQuads: options.processResult?.totalFetchedMetaQuads ?? metaQuads.length,
           rejectedKcs: 0,
           emptyResponses: 0,
           metaOnlyResponses: 0,
+          verifiedPrivateOnlyResponses: 0,
           dataRejectedMissingMeta: 0,
         };
       },
-      storeInsert: async (quads: Quad[]) => { insertedBatches.push(quads); },
+      storeInsert: async ({ quads }) => { insertedBatches.push(quads); },
+      storeGraphScopedAsset: options.storeGraphScopedAsset,
       deleteCheckpoint: (key: string) => { deletedCheckpoints.push(key); },
       setCheckpoint: () => undefined,
       logInfo: () => undefined,
@@ -87,16 +808,42 @@ function makeContext(options: {
   };
 }
 
+function challengeContext(
+  context: ReturnType<typeof makeContext>['context'],
+  selection: ChallengePinnedExactAssetSelection,
+  authenticateChallengePinnedAsset: (
+    request: DurableSyncChallengePinnedAuthenticationRequest,
+  ) => Promise<{
+    asset: import('../src/sync/requester/graph-scoped-materialization.js').VerifiedGraphScopedAsset;
+    privateRoots: readonly Uint8Array[];
+  }> = async ({ asset }) => ({ asset, privateRoots: [] }),
+) {
+  const {
+    exactAssetSelectionFor: _exactAssetSelectionFor,
+    storeGraphScopedAsset: _storeGraphScopedAsset,
+    deleteCheckpoint: _deleteCheckpoint,
+    setCheckpoint: _setCheckpoint,
+    ...sharedContext
+  } = context;
+  return {
+    ...sharedContext,
+    challengeSelectionFor: () => selection,
+    authenticateChallengePinnedAsset,
+  };
+}
+
 describe('runDurableSync sinceBatchId threading', () => {
   it('passes sinceBatchIdFor() to the DATA fetch only, not the META fetch', async () => {
-    const { calls, context } = makeContext({ sinceBatchIdFor: () => '7' });
-    await runDurableSync(context);
+    const { calls, context, processCalls } = makeContext({ sinceBatchIdFor: () => '7' });
+    const summary = await runDurableSync(context);
 
     const meta = calls.find((c) => c.phase === 'meta')!;
     const data = calls.find((c) => c.phase === 'data')!;
     expect(meta.sinceBatchId).toBeUndefined();
     expect(data.sinceBatchId).toBe('7');
     expect(data.snapshotRef).toBeUndefined();
+    expect(processCalls[0]?.mode).toEqual({ kind: 'sinceBatchId', sinceBatchId: '7' });
+    expect(summary.checkpointAdvances).toBe(2);
   });
 
   it('passes undefined when no high-water mark resolver is wired', async () => {
@@ -120,7 +867,12 @@ describe('runDurableSync agents meta routing', () => {
       contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.AGENTS],
       syncAgentsMeta: false,
       processResult: {
-        verifiedData: [{ id: 'verified-data' } as never],
+        verifiedData: [{
+          subject: 'did:dkg:agent:0x1111111111111111111111111111111111111111',
+          predicate: 'https://dkg.network/ontology#name',
+          object: '"verified-data"',
+          graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS),
+        }],
         totalFetchedDataQuads: 1,
         totalFetchedMetaQuads: 0,
       },
@@ -134,8 +886,16 @@ describe('runDurableSync agents meta routing', () => {
       phase: 'data',
     });
     expect(calls[0].graphUri).toBe('did:dkg:context-graph:agents');
-    expect(processCalls).toEqual([{ dataCount: 1, metaCount: 0, acceptUnverified: true }]);
-    expect(insertedBatches).toEqual([[{ id: 'verified-data' }]]);
+    expect(processCalls).toEqual([{
+      dataCount: 1,
+      metaCount: 0,
+      acceptUnverified: true,
+      mode: { kind: 'fullSnapshot' },
+    }]);
+    expect(insertedBatches).toEqual([[expect.objectContaining({
+      object: '"verified-data"',
+      graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS),
+    })]]);
     expect(deletedCheckpoints).toContain(`peerR|${SYSTEM_CONTEXT_GRAPHS.AGENTS}|durable|meta`);
   });
 
@@ -152,7 +912,12 @@ describe('runDurableSync agents meta routing', () => {
       phase: 'meta',
       graphUri: 'did:dkg:context-graph:agents/_meta',
     });
-    expect(processCalls).toEqual([{ dataCount: 1, metaCount: 1, acceptUnverified: true }]);
+    expect(processCalls).toEqual([{
+      dataCount: 1,
+      metaCount: 1,
+      acceptUnverified: true,
+      mode: { kind: 'fullSnapshot' },
+    }]);
   });
 
   it('still fetches metadata for normal context graphs when agents meta sync is disabled', async () => {
@@ -169,7 +934,12 @@ describe('runDurableSync agents meta routing', () => {
       phase: 'meta',
       graphUri: 'did:dkg:context-graph:normal-cg/_meta',
     });
-    expect(processCalls).toEqual([{ dataCount: 1, metaCount: 1, acceptUnverified: false }]);
+    expect(processCalls).toEqual([{
+      dataCount: 1,
+      metaCount: 1,
+      acceptUnverified: false,
+      mode: { kind: 'fullSnapshot' },
+    }]);
   });
 
   it('still fetches ontology metadata when agents meta sync is disabled', async () => {
@@ -186,6 +956,11 @@ describe('runDurableSync agents meta routing', () => {
       phase: 'meta',
       graphUri: 'did:dkg:context-graph:ontology/_meta',
     });
-    expect(processCalls).toEqual([{ dataCount: 1, metaCount: 1, acceptUnverified: true }]);
+    expect(processCalls).toEqual([{
+      dataCount: 1,
+      metaCount: 1,
+      acceptUnverified: true,
+      mode: { kind: 'fullSnapshot' },
+    }]);
   });
 });

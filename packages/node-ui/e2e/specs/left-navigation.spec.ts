@@ -44,7 +44,7 @@ test.describe('Left Panel Navigation (rc.12)', () => {
     expect((await leftPanel.getActiveMode())?.trim()).toContain('Context Oracle');
     // The catalogue renders EITHER discovered public CGs OR the empty-state
     // hint — both are valid on a real node depending on what's been synced.
-    const emptyState = page.getByText(/No public catalogue entries yet/i);
+    const emptyState = page.getByText(/No discovered public Context Graphs yet/i);
     const catalogueRows = leftPanel.root.locator('.v10-tree-section');
     await expect
       .poll(async () => (await emptyState.isVisible().catch(() => false)) || (await catalogueRows.count()) > 0)

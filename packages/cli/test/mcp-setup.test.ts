@@ -3,7 +3,12 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readFileSync
 import { tmpdir, homedir, platform } from 'node:os';
 import { join } from 'node:path';
 import TOML from '@iarna/toml';
-import { mcpSetupAction, type McpSetupActionDeps } from '../src/mcp-setup.js';
+import { parse as parseJsonc } from 'jsonc-parser';
+import { SELECTABLE_SETUP_NETWORKS } from '@origintrail-official/dkg-core';
+import { mcpSetupAction, type McpSetupActionDeps, type PlannedItem } from '../src/mcp-setup.js';
+import { listBundledNetworkConfigNames, resolveKnownNetworkConfigName } from '../src/config.js';
+import { REQUIRED_SKILL_TOKENS } from '../src/skill-template.js';
+import type { ClientTarget, McpConfigSelection } from '../src/mcp-client-registry.js';
 
 /**
  * NO MOCKS. `dkg mcp setup` is a pure CLI ORCHESTRATOR over (a) a real
@@ -177,6 +182,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const ensureDkgNodeConfig = recorder((opts: {
       agentName: string;
       network: any;
+      networkConfigName: string;
       apiPort: number;
       existing: Record<string, any>;
       overrides?: { nameExplicit?: boolean; portExplicit?: boolean };
@@ -191,6 +197,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
         ...opts.existing,
         name: opts.overrides?.nameExplicit ? opts.agentName : (opts.existing?.name ?? opts.agentName),
         apiPort: opts.overrides?.portExplicit ? opts.apiPort : (opts.existing?.apiPort ?? opts.apiPort),
+        networkConfig: opts.networkConfigName,
         nodeRole: opts.existing?.nodeRole ?? 'edge',
       };
       writeFileSync(
@@ -198,12 +205,20 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
         JSON.stringify(merged, null, 2),
       );
     });
-    const loadNetworkConfig = recorder(() => ({
-      networkName: 'test-net',
+    const loadNetworkConfig = recorder((networkName: string = 'testnet') => ({
+      networkName,
       relays: [],
       defaultContextGraphs: ['agent-context'],
       defaultNodeRole: 'edge',
       faucet: { url: 'http://faucet.test', mode: 'testnet' },
+      chain: {
+        chainId: ({
+          testnet: 'base:84532',
+          'mainnet-base': 'base:8453',
+          'mainnet-gnosis': 'gnosis:100',
+          'mainnet-neuroweb': 'neuroweb:2043',
+        } as Record<string, string>)[networkName],
+      },
     }) as any);
     // Eager wallet creation (issue #1306). Idempotent generate-if-absent;
     // mcpSetupAction ignores the return value (the faucet re-reads from disk),
@@ -249,6 +264,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     );
     return {
       loadNetworkConfig,
+      resolveKnownNetworkConfigName,
       ensureDkgNodeConfig,
       startDaemon,
       loadOpWallets,
@@ -354,6 +370,118 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // assertion to the port-9300 case above.
     expect((deps.ensureDkgNodeConfig as any).calls).toEqual([]);
     expect((deps.startDaemon as any).calls).toEqual([]);
+  });
+
+  it('keeps a legacy mainnet chain on its inferred overlay when an override rewrites config', async () => {
+    const dkgDir = join(tmpHome, '.dkg');
+    mkdirSync(dkgDir, { recursive: true });
+    writeFileSync(
+      join(dkgDir, 'config.json'),
+      JSON.stringify({
+        name: 'legacy-mainnet',
+        apiPort: 9200,
+        chain: {
+          type: 'evm',
+          chainId: 'gnosis:100',
+          rpcUrl: 'https://operator-rpc.invalid',
+          hubAddress: '0x0000000000000000000000000000000000000042',
+        },
+      }, null, 2),
+    );
+    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
+
+    const deps = makeDeps();
+    await mcpSetupAction({ port: '9300', start: false, verify: false, fund: false }, deps);
+
+    expect((deps.loadNetworkConfig as any).calls.map((call: any[]) => call[0])).toEqual(['mainnet-gnosis']);
+    expect((deps.ensureDkgNodeConfig as any).calls).toHaveLength(1);
+    const writeArgs = (deps.ensureDkgNodeConfig as any).calls[0][0];
+    expect(writeArgs.networkConfigName).toBe('mainnet-gnosis');
+    const rewritten = JSON.parse(readFileSync(join(dkgDir, 'config.json'), 'utf-8'));
+    expect(rewritten).toMatchObject({
+      networkConfig: 'mainnet-gnosis',
+      chain: {
+        chainId: 'gnosis:100',
+        rpcUrl: 'https://operator-rpc.invalid',
+        hubAddress: '0x0000000000000000000000000000000000000042',
+      },
+    });
+  });
+
+  it('infers a legacy chain exclusively through injected network metadata', async () => {
+    const dkgDir = join(tmpHome, '.dkg');
+    mkdirSync(dkgDir, { recursive: true });
+    writeFileSync(join(dkgDir, 'config.json'), JSON.stringify({
+      name: 'fixture-legacy',
+      apiPort: 9200,
+      chain: {
+        type: 'evm',
+        chainId: 'fixture:42',
+        rpcUrl: 'https://fixture-rpc.invalid',
+        hubAddress: '0x0000000000000000000000000000000000000042',
+      },
+    }, null, 2));
+    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
+    const injectedLoader = recorder((name: string) => {
+      if (name !== 'fixture-mainnet') throw new Error(`unexpected network ${name}`);
+      return {
+        networkName: 'Fixture Mainnet',
+        relays: [],
+        defaultContextGraphs: [],
+        defaultNodeRole: 'edge',
+        chain: { chainId: 'fixture:42' },
+      } as any;
+    });
+    const deps = makeDeps({
+      loadNetworkConfig: injectedLoader as any,
+      resolveKnownNetworkConfigName: (config) => resolveKnownNetworkConfigName(config, {
+        'fixture-mainnet': { chain: { chainId: 'fixture:42' } },
+      }),
+    });
+
+    await mcpSetupAction({ port: '9300', start: false, verify: false, fund: false }, deps);
+
+    const writeArgs = (deps.ensureDkgNodeConfig as any).calls[0][0];
+    expect(writeArgs.networkConfigName).toBe('fixture-mainnet');
+    expect(JSON.parse(readFileSync(join(dkgDir, 'config.json'), 'utf-8'))).toMatchObject({
+      networkConfig: 'fixture-mainnet',
+      chain: {
+        chainId: 'fixture:42',
+        rpcUrl: 'https://fixture-rpc.invalid',
+      },
+    });
+  });
+
+  it('uses bundled registry candidates that are intentionally absent from the setup menu', async () => {
+    expect(SELECTABLE_SETUP_NETWORKS).not.toContain('mainnet-neuroweb');
+    expect(listBundledNetworkConfigNames()).toContain('mainnet-neuroweb');
+
+    const dkgDir = join(tmpHome, '.dkg');
+    mkdirSync(dkgDir, { recursive: true });
+    writeFileSync(join(dkgDir, 'config.json'), JSON.stringify({
+      name: 'legacy-neuroweb',
+      apiPort: 9200,
+      chain: {
+        type: 'evm',
+        chainId: 'neuroweb:2043',
+        rpcUrl: 'https://operator-neuroweb.invalid',
+        hubAddress: '0x0000000000000000000000000000000000000042',
+      },
+    }, null, 2));
+    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
+    const deps = makeDeps();
+
+    await mcpSetupAction({ port: '9300', start: false, verify: false, fund: false }, deps);
+
+    expect((deps.ensureDkgNodeConfig as any).calls[0][0].networkConfigName)
+      .toBe('mainnet-neuroweb');
+    expect(JSON.parse(readFileSync(join(dkgDir, 'config.json'), 'utf-8'))).toMatchObject({
+      networkConfig: 'mainnet-neuroweb',
+      chain: {
+        chainId: 'neuroweb:2043',
+        rpcUrl: 'https://operator-neuroweb.invalid',
+      },
+    });
   });
 
   it('funds wallets via the shared fundWalletsBestEffort orchestrator (network, seed, didStartDaemon)', async () => {
@@ -772,7 +900,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     expect(existsSync(vscodePath)).toBe(true);
     const written = JSON.parse(readFileSync(vscodePath, 'utf-8'));
     // VSCode + Copilot Chat keys under `servers`, NOT `mcpServers`.
-    // Pins the entryPath dispatch wired in phase 1.
+    // Pins the serverContainer dispatch wired in phase 1.
     expect(written.servers?.dkg).toEqual(EXPECTED_INSTALLED_ENTRY());
     // The canonical `mcpServers.dkg` shape MUST NOT be present in
     // VSCode's file — that would be the wrong key for Copilot Chat.
@@ -797,6 +925,52 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const written = JSON.parse(readFileSync(vscodePath, 'utf-8'));
     expect(written.servers['other-mcp']).toEqual({ command: 'baz' });
     expect(written.servers.dkg).toEqual(EXPECTED_INSTALLED_ENTRY());
+  });
+
+  it('phase-4: adds VSCode servers.dkg without normalizing JSONC trivia or numeric lexemes', async () => {
+    const vscodePath = vscodeMcpPathUnder(tmpHome);
+    mkdirSync(join(vscodePath, '..'), { recursive: true });
+    const raw = '{\r\n  // keep operator settings\r\n  "clientId": 9007199254740993,\r\n  "servers": {\r\n    "other": { "command": "other" },\r\n  },\r\n}\r\n';
+    writeFileSync(vscodePath, raw);
+
+    await mcpSetupAction({ start: false, fund: false, verify: false }, makeDeps());
+
+    const output = readFileSync(vscodePath, 'utf8');
+    const closingContainer = raw.indexOf('  },\r\n}\r\n');
+    expect(output.startsWith(raw.slice(0, closingContainer))).toBe(true);
+    expect(output.endsWith(raw.slice(closingContainer))).toBe(true);
+    expect(output).toContain('// keep operator settings');
+    expect(output).toContain('9007199254740993');
+    expect(output).toContain('"other": {');
+    expect(output.replace(/\r\n/g, '')).not.toContain('\n');
+    const parsed = parseJsonc(output);
+    expect(parsed.servers.other).toEqual({ command: 'other' });
+    expect(parsed.servers.dkg).toEqual(EXPECTED_INSTALLED_ENTRY());
+  });
+
+  it('phase-4: refreshes VSCode servers.dkg while preserving JSONC extensions and siblings', async () => {
+    const vscodePath = vscodeMcpPathUnder(tmpHome);
+    mkdirSync(join(vscodePath, '..'), { recursive: true });
+    const raw = '{\r\n  // keep root comment\r\n  "ratio": 1.2300e+06,\r\n  "servers": {\r\n    "dkg": { "command": "old", "args": [], "env": { "DKG_HOME": "/old", "EXTRA": "keep" }, "cwd": "/keep" },\r\n    // keep sibling comment\r\n    "other": { "command": "other" },\r\n  },\r\n}\r\n';
+    writeFileSync(vscodePath, raw);
+
+    await mcpSetupAction({ start: false, fund: false, verify: false }, makeDeps());
+
+    const output = readFileSync(vscodePath, 'utf8');
+    expect(output.startsWith(raw.slice(0, raw.indexOf('    "dkg"')))).toBe(true);
+    expect(output.endsWith(raw.slice(raw.indexOf('    // keep sibling comment')))).toBe(true);
+    expect(output).toContain('// keep root comment');
+    expect(output).toContain('// keep sibling comment');
+    expect(output).toContain('1.2300e+06');
+    expect(output).toContain('"other": { "command": "other" },');
+    expect(output.replace(/\r\n/g, '')).not.toContain('\n');
+    const parsed = parseJsonc(output);
+    expect(parsed.servers.dkg).toMatchObject({
+      ...EXPECTED_INSTALLED_ENTRY(),
+      cwd: '/keep',
+      env: { ...EXPECTED_INSTALLED_ENTRY().env, EXTRA: 'keep' },
+    });
+    expect(parsed.servers.other).toEqual({ command: 'other' });
   });
 
   // ── Phase-5: Cline (deep-nested VSCode globalStorage path) ────────
@@ -839,7 +1013,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     expect(existsSync(clinePath)).toBe(true);
     const written = JSON.parse(readFileSync(clinePath, 'utf-8'));
     // Cline keys under canonical `mcpServers.dkg` (unlike VSCode's
-    // `servers.dkg`), so no entryPath override on the candidate.
+    // `servers.dkg`), so no serverContainer override on the candidate.
     expect(written.mcpServers.dkg).toEqual(EXPECTED_INSTALLED_ENTRY());
   });
 
@@ -975,7 +1149,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // stub knows the operator opted into auto-confirm. The stub
     // returns the plan unchanged → all detected clients register.
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
-    const confirmPlan = recorder(async (planned: any) => [...planned]);
+    const confirmPlan = recorder(async (planned: readonly PlannedItem[], _opts: { yes: boolean }) => [...planned]);
     const deps = makeDeps({ confirmPlan });
 
     await mcpSetupAction({ start: false, fund: false, verify: false, yes: true }, deps);
@@ -1021,7 +1195,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
 
     const confirmPlan = recorder(async (planned: any) =>
       planned.map((p: any) =>
-        p.s.target.name === 'Cursor' ? { ...p, action: 'skip' } : p,
+        p.s.target.aliases.some((alias: ClientTarget) => alias.id === 'cursor') ? { ...p, action: 'skip' } : p,
       ),
     );
     const deps = makeDeps({ confirmPlan });
@@ -2213,6 +2387,57 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
 
   // ── Codex Round-8 Fix 15: per-client failure isolation ───────────
 
+  it.each([false, true])('plans one Windows-backed registration when native and WSL targets alias (Windows first: %s)', async (windowsFirst) => {
+    const configPath = join(tmpHome, 'aliased-cursor.json');
+    writeFileSync(configPath, JSON.stringify({ mcpServers: { dkg: { command: 'old' } } }));
+    const native: ClientTarget = {
+      id: 'cursor', name: 'Cursor', configPath, displayPath: configPath,
+      format: 'json', serverContainer: 'mcpServers', location: 'native',
+    };
+    const windows: ClientTarget = { ...native, name: 'Cursor via WSL', location: 'windows-wsl' };
+    const plans: McpConfigSelection[][] = [];
+    await mcpSetupAction({ start: false, fund: false, verify: false, force: true }, makeDeps({
+      detectClients: () => windowsFirst ? [windows, native] : [native, windows],
+      confirmPlan: async (planned) => {
+        plans.push(planned.filter(item => item.action !== 'skip').map(item => item.s.target));
+        return planned.map(item => ({ ...item, action: 'skip' }));
+      },
+    }));
+    expect(plans).toHaveLength(1);
+    expect(plans[0]).toHaveLength(1);
+    expect(plans[0][0].file.destination).toBe(realpathSync(configPath));
+    expect(plans[0][0].file.shape).toEqual({ format: 'json', serverContainer: 'mcpServers' });
+    expect(plans[0][0].aliases).toEqual(windowsFirst ? [windows, native] : [native, windows]);
+    expect(JSON.parse(readFileSync(configPath, 'utf8')).mcpServers.dkg.command).toBe('old');
+  });
+
+  it.each([false, true])('delivers skills to both logical clients sharing one physical config (Claude first: %s)', async (claudeFirst) => {
+    const configPath = join(tmpHome, 'shared-config.json');
+    writeFileSync(configPath, '{"mcpServers":{}}');
+    const cursor: ClientTarget = { id: 'cursor', name: 'Cursor', configPath, displayPath: configPath,
+      location: 'native', format: 'json', serverContainer: 'mcpServers' };
+    const claude: ClientTarget = { ...cursor, id: 'claude-code', name: 'Claude Code' };
+    await mcpSetupAction({ start: false, fund: false, verify: false }, makeDeps({
+      detectClients: () => claudeFirst ? [claude, cursor] : [cursor, claude],
+      confirmPlan: async (planned) => { expect(planned).toHaveLength(1); return [...planned]; },
+    }));
+    expect(existsSync(join(tmpHome, '.cursor', 'skills', 'dkg-node', 'SKILL.md'))).toBe(true);
+    expect(existsSync(join(tmpHome, '.claude', 'skills', 'dkg-node', 'SKILL.md'))).toBe(true);
+  });
+
+  it('rejects a malformed server container during setup while registering a healthy client', async () => {
+    const cursorDir = join(tmpHome, '.cursor');
+    mkdirSync(cursorDir, { recursive: true });
+    const configPath = join(cursorDir, 'mcp.json');
+    const original = '{ "mcpServers": [{ "command": "keep" }], "setting": true }\n';
+    writeFileSync(configPath, original);
+    await expect(mcpSetupAction({ start: false, fund: false, verify: false }, makeDeps()))
+      .rejects.toThrow(/1 client\(s\) failed to register; 1 succeeded/);
+    expect(readFileSync(configPath, 'utf8')).toBe(original);
+    expect(JSON.parse(readFileSync(join(tmpHome, '.claude.json'), 'utf8')).mcpServers.dkg)
+      .toEqual(EXPECTED_INSTALLED_ENTRY());
+  });
+
   it('Codex Round-8 Fix 15 + Round-9 Fix 17: classify error on one client → others still attempted, failing client skipped, action throws partial-failure', async () => {
     // Round-8 Fix 15 isolates per-client classify errors so other
     // clients still get attempted. Round-9 Fix 17 layered an
@@ -2564,7 +2789,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     delete process.env.WSL_DISTRO_NAME;
     delete process.env.WSL_INTEROP;
     try {
-      const { detectClients } = await import('../src/mcp-setup.js');
+      const { detectClients } = await import('../src/mcp-client-registry.js');
       const detected = detectClients();
       // No "(Windows-side via WSL)" entries on plain Linux.
       const wslEntries = detected.filter((c) => c.name.includes('Windows-side via WSL'));
@@ -2595,7 +2820,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       // What we CAN verify: isWSL() detection fired correctly and
       // detectClients didn't throw or hang; it just returned the
       // base set when wsl path resolution failed.
-      const { detectClients } = await import('../src/mcp-setup.js');
+      const { detectClients } = await import('../src/mcp-client-registry.js');
       const detected = detectClients();
       // The detector found at least the Linux-side defaults that
       // exist on this test runner (probably Cursor's parent if
@@ -2627,7 +2852,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
         // detectClients should NOT add Windows-side entries on
         // Windows (the detector's `if (platform() !== 'linux')
         // return false` guard).
-        const { detectClients } = await import('../src/mcp-setup.js');
+        const { detectClients } = await import('../src/mcp-client-registry.js');
         const detected = detectClients();
         const wslEntries = detected.filter((c) => c.name.includes('Windows-side via WSL'));
         expect(wslEntries.length).toBe(0);
@@ -2653,7 +2878,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     saveWslEnv();
     process.env.WSL_DISTRO_NAME = 'TestDistro';
     try {
-      const { detectClients } = await import('../src/mcp-setup.js');
+      const { detectClients } = await import('../src/mcp-client-registry.js');
       // Should not throw despite WSL being "detected" while
       // cmd.exe/wslpath are unavailable in the test environment.
       const detected = detectClients();
@@ -2865,7 +3090,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     saveWslEnv();
     process.env.WSL_DISTRO_NAME = 'TestDistro';
     try {
-      const { detectClients } = await import('../src/mcp-setup.js');
+      const { detectClients } = await import('../src/mcp-client-registry.js');
       const detected = detectClients();
       // We can't fake cmd.exe / wslpath in this test env, so the
       // Windows-side entries (including Cursor) won't actually be
@@ -2879,9 +3104,9 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       );
       // If the WSL helpers succeed in this environment, the
       // entry is present with the canonical mcpServers.dkg shape
-      // (no entryPath override) and the path includes `.cursor`.
+      // (explicit mcpServers container) and the path includes `.cursor`.
       for (const entry of cursorWslEntries) {
-        expect(entry.entryPath).toBeUndefined();
+        expect(entry.serverContainer).toBe('mcpServers');
         expect(entry.configPath).toContain('.cursor');
       }
     } finally {
@@ -2900,7 +3125,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     saveWslEnv();
     process.env.WSL_DISTRO_NAME = 'TestDistro';
     try {
-      const { detectClients } = await import('../src/mcp-setup.js');
+      const { detectClients } = await import('../src/mcp-client-registry.js');
       const detected = detectClients();
       // No crash. Every entry is well-formed.
       expect(Array.isArray(detected)).toBe(true);
@@ -2928,7 +3153,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       mkdirSync(join(winUserProfile, '.cursor'), { recursive: true });
       mkdirSync(join(winUserProfile, '.codex'), { recursive: true });
 
-      const { detectClients } = await import('../src/mcp-setup.js');
+      const { detectClients } = await import('../src/mcp-client-registry.js');
       const detected = detectClients((envVarName) => {
         if (envVarName === 'USERPROFILE') return winUserProfile;
         if (envVarName === 'APPDATA') return winAppData;
@@ -3094,11 +3319,11 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const rawContent = readFileSync(codexPath, 'utf-8');
     const written = TOML.parse(rawContent);
     // Codex CLI's canonical key is `mcp_servers.<name>` (snake-case),
-    // not the JSON-world `mcpServers.<name>`. entryPath dispatch
+    // not the JSON-world `mcpServers.<name>`. serverContainer dispatch
     // routes the entry to the right table.
     expect((written as any).mcp_servers?.dkg).toEqual(EXPECTED_INSTALLED_ENTRY());
     // And the canonical JSON-world key MUST NOT appear in TOML output
-    // — that would mean entryPath fell through to default.
+    // — that would mean serverContainer fell through to default.
     expect((written as any).mcpServers).toBeUndefined();
 
     // PR #443 round-4 Codex Review: parsing-and-comparing the
@@ -3357,7 +3582,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const stderrText = (stderrSilencer.calls as any[])
       .map((c) => String(c[0]))
       .join('');
-    expect(stderrText).toMatch(/WARNING: Codex CLI config/);
+    expect(stderrText).toMatch(/WARNING: TOML config/);
     expect(stderrText).toMatch(/cannot be patched safely for mcp_servers\.dkg/);
     expect(stderrText).toMatch(/invalid or duplicate definitions/);
     expect(stderrText).toMatch(/Comments\/formatting outside this entry may not be preserved/);
@@ -3397,7 +3622,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const stderrText = (stderrSilencer.calls as any[])
       .map((c) => String(c[0]))
       .join('');
-    expect(stderrText).toMatch(/WARNING: Codex CLI config/);
+    expect(stderrText).toMatch(/WARNING: TOML config/);
     expect(stderrText).toMatch(/cannot be patched safely for mcp_servers\.dkg/);
     expect(after.model).toBe('gpt-5');
     expect(after.mcp_servers['github-mcp']).toEqual({
@@ -3462,4 +3687,36 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     expect(reParsed).toEqual(written);
   });
 
+
+  // GH#1125 / PR #2331 review — `dkg mcp setup` copies SKILL.md into the
+  // client's skill directory. Once the template carried `{{token}}` syntax for
+  // the daemon's serve-time substitution, delivering the raw file would write
+  // that syntax into ~/.cursor/skills/dkg-node/SKILL.md.
+  //
+  // This asserts the file mcpSetupAction ACTUALLY writes. An earlier test
+  // checked hermes-setup's loader instead and would have stayed green while
+  // this path regressed, because mcp-setup carried its own private copy of it.
+  it('delivers a rendered SKILL.md to the client, never raw node template tokens', async () => {
+    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
+
+    await mcpSetupAction({ verify: false, fund: false }, makeDeps());
+
+    const delivered = join(tmpHome, '.cursor', 'skills', 'dkg-node', 'SKILL.md');
+    expect(existsSync(delivered)).toBe(true);
+    const content = readFileSync(delivered, 'utf-8');
+
+    // The regression: no unsubstituted node-metadata template syntax reaches
+    // the user. Query-catalog placeholders use the same doubled-brace shape,
+    // but are intentionally preserved through the explicit literal escape.
+    for (const token of REQUIRED_SKILL_TOKENS) {
+      expect(content).not.toContain(`{{${token}}}`);
+    }
+    expect(content).toContain('{{configurationId}}');
+    // Nor the pre-token placeholder prose it replaced.
+    expect(content).not.toContain('(dynamic)');
+    // It carries the standalone guidance instead of live node values.
+    expect(content).toContain('- **Node version:** _(run `dkg --version` on your node)_');
+    // And it is still the real skill document.
+    expect(content).toContain('## 1. Node Info');
+  });
 });

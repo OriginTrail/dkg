@@ -1,15 +1,14 @@
 import { useMemo, useState, useCallback, useEffect, useRef } from 'react';
 import { useFetch } from '../hooks.js';
+import { useMemoryEntityDetails } from '../hooks/useMemoryEntityDetails.js';
 import { api } from '../api-wrapper.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
 import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
 import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
 import {
-  buildMemoryEntities,
   canonicalEntityUri,
   useMemoryEntities,
-  type LayeredTriple,
   type TrustLevel,
 } from '../hooks/useMemoryEntities.js';
 import { useProjectProfile, ProjectProfileContext } from '../hooks/useProjectProfile.js';
@@ -18,6 +17,7 @@ import { useCurrentAgent } from '../hooks/useCurrentAgent.js';
 import { useSwmAttributions } from '../hooks/useSwmAttributions.js';
 import { useAssertionLifecycleEvents } from '../hooks/useAssertionLifecycleEvents.js';
 import { ActivityFeed } from '../components/ActivityFeed.js';
+import { MemoryReadStatus } from '../components/MemoryReadStatus.js';
 import { SubGraphBar } from '../components/SubGraphBar.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from '../lib/contextGraphPrimer.js';
 import { useTabsStore } from '../stores/tabs.js';
@@ -84,23 +84,6 @@ function isMemoryLayerView(layer: LayerView): layer is MemoryLayerView {
   return layer === 'wm' || layer === 'swm' || layer === 'vm';
 }
 
-function dedupeTriplesBySpo<T extends { subject: string; predicate: string; object: string }>(triples: T[]): T[] {
-  const seen = new Set<string>();
-  return triples.filter(t => {
-    // Canonicalise wrapped/bare IRIs so this dedup agrees with
-    // `buildEntities`' per-entity `tripleCount` dedup
-    // (`useMemoryEntities.ts` builds its SPO key from canonical
-    // subject/object). Daemon sometimes ships wrapped `<urn:...>`
-    // for the same triple it returns bare elsewhere; without
-    // canonicalisation here the detail-page Triples tab would show
-    // two rows for what the badge counts as one.
-    const key = `${canonicalEntityUri(t.subject)}|${t.predicate}|${canonicalEntityUri(t.object)}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
 function scrollElementFor(key: string, fallback: HTMLElement | null): HTMLElement | null {
   if (typeof document === 'undefined') return fallback;
   const elements = document.querySelectorAll<HTMLElement>('[data-cg-scroll-key]');
@@ -123,7 +106,11 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const [showImport, setShowImport] = useState(false);
   const [showShare, setShowShare] = useState(false);
   const [activeLayer, setActiveLayer] = useState<LayerView>('overview');
+  const [showQueryCatalog, setShowQueryCatalog] = useState(false);
   const [selectedUri, setSelectedUri] = useState<string | null>(null);
+  useEffect(() => {
+    setShowQueryCatalog(false);
+  }, [contextGraphId]);
   const [participantsState, setParticipantsState] = useState<ParticipantsState>({
     contextGraphId: null,
     list: [],
@@ -290,7 +277,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     if (!selectedUriRef.current || !detailOriginRef.current) {
       detailOriginRef.current = captureDetailOrigin(originScrollKey);
     }
-    setSelectedUri(uri);
+    setSelectedUri(canonicalEntityUri(uri));
   }, [captureDetailOrigin]);
 
   const clearDetailOrigin = useCallback(() => {
@@ -363,7 +350,12 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // contradiction Bug C set out to prevent). Mirrors the
   // DashboardView caller, which already opts in for the same
   // failed-vs-empty-distinct reason.
-  const rawMemory = useMemoryEntities(contextGraphId, { signalErrors: true });
+  const includeQueryCatalogInMemory = showQueryCatalog
+    && (activeLayer === 'wm' || activeLayer === 'swm');
+  const rawMemory = useMemoryEntities(contextGraphId, {
+    signalErrors: true,
+    includeQueryCatalog: includeQueryCatalogInMemory,
+  });
   // Canonical (de-duped, Root-inclusive) triple total — the SAME number the
   // Subgraph Explorer panel subtitle shows. Fed to the SubGraphBar "All" chip
   // tooltip so it stops reporting "0 triples" on Root-only graphs (the daemon
@@ -474,34 +466,8 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   }, [refreshSubGraphCount]);
   useMemoryGraphEvents(contextGraphId, refreshSubGraphCount);
 
-  const selectedLayerTrust = selectedLayerContext ? TRUST_FOR_LAYER[selectedLayerContext] : null;
-  const detailEntityTriples = useMemo(
-    () => selectedLayerTrust
-      ? rawMemory.allTriples.filter(t => t.layer === selectedLayerTrust)
-      : rawMemory.graphTriples,
-    [rawMemory.allTriples, rawMemory.graphTriples, selectedLayerTrust],
-  );
-  const detailTriples = useMemo(
-    () => selectedLayerTrust ? dedupeTriplesBySpo(detailEntityTriples) : detailEntityTriples,
-    [detailEntityTriples, selectedLayerTrust],
-  );
-  const detailEntities = useMemo(
-    () => selectedLayerTrust
-      ? buildMemoryEntities(detailEntityTriples as LayeredTriple[])
-      : rawMemory.entities,
-    [detailEntityTriples, rawMemory.entities, selectedLayerTrust],
-  );
-  const selectedEntity = useMemo(
-    () => selectedUri ? detailEntities.get(selectedUri) ?? null : null,
-    [selectedUri, detailEntities]
-  );
-
-  useEffect(() => {
-    if (!selectedUri || selectedEntity || rawMemory.loading) return;
-    setSelectedUri(null);
-    setSelectedLayerContext(null);
-    clearDetailOrigin();
-  }, [selectedUri, selectedEntity, rawMemory.loading, clearDetailOrigin]);
+  const detailRead = useMemoryEntityDetails(contextGraphId, selectedUri, selectedLayerContext, includeQueryCatalogInMemory, rawMemory);
+  const { entity: selectedEntity, entities: detailEntities, triples: detailTriples } = detailRead;
 
   // Route a sub-graph chip click to the sub-graph page. Selecting "All"
   // (null) exits the page back to the current layer view, or overview if
@@ -775,6 +741,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     <ProjectProfileContext.Provider value={profile}>
     <AgentsContext.Provider value={agentsContextValue}>
     <div className="v10-memory-explorer">
+      <MemoryReadStatus memory={rawMemory} />
       {/* GH #905: when a project is already open, `useFetch` keeps the
           last-good `cgData`, so a failing 30s refresh leaves `cg` truthy and
           the view would silently show stale data. Surface an inline,
@@ -822,6 +789,15 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       />
 
       <main className="v10-memory-explorer-page" data-view={activePage} data-cg-scroll-key="page" ref={pageRef}>
+      {selectedUri && (detailRead.loading || detailRead.error || detailRead.partial || !selectedEntity) && (
+        <div className="v10-layer-action-note" role="status">
+          {detailRead.loading ? 'Loading resource details…' : detailRead.error ?? (detailRead.partial
+            ? 'The resource detail read reached its limit. Some relationships may be missing. Use a narrower query to inspect them.'
+            : 'This resource is referenced here, but has no details in this view.')}
+          {detailRead.error && <button onClick={detailRead.refresh}>Retry resource details</button>}
+          {!selectedEntity && <button onClick={handleDetailClose}>Close resource</button>}
+        </div>
+      )}
       {/* Drilldown overlay */}
       {selectedEntity && (
         <KADetailView
@@ -831,7 +807,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           onNavigate={handleNavigate}
           onClose={handleDetailClose}
           contextGraphId={contextGraphId}
-          onRefresh={rawMemory.refresh}
+          onRefresh={() => { rawMemory.refresh(); detailRead.refresh(); }}
         />
       )}
 
@@ -867,6 +843,10 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             onTabChange={tab => handleSubGraphTabChange(activeSubGraph, tab)}
             initialEnabledLayers={subGraphInitialEnabledLayers ?? undefined}
             onEnabledLayersChange={handleDetailEnabledLayersChange}
+            onOpenQueryCatalog={() => {
+              setActiveSubGraphSync(null);
+              setActiveLayer('query');
+            }}
           />
         </>
       )}
@@ -970,6 +950,8 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             activeTab={layerContentTabs[activeLayer]}
             onTabChange={tab => handleLayerTabChange(activeLayer, tab)}
             swmAttribution={swmAttributionsResult}
+            showQueryCatalog={showQueryCatalog}
+            onShowQueryCatalogChange={setShowQueryCatalog}
           />
         </>
       )}

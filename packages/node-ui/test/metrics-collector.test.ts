@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DashboardDB } from '../src/db.js';
-import { MetricsCollector, type MetricsSource } from '../src/metrics-collector.js';
+import {
+  MetricsCollector,
+  STORE_METRICS_CACHE_TTL_MS,
+  type MetricsSource,
+} from '../src/metrics-collector.js';
 
 let db: DashboardDB;
 let dir: string;
@@ -285,22 +289,30 @@ describe('MetricsCollector store-metrics presence gate', () => {
       getTotalKAs: 0, getConfirmedKCs: 0, getTentativeKCs: 0,
       getStoreBytes: 0, getPeerCount: 0,
     };
+    const values = {
+      contextGraphCount: 2,
+      totalTriples: 1000,
+      totalKCs: 15,
+      totalKAs: 30,
+      confirmedKCs: 12,
+      tentativeKCs: 3,
+    };
     const source: MetricsSource = {
       getPeerCount: () => { calls.getPeerCount++; return 5; },
       getDirectPeerCount: () => 3,
       getRelayedPeerCount: () => 2,
       getMeshPeerCount: () => 4,
-      getContextGraphCount: async () => { calls.getContextGraphCount++; return 2; },
-      getTotalTriples: async () => { calls.getTotalTriples++; return 1000; },
-      getTotalKCs: async () => { calls.getTotalKCs++; return 15; },
-      getTotalKAs: async () => { calls.getTotalKAs++; return 30; },
-      getConfirmedKCs: async () => { calls.getConfirmedKCs++; return 12; },
-      getTentativeKCs: async () => { calls.getTentativeKCs++; return 3; },
+      getContextGraphCount: async () => { calls.getContextGraphCount++; return values.contextGraphCount; },
+      getTotalTriples: async () => { calls.getTotalTriples++; return values.totalTriples; },
+      getTotalKCs: async () => { calls.getTotalKCs++; return values.totalKCs; },
+      getTotalKAs: async () => { calls.getTotalKAs++; return values.totalKAs; },
+      getConfirmedKCs: async () => { calls.getConfirmedKCs++; return values.confirmedKCs; },
+      getTentativeKCs: async () => { calls.getTentativeKCs++; return values.tentativeKCs; },
       getStoreBytes: async () => { calls.getStoreBytes++; return 65536; },
       getRpcLatencyMs: async () => 25,
       isRpcHealthy: async () => true,
     };
-    return { source, calls };
+    return { source, calls, values };
   }
 
   it('closed gate: skips the six store scans and nulls their columns; cheap metrics still collect', async () => {
@@ -367,5 +379,67 @@ describe('MetricsCollector store-metrics presence gate', () => {
     const active = await collector.collect();
     expect(active.total_triples).toBe(1000);
     expect(calls.getTotalTriples).toBe(1);
+  });
+
+  it('reuses one complete store snapshot inside the freshness window', async () => {
+    const { source, calls, values } = countingSource();
+    let now = 1_000;
+    const collector = new MetricsCollector(
+      db, source, dir, () => true, { cacheClock: () => now },
+    );
+
+    const initial = await collector.collect();
+    expect(initial.total_triples).toBe(1000);
+    expect(initial.contextGraph_count).toBe(2);
+    values.totalTriples = 1001;
+    values.contextGraphCount = 3;
+    now += STORE_METRICS_CACHE_TTL_MS - 1;
+    const cached = await collector.collect();
+    expect(cached.total_triples).toBe(1000);
+    expect(cached.contextGraph_count).toBe(2);
+    expect(calls.getTotalTriples).toBe(1);
+    expect(calls.getContextGraphCount).toBe(1);
+
+    now += 1;
+    const refreshed = await collector.collect();
+    expect(refreshed.total_triples).toBe(1001);
+    expect(refreshed.contextGraph_count).toBe(3);
+    expect(calls.getTotalTriples).toBe(2);
+    expect(calls.getContextGraphCount).toBe(2);
+  });
+
+  it('coalesces concurrent refreshes into one set of full-store scans', async () => {
+    const { source, calls } = countingSource();
+    const original = source.getTotalTriples;
+    source.getTotalTriples = async () => {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      return original();
+    };
+    const collector = new MetricsCollector(
+      db, source, dir, () => true, { cacheClock: () => 1_000 },
+    );
+    const [first, second] = await Promise.all([collector.collect(), collector.collect()]);
+
+    expect(first.total_triples).toBe(1000);
+    expect(second.total_triples).toBe(1000);
+    expect(calls.getTotalTriples).toBe(1);
+    expect(calls.getContextGraphCount).toBe(1);
+  });
+
+  it('refreshes after a backwards clock step rather than presenting an old count as fresh', async () => {
+    const { source, calls, values } = countingSource();
+    let now = 10_000;
+    const collector = new MetricsCollector(
+      db, source, dir, () => true, { cacheClock: () => now },
+    );
+    const initial = await collector.collect();
+    expect(initial.total_triples).toBe(1000);
+    values.totalTriples = 1002;
+    values.contextGraphCount = 4;
+    now = 9_999;
+    const refreshed = await collector.collect();
+    expect(calls.getTotalTriples).toBe(2);
+    expect(refreshed.total_triples).toBe(1002);
+    expect(refreshed.contextGraph_count).toBe(4);
   });
 });

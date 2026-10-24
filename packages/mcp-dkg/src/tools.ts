@@ -15,7 +15,7 @@
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import type { DkgClient, ProjectRow } from './client.js';
+import type { DkgClient } from './client.js';
 import { normalizeContextGraphId } from './client.js';
 import type { DkgConfig } from './config.js';
 import {
@@ -31,6 +31,8 @@ import {
   type EntitySource,
 } from './sparql.js';
 import { EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION } from './tools/context-graph-description.js';
+import { filterContextGraphsForScope } from './tools/context-graph-scope.js';
+import { resolveWorkingMemoryAgentAddress } from './tools/working-memory-identity.js';
 
 type ToolResult = {
   content: Array<{ type: 'text'; text: string }>;
@@ -62,21 +64,6 @@ const projectErr = (): ToolResult =>
   err(
     'No project specified. Either pass `projectId` to this tool, set `DKG_PROJECT` in the environment, or pin `contextGraph:` in `.dkg/config.yaml`.',
   );
-
-function contextGraphBelongsToCaller(row: ProjectRow): boolean {
-  if (row.isSystem === true) return false;
-  if (row.callerInvolved === true) return true;
-  if (row.callerInvolved === false) return false;
-  const role = typeof row.role === 'string' ? row.role.trim().toLowerCase() : '';
-  if (['curator', 'creator', 'owner', 'participant', 'member'].includes(role)) return true;
-  // Older daemons did not include callerInvolved. Preserve compatibility by
-  // leaving those unscoped rows visible instead of hiding everything.
-  return true;
-}
-
-function filterContextGraphsForScope(rows: ProjectRow[], scope: 'mine' | 'all'): ProjectRow[] {
-  return scope === 'all' ? rows : rows.filter(contextGraphBelongsToCaller);
-}
 
 export function registerReadTools(
   server: McpServer,
@@ -195,9 +182,15 @@ export function registerReadTools(
         '`contextGraphId` and `view` are authoritative: local `GRAPH ?g` ' +
         'patterns are constrained to that resolved graph set. ' +
         'Set `includeSharedMemory: true` alongside `view: "working-memory"` ' +
-        'to query WM ∪ SWM in one call.',
+        'to query WM ∪ SWM in one call. Quad writes preserve predicate strings: ' +
+        'a predicate written as `rdf:type` is queried as `<rdf:type>`, and an ' +
+        'absolute IRI such as `urn:item:1` must be written as `<urn:item:1>`.',
       inputSchema: {
-        sparql: z.string().describe('SPARQL query body. Prefixes are auto-injected.'),
+        sparql: z.string().describe(
+          'Raw SPARQL query body without Markdown. Prefixes are auto-injected. ' +
+          'Wrap absolute IRIs in <...>. Match compact predicate strings written by the quad API exactly: ' +
+          '`rdf:type` → `<rdf:type>`, `schema:category` → `<schema:category>`.',
+        ),
         projectId: z
           .string()
           .optional()
@@ -219,14 +212,35 @@ export function registerReadTools(
       if (!pid) return projectErr();
       const fullSparql = sparql.startsWith('PREFIX') ? sparql : `${PREFIXES}\n${sparql}`;
       try {
+        const agentAddress = view === 'working-memory'
+          ? await resolveWorkingMemoryAgentAddress(client)
+          : undefined;
         const result = await client.query({
           sparql: fullSparql,
           contextGraphId: pid,
           subGraphName,
           view,
           includeSharedMemory,
+          agentAddress,
         });
-        const all = result.bindings ?? [];
+        if (result.type === 'boolean') {
+          return ok(String(result.value));
+        }
+        if (result.type === 'quads') {
+          const allQuads = result.quads;
+          const cappedQuads = typeof limit === 'number' ? allQuads.slice(0, limit) : allQuads;
+          const rows = cappedQuads.map((quad) => ({
+            subject: quad.subject,
+            predicate: quad.predicate,
+            object: quad.object,
+            graph: quad.graph ?? '',
+          }));
+          const tail = cappedQuads.length < allQuads.length
+            ? `\n\n_(showing ${cappedQuads.length} of ${allQuads.length} — raise limit to see more)_`
+            : '';
+          return ok(`${bindingsToTable(rows)}${tail}`);
+        }
+        const all = result.bindings;
         const capped = typeof limit === 'number' ? all.slice(0, limit) : all;
         const tail = capped.length < all.length ? `\n\n_(showing ${capped.length} of ${all.length} — raise limit to see more)_` : '';
         return ok(`${bindingsToTable(capped)}${tail}`);
@@ -252,6 +266,10 @@ export function registerReadTools(
           .string()
           .optional()
           .describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
+        subGraphName: z
+          .string()
+          .optional()
+          .describe('Limit the entity and its inbound neighbourhood to a single named sub-graph.'),
         view: z
           .enum(['working-memory', 'shared-working-memory', 'verifiable-memory'])
           .optional()
@@ -268,53 +286,74 @@ export function registerReadTools(
           .describe('When set with view: "working-memory", include SWM in the result set (the WM∪SWM combined view).'),
       },
     },
-    async ({ uri, projectId, view, includeSharedMemory }): Promise<ToolResult> => {
+    async ({ uri, projectId, subGraphName, view, includeSharedMemory }): Promise<ToolResult> => {
       const pid = resolveProject(projectId, config);
       if (!pid) return projectErr();
-      // Default behaviour mirrors the historical `layer: 'union'` default:
-      // when neither `view` nor `includeSharedMemory` is set, return WM∪SWM
-      // (the shape callers learned via the V9 surface). Explicit
-      // `view: 'verifiable-memory'` routes to VM; explicit
-      // `view: 'shared-working-memory'` routes to SWM only;
-      // `view: 'working-memory'` (without `includeSharedMemory: true`)
-      // returns WM only.
-      const scope =
+      // The query engine treats `view` as authoritative, so a single
+      // `{ view: 'working-memory', includeSharedMemory: true }` request would
+      // silently ignore SWM. Run the two strict scopes explicitly when the
+      // public MCP contract requests WM∪SWM. Keep the historical root-graph
+      // no-view route intact for callers that omit `subGraphName`.
+      const scopes =
         view === 'verifiable-memory'
-          ? { view: 'verifiable-memory' as const }
+          ? [{ view: 'verifiable-memory' as const }]
           : view === 'shared-working-memory'
-          ? { graphSuffix: '_shared_memory' as const }
+          ? [{ graphSuffix: '_shared_memory' as const }]
           : view === 'working-memory'
-          ? (includeSharedMemory === true ? { includeSharedMemory: true } : {})
-          : { includeSharedMemory: includeSharedMemory ?? true };
+          ? [
+              { view: 'working-memory' as const },
+              ...(includeSharedMemory === true
+                ? [{ graphSuffix: '_shared_memory' as const }]
+                : []),
+            ]
+          : subGraphName
+          ? [
+              { view: 'working-memory' as const },
+              ...(includeSharedMemory !== false
+                ? [{ graphSuffix: '_shared_memory' as const }]
+                : []),
+            ]
+          : [{ includeSharedMemory: includeSharedMemory ?? true }];
       try {
+        const agentAddress = scopes.some((scope) => 'view' in scope && scope.view === 'working-memory')
+          ? await resolveWorkingMemoryAgentAddress(client)
+          : undefined;
         // NOTE: no explicit `GRAPH ?g { … }` wrapper here — the query
         // engine injects one that scopes to the requested CG. Adding our
         // own skips that scoping and lets results bleed across other
         // context graphs on the same node. See `wrapWithGraph` in
         // `@origintrail-official/dkg-query/dkg-query-engine.ts`.
-        const [outgoing, incoming] = await Promise.all([
-          client.query({
-            sparql: `${PREFIXES}
+        const resultPairs = await Promise.all(scopes.map((scope) => Promise.all([
+            client.query({
+              sparql: `${PREFIXES}
 SELECT DISTINCT ?p ?o WHERE { <${uri}> ?p ?o }`,
-            contextGraphId: pid,
-            ...scope,
-          }),
-          client.query({
-            sparql: `${PREFIXES}
+              contextGraphId: pid,
+              subGraphName,
+              ...scope,
+              ...('view' in scope && scope.view === 'working-memory' ? { agentAddress } : {}),
+            }),
+            client.query({
+              sparql: `${PREFIXES}
 SELECT DISTINCT ?s ?p WHERE { ?s ?p <${uri}> } LIMIT 50`,
-            contextGraphId: pid,
-            ...scope,
-          }),
-        ]);
-        const out = outgoing.bindings ?? [];
-        const inc = incoming.bindings ?? [];
+              contextGraphId: pid,
+              subGraphName,
+              ...scope,
+              ...('view' in scope && scope.view === 'working-memory' ? { agentAddress } : {}),
+            }),
+          ])));
+        const dedupeBindings = <T>(bindings: T[]): T[] =>
+          [...new Map(bindings.map((binding) => [JSON.stringify(binding), binding])).values()];
+        const out = dedupeBindings(resultPairs.flatMap(([outgoing]) => outgoing.bindings ?? []));
+        const inc = dedupeBindings(resultPairs.flatMap(([, incoming]) => incoming.bindings ?? []));
         if (!out.length && !inc.length) {
           const scopeLabel =
             view === 'verifiable-memory' ? 'verifiable-memory' :
             view === 'shared-working-memory' ? 'shared-working-memory' :
             view === 'working-memory'
               ? (includeSharedMemory === true ? 'working-memory∪swm' : 'working-memory')
-              : 'working-memory∪swm';
+              : subGraphName && includeSharedMemory === false
+                ? 'working-memory'
+                : 'working-memory∪swm';
           return ok(`No triples found for <${uri}> in '${pid}' (view=${scopeLabel}).`);
         }
         const parts: string[] = [`# ${prettyTerm(uri)}`, `<${uri}>`, ''];
@@ -706,22 +745,24 @@ SELECT ?t (COUNT(DISTINCT ?s) AS ?n) WHERE {
           contextGraphId: pid,
           includeSharedMemory: true,
         });
+        const profileBindings = profile.type === 'bindings' ? profile.bindings : [];
+        const statsBindings = stats.type === 'bindings' ? stats.bindings : [];
 
         const parts: string[] = [`# ${prettyTerm(resolved)}`, `\`${resolved}\``, ''];
-        if (profile.bindings.length) {
+        if (profileBindings.length) {
           parts.push('## Profile');
           parts.push(
-            profile.bindings
+            profileBindings
               .map((b) => `- **${prettyTerm(bindingValue(b.p))}**: ${prettyTerm(bindingValue(b.o))}`)
               .join('\n'),
           );
         } else {
           parts.push('_(no profile triples found in the `meta` sub-graph; this agent may not be registered yet.)_');
         }
-        if (stats.bindings.length) {
+        if (statsBindings.length) {
           parts.push('', '## Authored activity');
           parts.push(
-            stats.bindings
+            statsBindings
               .map(
                 (b) =>
                   `- ${bindingValue(b.n)} × ${prettyTerm(bindingValue(b.t))}`,

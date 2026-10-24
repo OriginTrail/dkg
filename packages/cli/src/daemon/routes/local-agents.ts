@@ -209,11 +209,11 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
 } from '../http-utils.js';
+import { requireNodeAdmin } from '../node-admin-guard.js';
 import {
   normalizeRepo,
   isValidRepoSpec,
@@ -317,9 +317,64 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
+import {
+  primeAgentDkgSessionId,
+  readPrimeAgentSessions,
+} from '../prime-agent.js';
 
 import type { RequestContext } from './context.js';
+import { actorFromRequestContext } from './context.js';
 
+/**
+ * Prime Agent is the one integration whose "is it there" answer is not derivable
+ * from config: a bridge exists per live session, so the count changes without
+ * anything in the node changing. The listing therefore reads the discovery
+ * directory (a sync readdir over a handful of small files, already the hot path
+ * for the chat routes) so the UI can distinguish "installed but idle" from
+ * "not installed" without a second round trip.
+ */
+function withPrimeAgentSessionCounts<T extends { id: string; metadata?: Record<string, unknown> }>(
+  integrations: T[],
+): T[] {
+  return integrations.map((integration) => {
+    if (integration.id !== 'prime-agent') return integration;
+    let sessions: ReturnType<typeof readPrimeAgentSessions>;
+    try {
+      sessions = readPrimeAgentSessions();
+    } catch {
+      // Discovery is best-effort: an unreadable directory must not take down
+      // the whole integrations listing.
+      return integration;
+    }
+    const metadata: Record<string, unknown> = {
+      ...(integration.metadata ?? {}),
+      sessionCount: sessions.length,
+    };
+    if (sessions[0]) {
+      metadata.activeSessionId = sessions[0].sessionId;
+      metadata.activeMemorySessionId = primeAgentDkgSessionId(sessions[0].sessionId);
+    } else {
+      // A zero-session listing must not keep advertising the connect-time
+      // session ids: node-ui pins history to activeMemorySessionId, and stale
+      // raw/memory ids would route every send into a guaranteed 409.
+      delete metadata.activeSessionId;
+      delete metadata.activeMemorySessionId;
+    }
+    return { ...integration, metadata };
+  });
+}
+
+/**
+ * Single-integration responses (get / connect / refresh) need the same overlay
+ * as the listing: node-ui upserts each of them into its integrations state, so
+ * any un-overlaid response would regress the pinned session to the persisted
+ * connect-time id until the next listing poll.
+ */
+function withPrimeAgentSessionCount<T extends { id: string; metadata?: Record<string, unknown> }>(
+  integration: T,
+): T {
+  return withPrimeAgentSessionCounts([integration])[0];
+}
 
 export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void> {
   const {
@@ -349,15 +404,18 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
     apiPortRef,
     url,
     path,
-    requestToken,
     requestAgentAddress,
   } = ctx;
+  // Connecting, updating or refreshing an integration rewrites node config and
+  // can run its setup, so it requires a node-level admin token. Resolved lazily,
+  // inside those routes only, so read-only routes never depend on it.
+  const nodeAuth = () => actorFromRequestContext(ctx).authentication;
 
 
   // GET /api/local-agent-integrations — generic local agent registry/status surface
   if (req.method === 'GET' && path === '/api/local-agent-integrations') {
     return jsonResponse(res, 200, {
-      integrations: listLocalAgentIntegrations(config),
+      integrations: withPrimeAgentSessionCounts(listLocalAgentIntegrations(config)),
     });
   }
 
@@ -367,14 +425,21 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
     if (!id) return jsonResponse(res, 404, { error: 'Integration not found' });
     const integration = getLocalAgentIntegration(config, id);
     if (!integration) return jsonResponse(res, 404, { error: `Unknown integration: ${id}` });
-    return jsonResponse(res, 200, { integration });
+    return jsonResponse(res, 200, { integration: withPrimeAgentSessionCount(integration) });
   }
 
   // POST /api/local-agent-integrations/connect — upsert/connect an integration
   if (req.method === 'POST' && path === '/api/local-agent-integrations/connect') {
+    if (!requireNodeAdmin(nodeAuth(), res, 'POST /api/local-agent-integrations/connect', 'connect local agent integrations')) return;
     const body = await readBody(req, SMALL_BODY_BYTES);
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+    if (normalizeIntegrationId(typeof parsed.id === 'string' ? parsed.id : '') === 'local-llm') {
+      return jsonResponse(res, 409, {
+        error: 'DKG Local LLM is daemon-managed and does not require a connect or install step.',
+        code: 'DAEMON_MANAGED_INTEGRATION',
+      });
+    }
     try {
       const source = isPlainRecord(parsed.metadata) && typeof parsed.metadata.source === 'string'
         ? parsed.metadata.source
@@ -383,7 +448,11 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
         ? await connectLocalAgentIntegrationFromUi(config, parsed, bridgeAuthToken, { saveConfig })
         : { integration: connectLocalAgentIntegration(config, parsed) };
       await saveConfig(config);
-      return jsonResponse(res, 200, { ok: true, integration: result.integration, notice: result.notice });
+      return jsonResponse(res, 200, {
+        ok: true,
+        integration: withPrimeAgentSessionCount(result.integration),
+        notice: result.notice,
+      });
     } catch (err: any) {
       try { await saveConfig(config); } catch { /* best effort: preserve failed attach state when available */ }
       return jsonResponse(res, 400, { error: err?.message ?? 'Invalid local agent integration payload' });
@@ -397,6 +466,7 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
     && path.startsWith('/api/local-agent-integrations/')
     && path.endsWith('/refresh')
   ) {
+    if (!requireNodeAdmin(nodeAuth(), res, 'POST /api/local-agent-integrations/:id/refresh', 'refresh local agent integrations')) return;
     const segments = path.slice('/api/local-agent-integrations/'.length, -'/refresh'.length);
     if (!segments || segments.includes('/')) {
       return jsonResponse(res, 404, { error: 'Unknown integration' });
@@ -409,7 +479,7 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
     try {
       const integration = await refreshLocalAgentIntegrationFromUi(config, normalizedId, bridgeAuthToken);
       await saveConfig(config);
-      return jsonResponse(res, 200, { ok: true, integration });
+      return jsonResponse(res, 200, { ok: true, integration: withPrimeAgentSessionCount(integration) });
     } catch (err: any) {
       return jsonResponse(res, 400, { error: err?.message ?? 'Integration refresh failed' });
     }
@@ -417,8 +487,15 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
 
   // PUT /api/local-agent-integrations/:id — partial update for stored integration state
   if (req.method === 'PUT' && path.startsWith('/api/local-agent-integrations/')) {
+    if (!requireNodeAdmin(nodeAuth(), res, 'PUT /api/local-agent-integrations/:id', 'update local agent integrations')) return;
     const id = path.slice('/api/local-agent-integrations/'.length);
     if (!id) return jsonResponse(res, 404, { error: 'Integration not found' });
+    if (normalizeIntegrationId(id) === 'local-llm') {
+      return jsonResponse(res, 409, {
+        error: 'DKG Local LLM is daemon-managed and cannot be connected or disconnected.',
+        code: 'DAEMON_MANAGED_INTEGRATION',
+      });
+    }
     const body = await readBody(req, SMALL_BODY_BYTES);
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
@@ -446,6 +523,31 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
           await saveConfig(config);
           return jsonResponse(res, 200, { ok: true, integration });
         }
+      }
+
+      if (explicitDisconnect && normalizedId === 'prime-agent') {
+        // Reverse setup removes our entry from settings.json.extensions. A
+        // restore failure must NOT be reported as a failed disconnect: the
+        // integration really is disconnected either way, and surfacing it as
+        // `error` would leave the operator unable to clear the state. Same
+        // posture as the Hermes branch below — warn, do not fail.
+        let restoreError: string | undefined;
+        try {
+          const { restorePrimeAgentProfile } = await import('@origintrail-official/dkg-adapter-prime-agent');
+          const result = await restorePrimeAgentProfile({});
+          if (!result?.ok) restoreError = result?.restoreError ?? 'restore reported failure';
+        } catch (err: any) {
+          restoreError = `Prime Agent restore failed: ${err?.message ?? 'unknown error'}`;
+        }
+        const integration = updateLocalAgentIntegration(config, id, {
+          runtime: {
+            status: 'disconnected',
+            ready: false,
+            lastError: restoreError ?? null,
+          },
+        });
+        await saveConfig(config);
+        return jsonResponse(res, 200, { ok: true, integration });
       }
 
       if (explicitDisconnect && normalizedId === 'hermes') {

@@ -1,30 +1,156 @@
 import {
   decodePublishRequest, SYSTEM_CONTEXT_GRAPHS, isAgentRegistryContextGraph, DKG_ONTOLOGY,
+  CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE, type OntologyBindingSlotClass,
   Logger, createOperationContext,
   isSafeIri, assertSafeIri, validateSubGraphName, validateContextGraphId,
   contextGraphSubGraphUri,
   contextGraphMetaGraphUri, contextGraphDataGraphUri,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+  MemoryLayer,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  deleteByPatternWithoutCount,
+  GraphManager,
+  tryReplaceGraphAtomically,
+  type TripleStore,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
 import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
 import {
+  acceptIncomingPublicQuads,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity,
   generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad,
-  validatePublishRequest, parseSimpleNQuads, generateSubGraphRegistration,
+  generateGraphKnowledgeAssetMetadata,
+  resolveKnowledgeAssetWorkspaceHead,
+  workspacePublicQuadsDigest,
+  shouldApplyMaterialization,
+  withMaterializationLock,
+  writeMaterializedVersion,
+  validatePublishRequest, parseSimpleNQuads, ensureSubGraphRegistration,
   type KAMetadata,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
-import type { ContextGraphSub } from './dkg-agent-types.js';
+import type {
+  ContextGraphDiscoveryMetadata,
+  ContextGraphSub,
+  ContextGraphSubInput,
+} from './dkg-agent-types.js';
+import { normalizeContextGraphSubscriptionTransition } from './context-graph-subscription-policy.js';
+import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
+import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
+
+/** One registration announces one binding; more in a message are dropped unread. */
+const MAX_ONTOLOGY_GOSSIP_BINDING_CLASSIFICATIONS = 4;
 
 export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => void;
+
+interface GraphScopedPublishRequest {
+  scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+  publicTripleCount: number;
+  privateTripleCount: number;
+  privateMerkleRoot?: Uint8Array;
+  accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers: string[];
+}
+
+function resolveGraphScopedPublishRequest(
+  request: ReturnType<typeof decodePublishRequest>,
+): GraphScopedPublishRequest | undefined {
+  const privateMerkleRoot = request.privateMerkleRoot?.length
+    ? new Uint8Array(request.privateMerkleRoot)
+    : undefined;
+  const hasGraphField =
+    (request.contentScopeVersion ?? 0) !== 0
+    || Boolean(request.assertionVersion)
+    || (request.publicTripleCount ?? 0) > 0
+    || privateMerkleRoot !== undefined
+    || (request.privateTripleCount ?? 0) > 0
+    || Boolean(request.accessPolicy)
+    || (request.allowedPeers?.length ?? 0) > 0;
+  if (!hasGraphField) return undefined;
+  if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    throw new Error(
+      `Graph-scoped gossip requires contentScopeVersion=${GRAPH_KA_CONTENT_SCOPE_VERSION}`,
+    );
+  }
+  if (!request.ual) {
+    throw new Error('Graph-scoped gossip requires a UAL');
+  }
+  if (!request.assertionVersion || request.kas.length !== 0) {
+    throw new Error('Graph-scoped gossip requires assertionVersion and no legacy KA manifest');
+  }
+  const scope = createGraphKnowledgeAssetScope(request.ual, request.assertionVersion);
+  if (
+    scope.ual !== request.ual
+    || scope.assertionVersion !== '1'
+    || !request.chainId
+    || scope.chainId !== request.chainId
+  ) {
+    throw new Error('Graph-scoped gossip has a non-canonical initial KA scope');
+  }
+  const kaNumber = BigInt(scope.kaNumber);
+  if (kaNumber >= (1n << 96n)) {
+    throw new Error('Graph-scoped gossip KA number exceeds the 96-bit author namespace');
+  }
+  const packedKaId = (BigInt(scope.agentAddress) << 96n) | kaNumber;
+  const startKAId = protobufScalarToBigInt(request.startKAId ?? 0);
+  const endKAId = protobufScalarToBigInt(request.endKAId ?? 0);
+  if (startKAId !== packedKaId || endKAId !== packedKaId) {
+    throw new Error(
+      `Graph-scoped gossip UAL-derived kaId ${packedKaId} does not match ` +
+        `published range ${startKAId}..${endKAId}`,
+    );
+  }
+  const publicTripleCount = request.publicTripleCount ?? 0;
+  const privateTripleCount = request.privateTripleCount ?? 0;
+  if (
+    !Number.isSafeInteger(publicTripleCount)
+    || publicTripleCount < 0
+    || !Number.isSafeInteger(privateTripleCount)
+    || privateTripleCount < 0
+    || (publicTripleCount === 0 && privateTripleCount === 0)
+    || (privateTripleCount > 0 && privateMerkleRoot?.length !== 32)
+    || (privateTripleCount === 0 && privateMerkleRoot !== undefined)
+  ) {
+    throw new Error('Graph-scoped gossip has an invalid content envelope');
+  }
+  const accessPolicy = request.accessPolicy;
+  if (accessPolicy !== 'public' && accessPolicy !== 'ownerOnly' && accessPolicy !== 'allowList') {
+    throw new Error(`Graph-scoped gossip has invalid accessPolicy: ${accessPolicy || '(empty)'}`);
+  }
+  const rawAllowedPeers = request.allowedPeers ?? [];
+  const allowedPeers = [...new Set(rawAllowedPeers.map((peer) => peer.trim()).filter(Boolean))];
+  if (
+    allowedPeers.length !== rawAllowedPeers.length
+    || (accessPolicy === 'allowList' && allowedPeers.length === 0)
+    || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
+  ) {
+    throw new Error('Graph-scoped gossip has an invalid access-policy peer envelope');
+  }
+  return {
+    scope,
+    publicTripleCount,
+    privateTripleCount,
+    ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+    accessPolicy,
+    allowedPeers,
+  };
+}
 
 export interface GossipPublishHandlerCallbacks {
   contextGraphExists: (id: string) => Promise<boolean>;
   getContextGraphOwner: (id: string) => Promise<string | null>;
-  subscribeToContextGraph: (id: string, options?: { trackSyncScope?: boolean; persist?: boolean }) => void;
   setContextGraphSubscription?: (id: string, next: ContextGraphSub, options?: { persist?: boolean }) => void;
+  /**
+   * Record a Context Graph learned from ontology gossip. Agent-backed callers
+   * apply the node-role policy centrally (edge=catalogue-only, core=activate);
+   * standalone handlers fall back to an in-memory passive catalogue record.
+   */
+  recordDiscoveredContextGraph?: (id: string, metadata: ContextGraphDiscoveryMetadata) => void;
   /**
    * Same semantics as `DKGAgent#hasConfirmedMetaState`: returns true when the
    * local store already has a trustworthy public announcement for this CG
@@ -39,6 +165,14 @@ export interface GossipPublishHandlerCallbacks {
    */
   hasConfirmedMetaState?: (id: string) => Promise<boolean>;
   getCgMeta?: (id: string) => Promise<ContextGraphMetaRecord>;
+  /** Resolve the topic Context Graph to its authoritative on-chain id. */
+  getContextGraphOnChainId?: (id: string) => Promise<string | null>;
+  /**
+   * Classify the on-chain slot named by an ontology id binding (see
+   * `DKGAgent#classifyOntologyBindingSlot`). A binding to a slot proven
+   * curated is not stored from ontology gossip.
+   */
+  classifyOnChainSlot?: (onChainId: string) => Promise<OntologyBindingSlotClass>;
   markCgMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
   persistContextGraphSubscription?: (id: string) => void;
   onPhase?: GossipPhaseCallback;
@@ -79,15 +213,40 @@ export class GossipPublishHandler {
 
   private setContextGraphSubscription(
     id: string,
-    next: ContextGraphSub,
+    next: ContextGraphSubInput,
     options?: { persist?: boolean },
   ): void {
+    const previous = this.subscribedContextGraphs.get(id);
+    const normalized = normalizeContextGraphSubscriptionTransition(previous, next);
     const setter = this.callbacks.setContextGraphSubscription;
     if (setter) {
-      setter(id, next, options);
+      setter(id, normalized, options);
       return;
     }
-    this.subscribedContextGraphs.set(id, next);
+    this.subscribedContextGraphs.set(id, normalized);
+  }
+
+  private recordDiscoveredContextGraph(id: string, metadata: ContextGraphDiscoveryMetadata): void {
+    const recorder = this.callbacks.recordDiscoveredContextGraph;
+    if (recorder) {
+      recorder(id, metadata);
+      return;
+    }
+    const existing = this.subscribedContextGraphs.get(id);
+    this.setContextGraphSubscription(id, {
+      ...existing,
+      // Construct allowed discovery metadata explicitly. Besides keeping the
+      // TypeScript contract narrow, this prevents an older/untyped callback
+      // from smuggling membership, host, or reconciliation fields at runtime.
+      name: metadata.name ?? existing?.name,
+      onChainId: metadata.onChainId ?? existing?.onChainId,
+      onChainHash: metadata.onChainHash ?? existing?.onChainHash,
+      participantAgents: metadata.participantAgents ?? existing?.participantAgents,
+      subscribed: existing?.subscribed === true,
+      synced: existing?.synced === true,
+      sharedMemorySynced: existing?.sharedMemorySynced === true,
+      metaSynced: existing?.metaSynced === true,
+    }, { persist: false });
   }
 
   async handlePublishMessage(data: Uint8Array, contextGraphId: string, onPhase?: GossipPhaseCallback, fromPeerId?: string): Promise<void> {
@@ -123,6 +282,7 @@ export class GossipPublishHandler {
 
       const nquadsStr = new TextDecoder().decode(request.nquads);
       const quads = parseSimpleNQuads(nquadsStr);
+      const graphPublish = resolveGraphScopedPublishRequest(request);
 
       if (quads.length === 0 && !request.ual) {
         this.log.warn(ctx, 'Gossip: empty broadcast with no UAL, ignoring');
@@ -145,25 +305,53 @@ export class GossipPublishHandler {
         await graphManager.ensureSubGraph(request.contextGraphId, subGraphName);
       }
 
-      const dataGraph = subGraphName
-        ? contextGraphSubGraphUri(request.contextGraphId, subGraphName)
-        : graphManager.dataGraphUri(request.contextGraphId);
+      const dataGraph = graphPublish
+        ? knowledgeAssetLayerGraphUri(
+            request.contextGraphId,
+            MemoryLayer.VerifiableMemory,
+            graphPublish.scope,
+            subGraphName,
+          )
+        : subGraphName
+          ? contextGraphSubGraphUri(request.contextGraphId, subGraphName)
+          : graphManager.dataGraphUri(request.contextGraphId);
       // Drop any _meta quads from gossip — _meta state (allowlists, registration
       // status, curator) is security-critical and must only propagate via the
       // authenticated sync protocol, not unauthenticated gossip.
       // Match both raw `/_meta` suffix and common percent-encoded variants.
       // Avoid decodeURIComponent which throws on malformed encoding.
-      const filteredQuads = quads.filter(q => {
-        const g = q.graph;
-        return !g.endsWith('/_meta') && !g.endsWith('%2F_meta') && !g.endsWith('%2f_meta');
-      });
-      let normalized = filteredQuads.map(q => ({ ...q, graph: dataGraph }));
+      let normalized: Quad[];
+      if (graphPublish) {
+        if (quads.some((quad) => quad.graph !== dataGraph)) {
+          throw new Error(
+            `Graph-scoped gossip payload must target only its UAL-derived VM graph ${dataGraph}`,
+          );
+        }
+        if (quads.length !== graphPublish.publicTripleCount) {
+          throw new Error(
+            `Graph-scoped gossip public triple count mismatch ` +
+              `(wire=${graphPublish.publicTripleCount}, parsed=${quads.length})`,
+          );
+        }
+        // Compared with this node's own head below and written to VM: take
+        // the payload in the form the store returns it in.
+        normalized = acceptIncomingPublicQuads(quads).map((quad) => ({ ...quad, graph: dataGraph }));
+      } else {
+        const filteredQuads = quads.filter(q => {
+          const g = q.graph;
+          return !g.endsWith('/_meta') && !g.endsWith('%2F_meta') && !g.endsWith('%2f_meta');
+        });
+        normalized = filteredQuads.map(q => ({ ...q, graph: dataGraph }));
+      }
 
       // When receiving ontology-topic broadcasts, skip context graph definition
       // triples for context graphs we already have locally. This prevents duplicate
       // creator/timestamp triples when multiple nodes create the same context graph
       // during simultaneous startup.
-      // Also auto-subscribe to any newly discovered context graphs.
+      // Catalogue newly discovered context graphs without joining them. The
+      // ontology topic is a universal control-plane subscription, so treating a
+      // definition announcement as member intent would make every edge ingest
+      // every public CG it happens to hear about.
       if (request.contextGraphId === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) {
         const contextGraphPrefix = 'did:dkg:context-graph:';
         const incomingContextGraphUris = new Set(
@@ -203,25 +391,17 @@ export class GossipPublishHandler {
               q.subject === `${contextGraphPrefix}${newId}` && q.predicate === DKG_ONTOLOGY.SCHEMA_NAME,
             );
             const name = nameQuad ? stripLiteral(nameQuad.object) : newId;
-            const next = {
+            const metadata = {
               name,
-              subscribed: true,
-              // `synced: false` — we just got the definition triple via
-              // gossip, no actual CG data has been pulled yet. The
-              // catchup runner flips this to true once data arrives.
-              // Setting it true here would lie about sync state and
-              // pollute the Oracle browse catalogue with stale entries.
-              synced: false,
-              metaSynced: false,
               onChainId: this.subscribedContextGraphs.get(newId)?.onChainId,
             };
-            this.setContextGraphSubscription(newId, next, { persist: false });
-            this.callbacks.subscribeToContextGraph(newId, { trackSyncScope: true });
-            this.log.info(ctx, `Discovered context graph "${name}" (${newId}) via gossip — auto-subscribed (sync-enabled)`);
+            this.recordDiscoveredContextGraph(newId, metadata);
+            this.log.info(ctx, `Discovered context graph "${name}" (${newId}) via ontology gossip — recorded for role-aware activation`);
           }
         }
 
         normalized = await this.filterInvalidOntologyPolicyBindings(normalized, ctx);
+        normalized = await this.filterCuratedOnChainBindings(normalized, ctx);
       } else {
         const allowedPeers = await this.getContextGraphAllowedPeers(request.contextGraphId);
 
@@ -274,7 +454,7 @@ export class GossipPublishHandler {
       // broadcasts (no UAL or no KAs) bypass validation.
       phase?.('validate', 'start');
       let isReplay = false;
-      if (request.ual && request.kas?.length > 0) {
+      if (!graphPublish && request.ual && request.kas?.length > 0) {
         const manifest = request.kas.map(ka => ({
           tokenId: 0n,
           rootEntity: ka.rootEntity,
@@ -311,26 +491,210 @@ export class GossipPublishHandler {
       // Auto-register sub-graph in _meta AFTER validation passes.
       // This prevents polluting metadata when invalid messages are rejected.
       if (subGraphName) {
-        const sgUri = contextGraphSubGraphUri(request.contextGraphId, subGraphName);
-        const metaGraph = `did:dkg:context-graph:${assertSafeIri(request.contextGraphId)}/_meta`;
-        const alreadyRegistered = await this.store.query(
-          `ASK { GRAPH <${metaGraph}> {
-            <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> ;
-              <http://schema.org/name> ${JSON.stringify(subGraphName)} ;
-              <http://dkg.io/ontology/createdBy> ?createdBy .
-          } }`,
-        );
-        if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
-          const regQuads = generateSubGraphRegistration({
-            contextGraphId: request.contextGraphId,
-            subGraphName,
-            createdBy: request.publisherAddress || 'gossip-discovery',
-            timestamp: new Date(),
-          });
-          await this.store.insert(regQuads);
-          this.callbacks.markCgMetaDirtyFromQuads?.(regQuads);
+        const registration = await ensureSubGraphRegistration(this.store, {
+          contextGraphId: request.contextGraphId,
+          subGraphName,
+          createdBy: request.publisherAddress || 'gossip-discovery',
+          timestamp: new Date(),
+        }, { source: 'agent.gossipPublish.subGraphRegistration' });
+        if (registration.registered) {
+          this.callbacks.markCgMetaDirtyFromQuads?.(registration.quads);
           this.log.info(ctx, `Auto-registered sub-graph "${subGraphName}" in context graph "${request.contextGraphId}" from gossip`);
         }
+      }
+
+      if (graphPublish) {
+        phase?.('store', 'start');
+        const privateRoots = graphPublish.privateMerkleRoot
+          ? [graphPublish.privateMerkleRoot]
+          : [];
+        const merkleRoot = computeFlatKCRoot(normalized, privateRoots);
+        const txHash = request.txHash ?? '';
+        const blockNumber = protobufScalarToNumber(request.blockNumber ?? 0);
+        const startKAId = protobufScalarToBigInt(request.startKAId ?? 0);
+        const endKAId = protobufScalarToBigInt(request.endKAId ?? 0);
+        const graphManager = new GraphManager(this.store);
+        let workspaceHead;
+        try {
+          workspaceHead = await resolveKnowledgeAssetWorkspaceHead({
+            store: this.store,
+            graphManager,
+            contextGraphId: request.contextGraphId,
+            kaUal: graphPublish.scope.ual,
+            subGraphName,
+          });
+        } catch (err) {
+          this.log.warn(
+            ctx,
+            `Gossip rejected corrupt graph-scoped SWM head for ${graphPublish.scope.ual}: ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          );
+          return;
+        }
+        const privateMerkleRoot = graphPublish.privateMerkleRoot
+          ? ethers.hexlify(graphPublish.privateMerkleRoot).toLowerCase()
+          : undefined;
+        const publicDigest = workspacePublicQuadsDigest(
+          normalized.map((quad) => ({ ...quad, graph: '' })),
+        );
+        if (
+          !workspaceHead
+          || workspaceHead.assertionVersion !== graphPublish.scope.assertionVersion
+          || workspaceHead.publicTripleCount !== graphPublish.publicTripleCount
+          || workspaceHead.publicQuadsDigest !== publicDigest
+          || workspaceHead.privateTripleCount !== graphPublish.privateTripleCount
+          || workspaceHead.privateMerkleRoot?.toLowerCase() !== privateMerkleRoot
+        ) {
+          this.log.warn(
+            ctx,
+            `Gossip deferred graph-scoped publish ${graphPublish.scope.ual}: ` +
+              'no matching durable StorageACK workspace head',
+          );
+          return;
+        }
+        if (
+          graphPublish.accessPolicy !== workspaceHead.access.accessPolicy
+          || graphPublish.allowedPeers.join('\0') !== workspaceHead.access.allowedPeers.join('\0')
+          || (fromPeerId !== undefined && fromPeerId !== workspaceHead.publisherPeerId)
+        ) {
+          this.log.warn(
+            ctx,
+            `Gossip ignored untrusted graph-scoped access provenance for ${graphPublish.scope.ual}`,
+          );
+        }
+        let verified = false;
+        if (txHash && blockNumber > 0 && request.publisherAddress) {
+          phase?.('chain-verify', 'start');
+          verified = await this.verifyGossipOnChain(
+            txHash,
+            blockNumber,
+            merkleRoot,
+            request.publisherAddress,
+            startKAId,
+            endKAId,
+            ctx,
+            request.contextGraphId,
+          );
+          phase?.('chain-verify', 'end');
+        }
+
+        const metadata = generateGraphKnowledgeAssetMetadata(
+          {
+            ual: graphPublish.scope.ual,
+            contextGraphId: request.contextGraphId,
+            merkleRoot,
+            publisherPeerId: workspaceHead.publisherPeerId,
+            accessPolicy: workspaceHead.access.accessPolicy,
+            ...(workspaceHead.access.accessPolicy === 'allowList'
+              ? { allowedPeers: [...workspaceHead.access.allowedPeers] }
+              : {}),
+            timestamp: new Date(),
+            subGraphName,
+            authorAddress: graphPublish.scope.agentAddress,
+            assertionVersion: graphPublish.scope.assertionVersion,
+            publicTripleCount: graphPublish.publicTripleCount,
+            privateTripleCount: graphPublish.privateTripleCount,
+            ...(graphPublish.privateMerkleRoot
+              ? { privateMerkleRoot: graphPublish.privateMerkleRoot }
+              : {}),
+            assertionGraph: dataGraph,
+          },
+          verified
+            ? {
+                status: 'confirmed',
+                confirmation: {
+                  kind: 'transaction',
+                  provenance: {
+                    txHash,
+                    blockNumber,
+                    blockTimestamp: Math.floor(Date.now() / 1000),
+                    publisherAddress: request.publisherAddress,
+                    batchId: startKAId,
+                    chainId: request.chainId,
+                  },
+                },
+              }
+            : { status: 'tentative' },
+        );
+        const metaGraph = contextGraphMetaGraphUri(request.contextGraphId);
+        const incomingVersion = {
+          blockNumber: verified ? blockNumber : 0,
+          txIndex: 0,
+        };
+        const outcome = await withMaterializationLock(
+          metaGraph,
+          graphPublish.scope.ual,
+          async () => {
+            if (!verified) {
+              const confirmed = await this.store.query(
+                `ASK { GRAPH <${assertSafeIri(metaGraph)}> { ` +
+                  `<${assertSafeIri(graphPublish.scope.ual)}> ` +
+                  `<http://dkg.io/ontology/status> "confirmed" } }`,
+                { source: 'agent.gossipPublish.confirmedGuard' },
+              );
+              if (confirmed.type === 'boolean' && confirmed.value) {
+                return 'stale' as const;
+              }
+            }
+            if (!(await shouldApplyMaterialization(
+              this.store,
+              metaGraph,
+              graphPublish.scope.ual,
+              incomingVersion,
+              BigInt(graphPublish.scope.assertionVersion),
+            ))) {
+              return 'stale' as const;
+            }
+            const replaced = await tryReplaceGraphAtomically(
+              this.store,
+              dataGraph,
+              normalized,
+              { source: 'agent.gossipPublish.graphScopedReplace' },
+            );
+            if (!replaced) {
+              throw Object.assign(
+                new Error('Graph-scoped gossip requires atomic TripleStore.replaceGraph support'),
+                { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
+              );
+            }
+            await deleteByPatternWithoutCount(this.store, {
+              graph: metaGraph,
+              subject: graphPublish.scope.ual,
+            });
+            await this.store.insert(metadata);
+            await writeMaterializedVersion(
+              this.store,
+              metaGraph,
+              graphPublish.scope.ual,
+              incomingVersion,
+            );
+            if (verified) {
+              const swmGraph = knowledgeAssetLayerGraphUri(
+                request.contextGraphId,
+                MemoryLayer.SharedWorkingMemory,
+                graphPublish.scope,
+                subGraphName,
+              );
+              await this.store.dropGraph(swmGraph);
+            }
+            return 'applied' as const;
+          },
+        );
+        phase?.('store', 'end');
+        if (outcome === 'stale') {
+          this.log.info(
+            ctx,
+            `Skipped stale graph-scoped publish gossip for ${graphPublish.scope.ual}`,
+          );
+          return;
+        }
+        this.callbacks.markCgMetaDirtyFromQuads?.(metadata);
+        this.log.info(
+          ctx,
+          `Graph-scoped publish ${graphPublish.scope.ual} stored as ` +
+            `${verified ? 'confirmed' : 'tentative'} (${normalized.length} public triples)`,
+        );
+        return;
       }
 
       phase?.('store', 'start');
@@ -399,9 +763,9 @@ export class GossipPublishHandler {
         // If the gossip message includes on-chain proof (txHash + blockNumber),
         // attempt targeted verification and promote to confirmed if valid.
         const txHash = request.txHash ?? '';
-        const blockNumber = protoToNumber(request.blockNumber ?? 0);
-        const startKAId = protoToBigInt(request.startKAId ?? 0);
-        const endKAId = protoToBigInt(request.endKAId ?? 0);
+        const blockNumber = protobufScalarToNumber(request.blockNumber ?? 0);
+        const startKAId = protobufScalarToBigInt(request.startKAId ?? 0);
+        const endKAId = protobufScalarToBigInt(request.endKAId ?? 0);
 
         if (txHash && blockNumber > 0 && startKAId > 0n && request.publisherAddress) {
           phase?.('chain-verify', 'start');
@@ -444,6 +808,7 @@ export class GossipPublishHandler {
     expectedStartKAId: bigint,
     expectedEndKAId: bigint,
     ctx: OperationContext,
+    expectedContextGraphId?: string,
   ): Promise<boolean> {
     if (!this.chain || this.chain.chainId === 'none') return false;
 
@@ -453,6 +818,31 @@ export class GossipPublishHandler {
     }
 
     try {
+      if (expectedContextGraphId !== undefined) {
+        if (
+          typeof this.chain.getKAContextGraphId !== 'function'
+          || !this.callbacks.getContextGraphOnChainId
+        ) {
+          this.log.warn(ctx, 'Gossip verification rejected: Context Graph binding oracle unavailable');
+          return false;
+        }
+        const expectedOnChainId = await this.callbacks.getContextGraphOnChainId(
+          expectedContextGraphId,
+        );
+        if (expectedOnChainId === null) {
+          this.log.warn(ctx, `Gossip verification rejected: Context Graph ${expectedContextGraphId} is not registered`);
+          return false;
+        }
+        const actualOnChainId = await this.chain.getKAContextGraphId(expectedStartKAId);
+        if (actualOnChainId !== BigInt(expectedOnChainId)) {
+          this.log.warn(
+            ctx,
+            `Gossip verification rejected: KA ${expectedStartKAId} belongs to Context Graph ` +
+              `${actualOnChainId}, not ${expectedOnChainId}`,
+          );
+          return false;
+        }
+      }
       const filter: EventFilter = {
         eventTypes: ['KnowledgeBatchCreated', 'KCCreated'],
         fromBlock: blockNumber,
@@ -510,6 +900,38 @@ export class GossipPublishHandler {
         `Failed to promote gossip tentative→confirmed for ${ual}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  /**
+   * Drop on-chain id bindings whose slot the chain proves curated: ontology
+   * carries public graphs, and a curated graph's binding stays in its own
+   * `_meta`. A binding whose slot isn't proven either way is stored, as
+   * before: a registration announcement usually outruns this node's view of
+   * a new slot, and a node without chain reads can't classify at all. The
+   * metadata relocation removes such a binding later if its slot proves
+   * curated. Each distinct slot costs a chain read, so a message gets only a
+   * few.
+   */
+  private async filterCuratedOnChainBindings(quads: Quad[], ctx: OperationContext): Promise<Quad[]> {
+    const classify = this.callbacks.classifyOnChainSlot;
+    if (!classify) return quads;
+    const bindingPredicate = CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE;
+    const onChainIds = [...new Set(quads
+      .filter((q) => q.predicate === bindingPredicate)
+      .map((q) => stripLiteral(q.object).trim()))];
+    if (onChainIds.length === 0) return quads;
+    const kept = new Set<string>();
+    for (const onChainId of onChainIds.slice(0, MAX_ONTOLOGY_GOSSIP_BINDING_CLASSIFICATIONS)) {
+      if (!isCanonicalAuthoritativeContextGraphId(onChainId)) continue;
+      if (await classify(onChainId).catch(() => 'unknown') !== 'curated') kept.add(onChainId);
+    }
+    const dropped = onChainIds.length - kept.size;
+    if (dropped > 0) {
+      this.log.info(ctx, `Skipped ${dropped} ontology gossip binding(s) of a curated or unreadable slot`);
+    }
+    return quads.filter((q) => (
+      q.predicate !== bindingPredicate || kept.has(stripLiteral(q.object).trim())
+    ));
   }
 
   private async filterInvalidOntologyPolicyBindings(quads: Quad[], ctx: OperationContext): Promise<Quad[]> {
@@ -609,6 +1031,7 @@ export class GossipPublishHandler {
     const cgData = contextGraphDataGraphUri(contextGraphId);
     const result = await this.store.query(
       `SELECT ?peer WHERE { GRAPH <${cgMeta}> { <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}> ?peer } }`,
+      { source: 'agent.gossipPublish.allowedPeers' },
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return null;
     return result.bindings
@@ -617,19 +1040,6 @@ export class GossipPublishHandler {
       .map(v => v.replace(/^"|"$/g, ''));
   }
 }
-
-function protoToNumber(val: number | { low: number; high: number; unsigned: boolean }): number {
-  if (typeof val === 'number') return val;
-  return ((val.high >>> 0) * 0x100000000) + (val.low >>> 0);
-}
-
-function protoToBigInt(val: string | number | bigint | { low: number; high: number; unsigned: boolean }): bigint {
-  if (typeof val === 'string') return BigInt(val);
-  if (typeof val === 'bigint') return val;
-  if (typeof val === 'number') return BigInt(val);
-  return (BigInt(val.high >>> 0) << 32n) | BigInt(val.low >>> 0);
-}
-
 
 function stripLiteral(s: string): string {
   if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1);

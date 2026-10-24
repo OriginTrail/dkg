@@ -22,6 +22,8 @@ import {
   type NodeChallenge,
 } from '@origintrail-official/dkg-chain';
 import {
+  keccak256,
+  structuredKARootV10,
   tripleContentV10,
   V10ProofChunkOutOfRangeError,
   V10ProofLeafCountMismatchError,
@@ -46,6 +48,7 @@ import {
   type ProverWal,
 } from './wal.js';
 import { InMemoryProverWal } from './wal.js';
+import { SolvedPeriodSkip } from './solved-period-skip.js';
 
 /**
  * Outcome reported by `tick()`. The orchestrator's caller (the
@@ -83,6 +86,36 @@ export interface RandomSamplingProverDeps {
   wal?: ProverWal;
   /** Hook for observability / structured logs. Default = no-op. */
   log?: ProverLogger;
+  /**
+   * Optional foreground repair invoked when the sampled public KA is absent
+   * or its live local version does not match the immutable challenge. The
+   * result is explicit challenge-scoped proof input; durable storage mutation
+   * is not a second implicit success channel.
+   */
+  repairMissingKnowledgeAsset?: (input: {
+    kaId: bigint;
+    cgId: bigint;
+    /** Immutable content identity captured by the active challenge. */
+    expectedRoot: Uint8Array;
+    expectedLeafCount: bigint;
+  }) => RandomSamplingRepairOperation;
+}
+
+/** Challenge-scoped proof input returned without mutating the live KA view. */
+export interface RandomSamplingRepairMaterial {
+  readonly contents: readonly Uint8Array[];
+  readonly privateRoots: readonly Uint8Array[];
+}
+
+/**
+ * One explicitly owned repair task. `result` is the prompt logical outcome
+ * consumed by the tick, while `settled` is the physical completion boundary
+ * that handle shutdown must drain even when a dependency ignores abort.
+ */
+export interface RandomSamplingRepairOperation {
+  readonly result: Promise<RandomSamplingRepairMaterial>;
+  readonly settled: Promise<void>;
+  cancel(reason?: unknown): void;
 }
 
 export interface ProverLogger {
@@ -96,6 +129,74 @@ const noopLog: ProverLogger = {
   warn: () => undefined,
   error: () => undefined,
 };
+
+// A leaf-count/root mismatch is a deterministic local sync inconsistency, not
+// a transient RPC failure. Give the sync/reconciliation path a few ticks to
+// repair the KA before attempting another full extraction. The loop normally
+// runs every five seconds, so this caps repeated mismatch work to one extract
+// per roughly twenty seconds while keeping recovery bounded.
+const DATA_CORRUPTION_COOLDOWN_TICKS = 3;
+
+function lifecycleAbortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException(
+    'Random Sampling prover handle stopped',
+    'AbortError',
+  );
+}
+
+function raceWithLifecycleAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(lifecycleAbortReason(signal));
+  return new Promise<T>((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const onAbort = () => {
+      cleanup();
+      reject(lifecycleAbortReason(signal));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+    if (signal.aborted) onAbort();
+  });
+}
+
+/**
+ * Build a repair operation around one physical execution. Consumers cancel a
+ * single task and drain a single completion boundary; dependency promises do
+ * not leak through the public ownership protocol.
+ */
+export function createRandomSamplingRepairOperation(
+  execute: (signal: AbortSignal) => Promise<RandomSamplingRepairMaterial>,
+  externalSignals: readonly AbortSignal[] = [],
+): RandomSamplingRepairOperation {
+  const controller = new AbortController();
+  const signals = [controller.signal, ...externalSignals];
+  const signal = signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
+  const physicalResult = Promise.resolve().then(() => {
+    if (signal.aborted) throw lifecycleAbortReason(signal);
+    return execute(signal);
+  });
+  return {
+    result: raceWithLifecycleAbort(physicalResult, signal),
+    settled: physicalResult.then(
+      () => undefined,
+      () => undefined,
+    ),
+    cancel: (reason = new DOMException(
+      'Random Sampling repair cancelled',
+      'AbortError',
+    )) => {
+      if (!controller.signal.aborted) controller.abort(reason);
+    },
+  };
+}
 
 /**
  * Single-period prover orchestrator. One instance per node — it owns
@@ -113,7 +214,33 @@ export class RandomSamplingProver {
   private readonly builder: ProofBuilder;
   private readonly wal: ProverWal;
   private readonly log: ProverLogger;
+  private readonly repairMissingKnowledgeAsset?: RandomSamplingProverDeps['repairMissingKnowledgeAsset'];
+  private readonly lifecycleController = new AbortController();
   private inflight: Promise<TickOutcome> | null = null;
+  private readonly repairOperations = new Set<RandomSamplingRepairOperation>();
+  private readonly dataCorruptionCooldown = new Map<bigint, number>();
+  private readonly solvedPeriodSkip: SolvedPeriodSkip;
+
+  /**
+   * Proof material pinned for the active proof period. The prover already pins
+   * the challenge root / leaf-count / curation branch at issuance (WS-B Trap 1),
+   * but the CONTENT was re-read live on every retry — so a mid-period UPDATE to
+   * the sampled KA (typically surfacing on a submit retry after a transient tx
+   * failure) turned an already-valid proof into a `data-corrupted` miss. Once a
+   * proof verifies against the pinned root we keep it and reuse it for the rest
+   * of the period. Keyed by the full challenge identity so a new period never
+   * reuses stale material. In-memory only — a restart mid-period re-extracts,
+   * same as before (restart + mid-period-update + this exact sampled KA is
+   * vanishingly rare).
+   */
+  private pinnedProofMaterial?: {
+    epoch: bigint;
+    periodStartBlock: bigint;
+    kaId: bigint;
+    chunkId: bigint;
+    expectedRoot: Uint8Array;
+    material: Awaited<ReturnType<ProofBuilder['build']>>;
+  };
 
   constructor(deps: RandomSamplingProverDeps) {
     this.chain = deps.chain;
@@ -122,6 +249,8 @@ export class RandomSamplingProver {
     this.builder = deps.builder ?? new InProcessProofBuilder();
     this.wal = deps.wal ?? new InMemoryProverWal();
     this.log = deps.log ?? noopLog;
+    this.repairMissingKnowledgeAsset = deps.repairMissingKnowledgeAsset;
+    this.solvedPeriodSkip = new SolvedPeriodSkip(deps.chain);
   }
 
   /** Single-flight tick. Concurrent callers await the same result. */
@@ -133,58 +262,187 @@ export class RandomSamplingProver {
     return this.inflight;
   }
 
-  /** Release builder + WAL handles. Idempotent. */
+  /** Abort handle-owned foreground work before the loop drains its active tick. */
+  cancel(reason: unknown = new DOMException(
+    'Random Sampling prover handle stopped',
+    'AbortError',
+  )): void {
+    if (!this.lifecycleController.signal.aborted) {
+      this.lifecycleController.abort(reason);
+    }
+    for (const operation of this.repairOperations) operation.cancel(reason);
+  }
+
+  private trackRepairOperation(operation: RandomSamplingRepairOperation): void {
+    this.repairOperations.add(operation);
+    void operation.settled.then(
+      () => this.repairOperations.delete(operation),
+      () => this.repairOperations.delete(operation),
+    );
+  }
+
+  /** Release builder + WAL handles after all logical and physical work settles. */
   async close(): Promise<void> {
+    this.cancel();
+    const running = this.inflight;
+    if (running) await running.catch(() => undefined);
+    while (this.repairOperations.size > 0) {
+      await Promise.allSettled(
+        [...this.repairOperations].map((operation) => operation.settled),
+      );
+    }
     await this.builder.close();
     await this.wal.close();
   }
 
-  /**
-   * Detect "the cached challenge's proof period has already elapsed in
-   * wall-clock terms, even though no on-chain tx has advanced the
-   * `activeProofPeriodStartBlock` storage cursor yet". Returns true
-   * when we should force a `createChallenge` to make the chain rotate.
-   *
-   * Applies to BOTH solved-and-stale (poll-after-success while period
-   * actually rotated) AND unsolved-and-stale (testnet 2026-05-01: an
-   * RS-contract Hub rotation left every node holding an unsolvable
-   * challenge from a long-expired period; with no tx ever calling
-   * submitProof / createChallenge the cursor froze, so
-   * `existingIsCurrent` stayed truthy forever and the prover never
-   * tried to rotate. Wall-clock comparison breaks the deadlock.)
-   *
-   * Codex round 2 on PR #369 — the on-chain
-   * `updateAndGetActiveProofPeriodStartBlock()` rolls forward using
-   * the CURRENT epoch's
-   * `RandomSampling.getActiveProofingPeriodDurationInBlocks()`, NOT
-   * whatever duration was baked into a cached `NodeChallenge` at
-   * creation time. If governance shortens the proofing duration
-   * mid-flight, the cached duration overstates expiry and the same
-   * `kc-not-synced` deadlock reappears at the rollover. So when the
-   * adapter exposes the live duration on `ProofPeriodStatus`
-   * (modern EVM/mock adapters), prefer it; fall back to
-   * `existing.proofingPeriodDurationInBlocks` only for legacy adapters
-   * that don't yet populate the field.
-   *
-   * Robust to chain adapters that don't expose `getBlockNumber` (mock
-   * / test): falls back to "not stale" so the existing short-circuit
-   * behaviour is preserved.
-   */
-  private async isCachedChallengeStale(
-    existing: NodeChallenge,
-    liveDurationInBlocks?: bigint,
-  ): Promise<boolean> {
-    if (!this.chain.getBlockNumber) return false;
-    const duration = liveDurationInBlocks ?? existing.proofingPeriodDurationInBlocks;
-    if (duration <= 0n) return false;
-    let currentBlock: number;
-    try {
-      currentBlock = await this.chain.getBlockNumber();
-    } catch {
-      return false;
+  /** Reuse the proof material already verified for this exact challenge, if any. */
+  private pinnedMaterialFor(
+    periodKey: PeriodKey,
+    kaId: bigint,
+    chunkId: bigint,
+    expectedRoot: Uint8Array,
+  ): Awaited<ReturnType<ProofBuilder['build']>> | undefined {
+    const p = this.pinnedProofMaterial;
+    if (
+      p
+      && p.epoch === periodKey.epoch
+      && p.periodStartBlock === periodKey.periodStartBlock
+      && p.kaId === kaId
+      && p.chunkId === chunkId
+      && uint8ArrayEquals(p.expectedRoot, expectedRoot)
+    ) {
+      return p.material;
     }
-    const periodEndBlock = existing.activeProofPeriodStartBlock + duration;
-    return BigInt(currentBlock) >= periodEndBlock;
+    return undefined;
+  }
+
+  private pinProofMaterial(
+    periodKey: PeriodKey,
+    kaId: bigint,
+    chunkId: bigint,
+    expectedRoot: Uint8Array,
+    material: Awaited<ReturnType<ProofBuilder['build']>>,
+  ): void {
+    this.pinnedProofMaterial = {
+      epoch: periodKey.epoch,
+      periodStartBlock: periodKey.periodStartBlock,
+      kaId,
+      chunkId,
+      expectedRoot,
+      material,
+    };
+  }
+
+  private markDataCorrupted(kaId: bigint): void {
+    this.dataCorruptionCooldown.set(kaId, DATA_CORRUPTION_COOLDOWN_TICKS);
+  }
+
+  /** Consume one retry suppression tick for a KA, returning its prior count. */
+  private consumeDataCorruptionCooldown(kaId: bigint): number {
+    const remaining = this.dataCorruptionCooldown.get(kaId);
+    if (remaining === undefined) return 0;
+    if (remaining <= 1) this.dataCorruptionCooldown.delete(kaId);
+    else this.dataCorruptionCooldown.set(kaId, remaining - 1);
+    return remaining;
+  }
+
+  private async extractPublicKnowledgeAssetWithRepair(input: {
+    kaId: bigint;
+    cgId: bigint;
+    expectedRoot: Uint8Array;
+    expectedLeafCount: bigint;
+    periodStartBlock: bigint;
+  }): Promise<RandomSamplingRepairMaterial> {
+    const extractLocal = async (): Promise<RandomSamplingRepairMaterial> => {
+      const extracted = await extractV10KCFromStore(
+        this.store,
+        input.cgId,
+        input.kaId,
+        undefined,
+        () => this.chain.getContextGraphNameHash?.(input.cgId) ?? Promise.resolve(null),
+      );
+      return {
+        contents: extracted.triples.map((triple) => tripleContentV10(
+          triple.subject,
+          triple.predicate,
+          triple.object,
+        )),
+        privateRoots: extracted.privateRoots,
+      };
+    };
+    type LocalOutcome =
+      | { kind: 'ready'; material: RandomSamplingRepairMaterial }
+      | { kind: 'challenge-mismatch'; material: RandomSamplingRepairMaterial }
+      | { kind: 'missing'; error: KCNotFoundError | KCDataMissingError };
+    const readLocalOutcome = async (): Promise<LocalOutcome> => {
+      try {
+        const material = await extractLocal();
+        return repairMaterialMatchesChallenge(
+          material,
+          input.expectedRoot,
+          input.expectedLeafCount,
+        )
+          ? { kind: 'ready', material }
+          : { kind: 'challenge-mismatch', material };
+      } catch (error) {
+        if (!(error instanceof KCNotFoundError) && !(error instanceof KCDataMissingError)) {
+          throw error;
+        }
+        return { kind: 'missing', error };
+      }
+    };
+
+    const local = await readLocalOutcome();
+    if (local.kind === 'ready') return local.material;
+    if (!this.repairMissingKnowledgeAsset) {
+      if (local.kind === 'missing') throw local.error;
+      return local.material;
+    }
+
+    this.log.info('rs.tick.kc-repair-started', {
+      kaId: input.kaId.toString(),
+      cgId: input.cgId.toString(),
+      periodStart: input.periodStartBlock.toString(),
+      err: local.kind === 'challenge-mismatch'
+        ? 'ChallengeCommitmentMismatch'
+        : local.error.name,
+    });
+    try {
+      const signal = this.lifecycleController.signal;
+      if (signal.aborted) throw lifecycleAbortReason(signal);
+      const repairOperation = this.repairMissingKnowledgeAsset({
+        kaId: input.kaId,
+        cgId: input.cgId,
+        expectedRoot: input.expectedRoot,
+        expectedLeafCount: input.expectedLeafCount,
+      });
+      this.trackRepairOperation(repairOperation);
+      const repaired = await repairOperation.result;
+      if (signal.aborted) throw lifecycleAbortReason(signal);
+      this.log.info('rs.tick.kc-repaired', {
+        kaId: input.kaId.toString(),
+        cgId: input.cgId.toString(),
+        periodStart: input.periodStartBlock.toString(),
+        challengeScoped: true,
+      });
+      return repaired;
+    } catch (repairError) {
+      if (this.lifecycleController.signal.aborted) throw repairError;
+      this.log.warn('rs.tick.kc-repair-failed', {
+        kaId: input.kaId.toString(),
+        cgId: input.cgId.toString(),
+        periodStart: input.periodStartBlock.toString(),
+        err: repairError instanceof Error
+          ? repairError.message.slice(0, 200)
+          : String(repairError).slice(0, 200),
+      });
+      // Preserve the local semantic outcome: a missing asset remains a normal
+      // kc-not-synced result, while a local mismatch continues to the existing
+      // root/count classifier. A rejected hook is never treated as success via
+      // an undocumented storage side effect.
+      if (local.kind === 'missing') throw local.error;
+      return local.material;
+    }
   }
 
   private async tickImpl(): Promise<TickOutcome> {
@@ -200,29 +458,48 @@ export class RandomSamplingProver {
       );
     }
 
-    // Read the period status + existing challenge in parallel. We
-    // *don't* short-circuit on `!status.isValid`: that view-side
-    // check stalls single-tenant deployments indefinitely because no
-    // external tx ever triggers `updateAndGetActiveProofPeriodStartBlock`.
-    // The on-chain `createChallenge` auto-rotates the period inside
-    // `_generateChallenge`, so we always proceed and let the chain
-    // (a) decide what the current period actually is and (b) reject
-    // submissions for stale periods via `ChallengeNoLongerActive`.
-    const [status, existing] = await Promise.all([
-      this.chain.getActiveProofPeriodStatus(),
-      this.chain.getNodeChallenge(this.identityId),
-    ]);
+    // The collaborator owns the complete guarded sequence: reuse check, pair
+    // and epoch capture, these live reads, head staleness, and observation.
+    const solvedPeriodRead = await this.solvedPeriodSkip.read(async () => {
+      // Read the period status + existing challenge in parallel. We
+      // *don't* short-circuit on `!status.isValid`: that view-side
+      // check stalls single-tenant deployments indefinitely because no
+      // external tx ever triggers `updateAndGetActiveProofPeriodStartBlock`.
+      // The on-chain `createChallenge` auto-rotates the period inside
+      // `_generateChallenge`, so we always proceed and let the chain
+      // (a) decide what the current period actually is and (b) reject
+      // submissions for stale periods via `ChallengeNoLongerActive`.
+      const [status, existing] = await Promise.all([
+        this.chain.getActiveProofPeriodStatus!(),
+        this.chain.getNodeChallenge!(this.identityId),
+      ]);
 
-    // Existing is "current" iff its period-start block matches the
-    // status read. If status was stale, existing's period block
-    // matches the same stale snapshot and we still try to use it —
-    // the chain rejects on submit if the boundary actually crossed.
-    // If status is fresh but existing is from a previous period
-    // (rotation happened), we discard existing and force a rotation
-    // by calling `createChallenge` below.
-    const existingIsCurrent =
-      existing !== null
-      && existing.activeProofPeriodStartBlock === status.activeProofPeriodStartBlock;
+      // Existing is "current" iff its period-start block matches the status
+      // read. A stale status and matching challenge are still checked against
+      // the live head by the collaborator before either is reused.
+      const existingIsCurrent = existing !== null
+        && existing.activeProofPeriodStartBlock === status.activeProofPeriodStartBlock;
+      return {
+        value: { status },
+        ...(existingIsCurrent
+          ? {
+              currentChallenge: {
+                challenge: existing,
+                durationInBlocks: status.proofingPeriodDurationInBlocks,
+              },
+            }
+          : {}),
+      };
+    });
+    if (solvedPeriodRead.kind === 'reused') {
+      this.log.info('rs.tick.already-solved', {
+        epoch: solvedPeriodRead.record.challengePeriodEpoch.toString(),
+        periodStart: solvedPeriodRead.record.periodStartBlock.toString(),
+      });
+      return { kind: 'already-solved' };
+    }
+    const { status } = solvedPeriodRead.value;
+    const currentExisting = solvedPeriodRead.currentChallenge?.challenge ?? null;
 
     // Codex review on PR #357 flagged: short-circuiting on `existingIsCurrent && solved`
     // strands the node when the read-only `getActiveProofPeriodStatus` view is
@@ -238,15 +515,11 @@ export class RandomSamplingProver {
     // hasn't rotated yet (RandomSampling.sol L191-200). So a naive
     // always-call would burn a tick + emit confusing reverts on every
     // post-solve poll inside the same period.
-    if (existingIsCurrent && existing.solved) {
-      const isStale = await this.isCachedChallengeStale(
-        existing,
-        status.proofingPeriodDurationInBlocks,
-      );
-      if (!isStale) {
+    if (currentExisting?.solved === true) {
+      if (solvedPeriodRead.currentChallenge?.stale !== true) {
         this.log.info('rs.tick.already-solved', {
-          epoch: existing.epoch.toString(),
-          periodStart: existing.activeProofPeriodStartBlock.toString(),
+          epoch: currentExisting.epoch.toString(),
+          periodStart: currentExisting.activeProofPeriodStartBlock.toString(),
         });
         return { kind: 'already-solved' };
       }
@@ -255,7 +528,7 @@ export class RandomSamplingProver {
       // updateAndGetActiveProofPeriodStartBlock advances the storage slot
       // inside createChallenge and we get a fresh challenge.
       this.log.info('rs.tick.forcing-rotation', {
-        cachedPeriodStart: existing.activeProofPeriodStartBlock.toString(),
+        cachedPeriodStart: currentExisting.activeProofPeriodStartBlock.toString(),
         statusPeriodStart: status.activeProofPeriodStartBlock.toString(),
         reason: 'solved-stale',
       });
@@ -269,32 +542,35 @@ export class RandomSamplingProver {
 
     let challenge: NodeChallenge;
     let cgId: bigint;
+    let observedDurationInBlocks: bigint | undefined;
     // Same wall-clock stale check as the solved branch above. Without
     // it, an unsolved challenge whose period has expired (but whose
     // on-chain cursor never advanced because no submit/create tx
     // landed) would be reused forever and starve every subsequent
     // rotation. This is exactly what bricked Base Sepolia testnet
     // after the 2026-05-01 RS-contract Hub rotation.
-    const unsolvedStale = existingIsCurrent
-      && !existing.solved
-      && (await this.isCachedChallengeStale(
-        existing,
-        status.proofingPeriodDurationInBlocks,
-      ));
+    const unsolvedStale = currentExisting !== null
+      && !currentExisting.solved
+      && solvedPeriodRead.currentChallenge?.stale === true;
     if (unsolvedStale) {
       this.log.info('rs.tick.forcing-rotation', {
-        cachedPeriodStart: existing.activeProofPeriodStartBlock.toString(),
+        cachedPeriodStart: currentExisting!.activeProofPeriodStartBlock.toString(),
         statusPeriodStart: status.activeProofPeriodStartBlock.toString(),
         reason: 'unsolved-stale',
       });
     }
-    if (existingIsCurrent && !existing.solved && !unsolvedStale) {
-      challenge = existing;
+    if (currentExisting !== null && !currentExisting.solved && !unsolvedStale) {
+      challenge = currentExisting;
+      observedDurationInBlocks = status.proofingPeriodDurationInBlocks;
       cgId = await this.chain.getKAContextGraphId(challenge.knowledgeAssetId);
     } else {
       try {
         const created = await this.chain.createChallenge();
         challenge = created.challenge;
+        // A challenge created by this transaction pins the then-effective
+        // duration. Unlike an older challenge, it cannot carry a duration from
+        // a previous epoch's schedule.
+        observedDurationInBlocks = challenge.proofingPeriodDurationInBlocks;
         cgId = created.contextGraphId;
       } catch (err) {
         if (err instanceof NoEligibleContextGraphError) {
@@ -331,6 +607,29 @@ export class RandomSamplingProver {
         }),
       );
       return { kind: 'cg-not-found', kaId };
+    }
+
+    const cooldownTicksRemaining = this.consumeDataCorruptionCooldown(kaId);
+    if (cooldownTicksRemaining > 0) {
+      this.log.warn('rs.tick.kc-not-synced', {
+        kaId: kaId.toString(),
+        cgId: cgId.toString(),
+        periodStart: periodKey.periodStartBlock.toString(),
+        err: 'DataCorruptionCooldown',
+        cooldownTicksRemaining,
+      });
+      await this.wal.append(
+        makeWalEntry(periodKey, 'failed', {
+          kaId: kaId.toString(),
+          cgId: cgId.toString(),
+          chunkId: chunkId.toString(),
+          error: {
+            code: 'DataCorruptionCooldown',
+            message: `retry suppressed for ${cooldownTicksRemaining} tick(s) after data-corrupted outcome`,
+          },
+        }),
+      );
+      return { kind: 'kc-not-synced', kaId, cgId };
     }
 
     // OT-RFC-49 / WS-B Trap 1 — curation branch + commitment are PINNED on
@@ -389,10 +688,16 @@ export class RandomSamplingProver {
     } else {
       proofKind = 'public';
       try {
-        const extracted = await extractV10KCFromStore(this.store, cgId, kaId);
+        const extracted = await this.extractPublicKnowledgeAssetWithRepair({
+          kaId,
+          cgId,
+          expectedRoot,
+          expectedLeafCount: challenge.challengeLeafCount,
+          periodStartBlock: periodKey.periodStartBlock,
+        });
         // public structured path: contents = N-Triple bytes; private sub-roots -> sibling.
-        contents = extracted.triples.map((t) => tripleContentV10(t.subject, t.predicate, t.object));
-        privateRoots = extracted.privateRoots;
+        contents = [...extracted.contents];
+        privateRoots = [...extracted.privateRoots];
       } catch (err) {
         if (err instanceof KCNotFoundError || err instanceof KCDataMissingError) {
           this.log.warn('rs.tick.kc-not-synced', {
@@ -428,6 +733,7 @@ export class RandomSamplingProver {
               error: { code: 'KCRootEntitiesNotFoundError', message: err.message.slice(0, 200) },
             }),
           );
+          this.markDataCorrupted(kaId);
           return { kind: 'data-corrupted', kaId, cgId, reason: 'meta-graph-bug' };
         }
         throw err;
@@ -453,7 +759,24 @@ export class RandomSamplingProver {
       material = await this.builder.build(req);
     } catch (err) {
       const reason = mapBuilderError(err);
-      if (reason) {
+      if (!reason) throw err;
+      // Content changed under us mid-period: an UPDATE to the sampled KA flips
+      // the live root, so a freshly-extracted proof no longer matches the
+      // challenge root. That root is PINNED on the challenge, so if we already
+      // built a proof that verified against it earlier this period, reuse it
+      // instead of missing an honest proof — this rescues the common
+      // submit-retry-after-update path. Otherwise the content genuinely does
+      // not match the pinned commitment: skip as before.
+      const pinned = this.pinnedMaterialFor(periodKey, kaId, chunkId, expectedRoot);
+      if (pinned) {
+        this.log.info('rs.tick.pinned-material-reused', {
+          kaId: kaId.toString(),
+          cgId: cgId.toString(),
+          periodStart: periodKey.periodStartBlock.toString(),
+          reason,
+        });
+        material = pinned;
+      } else {
         const e = err as any;
         this.log.error('rs.tick.data-corrupted', {
           kaId: kaId.toString(),
@@ -476,10 +799,13 @@ export class RandomSamplingProver {
             error: { code: (err as Error).name, message: (err as Error).message.slice(0, 200) },
           }),
         );
+        this.markDataCorrupted(kaId);
         return { kind: 'data-corrupted', kaId, cgId, reason };
       }
-      throw err;
     }
+    // Pin the verified material so a mid-period update (surfacing here on a
+    // submit retry) reuses it rather than re-extracting stale content.
+    this.pinProofMaterial(periodKey, kaId, chunkId, expectedRoot, material);
 
     await this.wal.append(
       makeWalEntry(periodKey, 'built', {
@@ -494,6 +820,7 @@ export class RandomSamplingProver {
       txResult = await this.chain.submitProof(material.content, material.proof);
     } catch (err) {
       if (err instanceof ChallengeNoLongerActiveError) {
+        this.pinnedProofMaterial = undefined;
         this.log.warn('rs.tick.submit-stale', {
           kaId: kaId.toString(),
           cgId: cgId.toString(),
@@ -510,6 +837,11 @@ export class RandomSamplingProver {
         return { kind: 'submit-stale' };
       }
       if (err instanceof MerkleRootMismatchError) {
+        // This material was deterministically rejected by the on-chain
+        // verifier. Never retain it for the exception-path retry fallback: a
+        // later live-content mismatch must not resubmit proof bytes the chain
+        // already proved invalid.
+        this.pinnedProofMaterial = undefined;
         // The chain says the root we built does not match the on-chain
         // commitment. We already verified it locally, so this is
         // either (a) a race against an UPDATE that flipped the root,
@@ -527,6 +859,7 @@ export class RandomSamplingProver {
             error: { code: 'MerkleRootMismatch', message: err.message.slice(0, 200) },
           }),
         );
+        this.markDataCorrupted(kaId);
         return { kind: 'data-corrupted', kaId, cgId, reason: 'root-mismatch' };
       }
       throw err;
@@ -540,6 +873,11 @@ export class RandomSamplingProver {
         txHash: txResult.hash,
       }),
     );
+    await this.solvedPeriodSkip.observeSubmittedProof({
+      observationBindingId: solvedPeriodRead.observationBindingId,
+      challenge,
+      durationInBlocks: observedDurationInBlocks,
+    });
     this.log.info('rs.tick.submitted', {
       kaId: kaId.toString(),
       cgId: cgId.toString(),
@@ -556,4 +894,25 @@ function mapBuilderError(err: unknown): 'root-mismatch' | 'leaf-count-mismatch' 
   if (err instanceof V10ProofLeafCountMismatchError) return 'leaf-count-mismatch';
   if (err instanceof V10ProofChunkOutOfRangeError) return 'leaf-count-mismatch';
   return null;
+}
+
+function uint8ArrayEquals(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function repairMaterialMatchesChallenge(
+  material: RandomSamplingRepairMaterial,
+  expectedRoot: Uint8Array,
+  expectedLeafCount: bigint,
+): boolean {
+  const computed = structuredKARootV10(
+    material.contents.map((content) => keccak256(content)),
+    material.privateRoots,
+  );
+  return BigInt(computed.leafCount) === expectedLeafCount
+    && uint8ArrayEquals(computed.root, expectedRoot);
 }

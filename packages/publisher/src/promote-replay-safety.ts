@@ -1,0 +1,290 @@
+import { getPromoteNoEffectProof, PROMOTE_NO_EFFECT_REJECTION_CODE, type PromoteNoEffectProof } from './promote-no-effect-rejection.js';
+import {
+  isStoreOperationTimeoutError,
+  isStoreSchedulerBusyError,
+  type StoreOperationTimeoutErrorLike,
+} from '@origintrail-official/dkg-storage';
+
+const PROMOTE_REPLAY_SAFE_ERROR_CODE = 'PROMOTE_REPLAY_SAFE_FAILURE';
+const promoteReplaySafeBrand: unique symbol = Symbol('promote-replay-safe');
+
+export const PROMOTE_RETRYABLE_FAILURE_CODE = 'PROMOTE_RETRYABLE_FAILURE' as const;
+export const PROMOTE_RETRYABLE_FAILURE_ERROR_NAME = 'PromoteRetryableFailureError' as const;
+export const PROMOTE_POST_COMMIT_FAILURE_CODE = 'PROMOTE_POST_COMMIT_FAILURE' as const;
+export const PROMOTE_POST_COMMIT_FAILURE_ERROR_NAME = 'PromotePostCommitFailureError' as const;
+/**
+ * Fixed producer message. Queue rows written before the diagnostic code was
+ * persisted can only be recognized by this exact string, so it must stay stable.
+ */
+export const PROMOTE_POST_COMMIT_FAILURE_MESSAGE =
+  'A promote post-commit step failed after Shared Memory was committed' as const;
+
+type PromoteReplaySafeTimeoutError = StoreOperationTimeoutErrorLike & {
+  readonly [promoteReplaySafeBrand]: true;
+};
+
+export interface PromoteReplaySafeErrorDiagnostic {
+  readonly name: 'PromoteReplaySafeError';
+  readonly code: 'PROMOTE_REPLAY_SAFE_FAILURE';
+}
+
+/**
+ * Queue-owned retry disposition for transient failures that occur before a
+ * promote can commit. The exact structural code intentionally survives Error
+ * serialization and package/bundle boundaries.
+ */
+export interface PromoteRetryableFailureMarker {
+  readonly code: typeof PROMOTE_RETRYABLE_FAILURE_CODE;
+}
+
+export interface PromoteRetryableFailureDiagnostic {
+  readonly name: typeof PROMOTE_RETRYABLE_FAILURE_ERROR_NAME;
+  readonly code: typeof PROMOTE_RETRYABLE_FAILURE_CODE;
+}
+
+export interface PromotePostCommitFailureDiagnostic {
+  readonly name: typeof PROMOTE_POST_COMMIT_FAILURE_ERROR_NAME;
+  readonly code: typeof PROMOTE_POST_COMMIT_FAILURE_CODE;
+}
+
+export type PromoteFailureDiagnostic =
+  | PromoteReplaySafeErrorDiagnostic
+  | PromoteRetryableFailureDiagnostic
+  | PromotePostCommitFailureDiagnostic;
+
+export type PromoteFailureDisposition =
+  | {
+      readonly classification: 'cap_exceeded';
+      readonly retryable: false;
+      readonly diagnostic: { readonly name: 'PromoteNoEffectRejection'; readonly code: 'PROMOTE_NO_EFFECT_REJECTION' };
+      readonly noEffectProof: PromoteNoEffectProof;
+    }
+  | {
+      readonly classification: 'transient';
+      readonly retryable: true;
+      readonly diagnostic: PromoteReplaySafeErrorDiagnostic | PromoteRetryableFailureDiagnostic;
+    }
+  | {
+      readonly classification: 'fatal';
+      readonly retryable: false;
+      readonly diagnostic: PromotePostCommitFailureDiagnostic;
+    };
+
+class PromoteRetryableFailureError extends Error implements PromoteRetryableFailureMarker {
+  readonly code = PROMOTE_RETRYABLE_FAILURE_CODE;
+
+  constructor(cause: unknown) {
+    super('A promote prerequisite is temporarily unavailable', { cause });
+    this.name = PROMOTE_RETRYABLE_FAILURE_ERROR_NAME;
+  }
+}
+
+class PromotePostCommitFailureError extends Error {
+  readonly code = PROMOTE_POST_COMMIT_FAILURE_CODE;
+
+  constructor(cause: unknown) {
+    super(PROMOTE_POST_COMMIT_FAILURE_MESSAGE, { cause });
+    this.name = PROMOTE_POST_COMMIT_FAILURE_ERROR_NAME;
+  }
+}
+
+/** Translate a domain failure at the promote boundary into the queue contract. */
+export function createPromoteRetryableFailure(
+  cause: unknown,
+): Error & PromoteRetryableFailureMarker {
+  return new PromoteRetryableFailureError(cause);
+}
+
+/** Mark an unsafe finalization failure or a post-commit side effect as terminal. */
+export function createPromotePostCommitFailure(cause: unknown): Error {
+  return new PromotePostCommitFailureError(cause);
+}
+
+/**
+ * True only when the storage layer itself certifies that the failing
+ * operation never started: a typed deadline failure with a `not_started`
+ * outcome, or a scheduler admission rejection (queue full / queue wait
+ * timeout), which by contract rejects before dispatch. Indeterminate
+ * outcomes, untyped errors, capability refusals and prose that merely
+ * mentions a timeout or the scheduler never qualify, so a store that
+ * saturates mid-promote earns a bounded retry only when nothing was mutated.
+ */
+export function isStoreOperationProvenNotStarted(error: unknown): boolean {
+  try {
+    return (isStoreOperationTimeoutError(error) && error.outcome === 'not_started')
+      || isStoreSchedulerBusyError(error);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The single classification boundary for idempotent durable finalization that a
+ * replay of the same committed operation repairs: the publisher's commit tail
+ * and the agent's SWM pointer / bound inventory CAS. Never wrap detached observers
+ * or gossip: only an immutable operation's validated durable tail qualifies.
+ * A storage operation proven not to have started can re-enter the same
+ * immutable operation and repair its tail. Unknown/indeterminate outcomes and
+ * unrelated retry markers cannot earn that permission here.
+ */
+export async function runPromoteCommittedFinalization<T>(
+  finalize: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await finalize();
+  } catch (error) {
+    if (isStoreOperationProvenNotStarted(error)) throw error;
+    throw createPromotePostCommitFailure(error);
+  }
+}
+
+/**
+ * Classify a root-companion settlement failure by what the compound SWM
+ * replace proved before it. `false` is a proven non-commit: the failure
+ * propagates untouched under the caller's pre-dispatch contract. `true` is a
+ * known compound commit, so the settlement failure is a post-commit side
+ * effect and stays terminal. `undefined` (dispatched, outcome unknown) earns
+ * a bounded queue retry only when the storage layer proves the settlement's
+ * failing operation never started: the exact graph then holds one of the
+ * permitted old-or-new payloads that a replay validates before resuming, and
+ * the settlement itself left no partial state. Every other settlement failure
+ * remains post-commit fatal, so an indeterminate outcome can never become
+ * retryable through this seam.
+ */
+export function classifyPromoteCompanionSettlementFailure(
+  error: unknown,
+  companionCommitted: boolean | undefined,
+): unknown {
+  if (companionCommitted === false) return error;
+  if (companionCommitted === undefined && isStoreOperationProvenNotStarted(error)) {
+    return createPromoteRetryableFailure(error);
+  }
+  return createPromotePostCommitFailure(error);
+}
+
+/** Structural so the disposition survives durable/bundle boundaries. */
+export function isPromoteRetryableFailure(
+  error: unknown,
+): error is PromoteRetryableFailureMarker {
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
+    return false;
+  }
+  try {
+    return Reflect.get(error, 'code') === PROMOTE_RETRYABLE_FAILURE_CODE;
+  } catch {
+    return false;
+  }
+}
+
+/** Return a fixed, privacy-bounded identity for the generic queue marker. */
+export function getPromoteRetryableFailureDiagnostic(
+  error: unknown,
+): PromoteRetryableFailureDiagnostic | undefined {
+  return isPromoteRetryableFailure(error)
+    ? {
+        name: PROMOTE_RETRYABLE_FAILURE_ERROR_NAME,
+        code: PROMOTE_RETRYABLE_FAILURE_CODE,
+      }
+    : undefined;
+}
+
+function getPromotePostCommitFailureDiagnostic(
+  error: unknown,
+): PromotePostCommitFailureDiagnostic | undefined {
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
+    return undefined;
+  }
+  try {
+    return Reflect.get(error, 'code') === PROMOTE_POST_COMMIT_FAILURE_CODE
+      ? {
+          name: PROMOTE_POST_COMMIT_FAILURE_ERROR_NAME,
+          code: PROMOTE_POST_COMMIT_FAILURE_CODE,
+        }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Consume replay-safe certification without replacing the storage error contract. */
+export function isPromoteReplaySafeError(
+  error: unknown,
+): error is PromoteReplaySafeTimeoutError {
+  try {
+    return isStoreOperationTimeoutError(error)
+      && (error as PromoteReplaySafeTimeoutError)[promoteReplaySafeBrand] === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Return a bounded identity only for producer-certified replay-safe errors. */
+export function getPromoteReplaySafeErrorDiagnostic(
+  error: unknown,
+): PromoteReplaySafeErrorDiagnostic | undefined {
+  return isPromoteReplaySafeError(error)
+    ? { name: 'PromoteReplaySafeError', code: PROMOTE_REPLAY_SAFE_ERROR_CODE }
+    : undefined;
+}
+
+/**
+ * The single public consumer contract for producer-certified promote
+ * failures. Internal marker families stay distinct, while queue disposition
+ * and privacy-bounded diagnostics are read together exactly once.
+ */
+export function getPromoteFailureDisposition(
+  error: unknown,
+): PromoteFailureDisposition | undefined {
+  const noEffectProof = getPromoteNoEffectProof(error);
+  if (noEffectProof) return {classification: 'cap_exceeded', retryable: false, noEffectProof,
+    diagnostic: {name: 'PromoteNoEffectRejection', code: PROMOTE_NO_EFFECT_REJECTION_CODE}};
+  const postCommitDiagnostic = getPromotePostCommitFailureDiagnostic(error);
+  if (postCommitDiagnostic) {
+    return {
+      classification: 'fatal',
+      retryable: false,
+      diagnostic: postCommitDiagnostic,
+    };
+  }
+  const prerequisiteDiagnostic = getPromoteRetryableFailureDiagnostic(error);
+  if (prerequisiteDiagnostic) {
+    return {
+      classification: 'transient',
+      retryable: true,
+      diagnostic: prerequisiteDiagnostic,
+    };
+  }
+  const replaySafeDiagnostic = getPromoteReplaySafeErrorDiagnostic(error);
+  return replaySafeDiagnostic
+    ? {
+        classification: 'transient',
+        retryable: true,
+        diagnostic: replaySafeDiagnostic,
+      }
+    : undefined;
+}
+
+/**
+ * The publisher owns the exact graph and frozen payload at this call site, so
+ * an indeterminate atomic replace has only the permitted old-or-new outcomes.
+ */
+export function classifyExactSwmGraphReplaceFailure(error: unknown): unknown {
+  if (isStoreOperationTimeoutError(error)
+    && error.outcome === 'indeterminate'
+    && (
+      error.storeOperation === 'replaceGraph'
+      || error.storeOperation === 'replaceGraphAndSubject'
+    )) {
+    try {
+      Object.defineProperty(error, promoteReplaySafeBrand, {
+        value: true,
+        configurable: false,
+        enumerable: false,
+        writable: false,
+      });
+    } catch {
+      // Non-extensible or hostile error objects remain uncertified (fail closed).
+    }
+  }
+  return error;
+}

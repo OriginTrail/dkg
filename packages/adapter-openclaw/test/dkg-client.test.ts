@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { DkgDaemonClient } from '../src/dkg-client.js';
+import { DkgDaemonClient, DkgDaemonHttpError, DkgDaemonOutcomeUnknownError } from '../src/dkg-client.js';
 
 describe('DkgDaemonClient', () => {
   let client: DkgDaemonClient;
@@ -173,6 +173,19 @@ describe('DkgDaemonClient', () => {
 
     const body = JSON.parse(fetchCalls[0][1]?.body as string);
     expect(body.contextGraphId).toBe('agent-context');
+  });
+
+  it('writeQueryCatalog sends catalog quads to the dedicated endpoint', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const quads = [{ subject: 'urn:q', predicate: 'urn:p', object: '"value"', graph: '' }];
+
+    await client.writeQueryCatalog('agent-context', quads);
+
+    expect(fetchCalls[0]?.[0]).toBe('http://localhost:9200/api/profile/query-catalog/write');
+    expect(JSON.parse(fetchCalls[0]?.[1]?.body as string)).toEqual({
+      contextGraphId: 'agent-context',
+      quads,
+    });
   });
 
   it('query should forward view + agentAddress + assertionName for WM reads', async () => {
@@ -408,11 +421,10 @@ describe('DkgDaemonClient', () => {
   // destructure, plus URL-encodes the assertion name.
   // ---------------------------------------------------------------------------
 
-  it('promoteAssertion hits /api/knowledge-assets/:name/swm/share with camelCase body', async () => {
+  it('promoteAssertion atomically shares without root selectors', async () => {
     fetchResponses.push(new Response(JSON.stringify({ swmShared: true, promotedCount: 1 }), { status: 200 }));
 
     await client.promoteAssertion('ctx', 'chat-turns', {
-      entities: ['urn:a', 'urn:b'],
       subGraphName: 'protocols',
     });
 
@@ -422,9 +434,18 @@ describe('DkgDaemonClient', () => {
     const body = JSON.parse(opts?.body as string);
     expect(body).toEqual({
       contextGraphId: 'ctx',
-      entities: ['urn:a', 'urn:b'],
       subGraphName: 'protocols',
     });
+  });
+
+  it('promoteAssertion rejects root selection before HTTP', async () => {
+    await expect(
+      client.promoteAssertion('ctx', 'chat-turns', { entities: ['urn:a'] }),
+    ).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
+    await expect(
+      client.promoteAssertion('ctx', 'chat-turns', { entities: 'urn:not-all' as any }),
+    ).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
+    expect(fetchCalls).toHaveLength(0);
   });
 
   it('promoteAssertion URL-encodes assertion names containing slashes or spaces', async () => {
@@ -654,6 +675,14 @@ describe('DkgDaemonClient', () => {
   // Agents & skills discovery
   // ---------------------------------------------------------------------------
 
+/**
+   * Exact query-entry map — substring assertions are spoofable (a URL holding
+   * `badconnectionStatus=connected` CONTAINS `connectionStatus=connected`),
+   * and the wire parameter NAMES are the load-bearing contract here.
+   */
+  const queryEntries = (url: string): Record<string, string> =>
+    Object.fromEntries(new URLSearchParams(url.split('?')[1] ?? ''));
+
   it('getAgents should GET /api/agents', async () => {
     fetchResponses.push(
       new Response(JSON.stringify({ agents: [{ name: 'agent-1', peerId: '12D3...' }] }), { status: 200 }),
@@ -669,11 +698,94 @@ describe('DkgDaemonClient', () => {
       new Response(JSON.stringify({ agents: [] }), { status: 200 }),
     );
 
-    await client.getAgents({ framework: 'OpenClaw', skill_type: 'ImageAnalysis' });
-    const url = fetchCalls[0][0] as string;
-    expect(url).toContain('framework=OpenClaw');
-    expect(url).toContain('skill_type=ImageAnalysis');
+    await client.getAgents({ framework: 'OpenClaw', skillType: 'ImageAnalysis' });
+    expect(queryEntries(fetchCalls[0][0] as string)).toEqual({
+      framework: 'OpenClaw',
+      skill_type: 'ImageAnalysis',
+    });
   });
+
+  it('getAgents passes the GH#310 connection/local/pagination filters', async () => {
+    fetchResponses.push(
+      new Response(JSON.stringify({ agents: [], nextCursor: 'n1' }), { status: 200 }),
+    );
+
+    const result = await client.getAgents({
+      connectionStatus: 'connected',
+      local: true,
+      limit: 10,
+      cursor: 'cur-1',
+    });
+    // Exact entries: the camelCase/snake_case parameter NAMES are the contract.
+    expect(queryEntries(fetchCalls[0][0] as string)).toEqual({
+      connectionStatus: 'connected',
+      local: 'true',
+      limit: '10',
+      cursor: 'cur-1',
+    });
+    expect(result.nextCursor).toBe('n1');
+  });
+
+  it('getAgentsUnvalidated serializes raw args verbatim AND surfaces the daemon 400', async () => {
+    fetchResponses.push(
+      new Response(JSON.stringify({ error: '"limit" must be a positive integer' }), { status: 400 }),
+    );
+    // The rejection IS the contract: if the client swallowed the 400 into
+    // {agents: []}, malformed filters would look like successful empty
+    // queries and the whole validation chain would be silent.
+    await expect(client.getAgentsUnvalidated({
+      framework: 'OpenClaw',
+      skill_type: 'ImageAnalysis',
+      connection_status: 'onnected',
+      limit: '10junk',
+      local: 'ture',
+    })).rejects.toThrow(/responded 400.*positive integer/);
+    // The pre-existing filters go through the SAME boundary as the new ones;
+    // exact entries so a prefixed or renamed key cannot sneak past.
+    expect(queryEntries(fetchCalls[0][0] as string)).toEqual({
+      framework: 'OpenClaw',
+      skill_type: 'ImageAnalysis',
+      connectionStatus: 'onnected',
+      limit: '10junk',
+      local: 'ture',
+    });
+  });
+
+  it('legacy skill_type callers keep working, and a conflicting pair is loud', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ agents: [] }), { status: 200 }));
+    // Pre-GH#310 spelling, unchanged behavior on the wire.
+    await client.getAgents({ skill_type: 'ImageAnalysis' });
+    expect(queryEntries(fetchCalls[0][0] as string)).toEqual({ skill_type: 'ImageAnalysis' });
+    // Both spellings with different values cannot silently pick one.
+    await expect(client.getAgents({ skillType: 'A', skill_type: 'B' }))
+      .rejects.toThrow(/Conflicting skill filters/);
+  });
+
+  it('a misspelled key and an empty cursor REACH the daemon instead of widening the query', async () => {
+    fetchResponses.push(
+      new Response(JSON.stringify({ error: 'Unknown query parameter "limt"' }), { status: 400 }),
+    );
+    // The whole point of the unvalidated path: nothing supplied may vanish.
+    // A dropped `limt` would silently return the full ~150 KB registry; a
+    // dropped empty cursor would silently serve page one.
+    await expect(client.getAgentsUnvalidated({ limt: 5, cursor: '' }))
+      .rejects.toThrow(/responded 400/);
+    expect(queryEntries(fetchCalls[0][0] as string)).toEqual({
+      limt: '5',
+      cursor: '',
+    });
+  });
+
+  it('typed and tool-originated requests share one wire mapping', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ agents: [] }), { status: 200 }));
+    fetchResponses.push(new Response(JSON.stringify({ agents: [] }), { status: 200 }));
+    await client.getAgents({ skillType: 'X', connectionStatus: 'connected', local: false, limit: 5 });
+    await client.getAgentsUnvalidated({ skill_type: 'X', connection_status: 'connected', local: false, limit: 5 });
+    const typedQs = (fetchCalls[0][0] as string).split('?')[1];
+    const rawQs = (fetchCalls[1][0] as string).split('?')[1];
+    expect(typedQs).toBe(rawQs);
+  });
+
 
   it('getSkills should GET /api/skills', async () => {
     fetchResponses.push(
@@ -1050,6 +1162,18 @@ describe('DkgDaemonClient', () => {
       expect(url(1)).toBe('http://localhost:9200/api/knowledge-assets/f/vm/publish');
     });
 
+    it('knowledgeAssetShare rejects retired modes before HTTP and omits safe legacy defaults', async () => {
+      await expect(client.knowledgeAssetShare('cg-1', 'f', { entities: ['urn:x'] }))
+        .rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
+      await expect(client.knowledgeAssetShare('cg-1', 'f', { skipSeal: true }))
+        .rejects.toMatchObject({ code: 'UNSEALED_SHARE_BLOCKED' });
+      expect(fetchCalls).toHaveLength(0);
+
+      ok({ swmShared: true, promotedCount: 1, sealed: true, publishReady: true });
+      await client.knowledgeAssetShare('cg-1', 'f', { entities: 'all', skipSeal: false });
+      expect(body()).toEqual({ contextGraphId: 'cg-1' });
+    });
+
     it('knowledgeAssetPublish nests finalized-publish controls under `options`', async () => {
       ok({ ual: 'did:dkg:x' });
       await client.knowledgeAssetPublish('cg-1', 'f', {
@@ -1122,6 +1246,16 @@ describe('DkgDaemonClient', () => {
       expect(fetchCalls).toHaveLength(0);
     });
 
+    it('knowledgeAssetFinalize rejects SWM before HTTP and omits neutral layer:wm', async () => {
+      await expect(client.knowledgeAssetFinalize('cg-1', 'f', { layer: 'swm' }))
+        .rejects.toMatchObject({ code: 'LEGACY_KA_READ_ONLY' });
+      expect(fetchCalls).toHaveLength(0);
+
+      ok({ merkleRoot: '0xroot', eip712Digest: '0xdig' });
+      await client.knowledgeAssetFinalize('cg-1', 'f', { layer: 'wm' });
+      expect(body()).toEqual({ contextGraphId: 'cg-1' });
+    });
+
     it('createKnowledgeAsset rejects mutually exclusive authorship fields before HTTP serialization', async () => {
       await expect(client.createKnowledgeAsset('cg-1', 'f', {
         authorAgentAddress: '0xauthor',
@@ -1167,6 +1301,121 @@ describe('DkgDaemonClient', () => {
         alsoPublishVm: [],
       } as any)).rejects.toThrow('alsoPublishVm must be a boolean or publish-options object');
       expect(fetchCalls).toHaveLength(0);
+    });
+  });
+
+  // -- Per-route timeout classes ------------------------------------------------
+  // Real, small deadlines: a 20 ms default class and a 1 s long-mutation class. The
+  // stub daemon answers after `latencyMs` unless the request's signal aborts first,
+  // in which case it rejects with the abort reason, as fetch does.
+  describe('per-route timeout classes', () => {
+    const quads = [{ subject: 's', predicate: 'p', object: 'o', graph: '' }];
+    const slowDaemon = (latencyMs: number, status = 200, response: unknown = { kaId: '7', status: 'confirmed' }) => {
+      globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        fetchCalls.push([input, init]);
+        return new Promise<Response>((resolve, reject) => {
+          const timer = setTimeout(
+            () => resolve(new Response(JSON.stringify(response), { status })),
+            latencyMs,
+          );
+          init?.signal?.addEventListener('abort', () => {
+            clearTimeout(timer);
+            reject(init.signal!.reason);
+          }, { once: true });
+        });
+      }) as typeof fetch;
+    };
+    const timed = (longMutationTimeoutMs = 1_000) =>
+      new DkgDaemonClient({ baseUrl: 'http://localhost:9200', apiToken: '', timeoutMs: 20, longMutationTimeoutMs });
+
+    it('a publish that outlasts the default timeout is not reported as failed', async () => {
+      slowDaemon(80);
+      await expect(timed().knowledgeAssetPublish('cg-1', 'f')).resolves.toEqual({ kaId: '7', status: 'confirmed' });
+    });
+
+    it('a quick mutation with the same latency still times out (control)', async () => {
+      slowDaemon(80);
+      await expect(timed().knowledgeAssetWrite('cg-1', 'f', quads)).rejects.toMatchObject({ name: 'TimeoutError' });
+    });
+
+    it('share, import-file and a sharing create take the long class too', async () => {
+      slowDaemon(80);
+      const client = timed();
+      await expect(client.knowledgeAssetShare('cg-1', 'f')).resolves.toBeDefined();
+      await expect(client.promoteAssertion('cg-1', 'f')).resolves.toBeDefined();
+      await expect(client.importAssertionFile('cg-1', 'f', Buffer.from('# doc'), 'doc.md')).resolves.toBeDefined();
+      // Quads seal and, by the client default, share inside the create request.
+      await expect(client.createKnowledgeAsset('cg-1', 'f', { quads })).resolves.toBeDefined();
+      await expect(client.createKnowledgeAsset('cg-1', 'f', { alsoPublishVm: {} })).resolves.toBeDefined();
+    });
+
+    it('a create that neither shares nor publishes keeps the default class', async () => {
+      slowDaemon(80);
+      await expect(timed().createKnowledgeAsset('cg-1', 'f', { quads, alsoShareSwm: false }))
+        .rejects.toMatchObject({ name: 'TimeoutError' });
+    });
+
+    it('a long mutation past its deadline reports outcome unknown, pointing at the history tool', async () => {
+      slowDaemon(400);
+      const err = await timed(100).knowledgeAssetPublish('cg-1', 'f').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(DkgDaemonOutcomeUnknownError);
+      expect(err).toMatchObject({ code: 'OUTCOME_UNKNOWN', path: '/api/knowledge-assets/f/vm/publish', timeoutMs: 100 });
+      expect((err as Error).message).toContain('dkg_knowledge_asset_history');
+      const importErr = await timed(100).importAssertionFile('cg-1', 'f', Buffer.from('# doc'), 'doc.md')
+        .catch((e: unknown) => e);
+      expect(importErr).toBeInstanceOf(DkgDaemonOutcomeUnknownError);
+    });
+
+    it('a daemon answer on a long mutation keeps its HTTP error', async () => {
+      slowDaemon(0, 409, { code: 'VM_PUBLISH_PRECONDITION', error: 'not shared' });
+      const err = await timed().knowledgeAssetPublish('cg-1', 'f').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(DkgDaemonHttpError);
+      expect(err).toMatchObject({ status: 409 });
+    });
+
+    // Node's fetch (undici) stops waiting on its own after 300 s without headers or body
+    // progress; that surfaces as a TypeError whose cause carries the undici code.
+    const undiciTimeout = (message: string, code: string) =>
+      Object.assign(new TypeError(message), { cause: { code } });
+
+    it("treats Node fetch's own headers timeout on a long mutation as outcome unknown", async () => {
+      const err = undiciTimeout('fetch failed', 'UND_ERR_HEADERS_TIMEOUT');
+      globalThis.fetch = (async () => { throw err; }) as typeof fetch;
+      await expect(timed().knowledgeAssetPublish('cg-1', 'f')).rejects.toBeInstanceOf(DkgDaemonOutcomeUnknownError);
+      // Outside the long class it stays the raw transport error.
+      await expect(timed().knowledgeAssetWrite('cg-1', 'f', quads)).rejects.toBe(err);
+    });
+
+    it("treats Node fetch's own body timeout on a long mutation as outcome unknown", async () => {
+      const err = undiciTimeout('terminated', 'UND_ERR_BODY_TIMEOUT');
+      globalThis.fetch = (async () => ({
+        ok: true,
+        status: 200,
+        json: async () => { throw err; },
+      }) as unknown as Response) as typeof fetch;
+      await expect(timed().knowledgeAssetShare('cg-1', 'f')).rejects.toBeInstanceOf(DkgDaemonOutcomeUnknownError);
+    });
+
+    it('passes a hostile transport error on a long mutation through untouched', async () => {
+      const hostileCause = new Proxy({}, { get: () => { throw new Error('hostile getter'); } });
+      const transportError = Object.assign(new TypeError('unclassified transport error'), { cause: hostileCause });
+      globalThis.fetch = (async () => { throw transportError; }) as typeof fetch;
+      await expect(timed().knowledgeAssetPublish('cg-1', 'f')).rejects.toBe(transportError);
+    });
+
+    it('a daemon answer on import-file keeps its HTTP error', async () => {
+      slowDaemon(0, 413, { error: 'file too large' });
+      const err = await timed().importAssertionFile('cg-1', 'f', Buffer.from('# doc'), 'doc.md')
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(DkgDaemonHttpError);
+      expect(err).toMatchObject({ status: 413, body: { error: 'file too large' } });
+      expect((err as Error).message).toContain('DKG daemon /api/knowledge-assets/f/wm/import-file responded 413');
+    });
+
+    it('never lets the long class fall below an explicit default timeout', async () => {
+      slowDaemon(80);
+      const client = new DkgDaemonClient({ baseUrl: 'http://localhost:9200', apiToken: '', timeoutMs: 1_000, longMutationTimeoutMs: 20 });
+      await expect(client.knowledgeAssetPublish('cg-1', 'f')).resolves.toBeDefined();
     });
   });
 });

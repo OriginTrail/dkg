@@ -28,6 +28,7 @@ import {
   isFailClosedInlineEncrypt,
   type PublishOptions,
 } from '@origintrail-official/dkg-publisher';
+import { seedLegacyRawLiftTestJob } from '../../publisher/test/_helpers/legacy-raw-lift.js';
 import { createTripleStore } from '@origintrail-official/dkg-storage';
 import { addPublisherWallet } from '../src/publisher-wallets.js';
 import { createPublisherRuntimeFromAgent } from '../src/publisher-runner.js';
@@ -82,15 +83,14 @@ describe('publisher runner — private (non-public) inline-encryption callback h
         store,
         keypair,
         chainBase: undefined,
-        pollIntervalMs: 10,
-        errorBackoffMs: 10,
+        runnerOptions: { pollIntervalMs: 10, errorBackoffMs: 10 },
         publishEncryptionFactory: () => ({
           encryptInlinePayload: realInline,
           encryptInlineChunked: realChunked,
         }),
       });
 
-      const jobId = await runtime.publisher.lift({
+      const jobId = await seedLegacyRawLiftTestJob(store, {
         swmId: 'swm-main',
         shareOperationId: write.shareOperationId,
         roots: ['urn:local:/rihana'],

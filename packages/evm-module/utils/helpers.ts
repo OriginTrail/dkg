@@ -2,6 +2,7 @@
 import 'dotenv/config';
 import { execSync } from 'child_process';
 import * as fs from 'fs';
+import * as path from 'path';
 
 import { AddressLike, Contract } from 'ethers';
 import { HardhatRuntimeEnvironment } from 'hardhat/types';
@@ -97,7 +98,7 @@ export class Helpers {
 
     this.repositoryPath = this._getGitRepositoryPath();
 
-    const deploymentsConfig = `./deployments/${this.hre.network.name}_contracts.json`;
+    const deploymentsConfig = path.join(this.hre.config.paths.deployments, `${this.hre.network.name}_contracts.json`);
 
     if (fs.existsSync(deploymentsConfig)) {
       this.contractDeployments = JSON.parse(
@@ -183,7 +184,7 @@ export class Helpers {
       });
     } catch (error) {
       if (this.hre.network.config.environment !== 'development') {
-        this.saveDeploymentsJson('deployments');
+        this.saveDeploymentsJson();
       }
       let message;
       if (error instanceof Error) message = error.message;
@@ -252,7 +253,7 @@ export class Helpers {
       newContractName,
     );
 
-    this.saveDeploymentsJson('deployments');
+    this.saveDeploymentsJson();
 
     return this.hre.ethers.getContractAt(
       this.getAbi(newContractName),
@@ -444,7 +445,7 @@ export class Helpers {
     };
   }
 
-  public saveDeploymentsJson(folder: string) {
+  public saveDeploymentsJson() {
     console.log(
       `New or redeployed contracts: ${JSON.stringify(this.newContracts)}`,
     );
@@ -464,8 +465,10 @@ export class Helpers {
       `Encoded data for parameters settings: ${JSON.stringify(this.setParametersEncodedData)}`,
     );
 
+    const outputFolder = this.hre.config.paths.deployments;
+    fs.mkdirSync(outputFolder, { recursive: true });
     fs.writeFileSync(
-      `${folder}/${this.hre.network.name}_contracts.json`,
+      path.join(outputFolder, `${this.hre.network.name}_contracts.json`),
       JSON.stringify(this.contractDeployments, null, 4),
     );
   }

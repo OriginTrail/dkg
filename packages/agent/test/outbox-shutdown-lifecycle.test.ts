@@ -1,0 +1,671 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
+import { RandomSamplingRuntime } from '../src/random-sampling-runtime.js';
+import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
+import { describe, expect, it, vi } from 'vitest';
+import { startProverLoop, type TickOutcome } from '@origintrail-official/dkg-random-sampling';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { DKGAgent } from '../src/dkg-agent.js';
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { GossipSession } from '../src/gossip-session.js';
+import { StorageACKRegistrationRuntime } from '../src/p2p/storage-ack-registration-runtime.js';
+import { RandomSamplingShutdownTimeoutError } from '../src/random-sampling-bind.js';
+import { VmReconcileSchedulingRuntime } from '../src/chain-reconciler.js';
+import { FinalizationRuntime } from '../src/finalization-runtime.js';
+import {
+  ContextGraphMembershipPersistScheduler,
+  ContextGraphMembershipPersistShutdownTimeoutError,
+} from '../src/context-graph-membership-persist-scheduler.js';
+import { ContextGraphSubscriptionPersistScheduler } from '../src/context-graph-subscription-persist-scheduler.js';
+import {
+  VmReconcileQueueClosedError,
+  VmReconcileShutdownTimeoutError,
+} from '../src/vm-reconcile-service.js';
+import {
+  createSelectedSwmMetaFetcher,
+} from '../src/sync/selected-swm-meta-fetcher.js';
+import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
+import { createSelectedSwmMetaRetentionBudget } from '../src/sync/selected-swm-meta-budget.js';
+import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
+import { Rfc64BackgroundWorkDispatcherV1 } from
+  '../src/rfc64/background-work-dispatcher-v1.js';
+
+function syntheticShutdownAgent(): any {
+  const agent = Object.create(DKGAgent.prototype) as any;
+  agent.chain = new MockChainAdapter();
+  agent.workLifetime = new AgentWorkLifetime();
+  agent.peerSyncSession = PeerSyncSession.stopped();
+  agent.lastSyncDisconnectedAt = new Map();
+  agent.selectedSwmBootstrapAdmission = new SelectedSwmBootstrapAdmission();
+  // Object.create deliberately bypasses DKGAgentBase field initializers. Keep
+  // the synthetic shutdown fixture aligned with the production lifecycle
+  // owners that stop() fences before dependency teardown.
+  agent.gossipSession = new GossipSession();
+  agent.rfc64BackgroundWorkDispatcherV1 = new Rfc64BackgroundWorkDispatcherV1();
+  agent.storageACKRegistrationRuntime = new StorageACKRegistrationRuntime();
+  // stop() closes and drains this scheduler unconditionally: production always
+  // constructs it, so the fixture does too.
+  agent.contextGraphSubscriptionPersistence = new ContextGraphSubscriptionPersistScheduler();
+  return agent;
+}
+
+describe('DKGAgent outbox shutdown lifecycle', () => {
+  it('retains a timed-out Random Sampling prover and blocks dependency teardown until retry', async () => {
+    const originalTimeout = DKGAgentBase.RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS;
+    Object.defineProperty(DKGAgentBase, 'RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS', {
+      configurable: true,
+      value: 20,
+    });
+    let settleTick!: (outcome: TickOutcome) => void;
+    let tickStarted!: () => void;
+    const started = new Promise<void>((resolve) => { tickStarted = resolve; });
+    const closeProver = vi.fn(async () => undefined);
+    const loop = startProverLoop({
+      intervalMs: 60_000,
+      prover: {
+        tick: () => {
+          tickStarted();
+          return new Promise<TickOutcome>((resolve) => { settleTick = resolve; });
+        },
+        close: closeProver,
+      },
+    });
+    const stopProver = vi.fn(() => loop.stop());
+    const handle = {
+      enabled: true,
+      start: () => loop.start(),
+      stop: stopProver,
+      getStatus: vi.fn(() => ({ enabled: true, role: 'core' as const, identityId: '52', disabledReason: null, loop: null })),
+    };
+    const stopNode = vi.fn(async () => {});
+    const closeStore = vi.fn(async () => {});
+    const agent = syntheticShutdownAgent();
+    Object.assign(agent, {
+      started: true,
+      chainPoller: null,
+      coreHostRecordingsClosed: false,
+      drainCoreHostRecordings: vi.fn(async () => {}),
+      messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+      clearStorageACKRegistrationRetry: vi.fn(),
+      storageACKRegistrationRetryInFlight: false,
+      randomSamplingRuntime: new RandomSamplingRuntime({
+        role: 'core', resolveEligibility: async () => ({ kind: 'eligible', identityId: 52n }),
+        createHandle: async () => ({ kind: 'ready', handle }),
+        log: { info: vi.fn(), warn: vi.fn() },
+        shutdownTimeoutMs: () => DKGAgentBase.RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS,
+      }),
+      inFlightSubstrateFanOutCount: () => 0,
+      router: { closePooling: vi.fn(async () => {}) },
+      node: { libp2p: { getPeers: () => [] }, stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
+      store: { close: closeStore },
+      log: { warn: vi.fn() },
+    });
+
+    try {
+      await agent.randomSamplingRuntime.start();
+      await started;
+      const timeout = await agent.stop().catch((error: unknown) => error);
+      expect(timeout).toBeInstanceOf(RandomSamplingShutdownTimeoutError);
+      expect(timeout).toMatchObject({
+        name: 'RandomSamplingShutdownTimeoutError',
+        timeoutMs: 20,
+      });
+      expect(agent.randomSamplingRuntime.getDiagnostics().phase).toBe('retiring');
+      expect(closeProver).not.toHaveBeenCalled();
+      expect(stopNode).not.toHaveBeenCalled();
+      expect(closeStore).not.toHaveBeenCalled();
+
+      settleTick({ kind: 'period-closed' });
+      await expect(agent.stop()).resolves.toBeUndefined();
+      expect(stopProver).toHaveBeenCalledOnce();
+      expect(closeProver).toHaveBeenCalledOnce();
+      expect(agent.randomSamplingRuntime.getDiagnostics().phase).toBe('stopped');
+      expect(stopNode).toHaveBeenCalledOnce();
+      expect(closeStore).toHaveBeenCalledOnce();
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS', {
+        configurable: true,
+        value: originalTimeout,
+      });
+    }
+  });
+
+  it('drains an in-flight selected-SWM owner after network stop and before store close', async () => {
+    const events: string[] = [];
+    const transfers = new SelectedSwmMetaTransferCoordinator();
+    const deleteCheckpoint = vi.fn(() => events.push('prefix-cleaned'));
+    const peerId = 'peer-stop-order';
+    let releaseTransfer!: () => void;
+    const transferGate = new Promise<void>((resolve) => { releaseTransfer = resolve; });
+    let signalTransferStarted!: () => void;
+    const transferStarted = new Promise<void>((resolve) => {
+      signalTransferStarted = resolve;
+    });
+    const transfer = transfers.run(
+      peerId,
+      () => createSelectedSwmMetaFetcher({
+        remotePeerId: peerId,
+        requesterScope: 'selected-swm-meta:retained:1',
+        retentionBudget: createSelectedSwmMetaRetentionBudget({
+          maxRows: 10,
+          maxBytesEstimate: 1024,
+          maxPrefixRows: 10,
+          maxPrefixBytesEstimate: 1024,
+        }),
+        deleteCheckpoint,
+        fetchPage: async () => {
+          signalTransferStarted();
+          await transferGate;
+          return {
+            quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: 'urn:g' }],
+            bytesReceived: 1,
+            resumedFromOffset: 0,
+            nextOffset: 1,
+            checkpointKey: 'retained-stop-checkpoint',
+            completed: false,
+            timedOut: true,
+          };
+        },
+      }),
+      (fetcher) => fetcher.strategy.fetch({
+        ctx: { operationId: 'stop-order', operationName: 'sync' } as never,
+        remotePeerId: peerId,
+        contextGraphId: 'cg-stop-order',
+        graphUri: 'urn:g',
+        deadline: Date.now() + 1_000,
+      }),
+    );
+    await transferStarted;
+    // Initial ownership deliberately clears any orphaned cursor for this fresh
+    // scope; observe only the later shutdown release.
+    deleteCheckpoint.mockClear();
+    events.length = 0;
+
+    const agent = syntheticShutdownAgent();
+    Object.assign(agent, {
+      started: true,
+      chainPoller: null,
+      selectedSwmMetaTransfers: transfers,
+      coreHostRecordingsClosed: false,
+      drainCoreHostRecordings: vi.fn(async () => {}),
+      messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+      clearStorageACKRegistrationRetry: vi.fn(),
+      storageACKRegistrationRetryInFlight: false,
+      inFlightSubstrateFanOutCount: () => 0,
+      router: { closePooling: vi.fn(async () => {}) },
+      node: { libp2p: { getPeers: () => [] }, stop: vi.fn(async () => { events.push('node-stop'); }) },
+      finalizationRuntime: new FinalizationRuntime(),
+      store: {
+        close: vi.fn(async () => {
+          expect(deleteCheckpoint).toHaveBeenCalledWith('retained-stop-checkpoint');
+          expect(agent.selectedSwmMetaTransfers).toBeUndefined();
+          events.push('store-close');
+        }),
+      },
+      log: { warn: vi.fn() },
+    });
+
+    const stopping = agent.stop();
+    await vi.waitFor(() => expect(agent.node.stop).toHaveBeenCalledOnce());
+    expect(agent.store.close).not.toHaveBeenCalled();
+    expect(deleteCheckpoint).not.toHaveBeenCalled();
+    expect(agent.selectedSwmMetaTransfers).toBe(transfers);
+
+    releaseTransfer();
+    await Promise.all([transfer, stopping]);
+    expect(events).toEqual(['node-stop', 'prefix-cleaned', 'store-close']);
+  });
+
+  it('closes and drains membership persistence before network and store teardown', async () => {
+    const membershipPersistence = new ContextGraphMembershipPersistScheduler();
+    let releaseWrite!: () => void;
+    let markWriteStarted!: () => void;
+    const writeStarted = new Promise<void>((resolve) => { markWriteStarted = resolve; });
+    const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const write = membershipPersistence.enqueue('cg\0node\0peer', async () => {
+      markWriteStarted();
+      await writeGate;
+    });
+    await writeStarted;
+    const closeStore = vi.fn(async () => {});
+    const stopNode = vi.fn(async () => {});
+    const agent = syntheticShutdownAgent();
+    Object.assign(agent, {
+      started: true,
+      chainPoller: null,
+      contextGraphMembershipPersistence: membershipPersistence,
+      coreHostRecordingsClosed: false,
+      drainCoreHostRecordings: vi.fn(async () => {}),
+      messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+      clearStorageACKRegistrationRetry: vi.fn(),
+      storageACKRegistrationRetryInFlight: false,
+      inFlightSubstrateFanOutCount: () => 0,
+      router: { closePooling: vi.fn(async () => {}) },
+      node: { libp2p: { getPeers: () => [] }, stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
+      store: { close: closeStore },
+      log: { warn: vi.fn() },
+    });
+
+    const stopping = agent.stop();
+    await Promise.resolve();
+    expect(stopNode).not.toHaveBeenCalled();
+    expect(closeStore).not.toHaveBeenCalled();
+
+    releaseWrite();
+    await Promise.all([write, stopping]);
+    expect(stopNode).toHaveBeenCalledOnce();
+    expect(closeStore).toHaveBeenCalledOnce();
+  });
+
+  it('closes reconcile admission and cancels queued jobs before store teardown', async () => {
+    let releaseActive!: () => void;
+    let queuedStarted = false;
+    const scheduling = new VmReconcileSchedulingRuntime(async (key) => {
+      if (key === 'active') {
+        await new Promise<void>((resolve) => { releaseActive = resolve; });
+      } else if (key === 'queued') {
+        queuedStarted = true;
+      }
+    }, () => undefined);
+    const { dispatcher } = scheduling;
+    const active = dispatcher.triggerManual('active');
+    const queuedOutcome = dispatcher.triggerManual('queued').catch((error) => error);
+    const closeStore = vi.fn(async () => {});
+    const stopNode = vi.fn(async () => {});
+    const agent = syntheticShutdownAgent();
+    Object.assign(agent, {
+      started: true,
+      chainPoller: {
+        stop: vi.fn(async () => {
+          expect(agent.vmReconcileRotationClosed).toBe(true);
+        }),
+      },
+      vmReconcileScheduling: scheduling,
+      coreHostRecordingsClosed: false,
+      drainCoreHostRecordings: vi.fn(async () => {}),
+      messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+      clearStorageACKRegistrationRetry: vi.fn(),
+      storageACKRegistrationRetryInFlight: false,
+      inFlightSubstrateFanOutCount: () => 0,
+      router: { closePooling: vi.fn(async () => {}) },
+      node: { libp2p: { getPeers: () => [] }, stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
+      store: { close: closeStore },
+      log: { warn: vi.fn() },
+    });
+
+    const stopping = agent.stop();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(await queuedOutcome).toBeInstanceOf(VmReconcileQueueClosedError);
+    expect(queuedStarted).toBe(false);
+    expect(stopNode).not.toHaveBeenCalled();
+    expect(closeStore).not.toHaveBeenCalled();
+
+    releaseActive();
+    await Promise.all([active, stopping]);
+    expect(queuedStarted).toBe(false);
+    expect(stopNode).toHaveBeenCalledOnce();
+    expect(closeStore).toHaveBeenCalledOnce();
+  });
+
+  it('quarantines the instance after the bounded reconcile drain timeout', async () => {
+    const originalTimeout = DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS;
+    Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS', {
+      configurable: true,
+      value: 1,
+    });
+    try {
+      let release!: () => void;
+      const activeGate = new Promise<void>((resolve) => { release = resolve; });
+      const scheduling = new VmReconcileSchedulingRuntime(
+        async () => activeGate,
+        () => undefined,
+      );
+      const { dispatcher } = scheduling;
+      void dispatcher.triggerManual('stuck');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const closeStore = vi.fn(async () => {});
+      const stopNode = vi.fn(async () => {});
+      const warn = vi.fn();
+      const agent = syntheticShutdownAgent();
+      Object.assign(agent, {
+        started: true,
+        chainPoller: null,
+        vmReconcileScheduling: scheduling,
+        coreHostRecordingsClosed: false,
+        drainCoreHostRecordings: vi.fn(async () => {}),
+        messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+          clearStorageACKRegistrationRetry: vi.fn(),
+        storageACKRegistrationRetryInFlight: false,
+          inFlightSubstrateFanOutCount: () => 0,
+        router: { closePooling: vi.fn(async () => {}) },
+        node: { libp2p: { getPeers: () => [] }, stop: stopNode },
+        chain: { chainId: 'none' },
+        finalizationRuntime: new FinalizationRuntime(),
+        store: { close: closeStore },
+        log: { warn },
+      });
+
+      await expect(agent.stop()).rejects.toBeInstanceOf(VmReconcileShutdownTimeoutError);
+
+      expect(stopNode).not.toHaveBeenCalled();
+      expect(closeStore).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining('store/network teardown is blocked until stop() is retried'),
+      );
+
+      // Even after physical retirement, start remains blocked until a second
+      // stop finishes the deliberately incomplete teardown.
+      await expect(agent.start()).rejects.toBeInstanceOf(VmReconcileShutdownTimeoutError);
+
+      release();
+      await agent.vmReconcileRetirement;
+      await expect(agent.start()).rejects.toBeInstanceOf(VmReconcileShutdownTimeoutError);
+      await expect(agent.stop()).resolves.toBeUndefined();
+      expect(stopNode).toHaveBeenCalledOnce();
+      expect(closeStore).toHaveBeenCalledOnce();
+      expect(agent.started).toBe(false);
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS', {
+        configurable: true,
+        value: originalTimeout,
+      });
+    }
+  });
+
+  it('quarantines start and backing-store teardown after membership persistence times out', async () => {
+    const originalTimeout = DKGAgentBase.CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS;
+    Object.defineProperty(DKGAgentBase, 'CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS', {
+      configurable: true,
+      value: 1,
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const membershipPersistence = new ContextGraphMembershipPersistScheduler();
+    void membershipPersistence.enqueue('stuck', async () => gate);
+    await Promise.resolve();
+    const closeStore = vi.fn(async () => {});
+    const stopNode = vi.fn(async () => {});
+    const agent = syntheticShutdownAgent();
+    Object.assign(agent, {
+      started: true,
+      chainPoller: null,
+      contextGraphMembershipPersistence: membershipPersistence,
+      coreHostRecordingsClosed: false,
+      drainCoreHostRecordings: vi.fn(async () => {}),
+      messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+      clearStorageACKRegistrationRetry: vi.fn(),
+      storageACKRegistrationRetryInFlight: false,
+      inFlightSubstrateFanOutCount: () => 0,
+      router: { closePooling: vi.fn(async () => {}) },
+      node: { libp2p: { getPeers: () => [] }, stop: stopNode },
+      chain: { chainId: 'none' },
+      finalizationRuntime: new FinalizationRuntime(),
+      store: { close: closeStore },
+      log: { warn: vi.fn() },
+    });
+
+    try {
+      await expect(agent.stop()).rejects.toBeInstanceOf(
+        ContextGraphMembershipPersistShutdownTimeoutError,
+      );
+      expect(stopNode).not.toHaveBeenCalled();
+      expect(closeStore).not.toHaveBeenCalled();
+      await expect(agent.start()).rejects.toBeInstanceOf(
+        ContextGraphMembershipPersistShutdownTimeoutError,
+      );
+
+      release();
+      await membershipPersistence.closeAndDrain();
+      await expect(agent.start()).rejects.toBeInstanceOf(
+        ContextGraphMembershipPersistShutdownTimeoutError,
+      );
+      await expect(agent.stop()).resolves.toBeUndefined();
+      expect(stopNode).toHaveBeenCalledOnce();
+      expect(closeStore).toHaveBeenCalledOnce();
+      expect(agent.started).toBe(false);
+    } finally {
+      release();
+      Object.defineProperty(DKGAgentBase, 'CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS', {
+        configurable: true,
+        value: originalTimeout,
+      });
+    }
+  });
+
+  it('drains physically active VM reconciliation before closing the store', async () => {
+    const originalTimeout = DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS;
+    Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS', {
+      configurable: true,
+      value: 1,
+    });
+    let release!: () => void;
+    const physical = new Promise<void>((resolve) => { release = resolve; });
+    const closeStore = vi.fn(async () => {});
+    const stopNode = vi.fn(async () => {});
+    const agent = syntheticShutdownAgent();
+    agent.workLifetime.track(physical);
+    Object.assign(agent, {
+      started: true,
+      chainPoller: null,
+      coreHostRecordingsClosed: false,
+      drainCoreHostRecordings: vi.fn(async () => {}),
+      messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+      clearStorageACKRegistrationRetry: vi.fn(),
+      storageACKRegistrationRetryInFlight: false,
+      inFlightSubstrateFanOutCount: () => 0,
+      router: { closePooling: vi.fn(async () => {}) },
+      node: { libp2p: { getPeers: () => [] }, stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
+      store: { close: closeStore },
+      log: { warn: vi.fn() },
+    });
+
+    try {
+      const stopping = agent.stop();
+      expect(agent.workLifetime.closed).toBe(true);
+      expect(agent.workLifetime.generation).toBe(1);
+      await expect(stopping).rejects.toBeInstanceOf(VmReconcileShutdownTimeoutError);
+      expect(stopNode).not.toHaveBeenCalled();
+      expect(closeStore).not.toHaveBeenCalled();
+
+      release();
+      await agent.vmReconcileRetirement;
+      await agent.stop();
+      expect(stopNode).toHaveBeenCalledOnce();
+      expect(closeStore).toHaveBeenCalledOnce();
+    } finally {
+      release();
+      Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS', {
+        configurable: true,
+        value: originalTimeout,
+      });
+    }
+  });
+
+  it('drains an entered ordinary graph-scoped commit before closing the store', async () => {
+    let release!: () => void;
+    const physicalCommit = new Promise<void>((resolve) => { release = resolve; });
+    const closeStore = vi.fn(async () => {});
+    const stopNode = vi.fn(async () => {});
+    const agent = syntheticShutdownAgent();
+    agent.workLifetime.track(physicalCommit);
+    Object.assign(agent, {
+      started: true,
+      chainPoller: null,
+      coreHostRecordingsClosed: false,
+      drainCoreHostRecordings: vi.fn(async () => {}),
+      messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+      clearStorageACKRegistrationRetry: vi.fn(),
+      storageACKRegistrationRetryInFlight: false,
+      inFlightSubstrateFanOutCount: () => 0,
+      router: { closePooling: vi.fn(async () => {}) },
+      node: { libp2p: { getPeers: () => [] }, stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
+      store: { close: closeStore },
+      log: { warn: vi.fn() },
+    });
+
+    const stopping = agent.stop();
+    await Promise.resolve();
+    expect(stopNode).not.toHaveBeenCalled();
+    expect(closeStore).not.toHaveBeenCalled();
+
+    release();
+    await stopping;
+    expect(stopNode).toHaveBeenCalledOnce();
+    expect(closeStore).toHaveBeenCalledOnce();
+  });
+
+  it('bounds chain-poller retirement before network and store teardown', async () => {
+    const originalTimeout = DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS;
+    Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS', {
+      configurable: true,
+      value: 1,
+    });
+    let release!: () => void;
+    const pollerDrain = new Promise<void>((resolve) => { release = resolve; });
+    const chainPoller = { stop: vi.fn(() => pollerDrain) };
+    const closeStore = vi.fn(async () => {});
+    const stopNode = vi.fn(async () => {});
+    const agent = syntheticShutdownAgent();
+    Object.assign(agent, {
+      started: true,
+      chainPoller,
+      coreHostRecordingsClosed: false,
+      drainCoreHostRecordings: vi.fn(async () => {}),
+      messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+      clearStorageACKRegistrationRetry: vi.fn(),
+      storageACKRegistrationRetryInFlight: false,
+      inFlightSubstrateFanOutCount: () => 0,
+      router: { closePooling: vi.fn(async () => {}) },
+      node: { libp2p: { getPeers: () => [] }, stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
+      store: { close: closeStore },
+      log: { warn: vi.fn() },
+    });
+
+    try {
+      await expect(agent.stop()).rejects.toBeInstanceOf(VmReconcileShutdownTimeoutError);
+      expect(chainPoller.stop).toHaveBeenCalledOnce();
+      expect(agent.chainPoller).toBe(chainPoller);
+      expect(stopNode).not.toHaveBeenCalled();
+      expect(closeStore).not.toHaveBeenCalled();
+
+      release();
+      await agent.vmReconcileRetirement;
+      expect(agent.chainPoller).toBeNull();
+      await agent.stop();
+      expect(stopNode).toHaveBeenCalledOnce();
+      expect(closeStore).toHaveBeenCalledOnce();
+    } finally {
+      release();
+      Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS', {
+        configurable: true,
+        value: originalTimeout,
+      });
+    }
+  });
+
+  it('cancels and awaits the active outbox drain before network teardown', async () => {
+    let release!: () => void;
+    const activeDrain = new Promise<void>((resolve) => { release = resolve; });
+    const stopOutboxDrain = vi.fn(() => activeDrain);
+    const stopNode = vi.fn(async () => {});
+    const agent = syntheticShutdownAgent();
+    Object.assign(agent, {
+      started: true,
+      chainPoller: null,
+      coreHostRecordingsClosed: false,
+      drainCoreHostRecordings: vi.fn(async () => {}),
+      messenger: { stopOutboxDrain },
+      clearStorageACKRegistrationRetry: vi.fn(),
+      storageACKRegistrationRetryInFlight: false,
+      inFlightSubstrateFanOutCount: () => 0,
+      router: { closePooling: vi.fn(async () => {}) },
+      node: { libp2p: { getPeers: () => [] }, stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
+      store: { close: vi.fn(async () => {}) },
+      log: { warn: vi.fn() },
+    });
+
+    const stopping = agent.stop();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(stopOutboxDrain).toHaveBeenCalledOnce();
+    expect(stopNode).not.toHaveBeenCalled();
+
+    release();
+    await stopping;
+    expect(stopNode).toHaveBeenCalledOnce();
+  });
+
+  it('logs a failed outbox drain and continues network teardown', async () => {
+    const stopOutboxDrain = vi.fn(async () => { throw new Error('drain failed'); });
+    const stopNode = vi.fn(async () => {});
+    const closeStore = vi.fn(async () => {});
+    const warn = vi.fn();
+    const agent = syntheticShutdownAgent();
+    Object.assign(agent, {
+      started: true,
+      chainPoller: null,
+      coreHostRecordingsClosed: false,
+      drainCoreHostRecordings: vi.fn(async () => {}),
+      messenger: { stopOutboxDrain },
+      clearStorageACKRegistrationRetry: vi.fn(),
+      storageACKRegistrationRetryInFlight: false,
+      inFlightSubstrateFanOutCount: () => 0,
+      router: { closePooling: vi.fn(async () => {}) },
+      node: { libp2p: { getPeers: () => [] }, stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
+      store: { close: closeStore },
+      log: { warn },
+    });
+
+    await expect(agent.stop()).resolves.toBeUndefined();
+
+    expect(stopOutboxDrain).toHaveBeenCalledOnce();
+    expect(stopNode).toHaveBeenCalledOnce();
+    expect(closeStore).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining('outbox retry drain failed during shutdown: drain failed'),
+    );
+  });
+});
+
+
+it.each([false, true])('drains the registered sync cache before teardown even when authority close fails=%s', async authorityFails => {
+  const agent = syntheticShutdownAgent();
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const closeAndDrain = vi.fn(() => held), stopNode = vi.fn(async () => {}), closeStore = vi.fn(async () => {});
+  Object.assign(agent, {
+    started: true, chainPoller: null, coreHostRecordingsClosed: false,
+    drainCoreHostRecordings: vi.fn(async () => {}), messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+    clearStorageACKRegistrationRetry: vi.fn(), storageACKRegistrationRetryInFlight: false,
+    inFlightSubstrateFanOutCount: () => 0, router: { closePooling: vi.fn(async () => {}) },
+    node: { libp2p: { getPeers: () => [] }, stop: stopNode }, finalizationRuntime: new FinalizationRuntime(),
+    store: { close: closeStore }, log: { warn: vi.fn() }, syncResponderPreparedCacheOwner: { closeAndDrain },
+  });
+  if (authorityFails) agent.chain.contextGraphAuthorityIndexSnapshots = {
+    close: vi.fn(async () => { throw new Error('authority-close-fixture'); }),
+  };
+  let stopped = false;
+  const stopping = agent.stop().then(() => { stopped = true; });
+  try {
+    expect(closeAndDrain).toHaveBeenCalledOnce();
+    // Let every other shutdown await progress while the cache drain is held.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(stopped).toBe(false);
+    expect(stopNode).not.toHaveBeenCalled(); expect(closeStore).not.toHaveBeenCalled();
+    expect(agent.started).toBe(true);
+    await agent.start();
+    expect(agent.syncResponderPreparedCacheOwner.closeAndDrain).toBe(closeAndDrain);
+    expect(stopped).toBe(false);
+  } finally { release(); await stopping; }
+  expect(stopped).toBe(true); expect(closeStore).toHaveBeenCalledOnce();
+});

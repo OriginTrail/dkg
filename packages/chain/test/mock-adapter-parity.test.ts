@@ -41,7 +41,7 @@
  * offline-mode users will hit surprises on chain switch. The test stays
  * red until parity is restored or a documented exemption is added.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 import { NoChainAdapter } from '../src/no-chain-adapter.js';
@@ -68,6 +68,32 @@ const EVM_METHODS = collectMethodNames(EVMChainAdapter);
 const MOCK_METHODS = collectMethodNames(MockChainAdapter);
 const NO_CHAIN_METHODS = collectMethodNames(NoChainAdapter);
 
+// Normal protected prototype methods that are deliberately outside the
+// ChainAdapter API. Keeping this boundary explicit prevents production method
+// shape from being chosen merely to evade the runtime parity audit.
+const EVM_INTERNAL_METHODS = new Set<string>([
+  'getContextGraphNameHashResolver',
+  // Shared protected transport dispatcher behind the two public browser-wallet
+  // RPC capabilities. MockChainAdapter mirrors those public methods directly;
+  // it has no provider pool or failover plumbing to dispatch through.
+  'requestBrowserWalletRpc',
+  // Pure receipt projection behind the public canonical-finalization reader.
+  // The mock implements that public reader directly from its in-memory event
+  // state and has no ethers TransactionReceipt to project.
+  'projectCanonicalFinalizationReceipt',
+  // Physical EVM contract-binding and one-log generation fences. These are
+  // protected implementation details rather than ChainAdapter capabilities;
+  // the mock has neither Hub-bound contract handles nor a persisted one-log.
+  'knowledgeAssetStorageBindingAddress',
+  'knowledgeAssetStorageBindingIsCurrent',
+  'chainEventLogBindingIsCurrent',
+  // Protected readers behind the public Random Sampling availability
+  // capability. MockChainAdapter mirrors that public capability directly from
+  // its in-memory membership state and has no contract handle to bind.
+  'readRandomSamplingLifecycleMembership',
+  'contractBindingAddress',
+]);
+
 // Methods that are *intentionally* absent from the mock or from NoChainAdapter.
 // These are not parity violations. Additions here require a code-review
 // because each one is a silent divergence from the production adapter.
@@ -75,20 +101,53 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // Pure EVM bookkeeping surfaces that the mock has no reason to emulate.
   'getContract',            // resolves a Contract from the Hub — not applicable off-chain
   'getBlockNumber',         // the mock exposes its own block counter differently (advanceBlock)
+  // `getFinalityConfirmations` reports the depth THIS adapter resolved from
+  // `chain.finalityConfirmations` so callers holding a pre-built adapter stop
+  // re-deriving it from a `chainConfig` that may be ignored. It is optional on
+  // the ChainAdapter interface precisely so an adapter with no chain has NO
+  // OPINION: the mock returning a number here would override the operator's
+  // configured value in mock mode rather than deferring to it.
+  'getFinalityConfirmations',
   'getProvider',            // returns a JsonRpcProvider; mock has none
   'getReadProvider',        // @deprecated bare-primary accessor; mock has no RPC provider
   'getSignerAddress',       // mock exposes `signerAddress` as a field
   'getSignerAddresses',     // pool not applicable to mock
   'getAuthorizedPublisherAddress', // pool-specific signer selection; mock has one signerAddress
+  'resolvePublisherPublishPlan', // EVM signer-pool planning; mock has one signerAddress
   'signMessageAs',          // pool-specific wallet-key signing; mock has no adapter-held private keys
   'getOperationalPrivateKey', // mock has no wallet keys
+  'operationalSigning',     // optional; absent, an adapter is taken to sign with local wallets, as the mock's do
   'getRequiredPublishTokenAmount', // TODO: missing on mock, cross-check below
+  // Snapshot reuse requires a finalized block hash plus the exact physical
+  // DKGKnowledgeAssets address and binding generation. Mock snapshots
+  // intentionally carry none of that EVM evidence, so absence preserves the
+  // caller's live-read path instead of manufacturing a true lease.
+  'knowledgeAssetVersionSnapshotIsCurrent',
+  // Optional finalized snapshot capability requires a canonical block hash and
+  // deployment addresses. Fixtures opt in explicitly; the mock must not invent evidence.
+  'readPublicGraphSnapshot',
   // TypeScript `private` is erased at runtime; these are adapter-internal
   // helpers that survived into the prototype and are not part of the
   // ChainAdapter contract. They must remain EVM-only.
   'nextSigner',
   'nextAuthorizedSigner',
   'findSignerByAddress',
+  // PR #2300 r2 — isReceiptBlockFinalAndCanonical is a REAL ChainAdapter capability now (update
+  // recognition consumes it), and the mock implements it from its finality seam: no exemption.
+  'resolvePinnedPublisherSigner', // EVM signer-pool authorization/funding helper; mock has no wallet pool
+  'selectFundedSignerOrThrow', // strict funding diagnostic used by EVM publish planning
+  'quoteRequiredPublishTokenAmount', // shared protected AskStorage quote behind EVM reads/planning
+  // Protected EVM contract-read boundary shared by storage and publish mixins.
+  // The public ChainAdapter method remains `getKnowledgeAssetUpdateContext`,
+  // which MockChainAdapter implements and the parity suite still requires.
+  'readKnowledgeAssetUpdateContext',
+  // One-log contract-binding guard used only by EVM KA reads. It compares the
+  // current Hub-resolved ContextGraphStorage address with the persisted log
+  // binding before the public read either folds rows or falls back live. The
+  // mock has neither Hub rotation nor a persisted chain-event log to model.
+  'knowledgeAssetsFromLogFor',
+  'resolveFundedPublisherPublishPlan', // protected EVM pool/PCA planning state machine
+  'publisherConvictionPlanReader', // protected typed bridge from publish planning to the conviction mixin
   // Dispatcher Phase 3/4 selector seam + RS send plumbing — TS-protected
   // internals (the generalized wallet selector, the funding predicate behind
   // it, the RS-specific selector wrapper, and the serialized RS send). Not
@@ -125,29 +184,39 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'readHubContractAddress',
   'init',
   'initContracts',          // TS-private: init() body extracted so RPC-exhaustion can be wrapped as RPC_ENDPOINTS_EXHAUSTED
+  // TS-private: re-arms the initialization concurrent callers share, on a
+  // Hub rotation. The mock has no Hub bindings to initialize.
+  'rearmInit',
   'requireV9',
   'getBlockTimestamp',
+  'getFinalizedBlockTimestamp',
+  // TS-private half of the EVM sign/broadcast/receipt split. The mock has no
+  // raw RPC transport or signed-transaction acceptance boundary to emulate.
+  'broadcastSignedTransactionWithRetries',
   'broadcastSignedTransactionWithFailover',
   'getTransactionReceiptWithFailover',
+  'getTransactionWithFailover',
   'waitForReceiptWithFailover',
-  'signPopulatedTransaction',
+  'prepareSignerTransaction',
+  'signPreparedTransaction',
   // #1336 read-facade + populate plumbing: the chain-concept read facades over
   // the `RpcFailoverClient` transport — `readContract` (string-method point read),
+  // `readContractWithOptions` (the cancellable string-method variant),
   // `readContractWith` (policy/classifier-bearing contract read), and the raw
   // `readProvider` — plus the event-log scan wrapper, the contract rebind helper,
-  // and the populate+sign-across-providers delegator. Protected EVM-only helpers
+  // and the prepare-across-providers delegator. Protected EVM-only helpers
   // over `this.providers[]` (the mock has no RPC provider pool), not ChainAdapter
   // contract methods — same category as the write-failover helpers above.
   'readContract',
+  'readContractWithOptions',
   'readContractWith',
   'readProvider',
   'readTipProvider',
   'readProviderRetryingNull',
   'queryFilterWithFailover',
   'rebindContract',
-  'populateAndSignAcrossProviders',
+  'prepareAcrossProviders',
   'sendSignedTransactionAndWait',
-  'sendPopulatedTransaction',
   'sendContractTransaction',
   // TS-private / protected write-serialization plumbing. The EVM adapter uses
   // this scope to expose an unlocked sender only while the per-wallet serializer
@@ -156,6 +225,17 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'sendContractTransactionUnlocked',
   'parseV10PublishReceipt',
   'parseV9PublishReceipt',
+  // GH#2270 — TS-private single receipt read the three publish-resolution surfaces project from
+  // (`resolvePublishByTxHash`, `resolvePublishTransaction`, `resolveCanonicalFinalizationReceipt`).
+  // All three PUBLIC surfaces are mirrored on the mock; this is EVM receipt plumbing over
+  // `getTransactionReceiptWithFailover` — same category as the two parse helpers above.
+  'readPublishReceipt',
+  // TS-private header-timestamp policy shared by the two publish-receipt parsers above
+  // (`skipBlockTimestamp`: 0 for a caller that never reads it, else the finalized header read).
+  // EVM receipt plumbing — the mock builds its publish results without a block header.
+  'enrichPublishReceipt',
+  'decodeV10PublishReceipt',
+  'decodeV9PublishReceipt',
   // TS-private V10 TRAC-allowance helper backing publish/update. Encodes
   // the `chain.approvalPolicy` dispatch and the `transferFrom(..., 1n)`
   // floor; the mock has no ERC-20 allowance surface to mirror.
@@ -164,10 +244,10 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // forced re-approve retry on a stale-RPC `TooLowAllowance` revert; the
   // mock has no ERC-20 allowance surface to mirror.
   'confirmAllowanceVisible',
-  // TS-private populate+sign helper with shared stale-allowance recovery
+  // TS-private preparation helper with shared stale-allowance recovery
   // (#888) backing both V10 write paths (publish + update); the mock has no
   // populate/gas-estimation surface to mirror.
-  'populateAndSignV10WithAllowanceRecovery',
+  'prepareV10WithAllowanceRecovery',
   // TS-private shared dispatch for the two V10 write paths (#953). Serializes
   // the populate→sign→broadcast→confirm nonce window per operational wallet
   // via KeyedSerializer. The mock has no nonce/broadcast surface to mirror —
@@ -267,6 +347,8 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // is an in-memory scan with no chain, deploy block, or eth_getCode to resolve.
   'resolveKaStorageDeployBlock',
   'resolveContractDeployBlock',
+  // probe-free accessor over the same immutable deploy-block cache — EVM-only.
+  'resolveContractDeployBlockNumber',
   'resolveLogScanHead',
   // companion retry-wrapper for the deploy-block binary search's historical
   // eth_getCode probes — EVM-only, same rationale as resolveKaStorageDeployBlock.
@@ -275,6 +357,61 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // (the mock's getMaxKaNumberForAuthor is an in-memory scan, no providers).
   'queryKaCreatedPage',
   'queryEventLogsPage',
+  // EIP-1271 `isValidSignature(bytes32,bytes)` on-chain view call against a
+  // deployed smart-contract wallet. Its sole production caller
+  // (dkg-publisher.ts contract-author update authorization) is gated by
+  // `hasContractCode(author)`, which the mock hardcodes to false — so the
+  // contract-author branch is structurally unreachable on the mock. A `true`
+  // shim would be a false-accept on a security-sensitive auth path and a
+  // `false` shim would be dead code; a faithful impl would have to model
+  // deployed 1271 bytecode + the 0x1626ba7e magic value, which is out of the
+  // mock's remit. The two tests that exercise the contract-author branch stub
+  // both methods per-test. EVM-only — same family as the on-chain-derived
+  // helpers above.
+  'verifyContractSignature',
+  // The node's ONE chain log, and the four helpers that build, key, rebuild and
+  // read it. None of the five is on the `ChainAdapter` interface, so the CH-8
+  // hazard this list exists for — a mock-mode user flipping `chain.type` to
+  // `evm` and hitting "method not implemented" — cannot reach them.
+  //
+  // That claim is the entire justification for exempting them, and it is not a
+  // claim this file can check: `ChainAdapter` is a type. It is CHECKED, as a
+  // build gate, by `type-tests/one-log-internals-off-chain-adapter.ts`, which
+  // fails compilation the moment any of the five is promoted onto the
+  // interface — keep the two name lists in step. Why each is off it:
+  // `chainEventLogRows` and
+  // `chainIndexContract` are TS-`private`, `startChainIndexRuntime` and
+  // `rebuildChainIndexRuntimeOnRotation` are `protected`, and they appear in
+  // this audit only because TS visibility is erased at runtime (same category as
+  // `nextSigner` / `resolveContract` above). `attachChainEventLog` is public on
+  // the concrete EVM class but absent from the interface, its only non-test
+  // callers are inside `evm-adapter-base.ts` itself, and its parameter is a
+  // `ChainEventLogBinding` — an object only `createEvmChainIndexRuntime` builds,
+  // out of resolved Hub bindings, `ethers.Interface`s and one failover
+  // transport.
+  //
+  // THE DESIGN CALL — does a mock chain adapter have a one-log? No, and not
+  // because the mock stubs things: because of what the log IS. It is ONE per
+  // node, built only for the adapter handed a `ChainEventLogStore`
+  // (`evm-chain-index-runtime.ts`), and it exists solely so each event reader
+  // stops running its own `queryFilter` against a real RPC endpoint. The mock
+  // has no endpoint and no `queryFilter` — `listenForEvents` serves from
+  // in-process arrays and its blocks come from an internal `advanceBlock()`
+  // counter — so there is no RPC cost for an index to remove and nothing to
+  // index. Mirroring these would hand the mock a no-op claiming a log it does
+  // not have, which is a WORSE parity story than the honest absence: the log's
+  // whole contract is "this read cost zero chain RPC, provably", and a mock
+  // stub can prove nothing. EVM-only, like the Hub plumbing it is built from.
+  'chainEventLogRows',
+  'attachChainEventLog',
+  'startChainIndexRuntime',
+  'chainIndexContract',
+  'rebuildChainIndexRuntimeOnRotation',
+  // Optional public borrower of that same one-log boundary. Omitting it is
+  // deliberate: event polling against the mock already scans its in-process
+  // array without RPC, and a no-op lease would claim a generation the mock
+  // does not possess. Callers retain their existing fallback path.
+  'acquireEventScanHorizonLease',
 ]);
 
 const NO_CHAIN_EXEMPT_FROM_EVM = new Set<string>([
@@ -322,6 +459,7 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     const missing: string[] = [];
     for (const name of EVM_METHODS) {
       if (name.startsWith('_')) continue;
+      if (EVM_INTERNAL_METHODS.has(name)) continue;
       if (MOCK_EXEMPT_FROM_EVM.has(name)) continue;
       if (!MOCK_METHODS.has(name)) missing.push(name);
     }
@@ -329,6 +467,32 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     // mirrored on MockChainAdapter. Either add it to the mock or put it in
     // MOCK_EXEMPT_FROM_EVM with a comment explaining why.
     expect(missing).toEqual([]);
+  });
+
+  it('classifies the reverse name-hash resolver accessor as adapter-internal', () => {
+    const evm = new EVMChainAdapter({
+      rpcUrl: 'http://127.0.0.1:1',
+      hubAddress: '0x0000000000000000000000000000000000000001',
+      privateKey: '0x' + '1'.repeat(64),
+      allowNoAdminSigner: true,
+    });
+
+    expect(EVM_METHODS.has('getContextGraphNameHashResolver')).toBe(true);
+    expect(EVM_INTERNAL_METHODS.has('getContextGraphNameHashResolver')).toBe(true);
+    expect(MOCK_METHODS.has('getContextGraphNameHashResolver')).toBe(false);
+    expect(Object.hasOwn(evm, 'getContextGraphNameHashResolver')).toBe(false);
+    expect(typeof (evm as any).getContextGraphNameHashResolver).toBe('function');
+  });
+
+  it('does not leak the shared receipt-finality decision onto either adapter prototype', () => {
+    expect(EVM_METHODS.has('readFinalCanonicalReceiptBlock')).toBe(false);
+    expect(EVM_INTERNAL_METHODS.has('readFinalCanonicalReceiptBlock')).toBe(false);
+    expect(MOCK_METHODS.has('readFinalCanonicalReceiptBlock')).toBe(false);
+  });
+
+  it('does not leak the authority revision operation onto the adapter prototype', () => {
+    expect(EVM_METHODS.has('readContextGraphAuthorityIndexRevisions')).toBe(false);
+    expect(EVM_INTERNAL_METHODS.has('readContextGraphAuthorityIndexRevisions')).toBe(false);
   });
 
   it('method arity (declared parameter count) is within 1 of EVMChainAdapter for each shared method', () => {
@@ -367,6 +531,11 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(mock.isV10Ready()).toBe(true);
   });
 
+  it('keeps authority delta refresh unsupported in offline mock mode', () => {
+    const mock = new MockChainAdapter();
+    expect('contextGraphAuthorityIndexRevisionReader' in mock).toBe(false);
+  });
+
   // Codex PR #595 round-4: isShardingTableMember gates VM ACK eligibility.
   // The mock can't model a real sharding table, so it treats every
   // registered (non-zero) identity as a member; tests needing
@@ -376,6 +545,26 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(await mock.isShardingTableMember(0n)).toBe(false);
     expect(await mock.isShardingTableMember(1n)).toBe(true);
     expect(await mock.isShardingTableMember(99999n)).toBe(true);
+  });
+
+  it('resolves the mock Random Sampling deployment and membership through the typed capability', async () => {
+    const mock = new MockChainAdapter();
+    expect(await mock.resolveRandomSamplingAvailability(0n)).toEqual({ kind: 'available', member: false });
+    expect(await mock.resolveRandomSamplingAvailability(42n)).toEqual({ kind: 'available', member: true });
+  });
+
+  it('preserves mock Random Sampling readiness and readiness failures in the typed capability', async () => {
+    const mock = new MockChainAdapter();
+    vi.spyOn(mock, 'isRandomSamplingReady').mockReturnValueOnce(false);
+    await expect(mock.resolveRandomSamplingAvailability(42n)).resolves.toEqual({
+      kind: 'unavailable', reason: 'contracts_not_deployed',
+    });
+
+    const error = new Error('readiness unavailable');
+    vi.spyOn(mock, 'isRandomSamplingReady').mockImplementationOnce(() => { throw error; });
+    await expect(mock.resolveRandomSamplingAvailability(42n)).resolves.toEqual({
+      kind: 'indeterminate', error,
+    });
   });
 
   // Codex PR #595 round-5: EVMChainAdapter.getMinimumRequiredSignatures
@@ -512,6 +701,35 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
       accessPolicy: 1,
       publishPolicy: 0,
     })).resolves.toMatchObject({ contextGraphId: 3n });
+  });
+
+  it('mirrors exact name-hash reverse-resolution behavior', async () => {
+    const mock = new MockChainAdapter();
+    const nameHash = `0x${'ab'.repeat(32)}`;
+    const upperCaseHash = `0x${nameHash.slice(2).toUpperCase()}`;
+    const unknownHash = `0x${'cd'.repeat(32)}`;
+
+    await expect(mock.resolveContextGraphIdByNameHash('not-a-hash')).rejects.toThrow(
+      /bytes32 nameHash/,
+    );
+    await expect(mock.resolveContextGraphIdByNameHash(ethers.ZeroHash)).resolves.toBeNull();
+    await expect(mock.resolveContextGraphIdByNameHash(unknownHash)).resolves.toBeNull();
+
+    await expect(mock.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
+      nameHash,
+    })).resolves.toMatchObject({ contextGraphId: 1n });
+    await expect(mock.resolveContextGraphIdByNameHash(upperCaseHash)).resolves.toBe(1n);
+
+    await expect(mock.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
+      nameHash: upperCaseHash,
+    })).resolves.toMatchObject({ contextGraphId: 2n });
+    await expect(mock.resolveContextGraphIdByNameHash(nameHash)).rejects.toThrow(
+      /ambiguous.*2 numeric ids/i,
+    );
   });
 
   it('requires explicit mock support for address-specific V10 publishing', async () => {

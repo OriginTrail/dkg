@@ -7,20 +7,25 @@
  */
 import { Contract } from 'ethers';
 import type { ApprovalPolicy, ContextGraphRegistryScanCursorStore } from './chain-adapter.js';
+import type { ContextGraphAuthorityHistoryStore } from './context-graph-authority-history.js';
+import type { ContextGraphAuthorityIndexStore } from './context-graph-authority-index-checkpoint.js';
+import type { ContextGraphAuthorityIndexBootstrap } from './context-graph-authority-index-snapshot.js';
+import type { ChainEventLogStore } from './chain-index/index.js';
+import type { ChainEventLogBindingSource } from './chain-event-log-binding.js';
+import type { RpcRequestAdmission } from './rpc-request-transport.js';
+import type { OperationalSignerSource } from './evm-signer.js';
 
 export interface EVMAdapterBaseConfig {
   rpcUrl: string;
   rpcUrls?: string[];
+  /** Process-shared transport budget injected by the daemon composition root. */
+  rpcRequestAdmission?: RpcRequestAdmission;
   /**
    * Public RPC endpoints safe to hand to browser wallets for
    * `wallet_addEthereumChain`. These are intentionally separate from
    * rpcUrl/rpcUrls, which may be private operator/provider endpoints.
    */
   walletRpcUrls?: string[];
-  /** Primary operational wallet key (used for identity registration, staking, etc.) */
-  privateKey: string;
-  /** Additional operational wallet keys for parallel transaction submission. */
-  additionalKeys?: string[];
   hubAddress: string;
   /** Optional TRAC token contract override. When omitted, resolve from Hub.Token. */
   tokenAddress?: string;
@@ -32,6 +37,48 @@ export interface EVMAdapterBaseConfig {
    * wants dynamic provider network detection.
    */
   staticNetwork?: boolean;
+  /** Overall submitted-transaction receipt deadline. Defaults to 10 minutes. */
+  receiptTimeoutMs?: number;
+  /**
+   * Operator-selected canonical block confirmations required before a mined
+   * publish receipt may become terminal. The receipt block itself counts as
+   * confirmation 1. Lower values reduce wallet wait time but increase the risk
+   * that a chain reorganization reverses an already accepted receipt. A value
+   * of 1 gives no successor-block buffer. Defaults to 1.
+   */
+  finalityConfirmations?: number;
+  /**
+   * `chain.boundedAuthorityReads` — allow the node's own event index to answer
+   * Context Graph authority reads whose caller asked for bounded freshness.
+   *
+   * Defaults to `false`. Turning it on lets those reads be served locally when
+   * the index can prove coverage, lineage and freshness at its anchor, which
+   * removes the repeated `getContextGraph` call behind query, sync and
+   * reconciliation. It never applies to a read that asked to be live — key
+   * issuance, plaintext downgrade and roster mutation are unaffected — and a
+   * read the index declines falls through to the chain.
+   *
+   * It exists as a switch so that a suspect index can be taken out of the
+   * answer without a deploy.
+   */
+  boundedAuthorityReads?: boolean;
+  /**
+   * `chain.indexTickMs` (T): how long one completed finalized Context Graph
+   * authority projection answers reads before the next read refreshes it, in
+   * milliseconds. After a FAILED refresh the previous projection keeps
+   * answering until it is `min(max(3T, 15s), 5m)` old, then reads fail closed.
+   * A positive integer; defaults to 6000. Values above five minutes do not
+   * extend cache service past the RFC-64 accepted-authority interval. Affects
+   * only the durable authority index, so it is inert without
+   * `localContextGraphAuthorityIndexStore`.
+   */
+  indexTickMs?: number;
+  /**
+   * Optional operator cap for transaction fee-per-gas fields (wei). Applied to
+   * EIP-1559 maxFee/maxPriorityFee and legacy gasPrice after ethers populates a
+   * transaction. Omit for provider-selected fees.
+   */
+  maxFeePerGasWei?: bigint;
   /**
    * TTL (ms) for re-resolving `RandomSampling` / `RandomSamplingStorage`
    * addresses from the Hub. Defaults to 5 minutes. Values `<= 0` are
@@ -83,6 +130,43 @@ export interface EVMAdapterBaseConfig {
    */
   contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
   /**
+   * Optional durable finalized authority-history checkpoints. This explicitly
+   * named composition input must point to process-owned local storage; the
+   * structural interface itself does not pretend to enforce locality.
+   */
+  localContextGraphAuthorityHistoryStore?: ContextGraphAuthorityHistoryStore;
+  /**
+   * Optional process-owned durable contract-wide authority index. When present,
+   * authority snapshots use one shared resumable contract scan instead of one
+   * historical scan per Context Graph. Direct SDK consumers can omit it and
+   * retain the legacy per-graph reader.
+   */
+  localContextGraphAuthorityIndexStore?: ContextGraphAuthorityIndexStore;
+  /** Trusted core seed plus a bounded local tail; requires a local index store. */
+  contextGraphAuthorityIndexBootstrap?: ContextGraphAuthorityIndexBootstrap;
+  /**
+   * Durable backing for the node's ONE chain log. Supplying it is what makes
+   * an adapter OWN the tick: it builds the index runtime, starts the single
+   * background pass, and binds itself to the result.
+   *
+   * There must be exactly one such adapter per process — the daemon gives the
+   * store only to the agent's adapter (`lifecycle.ts`), never to the per-wallet
+   * publisher adapters (`publisher-runner.ts:createPublisherWalletChain`) —
+   * because a second one would be the second scanner this log exists to
+   * delete. An adapter without it keeps every pre-log path exactly as it was.
+   */
+  chainEventLogStore?: ChainEventLogStore;
+  /**
+   * Late-bound read-only access to the ONE log owned by another adapter in
+   * this process. Intended for publisher-wallet adapters: they borrow the
+   * owning adapter's current generation without receiving its store/runtime.
+   *
+   * This source is authoritative over `attachChainEventLog`, including while
+   * it returns `undefined` during cold start, rotation/rebuild, or shutdown.
+   * A source and `chainEventLogStore` are mutually exclusive.
+   */
+  chainEventLogBindingSource?: ChainEventLogBindingSource;
+  /**
    * Funding-aware publish wallet selection: minimum NATIVE gas balance (wei) an
    * operational wallet must hold to be PREFERRED when selecting the publish
    * signer. Default `0n` (strictly-positive: a wallet at exactly zero gas is
@@ -101,7 +185,8 @@ export interface EVMAdapterBaseConfig {
   minPublisherTracWei?: bigint;
 }
 
-export interface EVMAdapterConfig extends EVMAdapterBaseConfig {
+/** Every adapter option except where its operational wallets come from. */
+export interface EVMAdapterOptions extends EVMAdapterBaseConfig {
   /** Admin wallet key used for profile/key-management transactions. */
   adminPrivateKey?: string;
   /**
@@ -111,6 +196,13 @@ export interface EVMAdapterConfig extends EVMAdapterBaseConfig {
    */
   allowNoAdminSigner?: boolean;
 }
+
+/**
+ * EVM adapter configuration: the options plus exactly one source of
+ * operational wallets, local keys (`privateKey`, optionally `additionalKeys`)
+ * or external `signers`.
+ */
+export type EVMAdapterConfig = EVMAdapterOptions & OperationalSignerSource;
 
 export interface ContractCache {
   hub: Contract;

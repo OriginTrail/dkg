@@ -15,6 +15,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createServer } from 'node:http';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 describe('POST /api/context-graph/register — effective publishPolicy resolution (#1085)', () => {
   async function runRegisterRouteCaptureOpts(
@@ -68,8 +69,9 @@ describe('POST /api/context-graph/register — effective publishPolicy resolutio
         extractionRegistry: {}, fileStore: {}, extractionStatus: new Map(),
         assertionImportLocks: new Map(), vectorStore: {}, embeddingProvider: null,
         validTokens: new Set(), apiHost: '127.0.0.1', apiPortRef: { value: 0 },
-        routePlugins: [], url, path: url.pathname, requestToken: undefined,
+        routePlugins: [], url, path: url.pathname,
         requestAgentAddress: '0x0000000000000000000000000000000000000001',
+        authentication: requestAuthentication({ kind: 'nodeOperator' }),
       } as any);
       if (!res.writableEnded) { res.statusCode = 404; res.end(); }
     });
@@ -157,5 +159,52 @@ describe('POST /api/context-graph/register — effective publishPolicy resolutio
     } finally {
       warnSpy.mockRestore();
     }
+  });
+
+  it('maps an exact-PCA agent authorization failure to 403', async () => {
+    const { status, json } = await runRegisterRouteCaptureOpts(
+      { id: 'wrong-pca-agent-cg', publishPolicy: 0, pcaAccountId: '8' },
+      {
+        registerContextGraph: async () => {
+          throw new Error(
+            'Context graph "wrong-pca-agent-cg" cannot be PCA-registered: chain signer ' +
+            '0x0000000000000000000000000000000000000002 is not a registered agent of PCA account 8 ' +
+            '(registered account: 9).',
+          );
+        },
+      },
+    );
+    expect(status).toBe(403);
+    expect(json.error).toMatch(/not a registered agent of PCA account 8/);
+  });
+
+  it('maps missing PCA agent lookup support to 501', async () => {
+    const { status, json } = await runRegisterRouteCaptureOpts(
+      { id: 'unsupported-pca-agent-cg', publishPolicy: 0, pcaAccountId: '8' },
+      {
+        registerContextGraph: async () => {
+          throw new Error(
+            'PCA curated context graph registration by an agent requires chain adapter PCA agent lookup support.',
+          );
+        },
+      },
+    );
+    expect(status).toBe(501);
+    expect(json.error).toMatch(/PCA agent lookup support/);
+  });
+
+  it('maps unavailable PCA contract support to 503', async () => {
+    const { status, json } = await runRegisterRouteCaptureOpts(
+      { id: 'unavailable-pca-cg', publishPolicy: 0, pcaAccountId: '8' },
+      {
+        registerContextGraph: async () => {
+          const err = new Error('DKGPublishingConvictionNFT not deployed on this Hub.');
+          Object.assign(err, { code: 'PCA_UNAVAILABLE' });
+          throw err;
+        },
+      },
+    );
+    expect(status).toBe(503);
+    expect(json.error).toMatch(/not deployed on this Hub/);
   });
 });

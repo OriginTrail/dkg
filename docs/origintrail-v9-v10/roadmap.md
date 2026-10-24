@@ -1,10 +1,18 @@
 ---
+status: historical
+version: v9-v10
+audience: human
+doc_type: historical
 description: >-
   Multi-Agent Memory  ·  DePIN  ·  Truth-Seeking Algorithms  ·  Conviction
   Mechanisms
 ---
 
 # Roadmap
+
+{% hint style="warning" %}
+**Historical pre-launch roadmap.** The dates, four-week plan, and prospective availability below are retained for context and are not current operational guidance. See [Networks & RPCs](../general/networks.md) for current availability and [GitHub Releases](https://github.com/OriginTrail/dkg/releases) for shipped versions.
+{% endhint %}
 
 ## Metcalfe Convergence Phase
 

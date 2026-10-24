@@ -12,7 +12,7 @@
  *   - **store-backed** — composes any `ProtocolOutboxStore` (in-memory
  *     `InMemoryProtocolOutboxStore` for tests; SQLite-backed
  *     `SqliteProtocolOutboxStore` for the daemon, defined in
- *     `packages/node-ui/src/db.ts`). Adds inflight-lock + backoff +
+ *     `packages/node-store/src/protocol-outbox-store.ts`). Adds inflight-lock + backoff +
  *     prune logic on top of the raw storage primitive.
  *
  *   - **stale-snapshot-safe** — preserves the `hasEntry` guard from
@@ -28,13 +28,24 @@
  */
 
 import type {
+  CompatibleProtocolOutboxStore,
+  BoundedProtocolOutboxStore,
   IdempotencyCheckResult,
   MessageDirection,
   MessageIdempotencyStore,
+  LegacyProtocolOutboxStore,
   ProtocolOutboxEntry,
+  ProtocolOutboxMetadata,
+  ProtocolOutboxPage,
+  ProtocolOutboxPageBudget,
+  ProtocolOutboxQueueStats,
   ProtocolOutboxStore,
+  ProtocolOutboxPersistence,
+  ProtocolOutboxPayloadInspection,
+  ProtocolOutboxPolicyConfiguration,
 } from './messenger-types.js';
 import { RESPONSE_CACHE_BYTES } from './messenger-types.js';
+import { compareCodePoint } from './code-point-order.js';
 
 export interface ProtocolOutboxOptions {
   /**
@@ -89,30 +100,74 @@ function cloneOutboxEntry(entry: ProtocolOutboxEntry): ProtocolOutboxEntry {
   return { ...entry, payload: cloneBytes(entry.payload) };
 }
 
-interface ProtocolOutboxStorePolicy extends ProtocolOutboxOptions {
-  backoffFor: (attempts: number) => number;
+function compareDueEntries(a: ProtocolOutboxEntry, b: ProtocolOutboxEntry): number {
+  return a.nextAttemptAt - b.nextAttemptAt
+    || a.firstFailureAt - b.firstFailureAt
+    || compareCodePoint(a.peer, b.peer)
+    || compareCodePoint(a.protocol, b.protocol)
+    || compareCodePoint(a.messageId, b.messageId);
 }
 
-type PolicyAwareProtocolOutboxStore = ProtocolOutboxStore & {
-  configurePolicy?: (policy: ProtocolOutboxStorePolicy) => void;
-};
+function entryMetadata(entry: ProtocolOutboxEntry): ProtocolOutboxMetadata {
+  const { payload, ...metadata } = entry;
+  return { ...metadata, payloadBytes: payload.byteLength };
+}
 
-export class ProtocolOutbox {
-  private readonly store: ProtocolOutboxStore;
+export function validateProtocolOutboxPageBudget(budget: ProtocolOutboxPageBudget): void {
+  for (const name of ['maxEntries', 'maxPayloadBytes'] as const) {
+    if (!Number.isSafeInteger(budget[name]) || budget[name] <= 0) {
+      throw new RangeError(`Outbox ${name} must be a positive safe integer`);
+    }
+  }
+}
+
+function comparePendingEntries(a: ProtocolOutboxEntry, b: ProtocolOutboxEntry): number {
+  return a.firstFailureAt - b.firstFailureAt
+    || compareCodePoint(a.protocol, b.protocol)
+    || compareCodePoint(a.messageId, b.messageId);
+}
+
+function normalizeDuePageLimit(limit: number): number {
+  if (!Number.isFinite(limit) || limit < 0 || limit > Number.MAX_SAFE_INTEGER) {
+    throw new RangeError('Outbox duePage limit must be finite and non-negative');
+  }
+  return Math.floor(limit);
+}
+
+/**
+ * Keep compatibility at the constructor boundary. Internally the outbox only
+ * sees the current boolean peer-presence contract, while a legacy snapshot
+ * store is adapted once with all method receivers preserved.
+ */
+function normalizeOutboxStore(store: CompatibleProtocolOutboxStore): ProtocolOutboxStore {
+  if (typeof store.hasPendingFor === 'function') return store as ProtocolOutboxStore;
+
+  const legacy = store as LegacyProtocolOutboxStore;
+  const normalized: ProtocolOutboxStore = {
+    enqueue: legacy.enqueue.bind(legacy),
+    markDelivered: legacy.markDelivered.bind(legacy),
+    hasEntry: legacy.hasEntry.bind(legacy),
+    due: legacy.due.bind(legacy),
+    dropExpired: legacy.dropExpired.bind(legacy),
+    size: legacy.size.bind(legacy),
+    list: legacy.list.bind(legacy),
+    getEntry: legacy.getEntry.bind(legacy),
+    hasPendingFor: (peer) => legacy.pendingFor(peer).length > 0,
+    pendingFor: legacy.pendingFor.bind(legacy),
+  };
+  if (legacy.duePage) normalized.duePage = legacy.duePage.bind(legacy);
+  if (legacy.configurePolicy) normalized.configurePolicy = legacy.configurePolicy.bind(legacy);
+  return normalized;
+}
+
+class ProtocolOutboxAttempts<Store extends ProtocolOutboxPersistence> {
+  protected readonly store: Store;
   private readonly backoffs: readonly number[];
   /**
    * Per-key inflight set to prevent concurrent retry attempts for the
-   * same `(peer, protocol, messageId)`. Two trigger surfaces — the
-   * periodic tick (`Messenger.processOutboxTick`) and the
-   * opportunistic flush on `connection:open`
-   * (`Messenger.processOutboxOnConnect`) — can interleave: the tick
-   * starts the send for entry E, JS yields, `connection:open` fires,
-   * the on-connect handler reads `pendingFor(peer)` (entry E is still
-   * there — `markDelivered` hasn't fired yet because the in-flight
-   * send hasn't resolved), and would start a CONCURRENT second send
-   * for the same entry. Worst case both succeed and the receiver sees
-   * the same payload twice (receiver dedup absorbs it, but we waste
-   * a round-trip and amplify load).
+   * same `(peer, protocol, messageId)`. Overlapping scheduler callers or
+   * another explicit sender can otherwise interleave around a stale due
+   * snapshot and duplicate the same wire attempt.
    *
    * `tryBeginAttempt` is an atomic check-and-set: the second
    * concurrent attempter sees `false` and exits without dialing.
@@ -124,14 +179,18 @@ export class ProtocolOutbox {
    */
   private readonly inflight = new Set<string>();
 
-  constructor(store: ProtocolOutboxStore, options: ProtocolOutboxOptions = {}) {
+  constructor(
+    store: Store,
+    options: ProtocolOutboxOptions = {},
+    policyConfiguration?: ProtocolOutboxPolicyConfiguration,
+  ) {
+    this.store = store;
     const backoffs = options.backoffs ?? DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS;
     if (backoffs.length === 0) {
       throw new Error('ProtocolOutbox: backoffs must be non-empty');
     }
-    this.store = store;
     this.backoffs = backoffs;
-    (this.store as PolicyAwareProtocolOutboxStore).configurePolicy?.({
+    policyConfiguration?.configurePolicy({
       backoffs,
       maxAgeMs: options.maxAgeMs ?? DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS,
       backoffFor: (attempts) => this.backoffFor(attempts),
@@ -201,18 +260,65 @@ export class ProtocolOutbox {
     return this.store.hasEntry(peer, protocol, messageId);
   }
 
-  /** Entries whose `nextAttemptAt <= now`. */
+  /** Total entries currently queued. */
+  size(): number {
+    return this.store.size();
+  }
+
+  /** Compute backoff for a given attempt count. Exposed for testing. */
+  backoffFor(attempts: number): number {
+    const idx = Math.min(Math.max(attempts - 1, 0), this.backoffs.length - 1);
+    return this.backoffs[idx];
+  }
+}
+
+/** Compatibility facade for explicit payload snapshots and legacy stores. */
+export class ProtocolOutbox extends ProtocolOutboxAttempts<ProtocolOutboxStore> {
+  constructor(store: CompatibleProtocolOutboxStore, options: ProtocolOutboxOptions = {}) {
+    const normalized = normalizeOutboxStore(store);
+    const policyConfiguration = normalized.configurePolicy
+      ? { configurePolicy: normalized.configurePolicy.bind(normalized) }
+      : undefined;
+    super(normalized, options, policyConfiguration);
+  }
+
+  /** All due entries in deterministic retry order. */
   due(now: number): ProtocolOutboxEntry[] {
-    return this.store.due(now);
+    return [...this.store.due(now)].sort(compareDueEntries);
   }
 
   /**
-   * All entries for `peer`, regardless of `nextAttemptAt`. Used by
-   * `Messenger.processOutboxOnConnect` for opportunistic flush on
-   * reconnection.
+   * Explicit payload snapshot; omitting the limit preserves the all-due API.
+   * Automatic drains use readDuePage instead. A supplied count limit never
+   * falls back to loading an unlimited backlog.
+   */
+  duePage(now: number, limit?: number): ProtocolOutboxEntry[] {
+    if (limit === undefined) return this.due(now);
+    const normalizedLimit = normalizeDuePageLimit(limit);
+    if (normalizedLimit === 0) return [];
+
+    if (!this.store.duePage) {
+      throw new Error('Custom outbox store must implement duePage for count-limited payload reads');
+    }
+    const snapshot = this.store.duePage(now, normalizedLimit);
+    const ordered = [...snapshot].sort(compareDueEntries);
+    return ordered.slice(0, normalizedLimit);
+  }
+
+  hasPendingFor(peer: string): boolean {
+    return this.store.hasPendingFor(peer);
+  }
+
+  /**
+   * Compatibility/diagnostic snapshot for a peer. This does not participate in
+   * retry selection; scheduled drains remain exclusively `readDuePage`-driven.
    */
   pendingFor(peer: string): ProtocolOutboxEntry[] {
-    return this.store.pendingFor(peer);
+    const pendingFor = this.store.pendingFor;
+    const snapshot = pendingFor
+      ? pendingFor.call(this.store, peer)
+      : this.store.list().filter((entry) => entry.peer === peer);
+    return [...snapshot].sort(comparePendingEntries).map(cloneOutboxEntry);
   }
 
   /** Drop entries older than the store's configured max-age. */
@@ -220,14 +326,9 @@ export class ProtocolOutbox {
     return this.store.dropExpired(now);
   }
 
-  /** Total entries currently queued. */
-  size(): number {
-    return this.store.size();
-  }
-
   /**
    * Snapshot of every entry currently in the underlying store. Used
-   * by `Messenger.listOutbox` for the diagnostics surface. Returns
+   * only for explicit payload inspection. Returns
    * entries in store order — callers that need per-peer FIFO should
    * sort by `firstFailureAt`.
    */
@@ -242,11 +343,71 @@ export class ProtocolOutbox {
   getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined {
     return this.store.getEntry(peer, protocol, messageId);
   }
+}
 
-  /** Compute backoff for a given attempt count. Exposed for testing. */
-  backoffFor(attempts: number): number {
-    const idx = Math.min(Math.max(attempts - 1, 0), this.backoffs.length - 1);
-    return this.backoffs[idx];
+/** Compile-time completeness keeps JavaScript validation owned by the store contract. */
+const BOUNDED_STORE_METHODS = {
+  readDuePage: true, listMetadata: true, dropExpiredMetadata: true,
+  recordRetryFailure: true, queueStats: true, hasPendingFor: true,
+  enqueue: true, markDelivered: true, hasEntry: true, size: true,
+  configurePolicy: true,
+} satisfies Record<keyof BoundedProtocolOutboxStore, true>;
+
+export function assertBoundedProtocolOutboxStore(store: unknown): asserts store is BoundedProtocolOutboxStore {
+  for (const method of Object.keys(BOUNDED_STORE_METHODS)) {
+    if (store === null || (typeof store !== 'object' && typeof store !== 'function') || typeof (store as Record<string, unknown>)[method] !== 'function') {
+      throw new Error(`Custom outbox store must implement ${method} for byte-bounded Messenger retries`);
+    }
+  }
+}
+
+export function protocolOutboxPayloadInspection(
+  store: BoundedProtocolOutboxStore,
+): ProtocolOutboxPayloadInspection | undefined {
+  const candidate = store as BoundedProtocolOutboxStore & Partial<ProtocolOutboxPayloadInspection>;
+  return typeof candidate.list === 'function' && typeof candidate.getEntry === 'function'
+    ? candidate as BoundedProtocolOutboxStore & ProtocolOutboxPayloadInspection
+    : undefined;
+}
+
+/** Automatic retries depend only on bounded access and common persistence. */
+export class BoundedProtocolOutbox extends ProtocolOutboxAttempts<BoundedProtocolOutboxStore> {
+  private readonly inspection?: ProtocolOutboxPayloadInspection;
+
+  constructor(store: BoundedProtocolOutboxStore, options: ProtocolOutboxOptions = {}) {
+    assertBoundedProtocolOutboxStore(store);
+    super(store, options, store);
+    this.inspection = protocolOutboxPayloadInspection(store);
+  }
+
+  readDuePage(now: number, budget: ProtocolOutboxPageBudget): ProtocolOutboxPage {
+    validateProtocolOutboxPageBudget(budget);
+    return this.store.readDuePage(now, budget);
+  }
+
+  listMetadata(peer?: string): ProtocolOutboxMetadata[] {
+    return this.store.listMetadata(peer);
+  }
+
+  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
+    return this.store.dropExpiredMetadata(now);
+  }
+
+  recordRetryFailure(peer: string, protocol: string, messageId: string, error: string, now: number): ProtocolOutboxMetadata | undefined {
+    return this.store.recordRetryFailure(peer, protocol, messageId, error, now);
+  }
+
+  queueStats(now: number, maxPayloadBytes: number): ProtocolOutboxQueueStats {
+    return this.store.queueStats(now, maxPayloadBytes);
+  }
+
+  hasPendingFor(peer: string): boolean {
+    return this.store.hasPendingFor(peer);
+  }
+
+  /** Explicitly expose whether this store supplied payload inspection. */
+  payloadInspection(): ProtocolOutboxPayloadInspection | undefined {
+    return this.inspection;
   }
 }
 
@@ -254,13 +415,13 @@ export class ProtocolOutbox {
  * Reference in-memory implementation of `ProtocolOutboxStore`. Used
  * by tests + by the substrate before the SQLite-backed store is
  * wired in `lifecycle.ts` (PR-2). The SQLite-backed implementation
- * lives in `packages/node-ui/src/db.ts` and has the same semantics
+ * lives in `packages/node-store/src/protocol-outbox-store.ts` and has the same semantics
  * — this class exists as the executable spec for the contract.
  *
  * Implements the same backoff ladder the wrapper `ProtocolOutbox`
  * uses so the test fixture is self-contained.
  */
-export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
+export class InMemoryProtocolOutboxStore implements BoundedProtocolOutboxStore, ProtocolOutboxStore {
   private readonly entries = new Map<string, ProtocolOutboxEntry>();
   private backoffs: readonly number[] = DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS;
   private maxAgeMs = DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS;
@@ -298,10 +459,7 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
     const key = InMemoryProtocolOutboxStore.key(peer, protocol, messageId);
     const existing = this.entries.get(key);
     if (existing) {
-      existing.attempts += 1;
-      existing.lastAttemptAt = now;
-      existing.nextAttemptAt = now + this.backoffFor(existing.attempts);
-      existing.lastError = error;
+      this.advanceRetry(existing, error, now);
       return cloneOutboxEntry(existing);
     }
     const entry: ProtocolOutboxEntry = {
@@ -327,28 +485,107 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
     return this.entries.has(InMemoryProtocolOutboxStore.key(peer, protocol, messageId));
   }
 
+  hasPendingFor(peer: string): boolean {
+    return Array.from(this.entries.values()).some((entry) => entry.peer === peer);
+  }
+
   pendingFor(peer: string): ProtocolOutboxEntry[] {
     return Array.from(this.entries.values())
-      .filter((e) => e.peer === peer)
+      .filter((entry) => entry.peer === peer)
       .sort((a, b) => a.firstFailureAt - b.firstFailureAt)
       .map(cloneOutboxEntry);
   }
 
-  due(now: number): ProtocolOutboxEntry[] {
+  private dueEntries(now: number): ProtocolOutboxEntry[] {
     return Array.from(this.entries.values())
-      .filter((e) => e.nextAttemptAt <= now)
-      .map(cloneOutboxEntry);
+      .filter(entry => entry.nextAttemptAt <= now)
+      .sort(compareDueEntries);
   }
 
-  dropExpired(now: number): ProtocolOutboxEntry[] {
-    const dropped: ProtocolOutboxEntry[] = [];
+  due(now: number): ProtocolOutboxEntry[] {
+    return this.dueEntries(now).map(cloneOutboxEntry);
+  }
+
+  duePage(now: number, limit: number): ProtocolOutboxEntry[] {
+    limit = normalizeDuePageLimit(limit);
+    return this.dueEntries(now).slice(0, limit).map(cloneOutboxEntry);
+  }
+
+  readDuePage(now: number, budget: ProtocolOutboxPageBudget): ProtocolOutboxPage {
+    validateProtocolOutboxPageBudget(budget);
+    let skippedOversizedEntries = 0;
+    const candidates = this.dueEntries(now)
+      .filter(entry => {
+        if (entry.payload.byteLength <= budget.maxPayloadBytes) return true;
+        skippedOversizedEntries++;
+        return false;
+      });
+    const entries: ProtocolOutboxEntry[] = [];
+    let payloadBytes = 0;
+    let byteBudgetExhausted = false;
+    for (const entry of candidates) {
+      if (entries.length === budget.maxEntries) break;
+      if (payloadBytes + entry.payload.byteLength > budget.maxPayloadBytes) {
+        byteBudgetExhausted = true;
+        break;
+      }
+      payloadBytes += entry.payload.byteLength;
+      entries.push(cloneOutboxEntry(entry));
+    }
+    return { entries, skippedOversizedEntries, byteBudgetExhausted };
+  }
+
+  listMetadata(peer?: string): ProtocolOutboxMetadata[] {
+    return Array.from(this.entries.values())
+      .filter(entry => peer === undefined || entry.peer === peer)
+      .map(entryMetadata);
+  }
+
+  private removeExpired<T>(now: number, project: (entry: ProtocolOutboxEntry) => T): T[] {
+    const dropped: T[] = [];
     for (const [key, entry] of this.entries) {
       if (now - entry.firstFailureAt > this.maxAgeMs) {
-        dropped.push(cloneOutboxEntry(entry));
+        dropped.push(project(entry));
         this.entries.delete(key);
       }
     }
     return dropped;
+  }
+
+  dropExpiredMetadata(now: number): ProtocolOutboxMetadata[] {
+    return this.removeExpired(now, entryMetadata);
+  }
+
+  recordRetryFailure(peer: string, protocol: string, messageId: string, error: string, now: number): ProtocolOutboxMetadata | undefined {
+    const entry = this.entries.get(InMemoryProtocolOutboxStore.key(peer, protocol, messageId));
+    if (!entry) return undefined;
+    this.advanceRetry(entry, error, now);
+    return entryMetadata(entry);
+  }
+
+  private advanceRetry(entry: ProtocolOutboxEntry, error: string, now: number): void {
+    entry.attempts += 1;
+    entry.lastAttemptAt = now;
+    entry.nextAttemptAt = now + this.backoffFor(entry.attempts);
+    entry.lastError = error;
+  }
+
+  queueStats(now: number, maxPayloadBytes: number): ProtocolOutboxQueueStats {
+    let queuedBytes = 0;
+    let oldestDueAgeMs = 0;
+    let oversizedDueEntries = 0;
+    for (const entry of this.entries.values()) {
+      queuedBytes += entry.payload.byteLength;
+      if (entry.nextAttemptAt <= now) {
+        oldestDueAgeMs = Math.max(oldestDueAgeMs, now - entry.nextAttemptAt);
+        if (entry.payload.byteLength > maxPayloadBytes) oversizedDueEntries++;
+      }
+    }
+    return { queuedEntries: this.entries.size, queuedBytes, oldestDueAgeMs, oversizedDueEntries };
+  }
+
+  dropExpired(now: number): ProtocolOutboxEntry[] {
+    return this.removeExpired(now, cloneOutboxEntry);
   }
 
   size(): number {
@@ -356,12 +593,12 @@ export class InMemoryProtocolOutboxStore implements ProtocolOutboxStore {
   }
 
   list(): ProtocolOutboxEntry[] {
-    return Array.from(this.entries.values()).map((e) => ({ ...e }));
+    return Array.from(this.entries.values()).map(cloneOutboxEntry);
   }
 
   getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined {
     const entry = this.entries.get(InMemoryProtocolOutboxStore.key(peer, protocol, messageId));
-    return entry ? { ...entry } : undefined;
+    return entry ? cloneOutboxEntry(entry) : undefined;
   }
 }
 

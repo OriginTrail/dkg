@@ -43,6 +43,13 @@ import {
   HARDHAT_KEYS,
 } from './evm-test-context.js';
 import { mintTokens } from './hardhat-harness.js';
+import { MULTICALL3_RUNTIME_CODE } from './fixtures/multicall3-runtime-code.js';
+import type { ChainEvent } from '../src/chain-adapter.js';
+import {
+  MULTICALL3_ADDRESS,
+  drainRpcReadBatchingWindow,
+} from '../src/evm-background-read-batching.js';
+import { withRpcRequestContext } from '../src/rpc-request-transport.js';
 import {
   buildAuthorAttestationTypedData,
   buildUpdateAuthorAttestationTypedData,
@@ -244,6 +251,8 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
       expect(resolved!.startKAId).toBeGreaterThan(0n);
       expect(resolved!.endKAId).toBe(resolved!.startKAId);
       expect(resolved!.publisherAddress.toLowerCase()).toBe(adapter.getSignerAddress().toLowerCase());
+      expect(ethers.hexlify(resolved!.merkleRoot!)).toBe(ethers.hexlify(originalRoot));
+      expect(resolved!.authorAddress?.toLowerCase()).toBe(adapter.getSignerAddress().toLowerCase());
 
       // --- updateKnowledgeCollectionV10 (publisher ACK + owner EIP-712 seal) ---
       const newMerkleRoot = ethers.getBytes(
@@ -309,6 +318,39 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
       const wrongPub = new Wallet(HARDHAT_KEYS.EXTRA2).address;
       const notVerified = await adapter.verifyKAUpdate(updateResult.hash, kaId, wrongPub);
       expect(notVerified.verified).toBe(false);
+
+      // --- the update reaches the event lane the VM refresh nudge reads (#2858) ---
+      const updates: ChainEvent[] = [];
+      for await (const event of adapter.listenForEvents({
+        eventTypes: ['KnowledgeAssetUpdated'],
+        fromBlock: updateResult.blockNumber,
+        toBlock: updateResult.blockNumber,
+      })) {
+        updates.push(event);
+      }
+      const updateReceipt = await provider.getTransactionReceipt(updateResult.hash);
+      const updateLog = updateReceipt!.logs.find((log) => log.topics[0] === ethers.id(
+        'KnowledgeAssetUpdated(uint256,address,string,bytes32,uint256,uint96)',
+      ));
+      expect(updateLog).toBeDefined();
+      expect(updates).toEqual([{
+        type: 'KnowledgeAssetUpdated',
+        blockNumber: updateResult.blockNumber,
+        updateIdentity: {
+          eventKind: 'log', blockNumber: updateResult.blockNumber,
+          logIndex: updateLog!.index, blockHash: updateReceipt!.blockHash.toLowerCase(),
+          txHash: updateResult.hash.toLowerCase(),
+        },
+        data: expect.objectContaining({
+          kaId: kaId.toString(),
+          batchId: kaId.toString(),
+          merkleRoot: ethers.hexlify(newMerkleRoot),
+          author: coreOp.address,
+          txHash: updateResult.hash,
+          logIndex: updateLog!.index,
+          blockHash: updateReceipt!.blockHash,
+        }),
+      }]);
     }, 120_000);
 
     // #831 regression test: a metadata update with `newByteSize > currentByteSize`
@@ -383,6 +425,77 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
       const bogus = '0x' + 'ab'.repeat(32);
       const resolved = await adapter.resolvePublishByTxHash(bogus);
       expect(resolved).toBeNull();
+    });
+
+    // GH#2270 — `resolvePublishByTxHash` answers `null` for a mined-and-reverted
+    // tx, a mined non-publish tx, a tx still in the mempool, and a tx the node
+    // has never seen. Recovery read that `null` as "the publish did not happen"
+    // and resent. These pin that `resolvePublishTransaction` tells them apart
+    // against a real node, and specifically that `pending` comes from asking for
+    // the TRANSACTION — not from inferring anything out of a missing receipt.
+    describe('resolvePublishTransaction separates pending from absent [GH#2270]', () => {
+      it('reports not-found for a hash the node has never seen', async () => {
+        const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+        const bogus = '0x' + 'ab'.repeat(32);
+
+        expect(await adapter.resolvePublishTransaction(bogus)).toEqual({ status: 'not-found' });
+      });
+
+      it('reports pending while unmined and unrecognized once mined — same hash', async () => {
+        // One transaction, two verdicts. The only thing that changes between
+        // them is whether it has been mined, so a resolver that derived its
+        // answer from the absent receipt could not produce both.
+        const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+        const provider = createProvider();
+        const wallet = new Wallet(HARDHAT_KEYS.CORE_OP, provider);
+
+        await provider.send('evm_setAutomine', [false]);
+        let txHash: string;
+        try {
+          const sent = await wallet.sendTransaction({ to: wallet.address, value: 0n });
+          txHash = sent.hash;
+          expect(await adapter.resolvePublishTransaction(txHash)).toEqual({ status: 'pending-mempool' });
+        } finally {
+          await provider.send('evm_setAutomine', [true]);
+        }
+        await provider.send('evm_mine', []);
+
+        // Mined and successful, but a plain transfer carries no publish event.
+        expect(await adapter.resolvePublishTransaction(txHash)).toEqual({ status: 'unrecognized' });
+        // The legacy surface collapses that and the pending case to one `null`.
+        expect(await adapter.resolvePublishByTxHash(txHash)).toBeNull();
+      });
+
+      it('reports reverted for a mined failure receipt', async () => {
+        const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+        const provider = createProvider();
+        const wallet = new Wallet(HARDHAT_KEYS.CORE_OP, provider);
+        const { hubAddress } = getSharedContext();
+
+        // Unknown selector against a deployed contract with no fallback. The
+        // explicit gasLimit skips estimateGas, and automine has to be off for
+        // the send itself: Hardhat simulates on eth_sendRawTransaction while
+        // automining and would reject the tx instead of mining a status-0
+        // receipt. Mining it separately produces the failure receipt.
+        await provider.send('evm_setAutomine', [false]);
+        let txHash: string;
+        try {
+          const sent = await wallet.sendTransaction({
+            to: hubAddress,
+            data: '0xdeadbeef',
+            gasLimit: 100_000,
+          });
+          txHash = sent.hash;
+        } finally {
+          await provider.send('evm_setAutomine', [true]);
+        }
+        await provider.send('evm_mine', []).catch(() => undefined);
+
+        expect(await adapter.resolvePublishTransaction(txHash)).toEqual({ status: 'reverted' });
+        // The legacy surface reports this the same way it reports a tx that
+        // never existed — the fusion this whole tri-state exists to undo.
+        expect(await adapter.resolvePublishByTxHash(txHash)).toBeNull();
+      });
     });
 
     it('verifyKAUpdate returns unverified for an unrelated tx hash', async () => {
@@ -490,6 +603,31 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
       expect(ok).toBe(true);
     }, 60_000);
 
+    it('resolves a funded publish plan through the concrete EVM publish mixin', async () => {
+      const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+      const { hubAddress } = getSharedContext();
+      await mintTokens(
+        createProvider(),
+        hubAddress,
+        HARDHAT_KEYS.DEPLOYER,
+        adapter.getSignerAddress(),
+        ethers.parseEther('1000'),
+      );
+      const contextGraphId = await createTestContextGraph(adapter, undefined, 0);
+
+      const plan = await adapter.resolvePublisherPublishPlan!({
+        contextGraphId,
+        // Legacy callers can continue sending only the deprecated alias.
+        effectiveByteSize: 256n,
+        explicitPublishEpochs: 2,
+        defaultPublishEpochs: 12,
+      });
+
+      expect(plan.publisherAddress.toLowerCase()).toBe(adapter.getSignerAddress().toLowerCase());
+      expect(plan.publishEpochs).toBe(2);
+      expect(plan.tokenAmount).toBeGreaterThanOrEqual(2n);
+    }, 60_000);
+
     it('seedContextGraphRegistration writes the expected metadata quad into the store', async () => {
       type Quad = { subject: string; predicate: string; object: string; graph: string };
       const quads: Quad[] = [];
@@ -588,5 +726,95 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
         }),
       ).rejects.toThrow(/positive on-chain context graph id/);
     });
+  });
+
+  // --------------------------------------------------------------------
+  // Background views through Multicall3, against the deployed contracts.
+  // --------------------------------------------------------------------
+
+  describe('background views through Multicall3', () => {
+    const background = <T>(fn: () => T): T => withRpcRequestContext({ requestClass: 'background' }, fn);
+
+    /** Background reads go out directly until the adapter has checked the bytecode. */
+    async function waitUntilBatching(adapter: ReturnType<typeof createEVMAdapter>, kaId: bigint): Promise<boolean> {
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        drainRpcReadBatchingWindow();
+        await background(() => adapter.getLatestMerkleRoot(kaId));
+        if (drainRpcReadBatchingWindow().batches > 0) return true;
+        await new Promise<void>((resolve) => { setTimeout(resolve, 20); });
+      }
+      return false;
+    }
+
+    it('answers a published asset\'s views in one request, with the direct reads\' values', async () => {
+      const provider = createProvider();
+      await provider.send('hardhat_setCode', [MULTICALL3_ADDRESS, MULTICALL3_RUNTIME_CODE]);
+      const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+      const { kaId, contextGraphId, merkleRoot } = await publishOneKCV10();
+      const views = () => Promise.all([
+        adapter.getLatestMerkleRoot(kaId),
+        adapter.getMerkleRootCount(kaId),
+        adapter.getKnowledgeAssetUpdateContext(kaId),
+        adapter.getKAContextGraphId(kaId),
+        adapter.getContextGraphKCCount(contextGraphId),
+        adapter.getContextGraphKCAt(contextGraphId, 0n),
+        adapter.getLatestMerkleRootPublisher(kaId),
+        adapter.getLatestMerkleRootAuthor(kaId),
+      ]);
+
+      const direct = await views();
+      expect(ethers.hexlify(direct[0])).toBe(ethers.hexlify(merkleRoot));
+      expect(direct[1]).toBe(1n);
+      expect(direct[3]).toBe(contextGraphId);
+      expect(direct[5]).toBe(kaId);
+      expect(await waitUntilBatching(adapter, kaId)).toBe(true);
+      adapter.drainRpcUsage();
+
+      const batched = await background(views);
+
+      expect(batched).toEqual(direct);
+      // Eight reads, seven distinct calls (the root count and the update
+      // context are the same view), one request.
+      expect(drainRpcReadBatchingWindow()).toMatchObject({
+        batches: 1, failedBatches: 0, refusedBatches: 0, calls: 7, directReads: 0,
+      });
+      expect(adapter.drainRpcUsage().byMethod).toEqual({ eth_call: 1 });
+    }, 60_000);
+
+    it('reports a view the contract reverts exactly as the direct read does', async () => {
+      const provider = createProvider();
+      await provider.send('hardhat_setCode', [MULTICALL3_ADDRESS, MULTICALL3_RUNTIME_CODE]);
+      const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+      const { kaId, contextGraphId } = await publishOneKCV10();
+      // Position 5 of a graph that holds one asset: the contract reverts.
+      const outOfRange = () => adapter.getContextGraphKCAt(contextGraphId, 5n);
+
+      const direct = await outOfRange().then(() => undefined, (error: unknown) => error);
+      expect(direct).toBeInstanceOf(Error);
+      expect(await waitUntilBatching(adapter, kaId)).toBe(true);
+      const [batched, neighbour] = await Promise.allSettled(background(() => [
+        outOfRange(),
+        adapter.getKAContextGraphId(kaId),
+      ]));
+
+      expect(batched.status).toBe('rejected');
+      const reason = (batched as PromiseRejectedResult).reason as { code?: unknown; message?: string };
+      expect(reason.code).toBe((direct as { code?: unknown }).code);
+      expect(reason.message).toBe((direct as Error).message);
+      // The revert stays that read's own: the view beside it is answered.
+      expect(neighbour).toEqual({ status: 'fulfilled', value: contextGraphId });
+      expect(drainRpcReadBatchingWindow()).toMatchObject({ batches: 1, directReads: 1 });
+    }, 60_000);
+
+    it('keeps the direct reads on a chain without Multicall3', async () => {
+      const provider = createProvider();
+      expect(await provider.getCode(MULTICALL3_ADDRESS)).toBe('0x');
+      const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+      const { kaId, merkleRoot } = await publishOneKCV10();
+
+      expect(await waitUntilBatching(adapter, kaId)).toBe(false);
+      expect(ethers.hexlify(await background(() => adapter.getLatestMerkleRoot(kaId))))
+        .toBe(ethers.hexlify(merkleRoot));
+    }, 60_000);
   });
 });

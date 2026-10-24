@@ -16,7 +16,7 @@ export interface ContextGraph {
    * the local store for this CG. Distinct from `subscribed`: a CG can be
    * subscribed but never synced (no peer holds the data), and conversely a CG
    * can be synced but no longer subscribed (we caught up once and unsubscribed).
-   * Used by the Context Oracle sidebar to hide stale entries the daemon learned
+   * Used to distinguish active subscriptions from catalogue-only graphs learned
    * about via gossip but never actually interacted with.
    */
   synced?: boolean;

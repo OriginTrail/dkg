@@ -19,6 +19,8 @@ export interface SyncVerifyResult {
 export interface SyncParseResult {
   quads: Quad[];
   totalQuads: number;
+  /** Raw page index for each retained quad, preserving responder coordinates. */
+  sourceIndexes?: number[];
 }
 
 export interface SharedMemoryProcessResult {
@@ -37,9 +39,34 @@ export interface SharedMemoryBatchProcessResult {
   entityCreators: Array<{ dataGraph: string; entity: string; creator: string }>;
 }
 
+export type DurableBatchVerificationMode =
+  | { kind: 'fullSnapshot' }
+  | { kind: 'sinceBatchId'; sinceBatchId: string }
+  | { kind: 'changelogPage'; changedDataGraphs: readonly string[] };
+
 export interface DurableBatchProcessResult {
   verifiedData: Quad[];
   verifiedMeta: Quad[];
+  verifiedGraphScopedDataGraphs: string[];
+  /** Metadata controls deliberately consumed after failing authentication (diagnostic). */
+  droppedSyncControlTriples: number;
+  /**
+   * Non-IRI (blank-node/literal) `_meta` subject rows deliberately dropped at
+   * ingest (#1921) — a verifier-side diagnostic count.
+   */
+  droppedNonIriSubjectTriples: number;
+  /**
+   * Reason-agnostic aggregate of meta rows the verifier deliberately CONSUMED
+   * but did not persist (unverified sync controls + non-IRI subjects). This is
+   * the single count the requester uses to decide whether a fully-discarded
+   * metadata-only page still advances the meta checkpoint (rather than pinning
+   * durable sync on the same page). Keeping the per-reason counts above as
+   * diagnostics only keeps checkpoint orchestration decoupled from verifier
+   * discard policy.
+   */
+  consumedUnpersistedMetaTriples: number;
+  /** Clean batches containing verified V2 assets with no public assertion triples. */
+  verifiedPrivateOnlyResponses: number;
   totalFetchedDataQuads: number;
   totalFetchedMetaQuads: number;
   rejectedKcs: number;
@@ -47,6 +74,22 @@ export interface DurableBatchProcessResult {
   metaOnlyResponses: number;
   dataRejectedMissingMeta: number;
   logs: SyncVerifyLogEntry[];
+}
+
+/**
+ * Worker-wire form of {@link DurableBatchProcessResult}.
+ *
+ * Returning verified Quad objects through `postMessage()` structured-clones
+ * every accepted quad back into the requester heap. The requester already
+ * retains the original input arrays, so that clone briefly doubles the
+ * complete durable phase immediately before store serialization. Return only
+ * indexes across the worker boundary and rebuild arrays of references to the
+ * caller-owned quads on the main thread.
+ */
+export interface DurableBatchProcessWireResult
+  extends Omit<DurableBatchProcessResult, 'verifiedData' | 'verifiedMeta'> {
+  verifiedDataIndexes: number[];
+  verifiedMetaIndexes: number[];
 }
 
 export class SyncVerifyWorker {
@@ -150,7 +193,7 @@ export class SyncVerifyWorker {
     }
 
     this.worker = new Worker(workerPath);
-    this.worker.on('message', (message: { id: number; result?: SyncVerifyResult; error?: string }) => {
+    this.worker.on('message', (message: { id: number; result?: unknown; error?: string }) => {
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
@@ -187,15 +230,46 @@ export class SyncVerifyWorker {
     });
   }
 
+  /**
+   * Array membership and order are snapshotted before dispatch. Callers must
+   * keep the Quad objects themselves immutable until the returned promise
+   * settles so the caller-owned references still match the worker snapshot.
+   */
   processDurableBatch(
-    dataQuads: Quad[],
-    metaQuads: Quad[],
+    dataQuads: readonly Quad[],
+    metaQuads: readonly Quad[],
     acceptUnverified: boolean,
+    mode: DurableBatchVerificationMode = { kind: 'fullSnapshot' },
   ): Promise<DurableBatchProcessResult> {
+    // Preserve the array membership/order that the worker verifies without
+    // cloning the Quad object graph on the caller side. Callers may resize or
+    // reorder their arrays once this method returns.
+    const stableDataQuads = dataQuads.slice();
+    const stableMetaQuads = metaQuads.slice();
     const id = this.nextId++;
-    return new Promise<DurableBatchProcessResult>((resolve, reject) => {
+    return new Promise<DurableBatchProcessWireResult>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, method: 'processDurableBatch', args: [dataQuads, metaQuads, acceptUnverified] });
+      this.worker.postMessage({
+        id,
+        method: 'processDurableBatch',
+        args: [
+          stableDataQuads,
+          stableMetaQuads,
+          acceptUnverified,
+          mode,
+        ],
+      });
+    }).then((wireResult) => {
+      const {
+        verifiedDataIndexes,
+        verifiedMetaIndexes,
+        ...summary
+      } = wireResult;
+      return {
+        ...summary,
+        verifiedData: selectQuadReferences(stableDataQuads, verifiedDataIndexes, 'data'),
+        verifiedMeta: selectQuadReferences(stableMetaQuads, verifiedMetaIndexes, 'meta'),
+      };
     });
   }
 
@@ -220,4 +294,20 @@ export class SyncVerifyWorker {
   async close(): Promise<void> {
     await this.worker.terminate();
   }
+}
+
+function selectQuadReferences(
+  source: Quad[],
+  indexes: readonly number[],
+  phase: 'data' | 'meta',
+): Quad[] {
+  const selected = new Array<Quad>(indexes.length);
+  for (let i = 0; i < indexes.length; i++) {
+    const index = indexes[i];
+    if (!Number.isSafeInteger(index) || index < 0 || index >= source.length) {
+      throw new Error(`Sync verify worker returned an invalid ${phase} quad index: ${index}`);
+    }
+    selected[i] = source[index];
+  }
+  return selected;
 }

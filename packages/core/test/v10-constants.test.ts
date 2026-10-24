@@ -4,6 +4,10 @@ import {
   PROTOCOL_QUERY,
   PROTOCOL_DISCOVER,
   PROTOCOL_SYNC,
+  PROTOCOL_SYNC_POOLED,
+  PROTOCOL_SYNC_CHANGELOG,
+  PROTOCOL_NETWORK_IDENTITY,
+  advertisesSyncProtocol,
   PROTOCOL_MESSAGE,
   PROTOCOL_ACCESS,
   PROTOCOL_QUERY_REMOTE,
@@ -34,23 +38,23 @@ import {
   contextGraphVerifiableMemoryMetaUri,
   contextGraphAssertionUri,
   contextGraphLayerUri,
+  contextGraphLayerUriCandidates,
+  contextGraphLayerPrefixCandidates,
+  contextGraphAssertionPrefixCandidates,
+  knowledgeAssetAgentAddressesEqual,
   contextGraphRulesUri,
   contextGraphSubGraphUri,
   // Deprecated aliases
   contextGraphPublishTopic,
   contextGraphWorkspaceTopic,
-  contextGraphFinalizationTopic,
-  contextGraphUpdateTopic,
-  contextGraphAppTopic,
   contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
   contextGraphPrivateGraphUri,
   contextGraphWorkspaceGraphUri,
   contextGraphWorkspaceMetaGraphUri,
-  contextGraphSessionsTopic,
-  contextGraphSessionTopic,
 } from '../src/constants.js';
 import { MemoryLayer } from '../src/memory-model.js';
+import { STORAGE_ACK_MAX_STAGING_BYTES } from '../src/protocol-limits.js';
 
 describe('V10 protocol stream IDs', () => {
   // rc.9 plan: protocols on /dkg/10.0.1/* are migrated onto the
@@ -84,12 +88,33 @@ describe('V10 protocol stream IDs', () => {
     expect(PROTOCOL_SYNC).toBe('/dkg/10.0.2/sync');
   });
 
+  it('pooled sync overlay uses the /dkg/10.0.3/ prefix', () => {
+    expect(PROTOCOL_SYNC_POOLED).toBe('/dkg/10.0.3/sync');
+  });
+
   it('storage ACK V2 uses the /dkg/10.0.2/ prefix for field-20 capable ACKs', () => {
     expect(PROTOCOL_STORAGE_ACK_V2).toBe('/dkg/10.0.2/storage-ack');
   });
 
   it('DHT protocol is unchanged', () => {
     expect(DHT_PROTOCOL).toBe('/dkg/kad/1.0.0');
+  });
+});
+
+describe('advertisesSyncProtocol (#2822)', () => {
+  it.each([
+    { name: 'nothing advertised', protocols: [], expected: false },
+    { name: 'legacy sync id only', protocols: [PROTOCOL_SYNC], expected: true },
+    { name: 'pooled sync id only', protocols: [PROTOCOL_SYNC_POOLED], expected: true },
+    { name: 'both sync ids', protocols: [PROTOCOL_SYNC_POOLED, PROTOCOL_SYNC], expected: true },
+    // Stale identify: later pooled pulls add only the pooled id.
+    { name: 'network identity + pooled id', protocols: [PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC_POOLED], expected: true },
+    { name: 'network identity only', protocols: [PROTOCOL_NETWORK_IDENTITY], expected: false },
+    { name: 'changelog lane only', protocols: [PROTOCOL_SYNC_CHANGELOG], expected: false },
+    { name: 'retired sync ids', protocols: ['/dkg/10.0.0/sync', '/dkg/10.0.1/sync'], expected: false },
+    { name: 'id prefix only', protocols: ['/dkg/10.0.3/sync/extra', '/dkg/10.0.3'], expected: false },
+  ])('$name -> $expected', ({ protocols, expected }) => {
+    expect(advertisesSyncProtocol(protocols)).toBe(expected);
   });
 });
 
@@ -124,9 +149,10 @@ describe('V10 GossipSub topics', () => {
     expect(networkPeersTopic()).toBe('dkg/network/peers');
   });
 
-  it('allows one 10 MB DKG gossip application payload', () => {
-    expect(DKG_GOSSIP_MAX_MESSAGE_BYTES).toBe(10 * 1024 * 1024);
-    expect(DKG_GOSSIP_MAX_RPC_BYTES).toBeGreaterThan(DKG_GOSSIP_MAX_MESSAGE_BYTES);
+  it('limits one DKG gossip application payload to the 4 MiB StorageACK ceiling', () => {
+    expect(DKG_GOSSIP_MAX_MESSAGE_BYTES).toBe(4 * 1024 * 1024);
+    expect(DKG_GOSSIP_MAX_MESSAGE_BYTES).toBe(STORAGE_ACK_MAX_STAGING_BYTES);
+    expect(DKG_GOSSIP_MAX_RPC_BYTES).toBe(DKG_GOSSIP_MAX_MESSAGE_BYTES + 256 * 1024);
   });
 });
 
@@ -195,6 +221,89 @@ describe('V10 named graph URIs', () => {
     expect(suffix(wm)).toBe('0xAbc/7');
     expect(suffix(swm)).toBe('0xAbc/7');
     expect(suffix(vm)).toBe('0xAbc/7');
+  });
+
+  it('canonicalizes a full EVM-address suffix uniformly across every memory layer', () => {
+    const mixed = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
+    const expectedSuffix = '0xabcdef0123456789abcdef0123456789abcdef01/7';
+    for (const layer of [
+      MemoryLayer.WorkingMemory,
+      MemoryLayer.SharedWorkingMemory,
+      MemoryLayer.VerifiableMemory,
+    ]) {
+      expect(contextGraphLayerUri(id, layer, mixed, 7).endsWith(expectedSuffix)).toBe(true);
+    }
+  });
+
+  it('centralizes canonical and caller-known legacy graph and prefix candidates', () => {
+    const mixed = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
+    const lower = mixed.toLowerCase();
+    expect(contextGraphLayerUriCandidates(
+      id,
+      MemoryLayer.WorkingMemory,
+      mixed,
+      7,
+      'game-state',
+    )).toEqual([
+      `did:dkg:context-graph:${id}/game-state/_working_memory/${lower}/7`,
+      `did:dkg:context-graph:${id}/game-state/_working_memory/${mixed}/7`,
+    ]);
+    expect(contextGraphLayerPrefixCandidates(
+      id,
+      MemoryLayer.SharedWorkingMemory,
+      mixed,
+      'game-state',
+    )).toEqual([
+      `did:dkg:context-graph:${id}/game-state/_shared_memory/${lower}/`,
+      `did:dkg:context-graph:${id}/game-state/_shared_memory/${mixed}/`,
+    ]);
+    expect(knowledgeAssetAgentAddressesEqual(mixed, lower)).toBe(true);
+    expect(knowledgeAssetAgentAddressesEqual('PeerA', 'peera')).toBe(false);
+  });
+
+  it('contextGraphAssertionPrefixCandidates covers the name-keyed WM family', () => {
+    // Working memory lives in TWO graph families. `…/_working_memory/{addr}/`
+    // is the uniform per-KA layout; `…/assertion/{addr}/` is the name-keyed
+    // one, which `DKGPublisher.wmGraphUri` still writes whenever a per-author
+    // KA number cannot be resolved. An unscoped WM read has to span both, so
+    // this builder is the assertion-family counterpart of
+    // `contextGraphLayerPrefixCandidates`.
+    const id = 'cg-assertion-prefix';
+    const mixed = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
+    const lower = mixed.toLowerCase();
+
+    // Canonical (EVM-lowercased) first, caller casing second — the same order
+    // and rationale as the layer-prefix builder, because graphs written before
+    // address canonicalization are still addressed with the original casing.
+    expect(contextGraphAssertionPrefixCandidates(id, mixed)).toEqual([
+      `did:dkg:context-graph:${id}/assertion/${lower}/`,
+      `did:dkg:context-graph:${id}/assertion/${mixed}/`,
+    ]);
+
+    // Already-canonical input collapses to a single prefix rather than
+    // emitting a duplicate.
+    expect(contextGraphAssertionPrefixCandidates(id, lower)).toEqual([
+      `did:dkg:context-graph:${id}/assertion/${lower}/`,
+    ]);
+
+    // Sub-graph scoping inserts the sub-graph segment before `assertion`,
+    // mirroring contextGraphAssertionUri's own sub-graph shape.
+    expect(contextGraphAssertionPrefixCandidates(id, lower, 'game-state')).toEqual([
+      `did:dkg:context-graph:${id}/game-state/assertion/${lower}/`,
+    ]);
+
+    // Non-EVM legacy identities (peer IDs) are byte-stable, so they too
+    // collapse to one prefix instead of being lowercased.
+    const peer = '12D3KooWLegacyPeerIdNamespace';
+    expect(contextGraphAssertionPrefixCandidates(id, peer)).toEqual([
+      `did:dkg:context-graph:${id}/assertion/${peer}/`,
+    ]);
+
+    // Every prefix must end in `/` so a STRSTARTS scan cannot match a
+    // sibling agent whose address merely shares this one as a prefix.
+    for (const prefix of contextGraphAssertionPrefixCandidates(id, mixed)) {
+      expect(prefix.endsWith('/')).toBe(true);
+    }
   });
 
   it('uniform per-KA layer URI: sub-graph scoping is uniform across layers', () => {

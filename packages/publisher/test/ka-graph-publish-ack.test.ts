@@ -1,0 +1,592 @@
+import { describe, expect, it, vi } from 'vitest';
+import { ethers } from 'ethers';
+import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  MemoryLayer,
+  PROTOCOL_STORAGE_ACK_V2,
+  TypedEventBus,
+  computeCatalogRoot,
+  contextGraphCatalogUri,
+  createGraphKnowledgeAssetScope,
+  decodeStorageACK,
+  decodePublishIntent,
+  encodePublishIntent,
+  isStorageACKDecline,
+  knowledgeAssetLayerGraphUri,
+  STORAGE_ACK_DECLINE_CODES,
+} from '@origintrail-official/dkg-core';
+import { GraphManager, OxigraphStore, readExactGraphPaged, type Quad } from '@origintrail-official/dkg-storage';
+import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
+import {
+  StorageACKHandler,
+  type StorageACKHandlerConfig,
+} from '../src/storage-ack-handler.js';
+import { parseSimpleNQuads } from '../src/publish-handler.js';
+import { resolveKnowledgeAssetWorkspaceHead } from '../src/workspace-resolution.js';
+import { workspacePublicQuadsDigest } from '../src/workspace-snapshot-store.js';
+import {
+  computeFlatKCMerkleLeafCountV10,
+  computeFlatKCRootV10,
+} from '../src/merkle.js';
+import { swmKaWriteLockKey, withKeyedLocks } from '../src/keyed-lock.js';
+
+const CONTEXT_GRAPH_ID = '42';
+const AUTHOR = '0x1111111111111111111111111111111111111111';
+const UAL = `did:dkg:otp:20430/${AUTHOR}/7`;
+const SCOPE = createGraphKnowledgeAssetScope(UAL, 1);
+const SWM_GRAPH = knowledgeAssetLayerGraphUri(
+  CONTEXT_GRAPH_ID,
+  MemoryLayer.SharedWorkingMemory,
+  SCOPE,
+);
+const KAV10 = '0x000000000000000000000000000000000000c10a';
+const PRIVATE_ROOT = ethers.getBytes(
+  ethers.keccak256(ethers.toUtf8Bytes('rootless-private-publish')),
+);
+const PEER = { toString: () => 'publisher-peer' };
+
+function handlerConfig(wallet: ethers.Wallet, curated: boolean): StorageACKHandlerConfig {
+  return {
+    nodeRole: 'core',
+    nodeIdentityId: 17n,
+    signerWallet: wallet,
+    contextGraphSharedMemoryUri: (cgId: string) =>
+      `did:dkg:context-graph:${cgId}/_shared_memory`,
+    chainId: 31337n,
+    kav10Address: KAV10,
+    isCgCurated: async () => curated,
+  };
+}
+
+function byteSizeFloor(quads: readonly Pick<Quad, 'subject' | 'predicate' | 'object'>[]): number {
+  return quads.reduce(
+    (sum, quad) => sum
+      + Buffer.byteLength(quad.subject, 'utf8')
+      + Buffer.byteLength(quad.predicate, 'utf8')
+      + Buffer.byteLength(quad.object, 'utf8'),
+    0,
+  );
+}
+
+describe('graph-scoped publish storage ACKs', () => {
+  it.each([
+    { label: 'clean capability refusal', throwAfterCommit: false, expectedSettle: false },
+    { label: 'indeterminate post-commit failure', throwAfterCommit: true, expectedSettle: undefined },
+  ])('preserves atomic root-boundary semantics on $label', async ({
+    throwAfterCommit,
+    expectedSettle,
+  }) => {
+    const base = new OxigraphStore();
+    const quads: Quad[] = [{
+      subject: 'urn:asset:root-boundary',
+      predicate: 'urn:p:value',
+      object: '"root-boundary"',
+      graph: SWM_GRAPH,
+    }];
+    await base.insert(quads);
+    if (throwAfterCommit) {
+      const atomicReplace = base.replaceGraphAndSubject!.bind(base);
+      base.replaceGraphAndSubject = async (...args) => {
+        await atomicReplace(...args);
+        throw new Error('response lost after compound StorageACK commit');
+      };
+    }
+    const store = throwAfterCommit
+      ? base
+      : new Proxy(base, {
+          get(target, property, receiver) {
+            if (property === 'replaceGraphAndSubject') return undefined;
+            const value = Reflect.get(target, property, receiver);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        });
+    const markerGraph = 'urn:test:rfc64-late-boundary';
+    const markerSubject = 'urn:test:rfc64-late-boundary:storage-ack';
+    const settle = vi.fn();
+    // The resolver's admission wait runs first, once, for this root asset.
+    const order: string[] = [];
+    let admit!: () => void;
+    const admission = new Promise<void>((resolve) => { admit = resolve; });
+    const awaitAdmission = vi.fn(async () => {
+      order.push('awaitAdmission');
+      await admission;
+    });
+    const handler = new StorageACKHandler(
+      store,
+      {
+        ...handlerConfig(ethers.Wallet.createRandom(), false),
+        resolveDurableRootAtomicCompanion: Object.assign(() => {
+          order.push('resolve');
+          return {
+            graphUri: markerGraph,
+            subject: markerSubject,
+            quads: [{
+              subject: markerSubject,
+              predicate: 'urn:test:entry',
+              object: '"storage-ack"',
+              graph: markerGraph,
+            }],
+            settle,
+          };
+        }, { awaitAdmission }),
+      },
+      new TypedEventBus(),
+    );
+    const intent = encodePublishIntent({
+      merkleRoot: computeFlatKCRootV10(quads, []),
+      contextGraphId: CONTEXT_GRAPH_ID,
+      publisherPeerId: 'publisher-peer',
+      publicByteSize: byteSizeFloor(quads),
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: [],
+      merkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: '1',
+      publicTripleCount: quads.length,
+      privateTripleCount: 0,
+      accessPolicy: 'public',
+      allowedPeers: [],
+    });
+
+    const answered = handler.handler(intent, PEER);
+    // The handler stays behind the pending admission: nothing is resolved.
+    await vi.waitFor(() => expect(awaitAdmission).toHaveBeenCalledOnce());
+    await new Promise<void>((resolve) => { setTimeout(resolve, 25); });
+    expect(order).toEqual(['awaitAdmission']);
+    admit();
+    const decoded = decodeStorageACK(await answered);
+
+    expect(isStorageACKDecline(decoded)).toBe(true);
+    expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+    expect(settle).toHaveBeenCalledWith(expectedSettle);
+    expect(order).toEqual(['awaitAdmission', 'resolve']);
+    expect(awaitAdmission).toHaveBeenCalledWith({ contextGraphId: expect.any(String), kaUal: UAL });
+    await expect(base.query(
+      `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+    )).resolves.toMatchObject({
+      type: 'boolean',
+      value: throwAfterCommit,
+    });
+  });
+
+  it('serializes workspace persistence in the shared per-KA lock domain', async () => {
+    const store = new OxigraphStore();
+    const writeLocks = new Map<string, Promise<void>>();
+    const quads: Quad[] = [{
+      subject: 'urn:asset:locked',
+      predicate: 'urn:p:value',
+      object: '"locked"',
+      graph: SWM_GRAPH,
+    }];
+    await store.insert(quads);
+    const config = handlerConfig(ethers.Wallet.createRandom(), false);
+    const handler = new StorageACKHandler(
+      store,
+      { ...config, workspaceWriteLocks: writeLocks },
+      new TypedEventBus(),
+    );
+    const merkleRoot = computeFlatKCRootV10(quads, []);
+    const intent = encodePublishIntent({
+      merkleRoot,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      publisherPeerId: 'publisher-peer',
+      publicByteSize: byteSizeFloor(quads),
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: [],
+      merkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: '1',
+      publicTripleCount: quads.length,
+      privateTripleCount: 0,
+      accessPolicy: 'public',
+      allowedPeers: [],
+    });
+
+    let release!: () => void;
+    let entered!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const lockEntered = new Promise<void>((resolve) => { entered = resolve; });
+    const lock = withKeyedLocks(
+      writeLocks,
+      [swmKaWriteLockKey(CONTEXT_GRAPH_ID, undefined, UAL)],
+      async () => {
+        entered();
+        await blocked;
+      },
+    );
+    await lockEntered;
+
+    let settled = false;
+    const response = handler.handler(intent, PEER).finally(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(settled).toBe(false);
+
+    release();
+    await lock;
+    await expect(response).resolves.toBeInstanceOf(Uint8Array);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: new GraphManager(store),
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ kaUal: UAL });
+  });
+
+  it.each([
+    {
+      label: 'content without triples',
+      envelope: { publicTripleCount: 0, privateTripleCount: 0, accessPolicy: 'public' as const, allowedPeers: [] },
+      error: 'invalid content envelope',
+    },
+    {
+      label: 'content with an undeclared private root',
+      envelope: {
+        publicTripleCount: 1,
+        privateTripleCount: 0,
+        privateMerkleRoot: PRIVATE_ROOT,
+        accessPolicy: 'public' as const,
+        allowedPeers: [],
+      },
+      error: 'invalid content envelope',
+    },
+    {
+      label: 'access',
+      envelope: {
+        publicTripleCount: 1,
+        privateTripleCount: 0,
+        accessPolicy: 'public' as const,
+        allowedPeers: ['12D3KooWReader'],
+      },
+      error: 'invalid access envelope',
+    },
+  ])('rejects a malformed graph-scoped $label envelope before persistence or signing', async ({ envelope, error }) => {
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    const signMessage = vi.spyOn(wallet, 'signMessage');
+    const handler = new StorageACKHandler(
+      store,
+      handlerConfig(wallet, false),
+      new TypedEventBus(),
+    );
+    const intent = encodePublishIntent({
+      merkleRoot: new Uint8Array(32),
+      contextGraphId: CONTEXT_GRAPH_ID,
+      publisherPeerId: 'publisher-peer',
+      publicByteSize: 1,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: [],
+      merkleLeafCount: 1,
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: '1',
+      ...envelope,
+    });
+
+    await expect(handler.handler(intent, PEER)).rejects.toThrow(error);
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(await store.countQuads(SWM_GRAPH)).toBe(0);
+    expect(await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: new GraphManager(store),
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+    })).toBeUndefined();
+  });
+
+  it('keeps identical-content KAs in distinct durable workspace operations', async () => {
+    const store = new OxigraphStore();
+    const handler = new StorageACKHandler(
+      store,
+      handlerConfig(ethers.Wallet.createRandom(), false),
+      new TypedEventBus(),
+    );
+    const secondUal = `did:dkg:otp:20430/${AUTHOR}/8`;
+
+    for (const ual of [UAL, secondUal]) {
+      const scope = createGraphKnowledgeAssetScope(ual, 1);
+      const swmGraph = knowledgeAssetLayerGraphUri(
+        CONTEXT_GRAPH_ID,
+        MemoryLayer.SharedWorkingMemory,
+        scope,
+      );
+      const quads: Quad[] = [{
+        subject: 'urn:asset:same',
+        predicate: 'urn:p:value',
+        object: '"same"',
+        graph: swmGraph,
+      }];
+      await store.insert(quads);
+      const merkleRoot = computeFlatKCRootV10(quads, []);
+      const deps: ACKCollectorDeps = {
+        gossipPublish: async () => {},
+        sendP2P: async (_peerId, _protocol, data) => handler.handler(data, PEER),
+        getConnectedCorePeers: () => ['core-1'],
+        verifyIdentity: async () => true,
+        log: () => {},
+      };
+      const result = await new ACKCollector(deps).collect({
+        merkleRoot,
+        contextGraphId: BigInt(CONTEXT_GRAPH_ID),
+        contextGraphIdStr: CONTEXT_GRAPH_ID,
+        publisherPeerId: 'publisher-peer',
+        publicByteSize: BigInt(byteSizeFloor(quads)),
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: [],
+        chainId: 31337n,
+        kav10Address: KAV10,
+        requiredACKs: 1,
+        merkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: ual,
+        assertionVersion: '1',
+        publicTripleCount: quads.length,
+        privateTripleCount: 0,
+        accessPolicy: 'public',
+        allowedPeers: [],
+        ackMode: { kind: 'public' },
+      });
+      expect(result.acks).toHaveLength(1);
+    }
+
+    const graphManager = new GraphManager(store);
+    const firstHead = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+    });
+    const secondHead = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: secondUal,
+    });
+    expect(firstHead?.kaUal).toBe(UAL);
+    expect(secondHead?.kaUal).toBe(secondUal);
+    expect(firstHead?.shareOperationId).not.toBe(secondHead?.shareOperationId);
+  });
+
+  it('collects over V2 from only the exact per-KA SWM graph', async () => {
+    const store = new OxigraphStore();
+    const quads: Quad[] = [
+      { subject: 'urn:asset:a', predicate: 'urn:p:value', object: '"a"', graph: SWM_GRAPH },
+      { subject: 'urn:asset:b', predicate: 'urn:p:value', object: '"b"', graph: SWM_GRAPH },
+    ];
+    await store.insert([
+      ...quads,
+      {
+        subject: 'urn:legacy:poison',
+        predicate: 'urn:p:value',
+        object: '"wrong"',
+        graph: `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory`,
+      },
+    ]);
+    const handler = new StorageACKHandler(
+      store,
+      handlerConfig(ethers.Wallet.createRandom(), false),
+      new TypedEventBus(),
+    );
+    const merkleRoot = computeFlatKCRootV10(quads, []);
+    let capturedIntent: ReturnType<typeof decodePublishIntent> | undefined;
+    let capturedProtocol: string | undefined;
+    const deps: ACKCollectorDeps = {
+      gossipPublish: async () => {},
+      sendP2P: async (_peerId, protocol, data) => {
+        capturedProtocol = protocol;
+        capturedIntent = decodePublishIntent(data);
+        return handler.handler(data, PEER);
+      },
+      getConnectedCorePeers: () => ['core-1'],
+      verifyIdentity: async () => true,
+      log: () => {},
+    };
+
+    const result = await new ACKCollector(deps).collect({
+      merkleRoot,
+      contextGraphId: BigInt(CONTEXT_GRAPH_ID),
+      contextGraphIdStr: CONTEXT_GRAPH_ID,
+      publisherPeerId: 'publisher-peer',
+      publicByteSize: BigInt(Math.max(1, byteSizeFloor(quads))),
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: [],
+      chainId: 31337n,
+      kav10Address: KAV10,
+      requiredACKs: 1,
+      merkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: '1',
+      publicTripleCount: quads.length,
+      privateTripleCount: 0,
+      accessPolicy: 'allowList',
+      allowedPeers: ['12D3KooWReader'],
+      ackMode: { kind: 'public' },
+    });
+
+    expect(result.acks).toHaveLength(1);
+    expect(capturedProtocol).toBe(PROTOCOL_STORAGE_ACK_V2);
+    expect(capturedIntent?.rootEntities).toEqual([]);
+    expect(capturedIntent?.privateMerkleRoots).toEqual([]);
+    expect(capturedIntent?.kaUal).toBe(UAL);
+    expect(capturedIntent?.publicTripleCount).toBe(quads.length);
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: new GraphManager(store),
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+    });
+    expect(head).toMatchObject({
+      kaUal: UAL,
+      assertionVersion: '1',
+      assertionGraph: SWM_GRAPH,
+      publicTripleCount: quads.length,
+      privateTripleCount: 0,
+      publisherPeerId: 'publisher-peer',
+      access: {
+        kind: 'persisted',
+        accessPolicy: 'allowList',
+        allowedPeers: ['12D3KooWReader'],
+      },
+    });
+  });
+
+  it('collects a curated publish with one KA-level private commitment and no root manifest', async () => {
+    const store = new OxigraphStore();
+    const handler = new StorageACKHandler(
+      store,
+      handlerConfig(ethers.Wallet.createRandom(), true),
+      new TypedEventBus(),
+    );
+    const catalogTriples = [{
+      subject: `did:dkg:context-graph:${CONTEXT_GRAPH_ID}`,
+      predicate: 'http://purl.org/dc/terms/identifier',
+      object: `"did:dkg:context-graph:${CONTEXT_GRAPH_ID}"`,
+    }];
+    const catalog = computeCatalogRoot(catalogTriples);
+    const stagingQuads = new TextEncoder().encode(
+      catalogTriples.map((quad) =>
+        `<${quad.subject}> <${quad.predicate}> ${quad.object} .`,
+      ).join('\n'),
+    );
+    const publicQuads: Quad[] = catalogTriples.map((quad) => ({
+      ...quad,
+      graph: SWM_GRAPH,
+    }));
+    const merkleRoot = computeFlatKCRootV10(publicQuads, [PRIVATE_ROOT]);
+    let capturedIntent: ReturnType<typeof decodePublishIntent> | undefined;
+    const deps: ACKCollectorDeps = {
+      gossipPublish: async () => {},
+      sendP2P: async (_peerId, protocol, data) => {
+        expect(protocol).toBe(PROTOCOL_STORAGE_ACK_V2);
+        capturedIntent = decodePublishIntent(data);
+        return handler.handler(data, PEER);
+      },
+      getConnectedCorePeers: () => ['core-1'],
+      verifyIdentity: async () => true,
+      log: () => {},
+    };
+
+    const result = await new ACKCollector(deps).collect({
+      merkleRoot,
+      contextGraphId: BigInt(CONTEXT_GRAPH_ID),
+      contextGraphIdStr: CONTEXT_GRAPH_ID,
+      publisherPeerId: 'publisher-peer',
+      publicByteSize: BigInt(stagingQuads.length),
+      isPrivate: true,
+      kaCount: 1,
+      rootEntities: [],
+      chainId: 31337n,
+      kav10Address: KAV10,
+      requiredACKs: 1,
+      stagingQuads,
+      merkleLeafCount: computeFlatKCMerkleLeafCountV10(publicQuads, [PRIVATE_ROOT]),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: '1',
+      publicTripleCount: publicQuads.length,
+      privateMerkleRoot: PRIVATE_ROOT,
+      privateTripleCount: 9,
+      accessPolicy: 'ownerOnly',
+      allowedPeers: [],
+      ackMode: {
+        kind: 'curated-catalog',
+        catalogCommitment: {
+          catalogRoot: catalog.root,
+          catalogLeafCount: catalog.leafCount,
+        },
+      },
+    });
+
+    expect(result.acks).toHaveLength(1);
+    expect(capturedIntent?.rootEntities).toEqual([]);
+    expect(capturedIntent?.privateMerkleRoots).toEqual([]);
+    expect(ethers.hexlify(capturedIntent!.privateMerkleRoot!)).toBe(
+      ethers.hexlify(PRIVATE_ROOT),
+    );
+    expect(await store.countQuads(contextGraphCatalogUri(CONTEXT_GRAPH_ID))).toBe(
+      publicQuads.length,
+    );
+    // A storage core that is not a curated-CG member must retain only the
+    // independently verified public catalog. The protected assertion reaches
+    // members through encrypted gossip/sync and must never be mislabeled as a
+    // complete exact SWM graph on this core.
+    expect(await store.countQuads(SWM_GRAPH)).toBe(0);
+  });
+
+  it('records the fingerprint of the stored form for an inline copy with escaped text', async () => {
+    const store = new OxigraphStore();
+    const handler = new StorageACKHandler(
+      store,
+      handlerConfig(ethers.Wallet.createRandom(), false),
+      new TypedEventBus(),
+    );
+    const nquads = [
+      `<urn:asset:escaped> <urn:p:headline> "Women\\u2019s Europeans \\uD83D\\uDDD3 12 October" <${SWM_GRAPH}> .`,
+      `<urn:asset:escaped> <urn:p:text> "line one\\nline two\\tend" <${SWM_GRAPH}> .`,
+    ].join('\n');
+    const stagingQuads = new TextEncoder().encode(nquads);
+    const wireQuads = parseSimpleNQuads(nquads);
+    const intent = encodePublishIntent({
+      merkleRoot: computeFlatKCRootV10(wireQuads, []),
+      contextGraphId: CONTEXT_GRAPH_ID,
+      publisherPeerId: 'publisher-peer',
+      publicByteSize: stagingQuads.length,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: [],
+      merkleLeafCount: computeFlatKCMerkleLeafCountV10(wireQuads, []),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: '1',
+      publicTripleCount: wireQuads.length,
+      privateTripleCount: 0,
+      accessPolicy: 'public',
+      allowedPeers: [],
+      stagingQuads,
+    });
+
+    const decoded = decodeStorageACK(await handler.handler(intent, PEER));
+
+    expect(isStorageACKDecline(decoded)).toBe(false);
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: new GraphManager(store),
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+    });
+    const readBack = await readExactGraphPaged(store, SWM_GRAPH, {
+      expectedQuadCount: wireQuads.length,
+      outputGraph: '',
+    });
+    // Finalization recomputes the fingerprint from the store and compares it
+    // with the one recorded here.
+    expect(head?.publicQuadsDigest).toBe(workspacePublicQuadsDigest(readBack));
+  });
+});

@@ -1,4 +1,20 @@
-import { describe, it, expect, beforeAll, afterAll, DKGAgentWallet, buildAgentProfile, collectPublishableMultiaddrs, CclEvaluator, DiscoveryClient, ProfileManager, encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret, DKGAgent, AGENT_REGISTRY_CONTEXT_GRAPH, parseCclPolicy, OxigraphStore, getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, contextGraphMetaUri, sparqlString, DKGQueryEngine, sha256, EVMChainAdapter, MockChainAdapter, createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS, mintTokens, ethers, tmpdir, mkdtemp, readFile, readdir, rm, join, fileURLToPath, _wrapAgentPublisherForSeal, CapturingContextGraphChainAdapter, AsyncSignerAddressContextGraphChainAdapter, SignerListContextGraphChainAdapter, PcaCuratedRegistrationChainAdapter, NonRegisteringACKChainAdapter, FlakyRegistrationACKChainAdapter, TransientIdentityFailureChainAdapter, BrandNewCoreTransientChainAdapter, PermanentProfileFailureChainAdapter, RetryPathPermanentFailureChainAdapter, ContextAuthorizedPublisherChainAdapter, buildSnapshotFactQuads, ReferenceEvaluator, loadYaml, CCL_FACT_NS, OperationalKeyOnlyPublishChainAdapter, ExternalOperationalKeyPublishChainAdapter, AddressOnlyExternalOperationalKeyPublishChainAdapter, AsyncAddressSignMessageAsPublishChainAdapter, GenericSignMessageExternalOperationalKeyPublishChainAdapter, MultiSignerGenericSignMessagePublishChainAdapter, SingleAddressMismatchedGenericSignMessagePublishChainAdapter, SingleSignerAdapterPublishChainAdapter, ReservingAuthorityContextGraphChainAdapter, type Quad, type ChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type OnChainPublishResult, type V10PublishDirectParams } from './agent.shared';
+import { describe, it, expect, beforeAll, afterAll, DKGAgentWallet, buildAgentProfile, collectPublishableMultiaddrs, CclEvaluator, DiscoveryClient, ProfileManager, encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret, DKGAgent as RealDKGAgent, AGENT_REGISTRY_CONTEXT_GRAPH, parseCclPolicy, OxigraphStore, getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, contextGraphMetaUri, sparqlString, DKGQueryEngine, sha256, EVMChainAdapter, MockChainAdapter, createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS, mintTokens, ethers, tmpdir, mkdtemp, readFile, readdir, rm, join, fileURLToPath, _wrapAgentPublisherForSeal, CapturingContextGraphChainAdapter, AsyncSignerAddressContextGraphChainAdapter, SignerListContextGraphChainAdapter, PcaCuratedRegistrationChainAdapter, NonRegisteringACKChainAdapter, FlakyRegistrationACKChainAdapter, TransientIdentityFailureChainAdapter, BrandNewCoreTransientChainAdapter, PermanentProfileFailureChainAdapter, RetryPathPermanentFailureChainAdapter, ContextAuthorizedPublisherChainAdapter, buildSnapshotFactQuads, ReferenceEvaluator, loadYaml, CCL_FACT_NS, OperationalKeyOnlyPublishChainAdapter, ExternalOperationalKeyPublishChainAdapter, AddressOnlyExternalOperationalKeyPublishChainAdapter, AsyncAddressSignMessageAsPublishChainAdapter, GenericSignMessageExternalOperationalKeyPublishChainAdapter, MultiSignerGenericSignMessagePublishChainAdapter, SingleAddressMismatchedGenericSignMessagePublishChainAdapter, SingleSignerAdapterPublishChainAdapter, ReservingAuthorityContextGraphChainAdapter, type Quad, type ChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type OnChainPublishResult, type V10PublishDirectParams } from './agent.shared';
+import { DKGEvent } from '@origintrail-official/dkg-core';
+import { getSyncCheckpointKey } from '../src/sync/checkpoint/state.js';
+import {
+  asSyncOnConnectTestAgent,
+  peerSyncSessionDriver,
+} from './_helpers/sync-on-connect-test-fixture.js';
+
+type DKGAgent = RealDKGAgent;
+const DKGAgent = {
+  create(config: Parameters<typeof RealDKGAgent.create>[0]) {
+    return RealDKGAgent.create({
+      rfc64CatalogActivation: { enabled: false },
+      ...config,
+    });
+  },
+};
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -12,6 +28,21 @@ function allowAllNetworkAdmission(agent: DKGAgent): void {
   coordinator.isRejectedPeer = () => false;
   coordinator.ensureAdmitted = async () => true;
 }
+
+// Catch-up probes sync readiness through the libp2p peer store, which only
+// answers for canonical peer IDs. These valid Ed25519 IDs play the named
+// roles in the connected-peer fan-out cases below.
+const CANONICAL_TEST_PEER_IDS = {
+  cleanMiss: '12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw',
+  timedOut: '12D3KooWCV9mkCJkKkyNLvvPNRTsvpGMstN5E4C5jtXUK61S3xan',
+  denied: '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb',
+  serving: '12D3KooWFHUALUrdSfrVHSxtCRCJC9xvxS7nYfM6T1sbYVak9HTu',
+  deniedEmpty: '12D3KooWFq5KMnSMyYr8Z8t8a6Vh1Y6N6KkF5UZjLpCqUkBJsAaa',
+  cleanEmpty: '12D3KooWGiQrwo1jXJsHaQK4kFYx3xVDp5tWHPEnpUUEUbygP4WL',
+  metaOnly: '12D3KooWJqhnnfouiNRUyJBEREpuKtV4A448LUbS6JiVCe8Q82bZ',
+  metaOnlyClean: '12D3KooWLb1bH9NfMSjJDmsZxufmw5UFD8wajVKnvD5HfL3VbqGq',
+  privateOnlyClean: '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh',
+} as const;
 
 // #1236 🔵: clean (all-zero, no-backoff, made-no-progress) detailed
 // sync summaries shaped to match the production `DurableSyncResult` /
@@ -159,28 +190,193 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         }));
         (agent as any).syncSharedMemoryFromPeerDetailed = syncSharedMemoryFromPeerDetailed;
 
-        const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+        const recovery = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
           includeSharedMemory: true,
         });
+        const result = recovery;
 
         expect(peerStoreReads).toBe(3);
-        expect(syncFromPeerDetailed.calls.at(-1)).toEqual([remotePeer.toString(), ['runtime-contextGraph']]);
-        expect(syncSharedMemoryFromPeerDetailed.calls.at(-1)).toEqual([remotePeer.toString(), ['runtime-contextGraph']]);
+        // Background catch-up carries no admission priority override, but it
+        // does tag its origin so node-wide scheduler diagnostics can attribute
+        // queue pressure to a trigger (issue #2006).
+        expect(syncFromPeerDetailed.calls.at(-1)).toEqual([
+          remotePeer.toString(),
+          ['runtime-contextGraph'],
+          undefined,
+          undefined,
+          undefined,
+          expect.objectContaining({
+            priority: 2_000,
+            source: 'vm-recovery',
+            stopOnBackoffWorthyFailure: true,
+            totalTimeoutMs: 660_000,
+            settlementSliceTimeoutMs: 120_000,
+          }),
+        ]);
+        expect(syncSharedMemoryFromPeerDetailed.calls.at(-1)).toEqual([
+          remotePeer.toString(),
+          ['runtime-contextGraph'],
+          { source: 'catchup-background' },
+        ]);
         expect(result.connectedPeers).toBe(1);
         expect(result.syncCapablePeers).toBe(1);
         expect(result.peersTried).toBe(1);
         expect(result.dataSynced).toBe(5);
         expect(result.sharedMemorySynced).toBe(2);
+        expect(recovery.cleanSharedMemoryPeerIds).toEqual([remotePeer.toString()]);
         expect(result.diagnostics.noProtocolPeers).toBe(0);
         expect(result.diagnostics.durable.failedPeers).toBe(0);
         expect(result.diagnostics.sharedMemory.failedPeers).toBe(0);
+        expect(agent.getSubscribedContextGraphs().get('runtime-contextGraph')).toMatchObject({
+          synced: true,
+          sharedMemorySynced: true,
+        });
       } finally {
         await agent.stop().catch(() => {});
       }
     });
 
 
-    it('does not count no-progress catchup timeouts as peer success', async () => {
+    it('records clean empty SWM completion as VM-recovery miss evidence', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeVmRecoveryCleanEmptyEvidence',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        allowAllNetworkAdmission(agent);
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const remotePeer = agent.node.peerId;
+        (agent.node.libp2p as any).getConnections = () => [{ remotePeer } as any];
+        (agent.node.libp2p.peerStore as any).get = async () => ({
+          protocols: [PROTOCOL_SYNC],
+        } as any);
+        (agent as any).syncFromPeerDetailed = async () => ({
+          ...cleanDurableSyncResult(),
+          completedPhases: 1,
+          emptyResponses: 1,
+        });
+        (agent as any).syncSharedMemoryFromPeerDetailed = async () => ({
+          ...cleanSharedMemorySyncResult(),
+          completedPhases: 1,
+          emptyResponses: 1,
+        });
+
+        const recovery = await agent.syncContextGraphFromConnectedPeers(
+          'runtime-contextGraph',
+          { includeSharedMemory: true },
+        );
+
+        expect(recovery.sharedMemorySynced).toBe(0);
+        expect(recovery.cleanSharedMemoryPeerIds).toEqual([remotePeer.toString()]);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+    it.each([
+      ['timeout', { timedOutPhases: 1 }],
+      ['phase failure', { failedPhases: 1 }],
+      ['denial', { deniedPhases: 1 }],
+      ['backpressure deferral', { deferredBackpressure: 1 }],
+    ] as const)('does not record a failed-only SWM %s as VM-recovery miss evidence', async (
+      failureKind,
+      failure,
+    ) => {
+      const agent = await DKGAgent.create({
+        name: `RuntimeVmRecoveryNo${failureKind.replace(/\s/g, '')}Evidence`,
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        allowAllNetworkAdmission(agent);
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const remotePeer = agent.node.peerId;
+        (agent.node.libp2p as any).getConnections = () => [{ remotePeer } as any];
+        (agent.node.libp2p.peerStore as any).get = async () => ({
+          protocols: [PROTOCOL_SYNC],
+        } as any);
+        (agent as any).syncFromPeerDetailed = async () => ({
+          ...cleanDurableSyncResult(),
+          completedPhases: 1,
+          emptyResponses: 1,
+        });
+        (agent as any).syncSharedMemoryFromPeerDetailed = async () => ({
+          ...cleanSharedMemorySyncResult(),
+          completedPhases: 1,
+          emptyResponses: 1,
+          ...failure,
+        });
+
+        const recovery = await agent.syncContextGraphFromConnectedPeers(
+          'runtime-contextGraph',
+          { includeSharedMemory: true },
+        );
+
+        expect(recovery.cleanSharedMemoryPeerIds).toEqual([]);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+    it('attributes VM-recovery miss evidence only to the clean peer in a mixed fan-out', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeVmRecoveryMixedPeerEvidence',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        allowAllNetworkAdmission(agent);
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const cleanPeer = { toString: () => CANONICAL_TEST_PEER_IDS.cleanMiss };
+        const timedOutPeer = { toString: () => CANONICAL_TEST_PEER_IDS.timedOut };
+        (agent.node.libp2p as any).getConnections = () => [
+          { remotePeer: cleanPeer } as any,
+          { remotePeer: timedOutPeer } as any,
+        ];
+        (agent.node.libp2p.peerStore as any).get = async () => ({
+          protocols: [PROTOCOL_SYNC],
+        } as any);
+        (agent as any).syncFromPeerDetailed = async () => ({
+          ...cleanDurableSyncResult(),
+          completedPhases: 1,
+          emptyResponses: 1,
+        });
+        const syncSharedMemoryFromPeerDetailed = recorder(async (peerId: string) => ({
+          ...cleanSharedMemorySyncResult(),
+          completedPhases: 1,
+          emptyResponses: 1,
+          ...(peerId === timedOutPeer.toString() ? { timedOutPhases: 1 } : {}),
+        }));
+        (agent as any).syncSharedMemoryFromPeerDetailed = syncSharedMemoryFromPeerDetailed;
+
+        const recovery = await agent.syncContextGraphFromConnectedPeers(
+          'runtime-contextGraph',
+          { includeSharedMemory: true },
+        );
+
+        expect(syncSharedMemoryFromPeerDetailed.calls.map(([peerId]) => peerId).sort()).toEqual([
+          cleanPeer.toString(),
+          timedOutPeer.toString(),
+        ]);
+        expect(recovery.cleanSharedMemoryPeerIds).toEqual([cleanPeer.toString()]);
+        expect(recovery.diagnostics.sharedMemory.timedOutPhases).toBe(1);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+
+    it('does not count timed-out catchup rounds as peer success', async () => {
       const agent = await DKGAgent.create({
         name: 'RuntimeCatchupTimeoutProgressAccounting',
         listenHost: '127.0.0.1',
@@ -201,6 +397,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         } as any));
 
         const durableResult = (overrides: Partial<{
+          insertedTriples: number;
+          insertedDataTriples: number;
           timedOutPhases: number;
           completedPhases: number;
           checkpointAdvances: number;
@@ -263,10 +461,31 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
         expect(progressWithTimeout.peersTried).toBe(1);
         expect(progressWithTimeout.peersResponded).toBe(1);
-        expect(progressWithTimeout.peersSucceeded).toBe(1);
+        expect(progressWithTimeout.peersSucceeded).toBe(0);
         expect(progressWithTimeout.diagnostics.durable.timedOutPhases).toBe(1);
         expect(progressWithTimeout.diagnostics.durable.completedPhases).toBe(1);
         expect(progressWithTimeout.diagnostics.durable.checkpointAdvances).toBe(1);
+
+        syncFromPeerDetailedQueue.push(durableResult({
+          insertedTriples: 1,
+          insertedDataTriples: 1,
+          timedOutPhases: 1,
+          completedPhases: 1,
+        }));
+
+        const partialInsertWithTimeout = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
+
+        expect(partialInsertWithTimeout.dataSynced).toBe(1);
+        expect(agent.getSubscribedContextGraphs().get('runtime-contextGraph')?.synced).not.toBe(true);
+
+        syncFromPeerDetailedQueue.push(durableResult({
+          insertedTriples: 1,
+          insertedDataTriples: 1,
+          completedPhases: 1,
+        }));
+
+        await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
+        expect(agent.getSubscribedContextGraphs().get('runtime-contextGraph')?.synced).toBe(true);
 
         syncFromPeerDetailedQueue.push(durableResult({
           failedPhases: 1,
@@ -281,15 +500,15 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(phaseFailure.diagnostics.durable.failedPhases).toBe(1);
 
         const syncSharedMemoryFromPeerDetailed = recorder(async () => ({
-          insertedTriples: 0,
+          insertedTriples: 1,
           fetchedMetaTriples: 0,
-          fetchedDataTriples: 0,
+          fetchedDataTriples: 1,
           insertedMetaTriples: 0,
-          insertedDataTriples: 0,
+          insertedDataTriples: 1,
           bytesReceived: 0,
           resumedPhases: 0,
           timedOutPhases: 0,
-          completedPhases: 0,
+          completedPhases: 1,
           checkpointAdvances: 0,
           emptyResponses: 0,
           droppedDataTriples: 0,
@@ -311,6 +530,43 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(durableOnlyResponse.peersSucceeded).toBe(0);
         expect(durableOnlyResponse.diagnostics.durable.failedPeers).toBe(0);
         expect(durableOnlyResponse.diagnostics.sharedMemory.failedPeers).toBe(1);
+        expect(durableOnlyResponse.sharedMemorySynced).toBe(1);
+        expect(agent.getSubscribedContextGraphs().get('runtime-contextGraph')?.sharedMemorySynced)
+          .not.toBe(true);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+    it('surfaces admission deferral without counting a remote response or success', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupLocalDeferralAccounting',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        allowAllNetworkAdmission(agent);
+        const remotePeer = agent.node.peerId;
+        (agent.node.libp2p as any).getConnections = recorder(() => [
+          { remotePeer } as any,
+        ]);
+        (agent.node.libp2p.peerStore as any).get = recorder(async () => ({
+          protocols: [PROTOCOL_SYNC],
+        } as any));
+        (agent as any).syncFromPeerDetailed = recorder(async () => ({
+          ...cleanDurableSyncResult(),
+          deferredBackpressure: 1,
+        }));
+
+        const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
+
+        expect(result.peersTried).toBe(1);
+        expect(result.peersResponded).toBe(0);
+        expect(result.peersSucceeded).toBe(0);
+        expect(result.deferredBackpressure).toBe(1);
+        expect(result.diagnostics.durable.deferredBackpressure).toBe(1);
       } finally {
         await agent.stop().catch(() => {});
       }
@@ -328,8 +584,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
 
-        const deniedPeer = { toString: () => 'peer-denied' };
-        const servingPeer = { toString: () => 'peer-serving' };
+        const deniedPeer = { toString: () => CANONICAL_TEST_PEER_IDS.denied };
+        const servingPeer = { toString: () => CANONICAL_TEST_PEER_IDS.serving };
         (agent.node.libp2p as any).getConnections = recorder(() => [
           { remotePeer: deniedPeer } as any,
           { remotePeer: servingPeer } as any,
@@ -339,7 +595,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         } as any));
 
         (agent as any).syncFromPeerDetailed = recorder(async (peerId: string) => {
-          if (peerId === 'peer-denied') {
+          if (peerId === deniedPeer.toString()) {
             return {
               insertedTriples: 0,
               fetchedMetaTriples: 0,
@@ -368,7 +624,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
             bytesReceived: 0,
             resumedPhases: 0,
             timedOutPhases: 0,
-            completedPhases: 0,
+            completedPhases: 1,
             checkpointAdvances: 0,
             emptyResponses: 0,
             metaOnlyResponses: 0,
@@ -386,6 +642,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(result.peersResponded).toBe(2);
         expect(result.peersSucceeded).toBe(1);
         expect(result.dataSynced).toBe(1);
+        expect(agent.getSubscribedContextGraphs().get('runtime-contextGraph')?.synced).toBe(true);
       } finally {
         await agent.stop().catch(() => {});
       }
@@ -404,8 +661,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
 
-        const deniedPeer = { toString: () => 'peer-denied-empty' };
-        const cleanPeer = { toString: () => 'peer-clean-empty' };
+        const deniedPeer = { toString: () => CANONICAL_TEST_PEER_IDS.deniedEmpty };
+        const cleanPeer = { toString: () => CANONICAL_TEST_PEER_IDS.cleanEmpty };
         (agent.node.libp2p as any).getConnections = recorder(() => [
           { remotePeer: deniedPeer } as any,
           { remotePeer: cleanPeer } as any,
@@ -425,12 +682,12 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           timedOutPhases: 0,
           completedPhases: 0,
           checkpointAdvances: 0,
-          emptyResponses: peerId === 'peer-clean-empty' ? 1 : 0,
+          emptyResponses: peerId === cleanPeer.toString() ? 1 : 0,
           metaOnlyResponses: 0,
           dataRejectedMissingMeta: 0,
           rejectedKcs: 0,
           failedPeers: 0,
-          deniedPhases: peerId === 'peer-denied-empty' ? 1 : 0,
+          deniedPhases: peerId === deniedPeer.toString() ? 1 : 0,
         }));
 
         const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
@@ -458,7 +715,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
 
-        const remotePeer = { toString: () => 'peer-meta-only' };
+        const remotePeer = { toString: () => CANONICAL_TEST_PEER_IDS.metaOnly };
         (agent.node.libp2p as any).getConnections = recorder(() => [
           { remotePeer } as any,
         ]);
@@ -531,7 +788,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
 
-        const remotePeer = { toString: () => 'peer-meta-only-clean' };
+        const remotePeer = { toString: () => CANONICAL_TEST_PEER_IDS.metaOnlyClean };
         (agent.node.libp2p as any).getConnections = recorder(() => [
           { remotePeer } as any,
         ]);
@@ -592,11 +849,73 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       }
     });
 
+    it('counts a verified private-only inline catchup as clean durable readiness', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupVerifiedPrivateOnly',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        allowAllNetworkAdmission(agent);
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const remotePeer = { toString: () => CANONICAL_TEST_PEER_IDS.privateOnlyClean };
+        (agent.node.libp2p as any).getConnections = recorder(() => [
+          { remotePeer } as any,
+        ]);
+        (agent.node.libp2p.peerStore as any).get = recorder(async () => ({
+          protocols: [PROTOCOL_SYNC],
+        } as any));
+        const syncedEvents: unknown[] = [];
+        agent.eventBus.on(DKGEvent.PROJECT_SYNCED, (event) => syncedEvents.push(event));
+        (agent as any).syncFromPeerDetailed = recorder(async () => ({
+          insertedTriples: 1,
+          fetchedMetaTriples: 1,
+          fetchedDataTriples: 0,
+          insertedMetaTriples: 1,
+          insertedDataTriples: 0,
+          bytesReceived: 1,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 2,
+          checkpointAdvances: 2,
+          emptyResponses: 0,
+          metaOnlyResponses: 0,
+          verifiedPrivateOnlyResponses: 1,
+          dataRejectedMissingMeta: 0,
+          rejectedKcs: 0,
+          failedPeers: 0,
+          failedPhases: 0,
+          deniedPhases: 0,
+        }));
+
+        const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
+
+        expect(result.peersResponded).toBe(1);
+        expect(result.peersSucceeded).toBe(1);
+        expect(result.dataSynced).toBe(0);
+        expect(result.diagnostics.durable.verifiedPrivateOnlyResponses).toBe(1);
+        expect(syncedEvents).toContainEqual(expect.objectContaining({
+          contextGraphId: 'runtime-contextGraph',
+          dataSynced: 0,
+          verifiedPrivateOnlyResponses: 1,
+        }));
+        expect(agent.getSubscribedContextGraphs().get('runtime-contextGraph')).toMatchObject({
+          synced: true,
+        });
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
 
     it('sync-on-connect re-reads sync scope after discovery for a second durable pass', async () => {
       const agent = await DKGAgent.create({
         name: 'SyncOnConnectDiscoveryRefresh',
         listenHost: '127.0.0.1',
+        nodeRole: 'core',
         chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       });
 
@@ -757,7 +1076,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
         (agent as any).preferredSyncPeers.set('runtime-contextGraph', 'peer-preferred');
-        (agent as any).knownCorePeerIds.add('peer-core');
+        (agent as any).peerCapabilityRegistry.observe('peer-core', { source: 'peer-update', protocols: [PROTOCOL_STORAGE_ACK] });
 
         const peerEdge = { toString: () => 'peer-edge' };
         const peerCore = { toString: () => 'peer-core' };
@@ -810,6 +1129,59 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(firstResult.syncCapablePeers).toBe(1);
         expect(firstResult.peersTried).toBe(1);
         expect(triedPeers).toEqual(['peer-preferred', 'peer-core', 'peer-edge']);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+    it('lets the VM-recovery owner rank every responder by verified checkpoint', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCheckpointAwareVmRecovery',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        allowAllNetworkAdmission(agent);
+        agent.subscribeToContextGraph('runtime-contextGraph');
+        (agent as any).preferredSyncPeers.set('runtime-contextGraph', 'peer-zero');
+
+        const peerZero = { toString: () => 'peer-zero' };
+        const peerCheckpoint = { toString: () => 'y1s97WVs' };
+        (agent.node.libp2p as any).getConnections = recorder(() => [
+          { remotePeer: peerZero } as any,
+          { remotePeer: peerCheckpoint } as any,
+        ]);
+        (agent as any).discovery.findAgents = recorder(async () => []);
+        (agent as any).ensurePeerConnected = recorder(async () => undefined);
+        (agent as any).waitForSyncProtocol = recorder(async () => true);
+        (agent as any).syncCheckpoints.setManifestBoundOffset(
+          getSyncCheckpointKey('y1s97WVs', 'runtime-contextGraph', false, 'data'),
+          4_191_706,
+          `sha256:${'a'.repeat(64)}`,
+          Date.now(),
+          `sha256:${'b'.repeat(64)}`,
+        );
+
+        const triedPeers: string[] = [];
+        (agent as any).syncFromPeerDetailed = recorder(async (peerId: string) => {
+          triedPeers.push(peerId);
+          return {
+            ...cleanDurableSyncResult(),
+            emptyResponses: 1,
+          };
+        });
+
+        const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+          maxPeers: 1,
+          peerRotationKey: 'runtime-contextGraph',
+          sourceOverride: 'vm-recovery',
+        });
+
+        expect(result.selectedPeers).toBe(2);
+        expect(result.syncCapablePeers).toBe(2);
+        expect(triedPeers).toEqual(['y1s97WVs', 'peer-zero']);
       } finally {
         await agent.stop().catch(() => {});
       }
@@ -984,7 +1356,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           peerRotationKey: 'runtime-contextGraph',
         });
 
-        (agent as any).knownCorePeerIds.add('peer-core-new');
+        (agent as any).peerCapabilityRegistry.observe('peer-core-new', { source: 'peer-update', protocols: [PROTOCOL_STORAGE_ACK] });
         connections = [
           { remotePeer: peerEdgeA } as any,
           { remotePeer: peerCore } as any,
@@ -1125,6 +1497,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       const agent = await DKGAgent.create({
         name: 'SyncDedupTest',
         listenHost: '127.0.0.1',
+        nodeRole: 'core',
         chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       });
       try {
@@ -1195,7 +1568,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
         releaseSync?.();
         await Promise.all([first, second]);
-        expect((agent as any).syncingPeers.has(remotePeer)).toBe(false);
+        expect(peerSyncSessionDriver(asSyncOnConnectTestAgent(agent))
+          .snapshot(remotePeer).syncing).toBe(false);
 
         await (agent as any).trySyncFromPeer(remotePeer);
         expect(syncCallCount).toBe(2);

@@ -15,19 +15,17 @@ import {
   requestFaucetFunding,
   resolveDkgConfigHome,
   toErrorMessage,
-  hasErrorCode,
 } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
   loadConfig, saveConfig, configExists, configPath,
-  readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
+  readApiPort, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
-  loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
+  resolveChainConfig,
   releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
   readNodeRoleFromConfigSync,
-  type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
@@ -36,12 +34,9 @@ import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
 import {
   runDaemon,
-  checkForNpmVersionUpdate,
-  performNpmUpdate,
   performNpmUpdateEdge,
   getCurrentCliVersion,
   DAEMON_EXIT_CODE_RESTART,
-  resolveStandaloneInstall,
   decodeForcedExitCode,
 } from '../daemon.js';
 import {
@@ -77,23 +72,17 @@ import {
   formatPublisherJobValue,
   stripQuotes,
   formatQuadObject,
-  sleep,
   stopDaemonIfRunning,
 } from '../cli-helpers.js';
-import type { ActionOpts, CatchupStatusCommandOptions } from '../cli-helpers.js';
+import type { CatchupStatusCommandOptions } from '../cli-helpers.js';
 import {
   cliWithTimeout,
   isCliKnownTransactionError,
   isCliRetryableRpcError,
   createCliEvmProviders,
-  getCliReceiptWithFailover,
-  assertCliSuccessfulReceipt,
   sendCliRawTransactionWithFailover,
   CLI_RPC_READ_STALL_TIMEOUT_MS,
   CLI_RPC_BROADCAST_TIMEOUT_MS,
-  CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
-  CLI_RPC_RECEIPT_POLL_INTERVAL_MS,
-  CLI_RPC_RECEIPT_TIMEOUT_MS,
 } from '../cli-rpc.js';
 import {
   appendSupervisorLog,
@@ -102,179 +91,37 @@ import {
   runDaemonSupervisor,
   runForegroundSupervisor,
 } from '../cli-supervisor.js';
+import { registerUpdateCommand } from './update.js';
+
+export interface CoreRollbackActivationDependencies {
+  stopDaemon(): Promise<boolean>;
+  swapSlot(target: 'a' | 'b'): Promise<void>;
+  error(message: string): void;
+}
+
+const defaultCoreRollbackActivationDependencies: CoreRollbackActivationDependencies = {
+  stopDaemon: stopDaemonIfRunning,
+  swapSlot,
+  error: (message) => console.error(message),
+};
+
+/** Executable command boundary: activation is forbidden until shutdown succeeds. */
+export async function executeCoreRollbackActivation(
+  target: 'a' | 'b',
+  dependencies: CoreRollbackActivationDependencies = defaultCoreRollbackActivationDependencies,
+): Promise<boolean> {
+  if (!await dependencies.stopDaemon()) {
+    dependencies.error(
+      'Rollback aborted because the daemon did not stop before its configured shutdown deadline.',
+    );
+    return false;
+  }
+  await dependencies.swapSlot(target);
+  return true;
+}
 
 export function registerMaintenanceCommands(program: Command): void {
-// ─── dkg update ──────────────────────────────────────────────────────
-//
-// OT-RFC-41 §4.5 / §5 PR 6: `dkg migrate-to-npm` was removed.
-// Edge nodes coming from a pre-rc.12 install are migrated
-// automatically on first `dkg start` via `noteEdgeLegacyReleases`
-// (see migration.ts + cli.ts dkg start). Core node operators
-// who still hold a git-checkout install follow the manual
-// procedure documented in `docs/archive/MIGRATE_TO_NPM.md`
-// (formerly `docs/operator/MIGRATE_TO_NPM.md`).
-
-
-program
-  .command('update [versionOrRef]')
-  .description('Check for and apply DKG node updates (blue-green swap)')
-  .option('--check', 'Only check for updates, do not apply')
-  .option('--allow-prerelease', 'Allow pre-release target versions')
-  .option('--no-verify-tag', 'Skip signed-tag verification for version/tag updates')
-  .action(async (versionOrRef: string | undefined, opts: ActionOpts) => {
-    const config = await loadConfig();
-    const net = await loadNetworkConfig(config.networkConfig);
-    // Resolve field-by-field across local/network/project so defaults flow
-    // through even when the local config omits repo/branch.
-    const au = resolveAutoUpdateConfig(config, net) ?? (() => {
-      const proj = loadProjectConfig();
-      return {
-        // Mirror resolveAutoUpdateConfig precedence for the fields a manual
-        // `dkg update` depends on — auto-apply being disabled must NOT drop the
-        // operator's stable-only (allowPrerelease) intent or channel pin.
-        enabled: true,
-        repo: proj.repo,
-        branch: proj.defaultBranch,
-        allowPrerelease: config.autoUpdate?.allowPrerelease ?? net?.autoUpdate?.allowPrerelease ?? true,
-        checkIntervalMinutes: 30,
-        channel: config.autoUpdate?.channel ?? net?.autoUpdate?.channel,
-        source: undefined as 'auto' | 'npm' | 'git' | undefined,
-      };
-    })();
-    // Honour `autoUpdate.source` override so `dkg update` from a beacon-01
-    // operator with `source: "npm"` configured goes through the npm install
-    // path even if .git is still present in the working tree. See
-    // `AutoUpdateConfig.source` (config.ts) for the rationale.
-    const standalone = resolveStandaloneInstall(au.source ?? resolveAutoUpdateSource(config, net));
-    const allowPre = opts.allowPrerelease === true ? true : (au.allowPrerelease ?? true);
-
-    if (standalone) {
-      const logFn = (msg: string) => console.log(msg);
-
-      if (opts.check) {
-        console.log('Checking NPM registry for updates...');
-        const check = await checkForNpmVersionUpdate(logFn, allowPre, au.channel);
-        if (check.status === 'available' && check.version) {
-          console.log(`Update available: ${check.version}`);
-        } else if (check.status === 'no-target') {
-          console.log(`No acceptable target for channel "${check.channel}" (tag unpublished, or a pre-release rejected by allowPrerelease=false) — nothing to update to.`);
-        } else if (check.status === 'up-to-date') {
-          console.log('No updates available.');
-        } else {
-          console.error('Update check failed. See logs above for details.');
-          process.exit(1);
-        }
-        return;
-      }
-
-      // RFC-41 §4.7.7 invocation pattern #3: before applying an update,
-      // `dkg update` MUST run the install-layout + version-skew doctor
-      // checks. If either reports an `error`, abort with a pointer at
-      // `dkg doctor --json` for full context. Warnings do not block.
-      try {
-        const { createProductionDeps, runDoctor, UPDATE_PREFLIGHT_CHECKS } =
-          await import('../doctor/index.js');
-        const preflightDeps = createProductionDeps({ apiPort: config.apiPort ?? 9200 });
-        const preflight = await runDoctor(preflightDeps, { checks: UPDATE_PREFLIGHT_CHECKS });
-        if (preflight.exitCode === 2) {
-          const errors = preflight.findings.filter((f) => f.severity === 'error');
-          console.error('\n[dkg update] Pre-flight checks failed; refusing to apply update.\n');
-          for (const f of errors) {
-            console.error(`  • [${f.check}] ${f.message}`);
-            if (f.advisory) console.error(`      → ${f.advisory}`);
-          }
-          console.error('\nRun `dkg doctor --json` for the full diagnostic report.\n');
-          process.exit(2);
-        }
-      } catch (err: any) {
-        // Pre-flight crashing should not block updates — fall through
-        // and let the real update path do its thing. Warn loudly so a
-        // recurring failure is visible.
-        process.stderr.write(`[dkg update] WARNING: pre-flight doctor check crashed (${err?.message ?? err}); continuing without it.\n`);
-      }
-
-      let version = versionOrRef ?? null;
-      if (version) {
-        version = version.replace(/^refs\/tags\/v?/, '').replace(/^v/, '');
-      }
-      if (!version) {
-        console.log('Checking NPM registry for updates...');
-        const check = await checkForNpmVersionUpdate(logFn, allowPre, au.channel);
-        if (check.status === 'available' && check.version) {
-          version = check.version;
-        } else if (check.status === 'no-target') {
-          console.log(`No acceptable target for channel "${check.channel}" (tag unpublished, or a pre-release rejected by allowPrerelease=false) — nothing to update to.`);
-          return;
-        } else if (check.status === 'up-to-date') {
-          console.log('No update needed — already on latest.');
-          return;
-        } else {
-          console.error('Update check failed. See logs above for details.');
-          process.exit(1);
-        }
-      }
-
-      // OT-RFC-41 Bundle B1b: dispatch on nodeRole. Edge runs
-      // `npm install -g` against the global install (no slots);
-      // Core continues to use the slot-based update path.
-      const npmUpdateRole = config.nodeRole ?? 'edge';
-      console.log(
-        `Updating to ${version} via NPM ` +
-          `(${npmUpdateRole === 'edge' ? 'global npm install' : 'blue-green slot'})...`,
-      );
-      const updateStatus = npmUpdateRole === 'edge'
-        ? await performNpmUpdateEdge(version!, getCurrentCliVersion(), logFn)
-        : await performNpmUpdate(version!, logFn);
-      if (updateStatus === 'updated') {
-        const stopped = await stopDaemonIfRunning();
-        if (!stopped) {
-          console.error('Update applied but old daemon is still running. Stop it manually and run "dkg start".');
-          process.exit(1);
-        }
-        console.log('Update applied. Run "dkg start" to start with the new version.');
-      } else {
-        console.error('Update failed. Check logs and retry.');
-        process.exit(1);
-      }
-      return;
-    }
-
-    // --- Manual git update path: hard refusal. Git source updates are daemon-only. ---
-    //
-    // The npm path above is the canonical manual update mechanism for both Edge
-    // (`npm install -g`) and Core (`npm install` into a slot). Core nodes that
-    // opt into `autoUpdate.source = "git"` run the build-from-source updater
-    // only from daemon polling, so the supervised restart flow owns activation.
-    //
-    // For monorepo contributors: the canonical "update" is
-    // `git pull && pnpm install && pnpm build` from the repo
-    // root — `dkg update` is not the right tool.
-    // For pre-rc.12 `install.sh` operators: re-install via
-    // `npm install -g @origintrail-official/dkg` and let the
-    // first-start migration record `~/.dkg/previous-version`.
-    //
-    console.error(
-      '\n' +
-      '[dkg update] ERROR: manual git-based update is not supported.\n' +
-      '\n' +
-      '  Manual `dkg update` flows through the npm registry.\n' +
-      '  Advanced Core nodes may opt into daemon-polled git updates with\n' +
-      '  autoUpdate.source = "git", repo, and branch/ref in config.json.\n' +
-      '\n' +
-      '  - Monorepo contributors: use `git pull && pnpm install && pnpm build`\n' +
-      '    from the repo root. `dkg update` is for npm-installed nodes only.\n' +
-      '  - install.sh-style operators: re-install via `npm install -g\n' +
-      '    @origintrail-official/dkg`. The first daemon start records\n' +
-      '    your existing slot version as the rollback target. Run\n' +
-      '    `dkg doctor --json` for a diagnostic of your current layout.\n' +
-      '  - Then re-run `dkg update` from a fresh `npm install -g\n' +
-      '    @origintrail-official/dkg` install.\n' +
-      '\n' +
-      '  RFC: https://github.com/OriginTrail/dkgv10-spec/blob/main/rfcs/OT-RFC-41-edge-node-npm-only-install-and-update.md\n' +
-      '\n',
-    );
-    process.exit(1);
-  });
+  registerUpdateCommand(program);
 
 // ─── dkg rollback ────────────────────────────────────────────────────
 
@@ -323,7 +170,7 @@ program
       }
       const stopped = await stopDaemonIfRunning();
       if (!stopped) {
-        console.error('Rollback applied but old daemon is still running. Stop it manually and run "dkg start".');
+        console.error('Rollback applied but the old daemon did not stop before the configured shutdown deadline.');
         process.exit(1);
       }
       console.log(`Rolled back to ${targetVersion}. Run "dkg start" to start with the rolled-back version.`);
@@ -352,25 +199,9 @@ program
       process.exit(1);
     }
 
-    const pid = await readPid();
-    if (pid && isProcessRunning(pid)) {
-      console.log('Stopping daemon...');
-      try {
-        process.kill(pid, 'SIGTERM');
-      } catch (err) {
-        if (!hasErrorCode(err, 'ESRCH')) throw err;
-      }
-      for (let i = 0; i < 20; i++) {
-        await sleep(500);
-        if (!isProcessRunning(pid)) break;
-      }
-      if (isProcessRunning(pid)) {
-        console.error('Rollback aborted: daemon is still running after SIGTERM. Stop it manually and retry.');
-        process.exit(1);
-      }
+    if (!await executeCoreRollbackActivation(target)) {
+      process.exit(1);
     }
-
-    await swapSlot(target);
     const commitFile = join(dkgDir(), '.current-commit');
     const versionFile = join(dkgDir(), '.current-version');
     if (existsSync(join(targetDir, '.git'))) {

@@ -3,6 +3,8 @@
 
   "_comment_signals": "Three independent signals. LOGS use a hand-rolled OTLP/HTTP JSON exporter (the OTel Logs SDK is still 'Development'); set logs.exporter to 'otlp' — if you leave it unset on a hosted node it defaults to legacy syslog/Graylog, NOT OTLP. TRACES and METRICS use the stable OTel SDK exporters (OTLP/protobuf). IMPORTANT: the polaris backend today is LOGS-ONLY (Alloy → Loki; no Tempo for traces, no Prometheus/Mimir for metrics). So traces/metrics are shown here with enabled:false — they will NOT export until you (a) stand up a traces/metrics backend, (b) point config.alloy at it (see its FULL-SIGNAL section), and (c) flip enabled:true. Pointing them at the logs-only ingest host while enabled would just send spans/metrics into a void.",
 
+  "_comment_local_metrics": "metrics.enabled/exportIntervalMs control OTLP export. collectionEnabled independently controls local Node UI SQLite snapshots and store scans.",
+
   "name": "testnet-core-01",
 
   "telemetry": {
@@ -23,7 +25,8 @@
       "enabled": false,
       "endpoint": "https://metrics-ingest.example.com/v1/metrics",
       "token": "<INGEST_TOKEN>",
-      "exportIntervalMs": 30000
+      "exportIntervalMs": 30000,
+      "collectionEnabled": true
     }
   }
 }

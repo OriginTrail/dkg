@@ -1,0 +1,833 @@
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * Accepted-current D26 access decisions for the RFC-64 catalog data plane.
+ *
+ * This registry is deliberately an authorization consumer, not an authority
+ * verifier. Callers may insert only a policy/roster snapshot that has already
+ * passed the RFC-64 administrative/finality boundary. The registry snapshots
+ * those values once, binds a private roster to the exact policy digest, and
+ * refuses in-place policy replacement so a stale caller cannot roll current
+ * authorization backwards.
+ *
+ * SWM read, submission, discovery, and payload transfer follow accessPolicy.
+ * publishPolicy is retained in the accepted policy snapshot but never consulted
+ * here: it governs VM transaction admission, not SWM synchronization.
+ */
+
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+import {
+  assertCanonicalDigest,
+  assertContextGraphIdV1,
+  assertNetworkIdV1,
+  canonicalizeContextGraphPolicyPayloadV1,
+  canonicalizeMemberRosterPayloadV1,
+  parseCanonicalContextGraphPolicyPayloadV1,
+  parseCanonicalMemberRosterPayloadV1,
+  type ContextGraphIdV1,
+  type ContextGraphPolicyV1,
+  type Digest32V1,
+  type EvmAddressV1,
+  type FinalizedChainPolicySourceV1,
+  type MemberRosterEntryV1,
+  type MemberRosterV1,
+  type NetworkIdV1,
+} from '@origintrail-official/dkg-core';
+
+import { classifyRfc64PolicyCellV1 } from './policy-cell-v1.js';
+
+export type Rfc64CatalogAccessOperationV1 =
+  | 'announce-outbound'
+  | 'announce-inbound'
+  | 'head-replay-outbound'
+  | 'head-replay-inbound'
+  | 'fetch-outbound'
+  | 'fetch-inbound'
+  | 'catalog-object-fetch-outbound'
+  | 'catalog-object-fetch-inbound'
+  | 'ka-bundle-fetch-outbound'
+  | 'ka-bundle-fetch-inbound';
+
+export type Rfc64CatalogAuthorityOperationV1 =
+  | Rfc64CatalogAccessOperationV1
+  | 'current-head-discovery-outbound'
+  | 'current-head-discovery-inbound';
+
+export type Rfc64CatalogAuthorityDirectionV1 = 'serving' | 'receiving';
+
+/** One exhaustive authority direction for every RFC-64 transport operation. */
+export function rfc64CatalogAuthorityDirectionV1(
+  operation: Rfc64CatalogAuthorityOperationV1,
+): Rfc64CatalogAuthorityDirectionV1 {
+  switch (operation) {
+    case 'announce-outbound':
+    case 'head-replay-inbound':
+    case 'fetch-inbound':
+    case 'catalog-object-fetch-inbound':
+    case 'ka-bundle-fetch-inbound':
+    case 'current-head-discovery-inbound':
+      return 'serving';
+    case 'announce-inbound':
+    case 'head-replay-outbound':
+    case 'fetch-outbound':
+    case 'catalog-object-fetch-outbound':
+    case 'ka-bundle-fetch-outbound':
+    case 'current-head-discovery-outbound':
+      return 'receiving';
+  }
+}
+
+export interface Rfc64CatalogAccessAuthorizationInputV1 {
+  readonly operation: Rfc64CatalogAccessOperationV1;
+  readonly remotePeerId: string;
+  readonly networkId: NetworkIdV1;
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly policyDigest: Digest32V1;
+}
+
+export interface Rfc64CatalogAccessAuthorizationV1 {
+  readonly accessPolicy: ContextGraphPolicyV1['accessPolicy'];
+  readonly policyDigest: Digest32V1;
+}
+
+export interface AcceptRfc64CatalogAccessSnapshotInputV1 {
+  readonly policy: ContextGraphPolicyV1;
+  readonly policyDigest: Digest32V1;
+  readonly roster?: MemberRosterV1 | null;
+}
+
+export interface AcceptedRfc64CatalogAccessSnapshotV1 {
+  readonly policy: Readonly<ContextGraphPolicyV1>;
+  readonly policyDigest: Digest32V1;
+  readonly roster: Readonly<MemberRosterV1> | null;
+}
+
+/**
+ * Process-local, accepted-current roster capability handed only to the local
+ * principal resolver for one authorization attempt.
+ *
+ * This is not a cache. The registry constructs it from the exact frozen
+ * policy/roster generation it is authorizing, then generation-fences the
+ * result after every asynchronous identity lookup. Keeping all binding fields
+ * here makes it impossible for a resolver to accidentally mix members from a
+ * different policy, ownership transition, or roster version.
+ */
+export interface Rfc64CatalogLocalAuthorizationScopeV1 {
+  readonly networkId: NetworkIdV1;
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly policyDigest: Digest32V1;
+  readonly ownershipTransitionDigest: ContextGraphPolicyV1['ownershipTransitionDigest'];
+  readonly policyEra: ContextGraphPolicyV1['era'];
+  readonly policyVersion: ContextGraphPolicyV1['version'];
+  readonly administrativeDelegationDigest:
+    ContextGraphPolicyV1['administrativeDelegationDigest'];
+  readonly rosterVersion: MemberRosterV1['version'];
+  readonly memberAddresses: readonly EvmAddressV1[];
+}
+
+/** Select the one-operation roster source without retaining it past the call. */
+export function resolveRfc64CatalogAuthorizationRosterV1(
+  contextGraphId: ContextGraphIdV1,
+  scope: Readonly<Rfc64CatalogLocalAuthorizationScopeV1> | undefined,
+  resolveLiveRoster: () => Promise<readonly EvmAddressV1[] | null>,
+): Promise<readonly EvmAddressV1[] | null> | readonly EvmAddressV1[] | null {
+  if (scope === undefined) return resolveLiveRoster();
+  return scope.contextGraphId === contextGraphId ? scope.memberAddresses : null;
+}
+
+/** Canonical policy/roster invariant shared by every accepted-snapshot consumer. */
+export function assertAcceptedRfc64CatalogPolicyRosterV1(
+  policy: Readonly<ContextGraphPolicyV1>,
+  policyDigest: Digest32V1,
+  roster: Readonly<MemberRosterV1> | null,
+): void {
+  if (policy.accessPolicy === 0) {
+    if (roster !== null) {
+      throw new Error('public RFC-64 policy forbids an exhaustive member roster');
+    }
+    return;
+  }
+  if (
+    roster === null
+    || roster.networkId !== policy.networkId
+    || roster.contextGraphId !== policy.contextGraphId
+    || roster.ownershipTransitionDigest !== policy.ownershipTransitionDigest
+    || roster.era !== policy.era
+    || roster.policyDigest !== policyDigest
+    || roster.administrativeDelegationDigest !== policy.administrativeDelegationDigest
+  ) {
+    throw new Error(
+      'private RFC-64 member roster is not bound to the exact accepted policy; '
+      + 'private recovery requires the exact current policy-bound roster',
+    );
+  }
+}
+
+/** Require one author to belong to an already-validated private access snapshot. */
+export function assertAcceptedRfc64CatalogAuthorMembershipV1(
+  policy: Readonly<ContextGraphPolicyV1>,
+  roster: Readonly<MemberRosterV1> | null,
+  requiredMemberAddress: EvmAddressV1,
+): void {
+  if (
+    policy.accessPolicy === 1
+    && (
+      roster === null
+      || !roster.members.some((member) => member.agentAddress === requiredMemberAddress)
+    )
+  ) {
+    throw new Error(
+      'private RFC-64 policy requires the exact current policy-bound roster and author membership',
+    );
+  }
+}
+
+type Rfc64CatalogLocalAuthorityV1 =
+  | Readonly<{
+    /** Compatibility authority for nodes that expose one identity globally. */
+    localAgentAddress: EvmAddressV1;
+    resolveLocalAgentAddress?: never;
+  }>
+  | Readonly<{
+    localAgentAddress?: never;
+    /** Resolve the one unambiguous local principal for this Context Graph. */
+    resolveLocalAgentAddress: (
+      contextGraphId: ContextGraphIdV1,
+      scope?: Readonly<Rfc64CatalogLocalAuthorizationScopeV1>,
+    ) => Promise<EvmAddressV1 | null>;
+  }>;
+
+export type Rfc64CatalogAccessPolicyRegistryOptionsV1 =
+  Rfc64CatalogLocalAuthorityV1 & Readonly<{
+  /** Exact authenticated libp2p-peer to agent-wallet binding. */
+  resolveRemoteAgentAddress: (
+    remotePeerId: string,
+    contextGraphId: ContextGraphIdV1,
+  ) => Promise<EvmAddressV1 | null>;
+}>;
+
+interface HeldCatalogAccessSnapshotV1 extends AcceptedRfc64CatalogAccessSnapshotV1 {
+  readonly members: ReadonlyMap<EvmAddressV1, Readonly<MemberRosterEntryV1>> | null;
+}
+
+interface Rfc64CatalogAuthorizationScopeStoreV1 {
+  active: boolean;
+  readonly generations: WeakMap<
+    Rfc64CatalogAccessPolicyRegistryV1,
+    Map<string, HeldCatalogAccessSnapshotV1>
+  >;
+}
+
+const rfc64CatalogAuthorizationScopeV1 =
+  new AsyncLocalStorage<Rfc64CatalogAuthorizationScopeStoreV1>();
+
+/**
+ * Bound one-shot transport authorization scope. Nested policy rechecks share
+ * the same scope, while independent and concurrent transfers cannot observe
+ * one another's authorization capability.
+ */
+export function withRfc64CatalogAccessAuthorizationScopeV1<Value>(
+  work: () => Value | Promise<Value>,
+): Promise<Value> {
+  const current = rfc64CatalogAuthorizationScopeV1.getStore();
+  if (current?.active === true) return Promise.resolve(work());
+  const scope: Rfc64CatalogAuthorizationScopeStoreV1 = {
+    active: true,
+    generations: new WeakMap(),
+  };
+  return rfc64CatalogAuthorizationScopeV1.run(scope, async () => {
+    try {
+      return await work();
+    } finally {
+      // Async resources created inside the operation may outlive it. Their ALS
+      // reference must not keep the capability usable after the transfer ends.
+      scope.active = false;
+    }
+  });
+}
+
+const EVM_ADDRESS = /^0x[0-9a-f]{40}$/u;
+const ZERO_ADDRESS = `0x${'0'.repeat(40)}`;
+const ZERO_DIGEST = `0x${'0'.repeat(64)}` as Digest32V1;
+const MAX_PEER_ID_BYTES = 256;
+const UTF8 = new TextEncoder();
+
+/**
+ * Fail-closed current-policy registry shared by announcement, catalog-object,
+ * and opaque-bundle transports.
+ */
+export class Rfc64CatalogAccessPolicyRegistryV1 {
+  readonly #localAgentAddress: EvmAddressV1 | null;
+  readonly #resolveLocalAgentAddress: ((
+    contextGraphId: ContextGraphIdV1,
+    scope?: Readonly<Rfc64CatalogLocalAuthorizationScopeV1>,
+  ) => Promise<EvmAddressV1 | null>) | null;
+  readonly #resolveRemoteAgentAddress: ((
+    remotePeerId: string,
+    contextGraphId: ContextGraphIdV1,
+  ) => Promise<EvmAddressV1 | null>) | null;
+  readonly #byKey = new Map<string, HeldCatalogAccessSnapshotV1>();
+
+  constructor(options?: Rfc64CatalogAccessPolicyRegistryOptionsV1) {
+    if (options === undefined) {
+      this.#localAgentAddress = null;
+      this.#resolveLocalAgentAddress = null;
+      this.#resolveRemoteAgentAddress = null;
+      return;
+    }
+    const hasStaticLocalAuthority = options.localAgentAddress !== undefined;
+    const hasLocalAuthorityResolver = options.resolveLocalAgentAddress !== undefined;
+    if (hasStaticLocalAuthority === hasLocalAuthorityResolver) {
+      throw new TypeError(
+        'exactly one of localAgentAddress or resolveLocalAgentAddress must be supplied',
+      );
+    }
+    if (
+      hasLocalAuthorityResolver
+      && typeof options.resolveLocalAgentAddress !== 'function'
+    ) {
+      throw new TypeError('resolveLocalAgentAddress must be a function');
+    }
+    this.#localAgentAddress = hasStaticLocalAuthority
+      ? snapshotAgentAddress(options.localAgentAddress, 'localAgentAddress')
+      : null;
+    this.#resolveLocalAgentAddress = hasLocalAuthorityResolver
+      ? options.resolveLocalAgentAddress
+      : null;
+    if (typeof options.resolveRemoteAgentAddress !== 'function') {
+      throw new TypeError('resolveRemoteAgentAddress must be a function');
+    }
+    this.#resolveRemoteAgentAddress = options.resolveRemoteAgentAddress;
+  }
+
+  /** Accept one already-authoritative current snapshot. Exact replay is idempotent. */
+  accept(
+    input: AcceptRfc64CatalogAccessSnapshotInputV1,
+  ): AcceptedRfc64CatalogAccessSnapshotV1 {
+    return this.#accept(input, false);
+  }
+
+  /**
+   * Advance accepted-current state across one already-verified direct policy
+   * transition. The predecessor digest and monotonic era/version high-water are
+   * rechecked locally before the old authorization snapshot is replaced.
+   */
+  acceptCurrent(
+    input: AcceptRfc64CatalogAccessSnapshotInputV1,
+  ): AcceptedRfc64CatalogAccessSnapshotV1 {
+    return this.#accept(input, 'linked');
+  }
+
+  /**
+   * Advance state that was independently reconstructed from the canonical
+   * finalized-chain or owner lifecycle. This path owns its own monotonic
+   * generation proof and therefore does not require a transported predecessor
+   * digest that a cold node could not know.
+   */
+  acceptAuthoritativeCurrent(
+    input: AcceptRfc64CatalogAccessSnapshotInputV1,
+  ): AcceptedRfc64CatalogAccessSnapshotV1 {
+    return this.#accept(input, 'authoritative');
+  }
+
+  #accept(
+    input: AcceptRfc64CatalogAccessSnapshotInputV1,
+    transition: false | 'linked' | 'authoritative',
+  ): AcceptedRfc64CatalogAccessSnapshotV1 {
+    const policy = snapshotPolicy(input?.policy);
+    const policyDigest = snapshotDigest(input?.policyDigest, 'policyDigest');
+    const descriptor = classifyRfc64PolicyCellV1(policy);
+    const rosterInput = input?.roster ?? null;
+    let roster: Readonly<MemberRosterV1> | null = null;
+    let members: ReadonlyMap<EvmAddressV1, Readonly<MemberRosterEntryV1>> | null = null;
+
+    if (descriptor.rosterMode === 'forbidden') {
+      if (rosterInput !== null) {
+        throw new Error('open RFC-64 catalog policy forbids an exhaustive member roster');
+      }
+    } else {
+      if (!this.privatePolicyAuthorityConfigured) {
+        throw new Error(
+          'RFC-64 private catalog policy requires explicit access-policy authority configuration',
+        );
+      }
+      if (rosterInput === null) {
+        throw new Error('invite-only RFC-64 catalog policy requires a current member roster');
+      }
+      roster = snapshotRoster(rosterInput);
+      assertAcceptedRfc64CatalogPolicyRosterV1(policy, policyDigest, roster);
+      members = new Map(roster.members.map((entry) => [entry.agentAddress, entry]));
+    }
+
+    const key = policyKey(policy.networkId, policy.contextGraphId);
+    const held = Object.freeze({ policy, policyDigest, roster, members });
+    const current = this.#byKey.get(key);
+    if (current !== undefined) {
+      if (!sameSnapshot(current, held)) {
+        if (transition === false) {
+          throw new Error(
+            'RFC-64 current policy replacement requires the verified transition/high-water path',
+          );
+        }
+        if (transition === 'linked') assertDirectMonotonicPolicyTransition(current, held);
+        else assertAuthoritativeMonotonicPolicyTransition(current, held);
+        this.#byKey.set(key, held);
+        return publicSnapshot(held);
+      }
+      return publicSnapshot(current);
+    }
+
+    this.#byKey.set(key, held);
+    return publicSnapshot(held);
+  }
+
+  get privatePolicyAuthorityConfigured(): boolean {
+    return (
+      this.#localAgentAddress !== null || this.#resolveLocalAgentAddress !== null
+    ) && this.#resolveRemoteAgentAddress !== null;
+  }
+
+  lookup(
+    networkId: NetworkIdV1,
+    contextGraphId: ContextGraphIdV1,
+  ): AcceptedRfc64CatalogAccessSnapshotV1 | null {
+    const held = this.#byKey.get(policyKey(networkId, contextGraphId));
+    return held === undefined ? null : publicSnapshot(held);
+  }
+
+  get size(): number {
+    return this.#byKey.size;
+  }
+
+  /**
+   * Authorize one live transport operation from accepted local state only.
+   * Returning null is the sole denial shape; transports still compare the
+   * returned digest with the untrusted wire digest independently.
+   */
+  readonly authorize = async (
+    input: Rfc64CatalogAccessAuthorizationInputV1,
+  ): Promise<Rfc64CatalogAccessAuthorizationV1 | null> => {
+    let boundary: Readonly<Rfc64CatalogAccessAuthorizationInputV1>;
+    try {
+      boundary = snapshotAuthorizationInput(input);
+    } catch {
+      return null;
+    }
+
+    const key = policyKey(boundary.networkId, boundary.contextGraphId);
+    const held = this.#byKey.get(key);
+    if (held === undefined || held.policyDigest !== boundary.policyDigest) return null;
+    const descriptor = classifyRfc64PolicyCellV1(held.policy);
+    if (descriptor.catalogDisclosure === 'open-authenticated') {
+      return authorization(held);
+    }
+    if (
+      held.members === null
+      || (
+        this.#localAgentAddress === null
+        && this.#resolveLocalAgentAddress === null
+      )
+      || this.#resolveRemoteAgentAddress === null
+    ) return null;
+
+    const scopedGenerations = scopedAuthorizationGenerations(this);
+    const scopeKey = authorizationScopeKey(boundary);
+    const scopedGeneration = scopedGenerations?.get(scopeKey);
+    if (scopedGeneration !== undefined && scopedGeneration !== held) return null;
+
+    const [localAgentAddress, remoteAgentAddress] = await Promise.all([
+      this.#resolveLocalMemberAddress(
+        boundary.contextGraphId,
+        scopedGeneration === held ? localAuthorizationScope(held) : undefined,
+      ),
+      this.#resolveRemoteMemberAddress(
+        boundary.remotePeerId,
+        boundary.contextGraphId,
+      ),
+    ]);
+    if (localAgentAddress === null || remoteAgentAddress === null) return null;
+    // A future verified transition path may replace the held snapshot while
+    // either authenticated identity binding is being resolved. Never authorize
+    // against a snapshot that stopped being current during those awaits.
+    if (this.#byKey.get(key) !== held) return null;
+    const localMember = held.members.get(localAgentAddress);
+    const remoteMember = held.members.get(remoteAgentAddress);
+    if (localMember === undefined || remoteMember === undefined) return null;
+
+    const servingMember = servingSide(boundary.operation) === 'local'
+      ? localMember
+      : remoteMember;
+    if (!servingMember.roles.includes('provider')) return null;
+    scopedGenerations?.set(scopeKey, held);
+    return authorization(held);
+  };
+
+  /** SWM authorship follows accessPolicy and is intentionally publishPolicy-neutral. */
+  isSwmAuthorAuthorized(input: {
+    readonly networkId: NetworkIdV1;
+    readonly contextGraphId: ContextGraphIdV1;
+    readonly policyDigest: Digest32V1;
+    readonly authorAddress: EvmAddressV1;
+  }): boolean {
+    try {
+      const networkId = input.networkId;
+      const contextGraphId = input.contextGraphId;
+      const policyDigest = snapshotDigest(input.policyDigest, 'policyDigest');
+      const authorAddress = snapshotAgentAddress(input.authorAddress, 'authorAddress');
+      assertNetworkIdV1(networkId);
+      assertContextGraphIdV1(contextGraphId);
+      const held = this.#byKey.get(policyKey(networkId, contextGraphId));
+      if (held === undefined || held.policyDigest !== policyDigest) return false;
+      return held.policy.accessPolicy === 0
+        || (
+          this.privatePolicyAuthorityConfigured
+          && held.members?.has(authorAddress) === true
+        );
+    } catch {
+      return false;
+    }
+  }
+
+  async #resolveRemoteMemberAddress(
+    remotePeerId: string,
+    contextGraphId: ContextGraphIdV1,
+  ): Promise<EvmAddressV1 | null> {
+    if (this.#resolveRemoteAgentAddress === null) return null;
+    try {
+      const resolved = await this.#resolveRemoteAgentAddress(remotePeerId, contextGraphId);
+      return resolved === null
+        ? null
+        : snapshotAgentAddress(resolved, 'resolved remote agent address');
+    } catch {
+      return null;
+    }
+  }
+
+  async #resolveLocalMemberAddress(
+    contextGraphId: ContextGraphIdV1,
+    scope?: Readonly<Rfc64CatalogLocalAuthorizationScopeV1>,
+  ): Promise<EvmAddressV1 | null> {
+    if (this.#localAgentAddress !== null) return this.#localAgentAddress;
+    if (this.#resolveLocalAgentAddress === null) return null;
+    try {
+      const resolved = await this.#resolveLocalAgentAddress(contextGraphId, scope);
+      return resolved === null
+        ? null
+        : snapshotAgentAddress(resolved, 'resolved local agent address');
+    } catch {
+      return null;
+    }
+  }
+}
+
+function assertAuthoritativeMonotonicPolicyTransition(
+  current: HeldCatalogAccessSnapshotV1,
+  successor: HeldCatalogAccessSnapshotV1,
+): void {
+  if (
+    current.policy.source.kind === 'owner-signed-unregistered'
+    && successor.policy.source.kind === 'finalized-chain'
+  ) {
+    // Registration is a one-way authority promotion. Both sources begin at
+    // era/version zero, so numeric high-water comparison alone cannot admit
+    // the canonical chain snapshot that replaces the creator's local seed.
+    // The caller reaches this boundary only after independently verifying the
+    // finalized chain state and its name commitment. Never allow the reverse.
+    return;
+  }
+  if (isFinalizedChainReorgReplacement(current, successor)) {
+    // A head-anchored authority event can be re-mined without advancing its
+    // event-derived era/version. The exact event block remains provenance in
+    // the policy object (and therefore changes policyDigest), but a periodic
+    // authoritative refresh must be able to replace the orphaned coordinates.
+    // Only provenance may differ: policy semantics and the roster generation
+    // must remain byte-identical after their digest backlink is neutralized.
+    return;
+  }
+  const currentEra = BigInt(current.policy.era);
+  const successorEra = BigInt(successor.policy.era);
+  const currentVersion = BigInt(current.policy.version);
+  const successorVersion = BigInt(successor.policy.version);
+  const policyAdvanced = successor.policyDigest !== current.policyDigest
+    && (
+      successorEra > currentEra
+      || (successorEra === currentEra && successorVersion > currentVersion)
+    );
+  const rosterAdvanced = successor.policyDigest === current.policyDigest
+    && current.roster !== null
+    && successor.roster !== null
+    && successorEra === currentEra
+    && BigInt(successor.roster.version) > BigInt(current.roster.version);
+  if (!policyAdvanced && !rosterAdvanced) {
+    throw new Error(
+      'RFC-64 authoritative policy/roster transition does not advance its high-water',
+    );
+  }
+}
+
+function isFinalizedChainReorgReplacement(
+  current: HeldCatalogAccessSnapshotV1,
+  successor: HeldCatalogAccessSnapshotV1,
+): boolean {
+  const currentSource = current.policy.source;
+  const successorSource = successor.policy.source;
+  if (
+    current.policyDigest === successor.policyDigest
+    || currentSource.kind !== 'finalized-chain'
+    || successorSource.kind !== 'finalized-chain'
+    || (
+      currentSource.blockNumber === successorSource.blockNumber
+      && currentSource.blockHash === successorSource.blockHash
+    )
+    || current.policy.era !== successor.policy.era
+    || current.policy.version !== successor.policy.version
+    || !samePolicyWithoutFinalizedSourceCoordinates(
+      current.policy,
+      successor.policy,
+      currentSource,
+      successorSource,
+    )
+  ) return false;
+  if (current.roster === null || successor.roster === null) {
+    // Public catalogs carry no roster. Both sides must agree on that: a
+    // roster appearing or disappearing is a generation change, not a re-mine.
+    return current.roster === null && successor.roster === null;
+  }
+  if (
+    canonicalizeMemberRosterPayloadV1({
+      ...current.roster,
+      policyDigest: ZERO_DIGEST,
+    }) === canonicalizeMemberRosterPayloadV1({
+      ...successor.roster,
+      policyDigest: ZERO_DIGEST,
+    })
+  ) return true;
+  // The event block can be re-mined in the same refresh window in which the
+  // roster legitimately advances. That combination reaches none of the three
+  // acceptance paths otherwise: the byte-identical roster check above rejects
+  // it, `policyAdvanced` needs an era/version bump the re-mine does not
+  // produce, and `rosterAdvanced` requires an unchanged policyDigest that the
+  // new block coordinates have already changed. The node would stay wedged on
+  // the orphaned digest until restart — the exact failure this gate exists to
+  // recover from. Only a strict advance within the same era is admitted, so a
+  // roster rollback still fails closed.
+  return BigInt(successor.roster.version) > BigInt(current.roster.version);
+}
+
+/**
+ * The caller has already narrowed both sources to `finalized-chain`, so they
+ * are passed in rather than re-checked: a redundant kind guard here would be
+ * unreachable from the single call site.
+ */
+function samePolicyWithoutFinalizedSourceCoordinates(
+  current: Readonly<ContextGraphPolicyV1>,
+  successor: Readonly<ContextGraphPolicyV1>,
+  currentSource: FinalizedChainPolicySourceV1,
+  successorSource: FinalizedChainPolicySourceV1,
+): boolean {
+  return canonicalizeContextGraphPolicyPayloadV1(current)
+    === canonicalizeContextGraphPolicyPayloadV1({
+      ...successor,
+      source: {
+        ...successorSource,
+        blockNumber: currentSource.blockNumber,
+        blockHash: currentSource.blockHash,
+      },
+    });
+}
+
+function authorization(
+  held: HeldCatalogAccessSnapshotV1,
+): Rfc64CatalogAccessAuthorizationV1 {
+  return Object.freeze({
+    accessPolicy: held.policy.accessPolicy,
+    policyDigest: held.policyDigest,
+  });
+}
+
+function localAuthorizationScope(
+  held: HeldCatalogAccessSnapshotV1,
+): Readonly<Rfc64CatalogLocalAuthorizationScopeV1> {
+  const roster = held.roster;
+  if (roster === null || held.members === null) {
+    throw new Error('private RFC-64 authorization scope requires an accepted roster');
+  }
+  return Object.freeze({
+    networkId: held.policy.networkId,
+    contextGraphId: held.policy.contextGraphId,
+    policyDigest: held.policyDigest,
+    ownershipTransitionDigest: held.policy.ownershipTransitionDigest,
+    policyEra: held.policy.era,
+    policyVersion: held.policy.version,
+    administrativeDelegationDigest: held.policy.administrativeDelegationDigest,
+    rosterVersion: roster.version,
+    memberAddresses: Object.freeze([...held.members.keys()]),
+  });
+}
+
+function scopedAuthorizationGenerations(
+  registry: Rfc64CatalogAccessPolicyRegistryV1,
+): Map<string, HeldCatalogAccessSnapshotV1> | null {
+  const store = rfc64CatalogAuthorizationScopeV1.getStore();
+  if (store?.active !== true) return null;
+  let generations = store.generations.get(registry);
+  if (generations === undefined) {
+    generations = new Map();
+    store.generations.set(registry, generations);
+  }
+  return generations;
+}
+
+function authorizationScopeKey(
+  input: Readonly<Rfc64CatalogAccessAuthorizationInputV1>,
+): string {
+  return [
+    input.operation,
+    input.remotePeerId,
+    input.networkId,
+    input.contextGraphId,
+    input.policyDigest,
+  ].join('\n');
+}
+
+function servingSide(operation: Rfc64CatalogAccessOperationV1): 'local' | 'remote' {
+  return rfc64CatalogAuthorityDirectionV1(operation) === 'serving' ? 'local' : 'remote';
+}
+
+function snapshotAuthorizationInput(
+  input: Rfc64CatalogAccessAuthorizationInputV1,
+): Readonly<Rfc64CatalogAccessAuthorizationInputV1> {
+  if (input === null || typeof input !== 'object') {
+    throw new TypeError('catalog access authorization input must be an object');
+  }
+  const operation = snapshotOperation(input.operation);
+  const remotePeerId = snapshotPeerId(input.remotePeerId);
+  const networkId = input.networkId;
+  const contextGraphId = input.contextGraphId;
+  assertNetworkIdV1(networkId);
+  assertContextGraphIdV1(contextGraphId);
+  const policyDigest = snapshotDigest(input.policyDigest, 'policyDigest');
+  return Object.freeze({
+    operation,
+    remotePeerId,
+    networkId,
+    contextGraphId,
+    policyDigest,
+  });
+}
+
+function snapshotOperation(input: unknown): Rfc64CatalogAccessOperationV1 {
+  switch (input) {
+    case 'announce-outbound':
+    case 'announce-inbound':
+    case 'head-replay-outbound':
+    case 'head-replay-inbound':
+    case 'fetch-outbound':
+    case 'fetch-inbound':
+    case 'catalog-object-fetch-outbound':
+    case 'catalog-object-fetch-inbound':
+    case 'ka-bundle-fetch-outbound':
+    case 'ka-bundle-fetch-inbound':
+      return input;
+    default:
+      throw new TypeError('operation must be a supported RFC-64 catalog access operation');
+  }
+}
+
+function publicSnapshot(
+  held: HeldCatalogAccessSnapshotV1,
+): AcceptedRfc64CatalogAccessSnapshotV1 {
+  return Object.freeze({
+    policy: held.policy,
+    policyDigest: held.policyDigest,
+    roster: held.roster,
+  });
+}
+
+function snapshotPolicy(input: ContextGraphPolicyV1): Readonly<ContextGraphPolicyV1> {
+  return deepFreeze(parseCanonicalContextGraphPolicyPayloadV1(
+    canonicalizeContextGraphPolicyPayloadV1(input),
+  ));
+}
+
+function snapshotRoster(input: MemberRosterV1): Readonly<MemberRosterV1> {
+  return deepFreeze(parseCanonicalMemberRosterPayloadV1(
+    canonicalizeMemberRosterPayloadV1(input),
+  ));
+}
+
+function snapshotDigest(input: Digest32V1, label: string): Digest32V1 {
+  assertCanonicalDigest(input, label);
+  return input;
+}
+
+function snapshotAgentAddress(input: EvmAddressV1, label: string): EvmAddressV1 {
+  if (typeof input !== 'string' || !EVM_ADDRESS.test(input) || input === ZERO_ADDRESS) {
+    throw new TypeError(`${label} must be a canonical nonzero EVM address`);
+  }
+  return input;
+}
+
+function snapshotPeerId(input: string): string {
+  if (
+    typeof input !== 'string'
+    || input.length === 0
+    || input.trim() !== input
+    || UTF8.encode(input).byteLength > MAX_PEER_ID_BYTES
+  ) {
+    throw new TypeError('remotePeerId must be a bounded canonical peer identifier');
+  }
+  return input;
+}
+
+function canonicalRoster(roster: Readonly<MemberRosterV1> | null): string | null {
+  return roster === null ? null : canonicalizeMemberRosterPayloadV1(roster);
+}
+
+function sameSnapshot(
+  left: HeldCatalogAccessSnapshotV1,
+  right: HeldCatalogAccessSnapshotV1,
+): boolean {
+  return left.policyDigest === right.policyDigest
+    && canonicalizeContextGraphPolicyPayloadV1(left.policy)
+      === canonicalizeContextGraphPolicyPayloadV1(right.policy)
+    && canonicalRoster(left.roster) === canonicalRoster(right.roster);
+}
+
+function assertDirectMonotonicPolicyTransition(
+  current: HeldCatalogAccessSnapshotV1,
+  successor: HeldCatalogAccessSnapshotV1,
+): void {
+  if (successor.policy.previousPolicyDigest !== current.policyDigest) {
+    throw new Error(
+      'RFC-64 accepted-current policy transition is not linked to the exact predecessor digest',
+    );
+  }
+  const currentEra = BigInt(current.policy.era);
+  const successorEra = BigInt(successor.policy.era);
+  const currentVersion = BigInt(current.policy.version);
+  const successorVersion = BigInt(successor.policy.version);
+  if (
+    successorEra < currentEra
+    || (successorEra === currentEra && successorVersion <= currentVersion)
+  ) {
+    throw new Error(
+      'RFC-64 accepted-current policy transition does not advance the era/version high-water',
+    );
+  }
+}
+
+function policyKey(networkId: NetworkIdV1, contextGraphId: ContextGraphIdV1): string {
+  return `${networkId}\n${contextGraphId}`;
+}
+
+function deepFreeze<T>(value: T): Readonly<T> {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const child of Object.values(value as Record<string, unknown>)) {
+      deepFreeze(child);
+    }
+    Object.freeze(value);
+  }
+  return value as Readonly<T>;
+}

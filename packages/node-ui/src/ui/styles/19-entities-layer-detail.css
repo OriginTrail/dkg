@@ -187,6 +187,12 @@
 }
 .v10-layer-expand-tab:hover { color: var(--text-secondary); }
 .v10-layer-expand-tab.active { color: var(--text-primary); border-bottom-color: var(--text-secondary); }
+.v10-query-catalog-visibility {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+  color: var(--text-tertiary); font-size: 10px; cursor: pointer; white-space: nowrap;
+}
+.v10-query-catalog-visibility:hover { color: var(--text-secondary); }
+.v10-query-catalog-visibility input { margin: 0; accent-color: var(--text-warning); }
 .v10-layer-expand-items {
   padding: 0;
   flex: 1 1 auto; min-height: 0;

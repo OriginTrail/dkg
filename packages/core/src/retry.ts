@@ -15,7 +15,19 @@ export interface RetryOptions {
   signal?: AbortSignal;
 }
 
-const DEFAULTS: Required<Omit<RetryOptions, 'isRetryable' | 'onRetry' | 'signal'>> = {
+/** Canonical attempt state supplied by the retry engine to each invocation. */
+export interface RetryAttemptContext {
+  /** One-based attempt number. */
+  readonly attempt: number;
+  readonly maxAttempts: number;
+  /** Attempts available including the current invocation. */
+  readonly remainingAttempts: number;
+}
+
+const DEFAULTS: Required<Omit<
+  RetryOptions,
+  'isRetryable' | 'onRetry' | 'signal'
+>> = {
   maxAttempts: 3,
   baseDelayMs: 500,
   maxDelayMs: 30_000,
@@ -31,6 +43,17 @@ export async function withRetry<T>(
   fn: () => Promise<T>,
   opts: RetryOptions = {},
 ): Promise<T> {
+  return withRetryContext(() => fn(), opts);
+}
+
+/**
+ * Execute an async function with exponential backoff retry and expose the
+ * canonical attempt state to callers that explicitly opt in to it.
+ */
+export async function withRetryContext<T>(
+  fn: (attempt: RetryAttemptContext) => Promise<T>,
+  opts: RetryOptions = {},
+): Promise<T> {
   const maxAttempts = opts.maxAttempts ?? DEFAULTS.maxAttempts;
   const baseDelayMs = opts.baseDelayMs ?? DEFAULTS.baseDelayMs;
   const maxDelayMs = opts.maxDelayMs ?? DEFAULTS.maxDelayMs;
@@ -44,7 +67,11 @@ export async function withRetry<T>(
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     throwIfAborted(signal);
     try {
-      return await fn();
+      return await fn(Object.freeze({
+        attempt: attempt + 1,
+        maxAttempts,
+        remainingAttempts: maxAttempts - attempt,
+      }));
     } catch (err) {
       lastErr = err;
 
@@ -57,6 +84,9 @@ export async function withRetry<T>(
 
       onRetry?.(attempt + 1, delay, err);
       await sleep(delay, signal);
+      // Retry policy may depend on a deadline or lease that changed during the
+      // sleep. Re-evaluate the same predicate and preserve the admitted error.
+      if (isRetryable && !isRetryable(err)) throw err;
     }
   }
 

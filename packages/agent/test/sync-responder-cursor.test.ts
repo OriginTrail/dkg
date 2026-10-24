@@ -16,6 +16,7 @@ import type { OperationContext } from '@origintrail-official/dkg-core';
 
 const CG_ID = 'mfacts';
 const CG_PREFIX = `did:dkg:context-graph:${CG_ID}`;
+const TOP_CG_META = `${CG_PREFIX}/_meta`;
 const PER_CG_DATA = `${CG_PREFIX}/context/1`;
 const PER_CG_META = `${CG_PREFIX}/context/1/_meta`;
 const DKG_NS = 'http://dkg.io/ontology/';
@@ -176,6 +177,33 @@ describe('sync responder — Phase C sinceBatchId delta filter', () => {
 
     const excluded = await cap.invoke({ contextGraphId: CG_ID, offset: 0, limit: 5000, includeSharedMemory: false, phase: 'data', sinceBatchId: '14' });
     expect(excluded).not.toContain('"data-collapsed"');
+  });
+
+  it('filters rootless graph-scoped KAs by assertion graph batchId', async () => {
+    const oldUal = 'did:dkg:otp:2043/0x1111111111111111111111111111111111111111/5';
+    const newUal = 'did:dkg:otp:2043/0x2222222222222222222222222222222222222222/6';
+    const oldGraph = `${CG_PREFIX}/_verifiable_memory/0x1111111111111111111111111111111111111111/5`;
+    const newGraph = `${CG_PREFIX}/_verifiable_memory/0x2222222222222222222222222222222222222222/6`;
+    await store.insert([
+      { graph: TOP_CG_META, subject: oldUal, predicate: `${DKG_NS}assertionGraph`, object: oldGraph },
+      { graph: TOP_CG_META, subject: oldUal, predicate: `${DKG_NS}batchId`, object: intLit(5) },
+      { graph: TOP_CG_META, subject: newUal, predicate: `${DKG_NS}assertionGraph`, object: newGraph },
+      { graph: TOP_CG_META, subject: newUal, predicate: `${DKG_NS}batchId`, object: intLit(6) },
+      { graph: oldGraph, subject: 'urn:rootless:old', predicate: `${DKG_NS}label`, object: '"rootless-old"' },
+      { graph: newGraph, subject: 'urn:rootless:new', predicate: `${DKG_NS}label`, object: '"rootless-new"' },
+    ]);
+
+    const out = await cap.invoke({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: 5000,
+      includeSharedMemory: false,
+      phase: 'data',
+      sinceBatchId: '5',
+    });
+
+    expect(out).not.toContain('"rootless-old"');
+    expect(out).toContain('"rootless-new"');
   });
 
   it('reuses a durable delta session snapshot on page-zero retry', async () => {

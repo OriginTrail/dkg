@@ -18,12 +18,45 @@ import { describe, it, expect } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
-import { tagPromoteError, tagPromoteStep } from '../src/promote-step-tag.js';
+import {
+  isPromoteStepName,
+  PROMOTE_STEP_NAMES,
+  tagPromoteError,
+  tagPromoteStep,
+} from '../src/promote-step-tag.js';
 import { DKGPublisher } from '../src/dkg-publisher.js';
+
+describe('#1464 promote step tagging — isPromoteStepName', () => {
+  // The guard is the producer-owned narrowing the CLI classifies against
+  // (`diagnosticPromoteStage`), so the publisher owns its coverage rather than
+  // leaning on the consumer's suite to exercise it.
+  //
+  // Deriving the accept cases from the tuple IS true by construction — but here
+  // that is the contract: the guard and the tuple are the same declaration in
+  // the same file, and "member of PROMOTE_STEP_NAMES" is all the predicate
+  // claims. A hand-written copy would duplicate the tuple with no second owner
+  // to disagree with it. (Contrast the CLI stage test, which spans an ownership
+  // boundary and therefore does keep an independent literal.) The assertions
+  // that can actually fail are the rejections below.
+  it.each(PROMOTE_STEP_NAMES)('accepts the producer-owned %s stage', (stage) => {
+    expect(isPromoteStepName(stage)).toBe(true);
+  });
+
+  it.each([
+    'resolveKaNumber', // a plausible-looking step that is NOT in the tuple
+    'wmGraphUri',
+    'callerControlled',
+    'ensureSubGraphRegistered ', // trailing space — no trimming
+    'EnsureSubGraphRegistered', // case-sensitive
+    '',
+  ])('rejects the unowned value %o', (value) => {
+    expect(isPromoteStepName(value)).toBe(false);
+  });
+});
 
 describe('#1464 promote step tagging — tagPromoteStep / tagPromoteError', () => {
   it('passes a resolved value through unchanged', async () => {
-    await expect(tagPromoteStep('resolveKaNumber', async () => 42)).resolves.toBe(42);
+    await expect(tagPromoteStep('assertionScopedQuads', async () => 42)).resolves.toBe(42);
   });
 
   it('tags a rejected plain Error IN PLACE, preserving object identity, code, and stack', async () => {
@@ -32,7 +65,7 @@ describe('#1464 promote step tagging — tagPromoteStep / tagPromoteError', () =
     const originalStack = original.stack; // materialise before tagging
 
     let caught: unknown;
-    await tagPromoteStep('resolveKaNumber', async () => {
+    await tagPromoteStep('assertionScopedQuads', async () => {
       throw original;
     }).catch((e) => {
       caught = e;
@@ -40,7 +73,7 @@ describe('#1464 promote step tagging — tagPromoteStep / tagPromoteError', () =
 
     expect(caught).toBe(original); // same object — instanceof / typed class preserved
     expect((caught as Error).message).toBe(
-      '[promote:resolveKaNumber] SPARQL HTTP query failed (500): boom',
+      '[promote:assertionScopedQuads] SPARQL HTTP query failed (500): boom',
     );
     expect((caught as { code?: unknown }).code).toBe('RPC_503'); // PR2 classification signal survives
     expect((caught as Error).stack).toBe(originalStack); // stack untouched
@@ -48,7 +81,7 @@ describe('#1464 promote step tagging — tagPromoteStep / tagPromoteError', () =
 
   it('never double-prefixes — the innermost promote step wins', () => {
     const already = new Error('[promote:assertionScopedQuads] deep failure');
-    const tagged = tagPromoteError('wmGraphUri', already);
+    const tagged = tagPromoteError('knowledgeAssetPrivateQuads', already);
     expect(tagged).toBe(already);
     expect((tagged as Error).message).toBe('[promote:assertionScopedQuads] deep failure');
   });
@@ -67,25 +100,25 @@ describe('#1464 promote step tagging — tagPromoteStep / tagPromoteError', () =
   });
 
   it('wraps a non-object throwable (string) in a tagged Error', () => {
-    const tagged = tagPromoteError('wmGraphUri', 'raw string failure') as Error;
+    const tagged = tagPromoteError('ensureSubGraphRegistered', 'raw string failure') as Error;
     expect(tagged).toBeInstanceOf(Error);
-    expect(tagged.message).toBe('[promote:wmGraphUri] raw string failure');
+    expect(tagged.message).toBe('[promote:ensureSubGraphRegistered] raw string failure');
   });
 });
 
 describe('#1464 promote step tagging — assertionPromote integration', () => {
-  it('surfaces a [promote:<step>] tag when a pre-insert store read rejects', async () => {
+  it.each(['assertNoUnfinishedBoundShare', 'assertGraphScopedLifecycleWritable'] as const)('tags a rejected %s pre-insert read', async stage => {
     const store = new OxigraphStore();
     const boom = new Error('SPARQL HTTP query failed (500): oxigraph worker unavailable');
     (boom as { code?: unknown }).code = 'OXIGRAPH_DOWN';
-    // The first pre-insert awaited op in assertionPromote is
-    // wmGraphUri → resolveKaNumber → store.query. Reject there.
+    // Ownership is checked first; bypass its read only to test the next lifecycle boundary.
     store.query = async () => {
       throw boom;
     };
 
     const publisher = new DKGPublisher({
       store,
+      ...(stage === 'assertGraphScopedLifecycleWritable' ? { promoteOwnershipReader: async () => null } : {}),
       chain: {} as unknown as ChainAdapter, // unused before the reject point
       eventBus: new TypedEventBus(),
       keypair: await generateEd25519Keypair(),
@@ -97,10 +130,10 @@ describe('#1464 promote step tagging — assertionPromote integration', () => {
         'my-assertion',
         '0x1234567890abcdef1234567890abcdef12345678',
       ),
-    ).rejects.toThrow(/^\[promote:wmGraphUri\] SPARQL HTTP query failed \(500\)/);
+    ).rejects.toThrow(`[promote:${stage}] SPARQL HTTP query failed (500)`);
 
     // Original error identity + classification code preserved for PR2.
-    expect(boom.message).toContain('[promote:wmGraphUri]');
+    expect(boom.message).toContain(`[promote:${stage}]`);
     expect((boom as { code?: unknown }).code).toBe('OXIGRAPH_DOWN');
   });
 });

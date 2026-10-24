@@ -94,14 +94,14 @@ describe('CodeBlock', () => {
     // immediate plain-text fallback. A broken shiki bundle, a botched
     // `normalizeLang` map, or a wrong theme key would still pass them
     // all — the rendered branch never executes in the assertions. Mock
-    // `shiki` per-test, re-import CodeBlock through a fresh module
-    // graph (the test file imports the real component at the top), then
+    // the fine-grained shiki facade per-test, re-import CodeBlock through a
+    // fresh module graph (the test file imports the real component at the top), then
     // wait for the async `loadHighlighter().then(setHtml)` chain to
     // settle and assert that `.v10-md-pre-rendered` actually replaced
     // the fallback with the highlighter's output.
     vi.useRealTimers(); // shiki path uses promises/microtasks, not setTimeout
     vi.resetModules();
-    vi.doMock('shiki', () => ({
+    vi.doMock('../src/ui/components/chat/shikiHighlighter.js', () => ({
       createHighlighter: async () => ({
         codeToHtml: (code: string, opts: { lang: string; theme: string }) =>
           `<pre class="shiki shiki-${opts.theme}" data-lang="${opts.lang}"><code>SHIKI:${code}</code></pre>`,
@@ -135,7 +135,7 @@ describe('CodeBlock', () => {
 
     await act(async () => { root.unmount(); });
     container.remove();
-    vi.doUnmock('shiki');
+    vi.doUnmock('../src/ui/components/chat/shikiHighlighter.js');
     vi.resetModules();
   });
 

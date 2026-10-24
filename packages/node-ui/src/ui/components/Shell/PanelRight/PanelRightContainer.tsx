@@ -1,14 +1,15 @@
+import { randomUUID } from '../../../lib/randomUUID.js';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useJourneyStore } from '../../../stores/journey.js';
 import { useProjectsStore } from '../../../stores/projects.js';
 import {
   importFile,
-  type AgentIdentity,
   type LocalAgentChatAttachmentRef,
   type LocalAgentIntegration,
   type LocalAgentStreamEvent,
   type MemorySession,
   connectLocalAgentIntegration,
+  clearLocalLlmSession,
   disconnectLocalAgentIntegration,
   fetchAgents,
   fetchConnections,
@@ -28,12 +29,18 @@ import { buildChatContextEntries } from './chat-context.js';
 import { ADD_AGENT_TAB_ID, STATIC_DEFAULT_LOCAL_AGENT_HISTORY_INTEGRATIONS } from './constants.js';
 import { formatLocalTimestamp, toIsoTimestamp } from './format.js';
 import { formatLocalAgentErrorMessage } from './local-agent-errors.js';
-import { adoptLocalAgentTurnId, mapHistoryMessage, mergeLocalAgentMessages } from './messages.js';
+import {
+  adoptLocalAgentTurnId,
+  buildLiveFailedTurnDisplay,
+  mapHistoryMessage,
+  mergeLocalAgentMessages,
+} from './messages.js';
 import { ConnectedAgentsTab } from './ConnectedAgentsTab.js';
 import { NetworkTab } from './NetworkTab.js';
 import { SessionsTab } from './SessionsTab.js';
 import {
   compareLocalAgentIntegrations,
+  getLocalAgentConversationStateKey,
   markLocalAgentIntegrationDisconnected,
   resolveLocalAgentConversation,
   resolveLocalAgentSelectionState,
@@ -43,10 +50,6 @@ import {
   upsertLocalAgentIntegrationState,
 } from './selection.js';
 import type { AgentInfo, ConnectionRow, LocalAgentAttachmentDraft, LocalAgentAttachmentStatus, LocalAgentMessage, LocalAgentSessionSummary } from './types.js';
-
-function useSharedCurrentAgent(): AgentIdentity | null {
-  return useSharedCurrentAgentRaw().data;
-}
 
 export function PanelRight() {
   const { stage, advance } = useJourneyStore();
@@ -60,7 +63,7 @@ export function PanelRight() {
   // race-fetch its own copy of the current agent on every mount
   // (BUG-007). The boolean `loading` flag is intentionally ignored;
   // callers below already null-check `currentAgent`.
-  const currentAgent = useSharedCurrentAgent();
+  const { data: currentAgent } = useSharedCurrentAgentRaw();
 
   const [integrations, setIntegrations] = useState<LocalAgentIntegration[]>([]);
   const [selectedIntegrationId, setSelectedIntegrationId] = useState('openclaw');
@@ -71,6 +74,7 @@ export function PanelRight() {
   const [connectNotice, setConnectNotice] = useState<string | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
   const [refreshBusyId, setRefreshBusyId] = useState<string | null>(null);
+  const [clearBusyId, setClearBusyId] = useState<string | null>(null);
 
   const [localMessagesByConversation, setLocalMessagesByConversation] = useState<Record<string, LocalAgentMessage[]>>({});
   const [localInputByConversation, setLocalInputByConversation] = useState<Record<string, string>>({});
@@ -223,10 +227,10 @@ export function PanelRight() {
     if (uniqueFiles.length === 0) return;
 
     const drafts = uniqueFiles.map((file) => ({
-      id: `${conversationKey}:${file.name}:${file.size}:${file.lastModified}:${crypto.randomUUID()}`,
+      id: `${conversationKey}:${file.name}:${file.size}:${file.lastModified}:${randomUUID()}`,
       file,
       contextGraphId,
-      assertionName: `${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`,
+      assertionName: `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`,
       status: 'queued' as const,
     }));
 
@@ -502,7 +506,7 @@ export function PanelRight() {
         return;
       }
 
-      correlationId = crypto.randomUUID();
+      correlationId = randomUUID();
       const importSummary = buildAttachmentImportSummary(importContext.results);
       const textWithImportSummary = [text, importSummary].filter((part) => part.length > 0).join('\n\n');
       messageText = text
@@ -548,11 +552,17 @@ export function PanelRight() {
       const contextEntries = [
         ...buildChatContextEntries(availableProjects, activeProjectId, currentAgent),
       ];
+      const liveSession = integration.id === 'prime-agent'
+        ? integration.liveSessions?.find(
+            (session) => session.sessionId === conversation.sessionId,
+          )
+        : undefined;
 
       const result = await streamLocalAgentChat(integrationId, outboundText, {
         correlationId,
         signal: controller?.signal,
         sessionId: conversation.sessionId ?? undefined,
+        liveSession,
         profile: integration.profile,
         persistUserMessage: outboundText ? undefined : messageText,
         attachments,
@@ -591,10 +601,46 @@ export function PanelRight() {
                 // consistent date+time timestamp format across all sources.
                 ts: formatLocalTimestamp(completedAt),
                 tsRaw: toIsoTimestamp(completedAt),
+                toolCalls: result.toolCalls,
+                traceFile: result.traceFile,
+                profile: result.profile,
+                contextGraphId: result.contextGraphId,
+                readOnly: result.readOnly,
               }
             : message,
         ),
       );
+      const resolvedPrimeSessionId = integrationId === 'prime-agent'
+        ? result.sessionId?.trim()
+        : undefined;
+      if (
+        resolvedPrimeSessionId
+        && resolvedPrimeSessionId !== conversation.sessionId
+        && selectedIntegrationIdRef.current === integrationId
+        && selectedSessionIdRef.current === conversation.sessionId
+      ) {
+        const nextConversationKey = getLocalAgentConversationStateKey(
+          integrationId,
+          resolvedPrimeSessionId,
+        );
+        // Preserve the just-finished transcript while moving the routing pin
+        // to the replacement Prime session. The API retries only the explicit
+        // PRIME_AGENT_NO_SESSION miss, which is a pre-delivery failure, so this
+        // migration cannot duplicate an executed turn.
+        setLocalMessagesByConversation((prev) => ({
+          ...prev,
+          [nextConversationKey]: mergeLocalAgentMessages(
+            prev[nextConversationKey] ?? [],
+            prev[conversationKey] ?? [],
+          ),
+        }));
+        setLocalHistoryLoadedByConversation((prev) => ({
+          ...prev,
+          [nextConversationKey]: prev[conversationKey] ?? true,
+        }));
+        setSelectedIntegration(integrationId, { sessionId: resolvedPrimeSessionId });
+        setConnectNotice(`${integration.name} restarted; switched chat to the live session.`);
+      }
       loadSessions();
       if (stage === 0) advance();
     } catch (err: any) {
@@ -602,19 +648,22 @@ export function PanelRight() {
       const failureReason = isUserAbort ? 'Request cancelled.' : formatLocalAgentErrorMessage(integration, err);
       const failureContent = isUserAbort ? failureReason : `Error: ${failureReason}`;
       if (assistantId) {
+        const failedDisplay = buildLiveFailedTurnDisplay(assistantPartialText, failureContent);
         updateLocalMessages(conversationKey, (prev) =>
           prev.map((message) =>
             message.id === assistantId
               ? {
                   ...message,
-                  content: assistantPartialText,
-                  failureNotice: failureContent,
+                  ...failedDisplay,
                   streaming: false,
-                  synthesized: !assistantPartialText,
                 }
               : message,
           ),
         );
+      } else {
+        // Failures before the optimistic bubbles exist must still be visible.
+        // Keep the composer intact so the user can retry.
+        setConnectError(failureReason);
       }
       if (!isUserAbort && integrationId === 'hermes' && assistantId && messageText) {
         void (async () => {
@@ -681,6 +730,7 @@ export function PanelRight() {
     clearCompletedAttachmentsForConversation,
     setLocalInputForConversation,
     setLocalSendingForConversation,
+    setSelectedIntegration,
     stage,
     updateLocalMessages,
   ]);
@@ -790,6 +840,30 @@ export function PanelRight() {
     }
   }, [integrations, refreshBusyId, selectedIntegrationId, updateLocalMessages]);
 
+  const clearIntegrationSession = useCallback(async (integrationId: string) => {
+    if (integrationId !== 'local-llm' || clearBusyId) return;
+    setClearBusyId(integrationId);
+    setConnectError(null);
+    setConnectNotice(null);
+    try {
+      await clearLocalLlmSession();
+      const conversation = resolveLocalAgentConversation({
+        integrationId,
+        sessionId: getDefaultLocalAgentSessionId(integrationId),
+      });
+      setLocalMessagesByConversation((prev) => ({ ...prev, [conversation.stateKey]: [] }));
+      setLocalInputByConversation((prev) => ({ ...prev, [conversation.stateKey]: '' }));
+      setAttachmentDraftsByConversation((prev) => ({ ...prev, [conversation.stateKey]: [] }));
+      setLocalHistoryLoadedByConversation((prev) => ({ ...prev, [conversation.stateKey]: true }));
+      setConnectNotice('DKG Local LLM session cleared. You can now select a different Context Graph.');
+      await refreshLocalIntegrations();
+    } catch (err: any) {
+      setConnectError(err?.message ?? 'Failed to clear the local LLM session.');
+    } finally {
+      setClearBusyId(null);
+    }
+  }, [clearBusyId, refreshLocalIntegrations]);
+
   const openSession = useCallback((session: LocalAgentSessionSummary) => {
     setSelectedIntegration(session.integrationId, { sessionId: session.sessionId });
     setMode('agents');
@@ -844,8 +918,10 @@ export function PanelRight() {
           onConnectIntegration={connectIntegration}
           onDisconnectIntegration={disconnectIntegration}
           onRefreshIntegration={refreshIntegration}
+          onClearIntegrationSession={clearIntegrationSession}
           connectBusyId={connectBusyId}
           refreshBusyId={refreshBusyId}
+          clearBusyId={clearBusyId}
           connectNotice={connectNotice}
           connectError={connectError}
           localMessages={selectedLocalMessages}

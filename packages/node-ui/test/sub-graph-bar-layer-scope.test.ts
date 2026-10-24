@@ -8,14 +8,22 @@ import { createRoot, type Root } from 'react-dom/client';
 
 // Mock the daemon /api/sub-graph/list endpoint with a deterministic
 // two-sub-graph response. Both report a project-wide entityCount of 3.
-vi.mock('../src/ui/api.js', () => ({
-  fetchSubGraphs: vi.fn(async () => ({
+const fetchSubGraphsMock = vi.hoisted(() =>
+  vi.fn(async () => ({
     subGraphs: [
       { name: 'alpha', entityCount: 3, tripleCount: 9, description: 'Alpha' },
       { name: 'beta', entityCount: 3, tripleCount: 9, description: 'Beta' },
     ],
   })),
-}));
+);
+
+vi.mock('../src/ui/api.js', () => ({ fetchSubGraphs: fetchSubGraphsMock }));
+
+// PR #2131 — SubGraphBar/SubGraphOverviewGrid now call `fetchSubGraphs`
+// through `api-wrapper` so the chip row and cards resolve in mock mode.
+// Point the wrapper at the same mock so this suite drives the same path
+// the component actually takes.
+vi.mock('../src/ui/api-wrapper.js', () => ({ api: { fetchSubGraphs: fetchSubGraphsMock } }));
 
 // Mock the live-update channel so the bar doesn't try to open an
 // EventSource — happy-dom doesn't ship one.

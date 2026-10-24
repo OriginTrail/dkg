@@ -1,37 +1,86 @@
+import { snapshotOperation, type WorkspaceSnapshotScope } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import {
+  withKeyedLocks,
+  type DurableRootAtomicCompanionResolver,
+  type WorkspacePublicSnapshotStore,
+} from '@origintrail-official/dkg-publisher';
 import {
   contextGraphWorkspaceGraphUri,
   contextGraphWorkspaceMetaGraphUri,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
-import type { SyncPageResult } from './page-fetch.js';
-import { applySwmRecovery, type SwmRecoveryStore } from './swm-recovery-apply.js';
-import { sharedMemoryOwnershipKeyFromGraph } from './shared-memory-sync.js';
+import type { SyncPageFetchOptions, SyncPageResult } from './page-fetch.js';
+import type { SyncPhase } from '../auth/request-build.js';
+import {
+  createVerifiedSwmRecoveryApplyPlan,
+  applyVerifiedSwmRecoveryPlan,
+  applyVerifiedSwmRecoveryGraphAsset,
+  type SwmRecoveryStore,
+  type VerifiedSwmRecoveryGraphApply,
+} from './swm-recovery-apply.js';
+import {
+  collectPublicSnapshotMetadata,
+  syncPublicSnapshotsInScope,
+  type PublicSnapshotMetadata,
+} from './shared-memory-sync.js';
+import { preparePrivateSwmSnapshotWalk } from './private-swm-snapshot-walk-registry.js';
+import type { ManifestBoundSnapshotProgress } from './manifest-bound-snapshot-walk.js';
 import { appendInPlace } from '../append-in-place.js';
+import {
+  canonicalGraphScopedSnapshotManifestQuads,
+  discoverSwmRecoverySubGraphNames,
+  materializeGraphScopedSwmRecoveryAsset,
+  parseGraphScopedSwmRecoveryDescriptors,
+  type GraphScopedSwmRecoveryDescriptor,
+} from '../graph-scoped-swm-recovery.js';
+import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
+import {
+  createRecoveryExecutionAdmission,
+  type RecoveryExecutionAdmission,
+  type RecoveryExecutionGuard,
+} from './recovery-execution-guard.js';
+import { canonicalQuadKey } from './quad-key.js';
+import type { PrivateSwmRecoveryWindow } from './private-swm-recovery-budget.js';
+import {
+  composeSyncWorkAdmission,
+  type SyncWorkAdmission,
+} from '../work-admission.js';
+import {
+  isNamedSubgraphSharedMemoryDataGraph,
+  isNamedSubgraphSharedMemoryMetaGraph,
+} from '../shared-memory-graphs.js';
+import {
+  sharedMemoryWorkOutcome,
+  type SharedMemoryWorkOutcome,
+} from '../shared-memory-completion.js';
+import type { RecoverContextGraphSwmResult } from '../shared-memory-completion.js';
+export type { RecoverContextGraphSwmResult } from '../shared-memory-completion.js';
 
 /**
  * recovery entry point. Recovers a CG's
  * `_shared_memory` current state from a single authoritative peer (a member or
  * a designated anchor), applying via REPLACE rather than the shared incremental
  * sync path's blind union (which corrupts a non-empty store — see
- * {@link applySwmRecovery}).
+ * {@link applyVerifiedSwmRecoveryPlan}).
  *
- * It fetches the COMPLETE state across pages (each `fetchSyncPages` call loops
- * internally to completion-or-deadline), verifies it, then replaces each root
- * exactly once.
+ * It fetches the COMPLETE metadata state across pages, verifies it, then uses
+ * the narrowest safe recovery path:
  *
- * A partial fetch (deadline) is NOT safe to apply, and is deliberately NOT
- * applied. Pagination is row-based, so a single root's rows (the root + its
- * skolemized children + every predicate) can straddle the last fetched page: a
- * deadline can cut a root mid-stream. REPLACE-ing such a root would clear it and
- * reinsert only the fetched prefix, truncating the entity until a later retry —
- * the same corruption the per-root REPLACE exists to prevent. So recovery is
- * all-or-nothing: we apply ONLY when BOTH phases fetched to completion; on a
- * partial fetch we mutate the store not at all, drop the mid-stream checkpoint
- * so the retry re-accumulates from offset 0, and return `completed: false` for
- * the caller to retry. (Per-root completeness is not cheaply recoverable here —
- * `entityCreators` is a set derived from possibly-truncated rows, so the
- * truncated tail root can't be singled out; all-or-nothing is the correct gate.)
+ * - graph-scoped KAs backed by immutable public snapshots are fetched and
+ *   verified one KA at a time, without scanning the aggregate SWM data graph;
+ * - legacy root-scoped KAs and graph-backed legacy snapshots retain the full
+ *   data-phase recovery below.
+ *
+ * A partial legacy-root fetch (deadline) is NOT safe to apply. Pagination is
+ * row-based, so a root's rows can straddle the last fetched page; replacing it
+ * with that prefix would truncate the entity. Legacy recovery therefore stays
+ * all-or-nothing and restarts from offset zero after a partial response.
+ *
+ * Exact rootless KAs are different: each immutable snapshot carries its own
+ * signed count and digest. A complete verified KA can be atomically
+ * materialized immediately while the next KA is still downloading. An
+ * incomplete snapshot remains invisible and is retried from zero.
  *
  * This is deliberately separate from `runSharedMemorySync` so the shared
  * incremental path (cold-start / public / top-up, where union is correct) is
@@ -53,15 +102,20 @@ export interface RecoverContextGraphSwmDeps {
   readonly contextGraphId: string;
   /** Absolute wall-clock deadline (ms) for the whole recovery. */
   readonly deadline: number;
+  /** Admission policy supplied by the owning executor. Direct rounds use their deadline. */
+  readonly workAdmission?: SyncWorkAdmission;
   readonly fetchSyncPages: (
     ctx: OperationContext,
     remotePeerId: string,
     contextGraphId: string,
     includeSharedMemory: boolean,
-    phase: RecoverableSyncPhase,
+    phase: SyncPhase,
     graphUri: string,
     deadline: number,
+    options?: SyncPageFetchOptions,
   ) => Promise<SyncPageResult>;
+  /** Current-authority capability for selected recovery; ordinary recovery omits it. */
+  readonly recoveryGuard?: RecoveryExecutionGuard;
   readonly processSharedMemoryBatch: (
     wsDataQuads: Quad[],
     wsMetaQuads: Quad[],
@@ -69,69 +123,206 @@ export interface RecoverContextGraphSwmDeps {
     registeredSubGraphNames?: readonly string[],
     excludedSubGraphNames?: readonly string[],
   ) => Promise<ProcessedSwmBatch>;
+  /**
+   * Agent-owned lock domain shared by every authoritative recovery caller.
+   * One complete provider recovery sequence for a Context Graph must finish before
+   * another provider can fetch/apply a competing head for that same graph.
+   */
+  readonly writeLocks: Map<string, Promise<void>>;
   readonly store: SwmRecoveryStore;
+  readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
   /**
    * REPLACE (not append) the SWM meta for each recovered root, BEFORE the fresh
-   * `verifiedMeta` is inserted. `applySwmRecovery` REPLACEs the root DATA, but
+   * `verifiedMeta` is inserted. Recovery REPLACEs the root DATA, but
    * without also replacing the meta an older `WorkspaceOperation`/`rootEntity`
    * row for the same root lingers in `_shared_memory_meta`; the TTL sweep then
    * deletes data for that expired op and can wipe the freshly-recovered root
    * (Codex high). Mirrors the share/gossip apply path's per-root meta
-   * replacement (`deleteMetaForRoot`). Production callers MUST pass it.
+   * replacement (`deleteMetaForRoot`). This port is mandatory so recovery
+   * cannot silently apply data without retiring stale root metadata.
    */
-  readonly replaceMetaForRoots?: (
+  readonly replaceMetaForRoots: (
     roots: readonly { readonly entity: string }[],
     metaGraphs: readonly string[],
   ) => Promise<void>;
+  /** Replace the active head/operation rows for each exact graph asset. */
+  readonly replaceMetaForGraphAssets: (
+    assets: readonly GraphScopedSwmRecoveryDescriptor[],
+  ) => Promise<void>;
+  /**
+   * GH#2273 — skipping an already-materialized KA and deciding whether its
+   * stored operation identity may be preserved are ONE capability, and the
+   * materializer OWNS both halves (`isGraphAssetMaterialized` +
+   * `preserveStoredIdentityForSkippedAsset`) over one store and one lock
+   * map — a config that could skip but not decide, or pair a predicate from
+   * one store with a materializer over another, is unrepresentable.
+   */
+  readonly snapshotMaterializer: SharedMemorySnapshotMaterializer;
+  /** Durable boundary companion for every admitted root snapshot mutation. */
+  readonly resolveRootAtomicCompanion?: DurableRootAtomicCompanionResolver;
+  /** Manifest-bound progress retained by the owning private recovery executor. */
+  readonly snapshotWalkProgress?: (
+    orderedManifest: readonly PublicSnapshotMetadata[],
+  ) => ManifestBoundSnapshotProgress;
   readonly ensureContextGraph: (contextGraphId: string) => Promise<void>;
   readonly setCheckpoint: (key: string, offset: number) => void;
   readonly deleteCheckpoint: (key: string) => void;
   readonly getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   readonly getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   /**
+   * False for a catalog-root CG's disjoint named-subgraph compatibility lane.
+   * Root rows never reach verification or any destructive recovery mutation.
+   */
+  readonly includeRootScope?: boolean;
+  /**
    * Rule-4 ownership cache hydrator (parity with `runSharedMemorySync`). Without
    * it, a recovered member holds correct triples but an empty ownership map and
-   * mis-arbitrates its NEXT contended write — so production callers MUST pass it.
+   * mis-arbitrates its NEXT contended write. This port is therefore mandatory.
    */
-  readonly ensureOwnedMap?: (ownershipKey: string) => Map<string, string>;
+  readonly ensureOwnedMap: (ownershipKey: string) => Map<string, string>;
   readonly logInfo?: (ctx: OperationContext, message: string) => void;
   readonly logWarn?: (ctx: OperationContext, message: string) => void;
   /** Backstop against a misbehaving responder that never reports `completed`. */
   readonly maxPagesPerPhase?: number;
 }
 
-export interface RecoverContextGraphSwmResult {
-  readonly replacedRoots: number;
-  readonly insertedDataQuads: number;
-  readonly insertedMetaQuads: number;
-  readonly droppedDataTriples: number;
-  /** false if a phase hit the deadline without completing — partial, safe to retry. */
-  readonly completed: boolean;
+export interface SwmRecoveryProgress {
+  readonly completedRound: number;
+  readonly readySnapshots: number;
+  readonly totalSnapshots: number;
+  /** Present when an owning registry exposes cross-invocation retention. */
+  readonly snapshotProgressRetention?: 'retained' | 'detached';
+}
+
+export const DEFAULT_PRIVATE_SWM_RECOVERY_MAX_ROUNDS = 6;
+export const ABSOLUTE_PRIVATE_SWM_RECOVERY_MAX_ROUNDS = 24;
+
+/**
+ * Repeat an authoritative private-SWM recovery while its immutable snapshot
+ * cache is making monotonic progress. A single recovery round is deliberately
+ * deadline-bounded; large rootless CGs can therefore finish several verified
+ * KAs and time out before the final one. Treating that first timeout as a
+ * terminal subscribe failure strands the safe cached progress until a later
+ * reconnect/reconciler tick. This bounded driver consumes that progress in the
+ * same catch-up job without weakening the all-or-nothing graph apply gate.
+ *
+ * One no-progress retry is allowed for a transient transport failure. Two
+ * consecutive results with the same ready count stop the driver. For the
+ * default policy, the first verified metadata response expands the six-round
+ * floor to at most one round per declared immutable snapshot plus a two-round
+ * transport cushion, bounded by an absolute ceiling. That lets a finite CG
+ * finish when a lossy relay yields only one new verified snapshot per round,
+ * without allowing an arbitrarily large CG to monopolise a worker. An explicit
+ * `maxRounds` remains authoritative for callers and tests. One monotonic budget
+ * also limits admission across the entire job (including every page and KA).
+ * Admitted transport and atomic asset writes drain; expiry never races a write
+ * or treats an incomplete metadata/data prefix as authoritative.
+ */
+export async function recoverContextGraphSwmWithProgressRetries(params: {
+  readonly window: PrivateSwmRecoveryWindow;
+  readonly createRoundDeadline: (round: number) => number;
+  readonly recover: (
+    round: number,
+    workAdmission: SyncWorkAdmission,
+    deadline: number,
+  ) => Promise<RecoverContextGraphSwmResult>;
+  readonly maxRounds?: number;
+  readonly onRetry?: (progress: SwmRecoveryProgress) => void;
+  readonly snapshotProgressRetention?: () => 'retained' | 'detached';
+}): Promise<RecoverContextGraphSwmResult> {
+  const explicitMaxRounds = params.maxRounds === undefined
+    ? undefined
+    : Math.max(1, Math.floor(params.maxRounds));
+  let maxRounds = explicitMaxRounds ?? DEFAULT_PRIVATE_SWM_RECOVERY_MAX_ROUNDS;
+  let previousReadySnapshots = -1;
+  let consecutiveNoProgressRounds = 0;
+  let result: RecoverContextGraphSwmResult | undefined;
+
+  for (let round = 1; round <= maxRounds; round += 1) {
+    // Recheck after the retry observer too: logging must not admit a late round.
+    if (!params.window.canStartRound(round)) break;
+    const deadline = params.createRoundDeadline(round);
+    // The driver owns both round gating and page/transport admission from the
+    // same window. Callers receive the composed capability with its deadline.
+    const workAdmission = params.window.admitRound(deadline);
+    result = await params.recover(round, workAdmission, deadline);
+    if (result.completed) return result;
+
+    if (explicitMaxRounds === undefined && Number.isSafeInteger(result.totalSnapshots)) {
+      maxRounds = Math.min(
+        ABSOLUTE_PRIVATE_SWM_RECOVERY_MAX_ROUNDS,
+        Math.max(maxRounds, result.totalSnapshots + 2),
+      );
+    }
+
+    const readySnapshots = result.cumulativeResolvedSnapshots ?? result.readySnapshots;
+    const madeProgress = readySnapshots > previousReadySnapshots;
+    consecutiveNoProgressRounds = madeProgress ? 0 : consecutiveNoProgressRounds + 1;
+    if (round >= maxRounds || consecutiveNoProgressRounds >= 2
+      || !params.window.canStartRound(round + 1)) return result;
+
+    previousReadySnapshots = readySnapshots;
+    const snapshotProgressRetention = params.snapshotProgressRetention?.();
+    params.onRetry?.({
+      completedRound: round,
+      readySnapshots,
+      totalSnapshots: result.totalSnapshots,
+      ...(snapshotProgressRetention === undefined ? {} : { snapshotProgressRetention }),
+    });
+  }
+
+  // The loop always executes at least once because maxRounds is clamped to 1.
+  return result!;
 }
 
 const DEFAULT_MAX_PAGES_PER_PHASE = 1000;
 
+type AdmittedRecoverContextGraphSwmDeps = RecoverContextGraphSwmDeps & {
+  readonly workAdmission: SyncWorkAdmission;
+};
+
 async function fetchPhaseFully(
-  deps: RecoverContextGraphSwmDeps,
+  deps: AdmittedRecoverContextGraphSwmDeps,
+  boundary: RecoveryExecutionAdmission,
   phase: RecoverableSyncPhase,
   graphUri: string,
-): Promise<{ quads: Quad[]; completed: boolean }> {
+): Promise<{
+  quads: Quad[];
+  outcome: SharedMemoryWorkOutcome;
+}> {
+  const workAdmission = deps.workAdmission;
+  let outcome: SharedMemoryWorkOutcome = 'incomplete';
   const maxPages = deps.maxPagesPerPhase ?? DEFAULT_MAX_PAGES_PER_PHASE;
   const all: Quad[] = [];
   let lastCheckpointKey: string | undefined;
   for (let i = 0; i < maxPages; i++) {
-    const page = await deps.fetchSyncPages(
-      deps.ctx, deps.remotePeerId, deps.contextGraphId, true, phase, graphUri, deps.deadline,
-    );
+    if (!workAdmission.canAdmitWork()) {
+      outcome = 'local-budget-yield';
+      break;
+    }
+    const page = await boundary.read(() => deps.fetchSyncPages(
+      deps.ctx,
+      deps.remotePeerId,
+      deps.contextGraphId,
+      true,
+      phase,
+      graphUri,
+      deps.deadline,
+      { signal: boundary.signal, workAdmission },
+    ));
+    const pageOutcome = sharedMemoryWorkOutcome(page);
     appendInPlace(all, page.quads);
     lastCheckpointKey = page.checkpointKey;
-    if (page.completed) {
-      deps.deleteCheckpoint(page.checkpointKey);
-      return { quads: all, completed: true };
+    if (pageOutcome === 'completed') {
+      boundary.admitSyncMutation(() => deps.deleteCheckpoint(page.checkpointKey));
+      return { quads: all, outcome: 'completed' };
+    }
+    if (pageOutcome === 'local-budget-yield' || pageOutcome === 'timed-out') {
+      outcome = pageOutcome;
     }
     // Not completed (deadline or partial). Stop if no forward progress.
-    if (page.nextOffset <= page.resumedFromOffset) break;
-    deps.setCheckpoint(page.checkpointKey, page.nextOffset);
+    if (pageOutcome !== 'incomplete' || page.nextOffset <= page.resumedFromOffset) break;
+    boundary.admitSyncMutation(() => deps.setCheckpoint(page.checkpointKey, page.nextOffset));
   }
   // Incomplete: the accumulated `all` is a prefix that the caller MUST NOT
   // apply (a tail root may be truncated mid-stream). `all` is local to this
@@ -139,85 +330,440 @@ async function fetchPhaseFully(
   // has no cross-invocation accumulator, so the retry must restart from
   // offset 0 (which makes the responder re-read from the start of its row
   // list) and rebuild the COMPLETE state before the apply gate can pass.
-  if (lastCheckpointKey !== undefined) deps.deleteCheckpoint(lastCheckpointKey);
-  return { quads: all, completed: false };
+  if (lastCheckpointKey !== undefined) {
+    boundary.admitSyncMutation(() => deps.deleteCheckpoint(lastCheckpointKey!));
+  }
+  return {
+    quads: all,
+    outcome,
+  };
 }
 
-export async function recoverContextGraphSwm(
-  deps: RecoverContextGraphSwmDeps,
+export const recoverContextGraphSwm = snapshotOperation<RecoverContextGraphSwmDeps, RecoverContextGraphSwmResult>(async deps => {
+  const admittedDeps: AdmittedRecoverContextGraphSwmDeps = {
+    ...deps,
+    workAdmission: deps.workAdmission ?? composeSyncWorkAdmission({
+      deadline: deps.deadline,
+    }),
+  };
+  const boundary = createRecoveryExecutionAdmission(deps.recoveryGuard);
+  boundary.assertCurrent();
+  return withKeyedLocks(
+    deps.writeLocks,
+    [contextGraphSwmRecoveryWriteLockKey(deps.contextGraphId)],
+    () => recoverContextGraphSwmUnlocked(admittedDeps, boundary, deps.publicSnapshotStore),
+  );
+});
+
+/**
+ * Recovery-level lock key. Per-KA materialization keeps using the canonical
+ * publisher lock, while this coarser key elects exactly one authoritative
+ * provider recovery sequence for a Context Graph at a time.
+ */
+export function contextGraphSwmRecoveryWriteLockKey(contextGraphId: string): string {
+  return `${contextGraphId}\u0000swm-recovery`;
+}
+
+async function recoverContextGraphSwmUnlocked(
+  deps: AdmittedRecoverContextGraphSwmDeps,
+  boundary: RecoveryExecutionAdmission,
+  snapshotScope: WorkspaceSnapshotScope | undefined,
 ): Promise<RecoverContextGraphSwmResult> {
+  boundary.assertCurrent();
   const wsGraph = contextGraphWorkspaceGraphUri(deps.contextGraphId);
   const wsMetaGraph = contextGraphWorkspaceMetaGraphUri(deps.contextGraphId);
 
-  // Meta first (its rootEntity list is what validates the data subjects), then data.
-  const meta = await fetchPhaseFully(deps, 'meta', wsMetaGraph);
-  const data = await fetchPhaseFully(deps, 'data', wsGraph);
-
-  // All-or-nothing gate (B10): a partial fetch may have cut a root mid-stream,
-  // so applying REPLACE over a prefix would truncate that root. If EITHER phase
-  // is incomplete, mutate nothing — not the data REPLACE, not the additive meta
-  // insert, not the ownership-cache hydration (hydrating roots we didn't write
-  // would desync the ownership map from the store) — and report `completed:
-  // false` so the caller retries. The checkpoint was already dropped above, so
-  // the retry re-accumulates the complete state from offset 0.
-  if (!meta.completed || !data.completed) {
+  // Metadata is the recovery plan: it identifies both legacy roots and exact
+  // graph-scoped assets. Fetch it before deciding whether an aggregate SWM data
+  // scan is necessary.
+  const meta = await fetchPhaseFully(deps, boundary, 'meta', wsMetaGraph);
+  if (meta.outcome !== 'completed') {
     deps.logInfo?.(
       deps.ctx,
-      `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: partial fetch ` +
-      `(meta ${meta.completed ? 'complete' : 'incomplete'}, data ${data.completed ? 'complete' : 'incomplete'}) — skipped, will retry`,
+      `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: ` +
+      'partial metadata fetch — skipped, will retry',
     );
     return {
       replacedRoots: 0,
+      replacedGraphs: 0,
       insertedDataQuads: 0,
       insertedMetaQuads: 0,
       droppedDataTriples: 0,
+      readySnapshots: 0,
+      totalSnapshots: 0,
+      ...(meta.outcome === 'local-budget-yield' ? { localYield: true as const, localYieldFailedPhases: 1 } : {}),
+      phaseFailureCause: meta.outcome === 'local-budget-yield' ? 'local-budget' : 'transport',
       completed: false,
     };
   }
+  const metaQuads = deps.includeRootScope === false
+    ? meta.quads.filter((quad) => (
+      isNamedSubgraphSharedMemoryMetaGraph(deps.contextGraphId, quad.graph)
+    ))
+    : meta.quads;
 
   const registered = deps.getRegisteredSubGraphNames
-    ? await deps.getRegisteredSubGraphNames(deps.contextGraphId)
+    ? await boundary.read(() => deps.getRegisteredSubGraphNames!(deps.contextGraphId))
     : undefined;
   const excluded = deps.getExcludedSubGraphNames
-    ? await deps.getExcludedSubGraphNames(deps.contextGraphId)
+    ? await boundary.read(() => deps.getExcludedSubGraphNames!(deps.contextGraphId))
     : undefined;
+  const recoveryRegistered = [
+    ...new Set([
+      ...(registered ?? []),
+      ...discoverSwmRecoverySubGraphNames({
+        contextGraphId: deps.contextGraphId,
+        metaQuads,
+        excludedSubGraphNames: excluded,
+      }),
+    ]),
+  ];
 
-  const processed = await deps.processSharedMemoryBatch(
-    data.quads, meta.quads, deps.contextGraphId, registered, excluded,
-  );
-
-  await deps.ensureContextGraph(deps.contextGraphId);
-
-  // REPLACE per root (the recovery fix), applied over the COMPLETE fetched state.
-  const applied = await applySwmRecovery({
-    store: deps.store,
-    verifiedData: processed.verifiedData,
-    roots: processed.entityCreators,
+  const graphScopedDescriptors = parseGraphScopedSwmRecoveryDescriptors({
+    contextGraphId: deps.contextGraphId,
+    metaQuads,
+    registeredSubGraphNames: recoveryRegistered,
+    excludedSubGraphNames: excluded,
   });
-  // Codex high: REPLACE the SWM meta for each recovered root (the data was
-  // REPLACEd above; the meta must be too). Otherwise a stale WorkspaceOperation
-  // pointing at the root survives and the TTL sweep later deletes the
-  // freshly-recovered root. Scope to the meta graphs the curator's fresh meta
-  // populates (+ the caller's base fallback when empty). Runs BEFORE the insert.
-  if (processed.entityCreators.length > 0) {
-    const metaGraphs = [...new Set(processed.verifiedMeta.map((q) => q.graph))];
-    await deps.replaceMetaForRoots?.(processed.entityCreators, metaGraphs);
-  }
-  if (processed.verifiedMeta.length > 0) {
-    await deps.store.insert([...processed.verifiedMeta]);
-  }
 
-  // R2 — hydrate the Rule-4 ownership cache for the recovered roots (parity with
-  // runSharedMemorySync); otherwise the member's next contended write to a
-  // recovered root is mis-arbitrated against an empty ownership map.
-  if (deps.ensureOwnedMap) {
-    for (const { dataGraph, entity, creator } of processed.entityCreators) {
-      const ownershipKey = sharedMemoryOwnershipKeyFromGraph(deps.contextGraphId, dataGraph);
-      if (!ownershipKey) continue;
-      const ownedMap = deps.ensureOwnedMap(ownershipKey);
-      if (!ownedMap.has(entity)) ownedMap.set(entity, creator);
+  // Classify legacy roots from metadata alone. The verifier does not need data
+  // rows to derive entityCreators, and this lets a rootless-only CG avoid the
+  // expensive aggregate `_shared_memory` query entirely. That query is both
+  // redundant (the immutable snapshot is the canonical source for an exact
+  // graph asset) and scales with every KA in the CG.
+  const metadataOnlyProcessed = await boundary.read(() => deps.processSharedMemoryBatch(
+    [], metaQuads, deps.contextGraphId, recoveryRegistered, excluded,
+  ));
+  const hasLegacyRoots = metadataOnlyProcessed.entityCreators.length > 0;
+  const hasGraphBackedSnapshots = graphScopedDescriptors.some(
+    (descriptor) => descriptor.snapshotSource.locator.kind === 'graph',
+  );
+  let snapshotProgress: Pick<RecoverContextGraphSwmResult, 'readySnapshots' | 'totalSnapshots' | 'cumulativeResolvedSnapshots'> = {
+    readySnapshots: 0, totalSnapshots: 0,
+  };
+  let snapshotWalkProgress: ManifestBoundSnapshotProgress | undefined;
+  const incrementallyReadyGraphs = new Set<string>();
+  /** Graph keys whose ASSERTION GRAPH was actually (re)written this run. */
+  const rewrittenGraphKeys = new Set<string>();
+  /** Graph keys whose exact content the store already held, so this run wrote none of it. */
+  const heldGraphKeys = new Set<string>();
+  let incrementallyReplacedGraphs = 0;
+  let incrementallyInsertedDataQuads = 0;
+  let incrementallyInsertedMetaQuads = 0;
+
+  const snapshotDescriptorsByRef = new Map<string, GraphScopedSwmRecoveryDescriptor[]>();
+  for (const descriptor of graphScopedDescriptors) {
+    if (descriptor.snapshotSource.locator.kind !== 'store') continue;
+    const { ref } = descriptor.snapshotSource.locator;
+    const descriptors = snapshotDescriptorsByRef.get(ref) ?? [];
+    descriptors.push(descriptor);
+    snapshotDescriptorsByRef.set(ref, descriptors);
+  }
+  const verifiedMetaKeys = new Set(metadataOnlyProcessed.verifiedMeta.map(canonicalQuadKey));
+  let contextGraphEnsured = false;
+
+  const materializeReadySnapshot = async (snapshotRef: string): Promise<void> => {
+    for (const descriptor of snapshotDescriptorsByRef.get(snapshotRef) ?? []) {
+      const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
+      if (incrementallyReadyGraphs.has(graphKey)) continue;
+      const verifiedAssetMeta = descriptor.metadataQuads.filter(
+        (quad) => verifiedMetaKeys.has(canonicalQuadKey(quad)),
+      );
+      if (verifiedAssetMeta.length !== descriptor.metadataQuads.length) {
+        throw new Error(`Verified SWM metadata is incomplete for ${descriptor.kaUal}`);
+      }
+      if (await boundary.read(() => (
+        deps.snapshotMaterializer.isGraphAssetMaterialized(descriptor)
+      ))) {
+        if (
+          descriptor.subGraphName === undefined
+          && deps.resolveRootAtomicCompanion !== undefined
+        ) {
+          // A bounded/partial manifest may stop after this exact ref. Establish
+          // the durable root boundary now, under the canonical KA lock owned by
+          // applyVerifiedSwmRecoveryGraphAsset, instead of waiting for the final
+          // all-manifest plan that this invocation may never reach.
+          const applied = await boundary.admitAsyncMutation(() => (
+            applyVerifiedSwmRecoveryGraphAsset({
+              contextGraphId: deps.contextGraphId,
+              asset: { kind: 'preserve-equivalent', descriptor },
+              ports: {
+                store: deps.store,
+                replaceMetaForGraphAssets: deps.replaceMetaForGraphAssets,
+                snapshotMaterializer: deps.snapshotMaterializer,
+                resolveRootAtomicCompanion: deps.resolveRootAtomicCompanion!,
+              },
+            })
+          ));
+          const withheld = new Set(applied.withholdRows.map(canonicalQuadKey));
+          const insertableMeta = verifiedAssetMeta.filter(
+            (quad) => !withheld.has(canonicalQuadKey(quad)),
+          );
+          if (insertableMeta.length > 0) await deps.store.insert([...insertableMeta]);
+          incrementallyInsertedMetaQuads += insertableMeta.length;
+          rewrittenGraphKeys.add(graphKey);
+        }
+        heldGraphKeys.add(graphKey);
+        incrementallyReadyGraphs.add(graphKey);
+        continue;
+      }
+      const asset = await boundary.read(() => materializeGraphScopedSwmRecoveryAsset({
+        descriptor,
+        fetchedDataQuads: [],
+        publicSnapshotStore: snapshotScope,
+      }));
+      // Admit the retry-safe graph+metadata sequence once. A lease revoked
+      // before admission prevents every mutation; one revoked after graph
+      // replacement starts cannot interrupt the related witness/meta writes.
+      await boundary.admitAsyncMutation(async () => {
+        if (!contextGraphEnsured) {
+          await deps.ensureContextGraph(deps.contextGraphId);
+          contextGraphEnsured = true;
+        }
+        await applyVerifiedSwmRecoveryGraphAsset({
+          contextGraphId: deps.contextGraphId,
+          asset: {
+            kind: 'replace',
+            descriptor,
+            replacementQuads: asset.quads,
+          },
+          ports: {
+            store: deps.store,
+            replaceMetaForGraphAssets: deps.replaceMetaForGraphAssets,
+            snapshotMaterializer: deps.snapshotMaterializer,
+            ...(deps.resolveRootAtomicCompanion === undefined
+              ? {}
+              : { resolveRootAtomicCompanion: deps.resolveRootAtomicCompanion }),
+          },
+        });
+        if (verifiedAssetMeta.length > 0) {
+          await deps.store.insert([...verifiedAssetMeta]);
+        }
+      });
+      incrementallyReadyGraphs.add(graphKey);
+      rewrittenGraphKeys.add(graphKey);
+      incrementallyReplacedGraphs += 1;
+      incrementallyInsertedDataQuads += asset.quads.length;
+      incrementallyInsertedMetaQuads += verifiedAssetMeta.length;
+      deps.logInfo?.(
+        deps.ctx,
+        `SWM recovery for "${deps.contextGraphId}": committed verified snapshot ${snapshotRef} ` +
+        `as ${descriptor.assertionGraph} (${asset.quads.length} triples)`,
+      );
+    }
+  };
+
+  // Fetch store-backed snapshots before any aggregate data scan. Each completed
+  // snapshot is persisted independently, so a deadline can make monotonic
+  // progress across retries while memory remains bounded to one KA rather than
+  // the complete context graph.
+  if (graphScopedDescriptors.length > 0) {
+    const activeGraphMeta = canonicalGraphScopedSnapshotManifestQuads(
+      graphScopedDescriptors.flatMap((descriptor) => [...descriptor.metadataQuads]),
+      graphScopedDescriptors,
+    );
+    const orderedManifest = collectPublicSnapshotMetadata(activeGraphMeta);
+    snapshotWalkProgress = deps.snapshotWalkProgress?.(orderedManifest);
+    const privatePreparation = snapshotWalkProgress
+      ? await preparePrivateSwmSnapshotWalk(snapshotWalkProgress, {
+        workAdmission: deps.workAdmission,
+        validateRef: async (resolvedRef) => {
+          const descriptors = snapshotDescriptorsByRef.get(resolvedRef) ?? [];
+          let stillMaterialized = descriptors.length > 0;
+          for (const descriptor of descriptors) {
+            if (!stillMaterialized) break;
+            stillMaterialized = await boundary.read(() => (
+              deps.snapshotMaterializer.isGraphAssetMaterialized(descriptor)
+            ));
+          }
+          return stillMaterialized;
+        },
+      })
+      : undefined;
+    if (privatePreparation?.kind === 'local-budget-yield') {
+      deps.logInfo?.(
+        deps.ctx,
+        `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: `
+        + 'retained snapshot validation exhausted the local budget — will retry',
+      );
+      return {
+        localYield: true,
+        localYieldFailedPhases: 1,
+        phaseFailureCause: 'local-budget',
+        replacedRoots: 0,
+        replacedGraphs: 0,
+        insertedDataQuads: 0,
+        insertedMetaQuads: 0,
+        droppedDataTriples: 0,
+        readySnapshots: privatePreparation.validatedRefs,
+        cumulativeResolvedSnapshots: snapshotWalkProgress?.resolvedCount(),
+        totalSnapshots: orderedManifest.length,
+        completed: false,
+      };
+    }
+    boundary.assertCurrent();
+    const snapshotSync = await syncPublicSnapshotsInScope({
+      ctx: deps.ctx,
+      remotePeerId: deps.remotePeerId,
+      contextGraphId: deps.contextGraphId,
+      deadline: deps.deadline,
+      workAdmission: deps.workAdmission,
+      ...(privatePreparation?.kind === 'prepared'
+        ? { snapshotWalk: privatePreparation.plan }
+        : { metaQuads: activeGraphMeta }),
+      publicSnapshotStore: snapshotScope,
+      // Raw ports: syncPublicSnapshotsInScope is the sole owner of admission,
+      // post-read checks, signal attachment, and checkpoint commits.
+      fetchSyncPages: deps.fetchSyncPages,
+      deleteCheckpoint: deps.deleteCheckpoint,
+      setCheckpoint: deps.setCheckpoint,
+      executionBoundary: boundary,
+      onSnapshotReady: async (snapshot) => {
+        await materializeReadySnapshot(snapshot.ref);
+        snapshotWalkProgress?.markResolved(snapshot.ref);
+      },
+    });
+    snapshotProgress = {
+      readySnapshots: snapshotSync.readySnapshots,
+      ...(snapshotWalkProgress
+        ? { cumulativeResolvedSnapshots: snapshotWalkProgress.resolvedCount() }
+        : {}),
+      totalSnapshots: snapshotSync.totalSnapshots,
+    };
+    if (!snapshotSync.completed) {
+      deps.logInfo?.(
+        deps.ctx,
+        `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: ` +
+        'graph-scoped public snapshot fetch incomplete — skipped, will retry',
+      );
+      return {
+        replacedRoots: 0,
+        replacedGraphs: incrementallyReplacedGraphs,
+        insertedDataQuads: incrementallyInsertedDataQuads,
+        insertedMetaQuads: incrementallyInsertedMetaQuads,
+        droppedDataTriples: 0,
+        ...snapshotProgress,
+        ...(snapshotSync.localYield
+          ? { localYield: snapshotSync.localYield, localYieldFailedPhases: snapshotSync.localYieldFailedPhases }
+          : {}),
+        phaseFailureCause: snapshotSync.phaseFailureCause ?? 'transport',
+        completed: false,
+      };
     }
   }
+
+  // Only legacy roots and old graph-backed snapshot rows require the aggregate
+  // data phase. New rootless KAs use immutable snapshot refs and never enter
+  // this path.
+  const needsAggregateData = hasLegacyRoots || hasGraphBackedSnapshots;
+  const data = needsAggregateData
+    ? await fetchPhaseFully(deps, boundary, 'data', wsGraph)
+    : { quads: [] as Quad[], outcome: 'completed' as const };
+
+  // Legacy row pagination can cut a root (or a graph-backed snapshot) in the
+  // middle. Preserve the existing all-or-nothing gate for that compatibility
+  // path; store-backed exact assets above do not depend on it.
+  if (data.outcome !== 'completed') {
+    deps.logInfo?.(
+      deps.ctx,
+      `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: ` +
+      'partial legacy data fetch — skipped, will retry',
+    );
+    return {
+      replacedRoots: 0,
+      replacedGraphs: incrementallyReplacedGraphs,
+      insertedDataQuads: incrementallyInsertedDataQuads,
+      insertedMetaQuads: incrementallyInsertedMetaQuads,
+      droppedDataTriples: 0,
+      ...snapshotProgress,
+      ...(data.outcome === 'local-budget-yield' ? { localYield: true as const, localYieldFailedPhases: 1 } : {}),
+      phaseFailureCause: data.outcome === 'local-budget-yield' ? 'local-budget' : 'transport',
+      completed: false,
+    };
+  }
+  const dataQuads = deps.includeRootScope === false
+    ? data.quads.filter((quad) => (
+      isNamedSubgraphSharedMemoryDataGraph(deps.contextGraphId, quad.graph)
+    ))
+    : data.quads;
+
+  // Rootless exact graphs and graph-backed immutable snapshots are verified
+  // per KA below. Keep them out of the legacy rootEntity worker path so they
+  // are not counted as invalid root subjects or inserted by union.
+  const graphScopedTransportGraphs = new Set<string>();
+  for (const descriptor of graphScopedDescriptors) {
+    graphScopedTransportGraphs.add(descriptor.assertionGraph);
+    if (descriptor.snapshotSource.locator.kind === 'graph') {
+      graphScopedTransportGraphs.add(descriptor.snapshotSource.locator.graph);
+    }
+  }
+  const legacyDataQuads = dataQuads.filter(
+    (quad) => !graphScopedTransportGraphs.has(quad.graph),
+  );
+
+  const processed = needsAggregateData
+    ? await boundary.read(() => deps.processSharedMemoryBatch(
+      legacyDataQuads, metaQuads, deps.contextGraphId, recoveryRegistered, excluded,
+    ))
+    : metadataOnlyProcessed;
+
+  const graphAssets: VerifiedSwmRecoveryGraphApply[] = [];
+  for (const descriptor of graphScopedDescriptors) {
+    const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
+    const retainedSnapshotRef = descriptor.snapshotSource.locator.kind === 'store'
+      ? descriptor.snapshotSource.locator.ref
+      : undefined;
+    const retainedReady = retainedSnapshotRef !== undefined
+      && snapshotWalkProgress?.isResolved(retainedSnapshotRef) === true;
+    if (incrementallyReadyGraphs.has(graphKey) || retainedReady) {
+      // A ref an earlier round resolved was re-validated as still materialized
+      // before this round's walk, which then skipped it.
+      if (!incrementallyReadyGraphs.has(graphKey)) heldGraphKeys.add(graphKey);
+      graphAssets.push(Object.freeze({
+        descriptor,
+        kind: rewrittenGraphKeys.has(graphKey)
+          ? 'already-replaced'
+          : 'preserve-equivalent',
+      }));
+      continue;
+    }
+    const asset = await boundary.read(() => materializeGraphScopedSwmRecoveryAsset({
+      descriptor,
+      fetchedDataQuads: dataQuads,
+      publicSnapshotStore: snapshotScope,
+    }));
+    graphAssets.push(Object.freeze({
+      kind: 'replace',
+      descriptor,
+      replacementQuads: Object.freeze([...asset.quads]),
+    }));
+  }
+
+  const applyPlan = createVerifiedSwmRecoveryApplyPlan({
+    contextGraphId: deps.contextGraphId,
+    rootData: processed.verifiedData,
+    roots: processed.entityCreators,
+    graphAssets,
+    verifiedMeta: processed.verifiedMeta,
+  });
+  const applied = await applyVerifiedSwmRecoveryPlan({
+    plan: applyPlan,
+    executionBoundary: boundary,
+    ports: {
+      store: deps.store,
+      ensureContextGraph: deps.ensureContextGraph,
+      replaceMetaForRoots: deps.replaceMetaForRoots,
+      replaceMetaForGraphAssets: deps.replaceMetaForGraphAssets,
+      snapshotMaterializer: deps.snapshotMaterializer,
+      ...(deps.resolveRootAtomicCompanion === undefined
+        ? {}
+        : { resolveRootAtomicCompanion: deps.resolveRootAtomicCompanion }),
+      ensureOwnedMap: deps.ensureOwnedMap,
+    },
+  });
+  // The admitted mutation sequence must drain after revocation, but a stale
+  // invocation must never be accounted as a completed recovery target.
+  boundary.assertCurrent();
 
   if (processed.droppedDataTriples > 0) {
     deps.logWarn?.(deps.ctx, `SWM recovery for "${deps.contextGraphId}" dropped ${processed.droppedDataTriples} triples with invalid subjects`);
@@ -226,14 +772,19 @@ export async function recoverContextGraphSwm(
   deps.logInfo?.(
     deps.ctx,
     `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: replaced ${applied.replacedRoots} roots, ` +
-    `${applied.insertedQuads} data + ${processed.verifiedMeta.length} meta triples`,
+    `${applied.replacedGraphs} exact graphs, ` +
+    `${applied.insertedRootQuads + applied.insertedGraphQuads} data + ` +
+    `${applied.insertedMetaQuads} meta triples`,
   );
 
   return {
     replacedRoots: applied.replacedRoots,
-    insertedDataQuads: applied.insertedQuads,
-    insertedMetaQuads: processed.verifiedMeta.length,
+    replacedGraphs: applied.replacedGraphs,
+    insertedDataQuads: applied.insertedRootQuads + applied.insertedGraphQuads,
+    insertedMetaQuads: applied.insertedMetaQuads,
     droppedDataTriples: processed.droppedDataTriples,
+    alreadyHeldGraphs: heldGraphKeys.size,
+    ...snapshotProgress,
     completed: true,
   };
 }

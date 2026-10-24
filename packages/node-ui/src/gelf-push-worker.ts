@@ -44,7 +44,7 @@ export interface LogPushWorkerOptions {
   role?: string;
   /** Whether auto-update is enabled */
   autoUpdate?: boolean;
-  /** Dynamic getter returning version status: latest | updating | behind | disabled | unknown */
+  /** Dynamic getter returning the daemon's current update status. */
   versionStatus?: () => string;
 }
 

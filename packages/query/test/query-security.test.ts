@@ -8,8 +8,8 @@
  * - Standard context-graph-scoped queries still work correctly
  */
 import { readFileSync } from 'node:fs';
-import { describe, it, expect, beforeEach } from 'vitest';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import { QueryHandler } from '../src/query-handler.js';
 import type { QueryRequest, QueryAccessConfig } from '../src/query-types.js';
@@ -202,6 +202,88 @@ describe('I-009: SPARQL graph scope bypass prevention', () => {
     expect(response.error).toContain('GRAPH clauses are not allowed');
   });
 
+  it('rejects an explicit GRAPH target written with UCHAR delimiters', async () => {
+    const response = await handler.handle(
+      makeRequest({
+        sparql: String.raw`SELECT ?name WHERE { GRAPH \u003C${OTHER_GRAPH}\u003E { ?s <${SCHEMA_NAME}> ?name } }`,
+      }),
+      'peer-attacker',
+    );
+
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('GRAPH clauses are not allowed');
+  });
+
+  it('rejects an escaped GRAPH keyword before invoking the query engine', async () => {
+    const boundary = makeNoExecuteBoundary();
+
+    const response = await boundary.handler.handle(
+      makeRequest({
+        sparql: String.raw`SELECT ?name WHERE { \u0047RAPH \u003C${OTHER_GRAPH}\u003E { ?s <${SCHEMA_NAME}> ?name } }`,
+      }),
+      'peer-attacker',
+    );
+
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('GRAPH clauses are not allowed');
+    expect(boundary.wasExecuted()).toBe(false);
+  });
+
+  it('rejects an escaped SERVICE keyword before invoking the query engine', async () => {
+    const boundary = makeNoExecuteBoundary();
+
+    const response = await boundary.handler.handle(
+      makeRequest({
+        sparql: String.raw`SELECT * WHERE { \u0053ERVICE \u003Chttp://127.0.0.1:8080/sparql\u003E { ?s ?p ?o } }`,
+      }),
+      'peer-attacker',
+    );
+
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('SERVICE clauses are not allowed');
+    expect(boundary.wasExecuted()).toBe(false);
+  });
+
+  it('keeps escaped SERVICE text inside strings and comments inert', async () => {
+    const response = await handler.handle(
+      makeRequest({
+        sparql: String.raw`SELECT ?x WHERE { BIND("\u0053ERVICE" AS ?x) # \u00ZZ \u0053ERVICE
+}`,
+      }),
+      'peer-1',
+    );
+
+    expect(response.status).toBe('OK');
+  });
+
+  it('rejects escaped SERVICE again at the engine execution boundary', async () => {
+    await expect(engine.query(
+      String.raw`SELECT * WHERE { \u0053ERVICE \u003Chttp://127.0.0.1/sparql\u003E { ?s ?p ?o } }`,
+    )).rejects.toThrow('SERVICE clauses are not allowed');
+  });
+
+  it('rejects malformed UCHAR escapes before executing SPARQL', async () => {
+    await expect(engine.query(
+      String.raw`SELECT ?name WHERE { ?s <${SCHEMA_NAME}> \u00ZZ }`,
+      { contextGraphId: CONTEXT_GRAPH },
+    )).rejects.toThrow('malformed Unicode code-point escape');
+  });
+
+  it.each([
+    ['SERVICE', String.raw`SELECT * WHERE { \u005Cu0053ERVICE <http://127.0.0.1/sparql> { ?s ?p ?o } }`],
+    ['GRAPH', String.raw`SELECT * WHERE { \u005Cu0047RAPH <${OTHER_GRAPH}> { ?s ?p ?o } }`],
+    ['FROM', String.raw`SELECT * \u005Cu0046ROM <${OTHER_GRAPH}> WHERE { ?s ?p ?o }`],
+    ['mutation', String.raw`SELECT * WHERE {} \u005Cu0044ELETE DATA { <urn:s> <urn:p> <urn:o> }`],
+  ])('rejects double-encoded %s syntax before store dispatch', async (_label, sparql) => {
+    const query = vi.fn<TripleStore['query']>();
+    const noExecuteEngine = new DKGQueryEngine({ query } as unknown as TripleStore);
+
+    await expect(noExecuteEngine.query(sparql, {
+      contextGraphId: CONTEXT_GRAPH,
+    })).rejects.toThrow('malformed Unicode code-point escape');
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it('rejects SPARQL with FROM clause', async () => {
     const response = await handler.handle(
       makeRequest({
@@ -220,6 +302,21 @@ describe('I-009: SPARQL graph scope bypass prevention', () => {
     const response = await boundary.handler.handle(
       makeRequest({
         sparql: `SELECT ?name FROM<${OTHER_GRAPH}> WHERE { ?s <${SCHEMA_NAME}> ?name }`,
+      }),
+      'peer-attacker',
+    );
+
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('FROM');
+    expect(boundary.wasExecuted()).toBe(false);
+  });
+
+  it('rejects an escaped FROM keyword before invoking the query engine', async () => {
+    const boundary = makeNoExecuteBoundary();
+
+    const response = await boundary.handler.handle(
+      makeRequest({
+        sparql: String.raw`SELECT ?name \u0046ROM \u003C${OTHER_GRAPH}\u003E WHERE { ?s <${SCHEMA_NAME}> ?name }`,
       }),
       'peer-attacker',
     );

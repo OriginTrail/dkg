@@ -325,7 +325,7 @@ case "$POST_STATE" in
     fail "job back to state=queued — recovery wrongly demoted running → queued. RFC §6.2 explicitly forbids this; would cause duplicate execution."
     ;;
   failed)
-    if printf '%s' "$POST_REASON" | grep -qi 'partial promote ambiguity\|lease expired'; then
+    if grep -qi 'partial promote ambiguity\|lease expired' <<<"$POST_REASON"; then
       CLASSIFICATION="GREEN: recovery correctly abandoned expired-lease job ('$POST_REASON')"
     else
       fail "job state=failed but reason did not match expected expired-lease patterns: '$POST_REASON'. Recovery may have abandoned a still-valid lease."

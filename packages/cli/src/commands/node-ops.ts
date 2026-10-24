@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { readFile, writeFile, unlink, appendFile } from 'node:fs/promises';
 import { ethers } from 'ethers';
-import { resolveRpcUrls } from '@origintrail-official/dkg-chain';
+import { connectConfiguredRemoteSigners, resolveChainSignerConfig, resolveRpcUrls } from '@origintrail-official/dkg-chain';
 import {
   dkgAuthTokenPath,
   FAUCET_WALLETS_PER_REQUEST,
@@ -22,7 +22,7 @@ import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
-  loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig, resolveReadyChainConfig,
+  loadNetworkConfig, loadResolvedNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig, resolveReadyChainConfig,
   releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
@@ -86,14 +86,9 @@ import {
   isCliKnownTransactionError,
   isCliRetryableRpcError,
   createCliEvmProviders,
-  getCliReceiptWithFailover,
-  assertCliSuccessfulReceipt,
   sendCliRawTransactionWithFailover,
   CLI_RPC_READ_STALL_TIMEOUT_MS,
   CLI_RPC_BROADCAST_TIMEOUT_MS,
-  CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
-  CLI_RPC_RECEIPT_POLL_INTERVAL_MS,
-  CLI_RPC_RECEIPT_TIMEOUT_MS,
 } from '../cli-rpc.js';
 import {
   appendSupervisorLog,
@@ -132,9 +127,16 @@ program
   .action(async () => {
     try {
       const config = await loadConfig();
-      const network = await loadNetworkConfig(config.networkConfig);
-      const { loadOpWallets } = await import('@origintrail-official/dkg-agent');
-      const opWallets = await loadOpWallets(dkgDir());
+      const { network } = await loadResolvedNetworkConfig(config, loadNetworkConfig);
+      // With an external signer the addresses come from the signer and no
+      // wallets.json is read or created.
+      const remoteSigner = resolveChainSignerConfig(config.chain?.signer);
+      const external = remoteSigner === undefined ? undefined : await connectConfiguredRemoteSigners(remoteSigner);
+      // Only the accounts the signer reported are shown: its connections close now.
+      external?.destroy();
+      const opWallets = external === undefined
+        ? await (await import('@origintrail-official/dkg-agent')).loadOpWallets(dkgDir())
+        : { adminWallet: undefined, wallets: external.operational.map((signer) => ({ address: signer.address })) };
 
       if (!opWallets.wallets.length) {
         console.error('No operational wallets found. Run "dkg start" to auto-generate them.');
@@ -182,11 +184,13 @@ program
             console.log('  (unable to query balances)');
           }
         }
+      } else if (external) {
+        console.log('  (none: the node holds no admin key; perform admin-key operations outside the node)');
       } else {
         console.log('  (missing from legacy wallets.json; add the profile admin key to enable key management)');
       }
 
-      console.log(`\nOperational wallets (${opWallets.wallets.length}):\n`);
+      console.log(`\n${external ? 'Payer wallets (external signer)' : 'Operational wallets'} (${opWallets.wallets.length}):\n`);
       for (let i = 0; i < opWallets.wallets.length; i++) {
         const addr = opWallets.wallets[i].address;
         const label = i === 0 ? '(primary)' : `(pool #${i + 1})`;
@@ -202,10 +206,22 @@ program
         }
       }
 
+      if (external?.authors) {
+        console.log(`\nAuthor keys (external signer; own published assets, never pay):\n`);
+        for (const address of external.authors.addresses) {
+          const label = address === external.authors.defaultAuthor?.address ? '(default)' : '(agent)';
+          console.log(`  ${label} ${address}`);
+        }
+      }
+
       console.log(`\n  Chain: ${chainId}`);
       if (rpcUrl) console.log(`  RPC:   ${rpcUrl}`);
       if (chainResolved?.rpcUrls?.length) console.log(`  RPC backups: ${chainResolved.rpcUrls.join(', ')}`);
-      console.log(`  File:  ~/.dkg/wallets.json`);
+      console.log(external ? `  Signer: ${external.operational[0].client.endpoint}` : `  File:  ~/.dkg/wallets.json`);
+      if (external) {
+        console.log('\nFund the payer wallets with gas, and TRAC or a Publishing Conviction Account that covers them.\n');
+        return;
+      }
       console.log('\nFund these addresses with ETH (gas) and TRAC (staking/publishing).');
       if (opWallets.adminWallet) {
         console.log('The admin wallet is used for profile key management. The primary operational wallet is used for staking; all operational wallets are used for publishing.\n');
@@ -227,7 +243,15 @@ program
   .action(async (amount: string, opts: ActionOpts) => {
     try {
       const config = await loadConfig();
-      const network = await loadNetworkConfig(config.networkConfig);
+      if (resolveChainSignerConfig(config.chain?.signer) !== undefined) {
+        console.error(
+          'dkg set-ask signs with a local operational key. With chain.signer.type "remote" the node holds ' +
+          'no such key (external signing is supported for edge nodes, which have no ask); call ' +
+          'Profile.updateAsk with your own signing tooling instead.',
+        );
+        process.exit(1);
+      }
+      const { network } = await loadResolvedNetworkConfig(config, loadNetworkConfig);
       const { loadOpWallets } = await import('@origintrail-official/dkg-agent');
       const opWallets = await loadOpWallets(dkgDir());
 
@@ -250,7 +274,12 @@ program
         process.exit(1);
       }
 
-      const { urls, providers, readProvider } = createCliEvmProviders(rpcUrl, chainResolved?.rpcUrls);
+      const rpcContext = createCliEvmProviders(
+        rpcUrl,
+        chainResolved?.rpcUrls,
+        chainResolved.receiptTimeoutMs,
+      );
+      const { readProvider } = rpcContext;
       const wallet = new ethers.Wallet(opWallets.wallets[0].privateKey, readProvider);
 
       const hub = new ethers.Contract(hubAddress, [
@@ -302,7 +331,11 @@ program
       const signedTx = await wallet.signTransaction(filled);
       const txHash = ethers.Transaction.from(signedTx).hash ?? '0x';
       console.log(`  TX: ${txHash}`);
-      const receipt = await sendCliRawTransactionWithFailover(providers, signedTx, txHash, urls);
+      const receipt = await sendCliRawTransactionWithFailover(
+        rpcContext,
+        signedTx,
+        txHash,
+      );
       console.log(`  Confirmed in block ${receipt.blockNumber}`);
       console.log(`  New ask: ${amount} TRAC`);
     } catch (err) {

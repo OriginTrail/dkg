@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path';
 import { readFile, writeFile, unlink, appendFile } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { resolveRpcUrls } from '@origintrail-official/dkg-chain';
+import type { AsyncLiftRetryOutcome } from '@origintrail-official/dkg-publisher';
 import {
   dkgAuthTokenPath,
   FAUCET_WALLETS_PER_REQUEST,
@@ -30,6 +31,7 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
+import { normalizeContextGraphIdOrUri } from '../context-graph-identifiers.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { addFinalizedPublishOptions, parseFinalizedPublishOptions } from './finalized-publish-command-options.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
@@ -87,14 +89,9 @@ import {
   isCliKnownTransactionError,
   isCliRetryableRpcError,
   createCliEvmProviders,
-  getCliReceiptWithFailover,
-  assertCliSuccessfulReceipt,
   sendCliRawTransactionWithFailover,
   CLI_RPC_READ_STALL_TIMEOUT_MS,
   CLI_RPC_BROADCAST_TIMEOUT_MS,
-  CLI_RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
-  CLI_RPC_RECEIPT_POLL_INTERVAL_MS,
-  CLI_RPC_RECEIPT_TIMEOUT_MS,
 } from '../cli-rpc.js';
 import {
   appendSupervisorLog,
@@ -178,7 +175,12 @@ publisherCmd
   .action(async (opts: ActionOpts) => {
     try {
       const config = await loadConfig();
+      // Spread first so the keys this command does NOT manage survive — notably
+      // the GH#2270 retry knobs (autoRetryEnabled, retryJitterRatio,
+      // retryBackoffBaseMs/MaxMs), which a wholesale replace would erase on the
+      // next `dkg publisher enable`. Mirrors `publisher disable` below.
       config.publisher = {
+        ...(config.publisher ?? {}),
         enabled: true,
         pollIntervalMs: parsePositiveMsOption(String(opts.pollInterval ?? '12000'), '--poll-interval'),
         errorBackoffMs: parsePositiveMsOption(String(opts.errorBackoff ?? '5000'), '--error-backoff'),
@@ -236,6 +238,7 @@ publisherCmd
   .command('jobs')
   .description('List async publisher jobs')
   .option('--status <value>', 'Filter by status')
+  .option('--context-graph <id>', 'Context graph to list (required for agent tokens)')
   .action(async (opts: ActionOpts) => {
     try {
       const status = opts.status ? String(opts.status) : undefined;
@@ -244,10 +247,11 @@ publisherCmd
         process.exit(1);
       }
 
+      const contextGraphId = opts.contextGraph ? String(opts.contextGraph) : undefined;
       let jobs: any[];
       try {
         const client = await ApiClient.connect();
-        const result = await client.publisherJobs(status);
+        const result = await client.publisherJobs(status, contextGraphId);
         jobs = result.jobs;
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
@@ -255,7 +259,10 @@ publisherCmd
         const { createPublisherInspector } = await import('../publisher-runner.js');
         const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
         try {
-          jobs = await inspector.publisher.list(status ? { status: status as any } : undefined);
+          jobs = await inspector.publisher.list({
+            ...(status ? { status: status as any } : {}),
+            ...(contextGraphId ? { contextGraphId: normalizeContextGraphIdOrUri(contextGraphId) } : {}),
+          });
         } finally {
           await inspector.stop();
         }
@@ -276,12 +283,16 @@ publisherCmd
       let result: any;
       try {
         const client = await ApiClient.connect();
+        // GH#2942 - the daemon derives `retryState` (why the job is not moving) beside the job;
+        // printing only the job dropped exactly the part an operator needs for a held one. It is
+        // a top-level key, so the job's own fields are untouched. The offline inspector below has
+        // no runtime wiring to derive it from, and says nothing rather than something misleading.
         if (opts.payload) {
           const resp = await client.publisherJobPayload(jobId);
-          result = { ...resp.job, payload: resp.payload };
+          result = { ...resp.job, payload: resp.payload, retryState: resp.retryState };
         } else {
           const resp = await client.publisherJob(jobId);
-          result = resp.job;
+          result = { ...resp.job, retryState: resp.retryState };
         }
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
@@ -379,23 +390,30 @@ publisherCmd
         console.error(`Invalid retry status: ${status}. Only "failed" is supported.`);
         process.exit(1);
       }
-      let count: number;
+      // GH#2270 — the full disposition of the pass. `retried` keeps its old sentence so
+      // existing operator habits (and scripts scraping it) still read; the other two say
+      // why the remaining failed jobs were left alone, which the old output hid entirely.
+      let outcome: AsyncLiftRetryOutcome;
       try {
         const client = await ApiClient.connect();
-        const result = await client.publisherRetry(status);
-        count = result.retried;
+        outcome = await client.publisherRetry(status);
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
         const config = await loadConfig();
         const { createPublisherInspector } = await import('../publisher-runner.js');
         const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
         try {
-          count = await inspector.publisher.retry({ status: 'failed' });
+          outcome = await inspector.publisher.retryDetailed({ status: 'failed' });
         } finally {
           await inspector.stop();
         }
       }
-      console.log(`Retried ${count} publisher job(s).`);
+      console.log(`Retried ${outcome.retried} publisher job(s).`);
+      console.log(
+        `Left failed: ${outcome.blockedPendingRecovery} awaiting chain proof `
+          + `(a transaction may exist), ${outcome.skipped} with nothing to retry `
+          + '(terminal failure or retry budget spent).',
+      );
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);

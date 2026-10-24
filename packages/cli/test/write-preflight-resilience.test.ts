@@ -38,15 +38,19 @@ import {
   WRITE_PREFLIGHT_CHAIN_RESCUE_TIMEOUT_MS,
 } from '../src/daemon/http-utils.js';
 import { ContextGraphResolveMethods } from '../../agent/src/dkg-agent-cg-resolve.js';
+import type { ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-agent';
 import { OxigraphWorkerStore, createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
   contextGraphDataGraphUri,
+  contextGraphMetaGraphUri,
 } from '@origintrail-official/dkg-core';
 
 const CG = 'resilience-cg';
+const CALLER = '0x2222222222222222222222222222222222222222';
 const UNSCOPED = { callerAgentAddress: undefined, allowLocalExactFallback: true } as const;
+const SCOPED = { callerAgentAddress: CALLER, allowLocalExactFallback: false } as const;
 
 // Real prototype methods from the agent mixin — the exact code the daemon
 // runs, bound to a narrow harness instead of a full DKGAgent (which would
@@ -552,6 +556,580 @@ describe('resolveRequiredWriteContextGraphId — healthy-store paths unchanged',
     const probe = await harness.probeContextGraphWritePreflight(seededCg);
     expect(probe.storeUnavailable).toBeUndefined();
     expect(probe.exists).toBe(true);
+  });
+
+  it('accepts an authenticated caller of an explicitly public canonical graph without listing', async () => {
+    const seededCg = '0x1111111111111111111111111111111111111111/public-scoped-allow';
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const cgUri = `did:dkg:context-graph:${seededCg}`;
+    await healthyStore.insert([
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: ontologyGraph,
+      },
+    ]);
+    const harness = agentHarness(
+      healthyStore,
+      new Map([[seededCg, { subscribed: true, synced: true }]]),
+    );
+    const { provider, listCalls } = providerFor(harness);
+    const { res, out } = captureRes();
+
+    const resolved = await resolveRequiredWriteContextGraphId(provider, seededCg, res, SCOPED);
+
+    expect(resolved).toBe(seededCg);
+    expect(out.status).toBeUndefined();
+    expect(listCalls).toEqual([]);
+    await expect(harness.probeContextGraphWritePreflight(
+      seededCg,
+      { callerAgentAddress: CALLER },
+    )).resolves.toMatchObject({
+      accessPolicy: 'public',
+      callerAuthorized: true,
+    });
+  });
+
+  it('never falls back to the full catalog when a canonical exact probe is unavailable', async () => {
+    const qualified = '0x1111111111111111111111111111111111111111/qualified-cg';
+    let listCalls = 0;
+    const provider = {
+      async listContextGraphs() {
+        listCalls += 1;
+        return [];
+      },
+      async probeContextGraphWritePreflight() {
+        return {
+          storeAvailable: false,
+          storeUnavailable: true,
+          storeErrorMessage: 'Store scheduler queue wait timeout',
+        } as ContextGraphWritePreflightProbe;
+      },
+      async validateWriteTargetDuringStoreOutage() {
+        return false;
+      },
+    };
+    const { res, out } = captureRes();
+
+    const resolved = await resolveRequiredWriteContextGraphId(
+      provider,
+      qualified,
+      res,
+      UNSCOPED,
+    );
+
+    expect(resolved).toBeNull();
+    expect(listCalls).toBe(0);
+    expect(out.status).toBe(503);
+    expect(out.body).toMatchObject({ code: 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE' });
+    expect(out.body.error).toContain('exact preflight failed: Store scheduler queue wait timeout');
+  });
+
+  it('rescues a canonical id from positive on-chain proof without scanning the catalog', async () => {
+    const qualified = '0x1111111111111111111111111111111111111111/rescued-cg';
+    let listCalls = 0;
+    const provider = {
+      async listContextGraphs() {
+        listCalls += 1;
+        return [];
+      },
+      async probeContextGraphWritePreflight() {
+        return {
+          storeAvailable: false,
+          storeUnavailable: true,
+          storeErrorMessage: 'Store scheduler queue wait timeout',
+        } as ContextGraphWritePreflightProbe;
+      },
+      async validateWriteTargetDuringStoreOutage() {
+        return true;
+      },
+    };
+    const { res, out } = captureRes();
+
+    const resolved = await resolveRequiredWriteContextGraphId(
+      provider,
+      qualified,
+      res,
+      UNSCOPED,
+    );
+
+    expect(resolved).toBe(qualified);
+    expect(listCalls).toBe(0);
+    expect(out.status).toBeUndefined();
+  });
+
+  it('rejects an unknown canonical id from exact evidence without scanning the catalog', async () => {
+    const qualified = '0x1111111111111111111111111111111111111111/missing-cg';
+    let listCalls = 0;
+    const provider = {
+      async listContextGraphs() {
+        listCalls += 1;
+        return [];
+      },
+      async probeContextGraphWritePreflight() {
+        return {
+          storeAvailable: true,
+          exists: false,
+          hasLocalContent: false,
+          declarationFound: false,
+        } as ContextGraphWritePreflightProbe;
+      },
+    };
+    const { res, out } = captureRes();
+
+    const resolved = await resolveRequiredWriteContextGraphId(
+      provider,
+      qualified,
+      res,
+      UNSCOPED,
+    );
+
+    expect(resolved).toBeNull();
+    expect(listCalls).toBe(0);
+    expect(out.status).toBe(400);
+    expect(out.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_FOUND' });
+  });
+
+  it('fast-accepts an exact private synced CG for a trusted local caller without listing every CG', async () => {
+    const seededCg = '0x1111111111111111111111111111111111111111/private-fast-path';
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const cgUri = `did:dkg:context-graph:${seededCg}`;
+    await healthyStore.insert([
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"private"',
+        graph: ontologyGraph,
+      },
+    ]);
+    const harness = agentHarness(
+      healthyStore,
+      new Map([[seededCg, { subscribed: true, synced: true }]]),
+    );
+    const { provider, listCalls } = providerFor(harness);
+    const { res, out } = captureRes();
+
+    const resolved = await resolveRequiredWriteContextGraphId(
+      provider,
+      seededCg,
+      res,
+      UNSCOPED,
+    );
+
+    expect(resolved).toBe(seededCg);
+    expect(out.status).toBeUndefined();
+    expect(listCalls).toEqual([]);
+    await expect(harness.probeContextGraphWritePreflight(seededCg)).resolves.toMatchObject({
+      storeAvailable: true,
+      exists: true,
+      accessPolicy: 'private',
+    });
+  });
+
+  it('does not extend the trusted local private fast path to a scoped unauthorized agent', async () => {
+    const seededCg = '0x1111111111111111111111111111111111111111/private-scoped-deny';
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const cgUri = `did:dkg:context-graph:${seededCg}`;
+    await healthyStore.insert([
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"private"',
+        graph: ontologyGraph,
+      },
+    ]);
+    const harness = agentHarness(
+      healthyStore,
+      new Map([[seededCg, { subscribed: true, synced: true }]]),
+    );
+    const { provider, listCalls } = providerFor(harness);
+    const { res, out } = captureRes();
+
+    const resolved = await resolveRequiredWriteContextGraphId(
+      provider,
+      seededCg,
+      res,
+      SCOPED,
+    );
+
+    expect(resolved).toBeNull();
+    expect(out.status).toBe(400);
+    expect(out.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_FOUND' });
+    expect(listCalls).toEqual([]);
+  });
+
+  it('accepts an explicitly private canonical graph for an authorized scoped caller without listing', async () => {
+    const seededCg = '0x1111111111111111111111111111111111111111/private-scoped-allow';
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const cgUri = `did:dkg:context-graph:${seededCg}`;
+    await healthyStore.insert([
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"private"',
+        graph: ontologyGraph,
+      },
+    ]);
+    const harness = agentHarness(
+      healthyStore,
+      new Map([[seededCg, { subscribed: true, synced: true }]]),
+    );
+    harness.callerIsAllowlistedAgentParticipant = async () => true;
+    const { provider, listCalls } = providerFor(harness);
+    const { res, out } = captureRes();
+
+    const resolved = await resolveRequiredWriteContextGraphId(provider, seededCg, res, SCOPED);
+
+    expect(resolved).toBe(seededCg);
+    expect(out.status).toBeUndefined();
+    expect(listCalls).toEqual([]);
+  });
+
+  it('authorizes a canonical gate-only private graph through the bounded exact probe', async () => {
+    const seededCg = '0x1111111111111111111111111111111111111111/gate-only-authorized';
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const metaGraph = contextGraphMetaGraphUri(seededCg);
+    const cgUri = `did:dkg:context-graph:${seededCg}`;
+    await healthyStore.insert([
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+        object: `"${CALLER}"`,
+        graph: metaGraph,
+      },
+    ]);
+    const harness = agentHarness(
+      healthyStore,
+      new Map([[seededCg, { subscribed: true, synced: true }]]),
+    );
+    harness.callerIsAllowlistedAgentParticipant = async () => true;
+    const { provider, listCalls } = providerFor(harness);
+    const { res, out } = captureRes();
+
+    const resolved = await resolveRequiredWriteContextGraphId(
+      provider,
+      seededCg,
+      res,
+      SCOPED,
+    );
+
+    expect(resolved).toBe(seededCg);
+    expect(out.status).toBeUndefined();
+    expect(listCalls).toEqual([]);
+    await expect(harness.probeContextGraphWritePreflight(
+      seededCg,
+      { callerAgentAddress: CALLER },
+    )).resolves.toMatchObject({
+      storeAvailable: true,
+      exists: true,
+      accessPolicy: 'private',
+      callerAuthorized: true,
+    });
+  });
+
+  it('denies an unauthorized caller of a canonical gate-only private graph without a catalog scan', async () => {
+    const seededCg = '0x1111111111111111111111111111111111111111/gate-only-denied';
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const metaGraph = contextGraphMetaGraphUri(seededCg);
+    const cgUri = `did:dkg:context-graph:${seededCg}`;
+    await healthyStore.insert([
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+        object: '"0x3333333333333333333333333333333333333333"',
+        graph: metaGraph,
+      },
+    ]);
+    const harness = agentHarness(
+      healthyStore,
+      new Map([[seededCg, { subscribed: true, synced: true }]]),
+    );
+    const { provider, listCalls } = providerFor(harness);
+    const { res, out } = captureRes();
+
+    const resolved = await resolveRequiredWriteContextGraphId(
+      provider,
+      seededCg,
+      res,
+      SCOPED,
+    );
+
+    expect(resolved).toBeNull();
+    expect(listCalls).toEqual([]);
+    expect(out.status).toBe(400);
+    expect(out.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_FOUND' });
+  });
+
+  it('keeps an explicit public policy public when a legacy gate lives in another metadata source', async () => {
+    const seededCg = '0x1111111111111111111111111111111111111111/public-cross-source-gate';
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const metaGraph = contextGraphMetaGraphUri(seededCg);
+    const cgUri = `did:dkg:context-graph:${seededCg}`;
+    await healthyStore.insert([
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: ontologyGraph,
+      },
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+        object: '"0x3333333333333333333333333333333333333333"',
+        graph: metaGraph,
+      },
+    ]);
+    const harness = agentHarness(
+      healthyStore,
+      new Map([[seededCg, { subscribed: true, synced: true }]]),
+    );
+    harness.callerIsAllowlistedAgentParticipant = async () => {
+      throw new Error('public policy must not consult the allowlist');
+    };
+    const { provider, listCalls } = providerFor(harness);
+    const { res, out } = captureRes();
+
+    const resolved = await resolveRequiredWriteContextGraphId(provider, seededCg, res, SCOPED);
+
+    expect(resolved).toBe(seededCg);
+    expect(out.status).toBeUndefined();
+    expect(listCalls).toEqual([]);
+    await expect(harness.probeContextGraphWritePreflight(
+      seededCg,
+      { callerAgentAddress: CALLER },
+    )).resolves.toMatchObject({
+      declarationFound: true,
+      accessPolicy: 'public',
+      callerAuthorized: true,
+    });
+  });
+
+  it('applies the private-policy ratchet across sources and denies an unauthorized caller', async () => {
+    const seededCg = '0x1111111111111111111111111111111111111111/private-ratchet-cross-source';
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const metaGraph = contextGraphMetaGraphUri(seededCg);
+    const cgUri = `did:dkg:context-graph:${seededCg}`;
+    await healthyStore.insert([
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: ontologyGraph,
+      },
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"private"',
+        graph: metaGraph,
+      },
+    ]);
+    const harness = agentHarness(
+      healthyStore,
+      new Map([[seededCg, { subscribed: true, synced: true }]]),
+    );
+    const { provider, listCalls } = providerFor(harness);
+    const { res, out } = captureRes();
+
+    const resolved = await resolveRequiredWriteContextGraphId(provider, seededCg, res, SCOPED);
+
+    expect(resolved).toBeNull();
+    expect(listCalls).toEqual([]);
+    expect(out.status).toBe(400);
+    expect(out.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_FOUND' });
+    await expect(harness.probeContextGraphWritePreflight(
+      seededCg,
+      { callerAgentAddress: CALLER },
+    )).resolves.toMatchObject({
+      declarationFound: true,
+      accessPolicy: 'private',
+      callerAuthorized: false,
+    });
+  });
+
+  it('authorizes a cross-source curator when only the declaration source repeats rdf:type', async () => {
+    const seededCg = '0x1111111111111111111111111111111111111111/curator-cross-source';
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const metaGraph = contextGraphMetaGraphUri(seededCg);
+    const cgUri = `did:dkg:context-graph:${seededCg}`;
+    await healthyStore.insert([
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"private"',
+        graph: metaGraph,
+      },
+      {
+        subject: cgUri,
+        predicate: DKG_ONTOLOGY.DKG_CURATOR,
+        object: `did:dkg:agent:${CALLER}`,
+        graph: metaGraph,
+      },
+    ]);
+    const harness = agentHarness(
+      healthyStore,
+      new Map([[seededCg, { subscribed: true, synced: true }]]),
+    );
+    harness.curatorDidMatchesChecksumAgent = (curator: string, checksum: string) =>
+      curator.includes(CALLER) && checksum === CALLER;
+    harness.callerIsAllowlistedAgentParticipant = async () => {
+      throw new Error('curator match must short-circuit the allowlist');
+    };
+    const { provider, listCalls } = providerFor(harness);
+    const { res, out } = captureRes();
+
+    const resolved = await resolveRequiredWriteContextGraphId(provider, seededCg, res, SCOPED);
+
+    expect(resolved).toBe(seededCg);
+    expect(out.status).toBeUndefined();
+    expect(listCalls).toEqual([]);
+    await expect(harness.probeContextGraphWritePreflight(
+      seededCg,
+      { callerAgentAddress: CALLER },
+    )).resolves.toMatchObject({
+      declarationFound: true,
+      accessPolicy: 'private',
+      callerAuthorized: true,
+    });
+  });
+
+  it('fails closed for healthy but incomplete canonical metadata without a catalog scan', async () => {
+    const qualified = '0x1111111111111111111111111111111111111111/incomplete-metadata';
+    let listCalls = 0;
+    const provider = {
+      async listContextGraphs() {
+        listCalls += 1;
+        return [];
+      },
+      async probeContextGraphWritePreflight() {
+        return {
+          storeAvailable: true,
+          exists: true,
+          hasLocalContent: true,
+          declarationFound: true,
+        } as ContextGraphWritePreflightProbe;
+      },
+    };
+    const { res, out } = captureRes();
+
+    const resolved = await resolveRequiredWriteContextGraphId(provider, qualified, res, SCOPED);
+
+    expect(resolved).toBeNull();
+    expect(listCalls).toBe(0);
+    expect(out.status).toBe(503);
+    expect(out.body).toMatchObject({ code: 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE' });
+    expect(out.body.error).toContain('exact context graph metadata was incomplete');
+  });
+
+  it('keeps a throwing canonical exact probe on the bounded rescue path without a catalog scan', async () => {
+    const qualified = '0x1111111111111111111111111111111111111111/throwing-probe';
+    let listCalls = 0;
+    let rescueCalls = 0;
+    const provider = {
+      async listContextGraphs() {
+        listCalls += 1;
+        return [];
+      },
+      async probeContextGraphWritePreflight() {
+        throw new Error('Store scheduler queue wait timeout');
+      },
+      async validateWriteTargetDuringStoreOutage() {
+        rescueCalls += 1;
+        return false;
+      },
+    };
+    const { res, out } = captureRes();
+
+    const resolved = await resolveRequiredWriteContextGraphId(provider, qualified, res, UNSCOPED);
+
+    expect(resolved).toBeNull();
+    expect(listCalls).toBe(0);
+    expect(rescueCalls).toBe(1);
+    expect(out.status).toBe(503);
+    expect(out.body).toMatchObject({ code: 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE' });
+    expect(out.body.error).toContain('exact preflight failed: Store scheduler queue wait timeout');
+  });
+
+  it('rejects a known but locally non-writable canonical graph without a catalog scan', async () => {
+    const qualified = '0x1111111111111111111111111111111111111111/non-writable';
+    let listCalls = 0;
+    const provider = {
+      async listContextGraphs() {
+        listCalls += 1;
+        return [];
+      },
+      async probeContextGraphWritePreflight() {
+        return {
+          storeAvailable: true,
+          exists: true,
+          hasLocalContent: false,
+          declarationFound: true,
+          accessPolicy: 'public',
+        } as ContextGraphWritePreflightProbe;
+      },
+    };
+    const { res, out } = captureRes();
+
+    const resolved = await resolveRequiredWriteContextGraphId(provider, qualified, res, UNSCOPED);
+
+    expect(resolved).toBeNull();
+    expect(listCalls).toBe(0);
+    expect(out.status).toBe(400);
+    expect(out.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_WRITABLE' });
   });
 
   it('(e) a storeUnavailable exact probe does not poison a healthy list leg (list evidence still accepts)', async () => {

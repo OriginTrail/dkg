@@ -3,27 +3,72 @@
 /**
  * EVM error decoding / classification helpers extracted from
  * evm-adapter.ts. Covers low-level error-shape extraction
- * (`errorMessage` / `errorCode` / `errorStatus`), custom-error ABI
+ * (`errorMessage` / `errorName` / `errorCode` / `errorStatus`), custom-error ABI
  * decoding (`decodeEvmError` / `enrichEvmError` and the lazily-cached
  * error/PCA interfaces), the Hub-stale revert markers, and the
  * `TooLowAllowance` classifier. Bodies are a 1:1 move from the original
  * module.
  */
-import { ethers, Interface } from 'ethers';
+import { ethers, ErrorFragment, Interface } from 'ethers';
 import {
+  PCA_FUNDING_UNKNOWN_CODE,
+  PCA_FUNDING_UNKNOWN_MESSAGE,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   NO_FUNDED_PUBLISHER_WALLET_MESSAGE_PREFIX,
   messageIndicatesNoFundedPublisherWallet,
 } from '@origintrail-official/dkg-core';
-import { loadAbi } from './evm-adapter-abi.js';
+import { loadAbi, loadVendoredAbis } from './evm-adapter-abi.js';
+import { isRemoteSignerError } from './remote-signer-errors.js';
 
 export function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   try { return JSON.stringify(err); } catch { return String(err); }
 }
 
+/**
+ * Read the top-level error class name exposed by Error / DOMException shapes.
+ * Unlike status and code extraction, this deliberately does not traverse
+ * wrappers: a name describes the caught surface error, while nested transport
+ * metadata is decoded separately by {@link errorCode} / {@link errorStatus}.
+ */
+export function errorName(err: unknown): string {
+  if (!err || typeof err !== 'object') return '';
+  const { name } = err as { name?: unknown };
+  return typeof name === 'string' ? name : '';
+}
+
 export function errorCode(err: unknown): string {
   return String((err as any)?.code ?? (err as any)?.error?.code ?? '').toUpperCase();
+}
+
+/** One cycle/depth-bounded traversal for the wrapper graph shared by selectors. */
+function* wrappedRpcErrorRecords(err: unknown): Generator<Record<string, unknown>> {
+  const seen = new Set<unknown>();
+  const pending: Array<{ value: unknown; depth: number }> = [{ value: err, depth: 0 }];
+  while (pending.length > 0) {
+    const { value, depth } = pending.pop()!;
+    if (value == null || typeof value !== 'object' || depth > 6 || seen.has(value)) continue;
+    seen.add(value);
+    const record = value as Record<string, unknown>;
+    yield record;
+    // Reverse push preserves the established cause → info → error → response walk.
+    for (const key of ['response', 'error', 'info', 'cause']) {
+      pending.push({ value: record[key], depth: depth + 1 });
+    }
+  }
+}
+
+/**
+ * True when `err`, or an error it wraps anywhere in the wrapper graph the
+ * selectors here walk, is a failure of an external signer. Such a failure is
+ * final: no contract-error recovery may read its text as a revert and ask the
+ * signer for another signature.
+ */
+export function isCausedByRemoteSigner(err: unknown): boolean {
+  for (const record of wrappedRpcErrorRecords(err)) {
+    if (isRemoteSignerError(record)) return true;
+  }
+  return false;
 }
 
 export function errorStatus(err: unknown): number | undefined {
@@ -31,43 +76,69 @@ export function errorStatus(err: unknown): number | undefined {
   // a provider HTTP status buried at e.g. `err.cause.info.error.status` is still
   // found (a shallow one-level read misses it and the caller would misclassify a
   // 401/403/429 as a non-status error). Depth- and cycle-bounded.
-  const seen = new Set<unknown>();
-  const visit = (e: any, depth: number): number | undefined => {
-    if (e == null || typeof e !== 'object' || depth > 5 || seen.has(e)) return undefined;
-    seen.add(e);
-    for (const raw of [e.status, e.statusCode, e.response?.status, e.error?.status, e.error?.statusCode]) {
+  for (const record of wrappedRpcErrorRecords(err)) {
+    for (const raw of [
+      record.status,
+      record.statusCode,
+    ]) {
       // Numeric, OR a digit-only string ("429"/"401") — several wrapped RPC/fetch
       // errors serialize the HTTP status as a string, so coerce those too rather
       // than missing them and falling back to message heuristics.
       if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
       if (typeof raw === 'string' && /^\d{3}$/.test(raw.trim())) return Number(raw);
     }
-    for (const k of ['cause', 'info', 'error']) {
-      const found = visit(e[k], depth + 1);
-      if (found !== undefined) return found;
-    }
-    return undefined;
-  };
-  return visit(err, 0);
+  }
+  return undefined;
 }
 
-export const ERROR_ABI_CONTRACTS = [
-  'KnowledgeAssets', 'KnowledgeAssetsLifecycle', 'KnowledgeAssetsStorage',
-  'DKGKnowledgeAssets', 'ContextGraphs', 'ContextGraphStorage',
-  'ContextGraphNameRegistry', 'Profile', 'Identity', 'IdentityStorage',
-  'Staking', 'StakingStorage', 'StakingV10', 'StakingKPI',
-  'ConvictionStakingStorage',
-  'DKGStakingConvictionNFT', 'DKGPublishingConvictionNFT',
-  // Post PR #650 split — PCA business errors are declared on the logic
-  // and storage contracts, NOT the slim wrapper. Both must be in this
-  // list so wrapper-bubbled reverts (e.g. NoConvictionAccount, AccountExpired,
-  // UnknownAccount, InvalidAmount, AgentAlreadyRegistered) decode at runtime.
-  'PublishingConviction', 'PublishingConvictionStorage',
-  'Hub', 'Token', 'Ask', 'AskStorage',
-  'Paymaster', 'ShardingTable', 'ParametersStorage',
-  'PublishingConvictionAccount',
-  'RandomSampling', 'RandomSamplingStorage',
-];
+/**
+ * Extract a standard HTTP `Retry-After` delay from the wrapper shapes used by
+ * ethers, undici, and managed JSON-RPC providers. Both delta-seconds and HTTP
+ * dates are accepted. The result is deliberately only metadata: callers own
+ * their policy cap and must never sleep an unbounded provider-supplied value.
+ */
+export function errorRetryAfterMs(
+  err: unknown,
+  nowMs: number = Date.now(),
+): number | undefined {
+  const delays: number[] = [];
+
+  const record = (raw: unknown): void => {
+    if (typeof raw !== 'string' && typeof raw !== 'number') return;
+    const value = String(raw).trim();
+    if (value.length === 0) return;
+    if (/^\d+$/u.test(value)) {
+      const seconds = Number(value);
+      if (Number.isSafeInteger(seconds) && seconds >= 0) {
+        const delay = seconds * 1_000;
+        if (Number.isSafeInteger(delay)) delays.push(delay);
+      }
+      return;
+    }
+    const dateMs = Date.parse(value);
+    if (Number.isFinite(dateMs)) delays.push(Math.max(0, dateMs - nowMs));
+  };
+
+  const readHeaders = (headers: unknown): void => {
+    if (headers == null || typeof headers !== 'object') return;
+    const get = (headers as { get?: unknown }).get;
+    if (typeof get === 'function') {
+      try {
+        record(get.call(headers, 'retry-after'));
+      } catch {
+        // A foreign Headers-like object must not break RPC error handling.
+      }
+    }
+    for (const [key, value] of Object.entries(headers as Record<string, unknown>)) {
+      if (key.toLowerCase() === 'retry-after') record(value);
+    }
+  };
+
+  for (const candidate of wrappedRpcErrorRecords(err)) {
+    readHeaders(candidate.headers);
+  }
+  return delays.length === 0 ? undefined : Math.max(...delays);
+}
 
 /**
  * Substrings we treat as "the Hub no longer recognises this contract
@@ -81,6 +152,13 @@ export const HUB_STALE_ERROR_MARKERS = [
   'Only Contracts in Hub',
   'UnauthorizedAccess(Only Contracts in Hub)',
 ];
+
+/** A write reverted because a cached contract is no longer registered in the Hub; never a signer failure. */
+export function isHubStaleError(err: unknown): boolean {
+  if (isCausedByRemoteSigner(err)) return false;
+  const message = err instanceof Error ? err.message : '';
+  return HUB_STALE_ERROR_MARKERS.some((marker) => message.includes(marker));
+}
 
 let _errorInterface: Interface | null = null;
 let _pcaLogicInterface: Interface | null = null;
@@ -104,21 +182,24 @@ export function getPcaLogicInterface(): Interface {
   return _pcaLogicInterface;
 }
 
+/**
+ * Lazy-cached `ethers.Interface` over the custom errors of every vendored
+ * ABI (see `loadVendoredAbis`). An error from a base contract or library is
+ * declared by every ABI that can revert with it, so fragments are deduped
+ * by selector. The first declaration wins, which ranks the live top-level
+ * ABIs ahead of `archive/`.
+ */
 export function getErrorInterface(): Interface {
   if (_errorInterface) return _errorInterface;
-  const errorFragments: string[] = [];
-  for (const name of ERROR_ABI_CONTRACTS) {
-    try {
-      const abi = loadAbi(name) as any[];
-      for (const entry of abi) {
-        if (entry.type === 'error') {
-          const params = (entry.inputs ?? []).map((i: any) => `${i.type} ${i.name}`).join(', ');
-          errorFragments.push(`error ${entry.name}(${params})`);
-        }
-      }
-    } catch { /* ABI not available */ }
+  const errors = new Map<string, ErrorFragment>();
+  for (const abi of loadVendoredAbis()) {
+    for (const entry of abi) {
+      if (entry.type !== 'error') continue;
+      const fragment = ErrorFragment.from(entry);
+      if (!errors.has(fragment.selector)) errors.set(fragment.selector, fragment);
+    }
   }
-  _errorInterface = new Interface([...new Set(errorFragments)]);
+  _errorInterface = new Interface([...errors.values()]);
   return _errorInterface;
 }
 
@@ -274,6 +355,8 @@ export function enrichEvmError(err: unknown): string | null {
  */
 export function isTooLowAllowanceError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
+  // A signer's refusal is never a revert, whatever its text says.
+  if (isCausedByRemoteSigner(err)) return false;
   const e = err as {
     revert?: { name?: unknown };
     message?: unknown;
@@ -334,6 +417,17 @@ export class InsufficientPublisherFundsError extends Error {
     super(message, options);
     this.name = 'InsufficientPublisherFundsError';
     this.balances = balances;
+  }
+}
+
+/** A strict publish cannot prove PCA coverage while its chain reads are unavailable. */
+export class PcaFundingUnknownError extends Error {
+  readonly code = PCA_FUNDING_UNKNOWN_CODE;
+  readonly readCode?: string;
+  constructor(readCode?: string) {
+    super(PCA_FUNDING_UNKNOWN_MESSAGE);
+    this.name = 'PcaFundingUnknownError';
+    this.readCode = readCode;
   }
 }
 

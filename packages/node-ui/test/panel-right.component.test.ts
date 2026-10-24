@@ -11,7 +11,7 @@
 // this package use real HTTP servers / real Storage shims (no mocks).
 
 import React, { act } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot } from 'react-dom/client';
 
 const fetchAgentsMock = vi.fn();
@@ -24,6 +24,7 @@ const persistLocalAgentChatFailureMock = vi.fn();
 const streamLocalAgentChatMock = vi.fn();
 const connectLocalAgentIntegrationMock = vi.fn();
 const disconnectLocalAgentIntegrationMock = vi.fn();
+const clearLocalLlmSessionMock = vi.fn();
 const apiFetchMemorySessionsMock = vi.fn();
 
 vi.mock('../src/ui/api.js', async () => {
@@ -40,6 +41,7 @@ vi.mock('../src/ui/api.js', async () => {
     streamLocalAgentChat: streamLocalAgentChatMock,
     connectLocalAgentIntegration: connectLocalAgentIntegrationMock,
     disconnectLocalAgentIntegration: disconnectLocalAgentIntegrationMock,
+    clearLocalLlmSession: clearLocalLlmSessionMock,
   };
 });
 
@@ -72,6 +74,7 @@ async function waitForAssertion(assertion: () => void): Promise<void> {
 }
 
 describe('PanelRight component', () => {
+  afterEach(() => vi.unstubAllGlobals());
   beforeEach(() => {
     vi.clearAllMocks();
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -121,6 +124,11 @@ describe('PanelRight component', () => {
       nodeIdentityId: 'node-self',
     });
     streamLocalAgentChatMock.mockResolvedValue({ text: 'Roger that', correlationId: 'corr-1' });
+    clearLocalLlmSessionMock.mockResolvedValue({
+      ok: true,
+      sessionId: 'local-llm:dkg-ui',
+      readOnly: true,
+    });
     persistLocalAgentChatFailureMock.mockResolvedValue({ ok: true, turnId: 'corr-1' });
     importFileMock.mockResolvedValue({
       assertionUri: 'urn:dkg:assertion:completed',
@@ -129,6 +137,109 @@ describe('PanelRight component', () => {
       extraction: { status: 'completed', tripleCount: 4, pipelineUsed: 'markdown' },
     });
     apiFetchMemorySessionsMock.mockResolvedValue({ sessions: [] });
+  });
+
+  it.each(['https', 'http', 'no-crypto'])('local-LLM send on %s exposes results or early errors', async (origin) => {
+    const crypto = globalThis.crypto;
+    if (origin === 'http') vi.stubGlobal('crypto', { getRandomValues: crypto.getRandomValues.bind(crypto) });
+    if (origin === 'no-crypto') vi.stubGlobal('crypto', undefined);
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
+      id: 'local-llm',
+      name: 'DKG Local LLM',
+      description: 'Daemon-owned local model',
+      defaultSessionId: 'local-llm:dkg-ui',
+      connectSupported: false,
+      chatSupported: true,
+      chatReady: true,
+      chatAttachments: false,
+      persistentChat: true,
+      bridgeOnline: true,
+      bridgeStatusLabel: 'Connected',
+      configured: true,
+      detected: true,
+      status: 'chat_ready',
+      statusLabel: 'Chat ready',
+      detail: 'ready',
+      source: 'live',
+    }] });
+    streamLocalAgentChatMock.mockResolvedValue({
+      text: 'Catalog evidence',
+      correlationId: 'local-correlation',
+      turnId: 'local-correlation',
+      sessionId: 'local-llm:dkg-ui',
+      contextGraphId: 'testing',
+      profile: 'catalog',
+      toolCalls: [{ name: 'dkg_query_catalog_list', arguments: {} }],
+      traceFile: '/tmp/local-llm.log',
+      readOnly: true,
+    });
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    act(() => {
+      useProjectsStore.setState({
+        contextGraphs: [{ id: 'testing', name: 'Testing' }],
+        loading: false,
+        activeProjectId: 'testing',
+      });
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(React.createElement(PanelRight)));
+    await waitForAssertion(() => expect(container.textContent).toContain('DKG Local LLM'));
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(
+        textarea,
+        'List saved queries',
+      );
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('button[aria-label="Send message"]')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    if (origin === 'no-crypto') {
+      await waitForAssertion(() => expect(container.textContent).toContain('This browser cannot generate a secure request ID.'));
+      expect(streamLocalAgentChatMock).not.toHaveBeenCalled();
+      expect(textarea.value).toBe('List saved queries');
+      await act(async () => root.unmount());
+      container.remove();
+      return;
+    }
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain('Catalog evidence');
+      expect(container.textContent).toContain('Tools: dkg_query_catalog_list');
+      expect(container.textContent).toContain('Trace: /tmp/local-llm.log');
+    });
+    expect(streamLocalAgentChatMock).toHaveBeenCalledWith(
+      'local-llm',
+      'List saved queries',
+      expect.objectContaining({ contextGraphId: 'testing' }),
+    );
+
+    expect(streamLocalAgentChatMock.mock.calls.at(-1)?.[2].correlationId)
+      .toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i);
+
+    await act(async () => {
+      container.querySelector('.v10-agent-tab-menu-trigger')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const clearItem = Array.from(container.querySelectorAll<HTMLButtonElement>(
+      '.v10-agent-tab-menu-item',
+    )).find((item) => /clear session/i.test(item.textContent ?? ''));
+    expect(clearItem).toBeTruthy();
+    expect(container.textContent).not.toContain('Disconnect');
+    await act(async () => {
+      clearItem!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await waitForAssertion(() => expect(clearLocalLlmSessionMock).toHaveBeenCalledOnce());
+    await waitForAssertion(() => expect(container.textContent).not.toContain('Catalog evidence'));
+
+    await act(async () => root.unmount());
+    container.remove();
   });
 
   it('always injects target context graph name alongside id and URI', async () => {
@@ -156,6 +267,72 @@ describe('PanelRight component', () => {
       },
     ]);
   }, 10_000);
+
+  it('sends a selected Prime session as one raw-and-memory pairing', async () => {
+    const memorySessionId = 'prime-agent:dkg-ui:s1';
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
+      id: 'prime-agent',
+      name: 'Prime Agent',
+      description: 'Prime bridge',
+      connectSupported: true,
+      chatSupported: true,
+      chatReady: true,
+      chatAttachments: false,
+      persistentChat: true,
+      bridgeOnline: true,
+      bridgeStatusLabel: 'Connected',
+      configured: true,
+      detected: true,
+      status: 'chat_ready',
+      statusLabel: 'Chat ready',
+      detail: 'ready',
+      source: 'live',
+      defaultSessionId: memorySessionId,
+      liveSessions: [{ sessionId: memorySessionId, rawSessionId: 's1' }],
+    }] });
+    streamLocalAgentChatMock.mockResolvedValue({
+      text: 'Prime reply',
+      correlationId: 'prime-correlation',
+      turnId: 'prime-correlation',
+      sessionId: memorySessionId,
+    });
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(React.createElement(PanelRight));
+    });
+    await waitForAssertion(() => expect(container.textContent).toContain('Prime Agent'));
+
+    const textarea = container.querySelector('textarea');
+    expect(textarea).toBeTruthy();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      valueSetter?.call(textarea, 'Hello Prime');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const sendButton = container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement | null;
+    expect(sendButton).toBeTruthy();
+    await act(async () => {
+      sendButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await waitForAssertion(() => {
+      expect(streamLocalAgentChatMock).toHaveBeenCalledWith(
+        'prime-agent',
+        'Hello Prime',
+        expect.objectContaining({
+          sessionId: memorySessionId,
+          liveSession: { sessionId: memorySessionId, rawSessionId: 's1' },
+        }),
+      );
+    });
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
 
   it('renders, loads agent state, and sends chat with injected context entries', async () => {
     const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
@@ -577,6 +754,77 @@ describe('PanelRight component', () => {
       expect(container.textContent).toContain('Error: Hermes bridge response timed out.');
     });
     expect(container.textContent).not.toContain('The operation was aborted due to timeout');
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('renders a terminal Prime provider failure before the first token and releases the composer', async () => {
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const { LocalAgentApiError } = await import('../src/ui/api.js');
+
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
+      id: 'prime-agent',
+      name: 'Prime Agent',
+      description: 'Prime Agent bridge',
+      connectSupported: true,
+      chatSupported: true,
+      chatReady: true,
+      chatAttachments: false,
+      persistentChat: true,
+      bridgeOnline: true,
+      bridgeStatusLabel: 'Connected',
+      configured: true,
+      detected: true,
+      status: 'connected',
+      statusLabel: 'Connected',
+      detail: 'ready',
+      target: 'bridge',
+    }] });
+    streamLocalAgentChatMock.mockRejectedValueOnce(new LocalAgentApiError(
+      'Prime Agent provider authentication failed.',
+      {
+        code: 'PRIME_AGENT_PROVIDER_UNAUTHORIZED',
+        source: 'prime-agent-channel',
+        correlationId: 'corr-prime-auth',
+      },
+    ));
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(React.createElement(PanelRight));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const textarea = container.querySelector('textarea');
+    expect(textarea).toBeTruthy();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      valueSetter?.call(textarea, 'Use the provider');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    const sendButton = container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement | null;
+    expect(sendButton).toBeTruthy();
+    await act(async () => {
+      sendButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain(
+        'Error: Prime Agent provider authentication failed. Check its provider credentials and try again.',
+      );
+      expect(container.textContent).not.toContain('Thinking…');
+      expect((container.querySelector('textarea') as HTMLTextAreaElement).disabled).toBe(false);
+    });
+    expect(persistLocalAgentChatFailureMock).not.toHaveBeenCalled();
 
     await act(async () => {
       root.unmount();

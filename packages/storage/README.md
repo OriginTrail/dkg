@@ -33,6 +33,56 @@ await store.insert(quads);
 const result = await store.query('SELECT * WHERE { ?s ?p ?o } LIMIT 10');
 ```
 
+## Oxigraph persistence contract
+
+This contract applies to `OxigraphStore` when it is created with a persistence
+path (`oxigraph-persistent`) and to `oxigraph-worker` when that worker is given
+a persistence path. Plain `oxigraph`, and a worker without a persistence path,
+are in-memory stores and provide no restart durability.
+
+### Mutation and flush semantics
+
+- Mutations update the in-memory store immediately and schedule a full N-Quads
+  snapshot after a 50 ms debounce. A successful mutation does not by itself
+  mean the snapshot has reached disk.
+- Callers that require an operation to survive an immediate restart must await
+  `flush()`. It cancels a pending debounce, waits for an in-flight snapshot,
+  and then writes the current state.
+- A snapshot is written to a sibling temporary file, the file is synced, and
+  then atomically renamed over the persistence file. The containing directory
+  is synced when the platform supports it. A crash before the rename retains
+  the previous complete snapshot; a temporary file may remain for cleanup.
+- Background flush failures are logged. Explicit `flush()` and `close()` calls
+  reject on write, sync, or rename failures so their callers can report that
+  recent in-memory changes may not be durable.
+
+### Hydration and corruption
+
+- Construction synchronously loads an existing non-empty persistence file.
+  Read failures abort construction.
+- Invalid N-Quads are never swallowed. The file is renamed to
+  `<persist-path>.corrupt-<timestamp>` for forensics, the failure is logged,
+  and construction throws. A later start can continue with an empty store
+  while the quarantined file remains available for investigation.
+
+### Graceful shutdown
+
+- `close()` cancels the debounce, waits for any in-flight snapshot, and runs a
+  final flush. For `oxigraph-worker`, the close request delegates to that same
+  final flush and is not subject to the read-operation timeout; the worker is
+  terminated only after the request settles.
+- `DKGAgent.stop()` awaits `store.close()`. If the final flush fails, shutdown
+  continues but emits a loud operator-facing error stating that the on-disk
+  store may be missing recent inserts.
+- Forced termination can still lose changes made after the last successful
+  flush. The atomic snapshot protocol protects the previously persisted file
+  from a torn overwrite; it cannot make unflushed memory durable.
+
+The executable regression contract is in
+[`test/oxigraph-persistence.test.ts`](test/oxigraph-persistence.test.ts). The
+[archived WM persistence incident report](../../docs/archive/internal/bugs/wm-persistence-regression.md)
+retains the original diagnosis, reproduction evidence, and fix history.
+
 ## Embedded worker store (`oxigraph-worker`) tuning
 
 The embedded worker runs **all** store operations on a single worker thread, so
@@ -66,6 +116,79 @@ For heavy / production workloads, prefer an out-of-process SPARQL server
 (`sparql-http` or `blazegraph`), which handles reads and writes concurrently
 and keeps the daemon responsive under load.
 
+## External-store admission and deadlines
+
+All external adapters share a process-wide priority scheduler. Waiting work is
+bounded independently for `ack`, `normal`, and `background` traffic, and an
+operation rejected before dispatch receives `StoreSchedulerBusyError` with
+`code: STORE_SCHEDULER_BUSY`, `retryable: true`, and a reason of either
+`queue_full` or `queue_wait_timeout`. Because this error is only created before
+the operation closure starts, retrying it cannot duplicate a write that might
+already have reached the store.
+
+Each external adapter supplies the canonical store operation as queue-entry
+metadata, and the scheduler binds it when creating either admission rejection.
+Decorators validate that tagged operation-outcome contract rather than the
+error class alone: a rejected nested read does not imply that an enclosing
+replace failed before mutation.
+
+| Environment variable | Default | Purpose |
+|---|---:|---|
+| `DKG_STORE_MAX_CONCURRENT` | `4` | Maximum external-store operations in flight, capped to available CPUs while preserving the default ACK reserve on single-CPU hosts. |
+| `DKG_STORE_ACK_RESERVED_SLOTS` | `1` | In-flight capacity reserved for ACK work. |
+| `DKG_STORE_NORMAL_RESERVED_SLOTS` | `1` | Non-ACK capacity kept available for normal work while background operations are in flight. |
+| `DKG_STORE_BACKGROUND_RESERVED_SLOTS` | `1` | Non-ACK capacity reserved for background progress. |
+| `DKG_STORE_QUEUE_LIMIT` | `64` | Maximum waiting operations in each priority queue. |
+| `DKG_STORE_ACK_QUEUE_LIMIT` | common limit | Optional ACK queue override. |
+| `DKG_STORE_NORMAL_QUEUE_LIMIT` | common limit | Optional normal queue override. |
+| `DKG_STORE_BACKGROUND_QUEUE_LIMIT` | common limit | Optional background queue override. |
+| `DKG_STORE_QUEUE_WAIT_TIMEOUT_MS` | `10000` | Maximum pre-dispatch wait before a retryable busy rejection. |
+| `DKG_BLAZEGRAPH_OPERATION_TIMEOUT_MS` | `30000` | Blazegraph end-to-end operation deadline, including scheduler wait, HTTP, response decoding, and mapping. |
+
+Normal and background reserves are normalized against the available non-ACK
+capacity. At least one background slot remains available, and the background
+progress floor is capped to its admission ceiling so conflicting custom values
+cannot leave usable capacity idle.
+
+When only one ordinary slot remains after ACK and health reservations, a
+positive background reservation instead guarantees dispatch opportunities:
+at most eight normal operations start while background work waits before one
+background operation gets its turn. A fresh backlog starts with normal work;
+ACK and health retain priority. This does not bound elapsed waiting time,
+because admitted operations are not preempted. Setting
+`DKG_STORE_BACKGROUND_RESERVED_SLOTS=0` retains strict normal-before-background
+ordering. Schedulers with multiple ordinary slots retain their capacity reserves.
+
+Blazegraph's deadline can also be set per store, which takes precedence over
+the environment default:
+
+```jsonc
+"store": {
+  "backend": "blazegraph",
+  "options": {
+    "url": "http://127.0.0.1:9999/blazegraph/namespace/dkg/sparql",
+    "timeout": 30000
+  }
+}
+```
+
 ## Internal Dependencies
 
 - `@origintrail-official/dkg-core` — configuration types, logging, constants
+
+## Atomic subject replacement with additive rows
+
+`replaceSubjectAndInsert(graphUri, subject, replacementQuads, insertQuads, options)`
+replaces exactly one subject and adds companion rows for other subjects in the
+same named graph in one backend transaction. Both groups must be blank-node free;
+validation runs before mutation or external literal storage. Companion subjects
+are never deleted, so missing immutable request rows can be reasserted while
+preserving existing extra rows. The existing `replaceSubject` remains strictly
+single-subject.
+
+The optional `tryReplaceSubjectAndInsertAtomically` returns `false` only when the
+capability is absent or gives its matching typed preflight refusal. Generic
+SPARQL endpoints need a certified `atomic-update` consistency profile. Execution,
+timeout and postcommit decorator failures propagate: callers must not replay
+through a compatibility fallback after these errors. One HTTP request alone is
+not evidence that an arbitrary endpoint is transactional.

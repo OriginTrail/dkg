@@ -88,7 +88,15 @@ export const FinalizationMessageSchema = new Type('FinalizationMessage')
   // preventing a stale same-block publish-promotion from clobbering an
   // already-applied update. Legacy publishers omit the field and the
   // receiver falls back to 0 (matching the pre-fix shape).
-  .add(new Field('txIndex', 17, 'uint32'));
+  .add(new Field('txIndex', 17, 'uint32'))
+  // Rootless KA scope. `ual` is already field 1; no physical graph IRI is sent.
+  .add(new Field('contentScopeVersion', 18, 'uint32'))
+  .add(new Field('assertionVersion', 19, 'string'))
+  .add(new Field('publicTripleCount', 20, 'uint32'))
+  .add(new Field('privateMerkleRoot', 21, 'bytes'))
+  .add(new Field('privateTripleCount', 22, 'uint32'))
+  .add(new Field('accessPolicy', 23, 'string'))
+  .add(new Field('allowedPeers', 24, 'string', 'repeated'));
 
 type Long = { low: number; high: number; unsigned: boolean };
 
@@ -148,6 +156,20 @@ export interface FinalizationMessageMsg {
    * receiver falls back to 0.
    */
   txIndex?: number;
+  /** Rootless KA graph-scope discriminator. New writers emit exactly 2. */
+  contentScopeVersion?: number;
+  /** One-based assertion/Merkle-root index encoded as a decimal string. */
+  assertionVersion?: string;
+  /** Number of public RDF triples in the complete assertion. */
+  publicTripleCount?: number;
+  /** Optional single KA-level private commitment. */
+  privateMerkleRoot?: Uint8Array;
+  /** Number of private RDF triples committed by privateMerkleRoot. */
+  privateTripleCount?: number;
+  /** Rootless KA query policy retained by receiving replicas. */
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  /** Exact peer allow-list when accessPolicy is allowList. */
+  allowedPeers?: string[];
 }
 
 const MAX_UINT64 = (1n << 64n) - 1n;

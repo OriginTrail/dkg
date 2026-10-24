@@ -7,6 +7,13 @@
  */
 
 import { loadAuthTokenSync } from '@origintrail-official/dkg-core';
+import {
+  serializeAgentListOptions,
+  serializeRawAgentListArgs,
+  type AgentListOptions,
+} from './agent-list.js';
+
+export type { AgentListOptions } from './agent-list.js';
 
 /**
  * Typed daemon HTTP error. Carries the response `status` and the parsed JSON
@@ -42,6 +49,59 @@ function daemonHttpError(message: string, status: number, text: string): DkgDaem
   return new DkgDaemonHttpError(message, status, body);
 }
 
+/** Deadline for reads and quick mutations, which answer from local daemon state. */
+export const DAEMON_DEFAULT_TIMEOUT_MS = 30_000;
+
+/**
+ * Deadline for the long synchronous Knowledge Asset mutations: `vm/publish`,
+ * `swm/share`, `wm/import-file`, and a create that also shares or publishes.
+ * `vm/publish` holds the request open for the publisher's storage-ACK window
+ * (`ACK_TIMEOUT_MS`, 120 s, in packages/publisher/src/ack-collector.ts) plus chain
+ * confirmation, and an auto-register transaction when the context graph is not
+ * on-chain yet. It stays under the 300 s Node's fetch waits on its own, so this
+ * deadline, and its outcome-unknown report, comes first.
+ */
+export const DAEMON_LONG_MUTATION_TIMEOUT_MS = 240_000;
+
+/**
+ * A long mutation reached the daemon but no response arrived before the client
+ * deadline. The daemon does not abort the operation when the client disconnects,
+ * so it may still complete, and a blind retry can 409 against it. Callers surface
+ * this as "outcome unknown", not as a failure.
+ */
+export class DkgDaemonOutcomeUnknownError extends Error {
+  readonly code = 'OUTCOME_UNKNOWN';
+  readonly path: string;
+  readonly timeoutMs: number;
+  constructor(path: string, timeoutMs: number) {
+    super(
+      `DKG daemon ${path} did not respond within ${Math.round(timeoutMs / 1000)}s; outcome unknown. ` +
+      'The daemon keeps working after the client disconnects, so the operation may still complete. ' +
+      'Check dkg_knowledge_asset_history before retrying.',
+    );
+    this.name = 'DkgDaemonOutcomeUnknownError';
+    this.path = path;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+type RequestTimeoutClass = 'default' | 'longMutation';
+
+/**
+ * Node's fetch (undici) stops waiting on its own after 300 s without response
+ * headers or body progress, rejecting with `fetch failed` / `terminated` and an
+ * `UND_ERR_HEADERS_TIMEOUT` / `UND_ERR_BODY_TIMEOUT` cause: the same unanswered
+ * request as the client deadline expiring.
+ */
+function isDispatcherTimeout(err: unknown): boolean {
+  try {
+    const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code;
+    return code === 'UND_ERR_HEADERS_TIMEOUT' || code === 'UND_ERR_BODY_TIMEOUT';
+  } catch {
+    return false;
+  }
+}
+
 export interface DkgClientOptions {
   /** Base URL of the DKG daemon (default: "http://127.0.0.1:9200"). */
   baseUrl?: string;
@@ -58,8 +118,14 @@ export interface DkgClientOptions {
    * the live daemon is at `~/.dkg-dev` (the very bug T70 set out to fix).
    */
   dkgHome?: string;
-  /** Request timeout in ms (default: 30 000). */
+  /** Request timeout in ms for reads and quick mutations (default: 30 000). */
   timeoutMs?: number;
+  /**
+   * Request timeout in ms for the long Knowledge Asset mutations (default:
+   * 240 000, never below `timeoutMs`). A timeout there throws
+   * {@link DkgDaemonOutcomeUnknownError}.
+   */
+  longMutationTimeoutMs?: number;
 }
 
 export interface OpenClawAttachmentRef {
@@ -368,11 +434,17 @@ function createAlsoPublishVmPayload(value: unknown): boolean | Record<string, un
 export class DkgDaemonClient {
   readonly baseUrl: string;
   private readonly timeoutMs: number;
+  private readonly longMutationTimeoutMs: number;
   private readonly apiToken: string | undefined;
 
   constructor(opts?: DkgClientOptions) {
     this.baseUrl = stripTrailingSlashes(opts?.baseUrl ?? 'http://127.0.0.1:9200');
-    this.timeoutMs = opts?.timeoutMs ?? 30_000;
+    this.timeoutMs = opts?.timeoutMs ?? DAEMON_DEFAULT_TIMEOUT_MS;
+    // A generous default timeout never shortens the long routes.
+    this.longMutationTimeoutMs = Math.max(
+      opts?.longMutationTimeoutMs ?? DAEMON_LONG_MUTATION_TIMEOUT_MS,
+      this.timeoutMs,
+    );
     this.apiToken = opts?.apiToken ?? DkgDaemonClient.loadTokenFromFile(opts?.dkgHome);
   }
 
@@ -490,25 +562,23 @@ export class DkgDaemonClient {
   /**
    * Read saved profile query catalog entries for a context graph.
    *
-   * The daemon stores these as local profile metadata in
-   * `did:dkg:context-graph:<id>/meta/query-catalog`; callers usually run the
-   * returned `prof:sparqlQuery` text through `query()`.
+   * The daemon stores these as normal assertions in the Context Graph's
+   * registered `meta` subgraph; callers usually run the returned
+   * `prof:sparqlQuery` text through `query()`.
    */
   async readQueryCatalog(contextGraphId: string): Promise<Record<string, unknown>> {
     return this.post('/api/profile/query-catalog/read', { contextGraphId: normalizeContextGraphId(contextGraphId) });
   }
 
-  /**
-   * Append profile query catalog triples for a context graph.
-   *
-   * The daemon ignores caller-supplied graph names and writes into the
-   * context graph's local `meta/query-catalog` profile graph.
-   */
+  /** Write profile query/catalog subjects for a context graph. */
   async writeQueryCatalog(
     contextGraphId: string,
     quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
   ): Promise<Record<string, unknown>> {
-    return this.post('/api/profile/query-catalog/write', { contextGraphId: normalizeContextGraphId(contextGraphId), quads });
+    return this.post('/api/profile/query-catalog/write', {
+      contextGraphId: normalizeContextGraphId(contextGraphId),
+      quads,
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -561,21 +631,26 @@ export class DkgDaemonClient {
     });
   }
 
-  /**
-   * Promote a Working Memory assertion (or a subset of its root entities) to
-   * Shared Working Memory. `entities` defaults to `"all"` server-side when
-   * omitted; callers can pin specific root entity URIs via an array.
-   */
+  /** Atomically seal and share a complete Working Memory Knowledge Asset. */
   async promoteAssertion(
     contextGraphId: string,
     name: string,
-    opts?: { entities?: string[] | 'all'; subGraphName?: string },
+    opts?: { /** @deprecated Root selection is unsupported. */ entities?: string[] | 'all'; subGraphName?: string },
   ): Promise<Record<string, unknown>> {
+    if (Array.isArray(opts?.entities)) {
+      throw Object.assign(new Error('Knowledge Assets are shared atomically; root-entity selection is not supported'), {
+        code: 'KA_ATOMIC_SHARE_REQUIRED',
+      });
+    }
+    if (opts?.entities !== undefined && opts.entities !== 'all') {
+      throw Object.assign(new Error('Knowledge Assets are shared atomically; omit entities to share the complete asset'), {
+        code: 'KA_ATOMIC_SHARE_REQUIRED',
+      });
+    }
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, {
       contextGraphId: normalizeContextGraphId(contextGraphId),
-      entities: opts?.entities,
       subGraphName: opts?.subGraphName,
-    });
+    }, 'longMutation');
   }
 
   /**
@@ -701,24 +776,24 @@ export class DkgDaemonClient {
     if (opts?.ontologyRef) form.append('ontologyRef', opts.ontologyRef);
     if (opts?.subGraphName) form.append('subGraphName', opts.subGraphName);
 
-    const res = await fetch(
-      `${this.baseUrl}/api/knowledge-assets/${encodeURIComponent(name)}/wm/import-file`,
-      {
+    const path = `/api/knowledge-assets/${encodeURIComponent(name)}/wm/import-file`;
+    return this.withDeadline(path, 'longMutation', async (signal) => {
+      const res = await fetch(`${this.baseUrl}${path}`, {
         method: 'POST',
         headers: { Accept: 'application/json', ...this.authHeaders() },
         body: form,
-        signal: AbortSignal.timeout(this.timeoutMs),
-      },
-    );
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw daemonHttpError(
-        `DKG daemon /api/knowledge-assets/${name}/wm/import-file responded ${res.status}: ${text}`,
-        res.status,
-        text,
-      );
-    }
-    return res.json() as Promise<Record<string, unknown>>;
+        signal,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw daemonHttpError(
+          `DKG daemon /api/knowledge-assets/${name}/wm/import-file responded ${res.status}: ${text}`,
+          res.status,
+          text,
+        );
+      }
+      return (await res.json()) as Record<string, unknown>;
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -818,10 +893,10 @@ export class DkgDaemonClient {
 
   /**
    * Persist a chat turn through the daemon's `/api/openclaw-channel/persist-turn`
-   * route, which delegates to `ChatMemoryManager.storeChatExchange`. As of
-   * v1 of the openclaw-dkg-primary-memory work the downstream writer targets
-   * the `'chat-turns'` Working Memory assertion of the `'agent-context'`
-   * context graph via `agent.assertion.write`, not `agent.share`.
+   * route (`persistDurableChatTurn`, then `ChatMemoryManager.storeChatExchange`)
+   * into the `'chat-turns'` Working Memory assertion of the `'agent-context'`
+   * context graph. Keyed by `(sessionId, turnId)`: a resend is a no-op
+   * (`duplicate: true`), a higher `persistenceState` records a transition.
    */
   async storeChatTurn(
     sessionId: string,
@@ -965,12 +1040,30 @@ export class DkgDaemonClient {
   // Agents & skills discovery
   // ---------------------------------------------------------------------------
 
-  async getAgents(filter?: { framework?: string; skill_type?: string }): Promise<{ agents: any[] }> {
-    const params = new URLSearchParams();
-    if (filter?.framework) params.set('framework', filter.framework);
-    if (filter?.skill_type) params.set('skill_type', filter.skill_type);
-    const qs = params.toString();
-    return this.get(`/api/agents${qs ? `?${qs}` : ''}`);
+  /**
+   * List agents (GH#310), strictly typed for SDK callers. Serialization
+   * lives in the agent-list boundary module (src/agent-list.ts) and is
+   * shared with {@link getAgentsUnvalidated}, so both paths speak one wire
+   * vocabulary. The deprecated `skill_type` alias keeps pre-GH#310 callers
+   * working.
+   */
+  async getAgents(options?: AgentListOptions): Promise<{ agents: any[]; nextCursor?: string }> {
+    return this.agentsRequest(serializeAgentListOptions(options ?? {}));
+  }
+
+  /**
+   * The dkg_find_agents tool boundary: UNVALIDATED model-produced arguments,
+   * serialized verbatim by the shared boundary module, so the daemon — the
+   * single validator — sees exactly what the model supplied and its 400 is
+   * the caller's signal. `limit: 0` coerced or dropped client-side would
+   * instead return the full ~150 KB registry.
+   */
+  async getAgentsUnvalidated(args: Record<string, unknown>): Promise<{ agents: any[]; nextCursor?: string }> {
+    return this.agentsRequest(serializeRawAgentListArgs(args));
+  }
+
+  private async agentsRequest(queryString: string): Promise<{ agents: any[]; nextCursor?: string }> {
+    return this.get(`/api/agents${queryString ? `?${queryString}` : ''}`);
   }
 
   async getSkills(filter?: { skillType?: string }): Promise<{ skills: any[] }> {
@@ -1077,45 +1170,71 @@ export class DkgDaemonClient {
   // ---------------------------------------------------------------------------
 
   private async get<T>(path: string): Promise<T> {
-    const headers: Record<string, string> = { 'Accept': 'application/json', ...this.authHeaders() };
-    const res = await fetch(`${this.baseUrl}${path}`, {
+    return this.requestJson<T>(path, {
       method: 'GET',
-      headers,
-      signal: AbortSignal.timeout(this.timeoutMs),
+      headers: { 'Accept': 'application/json', ...this.authHeaders() },
     });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw daemonHttpError(`DKG daemon ${path} responded ${res.status}: ${text}`, res.status, text);
-    }
-    return res.json() as Promise<T>;
   }
 
-  private async post<T>(path: string, body: unknown): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
+  private async post<T>(
+    path: string,
+    body: unknown,
+    timeoutClass: RequestTimeoutClass = 'default',
+  ): Promise<T> {
+    return this.requestJson<T>(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', ...this.authHeaders() },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(this.timeoutMs),
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw daemonHttpError(`DKG daemon ${path} responded ${res.status}: ${text}`, res.status, text);
-    }
-    return res.json() as Promise<T>;
+    }, timeoutClass);
   }
 
   private async put<T>(path: string, body: unknown): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
+    return this.requestJson<T>(path, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', ...this.authHeaders() },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(this.timeoutMs),
     });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw daemonHttpError(`DKG daemon ${path} responded ${res.status}: ${text}`, res.status, text);
+  }
+
+  private async requestJson<T>(
+    path: string,
+    init: RequestInit,
+    timeoutClass: RequestTimeoutClass = 'default',
+  ): Promise<T> {
+    return this.withDeadline(path, timeoutClass, async (signal) => {
+      const res = await fetch(`${this.baseUrl}${path}`, { ...init, signal });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw daemonHttpError(`DKG daemon ${path} responded ${res.status}: ${text}`, res.status, text);
+      }
+      return (await res.json()) as T;
+    });
+  }
+
+  /**
+   * Run one daemon round-trip under its route's deadline. The deadline also covers
+   * reading the body, so a long mutation whose answer never fully arrives is
+   * reported as outcome-unknown rather than as a transport failure.
+   */
+  private async withDeadline<T>(
+    path: string,
+    timeoutClass: RequestTimeoutClass,
+    run: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    const timeoutMs = timeoutClass === 'longMutation' ? this.longMutationTimeoutMs : this.timeoutMs;
+    const signal = AbortSignal.timeout(timeoutMs);
+    try {
+      return await run(signal);
+    } catch (err) {
+      if (
+        timeoutClass === 'longMutation'
+        && !(err instanceof DkgDaemonHttpError)
+        && (signal.aborted || isDispatcherTimeout(err))
+      ) {
+        throw new DkgDaemonOutcomeUnknownError(path, timeoutMs);
+      }
+      throw err;
     }
-    return res.json() as Promise<T>;
   }
 
   // -- OT-RFC-43 Section 10.5 -- GitHub-shaped Knowledge Asset client --------------
@@ -1177,7 +1296,11 @@ export class DkgDaemonClient {
     if (opts?.alsoPublishVm !== undefined) {
       payload.alsoPublishVm = createAlsoPublishVmPayload(opts.alsoPublishVm);
     }
-    return this.post('/api/knowledge-assets', payload);
+    // Judged on the final payload: the share default above runs the share inside
+    // this same request.
+    const sharesOrPublishes = payload.alsoShareSwm === true
+      || (payload.alsoPublishVm !== undefined && payload.alsoPublishVm !== false);
+    return this.post('/api/knowledge-assets', payload, sharesOrPublishes ? 'longMutation' : 'default');
   }
 
   /** GET a KA's per-layer lifecycle state by name. */
@@ -1225,16 +1348,29 @@ export class DkgDaemonClient {
       authorAgentAddress?: string;
       preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
       schemeVersion?: number;
-      // #1116: "wm" (default) seals the open WM draft; "swm" seals an asset
-      // already shared to SWM (recover-without-recreate).
+      /** @deprecated Only WM finalization is supported. `swm` fails read-only. */
       layer?: 'wm' | 'swm';
     },
   ): Promise<{ merkleRoot: string; eip712Digest: string }> {
     assertExclusiveAuthorFields(opts ?? {});
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`, {
+    if (opts?.layer === 'swm') {
+      throw Object.assign(new Error('Legacy root-scoped Knowledge Assets are read-only'), {
+        code: 'LEGACY_KA_READ_ONLY',
+      });
+    }
+    if (opts?.layer !== undefined && opts.layer !== 'wm') {
+      throw new TypeError('Only Working Memory finalization is supported');
+    }
+    const body: Record<string, unknown> = {
       contextGraphId: normalizeContextGraphId(contextGraphId),
-      ...(opts ?? {}),
-    });
+    };
+    if (opts?.subGraphName) body.subGraphName = opts.subGraphName;
+    if (opts?.authorAgentAddress) body.authorAgentAddress = opts.authorAgentAddress;
+    if (opts?.preSignedAuthorAttestation) {
+      body.preSignedAuthorAttestation = opts.preSignedAuthorAttestation;
+    }
+    if (opts?.schemeVersion !== undefined) body.schemeVersion = opts.schemeVersion;
+    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`, body);
   }
 
   /** Discard the open WM draft (git checkout -- .). */
@@ -1267,8 +1403,32 @@ export class DkgDaemonClient {
   async knowledgeAssetShare(
     contextGraphId: string,
     name: string,
-    opts?: { subGraphName?: string; entities?: string[] | 'all'; skipSeal?: boolean },
+    opts?: {
+      subGraphName?: string;
+      /** @deprecated Root selection is unsupported. */
+      entities?: string[] | 'all';
+      /** @deprecated Unsealed shares are unsupported. */
+      skipSeal?: boolean;
+    },
   ): Promise<{ swmShared: boolean; promotedCount: number; sealed: boolean; publishReady: boolean }> {
+    if (Array.isArray(opts?.entities)) {
+      throw Object.assign(new Error('Knowledge Assets are shared atomically; root-entity selection is not supported'), {
+        code: 'KA_ATOMIC_SHARE_REQUIRED',
+      });
+    }
+    if (opts?.entities !== undefined && opts.entities !== 'all') {
+      throw Object.assign(new Error('Knowledge Assets are shared atomically; omit entities to share the complete asset'), {
+        code: 'KA_ATOMIC_SHARE_REQUIRED',
+      });
+    }
+    if (opts?.skipSeal === true) {
+      throw Object.assign(new Error('Knowledge Assets are always sealed before sharing'), {
+        code: 'UNSEALED_SHARE_BLOCKED',
+      });
+    }
+    if (opts?.skipSeal !== undefined && opts.skipSeal !== false) {
+      throw new TypeError('skipSeal must be false or omitted');
+    }
     // Only include the optional fields when actually set -- don't spread the whole
     // opts object (which would carry `entities: undefined` / `subGraphName:
     // undefined` keys). Parity with MCP's knowledgeAssetShare body construction.
@@ -1276,10 +1436,7 @@ export class DkgDaemonClient {
       contextGraphId: normalizeContextGraphId(contextGraphId),
     };
     if (opts?.subGraphName) body.subGraphName = opts.subGraphName;
-    if (opts?.entities !== undefined) body.entities = opts.entities;
-    // #1116: a full share SEALS BY DEFAULT; `skipSeal:true` shares unsealed.
-    if (opts?.skipSeal !== undefined) body.skipSeal = opts.skipSeal;
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, body);
+    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, body, 'longMutation');
   }
 
   /** Publish to VM -- mint or update on chain (git push origin main). */
@@ -1293,7 +1450,7 @@ export class DkgDaemonClient {
       contextGraphId: normalizeContextGraphId(contextGraphId),
       ...(opts?.subGraphName ? { subGraphName: opts.subGraphName } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
-    });
+    }, 'longMutation');
   }
 }
 

@@ -29,6 +29,12 @@ describe('ProtocolRouter', () => {
       expect(isRecoverableSendError(new Error('ECONNREFUSED'))).toBe(true);
       expect(isRecoverableSendError(new Error('EPIPE'))).toBe(true);
       expect(isRecoverableSendError(new Error('The operation was aborted'))).toBe(true);
+      expect(isRecoverableSendError(new Error('send timeout'))).toBe(true);
+      expect(isRecoverableSendError(new Error('operation timed out'))).toBe(true);
+      expect(isRecoverableSendError(new Error('operation was aborted due to timeout'))).toBe(true);
+      expect(isRecoverableSendError(new Error('peer-closed-stream'))).toBe(true);
+      expect(isRecoverableSendError(new Error('The stream has been reset'))).toBe(true);
+      expect(isRecoverableSendError(new Error('Remote closed connection during opening'))).toBe(true);
       expect(isRecoverableSendError(new Error('no valid addresses'))).toBe(true);
       expect(isRecoverableSendError(new Error('NO_RESERVATION'))).toBe(true);
       expect(isRecoverableSendError(new Error('no reservation for relay'))).toBe(true);
@@ -85,6 +91,8 @@ describe('ProtocolRouter', () => {
       aborted: Error | null = null;
       closedWithSignal: AbortSignal | undefined;
       reads = 0;
+      /** Typed observer invoked on every async-iterator pull (ordering tests). */
+      onRead?: () => void;
 
       constructor(
         private readonly chunks: Uint8Array[],
@@ -111,6 +119,7 @@ describe('ProtocolRouter', () => {
         return {
           next: async () => {
             this.reads += 1;
+            this.onRead?.();
             if (index < this.chunks.length) {
               return { value: this.chunks[index++], done: false };
             }
@@ -170,6 +179,87 @@ describe('ProtocolRouter', () => {
       expect(stream.aborted?.message).toMatch(/handler error/);
     });
 
+    it('does ZERO admission work for an outbound send whose signal is already aborted', async () => {
+      // The premise W1's changelog pre-send boundary rests on. That boundary
+      // skips recording an attempt and its request bytes for an already-aborted
+      // send, on the grounds that the router rejects it before anything
+      // physical happens. Asserted here against the REAL router rather than
+      // reasoned about, because every agent telemetry test replaces
+      // `agent.messenger` wholesale and so never exercises this preflight —
+      // which would leave "no work happened" a code-reading claim.
+      const admittedCalls: Array<[string, string, 'inbound' | 'outbound']> = [];
+      const node = {
+        libp2p: { handle: () => undefined, unhandle: () => undefined },
+        stopSignal: AbortSignal.abort(new Error('node stopping')),
+      } as unknown as DKGNode;
+      const router = new ProtocolRouter(node, {
+        isPeerAccepted: (peerId, protocolId, direction) => {
+          admittedCalls.push([peerId, protocolId, direction]);
+          return true;
+        },
+      });
+
+      // Capture rather than `rejects.toMatchObject`, so the admission assertion
+      // below is REACHED even when the shape assertion would fail. Ordered
+      // deliberately: with the preflight removed, admission runs (it is the very
+      // next statement) and only later does the fixture's peer id fail to parse
+      // — so `admittedCalls` is what discriminates, and asserting it second
+      // would leave it unreached behind an earlier failure.
+      const err = await router
+        .send(REMOTE_PEER, PROTOCOL, new Uint8Array([0x01]))
+        .then(() => null, (e: unknown) => e);
+
+      // Admission is the FIRST thing after the abort preflight, so zero calls
+      // proves the rejection happened upstream of it — and therefore upstream
+      // of every dial, stream and byte.
+      expect(admittedCalls).toEqual([]);
+      expect(err).toMatchObject({ name: 'AbortError' });
+    });
+
+    it('quietly rejects inbound requests when the admission boundary returns a quiet retryable error', async () => {
+      const originalError = console.error;
+      const errorSpy = recorder((..._args: unknown[]) => undefined);
+      console.error = errorSpy as unknown as typeof console.error;
+      try {
+        let inbound: ((stream: FakeInboundStream, connection: unknown) => Promise<void>) | null = null;
+        let handlerCalls = 0;
+        const node = {
+          libp2p: {
+            handle: (_protocol: string, handler: (stream: FakeInboundStream, connection: unknown) => Promise<void>) => {
+              inbound = handler;
+            },
+            unhandle: () => undefined,
+          },
+        } as unknown as DKGNode;
+        const router = new ProtocolRouter(node, {
+          isPeerAccepted: async () => {
+            throw new QuietRetryableHandlerError(
+              'Network identity probe failed: retryable probe backed off',
+            );
+          },
+        });
+        router.register(PROTOCOL, async () => {
+          handlerCalls += 1;
+          return new Uint8Array([0xaa]);
+        });
+
+        const stream = new FakeInboundStream([new Uint8Array([0x01])]);
+        await inbound!(stream, {
+          remotePeer: {
+            toString: () => REMOTE_PEER,
+            toMultihash: () => ({ bytes: new Uint8Array([1, 2, 3]) }),
+          },
+        });
+
+        expect(handlerCalls).toBe(0);
+        expect(stream.sent).toBeNull();
+        expect(stream.aborted?.message).toContain('retryable probe backed off');
+        expect(errorSpy.calls).toEqual([]);
+      } finally {
+        console.error = originalError;
+      }
+    });
+
     it('awaits async inbound admission before dispatching the handler', async () => {
       let inbound: ((stream: FakeInboundStream, connection: unknown) => Promise<void>) | null = null;
       let admitted = false;
@@ -221,8 +311,16 @@ describe('ProtocolRouter', () => {
           unhandle: () => undefined,
         },
       } as unknown as DKGNode;
+      let gateCalls = 0;
       const router = new ProtocolRouter(node, {
         isPeerAccepted: () => false,
+        // Exempt protocols must bypass the pre-read gate too — a cached-rejected
+        // peer still gets identity-probe traffic through, which is how it can
+        // re-prove itself. The predicate must not even be consulted.
+        isPeerKnownRejected: () => {
+          gateCalls += 1;
+          return true;
+        },
         admissionExemptProtocols: [PROTOCOL],
       });
       router.register(PROTOCOL, async () => {
@@ -241,9 +339,68 @@ describe('ProtocolRouter', () => {
       expect(handlerCalls).toBe(1);
       expect(stream.sent).toEqual(new Uint8Array([0xaa]));
       expect(stream.aborted).toBeNull();
+      expect(gateCalls).toBe(0);
     });
 
-    function makeInboundFixture(stopSignal?: AbortSignal) {
+    it('drops an already-rejected inbound peer before reading its request body', async () => {
+      // `reads` is the discriminator: zero pulls proves the body was never taken
+      // off the wire. handlerCalls alone would pass even if it were read then
+      // discarded.
+      let probeCalls = 0;
+      let handlerCalls = 0;
+      const fixture = makeInboundFixture(undefined, {
+        isPeerKnownRejected: () => true,
+        isPeerAccepted: () => {
+          probeCalls += 1;
+          return true;
+        },
+      });
+      fixture.router.register(PROTOCOL, async () => {
+        handlerCalls += 1;
+        return new Uint8Array([0xaa]);
+      });
+
+      const stream = new FakeInboundStream([new Uint8Array([0x01])]);
+      await fixture.invoke(stream);
+
+      expect(stream.reads).toBe(0);
+      expect(handlerCalls).toBe(0);
+      expect(stream.sent).toBeNull();
+      // And the probing check is never reached for a peer already known bad.
+      expect(probeCalls).toBe(0);
+    });
+
+    it('still reads before probing when the peer is not already classified', async () => {
+      // The other half of the contract, and the reason the pre-read gate is
+      // limited to cached verdicts: `isPeerAccepted` performs an admission probe
+      // (outbound I/O) for unclassified peers in production. Probing while the
+      // inbound body is still unread inverts the I/O order against a sender that
+      // is itself mid-write, which stalls request/response exchanges with a
+      // freshly restarted peer. So an unclassified peer keeps the read-first order.
+      const order: string[] = [];
+      const fixture = makeInboundFixture(undefined, {
+        isPeerKnownRejected: () => false,
+        isPeerAccepted: () => {
+          order.push('probe');
+          return true;
+        },
+      });
+      fixture.router.register(PROTOCOL, async () => new Uint8Array([0xaa]));
+
+      const stream = new FakeInboundStream([new Uint8Array([0x01])]);
+      stream.onRead = () => {
+        if (!order.includes('read')) order.push('read');
+      };
+      await fixture.invoke(stream);
+
+      expect(order).toEqual(['read', 'probe']);
+      expect(stream.sent).toEqual(new Uint8Array([0xaa]));
+    });
+
+    function makeInboundFixture(
+      stopSignal?: AbortSignal,
+      routerOptions?: ConstructorParameters<typeof ProtocolRouter>[1],
+    ) {
       let inbound: ((stream: FakeInboundStream, connection: unknown) => Promise<void>) | null = null;
       const node = {
         get stopSignal() {
@@ -256,7 +413,7 @@ describe('ProtocolRouter', () => {
           unhandle: () => undefined,
         },
       } as unknown as DKGNode;
-      const router = new ProtocolRouter(node);
+      const router = new ProtocolRouter(node, routerOptions);
       const connection = {
         remotePeer: {
           toString: () => REMOTE_PEER,
@@ -271,6 +428,67 @@ describe('ProtocolRouter', () => {
         },
       };
     }
+
+    it('honors a per-registration read cap without changing the router-wide limit', async () => {
+      const originalError = console.error;
+      const errorSpy = recorder((..._args: unknown[]) => undefined);
+      console.error = errorSpy as unknown as typeof console.error;
+      try {
+        const inbound = new Map<
+          string,
+          (stream: FakeInboundStream, connection: unknown) => Promise<void>
+        >();
+        const node = {
+          libp2p: {
+            handle: (
+              protocol: string,
+              handler: (stream: FakeInboundStream, connection: unknown) => Promise<void>,
+            ) => {
+              inbound.set(protocol, handler);
+            },
+            unhandle: () => undefined,
+          },
+        } as unknown as DKGNode;
+        const router = new ProtocolRouter(node, { maxReadBytes: 4 });
+        const cappedProtocol = `${PROTOCOL}/capped`;
+        const defaultProtocol = `${PROTOCOL}/default`;
+        let cappedHandlerCalls = 0;
+        let defaultHandlerCalls = 0;
+
+        router.register(cappedProtocol, async (data) => {
+          cappedHandlerCalls += 1;
+          return data;
+        }, { maxReadBytes: 2 });
+        router.register(defaultProtocol, async (data) => {
+          defaultHandlerCalls += 1;
+          return data;
+        });
+
+        const connection = {
+          remotePeer: {
+            toString: () => REMOTE_PEER,
+            toMultihash: () => ({ bytes: new Uint8Array([1, 2, 3]) }),
+          },
+        };
+        const cappedStream = new FakeInboundStream([new Uint8Array([1, 2, 3])]);
+        const defaultStream = new FakeInboundStream([new Uint8Array([1, 2, 3])]);
+
+        await inbound.get(cappedProtocol)!(cappedStream, connection);
+        await inbound.get(defaultProtocol)!(defaultStream, connection);
+
+        expect(cappedHandlerCalls).toBe(0);
+        expect(cappedStream.sent).toBeNull();
+        expect(errorSpy.calls).toContainEqual([
+          expect.stringContaining(cappedProtocol),
+          'Read limit exceeded (2 bytes)',
+        ]);
+        expect(defaultHandlerCalls).toBe(1);
+        expect(defaultStream.sent).toEqual(new Uint8Array([1, 2, 3]));
+        expect(router.maxReadBytes).toBe(4);
+      } finally {
+        console.error = originalError;
+      }
+    });
 
     it('passes a live AbortSignal to raw handlers and preserves it through close', async () => {
       let seenSignal: AbortSignal | undefined;
@@ -720,6 +938,227 @@ describe('ProtocolRouter', () => {
     });
   });
 
+  // The pooled wire multiplexes every request for a peer onto one
+  // long-lived substream. Over a circuit-relay connection the relay's
+  // reservation churn bounds that substream's life and one request
+  // timeout kills every in-flight request with it — observed as
+  // deterministic "pooled stream reset" against a NAT-only peer whose
+  // one-shot streams succeeded immediately (10.0.12 Base-mainnet edge
+  // node, 2026-08-06). The router therefore bypasses the pool for any
+  // send whose peer currently has ONLY relayed connections, re-checking
+  // per send so a later direct connection re-enables pooling.
+  describe('send() pooled-wire relay-only bypass', () => {
+    const FAKE_PEER_ID = '12D3KooWBzj7Hg2cKCdsKL6QcjC5UbLztKTvzCZQHaT4P4ZyJEAA';
+    const PROTOCOL_ID = '/dkg/test/1.0.0';
+
+    function makeStubStream(response: Uint8Array) {
+      let returned = false;
+      return {
+        writeStatus: 'open' as const,
+        send: () => undefined,
+        close: async () => undefined,
+        abort: () => undefined,
+        async *[Symbol.asyncIterator]() {
+          if (!returned) {
+            returned = true;
+            yield response;
+          }
+        },
+      };
+    }
+
+    function makeConn(opts: {
+      remoteAddr: string;
+      limits?: unknown;
+      remotePeerStr?: string;
+      newStream?: () => Promise<unknown>;
+    }) {
+      const remotePeerStr = opts.remotePeerStr ?? FAKE_PEER_ID;
+      return {
+        status: 'open' as const,
+        limits: opts.limits,
+        remotePeer: {
+          equals: (other: unknown) => String(other) === remotePeerStr,
+          toString: () => remotePeerStr,
+        },
+        remoteAddr: { toString: () => opts.remoteAddr },
+        newStream:
+          opts.newStream ??
+          (async () => {
+            throw new Error('newStream not expected on this connection');
+          }),
+      };
+    }
+
+    function makeRouterWithPool(opts: {
+      connections: () => ReadonlyArray<unknown>;
+      poolSend: () => Promise<Uint8Array>;
+      onClosePeerIfIdle?: (peerIdStr: string) => void;
+      dialBehavior?: () => Promise<unknown>;
+    }): ProtocolRouter {
+      const node = {
+        libp2p: {
+          getConnections: () => opts.connections(),
+          dialProtocol:
+            opts.dialBehavior ??
+            (async () => {
+              throw new Error('dialProtocol not expected');
+            }),
+          handle: () => undefined,
+          unhandle: () => undefined,
+          peerStore: { get: async () => { throw new Error('NotFound'); } },
+        },
+      } as unknown as DKGNode;
+      const peerResolver = { resolve: async () => [] } as unknown as PeerResolver;
+      const router = new ProtocolRouter(node, { peerResolver });
+      (router as any).pooledByLogical.set(PROTOCOL_ID, {
+        logicalProtocolId: PROTOCOL_ID,
+        wireProtocolId: '/dkg/10.0.2/message',
+        pool: {
+          send: opts.poolSend,
+          closePeerIfIdle: async (peerIdStr: string) => {
+            opts.onClosePeerIfIdle?.(peerIdStr);
+            return false;
+          },
+        },
+      });
+      return router;
+    }
+
+    it('bypasses the pool for a relayed-only peer — one-shot path runs, pool is never dialed', async () => {
+      let poolSends = 0;
+      let newStreamCalls = 0;
+      const retired: string[] = [];
+      const relayedConn = makeConn({
+        remoteAddr: `/ip4/9.9.9.9/tcp/4001/p2p/QmRelay/p2p-circuit/p2p/${FAKE_PEER_ID}`,
+        limits: { bytes: 1024 * 1024 },
+        newStream: async () => {
+          newStreamCalls += 1;
+          return makeStubStream(new Uint8Array([0x42])) as any;
+        },
+      });
+      const router = makeRouterWithPool({
+        connections: () => [relayedConn],
+        poolSend: async () => {
+          poolSends += 1;
+          throw new Error('pool must not be used for a relay-only peer');
+        },
+        onClosePeerIfIdle: (p) => { retired.push(p); },
+      });
+
+      const out = await router.send(FAKE_PEER_ID, PROTOCOL_ID, new Uint8Array([1]), 5000);
+
+      expect(out).toEqual(new Uint8Array([0x42]));
+      expect(poolSends).toBe(0);
+      // One-shot path served the send over the relayed connection
+      // (fast-path reuse — same wire shape that succeeded in the field
+      // while pooled sends reset).
+      expect(newStreamCalls).toBe(1);
+      // A pool stream already held for the peer must be retired (once
+      // quiescent) rather than reused on the relayed connection.
+      expect(retired).toEqual([FAKE_PEER_ID]);
+    });
+
+    it('keeps the pooled path when a direct connection is present alongside a relayed one', async () => {
+      let poolSends = 0;
+      let newStreamCalls = 0;
+      const countNewStream = async (): Promise<unknown> => {
+        newStreamCalls += 1;
+        throw new Error('one-shot path must not run when pooled path is selected');
+      };
+      const router = makeRouterWithPool({
+        connections: () => [
+          makeConn({
+            remoteAddr: '/ip4/9.9.9.9/tcp/4001/p2p/QmRelay/p2p-circuit',
+            limits: { bytes: 1024 * 1024 },
+            newStream: countNewStream,
+          }),
+          makeConn({ remoteAddr: '/ip4/1.2.3.4/tcp/4001', newStream: countNewStream }),
+        ],
+        poolSend: async () => {
+          poolSends += 1;
+          return new Uint8Array([0x07]);
+        },
+      });
+
+      const out = await router.send(FAKE_PEER_ID, PROTOCOL_ID, new Uint8Array([1]), 5000);
+
+      expect(out).toEqual(new Uint8Array([0x07]));
+      expect(poolSends).toBe(1);
+      expect(newStreamCalls).toBe(0);
+    });
+
+    it('re-enables pooling when a direct connection appears after a relayed-only send', async () => {
+      let poolSends = 0;
+      const connections: unknown[] = [
+        makeConn({
+          remoteAddr: `/ip4/9.9.9.9/tcp/4001/p2p/QmRelay/p2p-circuit/p2p/${FAKE_PEER_ID}`,
+          limits: { bytes: 1024 * 1024 },
+          newStream: async () => makeStubStream(new Uint8Array([0x11])) as any,
+        }),
+      ];
+      const router = makeRouterWithPool({
+        connections: () => connections,
+        poolSend: async () => {
+          poolSends += 1;
+          return new Uint8Array([0x22]);
+        },
+      });
+
+      // Relayed-only: one-shot serves the send; crucially the bypass
+      // must NOT pin the peer's wire memo to one-shot — the peer DOES
+      // speak the pooled wire, only the current transport path is bad.
+      const first = await router.send(FAKE_PEER_ID, PROTOCOL_ID, new Uint8Array([1]), 5000);
+      expect(first).toEqual(new Uint8Array([0x11]));
+      expect(poolSends).toBe(0);
+
+      // DCUtR (or a fresh dial) lands a direct connection.
+      connections.push(makeConn({ remoteAddr: '/ip4/1.2.3.4/tcp/4001' }));
+
+      const second = await router.send(FAKE_PEER_ID, PROTOCOL_ID, new Uint8Array([2]), 5000);
+      expect(second).toEqual(new Uint8Array([0x22]));
+      expect(poolSends).toBe(1);
+    });
+
+    it('keeps the pooled path for a cold peer with no connections at all', async () => {
+      let poolSends = 0;
+      const router = makeRouterWithPool({
+        connections: () => [],
+        poolSend: async () => {
+          poolSends += 1;
+          return new Uint8Array([0x33]);
+        },
+      });
+
+      const out = await router.send(FAKE_PEER_ID, PROTOCOL_ID, new Uint8Array([1]), 5000);
+
+      expect(out).toEqual(new Uint8Array([0x33]));
+      expect(poolSends).toBe(1);
+    });
+
+    it('ignores relayed connections that belong to a different peer', async () => {
+      let poolSends = 0;
+      const router = makeRouterWithPool({
+        connections: () => [
+          makeConn({
+            remoteAddr: '/ip4/9.9.9.9/tcp/4001/p2p/QmRelay/p2p-circuit',
+            limits: { bytes: 1024 * 1024 },
+            remotePeerStr: '12D3KooWSomeOtherPeer00000000000000000000000000000000zzzz',
+          }),
+        ],
+        poolSend: async () => {
+          poolSends += 1;
+          return new Uint8Array([0x44]);
+        },
+      });
+
+      const out = await router.send(FAKE_PEER_ID, PROTOCOL_ID, new Uint8Array([1]), 5000);
+
+      expect(out).toEqual(new Uint8Array([0x44]));
+      expect(poolSends).toBe(1);
+    });
+  });
+
   describe('composeAbortSignals', () => {
     it('manual fallback removes both listeners after either source aborts', () => {
       const originalAny = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
@@ -824,6 +1263,92 @@ describe('ProtocolRouter', () => {
       expect(resolveCalls).toBe(3);
     });
 
+    it('uses one pooled attempt for a single-use payload without replaying it', async () => {
+      let resolveCalls = 0;
+      let dialCalls = 0;
+      let poolCalls = 0;
+      const protocolId = '/dkg/test/single-use/1.0.0';
+      const router = makeRouter({
+        onResolve: () => { resolveCalls += 1; },
+        dialBehavior: async () => {
+          dialCalls += 1;
+          throw new Error('The operation was aborted due to timeout');
+        },
+      });
+      (router as any).pooledByLogical.set(protocolId, {
+        logicalProtocolId: protocolId,
+        wireProtocolId: '/dkg/test/single-use-pooled/1.0.0',
+        pool: {
+          send: async () => {
+            poolCalls += 1;
+            return new Uint8Array([0xFF]);
+          },
+        },
+      });
+
+      await expect(router.send(
+        FAKE_PEER_ID,
+        protocolId,
+        new Uint8Array([1, 2, 3]),
+        { timeoutMs: 5_000, payloadReuse: 'single-use' },
+      )).resolves.toEqual(new Uint8Array([0xFF]));
+
+      expect(poolCalls).toBe(1);
+      expect(dialCalls).toBe(0);
+      expect(resolveCalls).toBe(0);
+    });
+
+    it('never replays a single-use payload after an ambiguous pooled failure', async () => {
+      let dialCalls = 0;
+      const protocolId = '/dkg/test/single-use/1.0.0';
+      const router = makeRouter({
+        onResolve: () => undefined,
+        dialBehavior: async () => {
+          dialCalls += 1;
+          return makeStubStream(new Uint8Array([0xFF])) as any;
+        },
+      });
+      (router as any).pooledByLogical.set(protocolId, {
+        logicalProtocolId: protocolId,
+        wireProtocolId: '/dkg/test/single-use-pooled/1.0.0',
+        pool: {
+          send: async () => { throw new Error('pooled stream reset after write'); },
+        },
+      });
+
+      await expect(router.send(
+        FAKE_PEER_ID,
+        protocolId,
+        new Uint8Array([1, 2, 3]),
+        { timeoutMs: 5_000, payloadReuse: 'single-use' },
+      )).rejects.toThrow(/pooled stream reset/);
+      expect(dialCalls).toBe(0);
+    });
+
+    it('rejects multi-path fan-out for a single-use payload before any wire attempt', async () => {
+      let resolveCalls = 0;
+      let dialCalls = 0;
+      const router = makeRouter({
+        onResolve: () => { resolveCalls += 1; },
+        dialBehavior: async () => {
+          dialCalls += 1;
+          return makeStubStream(new Uint8Array([0xFF])) as any;
+        },
+      });
+
+      await expect(
+        router.send(
+          FAKE_PEER_ID,
+          '/dkg/test/single-use/1.0.0',
+          new Uint8Array([1, 2, 3]),
+          { payloadReuse: 'single-use', parallelPaths: 2 },
+        ),
+      ).rejects.toThrow(/single-use payloads cannot use parallelPaths > 1/);
+
+      expect(dialCalls).toBe(0);
+      expect(resolveCalls).toBe(0);
+    });
+
     it('stops retrying once a resolver-re-prime followed by dial succeeds', async () => {
       let resolveCalls = 0;
       let dialCalls = 0;
@@ -889,7 +1414,7 @@ describe('ProtocolRouter', () => {
       let returned = false;
       return {
         writeStatus: 'open' as const,
-        send: () => undefined,
+        send: (_bytes: Uint8Array): void => undefined,
         close: async () => undefined,
         abort: () => undefined,
         async *[Symbol.asyncIterator]() {
@@ -1002,6 +1527,58 @@ describe('ProtocolRouter', () => {
       // Resolver is bypassed on warm path — its only job (priming
       // peerStore for the dialer) is unnecessary when we don't dial.
       expect(resolveCalls).toBe(0);
+    });
+
+    it('caps the response read at SendOptions.maxReadBytes without widening the router-wide limit', async () => {
+      const makeRouter = () => makeRouterWithFastPath({
+        connections: [
+          {
+            status: 'open',
+            newStream: async () => makeStubStream(new Uint8Array([1, 2, 3, 4, 5])) as any,
+          },
+        ],
+        dialBehavior: async () => {
+          throw new Error('dialProtocol must not be called when fast path hits');
+        },
+      });
+
+      // Default: the router-wide limit (10 MiB) admits the 5-byte response.
+      await expect(makeRouter().send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1])))
+        .resolves.toEqual(new Uint8Array([1, 2, 3, 4, 5]));
+      // A per-call cap tightens the read for this send only.
+      await expect(makeRouter().send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), { maxReadBytes: 4 }))
+        .rejects.toThrow('Read limit exceeded (4 bytes)');
+      await expect(makeRouter().send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), { maxReadBytes: 5 }))
+        .resolves.toEqual(new Uint8Array([1, 2, 3, 4, 5]));
+      // A per-call cap can never exceed the router-wide limit.
+      const tight = new ProtocolRouter(
+        {
+          libp2p: {
+            getConnections: () => [{
+              status: 'open',
+              remotePeer: {
+                equals: (other: unknown) => String(other) === FAKE_PEER_ID,
+                toString: () => FAKE_PEER_ID,
+              },
+              newStream: async () => makeStubStream(new Uint8Array([1, 2, 3, 4, 5])),
+            }],
+            dialProtocol: async () => {
+              throw new Error('dialProtocol must not be called when fast path hits');
+            },
+            handle: () => undefined,
+            unhandle: () => undefined,
+            peerStore: { get: async () => { throw new Error('NotFound'); } },
+          },
+        } as unknown as DKGNode,
+        { maxReadBytes: 3 },
+      );
+      await expect(tight.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), { maxReadBytes: 1024 }))
+        .rejects.toThrow('Read limit exceeded (3 bytes)');
+      // Malformed caps are rejected before any I/O.
+      await expect(makeRouter().send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), { maxReadBytes: 0 }))
+        .rejects.toThrow(RangeError);
+      await expect(makeRouter().send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), { maxReadBytes: 2.5 }))
+        .rejects.toThrow(/positive integer/u);
     });
 
     it('falls through to dialProtocol when no connections exist (cold peer)', async () => {
@@ -1177,6 +1754,188 @@ describe('ProtocolRouter', () => {
       expect(out).toEqual(new Uint8Array([0x66]));
       expect(limitedNewStream).toBe(0);
       expect(dialCalls).toBe(1);
+    });
+
+    it('falls back to a live limited candidate after cached direct-address dialing fails', async () => {
+      let limitedNewStream = 0;
+      let dialCalls = 0;
+      const router = makeRouterWithFastPath({
+        connections: [
+          {
+            status: 'open',
+            limits: { bytes: 1024 * 1024 },
+            newStream: async () => {
+              limitedNewStream += 1;
+              return makeStubStream(new Uint8Array([0x67])) as any;
+            },
+          },
+        ],
+        peerStoreGet: async () => ({
+          addresses: [
+            { multiaddr: { toString: () => '/ip4/1.2.3.4/tcp/4001' } },
+          ],
+        }),
+        dialBehavior: async () => {
+          dialCalls += 1;
+          throw new Error('All multiaddr dials failed');
+        },
+      });
+
+      const out = await router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]));
+      expect(out).toEqual(new Uint8Array([0x67]));
+      expect(dialCalls).toBe(1);
+      expect(limitedNewStream).toBe(1);
+    });
+
+    // A single-use payload gets one attempt, so the retry above never runs for
+    // it. Its dial fails before any byte is written, and the open limited
+    // connection must carry it within that one attempt. libp2p never returns
+    // a limited connection from a dial: it dials a second circuit, and aborts
+    // it when it has the address of the first.
+    describe('single-use payload on a peer reached through a relay', () => {
+      const DIRECT_ADDRESS_IN_PEER_STORE = async () => ({
+        addresses: [{ multiaddr: { toString: () => '/ip4/1.2.3.4/tcp/4001' } }],
+      });
+
+      function limitedConnection(newStream: () => Promise<ReturnType<typeof makeStubStream>>) {
+        return { status: 'open', limits: { bytes: 1024 * 1024 }, newStream };
+      }
+
+      it('is sent on the open limited connection when the dial ends in a closed duplicate', async () => {
+        let dialCalls = 0;
+        const sent: Uint8Array[] = [];
+        const router = makeRouterWithFastPath({
+          connections: [limitedConnection(async () => ({
+            ...makeStubStream(new Uint8Array([0x68])),
+            send: (bytes: Uint8Array) => { sent.push(bytes); },
+          }))],
+          peerStoreGet: DIRECT_ADDRESS_IN_PEER_STORE,
+          dialBehavior: async () => {
+            dialCalls += 1;
+            throw new Error('Remote closed connection during opening');
+          },
+        });
+
+        const out = await router.send(
+          FAKE_PEER_ID,
+          '/dkg/test/1.0.0',
+          new Uint8Array([7]),
+          { timeoutMs: 5_000, payloadReuse: 'single-use' },
+        );
+
+        expect(out).toEqual(new Uint8Array([0x68]));
+        expect(dialCalls).toBe(1);
+        expect(sent).toEqual([new Uint8Array([7])]);
+      });
+
+      it('fails with the dial error when no connection to the peer is open', async () => {
+        let dialCalls = 0;
+        const router = makeRouterWithFastPath({
+          connections: [],
+          peerStoreGet: DIRECT_ADDRESS_IN_PEER_STORE,
+          dialBehavior: async () => {
+            dialCalls += 1;
+            throw new Error('Remote closed connection during opening');
+          },
+        });
+
+        await expect(router.send(
+          FAKE_PEER_ID,
+          '/dkg/test/1.0.0',
+          new Uint8Array([7]),
+          { timeoutMs: 5_000, payloadReuse: 'single-use' },
+        )).rejects.toThrow('Remote closed connection during opening');
+        expect(dialCalls).toBe(1);
+      });
+
+      it('is not sent a second time when the limited connection fails after the write', async () => {
+        let dialCalls = 0;
+        let limitedNewStream = 0;
+        const sent: Uint8Array[] = [];
+        const router = makeRouterWithFastPath({
+          connections: [limitedConnection(async () => {
+            limitedNewStream += 1;
+            return {
+              ...makeStubStream(new Uint8Array([0x69])),
+              send: (bytes: Uint8Array) => { sent.push(bytes); },
+              close: async () => { throw new Error('stream reset'); },
+            };
+          })],
+          peerStoreGet: DIRECT_ADDRESS_IN_PEER_STORE,
+          dialBehavior: async () => {
+            dialCalls += 1;
+            throw new Error('Remote closed connection during opening');
+          },
+        });
+
+        await expect(router.send(
+          FAKE_PEER_ID,
+          '/dkg/test/1.0.0',
+          new Uint8Array([7]),
+          { timeoutMs: 5_000, payloadReuse: 'single-use' },
+        )).rejects.toThrow('stream reset');
+        expect(dialCalls).toBe(1);
+        expect(limitedNewStream).toBe(1);
+        expect(sent).toEqual([new Uint8Array([7])]);
+      });
+
+      it('goes out on the dialed stream when the dial succeeds, leaving the limited connection alone', async () => {
+        let limitedNewStream = 0;
+        const router = makeRouterWithFastPath({
+          connections: [limitedConnection(async () => {
+            limitedNewStream += 1;
+            return makeStubStream(new Uint8Array([0x6a]));
+          })],
+          peerStoreGet: DIRECT_ADDRESS_IN_PEER_STORE,
+          dialBehavior: async () => makeStubStream(new Uint8Array([0x6b])) as any,
+        });
+
+        const out = await router.send(
+          FAKE_PEER_ID,
+          '/dkg/test/1.0.0',
+          new Uint8Array([7]),
+          { timeoutMs: 5_000, payloadReuse: 'single-use' },
+        );
+
+        expect(out).toEqual(new Uint8Array([0x6b]));
+        expect(limitedNewStream).toBe(0);
+      });
+    });
+
+    it('prefers an open direct candidate even when a limited candidate is listed first', async () => {
+      let limitedNewStream = 0;
+      let directNewStream = 0;
+      let dialCalls = 0;
+      const router = makeRouterWithFastPath({
+        connections: [
+          {
+            status: 'open',
+            limits: { bytes: 1024 * 1024 },
+            newStream: async () => {
+              limitedNewStream += 1;
+              return makeStubStream(new Uint8Array([0x68])) as any;
+            },
+          },
+          {
+            status: 'open',
+            newStream: async () => {
+              directNewStream += 1;
+              return makeStubStream(new Uint8Array([0x69])) as any;
+            },
+          },
+        ],
+        peerStoreGet: async () => ({ addresses: [] }),
+        dialBehavior: async () => {
+          dialCalls += 1;
+          throw new Error('dialProtocol must not be called when direct is open');
+        },
+      });
+
+      const out = await router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]));
+      expect(out).toEqual(new Uint8Array([0x69]));
+      expect(directNewStream).toBe(1);
+      expect(limitedNewStream).toBe(0);
+      expect(dialCalls).toBe(0);
     });
 
     // The Window D shape this fast path is meant to heal: a single
@@ -1357,6 +2116,197 @@ describe('ProtocolRouter', () => {
       expect(out).toEqual(new Uint8Array([0x99]));
       expect(newStreamCalls).toBe(1);
       expect(dialCalls).toBe(0);
+    });
+  });
+
+  // A resolver step can hold the whole send budget (kad-dht parks a
+  // findPeer until its signal aborts while the routing table is empty).
+  // A connection to the peer that opens meanwhile must end that wait and
+  // carry the send, instead of the send timing out beside a live
+  // connection. The real-libp2p reproduction lives in
+  // protocol-router-resolver.test.ts; these fakes pin the edges.
+  describe('send() resolver yields to a connection that opens mid-resolve', () => {
+    const FAKE_PEER_ID = '12D3KooWBzj7Hg2cKCdsKL6QcjC5UbLztKTvzCZQHaT4P4ZyJEAA';
+    const OTHER_PEER_ID = 'other-peer';
+
+    type FakeConnection = {
+      status: 'open';
+      remotePeer: { equals: (other: unknown) => boolean; toString: () => string };
+      newStream: () => Promise<unknown>;
+    };
+
+    function makeStubStream(response: Uint8Array) {
+      let returned = false;
+      return {
+        writeStatus: 'open' as const,
+        send: () => undefined,
+        close: async () => undefined,
+        abort: () => undefined,
+        async *[Symbol.asyncIterator]() {
+          if (!returned) {
+            returned = true;
+            yield response;
+          }
+        },
+      };
+    }
+
+    function connectionTo(peerId: string, newStream: () => Promise<unknown>): FakeConnection {
+      return {
+        status: 'open',
+        remotePeer: { equals: (other) => String(other) === peerId, toString: () => peerId },
+        newStream,
+      };
+    }
+
+    /** Resolver that holds until its signal aborts, like kad-dht's empty-table wait. */
+    function parkingResolver() {
+      const signals: AbortSignal[] = [];
+      let markEntered: () => void = () => {};
+      const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+      const resolve = async (_peerId: string, opts?: { signal?: AbortSignal }): Promise<string[]> => {
+        const signal = opts?.signal;
+        if (!signal) throw new Error('resolver needs a signal');
+        signals.push(signal);
+        markEntered();
+        await new Promise<void>((done) => {
+          if (signal.aborted) done();
+          else signal.addEventListener('abort', () => done(), { once: true });
+        });
+        return [];
+      };
+      return { signals, entered, resolve };
+    }
+
+    function makeWatchedRouter(opts: {
+      getConnections: () => ReadonlyArray<FakeConnection>;
+      resolve: (peerId: string, opts?: { signal?: AbortSignal }) => Promise<string[]>;
+      dialBehavior?: () => Promise<unknown>;
+    }) {
+      const events = new EventTarget();
+      let connectionOpenListeners = 0;
+      let dialCalls = 0;
+      const node = {
+        libp2p: {
+          getConnections: opts.getConnections,
+          dialProtocol: async () => {
+            dialCalls += 1;
+            if (!opts.dialBehavior) throw new Error('The dial request has no valid addresses for peer');
+            return opts.dialBehavior();
+          },
+          handle: () => undefined,
+          unhandle: () => undefined,
+          peerStore: { get: async () => { throw new Error('NotFound'); } },
+          addEventListener: (type: string, listener: EventListener) => {
+            if (type === 'connection:open') connectionOpenListeners += 1;
+            events.addEventListener(type, listener);
+          },
+          removeEventListener: (type: string, listener: EventListener) => {
+            if (type === 'connection:open') connectionOpenListeners -= 1;
+            events.removeEventListener(type, listener);
+          },
+        },
+      } as unknown as DKGNode;
+      const peerResolver = { resolve: opts.resolve } as unknown as PeerResolver;
+      return {
+        router: new ProtocolRouter(node, { peerResolver }),
+        emitConnectionOpen: (connection: FakeConnection) => {
+          events.dispatchEvent(new CustomEvent('connection:open', { detail: connection }));
+        },
+        connectionOpenListeners: () => connectionOpenListeners,
+        dialCalls: () => dialCalls,
+      };
+    }
+
+    it('ends the resolve when the peer connects and sends over that connection without dialing', async () => {
+      const connections: FakeConnection[] = [];
+      const resolver = parkingResolver();
+      const harness = makeWatchedRouter({ getConnections: () => connections, resolve: resolver.resolve });
+
+      const sent = harness.router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), 2_000);
+      await resolver.entered;
+      expect(harness.connectionOpenListeners()).toBe(1);
+
+      const inbound = connectionTo(FAKE_PEER_ID, async () => makeStubStream(new Uint8Array([0xA1])));
+      connections.push(inbound);
+      harness.emitConnectionOpen(inbound);
+
+      await expect(sent).resolves.toEqual(new Uint8Array([0xA1]));
+      expect(resolver.signals).toHaveLength(1);
+      expect(resolver.signals[0].aborted).toBe(true);
+      expect(harness.dialCalls()).toBe(0);
+      expect(harness.connectionOpenListeners()).toBe(0);
+    });
+
+    it('keeps resolving when a connection to a different peer opens', async () => {
+      const connections: FakeConnection[] = [];
+      const resolver = parkingResolver();
+      const harness = makeWatchedRouter({ getConnections: () => connections, resolve: resolver.resolve });
+      let otherPeerStreams = 0;
+
+      const sent = harness.router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), 300);
+      await resolver.entered;
+      const unrelated = connectionTo(OTHER_PEER_ID, async () => {
+        otherPeerStreams += 1;
+        return makeStubStream(new Uint8Array([0xEE]));
+      });
+      connections.push(unrelated);
+      harness.emitConnectionOpen(unrelated);
+      await Promise.resolve();
+      expect(resolver.signals[0].aborted).toBe(false);
+
+      // The resolver holds until the send budget ends; the dial fallback then
+      // finds no address, so the send fails as it did before the watch.
+      await expect(sent).rejects.toThrow(/no valid addresses/);
+      expect(otherPeerStreams).toBe(0);
+      expect(harness.dialCalls()).toBe(1);
+      expect(harness.connectionOpenListeners()).toBe(0);
+    });
+
+    it('sends over a connection that opened after the fast-path pass but before the watch attached', async () => {
+      // No `connection:open` reaches the watch: the connection is already in
+      // the table when it attaches, so only the attach-time check can see it.
+      let getConnectionsCalls = 0;
+      const lateConnection = connectionTo(FAKE_PEER_ID, async () => makeStubStream(new Uint8Array([0xB2])));
+      const resolver = parkingResolver();
+      const harness = makeWatchedRouter({
+        getConnections: () => (getConnectionsCalls++ === 0 ? [] : [lateConnection]),
+        resolve: resolver.resolve,
+      });
+
+      await expect(
+        harness.router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), 2_000),
+      ).resolves.toEqual(new Uint8Array([0xB2]));
+      expect(resolver.signals).toHaveLength(0);
+      expect(harness.dialCalls()).toBe(0);
+      expect(harness.connectionOpenListeners()).toBe(0);
+    });
+
+    it('still resolves before dialing when the only connection is one the fast path already failed on', async () => {
+      // That connection must not read as "the peer connected": skipping the
+      // resolver for it would drop the peerStore priming the dial relies on.
+      let newStreamCalls = 0;
+      let resolveCalls = 0;
+      const halfDead = connectionTo(FAKE_PEER_ID, async () => {
+        newStreamCalls += 1;
+        throw new Error('connection went away mid-newStream');
+      });
+      const harness = makeWatchedRouter({
+        getConnections: () => [halfDead],
+        resolve: async () => {
+          resolveCalls += 1;
+          return [];
+        },
+        dialBehavior: async () => makeStubStream(new Uint8Array([0xC3])),
+      });
+
+      await expect(
+        harness.router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1])),
+      ).resolves.toEqual(new Uint8Array([0xC3]));
+      expect(newStreamCalls).toBe(1);
+      expect(resolveCalls).toBe(1);
+      expect(harness.dialCalls()).toBe(1);
+      expect(harness.connectionOpenListeners()).toBe(0);
     });
   });
 

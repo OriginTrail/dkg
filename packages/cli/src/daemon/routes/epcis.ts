@@ -1,3 +1,4 @@
+import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
 // daemon/routes/epcis.ts
 //
 // Route handlers for EPCIS events + capture.
@@ -211,7 +212,6 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  isValidContextGraphId,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
@@ -319,7 +319,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import { actorFromRequestContext, type RequestContext } from './context.js';
 
 type ResolveOk<T> = { ok: true; value: T };
 type ResolveErr = { ok: false; status: number; body: object };
@@ -397,7 +397,6 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
     res,
     agent,
     publisherControl,
-    publisherRuntime,
     config,
     startedAt,
     dashDb,
@@ -420,7 +419,6 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
     apiPortRef,
     url,
     path,
-    requestToken,
     requestAgentAddress,
   } = ctx;
 
@@ -435,6 +433,8 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
     const sg = resolveSubGraphName(searchParams.get('subGraphName'));
     if (!sg.ok) return jsonResponse(res, sg.status, sg.body);
 
+    if (!(await requireContextGraphReadAuthority(ctx, cg.value))) return;
+    const callerAgentAddress = actorFromRequestContext(ctx).authenticatedAgentAddress;
     const epcisQueryEngine = {
       query: (
         sparql: string,
@@ -444,7 +444,7 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
           graphSuffix?: '_shared_memory';
           includePrivate?: boolean;
         },
-      ) => agent.query(sparql, opts),
+      ) => agent.query(sparql, { ...opts, callerAgentAddress }),
     };
     try {
       const result = await handleEventsQuery(searchParams, {
@@ -490,16 +490,20 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
 
   // POST /api/epcis/capture  { contextGraphId?, subGraphName?, epcisDocument, publishOptions? }
   if (req.method === "POST" && path === "/api/epcis/capture") {
-    if (!config.publisher?.enabled) {
+    const publisherAvailability = ctx.publisherState.availability;
+    if (!publisherAvailability.available && publisherAvailability.reason === 'publisher_disabled') {
       return jsonResponse(res, 503, {
         error: "PublisherDisabled",
         message: "Async EPCIS capture requires publisher.enabled=true",
       });
     }
-    if (!publisherRuntime || publisherRuntime.walletIds.length === 0) {
+    if (!publisherAvailability.available) {
       return jsonResponse(res, 503, {
         error: "PublisherUnavailable",
         message: "Async EPCIS capture requires the publisher runtime to be running with at least one configured publisher wallet",
+        reason: publisherAvailability.reason,
+        retryable: publisherAvailability.retryable,
+        operatorActionRequired: publisherAvailability.operatorActionRequired,
       });
     }
     const body = await readBody(req);
@@ -530,7 +534,21 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
         return agent.publishAsync(
           contextGraphId,
           content as Record<string, unknown>,
-          opts,
+          {
+            ...opts,
+            /**
+             * An EPCIS capture is externally authenticated, so the job it enqueues belongs to
+             * the agent that submitted it. Without this the publish path treats the capture as
+             * an internal producer and assigns it to the node's default agent, which both
+             * denies the submitter the by-id force clear — the only manual exit for a held job
+             * — and hands that destructive capability to an agent that never submitted it.
+             *
+             * `handleCaptureAsync` builds these opts from a strict allow-list, so a request
+             * body cannot carry this field; spreading first is defence in depth if that
+             * allow-list ever widens. Authorization only — never an author-selection input.
+             */
+            admittedByAgentAddress: requestAgentAddress,
+          },
         );
       },
     };

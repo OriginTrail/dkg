@@ -1,71 +1,171 @@
 import { describe, expect, it } from 'vitest';
-import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKGAgent } from '../src/index.js';
+import { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
+import { PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS, SYNC_RECONNECT_FLAP_GRACE_MS } from '../src/dkg-agent-constants.js';
-import { runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
+import {
+  InMemoryPeerSyncLease,
+  runSelectedSharedMemoryRetry,
+  runSyncOnConnect,
+} from '../src/sync/on-connect/sync-on-connect.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
+import {
+  allowAllNetworkAdmission,
+  createUnstartedAgent,
+  emptyDetailedSync,
+  flushTimers,
+  installSyncOnConnectPeerJobStub,
+  peerSyncSessionDriver,
+  recorder,
+  resetPeerSyncSessionForTest,
+} from './_helpers/sync-on-connect-test-fixture.js';
+import { ordinaryLane } from './_helpers/run-sync-on-connect.js';
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 const PEER_B = '12D3KooWRnKxyUg8W3ju7BpxN3e9NAsG1T4d6TuK53LZxD41f3RC';
-
-function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
-  const calls: A[] = [];
-  const fn = (...args: A): R => {
-    calls.push(args);
-    return impl(...args);
-  };
-  return Object.assign(fn, { calls });
-}
-
-async function flushTimers(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  await Promise.resolve();
-}
-
-async function createUnstartedAgent(name: string): Promise<DKGAgent> {
-  return DKGAgent.create({
-    name,
-    listenHost: '127.0.0.1',
-    chainAdapter: new MockChainAdapter(),
-  });
-}
+const ACTIVE_SYNC_LIFETIME = new AbortController().signal;
 
 const noopLog = (_ctx: OperationContext, _message: string) => {};
 
-function emptyDetailedSync(overrides: Record<string, number> = {}) {
-  return {
-    insertedTriples: 0,
-    insertedDataTriples: 0,
-    insertedMetaTriples: 0,
-    metaOnlyResponses: 0,
-    completedPhases: 0,
-    checkpointAdvances: 0,
-    timedOutPhases: 0,
-    failedPeers: 0,
-    failedPhases: 0,
-    deniedPhases: 0,
-    backoffWorthyFailures: 0,
-    ...overrides,
-  };
-}
-
 describe('sync-on-connect churn gates', () => {
+  it('keeps agents, ontology, and configured graphs in the sync-on-connect metadata scope', async () => {
+    const refreshMetaSyncedFlags = recorder(async () => undefined);
+    const configuredGraph = 'configured-default-cg';
+
+    const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
+      remotePeer: PEER_A,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      peerCapabilities: new PeerCapabilityRegistry(),
+      getSyncContextGraphs: () => [configuredGraph],
+      syncFromPeer: async () => 0,
+      refreshMetaSyncedFlags,
+      discoverContextGraphsFromStore: async () => 0,
+      logInfo: noopLog,
+    });
+
+    expect(outcome).toBe('synced');
+    expect(refreshMetaSyncedFlags.calls).toHaveLength(1);
+    expect([...refreshMetaSyncedFlags.calls[0][0]]).toEqual([
+      SYSTEM_CONTEXT_GRAPHS.AGENTS,
+      SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+      configuredGraph,
+    ]);
+  });
+
+  it('uses the exact automatic durable scope supplied by the role policy', async () => {
+    const syncFromPeer = recorder(async () => 0);
+    const refreshMetaSyncedFlags = recorder(async () => undefined);
+
+    const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
+      remotePeer: PEER_A,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      peerCapabilities: new PeerCapabilityRegistry(),
+      getSyncContextGraphs: () => ['selected-cg'],
+      getDurableSyncContextGraphs: () => ['selected-cg'],
+      syncFromPeer,
+      refreshMetaSyncedFlags,
+      discoverContextGraphsFromStore: async () => 0,
+      logInfo: noopLog,
+    });
+
+    expect(outcome).toBe('synced');
+    expect(syncFromPeer.calls).toEqual([[PEER_A, ['selected-cg']]]);
+    expect([...refreshMetaSyncedFlags.calls[0][0]]).toEqual(['selected-cg']);
+  });
+
+  it('treats an empty automatic durable scope as a clean no-op', async () => {
+    const syncFromPeer = recorder(async () => 0);
+    const refreshMetaSyncedFlags = recorder(async () => undefined);
+    const discoverContextGraphsFromStore = recorder(async () => 0);
+    const syncedPeers: Array<{ peerId: string; fresh: boolean; progress?: boolean }> = [];
+
+    const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
+      remotePeer: PEER_A,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      peerCapabilities: new PeerCapabilityRegistry(),
+      getSyncContextGraphs: () => [],
+      getDurableSyncContextGraphs: () => [],
+      syncFromPeer,
+      refreshMetaSyncedFlags,
+      discoverContextGraphsFromStore,
+      logInfo: noopLog,
+      onSyncAccounting: (peerId, syncOutcome) => {
+        syncedPeers.push({ peerId, fresh: syncOutcome?.fresh ?? false, progress: syncOutcome?.progress });
+      },
+    });
+
+    expect(outcome).toBe('synced');
+    expect(syncFromPeer.calls).toEqual([]);
+    expect(refreshMetaSyncedFlags.calls).toEqual([]);
+    expect(discoverContextGraphsFromStore.calls).toEqual([[]]);
+    expect(syncedPeers).toEqual([{ peerId: PEER_A, fresh: true, progress: false }]);
+  });
+
+  it.each([
+    ['edge', ['selected-cg']],
+    ['core', [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, 'selected-cg']],
+  ] as const)('wires the %s role into the automatic durable scope', async (nodeRole, expectedScope) => {
+    const agent = await createUnstartedAgent(`AutomaticSystemScope-${nodeRole}`);
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    resetPeerSyncSessionForTest(agent);
+    agent.config.nodeRole = nodeRole;
+    agent.config.syncContextGraphs = ['selected-cg'];
+    agent.config.syncSharedMemoryOnConnect = false;
+    agent.getPeerProtocols = async () => [PROTOCOL_SYNC];
+    const syncFromPeerDetailed = recorder(async () => emptyDetailedSync({ completedPhases: 1 }));
+    agent.syncFromPeerDetailed = syncFromPeerDetailed;
+    agent.refreshMetaSyncedFlags = async () => undefined;
+    agent.discoverContextGraphsFromStore = async () => 0;
+    agent.planSharedMemorySyncContextGraphs = async () => ({
+      targets: [],
+    });
+
+    expect(await agent.trySyncFromPeer(PEER_A)).toBe('synced');
+    const requestedScope = syncFromPeerDetailed.calls
+      .flatMap((call) => call[1] as string[])
+      .sort();
+    expect(requestedScope).toEqual([...expectedScope].sort());
+  });
+
+  it('keeps explicit Edge catch-up available for system Context Graphs', async () => {
+    const agent = await createUnstartedAgent('ExplicitSystemGraphCatchup');
+    agent.config.nodeRole = 'edge';
+    const syncFromPeerDetailed = recorder(async () => emptyDetailedSync());
+    agent.syncFromPeerDetailed = syncFromPeerDetailed;
+
+    await agent.syncFromPeer(PEER_A, [
+      SYSTEM_CONTEXT_GRAPHS.AGENTS,
+      SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+    ]);
+
+    expect(syncFromPeerDetailed.calls[0][1]).toEqual([
+      SYSTEM_CONTEXT_GRAPHS.AGENTS,
+      SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+    ]);
+  });
+
   it('dedupes repeated reconnect scheduling across a short relay flap', async () => {
     const agent = await createUnstartedAgent('SyncReconnectFlapDedup');
     const calls: string[] = [];
-    (agent as any).runSyncFromPeerOnConnect = async (peerId: string) => {
+    const runOrdinary = async (peerId: string) => {
       calls.push(peerId);
     };
+    installSyncOnConnectPeerJobStub(agent, { runOrdinary });
 
     const handleSyncError = () => undefined;
-    expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
-    const firstQueuedAt = (agent as any).catchupOnConnectAt.get(PEER_A);
+    expect(agent.queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
+    const firstQueuedAt = peerSyncSessionDriver(agent).snapshot(PEER_A).lastQueued;
 
-    (agent as any).lastSyncDisconnectedAt.set(PEER_A, Date.now() - Math.floor(SYNC_RECONNECT_FLAP_GRACE_MS / 2));
-    expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(false);
-    expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(false);
-    expect((agent as any).catchupOnConnectAt.get(PEER_A)).toBe(firstQueuedAt);
+    agent.lastSyncDisconnectedAt.set(PEER_A, Date.now() - Math.floor(SYNC_RECONNECT_FLAP_GRACE_MS / 2));
+    expect(agent.queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(false);
+    expect(agent.queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(false);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastQueued).toBe(firstQueuedAt);
 
     await flushTimers();
     expect(calls).toEqual([PEER_A]);
@@ -74,77 +174,386 @@ describe('sync-on-connect churn gates', () => {
   it('allows reconnect catch-up after a meaningful offline gap', async () => {
     const agent = await createUnstartedAgent('SyncReconnectOfflineGap');
     const calls: string[] = [];
-    (agent as any).runSyncFromPeerOnConnect = async (peerId: string) => {
+    const runOrdinary = async (peerId: string) => {
       calls.push(peerId);
     };
+    installSyncOnConnectPeerJobStub(agent, { runOrdinary });
 
     const lastDisconnected = Date.now() - SYNC_RECONNECT_FLAP_GRACE_MS - 100;
     const beforeDisconnect = lastDisconnected - 1;
-    (agent as any).lastSuccessfulSyncAt.set(PEER_A, beforeDisconnect);
-    (agent as any).catchupOnConnectAt.set(PEER_A, beforeDisconnect);
-    (agent as any).lastSyncDisconnectedAt.set(PEER_A, lastDisconnected);
+    peerSyncSessionDriver(agent).recordFreshness(PEER_A, { successfulAt: beforeDisconnect });
+    peerSyncSessionDriver(agent).recordQueued(PEER_A, beforeDisconnect);
+    agent.lastSyncDisconnectedAt.set(PEER_A, lastDisconnected);
 
-    expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(true);
-    expect((agent as any).catchupOnConnectAt.get(PEER_A)).toBeGreaterThan(lastDisconnected);
+    expect(agent.queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(true);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastQueued).toBeGreaterThan(lastDisconnected);
 
     await flushTimers();
     expect(calls).toEqual([PEER_A]);
   });
 
+  it('labels the connect-driven admission on-connect, not unspecified', async () => {
+    // The complement of the reconciler assertion below, and the source with the
+    // highest production volume: every reconnect sync flows through this
+    // default. Nothing pinned it, so changing the default would silently
+    // relabel most sync-global pressure on the operator dashboards.
+    const agent = await createUnstartedAgent('SyncOnConnectSourceLabel');
+    agent.started = true;
+    resetPeerSyncSessionForTest(agent);
+    const sources: unknown[] = [];
+    agent.trySyncFromPeer = async (
+      _peer: string,
+      _onAccounting: unknown,
+      source: unknown,
+    ) => {
+      sources.push(source);
+      return undefined;
+    };
+
+    await agent.attemptSyncFromPeerWithReconcilerAccounting(PEER_A, {
+      connected: true,
+      hasSyncProtocol: true,
+    });
+
+    expect(sources).toEqual(['on-connect']);
+  });
+
   it('reconciler still retries stale connected peers', async () => {
     const agent = await createUnstartedAgent('SyncReconcilerStillRetries');
-    (agent as any).started = true;
-    (agent.node as any).node = {
+    agent.started = true;
+    resetPeerSyncSessionForTest(agent);
+    agent.node.node = {
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
     };
-    (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
+    agent.getPeerProtocols = async () => [PROTOCOL_SYNC];
     const trySyncFromPeer = recorder(async () => undefined);
-    (agent as any).trySyncFromPeer = trySyncFromPeer;
+    agent.trySyncFromPeer = trySyncFromPeer;
 
-    await (agent as any).reconcileSyncFromConnectedPeers();
+    await agent.reconcileSyncFromConnectedPeers();
     await flushTimers();
 
-    expect(trySyncFromPeer.calls).toEqual([[PEER_A, expect.any(Function)]]);
+    // The third argument is the bounded admission origin (issue #2006): the
+    // reconciler's queue pressure must be attributable to `reconcile`, not
+    // indistinguishable from sync-on-connect. Selected/ordinary phase history
+    // exists only inside a queued peer job.
+    expect(trySyncFromPeer.calls).toEqual([[
+      PEER_A,
+      expect.any(Function),
+      'reconcile',
+    ]]);
+  });
+
+  it('uses configured staleness and backoff values in the sync lifecycle', async () => {
+    const agent = await createUnstartedAgent('ConfiguredSyncTimingConsumers', {
+      syncStalenessThresholdMs: 20_000,
+      syncBackoffBaseMs: 5_000,
+      syncBackoffMaxMs: 30_000,
+      syncBackoffJitter: 0,
+    });
+    agent.started = true;
+    resetPeerSyncSessionForTest(agent);
+    agent.node.node = {
+      getPeers: () => [{ toString: () => PEER_A }],
+      getConnections: () => [],
+    };
+    agent.getPeerProtocols = async () => [PROTOCOL_SYNC];
+    peerSyncSessionDriver(agent).recordFreshness(PEER_A, {
+      successfulAt: Date.now() - 30_000,
+    });
+    const trySyncFromPeer = recorder(async () => undefined);
+    agent.trySyncFromPeer = trySyncFromPeer;
+    const before = Date.now();
+
+    await agent.reconcileSyncFromConnectedPeers();
+    await flushTimers();
+
+    expect(trySyncFromPeer.calls).toHaveLength(1);
+    const backoff = peerSyncSessionDriver(agent).snapshot(PEER_A).backoff;
+    expect(backoff?.failures).toBe(1);
+    expect(backoff?.nextRetryAt - before).toBeGreaterThanOrEqual(5_000);
+    expect(backoff?.nextRetryAt - before).toBeLessThan(5_100);
   });
 
   it('records backoff after a failed sync round and blocks connection-open rescheduling', async () => {
     const agent = await createUnstartedAgent('SyncReconnectBackoff');
-    (agent as any).started = true;
-    (agent.node as any).node = {
+    agent.started = true;
+    resetPeerSyncSessionForTest(agent);
+    agent.node.node = {
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
     };
-    (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
-    (agent as any).trySyncFromPeer = async () => 'synced';
+    agent.getPeerProtocols = async () => [PROTOCOL_SYNC];
+    agent.trySyncFromPeer = async () => 'synced';
 
-    await (agent as any).runSyncFromPeerOnConnect(PEER_A, () => undefined);
+    await agent.attemptSyncFromPeerWithReconcilerAccounting(PEER_A, {
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
 
-    const backoff = (agent as any).syncReconcilerBackoff.get(PEER_A);
+    const backoff = peerSyncSessionDriver(agent).snapshot(PEER_A).backoff;
     expect(backoff?.failures).toBe(1);
     expect(backoff?.nextRetryAt).toBeGreaterThan(Date.now());
 
     const staleQueuedAt = Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1;
-    (agent as any).catchupOnConnectAt.set(PEER_A, staleQueuedAt);
+    peerSyncSessionDriver(agent).recordQueued(PEER_A, staleQueuedAt);
+    expect(agent.queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(false);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastQueued).toBe(staleQueuedAt);
+  });
+
+  it('retains progress while backing off a mixed progress-and-failure round', async () => {
+    const agent = await createUnstartedAgent('SyncReconnectPartialProgressBackoff', {
+      syncContextGraphs: ['cg-a'],
+      rfc64CatalogActivation: { enabled: false },
+    });
+    allowAllNetworkAdmission(agent);
+    (agent as any).started = true;
+    resetPeerSyncSessionForTest(agent);
+    (agent.node as any).node = {
+      getPeers: () => [{ toString: () => PEER_A }],
+      getConnections: () => [{
+        remotePeer: { toString: () => PEER_A },
+        direction: 'outbound',
+        timeline: { open: 123 },
+        remoteAddr: { toString: () => '/ip4/127.0.0.1/tcp/9090' },
+      }],
+    };
+    (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
+    (agent as any).syncFromPeerDetailed = async () => emptyDetailedSync({
+      insertedTriples: 3,
+      insertedDataTriples: 3,
+      completedPhases: 1,
+      checkpointAdvances: 1,
+      timedOutPhases: 1,
+      backoffWorthyFailures: 1,
+    });
+    (agent as any).refreshMetaSyncedFlags = async () => undefined;
+    (agent as any).discoverContextGraphsFromStore = async () => 0;
+    (agent as any).planSharedMemorySyncContextGraphs = async () => ({ targets: [] });
+    peerSyncSessionDriver(agent).recordBackoff(PEER_A, {
+      failures: 2,
+      nextRetryAt: Date.now() - 1,
+      protocolsKey: null,
+      connectionKey: null,
+    });
+
+    await (agent as any).attemptSyncFromPeerWithReconcilerAccounting(PEER_A, {
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: null,
+    });
+
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastSyncProgress).toBeGreaterThan(0);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastSuccessfulSync).toBeUndefined();
+    const backoff = peerSyncSessionDriver(agent).snapshot(PEER_A).backoff;
+    expect(backoff?.failures).toBe(3);
+    expect(backoff?.nextRetryAt).toBeGreaterThan(Date.now());
+
+    peerSyncSessionDriver(agent).recordQueued(
+      PEER_A,
+      Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
+    );
     expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(false);
-    expect((agent as any).catchupOnConnectAt.get(PEER_A)).toBe(staleQueuedAt);
+  });
+
+  it.each([
+    {
+      disposition: 'clear' as const,
+      fresh: true as const,
+      expectedFailures: undefined,
+      expectedFresh: true,
+    },
+    {
+      disposition: 'retry' as const,
+      fresh: false as const,
+      expectedFailures: 3,
+      expectedFresh: false,
+    },
+    {
+      disposition: 'defer' as const,
+      fresh: false as const,
+      expectedFailures: 2,
+      expectedFresh: false,
+    },
+  ])(
+    'applies $disposition accounting as one coherent lifecycle update',
+    async ({ disposition, fresh, expectedFailures, expectedFresh }) => {
+      const agent = await createUnstartedAgent(`SyncAccounting-${disposition}`);
+      (agent as any).started = true;
+    resetPeerSyncSessionForTest(agent);
+      (agent as any).isPeerConnectedForSyncBackoff = () => true;
+      peerSyncSessionDriver(agent).recordBackoff(PEER_A, {
+        failures: 2,
+        nextRetryAt: Date.now() - 1,
+        protocolsKey: null,
+        connectionKey: null,
+      });
+
+      (agent as any).applySyncOnConnectAccounting(
+        PEER_A,
+        {
+          reconcilerDisposition: disposition,
+          fresh,
+          progress: true,
+        },
+        { protocolsKey: PROTOCOL_SYNC, connectionKey: 'accounting-test' },
+      );
+
+      expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastSyncProgress).toBeGreaterThan(0);
+      expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastSuccessfulSync !== undefined)
+        .toBe(expectedFresh);
+      expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff?.failures)
+        .toBe(expectedFailures);
+    },
+  );
+
+  it('records reconciler backoff when selected SWM is explicitly incomplete without progress', async () => {
+    const agent = await createUnstartedAgent('SelectedSwmIncompleteBackoff');
+    agent.started = true;
+    resetPeerSyncSessionForTest(agent);
+    agent.node.node = {
+      getPeers: () => [{ toString: () => PEER_A }],
+      getConnections: () => [],
+    };
+    agent.selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
+    agent.trySelectedSwmRetryFromPeer = async (
+      _peerId: string,
+      onSyncAccounting?: (outcome: { fresh: boolean; progress?: boolean }) => void,
+    ) => runSelectedSharedMemoryRetry({
+      signal: ACTIVE_SYNC_LIFETIME,
+      remotePeer: PEER_A,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      selectedSharedMemoryLane: {
+        admitWork: () => ({
+          contextGraphIds: ['selected-cg'],
+          syncFromPeer: async () => ({
+            kind: 'selected-shared-memory',
+            requestedScope: {
+              kind: 'selected-public',
+              targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' }],
+            },
+            shared: emptyDetailedSync(),
+            scopeComplete: false,
+            targetDiagnostics: {
+              selectedPublic: { completed: 0, total: 1 },
+              ordinaryPrivate: { completed: 0, total: 0 },
+            },
+          }),
+        }),
+      },
+      onSyncAccounting: (_peerId, outcome) => {
+        if (outcome) onSyncAccounting?.(outcome);
+      },
+      logInfo: noopLog,
+    });
+
+    await agent.attemptSelectedSwmRetryWithReconcilerAccounting(PEER_A, {
+      connected: true,
+      hasSyncProtocol: true,
+    });
+
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastSuccessfulSync !== undefined).toBe(false);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastSyncProgress !== undefined).toBe(false);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff).toMatchObject({
+      failures: 1,
+    });
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff?.nextRetryAt)
+      .toBeGreaterThan(Date.now());
+  });
+
+  it('records selected SWM progress and preserves a bounded retry backoff', async () => {
+    const agent = await createUnstartedAgent('SelectedSwmIncompleteProgress');
+    const calls: string[] = [];
+    const runSelected = async (peerId: string) => {
+      calls.push(peerId);
+    };
+    installSyncOnConnectPeerJobStub(agent, { runSelected });
+    allowAllNetworkAdmission(agent);
+    agent.started = true;
+    agent.config.syncContextGraphs = ['selected-cg'];
+    agent.config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: [{ completeSwmProviders: [PEER_A] }],
+    };
+    agent.getPeerProtocols = async () => [PROTOCOL_SYNC];
+    agent.resolveRfc64CompleteSwmProviderPeerIdsV1 = () => [PEER_A];
+    agent.planSharedMemorySyncContextGraphs = async () => ({
+      targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' }],
+    });
+    agent.syncFromPeerDetailed = async () => emptyDetailedSync({ complete: true });
+    agent.refreshMetaSyncedFlags = async () => undefined;
+    agent.discoverContextGraphsFromStore = async () => 0;
+    agent.syncSelectedSharedMemoryFromPeerDetailed = async (
+      _peerId: string,
+      _contextGraphIds: readonly string[],
+      options: { requestedScope: any },
+    ) => ({
+      kind: 'selected-shared-memory',
+      requestedScope: options.requestedScope,
+      shared: emptyDetailedSync({
+        insertedTriples: 4,
+        insertedDataTriples: 4,
+      }),
+      scopeComplete: false,
+      targetDiagnostics: {
+        selectedPublic: { completed: 0, total: 1 },
+        ordinaryPrivate: { completed: 0, total: 0 },
+      },
+    });
+    agent.selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
+    agent.selectedSwmBootstrapContextGraphIdsForPeer = () => ['selected-cg'];
+    peerSyncSessionDriver(agent).recordBackoff(PEER_A, {
+      failures: 1,
+      nextRetryAt: Date.now() + 60_000,
+    });
+
+    await agent.attemptSelectedSwmRetryWithReconcilerAccounting(PEER_A, {
+      connected: true,
+      hasSyncProtocol: true,
+    });
+
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastSyncProgress !== undefined).toBe(true);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastSuccessfulSync !== undefined).toBe(false);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff?.failures).toBe(1);
+
+    const handleSyncError = () => undefined;
+    expect(agent.queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+      { selectedSwmRetry: true },
+    )).toBe(false);
+    peerSyncSessionDriver(agent).expireBackoff(PEER_A);
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+      { selectedSwmRetry: true },
+    )).toBe(true);
+    expect(agent.queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+      { selectedSwmRetry: true },
+    )).toBe(false);
+    await flushTimers();
+    expect(calls).toEqual([PEER_A]);
   });
 
   it('does not let one peer backoff suppress connection-open sync for another peer', async () => {
     const agent = await createUnstartedAgent('SyncReconnectBackoffPeerScoped');
     const calls: string[] = [];
-    (agent as any).syncReconcilerBackoff.set(PEER_A, {
+    const runOrdinary = async (peerId: string) => {
+      calls.push(peerId);
+    };
+    installSyncOnConnectPeerJobStub(agent, { runOrdinary });
+    peerSyncSessionDriver(agent).recordBackoff(PEER_A, {
       failures: 1,
       nextRetryAt: Date.now() + CATCHUP_ON_CONNECT_COOLDOWN_MS,
       protocolsKey: null,
       connectionKey: null,
     });
-    (agent as any).runSyncFromPeerOnConnect = async (peerId: string) => {
-      calls.push(peerId);
-    };
-
-    expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(false);
-    expect((agent as any).queueSyncFromPeerOnConnect(PEER_B, () => undefined, 0)).toBe(true);
+    expect(agent.queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(false);
+    expect(agent.queueSyncFromPeerOnConnect(PEER_B, () => undefined, 0)).toBe(true);
 
     await flushTimers();
     expect(calls).toEqual([PEER_B]);
@@ -153,17 +562,17 @@ describe('sync-on-connect churn gates', () => {
   it('allows connection-open sync after peer backoff cooldown expires', async () => {
     const agent = await createUnstartedAgent('SyncReconnectBackoffExpiry');
     const calls: string[] = [];
-    (agent as any).syncReconcilerBackoff.set(PEER_A, {
+    const runOrdinary = async (peerId: string) => {
+      calls.push(peerId);
+    };
+    installSyncOnConnectPeerJobStub(agent, { runOrdinary });
+    peerSyncSessionDriver(agent).recordBackoff(PEER_A, {
       failures: 1,
       nextRetryAt: Date.now() - 1,
       protocolsKey: null,
       connectionKey: null,
     });
-    (agent as any).runSyncFromPeerOnConnect = async (peerId: string) => {
-      calls.push(peerId);
-    };
-
-    expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(true);
+    expect(agent.queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(true);
 
     await flushTimers();
     expect(calls).toEqual([PEER_A]);
@@ -171,15 +580,17 @@ describe('sync-on-connect churn gates', () => {
 
   it('makes sync-on-connect requester paths no-op when the emergency switch is disabled', async () => {
     const agent = await createUnstartedAgent('SyncOnConnectDisabled');
-    (agent as any).config.syncOnConnectEnabled = false;
-    (agent as any).started = true;
+    agent.config.syncOnConnectEnabled = false;
+    agent.started = true;
+    resetPeerSyncSessionForTest(agent);
     const calls: string[] = [];
-    (agent as any).runSyncFromPeerOnConnect = async (peerId: string) => {
+    const runOrdinary = async (peerId: string) => {
       calls.push(peerId);
     };
+    installSyncOnConnectPeerJobStub(agent, { runOrdinary });
 
-    expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(false);
-    expect(await (agent as any).trySyncFromPeer(PEER_A)).toBe('not-started');
+    expect(agent.queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(false);
+    expect(await agent.trySyncFromPeer(PEER_A)).toBe('not-started');
 
     await flushTimers();
     expect(calls).toEqual([]);
@@ -187,28 +598,31 @@ describe('sync-on-connect churn gates', () => {
 
   it('makes durable sync requester paths no-op when the emergency switch is disabled', async () => {
     const agent = await createUnstartedAgent('DurableSyncDisabled');
-    (agent as any).config.durableSyncEnabled = false;
+    agent.config.durableSyncEnabled = false;
 
-    const durable = await (agent as any).syncFromPeerDetailed(PEER_A, ['cg-a']);
+    const durable = await agent.syncFromPeerDetailed(PEER_A, ['cg-a']);
     expect(durable).toMatchObject({
       insertedTriples: 0,
       failedPeers: 0,
       failedPhases: 0,
     });
 
-    const shared = await (agent as any).syncSharedMemoryFromPeerDetailed(PEER_A, ['cg-a']);
+    const shared = await agent.syncSharedMemoryFromPeerDetailed(PEER_A, ['cg-a']);
     expect(shared).toMatchObject({
       insertedTriples: 0,
       failedPeers: 0,
       failedPhases: 0,
     });
 
-    const recovery = await (agent as any).recoverContextGraphSwmFromPeer(PEER_A, 'cg-a');
+    const recovery = await agent.recoverContextGraphSwmFromPeer(PEER_A, 'cg-a');
     expect(recovery).toEqual({
       replacedRoots: 0,
+      replacedGraphs: 0,
       insertedDataQuads: 0,
       insertedMetaQuads: 0,
       droppedDataTriples: 0,
+      readySnapshots: 0,
+      totalSnapshots: 0,
       completed: true,
     });
   });
@@ -216,15 +630,15 @@ describe('sync-on-connect churn gates', () => {
   it('marks a subscribed context graph synced after SWM-only catchup progress', async () => {
     const agent = await createUnstartedAgent('SwmOnlyCatchupMarksSynced');
     const contextGraphId = 'swm-only-catchup-cg';
-    (agent as any).subscribedContextGraphs.set(contextGraphId, {
+    agent.subscribedContextGraphs.set(contextGraphId, {
       subscribed: true,
       synced: false,
       sharedMemorySynced: false,
     });
-    (agent as any).persistLocalNodeMembership = () => undefined;
-    (agent as any).refreshMetaSyncedFlags = recorder(async () => undefined);
-    (agent as any).waitForSyncProtocol = recorder(async () => true);
-    (agent as any).syncFromPeerDetailed = recorder(async () => ({
+    agent.persistLocalNodeMembership = () => undefined;
+    agent.refreshMetaSyncedFlags = recorder(async () => undefined);
+    agent.waitForSyncProtocol = recorder(async () => true);
+    agent.syncFromPeerDetailed = recorder(async () => ({
       insertedTriples: 0,
       fetchedMetaTriples: 0,
       fetchedDataTriples: 0,
@@ -243,7 +657,7 @@ describe('sync-on-connect churn gates', () => {
       failedPhases: 0,
       deniedPhases: 0,
     }));
-    (agent as any).syncSharedMemoryFromPeerDetailed = recorder(async () => ({
+    agent.syncSharedMemoryFromPeerDetailed = recorder(async () => ({
       insertedTriples: 4,
       fetchedMetaTriples: 0,
       fetchedDataTriples: 4,
@@ -261,7 +675,7 @@ describe('sync-on-connect churn gates', () => {
       deniedPhases: 0,
     }));
 
-    const result = await (agent as any).runCatchupOverPeers(
+    const result = await agent.runCatchupOverPeers(
       contextGraphId,
       true,
       [{ toString: () => PEER_A }],
@@ -269,24 +683,31 @@ describe('sync-on-connect churn gates', () => {
 
     expect(result.dataSynced).toBe(0);
     expect(result.sharedMemorySynced).toBe(4);
-    expect((agent as any).subscribedContextGraphs.get(contextGraphId)).toMatchObject({
+    expect(agent.subscribedContextGraphs.get(contextGraphId)).toMatchObject({
       subscribed: true,
       synced: true,
       sharedMemorySynced: true,
     });
   });
 
-  it('records progress before stopping post-durable sync-on-connect fanout after backoff-worthy durable pressure', async () => {
+  it('continues post-durable sync-on-connect fanout past backoff-worthy per-CG durable pressure', async () => {
     const refreshMetaSyncedFlags = recorder(async () => undefined);
     const discoverContextGraphsFromStore = recorder(async () => 0);
     const syncSharedMemoryFromPeer = recorder(async () => 0);
-    const syncedPeers: Array<{ peerId: string; fresh: boolean; progress?: boolean }> = [];
+    const syncedPeers: Array<{
+      peerId: string;
+      fresh: boolean;
+      progress?: boolean;
+      reconcilerDisposition: 'clear' | 'retry' | 'defer';
+    }> = [];
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
+      ordinarySharedMemoryLane: ordinaryLane(() => ['cg-a'], syncSharedMemoryFromPeer),
       remotePeer: PEER_A,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['cg-a'],
       syncFromPeer: async () => emptyDetailedSync({
         insertedTriples: 3,
@@ -298,21 +719,104 @@ describe('sync-on-connect churn gates', () => {
       }),
       refreshMetaSyncedFlags,
       discoverContextGraphsFromStore,
-      syncSharedMemoryFromPeer,
       logInfo: noopLog,
-      onPeerSynced: (peerId, syncOutcome) => {
+      onSyncAccounting: (peerId, syncOutcome) => {
+        syncedPeers.push({
+          peerId,
+          fresh: syncOutcome?.fresh ?? false,
+          progress: syncOutcome?.progress,
+          reconcilerDisposition: syncOutcome.reconcilerDisposition,
+        });
+      },
+    });
+
+    // The peer answered (failedPeers: 0), so one CG's backoff-worthy round may
+    // not starve CG discovery or shared-memory sync; only peer accounting
+    // remembers the pressure (fresh: false).
+    expect(outcome).toBe('synced');
+    expect(refreshMetaSyncedFlags.calls).toHaveLength(1);
+    expect(discoverContextGraphsFromStore.calls).toEqual([[]]);
+    expect(syncSharedMemoryFromPeer.calls).toEqual([[PEER_A, ['cg-a']]]);
+    expect(syncedPeers).toEqual([{
+      peerId: PEER_A,
+      fresh: false,
+      progress: true,
+      reconcilerDisposition: 'retry',
+    }]);
+  });
+
+  it('stops post-durable sync-on-connect fanout when the peer never answered and nothing progressed', async () => {
+    const refreshMetaSyncedFlags = recorder(async () => undefined);
+    const discoverContextGraphsFromStore = recorder(async () => 0);
+    const syncSharedMemoryFromPeer = recorder(async () => 0);
+    const syncedPeers: Array<{ peerId: string; fresh: boolean; progress?: boolean }> = [];
+
+    const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
+      ordinarySharedMemoryLane: ordinaryLane(() => ['cg-a'], syncSharedMemoryFromPeer),
+      remotePeer: PEER_A,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      peerCapabilities: new PeerCapabilityRegistry(),
+      getSyncContextGraphs: () => ['cg-a'],
+      syncFromPeer: async () => emptyDetailedSync({
+        failedPeers: 1,
+        backoffWorthyFailures: 1,
+      }),
+      refreshMetaSyncedFlags,
+      discoverContextGraphsFromStore,
+      logInfo: noopLog,
+      onSyncAccounting: (peerId, syncOutcome) => {
         syncedPeers.push({ peerId, fresh: syncOutcome?.fresh ?? false, progress: syncOutcome?.progress });
       },
     });
 
+    // A dead/unreachable peer must not be re-dialed by every later lane.
     expect(outcome).toBe('synced');
     expect(refreshMetaSyncedFlags.calls).toEqual([]);
     expect(discoverContextGraphsFromStore.calls).toEqual([]);
     expect(syncSharedMemoryFromPeer.calls).toEqual([]);
-    expect(syncedPeers).toEqual([{ peerId: PEER_A, fresh: false, progress: true }]);
+    expect(syncedPeers).toEqual([{
+      peerId: PEER_A,
+      fresh: false,
+      progress: false,
+    }]);
   });
 
-  it('records progress before stopping newly discovered CG fanout after durable pressure', async () => {
+  it('continues sync-on-connect when a sibling CG proves the peer answered', async () => {
+    const refreshMetaSyncedFlags = recorder(async () => undefined);
+    const discoverContextGraphsFromStore = recorder(async () => 0);
+    const syncSharedMemoryFromPeer = recorder(async () => 0);
+
+    const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
+      ordinarySharedMemoryLane: ordinaryLane(() => ['unreachable-cg', 'denied-cg'], syncSharedMemoryFromPeer),
+      remotePeer: PEER_A,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      peerCapabilities: new PeerCapabilityRegistry(),
+      getSyncContextGraphs: () => ['unreachable-cg', 'denied-cg'],
+      syncFromPeer: async () => emptyDetailedSync({
+        failedPeers: 1,
+        deniedPhases: 1,
+        backoffWorthyFailures: 1,
+      }),
+      refreshMetaSyncedFlags,
+      discoverContextGraphsFromStore,
+      logInfo: noopLog,
+    });
+
+    // `failedPeers` came from one unanswered CG, but the denial proves this
+    // peer answered another round. Discovery and SWM must still get a turn.
+    expect(outcome).toBe('synced');
+    expect(refreshMetaSyncedFlags.calls).toHaveLength(1);
+    expect(discoverContextGraphsFromStore.calls).toEqual([[]]);
+    expect(syncSharedMemoryFromPeer.calls).toEqual([
+      [PEER_A, ['unreachable-cg', 'denied-cg']],
+    ]);
+  });
+
+  it('continues newly discovered CG fanout past per-CG durable pressure with progress', async () => {
     let contextGraphs = ['cg-a'];
     const refreshMetaSyncedFlags = recorder(async () => undefined);
     const discoverContextGraphsFromStore = recorder(async () => {
@@ -320,7 +824,12 @@ describe('sync-on-connect churn gates', () => {
       return 1;
     });
     const syncSharedMemoryFromPeer = recorder(async () => 0);
-    const syncedPeers: Array<{ peerId: string; fresh: boolean; progress?: boolean }> = [];
+    const syncedPeers: Array<{
+      peerId: string;
+      fresh: boolean;
+      progress?: boolean;
+      reconcilerDisposition: 'clear' | 'retry' | 'defer';
+    }> = [];
     const syncFromPeer = recorder(async (_peerId: string, contextGraphIds?: string[]) => {
       if (contextGraphIds?.includes('cg-b')) {
         return emptyDetailedSync({
@@ -336,43 +845,54 @@ describe('sync-on-connect churn gates', () => {
     });
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
+      ordinarySharedMemoryLane: ordinaryLane(() => contextGraphs, syncSharedMemoryFromPeer),
       remotePeer: PEER_A,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => contextGraphs,
       syncFromPeer,
       refreshMetaSyncedFlags,
       discoverContextGraphsFromStore,
-      syncSharedMemoryFromPeer,
       logInfo: noopLog,
-      onPeerSynced: (peerId, syncOutcome) => {
-        syncedPeers.push({ peerId, fresh: syncOutcome?.fresh ?? false, progress: syncOutcome?.progress });
+      onSyncAccounting: (peerId, syncOutcome) => {
+        syncedPeers.push({
+          peerId,
+          fresh: syncOutcome?.fresh ?? false,
+          progress: syncOutcome?.progress,
+          reconcilerDisposition: syncOutcome.reconcilerDisposition,
+        });
       },
     });
 
     expect(outcome).toBe('synced');
     expect(syncFromPeer.calls).toEqual([[PEER_A], [PEER_A, ['cg-b']]]);
-    expect(refreshMetaSyncedFlags.calls).toHaveLength(1);
+    expect(refreshMetaSyncedFlags.calls).toHaveLength(2);
     expect(discoverContextGraphsFromStore.calls).toEqual([[]]);
-    expect(syncSharedMemoryFromPeer.calls).toEqual([]);
-    expect(syncedPeers).toEqual([{ peerId: PEER_A, fresh: false, progress: true }]);
+    expect(syncSharedMemoryFromPeer.calls).toEqual([[PEER_A, ['cg-a', 'cg-b']]]);
+    expect(syncedPeers).toEqual([{
+      peerId: PEER_A,
+      fresh: false,
+      progress: true,
+      reconcilerDisposition: 'retry',
+    }]);
   });
 
   it('skips SWM sync-on-connect fanout when no CG is locally eligible', async () => {
     const syncSharedMemoryFromPeer = recorder(async () => 0);
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
+      ordinarySharedMemoryLane: ordinaryLane(() => [], syncSharedMemoryFromPeer),
       remotePeer: PEER_A,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['unauthorized-cg'],
-      getSharedMemorySyncContextGraphs: () => [],
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags: async () => undefined,
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer,
       logInfo: noopLog,
     });
 
@@ -385,19 +905,19 @@ describe('sync-on-connect churn gates', () => {
     let selectedForPeer: string | undefined;
 
     const outcome = await runSyncOnConnect({
-      remotePeer: PEER_A,
-      syncingPeers: new Set(),
-      getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
-      getSyncContextGraphs: () => ['eligible-cg'],
-      getSharedMemorySyncContextGraphs: (peerId) => {
+      signal: ACTIVE_SYNC_LIFETIME,
+      ordinarySharedMemoryLane: ordinaryLane((peerId) => {
         selectedForPeer = peerId;
         return ['eligible-cg'];
-      },
+      }, syncSharedMemoryFromPeer),
+      remotePeer: PEER_A,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      peerCapabilities: new PeerCapabilityRegistry(),
+      getSyncContextGraphs: () => ['eligible-cg'],
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags: async () => undefined,
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer,
       logInfo: noopLog,
     });
 
@@ -410,16 +930,16 @@ describe('sync-on-connect churn gates', () => {
     const syncSharedMemoryFromPeer = recorder(async () => 0);
 
     const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
+      ordinarySharedMemoryLane: ordinaryLane(() => ['eligible-cg'], syncSharedMemoryFromPeer),
       remotePeer: PEER_A,
-      syncingPeers: new Set(),
+      syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['eligible-cg'],
-      getSharedMemorySyncContextGraphs: () => ['eligible-cg'],
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags: async () => undefined,
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer,
       logInfo: noopLog,
     });
 
@@ -428,36 +948,41 @@ describe('sync-on-connect churn gates', () => {
   });
 
   it('filters private SWM sync-on-connect scope to the matching curator peer', async () => {
-    const agent = await createUnstartedAgent('SwmPeerScopedRecovery');
+    const agent = await createUnstartedAgent('SwmPeerScopedRecovery', {
+      rfc64CatalogActivation: { enabled: false },
+    });
+    agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({
+      legacySyncAllowed: true,
+    } as ReturnType<typeof agent.resolveRfc64CatalogReceiverAuthorityV1>);
     const privateCg = 'private-cg';
     const otherPrivateCg = 'other-private-cg';
     const localPrivateCg = 'local-private-cg';
     const unconfirmedCg = 'unconfirmed-cg';
-    (agent as any).config.syncContextGraphs = [
+    agent.config.syncContextGraphs = [
       'public-cg',
       privateCg,
       otherPrivateCg,
       localPrivateCg,
       unconfirmedCg,
     ];
-    (agent as any).canUseSharedMemoryForContextGraph = async (contextGraphId: string) =>
+    agent.canUseSharedMemoryForContextGraph = async (contextGraphId: string) =>
       contextGraphId !== unconfirmedCg;
-    (agent as any).isPrivateContextGraph = async (contextGraphId: string) =>
+    agent.isPrivateContextGraph = async (contextGraphId: string) =>
       contextGraphId.includes('private');
-    (agent as any).isCuratorOf = async (contextGraphId: string) =>
+    agent.isCuratorOf = async (contextGraphId: string) =>
       contextGraphId === localPrivateCg;
-    (agent as any).resolveCuratorPeerId = async (contextGraphId: string) => {
+    agent.resolveCuratorPeerId = async (contextGraphId: string) => {
       if (contextGraphId === privateCg) return PEER_A;
       if (contextGraphId === otherPrivateCg) return 'other-peer';
       return undefined;
     };
-    (agent as any).refreshMetaFromCurator = async () => undefined;
+    agent.refreshMetaFromCurator = async () => undefined;
 
-    expect(await (agent as any).getSharedMemorySyncContextGraphs(PEER_A)).toEqual([
+    expect(await agent.getSharedMemorySyncContextGraphs(PEER_A)).toEqual([
       'public-cg',
       privateCg,
     ]);
-    expect(await (agent as any).getSharedMemorySyncContextGraphs()).toEqual([
+    expect(await agent.getSharedMemorySyncContextGraphs()).toEqual([
       'public-cg',
       privateCg,
       otherPrivateCg,

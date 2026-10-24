@@ -73,7 +73,7 @@ describe('sub-graph URI helpers', () => {
     expect(parseContextGraphLayerUri(uri)).toEqual({
       contextGraphId: cgId,
       layer: MemoryLayer.SharedWorkingMemory,
-      agentAddress: '0x000000000000000000000000000000000000c10A',
+      agentAddress: '0x000000000000000000000000000000000000c10a',
       kaNumber: 7n,
     });
   });
@@ -91,7 +91,7 @@ describe('sub-graph URI helpers', () => {
       contextGraphId: cgId,
       subGraphName: 'code',
       layer: MemoryLayer.VerifiableMemory,
-      agentAddress: '0x000000000000000000000000000000000000c10A',
+      agentAddress: '0x000000000000000000000000000000000000c10a',
       kaNumber: 9n,
     });
   });

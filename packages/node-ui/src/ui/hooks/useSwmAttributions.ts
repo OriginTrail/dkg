@@ -210,8 +210,8 @@ SELECT ?op ?root ?agent ?publishedAt ?g WHERE {
 } ORDER BY DESC(?publishedAt) LIMIT 5000`;
 }
 
-/** Stable hash → palette index so a given agent always keeps the same
- *  colour across reloads, and two nearby agents don't collide on colour 0. */
+/** Stable hash → preferred palette slot, so a given agent keeps the same
+ *  colour across reloads and two nearby agents don't both land on colour 0. */
 function paletteIndex(agent: string): number {
   let h = 0;
   for (let i = 0; i < agent.length; i++) {
@@ -220,10 +220,65 @@ function paletteIndex(agent: string): number {
   return Math.abs(h) % AGENT_PALETTE.length;
 }
 
+/**
+ * GH#1128 — assign distinct colours until the palette is exhausted, then give
+ * each overflow agent its preferred slot.
+ *
+ * The hash above is stable but not injective: over an 8-slot palette, five
+ * agents collide with ~70% probability, and two agents rendering the same
+ * swatch defeats the only thing the attribution view exists to show. Worse,
+ * the legend and the graph tint each called `paletteIndex` independently, so
+ * there was no single place a collision could even be observed.
+ *
+ * The hash stays each agent's *preferred* slot and we linear-probe to the next
+ * free one on a collision, so distinctness holds for the first
+ * AGENT_PALETTE.length agents. Agents are processed in sorted order, making the
+ * result deterministic regardless of arrival order.
+ *
+ * Past exhaustion reuse is arithmetic, not a policy choice — there are more
+ * agents than colours. Those agents take their preferred slot, which keeps the
+ * reuse spread across the palette instead of crowding onto one colour, and
+ * leaves the already-assigned agents untouched.
+ *
+ * The trade-off this encodes: distinctness requires coordinating slots across
+ * the whole set, so assignment depends on set MEMBERSHIP. Colours are stable
+ * for a fixed roster but may permute when it changes. #1128 asked for distinct
+ * colours, so distinctness wins.
+ */
+export function buildAgentColorMap(agents: Iterable<string>): Map<string, string> {
+  const distinct = [...new Set(agents)].sort();
+  const taken = new Set<number>();
+  const out = new Map<string, string>();
+  for (const agent of distinct) {
+    const preferred = paletteIndex(agent);
+    let slot = preferred;
+    // Probe for a free slot while ANY remain. Degradation is local to the
+    // agents that actually overflow — PR #2333 review: gating this on the
+    // total set size meant a ninth agent flipped the whole collection back to
+    // raw hashing, collapsing already-distinct agents onto one colour.
+    if (taken.size < AGENT_PALETTE.length) {
+      for (let probe = 0; probe < AGENT_PALETTE.length; probe++) {
+        const candidate = (preferred + probe) % AGENT_PALETTE.length;
+        if (!taken.has(candidate)) { slot = candidate; break; }
+      }
+      taken.add(slot);
+    }
+    // Past exhaustion reuse is unavoidable; the preferred slot keeps it stable.
+    out.set(agent, AGENT_PALETTE[slot]!);
+  }
+  return out;
+}
+
 export function useSwmAttributions(contextGraphId: string | undefined): SwmAttributionsResult {
   const [attributions, setAttributions] = useState<Map<string, AgentAttribution[]>>(new Map());
   const [events, setEvents] = useState<WorkspaceOperationEvent[]>([]);
   const [palette, setPalette] = useState<AgentPaletteEntry[]>([]);
+  // PR #2333 review — the canonical agent->colour mapping, produced with
+  // `palette` in the same update so the legend and the graph tint cannot
+  // diverge. Consumers must resolve through this; there is deliberately no
+  // hash fallback, because a fallback would silently re-collide and hide the
+  // invariant violation it was papering over.
+  const [colorByAgent, setColorByAgent] = useState<Map<string, string>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [resolvedContextGraphId, setResolvedContextGraphId] = useState<string | undefined>(undefined);
@@ -235,6 +290,7 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
       setAttributions(new Map());
       setEvents([]);
       setPalette([]);
+      setColorByAgent(new Map());
       setLoading(false);
       setResolvedContextGraphId(undefined);
       return;
@@ -326,10 +382,13 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
           roots.add(root);
         }
 
+        // One map, built once from the full agent set, so the legend below and
+        // the graph tint in the `nodeColors` memo cannot disagree (GH#1128).
+        const agentColors = buildAgentColorMap(agentTotals.keys());
         const paletteEntries: AgentPaletteEntry[] = [...agentTotals.entries()]
           .map(([agent, roots]) => ({
             agent,
-            color: AGENT_PALETTE[paletteIndex(agent)]!,
+            color: agentColors.get(agent)!,
             label: agentLabel(agent),
             entityCount: roots.size,
           }))
@@ -339,6 +398,7 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
         setAttributions(attrMap);
         setEvents(eventLog);
         setPalette(paletteEntries);
+        setColorByAgent(agentColors);
         setResolvedContextGraphId(contextGraphId);
       } catch (err: any) {
         if (!isCurrent()) return;
@@ -346,6 +406,7 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
         setAttributions(new Map());
         setEvents([]);
         setPalette([]);
+      setColorByAgent(new Map());
         setResolvedContextGraphId(contextGraphId);
       } finally {
         if (timeoutId) clearTimeout(timeoutId);
@@ -363,13 +424,21 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
   const { nodeColors, conflicts } = useMemo(() => {
     const nc: Record<string, string> = {};
     const confl: string[] = [];
+    // GH#1128 — resolve through the canonical map the legend was built from.
+    // Recomputing here was the second half of the bug: a swatch and its graph
+    // nodes could land on different slots.
     // A single-signer devnet will have one-element attribution arrays; the
     // conflict branch is dead code there but we keep it wired so the UI
     // "just works" the moment a second signer joins.
     for (const [uri, list] of attributions) {
       if (list.length === 0) continue;
       if (list.length === 1) {
-        nc[uri] = AGENT_PALETTE[paletteIndex(list[0]!.agent)]!;
+        const agent = list[0]!.agent;
+        const color = colorByAgent.get(agent);
+        // No hash fallback by design (PR #2333 review): an agent missing from
+        // the map is an invariant violation, and inventing a possibly-colliding
+        // colour would hide it. Leave the node untinted instead.
+        if (color !== undefined) nc[uri] = color;
       } else {
         // Tag conflict nodes with a distinct warning colour — takes
         // priority over any single agent's palette slot so they're
@@ -379,7 +448,7 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
       }
     }
     return { nodeColors: nc, conflicts: confl };
-  }, [attributions]);
+  }, [attributions, colorByAgent]);
 
   const attributionPending = Boolean(contextGraphId && (loading || resolvedContextGraphId !== contextGraphId));
 

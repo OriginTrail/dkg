@@ -7,10 +7,16 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { generateEd25519Keypair, TypedEventBus } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { DKGPublisher, FileWorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
+import {
+  DKGPublisher,
+  FileWorkspacePublicSnapshotStore,
+} from '@origintrail-official/dkg-publisher';
+import { seedLegacyRawLiftTestJob } from '../../publisher/test/_helpers/legacy-raw-lift.js';
 import { createPublisherControlFromStore } from '../src/publisher-runner.js';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
+import { TEST_SNAPSHOT_STORAGE } from '../../../scripts/testing/snapshot-storage.js';
 
 const CONTEXT_GRAPH = 'publisher-route-snapshot';
 const ENTITY = 'urn:publisher-route:snapshot:entity';
@@ -29,7 +35,7 @@ describe('publisher routes with disk public snapshot refs', () => {
     tempDirs.push(dataDir);
     const store = new OxigraphStore();
     stores.push(store);
-    const publicSnapshotStore = new FileWorkspacePublicSnapshotStore(join(dataDir, 'swm-public-snapshots'));
+    const publicSnapshotStore = new FileWorkspacePublicSnapshotStore(join(dataDir, 'swm-public-snapshots'), undefined, TEST_SNAPSHOT_STORAGE);
     const publisher = new DKGPublisher({
       store,
       chain: new NoChainAdapter(),
@@ -41,8 +47,8 @@ describe('publisher routes with disk public snapshot refs', () => {
       { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Route Snapshot"', graph: '' },
     ], { publisherPeerId: 'peer-route' });
 
-    const publisherControl = createPublisherControlFromStore(store, publicSnapshotStore);
-    const jobId = await publisherControl.lift({
+    const publisherControl = createPublisherControlFromStore(store, { publicSnapshotStore });
+    const jobId = await seedLegacyRawLiftTestJob(store, {
       contextGraphId: CONTEXT_GRAPH,
       swmId: write.shareOperationId,
       shareOperationId: write.shareOperationId,
@@ -91,7 +97,15 @@ function createContext(
     res: createResponse() as unknown as ServerResponse,
     agent: {} as RequestContext['agent'],
     publisherControl,
-    publisherRuntime: null,
+    publisherState: {
+      runtime: null,
+      availability: {
+        available: false,
+        reason: 'publisher_disabled',
+        retryable: false,
+        operatorActionRequired: true,
+      },
+    },
     config: {} as RequestContext['config'],
     startedAt: 0,
     dashDb: {} as RequestContext['dashDb'],
@@ -114,7 +128,7 @@ function createContext(
     apiPortRef: { value: 0 },
     url,
     path: url.pathname,
-    requestToken: undefined,
+    authentication: requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
     requestAgentAddress: '0x0',
   };
 }

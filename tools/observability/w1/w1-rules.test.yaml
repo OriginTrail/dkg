@@ -1,0 +1,73 @@
+# promtool rule unit tests for the W1 recording rules.
+#
+# `promtool check rules` proves the expressions PARSE. It cannot see the defect
+# these tests exist for: PromQL binary `+` yields an EMPTY result whenever
+# either operand is empty, so `sum(I2) + sum(I3)` went blank in any window where
+# no response ever arrived — while real request bytes had been recorded.
+#
+# That is not a hypothetical window. §6.2 records I3 only when the send
+# RESOLVED, so "every send timed out" produces I2 series and no I3 series at
+# all — the one window an operator most needs the byte total for, and the one
+# where the answer is perfectly well known.
+#
+# Run: promtool test rules /w/w1/w1-rules.test.yaml   (from the repo's pinned
+# prom/prometheus image; wired into the observability workflow next to
+# `check rules`).
+rule_files:
+  - w1-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ── the regression: request bytes with NO response series at all ──────────
+  - interval: 1m
+    name: a request-only window still totals the request bytes
+    input_series:
+      # Counter climbing 0 → 10485760 (10 MiB) across the 2h window.
+      - series: 'dkg_sync_attempt_request_bytes_total{plane="durable", phase="data", source="reconcile", instance="node-a"}'
+        values: '0+87381x120'
+      # I4 count so the window is not otherwise empty; unrelated to the byte legs.
+      - series: 'dkg_sync_attempt_total{plane="durable", phase="data", source="reconcile", instance="node-a"}'
+        values: '0+1x120'
+    promql_expr_test:
+      # THE ASSERTION. Before zero-filling each leg independently this returned
+      # NOTHING — no samples — because the I3 half of the sum was empty.
+      - expr: w1:stable:attributed_durable_payload_bytes
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1:stable:attributed_durable_payload_bytes"}'
+            value: 1.048572e+07
+
+  # ── both legs absent: still a number, not a hole ──────────────────────────
+  - interval: 1m
+    name: a completely silent window totals zero rather than going blank
+    input_series:
+      - series: 'dkg_sync_attempt_total{plane="durable", phase="data", source="reconcile", instance="node-a"}'
+        values: '0+1x120'
+    promql_expr_test:
+      # Distinguishing 0 from "no data" is the whole point: §7.3 reads an empty
+      # result as `inconclusive`, and a silent window is a confident zero. A
+      # dead pipeline is caught by `completed_durable_operations` and
+      # `export_coverage_min_samples`, not by this total going blank.
+      - expr: w1:stable:attributed_durable_payload_bytes
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1:stable:attributed_durable_payload_bytes"}'
+            value: 0
+
+  # ── both legs present: zero-filling must not change a normal window ───────
+  - interval: 1m
+    name: both byte legs present still sum to their true total
+    input_series:
+      - series: 'dkg_sync_attempt_request_bytes_total{plane="durable", phase="data", source="reconcile", instance="node-a"}'
+        values: '0+87381x120'
+      - series: 'dkg_sync_attempt_response_bytes_total{plane="durable", phase="data", source="reconcile", instance="node-a"}'
+        values: '0+87381x120'
+      - series: 'dkg_sync_attempt_total{plane="durable", phase="data", source="reconcile", instance="node-a"}'
+        values: '0+1x120'
+    promql_expr_test:
+      - expr: w1:stable:attributed_durable_payload_bytes
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1:stable:attributed_durable_payload_bytes"}'
+            value: 2.097144e+07

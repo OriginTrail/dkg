@@ -1,25 +1,33 @@
-import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   TypedEventBus,
   generateEd25519Keypair,
-  encodeWorkspacePublishRequest,
+  decodeWorkspacePublishRequest,
+  decodeEncryptedWorkspacePayload,
   encodeGossipEnvelope,
   encodeEncryptedWorkspacePayload,
+  encodeSwmSenderKeyMessage,
   encryptWorkspacePayload,
   generateWorkspaceRecipientEncryptionKey,
   computeGossipSigningPayload,
+  DKG_GOSSIP_MAX_MESSAGE_BYTES,
   GOSSIP_ENVELOPE_VERSION,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
   STORAGE_ACK_MAX_STAGING_BYTES,
+  SWM_SENDER_KEY_CIPHER_ALGORITHM,
+  SWM_SENDER_KEY_MESSAGE_TYPE,
+  SWM_SENDER_KEY_PACKAGE_VERSION,
   type WorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
   SharedMemoryHandler,
   StaleWriteError,
+  resolveKnowledgeAssetWorkspaceHead,
+  resolvePublishedKnowledgeAssetWorkspaceHead,
   type ShareOptions,
   type ConditionalShareOptions,
 } from '../src/index.js';
@@ -29,6 +37,14 @@ import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { wrapPublisherForTest, buildSeal } from './_helpers/seal.js';
 import { makeHardhatReceiverACKProvider } from './_helpers/acks.js';
 import { makeTestKaAllocator } from './_helpers/ka-allocator.js';
+import {
+  encodeRootlessWorkspaceRequest,
+  rootlessSharedMemoryGraphFromWire,
+} from './_helpers/rootless-workspace.js';
+import {
+  buildPublicQuadsWithByteSize,
+  encodedPublicByteLength,
+} from './_helpers/public-nquads.js';
 import type { V10ACKProvider, V10ACKProviderParams } from '../src/publisher.js';
 
 // RC11 / PR1: in-memory 3-of-N ACK provider that signs the V10 ACK
@@ -55,6 +71,10 @@ let DATA_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 let WORKSPACE_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
 let WORKSPACE_META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;
 const ENTITY = 'urn:test:entity:1';
+const SNAPSHOT_PEER_A = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
+const SNAPSHOT_PEER_B = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
+const SNAPSHOT_SELF_PEER = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+const SNAPSHOT_PEER_C = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 let _kav10Address: string;
 let _provider: ethers.JsonRpcProvider;
 const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
@@ -70,59 +90,6 @@ async function sealForQuads(quads: Quad[], contextGraphId: string | bigint) {
 
 function q(s: string, p: string, o: string, g = ''): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
-}
-
-const nquadsEncoder = new TextEncoder();
-
-function serializePublicQuad(quad: Quad): string {
-  return `<${quad.subject}> <${quad.predicate}> ${
-    quad.object.startsWith('"') ? quad.object : `<${quad.object}>`
-  } <${quad.graph}> .`;
-}
-
-function encodedPublicByteLength(quads: Quad[]): number {
-  return nquadsEncoder.encode(quads.map(serializePublicQuad).join('\n')).length;
-}
-
-function buildPublicQuadsWithByteSize(targetBytes: number): Quad[] {
-  const quads: Quad[] = [];
-  const maxSafeLiteralBytes = 50_000;
-
-  for (let i = 0; i < 1_000; i++) {
-    const subject = `urn:test:oversized-swm:${i}`;
-    const predicate = 'http://schema.org/description';
-    const emptyLine = serializePublicQuad({
-      subject,
-      predicate,
-      object: '""',
-      graph: '',
-    });
-    const currentBytes = encodedPublicByteLength(quads);
-    const separatorBytes = quads.length === 0 ? 0 : 1;
-    const bytesNeededInsideLiteral =
-      targetBytes - currentBytes - separatorBytes - nquadsEncoder.encode(emptyLine).length;
-    const literalBytes =
-      bytesNeededInsideLiteral >= 0 && bytesNeededInsideLiteral <= maxSafeLiteralBytes
-        ? bytesNeededInsideLiteral
-        : maxSafeLiteralBytes;
-
-    quads.push({
-      subject,
-      predicate,
-      object: `"${'x'.repeat(literalBytes)}"`,
-      graph: '',
-    });
-
-    const size = encodedPublicByteLength(quads);
-    if (size >= targetBytes) {
-      if (size !== targetBytes) {
-        throw new Error(`oversized SWM fixture byte-size drift: expected ${targetBytes}, got ${size}`);
-      }
-      return quads;
-    }
-  }
-
-  throw new Error(`failed to build public quads with byte size ${targetBytes}`);
 }
 
 async function signWorkspaceMessage(
@@ -242,8 +209,9 @@ describe('Workspace: share', () => {
     const result = await publisher.share(CONTEXT_GRAPH, quads, opts);
 
     expect(result.shareOperationId).toMatch(/^swm-\d+-[a-z0-9]+$/);
-    expect(result.message).toBeInstanceOf(Uint8Array);
-    expect(result.message.length).toBeGreaterThan(0);
+    expect(result.gossipPayload.message).toBeInstanceOf(Uint8Array);
+    expect(result.gossipPayload.message.length).toBeGreaterThan(0);
+    expect(result.message).toBe(result.gossipPayload.message);
 
     const workspaceResult = await store.query(
       `SELECT ?o WHERE { GRAPH <${WORKSPACE_GRAPH}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
@@ -261,6 +229,255 @@ describe('Workspace: share', () => {
     if (metaResult.type === 'bindings') {
       expect(metaResult.bindings.length).toBe(1);
     }
+  });
+
+  it('returns isolated encryption-time fan-out snapshots for concurrent shares', async () => {
+    const senderAgentAddress = ethers.Wallet.createRandom().address;
+    publisher.setWorkspaceAgentRecipientResolver(async ({ contextGraphId }) => ({
+      requiresEncryption: true,
+      recipients: [{
+        ...recipientKeyFor(senderAgentAddress),
+        agentAddress: senderAgentAddress,
+        peerId: contextGraphId === 'snapshot-a' ? SNAPSHOT_PEER_A : SNAPSHOT_PEER_B,
+      }],
+    }));
+    publisher.setWorkspaceSenderKeyEncryptor(async (input) => {
+      expect(input.resolution.recipients[0]?.peerId).toBe(
+        input.contextGraphId === 'snapshot-a' ? SNAPSHOT_PEER_A : SNAPSHOT_PEER_B,
+      );
+      return input.plaintext;
+    });
+
+    const [first, second] = await Promise.all([
+      publisher.share('snapshot-a', [q('urn:test:snapshot-a', 'http://schema.org/name', '"A"')], {
+        publisherPeerId: SNAPSHOT_SELF_PEER,
+        senderAgentAddress,
+      }),
+      publisher.share('snapshot-b', [q('urn:test:snapshot-b', 'http://schema.org/name', '"B"')], {
+        publisherPeerId: SNAPSHOT_SELF_PEER,
+        senderAgentAddress,
+      }),
+    ]);
+
+    expect(first.gossipPayload).toEqual({
+      message: expect.any(Uint8Array),
+      fanout: {
+        kind: 'captured',
+        snapshot: {
+          source: 'agent-roster',
+          members: [SNAPSHOT_PEER_A],
+          complete: true,
+        },
+      },
+    });
+    expect(second.gossipPayload).toEqual({
+      message: expect.any(Uint8Array),
+      fanout: {
+        kind: 'captured',
+        snapshot: {
+          source: 'agent-roster',
+          members: [SNAPSHOT_PEER_B],
+          complete: true,
+        },
+      },
+    });
+  });
+
+  it('owns resolver recipient records and key bytes before encryption and fan-out', async () => {
+    const senderAgentAddress = ethers.Wallet.createRandom().address;
+    const resolverKey = recipientKeyFor(senderAgentAddress);
+    const resolverPublicKeyBytes = resolverKey.publicKeyBytes;
+    if (!resolverPublicKeyBytes) throw new Error('expected recipient public key');
+    const originalPublicKeyBytes = Uint8Array.from(resolverPublicKeyBytes);
+    const resolverRecipient = {
+      ...resolverKey,
+      agentAddress: senderAgentAddress,
+      peerId: SNAPSHOT_PEER_A,
+    };
+
+    publisher.setWorkspaceAgentRecipientResolver(async () => ({
+      requiresEncryption: true,
+      recipients: [resolverRecipient],
+    }));
+    publisher.setWorkspaceSenderKeyEncryptor(async (input) => {
+      resolverRecipient.peerId = SNAPSHOT_PEER_B;
+      resolverPublicKeyBytes.fill(0);
+
+      const capturedRecipient = input.resolution.recipients[0];
+      expect(capturedRecipient).not.toBe(resolverRecipient);
+      expect(capturedRecipient.peerId).toBe(SNAPSHOT_PEER_A);
+      expect(capturedRecipient.publicKeyBytes).not.toBe(resolverPublicKeyBytes);
+      expect(capturedRecipient.publicKeyBytes).toEqual(originalPublicKeyBytes);
+      expect(Object.isFrozen(input.resolution)).toBe(true);
+      expect(Object.isFrozen(input.resolution.recipients)).toBe(true);
+      expect(Object.isFrozen(capturedRecipient)).toBe(true);
+      expect(() => {
+        (capturedRecipient as { peerId?: string }).peerId = SNAPSHOT_PEER_B;
+      }).toThrow();
+      return input.plaintext;
+    });
+
+    const result = await publisher.share(
+      'snapshot-owned-recipient',
+      [q('urn:test:snapshot-owned-recipient', 'http://schema.org/name', '"owned"')],
+      { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
+    );
+
+    expect(result.gossipPayload.fanout.kind).toBe('captured');
+    expect(result.gossipPayload.fanout.kind === 'captured'
+      ? result.gossipPayload.fanout.snapshot
+      : null).toEqual({
+      source: 'agent-roster',
+      members: [SNAPSHOT_PEER_A],
+      complete: true,
+    });
+  });
+
+  it('uses the validated non-empty recipient snapshot in built-in encryption', async () => {
+    const senderAgentAddress = ethers.Wallet.createRandom().address;
+    const recipient = recipientKeyFor(senderAgentAddress);
+    publisher.setWorkspaceAgentRecipientResolver(async () => ({
+      requiresEncryption: true,
+      recipients: [{
+        ...recipient,
+        agentAddress: senderAgentAddress,
+        peerId: SNAPSHOT_PEER_A,
+      }],
+    }));
+
+    const result = await publisher.share(
+      'snapshot-built-in-encryption',
+      [q('urn:test:snapshot-built-in', 'http://schema.org/name', '"built-in"')],
+      { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
+    );
+
+    expect(result.gossipPayload.fanout.kind).toBe('captured');
+    if (result.gossipPayload.fanout.kind !== 'captured') throw new Error('expected captured fan-out');
+    const envelope = decodeEncryptedWorkspacePayload(result.gossipPayload.message);
+    expect(envelope.recipients).toHaveLength(1);
+    expect(result.gossipPayload.fanout.snapshot).toEqual({
+      source: 'agent-roster',
+      members: [SNAPSHOT_PEER_A],
+      complete: true,
+    });
+  });
+
+  it('does not leak recipient state from a failed pre-commit encryption', async () => {
+    const senderAgentAddress = ethers.Wallet.createRandom().address;
+    publisher.setWorkspaceAgentRecipientResolver(async ({ contextGraphId }) => ({
+      requiresEncryption: true,
+      recipients: [{
+        ...recipientKeyFor(senderAgentAddress),
+        agentAddress: senderAgentAddress,
+        peerId: contextGraphId === 'snapshot-fail' ? SNAPSHOT_PEER_B : SNAPSHOT_PEER_C,
+      }],
+    }));
+    publisher.setWorkspaceSenderKeyEncryptor(async (input) => {
+      if (input.contextGraphId === 'snapshot-fail') throw new Error('encryption failed');
+      return input.plaintext;
+    });
+
+    await expect(publisher.share(
+      'snapshot-fail',
+      [q('urn:test:snapshot-fail', 'http://schema.org/name', '"fail"')],
+      { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
+    )).rejects.toThrow('encryption failed');
+
+    const recovered = await publisher.share(
+      'snapshot-fresh',
+      [q('urn:test:snapshot-fresh', 'http://schema.org/name', '"fresh"')],
+      { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
+    );
+    expect(recovered.gossipPayload).toEqual({
+      message: expect.any(Uint8Array),
+      fanout: {
+        kind: 'captured',
+        snapshot: {
+          source: 'agent-roster',
+          members: [SNAPSHOT_PEER_C],
+          complete: true,
+        },
+      },
+    });
+  });
+
+  it('keeps gossip enabled when an unchanged encryption member advertises a malformed peer ID', async () => {
+    const senderAgentAddress = ethers.Wallet.createRandom().address;
+    const recipient = recipientKeyFor(senderAgentAddress);
+    let advertisedPeerId = SNAPSHOT_PEER_A;
+    publisher.setWorkspaceAgentRecipientResolver(async () => ({
+      requiresEncryption: true,
+      recipients: [{
+        ...recipient,
+        agentAddress: senderAgentAddress,
+        peerId: advertisedPeerId,
+      }],
+    }));
+    publisher.setWorkspaceSenderKeyEncryptor(async (input) => input.plaintext);
+
+    const first = await publisher.share(
+      'snapshot-malformed-peer',
+      [q('urn:test:snapshot-malformed-peer:first', 'http://schema.org/name', '"first"')],
+      { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
+    );
+    advertisedPeerId = 'not-a-peer-id';
+    const second = await publisher.share(
+      'snapshot-malformed-peer',
+      [q('urn:test:snapshot-malformed-peer:second', 'http://schema.org/name', '"second"')],
+      { publisherPeerId: SNAPSHOT_SELF_PEER, senderAgentAddress },
+    );
+
+    expect(first.gossipPayload.fanout.kind).toBe('captured');
+    expect(first.gossipPayload.fanout.kind === 'captured'
+      ? first.gossipPayload.fanout.snapshot
+      : null).toEqual({
+      source: 'agent-roster',
+      members: [SNAPSHOT_PEER_A],
+      complete: true,
+    });
+    expect(second.gossipPayload.fanout.kind).toBe('captured');
+    expect(second.gossipPayload.fanout.kind === 'captured'
+      ? second.gossipPayload.fanout.snapshot
+      : null).toEqual({
+      source: 'agent-roster',
+      members: [],
+      complete: false,
+    });
+  });
+
+  it.each([
+    [
+      'an empty encrypted roster',
+      { requiresEncryption: true, recipients: [] },
+      /has no valid DKG agent recipients/,
+    ],
+    [
+      'recipients on the plaintext arm',
+      {
+        requiresEncryption: false,
+        recipients: [{
+          ...recipientKeyFor('0x0000000000000000000000000000000000000001'),
+          agentAddress: '0x0000000000000000000000000000000000000001',
+        }],
+      },
+      /returned recipients while encryption is disabled/,
+    ],
+    [
+      'a malformed encrypted recipient',
+      { requiresEncryption: true, recipients: [{ agentAddress: ethers.Wallet.createRandom().address }] },
+      /returned an invalid DKG agent recipient/,
+    ],
+  ])('rejects custom resolver output with %s', async (_label, invalidResolution, expected) => {
+    publisher.setWorkspaceAgentRecipientResolver(async () => invalidResolution as any);
+
+    await expect(publisher.share(
+      'snapshot-invalid-resolver',
+      [q('urn:test:snapshot-invalid-resolver', 'http://schema.org/name', '"invalid"')],
+      {
+        publisherPeerId: SNAPSHOT_SELF_PEER,
+        senderAgentAddress: ethers.Wallet.createRandom().address,
+      },
+    )).rejects.toThrow(expected);
   });
 
   // ── Strict curator-ack gate (OT-RFC-49 curator-leader) ──
@@ -498,16 +715,32 @@ describe('Workspace: publishFromSharedMemory', () => {
     expect(decoded).toContain(`<${ENTITY}> <http://schema.org/name> "Inline From SWM"`);
   });
 
-  it('omits staging quads for over-limit internal public SWM first ACK attempts', async () => {
+  it('omits staging quads for over-limit aggregate public SWM first ACK attempts', async () => {
     const targetBytes = STORAGE_ACK_MAX_STAGING_BYTES + 1;
-    const selectedQuads = buildPublicQuadsWithByteSize(targetBytes);
+    // The publisher prices/ACKs the canonical data-graph N-Quads, not the
+    // caller's graphless SWM input. Build the boundary fixture with that exact
+    // graph name so targetBytes remains the actual wire byte size.
+    const selectedQuads = buildPublicQuadsWithByteSize(targetBytes, DATA_GRAPH);
     expect(encodedPublicByteLength(selectedQuads)).toBe(targetBytes);
 
-    await publisher.share(
+    // An aggregate SWM selection can exceed the 4 MiB ACK-inline ceiling even
+    // though every individual gossip operation respects the same 4 MiB limit.
+    // Seed that reachable state through two valid shares instead of one
+    // oversized share that must now fail at the producing boundary.
+    const graphlessQuads = selectedQuads.map((quad) => ({ ...quad, graph: '' }));
+    const splitAt = Math.ceil(graphlessQuads.length / 2);
+    const firstShare = await publisher.share(
       CONTEXT_GRAPH,
-      selectedQuads.map((quad) => ({ ...quad, graph: '' })),
-      { publisherPeerId: 'peer-oversized-inline' },
+      graphlessQuads.slice(0, splitAt),
+      { publisherPeerId: 'peer-aggregate-first' },
     );
+    const secondShare = await publisher.share(
+      CONTEXT_GRAPH,
+      graphlessQuads.slice(splitAt),
+      { publisherPeerId: 'peer-aggregate-second' },
+    );
+    expect(firstShare.gossipPayload.message.length).toBeLessThanOrEqual(DKG_GOSSIP_MAX_MESSAGE_BYTES);
+    expect(secondShare.gossipPayload.message.length).toBeLessThanOrEqual(DKG_GOSSIP_MAX_MESSAGE_BYTES);
 
     let receivedParams: V10ACKProviderParams | undefined;
     const stopAfterCapture = new Error('stop after over-limit ACK capture');
@@ -598,7 +831,7 @@ describe('Workspace: publishFromSharedMemory', () => {
   it('throws when workspace is empty for selection', async () => {
     await expect(
       publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all'),
-    ).rejects.toThrow(/No quads in shared memory/);
+    ).rejects.toThrow(/No public or private quads/);
   });
 
   it('escapes backslash and double-quote in rootEntity filter (SPARQL injection prevention)', async () => {
@@ -918,12 +1151,10 @@ describe('SharedMemoryHandler', () => {
   });
 
   it('stores valid workspace message to workspace and workspace_meta', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
     const nquads = `<${ENTITY}> <http://schema.org/name> "Handler Test" <${DATA_GRAPH}> .`;
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       shareOperationId: 'ws-handler-1',
       timestampMs: Date.now(),
@@ -931,9 +1162,7 @@ describe('SharedMemoryHandler', () => {
 
     await handler.handle(msg, '12D3KooWPeer');
 
-    const gm = new GraphManager(store);
-    await gm.ensureContextGraph(CONTEXT_GRAPH);
-    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(msg);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
     );
@@ -942,7 +1171,7 @@ describe('SharedMemoryHandler', () => {
       expect(result.bindings.length).toBe(1);
       expect(result.bindings[0]['o']).toBe('"Handler Test"');
     }
-    expect(workspaceOwned.get(CONTEXT_GRAPH)?.has(ENTITY)).toBe(true);
+    expect(workspaceOwned.get(CONTEXT_GRAPH)?.has(ENTITY)).not.toBe(true);
   });
 
   it('notifies context-graph meta invalidation after SWM sub-graph auto-registration', async () => {
@@ -954,11 +1183,10 @@ describe('SharedMemoryHandler', () => {
     const subGraphName = 'tasks';
     const subGraphGraph = `${DATA_GRAPH}/${subGraphName}`;
     const nquads = `<${ENTITY}> <http://schema.org/name> "SubGraph Handler Test" <${DATA_GRAPH}> .`;
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       subGraphName,
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       shareOperationId: 'ws-handler-subgraph-dirty',
       timestampMs: Date.now(),
@@ -988,10 +1216,9 @@ describe('SharedMemoryHandler', () => {
     }]);
 
     const nquads = `<${ENTITY}> <http://schema.org/name> "Unsigned" <${DATA_GRAPH}> .`;
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       shareOperationId: 'ws-unsigned-agent-gate',
       timestampMs: Date.now(),
@@ -1019,10 +1246,9 @@ describe('SharedMemoryHandler', () => {
     }]);
 
     const nquads = `<${ENTITY}> <http://schema.org/name> "Malformed Gate" <${DATA_GRAPH}> .`;
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       shareOperationId: 'ws-malformed-agent-gate',
       timestampMs: Date.now(),
@@ -1059,10 +1285,9 @@ describe('SharedMemoryHandler', () => {
     const nquads = `<${ENTITY}> <http://schema.org/name> "Signed" <${DATA_GRAPH}> .`;
     const timestampMs = Date.now();
     const shareOperationId = 'ws-signed-agent-gate';
-    const raw = encodeWorkspacePublishRequest({
+    const raw = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       shareOperationId,
       timestampMs,
@@ -1079,10 +1304,9 @@ describe('SharedMemoryHandler', () => {
 
     await handler.handle(msg, '12D3KooWPeer');
 
-    const gm = new GraphManager(store);
-    await gm.ensureContextGraph(CONTEXT_GRAPH);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(raw);
     const result = await store.query(
-      `SELECT ?o WHERE { GRAPH <${gm.workspaceGraphUri(CONTEXT_GRAPH)}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
+      `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
     );
     expect(result.type).toBe('bindings');
     if (result.type === 'bindings') {
@@ -1105,10 +1329,9 @@ describe('SharedMemoryHandler', () => {
     }]);
 
     const nquads = `<${ENTITY}> <http://schema.org/name> "Denied" <${DATA_GRAPH}> .`;
-    const raw = encodeWorkspacePublishRequest({
+    const raw = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       shareOperationId: 'ws-denied-agent-gate',
       timestampMs: Date.now(),
@@ -1128,60 +1351,54 @@ describe('SharedMemoryHandler', () => {
     }
   });
 
-  it('rejects message when rootEntity was created by a different peer (Rule 4)', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+  it('does not consult legacy per-root ownership for a graph-scoped KA', async () => {
     workspaceOwned.set(CONTEXT_GRAPH, new Map([[ENTITY, 'otherPeer']]));
 
     const nquads = `<${ENTITY}> <http://schema.org/name> "Duplicate" <${DATA_GRAPH}> .`;
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       shareOperationId: 'ws-dup',
       timestampMs: Date.now(),
     });
 
-    await handler.handle(msg, '12D3KooWPeer');
+    const outcome = await handler.handle(msg, '12D3KooWPeer');
 
-    const gm = new GraphManager(store);
-    await gm.ensureContextGraph(CONTEXT_GRAPH);
-    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(msg);
     const askResult = await store.query(
       `ASK { GRAPH <${wsGraph}> { <${ENTITY}> ?p ?o } }`,
     );
+    expect(outcome.applied).toBe(true);
     expect(askResult.type).toBe('boolean');
     if (askResult.type === 'boolean') {
-      expect(askResult.value).toBe(false);
+      expect(askResult.value).toBe(true);
     }
   });
 
   it('allows same creator to upsert via gossip handler', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWSameCreator';
 
-    const msg1 = encodeWorkspacePublishRequest({
+    const msg1 = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "Original" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-1',
       timestampMs: Date.now(),
     });
     await handler.handle(msg1, peerId);
 
-    const msg2 = encodeWorkspacePublishRequest({
+    const msg2 = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "Updated" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-2',
+      assertionVersion: '2',
       timestampMs: Date.now(),
     });
     await handler.handle(msg2, peerId);
 
-    const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(msg2);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
     );
@@ -1192,49 +1409,79 @@ describe('SharedMemoryHandler', () => {
     }
   });
 
-  it('persists ownership triples and does not duplicate on same-creator upsert', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+  it('persists one durable KA-level transport owner across assertion versions', async () => {
     const peerId = '12D3KooWOwner';
+    const firstPublishedAt = 1_700_000_000_000;
+    // Oxigraph canonicalizes the valid xsd:dateTime fraction `.120Z` to `.12Z`.
+    // The resolver must validate the value semantically and normalize it to ms.
+    const secondPublishedAt = 1_700_000_000_120;
 
-    const msg1 = encodeWorkspacePublishRequest({
+    const msg1 = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "First" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-own-1',
-      timestampMs: Date.now(),
+      timestampMs: firstPublishedAt,
     });
     await handler.handle(msg1, peerId);
 
     const gm = new GraphManager(store);
-    const wsMetaGraph = gm.workspaceMetaGraphUri(CONTEXT_GRAPH);
-    const afterFirst = await store.query(
-      `SELECT ?creator WHERE { GRAPH <${wsMetaGraph}> { <${ENTITY}> <http://dkg.io/ontology/workspaceOwner> ?creator } }`,
-    );
-    expect(afterFirst.type).toBe('bindings');
-    if (afterFirst.type === 'bindings') {
-      expect(afterFirst.bindings.length).toBe(1);
-      expect(afterFirst.bindings[0]['creator']).toBe(`"${peerId}"`);
-    }
+    const firstRequest = decodeWorkspacePublishRequest(msg1);
+    const afterFirst = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: gm,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: firstRequest.kaUal ?? '',
+    });
+    expect(afterFirst?.publisherPeerId).toBe(peerId);
+    expect(afterFirst?.publishedAt).toBe(firstPublishedAt.toString());
+    await expect(resolvePublishedKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: gm,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: firstRequest.kaUal ?? '',
+    })).resolves.toMatchObject({ publishedAt: firstPublishedAt.toString() });
 
-    const msg2 = encodeWorkspacePublishRequest({
+    await store.deleteByPattern({
+      graph: gm.sharedMemoryMetaUri(CONTEXT_GRAPH),
+      subject: `urn:dkg:share:${CONTEXT_GRAPH}:ws-own-1`,
+      predicate: 'http://dkg.io/ontology/publishedAt',
+    });
+    const legacyHeadWithoutPublishedAt = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: gm,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: firstRequest.kaUal ?? '',
+    });
+    expect(legacyHeadWithoutPublishedAt?.publishedAt).toBeUndefined();
+    await expect(resolvePublishedKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: gm,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: firstRequest.kaUal ?? '',
+    })).rejects.toThrow(/missing canonical publishedAt/u);
+
+    const msg2 = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "Updated" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-own-2',
-      timestampMs: Date.now(),
+      assertionVersion: '2',
+      timestampMs: secondPublishedAt,
     });
     await handler.handle(msg2, peerId);
 
-    const afterSecond = await store.query(
-      `SELECT ?creator WHERE { GRAPH <${wsMetaGraph}> { <${ENTITY}> <http://dkg.io/ontology/workspaceOwner> ?creator } }`,
-    );
-    expect(afterSecond.type).toBe('bindings');
-    if (afterSecond.type === 'bindings') {
-      expect(afterSecond.bindings.length).toBe(1);
-      expect(afterSecond.bindings[0]['creator']).toBe(`"${peerId}"`);
-    }
+    const afterSecond = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: gm,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: firstRequest.kaUal ?? '',
+    });
+    expect(afterSecond).toMatchObject({
+      assertionVersion: '2',
+      publisherPeerId: peerId,
+      publishedAt: secondPublishedAt.toString(),
+    });
   });
 });
 
@@ -1257,10 +1504,9 @@ describe('SharedMemoryHandler.handle outcome (rc.9 PR-C codex R3)', () => {
 
   it('successful apply returns { applied: true } with metadata for PR-D ack-quorum tracking', async () => {
     const nquads = `<${ENTITY}> <http://schema.org/name> "Applied" <${DATA_GRAPH}> .`;
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeerR3',
       shareOperationId: 'op-applied',
       timestampMs: Date.now(),
@@ -1281,6 +1527,7 @@ describe('SharedMemoryHandler.handle outcome (rc.9 PR-C codex R3)', () => {
     // assertions need the new field.
     expect(outcome).toEqual({
       applied: true,
+      assetUal: expect.stringMatching(/^did:dkg:/),
       cgId: CONTEXT_GRAPH,
       shareOperationId: 'op-applied',
       publisherPeerId: '12D3KooWPeerR3',
@@ -1290,10 +1537,9 @@ describe('SharedMemoryHandler.handle outcome (rc.9 PR-C codex R3)', () => {
 
   it('permanent rejection (publisherPeerId / fromPeerId mismatch) returns { applied: false, retryable: false }', async () => {
     const nquads = `<${ENTITY}> <http://schema.org/name> "PubMismatch" <${DATA_GRAPH}> .`;
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWClaimedPublisher',
       shareOperationId: 'op-pub-mismatch',
       timestampMs: Date.now(),
@@ -1304,6 +1550,203 @@ describe('SharedMemoryHandler.handle outcome (rc.9 PR-C codex R3)', () => {
     if (outcome.applied) throw new Error('unreachable');
     expect(outcome.retryable).toBe(false);
     expect(outcome.reason).toContain('does not match sender');
+  });
+
+  it('declines catalog-owned root materialization while preserving the named-subgraph lane', async () => {
+    const legacyApplyAllowedOracle = vi.fn(async (
+      _contextGraphId: string,
+      subGraphName: string | null,
+    ) => subGraphName !== null);
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      legacyApplyAllowedOracle,
+    });
+    const nquads = `<${ENTITY}> <http://schema.org/name> "Catalog owned" <${DATA_GRAPH}> .`;
+    const msg = encodeRootlessWorkspaceRequest({
+      contextGraphId: CONTEXT_GRAPH,
+      nquads: new TextEncoder().encode(nquads),
+      publisherPeerId: '12D3KooWCatalogOwned',
+      shareOperationId: 'op-catalog-owned',
+      timestampMs: Date.now(),
+    });
+
+    const outcome = await handler.handle(msg, '12D3KooWCatalogOwned');
+
+    expect(outcome).toMatchObject({
+      applied: false,
+      retryable: false,
+      reason: expect.stringContaining('not authoritative'),
+    });
+    expect(legacyApplyAllowedOracle).toHaveBeenCalledWith(CONTEXT_GRAPH, null);
+    await expect(store.hasGraph(rootlessSharedMemoryGraphFromWire(msg))).resolves.toBe(false);
+
+    const subgraphMsg = encodeRootlessWorkspaceRequest({
+      contextGraphId: CONTEXT_GRAPH,
+      subGraphName: 'research',
+      nquads: new TextEncoder().encode(
+        `<urn:test:catalog-root-subgraph-compatible> <http://schema.org/name> "Legacy subgraph" <${DATA_GRAPH}> .`,
+      ),
+      publisherPeerId: '12D3KooWCatalogOwned',
+      shareOperationId: 'op-catalog-owned-subgraph-compatible',
+      timestampMs: Date.now(),
+    });
+
+    await expect(handler.handle(subgraphMsg, '12D3KooWCatalogOwned')).resolves.toMatchObject({
+      applied: true,
+    });
+    expect(legacyApplyAllowedOracle).toHaveBeenCalledWith(CONTEXT_GRAPH, 'research');
+    await expect(store.hasGraph(rootlessSharedMemoryGraphFromWire(subgraphMsg))).resolves.toBe(true);
+  });
+
+  it('rechecks root authority after validation and the KA lock, before live graph mutation', async () => {
+    const legacyApplyAllowedOracle = vi.fn()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      legacyApplyAllowedOracle,
+    });
+    const msg = encodeRootlessWorkspaceRequest({
+      contextGraphId: CONTEXT_GRAPH,
+      nquads: new TextEncoder().encode(
+        `<${ENTITY}> <http://schema.org/name> "Authority changed" <${DATA_GRAPH}> .`,
+      ),
+      publisherPeerId: '12D3KooWAuthorityChanged',
+      shareOperationId: 'op-authority-changed-before-commit',
+      timestampMs: Date.now(),
+    });
+
+    const outcome = await handler.handle(msg, '12D3KooWAuthorityChanged');
+
+    expect(outcome).toMatchObject({
+      applied: false,
+      retryable: false,
+      reason: expect.stringContaining('not authoritative for root scope'),
+    });
+    expect(legacyApplyAllowedOracle).toHaveBeenCalledTimes(2);
+    await expect(store.hasGraph(rootlessSharedMemoryGraphFromWire(msg))).resolves.toBe(false);
+  });
+
+  it('atomically backfills the late root witness on an exact live replay', async () => {
+    const markerGraph = 'urn:test:late-root-boundary';
+    const markerSubject = 'urn:test:late-root-boundary:live-replay';
+    const settle = vi.fn();
+    const resolveDurableRootAtomicCompanion = vi.fn(() => ({
+      graphUri: markerGraph,
+      subject: markerSubject,
+      quads: [{
+        subject: markerSubject,
+        predicate: 'urn:test:entry',
+        object: '"live-replay"',
+        graph: markerGraph,
+      }],
+      settle,
+    }));
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      legacyApplyAllowedOracle: async () => true,
+      resolveDurableRootAtomicCompanion,
+    });
+    const msg = encodeRootlessWorkspaceRequest({
+      contextGraphId: CONTEXT_GRAPH,
+      nquads: new TextEncoder().encode(
+        `<${ENTITY}> <http://schema.org/name> "Witnessed replay" <${DATA_GRAPH}> .`,
+      ),
+      publisherPeerId: '12D3KooWWitnessedReplay',
+      shareOperationId: 'op-witnessed-live-replay',
+      timestampMs: Date.now(),
+    });
+
+    await expect(handler.handle(msg, '12D3KooWWitnessedReplay')).resolves.toMatchObject({
+      applied: true,
+    });
+    // The second delivery takes the exact-replay exit. It must still perform
+    // the same-byte compound replace so a pre-fix graph can acquire a witness.
+    await expect(handler.handle(msg, '12D3KooWWitnessedReplay')).resolves.toMatchObject({
+      applied: true,
+    });
+
+    expect(resolveDurableRootAtomicCompanion).toHaveBeenCalledTimes(2);
+    expect(settle.mock.calls).toEqual([[true], [true]]);
+    await expect(store.query(
+      `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+  });
+
+  it('rejects an encrypted Sender-Key scope downgrade without mutating root while accepting a matching named scope', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const peerId = '12D3KooWSenderKeyScopeFence';
+    const legacyApplyAllowedOracle = vi.fn(async (
+      _contextGraphId: string,
+      subGraphName: string | null,
+    ) => subGraphName !== null);
+    const rootRequest = encodeRootlessWorkspaceRequest({
+      contextGraphId: CONTEXT_GRAPH,
+      nquads: new TextEncoder().encode(
+        `<urn:test:sender-key-scope-root> <http://schema.org/name> "Must not apply" <${DATA_GRAPH}> .`,
+      ),
+      publisherPeerId: peerId,
+      shareOperationId: 'op-sender-key-scope-root',
+      timestampMs: Date.now(),
+    });
+    const namedRequest = encodeRootlessWorkspaceRequest({
+      contextGraphId: CONTEXT_GRAPH,
+      subGraphName: 'research',
+      nquads: new TextEncoder().encode(
+        `<urn:test:sender-key-scope-named> <http://schema.org/name> "May apply" <${DATA_GRAPH}> .`,
+      ),
+      publisherPeerId: peerId,
+      shareOperationId: 'op-sender-key-scope-named',
+      timestampMs: Date.now(),
+    });
+    const workspaceSenderKeyDecryptor = vi.fn(async (message: { epochId: string }) =>
+      message.epochId === 'epoch-root' ? rootRequest : namedRequest);
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      localAgentAddresses: () => [wallet.address],
+      legacyApplyAllowedOracle,
+      workspaceSenderKeyDecryptor,
+    });
+    await store.insert([{
+      subject: DATA_GRAPH,
+      predicate: 'https://dkg.network/ontology#allowedAgent',
+      object: `"${wallet.address}"`,
+      graph: `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`,
+    }]);
+
+    const senderKeyWire = async (epochId: string, messageIndex: number): Promise<Uint8Array> =>
+      signWorkspaceMessage(wallet, CONTEXT_GRAPH, encodeSwmSenderKeyMessage({
+        version: SWM_SENDER_KEY_PACKAGE_VERSION,
+        type: SWM_SENDER_KEY_MESSAGE_TYPE,
+        contextGraphId: CONTEXT_GRAPH,
+        subGraphName: 'research',
+        senderAgentAddress: wallet.address,
+        epochId,
+        membershipHash: 'sha256:sender-key-scope-fence',
+        messageIndex,
+        cipherAlgorithm: SWM_SENDER_KEY_CIPHER_ALGORITHM,
+        nonce: new Uint8Array(12).fill(messageIndex + 1),
+        ciphertext: new Uint8Array([messageIndex + 1]),
+        aadHash: new Uint8Array(32).fill(messageIndex + 2),
+        senderKeySignature: new Uint8Array(64).fill(messageIndex + 3),
+      }));
+
+    const rejected = await handler.handle(await senderKeyWire('epoch-root', 0), peerId);
+
+    expect(rejected).toMatchObject({
+      applied: false,
+      retryable: false,
+      reason: expect.stringContaining('not authoritative for root scope'),
+    });
+    await expect(store.hasGraph(rootlessSharedMemoryGraphFromWire(rootRequest))).resolves.toBe(false);
+
+    const accepted = await handler.handle(await senderKeyWire('epoch-research', 1), peerId);
+
+    expect(accepted).toMatchObject({ applied: true });
+    await expect(store.hasGraph(rootlessSharedMemoryGraphFromWire(namedRequest))).resolves.toBe(true);
+    expect(workspaceSenderKeyDecryptor).toHaveBeenCalledTimes(2);
+    expect(legacyApplyAllowedOracle.mock.calls).toEqual([
+      [CONTEXT_GRAPH, 'research'],
+      [CONTEXT_GRAPH, null],
+      [CONTEXT_GRAPH, 'research'],
+      [CONTEXT_GRAPH, 'research'],
+    ]);
   });
 
   it('retryable rejection (CAS pre-condition not met) returns { applied: false, retryable: true } — codex R4', async () => {
@@ -1320,10 +1763,9 @@ describe('SharedMemoryHandler.handle outcome (rc.9 PR-C codex R3)', () => {
     // withWriteLocksRejection = 'cas' → outcome should be
     // retryable.
     const nquads = `<${ENTITY}> <http://schema.org/name> "CASRetry" <${DATA_GRAPH}> .`;
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeerR4',
       shareOperationId: 'op-cas-retryable',
       timestampMs: Date.now(),
@@ -1384,10 +1826,9 @@ describe('SharedMemoryHandler.handle outcome (rc.9 PR-C codex R3)', () => {
     const throwingHandler = new SharedMemoryHandler(throwingStore, new TypedEventBus(), {});
 
     const nquads = `<${ENTITY}> <http://schema.org/name> "WillThrow" <${DATA_GRAPH}> .`;
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeerR3',
       shareOperationId: 'op-retryable',
       timestampMs: Date.now(),
@@ -1417,10 +1858,9 @@ describe('SharedMemoryHandler: redundant-apply counter (rc.9 PR-A)', () => {
 
   it('does not count first delivery of a (cgId, shareOpId) pair', async () => {
     const nquads = `<${ENTITY}> <http://schema.org/name> "First" <${DATA_GRAPH}> .`;
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       shareOperationId: 'first-only',
       timestampMs: Date.now(),
@@ -1433,10 +1873,9 @@ describe('SharedMemoryHandler: redundant-apply counter (rc.9 PR-A)', () => {
 
   it('counts each subsequent delivery of the same (cgId, shareOpId) within TTL', async () => {
     const nquads = `<${ENTITY}> <http://schema.org/name> "Twice" <${DATA_GRAPH}> .`;
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       shareOperationId: 'dup-op',
       timestampMs: Date.now(),
@@ -1458,18 +1897,16 @@ describe('SharedMemoryHandler: redundant-apply counter (rc.9 PR-A)', () => {
     const otherCg = `${CONTEXT_GRAPH}-second`;
     const otherDataGraph = `did:dkg:context-graph:${otherCg}`;
 
-    const msgA = encodeWorkspacePublishRequest({
+    const msgA = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "A" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       shareOperationId: 'op-a',
       timestampMs: Date.now(),
     });
-    const msgB = encodeWorkspacePublishRequest({
+    const msgB = encodeRootlessWorkspaceRequest({
       contextGraphId: otherCg,
       nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "B" <${otherDataGraph}> .`),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       shareOperationId: 'op-b',
       timestampMs: Date.now(),
@@ -1498,10 +1935,9 @@ describe('SharedMemoryHandler: redundant-apply counter (rc.9 PR-A)', () => {
       now: () => nowMs,
     });
 
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "TTL" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       shareOperationId: 'op-ttl',
       timestampMs: nowMs,
@@ -1516,10 +1952,9 @@ describe('SharedMemoryHandler: redundant-apply counter (rc.9 PR-A)', () => {
 
   it('still applies the second delivery (no behavior change — measurement only)', async () => {
     const nquads = `<${ENTITY}> <http://schema.org/name> "Applied" <${DATA_GRAPH}> .`;
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       shareOperationId: 'op-applied-twice',
       timestampMs: Date.now(),
@@ -1528,9 +1963,7 @@ describe('SharedMemoryHandler: redundant-apply counter (rc.9 PR-A)', () => {
     await handler.handle(msg, '12D3KooWPeer');
     await handler.handle(msg, '12D3KooWPeer');
 
-    const gm = new GraphManager(store);
-    await gm.ensureContextGraph(CONTEXT_GRAPH);
-    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(msg);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
     );
@@ -1556,10 +1989,9 @@ describe('SharedMemoryHandler: redundant-apply counter (rc.9 PR-A)', () => {
   // Codex review on PR #570 caught the early-bump.
   it('does NOT count a duplicated rejected delivery (R1: rejected messages skipped)', async () => {
     const nquads = `<${ENTITY}> <http://schema.org/name> "Bad" <${DATA_GRAPH}> .`;
-    const badMsg = encodeWorkspacePublishRequest({
+    const badMsg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
       shareOperationId: 'op-rejected',
       timestampMs: Date.now(),
@@ -1578,10 +2010,9 @@ describe('SharedMemoryHandler: redundant-apply counter (rc.9 PR-A)', () => {
 
   it('does NOT count a duplicated delivery whose publisherPeerId disagrees with the sender (R1: rejected messages skipped)', async () => {
     const nquads = `<${ENTITY}> <http://schema.org/name> "Spoofed" <${DATA_GRAPH}> .`;
-    const spoofedMsg = encodeWorkspacePublishRequest({
+    const spoofedMsg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       // Claims to be from Peer-A but `handle()` receives it from
       // Peer-Other → rejected at the publisherPeerId check.
       publisherPeerId: '12D3KooWPeer-A',
@@ -1970,15 +2401,13 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
   });
 
   it('rejects CAS conditions with SPARQL injection in subject', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const safeEntity = 'urn:test:safe-entity';
     const nquads = `<${safeEntity}> <http://schema.org/name> "Test" <${DATA_GRAPH}> .`;
 
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: safeEntity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-inject-1',
       timestampMs: Date.now(),
@@ -2002,15 +2431,13 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
   });
 
   it('rejects CAS conditions with SPARQL injection in expectedValue', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const safeEntity = 'urn:test:safe-entity2';
 
     // First write so the entity exists
-    const setupMsg = encodeWorkspacePublishRequest({
+    const setupMsg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${safeEntity}> <http://schema.org/name> "Setup" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: safeEntity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-setup',
       timestampMs: Date.now(),
@@ -2018,12 +2445,12 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     await handler.handle(setupMsg, peerId);
 
     const nquads = `<${safeEntity}> <http://schema.org/name> "Updated" <${DATA_GRAPH}> .`;
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: safeEntity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-inject-2',
+      assertionVersion: '2',
       timestampMs: Date.now(),
       casConditions: [{
         subject: safeEntity,
@@ -2035,8 +2462,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
 
     await handler.handle(msg, peerId);
 
-    const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(setupMsg);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${safeEntity}> <http://schema.org/name> ?o } }`,
     );
@@ -2048,26 +2474,24 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
   });
 
   it('accepts valid CAS conditions and enforces them', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const entity = 'urn:test:cas-valid';
 
-    const setupMsg = encodeWorkspacePublishRequest({
+    const setupMsg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-cas-setup',
       timestampMs: Date.now(),
     });
     await handler.handle(setupMsg, peerId);
 
-    const updateMsg = encodeWorkspacePublishRequest({
+    const updateMsg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "traveling" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-cas-update',
+      assertionVersion: '2',
       timestampMs: Date.now(),
       casConditions: [{
         subject: entity,
@@ -2078,8 +2502,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     });
     await handler.handle(updateMsg, peerId);
 
-    const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(updateMsg);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
     );
@@ -2091,26 +2514,24 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
   });
 
   it('rejects write when CAS condition value mismatches', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const entity = 'urn:test:cas-mismatch';
 
-    const setupMsg = encodeWorkspacePublishRequest({
+    const setupMsg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "traveling" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-mismatch-setup',
       timestampMs: Date.now(),
     });
     await handler.handle(setupMsg, peerId);
 
-    const updateMsg = encodeWorkspacePublishRequest({
+    const updateMsg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "arrived" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-mismatch-update',
+      assertionVersion: '2',
       timestampMs: Date.now(),
       casConditions: [{
         subject: entity,
@@ -2121,8 +2542,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     });
     await handler.handle(updateMsg, peerId);
 
-    const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(setupMsg);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
     );
@@ -2134,14 +2554,12 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
   });
 
   it('expectAbsent: allows write when triple does not exist', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const entity = 'urn:test:absent-pass';
 
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-absent-pass',
       timestampMs: Date.now(),
@@ -2154,8 +2572,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     });
     await handler.handle(msg, peerId);
 
-    const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(msg);
     const result = await store.query(
       `ASK { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
     );
@@ -2164,26 +2581,24 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
   });
 
   it('expectAbsent: rejects write when triple already exists', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const entity = 'urn:test:absent-fail';
 
-    const setupMsg = encodeWorkspacePublishRequest({
+    const setupMsg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-absent-setup',
       timestampMs: Date.now(),
     });
     await handler.handle(setupMsg, peerId);
 
-    const updateMsg = encodeWorkspacePublishRequest({
+    const updateMsg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "traveling" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-absent-reject',
+      assertionVersion: '2',
       timestampMs: Date.now(),
       casConditions: [{
         subject: entity,
@@ -2194,8 +2609,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     });
     await handler.handle(updateMsg, peerId);
 
-    const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(setupMsg);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
     );
@@ -2207,26 +2621,24 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
   });
 
   it('rejects non-absent CAS condition with empty expectedValue (protobuf default)', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const entity = 'urn:test:empty-expected';
 
-    const setupMsg = encodeWorkspacePublishRequest({
+    const setupMsg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${entity}> <http://schema.org/name> "Setup" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-empty-setup',
       timestampMs: Date.now(),
     });
     await handler.handle(setupMsg, peerId);
 
-    const updateMsg = encodeWorkspacePublishRequest({
+    const updateMsg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${entity}> <http://schema.org/name> "Updated" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-empty-update',
+      assertionVersion: '2',
       timestampMs: Date.now(),
       casConditions: [{
         subject: entity,
@@ -2237,8 +2649,7 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     });
     await handler.handle(updateMsg, peerId);
 
-    const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(setupMsg);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://schema.org/name> ?o } }`,
     );
@@ -2479,8 +2890,8 @@ describe('Workspace: conditionalShare (CAS)', () => {
     // a dummy "success" shape) cannot pass.
     const casResult = await publisher.conditionalShare(CONTEXT_GRAPH, [], literalOpts);
     expect(casResult.shareOperationId).toMatch(/.+/);
-    expect(casResult.message).toBeInstanceOf(Uint8Array);
-    expect(casResult.message.length).toBeGreaterThan(0);
+    expect(casResult.gossipPayload.message).toBeInstanceOf(Uint8Array);
+    expect(casResult.gossipPayload.message.length).toBeGreaterThan(0);
   });
 
   it('serializes concurrent CAS writes to the same subject+predicate', async () => {
@@ -2533,15 +2944,13 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
   });
 
   it('rejects CAS conditions with SPARQL injection in predicate', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const entity = 'urn:test:inject-pred';
     const nquads = `<${entity}> <http://schema.org/name> "Test" <${DATA_GRAPH}> .`;
 
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(nquads),
-      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-inject-pred',
       timestampMs: Date.now(),
@@ -2565,27 +2974,29 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
   });
 
   it('cross-subject CAS: condition on subject A, write targets subject B — lock covers both', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const subjectA = 'urn:test:lock-a';
     const subjectB = 'urn:test:lock-b';
 
-    const setupA = encodeWorkspacePublishRequest({
+    const setupA = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${subjectA}> <http://example.org/status> "active" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: subjectA, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-lock-setup-a',
       timestampMs: Date.now(),
     });
     await handler.handle(setupA, peerId);
+    const setupScope = decodeWorkspacePublishRequest(setupA);
 
-    const writeB = encodeWorkspacePublishRequest({
+    const writeB = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${subjectB}> <http://example.org/name> "Created conditionally" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: subjectB, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-lock-write-b',
+      agentAddress: setupScope.agentAddress,
+      kaNumber: setupScope.kaNumber,
+      kaUal: setupScope.kaUal,
+      assertionVersion: '2',
       timestampMs: Date.now(),
       casConditions: [{
         subject: subjectA,
@@ -2596,8 +3007,7 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     });
     await handler.handle(writeB, peerId);
 
-    const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(writeB);
     const result = await store.query(
       `ASK { GRAPH <${wsGraph}> { <${subjectB}> <http://example.org/name> ?o } }`,
     );
@@ -2606,27 +3016,29 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
   });
 
   it('cross-subject CAS: rejects when condition on subject A fails', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const subjectA = 'urn:test:lock-a2';
     const subjectB = 'urn:test:lock-b2';
 
-    const setupA = encodeWorkspacePublishRequest({
+    const setupA = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${subjectA}> <http://example.org/status> "inactive" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: subjectA, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-lock-setup-a2',
       timestampMs: Date.now(),
     });
     await handler.handle(setupA, peerId);
+    const setupScope = decodeWorkspacePublishRequest(setupA);
 
-    const writeB = encodeWorkspacePublishRequest({
+    const writeB = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${subjectB}> <http://example.org/name> "Should not appear" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: subjectB, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-lock-write-b2',
+      agentAddress: setupScope.agentAddress,
+      kaNumber: setupScope.kaNumber,
+      kaUal: setupScope.kaUal,
+      assertionVersion: '2',
       timestampMs: Date.now(),
       casConditions: [{
         subject: subjectA,
@@ -2637,8 +3049,7 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     });
     await handler.handle(writeB, peerId);
 
-    const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(setupA);
     const result = await store.query(
       `ASK { GRAPH <${wsGraph}> { <${subjectB}> ?p ?o } }`,
     );
@@ -2647,29 +3058,27 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
   });
 
   it('multiple gossip CAS conditions: rejects if any single condition fails', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const entity = 'urn:test:multi-cond';
 
-    const setup = encodeWorkspacePublishRequest({
+    const setup = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(
         `<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .\n` +
         `<${entity}> <http://example.org/turn> "5"^^<http://www.w3.org/2001/XMLSchema#integer> <${DATA_GRAPH}> .`,
       ),
-      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-multi-setup',
       timestampMs: Date.now(),
     });
     await handler.handle(setup, peerId);
 
-    const update = encodeWorkspacePublishRequest({
+    const update = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "traveling" <${DATA_GRAPH}> .`),
-      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-multi-update',
+      assertionVersion: '2',
       timestampMs: Date.now(),
       casConditions: [
         { subject: entity, predicate: 'http://example.org/status', expectedValue: '"recruiting"', expectAbsent: false },
@@ -2678,8 +3087,7 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     });
     await handler.handle(update, peerId);
 
-    const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(setup);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
     );
@@ -2691,30 +3099,28 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
   });
 
   it('gossip CAS with typed literal (xsd:integer) succeeds when match', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const entity = 'urn:test:typed-lit';
 
-    const setup = encodeWorkspacePublishRequest({
+    const setup = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(
         `<${entity}> <http://example.org/turn> "1"^^<http://www.w3.org/2001/XMLSchema#integer> <${DATA_GRAPH}> .`,
       ),
-      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-typed-setup',
       timestampMs: Date.now(),
     });
     await handler.handle(setup, peerId);
 
-    const update = encodeWorkspacePublishRequest({
+    const update = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
       nquads: new TextEncoder().encode(
         `<${entity}> <http://example.org/turn> "2"^^<http://www.w3.org/2001/XMLSchema#integer> <${DATA_GRAPH}> .`,
       ),
-      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
       shareOperationId: 'ws-typed-update',
+      assertionVersion: '2',
       timestampMs: Date.now(),
       casConditions: [{
         subject: entity,
@@ -2725,8 +3131,7 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     });
     await handler.handle(update, peerId);
 
-    const gm = new GraphManager(store);
-    const wsGraph = gm.workspaceGraphUri(CONTEXT_GRAPH);
+    const wsGraph = rootlessSharedMemoryGraphFromWire(update);
     const result = await store.query(
       `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://example.org/turn> ?o } }`,
     );

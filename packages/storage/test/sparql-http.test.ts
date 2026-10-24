@@ -1,17 +1,28 @@
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import {
+  STORE_OPERATION_TIMEOUT_CODE,
   SparqlHttpStore,
+  StorePriorityScheduler,
+  asGraphWriteRevisionSource,
+  createManagedOxigraphRuntimeStoreConfigV1,
+  createManagedOxigraphSparqlStoreV1,
   createTripleStore,
   getExternalStorePrioritySchedulerSnapshot,
+  isSparqlHttpResponseError,
+  tryReplaceGraphAtomically,
+  tryReplaceSubjectAtomically,
   type Quad,
+  type SparqlHttpResponseErrorLike,
   type SparqlHttpSlowQueryEvent,
 } from '../src/index.js';
+import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
 let server: Server;
 let queryUrl: string;
 let updateUrl: string;
 const insertedQuads: string[] = [];
+let countQuadsHits = 0;
 /** How many times the server received a listGraphs enumeration query (old `SELECT DISTINCT ?g` scan or the new index-read `GRAPH ?g {} FILTER EXISTS`). */
 let listGraphsHits = 0;
 /** The most recent listGraphs enumeration query the server received — asserted on to guard the query SHAPE (index-read, not the O(#quads) scan; dkg #1597). */
@@ -68,6 +79,7 @@ function startTestServer(): Promise<void> {
             return;
           }
           if (decoded.includes('COUNT(*)')) {
+            countQuadsHits++;
             res.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });
             res.end(JSON.stringify({
               head: { vars: ['c'] },
@@ -119,6 +131,10 @@ describe('SparqlHttpStore (test server)', () => {
     await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
   });
 
+  it('declares process-local revision coverage at the extracted adapter boundary', () => {
+    expect(asGraphWriteRevisionSource(store)?.writeRevisionCoverage).toBe('process-local');
+  });
+
   it('insert sends INSERT DATA to update endpoint', async () => {
     insertedQuads.length = 0;
     await store.insert([{
@@ -165,6 +181,40 @@ describe('SparqlHttpStore (test server)', () => {
     expect(updateReq?.contentType).toBe('application/sparql-update; charset=utf-8');
   });
 
+  it.each([
+    [
+      'CONSTRUCT',
+      'PREFIX schema: <http://schema.org/>\nCONSTRUCT { ?s schema:name ?name } WHERE { ?s schema:name ?name }',
+    ],
+    [
+      'DESCRIBE',
+      'PREFIX schema: <http://schema.org/>\nDESCRIBE ?s WHERE { ?s schema:name ?name }',
+    ],
+  ])('uses an N-Quads Accept header for a PREFIX-prefixed %s query', async (
+    _form,
+    sparql,
+  ) => {
+    const originalFetch = globalThis.fetch;
+    let accept = '';
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      accept = ((init?.headers ?? {}) as Record<string, string>).Accept ?? '';
+      return new Response(
+        '<http://ex.org/s> <http://schema.org/name> "Alice" .\n',
+        { status: 200, headers: { 'Content-Type': 'application/n-quads' } },
+      );
+    }) as typeof fetch;
+    try {
+      const prefixedStore = new SparqlHttpStore({
+        queryEndpoint: 'http://prefixed-construct.test/query',
+      });
+      const result = await prefixedStore.query(sparql);
+      expect(result.type).toBe('quads');
+      expect(accept).toBe('application/n-quads, text/n-quads');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('rejects RDF literals above the Java MUTF-8 hard limit before update POST', async () => {
     insertedQuads.length = 0;
     await expect(store.insert([{
@@ -193,7 +243,10 @@ describe('SparqlHttpStore (test server)', () => {
     const before = getExternalStorePrioritySchedulerSnapshot();
     expect(before.maxConcurrent).toBeGreaterThan(1);
     expect(before.ackReservedSlots).toBeGreaterThan(0);
-    const backgroundSlots = before.maxConcurrent - before.ackReservedSlots;
+    const backgroundSlots = before.maxConcurrent
+      - before.ackReservedSlots
+      - (before.healthReservedSlots ?? 0)
+      - (before.normalReservedSlots ?? 0);
     const arrivals: Array<'listGraphs' | 'ack' | 'other'> = [];
     const heldListGraphResponses: ServerResponse[] = [];
     let listGraphRequests = 0;
@@ -292,29 +345,33 @@ describe('SparqlHttpStore (test server)', () => {
     const seenSignals: AbortSignal[] = [];
     globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
       if (init?.signal instanceof AbortSignal) seenSignals.push(init.signal);
-      const accept = String((init?.headers as Record<string, string> | undefined)?.Accept ?? '');
-      if (accept.includes('n-quads')) {
-        return new Response('', { status: 200 });
-      }
-      return new Response(JSON.stringify({
-        head: { vars: [] },
-        results: { bindings: [] },
-      }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/sparql-results+json' },
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+          once: true,
+        });
       });
     }) as typeof fetch;
     try {
       const signalController = new AbortController();
       const signalStore = new SparqlHttpStore({ queryEndpoint: 'http://example.test/query', timeout: 30_000 });
 
-      await signalStore.query('SELECT ?s WHERE { ?s ?p ?o }', { signal: signalController.signal });
-      await signalStore.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }', { signal: signalController.signal });
+      const select = signalStore.query(
+        'SELECT ?s WHERE { ?s ?p ?o }',
+        { signal: signalController.signal },
+      );
+      const construct = signalStore.query(
+        'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }',
+        { signal: signalController.signal },
+      );
+      const selectRejected = expect(select).rejects.toThrow('caller aborted');
+      const constructRejected = expect(construct).rejects.toThrow('caller aborted');
 
+      await waitForCondition(() => seenSignals.length === 2, 'both fetches should start');
       expect(seenSignals).toHaveLength(2);
       expect(seenSignals.every((signal) => !signal.aborted)).toBe(true);
       signalController.abort(new Error('caller aborted'));
       expect(seenSignals.every((signal) => signal.aborted)).toBe(true);
+      await Promise.all([selectRejected, constructRejected]);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -340,6 +397,580 @@ describe('SparqlHttpStore (test server)', () => {
     }
   });
 
+  it('does not return a timeout until the aborted server attempt has stopped', async () => {
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    let active = 0;
+    let maxActive = 0;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      calls += 1;
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      if (calls > 1) {
+        active -= 1;
+        return new Response(JSON.stringify({ head: { vars: [] }, results: { bindings: [] } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/sparql-results+json' },
+        });
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          // Model an HTTP/server stack that needs cleanup time after receiving
+          // cancellation. The adapter must keep its admission slot and caller
+          // promise pending until that cleanup finishes.
+          setTimeout(() => {
+            active -= 1;
+            reject(init.signal?.reason);
+          }, 20);
+        }, { once: true });
+      });
+    }) as typeof fetch;
+    try {
+      const store = new SparqlHttpStore({ queryEndpoint: 'http://example.test/query', timeout: 5 });
+      await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
+        name: 'TimeoutError',
+        code: 'STORE_OPERATION_TIMEOUT',
+        retryable: true,
+        backend: 'sparql-http',
+        operation: 'query',
+      });
+      expect(active).toBe(0);
+
+      await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).resolves.toMatchObject({
+        type: 'bindings',
+      });
+      expect(maxActive).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('emits complete timeout metadata for a timed-out mutation', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(init.signal?.reason),
+          { once: true },
+        );
+      })) as typeof fetch;
+    try {
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://example.test/query',
+        updateEndpoint: 'http://example.test/update',
+        timeout: 5,
+      });
+      const graph = 'http://g';
+      const before = store.getWriteRevision(graph);
+      await expect(store.insert([
+        { subject: 'http://s', predicate: 'http://p', object: '"o"', graph },
+      ])).rejects.toMatchObject({
+        name: 'TimeoutError',
+        code: 'STORE_OPERATION_TIMEOUT',
+        retryable: true,
+        backend: 'sparql-http',
+        operation: 'insert',
+        timeoutMs: 5,
+        outcome: 'indeterminate',
+      });
+      const after = store.getWriteRevision(graph);
+      expect(after.generation).toBeGreaterThan(before.generation);
+      expect(after.stable).toBe(false);
+      expect(store.getWriteRevision(graph)).toEqual(after);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('uses the transport label for recovery while retaining the canonical helper operation', async () => {
+    const originalFetch = globalThis.fetch;
+    const timedOutOperations: string[] = [];
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(init.signal?.reason),
+          { once: true },
+        );
+      })) as typeof fetch;
+    try {
+      const store = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        timeout: 5,
+      }, {
+        onClientTimeout: (operation) => timedOutOperations.push(operation),
+      });
+      await expect(store.hasGraph('urn:timed-out-graph')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'oxigraph-server',
+        operation: 'query',
+        storeOperation: 'hasGraph',
+        timeoutMs: 5,
+      });
+      expect(timedOutOperations).toEqual(['query']);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('ignores timeout hooks smuggled in generic options', async () => {
+    const originalFetch = globalThis.fetch;
+    const timedOutOperations: string[] = [];
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(init.signal?.reason),
+          { once: true },
+        );
+      })) as typeof fetch;
+    try {
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://example.test/query',
+        timeout: 5,
+        onClientTimeout: (operation) => timedOutOperations.push(operation),
+      } as never);
+      await expect(store.hasGraph('urn:generic-timeout-graph')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'sparql-http',
+        operation: 'query',
+        storeOperation: 'hasGraph',
+        timeoutMs: 5,
+      });
+      expect(timedOutOperations).toEqual([]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('does not lift one-argument option hooks into managed authority', async () => {
+    const originalFetch = globalThis.fetch;
+    const timedOutOperations: string[] = [];
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(init.signal?.reason),
+          { once: true },
+        );
+      })) as typeof fetch;
+    try {
+      const store = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        timeout: 5,
+        onClientTimeout: (operation) => timedOutOperations.push(operation),
+      } as never);
+      await expect(store.hasGraph('urn:legacy-timeout-graph')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'oxigraph-server',
+        operation: 'query',
+        storeOperation: 'hasGraph',
+        timeoutMs: 5,
+      });
+      expect(timedOutOperations).toEqual([]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('does not relabel a late managed-server response as a timeout', async () => {
+    const originalFetch = globalThis.fetch;
+    let now = 0;
+    globalThis.fetch = (async () => {
+      now = 60_000;
+      return new Response('request timed out', { status: 500 });
+    }) as typeof fetch;
+    try {
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://managed-oxigraph.test/query',
+        managedOxigraph: true,
+        timeout: 125_000,
+        slowQueryThresholdMs: 0,
+        now: () => now,
+      });
+
+      await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
+        code: 'SPARQL_HTTP_RESPONSE',
+        operation: 'query',
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('preserves a caller abort after the former server-timeout threshold', async () => {
+    const originalFetch = globalThis.fetch;
+    let now = 0;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      })) as typeof fetch;
+    try {
+      const caller = new AbortController();
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://managed-oxigraph.test/query',
+        managedOxigraph: true,
+        timeout: 125_000,
+        slowQueryThresholdMs: 0,
+        now: () => now,
+      });
+      const query = store.query(
+        'SELECT ?s WHERE { ?s ?p ?o }',
+        { signal: caller.signal },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      now = 56_000;
+      caller.abort(new Error('caller aborted after 56 seconds'));
+
+      await expect(query).rejects.toThrow('caller aborted after 56 seconds');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('classifies a concurrent write and new work during query-triggered recovery', async () => {
+    const originalFetch = globalThis.fetch;
+    let recovery = { recovering: false, generation: 0 };
+    let fetchCalls = 0;
+    let resolveQueryStarted!: () => void;
+    let resolveUpdateStarted!: () => void;
+    let rejectUpdate!: (error: unknown) => void;
+    const queryStarted = new Promise<void>((resolve) => { resolveQueryStarted = resolve; });
+    const updateStarted = new Promise<void>((resolve) => { resolveUpdateStarted = resolve; });
+
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      fetchCalls += 1;
+      const body = String(init?.body ?? '');
+      if (recovery.generation > 0 && !recovery.recovering) {
+        return new Response(JSON.stringify({ head: {}, boolean: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/sparql-results+json' },
+        });
+      }
+      if (body.startsWith('INSERT')) {
+        resolveUpdateStarted();
+        return await new Promise<Response>((_resolve, reject) => {
+          rejectUpdate = reject;
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+        });
+      }
+      resolveQueryStarted();
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+    }) as typeof fetch;
+
+    try {
+      const managed = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        updateEndpoint: 'http://127.0.0.1:7878/update',
+        timeout: 100,
+      }, {
+        getRecoveryState: () => recovery,
+        onClientTimeout: (operation) => {
+          if (operation !== 'query') return;
+          recovery = { recovering: true, generation: 1 };
+          rejectUpdate(new TypeError('fetch failed: managed server restarted'));
+        },
+      });
+
+      const query = managed.query('SELECT ?s WHERE { ?s ?p ?o }');
+      const queryFailure = query.catch((error) => error);
+      await queryStarted;
+      const update = managed.insert([{
+        subject: 'http://ex.org/s',
+        predicate: 'http://ex.org/p',
+        object: '"value"',
+        graph: 'http://ex.org/g',
+      }]);
+      const updateFailure = update.catch((error) => error);
+      await updateStarted;
+
+      expect(await queryFailure).toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        operation: 'query',
+        outcome: 'indeterminate',
+      });
+      expect(await updateFailure).toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'oxigraph-server',
+        operation: 'insert',
+        outcome: 'indeterminate',
+      });
+
+      await expect(managed.query('ASK { ?s ?p ?o }')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        operation: 'query',
+        outcome: 'not_started',
+      });
+      expect(fetchCalls).toBe(2);
+
+      recovery = { recovering: false, generation: 1 };
+      await expect(managed.query('ASK { ?s ?p ?o }')).resolves.toMatchObject({
+        type: 'boolean',
+        value: true,
+      });
+      expect(fetchCalls).toBe(3);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('classifies an in-flight write after recovery has already completed', async () => {
+    const originalFetch = globalThis.fetch;
+    let recovery = { recovering: false, generation: 0 };
+    let rejectWrite!: (error: unknown) => void;
+    let markWriteStarted!: () => void;
+    const writeStarted = new Promise<void>((resolve) => { markWriteStarted = resolve; });
+    globalThis.fetch = (async () => await new Promise<Response>((_resolve, reject) => {
+      rejectWrite = reject;
+      markWriteStarted();
+    })) as typeof fetch;
+
+    try {
+      const managed = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        updateEndpoint: 'http://127.0.0.1:7878/update',
+        timeout: 5_000,
+      }, {
+        getRecoveryState: () => recovery,
+      });
+      const writeFailure = managed.insert([{
+        subject: 'http://ex.org/s',
+        predicate: 'http://ex.org/p',
+        object: '"value"',
+        graph: 'http://ex.org/g',
+      }]).catch((error) => error);
+      await writeStarted;
+
+      // The transport rejects only after the supervisor is healthy again.
+      // The generation change is therefore the sole evidence that this
+      // in-flight write crossed a recovery boundary.
+      recovery = { recovering: false, generation: 1 };
+      rejectWrite(new TypeError('socket closed by completed recovery'));
+
+      expect(await writeFailure).toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'oxigraph-server',
+        operation: 'insert',
+        outcome: 'indeterminate',
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('keeps a definite write failure definite while maintenance pauses admission', async () => {
+    const originalFetch = globalThis.fetch;
+    let recovery: {
+      recovering: boolean;
+      admissionsPaused?: boolean;
+      generation: number;
+    } = { recovering: false, generation: 0 };
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      // WAL maintenance closes admission while this update is in flight. The
+      // child is alive and answers what it already accepted — here, with a
+      // hard parse error that definitively never applied.
+      recovery = { recovering: false, admissionsPaused: true, generation: 0 };
+      return new Response('SPARQL update parse error', { status: 400 });
+    }) as typeof fetch;
+
+    try {
+      const managed = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        updateEndpoint: 'http://127.0.0.1:7878/update',
+        timeout: 5_000,
+      }, {
+        getRecoveryState: () => recovery,
+      });
+      const failure = await managed.insert([{
+        subject: 'http://ex.org/s',
+        predicate: 'http://ex.org/p',
+        object: '"value"',
+        graph: 'http://ex.org/g',
+      }]).catch((error) => error);
+
+      // An admission pause is not a termination, so the server's own verdict
+      // must survive instead of being reclassified as "may have committed".
+      expect(isSparqlHttpResponseError(failure)).toBe(true);
+      expect(failure).toMatchObject({ status: 400 });
+      expect(failure).not.toMatchObject({ code: STORE_OPERATION_TIMEOUT_CODE });
+
+      // New work is still refused for as long as admission stays paused.
+      await expect(managed.query('ASK { ?s ?p ?o }')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        operation: 'query',
+        outcome: 'not_started',
+      });
+      expect(fetchCalls).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('rejects a partial managed Oxigraph SELECT response when the native deadline cancels it', async () => {
+    const originalFetch = globalThis.fetch;
+    const onClientTimeout = vi.fn();
+    globalThis.fetch = (async () => new Response(
+      '{"head":{"vars":["s"]},"results":{"bindings":[The SPARQL operation has been cancelled',
+      { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
+    )) as typeof fetch;
+    try {
+      const managed = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+      }, {
+        onClientTimeout,
+      });
+      await expect(managed.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
+        name: 'TimeoutError',
+        code: 'STORE_OPERATION_TIMEOUT',
+        retryable: true,
+        backend: 'oxigraph-server',
+        operation: 'query',
+      });
+      expect(onClientTimeout).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it.each(['readState', 'recover'] as const)(
+    'keeps a managed recovery capability without %s inert',
+    async (missing) => {
+      const originalFetch = globalThis.fetch;
+      const recover = vi.fn();
+      const readState = vi.fn(() => ({ recovering: true, generation: 1 }));
+      globalThis.fetch = (async () => new Response(
+        '{"head":{"vars":["s"]},"results":{"bindings":[The SPARQL operation has been cancelled',
+        { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
+      )) as typeof fetch;
+      try {
+        const managed = createManagedOxigraphSparqlStoreV1({
+          queryEndpoint: 'http://127.0.0.1:7878/query',
+          managedRecovery: (missing === 'readState' ? { recover } : { readState }) as never,
+        });
+        await expect(managed.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
+          name: 'TimeoutError',
+          code: 'STORE_OPERATION_TIMEOUT',
+          backend: 'oxigraph-server',
+          operation: 'query',
+        });
+        expect(readState).not.toHaveBeenCalled();
+        expect(recover).not.toHaveBeenCalled();
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  );
+
+  it('preserves managed Oxigraph timeout semantics behind GraphSetIndexStore', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(
+      'query failed\nThe SPARQL operation has been cancelled',
+      { status: 500 },
+    )) as typeof fetch;
+    const managed = await createTripleStore(createManagedOxigraphRuntimeStoreConfigV1({
+      backend: 'sparql-http',
+      options: {
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        managedByDkg: true,
+      },
+      graphSetIndex: true,
+    }));
+    try {
+      await expect(managed.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'oxigraph-server',
+        operation: 'query',
+      });
+    } finally {
+      await managed.close();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('rejects rather than parsing a partial managed Oxigraph CONSTRUCT response', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(
+      '<http://s> <http://p> "partial" <http://g> .\nThe SPARQL operation has been cancelled',
+      { status: 200, headers: { 'Content-Type': 'application/n-quads' } },
+    )) as typeof fetch;
+    try {
+      const managed = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+      });
+      await expect(
+        managed.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'),
+      ).rejects.toMatchObject({
+        name: 'TimeoutError',
+        code: 'STORE_OPERATION_TIMEOUT',
+        retryable: true,
+        backend: 'oxigraph-server',
+        operation: 'construct',
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('rejects a managed Oxigraph cancellation body on a non-OK response', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(
+      'query failed\nThe SPARQL operation has been cancelled',
+      { status: 500 },
+    )) as typeof fetch;
+    try {
+      const managed = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+      });
+      await expect(managed.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'oxigraph-server',
+        operation: 'query',
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('does not apply the managed Oxigraph cancellation policy to generic endpoints', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(
+      'query failed\nThe SPARQL operation has been cancelled',
+      { status: 500 },
+    )) as typeof fetch;
+    try {
+      const generic = new SparqlHttpStore({
+        queryEndpoint: 'http://generic-sparql.test/query',
+      });
+      let failure: unknown;
+      try {
+        await generic.query('SELECT ?s WHERE { ?s ?p ?o }');
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).toMatchObject({
+        message: expect.stringContaining('SPARQL HTTP query failed (500)'),
+      });
+      // GH#1758 — this used to assert `code === undefined` as a proxy for "the
+      // managed cancellation policy did not apply". Non-OK responses now carry
+      // a typed `SPARQL_HTTP_RESPONSE` discriminant so the daemon can classify
+      // malformed queries by upstream status, so assert the guarantee directly
+      // instead: it must NOT be the timeout the managed path produces, and it
+      // must not be tagged as an oxigraph-server backend failure.
+      expect((failure as { code?: unknown }).code).not.toBe(STORE_OPERATION_TIMEOUT_CODE);
+      expect((failure as { backend?: unknown }).backend).toBeUndefined();
+      expect(isSparqlHttpResponseError(failure)).toBe(true);
+      expect((failure as SparqlHttpResponseErrorLike).status).toBe(500);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('emits sampled slow-query events with source tags and query fingerprints', async () => {
     let clock = 0;
     const events: SparqlHttpSlowQueryEvent[] = [];
@@ -352,7 +983,8 @@ describe('SparqlHttpStore (test server)', () => {
     });
 
     const pending = taggedStore.query(
-      'SELECT ?name WHERE { GRAPH <http://ex.org/g1> { <http://ex.org/alice> <http://schema.org/name> ?name } }',
+      `PREFIX schema: <http://schema.org/>
+       SELECT ?name WHERE { GRAPH <http://ex.org/g1> { <http://ex.org/alice> schema:name ?name } }`,
       { source: 'unit test/source' },
     );
     clock = 25;
@@ -369,6 +1001,206 @@ describe('SparqlHttpStore (test server)', () => {
     expect(events[0].queryHash).toMatch(/^[a-f0-9]{16}$/);
     expect(events[0].queryBytes).toBeGreaterThan(0);
     expect(events[0]).not.toHaveProperty('sparql');
+  });
+
+  it('close aborts and drains queued/in-flight HTTP work before resolving', async () => {
+    const originalFetch = globalThis.fetch;
+    let fetchStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      fetchStarted = resolve;
+    });
+    let cancellationSettled = false;
+    let fetchCalls = 0;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      fetchCalls++;
+      fetchStarted();
+      if (fetchCalls > 1) {
+        return new Response(JSON.stringify({
+          head: { vars: [] },
+          results: { bindings: [] },
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/sparql-results+json' },
+        });
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          setTimeout(() => {
+            cancellationSettled = true;
+            reject(init.signal?.reason);
+          }, 10);
+        }, { once: true });
+      });
+    }) as typeof fetch;
+
+    try {
+      const closingStore = new SparqlHttpStore({
+        queryEndpoint: 'http://close.test/query',
+        timeout: 30_000,
+      });
+      const query = closingStore.query('SELECT ?s WHERE { ?s ?p ?o }');
+      const rejected = expect(query).rejects.toThrow(/SparqlHttpStore closed/);
+      await started;
+
+      await closingStore.close();
+
+      expect(cancellationSettled).toBe(true);
+      await rejected;
+      await expect(
+        closingStore.query('SELECT ?s WHERE { ?s ?p ?o }'),
+      ).resolves.toMatchObject({ type: 'bindings' });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('close aborts scheduler-queued work before it reaches fetch', async () => {
+    const originalFetch = globalThis.fetch;
+    let firstFetchStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      firstFetchStarted = resolve;
+    });
+    let fetchCalls = 0;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      fetchCalls++;
+      firstFetchStarted();
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          setTimeout(() => reject(init.signal?.reason), 10);
+        }, { once: true });
+      });
+    }) as typeof fetch;
+
+    try {
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://queued-close.test/query',
+        timeout: 30_000,
+      });
+      const active = store.query('SELECT ?s WHERE { ?s ?p ?o }', {
+        priority: 'background',
+        source: 'test.close.active',
+      });
+      const activeRejected = expect(active).rejects.toThrow(/SparqlHttpStore closed/);
+      await started;
+
+      const queued = store.query('SELECT ?o WHERE { ?s ?p ?o }', {
+        priority: 'background',
+        source: 'test.close.queued',
+      });
+      const queuedRejected = expect(queued).rejects.toThrow(/SparqlHttpStore closed/);
+      await Promise.resolve();
+
+      await store.close();
+
+      expect(fetchCalls).toBe(1);
+      await Promise.all([activeRejected, queuedRejected]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('close aborts and drains an in-flight update request', async () => {
+    const originalFetch = globalThis.fetch;
+    let fetchStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      fetchStarted = resolve;
+    });
+    let observedSignal: AbortSignal | undefined;
+    let cancellationSettled = false;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      observedSignal = init?.signal ?? undefined;
+      fetchStarted();
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          setTimeout(() => {
+            cancellationSettled = true;
+            reject(init.signal?.reason);
+          }, 10);
+        }, { once: true });
+      });
+    }) as typeof fetch;
+
+    try {
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://write-close.test/query',
+        updateEndpoint: 'http://write-close.test/update',
+        timeout: 30_000,
+      });
+      const update = store.insert([{
+        subject: 'http://ex.org/s',
+        predicate: 'http://ex.org/p',
+        object: '"value"',
+        graph: 'http://ex.org/g',
+      }]);
+      const updateRejected = expect(update).rejects.toThrow(/SparqlHttpStore closed/);
+      await started;
+
+      await store.close();
+
+      expect(observedSignal?.aborted).toBe(true);
+      expect(cancellationSettled).toBe(true);
+      await updateRejected;
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('rejects work admitted during close and reopens only after the drain', async () => {
+    const originalFetch = globalThis.fetch;
+    let fetchStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      fetchStarted = resolve;
+    });
+    let settleCancellation!: () => void;
+    const cancellationGate = new Promise<void>((resolve) => {
+      settleCancellation = resolve;
+    });
+    let fetchCalls = 0;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      fetchCalls++;
+      if (fetchCalls > 1) {
+        return new Response(JSON.stringify({
+          head: { vars: [] },
+          results: { bindings: [] },
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/sparql-results+json' },
+        });
+      }
+      fetchStarted();
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          void cancellationGate.then(() => reject(init.signal?.reason));
+        }, { once: true });
+      });
+    }) as typeof fetch;
+
+    try {
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://closing-generation.test/query',
+        timeout: 30_000,
+      });
+      const active = store.query('SELECT ?s WHERE { ?s ?p ?o }');
+      const activeRejected = expect(active).rejects.toThrow(/SparqlHttpStore closed/);
+      await started;
+
+      const closing = store.close();
+      await expect(
+        store.query('SELECT ?during WHERE { ?during ?p ?o }'),
+      ).rejects.toThrow(/SparqlHttpStore closed/);
+      expect(fetchCalls).toBe(1);
+
+      settleCancellation();
+      await closing;
+      await activeRejected;
+
+      await expect(
+        store.query('SELECT ?after WHERE { ?after ?p ?o }'),
+      ).resolves.toMatchObject({ type: 'bindings' });
+      expect(fetchCalls).toBe(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it('honors slow-query sample rate zero', async () => {
@@ -445,6 +1277,15 @@ describe('SparqlHttpStore (test server)', () => {
     if (result.type === 'boolean') expect(result.value).toBe(true);
   });
 
+  it.each([
+    'PREFIX ex: <urn:ex:> ASK { ?s ex:p ?o }',
+    'BASE <urn:base:> ASK { ?s <p> ?o }',
+    '# leading comment\nASK { ?s ?p ?o }',
+  ])('classifies prologue-prefixed ASK as boolean: %s', async (query) => {
+    const result = await store.query(query);
+    expect(result).toEqual({ type: 'boolean', value: true });
+  });
+
   it('delete sends DELETE DATA to update endpoint', async () => {
     insertedQuads.length = 0;
     await store.delete([{
@@ -484,10 +1325,718 @@ describe('SparqlHttpStore (test server)', () => {
     expect(insertedQuads.some(q => q.includes('DROP'))).toBe(true);
   });
 
+  it('replaceGraph sends one staged MOVE update when the endpoint declares atomic updates', async () => {
+    insertedQuads.length = 0;
+    const atomicStore = new SparqlHttpStore({
+      queryEndpoint: queryUrl,
+      updateEndpoint: updateUrl,
+      consistencyProfile: 'atomic-update',
+    });
+    await atomicStore.replaceGraph('http://ex.org/g1', [{
+      subject: 'http://ex.org/new',
+      predicate: 'http://ex.org/p',
+      object: '"new"',
+      graph: 'http://ex.org/g1',
+    }]);
+    expect(insertedQuads).toHaveLength(1);
+    expect(insertedQuads[0]).toContain('urn:dkg:internal:atomic-graph-replace:');
+    expect(insertedQuads[0]).toContain('INSERT DATA');
+    // Non-SILENT: a missing staging graph must fail loudly, not report success.
+    expect(insertedQuads[0]).toContain('MOVE GRAPH');
+    expect(insertedQuads[0]).not.toContain('MOVE SILENT');
+    expect(insertedQuads[0]).toContain('TO GRAPH <http://ex.org/g1>');
+  });
+
+  it('dispatches staging cleanup after failed atomic graph replacements and preserves the original error', async () => {
+    const originalFetch = globalThis.fetch;
+    const graph = 'http://ex.org/cleanup-target';
+    const metaGraph = `${graph}/metadata`;
+    const subject = 'http://ex.org/cleanup-subject';
+    const quad = {
+      subject,
+      predicate: 'http://ex.org/p',
+      object: '"new"',
+      graph,
+    };
+    const cases: Array<{
+      name: string;
+      expectedStagingGraphs: number;
+      affected: string[];
+      attempt(store: SparqlHttpStore): Promise<void>;
+    }> = [
+      {
+        name: 'replaceGraph',
+        expectedStagingGraphs: 1,
+        affected: [graph],
+        attempt: (candidate) => candidate.replaceGraph(graph, [quad]),
+      },
+      {
+        name: 'replaceGraphAndSubject',
+        expectedStagingGraphs: 2,
+        affected: [graph, metaGraph],
+        attempt: (candidate) => candidate.replaceGraphAndSubject(
+          graph,
+          [quad],
+          metaGraph,
+          subject,
+          [{ ...quad, graph: metaGraph }],
+        ),
+      },
+    ];
+
+    try {
+      for (const testCase of cases) {
+        const requests: string[] = [];
+        globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+          requests.push(String(init?.body ?? ''));
+          return requests.length === 1
+            ? new Response('primary mutation failed', { status: 500 })
+            : new Response('', { status: 200 });
+        }) as typeof fetch;
+        const failedStore = new SparqlHttpStore({
+          queryEndpoint: 'http://cleanup.test/query',
+          updateEndpoint: 'http://cleanup.test/update',
+          consistencyProfile: 'atomic-update',
+        });
+        const before = new Map(testCase.affected.map((scope) => [
+          scope,
+          failedStore.getWriteRevision(scope),
+        ]));
+
+        const error = await testCase.attempt(failedStore).then(
+          () => undefined,
+          (reason: unknown) => reason,
+        );
+        expect(error, testCase.name).toBeInstanceOf(Error);
+        expect((error as Error).message, testCase.name)
+          .toContain('primary mutation failed');
+        expect(requests, testCase.name).toHaveLength(2);
+
+        const stagingGraphs = Array.from(new Set(
+          Array.from(requests[0].matchAll(
+            /<(urn:dkg:internal:atomic-graph-replace:[^>]+)>/gu,
+          ), (match) => match[1]),
+        ));
+        expect(stagingGraphs, testCase.name).toHaveLength(testCase.expectedStagingGraphs);
+        expect(requests[1], testCase.name).toBe(
+          stagingGraphs.map((stagingGraph) => (
+            `DROP SILENT GRAPH <${stagingGraph}>`
+          )).join(';\n'),
+        );
+
+        for (const scope of testCase.affected) {
+          const revision = failedStore.getWriteRevision(scope);
+          expect(revision.generation, testCase.name)
+            .toBeGreaterThan(before.get(scope)!.generation);
+          expect(revision.stable, testCase.name).toBe(false);
+        }
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('replaceGraph fails closed for endpoints without a declared atomicity guarantee', async () => {
+    // SPARQL 1.1 only RECOMMENDS whole-request atomicity: a generic endpoint
+    // could apply the staged DROP/INSERT/MOVE partially and strand the target
+    // graph. The plain store must refuse the capability BEFORE sending any
+    // update, so rootless KA writers take their non-atomic fallback instead.
+    insertedQuads.length = 0;
+    const replacement = [{
+      subject: 'http://ex.org/new',
+      predicate: 'http://ex.org/p',
+      object: '"new"',
+      graph: 'http://ex.org/g1',
+    }];
+    await expect(store.replaceGraph('http://ex.org/g1', replacement))
+      .rejects.toMatchObject({
+        name: 'UnsupportedTripleStoreCapabilityError',
+        capability: 'replaceGraph',
+      });
+    await expect(tryReplaceGraphAtomically(store, 'http://ex.org/g1', replacement))
+      .resolves.toBe(false);
+    expect(insertedQuads).toHaveLength(0);
+
+    // Daemon-owned endpoints are oxigraph-server (transactional) and keep it.
+    const managedStore = createManagedOxigraphSparqlStoreV1({
+      queryEndpoint: queryUrl,
+      updateEndpoint: updateUrl,
+    });
+    await expect(tryReplaceGraphAtomically(managedStore, 'http://ex.org/g1', replacement))
+      .resolves.toBe(true);
+    expect(insertedQuads).toHaveLength(1);
+  });
+
+  it('replaceSubject sends one subject-scoped DELETE WHERE + INSERT DATA when the endpoint declares atomic updates', async () => {
+    insertedQuads.length = 0;
+    const atomicStore = new SparqlHttpStore({
+      queryEndpoint: queryUrl,
+      updateEndpoint: updateUrl,
+      consistencyProfile: 'atomic-update',
+    });
+    const ok = await tryReplaceSubjectAtomically(atomicStore, 'http://ex.org/g1', 'http://ex.org/job', [{
+      subject: 'http://ex.org/job',
+      predicate: 'http://ex.org/p',
+      object: '"new"',
+      graph: 'http://ex.org/g1',
+    }]);
+    expect(ok).toBe(true);
+    // One HTTP update, subject-scoped: DELETE WHERE for the subject + INSERT DATA,
+    // no whole-graph staging/MOVE (that would clobber the other jobs in the graph).
+    expect(insertedQuads).toHaveLength(1);
+    expect(insertedQuads[0]).toContain('DELETE WHERE');
+    expect(insertedQuads[0]).toContain('<http://ex.org/job> ?p ?o');
+    expect(insertedQuads[0]).toContain('INSERT DATA');
+    expect(insertedQuads[0]).toContain('<http://ex.org/g1>');
+    expect(insertedQuads[0]).not.toContain('MOVE GRAPH');
+  });
+
+  it('replaceSubject fails closed for endpoints without a declared atomicity guarantee', async () => {
+    insertedQuads.length = 0;
+    const replacement = [{
+      subject: 'http://ex.org/job',
+      predicate: 'http://ex.org/p',
+      object: '"new"',
+      graph: 'http://ex.org/g1',
+    }];
+    // A generic endpoint may apply DELETE WHERE; INSERT DATA sequentially, so the
+    // adapter must refuse BEFORE sending any update → callers take the fallback.
+    await expect(store.replaceSubject!('http://ex.org/g1', 'http://ex.org/job', replacement))
+      .rejects.toMatchObject({
+        name: 'UnsupportedTripleStoreCapabilityError',
+        capability: 'replaceSubject',
+      });
+    await expect(tryReplaceSubjectAtomically(store, 'http://ex.org/g1', 'http://ex.org/job', replacement))
+      .resolves.toBe(false);
+    expect(insertedQuads).toHaveLength(0);
+
+    // Daemon-owned endpoints are oxigraph-server (transactional) and keep it.
+    const managedStore = createManagedOxigraphSparqlStoreV1({
+      queryEndpoint: queryUrl,
+      updateEndpoint: updateUrl,
+    });
+    await expect(tryReplaceSubjectAtomically(managedStore, 'http://ex.org/g1', 'http://ex.org/job', replacement))
+      .resolves.toBe(true);
+    expect(insertedQuads).toHaveLength(1);
+  });
+
+  it('advances write generation when an atomic replace has an indeterminate remote failure', async () => {
+    const graph = 'http://ex.org/possibly-committed';
+    const metaGraph = 'http://ex.org/possibly-committed/meta';
+    const subject = 'http://ex.org/job';
+    const replacement = [{
+      subject,
+      predicate: 'http://ex.org/p',
+      object: '"new"',
+      graph,
+    }];
+    const cases: Array<{
+      affected: string[];
+      attempt(store: SparqlHttpStore): Promise<void>;
+    }> = [
+      {
+        affected: [graph],
+        attempt: (store) => store.replaceGraph(graph, replacement),
+      },
+      {
+        affected: [graph, metaGraph],
+        attempt: (store) => store.replaceGraphAndSubject(
+          graph,
+          replacement,
+          metaGraph,
+          subject,
+          [{ ...replacement[0], graph: metaGraph }],
+        ),
+      },
+      {
+        affected: [graph],
+        attempt: (store) => store.replaceSubject(graph, subject, replacement),
+      },
+    ];
+
+    for (const testCase of cases) {
+      // A fresh store per method proves each mutation independently marks all
+      // of its own scopes; an earlier indeterminate failure cannot make a later
+      // assertion vacuous.
+      const failedStore = new SparqlHttpStore({
+        queryEndpoint: queryUrl,
+        updateEndpoint: updateUrl.replace('/update', '/error-update'),
+        consistencyProfile: 'atomic-update',
+      });
+      const before = failedStore.getWriteRevision('');
+      await expect(testCase.attempt(failedStore)).rejects.toThrow();
+      for (const scope of testCase.affected) {
+        const after = failedStore.getWriteRevision(scope);
+        expect(after.generation).toBeGreaterThan(before.generation);
+        expect(after.stable).toBe(false);
+        expect(failedStore.getWriteRevision(scope)).toEqual(after);
+      }
+    }
+  });
+
+  it('brackets an insert at dispatch and successful remote settlement', async () => {
+    const originalFetch = globalThis.fetch;
+    let releaseResponse!: () => void;
+    let markDispatched!: () => void;
+    const dispatched = new Promise<void>((resolve) => { markDispatched = resolve; });
+    const response = new Promise<Response>((resolve) => {
+      releaseResponse = () => resolve(new Response('', { status: 200 }));
+    });
+    globalThis.fetch = (async () => {
+      markDispatched();
+      return response;
+    }) as typeof fetch;
+    try {
+      const pendingStore = new SparqlHttpStore({
+        queryEndpoint: 'http://pending.test/query',
+        updateEndpoint: 'http://pending.test/update',
+        consistencyProfile: 'atomic-update',
+      });
+      const graph = 'http://ex.org/pending-commit';
+      const quads = [{
+        subject: 'http://ex.org/s',
+        predicate: 'http://ex.org/p',
+        object: '"new"',
+        graph,
+      }];
+      const before = pendingStore.getWriteRevision(graph);
+      const inserting = pendingStore.insert(quads);
+      await dispatched;
+      const whilePending = pendingStore.getWriteRevision(graph);
+      expect(whilePending.generation).toBeGreaterThan(before.generation);
+      expect(whilePending.stable).toBe(false);
+      expect(pendingStore.getWriteRevision(graph)).toEqual(whilePending);
+
+      releaseResponse();
+      await inserting;
+      const settled = pendingStore.getWriteRevision(graph);
+      expect(settled.generation).toBeGreaterThan(whilePending.generation);
+      expect(settled.stable).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('begins a lifecycle before every public remote mutation dispatch', async () => {
+    const originalFetch = globalThis.fetch;
+    const graph = 'http://ex.org/tracked-dispatch';
+    const metaGraph = `${graph}/meta`;
+    const subject = 'http://ex.org/subject';
+    const quad = {
+      subject,
+      predicate: 'http://ex.org/p',
+      object: '"value"',
+      graph,
+    };
+    const cases: Array<{
+      name: string;
+      scope: string;
+      attempt(store: SparqlHttpStore): Promise<unknown>;
+    }> = [
+      { name: 'insert', scope: graph, attempt: (store) => store.insert([quad]) },
+      { name: 'delete', scope: graph, attempt: (store) => store.delete([quad]) },
+      {
+        name: 'deleteByPattern',
+        scope: graph,
+        attempt: (store) => store.deleteByPattern({ subject, graph }),
+      },
+      {
+        name: 'deleteByPatternWithoutCount',
+        scope: graph,
+        attempt: (store) => store.deleteByPatternWithoutCount({ subject, graph }),
+      },
+      {
+        name: 'deleteBySubjectPrefix',
+        scope: graph,
+        attempt: (store) => store.deleteBySubjectPrefix(graph, subject),
+      },
+      {
+        name: 'update',
+        scope: graph,
+        attempt: (store) => store.update('DELETE WHERE { GRAPH ?g { ?s ?p ?o } }'),
+      },
+      {
+        name: 'replaceGraph',
+        scope: graph,
+        attempt: (store) => store.replaceGraph(graph, [quad]),
+      },
+      {
+        name: 'replaceGraphAndSubject',
+        scope: metaGraph,
+        attempt: (store) => store.replaceGraphAndSubject(
+          graph,
+          [quad],
+          metaGraph,
+          subject,
+          [{ ...quad, graph: metaGraph }],
+        ),
+      },
+      {
+        name: 'replaceSubject',
+        scope: graph,
+        attempt: (store) => store.replaceSubject(graph, subject, [quad]),
+      },
+      { name: 'dropGraph', scope: graph, attempt: (store) => store.dropGraph(graph) },
+    ];
+
+    try {
+      for (const testCase of cases) {
+        let markDispatched!: () => void;
+        let releaseResponse!: () => void;
+        const dispatched = new Promise<void>((resolve) => { markDispatched = resolve; });
+        const response = new Promise<Response>((resolve) => {
+          releaseResponse = () => resolve(new Response('', { status: 200 }));
+        });
+        globalThis.fetch = (async (input: string | URL | Request) => {
+          if (String(input).includes('/query')) {
+            return new Response(JSON.stringify({
+              head: { vars: ['c'] },
+              results: { bindings: [{ c: { type: 'literal', value: '1' } }] },
+            }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/sparql-results+json' },
+            });
+          }
+          markDispatched();
+          return response;
+        }) as typeof fetch;
+
+        const pendingStore = new SparqlHttpStore({
+          queryEndpoint: 'http://tracked.test/query',
+          updateEndpoint: 'http://tracked.test/update',
+          consistencyProfile: 'atomic-update',
+        });
+        const before = pendingStore.getWriteRevision(testCase.scope);
+        const mutation = testCase.attempt(pendingStore);
+        await dispatched;
+        const pending = pendingStore.getWriteRevision(testCase.scope);
+        expect(pending.generation, testCase.name).toBeGreaterThan(before.generation);
+        expect(pending.stable, testCase.name).toBe(false);
+
+        releaseResponse();
+        await mutation;
+        const settled = pendingStore.getWriteRevision(testCase.scope);
+        expect(settled.generation, testCase.name).toBeGreaterThan(pending.generation);
+        expect(settled.stable, testCase.name).toBe(true);
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('keeps raw updates globally unstable while pending and after an indeterminate failure', async () => {
+    const originalFetch = globalThis.fetch;
+    let releaseResponse!: () => void;
+    let markDispatched!: () => void;
+    const dispatched = new Promise<void>((resolve) => { markDispatched = resolve; });
+    const response = new Promise<Response>((resolve) => {
+      releaseResponse = () => resolve(new Response('', { status: 200 }));
+    });
+    globalThis.fetch = (async () => {
+      markDispatched();
+      return response;
+    }) as typeof fetch;
+    try {
+      const pendingStore = new SparqlHttpStore({
+        queryEndpoint: 'http://pending-update.test/query',
+        updateEndpoint: 'http://pending-update.test/update',
+      });
+      const firstPrefix = 'http://ex.org/first/';
+      const secondPrefix = 'http://ex.org/second/';
+      const updating = pendingStore.update('DELETE WHERE { GRAPH ?g { ?s ?p ?o } }');
+      await dispatched;
+
+      const firstPending = pendingStore.getWriteRevision(firstPrefix);
+      const secondPending = pendingStore.getWriteRevision(secondPrefix);
+      expect(firstPending.stable).toBe(false);
+      expect(secondPending).toEqual(firstPending);
+      expect(pendingStore.getWriteRevision(firstPrefix)).toEqual(firstPending);
+
+      releaseResponse();
+      await updating;
+      expect(pendingStore.getWriteRevision(firstPrefix).stable).toBe(true);
+      expect(pendingStore.getWriteRevision(secondPrefix).stable).toBe(true);
+
+      globalThis.fetch = (async () => new Response('failed', { status: 500 })) as typeof fetch;
+      const failedStore = new SparqlHttpStore({
+        queryEndpoint: 'http://failed-update.test/query',
+        updateEndpoint: 'http://failed-update.test/update',
+      });
+      await expect(failedStore.update('CLEAR ALL')).rejects.toThrow(/failed \(500\)/u);
+      const indeterminate = failedStore.getWriteRevision(firstPrefix);
+      expect(indeterminate.stable).toBe(false);
+      expect(failedStore.getWriteRevision(secondPrefix)).toEqual(indeterminate);
+      expect(failedStore.getWriteRevision(firstPrefix)).toEqual(indeterminate);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('keeps a write stable when managed recovery rejects it before dispatch', async () => {
+    let fetchCalls = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      return new Response('', { status: 200 });
+    }) as typeof fetch;
+    try {
+      const graph = 'http://ex.org/not-started';
+      const recoveringStore = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        updateEndpoint: 'http://127.0.0.1:7878/update',
+      }, {
+        getRecoveryState: () => ({ recovering: true, generation: 1 }),
+      });
+      const before = recoveringStore.getWriteRevision(graph);
+      await expect(recoveringStore.replaceSubject(graph, 'http://ex.org/s', [])).rejects
+        .toMatchObject({ outcome: 'not_started' });
+      expect(recoveringStore.getWriteRevision(graph)).toEqual(before);
+      expect(fetchCalls).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('reports concurrent store activity without letting the observer affect results', async () => {
+    const originalFetch = globalThis.fetch;
+    const releases: Array<() => void> = [];
+    const activity: boolean[] = [];
+    globalThis.fetch = (async () => await new Promise<Response>((resolve) => {
+      releases.push(() => resolve(new Response(
+        JSON.stringify({ head: {}, boolean: true }),
+        { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
+      )));
+    })) as typeof fetch;
+    try {
+      const store = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+      }, {
+        registerActivity: () => ({ report: (activeOperations) => {
+          activity.push(activeOperations);
+          if (activeOperations) throw new Error('observer failure');
+        }, dispose() {} }),
+      });
+      const first = store.query('ASK { ?s ?p ?o }');
+      const second = store.query('ASK { ?s ?p ?o }');
+      while (releases.length < 2) await Promise.resolve();
+      expect(activity).toEqual([true]);
+
+      releases[0]!();
+      await first;
+      expect(activity).toEqual([true]);
+      releases[1]!();
+      await second;
+      expect(activity).toEqual([true, false]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('aggregates activity independently for two stores sharing one runtime', async () => {
+    const originalFetch = globalThis.fetch;
+    const releases: Array<() => void> = [];
+    const activeByStore = new Map<symbol, boolean>();
+    const aggregateActivity: boolean[] = [];
+    const registerActivity = () => {
+      const key = Symbol('store');
+      activeByStore.set(key, false);
+      return {
+        report(active: boolean) {
+          activeByStore.set(key, active);
+          aggregateActivity.push([...activeByStore.values()].some(Boolean));
+        },
+        dispose() {
+          activeByStore.delete(key);
+        },
+      };
+    };
+    globalThis.fetch = (async () => await new Promise<Response>((resolve) => {
+      releases.push(() => resolve(new Response(
+        JSON.stringify({ head: {}, boolean: true }),
+        { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
+      )));
+    })) as typeof fetch;
+    try {
+      const options = { queryEndpoint: 'http://127.0.0.1:7878/query' };
+      const firstStore = createManagedOxigraphSparqlStoreV1(options, { registerActivity });
+      const secondStore = createManagedOxigraphSparqlStoreV1(options, { registerActivity });
+      const first = firstStore.query('ASK { ?s ?p ?o }');
+      const second = secondStore.query('ASK { ?s ?p ?o }');
+      while (releases.length < 2) await Promise.resolve();
+      expect(aggregateActivity).toContain(true);
+
+      releases[0]!();
+      await first;
+      expect(aggregateActivity.at(-1)).toBe(true);
+      releases[1]!();
+      await second;
+      expect(aggregateActivity.at(-1)).toBe(false);
+      await firstStore.close();
+      await secondStore.close();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('keeps a fresh busy lease when reuse races the close handoff microtask', async () => {
+    const leases = new Map<number, boolean>();
+    let nextLease = 0;
+    let release!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const response = new Promise<Response>(resolve => {
+      release = () => resolve(new Response(JSON.stringify({ boolean: true })));
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => { entered(); return response; };
+    const store = createManagedOxigraphSparqlStoreV1({ queryEndpoint: 'http://127.0.0.1:7878/query' }, {
+      registerActivity: () => {
+        const id = nextLease++;
+        leases.set(id, false);
+        return { report: busy => leases.set(id, busy), dispose: () => { leases.delete(id); } };
+      },
+    });
+    let query: Promise<unknown> | undefined;
+    try {
+      const closing = store.close();
+      query = Promise.resolve().then(() => store.query('ASK {}'));
+      await started;
+      await closing;
+      expect([...leases.values()]).toContain(true);
+      release();
+      await expect(query).resolves.toEqual({ type: 'boolean', value: true });
+      expect([...leases.values()]).not.toContain(true);
+    } finally {
+      release(); await query; await store.close(); globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('disposes one activity lease on close and reacquires it when the store is reused', async () => {
+    const reports: boolean[][] = [], disposals: number[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({ boolean: true }));
+    const store = createManagedOxigraphSparqlStoreV1({ queryEndpoint: 'http://127.0.0.1:7878/query' }, {
+      registerActivity: () => {
+        const id = reports.push([]) - 1;
+        return { report: busy => reports[id]!.push(busy), dispose() { disposals.push(id); throw new Error('observer dispose failed'); } };
+      },
+    });
+    try {
+      await expect(store.query('ASK {}')).resolves.toEqual({ type: 'boolean', value: true });
+      await expect(store.close()).resolves.toBeUndefined();
+      await expect(store.query('ASK {}')).resolves.toEqual({ type: 'boolean', value: true });
+      await expect(store.close()).resolves.toBeUndefined();
+      expect(reports).toEqual([[true, false], [true, false]]);
+      expect(disposals).toEqual([0, 1]);
+    } finally { globalThis.fetch = originalFetch; await store.close(); }
+  });
+
+  it('isolates activity registration failures from store results and retries registration', async () => {
+    const registerActivity = vi.fn(() => { throw new Error('observer registration failed'); });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({ boolean: true }));
+    const store = createManagedOxigraphSparqlStoreV1({ queryEndpoint: 'http://127.0.0.1:7878/query' }, { registerActivity });
+    try {
+      await expect(store.query('ASK {}')).resolves.toEqual({ type: 'boolean', value: true });
+      await expect(store.close()).resolves.toBeUndefined();
+      expect(registerActivity.mock.calls.length).toBeGreaterThan(1);
+    } finally { globalThis.fetch = originalFetch; await store.close(); }
+  });
+
+  it('keeps the managed activity fence busy during an in-flight mutation', async () => {
+    const originalFetch = globalThis.fetch;
+    let release!: () => void;
+    const response = new Promise<Response>((resolve) => {
+      release = () => resolve(new Response('', { status: 200 }));
+    });
+    const activity: boolean[] = [];
+    globalThis.fetch = (async () => response) as typeof fetch;
+    try {
+      const store = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        updateEndpoint: 'http://127.0.0.1:7878/update',
+      }, {
+        registerActivity: () => ({ report: (activeOperations) => activity.push(activeOperations), dispose() {} }),
+      });
+      const updating = store.update('INSERT DATA { GRAPH <http://ex.org/g> { <http://ex.org/s> <http://ex.org/p> "o" } }');
+      while (activity.at(-1) !== true) await Promise.resolve();
+      expect(activity.at(-1)).toBe(true);
+      release();
+      await updating;
+      expect(activity.at(-1)).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('keeps the busy fence until physical work drains despite a queued caller abort', async () => {
+    const originalFetch = globalThis.fetch;
+    const releases: Array<() => void> = [];
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      return await new Promise<Response>((resolve) => {
+        releases.push(() => resolve(new Response(
+          JSON.stringify({ head: {}, boolean: true }),
+          { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
+        )));
+      });
+    }) as typeof fetch;
+    try {
+      const activity: boolean[] = [];
+      const scheduler = new StorePriorityScheduler({
+        maxConcurrent: 1,
+        ackReservedSlots: 0,
+        healthReservedSlots: 0,
+        backgroundReservedSlots: 0,
+      });
+      const store = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        scheduler,
+      }, {
+        registerActivity: () => ({ report: (activeOperations) => activity.push(activeOperations), dispose() {} }),
+      });
+      const first = store.query('ASK { ?s ?p ?o }');
+      await waitForCondition(() => fetchCalls === 1, 'first query was not dispatched');
+      const queuedController = new AbortController();
+      const queued = store.query(
+        'ASK { ?queued ?p ?o }',
+        { signal: queuedController.signal },
+      );
+      await waitForCondition(() => scheduler.snapshot.normalQueued === 1, 'queued work was not admitted');
+      expect(fetchCalls).toBe(1);
+
+      queuedController.abort(new Error('queued caller stopped'));
+      await expect(queued).rejects.toThrow('queued caller stopped');
+      expect(activity).toEqual([true]);
+      expect(fetchCalls).toBe(1);
+
+      releases[0]!();
+      await first;
+      expect(activity).toEqual([true, false]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('deleteByPattern sends DELETE WHERE to update endpoint', async () => {
     insertedQuads.length = 0;
     await store.deleteByPattern({ subject: 'http://ex.org/s', graph: 'http://ex.org/g' });
     expect(insertedQuads.some(q => q.includes('DELETE'))).toBe(true);
+  });
+
+  it('deleteByPatternWithoutCount sends one UPDATE and skips both COUNT queries', async () => {
+    insertedQuads.length = 0;
+    const countHitsBefore = countQuadsHits;
+
+    await store.deleteByPatternWithoutCount({
+      subject: 'http://ex.org/s',
+      graph: 'http://ex.org/g',
+    });
+
+    expect(insertedQuads).toHaveLength(1);
+    expect(insertedQuads[0]).toContain('DELETE');
+    expect(countQuadsHits).toBe(countHitsBefore);
   });
 
   it('deleteBySubjectPrefix sends DELETE with FILTER STRSTARTS', async () => {
@@ -611,6 +2160,68 @@ describe('SparqlHttpStore (test server)', () => {
       }
     });
 
+    it('invalidates a managed listGraphs refresh at mutation dispatch and settlement', async () => {
+      const originalFetch = globalThis.fetch;
+      let visibleGraphs = ['http://ex.org/old'];
+      let queryCalls = 0;
+      let markUpdateDispatched!: () => void;
+      let resolveUpdate!: () => void;
+      const updateDispatched = new Promise<void>((resolve) => {
+        markUpdateDispatched = resolve;
+      });
+      const updateResponse = new Promise<Response>((resolve) => {
+        resolveUpdate = () => resolve(new Response('', { status: 200 }));
+      });
+      globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+        const body = String(init?.body ?? '');
+        if (body.includes('GRAPH ?g {}')) {
+          queryCalls += 1;
+          return new Response(JSON.stringify({
+            head: { vars: ['g'] },
+            results: {
+              bindings: visibleGraphs.map((value) => ({ g: { type: 'uri', value } })),
+            },
+          }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/sparql-results+json' },
+          });
+        }
+        markUpdateDispatched();
+        return updateResponse;
+      }) as typeof fetch;
+      try {
+        const managedStore = new SparqlHttpStore({
+          queryEndpoint: 'http://managed.test/query',
+          updateEndpoint: 'http://managed.test/update',
+          managedByDkg: true,
+        });
+        await expect(managedStore.listGraphs()).resolves.toEqual(['http://ex.org/old']);
+        expect(queryCalls).toBe(1);
+
+        const inserting = managedStore.insert([{
+          subject: 'http://ex.org/s',
+          predicate: 'http://ex.org/p',
+          object: '"v"',
+          graph: 'http://ex.org/new',
+        }]);
+        await updateDispatched;
+
+        // The dispatch invalidates the pre-write cache. This refresh still
+        // sees the old backend state and must be invalidated again at settle.
+        await expect(managedStore.listGraphs()).resolves.toEqual(['http://ex.org/old']);
+        expect(queryCalls).toBe(2);
+
+        visibleGraphs = ['http://ex.org/new'];
+        resolveUpdate();
+        await inserting;
+
+        await expect(managedStore.listGraphs()).resolves.toEqual(['http://ex.org/new']);
+        expect(queryCalls).toBe(3);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
     it('uses GraphSetIndexStore as the only cache owner for managed factory stores', async () => {
       listGraphsHits = 0;
       const store = await createTripleStore({
@@ -635,6 +2246,220 @@ describe('SparqlHttpStore (test server)', () => {
         await store.close();
       }
     });
+  });
+});
+
+describe('SparqlHttpStore RDF term formatting', () => {
+  /** Run `work` against a fetch stub and return every request body, in order. */
+  async function captureSparql(work: (store: SparqlHttpStore) => Promise<unknown>): Promise<string[]> {
+    const originalFetch = globalThis.fetch;
+    const bodies: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const body = String(init?.body ?? '');
+      bodies.push(body);
+      if (!String(input).endsWith('/query')) return new Response(null, { status: 204 });
+      const json = body.startsWith('ASK')
+        ? { boolean: true }
+        : { head: { vars: ['c'] }, results: { bindings: [{ c: { type: 'literal', value: '0' } }] } };
+      return new Response(JSON.stringify(json), {
+        status: 200,
+        headers: { 'Content-Type': 'application/sparql-results+json' },
+      });
+    }) as typeof fetch;
+    try {
+      await work(new SparqlHttpStore({
+        queryEndpoint: 'http://terms.test/query',
+        updateEndpoint: 'http://terms.test/update',
+      }));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    return bodies;
+  }
+
+  it('sends byte-identical SPARQL for well-formed terms', async () => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      const bodies = await captureSparql(async (store) => {
+        await store.insert([
+          { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"v"@en', graph: 'http://ex.org/g' },
+          {
+            subject: '_:b0',
+            predicate: 'http://ex.org/n',
+            object: '"42"^^http://www.w3.org/2001/XMLSchema#integer',
+            graph: 'http://ex.org/g',
+          },
+          { subject: '<http://ex.org/s>', predicate: '<http://ex.org/p2>', object: 'http://ex.org/o', graph: '' },
+        ]);
+        await store.delete([
+          { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"line\\nbreak"', graph: 'http://ex.org/g' },
+        ]);
+        await store.deleteByPatternWithoutCount({
+          graph: 'http://ex.org/g',
+          subject: 'http://ex.org/s',
+          predicate: 'http://ex.org/p',
+          object: '"v"@en',
+        });
+        await store.deleteByPatternWithoutCount({ object: 'http://ex.org/o' });
+        await store.deleteBySubjectPrefix('http://ex.org/g', 'http://ex.org/q/');
+        await store.dropGraph('http://ex.org/g');
+        await store.hasGraph('http://ex.org/g');
+      });
+      expect(bodies).toEqual([
+        'INSERT DATA {\n'
+          + '  GRAPH <http://ex.org/g> {\n'
+          + '    <http://ex.org/s> <http://ex.org/p> "v"@en .\n'
+          + '    _:b0 <http://ex.org/n> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
+          + '  }\n'
+          + '  <http://ex.org/s> <http://ex.org/p2> <http://ex.org/o> .\n'
+          + '}',
+        'DELETE DATA {\nGRAPH <http://ex.org/g> { <http://ex.org/s> <http://ex.org/p> "line\\nbreak" . }\n}',
+        'DELETE { GRAPH <http://ex.org/g> { <http://ex.org/s> <http://ex.org/p> "v"@en } } '
+          + 'WHERE { GRAPH <http://ex.org/g> { <http://ex.org/s> <http://ex.org/p> "v"@en } }',
+        'DELETE { GRAPH ?g_ctx { ?s ?p <http://ex.org/o> } } WHERE { GRAPH ?g_ctx { ?s ?p <http://ex.org/o> } }',
+        'SELECT (COUNT(*) AS ?c) WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }',
+        'DELETE { GRAPH <http://ex.org/g> { ?s ?p ?o } } '
+          + 'WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "http://ex.org/q/")) } }',
+        'SELECT (COUNT(*) AS ?c) WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }',
+        'DROP SILENT GRAPH <http://ex.org/g>',
+        'ASK { GRAPH <http://ex.org/g> { ?s ?p ?o } }',
+      ]);
+      expect(observed.counted).toEqual([]);
+      expect(observed.warnings).toEqual([]);
+    } finally {
+      observed.restore();
+    }
+  });
+
+  it('logs and counts a malformed IRI instead of silently stripping it', async () => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      const bodies = await captureSparql((store) => store.insert([
+        { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"v"', graph: 'http://ex.org/g^x' },
+      ]));
+      // Observe mode: the pre-validation (stripped) update is still sent.
+      expect(bodies).toEqual([
+        'INSERT DATA {\n  GRAPH <http://ex.org/gx> {\n    <http://ex.org/s> <http://ex.org/p> "v" .\n  }\n}',
+      ]);
+      expect(observed.counted).toEqual([{
+        value: 1,
+        adapter: 'sparql-http',
+        operation: 'insert',
+        position: 'graph',
+        kind: 'iri',
+        enforcement: 'observe',
+      }]);
+      expect(observed.warnings).toEqual([
+        expect.stringContaining('sparql-http.insert: invalid iri in SPARQL graph position (17 chars, fingerprint '),
+      ]);
+      expect(observed.warnings[0]).not.toContain('http://ex.org/g^x');
+    } finally {
+      observed.restore();
+    }
+  });
+
+  it('logs a blank-node pattern object, which a DELETE template cannot hold', async () => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      const bodies = await captureSparql((store) => store.deleteByPatternWithoutCount({
+        graph: 'http://ex.org/g',
+        object: '_:b0',
+      }));
+      expect(bodies).toEqual([
+        'DELETE { GRAPH <http://ex.org/g> { ?s ?p _:b0 } } WHERE { GRAPH <http://ex.org/g> { ?s ?p _:b0 } }',
+      ]);
+      expect(observed.counted).toEqual([expect.objectContaining({
+        operation: 'deleteByPattern',
+        position: 'object',
+        kind: 'blank-node',
+      })]);
+    } finally {
+      observed.restore();
+    }
+  });
+
+  it('counts a subject prefix no IRI can start with and sends it as before', async () => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      const bodies = await captureSparql(async (store) => {
+        await store.deleteBySubjectPrefix('http://ex.org/g', 'urn:a\r\nb');
+        await store.deleteBySubjectPrefix('http://ex.org/g', 'urn:"q"');
+      });
+      // The line break stays raw, so a real endpoint still rejects the update
+      // rather than reporting that nothing matched.
+      expect(bodies[1]).toBe(
+        'DELETE { GRAPH <http://ex.org/g> { ?s ?p ?o } } '
+          + 'WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "urn:a\r\nb")) } }',
+      );
+      expect(bodies[4]).toContain('FILTER(STRSTARTS(STR(?s), "urn:\\"q\\""))');
+      expect(observed.counted).toEqual(Array(2).fill({
+        value: 1,
+        adapter: 'sparql-http',
+        operation: 'deleteBySubjectPrefix',
+        position: 'subject-prefix',
+        kind: 'iri',
+        enforcement: 'observe',
+      }));
+    } finally {
+      observed.restore();
+    }
+  });
+
+  it('labels the graph term of every graph-scoped operation', async () => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      await captureSparql(async (store) => {
+        await store.hasGraph('http://g{x}');
+        await store.countQuads('http://g{x}');
+        await store.deleteBySubjectPrefix('http://g{x}', 'urn:ok/');
+        await store.dropGraph('http://g{x}');
+      });
+      const graphPoint = (operation: string) => ({
+        value: 1, adapter: 'sparql-http', operation, position: 'graph', kind: 'iri', enforcement: 'observe',
+      });
+      expect(observed.counted).toEqual([
+        graphPoint('hasGraph'),
+        graphPoint('countQuads'),
+        graphPoint('countQuads'),
+        graphPoint('deleteBySubjectPrefix'),
+        graphPoint('countQuads'),
+        graphPoint('dropGraph'),
+      ]);
+    } finally {
+      observed.restore();
+    }
+  });
+
+  it('scopes each statement write to the graphs its plan names', async () => {
+    const g1 = 'http://ex.org/g1';
+    const g2 = 'http://ex.org/g2';
+    const other = 'http://ex.org/other';
+    const generations: number[][] = [];
+    await captureSparql(async (store) => {
+      const snapshot = () => generations.push([g1, g2, other].map((graph) => store.getWriteRevision(graph).generation));
+      snapshot();
+      await store.insert([
+        { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"1"', graph: g1 },
+        { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"2"', graph: g2 },
+      ]);
+      snapshot();
+      await store.dropGraph(g1);
+      snapshot();
+      await store.deleteByPattern({ predicate: 'http://ex.org/p' });
+      snapshot();
+    });
+    const [initial, afterInsert, afterDrop, afterPatternDelete] = generations;
+    // The insert plan's scope is both of its graphs, and only those.
+    expect(afterInsert[0]).toBeGreaterThan(initial[0]);
+    expect(afterInsert[1]).toBeGreaterThan(initial[1]);
+    expect(afterInsert[2]).toBe(initial[2]);
+    // dropGraph writes its one graph.
+    expect(afterDrop[0]).toBeGreaterThan(afterInsert[0]);
+    expect(afterDrop.slice(1)).toEqual(afterInsert.slice(1));
+    // A pattern delete without a graph may write any graph.
+    for (const [index, generation] of afterPatternDelete.entries()) {
+      expect(generation).toBeGreaterThan(afterDrop[index]);
+    }
   });
 });
 
@@ -677,3 +2502,117 @@ if (liveQueryUrl && liveUpdateUrl) {
 // wasn't exercising anything — removed. The live-endpoint `describe` above
 // only runs when `SPARQL_HTTP_TEST_QUERY_URL` is set; otherwise the mock
 // server tests above give full coverage of the adapter's HTTP contract.
+
+// These transitions happen after initial admission, so early refusal alone cannot satisfy them.
+describe('managed update cancellation and queued maintenance admission', () => {
+  it.each([400, 403, 500].flatMap(status => ['caller', 'deadline'].map(trigger => ({ status, trigger }))))
+    ('preserves known HTTP$status evidence when its diagnostic stream is cancelled by $trigger', async ({ status, trigger }) => {
+    const originalFetch = globalThis.fetch;
+    const activity: boolean[] = []; const onClientTimeout = vi.fn();
+    let started!: () => void; const bodyStarted = new Promise<void>(resolve => { started = resolve; });
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          init!.signal!.addEventListener('abort', () => controller.error(init!.signal!.reason), { once: true });
+          started();
+        },
+      });
+      return new Response(body, { status });
+    }) as typeof fetch;
+    const store = createManagedOxigraphSparqlStoreV1({
+      queryEndpoint: 'http://127.0.0.1:7878/query', timeout: 100,
+    }, { getRecoveryState: () => ({ recovering: false, generation: 0 }), onClientTimeout,
+      registerActivity: () => ({ report: busy => activity.push(busy), dispose() {} }) });
+    try {
+      const controller = new AbortController();
+      const failed = store.insert([{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: 'urn:g' }],
+        { signal: controller.signal }).catch(error => error);
+      await bodyStarted;
+      // Let the transport observe status before interrupting the still-streaming body.
+      await Promise.resolve(); await Promise.resolve();
+      if (trigger === 'caller') controller.abort(new Error('diagnostic reader cancelled'));
+      expect(await failed).toMatchObject(status === 500 && trigger === 'deadline'
+        ? { code: 'STORE_OPERATION_TIMEOUT', operation: 'insert' }
+        : { code: 'SPARQL_HTTP_RESPONSE', status, operation: 'insert' });
+      await new Promise(resolve => setTimeout(resolve, 150));
+      if (status === 500) {
+        expect(onClientTimeout).toHaveBeenCalledExactlyOnceWith('insert');
+        expect(activity.at(-1)).toBe(true);
+      } else {
+        expect(onClientTimeout).not.toHaveBeenCalled();
+        expect(activity.at(-1)).toBe(false);
+      }
+    } finally { globalThis.fetch = originalFetch; await store.close(); }
+  });
+
+  it.each(['read', 'write'] as const)('refuses a queued %s when maintenance closes before scheduler dispatch', async kind => {
+    const originalFetch = globalThis.fetch;
+    const state = { recovering: false, admissionsPaused: false, generation: 0 };
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 1, ackReservedSlots: 0,
+      healthReservedSlots: 0, normalReservedSlots: 0, backgroundReservedSlots: 0 });
+    let release!: () => void; let started!: () => void;
+    const firstStarted = new Promise<void>(resolve => { started = resolve; });
+    const firstResponse = new Promise<Response>(resolve => { release = () => resolve(new Response(null, { status: 204 })); });
+    const fetchSpy = vi.fn(async () => { started(); return firstResponse; });
+    globalThis.fetch = fetchSpy as typeof fetch;
+    const store = createManagedOxigraphSparqlStoreV1({ queryEndpoint: 'http://127.0.0.1:7878/query', scheduler }, {
+      getRecoveryState: () => state,
+    });
+    try {
+      const revisions = asGraphWriteRevisionSource(store)!;
+      const before = revisions.getWriteRevision('urn:queued');
+      const first = store.insert([{ subject: 'urn:a', predicate: 'urn:p', object: '"a"', graph: 'urn:active' }]);
+      await firstStarted;
+      const queued = (kind === 'write'
+        ? store.insert([{ subject: 'urn:b', predicate: 'urn:p', object: '"b"', graph: 'urn:queued' }])
+        : store.query('ASK { GRAPH <urn:queued> { ?s ?p ?o } }')).catch(error => error);
+      await waitForCondition(() => scheduler.snapshot.normalQueued === 1, 'request was not actually queued');
+      state.admissionsPaused = true; release(); await first;
+      expect(await queued).toMatchObject({ code: 'STORE_OPERATION_TIMEOUT', outcome: 'not_started',
+        operation: kind === 'write' ? 'insert' : 'query' });
+      expect(fetchSpy).toHaveBeenCalledOnce();
+      expect(revisions.getWriteRevision('urn:queued')).toEqual(before);
+      expect(revisions.getWriteRevision('urn:active').generation).toBeGreaterThan(0);
+    } finally { release(); globalThis.fetch = originalFetch; await store.close(); }
+  });
+
+  it('retains only its own dispatched mutation when a continuation waits behind another scheduler caller', async () => {
+    const state = { recovering: false, admissionsPaused: false, generation: 0 };
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 1, ackReservedSlots: 0,
+      healthReservedSlots: 0, normalReservedSlots: 0, backgroundReservedSlots: 0 });
+    let releaseBlocker!: () => void; let markBlocker!: () => void;
+    const blockerStarted = new Promise<void>(resolve => { markBlocker = resolve; });
+    const blockerResponse = new Promise<Response>(resolve => { releaseBlocker = () => resolve(new Response(null, { status: 204 })); });
+    let markMutation!: () => void; let continueRead!: () => void;
+    const mutationCompleted = new Promise<void>(resolve => { markMutation = resolve; });
+    const readGate = new Promise<void>(resolve => { continueRead = resolve; });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const body = String(init?.body);
+      if (body.includes('urn:blocker')) { markBlocker(); return blockerResponse; }
+      return body.startsWith('ASK') ? new Response(JSON.stringify({ boolean: true })) : new Response(null, { status: 204 });
+    });
+    const store = createManagedOxigraphSparqlStoreV1({ queryEndpoint: 'http://127.0.0.1:7878/query', scheduler }, {
+      getRecoveryState: () => state,
+    });
+    const continuation = store.runLogicalMutation('insert', undefined, async options => {
+      await store.insert([{ subject: 'urn:b', predicate: 'urn:p', object: '"b"', graph: 'urn:committed' }], options);
+      markMutation(); await readGate;
+      return store.query('ASK { GRAPH <urn:committed> { ?s ?p ?o } }', options);
+    });
+    let blocker: Promise<void> | undefined;
+    try {
+      await mutationCompleted;
+      blocker = store.insert([{ subject: 'urn:a', predicate: 'urn:p', object: '"a"', graph: 'urn:blocker' }]);
+      await blockerStarted; continueRead();
+      await waitForCondition(() => scheduler.snapshot.normalQueued === 1, 'continuation was not actually queued');
+      state.admissionsPaused = true; releaseBlocker(); await blocker;
+      await expect(continuation).resolves.toMatchObject({ type: 'boolean', value: true });
+      await expect(store.query('ASK {}')).rejects.toMatchObject({ outcome: 'not_started' });
+      expect(fetchSpy).toHaveBeenCalledTimes(3);
+    } finally {
+      continueRead(); releaseBlocker();
+      await Promise.allSettled([continuation, ...(blocker ? [blocker] : [])]);
+      await store.close(); fetchSpy.mockRestore();
+    }
+  });
+});

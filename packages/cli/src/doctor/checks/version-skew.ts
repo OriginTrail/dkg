@@ -60,6 +60,32 @@ export async function runVersionSkewCheck(
   }
 
   // Edge.
+  if (
+    state.cli.version
+    && state.cli.version !== state.daemon.version
+  ) {
+    const cliSubject = state.cli.globalPath ?? 'dkg';
+    findings.push({
+      check: 'version-skew',
+      severity: 'warning',
+      message:
+        `CLI on PATH (${state.cli.version} at ${cliSubject}) differs from `
+        + `running daemon (${state.daemon.version})`,
+      advisory:
+        "The shell is resolving a stale or different DKG install. Prepend "
+        + "'$(npm config get prefix)/bin' to PATH, open a new shell, verify "
+        + "'command -v dkg' and 'dkg --version', then remove the obsolete "
+        + 'global install.',
+      subject: state.cli.globalPath ?? undefined,
+      details: {
+        cliPath: state.cli.globalPath,
+        cliVersion: state.cli.version,
+        daemonVersion: state.daemon.version,
+        npmGlobalDkg: state.paths.npmGlobalDkg,
+      },
+    });
+  }
+
   if (!state.paths.npmGlobalDkg) return findings;
   const npmGlobalPkgPath = join(state.paths.npmGlobalDkg, 'package.json');
   const npmGlobalVersion = await readPackageVersion(deps, npmGlobalPkgPath);

@@ -14,14 +14,70 @@ describe('setup tools — context graph + sub-graph + subscribe', () => {
     registerSetupTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
   });
 
-  it('registers all three setup tools', () => {
+  it('registers all four setup tools', () => {
     for (const name of [
       'dkg_context_graph_create',
+      'dkg_context_graph_register',
       'dkg_subscribe',
       'dkg_sub_graph_create',
     ]) {
       expect(server.tools.has(name)).toBe(true);
     }
+  });
+
+  it('registers a private PCA-backed context graph with exact daemon wire options', async () => {
+    let received: Record<string, unknown> | undefined;
+    const localClient = new FakeClient({
+      registerContextGraph: async (args) => {
+        received = args;
+        return {
+          registered: args.id,
+          onChainId: '42',
+          txHash: '0xreg',
+          alreadyRegistered: false,
+        };
+      },
+    });
+    const localServer = new FakeServer();
+    registerSetupTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
+
+    const result = await localServer.call('dkg_context_graph_register', {
+      contextGraphId: 'pca-private',
+      sharing: 'invite-only',
+      contribution: 'curators-only',
+      pcaAccountId: '8',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toMatch(/On-chain ID: 42/);
+    expect(received).toEqual({
+      id: 'pca-private',
+      accessPolicy: 1,
+      publishPolicy: 0,
+      pcaAccountId: '8',
+    });
+  });
+
+  it('rejects an open-contribution PCA registration before calling the daemon', async () => {
+    let called = false;
+    const localClient = new FakeClient({
+      registerContextGraph: async () => {
+        called = true;
+        throw new Error('must not be called');
+      },
+    });
+    const localServer = new FakeServer();
+    registerSetupTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
+
+    const result = await localServer.call('dkg_context_graph_register', {
+      contextGraphId: 'invalid-pca',
+      contribution: 'open',
+      pcaAccountId: '8',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/only valid with curated contribution/i);
+    expect(called).toBe(false);
   });
 
   it('dkg_context_graph_create description carries the SKILL.md §6 canonical-naming note', () => {
@@ -105,7 +161,7 @@ describe('setup tools — context graph + sub-graph + subscribe', () => {
   });
 
   it('documents canonical context graph ids for existing-target setup tools', () => {
-    for (const name of ['dkg_subscribe', 'dkg_sub_graph_create']) {
+    for (const name of ['dkg_context_graph_register', 'dkg_subscribe', 'dkg_sub_graph_create']) {
       const contextGraphId = server.get(name).config.inputSchema?.contextGraphId;
       expect(contextGraphId?.description).toContain('dkg_list_context_graphs');
       expect(contextGraphId?.description).toContain('local-notes');

@@ -17,7 +17,7 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -29,6 +29,7 @@ import {
   isStorageACKDecline,
   STORAGE_ACK_DECLINE_CODES,
   computePublishACKDigest,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
   sharedMemoryReadBothFilter,
   TypedEventBus,
 } from '@origintrail-official/dkg-core';
@@ -38,6 +39,8 @@ import {
   computeFlatKCMerkleLeafCountV10,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent, agentFromPrivateKey, type AgentKeyRecord } from '../../src/index.js';
+import { initializeRfc64LegacySwmBoundaryV1 } from '../../src/rfc64/legacy-swm-boundary-v1.js';
+import { resolveRfc64PersistenceRootV1 } from '../../src/rfc64/persistence-layout-v1.js';
 import { SwmHostModeStore } from '../../src/swm/host-mode-store.js';
 
 interface ClassifierInternals {
@@ -50,12 +53,33 @@ interface ClassifierInternals {
 
 interface IngestInternals {
   getContextGraphOnChainPolicy(cgId: string): Promise<{ accessPolicy?: number; publishPolicy?: number }>;
+  resolveRegisteredContextGraphAuthority(cgId: string): Promise<
+    | { kind: 'public'; onChainId: bigint }
+    | { kind: 'private'; onChainId: bigint; participantAgents: string[] }
+    | { kind: 'unavailable'; reason: 'chain-access-policy-unknown'; onChainId: bigint }
+  >;
   encodeWorkspaceGossipMessage(contextGraphId: string, message: Uint8Array): Promise<Uint8Array>;
   ingestSwmHostModeEnvelope(contextGraphId: string, data: Uint8Array, fromPeerId: string): Promise<void>;
   swmHostModeStore?: SwmHostModeStore;
   localAgents: Map<string, AgentKeyRecord>;
   defaultAgentAddress?: string;
   getSwmHostModeStats(): Promise<{ perCg?: Record<string, { entries: number; bytes: number }> } | undefined>;
+}
+
+function rootlessWorkspaceScope(g: IngestInternals) {
+  const agentAddress = ethers.getAddress(g.defaultAgentAddress!).toLowerCase();
+  const kaNumber = '1';
+  return {
+    agentAddress,
+    kaNumber,
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+    kaUal: `did:dkg:otp:20430/${agentAddress}/${kaNumber}`,
+    assertionVersion: '1',
+    publicTripleCount: 1,
+    privateTripleCount: 0,
+    accessPolicy: 'public' as const,
+    allowedPeers: [] as string[],
+  };
 }
 
 describe('GH #1124 — isConfirmedPublicForHostMode safety bias (only accessPolicy===0 is public)', () => {
@@ -69,7 +93,7 @@ describe('GH #1124 — isConfirmedPublicForHostMode safety bias (only accessPoli
   async function makeCore(): Promise<DKGAgent> {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-1124-'));
     tempDirs.push(dataDir);
-    const core = await DKGAgent.create({ name: 'Pub1124Core', listenHost: '127.0.0.1', dataDir, nodeRole: 'core' });
+    const core = await DKGAgent.create({ name: 'Pub1124Core', listenHost: '127.0.0.1', dataDir, nodeRole: 'core', rfc64CatalogActivation: { enabled: false } });
     agents.push(core);
     return core;
   }
@@ -134,8 +158,20 @@ describe('GH #1124 — ingestSwmHostModeEnvelope gate behaviour (signed plaintex
   async function makeHostCore(): Promise<DKGAgent> {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-1124-ingest-'));
     tempDirs.push(dataDir);
-    const core = await DKGAgent.create({ name: 'Ingest1124Host', listenHost: '127.0.0.1', dataDir, nodeRole: 'core', swmHostMode: { enabled: true } });
+    const core = await DKGAgent.create({ name: 'Ingest1124Host', listenHost: '127.0.0.1', dataDir, nodeRole: 'core', rfc64CatalogActivation: { enabled: false }, swmHostMode: { enabled: true } });
     agents.push(core);
+    // Production initializes the durable legacy-SWM boundary during start()
+    // before any network ingest can reach the shared-memory handler. This
+    // fixture intentionally drives ingest without starting libp2p, so mirror
+    // that prerequisite explicitly rather than exercising the fail-closed
+    // pre-start state.
+    const persistenceRoot = resolveRfc64PersistenceRootV1(dataDir);
+    await mkdir(persistenceRoot, { mode: 0o700 });
+    await initializeRfc64LegacySwmBoundaryV1(
+      core,
+      persistenceRoot,
+      core.store,
+    );
     const store = new SwmHostModeStore({ dataDir: join(dataDir, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
     await store.init();
     const g = core as unknown as IngestInternals;
@@ -151,13 +187,16 @@ describe('GH #1124 — ingestSwmHostModeEnvelope gate behaviour (signed plaintex
   const PEER = '12D3KooWHostModePublisherPeerForIngestTest';
   // A valid PLAINTEXT WorkspacePublishRequest (public SWM share) — not ciphertext,
   // and decodable by the host's verifyHostModeEnvelopeAuthority path.
-  const plaintextRequest = (cg: string): Uint8Array => encodeWorkspacePublishRequest({
+  const plaintextRequest = (g: IngestInternals, cg: string): Uint8Array => encodeWorkspacePublishRequest({
     contextGraphId: cg,
-    nquads: new TextEncoder().encode('<urn:p01124:s> <http://schema.org/name> "Public1124" .'),
-    manifest: [{ rootEntity: 'urn:p01124:s' }],
+    nquads: new TextEncoder().encode(
+      `<urn:p01124:s> <http://schema.org/name> "Public1124" <did:dkg:context-graph:${cg}> .`,
+    ),
+    manifest: [],
     publisherPeerId: PEER,
     shareOperationId: `op-1124-${cg}`,
     timestampMs: 1_700_000_000_000,
+    ...rootlessWorkspaceScope(g),
   });
 
   async function entriesFor(g: IngestInternals, cg: string): Promise<number> {
@@ -172,7 +211,7 @@ describe('GH #1124 — ingestSwmHostModeEnvelope gate behaviour (signed plaintex
     const g = (await makeHostCore()) as unknown as IngestInternals;
     const cg = 'cg-ingest-public';
     g.getContextGraphOnChainPolicy = async () => ({ accessPolicy: 0, publishPolicy: 1 }); // resolves fully-open (public read + open publish)
-    const env = await g.encodeWorkspaceGossipMessage(cg, plaintextRequest(cg));
+    const env = await g.encodeWorkspaceGossipMessage(cg, plaintextRequest(g, cg));
     await g.ingestSwmHostModeEnvelope(cg, env, PEER);
     expect(await entriesFor(g, cg)).toBe(1);
   });
@@ -181,7 +220,7 @@ describe('GH #1124 — ingestSwmHostModeEnvelope gate behaviour (signed plaintex
     const g = (await makeHostCore()) as unknown as IngestInternals;
     const cg = 'cg-ingest-curated';
     g.getContextGraphOnChainPolicy = async () => ({ accessPolicy: 1, publishPolicy: 0 });
-    const env = await g.encodeWorkspaceGossipMessage(cg, plaintextRequest(cg));
+    const env = await g.encodeWorkspaceGossipMessage(cg, plaintextRequest(g, cg));
     await g.ingestSwmHostModeEnvelope(cg, env, PEER);
     expect(await entriesFor(g, cg)).toBe(0);
   });
@@ -190,7 +229,7 @@ describe('GH #1124 — ingestSwmHostModeEnvelope gate behaviour (signed plaintex
     const g = (await makeHostCore()) as unknown as IngestInternals;
     const cg = 'cg-ingest-unknown';
     g.getContextGraphOnChainPolicy = async () => ({}); // accessPolicy undefined
-    const env = await g.encodeWorkspaceGossipMessage(cg, plaintextRequest(cg));
+    const env = await g.encodeWorkspaceGossipMessage(cg, plaintextRequest(g, cg));
     await g.ingestSwmHostModeEnvelope(cg, env, PEER);
     expect(await entriesFor(g, cg)).toBe(0);
   });
@@ -199,7 +238,7 @@ describe('GH #1124 — ingestSwmHostModeEnvelope gate behaviour (signed plaintex
     const g = (await makeHostCore()) as unknown as IngestInternals;
     const cg = 'cg-ingest-public-forged';
     g.getContextGraphOnChainPolicy = async () => ({ accessPolicy: 0, publishPolicy: 1 });
-    const env = await g.encodeWorkspaceGossipMessage(cg, plaintextRequest(cg));
+    const env = await g.encodeWorkspaceGossipMessage(cg, plaintextRequest(g, cg));
     const tampered = Uint8Array.from(env);
     for (let i = 1; i <= 8 && i <= tampered.length; i++) tampered[tampered.length - i] ^= 0xff;
     await g.ingestSwmHostModeEnvelope(cg, tampered, PEER);
@@ -212,7 +251,7 @@ describe('GH #1124 — ingestSwmHostModeEnvelope gate behaviour (signed plaintex
     const cgInner = 'cg-ingest-B';
     g.getContextGraphOnChainPolicy = async () => ({ accessPolicy: 0, publishPolicy: 1 }); // both fully-open (isolate the CG-binding check)
     // Envelope is signed for CG-A but its inner WorkspacePublishRequest targets CG-B.
-    const env = await g.encodeWorkspaceGossipMessage(cgEnvelope, plaintextRequest(cgInner));
+    const env = await g.encodeWorkspaceGossipMessage(cgEnvelope, plaintextRequest(g, cgInner));
     await g.ingestSwmHostModeEnvelope(cgEnvelope, env, PEER);
     expect(await entriesFor(g, cgEnvelope)).toBe(0);
     expect(await entriesFor(g, cgInner)).toBe(0);
@@ -227,8 +266,8 @@ describe('GH #1124 — ingestSwmHostModeEnvelope gate behaviour (signed plaintex
     const g = (await makeHostCore()) as unknown as IngestInternals;
     const cg = 'cg-ingest-spoof';
     g.getContextGraphOnChainPolicy = async () => ({ accessPolicy: 0, publishPolicy: 1 });
-    // plaintextRequest(cg) sets publisherPeerId = PEER; deliver it from a DIFFERENT sender.
-    const env = await g.encodeWorkspaceGossipMessage(cg, plaintextRequest(cg));
+    // plaintextRequest(g, cg) sets publisherPeerId = PEER; deliver it from a DIFFERENT sender.
+    const env = await g.encodeWorkspaceGossipMessage(cg, plaintextRequest(g, cg));
     await g.ingestSwmHostModeEnvelope(cg, env, '12D3KooWSomeOtherRelayPeerNotThePublisher');
     expect(await entriesFor(g, cg)).toBe(0);
   });
@@ -285,13 +324,23 @@ describe('GH #1124 — a confirmed-public ingest makes a NON-MEMBER host ACK-cap
   const PEER = '12D3KooWHostModePublisherPeerForAckTest';
   const TEST_CHAIN_ID = 31337n;
   const TEST_KAV10_ADDR = '0x000000000000000000000000000000000000c10a';
-  const NQUAD = '<urn:ack1124:s> <http://schema.org/name> "AckCapable1124" .';
+  const nquadFor = (cg: string) =>
+    `<urn:ack1124:s> <http://schema.org/name> "AckCapable1124" <did:dkg:context-graph:${cg}> .`;
 
   async function makeHostCore(): Promise<DKGAgent> {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-1124-ack-'));
     tempDirs.push(dataDir);
-    const core = await DKGAgent.create({ name: 'Ack1124Host', listenHost: '127.0.0.1', dataDir, nodeRole: 'core', swmHostMode: { enabled: true } });
+    const core = await DKGAgent.create({ name: 'Ack1124Host', listenHost: '127.0.0.1', dataDir, nodeRole: 'core', rfc64CatalogActivation: { enabled: false }, swmHostMode: { enabled: true } });
     agents.push(core);
+    // See the ingest fixture above: production establishes this boundary in
+    // start(), while this focused test deliberately bypasses node startup.
+    const persistenceRoot = resolveRfc64PersistenceRootV1(dataDir);
+    await mkdir(persistenceRoot, { mode: 0o700 });
+    await initializeRfc64LegacySwmBoundaryV1(
+      core,
+      persistenceRoot,
+      core.store,
+    );
     const g = core as unknown as IngestInternals;
     // Wire the host-mode store explicitly — ingestSwmHostModeEnvelope returns
     // early when `swmHostModeStore` is unset (it's lazily inited on start()).
@@ -301,6 +350,15 @@ describe('GH #1124 — a confirmed-public ingest makes a NON-MEMBER host ACK-cap
     const signer = agentFromPrivateKey(ethers.Wallet.createRandom().privateKey, 'signer');
     g.localAgents.set(signer.agentAddress, signer);
     g.defaultAgentAddress = signer.agentAddress;
+    g.resolveRegisteredContextGraphAuthority = async (cgId) => {
+      const onChainId = BigInt(cgId);
+      const policy = await g.getContextGraphOnChainPolicy(cgId);
+      if (policy.accessPolicy === 0) return { kind: 'public', onChainId };
+      if (policy.accessPolicy === 1) {
+        return { kind: 'private', onChainId, participantAgents: [signer.agentAddress] };
+      }
+      return { kind: 'unavailable', reason: 'chain-access-policy-unknown', onChainId };
+    };
     return core;
   }
 
@@ -309,11 +367,12 @@ describe('GH #1124 — a confirmed-public ingest makes a NON-MEMBER host ACK-cap
   // anti-spoof bind passes.
   const publishEnvelope = (g: IngestInternals, cg: string) => g.encodeWorkspaceGossipMessage(cg, encodeWorkspacePublishRequest({
     contextGraphId: cg,
-    nquads: new TextEncoder().encode(NQUAD),
-    manifest: [{ rootEntity: 'urn:ack1124:s' }],
+    nquads: new TextEncoder().encode(nquadFor(cg)),
+    manifest: [],
     publisherPeerId: PEER,
     shareOperationId: `op-ack-${cg}`,
     timestampMs: 1_700_000_000_000,
+    ...rootlessWorkspaceScope(g),
   }));
 
   // Read the SWM graph EXACTLY as StorageACKHandler.loadSWMQuads does.
@@ -357,12 +416,13 @@ describe('GH #1124 — a confirmed-public ingest makes a NON-MEMBER host ACK-cap
     //    over its applied copy and they match by construction.
     const merkleRoot = computeFlatKCRootV10(quads, []);
     const leafCount = computeFlatKCMerkleLeafCountV10(quads, []);
-    const byteSize = new TextEncoder().encode(NQUAD).length;
+    const byteSize = new TextEncoder().encode(nquadFor(cg)).length;
     const signer = ethers.Wallet.createRandom();
     const intent = encodePublishIntent({
       merkleRoot, contextGraphId: cg, publisherPeerId: PEER,
       publicByteSize: byteSize, isPrivate: false, kaCount: 1,
       rootEntities: [], merkleLeafCount: leafCount,
+      ...rootlessWorkspaceScope(g),
     });
     const ack = decodeStorageACK(await ackHandler(core, signer).handler(intent, { toString: () => PEER }));
 

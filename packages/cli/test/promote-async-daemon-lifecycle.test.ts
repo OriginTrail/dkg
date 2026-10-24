@@ -18,6 +18,7 @@ import {
   type PromoteListFilter,
 } from '@origintrail-official/dkg-publisher';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 import { daemonState, startPromoteWorkerDaemonLifecycle, type PromoteWorkerDaemonLifecycle } from '../src/daemon.js';
 
 describe('promote-async daemon lifecycle wiring', () => {
@@ -154,8 +155,8 @@ describe('promote-async daemon lifecycle wiring', () => {
           apiPortRef: { value: 0 },
           url,
           path: url.pathname,
-          requestToken: undefined,
           requestAgentAddress: 'did:dkg:agent:test',
+          authentication: requestAuthentication({ kind: 'anonymous' }),
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);
@@ -203,7 +204,7 @@ describe('promote-async daemon lifecycle wiring', () => {
     const enqueued = await post('/api/knowledge-assets/daemon-lifecycle/swm/share-async', {
       contextGraphId: 'graphify',
       subGraphName: 'code',
-      entities: ['urn:dkg:entity:a'],
+      entities: 'all',
     });
     // Spec §3.1: enqueue replies 200 OK with `{ jobId, state: "queued" }`.
     // (Routes return 503 when the worker flag is off — the test arms it
@@ -234,7 +235,7 @@ describe('promote-async daemon lifecycle wiring', () => {
     expect(promoteCalls[0]).toEqual({
       contextGraphId: 'graphify',
       name: 'daemon-lifecycle',
-      opts: { entities: ['urn:dkg:entity:a'], subGraphName: 'code' },
+      opts: { entities: 'all', subGraphName: 'code' },
     });
 
     let stopSettled = false;

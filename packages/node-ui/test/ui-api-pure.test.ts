@@ -15,6 +15,9 @@ import {
   fetchConnections,
   fetchRetentionSettings,
   fetchTelemetrySettings,
+  fetchIdentityWalletContracts,
+  fetchOperationalWallets,
+  IdentityWalletApiDecodeError,
   markNotificationsRead,
   fetchRpcHealth,
   fetchQueryHistory,
@@ -24,6 +27,8 @@ import {
   fetchSuccessRates,
   fetchExtractionStatus,
   executeQuery,
+  readProfileQueryCatalog,
+  writeProfileQueryCatalog,
   listAssertions,
   ensureContextGraphOnChain,
   fetchAssertionUals,
@@ -41,9 +46,9 @@ import {
   knowledgeAssetPublish,
   knowledgeAssetPublishWithSeal,
   publishAssertionsToVm,
-  SwmSubsetNotSealableError,
   partialPublishWarning,
   knowledgeAssetFinalize,
+  knowledgeAssetShare,
 } from '../src/ui/api.js';
 
 let server: Server;
@@ -51,9 +56,8 @@ let baseUrl: string;
 const requestLog: Array<{ url: string; method: string; body: string }> = [];
 let queryBindings: any[] = [];
 // Scripted per-call responses (status + body) for tests that need a non-200
-// reply, e.g. the knowledgeAssetPublishWithSeal recovery contract. Each entry
-// is consumed on first match (FIFO), so a test can sequence "first call 409,
-// next call 200". Cleared in beforeEach.
+// reply, e.g. a fail-closed publish precondition. Each entry is consumed on
+// first match (FIFO). Cleared in beforeEach.
 type ResponseOverride = {
   match: (url: string, method: string, body: string) => boolean;
   status: number;
@@ -66,13 +70,13 @@ function startTestServer(): Promise<void> {
     server = createServer((req, res) => {
       let body = '';
       req.on('data', (chunk) => { body += chunk; });
-      req.on('end', () => {
+      req.on('end', async () => {
         const reqUrl = req.url ?? '';
         const reqMethod = req.method ?? '';
         requestLog.push({ url: reqUrl, method: reqMethod, body });
 
         // Scripted override (consumed on first match) — lets a test return a
-        // 409 then a 200 to exercise the catch→seal→retry path.
+        // specific failure or partial-success response.
         const ovIdx = responseOverrides.findIndex(o => o.match(reqUrl, reqMethod, body));
         if (ovIdx !== -1) {
           const [ov] = responseOverrides.splice(ovIdx, 1);
@@ -125,7 +129,8 @@ function startTestServer(): Promise<void> {
         } else if (url.startsWith('/api/context-graph/list') || url.startsWith('/api/context-graphs')) {
           res.end(JSON.stringify({ contextGraphs: [{ id: 'cg1' }] }));
         } else if (url.startsWith('/api/query')) {
-          res.end(JSON.stringify({ result: { bindings: queryBindings } }));
+          const bindings = queryBindings;
+          res.end(JSON.stringify({ result: { bindings } }));
         } else if (url.startsWith('/api/shared-memory')) {
           res.end(JSON.stringify({ success: true, ual: 'did:dkg:test' }));
         } else if (url.includes('/promote')) {
@@ -249,6 +254,104 @@ describe('UI API tests', () => {
       expect(requestLog.some(r => r.url.startsWith('/api/chain/rpc-health'))).toBe(true);
     });
 
+    it('surfaces a malformed identity-wallet bootstrap as a typed decode error', async () => {
+      await expect(fetchIdentityWalletContracts()).rejects.toBeInstanceOf(IdentityWalletApiDecodeError);
+      expect(requestLog.some(r => r.url.startsWith('/api/identity-wallets/contracts'))).toBe(true);
+    });
+
+    it('accepts the daemon identity-wallet bootstrap wire payload', async () => {
+      const contracts = {
+        profile: `0x${'11'.repeat(20)}`,
+        identity: `0x${'22'.repeat(20)}`,
+        storage: `0x${'33'.repeat(20)}`,
+        chainId: 'base:84532',
+        rpcUrls: ['/api/identity-wallets/rpc'],
+        walletRpcUrls: ['https://wallet.example/base-sepolia'],
+      };
+      responseOverrides.push({
+        match: (url) => url.startsWith('/api/identity-wallets/contracts'),
+        status: 200,
+        body: contracts,
+      });
+
+      await expect(fetchIdentityWalletContracts()).resolves.toEqual(contracts);
+    });
+
+    it('maps only the stable identity-wallet capability 503 to unavailable', async () => {
+      responseOverrides.push({
+        match: (url) => url.startsWith('/api/identity-wallets/contracts'),
+        status: 503,
+        body: {
+          error: 'Identity wallet management is not available on this deployment',
+          code: 'IDENTITY_WALLET_MANAGEMENT_UNAVAILABLE',
+        },
+      });
+
+      await expect(fetchIdentityWalletContracts()).resolves.toBeNull();
+    });
+
+    it('preserves transient identity-wallet bootstrap failures for retry', async () => {
+      responseOverrides.push({
+        match: (url) => url.startsWith('/api/identity-wallets/contracts'),
+        status: 503,
+        body: { error: 'RPC endpoints exhausted', code: 'RPC_ENDPOINTS_EXHAUSTED' },
+      });
+
+      await expect(fetchIdentityWalletContracts()).rejects.toMatchObject({
+        status: 503,
+        body: { code: 'RPC_ENDPOINTS_EXHAUSTED' },
+      });
+    });
+
+    it.each([
+      ['missing address', { isAdmin: false, isPrimary: false, registered: true }],
+      ['non-boolean admin flag', { address: '0xabc', isAdmin: 'yes', isPrimary: false, registered: true }],
+      ['non-boolean primary flag', { address: '0xabc', isAdmin: false, isPrimary: 0, registered: true }],
+      ['invalid registration state', { address: '0xabc', isAdmin: false, isPrimary: false, registered: 'unknown' }],
+    ])('surfaces an operational-wallet entry with %s as a typed decode error', async (_label, wallet) => {
+      responseOverrides.push({
+        match: (url) => url.startsWith('/api/operational-wallets'),
+        status: 200,
+        body: {
+          identityId: '61',
+          hasProfile: true,
+          adminKeyConfigured: true,
+          canManage: true,
+          wallets: [wallet],
+        },
+      });
+      await expect(fetchOperationalWallets()).rejects.toBeInstanceOf(IdentityWalletApiDecodeError);
+    });
+
+    it('maps only the stable operational-wallet capability 503 to unavailable', async () => {
+      responseOverrides.push({
+        match: (url) => url.startsWith('/api/operational-wallets'),
+        status: 503,
+        body: {
+          error: 'Operational wallet management is unavailable',
+          code: 'OPERATIONAL_WALLET_MANAGEMENT_UNAVAILABLE',
+        },
+      });
+
+      await expect(fetchOperationalWallets()).resolves.toEqual({ available: false });
+    });
+
+    it('accepts a complete operational-wallet snapshot', async () => {
+      const snapshot = {
+        identityId: '61',
+        hasProfile: true,
+        adminKeyConfigured: true,
+        canManage: true,
+        wallets: [{ address: '0xabc', isAdmin: false, isPrimary: true, registered: null }],
+      };
+      responseOverrides.push({
+        match: (url) => url.startsWith('/api/operational-wallets'),
+        status: 200,
+        body: snapshot,
+      });
+      await expect(fetchOperationalWallets()).resolves.toEqual({ available: true, snapshot });
+    });
+
     it('fetchEconomics calls /api/economics', async () => {
       await fetchEconomics();
       expect(requestLog.some(r => r.url.startsWith('/api/economics'))).toBe(true);
@@ -312,11 +415,59 @@ describe('UI API tests', () => {
 
   describe('POST endpoints', () => {
     it('executeQuery sends sparql and contextGraphId', async () => {
-      await executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-1');
+      await executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-1' });
       const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/query'));
       const body = JSON.parse(call?.body ?? '{}');
       expect(body.sparql).toBe('SELECT * WHERE { ?s ?p ?o }');
       expect(body.contextGraphId).toBe('cg-1');
+    });
+
+    it('executeQuery sends the daemon working-memory view', async () => {
+      await executeQuery(
+        'SELECT ?incident WHERE { ?incident ?p ?o }',
+        { contextGraphId: 'cg-query-catalog', view: 'working-memory' },
+      );
+      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/query'));
+      expect(JSON.parse(call?.body ?? '{}').view).toBe('working-memory');
+    });
+
+    it('executeQuery maps named scope and partition options into the request body', async () => {
+      await executeQuery('SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }', {
+        contextGraphId: 'cg-scoped',
+        subGraphName: 'incidents',
+        view: 'shared-working-memory',
+        includeSharedMemory: true,
+        includeContextGraphPartitions: true,
+      });
+      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/query'));
+      expect(JSON.parse(call?.body ?? '{}')).toEqual({
+        sparql: 'SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }',
+        contextGraphId: 'cg-scoped',
+        subGraphName: 'incidents',
+        view: 'shared-working-memory',
+        includeSharedMemory: true,
+        includeContextGraphPartitions: true,
+      });
+    });
+
+    it('readProfileQueryCatalog uses the dedicated profile endpoint', async () => {
+      await readProfileQueryCatalog('cg-query-catalog');
+      const call = requestLog.find(
+        r => r.method === 'POST' && r.url.includes('/api/profile/query-catalog/read'),
+      );
+      expect(JSON.parse(call?.body ?? '{}')).toEqual({ contextGraphId: 'cg-query-catalog' });
+    });
+
+    it('writeProfileQueryCatalog sends catalog quads to the dedicated endpoint', async () => {
+      const quads = [{ subject: 'urn:q', predicate: 'urn:p', object: '"value"', graph: '' }];
+      await writeProfileQueryCatalog('cg-query-catalog', quads);
+      const call = requestLog.find(
+        r => r.method === 'POST' && r.url.includes('/api/profile/query-catalog/write'),
+      );
+      expect(JSON.parse(call?.body ?? '{}')).toEqual({
+        contextGraphId: 'cg-query-catalog',
+        quads,
+      });
     });
 
     it('knowledgeAssetPublish rejects non-decimal publisher identity overrides before POSTing', async () => {
@@ -355,51 +506,23 @@ describe('UI API tests', () => {
       expect(requestLog.some(r => r.url.includes('/api/shared-memory/publish'))).toBe(false);
     });
 
-    it('knowledgeAssetPublishWithSeal seals in SWM (layer:swm + subGraphName) then retries on a VM_PUBLISH_PRECONDITION 409', async () => {
-      // VM_PUBLISH_PRECONDITION is the SEALABLE 409 — an unsealed full share. The
-      // wrapper seals in place (wm/finalize {layer:"swm"}, forwarding subGraphName) and
-      // retries the publish once. (A PUBLISH_NOT_FULL_SHARE 409 is NOT sealable: the
-      // full-share marker is missing, so finalize(layer:"swm") returns
-      // SWM_SUBSET_NOT_SEALABLE — that path is covered by the throws-no-retry test below.)
+    it('knowledgeAssetPublishWithSeal surfaces a VM_PUBLISH_PRECONDITION without mutating SWM or retrying', async () => {
       responseOverrides.push({
         match: (url, method) => method === 'POST' && url.includes('/api/knowledge-assets/a/vm/publish'),
         status: 409,
         body: { code: 'VM_PUBLISH_PRECONDITION', error: 'is not finalized' },
       });
 
-      const res = await knowledgeAssetPublishWithSeal('cg-1', 'a', { subGraphName: 'sg' });
+      await expect(
+        knowledgeAssetPublishWithSeal('cg-1', 'a', { subGraphName: 'sg' }),
+      ).rejects.toMatchObject({
+        status: 409,
+        body: { code: 'VM_PUBLISH_PRECONDITION' },
+      });
 
-      const finalize = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/knowledge-assets/a/wm/finalize'));
-      expect(finalize, 'must seal in SWM after the 409').toBeTruthy();
-      expect(JSON.parse(finalize!.body).layer).toBe('swm');
-      expect(JSON.parse(finalize!.body).subGraphName).toBe('sg');
-      // Exactly two publish attempts: the failing one + the post-seal retry.
+      expect(requestLog.some(r => r.url.includes('/wm/finalize'))).toBe(false);
       const publishCalls = requestLog.filter(r => r.method === 'POST' && r.url.includes('/vm/publish'));
-      expect(publishCalls).toHaveLength(2);
-      // `sealed` flag tells the caller a seal step ran (surface "sealing then publishing").
-      expect(res.sealed).toBe(true);
-    });
-
-    it('knowledgeAssetPublishWithSeal throws SwmSubsetNotSealableError and does NOT retry on SWM_SUBSET_NOT_SEALABLE', async () => {
-      // Publish 409s as not-finalized, but the in-place seal is rejected because
-      // only a subset was shared — surface the typed error, never loop.
-      responseOverrides.push({
-        match: (url, method) => method === 'POST' && url.includes('/api/knowledge-assets/c/vm/publish'),
-        status: 409,
-        body: { code: 'PUBLISH_NOT_FULL_SHARE', error: 'requires a complete full share' },
-      });
-      responseOverrides.push({
-        match: (url, method) => method === 'POST' && url.includes('/api/knowledge-assets/c/wm/finalize'),
-        status: 409,
-        body: { code: 'SWM_SUBSET_NOT_SEALABLE', error: 'share the full asset first' },
-      });
-
-      await expect(knowledgeAssetPublishWithSeal('cg-1', 'c')).rejects.toBeInstanceOf(SwmSubsetNotSealableError);
-
-      // The seal was attempted exactly once and the publish was NOT retried
-      // after the seal failed (one failing publish, no second attempt).
-      expect(requestLog.filter(r => r.method === 'POST' && r.url.includes('/api/knowledge-assets/c/wm/finalize'))).toHaveLength(1);
-      expect(requestLog.filter(r => r.method === 'POST' && r.url.includes('/vm/publish'))).toHaveLength(1);
+      expect(publishCalls).toHaveLength(1);
     });
 
     it('knowledgeAssetPublishWithSeal surfaces a 207 partial publish (contextGraphError) without throwing', async () => {
@@ -418,7 +541,7 @@ describe('UI API tests', () => {
       expect(res.status).toBe('confirmed');
       expect(res.txHash).toBe('0xdeadbeef');
       expect(res.contextGraphError).toBe('binding failed');
-      // No seal/retry — a 207 is not a 409 precondition.
+      // A 207 is returned directly without any SWM mutation.
       expect(requestLog.some(r => r.url.includes('/wm/finalize'))).toBe(false);
       expect(requestLog.filter(r => r.method === 'POST' && r.url.includes('/vm/publish'))).toHaveLength(1);
     });
@@ -595,6 +718,103 @@ describe('UI API tests', () => {
       expect(requestLog).toHaveLength(0);
     });
 
+    it('knowledgeAssetFinalize rejects legacy SWM finalization before POSTing', () => {
+      expect(() =>
+        knowledgeAssetFinalize('cg-1', 'legacy', { layer: 'swm' } as any),
+      ).toThrow('Legacy root-scoped Knowledge Assets are read-only');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('knowledgeAssetFinalize accepts neutral layer:wm but omits it from the wire', async () => {
+      await knowledgeAssetFinalize('cg-1', 'asset', { layer: 'wm' });
+      expect(JSON.parse(requestLog[0]?.body ?? '{}')).toEqual({ contextGraphId: 'cg-1' });
+    });
+
+    it('knowledgeAssetShare sends only atomic scope and rejects root-entity subsets before POSTing', async () => {
+      await knowledgeAssetShare('cg-1', 'asset', {
+        subGraphName: 'sg',
+        entities: 'all', // compatibility-only neutral value
+      } as any);
+      const call = requestLog.find(r => r.url.includes('/api/knowledge-assets/asset/swm/share'));
+      expect(JSON.parse(call?.body ?? '{}')).toEqual({
+        contextGraphId: 'cg-1',
+        subGraphName: 'sg',
+        awaitCuratorAck: true,
+      });
+
+      requestLog.length = 0;
+      expect(() =>
+        knowledgeAssetShare('cg-1', 'asset', { entities: ['urn:root'] } as any),
+      ).toThrow('root-entity selection is not supported');
+      expect(requestLog).toHaveLength(0);
+
+      expect(() =>
+        knowledgeAssetShare('cg-1', 'asset', { skipSeal: true } as any),
+      ).toThrow('always sealed before sharing');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('knowledgeAssetShare preserves an explicit curator-ACK opt-out and rejects invalid values', async () => {
+      await knowledgeAssetShare('cg-1', 'asset', {
+        subGraphName: 'sg',
+        awaitCuratorAck: false,
+      });
+      expect(JSON.parse(requestLog[0]?.body ?? '{}')).toEqual({
+        contextGraphId: 'cg-1',
+        subGraphName: 'sg',
+        awaitCuratorAck: false,
+      });
+
+      requestLog.length = 0;
+      expect(() =>
+        knowledgeAssetShare('cg-1', 'asset', { awaitCuratorAck: 'false' } as any),
+      ).toThrow('awaitCuratorAck must be a boolean');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('promoteAssertion shares the complete owning KA and never silently widens a legacy subset', async () => {
+      await promoteAssertion('cg-1', 'asset', { subGraphName: 'sg' });
+      const call = requestLog.find(r => r.url.includes('/api/knowledge-assets/asset/swm/share'));
+      expect(JSON.parse(call?.body ?? '{}')).toEqual({
+        contextGraphId: 'cg-1',
+        subGraphName: 'sg',
+        awaitCuratorAck: true,
+      });
+
+      requestLog.length = 0;
+      await promoteAssertion('cg-1', 'explicit-opt-out', {
+        subGraphName: 'sg-no-ack',
+        awaitCuratorAck: false,
+      });
+      expect(JSON.parse(requestLog[0]?.body ?? '{}')).toEqual({
+        contextGraphId: 'cg-1',
+        subGraphName: 'sg-no-ack',
+        awaitCuratorAck: false,
+      });
+
+      requestLog.length = 0;
+      await promoteAssertion('cg-1', 'legacy-caller', 'all', 'sg-legacy');
+      expect(JSON.parse(requestLog[0]?.body ?? '{}')).toEqual({
+        contextGraphId: 'cg-1',
+        subGraphName: 'sg-legacy',
+        awaitCuratorAck: true,
+      });
+
+      requestLog.length = 0;
+      await promoteAssertion('cg-1', 'undefined-placeholder', undefined, 'sg-from-fourth-arg');
+      expect(JSON.parse(requestLog[0]?.body ?? '{}')).toEqual({
+        contextGraphId: 'cg-1',
+        subGraphName: 'sg-from-fourth-arg',
+        awaitCuratorAck: true,
+      });
+
+      requestLog.length = 0;
+      expect(() => promoteAssertion('cg-1', 'asset', ['urn:root'])).toThrow(
+        'root-entity selection is not supported',
+      );
+      expect(requestLog).toHaveLength(0);
+    });
+
     it('listAssertions(wm) recognizes the lifecycle-URN marker form (file imports)', async () => {
       // File-imported assertions carry dkg:memoryLayer "WM" ONLY on the
       // lifecycle URN (urn:dkg:assertion:<cg>:<agent>:<name>), not the
@@ -604,16 +824,6 @@ describe('UI API tests', () => {
       queryBindings = [{ g: { value: `urn:dkg:assertion:cg-1:${agent}:my-import.md` } }];
       const list = await listAssertions('cg-1', 'wm');
       expect(list.map(a => a.name)).toEqual(['my-import.md']);
-    });
-
-    it('listAssertions(wm) dedupes when BOTH the URN and data-URI markers exist', async () => {
-      const agent = '0x' + '2'.repeat(40);
-      queryBindings = [
-        { g: { value: `did:dkg:context-graph:cg-1/assertion/${agent}/doc` } },
-        { g: { value: `urn:dkg:assertion:cg-1:${agent}:doc` } },
-      ];
-      const list = await listAssertions('cg-1', 'wm');
-      expect(list.map(a => a.name)).toEqual(['doc']);
     });
 
     it('listAssertions(wm) parses sub-graph-scoped URN markers and names containing ":"', async () => {
@@ -635,18 +845,6 @@ describe('UI API tests', () => {
       expect(list.map(a => a.name)).toEqual(['shared-doc.md']);
     });
 
-    it('listAssertions(swm) excludes assertions already published to VM (dkg:vmCurrentAssertion)', async () => {
-      // Publish records a vmCurrentAssertion pointer but does NOT flip memoryLayer
-      // off "SWM" (backend gap), so the SWM list must drop published rows itself.
-      const agent = '0x' + '5'.repeat(40);
-      queryBindings = [
-        { g: { value: `urn:dkg:assertion:cg-1:${agent}:unpublished.md` } },
-        { g: { value: `urn:dkg:assertion:cg-1:${agent}:published.md` }, vm: { value: 'abc123deadbeef' } },
-      ];
-      const list = await listAssertions('cg-1', 'swm');
-      expect(list.map(a => a.name)).toEqual(['unpublished.md']);
-    });
-
     it('fetchAssertionUals maps assertionName -> reservedUal (shown next to the filename)', async () => {
       queryBindings = [
         { name: { value: 'spec.md' }, ual: { value: 'did:dkg:evm:31337/0xabc/7' } },
@@ -655,6 +853,16 @@ describe('UI API tests', () => {
       const map = await fetchAssertionUals('cg-1');
       expect(map['spec.md']).toBe('did:dkg:evm:31337/0xabc/7');
       expect(map['demo.md']).toBe('did:dkg:evm:31337/0xabc/8');
+    });
+
+    it('fetchAssertionUals normalizes raw N-Triples string bindings', async () => {
+      queryBindings = [{
+        name: '"spec.md"',
+        ual: '"did:dkg:evm:31337/0xabc/7"',
+      }];
+      await expect(fetchAssertionUals('cg-1')).resolves.toEqual({
+        'spec.md': 'did:dkg:evm:31337/0xabc/7',
+      });
     });
 
     it('ensureContextGraphOnChain auto-registers an off-chain CG before publishing', async () => {
@@ -682,6 +890,14 @@ describe('UI API tests', () => {
       const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/subscribe'));
       const body = JSON.parse(call?.body ?? '{}');
       expect(body.contextGraphId).toBe('cg-1');
+      expect(body.syncMode).toBe('on-demand');
+    });
+
+    it('subscribeToContextGraph forwards an explicit always-on choice', async () => {
+      await subscribeToContextGraph('cg-1', { syncMode: 'always-on' });
+      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/subscribe'));
+      const body = JSON.parse(call?.body ?? '{}');
+      expect(body).toEqual({ contextGraphId: 'cg-1', syncMode: 'always-on' });
     });
   });
 
@@ -695,11 +911,11 @@ describe('UI API tests', () => {
   describe('executeQuery in-flight dedup', () => {
     it('coalesces concurrent identical queries to one /api/query POST', async () => {
       const results = await Promise.all([
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-dedup'),
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-dedup'),
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-dedup'),
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-dedup'),
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-dedup'),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-dedup' }),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-dedup' }),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-dedup' }),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-dedup' }),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-dedup' }),
       ]);
       const queryCalls = requestLog.filter(
         r => r.method === 'POST' && r.url.startsWith('/api/query'),
@@ -707,14 +923,36 @@ describe('UI API tests', () => {
       expect(queryCalls).toHaveLength(1);
       expect(results).toHaveLength(5);
       for (const r of results) {
-        expect(r).toEqual({ result: { bindings: [] } });
+        expect(r).toEqual({ result: { type: 'bindings', bindings: [] } });
       }
+    });
+
+    it('normalizes current and legacy query result shapes at the API boundary', async () => {
+      responseOverrides.push(
+        {
+          match: (url) => url.startsWith('/api/query'),
+          status: 200,
+          body: { result: { bindings: [{ result: 'false' }] } },
+        },
+        {
+          match: (url) => url.startsWith('/api/query'),
+          status: 200,
+          body: { result: { type: 'quads', quads: [{ subject: 's', predicate: 'p', object: 'o' }] } },
+        },
+      );
+
+      await expect(executeQuery('ASK { ?s ?p ?o }')).resolves.toEqual({
+        result: { type: 'boolean', value: false },
+      });
+      await expect(executeQuery('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }')).resolves.toEqual({
+        result: { type: 'quads', quads: [{ subject: 's', predicate: 'p', object: 'o' }] },
+      });
     });
 
     it('does not coalesce when args differ', async () => {
       await Promise.all([
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-a'),
-        executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-b'),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-a' }),
+        executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-b' }),
       ]);
       const queryCalls = requestLog.filter(
         r => r.method === 'POST' && r.url.startsWith('/api/query'),
@@ -723,8 +961,8 @@ describe('UI API tests', () => {
     });
 
     it('issues a fresh fetch once the prior request has settled', async () => {
-      await executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-sequential');
-      await executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-sequential');
+      await executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-sequential' });
+      await executeQuery('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'cg-sequential' });
       const queryCalls = requestLog.filter(
         r => r.method === 'POST' && r.url.startsWith('/api/query'),
       );

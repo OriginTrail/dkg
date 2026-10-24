@@ -31,6 +31,7 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   Logger,
   computeSwmSenderKeyPackageAAD,
+  decodeSwmSenderKeyPackageAck,
   encodeSwmSenderKeyPackage,
   encryptSwmSenderKeyPackage,
   generateEd25519Keypair,
@@ -46,9 +47,17 @@ import {
   agentFromPrivateKey,
   type AgentKeyRecord,
 } from '../src/index.js';
+import {
+  CONTEXT_GRAPH_AGENT_GATE_UNAVAILABLE_REASONS,
+  createContextGraphAuthorityError,
+  isRetryableContextGraphAuthorityUnavailableReason,
+  type ContextGraphAgentGateAuthority,
+  type ContextGraphAgentGateUnavailableReason,
+} from '../src/internal/context-graph-authority/context-graph-authority.js';
 
 interface DKGAgentInternals {
   localAgents: Map<string, AgentKeyRecord>;
+  swmSenderKeyReceiveStates: Map<string, unknown>;
   // Both private — we reach in via this view to drive them in tests.
   acceptSwmSenderKeyPackage(
     pkg: SwmSenderKeyPackageMsg,
@@ -59,7 +68,16 @@ interface DKGAgentInternals {
   // Exposed for the `agentGate` mock so we don't have to spin up a
   // full context graph + membership snapshot just to drive the
   // sender-key bootstrap path.
-  getContextGraphAgentGateAddresses(contextGraphId: string): Promise<string[] | null>;
+  resolveContextGraphAgentGateAuthority(contextGraphId: string): Promise<ContextGraphAgentGateAuthority>;
+  getContextGraphOnChainPolicy(contextGraphId: string): Promise<{
+    accessPolicy: number | null;
+    publishPolicy: number | null;
+  }>;
+  getContextGraphAllowedPeers(contextGraphId: string): Promise<string[] | null>;
+  resolveSwmAllowedPeersForCurrentAuthority(contextGraphId: string): Promise<string[] | null>;
+  // The sender-side classification of a rejection ACK's reason code.
+  isRetryableSwmSenderKeySetupAckReason(reasonCode: string | undefined): boolean;
+  readonly peerId: string;
 }
 
 interface CapturedLog {
@@ -127,10 +145,11 @@ async function bootAgentForStaleTargetTest(): Promise<{
   // log-routing test we just need both addresses to look "allowed",
   // which is exactly what the bootstrap would observe in production
   // after the chain-side join completed.
-  internals.getContextGraphAgentGateAddresses = async () => [
-    senderWallet.address,
-    recipient.agentAddress,
-  ];
+  internals.resolveContextGraphAgentGateAuthority = async () => ({
+    kind: 'available',
+    agentAddresses: [senderWallet.address, recipient.agentAddress],
+  });
+  internals.getContextGraphAllowedPeers = async () => null;
   return { agent, internals, recipient, senderWallet };
 }
 
@@ -194,6 +213,157 @@ describe('acceptSwmSenderKeyPackage: stale-target throw type', () => {
       }),
     ).rejects.toBeInstanceOf(StaleSenderKeyTargetError);
   });
+
+  it('returns a retryable pending ACK when a chain-proven private gate is still materializing', async () => {
+    const { internals, recipient, senderWallet } = await bootAgentForStaleTargetTest();
+    const activeKeyId = recipient.workspaceEncryptionKeys[0].encryptionKeyId;
+    const pkg = await buildSignedPackage({
+      senderWallet,
+      recipientAgentAddress: recipient.agentAddress,
+      recipientKeyId: activeKeyId,
+    });
+    internals.resolveContextGraphAgentGateAuthority = async () => ({ kind: 'ungated' });
+    internals.getContextGraphOnChainPolicy = async () => ({
+      accessPolicy: 1,
+      publishPolicy: 0,
+    });
+
+    const ack = decodeSwmSenderKeyPackageAck(
+      await internals.handleSwmSenderKeyPackage(encodeSwmSenderKeyPackage(pkg), FROM_PEER_ID),
+    );
+    expect(ack.accepted).toBe(false);
+    expect(ack.reasonCode).toBe('agent-gate-pending');
+    expect(ack.reason).toContain('private agent gate is not materialized yet');
+  });
+
+  it('keeps a missing gate terminal when private chain authority is absent', async () => {
+    const { internals, recipient, senderWallet } = await bootAgentForStaleTargetTest();
+    const activeKeyId = recipient.workspaceEncryptionKeys[0].encryptionKeyId;
+    const pkg = await buildSignedPackage({
+      senderWallet,
+      recipientAgentAddress: recipient.agentAddress,
+      recipientKeyId: activeKeyId,
+    });
+    internals.resolveContextGraphAgentGateAuthority = async () => ({ kind: 'ungated' });
+    internals.getContextGraphOnChainPolicy = async () => ({
+      accessPolicy: null,
+      publishPolicy: null,
+    });
+
+    const ack = decodeSwmSenderKeyPackageAck(
+      await internals.handleSwmSenderKeyPackage(encodeSwmSenderKeyPackage(pkg), FROM_PEER_ID),
+    );
+    expect(ack.accepted).toBe(false);
+    expect(ack.reasonCode).toBe('not-agent-gated');
+  });
+
+  it('returns a retryable pending ACK instead of sender-not-allowed when gate authority is unavailable', async () => {
+    const { internals, recipient, senderWallet } = await bootAgentForStaleTargetTest();
+    const activeKeyId = recipient.workspaceEncryptionKeys[0].encryptionKeyId;
+    const pkg = await buildSignedPackage({
+      senderWallet,
+      recipientAgentAddress: recipient.agentAddress,
+      recipientKeyId: activeKeyId,
+    });
+    // #2827: a joined member of an unregistered graph resolved its gate as
+    // unavailable, which used to collapse to an empty allowlist and a
+    // terminal `sender-not-allowed` for the graph's own curator.
+    internals.resolveContextGraphAgentGateAuthority = async () => ({
+      kind: 'unavailable',
+      reason: 'finalized-name-absence-unaccepted',
+    });
+
+    const ack = decodeSwmSenderKeyPackageAck(
+      await internals.handleSwmSenderKeyPackage(encodeSwmSenderKeyPackage(pkg), FROM_PEER_ID),
+    );
+    expect(ack.accepted).toBe(false);
+    expect(ack.reasonCode).toBe('agent-gate-pending');
+    expect(ack.reason).toContain('agent gate authority is unavailable (finalized-name-absence-unaccepted)');
+  });
+
+  // #2831 review: only an authority failure that can heal on its own is worth
+  // a retry. The rest need a software or configuration change on this
+  // receiver, so the sender must stop instead of publishing ciphertext this
+  // receiver can never authorize.
+  async function ackForUnavailableGate(reason: ContextGraphAgentGateUnavailableReason) {
+    const { internals, recipient, senderWallet } = await bootAgentForStaleTargetTest();
+    const pkg = await buildSignedPackage({
+      senderWallet,
+      recipientAgentAddress: recipient.agentAddress,
+      recipientKeyId: recipient.workspaceEncryptionKeys[0].encryptionKeyId,
+    });
+    internals.resolveContextGraphAgentGateAuthority = async () => ({ kind: 'unavailable', reason });
+    const ack = decodeSwmSenderKeyPackageAck(
+      await internals.handleSwmSenderKeyPackage(encodeSwmSenderKeyPackage(pkg), FROM_PEER_ID),
+    );
+    return { ack, retryable: internals.isRetryableSwmSenderKeySetupAckReason(ack.reasonCode) };
+  }
+
+  // The intended semantics for every registered reason, stated independently
+  // of the shared classifier, so flipping any one of them fails a case here.
+  const EXPECTED_GATE_RETRY: Record<ContextGraphAgentGateUnavailableReason, boolean> = {
+    'finalized-name-absence-unaccepted': true,
+    'chain-name-binding-unavailable': true,
+    'authority-circuit-open': true,
+    'local-chain-binding-unavailable': true,
+    'local-existence-unavailable': true,
+    'chain-access-policy-unavailable': true,
+    'chain-access-policy-timeout': true,
+    'chain-access-policy-unknown': false,
+    'chain-participant-authority-unsupported': false,
+    'chain-participant-authority-unavailable': true,
+    'chain-participant-authority-invalid': false,
+    'rfc64-private-read-roster-unavailable': true,
+  };
+
+  it('classifies exactly the registered unavailable reasons', () => {
+    expect(Object.keys(EXPECTED_GATE_RETRY).sort())
+      .toEqual([...CONTEXT_GRAPH_AGENT_GATE_UNAVAILABLE_REASONS].sort());
+  });
+
+  it.each(Object.entries(EXPECTED_GATE_RETRY) as Array<[ContextGraphAgentGateUnavailableReason, boolean]>)(
+    'answers a %s gate with the matching ACK (retryable: %s)',
+    async (reason, retryable) => {
+      const { ack, retryable: senderRetries } = await ackForUnavailableGate(reason);
+
+      expect(ack.accepted).toBe(false);
+      expect(ack.reasonCode).toBe(retryable ? 'agent-gate-pending' : 'agent-gate-unavailable');
+      expect(ack.reason).toContain(`agent gate authority is unavailable (${reason})`);
+      expect(senderRetries).toBe(retryable);
+      // The promote path consumes the same classifier.
+      expect(isRetryableContextGraphAuthorityUnavailableReason(reason)).toBe(retryable);
+    },
+  );
+
+  it.each([
+    ['chain-access-policy-timeout', 'agent-gate-pending'],
+    ['chain-participant-authority-invalid', 'agent-gate-unavailable'],
+  ] as const)(
+    'maps an unavailable SWM peer gate (%s) to the existing %s ACK',
+    async (reason, expectedReasonCode) => {
+      const { internals, recipient, senderWallet } = await bootAgentForStaleTargetTest();
+      const pkg = await buildSignedPackage({
+        senderWallet,
+        recipientAgentAddress: recipient.agentAddress,
+        recipientKeyId: recipient.workspaceEncryptionKeys[0].encryptionKeyId,
+      });
+      internals.resolveSwmAllowedPeersForCurrentAuthority = async () => {
+        throw createContextGraphAuthorityError('test SWM peer authority failure', { reason });
+      };
+
+      const ack = decodeSwmSenderKeyPackageAck(
+        await internals.handleSwmSenderKeyPackage(
+          encodeSwmSenderKeyPackage(pkg),
+          FROM_PEER_ID,
+        ),
+      );
+      expect(ack).toMatchObject({
+        accepted: false,
+        reasonCode: expectedReasonCode,
+      });
+      expect(ack.reason).toContain(`SWM peer gate authority is unavailable (${reason})`);
+    },
+  );
 
   it('does NOT throw StaleSenderKeyTargetError for an active key (decrypt failure path)', async () => {
     const { internals, recipient, senderWallet } = await bootAgentForStaleTargetTest();
@@ -268,6 +438,55 @@ describe('acceptSwmSenderKeyPackage: stale-target throw type', () => {
     });
     await expect(accept).rejects.toThrow(/was revoked at/);
     await expect(accept).rejects.not.toBeInstanceOf(StaleSenderKeyTargetError);
+  });
+
+  it('rejects a sender-key package when this recipient peer is outside the graph peer allowlist', async () => {
+    const { agent, internals, recipient, senderWallet } = await bootAgentForStaleTargetTest();
+    await agent.start();
+    try {
+      const pkg = await buildSignedPackage({
+        senderWallet,
+        recipientAgentAddress: recipient.agentAddress,
+        recipientKeyId: recipient.workspaceEncryptionKeys[0].encryptionKeyId,
+      });
+      internals.getContextGraphAllowedPeers = async () => [FROM_PEER_ID];
+
+      const accept = internals.acceptSwmSenderKeyPackage(pkg, FROM_PEER_ID, {
+        operationId: 'test-op',
+        operationName: 'share',
+      });
+      await expect(accept).rejects.toMatchObject({
+        name: 'SwmSenderKeySetupRejectionError',
+        reasonCode: 'recipient-not-allowed',
+      });
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it('rejects a sender-key package when its sender peer is outside the graph peer allowlist', async () => {
+    const { agent, internals, recipient, senderWallet } = await bootAgentForStaleTargetTest();
+    await agent.start();
+    try {
+      const pkg = await buildSignedPackage({
+        senderWallet,
+        recipientAgentAddress: recipient.agentAddress,
+        recipientKeyId: recipient.workspaceEncryptionKeys[0].encryptionKeyId,
+      });
+      internals.getContextGraphAllowedPeers = async () => [internals.peerId];
+
+      const accept = internals.acceptSwmSenderKeyPackage(pkg, FROM_PEER_ID, {
+        operationId: 'test-op',
+        operationName: 'share',
+      });
+      await expect(accept).rejects.toMatchObject({
+        name: 'SwmSenderKeySetupRejectionError',
+        reasonCode: 'sender-not-allowed',
+      });
+      expect(internals.swmSenderKeyReceiveStates).toHaveLength(0);
+    } finally {
+      await agent.stop();
+    }
   });
 });
 

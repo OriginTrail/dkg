@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { pad, parseEther, type Address, type Hex, type TransactionReceipt } from 'viem';
 
 import type { PcaContracts } from '../src/ui/api.js';
+import { useWalletStore } from '../src/ui/stores/wallet.js';
 import type { Eip1193Provider } from '../src/ui/web3/eip6963.js';
 
 const apiMocks = vi.hoisted(() => ({
@@ -20,6 +21,7 @@ import {
   WalletOwnerActionUnavailableError,
   type MinimalPublicClient,
   type MinimalWalletClient,
+  type WalletTxProgressEvent,
 } from '../src/ui/web3/walletOwnerActionSubmitter.js';
 import { WalletReceiptRevertedError, WalletReceiptWaitError, WalletTxStepError } from '../src/ui/web3/walletTxError.js';
 
@@ -135,12 +137,25 @@ function makeHarness(opts: {
   });
   const publicClient: MinimalPublicClient = { readContract, waitForTransactionReceipt };
   const walletClient: MinimalWalletClient = { writeContract };
+  const progress: WalletTxProgressEvent[] = [];
   const submitter = walletOwnerActionSubmitter({
+    bootstrap: CONTRACTS,
     getWalletState: () => state,
     publicClientFor: () => publicClient,
     walletClientFromProvider: () => walletClient,
+    onProgress: (event) => progress.push(event),
   });
-  return { submitter, state, provider, readContract, waitForTransactionReceipt, writeContract };
+  return {
+    submitter,
+    state,
+    provider,
+    readContract,
+    waitForTransactionReceipt,
+    writeContract,
+    publicClient,
+    walletClient,
+    progress,
+  };
 }
 
 beforeEach(() => {
@@ -148,6 +163,31 @@ beforeEach(() => {
 });
 
 describe('walletOwnerActionSubmitter create guards', () => {
+  it('reads browser wallet and PCA bootstrap state from the shared store by default', async () => {
+    const h = makeHarness({ allowanceQueue: [parseEther('5')] });
+    useWalletStore.setState(h.state);
+    const submitter = walletOwnerActionSubmitter({
+      publicClientFor: () => h.publicClient,
+      walletClientFromProvider: () => h.walletClient,
+    });
+
+    await expect(submitter.create({ tokens: '5', primaryNode: '42' }))
+      .resolves.toMatchObject({ accountId: '9' });
+    expect(h.writeContract.mock.calls.at(-1)![0]).toMatchObject({
+      account: OWNER,
+      address: NFT,
+      functionName: 'createAccount',
+    });
+  });
+
+  it('fails closed when neither injected nor shared PCA bootstrap state exists', async () => {
+    useWalletStore.setState({ bootstrap: null });
+    const submitter = walletOwnerActionSubmitter();
+
+    await expect(submitter.create({ tokens: '5', primaryNode: '42' }))
+      .rejects.toBeInstanceOf(WalletOwnerActionUnavailableError);
+  });
+
   it.each([
     ['missing', undefined],
     ['zero', '0'],
@@ -189,11 +229,13 @@ describe('walletOwnerActionSubmitter create guards', () => {
     });
     expect(h.writeContract).toHaveBeenCalledTimes(2);
     expect(h.writeContract.mock.calls[0]![0]).toMatchObject({
+      account: OWNER,
       address: TOKEN,
       functionName: 'approve',
       args: [NFT, amount],
     });
     expect(h.writeContract.mock.calls[1]![0]).toMatchObject({
+      account: OWNER,
       address: NFT,
       functionName: 'createAccount',
       args: [amount, 42n],
@@ -307,6 +349,7 @@ describe('walletOwnerActionSubmitter action shapes', () => {
     expect(h.readContract).not.toHaveBeenCalled();
     expect(h.writeContract).toHaveBeenCalledTimes(1);
     expect(h.writeContract.mock.calls[0]![0]).toMatchObject({
+      account: OWNER,
       address: NFT,
       functionName: 'registerAgent',
       args: [7n, OTHER],
@@ -319,6 +362,11 @@ describe('walletOwnerActionSubmitter action shapes', () => {
       txHash: ACTION_HASH,
       blockNumber: 2,
     });
+    expect(h.progress).toEqual([
+      { step: 'action', state: 'active' },
+      { step: 'action', state: 'submitted', txHash: ACTION_HASH },
+      { step: 'action', state: 'confirmed', txHash: ACTION_HASH },
+    ]);
   });
 
   it('deregisterAgent does not approve and returns the daemon-compatible shape', async () => {
@@ -327,6 +375,7 @@ describe('walletOwnerActionSubmitter action shapes', () => {
     expect(h.readContract).not.toHaveBeenCalled();
     expect(h.writeContract).toHaveBeenCalledTimes(1);
     expect(h.writeContract.mock.calls[0]![0]).toMatchObject({
+      account: OWNER,
       address: NFT,
       functionName: 'deregisterAgent',
       args: [7n, OTHER],
@@ -350,6 +399,7 @@ describe('walletOwnerActionSubmitter action shapes', () => {
     expect(h.writeContract).toHaveBeenCalledTimes(2);
     expect(h.writeContract.mock.calls[0]![0]).toMatchObject({ functionName: 'approve' });
     expect(h.writeContract.mock.calls[1]![0]).toMatchObject({
+      account: OWNER,
       address: NFT,
       functionName: 'topUp',
       args: [7n, amount],

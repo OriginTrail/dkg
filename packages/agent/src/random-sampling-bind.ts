@@ -23,6 +23,7 @@ import {
   type ProofBuilder,
   type ProverLogger,
   type ProverLoopStatus,
+  type RandomSamplingProverDeps,
   type ProverWal,
   type TickOutcome,
 } from '@origintrail-official/dkg-random-sampling';
@@ -65,6 +66,8 @@ export interface RandomSamplingBindOptions {
    * by the hook are caught and logged so the prover stays running.
    */
   onTick?: (outcome: TickOutcome) => void;
+  /** Foreground exact-KA repair used by the prover's one-shot extraction retry. */
+  repairMissingKnowledgeAsset?: RandomSamplingProverDeps['repairMissingKnowledgeAsset'];
 }
 
 /**
@@ -77,8 +80,27 @@ export interface RandomSamplingStatus {
   enabled: boolean;
   role: AgentRole;
   identityId: string;
+  /**
+   * Additive diagnostic field. Optional so consumers compiled against the
+   * earlier public status shape can keep constructing compatible mocks.
+   * Built-in agent handles always populate it.
+   */
+  disabledReason?: RandomSamplingDisabledReason | null;
+  /** Work is disabled while the owned prover finishes stopping. */
+  retiring?: boolean;
   loop: ProverLoopStatus | null;
 }
+
+export type RandomSamplingDisabledReason =
+  | 'not_started'
+  | 'edge_node'
+  | 'no_identity'
+  | 'awaiting_sharding_table'
+  | 'identity_lookup_failed'
+  | 'eligibility_lookup_failed'
+  | 'unsupported_chain'
+  | 'contracts_not_deployed'
+  | 'bind_failed';
 
 /**
  * Handle returned by {@link bindRandomSampling}. The agent owns its
@@ -93,18 +115,76 @@ export interface RandomSamplingHandle {
   getStatus(): RandomSamplingStatus;
 }
 
+export type RandomSamplingBindingResult =
+  | { kind: 'ready'; handle: RandomSamplingHandle }
+  | {
+    kind: 'unavailable';
+    reason: 'edge_node' | 'no_identity' | 'unsupported_chain' | 'contracts_not_deployed';
+    /** Retained only when construction acquired a resource before declining admission. */
+    handleToClose?: RandomSamplingHandle;
+  };
+
+export const RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_ERROR_CODE =
+  'RandomSamplingShutdownTimeout';
+
+export class RandomSamplingShutdownTimeoutError extends Error {
+  readonly code = RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_ERROR_CODE;
+
+  constructor(readonly timeoutMs: number) {
+    super(`Random Sampling prover did not physically retire within ${timeoutMs}ms`);
+    this.name = 'RandomSamplingShutdownTimeoutError';
+  }
+}
+
+/**
+ * Agent-owned bounded wait around the handle's stable physical-close promise.
+ * Timing out never changes or replaces that promise, so a later lifecycle
+ * retry observes the same shutdown and can safely release host dependencies.
+ */
+export async function stopRandomSamplingHandleWithin(
+  handle: RandomSamplingHandle,
+  timeoutMs: number,
+): Promise<void> {
+  return waitForRandomSamplingShutdownWithin(handle.stop(), timeoutMs);
+}
+
+/** Bound the wait while retaining ownership of the underlying physical drain. */
+export async function waitForRandomSamplingShutdownWithin(
+  retirement: Promise<void>,
+  timeoutMs: number,
+): Promise<void> {
+  let timedOut = false;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      resolve();
+    }, timeoutMs);
+    timeoutHandle.unref?.();
+  });
+  try {
+    await Promise.race([retirement, timeout]);
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+  if (timedOut) throw new RandomSamplingShutdownTimeoutError(timeoutMs);
+}
+
 const DEFAULT_TICK_INTERVAL_MS = 30_000;
 
 /**
- * Build a Random Sampling handle for the agent. Returns a no-op
- * handle when `role !== 'core'` or `identityId === 0n`, so callers
- * can wire this in unconditionally and the gating is internal.
+ * Build a Random Sampling binding for the agent. Unavailable outcomes carry
+ * their retry policy explicitly; callers never infer lifecycle policy from
+ * the compatibility-oriented status snapshot.
  */
-export async function bindRandomSampling(
+export async function resolveRandomSamplingBinding(
   opts: RandomSamplingBindOptions,
-): Promise<RandomSamplingHandle> {
+): Promise<RandomSamplingBindingResult> {
   if (opts.role !== 'core' || opts.identityId === 0n) {
-    return makeNoopHandle(opts.role, opts.identityId);
+    return {
+      kind: 'unavailable',
+      reason: opts.role !== 'core' ? 'edge_node' : 'no_identity',
+    };
   }
 
   // Validate the chain adapter has the methods the prover needs.
@@ -123,14 +203,14 @@ export async function bindRandomSampling(
   );
   if (missing.length > 0) {
     opts.log?.warn('rs.bind.missing-methods', { missing });
-    return makeNoopHandle(opts.role, opts.identityId);
+    return { kind: 'unavailable', reason: 'unsupported_chain' };
   }
   const readiness = (opts.chain as { isRandomSamplingReady?: () => boolean }).isRandomSamplingReady;
   if (typeof readiness === 'function' && !readiness.call(opts.chain)) {
     opts.log?.warn('rs.bind.not-deployed', {
       reason: 'RandomSampling/RandomSamplingStorage not resolved on chain adapter',
     });
-    return makeNoopHandle(opts.role, opts.identityId);
+    return { kind: 'unavailable', reason: 'contracts_not_deployed' };
   }
 
   const wal: ProverWal = opts.walPath
@@ -148,6 +228,7 @@ export async function bindRandomSampling(
     builder,
     wal,
     log: opts.log,
+    repairMissingKnowledgeAsset: opts.repairMissingKnowledgeAsset,
   });
 
   const loop = startProverLoop({
@@ -157,7 +238,7 @@ export async function bindRandomSampling(
     log: opts.log,
   });
 
-  return {
+  return { kind: 'ready', handle: {
     enabled: true,
     start: () => loop.start(),
     stop: () => loop.stop(),
@@ -165,12 +246,31 @@ export async function bindRandomSampling(
       enabled: true,
       role: opts.role,
       identityId: opts.identityId.toString(),
+      disabledReason: null,
       loop: loop.getStatus(),
     }),
-  };
+  } };
 }
 
-function makeNoopHandle(role: AgentRole, identityId: bigint): RandomSamplingHandle {
+/**
+ * Public compatibility facade. Since its introduction this function has
+ * returned a directly usable handle, including a disabled no-op handle when
+ * Random Sampling cannot run. Lifecycle policy belongs to the agent-owned
+ * runtime and is intentionally kept behind {@link resolveRandomSamplingBinding}.
+ */
+export async function bindRandomSampling(
+  opts: RandomSamplingBindOptions,
+): Promise<RandomSamplingHandle> {
+  const binding = await resolveRandomSamplingBinding(opts);
+  if (binding.kind === 'ready') return binding.handle;
+  return binding.handleToClose ?? makeNoopHandle(opts.role, opts.identityId, binding.reason);
+}
+
+function makeNoopHandle(
+  role: AgentRole,
+  identityId: bigint,
+  disabledReason: RandomSamplingDisabledReason,
+): RandomSamplingHandle {
   return {
     enabled: false,
     start: () => undefined,
@@ -179,6 +279,7 @@ function makeNoopHandle(role: AgentRole, identityId: bigint): RandomSamplingHand
       enabled: false,
       role,
       identityId: identityId.toString(),
+      disabledReason,
       loop: null,
     }),
   };

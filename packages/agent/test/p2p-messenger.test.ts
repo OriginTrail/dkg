@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { Messenger } from '../src/p2p/messenger.js';
-import type { ProtocolRouter } from '@origintrail-official/dkg-core';
+import type { ProtocolRouter, SendOptions } from '@origintrail-official/dkg-core';
 
 // NO MOCKS: the Messenger is real; `router` is a DI seam it's designed to
 // accept (ProtocolRouter). We substitute a plain hand-rolled recorder that
@@ -17,10 +17,10 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
 const PEER_A = '12D3KooWAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const PEER_B = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
 
-// router.send's 4th arg is the send-options object ({ timeoutMs?, signal? }).
+// router.send's 4th arg is the core SendOptions contract.
 type RouterSendRecorder = ReturnType<
   typeof recorder<
-    [string, string, Uint8Array, { timeoutMs?: number; signal?: AbortSignal } | undefined],
+    [string, string, Uint8Array, SendOptions | undefined],
     Promise<Uint8Array>
   >
 >;
@@ -65,12 +65,13 @@ describe('Messenger.sendToPeer', () => {
     expect(out).toEqual(new Uint8Array([0x01, 0x02]));
   });
 
-  it('forwards timeoutMs and signal to router.send', async () => {
+  it('forwards timeoutMs, payloadReuse, and signal to router.send', async () => {
     const { messenger, mocks } = makeMessenger();
     const controller = new AbortController();
 
     await messenger.sendToPeer(PEER_A, '/dkg/test/1.0.0', new Uint8Array([0xff]), {
       timeoutMs: 5000,
+      payloadReuse: 'single-use',
       signal: controller.signal,
     });
 
@@ -78,7 +79,7 @@ describe('Messenger.sendToPeer', () => {
       PEER_A,
       '/dkg/test/1.0.0',
       expect.any(Uint8Array),
-      { timeoutMs: 5000, signal: controller.signal },
+      { timeoutMs: 5000, payloadReuse: 'single-use', signal: controller.signal },
     ]);
   });
 

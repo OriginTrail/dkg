@@ -357,7 +357,10 @@ describe('context-graph write-path validation — real daemon route wiring', () 
   // ── every write route rejects an unknown contextGraphId before mutating ──
   it('rejects unknown wm/write targets with CONTEXT_GRAPH_NOT_FOUND before mutation', async () => {
     const res = await postJson(daemon, '/api/knowledge-assets/draft/wm/write', { contextGraphId: 'missing-cg', quads: QUADS });
-    expect(res.status).toBe(400);
+    expect(
+      res.status,
+      `${JSON.stringify(res.body)}\n${daemon.owner.stderr}`,
+    ).toBe(400);
     expect(res.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_FOUND' });
   });
 

@@ -42,6 +42,18 @@ const SUBGRAPH = args.subgraph ?? 'meta';
 const ASSERTION_NAME = args.assertion ?? 'project-profile';
 const DRY_RUN = args['dry-run'] === 'true';
 
+const token = DRY_RUN ? undefined : resolveToken(REPO_ROOT);
+const client = DRY_RUN ? undefined : makeClient({ apiBase: API_BASE, token });
+const { cgId } = client
+  ? await client.ensureProject({
+    id: PROJECT_ID,
+    name: args.name ?? 'DKG Code memory',
+    description: 'Shared context graph for the dkg-v9 monorepo itself.',
+  })
+  : { cgId: PROJECT_ID };
+
+const scopeGraph = (subGraph) => uri(`did:dkg:context-graph:${cgId}/${subGraph}`);
+
 const sink = createTripleSink();
 const { emit } = sink;
 
@@ -327,6 +339,8 @@ for (const c of queryCatalogs) {
   const id = Profile.uri.catalog(PROJECT_ID, c.slug);
   emit(uri(id), uri(Common.type), uri(Profile.T.QueryCatalog));
   emit(uri(id), uri(Profile.P.ofProfile), uri(profileId));
+  emit(uri(id), uri(Profile.P.scopeGraph), scopeGraph(c.sg));
+  // Transitional read-old/write-both field for pre-v2 catalog consumers.
   emit(uri(id), uri(Profile.P.forSubGraph), lit(c.sg));
   emit(uri(id), uri(Profile.P.displayName), lit(c.name));
   emit(uri(id), uri(Common.description), lit(c.description));
@@ -428,6 +442,7 @@ for (const q of savedQueries) {
   const id = Profile.uri.query(PROJECT_ID, q.slug);
   emit(uri(id), uri(Common.type), uri(Profile.T.SavedQuery));
   emit(uri(id), uri(Profile.P.ofProfile), uri(profileId));
+  emit(uri(id), uri(Profile.P.scopeGraph), scopeGraph(q.sg));
   emit(uri(id), uri(Profile.P.forSubGraph), lit(q.sg));
   emit(uri(id), uri(Profile.P.displayName), lit(q.name));
   emit(uri(id), uri(Common.description), lit(q.description));
@@ -448,13 +463,6 @@ if (DRY_RUN) {
   process.exit(0);
 }
 
-const token = resolveToken(REPO_ROOT);
-const client = makeClient({ apiBase: API_BASE, token });
-const { cgId } = await client.ensureProject({
-  id: PROJECT_ID,
-  name: args.name ?? 'DKG Code memory',
-  description: 'Shared context graph for the dkg-v9 monorepo itself.',
-});
 await client.ensureSubGraph(cgId, SUBGRAPH);
 await client.writeAssertion(
   {

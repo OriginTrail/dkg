@@ -1,0 +1,488 @@
+/**
+ * Query-catalog MCP facade.
+ *
+ * The catalog contract (encoding, parameter rendering, execution view, and
+ * immutable persistence) belongs to dkg-core + the daemon. These tools intentionally
+ * stay thin so CLI, UI, adapters, and local LLM clients execute the same
+ * contract rather than growing subtly different catalog implementations.
+ */
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
+import {
+  CONTEXT_GRAPH_QUERY_SUBGRAPH,
+  USER_QUERY_CATALOG_DESCRIPTION,
+  USER_QUERY_CATALOG_NAME,
+  USER_QUERY_CATALOG_SLUG,
+  buildQueryCatalogWrite,
+  decodeQueryCatalogReadResponse,
+  prepareQueryCatalogExecution,
+  type QueryCatalogItem,
+} from '@origintrail-official/dkg-core/query-catalog';
+import type { DkgClient, SparqlResult } from '../client.js';
+import type { DkgConfig } from '../config.js';
+import { bindingsToTable } from '../sparql.js';
+import { EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION } from './context-graph-description.js';
+import { filterContextGraphsForScope } from './context-graph-scope.js';
+import { resolveWorkingMemoryAgentAddress } from './working-memory-identity.js';
+
+type ToolResult = {
+  content: Array<{ type: 'text'; text: string }>;
+  structuredContent?: Record<string, unknown>;
+  isError?: boolean;
+};
+
+const ok = (text: string, structuredContent?: Record<string, unknown>): ToolResult => ({
+  content: [{ type: 'text', text }],
+  ...(structuredContent ? { structuredContent } : {}),
+});
+
+const err = (text: string): ToolResult => ({
+  content: [{ type: 'text', text }],
+  isError: true,
+});
+
+const formatError = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+const projectSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .optional()
+  .describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`);
+
+const parameterValueSchema = z.union([z.string(), z.number(), z.boolean()]);
+
+const parameterDefinitionSchema = z.object({
+  name: z.string().trim().min(1).describe('Placeholder name without braces.'),
+  type: z.enum(['string', 'integer', 'number', 'boolean', 'iri']),
+  label: z.string().trim().min(1).optional(),
+  description: z.string().trim().min(1).optional(),
+  required: z.boolean().optional(),
+  defaultValue: parameterValueSchema.optional(),
+});
+
+function resolveProject(projectId: string | undefined, config: DkgConfig): string | null {
+  return projectId ?? config.defaultProject ?? null;
+}
+
+function projectError(): ToolResult {
+  return err(
+    'No project specified. Pass `projectId`, set `DKG_PROJECT`, or pin a Context Graph in `.dkg/config.yaml`.',
+  );
+}
+
+function qualifiedSelector(item: QueryCatalogItem): string {
+  return `${item.subGraph}/${item.catalogSlug}/${item.slug}`;
+}
+
+function findSavedQuery(items: QueryCatalogItem[], selector: string): QueryCatalogItem | undefined {
+  const qualified = items.filter((item) => qualifiedSelector(item) === selector);
+  if (qualified.length === 1) return qualified[0];
+  const matches = items.filter((item) => item.slug === selector || item.name === selector);
+  if (matches.length > 1) {
+    throw new Error(
+      `Saved query selector is ambiguous: ${selector}. Use one of: `
+      + matches.map(qualifiedSelector).join(', '),
+    );
+  }
+  return matches[0];
+}
+
+function renderParameters(item: QueryCatalogItem): string {
+  if (item.parameters.length === 0) return 'none';
+  return item.parameters.map((parameter) => {
+    const optional = parameter.defaultValue === undefined
+      ? 'required'
+      : `default=${JSON.stringify(parameter.defaultValue)}`;
+    return `${parameter.name}:${parameter.type} (${optional})`;
+  }).join(', ');
+}
+
+function capQueryResult(result: SparqlResult, limit: number): {
+  result: SparqlResult;
+  totalCount: number;
+  truncated: boolean;
+} {
+  if (result.type === 'boolean') {
+    return { result, totalCount: 1, truncated: false };
+  }
+  if (result.type === 'quads') {
+    return {
+      result: { ...result, quads: result.quads.slice(0, limit) },
+      totalCount: result.quads.length,
+      truncated: result.quads.length > limit,
+    };
+  }
+  return {
+    result: { ...result, bindings: result.bindings.slice(0, limit) },
+    totalCount: result.bindings.length,
+    truncated: result.bindings.length > limit,
+  };
+}
+
+function renderQueryResult(result: SparqlResult, totalCount: number): string {
+  if (result.type === 'boolean') return String(result.value);
+  if (result.type === 'quads') {
+    const rows = result.quads.map((quad) => ({
+      subject: quad.subject,
+      predicate: quad.predicate,
+      object: quad.object,
+      graph: quad.graph ?? '',
+    }));
+    const tail = result.quads.length < totalCount
+      ? `\n\n_(showing ${result.quads.length} of ${totalCount})_`
+      : '';
+    return `${bindingsToTable(rows)}${tail}`;
+  }
+  const tail = result.bindings.length < totalCount
+    ? `\n\n_(showing ${result.bindings.length} of ${totalCount})_`
+    : '';
+  return `${bindingsToTable(result.bindings)}${tail}`;
+}
+
+async function readCatalog(client: DkgClient, projectId: string): Promise<QueryCatalogItem[]> {
+  const response = await client.readQueryCatalog(projectId);
+  return decodeQueryCatalogReadResponse(response);
+}
+
+export function registerQueryCatalogTools(
+  server: McpServer,
+  client: DkgClient,
+  config: DkgConfig,
+): void {
+  server.registerTool(
+    'dkg_query_catalog_context_graphs',
+    {
+      title: 'Find Context Graph Query Catalogs',
+      description:
+        'Inspect accessible DKG Context Graphs and return only graphs that actually contain saved query-catalog entries. ' +
+        'Use only for explicit cross-graph questions such as which/all Context Graphs have catalogs; never infer catalog presence ' +
+        'from graph names or descriptions. This tool does not resolve words such as default or current to one graph.',
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      inputSchema: {
+        scope: z.enum(['mine', 'all']).optional().default('mine').describe(
+          'Defaults to "mine" (created/joined Context Graphs). Use "all" for every graph known to this node.',
+        ),
+        limit: z.number().int().min(1).max(200).optional().default(100).describe(
+          'Maximum number of Context Graphs to inspect.',
+        ),
+        selectorLimit: z.number().int().min(0).max(50).optional().default(10).describe(
+          'Maximum saved-query selectors returned per matching Context Graph. Use 0 when only graph ids and counts are needed.',
+        ),
+      },
+    },
+    async ({ scope = 'mine', limit = 100, selectorLimit = 10 }): Promise<ToolResult> => {
+      try {
+        const accessible = filterContextGraphsForScope(await client.listProjects(), scope);
+        const inspected = accessible.slice(0, limit);
+        const outcomes: Array<{
+          row: (typeof inspected)[number];
+          items?: QueryCatalogItem[];
+          error?: string;
+        }> = inspected.map((row) => ({ row, error: 'not inspected' }));
+        const workerCount = Math.min(6, inspected.length);
+        let nextIndex = 0;
+        await Promise.all(Array.from({ length: workerCount }, async () => {
+          while (nextIndex < inspected.length) {
+            const index = nextIndex++;
+            const row = inspected[index];
+            try {
+              outcomes[index] = { row, items: await readCatalog(client, row.id) };
+            } catch (error) {
+              outcomes[index] = { row, error: formatError(error) };
+            }
+          }
+        }));
+
+        const matches = outcomes.flatMap((outcome) => {
+          if (!outcome.items?.length) return [];
+          const selectors = outcome.items.map(qualifiedSelector);
+          return [{
+            contextGraphId: outcome.row.id,
+            name: outcome.row.name,
+            count: outcome.items.length,
+            catalogs: [...new Set(outcome.items.map((item) => item.catalogSlug))],
+            selectors: selectors.slice(0, selectorLimit),
+            selectorsTruncated: selectors.length > selectorLimit,
+          }];
+        });
+        const failures = outcomes.flatMap((outcome) => outcome.error
+          ? [{ contextGraphId: outcome.row.id, error: outcome.error }]
+          : []);
+        const truncated = accessible.length > inspected.length;
+        if (!matches.length) {
+          const qualifier = failures.length
+            ? ` ${failures.length} graph(s) could not be inspected.`
+            : '';
+          const tail = truncated ? ` Inspection was limited to ${inspected.length} of ${accessible.length} graphs.` : '';
+          return ok(`No saved query catalogs found in ${inspected.length} inspected Context Graph(s).${qualifier}${tail}`, {
+            scope,
+            accessibleCount: accessible.length,
+            inspectedCount: inspected.length,
+            matchingCount: 0,
+            truncated,
+            items: [],
+            failures,
+          });
+        }
+        const lines = matches.map((match) => {
+          const name = match.name ? ` — ${match.name}` : '';
+          const catalogLabel = match.catalogs.length
+            ? ` · catalog(s): ${match.catalogs.map((slug) => `\`${slug}\``).join(', ')}`
+            : '';
+          const selectorLines = match.selectors.length
+            ? `\n  Selectors: ${match.selectors.map((selector) => `\`${selector}\``).join(', ')}`
+              + (match.selectorsTruncated ? ' …' : '')
+            : '';
+          return `- **${match.contextGraphId}**${name} · ${match.count} saved query(s)${catalogLabel}${selectorLines}`;
+        });
+        const warnings = [
+          ...(truncated ? [`Only ${inspected.length} of ${accessible.length} accessible graphs were inspected.`] : []),
+          ...(failures.length ? [`${failures.length} graph(s) could not be inspected.`] : []),
+        ];
+        return ok(
+          `Context Graphs with saved query catalogs (${matches.length}):\n\n${lines.join('\n')}`
+          + (warnings.length ? `\n\n${warnings.join(' ')}` : ''),
+          {
+            scope,
+            accessibleCount: accessible.length,
+            inspectedCount: inspected.length,
+            matchingCount: matches.length,
+            truncated,
+            items: matches,
+            failures,
+          },
+        );
+      } catch (error) {
+        return err(`Failed to discover query catalogs: ${formatError(error)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    'dkg_query_catalog_list',
+    {
+      title: 'List Query Catalog',
+      description:
+        'List saved, parameterized queries available in one DKG Context Graph. ' +
+        'Returns stable selectors, declared parameters, execution views, and ' +
+        'sub-graph scopes. Use this for catalog discovery; it does not execute a query.',
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      inputSchema: {
+        projectId: projectSchema,
+        catalogSlug: z.string().trim().min(1).optional(),
+        subGraph: z.string().trim().min(1).optional(),
+        limit: z.number().int().min(1).max(500).optional().default(100),
+      },
+    },
+    async ({ projectId, catalogSlug, subGraph, limit = 100 }): Promise<ToolResult> => {
+      const pid = resolveProject(projectId, config);
+      if (!pid) return projectError();
+      try {
+        const allItems = await readCatalog(client, pid);
+        const filtered = allItems.filter((item) =>
+          (!catalogSlug || item.catalogSlug === catalogSlug)
+          && (!subGraph || item.subGraph === subGraph));
+        const items = filtered.slice(0, limit);
+        if (items.length === 0) {
+          return ok(`No saved queries found in Context Graph \`${pid}\`.`, {
+            contextGraphId: pid,
+            count: 0,
+            items: [],
+          });
+        }
+        const lines = items.map((item) => [
+          `- **${item.name}** — \`${qualifiedSelector(item)}\``,
+          `  Catalog: \`${item.catalogSlug}\` · Sub-graph: \`${item.subGraph}\` · View: \`${item.view ?? 'default'}\``,
+          `  Parameters: ${renderParameters(item)}`,
+          ...(item.description ? [`  ${item.description}`] : []),
+        ].join('\n'));
+        const tail = items.length < filtered.length
+          ? `\n\n_(showing ${items.length} of ${filtered.length})_`
+          : '';
+        return ok(
+          `Saved queries in \`${pid}\`:\n\n${lines.join('\n')}${tail}`,
+          {
+            contextGraphId: pid,
+            count: filtered.length,
+            items: items.map((item) => ({
+              selector: qualifiedSelector(item),
+              slug: item.slug,
+              name: item.name,
+              description: item.description,
+              catalogSlug: item.catalogSlug,
+              catalogName: item.catalogName,
+              subGraph: item.subGraph,
+              view: item.view,
+              resultColumn: item.resultColumn,
+              parameters: item.parameters,
+            })),
+          },
+        );
+      } catch (error) {
+        return err(`Failed to list query catalog: ${formatError(error)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    'dkg_query_catalog_run',
+    {
+      title: 'Run Saved Query',
+      description:
+        'Execute one saved query by its stable selector, slug, or exact name. ' +
+        'Runtime parameter values are rendered by the DKG query-catalog contract; ' +
+        'they are never interpolated as raw SPARQL.',
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      inputSchema: {
+        projectId: projectSchema,
+        selector: z.string().trim().min(1).describe(
+          'Prefer the selector returned by dkg_query_catalog_list. Selectors are scoped to a Context Graph, '
+          + 'so pass the same projectId used for that list call.',
+        ),
+        parameters: z.record(parameterValueSchema).optional().default({}),
+        limit: z.number().int().min(1).max(500).optional().default(100),
+      },
+    },
+    async ({ projectId, selector, parameters = {}, limit = 100 }): Promise<ToolResult> => {
+      const pid = resolveProject(projectId, config);
+      if (!pid) return projectError();
+      try {
+        const items = await readCatalog(client, pid);
+        const match = findSavedQuery(items, selector);
+        if (!match) return err(`Saved query not found: ${selector}`);
+        const execution = prepareQueryCatalogExecution(match, parameters);
+        const agentAddress = execution.view === 'working-memory'
+          ? await resolveWorkingMemoryAgentAddress(client)
+          : undefined;
+        const result = await client.query({
+          sparql: execution.sparql,
+          contextGraphId: pid,
+          ...(execution.subGraphName ? { subGraphName: execution.subGraphName } : {}),
+          ...(execution.view ? { view: execution.view } : {}),
+          ...(agentAddress ? { agentAddress } : {}),
+        });
+        const capped = capQueryResult(result, limit);
+        return ok(
+          `Saved query **${match.name}** (\`${qualifiedSelector(match)}\`) in \`${pid}\`:\n\n`
+          + renderQueryResult(capped.result, capped.totalCount),
+          {
+            contextGraphId: pid,
+            selector: qualifiedSelector(match),
+            query: {
+              slug: match.slug,
+              name: match.name,
+              catalogSlug: match.catalogSlug,
+              subGraph: match.subGraph,
+              view: match.view,
+              parameters: match.parameters,
+            },
+            result: capped.result,
+            resultMetadata: {
+              totalCount: capped.totalCount,
+              returnedCount: capped.result.type === 'boolean'
+                ? 1
+                : capped.result.type === 'quads'
+                  ? capped.result.quads.length
+                  : capped.result.bindings.length,
+              truncated: capped.truncated,
+            },
+          },
+        );
+      } catch (error) {
+        return err(`Failed to run saved query: ${formatError(error)}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    'dkg_query_catalog_save',
+    {
+      title: 'Save Query Catalog Entry',
+      description:
+        'Save an immutable parameterized SPARQL query revision in the Context ' +
+        'Graph profile catalog. This mutates local DKG state. Never call it ' +
+        'unless the user explicitly asks to save a catalog query. Repeating the ' +
+        'exact same definition is idempotent; changed definitions create new revisions. ' +
+        'Use raw SPARQL and wrap absolute or compact quad IRIs in angle brackets ' +
+        '(for example `<urn:item:1>`, `<rdf:type>`, and `<schema:category>`).',
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      inputSchema: {
+        projectId: projectSchema,
+        name: z.string().trim().min(1).max(160),
+        description: z.string().trim().min(1).max(2_000).optional(),
+        sparql: z.string().trim().min(1).max(100_000).describe(
+          'Parameterized raw SPARQL. Wrap absolute IRIs in <...>. Match predicates written through ' +
+          'the quad API exactly, e.g. `<rdf:type>` and `<schema:category>`. Parameter placeholders use {{name}}.',
+        ),
+        subGraph: z.string().trim().min(1).optional().default(CONTEXT_GRAPH_QUERY_SUBGRAPH),
+        catalogSlug: z.string().trim().min(1).optional().default(USER_QUERY_CATALOG_SLUG),
+        catalogName: z.string().trim().min(1).max(160).optional().default(USER_QUERY_CATALOG_NAME),
+        catalogDescription: z.string().trim().min(1).max(2_000).optional().default(USER_QUERY_CATALOG_DESCRIPTION),
+        resultColumn: z.string().trim().min(1).optional(),
+        rank: z.number().int().min(0).max(1_000_000).optional().default(99),
+        catalogRank: z.number().int().min(0).max(1_000_000).optional().default(999),
+        parameters: z.array(parameterDefinitionSchema).max(50).optional().default([]),
+        view: z.enum(['working-memory', 'shared-working-memory', 'verifiable-memory']).optional(),
+      },
+    },
+    async (input): Promise<ToolResult> => {
+      const pid = resolveProject(input.projectId, config);
+      if (!pid) return projectError();
+      try {
+        const write = buildQueryCatalogWrite({
+          contextGraphId: pid,
+          name: input.name,
+          description: input.description,
+          sparql: input.sparql,
+          subGraph: input.subGraph,
+          catalogSlug: input.catalogSlug,
+          catalogName: input.catalogName,
+          catalogDescription: input.catalogDescription,
+          resultColumn: input.resultColumn,
+          rank: input.rank,
+          catalogRank: input.catalogRank,
+          parameters: input.parameters,
+          view: input.view,
+        });
+        const response = await client.writeQueryCatalog({
+          contextGraphId: pid,
+          quads: write.quads,
+        });
+        return ok(
+          `${response.alreadyExists ? 'Query already exists' : 'Saved query'} **${write.savedQuery.name}** as `
+          + `\`${qualifiedSelector(write.savedQuery)}\` in Context Graph \`${pid}\` `
+          + `(${response.triplesWritten} triples, assertion=${response.assertionName}).`,
+          {
+            ...response,
+            selector: qualifiedSelector(write.savedQuery),
+            savedQuery: write.savedQuery,
+          },
+        );
+      } catch (error) {
+        return err(`Failed to save catalog query: ${formatError(error)}`);
+      }
+    },
+  );
+}

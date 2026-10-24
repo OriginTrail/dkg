@@ -7,16 +7,20 @@ import {
 export interface StorageAckTiming {
   handlerDeadlineMs: number;
   sendTimeoutMs: number;
+  /** Maximum ACK collection rounds that this publisher may run at once. */
+  maxConcurrentCollections: number;
 }
 
 export interface StorageAckTimingInput {
   handlerDeadlineMs?: number;
   sendTimeoutMs?: number;
+  maxConcurrentCollections?: number;
 }
 
 export const STORAGE_ACK_SEND_TIMEOUT_DEFAULT_MS = DEFAULT_SEND_TIMEOUT_MS;
 export const STORAGE_ACK_HANDLER_DEADLINE_DEFAULT_MS = DEFAULT_ACK_HANDLER_DEADLINE_MS;
 export const STORAGE_ACK_TIMING_SAFETY_MARGIN_MS = ACK_HANDLER_DEADLINE_SAFETY_MARGIN_MS;
+export const STORAGE_ACK_MAX_CONCURRENT_COLLECTIONS_DEFAULT = 1;
 
 function requirePositiveSafeIntegerMs(value: unknown, label: string): number | undefined {
   if (value === undefined) return undefined;
@@ -39,7 +43,10 @@ export function resolveStorageAckTiming(
   label = 'storageAck',
 ): StorageAckTiming {
   if (storageAck != null && (typeof storageAck !== 'object' || Array.isArray(storageAck))) {
-    throw new Error(`${label} must be an object with optional handlerDeadlineMs/sendTimeoutMs fields`);
+    throw new Error(
+      `${label} must be an object with optional handlerDeadlineMs/sendTimeoutMs/` +
+      'maxConcurrentCollections fields',
+    );
   }
   const handlerOverride = requireNonNegativeSafeIntegerMs(
     storageAck?.handlerDeadlineMs,
@@ -49,6 +56,10 @@ export function resolveStorageAckTiming(
     storageAck?.sendTimeoutMs,
     `${label}.sendTimeoutMs`,
   );
+  const maxConcurrentCollections = requirePositiveSafeIntegerMs(
+    storageAck?.maxConcurrentCollections,
+    `${label}.maxConcurrentCollections`,
+  ) ?? STORAGE_ACK_MAX_CONCURRENT_COLLECTIONS_DEFAULT;
   const handlerDeadlineMs = handlerOverride ?? STORAGE_ACK_HANDLER_DEADLINE_DEFAULT_MS;
   const sendTimeoutMs = sendOverride ?? Math.max(
     STORAGE_ACK_SEND_TIMEOUT_DEFAULT_MS,
@@ -64,5 +75,5 @@ export function resolveStorageAckTiming(
       `(got handlerDeadlineMs=${handlerDeadlineMs}, sendTimeoutMs=${sendTimeoutMs})`,
     );
   }
-  return { handlerDeadlineMs, sendTimeoutMs };
+  return { handlerDeadlineMs, sendTimeoutMs, maxConcurrentCollections };
 }

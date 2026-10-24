@@ -248,7 +248,7 @@ describe("DkgNodePlugin", () => {
   });
 
 
-  it('registers session_end hook and all exported tools via register()', () => {
+  it('registers session_end hook and all exported tools via register()', async () => {
     const plugin = new DkgNodePlugin();
     const registeredHooks: Array<{ event: string; name?: string }> = [];
     const registeredTools: OpenClawTool[] = [];

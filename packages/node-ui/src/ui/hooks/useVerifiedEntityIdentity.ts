@@ -138,8 +138,8 @@ export function useVerifiedEntityIdentity(
     (async () => {
       try {
         const [ownerRes, anchorRes] = await Promise.all([
-          executeQuery(buildOwnerQuery(contextGraphId, entityUri), contextGraphId).catch(() => null),
-          executeQuery(buildAnchorQuery(contextGraphId, entityUri), contextGraphId).catch(() => null),
+          executeQuery(buildOwnerQuery(contextGraphId, entityUri), { contextGraphId }).catch(() => null),
+          executeQuery(buildAnchorQuery(contextGraphId, entityUri), { contextGraphId }).catch(() => null),
         ]);
         if (version !== versionRef.current) return;
 

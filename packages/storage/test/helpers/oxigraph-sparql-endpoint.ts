@@ -11,6 +11,8 @@
  *   - POST /update                                  → store.update(), 204 / 400
  *   - POST /query  Accept: sparql-results+json      → SELECT (W3C JSON) / ASK
  *   - POST /query  Accept: n-quads | n-triples      → CONSTRUCT (N-Quads text)
+ * It also accepts BlazegraphStore's N-Quads bulk-insert request on /query,
+ * allowing backend-portability tests to exercise that adapter hermetically.
  */
 import { createServer, type Server } from 'node:http';
 import oxigraph from 'oxigraph';
@@ -69,21 +71,40 @@ export interface OxigraphSparqlEndpoint {
   close: () => Promise<void>;
 }
 
-export async function startOxigraphSparqlEndpoint(): Promise<OxigraphSparqlEndpoint> {
+export async function startOxigraphSparqlEndpoint(options: { maxRequestBytes?: number } = {}): Promise<OxigraphSparqlEndpoint> {
   const store = new oxigraph.Store();
   const server: Server = createServer((req, res) => {
-    let body = '';
-    req.on('data', (c) => { body += c; });
+    let body = '', bytes = 0, rejected = false;
+    req.on('data', (c: Buffer) => {
+      if (rejected) return;
+      bytes += c.length;
+      if (bytes > (options.maxRequestBytes ?? Infinity)) {
+        rejected = true; body = ''; res.writeHead(413); res.end('SPARQL request too large');
+      } else body += c;
+    });
     req.on('end', () => {
+      if (rejected) return;
       try {
-        if (req.url?.includes('/update')) {
-          store.update(body);
+        const contentType = String(req.headers['content-type'] ?? '');
+        // Daemon reset/ownership requests use SPARQL Protocol form encoding;
+        // the runtime store adapter sends raw SPARQL to the same endpoint.
+        const form = contentType.includes('application/x-www-form-urlencoded')
+          ? new URLSearchParams(body)
+          : undefined;
+        if (contentType.includes('text/x-nquads') || contentType.includes('application/n-quads')) {
+          store.load(body, { format: 'application/n-quads' });
+          res.writeHead(200);
+          res.end();
+          return;
+        }
+        if (req.url?.includes('/update') || contentType.includes('application/sparql-update') || form?.has('update')) {
+          store.update(form?.get('update') ?? body);
           res.writeHead(204);
           res.end();
           return;
         }
         const accept = String(req.headers['accept'] ?? '');
-        const result = store.query(body);
+        const result = store.query(form?.get('query') ?? body);
 
         if (typeof result === 'boolean') {
           res.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });

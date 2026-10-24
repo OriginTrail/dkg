@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test kafka-streams/test/*.mjs"
+    "test": "node --test kafka-streams/test/*.mjs epcis-bike/test/*.mjs"
   },
   "dependencies": {
     "@multiformats/multiaddr": "^13.0.3",

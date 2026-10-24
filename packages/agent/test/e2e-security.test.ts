@@ -16,7 +16,7 @@ import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DKGAgent } from '../src/index.js';
+import { DKGAgent as RealDKGAgent } from '../src/index.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import {
@@ -30,6 +30,16 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { AccessClient, AccessHandler, DKGPublisher } from '@origintrail-official/dkg-publisher';
 import { InMemoryMessageIdempotencyStore, InMemoryProtocolOutboxStore } from '@origintrail-official/dkg-core';
 import { Messenger } from '../src/p2p/messenger.js';
+
+type DKGAgent = RealDKGAgent;
+const DKGAgent = {
+  create(config: Parameters<typeof RealDKGAgent.create>[0]) {
+    return RealDKGAgent.create({
+      rfc64CatalogActivation: { enabled: false },
+      ...config,
+    });
+  },
+};
 
 // rc.9 PR-8: PROTOCOL_ACCESS migrated onto the Universal Messenger
 // substrate (wire prefix bumped to /dkg/10.0.1/private-access). The
@@ -465,6 +475,15 @@ describe('Access protocol round-trip', () => {
       predicate: 'http://dkg.io/ontology/accessPolicy',
     });
     await storeA.insert([
+      // Access metadata is accepted only from an authoritative root context-
+      // graph registry. This test constructs DKGPublisher directly (without
+      // DKGAgent.createContextGraph), so declare that control-plane fact here.
+      {
+        subject: `did:dkg:context-graph:${CONTEXT_GRAPH}`,
+        predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        object: 'https://dkg.network/ontology#ContextGraph',
+        graph: metaGraph,
+      },
       {
         subject: result.ual,
         predicate: 'http://dkg.io/ontology/accessPolicy',
@@ -486,6 +505,8 @@ describe('Access protocol round-trip', () => {
     expect(result.status).toBe('confirmed');
     const ka = result.kaManifest[0];
     expect(ka).toBeDefined();
+    // Preserve the legacy token-address compatibility route while graph-scoped
+    // V2 assets continue to use only their canonical bare UAL.
     const accessResult = await accessClient.requestAccess(nodeA.peerId, `${result.ual}/${ka!.tokenId}`);
 
     expect(accessResult.granted, accessResult.rejectionReason).toBe(true);

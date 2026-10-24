@@ -2,6 +2,8 @@ import {
   PROTOCOL_STORAGE_ACK,
   PROTOCOL_STORAGE_ACK_V2,
   PROTOCOL_STORAGE_UPDATE_ACK,
+  PROTOCOL_STORAGE_UPDATE_ACK_V2,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
   encodePublishIntent,
   encodeUpdateIntent,
   decodeStorageACK,
@@ -11,7 +13,9 @@ import {
   isTransientStorageACKDeclineCode,
   STORAGE_ACK_DECLINE_CODES,
   boundedDeclineCodeLabel,
+  isProtocolUnsupportedError,
   isSubscriptionSource,
+  createGraphKnowledgeAssetScope,
   withSpan,
   getMetrics,
   type PublishIntentMsg,
@@ -22,6 +26,7 @@ import {
 import { ethers } from 'ethers';
 import { QuorumUnmetError, type PeerOutcome } from './ack-errors.js';
 import type { V10ACKMode } from './publisher.js';
+import { hasValidGraphScopedContent } from './graph-publish-envelope.js';
 
 /**
  * Why an ACK signer pre-flight rejected a recovered signer. Mirrors
@@ -40,7 +45,12 @@ export interface ACKVerifyResult {
 export interface ACKCollectorDeps {
   gossipPublish: (topic: string, data: Uint8Array) => Promise<void>;
   sendP2P: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
-  getConnectedCorePeers: (protocol?: string) => string[];
+  /**
+   * Resolve the candidate pool before an ACK round freezes it. Implementers
+   * may return a synchronous pool for backward compatibility or await network
+   * admission; consumers must always await the result.
+   */
+  getConnectedCorePeers: (protocol?: string) => string[] | Promise<string[]>;
   /**
    * Boolean ACK signer pre-flight. Backward-compatible legacy entry
    * point — when only this is provided the rejection log surfaces a
@@ -119,6 +129,15 @@ export interface ACKCollectorParams {
   merkleLeafCount: number;
   /** Canonical KA UAL for publisher-local lifecycle context. Not sent on the PublishIntent wire. */
   assetUal?: string;
+  /** Complete rootless-KA envelope; omitted together for legacy intents. */
+  contentScopeVersion?: number;
+  kaUal?: string;
+  assertionVersion?: string;
+  publicTripleCount?: number;
+  privateMerkleRoot?: Uint8Array;
+  privateTripleCount?: number;
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers?: string[];
   ackMode?: V10ACKMode;
 }
 
@@ -159,6 +178,8 @@ function transientDeclineRetryReason(code: string): string {
       return 'responder is still missing ciphertext chunks';
     case STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE:
       return 'responder store is saturated or temporarily unavailable';
+    case STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE:
+      return 'responder cannot yet commit to promoting the data to its verifiable memory';
     default:
       return 'the decline is retryable';
   }
@@ -195,6 +216,111 @@ function declineLogMessage(message: string): string {
   return sanitizeDeclineField(message, MAX_DECLINE_LOG_MESSAGE_CHARS);
 }
 
+type PeerStatus =
+  | { kind: 'ack'; ack: CollectedACK }
+  | { kind: 'storage-decline'; code: string; message: string }
+  | { kind: 'ack-validation'; reason: string }
+  | { kind: 'protocol-unsupported'; message: string }
+  | { kind: 'transport-error'; message: string };
+
+/**
+ * Owns the terminal status for every peer participating in one ACK round.
+ * Recording a new status replaces stale evidence from an earlier attempt, and
+ * the two projections keep structured telemetry and legacy operator text in
+ * sync as new status categories are added.
+ */
+class PeerStatusLedger {
+  private readonly statuses = new Map<string, PeerStatus>();
+
+  recordACK(ack: CollectedACK): void {
+    this.statuses.set(ack.peerId, { kind: 'ack', ack });
+  }
+
+  recordStorageDecline(peerId: string, code: string, message: string): void {
+    this.statuses.set(peerId, { kind: 'storage-decline', code, message });
+  }
+
+  recordACKValidation(peerId: string, reason: string): void {
+    this.statuses.set(peerId, { kind: 'ack-validation', reason });
+  }
+
+  recordProtocolUnsupported(peerId: string, message: string): void {
+    this.statuses.set(peerId, { kind: 'protocol-unsupported', message });
+  }
+
+  recordTransportError(peerId: string, message: string): void {
+    this.statuses.set(peerId, { kind: 'transport-error', message });
+  }
+
+  clear(peerId: string): void {
+    this.statuses.delete(peerId);
+  }
+
+  snapshot(corePeers: string[]): PeerOutcome[] {
+    return corePeers.map((peerId): PeerOutcome => {
+      const status = this.statuses.get(peerId);
+      if (!status) return { peerId, reason: 'no_response' };
+      switch (status.kind) {
+        case 'ack': {
+          const advertised = status.ack.subscriptionSource !== undefined ? true : undefined;
+          return {
+            peerId,
+            dialOk: true,
+            protocolSupported: true,
+            ...(advertised !== undefined ? { swmHostModeAdvertised: advertised } : {}),
+            reason: status.ack.subscriptionSource
+              ? `ACK:${status.ack.subscriptionSource}`
+              : 'ACK',
+          };
+        }
+        case 'storage-decline':
+          return {
+            peerId,
+            dialOk: true,
+            protocolSupported: true,
+            reason: `STORAGE_ACK_DECLINE:${status.code}`,
+          };
+        case 'ack-validation':
+          return {
+            peerId,
+            dialOk: true,
+            protocolSupported: true,
+            reason: status.reason,
+          };
+        case 'protocol-unsupported':
+          return {
+            peerId,
+            dialOk: true,
+            protocolSupported: false,
+            reason: 'PROTOCOL_UNSUPPORTED',
+          };
+        case 'transport-error':
+          return { peerId, dialOk: false, reason: 'TRANSPORT_ERROR' };
+      }
+    });
+  }
+
+  formatLegacyDetail(): string {
+    const declineDetails: string[] = [];
+    const terminalDetails: string[] = [];
+    for (const [peerId, status] of this.statuses) {
+      const tagPrefix = peerId.slice(-8);
+      if (status.kind === 'storage-decline') {
+        const tag = `${tagPrefix}→${status.code}`;
+        declineDetails.push(status.message ? `${tag} (${status.message})` : tag);
+      } else if (status.kind === 'protocol-unsupported' || status.kind === 'transport-error') {
+        const code = status.kind === 'protocol-unsupported'
+          ? 'PROTOCOL_UNSUPPORTED'
+          : 'TRANSPORT_ERROR';
+        const tag = `${tagPrefix}→${code}`;
+        terminalDetails.push(status.message ? `${tag} (${status.message})` : tag);
+      }
+    }
+    const formatted = [...declineDetails, ...terminalDetails].join('; ');
+    return formatted ? ` Declines: ${formatted}.` : '';
+  }
+}
+
 /**
  * ACKCollector implements V10 spec §9.0 Phase 3: collecting 3 core node
  * StorageACKs via direct P2P before the chain TX.
@@ -209,6 +335,26 @@ export class ACKCollector {
 
   constructor(deps: ACKCollectorDeps) {
     this.deps = deps;
+  }
+
+  private async resolveConnectedCorePeers(
+    protocol: string,
+    requiredACKs: number,
+  ): Promise<string[]> {
+    try {
+      return await this.deps.getConnectedCorePeers(protocol);
+    } catch (err) {
+      if (err instanceof QuorumUnmetError) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      throw new QuorumUnmetError({
+        collected: 0,
+        required: requiredACKs,
+        dialled: 0,
+        peerOutcomes: [],
+        legacyMessage: `ACK candidate discovery failed for protocol ${protocol}: ${message}`,
+        cause: err,
+      });
+    }
   }
 
   async collect(params: ACKCollectorParams): Promise<ACKCollectionResult> {
@@ -280,9 +426,20 @@ export class ACKCollector {
     } = ctx;
 
     const log = this.deps.log ?? (() => {});
-    if (!Number.isInteger(params.merkleLeafCount) || params.merkleLeafCount < 1) {
+    const ackMode = params.ackMode ?? { kind: 'public' as const };
+    // Curated KAs are challenged against their public catalog commitment,
+    // not the private assertion's public-leaf tree. The lifecycle contract
+    // consequently permits merkleLeafCount=0 for curated KAs while rejecting
+    // it for public KAs. Keep that distinction on the ACK wire too so a fully
+    // private curated KA does not need a synthetic public placeholder triple.
+    if (
+      !Number.isInteger(params.merkleLeafCount)
+      || params.merkleLeafCount < 0
+      || (params.merkleLeafCount === 0 && ackMode.kind !== 'curated-catalog')
+    ) {
       throw new Error(
-        `ACK collection failed: merkleLeafCount must be a positive integer, got ${params.merkleLeafCount}`,
+        `ACK collection failed: merkleLeafCount must be positive for public KAs ` +
+          `(zero is valid only for curated-catalog ACKs), got ${params.merkleLeafCount}`,
       );
     }
     if (params.kaCount !== 1) {
@@ -290,7 +447,14 @@ export class ACKCollector {
         `ACK collection failed: V10 publish requires exactly one Knowledge Asset (kaCount=1); got ${params.kaCount}`,
       );
     }
-    const ackMode = params.ackMode ?? { kind: 'public' as const };
+    const isGraphScoped = params.contentScopeVersion !== undefined
+      || params.kaUal !== undefined
+      || params.assertionVersion !== undefined
+      || params.publicTripleCount !== undefined
+      || params.privateMerkleRoot !== undefined
+      || params.privateTripleCount !== undefined
+      || params.accessPolicy !== undefined
+      || params.allowedPeers !== undefined;
     const privateMerkleRoots = ackMode.kind === 'folded-private'
       ? ackMode.privateMerkleRoots
       : [];
@@ -307,6 +471,60 @@ export class ACKCollector {
     }
     if (ackMode.kind === 'folded-private' && privateMerkleRoots.length === 0) {
       throw new Error('ACK collection failed: folded-private ACK mode requires at least one privateMerkleRoot');
+    }
+    if (isGraphScoped) {
+      if (
+        params.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
+        || !params.kaUal
+        || !params.assertionVersion
+        || params.publicTripleCount === undefined
+        || params.privateTripleCount === undefined
+      ) {
+        throw new Error('ACK collection failed: graph-scoped publish requires a complete content envelope');
+      }
+      const allowedPeers = params.allowedPeers ?? [];
+      if (
+        (params.accessPolicy !== 'public'
+          && params.accessPolicy !== 'ownerOnly'
+          && params.accessPolicy !== 'allowList')
+        || new Set(allowedPeers).size !== allowedPeers.length
+        || allowedPeers.some((peer) => peer.trim() !== peer || peer.length === 0)
+        || (params.accessPolicy === 'allowList' && allowedPeers.length === 0)
+        || (params.accessPolicy !== 'allowList' && allowedPeers.length > 0)
+      ) {
+        throw new Error('ACK collection failed: graph-scoped publish has an invalid access envelope');
+      }
+      if (params.rootEntities.length !== 0) {
+        throw new Error('ACK collection failed: graph-scoped publish must not carry rootEntities');
+      }
+      if (privateMerkleRoots.length > 1) {
+        throw new Error('ACK collection failed: graph-scoped publish supports one KA-level private commitment');
+      }
+      const graphScope = createGraphKnowledgeAssetScope(params.kaUal, params.assertionVersion);
+      if (graphScope.ual !== params.kaUal || graphScope.assertionVersion !== '1') {
+        throw new Error('ACK collection failed: graph-scoped publish requires a canonical version-1 UAL');
+      }
+      if (!hasValidGraphScopedContent(
+        params.publicTripleCount,
+        params.privateTripleCount,
+        params.privateMerkleRoot,
+      )) {
+        throw new Error('ACK collection failed: graph-scoped publish has an invalid content envelope');
+      }
+      if (
+        params.privateMerkleRoot
+        && ackMode.kind === 'folded-private'
+        && (privateMerkleRoots.length !== 1
+          || !privateMerkleRoots[0].every((byte, index) => byte === params.privateMerkleRoot![index]))
+      ) {
+        throw new Error('ACK collection failed: graph-scoped private commitment differs from ACK mode');
+      }
+      if (
+        (params.privateMerkleRoot === undefined && privateMerkleRoots.length > 0)
+        || (params.privateMerkleRoot !== undefined && ackMode.kind === 'public')
+      ) {
+        throw new Error('ACK collection failed: graph-scoped ACK mode carries an undeclared private commitment');
+      }
     }
     for (const [idx, root] of privateMerkleRoots.entries()) {
       if (root.length !== 32) {
@@ -353,7 +571,7 @@ export class ACKCollector {
     // the V2 storage-ack protocol. This makes mixed-version clusters fail at
     // protocol/capability selection instead of dialing V1-only cores that would
     // ignore field 20 and sign/decline against a public-only root.
-    const ackProtocolId = privateMerkleRoots.length > 0
+    const ackProtocolId = privateMerkleRoots.length > 0 || isGraphScoped
       ? PROTOCOL_STORAGE_ACK_V2
       : PROTOCOL_STORAGE_ACK;
     const p2pMsg: PublishIntentMsg = {
@@ -376,8 +594,17 @@ export class ACKCollector {
       catalogRoot: catalogCommitment?.catalogRoot,
       catalogLeafCount: catalogCommitment?.catalogLeafCount,
       privateMerkleRoots: privateMerkleRoots.length > 0
+        && !isGraphScoped
         ? [...privateMerkleRoots]
         : undefined,
+      contentScopeVersion: params.contentScopeVersion,
+      kaUal: params.kaUal,
+      assertionVersion: params.assertionVersion,
+      publicTripleCount: params.publicTripleCount,
+      privateMerkleRoot: params.privateMerkleRoot,
+      privateTripleCount: params.privateTripleCount,
+      accessPolicy: params.accessPolicy,
+      allowedPeers: params.allowedPeers,
     };
     const intentBytes = encodePublishIntent(p2pMsg);
 
@@ -386,7 +613,7 @@ export class ACKCollector {
     // that decode payloads as FinalizationMessages, causing decode errors.
     log(`[ACKCollector] Collecting ACKs via direct P2P (merkleRoot=${ethers.hexlify(merkleRoot).slice(0, 18)}...)`);
 
-    const corePeers = this.deps.getConnectedCorePeers(ackProtocolId);
+    const corePeers = await this.resolveConnectedCorePeers(ackProtocolId, REQUIRED_ACKS);
     if (corePeers.length === 0) {
       // Pre-dial impossibility — wrap in the typed surface but preserve
       // the legacy `ACK collection failed: no connected core peers` text
@@ -486,6 +713,12 @@ export class ACKCollector {
     stagingQuads?: Uint8Array;
     isEncryptedPayload?: boolean;
     ackProtocolVersion?: number;
+    contentScopeVersion?: number;
+    kaUal?: string;
+    assertionVersion?: string;
+    publicTripleCount?: number;
+    privateMerkleRoot?: Uint8Array;
+    privateTripleCount?: number;
   }): Promise<ACKCollectionResult> {
     const {
       kaId, contextGraphId, preUpdateMerkleRootCount, newMerkleRoot,
@@ -500,9 +733,17 @@ export class ACKCollector {
         `UPDATE ACK collection failed: newMerkleRoot must be 32 bytes, got ${newMerkleRoot.length}`,
       );
     }
-    if (!Number.isInteger(newMerkleLeafCount) || newMerkleLeafCount < 1) {
+    // The contract samples curated KAs through newCatalogLeafCount, so their
+    // private assertion may legitimately have zero public challenge leaves.
+    // Public updates must remain positive or the on-chain update reverts.
+    if (
+      !Number.isInteger(newMerkleLeafCount)
+      || newMerkleLeafCount < 0
+      || (newMerkleLeafCount === 0 && params.isEncryptedPayload !== true)
+    ) {
       throw new Error(
-        `UPDATE ACK collection failed: newMerkleLeafCount must be a positive integer, got ${newMerkleLeafCount}`,
+        `UPDATE ACK collection failed: newMerkleLeafCount must be positive for public KAs ` +
+          `(zero is valid only for curated encrypted updates), got ${newMerkleLeafCount}`,
       );
     }
 
@@ -530,12 +771,21 @@ export class ACKCollector {
       stagingQuads: params.stagingQuads,
       isEncryptedPayload: params.isEncryptedPayload === true ? true : undefined,
       ackProtocolVersion: params.ackProtocolVersion,
+      contentScopeVersion: params.contentScopeVersion,
+      kaUal: params.kaUal,
+      assertionVersion: params.assertionVersion,
+      publicTripleCount: params.publicTripleCount,
+      privateMerkleRoot: params.privateMerkleRoot,
+      privateTripleCount: params.privateTripleCount,
     };
     const intentBytes = encodeUpdateIntent(p2pMsg);
 
     log(`[ACKCollector] Collecting UPDATE ACKs via direct P2P (kaId=${kaId}, newMerkleRoot=${ethers.hexlify(newMerkleRoot).slice(0, 18)}...)`);
 
-    const corePeers = this.deps.getConnectedCorePeers(PROTOCOL_STORAGE_UPDATE_ACK);
+    const updateAckProtocolId = params.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION
+      ? PROTOCOL_STORAGE_UPDATE_ACK_V2
+      : PROTOCOL_STORAGE_UPDATE_ACK;
+    const corePeers = await this.resolveConnectedCorePeers(updateAckProtocolId, REQUIRED_ACKS);
     if (corePeers.length === 0) {
       throw new QuorumUnmetError({
         collected: 0,
@@ -579,7 +829,7 @@ export class ACKCollector {
 
     return this.runACKRound({
       intentBytes,
-      ackProtocolId: PROTOCOL_STORAGE_UPDATE_ACK,
+      ackProtocolId: updateAckProtocolId,
       ackDigest,
       merkleRoot: newMerkleRoot,
       contextGraphId,
@@ -621,40 +871,11 @@ export class ACKCollector {
     const collected: CollectedACK[] = [];
     const seenPeers = new Set<string>();
     const seenIdentityIds = new Set<bigint>();
-    // Per-peer typed declines from core nodes that ran the StorageACK
-    // handler against the request and decided they cannot sign. The
-    // publisher records the reason, skips retries against the declining
-    // peer, and surfaces all collected reasons in the final
-    // `storage_ack_insufficient` message when quorum can't be reached.
-    // Cores that pre-date the typed wire shape continue to throw / reset
-    // and follow the legacy retry path below — declines are strictly
-    // additive on the wire. ALSO carries the synthetic `TRANSPORT_ERROR`
-    // terminal outcome for peers whose final send attempt threw, so a
-    // peer that never answered surfaces WITH its transport error string
-    // instead of a bare `no_response` (testnet dead-air incident).
-    const declines = new Map<string, { code: string; message: string }>();
-    // ACKs that arrived over the protocol but failed publisher-side validation
-    // are not "no response". Track them separately so QuorumUnmetError can
-    // distinguish transport silence from an ACK the publisher rejected locally
-    // (signature, merkle root, or chain/RPC identity verification).
-    const ackFailures = new Map<string, { reason: string }>();
-    const recordACKFailure = (peerId: string, reason: string): void => {
-      ackFailures.set(peerId, { reason });
-      // A later terminal ACK-validation failure is more actionable than an
-      // earlier transient decline from the same peer.
-      declines.delete(peerId);
-    };
-
-    const formatDeclineDetail = (): string => {
-      if (declines.size === 0) return '';
-      const formatted = [...declines.entries()]
-        .map(([peer, { code, message }]) => {
-          const tag = `${peer.slice(-8)}→${code}`;
-          return message ? `${tag} (${message})` : tag;
-        })
-        .join('; ');
-      return ` Declines: ${formatted}.`;
-    };
+    // A single per-peer ledger owns replacement and rendering rules for ACKs,
+    // responder declines, validation failures, unsupported protocols, and
+    // transport errors. This keeps the busy retry loop from growing one-off
+    // maps and projections for every new terminal outcome.
+    const peerStatuses = new PeerStatusLedger();
 
     // Build the per-peer outcome list `QuorumUnmetError` carries
     // through to PR5 telemetry. Snapshots the collector's bookkeeping at
@@ -669,52 +890,7 @@ export class ACKCollector {
     // its existing sanitized form, and the test
     // `sanitizes and truncates peer-controlled decline messages` pins
     // a per-error length bound that double-rendering would blow past.
-    const snapshotPeerOutcomes = (): PeerOutcome[] => {
-      const ackedById = new Map(collected.map(a => [a.peerId, a] as const));
-      return corePeers.map((peerId): PeerOutcome => {
-        const ack = ackedById.get(peerId);
-        if (ack) {
-          // PR5: an ACK from a peer with `source=member` or any of
-          // the four host-mode sources is, by construction, advertising
-          // host-mode (or the stronger "I'm a member, decrypt+apply
-          // handler is authoritative") for this CG. Peers that ACKed
-          // without a source field are pre-PR5; we leave
-          // `swmHostModeAdvertised` undefined rather than asserting
-          // either way.
-          const advertised = ack.subscriptionSource !== undefined ? true : undefined;
-          return {
-            peerId,
-            dialOk: true,
-            protocolSupported: true,
-            ...(advertised !== undefined ? { swmHostModeAdvertised: advertised } : {}),
-            reason: ack.subscriptionSource ? `ACK:${ack.subscriptionSource}` : 'ACK',
-          };
-        }
-        const ackFailure = ackFailures.get(peerId);
-        if (ackFailure) {
-          return {
-            peerId,
-            dialOk: true,
-            protocolSupported: true,
-            reason: ackFailure.reason,
-          };
-        }
-        const decline = declines.get(peerId);
-        if (decline) {
-          const code = decline.code;
-          const reason = code === 'TRANSPORT_ERROR'
-            ? 'TRANSPORT_ERROR'
-            : `STORAGE_ACK_DECLINE:${code}`;
-          return {
-            peerId,
-            dialOk: code !== 'TRANSPORT_ERROR',
-            protocolSupported: code !== 'TRANSPORT_ERROR' ? true : undefined,
-            reason,
-          };
-        }
-        return { peerId, reason: 'no_response' };
-      });
-    };
+    const snapshotPeerOutcomes = (): PeerOutcome[] => peerStatuses.snapshot(corePeers);
 
     // PR #896 review (🟡): once the round is decided — quorum reached, timed
     // out, or proven impossible — any `requestACK` loop still sleeping
@@ -780,7 +956,7 @@ export class ACKCollector {
                   result: 'decline',
                   // `declineCode` is peer-supplied and untrusted — bound it to the
                   // known enum so a peer can't explode metric cardinality with
-                  // unique codes. Full code stays on the span + declines map.
+                  // unique codes. Full code stays on the span + status ledger.
                   decline_code: boundedDeclineCodeLabel(declineCode),
                 });
               }
@@ -811,8 +987,7 @@ export class ACKCollector {
             // final `storage_ack_insufficient` error. Overwriting any
             // prior entry is intentional — operators care most about
             // why the peer ultimately could not ACK.
-            declines.set(peerId, { code, message: declineMessage });
-            ackFailures.delete(peerId);
+            peerStatuses.recordStorageDecline(peerId, code, declineMessage);
 
             // Transient declines (SWM replication catching up via
             // gossip) can resolve on a retry, so re-send with backoff
@@ -867,14 +1042,14 @@ export class ACKCollector {
 
           const recoveredAddress = this.recoverACKSigner(ack, ackDigest);
           if (!recoveredAddress) {
-            recordACKFailure(peerId, 'INVALID_SIGNATURE');
+            peerStatuses.recordACKValidation(peerId, 'INVALID_SIGNATURE');
             getMetrics().ackPeerTotal.add(1, { result: 'rejected' });
             log(`[ACKCollector] Invalid ACK signature from ${peerId.slice(-8)}`);
             return null;
           }
 
           if (!this.merkleRootsMatch(ack.merkleRoot, merkleRoot)) {
-            recordACKFailure(peerId, 'MERKLE_ROOT_MISMATCH');
+            peerStatuses.recordACKValidation(peerId, 'MERKLE_ROOT_MISMATCH');
             getMetrics().ackPeerTotal.add(1, { result: 'rejected' });
             log(`[ACKCollector] Merkle root mismatch from ${peerId.slice(-8)}`);
             return null;
@@ -908,7 +1083,7 @@ export class ACKCollector {
             );
             if (!verdict.valid) {
               const reason = sanitizeDeclineField(verdict.reason ?? 'unknown', MAX_DECLINE_CODE_CHARS) || 'unknown';
-              recordACKFailure(peerId, `ACK_VERIFY:${reason}`);
+              peerStatuses.recordACKValidation(peerId, `ACK_VERIFY:${reason}`);
               getMetrics().ackPeerTotal.add(1, { result: 'rejected' });
               log(
                 `[ACKCollector] ACK from ${peerId.slice(-8)} rejected: ${reason}` +
@@ -932,7 +1107,7 @@ export class ACKCollector {
               { attributes: { 'dkg.identity_id': String(identityId) } },
             );
             if (!valid) {
-              recordACKFailure(peerId, 'ACK_VERIFY:key-not-registered');
+              peerStatuses.recordACKValidation(peerId, 'ACK_VERIFY:key-not-registered');
               getMetrics().ackPeerTotal.add(1, { result: 'rejected' });
               log(`[ACKCollector] Signer ${recoveredAddress.slice(0, 10)}... not registered for identity ${identityId} — rejecting ACK from ${peerId.slice(-8)}`);
               return null;
@@ -943,8 +1118,7 @@ export class ACKCollector {
           // has produced a valid ACK on a later retry — otherwise the
           // stale decline would still appear in `storage_ack_insufficient`
           // if quorum fails for unrelated reasons.
-          declines.delete(peerId);
-          ackFailures.delete(peerId);
+          peerStatuses.clear(peerId);
 
           // PR5: capture the peer-reported ACK-provenance source if
           // present. Pre-PR5 cores never set the field; treat any
@@ -971,6 +1145,18 @@ export class ACKCollector {
           };
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
+          if (isProtocolUnsupportedError(err)) {
+            getMetrics().ackPeerTotal.add(1, { result: 'protocol_unsupported' });
+            peerStatuses.recordProtocolUnsupported(
+              peerId,
+              sanitizeDeclineField(msg, MAX_DECLINE_MESSAGE_CHARS),
+            );
+            log(
+              `[ACKCollector] Peer ${peerId.slice(-8)} does not negotiate ${ackProtocolId}; `
+                + 'settling it without transport retries',
+            );
+            return null;
+          }
           transportAttempts += 1;
           getMetrics().ackPeerTotal.add(1, { result: 'transport_error' });
           if (transportAttempts < MAX_RETRIES) {
@@ -1006,10 +1192,10 @@ export class ACKCollector {
           // sanitized, bounded message here makes the terminal cause ride
           // `QuorumUnmetError.peerOutcomes` (reason `TRANSPORT_ERROR`) and
           // the `Declines:` detail on the aggregated message.
-          declines.set(peerId, {
-            code: 'TRANSPORT_ERROR',
-            message: sanitizeDeclineField(msg, MAX_DECLINE_MESSAGE_CHARS),
-          });
+          peerStatuses.recordTransportError(
+            peerId,
+            sanitizeDeclineField(msg, MAX_DECLINE_MESSAGE_CHARS),
+          );
           log(`[ACKCollector] Failed to get ACK from ${peerId.slice(-8)} after ${MAX_RETRIES} attempts: ${msg}`);
           return null;
         }
@@ -1043,7 +1229,7 @@ export class ACKCollector {
           peerOutcomes: snapshotPeerOutcomes(),
           legacyMessage:
             `storage_ack_insufficient: got ${collected.length}/${REQUIRED_ACKS} valid ACKs after ` +
-            `${peersSettled}/${corePeers.length} core peer(s) settled — quorum no longer reachable.${formatDeclineDetail()}`,
+            `${peersSettled}/${corePeers.length} core peer(s) settled — quorum no longer reachable.${peerStatuses.formatLegacyDetail()}`,
         }));
       }
     };
@@ -1062,6 +1248,7 @@ export class ACKCollector {
                 seenPeers.add(ack.peerId);
                 seenIdentityIds.add(ack.nodeIdentityId);
                 collected.push(ack);
+                peerStatuses.recordACK(ack);
                 if (collected.length >= REQUIRED_ACKS) {
                   // Eagerly mark the round settled so any peers still mid-
                   // backoff bail before their next dial (see `roundIsOver`).
@@ -1083,7 +1270,7 @@ export class ACKCollector {
             dialled: corePeers.length,
             peerOutcomes: snapshotPeerOutcomes(),
             legacyMessage:
-              `storage_ack_timeout: only ${collected.length}/${REQUIRED_ACKS} ACKs received within ${ACK_TIMEOUT_MS}ms.${formatDeclineDetail()}`,
+              `storage_ack_timeout: only ${collected.length}/${REQUIRED_ACKS} ACKs received within ${ACK_TIMEOUT_MS}ms.${peerStatuses.formatLegacyDetail()}`,
           })),
             ACK_TIMEOUT_MS,
           ),
@@ -1104,7 +1291,7 @@ export class ACKCollector {
         peerOutcomes: snapshotPeerOutcomes(),
         legacyMessage:
           `storage_ack_insufficient: got ${collected.length}/${REQUIRED_ACKS} valid ACKs. ` +
-          `Tried ${corePeers.length} core peers.${formatDeclineDetail()}`,
+          `Tried ${corePeers.length} core peers.${peerStatuses.formatLegacyDetail()}`,
       });
     }
 

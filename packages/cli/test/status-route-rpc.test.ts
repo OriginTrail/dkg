@@ -22,6 +22,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { ethers } from 'ethers';
 import {
   ChainRpcTransportError,
   noteRpcFailover,
@@ -30,16 +31,1677 @@ import {
   noteRpcServed,
   getRpcFailoverStats,
   _resetRpcFailoverStatsForTest,
+  withRpcRequestContext,
 } from '@origintrail-official/dkg-chain';
+import {
+  createDaemonRpcRuntime,
+  type DaemonRouteRpcTransport,
+} from '../src/daemon/rpc-runtime.js';
 import { computeNetworkId } from '../../core/src/genesis.js';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
-import { loadNetworkConfig } from '../src/config.js';
-import { handleStatusRoutes } from '../src/daemon/routes/status.js';
+import { DashboardDB } from '@origintrail-official/dkg-node-ui';
+import {
+  loadNetworkConfig,
+  resolveRfc64CatalogActivations,
+  resolveRfc64PublicCatalogActivation,
+  resolveRfc64PublicCatalogActivationChainIdentityV1,
+} from '../src/config.js';
+import {
+  buildRfc64CatalogConfigurationEvidenceV1,
+  handleStatusRoutes,
+  probeRpcEndpoint,
+} from '../src/daemon/routes/status.js';
+import { sanitizeRfc64CatalogShadowExecutionStatusV1 } from
+  '../src/daemon/routes/rfc64-status-contract.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from './helpers/live-daemon.js';
+import { rfc64PublicCatalogPolicy } from './helpers/rfc64-public-catalog.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 // A port nothing listens on — connecting to it is a REAL refused connection.
 const DEAD_RPC = 'http://127.0.0.1:9';
+const DISABLED_PUBLISHER_STATE: RequestContext['publisherState'] = {
+  runtime: null,
+  availability: {
+    available: false,
+    reason: 'publisher_disabled',
+    retryable: false,
+    operatorActionRequired: true,
+  },
+};
+const DISABLED_RFC64_PUBLIC_CATALOG: RequestContext['rfc64PublicCatalog'] = {
+  enabled: false,
+  selectedContextGraphs: [],
+};
+
+function resolveStatusActivationState(config: Record<string, unknown>) {
+  return resolveRfc64CatalogActivations(
+    config as never,
+    resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
+  ).activationState;
+}
+
+describe('daemon direct RPC probe admission', () => {
+  it('bounds a diagnostic flood without queueing or displacing foreground work', async () => {
+    let hits = 0;
+    const rpc = createServer((_req, res) => {
+      hits += 1;
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x10' }));
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const runtime = createDaemonRpcRuntime({
+      rpcUrl: `http://127.0.0.1:${address.port}`,
+      hubAddress: '0x1111111111111111111111111111111111111111',
+      chainId: 'evm:31337',
+      rpcRequestBudget: {
+      maxRequestsPerSecond: 100,
+      foregroundReservePercent: 80,
+      burstRequests: 5,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+      },
+    })!;
+    try {
+      const results = await Promise.all(Array.from({ length: 20 }, (_, index) =>
+        probeRpcEndpoint(
+          `http://127.0.0.1:${address.port}`,
+          index,
+          runtime.routeTransport,
+        )));
+      expect(results.filter((result) => result.ok)).toHaveLength(1);
+      expect(results.filter((result) => !result.ok)).toHaveLength(19);
+      expect(results.filter((result) => result.status === 'skipped-local-capacity'))
+        .toHaveLength(19);
+      expect(hits).toBeGreaterThan(0);
+      await expect(runtime.governor.acquire('foreground')).resolves.toBeUndefined();
+      expect(runtime.governor.snapshot()).toMatchObject({
+        foregroundAdmitted: 1,
+        backgroundQueued: 0,
+        foregroundQueued: 0,
+        rejected: 19,
+      });
+      expect(runtime.drainRouteRpcUsage().byMethod.eth_blockNumber).toBe(hits);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  }, 10_000);
+
+  it('cannot let sustained public diagnostics jump queued RFC-64-class work', async () => {
+    let hits = 0;
+    const rpc = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        hits += 1;
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x10' }));
+      });
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const rpcUrl = `http://127.0.0.1:${address.port}`;
+    const runtime = createDaemonRpcRuntime({
+      rpcUrl,
+      chainId: 'evm:31337',
+      rpcRequestBudget: {
+        maxRequestsPerSecond: 20,
+        foregroundReservePercent: 80,
+        burstRequests: 5,
+        maxQueueSize: 8,
+        startupJitterMs: 0,
+      },
+    })!;
+    try {
+      await withRpcRequestContext(
+        { requestClass: 'background' },
+        () => runtime.governor.acquireActiveRequest(),
+      );
+      const scheduledRfc64Admission = withRpcRequestContext(
+        { requestClass: 'background' },
+        () => runtime.governor.acquireActiveRequest(),
+      );
+      await vi.waitFor(() => expect(runtime.governor.snapshot().backgroundQueued).toBe(1));
+
+      const flood = await Promise.all(Array.from({ length: 50 }, (_, index) => (
+        probeRpcEndpoint(rpcUrl, index, runtime.routeTransport)
+      )));
+      expect(flood.every((result) => result.status === 'skipped-local-capacity')).toBe(true);
+      expect(hits).toBe(0);
+      await expect(runtime.governor.acquire('foreground')).resolves.toBeUndefined();
+      await expect(scheduledRfc64Admission).resolves.toBeUndefined();
+      expect(runtime.governor.snapshot()).toMatchObject({
+        foregroundAdmitted: 1,
+        backgroundAdmitted: 2,
+        backgroundQueued: 0,
+        rejected: 50,
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  }, 10_000);
+});
+
+async function requestStatusWithAgent(
+  agentOverrides: Record<string, unknown>,
+  configOverrides: Record<string, unknown> = {},
+  requestPath = '/api/status',
+  networkOverride: RequestContext['network'] = null,
+  rfc64CatalogOverride?: RequestContext['rfc64Catalog'],
+  rfc64PublicCatalogOverride?: RequestContext['rfc64PublicCatalog'],
+  routeRpcTransport?: DaemonRouteRpcTransport,
+  opWalletsOverride: RequestContext['opWallets'] = { wallets: [] },
+  // The node operator, unless a test names another caller.
+  authentication = requestAuthentication({ kind: 'nodeOperator' }),
+): Promise<{ status: number; body: any }> {
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const config = {
+      name: 'status-finalization-recovery-test',
+      nodeRole: 'edge',
+      chain: { type: 'mock' },
+      ...configOverrides,
+    };
+    await handleStatusRoutes({
+      req,
+      res,
+      publisherState: DISABLED_PUBLISHER_STATE,
+      path: url.pathname,
+      url,
+      network: networkOverride,
+      config,
+      rfc64CatalogActivationState: resolveStatusActivationState(config),
+      rfc64PublicCatalog: rfc64PublicCatalogOverride
+        ?? resolveRfc64PublicCatalogActivation(
+          config as never,
+          resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
+        ),
+      ...(rfc64CatalogOverride === undefined
+        ? {}
+        : { rfc64Catalog: rfc64CatalogOverride }),
+      startedAt: Date.now(),
+      agent: {
+        peerId: 'peer-status-test',
+        multiaddrs: [],
+        node: {
+          libp2p: { getConnections: () => [] },
+          getRelayStats: () => null,
+        },
+        publisher: { getIdentityId: () => 0n },
+        getSyncContextGraphIds: () => [],
+        ...agentOverrides,
+      },
+      nodeVersion: '0.0.0-test',
+      nodeCommit: '',
+      admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
+      routeRpcTransport,
+      opWallets: opWalletsOverride,
+      authentication,
+    } as unknown as RequestContext);
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address() as AddressInfo;
+    const response = await fetch(`http://127.0.0.1:${address.port}${requestPath}`);
+    return { status: response.status, body: await response.json() };
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
+}
+
+describe('/api/wallets/balances governed transport', () => {
+  const hubAddress = '0x1111111111111111111111111111111111111111';
+  const tokenAddress = '0x2222222222222222222222222222222222222222';
+  const walletAddress = '0x3333333333333333333333333333333333333333';
+  const opWallets: RequestContext['opWallets'] = {
+    wallets: [{
+      address: walletAddress,
+      privateKey: `0x${'11'.repeat(32)}`,
+    }],
+  };
+
+  it('accounts every wallet RPC through the daemon-owned governor', async () => {
+    const methods: string[] = [];
+    const abi = ethers.AbiCoder.defaultAbiCoder();
+    const rpc = createServer((req, res) => {
+      let raw = '';
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => { raw += chunk; });
+      req.on('end', () => {
+        const call = JSON.parse(raw) as {
+          id: string | number;
+          method: string;
+          params?: Array<{ data?: string }>;
+        };
+        methods.push(call.method);
+        const data = call.params?.[0]?.data?.toLowerCase();
+        const result = call.method === 'eth_chainId'
+          ? '0x7a69'
+          : call.method === 'eth_getBalance'
+            ? ethers.toBeHex(ethers.parseEther('1.5'))
+            : call.method === 'eth_call' && data?.startsWith('0x95d89b41')
+              ? abi.encode(['string'], ['TRAC'])
+              : call.method === 'eth_call' && data?.startsWith('0x70a08231')
+                ? abi.encode(['uint256'], [ethers.parseEther('7')])
+                : '0x10';
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: call.id, result }));
+      });
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const rpcUrl = `http://127.0.0.1:${address.port}`;
+    const chain = {
+      type: 'evm',
+      rpcUrl,
+      chainId: 'evm:31337',
+      hubAddress,
+      tokenAddress,
+      rpcRequestBudget: {
+        maxRequestsPerSecond: 100,
+        foregroundReservePercent: 80,
+        burstRequests: 10,
+        maxQueueSize: 8,
+        startupJitterMs: 0,
+      },
+    };
+    const runtime = createDaemonRpcRuntime(chain)!;
+    try {
+      const response = await requestStatusWithAgent(
+        {},
+        { chain },
+        '/api/wallets/balances',
+        null,
+        undefined,
+        undefined,
+        runtime.routeTransport,
+        opWallets,
+      );
+
+      expect(response).toMatchObject({
+        status: 200,
+        body: {
+          wallets: [walletAddress],
+          balances: [{
+            address: walletAddress,
+            eth: '1.5',
+            trac: '7.0',
+            symbol: 'TRAC',
+          }],
+          symbol: 'TRAC',
+        },
+      });
+      const usage = runtime.drainRouteRpcUsage();
+      expect(usage.byMethod.eth_getBalance).toBe(1);
+      expect(usage.byMethod.eth_call).toBe(2);
+      expect(methods).toEqual(expect.arrayContaining([
+        'eth_chainId',
+        'eth_getBalance',
+        'eth_call',
+      ]));
+      expect(runtime.governor.snapshot().foregroundAdmitted).toBe(methods.length);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  }, 10_000);
+
+  it('fails locally without reaching RPC when the governed queue is saturated', async () => {
+    let hits = 0;
+    const rpc = createServer((_req, res) => {
+      hits += 1;
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x7a69' }));
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const rpcUrl = `http://127.0.0.1:${address.port}`;
+    const chain = {
+      type: 'evm',
+      rpcUrl,
+      chainId: 'evm:31337',
+      hubAddress,
+      tokenAddress,
+      rpcRequestBudget: {
+        maxRequestsPerSecond: 1,
+        foregroundReservePercent: 99,
+        burstRequests: 1,
+        maxQueueSize: 1,
+        startupJitterMs: 0,
+      },
+    };
+    const runtime = createDaemonRpcRuntime(chain)!;
+    const controller = new AbortController();
+    await runtime.governor.acquire('foreground');
+    const queued = runtime.governor.acquire('foreground', controller.signal);
+    await vi.waitFor(() => expect(runtime.governor.snapshot().foregroundQueued).toBe(1));
+    try {
+      const response = await requestStatusWithAgent(
+        {},
+        { chain },
+        '/api/wallets/balances',
+        null,
+        undefined,
+        undefined,
+        runtime.routeTransport,
+        opWallets,
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.body.balances).toEqual([]);
+      expect(response.body.error).toContain('RPC request governor queue is full');
+      expect(hits).toBe(0);
+      expect(runtime.governor.snapshot().rejected).toBeGreaterThanOrEqual(1);
+    } finally {
+      controller.abort(new Error('test cleanup'));
+      await expect(queued).rejects.toThrow('test cleanup');
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  }, 10_000);
+});
+
+describe('/api/chain/rpc-health partial adapter configuration', () => {
+  it('uses the governed daemon transport when rpcUrl exists without a Hub address', async () => {
+    let hits = 0;
+    const rpc = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        hits += 1;
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x10' }));
+      });
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const rpcUrl = `http://127.0.0.1:${address.port}`;
+    const runtime = createDaemonRpcRuntime({
+      rpcUrl,
+      chainId: 'evm:31337',
+      rpcRequestBudget: {
+        maxRequestsPerSecond: 100,
+        foregroundReservePercent: 0,
+        burstRequests: 5,
+        maxQueueSize: 8,
+        startupJitterMs: 0,
+      },
+    })!;
+    try {
+      expect(runtime.chainConfig).toBeUndefined();
+      const response = await requestStatusWithAgent(
+        {},
+        { chain: { type: 'evm', rpcUrl, chainId: 'evm:31337' } },
+        '/api/chain/rpc-health',
+        null,
+        undefined,
+        undefined,
+        runtime.routeTransport,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        ok: true,
+        configured: true,
+        rpcEndpointCount: 1,
+        blockNumber: 16,
+      });
+      expect(hits).toBe(1);
+      expect(runtime.governor.snapshot().backgroundAdmitted).toBe(1);
+      expect(runtime.drainRouteRpcUsage()).toMatchObject({
+        byMethod: { eth_blockNumber: 1 },
+        lifetimeTotal: 1,
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  });
+});
+
+describe('/api/status RFC-64 private recovery privacy', () => {
+  it('surfaces only the privacy-safe RFC-64 authority RPC circuit snapshot', async () => {
+    const readCircuit = vi.fn(() => ({
+      state: 'open' as const,
+      consecutiveExhaustions: 3,
+      retryAtMs: 1_893_456_000_000,
+      endpointUrl: 'https://user:pass@rpc.example',
+      requestPayload: { method: 'eth_call', params: ['private'] },
+      contextGraphId: 'private-context-graph',
+    }));
+    const response = await requestStatusWithAgent({
+      readRfc64AuthorityRpcCircuitSnapshotV1: readCircuit,
+    });
+
+    expect(response.status).toBe(200);
+    expect(readCircuit).toHaveBeenCalledOnce();
+    expect(response.body.rfc64Catalog.authorityRpcCircuit).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 3,
+      retryAtMs: 1_893_456_000_000,
+    });
+    expect(Object.keys(response.body.rfc64Catalog.authorityRpcCircuit).sort()).toEqual([
+      'consecutiveExhaustions',
+      'retryAtMs',
+      'state',
+    ]);
+    expect(JSON.stringify(response.body.rfc64Catalog.authorityRpcCircuit))
+      .not.toContain('rpc.example');
+    expect(JSON.stringify(response.body.rfc64Catalog.authorityRpcCircuit))
+      .not.toContain('private-context-graph');
+    expect(response.body.rfc64Catalog.configuration).toMatchObject({
+      source: 'default-omitted',
+      defaultMode: 'catalog',
+    });
+  });
+
+  it.each([
+    ['unknown state', { state: 'tripped', consecutiveExhaustions: 1, retryAtMs: null }],
+    ['negative count', { state: 'open', consecutiveExhaustions: -1, retryAtMs: null }],
+    ['unsafe retry', {
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: Number.MAX_SAFE_INTEGER + 1,
+    }],
+  ])('degrades malformed authority RPC circuit input to null: %s', async (
+    _label,
+    circuit,
+  ) => {
+    const response = await requestStatusWithAgent({
+      readRfc64AuthorityRpcCircuitSnapshotV1: () => circuit,
+    });
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog.authorityRpcCircuit).toBeNull();
+  });
+
+  it('exposes bounded shadow execution evidence without raw supervisor identities', async () => {
+    const shadowContextGraph =
+      '0x1111111111111111111111111111111111111111/private-shadow-status';
+    const privateProvider = '12D3KooPrivateShadowProviderMustNotLeak';
+    const privateAuthor = '0x2222222222222222222222222222222222222222';
+    const privateDigest = `0x${'33'.repeat(32)}`;
+    const readShadowExecution = vi.fn(() => ({
+      schemaVersion: 1,
+      contextGraphCount: 1,
+      legacyAuthorityRetained: true,
+      authoritativeApplyAllowed: false,
+      inventoryObserver: {
+        scope: 'process',
+        inFlight: 0,
+        attemptedUpserts: 4,
+        attemptedRemovals: 1,
+        committedMutations: 3,
+        noOpMutations: 1,
+        failedMutations: 1,
+        casRetries: 2,
+        authorAddress: privateAuthor,
+        lastHeadDigest: privateDigest,
+      },
+      projectionSupervisor: {
+        running: false,
+        passes: 2,
+        trackedAuthorScopes: 1,
+        pending: 0,
+        reconciled: 1,
+        noInventory: 0,
+        failed: 0,
+        lastPassStartedAtMs: 10,
+        lastPassCompletedAtMs: 20,
+        repairs: [{ authorAddress: privateAuthor }],
+      },
+      receiverStaging: {
+        running: false,
+        passes: 3,
+        trackedTargets: 1,
+        pending: 0,
+        staged: 1,
+        notFound: 0,
+        knownIncomplete: 0,
+        failed: 0,
+        authoritativeApplyCount: 0,
+        stagingObserved: true,
+        stageOnlyInvariantSatisfied: true,
+        lastPassStartedAtMs: 30,
+        lastPassCompletedAtMs: 40,
+        providers: [privateProvider],
+        lastHeadDigest: privateDigest,
+      },
+      // A route boundary must not forward unknown fields introduced by a
+      // mismatched package or unsafe test double.
+      repairs: [{ authorAddress: privateAuthor }],
+      providers: [privateProvider],
+      lastHeadDigest: privateDigest,
+    }));
+    const response = await requestStatusWithAgent(
+      { readRfc64CatalogShadowExecutionStatusV1: readShadowExecution },
+      {},
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: [shadowContextGraph],
+        selectedPublicContextGraphs: [],
+        selectedPrivateContextGraphs: [shadowContextGraph],
+        rollout: {
+          killSwitch: false,
+          contextGraphModes: { [shadowContextGraph]: 'shadow' },
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(readShadowExecution).toHaveBeenCalledOnce();
+    expect(response.body.rfc64Catalog.shadowExecution).toEqual({
+      schemaVersion: 1,
+      contextGraphCount: 1,
+      legacyAuthorityRetained: true,
+      authoritativeApplyAllowed: false,
+      inventoryObserver: {
+        scope: 'process',
+        inFlight: 0,
+        attemptedUpserts: 4,
+        attemptedRemovals: 1,
+        committedMutations: 3,
+        noOpMutations: 1,
+        failedMutations: 1,
+        casRetries: 2,
+      },
+      projectionSupervisor: {
+        running: false,
+        passes: 2,
+        trackedAuthorScopes: 1,
+        pending: 0,
+        reconciled: 1,
+        noInventory: 0,
+        failed: 0,
+        lastPassStartedAtMs: 10,
+        lastPassCompletedAtMs: 20,
+      },
+      receiverStaging: {
+        running: false,
+        passes: 3,
+        trackedTargets: 1,
+        pending: 0,
+        staged: 1,
+        notFound: 0,
+        knownIncomplete: 0,
+        failed: 0,
+        authoritativeApplyCount: 0,
+        stagingObserved: true,
+        stageOnlyInvariantSatisfied: true,
+        lastPassStartedAtMs: 30,
+        lastPassCompletedAtMs: 40,
+      },
+    });
+    const serialized = JSON.stringify(response.body.rfc64Catalog.shadowExecution);
+    expect(serialized).not.toContain(privateProvider);
+    expect(serialized).not.toContain(privateAuthor);
+    expect(serialized).not.toContain(privateDigest);
+    expect(response.body.rfc64Catalog.shadowExecution).not.toHaveProperty('repairs');
+    expect(response.body.rfc64Catalog.shadowExecution).not.toHaveProperty('providers');
+    expect(response.body.rfc64Catalog.shadowExecution.inventoryObserver)
+      .not.toHaveProperty('authorAddress');
+    expect(response.body.rfc64Catalog.shadowExecution.inventoryObserver)
+      .not.toHaveProperty('lastHeadDigest');
+    expect(response.body.rfc64Catalog.shadowExecution.projectionSupervisor)
+      .not.toHaveProperty('repairs');
+    expect(response.body.rfc64Catalog.shadowExecution.receiverStaging)
+      .not.toHaveProperty('providers');
+    expect(response.body.rfc64Catalog.shadowExecution.receiverStaging)
+      .not.toHaveProperty('lastHeadDigest');
+  });
+
+  it('keeps status available when a shadow provider is structurally version-skewed', async () => {
+    const response = await requestStatusWithAgent(
+      {
+        readRfc64CatalogShadowExecutionStatusV1: () => ({
+          schemaVersion: 0,
+          unknownPrivateField: 'must-not-leak',
+        }),
+      },
+      {},
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: ['shadow-version-skew'],
+        selectedPublicContextGraphs: ['shadow-version-skew'],
+        selectedPrivateContextGraphs: [],
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'shadow',
+          contextGraphModes: {},
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog.shadowExecution).toBeNull();
+    expect(JSON.stringify(response.body)).not.toContain('must-not-leak');
+  });
+
+  describe('catalog head delivery counts (GH#3081)', () => {
+    const privateContextGraph =
+      '0x1111111111111111111111111111111111111111/private-head-delivery';
+    const peerId = '12D3KooWAUCFb3hwTLUu3bhMqAsqtF1YH1sTUaMuTXiyvC1z7k65';
+    const catalogActivation = {
+      enabled: true,
+      selectedContextGraphs: [privateContextGraph],
+      selectedPublicContextGraphs: [],
+      selectedPrivateContextGraphs: [privateContextGraph],
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
+    } as never;
+    const delivery = {
+      handoffsQueued: 12,
+      handoffsNobody: 1,
+      handoffsNotQueued: 2,
+      reportedHeads: 9,
+      deliveredPeers: 20,
+      failedPeers: 3,
+      refusedPeers: 40,
+      uncheckedPeers: 5,
+      unconfirmedPeers: 1,
+      supersededHeads: 3,
+      undeliverableHeads: 1,
+      checkpointCapacityExceeded: 0,
+    };
+
+    it('surfaces the counters and nothing a provider attaches to them', async () => {
+      const readDelivery = vi.fn(() => ({
+        ...delivery,
+        uncheckedPeerIds: [peerId],
+        lastContextGraphId: privateContextGraph,
+      }));
+      const response = await requestStatusWithAgent(
+        { readRfc64CatalogHeadDeliveryStatusV1: readDelivery },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+
+      expect(response.status).toBe(200);
+      expect(readDelivery).toHaveBeenCalledOnce();
+      expect(response.body.rfc64Catalog.catalogHeadDelivery).toEqual(delivery);
+      const serialized = JSON.stringify(response.body.rfc64Catalog.catalogHeadDelivery);
+      expect(serialized).not.toContain(peerId);
+      expect(serialized).not.toContain(privateContextGraph);
+    });
+
+    it.each([
+      ['a missing counter', (({ uncheckedPeers: _unchecked, ...rest }) => rest)(delivery)],
+      ['a negative counter', { ...delivery, refusedPeers: -1 }],
+      ['a fractional counter', { ...delivery, deliveredPeers: 1.5 }],
+      ['a counter that is not a number', { ...delivery, reportedHeads: '9' }],
+      ['an array', [delivery]],
+      ['no answer', undefined],
+    ])('degrades malformed counts to null: %s', async (_label, answer) => {
+      const response = await requestStatusWithAgent(
+        { readRfc64CatalogHeadDeliveryStatusV1: () => answer },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.catalogHeadDelivery).toBeNull();
+    });
+
+    it('keeps status available when the provider throws, and when an agent has no counts', async () => {
+      const throwing = await requestStatusWithAgent(
+        {
+          readRfc64CatalogHeadDeliveryStatusV1: () => {
+            throw new Error('delivery report is not available');
+          },
+        },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+      expect(throwing.status).toBe(200);
+      expect(throwing.body.rfc64Catalog.catalogHeadDelivery).toBeNull();
+
+      const without = await requestStatusWithAgent({}, {}, '/api/status', null, catalogActivation);
+      expect(without.status).toBe(200);
+      expect(without.body.rfc64Catalog.catalogHeadDelivery).toBeNull();
+    });
+
+    it('reports nothing while the catalog is disabled', async () => {
+      const readDelivery = vi.fn(() => delivery);
+      const response = await requestStatusWithAgent(
+        { readRfc64CatalogHeadDeliveryStatusV1: readDelivery },
+        {},
+        '/api/status',
+        null,
+        {
+          enabled: false,
+          selectedContextGraphs: [],
+          selectedPublicContextGraphs: [],
+          selectedPrivateContextGraphs: [],
+          rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
+        } as never,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.catalogHeadDelivery).toBeNull();
+      expect(readDelivery).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('finalized-private placement queue (GH#3081)', () => {
+    const privateContextGraph =
+      '0x1111111111111111111111111111111111111111/private-placement-queue';
+    const privateAuthor = '0x2222222222222222222222222222222222222222';
+    const privateUal = `did:dkg:otp:20430/${privateAuthor}/7`;
+    // A catalog-mode private graph: no shadow scope, so `shadowExecution` stays null here.
+    const catalogActivation = {
+      enabled: true,
+      selectedContextGraphs: [privateContextGraph],
+      selectedPublicContextGraphs: [],
+      selectedPrivateContextGraphs: [privateContextGraph],
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
+    } as never;
+    const queue = {
+      depth: 2,
+      pending: 4,
+      oldestPendingAgeMs: 61_000,
+      waiters: 1,
+      oldestWaiterAgeMs: 1_520,
+      passRunning: true,
+      lastPassDurationMs: 830,
+      cooldownSkips: 3,
+    };
+
+    function supervisorStatus(finalizedPrivatePlacement: unknown) {
+      return {
+        running: true,
+        pass: 4,
+        retryIntervalMs: 5_000,
+        lastPassStartedAtMs: 10,
+        lastPassCompletedAtMs: 20,
+        repairs: [{ contextGraphId: privateContextGraph, authorAddress: privateAuthor }],
+        finalizedPrivatePlacement,
+      };
+    }
+
+    it('surfaces only the aggregate queue, never the supervisor repairs or a provider extra', async () => {
+      const readSupervisor = vi.fn(() => supervisorStatus({
+        ...queue,
+        kaUal: privateUal,
+        repairKeys: [JSON.stringify([privateContextGraph, privateAuthor])],
+      }));
+      const response = await requestStatusWithAgent(
+        { readRfc64SwmCatalogProjectionSupervisorStatusV1: readSupervisor },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+
+      expect(response.status).toBe(200);
+      expect(readSupervisor).toHaveBeenCalledOnce();
+      expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toEqual(queue);
+      expect(Object.keys(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).sort()).toEqual([
+        'cooldownSkips',
+        'depth',
+        'lastPassDurationMs',
+        'oldestPendingAgeMs',
+        'oldestWaiterAgeMs',
+        'passRunning',
+        'pending',
+        'waiters',
+      ]);
+      const serialized = JSON.stringify(response.body.rfc64Catalog);
+      expect(serialized).not.toContain(privateAuthor);
+      expect(serialized).not.toContain(privateUal);
+      expect(JSON.stringify(response.body.rfc64Catalog.finalizedPrivatePlacementQueue))
+        .not.toContain(privateContextGraph);
+    });
+
+    it('keeps a backlog that nothing waits on: placements owed with no request held', async () => {
+      // A failed first attempt, or a restart, leaves markers owed and no waiter behind them.
+      const owed = { ...queue, waiters: 0, oldestWaiterAgeMs: null, passRunning: false };
+      const response = await requestStatusWithAgent(
+        { readRfc64SwmCatalogProjectionSupervisorStatusV1: () => supervisorStatus(owed) },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toMatchObject({
+        pending: 4, oldestPendingAgeMs: 61_000, waiters: 0, oldestWaiterAgeMs: null,
+      });
+    });
+
+    it('keeps an idle queue with nothing waiting', async () => {
+      const idle = {
+        ...queue, pending: 0, oldestPendingAgeMs: null, waiters: 0, oldestWaiterAgeMs: null,
+        passRunning: false, lastPassDurationMs: null,
+      };
+      const response = await requestStatusWithAgent(
+        { readRfc64SwmCatalogProjectionSupervisorStatusV1: () => supervisorStatus(idle) },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toEqual(idle);
+    });
+
+    it.each([
+      ['missing block', undefined],
+      ['negative depth', { ...queue, depth: -1 }],
+      ['fractional age', { ...queue, oldestWaiterAgeMs: 1.5 }],
+      ['negative pending count', { ...queue, pending: -1 }],
+      ['pending count that is not a number', { ...queue, pending: '4' }],
+      ['fractional pending age', { ...queue, oldestPendingAgeMs: 0.5 }],
+      ['string flag', { ...queue, passRunning: 'yes' }],
+      ['array', [queue]],
+    ])('degrades a malformed queue to null: %s', async (_label, finalizedPrivatePlacement) => {
+      const response = await requestStatusWithAgent(
+        { readRfc64SwmCatalogProjectionSupervisorStatusV1: () => supervisorStatus(finalizedPrivatePlacement) },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toBeNull();
+    });
+
+    it.each([
+      ['neither backlog field', (({ pending: _p, oldestPendingAgeMs: _a, ...rest }) => rest)(queue)],
+      ['no pending count', (({ pending: _p, ...rest }) => rest)(queue)],
+      ['no pending age', (({ oldestPendingAgeMs: _a, ...rest }) => rest)(queue)],
+    ])('reads the rest of the block from a provider that predates the backlog fields: %s', async (_label, older) => {
+      const response = await requestStatusWithAgent(
+        { readRfc64SwmCatalogProjectionSupervisorStatusV1: () => supervisorStatus(older) },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+      expect(response.status).toBe(200);
+      // What the provider sent, and nothing made up for what it did not.
+      expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toEqual(older);
+    });
+
+    it('keeps status available when the supervisor is not bound', async () => {
+      const response = await requestStatusWithAgent(
+        {
+          readRfc64SwmCatalogProjectionSupervisorStatusV1: () => {
+            throw new Error('RFC-64 SWM catalog projection owner is not bound');
+          },
+        },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toBeNull();
+    });
+
+    it('reports nothing while the catalog is disabled', async () => {
+      const readSupervisor = vi.fn(() => supervisorStatus(queue));
+      const response = await requestStatusWithAgent(
+        { readRfc64SwmCatalogProjectionSupervisorStatusV1: readSupervisor },
+        {},
+        '/api/status',
+        null,
+        {
+          enabled: false,
+          selectedContextGraphs: [],
+          selectedPublicContextGraphs: [],
+          selectedPrivateContextGraphs: [],
+          rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
+        } as never,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toBeNull();
+      expect(readSupervisor).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('author catalog capacity (GH#3134)', () => {
+    const fullContextGraph =
+      '0x1111111111111111111111111111111111111111/full-author-catalog';
+    const fullAuthor = '0x3333333333333333333333333333333333333333';
+    const parkedUal = `did:dkg:otp:20430/${fullAuthor}/1025`;
+    const catalogActivation = {
+      enabled: true,
+      selectedContextGraphs: [fullContextGraph],
+      selectedPublicContextGraphs: [],
+      selectedPrivateContextGraphs: [fullContextGraph],
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
+    } as never;
+    // The queue as an agent from before the aggregate reports it: valid, and without it.
+    const queue = {
+      depth: 3,
+      pending: 3,
+      oldestPendingAgeMs: 7_200_000,
+      waiters: 0,
+      oldestWaiterAgeMs: null,
+      passRunning: false,
+      lastPassDurationMs: 2,
+      cooldownSkips: 0,
+    };
+    const supervisorStatus = (extra: Record<string, unknown>) => ({
+      running: false,
+      pass: 9,
+      retryIntervalMs: 5_000,
+      lastPassStartedAtMs: 10,
+      lastPassCompletedAtMs: 20,
+      repairs: [{
+        contextGraphId: fullContextGraph,
+        authorAddress: fullAuthor,
+        outcome: 'failed',
+        diagnostic: { kind: 'catalog_full', stage: 'unknown', source: 'unknown', stageElapsedMs: null },
+      }],
+      finalizedPrivatePlacement: queue,
+      ...extra,
+    });
+    const requestCapacity = (extra: Record<string, unknown>) => requestStatusWithAgent(
+      { readRfc64SwmCatalogProjectionSupervisorStatusV1: vi.fn(() => supervisorStatus(extra)) },
+      {},
+      '/api/status',
+      null,
+      catalogActivation,
+    );
+
+    it('surfaces the two counts next to the queue, and nothing that names a graph, author or asset', async () => {
+      const response = await requestCapacity({
+        authorCatalogCapacity: {
+          scopesAtCap: 1,
+          parkedPlacements: 3,
+          contextGraphId: fullContextGraph,
+          authorAddress: fullAuthor,
+          parkedKaUals: [parkedUal],
+        },
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.authorCatalogCapacity).toEqual({ scopesAtCap: 1, parkedPlacements: 3 });
+      expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toMatchObject({ depth: 3, waiters: 0 });
+      expect(Object.keys(response.body.rfc64Catalog)).toContain('authorCatalogCapacity');
+      const serialized = JSON.stringify(response.body.rfc64Catalog);
+      expect(serialized).not.toContain(fullAuthor);
+      expect(serialized).not.toContain(parkedUal);
+      expect(JSON.stringify(response.body.rfc64Catalog.authorCatalogCapacity)).not.toContain(fullContextGraph);
+    });
+
+    it('reports a node with no full catalog as zeros', async () => {
+      const response = await requestCapacity({ authorCatalogCapacity: { scopesAtCap: 0, parkedPlacements: 0 } });
+      expect(response.body.rfc64Catalog.authorCatalogCapacity).toEqual({ scopesAtCap: 0, parkedPlacements: 0 });
+    });
+
+    it('reports the sweep counts of finalized assets\' inventory rows on their own, only as a pair of counts', async () => {
+      const swept = await requestCapacity({
+        authorCatalogCapacity: { scopesAtCap: 0, parkedPlacements: 0 },
+        finalizedRowHeal: { finalizedRowHealPasses: 1, finalizedRowsHealed: 2, contextGraphId: fullContextGraph },
+      });
+      expect(swept.body.rfc64Catalog.finalizedRowHeal).toEqual({ finalizedRowHealPasses: 1, finalizedRowsHealed: 2 });
+      expect(swept.body.rfc64Catalog.authorCatalogCapacity).toEqual({ scopesAtCap: 0, parkedPlacements: 0 });
+      const half = await requestCapacity({ finalizedRowHeal: { finalizedRowHealPasses: 1, finalizedRowsHealed: -1 } });
+      expect(half.body.rfc64Catalog.finalizedRowHeal).toBeNull();
+      const none = await requestCapacity({});
+      expect(none.body.rfc64Catalog.finalizedRowHeal).toBeNull();
+    });
+
+    it.each([
+      ['an agent from before the aggregate', {}],
+      ['a negative count', { authorCatalogCapacity: { scopesAtCap: -1, parkedPlacements: 0 } }],
+      ['a missing count', { authorCatalogCapacity: { scopesAtCap: 1 } }],
+      ['a fractional count', { authorCatalogCapacity: { scopesAtCap: 1, parkedPlacements: 0.5 } }],
+      ['an array', { authorCatalogCapacity: [{ scopesAtCap: 1, parkedPlacements: 1 }] }],
+    ])('reads %s as null without touching the rest of the block', async (_label, extra) => {
+      const response = await requestCapacity(extra);
+
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.authorCatalogCapacity).toBeNull();
+      // The queue next to it, and the block around both, are what they would be without it.
+      expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toMatchObject({
+        depth: 3, waiters: 0, passRunning: false, cooldownSkips: 0,
+      });
+      expect(response.body.rfc64Catalog).toMatchObject({
+        enabled: true,
+        selectedPrivateContextGraphs: [fullContextGraph],
+      });
+    });
+
+    it('keeps the counts when the queue beside them is in another shape', async () => {
+      const response = await requestCapacity({
+        finalizedPrivatePlacement: { depth: 'three' },
+        authorCatalogCapacity: { scopesAtCap: 2, parkedPlacements: 5 },
+      });
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toBeNull();
+      expect(response.body.rfc64Catalog.authorCatalogCapacity).toEqual({ scopesAtCap: 2, parkedPlacements: 5 });
+    });
+
+    it('reads the supervisor once for both aggregates, and reports null for both when it is not bound', async () => {
+      const readSupervisor = vi.fn(() => supervisorStatus({
+        authorCatalogCapacity: { scopesAtCap: 1, parkedPlacements: 1 },
+      }));
+      await requestStatusWithAgent(
+        { readRfc64SwmCatalogProjectionSupervisorStatusV1: readSupervisor },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+      expect(readSupervisor).toHaveBeenCalledOnce();
+
+      const unbound = await requestStatusWithAgent(
+        {
+          readRfc64SwmCatalogProjectionSupervisorStatusV1: () => {
+            throw new Error('RFC-64 SWM catalog projection owner is not bound');
+          },
+        },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+      expect(unbound.status).toBe(200);
+      expect(unbound.body.rfc64Catalog.authorCatalogCapacity).toBeNull();
+      expect(unbound.body.rfc64Catalog.finalizedPrivatePlacementQueue).toBeNull();
+    });
+
+    it('reports nothing while the catalog is disabled', async () => {
+      const readSupervisor = vi.fn(() => supervisorStatus({
+        authorCatalogCapacity: { scopesAtCap: 1, parkedPlacements: 1 },
+      }));
+      const response = await requestStatusWithAgent(
+        { readRfc64SwmCatalogProjectionSupervisorStatusV1: readSupervisor },
+        {},
+        '/api/status',
+        null,
+        {
+          enabled: false,
+          selectedContextGraphs: [],
+          selectedPublicContextGraphs: [],
+          selectedPrivateContextGraphs: [],
+          rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
+        } as never,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.authorCatalogCapacity).toBeNull();
+      expect(readSupervisor).not.toHaveBeenCalled();
+    });
+  });
+
+  it('rejects contradictory derived shadow-safety evidence at the HTTP boundary', () => {
+    const valid = {
+      schemaVersion: 1,
+      contextGraphCount: 1,
+      legacyAuthorityRetained: true,
+      authoritativeApplyAllowed: false,
+      inventoryObserver: {
+        scope: 'process',
+        inFlight: 0,
+        attemptedUpserts: 0,
+        attemptedRemovals: 0,
+        committedMutations: 0,
+        noOpMutations: 0,
+        failedMutations: 0,
+        casRetries: 0,
+      },
+      projectionSupervisor: {
+        running: false,
+        passes: 0,
+        trackedAuthorScopes: 0,
+        pending: 0,
+        reconciled: 0,
+        noInventory: 0,
+        failed: 0,
+        lastPassStartedAtMs: null,
+        lastPassCompletedAtMs: null,
+      },
+      receiverStaging: {
+        running: false,
+        passes: 0,
+        trackedTargets: 1,
+        pending: 0,
+        staged: 1,
+        notFound: 0,
+        knownIncomplete: 0,
+        failed: 0,
+        authoritativeApplyCount: 0,
+        stagingObserved: true,
+        stageOnlyInvariantSatisfied: true,
+        lastPassStartedAtMs: null,
+        lastPassCompletedAtMs: null,
+      },
+    } as const;
+
+    expect(sanitizeRfc64CatalogShadowExecutionStatusV1({
+      ...valid,
+      receiverStaging: {
+        ...valid.receiverStaging,
+        authoritativeApplyCount: 1,
+      },
+    })).toBeNull();
+    expect(sanitizeRfc64CatalogShadowExecutionStatusV1({
+      ...valid,
+      receiverStaging: {
+        ...valid.receiverStaging,
+        stagingObserved: false,
+      },
+    })).toBeNull();
+  });
+
+  it('projects live mixed edge selection without leaking private ids into public status', async () => {
+    const publicContextGraph = 'runtime-selected-public';
+    const privateContextGraph =
+      '0x1111111111111111111111111111111111111111/runtime-selected-private';
+    const response = await requestStatusWithAgent(
+      {
+        readRfc64CatalogRuntimeSelectionV1: () => ({
+          subscriptionDriven: true,
+          eligibleContextGraphs: [publicContextGraph, privateContextGraph],
+          selectedContextGraphs: [privateContextGraph],
+        }),
+        readRfc64CatalogResponsibilitiesV1: () => [{
+          contextGraphId: privateContextGraph,
+          responsible: true,
+          responsibilityReason: 'private-membership',
+          active: true,
+          mode: 'catalog',
+          selectionSource: 'default',
+        }],
+        readRfc64CatalogOperationalStatusV1: async () => [{
+          contextGraphId: privateContextGraph,
+          responsibilityReason: 'private-membership',
+          selectionSource: 'default',
+          effectiveMode: 'catalog',
+          phase: 'bootstrapping',
+          authorityState: 'accepted',
+          policySource: 'owner-signed-unregistered',
+        }],
+        readRfc64AuthorityRpcCircuitSnapshotV1: () => ({
+          state: 'open',
+          consecutiveExhaustions: 2,
+          retryAtMs: 1_725_987_654_321,
+        }),
+      },
+      {
+        rfc64PublicCatalog: {
+          enabled: true,
+          bootstrap: {
+            acceptedPublicPolicies: [rfc64PublicCatalogPolicy(publicContextGraph)],
+          },
+        },
+      },
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: [publicContextGraph, privateContextGraph],
+        selectedPublicContextGraphs: [publicContextGraph],
+        selectedPrivateContextGraphs: [privateContextGraph],
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'catalog',
+          contextGraphModes: {
+            [publicContextGraph]: 'catalog',
+            [privateContextGraph]: 'catalog',
+          },
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog.runtimeSelection).toEqual({
+      subscriptionDriven: true,
+      eligibleContextGraphs: [publicContextGraph, privateContextGraph],
+      selectedContextGraphs: [privateContextGraph],
+    });
+    expect(response.body.rfc64Catalog.responsibilities).toEqual([{
+      contextGraphId: privateContextGraph,
+      responsible: true,
+      responsibilityReason: 'private-membership',
+      active: true,
+      mode: 'catalog',
+      selectionSource: 'default',
+    }]);
+    expect(response.body.rfc64Catalog.contextGraphs).toEqual([expect.objectContaining({
+      contextGraphId: privateContextGraph,
+      responsibilityReason: 'private-membership',
+      selectionSource: 'default',
+      effectiveMode: 'catalog',
+      phase: 'bootstrapping',
+      authorityState: 'accepted',
+    })]);
+    expect(response.body.rfc64Catalog.authorityRpcCircuit).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 2,
+      retryAtMs: 1_725_987_654_321,
+    });
+    expect(response.body.rfc64Catalog.configuration).toMatchObject({
+      schemaVersion: 1,
+      source: 'compatibility-seed',
+      catalogControlPresent: false,
+      deprecatedPublicControlPresent: true,
+      activationManifestPresent: true,
+      deprecatedDisabledOverride: false,
+      killSwitch: false,
+      defaultMode: 'catalog',
+    });
+    expect(response.body.rfc64Catalog.configuration.digest)
+      .toMatch(/^sha256:[0-9a-f]{64}$/u);
+    expect(response.body.rfc64PublicCatalog.runtimeSelection).toEqual({
+      subscriptionDriven: true,
+      selectedContextGraphs: [],
+    });
+    expect(response.body.rfc64PublicCatalog.responsibilities).toBeUndefined();
+  });
+
+  it('attests rollback configuration without exposing private CG identifiers', () => {
+    const privateContextGraph =
+      '0x1111111111111111111111111111111111111111/private-config-evidence';
+    const evidence = buildRfc64CatalogConfigurationEvidenceV1(resolveStatusActivationState({
+      rfc64Catalog: {
+        rollout: { contextGraphModes: { [privateContextGraph]: 'legacy' } },
+      },
+    }));
+
+    expect(evidence).toMatchObject({
+      source: 'operator-override',
+      catalogControlPresent: true,
+      activationManifestPresent: false,
+      legacyOverrideCount: 1,
+      shadowOverrideCount: 0,
+    });
+    expect(JSON.stringify(evidence)).not.toContain(privateContextGraph);
+
+    const catalogDefault = buildRfc64CatalogConfigurationEvidenceV1(resolveStatusActivationState({
+      rfc64Catalog: { rollout: { defaultMode: 'catalog' } },
+    }));
+    const legacyDefault = buildRfc64CatalogConfigurationEvidenceV1(resolveStatusActivationState({
+      rfc64Catalog: { rollout: { defaultMode: 'legacy' } },
+    }));
+    expect(catalogDefault.digest).not.toBe(legacyDefault.digest);
+    expect(JSON.stringify([catalogDefault, legacyDefault])).not.toContain(privateContextGraph);
+
+    expect(buildRfc64CatalogConfigurationEvidenceV1(
+      resolveStatusActivationState({}),
+    )).toMatchObject({
+      source: 'default-omitted',
+      catalogControlPresent: false,
+      deprecatedPublicControlPresent: false,
+      activationManifestPresent: false,
+      deprecatedDisabledOverride: false,
+      legacyOverrideCount: 0,
+      shadowOverrideCount: 0,
+    });
+  });
+
+  it.each([
+    ['unified', { rfc64Catalog: { enabled: false } }],
+    ['deprecated', { rfc64PublicCatalog: { enabled: false } }],
+  ])('reports the effective legacy lane for an explicitly disabled %s activation', async (
+    _label,
+    configOverrides,
+  ) => {
+    const activations = resolveRfc64CatalogActivations(
+      configOverrides,
+      resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
+    );
+    const response = await requestStatusWithAgent(
+      {},
+      configOverrides,
+      '/api/status',
+      null,
+      activations.catalog,
+      activations.publicCatalog,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog).toMatchObject({
+      enabled: false,
+      rollout: {
+        killSwitch: false,
+        defaultMode: 'legacy',
+        contextGraphModes: {},
+      },
+    });
+    expect(response.body.rfc64Catalog.configuration).toMatchObject({
+      source: 'explicit-disabled',
+      deprecatedDisabledOverride: true,
+      defaultMode: 'legacy',
+      legacyOverrideCount: 0,
+      shadowOverrideCount: 0,
+    });
+  });
+
+  it('reports a bounded lifecycle default and its explicit canary override', async () => {
+    const canary = 'bounded-status-canary';
+    const response = await requestStatusWithAgent(
+      {},
+      {
+        rfc64Catalog: {
+          rollout: {
+            defaultMode: 'legacy',
+            contextGraphModes: { [canary]: 'shadow' },
+          },
+        },
+      },
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: [],
+        selectedPublicContextGraphs: [],
+        selectedPrivateContextGraphs: [],
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'legacy',
+          contextGraphModes: { [canary]: 'shadow' },
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog.rollout).toEqual({
+      killSwitch: false,
+      defaultMode: 'legacy',
+      contextGraphModes: { [canary]: 'shadow' },
+    });
+    expect(response.body.rfc64Catalog.configuration).toMatchObject({
+      source: 'operator-override',
+      defaultMode: 'legacy',
+      legacyOverrideCount: 0,
+      shadowOverrideCount: 1,
+    });
+  });
+
+  it('does not report a selected inherited mode as a per-CG override', async () => {
+    const selected = 'selected-inherited-shadow';
+    const response = await requestStatusWithAgent(
+      {},
+      { rfc64Catalog: { rollout: { defaultMode: 'shadow' } } },
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: [selected],
+        selectedPublicContextGraphs: [selected],
+        selectedPrivateContextGraphs: [],
+        selectedContextGraphModes: { [selected]: 'shadow' },
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'shadow',
+          contextGraphModes: {},
+        },
+      } as never,
+      {
+        enabled: true,
+        selectedContextGraphs: [selected],
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'catalog',
+          contextGraphModes: {},
+        },
+      },
+    );
+
+    expect(response.body.rfc64Catalog.rollout).toEqual({
+      killSwitch: false,
+      defaultMode: 'shadow',
+      contextGraphModes: {},
+    });
+    expect(response.body.rfc64Catalog.configuration).toMatchObject({
+      defaultMode: 'shadow',
+      legacyOverrideCount: 0,
+      shadowOverrideCount: 0,
+    });
+    expect(response.body.rfc64PublicCatalog.rollout).toEqual({
+      killSwitch: false,
+      contextGraphModes: { [selected]: 'shadow' },
+    });
+  });
+
+  it('reports aggregate telemetry for a private-only catalog activation', async () => {
+    const privateContextGraph =
+      '0x1111111111111111111111111111111111111111/private-only-telemetry';
+    const response = await requestStatusWithAgent(
+      {
+        rfc64PublicCatalogStatsV1: () => ({
+          started: true,
+          acceptedPolicies: 1,
+          receiver: {
+            providerAttempts: 2,
+            providerSwitches: 1,
+            providerSuccesses: 1,
+            providerBackoffMs: 4,
+          },
+          nativeReceiver: {
+            controlObjectCacheHits: 3,
+            controlObjectNetworkFetches: 5,
+            kaBundleCacheHits: 7,
+            kaBundleNetworkFetches: 11,
+            kaBundleCacheBytes: 13,
+            kaBundleNetworkBytes: 17,
+          },
+        }),
+      },
+      {},
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: [privateContextGraph],
+        selectedPublicContextGraphs: [],
+        selectedPrivateContextGraphs: [privateContextGraph],
+        accessPolicyAuthority: {
+          localAgentAddress: '0x3333333333333333333333333333333333333333',
+          peerAgentBindings: [],
+        },
+        autoPublish: {
+          peers: [],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'catalog',
+          contextGraphModes: {},
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64PublicCatalog.enabled).toBe(false);
+    expect(response.body.rfc64Catalog.autoPublishEnabled).toBe(true);
+    expect(response.body.rfc64Catalog.resourceTelemetry).toEqual({
+      providerAttempts: 2,
+      providerSwitches: 1,
+      providerSuccesses: 1,
+      providerBackoffMs: 4,
+      controlObjectCacheHits: 3,
+      controlObjectNetworkFetches: 5,
+      kaBundleCacheHits: 7,
+      kaBundleNetworkFetches: 11,
+      kaBundleCacheBytes: 13,
+      kaBundleNetworkBytes: 17,
+    });
+    expect(JSON.stringify(response.body)).not.toContain('peerAgentBindings');
+  });
+
+  it('reports only aggregate private recovery state and hides provider identities', async () => {
+    const privateContextGraph =
+      '0x1111111111111111111111111111111111111111/private-release-2';
+    const privateProvider = '12D3KooPrivateProviderMustNotLeak';
+    const publicContextGraph = 'public-compatibility-surface';
+    const publicProvider = '12D3KooPublicProviderMayAppear';
+    const response = await requestStatusWithAgent(
+      {
+        rfc64PublicCatalogStatsV1: () => ({
+          started: true,
+          acceptedPolicies: 1,
+          receiver: {
+            providerAttempts: 3,
+            providerSwitches: 1,
+            providerSuccesses: 1,
+            providerBackoffMs: 20,
+          },
+          nativeReceiver: {
+            controlObjectCacheHits: 4,
+            controlObjectNetworkFetches: 5,
+            kaBundleCacheHits: 6,
+            kaBundleNetworkFetches: 7,
+            kaBundleCacheBytes: 800,
+            kaBundleNetworkBytes: 900,
+          },
+        }),
+        readRfc64PublicCatalogBootstrapStatusV1: () => ({
+          running: false,
+          pass: 1,
+          retryIntervalMs: 1_000,
+          lastPassStartedAtMs: 1,
+          lastPassCompletedAtMs: 2,
+          targets: [{
+            scope: {
+              networkId: 'otp:20430',
+              contextGraphId: privateContextGraph,
+              subGraphName: null,
+              authorAddress: '0x2222222222222222222222222222222222222222',
+              catalogEra: '0',
+            },
+            providers: [privateProvider],
+            outcome: 'known-incomplete',
+            completionReason: 'no-authorized-provider',
+            attempts: 1,
+            providerPeerId: privateProvider,
+            appliedHeadDigest: null,
+            catalogVersion: null,
+            inventoryRowCount: null,
+            lastError: `provider ${privateProvider} failed`,
+            updatedAtMs: 2,
+          }, {
+            scope: {
+              networkId: 'otp:20430',
+              contextGraphId: publicContextGraph,
+              subGraphName: null,
+              authorAddress: '0x4444444444444444444444444444444444444444',
+              catalogEra: '0',
+            },
+            providers: [publicProvider],
+            outcome: 'applied',
+            completionReason: null,
+            attempts: 1,
+            providerPeerId: publicProvider,
+            appliedHeadDigest: `0x${'55'.repeat(32)}`,
+            catalogVersion: '1',
+            inventoryRowCount: '1',
+            lastError: null,
+            updatedAtMs: 2,
+          }],
+        }),
+      },
+      {
+        rfc64Catalog: {
+          rollout: {
+            killSwitch: true,
+            contextGraphModes: {
+              [publicContextGraph]: 'shadow',
+              [privateContextGraph]: 'legacy',
+            },
+          },
+        },
+        rfc64PublicCatalog: {
+          enabled: true,
+          rollout: {
+            contextGraphModes: {
+              [publicContextGraph]: 'shadow',
+            },
+          },
+          bootstrap: {
+            acceptedPublicPolicies: [rfc64PublicCatalogPolicy(publicContextGraph)],
+          },
+        },
+      },
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: [publicContextGraph, privateContextGraph],
+        selectedPublicContextGraphs: [publicContextGraph],
+        selectedPrivateContextGraphs: [privateContextGraph],
+        accessPolicyAuthority: {
+          localAgentAddress: '0x3333333333333333333333333333333333333333',
+          peerAgentBindings: [],
+        },
+        rollout: {
+          killSwitch: true,
+          defaultMode: 'catalog',
+          contextGraphModes: {
+            [publicContextGraph]: 'shadow',
+            [privateContextGraph]: 'legacy',
+          },
+        },
+        bootstrap: {
+          acceptedPolicies: [rfc64PublicCatalogPolicy(publicContextGraph), {
+            policyEnvelope: {
+              payload: {
+                contextGraphId: privateContextGraph,
+                accessPolicy: 1,
+                publishPolicy: 1,
+                source: { kind: 'finalized-chain' },
+              },
+            },
+          }],
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog.privateRecovery).toEqual([{
+      contextGraphId: privateContextGraph,
+      mode: 'legacy',
+      accessPolicy: 1,
+      publishPolicy: 1,
+      vmRequired: true,
+      targetCount: 1,
+      outcomeCounts: { 'known-incomplete': 1 },
+      completionReasons: ['no-authorized-provider'],
+    }]);
+    expect(response.body.rfc64Catalog.resourceTelemetry).toEqual({
+      providerAttempts: 3,
+      providerSwitches: 1,
+      providerSuccesses: 1,
+      providerBackoffMs: 20,
+      controlObjectCacheHits: 4,
+      controlObjectNetworkFetches: 5,
+      kaBundleCacheHits: 6,
+      kaBundleNetworkFetches: 7,
+      kaBundleCacheBytes: 800,
+      kaBundleNetworkBytes: 900,
+    });
+    expect(response.body.rfc64PublicCatalog.bootstrap.targets).toHaveLength(1);
+    expect(response.body.rfc64PublicCatalog.bootstrap.targets[0]).toMatchObject({
+      scope: { contextGraphId: publicContextGraph },
+      providers: [publicProvider],
+      providerPeerId: publicProvider,
+    });
+    expect(response.body.rfc64Catalog.rollout).toEqual({
+      killSwitch: true,
+      defaultMode: 'catalog',
+      contextGraphModes: {
+        [publicContextGraph]: 'shadow',
+        [privateContextGraph]: 'legacy',
+      },
+    });
+    expect(JSON.stringify(response.body)).toContain(publicProvider);
+    expect(JSON.stringify(response.body)).not.toContain(privateProvider);
+  });
+});
 
 describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => {
   let daemon: LiveDaemon;
@@ -54,6 +1716,17 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
           rpcUrls: [rpcUrl, DEAD_RPC],
           hubAddress,
           chainId: 'evm:31337',
+          // This case validates the real provider result shape, not local
+          // saturation (covered by the bounded flood case above). Give the
+          // daemon enough hermetic diagnostic capacity that unrelated startup
+          // work cannot consume the permits before this assertion runs.
+          rpcRequestBudget: {
+            maxRequestsPerSecond: 100,
+            foregroundReservePercent: 0,
+            burstRequests: 100,
+            maxQueueSize: 100,
+            startupJitterMs: 0,
+          },
         },
       },
     });
@@ -76,6 +1749,12 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
     expect(body.chain).not.toHaveProperty('rpcUrl');
     expect(body.chain).not.toHaveProperty('rpcUrls');
     expect(body.chain).not.toHaveProperty('hubAddress');
+    expect(body.asyncPublisher).toEqual({
+      available: false,
+      reason: 'publisher_disabled',
+      retryable: false,
+      operatorActionRequired: true,
+    });
     // Multi-RPC failover observability (W3): scalar counts + bounded by-class
     // map only — host-only, never a full RPC URL.
     expect(typeof body.chain.rpcFailovers).toBe('number');
@@ -98,13 +1777,15 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
 
     // Primary = the real Hardhat node: ok with a REAL block number.
     const primary = body.rpcs.find((p: any) => p.role === 'primary');
-    expect(primary.ok).toBe(true);
+    expect(primary.ok, JSON.stringify(body)).toBe(true);
+    expect(primary.status).toBe('healthy');
     expect(typeof primary.blockNumber).toBe('number');
     expect(primary.blockNumber).toBeGreaterThanOrEqual(0);
 
     // Backup = the dead endpoint: a REAL connection failure, sanitized.
     const backup = body.rpcs.find((p: any) => p.role === 'backup');
     expect(backup.ok).toBe(false);
+    expect(backup.status).toBe('unhealthy');
     expect(backup.blockNumber).toBeNull();
     expect(backup.error).toBe('RPC health probe failed');
 
@@ -113,6 +1794,496 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
     expect(typeof body.blockNumber).toBe('number');
     for (const probe of body.rpcs) {
       expect(probe).not.toHaveProperty('rpcUrl');
+    }
+  });
+});
+
+describe('/api/status effective sync lifecycle switches', () => {
+  async function withSwitchEnv<T>(
+    env: { sync?: string; vm?: string },
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const previousSync = process.env.DKG_SYNC_RECONCILER_ENABLED;
+    const previousVm = process.env.DKG_VM_RECONCILER_ENABLED;
+    const restore = (name: string, value: string | undefined) => {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    };
+    restore('DKG_SYNC_RECONCILER_ENABLED', env.sync);
+    restore('DKG_VM_RECONCILER_ENABLED', env.vm);
+    try {
+      return await run();
+    } finally {
+      restore('DKG_SYNC_RECONCILER_ENABLED', previousSync);
+      restore('DKG_VM_RECONCILER_ENABLED', previousVm);
+    }
+  }
+
+  it('surfaces the configured reconciler switch', async () => {
+    const response = await withSwitchEnv({}, () => requestStatusWithAgent(
+      {},
+      { syncReconcilerEnabled: false },
+    ));
+
+    expect(response.status).toBe(200);
+    // Peer sync off no longer implies VM reconcile off.
+    expect(response.body.syncLifecycle).toEqual({
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: true,
+    });
+  });
+
+  it('surfaces the environment override that runtime actually honors', async () => {
+    const response = await withSwitchEnv({ sync: 'true' }, () => requestStatusWithAgent(
+      {},
+      { syncReconcilerEnabled: false },
+    ));
+
+    expect(response.status).toBe(200);
+    expect(response.body.syncLifecycle).toEqual({
+      syncReconcilerEnabled: true,
+      vmReconcilerEnabled: true,
+    });
+  });
+
+  it('surfaces the VM reconciler switch with config and environment precedence', async () => {
+    const configured = await withSwitchEnv({}, () => requestStatusWithAgent(
+      {},
+      { vmReconcilerEnabled: false },
+    ));
+    expect(configured.body.syncLifecycle).toEqual({
+      syncReconcilerEnabled: true,
+      vmReconcilerEnabled: false,
+    });
+
+    const overridden = await withSwitchEnv({ vm: 'on' }, () => requestStatusWithAgent(
+      {},
+      { vmReconcilerEnabled: false },
+    ));
+    expect(overridden.body.syncLifecycle.vmReconcilerEnabled).toBe(true);
+  });
+
+  it('reports the agent VM promotion state and omits it for agents without it', async () => {
+    const vmPromotion = {
+      vmReconcilerEnabled: false,
+      vmReconcileActive: false,
+      unavailableReason: 'switched off (vmReconcilerEnabled=false or DKG_VM_RECONCILER_ENABLED)',
+      runtimeReady: true,
+      storageAckGate: 'declining',
+      storageAckHandler: 'registered',
+      coreHostedGraphs: 0,
+      storageAckDeclinesLastHour: { CORE_VM_PROMOTION_DISABLED: 3 },
+      audit: { lastRunAt: null, ledgerReady: false, stalledOnChain: 0 },
+    };
+    const reported = await requestStatusWithAgent({ getVmPromotionStatus: () => vmPromotion });
+    expect(reported.body.vmPromotion).toEqual(vmPromotion);
+
+    const legacy = await requestStatusWithAgent({});
+    expect(legacy.status).toBe(200);
+    expect(legacy.body).not.toHaveProperty('vmPromotion');
+  });
+});
+
+describe('daemon subscription rehydration lifecycle', () => {
+  it('honors the environment kill-switch through real startup and leaves durable rows dormant', async () => {
+    const contextGraphId = 'persisted-user-context-graph';
+    let daemon: LiveDaemon | undefined;
+
+    try {
+      daemon = await startLiveDaemon({
+        extraConfig: {
+          chain: { type: 'mock' },
+          contextGraphSubscriptionRehydrationEnabled: true,
+        },
+        env: {
+          DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED: 'false',
+        },
+        prepareHome: async (home) => {
+          const db = new DashboardDB({ dataDir: home });
+          try {
+            db.upsertContextGraphSubscription({
+              context_graph_id: contextGraphId,
+              name: 'Persisted user Context Graph',
+              subscribed: 1,
+              synced: 1,
+              shared_memory_synced: 1,
+              meta_synced: 1,
+              sync_scoped: 1,
+              updated_at: 1_700_000_000_000,
+            });
+          } finally {
+            db.close();
+          }
+        },
+      });
+
+      const response = await fetch(`${daemon.base}/api/context-graph/subscriptions`, {
+        headers: authHeaders(daemon),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        count: 0,
+        subscriptions: [],
+        rehydration: {
+          rehydrationEnabled: false,
+          persistedTotal: 1,
+          hostedActivated: 0,
+          activated: 0,
+          dormant: 1,
+          dormantIds: [contextGraphId],
+        },
+      });
+
+      // The daemon must only suppress live activation. The operator's durable
+      // intent remains byte-for-byte meaningful for a later enabled restart.
+      const db = new DashboardDB({ dataDir: daemon.home });
+      try {
+        expect(db.getContextGraphSubscription(contextGraphId)).toMatchObject({
+          context_graph_id: contextGraphId,
+          name: 'Persisted user Context Graph',
+          subscribed: 1,
+          synced: 1,
+          shared_memory_synced: 1,
+          meta_synced: 1,
+          sync_scoped: 1,
+        });
+      } finally {
+        db.close();
+      }
+    } finally {
+      await stopLiveDaemon(daemon);
+    }
+  }, 120_000);
+});
+
+describe('/api/info chain sanitization', () => {
+  it('never serializes configured RPC endpoint credentials when API auth is disabled', async () => {
+    const credentialSentinel = 'UNIT_TEST_RPC_CREDENTIAL_MUST_NOT_LEAK';
+    const response = await requestStatusWithAgent(
+      {},
+      {
+        auth: { enabled: false },
+        chain: {
+          type: 'evm',
+          rpcUrl: `https://tenant:${credentialSentinel}@primary.invalid/v1/${credentialSentinel}`,
+          rpcUrls: [`https://backup.invalid/rpc?token=${credentialSentinel}`],
+          hubAddress: `0x${'11'.repeat(20)}`,
+          chainId: 'base:84532',
+        },
+      },
+      '/api/info',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.auth).toBe(false);
+    expect(response.body.chain).toEqual({
+      chainId: 'base:84532',
+      configured: true,
+      rpcEndpointCount: 2,
+      hubConfigured: true,
+      rpcUrl: null,
+      rpcUrls: [],
+      hubAddress: `0x${'11'.repeat(20)}`,
+      rpcEndpointsRedacted: true,
+    });
+    expect(JSON.stringify(response.body)).not.toContain(credentialSentinel);
+    expect(JSON.stringify(response.body.chain)).not.toContain('://');
+  });
+
+  it('retains the legacy chain keys while making endpoint redaction explicit', async () => {
+    const response = await requestStatusWithAgent(
+      {},
+      {
+        auth: { enabled: true },
+        chain: {
+          type: 'evm',
+          rpcUrl: 'https://primary.invalid/operator-secret',
+          rpcUrls: ['https://backup.invalid/operator-secret'],
+          hubAddress: `0x${'22'.repeat(20)}`,
+          chainId: 'base:84532',
+        },
+      },
+      '/api/info',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.chain).toMatchObject({
+      rpcUrl: null,
+      rpcUrls: [],
+      hubAddress: `0x${'22'.repeat(20)}`,
+      rpcEndpointsRedacted: true,
+      rpcEndpointCount: 2,
+    });
+    expect(JSON.stringify(response.body)).not.toContain('operator-secret');
+  });
+});
+
+describe('/api/status finalization recovery health', () => {
+  it('includes the exact operator-facing recovery health block', async () => {
+    const finalizationRecovery = {
+      available: true,
+      closed: false,
+      ready: false,
+      canonicalReceiptCapability: 'unsupported' as const,
+      degradedReason: 'canonical-finalization-receipt-unsupported',
+      stateCounts: { RECEIVED: 1 },
+      liveEntries: 1,
+      livePayloadBytes: 4,
+      dueEntries: 1,
+    };
+
+    const response = await requestStatusWithAgent({
+      getFinalizationRecoveryHealth: async () => finalizationRecovery,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.finalizationRecovery).toEqual(finalizationRecovery);
+  });
+
+  it('keeps status healthy and degrades recovery when the health read throws', async () => {
+    const response = await requestStatusWithAgent({
+      getFinalizationRecoveryHealth: async () => {
+        throw new Error('finalization inbox health read failed');
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.finalizationRecovery).toEqual({
+      available: false,
+      closed: false,
+      ready: false,
+      canonicalReceiptCapability: 'unknown',
+      degradedReason: 'finalization inbox health read failed',
+      stateCounts: {},
+      livePayloadBytes: 0,
+      dueEntries: 0,
+    });
+  });
+});
+
+describe('/api/status RFC-64 selected-public activation', () => {
+  it('reports RFC-64 selected public scheduling as the default for explicit subscriptions', async () => {
+    const response = await requestStatusWithAgent({
+      // Runtime subscribe mutates the agent scope, not the startup CLI config.
+      getSyncContextGraphIds: () => ['explicit-public-cg'],
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64SelectedPublicSync).toEqual({
+      defaultEnabled: true,
+      requestedContextGraphs: ['explicit-public-cg'],
+      requestedContextGraphCount: 1,
+      catalogBackedContextGraphs: [],
+    });
+  });
+
+  it('reports mixed requested scopes without classifying a network-default graph as public', async () => {
+    const response = await requestStatusWithAgent(
+      { getSyncContextGraphIds: () => ['explicit-public-cg'] },
+      {},
+      '/api/status',
+      { defaultContextGraphs: ['private-network-default-cg', 'explicit-public-cg'] } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64SelectedPublicSync).toEqual({
+      defaultEnabled: true,
+      requestedContextGraphs: ['explicit-public-cg', 'private-network-default-cg'],
+      requestedContextGraphCount: 2,
+      catalogBackedContextGraphs: [],
+    });
+  });
+
+  it('reports the fail-closed disabled state without invoking catalog controls', async () => {
+    const catalogStats = vi.fn(() => {
+      throw new Error('disabled status must not read catalog service state');
+    });
+    const bootstrapStatus = vi.fn(() => {
+      throw new Error('disabled status must not read catalog bootstrap state');
+    });
+    const response = await requestStatusWithAgent({
+      rfc64PublicCatalogStatsV1: catalogStats,
+      readRfc64PublicCatalogBootstrapStatusV1: bootstrapStatus,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64PublicCatalog).toEqual({
+      enabled: false,
+      selectedContextGraphs: [],
+      runtimeSelection: { subscriptionDriven: false, selectedContextGraphs: [] },
+      rollout: { killSwitch: false, contextGraphModes: {} },
+      autoPublishEnabled: false,
+      completeSwmProviders: [],
+      service: null,
+      bootstrap: null,
+    });
+    expect(catalogStats).not.toHaveBeenCalled();
+    expect(bootstrapStatus).not.toHaveBeenCalled();
+  });
+
+  it('exposes selected scopes and exact per-target applied-head evidence', async () => {
+    const service = {
+      started: true,
+      acceptedPolicies: 1,
+      receiver: { queued: 0, applied: 1, failed: 0 },
+    };
+    const bootstrap = {
+      running: false,
+      pass: 2,
+      retryIntervalMs: 30_000,
+      targets: [{
+        scope: { contextGraphId: 'selected-public-cg', authorAddress: `0x${'22'.repeat(20)}` },
+        outcome: 'applied',
+        appliedHeadDigest: `0x${'33'.repeat(32)}`,
+        inventoryRowCount: '50',
+      }],
+    };
+    const response = await requestStatusWithAgent(
+      {
+        rfc64PublicCatalogStatsV1: () => service,
+        readRfc64PublicCatalogBootstrapStatusV1: () => bootstrap,
+        getSyncContextGraphIds: () => ['selected-public-cg'],
+      },
+      {
+        rfc64PublicCatalog: {
+          enabled: true,
+          rollout: {
+            killSwitch: true,
+            contextGraphModes: { 'selected-public-cg': 'shadow' },
+          },
+          autoPublish: {
+            peers: ['12D3KooReceiver'],
+            catalogIssuerDelegationExpiresAt: '1893456000000',
+          },
+          bootstrap: {
+            acceptedPublicPolicies: [{
+              ...rfc64PublicCatalogPolicy('selected-public-cg'),
+              completeSwmProviders: ['12D3KooCompleteSwm'],
+            }],
+          },
+        },
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64PublicCatalog).toEqual({
+      enabled: true,
+      selectedContextGraphs: ['selected-public-cg'],
+      runtimeSelection: {
+        subscriptionDriven: false,
+        selectedContextGraphs: ['selected-public-cg'],
+      },
+      rollout: {
+        killSwitch: true,
+        contextGraphModes: { 'selected-public-cg': 'shadow' },
+      },
+      autoPublishEnabled: true,
+      completeSwmProviders: [{
+        contextGraphId: 'selected-public-cg',
+        accessPolicy: 0,
+        publishPolicy: 1,
+        providers: ['12D3KooCompleteSwm'],
+      }],
+      service,
+      bootstrap,
+    });
+    expect(response.body.rfc64SelectedPublicSync).toEqual({
+      defaultEnabled: true,
+      requestedContextGraphs: ['selected-public-cg'],
+      requestedContextGraphCount: 1,
+      catalogBackedContextGraphs: ['selected-public-cg'],
+    });
+  });
+
+  it('reports receiver-only activation without claiming auto-publish is enabled', async () => {
+    const bootstrap = {
+      running: true,
+      pass: 1,
+      retryIntervalMs: 30_000,
+      targets: [],
+    };
+    const response = await requestStatusWithAgent(
+      {
+        rfc64PublicCatalogStatsV1: () => ({ started: true }),
+        readRfc64PublicCatalogBootstrapStatusV1: () => bootstrap,
+      },
+      {
+        rfc64PublicCatalog: {
+          enabled: true,
+          bootstrap: {
+            acceptedPublicPolicies: [rfc64PublicCatalogPolicy('receiver-only-cg')],
+          },
+        },
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64PublicCatalog).toMatchObject({
+      enabled: true,
+      selectedContextGraphs: ['receiver-only-cg'],
+      autoPublishEnabled: false,
+      completeSwmProviders: [],
+      bootstrap,
+    });
+  });
+});
+
+describe('/api/status RFC-64 requested scope by caller', () => {
+  // The live scope holds a public catalog graph, a private graph and the
+  // cleartext id an adopted name hash resolved to; the network adds a default.
+  const requestScopeAs = (authentication: ReturnType<typeof requestAuthentication>) => requestStatusWithAgent(
+    { getSyncContextGraphIds: () => ['selected-public-cg', 'acme-private-cg', 'acme-adopted-cg'] },
+    {
+      rfc64PublicCatalog: {
+        enabled: true,
+        bootstrap: { acceptedPublicPolicies: [rfc64PublicCatalogPolicy('selected-public-cg')] },
+      },
+    },
+    '/api/status',
+    { defaultContextGraphs: ['network-default-cg'] } as never,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    authentication,
+  );
+  const wholeScope = ['selected-public-cg', 'acme-private-cg', 'acme-adopted-cg', 'network-default-cg'];
+
+  it('names the whole scope to the node operator, and to every caller when auth is off', async () => {
+    for (const authentication of [
+      requestAuthentication({ kind: 'nodeOperator' }),
+      requestAuthentication({ kind: 'nodeOperator', mode: 'public' }),
+      requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
+    ]) {
+      const response = await requestScopeAs(authentication);
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64SelectedPublicSync).toEqual({
+        defaultEnabled: true,
+        requestedContextGraphs: wholeScope,
+        requestedContextGraphCount: 4,
+        catalogBackedContextGraphs: ['selected-public-cg'],
+      });
+    }
+  });
+
+  it('names only the selected public catalog graphs to any other caller, with the whole count', async () => {
+    for (const authentication of [
+      requestAuthentication({ kind: 'anonymous' }),
+      requestAuthentication({ kind: 'anonymous', presentedToken: 'not-a-valid-token' }),
+      requestAuthentication({ kind: 'agent', agentAddress: `0x${'44'.repeat(20)}`, mode: 'public' }),
+    ]) {
+      const response = await requestScopeAs(authentication);
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64SelectedPublicSync).toEqual({
+        defaultEnabled: true,
+        requestedContextGraphs: ['selected-public-cg'],
+        requestedContextGraphCount: 4,
+        catalogBackedContextGraphs: ['selected-public-cg'],
+      });
+      // The public catalog already lists that graph; nothing names the rest.
+      expect(response.body.rfc64PublicCatalog.selectedContextGraphs).toEqual(['selected-public-cg']);
+      const text = JSON.stringify(response.body);
+      for (const hidden of wholeScope.slice(1)) expect(text).not.toContain(hidden);
     }
   });
 });
@@ -127,6 +2298,7 @@ describe('/api/status selected overlay details', () => {
       await handleStatusRoutes({
         req,
         res,
+        publisherState: DISABLED_PUBLISHER_STATE,
         path: url.pathname,
         url,
         network,
@@ -136,10 +2308,13 @@ describe('/api/status selected overlay details', () => {
           nodeRole: 'edge',
           chain: { type: 'mock' },
         },
+        rfc64CatalogActivationState: resolveStatusActivationState({}),
+        rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
         startedAt: Date.now(),
         agent: {
           peerId: 'peer-status-test',
           multiaddrs: [],
+          getSyncContextGraphIds: () => [],
           node: {
             libp2p: { getConnections: () => [] },
             getRelayStats: () => null,
@@ -152,6 +2327,7 @@ describe('/api/status selected overlay details', () => {
         // handleRequest; stubbed here because this hand-built ctx drives the full
         // /api/status body, which now surfaces the admission block.
         admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
+        authentication: requestAuthentication({ kind: 'anonymous' }),
       } as unknown as RequestContext);
     });
 
@@ -192,6 +2368,7 @@ describe('/api/status selected overlay details', () => {
         await handleStatusRoutes({
           req,
           res,
+          publisherState: DISABLED_PUBLISHER_STATE,
           path: url.pathname,
           url,
           network,
@@ -206,16 +2383,20 @@ describe('/api/status selected overlay details', () => {
               chainId: 'evm:31337',
             },
           },
+          rfc64CatalogActivationState: resolveStatusActivationState({}),
+          rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
           startedAt: Date.now(),
           agent: {
             peerId: 'peer-status-test',
             multiaddrs: [],
+            getSyncContextGraphIds: () => [],
             node: { libp2p: { getConnections: () => [] }, getRelayStats: () => null },
             publisher: { getIdentityId: () => 0n },
           },
           nodeVersion: '0.0.0-test',
           nodeCommit: '',
           admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
+          authentication: requestAuthentication({ kind: 'anonymous' }),
         } as unknown as RequestContext);
       });
       await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -257,6 +2438,7 @@ describe('/api/status selected overlay details', () => {
       await handleStatusRoutes({
         req,
         res,
+        publisherState: DISABLED_PUBLISHER_STATE,
         path: url.pathname,
         url,
         network: null,
@@ -265,8 +2447,11 @@ describe('/api/status selected overlay details', () => {
           nodeRole: 'edge',
           chain: { type: 'evm', rpcUrl: 'http://127.0.0.1:9', hubAddress: `0x${'ab'.repeat(20)}`, chainId: 'evm:31337' },
         },
+        rfc64CatalogActivationState: resolveStatusActivationState({}),
+        rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
         startedAt: Date.now(),
         agent: { ensureIdentity: async () => { throw err; } },
+        authentication: requestAuthentication({ kind: 'nodeOperator' }),
         nodeVersion: '0.0.0-test',
         nodeCommit: '',
         admission: { inFlight: 0, max: 0, rejectedTotal: 0 },

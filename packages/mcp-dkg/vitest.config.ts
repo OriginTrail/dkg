@@ -1,3 +1,4 @@
+import { coverageForPackage } from '../../vitest.coverage';
 import { defineConfig } from 'vitest/config';
 
 /**
@@ -13,6 +14,16 @@ import { defineConfig } from 'vitest/config';
  */
 export default defineConfig({
   test: {
+    allowOnly: false,
+    coverage: coverageForPackage('mcp-dkg'),
     include: ['test/**/*.test.ts'],
+    // Compile-time contract assertions (@ts-expect-error) live in test-d/ and
+    // run through tsc here — the ordinary transform strips types, so a
+    // @ts-expect-error in a runtime test file proves nothing.
+    typecheck: {
+      enabled: true,
+      include: ['test-d/**/*.test-d.ts'],
+      tsconfig: './tsconfig.typetest.json',
+    },
   },
 });

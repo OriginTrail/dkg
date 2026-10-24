@@ -6,8 +6,6 @@
  * use these helpers for real-chain integration testing via Hardhat.
  */
 import { readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { JsonRpcProvider } from 'ethers';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { makeAdapterConfig, HARDHAT_KEYS } from './hardhat-harness.js';
@@ -21,8 +19,8 @@ export interface SharedHardhatContext {
 }
 
 export function contextFilePath(): string {
-  const port = process.env.HARDHAT_PORT || '9545';
-  return join(tmpdir(), `dkg-hardhat-ctx-${port}.json`);
+  if (process.env.DKG_HARDHAT_CONTEXT_FILE) return process.env.DKG_HARDHAT_CONTEXT_FILE;
+  throw new Error('Hardhat workers require an isolated DKG_HARDHAT_CONTEXT_FILE');
 }
 
 let _cached: SharedHardhatContext | null = null;

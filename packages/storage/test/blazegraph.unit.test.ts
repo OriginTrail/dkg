@@ -2,9 +2,14 @@
  * BlazegraphStore unit tests with mocked fetch (03 §16 — graph isolation via GRAPH IRIs;
  * no live Blazegraph required).
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { performance } from 'node:perf_hooks';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
-import { getExternalStorePrioritySchedulerSnapshot } from '../src/store-priority-scheduler.js';
+import {
+  externalStorePriorityScheduler,
+  getExternalStorePrioritySchedulerSnapshot,
+} from '../src/store-priority-scheduler.js';
+import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
 async function waitForCondition(
   predicate: () => boolean,
@@ -37,6 +42,31 @@ function blazeListGraphsResponse(): Response {
     }),
     { status: 200, headers: { 'Content-Type': 'application/json' } },
   );
+}
+
+async function outcomeWithin(work: Promise<unknown>, timeoutMs: number): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work.then(
+        () => 'resolved',
+        (error: unknown) => error,
+      ),
+      new Promise<'still-pending'>((resolve) => {
+        timer = setTimeout(() => resolve('still-pending'), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function blockEventLoopFor(durationMs: number): void {
+  const end = performance.now() + durationMs;
+  while (performance.now() < end) {
+    // Deliberately keep timers from firing so the post-await clock check owns
+    // timeout classification when the awaited work rejects.
+  }
 }
 
 describe('BlazegraphStore (mocked HTTP)', () => {
@@ -213,11 +243,424 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(String(init?.body)).toMatch(/^CONSTRUCT /);
   });
 
+  it.each([
+    [
+      'CONSTRUCT',
+      'BASE <http://ex.org/>\nPREFIX schema: <http://schema.org/>\nCONSTRUCT { <s> schema:name ?name } WHERE { <s> schema:name ?name }',
+    ],
+    [
+      'DESCRIBE',
+      'BASE <http://ex.org/>\nPREFIX schema: <http://schema.org/>\nDESCRIBE <s>',
+    ],
+  ])('uses an N-Quads Accept header for a BASE/PREFIX-prefixed %s query', async (
+    _form,
+    sparql,
+  ) => {
+    setFetch(async () => new Response(
+      '<http://ex.org/s> <http://schema.org/name> "Alice" .\n',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const s = new BlazegraphStore(baseUrl);
+    const result = await s.query(sparql);
+    expect(result.type).toBe('quads');
+    const headers = fetchCalls[0][1]?.headers as Record<string, string>;
+    expect(headers.Accept).toBe('text/x-nquads, application/n-quads');
+  });
+
+  it('sends a server-side query deadline on SELECT and CONSTRUCT, wider than the client deadline', async () => {
+    // Without a server-side bound, a client abort leaves the query executing
+    // on Blazegraph indefinitely (observed on mainnet: 10-32+ min past a 30s
+    // abort, queryErrorCount=0 across 20,953 queries). The bound must be
+    // WIDER than the client deadline so the client always aborts first —
+    // The wire-level 120s expectation below independently documents the
+    // operational contract for the default 30s client deadline.
+    setFetch(async () => blazeSelectResponse());
+    const s = new BlazegraphStore(baseUrl, { timeout: 30_000 });
+    await s.query('SELECT ?s WHERE { ?s ?p ?o }');
+    const selectHeaders = fetchCalls[0][1]?.headers as Record<string, string>;
+    const sent = Number(selectHeaders['X-BIGDATA-MAX-QUERY-MILLIS']);
+    expect(sent).toBe(120_000);
+    expect(sent).toBeGreaterThan(30_000);
+
+    fetchCalls.length = 0;
+    setFetch(async () => new Response(
+      '<http://ex.org/s> <http://ex.org/p> <http://ex.org/o> <http://ctx/1> .\n',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    await s.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }');
+    const constructHeaders = fetchCalls[0][1]?.headers as Record<string, string>;
+    expect(Number(constructHeaders['X-BIGDATA-MAX-QUERY-MILLIS']))
+      .toBe(120_000);
+  });
+
+  it('scales the server-side deadline with a custom client timeout', async () => {
+    setFetch(async () => blazeSelectResponse());
+    const s = new BlazegraphStore(baseUrl, { timeout: 5_000 });
+    await s.query('SELECT ?s WHERE { ?s ?p ?o }');
+    const headers = fetchCalls[0][1]?.headers as Record<string, string>;
+    expect(Number(headers['X-BIGDATA-MAX-QUERY-MILLIS']))
+      .toBe(20_000);
+  });
+
+  it('rejects a CONSTRUCT body truncated by an engine error instead of parsing it as partial data', async () => {
+    // Blazegraph commits 200 and streams before it knows the query will fail,
+    // then appends the error into the committed body. The tolerant n-quads
+    // parser skips unmatched lines, so without the guard this returns a short
+    // but structurally valid quad set — silent data loss.
+    setFetch(async () => new Response(
+      '<http://ex.org/s> <http://ex.org/p> <http://ex.org/o> <http://ctx/1> .\n'
+      + 'java.util.concurrent.TimeoutException: query deadline exceeded\n'
+      + '\tat com.bigdata.rdf.sail.webapp.BigdataRDFContext.run(BigdataRDFContext.java:1)\n',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const s = new BlazegraphStore(baseUrl);
+    await expect(s.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'))
+      .rejects.toThrow(/truncated CONSTRUCT result/i);
+  });
+
+  it('rejects a CONSTRUCT body cut mid-statement', async () => {
+    setFetch(async () => new Response(
+      '<http://ex.org/s> <http://ex.org/p> <http://ex.org/o> <http://ctx/1> .\n'
+      + '<http://ex.org/s2> <http://ex.org/p2> <http://ex.or',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const s = new BlazegraphStore(baseUrl);
+    await expect(s.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'))
+      .rejects.toThrow(/truncated CONSTRUCT result/i);
+  });
+
+  it('rejects a final truncated literal even when the fragment ends with a period', async () => {
+    // A punctuation-only guard mistakes the period inside this unfinished
+    // literal for an N-Quads statement terminator, after which the tolerant
+    // parser silently skips the line and returns only the first quad.
+    setFetch(async () => new Response(
+      '<http://ex.org/s1> <http://ex.org/p> <http://ex.org/o> <http://ctx/1> .\n'
+      + '<http://ex.org/s2> <http://ex.org/p> "partial.',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const s = new BlazegraphStore(baseUrl);
+    await expect(s.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'))
+      .rejects.toThrow(/truncated CONSTRUCT result/i);
+  });
+
+  it('does not misread a trailing comment or an error-like literal as truncation', async () => {
+    // Two false positives a narrower guard must not have: (1) a body whose
+    // final line is a comment is complete, not cut short; (2) a STORED literal
+    // containing Java-stack-trace text sits mid-line inside its quad (n-quads
+    // forbids raw newlines in literals), so the line-start-anchored error scan
+    // must not fire on it. User-published content is arbitrary — a KA holding
+    // error logs must not poison every read of its graph.
+    setFetch(async () => new Response(
+      '<http://ex.org/s> <http://ex.org/p> "logs: at com.bigdata.Journal.run TimeoutException" <http://ctx/1> .\n'
+      + '# end of results\n',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const r = await new BlazegraphStore(baseUrl)
+      .query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }');
+    expect(r.type).toBe('quads');
+    expect((r as { quads: unknown[] }).quads).toHaveLength(1);
+  });
+
+  it('still accepts complete CONSTRUCT bodies, including empty results and comments', async () => {
+    // The guard must not start rejecting shapes the tolerant parser has
+    // always accepted, or it becomes a worse bug than the one it fixes.
+    setFetch(async () => new Response('', { status: 200, headers: { 'Content-Type': 'text/x-nquads' } }));
+    const empty = await new BlazegraphStore(baseUrl)
+      .query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }');
+    expect(empty.type).toBe('quads');
+    expect((empty as { quads: unknown[] }).quads).toHaveLength(0);
+
+    setFetch(async () => new Response(
+      '# a comment line\n'
+      + '<http://ex.org/s> <http://ex.org/p> "lit"@en <http://ctx/1> .\n',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const ok = await new BlazegraphStore(baseUrl)
+      .query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }');
+    expect((ok as { quads: unknown[] }).quads).toHaveLength(1);
+  });
+
+  it.each([
+    {
+      name: 'SELECT',
+      operation: 'query',
+      run: (store: BlazegraphStore) => store.query('SELECT ?s WHERE { ?s ?p ?o }'),
+    },
+    {
+      name: 'CONSTRUCT',
+      operation: 'construct',
+      run: (store: BlazegraphStore) => store.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'),
+    },
+    {
+      name: 'UPDATE',
+      operation: 'update',
+      run: (store: BlazegraphStore) => store.update('DELETE WHERE { ?s ?p ?o }'),
+    },
+    {
+      name: 'bulk insert',
+      operation: 'insert',
+      run: (store: BlazegraphStore) => store.insert([
+        { subject: 'http://s', predicate: 'http://p', object: '"o"', graph: 'http://g' },
+      ]),
+    },
+  ])('applies its end-to-end timeout to an in-flight $name fetch', async ({ operation, run }) => {
+    let seenSignal: AbortSignal | undefined;
+    setFetch(async (_url, init) => {
+      seenSignal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+    });
+    const s = new BlazegraphStore(baseUrl, { timeout: 20 });
+
+    const outcome = await outcomeWithin(run(s), 200);
+    expect(outcome).toMatchObject({
+      name: 'TimeoutError',
+      code: 'STORE_OPERATION_TIMEOUT',
+      retryable: true,
+      backend: 'blazegraph',
+      operation,
+      timeoutMs: 20,
+      outcome: 'indeterminate',
+    });
+    expect(seenSignal?.aborted).toBe(true);
+  });
+
+  it('classifies a deadline that expires before scheduler admission as not started', async () => {
+    const maxConcurrent = getExternalStorePrioritySchedulerSnapshot().maxConcurrent;
+    const releases: Array<() => void> = [];
+    const blockers = Array.from({ length: maxConcurrent }, (_, index) =>
+      externalStorePriorityScheduler.run('ack', `test.blocker.${index}`, () =>
+        new Promise<void>((resolve) => {
+          releases.push(resolve);
+        })));
+    try {
+      await waitForCondition(
+        () => releases.length === maxConcurrent,
+        'scheduler blockers were not all admitted',
+      );
+      const store = new BlazegraphStore(baseUrl, { timeout: 20 });
+      const outcome = await outcomeWithin(store.insert([
+        { subject: 'http://s', predicate: 'http://p', object: '"o"', graph: 'http://g' },
+      ]), 200);
+
+      expect(outcome).toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'blazegraph',
+        operation: 'insert',
+        timeoutMs: 20,
+        outcome: 'not_started',
+      });
+      expect(fetchCalls).toHaveLength(0);
+    } finally {
+      releases.forEach((release) => release());
+      await Promise.all(blockers);
+    }
+  });
+
+  it('reports TimeoutError when fetch rejects after the deadline clock but before its timer runs', async () => {
+    const lateTransportFailure = new Error('late transport failure');
+    setFetch(async () => {
+      blockEventLoopFor(25);
+      throw lateTransportFailure;
+    });
+    const s = new BlazegraphStore(baseUrl, { timeout: 5 });
+
+    const outcome = await outcomeWithin(
+      s.query('SELECT ?s WHERE { ?s ?p ?o }'),
+      200,
+    );
+    expect(outcome).toMatchObject({ name: 'TimeoutError' });
+    expect(outcome).not.toBe(lateTransportFailure);
+  });
+
+  it('reports TimeoutError when response text reading rejects after the deadline clock but before its timer runs', async () => {
+    const lateDecodeFailure = new Error('late JSON failure');
+    setFetch(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => {
+        blockEventLoopFor(25);
+        throw lateDecodeFailure;
+      },
+    }) as Response);
+    const s = new BlazegraphStore(baseUrl, { timeout: 5 });
+
+    const outcome = await outcomeWithin(
+      s.query('SELECT ?s WHERE { ?s ?p ?o }'),
+      200,
+    );
+    expect(outcome).toMatchObject({ name: 'TimeoutError' });
+    expect(outcome).not.toBe(lateDecodeFailure);
+  });
+
+  it('preserves the exact caller abort reason while fetch is in flight', async () => {
+    setFetch(async (_url, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+    }));
+    const controller = new AbortController();
+    const reason = new Error('caller cancelled query');
+    const s = new BlazegraphStore(baseUrl);
+    const query = s.query('SELECT ?s WHERE { ?s ?p ?o }', { signal: controller.signal });
+    await waitForCondition(() => fetchCalls.length === 1, 'query fetch did not start');
+
+    controller.abort(reason);
+
+    await expect(query).rejects.toBe(reason);
+  });
+
+  it('keeps the SELECT deadline active through response text reading', async () => {
+    setFetch(async (_url, init) => {
+      const body = new Promise<string>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+      return {
+        ok: true,
+        status: 200,
+        text: () => body,
+      } as Response;
+    });
+    const s = new BlazegraphStore(baseUrl, { timeout: 20 });
+
+    const outcome = await outcomeWithin(
+      s.query('SELECT ?s WHERE { ?s ?p ?o }'),
+      200,
+    );
+    expect(outcome).toMatchObject({ name: 'TimeoutError' });
+  });
+
+  it('keeps the UPDATE deadline active while reading an error response body', async () => {
+    setFetch(async (_url, init) => {
+      const body = new Promise<string>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+      return {
+        ok: false,
+        status: 500,
+        text: () => body,
+      } as Response;
+    });
+    const s = new BlazegraphStore(baseUrl, { timeout: 20 });
+
+    const outcome = await outcomeWithin(
+      s.update('DELETE WHERE { ?s ?p ?o }'),
+      200,
+    );
+    expect(outcome).toMatchObject({ name: 'TimeoutError' });
+  });
+
+  it('does not return a timeout until the aborted Blazegraph attempt has stopped', async () => {
+    let calls = 0;
+    let active = 0;
+    let maxActive = 0;
+    setFetch(async (_url, init) => {
+      calls += 1;
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      if (calls > 1) {
+        active -= 1;
+        return blazeSelectResponse();
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          // Model delayed HTTP/server cleanup after Blazegraph receives the
+          // cancellation. The adapter must not release admission or reject the
+          // caller until this underlying attempt has actually settled.
+          setTimeout(() => {
+            active -= 1;
+            reject(init.signal?.reason);
+          }, 20);
+        }, { once: true });
+      });
+    });
+    const s = new BlazegraphStore(baseUrl, { timeout: 5 });
+
+    await expect(s.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toBeDefined();
+    expect(active).toBe(0);
+
+    // The 5 ms budget above exists only to trigger cancellation. Reusing it
+    // for the recovery probe makes this assertion depend on host scheduling
+    // latency rather than on whether the previous attempt released its slot.
+    const recoveryStore = new BlazegraphStore(baseUrl, { timeout: 200 });
+    await expect(recoveryStore.query('SELECT ?s WHERE { ?s ?p ?o }')).resolves.toMatchObject({
+      type: 'bindings',
+    });
+    expect(maxActive).toBe(1);
+  });
+
+  it('expires queued work before fetch and never dispatches it later', async () => {
+    const before = getExternalStorePrioritySchedulerSnapshot();
+    const normalSlots = before.maxConcurrent
+      - before.ackReservedSlots
+      - (before.healthReservedSlots ?? 0);
+    const releases: Array<(response: Response) => void> = [];
+    const blockers: Array<Promise<unknown>> = [];
+    let fetchCount = 0;
+    setFetch(async (_url, init) => {
+      fetchCount++;
+      return new Promise<Response>((resolve, reject) => {
+        releases.push(resolve);
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+    });
+
+    try {
+      const blockingStore = new BlazegraphStore(baseUrl, { timeout: 30_000 });
+      for (let i = 0; i < normalSlots; i++) {
+        blockers.push(blockingStore.query(
+          `SELECT ?s WHERE { # queue-blocker-${i}\n?s ?p ?o }`,
+          { priority: 'normal' },
+        ));
+      }
+      await waitForCondition(
+        () => fetchCount === normalSlots,
+        `normal store lanes did not fill; fetchCount=${fetchCount}, slots=${normalSlots}`,
+      );
+
+      const deadlineStore = new BlazegraphStore(baseUrl, { timeout: 20 });
+      const queued = deadlineStore.query(
+        'SELECT ?s WHERE { # must-not-dispatch\n?s ?p ?o }',
+        { priority: 'normal' },
+      );
+      const outcome = await outcomeWithin(queued, 200);
+      expect(outcome).toMatchObject({ name: 'TimeoutError' });
+      expect(fetchCount).toBe(normalSlots);
+
+      for (const release of releases.splice(0)) release(blazeSelectResponse());
+      await Promise.allSettled([...blockers, queued]);
+      expect(fetchCount).toBe(normalSlots);
+    } finally {
+      for (const release of releases.splice(0)) release(blazeSelectResponse());
+      await Promise.allSettled(blockers);
+    }
+  });
+
+  it('detaches the caller abort listener after a completed operation', async () => {
+    setFetch(async () => blazeSelectResponse());
+    const caller = new AbortController();
+    const addListener = vi.spyOn(caller.signal, 'addEventListener');
+    const removeListener = vi.spyOn(caller.signal, 'removeEventListener');
+    const s = new BlazegraphStore(baseUrl);
+
+    await s.query('SELECT ?s WHERE { ?s ?p ?o }', { signal: caller.signal });
+    expect(addListener).toHaveBeenCalledTimes(1);
+    expect(removeListener).toHaveBeenCalledTimes(1);
+    addListener.mockRestore();
+    removeListener.mockRestore();
+  });
+
+  it('rejects invalid explicit operation timeouts', () => {
+    expect(() => new BlazegraphStore(baseUrl, { timeout: 0 })).toThrow(/positive integer/);
+  });
+
   it('routes ack-priority adapter queries ahead of queued background fetch work', async () => {
     const before = getExternalStorePrioritySchedulerSnapshot();
     expect(before.maxConcurrent).toBeGreaterThan(1);
     expect(before.ackReservedSlots).toBeGreaterThan(0);
-    const backgroundSlots = before.maxConcurrent - before.ackReservedSlots;
+    const backgroundSlots = before.maxConcurrent
+      - before.ackReservedSlots
+      - (before.healthReservedSlots ?? 0)
+      - (before.normalReservedSlots ?? 0);
     const arrivals: Array<'listGraphs' | 'ack' | 'other'> = [];
     const releaseHeldListGraphs: Array<() => void> = [];
     const backgroundWork: Array<Promise<unknown>> = [];
@@ -291,7 +734,10 @@ describe('BlazegraphStore (mocked HTTP)', () => {
   });
 
   it('ASK query returns boolean result', async () => {
-    setFetch(async () => new Response(JSON.stringify({ boolean: true }), {
+    setFetch(async () => new Response(JSON.stringify({
+      head: { link: ['https://example.test/results'] },
+      boolean: true,
+    }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     }));
@@ -299,6 +745,19 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     const r = await s.query('ASK { GRAPH <http://g1> { ?s ?p ?o } }');
     expect(r.type).toBe('boolean');
     if (r.type === 'boolean') expect(r.value).toBe(true);
+  });
+
+  it.each([
+    'PREFIX ex: <urn:ex:> ASK { ?s ex:p ?o }',
+    'BASE <urn:base:> ASK { ?s <p> ?o }',
+    '# leading comment\nASK { ?s ?p ?o }',
+  ])('classifies prologue-prefixed ASK as boolean: %s', async (query) => {
+    setFetch(async () => new Response(JSON.stringify({ head: {}, boolean: false }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    const result = await new BlazegraphStore(baseUrl).query(query);
+    expect(result).toEqual({ type: 'boolean', value: false });
   });
 
   it('query throws when SPARQL endpoint returns error', async () => {
@@ -353,22 +812,73 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     // charset=utf-8 keeps Jetty from ISO-8859-1-decoding non-ASCII literals.
     expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-update; charset=utf-8');
     expect(String(init?.body)).toBe(sparql);
-    expect(init?.signal).toBe(controller.signal);
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+    expect(init?.signal).not.toBe(controller.signal);
     expect(fetchCalls.some((c) => /\bCOUNT\b/i.test(String(c[1]?.body ?? '')))).toBe(false);
     expect(fetchCalls.some((c) => String(c[1]?.body ?? '').startsWith('SELECT'))).toBe(false);
+  });
+
+  it('replaceGraph sends one staged MOVE update for the complete graph', async () => {
+    const s = new BlazegraphStore(baseUrl);
+    await s.replaceGraph('http://ex.org/g', [{
+      subject: 'http://ex.org/new',
+      predicate: 'http://ex.org/p',
+      object: '"new"',
+      graph: 'http://ex.org/g',
+    }]);
+
+    expect(fetchCalls).toHaveLength(1);
+    const [, init] = fetchCalls[0];
+    const body = String(init?.body);
+    expect((init?.headers as Record<string, string>)['Content-Type'])
+      .toBe('application/sparql-update; charset=utf-8');
+    expect(body).toContain('urn:dkg:internal:atomic-graph-replace:');
+    expect(body).toContain('INSERT DATA');
+    // Non-SILENT: a missing staging graph must fail loudly, not report success.
+    expect(body).toContain('MOVE GRAPH');
+    expect(body).not.toContain('MOVE SILENT');
+    expect(body).toContain('TO GRAPH <http://ex.org/g>');
+    expect(body).toContain('<http://ex.org/new> <http://ex.org/p> "new" .');
+  });
+
+  it('replaceSubject sends ONE subject-scoped DELETE WHERE + INSERT DATA update (no MOVE)', async () => {
+    const s = new BlazegraphStore(baseUrl);
+    await s.replaceSubject('http://ex.org/g', 'http://ex.org/job', [{
+      subject: 'http://ex.org/job',
+      predicate: 'http://ex.org/p',
+      object: '"new"',
+      graph: 'http://ex.org/g',
+    }]);
+
+    // Exactly one update POST, application/sparql-update, subject-scoped: the
+    // DELETE clears only <job>, INSERT DATA writes the new rows, and there is NO
+    // whole-graph staging/MOVE (that would clobber other subjects in the graph).
+    expect(fetchCalls).toHaveLength(1);
+    const [, init] = fetchCalls[0];
+    const body = String(init?.body);
+    expect((init?.headers as Record<string, string>)['Content-Type'])
+      .toBe('application/sparql-update; charset=utf-8');
+    expect(body).toContain('DELETE WHERE');
+    expect(body).toContain('<http://ex.org/job> ?p ?o');
+    expect(body).toContain('INSERT DATA');
+    expect(body).toContain('GRAPH <http://ex.org/g>');
+    expect(body).toContain('<http://ex.org/job> <http://ex.org/p> "new" .');
+    expect(body).not.toContain('MOVE GRAPH');
+    expect(body).not.toContain('atomic-graph-replace:');
   });
 
   it('update honors pre-aborted options before dispatch', async () => {
     const s = new BlazegraphStore(baseUrl);
     const controller = new AbortController();
-    controller.abort(new Error('cancel update'));
+    const reason = new Error('cancel update');
+    controller.abort(reason);
 
     await expect(
       s.update('DELETE WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }', {
         priority: 'ack',
         signal: controller.signal,
       }),
-    ).rejects.toThrow('cancel update');
+    ).rejects.toBe(reason);
     expect(fetchCalls).toHaveLength(0);
   });
 
@@ -425,6 +935,20 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     const s = new BlazegraphStore(baseUrl);
     const removed = await s.deleteByPattern({ graph: 'http://g', subject: 'http://s' });
     expect(removed).toBe(3);
+  });
+
+  it('deleteByPatternWithoutCount sends one UPDATE and no COUNT queries', async () => {
+    setFetch(async () => new Response(null, { status: 200 }));
+    const s = new BlazegraphStore(baseUrl);
+
+    await s.deleteByPatternWithoutCount({
+      graph: 'http://g',
+      subject: 'http://s',
+    });
+
+    expect(fetchCalls).toHaveLength(1);
+    expect(String(fetchCalls[0]?.[1]?.body)).toContain('DELETE');
+    expect(String(fetchCalls[0]?.[1]?.body)).not.toContain('SELECT');
   });
 
   it('deleteByPattern count branch keyed on direct-POST SELECT body', async () => {
@@ -557,5 +1081,138 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(fetchCalls).toHaveLength(1);
     const body = String(fetchCalls[0][1]?.body);
     expect(body).toContain(longUri);
+  });
+
+  describe('RDF term formatting', () => {
+    function respondToSparql(): void {
+      setFetch(async (_url, init) => {
+        const body = String(init?.body ?? '');
+        if (body.startsWith('ASK')) {
+          return new Response(JSON.stringify({ boolean: true }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (body.startsWith('SELECT')) {
+          return new Response(
+            JSON.stringify({ head: { vars: ['c'] }, results: { bindings: [{ c: { type: 'literal', value: '0' } }] } }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response(null, { status: 200 });
+      });
+    }
+    const bodies = () => fetchCalls.map(([, init]) => String(init?.body));
+
+    it('sends byte-identical SPARQL for well-formed terms', async () => {
+      const observed = observeInvalidSparqlTerms();
+      try {
+        respondToSparql();
+        const s = new BlazegraphStore(baseUrl);
+        await s.deleteByPatternWithoutCount({
+          graph: 'http://g',
+          subject: '<http://s>',
+          predicate: 'http://p',
+          object: '"5"^^http://www.w3.org/2001/XMLSchema#integer',
+        });
+        await s.delete([
+          { subject: 'http://s', predicate: 'http://p', object: '_:b0', graph: 'http://g' },
+          { subject: '_:b0', predicate: 'http://q', object: '"v"@en', graph: 'http://g' },
+        ]);
+        await s.deleteBySubjectPrefix('http://g', 'http://s/');
+        await s.dropGraph('http://g');
+        await s.hasGraph('http://g');
+
+        const component = 'GRAPH <http://g> {\n    <http://s> <http://p> ?b0 .\n    ?b0 <http://q> "v"@en .\n  }';
+        expect(bodies()).toEqual([
+          'DELETE { GRAPH <http://g> { <http://s> <http://p> "5"^^<http://www.w3.org/2001/XMLSchema#integer> } } '
+            + 'WHERE { GRAPH <http://g> { <http://s> <http://p> "5"^^<http://www.w3.org/2001/XMLSchema#integer> } }',
+          `DELETE { ${component} } WHERE { ${component} }`,
+          'SELECT (COUNT(*) AS ?c) WHERE { GRAPH <http://g> { ?s ?p ?o } }',
+          'DELETE { GRAPH <http://g> { ?s ?p ?o } } '
+            + 'WHERE { GRAPH <http://g> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "http://s/")) } }',
+          'SELECT (COUNT(*) AS ?c) WHERE { GRAPH <http://g> { ?s ?p ?o } }',
+          'DROP SILENT GRAPH <http://g>',
+          'ASK { GRAPH <http://g> { ?s ?p ?o } }',
+        ]);
+        expect(observed.counted).toEqual([]);
+        expect(observed.warnings).toEqual([]);
+      } finally {
+        observed.restore();
+      }
+    });
+
+    it('logs and counts a malformed IRI instead of silently stripping it', async () => {
+      const observed = observeInvalidSparqlTerms();
+      try {
+        respondToSparql();
+        const s = new BlazegraphStore(baseUrl);
+        await s.dropGraph('http://g{x}');
+        // Observe mode: the pre-validation (stripped) update is still sent.
+        expect(bodies()).toEqual(['DROP SILENT GRAPH <http://gx>']);
+        expect(observed.counted).toEqual([{
+          value: 1,
+          adapter: 'blazegraph',
+          operation: 'dropGraph',
+          position: 'graph',
+          kind: 'iri',
+          enforcement: 'observe',
+        }]);
+        expect(observed.warnings).toEqual([
+          expect.stringContaining('blazegraph.dropGraph: invalid iri in SPARQL graph position (11 chars, fingerprint '),
+        ]);
+        expect(observed.warnings[0]).not.toContain('http://g{x}');
+      } finally {
+        observed.restore();
+      }
+    });
+
+    it('labels blank-node-safe deletes and counts subject prefixes no IRI can start with', async () => {
+      const observed = observeInvalidSparqlTerms();
+      try {
+        respondToSparql();
+        const s = new BlazegraphStore(baseUrl);
+        await s.delete([{ subject: 'http://s', predicate: 'http://p q', object: '"v"', graph: 'http://g' }]);
+        await s.deleteBySubjectPrefix('http://g', 'http://s/\n"x"');
+        expect(bodies()[0]).toBe('DELETE DATA {\nGRAPH <http://g> { <http://s> <http://p q> "v" . }\n}');
+        // Sent as before: the quote is escaped and the line break stays raw.
+        expect(bodies()[2]).toContain('FILTER(STRSTARTS(STR(?s), "http://s/\n\\"x\\""))');
+        expect(observed.counted).toEqual([
+          expect.objectContaining({ adapter: 'blazegraph', operation: 'delete', position: 'predicate' }),
+          expect.objectContaining({
+            adapter: 'blazegraph', operation: 'deleteBySubjectPrefix', position: 'subject-prefix', kind: 'iri',
+          }),
+        ]);
+      } finally {
+        observed.restore();
+      }
+    });
+
+    it('labels the graph term of every graph-scoped operation', async () => {
+      const observed = observeInvalidSparqlTerms();
+      try {
+        respondToSparql();
+        const s = new BlazegraphStore(baseUrl);
+        await s.hasGraph('http://g{x}');
+        await s.countQuads('http://g{x}');
+        await s.deleteBySubjectPrefix('http://g{x}', 'urn:ok/');
+        await s.deleteByPatternWithoutCount({ graph: 'http://g{x}' });
+        await s.dropGraph('http://g{x}');
+        const graphPoint = (operation: string) => ({
+          value: 1, adapter: 'blazegraph', operation, position: 'graph', kind: 'iri', enforcement: 'observe',
+        });
+        expect(observed.counted).toEqual([
+          graphPoint('hasGraph'),
+          graphPoint('countQuads'),
+          graphPoint('countQuads'),
+          graphPoint('deleteBySubjectPrefix'),
+          graphPoint('countQuads'),
+          graphPoint('deleteByPattern'),
+          graphPoint('dropGraph'),
+        ]);
+      } finally {
+        observed.restore();
+      }
+    });
   });
 });

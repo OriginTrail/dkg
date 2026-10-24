@@ -1,0 +1,189 @@
+import { createHash } from 'node:crypto';
+
+import {
+  CP1_PUBLIC_CELL_SPECS,
+  cp1PolicyDigest,
+} from './policy-cells.ts';
+
+export const CP1_PUBLIC_SWM_PARITY_SCHEMA =
+  'dkg-rfc64-cp1-public-swm-parity-v1' as const;
+
+const DIGEST = /^0x[0-9a-f]{64}$/u;
+const SHA256 = /^sha256:[0-9a-f]{64}$/u;
+
+export interface Cp1ExpectedProvenanceV1 {
+  readonly runtimeManifestDigest: string;
+  readonly testedHeadCommit: string;
+}
+
+export function semanticSha256(value: string): string {
+  return `sha256:${createHash('sha256').update(value).digest('hex')}`;
+}
+
+export function verifyCp1PublicSwmParity(
+  value: unknown,
+  expectedProvenance: Cp1ExpectedProvenanceV1,
+): Record<string, unknown> {
+  const root = closedRecord(value, '$', [
+    'cells',
+    'expectedProjectionNQuads',
+    'expectedSemanticSha256',
+    'peers',
+    'processBoundary',
+    'repository',
+    'runtimeManifestDigest',
+    'schemaVersion',
+    'status',
+  ]);
+  exact(root.schemaVersion, CP1_PUBLIC_SWM_PARITY_SCHEMA, '$.schemaVersion');
+  exact(root.status, 'PASS', '$.status');
+  const runtimeManifestDigest = digest(root.runtimeManifestDigest, '$.runtimeManifestDigest');
+  exact(
+    runtimeManifestDigest,
+    expectedProvenance.runtimeManifestDigest,
+    '$.runtimeManifestDigest',
+  );
+  const repository = closedRecord(root.repository, '$.repository', [
+    'testedHeadCommit',
+    'trackedSourceClean',
+  ]);
+  const testedHeadCommit = string(repository.testedHeadCommit, '$.repository.testedHeadCommit');
+  if (!/^[0-9a-f]{40}$/u.test(testedHeadCommit)) {
+    fail('$.repository.testedHeadCommit', 'must be a full lowercase Git commit');
+  }
+  exact(
+    testedHeadCommit,
+    expectedProvenance.testedHeadCommit,
+    '$.repository.testedHeadCommit',
+  );
+  exact(repository.trackedSourceClean, true, '$.repository.trackedSourceClean');
+  const boundary = closedRecord(root.processBoundary, '$.processBoundary', [
+    'authorExitCode',
+    'authorPid',
+    'receiverExitCode',
+    'receiverPid',
+  ]);
+  integer(boundary.authorPid, '$.processBoundary.authorPid');
+  integer(boundary.receiverPid, '$.processBoundary.receiverPid');
+  if (boundary.authorPid === boundary.receiverPid) fail('$.processBoundary', 'PIDs must differ');
+  exact(boundary.authorExitCode, 0, '$.processBoundary.authorExitCode');
+  exact(boundary.receiverExitCode, 0, '$.processBoundary.receiverExitCode');
+  const peers = closedRecord(root.peers, '$.peers', ['authorPeerId', 'receiverPeerId']);
+  const authorPeerId = string(peers.authorPeerId, '$.peers.authorPeerId');
+  const receiverPeerId = string(peers.receiverPeerId, '$.peers.receiverPeerId');
+  if (authorPeerId === receiverPeerId) fail('$.peers', 'peer IDs must differ');
+  const expectedProjection = string(root.expectedProjectionNQuads, '$.expectedProjectionNQuads');
+  const expectedSemanticDigest = semanticSha256(expectedProjection);
+  exact(root.expectedSemanticSha256, expectedSemanticDigest, '$.expectedSemanticSha256');
+
+  if (!Array.isArray(root.cells) || root.cells.length !== 2) {
+    fail('$.cells', 'must contain exactly public-open and public-curated');
+  }
+  const cells = root.cells.map((entry, index) => {
+    const path = `$.cells[${index}]`;
+    const cell = closedRecord(entry, path, [
+      'accessPolicy',
+      'activatedTripleCount',
+      'announcementPolicyDigest',
+      'announcedPeerId',
+      'appliedHeadStatus',
+      'authorPolicyDigest',
+      'bundleDigest',
+      'cell',
+      'contentDigest',
+      'contextGraphId',
+      'inventoryRowCount',
+      'projectionNQuads',
+      'publishPolicy',
+      'receiverPolicyDigest',
+      'semanticSha256',
+    ]);
+    const spec = CP1_PUBLIC_CELL_SPECS[index]!;
+    exact(cell.cell, spec.cell, `${path}.cell`);
+    exact(cell.accessPolicy, 0, `${path}.accessPolicy`);
+    exact(cell.publishPolicy, spec.publishPolicy, `${path}.publishPolicy`);
+    exact(cell.contextGraphId, spec.contextGraphId, `${path}.contextGraphId`);
+    const policyDigest = digest(cell.authorPolicyDigest, `${path}.authorPolicyDigest`);
+    exact(policyDigest, cp1PolicyDigest(spec), `${path}.authorPolicyDigest`);
+    exact(cell.receiverPolicyDigest, policyDigest, `${path}.receiverPolicyDigest`);
+    exact(cell.announcementPolicyDigest, policyDigest, `${path}.announcementPolicyDigest`);
+    exact(cell.announcedPeerId, receiverPeerId, `${path}.announcedPeerId`);
+    exact(cell.inventoryRowCount, 1, `${path}.inventoryRowCount`);
+    exact(cell.activatedTripleCount, 2, `${path}.activatedTripleCount`);
+    exact(cell.appliedHeadStatus, 'applied', `${path}.appliedHeadStatus`);
+    const bundleDigest = digest(cell.bundleDigest, `${path}.bundleDigest`);
+    const contentDigest = digest(cell.contentDigest, `${path}.contentDigest`);
+    const projection = string(cell.projectionNQuads, `${path}.projectionNQuads`);
+    exact(projection, expectedProjection, `${path}.projectionNQuads`);
+    const semanticDigest = sha256(cell.semanticSha256, `${path}.semanticSha256`);
+    exact(semanticDigest, expectedSemanticDigest, `${path}.semanticSha256`);
+    return {
+      bundleDigest,
+      contentDigest,
+      contextGraphId: spec.contextGraphId,
+      policyDigest,
+      semanticDigest,
+    };
+  });
+  if (cells[0]!.contextGraphId === cells[1]!.contextGraphId) {
+    fail('$.cells context graph identity', 'policy cells must use distinct context graphs');
+  }
+  if (cells[0]!.policyDigest === cells[1]!.policyDigest) {
+    fail('$.cells policy identity', 'policy cells must use distinct policy digests');
+  }
+  exact(cells[1]!.bundleDigest, cells[0]!.bundleDigest, '$.cells bundle parity');
+  exact(cells[1]!.contentDigest, cells[0]!.contentDigest, '$.cells content parity');
+  exact(cells[1]!.semanticDigest, cells[0]!.semanticDigest, '$.cells semantic parity');
+  return root;
+}
+
+function record(value: unknown, path: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    fail(path, 'must be an object');
+  }
+  return value as Record<string, unknown>;
+}
+
+function closedRecord(
+  value: unknown,
+  path: string,
+  expectedKeys: readonly string[],
+): Record<string, unknown> {
+  const result = record(value, path);
+  const actual = Object.keys(result).sort();
+  const expected = [...expectedKeys].sort();
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    fail(path, `keys differ: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+  }
+  return result;
+}
+
+function string(value: unknown, path: string): string {
+  if (typeof value !== 'string' || value.length === 0) fail(path, 'must be a non-empty string');
+  return value;
+}
+
+function integer(value: unknown, path: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) fail(path, 'must be a positive PID');
+  return value as number;
+}
+
+function digest(value: unknown, path: string): string {
+  const result = string(value, path);
+  if (!DIGEST.test(result)) fail(path, 'must be a canonical digest');
+  return result;
+}
+
+function sha256(value: unknown, path: string): string {
+  const result = string(value, path);
+  if (!SHA256.test(result)) fail(path, 'must be a canonical sha256 digest');
+  return result;
+}
+
+function exact(actual: unknown, expected: unknown, path: string): void {
+  if (actual !== expected) fail(path, `expected ${JSON.stringify(expected)}`);
+}
+
+function fail(path: string, message: string): never {
+  throw new Error(`RFC64_CP1_PUBLIC_SWM_PARITY_INVALID at ${path}: ${message}`);
+}

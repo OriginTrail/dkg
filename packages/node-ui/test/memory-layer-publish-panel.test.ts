@@ -23,10 +23,11 @@ const apiMocks = vi.hoisted(() => ({
   partialPublishWarning: vi.fn(),
 }));
 
-vi.mock('../src/ui/api.js', () => ({
+vi.mock('../src/ui/api.js', async (orig) => ({
   listAssertions: apiMocks.listAssertions,
   publishAssertionsToVm: apiMocks.publishAssertionsToVm,
   partialPublishWarning: apiMocks.partialPublishWarning,
+  outcomeUnknownPublishNote: (await orig<typeof import('../src/ui/api.js')>()).outcomeUnknownPublishNote,
   PARTIAL_PUBLISH_STATUS_SUFFIX: 'binding incomplete',
   // Other api.js members the panel/module references.
   executeQuery: vi.fn(),
@@ -76,7 +77,7 @@ const ASSERTIONS = [
 ];
 
 const cleanResult = {
-  published: 2, total: 2, sealed: 0, partial: 0, failures: [],
+  published: 2, total: 2, partial: 0, failures: [],
   sample: { status: 'confirmed', txHash: '0xtx', kaId: '0xka' },
 };
 
@@ -163,7 +164,7 @@ describe('MemoryLayerView PublishPanel (SWM → VM)', () => {
 
   it('renders a WARNING (not a clean success) + the contextGraphError detail on a 207 partial', async () => {
     apiMocks.publishAssertionsToVm.mockResolvedValue({
-      published: 1, total: 1, sealed: 0, partial: 1, partialError: 'binding failed', failures: [],
+      published: 1, total: 1, partial: 1, partialError: 'binding failed', failures: [],
       sample: { status: 'confirmed', txHash: '0xtx', kaId: '0xka', contextGraphError: 'binding failed' },
     });
     const { container, unmount } = await render(
@@ -189,7 +190,7 @@ describe('MemoryLayerView PublishPanel (SWM → VM)', () => {
   // guard: a CLEAN non-discount sample alongside a batch-level discount must still render.
   it('B8 — renders the discount badge from the BATCH field even when the clean sample has no discount', async () => {
     apiMocks.publishAssertionsToVm.mockResolvedValue({
-      published: 2, total: 2, sealed: 0, partial: 0, failures: [],
+      published: 2, total: 2, partial: 0, failures: [],
       // The headline sample is a clean, NON-discount item (the mixed-batch trap)…
       sample: { status: 'confirmed', txHash: '0xtx', kaId: '0xka' },
       // …but the batch DID draw a discount on another item → badge must render it.
@@ -220,10 +221,29 @@ describe('MemoryLayerView PublishPanel (SWM → VM)', () => {
     await unmount();
   });
 
-  it('surfaces a per-KA failure (subset-not-sealable) via failures[] without crashing', async () => {
+  it('titles an all-unknown batch as an unknown outcome, not as NOT published', async () => {
     apiMocks.publishAssertionsToVm.mockResolvedValue({
-      published: 0, total: 1, sealed: 0, partial: 0,
-      failures: [{ name: 'beta', error: 'Share the full asset to Shared Memory before publishing.' }],
+      published: 0, total: 1, partial: 0, failures: [],
+      outcomeUnknown: [{ name: 'beta', error: 'Publishing "beta" got no response within 5 minutes.' }],
+      sample: null,
+    });
+    const { container, unmount } = await render(
+      React.createElement(PublishPanel, { contextGraphId: 'cg', onPublished: () => {} }),
+    );
+    await flush();
+    await act(async () => { (container.querySelector('.v10-btn-promote-all') as HTMLButtonElement).click(); });
+    await flush();
+
+    expect(container.querySelector('.v10-publish-result-title')?.textContent).toBe('Publish outcome unknown');
+    expect(container.textContent).toContain('1 knowledge asset: publish outcome unknown');
+    expect(container.textContent).not.toContain('could not be published');
+    await unmount();
+  });
+
+  it('surfaces a fail-closed per-KA publish precondition via failures[] without crashing', async () => {
+    apiMocks.publishAssertionsToVm.mockResolvedValue({
+      published: 0, total: 1, partial: 0,
+      failures: [{ name: 'beta', error: 'Knowledge Asset is not publish-ready.' }],
       sample: null,
     });
     const { container, unmount } = await render(
@@ -235,7 +255,7 @@ describe('MemoryLayerView PublishPanel (SWM → VM)', () => {
 
     const card = container.querySelector('.v10-publish-result-card');
     expect(card, 'panel renders a result card rather than crashing').toBeTruthy();
-    expect(container.textContent).toContain('Share the full asset');
+    expect(container.textContent).toContain('Knowledge Asset is not publish-ready');
     await unmount();
   });
 });

@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useCallback, lazy, Suspense } from 'react';
 import { useFetch } from '../hooks.js';
-import { executeQuery, fetchStatus, listAssertions, promoteAssertion, publishAssertionsToVm, partialPublishWarning, describePromoteResult, describePromoteError, type AssertionInfo, type BatchPublishResult } from '../api.js';
+import { executeQuery, fetchStatus, listAssertions, promoteAssertion, publishAssertionsToVm, partialPublishWarning, outcomeUnknownPublishNote, describePromoteResult, describePromoteError, type AssertionInfo, type BatchPublishResult } from '../api.js';
 import { FilePreviewModal } from '../components/Modals/FilePreviewModal.js';
 import { DiscountAppliedBadge } from '../components/Pca/index.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
@@ -155,23 +155,21 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
   const graphSuffix = layer === 'swm' ? '_shared_memory' as const : undefined;
   const includeShared = layer === 'swm';
   const queryView = layer === 'vm' ? 'verifiable-memory' as const : undefined;
-  // WM content lives in the CG's assertion partitions, which sit outside the
-  // daemon's static `GRAPH ?g` allow-list. Without this opt-in the WM view's
-  // `GRAPH ?g { ?s ?p ?o }` enumeration resolves against only
-  // { <cg>, <cg>/_meta, <cg>/_shared_memory_meta } and renders empty. SWM/VM
-  // use their own `view`-routed scopes and don't need it.
-  //
-  // Scope the opt-in to the *built-in* WM query only (`sparql === defaultSparql`):
-  // that query constrains `?g` to WM-marked graphs via the `_meta` join, so the
-  // widened allow-list stays layer-correct. A custom query typed into the WM tab
-  // must NOT get the opt-in — otherwise an advanced `GRAPH ?g { … }` could
-  // enumerate SWM/VM/meta partitions and silently escape the WM scope. Custom
-  // queries fall back to the daemon's default static allow-list.
+  // Only the built-in WM query constrains partitions to WM lifecycle markers.
+  // Custom queries retain the daemon's default graph scope. SWM/VM use views.
+  // Explicit queries also retain their interactive timeout/response-size policy.
   const includePartitions = layer === 'wm' && sparql === defaultSparql;
+  const interactive = !!activeQuery;
 
   const { data, loading, error, refresh } = useFetch(
-    () => executeQuery(sparql, contextGraphId, includeShared, graphSuffix, queryView, includePartitions),
-    [sparql, contextGraphId, includeShared, graphSuffix, queryView, includePartitions],
+    () => executeQuery(sparql, {
+      contextGraphId,
+      includeSharedMemory: includeShared,
+      graphSuffix,
+      view: queryView,
+      includeContextGraphPartitions: includePartitions,
+    }, interactive ? { timeoutMs: null, maxResponseBytes: null } : {}),
+    [sparql, contextGraphId, includeShared, graphSuffix, queryView, includePartitions, interactive],
     0
   );
   useMemoryGraphEvents(contextGraphId, refresh, { layers: [layer] });
@@ -475,7 +473,11 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
       // PR #710 Fix A — thread `subGraph` so the daemon's
       // `(cg, name, subGraph)` lookup hits the right partition;
       // mirrors the AssertionsList fix in components.tsx.
-      const res = await promoteAssertion(contextGraphId, assertion.name, 'all', assertion.subGraph);
+      const res = await promoteAssertion(
+        contextGraphId,
+        assertion.name,
+        assertion.subGraph ? { subGraphName: assertion.subGraph } : {},
+      );
       const outcome = describePromoteResult(assertion.name, res);
       setPromoteResult({
         message: outcome.message + (assertion.subGraph ? ` (in ${assertion.subGraph})` : ''),
@@ -501,7 +503,6 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
     setPromoting('__all__');
     setPromoteResult(null);
     setPromoteError(null);
-    let totalPromoted = 0;
     let noopCount = 0;
     // Issue #864 (Codex review on #874) — capture the in-flight
     // assertion name so a mid-loop failure surfaces "<name>: …"
@@ -513,16 +514,20 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
       for (const a of assertions) {
         currentAssertion = a.name;
         // PR #710 — see comment on the single-row handler above.
-        const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
-        totalPromoted += res.promotedCount;
+        const res = await promoteAssertion(
+          contextGraphId,
+          a.name,
+          a.subGraph ? { subGraphName: a.subGraph } : {},
+        );
         if (res.promotedCount === 0) noopCount += 1;
       }
-      const tail = noopCount > 0 ? ` (${noopCount} assertion${noopCount === 1 ? '' : 's'} had nothing to promote)` : '';
+      const sharedCount = assertions.length - noopCount;
+      const tail = noopCount > 0 ? ` (${noopCount} already shared or still committing)` : '';
       setPromoteResult({
-        message: totalPromoted > 0
-          ? `Promoted ${totalPromoted} triple${totalPromoted === 1 ? '' : 's'} across ${assertions.length} assertion${assertions.length === 1 ? '' : 's'}.${tail}`
-          : `No triples were promoted — every assertion was already in Shared Working Memory or its content has not been committed yet.`,
-        kind: totalPromoted > 0 ? 'success' : 'noop',
+        message: sharedCount > 0
+          ? `Shared ${sharedCount} complete Knowledge Asset${sharedCount === 1 ? '' : 's'} to Shared Working Memory${tail}.`
+          : 'No Knowledge Assets were newly shared — all were already in Shared Working Memory or still committing.',
+        kind: sharedCount > 0 ? 'success' : 'noop',
       });
       refresh();
       onPromoted();
@@ -550,7 +555,7 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
           disabled={promoting !== null}
           onClick={handlePromoteAll}
         >
-          {promoting === '__all__' ? 'Promoting...' : 'Promote All → SWM'}
+          {promoting === '__all__' ? 'Sharing...' : 'Share Complete KAs → SWM'}
         </button>
       </div>
       <div className="v10-assertion-items">
@@ -584,7 +589,7 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
               className="v10-btn-promote"
               disabled={promoting !== null}
               onClick={() => handlePromote(a)}
-              title="Copy these triples to Shared Working Memory"
+              title="Share this complete Knowledge Asset to Shared Working Memory"
             >
               {promoting === a.graphUri ? 'Promoting...' : '→ SWM'}
             </button>
@@ -664,7 +669,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
   }, [allSelected, allKeys]);
 
   // Publish a set of named SWM assertions, each as its own KA via the canonical
-  // /vm/publish (with the §4.4 catch→seal→retry safety net). We do NOT pre-
+  // /vm/publish (direct and fail-closed). We do NOT pre-
   // register the CG on-chain: the daemon's /vm/publish runs the local
   // preconditions FIRST and only auto-registers (preserving the stored publish
   // policy) on the `CG_NOT_REGISTERED` retry path — so a doomed publish never
@@ -780,7 +785,8 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
       </div>
 
       {publishResult && (() => {
-        const { published, total, sealed, partial, partialError, failures, sample, convictionCostCovered } = publishResult;
+        const { published, total, partial, partialError, failures, sample, convictionCostCovered } = publishResult;
+        const unknownNote = outcomeUnknownPublishNote(publishResult);
         // "Clean" only when every asset published AND none came back as a 207
         // partial (minted on-chain but the CG binding failed).
         const allOk = published === total && published > 0 && partial === 0;
@@ -790,13 +796,10 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
             <div className="v10-publish-result-title">
               {published > 0
                 ? `Published ${published} of ${total} knowledge asset${total === 1 ? '' : 's'} to Verifiable Memory`
-                : 'NOT published to Verifiable Memory'}
+                : unknownNote && failures.length === 0
+                  ? 'Publish outcome unknown'
+                  : 'NOT published to Verifiable Memory'}
             </div>
-            {sealed > 0 && (
-              <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
-                {sealed} asset{sealed === 1 ? ' was' : 's were'} sealed in Shared Memory before publishing.
-              </div>
-            )}
             {partial > 0 && (
               <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
                 ⚠ {partial} asset{partial === 1 ? '' : 's'}: {partialPublishWarning(partialError)}
@@ -806,6 +809,11 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
               <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
                 {failures.length} asset{failures.length === 1 ? '' : 's'} could not be published — {failures[0].name}: {failures[0].error}
                 {failures.length > 1 ? ` (+${failures.length - 1} more)` : ''}
+              </div>
+            )}
+            {unknownNote && (
+              <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
+                ⚠ {unknownNote}
               </div>
             )}
             <div className="v10-publish-result-details">

@@ -26,6 +26,11 @@ export interface LocalAgentMessage {
   tsRaw?: string;
   streaming?: boolean;
   attachments?: LocalAgentChatAttachmentRef[];
+  toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>;
+  traceFile?: string;
+  profile?: string;
+  contextGraphId?: string;
+  readOnly?: boolean;
   /**
    * UI-generated failed-turn notice rendered as literal text after any real
    * agent output. Kept separate from `content` so markdown can stay enabled

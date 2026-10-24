@@ -1,0 +1,43 @@
+{
+  "$schema": "../schema/integration.schema.json",
+  "schemaVersion": "0.1.0",
+  "slug": "dkg-hello-world",
+  "name": "DKG Hello World",
+  "description": "Minimal reference integration for DKG v10. Writes a greeting into Working Memory and reads it back, to demonstrate the smallest end-to-end round trip an integration can make through the supported public interfaces.",
+  "category": ["template", "example", "working-memory"],
+  "maintainer": {
+    "github": "@OriginTrail/core-developers",
+    "name": "OriginTrail Core Developers"
+  },
+  "repo": "https://github.com/OriginTrail/dkg-hello-world",
+  "commit": "cb6af61a26b31be12ca9ff55a72af7442afe9c6b",
+  "license": "Apache-2.0",
+  "requiresDkgNodeVersion": ">=10.0.0-rc.1",
+  "memoryLayers": ["WM"],
+  "v10PrimitivesUsed": ["ContextGraph", "Assertion"],
+  "publicInterfacesUsed": ["http-api"],
+  "targetAgents": ["generic-CLI", "generic-HTTP"],
+  "install": {
+    "kind": "cli",
+    "package": "@origintrail-official/dkg-hello-world",
+    "version": "0.1.0",
+    "binary": "dkg-hello-world",
+    "envRequired": ["DKG_API_URL", "DKG_AUTH_TOKEN"],
+    "usageHint": "Say hello to the DKG:\n  dkg-hello-world greet \"first post\"\n  dkg-hello-world list\n\nDKG_API_URL defaults to http://127.0.0.1:9200 and DKG_AUTH_TOKEN is auto-filled by `dkg integration install` from your local node."
+  },
+  "security": {
+    "networkEgress": [],
+    "writeAuthority": [
+      "POST /api/context-graph/create",
+      "POST /api/assertion/create",
+      "POST /api/assertion/{name}/write"
+    ],
+    "credentialsHandled": [],
+    "notes": "No third-party credentials handled. Only talks to the local DKG node via its HTTP API. Writes exclusively to Working Memory (private, per-agent); never calls PUBLISH or SHARE and never touches Curator-authority operations. Uses no postinstall/preinstall scripts."
+  },
+  "trustTier": "featured",
+  "designBrief": "https://github.com/OriginTrail/dkg-hello-world/blob/main/DESIGN.md",
+  "demo": "https://github.com/OriginTrail/dkg-hello-world#demo",
+  "promotionPath": "DKG Hello World is a template, not a production integration. It demonstrates the WM leg of the promotion path; a contributor building on this template is expected to extend it to promote matured greetings to Shared Memory (POST /api/assertion/{name}/promote) and, when a greeting has broad relevance, to publish it as a Knowledge Asset for consumption by context oracles. The reference implementation intentionally stops at WM so the template's scope stays minimal.",
+  "fitNotes": "Exists so new contributors have a working, ~150-line starting point for their own integration rather than reverse-engineering the HTTP API from the SKILL.md alone. Not bounty-eligible in its own right (first-party, already maintained)."
+}
