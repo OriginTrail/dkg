@@ -315,56 +315,48 @@ function commandBuildInfo(args) {
   console.log(`Wrote ${path.relative(ROOT_DIR, outputPath)} for ${payload.commitShort} (${payload.distTag}).`);
 }
 
-function commandPromote(args) {
-  const version = requireArg(args, 'version');
-  const tags = parseTags(requireArg(args, 'tags'));
-  const otp = typeof args.otp === 'string' ? args.otp : process.env.NPM_CONFIG_OTP;
-  const dryRun = Boolean(args['dry-run']);
-  if (tags.length === 0) throw new Error('--tags must include at least one dist-tag');
-  if (!dryRun && (!otp || otp.length === 0)) {
-    throw new Error('Provide --otp <code> or NPM_CONFIG_OTP for npm dist-tag promotion');
+async function packageContext(args, certificate = true) {
+  const { expectedPolicy, run } = await import('./lib/package-certification/prepare.mjs');
+  const commit = requireArg(args, 'commit');
+  if (run('git', ['rev-parse', 'HEAD'], { cwd: ROOT_DIR }) !== commit) {
+    throw new Error('Use the intended candidate checkout to supply the independent package policy');
   }
-  for (const pkg of discoverPublishablePackages(ROOT_DIR)) {
-    for (const tag of tags) {
-      const cmd = ['dist-tag', 'add', `${pkg.name}@${version}`, tag, ...(otp ? [`--otp=${otp}`] : [])];
-      if (dryRun) {
-        console.log(`npm ${cmd.join(' ')}`);
-      } else {
-        runInteractive('npm', cmd);
-      }
-    }
-  }
+  return {
+    rootDir: ROOT_DIR,
+    bundle: path.resolve(requireArg(args, 'bundle')),
+    ...(certificate ? { receiptFile: path.resolve(requireArg(args, 'certificate')) } : {}),
+    expected: await expectedPolicy(ROOT_DIR, { commit, version: requireArg(args, 'version'), profile: requireArg(args, 'profile') }),
+  };
 }
 
-function commandVerifyPublished(args) {
-  const version = requireArg(args, 'version');
-  const tags = parseTags(args.tags);
-  const failures = [];
-  for (const pkg of discoverPublishablePackages(ROOT_DIR)) {
-    try {
-      const publishedVersion = npmViewJson([`${pkg.name}@${version}`, 'version']);
-      if (publishedVersion !== version) {
-        failures.push(`${pkg.name}: version ${publishedVersion} !== ${version}`);
-      }
-      if (tags.length > 0) {
-        const distTags = npmViewJson([pkg.name, 'dist-tags']);
-        for (const tag of tags) {
-          if (distTags[tag] !== version) {
-            failures.push(`${pkg.name}: dist-tag ${tag}=${distTags[tag] ?? '<missing>'} !== ${version}`);
-          }
-        }
-      }
-    } catch (err) {
-      failures.push(`${pkg.name}: ${err instanceof Error ? err.message : String(err)}`);
+async function commandPreparedRelease(args, mode) {
+  const { preparedRelease } = await import('./lib/package-certification/publish.mjs');
+  const progress = preparedRelease({
+    ...await packageContext(args), mode,
+    tag: requireArg(args, 'tag'),
+    tags: parseTags(requireArg(args, mode === 'publish' ? 'dist-tag' : 'tags')),
+    otp: typeof args.otp === 'string' ? args.otp : process.env.NPM_CONFIG_OTP,
+    registry: typeof args.registry === 'string' ? args.registry : undefined,
+    dryRun: Boolean(args['dry-run']),
+  });
+  console.log(JSON.stringify(progress, null, 2));
+}
+
+async function commandVerifyPublished(args) {
+  const { verifyBundle } = await import('./lib/package-certification/bundle.mjs');
+  const { registryDist, checkRegistrySet } = await import('./lib/package-certification/publish.mjs');
+  const context = await packageContext(args, false);
+  const manifest = verifyBundle(context.bundle, context.expected);
+  checkRegistrySet(manifest, pkg => registryDist(pkg, args.registry));
+  for (const pkg of manifest.packages) {
+    const tags = parseTags(args.tags);
+    if (!tags.length) continue;
+    const distTags = npmViewJson([pkg.name, 'dist-tags', ...(args.registry ? ['--registry', args.registry] : [])]);
+    for (const tag of tags) {
+      if (distTags[tag] !== manifest.version) throw new Error(`${pkg.name}: dist-tag ${tag} does not match ${manifest.version}`);
     }
   }
-  if (failures.length > 0) {
-    console.error('Published package verification failed:');
-    for (const failure of failures) console.error(`- ${failure}`);
-    process.exitCode = 1;
-    return;
-  }
-  console.log(`Published package verification passed for ${version}${tags.length ? ` (${tags.join(', ')})` : ''}.`);
+  console.log(`Published integrity verification passed for ${manifest.packageSetDigest}.`);
 }
 
 function commandVerifyTag(args) {
@@ -477,8 +469,12 @@ function usage() {
   node scripts/release-packages.mjs verify-tag --tag vX.Y.Z [--version X.Y.Z] [--base origin/main]
   node scripts/release-packages.mjs verify-pack
   node scripts/release-packages.mjs build-info --dist-tag latest|rc|beta|alpha [--commit SHA] [--ci-run ID]
-  node scripts/release-packages.mjs promote --version X.Y.Z --tags mainnet,testnet --otp 123456 [--dry-run]
-  node scripts/release-packages.mjs verify-published --version X.Y.Z [--tags latest,mainnet,testnet]`);
+  node scripts/release-packages.mjs prepare-packages --version X.Y.Z --out NEW_DIRECTORY
+  node scripts/release-packages.mjs certify-install --bundle DIR --commit SHA --version X.Y.Z --profile installed-local-rdf-v1 --out NEW_ATTEMPT [--image IMAGE] [--negative-control missing-ui]
+  node scripts/release-packages.mjs verify-package-certificate --bundle DIR --certificate RECEIPT --commit SHA --version X.Y.Z --profile installed-local-rdf-v1
+  node scripts/release-packages.mjs publish-prepared --bundle DIR --certificate RECEIPT --commit SHA --version X.Y.Z --profile installed-local-rdf-v1 --tag vX.Y.Z --dist-tag canary [--dry-run]
+  node scripts/release-packages.mjs promote --bundle DIR --certificate RECEIPT --commit SHA --version X.Y.Z --profile installed-local-rdf-v1 --tag vX.Y.Z --tags testnet [--dry-run]
+  node scripts/release-packages.mjs verify-published --bundle DIR --commit SHA --version X.Y.Z --profile installed-local-rdf-v1 [--tags latest,mainnet,testnet]`);
 }
 
 async function main() {
@@ -500,11 +496,33 @@ async function main() {
     case 'build-info':
       commandBuildInfo(args);
       break;
+    case 'prepare-packages': {
+      const { preparePackages } = await import('./lib/package-certification/prepare.mjs');
+      const manifest = await preparePackages({ rootDir: ROOT_DIR, output: path.resolve(requireArg(args, 'out')), version: requireArg(args, 'version') });
+      console.log(`Prepared ${manifest.packages.length} packages: ${manifest.packageSetDigest}`);
+      break;
+    }
+    case 'certify-install': {
+      const { certifyInstall } = await import('./lib/package-certification/certify.mjs');
+      await certifyInstall({ ...await packageContext(args, false), output: path.resolve(requireArg(args, 'out')), image: args.image, negativeControl: args['negative-control'] });
+      console.log('Installed package certification PASS');
+      break;
+    }
+    case 'verify-package-certificate': {
+      const { verifyCertificate } = await import('./lib/package-certification/bundle.mjs');
+      const { bundle, receiptFile, expected } = await packageContext(args);
+      verifyCertificate(bundle, receiptFile, expected);
+      console.log('Package certificate consistency verification PASS');
+      break;
+    }
+    case 'publish-prepared':
+      await commandPreparedRelease(args, 'publish');
+      break;
     case 'promote':
-      commandPromote(args);
+      await commandPreparedRelease(args, 'promote');
       break;
     case 'verify-published':
-      commandVerifyPublished(args);
+      await commandVerifyPublished(args);
       break;
     default:
       usage();
