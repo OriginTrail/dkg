@@ -1009,21 +1009,22 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     let activeSinkSum = 0n;
     for (const log of receipt!.logs) {
       if (log.address.toLowerCase() !== epochStorageAddr) continue;
+      let parsed: ReturnType<typeof EpochStorageContract.interface.parseLog>;
       try {
-        const parsed = EpochStorageContract.interface.parseLog({
+        parsed = EpochStorageContract.interface.parseLog({
           topics: [...log.topics],
           data: log.data,
         });
-        if (parsed?.name === 'TokensAddedToEpochRange') {
-          expect(BigInt(parsed.args.shardId)).to.equal(STAKER_SHARD_ID);
-          expect(BigInt(parsed.args.startEpoch)).to.be.gte(currentEpoch);
-          expect(BigInt(parsed.args.endEpoch)).to.be.lte(
-            currentEpoch + BigInt(epochs),
-          );
-          activeSinkSum += BigInt(parsed.args.tokenAmount);
-        }
       } catch {
-        // not the event we're after
+        continue; // Unrelated ABI; assertion failures must propagate.
+      }
+      if (parsed?.name === 'TokensAddedToEpochRange') {
+        expect(BigInt(parsed.args.shardId)).to.equal(STAKER_SHARD_ID);
+        expect(BigInt(parsed.args.startEpoch)).to.be.gte(currentEpoch);
+        expect(BigInt(parsed.args.endEpoch)).to.be.lte(
+          currentEpoch + BigInt(epochs),
+        );
+        activeSinkSum += BigInt(parsed.args.tokenAmount);
       }
     }
     expect(activeSinkSum).to.equal(0n);
