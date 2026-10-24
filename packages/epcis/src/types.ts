@@ -135,7 +135,10 @@ export interface QueryEngine {
   ): Promise<{ bindings: SparqlBinding[] }>;
 }
 
-/** Legacy sparse projection: typed known fields plus dynamically inspected extension fields. */
+/**
+ * Sparse output of toEpcisEvent: known fields and dynamically inspected extensions.
+ * Query responses separately validate and add the required eventID.
+ */
 export interface EPCISEventProjection extends Omit<EPCISEventFields, 'eventID'> {
   'dkg:ual'?: string;
   [key: string]: unknown;

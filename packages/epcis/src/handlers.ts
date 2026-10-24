@@ -158,14 +158,16 @@ export function toEpcisEvent(binding: SparqlBinding): EPCISEventProjection {
     event.bizLocation = { id: bizLocation };
   }
 
-  const epcList = parseGroupConcat(binding.epcList);
-  if (epcList) event.epcList = epcList;
-  const childEPCs = parseGroupConcat(binding.childEPCList);
-  if (childEPCs) event.childEPCs = childEPCs;
-  const inputEPCList = parseGroupConcat(binding.inputEPCs);
-  if (inputEPCList) event.inputEPCList = inputEPCList;
-  const outputEPCList = parseGroupConcat(binding.outputEPCs);
-  if (outputEPCList) event.outputEPCList = outputEPCList;
+  const concatFields = {
+    epcList: 'epcList',
+    childEPCList: 'childEPCs',
+    inputEPCs: 'inputEPCList',
+    outputEPCs: 'outputEPCList',
+  } as const;
+  for (const [bindingKey, eventKey] of Object.entries(concatFields)) {
+    const values = parseGroupConcat(binding[bindingKey]);
+    if (values) event[eventKey] = values;
+  }
 
   return event;
 }
