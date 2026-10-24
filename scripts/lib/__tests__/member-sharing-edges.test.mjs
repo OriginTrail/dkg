@@ -55,12 +55,25 @@ const untouched = (devnet, number) => existsSync(devnet.nodeDir(number))
   && readFileSync(join(devnet.nodeDir(number), 'config.json'), 'utf8') === '{"theirs":true}'
   && !existsSync(join(devnet.nodeDir(number), MARK));
 
-test('a fourth free node number becomes the feeder of case 6\'s large graphs; without one the owner holds them', t => {
+test('a fourth free node number is kept for the feeder of case 6\'s later attempts, which runs only while it is needed', async t => {
   const log = { say() {}, note() {} };
-  const edges = new TemporaryEdges(fakeDevnet(t), { stamp: 'S', log });
+  const devnet = fakeDevnet(t);
+  const edges = new TemporaryEdges(devnet, { stamp: 'S', log });
   assert.deepEqual(edges.allocate({ relay1: 'r1', relay2: 'r2' }), { taken: [] });
   assert.deepEqual([edges.owner, edges.member1, edges.member2, edges.feeder].map(node => node.number), [7, 8, 9, 10]);
+  // Until it is started the owner writes the large graphs, as before.
+  assert.equal(edges.largeAuthor, edges.owner);
+  for (const node of edges.nodes) await edges.start(node);
+  assert.ok(!devnet.calls.includes('addnode 10 edge'));
+  await edges.startFeeder();
+  assert.ok(devnet.calls.includes('addnode 10 edge') && edges.feederUp);
   assert.equal(edges.largeAuthor, edges.feeder);
+  await edges.stopFeeder();
+  assert.ok(devnet.calls.includes('stop-node 10') && !edges.feederUp);
+  assert.equal(edges.largeAuthor, edges.owner);
+  // The cleanup removes it with the others.
+  edges.cleanup({ keep: false, failed: false });
+  assert.ok(!existsSync(devnet.nodeDir(10)));
   // It reserves on member 2's relay and announces only that circuit: member 2 reaches it as it reaches the owner.
   assert.deepEqual({ label: edges.feeder.label, relay: edges.feeder.relay, member: edges.feeder.member, overrides: edges.feeder.overrides }, {
     label: 'node10 (feeder)', relay: 'r2', member: false, overrides: { relay: 'r2', announceAddresses: ['/ip4/127.0.0.1/tcp/9', 'r2/p2p-circuit'] },
@@ -75,6 +88,12 @@ test('a fourth free node number becomes the feeder of case 6\'s large graphs; wi
   assert.deepEqual(without.allocate({ relay1: 'r1', relay2: 'r2' }), { taken: ['node10: its folder exists'] });
   assert.equal(without.feeder, null);
   assert.equal(without.largeAuthor, without.owner);
+  // A feeder whose start fails leaves the owner to write the large graphs.
+  const failing = fakeDevnet(t, { readiness: number => (number === 10 ? 'failed' : 'ready') });
+  const fallback = new TemporaryEdges(failing, { stamp: 'S', log });
+  fallback.allocate({ relay1: 'r1', relay2: 'r2' });
+  await assert.rejects(fallback.startFeeder(), /temporary node 10 could not be added/);
+  assert.equal(fallback.largeAuthor, fallback.owner);
   // MEMBER_SHARING_NODES names three numbers, or four with the feeder's.
   const three = new TemporaryEdges(fakeDevnet(t), { stamp: 'S', log });
   assert.deepEqual(three.allocate({ explicit: '10,9,8', relay1: 'r1', relay2: 'r2' }), { taken: [] });

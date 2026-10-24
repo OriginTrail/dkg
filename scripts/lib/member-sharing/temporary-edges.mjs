@@ -10,7 +10,8 @@
 // first start), env (its daemon's environment), peerId, agentAddress };
 // member 2's also `trace`, the file its node writes its sync admission trace
 // to (DKG_SYNC_ADMISSION_TRACE). The feeder, when a fourth node number is
-// free, holds the large graphs of case 6 and serves them to member 2.
+// free, holds the large graphs of case 6's later attempts and serves them to
+// member 2; it runs only while case 6 needs it.
 
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -39,6 +40,8 @@ export class TemporaryEdges {
     this.member1 = null;
     this.member2 = null;
     this.feeder = null;
+    // Whether the feeder runs now (startFeeder, stopFeeder).
+    this.feederUp = false;
     // Every node this run added: the cleanup stops and removes these only.
     this.started = [];
     // The starts still running, each with what cancels it.
@@ -47,8 +50,8 @@ export class TemporaryEdges {
 
   get nodes() { return [this.owner, this.member1, this.member2]; }
   get members() { return [this.member1, this.member2]; }
-  /** The node that holds case 6's large graphs: the feeder, or the owner without one. */
-  get largeAuthor() { return this.feeder ?? this.owner; }
+  /** The node that writes case 6's next large graph: the feeder while it runs, else the owner. */
+  get largeAuthor() { return this.feederUp ? this.feeder : this.owner; }
   /** Whether a node number is one of the temporary nodes. */
   isTemporary(number) { return [...this.nodes, this.feeder].some(node => node?.number === number); }
 
@@ -146,13 +149,28 @@ export class TemporaryEdges {
         }),
       trace,
     };
-    // Case 6's large graphs come from the feeder, which member 2 reaches the
-    // way it reaches the owner: through node 2. A node writes more slowly the
-    // more it holds, and the owner's writes are among those case 6 waits for,
-    // so the owner holds no large graph when a feeder can.
+    // The large graphs of case 6's later attempts come from the feeder, which
+    // member 2 reaches the way it reaches the owner: through node 2. A node
+    // writes more slowly the more it holds, and the owner's writes are among
+    // those case 6 waits for, so another large graph does not go to the owner
+    // when a feeder can take it.
     this.feeder = feeder === undefined ? null
       : record(feeder, 'feeder', 'the feeder', relay2, { relay: relay2, announceAddresses: [DEAD_DIRECT_ADDRESS, `${relay2}/p2p-circuit`] });
     return { taken };
+  }
+
+  /** Starts the feeder and has member 2 dial it; throws when either fails (the feeder is then removed at the cleanup). */
+  async startFeeder() {
+    await this.start(this.feeder);
+    await this.dial(this.member2, this.feeder);
+    this.feederUp = true;
+  }
+
+  /** Stops the feeder, so that the cases after case 6 run with the owner and the members alone. */
+  async stopFeeder() {
+    if (!this.feederUp) return;
+    this.feederUp = false;
+    await this.stop(this.feeder);
   }
 
   /**
