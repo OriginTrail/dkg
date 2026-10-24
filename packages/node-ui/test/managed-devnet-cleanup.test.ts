@@ -8,7 +8,7 @@ import { cleanupManagedDevnet } from '../e2e/global-teardown.js';
 
 it('cleans interrupted-bootstrap children while preserving pre-existing nodes and chain', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-owned-cleanup-'));
-  const children = Array.from({ length: 3 }, () => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }));
+  const children = Array.from({ length: 4 }, () => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }));
   try {
     await Promise.all(children.map(child => once(child, 'spawn')));
     for (let index = 0; index < 2; index++) {
@@ -16,9 +16,11 @@ it('cleans interrupted-bootstrap children while preserving pre-existing nodes an
       writeFileSync(join(dir, `node${index + 1}`, 'devnet.pid'), String(children[index]!.pid));
     }
     writeFileSync(join(dir, 'hardhat.pid'), String(children[2]!.pid));
+    writeFileSync(join(dir, 'node2', 'daemon.pid'), String(children[3]!.pid));
     writeFileSync(join(dir, '.playwright-managed'), JSON.stringify({ numNodes: '2', preExistingNodes: [1], preExistingHardhat: true }));
-    const stopped = once(children[1]!, 'exit');
+    const stopped = Promise.all([once(children[1]!, 'exit'), once(children[3]!, 'exit')]);
     await cleanupManagedDevnet(dir);
+    expect(() => process.kill(children[3]!.pid!, 0), 'owned daemon worker must also exit').toThrow();
     await stopped;
     expect(() => process.kill(children[0]!.pid!, 0)).not.toThrow();
     expect(() => process.kill(children[2]!.pid!, 0)).not.toThrow();

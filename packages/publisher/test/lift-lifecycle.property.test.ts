@@ -78,7 +78,8 @@ it(identity, async () => {
     numRuns: result.numRuns, numSkips: result.numSkips, interrupted: result.interrupted,
     counterexamplePath: result.counterexamplePath, counterexample: result.counterexample,
     failure: result.failed ? fc.defaultReportMessage(result) : null,
+    failureReason: result.errorInstance instanceof Error ? result.errorInstance.message : null,
   });
   console.log(`Lift lifecycle: seed=${options.seed}, requested=${options.numRuns}, runs=${result.numRuns}, interrupted=${result.interrupted}, durationMs=${Math.round(performance.now() - started)}`);
-  if (result.failed) throw new Error(fc.defaultReportMessage(result));
+  if (result.failed) throw new Error(fc.defaultReportMessage(result), { cause: result.errorInstance });
 }, campaignTimeoutMs);

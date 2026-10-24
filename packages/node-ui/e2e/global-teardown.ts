@@ -45,13 +45,17 @@ async function stopPid(pid: number, label: string): Promise<void> {
 }
 
 async function stopNode(devnetDir: string, nodeIndex: number): Promise<void> {
-  const pidfile = resolve(devnetDir, `node${nodeIndex}`, 'devnet.pid');
-  if (!existsSync(pidfile)) return;
-  const pid = Number(stripVTControlCharacters(readFileSync(pidfile, 'utf8')).trim());
-  if (Number.isFinite(pid) && pid > 0) {
-    await stopPid(pid, `node${nodeIndex}`);
-  }
-  try { rmSync(pidfile, { force: true }); } catch { /* best-effort */ }
+  // devnet.pid identifies the detached supervisor, daemon.pid its worker.
+  // Snapshot both before signalling: stopping the supervisor alone can orphan
+  // the worker, and either process may remove its pidfile while exiting.
+  const pidfiles = ['devnet.pid', 'daemon.pid'].map(name => resolve(devnetDir, `node${nodeIndex}`, name));
+  const pids = new Set(pidfiles.filter(existsSync).map(file =>
+    Number(stripVTControlCharacters(readFileSync(file, 'utf8')).trim())));
+  const results = await Promise.allSettled([...pids].filter(pid => Number.isInteger(pid) && pid > 0)
+    .map(pid => stopPid(pid, `node${nodeIndex}`)));
+  const failures = results.filter(result => result.status === 'rejected');
+  if (failures.length) throw new AggregateError(failures.map(result => result.reason), `node${nodeIndex} cleanup failed`);
+  for (const file of pidfiles) rmSync(file, { force: true });
 }
 
 async function stopHardhat(devnetDir: string): Promise<void> {
