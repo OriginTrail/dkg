@@ -275,6 +275,7 @@ function SimulateTab() {
   const [contextGraphId, setContextGraphId] = useState('devnet-test');
   const [enabledOps, setEnabledOps] = useState<Set<SimOp>>(new Set(['publish', 'workspace', 'query', 'chat']));
   const [running, setRunning] = useState(false);
+  const [disconnected, setDisconnected] = useState(false);
   const [stats, setStats] = useState<SimStats | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const contextGraphIds = useContextGraphIds();
@@ -305,6 +306,7 @@ function SimulateTab() {
     const simStats: SimStats = { total: opCount, completed: 0, errors: 0, startedAt: Date.now() };
     setStats({ ...simStats });
     setRunning(true);
+    setDisconnected(false);
 
     try {
       const res = await fetch('/sim/start', {
@@ -375,22 +377,16 @@ function SimulateTab() {
       } catch { /* ignore parse errors */ }
     };
 
-    es.onerror = () => {
-      es.close();
-      eventSourceRef.current = null;
-      if (running) {
-        simStats.finishedAt = Date.now();
-        setStats({ ...simStats });
-        setRunning(false);
-        dispatch({ type: 'STOP_SIMULATION' });
-      }
-    };
+    es.onopen = () => { if (eventSourceRef.current === es) setDisconnected(false); };
+    es.onerror = () => { if (eventSourceRef.current === es) setDisconnected(true); };
   }, [opCount, opsPerSec, concurrency, contextGraphId, enabledOps, simName, kasPerPublish, addBroadcast, addOperation, completeOperation, dispatch]);
 
   const stopSimulation = useCallback(async () => {
-    eventSourceRef.current?.close();
+    const es = eventSourceRef.current;
+    const stopped = await fetch('/sim/stop', { method: 'POST' }).then(res => res.ok, () => false);
+    if (!stopped || eventSourceRef.current !== es) return;
+    es?.close();
     eventSourceRef.current = null;
-    await fetch('/sim/stop', { method: 'POST' }).catch(() => {});
     dispatch({ type: 'STOP_SIMULATION' });
     setRunning(false);
   }, [dispatch]);
@@ -405,8 +401,8 @@ function SimulateTab() {
   const elapsed = stats
     ? ((stats.finishedAt ?? Date.now()) - stats.startedAt) / 1000
     : 0;
-  const actualOps = stats ? (stats.completed + stats.errors) : 0; // total finished (success + fail)
-  const pct = stats ? Math.min(100, Math.round((actualOps / stats.total) * 100)) : 0;
+  const succeeded = stats ? Math.max(0, stats.completed - stats.errors) : 0;
+  const pct = stats ? Math.min(100, Math.round((stats.completed / stats.total) * 100)) : 0;
 
   return (
     <div className="tab-form">
@@ -479,6 +475,7 @@ function SimulateTab() {
         {running ? 'Stop Simulation' : 'Play Simulation'}
       </button>
 
+      {running && disconnected && <div role="status">Connection lost. The server may still be running; reconnecting automatically. Use Stop Simulation to cancel.</div>}
       {stats && (
         <div className="sim-stats">
           <div className="sim-progress-bar">
@@ -489,7 +486,7 @@ function SimulateTab() {
           </div>
           <div className="sim-stats-grid">
             <div className="sim-stat">
-              <span className="sim-stat-value">{stats.completed}/{stats.total}</span>
+              <span className="sim-stat-value">{succeeded}/{stats.total}</span>
               <span className="sim-stat-label">succeeded</span>
             </div>
             <div className="sim-stat">
@@ -499,7 +496,7 @@ function SimulateTab() {
               <span className="sim-stat-label">errors</span>
             </div>
             <div className="sim-stat">
-              <span className="sim-stat-value">{elapsed > 0 ? (actualOps / elapsed).toFixed(1) : '0'}</span>
+              <span className="sim-stat-value">{elapsed > 0 ? (stats.completed / elapsed).toFixed(1) : '0'}</span>
               <span className="sim-stat-label">ops/sec</span>
             </div>
             <div className="sim-stat">
@@ -509,7 +506,7 @@ function SimulateTab() {
           </div>
           {stats.finishedAt && (
             <div className="sim-summary">
-              Simulation complete: {stats.completed} succeeded, {stats.errors} failed in {elapsed.toFixed(1)}s
+              Simulation complete: {succeeded} succeeded, {stats.errors} failed in {elapsed.toFixed(1)}s
             </div>
           )}
         </div>
