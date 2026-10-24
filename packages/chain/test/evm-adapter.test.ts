@@ -76,6 +76,32 @@ describe('EVMChainAdapter integration', () => {
       .toEqual([retained]);
   }, 60_000);
 
+  it('answers live authority from a real getContextGraph read, and proves a nonexistent id', async () => {
+    const adapter = new EVMChainAdapter(
+      makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER),
+    );
+    const member = new Wallet(HARDHAT_KEYS.EXTRA1).address;
+    const created = await adapter.createOnChainContextGraph({
+      accessPolicy: 1,
+      publishPolicy: 0,
+      participantAgents: [member],
+    });
+
+    // A real tuple off a real node, and the same facts the three point reads give.
+    const authority = await adapter.getContextGraphLiveAuthority(created.contextGraphId);
+    expect(authority).toEqual({
+      active: await adapter.isContextGraphActiveOnChain(created.contextGraphId),
+      accessPolicy: await adapter.getContextGraphAccessPolicy(created.contextGraphId),
+      participantAgents: await adapter.getContextGraphParticipantAgents(created.contextGraphId),
+    });
+    expect(authority).toEqual({ active: true, accessPolicy: 1, participantAgents: [member] });
+
+    // The nonexistent-id proof against the error ethers REALLY raises for
+    // `ERC721NonexistentToken`, not a hand-built object: `null`, not a rejection.
+    await expect(adapter.getContextGraphLiveAuthority(created.contextGraphId + 1_000_000n))
+      .resolves.toBeNull();
+  }, 60_000);
+
   it('verifyPublisherOwnsRange resolves KnowledgeAssetsStorage after init', async () => {
     const adapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER));
     const deployer = adapter.getSignerAddress();

@@ -1,0 +1,221 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { type PreparedContent, createPreparedContentCache, resolvePreparedContentCacheConfig } from '../src/sync/responder/prepared-content-cache.js';
+import { createBoundedExactAssetExportCache } from '../src/sync/responder/exact-asset-export-cache.js';
+import { exactAssetExportFixture as fixture } from './fixtures/exact-asset-export.js';
+
+const directories: string[] = [];
+function persistentFixture(count: number) {
+  const directory = mkdtempSync(join(tmpdir(), 'prepared-export-'));
+  directories.push(directory);
+  const config = resolvePreparedContentCacheConfig({ enabled: true, directory })!;
+  return { f: fixture(count), config };
+}
+afterEach(() => {
+  vi.restoreAllMocks();
+  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
+});
+
+it('publishes verified bytes even if the response changes while publication is queued', async () => {
+  const { f, config } = persistentFixture(4);
+  const disk = createPreparedContentCache(config);
+  let entered!: () => void, resume!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const held = new Promise<void>(resolve => { resume = resolve; });
+  const cache = createBoundedExactAssetExportCache({ store: f.store, budget: f.budget,
+    preparedContentCache: { get: key => disk.get(key), put: async (key, content) => {
+      entered(); await held; await disk.put(key, content);
+    } } });
+  const lease = (await cache.acquireEncoded(f))!;
+  const expected = lease.body.slice();
+  const pending = lease.assertCurrent();
+  const rejected = expect(pending).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_INVALID' });
+  try {
+    await started; lease.body.fill(0); resume();
+    await rejected; lease.release();
+    const restarted = createBoundedExactAssetExportCache({ store: f.store, budget: f.budget,
+      preparedContentCache: createPreparedContentCache(config) });
+    const warm = (await restarted.acquireEncoded(f))!;
+    try {
+      expect(warm.body).toEqual(expected);
+      expect(restarted.stats().preparedCacheHits).toBe(1);
+      await warm.assertCurrent();
+    } finally { warm.release(); }
+  } finally { resume(); await pending.catch(() => {}); lease.release(); }
+});
+
+describe('cold prepared writes retain source fences and response ownership', () => {
+  it.each(['metadata', 'revision', 'abort'] as const)('rejects a %s change while persistence is pending', async kind => {
+    const f = fixture(3), controller = new AbortController();
+    let revision = 1;
+    if (kind === 'revision') Object.assign(f.store, { getWriteRevision: () => ({ generation: revision, stable: true }) });
+    let enter!: () => void, finish!: () => void;
+    const started = new Promise<void>(resolve => { enter = resolve; });
+    const held = new Promise<void>(resolve => { finish = resolve; });
+    const put = vi.fn(async () => { enter(); await held; });
+    const cache = createBoundedExactAssetExportCache({ store: f.store, budget: f.budget,
+      preparedContentCache: { get: async () => null, put } });
+    const lease = (await cache.acquireEncoded({ ...f, signal: controller.signal }))!;
+    let settled = false, completed = false;
+    const pending = lease.assertCurrent().then(() => { completed = true; })
+      .finally(() => { settled = true; lease.release(); });
+    const observed = pending.catch(error => error);
+    await started;
+    const reserved = f.budget.stats();
+    try {
+      if (kind === 'metadata') f.meta.push({ subject: f.assetUal, predicate: 'urn:changed', object: '"value"', graph: '' });
+      if (kind === 'revision') revision++;
+      if (kind === 'abort') controller.abort(Object.assign(new Error('cancelled persistence'), { name: 'AbortError' }));
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      expect(reserved.bytesEstimate).toBeGreaterThan(96 * 1024 * 1024);
+      expect(f.budget.stats()).toEqual(reserved);
+    } finally { finish(); }
+    expect(await observed).toMatchObject(kind === 'abort' ? { name: 'AbortError' } : { code: 'SYNC_EXACT_EXPORT_CHANGED' });
+    expect(completed).toBe(false);
+    expect(put).toHaveBeenCalledTimes(1);
+    if (kind === 'revision') {
+      expect(f.budget.stats()).toEqual({ snapshots: 2, rows: 3, bytesEstimate: reserved.bytesEstimate - 96 * 1024 * 1024 });
+    } else {
+      expect(f.budget.stats()).toEqual({ snapshots: 1, rows: 0, bytesEstimate: cache.stats().encodedCacheBytes });
+    }
+  });
+});
+
+describe('prepared assertion reuse across responder restarts', () => {
+  it('reuses persisted bytes after a process generation reset and fences the new response', async () => {
+    const { f, config } = persistentFixture(4);
+    let generation = 7;
+    Object.assign(f.store, { getWriteRevision: () => ({ generation, stable: true }) });
+    const restart = () => createBoundedExactAssetExportCache({ store: f.store, budget: f.budget,
+      preparedContentCache: createPreparedContentCache(config) });
+      const cold = (await restart().acquireEncoded(f))!;
+      await cold.assertCurrent(); const expected = cold.body.slice(); cold.release();
+      generation = 0;
+      const restarted = restart(); f.reads.length = 0;
+      const warm = (await restarted.acquireEncoded(f))!;
+      try {
+        expect(warm.body).toEqual(expected);
+        expect(warm.wholePayloadExports).toBe(0);
+        expect(restarted.stats()).toMatchObject({ exports: 0, preparedCacheHits: 1 });
+        await warm.assertCurrent();
+        expect(f.reads.every(read => read.options?.source?.endsWith('.metadata'))).toBe(true);
+        generation++;
+        await expect(warm.assertCurrent()).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_CHANGED' });
+      } finally { warm.release(); }
+  });
+
+  it('serves prepared bytes when memory retention declines and keeps the response charged and fenced', async () => {
+    const { f, config } = persistentFixture(4);
+    const restart = () => createBoundedExactAssetExportCache({ store: f.store, budget: f.budget,
+      encodedMaxBytes: 1, preparedContentCache: createPreparedContentCache(config) });
+      const first = (await restart().acquireEncoded(f))!;
+      await first.assertCurrent(); const expected = first.body.slice(); first.release();
+      const before = f.budget.stats().bytesEstimate;
+      const cache = restart(); f.reads.length = 0;
+      const lease = (await cache.acquireEncoded(f))!;
+      expect(lease.body).toEqual(expected);
+      expect(lease.wholePayloadExports).toBe(0);
+      expect(cache.stats()).toMatchObject({ exports: 0, preparedCacheHits: 1, encodedCacheEntries: 0 });
+      expect(f.budget.stats().bytesEstimate).toBe(before + 96 * 1024 * 1024);
+      await lease.assertCurrent();
+      f.meta.push({ subject: f.assetUal, predicate: 'urn:changed', object: '"value"', graph: '' });
+      await expect(lease.assertCurrent()).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_CHANGED' });
+      lease.release(); lease.release();
+      expect(f.budget.stats().bytesEstimate).toBe(before);
+      expect(f.reads.every(read => read.options?.source?.endsWith('.metadata'))).toBe(true);
+  });
+  it('reuses disk bytes without exporting DATA, but reads fresh metadata and fences every response', async () => {
+    const { f, config } = persistentFixture(4);
+    const restart = () => createBoundedExactAssetExportCache({ store: f.store, budget: f.budget,
+      preparedContentCache: createPreparedContentCache(config) });
+      const first = restart(), cold = (await first.acquireEncoded(f))!;
+      await cold.assertCurrent(); const expected = cold.body.slice(); cold.release();
+      const second = restart(); f.reads.length = 0;
+      const warm = (await second.acquireEncoded(f))!;
+      expect(warm.body).toEqual(expected); expect(warm.wholePayloadExports).toBe(0);
+      await warm.assertCurrent(); warm.release();
+      expect(second.stats()).toMatchObject({ exports: 0, preparedCacheHits: 1 });
+      expect(f.reads.every(read => read.options?.source?.endsWith('.metadata'))).toBe(true);
+      // A policy transition invalidates access even though the disk copy exists.
+      f.meta.find(q => q.predicate === 'http://dkg.io/ontology/accessPolicy')!.object = '"private"';
+      expect(await restart().acquireEncoded(f)).toBeNull();
+  });
+  it('does not persist an unfenced response or reuse changed metadata', async () => {
+    const { f, config } = persistentFixture(3);
+    const restart = () => createBoundedExactAssetExportCache({ store: f.store, budget: f.budget,
+      preparedContentCache: createPreparedContentCache(config) });
+      const abandoned = (await restart().acquireEncoded(f))!; abandoned.release();
+      const second = restart(), cold = (await second.acquireEncoded(f))!;
+      expect(cold.wholePayloadExports).toBe(1); await cold.assertCurrent(); cold.release();
+      f.meta.push({ subject: f.assetUal, predicate: 'urn:additional-metadata', object: '"changed"', graph: '' });
+      const third = restart(), changed = (await third.acquireEncoded(f))!;
+      expect(changed.wholePayloadExports).toBe(1); await changed.assertCurrent(); changed.release();
+      expect(third.stats().preparedCacheHits).toBe(0);
+  });
+  it('retains source revision fences and cancellation after disk IO', async () => {
+    const f = fixture(3); let revision = 1;
+    Object.assign(f.store, { getWriteRevision: () => ({ generation: revision, stable: true }) });
+    let value: PreparedContent | undefined;
+    const preparedContentCache = { get: async () => value ?? null, put: async (_key: string, saved: PreparedContent) => { value = saved; } };
+    const first = createBoundedExactAssetExportCache({ store: f.store, budget: f.budget, preparedContentCache });
+    const cold = (await first.acquireEncoded(f))!; await cold.assertCurrent(); cold.release();
+    const baseline = f.budget.stats();
+    const second = createBoundedExactAssetExportCache({ store: f.store, budget: f.budget,
+      preparedContentCache: { ...preparedContentCache, get: async () => { revision++; return value!; } } });
+    await expect(second.acquireEncoded(f)).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_CHANGED' });
+    expect(f.budget.stats()).toEqual(baseline);
+    const controller = new AbortController();
+    const third = createBoundedExactAssetExportCache({ store: f.store, budget: f.budget,
+      preparedContentCache: { ...preparedContentCache, get: async () => { controller.abort(); return value!; } } });
+    await expect(third.acquireEncoded({ ...f, signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' });
+    expect(f.budget.stats()).toEqual(baseline);
+  });
+});
+
+it('owns a cancelled prepared-read reservation until the disk read settles', async () => {
+  const f=fixture(3), controller=new AbortController();
+  let enter!:()=>void, finish!:()=>void;
+  const started=new Promise<void>(r=>{enter=r;}), held=new Promise<void>(r=>{finish=r;});
+  const baseline=f.budget.stats();
+  const cache=createBoundedExactAssetExportCache({store:f.store,budget:f.budget,
+    preparedContentCache:{get:async()=>{enter();await held;return null;},put:async()=>{}}});
+  let settled=false;
+  const pending=cache.acquireEncoded({...f,signal:controller.signal}).finally(()=>{settled=true;});
+  const rejected=expect(pending).rejects.toMatchObject({name:'AbortError'});
+  await started;
+  try {
+    const reserved=f.budget.stats();
+    expect(reserved.bytesEstimate).toBe(baseline.bytesEstimate+96*1024*1024);
+    controller.abort();await Promise.resolve();
+    expect(settled).toBe(false);expect(f.budget.stats()).toEqual(reserved);
+  } finally {finish();}
+  await rejected;expect(f.budget.stats()).toEqual(baseline);
+});
+
+it.each(['metadata', 'data'] as const)('never reuses or publishes disk content with an unstable %s revision', async kind => {
+  const { f, config } = persistentFixture(4);
+  let stable = true;
+  Object.assign(f.store, { getWriteRevision: (graph: string) => ({ generation: 1,
+    stable: stable || (kind === 'metadata' ? !graph.endsWith('/_meta') : graph !== f.graph) }) });
+  const disk = createPreparedContentCache(config);
+  const get = vi.spyOn(disk, 'get'), put = vi.spyOn(disk, 'put');
+  const restart = () => createBoundedExactAssetExportCache({ store: f.store, budget: f.budget, preparedContentCache: disk });
+    const seeded = (await restart().acquireEncoded(f))!;
+    await seeded.assertCurrent(); seeded.release();
+    expect(put).toHaveBeenCalledTimes(1);
+    get.mockClear(); put.mockClear(); stable = false; f.reads.length = 0;
+    const successful = restart(), fresh = (await successful.acquireEncoded(f))!;
+    expect(fresh.wholePayloadExports).toBe(1);
+    await fresh.assertCurrent(); fresh.release();
+    expect(successful.stats().preparedCacheHits).toBe(0);
+    expect(f.reads.some(read => !read.options?.source?.endsWith('.metadata'))).toBe(true);
+    expect(get).not.toHaveBeenCalled(); expect(put).not.toHaveBeenCalled();
+    f.payload[0]!.object = '"corrupted data"';
+    const corrupt = restart();
+    await expect(corrupt.acquireEncoded(f)).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_INVALID' });
+    expect(corrupt.stats().preparedCacheHits).toBe(0);
+    expect(get).not.toHaveBeenCalled(); expect(put).not.toHaveBeenCalled();
+});

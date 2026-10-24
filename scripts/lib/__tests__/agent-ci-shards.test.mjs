@@ -54,7 +54,7 @@ test('agent shards match actual Vitest discovery exactly once and separate the u
   }
   assert.equal(new Set(executableFiles).size, executableFiles.length);
   assert.deepEqual(executableFiles.sort(), discovered.get(AGENT_INTEGRATION_CONFIG));
-  assert.deepEqual(shards.map((shard) => shard.reservedOverheadMs), [0, 0, 0, 0, 0, 0, 0, 0, 0, 40_000]);
+  assert.deepEqual(shards.map((shard) => shard.reservedOverheadMs), [0, 0, 0, 0, 0, 0, 0, 0, 0, 160_000]);
   assert.deepEqual(planAgentShards(AGENT_REPO_ROOT, { discover }), shards);
   assert.ok(timings.bodyWeightsMs['test/rfc64-inventory-v1-lifecycle.test.ts'] > 100_000);
 });
@@ -83,9 +83,9 @@ test('agent executable rejects invalid arguments and matches workflow dispatch',
   const rows = CI_MATRICES['tornado-agent'].include;
   assert.deepEqual(rows.map(({ shard }) => shard), Array.from({ length: AGENT_SHARD_COUNT }, (_, index) => agentShardDescriptor(index + 1).index));
   for (const step of job.steps.filter((step) => step.name?.startsWith('RFC-64'))) {
-    assert.equal(step.if, 'matrix.gate1', 'evidence sidecars must use the policy reservation');
+    assert.equal(step.if, 'matrix.sidecars', 'evidence sidecars must use the policy reservation');
   }
-  assert.deepEqual(rows.filter(({ gate1 }) => gate1).map(({ shard }) => shard),
+  assert.deepEqual(rows.filter(({ sidecars }) => sidecars).map(({ shard }) => shard),
     rows.filter(({ shard }) => agentShardDescriptor(shard).reservedOverheadMs > 0).map(({ shard }) => shard));
 
 });

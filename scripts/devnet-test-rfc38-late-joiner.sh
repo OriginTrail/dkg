@@ -7,14 +7,11 @@
 # curated CG even when the curator is offline, as long as ANY
 # other current member is reachable.
 #
-# This is the "member-from-member catchup" path that today's
-# Phase A implementation supports natively. It is the complement
-# to the "member-from-core" path that is documented as a known
-# gap (cores do not yet subscribe to live curated-CG SWM gossip;
-# substrate-encryption + sharding-table subscription land in a
-# follow-up of LU-6).
+# Private SWM travels directly between authorized members. Cores do not
+# retain curated ciphertext under the current strip policy; this suite
+# checks member recovery and the zero-custody boundary together.
 #
-# Three scenarios:
+# Five scenarios:
 #
 #   SCENARIO A — member-from-curator catchup (baseline, curator online):
 #     • Curator (N5) creates curated CG with [N5, N6] in allowlist.
@@ -28,53 +25,39 @@
 #     • Curator writes 7 SWM triples. N6 receives them via live
 #       gossip (live multi-member topology).
 #     • Curator goes OFFLINE (kill node 5).
-#     • N4 (third member) calls catchup against N6 (second member).
-#       Asserts: N4 inserts 7 triples + can query them — proves
+#     • N3 (third member) calls catchup against N6 (second member).
+#       Asserts: N3 sees 7 triples via query — proves
 #       any current member can serve any other member.
 #     • Curator comes back online for the rest of the suite.
 #
-#   SCENARIO C — outsider catchup (cores host ciphertext but
-#                outsider has no chain key, expected fail-soft):
+#   SCENARIO C — outsider catchup (no private core custody,
+#                expected fail-soft):
 #     • Curator (N5) creates a THIRD curated CG with [N5, N3] in
 #       allowlist. (N6 is NOT a member.)
 #     • Curator writes 4 SWM triples.
 #     • Curator goes OFFLINE.
 #     • N6 (non-member, pretending to be a late joiner who somehow
 #       discovered the CG) tries to catch up from the cores only.
-#     • Asserts: cores host the ciphertext envelopes via LU-6 and
-#       serve them; N6 cannot decrypt (no chain key) and applies
-#       zero. The endpoint must NOT crash and must return cleanly
-#       with 0 inserted triples. This is the *intended* outcome —
-#       LU-6 ciphertext custody is decoupled from CG-membership
-#       authority; non-members hit AEAD verify failure on apply.
+#     • Asserts: cores serve no private history, N6 applies zero,
+#       and the endpoint returns cleanly without leaking graph data.
 #     • Curator comes back online.
 #
-#   SCENARIO D — LU-6 happy path (member-with-chain-key, curator
-#                offline, cores serve ciphertext, member decrypts):
-#     • Curator (N5) creates a curated CG with [N5, N6] in allowlist.
-#       Both nodes pre-create the CG locally (sender-key handshake
-#       needs both ends online).
-#     • Curator writes 1 SWM triple — this triggers the sender-key
-#       handshake and N6 receives the chain key (epoch 0).
-#     • N6 is KILLED — but its on-disk sender-key receive state is
-#       preserved (DKGAgentWallet + swm-sender-key files survive).
-#     • Curator writes 5 more SWM triples (so 5 ciphertext envelopes
-#       at epoch >= 1 are gossiped). N6 is offline, so misses live
-#       gossip; cores receive via LU-6 host-mode and stash opaque
-#       ciphertext.
-#     • Curator is KILLED. Now no CG member is online except (the
-#       offline) N6.
-#     • N6 RESTARTS. Local SWM state still has the original 1
-#       triple, NOT the 5 it missed.
-#     • N6 calls /api/shared-memory/catchup — standard sync returns
-#       0 (curator offline, no other member online); the LU-6
-#       host-catchup fallback fires, pulls 5 ciphertext envelopes
-#       from cores, decrypts with the local chain key, applies.
-#     • Asserts: N6 ends with all 6 triples via SPARQL.
-#     • Curator comes back online.
+#   SCENARIO D — private member reconnect under the current transport:
+#     • Curator (N5) writes 1 triple while N6 is online, then 5 while
+#       N6 is offline. A manual host-mode subscribe on cores cannot
+#       override the private-ciphertext strip.
+#     • With curator offline, N6 restarts and still has only 1 triple;
+#       the cores hold zero private ciphertext for this graph.
+#     • Once curator returns, N6 catches up all 6 triples from that
+#       authorized member and verifies them through SPARQL.
 #
-# Talks ONLY to the daemon HTTP API. Re-runnable: every CG id is
-# timestamp-suffixed.
+#   SCENARIO E — chain/beacon auto-host cannot retain private data:
+#     • Create a second registered private CG without a manual core
+#       subscription, share a triple to its member, and confirm cores
+#       have zero host-mode entries for that graph.
+#
+# Uses daemon HTTP APIs plus local devnet configs and multiaddrs.
+# Re-runnable: every CG id is timestamp-suffixed.
 
 set -euo pipefail
 
@@ -88,7 +71,7 @@ CURATOR_NODE=5
 MEMBER_NODE=6
 THIRD_MEMBER_NODE=3
 OUTSIDER_NODE=1
-LEGACY_HOST_CORES=(1 2 3 4)
+CORE_NODES=(1 2 3 4)
 
 log()  { echo "[lj] $*"; }
 warn() { echo "[lj] WARN: $*" >&2; }
@@ -213,13 +196,42 @@ kill_node() {
     kill -9 "$pid" 2>/dev/null || true
   fi
   wait_for_node_down "$node"
+  case "$node" in
+    5) CURATOR_NEEDS_RESTART=1 ;;
+    6) MEMBER_NEEDS_RESTART=1 ;;
+  esac
 }
 
 restart_node() {
   local node="$1"
-  ( cd "$REPO_ROOT" && ./scripts/devnet.sh restart-node "$node" 2>&1 | sed "s/^/  [devnet] /" )
+  # Startup output can include local auth material. Report only the outcome.
+  ( cd "$REPO_ROOT" && ./scripts/devnet.sh restart-node "$node" >/dev/null 2>&1 )
   wait_for_node_up "$node"
+  case "$node" in
+    5) CURATOR_NEEDS_RESTART=0 ;;
+    6) MEMBER_NEEDS_RESTART=0 ;;
+  esac
+  log "✓ node $node restarted"
 }
+
+CURATOR_NEEDS_RESTART=0
+MEMBER_NEEDS_RESTART=0
+restore_offline_nodes_on_exit() {
+  local status="$1"
+  trap - EXIT INT TERM
+  if [ "$CURATOR_NEEDS_RESTART" = 1 ] && ! restart_node "$CURATOR_NODE"; then
+    warn "curator did not recover during cleanup"
+    status=1
+  fi
+  if [ "$MEMBER_NEEDS_RESTART" = 1 ] && ! restart_node "$MEMBER_NODE"; then
+    warn "member did not recover during cleanup"
+    status=1
+  fi
+  exit "$status"
+}
+trap 'restore_offline_nodes_on_exit $?' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 republish_agent_profile() {
   local node="$1" label="${2:-node $1}"
@@ -232,39 +244,22 @@ republish_agent_profile() {
   log "✓ republished current agent profile for $label"
 }
 
-LEGACY_HOST_CFG_BAK_DIR=""
-restore_legacy_host_custody_configs() {
-  [ -n "${LEGACY_HOST_CFG_BAK_DIR:-}" ] && [ -d "$LEGACY_HOST_CFG_BAK_DIR" ] || return 0
-  for node in "${LEGACY_HOST_CORES[@]}"; do
-    local cfg bak
-    cfg="$(node_dir "$node")/config.json"
-    bak="$LEGACY_HOST_CFG_BAK_DIR/node${node}.config.json"
-    [ -f "$bak" ] || continue
-    cp "$bak" "$cfg" 2>/dev/null || true
-    restart_node "$node" >/dev/null 2>&1 || true
+connect_member_to_curator() {
+  local multiaddr body response
+  multiaddr=$(cat "$(node_dir "$CURATOR_NODE")/multiaddr" 2>/dev/null) ||
+    fail "curator multiaddr is unavailable"
+  body=$(MULTIADDR="$multiaddr" node -e '
+    console.log(JSON.stringify({multiaddr:process.env.MULTIADDR}));
+  ')
+  for _ in 1 2 3; do
+    response=$(api_call_agent "$MEMBER_NODE" POST /api/connect "$body") || response=""
+    if [ -n "$response" ] && [ "$(parse_json "$response" '.connected')" = true ]; then
+      log "✓ member reconnected to curator"
+      return 0
+    fi
+    sleep 5
   done
-  rm -rf "$LEGACY_HOST_CFG_BAK_DIR"
-}
-
-configure_legacy_host_custody_cores() {
-  LEGACY_HOST_CFG_BAK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rfc38-lj-core-cfg-XXXXXX")"
-  trap restore_legacy_host_custody_configs EXIT INT TERM
-  for node in "${LEGACY_HOST_CORES[@]}"; do
-    local cfg bak
-    cfg="$(node_dir "$node")/config.json"
-    bak="$LEGACY_HOST_CFG_BAK_DIR/node${node}.config.json"
-    [ -f "$cfg" ] || fail "core config $cfg missing — bring up the devnet first"
-    cp "$cfg" "$bak"
-    node -e '
-      const fs = require("fs");
-      const file = process.argv[1];
-      const cfg = JSON.parse(fs.readFileSync(file, "utf8"));
-      cfg.swmHostMode = Object.assign({}, cfg.swmHostMode, { enabled: true, stripCiphertext: false });
-      fs.writeFileSync(file, JSON.stringify(cfg, null, 2));
-    ' "$cfg" || fail "could not edit core node $node config for legacy host custody"
-    restart_node "$node" >/dev/null 2>&1 || fail "core node $node did not restart after enabling legacy host custody"
-  done
-  log "✓ cores ${LEGACY_HOST_CORES[*]} running with swmHostMode.stripCiphertext=false for LU-6 legacy host-custody checks"
+  fail "member could not reconnect to curator"
 }
 
 # Poll `/api/connections` on $node until $targetPeer is in the
@@ -308,7 +303,10 @@ THIRD_AGENT=$(api_call "$THIRD_MEMBER_NODE"   GET /api/agent/identity | node -e 
 log "Curator:      $CURATOR_AGENT (node $CURATOR_NODE, peer=$CURATOR_PEER)"
 log "Member:       $MEMBER_AGENT  (node $MEMBER_NODE,  peer=$MEMBER_PEER)"
 log "Third member: $THIRD_AGENT  (node $THIRD_MEMBER_NODE, core daemon used as member)"
+republish_agent_profile "$CURATOR_NODE" "curator"
+republish_agent_profile "$MEMBER_NODE" "member"
 republish_agent_profile "$THIRD_MEMBER_NODE" "third member"
+connect_member_to_curator
 sleep 5
 
 STAMP=$(date +%s)
@@ -336,8 +334,11 @@ EOF
   fi
 done
 
-# Brief settle so the sender-key handshake can complete.
+# Establish a current peer link before the sender-key handshake and identity
+# probe. A node recently restarted by the preceding suite can still hold a
+# failed probe in backoff even after its HTTP API has reopened.
 sleep 3
+wait_for_peer_link "$CURATOR_NODE" "$MEMBER_PEER"
 
 log "Curator writes 5 SWM triples to CG_A..."
 A_PAYLOAD=$(CG_ID="$CG_A" N=5 LABEL="A" node -e '
@@ -364,22 +365,24 @@ log "✓ curator wrote 5 triples"
 sleep 3
 
 log "Member catches up from curator (peerId=$CURATOR_PEER)..."
-CATCHUP_A=$(api_call_agent "$MEMBER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
+N_A=""
+for attempt in $(seq 1 6); do
+  CATCHUP_A=$(api_call_agent "$MEMBER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
 { "contextGraphId": "$CG_A", "peerId": "$CURATOR_PEER" }
 EOF
 )")
-INSERTED_A=$(parse_json "$CATCHUP_A" '.totalInsertedTriples')
-log "  catchup response (insertedTriples=$INSERTED_A)"
-[ -n "$INSERTED_A" ] || fail "catchup result missing: $CATCHUP_A"
-
-# Validate the member can read the data via SPARQL regardless of how
-# it got there (live gossip vs catchup).
-Q_A=$(api_call_agent "$MEMBER_NODE" POST /api/query "$(cat <<EOF
+  INSERTED_A=$(parse_json "$CATCHUP_A" '.totalInsertedTriples')
+  [ -n "$INSERTED_A" ] || fail "catchup result missing: $CATCHUP_A"
+  Q_A=$(api_call_agent "$MEMBER_NODE" POST /api/query "$(cat <<EOF
 { "contextGraphId": "$CG_A", "graphSuffix": "_shared_memory",
   "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
 EOF
 )")
-N_A=$(sparql_count "$Q_A")
+  N_A=$(sparql_count "$Q_A")
+  [ "$N_A" = 5 ] && break
+  log "  catch-up attempt $attempt/6 transferred $INSERTED_A; member has ${N_A:-unknown}/5"
+  sleep 5
+done
 [ "$N_A" = "5" ] || fail "member's CG_A binding count was '$N_A', expected 5 (response: $Q_A)"
 log "✓ SCENARIO A: member sees all 5 triples via SPARQL"
 
@@ -501,6 +504,7 @@ log "✓ SCENARIO B: third-member resync via OTHER MEMBER returned all 7 triples
 
 log "Restarting curator..."
 restart_node "$CURATOR_NODE"
+connect_member_to_curator
 log "✓ curator back online"
 
 # Give the rejoined curator time to settle libp2p before any
@@ -616,6 +620,7 @@ log "✓ SCENARIO C: outsider cores-only catchup returned 0 triples cleanly (LU-
 
 log "Restarting curator..."
 restart_node "$CURATOR_NODE"
+connect_member_to_curator
 log "✓ curator back online"
 
 # Give the rejoined curator time to settle libp2p before the next
@@ -623,21 +628,63 @@ log "✓ curator back online"
 sleep 5
 
 # ===========================================================================
-act "SCENARIO D: LU-6 happy path (member-with-chain-key catchup from cores)"
+act "SCENARIO D: private late joiner recovers from an authorized member"
 # ===========================================================================
 CG_D="${CURATOR_AGENT}/lj-D-${STAMP}"
 log "Create curated CG: $CG_D (allowlist=[curator, member])"
-log "  Pre-create on members only (cores get host-mode via explicit API call below)."
 
-configure_legacy_host_custody_cores
+# Default OT-RFC-49 policy strips private ciphertext on cores. Check the
+# actual node config before using zero host-mode entries as an invariant.
+for N in "${CORE_NODES[@]}"; do
+  python3 - "$(node_dir "$N")/config.json" <<'PYCONFIG' || fail "core $N does not have private-ciphertext stripping enabled"
+import json,sys
+c=json.load(open(sys.argv[1]))
+assert c.get('swmHostMode',{}).get('stripCiphertext') is not False
+PYCONFIG
+done
 
-# Only members pre-create the CG. Cores deliberately do NOT, because:
-#   (a) the curator's allowlist is exactly [curator, member] — adding
-#       cores into the on-the-wire DKG_ALLOWED_AGENT membership union
-#       (via gossiped meta) would make them *real* members and shortcut
-#       past the host-mode path we're trying to test.
-#   (b) we want to prove the LU-6 path where cores host ciphertext
-#       without being CG members.
+host_entries_for_graph() {
+  local node="$1" cg="$2" wire stats
+  wire=$(cd "$REPO_ROOT/packages/agent" && CG_ID="$cg" node -e '
+    const {keccak256,toUtf8Bytes}=require("ethers");
+    process.stdout.write(keccak256(toUtf8Bytes(process.env.CG_ID)));
+  ') || return 1
+  stats=$(api_call "$node" GET /api/shared-memory/host-mode/stats) || return 1
+  printf '%s' "$stats" | CG_ID="$cg" WIRE_ID="$wire" node -e '
+    let input="";process.stdin.on("data",c=>input+=c);
+    process.stdin.on("end",()=>{
+      try {
+        const data=JSON.parse(input), rows=data.perCg || {};
+        if(data.enabled!==true) process.exit(1);
+        const keys=new Set([process.env.CG_ID,process.env.WIRE_ID,process.env.WIRE_ID.toLowerCase()]);
+        let count=0;
+        for(const key of keys) count+=Number(rows[key]?.entries || 0);
+        if(!Number.isSafeInteger(count) || count<0) process.exit(1);
+        console.log(count);
+      } catch { process.exit(1); }
+    });
+  '
+}
+
+assert_no_private_core_custody() {
+  local cg="$1" node entries
+  for node in "${CORE_NODES[@]}"; do
+    entries=$(host_entries_for_graph "$node" "$cg") || fail "cannot read node $node host-mode stats"
+    [ "$entries" = 0 ] || fail "node $node retained $entries private ciphertext envelopes for $cg"
+    log "  node $node private host-mode entries for this graph: $entries"
+  done
+}
+
+query_member_count() {
+  local cg="$1" response
+  response=$(api_call_agent "$MEMBER_NODE" POST /api/query "$(cat <<EOF
+{ "contextGraphId": "$cg", "graphSuffix": "_shared_memory",
+  "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
+EOF
+)") || return 1
+  sparql_count "$response"
+}
+
 for N in "$CURATOR_NODE" "$MEMBER_NODE"; do
   CR=$(api_call_agent "$N" POST /api/context-graph/create "$(cat <<EOF
 { "id": "$CG_D", "name": "lj-D ${STAMP}",
@@ -650,207 +697,78 @@ EOF
     ON_CHAIN_D=$(parse_json "$CR" '.onChainId')
     [ -n "$ON_CHAIN_D" ] || fail "curator CG_D create failed: $CR"
     log "  curator created+registered: onChainId=$ON_CHAIN_D"
-  else
-    log "  node $N pre-created CG_D"
   fi
 done
 
-# Operator-driven host-mode designation: tell each core to subscribe
-# in host mode for CG_D. This is the Phase A surface that maps onto
-# the eventual sharding-table-driven auto-subscribe. Cores do NOT
-# need the CG metadata locally — only the topic id.
-log "Designating cores 1-4 as host-mode subscribers for CG_D..."
-for N in 1 2 3 4; do
-  SR=$(api_call "$N" POST /api/shared-memory/host-mode/subscribe "$(cat <<EOF
-{ "contextGraphId": "$CG_D" }
-EOF
-)")
-  log "  node $N host-mode/subscribe: $SR"
+# Exercise the operator hatch explicitly. A core may already know the topic
+# by its chain event, but neither path may retain private ciphertext.
+for N in "${CORE_NODES[@]}"; do
+  SR=$(api_call "$N" POST /api/shared-memory/host-mode/subscribe "{\"contextGraphId\":\"$CG_D\"}")
+  [ "$(parse_json "$SR" '.hostingEnabled')" = true ] || fail "core $N host-mode API unavailable: $SR"
 done
-
-# Give cores a beat to wire up the pubsub topic listeners.
 sleep 5
-
 wait_for_peer_link "$CURATOR_NODE" "$MEMBER_PEER"
 
-log "Initial write (1 triple) to drive sender-key handshake to member..."
 D0_PAYLOAD=$(CG_ID="$CG_D" node -e '
-  const cgId = process.env.CG_ID;
-  console.log(JSON.stringify({
-    contextGraphId: cgId,
-    quads: [{
-      subject: "urn:lj-D:e0",
-      predicate: "http://schema.org/name",
-      object: "\"value-D-0\"",
-      graph: "did:dkg:context-graph:" + cgId,
-    }],
-  }));
+  const cg=process.env.CG_ID;
+  console.log(JSON.stringify({contextGraphId:cg,quads:[{
+    subject:"urn:lj-D:e0",predicate:"http://schema.org/name",
+    object:"\"value-D-0\"",graph:"did:dkg:context-graph:"+cg}]}));
 ')
 WROTE_D0=$(devnet_create_shared_ka_agent "$CURATOR_NODE" "$D0_PAYLOAD")
-TRIPLES_WROTE_D0=$(parse_json "$WROTE_D0" '.triplesWritten')
-[ "$TRIPLES_WROTE_D0" = "1" ] || fail "expected 1 triplesWritten for handshake, got '$TRIPLES_WROTE_D0' (response: $WROTE_D0)"
-log "✓ handshake write OK"
-
-# Wait for the sender-key package to land + the first message to apply
-# on member; otherwise N6's local receive state never gets the chain
-# key and SCENARIO D's whole premise breaks.
-log "Waiting for member to receive handshake + first triple..."
+[ "$(parse_json "$WROTE_D0" '.triplesWritten')" = 1 ] || fail "CG_D handshake write failed: $WROTE_D0"
 N_D_HANDSHAKE=""
 for _ in $(seq 1 30); do
-  Q_D_HANDSHAKE=$(api_call_agent "$MEMBER_NODE" POST /api/query "$(cat <<EOF
-{ "contextGraphId": "$CG_D", "graphSuffix": "_shared_memory",
-  "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
-EOF
-)")
-  N_D_HANDSHAKE=$(sparql_count "$Q_D_HANDSHAKE")
-  [ "$N_D_HANDSHAKE" = "1" ] && break
+  N_D_HANDSHAKE=$(query_member_count "$CG_D")
+  [ "$N_D_HANDSHAKE" = 1 ] && break
   sleep 1
 done
-[ "$N_D_HANDSHAKE" = "1" ] || fail "member never received handshake triple (got '$N_D_HANDSHAKE') — sender-key package likely never landed"
-log "✓ member received chain key + 1 triple"
+[ "$N_D_HANDSHAKE" = 1 ] || fail "member did not receive CG_D's first triple"
+log "✓ member received the first private triple"
 
-log "Killing member ($MEMBER_NODE) before curator writes 5 more..."
 kill_node "$MEMBER_NODE"
-log "✓ member down (chain key persists on disk)"
-
-log "Curator writes 5 SWM triples to CG_D while member is OFFLINE..."
 D5_PAYLOAD=$(CG_ID="$CG_D" node -e '
-  const cgId = process.env.CG_ID;
-  const quads = [];
-  for (let i = 1; i <= 5; i += 1) {
-    quads.push({
-      subject: "urn:lj-D:e" + i,
-      predicate: "http://schema.org/name",
-      object: "\"value-D-" + i + "\"",
-      graph: "did:dkg:context-graph:" + cgId,
-    });
-  }
-  console.log(JSON.stringify({ contextGraphId: cgId, quads }));
+  const cg=process.env.CG_ID;
+  const quads=Array.from({length:5},(_,index)=>({
+    subject:"urn:lj-D:e"+(index+1),predicate:"http://schema.org/name",
+    object:"\"value-D-"+(index+1)+"\"",graph:"did:dkg:context-graph:"+cg}));
+  console.log(JSON.stringify({contextGraphId:cg,quads}));
 ')
 WROTE_D5=$(devnet_create_shared_ka_agent "$CURATOR_NODE" "$D5_PAYLOAD")
-TRIPLES_WROTE_D5=$(parse_json "$WROTE_D5" '.triplesWritten')
-[ "$TRIPLES_WROTE_D5" = "5" ] || fail "expected 5 triplesWritten, got '$TRIPLES_WROTE_D5' (response: $WROTE_D5)"
-log "✓ curator wrote 5 triples while member offline"
-
-# Give cores a moment to absorb ciphertext into host-mode storage.
+[ "$(parse_json "$WROTE_D5" '.triplesWritten')" = 5 ] || fail "CG_D offline-member write failed: $WROTE_D5"
 sleep 5
+assert_no_private_core_custody "$CG_D"
+log "✓ manually designated cores retained zero private ciphertext"
 
-log "Probing core host-mode stores on all 4 cores to confirm ciphertext was captured for CG_D specifically..."
-# Codex PR #610 R3: assert on per-CG entries for $CG_D rather
-# than the global totalEntries — the latter would silently pass
-# if SCENARIO C left residue but CG_D itself was never hosted.
-HOST_D_TOTAL=0
-for N in 1 2 3 4; do
-  HS=$(api_call $N GET /api/shared-memory/host-mode/stats || true)
-  log "  host-mode stats node$N: $HS"
-  # NB: env-var prefix in a pipeline binds to the LEFTMOST command,
-  # so `CG_ID=... printf | node` does NOT export CG_ID into node's
-  # environment. Wrap the pipeline in a subshell with `export` so
-  # CG_ID reaches the `process.env.CG_ID` lookup below.
-  E=$(export CG_ID="$CG_D"; printf '%s' "$HS" | node -e '
-    let d=""; process.stdin.on("data",c=>d+=c);
-    process.stdin.on("end",()=>{
-      try {
-        const j = JSON.parse(d);
-        const cg = process.env.CG_ID;
-        const perCg = j.perCg || {};
-        const e = (perCg[cg] && perCg[cg].entries) || 0;
-        console.log(e);
-      } catch { console.log(0); }
-    })')
-  HOST_D_TOTAL=$((HOST_D_TOTAL + E))
-done
-log "  CG_D-specific host-mode entries across cores: $HOST_D_TOTAL"
-[ "$HOST_D_TOTAL" -gt 0 ] \
-  || fail "LU-6 host-mode regression: 0 ciphertext envelopes stored for CG_D across cores (expected at least 1)"
-
-log "Killing curator ($CURATOR_NODE) — now no CG member is online."
 kill_node "$CURATOR_NODE"
-log "✓ curator down"
-
-log "Restarting member ($MEMBER_NODE) — its on-disk chain-key state survives."
 restart_node "$MEMBER_NODE"
-log "✓ member back online"
+N_D_PRE=$(query_member_count "$CG_D")
+[ "$N_D_PRE" = 1 ] || fail "member gained private history without an authorized peer: count=$N_D_PRE"
+CATCHUP_D_OFFLINE=$(api_call_agent "$MEMBER_NODE" POST /api/shared-memory/catchup "{\"contextGraphId\":\"$CG_D\"}")
+N_D_OFFLINE=$(query_member_count "$CG_D")
+[ "$N_D_OFFLINE" = 1 ] || fail "cores served private history while curator was offline: count=$N_D_OFFLINE"
+log "✓ offline member remained at 1 triple with curator unavailable"
 
-# Sanity: confirm member still only has the 1 triple (the missed
-# 5 are not yet visible because gossip happened while member was
-# offline).
-Q_D_PRE=$(api_call_agent "$MEMBER_NODE" POST /api/query "$(cat <<EOF
-{ "contextGraphId": "$CG_D", "graphSuffix": "_shared_memory",
-  "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
-EOF
-)")
-N_D_PRE=$(sparql_count "$Q_D_PRE")
-[ "$N_D_PRE" = "1" ] || fail "member should have only the 1 handshake triple before catchup, got '$N_D_PRE'"
-log "  pre-catchup count on member: $N_D_PRE (expected 1, confirms 5 still missing)"
-
-log "Member triggers /api/shared-memory/catchup — standard sync returns 0, LU-6 host-catchup fallback fires..."
-CATCHUP_D=$(api_call_agent "$MEMBER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
-{ "contextGraphId": "$CG_D" }
-EOF
-)")
-HOST_APPLIED_D=$(parse_json "$CATCHUP_D" '.hostCatchup.appliedTotal')
-HOST_RAN_D=$(parse_json "$CATCHUP_D" '.hostCatchup.ranFallback')
-log "  catchup response: $CATCHUP_D"
-log "  catchup hostCatchup.ranFallback=$HOST_RAN_D hostCatchup.appliedTotal=$HOST_APPLIED_D"
-
-# The whole point of LU-6 is that the host-catchup fallback fires
-# in this configuration. If standard sync magically resolves the
-# data, something else is going on — fail loudly so we notice.
-[ "$HOST_RAN_D" = "true" ] \
-  || fail "LU-6 happy-path: host-catchup fallback did not fire (got hostCatchup.ranFallback=$HOST_RAN_D)"
-
-# Final SPARQL check: 1 (handshake) + 5 (host-catchup decrypted) = 6.
-N_D_POST=""
-for _ in $(seq 1 30); do
-  Q_D_POST=$(api_call_agent "$MEMBER_NODE" POST /api/query "$(cat <<EOF
-{ "contextGraphId": "$CG_D", "graphSuffix": "_shared_memory",
-  "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
-EOF
-)")
-  N_D_POST=$(sparql_count "$Q_D_POST")
-  [ "$N_D_POST" = "6" ] && break
-  sleep 1
-done
-[ "$N_D_POST" = "6" ] \
-  || fail "LU-6 happy-path regression: member ended with '$N_D_POST' triples after catchup (expected 6 = 1 handshake + 5 host-catchup)"
-log "✓ SCENARIO D: member recovered all 6 triples via LU-6 host-catchup decrypt (cores hosted, member decrypted)"
-
-log "Restarting curator..."
 restart_node "$CURATOR_NODE"
-log "✓ curator back online"
+connect_member_to_curator
+wait_for_peer_link "$CURATOR_NODE" "$MEMBER_PEER"
+N_D_POST=""
+for attempt in $(seq 1 6); do
+  CATCHUP_D=$(api_call_agent "$MEMBER_NODE" POST /api/shared-memory/catchup "{\"contextGraphId\":\"$CG_D\"}")
+  for _ in $(seq 1 10); do
+    N_D_POST=$(query_member_count "$CG_D")
+    [ "$N_D_POST" = 6 ] && break 2
+    sleep 2
+  done
+  log "  curator catch-up retry $attempt/6; member has ${N_D_POST:-unknown}/6 triples"
+done
+[ "$N_D_POST" = 6 ] || fail "member did not recover all private history from curator: count=$N_D_POST"
+log "✓ SCENARIO D: member recovered all 6 triples from the authorized curator"
 
 # ===========================================================================
-# SCENARIO E — OT-RFC-38 LU-6 Phase B: chain-event + discovery-beacon
-#              driven AUTO-HOST (no operator-driven /host-mode/subscribe).
+act "SCENARIO E: chain/beacon discovery retains no private ciphertext"
 # ===========================================================================
-# Phase B replaces SCENARIO D's manual /api/shared-memory/host-mode/subscribe
-# with two complementary auto-host signals:
-#
-#   (1) The on-chain `ContextGraphCreated(nameHash, accessPolicy=1)` event.
-#       Every core's chain-event poller hears it and engages host-mode for
-#       the wire-id (keccak256(cleartextId)) without local CG metadata.
-#
-#   (2) The curator's discovery beacon, broadcast on the global
-#       `dkg/cg-discovery` gossip topic at create-time and re-announced
-#       periodically. Cores receive it, verify the curator-EOA signature
-#       (first-claim-wins), and engage host-mode even BEFORE the on-chain
-#       registration commits (pre-reg auto-host, gated by per-curator +
-#       per-core sliding-window rate limits).
-#
-# SCENARIO E proves the new path end-to-end by repeating the SCENARIO D
-# host-mode probe WITHOUT calling /host-mode/subscribe on any core. If
-# cores absorb ciphertext for CG_E, the auto-host wiring is healthy. If
-# they don't, Phase B regressed and we'd silently fall back to Phase A's
-# operator-driven topology — which is exactly what we're killing.
-log ""
-log "================================================================"
-log "  SCENARIO E — LU-6 Phase B auto-host (no /host-mode/subscribe)"
-log "================================================================"
-
-CG_E="$CURATOR_AGENT/lj-E-${STAMP}"
-log "CG_E id: $CG_E"
-log "Creating CG_E on curator + member (member off-chain, curator registers on-chain)..."
+CG_E="${CURATOR_AGENT}/lj-E-${STAMP}"
 for N in "$CURATOR_NODE" "$MEMBER_NODE"; do
   CR=$(api_call_agent "$N" POST /api/context-graph/create "$(cat <<EOF
 { "id": "$CG_E", "name": "lj-E ${STAMP}",
@@ -862,163 +780,36 @@ EOF
   if [ "$N" = "$CURATOR_NODE" ]; then
     ON_CHAIN_E=$(parse_json "$CR" '.onChainId')
     [ -n "$ON_CHAIN_E" ] || fail "curator CG_E create failed: $CR"
-    log "  curator created+registered CG_E: onChainId=$ON_CHAIN_E"
-  else
-    log "  node $N pre-created CG_E"
   fi
 done
-
-# NOTE: deliberately NO /api/shared-memory/host-mode/subscribe call here.
-# Cores must auto-host via (1) chain-event + (2) discovery beacon.
-log "Waiting for cores to absorb the ContextGraphCreated chain event + discovery beacon..."
 sleep 8
-
 wait_for_peer_link "$CURATOR_NODE" "$MEMBER_PEER"
-
-log "Handshake write (1 triple) to drive sender-key broadcast to member..."
-E0_PAYLOAD=$(CG_ID="$CG_E" node -e '
-  const cgId = process.env.CG_ID;
-  console.log(JSON.stringify({
-    contextGraphId: cgId,
-    quads: [{
-      subject: "urn:lj-E:e0",
-      predicate: "http://schema.org/name",
-      object: "\"value-E-0\"",
-      graph: "did:dkg:context-graph:" + cgId,
-    }],
-  }));
+E_PAYLOAD=$(CG_ID="$CG_E" node -e '
+  const cg=process.env.CG_ID;
+  console.log(JSON.stringify({contextGraphId:cg,quads:[{
+    subject:"urn:lj-E:e0",predicate:"http://schema.org/name",
+    object:"\"value-E-0\"",graph:"did:dkg:context-graph:"+cg}]}));
 ')
-WROTE_E0=$(devnet_create_shared_ka_agent "$CURATOR_NODE" "$E0_PAYLOAD")
-TRIPLES_WROTE_E0=$(parse_json "$WROTE_E0" '.triplesWritten')
-[ "$TRIPLES_WROTE_E0" = "1" ] || fail "expected 1 triplesWritten for E handshake, got '$TRIPLES_WROTE_E0' (response: $WROTE_E0)"
-log "✓ CG_E handshake write OK"
-
-log "Waiting for member to receive handshake + first triple..."
-N_E_HANDSHAKE=""
+WROTE_E=$(devnet_create_shared_ka_agent "$CURATOR_NODE" "$E_PAYLOAD")
+[ "$(parse_json "$WROTE_E" '.triplesWritten')" = 1 ] || fail "CG_E write failed: $WROTE_E"
+N_E_MEMBER=""
 for _ in $(seq 1 30); do
-  Q_E_HANDSHAKE=$(api_call_agent "$MEMBER_NODE" POST /api/query "$(cat <<EOF
-{ "contextGraphId": "$CG_E", "graphSuffix": "_shared_memory",
-  "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
-EOF
-)")
-  N_E_HANDSHAKE=$(sparql_count "$Q_E_HANDSHAKE")
-  [ "$N_E_HANDSHAKE" = "1" ] && break
+  N_E_MEMBER=$(query_member_count "$CG_E")
+  [ "$N_E_MEMBER" = 1 ] && break
   sleep 1
 done
-[ "$N_E_HANDSHAKE" = "1" ] || fail "CG_E member never received handshake triple (got '$N_E_HANDSHAKE')"
-log "✓ member received CG_E chain key + 1 triple"
-
-log "Killing member ($MEMBER_NODE) before curator writes 5 more to CG_E..."
-kill_node "$MEMBER_NODE"
-log "✓ member down (chain key persists)"
-
-log "Curator writes 5 SWM triples to CG_E while member is OFFLINE..."
-E5_PAYLOAD=$(CG_ID="$CG_E" node -e '
-  const cgId = process.env.CG_ID;
-  const quads = [];
-  for (let i = 1; i <= 5; i += 1) {
-    quads.push({
-      subject: "urn:lj-E:e" + i,
-      predicate: "http://schema.org/name",
-      object: "\"value-E-" + i + "\"",
-      graph: "did:dkg:context-graph:" + cgId,
-    });
-  }
-  console.log(JSON.stringify({ contextGraphId: cgId, quads }));
-')
-WROTE_E5=$(devnet_create_shared_ka_agent "$CURATOR_NODE" "$E5_PAYLOAD")
-TRIPLES_WROTE_E5=$(parse_json "$WROTE_E5" '.triplesWritten')
-[ "$TRIPLES_WROTE_E5" = "5" ] || fail "expected 5 triplesWritten on CG_E, got '$TRIPLES_WROTE_E5' (response: $WROTE_E5)"
-log "✓ curator wrote 5 triples to CG_E while member offline"
-
-# Give cores a moment to absorb ciphertext via AUTO-HOST (no
-# /host-mode/subscribe was ever called for CG_E).
+[ "$N_E_MEMBER" = 1 ] || fail "CG_E member did not receive the share"
 sleep 5
+assert_no_private_core_custody "$CG_E"
+log "✓ SCENARIO E: auto-discovery retained zero private ciphertext on cores"
 
-log "Probing core host-mode stores on all 4 cores for CG_E (auto-host only)..."
-HOST_E_TOTAL=0
-for N in 1 2 3 4; do
-  HS=$(api_call $N GET /api/shared-memory/host-mode/stats || true)
-  log "  host-mode stats node$N: $HS"
-  E=$(export CG_ID="$CG_E"; printf '%s' "$HS" | node -e '
-    let d=""; process.stdin.on("data",c=>d+=c);
-    process.stdin.on("end",()=>{
-      try {
-        const j = JSON.parse(d);
-        const cg = process.env.CG_ID;
-        const perCg = j.perCg || {};
-        const e = (perCg[cg] && perCg[cg].entries) || 0;
-        console.log(e);
-      } catch { console.log(0); }
-    })')
-  HOST_E_TOTAL=$((HOST_E_TOTAL + E))
-done
-log "  CG_E-specific host-mode entries across cores: $HOST_E_TOTAL"
-[ "$HOST_E_TOTAL" -gt 0 ] \
-  || fail "LU-6 Phase B regression: 0 ciphertext envelopes auto-hosted for CG_E (expected >=1; chain-event or beacon auto-host is not engaging)"
-
-log "Killing curator ($CURATOR_NODE) — now no CG_E member is online."
-kill_node "$CURATOR_NODE"
-log "✓ curator down"
-
-log "Restarting member ($MEMBER_NODE)..."
-restart_node "$MEMBER_NODE"
-log "✓ member back online"
-
-# Sanity: member should still only have the handshake triple.
-Q_E_PRE=$(api_call_agent "$MEMBER_NODE" POST /api/query "$(cat <<EOF
-{ "contextGraphId": "$CG_E", "graphSuffix": "_shared_memory",
-  "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
-EOF
-)")
-N_E_PRE=$(sparql_count "$Q_E_PRE")
-[ "$N_E_PRE" = "1" ] || fail "CG_E member should have only the 1 handshake triple before catchup, got '$N_E_PRE'"
-log "  pre-catchup count on member for CG_E: $N_E_PRE (expected 1)"
-
-log "Member triggers /api/shared-memory/catchup for CG_E — host-catchup fallback should fire..."
-CATCHUP_E=$(api_call_agent "$MEMBER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
-{ "contextGraphId": "$CG_E" }
-EOF
-)")
-HOST_APPLIED_E=$(parse_json "$CATCHUP_E" '.hostCatchup.appliedTotal')
-HOST_RAN_E=$(parse_json "$CATCHUP_E" '.hostCatchup.ranFallback')
-log "  catchup response: $CATCHUP_E"
-log "  catchup hostCatchup.ranFallback=$HOST_RAN_E hostCatchup.appliedTotal=$HOST_APPLIED_E"
-[ "$HOST_RAN_E" = "true" ] \
-  || fail "LU-6 Phase B regression: host-catchup fallback did not fire on CG_E (got hostCatchup.ranFallback=$HOST_RAN_E)"
-
-N_E_POST=""
-for _ in $(seq 1 30); do
-  Q_E_POST=$(api_call_agent "$MEMBER_NODE" POST /api/query "$(cat <<EOF
-{ "contextGraphId": "$CG_E", "graphSuffix": "_shared_memory",
-  "sparql": "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://schema.org/name> ?o }" }
-EOF
-)")
-  N_E_POST=$(sparql_count "$Q_E_POST")
-  [ "$N_E_POST" = "6" ] && break
-  sleep 1
-done
-[ "$N_E_POST" = "6" ] \
-  || fail "LU-6 Phase B regression: member ended CG_E with '$N_E_POST' triples after catchup (expected 6)"
-log "✓ SCENARIO E: AUTO-HOST path works end-to-end (no operator subscribe; member recovered all $N_E_POST triples)"
-
-log "Restarting curator..."
-restart_node "$CURATOR_NODE"
-log "✓ curator back online"
-
-# ===========================================================================
 log ""
 log "================================================================"
 log "  RFC-38 LATE-JOINER test: PASS"
 log "================================================================"
-log "  CG_A (member-from-curator):     $CG_A  (onChainId=$ON_CHAIN_A)"
-log "                                  member catchup OK, $N_A triples"
-log "  CG_B (member-from-member,       $CG_B  (onChainId=$ON_CHAIN_B)"
-log "        curator OFFLINE):         third-member catchup OK, $N_B triples"
-log "  CG_C (outsider catchup,         $CG_C  (onChainId=$ON_CHAIN_C)"
-log "        no chain key):            cores-only catchup returned 0 (confidentiality upheld)"
-log "  CG_D (LU-6 happy path,          $CG_D  (onChainId=$ON_CHAIN_D)"
-log "        member decrypts cores):   member recovered all $N_D_POST triples via host-catchup"
-log "  CG_E (LU-6 Phase B AUTO-HOST,   $CG_E  (onChainId=$ON_CHAIN_E)"
-log "        no operator subscribe):   member recovered all $N_E_POST triples via auto-host + host-catchup"
+log "  CG_A: curator-to-member catch-up, $N_A triples"
+log "  CG_B: member-to-member catch-up with curator offline, $N_B triples"
+log "  CG_C: outsider cores-only catch-up returned zero"
+log "  CG_D: private member recovered $N_D_POST triples after curator returned"
+log "  CG_E: chain/beacon auto-discovery retained zero private ciphertext"
 log "================================================================"

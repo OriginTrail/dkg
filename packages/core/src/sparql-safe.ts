@@ -15,6 +15,18 @@
  *   Use `sparqlInt`.
  */
 
+/**
+ * A value that cannot be interpolated into SPARQL safely. {@link assertSafeIri}
+ * and {@link assertSafeRdfTerm} throw only this, so a caller can tell bad
+ * input from a bug in the validator.
+ */
+export class UnsafeSparqlValueError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnsafeSparqlValueError';
+  }
+}
+
 const UNSAFE_IRI_CHARS = /[<>"{}|\\^`\x00-\x20]/;
 
 const IRI_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>"{}|\\^`\x00-\x20]+$/;
@@ -27,7 +39,7 @@ const IRI_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>"{}|\\^`\x00-\x20]+$/;
  */
 export function assertSafeIri(value: string): string {
   if (!value || UNSAFE_IRI_CHARS.test(value)) {
-    throw new Error(`Unsafe or empty IRI value: ${value}`);
+    throw new UnsafeSparqlValueError(`Unsafe or empty IRI value: ${value}`);
   }
   return value;
 }
@@ -101,7 +113,7 @@ const SAFE_RDF_IRI_TERM = /^<[^<>"{}|\\^`\x00-\x20]+>$/;
 export function assertSafeRdfTerm(value: string): void {
   if (SAFE_RDF_LITERAL.test(value)) return;
   if (SAFE_RDF_IRI_TERM.test(value)) return;
-  throw new Error(`Unsafe RDF term for CAS condition: ${value.slice(0, 80)}`);
+  throw new UnsafeSparqlValueError(`Unsafe RDF term for CAS condition: ${value.slice(0, 80)}`);
 }
 
 export function sparqlInt(

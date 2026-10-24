@@ -3,11 +3,13 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import {
   resolveDaemonEntryPoint,
   resolveDaemonNodeCommand,
 } from '../src/daemon-entrypoint.js';
+import { resolveHelperModuleNodeArgs } from '../src/own-module-path.js';
 
 /**
  * Regression guard for #962 (cli.ts split review): `resolveDaemonEntryPoint`
@@ -94,5 +96,36 @@ describe('resolveDaemonEntryPoint (#962)', () => {
 
     expect(command.entryPoint).toBe(legacySlotEntry);
     expect(command.args).toEqual([...process.execArgv, legacySlotEntry, 'daemon-worker']);
+  });
+});
+
+describe('resolveHelperModuleNodeArgs', () => {
+  it('runs a built helper directly and a source-only helper through tsx, without the daemon execArgv', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-helper-module-'));
+    try {
+      const built = join(dir, 'helper.js');
+      const source = join(dir, 'helper.ts');
+      await writeFile(source, '');
+      expect(resolveHelperModuleNodeArgs(pathToFileURL(built)))
+        .toEqual(['--import', expect.stringMatching(/\/tsx\/.*\.m?js$/), source]);
+      await writeFile(built, '');
+      expect(resolveHelperModuleNodeArgs(pathToFileURL(built))).toEqual([built]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails clearly instead of returning a path that does not exist', () => {
+    expect(() => resolveHelperModuleNodeArgs(new URL('file:///nonexistent/dkg-helper.js')))
+      .toThrow(/CLI helper module not found: \/nonexistent\/dkg-helper\.js/);
+  });
+
+  it('resolves the Oxigraph parent watchdog to a file that exists in this run mode', () => {
+    const args = resolveHelperModuleNodeArgs(
+      new URL('../src/daemon/oxigraph-parent-watchdog.js', import.meta.url),
+    );
+    const entry = args.at(-1)!;
+    expect(entry).toMatch(/oxigraph-parent-watchdog\.(ts|js)$/);
+    expect(existsSync(entry), `watchdog entry must exist: ${entry}`).toBe(true);
   });
 });

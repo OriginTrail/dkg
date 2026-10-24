@@ -173,7 +173,8 @@ describe('runDaemonInner publisher admission-config wiring (#1836, #2270)', () =
     publisher: Record<string, unknown>,
   ): Promise<{ store: unknown; options: { maxRetries?: number; retryTuning?: Record<string, unknown> }; agentStore: unknown }> {
     const fakeAgent = {
-      peerId: 'self-peer',
+      configurePromoteQueue: vi.fn(),
+    peerId: 'self-peer',
       multiaddrs: [],
       wallet: { keypair: { publicKey: new Uint8Array([1]), secretKey: new Uint8Array([2]) } },
       store: {},
@@ -211,7 +212,7 @@ describe('runDaemonInner publisher admission-config wiring (#1836, #2270)', () =
       apiPort: 0,
       nodeRole: 'edge',
       auth: { enabled: false },
-      promoteQueue: { enabled: false },
+      promoteQueue: { enabled: false, maxRetries: 3, retryBaseMs: 100, retryMaxMs: 500, retryJitterRatio: 0 },
       source: 'monorepo',
       publisher,
       chain: {
@@ -223,6 +224,8 @@ describe('runDaemonInner publisher admission-config wiring (#1836, #2270)', () =
     } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('after-publisher-control');
 
     closeDashboardDbFromAgentCreateArg(mocks.agentCreate.mock.calls[0]?.[0]);
+    expect(fakeAgent.configurePromoteQueue).toHaveBeenCalledWith(expect.objectContaining({ maxRetries: 3, backoff: expect.any(Function) }));
+    expect(fakeAgent.configurePromoteQueue.mock.calls[0][0].backoff(2)).toBe(200);
     expect(mocks.createPublisherControlFromStore).toHaveBeenCalledTimes(1);
     const [store, options] = mocks.createPublisherControlFromStore.mock.calls[0] as [
       unknown,

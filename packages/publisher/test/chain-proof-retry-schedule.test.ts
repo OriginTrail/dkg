@@ -26,7 +26,7 @@ function harness(rand: () => number = () => 0) {
     turn(jobId: string, identity: string, cadence: 'default' | 'awaiting-confirmations' = 'default') {
       const turn = obs(schedule.beginPass(now), jobId, identity);
       expect(turn).not.toBeNull();
-      turn!.defer(cadence);
+      turn!.defer(cadence, 'inconclusive');
     },
     /** Admission on a fresh pass: true when a turn was admitted (due). */
     due(jobId: string, identity: string) {
@@ -120,7 +120,7 @@ describe('ChainProofRetrySchedule', () => {
   it('a settled turn leaves no schedule behind', () => {
     const h = harness();
     const turn = obs(h.schedule.beginPass(h.now()), 'job', A);
-    turn!.defer('default');
+    turn!.defer('default', 'inconclusive');
     h.advance(30_000);
     const next = obs(h.schedule.beginPass(h.now()), 'job', A);
     next!.settled();
@@ -136,7 +136,7 @@ describe('ChainProofRetrySchedule', () => {
     const staleTurns = [A, `${A}x1`, `${A}x2`, `${A}x3`, `${A}x4`]
       .map((id) => obs(h.schedule.beginPass(h.now()), 'job', id));
     h.turn('job', B); // B takes ownership and defers
-    for (const turn of staleTurns) turn?.defer('default');
+    for (const turn of staleTurns) turn?.defer('default', 'inconclusive');
     expect(h.schedule.retainedEntryCount()).toBe(1);
     h.advance(29_999);
     expect(h.due('job', B)).toBe(false);
@@ -183,8 +183,8 @@ describe('ChainProofRetrySchedule', () => {
     expect(staleTurn).not.toBeNull(); // first contact installs ready(A)
     const newerTurn = obs(newerPass, 'job', B);
     expect(newerTurn).not.toBeNull(); // newer token: ready(B)
-    staleTurn!.defer('default'); // stale completion: foreign-dropped
-    newerTurn!.defer('default'); // B's first backoff LANDS
+    staleTurn!.defer('default', 'inconclusive'); // stale completion: foreign-dropped
+    newerTurn!.defer('default', 'inconclusive'); // B's first backoff LANDS
     expect(h.schedule.retainedEntryCount()).toBe(1);
     h.advance(29_999);
     expect(h.due('job', B)).toBe(false);
@@ -204,7 +204,7 @@ describe('ChainProofRetrySchedule', () => {
     const newerTurn = obs(newerPass, 'job', B);
     expect(newerTurn).not.toBeNull();
     newerTurn!.settled(); // the owner resolves the job; the slot is gone
-    staleTurn!.defer('default'); // late echo into the emptied slot
+    staleTurn!.defer('default', 'inconclusive'); // late echo into the emptied slot
     expect(h.schedule.retainedEntryCount()).toBe(0);
   });
 
@@ -243,7 +243,7 @@ describe('ChainProofRetrySchedule', () => {
     expect(newerTurn).not.toBeNull();
     sweeper.observeSnapshot([{ jobId: 'live', identity: A }]); // sweeper's OLDER snapshot: live only
     expect(h.schedule.retainedEntryCount()).toBe(2);
-    newerTurn!.defer('default'); // the kept entry is still owned: the deferral lands
+    newerTurn!.defer('default', 'inconclusive'); // the kept entry is still owned: the deferral lands
     h.advance(29_999);
     // Both ladders intact — one combined snapshot per check, as a real pass would carry.
     const fullSnapshot = [
@@ -280,7 +280,7 @@ describe('ChainProofRetrySchedule', () => {
     const t2 = h.schedule.beginPass(h.now()); // stale pass for A, opened between B's turns
     const t3 = h.schedule.beginPass(h.now());
     expect(obs(t3, 'job', B)).not.toBeNull(); // recency refreshed to t3
-    turnB!.defer('default'); // late deferral from t1: must not regress recency below t3
+    turnB!.defer('default', 'inconclusive'); // late deferral from t1: must not regress recency below t3
     expect(obs(t2, 'job', A)).toBeNull(); // t2 < t3: still refused
     h.advance(29_999);
     expect(h.due('job', B)).toBe(false); // B's ladder intact on its own entry
@@ -298,11 +298,94 @@ describe('ChainProofRetrySchedule', () => {
     const newerTurn = obs(newerPass, 'job', B);
     expect(newerTurn).not.toBeNull(); // B takes ownership
     expect(obs(stalePass, 'job', A)).toBeNull(); // stale pass refused
-    newerTurn!.defer('default'); // B's deferral is NOT foreign-dropped
+    newerTurn!.defer('default', 'inconclusive'); // B's deferral is NOT foreign-dropped
     h.advance(29_999);
     expect(h.due('job', B)).toBe(false);
     h.advance(1);
     expect(h.due('job', B)).toBe(true);
     expect(h.schedule.retainedEntryCount()).toBe(1);
+  });
+});
+
+describe('ChainProofRetrySchedule: the observation beside a deferral (GH#2945)', () => {
+  it('has none until a check earns a deferral, then returns it for the owning incarnation only', () => {
+    const h = harness();
+    expect(h.schedule.lastCheckOf('job', A)).toBeUndefined();
+    const turn = obs(h.schedule.beginPass(h.now()), 'job', A);
+    expect(h.schedule.lastCheckOf('job', A)).toBeUndefined(); // admitted, not yet checked
+    turn!.defer('default', 'pending-mempool');
+
+    expect(h.schedule.lastCheckOf('job', A)).toEqual({ outcome: 'pending-mempool', at: h.now() });
+    expect(h.schedule.lastCheckOf('job', B)).toBeUndefined(); // another incarnation of the same jobId
+    expect(h.schedule.lastCheckOf('other', A)).toBeUndefined();
+  });
+
+  it.each([
+    'pending-mempool', 'pending-awaiting-confirmation', 'unrecognized', 'rpc-unavailable', 'absence-unproven', 'deadline', 'error',
+  ] as const)('never moves the ladder: deferrals stating %s are due at the same instants as ones stating inconclusive', (outcome) => {
+    const withOutcomes = harness(() => 0.5);
+    const without = harness(() => 0.5);
+    for (const cadence of ['default', 'awaiting-confirmations', 'default', 'awaiting-confirmations'] as const) {
+      obs(withOutcomes.schedule.beginPass(withOutcomes.now()), 'job', A)!.defer(cadence, outcome);
+      obs(without.schedule.beginPass(without.now()), 'job', A)!.defer(cadence, 'inconclusive');
+      for (let step = 0; step < 40; step += 1) {
+        expect(withOutcomes.due('job', A)).toBe(without.due('job', A));
+        withOutcomes.advance(10_000);
+        without.advance(10_000);
+      }
+      // Bring both to the same instant of being due before the next deferral.
+      while (!withOutcomes.due('job', A)) { withOutcomes.advance(1_000); without.advance(1_000); }
+    }
+  });
+
+  it('reads the clock once per deferral, exactly as before', () => {
+    let reads = 0;
+    const schedule = new ChainProofRetrySchedule({ now: () => { reads += 1; return 1_000_000; }, rand: () => 0 });
+    const turn = obs(schedule.beginPass(1_000_000), 'job', A)!;
+    const before = reads;
+
+    turn.defer('default', 'error');
+
+    expect(reads - before).toBe(1);
+  });
+
+  it('a later deferral replaces the earlier observation, with its own stamp', () => {
+    const h = harness();
+    obs(h.schedule.beginPass(h.now()), 'job', A)!.defer('default', 'inconclusive');
+    const first = h.schedule.lastCheckOf('job', A)!;
+
+    h.advance(30_000);
+    obs(h.schedule.beginPass(h.now()), 'job', A)!.defer('default', 'pending-mempool');
+
+    expect(first.outcome).toBe('inconclusive');
+    expect(h.schedule.lastCheckOf('job', A)).toEqual({ outcome: 'pending-mempool', at: first.at + 30_000 });
+  });
+
+  it('is dropped by a settlement, by a replacing incarnation and by a sweep', () => {
+    const h = harness();
+    const settledTurn = obs(h.schedule.beginPass(h.now()), 'settled', A)!;
+    settledTurn.defer('default', 'pending-mempool');
+    settledTurn.settled();
+    expect(h.schedule.lastCheckOf('settled', A)).toBeUndefined();
+
+    obs(h.schedule.beginPass(h.now()), 'replaced', A)!.defer('default', 'pending-mempool');
+    obs(h.schedule.beginPass(h.now()), 'replaced', B); // a newer incarnation takes the slot
+    expect(h.schedule.lastCheckOf('replaced', A)).toBeUndefined();
+    expect(h.schedule.lastCheckOf('replaced', B)).toBeUndefined();
+
+    obs(h.schedule.beginPass(h.now()), 'swept', A)!.defer('default', 'pending-mempool');
+    h.schedule.beginPass(h.now()).observeSnapshot([]); // a newer snapshot that no longer holds the job
+    expect(h.schedule.lastCheckOf('swept', A)).toBeUndefined();
+  });
+
+  it('a superseded echo cannot write into the successor incarnation', () => {
+    const h = harness();
+    const staleTurn = obs(h.schedule.beginPass(h.now()), 'job', A)!;
+    obs(h.schedule.beginPass(h.now()), 'job', B); // B takes the slot after A's turn was admitted
+
+    staleTurn.defer('default', 'rpc-unavailable');
+
+    expect(h.schedule.lastCheckOf('job', A)).toBeUndefined();
+    expect(h.schedule.lastCheckOf('job', B)).toBeUndefined();
   });
 });

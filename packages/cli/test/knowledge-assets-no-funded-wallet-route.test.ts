@@ -112,4 +112,27 @@ describe('POST /api/knowledge-assets/:name/vm/publish — NO_FUNDED_PUBLISHER_WA
     expect(res.body?.code).toBe('NO_FUNDED_PUBLISHER_WALLET');
     expect(res.body?.error).toContain('No operational wallet has enough funds');
   });
+
+  it('maps inconclusive PCA funding to a sanitized retryable 503', async () => {
+    await startWithPublishImpl(async () => {
+      throw Object.assign(new Error('RPC at https://private.example failed'), {
+        code: 'PCA_FUNDING_UNKNOWN', readCode: 'RPC_ENDPOINTS_EXHAUSTED',
+      });
+    });
+    const res = await postPublish();
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({
+      code: 'PCA_FUNDING_UNKNOWN',
+      error: 'PCA funding verification is inconclusive; retry when chain reads recover.',
+      retryable: true,
+    });
+  });
+
+  it('keeps a genuine on-chain revert as 500', async () => {
+    await startWithPublishImpl(async () => {
+      throw Object.assign(new Error('execution reverted'), { code: 'CALL_EXCEPTION' });
+    });
+    const res = await postPublish();
+    expect(res.status).toBe(500);
+  });
 });

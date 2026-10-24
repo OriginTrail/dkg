@@ -9,6 +9,7 @@ import {
 
 import type {
   EncodedSwmAuthorInventoryKeyV1,
+  PreparedMergeSwmAuthorInventoryCommitV1,
   PreparedSwmAuthorInventoryCommitV1,
 } from './swm-author-inventory-commit-plan.js';
 import {
@@ -28,7 +29,7 @@ export function swmAuthorKeyParametersV1(
 }
 
 export function swmAuthorHeadParametersV1(
-  head: PreparedSwmAuthorInventoryCommitV1,
+  head: PreparedSwmAuthorInventoryCommitV1 | PreparedMergeSwmAuthorInventoryCommitV1,
 ): SqlParametersV1 {
   const payload = head.snapshot.head.payload;
   return {

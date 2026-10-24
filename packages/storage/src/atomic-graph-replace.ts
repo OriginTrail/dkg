@@ -1,8 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import {
-  assertSafeIri,
-  assertSafeRdfTerm,
-} from '@origintrail-official/dkg-core';
+import { assertSafeIri, formatSparqlTerm } from '@origintrail-official/dkg-core';
 import type { Quad } from './triple-store.js';
 
 /** Never expose these operation-internal graphs through graph enumeration. */
@@ -46,16 +43,13 @@ export function buildAtomicGraphReplaceUpdate(
   }
 
   const stagingGraph = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}${randomUUID()}`;
-  const triples = quads
-    .map((quad) => `    ${formatResource(quad.subject, 'subject')} <${assertSafeIri(unwrapIri(quad.predicate))}> ${formatObject(quad.object)} .`)
-    .join('\n');
   const cleanup = `DROP SILENT GRAPH <${stagingGraph}>`;
   return {
     stagingGraph,
     cleanup,
     update:
       `${cleanup};\n` +
-      `INSERT DATA {\n  GRAPH <${stagingGraph}> {\n${triples}\n  }\n};\n` +
+      `INSERT DATA {\n${formatGraphBlock(stagingGraph, quads)}\n};\n` +
       // The final MOVE must NOT be SILENT: if the staging graph is missing the
       // commit did not happen, and SILENT would report that as success while
       // the stale target content survives.
@@ -141,7 +135,7 @@ export function isAtomicGraphReplaceStagingGraph(graphUri: string): boolean {
  * immutable request record) must do that as its own separate write — the delete
  * scope and the insert scope are the same single subject, so the name never
  * diverges from the behaviour. Quads must be blank-node free; object terms are
- * validated/escaped through the same `formatObject` path as
+ * validated/escaped through the same `formatSparqlTerm` path as
  * `buildAtomicGraphReplaceUpdate`, so callers pass already-serialized RDF terms
  * rather than hand-escaping literals.
  */
@@ -214,38 +208,32 @@ export function assertSubjectReplacementPayload(
   }
 }
 
+/**
+ * One `GRAPH` block of an atomic update. `graphUri` must already be a safe
+ * bare IRI; every term of every quad goes through {@link formatSparqlTerm}.
+ */
 export function formatGraphBlock(graphUri: string, quads: readonly Quad[]): string {
-  const triples = quads
-    .map((quad) => `    ${formatResource(quad.subject, 'subject')} <${assertSafeIri(unwrapIri(quad.predicate))}> ${formatObject(quad.object)} .`)
-    .join('\n');
+  const triples = quads.map((quad) => `    ${formatTriple(quad)}`).join('\n');
   return `  GRAPH <${graphUri}> {\n${triples}\n  }`;
 }
 
-function formatResource(term: string, role: string): string {
-  if (term.startsWith('"')) {
-    throw new Error(`Atomic graph replacement ${role} must be an IRI`);
-  }
-  return `<${assertSafeIri(unwrapIri(term))}>`;
+function formatTriple(quad: Quad): string {
+  return `${formatSparqlTerm(quad.subject, { position: 'subject' })} ` +
+    `${formatSparqlTerm(quad.predicate, { position: 'predicate' })} ` +
+    `${formatSparqlTerm(quad.object, { position: 'object' })} .`;
 }
 
+// Compatibility exports: `dist/atomic-graph-replace.js` is a public package
+// path, and these formatters used to live here.
+
+/** @deprecated Use core's `unwrapIri`. */
+export { unwrapIri } from '@origintrail-official/dkg-core';
+
+/**
+ * @deprecated Use core's `formatSparqlTerm(term, { position: 'object' })`,
+ * which this delegates to. Literals and IRIs render as before; a blank node
+ * now throws instead of becoming the invalid IRI `<_:b0>`.
+ */
 export function formatObject(term: string): string {
-  if (term.startsWith('"')) {
-    const normalized = normalizeLiteralDatatype(term);
-    assertSafeRdfTerm(normalized);
-    return normalized;
-  }
-  return formatResource(term, 'object');
-}
-
-function normalizeLiteralDatatype(term: string): string {
-  const bareDatatype = term.match(/^("(?:[^"\\]|\\.)*")\^\^(?!<)(.+)$/);
-  return bareDatatype
-    ? `${bareDatatype[1]}^^<${assertSafeIri(unwrapIri(bareDatatype[2]))}>`
-    : term;
-}
-
-export function unwrapIri(term: string): string {
-  return term.startsWith('<') && term.endsWith('>')
-    ? term.slice(1, -1)
-    : term;
+  return formatSparqlTerm(term, { position: 'object' });
 }

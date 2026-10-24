@@ -41,6 +41,10 @@ import {
   encodeRootlessWorkspaceRequest,
   rootlessSharedMemoryGraphFromWire,
 } from './_helpers/rootless-workspace.js';
+import {
+  buildPublicQuadsWithByteSize,
+  encodedPublicByteLength,
+} from './_helpers/public-nquads.js';
 import type { V10ACKProvider, V10ACKProviderParams } from '../src/publisher.js';
 
 // RC11 / PR1: in-memory 3-of-N ACK provider that signs the V10 ACK
@@ -86,59 +90,6 @@ async function sealForQuads(quads: Quad[], contextGraphId: string | bigint) {
 
 function q(s: string, p: string, o: string, g = ''): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
-}
-
-const nquadsEncoder = new TextEncoder();
-
-function serializePublicQuad(quad: Quad): string {
-  return `<${quad.subject}> <${quad.predicate}> ${
-    quad.object.startsWith('"') ? quad.object : `<${quad.object}>`
-  } <${quad.graph}> .`;
-}
-
-function encodedPublicByteLength(quads: Quad[]): number {
-  return nquadsEncoder.encode(quads.map(serializePublicQuad).join('\n')).length;
-}
-
-function buildPublicQuadsWithByteSize(targetBytes: number, graph = ''): Quad[] {
-  const quads: Quad[] = [];
-  const maxSafeLiteralBytes = 50_000;
-
-  for (let i = 0; i < 1_000; i++) {
-    const subject = `urn:test:oversized-swm:${i}`;
-    const predicate = 'http://schema.org/description';
-    const emptyLine = serializePublicQuad({
-      subject,
-      predicate,
-      object: '""',
-      graph,
-    });
-    const currentBytes = encodedPublicByteLength(quads);
-    const separatorBytes = quads.length === 0 ? 0 : 1;
-    const bytesNeededInsideLiteral =
-      targetBytes - currentBytes - separatorBytes - nquadsEncoder.encode(emptyLine).length;
-    const literalBytes =
-      bytesNeededInsideLiteral >= 0 && bytesNeededInsideLiteral <= maxSafeLiteralBytes
-        ? bytesNeededInsideLiteral
-        : maxSafeLiteralBytes;
-
-    quads.push({
-      subject,
-      predicate,
-      object: `"${'x'.repeat(literalBytes)}"`,
-      graph,
-    });
-
-    const size = encodedPublicByteLength(quads);
-    if (size >= targetBytes) {
-      if (size !== targetBytes) {
-        throw new Error(`oversized SWM fixture byte-size drift: expected ${targetBytes}, got ${size}`);
-      }
-      return quads;
-    }
-  }
-
-  throw new Error(`failed to build public quads with byte size ${targetBytes}`);
 }
 
 async function signWorkspaceMessage(
@@ -1646,6 +1597,79 @@ describe('SharedMemoryHandler.handle outcome (rc.9 PR-C codex R3)', () => {
     await expect(store.hasGraph(rootlessSharedMemoryGraphFromWire(subgraphMsg))).resolves.toBe(true);
   });
 
+  it('rechecks root authority after validation and the KA lock, before live graph mutation', async () => {
+    const legacyApplyAllowedOracle = vi.fn()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      legacyApplyAllowedOracle,
+    });
+    const msg = encodeRootlessWorkspaceRequest({
+      contextGraphId: CONTEXT_GRAPH,
+      nquads: new TextEncoder().encode(
+        `<${ENTITY}> <http://schema.org/name> "Authority changed" <${DATA_GRAPH}> .`,
+      ),
+      publisherPeerId: '12D3KooWAuthorityChanged',
+      shareOperationId: 'op-authority-changed-before-commit',
+      timestampMs: Date.now(),
+    });
+
+    const outcome = await handler.handle(msg, '12D3KooWAuthorityChanged');
+
+    expect(outcome).toMatchObject({
+      applied: false,
+      retryable: false,
+      reason: expect.stringContaining('not authoritative for root scope'),
+    });
+    expect(legacyApplyAllowedOracle).toHaveBeenCalledTimes(2);
+    await expect(store.hasGraph(rootlessSharedMemoryGraphFromWire(msg))).resolves.toBe(false);
+  });
+
+  it('atomically backfills the late root witness on an exact live replay', async () => {
+    const markerGraph = 'urn:test:late-root-boundary';
+    const markerSubject = 'urn:test:late-root-boundary:live-replay';
+    const settle = vi.fn();
+    const resolveDurableRootAtomicCompanion = vi.fn(() => ({
+      graphUri: markerGraph,
+      subject: markerSubject,
+      quads: [{
+        subject: markerSubject,
+        predicate: 'urn:test:entry',
+        object: '"live-replay"',
+        graph: markerGraph,
+      }],
+      settle,
+    }));
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      legacyApplyAllowedOracle: async () => true,
+      resolveDurableRootAtomicCompanion,
+    });
+    const msg = encodeRootlessWorkspaceRequest({
+      contextGraphId: CONTEXT_GRAPH,
+      nquads: new TextEncoder().encode(
+        `<${ENTITY}> <http://schema.org/name> "Witnessed replay" <${DATA_GRAPH}> .`,
+      ),
+      publisherPeerId: '12D3KooWWitnessedReplay',
+      shareOperationId: 'op-witnessed-live-replay',
+      timestampMs: Date.now(),
+    });
+
+    await expect(handler.handle(msg, '12D3KooWWitnessedReplay')).resolves.toMatchObject({
+      applied: true,
+    });
+    // The second delivery takes the exact-replay exit. It must still perform
+    // the same-byte compound replace so a pre-fix graph can acquire a witness.
+    await expect(handler.handle(msg, '12D3KooWWitnessedReplay')).resolves.toMatchObject({
+      applied: true,
+    });
+
+    expect(resolveDurableRootAtomicCompanion).toHaveBeenCalledTimes(2);
+    expect(settle.mock.calls).toEqual([[true], [true]]);
+    await expect(store.query(
+      `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+  });
+
   it('rejects an encrypted Sender-Key scope downgrade without mutating root while accepting a matching named scope', async () => {
     const wallet = ethers.Wallet.createRandom();
     const peerId = '12D3KooWSenderKeyScopeFence';
@@ -1720,6 +1744,7 @@ describe('SharedMemoryHandler.handle outcome (rc.9 PR-C codex R3)', () => {
     expect(legacyApplyAllowedOracle.mock.calls).toEqual([
       [CONTEXT_GRAPH, 'research'],
       [CONTEXT_GRAPH, null],
+      [CONTEXT_GRAPH, 'research'],
       [CONTEXT_GRAPH, 'research'],
     ]);
   });

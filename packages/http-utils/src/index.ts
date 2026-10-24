@@ -63,3 +63,17 @@ export async function readResponseBodyBytesBounded(
   }
   return body;
 }
+
+export {
+  BrotliResponseRefusedError,
+  fetchGlobalDispatcher,
+  installGlobalBrotliRefusal,
+  isBrotliRefusing,
+  isComposableDispatcher,
+  refuseBrotliResponses,
+  withBrotliRefusal,
+  type ComposableDispatcher,
+  type DispatchFunction,
+  type FetchGlobalDispatcher,
+  type GlobalBrotliRefusal,
+} from './fetch-brotli-refusal.js';

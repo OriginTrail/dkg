@@ -28,6 +28,64 @@ const B: readonly Quad[] = Object.freeze([
 ]);
 
 describe('knowledge-asset SWM staging', () => {
+  it('atomically accompanies a root stage while leaving named staging unchanged', async () => {
+    const store = new OxigraphStore();
+    const keypair = await generateEd25519Keypair();
+    const settle = vi.fn();
+    const markerGraph = 'urn:test:late-root-boundary';
+    const markerSubject = 'urn:test:late-root-boundary:stage';
+    const resolveCompanion = vi.fn(() => ({
+      graphUri: markerGraph,
+      subject: markerSubject,
+      quads: [{
+        subject: markerSubject,
+        predicate: 'urn:test:entry',
+        object: '"stage"',
+        graph: markerGraph,
+      }],
+      settle,
+    }));
+    const publisher = new DKGPublisher({
+      store,
+      chain: { chainId: 'none' } as never,
+      eventBus: new TypedEventBus(),
+      keypair,
+      resolveDurableRootMaterializationAtomicCompanion: resolveCompanion,
+    });
+
+    const staged = await publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+      assertionVersion: VERSION,
+      shareOperationId: 'operation-root-companion',
+      quads: A,
+      privateTripleCount: 0,
+    });
+
+    expect(resolveCompanion).toHaveBeenCalledWith({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+      assertionVersion: VERSION,
+      shareOperationId: 'operation-root-companion',
+    });
+    expect(settle).toHaveBeenCalledWith(true);
+    await expect(store.hasGraph(staged.swmGraph)).resolves.toBe(true);
+    await expect(store.query(
+      `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+
+    await publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+      assertionVersion: '3',
+      shareOperationId: 'operation-named-no-companion',
+      quads: B,
+      privateTripleCount: 0,
+      subGraphName: 'named',
+    });
+    expect(resolveCompanion).toHaveBeenCalledTimes(1);
+  });
+
   it('shares one store-scoped lock domain and preserves an older immutable operation', async () => {
     const store = new OxigraphStore();
     const graphManager = new GraphManager(store);
@@ -234,6 +292,92 @@ describe('knowledge-asset SWM staging', () => {
     assertNoWrites();
     expect(fixture.snapshotStore.putSnapshot).not.toHaveBeenCalled();
     if (externalSnapshots) expect(fixture.snapshotStore.getSnapshot).toHaveBeenCalledOnce();
+  });
+
+  it('atomically backfills a root boundary when reusing an unmarked queued intent', async () => {
+    const fixture = await createReusableOperation();
+    const markerGraph = 'urn:test:late-root-boundary';
+    const markerSubject = 'urn:test:late-root-boundary:reuse';
+    const settle = vi.fn();
+    const publisher = new DKGPublisher({
+      store: fixture.store,
+      chain: { chainId: 'none' } as never,
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      resolveDurableRootMaterializationAtomicCompanion: () => ({
+        graphUri: markerGraph,
+        subject: markerSubject,
+        quads: [{
+          subject: markerSubject,
+          predicate: 'urn:test:entry',
+          object: '"reuse"',
+          graph: markerGraph,
+        }],
+        settle,
+      }),
+    });
+
+    await expect(publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+      ...fixture.input,
+      reuseExistingOperation: true,
+    })).resolves.toEqual(fixture.staged);
+
+    expect(settle).toHaveBeenCalledWith(true);
+    await expect(readGraphObjects(fixture.store, fixture.staged.swmGraph))
+      .resolves.toEqual(['"a"']);
+    await expect(fixture.store.query(
+      `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+  });
+
+  it.each([
+    { outcome: 'capability refusal' as const, expected: false },
+    { outcome: 'indeterminate throw' as const, expected: undefined },
+  ])('settles $outcome while refusing an unmarked queued-intent reuse', async ({ outcome, expected }) => {
+    const fixture = await createReusableOperation();
+    const settle = vi.fn();
+    const failure = new Error('compound replacement interrupted');
+    if (outcome === 'capability refusal') {
+      Object.defineProperty(fixture.store, 'replaceGraphAndSubject', {
+        configurable: true,
+        value: undefined,
+      });
+    } else {
+      vi.spyOn(fixture.store, 'replaceGraphAndSubject').mockRejectedValueOnce(failure);
+    }
+    const publisher = new DKGPublisher({
+      store: fixture.store,
+      chain: { chainId: 'none' } as never,
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      resolveDurableRootMaterializationAtomicCompanion: () => ({
+        graphUri: 'urn:test:late-root-boundary',
+        subject: 'urn:test:late-root-boundary:reuse-failure',
+        quads: [{
+          subject: 'urn:test:late-root-boundary:reuse-failure',
+          predicate: 'urn:test:entry',
+          object: '"reuse-failure"',
+          graph: 'urn:test:late-root-boundary',
+        }],
+        settle,
+      }),
+    });
+
+    const operation = publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+      ...fixture.input,
+      reuseExistingOperation: true,
+    });
+    if (outcome === 'capability refusal') {
+      await expect(operation).rejects.toMatchObject({
+        code: 'ATOMIC_GRAPH_REPLACE_UNSUPPORTED',
+      });
+    } else {
+      await expect(operation).rejects.toBe(failure);
+    }
+    expect(settle).toHaveBeenCalledWith(expected);
+    await expect(fixture.store.query(
+      'ASK { GRAPH <urn:test:late-root-boundary> { ?s ?p ?o } }',
+    )).resolves.toMatchObject({ type: 'boolean', value: false });
   });
 
   it.each([

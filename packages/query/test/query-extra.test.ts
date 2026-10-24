@@ -821,13 +821,33 @@ describe('[Q-3] resolveViewGraphs + DKGQueryEngine route working-memory', () => 
     expect(res.graphs).toEqual([contextGraphAssertionUri(CG, AGENT, 'note-1')]);
   });
 
-  it('resolveViewGraphs(working-memory, {agentAddress}) → prefix scoped to that agent', () => {
+  // Working memory lives in TWO graph families and an unscoped read spans both:
+  // the uniform per-KA layout `…/_working_memory/{addr}/{number}` AND the
+  // name-keyed `…/assertion/{addr}/{name}`. The second is NOT dead legacy —
+  // `DKGPublisher.wmGraphUri` still falls back to `contextGraphAssertionUri`
+  // whenever `resolveKaGraphIdentity` returns null — and this same view's
+  // by-name branch reads exactly that shape. Scanning only the first made the
+  // prefix branch strictly narrower than the by-name branch of the same view.
+  it('resolveViewGraphs(working-memory, {agentAddress}) → prefix scoped to that agent, both families', () => {
     const res = resolveViewGraphs('working-memory', CG, { agentAddress: AGENT });
     expect(res.graphs).toEqual([]);
     expect(res.graphPrefixes).toEqual([
       `did:dkg:context-graph:${CG}/_working_memory/${AGENT.toLowerCase()}/`,
       `did:dkg:context-graph:${CG}/_working_memory/${AGENT}/`,
+      `did:dkg:context-graph:${CG}/assertion/${AGENT.toLowerCase()}/`,
+      `did:dkg:context-graph:${CG}/assertion/${AGENT}/`,
     ]);
+  });
+
+  it('every working-memory prefix stays keyed to the requested address', () => {
+    // Widening to a second graph family must never widen across agents: both
+    // families embed the SAME address, so this is coverage, not a leak.
+    const OTHER = '0xDeAd000000000000000000000000000000000002';
+    const res = resolveViewGraphs('working-memory', CG, { agentAddress: AGENT });
+    for (const prefix of res.graphPrefixes) {
+      expect(prefix.toLowerCase()).toContain(AGENT.toLowerCase());
+      expect(prefix.toLowerCase()).not.toContain(OTHER.toLowerCase());
+    }
   });
 
   // PR #1107 review (🟡): the node default agent's WM is split across the
@@ -843,7 +863,10 @@ describe('[Q-3] resolveViewGraphs + DKGQueryEngine route working-memory', () => 
     expect(res.graphPrefixes).toEqual([
       `did:dkg:context-graph:${CG}/_working_memory/${AGENT.toLowerCase()}/`,
       `did:dkg:context-graph:${CG}/_working_memory/${AGENT}/`,
+      `did:dkg:context-graph:${CG}/assertion/${AGENT.toLowerCase()}/`,
+      `did:dkg:context-graph:${CG}/assertion/${AGENT}/`,
       `did:dkg:context-graph:${CG}/_working_memory/${PEER}/`,
+      `did:dkg:context-graph:${CG}/assertion/${PEER}/`,
     ]);
   });
 
@@ -855,6 +878,8 @@ describe('[Q-3] resolveViewGraphs + DKGQueryEngine route working-memory', () => 
     expect(res.graphPrefixes).toEqual([
       `did:dkg:context-graph:${CG}/_working_memory/${AGENT.toLowerCase()}/`,
       `did:dkg:context-graph:${CG}/_working_memory/${AGENT}/`,
+      `did:dkg:context-graph:${CG}/assertion/${AGENT.toLowerCase()}/`,
+      `did:dkg:context-graph:${CG}/assertion/${AGENT}/`,
     ]);
   });
 

@@ -5,6 +5,7 @@ import {
   queryCatalogBindingValue,
   queryCatalogScopeGraphUri,
   queryCatalogSubGraphFromScopeGraph,
+  queryCatalogProfileUri,
 } from '@origintrail-official/dkg-core/query-catalog';
 import {
   canonicalizeObjectTermForHash,
@@ -64,6 +65,8 @@ export class QueryCatalogWriteConflictError extends Error {
 }
 
 export interface QueryCatalogReadOptions {
+  /** Exact catalog identity within the already-authorized Context Graph. */
+  catalogSlug?: string;
   signal?: AbortSignal;
   priority?: StoreWorkPriority;
   source?: string;
@@ -98,7 +101,7 @@ export function legacyContextGraphQueryCatalogGraphUri(contextGraphId: string): 
   return `did:dkg:context-graph:${contextGraphId}/meta/query-catalog`;
 }
 
-export function buildContextGraphQueryCatalogSelect(graph: string = '?g'): string {
+export function buildContextGraphQueryCatalogSelect(graph: string = '?g', catalogIri?: string): string {
   return `PREFIX prof: <${PROFILE_NS}>
 PREFIX schema: <http://schema.org/>
 SELECT ?q ?scopeGraph ?subGraph ?catalog ?name ?description ?sparql ?resultColumn ?queryParameters ?executionView ?view ?rank ?catalogScopeGraph ?catalogSubGraph ?catalogName ?catalogDescription ?catalogRank
@@ -109,7 +112,7 @@ WHERE {
     OPTIONAL { ?q prof:scopeGraph ?scopeGraph }
     OPTIONAL { ?q prof:forSubGraph ?subGraph }
     FILTER(BOUND(?scopeGraph) || BOUND(?subGraph))
-    OPTIONAL { ?q prof:inCatalog ?catalog }
+    ${catalogIri ? `VALUES ?catalog { <${catalogIri}> }\n    ?q prof:inCatalog ?catalog .` : 'OPTIONAL { ?q prof:inCatalog ?catalog }'}
     OPTIONAL { ?q prof:displayName ?name }
     OPTIONAL { ?q schema:description ?description }
     OPTIONAL { ?q prof:resultColumn ?resultColumn }
@@ -152,7 +155,8 @@ export async function readContextGraphQueryCatalogBindings(
   contextGraphId: string,
   options: QueryCatalogReadOptions = {},
 ): Promise<Array<Record<string, unknown>>> {
-  const query = buildContextGraphQueryCatalogSelect();
+  const catalogIri = options.catalogSlug === undefined ? undefined : queryCatalogProfileUri(contextGraphId, 'catalog', options.catalogSlug);
+  const query = buildContextGraphQueryCatalogSelect('?g', catalogIri);
   const baseOptions = {
     contextGraphId,
     subGraphName: QUERY_CATALOG_META_SUBGRAPH,
@@ -177,7 +181,7 @@ export async function readContextGraphQueryCatalogBindings(
   const legacyRead = options.includeLegacyDirectGraph === false
     ? Promise.resolve([] as Array<Record<string, unknown>>)
     : agent.store.query(
-      buildContextGraphQueryCatalogSelect(`<${legacyContextGraphQueryCatalogGraphUri(contextGraphId)}>`),
+      buildContextGraphQueryCatalogSelect(`<${legacyContextGraphQueryCatalogGraphUri(contextGraphId)}>`, catalogIri),
       {
         signal: options.signal,
         priority: options.priority,

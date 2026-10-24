@@ -19,16 +19,48 @@ function revisionSource(
 }
 
 const REQUEST = {
-  contentKey: 'parent',
+  contextKey: 'parent',
   laneKey: 'normal',
   graphPrefix: 'did:dkg:context-graph:parent',
 };
 
+
+// Exercise revision and lane isolation using inventories from distinct contexts.
+function testMemo(...args: ConstructorParameters<typeof ScopedContentGraphDiscoveryMemo>) {
+  const memo = new ScopedContentGraphDiscoveryMemo(...args);
+  return {
+    get(request: typeof REQUEST & { signal?: AbortSignal; load: () => Promise<readonly string[]> }) {
+      return memo.get({ ...request, load: async () => {
+        const graphs = await request.load();
+        return { inventory: graphs, partitions: [] };
+      } }).then(snapshot => snapshot.inventory);
+    },
+  };
+}
+
 describe('ScopedContentGraphDiscoveryMemo', () => {
+  it('preserves distinct inventory and classified partitions as an immutable snapshot', async () => {
+    const memo = new ScopedContentGraphDiscoveryMemo(
+      revisionSource('all-writers', () => ({ generation: 1, stable: true })),
+    );
+    const inventory = ['urn:route-only', 'urn:content'];
+    const partitions: Array<{ graph: string; kind: 'content' }> = [{ graph: 'urn:content', kind: 'content' }];
+    const first = await memo.get({ ...REQUEST, load: async () => ({ inventory, partitions }) });
+    inventory.push('urn:later'); partitions[0]!.graph = 'urn:later';
+    expect(first.inventory).toEqual(['urn:route-only', 'urn:content']);
+    expect(first.partitions).toEqual([{ graph: 'urn:content', kind: 'content' }]);
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(Object.isFrozen(first.inventory)).toBe(true);
+    expect(Object.isFrozen(first.partitions)).toBe(true);
+    expect(Object.isFrozen(first.partitions[0])).toBe(true);
+    const second = await memo.get({ ...REQUEST, load: async () => { throw new Error('unexpected reload'); } });
+    expect(second).toBe(first);
+  });
+
   it('reuses completed values across lanes until the all-writers generation changes', async () => {
     let revision = { generation: 1, stable: true };
     let loads = 0;
-    const memo = new ScopedContentGraphDiscoveryMemo(
+    const memo = testMemo(
       revisionSource('all-writers', () => revision),
     );
     const load = async () => [`urn:graph:${++loads}`];
@@ -47,7 +79,7 @@ describe('ScopedContentGraphDiscoveryMemo', () => {
   it('never reuses authorization discovery under a process-local revision', async () => {
     const stale = deferred<readonly string[]>();
     let loads = 0;
-    const memo = new ScopedContentGraphDiscoveryMemo(
+    const memo = testMemo(
       revisionSource('process-local', () => ({ generation: 1, stable: true })),
     );
 
@@ -65,7 +97,7 @@ describe('ScopedContentGraphDiscoveryMemo', () => {
   it('does not reuse or admit values while the revision is unstable', async () => {
     let revision = { generation: 7, stable: true };
     let loads = 0;
-    const memo = new ScopedContentGraphDiscoveryMemo(
+    const memo = testMemo(
       revisionSource('all-writers', () => revision),
     );
     const load = async () => [`urn:graph:${++loads}`];
@@ -89,7 +121,7 @@ describe('ScopedContentGraphDiscoveryMemo', () => {
   it('shares only same-generation, same-lane flights and keeps abort caller-local', async () => {
     const gate = deferred<readonly string[]>();
     let loads = 0;
-    const memo = new ScopedContentGraphDiscoveryMemo(
+    const memo = testMemo(
       revisionSource('all-writers', () => ({ generation: 1, stable: true })),
     );
     const controller = new AbortController();
@@ -106,22 +138,22 @@ describe('ScopedContentGraphDiscoveryMemo', () => {
     await expect(otherLane).resolves.toEqual(['urn:graph:ok']);
   });
 
-  it('isolates completed values and concurrent flights by authorization scope key', async () => {
+  it('isolates completed values and concurrent flights by context key', async () => {
     const code = deferred<readonly string[]>();
     const decisions = deferred<readonly string[]>();
     let loads = 0;
-    const memo = new ScopedContentGraphDiscoveryMemo(
+    const memo = testMemo(
       revisionSource('all-writers', () => ({ generation: 1, stable: true })),
     );
 
     const codeRequest = memo.get({
       ...REQUEST,
-      contentKey: '["parent","code"]',
+      contextKey: 'code-context',
       load: () => { loads += 1; return code.promise; },
     });
     const decisionsRequest = memo.get({
       ...REQUEST,
-      contentKey: '["parent","decisions"]',
+      contextKey: 'decisions-context',
       load: () => { loads += 1; return decisions.promise; },
     });
     expect(loads).toBe(2);
@@ -133,12 +165,12 @@ describe('ScopedContentGraphDiscoveryMemo', () => {
 
     await expect(memo.get({
       ...REQUEST,
-      contentKey: '["parent","code"]',
+      contextKey: 'code-context',
       load: async () => { loads += 1; return ['urn:graph:wrong']; },
     })).resolves.toEqual(['urn:graph:code']);
     await expect(memo.get({
       ...REQUEST,
-      contentKey: '["parent","decisions"]',
+      contextKey: 'decisions-context',
       load: async () => { loads += 1; return ['urn:graph:wrong']; },
     })).resolves.toEqual(['urn:graph:decisions']);
     expect(loads).toBe(2);

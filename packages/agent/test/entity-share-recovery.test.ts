@@ -44,6 +44,14 @@ describe('entity-share recovery beside malformed KA heads', () => {
       publish([root, siblingRoot], [...payload, ...siblingPayload]),
       publish([root], payload, 'research'),
     ]);
+    const recoveryOrderedMeta = (
+      fixture: Awaited<ReturnType<typeof publish>>,
+    ): Quad[] => {
+      const sliceSubjects = fixture.slices.map((slice) => slice.sliceSubject);
+      return [...fixture.meta].sort(
+        (a, b) => sliceSubjects.indexOf(a.subject) - sliceSubjects.indexOf(b.subject),
+      );
+    };
     const sliceFor = (fixture: Awaited<ReturnType<typeof publish>>, rootEntity: string) => {
       const slice = fixture.slices.find(candidate => candidate.rootEntity === rootEntity);
       if (!slice) throw new Error(`Entity-share recovery fixture did not publish ${rootEntity}`);
@@ -61,9 +69,11 @@ describe('entity-share recovery beside malformed KA heads', () => {
     }
     const metaGraph = entityPublished.metaGraph;
     const namedMetaGraph = namedPublished.metaGraph;
-    const entityMeta = entityPublished.meta;
-    const twoRootMeta = twoRootPublished.meta;
-    const namedMeta = namedPublished.meta;
+    // Recovery traversal owns its deterministic manifest order; the publisher
+    // fixture returns the publisher/store result without consumer policy.
+    const entityMeta = recoveryOrderedMeta(entityPublished);
+    const twoRootMeta = recoveryOrderedMeta(twoRootPublished);
+    const namedMeta = recoveryOrderedMeta(namedPublished);
     const sliceSubject = entitySlice.sliceSubject;
     const siblingSubject = siblingSlice.sliceSubject;
     const ka = swmFixtures(COVERAGE_CG).manifest(1)[0]!;

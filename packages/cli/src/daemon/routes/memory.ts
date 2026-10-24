@@ -1,3 +1,5 @@
+import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
+import { SUB_GRAPH_NOT_FOUND_CODE } from '@origintrail-official/dkg-publisher';
 // daemon/routes/memory.ts
 //
 // Route handlers for shared-memory / workspace write + publish + conditional-write, memory turn/search.
@@ -55,14 +57,20 @@ const daemonRequire = createRequire(import.meta.url);
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
-import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  enrichEvmError,
+  MockChainAdapter,
+} from '@origintrail-official/dkg-chain';
 import {
   DKGAgent,
   classifySwmCatchupPeerOutcome,
   createSwmCatchupPeerSelector,
   loadOpWallets,
+  swmCatchupOwnerPeerIds,
 } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphMetaUri, advertisesSyncProtocol } from '@origintrail-official/dkg-core';
+import { retrieveMemorySearch } from "./memory-search-retrieval.js";
 import { buildAutoRegisterFailureBody } from "./shared-assertion-helpers.js";
 import {
   DashboardDB,
@@ -123,7 +131,7 @@ import {
   type DurableCatchupLegState,
   type DurableLegDiagnostics,
 } from '../../catchup-runner.js';
-import { authenticatedAgentAddress, loadTokens, httpAuthGuard } from '../../auth.js';
+import { loadTokens, httpAuthGuard } from '../../auth.js';
 import { recordAssertionActivity } from '../activity-notification.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
@@ -206,8 +214,6 @@ import {
 } from '../manifest.js';
 import {
   resolveNameToPeerId,
-  isWritableQuad,
-  validateQuadObjectTerms,
   validateWritableQuadLiteralSizes,
   oversizedRdfLiteralResponseBody,
   jsonResponse,
@@ -342,7 +348,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import { actorFromRequestContext, type RequestContext } from './context.js';
 import { authorizeAgentScopedAuthorClaim, isSameAgentAddress } from './shared-assertion-helpers.js';
 
 /**
@@ -518,12 +524,12 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     apiPortRef,
     url,
     path,
-    requestAgentAddress,
-    authentication,
     emitMemoryGraphChanged,
     emitNotification,
   } = ctx;
-  const writePreflightCallerAgentAddress = authenticatedAgentAddress(authentication);
+  const actor = actorFromRequestContext(ctx);
+  const { authentication, effectiveAgentAddress: requestAgentAddress } = actor;
+  const writePreflightCallerAgentAddress = actor.authenticatedAgentAddress;
   const writePreflightContextGraphOpts = {
     callerAgentAddress: writePreflightCallerAgentAddress,
     allowLocalExactFallback: !writePreflightCallerAgentAddress,
@@ -642,7 +648,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
       if (!check) {
         check = Promise.resolve()
           .then(() => agent.getPeerProtocols(peerId))
-          .then((protocols) => protocols.includes(PROTOCOL_SYNC))
+          .then((protocols) => advertisesSyncProtocol(protocols))
           .catch(() => undefined);
         protocolChecks.set(peerId, check);
       }
@@ -655,6 +661,21 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
         return await agent.canUseSharedMemoryForContextGraph(cgId);
       } catch {
         return true;
+      }
+    };
+    const usesSelectedPublicCatalogRecovery = async (cgId: string): Promise<boolean> => {
+      try {
+        if (await agent.isPrivateContextGraph(cgId)) return false;
+        const authority = agent.resolveRfc64CatalogReceiverAuthorityV1(cgId);
+        return authority.active
+          && authority.mode === 'catalog'
+          && authority.reconciliationLane === 'catalog-apply'
+          && !authority.killSwitchActive;
+      } catch {
+        // Older/compatibility agents do not expose RFC-64 receiver authority.
+        // Preserve their ordinary catch-up behavior rather than guessing that
+        // an arbitrary public graph belongs to the selected catalog lane.
+        return false;
       }
     };
     const unsupportedPeersForContextGraph = async (cgId: string, peers: readonly string[]): Promise<Set<string>> => {
@@ -725,6 +746,8 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     type PerCgLeg = {
       contextGraphId: string;
       perPeer: PerPeerLeg[];
+      /** True when RFC-64 owns this public graph's complete ROOT recovery. */
+      selectedPublicCatalog?: boolean;
       /** Graph-owner outcome used for terminal request classification. */
       durableAttempts?: DurableCatchupAttempt[];
       insertedTriples: number;
@@ -734,6 +757,8 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     for (const cgId of cgIds) {
       const canUseSharedMemory = includeSharedMemory
         && await canUseSharedMemoryForContextGraph(cgId);
+      const selectedPublicCatalog = canUseSharedMemory
+        && await usesSelectedPublicCatalogRecovery(cgId);
       if (!canUseSharedMemory && !includeDurable) {
         perCgLegs.push({
           contextGraphId: cgId,
@@ -744,11 +769,9 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
         continue;
       }
       const baseCandidatePeers = await candidatePeersForContextGraph(cgId);
-      // An explicit peerId is an operator-directed bounded probe. libp2p's
-      // identify-backed peerStore can lag a live connection, so an absent
-      // protocol advertisement must not suppress the wire negotiation the
-      // operator requested. Default peer enumeration remains conservative and
-      // filters peers that are known not to advertise the current sync wire.
+      // An explicit peerId is an operator-directed bounded probe. libp2p's identify-backed peerStore can lag a live
+      // connection, so an absent protocol advertisement must not suppress the wire negotiation the operator requested.
+      // Default peer enumeration remains conservative and filters peers known not to advertise the current sync wire.
       const unsupportedPeers = peerIdParam
         ? new Set<string>()
         : await unsupportedPeersForContextGraph(cgId, baseCandidatePeers);
@@ -759,6 +782,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
             candidatePeers: baseCandidatePeers,
             unsupportedPeers,
             privateCuratorPeerIds,
+            ownerPeerIds: await swmCatchupOwnerPeerIds(agent, cgId),
           }).selectedPeers
         : [];
       const durableSelectedPeers = includeDurable
@@ -796,13 +820,27 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
           let durableError: string | undefined;
           if (swmSelected.has(candidate)) {
             try {
-              const syncResult = await withTimeout(
-                typeof (agent as any).syncSharedMemoryFromPeerDetailed === 'function'
-                  ? (agent as any).syncSharedMemoryFromPeerDetailed(candidate, [cgId])
-                  : agent.syncSharedMemoryFromPeer(candidate, [cgId]).then(swmCatchupResultFromInserted),
+              const syncExecution = await withTimeout(
+                selectedPublicCatalog
+                  ? agent.syncSelectedSharedMemoryFromPeerDetailed(candidate, [cgId], {
+                      selectedSwmPriority: true,
+                      requestedScope: {
+                        kind: 'selected-public',
+                        targets: [{ contextGraphId: cgId, lane: 'selected-public' }],
+                      },
+                      source: 'catchup-foreground',
+                    })
+                  : typeof (agent as any).syncSharedMemoryFromPeerDetailed === 'function'
+                    ? (agent as any).syncSharedMemoryFromPeerDetailed(candidate, [cgId])
+                    : agent.syncSharedMemoryFromPeer(candidate, [cgId]).then(swmCatchupResultFromInserted),
                 PER_PEER_SWM_BUDGET_MS,
                 `SWM catchup from ${candidate} for ${cgId}`,
-              ) as SwmCatchupDetailedResult;
+              );
+              // Selected recovery has a typed terminal wrapper; the route's
+              // existing accounting consumes the underlying SWM diagnostics.
+              const syncResult = (selectedPublicCatalog
+                ? (syncExecution as Awaited<ReturnType<typeof agent.syncSelectedSharedMemoryFromPeerDetailed>>).shared
+                : syncExecution) as SwmCatchupDetailedResult;
               swm = Number(syncResult.insertedTriples ?? 0);
               recordSwmCatchupPeerOutcome(
                 cgId,
@@ -938,6 +976,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
       perCgLegs.push({
         contextGraphId: cgId,
         perPeer,
+        ...(selectedPublicCatalog ? { selectedPublicCatalog: true } : {}),
         ...(durableAttempts ? { durableAttempts } : {}),
         insertedTriples: perPeer.reduce((sum, p) => sum + p.insertedTriples, 0),
         durableInsertedTriples: coordinatedDurableInsertedTriples
@@ -974,7 +1013,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     const hostCatchup: HostCatchupLeg[] = [];
     if (hostCatchupOpted && hostCatchupSupported) {
       for (const cg of perCgLegs) {
-        if (cg.insertedTriples > 0) continue;
+        if (cg.insertedTriples > 0 || cg.selectedPublicCatalog === true) continue;
         try {
           const peerResults = await (agent as any).catchupSwmFromConnectedHosts(cg.contextGraphId, {
             peers: peerIdParam ? [peerIdParam] : undefined,
@@ -1662,6 +1701,10 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
       if (err?.code === "OVERSIZED_RDF_LITERAL") {
         return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(err));
       }
+      // A sub-graph neither this node nor the graph's peers hold (#3293).
+      if (err?.code === SUB_GRAPH_NOT_FOUND_CODE) {
+        return jsonResponse(res, 400, { code: err.code, error: err.message });
+      }
       return jsonResponse(res, 500, { error: `Failed to write turn to ${targetLayer}: ${err.message}` });
     }
     emitMemoryGraphChanged?.({
@@ -1685,6 +1728,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
           entityUri: turnUri,
           contextGraphId: resolvedContextGraphId,
           memoryLayer: targetLayer,
+          agentAddress: actor.effectiveAgentAddress,
           model: embeddingProvider.model,
           snippet,
           label: extractResult.subjectIri,
@@ -1726,7 +1770,8 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     }
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
 
-    const resultLimit = typeof rawLimit === 'number' && rawLimit > 0 ? Math.min(rawLimit, 100) : 20;
+    const resultLimit = typeof rawLimit === 'number' && Number.isFinite(rawLimit) && rawLimit > 0
+      ? Math.max(1, Math.min(Math.floor(rawLimit), 100)) : 20;
     const requestedLayers = Array.isArray(parsed.memoryLayers)
       ? parsed.memoryLayers
       : ['wm', 'swm', 'vm'];
@@ -1736,122 +1781,60 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     }
     const memoryLayers = [...new Set(requestedLayers)] as Array<'wm' | 'swm' | 'vm'>;
 
-    const results: Array<{
-      entityUri: string;
-      label: string | null;
-      sources: string[];
-      similarity: number | null;
-      sourceFile: string | null;
-      snippet: string | null;
-      memoryLayer: string | null;
-    }> = [];
-    const seen = new Map<string, number>();
-
-    // Fan-out 1: Vector search
-    if (embeddingProvider) {
-      try {
-        const queryEmbedding = await embeddingProvider.embed(query);
-        const vectorResults = await vectorStore.search(queryEmbedding, {
-          contextGraphId,
-          memoryLayers,
-          limit: resultLimit,
-          minSimilarity: 0.3,
-        });
-        for (const vr of vectorResults) {
-          const idx = results.length;
-          seen.set(vr.entityUri, idx);
-          results.push({
-            entityUri: vr.entityUri,
-            label: vr.label,
-            sources: ['vector'],
-            similarity: Math.round(vr.similarity * 1000) / 1000,
-            sourceFile: vr.sourceUri,
-            snippet: vr.snippet,
-            memoryLayer: vr.memoryLayer,
-          });
-        }
-      } catch {
-        // Vector search failure is non-fatal
+    // ── Read authority ────────────────────────────────────────────────
+    // `contextGraphId` arrives from the request body and
+    // `validateRequiredContextGraphId` only checks its SHAPE, so without this
+    // gate any holder of a valid token — including an agent-scoped token whose
+    // agent is in no roster for this CG — could name a private context graph
+    // and have both fan-outs below serve its content back:
+    //
+    //   - fan-out 1 queries the vector store, whose rows are filtered by
+    //     `context_graph_id` in SQL (see `VectorStore.search`) — so the CG the
+    //     caller names IS the CG whose embeddings, labels and snippets are
+    //     ranked and returned,
+    //   - fan-out 2 queries the memory-layer views for that CG. It now runs
+    //     through `DKGAgent.query`, which applies its own
+    //     `canReadContextGraph` check — but that check resolves per VIEW
+    //     call and returns an empty result rather than a status, so the
+    //     explicit gate here is what turns a refusal into a 403 and what
+    //     also covers the vector fan-out above.
+    //
+    // This resolves the FULL authority decision rather than the
+    // `canReadContextGraph` boolean, because the boolean collapses three
+    // outcomes into two and loses the one fact an agent-scoped caller needs:
+    // WHY the read was allowed.
+    const callerAgentAddress = actor.authenticatedAgentAddress;
+    const isNodeAdmin = authentication.principal.kind === 'nodeOperator';
+    if (!(await requireContextGraphReadAuthority(ctx, contextGraphId, CG_AUTH_RPC_SITES.memorySearch))) return;
+    const unavailableLayers: Array<{ layer: 'swm'; reason: 'read-authority' }> = [];
+    if (!isNodeAdmin) {
+      // Shared memory carries a SECOND gate. `DKGAgent.query` requires
+      // `canUseSharedMemoryForContextGraph` — which additionally demands
+      // confirmed SWM metadata — for any shared-memory-targeting read
+      // (`dkg-agent-query.ts`). Reading `_shared_memory` graphs under
+      // `canReadContextGraph` alone would leave this route measurably more
+      // permissive than `/api/query` for that layer. Drop the layer rather
+      // than failing the whole request: that matches the engine's own
+      // empty-result semantics for an SWM denial, and the other requested
+      // layers remain legitimately readable.
+      if (
+        memoryLayers.includes('swm')
+        && !(await agent.canUseSharedMemoryForContextGraph(contextGraphId, { callerAgentAddress }))
+      ) {
+        const idx = memoryLayers.indexOf('swm');
+        if (idx >= 0) memoryLayers.splice(idx, 1);
+        unavailableLayers.push({ layer: 'swm', reason: 'read-authority' });
       }
     }
 
-    // Fan-out 2: SPARQL text search (scoped to the requested CG + layers).
-    // escapeSparqlLiteral escapes backslashes, quotes, and CR/LF/TAB per the
-    // SPARQL STRING_LITERAL2 grammar -- a simple `replace(/"/g, '\\"')` would
-    // still allow `\` to escape the closing quote and break out of the literal.
-    const escapedQuery = escapeSparqlLiteral(query.toLowerCase());
-    const cgUri = `did:dkg:context-graph:${contextGraphId}`;
-    const graphFilters = memoryLayers.map((l) => {
-      if (l === 'wm') {
-        return `(STRSTARTS(STR(?g), "${cgUri}/_working_memory") || STRSTARTS(STR(?g), "${cgUri}/assertion/"))`;
-      }
-      if (l === 'swm') return `STRSTARTS(STR(?g), "${cgUri}/_shared_memory")`;
-      // #1096: VM graphs live under `/_verifiable_memory/<id>` (see
-      // contextGraphVerifiableMemoryUri in dkg-core). The pre-rc.16
-      // "_verified" prefix matched nothing, so memory layer "vm" could
-      // never return SPARQL hits.
-      return `STRSTARTS(STR(?g), "${cgUri}/_verifiable_memory")`;
-    }).join(' || ') || 'false';
-    try {
-      // #1096: accept both http:// and https:// schema.org forms -- real
-      // payloads overwhelmingly use https://schema.org, which the previous
-      // http-only property path silently excluded.
-      const sparqlResult = await agent.store.query(`
-        SELECT DISTINCT ?entity ?name ?desc WHERE {
-          GRAPH ?g {
-            ?entity <http://schema.org/name>|<https://schema.org/name>|<http://www.w3.org/2000/01/rdf-schema#label> ?name .
-            OPTIONAL { ?entity <http://schema.org/description>|<https://schema.org/description> ?desc }
-          }
-          FILTER(${graphFilters})
-          FILTER(
-            CONTAINS(LCASE(STR(?name)), "${escapedQuery}")
-            || (BOUND(?desc) && CONTAINS(LCASE(STR(?desc)), "${escapedQuery}"))
-          )
-        }
-        LIMIT ${resultLimit}
-      `);
-      if (sparqlResult.type === 'bindings') {
-        for (const binding of sparqlResult.bindings) {
-          const uri = binding.entity;
-          const label = binding.name ?? null;
-          const snippet = binding.desc ?? null;
-          if (seen.has(uri)) {
-            const idx = seen.get(uri)!;
-            if (!results[idx].sources.includes('sparql')) {
-              results[idx].sources.push('sparql');
-            }
-          } else {
-            const idx = results.length;
-            seen.set(uri, idx);
-            results.push({
-              entityUri: uri,
-              label,
-              sources: ['sparql'],
-              similarity: null,
-              sourceFile: null,
-              snippet,
-              memoryLayer: null,
-            });
-          }
-        }
-      }
-    } catch {
-      // SPARQL search failure is non-fatal
-    }
-
-    // Sort: vector-matched results first (by similarity), then SPARQL-only
-    results.sort((a, b) => {
-      if (a.similarity !== null && b.similarity !== null) return b.similarity - a.similarity;
-      if (a.similarity !== null) return -1;
-      if (b.similarity !== null) return 1;
-      return 0;
-    });
+    const results = await retrieveMemorySearch(ctx, actor, { query, contextGraphId, memoryLayers, resultLimit });
 
     return jsonResponse(res, 200, {
       query,
       contextGraphId,
       resultCount: results.length,
-      results: results.slice(0, resultLimit),
+      results,
+      unavailableLayers,
     });
   }
 

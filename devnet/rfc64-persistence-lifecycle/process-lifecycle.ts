@@ -51,6 +51,11 @@ export class ChildProcessRegistry {
     this.#closeDeadlineMs = closeDeadlineMs;
   }
 
+  /** Number of role-owned process handles awaiting an observed close event. */
+  get activeCount(): number {
+    return this.#active.size;
+  }
+
   track(child: ManagedChildProcess): TrackedChildProcess {
     let tracked: TrackedChildProcess;
     const closed = new Promise<ProcessExitEvidence>((resolveClose) => {

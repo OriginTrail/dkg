@@ -31,8 +31,10 @@
 
 * [Daemon Lifecycle](use-dkg/run-node.md)
 * [Publish & Query](use-dkg/publish-and-query.md)
+* [Large Content](use-dkg/large-content.md)
 * [Knowledge Asset Lifecycle CLI](use-dkg/knowledge-asset-lifecycle.md)
 * [Async Publisher Wallets](use-dkg/async-publisher-wallets.md)
+* [External Signer](use-dkg/external-signer.md)
 * [OKF Import, Export, and Verify](use-dkg/okf.md)
 * [Funding](use-dkg/funding.md)
 * [Publishing Conviction](use-dkg/publishing-conviction.md)

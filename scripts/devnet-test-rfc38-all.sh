@@ -33,7 +33,7 @@ SCENARIOS=(
   "xcg:devnet-test-rfc38-cross-cg.sh:RFC-38 cross-CG isolation (member of CG-A cannot read CG-B; outsider catchup denied; curator can still decrypt its own CGs)"
   "mm:devnet-test-rfc38-multi-member.sh:RFC-38 multi-member CG (3 distinct member wallets; each verify-batches the same root; outsider cross-verifies all 3 attestations)"
   "scale:devnet-test-rfc38-scale.sh:RFC-38 scale probe (50 triples / 25 KAs in one curated batch; full verify + attestation roundtrip)"
-  "lj:devnet-test-rfc38-late-joiner.sh:RFC-38 late-joiner (member-from-curator + member-from-member-with-curator-offline; documented LU-6 cores-only gap)"
+  "lj:devnet-test-rfc38-late-joiner.sh:RFC-38 late-joiner (curator/member recovery, outage behavior, and no private core custody)"
 )
 
 declare -a RESULTS

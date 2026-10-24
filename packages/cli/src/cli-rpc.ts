@@ -1,6 +1,7 @@
 import { ethers } from 'ethers';
 import {
   resolveRpcUrls,
+  hostOnlyRpcText,
   isRetryableRpcError,
   isKnownTransactionError,
   noteRpcFailover,
@@ -128,7 +129,7 @@ async function sendCliRawTransactionWithFailover(
     // all-endpoints-exhausted failure from a deterministic revert.
     throw new ChainRpcTransportError(
       'RPC_ENDPOINTS_EXHAUSTED',
-      `Broadcast failed on all configured RPC endpoints: ${cliErrorMessage(lastError)}`,
+      `Broadcast failed on all configured RPC endpoints: ${hostOnlyRpcText(cliErrorMessage(lastError))}`,
       { cause: lastError, rpcUrls },
     );
   }

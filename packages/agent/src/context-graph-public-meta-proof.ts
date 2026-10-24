@@ -9,6 +9,11 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { stripLiteral } from './dkg-agent-utils.js';
+import {
+  hasActiveApprovedMemberDelegation,
+  renderApprovedMemberProofSparql,
+  type ApprovedMemberProof,
+} from './context-graph-member-proof.js';
 
 type PublicMetaObjectRequirement =
   | { kind: 'iri'; value: string }
@@ -125,6 +130,23 @@ export function hasAuthoritativePublicMetaDefinition(
   return inspection.missing.length === 0 && !inspection.conflictingPolicy;
 }
 
+/**
+ * The post-approval contract of a PUBLIC graph: its unambiguous public
+ * definition plus the same approved-member proof a private definition must
+ * carry. A join can be approved on a public graph, whose allowlist governs
+ * publishing rather than reads (#2827). This checks the snapshot only; the
+ * caller must separately hold authenticated evidence that the graph is public,
+ * so a peer cannot downgrade a private graph by serving a public definition.
+ */
+export function hasAuthoritativePublicMetaDefinitionForApprovedMember(
+  contextGraphId: string,
+  quads: readonly Quad[],
+  memberProof: ApprovedMemberProof,
+): boolean {
+  return hasAuthoritativePublicMetaDefinition(contextGraphId, quads)
+    && hasActiveApprovedMemberDelegation(contextGraphId, quads, memberProof);
+}
+
 function renderRequirement(
   contextGraphUri: string,
   requirement: PublicMetaRequirement,
@@ -159,18 +181,28 @@ function renderConflictingPublicPolicyPattern(contextGraphUri: string): string {
 }
 
 /** Build the store-side ASK query from the canonical public proof model. */
-export function buildAuthoritativePublicMetaAskQuery(contextGraphId: string): string {
+export function buildAuthoritativePublicMetaAskQuery(
+  contextGraphId: string,
+  memberProof?: ApprovedMemberProof,
+): string {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
   const requirements = AUTHORITATIVE_PUBLIC_META_REQUIREMENTS
     .map((requirement) => `      ${renderRequirement(contextGraphUri, requirement)}`)
     .join('\n');
-  return `ASK WHERE {
+  // With a member proof this is the stored form of the post-approval contract
+  // (hasAuthoritativePublicMetaDefinitionForApprovedMember), rendered from the
+  // same member model as the private ASK.
+  const memberRequirements = memberProof
+    ? `\n${renderApprovedMemberProofSparql(contextGraphId, contextGraphUri, memberProof)}`
+    : '';
+  const prefix = memberProof ? 'PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n  ' : '';
+  return `${prefix}ASK WHERE {
     GRAPH <${assertSafeIri(metaGraph)}> {
 ${requirements}
       FILTER NOT EXISTS {
 ${renderConflictingPublicPolicyPattern(contextGraphUri)}
-      }
+      }${memberRequirements}
     }
   }`;
 }

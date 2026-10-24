@@ -9,10 +9,15 @@ import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 
 import {
+  NODE_SQLITE_INSTALL_GUARD,
+  SUBCOMMAND_CHILD_COMMANDS,
   buildInfoPayload,
   discoverPublishablePackages,
+  findNodeSqliteEngineViolations,
+  findNodeSqliteInstallGuardViolations,
   findMissingCliPackAssets,
   findReleaseVersionMismatches,
+  verifyPack,
   verifyReleaseTag,
   writeBuildInfo,
 } from '../../release-packages.mjs';
@@ -158,6 +163,50 @@ test('discovers public OriginTrail packages only', () => withFixture((root) => {
     discoverPublishablePackages(root).map((pkg) => pkg.name),
     ['@origintrail-official/dkg', '@origintrail-official/dkg-query'],
   );
+}));
+
+test('requires the declared Node.js range for publishable node:sqlite consumers', () => withFixture((root) => {
+  const queryDir = path.join(root, 'packages/query');
+  fs.mkdirSync(path.join(queryDir, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(queryDir, 'src/index.js'), "import 'node:sqlite';\n");
+  assert.deepEqual(findNodeSqliteEngineViolations(root).map((violation) => violation.name), [
+    '@origintrail-official/dkg-query',
+  ]);
+
+  writePackage(root, 'packages/query', {
+    name: '@origintrail-official/dkg-query',
+    version: '1.2.3',
+    engines: { node: '>=22.13.0 <23.0.0 || >=23.4.0' },
+  });
+  assert.deepEqual(findNodeSqliteEngineViolations(root), []);
+}));
+
+test('requires target-owned install guards for predecessor npm and git updaters', () => withFixture((root) => {
+  assert.deepEqual(
+    findNodeSqliteInstallGuardViolations(root).map((violation) => violation.path),
+    [
+      'package.json',
+      'packages/cli/package.json',
+      'packages/cli/scripts/verify-node-sqlite-runtime.mjs',
+    ],
+  );
+
+  writePackage(root, '.', {
+    name: 'dkg-v10',
+    version: '1.2.3',
+    private: true,
+    scripts: { preinstall: 'node packages/cli/scripts/verify-node-sqlite-runtime.mjs' },
+  });
+  writePackage(root, 'packages/cli', {
+    name: '@origintrail-official/dkg',
+    version: '1.2.3',
+    scripts: { preinstall: 'node ./scripts/verify-node-sqlite-runtime.mjs' },
+  });
+  const guardPath = path.join(root, 'packages/cli/scripts/verify-node-sqlite-runtime.mjs');
+  fs.mkdirSync(path.dirname(guardPath), { recursive: true });
+  fs.writeFileSync(guardPath, '#!/usr/bin/env node\n');
+
+  assert.deepEqual(findNodeSqliteInstallGuardViolations(root), []);
 }));
 
 test('finds every release package version mismatch, including private packages and the root', () => withFixture((root) => {
@@ -346,6 +395,7 @@ test('flags a cli tarball missing required runtime assets (the 10.0.4 drop)', ()
       'network/mainnet-base.json',
       'network/testnet.json',
       'project.json',
+      'scripts/verify-node-sqlite-runtime.mjs',
     ],
   );
 }));
@@ -355,6 +405,7 @@ test('passes when the cli tarball includes every required runtime asset', () => 
   // npm reports Windows paths with backslashes — the check must normalize them.
   const packReport = () => JSON.stringify([{ files: [
     { path: 'project.json' },
+    { path: 'scripts/verify-node-sqlite-runtime.mjs' },
     { path: 'blazegraph-image.json' },
     { path: 'blazegraph-image-metadata.cjs' },
     { path: 'blazegraph-namespace-contract.cjs' },
@@ -435,7 +486,18 @@ test('copyCliRuntimeAssets fails loudly when a source asset is missing', () => w
 }));
 
 test('packages/cli lifecycle is wired to the copy script (build + prepack)', () => {
+  const rootPkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
   const cliPkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'packages', 'cli', 'package.json'), 'utf8'));
+  assert.equal(
+    rootPkg.scripts.preinstall,
+    'node packages/cli/scripts/verify-node-sqlite-runtime.mjs',
+    'git-slot installs must run the target-owned node:sqlite guard',
+  );
+  assert.equal(
+    cliPkg.scripts.preinstall,
+    'node ./scripts/verify-node-sqlite-runtime.mjs',
+    'published CLI installs must run the target-owned node:sqlite guard',
+  );
   assert.match(cliPkg.scripts.prepack ?? '', /copy-cli-runtime-assets\.mjs/, 'prepack must run the copy script');
   assert.match(cliPkg.scripts.build ?? '', /build:prepared/, 'build must run the prepared CLI phase');
   assert.match(
@@ -466,7 +528,11 @@ test('the manifest distinguishes copied assets from complete pack requirements',
   ]);
   assert.ok(copiedRuntimeAssets.every((asset) => requiredPackAssets.includes(asset)));
   const spyReport = () => JSON.stringify([{
-    files: [...requiredPackAssets, 'build-info.json'].map((p) => ({ path: p })),
+    files: [
+      ...requiredPackAssets,
+      'build-info.json',
+      'scripts/verify-node-sqlite-runtime.mjs',
+    ].map((p) => ({ path: p })),
   }]);
   assert.deepEqual(findMissingCliPackAssets(root, spyReport), []);
 }));
@@ -657,6 +723,77 @@ test('findMissingCliPackAssets runs npm pack in the cli package dir (correct cwd
   };
   findMissingCliPackAssets(root, spyRunner);
   assert.equal(seenCwd, path.join(root, 'packages', 'cli'));
+}));
+
+// The install guards verify-pack checks first: both preinstall hooks and the
+// CLI's guard script.
+function writeInstallGuards(root) {
+  writePackage(root, '.', { name: 'dkg-v10', version: '1.2.3', private: true, scripts: { preinstall: NODE_SQLITE_INSTALL_GUARD.rootCommand } });
+  writePackage(root, 'packages/cli', { name: '@origintrail-official/dkg', version: '1.2.3', scripts: { preinstall: NODE_SQLITE_INSTALL_GUARD.cliCommand } });
+  const guard = path.join(root, 'packages', 'cli', ...NODE_SQLITE_INSTALL_GUARD.cliAsset.split('/'));
+  fs.mkdirSync(path.dirname(guard), { recursive: true });
+  fs.writeFileSync(guard, '');
+}
+
+// A publishable package that imports node:sqlite without the supported
+// engines range, which verify-pack checks second.
+function writeUndeclaredNodeSqliteConsumer(root) {
+  fs.mkdirSync(path.join(root, 'packages', 'query', 'src'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'packages', 'query', 'src', 'index.js'), "import 'node:sqlite';\n");
+}
+
+const refusePack = () => {
+  throw new Error('verify-pack ran the pack after a failed check');
+};
+
+test('verify-pack stops at a missing install guard, before the engines check and the pack', () => withFixture((root) => {
+  // The engines range is wrong too: the install guards are checked first, so
+  // only their violations are returned, and nothing is packed.
+  writeCliPackFixture(root);
+  writeUndeclaredNodeSqliteConsumer(root);
+  assert.equal(findNodeSqliteEngineViolations(root).length, 1);
+  assert.deepEqual(verifyPack({ rootDir: root, runner: refusePack }), {
+    installGuardViolations: findNodeSqliteInstallGuardViolations(root),
+    runtimeViolations: [],
+    missing: [],
+  });
+  assert.deepEqual(findNodeSqliteInstallGuardViolations(root).map(({ path: file }) => file), [
+    'package.json',
+    'packages/cli/package.json',
+    'packages/cli/scripts/verify-node-sqlite-runtime.mjs',
+  ]);
+}));
+
+test('verify-pack stops at a wrong node:sqlite engines range, before the pack', () => withFixture((root) => {
+  writeCliPackFixture(root);
+  writeInstallGuards(root);
+  writeUndeclaredNodeSqliteConsumer(root);
+  const { installGuardViolations, runtimeViolations, missing } = verifyPack({ rootDir: root, runner: refusePack });
+  assert.deepEqual(installGuardViolations, []);
+  assert.deepEqual(runtimeViolations.map(({ name, actual }) => [name, actual]), [['@origintrail-official/dkg-query', undefined]]);
+  assert.deepEqual(missing, []);
+}));
+
+test('verify-pack runs exactly the child commands it declares to the CI routing guard', () => withFixture((root) => {
+  // SUBCOMMAND_CHILD_COMMANDS is what the routing guard's execution graph
+  // reads for `release-packages.mjs verify-pack` (its route to the CLI's
+  // prepack), so the subcommand must run those commands and no others. The
+  // fixture passes the install-guard and engine checks so the pack runs.
+  writeCliPackFixture(root);
+  writeInstallGuards(root);
+  const observed = [];
+  const runner = (command, args, { cwd }) => {
+    observed.push({ command, args, cwd: path.relative(root, cwd).split(path.sep).join('/') });
+    return JSON.stringify([{ files: [] }]);
+  };
+  const { installGuardViolations, runtimeViolations, missing } = verifyPack({ rootDir: root, runner });
+  assert.deepEqual([installGuardViolations, runtimeViolations], [[], []]);
+  assert.ok(missing.length > 0, 'the check reads the pack report');
+  // The pack must stay a dry run in the CLI package: pinned here on its own,
+  // so a change to the declaration cannot move both sides of the check.
+  const pack = { command: 'npm', args: ['pack', '--dry-run', '--json'], cwd: 'packages/cli' };
+  assert.deepEqual(observed, [pack]);
+  assert.deepEqual(SUBCOMMAND_CHILD_COMMANDS['verify-pack'].map(({ command, args, cwd }) => ({ command, args: [...args], cwd })), [pack]);
 }));
 
 // The integration test the mocked-runner unit tests can't give: run the REAL

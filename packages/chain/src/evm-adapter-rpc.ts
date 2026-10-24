@@ -16,6 +16,10 @@ import {
   errorStatus,
 } from './evm-adapter-errors.js';
 import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
+import { RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS } from './evm-adapter-constants.js';
+import { ContextGraphAuthorityIndexBootstrapUnavailableError } from
+  './context-graph-authority-index-snapshot.js';
+import { EvmLogRangeUnavailableError } from './evm-log-range.js';
 export { boundedRetryFetchRequest } from './rpc-request-transport.js';
 
 /**
@@ -45,6 +49,22 @@ export { boundedRetryFetchRequest } from './rpc-request-transport.js';
  */
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Retry a signer-free broadcast pass after transient exhaustion of its endpoint set. */
+export async function retryBroadcastEndpointSet(broadcast: () => Promise<void>): Promise<void> {
+  for (let pass = 0; ; pass += 1) {
+    try {
+      await broadcast();
+      return;
+    } catch (err) {
+      if (errorCode(err) === 'RPC_ENDPOINTS_EXHAUSTED' && pass < RPC_ENDPOINT_SET_RETRIES) {
+        await sleep(RPC_ENDPOINT_SET_RETRY_BACKOFF_MS);
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
@@ -112,6 +132,13 @@ export type RpcRetryDisposition = 'fail' | 'retry-later' | 'failover';
  * another endpoint attempt in the same process cannot help them.
  */
 export function classifyRpcRetryDisposition(err: unknown): RpcRetryDisposition {
+  // A failed trusted-core walk belongs to the bootstrap transport. Another RPC
+  // endpoint must not multiply its complete peer/deadline/CAS budget.
+  if (err instanceof ContextGraphAuthorityIndexBootstrapUnavailableError) return 'retry-later';
+  // One provider cannot serve this eth_getLogs range (history, archive or plan
+  // limit, or a span cap too small for the request budget). Another endpoint
+  // may: this must fail over whatever the provider's own error code was.
+  if (err instanceof EvmLogRangeUnavailableError) return 'failover';
   if (err instanceof Error) enrichEvmError(err);
   const code = errorCode(err);
   const status = errorStatus(err);
@@ -194,6 +221,48 @@ export function assertSuccessfulReceipt(receipt: ethers.TransactionReceipt, labe
     },
   );
   throw err;
+}
+
+/**
+ * Rejection handler for the receipt wait of a transaction this process signed.
+ * A receipt carries neither the gas limit nor revert data, so a transaction
+ * that ran out of gas reads like any other mined revert. When the failed
+ * transaction left at most 1/32 of the limit it was signed with unused, append
+ * both numbers to the message.
+ *
+ * A call hands the contract it calls at most 63/64 of its remaining gas. A
+ * callee that runs out therefore leaves its caller 1/64 of what the caller
+ * had, and the caller reverts with that much unused. The writes seen running
+ * out did so two calls below the transaction's own frame, so two callers each
+ * kept 1/64: at most 1/32 of the limit together. A transaction that runs out
+ * in its own frame uses the whole limit.
+ *
+ * All 557 challenge creations that failed in 24 days of one test network's
+ * history used 97.91% to 100% of their limit. A 99% test saw 158 of them and
+ * 63/64 would see 547. An ordinary revert stops where its check fails and
+ * hands back the rest, which is most of a limit that carries headroom. Only a
+ * write sent on its bare estimate that reverts in its last steps comes this
+ * close. Not recognised: a callee three or more calls deep that runs out
+ * early in the transaction, which leaves up to 1/64 per level.
+ *
+ * Every error, changed or not, is rethrown as the same object.
+ */
+export function explainOutOfGasRevert(signedTx: string): (err: unknown) => never {
+  return (err) => {
+    const receipt = (err as { receipt?: { status?: unknown; gasUsed?: unknown } } | null)?.receipt;
+    if (err instanceof Error && receipt?.status === 0 && typeof receipt.gasUsed === 'bigint') {
+      let gasLimit = 0n;
+      try {
+        gasLimit = ethers.Transaction.from(signedTx).gasLimit;
+      } catch {
+        // Not a decodable signed transaction: leave the error as it is.
+      }
+      if (gasLimit > 0n && receipt.gasUsed * 32n >= gasLimit * 31n) {
+        err.message += `; it used ${receipt.gasUsed} of its ${gasLimit} gas limit, so it probably ran out of gas`;
+      }
+    }
+    throw err;
+  };
 }
 
 export function isKnownTransactionError(err: unknown): boolean {

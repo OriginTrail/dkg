@@ -27,6 +27,8 @@ export interface SelectSwmCatchupPeersInput {
   candidatePeers: readonly string[];
   unsupportedPeers?: ReadonlySet<string>;
   privateCuratorPeerIds?: readonly string[];
+  /** The graph owner's peers: asked whenever they are candidates, whatever they answered before. */
+  ownerPeerIds?: readonly string[];
   now?: number;
   fallbackProbeLimit?: number;
 }
@@ -44,6 +46,8 @@ export class SwmCatchupPeerSelector {
   private readonly negativeTtlMs: number;
   private readonly fallbackProbeLimit: number;
   private readonly maxEntries: number;
+  /** Turns through the peers not known yet, one per selection that has known-good peers. */
+  private unknownTurn = 0;
 
   constructor(options: SwmCatchupPeerSelectorOptions = {}) {
     this.goodTtlMs = options.goodTtlMs ?? SWM_CATCHUP_PEER_GOOD_TTL_MS;
@@ -100,24 +104,37 @@ export class SwmCatchupPeerSelector {
       protocolCandidates.push(peerId);
     }
 
+    // The owner holds every member's writes (#3421): it is asked whenever it
+    // can be, whatever it answered before, and the rest are chosen beside it.
+    const ownerIds = new Set(input.ownerPeerIds ?? []);
+    const owners: string[] = [];
+    let goodOwner = false;
     const knownGood: string[] = [];
     const unknown: string[] = [];
     const negative: string[] = [];
     for (const peerId of protocolCandidates) {
       const outcome = this.get(input.contextGraphId, peerId, now);
-      if (outcome === 'good') knownGood.push(peerId);
+      if (ownerIds.has(peerId)) {
+        owners.push(peerId);
+        goodOwner ||= outcome === 'good';
+      } else if (outcome === 'good') knownGood.push(peerId);
       else if (outcome) negative.push(peerId);
       else unknown.push(peerId);
     }
 
     let selectedPeers: string[];
-    if (knownGood.length > 0) {
-      selectedPeers = knownGood;
+    if (knownGood.length > 0 || goodOwner) {
+      // A peer that served data once may have fallen behind since (#3421):
+      // one peer not known yet is asked as well, another one each time.
+      selectedPeers = unknown.length > 0
+        ? [...knownGood, unknown[this.unknownTurn++ % unknown.length]!]
+        : knownGood;
     } else if (unknown.length > 0) {
       selectedPeers = unknown.slice(0, Math.max(0, fallbackProbeLimit));
     } else {
       selectedPeers = negative.slice(0, Math.max(0, fallbackProbeLimit));
     }
+    selectedPeers = [...owners, ...selectedPeers];
 
     const selected = new Set(selectedPeers);
     return {
@@ -143,8 +160,31 @@ export function createSwmCatchupPeerSelector(options?: SwmCatchupPeerSelectorOpt
   return new SwmCatchupPeerSelector(options);
 }
 
+/** What {@link swmCatchupOwnerPeerIds} reads of the agent. */
+export interface SwmCatchupOwnerLookup {
+  resolveCuratorPeerIdsForCg(
+    contextGraphId: string,
+    options: { maxPeerIds: number },
+  ): Promise<{ readonly curatorIsLocal: boolean; readonly peerIds: readonly string[] }>;
+}
+
+/**
+ * The peers of the graph's owner, which a catch-up always asks (#3421): none
+ * when this node owns the graph or the owner cannot be looked up. Never throws.
+ */
+export async function swmCatchupOwnerPeerIds(agent: SwmCatchupOwnerLookup, contextGraphId: string): Promise<string[]> {
+  try {
+    const resolved = await agent.resolveCuratorPeerIdsForCg(contextGraphId, { maxPeerIds: 16 });
+    return resolved.curatorIsLocal ? [] : [...resolved.peerIds];
+  } catch {
+    return [];
+  }
+}
+
 interface SwmCatchupPeerTelemetry {
   insertedTriples?: number;
+  /** New data triples stored; producers that report only the total leave it out. */
+  insertedDataTriples?: number;
   fetchedDataTriples?: number;
   fetchedMetaTriples?: number;
   deniedPhases?: number;
@@ -170,9 +210,7 @@ export function classifySwmCatchupPeerOutcome(
 export function classifySwmCatchupPeerOutcome(
   input: SwmCatchupPeerOutcomeInput,
 ): SwmCatchupPeerOutcome | undefined {
-  if ((input.insertedTriples ?? 0) > 0 || (input.fetchedDataTriples ?? 0) > 0 || (input.fetchedMetaTriples ?? 0) > 0) {
-    return 'good';
-  }
+  if (servedData(input)) return 'good';
   if ((input.deniedPhases ?? 0) > 0 || isDeniedMessage(input.errorMessage)) {
     return 'denied';
   }
@@ -199,6 +237,21 @@ export function classifySwmCatchupPeerOutcome(
   if (failedPhases > localYieldFailedPhases) return 'transportFailed';
   if (input.localYield) return undefined;
   return 'empty';
+}
+
+/**
+ * The peer served data: it stored new data here, or sent some. Metadata
+ * alone does not count (#3421): a peer that held a graph's metadata and not
+ * its newest data answered every catch-up with it, was taken for a good
+ * source, and was the only peer asked for ten minutes. A producer that
+ * reports only a total keeps the old reading of it.
+ */
+function servedData(input: SwmCatchupPeerTelemetry): boolean {
+  if ((input.insertedDataTriples ?? 0) > 0 || (input.fetchedDataTriples ?? 0) > 0) return true;
+  return input.insertedDataTriples === undefined
+    && input.fetchedDataTriples === undefined
+    && input.fetchedMetaTriples === undefined
+    && (input.insertedTriples ?? 0) > 0;
 }
 
 function cacheKey(contextGraphId: string, peerId: string): string {
