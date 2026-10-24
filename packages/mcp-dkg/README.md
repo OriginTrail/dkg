@@ -321,3 +321,7 @@ Per-turn state is kept in `~/.cache/dkg-mcp/sessions/*.json`; safe to delete at 
 ## Historical recovery
 
 Ten V9-era and coding-project tools were dropped from the V10 surface during consolidation. The annotated git tag `pre-v10-tool-drop` preserves them — recover any individual handler with `git show pre-v10-tool-drop:packages/mcp-dkg/src/tools/<file>`. Design rationale and reintroduction-pointers for each drop are in [`agent-docs/dkg-v10-mcp-consolidation/v9-design-archive.md`](../../agent-docs/dkg-v10-mcp-consolidation/v9-design-archive.md).
+
+### Large tool responses
+
+The stdio server limits each serialized JSON-RPC response to 8 MiB, below the MCP SDK client's default 10 MiB receive buffer. JSON escaping can make an artifact response larger than its original file. An oversized result returns an error without closing the session: retry artifact reads with a smaller `maxBytes`, or narrow/paginate a query. The daemon's 5 MiB artifact-read maximum is a source-byte limit, not a guarantee that the fully formatted result fits over MCP.
