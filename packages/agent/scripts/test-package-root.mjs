@@ -248,7 +248,7 @@ if (typeof publicCatalogActivation.resolveRfc64PublicCatalogControlsV1 !== 'func
 if (
   typeof inventoryRollback.planRfc64InventoryRollbackV1 !== 'function'
   || typeof inventoryRollback.prepareRfc64InventoryForRollbackV1 !== 'function'
-  || inventoryRollback.rfc64InventoryUserVersionForReleaseV1('10.0.25') !== 5
+  || !inventoryRollback.INVENTORY_SCHEMA_FIRST_RELEASES_V1?.length
 ) {
   throw new Error('RFC-64 inventory rollback subpath did not expose its rollback preparation');
 }

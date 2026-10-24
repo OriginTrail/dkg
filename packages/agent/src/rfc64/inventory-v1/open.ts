@@ -1,5 +1,5 @@
 import { INVENTORY_SCHEMA_MIGRATIONS_V1, type InventorySchemaMigrationV1 } from './schema-migrations.js';
-import { keepInventoryV1PreMigrationCopy } from './pre-migration-copy.js';
+import { finishInventoryV1PreMigrationCopy, keepInventoryV1PreMigrationCopy } from './pre-migration-copy.js';
 import { InventoryV1OpenError } from './open-error.js';
 export { InventoryV1OpenError, type InventoryV1OpenErrorCode } from './open-error.js';
 import type { Rfc64SwmAuthorInventoryOperationsV1 } from './swm-author-inventory-contracts.js';
@@ -1267,7 +1267,7 @@ function migrateInventorySchemaToCurrent(
   keepInventoryV1PreMigrationCopy(database, databasePath);
   while (true) {
     const identity = readIdentity(database);
-    if (identity.userVersion === INVENTORY_V1_USER_VERSION) return;
+    if (identity.userVersion === INVENTORY_V1_USER_VERSION) return finishInventoryV1PreMigrationCopy(databasePath);
     const migration = INVENTORY_SCHEMA_MIGRATIONS_V1.find(
       (candidate) => candidate.fromVersion === identity.userVersion,
     );

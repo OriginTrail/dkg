@@ -26,16 +26,17 @@ import {
   type SqliteModuleV1,
 } from './open.js';
 import { InventoryV1OpenError } from './open-error.js';
-import { listInventoryV1PreMigrationCopies } from './pre-migration-copy.js';
 import {
-  INVENTORY_SCHEMA_DOWNGRADES_V1,
-  INVENTORY_SCHEMA_FIRST_RELEASES_V1,
-  type InventorySchemaMigrationV1,
-} from './schema-migrations.js';
+  hasExactInventoryV1Objects,
+  INVENTORY_V1_OBJECTS_BY_USER_VERSION,
+  listInventoryV1PreMigrationCopies,
+} from './pre-migration-copy.js';
+import { INVENTORY_SCHEMA_DOWNGRADES_V1, type InventorySchemaMigrationV1 } from './schema-migrations.js';
 import { INVENTORY_V1_APPLICATION_ID, INVENTORY_V1_USER_VERSION } from './sql.js';
 
+export { INVENTORY_SCHEMA_FIRST_RELEASES_V1 } from './schema-migrations.js';
+
 const SQLITE_SIDECAR_SUFFIXES = ['-journal', '-wal', '-shm'] as const;
-const RELEASE_PATTERN = /^v?(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 /** What `prepareRfc64InventoryForRollbackV1` did to the inventory database. */
 export type Rfc64InventoryRollbackOutcomeV1 =
@@ -82,43 +83,6 @@ export interface Rfc64InventoryRollbackPreparationV1 {
   release(): void;
 }
 
-interface ParsedReleaseV1 {
-  readonly numbers: readonly [number, number, number];
-  readonly prerelease: boolean;
-}
-
-function parseRelease(release: string): ParsedReleaseV1 | null {
-  const match = RELEASE_PATTERN.exec(release.trim());
-  if (match === null) return null;
-  return {
-    numbers: [Number(match[1]), Number(match[2]), Number(match[3])],
-    prerelease: match[4] !== undefined,
-  };
-}
-
-function compareReleases(left: ParsedReleaseV1, right: ParsedReleaseV1): number {
-  for (let index = 0; index < 3; index += 1) {
-    const difference = left.numbers[index]! - right.numbers[index]!;
-    if (difference !== 0) return difference;
-  }
-  return Number(right.prerelease) - Number(left.prerelease);
-}
-
-/**
- * The newest inventory schema `release` opens: 0 for releases before the
- * inventory, null when the version cannot be read. A prerelease counts as
- * older than its release.
- */
-export function rfc64InventoryUserVersionForReleaseV1(release: string): number | null {
-  const target = parseRelease(release);
-  if (target === null) return null;
-  let userVersion = 0;
-  for (const entry of INVENTORY_SCHEMA_FIRST_RELEASES_V1) {
-    if (compareReleases(target, parseRelease(entry.release)!) >= 0) userVersion = entry.userVersion;
-  }
-  return userVersion;
-}
-
 function downgradeChain(fromVersion: number, maxUserVersion: number): InventorySchemaMigrationV1[] | null {
   const chain: InventorySchemaMigrationV1[] = [];
   let userVersion = fromVersion;
@@ -146,19 +110,37 @@ interface PreMigrationCopyV1 {
   readonly userVersion: number;
 }
 
-function findPreMigrationCopy(databasePath: string, maxUserVersion: number): PreMigrationCopyV1 | null {
-  const candidates = listInventoryV1PreMigrationCopies(databasePath)
+/** Copies whose name, owner and header fit a target that opens `maxUserVersion`, newest schema first. */
+function preMigrationCopyCandidates(databasePath: string, maxUserVersion: number): PreMigrationCopyV1[] {
+  return listInventoryV1PreMigrationCopies(databasePath)
     .filter((copy) => copy.fromVersion <= maxUserVersion)
-    .sort((left, right) => right.fromVersion - left.fromVersion);
-  for (const { path, fromVersion } of candidates) {
-    assertOwnedRegularFile(path, 'inventory pre-migration copy');
-    if (SQLITE_SIDECAR_SUFFIXES.some((suffix) => pathEntryExists(`${path}${suffix}`))) continue;
-    const header = readValidSqliteHeaderIdentity(path);
-    if (header?.applicationId === INVENTORY_V1_APPLICATION_ID && header.userVersion === fromVersion) {
-      return { path, userVersion: fromVersion };
-    }
+    .sort((left, right) => right.fromVersion - left.fromVersion)
+    .flatMap(({ path, fromVersion }) => {
+      assertOwnedRegularFile(path, 'inventory pre-migration copy');
+      if (SQLITE_SIDECAR_SUFFIXES.some((suffix) => pathEntryExists(`${path}${suffix}`))) return [];
+      const header = readValidSqliteHeaderIdentity(path);
+      // Copies are rollback-journal databases, which a read-only check leaves as they are.
+      return header?.applicationId === INVENTORY_V1_APPLICATION_ID && header.userVersion === fromVersion
+        && header.writeVersion === 1 && header.readVersion === 1 ? [{ path, userVersion: fromVersion }] : [];
+    });
+}
+
+/** The copy passes SQLite's quick check and holds exactly its schema, with intact foreign keys. */
+function isRestorableCopy(sqlite: SqliteModuleV1, copy: PreMigrationCopyV1): boolean {
+  const expected = INVENTORY_V1_OBJECTS_BY_USER_VERSION.get(copy.userVersion);
+  let database: DatabaseSyncV1 | null = null;
+  try {
+    database = new sqlite.DatabaseSync(copy.path, { readOnly: true });
+    const quickCheck = database.prepare('PRAGMA quick_check').all();
+    return expected !== undefined
+      && quickCheck.length === 1 && Object.values(quickCheck[0]!)[0] === 'ok'
+      && hasExactInventoryV1Objects(database, expected)
+      && database.prepare('PRAGMA foreign_key_check').all().length === 0;
+  } catch {
+    return false;
+  } finally {
+    database?.close();
   }
-  return null;
 }
 
 function unrecognizedSchema(
@@ -173,7 +155,7 @@ function unrecognizedSchema(
     userVersion,
     maxUserVersion,
     `RFC-64 inventory database ${databasePath} has ${schema}; no exact down-migration and no `
-      + `pre-migration copy brings it to schema v${maxUserVersion} or older`,
+      + `restorable pre-migration copy brings it to schema v${maxUserVersion} or older`,
   );
 }
 
@@ -201,7 +183,7 @@ export function planRfc64InventoryRollbackV1(
     if (downgradeChain(userVersion, maxUserVersion) !== null) {
       return { action: 'downgrade', databasePath, userVersion };
     }
-    if (findPreMigrationCopy(databasePath, maxUserVersion) !== null) {
+    if (preMigrationCopyCandidates(databasePath, maxUserVersion).length !== 0) {
       return { action: 'restore', databasePath, userVersion };
     }
     throw unrecognizedSchema(databasePath, userVersion, maxUserVersion);
@@ -432,8 +414,9 @@ export async function prepareRfc64InventoryForRollbackV1(
     if (chain !== null && downgradeExactSchema(sqlite, databasePath, chain)) {
       return prepared('downgraded', chain[chain.length - 1]!.toVersion);
     }
-    const copy = findPreMigrationCopy(databasePath, maxUserVersion);
-    if (copy === null) throw unrecognizedSchema(databasePath, userVersion, maxUserVersion);
+    const copy = preMigrationCopyCandidates(databasePath, maxUserVersion)
+      .find((candidate) => isRestorableCopy(sqlite, candidate));
+    if (copy === undefined) throw unrecognizedSchema(databasePath, userVersion, maxUserVersion);
     const keptPath = restorePreMigrationCopy(databasePath, userVersion, copy);
     return prepared('restored', copy.userVersion, keptPath);
   } catch (cause) {

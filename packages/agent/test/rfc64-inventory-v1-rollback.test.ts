@@ -41,7 +41,6 @@ import {
 import {
   planRfc64InventoryRollbackV1,
   prepareRfc64InventoryForRollbackV1,
-  rfc64InventoryUserVersionForReleaseV1,
   RFC64_INVENTORY_ROLLBACK_FLOOR_USER_VERSION_V1,
   Rfc64InventoryRollbackRefusedErrorV1,
 } from '../src/rfc64/inventory-v1/rollback.js';
@@ -111,8 +110,12 @@ function databasePath(dataDir: string): string {
   return join(dataDir, 'rfc64-sync', 'inventory-v1.sqlite3');
 }
 
-function copyPath(dataDir: string, fromVersion: number, toVersion = INVENTORY_V1_USER_VERSION): string {
-  return join(dataDir, 'rfc64-sync', `inventory-v1.schema-v${fromVersion}-to-v${toVersion}.pre-migration.sqlite3`);
+function copyPath(dataDir: string, fromVersion: number, toVersion = INVENTORY_V1_USER_VERSION, pending = false): string {
+  return join(
+    dataDir,
+    'rfc64-sync',
+    `inventory-v1.schema-v${fromVersion}-to-v${toVersion}.pre-migration${pending ? '.pending' : ''}.sqlite3`,
+  );
 }
 
 function inventoryEntries(dataDir: string): string[] {
@@ -275,16 +278,16 @@ describe('RFC-64 inventory pre-migration copy', () => {
       'inventory-v1.schema-v5-to-v6.pre-migration.sqlite3',
     ]);
     expect(headerUserVersion(copy)).toBe(5);
+    // A rollback-journal database, which a read-only check leaves as it is.
+    expect([...fs.readFileSync(copy).subarray(18, 20)]).toEqual([1, 1]);
     expectOpensAsV5(copy);
     expect(repairCount(copy)).toBe(1);
     if (process.platform !== 'win32') expect(fs.statSync(copy).mode & 0o777).toBe(0o600);
     expect(headerUserVersion(databasePath(dataDir))).toBe(INVENTORY_V1_USER_VERSION);
 
-    const kept = sha256(copy);
-    vi.mocked(fs.copyFileSync).mockClear();
+    const kept = { inode: fs.statSync(copy).ino, digest: sha256(copy) };
     close(await open(dataDir));
-    expect(fs.copyFileSync).not.toHaveBeenCalled();
-    expect(sha256(copy)).toBe(kept);
+    expect({ inode: fs.statSync(copy).ino, digest: sha256(copy) }).toEqual(kept);
   });
 
   it('replaces the copies of earlier migrations, so each store keeps one', async () => {
@@ -294,7 +297,7 @@ describe('RFC-64 inventory pre-migration copy', () => {
     const directory = join(dataDir, 'rfc64-sync');
     // A copy from an earlier, finished migration and a torn temporary file.
     fs.writeFileSync(join(directory, 'inventory-v1.schema-v4-to-v5.pre-migration.sqlite3'), 'older copy');
-    fs.writeFileSync(join(directory, 'inventory-v1.schema-v5-to-v6.pre-migration.sqlite3.tmp-0123456789abcdef'), 'torn');
+    fs.writeFileSync(join(directory, 'inventory-v1.schema-v5-to-v6.pre-migration.pending.sqlite3.tmp-0123456789abcdef'), 'torn');
 
     const foundation = await open(dataDir);
     foundation.putFinalizedPrivatePlacementRepair(laterRepair);
@@ -317,18 +320,18 @@ describe('RFC-64 inventory pre-migration copy', () => {
       'PRAGMA user_version = 4',
     ]);
     // An earlier start kept the v4 copy and committed v4 to v5, then stopped.
-    fs.copyFileSync(databasePath(dataDir), copyPath(dataDir, 4));
     const interrupted = new DatabaseSync(databasePath(dataDir));
+    interrupted.exec(`VACUUM INTO '${copyPath(dataDir, 4, INVENTORY_V1_USER_VERSION, true).replaceAll("'", "''")}'`);
     interrupted.exec(INVENTORY_V1_MIGRATE_V4_TO_V5_SQL);
     interrupted.close();
-    vi.mocked(fs.copyFileSync).mockClear();
 
     close(await open(dataDir));
 
-    expect(fs.copyFileSync).not.toHaveBeenCalled();
+    // The migration completed, so its first copy is kept and no longer pending.
     expect(inventoryEntries(dataDir).filter((name) => name.includes('.pre-migration.'))).toEqual([
       'inventory-v1.schema-v4-to-v6.pre-migration.sqlite3',
     ]);
+    expect(headerUserVersion(copyPath(dataDir, 4))).toBe(4);
     const prepared = await prepareRfc64InventoryForRollbackV1(dataDir, 4);
     prepared.release();
     expect(prepared).toMatchObject({ outcome: 'restored', fromVersion: INVENTORY_V1_USER_VERSION, toVersion: 4 });
@@ -345,7 +348,6 @@ describe('RFC-64 inventory pre-migration copy', () => {
 
     await expect(open(dataDir)).rejects.toBeInstanceOf(InventoryV1OpenError);
 
-    expect(fs.copyFileSync).not.toHaveBeenCalled();
     expect(inventoryEntries(dataDir).filter((name) => name.includes('.pre-migration.'))).toEqual([]);
   });
 
@@ -355,7 +357,6 @@ describe('RFC-64 inventory pre-migration copy', () => {
     close(await open(dataDir));
 
     expect(inventoryEntries(dataDir).filter((name) => name.includes('.pre-migration.'))).toEqual([]);
-    expect(fs.copyFileSync).not.toHaveBeenCalled();
   });
 
   it('refuses to migrate, leaving the v5 database as it was, when the volume lacks room for the copy', async () => {
@@ -368,7 +369,7 @@ describe('RFC-64 inventory pre-migration copy', () => {
     await expect(open(dataDir)).rejects.toSatisfy((error: unknown) =>
       error instanceof InventoryV1OpenError
       && error.code === 'database-io'
-      && /not enough free disk space to keep inventory-v1\.schema-v5-to-v6\.pre-migration\.sqlite3/.test(error.message));
+      && /not enough free disk space to keep inventory-v1\.schema-v5-to-v6\.pre-migration\.pending\.sqlite3/.test(error.message));
 
     expect(headerUserVersion(databasePath(dataDir))).toBe(5);
     expect(inventoryEntries(dataDir).filter((name) => name.includes('.pre-migration.'))).toEqual([]);
@@ -378,35 +379,46 @@ describe('RFC-64 inventory pre-migration copy', () => {
   it('removes a torn copy and keeps the database at v5 when writing the copy fails', async () => {
     const dataDir = dataDirectory();
     await writeV5(dataDir);
-    vi.mocked(fs.copyFileSync).mockImplementationOnce((_source, destination) => {
-      fs.writeFileSync(destination as string, 'torn');
-      throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' });
+    const { renameSync } = await vi.importActual<typeof import('node:fs')>('node:fs');
+    vi.mocked(fs.renameSync).mockImplementation((source, destination) => {
+      if (String(source).includes('.tmp-')) {
+        throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' });
+      }
+      renameSync(source, destination);
     });
 
     await expect(open(dataDir)).rejects.toSatisfy((error: unknown) =>
       error instanceof InventoryV1OpenError
-      && /failed to keep inventory-v1\.schema-v5-to-v6\.pre-migration\.sqlite3/.test(error.message));
+      && /failed to keep inventory-v1\.schema-v5-to-v6\.pre-migration\.pending\.sqlite3/.test(error.message));
+    vi.mocked(fs.renameSync).mockImplementation(renameSync);
 
     expect(headerUserVersion(databasePath(dataDir))).toBe(5);
     expect(inventoryEntries(dataDir).filter((name) => name.includes('.pre-migration.'))).toEqual([]);
   });
 
-  it('does not copy or migrate while another connection reads the database', async () => {
+  it('keeps a fresh copy for an upgrade after a rollback, with the rows written in between', async () => {
     const dataDir = dataDirectory();
-    await writeV5(dataDir);
-    const reader = new DatabaseSync(databasePath(dataDir));
-    holders.push(reader);
-    // A write leaves a frame in the log, so the reader's snapshot pins it.
-    reader.exec('CREATE TABLE rollback_test_scratch (value TEXT); DROP TABLE rollback_test_scratch');
-    reader.exec('BEGIN');
-    reader.prepare('SELECT count(*) AS count FROM rfc64_finalized_private_placement_repairs_v1').get();
+    createRawDatabase(databasePath(dataDir), [
+      `PRAGMA application_id = ${INVENTORY_V1_APPLICATION_ID}`,
+      'PRAGMA journal_mode = WAL',
+      ...Object.values(INVENTORY_V1_V4_USER_OBJECTS),
+      'PRAGMA user_version = 4',
+    ]);
+    close(await open(dataDir));
+    (await prepareRfc64InventoryForRollbackV1(dataDir, 5)).release();
+    // The older release writes a row while the database is at v5.
+    const bytes = encodeRfc64FinalizedPrivatePlacementRepairV1(repair);
+    const older = new DatabaseSync(databasePath(dataDir));
+    older.prepare('INSERT INTO rfc64_finalized_private_placement_repairs_v1 (repair_digest, repair_json) VALUES (?, ?)')
+      .run(digestRfc64FinalizedPrivatePlacementRepairV1(bytes), new TextDecoder().decode(bytes));
+    older.close();
 
-    await expect(open(dataDir)).rejects.toSatisfy((error: unknown) =>
-      error instanceof InventoryV1OpenError && error.code === 'database-busy');
+    close(await open(dataDir));
 
-    expect(fs.copyFileSync).not.toHaveBeenCalled();
-    reader.exec('ROLLBACK');
-    expect(headerUserVersion(databasePath(dataDir))).toBe(5);
+    expect(inventoryEntries(dataDir).filter((name) => name.includes('.pre-migration.'))).toEqual([
+      'inventory-v1.schema-v5-to-v6.pre-migration.sqlite3',
+    ]);
+    expect(repairCount(copyPath(dataDir, 5))).toBe(1);
   });
 });
 
@@ -558,6 +570,22 @@ describe('RFC-64 inventory rollback', () => {
     expect(repairCount(databasePath(dataDir))).toBe(2);
   });
 
+  it('refuses a damaged copy whose header is intact, leaving the database and the copy in place', async () => {
+    const dataDir = dataDirectory();
+    await writeV5(dataDir);
+    close(await open(dataDir));
+    addForeignIndex(databasePath(dataDir));
+    fs.truncateSync(copyPath(dataDir, 5), 100);
+    const before = sha256(databasePath(dataDir));
+    expect(planRfc64InventoryRollbackV1(dataDir, 5).action).toBe('downgrade');
+
+    const refusal = await refusalOf(prepareRfc64InventoryForRollbackV1(dataDir, 5));
+
+    expect(refusal.reason).toBe('unrecognized-schema');
+    expect(sha256(databasePath(dataDir))).toBe(before);
+    expect(fs.statSync(copyPath(dataDir, 5)).size).toBe(100);
+  });
+
   it('restores a copy for a target older than the down-migrations reach', async () => {
     const dataDir = dataDirectory();
     createRawDatabase(databasePath(dataDir), [
@@ -587,7 +615,7 @@ describe('RFC-64 inventory rollback', () => {
     expect(refusal).toMatchObject({ reason: 'unrecognized-schema', userVersion: 6, maxUserVersion: 5 });
     expect(refusal.message).toBe(
       `RFC-64 inventory database ${databasePath(dataDir)} has schema v6; no exact down-migration and no `
-        + 'pre-migration copy brings it to schema v5 or older',
+        + 'restorable pre-migration copy brings it to schema v5 or older',
     );
     expect(sha256(databasePath(dataDir))).toBe(before);
     // The lease was released: a second attempt reaches the same answer.
@@ -677,11 +705,7 @@ describe('RFC-64 inventory rollback', () => {
     expect(headerUserVersion(databasePath(current))).toBe(INVENTORY_V1_USER_VERSION);
   });
 
-  it('maps release versions to the newest schema they open', () => {
-    expect([
-      '10.0.9', '10.0.10', 'v10.0.14', '10.0.16', '10.0.17', '10.0.25', '10.0.26-rc.1',
-      '10.0.26', '10.0.27+build.5', '10.1.0', '11.0.0', 'latest', '10.0',
-    ].map(rfc64InventoryUserVersionForReleaseV1)).toEqual([0, 2, 3, 4, 5, 5, 5, 6, 6, 6, 6, null, null]);
+  it('lowers to v5 at most without losing a row', () => {
     expect(RFC64_INVENTORY_ROLLBACK_FLOOR_USER_VERSION_V1).toBe(5);
   });
 

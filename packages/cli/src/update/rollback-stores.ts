@@ -1,12 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  INVENTORY_SCHEMA_FIRST_RELEASES_V1,
   planRfc64InventoryRollbackV1,
   prepareRfc64InventoryForRollbackV1,
-  rfc64InventoryUserVersionForReleaseV1,
   RFC64_INVENTORY_ROLLBACK_FLOOR_USER_VERSION_V1,
   Rfc64InventoryRollbackRefusedErrorV1,
 } from '@origintrail-official/dkg-agent/rfc64/inventory-v1/rollback';
+import { compareSemver } from './npm-registry.js';
 
 // A store that a newer release migrated must be handed back in a form the
 // rollback target opens, or the target stops at start. Each store whose
@@ -41,8 +42,23 @@ export function readSlotVersion(slotDir: string): string | null {
   return null;
 }
 
+/**
+ * The newest inventory schema `release` opens: 0 for releases before the
+ * inventory, null when the version cannot be read. A prerelease counts as
+ * older than its release, as in update target selection.
+ */
+export function inventoryUserVersionForRelease(release: string): number | null {
+  let userVersion = 0;
+  for (const entry of INVENTORY_SCHEMA_FIRST_RELEASES_V1) {
+    const order = compareSemver(release, entry.release);
+    if (Number.isNaN(order)) return null;
+    if (order >= 0) userVersion = entry.userVersion;
+  }
+  return userVersion;
+}
+
 function inventoryUserVersionFor(targetVersion: string | null): number {
-  const known = targetVersion === null ? null : rfc64InventoryUserVersionForReleaseV1(targetVersion);
+  const known = targetVersion === null ? null : inventoryUserVersionForRelease(targetVersion);
   // A release this build cannot read gets the oldest schema it can write
   // without losing a row, which every release since 10.0.17 opens.
   return known ?? RFC64_INVENTORY_ROLLBACK_FLOOR_USER_VERSION_V1;

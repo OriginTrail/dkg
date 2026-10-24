@@ -74,7 +74,11 @@ vi.mock('@origintrail-official/dkg-agent/rfc64/inventory-v1/rollback', async (im
 
 import { prepareRfc64InventoryForRollbackV1 } from '@origintrail-official/dkg-agent/rfc64/inventory-v1/rollback';
 import { registerMaintenanceCommands } from '../src/commands/maintenance.js';
-import { checkRollbackStores, readSlotVersion } from '../src/update/rollback-stores.js';
+import {
+  checkRollbackStores,
+  inventoryUserVersionForRelease,
+  readSlotVersion,
+} from '../src/update/rollback-stores.js';
 
 class ProcessExit extends Error {
   constructor(readonly code: number | undefined) {
@@ -180,7 +184,7 @@ describe('dkg rollback readies the local stores for the target version', () => {
     expect(wiring.calls).toEqual([]);
     expect(output.error).toEqual([
       `Rollback refused: RFC-64 inventory database ${inventoryPath()} has schema v7; no exact down-migration `
-        + 'and no pre-migration copy brings it to schema v5 or older.',
+        + 'and no restorable pre-migration copy brings it to schema v5 or older.',
       `10.0.25 opens inventory schema v5 at most. To roll back anyway, move ${inventoryPath()} aside first: `
         + '10.0.25 then starts with an empty inventory and syncs its catalog state again, and work recorded '
         + 'only in that database, such as pending private placement repairs, is lost.',
@@ -330,6 +334,13 @@ describe('rollback store helpers', () => {
     expect(readSlotVersion(gitSlot)).toBe('10.0.25');
     expect(readSlotVersion(npmSlot)).toBe('10.0.24');
     expect(readSlotVersion(join(wiring.root, 'empty-slot'))).toBeNull();
+  });
+
+  it('maps release versions to the newest inventory schema they open, as update selection orders them', () => {
+    expect([
+      '10.0.9', '10.0.10', 'v10.0.14', '10.0.16', '10.0.17', '10.0.25', '10.0.26-rc.1',
+      '10.0.26', ' 10.0.27+build.5 ', '10.1.0', '11.0.0', 'latest', '10.0',
+    ].map(inventoryUserVersionForRelease)).toEqual([0, 2, 3, 4, 5, 5, 5, 6, 6, 6, 6, null, null]);
   });
 
   it('plans for the oldest schema it can write when the target version is unknown', async () => {

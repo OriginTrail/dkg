@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import {
   closeSync,
-  constants as fsConstants,
-  copyFileSync,
   fsyncSync,
   openSync,
   readdirSync,
@@ -29,7 +27,19 @@ export const INVENTORY_V1_PRE_MIGRATION_COPY_RESERVE_BYTES = 64 * 1024 * 1024;
 
 const MIB = 1024 * 1024;
 
-function hasExactObjects(database: DatabaseSync, expected: Readonly<Record<string, string>>): boolean {
+/** The exact objects of each schema version a migration starts from or reaches. */
+export const INVENTORY_V1_OBJECTS_BY_USER_VERSION: ReadonlyMap<number, Readonly<Record<string, string>>> = new Map(
+  INVENTORY_SCHEMA_MIGRATIONS_V1.flatMap((migration) => [
+    [migration.fromVersion, migration.fromObjects] as const,
+    [migration.toVersion, migration.toObjects] as const,
+  ]),
+);
+
+/** The database's objects, outside SQLite's own, are exactly `expected`. */
+export function hasExactInventoryV1Objects(
+  database: DatabaseSync,
+  expected: Readonly<Record<string, string>>,
+): boolean {
   const objects = database.prepare(
     `SELECT name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'`,
   ).all() as Array<{ name: string; sql: string | null }>;
@@ -43,14 +53,22 @@ function databaseStem(databasePath: string): string {
 
 function copyNamePattern(databasePath: string, suffix = ''): RegExp {
   const stem = databaseStem(databasePath).replace(/[.]/g, '\\.');
-  return new RegExp(`^${stem}\\.schema-v(\\d+)-to-v(\\d+)\\.pre-migration\\.sqlite3${suffix}$`);
+  return new RegExp(`^${stem}\\.schema-v(\\d+)-to-v(\\d+)\\.pre-migration(\\.pending)?\\.sqlite3${suffix}$`);
 }
 
-/** The copy of the database as it was at `fromVersion`, before a migration to `toVersion` started. */
-export function inventoryV1PreMigrationCopyPath(databasePath: string, fromVersion: number, toVersion: number): string {
+/**
+ * The copy of the database as it was at `fromVersion`, before a migration to
+ * `toVersion` started. It is pending until that migration completes.
+ */
+export function inventoryV1PreMigrationCopyPath(
+  databasePath: string,
+  fromVersion: number,
+  toVersion: number,
+  pending = false,
+): string {
   return join(
     dirname(databasePath),
-    `${databaseStem(databasePath)}.schema-v${fromVersion}-to-v${toVersion}.pre-migration.sqlite3`,
+    `${databaseStem(databasePath)}.schema-v${fromVersion}-to-v${toVersion}.pre-migration${pending ? '.pending' : ''}.sqlite3`,
   );
 }
 
@@ -58,6 +76,7 @@ export interface InventoryV1PreMigrationCopy {
   readonly path: string;
   readonly fromVersion: number;
   readonly toVersion: number;
+  readonly pending: boolean;
 }
 
 /** The copies kept next to the database. */
@@ -66,36 +85,35 @@ export function listInventoryV1PreMigrationCopies(databasePath: string): Invento
   const pattern = copyNamePattern(databasePath);
   return readdirSync(directory).flatMap((name) => {
     const match = pattern.exec(name);
-    return match === null ? [] : [{ path: join(directory, name), fromVersion: Number(match[1]), toVersion: Number(match[2]) }];
+    return match === null ? [] : [{
+      path: join(directory, name),
+      fromVersion: Number(match[1]),
+      toVersion: Number(match[2]),
+      pending: match[3] !== undefined,
+    }];
   });
 }
 
 /**
  * Keep one copy of an existing database before its schema migration starts,
  * so `dkg rollback` can give the release that wrote it back a file it opens.
- * The caller holds the inventory lease, so the checkpointed main file is the
- * whole database. The copy is written under a temporary name, fsynced and
- * renamed; it replaces the copies earlier migrations kept, one per store.
+ * `VACUUM INTO` writes a consistent snapshot, write-ahead log included, as a
+ * rollback-journal database that can be checked read-only without leaving
+ * SQLite files next to it. The copy is written under a temporary name, fsynced
+ * and renamed; it replaces the copies earlier migrations kept, one per store.
  */
 export function keepInventoryV1PreMigrationCopy(database: DatabaseSync, databasePath: string): void {
   const userVersion = Number(database.prepare('PRAGMA user_version').get()?.user_version);
   const migration = INVENTORY_SCHEMA_MIGRATIONS_V1.find((candidate) => candidate.fromVersion === userVersion);
   // A database that is not exactly its version's schema is quarantined, not migrated.
-  if (migration === undefined || !hasExactObjects(database, migration.fromObjects)) return;
-  // A migration interrupted between its steps already kept the copy of the
-  // release that ran before it; a copy of the intermediate schema would replace it.
+  if (migration === undefined || !hasExactInventoryV1Objects(database, migration.fromObjects)) return;
+  // A migration that stopped between its steps keeps the copy it took first,
+  // of the release that ran before it, rather than one of a middle schema.
   if (listInventoryV1PreMigrationCopies(databasePath).some((copy) =>
-    copy.fromVersion < userVersion && copy.toVersion === INVENTORY_V1_USER_VERSION)) return;
+    copy.pending && copy.fromVersion < userVersion && copy.toVersion === INVENTORY_V1_USER_VERSION)) return;
 
-  const checkpoint = database.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
-  if (checkpoint?.busy !== 0) {
-    throw new InventoryV1OpenError(
-      checkpoint?.busy === 1 ? 'database-busy' : 'database-io',
-      'RFC-64 inventory could not checkpoint before keeping its pre-migration copy',
-    );
-  }
   const directory = dirname(databasePath);
-  const copyPath = inventoryV1PreMigrationCopyPath(databasePath, userVersion, INVENTORY_V1_USER_VERSION);
+  const copyPath = inventoryV1PreMigrationCopyPath(databasePath, userVersion, INVENTORY_V1_USER_VERSION, true);
   const neededBytes = statSync(databasePath).size + INVENTORY_V1_PRE_MIGRATION_COPY_RESERVE_BYTES;
   const volume = statfsSync(directory);
   const freeBytes = volume.bavail * volume.bsize;
@@ -110,7 +128,7 @@ export function keepInventoryV1PreMigrationCopy(database: DatabaseSync, database
 
   const temporaryPath = `${copyPath}.tmp-${randomBytes(8).toString('hex')}`;
   try {
-    copyFileSync(databasePath, temporaryPath, fsConstants.COPYFILE_EXCL);
+    database.exec(`VACUUM INTO '${temporaryPath.replaceAll("'", "''")}'`);
     applyRfc64OwnerOnlyPermissionsSyncV1(temporaryPath, INVENTORY_V1_FILE_MODE, { entryKind: 'file' });
     const descriptor = openSync(temporaryPath, rfc64RegularFileFsyncOpenFlagsV1());
     try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
@@ -128,4 +146,21 @@ export function keepInventoryV1PreMigrationCopy(database: DatabaseSync, database
     if (name !== basename(copyPath) && earlierCopy.test(name)) unlinkSync(join(directory, name));
   }
   fsyncRfc64DirectorySyncV1(directory);
+}
+
+/**
+ * The database is at the current schema: a pending copy belongs to a migration
+ * that completed, so a later upgrade from an older schema takes a fresh copy.
+ */
+export function finishInventoryV1PreMigrationCopy(databasePath: string): void {
+  const pending = listInventoryV1PreMigrationCopies(databasePath).filter((copy) => copy.pending);
+  if (pending.length === 0) return;
+  try {
+    for (const copy of pending) {
+      renameSync(copy.path, inventoryV1PreMigrationCopyPath(databasePath, copy.fromVersion, copy.toVersion));
+    }
+    fsyncRfc64DirectorySyncV1(dirname(databasePath));
+  } catch (cause) {
+    throw new InventoryV1OpenError('database-io', 'failed to mark the inventory pre-migration copy finished', { cause });
+  }
 }
