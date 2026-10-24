@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { discoverPublishablePackages, findReleaseVersionMismatches } from '../release-policy.mjs';
 import { run } from '../release-process.mjs';
 import { cliRuntimeAssetManifest } from '../../copy-cli-runtime-assets.mjs';
@@ -37,5 +38,25 @@ export function trackedSnapshot(rootDir) {
 }
 export function requireCleanSource(rootDir) {
   assert.equal(run('git', ['status', '--porcelain', '--untracked-files=no'], { cwd: rootDir }), '', 'certification requires clean tracked source');
-  return run('git', ['rev-parse', 'HEAD'], { cwd: rootDir });
+  const commit = run('git', ['rev-parse', 'HEAD'], { cwd: rootDir });
+  const algorithm = run('git', ['rev-parse', '--show-object-format'], { cwd: rootDir });
+  assert.ok(['sha1', 'sha256'].includes(algorithm), 'unsupported Git object format');
+  const entries = run('git', ['ls-tree', '-r', '-z', '--full-tree', commit], { cwd: rootDir }).split('\0').filter(Boolean);
+  const committed = entries.map(entry => {
+    const separator = entry.indexOf('\t');
+    const [mode, type, oid] = entry.slice(0, separator).split(' ');
+    const name = entry.slice(separator + 1), file = path.join(rootDir, name);
+    assert.equal(type, 'blob', `unsupported source entry: ${name}`);
+    const stat = fs.lstatSync(file);
+    assert.ok(mode === '120000' ? stat.isSymbolicLink() : ['100644', '100755'].includes(mode) && stat.isFile(), `source file type differs from commit: ${name}`);
+    const bytes = mode === '120000' ? fs.readlinkSync(file, { encoding: 'buffer' }) : fs.readFileSync(file);
+    // Git blob identity hashes the header and raw bytes. It does not consult
+    // index stat caches, assume-unchanged/skip-worktree flags, or content filters.
+    const actual = createHash(algorithm).update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+    assert.equal(actual, oid, `tracked contents differ from claimed commit: ${name}`);
+    return name;
+  });
+  const indexed = run('git', ['ls-files', '-z'], { cwd: rootDir }).split('\0').filter(Boolean);
+  assert.deepEqual(indexed.sort(), committed.sort(), 'tracked source inventory differs from commit');
+  return commit;
 }

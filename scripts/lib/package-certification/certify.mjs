@@ -79,9 +79,10 @@ export async function certifyInstall({ rootDir, bundle, output, expected, image 
     // A tiny, restricted control-plane gateway. The product has no source mounts;
     // at runtime its only network is internal and this gateway exposes only the
     // owned chain. The registry handler is disabled outside installation.
-    const proxy = `const http=require('http');http.createServer((q,s)=>{const r=http.request({host:'host.docker.internal',port:${registry.port},path:q.url,method:q.method,headers:q.headers},p=>{s.writeHead(p.statusCode,p.headers);p.pipe(s)});r.on('error',()=>{s.writeHead(502);s.end()});q.pipe(r)}).listen(4873,'0.0.0.0')`;
     containers.add(gateway);
-    await docker(['run', '-d', '--name', gateway, '--network', egress, '--network-alias', 'fixture', ...(process.platform === 'linux' ? ['--add-host=host.docker.internal:host-gateway'] : []), image, 'node', '-e', proxy]);
+    await docker(['create', '--name', gateway, '--network', egress, '--network-alias', 'fixture', ...(process.platform === 'linux' ? ['--add-host=host.docker.internal:host-gateway'] : []), image, 'node', '/fixture-gateway.mjs', String(registry.port)]);
+    await docker(['cp', path.join(scripts, 'fixture-gateway.mjs'), `${gateway}:/fixture-gateway.mjs`]);
+    await docker(['start', gateway]);
     await docker(['network', 'connect', '--alias', 'fixture', isolated, gateway]);
     receipt.containerImage = JSON.parse(run('docker', ['image', 'inspect', image]))[0].Id;
     for (const layout of LAYOUTS) {

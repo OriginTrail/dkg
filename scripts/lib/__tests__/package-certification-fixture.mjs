@@ -58,10 +58,10 @@ export function fixture(t, { expected: suppliedExpected, inputRoot } = {}) {
       runtime: { os: 'linux', arch: 'arm64', node: 'v22.23.4', npm: '10.9.8' },
       cacheReader: { id: 'npm10-cacache19-v1', npmVersion: '10.9.8', cacacheVersion: '19.0.1' },
       cases: CASES.map(id => ({ id, outcome: 'PASS', errors: [], startedAt: receipt.startedAt, endedAt: receipt.endedAt })),
-      identity: { version, ...buildIdentity, storeBackend: 'oxigraph-worker' }, restartedIdentity: { version, ...buildIdentity, storeBackend: 'oxigraph-worker' },
-      rdfValue: 'installed-package-certification', restartedRdfValue: 'installed-package-certification',
-      rdfResponse: { result: { type: 'bindings', bindings: [{ value: '"installed-package-certification"' }] } },
-      restartedRdfResponse: { result: { type: 'bindings', bindings: [{ value: '"installed-package-certification"' }] } },
+      observations: Object.fromEntries(['initial', 'restarted'].map(phase => [phase, {
+        identity: { version, ...buildIdentity, storeBackend: 'oxigraph-worker' },
+        rdfResponse: { result: { type: 'bindings', bindings: [{ value: '"installed-package-certification"' }] } },
+      }])),
       logs: [`${layout}-daemon-1.log`, `${layout}-daemon-2.log`],
     };
     writeJson(path.join(attempt, `${layout}-tree.json`), tree);

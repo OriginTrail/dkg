@@ -162,6 +162,16 @@ export function validateRdfReadback(response) {
   // The API returns canonical RDF terms, including the literal's quotes.
   return JSON.parse(response.result.bindings[0].value);
 }
+export function validateRuntimeIdentity(identity, manifest) {
+  assert.equal(identity.version, manifest.version, 'wrong observed version');
+  for (const key of ['commit', 'buildTime', 'distTag']) assert.equal(identity[key], manifest.buildIdentity[key], `wrong observed build ${key}`);
+  assert.equal(identity.storeBackend, 'oxigraph-worker');
+}
+export function validateRuntimeObservation(observation, manifest) {
+  assert.ok(observation, 'missing runtime observation');
+  validateRuntimeIdentity(observation.identity, manifest);
+  return validateRdfReadback(observation.rdfResponse);
+}
 export function verifyCertificate(bundle, receiptFile, expected) {
   const manifest = verifyBundle(bundle, expected);
   const receipt = readJson(receiptFile);
@@ -210,16 +220,7 @@ export function verifyCertificate(bundle, receiptFile, expected) {
       assert.ok(Date.parse(result.startedAt) <= Date.parse(result.endedAt), 'invalid case interval');
       assert.ok(Date.parse(result.startedAt) >= Date.parse(receipt.startedAt) && Date.parse(result.endedAt) <= Date.parse(receipt.endedAt), 'case lies outside receipt interval');
     }
-    assert.equal(report.identity.version, expected.version);
-    for (const key of ['commit', 'buildTime', 'distTag']) assert.equal(report.identity[key], manifest.buildIdentity[key], `wrong observed build ${key}`);
-    assert.equal(report.identity.storeBackend, 'oxigraph-worker');
-    assert.equal(report.restartedIdentity.version, expected.version);
-    for (const key of ['commit', 'buildTime', 'distTag']) assert.equal(report.restartedIdentity[key], manifest.buildIdentity[key], `wrong restarted build ${key}`);
-    assert.equal(report.restartedIdentity.storeBackend, 'oxigraph-worker');
-    assert.equal(report.rdfValue, 'installed-package-certification');
-    assert.equal(report.restartedRdfValue, report.rdfValue);
-    assert.equal(validateRdfReadback(report.rdfResponse), report.rdfValue);
-    assert.equal(validateRdfReadback(report.restartedRdfResponse), report.restartedRdfValue);
+    for (const phase of ['initial', 'restarted']) validateRuntimeObservation(report.observations?.[phase], manifest);
     for (const log of report.logs) assert.ok(evidence.has(log), `missing runtime log ${log}`);
     assert.ok(report.logs.length >= 2, 'restart logs missing');
   }

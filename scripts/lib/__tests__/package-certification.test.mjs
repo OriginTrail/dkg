@@ -53,12 +53,6 @@ for (const [name, damage] of [
   ['cancelled case', r => { r.cases[0].outcome = 'CANCELLED'; }],
   ['timed-out case', r => { r.cases[0].outcome = 'TIMEOUT'; }],
   ['malformed time', r => { r.cases[0].endedAt = 'unknown'; }],
-  ['wrong build identity', r => { r.identity.commit = 'b'.repeat(40); }],
-  ['wrong restart', r => { r.restartedIdentity.commit = 'b'.repeat(40); }],
-  ['wrong readback', r => { r.rdfValue = 'something else'; }],
-  ['wrong query response', r => { r.rdfResponse.result.bindings = []; }],
-  ['wrong restarted query response', r => { r.restartedRdfResponse.result.bindings[0].value = '"different"'; }],
-  ['legacy query response shape', r => { r.rdfResponse = r.rdfResponse.result; }],
   ['no daemon logs', r => { r.logs = []; }],
   ['missing cache reader', r => { delete r.cacheReader; }],
   ['wrong cache installer', r => { r.cacheReader.npmVersion = '10.0.0'; }],
@@ -66,6 +60,21 @@ for (const [name, damage] of [
 ]) test(`rejects internally rehashed execution evidence: ${name}`, t => {
   const f = fixture(t), file = path.join(f.attempt, 'core-slot-report.json');
   const report = readJson(file); damage(report); writeJson(file, report); f.seal();
+  assert.throws(() => verifyCertificate(f.bundle, f.receiptFile, f.expected));
+});
+
+for (const phase of ['initial', 'restarted']) for (const [name, damage] of [
+  ['missing observation', (r, phase) => { delete r.observations[phase]; }],
+  ['wrong version', (r, phase) => { r.observations[phase].identity.version = '0.0.0'; }],
+  ['wrong commit', (r, phase) => { r.observations[phase].identity.commit = 'b'.repeat(40); }],
+  ['wrong build time', (r, phase) => { r.observations[phase].identity.buildTime = '2000-01-01T00:00:00Z'; }],
+  ['wrong store', (r, phase) => { r.observations[phase].identity.storeBackend = 'memory'; }],
+  ['wrong readback', (r, phase) => { r.observations[phase].rdfResponse.result.bindings[0].value = '"different"'; }],
+  ['empty readback', (r, phase) => { r.observations[phase].rdfResponse.result.bindings = []; }],
+  ['legacy response shape', (r, phase) => { r.observations[phase].rdfResponse = r.observations[phase].rdfResponse.result; }],
+]) test(`rejects rehashed ${phase} observation: ${name}`, t => {
+  const f = fixture(t), file = path.join(f.attempt, 'core-slot-report.json');
+  const report = readJson(file); damage(report, phase); writeJson(file, report); f.seal();
   assert.throws(() => verifyCertificate(f.bundle, f.receiptFile, f.expected));
 });
 

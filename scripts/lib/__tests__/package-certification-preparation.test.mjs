@@ -44,8 +44,8 @@ function preparationFixture(t, change) {
   };
   git(['init', '-q']); git(['add', '.']); git(['commit', '-qm', 'clean candidate fixture']);
   const commit = git(['rev-parse', 'HEAD']);
-  if (change === 'build-hidden') git(['update-index', '--assume-unchanged', 'tracked.txt']);
-  if (change === 'dirty') write('tracked.txt', 'dirty before preparation');
+  if (['build-hidden', 'hidden-before'].includes(change)) git(['update-index', '--assume-unchanged', 'tracked.txt']);
+  if (['dirty', 'hidden-before'].includes(change)) write('tracked.txt', 'dirty before preparation');
   const assets = [...cliRuntimeAssetManifest({ rootDir: source }).requiredPackAssets,
     'build-info.json', 'scripts/verify-node-sqlite-runtime.mjs', 'scripts/bundle-markitdown-binaries.mjs', 'dist/cli.js'];
   const calls = path.join(root, 'commands.jsonl');
@@ -84,7 +84,8 @@ for (const [change, failure] of [
   ['dirty', /requires clean tracked source/],
   ['build', /requires clean tracked source/],
   ['pack', /requires clean tracked source/],
-  ['build-hidden', /tracked build inputs changed/],
+  ['build-hidden', /tracked contents differ from claimed commit/],
+  ['hidden-before', /tracked contents differ from claimed commit/],
   ['none', null],
 ]) test(`preparation provenance: ${change === 'none' ? 'permits ignored generated outputs' : `rejects ${change} source changes`}`, async t => {
   const f = preparationFixture(t, change), previousPath = process.env.PATH;
@@ -94,9 +95,9 @@ for (const [change, failure] of [
     if (failure) {
       await assert.rejects(prepare, failure);
       assert.equal(fs.existsSync(path.join(f.output, 'manifest.json')), false, 'changed source must not produce a certified manifest');
-      if (change === 'dirty') assert.equal(fs.existsSync(f.calls), false, 'initially dirty source must not run pnpm');
+      if (['dirty', 'hidden-before'].includes(change)) assert.equal(fs.existsSync(f.calls), false, 'initially dirty source must not run pnpm');
       else assert.ok(fs.readFileSync(f.calls, 'utf8').includes('pack'), 'exercise the final provenance guard after packing');
-      if (change === 'build-hidden') assert.equal(f.git(['status', '--porcelain']), '', 'snapshot must reject changes hidden from Git status');
+      if (['build-hidden', 'hidden-before'].includes(change)) assert.equal(f.git(['status', '--porcelain']), '', 'blob comparison must reject changes hidden from Git status');
     } else {
       const manifest = await prepare();
       assert.equal(manifest.source.commit, f.commit);

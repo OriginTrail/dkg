@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { CASES, CLI, PROFILE, digest, hash, readJson, validateTree, validateRdfReadback } from './bundle.mjs';
+import { CASES, CLI, PROFILE, digest, hash, readJson, validateTree, validateRuntimeIdentity, validateRuntimeObservation } from './bundle.mjs';
 
 import { readNpmCache } from './npm-cache.mjs';
 import { ownProcess } from '../../testing/owned-process.mjs';
@@ -134,9 +134,7 @@ async function start(attempt) {
       let identity;
       try { identity = await api('/api/status', undefined, 1000, signal); }
       catch { return undefined; } // Retry only acquisition, never product assertions.
-      assert.equal(identity.version, manifest.version);
-      for (const key of ['commit', 'buildTime', 'distTag']) assert.equal(identity[key], manifest.buildIdentity[key], `status ${key} mismatch`);
-      assert.equal(identity.storeBackend, 'oxigraph-worker');
+      validateRuntimeIdentity(identity, manifest);
       return identity;
     }, { timeoutMs: 60_000, intervalMs: 500 });
   } catch (error) {
@@ -145,13 +143,11 @@ async function start(attempt) {
   }
 }
 
-async function readFixture(field) {
-  const response = await api('/api/query', {
+async function readFixture() {
+  return api('/api/query', {
     contextGraphId: 'package-certification', view: 'working-memory',
     sparql: 'SELECT ?value WHERE { <urn:package-certification:subject> <urn:package-certification:value> ?value }',
   });
-  report[field] = response;
-  return validateRdfReadback(response);
 }
 try {
   if (operation === 'install') {
@@ -201,16 +197,17 @@ try {
       chain: { type: 'evm', rpcUrl: 'http://fixture:4873/rpc', rpcUrls: [], walletRpcUrls: ['http://fixture:4873/rpc'], hubAddress, chainId: 'evm:31337' },
       // No store override: exercise the production default persistent worker.
     }, null, 2));
-    await observe('daemon-status', async () => { report.identity = await start(1); });
+    await observe('daemon-status', async () => { report.observations = { initial: { identity: await start(1) } }; });
     await observe('rdf-readback', async () => {
       await api('/api/context-graph/create', { id: 'package-certification', name: 'Package certification', register: false });
       await api('/api/knowledge-assets', { contextGraphId: 'package-certification', name: 'fixture', finalize: false, quads: [{ subject: 'urn:package-certification:subject', predicate: 'urn:package-certification:value', object: '"installed-package-certification"', graph: '' }] });
-      report.rdfValue = await readFixture('rdfResponse');
+      report.observations.initial.rdfResponse = await readFixture();
+      validateRuntimeObservation(report.observations.initial, manifest);
     });
     await observe('graceful-restart', async () => {
       await stop();
-      report.restartedIdentity = await start(2);
-      report.restartedRdfValue = await readFixture('restartedRdfResponse');
+      report.observations.restarted = { identity: await start(2), rdfResponse: await readFixture() };
+      validateRuntimeObservation(report.observations.restarted, manifest);
       await stop();
     });
   }

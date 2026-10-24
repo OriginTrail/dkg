@@ -240,6 +240,11 @@ comprehensive devnet, testnet or mainnet acceptance. This profile does not certi
 crash durability, previous-version upgrades, multi-peer sharing, every platform,
 or distributed/network readiness.
 
+Source cleanliness includes comparing every tracked file with its Git blob in the
+claimed commit, independently of index flags and content filters. Preparation also
+checks that tracked contents remain unchanged through building and packing. Ignored
+generated outputs remain permitted.
+
 Publication passes the exact manifest-bound tarball paths to npm, never workspace
 directories. Before its first mutation it verifies every existing registry
 version's `dist.integrity`; a matching version can be reused after partial

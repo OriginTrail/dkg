@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -41,6 +42,12 @@ async function cliFixture(t, mode) {
   const tag = `v${version}`, object = 'c'.repeat(40);
   const gitResults = {
     'status --porcelain --untracked-files=no': '', 'rev-parse HEAD': commit,
+    'rev-parse --show-object-format': 'sha1',
+    [`ls-tree -r -z --full-tree ${commit}`]: [...new Set(tracked)].sort().map(name => {
+      const bytes = fs.readFileSync(path.join(source, name));
+      const oid = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+      return `100644 blob ${oid}\t${name}\0`;
+    }).join(''),
     'ls-files -z': [...new Set(tracked)].sort().join('\0') + '\0',
     [`rev-parse --verify refs/tags/${tag}`]: object,
     [`cat-file -t refs/tags/${tag}`]: 'tag',
