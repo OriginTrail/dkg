@@ -17,7 +17,7 @@ export class BoundedStdioServerTransport extends StdioServerTransport {
         error: {
           code: -32000,
           message: 'DKG response exceeds the 8 MiB serialized MCP limit. '
-            + 'Read the artifact with a smaller maxBytes value, or narrow/paginate the query. '
+            + 'Narrow/paginate the query, or retrieve large artifacts through the daemon HTTP API. '
             + 'The session remains available for subsequent calls.',
         },
       });

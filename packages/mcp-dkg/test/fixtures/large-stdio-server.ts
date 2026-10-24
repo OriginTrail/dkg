@@ -7,7 +7,11 @@ const server = new McpServer({ name: 'large-response-test', version: '0.0.0' });
 const client = new FakeClient({
   async readImportArtifactMarkdown(args) {
     const artifact = await this.resolveImportArtifact(args);
-    const bytes = Math.min(args.maxBytes ?? 1024, 5 * 1024 * 1024);
+    const bytes = args.assertionUri === 'urn:test:small-artifact' ? 128 : 5 * 1024 * 1024;
+    // Production read-markdown accepts or rejects the whole file; it never slices.
+    if (bytes > (args.maxBytes ?? 5 * 1024 * 1024)) {
+      throw new Error('HTTP 413: Markdown content exceeds maxBytes');
+    }
     return {
       ...artifact,
       markdownHash: `sha256:${'b'.repeat(64)}`,
