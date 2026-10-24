@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { CASES, LAYOUTS, PROFILE, SCHEMA, digest, readJson, verifyBundle, verifyCertificate } from './bundle.mjs';
+import { CASES, LAYOUTS, PROFILE, SCHEMA, digest, readJson, verifyBundle, verifyReceipt } from './bundle.mjs';
 import { run } from '../release-process.mjs';
 import { requireCleanSource } from './source.mjs';
 import { startRegistry } from './registry.mjs';
@@ -122,8 +122,8 @@ export async function certifyInstall({ rootDir, bundle, output, expected, image 
     for (const network of networks) await safely('cleanup', () => cleanupDocker(['network', 'rm', network]));
     await safely('cleanup', () => registry?.close());
     await safely('cleanup', () => chain?.stop());
-  }, verify: receiptFile => {
+  }, verify: prospectiveReceipt => {
     assert.equal(requireCleanSource(rootDir), expected.commit, 'controller source changed during certification');
-    verifyCertificate(bundle, receiptFile, expected);
+    verifyReceipt(bundle, prospectiveReceipt, output, expected);
   } });
 }

@@ -157,7 +157,7 @@ try {
     fs.writeFileSync(`${slot}/package.json`, '{"name":"package-certificate-slot","version":"1.0.0","private":true}');
     report.runtime.npm = capture('npm', ['--version']);
     await observe('install', () => {
-      capture('npm', ['install', ...npmArgs, `${CLI}@${manifest.version}`, '--registry=http://fixture:4873/registry/', '--foreground-scripts', '--no-audit', '--no-fund'], `${layout}-install.log`);
+      capture('npm', ['install', ...npmArgs, `${CLI}@${manifest.version}`, '--registry=http://fixture:4873/registry/', '--replace-registry-host=never', '--foreground-scripts', '--no-audit', '--no-fund'], `${layout}-install.log`);
       assert.ok(fs.existsSync(executable), 'installed dkg executable absent');
     });
     await observe('dependency-policy', async () => {

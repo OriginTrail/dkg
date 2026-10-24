@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from './release-process.mjs';
+import { cliRuntimeAssetManifest } from '../copy-cli-runtime-assets.mjs';
 
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -11,6 +12,11 @@ export const NODE_SQLITE_INSTALL_GUARD = Object.freeze({
   cliCommand: 'node ./scripts/verify-node-sqlite-runtime.mjs',
   cliAsset: 'scripts/verify-node-sqlite-runtime.mjs',
 });
+
+export function cliReleaseAssets(rootDir = ROOT_DIR) {
+  return [...cliRuntimeAssetManifest({ rootDir }).requiredPackAssets,
+    'build-info.json', NODE_SQLITE_INSTALL_GUARD.cliAsset];
+}
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));

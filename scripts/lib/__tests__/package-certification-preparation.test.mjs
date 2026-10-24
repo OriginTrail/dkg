@@ -104,6 +104,8 @@ for (const [change, failure] of [
       assert.equal(f.git(['status', '--porcelain']), '');
       assert.equal(fs.existsSync(path.join(f.source, 'generated.txt')), true);
       const expected = await expectedPolicy(f.source, { commit: f.commit, version: f.version });
+      assert.deepEqual(expected.requiredAssets[CLI], [...cliRuntimeAssetManifest({ rootDir: f.source }).requiredPackAssets,
+        'build-info.json', 'scripts/verify-node-sqlite-runtime.mjs', 'scripts/bundle-markitdown-binaries.mjs', 'dist/cli.js']);
       assert.deepEqual(verifyBundle(f.output, expected), manifest);
     }
   } finally { process.env.PATH = previousPath; }

@@ -2,9 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { discoverPublishablePackages, findReleaseVersionMismatches } from '../release-policy.mjs';
+import { cliReleaseAssets, discoverPublishablePackages, findReleaseVersionMismatches } from '../release-policy.mjs';
 import { run } from '../release-process.mjs';
-import { cliRuntimeAssetManifest } from '../../copy-cli-runtime-assets.mjs';
 import { CLI, PROFILE, BUILD_INPUTS, dependencies, digest, hash, readJson } from './bundle.mjs';
 
 export async function expectedPolicy(rootDir, { commit, version, profile = PROFILE }) {
@@ -27,7 +26,7 @@ export async function expectedPolicy(rootDir, { commit, version, profile = PROFI
     inputHashes: Object.fromEntries(BUILD_INPUTS.map(name => [`inputs/${name}`, hash(fs.readFileSync(path.join(rootDir, name)))])),
     familyPolicy: Object.fromEntries([...family.versions].sort().map(([name, versions]) => [name, [...versions][0]])),
     requiredAssets: {
-      [CLI]: [...cliRuntimeAssetManifest({ rootDir }).requiredPackAssets, 'build-info.json', 'scripts/verify-node-sqlite-runtime.mjs', 'scripts/bundle-markitdown-binaries.mjs', 'dist/cli.js'],
+      [CLI]: [...cliReleaseAssets(rootDir), 'scripts/bundle-markitdown-binaries.mjs', 'dist/cli.js'],
       '@origintrail-official/dkg-node-ui': ['dist/index.js', 'dist-ui/index.html'],
     },
   };

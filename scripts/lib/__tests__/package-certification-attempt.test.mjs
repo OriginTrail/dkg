@@ -45,6 +45,46 @@ test('a failed observed case stays FAIL even if the execution wrapper returns no
   assert.equal(readJson(path.join(options.output, 'receipt.json')).outcome, 'FAIL');
 });
 
+for (const accepted of [true, false]) test(`PASS is persisted only after verification ${accepted ? 'succeeds' : 'rejects'}`, async t => {
+  const options = attempt(t);
+  const run = recordAttempt({ ...options, work: () => {}, cleanup: () => {},
+    verify: async prospective => {
+      assert.equal(prospective.outcome, 'PASS');
+      assert.equal(readJson(path.join(options.output, 'receipt.json')).outcome, 'INCOMPLETE');
+      await Promise.resolve();
+      if (!accepted) throw new Error('final policy rejection');
+    },
+  });
+  if (accepted) await run;
+  else await assert.rejects(run, /INCOMPLETE/);
+  const receipt = readJson(path.join(options.output, 'receipt.json'));
+  assert.equal(receipt.outcome, accepted ? 'PASS' : 'INCOMPLETE');
+  assert.deepEqual(receipt.errors, accepted ? [] : [{ phase: 'verification', message: 'final policy rejection' }]);
+  assert.equal(fs.existsSync(path.join(options.output, 'receipt.json.tmp')), false);
+});
+
+test('SIGKILL during pending final verification leaves the durable receipt INCOMPLETE', { timeout: 15_000 }, async t => {
+  const { output } = attempt(t);
+  const moduleUrl = new URL('../package-certification/attempt.mjs', import.meta.url).href;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { setTimeout } from 'node:timers/promises';
+    import { recordAttempt } from ${JSON.stringify(moduleUrl)};
+    await recordAttempt({ output: process.argv[1], receipt: { outcome: 'INCOMPLETE', layouts: [], errors: [], evidence: [] },
+      work: () => {}, cleanup: () => {},
+      verify: async receipt => { process.send(receipt.outcome); await setTimeout(60_000); },
+    });
+  `, output], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
+  const ended = once(child, 'exit');
+  const [prospectiveOutcome] = await once(child, 'message');
+  assert.equal(prospectiveOutcome, 'PASS');
+  assert.equal(readJson(path.join(output, 'receipt.json')).outcome, 'INCOMPLETE');
+  child.kill('SIGKILL');
+  const [, signal] = await ended;
+  assert.equal(signal, 'SIGKILL');
+  assert.equal(readJson(path.join(output, 'receipt.json')).outcome, 'INCOMPLETE');
+});
+
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGKILL']) test(`${signal} cannot leave a passing receipt; catchable signals run cleanup`, { timeout: 15_000 }, async t => {
   const { output } = attempt(t);
   const moduleUrl = new URL('../package-certification/attempt.mjs', import.meta.url).href;

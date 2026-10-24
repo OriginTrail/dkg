@@ -6,7 +6,10 @@ import { fileIdentity, readJson } from './bundle.mjs';
 // SIGKILL/host loss cannot run cleanup; the initial INCOMPLETE receipt survives.
 export async function recordAttempt({ output, receipt, work, cleanup, verify }) {
   const receiptFile = path.join(output, 'receipt.json');
-  const save = () => fs.writeFileSync(receiptFile, `${JSON.stringify(receipt, null, 2)}\n`);
+  const save = () => {
+    fs.writeFileSync(`${receiptFile}.tmp`, `${JSON.stringify(receipt, null, 2)}\n`);
+    fs.renameSync(`${receiptFile}.tmp`, receiptFile);
+  };
   const controller = new AbortController();
   const recordError = (phase, error) => receipt.errors.push({ phase, message: error.message });
   const safely = async (phase, operation) => {
@@ -41,10 +44,13 @@ export async function recordAttempt({ output, receipt, work, cleanup, verify }) 
         if (fs.statSync(file).isFile()) receipt.evidence.push({ path: name, sha256: fileIdentity(file).sha256 });
       });
     }
-    receipt.outcome = controller.signal.aborted ? 'INCOMPLETE' : productFailed ? 'FAIL' : receipt.errors.length ? 'INCOMPLETE' : 'PASS';
+    const outcome = controller.signal.aborted ? 'INCOMPLETE' : productFailed ? 'FAIL' : receipt.errors.length ? 'INCOMPLETE' : 'PASS';
+    receipt.outcome = outcome === 'PASS' ? 'INCOMPLETE' : outcome;
     save();
-    if (receipt.outcome === 'PASS') {
-      try { await verify(receiptFile); }
+    if (outcome === 'PASS') {
+      // Verify a prospective receipt in memory. The durable receipt remains
+      // INCOMPLETE even if the process is killed during final verification.
+      try { await verify({ ...receipt, outcome: 'PASS' }); receipt.outcome = 'PASS'; }
       catch (error) { receipt.outcome = 'INCOMPLETE'; recordError('verification', error); }
     }
     // A signal arriving during final verification must not leave a PASS behind.

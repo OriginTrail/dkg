@@ -194,6 +194,8 @@ pnpm release:certify-install --bundle "$BUNDLE" --commit "$COMMIT" --version "$V
 Logs and diagnostic data survive failures; owned containers, networks and chain
 processes are stopped. SIGINT/SIGTERM cancel active commands, attempt every owned
 resource cleanup and retain an `INCOMPLETE` receipt; cleanup errors are recorded.
+Final verification checks a prospective PASS receipt in memory; only successful
+verification permits atomically replacing the durable INCOMPLETE receipt with PASS.
 The initial receipt is written before execution, so SIGKILL or host loss also
 leaves non-passing evidence, but cannot guarantee cleanup. Inspect resources
 named `dkg-cert-<receipt.runId>-*` after a forced termination. `*-data/` contains disposable local wallet keys and is

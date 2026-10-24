@@ -173,9 +173,10 @@ export function validateRuntimeObservation(observation, manifest) {
   return validateRdfReadback(observation.rdfResponse);
 }
 export function verifyCertificate(bundle, receiptFile, expected) {
+  return verifyReceipt(bundle, readJson(receiptFile), path.dirname(receiptFile), expected);
+}
+export function verifyReceipt(bundle, receipt, evidenceRoot, expected) {
   const manifest = verifyBundle(bundle, expected);
-  const receipt = readJson(receiptFile);
-  const evidenceRoot = path.dirname(receiptFile);
   assert.equal(receipt.schemaVersion, SCHEMA, 'receipt schema');
   assert.equal(receipt.packageSetDigest, manifest.packageSetDigest, 'receipt package-set digest');
   assert.equal(receipt.commit, expected.commit, 'receipt subject commit');
