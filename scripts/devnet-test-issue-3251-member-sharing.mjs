@@ -244,7 +244,8 @@ async function largeGraph(attempt, size) {
       await edges.startFeeder();
       say(`feeder ${edges.feeder.label} up and dialed by member2 (${elapsed()})`);
     } catch (error) {
-      note(`the feeder could not be set up (${error?.message ?? error}): the owner writes the large graph of attempt ${attempt}`);
+      note(`the feeder could not be set up (${error?.message ?? error}): the owner writes the large graphs of case 6's later attempts`);
+      edges.feeder = null;
     }
   }
   const author = edges.largeAuthor;

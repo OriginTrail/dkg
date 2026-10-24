@@ -159,10 +159,18 @@ export class TemporaryEdges {
     return { taken };
   }
 
-  /** Starts the feeder and has member 2 dial it; throws when either fails (the feeder is then removed at the cleanup). */
+  /**
+   * Starts the feeder and has member 2 dial it; throws when either fails. A
+   * feeder member 2 cannot dial is stopped again; the cleanup removes it.
+   */
   async startFeeder() {
     await this.start(this.feeder);
-    await this.dial(this.member2, this.feeder);
+    try {
+      await this.dial(this.member2, this.feeder);
+    } catch (error) {
+      await this.stop(this.feeder).catch(() => {});
+      throw error;
+    }
     this.feederUp = true;
   }
 

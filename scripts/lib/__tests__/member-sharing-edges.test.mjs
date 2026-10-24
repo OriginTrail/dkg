@@ -94,6 +94,14 @@ test('a fourth free node number is kept for the feeder of case 6\'s later attemp
   fallback.allocate({ relay1: 'r1', relay2: 'r2' });
   await assert.rejects(fallback.startFeeder(), /temporary node 10 could not be added/);
   assert.equal(fallback.largeAuthor, fallback.owner);
+  // One that started but that member 2 cannot dial is stopped again.
+  const undialable = fakeDevnet(t);
+  const dialFails = new TemporaryEdges(undialable, { stamp: 'S', log });
+  dialFails.allocate({ relay1: 'r1', relay2: 'r2' });
+  dialFails.dial = async () => { throw new Error('node9 (member2) could not dial the feeder through the relay: HTTP 0 refused'); };
+  await assert.rejects(dialFails.startFeeder(), /could not dial the feeder/);
+  assert.ok(undialable.calls.includes('stop-node 10') && !dialFails.feederUp);
+  assert.equal(dialFails.largeAuthor, dialFails.owner);
   // MEMBER_SHARING_NODES names three numbers, or four with the feeder's.
   const three = new TemporaryEdges(fakeDevnet(t), { stamp: 'S', log });
   assert.deepEqual(three.allocate({ explicit: '10,9,8', relay1: 'r1', relay2: 'r2' }), { taken: [] });
