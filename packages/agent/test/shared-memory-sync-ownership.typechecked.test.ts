@@ -247,7 +247,10 @@ describe('runSharedMemorySync ownership hydration', () => {
     expect(ownedMaps.get(`${CG_ID}\0${SUB_GRAPH}`)?.get(ROOT_ENTITY)).toBe('peer-sub');
   });
 
-  it('rejects sub-graph SWM authorized only by a remote registration in the same meta batch', async () => {
+  // A responder serves only the sub-graphs registered on it, and a member that
+  // never created one admits it all the same, in every lane (#3301). The
+  // registration rows a responder sends never become a local registration.
+  it('admits a sub-graph the responder serves without storing the registration rows it sent', async () => {
     const worker = new SyncVerifyWorker();
     const ownedMaps = new Map<string, Map<string, string>>();
     const inserted: Quad[] = [];
@@ -298,11 +301,11 @@ describe('runSharedMemorySync ownership hydration', () => {
       });
 
       expect(summary.failedPeers).toBe(0);
-      expect(summary.droppedDataTriples).toBe(1);
-      expect(summary.insertedDataTriples).toBe(0);
-      expect(inserted.some((quad) => quad.graph === ROOT_CG_META_GRAPH && quad.predicate === SCHEMA_NAME)).toBe(false);
-      expect(inserted.some((quad) => quad.graph === SUB_GRAPH_SWM)).toBe(false);
-      expect(ownedMaps.get(`${CG_ID}\0${SUB_GRAPH}`)?.get(ROOT_ENTITY)).toBeUndefined();
+      expect(summary.droppedDataTriples).toBe(0);
+      expect(summary.insertedDataTriples).toBe(1);
+      expect(inserted.some((quad) => quad.graph === ROOT_CG_META_GRAPH)).toBe(false);
+      expect(inserted.some((quad) => quad.graph === SUB_GRAPH_SWM)).toBe(true);
+      expect(ownedMaps.get(`${CG_ID}\0${SUB_GRAPH}`)?.get(ROOT_ENTITY)).toBe('peer-remote-sub');
     } finally {
       await worker.close();
     }
@@ -450,7 +453,7 @@ describe('runSharedMemorySync ownership hydration', () => {
     }
   });
 
-  it('rejects forged replicated registrations with noncanonical subjects', async () => {
+  it('never stores forged registration rows a responder sends with the sub-graph it serves', async () => {
     const worker = new SyncVerifyWorker();
     const inserted: Quad[] = [];
     const dataQuads: Quad[] = [
@@ -494,9 +497,10 @@ describe('runSharedMemorySync ownership hydration', () => {
       });
 
       expect(summary.failedPeers).toBe(0);
-      expect(summary.droppedDataTriples).toBe(1);
-      expect(summary.insertedDataTriples).toBe(0);
-      expect(inserted.some((quad) => quad.graph === SUB_GRAPH_SWM)).toBe(false);
+      expect(summary.droppedDataTriples).toBe(0);
+      expect(summary.insertedDataTriples).toBe(1);
+      expect(inserted.some((quad) => quad.subject === 'urn:forged-subgraph-registration')).toBe(false);
+      expect(inserted.some((quad) => quad.graph === ROOT_CG_META_GRAPH)).toBe(false);
     } finally {
       await worker.close();
     }
@@ -747,7 +751,7 @@ describe('runSharedMemorySync ownership hydration', () => {
     }
   });
 
-  it('rejects unregistered child-CG-shaped SWM descendants', async () => {
+  it('rejects SWM descendants under a sub-graph name that is a context graph of its own', async () => {
     const worker = new SyncVerifyWorker();
     const inserted: Quad[] = [];
     const childMetaGraph = contextGraphSharedMemoryMetaUri(CG_ID, 'child');
@@ -770,6 +774,8 @@ describe('runSharedMemorySync ownership hydration', () => {
         processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames) =>
           worker.processSharedMemoryBatch(wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames),
         getRegisteredSubGraphNames: async () => [],
+        // `<graph>/child` is a context graph of this node's own.
+        isOwnContextGraph: async (_contextGraphId, name) => name === 'child',
         ensureContextGraph: async () => {},
         storeInsert: async (quads) => {
           inserted.push(...quads);

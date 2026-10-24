@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { ChangelogStore, CHANGELOG_GRAPH } from '../src/changelog-store.js';
 import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
@@ -52,4 +52,41 @@ describe('optional logical mutation capability', () => {
     const cycle: { innerStore?: unknown } = {}; cycle.innerStore = cycle;
     await expect(runLogicalStoreMutation(cycle, 'insert', undefined, async () => 'direct')).resolves.toBe('direct');
   });
+});
+
+
+it('keeps grouped publication and graph bookkeeping inside the same scoped lifetime', async () => {
+  let active = 0;
+  const raw = Object.assign(new OxigraphStore(), {
+    async runLogicalMutation<T>(_operation: StoreOperation, options: QueryOptions | undefined,
+      work: (options: QueryOptions | undefined) => Promise<T>): Promise<T> {
+      if (active > 0 && _operation === 'replaceAssetGroup') expect(options?.source).toBe('logical-owner');
+      active++;
+      try { return await work({ ...options, source: 'logical-owner' }); }
+      finally { active--; }
+    },
+  });
+  const publish = raw.replaceAssetGroup.bind(raw);
+  const grouped = vi.spyOn(raw, 'replaceAssetGroup');
+  grouped.mockImplementation(async (assets, options) => {
+    expect(active).toBeGreaterThan(0); expect(options?.source).toBe('logical-owner');
+    return publish.call(raw, assets, options);
+  });
+  const hasGraph = raw.hasGraph.bind(raw);
+  const presence = vi.spyOn(raw, 'hasGraph');
+  presence.mockImplementation(async (graph, options) => {
+    expect(active).toBeGreaterThan(0); expect(options?.source).toBe('logical-owner');
+    return hasGraph.call(raw, graph, options);
+  });
+  const log = new ChangelogStore(new GraphSetIndexStore(raw));
+  const meta = 'urn:group:meta';
+  try {
+    await log.replaceAssetGroup([{ graphUri: graph, graphQuads: [quad], metaGraphUri: meta,
+      metadataSubject: quad.subject, metadataQuads: [{ ...quad, graph: meta }] }], { source: 'caller' });
+    expect(grouped).toHaveBeenCalledOnce(); expect(presence).toHaveBeenCalled();
+    expect(active).toBe(0);
+    expect(await raw.query(`ASK { GRAPH <${graph}> { ?s ?p ?o } }`)).toEqual({ type: 'boolean', value: true });
+    expect(await raw.query(`ASK { GRAPH <${CHANGELOG_GRAPH}> { ?s <urn:dkg:changelog#graph> <${graph}> } }`))
+      .toEqual({ type: 'boolean', value: true });
+  } finally { presence.mockRestore(); grouped.mockRestore(); await log.close(); }
 });

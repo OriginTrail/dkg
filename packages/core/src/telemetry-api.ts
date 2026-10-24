@@ -201,6 +201,8 @@ export interface DkgMetrics {
   storeSchedulerRejectionsTotal: Counter;
   /** ms; priority and operation identify the bounded admission lane and static caller */
   storeSchedulerQueueWaitMs: Histogram;
+  /** ms; admitted execution time by priority, static operation and outcome={ok|error} */
+  storeSchedulerOperationDurationMs: Histogram;
   /** active admitted operations by priority and operation */
   storeSchedulerActive: UpDownCounter;
   /** current queued work; scheduler and lane are bounded static labels */
@@ -421,6 +423,11 @@ function buildMetrics(): DkgMetrics {
     storeSchedulerQueueWaitMs: meter.createHistogram('dkg.store.scheduler_queue_wait_ms', {
       unit: 'ms',
       description: 'External-store admission queue wait by lane and static caller',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    storeSchedulerOperationDurationMs: meter.createHistogram('dkg.store.scheduler_operation_duration_ms', {
+      unit: 'ms',
+      description: 'External-store execution time after admission by lane and static caller',
       advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
     }),
     storeSchedulerActive: meter.createUpDownCounter('dkg.store.scheduler_active', {

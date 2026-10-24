@@ -8,6 +8,7 @@ import {
   GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
   readGraphKnowledgeAssetConfirmationKindV1,
 } from '@origintrail-official/dkg-publisher';
+import { parseGraphScopedDescriptor } from '../durable-integrity.js';
 import { packKnowledgeAssetIdFromIdentity } from '../../ka-identity.js';
 import type { VerifiedGraphScopedAsset } from './graph-scoped-materialization.js';
 
@@ -16,7 +17,6 @@ const CONTENT_SCOPE_VERSION = `${DKG_NS}contentScopeVersion`;
 const KA_UAL = `${DKG_NS}kaUal`;
 const ASSERTION_GRAPH = `${DKG_NS}assertionGraph`;
 const ASSERTION_VERSION = `${DKG_NS}assertionVersion`;
-const CONTEXT_GRAPH = `${DKG_NS}contextGraph`;
 const BATCH_ID = `${DKG_NS}batchId`;
 const MATERIALIZED_VERSION = `${DKG_NS}materializedVersion`;
 const TRANSACTION_HASH = `${DKG_NS}transactionHash`;
@@ -147,17 +147,11 @@ export function partitionVerifiedGraphScopedAssets(
     const metadataQuads = (metadataBySubject.get(ual) ?? []).filter(
       (quad) => GRAPH_SCOPED_SYNC_METADATA_PREDICATES.has(quad.predicate),
     );
-    const versions = new Set(
-      metadataQuads
-        .filter((quad) => quad.predicate === ASSERTION_VERSION)
-        .map((quad) => stripLiteral(quad.object)),
-    );
-    if (versions.size !== 1) {
-      throw new Error(`Verified graph-scoped KA ${ual} has ${versions.size} assertion versions`);
-    }
-    const [versionRaw] = versions;
-    if (!versionRaw || !/^\d+$/.test(versionRaw)) {
-      throw new Error(`Verified graph-scoped KA ${ual} has invalid assertionVersion ${versionRaw ?? '<missing>'}`);
+    const rootCount = metadataQuads.filter(quad => quad.predicate === `${DKG_NS}merkleRoot`).length;
+    if (rootCount !== 1) throw new Error(`Verified graph-scoped KA ${ual} has ${rootCount} Merkle roots`);
+    const descriptor = parseGraphScopedDescriptor(ual, metadataQuads);
+    if (descriptor.contextGraphId !== contextGraphId || descriptor.assertionGraph !== assertionGraph) {
+      throw new Error(`Verified graph-scoped KA ${ual} is not bound to requested context graph ${contextGraphId}`);
     }
     try {
       readGraphKnowledgeAssetConfirmationKindV1(metadataQuads);
@@ -167,26 +161,7 @@ export function partitionVerifiedGraphScopedAssets(
         { cause },
       );
     }
-    const metaGraphs = new Set(metadataQuads.map((quad) => quad.graph));
-    if (metaGraphs.size !== 1) {
-      throw new Error(`Verified graph-scoped KA ${ual} spans ${metaGraphs.size} metadata graphs`);
-    }
-    const [metaGraph] = metaGraphs;
-    const expectedContextGraph = `did:dkg:context-graph:${contextGraphId}`;
-    const contextGraphs = new Set(
-      metadataQuads
-        .filter((quad) => quad.predicate === CONTEXT_GRAPH)
-        .map((quad) => stripLiteral(quad.object)),
-    );
-    if (
-      metaGraph !== `${expectedContextGraph}/_meta`
-      || contextGraphs.size !== 1
-      || !contextGraphs.has(expectedContextGraph)
-    ) {
-      throw new Error(
-        `Verified graph-scoped KA ${ual} is not bound to requested context graph ${contextGraphId}`,
-      );
-    }
+    const metaGraph = `did:dkg:context-graph:${descriptor.contextGraphId}/_meta`;
     const identity = parseDeterministicKnowledgeAssetUal(ual);
     const batchId = packKnowledgeAssetIdFromIdentity(identity);
     metadataQuads.push({
@@ -196,9 +171,11 @@ export function partitionVerifiedGraphScopedAssets(
       graph: metaGraph,
     });
     assets.push({
+      merkleRootHex: descriptor.claimedRootHex,
       contextGraphId,
+      subGraphName: descriptor.subGraphName,
       ual,
-      assertionVersion: BigInt(versionRaw),
+      assertionVersion: BigInt(descriptor.assertionVersion),
       assertionGraph,
       metaGraph,
       dataQuads: dataByGraph.get(assertionGraph) ?? [],

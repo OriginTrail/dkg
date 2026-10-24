@@ -31,6 +31,7 @@ import {
 import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 import { operationIdentityKey } from '../graph-scoped-swm-recovery.js';
 import { createSwmMaterializationMemo } from './swm-materialization-memo.js';
+import { newerStoredHeadIsMaterialized } from './swm-stored-head-proof.js';
 import { isDecodableWorkspaceOperationRows } from '@origintrail-official/dkg-publisher';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -250,14 +251,10 @@ export interface SharedMemorySnapshotMaterializer {
     | { outcome: 'replace' }
   >;
   /**
-   * The private curator-recovery lane's skip predicate. A head marker alone
-   * cannot prove materialization: the assertion graph can be cleared while
-   * its durable metadata survives. Reuse the same exact count+digest guard as
-   * ordinary catch-up so a marker-only, partial, or equal-count stale graph is
-   * repaired rather than reported as recovered. Living here (rather than as a
-   * caller-supplied closure) keeps skip and preserve as one capability over
-   * one store and lock map.
+   * True only when the stored head is newer than the descriptor and its own
+   * committed content is in the store. Keeping a newer head is not holding it.
    */
+  isNewerStoredHeadMaterialized(contextGraphId: string, descriptor: GraphScopedSwmRecoveryDescriptor): Promise<boolean>;
   /**
    * Canonical graph-asset meta replacement (delete head + kaUal-owned linked
    * operation subjects) over THIS materializer's store — the one cleanup
@@ -637,6 +634,8 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       withKeyedLocks(deps.writeLocks, [swmKaWriteLockKey(contextGraphId, subGraphName, kaUal)], fn),
 
     readStoredHead,
+
+    isNewerStoredHeadMaterialized: (contextGraphId, descriptor) => newerStoredHeadIsMaterialized(deps.store, contextGraphId, descriptor),
 
     isGraphAssetMaterialized: async (descriptor) => {
       const expected = descriptor.publicQuadsCount;

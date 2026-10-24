@@ -42,6 +42,21 @@ export function throwIfOperationAborted(signal: AbortSignal | undefined): void {
 }
 
 /**
+ * `work`'s outcome, or the canonical normalized AbortError as soon as `signal`
+ * aborts. Only the caller stops waiting: `work` goes on, and its late outcome
+ * is consumed.
+ */
+export function untilOperationAborted<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (signal === undefined) return work;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(createAbortError(signal.reason));
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+    void work.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
+/**
  * Run one lazily-started operation with a caller-abort and deadline boundary.
  *
  * The operation is not started when the caller is already aborted. Once it is

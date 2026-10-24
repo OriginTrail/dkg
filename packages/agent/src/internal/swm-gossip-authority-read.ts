@@ -9,15 +9,28 @@
  * subscription this node holds then stays, one it does not hold is not made,
  * and the graph is asked again without waiting for the next event that would
  * reconcile it.
+ *
+ * Nor is a "no" given while the graph's RFC-64 authority is not in place on
+ * this node a refusal: the check says so through its `onAuthorityWait`
+ * option, the node's log says what the subscription waits for, and says so
+ * again when the wait is over and the subscription is made.
  */
 
 import type { Logger, OperationContext } from '@origintrail-official/dkg-core';
 import { sharedMemoryAuthorityRecheckOf } from '../gossip-session.js';
 import { UnansweredAuthorityObservation } from './context-graph-authority/unanswered-authority-read.js';
+import {
+  describeSharedMemoryAuthorityWait,
+  sharedMemoryAuthorityWaitsOf,
+  type SharedMemoryAuthorityWait,
+  type SharedMemoryAuthorityWaitSink,
+} from './shared-memory-authority-wait.js';
 import { describeUnansweredAuthorityCheck } from './unanswered-authority-recheck.js';
 
 export class SharedMemoryGossipAuthorityRead {
   readonly #read: UnansweredAuthorityObservation;
+  /** What the check's "no" waits for, as its `onAuthorityWait` option heard. */
+  #wait: SharedMemoryAuthorityWait | undefined;
   /** Whether the graph's member subscription was wanted when the check began. */
   #subscribedAtCheck = false;
 
@@ -28,6 +41,11 @@ export class SharedMemoryGossipAuthorityRead {
   ) {
     this.#read = new UnansweredAuthorityObservation(contextGraphId);
   }
+
+  /** The check's `onAuthorityWait` option. */
+  readonly onAuthorityWait: SharedMemoryAuthorityWaitSink = (wait) => {
+    this.#wait = wait;
+  };
 
   /**
    * Run the authority check so that a chain read without an answer is
@@ -83,5 +101,43 @@ export class SharedMemoryGossipAuthorityRead {
       unansweredChecks,
     }));
     return true;
+  }
+
+  /**
+   * Log an answered check as the pass acts on it. A "no" that waits for the
+   * graph's authority is said at info, and at debug when repeated; any other
+   * "no" is a refusal and stays a warning. A "yes" after a wait says the wait
+   * is over. Nothing is logged for a "yes" without one.
+   */
+  logAnswer(pass: {
+    /** The gossip session the pass runs for. Its waits end with it. */
+    readonly session: object;
+    readonly canUseSharedMemory: boolean;
+    /** Whether the session holds the member subscription's handler now. */
+    readonly isRegistered: boolean;
+    readonly log: Pick<Logger, 'info' | 'debug' | 'warn'>;
+    readonly ctx: OperationContext;
+  }): void {
+    const waits = sharedMemoryAuthorityWaitsOf(pass.session);
+    const subject = `SWM gossip subscription for "${this.contextGraphId}"`;
+    if (pass.canUseSharedMemory) {
+      const waited = waits.settle(this.contextGraphId);
+      if (waited === undefined) return;
+      pass.log.info(pass.ctx, `${subject} ${
+        pass.isRegistered ? 'is in place' : 'made'
+      } after waiting for ${waited.waitingFor}`);
+      return;
+    }
+    const wait = this.#wait;
+    if (wait === undefined) {
+      waits.settle(this.contextGraphId);
+      pass.log.warn(pass.ctx, pass.isRegistered
+        ? `SWM gossip unsubscribed for "${this.contextGraphId}": local node is no longer authorized`
+        : `SWM gossip subscription denied for "${this.contextGraphId}": local node is not authorized`);
+      return;
+    }
+    pass.log[waits.wait(this.contextGraphId, wait)](pass.ctx, `${subject} waits for ${
+      describeSharedMemoryAuthorityWait(wait)
+    }; ${pass.isRegistered ? 'unsubscribed until then' : 'not subscribed yet'}`);
   }
 }

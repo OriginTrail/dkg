@@ -162,6 +162,7 @@ async function materialize(
   return materializeVerifiedGraphScopedAsset({
     store,
     asset: {
+      merkleRootHex: Buffer.from(root).toString('hex'),
       contextGraphId: localCgId,
       ual,
       assertionVersion: version.assertionVersion,

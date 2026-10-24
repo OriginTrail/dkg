@@ -1,3 +1,4 @@
+import { createEntityClient } from './entity-search/client.js';
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import type {
@@ -14,10 +15,7 @@ import type {
   PersistedLiftJob,
   PublicationPricingPolicy,
 } from '@origintrail-official/dkg-publisher';
-import {
-  isSafeJobId,
-  SAFE_JOB_ID_ERROR,
-} from '@origintrail-official/dkg-publisher';
+import { isSafeJobId, SAFE_JOB_ID_ERROR } from '@origintrail-official/dkg-publisher';
 import { DkgHomeFiles, isProcessRunning } from './config.js';
 import type { ContextGraphListOnChainView } from './context-graph-list-format.js';
 import type { ContextGraphJoinResult } from './context-graph-join-result.js';
@@ -204,7 +202,7 @@ export interface KnowledgeAssetCreateResponse {
   status?: string;
   written?: number;
   merkleRoot?: string;
-  shareOperationId?: string;
+  shareOperationId?: string; catalogHandoff?: KnowledgeAssetShareResponse['catalogHandoff'];
   swmShared?: boolean;
   promotedCount?: number;
   publishReady?: boolean;
@@ -223,7 +221,7 @@ export interface KnowledgeAssetShareResponse {
   promotedCount: number;
   sealed?: boolean;
   publishReady?: boolean;
-  shareOperationId?: string;
+  shareOperationId?: string; catalogHandoff?: { state: 'pending'; reason: string; recoveryJobId: string; recoveryStatusUrl: string };
   errors?: KnowledgeAssetLifecycleError[];
 }
 
@@ -2465,6 +2463,8 @@ export class ApiClient {
   private async get<T>(path: string, opts: { auth?: boolean } = {}): Promise<T> {
     return this.send<T>(path, { headers: opts.auth === false ? {} : this.authHeaders() });
   }
+
+  readonly entities = createEntityClient((path, body, deadline) => this.post(path, body, deadline));
 
   private async post<T>(path: string, body: unknown, deadline: RequestDeadline = {}): Promise<T> {
     return this.send<T>(path, {

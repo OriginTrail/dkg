@@ -1,17 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
 import type { QueryOptions } from '@origintrail-official/dkg-query';
+
+const stores: OxigraphStore[] = [];
+afterEach(async () => { await Promise.all(stores.splice(0).map(store => store.close())); });
 
 const A = '0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa';
 const B = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const PEER = 'LegacyPeer';
 function node(defaultAgentAddress: string | undefined = A) {
   const query = vi.fn(async (_sparql: string, _options?: QueryOptions) => ({ bindings: [{ value: 'visible' }] }));
+  const store = new OxigraphStore();
+  stores.push(store);
   const agent = Object.create(DKGAgent.prototype) as DKGAgent;
   Object.assign(agent, {
     defaultAgentAddress, config: {}, log: { info() {}, warn() {}, debug() {}, error() {} },
-    queryEngine: { query }, subscribedContextGraphs: new Map(),
+    store, queryEngine: { query }, subscribedContextGraphs: new Map(),
     resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', source: 'system', reason: 'test', metadataBootstrap: 'eligible' }),
     canReadContextGraph: async () => true, isPrivateContextGraph: async () => false,
     listPrivateContextGraphIdsNotReadableBy: async () => [],

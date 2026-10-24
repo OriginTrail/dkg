@@ -1,5 +1,5 @@
 import { vi } from 'vitest';
-import { DKGPublisher } from '@origintrail-official/dkg-publisher';
+import { DKGPublisher, type DKGPublisherConfig } from '@origintrail-official/dkg-publisher';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
@@ -8,15 +8,17 @@ import { DKGAgent } from '../../src/dkg-agent.js';
 /** A "process" over a durable store: fresh in-memory agent + publisher objects. */
 export async function createPromotionAgentForTest(
   store: TripleStore,
-  { agentAddress, peerId }: { agentAddress: string; peerId: string },
+  { agentAddress, peerId, kaAllocator }: { agentAddress: string; peerId: string; kaAllocator?: DKGPublisherConfig['kaAllocator'] },
 ) {
   const publisher = new DKGPublisher({
     store,
     chain: new MockChainAdapter(),
     eventBus: new TypedEventBus(),
     keypair: await generateEd25519Keypair(),
+    kaAllocator,
   });
   const agent = Object.create(DKGAgent.prototype) as any;
+  agent.config = {};
   agent.defaultAgentAddress = agentAddress;
   agent.node = { peerId: { toString: () => peerId } };
   agent.store = store;

@@ -204,6 +204,20 @@ export function sanitizeRfc64AuthorCatalogCapacityV1(
   });
 }
 
+/** GH#3134 — the sweeps of finalized assets' inventory rows, only as a pair of counts. */
+export function sanitizeRfc64FinalizedRowHealV1(
+  input: unknown,
+): Readonly<{ finalizedRowHealPasses: number; finalizedRowsHealed: number }> | null {
+  if (
+    !isRecordV1(input)
+    || !hasNonNegativeSafeIntegersV1(input, ['finalizedRowHealPasses', 'finalizedRowsHealed'])
+  ) return null;
+  return Object.freeze({
+    finalizedRowHealPasses: input.finalizedRowHealPasses as number,
+    finalizedRowsHealed: input.finalizedRowsHealed as number,
+  });
+}
+
 function isRecordV1(value: unknown): value is Readonly<Record<string, unknown>> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);

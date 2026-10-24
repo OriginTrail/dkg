@@ -118,10 +118,6 @@ describe('peer gate revision through the production store wrapper (GH#3067)', ()
     ['a removal of a whole meta graph', (s) => s.dropGraph(META_GRAPH)],
     ['a replace of the meta graph', (s) => s.replaceGraph!(META_GRAPH, [quad(CG_DID, NAME, META_GRAPH)])],
     ['a replace of the graph\'s own subject', (s) => s.replaceSubject!(META_GRAPH, CG_DID, [quad(CG_DID, ALLOWED_PEER, META_GRAPH)])],
-    ['a replace of the catalog subject', (s) => s.replaceSubject!(contextGraphCatalogUri(CG), CG_DID, [
-      quad(CG_DID, DKG_ONTOLOGY.DCT_ACCESS_RIGHTS, contextGraphCatalogUri(CG))])],
-    ['a removal of a catalog fact by predicate', (s) => s.deleteByPatternWithoutCount!({
-      graph: contextGraphCatalogUri(CG), subject: CG_DID, predicate: DKG_ONTOLOGY.DCT_ACCESS_RIGHTS })],
     ['a removal in the agents graph', (s) => s.deleteByPatternWithoutCount!({
       graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS), subject: CG_DID })],
     ['a prefix delete', (s) => s.deleteBySubjectPrefix(KA_GRAPH, 'urn:x:')],
@@ -136,6 +132,26 @@ describe('peer gate revision through the production store wrapper (GH#3067)', ()
     const before = read();
     await run(wrapper);
     expect(read(), label).not.toBe(before);
+  });
+
+  const catalogFloor: Array<[string, (store: Wrapper) => Promise<unknown>]> = [
+    ['a replace of the catalog subject', (s) => s.replaceSubject!(contextGraphCatalogUri(CG), CG_DID, [
+      quad(CG_DID, DKG_ONTOLOGY.DCT_ACCESS_RIGHTS, contextGraphCatalogUri(CG))])],
+    ['a removal of a catalog fact by predicate', (s) => s.deleteByPatternWithoutCount!({
+      graph: contextGraphCatalogUri(CG), subject: CG_DID, predicate: DKG_ONTOLOGY.DCT_ACCESS_RIGHTS })],
+  ];
+
+  it.each(catalogFloor)('refreshes catalog authority without changing the peer gate for %s', async (label, run) => {
+    const { wrapper, projection, read } = await open();
+    await wrapper.insert([quad(CG_DID, DKG_ONTOLOGY.DCT_ACCESS_RIGHTS, contextGraphCatalogUri(CG))]);
+    const gate = read();
+    const cache = projection.readContextGraphAuthorityFactsRevision(CG);
+    const nodeWide = projection.readAuthorityFactsRevision;
+    await run(wrapper);
+    // Catalog floors contribute access classification, never peer/roster/delegation facts.
+    expect(read(), label).toBe(gate);
+    expect(projection.readContextGraphAuthorityFactsRevision(CG), label).not.toBe(cache);
+    expect(projection.readAuthorityFactsRevision, label).toBeGreaterThan(nodeWide);
   });
 
   it('moves for a counted removal of allowed peers by predicate', async () => {

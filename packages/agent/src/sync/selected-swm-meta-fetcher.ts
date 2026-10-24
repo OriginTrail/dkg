@@ -58,6 +58,14 @@ interface SelectedSwmMetaContinuationState {
   metadataExpiresAtMs: number;
   /** Independent continuation created only after metadata is complete. */
   snapshotWalk?: SelectedManifestBoundSnapshotWalk;
+  /**
+   * The walk, and how many of its refs were resolved, when a round of the
+   * current outer invocation first replayed this completed manifest.
+   */
+  replayedAt?: {
+    readonly walk: SelectedManifestBoundSnapshotWalk | undefined;
+    readonly resolved: number;
+  };
   retentionLease: SelectedSwmMetaRetentionLease;
   /** Consecutive shared-pool yields since this prefix last grew. */
   sharedPoolYields: number;
@@ -340,6 +348,14 @@ export function createSelectedSwmMetaFetcher(options: {
     hasRetainedMetadataPrefix(state) || hasIncompleteSnapshotWalk(state)
   );
 
+  /** A round of this outer invocation replayed the manifest and its walk resolved nothing more. */
+  const replayedWithoutProgress = (state: SelectedSwmMetaContinuationState): boolean => {
+    const replayed = state.replayedAt;
+    if (replayed === undefined) return false;
+    const resolvedBefore = state.snapshotWalk === replayed.walk ? replayed.resolved : 0;
+    return (state.snapshotWalk?.resolvedCount() ?? 0) <= resolvedBefore;
+  };
+
   const retainedContinuationExpiry = (
     state: SelectedSwmMetaContinuationState,
   ): number | undefined => {
@@ -596,6 +612,10 @@ export function createSelectedSwmMetaFetcher(options: {
       activeContextGraphs.add(request.contextGraphId);
       try {
         if (state.completed) {
+          state.replayedAt ??= {
+            walk: state.snapshotWalk,
+            resolved: state.snapshotWalk?.resolvedCount() ?? 0,
+          };
           return {
             result: {
               quads: state.quads,
@@ -665,7 +685,16 @@ export function createSelectedSwmMetaFetcher(options: {
         // skip refs already materialized instead of spending every slice
         // re-reading the same prefix. Full walks, zero-ref manifests and empty
         // metadata state have no resumable work and are released immediately.
-        if (!hasRetainedContinuation(state)) {
+        //
+        // Nor is it kept once a round replayed it and its walk resolved
+        // nothing more. The ref the walk waits for may be one the peer no
+        // longer serves: a Core drops the copy it keeps for a StorageACK once
+        // the asset is in Verified Memory, and its current manifest no longer
+        // names it. The next round reads the manifest again instead of asking
+        // for that ref until the walk expires.
+        const stalled = replayedWithoutProgress(state);
+        state.replayedAt = undefined;
+        if (!hasRetainedContinuation(state) || stalled) {
           release(contextGraphId, state);
           completedContextGraphs.delete(contextGraphId);
         } else {

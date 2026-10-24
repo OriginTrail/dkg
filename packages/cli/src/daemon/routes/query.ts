@@ -1,3 +1,4 @@
+import { isPublicSnapshotMode } from '@origintrail-official/dkg-agent/public-snapshot-mode';
 import { handleGenuiRender } from './query-genui.js';
 // daemon/routes/query.ts
 //
@@ -520,6 +521,9 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     const contextGraphId = parsed.contextGraphId === 'all'
       ? undefined
       : parsed.contextGraphId;
+    if (parsed.chainEvidenceMode !== undefined && !isPublicSnapshotMode(parsed.chainEvidenceMode)) {
+      return jsonResponse(res, 400, { error: 'Invalid chainEvidenceMode; expected core-cache or rpc-only' });
+    }
     const graphSuffix = parsed.graphSuffix;
     const includeSharedMemory =
       parsed.includeSharedMemory ?? parsed.includeWorkspace;
@@ -666,6 +670,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       try {
         result = await agent.query(sparql, {
           contextGraphId,
+          chainEvidenceMode: parsed.chainEvidenceMode,
           graphSuffix,
           includeSharedMemory,
           includeContextGraphPartitions,

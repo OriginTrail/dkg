@@ -1,3 +1,4 @@
+import type { PreparedContentCacheConfig } from './sync/responder/prepared-content-cache.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -51,7 +52,6 @@ import type {
   UnsignedMemberRosterEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import type {
-  PublisherAssertionPromoteOptions,
   PublicationPricingPolicy,
   PhaseCallback,
   SharedMemoryPublicSnapshotStorageConfig,
@@ -92,24 +92,14 @@ import type {
   SyncResponderSnapshotLimitsConfig,
 } from './sync/policy.js';
 import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
-import type { FinalizationRecoveryStore } from './finalization-recovery-store.js';
+import type { FinalizationRecoveryStoreFactory } from './finalization-recovery-store.js';
 import type { AuthorityIndexConfig } from './authority-index-config.js';
 import type { ContextGraphStorageDiscoveryStore } from './context-graph-storage-discovery.js';
 
 // ── File-local structural types ─────────────────────────────────────
 
-/** Public options for the agent assertion-promote facade. */
-export interface AssertionPromoteOptions extends Pick<
-  PublisherAssertionPromoteOptions,
-  'entities' | 'subGraphName' | 'accessPolicy' | 'allowedPeers'
-> {
-  agentAddress?: string;
-  authorAgentAddress?: string;
-  preSignedAuthorAttestation?: PreSignedAuthorAttestation;
-  awaitCuratorAck?: boolean;
-  curatorAckTimeoutMs?: number;
-  skipSeal?: boolean;
-}
+/** Public options distinguish ordinary promotion from immutable bound replay. */
+export type { AssertionPromoteOptions } from './internal/promote/assertion-promote-input.js';
 
 /**
  * Pre-signed AuthorAttestation payload supplied at finalize-time by
@@ -1409,14 +1399,7 @@ export interface Rfc64CatalogBootstrapConfigV1 {
   readonly retryIntervalMs?: number;
 }
 
-/**
- * Creates the durable finalization inbox for one agent data directory.
- * The factory must return a fresh, open store. The agent owns the returned
- * store and closes it during normal startup rollback or shutdown.
- */
-export type FinalizationRecoveryStoreFactory = (
-  dataDir: string,
-) => Promise<FinalizationRecoveryStore>;
+export type { FinalizationRecoveryStoreFactory } from './finalization-recovery-store.js';
 
 export interface DKGAgentConfig {
   name: string;
@@ -1634,6 +1617,8 @@ export interface DKGAgentConfig {
   syncAdmission?: SyncAdmissionConfig;
   /** Daemon-local retained responder snapshot row/estimated-byte policy. */
   syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
+  /** Opt-in persistent verified public assertion bytes, never cached authority. */
+  preparedContentCache?: PreparedContentCacheConfig;
   /**
    * Local requester/responder priority by Context Graph ID. Higher runs first.
    * System Context Graphs default to a deprioritized priority so they run
@@ -2058,6 +2043,8 @@ export type ResolvedDKGAgentConfig =
     chainAuthorityReadBudgets: ChainAuthorityReadBudgets;
     rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
     rfc64CatalogBootstrap?: Readonly<Rfc64CatalogBootstrapConfigV1>;
+    /** Graphs the manual peer table of `rfc64Catalog.accessPolicyAuthority` covers. */
+    rfc64CatalogManualTrustRootContextGraphs?: readonly string[];
     /** Sole immutable restart-stable D17/D18 runtime authority for this boot. */
     rfc64CatalogExecutionPlan: import('./rfc64/catalog-rollout-authority-v1.js')
       .Rfc64CatalogExecutionPlanV1;
