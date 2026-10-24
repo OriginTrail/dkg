@@ -31,8 +31,8 @@ export function fixture(t) {
   const commit = 'a'.repeat(40), version = '10.0.25';
   const buildIdentity = { commit, commitShort: commit.slice(0, 8), dirty: false, buildTime: '2026-10-24T00:00:00.000Z', distTag: 'monorepo', ciRun: null };
   const expected = { commit, version, profile: PROFILE, familyPolicy: { libp2p: '3.5.1' }, requiredAssets: { [CLI]: ['build-info.json', 'dist/cli.js'] }, packages: [
-    { name: CLI, version, dependencies: { dependencies: { '@origintrail-official/dkg-core': version }, optionalDependencies: {}, peerDependencies: {} } },
-    { name: '@origintrail-official/dkg-core', version, dependencies: { dependencies: { libp2p: '3.5.1' }, optionalDependencies: {}, peerDependencies: {} } },
+    { name: CLI, version, dependencies: { dependencies: { '@origintrail-official/dkg-core': version }, optionalDependencies: {}, peerDependencies: {}, devDependencies: {} } },
+    { name: '@origintrail-official/dkg-core', version, dependencies: { dependencies: { libp2p: '3.5.1' }, optionalDependencies: {}, peerDependencies: {}, devDependencies: {} } },
   ] };
   const packages = expected.packages.map((pkg, i) => {
     const files = { 'package.json': JSON.stringify({ name: pkg.name, version, ...pkg.dependencies }), 'dist/cli.js': 'export {};', ...(i === 0 ? { 'build-info.json': JSON.stringify(buildIdentity) } : {}) };

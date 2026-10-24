@@ -59,7 +59,7 @@ export function tarFiles(bytes) {
   assert.ok(files.has('package.json'), 'tarball has no package.json');
   return files;
 }
-export const dependencies = pkg => Object.fromEntries(['dependencies', 'optionalDependencies', 'peerDependencies'].map(field => [field, pkg[field] ?? {}]));
+export const dependencies = pkg => Object.fromEntries(['dependencies', 'optionalDependencies', 'peerDependencies', 'devDependencies'].map(field => [field, pkg[field] ?? {}]));
 export function validatePackedManifest(pkg, expected, names) {
   assert.equal(pkg.name, expected.name, 'wrong package name');
   assert.equal(pkg.version, expected.version, `wrong version: ${pkg.name}`);
