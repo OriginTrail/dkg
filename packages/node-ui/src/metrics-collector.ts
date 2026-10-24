@@ -23,17 +23,22 @@ export interface RelayStatsSnapshot {
   bytesOut: bigint;
 }
 
+export interface StoreCountSnapshot {
+  totalTriples: number;
+  totalKCs: number;
+  totalKAs: number;
+  confirmedKCs: number;
+  tentativeKCs: number;
+}
+
 export interface MetricsSource {
   getPeerCount(): number;
   getDirectPeerCount(): number;
   getRelayedPeerCount(): number;
   getMeshPeerCount(): number;
   getContextGraphCount(): Promise<number>;
-  getTotalTriples(): Promise<number>;
-  getTotalKCs(): Promise<number>;
-  getTotalKAs(): Promise<number>;
-  getConfirmedKCs(): Promise<number>;
-  getTentativeKCs(): Promise<number>;
+  /** One coherent, exact snapshot of the five store-wide counters. */
+  getStoreCountSnapshot(): Promise<StoreCountSnapshot>;
   // External SPARQL backends (Blazegraph, sparql-http) own no local
   // file, so `null` is the correct signal: collector writes a NULL into
   // the `store_bytes` SQLite column (already nullable). Quad count for
@@ -177,8 +182,7 @@ export class MetricsCollector {
       rpcHealthy = (await this.source.isRpcHealthy()) ? 1 : 0;
     } catch { /* ignore */ }
 
-    // These six getters are full-store SPARQL scans (COUNT / COUNT(DISTINCT)
-    // across every graph, plus the context-graph inventory) — the expensive
+    // The store-count snapshot and context-graph inventory are the expensive
     // part of a tick. Skip them when nothing is consuming metrics, leaving the
     // columns null (already nullable; charts render the gap). The cheap
     // system/network metrics above always collect, so a CPU peg is still
@@ -257,24 +261,16 @@ export class MetricsCollector {
   }
 
   private async readStoreMetrics(): Promise<StoreMetricCounts> {
-    let totalTriples: number | null = null;
-    let totalKCs: number | null = null;
-    let totalKAs: number | null = null;
-    let confirmedKCs: number | null = null;
-    let tentativeKCs: number | null = null;
+    let counts: StoreCountSnapshot | null = null;
     let contextGraphCount: number | null = null;
-    try { totalTriples = await this.source.getTotalTriples(); } catch { /* ignore */ }
-    try { totalKCs = await this.source.getTotalKCs(); } catch { /* ignore */ }
-    try { totalKAs = await this.source.getTotalKAs(); } catch { /* ignore */ }
-    try { confirmedKCs = await this.source.getConfirmedKCs(); } catch { /* ignore */ }
-    try { tentativeKCs = await this.source.getTentativeKCs(); } catch { /* ignore */ }
+    try { counts = await this.source.getStoreCountSnapshot(); } catch { /* ignore */ }
     try { contextGraphCount = await this.source.getContextGraphCount(); } catch { /* ignore */ }
     return {
-      total_triples: totalTriples,
-      total_kcs: totalKCs,
-      total_kas: totalKAs,
-      confirmed_kcs: confirmedKCs,
-      tentative_kcs: tentativeKCs,
+      total_triples: counts?.totalTriples ?? null,
+      total_kcs: counts?.totalKCs ?? null,
+      total_kas: counts?.totalKAs ?? null,
+      confirmed_kcs: counts?.confirmedKCs ?? null,
+      tentative_kcs: counts?.tentativeKCs ?? null,
       contextGraph_count: contextGraphCount,
     };
   }

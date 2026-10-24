@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { markCoreTrustedGraph, queryWithPublicSnapshotTrust } from '../../agent/src/public-snapshot-evidence.js';
 import { DKGQueryEngine } from '../../query/src/dkg-query-engine.js';
@@ -260,10 +260,13 @@ describe('createStoreCountMetrics', () => {
         { subject: 'did:dkg:evm:31337/0xcd/2', predicate: `${DKG}status`, object: '"tentative"', graph: 'did:dkg:context-graph:imported/_meta' },
         { subject: 'did:dkg:evm:31337/0xcd/2', predicate: `${DKG}rootEntity`, object: 'urn:entity', graph: 'did:dkg:context-graph:imported/_meta' },
       ]);
-      const read = async () => ({
-        triples: await metrics.getTotalTriples(), kcs: await metrics.getTotalKCs(), kas: await metrics.getTotalKAs(),
-        confirmed: await metrics.getConfirmedKCs(), tentative: await metrics.getTentativeKCs(),
-      });
+      const read = async () => {
+        const counts = await metrics.getStoreCountSnapshot();
+        return {
+          triples: counts.totalTriples, kcs: counts.totalKCs, kas: counts.totalKAs,
+          confirmed: counts.confirmedKCs, tentative: counts.tentativeKCs,
+        };
+      };
       expect(await read()).toEqual({ triples: 4, kcs: 2, kas: 2, confirmed: 1, tentative: 1 });
       await markCoreTrustedGraph(store, 'imported');
       // A new reconciler models the next low-frequency exact refresh.

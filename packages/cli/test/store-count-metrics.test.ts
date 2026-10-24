@@ -10,11 +10,16 @@ const countRow = (value: string) => ({ bindings: [{
 }] });
 
 describe('createStoreCountMetrics snapshot lifecycle', () => {
-  it('coalesces every getter into one exact background reconciliation', async () => {
+  it('coalesces concurrent snapshot reads into one exact background reconciliation', async () => {
     const query = vi.fn(async () => countRow('"5"^^<http://www.w3.org/2001/XMLSchema#integer>'));
     const metrics = createStoreCountMetrics(query);
-    expect(await Promise.all([metrics.getTotalTriples(), metrics.getTotalKCs(), metrics.getTotalKAs(),
-      metrics.getConfirmedKCs(), metrics.getTentativeKCs()])).toEqual([5, 5, 5, 5, 5]);
+    const [first, second] = await Promise.all([
+      metrics.getStoreCountSnapshot(), metrics.getStoreCountSnapshot(),
+    ]);
+    expect(first).toEqual({
+      totalTriples: 5, totalKCs: 5, totalKAs: 5, confirmedKCs: 5, tentativeKCs: 5,
+    });
+    expect(second).toBe(first);
     expect(query).toHaveBeenCalledOnce();
     expect(query.mock.calls[0]?.[1]).toEqual({
       source: 'daemon.metrics.storeCountReconcile',
@@ -22,7 +27,7 @@ describe('createStoreCountMetrics snapshot lifecycle', () => {
     });
   });
 
-  it('serves the maintained snapshot, probes health, and reconciles stale data in background', async () => {
+  it('probes health and awaits a stale reconciliation before releasing the collected snapshot', async () => {
     let now = 1_000;
     let value = 5;
     let releaseRefresh!: () => void;
@@ -39,24 +44,22 @@ describe('createStoreCountMetrics snapshot lifecycle', () => {
       reconcileIntervalMs: 100,
       healthIntervalMs: 10,
     });
-    expect(await metrics.getTotalTriples()).toBe(5);
+    expect((await metrics.getStoreCountSnapshot()).totalTriples).toBe(5);
     now += 100;
     value = 6;
-    // The stale exact value is immediate; reconciliation is detached.
-    expect(await metrics.getTotalTriples()).toBe(5);
+    const refresh = metrics.getStoreCountSnapshot();
+    await vi.waitFor(() => expect(reconciliations).toBe(2));
     expect(query.mock.calls.some(([sparql]) => sparql === 'ASK {}')).toBe(true);
     releaseRefresh();
-    await metrics.reconcileStoreCounts();
-    expect(await metrics.getTotalTriples()).toBe(6);
+    expect((await refresh).totalTriples).toBe(6);
   });
 
-  it('never serves a maintained snapshot through a store outage', async () => {
+  it('never serves a maintained snapshot when the health ASK is denied', async () => {
     let now = 1_000;
-    let healthy = true;
+    let authorized = true;
     const query = vi.fn(async (sparql: string) => {
       if (sparql === 'ASK {}') {
-        if (!healthy) throw new Error('store unavailable');
-        return { type: 'boolean' as const, value: true };
+        return { type: 'boolean' as const, value: authorized };
       }
       return countRow('5');
     });
@@ -64,9 +67,41 @@ describe('createStoreCountMetrics snapshot lifecycle', () => {
       now: () => now,
       healthIntervalMs: 10,
     });
-    expect(await metrics.getTotalTriples()).toBe(5);
+    expect((await metrics.getStoreCountSnapshot()).totalTriples).toBe(5);
     now += 10;
-    healthy = false;
-    await expect(metrics.getTotalTriples()).rejects.toThrow('store unavailable');
+    authorized = false;
+    await expect(metrics.getStoreCountSnapshot()).rejects.toThrow('health probe was denied');
+  });
+
+  it('suppresses failed reconciliation retries and recovers with an updated snapshot', async () => {
+    let now = 1_000;
+    let value = 5;
+    let failReconciliation = false;
+    let reconciliations = 0;
+    const query = vi.fn(async (sparql: string) => {
+      if (sparql === 'ASK {}') return { type: 'boolean' as const, value: true };
+      reconciliations += 1;
+      if (failReconciliation) throw new Error('count timeout');
+      return countRow(String(value));
+    });
+    const metrics = createStoreCountMetrics(query, {
+      now: () => now,
+      reconcileIntervalMs: 100,
+      healthIntervalMs: 10,
+    });
+    expect((await metrics.getStoreCountSnapshot()).totalTriples).toBe(5);
+
+    now += 100;
+    failReconciliation = true;
+    await expect(metrics.getStoreCountSnapshot()).rejects.toThrow('count timeout');
+    expect(reconciliations).toBe(2);
+    await expect(metrics.getStoreCountSnapshot()).rejects.toThrow('count timeout');
+    expect(reconciliations).toBe(2);
+
+    now += 10;
+    failReconciliation = false;
+    value = 6;
+    expect((await metrics.getStoreCountSnapshot()).totalTriples).toBe(6);
+    expect(reconciliations).toBe(3);
   });
 });

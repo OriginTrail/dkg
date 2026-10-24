@@ -23,13 +23,17 @@ const CONTEXT_GRAPH_RESERVED_SUFFIXES = [
 ] as const;
 const WALLET_SCOPED_CONTEXT_GRAPH_RE = /^0x[a-fA-F0-9]{40}\/.+$/;
 
+// sparql-scan-allow: R1 -- exact low-frequency store reconciliation must count the default graph
+// sparql-scan-allow: R2 -- exact low-frequency store reconciliation must count every named graph
+const TOTAL_TRIPLES_PATTERN = '{ ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } }';
+
 /**
  * Total triples across the default graph and all named graphs. This standalone
  * query remains the canonical benchmark probe; production metrics use the
  * combined, low-frequency snapshot below.
  */
 export const GET_TOTAL_TRIPLES_SPARQL =
-  'SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }';
+  `SELECT (COUNT(*) AS ?c) WHERE { ${TOTAL_TRIPLES_PATTERN} }`;
 
 // RFC ka-metadata-trim (Phase 2 ⊕ / Phase 3 P3.1): the KC/KA counters are
 // predicate-based, not rdf:type-based — `generateKCMetadata` no longer
@@ -41,28 +45,18 @@ export const GET_TOTAL_TRIPLES_SPARQL =
 //     `dkg:status` + the entity pair with NO token row pointing at it
 //     (the NOT-EXISTS guard prevents double-counting old-shape rows,
 //     whose aggregate UAL node also carries `dkg:rootEntity`).
-export const GET_TOTAL_KCS_SPARQL =
-  'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> ?s } }';
-export const GET_TOTAL_KAS_SPARQL = `SELECT (COUNT(DISTINCT ?ka) AS ?c) WHERE { GRAPH ?g {
-          { ?ka <http://dkg.io/ontology/partOf> ?kc }
-          UNION
-          { ?ka <http://dkg.io/ontology/status> ?st .
-            ?ka <http://dkg.io/ontology/rootEntity> ?re .
-            FILTER NOT EXISTS { ?tok <http://dkg.io/ontology/partOf> ?ka } }
-        } }`;
-export const GET_CONFIRMED_KCS_SPARQL =
-  'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "confirmed" } }';
-export const GET_TENTATIVE_KCS_SPARQL =
-  'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "tentative" } }';
-
 /**
  * One exact store-count snapshot. The subqueries intentionally preserve the
  * established count semantics above; combining them removes four HTTP
  * round-trips and gives the reconciler one all-or-nothing result.
  */
+// sparql-scan-allow: R1 -- exact reconciliation runs at background priority at most once per five minutes
+// sparql-scan-allow: R2 -- exact reconciliation intentionally counts all admitted named graphs in one query
 export const GET_STORE_COUNT_SNAPSHOT_SPARQL = `SELECT ?totalTriples ?totalKCs ?totalKAs ?confirmedKCs ?tentativeKCs WHERE {
   { SELECT (COUNT(*) AS ?totalTriples) WHERE {
-      { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } }
+      # sparql-scan-allow: R1 -- exact background reconciliation counts the default graph at most once per five minutes
+      # sparql-scan-allow: R2 -- exact background reconciliation counts all admitted named graphs at most once per five minutes
+      ${TOTAL_TRIPLES_PATTERN}
   } }
   { SELECT (COUNT(DISTINCT ?kc) AS ?totalKCs) WHERE {
       GRAPH ?g { ?kc <http://dkg.io/ontology/status> ?status }
@@ -182,7 +176,10 @@ export function createStoreCountMetrics(
     const run = query(STORE_METRICS_HEALTH_SPARQL, {
       source: 'daemon.metrics.storeHealth',
       priority: 'health',
-    }).then(() => {
+    }).then((result) => {
+      if (result?.type !== 'boolean' || result.value !== true) {
+        throw new Error('Store metrics health probe was denied');
+      }
       lastHealthyAt = now();
     }).finally(() => {
       if (healthInflight === run) healthInflight = null;
@@ -192,7 +189,7 @@ export function createStoreCountMetrics(
   };
 
   const read = async (): Promise<StoreCountSnapshot> => {
-    const checkedAt = now();
+    let checkedAt = now();
     if (snapshot === null) {
       if (
         lastReconcileFailureAt !== null
@@ -202,6 +199,7 @@ export function createStoreCountMetrics(
       return reconcile();
     }
     await assertHealthy();
+    checkedAt = now();
     if (
       lastReconcileFailureAt !== null
       && checkedAt >= lastReconcileFailureAt
@@ -211,21 +209,17 @@ export function createStoreCountMetrics(
       checkedAt < snapshot.reconciledAt
       || checkedAt - snapshot.reconciledAt >= reconcileIntervalMs
     ) {
-      // Dashboard reads stay O(1): refresh at background priority and keep the
-      // last exact snapshot only while the endpoint remains demonstrably live.
-      void reconcile().catch(() => undefined);
+      // The collector persists this result for up to a day, so the collection
+      // that detects expiry must await the exact replacement rather than save
+      // the previous snapshot and strand the refreshed value in memory.
+      return reconcile();
     }
     if (lastReconcileError !== undefined) throw lastReconcileError;
     return snapshot.value;
   };
 
   return {
-    getTotalTriples: async () => (await read()).totalTriples,
-    getTotalKCs: async () => (await read()).totalKCs,
-    getTotalKAs: async () => (await read()).totalKAs,
-    getConfirmedKCs: async () => (await read()).confirmedKCs,
-    getTentativeKCs: async () => (await read()).tentativeKCs,
-    reconcileStoreCounts: reconcile,
+    getStoreCountSnapshot: read,
   };
 }
 
