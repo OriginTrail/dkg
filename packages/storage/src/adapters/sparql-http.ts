@@ -40,8 +40,7 @@ import type {
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
-import { decodeSparqlJsonQueryResult } from '../sparql-json-query-result.js';
-import { decodeSparqlTsvSelectResponse } from '../sparql-tsv-query-result.js';
+import { decodeSparqlHttpQueryResponse } from './sparql-query-response.js';
 import {
   externalStorePriorityScheduler,
   type StorePriorityScheduler,
@@ -1108,35 +1107,11 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
           'query',
           canonicalOperation,
           effectiveOptions,
-          async (res) => {
-            if (!res.ok) {
-              const text = await readSparqlResponseText(res, {
-                maxResponseBytes: effectiveOptions.maxResponseBytes,
-                managedOxigraph: this.managedOxigraph,
-                operation: canonicalOperation,
-                tolerateReadFailure: true,
-              });
-              throw new SparqlHttpResponseError('query', res.status, text.slice(0, 300));
-            }
-
-            // A generic endpoint keeps the standard JSON path. Managed
-            // Oxigraph honors TSV, but fall back safely if a proxy explicitly
-            // identifies a JSON response despite the Accept header.
-            const contentType = res.headers?.get?.('content-type')?.toLowerCase() ?? '';
-            if (useStreamingTsv && !contentType.includes('json')) {
-              return decodeSparqlTsvSelectResponse(res, {
-                maxResponseBytes: effectiveOptions.maxResponseBytes,
-                managedOxigraph: true,
-                operation: canonicalOperation,
-              });
-            }
-            const text = await readSparqlResponseText(res, {
-              maxResponseBytes: effectiveOptions.maxResponseBytes,
-              managedOxigraph: this.managedOxigraph,
-              operation: canonicalOperation,
-            });
-            return decodeSparqlJsonQueryResult(text, isAsk ? 'ask' : 'select');
-          },
+          (res) => decodeSparqlHttpQueryResponse(res, {
+            isAsk, useStreamingTsv, operation: canonicalOperation,
+            maxResponseBytes: effectiveOptions.maxResponseBytes,
+            managedOxigraph: this.managedOxigraph,
+          }),
           readPolicy,
         );
       } finally {

@@ -5,11 +5,15 @@ import {
   parseRdfLiteralTerm,
   type RdfLiteralTerm,
 } from '@origintrail-official/dkg-rdf-utils';
-import { isSafeIri } from '@origintrail-official/dkg-core';
-import { StoreResponseTooLargeError } from './http-response-limit.js';
+import { consumeStoreResponseBodyChunks } from './http-response-limit.js';
 import {
   assertManagedOxigraphSparqlResponseComplete,
 } from './adapters/sparql-response-policy.js';
+import {
+  createSparqlResultIriValidator,
+  isSafeSparqlResultIri,
+  MAX_CACHED_SPARQL_IRI_VARIABLES,
+} from './sparql-result-iri.js';
 import type { StoreOperation } from './store-operation-outcome.js';
 import type { SelectResult } from './triple-store.js';
 
@@ -17,8 +21,18 @@ const XSD_NAMESPACE = 'http://www.w3.org/2001/XMLSchema#';
 const TSV_INTEGER = /^[+-]?[0-9]+$/;
 const TSV_DECIMAL = /^[+-]?(?:[0-9]*\.[0-9]+)$/;
 const TSV_DOUBLE = /^[+-]?(?:(?:[0-9]+\.[0-9]*|\.[0-9]+)[eE][+-]?[0-9]+|[0-9]+[eE][+-]?[0-9]+)$/;
-const TSV_FAST_PLAIN_LITERAL = /^"[^"\\\u0000-\u001F\u007F]*"$/;
-const SCHEME_ONLY_IRI = /^[a-zA-Z][a-zA-Z0-9+.-]*:$/;
+const TSV_FAST_PLAIN_LITERAL = /^"[^"\\]*"$/;
+
+function hasForbiddenLiteralControlCharacter(cell: string): boolean {
+  for (let index = 1; index < cell.length - 1; index += 1) {
+    const characterCode = cell.charCodeAt(index);
+    if (characterCode <= 0x1f || characterCode === 0x7f) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 // SPARQL 1.1 VARNAME. A TSV header always uses the `?name` spelling.
 const PN_CHARS_BASE =
@@ -30,11 +44,6 @@ const TSV_HEADER_VARIABLE = new RegExp(
   `^\\?([${PN_CHARS_U}0-9][${PN_CHARS_U}0-9\\u00B7\\u0300-\\u036F\\u203F-\\u2040]*)$`,
   'u',
 );
-
-const MAX_CACHED_IRI_VARIABLES = 128;
-const MAX_CACHED_IRI_LENGTH = 1024;
-const MAX_CONSECUTIVE_IRI_MISSES = 16;
-const PAUSED_IRI_COMPARISON_ROWS = 128;
 
 export class SparqlTsvResultsShapeError extends Error {
   constructor(message: string, options: ErrorOptions = {}) {
@@ -58,37 +67,21 @@ export async function decodeSparqlTsvSelectResponse(
   response: Response,
   options: SparqlTsvResponseOptions,
 ): Promise<SelectResult> {
-  const maxBytes = validateMaxBytes(options.maxResponseBytes);
-  rejectOversizedContentLength(response, maxBytes);
   const parser = new SparqlTsvSelectParser(options);
-  const body = response.body;
-  if (body === null) return parser.finish();
-
-  const reader = body.getReader();
   const decoder = new TextDecoder('utf-8', { fatal: true });
-  let bytesRead = 0;
   try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      bytesRead += value.byteLength;
-      if (maxBytes !== undefined && bytesRead > maxBytes) {
-        throw new StoreResponseTooLargeError(maxBytes, bytesRead);
-      }
-      parser.feed(decoder.decode(value, { stream: true }));
-    }
+    await consumeStoreResponseBodyChunks(response, options.maxResponseBytes, chunk => {
+      parser.feed(decoder.decode(chunk, { stream: true }));
+    });
     parser.feed(decoder.decode());
     return parser.finish();
   } catch (error) {
-    await reader.cancel(error).catch(() => undefined);
     if (error instanceof TypeError && /encoded data|utf-8/i.test(error.message)) {
       throw new SparqlTsvResultsShapeError('SPARQL TSV response is not valid UTF-8', {
         cause: error,
       });
     }
     throw error;
-  } finally {
-    reader.releaseLock();
   }
 }
 
@@ -200,13 +193,13 @@ class TsvResultNormalizer {
   private readonly datatypeValidators: Array<(value: string) => boolean>;
 
   constructor(variableCount: number) {
-    const cachedColumns = Math.min(variableCount, MAX_CACHED_IRI_VARIABLES);
-    this.iriValidators = Array.from({ length: cachedColumns }, createIriValidator);
-    this.datatypeValidators = Array.from({ length: cachedColumns }, createIriValidator);
+    const cachedColumns = Math.min(variableCount, MAX_CACHED_SPARQL_IRI_VARIABLES);
+    this.iriValidators = Array.from({ length: cachedColumns }, createSparqlResultIriValidator);
+    this.datatypeValidators = Array.from({ length: cachedColumns }, createSparqlResultIriValidator);
   }
 
   formatIri(value: string, column: number, label: string): string {
-    if (!(this.iriValidators[column] ?? isSafeResultIri)(value)) {
+    if (!(this.iriValidators[column] ?? isSafeSparqlResultIri)(value)) {
       malformed(`${label} URI value must be an absolute safe IRI`);
     }
     return value;
@@ -220,7 +213,7 @@ class TsvResultNormalizer {
         if (decoded === null) malformed(`${label} datatype must be an absolute safe IRI`);
         datatype = decoded;
       }
-      if (!(this.datatypeValidators[column] ?? isSafeResultIri)(datatype)) {
+      if (!(this.datatypeValidators[column] ?? isSafeSparqlResultIri)(datatype)) {
         malformed(`${label} datatype must be an absolute safe IRI`);
       }
       return formatCanonicalRdfLiteralTerm({ ...term, datatype });
@@ -235,7 +228,10 @@ function formatTsvTerm(
   label: string,
   normalizer: TsvResultNormalizer,
 ): string {
-  if (TSV_FAST_PLAIN_LITERAL.test(cell)) {
+  if (
+    TSV_FAST_PLAIN_LITERAL.test(cell) &&
+    !hasForbiddenLiteralControlCharacter(cell)
+  ) {
     return `"${cell.slice(1, -1)}"`;
   }
   if (cell === 'true' || cell === 'false') {
@@ -277,37 +273,6 @@ function formatTsvTerm(
   return normalizer.formatLiteral(literal, column, label);
 }
 
-function isSafeResultIri(value: string): boolean {
-  // Match the established SPARQL JSON response contract exactly so changing
-  // the transport can never make a previously accepted result fail.
-  return isSafeIri(value) || SCHEME_ONLY_IRI.test(value);
-}
-
-function createIriValidator(): (value: string) => boolean {
-  let lastValidIri: string | undefined;
-  let consecutiveMisses = 0;
-  let pausedRows = 0;
-  return value => {
-    if (pausedRows > 0) {
-      pausedRows -= 1;
-      return isSafeResultIri(value);
-    }
-    if (value === lastValidIri) {
-      consecutiveMisses = 0;
-      return true;
-    }
-    const valid = isSafeResultIri(value);
-    if (valid && value.length <= MAX_CACHED_IRI_LENGTH) lastValidIri = value;
-    consecutiveMisses += 1;
-    if (consecutiveMisses >= MAX_CONSECUTIVE_IRI_MISSES) {
-      pausedRows = PAUSED_IRI_COMPARISON_ROWS;
-      consecutiveMisses = 0;
-      lastValidIri = undefined;
-    }
-    return valid;
-  };
-}
-
 function setBinding(binding: Record<string, string>, variable: string, value: string): void {
   if (variable === '__proto__') {
     Object.defineProperty(binding, '__proto__', {
@@ -319,21 +284,6 @@ function setBinding(binding: Record<string, string>, variable: string, value: st
     return;
   }
   binding[variable] = value;
-}
-
-function validateMaxBytes(value: number | undefined): number | undefined {
-  if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
-    throw new RangeError('maxResponseBytes must be a non-negative safe integer');
-  }
-  return value;
-}
-
-function rejectOversizedContentLength(response: Response, maxBytes: number | undefined): void {
-  if (maxBytes === undefined) return;
-  const raw = response.headers.get('content-length');
-  if (raw === null || !/^[0-9]+$/.test(raw)) return;
-  const actual = BigInt(raw);
-  if (actual > BigInt(maxBytes)) throw new StoreResponseTooLargeError(maxBytes, actual);
 }
 
 function malformed(message: string): never {

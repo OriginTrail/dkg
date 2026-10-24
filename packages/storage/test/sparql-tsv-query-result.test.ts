@@ -44,13 +44,11 @@ describe('SPARQL TSV SELECT decoding', () => {
   });
 
   it('handles BOM, CRLF, empty results, zero-column rows, and __proto__ safely', () => {
-    expect(decodeSparqlTsvSelectResult('\uFEFF?__proto__\r\n"safe"\r\n'))
-      .toEqual({
-        type: 'bindings',
-        variables: ['__proto__'],
-        bindings: [expect.objectContaining({ __proto__: '"safe"' })],
-      });
-    const binding = decodeSparqlTsvSelectResult('?__proto__\n"safe"\n').bindings[0]!;
+    const decoded = decodeSparqlTsvSelectResult('\uFEFF?__proto__\r\n"safe"\r\n');
+    expect(decoded.type).toBe('bindings');
+    expect(decoded.variables).toEqual(['__proto__']);
+    const binding = decoded.bindings[0]!;
+    expect(binding['__proto__']).toBe('"safe"');
     expect(Object.getPrototypeOf(binding)).toBe(Object.prototype);
     expect(Object.prototype.hasOwnProperty.call(binding, '__proto__')).toBe(true);
     expect(decodeSparqlTsvSelectResult('?x\n')).toEqual({
@@ -75,18 +73,33 @@ describe('SPARQL TSV SELECT decoding', () => {
 
   it('enforces maxResponseBytes while streaming and from Content-Length', async () => {
     const bytes = new TextEncoder().encode('?x\n"value"\n');
-    await expect(decodeSparqlTsvSelectResponse(chunkedResponse([
-      bytes.slice(0, 4), bytes.slice(4),
-    ]), {
+    let streamCancelled = false;
+    const streamingBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.slice(0, 4));
+        controller.enqueue(bytes.slice(4));
+      },
+      cancel() {
+        streamCancelled = true;
+      },
+    });
+    await expect(decodeSparqlTsvSelectResponse(new Response(streamingBody), {
       operation: 'query',
       maxResponseBytes: bytes.byteLength - 1,
     })).rejects.toMatchObject({
       code: 'STORE_RESPONSE_TOO_LARGE',
       maxBytes: bytes.byteLength - 1,
     });
+    expect(streamCancelled).toBe(true);
 
-    await expect(decodeSparqlTsvSelectResponse(chunkedResponse([], {
-      'Content-Length': String(bytes.byteLength),
+    let headerCancelled = false;
+    const declaredBody = new ReadableStream<Uint8Array>({
+      cancel() {
+        headerCancelled = true;
+      },
+    });
+    await expect(decodeSparqlTsvSelectResponse(new Response(declaredBody, {
+      headers: { 'Content-Length': String(bytes.byteLength) },
     }), {
       operation: 'query',
       maxResponseBytes: 1,
@@ -94,6 +107,7 @@ describe('SPARQL TSV SELECT decoding', () => {
       code: 'STORE_RESPONSE_TOO_LARGE',
       actualBytes: BigInt(bytes.byteLength),
     });
+    expect(headerCancelled).toBe(true);
   });
 
   it('rejects malformed headers, rows, RDF terms, UTF-8, and duplicate variables', async () => {

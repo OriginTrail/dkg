@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   BoundedResponseBodyLimitError,
+  consumeResponseBodyChunks,
   readResponseBodyBytesBounded,
 } from '../src/index.js';
 
@@ -48,6 +49,22 @@ describe('bounded response body collection', () => {
     await expect(readResponseBodyBytesBounded(new Response(input), 3)).resolves.toEqual(input);
     await expect(readResponseBodyBytesBounded(new Response(null), 0))
       .resolves.toEqual(new Uint8Array());
+  });
+
+  it('supports incremental consumers and cancels when the consumer rejects', async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(Uint8Array.of(1));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    await expect(consumeResponseBodyChunks(new Response(body), 10, () => {
+      throw new Error('consumer failed');
+    })).rejects.toThrow('consumer failed');
+    expect(cancelled).toBe(true);
   });
 
   it('rejects invalid limits before reading the response', async () => {
