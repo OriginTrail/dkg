@@ -200,11 +200,20 @@ The initial receipt is written before execution, so SIGKILL or host loss also
 leaves non-passing evidence, but cannot guarantee cleanup. Inspect resources
 named `dkg-cert-<receipt.runId>-*` after a forced termination. `*-data/` contains disposable local wallet keys and is
 local diagnosis only: exclude it from uploads. Portable evidence is the complete
-bundle plus attempt top-level JSON/JSONL/log files. The separately named manual
-`package-certification.yml` workflow uploads those files, with no npm credentials.
-It is opt-in and does not run global npm installs on unrelated PRs. Availability
-of workflow dispatch depends on the workflow reaching the default branch.
-It does not change the immutable planner, required checks or branch protections.
+bundle plus attempt top-level JSON/JSONL/log files. The separately named
+`package-certification.yml` workflow runs automatically on every push to `main`,
+including release PR merges, and certifies the exact pushed commit. It prepares
+the full package set, certifies both installation layouts, verifies the receipt,
+and runs the missing-UI negative control. Package bytes and attempt evidence are
+uploaded for 14 days, including evidence from failed attempts, with no npm
+credentials or publication. A failed run marks that commit's certification check
+as failed; it does not undo the merge or automatically promote a release.
+
+Maintainers can also dispatch a manual rehearsal for a full candidate SHA once
+the workflow reaches the default branch. The workflow does not run on unrelated
+PRs. Both automatic and manual runs use the selected SHA consistently for checkout,
+certification, verification and artifact naming. This post-merge check does not
+change the immutable planner, required checks or branch protections.
 Required script tests continue through `pnpm test:scripts`; any activation as a
 required candidate gate needs a separately reviewed trusted-controller pin/route
 update and maintainer branch-protection decision.
