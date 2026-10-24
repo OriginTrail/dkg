@@ -21,7 +21,7 @@ To better understand how DKG works, explore [here](../how-dkg-works/key-concepts
 
 ## Prerequisites&#x20;
 
-Node.js 22.13+ (or 23.4+), npm 10+. macOS, Linux, and Windows (PowerShell 5.1+ or WSL2) all supported.
+Node.js 22.23.4+, 24.22.1+ or 26.12.1+, npm 10+. DKG starts on Node.js 22.13+ (or 23.4+), but older releases miss the [2026-10-21 Node.js security fixes](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases), and `dkg start` and `dkg doctor` warn about them. macOS, Linux, and Windows (PowerShell 5.1+ or WSL2) all supported.
 
 ## Hermes&#x20;
 
