@@ -12,6 +12,8 @@ import { traceLaneLoads } from './load-graph.mjs';
 // load-closure guard cannot follow, each with the reason it needs no route of
 // its own.
 export const UNFOLLOWED_LOADS = new Map([
+  ['packages/node-ui/e2e/specs/bootstrap-failure.spec.ts: isolatedBootstrap',
+    'a byte-for-byte copy of e2e/bootstrap-devnet.ts in an isolated temporary repository; its bootstrap and devnet helper sources are already traced and routed to the browser lane'],
   ['scripts/test-mcp-wsl-launch.mjs: execute = execFileSync',
     'injected test seam defaults to node:child_process; calls only system /usr/bin/wslpath and /usr/bin/env, while the repository Windows driver is a literal URL also loaded directly by the smoke test'],
   ['scripts/ci/run-chain-rpc-node26.mjs: vitest',
