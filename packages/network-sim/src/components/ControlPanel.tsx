@@ -378,7 +378,7 @@ function SimulateTab() {
     es.onerror = () => {
       es.close();
       eventSourceRef.current = null;
-      if (running) {
+      if (!simStats.finishedAt) {
         simStats.finishedAt = Date.now();
         setStats({ ...simStats });
         setRunning(false);
@@ -405,7 +405,8 @@ function SimulateTab() {
   const elapsed = stats
     ? ((stats.finishedAt ?? Date.now()) - stats.startedAt) / 1000
     : 0;
-  const actualOps = stats ? (stats.completed + stats.errors) : 0; // total finished (success + fail)
+  const actualOps = stats?.completed ?? 0;
+  const succeeded = stats ? Math.max(0, stats.completed - stats.errors) : 0;
   const pct = stats ? Math.min(100, Math.round((actualOps / stats.total) * 100)) : 0;
 
   return (
@@ -489,7 +490,7 @@ function SimulateTab() {
           </div>
           <div className="sim-stats-grid">
             <div className="sim-stat">
-              <span className="sim-stat-value">{stats.completed}/{stats.total}</span>
+              <span className="sim-stat-value">{succeeded}/{stats.total}</span>
               <span className="sim-stat-label">succeeded</span>
             </div>
             <div className="sim-stat">
@@ -509,7 +510,7 @@ function SimulateTab() {
           </div>
           {stats.finishedAt && (
             <div className="sim-summary">
-              Simulation complete: {stats.completed} succeeded, {stats.errors} failed in {elapsed.toFixed(1)}s
+              Simulation complete: {succeeded} succeeded, {stats.errors} failed in {elapsed.toFixed(1)}s
             </div>
           )}
         </div>

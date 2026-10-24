@@ -30,6 +30,36 @@ afterEach(() => { ui.unmount(); vi.useRealTimers(); vi.restoreAllMocks(); vi.uns
 const source = () => TestEventSource.instances.at(-1)!;
 
 describe('simulation form and streamed results', () => {
+  it('clears the running state after an event-stream disconnect', async () => {
+    await ui.click('Play Simulation');
+    expect(ui.field('Total Ops').disabled).toBe(true);
+    act(() => source().onerror?.());
+    expect(source().close).toHaveBeenCalledTimes(1);
+    expect(store.dispatch).toHaveBeenLastCalledWith({ type: 'STOP_SIMULATION' });
+    expect(ui.button('Play Simulation').disabled).toBe(false);
+    expect(ui.field('Total Ops').disabled).toBe(false);
+    const calls = vi.mocked(store.dispatch).mock.calls.length;
+    act(() => source().onerror?.());
+    source().emit({ type: 'op', opType: 'query', nodeId: 2, success: true });
+    expect(store.dispatch).toHaveBeenCalledTimes(calls);
+    expect(store.addOperation).not.toHaveBeenCalled();
+  });
+  it.each(['op', 'status'])('counts failures once in progress and excludes them from succeeded totals via %s events', async eventType => {
+    await ui.fill('Total Ops', '2');
+    await ui.click('Play Simulation');
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    if (eventType === 'op') source().emit({ type: 'op', opType: 'query', nodeId: 2, success: false, durationMs: 10, detail: 'rejected' });
+    else source().emit({ type: 'status', completed: 1, errors: 1 });
+    expect((ui.container.querySelector('.sim-progress-fill') as HTMLElement).style.width).toBe('50%');
+    expect(ui.container.querySelector('.sim-stat-value')?.textContent).toBe('0/2');
+    expect(ui.container.querySelectorAll('.sim-stat-value')[2].textContent).toBe('1.0');
+    if (eventType === 'op') source().emit({ type: 'op', opType: 'query', nodeId: 2, success: true, durationMs: 10, detail: 'done' });
+    else source().emit({ type: 'status', completed: 2, errors: 1 });
+    expect((ui.container.querySelector('.sim-progress-fill') as HTMLElement).style.width).toBe('100%');
+    expect(ui.container.querySelector('.sim-stat-value')?.textContent).toBe('1/2');
+    source().emit({ type: 'done', completed: 2, errors: 1 });
+    expect(ui.container.textContent).toContain('Simulation complete: 1 succeeded, 1 failed');
+  });
   it('submits edited parameters, keeps at least one operation, and blocks edits during the run', async () => {
     await ui.fill('Simulation Name', 'load-test'); await ui.fill('Context Graph', 'team');
     await ui.fill('Total Ops', '8'); await ui.fill('Ops/sec', '2.5'); await ui.fill('Concurrency', '3'); await ui.fill('KAs per Publish', '4');

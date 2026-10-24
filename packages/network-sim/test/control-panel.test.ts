@@ -24,13 +24,18 @@ function result() { return ui.container.querySelector('.result-box')?.textConten
 
 describe('publish and shared-memory controls', () => {
   it.each(['literal text', 'https://example/entity', 'did:dkg:entity:x', 'urn:entity'])('publishes %s using the selected node and exact quad scope', async object => {
+    vi.mocked(store.dispatch).mockImplementation(action => {
+      if (action.type === 'SELECT_NODE') store.state = { ...store.state, selectedNode: action.id };
+    });
     await mount();
     await ui.fill('Subject', 'urn:subject'); await ui.fill('Predicate', 'urn:predicate');
     await ui.fill('Object', object); await ui.fill('Context Graph', 'did:dkg:context-graph:custom');
     await ui.click('N2', ui.container.querySelector('.node-selector')!);
     expect(store.dispatch).toHaveBeenCalledWith({ type: 'SELECT_NODE', id: 2 });
+    await ui.render(React.createElement(ControlPanel));
     await ui.click('Publish Knowledge Asset');
-    expect(api.publishKA).toHaveBeenCalledExactlyOnceWith(1, 'did:dkg:context-graph:custom', [{ subject: 'urn:subject', predicate: 'urn:predicate', object: object === 'literal text' ? '"literal text"' : object, graph: 'did:dkg:context-graph:custom' }], undefined);
+    expect(api.publishKA).toHaveBeenCalledExactlyOnceWith(2, 'did:dkg:context-graph:custom', [{ subject: 'urn:subject', predicate: 'urn:predicate', object: object === 'literal text' ? '"literal text"' : object, graph: 'did:dkg:context-graph:custom' }], undefined);
+    expect(store.addBroadcast).toHaveBeenCalledExactlyOnceWith('publish', 2, 'publish');
     expect(store.completeOperation).toHaveBeenCalledWith('broadcast', 'success', 'KC: ka-1');
     expect(result()).toBe('KC: ka-1 | Status: confirmed | KAs: 1');
   });
