@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { setImmediate } from 'node:timers/promises';
 import { fileIdentity, readJson } from './bundle.mjs';
 
 // Keep a receipt even when the controller is interrupted or cleanup fails.
@@ -53,7 +54,9 @@ export async function recordAttempt({ output, receipt, work, cleanup, verify }) 
       try { await verify({ ...receipt, outcome: 'PASS' }); receipt.outcome = 'PASS'; }
       catch (error) { receipt.outcome = 'INCOMPLETE'; recordError('verification', error); }
     }
-    // A signal arriving during final verification must not leave a PASS behind.
+    // Synchronous verification can queue an OS signal without running its JS
+    // handler. Keep handlers installed for an event-loop turn before committing.
+    await setImmediate();
     if (controller.signal.aborted) receipt.outcome = 'INCOMPLETE';
     save();
   } finally {

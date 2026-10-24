@@ -85,6 +85,30 @@ test('SIGKILL during pending final verification leaves the durable receipt INCOM
   assert.equal(readJson(path.join(output, 'receipt.json')).outcome, 'INCOMPLETE');
 });
 
+test('SIGTERM queued during synchronous verification cannot commit PASS', { timeout: 15_000 }, async t => {
+  const { output } = attempt(t);
+  const moduleUrl = new URL('../package-certification/attempt.mjs', import.meta.url).href;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { recordAttempt } from ${JSON.stringify(moduleUrl)};
+    try {
+      await recordAttempt({ output: process.argv[1], receipt: { outcome: 'INCOMPLETE', layouts: [], errors: [], evidence: [] },
+        work: () => {}, cleanup: () => {},
+        verify: () => {
+          process.kill(process.pid, 'SIGTERM');
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+        },
+      });
+    } catch { process.exitCode = 1; }
+  `, output], { stdio: ['ignore', 'pipe', 'pipe'] });
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
+  const [code, signal] = await once(child, 'exit');
+  const receipt = readJson(path.join(output, 'receipt.json'));
+  assert.equal(receipt.outcome, 'INCOMPLETE');
+  assert.equal(code, 1);
+  assert.equal(signal, null);
+  assert.ok(receipt.errors.some(error => error.phase === 'cancellation' && error.message.includes('SIGTERM')));
+});
+
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGKILL']) test(`${signal} cannot leave a passing receipt; catchable signals run cleanup`, { timeout: 15_000 }, async t => {
   const { output } = attempt(t);
   const moduleUrl = new URL('../package-certification/attempt.mjs', import.meta.url).href;
