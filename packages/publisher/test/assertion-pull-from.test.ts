@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { CG, AGENT, NAME, SCHEMA, DKG, ENTITY_1, ENTITY_2, ENTITY_3, makePublisher, q, key, seedDirtyDraft, seedShared, registerSubGraph, cleanupPullFixtures } from './_helpers/assertion-pull.js';
+import { execFileSync } from 'node:child_process';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   ASSERTION_SEAL_PREDICATES,
@@ -11,98 +13,23 @@ import {
   contextGraphMetaUri,
   contextGraphPrivateUri,
   contextGraphSubGraphPrivateUri,
-  contextGraphSubGraphUri,
   createGraphKnowledgeAssetScope,
   generateEd25519Keypair,
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { DKGPublisher, assertionScopedGraphUri } from '../src/index.js';
+import { GraphManager, PrivateContentStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { DKGPublisher, TripleStoreAsyncPromoteQueue, assertionScopedGraphUri } from '../src/index.js';
+import { resolveKnowledgeAssetWorkspaceHead, storeKnowledgeAssetWorkspaceHead, storeKnowledgeAssetOperationPublicQuads } from '../src/workspace-resolution.js';
 import { finalizeRootlessAssertionForTest } from './_helpers/rootless-lifecycle.js';
 
-const CG = 'pull-from-test';
-const AGENT = '0x00000000000000000000000000000000000000a1';
-const NAME = 'meeting-notes';
 const LEGACY_SWM_GRAPH = `did:dkg:context-graph:${CG}/_shared_memory`;
 const LEGACY_DATA_GRAPH = `did:dkg:context-graph:${CG}`;
-const SCHEMA = 'http://schema.org/name';
-const DKG = 'http://dkg.io/ontology/';
-const ENTITY_1 = 'urn:e:alice';
-const ENTITY_2 = 'urn:e:bob';
-const ENTITY_3 = 'urn:e:carol';
 
-async function makePublisher() {
-  const store = new OxigraphStore();
-  const publisher = new DKGPublisher({
-    store,
-    chain: new NoChainAdapter(),
-    eventBus: new TypedEventBus(),
-    keypair: await generateEd25519Keypair(),
-  });
-  return { publisher, store };
-}
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await cleanupPullFixtures();
+});
 
-function q(subject: string, predicate: string, object: string, graph = ''): Quad {
-  return { subject, predicate, object, graph };
-}
-
-function key(quad: Quad): string {
-  return JSON.stringify([quad.subject, quad.predicate, quad.object]);
-}
-
-async function seedShared(
-  publisher: DKGPublisher,
-  store: OxigraphStore,
-  options: {
-    publicQuads?: Quad[];
-    privateQuads?: Quad[];
-    name?: string;
-    agentAddress?: string;
-    subGraphName?: string;
-  } = {},
-) {
-  const name = options.name ?? NAME;
-  const agentAddress = options.agentAddress ?? AGENT;
-  const subGraphName = options.subGraphName;
-  const publicQuads = options.publicQuads ?? [
-    q(ENTITY_1, SCHEMA, '"Alice"'),
-    q(ENTITY_2, SCHEMA, '"Bob"'),
-  ];
-  const privateQuads = options.privateQuads ?? [];
-  await publisher.assertionCreate(CG, name, agentAddress, subGraphName);
-  if (publicQuads.length > 0) {
-    await publisher.assertionWrite(CG, name, agentAddress, publicQuads, subGraphName);
-  }
-  if (privateQuads.length > 0) {
-    await publisher.assertionWritePrivate(CG, name, agentAddress, privateQuads, subGraphName);
-  }
-  const finalized = await finalizeRootlessAssertionForTest({
-    publisher,
-    store,
-    contextGraphId: CG,
-    name,
-    agentAddress,
-    subGraphName,
-  });
-  await publisher.assertionPromote(CG, name, agentAddress, { subGraphName });
-  return finalized;
-}
-
-async function registerSubGraph(store: OxigraphStore, subGraphName: string): Promise<void> {
-  const metaGraph = contextGraphMetaUri(CG);
-  const subGraphUri = contextGraphSubGraphUri(CG, subGraphName);
-  await store.createGraph(metaGraph);
-  await store.insert([
-    q(
-      subGraphUri,
-      'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
-      'http://dkg.io/ontology/SubGraph',
-      metaGraph,
-    ),
-    q(subGraphUri, 'http://schema.org/name', `"${subGraphName}"`, metaGraph),
-    q(subGraphUri, `${DKG}createdBy`, 'did:dkg:agent:test-agent', metaGraph),
-  ]);
-}
 
 function legacySeal(rootEntities: string[]): Quad[] {
   return buildAssertionSealQuads({
@@ -122,6 +49,216 @@ function legacySeal(rootEntities: string[]): Quad[] {
 }
 
 describe('rootless assertionPullFrom', () => {
+  const sealPredicates = Object.values(ASSERTION_SEAL_PREDICATES);
+  async function interruptClear(publisher: DKGPublisher, store: TripleStore, boundary: number) {
+    const original = store.deleteByPatternWithoutCount!.bind(store);
+    const subjects = new Set([contextGraphAssertionUri(CG, AGENT, NAME), await publisher.wmGraphUri(CG, AGENT, NAME)]);
+    let deleted = 0;
+    const fault = vi.spyOn(store, 'deleteByPatternWithoutCount').mockImplementation(async (pattern, options) => {
+      if (pattern.subject && subjects.has(pattern.subject) && sealPredicates.includes(pattern.predicate as never)) {
+        if (deleted++ === boundary) throw new Error('injected active-seal clear failure');
+        await original(pattern, options);
+        if (boundary === sealPredicates.length * subjects.size && deleted === boundary) {
+          throw new Error('injected active-seal clear failure');
+        }
+        return;
+      }
+      return original(pattern, options);
+    });
+    await expect(publisher.assertionPullFrom(CG, NAME, AGENT, 'swm'))
+      .rejects.toThrow('injected active-seal clear failure');
+    fault.mockRestore();
+  }
+
+  it('checks the exact source pin even through partial-seal recovery (#3350)', async () => {
+    const { publisher, store } = await makePublisher();
+    const source = await seedShared(publisher, store);
+    await interruptClear(publisher, store, 4);
+    await expect(publisher.assertionPullFrom(CG, NAME, AGENT, 'swm', {
+      recoverExact: { ...source, merkleRoot: `0x${'ab'.repeat(32)}` },
+    })).rejects.toMatchObject({ code: 'WM_RECOVERY_SOURCE_UNAVAILABLE' });
+  });
+
+  it.each(Array.from({ length: sealPredicates.length * 2 + 1 }, (_, i) => i))(
+    'recovers active-seal clear boundary %i after publisher restart (#3332)', async (boundary) => {
+      const { publisher, store } = await makePublisher();
+      const finalized = await seedShared(publisher, store, {
+        privateQuads: [q(ENTITY_1, 'urn:secret', '"Private"')],
+      });
+      await interruptClear(publisher, store, boundary);
+      const container = process.env.DKG_PULL_RECOVERY_BLAZEGRAPH_CONTAINER;
+      if (container && (boundary === 4 || boundary === sealPredicates.length * 2)) {
+        if (!process.env.DKG_PULL_RECOVERY_BLAZEGRAPH_URL) throw new Error('Restart coverage requires Blazegraph URL');
+        execFileSync('docker', ['restart', container], { timeout: 60_000, stdio: 'pipe' });
+        const deadline = Date.now() + 30_000;
+        while (true) {
+          try { await store.query('ASK { ?s ?p ?o }'); break; }
+          catch (error) {
+            if (Date.now() >= deadline) throw error;
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+        }
+      }
+      const restarted = new DKGPublisher({ store, chain: new NoChainAdapter(),
+        eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair() });
+      await expect(restarted.assertionPullFrom(CG, NAME, AGENT, 'swm'))
+        .resolves.toMatchObject({ kaUal: finalized.kaUal, assertionVersion: finalized.assertionVersion, seededPrivate: 1 });
+      expect(new Set((await restarted.assertionQuery(CG, NAME, AGENT)).map(key)))
+        .toEqual(new Set(finalized.publicQuads.map(key)));
+      expect(new Set((await restarted.assertionQuery(CG, NAME, `0x${AGENT.slice(2).toUpperCase()}`)).map(key)))
+        .toEqual(new Set(finalized.publicQuads.map(key)));
+      expect(new Set((await restarted.assertionQueryPrivate(CG, NAME, AGENT)).map(key)))
+        .toEqual(new Set(finalized.privateQuads.map(key)));
+    },
+  );
+
+  it.each(['marker', 'archive-root', 'archive-version', 'remaining-field', 'operation-digest',
+    'head-version', 'operation-private-root', 'operation-id', 'orphan-intent', 'private-source', 'public-source', 'lifecycle-ual'])(
+    'rejects invalid recovery proof: %s without changing storage (#3332)', async (damage) => {
+      const { publisher, store } = await makePublisher();
+      const finalized = await seedShared(publisher, store, { privateQuads: [q(ENTITY_1, 'urn:secret', '"Private"')] });
+      await interruptClear(publisher, store, 4);
+      const meta = contextGraphMetaUri(CG);
+      const subject = contextGraphAssertionUri(CG, AGENT, NAME);
+      const archive = `${subject}/_recovery_seal`;
+      const privateGraph = contextGraphPrivateUri(CG);
+      const swmMeta = new GraphManager(store).sharedMemoryMetaUri(CG);
+      const lifecycle = assertionLifecycleUri(CG, AGENT, NAME);
+      async function replace(graph: string, target: string, predicate: string, object: string) {
+        await store.deleteByPattern({ graph, subject: target, predicate });
+        await store.insert([q(target, predicate, object, graph)]);
+      }
+      if (damage === 'marker') await publisher.clearSwmShareComplete(CG, NAME, AGENT);
+      if (damage === 'archive-root') await replace(privateGraph, archive, ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT, `"${'ff'.repeat(32)}"^^<http://www.w3.org/2001/XMLSchema#hexBinary>`);
+      if (damage === 'archive-version') await replace(privateGraph, archive, ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION, '"2"^^<http://www.w3.org/2001/XMLSchema#integer>');
+      if (damage === 'remaining-field') await replace(meta, subject, ASSERTION_SEAL_PREDICATES.AUTHOR_SCHEME_VERSION, '"2"^^<http://www.w3.org/2001/XMLSchema#integer>');
+      if (damage === 'operation-digest') await store.update!(`DELETE { GRAPH <${swmMeta}> { ?s <${DKG}publicQuadsDigest> ?o } } INSERT { GRAPH <${swmMeta}> { ?s <${DKG}publicQuadsDigest> "wrong" } } WHERE { GRAPH <${swmMeta}> { ?s <${DKG}publicQuadsDigest> ?o } }`);
+      if (damage === 'head-version') await replace(swmMeta, `${finalized.kaUal}#dkg-swm-head`, `${DKG}assertionVersion`, '"2"^^<http://www.w3.org/2001/XMLSchema#integer>');
+      if (damage === 'operation-private-root') {
+        const differentRoot = `0x${'ff'.repeat(32)}`;
+        await store.update!(`DELETE { GRAPH <${swmMeta}> { ?s <${DKG}privateMerkleRoot> ?o } } INSERT { GRAPH <${swmMeta}> { ?s <${DKG}privateMerkleRoot> "${differentRoot}" } } WHERE { GRAPH <${swmMeta}> { ?s <${DKG}privateMerkleRoot> ?o } }`);
+        await expect(resolveKnowledgeAssetWorkspaceHead({ store, graphManager: new GraphManager(store),
+          contextGraphId: CG, kaUal: finalized.kaUal }))
+          .resolves.toMatchObject({ assertionVersion: '1', privateMerkleRoot: differentRoot });
+      }
+      if (damage === 'operation-id') await replace(meta, lifecycle, `${DKG}shareOperationId`, '"unrelated"');
+      if (damage === 'orphan-intent') {
+        await store.deleteByPattern({ graph: meta, subject: lifecycle, predicate: `${DKG}shareOperationId` });
+        await replace(meta, lifecycle, `${DKG}promoteOperationIntent`, '"orphan"');
+      }
+      if (damage === 'lifecycle-ual') await replace(meta, lifecycle, `${DKG}reservedUal`, '"invalid"');
+      if (damage === 'public-source') await store.insert([q(ENTITY_1, SCHEMA, '"Tampered"', assertionScopedGraphUri(finalized.sharedGraphUri, ''))]);
+      if (damage === 'private-source') {
+        const privateStore = new PrivateContentStore(store, new GraphManager(store));
+        await privateStore.replaceKnowledgeAssetPrivateTriples(CG, createGraphKnowledgeAssetScope(finalized.kaUal, 1), [q(ENTITY_1, 'urn:secret', '"Changed"')]);
+      }
+      const before = await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o');
+      await expect(publisher.assertionPullFrom(CG, NAME, AGENT, 'swm', { onConflict: 'replace' })).rejects.toThrow();
+      expect(await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o')).toEqual(before);
+    },
+  );
+
+  it('reuses the verified SWM payload but separately validates a requested VM source (#3332)', async () => {
+    const { publisher, store } = await makePublisher();
+    const finalized = await seedShared(publisher, store);
+    await interruptClear(publisher, store, 4);
+    const vm = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(finalized.kaUal, 1));
+    await store.insert(finalized.publicQuads.map((quad) => ({ ...quad,
+      object: '"Different same-count VM payload"', graph: assertionScopedGraphUri(vm, quad.graph) })));
+    await expect(publisher.assertionPullFrom(CG, NAME, AGENT, 'vm')).rejects.toThrow('Merkle mismatch');
+    const sourceGraph = assertionScopedGraphUri(finalized.sharedGraphUri, '');
+    const reads = vi.spyOn(store, 'query');
+    await expect(publisher.assertionPullFrom(CG, NAME, AGENT, 'swm')).resolves.toMatchObject({ seededPublic: 2 });
+    expect(reads.mock.calls.filter(([query]) => query.includes('CONSTRUCT') && query.includes(`GRAPH <${sourceGraph}>`))).toHaveLength(1);
+  });
+
+  it('refuses a coherent newer SWM head with the same content and a consumed lifecycle pointer (#3332)', async () => {
+    const { publisher, store } = await makePublisher();
+    const finalized = await seedShared(publisher, store);
+    await interruptClear(publisher, store, 4);
+    const graphManager = new GraphManager(store);
+    const next = { store, graphManager, contextGraphId: CG, kaUal: finalized.kaUal,
+      assertionVersion: '2', shareOperationId: 'newer-completed-share' };
+    await storeKnowledgeAssetOperationPublicQuads({ ...next, quads: finalized.publicQuads, publisherPeerId: 'test-peer' });
+    await storeKnowledgeAssetWorkspaceHead(next);
+    const graph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, createGraphKnowledgeAssetScope(finalized.kaUal, 2));
+    await store.insert(finalized.publicQuads.map((quad) => ({ ...quad, graph: assertionScopedGraphUri(graph, quad.graph) })));
+    for (const predicate of [`${DKG}shareOperationId`, `${DKG}promoteOperationIntent`]) {
+      await store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: assertionLifecycleUri(CG, AGENT, NAME), predicate });
+    }
+    await expect(resolveKnowledgeAssetWorkspaceHead({ store, graphManager, contextGraphId: CG, kaUal: finalized.kaUal }))
+      .resolves.toMatchObject({ assertionVersion: '2', shareOperationId: next.shareOperationId });
+    const before = await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o');
+    await expect(publisher.assertionPullFrom(CG, NAME, AGENT, 'swm')).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
+    expect(await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o')).toEqual(before);
+  });
+
+  it('recovers when the completed lifecycle operation pointer was consumed (#3332)', async () => {
+    const { publisher, store } = await makePublisher();
+    await seedShared(publisher, store);
+    await interruptClear(publisher, store, 4);
+    for (const predicate of [`${DKG}shareOperationId`, `${DKG}promoteOperationIntent`]) {
+      await store.deleteByPattern({ graph: contextGraphMetaUri(CG), subject: assertionLifecycleUri(CG, AGENT, NAME), predicate });
+    }
+    await expect(publisher.assertionPullFrom(CG, NAME, AGENT, 'swm')).resolves.toMatchObject({ seededPublic: 2 });
+  });
+
+  it.each(['delete', 'insert'])('retries failed archive replacement at %s without clearing the active seal (#3332)', async (stage) => {
+    const { publisher, store } = await makePublisher();
+    await seedShared(publisher, store);
+    const archive = `${contextGraphAssertionUri(CG, AGENT, NAME)}/_recovery_seal`;
+    const originalDelete = store.deleteByPatternWithoutCount.bind(store);
+    const originalInsert = store.insert.bind(store);
+    const fault = stage === 'delete'
+      ? vi.spyOn(store, 'deleteByPatternWithoutCount').mockImplementation(async (pattern, options) => {
+        if (pattern.subject === archive) throw new Error('injected archive failure');
+        return originalDelete(pattern, options);
+      })
+      : vi.spyOn(store, 'insert').mockImplementation(async (quads, options) => {
+        if (quads.some((quad) => quad.subject === archive)) throw new Error('injected archive failure');
+        return originalInsert(quads, options);
+      });
+    await expect(publisher.assertionPullFrom(CG, NAME, AGENT, 'swm')).rejects.toThrow('injected archive failure');
+    fault.mockRestore();
+    await expect(publisher.assertionPullFrom(CG, NAME, AGENT, 'swm')).resolves.toMatchObject({ seededPublic: 2 });
+  });
+
+  it('keeps a torn seal blocked by a durable share owner until that owner succeeds (#3300, #3332)', async () => {
+    const { publisher, store } = await makePublisher();
+    await publisher.assertionCreate(CG, NAME, AGENT);
+    await publisher.assertionWrite(CG, NAME, AGENT, [q(ENTITY_1, SCHEMA, '"Alice"')]);
+    await publisher.assertionWritePrivate(CG, NAME, AGENT, [q(ENTITY_1, 'urn:secret', '"Private"')]);
+    await finalizeRootlessAssertionForTest({ publisher, store, contextGraphId: CG, name: NAME, agentAddress: AGENT });
+    const binding = await publisher.prepareAssertionPromoteRecovery(CG, NAME, AGENT, undefined, true);
+    if ('completedResult' in binding) throw new Error('Expected a fresh share binding');
+    await publisher.assertionPromote(CG, NAME, AGENT, { recoveryBinding: binding });
+    await interruptClear(publisher, store, 4);
+    // Model a historical torn clear alongside a persisted unfinished owner.
+    const queue = new TripleStoreAsyncPromoteQueue(store);
+    const job = await queue.enqueueAndClaim({ contextGraphId: CG, assertionName: NAME,
+      agentAddress: AGENT, entities: 'all', recoveryBinding: binding }, 'owner');
+    const restarted = new DKGPublisher({ store, chain: new NoChainAdapter(),
+      eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair() });
+    const before = await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o');
+    await expect(restarted.assertionPullFrom(CG, NAME, AGENT, 'swm'))
+      .rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED', recoveryJobId: job.jobId });
+    expect(await store.query('SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o')).toEqual(before);
+    await queue.recordCommitMarker(job.jobId, job.lease!.claimToken, 'swmInserted');
+    await queue.succeed(job.jobId, job.lease!.claimToken, { promotedCount: 0, succeededAt: Date.now() });
+    await expect(restarted.assertionPullFrom(CG, NAME, AGENT, 'swm'))
+      .resolves.toMatchObject({ seededPublic: 1, seededPrivate: 1 });
+  });
+
+  it('preserves conflicting drafts and ordinary mutation guards after partial clear (#3332)', async () => {
+    const { publisher, store } = await makePublisher();
+    await seedShared(publisher, store);
+    await interruptClear(publisher, store, 4);
+    await expect(publisher.assertionCreate(CG, NAME, AGENT)).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
+    await seedDirtyDraft(publisher, store, [q(ENTITY_1, SCHEMA, '"Local"')]);
+    await expect(publisher.assertionPullFrom(CG, NAME, AGENT, 'swm')).rejects.toMatchObject({ code: 'WM_DRAFT_CONFLICT' });
+    expect((await publisher.assertionQuery(CG, NAME, AGENT))[0].object).toBe('"Local"');
+  });
+
   it('re-opens the complete exact SWM graph and ignores bucket and root-row decoys', async () => {
     const { publisher, store } = await makePublisher();
     const finalized = await seedShared(publisher, store, {
@@ -193,7 +330,7 @@ describe('rootless assertionPullFrom', () => {
     const { publisher, store } = await makePublisher();
     await seedShared(publisher, store);
     await publisher.assertionCreate(CG, NAME, AGENT);
-    await publisher.assertionWrite(CG, NAME, AGENT, [
+    await seedDirtyDraft(publisher, store, [
       q('urn:e:local', SCHEMA, '"Local edit"'),
     ]);
 
@@ -209,7 +346,7 @@ describe('rootless assertionPullFrom', () => {
     const { publisher, store } = await makePublisher();
     await seedShared(publisher, store);
     await publisher.assertionCreate(CG, NAME, AGENT);
-    await publisher.assertionWritePrivate(CG, NAME, AGENT, [
+    await seedDirtyDraft(publisher, store, [], [
       q('urn:e:private-local', 'urn:predicate:secret', '"Local secret"'),
     ]);
 
@@ -228,10 +365,10 @@ describe('rootless assertionPullFrom', () => {
     await publisher.assertionCreate(CG, NAME, AGENT);
     const wmGraph = await publisher.wmGraphUri(CG, AGENT, NAME);
     const scopedLocalGraph = assertionScopedGraphUri(wmGraph, localNamedGraph);
-    await publisher.assertionWrite(CG, NAME, AGENT, [
+    await seedDirtyDraft(publisher, store, [
       q(ENTITY_1, SCHEMA, '"Stale named local"', localNamedGraph),
     ]);
-    await publisher.assertionWritePrivate(CG, NAME, AGENT, [
+    await seedDirtyDraft(publisher, store, [], [
       q('urn:e:private-local', 'urn:predicate:secret', '"Stale private local"'),
     ]);
     expect(await store.listGraphs()).toContain(scopedLocalGraph);
@@ -257,7 +394,7 @@ describe('rootless assertionPullFrom', () => {
     const { publisher, store } = await makePublisher();
     const finalized = await seedShared(publisher, store);
     await publisher.assertionCreate(CG, NAME, AGENT);
-    await publisher.assertionWrite(CG, NAME, AGENT, [
+    await seedDirtyDraft(publisher, store, [
       q('urn:e:precious-local', SCHEMA, '"Precious local edit"'),
     ]);
     await store.dropGraph(finalized.sharedGraphUri);
@@ -274,7 +411,7 @@ describe('rootless assertionPullFrom', () => {
     const { publisher, store } = await makePublisher();
     const finalized = await seedShared(publisher, store);
     await publisher.assertionCreate(CG, NAME, AGENT);
-    await publisher.assertionWrite(CG, NAME, AGENT, [
+    await seedDirtyDraft(publisher, store, [
       q('urn:e:precious-local', SCHEMA, '"Precious local edit"'),
     ]);
     await store.insert([
@@ -293,7 +430,7 @@ describe('rootless assertionPullFrom', () => {
     const { publisher, store } = await makePublisher();
     const finalized = await seedShared(publisher, store);
     await publisher.assertionCreate(CG, NAME, AGENT);
-    await publisher.assertionWrite(CG, NAME, AGENT, [
+    await seedDirtyDraft(publisher, store, [
       q('urn:e:precious-local', SCHEMA, '"Precious local edit"'),
     ]);
     const tamperedNamedGraph = assertionScopedGraphUri(

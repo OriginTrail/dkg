@@ -20,22 +20,43 @@ CI whenever it cannot prove that a smaller plan is safe.
 | Change/event | CI behavior |
 | --- | --- |
 | Pull request, known workspace | Owning lane plus declared downstream unit/integration lanes |
-| Documentation only | Planner and aggregate gates only |
-| `core` / `rdf-utils` | All downstream Node and real-EVM lanes |
+| Documentation only | Planner and aggregate gates only. A document a test reads (`RELEASE_PROCESS.md`, `packages/query/README.md`) is a CI input instead: its `PATH_TRIGGERS` entry selects only the lanes that read it, not the rule of the package it documents |
+| Agent lane | Also the Blazegraph lane and the Windows lifecycle job: the Blazegraph job runs the agent's live Blazegraph suites, so every plan that selects the agent lane selects it too; the Windows job is described below |
+| A file another package's code or tests load by relative path, outside declared dependencies | The loading lane or EVM scope too, through `PATH_TRIGGERS` or the file's own workspace rule (for example the agent lane for the CLI markdown extractor, the node-ui lane for the CLI daemon sources its tests scan, the core lane for the agent, publisher and CLI sources the chain RPC-site census reads, the Blazegraph lane for the CLI's Oxigraph launcher that the storage conformance suite runs, the chain scope for the identity-wallet code its node-ui suite loads, the arm64 contract lane for the storage package's Blazegraph namespace contract that the CLI's metadata parser loads) |
+| `core` / `rdf-utils` | All downstream Node and real-EVM lanes, including the browser E2E suite (its harness imports `core`) |
+| Real-node browser E2E (Playwright, 7 devnet shards) | PRs touching the UI surface it drives (`node-ui`, `graph-viz`, and `cli`, the daemon HTTP API) or a package its harness code imports (`core` and its dependency `rdf-utils`). The rest of the daemon runtime (`agent`, `chain`, `storage`, `publisher`, `query`, adapters and the other packages `cli` depends on) is a deliberate exception: those PRs run their own lanes plus the CLI daemon tests and get the suite after merge. `ci-delta-routing.test.mjs` derives both sets from the harness imports and `scripts/devnet.sh`, and pins the exception list |
+| Windows lifecycle job (`rfc64-inventory-windows.yml`) | Every PR that runs the agent lane, whether a package, a `devnet/` harness or the Gate 0 paths selected it: `ci.yml` starts the job on the agent lane's output and the gate requires it with that lane. Besides the SQLite suites it runs the RFC-64 Gate 0 lifecycle and evidence harnesses, which start a real agent and run on no Linux lane |
 | `evm-module` | Full Node/EVM CI; Solidity only for the established contract-relevant paths |
-| Root dependency/build config, workflow, planner, or generic scripts | Full Node/EVM CI; Solidity only when its independent path filter matches |
-| Any workspace `package.json` | Full CI because the base and head dependency graphs may differ |
-| Rename, copy, deletion, unknown path, or no diff | Full CI |
-| More than 100 production files or at least 4 workspaces | Full CI |
+| Root dependency/build config, lockfile, CI control-plane workflows (`ci.yml`, `evm-integration.yml`, `rfc64-inventory-windows.yml`), any nested path under `.github/workflows/`, composite actions, the planner and other CI tooling (`scripts/ci/`, `scripts/lib/` outside its tests), shared test fixtures (`scripts/testing/`), the EVM integration runner, the CLI runtime-asset copier, the coverage baselines, the files the CLI's install hooks run in every job's install (its node:sqlite runtime guard and MarkItDown bundler, with what they load and read, including the CLI's `tsconfig.json`, whose presence tells the bundler it runs in a workspace checkout), and every repository script outside the families below: the root build, release promotion and lint scripts, and any new script | Full Node/EVM CI; Solidity only when its independent path filter matches |
+| `scripts/devnet.sh`, `scripts/devnet-publish-helpers.sh`, `scripts/sync-chain-abis.mjs` | The lanes that run them (the devnet bootstrap: browser E2E, the agent lane's devnet harnesses and the CLI Blazegraph smoke fixture; the publish helpers: the CLI smoke test; the ABI sync: a chain test that runs it against temporary directories) plus the shared build checks |
+| Repository scripts in the build-only families: devnet suites and operations run by hand (`devnet-*`, the soak and smoke suites), the repository checks the build job runs (`audit-*`, `check-npm-metadata`, `release-packages`, `verify-w1-packet`), operator and data tools run by hand (`import-*`, snapshot and analysis tools, `scripts/load/`, `scripts/repro/`, `scripts/testnet-publish-stress/`); the repository-script tests (`scripts/lib/__tests__/`); the rest of `test-policy/` | Shared build checks (its lint, script tests and repository checks run them). A routing test fails if a lane runs or reads one of these scripts without a route to that lane: named in a test, even inside embedded shell, run by a workflow job, or reached through a workspace script CI runs. It also fails on a script path a lane assembles or picks at run time until the test lists it, and on a family that no longer matches an existing script |
+| Workspace `package.json` changing only package-scoped fields (`exports`, `scripts` other than install hooks, `version`, `files`, metadata) | Same lanes as a source change in that workspace |
+| Workspace `package.json` changing dependencies, `pnpm`/overrides, `engines`, `bin`, `directories`, `name`, `type`, install-time scripts (npm install/prepare lifecycle, `prepublish`, `dependencies`, any `pnpm:` hook) or unknown fields; added, removed or moved manifests; root and `devnet/*` manifests | Full CI because the install or dependency graph may differ |
+| Deletion, rename or copy | Routed by every old and new path, like edits |
+| Type change, unmerged or unknown git status, unknown path, or no diff | Full CI |
+| Several workspaces | Union of their rules |
+| `devnet/`, `test-systems/`, `bench/`, `tools/`, other top-level `.github/` files | Shared build checks plus the lanes that load them: `devnet/` the agent lane (with Blazegraph and the Windows job; the Gate 2 adapter the CLI starts, the shared `rfc64-runtime-*` modules and the CP2 batch planning it imports also the CLI lane), `bench/` the CLI lane, `test-systems/` Blazegraph, `tools/` and `.github/` the build checks alone |
+| More than 100 production files | Full CI |
 | PR with `ci:full` label | Full Node/EVM CI; Solidity remains path-gated |
-| Deterministic 5% PR audit sample | Full Node/EVM CI; Solidity remains path-gated |
 | Merge queue | Every Node/EVM lane plus sharded Solidity on the exact candidate |
 | Protected-branch push or manual dispatch | Full CI, including Solidity coverage |
 
+Each changed path gets one routing decision, first match wins: global CI inputs
+(full CI), then its package workspace, then a repository support area, then a
+file-level trigger alone (such as `blazegraph-image.json`), otherwise full CI.
+
 The planner reads `git diff --name-status -z`, so spaces and other shell-hostile
-file names cannot alter the decision. Its routing table lives in
-`scripts/lib/ci-delta.mjs` and is covered by table/snapshot-style tests in
-`scripts/lib/__tests__/ci-delta.test.mjs`.
+file names cannot alter the decision. For a modified workspace manifest it also
+reads both versions with `git cat-file blob` from the candidate checkout (data
+only; nothing from the candidate is executed); any read or parse failure keeps
+full CI. Its routing tables live in
+`scripts/lib/ci-routing.mjs`, next to the planner in `scripts/lib/ci-delta.mjs`, and are covered by table/snapshot-style tests in
+`scripts/lib/__tests__/`: `ci-delta.test.mjs` (planner policy),
+`ci-delta-routing.test.mjs` (path routing and the load-closure guard),
+`ci-execution-routing.test.mjs` and `ci-install-routing.test.mjs` (the guard
+on planted workflows, runs and install hooks, sharing `load-closure.mjs`),
+`ci-controller.test.mjs` (trusted controller and workflow wiring) and
+`ci-results.test.mjs` (aggregate gates).
 
 ## Reliability controls
 
@@ -43,11 +64,64 @@ file names cannot alter the decision. Its routing table lives in
   catching cross-package type and build failures even when a test lane is
   skipped.
 - Shared packages run conservative reverse consumers and explicit integrations;
-  this includes undeclared edges such as committed EVM ABIs consumed by `chain`
-  and the real devnet used by node-UI E2E.
+  this includes undeclared edges such as committed EVM ABIs consumed by `chain`.
+  Beyond declared dependencies, a routing test seeds from what CI runs, read
+  once into an execution graph (`ci-execution-graph.mjs`): each lane's
+  package code and tests, and every file outside the package workspaces that
+  a job runs or names, directly, through root or workspace `package.json`
+  scripts (install hooks, builds and packing included) and shell scripts, or
+  through local actions and reusable workflows, plus whatever an install hook
+  runs. A lane job's files need its lane, the build job's own checks need the
+  build job, and what an install hook runs needs full CI. What a workspace's
+  build or pack runs needs full CI outside the workspaces, and inside them
+  the lanes that workspace's rule selects (less the browser suite for the
+  runtime it follows after merge). The test reads each file with the handler for its format (JavaScript
+  and TypeScript modules, shell scripts; other formats name nothing), follows
+  every relative reference (imports, dynamic imports,
+  CommonJS `require`, `new URL(...)` paths, paths built with
+  `path.resolve`/`join` or their imported aliases from a file's own directory
+  and, in tests and test-runner configs, quoted repo paths naming a file;
+  documents included, and a built directory counts when the file walks it;
+  built `dist/` output stands for its `src/`) across packages and support
+  areas, and fails when a file it reaches does not select that lane or EVM
+  scope. A file a lane runs as a child process or worker (through a runner
+  imported from `node:child_process`, `node:worker_threads` or execa under
+  any name, or run by a shell command) has its imports followed too, except
+  package workspace code, whose imports are traced from its own workspace's
+  lanes; a file a lane only reads is required, but its imports are not. A
+  file a runner runs that no reading resolves (a wrapper's parameter, a
+  computed argument list), a program no reading identifies (a parameter, a
+  property, the environment) where no literal names a tool, or a runner
+  handed to other code (an argument, an object, a default) other than as a
+  const alias or `promisify` of it fails the test until it is listed with a
+  reason. It also fails on a module load it cannot follow, one whose specifier
+  is computed at run time, a script path assembled at run time, or a file a
+  shell command runs that is picked at run time (a script runner's operand
+  or a program path that expands a variable past its directory, such as
+  `bash "$SCRIPT_DIR/$helper"`), until the test lists it with the reason it
+  needs no route; any other file read
+  through a computed path is still out of its reach. The owning lanes it seeds from are checked against what CI executes,
+  and a negative control plants an unrouted load to show the test reports it.
+  Where that reach enters another package, the workspaces it imports by
+  package name (and their dependencies) must select the lane too, or, for a
+  package subpath its exports map resolves, that one file: the chain
+  scope's node-ui suite starts a DKGAgent, so storage, publisher, query and
+  random-sampling changes run that scope.
+  The most expensive system lane, real-node browser E2E, follows on PRs only
+  the UI surface it drives and the packages its harness imports, and runs in
+  full on every protected-branch push, merge-queue candidate and nightly run;
+  `ci:full` opts a PR in before merging.
+  The Windows lifecycle job is not narrowed that way: its Gate 0 and evidence
+  harnesses have no Linux equivalent, so it runs for the whole agent closure.
 - Unknown inputs fail closed to full CI instead of silently receiving no tests.
 - `CI gate` and `EVM integration gate` are always present. They fail when a
-  selected job was accidentally skipped, failed, or was cancelled.
+  selected job was accidentally skipped, failed, or was cancelled. The shared
+  build is required when a Node lane needs it or the plan declares
+  `buildChecks` (repository paths whose only CI consumer is the build job's own
+  checks). One function, `needsSharedBuild`, decides this for both the build
+  job's `run_node` condition and the primary gate, so the two cannot disagree;
+  a delta plan that selects no lane and no build checks fails closed to full
+  CI.
 - CI controller changes use a two-phase rollout. The controller implementation
   lands first while every workflow remains pinned to an immutable SHA already
   present on protected `main` or `testnet-canary` history. Only a follow-up PR
@@ -62,6 +136,24 @@ file names cannot alter the decision. Its routing table lives in
   git fetch origin testnet-canary
   git merge-base --is-ancestor <controller-sha> origin/testnet-canary
   ```
+
+  PR CI now checks this as well. The build job's
+  `fetch-trusted-controller.mjs` step fetches `testnet-canary` and `main`
+  from `origin` back to a day before the pin's commit date, and a failed
+  fetch fails the step. A merge of a pull request branch last pushed before
+  that date, landing right after the pin, cuts that history and hides the
+  pin, because git hides every parent of a commit with one old parent; while
+  the pin is out of reach the step prunes the stale shallow entries and
+  deepens the cut points by 1, 4, 16 and then 64 generations, and leaves a
+  pin that is still out of reach to the test. A test in
+  `ci-controller.test.mjs` then fails unless
+  the pinned SHA is an ancestor of one of those branches, and logs which
+  one, so a rotation to a commit that only a pull request branch contains
+  fails that PR's CI. The check runs under the controller it checks, which
+  decides whether the build job runs and whether a failure fails the gate:
+  it catches a mistaken rotation, but not a malicious pin or a PR that edits
+  the check. Review of rotations still matters, and the scheduled report
+  below remains the independent provenance check.
 - `CONTROLLER_POLICY_FILES` in `scripts/ci/trusted-controller-pins.mjs` is the
   single manifest for the narrow controller boundary. The semantic workflow
   validator parses every trusted checkout and rejects missing, extra, or
@@ -77,8 +169,19 @@ file names cannot alter the decision. Its routing table lives in
 - The merge queue tests every Node/EVM lane and the sharded Solidity suite
   against the exact combined commit before it lands. Protected-branch Solidity
   coverage remains the post-merge safety net.
-- Five percent of PR commits run full CI even when delta would be possible. This
-  continuously audits the routing model and exposes a missing dependency edge.
+- The controller must stay loadable from its sparse checkout: its files may
+  import only `node:` builtins and each other. A test runs `plan-ci.mjs` and
+  `assert-ci-results.mjs` from a copy of exactly `CONTROLLER_POLICY_FILES`,
+  because an import outside that list makes the pin impossible to rotate.
+- PR plans depend only on the diff and labels. The former 5% SHA-sampled full
+  runs were retired, so nothing at PR time runs a lane the plan skipped. Full CI
+  on protected-branch pushes, merge-queue candidates and the nightly schedule
+  catches a regression a skipped lane would have found, but it never evaluates
+  the PR's routing decision, and for a PR merged directly it surfaces after the
+  merge. The routing audit is static: the tests in `scripts/lib/__tests__/`
+  enumerate every workspace, derive consumers from declared dependencies and
+  from relative references, and pin the per-file triggers. Add `ci:full` when a
+  PR's paths understate its risk.
 - The routing tests enumerate all package/demo workspaces with a `test` script.
   They also close three existing coverage holes: `rdf-utils`, `okf`, and `demo`
   are now included in explicit CI lanes.
@@ -119,8 +222,9 @@ same protections.
   reviewer asks for the complete suite. Adding/removing the label reruns CI.
 - Use **Run workflow** for an unconditional full run on any branch.
 - If a new package, dependency edge, or integration consumer is introduced,
-  update `WORKSPACE_RULES` and its routing snapshot in the same PR. A package
-  manifest change already forces full CI for that PR.
+  update `WORKSPACE_RULES` and its routing snapshot in the same PR. A dependency
+  change in a package manifest (and its lockfile update) already forces full CI
+  for that PR.
 
 ## Measured baseline and expected effect
 
@@ -137,8 +241,8 @@ for about 86% of compute.
 - A leaf supporting-package change should take roughly 3 minutes instead of 14
   (shared build plus the supporting lane).
 - A Hardhat-plugin-only change should take roughly 5 minutes.
-- UI and shared protocol changes still run the real-node E2E suite, but its 326
-  tests now run in seven isolated devnet shards instead of one serial lane.
+- UI and daemon-API changes still run the real-node E2E suite on the PR, in
+  seven isolated devnet shards; deeper protocol changes run it after merge.
 
 The full PR path was also measured independently of delta selection. On the
 same PR, the original full workflow took
@@ -170,6 +274,10 @@ and test variance still affect elapsed time.
 ## Local verification
 
 ```sh
-node --test scripts/lib/__tests__/ci-delta.test.mjs
+# The pin provenance test reads both protected branches.
+git fetch origin testnet-canary main
+node --test scripts/lib/__tests__/ci-delta.test.mjs scripts/lib/__tests__/ci-delta-routing.test.mjs \
+  scripts/lib/__tests__/ci-execution-routing.test.mjs scripts/lib/__tests__/ci-install-routing.test.mjs \
+  scripts/lib/__tests__/ci-controller.test.mjs scripts/lib/__tests__/ci-results.test.mjs
 actionlint .github/workflows/ci.yml .github/workflows/evm-integration.yml
 ```

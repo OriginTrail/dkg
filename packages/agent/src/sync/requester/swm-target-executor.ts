@@ -47,12 +47,14 @@ import {
   PrivateSwmSnapshotWalkRegistry,
   type PrivateSwmSnapshotWalkLease,
 } from './private-swm-snapshot-walk-registry.js';
+import { SyncedSubGraphRegistration } from './synced-sub-graph-registration.js';
 
 type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0];
 
 export interface SwmTargetExecutorPortsV1 {
   /** Defaults to ten minutes for callers composed before this port existed. */
   readonly privateRecoveryBudgetMs?: number;
+  /** Mutations own their projection invalidation at the supplied store boundary. */
   readonly store: TripleStore;
   readonly writeLocks: Map<string, Promise<void>>;
   readonly listSubGraphs: (
@@ -62,9 +64,12 @@ export interface SwmTargetExecutorPortsV1 {
   readonly fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   readonly processSharedMemoryBatch: SharedMemorySyncContext['processSharedMemoryBatch'];
   readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  /** Process-local RFC-64 authority decision; this port must not perform I/O. */
+  readonly ordinaryRootSnapshotApplyAllowed?: (contextGraphId: string) => boolean;
+  readonly resolveRootSnapshotAtomicCompanion?:
+    SharedMemorySyncContext['resolveRootSnapshotAtomicCompanion'];
   readonly recordDrops: OversizeGuardHooks['recordDrops'];
   readonly invalidateListContextGraphsCache: () => void;
-  readonly markMetaProjectionDirty: (quads: Quad[]) => void;
   readonly recoveryMutation: SwmRecoveryMutationRuntimeV1;
   readonly setCheckpoint: RecoverContextGraphSwmOptions['setCheckpoint'];
   readonly deleteCheckpoint: RecoverContextGraphSwmOptions['deleteCheckpoint'];
@@ -74,6 +79,12 @@ export interface SwmTargetExecutorPortsV1 {
     retirement: FinalizedSwmTwinRetirement,
     ctx: OperationContext,
   ) => Promise<void>;
+  readonly retireLegacySwmAfterVerifiedVmTwin?: (input: Readonly<{
+    contextGraphId: string;
+    kaUal: string;
+    assertionVersion: string;
+    subGraphName?: string;
+  }>) => Promise<void>;
   readonly logInfo: (ctx: OperationContext, message: string) => void;
   readonly logWarn: (ctx: OperationContext, message: string) => void;
   readonly logDebug: (ctx: OperationContext, message: string) => void;
@@ -87,6 +98,8 @@ interface PublicSwmTargetBaseV1 {
   readonly stopOnBackoffWorthyFailure?: boolean;
   /** Include the catalog-owned root SWM scope as well as named subgraphs. */
   readonly includeRootScope?: boolean;
+  /** Read the peer's state at the call: join no page fetch of another round. */
+  readonly freshSnapshot?: boolean;
 }
 
 /** The only two valid public synchronization contracts. */
@@ -124,6 +137,7 @@ export class SwmTargetExecutorV1 {
     string,
     Promise<{ registered: string[]; excluded: string[] }>
   >();
+  readonly #syncedSubGraphs: SyncedSubGraphRegistration;
 
   constructor(
     ports: SwmTargetExecutorPortsV1,
@@ -139,6 +153,18 @@ export class SwmTargetExecutorV1 {
       invalidateListContextGraphsCache: ports.invalidateListContextGraphsCache,
     });
     this.#recoveryMutation = ports.recoveryMutation;
+    this.#syncedSubGraphs = new SyncedSubGraphRegistration({
+      store: ports.store,
+      writeLocks: ports.writeLocks,
+      admittedNames: async (contextGraphId) => {
+        const { registered, excluded } = await this.#getSubGraphAdmission(contextGraphId);
+        return [...registered, ...excluded];
+      },
+      isKnownChildContextGraph: (contextGraphId, subGraphName) => isKnownContextGraphUri(
+        ports.store,
+        `${contextGraphDataGraphUri(contextGraphId)}/${subGraphName}`,
+      ),
+    });
   }
 
   async recoverPrivateTarget(
@@ -175,6 +201,7 @@ export class SwmTargetExecutorV1 {
       writeLocks: this.#ports.writeLocks,
       publicSnapshotStore: this.#ports.publicSnapshotStore,
       snapshotMaterializer: this.#snapshotMaterializer,
+      resolveRootAtomicCompanion: this.#ports.resolveRootSnapshotAtomicCompanion,
       store: this.#recoveryMutation.store,
       replaceMetaForRoots: (roots, metaGraphs) => this.#recoveryMutation
         .replaceMetaForRoots(
@@ -205,7 +232,6 @@ export class SwmTargetExecutorV1 {
     };
     const result = await recoverContextGraphSwmWithProgressRetries({
       window,
-      owner: `private-swm:${target.contextGraphId}:${target.remotePeerId}`,
       createRoundDeadline: () => this.#ports.createContextGraphSyncDeadline(1),
       onRetry: target.onRetry,
       snapshotProgressRetention: () => snapshotLease?.kind ?? 'detached',
@@ -242,7 +268,7 @@ export class SwmTargetExecutorV1 {
       }
       : { kind: 'ordinary' as const };
     const storeInsert = async (quads: Quad[]) => {
-      const inserted = await insertWithOversizeGuard(
+      await insertWithOversizeGuard(
         (kept) => this.#ports.store.insert(kept, {
           priority: 'background',
           source: 'agent.sharedMemorySync.storeInsert',
@@ -251,10 +277,11 @@ export class SwmTargetExecutorV1 {
         { recordDrops: this.#ports.recordDrops },
         'swm-sync',
       );
-      this.#ports.markMetaProjectionDirty(inserted);
+      await this.#registerSyncedSubGraphs(target, quads);
     };
     return runSharedMemorySync({
       mode,
+      freshSnapshot: target.freshSnapshot,
       ctx: target.ctx,
       remotePeerId: target.remotePeerId,
       contextGraphIds: [target.contextGraphId],
@@ -271,10 +298,17 @@ export class SwmTargetExecutorV1 {
       getExcludedSubGraphNames: async (contextGraphId) => (
         await this.#getSubGraphAdmission(contextGraphId)
       ).excluded,
+      isOwnContextGraph: (contextGraphId, name) => isKnownContextGraphUri(
+        this.#ports.store,
+        `${contextGraphDataGraphUri(contextGraphId)}/${name}`,
+      ),
       includeRootScope: target.includeRootScope,
       stopOnBackoffWorthyFailure: target.stopOnBackoffWorthyFailure,
       ensureContextGraph: this.#recoveryMutation.ensureContextGraph,
       snapshotMaterializer: this.#snapshotMaterializer,
+      ordinaryRootSnapshotApplyAllowed: this.#ports.ordinaryRootSnapshotApplyAllowed,
+      resolveRootSnapshotAtomicCompanion:
+        this.#ports.resolveRootSnapshotAtomicCompanion,
       reconcileFinalizedTwin: async (contextGraphId, descriptor) => {
         const retirement = await reconcileFinalizedSwmTwinFromDescriptor({
           store: this.#ports.store,
@@ -283,6 +317,31 @@ export class SwmTargetExecutorV1 {
           descriptor,
           retire: (candidate) => this.#ports.retireFinalizedSwmTwin(candidate, target.ctx),
         });
+        const twinRetired = retirement === 'retired'
+          || retirement === 'already-retired-finalized';
+        if (twinRetired) {
+          // The twin's graph and head are already gone at this point. Marker
+          // retirement is a second, separate cleanup: if its failure escaped,
+          // the caller would treat the whole reconciliation as deferred, skip
+          // the suppression below, and its bulk append would write the retired
+          // head and operation rows back without their graph. A marker left
+          // behind is the conservative state (the graph stays reported as
+          // incomplete) until a later pass or a catalog replay retires it.
+          try {
+            await this.#ports.retireLegacySwmAfterVerifiedVmTwin?.({
+              contextGraphId,
+              kaUal: descriptor.kaUal,
+              assertionVersion: descriptor.assertionVersion,
+              subGraphName: descriptor.subGraphName,
+            });
+          } catch (cause) {
+            this.#ports.logWarn(
+              target.ctx,
+              `Deferred legacy SWM boundary retirement after finalized VM twin cleanup for `
+                + `${descriptor.kaUal}: ${cause instanceof Error ? cause.message : String(cause)}`,
+            );
+          }
+        }
         if (retirement === 'retired') {
           this.#ports.invalidateListContextGraphsCache();
           this.#ports.logInfo(
@@ -290,9 +349,7 @@ export class SwmTargetExecutorV1 {
             `Retired byte-identical SWM twin after SWM recovery found finalized VM for ${descriptor.kaUal}`,
           );
         }
-        return retirement === 'retired' || retirement === 'already-retired-finalized'
-          ? 'suppress-metadata'
-          : 'preserve';
+        return twinRetired ? 'suppress-metadata' : 'preserve';
       },
       storeInsert,
       publicSnapshotStore: this.#ports.publicSnapshotStore,
@@ -303,6 +360,30 @@ export class SwmTargetExecutorV1 {
       logWarn: this.#ports.logWarn,
       logDebug: this.#ports.logDebug,
     });
+  }
+
+  /**
+   * Register the named sub-graphs whose shared memory this round just stored
+   * (see `synced-sub-graph-registration.ts`). The rows stay stored when that
+   * fails, and the next rows stored for the sub-graph try again: a round stores
+   * the verified metadata of each asset it finds already present, too.
+   */
+  async #registerSyncedSubGraphs(target: PublicSwmTargetV1, stored: readonly Quad[]): Promise<void> {
+    try {
+      for (const subGraphName of await this.#syncedSubGraphs.registerFor(target.contextGraphId, stored)) {
+        this.#ports.invalidateListContextGraphsCache();
+        this.#ports.logInfo(
+          target.ctx,
+          `Auto-registered sub-graph "${subGraphName}" in context graph "${target.contextGraphId}" from SWM sync`,
+        );
+      }
+    } catch (cause) {
+      this.#ports.logWarn(
+        target.ctx,
+        `SWM sync stored shared memory of a sub-graph of "${target.contextGraphId}" it could not register: `
+          + `${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    }
   }
 
   async #getSubGraphAdmission(
@@ -358,7 +439,8 @@ async function getSharedMemorySubGraphAdmission(
   return { registered, excluded };
 }
 
-async function isKnownContextGraphUri(
+/** True when `contextGraphUri` is declared as a context graph of its own on this node. */
+export async function isKnownContextGraphUri(
   store: TripleStore,
   contextGraphUri: string,
 ): Promise<boolean> {

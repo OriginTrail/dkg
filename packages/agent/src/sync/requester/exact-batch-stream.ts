@@ -1,0 +1,228 @@
+// SPDX-License-Identifier: Apache-2.0
+import type { ExactBatchTransportSession } from '@origintrail-official/dkg-core';
+import {
+  EXACT_BATCH_BATCH_INDEX, EXACT_BATCH_FRAME_KIND as K, EXACT_BATCH_STREAM_WINDOW_SIZE,
+  ExactBatchReceiveWindow, decodeExactBatchAsset,
+  type ExactBatchFrame, type ExactBatchRefusal, type ReceivedExactBatchAsset,
+} from '../exact-batch-stream-contract.js';
+import { requireExactAssetUals } from '../exact-assets.js';
+import { observeExactBatch } from '../exact-batch-observation.js';
+import type { DurableSyncContext } from './durable-sync.js';
+import { createAssetPayloadVerifier, type AssetVerificationOptions, type AssetVerificationStage } from './asset-payload-verifier.js';
+
+/** Agent consumes the public operations of Core's fixed wire session. */
+export type ExactBatchAgentSession = Pick<ExactBatchTransportSession, 'signal' | 'windowSize' | 'assetUals' | 'next' | 'send'>;
+export type ExactBatchStage = AssetVerificationStage;
+export type ExactBatchAssetVerifierOptions = AssetVerificationOptions;
+export interface ExactBatchVerifiedReceiverOptions extends ExactBatchAssetVerifierOptions {
+  readonly assetUals: readonly string[];
+  /** The normal host callback, including chain/binding fences, atomic write and retirement. */
+  readonly storeGraphScopedAsset: NonNullable<DurableSyncContext['storeGraphScopedAsset']>;
+  readonly authenticationDeadline: () => number;
+  /** Observation only, after the normal store callback; progress is returned separately. */
+  readonly onCommitted?: (assetUal: string) => void;
+}
+export interface ExactBatchVerifiedResult {
+  readonly complete: true;
+  readonly committedAssetUals: readonly string[];
+}
+
+export { exactBatchTransportOptions } from '../exact-batch-transport-options.js';
+/** Settled local observations only; these never grant recovery or holder credit. */
+export interface ExactBatchRefusalObservation {
+  readonly code: ExactBatchRefusal;
+  readonly startedAssets: number;
+  readonly committedAssets: number;
+  readonly acknowledgedAssets: number;
+  readonly atAssetBoundary: boolean;
+  readonly verifiedPrefix: boolean;
+}
+class ExactBatchRefusalError extends Error {
+  constructor(readonly refusal: ExactBatchRefusal, readonly startedCount: number, readonly atAssetBoundary: boolean) {
+    super(`Exact batch responder refused: ${refusal}`);
+  }
+}
+export class ExactBatchPartialSyncError extends Error {
+  readonly code = 'EXACT_BATCH_PARTIAL';
+  constructor(readonly committedAssetUals: readonly string[], cause: unknown,
+    readonly refusalObservation?: ExactBatchRefusalObservation,
+    /**
+     * The stream itself failed or ended before completion, and no local
+     * cancellation caused it. False for a refusal, for an asset this node
+     * rejected or could not store, and for a frame the receive window refused.
+     */
+    readonly streamInterrupted = false) {
+    super('Exact batch stopped before verified completion', { cause });
+  }
+}
+/**
+ * The stream itself failed: a read or a send rejected, or it ended before
+ * BATCH_END. Raised only where the session is used, so what the verifier, the
+ * store or the receive window reject never carries it. `cause` is the failure
+ * as the session reported it, and the only thing callers get to see.
+ */
+class ExactBatchStreamFailure extends Error {
+  constructor(cause: unknown) { super('Exact batch stream failed', { cause }); }
+}
+function withoutStreamFailureTag(failure: unknown): unknown {
+  return failure instanceof ExactBatchStreamFailure ? failure.cause : failure;
+}
+interface ExactBatchProgress {
+  readonly committedAssetUals: string[];
+  refusalObservation?: ExactBatchRefusalObservation;
+}
+function committedPrefix(progress: ExactBatchProgress): readonly string[] {
+  return Object.freeze([...progress.committedAssetUals]);
+}
+/**
+ * `failure` is what ended the exchange: the first thing to fail, because a
+ * read left pending rejects only later, once the stream is torn down. A
+ * cancelled session is never an interrupted stream.
+ */
+function partialSyncError(progress: ExactBatchProgress, failure: unknown, signal?: AbortSignal): ExactBatchPartialSyncError {
+  const cause = withoutStreamFailureTag(failure);
+  return new ExactBatchPartialSyncError(committedPrefix(progress), cause,
+    cause instanceof ExactBatchRefusalError && !signal?.aborted ? progress.refusalObservation : undefined,
+    failure instanceof ExactBatchStreamFailure && !signal?.aborted);
+}
+/** Exact wire adaptation preserves its unchanged negotiated payload and ACK contract. */
+export function createExactBatchAssetVerifier(options: ExactBatchAssetVerifierOptions) {
+  const verify = createAssetPayloadVerifier(options);
+  return async (received: ReceivedExactBatchAsset, signal?: AbortSignal) => {
+    const started = performance.now();
+    const decoded = await decodeExactBatchAsset(received, { signal });
+    observeExactBatch(() => options.onStage?.('decode', received.assetIndex, performance.now() - started));
+    return verify({ ...received, dataBytes: decoded.bytes }, signal);
+  };
+}
+
+/** V1 keeps its original commit-before-ACK contract. Bulk reuses only verification. */
+export function createExactBatchVerifiedCommitter(options: ExactBatchVerifiedReceiverOptions) {
+  const verify = createExactBatchAssetVerifier(options);
+  return async (received: ReceivedExactBatchAsset, signal?: AbortSignal): Promise<void> => {
+    const asset = await verify(received, signal);
+    const deadline = options.authenticationDeadline();
+    if (!Number.isFinite(deadline) || deadline <= Date.now()) throw new Error('Exact batch authentication deadline expired');
+    const started = performance.now();
+    const outcome = await options.storeGraphScopedAsset({ asset, authenticationDeadline: deadline, signal });
+    observeExactBatch(() => options.onStage?.('authenticate-and-store', received.assetIndex, performance.now() - started));
+    // The prototype ACK certifies a completed normal atomic application, not an
+    // inferred stale/quarantined result or mere receipt of peer bytes.
+    if (outcome !== 'applied') throw new Error('Exact batch asset did not complete atomic materialization');
+    observeExactBatch(() => options.onCommitted?.(asset.ual));
+  };
+}
+
+/**
+ * One reader overlaps the next compressed asset with one normal verifier/write.
+ * On failure the Core exchange must abort the physical stream and settle its
+ * decoder before returning. Pending reads remain owned by that exchange; this
+ * module never releases a live atomic callback by racing it against cancellation.
+ */
+export async function consumeExactBatchVerifiedSession(session: ExactBatchAgentSession, options: ExactBatchVerifiedReceiverOptions): Promise<ExactBatchVerifiedResult> {
+  const selected = validateExactBatchSelection(session, options);
+  const progress: ExactBatchProgress = { committedAssetUals: [] };
+  try {
+    return await consumeExactBatchWithProgress(session, options, selected, progress);
+  } catch (cause) {
+    throw partialSyncError(progress, cause, session.signal);
+  }
+}
+
+function validateExactBatchSelection(session: ExactBatchAgentSession, options: ExactBatchVerifiedReceiverOptions): string[] {
+  if (session.windowSize !== EXACT_BATCH_STREAM_WINDOW_SIZE) throw new Error('Experimental exact batch requires fixed window2');
+  const selected = requireExactAssetUals(options.assetUals);
+  if (selected.length !== options.assetUals.length || JSON.stringify(selected) !== JSON.stringify(session.assetUals)) throw new Error('Exact batch authorized selection mismatch');
+  return selected;
+}
+
+async function consumeExactBatchWithProgress(session: ExactBatchAgentSession, options: ExactBatchVerifiedReceiverOptions,
+  selected: readonly string[], progress: ExactBatchProgress): Promise<ExactBatchVerifiedResult> {
+  const window = new ExactBatchReceiveWindow({ assetUals: selected, windowSize: EXACT_BATCH_STREAM_WINDOW_SIZE });
+  const cancellation = new AbortController();
+  const signal = AbortSignal.any([session.signal, cancellation.signal]);
+  const verifyAndCommit = createExactBatchVerifiedCommitter(options);
+  const commit = async (asset: ReceivedExactBatchAsset, commitSignal?: AbortSignal) => {
+    await verifyAndCommit(asset, commitSignal);
+    // Required progress follows settled atomic application, independent of
+    // observers and before the receive window checks cancellation for ACK.
+    progress.committedAssetUals.push(asset.assetUal);
+  };
+  let stopped = false, batchEnded = false, acknowledgedAssets = 0;
+  let wake: (() => void) | undefined;
+  const notify = () => { const waiting = wake; wake = undefined; waiting?.(); };
+  const onStream = async <T>(io: () => Promise<T>): Promise<T> => {
+    try { return await io(); } catch (cause) { throw new ExactBatchStreamFailure(cause); }
+  };
+  const reader = (async () => {
+    while (!stopped) {
+      const incoming = await onStream(() => session.next());
+      if (stopped) return;
+      if (!incoming) throw new ExactBatchStreamFailure(new Error('Exact batch ended without explicit completion'));
+      window.accept(incoming); notify();
+      if (incoming.kind === K.REFUSE) throw new ExactBatchRefusalError(window.refusal!, window.startedCount, window.atAssetBoundary);
+      if (incoming.kind === K.BATCH_END) { batchEnded = true; notify(); return; }
+    }
+  })();
+  const committer = (async () => {
+    while (!stopped && window.committedCount < selected.length) {
+      signal.throwIfAborted();
+      const asset = window.takeReady();
+      if (!asset) { await new Promise<void>(resolve => { wake = resolve; }); continue; }
+      const acknowledged = await window.commitAsset(asset, commit, { signal });
+      await onStream(() => session.send(acknowledged));
+      acknowledgedAssets += 1;
+    }
+  })();
+  try {
+    await Promise.all([reader, committer]);
+    if (!batchEnded || !window.complete) throw new Error('Exact batch did not reach verified completion');
+    return Object.freeze({ complete: true, committedAssetUals: committedPrefix(progress) });
+  } catch (failure) {
+    const cause = withoutStreamFailureTag(failure);
+    stopped = true; cancellation.abort(cause); notify();
+    await window.close();
+    const prefix = progress.committedAssetUals;
+    progress.refusalObservation = cause instanceof ExactBatchRefusalError && !session.signal.aborted
+      ? Object.freeze({ code: cause.refusal, startedAssets: cause.startedCount,
+          committedAssets: prefix.length, acknowledgedAssets, atAssetBoundary: cause.atAssetBoundary,
+          verifiedPrefix: cause.atAssetBoundary && !batchEnded
+            && prefix.length > 0 && prefix.length < selected.length
+            && cause.startedCount === prefix.length && acknowledgedAssets === prefix.length
+            && prefix.every((ual, index) => ual === selected[index]) })
+      : undefined;
+    // The owning public boundary normalizes the error after its physical
+    // settlement, so a later close failure can replace refusal classification.
+    // It also reads, and removes, the stream-failure tag.
+    throw failure;
+  } finally {
+    stopped = true; notify();
+    await window.close(); // physically await any verifier/write still running
+  }
+}
+
+/** START contains unchanged bytes from the normal public or signed builder. */
+export function exactBatchStartFrame(requestBytes: Uint8Array): ExactBatchFrame {
+  if (requestBytes.byteLength < 1 || requestBytes.byteLength > 8192) throw new RangeError('Exact batch START exceeds request allowance');
+  return { kind: K.REQUEST, assetIndex: EXACT_BATCH_BATCH_INDEX, sequence: 0, payload: requestBytes.slice() };
+}
+
+/**
+ * Preserve real per-KA progress even if Core's final physical close rejects
+ * after consume reached BATCH_END. No fallback can run inside this boundary.
+ */
+export async function exchangeExactBatchVerified(
+  exchange: (consume: (session: ExactBatchAgentSession) => Promise<ExactBatchVerifiedResult>) => Promise<ExactBatchVerifiedResult>,
+  options: ExactBatchVerifiedReceiverOptions,
+): Promise<ExactBatchVerifiedResult> {
+  const progress: ExactBatchProgress = { committedAssetUals: [] };
+  let sessionSignal: AbortSignal | undefined;
+  try {
+    return await exchange(session => {
+      sessionSignal = session.signal;
+      return consumeExactBatchWithProgress(session, options, validateExactBatchSelection(session, options), progress);
+    });
+  } catch (cause) {
+    throw partialSyncError(progress, cause, sessionSignal);
+  }
+}

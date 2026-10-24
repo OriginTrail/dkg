@@ -79,6 +79,7 @@ describe('DKG Local LLM Node UI surface', () => {
         return json({
           ok: false,
           configured: false,
+          detected: false,
           ready: false,
           reachable: false,
           offline: true,
@@ -92,7 +93,31 @@ describe('DKG Local LLM Node UI surface', () => {
     await expect(fetchLocalAgentIntegrations()).resolves.toEqual({ integrations: [] });
   });
 
-  it('hides an unconfigured local LLM when an unrelated service answers on the default port', async () => {
+  it('hides an unrelated HTTP service on the default Local LLM port', async () => {
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/api/local-agent-integrations')) {
+        return json({ integrations: [localLlmRecord()] });
+      }
+      if (url.endsWith('/api/local-llm/health')) {
+        return json({
+          ok: false,
+          configured: false,
+          detected: false,
+          ready: false,
+          reachable: true,
+          offline: false,
+          readOnly: true,
+          error: 'No compatible local LLM server was detected',
+        });
+      }
+      return json({ error: `Unexpected request: ${url}` }, 500);
+    }) as typeof globalThis.fetch;
+
+    await expect(fetchLocalAgentIntegrations()).resolves.toEqual({ integrations: [] });
+  });
+
+  it('hides the same false positive from a v10.0.16 daemon without detected health', async () => {
     globalThis.fetch = vi.fn(async (input) => {
       const url = String(input);
       if (url.endsWith('/api/local-agent-integrations')) {
@@ -104,9 +129,9 @@ describe('DKG Local LLM Node UI surface', () => {
           configured: false,
           ready: false,
           reachable: true,
-          offline: true,
+          offline: false,
           readOnly: true,
-          error: 'Local LLM readiness probe returned an unexpected response',
+          error: 'Local LLM server is reachable but not ready',
         });
       }
       return json({ error: `Unexpected request: ${url}` }, 500);
@@ -125,6 +150,7 @@ describe('DKG Local LLM Node UI surface', () => {
         return json({
           ok: true,
           configured: false,
+          detected: true,
           ready: true,
           reachable: true,
           offline: false,
@@ -140,6 +166,37 @@ describe('DKG Local LLM Node UI surface', () => {
       id: 'local-llm',
       chatReady: true,
       status: 'chat_ready',
+    });
+  });
+
+  it('shows an auto-detected Local LLM while its model is still loading', async () => {
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/api/local-agent-integrations')) {
+        return json({ integrations: [localLlmRecord()] });
+      }
+      if (url.endsWith('/api/local-llm/health')) {
+        return json({
+          ok: false,
+          configured: false,
+          detected: true,
+          ready: false,
+          reachable: true,
+          offline: false,
+          readOnly: true,
+          error: 'llama.cpp model is still loading',
+        });
+      }
+      return json({ error: `Unexpected request: ${url}` }, 500);
+    }) as typeof globalThis.fetch;
+
+    const { integrations } = await fetchLocalAgentIntegrations();
+    expect(integrations).toHaveLength(1);
+    expect(integrations[0]).toMatchObject({
+      id: 'local-llm',
+      detected: true,
+      chatReady: false,
+      error: 'llama.cpp model is still loading',
     });
   });
 

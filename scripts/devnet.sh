@@ -40,6 +40,20 @@
 #                 Local snapshot-store watermarks (defaults: 256 MiB, 512 MiB,
 #                 and 1 GiB) so devnet keeps capacity admission without
 #                 requiring production-scale free disk.
+#   DEVNET_SNAPSHOT_GC_FINALIZED_CLEANUP=1
+#                 Opt every node into the finalized-snapshot collector
+#                 (sharedMemoryPublicSnapshotStorage.gc.finalizedCleanupEnabled).
+#   DEVNET_SNAPSHOT_GC_FINALIZED_RETENTION_MS
+#                 Grace period after a confirmed publish before a snapshot may
+#                 be reclaimed (only written with FINALIZED_CLEANUP=1; the node
+#                 default is 24 hours).
+#   DEVNET_SNAPSHOT_GC_INTERVAL_MS
+#                 How often the snapshot collector runs (only written when set;
+#                 the node default is 5 minutes).
+#   DEVNET_RPC_BUDGET=shipped
+#                 Keep each node's shipped chain RPC request budget. By default
+#                 (`local`) nodes get a budget sized for the one local chain
+#                 they share: see devnet_chain_config_block.
 #
 set -euo pipefail
 
@@ -80,6 +94,7 @@ DEVNET_DOCKER_NAME_PREFIX="${DEVNET_DOCKER_NAME_PREFIX:-devnet}"
 DEVNET_SNAPSHOT_GC_HARD_RESERVE_BYTES="${DEVNET_SNAPSHOT_GC_HARD_RESERVE_BYTES:-268435456}"
 DEVNET_SNAPSHOT_GC_TRIGGER_FREE_BYTES="${DEVNET_SNAPSHOT_GC_TRIGGER_FREE_BYTES:-536870912}"
 DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES="${DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES:-1073741824}"
+DEVNET_RPC_BUDGET="${DEVNET_RPC_BUDGET:-local}"
 BLAZEGRAPH_PORT="${DEVNET_BLAZEGRAPH_PORT:-9999}"
 BLAZEGRAPH_CONTAINER="${DEVNET_DOCKER_NAME_PREFIX}-blazegraph"
 BLAZEGRAPH_LOG_MAX_SIZE="200m"
@@ -345,11 +360,13 @@ deploy_contracts() {
   # NEVER lower this (e.g. to 1). The devnet MUST exercise the real 3-of-N
   # StorageACK quorum so publish/consensus behaviour matches mainnet. A lower
   # value silently hides quorum bugs and produces false "publishing works"
-  # signals. A publisher collects StorageACKs from its PEERS only (it does NOT
-  # sign its own quorum), so a VM publish needs `minimumRequiredSignatures`
-  # OTHER reachable core nodes — i.e. >= minSig + 1 core nodes total (>= 4 for
-  # minSig=3). Verified empirically: with only 3 core nodes a publish aborts
-  # with "need 3 ACKs but only 2 core peers connected — quorum impossible".
+  # signals. A publisher collects StorageACKs from Core nodes only, and a
+  # publishing Core also counts its own StorageACK (it stores the copy and
+  # signs through its local endpoint; the chain requires distinct identities).
+  # So an Edge publish needs `minimumRequiredSignatures` reachable cores and a
+  # Core publish needs minSig - 1 OTHER reachable cores. The devnet runs
+  # >= minSig + 1 core nodes (4 for minSig=3), which leaves an Edge publish one
+  # spare core.
   # DO NOT CHANGE THIS VALUE. ── important ──
   local ps_addr
   ps_addr=$(node -e "
@@ -564,6 +581,43 @@ stop_blazegraph() {
   fi
 }
 
+# The "chain" member of one node's config.json.
+#
+# A node's shipped RPC request budget is sized for a public provider it shares
+# with other users: 10 requests/second, with background work held back for a
+# random part of the first 30 seconds so that nodes restarting together do not
+# all ask at once. Every devnet node talks to one local chain, where neither
+# limit protects anything, so a node gets a budget sized for that chain.
+#
+# DEVNET_RPC_BUDGET=shipped leaves the block out, for a run that is meant to
+# exercise the shipped budget. A node on another version (DEVNET_VERSION_LAYOUT)
+# keeps its shipped budget as well: only the code under test is known to read
+# this block.
+devnet_chain_config_block() {
+  local hub_addr="$1" version_ref="$2" rpc_budget=""
+  case "$DEVNET_RPC_BUDGET" in
+    local)
+      if [ "$version_ref" = "current" ]; then
+        rpc_budget=',
+    "rpcRequestBudget": { "maxRequestsPerSecond": 1000, "burstRequests": 1000, "startupJitterMs": 0 }'
+      fi
+      ;;
+    shipped) ;;
+    *)
+      echo "[devnet] DEVNET_RPC_BUDGET must be 'local' or 'shipped' (got '$DEVNET_RPC_BUDGET')" >&2
+      return 1
+      ;;
+  esac
+  cat <<EOCHAIN
+"chain": {
+    "type": "evm",
+    "rpcUrl": "http://127.0.0.1:${HARDHAT_PORT}",
+    "hubAddress": "${hub_addr}",
+    "chainId": "evm:31337"${rpc_budget}
+  }
+EOCHAIN
+}
+
 create_node_config() {
   local node_num="$1"
   local node_dir="$DEVNET_DIR/node${node_num}"
@@ -631,7 +685,26 @@ create_node_config() {
     if [ "$OXIGRAPH_SERVER_AVAILABLE" = true ]; then
       local ox_port_var="OXIGRAPH_SERVER_PORT_${node_num}"
       local ox_port="${!ox_port_var}"
-      store_block="\"store\": { \"backend\": \"sparql-http\", \"options\": { \"queryEndpoint\": \"http://127.0.0.1:${ox_port}/query\", \"updateEndpoint\": \"http://127.0.0.1:${ox_port}/update\" } },"
+      # Declare the transactional guarantee this endpoint actually has. The
+      # container is the same Oxigraph the managed path spawns (which
+      # self-declares `atomic-readback`), but an explicitly configured
+      # sparql-http endpoint defaults to `best-effort` — it cannot know what is
+      # behind it. RFC-64 durable sync requires atomic data/metadata
+      # replacement, so without this nodes 5-6 refuse every graph-scoped
+      # materialization with VM_ATOMIC_REPLACE_UNSUPPORTED and converge nothing
+      # while nodes 1-2 pass — a matrix hole that looks like a product failure.
+      #
+      # `atomic-update` is the minimum that lifts that refusal
+      # (SparqlHttpStore.replaceGraphAndSubject gates on it). `atomic-readback`
+      # is declared deliberately instead: one Oxigraph process does guarantee
+      # read-after-write, and it additionally exercises the receipt-bearing
+      # author-commit CAS lane (rfc64AuthorCommitCasV1) over sparql-http, which
+      # this matrix otherwise never covers. A failure in that lane on nodes 5-6
+      # is therefore a real finding, not devnet drift. Note the certifications
+      # reserved for the daemon-spawned runtime (shared projection stream,
+      # exact-bindings and semantic reads) stay off here by design, so these
+      # nodes remain an external-endpoint cell rather than a managed twin.
+      store_block="\"store\": { \"backend\": \"sparql-http\", \"options\": { \"queryEndpoint\": \"http://127.0.0.1:${ox_port}/query\", \"updateEndpoint\": \"http://127.0.0.1:${ox_port}/update\", \"consistencyProfile\": \"atomic-readback\" } },"
     else
       store_block="\"store\": { \"backend\": \"oxigraph-server\", \"options\": { \"port\": $(( ${DEVNET_OXIGRAPH_BASE:-7900} + node_num )) } },"
     fi
@@ -666,6 +739,24 @@ create_node_config() {
     rs_block="\"randomSampling\": { \"walPath\": \"${node_dir}/random-sampling.wal\", \"tickIntervalMs\": 5000 },"
   fi
 
+  # Optional snapshot collector tuning; nothing is written unless requested.
+  local snapshot_gc_extra=""
+  if [ "${DEVNET_SNAPSHOT_GC_FINALIZED_CLEANUP:-}" = "1" ]; then
+    snapshot_gc_extra="${snapshot_gc_extra},
+      \"finalizedCleanupEnabled\": true"
+    if [ -n "${DEVNET_SNAPSHOT_GC_FINALIZED_RETENTION_MS:-}" ]; then
+      snapshot_gc_extra="${snapshot_gc_extra},
+      \"finalizedRetentionMs\": ${DEVNET_SNAPSHOT_GC_FINALIZED_RETENTION_MS}"
+    fi
+  fi
+  if [ -n "${DEVNET_SNAPSHOT_GC_INTERVAL_MS:-}" ]; then
+    snapshot_gc_extra="${snapshot_gc_extra},
+      \"intervalMs\": ${DEVNET_SNAPSHOT_GC_INTERVAL_MS}"
+  fi
+
+  local chain_block
+  chain_block="$(devnet_chain_config_block "$hub_addr" "$(node_version_ref "$node_num" "$node_role")")"
+
   cat > "$node_dir/config.json" <<EOCONF
 {
   "name": "devnet-node-${node_num}",
@@ -683,7 +774,7 @@ create_node_config() {
     "gc": {
       "hardReserveBytes": ${DEVNET_SNAPSHOT_GC_HARD_RESERVE_BYTES},
       "triggerFreeBytes": ${DEVNET_SNAPSHOT_GC_TRIGGER_FREE_BYTES},
-      "targetFreeBytes": ${DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES}
+      "targetFreeBytes": ${DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES}${snapshot_gc_extra}
     }
   },
   "publisher": {
@@ -695,12 +786,7 @@ create_node_config() {
   ${rs_block}
   ${publisher_block}
   ${epcis_block}
-  "chain": {
-    "type": "evm",
-    "rpcUrl": "http://127.0.0.1:${HARDHAT_PORT}",
-    "hubAddress": "${hub_addr}",
-    "chainId": "evm:31337"
-  }
+  ${chain_block}
 }
 EOCONF
 
@@ -870,6 +956,13 @@ node_cli_entry() {
   version_cli_entry "$(node_version_ref "$node_num" "$role")"
 }
 
+# Modern compilers own their output identity. Historical checkouts receive
+# truthful metadata from the identity captured before their build begins.
+write_devnet_version_build_info() {
+  local dest="$1" before="${2:-}"
+  node "$(dirname "${BASH_SOURCE[0]}")/stamp-cli-build-info.mjs" --ensure-devnet "$dest" "$before"
+}
+
 # Check out <ref> as a worktree under DEVNET_VERSIONS_DIR and build it once.
 prepare_version() {
   local ref="$1"
@@ -879,7 +972,8 @@ prepare_version() {
     return 1
   fi
   local dest="$DEVNET_VERSIONS_DIR/$ref"
-  if [ -f "$dest/packages/cli/dist/cli.js" ] && [ "${DEVNET_VERSION_REBUILD:-0}" != "1" ]; then
+  if [ -f "$dest/packages/cli/dist/cli.js" ] && [ "${DEVNET_VERSION_REBUILD:-0}" != "1" ] &&
+    node "$(dirname "${BASH_SOURCE[0]}")/stamp-cli-build-info.mjs" --check-devnet-cache "$dest"; then
     log "Version '$ref' already prepared at $dest"
     return 0
   fi
@@ -888,8 +982,11 @@ prepare_version() {
     log "Checking out version '$ref' as a worktree at $dest ..."
     git -C "$REPO_ROOT" worktree add --force "$dest" "$ref"
   fi
+  local before
+  before="$(node "$(dirname "${BASH_SOURCE[0]}")/stamp-cli-build-info.mjs" --capture-devnet "$dest")"
   log "Building version '$ref' (runs once, then cached) ..."
   ( cd "$dest" && pnpm install --prefer-offline && pnpm run build )
+  write_devnet_version_build_info "$dest" "$before"
   log "Version '$ref' prepared at $dest"
 }
 
@@ -949,7 +1046,13 @@ start_node() {
     const fs = require('fs');
     const dir = process.env.DEVNET_DIR;
     const cfgPath = process.env.NODE_DIR + '/config.json';
-    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    // The members a test set when it added this node (addnode's
+    // DEVNET_ADDNODE_CONFIG_OVERRIDES), applied here only, on every start: the
+    // defaults below are derived from them (an overridden nodeRole or
+    // authorityIndex), and they win over the values generated below.
+    const overridesPath = process.env.NODE_DIR + '/addnode-overrides.json';
+    const overrides = fs.existsSync(overridesPath) ? JSON.parse(fs.readFileSync(overridesPath, 'utf8')) : {};
+    const cfg = { ...JSON.parse(fs.readFileSync(cfgPath, 'utf8')), ...overrides };
     if (process.env.RELAY_ARG) cfg.relay = process.env.RELAY_ARG;
     const n = Number(process.env.NODE_NUM);
     // Bootstrap targets are the CORE nodes among 1..n-1, read from each node's
@@ -966,6 +1069,22 @@ start_node() {
       try { const m = fs.readFileSync(dir + '/node' + c + '/multiaddr', 'utf8').trim(); if (m) peers.push(m); } catch {}
     }
     if (peers.length) cfg.bootstrapPeers = peers;
+    // The isolated Hardhat chain has no authority history on the public
+    // network relays. Pin an edge's snapshot trust to the local Core mesh so
+    // unregistered-CG subscription can prove finalized name absence without
+    // repeatedly cold-scanning the same chain on every receiver. Preserve an
+    // explicit operator override when adding a node to an existing devnet.
+    // The daemon rejects a trust list longer than eight Cores
+    // (CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_TRUSTED_PEERS), so a larger
+    // Core mesh trusts its first eight; bootstrapPeers above stays complete.
+    if (cfg.nodeRole === 'edge' && peers.length && !cfg.authorityIndex) {
+      cfg.authorityIndex = {
+        mode: 'core-snapshot',
+        trustedCorePeers: peers.slice(0, 8),
+        maxTailBlocks: 2000,
+      };
+    }
+    Object.assign(cfg, overrides);
     fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
   "
 
@@ -1014,7 +1133,10 @@ start_node() {
       auth_args=(-H "Authorization: Bearer $auth_token")
     fi
   fi
-  local max_wait=${DEVNET_NODE_READY_TIMEOUT:-30}
+  # 120 s, not 30: a Core that restarts into a running network has taken 70 s
+  # to answer on a busy machine, and a restart that gives up early aborts the
+  # suite that asked for it. The loop ends as soon as the node answers.
+  local max_wait=${DEVNET_NODE_READY_TIMEOUT:-120}
   [ "$node_num" -eq 1 ] && max_wait=$(( max_wait > 120 ? max_wait : 120 ))
   local ready=false
   # CRITICAL: declare loop variable `local` so we don't clobber the OUTER
@@ -2090,6 +2212,8 @@ cmd_clean() {
 # itself so it can assert on every step.
 #
 # Usage: devnet.sh addnode <num> [core|edge]
+#   DEVNET_ADDNODE_CONFIG_OVERRIDES='{"key": value, ...}'  config.json members
+#                                   to set before the node's first start
 cmd_addnode() {
   local node_num="${2:-}"
   local role="${3:-core}"
@@ -2117,7 +2241,44 @@ cmd_addnode() {
   fi
 
   log "Adding node $node_num (role=$role)..."
+  # One mkdir claims the folder: it fails when another caller made the folder
+  # since the check above, so only the caller that created it goes on. A caller
+  # that names a mark (DEVNET_ADDNODE_MARK_NAME, a file name, with
+  # DEVNET_ADDNODE_MARK_TEXT) has it written into the folder before anything
+  # else happens there, the daemon's start included: it can then tell its own
+  # node from another caller's even when this addnode is interrupted.
+  if ! mkdir "$DEVNET_DIR/node${node_num}" 2>/dev/null; then
+    echo "[devnet] node${node_num} already exists at $DEVNET_DIR/node${node_num}"
+    exit 1
+  fi
+  if [ -n "${DEVNET_ADDNODE_MARK_NAME:-}" ]; then
+    case "$DEVNET_ADDNODE_MARK_NAME" in
+      */*|.|..)
+        echo "[devnet] DEVNET_ADDNODE_MARK_NAME must be a file name; node${node_num} was not started"
+        rm -rf "$DEVNET_DIR/node${node_num}"
+        exit 1 ;;
+    esac
+    printf '%s\n' "${DEVNET_ADDNODE_MARK_TEXT:-}" > "$DEVNET_DIR/node${node_num}/$DEVNET_ADDNODE_MARK_NAME"
+  fi
   DEVNET_NODE_ROLE_OVERRIDE="$role" create_node_config "$node_num"
+
+  # A test that needs the new node to differ from the first second it runs
+  # (the addresses it announces, for one: what a peer has once learnt about a
+  # node it keeps) passes a JSON object here. addnode checks it and keeps it
+  # beside the node's config; start_node applies it, on the first start and on
+  # every later one (see there).
+  if [ -n "${DEVNET_ADDNODE_CONFIG_OVERRIDES:-}" ]; then
+    if ! node -e '
+      const overrides = JSON.parse(process.env.DEVNET_ADDNODE_CONFIG_OVERRIDES);
+      if (overrides === null || typeof overrides !== "object" || Array.isArray(overrides)) throw new Error("not a JSON object");
+    '; then
+      echo "[devnet] DEVNET_ADDNODE_CONFIG_OVERRIDES must be a JSON object; node${node_num} was not started"
+      rm -rf "$DEVNET_DIR/node${node_num}"
+      exit 1
+    fi
+    printf '%s\n' "$DEVNET_ADDNODE_CONFIG_OVERRIDES" > "$DEVNET_DIR/node${node_num}/addnode-overrides.json"
+    log "Node $node_num config: DEVNET_ADDNODE_CONFIG_OVERRIDES kept for every start"
+  fi
 
   # Reuse the cluster's shared auth token so the test can talk to the new
   # node with the same bearer used everywhere else.

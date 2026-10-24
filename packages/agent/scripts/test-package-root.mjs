@@ -8,6 +8,8 @@ if ('createRandomSamplingRuntime' in root.DKGAgent.prototype) {
   throw new Error('internal Random Sampling runtime factory leaked from the agent surface');
 }
 const legacyAgent = await import('@origintrail-official/dkg-agent/dist/dkg-agent.js');
+const legacyAgentBase = await import('@origintrail-official/dkg-agent/dist/dkg-agent-base.js');
+const legacyAgentPublish = await import('@origintrail-official/dkg-agent/dist/dkg-agent-publish.js');
 const legacyChainReconciler = await import(
   '@origintrail-official/dkg-agent/dist/chain-reconciler.js'
 );
@@ -19,6 +21,9 @@ const legacySharedMemorySync = await import(
 );
 const publicCatalogActivation = await import(
   '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1'
+);
+const chainAuthorityReadBudgets = await import(
+  '@origintrail-official/dkg-agent/chain-authority-read-budgets'
 );
 const registeredAuthorityContract = await import(
   '@origintrail-official/dkg-agent/dist/registered-context-graph-authority.js'
@@ -43,8 +48,11 @@ const expectedRfc64PublicCatalogReconciliationOutcomes = [
 ];
 
 if (
-  typeof root.DKGAgent !== 'function'
+  typeof root.resolveWorkingMemoryIdentityAliases !== 'function'
+  || typeof root.DKGAgent !== 'function'
   || typeof legacyAgent.DKGAgent !== 'function'
+  || typeof legacyAgentBase.createListContextGraphsCacheInvalidatingStore !== 'function'
+  || typeof legacyAgentPublish.createKnowledgeAssetVmPublishIntentKey !== 'function'
   || typeof root.Rfc64PublicCatalogSuccessorProducerV1 !== 'function'
   || typeof root.computeRfc64AppliedInventoryDigestV1 !== 'function'
   || typeof root.classifyRfc64PolicyCellV1 !== 'function'
@@ -86,22 +94,30 @@ for (const [subpath, target] of Object.entries(packageExports)) {
     throw new Error(`internal export exception must remain blocked: ${subpath}`);
   }
 }
-const representativeInternalSpecifier =
-  '@origintrail-official/dkg-agent/dist/internal/context-graph-authority/' +
-  'context-graph-agent-gate-authority.js';
-try {
-  await import(representativeInternalSpecifier);
-  throw new Error(`internal module unexpectedly resolved: ${representativeInternalSpecifier}`);
-} catch (error) {
-  if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
-}
-try {
-  require.resolve(representativeInternalSpecifier);
-  throw new Error(
-    `internal module unexpectedly resolved via require: ${representativeInternalSpecifier}`,
-  );
-} catch (error) {
-  if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+const emittedInternalModules = await listEmittedModules('internal', ['.js', '.d.ts', '.map']);
+if (emittedInternalModules.length === 0) throw new Error('internal module boundary has no emitted controls');
+for (const module of emittedInternalModules) {
+  const specifier = `@origintrail-official/dkg-agent/dist/internal/${module}`;
+  try {
+    await import(specifier);
+    throw new Error(`internal module unexpectedly imported: ${specifier}`);
+  } catch (error) {
+    if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+  }
+  try {
+    require.resolve(specifier);
+    throw new Error(`internal module unexpectedly resolved via require: ${specifier}`);
+  } catch (error) {
+    if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+  }
+  if (module.endsWith('.js')) {
+    try {
+      require(specifier);
+      throw new Error(`internal module unexpectedly required: ${specifier}`);
+    } catch (error) {
+      if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+    }
+  }
 }
 const legacySynchronizationError = new legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1(
   'no-authorized-provider',
@@ -214,6 +230,12 @@ if (typeof publicCatalogActivation.resolveRfc64PublicCatalogActivationConfigV1 !
   throw new Error('public RFC-64 activation subpath did not expose the complete resolver');
 }
 if (
+  typeof chainAuthorityReadBudgets.resolveChainAuthorityTimeoutMs !== 'function'
+  || typeof chainAuthorityReadBudgets.resolveChainAuthorityReadBudgets !== 'function'
+) {
+  throw new Error('chain authority read budgets subpath did not expose its resolvers');
+}
+if (
   typeof publicCatalogActivation.resolveRfc64PublicCatalogActivationChainIdentityV1
   !== 'function'
 ) {
@@ -253,9 +275,16 @@ const publicRfc64Modules = [
   'swm-author-inventory-producer-v1.js',
 ];
 const blockedRfc64Modules = [
+  'private-placement-failure-state-v1.js',
+  'inventory-v1/finalized-private-repair-persistence.js',
+  'inventory-v1/schema-migrations.js',
+  'catalog-projection-discovery-v1.js',
+  'catalog-repair-diagnostics-v1.js',
+  'catalog-repair-retry-v1.js',
   'catalog-synchronization-error-v1.js',
   'catalog-access-policy-v1.js',
   'catalog-authority-config-v1.js',
+  'manual-catalog-authority-scope-v1.js',
   'catalog-authority-refresh-binding-v1.js',
   'catalog-authority-refresh-loop-v1.js',
   'catalog-authority-revision-projection-v1.js',
@@ -265,24 +294,35 @@ const blockedRfc64Modules = [
   'catalog-responsibility-registry-v1.js',
   'release-native-catalog-authority-v1.js',
   'legacy-swm-boundary-v1.js',
+  'legacy-swm-boundary-codec-v1.js',
+  'legacy-swm-boundary-fence-v1.js',
+  'catalog-operational-targets-v1.js',
+  'private-read-roster-v1.js',
   'catalog-rollout-authority-v1.js',
   'catalog-rollout-authority-reconciliation-v1.js',
   'applied-catalog-authority-transition-v1.js',
   'catalog-semantic-authority-transition-v1.js',
   'public-catalog-native-errors-v1.js',
+  'projection-store-read-back-v1.js',
   'catalog-applied-head-coordinator-v1.js',
   'catalog-native-scoped-read-capability-v1-internal.js',
   'catalog-native-scoped-read-provider-v1.js',
   'catalog-head-lineage-v1.js',
   'catalog-limits-v1.js',
   'catalog-peers-v1.js',
+  'catalog-policy-decision-probe-v1.js',
   'catalog-transport-authorization-v1.js',
   'catalog-transport-wire-v1-internal.js',
   'control-envelope-signer-v1.js',
+  'unregistered-replica-authority-v1.js',
+  'unregistered-authority-seed-store-v1.js',
+  'unregistered-authority-transport-v1.js',
   'control-object-store-v1-internal.js',
   'control-object-store-v1.js',
   'durable-file-store-v1.js',
   'inventory-v1/exact-record.js',
+  'inventory-persistence-failure.js',
+  'inventory-v1/open-error.js',
   'inventory-v1/swm-author-inventory-auth-v1.js',
   'inventory-v1/swm-author-inventory-commit-plan.js',
   'inventory-v1/swm-author-inventory-contracts.js',
@@ -315,11 +355,15 @@ const blockedRfc64Modules = [
   'public-catalog-reconciliation-failure-v1.js',
   'public-catalog-reconciliation-outcome-v1.js',
   'public-catalog-receiver-task-lifecycle-v1.js',
+  'announced-current-head-retry-v1.js',
   'public-catalog-receiver-v1.js',
   'public-catalog-service-v1.js',
+  'public-catalog-head-delivery-v1.js',
+  'public-catalog-head-fanout-v1.js',
   'public-catalog-issuer-delegation-v1.js',
   'public-catalog-successor-asset-v1.js',
   'public-catalog-successor-producer-v1.js',
+  'public-catalog-successor-row-binding-v1.js',
   'public-catalog-transport-v1.js',
   'recoverable-author-attestation-v1.js',
   'secure-filesystem-policy-v1.js',
@@ -328,18 +372,26 @@ const blockedRfc64Modules = [
   'swm-inventory-catalog-reconciler-v1.js',
   'swm-catalog-durable-asset-resolver-v1.js',
   'swm-inventory-shadow-runtime-v1.js',
+  'swm-inventory-observation-retry-v1.js',
+  'swm-inventory-settlement-outlook-v1.js',
   'abort-v1.js',
   'catalog-mutation-runtime-v1.js',
   'catalog-replay-connection-runtime-v1.js',
+  'catalog-replay-generation-v1.js',
   'catalog-replay-recovery-runtime-v1.js',
   'catalog-replay-snapshot-runtime-v1.js',
+  'catalog-operational-applied-heads-v1.js',
+  'catalog-operational-reads-v1.js',
+  'catalog-completion-evidence-v1.js',
+  'private-catalog-subscription-readiness-v1.js',
+  'registered-private-empty-vm-proof-v1.js',
   'catalog-runtime-v1.js',
   'background-work-dispatcher-v1.js',
   'supervisor-status-v1.js',
   'catalog-shadow-observability-v1.js',
   'serialized-scope-runtime-v1.js',
 ];
-const emittedRfc64Modules = await listEmittedRfc64Modules();
+const emittedRfc64Modules = await listEmittedModules('rfc64');
 const classifiedRfc64Modules = new Set([
   ...publicRfc64Modules,
   ...blockedRfc64Modules,
@@ -397,8 +449,8 @@ for (const path of ['random-sampling-runtime.js', 'random-sampling-eligibility.j
   }
 }
 
-async function listEmittedRfc64Modules() {
-  const rootPath = fileURLToPath(new URL('../dist/rfc64/', import.meta.url));
+async function listEmittedModules(namespace, extensions = ['.js']) {
+  const rootPath = fileURLToPath(new URL(`../dist/${namespace}/`, import.meta.url));
   const pending = [rootPath];
   const modules = [];
   while (pending.length > 0) {
@@ -408,7 +460,7 @@ async function listEmittedRfc64Modules() {
       const entryPath = join(directory, entry.name);
       if (entry.isDirectory()) {
         pending.push(entryPath);
-      } else if (entry.isFile() && entry.name.endsWith('.js')) {
+      } else if (entry.isFile() && extensions.some(extension => entry.name.endsWith(extension))) {
         modules.push(relative(rootPath, entryPath).split(sep).join('/'));
       }
     }

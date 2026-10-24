@@ -132,10 +132,11 @@ function hexBinaryLexical(hex: string): string {
  * Caller supplies the resolved `assertionUri` (subject), the `_meta`
  * graph URI for the context graph (typically
  * `contextGraphMetaUri(contextGraphId)`), and the seal payload.
- * Every quad is pinned to the `metaGraph`. NOTE: the seal does NOT ride
- * SWM live gossip (that path force-rewrites quads onto the KA's data graph
- * and never carried seal fields); its peer-to-peer transport is the durable
- * `_meta` sync lane. See GH#1778.
+ * Every quad is pinned to the `metaGraph`. NOTE: these `_meta` rows do not
+ * ride SWM live gossip (that path force-rewrites quads onto the KA's data
+ * graph). A share carries the seal as canonical author-seal bytes instead,
+ * and a receiver that verifies them writes these rows itself (GH#3294); the
+ * durable `_meta` sync lane also carries them (GH#1778).
  */
 interface AssertionSealBuildBaseArgs {
   assertionUri: string;

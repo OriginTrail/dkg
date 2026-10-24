@@ -103,6 +103,14 @@ export type ExternalStoreBlock =
         queryEndpoint: string;
         updateEndpoint: string;
         managedByDkg: boolean;
+        /**
+         * Operator-declared endpoint guarantee. The adapter defaults an
+         * explicitly configured endpoint to `best-effort`, so a node that
+         * needs RFC-64 graph-scoped materialization must declare it here.
+         * Only carried through from an existing config; the wizard never
+         * invents a guarantee for an endpoint it cannot verify.
+         */
+        consistencyProfile?: string;
       };
     }
   // Daemon-managed local Oxigraph server (Release 2 opt-in). No URL: the
@@ -119,6 +127,7 @@ function externalStoreBlock(
   url: string,
   managedByDkg: boolean,
   updateUrl?: string,
+  consistencyProfile?: string,
 ): ExternalStoreBlock {
   if (backend === 'blazegraph') {
     return { backend, options: { url, managedByDkg } };
@@ -132,6 +141,10 @@ function externalStoreBlock(
       // can point query/update at different URLs).
       updateEndpoint: updateUrl ?? url,
       managedByDkg,
+      // A re-run must not silently downgrade an endpoint the operator already
+      // certified: dropping this key returns the node to `best-effort`, which
+      // makes RFC-64 durable sync refuse every graph-scoped materialization.
+      ...(consistencyProfile === undefined ? {} : { consistencyProfile }),
     },
   };
 }
@@ -153,6 +166,14 @@ export async function promptStoreBackend(
   const existingUpdateUrl =
     typeof opts.existingStore?.options?.updateEndpoint === 'string'
       ? (opts.existingStore?.options?.updateEndpoint as string)
+      : undefined;
+  // An operator-declared endpoint guarantee is a fact about their deployment,
+  // not something the wizard can re-derive from a URL. Keep it across a re-run
+  // of the same endpoint so `dkg init` cannot silently downgrade a node to the
+  // `best-effort` default that fails RFC-64 graph-scoped materialization.
+  const existingConsistencyProfile =
+    typeof opts.existingStore?.options?.consistencyProfile === 'string'
+      ? (opts.existingStore?.options?.consistencyProfile as string)
       : undefined;
 
   // `oxigraph-server` (daemon-managed local RocksDB server) is the default
@@ -339,8 +360,20 @@ export async function promptStoreBackend(
       // query URL for both.
       const preservedUpdateUrl =
         backend === 'sparql-http' && url === existingUrl ? existingUpdateUrl : undefined;
+      // The guarantee belongs to the endpoint, so it travels with an unchanged
+      // URL only. A newly typed endpoint is unverified and stays `best-effort`.
+      const preservedConsistencyProfile =
+        backend === 'sparql-http' && url === existingUrl
+          ? existingConsistencyProfile
+          : undefined;
       return {
-        storeBlock: externalStoreBlock(backend, url, false, preservedUpdateUrl),
+        storeBlock: externalStoreBlock(
+          backend,
+          url,
+          false,
+          preservedUpdateUrl,
+          preservedConsistencyProfile,
+        ),
       };
     }
 

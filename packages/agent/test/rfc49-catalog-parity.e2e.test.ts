@@ -129,12 +129,28 @@ describe('OT-RFC-49 WS-D — catalog producer↔extractor↔chain parity', () =>
       kaNumberAllocator: makeTestKaNumberAllocator(), name: 'ParityPublisher', nodeRole: 'core', listenPort: 0, skills: [],
       dataDir: mkDataDir('pub'),
       sharedMemoryPublicSnapshotStorage: TEST_SNAPSHOT_STORAGE,
+      // Exercise explicit publish/remote-ACK parity without unrelated maintenance
+      // replacing the private recipient authority during a later test's promote.
+      syncSharedMemoryOnConnect: false,
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
+      syncOnConnectEnabled: false,
+      durableSyncEnabled: false,
+      agentProfileHeartbeatMs: 0,
       chainConfig: chainConfig(HARDHAT_KEYS.CORE_OP, HARDHAT_KEYS.CORE_ADMIN),
     });
     ackCore = await DKGAgent.create({
       kaNumberAllocator: makeTestKaNumberAllocator(), name: 'ParityAckCore', nodeRole: 'core', listenPort: 0, skills: [],
       dataDir: mkDataDir('ack'),
       sharedMemoryPublicSnapshotStorage: TEST_SNAPSHOT_STORAGE,
+      // Exercise explicit publish/remote-ACK parity without unrelated maintenance
+      // replacing the private recipient authority during a later test's promote.
+      syncSharedMemoryOnConnect: false,
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
+      syncOnConnectEnabled: false,
+      durableSyncEnabled: false,
+      agentProfileHeartbeatMs: 0,
       chainConfig: chainConfig(HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC1_ADMIN),
     });
     agents.push(publisher, ackCore);

@@ -583,9 +583,11 @@ Local LLM** in the Agents panel. There is no separate provider selector in the
 browser: Node UI uses `DKG_LLM_URL`, `DKG_LLM_MODEL`, and `DKG_LLM_BACKEND`
 from the daemon environment. `DKG_LLM_BACKEND` accepts `ollama`, `llama.cpp`,
 or the backward-compatible default `auto`. Node UI hides the integration when
-none of those environment overrides is set and no server is reachable at the
-default local endpoint. An explicitly configured server remains visible while
-offline so the panel can report its error. The integration remains read-only:
+none of those environment overrides is set and the default local endpoint does
+not match a supported llama.cpp or Ollama health contract. A different HTTP
+service listening on the same port is not treated as a Local LLM. An explicitly
+configured server remains visible while unavailable so the panel can report its
+error. The integration remains read-only:
 the daemon always creates this
 UI runtime with writes disabled. The HTTP surface is also node-admin-only.
 Agent-scoped bearer tokens receive `403` and cannot start, continue, or clear
@@ -832,6 +834,21 @@ not copy its catalog.
 Use Qwen3-8B Q4_K_M, keep one model server running, reduce competing memory
 pressure, and preserve the 8192-token server context. Increase
 `--request-timeout-ms` only after confirming the model is still generating.
+
+### The model rejects the context size
+
+An explicit `exceed_context_size_error` response allows a bounded retry.
+The runtime first omits earlier conversation history, preserving the current
+question, selected Context Graph and completed tool results. It then tries a
+concise answer from those results without sending tool definitions. Completed
+tools are not run again. If the question depends on an identifier from the
+omitted history, the model is told to ask for it. Timeouts and other failures
+are not retried through this recovery path.
+
+A domain profile can declare `requiredTools`. Session initialization fails
+before inference when a required tool is unavailable in the permitted scope.
+Catalog reads with a `catalogSlug` filter select that catalog at the store,
+avoiding retrieval of unrelated historical catalog entries.
 
 ### Inspect the exact interaction
 

@@ -2,6 +2,8 @@
 
 import type { Digest32V1 } from '@origintrail-official/dkg-core';
 
+import { FinalizedVmChainInventoryLimitErrorV1 } from '@origintrail-official/dkg-chain';
+
 import { Rfc64CatalogSynchronizationErrorV1 } from './catalog-synchronization-error-v1.js';
 import { FinalizedVmCompositionErrorV1 } from './finalized-vm-composer-v1.js';
 import { Rfc64PublicCatalogNativeReceiverErrorV1 } from './public-catalog-native-receiver-v1.js';
@@ -185,7 +187,7 @@ function evictOldestWhenFullV1<T>(map: Map<Digest32V1, T>): void {
 }
 
 /**
- * Translate the one supported low-level private-VM terminal condition at the
+ * Translate the supported low-level private-VM terminal conditions at the
  * receiver boundary. No message parsing or recursive cause traversal is used.
  */
 export function classifyRfc64CatalogReconciliationTerminalReasonV1(
@@ -198,11 +200,12 @@ export function classifyRfc64CatalogReconciliationTerminalReasonV1(
     ) {
       return null;
     }
-    return error.providerFailures.every(({ error: providerError }) => (
-      classifySingleProviderTerminalReasonV1(providerError) === 'no-authorized-provider'
-    ))
-      ? 'no-authorized-provider'
-      : null;
+    // Terminal only when every provider ended in the same terminal condition.
+    const reasons = new Set(error.providerFailures.map(({ error: providerError }) => (
+      classifySingleProviderTerminalReasonV1(providerError)
+    )));
+    const [reason] = reasons;
+    return reasons.size === 1 ? reason ?? null : null;
   }
   return classifySingleProviderTerminalReasonV1(error);
 }
@@ -223,6 +226,13 @@ function classifySingleProviderTerminalReasonV1(
     && error.cause.code === 'finalized-vm-composition-incomplete'
   ) {
     return 'no-authorized-provider';
+  }
+  if (
+    error instanceof Rfc64PublicCatalogNativeReceiverErrorV1
+    && error.code === 'catalog-native-receiver-activation'
+    && error.cause instanceof FinalizedVmChainInventoryLimitErrorV1
+  ) {
+    return 'chain-inventory-limit';
   }
   return null;
 }

@@ -53,6 +53,8 @@ describe('context graph list row concurrency', () => {
         listDeclaredContextGraphIds: async () => IDS,
       },
       subscribedContextGraphs: new Map(),
+      wireIdToLocalCgId: new Map(),
+      onChainContextGraphFacts: new Map(),
       store: {
         listGraphsByPrefix: async () => [],
       },
@@ -76,6 +78,8 @@ describe('context graph list row concurrency', () => {
     const probe = concurrencyProbe();
     const fakeAgent = {
       subscribedContextGraphs: new Map(),
+      wireIdToLocalCgId: new Map(),
+      onChainContextGraphFacts: new Map(),
       store: {
         query: async () => ({
           type: 'bindings',

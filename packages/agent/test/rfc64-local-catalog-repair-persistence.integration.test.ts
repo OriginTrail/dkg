@@ -73,7 +73,15 @@ describe('RFC-64 durable local SWM catalog projection repair', () => {
     await edge.whenRfc64PublicCatalogBootstrapIdleV1();
     await edge.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     expect(repair).not.toHaveBeenCalled();
-    expect(edge.readRfc64SwmCatalogProjectionSupervisorStatusV1()).toBeNull();
+    // Durable obligations survive inactivity, but cannot bypass subscription.
+    expect(edge.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs)
+      .toEqual([expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        authorAddress: AUTHOR,
+        outcome: 'failed',
+        attempts: 1,
+        diagnostic: expect.objectContaining({ kind: 'lane_inactive' }),
+      })]);
 
     edge.subscribeToContextGraph(CONTEXT_GRAPH_ID);
     await edge.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
@@ -83,15 +91,23 @@ describe('RFC-64 durable local SWM catalog projection repair', () => {
         contextGraphId: CONTEXT_GRAPH_ID,
         authorAddress: AUTHOR,
         outcome: 'failed',
-        attempts: 1,
+        attempts: 2,
       })]);
+
+    // Repeated active notifications must not turn a failure into a retry storm.
+    edge.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    await edge.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(repair).toHaveBeenCalledTimes(1);
 
     edge.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID);
     edge.subscribeToContextGraph(CONTEXT_GRAPH_ID);
     await edge.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     expect(repair).toHaveBeenCalledTimes(2);
     expect(edge.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs)
-      .toEqual([expect.objectContaining({ outcome: 'failed', attempts: 2 })]);
+      .toEqual([expect.objectContaining({ outcome: 'failed', attempts: 3 })]);
+    edge.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    await edge.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(repair).toHaveBeenCalledTimes(2);
   }, 30_000);
 
   it('repairs durable additions and removals without remote author targets', async () => {

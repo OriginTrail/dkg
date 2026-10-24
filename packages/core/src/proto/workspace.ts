@@ -50,6 +50,10 @@ export const WorkspacePublishRequestSchema = new Type('WorkspacePublishRequest')
   .add(new Field('privateTripleCount', 17, 'uint32'))
   .add(new Field('accessPolicy', 18, 'string'))
   .add(new Field('allowedPeers', 19, 'string', 'repeated'))
+  // The author's seal of this exact assertion, so a receiver that is not the
+  // author (a curator) can publish it as the author's KA.
+  .add(new Field('assertionName', 20, 'string'))
+  .add(new Field('authorSeal', 21, 'bytes'))
   .add(WorkspaceManifestEntrySchema)
   .add(WorkspaceCASConditionSchema);
 
@@ -101,6 +105,15 @@ export interface WorkspacePublishRequestMsg {
   accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
   /** Canonical peer allow-list when accessPolicy is allowList. */
   allowedPeers?: string[];
+  /** The author's lifecycle name of this assertion. Sent with `authorSeal`. */
+  assertionName?: string;
+  /**
+   * The author's seal of this assertion: the canonical graph-scoped author
+   * seal bytes (`canonicalizeCanonicalGraphScopedAuthorSealBytesV1`). The
+   * signature in it is the author's, so a receiver verifies it, and its
+   * content binding, before it keeps it.
+   */
+  authorSeal?: Uint8Array;
 }
 
 export function encodeWorkspacePublishRequest(msg: WorkspacePublishRequestMsg): Uint8Array {

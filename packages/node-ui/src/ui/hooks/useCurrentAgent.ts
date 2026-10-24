@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api-wrapper.js';
 import type { AgentIdentity } from '../api.js';
+import { currentApiToken } from '../lib/apiToken.js';
 
 type CurrentAgentState = {
   data: AgentIdentity | null;
@@ -18,12 +19,12 @@ let state: CurrentAgentState = {
 let inFlight: { authKey: string; promise: Promise<void> } | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let generation = 0;
+let owners = 0;
 let stateAuthKey = '';
 const listeners = new Set<() => void>();
 
 function currentAuthKey() {
-  if (typeof window === 'undefined') return '';
-  const token = (window as any).__DKG_TOKEN__;
+  const token = currentApiToken();
   return token ? `Bearer ${token}` : '';
 }
 
@@ -113,7 +114,7 @@ function startPolling() {
 }
 
 function stopPollingIfIdle() {
-  if (listeners.size > 0 || !pollTimer) return;
+  if (owners > 0 || !pollTimer) return;
   clearInterval(pollTimer);
   pollTimer = null;
   generation += 1;
@@ -126,6 +127,23 @@ function stopPollingIfIdle() {
   stateAuthKey = currentAuthKey();
 }
 
+/** Await a current identity without creating a second polling schedule. */
+export function ensureCurrentAgent(): Promise<void> {
+  if (stateAuthKey !== currentAuthKey() || state.loading) return loadCurrentAgent();
+  return Promise.resolve();
+}
+
+/** React views and non-view workflows share the same scheduling and lifetime. */
+export function retainCurrentAgent(): () => void {
+  if (++owners === 1) startPolling();
+  else void ensureCurrentAgent();
+  return () => { owners--; stopPollingIfIdle(); };
+}
+
+export function refreshCurrentAgent(): Promise<void> {
+  return loadCurrentAgent();
+}
+
 export function useCurrentAgent() {
   const [snapshot, setSnapshot] = useState(snapshotForCurrentAuth);
 
@@ -133,11 +151,11 @@ export function useCurrentAgent() {
     const listener = () => setSnapshot(snapshotForCurrentAuth());
     listeners.add(listener);
     setSnapshot(snapshotForCurrentAuth());
-    startPolling();
+    const release = retainCurrentAgent();
 
     return () => {
       listeners.delete(listener);
-      stopPollingIfIdle();
+      release();
     };
   }, []);
 

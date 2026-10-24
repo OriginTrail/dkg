@@ -1,6 +1,7 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
 import { createStorageAckLifecycleObserver } from '../src/storage-ack-lifecycle-observer.js';
+import { replaceCatalogQuads } from '../src/catalog-persistence.js';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
   computeFlatKCMerkleLeafCountV10,
@@ -1146,15 +1147,38 @@ describe('StorageACKHandler', () => {
       await expect(base.countQuads(`${cgDid}/_catalog`)).resolves.toBe(catalogTriples.length);
     });
 
-    it('skips targeted update and deletes by pattern for a blank-node catalog subject', async () => {
+    it('declines a blank-node catalog subject before anything is persisted', async () => {
+      // A curated catalog must be the Context Graph DID's catalog partition, so
+      // a blank-node subject never reaches `<cg>/_catalog` through the handler.
       const blankCatalogTriples = [{
         subject: '_:catalog',
         predicate: 'urn:test:catalog-predicate',
         object: '"blank-subject"',
       }];
-      const blankCatalogNquads = '_:catalog <urn:test:catalog-predicate> "blank-subject" .';
-      const blankCatalogBytes = new TextEncoder().encode(blankCatalogNquads);
+      const blankCatalogBytes = new TextEncoder().encode(
+        '_:catalog <urn:test:catalog-predicate> "blank-subject" .',
+      );
       const blankCatalogRoot = computeCatalogRoot(blankCatalogTriples);
+      const store = new OxigraphStore();
+      const handler = curatedHandlerWithStore(store);
+
+      const decoded = decodeStorageACK(await handler.handler(curatedIntent({
+        stagingQuads: blankCatalogBytes,
+        publicByteSize: blankCatalogBytes.length,
+        catalogRoot: blankCatalogRoot.root,
+        catalogLeafCount: blankCatalogRoot.leafCount,
+      }), fakePeerId));
+
+      expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH);
+      await expect(store.countQuads(`${cgDid}/_catalog`)).resolves.toBe(0);
+    });
+
+    it('catalog persistence skips targeted update and deletes by pattern for a blank-node subject', async () => {
+      const blankCatalogTriples = [{
+        subject: '_:catalog',
+        predicate: 'urn:test:catalog-predicate',
+        object: '"blank-subject"',
+      }];
       const base = new OxigraphStore();
       let updateCalls = 0;
       const deletedPatterns: Array<Partial<Quad>> = [];
@@ -1181,16 +1205,12 @@ describe('StorageACKHandler', () => {
           return typeof value === 'function' ? value.bind(target) : value;
         },
       });
-      const handler = curatedHandlerWithStore(store);
+      await replaceCatalogQuads(
+        store,
+        `${cgDid}/_catalog`,
+        blankCatalogTriples.map((triple) => ({ ...triple, graph: '' })),
+      );
 
-      const decoded = decodeStorageACK(await handler.handler(curatedIntent({
-        stagingQuads: blankCatalogBytes,
-        publicByteSize: blankCatalogBytes.length,
-        catalogRoot: blankCatalogRoot.root,
-        catalogLeafCount: blankCatalogRoot.leafCount,
-      }), fakePeerId));
-
-      expect(isStorageACKDecline(decoded)).toBe(false);
       expect(updateCalls).toBe(0);
       expect(deletedPatterns).toEqual([{
         graph: `${cgDid}/_catalog`,
