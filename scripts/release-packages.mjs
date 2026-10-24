@@ -169,17 +169,6 @@ function runCapture(cmd, args, options = {}) {
   return result.stdout.trim();
 }
 
-function runInteractive(cmd, args, options = {}) {
-  const result = spawnSync(cmd, args, {
-    cwd: options.cwd ?? ROOT_DIR,
-    stdio: 'inherit',
-    env: { ...process.env, ...(options.env ?? {}) },
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    throw new Error(`${cmd} ${args.join(' ')} failed with exit code ${result.status}`);
-  }
-}
 
 function gitHead(rootDir) {
   return runCapture('git', ['rev-parse', 'HEAD'], { cwd: rootDir });

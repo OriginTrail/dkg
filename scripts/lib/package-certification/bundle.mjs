@@ -165,6 +165,8 @@ export function verifyCertificate(bundle, receiptFile, expected) {
     const tree = readJson(evidence.get(layout.tree));
     assert.equal(digest(tree), layout.treeDigest, 'dependency-tree digest');
     validateTree(tree, manifest);
+    assert.equal(report.profile, expected.profile, 'report profile');
+    assert.ok(!report.error && !report.cleanupError, 'report contains execution/cleanup error');
     assert.equal(report.layout, layout.layout);
     assert.equal(report.runId, receipt.runId);
     assert.equal(report.packageSetDigest, manifest.packageSetDigest);
@@ -180,7 +182,9 @@ export function verifyCertificate(bundle, receiptFile, expected) {
     assert.equal(report.identity.version, expected.version);
     for (const key of ['commit', 'buildTime', 'distTag']) assert.equal(report.identity[key], manifest.buildIdentity[key], `wrong observed build ${key}`);
     assert.equal(report.identity.storeBackend, 'oxigraph-worker');
-    assert.equal(report.restartedIdentity.commit, expected.commit);
+    assert.equal(report.restartedIdentity.version, expected.version);
+    for (const key of ['commit', 'buildTime', 'distTag']) assert.equal(report.restartedIdentity[key], manifest.buildIdentity[key], `wrong restarted build ${key}`);
+    assert.equal(report.restartedIdentity.storeBackend, 'oxigraph-worker');
     assert.equal(report.rdfValue, 'installed-package-certification');
     assert.equal(report.restartedRdfValue, report.rdfValue);
     for (const log of report.logs) assert.ok(evidence.has(log), `missing runtime log ${log}`);

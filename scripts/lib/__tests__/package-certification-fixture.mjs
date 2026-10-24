@@ -48,10 +48,10 @@ export function fixture(t) {
   for (const layout of LAYOUTS) {
     const tree = { packages: [...packages.map(p => ({ path: `node_modules/${p.name}`, name: p.name, version, integrity: p.integrity, filesDigest: digest(p.files) })), { name: 'libp2p', version: '3.5.1', path: 'node_modules/libp2p' }] };
     const report = {
-      layout, runId: receipt.runId, packageSetDigest: manifest.packageSetDigest,
+      profile: PROFILE, layout, runId: receipt.runId, packageSetDigest: manifest.packageSetDigest,
       runtime: { os: 'linux', arch: 'arm64', node: 'v22.23.4', npm: '10.9.8' },
       cases: CASES.map(id => ({ id, outcome: 'PASS', startedAt: receipt.startedAt, endedAt: receipt.endedAt })),
-      identity: { version, ...buildIdentity, storeBackend: 'oxigraph-worker' }, restartedIdentity: { commit },
+      identity: { version, ...buildIdentity, storeBackend: 'oxigraph-worker' }, restartedIdentity: { version, ...buildIdentity, storeBackend: 'oxigraph-worker' },
       rdfValue: 'installed-package-certification', restartedRdfValue: 'installed-package-certification',
       logs: [`${layout}-daemon-1.log`, `${layout}-daemon-2.log`],
     };

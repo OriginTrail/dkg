@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { CASES, LAYOUTS, PROFILE, SCHEMA, digest, fileIdentity, readJson, verifyBundle, verifyCertificate } from './bundle.mjs';
-import { run } from './prepare.mjs';
+import { run, requireCleanSource } from './prepare.mjs';
 import { startRegistry } from './registry.mjs';
 
 const scripts = path.dirname(fileURLToPath(import.meta.url));
@@ -24,14 +24,14 @@ async function startChain(rootDir, output) {
   const contextFile = path.join(output, 'chain-context.json');
   const fd = fs.openSync(path.join(output, 'chain.log'), 'w');
   const child = spawn(process.execPath, ['--import', 'tsx', path.join(scripts, 'chain-fixture.mjs'), contextFile], {
-    cwd: rootDir, env: { ...process.env, PATH: `${path.dirname(process.execPath)}:${process.env.PATH}` }, stdio: ['ignore', fd, fd],
+    cwd: rootDir, detached: true, env: { ...process.env, PATH: `${path.dirname(process.execPath)}:${process.env.PATH}` }, stdio: ['ignore', fd, fd],
   });
   fs.closeSync(fd);
   const exited = new Promise(resolve => child.once('exit', resolve));
   const stop = async () => {
     if (child.exitCode !== null) return;
-    child.kill('SIGTERM');
-    const timeout = setTimeout(() => child.kill('SIGKILL'), 30_000);
+    try { process.kill(-child.pid, 'SIGTERM'); } catch { /* already exited */ }
+    const timeout = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* exited */ } }, 30_000);
     await exited;
     clearTimeout(timeout);
   };
@@ -46,7 +46,7 @@ async function startChain(rootDir, output) {
 }
 export async function certifyInstall({ rootDir, bundle, output, expected, image = 'node:22.23.4-bookworm-slim', negativeControl }) {
   const manifest = verifyBundle(bundle, expected);
-  assert.equal(run('git', ['rev-parse', 'HEAD'], { cwd: rootDir }), expected.commit, 'controller checkout is not intended candidate');
+  assert.equal(requireCleanSource(rootDir), expected.commit, 'controller checkout is not intended candidate');
   assert.ok(!negativeControl || negativeControl === 'missing-ui', 'unknown negative control');
   fs.mkdirSync(output);
   const runId = randomUUID();
@@ -101,7 +101,9 @@ export async function certifyInstall({ rootDir, bundle, output, expected, image 
           const base = layout === 'edge-global' ? '/install/prefix/lib' : '/install/slot';
           // Deliberate damage AFTER successful npm installation. This exercises
           // the actual installed boundary, not just a synthetic verifier fixture.
-          await docker(['exec', container, 'rm', `${base}/node_modules/@origintrail-official/dkg-node-ui/dist-ui/index.html`]);
+          const tree = readJson(path.join(output, `${layout}-tree.json`));
+          const ui = tree.packages.find(pkg => pkg.name === '@origintrail-official/dkg-node-ui');
+          await docker(['exec', container, 'rm', `${base}/${ui.path}/dist-ui/index.html`]);
         }
         const smokeStart = Date.now();
         await docker(['exec', container, 'node', '/harness/installed-smoke.mjs', 'smoke', layout, runId, chain.hubAddress], `${layout}-observer.log`);
@@ -130,7 +132,10 @@ export async function certifyInstall({ rootDir, bundle, output, expected, image 
     const receiptFile = path.join(output, 'receipt.json');
     fs.writeFileSync(receiptFile, `${JSON.stringify(receipt, null, 2)}\n`);
     if (receipt.outcome === 'PASS') {
-      try { verifyCertificate(bundle, receiptFile, expected); }
+      try {
+        assert.equal(requireCleanSource(rootDir), expected.commit, 'controller source changed during certification');
+        verifyCertificate(bundle, receiptFile, expected);
+      }
       catch (error) {
         receipt.outcome = 'INCOMPLETE'; receipt.errors.push({ phase: 'verification', message: error.message });
         fs.writeFileSync(receiptFile, `${JSON.stringify(receipt, null, 2)}\n`);
