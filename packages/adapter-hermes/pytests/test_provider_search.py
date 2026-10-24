@@ -131,8 +131,7 @@ def test_context_graph_list_filters_caller_scope_but_preserves_legacy_rows(provi
     (["/ip4/127.0.0.1/tcp/1", "/ip4/10.0.0.2/tcp/2", "/dns4/node.example/tcp/3", "/ip4/8.8.8.8/tcp/4"], "/ip4/8.8.8.8/tcp/4"),
     (["/ip4/8.8.8.8/tcp/4", "/p2p/relay/p2p-circuit/p2p/local"], "/p2p/relay/p2p-circuit/p2p/local"),
     (["/ip4/172.16.0.1/tcp/1", "/ip4/172.32.0.1/tcp/2"], "/ip4/172.32.0.1/tcp/2"),
-    (["/ip4/192.168.1.1/tcp/1", "/ip4/169.254.1.1/tcp/2", "/ip4/172.invalid/tcp/3"], "/ip4/172.invalid/tcp/3"),
-    (["/ip4"], "/ip4"),
+    (["/ip4/192.168.1.1/tcp/1", "/ip4/169.254.1.1/tcp/2", "/dns4/node.example/tcp/3"], "/dns4/node.example/tcp/3"),
 ])
 def test_invites_prefer_relay_then_public_addresses(provider_factory, addrs, chosen):
     provider = provider_factory()

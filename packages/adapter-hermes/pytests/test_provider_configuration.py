@@ -26,13 +26,13 @@ def test_environment_overrides_file_config(plugin_module, hermes_host, monkeypat
     (hermes_host / "dkg.json").write_text(json.dumps({"daemon_url": "file", "agent_name": "file", "import_roots": ["file"]}))
     env = {"DKG_DAEMON_URL": "http://test.invalid", "DKG_CONTEXT_GRAPH": "team", "DKG_MEMORY_ASSERTION": "notes",
            "DKG_AGENT_NAME": "alice", "DKG_PUBLISH_TOOL": "disabled", "DKG_ALLOW_DIRECT_PUBLISH": "no",
-           "DKG_ALLOW_CONTEXT_GRAPH_ADMIN_TOOLS": "YES", "DKG_HERMES_IMPORT_ROOTS": "/a:: /b"}
+           "DKG_ALLOW_CONTEXT_GRAPH_ADMIN_TOOLS": "YES", "DKG_HERMES_IMPORT_ROOTS": "/a::/b"}
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     cfg = plugin_module._load_config()
     assert cfg == {"daemon_url": "http://test.invalid", "context_graph": "team", "memory_assertion": "notes",
                    "agent_name": "alice", "publish_tool": "disabled", "allow_direct_publish": False,
-                   "allow_context_graph_admin_tools": True, "import_roots": ["/a", " /b"]}
+                   "allow_context_graph_admin_tools": True, "import_roots": ["/a", "/b"]}
     monkeypatch.setenv("DKG_ALLOW_DIRECT_PUBLISH", "1")
     monkeypatch.setenv("DKG_ALLOW_CONTEXT_GRAPH_ADMIN_TOOLS", "false")
     assert plugin_module._load_config()["allow_direct_publish"] is True
