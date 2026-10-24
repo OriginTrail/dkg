@@ -598,7 +598,8 @@ describe('SqliteChainEventLogStore', () => {
       const { store } = createStore();
       await store.commit(SCOPE, undefined, commit(10, 12, [row(11, 0, false)]));
       const before = await store.load(SCOPE);
-      await expect(store.commit(SCOPE, revision, commit(20, 22, [])))
+      // Replacing 11..22 would delete the seeded tail row and extend coverage.
+      await expect(store.commit(SCOPE, revision, commit(10, 22, [])))
         .rejects.toThrow('expected revision is invalid');
       await expect(store.tombstone(SCOPE, revision)).rejects.toThrow('expected revision is invalid');
       expect(await store.load(SCOPE)).toEqual(before);
@@ -613,7 +614,8 @@ describe('SqliteChainEventLogStore', () => {
     db.db.prepare('UPDATE chain_index_cursor SET revision = ? WHERE scope = ?')
       .run(Number.MAX_SAFE_INTEGER, SCOPE);
     const before = await store.load(SCOPE);
-    await expect(store.commit(SCOPE, Number.MAX_SAFE_INTEGER, commit(20, 22, [])))
+    // Replacing 11..22 would delete the seeded tail row and extend coverage.
+    await expect(store.commit(SCOPE, Number.MAX_SAFE_INTEGER, commit(10, 22, [])))
       .rejects.toThrow('revision exceeds the safe integer range');
     await expect(store.tombstone(SCOPE, Number.MAX_SAFE_INTEGER))
       .rejects.toThrow('revision exceeds the safe integer range');
