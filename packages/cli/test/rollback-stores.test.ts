@@ -67,6 +67,12 @@ vi.mock('../src/daemon.js', async (importOriginal) => {
   };
 });
 
+vi.mock('@origintrail-official/dkg-agent/rfc64/inventory-v1/rollback', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@origintrail-official/dkg-agent/rfc64/inventory-v1/rollback')>();
+  return { ...actual, prepareRfc64InventoryForRollbackV1: vi.fn(actual.prepareRfc64InventoryForRollbackV1) };
+});
+
+import { prepareRfc64InventoryForRollbackV1 } from '@origintrail-official/dkg-agent/rfc64/inventory-v1/rollback';
 import { registerMaintenanceCommands } from '../src/commands/maintenance.js';
 import { checkRollbackStores, readSlotVersion } from '../src/update/rollback-stores.js';
 
@@ -195,6 +201,20 @@ describe('dkg rollback readies the local stores for the target version', () => {
       'Nothing was changed. The daemon is stopped: run "dkg start" to start 10.0.26 again.',
     );
     expect(leaseState()).toBe('lease free');
+  });
+
+  it('keeps the current slot, and says so, when readying the stores fails part-way', async () => {
+    await writeInventoryV6();
+    await writeTargetSlot('10.0.25');
+    vi.mocked(prepareRfc64InventoryForRollbackV1).mockRejectedValueOnce(new Error('EIO: i/o error, rename'));
+
+    expect(await rollback()).toBe(1);
+
+    expect(wiring.calls).toEqual(['stop']);
+    expect(output.error).toEqual([
+      'Rollback stopped: EIO: i/o error, rename.',
+      'The version was not switched. Check the RFC-64 inventory database before starting the node.',
+    ]);
   });
 
   it('lowers the inventory before an Edge reinstall of 10.0.25 and holds it through the install', async () => {

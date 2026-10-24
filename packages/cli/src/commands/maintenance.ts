@@ -99,37 +99,47 @@ import {
   type PreparedRollbackStores,
 } from '../update/rollback-stores.js';
 
-export interface CoreRollbackActivationDependencies {
+export interface RollbackActivationDependencies {
   stopDaemon(): Promise<boolean>;
-  /** Ready the stores for the target slot's version; null stops the rollback. */
+  /** Ready the stores for the target version; null stops the rollback. */
   prepareStores(): Promise<PreparedRollbackStores | null>;
-  swapSlot(target: 'a' | 'b'): Promise<void>;
   error(message: string): void;
 }
 
 /**
- * Executable command boundary: activation is forbidden until shutdown
- * succeeds and the stores are ready for the target, and the stores stay held
- * until the slot is switched.
+ * Executable command boundary for both roles: activation is forbidden until
+ * shutdown succeeds and the stores are ready for the target, and the stores
+ * stay held until the activation ends. Null when the rollback stopped first.
  */
-export async function executeCoreRollbackActivation(
-  target: 'a' | 'b',
-  dependencies: CoreRollbackActivationDependencies,
-): Promise<boolean> {
+export async function executeRollbackActivation<T>(
+  activate: () => Promise<T>,
+  dependencies: RollbackActivationDependencies,
+): Promise<{ readonly result: T } | null> {
   if (!await dependencies.stopDaemon()) {
     dependencies.error(
       'Rollback aborted because the daemon did not stop before its configured shutdown deadline.',
     );
-    return false;
+    return null;
   }
   const stores = await dependencies.prepareStores();
-  if (stores === null) return false;
+  if (stores === null) return null;
   try {
-    await dependencies.swapSlot(target);
+    return { result: await activate() };
   } finally {
     stores.release();
   }
-  return true;
+}
+
+export interface CoreRollbackActivationDependencies extends RollbackActivationDependencies {
+  swapSlot(target: 'a' | 'b'): Promise<void>;
+}
+
+/** A Core activates the rollback target by switching its blue-green slot. */
+export async function executeCoreRollbackActivation(
+  target: 'a' | 'b',
+  dependencies: CoreRollbackActivationDependencies,
+): Promise<boolean> {
+  return await executeRollbackActivation(() => dependencies.swapSlot(target), dependencies) !== null;
 }
 
 export function registerMaintenanceCommands(program: Command): void {
@@ -184,27 +194,19 @@ program
         process.exit(1);
       }
 
-      // The stores are readied with the daemon down and held through the
-      // reinstall, so the target never starts on a store it refuses.
+      // An Edge activates the rollback target by reinstalling it, with the
+      // stores readied and held through the reinstall.
       if (!checkRollbackStores(dkgDir(), targetVersion, currentVersion)) process.exit(1);
-      if (!await stopDaemonIfRunning()) {
-        console.error('Rollback aborted because the daemon did not stop before its configured shutdown deadline.');
-        process.exit(1);
-      }
-      const stores = await prepareRollbackStores(dkgDir(), targetVersion, currentVersion);
-      if (!stores) process.exit(1);
-      console.log(`Rolling back from ${currentVersion} to ${targetVersion} via NPM...`);
-      let rollbackStatus: Awaited<ReturnType<typeof performNpmUpdateEdge>>;
-      try {
-        rollbackStatus = await performNpmUpdateEdge(
-          targetVersion,
-          currentVersion,
-          (msg) => console.log(msg),
-        );
-      } finally {
-        stores.release();
-      }
-      if (rollbackStatus !== 'updated') {
+      const activation = await executeRollbackActivation(() => {
+        console.log(`Rolling back from ${currentVersion} to ${targetVersion} via NPM...`);
+        return performNpmUpdateEdge(targetVersion, currentVersion, (msg) => console.log(msg));
+      }, {
+        stopDaemon: stopDaemonIfRunning,
+        prepareStores: () => prepareRollbackStores(dkgDir(), targetVersion, currentVersion),
+        error: (message) => console.error(message),
+      });
+      if (!activation) process.exit(1);
+      if (activation.result !== 'updated') {
         console.error(
           `Rollback failed. Check logs and retry. The daemon is stopped: run "dkg start" to start ${currentVersion} again.`,
         );

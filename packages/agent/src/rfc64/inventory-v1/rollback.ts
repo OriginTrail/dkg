@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { renameSync, unlinkSync } from 'node:fs';
+import { constants as fsConstants, copyFileSync, linkSync, renameSync, unlinkSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 
 import { loadOwnedSqliteModuleV1 } from '../../sqlite/module-loader-v1.js';
@@ -26,7 +26,7 @@ import {
   type SqliteModuleV1,
 } from './open.js';
 import { InventoryV1OpenError } from './open-error.js';
-import { inventoryV1PreMigrationCopyPath } from './pre-migration-copy.js';
+import { listInventoryV1PreMigrationCopies } from './pre-migration-copy.js';
 import {
   INVENTORY_SCHEMA_DOWNGRADES_V1,
   INVENTORY_SCHEMA_FIRST_RELEASES_V1,
@@ -147,14 +147,15 @@ interface PreMigrationCopyV1 {
 }
 
 function findPreMigrationCopy(databasePath: string, maxUserVersion: number): PreMigrationCopyV1 | null {
-  for (let userVersion = maxUserVersion; userVersion > 0; userVersion -= 1) {
-    const path = inventoryV1PreMigrationCopyPath(databasePath, userVersion);
-    if (!pathEntryExists(path)) continue;
+  const candidates = listInventoryV1PreMigrationCopies(databasePath)
+    .filter((copy) => copy.fromVersion <= maxUserVersion)
+    .sort((left, right) => right.fromVersion - left.fromVersion);
+  for (const { path, fromVersion } of candidates) {
     assertOwnedRegularFile(path, 'inventory pre-migration copy');
     if (SQLITE_SIDECAR_SUFFIXES.some((suffix) => pathEntryExists(`${path}${suffix}`))) continue;
     const header = readValidSqliteHeaderIdentity(path);
-    if (header?.applicationId === INVENTORY_V1_APPLICATION_ID && header.userVersion === userVersion) {
-      return { path, userVersion };
+    if (header?.applicationId === INVENTORY_V1_APPLICATION_ID && header.userVersion === fromVersion) {
+      return { path, userVersion: fromVersion };
     }
   }
   return null;
@@ -309,9 +310,18 @@ function restorePreMigrationCopy(
     `${basename(databasePath).replace(/\.sqlite3$/, '')}.schema-v${userVersion}.before-rollback.sqlite3`,
   );
   if (pathEntryExists(keptPath)) unlinkSync(keptPath);
-  renameSync(databasePath, keptPath);
-  finishChange(databasePath, `moved to ${keptPath} to make way for its pre-migration copy`, () => {
-    renameSync(copy.path, databasePath);
+  // Give the database a second name before one rename puts the copy in its
+  // place, so the live path holds a whole database even if the process dies.
+  try {
+    linkSync(databasePath, keptPath);
+  } catch {
+    // A volume without hard links keeps a full copy instead.
+    copyFileSync(databasePath, keptPath, fsConstants.COPYFILE_EXCL);
+    fsyncRegularFile(keptPath, 'replaced inventory database');
+  }
+  fsyncDirectory(directory);
+  renameSync(copy.path, databasePath);
+  finishChange(databasePath, `replaced by its pre-migration copy, and the replaced one is kept at ${keptPath}`, () => {
     fsyncDirectory(directory);
     const restored = readValidSqliteHeaderIdentity(databasePath);
     if (restored?.userVersion !== copy.userVersion) throw new Error('the restored file does not carry the copy schema');

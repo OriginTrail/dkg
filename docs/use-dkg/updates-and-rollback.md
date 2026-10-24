@@ -66,9 +66,11 @@ A release can move a local store to a newer schema that older releases refuse.
 - `dkg rollback` lowers the database from v6 to v5. Schema v6 adds only the
   retry history of private placement repairs, which 10.0.25 does not use, so
   every row 10.0.25 reads is kept, including those written after the update.
-- Before migrating, 10.0.26 keeps a copy of the database as it was:
-  `rfc64-sync/inventory-v1.schema-v5.pre-migration.sqlite3`. A node keeps one
-  such copy per store; the next migration replaces it. Migrating needs free
+- Before migrating, 10.0.26 keeps a copy of the database as it was. The name
+  says the schema the copy holds and the one the migration moves to, for
+  example `rfc64-sync/inventory-v1.schema-v5-to-v6.pre-migration.sqlite3`. A
+  node keeps one such copy per store, and the next migration replaces it; a
+  migration that stopped part-way keeps its first copy. Migrating needs free
   disk space for the copy plus 64 MiB; with less, the node stops at start-up
   and says so, and the database stays as it was.
 - If the database is not exactly the v6 schema, `dkg rollback` restores that
