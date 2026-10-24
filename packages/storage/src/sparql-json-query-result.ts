@@ -1,5 +1,5 @@
 import { formatCanonicalRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
-import { isSafeIri } from '@origintrail-official/dkg-core';
+import { isSafeResultIri } from '@origintrail-official/dkg-core';
 import {
   isOrdinaryDataRecord,
   readOwnEnumerableDataProperty,
@@ -34,17 +34,6 @@ const MAX_CACHED_IRI_LENGTH = 1024;
 const MAX_CONSECUTIVE_IRI_MISSES = 16;
 const PAUSED_IRI_COMPARISON_ROWS = 128;
 type IriValidator = (value: string) => boolean;
-
-// RFC 3987 lets an absolute IRI's hier-part be empty, so a bare `scheme:`
-// such as `a:` is an IRI the stores accept on write and return from SELECT.
-// core's isSafeIri needs a character after the colon. This admits exactly
-// that shape, which holds only scheme characters and the colon.
-const SCHEME_ONLY_IRI = /^[a-zA-Z][a-zA-Z0-9+.-]*:$/;
-
-/** core's isSafeIri plus a bare `scheme:`; every other value gets isSafeIri's answer. */
-function isSafeResultIri(value: string): boolean {
-  return isSafeIri(value) || SCHEME_ONLY_IRI.test(value);
-}
 
 /** One last successful value per column role, never a growing per-row/global cache. */
 function createIriValidator(): IriValidator {
