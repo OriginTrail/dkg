@@ -389,6 +389,7 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { LocalContextGraphRegistrationStatusStore } from
   './local-context-graph-registration-status.js';
+import { retryStoreAdmission } from './store-admission-retry.js';
 import type { DKGAgent } from './dkg-agent.js';
 import { createLocalContextGraphOriginMembershipRecord } from
   './local-context-graph-provenance.js';
@@ -1161,10 +1162,21 @@ export class ContextGraphMethods extends DKGAgentBase {
         this.contextGraphMetaProjection.markDirty(contextGraphId)
       ),
     });
+    // The caller waits on a registration, so its own store steps outlast a
+    // short burst of background work instead of failing on the first busy
+    // refusal. Every step passed here is an idempotent read or replace.
+    const admitStoreStep = <T>(step: () => Promise<T>): Promise<T> => retryStoreAdmission(step, {
+      onRetry: (operation, delayMs) => this.log.info(
+        ctx,
+        `Context graph "${id}" registration: the store refused ${operation} while busy; retrying in ${delayMs} ms`,
+      ),
+    });
     const persistRegistrationStatus = async (
       status: 'unregistered' | 'pending' | 'registered',
-    ): Promise<void> => registrationStatuses.set(id, status);
-    const registrationStatus = await this.readLocalContextGraphRegistrationStatus(id);
+    ): Promise<void> => admitStoreStep(() => registrationStatuses.set(id, status));
+    const registrationStatus = await admitStoreStep(
+      () => this.readLocalContextGraphRegistrationStatus(id),
+    );
     if (registrationStatus === 'registered') {
       const existingOnChainId = this.subscribedContextGraphs.get(id)?.onChainId;
       throw new Error(`Context graph "${id}" is already registered on-chain${existingOnChainId ? ` (${existingOnChainId})` : ''}`);
@@ -1199,18 +1211,20 @@ export class ContextGraphMethods extends DKGAgentBase {
           // binding lives only in its `_meta`. If the local policy can't be
           // read, treat the graph as curated.
           const reconciledIsCurated = await this.isPrivateContextGraph(id).catch(() => true);
-          await replaceContextGraphMetadataFact(this.store, id, {
-            predicate: CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
-            object: `"${resolvedOnChainId}"`,
-            graphs: contextGraphMetadataGraphs(id, { curated: reconciledIsCurated }),
-            alsoInsert: [{
-              subject: contextGraphUri,
-              predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`,
-              object: `"${nameHash}"`,
-              graph: cgMetaGraph,
-            }],
+          await admitStoreStep(async () => {
+            await replaceContextGraphMetadataFact(this.store, id, {
+              predicate: CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
+              object: `"${resolvedOnChainId}"`,
+              graphs: contextGraphMetadataGraphs(id, { curated: reconciledIsCurated }),
+              alsoInsert: [{
+                subject: contextGraphUri,
+                predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`,
+                object: `"${nameHash}"`,
+                graph: cgMetaGraph,
+              }],
+            });
+            await this.store.flush?.();
           });
-          await this.store.flush?.();
           await persistRegistrationStatus('registered');
           reconciledOnChainId = resolvedOnChainId;
           reconciledNameHash = nameHash;
@@ -1724,18 +1738,22 @@ export class ContextGraphMethods extends DKGAgentBase {
       // Single-valued binding guard (RS heal): the on-chain id is immutable, so
       // clear any prior value before insert — the cgId resolver / heal read this
       // and must never see a multi-valued (LIMIT-1-nondeterministic) binding.
-      await replaceContextGraphMetadataFact(this.store, id, {
-        predicate: CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
-        object: `"${onChainId}"`,
-        graphs: contextGraphMetadataGraphs(id, { curated: isCuratedRegistration }),
-        // Persist the wire-id commitment in the cg's _meta graph so a
-        // restart can resume host-mode subscription on the correct
-        // topic without re-reading the chain event.
-        alsoInsert: [
-          { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`, object: `"${nameHash}"`, graph: cgMetaGraph },
-        ],
+      // The transaction is mined by now: a busy store must not turn it into a
+      // failed request that only a later reconciliation can repair.
+      await admitStoreStep(async () => {
+        await replaceContextGraphMetadataFact(this.store, id, {
+          predicate: CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
+          object: `"${onChainId}"`,
+          graphs: contextGraphMetadataGraphs(id, { curated: isCuratedRegistration }),
+          // Persist the wire-id commitment in the cg's _meta graph so a
+          // restart can resume host-mode subscription on the correct
+          // topic without re-reading the chain event.
+          alsoInsert: [
+            { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`, object: `"${nameHash}"`, graph: cgMetaGraph },
+          ],
+        });
+        await this.store.flush?.();
       });
-      await this.store.flush?.();
       // Keep `pending` durable until every recovery binding above is committed.
       // A crash or store failure before this final flip therefore forces the
       // next authority read to reconcile the now-discoverable chain slot.
