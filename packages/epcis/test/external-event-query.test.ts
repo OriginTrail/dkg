@@ -239,12 +239,53 @@ it.each(['public', 'private'].flatMap(visibility =>
         rows.push(...result.bindings);
       }
       expect(rows.map(row => row.event)).toEqual(ids);
-      expect(rows.map(row => row.eventType)).toEqual([`${EPCIS_CURRENT}${type}`, `${EPCIS}${type}`, `${EPCIS_CURRENT}${type}`]);
+      expect(rows.map(row => row.eventType)).toEqual(ids.map(() => `${EPCIS}${type}`));
       expect(rows.map(row => toEpcisEvent(row).type)).toEqual([type, type, type]);
     }
   } finally {
     await store.dropGraph(publicGraph);
     if (graph !== publicGraph) await store.dropGraph(graph);
+    await store.close();
+  }
+}, 30_000);
+
+it.each([EPCIS, EPCIS_CURRENT].flatMap(publicNamespace =>
+  [true, false].map(anchored => ({ publicNamespace, anchored })),
+))('groups split namespace aliases with public $publicNamespace and private anchor $anchored', async ({ publicNamespace, anchored }) => {
+  const store = create();
+  const contextGraphId = `${CG}-split-aliases`;
+  const publicGraph = contextGraphDataUri(contextGraphId);
+  const privateGraph = contextGraphPrivateUri(contextGraphId);
+  const metaGraph = contextGraphMetaUri(contextGraphId);
+  const privateNamespace = publicNamespace === EPCIS ? EPCIS_CURRENT : EPCIS;
+  const event = 'urn:split:a';
+  const next = 'urn:split:b';
+  try {
+    await store.insert([
+      { subject: event, predicate: RDF_TYPE, object: `${publicNamespace}ObjectEvent`, graph: publicGraph },
+      { subject: event, predicate: `${publicNamespace}epcList`, object: 'urn:epc:public', graph: publicGraph },
+      { subject: event, predicate: RDF_TYPE, object: `${privateNamespace}ObjectEvent`, graph: privateGraph },
+      { subject: event, predicate: `${privateNamespace}epcList`, object: 'urn:epc:private', graph: privateGraph },
+      { subject: next, predicate: RDF_TYPE, object: `${EPCIS}ObjectEvent`, graph: publicGraph },
+      ...[event, next].map(subject => ({
+        subject: `urn:publication:${subject}`, predicate: `${DKG}rootEntity`, object: subject, graph: metaGraph,
+      })),
+      ...(anchored ? [{ subject: event, predicate: `${DKG}privateDataAnchor`, object: '"true"', graph: publicGraph }] : []),
+    ]);
+    for (const eventType of [undefined, 'ObjectEvent', `${EPCIS}ObjectEvent`, `${EPCIS_CURRENT}ObjectEvent`]) {
+      const rows = [];
+      for (let offset = 0; offset < 3; offset++) {
+        const result = await store.query(buildEpcisQuery({ eventType, limit: 1, offset }, contextGraphId));
+        if (result.type !== 'bindings') throw new Error('Expected event bindings');
+        rows.push(...result.bindings);
+      }
+      expect(rows.map(row => row.event)).toEqual([event, next]);
+      expect(toEpcisEvent(rows[0]).epcList?.slice().sort()).toEqual(
+        (anchored ? ['urn:epc:public', 'urn:epc:private'] : ['urn:epc:public']).sort(),
+      );
+    }
+  } finally {
+    await store.dropGraph(publicGraph); await store.dropGraph(privateGraph); await store.dropGraph(metaGraph);
     await store.close();
   }
 }, 30_000);

@@ -1,4 +1,4 @@
-import { buildEpcisEventDiscoveryPattern, buildEpcisEventTypePreferencePattern } from './epcis-event-discovery.js';
+import { buildEpcisEventDiscoveryPattern, buildEpcisEventTypeBinding } from './epcis-event-discovery.js';
 import {
   EPCIS_DECLARED_EVENT_TYPE,
   EPCIS_CURRENT_PREFIX,
@@ -122,10 +122,10 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   const optionalClauses: string[] = [];
 
   // New captures retain auxiliary RDF classes but declare exactly one EPCIS
-  // discriminator. Historical rows without that declaration keep their behavior.
+  // discriminator. Unmarked historical rows use vocabulary and shape evidence.
   sharedRequiredPatterns.push(`OPTIONAL { ?event <${EPCIS_DECLARED_EVENT_TYPE}> ?_declaredEventType . }`);
-  filterClauses.push('FILTER(!BOUND(?_declaredEventType) || ?eventType = ?_declaredEventType)');
-  sharedRequiredPatterns.push(buildEpcisEventTypePreferencePattern());
+  filterClauses.push('FILTER(!BOUND(?_declaredEventType) || ?_rawEventType = ?_declaredEventType)');
+  sharedRequiredPatterns.push(buildEpcisEventTypeBinding());
 
   // External classes need both EPCIS timing fields to distinguish events from
   // ordinary RDF. Date filtering also needs eventTime; bind each field once.
@@ -308,7 +308,7 @@ SELECT ?event ?eventType ?eventTime ?eventTimeZoneOffset ?bizStep ?bizLocation ?
 WHERE {
   {
     GRAPH <${publicGraph}> {
-      ?event a ?eventType .
+      ?event a ?_rawEventType .
       ${publicGraphBody}
     }
   }
@@ -318,7 +318,7 @@ WHERE {
       ?event dkg:privateDataAnchor "true" .
     }
     GRAPH <${privateGraph}> {
-      ?event a ?eventType .
+      ?event a ?_rawEventType .
       ${privateGraphBody}
     }
   }

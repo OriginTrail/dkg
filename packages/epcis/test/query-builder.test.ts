@@ -275,7 +275,7 @@ describe('buildEpcisQuery', () => {
     expect(sparql).toContain('dkg:privateDataAnchor "true"');
     expect(sparql).toMatch(
       new RegExp(
-        String.raw`GRAPH <${DATA_GRAPH}> \{[\s\S]*\?event dkg:privateDataAnchor "true"[\s\S]*\}[\s\S]*GRAPH <${PRIVATE_GRAPH}> \{[\s\S]*\?event a \?eventType`,
+        String.raw`GRAPH <${DATA_GRAPH}> \{[\s\S]*\?event dkg:privateDataAnchor "true"[\s\S]*\}[\s\S]*GRAPH <${PRIVATE_GRAPH}> \{[\s\S]*\?event a \?_rawEventType`,
       ),
     );
   });
@@ -284,7 +284,7 @@ describe('buildEpcisQuery', () => {
     const sparql = buildEpcisQuery({ finalized: false, eventType: 'ObjectEvent' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain(`GRAPH <${SHARED_MEMORY_GRAPH}>`);
-    expect(sparql).not.toContain(`GRAPH <${DATA_GRAPH}> {\n    ?event a ?eventType`);
+    expect(sparql).not.toContain(`GRAPH <${DATA_GRAPH}> {\n    ?event a ?_rawEventType`);
     expect(sparql).toContain(`GRAPH <${PRIVATE_GRAPH}>`);
     expect(sparql).toContain('FILTER(?eventType IN (<https://gs1.github.io/EPCIS/ObjectEvent>, <https://ref.gs1.org/epcis/ObjectEvent>))');
   });

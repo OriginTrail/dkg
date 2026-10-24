@@ -1,5 +1,5 @@
 import { sparqlIri } from '@origintrail-official/dkg-core';
-import { EPCIS_NAMESPACES, EPCIS_STANDARD_EVENT_TYPES, epcisPropertyIris, standardEpcisEventIris } from './epcis-vocabulary.js';
+import { EPCIS_NAMESPACES, EPCIS_STANDARD_EVENT_TYPES, EPCIS_TYPE_PREFIX, epcisPropertyIris, standardEpcisEventIris } from './epcis-vocabulary.js';
 
 interface EventDiscoveryContext {
   metaGraph: string;
@@ -39,18 +39,14 @@ export function buildEpcisEventDiscoveryPattern({ metaGraph, source, partition }
 }
 
 /**
- * Equivalent standard classes must consume one pagination slot. Prefer the
- * later accepted namespace when both are asserted, but never override an
- * explicit capture discriminator or collapse distinct extension IRIs.
- * Keep this inside the same data GRAPH as the event's rdf:type bindings.
+ * Group equivalent standard types under the capture vocabulary's canonical
+ * identity, including when aliases occur in different admitted data graphs.
+ * Declaration checks use the raw class before grouping; extensions stay exact.
  */
-export function buildEpcisEventTypePreferencePattern(): string {
-  const equivalentTypes = EPCIS_STANDARD_EVENT_TYPES.flatMap(name => {
-    const iris = standardEpcisEventIris(name);
-    return iris.flatMap((iri, index) => iris.slice(index + 1).map(preferred =>
-      `(?eventType = ${sparqlIri(iri)} && EXISTS { ?event a ${sparqlIri(preferred)} . })`));
-  }).join(' || ');
-  // Use constant type tests: Blazegraph does not reliably correlate an outer
-  // eventType through a VALUES-bound alias pair inside FILTER NOT EXISTS.
-  return `FILTER(BOUND(?_declaredEventType) || !(${equivalentTypes}))`;
+export function buildEpcisEventTypeBinding(): string {
+  const expression = EPCIS_STANDARD_EVENT_TYPES.reduceRight((fallback, name) => {
+    const aliases = standardEpcisEventIris(name).map(sparqlIri).join(', ');
+    return `IF(?_rawEventType IN (${aliases}), ${sparqlIri(`${EPCIS_TYPE_PREFIX}${name}`)}, ${fallback})`;
+  }, '?_rawEventType');
+  return `BIND(${expression} AS ?eventType)`;
 }
