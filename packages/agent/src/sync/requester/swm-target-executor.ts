@@ -47,6 +47,7 @@ import {
   PrivateSwmSnapshotWalkRegistry,
   type PrivateSwmSnapshotWalkLease,
 } from './private-swm-snapshot-walk-registry.js';
+import { SyncedSubGraphRegistration } from './synced-sub-graph-registration.js';
 
 type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0];
 
@@ -97,6 +98,8 @@ interface PublicSwmTargetBaseV1 {
   readonly stopOnBackoffWorthyFailure?: boolean;
   /** Include the catalog-owned root SWM scope as well as named subgraphs. */
   readonly includeRootScope?: boolean;
+  /** Read the peer's state at the call: join no page fetch of another round. */
+  readonly freshSnapshot?: boolean;
 }
 
 /** The only two valid public synchronization contracts. */
@@ -134,6 +137,7 @@ export class SwmTargetExecutorV1 {
     string,
     Promise<{ registered: string[]; excluded: string[] }>
   >();
+  readonly #syncedSubGraphs: SyncedSubGraphRegistration;
 
   constructor(
     ports: SwmTargetExecutorPortsV1,
@@ -149,6 +153,18 @@ export class SwmTargetExecutorV1 {
       invalidateListContextGraphsCache: ports.invalidateListContextGraphsCache,
     });
     this.#recoveryMutation = ports.recoveryMutation;
+    this.#syncedSubGraphs = new SyncedSubGraphRegistration({
+      store: ports.store,
+      writeLocks: ports.writeLocks,
+      admittedNames: async (contextGraphId) => {
+        const { registered, excluded } = await this.#getSubGraphAdmission(contextGraphId);
+        return [...registered, ...excluded];
+      },
+      isKnownChildContextGraph: (contextGraphId, subGraphName) => isKnownContextGraphUri(
+        ports.store,
+        `${contextGraphDataGraphUri(contextGraphId)}/${subGraphName}`,
+      ),
+    });
   }
 
   async recoverPrivateTarget(
@@ -261,9 +277,11 @@ export class SwmTargetExecutorV1 {
         { recordDrops: this.#ports.recordDrops },
         'swm-sync',
       );
+      await this.#registerSyncedSubGraphs(target, quads);
     };
     return runSharedMemorySync({
       mode,
+      freshSnapshot: target.freshSnapshot,
       ctx: target.ctx,
       remotePeerId: target.remotePeerId,
       contextGraphIds: [target.contextGraphId],
@@ -280,6 +298,10 @@ export class SwmTargetExecutorV1 {
       getExcludedSubGraphNames: async (contextGraphId) => (
         await this.#getSubGraphAdmission(contextGraphId)
       ).excluded,
+      isOwnContextGraph: (contextGraphId, name) => isKnownContextGraphUri(
+        this.#ports.store,
+        `${contextGraphDataGraphUri(contextGraphId)}/${name}`,
+      ),
       includeRootScope: target.includeRootScope,
       stopOnBackoffWorthyFailure: target.stopOnBackoffWorthyFailure,
       ensureContextGraph: this.#recoveryMutation.ensureContextGraph,
@@ -340,6 +362,30 @@ export class SwmTargetExecutorV1 {
     });
   }
 
+  /**
+   * Register the named sub-graphs whose shared memory this round just stored
+   * (see `synced-sub-graph-registration.ts`). The rows stay stored when that
+   * fails, and the next rows stored for the sub-graph try again: a round stores
+   * the verified metadata of each asset it finds already present, too.
+   */
+  async #registerSyncedSubGraphs(target: PublicSwmTargetV1, stored: readonly Quad[]): Promise<void> {
+    try {
+      for (const subGraphName of await this.#syncedSubGraphs.registerFor(target.contextGraphId, stored)) {
+        this.#ports.invalidateListContextGraphsCache();
+        this.#ports.logInfo(
+          target.ctx,
+          `Auto-registered sub-graph "${subGraphName}" in context graph "${target.contextGraphId}" from SWM sync`,
+        );
+      }
+    } catch (cause) {
+      this.#ports.logWarn(
+        target.ctx,
+        `SWM sync stored shared memory of a sub-graph of "${target.contextGraphId}" it could not register: `
+          + `${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    }
+  }
+
   async #getSubGraphAdmission(
     contextGraphId: string,
   ): Promise<{ registered: string[]; excluded: string[] }> {
@@ -393,7 +439,8 @@ async function getSharedMemorySubGraphAdmission(
   return { registered, excluded };
 }
 
-async function isKnownContextGraphUri(
+/** True when `contextGraphUri` is declared as a context graph of its own on this node. */
+export async function isKnownContextGraphUri(
   store: TripleStore,
   contextGraphUri: string,
 ): Promise<boolean> {

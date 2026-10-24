@@ -212,9 +212,12 @@ export const SYNC_STALENESS_THRESHOLD_MS = 10 * 60_000;
  * The backoff grows the per-peer retry gap as
  * `SYNC_BACKOFF_BASE_MS * 2^(failures-1)` (capped at
  * `SYNC_BACKOFF_MAX_MS`, ±`SYNC_BACKOFF_JITTER` to de-correlate peers)
- * and resets the instant a sync succeeds. Only the periodic reconciler
- * is gated — connection:open and peer:update still trigger an immediate
- * attempt, so new information is never delayed.
+ * and resets the instant a sync succeeds. A new connection is gated as
+ * well: `queueSyncFromPeerOnConnect` skips a peer in backoff, as it skips
+ * one synced within `SYNC_STALENESS_THRESHOLD_MS` and one queued within
+ * `CATCHUP_ON_CONNECT_COOLDOWN_MS`; only an accepted authority change
+ * (`authorityScopeChanged`) passes the backoff. Shared memory such a peer
+ * holds is pulled by the change notice and the safety-net pull instead.
  */
 export const SYNC_BACKOFF_BASE_MS = 5 * 60_000;
 export const SYNC_BACKOFF_MAX_MS = 60 * 60_000;

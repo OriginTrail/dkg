@@ -1,3 +1,5 @@
+export { asQueryReadAdmissionCapability, type QueryReadAdmissionCapability } from './query-read-admission-capability.js';
+export { nonEmptyNamedGraphEnumerationPattern } from './adapters/graph-enumeration-query.js';
 export {
   BlazegraphNamespaceManager,
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
@@ -56,6 +58,11 @@ export {
   type AtomicGraphAndSubjectReplaceUpdate,
   type AtomicGraphReplaceUpdate,
 } from './atomic-graph-replace.js';
+export {
+  assertSubjectAndInsertPayload,
+  buildAtomicSubjectAndInsertUpdate,
+  tryReplaceSubjectAndInsertAtomically,
+} from './atomic-subject-insert.js';
 /**
  * Stable caller contract for one bounded RFC-64 author commit. Compilation,
  * receipt execution, normalization, and decorator mapping stay module-internal.
@@ -317,3 +324,7 @@ import './adapters/oxigraph.js';
 import './adapters/oxigraph-worker.js';
 import './adapters/blazegraph.js';
 import './adapters/sparql-http.js';
+
+export { buildAtomicAssetGroupUpdate, ATOMIC_ASSET_GROUP_MAX_ASSETS, ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES, type AtomicAssetReplacement } from './atomic-asset-group.js';
+
+export { StoreReadTransportFailure, isStoreReadTransportFailure } from './store-read-transport-failure.js';

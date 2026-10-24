@@ -11,7 +11,6 @@ import type {
   DKGAgentConfig,
   SyncAdmissionConfig,
   SyncContextGraphPriorityConfig,
-  SyncResponderSnapshotLimitsConfig,
 } from '@origintrail-official/dkg-agent';
 // The config loader must stay off the agent package ROOT at runtime: that entry
 // loads the whole agent runtime (libp2p, sync lanes, the process-wide
@@ -635,7 +634,9 @@ export interface LoggingConfig {
   kaPublishLifecycleDebug?: boolean;
 }
 
-export interface DkgConfig {
+export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLimits' | 'preparedContentCache'> {
+  /** Lower RPC usage by using the DKG Core chain cache. Core service defaults on. Edge use is opt-in. */
+  DKG_Core_chain_cache?: boolean;
   name: string;
   /**
    * Selects which bundled network/<name>.json overlay this node should use.
@@ -727,15 +728,15 @@ export interface DkgConfig {
    */
   preferredRelays?: string[];
   /**
-   * Transport-level network peer isolation: refuse to dial, store or accept
-   * the relays of the other bundled DKG networks and peers that failed the
-   * network-identity proof. Defaults to true. Set false (or
-   * DKG_NETWORK_PEER_ISOLATION_ENABLED=0, which wins) to fall back to
-   * admission-only isolation without a new release.
+   * Transport-level network peer isolation: refuse to dial, store or accept the relays of the other bundled
+   * DKG networks and peers that failed the network-identity proof. Defaults to true. Set false (or
+   * DKG_NETWORK_PEER_ISOLATION_ENABLED=0, which wins) to fall back to admission-only isolation without a new release.
    */
   networkPeerIsolationEnabled?: boolean;
   /** Public multiaddrs to announce (for VPS/cloud nodes where the public IP is not on the interface). */
   announceAddresses?: string[];
+  /** Keep LAN and VPN addresses in use on an Edge with public relays; see `lan-addresses.ts`. Default false. */
+  lanAddressesEnabled?: boolean;
   /** Bootstrap peer multiaddrs to connect to on startup (for direct peer discovery without relay). */
   bootstrapPeers?: string[];
   /** V10: context graphs to subscribe. */
@@ -765,16 +766,13 @@ export interface DkgConfig {
   queryAccess?: QueryAccessConfig;
   autoUpdate?: AutoUpdateConfig;
   /**
-   * Chain config. Field-merged on top of `network/<env>.json#chain` via
-   * `resolveChainConfig()`, so an operator can override individual fields
-   * (e.g. just `rpcUrl` to point at a private RPC) without having to
-   * restate `hubAddress` and `chainId`. Fields omitted here inherit the
-   * network defaults — including future hub rotations propagated by the
-   * auto-updater pulling a fresh network/<env>.json.
+   * Field-merged over network/<env>.json#chain by resolveChainConfig().
+   * Operators can override one field; omitted fields follow updated defaults.
    */
   chain?: Partial<ChainConfig>;
   /** Optional LLM for the Node UI chatbot (natural language → SPARQL, answers). */
   llm?: LlmConfig;
+  entitySearch?: { embedding: import('./entity-search/types.js').EntityEmbeddingConfig };
   /** Block explorer URL for TX links (default: derived from chainId). */
   blockExplorerUrl?: string;
   /** Triple store backend override (default: oxigraph-worker with file persistence). */
@@ -852,8 +850,6 @@ export interface DkgConfig {
   syncGlobalQueueLimit?: number;
   /** Optional partitioned fast/slow sync admission. Omit for the legacy shared limiter. */
   syncAdmission?: SyncAdmissionConfig;
-  /** Retained sync responder snapshot limits (rows and estimated bytes). */
-  syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
   /**
    * Local sync scheduling priority by Context Graph ID. Higher runs first.
    * System Context Graphs default to a deprioritized priority so they run
@@ -2006,7 +2002,7 @@ export async function loadNetworkConfig(network?: string): Promise<NetworkConfig
   }
 }
 
-function loadBundledNetworkRegistry(): Readonly<Record<string, NetworkConfig>> {
+export function loadBundledNetworkRegistry(): Readonly<Record<string, NetworkConfig>> {
   if (_bundledNetworkRegistry) return _bundledNetworkRegistry;
 
   _bundledNetworkRegistry = loadNetworkRegistryFromRoots(runtimeAssetRoots());

@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ContextGraphAuthorityIndexRevisionReader } from '@origintrail-official/dkg-chain';
+import type {
+  ContextGraphAuthorityIndexRevisionReader,
+  ContextGraphAuthorityProjectionServedEvidence,
+  ContextGraphAuthoritySnapshot,
+} from '@origintrail-official/dkg-chain';
 
 import { runBoundedOperation } from '../../bounded-operation.js';
 import type { FinalizedContextGraphAuthoritySnapshotReadV1 } from '../../dkg-agent-cg-resolve.js';
@@ -24,7 +28,9 @@ export type FinalizedOnChainAccessPolicyState =
 export interface FinalizedOnChainAccessPolicyDependencies {
   /** The adapter's finalized authority index; a legacy adapter has none. */
   readonly indexReader: ContextGraphAuthorityIndexRevisionReader | undefined;
-  /** The shared RFC-64 authority circuit; the scoped lane takes its foreground lane. */
+  /** Atomic snapshot from this request's name resolution; no cached grant. */
+  readonly registrationSnapshot?: ContextGraphAuthoritySnapshot;
+  /** The shared RFC-64 authority circuit for legacy scoped index reads. */
   readonly authorityReads: Pick<Rfc64AuthorityReadCoordinatorV1, 'runForeground'>;
   /**
    * The agent's one finalized snapshot read: a detached cold resolution that
@@ -53,51 +59,19 @@ const SNAPSHOT_MISMATCH_DETAIL = Object.freeze({
 } as const satisfies Record<FinalizedContextGraphSnapshotMismatchV1, string>);
 
 /**
- * Registered-authority policy evidence from the complete finalized authority
- * index, shared by both finalized read modes (see
- * `ContextGraphAuthorityReadMode`). Both wait on the one detached snapshot
- * read under the configured request deadline; they differ only in the lane.
+ * A named scoped query may reuse the atomic snapshot its registration lookup
+ * just returned. It still passes every id/name/liveness/policy check below.
+ * Without private-roster freshness provenance, private reads fall back to the
+ * current-state read. Other scoped queries use the retained-only capability. That
+ * capability proves the same scope, lineage and freshness without RPC. A miss
+ * leaves the caller on its existing bounded current-state authority read;
+ * refreshing a whole-contract index first can spend the entire query deadline
+ * before either the point read or the local store gets a chance to run.
  *
- * `finalized-index` (scoped query authorization) waits on the shared RFC-64
- * authority circuit's foreground lane: it never queues behind a cold
- * whole-contract scan on the bulk lane, and the provenance of the answer it
- * consumes is reported to the circuit, so a real provider read counts as
- * recovery evidence for every other consumer while a log fold or a projection
- * fetched before the trip does not. It is admitted while the circuit cools
- * down, as one more probe behind that lane's single permit. Refused, it would
- * defer nothing: its caller would go straight to the live read of the same
- * pool, ungoverned and unserialized, and give up an answer the reader's
- * projection can serve without reaching a provider. Its exhaustion joins the
- * open round. A graph whose registration itself needs the index (name-hash
- * discovery) is still refused at registration during a cooldown and never
- * reaches this lane. `finalized-index-or-live` (read-only host/sync/share
- * gates and the encryption policy bit) reads without the circuit.
- *
- * No `whenIdle()` drain here, unlike the bulk lanes. The reader's drain is
- * global (the bulk catalog pass's scans included), so inside this budget it
- * would hold a projection hit behind unrelated work and, past the budget,
- * trade the hit for the live read. A scan this read stops waiting for keeps
- * running in the detached resolution; that physical work belongs to the
- * reader's lifecycle, which `agent.stop()` drains.
- *
- * `undefined` sends the caller to the bounded current-state read, which
- * fails closed on its own. That happens when the adapter has no finalized
- * capability; when the lane faulted (an exhaustion included) or timed out;
- * when the index holds no snapshot for a slot whose registration is already
- * proven (the projection's anchor has not reached the registration block — the
- * registration lane never treats finalized absence as evidence either); when
- * the caller needs the CURRENT private roster (`requireLiveRosterForPrivate`);
- * and when a PRIVATE roster would come from a projection whose provenance the
- * reader did not report, or that it served as `stale-cache`, meaning a refresh
- * failed and the projection is at least one index tick old. The reader owns
- * the age bound: it never serves a projection older than its stale window,
- * `min(max(3T, 15s), 5m)` for `chain.indexTickMs` T (18s at the default 6s
- * tick), so a roster removal takes effect within finality depth plus one tick
- * while RPC is healthy and within that window at worst. A numeric bound here
- * would only fight the configured tick. Finalized EVIDENCE — an inactive,
- * malformed, or name-mismatched snapshot — fails closed and never falls back.
- * The public policy bit is immutable on chain, so a public snapshot is served
- * at any provenance.
+ * Host/sync reads and older adapters retain the detached index resolution and
+ * its foreground circuit lane. No grant is cached here. Inactive, malformed or
+ * name-mismatched evidence always fails closed; a missing or stale private
+ * roster still requires the existing current-state read.
  */
 export async function resolveFinalizedOnChainAccessPolicyState(
   dependencies: FinalizedOnChainAccessPolicyDependencies,
@@ -116,35 +90,57 @@ export async function resolveFinalizedOnChainAccessPolicyState(
   const label = `readFinalizedContextGraphAuthority(${onChainId})`;
   let read: FinalizedContextGraphAuthoritySnapshotReadV1;
   try {
-    read = options.readMode === 'finalized-index'
-      ? await runBoundedOperation(
-          (signal) => dependencies.authorityReads.runForeground(
-            signal,
-            async (readSignal, evidence) => {
-              // The detached resolution is shared and never sees a caller's
-              // evidence hooks, so the circuit is told here how the consumed
-              // answer was served (pool liveness). The provenance also stays on
-              // the read: a private roster decision must stay off a projection
-              // the reader could not refresh.
-              const chainReadOptions = evidence.chainReadOptions(readSignal);
-              const snapshotRead = await dependencies.readSnapshot(
-                onChainId,
-                { signal: readSignal, label },
-              );
-              if (snapshotRead.kind !== 'unsupported' && snapshotRead.served !== undefined) {
-                chainReadOptions.onContextGraphAuthorityProjectionServed?.(snapshotRead.served);
-              }
-              return snapshotRead;
+    const retained = dependencies.indexReader.peekFinalizedContextGraphAuthoritySnapshotsByNameHashes;
+    if (options.readMode === 'finalized-index' && dependencies.registrationSnapshot !== undefined) {
+      options.signal?.throwIfAborted();
+      read = { kind: 'snapshot', snapshot: dependencies.registrationSnapshot };
+    } else if (options.readMode === 'finalized-index' && retained !== undefined) {
+      const nameHash = dependencies.expectedNameHash();
+      options.signal?.throwIfAborted();
+      if (nameHash === undefined) return undefined;
+      let served: ContextGraphAuthorityProjectionServedEvidence | undefined;
+      const snapshots = await runBoundedOperation(
+        (signal) => retained.call(dependencies.indexReader, [nameHash], {
+          signal,
+          onContextGraphAuthorityProjectionServed: (report) => { served = report; },
+        }),
+        { label, timeoutMs: dependencies.requestTimeoutMs, signal: options.signal },
+      );
+      options.signal?.throwIfAborted();
+      const snapshot = snapshots?.get(nameHash);
+      if (snapshot === undefined) return undefined;
+      read = { kind: 'snapshot', snapshot, ...(served === undefined ? {} : { served }) };
+    } else {
+      read = options.readMode === 'finalized-index'
+        ? await runBoundedOperation(
+            (signal) => dependencies.authorityReads.runForeground(
+              signal,
+              async (readSignal, evidence) => {
+                // The detached resolution is shared and never sees a caller's
+                // evidence hooks, so the circuit is told here how the consumed
+                // answer was served (pool liveness). The provenance also stays on
+                // the read: a private roster decision must stay off a projection
+                // the reader could not refresh.
+                const chainReadOptions = evidence.chainReadOptions(readSignal);
+                const snapshotRead = await dependencies.readSnapshot(
+                  onChainId,
+                  { signal: readSignal, label },
+                );
+                if (snapshotRead.kind !== 'unsupported' && snapshotRead.served !== undefined) {
+                  chainReadOptions.onContextGraphAuthorityProjectionServed?.(snapshotRead.served);
+                }
+                return snapshotRead;
+              },
+              { admitWhileOpen: true },
+            ),
+            {
+              label,
+              timeoutMs: dependencies.requestTimeoutMs,
+              signal: options.signal,
             },
-            { admitWhileOpen: true },
-          ),
-          {
-            label,
-            timeoutMs: dependencies.requestTimeoutMs,
-            signal: options.signal,
-          },
-        )
-      : await dependencies.readSnapshot(onChainId, { signal: options.signal, label });
+          )
+        : await dependencies.readSnapshot(onChainId, { signal: options.signal, label });
+    }
   } catch {
     return undefined;
   }

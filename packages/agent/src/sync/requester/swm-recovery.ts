@@ -445,6 +445,8 @@ async function recoverContextGraphSwmUnlocked(
   const incrementallyReadyGraphs = new Set<string>();
   /** Graph keys whose ASSERTION GRAPH was actually (re)written this run. */
   const rewrittenGraphKeys = new Set<string>();
+  /** Graph keys whose exact content the store already held, so this run wrote none of it. */
+  const heldGraphKeys = new Set<string>();
   let incrementallyReplacedGraphs = 0;
   let incrementallyInsertedDataQuads = 0;
   let incrementallyInsertedMetaQuads = 0;
@@ -501,6 +503,7 @@ async function recoverContextGraphSwmUnlocked(
           incrementallyInsertedMetaQuads += insertableMeta.length;
           rewrittenGraphKeys.add(graphKey);
         }
+        heldGraphKeys.add(graphKey);
         incrementallyReadyGraphs.add(graphKey);
         continue;
       }
@@ -713,6 +716,9 @@ async function recoverContextGraphSwmUnlocked(
     const retainedReady = retainedSnapshotRef !== undefined
       && snapshotWalkProgress?.isResolved(retainedSnapshotRef) === true;
     if (incrementallyReadyGraphs.has(graphKey) || retainedReady) {
+      // A ref an earlier round resolved was re-validated as still materialized
+      // before this round's walk, which then skipped it.
+      if (!incrementallyReadyGraphs.has(graphKey)) heldGraphKeys.add(graphKey);
       graphAssets.push(Object.freeze({
         descriptor,
         kind: rewrittenGraphKeys.has(graphKey)
@@ -777,6 +783,7 @@ async function recoverContextGraphSwmUnlocked(
     insertedDataQuads: applied.insertedRootQuads + applied.insertedGraphQuads,
     insertedMetaQuads: applied.insertedMetaQuads,
     droppedDataTriples: processed.droppedDataTriples,
+    alreadyHeldGraphs: heldGraphKeys.size,
     ...snapshotProgress,
     completed: true,
   };

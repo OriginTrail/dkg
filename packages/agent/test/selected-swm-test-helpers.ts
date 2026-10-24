@@ -404,6 +404,8 @@ export interface AdmissionProbe {
   readonly contextGraphId: string;
   readonly selected: boolean;
   readonly priority: number | undefined;
+  /** Recorded only when the admission asked for a reserved slot only. */
+  readonly reservedSlotOnly?: boolean;
   readonly event: 'start' | 'end';
 }
 
@@ -458,6 +460,11 @@ export interface SelectedSwmLifecycleHarnessOptions {
   readonly dataFailuresBeforeSuccess?: number;
   /** Mirror the production verifier's empty-batch classification. */
   readonly reportEmptyResponse?: boolean;
+  /**
+   * The peer's answer to a snapshot request for a ref this node does not hold.
+   * Without it, every snapshot must be a cache hit.
+   */
+  readonly snapshotAnswer?: (ref: string) => readonly Quad[];
   /** Override the aggregate data phase to exercise incomplete empty rounds. */
   readonly dataPage?: {
     readonly quads?: readonly Quad[];
@@ -521,7 +528,7 @@ export interface SelectedSwmLifecycleAgentFixture {
     lane: string,
     operationId: string,
     work: () => Promise<SharedMemorySyncResult>,
-    admission: { priorityOverride?: number; selectedSwmPriority?: boolean },
+    admission: { priorityOverride?: number; selectedSwmPriority?: boolean; reservedSlotOnly?: boolean },
   ) => Promise<SharedMemorySyncResult>;
   syncCheckpoints: Map<string, number>;
   workspaceOwnedEntities: Map<string, Map<string, string>>;
@@ -730,7 +737,19 @@ export function createSelectedSwmLifecycleHarness(
       } = fetchOptions;
       if (phase === 'snapshot') {
         snapshotFetches.push(snapshotRef ?? 'missing-ref');
-        throw new Error('all snapshot fixtures should be cache hits');
+        if (options.snapshotAnswer === undefined || snapshotRef === undefined) {
+          throw new Error('all snapshot fixtures should be cache hits');
+        }
+        const quads = [...options.snapshotAnswer(snapshotRef)];
+        return {
+          quads,
+          bytesReceived: quads.length,
+          resumedFromOffset: 0,
+          nextOffset: quads.length,
+          checkpointKey: `${contextGraphId}:${phase}:${snapshotRef}`,
+          completed: true,
+          timedOut: false,
+        };
       }
       if (phase === 'meta') {
         metaFetches += 1;
@@ -847,6 +866,7 @@ export function createSelectedSwmLifecycleHarness(
         contextGraphId,
         selected: admission.selectedSwmPriority === true,
         priority: admission.priorityOverride,
+        ...(admission.reservedSlotOnly === undefined ? {} : { reservedSlotOnly: admission.reservedSlotOnly }),
       };
       admissions.push({ ...row, event: 'start' });
       try {

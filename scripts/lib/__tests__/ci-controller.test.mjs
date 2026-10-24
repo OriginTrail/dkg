@@ -211,6 +211,9 @@ test('every rotation shim is recorded next to the controller pin', () => {
     ...Object.entries(jobs.changes.outputs)
       .filter(([, value]) => String(value).includes('||'))
       .map(([name]) => `jobs.changes.outputs.${name} fallback`),
+    ...(jobs.changes.steps.find(step => step.id === 'plan')?.run.includes(
+      'scripts/repro/publisher-live-control-restart.test.mts|scripts/repro/publisher-live-control-worker.mts',
+    ) ? ['jobs.changes.steps.plan publisher campaign full-CI fallback'] : []),
     ...Object.entries(PRIMARY_LANE_JOBS).flatMap(([lane, job]) => String(jobs[job].if).split('||')
       .map((term) => term.trim().match(/^needs\.changes\.outputs\.(\w+) == 'true'$/)?.[1] ?? term.trim())
       .filter((output) => output !== lane)

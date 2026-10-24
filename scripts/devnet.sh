@@ -1046,7 +1046,13 @@ start_node() {
     const fs = require('fs');
     const dir = process.env.DEVNET_DIR;
     const cfgPath = process.env.NODE_DIR + '/config.json';
-    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    // The members a test set when it added this node (addnode's
+    // DEVNET_ADDNODE_CONFIG_OVERRIDES), applied here only, on every start: the
+    // defaults below are derived from them (an overridden nodeRole or
+    // authorityIndex), and they win over the values generated below.
+    const overridesPath = process.env.NODE_DIR + '/addnode-overrides.json';
+    const overrides = fs.existsSync(overridesPath) ? JSON.parse(fs.readFileSync(overridesPath, 'utf8')) : {};
+    const cfg = { ...JSON.parse(fs.readFileSync(cfgPath, 'utf8')), ...overrides };
     if (process.env.RELAY_ARG) cfg.relay = process.env.RELAY_ARG;
     const n = Number(process.env.NODE_NUM);
     // Bootstrap targets are the CORE nodes among 1..n-1, read from each node's
@@ -1078,6 +1084,7 @@ start_node() {
         maxTailBlocks: 2000,
       };
     }
+    Object.assign(cfg, overrides);
     fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
   "
 
@@ -2205,6 +2212,8 @@ cmd_clean() {
 # itself so it can assert on every step.
 #
 # Usage: devnet.sh addnode <num> [core|edge]
+#   DEVNET_ADDNODE_CONFIG_OVERRIDES='{"key": value, ...}'  config.json members
+#                                   to set before the node's first start
 cmd_addnode() {
   local node_num="${2:-}"
   local role="${3:-core}"
@@ -2232,7 +2241,44 @@ cmd_addnode() {
   fi
 
   log "Adding node $node_num (role=$role)..."
+  # One mkdir claims the folder: it fails when another caller made the folder
+  # since the check above, so only the caller that created it goes on. A caller
+  # that names a mark (DEVNET_ADDNODE_MARK_NAME, a file name, with
+  # DEVNET_ADDNODE_MARK_TEXT) has it written into the folder before anything
+  # else happens there, the daemon's start included: it can then tell its own
+  # node from another caller's even when this addnode is interrupted.
+  if ! mkdir "$DEVNET_DIR/node${node_num}" 2>/dev/null; then
+    echo "[devnet] node${node_num} already exists at $DEVNET_DIR/node${node_num}"
+    exit 1
+  fi
+  if [ -n "${DEVNET_ADDNODE_MARK_NAME:-}" ]; then
+    case "$DEVNET_ADDNODE_MARK_NAME" in
+      */*|.|..)
+        echo "[devnet] DEVNET_ADDNODE_MARK_NAME must be a file name; node${node_num} was not started"
+        rm -rf "$DEVNET_DIR/node${node_num}"
+        exit 1 ;;
+    esac
+    printf '%s\n' "${DEVNET_ADDNODE_MARK_TEXT:-}" > "$DEVNET_DIR/node${node_num}/$DEVNET_ADDNODE_MARK_NAME"
+  fi
   DEVNET_NODE_ROLE_OVERRIDE="$role" create_node_config "$node_num"
+
+  # A test that needs the new node to differ from the first second it runs
+  # (the addresses it announces, for one: what a peer has once learnt about a
+  # node it keeps) passes a JSON object here. addnode checks it and keeps it
+  # beside the node's config; start_node applies it, on the first start and on
+  # every later one (see there).
+  if [ -n "${DEVNET_ADDNODE_CONFIG_OVERRIDES:-}" ]; then
+    if ! node -e '
+      const overrides = JSON.parse(process.env.DEVNET_ADDNODE_CONFIG_OVERRIDES);
+      if (overrides === null || typeof overrides !== "object" || Array.isArray(overrides)) throw new Error("not a JSON object");
+    '; then
+      echo "[devnet] DEVNET_ADDNODE_CONFIG_OVERRIDES must be a JSON object; node${node_num} was not started"
+      rm -rf "$DEVNET_DIR/node${node_num}"
+      exit 1
+    fi
+    printf '%s\n' "$DEVNET_ADDNODE_CONFIG_OVERRIDES" > "$DEVNET_DIR/node${node_num}/addnode-overrides.json"
+    log "Node $node_num config: DEVNET_ADDNODE_CONFIG_OVERRIDES kept for every start"
+  fi
 
   # Reuse the cluster's shared auth token so the test can talk to the new
   # node with the same bearer used everywhere else.

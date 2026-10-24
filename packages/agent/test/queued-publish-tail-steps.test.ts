@@ -9,7 +9,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
+import { GRAPH_KA_CONTENT_SCOPE_VERSION, contextGraphAssertionUri, assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10,
   type KnowledgeAssetVmPublishRequest,
@@ -20,6 +20,7 @@ import {
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { DKGAgent } from '../src/dkg-agent.js';
 import { PublishMethods } from '../src/dkg-agent-publish.js';
+import type { PublishedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle.js';
 
 const AUTHOR = `0x${'11'.repeat(20)}` as const;
 const KAV10 = `0x${'44'.repeat(20)}` as const;
@@ -33,6 +34,10 @@ const QUADS: Quad[] = [{
 }];
 const ROOT = ethers.hexlify(computeFlatKCRootV10(QUADS, [])) as `0x${string}`;
 const UAL = `did:dkg:evm:31337/${AUTHOR}/${KA_NUMBER}`;
+const OPERATIONS = [
+  { kind: 'create', overrides: {} },
+  { kind: 'update', overrides: { vmCurrentAssertion: `0x${'cd'.repeat(32)}` } },
+] as const;
 
 function request(overrides: Partial<KnowledgeAssetVmPublishRequest> = {}): KnowledgeAssetVmPublishRequest {
   return {
@@ -80,11 +85,17 @@ function harness(options: {
   clearPublishedGraph?: () => Promise<void>;
   retireLegacySwm?: () => Promise<void>;
   observer?: (step: LiftJobTailStep) => void;
+  failStep?: string;
+  catalogCompletion?: boolean;
+  cleanupCompletion?: boolean;
 } = {}) {
   const calls: string[] = [];
   /** The options of every publish or update call the executor made. */
   const passedOn: Array<Record<string, unknown>> = [];
-  const call = (name: string) => async (): Promise<void> => { calls.push(name); };
+  const call = (name: string) => async (): Promise<void> => {
+    calls.push(name);
+    if (options.failStep === name) throw new Error(`failed ${name}`);
+  };
   const publisher = {
     publish: async (passed: Record<string, unknown>) => {
       calls.push('publish()');
@@ -94,6 +105,7 @@ function harness(options: {
     clearPublishedKnowledgeAssetSwm: async () => {
       calls.push('clearPublishedGraph()');
       await options.clearPublishedGraph?.();
+      return Object.hasOwn(options, 'cleanupCompletion') ? options.cleanupCompletion : true;
     },
     clearRemainingSharedMemory: call('clearRemainingSharedMemory()'),
     clearSwmShareComplete: call('clearShareMarker()'),
@@ -109,7 +121,7 @@ function harness(options: {
     },
     store: {
       query: async () => ({ type: 'bindings', bindings: [] }),
-      insert: async () => {},
+      insert: call('stampProvenance()'),
     },
     gossip: { publish: call('gossip()') },
     getContextGraphOnChainId: async () => {
@@ -121,17 +133,20 @@ function harness(options: {
     update: async (...passed: unknown[]) => {
       calls.push('update()');
       passedOn.push(passed.at(-1) as Record<string, unknown>);
-      return publishResult();
+      return options.publish?.() ?? publishResult();
     },
-    _stampPointer: async () => {},
-    _stampPointerIfDivergedFromVm: async () => {},
+    _stampPointer: call('stampVmPointer()'),
+    _stampPointerIfDivergedFromVm: call('stampWmPointer()'),
     _writeQueuedKnowledgeAssetVmPublishReceipt: call('writeReceipt()'),
     _stampQueuedKnowledgeAssetVmPublishedLifecycle: call('stampLifecycle()'),
     retireLegacySwmAfterVerifiedVmTwin: async () => {
       calls.push('retireLegacySwm()');
       await options.retireLegacySwm?.();
     },
-    observeRfc64ConfirmedVmV1: call('catalogObserver()'),
+    observeRfc64ConfirmedVmV1: async () => {
+      await call('catalogObserver()')();
+      return Object.hasOwn(options, 'catalogCompletion') ? options.catalogCompletion : true;
+    },
   }, PublishMethods.prototype) as unknown as DKGAgent;
   const publishOptions = {
     contextGraphId: 'tail-steps',
@@ -146,6 +161,74 @@ function harness(options: {
 }
 
 describe('the steps a queued executor reports after the confirmation', () => {
+  it.each([
+    ['initial', 'request'], ['initial', 'default'], ['update', 'request'], ['update', 'default'],
+  ] as const)('keeps one %s publication identity with its captured %s author', async (kind, authorSource) => {
+    const effectiveAuthor = `0x${'22'.repeat(20)}`;
+    const prior = 'cd'.repeat(32);
+    const queued = request({
+      contextGraphId: 'identity-scope', name: 'scoped-asset', subGraphName: 'documents',
+      ...(authorSource === 'request' ? { agentAddress: effectiveAuthor } : {}),
+      ...(kind === 'update' ? { vmCurrentAssertion: `0x${prior}` } : {}),
+    });
+    const { host, execute, calls } = harness({ publish: async () => {
+      // Finalization must retain the author selected before asynchronous execution.
+      (host as any).defaultAgentAddress = `0x${'33'.repeat(20)}`;
+      return publishResult();
+    } });
+    (host as any).defaultAgentAddress = effectiveAuthor;
+    const originalRequest = structuredClone(queued);
+    const writtenQuads: Quad[] = [];
+    const lifecycleWrites: PublishedNamedKaVmLifecycleInput[] = [];
+    // Exercise the real write boundaries: mocking these methods hides a second
+    // fallback to the default address after asynchronous publication finishes.
+    host._writeQueuedKnowledgeAssetVmPublishReceipt = PublishMethods.prototype._writeQueuedKnowledgeAssetVmPublishReceipt;
+    host._stampQueuedKnowledgeAssetVmPublishedLifecycle = PublishMethods.prototype._stampQueuedKnowledgeAssetVmPublishedLifecycle;
+    (host as any).publishedNamedKaVmLifecycleWriter = async (input: PublishedNamedKaVmLifecycleInput) => {
+      lifecycleWrites.push(input);
+    };
+    const clear = vi.spyOn(host.publisher, 'clearPublishedKnowledgeAssetSwm');
+    const marker = vi.spyOn(host.publisher, 'clearSwmShareComplete');
+    const lifecycle = vi.spyOn(host as any, '_stampQueuedKnowledgeAssetVmPublishedLifecycle');
+    const pointer = vi.spyOn(host as any, '_stampPointer');
+    const insert = vi.spyOn(host.store, 'insert').mockImplementation(async (quads) => { writtenQuads.push(...quads); });
+    const catalog = vi.spyOn(host as any, 'observeRfc64ConfirmedVmV1');
+    const metaGraph = contextGraphMetaUri(queued.contextGraphId);
+    const lifecycleUri = assertionLifecycleUri(queued.contextGraphId, effectiveAuthor, queued.name, queued.subGraphName);
+    expect((await execute(queued)).localFinalizationComplete).toBe(true);
+    expect(clear).toHaveBeenCalledWith(queued.contextGraphId, {
+      kind: 'named-lifecycle', identity: { agentAddress: AUTHOR, kaNumber: KA_NUMBER },
+    }, 'documents', expect.any(Object), UAL, '1');
+    expect(marker).toHaveBeenCalledWith(queued.contextGraphId, queued.name, effectiveAuthor, 'documents');
+    const assertionUri = contextGraphAssertionUri(queued.contextGraphId, effectiveAuthor, queued.name, queued.subGraphName);
+    expect(writtenQuads.some(quad => quad.subject === assertionUri)).toBe(true);
+    expect(lifecycleWrites).toEqual([expect.objectContaining({
+      contextGraphId: queued.contextGraphId, agentAddress: effectiveAuthor,
+      name: queued.name, subGraphName: queued.subGraphName, publishedUal: UAL,
+    })]);
+    const laterAuthor = `0x${'33'.repeat(20)}`;
+    expect(writtenQuads.some(quad => quad.subject.includes(laterAuthor))).toBe(false);
+    expect(lifecycleWrites.some(input => input.agentAddress === laterAuthor)).toBe(false);
+    expect(lifecycle).toHaveBeenCalledWith(expect.objectContaining({ ...queued, agentAddress: effectiveAuthor }), UAL, PACKED_KA_ID);
+    expect(queued).toEqual(originalRequest);
+    expect(catalog).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId: queued.contextGraphId, subGraphName: 'documents', assertionCoordinate: queued.name,
+      assertionUri: contextGraphAssertionUri(queued.contextGraphId, effectiveAuthor, queued.name, 'documents'),
+    }));
+    if (kind === 'update') {
+      expect(calls).toContain('update()');
+      expect(pointer).toHaveBeenCalledWith(lifecycleUri, expect.any(String), ROOT.slice(2), metaGraph);
+      expect(insert).toHaveBeenCalledWith(expect.arrayContaining([{
+        subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf',
+        object: `${lifecycleUri}#assertion-${prior}`, graph: metaGraph,
+      }]));
+    } else {
+      expect(calls).toContain('publish()');
+      expect(pointer).not.toHaveBeenCalled();
+      expect(writtenQuads.every(quad => quad.subject === assertionUri)).toBe(true);
+    }
+  });
+
   it('reports every step it runs as that step ends, the call that retires the legacy marker among them', async () => {
     const retirement = held();
     const { calls, execute } = harness({ retireLegacySwm: retirement.pass });
@@ -184,15 +267,103 @@ describe('the steps a queued executor reports after the confirmation', () => {
     ]);
   });
 
-  it('reports an update: no receipt write, and the graph id read for the announcement', async () => {
+  it('writes the update receipt before cleanup and reads the graph id for the announcement', async () => {
     const { calls, execute } = harness();
     await execute(request({ vmCurrentAssertion: `0x${'cd'.repeat(32)}` }));
     expect(calls).toEqual([
       'update()', 'ended:publish',
+      'writeReceipt()', 'ended:receiptWrite',
       'clearPublishedGraph()', 'ended:publishedGraphClear',
       'retireLegacySwm()', 'ended:legacySwmRetire',
+      'stampVmPointer()', 'stampWmPointer()', 'stampProvenance()',
       'stampLifecycle()', 'ended:lifecycleStamp',
       'readGraphId()', 'ended:graphIdRead',
+      'gossip()', 'ended:finalizationGossip',
+      'clearShareMarker()', 'ended:shareMarkerClear',
+      'catalogObserver()', 'ended:catalogObserver',
+    ]);
+  });
+
+  it.each(OPERATIONS)('certifies the complete $kind lifecycle, including its receipt', async ({ overrides }) => {
+    const { calls, execute } = harness();
+    const result = await execute(request(overrides));
+    expect(result.localFinalizationComplete).toBe(true);
+    expect(result.status).toBe('confirmed');
+    expect(result.onChainResult).toBeDefined();
+    expect(calls.indexOf('writeReceipt()')).toBeLessThan(calls.indexOf('clearPublishedGraph()'));
+  });
+
+  it.each(OPERATIONS.flatMap(operation =>
+    ['writeReceipt()', 'stampLifecycle()', 'clearShareMarker()', 'clearRemainingSharedMemory()']
+      .map(failStep => ({ ...operation, failStep }))))(
+    'leaves $kind recovery responsible when $failStep fails despite an upstream certificate', async ({ overrides, failStep }) => {
+      const { calls, execute } = harness({ failStep, publish: async () => ({
+        ...publishResult(), localFinalizationComplete: true,
+      }) });
+      const result = await execute(request({ ...overrides, clearSharedMemoryAfter: true }));
+      expect(result.status).toBe('confirmed');
+      expect(result.localFinalizationComplete).toBeUndefined();
+      expect(calls).toContain('ended:shareMarkerClear');
+      expect(calls.slice(-2)).toEqual(['catalogObserver()', 'ended:catalogObserver']);
+    },
+  );
+
+  it.each(['stampVmPointer()', 'stampWmPointer()', 'stampProvenance()'])(
+    'keeps an update confirmed but uncertified after %s fails, and continues the remaining tail', async (failStep) => {
+      const { calls, execute } = harness({ failStep, publish: async () => ({
+        ...publishResult(), localFinalizationComplete: true,
+      }) });
+      const result = await execute(request({
+        vmCurrentAssertion: `0x${'cd'.repeat(32)}`,
+        assertionVersion: '2',
+        clearSharedMemoryAfter: true,
+      }));
+      expect(result.status).toBe('confirmed');
+      expect(result.localFinalizationComplete).toBeUndefined();
+      const provenanceSteps = ['stampVmPointer()', 'stampWmPointer()', 'stampProvenance()'];
+      expect(calls).toEqual([
+        'update()', 'ended:publish',
+        'writeReceipt()', 'ended:receiptWrite',
+        'clearPublishedGraph()', 'ended:publishedGraphClear',
+        'retireLegacySwm()', 'ended:legacySwmRetire',
+        'clearRemainingSharedMemory()', 'ended:remainingSwmClear',
+        ...provenanceSteps.slice(0, provenanceSteps.indexOf(failStep) + 1),
+        'stampLifecycle()', 'ended:lifecycleStamp',
+        'readGraphId()', 'ended:graphIdRead',
+        'gossip()', 'ended:finalizationGossip',
+        'clearShareMarker()', 'ended:shareMarkerClear',
+        'catalogObserver()', 'ended:catalogObserver',
+      ]);
+    },
+  );
+
+  it.each(OPERATIONS.flatMap(operation => [false, undefined].map(catalogCompletion => ({ ...operation, catalogCompletion }))))(
+    'clears an upstream $kind certificate when catalog completion is $catalogCompletion', async ({ overrides, catalogCompletion }) => {
+      const { execute } = harness({ catalogCompletion, publish: async () => ({
+        ...publishResult(), localFinalizationComplete: true,
+      }) });
+      expect((await execute(request(overrides))).localFinalizationComplete).toBeUndefined();
+    },
+  );
+
+  it.each(OPERATIONS.flatMap(operation => [false, undefined].map(cleanupCompletion => ({ ...operation, cleanupCompletion }))))(
+    'clears an upstream $kind certificate when cleanup completion is $cleanupCompletion', async ({ overrides, cleanupCompletion }) => {
+      const { calls, execute } = harness({ cleanupCompletion, publish: async () => ({
+        ...publishResult(), localFinalizationComplete: true,
+      }) });
+      expect((await execute(request(overrides))).localFinalizationComplete).toBeUndefined();
+      expect(calls).toContain('retireLegacySwm()');
+    },
+  );
+
+  it.each(['clear', 'retire'])('retains recovery after a swallowed %s failure', async (step) => {
+    const fail = async () => { throw new Error('store refused cleanup'); };
+    const { calls, execute } = harness(step === 'clear' ? { clearPublishedGraph: fail } : { retireLegacySwm: fail });
+    expect((await execute()).localFinalizationComplete).toBeUndefined();
+    expect(calls.includes('retireLegacySwm()')).toBe(step === 'retire');
+    expect(calls).toContain('ended:publishedGraphClear');
+    expect(calls.includes('ended:legacySwmRetire')).toBe(step === 'retire');
+    expect(calls.slice(-6)).toEqual([
       'gossip()', 'ended:finalizationGossip',
       'clearShareMarker()', 'ended:shareMarkerClear',
       'catalogObserver()', 'ended:catalogObserver',
@@ -228,11 +399,56 @@ describe('the steps a queued executor reports after the confirmation', () => {
     ]);
   });
 
-  it('reports only the publish call for a result that was not confirmed', async () => {
-    const { calls, execute } = harness({ publish: async () => publishResult('tentative') });
-    await expect(execute()).resolves.toMatchObject({ status: 'tentative' });
+  it.each(OPERATIONS)('clears an upstream certificate for a tentative $kind, even with a chain result', async ({ kind, overrides }) => {
+    const { calls, execute } = harness({ publish: async () => ({
+      ...publishResult(), status: 'tentative', localFinalizationComplete: true,
+    }) });
+    const result = await execute(request(overrides));
+    expect(result.status).toBe('tentative');
+    expect(result.localFinalizationComplete).toBeUndefined();
     // The catalog tail is still called, and returns at once for a result that is not confirmed.
-    expect(calls).toEqual(['readGraphId()', 'publish()', 'ended:publish', 'ended:catalogObserver']);
+    expect(calls).toEqual([
+      ...(kind === 'create' ? ['readGraphId()', 'publish()'] : ['update()']),
+      'ended:publish', 'ended:catalogObserver',
+    ]);
+  });
+
+  it.each(OPERATIONS.flatMap(operation => (['tentative', 'confirmed'] as const).map(status => ({ ...operation, status }))))(
+    'does not certify or access gossip for a $status $kind without a chain result', async ({ overrides, status }) => {
+      const { calls, execute, host } = harness({ publish: async () => ({
+        ...publishResult(status), onChainResult: undefined, localFinalizationComplete: true,
+      }) });
+      Object.defineProperty(host, 'gossip', { get: () => { throw new Error('gossip not initialized'); } });
+      const result = await execute(request(overrides));
+      expect(result.status).toBe(status);
+      expect(result.localFinalizationComplete).toBeUndefined();
+      expect(calls).not.toContain('gossip()');
+      expect(calls).not.toContain('writeReceipt()');
+      expect(calls).toContain('ended:catalogObserver');
+      if (status === 'confirmed') expect(calls).toContain('clearShareMarker()');
+    },
+  );
+
+  it('propagates an update gossip graph-lookup failure before share and catalog work', async () => {
+    const { calls, execute, host } = harness();
+    host.getContextGraphOnChainId = async () => { throw new Error('graph lookup unavailable'); };
+    await expect(execute(request({ vmCurrentAssertion: `0x${'cd'.repeat(32)}` })))
+      .rejects.toThrow('graph lookup unavailable');
+    expect(calls).toContain('ended:lifecycleStamp');
+    expect(calls).not.toContain('ended:graphIdRead');
+    expect(calls).not.toContain('gossip()');
+    expect(calls).not.toContain('clearShareMarker()');
+    expect(calls).not.toContain('catalogObserver()');
+  });
+
+  it('keeps failed gossip transport best-effort and continues the certified tail', async () => {
+    const { calls, execute } = harness({ failStep: 'gossip()' });
+    expect((await execute()).localFinalizationComplete).toBe(true);
+    expect(calls.slice(calls.indexOf('gossip()'))).toEqual([
+      'gossip()', 'ended:finalizationGossip',
+      'clearShareMarker()', 'ended:shareMarkerClear',
+      'catalogObserver()', 'ended:catalogObserver',
+    ]);
   });
 
   it('runs the same tail to the same result when the observer throws or is absent', async () => {

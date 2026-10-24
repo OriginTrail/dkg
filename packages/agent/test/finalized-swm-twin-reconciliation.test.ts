@@ -1,3 +1,4 @@
+import { fixtureRoot } from './verified-asset-root-fixture.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -83,6 +84,7 @@ function fixture(
   ];
   return {
     asset: {
+      merkleRootHex: fixtureRoot(metadataQuads),
       contextGraphId: CG,
       ual: UAL,
       assertionVersion: 3n,

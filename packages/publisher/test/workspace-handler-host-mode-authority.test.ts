@@ -511,6 +511,54 @@ describe('SharedMemoryHandler.verifyHostModeEnvelopeAuthority (LU-6 host-mode ga
       expect(verdict.accepted).toBe(true);
     });
 
+    // The verifier answers a verdict object, not a boolean: every rejection of
+    // the self-signed path must still come out as SIG_VERIFY_FAILED here.
+    it('REJECTS an open-publish envelope signed by one wallet and claiming another', async () => {
+      const signer = ethers.Wallet.createRandom();
+      const claimed = ethers.Wallet.createRandom();
+      const wire = await signWorkspaceMessage(signer, workspaceMessage('Open Spoof', 'op-open-spoof'), claimed.address);
+      const handler = makeHandler();
+
+      const verdict = await handler.verifyHostModeEnvelopeAuthority(wire, CONTEXT_GRAPH_ID, PUBLISHER_PEER_ID, {
+        resolveOpenPublishPolicy: async () => ({ accessPolicy: 0, publishPolicy: 1 }),
+      });
+      expect(verdict).toMatchObject({ accepted: false, reasonCode: 'SIG_VERIFY_FAILED' });
+    });
+
+    it('REJECTS a correctly signed open-publish envelope whose timestamp is outside the freshness window', async () => {
+      const openPublisher = ethers.Wallet.createRandom();
+      const stale = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      const wire = await signWorkspaceMessage(
+        openPublisher, workspaceMessage('Open Stale', 'op-open-stale'), openPublisher.address, stale,
+      );
+      const handler = makeHandler();
+
+      const verdict = await handler.verifyHostModeEnvelopeAuthority(wire, CONTEXT_GRAPH_ID, PUBLISHER_PEER_ID, {
+        resolveOpenPublishPolicy: async () => ({ accessPolicy: 0, publishPolicy: 1 }),
+      });
+      expect(verdict).toMatchObject({ accepted: false, reasonCode: 'SIG_VERIFY_FAILED' });
+    });
+
+    it('REJECTS an open-publish envelope without a signature', async () => {
+      const openPublisher = ethers.Wallet.createRandom();
+      const payload = workspaceMessage('Open Unsigned', 'op-open-unsigned');
+      const wire = encodeGossipEnvelope({
+        version: GOSSIP_ENVELOPE_VERSION,
+        type: GOSSIP_TYPE_WORKSPACE_PUBLISH,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        agentAddress: openPublisher.address,
+        timestamp: new Date().toISOString(),
+        signature: new Uint8Array(),
+        payload,
+      });
+      const handler = makeHandler();
+
+      const verdict = await handler.verifyHostModeEnvelopeAuthority(wire, CONTEXT_GRAPH_ID, PUBLISHER_PEER_ID, {
+        resolveOpenPublishPolicy: async () => ({ accessPolicy: 0, publishPolicy: 1 }),
+      });
+      expect(verdict).toMatchObject({ accepted: false, reasonCode: 'SIG_VERIFY_FAILED' });
+    });
+
     it('still REJECTS the same non-allowlisted signer when the CG is NOT open publish (publishPolicy != 1 → curated branch)', async () => {
       const staleParticipant = ethers.Wallet.createRandom();
       await insertAgentGate(DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT, staleParticipant.address);

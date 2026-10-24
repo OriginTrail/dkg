@@ -49,13 +49,15 @@ import { DKG_GOSSIP_MAX_RPC_BYTES, dhtProtocolForNetwork } from './constants.js'
 import { POOLED_MESSAGE_PROTOCOL } from './message-stream-pool.js';
 import { RelayMetricsAdapter, RELAY_V2_STOP_CODEC } from './libp2p-metrics-adapter.js';
 import { readRelayReservations, readConnectionStreams } from './relay-internal-shapes.js';
+import { repairRelayReservationTimers } from './relay-reservation-timers.js';
+import { connectionMonitorOptions, connectionMonitorPingService } from './connection-monitor-policy.js';
 import { RelayFlapGuard, buildRelayFlapConnectionGater } from './relay-flap-guard.js';
 import { buildActiveRelayNetworkPolicy } from './relay-network-policy.js';
 import { buildRelayClientTransport } from './relay-client-transport.js';
 import { NetworkPeerDialPolicy, peerIdFromRelayAddress } from './network-peer-dial-policy.js';
 import { combineConnectionGaters, type SyncConnectionGater } from './connection-gater-combiner.js';
 import { parseCircuitRelayPeerIds } from './relay-path.js';
-import { isPublicLikeAddress } from './network/address-policy.js';
+import { isPublicLikeAddress, isPublicOrCircuitAddress } from './network/address-policy.js';
 import type { ConfiguredRelayTarget } from './network/relay-target.js';
 
 export {
@@ -368,6 +370,16 @@ export function nodeHasDirectPublicAddress(selfAddrs: readonly string[]): boolea
       !a.startsWith('/dnsaddr/') &&
       isPublicLikeAddress(a),
   );
+}
+
+/**
+ * libp2p `announceFilter` of `announcePublicAddressesOnly`: the node's own
+ * addresses that a peer on a public network can dial. libp2p applies it to
+ * `getMultiaddrs()`, the self peer record and identify (push included), so
+ * the circuits the relay watchdog reads stay in.
+ */
+export function announcePublicAddresses<T extends { toString(): string }>(addresses: T[]): T[] {
+  return addresses.filter((address) => isPublicOrCircuitAddress(address.toString()));
 }
 
 export class DKGNode {
@@ -766,6 +778,8 @@ export class DKGNode {
       ? new NetworkPeerDialPolicy({
           selfPeerId: selfPeerIdEarly.toString(),
           configuredRelayPeerIds: activeNetworkRelayPeerIds,
+          staticDialExemptionPeerIds: (this.config.staticDialExemptions ?? [])
+            .map(peerIdFromRelayAddress).filter((peerId): peerId is string => peerId !== undefined),
           otherNetworkRelayPeerIds: (this.config.otherNetworkRelays ?? [])
             .map((address) => peerIdFromRelayAddress(address))
             .filter((peerId): peerId is string => peerId !== undefined),
@@ -858,6 +872,7 @@ export class DKGNode {
         //     above so the wiring decision is reviewable in-place.
       }),
       dcutr: dcutr(),
+      livenessPing: connectionMonitorPingService(),
     };
 
     if (useAutoNAT) {
@@ -987,7 +1002,7 @@ export class DKGNode {
         listen: listenAddrs,
         ...(this.config.announceAddresses?.length
           ? { announce: this.config.announceAddresses }
-          : {}),
+          : this.config.announcePublicAddressesOnly ? { announceFilter: announcePublicAddresses } : {}),
       },
       transports: transports as any,
       connectionEncrypters: [noise()],
@@ -1006,6 +1021,7 @@ export class DKGNode {
         // pressure and wider headroom adds nothing.
         maxConnections: relayCaps?.maxConnections ?? EDGE_NODE_MAX_CONNECTIONS,
       },
+      connectionMonitor: connectionMonitorOptions(),
       // Inject the byte-counting Metrics adapter only on Core Nodes
       // (relay enabled). On edge nodes libp2p uses its built-in
       // no-op metrics; the adapter is purely additive.
@@ -1013,6 +1029,7 @@ export class DKGNode {
     } as any);
     this.stopAbortController = startStopAbortController;
     this.networkPeerDialPolicy = networkPeerDialPolicy;
+    if (services.relay) repairRelayReservationTimers(this.node.services.relay);
 
     this.setupConnectionObservability();
 

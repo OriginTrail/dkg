@@ -11,7 +11,7 @@
 // this package use real HTTP servers / real Storage shims (no mocks).
 
 import React, { act } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot } from 'react-dom/client';
 
 const fetchAgentsMock = vi.fn();
@@ -19,6 +19,7 @@ const fetchConnectionsMock = vi.fn();
 const fetchLocalAgentIntegrationsMock = vi.fn();
 const fetchLocalAgentHistoryMock = vi.fn();
 const fetchCurrentAgentMock = vi.fn();
+const fetchContextGraphsMock = vi.fn();
 const importFileMock = vi.fn();
 const persistLocalAgentChatFailureMock = vi.fn();
 const streamLocalAgentChatMock = vi.fn();
@@ -53,6 +54,7 @@ vi.mock('../src/ui/api-wrapper.js', () => ({
     // through the wrapper (not the named import). Wire the same mock
     // through the wrapper so the hook resolves under test.
     fetchCurrentAgent: fetchCurrentAgentMock,
+    fetchContextGraphs: fetchContextGraphsMock,
   },
 }));
 
@@ -74,11 +76,17 @@ async function waitForAssertion(assertion: () => void): Promise<void> {
 }
 
 describe('PanelRight component', () => {
+  afterEach(() => vi.unstubAllGlobals());
   beforeEach(() => {
     vi.clearAllMocks();
+    fetchContextGraphsMock.mockImplementation(async () => {
+      const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+      return { contextGraphs: useProjectsStore.getState().contextGraphs };
+    });
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     localStorage.clear();
     Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal('EventSource', class { addEventListener() {} close() {} });
 
     fetchAgentsMock.mockResolvedValue({ agents: [{
       agentUri: 'did:dkg:agent:peer-2',
@@ -138,7 +146,33 @@ describe('PanelRight component', () => {
     apiFetchMemorySessionsMock.mockResolvedValue({ sessions: [] });
   });
 
-  it('renders local-LLM final tool metadata and clears the daemon-owned session', async () => {
+  it('keeps the chat graph picker live when the sidebar collapses during its initial inventory load', async () => {
+    let reply!: (value: any) => void;
+    fetchContextGraphsMock.mockReturnValueOnce(new Promise(resolve => { reply = resolve; }));
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const { useContextGraphInventory } = await import('../src/ui/hooks/useContextGraphInventory.js');
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    useProjectsStore.setState({ contextGraphs: [], loading: false, inventoryLoaded: false, activeProjectId: null });
+    function SidebarInventory() { useContextGraphInventory(); return null; }
+    const container = document.createElement('div'); document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(React.createElement(React.Fragment, {},
+        React.createElement(SidebarInventory, { key: 'sidebar' }), React.createElement(PanelRight, { key: 'chat' }))));
+      await act(async () => root.render(React.createElement(React.Fragment, {}, React.createElement(PanelRight, { key: 'chat' }))));
+      await act(async () => reply({ contextGraphs: [{ id: 'loaded', name: 'Loaded graph', callerInvolved: true }] }));
+      const picker = container.querySelector('.v10-local-agent-target-select .v10-select-trigger') as HTMLButtonElement;
+      expect(picker).not.toBeNull();
+      expect(picker.disabled).toBe(false);
+      await act(async () => picker.click());
+      expect(document.body.textContent).toContain('Loaded graph');
+    } finally { await act(async () => root.unmount()); container.remove(); }
+  });
+
+  it.each(['https', 'http', 'no-crypto'])('local-LLM send on %s exposes results or early errors', async (origin) => {
+    const crypto = globalThis.crypto;
+    if (origin === 'http') vi.stubGlobal('crypto', { getRandomValues: crypto.getRandomValues.bind(crypto) });
+    if (origin === 'no-crypto') vi.stubGlobal('crypto', undefined);
     fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
       id: 'local-llm',
       name: 'DKG Local LLM',
@@ -197,6 +231,14 @@ describe('PanelRight component', () => {
       container.querySelector<HTMLButtonElement>('button[aria-label="Send message"]')!
         .dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
+    if (origin === 'no-crypto') {
+      await waitForAssertion(() => expect(container.textContent).toContain('This browser cannot generate a secure request ID.'));
+      expect(streamLocalAgentChatMock).not.toHaveBeenCalled();
+      expect(textarea.value).toBe('List saved queries');
+      await act(async () => root.unmount());
+      container.remove();
+      return;
+    }
     await waitForAssertion(() => {
       expect(container.textContent).toContain('Catalog evidence');
       expect(container.textContent).toContain('Tools: dkg_query_catalog_list');
@@ -207,6 +249,9 @@ describe('PanelRight component', () => {
       'List saved queries',
       expect.objectContaining({ contextGraphId: 'testing' }),
     );
+
+    expect(streamLocalAgentChatMock.mock.calls.at(-1)?.[2].correlationId)
+      .toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i);
 
     await act(async () => {
       container.querySelector('.v10-agent-tab-menu-trigger')!

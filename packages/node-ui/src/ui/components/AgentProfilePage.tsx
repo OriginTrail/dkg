@@ -13,6 +13,7 @@ import { useAgents, AgentsContext } from '../hooks/useAgents.js';
 import { useTabsStore } from '../stores/tabs.js';
 import { useProjectsStore } from '../stores/projects.js';
 import { AgentProfileView } from './AgentProfileView.js';
+import { MemoryReadStatus } from './MemoryReadStatus.js';
 
 export interface AgentProfilePageProps {
   contextGraphId: string;
@@ -70,9 +71,11 @@ export const AgentProfilePage: React.FC<AgentProfilePageProps> = ({
   return (
     <ProjectProfileContext.Provider value={profile}>
       <AgentsContext.Provider value={agentsContextValue}>
+        <MemoryReadStatus memory={memory} />
         <AgentProfileView
           agentUri={agentUri}
           entityList={memory.entityList}
+          partial={memory.partial || memory.loading}
           onSelectEntity={selectEntity}
           onOpenAgent={openAgent}
           onBack={goBack}

@@ -244,7 +244,7 @@ describe('experimental exact batch actual host completion verdict', () => {
     expect(f.host.requireLocalCgMatchesOnChainSlot).toHaveBeenCalledOnce();
     expect(f.host.invalidateListContextGraphsCache).toHaveBeenCalledTimes(2);
     expect(f.host.contextGraphMetaProjection.invalidateStoreMutation).toHaveBeenCalledTimes(2);
-    expect(f.host.graphScopedStorePhysicalRuns.size).toBe(0);
+    expect(f.host.workLifetime.physicalRuns.size).toBe(0);
     expect(vi.mocked(f.session.send).mock.calls.map(([frame]) => frame.assetIndex)).toEqual([0, 1]);
     expect(runDurableSyncDetailed).not.toHaveBeenCalled();
     const [, peer, start, transport] = vi.mocked(exchangeExperimentalExactBatch).mock.calls[0]!;
@@ -287,7 +287,7 @@ describe('experimental exact batch actual host completion verdict', () => {
     expect(await storedRows(f.store, f.items[0]!.graph)).toBe(1);
     expect(await storedRows(f.store, f.items[1]!.graph)).toBe(0);
     expect(vi.mocked(f.session.send).mock.calls.map(([frame]) => frame.assetIndex)).toEqual([0]);
-    expect(f.host.graphScopedStorePhysicalRuns.size).toBe(0);
+    expect(f.host.workLifetime.physicalRuns.size).toBe(0);
     expect(runDurableSyncDetailed).not.toHaveBeenCalled();
     expect(refusalLogs(f)).toEqual([]);
   });
@@ -304,7 +304,7 @@ describe('experimental exact batch actual host completion verdict', () => {
       expect(refusalLogs(f)).toEqual([
         `Exact batch requester refusal code=${code} startedAssets=2 committedAssets=2 acknowledgedAssets=2 atAssetBoundary=1 verifiedPrefix=1`,
       ]);
-      expect(f.host.graphScopedStorePhysicalRuns.size).toBe(0);
+      expect(f.host.workLifetime.physicalRuns.size).toBe(0);
       expect(exactBatchStreamUnsupported(f.host, 'fixture-source', 'fixture-connection', Date.now(),
         f.host.captureExperimentalExactBatchRefusalScope(CG))).toBe(code === 'RESOURCE_LIMIT');
       expect(f.session.send).toHaveBeenCalledTimes(2);
@@ -439,7 +439,7 @@ describe('experimental exact batch actual host completion verdict', () => {
     expect(refusalLogs(f)).toEqual([]);
     expect(exactBatchStreamUnsupported(f.host, 'fixture-source', 'fixture-connection', Date.now(),
       f.host.captureExperimentalExactBatchRefusalScope(CG))).toBe(false);
-    expect(f.host.graphScopedStorePhysicalRuns.size).toBe(0);
+    expect(f.host.workLifetime.physicalRuns.size).toBe(0);
     expect(runDurableSyncDetailed).not.toHaveBeenCalled();
   });
 
@@ -478,7 +478,7 @@ describe('experimental exact batch actual host completion verdict', () => {
     expect(refusalLogs(f)).toEqual([]);
     expect(exactBatchStreamUnsupported(f.host, 'fixture-source', 'fixture-connection', Date.now(),
       f.host.captureExperimentalExactBatchRefusalScope(CG))).toBe(false);
-    expect(f.host.graphScopedStorePhysicalRuns.size).toBe(0);
+    expect(f.host.workLifetime.physicalRuns.size).toBe(0);
     expect(f.session.send).toHaveBeenCalledTimes(2);
     expect(runDurableSyncDetailed).not.toHaveBeenCalled();
   });
@@ -496,7 +496,7 @@ describe('experimental exact batch actual host completion verdict', () => {
     expect(refusalLogs(f)).toEqual([]);
     expect(exactBatchStreamUnsupported(f.host, 'fixture-source', 'fixture-connection', Date.now(),
       f.host.captureExperimentalExactBatchRefusalScope(CG))).toBe(false);
-    expect(f.host.graphScopedStorePhysicalRuns.size).toBe(0);
+    expect(f.host.workLifetime.physicalRuns.size).toBe(0);
     expect(f.session.send).toHaveBeenCalledTimes(2);
     expect(runDurableSyncDetailed).not.toHaveBeenCalled();
   });
@@ -510,7 +510,7 @@ describe('experimental exact batch actual host completion verdict', () => {
     const outcome = await f.run();
     expect(outcome).toMatchObject({ exactFetchDisposition: 'incomplete',
       committedExactAssetUals: f.selection.assetUals.slice(0, 2), result: { complete: false, insertedDataTriples: 2 } });
-    expect(f.host.graphScopedStorePhysicalRuns.size).toBe(0);
+    expect(f.host.workLifetime.physicalRuns.size).toBe(0);
     expect(f.session.send).toHaveBeenCalledTimes(2);
     expect(exchangeExperimentalExactBatch).toHaveBeenCalledOnce();
     expect(runDurableSyncDetailed).not.toHaveBeenCalled();
@@ -595,8 +595,10 @@ describe('experimental exact batch actual host completion verdict', () => {
     } finally { exchange.mockRestore(); }
   });
 
-  it.each([undefined, '0'])('keeps requester on legacy transport when opt-in is %s', async flag => {
-    const f = fixture(); vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', flag);
+  it.each(['current', 'legacy'])('keeps requester on legacy transport when %s switch explicitly disables it', async name => {
+    const f = fixture();
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', name === 'current' ? '0' : undefined);
+    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '0');
     await f.run();
     expect(runDurableSyncDetailed).toHaveBeenCalledOnce();
     expect(exchangeExperimentalExactBatch).not.toHaveBeenCalled();

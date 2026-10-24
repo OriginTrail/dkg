@@ -62,7 +62,7 @@ function syntheticAgent(dataDirectory?: string): any {
   agent.storageACKRegistrationRuntime = new StorageACKRegistrationRuntime();
   agent.lastSyncDisconnectedAt = new Map();
   Object.assign(agent, {
-    config: dataDirectory === undefined ? {} : { dataDir: dataDirectory },
+    config: { coreChainCacheNetworks: [], ...(dataDirectory === undefined ? {} : { dataDir: dataDirectory }) },
     contextGraphMembershipPersistence: new ContextGraphMembershipPersistScheduler(),
     contextGraphSubscriptionPersistence: new ContextGraphSubscriptionPersistScheduler(),
     finalizationRuntime: new FinalizationRuntime(),
@@ -369,6 +369,10 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     }
     for (const operation of Object.values(persistence.swmAuthorInventory)) {
       expect(() => (operation as (...arguments_: unknown[]) => unknown)())
+        .toThrow('RFC-64 persistence owner is closed');
+    }
+    for (const key of ['readFailure', 'writeFailure'] as const) {
+      expect(() => (persistence.finalizedPrivatePlacementRepairs[key] as (...args: unknown[]) => unknown)())
         .toThrow('RFC-64 persistence owner is closed');
     }
     await expect(openInventoryV1(dataDirectory))

@@ -187,15 +187,15 @@ describe('exact VM recovery lifecycle', () => {
     );
     try {
       await agent.start();
-      const initialGeneration = (agent as any).vmReconcileLifecycleGeneration;
+      const initialGeneration = (agent as any).workLifetime.generation;
       await agent.stop();
       expect((agent as any).vmReconcileRotationClosed).toBe(true);
-      expect((agent as any).vmReconcileLifecycleGeneration).toBe(initialGeneration + 1);
+      expect((agent as any).workLifetime.generation).toBe(initialGeneration + 1);
       expect((agent as any).contextGraphMembershipPersistence.status().closed).toBe(true);
 
       await agent.start();
       expect((agent as any).vmReconcileRotationClosed).toBe(false);
-      expect((agent as any).vmReconcileLifecycleGeneration).toBe(initialGeneration + 1);
+      expect((agent as any).workLifetime.generation).toBe(initialGeneration + 1);
       expect((agent as any).vmReconcileScheduling.snapshot().closed).toBe(false);
       expect((agent as any).contextGraphMembershipPersistence.status().closed).toBe(false);
       const upsertsBeforeRestartProbe = membershipUpsert.mock.calls.length;
@@ -1328,6 +1328,123 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
+  it('runs a fresh shared-memory sync after the one already running, not inside it', async () => {
+    // A change notice asks for the peer's state at the call (#1611): the
+    // running sync may have read the peer's metadata before the change.
+    const firstMetaFetch = deferred<SyncPageResult>();
+    const fetches: string[] = [];
+    const agent = await createAgentWithSend(
+      async () => new Uint8Array(0),
+      { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
+    );
+    const sharedMemorySyncPlan = {
+      targets: [{ contextGraphId: 'coalesced-cg', lane: 'selected-public' }],
+    };
+    (agent as any).listSubGraphs = async () => [];
+    stubLifecycleFetch(agent, async ({ phase }) => {
+      fetches.push(phase);
+      if (fetches.length === 1) return firstMetaFetch.promise;
+      return emptySyncPage(phase);
+    });
+    (agent as any).getOrCreateSyncVerifyWorker = () => ({
+      processSharedMemoryBatch: async () => ({
+        verifiedData: [],
+        verifiedMeta: [],
+        totalFetchedDataQuads: 0,
+        totalFetchedMetaQuads: 0,
+        droppedDataTriples: 0,
+        emptyResponses: 1,
+        entityCreators: [],
+      }),
+    });
+
+    try {
+      const running = (agent as any).syncSharedMemoryFromPeerDetailed(PEER_A, ['coalesced-cg'], { sharedMemorySyncPlan });
+      const fresh = (agent as any).syncSharedMemoryFromPeerDetailed(
+        PEER_A,
+        ['coalesced-cg'],
+        { sharedMemorySyncPlan, freshSnapshot: true },
+      );
+      const joined = (agent as any).syncSharedMemoryFromPeerDetailed(PEER_A, ['coalesced-cg'], { sharedMemorySyncPlan });
+      await waitFor(() => fetches.length === 1);
+      expect(fetches).toEqual(['meta']);
+
+      firstMetaFetch.resolve(emptySyncPage('meta'));
+      const [runningResult, freshResult, joinedResult] = await Promise.all([running, fresh, joined]);
+      expect(joinedResult).toBe(runningResult);
+      expect(freshResult).not.toBe(runningResult);
+      expect(freshResult).toMatchObject({ failedPeers: 0 });
+      // The fresh sync's own metadata and data fetches, after the running sync's.
+      expect(fetches).toEqual(['meta', 'data', 'meta', 'data']);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('leaves the only general slot to a transfer while a reserved-slot-only shared-memory sync runs (#3251)', async () => {
+    // The Edge safety-net pull asks for the reserved slot only: on a node with
+    // one sync slot and no queue, the large transfers keep that slot.
+    const agent = await createAgentWithSend(
+      async () => new Uint8Array(0),
+      { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
+    );
+    const sharedMemorySyncPlan = {
+      targets: [{ contextGraphId: 'in-use-cg', lane: 'selected-public' }],
+    };
+    let metaFetch = deferred<SyncPageResult>();
+    (agent as any).listSubGraphs = async () => [];
+    (agent as any).getOrCreateSyncVerifyWorker = () => ({
+      processSharedMemoryBatch: async () => ({
+        verifiedData: [],
+        verifiedMeta: [],
+        totalFetchedDataQuads: 0,
+        totalFetchedMetaQuads: 0,
+        droppedDataTriples: 0,
+        emptyResponses: 1,
+        entityCreators: [],
+      }),
+    });
+    const transfer = () => withGlobalSyncBackpressure(
+      {
+        policy: resolveSyncGlobalBackpressure((agent as any).config),
+        ctx: createOperationContext('sync'),
+        label: 'durable:large-cg:peer',
+        lane: 'durable',
+        source: 'vm-recovery',
+      },
+      async () => 'transferred',
+    );
+    const pullWhileTransferring = async (options: Record<string, unknown>) => {
+      metaFetch = deferred<SyncPageResult>();
+      let metaRequested!: () => void;
+      const requested = new Promise<void>((resolve) => { metaRequested = resolve; });
+      stubLifecycleFetch(agent, async ({ phase }) => {
+        if (phase !== 'meta') return emptySyncPage(phase);
+        metaRequested();
+        return metaFetch.promise;
+      });
+      const pull = (agent as any).syncSharedMemoryFromPeerDetailed(
+        PEER_A,
+        ['in-use-cg'],
+        { sharedMemorySyncPlan, source: 'reconcile', ...options },
+      );
+      await requested;
+      const outcome = await transfer().catch((error: SyncBackpressureBusyError) => error.reason);
+      metaFetch.resolve(emptySyncPage('meta'));
+      await expect(pull).resolves.toMatchObject({ failedPeers: 0 });
+      return outcome;
+    };
+
+    try {
+      // An ordinary pull takes the free general slot first.
+      expect(await pullWhileTransferring({})).toBe('queue_full');
+      expect(await pullWhileTransferring({ reservedSlotOnly: true })).toBe('transferred');
+    } finally {
+      metaFetch.resolve(emptySyncPage('meta'));
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('does not let a supplied plan bypass an RFC-64 complete-provider fence', async () => {
     let fetchCalls = 0;
     const selectedContextGraphId = 'selected-cg';
@@ -1470,6 +1587,49 @@ describe('DKGAgent sync fetch coalescing', () => {
       async () => new Uint8Array(0),
       { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
     );
+    const policy = resolveSyncGlobalBackpressure((agent as any).config);
+    const occupied = deferred<void>();
+    const holder = withGlobalSyncBackpressure(
+      { policy, ctx: createOperationContext('sync'), label: 'occupied-slot' },
+      () => occupied.promise,
+    );
+    // #3251: shared-memory work has one reserved slot of its own; hold it too.
+    const occupiedReserve = deferred<void>();
+    const reserveHolder = withGlobalSyncBackpressure(
+      {
+        policy,
+        ctx: createOperationContext('sync'),
+        label: 'occupied-reserved-slot',
+        lane: 'swm_recovery',
+      },
+      () => occupiedReserve.promise,
+    );
+    await flushMicrotasks();
+
+    try {
+      let settled = false;
+      const recovery = agent.recoverContextGraphSwmFromPeer(PEER_A, 'private-cg')
+        .finally(() => { settled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // It waits for a slot instead of running beside the two held ones.
+      expect(settled).toBe(false);
+      occupiedReserve.resolve();
+      await reserveHolder;
+      await expect(recovery).resolves.toMatchObject({ completed: true });
+    } finally {
+      occupied.resolve();
+      occupiedReserve.resolve();
+      await Promise.allSettled([holder, reserveHolder]);
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('refuses standalone shared-memory recovery at once with the reserve turned off', async () => {
+    process.env.DKG_SYNC_SHARED_MEMORY_RESERVED_INFLIGHT = '0';
+    const agent = await createAgentWithSend(
+      async () => new Uint8Array(0),
+      { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
+    );
     const occupied = deferred<void>();
     const holder = withGlobalSyncBackpressure(
       {
@@ -1486,6 +1646,7 @@ describe('DKGAgent sync fetch coalescing', () => {
         agent.recoverContextGraphSwmFromPeer(PEER_A, 'private-cg'),
       ).rejects.toThrow(SyncBackpressureBusyError);
     } finally {
+      delete process.env.DKG_SYNC_SHARED_MEMORY_RESERVED_INFLIGHT;
       occupied.resolve();
       await holder;
       await agent.stop().catch(() => {});

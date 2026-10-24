@@ -5,7 +5,9 @@ on:
     paths:
       - 'packages/cli/src/mcp-*.ts'
       - 'packages/cli/test/fixtures/mcp-config-wsl.fixture.ts'
+      - 'packages/cli/test/fixtures/mcp-windows-client.fixture.cjs'
       - 'packages/cli/scripts/run-mcp-config-wsl.sh'
+      - 'scripts/test-mcp-wsl-launch.mjs'
       - 'packages/cli/.gitattributes'
       - 'packages/cli/package.json'
       - 'packages/cli/test/mcp-config-metadata.test.ts'
@@ -55,6 +57,8 @@ jobs:
         run: |
           node scripts/build-runtime-packages.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --check packages/cli/test/fixtures/mcp-windows-client.fixture.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm --dir packages/cli exec esbuild test/fixtures/mcp-config-wsl.fixture.ts --platform=node --format=esm --target=node22 --outfile=dist/fixtures/mcp-config-wsl.fixture.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           wsl --set-default-version 2
@@ -71,5 +75,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $script = (wsl --distribution Ubuntu-24.04 --user root --exec wslpath -u "$env:GITHUB_WORKSPACE/packages/cli/scripts/run-mcp-config-wsl.sh").Trim()
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          wsl --distribution Ubuntu-24.04 --user root --exec bash $script $fixture $temporary
+          $windowsNode = (Get-Command node.exe).Source
+          wsl --distribution Ubuntu-24.04 --user root --exec bash $script $fixture $temporary $windowsNode
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

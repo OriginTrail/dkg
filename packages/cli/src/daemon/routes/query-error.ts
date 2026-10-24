@@ -126,6 +126,10 @@ function isUnscopedQueryInvalidated(err: unknown): boolean {
  *   a 500. The sentence is the one the agent throws.
  */
 export function respondToQueryFailure(res: ServerResponse, err: unknown): boolean {
+  if ((err as { code?: unknown } | null)?.code === 'CORE_CACHE_QUERY_TRUST_REQUIRED') {
+    jsonResponse(res, 409, { code: 'CORE_CACHE_QUERY_TRUST_REQUIRED', error: 'Explicit acceptance of core-cache evidence is required for this context graph' });
+    return true;
+  }
   if (isClientQueryFailure(err)) {
     jsonResponse(res, 400, { error: (err as { message?: unknown } | null)?.message ?? "" });
     return true;
