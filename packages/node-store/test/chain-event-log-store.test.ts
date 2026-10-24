@@ -76,8 +76,16 @@ function commit(
 
 describe('SqliteChainEventLogStore', () => {
   const directories: string[] = [];
+  const databases: DashboardDB[] = [];
+
+  function openDatabase(dataDir: string): DashboardDB {
+    const db = new DashboardDB({ dataDir });
+    databases.push(db);
+    return db;
+  }
 
   afterEach(() => {
+    for (const db of databases.splice(0)) db.close();
     for (const directory of directories.splice(0)) {
       rmSync(directory, { recursive: true, force: true });
     }
@@ -86,7 +94,7 @@ describe('SqliteChainEventLogStore', () => {
   function createStore(): { db: DashboardDB; store: SqliteChainEventLogStore; dataDir: string } {
     const dataDir = mkdtempSync(join(tmpdir(), 'dkg-chain-log-'));
     directories.push(dataDir);
-    const db = new DashboardDB({ dataDir });
+    const db = openDatabase(dataDir);
     return { db, store: new SqliteChainEventLogStore(db), dataDir };
   }
 
@@ -386,14 +394,18 @@ describe('SqliteChainEventLogStore', () => {
     expect(await store.commit(SCOPE, undefined, commit(20, 22, []))).toBe(3);
   });
 
-  it('survives a restart of the daemon', async () => {
-    const { store, dataDir } = createStore();
+  it('preserves cursor, coverage and rows after closing and reopening the database', async () => {
+    const { store, db, dataDir } = createStore();
     await store.commit(SCOPE, undefined, commit(10, 12, [row(10, 0, true)]));
 
-    const reopened = new SqliteChainEventLogStore(new DashboardDB({ dataDir }));
+    const before = await store.load(SCOPE);
+    db.close();
+    expect(db.db.open).toBe(false);
+    const reopened = new SqliteChainEventLogStore(openDatabase(dataDir));
+    expect(await reopened.load(SCOPE)).toEqual(before);
     expect((await reopened.load(SCOPE))?.cursor.settledBlockNumber).toBe(10);
     expect(await reopened.readEvents(SCOPE, { fromBlockNumber: 0, throughBlockNumber: 20 }))
-      .toHaveLength(1);
+      .toEqual([row(10, 0, true)]);
   });
 
   it('answers a block hash from the cursor and from the rows', async () => {
@@ -568,12 +580,73 @@ describe('SqliteChainEventLogStore', () => {
     expect((await store.load(SCOPE))?.suspectedForkBlockNumber).toBeUndefined();
   });
 
-  it('round-trips a fork suspicion through a restart', async () => {
-    const { store, dataDir } = createStore();
+  it('preserves fork suspicion after closing and reopening the database', async () => {
+    const { store, db, dataDir } = createStore();
     await store.commit(SCOPE, undefined, commit(10, 12, []));
     await store.commit(SCOPE, 1, { ...commit(10, 12, []), suspectedForkBlockNumber: 10 });
 
-    const reopened = new SqliteChainEventLogStore(new DashboardDB({ dataDir }));
+    const before = await store.load(SCOPE);
+    db.close();
+    expect(db.db.open).toBe(false);
+    const reopened = new SqliteChainEventLogStore(openDatabase(dataDir));
+    expect(await reopened.load(SCOPE)).toEqual(before);
     expect((await reopened.load(SCOPE))?.suspectedForkBlockNumber).toBe(10);
   });
+
+  it.each([0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects malformed revisions without changing persisted state (%s)', async revision => {
+      const { store } = createStore();
+      await store.commit(SCOPE, undefined, commit(10, 12, [row(11, 0, false)]));
+      const before = await store.load(SCOPE);
+      await expect(store.commit(SCOPE, revision, commit(20, 22, [])))
+        .rejects.toThrow('expected revision is invalid');
+      await expect(store.tombstone(SCOPE, revision)).rejects.toThrow('expected revision is invalid');
+      expect(await store.load(SCOPE)).toEqual(before);
+      expect(await store.readEvents(SCOPE, { fromBlockNumber: 0, throughBlockNumber: 30 }))
+        .toEqual([row(11, 0, false)]);
+    },
+  );
+
+  it('refuses revision overflow without deleting tail rows or coverage', async () => {
+    const { store, db } = createStore();
+    await store.commit(SCOPE, undefined, commit(10, 12, [row(11, 0, false)]));
+    db.db.prepare('UPDATE chain_index_cursor SET revision = ? WHERE scope = ?')
+      .run(Number.MAX_SAFE_INTEGER, SCOPE);
+    const before = await store.load(SCOPE);
+    await expect(store.commit(SCOPE, Number.MAX_SAFE_INTEGER, commit(20, 22, [])))
+      .rejects.toThrow('revision exceeds the safe integer range');
+    await expect(store.tombstone(SCOPE, Number.MAX_SAFE_INTEGER))
+      .rejects.toThrow('revision exceeds the safe integer range');
+    expect(await store.load(SCOPE)).toEqual(before);
+    expect(await store.readEvents(SCOPE, { fromBlockNumber: 0, throughBlockNumber: 30 }))
+      .toEqual([row(11, 0, false)]);
+  });
+
+  it.each([
+    { fromBlockNumber: NaN, throughBlockNumber: 12 },
+    { fromBlockNumber: 11, throughBlockNumber: Infinity },
+    { fromBlockNumber: 11.5, throughBlockNumber: 12 },
+    { fromBlockNumber: 11, throughBlockNumber: Number.MAX_SAFE_INTEGER + 1 },
+  ])('rejects invalid replacement ranges atomically (%j)', async replacedRange => {
+    const { store } = createStore();
+    await store.commit(SCOPE, undefined, commit(10, 12, [row(11, 0, false)]));
+    const before = await store.load(SCOPE);
+    await expect(store.commit(SCOPE, 1, { ...commit(10, 12, []), replacedRange }))
+      .rejects.toThrow('replaced range is invalid');
+    expect(await store.load(SCOPE)).toEqual(before);
+    expect(await store.readEvents(SCOPE, { fromBlockNumber: 0, throughBlockNumber: 30 }))
+      .toEqual([row(11, 0, false)]);
+  });
+
+  it('refuses an empty lineage instead of creating an invisible live scope', async () => {
+    const { store } = createStore();
+    const value = commit(10, 12, [row(11, 0, false)]);
+    await expect(store.commit(SCOPE, undefined, {
+      ...value, cursor: { ...value.cursor, lineage: '' },
+    })).rejects.toThrow('lineage is empty');
+    expect(await store.load(SCOPE)).toBeUndefined();
+    expect(await store.readEvents(SCOPE, { fromBlockNumber: 0, throughBlockNumber: 30 })).toEqual([]);
+    expect(await store.commit(SCOPE, undefined, value)).toBe(1);
+  });
+
 });
