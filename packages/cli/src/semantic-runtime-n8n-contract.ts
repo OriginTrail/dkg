@@ -86,6 +86,28 @@ export function n8nExecutionMatches(source: Record<string, unknown>, executed: u
       subset(node.parameters, (executed.nodes as Record<string, unknown>[])[index]?.parameters));
 }
 
+/** Native snapshots contain normalized parameters, not the immutable definition.
+ * The trusted provider's published version and its complete approved digest bind
+ * parameters; the execution must name that version and preserve the graph,
+ * node types/settings and credential references. No node-specific exceptions.
+ */
+export function n8nPinnedExecutionMatches(
+  source: Record<string, unknown>, execution: Record<string, unknown>,
+  approved: Pick<SemanticN8nGrant, 'workflowId' | 'workflowSha256'>,
+  acknowledgedVersion: string,
+): boolean {
+  if (typeof source.versionId !== 'string' || !source.versionId
+    || source.versionId !== acknowledgedVersion || execution.workflowVersionId !== acknowledgedVersion
+    || execution.workflowId !== approved.workflowId || n8nWorkflowSha256(source) !== approved.workflowSha256
+    || !n8nRecord(execution.workflowData)) return false;
+  const structural = (value: Record<string, unknown>) => {
+    n8nWorkflowSha256(value); // Bound the complete provider snapshot before projecting it.
+    return { ...value, nodes: (value.nodes as Record<string, unknown>[])
+      .map(({ parameters: _parameters, ...node }) => node) };
+  };
+  return n8nWorkflowSha256(structural(source)) === n8nWorkflowSha256(structural(execution.workflowData));
+}
+
 export function assertN8nValue(schema: SemanticQueryOutputSchema, value: unknown, kind: 'INPUT' | 'OUTPUT'): void {
   try {
     canonicalizeJson(value as CanonicalJsonValue, { maxBytes: 16_384, maxDepth: 12 });

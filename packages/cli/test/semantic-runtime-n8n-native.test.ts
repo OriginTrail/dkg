@@ -54,7 +54,7 @@ function fixture() {
   vi.stubGlobal('fetch', fetch);
   const authorize = vi.fn(async () => {});
   const adapter = () => createNativeN8nWorkflowAdapter(graph, owner, grant, config, authorize, store);
-  return { adapter, grant, definition, execution, fetch, authorize, store, setFailRead(v: boolean) { failRead = v; },
+  return { adapter, grant, config, definition, execution, fetch, authorize, store, setFailRead(v: boolean) { failRead = v; },
     setExecution(v: any) { execution = v; }, posts: () => fetch.mock.calls.filter(c => c[1]?.method === 'POST').length };
 }
 
@@ -71,6 +71,33 @@ describe('native n8n component execution receipts', () => {
     const f = fixture(); f.execution.data.resultData.runData.Component[0].data.main = [[]];
     const result = JSON.parse((await f.adapter().dispatch(authorization, input)).output);
     expect(result.output).toMatchObject({ ok: true, itemsJson: '[]', portsJson: '{}' });
+  });
+  it('verifies normalized native parameters through the full published pin and acknowledged version', async () => {
+    const f = fixture();
+    f.definition.nodes[0]!.parameters = { selector: '={{ false }}', inactive: { value: 'reviewed' } };
+    f.grant.workflowSha256 = n8nWorkflowSha256(f.definition);
+    f.config.workflows[0]!.workflowSha256 = f.grant.workflowSha256;
+    // n8n may strip expression prefixes, omit hidden properties and fill defaults.
+    f.execution.workflowData.nodes[0].parameters = { selector: '{{ false }}', addedDefault: false };
+    const result = JSON.parse((await f.adapter().dispatch(authorization, input)).output);
+    expect(result.output.ok).toBe(true);
+    expect(f.posts()).toBe(1);
+  });
+  it.each(['type', 'credentials', 'connections', 'settings', 'node-count'])('rejects normalized snapshots with changed %s', async changed => {
+    const f = fixture(), snapshot = f.execution.workflowData;
+    if (changed === 'type') snapshot.nodes[0].type = 'n8n-nodes-base.httpRequest';
+    if (changed === 'credentials') snapshot.nodes[0].credentials = { httpHeaderAuth: { id: 'foreign' } };
+    if (changed === 'connections') snapshot.connections = { Component: { main: [[{ node: 'foreign', type: 'main', index: 0 }]] } };
+    if (changed === 'settings') snapshot.settings.executionOrder = 'v0';
+    if (changed === 'node-count') snapshot.nodes.pop();
+    await expect(f.adapter().dispatch(authorization, input)).rejects.toThrow('EXECUTION_NOT_VERIFIED');
+    expect(f.posts()).toBe(1);
+  });
+  it('rejects changed reviewed parameters before dispatch even if the provider reuses its version ID', async () => {
+    const f = fixture();
+    f.definition.nodes[0]!.parameters = { changed: true };
+    await expect(f.adapter().dispatch(authorization, input)).rejects.toThrow('WORKFLOW_NOT_PINNED');
+    expect(f.posts()).toBe(0);
   });
   it('collects both native branch ports and excludes unselected transport data', () => {
     const f = fixture(); f.grant.result!.ports = ['true', 'false'];
@@ -118,6 +145,14 @@ describe('native n8n component execution receipts', () => {
     await expect(f.adapter().dispatch(authorization, input)).rejects.toThrow('EXECUTION_NOT_VERIFIED');
     f.authorize.mockRejectedValue(new Error('revoked'));
     await expect(f.adapter().resume!(authorization, input)).rejects.toThrow('revoked'); expect(f.posts()).toBe(1);
+  });
+  it('withholds output if the published version changes after the durable acknowledgement', async () => {
+    const f = fixture(); f.setFailRead(true);
+    await expect(f.adapter().dispatch(authorization, input)).rejects.toThrow();
+    f.setFailRead(false); f.definition.versionId = 'new-published-version';
+    f.execution.workflowVersionId = 'new-published-version';
+    await expect(f.adapter().resume!(authorization, input)).rejects.toThrow('EXECUTION_NOT_VERIFIED');
+    expect(f.posts()).toBe(1);
   });
   it('reports confirmed native errors and oversized results as controlled rejection', () => {
     const f = fixture(); f.execution.status = 'error';

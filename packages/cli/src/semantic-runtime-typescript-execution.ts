@@ -3,7 +3,7 @@ import { recoverTerminalExecutionReceipt } from './semantic-runtime-terminal-rec
 import { createHash } from 'node:crypto';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { canonicalizeJson, type CanonicalJsonValue } from '@origintrail-official/dkg-core';
-import { ProgramTraceRecorder, readProgramTrace, hashCanonicalPlan, type SemanticRuntimeConfig, type SemanticProgramBinding } from '@origintrail-official/dkg-semantic-runtime';
+import { ProgramTraceRecorder, readProgramTrace, hashCanonicalPlan, type SemanticRuntimeConfig, type SemanticProgramBinding, type SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
 import { canonicalProgramInputs } from './semantic-runtime-bound-invocation.js';
 import { programBindingDigest } from './semantic-runtime-program-bindings.js';
 import { ConfiguredSemanticRuntimeService, SemanticInvocationResult, SemanticProgramError, StoredSemanticProgram, TypeScriptComposition } from './semantic-runtime-types.js';
@@ -12,6 +12,30 @@ import { assertBoundQueryDefinition, resolveProgramTools } from './semantic-runt
 import { loadStoredSemanticProgram } from './semantic-runtime-program-source.js';
 import { buildExecutionQuads, loadExecutionOutputs, persistExecutionKnowledgeAsset } from './semantic-runtime-execution-persistence.js';
 import { createProgramToolDispatcher, invokeBoundSemanticProgram } from './semantic-runtime-invocation.js';
+
+/** A failed native-only run can inspect durable provider acknowledgements. Its
+ * JavaScript is replayed in inspection-only mode: no new tool/child call may
+ * start, and every original effect must be resolved before a receipt is saved.
+ */
+function nativeContinuationEffects(store: SemanticRuntimeStore, executionIri: string, binding: SemanticProgramBinding): Set<string> | null {
+  const grant = binding.n8n;
+  if (!grant?.result || binding.typescript?.children.length) return null;
+  const effects = store.effectsForExecution(executionIri);
+  if (!effects.length || !effects.some(e => ['unknown', 'reconciling', 'manual_review_required'].includes(e.state))) return null;
+  for (const effect of effects) {
+    if (effect.adapterId !== 'n8n/workflow' || effect.resource !== grant.toolIri
+      || !['succeeded', 'unknown', 'reconciling', 'manual_review_required'].includes(effect.state)) return null;
+    try {
+      const saved = store.adapterCheckpoint(effect.effectId);
+      if (!saved) return null;
+      const value = JSON.parse(new TextDecoder().decode(saved.payload));
+      if (value.kind !== 'n8n-native-v1' || value.workflowId !== grant.workflowId
+        || value.workflowSha256 !== grant.workflowSha256 || typeof value.executionId !== 'string' || !/^\d{1,20}$/.test(value.executionId)
+        || typeof value.versionId !== 'string' || !value.versionId || typeof value.observed !== 'boolean') return null;
+    } catch { return null; }
+  }
+  return new Set(effects.map(e => e.effectId));
+}
 
 export function parseRequestedPermissions(json: string): Record<string, unknown> {
   try {
@@ -140,6 +164,7 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
     const previous = runtime.store.execution(executionIri);
     const history = await agent.assertion.history(graph, name, { agentAddress: executor.agentAddress });
     const journal = new ExecutionReceiptJournal(runtime.store, executionIri);
+    let continuation: Set<string> | null = null;
     if (previous && journal.terminal && ['active', 'completed'].includes(previous.status)) {
       const result = await recoverTerminalExecutionReceipt(agent, runtime.store, journal, {
         contextGraphId: graph, name, agentAddress: executor.agentAddress, layer, requestIdentity: identity,
@@ -149,24 +174,30 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
     if (previous) {
       if (previous.graphRevision !== identity) throw new SemanticProgramError('INVOCATION_LAYER_CONFLICT', 'Invocation already has different inputs or authority', 409);
       if (previous.status !== 'completed') {
-        // JavaScript continuations are not durable. Never replay partially run
-        // workflows and accidentally repeat an external effect after a crash.
-        if (previous.status === 'active') runtime.store.setExecutionStatus(executionIri, 'failed');
-        throw new SemanticProgramError('INVOCATION_NOT_RETRYABLE', 'Interrupted TypeScript execution has no terminal receipt; reconcile its effects before starting new work', 409,
-          mayReadTrace ? readProgramTrace(runtime.store, executionIri) : undefined);
+        continuation = ['active', 'failed'].includes(previous.status)
+          ? nativeContinuationEffects(runtime.store, executionIri, binding) : null;
+        if (!continuation) {
+          // General JavaScript continuations are not durable. Only acknowledged
+          // native effects below have a provider inspection path without POST.
+          if (previous.status === 'active') runtime.store.setExecutionStatus(executionIri, 'failed');
+          throw new SemanticProgramError('INVOCATION_NOT_RETRYABLE', 'Interrupted TypeScript execution has no terminal receipt; reconcile its effects before starting new work', 409,
+            mayReadTrace ? readProgramTrace(runtime.store, executionIri) : undefined);
+        }
+      } else {
+        if (!history || !historyIsAtLayer(history, layer)) throw new SemanticProgramError('EXECUTION_PERSISTENCE_INCONSISTENT', 'Completed receipt is missing', 500);
+        const outputs = await loadExecutionOutputs(agent, graph, executionIri, layer, executor.agentAddress);
+        await check();
+        return { invocationId, executionIri, executionLayer: layer, ...(layer === 'vm' ? { executionUal: history.publishedUal } : {}), outputs, persisted: true,
+          ...(mayReadTrace ? { trace: readProgramTrace(runtime.store, executionIri) } : {}) };
       }
-      if (!history || !historyIsAtLayer(history, layer)) throw new SemanticProgramError('EXECUTION_PERSISTENCE_INCONSISTENT', 'Completed receipt is missing', 500);
-      const outputs = await loadExecutionOutputs(agent, graph, executionIri, layer, executor.agentAddress);
-      await check();
-      return { invocationId, executionIri, executionLayer: layer, ...(layer === 'vm' ? { executionUal: history.publishedUal } : {}), outputs, persisted: true,
-        ...(mayReadTrace ? { trace: readProgramTrace(runtime.store, executionIri) } : {}) };
     }
     const resolved = await resolveTypeScriptTools(agent, runtime, binding, program, config, check);
     const artifact = await runtime.typescript!.compile(program.source);
     const manifest = new TextEncoder().encode(artifact.manifest), planId = hashCanonicalPlan(manifest);
     runtime.store.registerStrategyArtifact({ artifactHash: planId, strategyId: program.programIri, version: program.version,
       canonicalPlan: manifest, sourceRef: program.programIri, reviewState: 'approved', createdAt: Date.now() });
-    runtime.store.createExecution({ executionId: executionIri, planId, partitionId: hashParts([graph]),
+    if (continuation) runtime.store.setExecutionStatus(executionIri, 'active');
+    else runtime.store.createExecution({ executionId: executionIri, planId, partitionId: hashParts([graph]),
       status: 'active', graphRevision: identity, policyEpoch: 1n, rootProcessId: executionIri, leaseEpoch: 0n });
     const authority = {
       adapterVersions: new Map(resolved.public.requiredTools.map(tool => [tool.operation!, tool.semanticVersion!])),
@@ -181,6 +212,12 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
         { ...grant, timeoutMs: Math.max(1, Math.min(grant.timeoutMs, budget.deadline - Date.now())) }, async effect => trace.call(String(effect.id), effect.kind, effect.kind === 'tool' ? effect.tool : effect.program, async call => {
           await check();
           if (++budget.calls > budget.maximum) throw new SemanticProgramError('PROGRAM_CALL_BUDGET_EXCEEDED', 'Program tree exceeds its call budget', 403);
+          if (continuation && (effect.kind !== 'tool' || effect.tool !== binding.n8n!.toolIri
+            || !continuation.has(`urn:sr:effect:${invocationId}:${effect.id}`))) {
+            const failure = new SemanticProgramError('INVOCATION_REQUIRES_RECONCILIATION', 'Continuation may only inspect its original acknowledged effects', 409);
+            budget.uncertainEffect = failure;
+            throw failure;
+          }
           if (effect.kind === 'tool') {
             let output: string;
             try { output = await dispatchTool(effect.tool, effect.input, String(effect.id)); }
@@ -206,6 +243,8 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
           return values.length === 1 ? values[0] : values;
         }));
       await check();
+      if (continuation && [...continuation].some(id => runtime.store.effect(id)?.state !== 'succeeded'))
+        throw new SemanticProgramError('INVOCATION_REQUIRES_RECONCILIATION', 'Original effects still require reconciliation', 409);
       const quads = buildExecutionQuads({ bound: { binding, digest, assertAuthorized: check }, executionIri, invocationId,
         programIri: program.programIri, operatorIri: `did:dkg:agent:${executor.agentAddress}`, callerIri: `did:dkg:agent:${caller}`,
         policy: { iri: `urn:dkg:program-binding:${digest}`, version: '1', hash: digest }, programHash: artifact.hash,

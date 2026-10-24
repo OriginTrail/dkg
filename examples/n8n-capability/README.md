@@ -298,9 +298,19 @@ than a standalone node dashboard.
 
 The tenant approval and the operator installation must agree on graph, executor,
 workflow ID and digest. The adapter checks the published definition before
-dispatch and the execution's actual published-version ID, graph and reviewed
-parameters afterward. n8n expands omitted parameter defaults in its execution
-snapshot; those additions are accepted while reviewed values remain exact.
+dispatch. Native receipts bind the execution's provider-reported version ID to
+that exact published definition and durable acknowledgement; graph, node types,
+settings and credential references must also match. Runtime parameter snapshots
+are normalized by n8n (including removed inactive fields and expression prefixes)
+and are not a second immutable source definition. This works for every native
+node without URL, method or component-specific verification exceptions. The
+operator's n8n API is the trusted source of published-version identity.
+
+An interrupted native-only TypeScript invocation may retry the same identity to
+inspect its durably acknowledged provider execution. Changed inputs or approvals
+remain forbidden. Continuation cannot start a new tool or child invocation, and
+all original effects must succeed before a DKG receipt is persisted. Other
+interrupted TypeScript executions retain their non-retryable behavior.
 
 Credentials stay outside KAs, browser payloads and receipts. Requests and results
 have bounded sizes, schemas and deadlines. The common effect broker records an

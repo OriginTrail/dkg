@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { RuntimeAdapterOperation, SemanticN8nConfig, SemanticN8nGrant, SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
-import { assertN8nValue, n8nExecutionMatches, n8nObservationScope, n8nRecord, n8nWorkflowSha256, validateN8nConfig, validateN8nGrant } from './semantic-runtime-n8n-contract.js';
+import { assertN8nValue, n8nPinnedExecutionMatches, n8nObservationScope, n8nRecord, n8nWorkflowSha256, validateN8nConfig, validateN8nGrant } from './semantic-runtime-n8n-contract.js';
 import { collectN8nExecutionResult } from './semantic-runtime-n8n-results.js';
 
 type Checkpoint = { kind: 'n8n-native-v1'; workflowId: string; workflowSha256: string; executionId: string; versionId: string; observed: boolean };
@@ -91,8 +91,8 @@ export function createNativeN8nWorkflowAdapter(
     }
     if (['new', 'running', 'waiting'].includes(String(execution.status))) throw new Error('N8N_EXECUTION_PENDING');
     if (String(execution.id) !== saved.executionId || execution.workflowId !== grant.workflowId
-      || !['success', 'error'].includes(String(execution.status)) || execution.workflowVersionId !== saved.versionId
-      || !n8nExecutionMatches(published, execution.workflowData)) throw new Error('N8N_EXECUTION_NOT_VERIFIED');
+      || !['success', 'error'].includes(String(execution.status))
+      || !n8nPinnedExecutionMatches(published, execution, grant, saved.versionId)) throw new Error('N8N_EXECUTION_NOT_VERIFIED');
     if (saved.observed) {
       const scope = n8nObservationScope(graph, executor, grant.workflowId);
       const data = n8nRecord(execution.data) && n8nRecord(execution.data.resultData) ? execution.data.resultData.runData : undefined;
@@ -110,7 +110,8 @@ export function createNativeN8nWorkflowAdapter(
     id: 'n8n/workflow', version: '1', witInterface: 'origintrail:semantic-runtime/n8n-workflow@0.1.0',
     implementationVersion: 'n8n-native-components-v1',
     implementationHash: createHash('sha256').update(readFileSync(new URL(import.meta.url)))
-      .update(collectN8nExecutionResult.toString()).update(configuration).update(JSON.stringify(grant)).digest('hex'),
+      .update(collectN8nExecutionResult.toString()).update(n8nPinnedExecutionMatches.toString())
+      .update(configuration).update(JSON.stringify(grant)).digest('hex'),
     enabled: matches, effectClass: 'external-workflow', verb: 'invoke', idempotencyClass: 'non_repeatable',
     reconciliationRule: 'inspect-pinned-n8n-execution-from-durable-acknowledgement',
     validateInput(input) { assertN8nValue(grant.inputSchema, input, 'INPUT'); return structuredClone(input); },

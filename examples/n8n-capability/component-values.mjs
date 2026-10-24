@@ -32,6 +32,7 @@ export function resolveComponentValue(value, item = {}, validateOnly = false) {
 }
 
 /** Public HTTPS destinations are chosen by the workflow author. n8n also checks DNS/IPs. */
+/* eslint-disable no-control-regex -- URL validation intentionally rejects ASCII control characters. */
 export function validateComponentUrl(value) {
   if (typeof value !== 'string' || value.length > 2048 || /[\s\\\u0000-\u001f]/.test(value)) throw new Error('Enter a valid HTTPS API URL.');
   const match = /^https:\/\/([^/?#]+)(?:[/?][^#]*)?$/.exec(value);
@@ -42,3 +43,4 @@ export function validateComponentUrl(value) {
   }
   return value;
 }
+/* eslint-enable no-control-regex */
