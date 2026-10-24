@@ -26,6 +26,7 @@ import {
   slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
   readNodeRoleFromConfigSync,
+  type DkgConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
@@ -276,7 +277,12 @@ program
   .action(async (opts: { json?: boolean; orphanScan?: boolean }) => {
     const { createProductionDeps, runDoctor, formatDoctorReport, ALL_CHECK_IDS } =
       await import('../doctor/index.js');
-    const config = await loadConfig();
+    // A config the daemon cannot load is what the config-sanity check
+    // reports, so run the checks on default settings instead of exiting here.
+    const config: Partial<DkgConfig> = await loadConfig().catch((err: unknown) => {
+      console.warn(`Warning: the node config did not load, so the doctor runs with default settings: ${toErrorMessage(err)}`);
+      return {};
+    });
     const deps = createProductionDeps({ apiPort: config.apiPort ?? 9200 });
     // Overlay operator-configured scan roots + skipChecks from config.
     // The doctor namespace is opt-in — absent config means defaults.
