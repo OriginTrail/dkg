@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { CASES, CLI, LAYOUTS, PROFILE, digest, hash, fileIdentity } from '../package-certification/bundle.mjs';
+import { BUILD_INPUTS, CASES, CLI, LAYOUTS, PROFILE, digest, hash, fileIdentity } from '../package-certification/bundle.mjs';
 
 export const writeJson = (file, value) => fs.writeFileSync(file, JSON.stringify(value, null, 2));
 export function archive(files) {
@@ -28,9 +28,14 @@ export function fixture(t) {
   const attempt = path.join(root, 'attempt');
   fs.mkdirSync(bundle); fs.mkdirSync(attempt);
   fs.mkdirSync(path.join(bundle, 'tarballs'));
+  fs.mkdirSync(path.join(bundle, 'inputs'));
+  const inputs = BUILD_INPUTS.map(name => {
+    fs.writeFileSync(path.join(bundle, 'inputs', name), 'fixture');
+    return { path: `inputs/${name}`, sha256: hash('fixture') };
+  });
   const commit = 'a'.repeat(40), version = '10.0.25';
   const buildIdentity = { commit, commitShort: commit.slice(0, 8), dirty: false, buildTime: '2026-10-24T00:00:00.000Z', distTag: 'monorepo', ciRun: null };
-  const expected = { commit, version, profile: PROFILE, familyPolicy: { libp2p: '3.5.1' }, requiredAssets: { [CLI]: ['build-info.json', 'dist/cli.js'] }, packages: [
+  const expected = { commit, version, profile: PROFILE, sourceInputsDigest: hash('tracked'), inputHashes: Object.fromEntries(inputs.map(i => [i.path, i.sha256])), familyPolicy: { libp2p: '3.5.1' }, requiredAssets: { [CLI]: ['build-info.json', 'dist/cli.js'] }, packages: [
     { name: CLI, version, dependencies: { dependencies: { '@origintrail-official/dkg-core': version }, optionalDependencies: {}, peerDependencies: {}, devDependencies: {} } },
     { name: '@origintrail-official/dkg-core', version, dependencies: { dependencies: { libp2p: '3.5.1' }, optionalDependencies: {}, peerDependencies: {}, devDependencies: {} } },
   ] };
@@ -40,7 +45,7 @@ export function fixture(t) {
     fs.writeFileSync(path.join(bundle, tarball), archive(files));
     return { name: pkg.name, version, tarball, ...fileIdentity(path.join(bundle, tarball)), files: Object.fromEntries(Object.entries(files).map(([name, text]) => [name, hash(text)])) };
   });
-  const manifest = { schemaVersion: 1, source: { commit, repository: 'https://github.com/OriginTrail/dkg' }, version, expectedPackages: expected.packages, packages, familyPolicy: expected.familyPolicy, requiredAssets: expected.requiredAssets, buildIdentity, inputs: [] };
+  const manifest = { schemaVersion: 1, preparedAt: buildIdentity.buildTime, tools: { node: 'v22.23.4', pnpm: '10.28.1', npm: '10.9.8' }, lockPackages: ['libp2p@3.5.1'], source: { commit, sourceInputsDigest: expected.sourceInputsDigest, repository: 'https://github.com/OriginTrail/dkg' }, version, expectedPackages: expected.packages, packages, familyPolicy: expected.familyPolicy, requiredAssets: expected.requiredAssets, buildIdentity, inputs };
   manifest.packageSetDigest = digest(manifest);
   writeJson(path.join(bundle, 'manifest.json'), manifest);
   const receiptFile = path.join(attempt, 'receipt.json');

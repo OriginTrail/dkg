@@ -305,9 +305,9 @@ function commandBuildInfo(args) {
 }
 
 async function packageContext(args, certificate = true) {
-  const { expectedPolicy, run } = await import('./lib/package-certification/prepare.mjs');
+  const { expectedPolicy, requireCleanSource } = await import('./lib/package-certification/prepare.mjs');
   const commit = requireArg(args, 'commit');
-  if (run('git', ['rev-parse', 'HEAD'], { cwd: ROOT_DIR }) !== commit) {
+  if (requireCleanSource(ROOT_DIR) !== commit) {
     throw new Error('Use the intended candidate checkout to supply the independent package policy');
   }
   return {

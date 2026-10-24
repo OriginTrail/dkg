@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { discoverPublishablePackages, findReleaseVersionMismatches, findNodeSqliteInstallGuardViolations, findNodeSqliteEngineViolations } from '../../release-packages.mjs';
 import { cliRuntimeAssetManifest, copyCliRuntimeAssets } from '../../copy-cli-runtime-assets.mjs';
-import { CLI, PROFILE, SCHEMA, dependencies, digest, hash, fileIdentity, tarFiles, readJson, verifyBundle } from './bundle.mjs';
+import { CLI, PROFILE, SCHEMA, BUILD_INPUTS, dependencies, digest, hash, fileIdentity, tarFiles, readJson, verifyBundle } from './bundle.mjs';
 
 export function run(command, args, { cwd, log, env = {}, timeout = 30 * 60_000 } = {}) {
   const fd = log ? fs.openSync(log, 'a') : undefined;
@@ -34,6 +34,8 @@ export async function expectedPolicy(rootDir, { commit, version, profile = PROFI
   assert.deepEqual(findLibp2pPinViolations({ manifests: discoverPublishablePackages(rootDir).map(p => readJson(p.packageJsonPath)), lockFamily: family }), []);
   return {
     commit, version, profile, packages,
+    sourceInputsDigest: digest(trackedSnapshot(rootDir)),
+    inputHashes: Object.fromEntries(BUILD_INPUTS.map(name => [`inputs/${name}`, hash(fs.readFileSync(path.join(rootDir, name)))])),
     familyPolicy: Object.fromEntries([...family.versions].sort().map(([name, versions]) => [name, [...versions][0]])),
     requiredAssets: {
       [CLI]: [...cliRuntimeAssetManifest({ rootDir }).requiredPackAssets, 'build-info.json', 'scripts/verify-node-sqlite-runtime.mjs', 'scripts/bundle-markitdown-binaries.mjs', 'dist/cli.js'],
@@ -86,8 +88,7 @@ export async function preparePackages({ rootDir, output, version }) {
   assert.deepEqual(trackedSnapshot(rootDir), before, 'tracked build inputs changed during preparation');
   // Retain policy/build inputs without checkout paths; full tracked source content is
   // additionally identified by sourceInputsDigest and Git commit.
-  const inputNames = ['pnpm-lock.yaml', 'package.json', 'pnpm-workspace.yaml', '.npmrc', '.nvmrc', 'turbo.json'];
-  const inputs = inputNames.map(name => {
+  const inputs = BUILD_INPUTS.map(name => {
     const target = `inputs/${name}`;
     fs.copyFileSync(path.join(rootDir, name), path.join(output, target));
     return { path: target, sha256: before[name] };

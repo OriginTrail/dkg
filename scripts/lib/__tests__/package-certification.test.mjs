@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { verifyCertificate, verifyBundle, digest, readJson, tarFiles } from '../package-certification/bundle.mjs';
+import { verifyCertificate, verifyBundle, digest, readJson, tarFiles, fileIdentity, hash } from '../package-certification/bundle.mjs';
 import { preparedRelease, checkRegistrySet } from '../package-certification/publish.mjs';
 import { fixture, writeJson, archive } from './package-certification-fixture.mjs';
 import { startRegistry } from '../package-certification/registry.mjs';
@@ -74,6 +74,22 @@ test('self-consistent missing runtime asset is rejected by independent asset con
   delete changed.packageSetDigest; changed.packageSetDigest = digest(changed);
   writeJson(path.join(f.bundle, 'manifest.json'), changed);
   assert.throws(() => verifyBundle(f.bundle, f.expected), /asset contract/);
+});
+for (const [name, alter, message] of [
+  ['wrong packed version', files => { const pkg = JSON.parse(files['package.json']); pkg.version = '9.0.0'; files['package.json'] = JSON.stringify(pkg); }, /wrong version/],
+  ['wrong packed internal dependency', files => { const pkg = JSON.parse(files['package.json']); pkg.dependencies['@origintrail-official/dkg-core'] = 'workspace:*'; files['package.json'] = JSON.stringify(pkg); }, /relationships/],
+  ['missing required packed asset', files => { delete files['dist/cli.js']; }, /missing required asset/],
+  ['wrong packed build identity', files => { const identity = JSON.parse(files['build-info.json']); identity.commit = 'b'.repeat(40); files['build-info.json'] = JSON.stringify(identity); }, /wrong packed build identity/],
+]) test(`rehashed real archive still fails intended policy: ${name}`, t => {
+  const f = fixture(t), pkg = f.manifest.packages[0], file = path.join(f.bundle, pkg.tarball);
+  const files = Object.fromEntries(tarFiles(fs.readFileSync(file)));
+  alter(files);
+  fs.writeFileSync(file, archive(files));
+  Object.assign(pkg, fileIdentity(file), { files: Object.fromEntries(Object.entries(files).map(([name, bytes]) => [name, hash(bytes)])) });
+  delete f.manifest.packageSetDigest;
+  f.manifest.packageSetDigest = digest(f.manifest);
+  writeJson(path.join(f.bundle, 'manifest.json'), f.manifest);
+  assert.throws(() => verifyBundle(f.bundle, f.expected), message);
 });
 function releaseOptions(f, extra = {}) {
   return { mode: 'publish', bundle: f.bundle, receiptFile: f.receiptFile, expected: f.expected, tags: ['canary'], authorize: () => {}, readDist: () => null, log: () => {}, ...extra };

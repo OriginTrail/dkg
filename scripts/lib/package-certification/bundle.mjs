@@ -9,6 +9,7 @@ export const PROFILE = 'installed-local-rdf-v1';
 export const LAYOUTS = ['core-slot', 'edge-global'];
 export const CASES = ['install', 'dependency-policy', 'cli-identity', 'runtime-assets', 'daemon-status', 'rdf-readback', 'graceful-restart'];
 export const SCHEMA = 1;
+export const BUILD_INPUTS = ['pnpm-lock.yaml', 'package.json', 'pnpm-workspace.yaml', '.npmrc', '.nvmrc', 'turbo.json'];
 export const CLI = '@origintrail-official/dkg';
 export const hash = (bytes, algorithm = 'sha256', encoding = 'hex') => createHash(algorithm).update(bytes).digest(encoding);
 export function canonical(value) {
@@ -78,6 +79,14 @@ export function validateManifest(manifest, expected) {
   assert.match(expected.commit, /^[a-f0-9]{40}$/, 'full intended source commit required');
   assert.equal(manifest.source.commit, expected.commit, 'stale/wrong subject commit');
   assert.equal(manifest.version, expected.version, 'wrong candidate version');
+  assert.equal(manifest.source.sourceInputsDigest, expected.sourceInputsDigest, 'wrong tracked build-input digest');
+  assert.match(manifest.source.sourceInputsDigest, /^[a-f0-9]{64}$/);
+  assert.deepEqual(Object.fromEntries(manifest.inputs.map(input => [input.path, input.sha256])), expected.inputHashes, 'wrong build-input hashes');
+  assert.equal(manifest.inputs.length, BUILD_INPUTS.length, 'missing/duplicate build input');
+  assert.match(manifest.tools.node, /^v22\.\d+\.\d+$/);
+  for (const tool of ['pnpm', 'npm']) assert.match(manifest.tools[tool], /^\d+\.\d+\.\d+$/);
+  assert.ok(Number.isFinite(Date.parse(manifest.preparedAt)), 'missing preparation time');
+  assert.ok(Array.isArray(manifest.lockPackages) && manifest.lockPackages.length > 0 && new Set(manifest.lockPackages).size === manifest.lockPackages.length, 'invalid lockfile baseline');
   assert.equal(expected.profile, PROFILE, 'unsupported required profile');
   assert.equal(manifest.source.repository, 'https://github.com/OriginTrail/dkg');
   const { packageSetDigest, ...contents } = manifest;
@@ -147,6 +156,7 @@ export function verifyCertificate(bundle, receiptFile, expected) {
   assert.equal(receipt.profile, expected.profile, 'wrong profile');
   assert.equal(receipt.outcome, 'PASS', 'certification did not pass');
   assert.deepEqual(receipt.errors, [], 'receipt contains errors');
+  assert.equal(receipt.negativeControl, undefined, 'negative control is not a release certificate');
   assert.equal(receipt.toolRevision, expected.toolRevision ?? expected.commit, 'wrong certification tool revision');
   assert.match(receipt.runId, /^[a-z0-9-]+$/);
   assert.ok(Date.parse(receipt.startedAt) <= Date.parse(receipt.endedAt), 'invalid receipt interval');
