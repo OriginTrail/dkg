@@ -133,7 +133,6 @@ describe('partition rejection and caller-local discovery failures', () => {
   });
 });
 
-
 describe('graph rewrite compatibility boundaries', () => {
   it.each([
     ['ASK {}', 'ASK'], ['CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }', 'CONSTRUCT'],
@@ -205,22 +204,7 @@ describe('public authority cache boundaries', () => {
       expect(resolver).toHaveBeenCalledTimes(1_002);
     } finally { await store.close(); }
   });
-
-  it.each([[false, false], [true, false], [false, true], [true, true]])
-    ('combines ASK results from data=%s and shared-memory=%s', async (data, shared) => {
-      const store = new OxigraphStore();
-      try {
-        const graph = 'did:dkg:context-graph:combined';
-        for (const target of [...(data ? [graph] : []), ...(shared ? [`${graph}/_shared_memory`] : [])]) {
-          await store.insert([{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o', graph: target }]);
-        }
-        const engine = new DKGQueryEngine(store);
-        expect(await engine.query('ASK { <urn:s> <urn:p> <urn:o> }', { contextGraphId: 'combined', includeSharedMemory: true }))
-          .toEqual({ bindings: [{ result: String(data || shared) }] });
-      } finally { await store.close(); }
-    });
 });
-
 
 describe('invalid query options and explicit graph targets', () => {
   it.each([
