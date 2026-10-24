@@ -1,4 +1,6 @@
 /** Public component descriptors. Credentials and operator endpoints never enter this registry. */
+import { resolveComponentValue, validateComponentUrl } from './component-values.mjs';
+import { componentProgramSource as componentProgramSourceV1 } from './component-registry-v1.mjs';
 const text = (label, value = '', extra = {}) => ({ type: 'string', label, default: value, maxLength: 256, ...extra });
 const field = (label, value) => text(label, value, { pattern: 'field', maxLength: 64 });
 const number = (label, value, min = 1, max = 20) => ({ type: 'integer', label, default: value, min, max });
@@ -11,7 +13,10 @@ const entry = (id, name, category, nodeType, parameters = {}, extra = {}) => ({
 });
 
 export const componentRegistry = [
-  entry('edit-fields', 'Edit Fields', 'Data', 'set', { fields: json('Fields to add or replace', { team: 'DKG' }) }),
+  entry('edit-fields', 'Edit Fields', 'Data', 'set', {
+    fields: json('Field mappings', { team: 'DKG' }),
+    keepInput: choice('Keep other input fields', 'yes', ['yes', 'no']),
+  }, { version: 2 }),
   entry('filter', 'Filter', 'Data', 'filter', { field: field('Field', 'name'), equals: text('Equals', 'Ana') }),
   entry('sort', 'Sort', 'Data', 'sort', { field: field('Field', 'value'), direction: choice('Direction', 'ascending', ['ascending', 'descending']) }),
   entry('limit', 'Limit', 'Data', 'limit', { count: number('Maximum items', 1) }),
@@ -29,9 +34,11 @@ export const componentRegistry = [
   entry('crypto', 'Crypto', 'Files', 'crypto', { field: field('Field to hash with SHA-256', 'name') }),
   entry('compression', 'Compression', 'Files', 'compression', { name: text('ZIP file name', 'export.zip', { maxLength: 80 }) }, { input: 'file', outputs: ['file'], sampleItems: [{ file: { name: 'hello.txt', mimeType: 'text/plain', base64: 'SGVsbG8gREtHCg==' } }] }),
   entry('http-request', 'HTTP Request', 'Integrations', 'httpRequest', {
-    url: text('API URL (local PoC endpoint)', 'http://127.0.0.1:4631/spike/ka/demo-data', { maxLength: 512, pattern: 'http' }),
-    method: choice('Method', 'GET', ['GET', 'POST']), body: json('JSON request body', { hello: 'DKG' }),
-  }, { sampleItems: [{}] }),
+    url: text('API URL', 'https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&current=temperature_2m', { maxLength: 2048, pattern: 'http' }),
+    method: choice('Method', 'GET', ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']),
+    query: json('Query parameters', {}), headers: json('Request headers', {}),
+    body: { ...json('JSON request body', {}), shape: 'any' },
+  }, { sampleItems: [{}], version: 2 }),
   entry('google-sheets', 'Google Sheets', 'Integrations', 'googleSheets', { title: text('New spreadsheet title', 'nOS workflow export', { maxLength: 80 }) }, { connection: 'googleSheetsOAuth2Api', writes: true }),
   entry('google-drive', 'Google Drive', 'Integrations', 'googleDrive', { name: text('Drive file name', 'nOS-export.txt', { maxLength: 80 }) }, { input: 'file', connection: 'googleDriveOAuth2Api', writes: true, sampleItems: [{ file: { name: 'hello.txt', mimeType: 'text/plain', base64: 'SGVsbG8gREtHCg==' } }] }),
   entry('if', 'IF', 'Flow', 'if', { field: field('Field', 'name'), equals: text('Equals', 'Ana') }, { outputs: ['true', 'false'], mode: 'branch' }),
@@ -52,7 +59,7 @@ export function component(id) {
   return value;
 }
 
-/** Self-contained so precisely this validator is also embedded in the Program KA. */
+/** Embedded with componentValidationSource so the guest and native graph use the same contract. */
 export function normalizeComponentInput(descriptor, value) {
   const bad = message => { throw new Error(message); };
   const record = v => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -77,13 +84,15 @@ export function normalizeComponentInput(descriptor, value) {
     if (spec.type === 'integer') {
       if (!Number.isInteger(selected) || selected < spec.min || selected > spec.max) bad('Invalid ' + spec.label + '.');
     } else if (spec.type === 'json') {
-      if (!record(selected) || JSON.stringify(selected).length > spec.maxLength) bad('Invalid ' + spec.label + '.');
+      if (spec.shape !== 'any' && !record(selected) || JSON.stringify(selected).length > spec.maxLength) bad('Invalid ' + spec.label + '.');
+      if (descriptor.version >= 2) resolveComponentValue(selected, {}, true);
     } else {
       if (typeof selected !== 'string' || !selected.trim() || selected.length > spec.maxLength
         || spec.options && !spec.options.includes(selected)) bad('Invalid ' + spec.label + '.');
       if (spec.pattern === 'field' && !/^[A-Za-z][A-Za-z0-9_ .-]{0,63}$/.test(selected)) bad('Use a simple field name.');
       if (spec.pattern === 'http') {
-        if (selected !== 'http://127.0.0.1:4631/spike/ka/demo-data') bad('This PoC permits the local demo-data endpoint. Additional destinations require an operator-reviewed component revision.');
+        if (descriptor.version < 2 && selected !== 'http://127.0.0.1:4631/spike/ka/demo-data') bad('This saved HTTP revision permits only the local demo-data endpoint.');
+        if (descriptor.version >= 2) validateComponentUrl(selected);
       }
     }
     params[key] = selected;
@@ -105,6 +114,10 @@ export function normalizeComponentInput(descriptor, value) {
   return { itemsJson: JSON.stringify(items), paramsJson: JSON.stringify(params), executionId };
 }
 
+export function componentValidationSource() {
+  return `const resolveComponentValue = ${resolveComponentValue.toString()};\nconst validateComponentUrl = ${validateComponentUrl.toString()};\nconst normalize = ${normalizeComponentInput.toString()};\n`;
+}
+
 const stringSchema = maxLength => ({ type: 'string', maxLength });
 const objectSchema = properties => ({ type: 'object', properties, required: Object.keys(properties), additionalProperties: false });
 export const componentContract = {
@@ -114,7 +127,8 @@ export const componentContract = {
 
 export function componentProgramSource(id) {
   const descriptor = component(id);
-  return `// nos-n8n-component-v1:${id}\nimport { invoke_tool } from '@origintrail-official/dkg-graph-computer/program';\n`
-    + `const descriptor = ${JSON.stringify(descriptor)};\nconst normalize = ${normalizeComponentInput.toString()};\n`
+  if (descriptor.version === 1) return componentProgramSourceV1(id);
+  return `// nos-n8n-component-v2:${id}\nimport { invoke_tool } from '@origintrail-official/dkg-graph-computer/program';\n`
+    + `const descriptor = ${JSON.stringify(descriptor)};\n${componentValidationSource()}`
     + `export function run(input: unknown) { return invoke_tool('urn:dkg:tool:n8n', normalize(descriptor, input)); }\n`;
 }

@@ -1,4 +1,5 @@
 import { component } from './component-registry.mjs';
+import { resolveComponentValue } from './component-values.mjs';
 
 export const nativeVersions = { set: 3.4, filter: 2.3, sort: 1, limit: 1, removeDuplicates: 2, splitOut: 1.1,
   aggregate: 1, summarize: 1.1, renameKeys: 1, dateTime: 2, extractFromFile: 1.1, convertToFile: 1.1,
@@ -21,12 +22,13 @@ export function wire(connections, from, to, output = 0, input = 0) {
 export function componentPiece(id, name, param, { credentials = {}, subworkflowId = 'nos_component_echo_v1' } = {}) {
   const descriptor = component(id), type = descriptor.nodeType.split('.').at(-1);
   const p = key => expression(param(key)), value = key => expression(`$json[${param(key)}]`);
+  const resolved = key => `(${resolveComponentValue.toString()})(${param(key)}, $json)`;
   const nodes = [], connections = {};
   let parameters = {};
   const condition = () => ({ options: { caseSensitive: true, leftValue: '', typeValidation: 'loose', version: 2 },
     conditions: [{ id: 'equals', leftValue: value('field'), rightValue: p('equals'), operator: { type: 'string', operation: 'equals' } }], combinator: 'and' });
   switch (id) {
-    case 'edit-fields': parameters = { mode: 'raw', jsonOutput: expression(`({ ...$json, ...${param('fields')} })`), options: {} }; break;
+    case 'edit-fields': parameters = { mode: 'raw', jsonOutput: expression(`({ ...(${param('keepInput')} === 'yes' ? $json : {}), ...${resolved('fields')} })`), options: {} }; break;
     case 'filter': case 'if': parameters = { conditions: condition(), options: {} }; break;
     case 'sort': parameters = { type: 'simple', sortFieldsUi: { sortField: [{ fieldName: p('field'), order: p('direction') }] }, options: {} }; break;
     case 'limit': parameters = { maxItems: p('count'), keep: 'firstItems' }; break;
@@ -43,8 +45,11 @@ export function componentPiece(id, name, param, { credentials = {}, subworkflowI
     case 'markdown': parameters = { mode: 'markdownToHtml', markdown: value('field'), destinationKey: 'html', options: {} }; break;
     case 'crypto': parameters = { action: 'hash', type: 'SHA256', value: value('field'), dataPropertyName: 'hash', encoding: 'hex' }; break;
     case 'compression': parameters = { operation: 'compress', binaryPropertyName: 'data', outputFormat: 'zip', fileName: p('name'), binaryPropertyOutput: 'data' }; break;
-    case 'http-request': parameters = { method: p('method'), url: p('url'), sendBody: expression(`${param('method')} === 'POST'`),
-      specifyBody: 'json', jsonBody: expression(param('body')),
+    case 'http-request': parameters = { method: p('method'), url: p('url'),
+      sendQuery: true, specifyQuery: 'json', jsonQuery: expression(`JSON.stringify(${resolved('query')})`),
+      sendHeaders: true, specifyHeaders: 'json', jsonHeaders: expression(`JSON.stringify(${resolved('headers')})`),
+      sendBody: expression(`!['GET', 'HEAD'].includes(${param('method')})`),
+      specifyBody: 'json', jsonBody: expression(resolved('body')),
       options: { timeout: 8000, redirect: { redirect: { followRedirects: false } }, response: { response: { responseFormat: 'json' } } } }; break;
     case 'google-sheets': parameters = { authentication: 'oAuth2', resource: 'spreadsheet', operation: 'create', title: p('title'), sheetsUi: { sheetValues: [{ title: 'Export' }] }, options: {} }; break;
     case 'google-drive': parameters = { resource: 'file', operation: 'upload', inputDataFieldName: 'data', name: p('name'), driveId: { __rl: true, mode: 'list', value: 'My Drive' }, folderId: { __rl: true, mode: 'id', value: 'root' }, options: {} }; break;

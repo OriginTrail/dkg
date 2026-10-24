@@ -27,6 +27,7 @@ Run n8n in its own terminal, with its Node 24.22 executable selected:
 N8N_USER_FOLDER=/tmp/n8n-ka-state/n8n N8N_LISTEN_ADDRESS=127.0.0.1 \
 N8N_HOST=127.0.0.1 N8N_PORT=45679 N8N_PROTOCOL=http N8N_SECURE_COOKIE=false \
 N8N_DIAGNOSTICS_ENABLED=false N8N_VERSION_NOTIFICATIONS_ENABLED=false \
+N8N_SSRF_PROTECTION_ENABLED=true \
 /tmp/n8n-ka-runtime/node_modules/.bin/n8n start
 ```
 
@@ -201,7 +202,7 @@ node examples/n8n-capability/setup-components-local.mjs /tmp/n8n-ka-state --inst
 node examples/n8n-capability/serve.mjs /tmp/n8n-ka-state
 ```
 
-In nOS choose **Data + branching**, **CSV → Google Sheet**, **Loop example** or
+In nOS choose **HTTP → temperature**, **Data + branching**, **CSV → Google Sheet**, **Loop example** or
 **Schedule example**, or drag your own blocks. Click a block to edit its fields.
 Connect named outputs to inputs A/B; the Connections panel offers the same
 controls with select menus. A loop needs a `loop` path returning from its body,
@@ -238,8 +239,23 @@ in the private `studio.sqlite` database for recovery across service restarts.
 PoC bounds: eight blocks, one loop, twenty input/output records, 8 KiB serialized
 record sets, 4 KiB file uploads, three-second Wait, 24 saved graph revisions.
 Each component currently offers a reviewed subset of its native operations.
-HTTP Request targets the local `/spike/ka/demo-data` JSON API (GET/POST);
-additional destinations require a reviewed operator installation. Execute
+HTTP Request accepts a public HTTPS API URL, GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS,
+query parameters, headers and an arbitrary JSON body. n8n must run with
+`N8N_SSRF_PROTECTION_ENABLED=true`; redirects remain disabled. The URL validator
+rejects embedded credentials, local hostnames, IP literals and custom ports.
+Query/header/body values can reference input data such as
+`{{ $json.location.latitude }}`. Edit Fields maps nested paths and array indexes
+(`{{ $json.current.temperature_2m }}`, `{{ $json.hourly.temperature_2m[0] }}`)
+while preserving JSON types; choose whether to keep other input fields. The
+field editor supports named rows and an advanced JSON view. References are
+data paths, not arbitrary JavaScript. The **HTTP → temperature** example uses
+the full Open-Meteo forecast URL and maps temperature, unit and observation time.
+These component revisions have new immutable KA identities. Previous saved
+Studio sources use their original compiler and child pins, and retired component
+revisions remain available to their saved graphs; choose **Use current component
+version** before editing an older component into a new graph. Historical local
+HTTP demo calls are blocked when n8n's SSRF protection is enabled.
+Execute
 Sub-workflow invokes the installed native echo example. Google Sheets creates
 one spreadsheet per input batch and appends scalar rows using RAW cell input.
 Google Drive uploads a small file and needs a separate Drive OAuth connection;

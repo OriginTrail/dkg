@@ -17,6 +17,7 @@ import { programSource } from './workflow.mjs';
 import { createCapabilityBridge } from './bridge.mjs';
 import { csvProgramSource } from './csv-workflows.mjs';
 import { componentProgramSource } from './component-registry.mjs';
+import { componentProgramSource as componentProgramSourceV1 } from './component-registry-v1.mjs';
 
 const require = createRequire(new URL('../../packages/cli/package.json', import.meta.url));
 const { Wallet } = require('ethers');
@@ -94,7 +95,7 @@ try {
     catch (error) { if (error.code !== 'PROGRAM_NOT_FOUND') throw error; }
     if (program) program = { graphId, programIri, programLayer: 'wm', authorAgentAddress: program.authorAgentAddress, sourceHash: program.sourceHash };
     else program = await client.programs.upload({ graphId, programIri, name: definition.kind + '-' + definition.grant.workflowSha256.slice(0, 12), label: definition.name, language: 'typescript-v1',
-      source: definition.kind === 'text' ? programSource : definition.kind === 'component' ? componentProgramSource(definition.descriptor.id) : csvProgramSource(definition.kind), version: '1.0.0', requiredTools: [definition.grant.toolIri], requestedPermissions: { graphId, n8n: definition.grant } });
+      source: definition.kind === 'text' ? programSource : definition.kind === 'component' ? definition.source ?? (definition.retired ? componentProgramSourceV1 : componentProgramSource)(definition.descriptor.id) : csvProgramSource(definition.kind), version: '1.0.0', requiredTools: [definition.grant.toolIri], requestedPermissions: { graphId, n8n: definition.grant } });
     if (!definition.enabled) continue;
     let approval;
     try { approval = await client.programs.getApproval({ graphId, operationIri: programIri }); }
@@ -108,7 +109,7 @@ try {
   const capabilities = await bridge.list();
   if (!capabilities.length) throw new Error('Capability KA is missing from DKG query results');
   console.log(JSON.stringify({ ready: true, nodeUrl, capabilities: capabilities.length,
-    nativeComponents: capabilities.filter(c => c.kind === 'component').length, nativeAvailable: capabilities.filter(c => c.kind === 'component' && c.available).length,
+    nativeComponents: capabilities.filter(c => c.kind === 'component' && !c.retired).length, nativeAvailable: capabilities.filter(c => c.kind === 'component' && !c.retired && c.available).length,
     chain: 'MockChainAdapter; private Working Memory; no on-chain transactions' }));
   let stopping = false;
   const shutdown = async () => { if (stopping) return; stopping = true; await stop(); };

@@ -10,6 +10,7 @@ import { componentRegistry, component } from '../../../examples/n8n-capability/c
 import { compileStudio, normalizeStudio, readStudio, studioProgramSource, validateStudioCapabilities } from '../../../examples/n8n-capability/studio-definition.mjs';
 import { createStudioProvider } from '../../../examples/n8n-capability/studio-provider.mjs';
 import { createStudioService } from '../../../examples/n8n-capability/studio-service.mjs';
+import { compileStudio as compileStudioV1, studioProgramSource as studioProgramSourceV1 } from '../../../examples/n8n-capability/studio-definition-v1.mjs';
 
 const graphId='n8n-capability-poc', owner='0x'+'1'.repeat(40);
 const catalog=componentRegistry.map(d=>({kind:'component',kaRef:'urn:demo:n8n:component:'+d.id+':unit',sourceHash:'a'.repeat(64),available:true,descriptor:d}));
@@ -61,6 +62,17 @@ test('catalog revisions and unavailable connections are rejected before compilat
   const value=normalizeStudio(definition());validateStudioCapabilities(value,catalog);
   assert.throws(()=>validateStudioCapabilities(value,catalog.map(c=>({...c,sourceHash:'b'.repeat(64)}))),/revision/);
   assert.throws(()=>validateStudioCapabilities(value,catalog.map(c=>({...c,available:false}))),/revision/);
+});
+test('previously saved Studio sources retain their original validator, parameters and source hash', () => {
+  const old = definition(['http-request'], []);
+  old.nodes[0].params = { url: 'http://127.0.0.1:4631/spike/ka/demo-data', method: 'GET', body: { hello: 'DKG' } };
+  const source = studioProgramSourceV1(compileStudioV1(old, { graphId, owner, fixture: true }));
+  const read = readStudio(source);
+  assert.equal(read.legacy, true);
+  assert.deepEqual(read.definition.nodes[0].params, old.nodes[0].params);
+  assert.equal(studioProgramSourceV1(read), source);
+  const unchanged = definition(['limit'], []);
+  assert.notEqual(compileStudio(unchanged, { graphId, owner, fixture: true }).kaRef, compileStudioV1(unchanged, { graphId, owner, fixture: true }).kaRef);
 });
 
 function environment() {

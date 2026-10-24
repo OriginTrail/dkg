@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { component, normalizeComponentInput } from './component-registry.mjs';
+import { component as componentV1, normalizeComponentInput as normalizeComponentInputV1 } from './component-registry-v1.mjs';
 import { normalizeStudio, readStudio, studioProgramSource, validateStudioCapabilities } from './studio-definition.mjs';
 import { workflowUuid } from './workflow-definition.mjs';
 import { n8nObservationScope, n8nExecutionMatches } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
@@ -34,7 +35,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     return workflows;
   }
   async function save(value, authorize) {
-    const definition = normalizeStudio(value); validateStudioCapabilities(definition, await listCapabilities());
+    const definition = normalizeStudio(value); validateStudioCapabilities(definition, (await listCapabilities()).filter(c => !c.retired));
     if (definition.nodes.some(n => component(n.componentId).writes)) authorize();
     const key = JSON.stringify(definition); if (saving.has(key)) return saving.get(key);
     const pending = (async () => {
@@ -50,7 +51,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
         source = await client.programs.getSource({ graphId, programIri: compiled.kaRef, programLayer: 'wm' });
       }
       if (source.sourceHash !== sourceHash || source.source !== sourceText) throw reject('The graph source differs from its saved revision.');
-      validateStudioCapabilities(definition, await listCapabilities());
+      validateStudioCapabilities(definition, (await listCapabilities()).filter(c => !c.retired));
       if (compiled.requiresExportAuthorization) authorize();
       if (!await approved(compiled.kaRef, sourceHash)) await client.programs.approve({ graphId, operationIri: compiled.kaRef,
         program: reference(source, graphId), allowedCallers: [owner], n8n: compiled.grant,
@@ -67,8 +68,8 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     validateStudioCapabilities(compiled.definition, await listCapabilities());
     if (workflow.requiresExportAuthorization) authorize();
     const root = compiled.definition.nodes.find(n => n.id === compiled.definition.entryId);
-    const descriptor = { ...component(root.componentId), ...(compiled.mode === 'schedule' ? { mode: 'action' } : {}) };
-    let input; try { input = normalizeComponentInput(descriptor, { itemsJson: value.itemsJson, paramsJson: JSON.stringify(root.params), executionId: '' }); }
+    const descriptor = { ...(compiled.legacy ? componentV1 : component)(root.componentId), ...(compiled.mode === 'schedule' ? { mode: 'action' } : {}) };
+    let input; try { input = (compiled.legacy ? normalizeComponentInputV1 : normalizeComponentInput)(descriptor, { itemsJson: value.itemsJson, paramsJson: JSON.stringify(root.params), executionId: '' }); }
     catch (e) { throw reject(e.message); }
     const result = await client.programs.invoke({ graphId, operationIri: workflow.kaRef, invocationId, inputs: [input] });
     if (!isDeepStrictEqual(await loadOutputs(result.executionIri), result.rawOutputs)) throw new Error('The DKG receipt readback differs.');

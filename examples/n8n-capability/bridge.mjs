@@ -41,6 +41,7 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
       const available = !!binding && definition?.enabled !== false;
       capabilities.push({ kaRef, graphId, sourceHash: source.sourceHash, name: source.label ?? 'n8n capability', version: source.version,
         kind: definition?.kind ?? 'text', available,
+        ...(definition.retired ? { retired: true } : {}),
         ...(definition?.kind === 'component' ? { descriptor: definition.descriptor } : {}),
         ...((definition?.requiresExportAuthorization || definition?.kind === 'google-sheets-export') ? { requiresExportAuthorization: true } : {}),
         ...(!available && definition?.descriptor?.connection ? { unavailableReason: 'Connect ' + definition.descriptor.name + ' OAuth in local n8n, then refresh the operator installation.' } : {}),

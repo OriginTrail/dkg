@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
-import { component, normalizeComponentInput, componentContract } from './component-registry.mjs';
+import { component, normalizeComponentInput, componentContract, componentValidationSource } from './component-registry.mjs';
+import { readStudio as readStudioV1 } from './studio-definition-v1.mjs';
 import { componentPiece, nativeNode, editNode, wire, expression, nativeLiteral } from './component-workflows.mjs';
 import { n8nWorkflowSha256, n8nObservationScope } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { workflowUuid } from './workflow-definition.mjs';
 
 export const STUDIO_PREFIX = 'urn:demo:nos:studio:';
-const marker = '// nos-n8n-studio-v1:';
+const marker = '// nos-n8n-studio-v2:';
 const record = v => v !== null && typeof v === 'object' && !Array.isArray(v);
 const fail = message => { throw Object.assign(new Error(message), { code: 'INVALID_WORKFLOW', status: 400 }); };
 const closed = (v, keys) => { if (!record(v) || Object.keys(v).some(k => !keys.includes(k))) fail('Unexpected workflow fields.'); };
@@ -82,9 +83,9 @@ export function validateStudioCapabilities(definition, capabilities) {
 
 export function compileStudio(value, { graphId, owner, headerCredential, credentials = {}, fixture = false, providerId } = {}) {
   const definition = normalizeStudio(value);
-  const revision = createHash('sha256').update(JSON.stringify(definition)).digest('hex');
+  const revision = createHash('sha256').update(JSON.stringify({ compiler: 2, definition })).digest('hex');
   const kaRef = STUDIO_PREFIX + definition.id + ':' + revision.slice(0, 20), workflowName = 'nOS Studio ' + revision;
-  const workflowId = providerId ?? 'nos_studio_' + createHash('sha256').update(JSON.stringify([graphId, owner, definition])).digest('hex').slice(0, 32);
+  const workflowId = providerId ?? 'nos_studio_' + createHash('sha256').update(JSON.stringify([graphId, owner, 2, definition])).digest('hex').slice(0, 32);
   const scopeName = n8nObservationScope(graphId, owner, workflowId);
   const root = definition.nodes.find(n => n.id === definition.entryId), mode = component(root.componentId).mode;
   const nodes = [], connections = {}, pieces = new Map();
@@ -103,7 +104,7 @@ export function compileStudio(value, { graphId, owner, headerCredential, credent
     piece.entries = [];
     if (!['schedule', 'webhook'].includes(n.componentId)) {
       for (let i = 0; i < (descriptor.inputs ?? 1); i++) {
-        const guard = editNode(name + ' check ' + i, `(() => { const input = $input.all().map(i => i.json); (${normalizeComponentInput.toString()})(${nativeLiteral(descriptor)}, { itemsJson: JSON.stringify(input), paramsJson: ${nativeLiteral(JSON.stringify(n.params))}, executionId: '' }); return $json; })()`);
+        const guard = editNode(name + ' check ' + i, `(() => { ${componentValidationSource()} const input = $input.all().map(i => i.json); normalize(${nativeLiteral(descriptor)}, { itemsJson: JSON.stringify(input), paramsJson: ${nativeLiteral(JSON.stringify(n.params))}, executionId: '' }); return $json; })()`);
         nodes.push(guard); wire(connections, guard.name, piece.entry, 0, i); piece.entries.push(guard.name);
       }
     } else piece.entries = [piece.entry];
@@ -142,15 +143,16 @@ export function studioProgramSource(compiled, grant = compiled.grant) {
   const root = compiled.definition.nodes.find(n => n.id === compiled.definition.entryId);
   const descriptor = { ...component(root.componentId), ...(compiled.mode === 'schedule' ? { mode: 'action' } : {}) };
   return marker + Buffer.from(JSON.stringify(metadata)).toString('base64') + '\n'
-    + `import { invoke_tool } from '@origintrail-official/dkg-graph-computer/program';\nconst normalize = ${normalizeComponentInput.toString()};\n`
+    + `import { invoke_tool } from '@origintrail-official/dkg-graph-computer/program';\n${componentValidationSource()}`
     + `export function run(input: unknown) { const value = normalize(${JSON.stringify(descriptor)}, input); if (value.paramsJson !== ${JSON.stringify(JSON.stringify(root.params))} || value.executionId) throw new Error('Use the saved workflow parameters.'); return invoke_tool('urn:dkg:tool:n8n', value); }\n`;
 }
 
 export function readStudio(source) {
+  if (typeof source === 'string' && source.startsWith('// nos-n8n-studio-v1:')) return { ...readStudioV1(source), legacy: true };
   if (typeof source !== 'string' || !source.startsWith(marker) || source.length > 65536) fail('Saved Studio source is invalid.');
   const data = JSON.parse(Buffer.from(source.split('\n')[0].slice(marker.length), 'base64').toString('utf8'));
   const definition = normalizeStudio(data.definition);
-  const revision = createHash('sha256').update(JSON.stringify(definition)).digest('hex');
+  const revision = createHash('sha256').update(JSON.stringify({ compiler: 2, definition })).digest('hex');
   const compiled = { definition, grant: data.grant, mode: data.mode, kaRef: STUDIO_PREFIX + definition.id + ':' + revision.slice(0, 20),
     requiresExportAuthorization: definition.nodes.some(n => component(n.componentId).writes) };
   if (studioProgramSource(compiled) !== source) fail('Saved Studio source differs from its reviewed definition.');

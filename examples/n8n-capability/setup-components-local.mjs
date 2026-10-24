@@ -1,10 +1,10 @@
 /** Provision native templates with n8n's official local CLI; no API token is sent by this installer. */
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync, renameSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, renameSync, chmodSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync, backup } from 'node:sqlite';
-import { componentRegistry, componentContract } from './component-registry.mjs';
+import { componentRegistry, componentContract, componentProgramSource } from './component-registry.mjs';
 import { standaloneComponentWorkflow, echoSubworkflow } from './component-workflows.mjs';
 import { n8nWorkflowSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 
@@ -42,6 +42,8 @@ if (existsSync(database)) {
 }
 if (!fixture && header.id === 'component-fixture-header') throw new Error('The existing PoC webhook credential reference was not found.');
 const components = [];
+const componentRef = item => `urn:demo:n8n:component:${item.descriptor.id}:${item.grant.workflowSha256.slice(0, 12)}`
+  + (item.descriptor.version >= 2 ? ':' + createHash('sha256').update(item.source).digest('hex').slice(0, 12) : '');
 const echo = echoSubworkflow();
 writeFileSync(join(output, echo.id + '.json'), JSON.stringify({ ...echo, versionId: randomUUID() }), { mode: 0o600 });
 for (const descriptor of componentRegistry) {
@@ -54,14 +56,14 @@ for (const descriptor of componentRegistry) {
     for (const n of workflow.nodes) if (n.type === 'n8n-nodes-base.webhook') {
       n.parameters.authentication = 'none'; delete n.credentials;
     }
-    if (descriptor.id === 'http-request') workflow.nodes.find(n => n.name === 'Component').parameters.url = 'http://127.0.0.1:45782/data';
   }
   if (!only || only.includes(descriptor.id)) writeFileSync(join(output, id + '.json'), JSON.stringify({ ...workflow, versionId: randomUUID() }), { mode: 0o600 });
-  components.push({ kind: 'component', descriptor, name: descriptor.name,
+  const item = { kind: 'component', descriptor, name: descriptor.name, source: componentProgramSource(descriptor.id),
     enabled: !descriptor.connection || !!credentials[descriptor.connection],
     requiresExportAuthorization: !!descriptor.writes,
     kaRef: `urn:demo:n8n:component:${descriptor.id}:${n8nWorkflowSha256(workflow).slice(0, 12)}`,
-    grant: { toolIri: 'urn:dkg:tool:n8n', workflowId: id, workflowSha256: n8nWorkflowSha256(workflow), ...componentContract, result } });
+    grant: { toolIri: 'urn:dkg:tool:n8n', workflowId: id, workflowSha256: n8nWorkflowSha256(workflow), ...componentContract, result } };
+  item.kaRef = componentRef(item); components.push(item);
 }
 if (install) {
   if (!cli) throw new Error('--install requires the installed n8n CLI path.');
@@ -87,12 +89,15 @@ if (install) {
     if (item.enabled && item.descriptor.mode !== 'schedule' && !stored.activeVersionId) throw new Error('Native component was not published.');
     const definition = { nodes: JSON.parse(stored.nodes), connections: JSON.parse(stored.connections), settings: stored.settings ? JSON.parse(stored.settings) : {} };
     item.grant.workflowSha256 = n8nWorkflowSha256(definition);
-    item.kaRef = `urn:demo:n8n:component:${item.descriptor.id}:${item.grant.workflowSha256.slice(0, 12)}`;
+    item.kaRef = componentRef(item);
   }
   db.close();
 }
 const file = join(state, install ? 'components.json' : 'components.prepared.json');
-writeFileSync(file + '.next', JSON.stringify({ version: 1, installed: install, components }, null, 2), { mode: 0o600 });
+// Existing saved graphs keep their original child pins and native definitions.
+const retired = install && existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')).components
+  .filter(old => !components.some(current => current.kaRef === old.kaRef)).map(old => ({ ...old, retired: true })) : [];
+writeFileSync(file + '.next', JSON.stringify({ version: 2, installed: install, components: [...components, ...retired] }, null, 2), { mode: 0o600 });
 renameSync(file + '.next', file);
 console.log(JSON.stringify({ installed: install, prepared: components.length, availableConnections: Object.keys(credentials),
   enabled: components.filter(c => c.enabled).length, scheduleActivationRequired: true, restartN8nRequired: install, manifest: file }));

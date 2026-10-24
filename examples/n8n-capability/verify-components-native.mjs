@@ -6,7 +6,6 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createServer } from 'node:http';
 import { componentRegistry, normalizeComponentInput } from './component-registry.mjs';
 import { collectN8nExecutionResult } from '../../packages/cli/dist/semantic-runtime-n8n-results.js';
 
@@ -22,19 +21,6 @@ const evidence = [];
 const skipHttp = process.argv.includes('--skip-http');
 const onlyIndex = process.argv.indexOf('--only');
 const only = onlyIndex >= 0 ? process.argv[onlyIndex + 1].split(',') : null;
-let httpFixture;
-if (!skipHttp && (!only || only.includes('http-request'))) {
-  const target = manifest.components.find(c => c.descriptor.id === 'http-request');
-  const stored = db.prepare('SELECT nodes FROM workflow_entity WHERE id=?').get(target.grant.workflowId);
-  if (JSON.parse(stored.nodes).find(n => n.name === 'Component').parameters.url !== 'http://127.0.0.1:45782/data') throw new Error('HTTP smoke tests require the pinned local fixture endpoint.');
-  httpFixture = createServer(async (req, res) => {
-    if (req.url !== '/data') { res.writeHead(404).end(); return; }
-    let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 4096) { res.writeHead(413).end(); return; } }
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ source: 'local-native-fixture', records: 2, ...(body ? { received: JSON.parse(body) } : {}) }));
-  });
-  await new Promise((resolve, reject) => { httpFixture.once('error', reject); httpFixture.listen(45782, '127.0.0.1', resolve); });
-}
 try {
   for (const descriptor of componentRegistry.filter(c => !c.connection && c.mode !== 'schedule' && (!skipHttp || c.id !== 'http-request') && (!only || only.includes(c.id)))) {
     const selected = manifest.components.find(c => c.descriptor.id === descriptor.id);
@@ -84,7 +70,7 @@ try {
       case 'markdown': assert.ok(output[0].html.includes('<h1')); break;
       case 'crypto': assert.equal(output[0].hash, createHash('sha256').update('Ana').digest('hex')); break;
       case 'compression': assert.equal(Buffer.from(output[0].file.base64, 'base64').subarray(0, 2).toString(), 'PK'); break;
-      case 'http-request': assert.ok(output.length > 0); break;
+      case 'http-request': assert.equal(typeof output[0].current.temperature_2m, 'number'); break;
       case 'if': assert.equal(ports.true[0].name, 'Ana'); assert.equal(ports.false[0].name, 'Luka'); break;
       case 'switch': assert.equal(ports.match[0].name, 'Ana'); assert.equal(ports.other[0].name, 'Luka'); break;
       case 'merge': assert.equal(output.length, 4); break;
@@ -101,4 +87,4 @@ try {
     console.log(JSON.stringify(evidence.at(-1)));
   }
   console.log(JSON.stringify({ verifiedNativeComponents: evidence.length, credentialsUsed: false }));
-} finally { db.close(); if (httpFixture) await new Promise(resolve => httpFixture.close(resolve)); }
+} finally { db.close(); }
