@@ -18,6 +18,8 @@ import type { PromoteJob, PromoteJobState } from '@origintrail-official/dkg-publ
 export interface PromoteJobErrorView {
   code: string;
   diagnosticCode?: string;
+  /** Which authority prerequisite a retryable attempt waited for (a closed-set token). */
+  authorityReason?: string;
   message: string;
   retryable: boolean;
 }
@@ -71,6 +73,7 @@ export function promoteJobToView(job: PromoteJob): PromoteJobView {
         message: job.attempt.lastError.message,
         retryable: job.attempt.lastError.retryable,
         ...(job.attempt.lastError.diagnosticCode ? { diagnosticCode: job.attempt.lastError.diagnosticCode } : {}),
+        ...(job.attempt.lastError.authorityReason ? { authorityReason: job.attempt.lastError.authorityReason } : {}),
       }
     : undefined;
 

@@ -110,16 +110,8 @@ function agentLabel(agentId: string): string {
 
 /** Build the SPARQL that enumerates every publish-batch WorkspaceOperation
  *  across every sub-graph's `_shared_memory_meta`. */
-function buildAnchorsQuery(cgId: string): string {
-  // Trailing slash makes this an EXACT CG prefix: every partition graph is
-  // `did:dkg:context-graph:<cg>/[<sg>/]_shared_memory_meta`, so "<cgUri>/"
-  // matches all of this CG's partitions while excluding sibling CGs whose id
-  // merely shares the prefix (cg-1 must not capture cg-10 / cg-1-foo). Same
-  // known limitation as useSwmAttributions.buildAttributionsQuery: a
-  // path-extending child CG `<cg>/<x>` (CG ids may contain "/") would still
-  // prefix-match; the authoritative fix is the deferred server-side sub-graph
-  // SWM routing (A2/A4).
-  const cgPrefix = `did:dkg:context-graph:${cgId}/`;
+function buildAnchorsQuery(): string {
+  // The server resolves registered partitions and excludes child Context Graphs.
   return `PREFIX dkg: <http://dkg.io/ontology/>
 PREFIX prov: <http://www.w3.org/ns/prov#>
 SELECT ?op ?root ?agent ?publishedAt ?g WHERE {
@@ -129,10 +121,7 @@ SELECT ?op ?root ?agent ?publishedAt ?g WHERE {
         dkg:publishedAt ?publishedAt ;
         prov:wasAttributedTo ?agent .
   }
-  FILTER(
-    STRSTARTS(STR(?g), "${cgPrefix}") &&
-    CONTAINS(STR(?g), "_shared_memory_meta")
-  )
+  FILTER(STRENDS(STR(?g), "/_shared_memory_meta"))
 } ORDER BY ?publishedAt LIMIT 2000`;
 }
 
@@ -242,13 +231,10 @@ export function useVerifiableMemoryAnchors(
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders() },
           body: JSON.stringify({
-            // Do NOT send contextGraphId here. buildAnchorsQuery already scopes to
-            // the CG via its exact STRSTARTS(?g, "<cgUri>/") and enumerates EVERY sub-graph's
-            // <cg>/<sg>/_shared_memory_meta partition. Passing contextGraphId makes
-            // the engine constrain GRAPH ?g to CG-direct graphs only, dropping
-            // per-sub-graph anchors/attribution (same bug class as B2). See
-            // dkg-query-engine.ts graph-variable allow-list.
-            sparql: buildAnchorsQuery(contextGraphId),
+            contextGraphId,
+            includeContextGraphPartitions: true,
+            includeSharedMemoryMeta: true,
+            sparql: buildAnchorsQuery(),
           }),
         });
         if (!res.ok) throw new Error(`SPARQL query failed: ${res.status}`);

@@ -35,6 +35,7 @@
  * keccak256 fileHash; share-async → 200 {state:'queued'}.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createServer } from 'node:http';
 import {
   startLiveDaemon,
   stopLiveDaemon,
@@ -446,6 +447,14 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(body.count).toBe(2);
       // Sorted: ex:A precedes ex:Z.
       expect(body.quads[0].subject).toBe('ex:A');
+      const descriptor = await getJson(daemon, `/api/knowledge-assets/sorted?contextGraphId=${LOCAL}`);
+      const author = String(descriptor.body.agentAddress);
+      for (const spelling of [author, author.toLowerCase(), caseVariantAddress(author)]) {
+        const equivalent = await getJson(daemon,
+          `/api/knowledge-assets/sorted/wm/quads?contextGraphId=${LOCAL}&agentAddress=${spelling}`);
+        expect(equivalent.status).toBe(200);
+        expect(equivalent.body).toEqual(body);
+      }
     });
 
     it('rejects a bad assertion name (400, no query)', async () => {
@@ -1057,10 +1066,60 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(pullRes.status, `pull: ${JSON.stringify(pullRes.body)}`).toBe(200);
       expect(pullRes.body.seeded).toBeGreaterThan(0);
 
+      const recoverExact = { kaUal: pullRes.body.kaUal, assertionVersion: pullRes.body.assertionVersion, merkleRoot: pullRes.body.merkleRoot };
+      const path = `/api/knowledge-assets/${name}/wm/pull-from`;
+      // A real HTTP proxy forwards a complete pull but drops its response.
+      let forwardedStatus: number | undefined;
+      const proxy = createServer(async (req, res) => {
+        try {
+          const chunks = [];
+          for await (const chunk of req) chunks.push(chunk);
+          const upstream = await fetch(`${daemon.base}${path}`, { method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${agent.authToken}` },
+            body: Buffer.concat(chunks) });
+          const completed = await upstream.json();
+          forwardedStatus = upstream.status;
+          expect(completed.seeded).toBeGreaterThan(0);
+          res.destroy();
+        } catch (error) { res.destroy(error as Error); }
+      });
+      await new Promise<void>(resolve => proxy.listen(0, '127.0.0.1', resolve));
+      try {
+        const address = proxy.address() as { port: number };
+        await expect(fetch(`http://127.0.0.1:${address.port}${path}`, { method: 'POST',
+          body: JSON.stringify({ contextGraphId: cg, layer: 'swm', onConflict: 'replace' }) })).rejects.toThrow();
+      } finally { await new Promise<void>(resolve => proxy.close(() => resolve())); }
+      expect(forwardedStatus).toBe(200);
+      expect((await agent.post(path, { contextGraphId: cg, layer: 'swm' })).body.code).toBe('WM_DRAFT_CONFLICT');
+      const recovered = await agent.post(path, { contextGraphId: cg, layer: 'swm', recoverExact });
+      expect(recovered.status, JSON.stringify(recovered.body)).toBe(200);
+      const missingSubgraph = await agent.post(path, { contextGraphId: cg, layer: 'swm', subGraphName: 'missing' });
+      expect(missingSubgraph.status, JSON.stringify(missingSubgraph.body)).toBe(400);
+      expect(missingSubgraph.body.code).toBe('SUB_GRAPH_NOT_FOUND');
+      expect(recovered.body).toMatchObject({ recovered: true, draftEvidence: {
+        agentAddress: agent.agentAddress, contextGraphId: cg, privateTripleCount: 0, ...recoverExact } });
+      expect((await agent.post(path, { contextGraphId: cg, layer: 'swm',
+        recoverExact: { ...recoverExact, assertionVersion: '999' } })).body.code).toBe('WM_RECOVERY_SOURCE_UNAVAILABLE');
+      for (const invalid of [null, {}, { ...recoverExact, assertionVersion: 1 }]) {
+        expect((await agent.post(path, { contextGraphId: cg, layer: 'swm', recoverExact: invalid })).status).toBe(400);
+      }
+      expect((await agent.post(path, { contextGraphId: cg, layer: 'swm', recoverExact, onConflict: 'replace' })).status).toBe(400);
+      const other = await registerAgentClient('ka-wrong-recovery-actor');
+      const wrongActor = await other.post(path, { contextGraphId: cg, layer: 'swm', recoverExact, agentAddress: agent.agentAddress });
+      expect(wrongActor.status).toBe(400); // Named mutation targets cannot override the bearer actor.
+      expect((await fetch(`${daemon.base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contextGraphId: cg, layer: 'swm', recoverExact }) })).status).toBe(401);
+
       const readRes = await agent.get(`/api/knowledge-assets/${name}/wm/quads?contextGraphId=${cg}`);
       expect(readRes.status, `read: ${JSON.stringify(readRes.body)}`).toBe(200);
       expect(readRes.body.count).toBeGreaterThan(0);
       expect(readRes.body.quads.some((q: any) => q.subject === 'ex:token-pull')).toBe(true);
+      for (const spelling of [agent.agentAddress.toLowerCase(), caseVariantAddress(agent.agentAddress)]) {
+        const equivalent = await agent.get(
+          `/api/knowledge-assets/${name}/wm/quads?contextGraphId=${cg}&agentAddress=${spelling}`);
+        expect(equivalent.status).toBe(200);
+        expect(equivalent.body).toEqual(readRes.body);
+      }
     });
   });
 

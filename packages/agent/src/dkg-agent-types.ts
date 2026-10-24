@@ -1502,18 +1502,16 @@ export interface DKGAgentConfig {
    */
   networkRelays?: readonly string[];
   /**
-   * Relay multiaddrs declared by the OTHER DKG networks bundled with this
-   * build (the daemon derives them from network/*.json). With a network
-   * identity the node refuses to dial these peers, store their addresses or
-   * accept their connections. `relayPeers` win over this static list only: a
-   * `relayPeers` entry that fails the network-identity proof is refused like
-   * any other peer (`DKGNodeConfig.otherNetworkRelays`).
+   * Relay multiaddrs declared by the OTHER DKG networks bundled with this build
+   * (the daemon derives them from network/*.json). With a network identity the
+   * node refuses to dial these peers, store their addresses or accept their
+   * connections. `relayPeers` win over this static list only: a `relayPeers` entry
+   * that fails the network-identity proof is refused like any other peer (`DKGNodeConfig.otherNetworkRelays`).
    */
   otherNetworkRelays?: readonly string[];
   /**
-   * Transport-level network peer isolation (`DKGNodeConfig.networkPeerIsolation`).
-   * Default true; false is the operator kill switch, leaving other networks'
-   * peers to network admission alone.
+   * Transport-level network peer isolation (`DKGNodeConfig.networkPeerIsolation`). Default true; false is
+   * the operator kill switch, leaving other networks' peers to network admission alone.
    */
   networkPeerIsolation?: boolean;
   /** Legacy ACK candidate allowlist. When set, unlisted connected peers are not dialed for ACKs. */
@@ -1532,6 +1530,8 @@ export interface DKGAgentConfig {
   preferredACKPeerIds?: string[];
   /** Multiaddrs to announce to the network (for VPS/cloud nodes with a public IP not on the interface). */
   announceAddresses?: string[];
+  /** Announce public and relay addresses only, and take only a peer's public addresses for a direct route. Default false. */
+  publicAddressesOnly?: boolean;
   skills?: Array<{
     skillType: string;
     pricePerCall?: number;
@@ -1848,7 +1848,7 @@ export interface DKGAgentConfig {
   queryAccess?: QueryAccessConfig;
   /** User-selected context graph IDs to sync automatically on peer connect. */
   syncContextGraphs?: string[];
-  /** TTL for shared memory data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */
+  /** TTL for shared memory data in milliseconds. Expired operations are periodically cleaned up. Default: 30 days (`DEFAULT_SWM_TTL_MS`). Set to 0 to disable. */
   sharedMemoryTtlMs?: number;
   /**
    * OT-RFC-38 LU-6 — settings for the core-side host-mode SWM store.
@@ -1860,7 +1860,7 @@ export interface DKGAgentConfig {
    *  - `unregistered`: TTL/byte-cap for CGs the core knows about but that aren't on-chain registered yet.
    *  - `registered`: TTL/byte-cap for on-chain registered CGs (typically larger).
    *  - `pruneIntervalMs`: how often the TTL/cap sweep runs.
-   *  - `reconcileIntervalMs`: how often the host-mode subscription reconciler ensures cores are subscribed to all known curated CGs.
+   *  - `reconcileIntervalMs`: how often the host-mode subscription reconciler sweeps known curated CGs. With `stripCiphertext` on (the default) it declines them, so no curated CG is hosted in host mode.
    *  - `reconcileBatchSize`: max known CGs reconciled per tick. Default 32.
    *  - `reconcileJitterRatio`: startup interval jitter ratio in [0, 1]. Default 0.15.
    */

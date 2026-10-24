@@ -1,4 +1,5 @@
 import { SparqlHttpResponseError } from './adapters/sparql-http-response-error.js';
+import { StoreOperationTimeoutError } from './store-operation-timeout.js';
 /** A transport interruption from a query already classified as read-only. */
 export class StoreReadTransportFailure extends Error {
   readonly code = 'STORE_READ_TRANSPORT_FAILURE';
@@ -10,14 +11,21 @@ export class StoreReadTransportFailure extends Error {
 
 /** Retain the established SPARQL status/operation contract at proven read boundaries. */
 class StoreReadSparqlHttpFailure extends SparqlHttpResponseError {
+  declare private readonly readProvenance: void;
   constructor(cause: SparqlHttpResponseError) {
     super(cause.operation, cause.status, cause.responseExcerpt);
     this.cause = cause;
   }
 }
 
-export function isStoreReadTransportFailure(error: unknown): error is StoreReadTransportFailure | SparqlHttpResponseError {
-  return error instanceof StoreReadTransportFailure || error instanceof StoreReadSparqlHttpFailure;
+/** Preserve the adapter deadline contract for consumers outside the publisher. */
+class StoreReadDeadlineFailure extends StoreOperationTimeoutError {
+  declare private readonly readProvenance: void;
+  constructor(cause: StoreOperationTimeoutError) { super({ ...cause, message: cause.message, cause }); }
+}
+
+export function isStoreReadTransportFailure(error: unknown): error is StoreReadTransportFailure | StoreReadSparqlHttpFailure | StoreReadDeadlineFailure {
+  return error instanceof StoreReadTransportFailure || error instanceof StoreReadSparqlHttpFailure || error instanceof StoreReadDeadlineFailure;
 }
 
 export class StoreReadHttpResponseError extends Error {
@@ -31,6 +39,7 @@ const TRANSPORT_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDO
 /** Call only at a proven read boundary; this function never retries an operation. */
 export async function classifyStoreReadTransport<T>(read: Promise<T>): Promise<T> {
   try { return await read; } catch (error) {
+    if (error instanceof StoreOperationTimeoutError) throw new StoreReadDeadlineFailure(error);
     if (error instanceof SparqlHttpResponseError && TRANSIENT_READ_STATUS.has(error.status)) throw new StoreReadSparqlHttpFailure(error);
     if (error instanceof StoreReadHttpResponseError && TRANSIENT_READ_STATUS.has(error.status)) throw new StoreReadTransportFailure(error);
     if (error instanceof Error && (

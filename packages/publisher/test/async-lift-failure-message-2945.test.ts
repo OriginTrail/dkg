@@ -45,8 +45,8 @@ describe('GH#2945 persisted failure messages are host-only for every failure cod
       new Error(`Store query failed while reading ${KEYED_RPC_URL}: busy`),
     ));
 
-    expect(failed.failure.code).toBe('workspace_unavailable');
-    expectHostOnly(failed.failure.message);
+    expect(failed.failure.code).toBe('validation_unknown');
+    expect(failed.failure.message).toBe('Publication validation failed for an unknown reason');
   });
 
   it('a broadcast-origin failure on the publish mapper (a genuine submission timeout)', async () => {
@@ -79,7 +79,7 @@ describe('GH#2945 persisted failure messages are host-only for every failure cod
     expectHostOnly(failed.failure.message);
   });
 
-  it('classification still reads the RAW text: a URL path that spells a keyword changes nothing', async () => {
+  it('a keyword in an untyped URL path cannot grant retry permission', async () => {
     // "timeout" appears only inside the URL. The legacy chain keyed on it before this change and still
     // does; the persisted message just no longer carries the path.
     const publisher = h.createPublisher(RETRY_LANE);
@@ -90,7 +90,7 @@ describe('GH#2945 persisted failure messages are host-only for every failure cod
       new Error('lookup failed at https://rpc.example/timeout/SECRET-API-KEY'),
     ));
 
-    expect(failed.failure.code).toBe('workspace_unavailable');
+    expect(failed.failure.code).toBe('validation_unknown');
     expect(failed.failure.message).not.toContain('SECRET-API-KEY');
     expect(failed.failure.message).not.toContain('/timeout/');
   });
@@ -128,6 +128,6 @@ describe('GH#2945 persisted failure messages are host-only for every failure cod
       new Error('Store query failed: connect ECONNREFUSED 127.0.0.1:8545'),
     ));
 
-    expect(failed.failure.message).toBe('Store query failed: connect ECONNREFUSED 127.0.0.1:8545');
+    expect(failed.failure.message).toBe('Publication validation failed for an unknown reason');
   });
 });

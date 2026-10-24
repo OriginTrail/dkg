@@ -1,4 +1,4 @@
-/** Disposable child for publisher-live-control-restart.mts; never targets an operator data directory. */
+/** Disposable child for publisher-live-control-restart.test.mts; never targets an operator data directory. */
 import { createServer } from 'node:http';
 import fs from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';

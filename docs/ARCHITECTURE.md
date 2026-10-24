@@ -716,7 +716,9 @@ decision to keep private-store RDF plaintext after message decryption.
   into `_shared_memory`, removes the promoted rows from the assertion graph, and
   updates lifecycle metadata in `_meta`.
 - **SWM substrate writes** are produced by named KA sharing, gossip receive,
-  catch-up, and host-mode replication. Product callers share through
+  catch-up, and host-mode replication (only from Cores that run with
+  `swmHostMode.stripCiphertext: false`; by default Cores keep and serve no
+  host-mode copy of a curated graph). Product callers share through
   `POST /api/knowledge-assets/:name/swm/share` or `/swm/share-async`; those
   paths persist normalized quads in `did:dkg:context-graph:<cg>/_shared_memory`
   or the sub-graph equivalent. SWM operation metadata and ownership live in
@@ -732,13 +734,19 @@ decision to keep private-store RDF plaintext after message decryption.
   stores a JSON literal payload in a private staging graph keyed by
   `shareOperationId`, then the async publisher later moves those quads into
   `_private`.
-- **Encrypted ACK staging** is a scoped publish-finalization exception, not the
-  #633 queryability surface. Curated/private publishes may ask core nodes that
-  are not context-graph members to ACK storage without seeing plaintext. In that
-  path `StorageACKHandler` stores a temporary base64 ciphertext blob under
-  `_shared_memory/staging-encrypted/<merkle-prefix>` and
-  `urn:dkg:swm:v10-publish-ciphertext`; those rows are opaque transport escrow,
-  not queryable KA triples.
+- **Curated publish ACKs** leave no private data on the acknowledging core
+  nodes (OT-RFC-49, "hosting follows access"). Curated/private publishes still ask core nodes
+  that are not context-graph members to ACK storage without seeing plaintext,
+  but the request carries only the context graph's public `_catalog` N-quads
+  and the claimed `catalogRoot` / `catalogLeafCount`. `StorageACKHandler`
+  confirms the graph is curated, rebuilds the catalog root from those quads,
+  declines with `CATALOG_ROOT_MISMATCH` when it disagrees, and persists the
+  verified catalog to `did:dkg:context-graph:<cg>/_catalog` before it signs the
+  ACK. A curated update that carries a new catalog commitment is verified the
+  same way and replaces the stored catalog. Random sampling proves this public
+  catalog (`catalogRoot` / `catalogLeafCount` in `KnowledgeAssetsLifecycle`),
+  not ciphertext. This replaced the earlier encrypted-blob and ciphertext-chunk
+  ACK paths, which stored ciphertext on cores.
 
 The removed triple-store-level encryption surface was narrow: the
 `PrivateContentStore` `enc:gcm:v1` literal seal, `DKG_PRIVATE_STORE_KEY*`
@@ -748,9 +756,9 @@ metadata, assertion lifecycle, SWM persistence, and publisher replay semantics
 remain intact. Do not remove the peer-to-peer encryption surfaces: Sender Key
 SWM, legacy `EncryptedWorkspacePayload`, or encrypted sender-key setup packages.
 The Universal Messenger `sendReliable` / `register` reliability substrate
-continues to carry those opaque application payload bytes on the wire. Encrypted
-ACK staging also stays out of the #633 fix; if that exception needs to move out
-of RDF storage later, handle it as a separate publish-finalization design.
+continues to carry those opaque application payload bytes on the wire. Curated
+publish ACKs no longer stage ciphertext in RDF storage (see above), so the
+encrypted ACK staging exception this fix once carved out no longer exists.
 
 No automatic migration is planned for already-written `_private`
 `enc:gcm:v1` rows. They can remain as legacy data and may be overwritten or

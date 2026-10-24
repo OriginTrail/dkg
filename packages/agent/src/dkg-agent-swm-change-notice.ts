@@ -304,6 +304,11 @@ export class SwmChangeNoticeMethods extends DKGAgentBase {
       deliver: (notice, recipients) => sendSwmChangeNotice(notice, recipients, (peerId, bytes) => this.messenger.sendToPeer(
         peerId, PROTOCOL_SWM_CHANGE_NOTICE, bytes, { timeoutMs: DKGAgentBase.SWM_SUBSTRATE_FANOUT_TIMEOUT_MS },
       )),
+      // What identify told of the peer; unknown (no protocols yet) is tried.
+      supportsNotice: async (peerId) => {
+        const protocols = await this.getPeerProtocols(peerId);
+        return protocols.length === 0 ? undefined : protocols.includes(PROTOCOL_SWM_CHANGE_NOTICE);
+      },
       log: (message) => this.log.info(shareCtx, message),
     });
     const ownerPeers = new Map<string, { readonly at: number; readonly peerIds: readonly string[] }>();
