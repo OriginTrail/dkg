@@ -12,7 +12,8 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stripVTControlCharacters } from 'node:util';
+import { promisify, stripVTControlCharacters } from 'node:util';
+import { execFile } from 'node:child_process';
 import type { PlaywrightManagedMarker } from './bootstrap-devnet.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -45,17 +46,13 @@ async function stopPid(pid: number, label: string): Promise<void> {
 }
 
 async function stopNode(devnetDir: string, nodeIndex: number): Promise<void> {
-  // devnet.pid identifies the detached supervisor, daemon.pid its worker.
-  // Snapshot both before signalling: stopping the supervisor alone can orphan
-  // the worker, and either process may remove its pidfile while exiting.
-  const pidfiles = ['devnet.pid', 'daemon.pid'].map(name => resolve(devnetDir, `node${nodeIndex}`, name));
-  const pids = new Set(pidfiles.filter(existsSync).map(file =>
-    Number(stripVTControlCharacters(readFileSync(file, 'utf8')).trim())));
-  const results = await Promise.allSettled([...pids].filter(pid => Number.isInteger(pid) && pid > 0)
-    .map(pid => stopPid(pid, `node${nodeIndex}`)));
-  const failures = results.filter(result => result.status === 'rejected');
-  if (failures.length) throw new AggregateError(failures.map(result => result.reason), `node${nodeIndex} cleanup failed`);
-  for (const file of pidfiles) rmSync(file, { force: true });
+  if (!existsSync(resolve(devnetDir, `node${nodeIndex}`))) return;
+  // The existing scoped stop discovers supervisor/worker/store descendants by
+  // DKG_HOME as well as PID files. Cancellation can precede daemon.pid creation.
+  const { stdout } = await promisify(execFile)('bash', [resolve(REPO_ROOT, 'scripts/devnet.sh'), 'stop-node', String(nodeIndex)], {
+    env: { ...process.env, DEVNET_DIR: devnetDir }, timeout: 30_000,
+  });
+  console.log(stdout.trim());
 }
 
 async function stopHardhat(devnetDir: string): Promise<void> {

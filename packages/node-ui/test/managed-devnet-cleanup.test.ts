@@ -8,7 +8,9 @@ import { cleanupManagedDevnet } from '../e2e/global-teardown.js';
 
 it('cleans interrupted-bootstrap children while preserving pre-existing nodes and chain', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-owned-cleanup-'));
-  const children = Array.from({ length: 4 }, () => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }));
+  const children = Array.from({ length: 5 }, (_, index) => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    stdio: 'ignore', env: { ...process.env, DKG_HOME: join(dir, index === 3 ? 'node2' : index === 4 ? 'node20' : `unrelated${index}`) },
+  }));
   try {
     await Promise.all(children.map(child => once(child, 'spawn')));
     for (let index = 0; index < 2; index++) {
@@ -16,7 +18,8 @@ it('cleans interrupted-bootstrap children while preserving pre-existing nodes an
       writeFileSync(join(dir, `node${index + 1}`, 'devnet.pid'), String(children[index]!.pid));
     }
     writeFileSync(join(dir, 'hardhat.pid'), String(children[2]!.pid));
-    writeFileSync(join(dir, 'node2', 'daemon.pid'), String(children[3]!.pid));
+    // The worker has no daemon.pid yet: cancellation raced its initialization.
+    // node20 deliberately shares the node2 prefix and must remain untouched.
     writeFileSync(join(dir, '.playwright-managed'), JSON.stringify({ numNodes: '2', preExistingNodes: [1], preExistingHardhat: true }));
     const stopped = Promise.all([once(children[1]!, 'exit'), once(children[3]!, 'exit')]);
     await cleanupManagedDevnet(dir);
@@ -24,6 +27,7 @@ it('cleans interrupted-bootstrap children while preserving pre-existing nodes an
     await stopped;
     expect(() => process.kill(children[0]!.pid!, 0)).not.toThrow();
     expect(() => process.kill(children[2]!.pid!, 0)).not.toThrow();
+    expect(() => process.kill(children[4]!.pid!, 0)).not.toThrow();
     expect(existsSync(join(dir, '.playwright-managed'))).toBe(false);
     await cleanupManagedDevnet(dir); // repeated always-cleanup is harmless
     expect(() => process.kill(children[0]!.pid!, 0)).not.toThrow();
