@@ -231,6 +231,9 @@ async function precondition(caseId, when) {
   return false;
 }
 
+// Whether the feeder could not be set up for a later attempt of case 6 (it is not tried again).
+let feederFailed = false;
+
 /**
  * The large graph of case 6's attempt `attempt`, kept away from the Cores and
  * filled with `size` ({ assets, triples per asset }). The first is the
@@ -239,13 +242,13 @@ async function precondition(caseId, when) {
  * more than before; without a feeder it is the owner's too.
  */
 async function largeGraph(attempt, size) {
-  if (attempt > 1 && edges.feeder && !edges.feederUp) {
+  if (attempt > 1 && edges.feeder && !edges.feederUp && !feederFailed) {
     try {
       await edges.startFeeder();
       say(`feeder ${edges.feeder.label} up and dialed by member2 (${elapsed()})`);
     } catch (error) {
       note(`the feeder could not be set up (${error?.message ?? error}): the owner writes the large graphs of case 6's later attempts`);
-      edges.feeder = null;
+      feederFailed = true;
     }
   }
   const author = edges.largeAuthor;
@@ -343,12 +346,14 @@ async function run() {
     await busyMember({ devnet, edges, graphs, io, report, precondition, boundMs: BOUND_MS, sub: SUB, attempts: BUSY_ATTEMPTS, largeGraph, connect: redial }, pub.graph, big);
   }
   // A feeder that ran must not have followed the public graph, as no Core may; then it stops, and the cases
-  // after case 6 run with the owner and the members alone, as before it.
-  if (edges.feederUp) {
+  // after case 6 run with the owner and the members alone, as before it. One that cannot be stopped (asked
+  // twice) fails case 6: the cases after it would run beside it.
+  if (edges.feederRunning) {
     const fed = await graphs.following(edges.feeder, pub.graph);
     if (fed.state === 'following') fail(2, `after case 6 the feeder ${edges.feeder.label} follows the public graph: its gossip may have carried writes`);
     else if (fed.state !== 'not-following') fail(2, `after case 6 it is not known whether the feeder ${edges.feeder.label} follows the public graph (${fed.reason ?? fed.state})`);
-    await edges.stopFeeder().catch(error => note(`the feeder could not be stopped after case 6: ${error?.message ?? error}`));
+    const stopped = await edges.stopFeeder().catch(() => edges.stopFeeder()).then(() => null, error => error);
+    if (stopped) fail(6, `the feeder ${edges.feeder.label} could not be stopped after case 6, so the cases after it run beside it: ${stopped?.message ?? stopped}`);
   }
 
   // Case 5: members that subscribed LATER_MS ago (after case 6, the members dial the owner again, as above).

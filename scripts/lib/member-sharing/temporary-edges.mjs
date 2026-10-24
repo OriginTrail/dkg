@@ -40,7 +40,10 @@ export class TemporaryEdges {
     this.member1 = null;
     this.member2 = null;
     this.feeder = null;
-    // Whether the feeder runs now (startFeeder, stopFeeder).
+    // Whether the feeder's process runs (from its start until a stop that
+    // succeeded), and whether it is the author of the next large graph (from
+    // member 2's dial until it is stopped).
+    this.feederRunning = false;
     this.feederUp = false;
     // Every node this run added: the cleanup stops and removes these only.
     this.started = [];
@@ -161,24 +164,31 @@ export class TemporaryEdges {
 
   /**
    * Starts the feeder and has member 2 dial it; throws when either fails. A
-   * feeder member 2 cannot dial is stopped again; the cleanup removes it.
+   * feeder member 2 cannot dial is stopped again (feederRunning says whether
+   * that worked); the cleanup removes it either way.
    */
   async startFeeder() {
     await this.start(this.feeder);
+    this.feederRunning = true;
     try {
       await this.dial(this.member2, this.feeder);
     } catch (error) {
-      await this.stop(this.feeder).catch(() => {});
+      await this.stopFeeder().catch(() => {});
       throw error;
     }
     this.feederUp = true;
   }
 
-  /** Stops the feeder, so that the cases after case 6 run with the owner and the members alone. */
+  /**
+   * Stops a running feeder, so that the cases after case 6 run with the owner
+   * and the members alone. A stop that fails leaves it marked running, and
+   * stopFeeder may be called again.
+   */
   async stopFeeder() {
-    if (!this.feederUp) return;
-    this.feederUp = false;
+    if (!this.feederRunning) return;
     await this.stop(this.feeder);
+    this.feederRunning = false;
+    this.feederUp = false;
   }
 
   /**

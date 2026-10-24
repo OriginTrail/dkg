@@ -14,9 +14,10 @@ const MARK = '.issue-3251-member-sharing';
  * caller's mark into it first, and then starts the node. `duringAddnode` runs
  * at the start of each addnode, as another suite might; `readiness(number)`
  * says how the start ends: 'ready', 'failed', or 'hang' (until it is
- * cancelled). Every call is kept.
+ * cancelled); `stopStatus(number)` is the exit status of an asynchronous
+ * stop-node (0). Every call is kept.
  */
-function fakeDevnet(t, { duringAddnode = () => {}, readiness = () => 'ready' } = {}) {
+function fakeDevnet(t, { duringAddnode = () => {}, readiness = () => 'ready', stopStatus = () => 0 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-edges-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const calls = [];
@@ -25,6 +26,7 @@ function fakeDevnet(t, { duringAddnode = () => {}, readiness = () => 'ready' } =
     dir, calls, nodeDir,
     async devnetSh(args, env = {}, timeoutMs, { signal } = {}) {
       calls.push(args.join(' '));
+      if (args[0] === 'stop-node') return { status: stopStatus(Number(args[1])), output: '' };
       if (args[0] !== 'addnode') return { status: 0, output: '' };
       const number = Number(args[1]);
       duringAddnode(number);
@@ -100,8 +102,20 @@ test('a fourth free node number is kept for the feeder of case 6\'s later attemp
   dialFails.allocate({ relay1: 'r1', relay2: 'r2' });
   dialFails.dial = async () => { throw new Error('node9 (member2) could not dial the feeder through the relay: HTTP 0 refused'); };
   await assert.rejects(dialFails.startFeeder(), /could not dial the feeder/);
-  assert.ok(undialable.calls.includes('stop-node 10') && !dialFails.feederUp);
+  assert.ok(undialable.calls.includes('stop-node 10') && !dialFails.feederUp && !dialFails.feederRunning);
   assert.equal(dialFails.largeAuthor, dialFails.owner);
+  // A stop that fails leaves the feeder marked running, and a second stopFeeder stops it.
+  let stops = 0;
+  const stubborn = fakeDevnet(t, { stopStatus: number => (number === 10 && ++stops === 1 ? 1 : 0) });
+  const once = new TemporaryEdges(stubborn, { stamp: 'S', log });
+  once.allocate({ relay1: 'r1', relay2: 'r2' });
+  await once.startFeeder();
+  await assert.rejects(once.stopFeeder(), /the feeder could not be stopped/);
+  assert.ok(once.feederRunning && once.feederUp);
+  await once.stopFeeder();
+  assert.deepEqual(stubborn.calls.filter(call => call === 'stop-node 10'), ['stop-node 10', 'stop-node 10']);
+  assert.ok(!once.feederRunning && !once.feederUp);
+  assert.equal(once.largeAuthor, once.owner);
   // MEMBER_SHARING_NODES names three numbers, or four with the feeder's.
   const three = new TemporaryEdges(fakeDevnet(t), { stamp: 'S', log });
   assert.deepEqual(three.allocate({ explicit: '10,9,8', relay1: 'r1', relay2: 'r2' }), { taken: [] });
