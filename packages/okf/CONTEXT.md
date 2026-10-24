@@ -65,7 +65,7 @@ a claim. Mapped to `schema:citation`, semantically distinct from concept edges.
 - Concept → one Knowledge Asset (one subject IRI) → many quads (frontmatter
   triples + body sections + untyped edges + citations).
 - Frontmatter key → RDF predicate via the locked table
-  ([ADR 0008](../../docs/adr/0008-okf-rdf-mapping.md)). `type` is the only
+  ([ADR 0009](../../docs/adr/0009-okf-rdf-mapping.md)). `type` is the only
   required key (OKF §9); everything else degrades gracefully when absent.
 - Link → `schema:mentions` edge **iff** its resolved target is a concept in the
   bundle; otherwise it is a broken-link warning (target may be not-yet-written
@@ -114,7 +114,7 @@ a claim. Mapped to `schema:citation`, semantically distinct from concept edges.
 - **`timestamp` → `schema:dateModified`.** OKF defines `timestamp` as last-modified
   time, so we map it to `schema:dateModified` (typed `xsd:dateTime`) rather than
   the extractor's naive `schema:timestamp` slug — a deliberate semantic choice.
-- **`resource` → `schema:url`.** Chosen over `dcterms:source`; documented in ADR 0008.
+- **`resource` → `schema:url`.** Chosen over `dcterms:source`; documented in ADR 0009.
 - **Citations, two styles.** Both numbered (`[1] [text](url)`) and bare-bullet
   (`- https://…`) forms are parsed leniently; deduplicated by URL.
 - **Folder hierarchy.** `schema:isPartOf` from directory structure is **off by

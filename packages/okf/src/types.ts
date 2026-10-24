@@ -75,13 +75,13 @@ export interface OkfMappingOptions {
   /**
    * Whether a concept link written inside an inline code span counts as an edge.
    * Default `false` — CommonMark treats code-span content as literal text, so it
-   * is NOT a link. See ADR 0008 / CONTEXT.md "Flagged ambiguities".
+   * is NOT a link. See ADR 0009 / CONTEXT.md "Flagged ambiguities".
    */
   includeCodeSpanLinks?: boolean;
   /**
    * Whether to emit `schema:isPartOf` triples reflecting the folder hierarchy.
    * Default `false` — directories are not concepts, so minting them as nodes
-   * muddies the concept graph. See ADR 0008.
+   * muddies the concept graph. See ADR 0009.
    */
   emitFolderHierarchy?: boolean;
 }

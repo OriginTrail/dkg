@@ -11,7 +11,7 @@
  * convergence with a test.
  *
  * The OKF-specific deltas — and the rationale for each — are recorded in
- * `docs/adr/0008-okf-rdf-mapping.md` and `CONTEXT.md`.
+ * `docs/adr/0009-okf-rdf-mapping.md` and `CONTEXT.md`.
  */
 
 // --- RDF / XSD ---
@@ -36,7 +36,7 @@ export const SCHEMA_URL = 'http://schema.org/url';
 export const SCHEMA_CITATION = 'http://schema.org/citation';
 /** Containment edge — opt-in target for type-pair relations (e.g. dataset→table). */
 export const SCHEMA_HAS_PART = 'http://schema.org/hasPart';
-/** Optional folder hierarchy (off by default — see ADR 0008). */
+/** Optional folder hierarchy (off by default — see ADR 0009). */
 export const SCHEMA_IS_PART_OF = 'http://schema.org/isPartOf';
 
 // --- DKG ontology (converges with the extractor) ---

@@ -1,4 +1,4 @@
-# ADR 0008 — OKF → RDF mapping and extractor reuse-vs-fork
+# ADR 0009 — OKF → RDF mapping and extractor reuse-vs-fork
 
 - **Status**: Accepted
 - **Date**: 2026-06-25
@@ -17,7 +17,9 @@
   onto v10.0.1 as one commit without its `docs/` changes, so the package
   shipped in [#1388](https://github.com/OriginTrail/dkg/pull/1388) without this
   record. Restored on 2026-10-14 as ADR 0008, because 0005 now belongs to the
-  KafkaStream ADR. Apart from its number and the links to the archived ADRs,
+  KafkaStream ADR. Renumbered to ADR 0009 on 2026-10-24 after ADR 0008
+  was assigned to explicit receiver-side private access. Apart from its number
+  and the links to the archived ADRs,
   the text is as written; the differences found in the shipped package when
   it was restored are under
   [Where the shipped package differs](#where-the-shipped-package-differs).
