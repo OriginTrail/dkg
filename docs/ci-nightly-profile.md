@@ -52,8 +52,11 @@ weaken the real publish/refresh assertions to accommodate the fixture.
 
 The historical publisher seed is **13064**. The October 23 report records a
 30,000 ms Vitest deadline, not a fast-check counterexample; no shrinking path was
-reported. A failure receipt with a counterexample/path is an invariant failure,
-while an interrupted/unfinished receipt identifies budget or process failure.
+reported. Inspect `failureReason` alongside the counterexample/path: an assertion
+identifies an invariant failure, a per-example timeout identifies a stuck or slow
+operation, and an interrupted/unfinished receipt identifies budget or process
+failure. A timeout can also retain a counterexample; its presence alone does not
+classify the failure.
 Keep the original generated command domain, independent real stores, legal/illegal
 transition oracle and `finally` cleanup when investigating either.
 
@@ -69,7 +72,7 @@ For focused reproduction in an isolated checkout with dependencies and package
 outputs built (Node 22), use unused loopback ports:
 
 ```sh
-CI=1 PW_DEVNET_LOCAL=1 HARDHAT_PORT=28545 \
+CI=1 PW_DEVNET_LOCAL=1 HARDHAT_PORT=28545 DEVNET_OXIGRAPH_BASE=37900 \
 PLAYWRIGHT_DEVNET_API_PORT_BASE=29201 PLAYWRIGHT_DEVNET_LIBP2P_PORT_BASE=30001 \
 pnpm --filter @origintrail-official/dkg-node-ui exec playwright test \
   e2e/specs/devnet-local/wm-swm-vm-lifecycle.devnet.spec.ts --retries=0 --trace=on

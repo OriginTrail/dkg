@@ -1,12 +1,12 @@
-import { expect, it } from 'vitest';
+import { expect, test } from '@playwright/test';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cleanupManagedDevnet } from '../e2e/global-teardown.js';
+import { cleanupManagedDevnet } from '../global-teardown.js';
 
-it('cleans interrupted-bootstrap children while preserving pre-existing nodes and chain', async () => {
+test('cleans interrupted-bootstrap children while preserving pre-existing nodes and chain', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-owned-cleanup-'));
   const children = Array.from({ length: 5 }, (_, index) => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
     stdio: 'ignore', env: { ...process.env, DKG_HOME: join(dir, index === 3 ? 'node2' : index === 4 ? 'node20' : `unrelated${index}`) },
@@ -40,7 +40,7 @@ it('cleans interrupted-bootstrap children while preserving pre-existing nodes an
   }
 });
 
-it('stops an owned chain from an interrupted boot with a legacy colorized PID', async () => {
+test('stops an owned chain from an interrupted boot with a legacy colorized PID', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-owned-chain-'));
   const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   try {
