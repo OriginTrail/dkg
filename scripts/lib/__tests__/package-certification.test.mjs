@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { verifyCertificate, verifyBundle, digest, readJson, tarFiles } from '../package-certification/bundle.mjs';
 import { preparedRelease, checkRegistrySet } from '../package-certification/publish.mjs';
 import { fixture, writeJson, archive } from './package-certification-fixture.mjs';
+import { startRegistry } from '../package-certification/registry.mjs';
 
 test('portable bundle and complete observed receipt verify against independently supplied candidate', t => {
   const f = fixture(t);
@@ -95,7 +96,7 @@ test('preflights whole registry set before publish or promotion; rejects same-ve
   const f = fixture(t);
   for (const mode of ['publish', 'promote']) {
     let calls = 0;
-    assert.throws(() => preparedRelease(releaseOptions(f, { mode, readDist: p => ({ integrity: p === f.manifest.packages[1] ? 'wrong' : 'wrong' }), runner: () => { calls++; } })), /integrity mismatch/);
+    assert.throws(() => preparedRelease(releaseOptions(f, { mode, readDist: p => ({ integrity: p.name === f.manifest.packages[1].name ? 'wrong' : p.integrity }), runner: () => { calls++; } })), /integrity mismatch/);
     assert.equal(calls, 0);
   }
   assert.throws(() => checkRegistrySet(f.manifest, () => null), /unpublished/);
@@ -129,4 +130,21 @@ test('registry acquisition cannot change bytes between verification and mutation
     fs.appendFileSync(path.join(f.bundle, f.manifest.packages[0].tarball), 'changed'); return null;
   } })));
   assert.equal(calls, 0);
+});
+
+test('candidate registry serves actual bytes and refuses scope fallback or runtime registry access', async t => {
+  const f = fixture(t);
+  const server = await startRegistry({ bundle: f.bundle, manifest: f.manifest, rpcUrl: 'http://127.0.0.1:1', upstream: 'http://127.0.0.1:1', log: path.join(f.root, 'registry.log') });
+  try {
+    const base = `http://127.0.0.1:${server.port}/registry/`;
+    const response = await fetch(`${base}@origintrail-official%2fdkg`);
+    const metadata = await response.json();
+    assert.equal(metadata.versions[f.expected.version].dist.integrity, f.manifest.packages[0].integrity);
+    const tarball = await fetch(`${base}${f.manifest.packages[0].tarball}`);
+    assert.deepEqual(Buffer.from(await tarball.arrayBuffer()), fs.readFileSync(path.join(f.bundle, f.manifest.packages[0].tarball)));
+    assert.equal((await fetch(`${base}@origintrail-official%2funknown`)).status, 404);
+    assert.equal((await fetch(`${base}@origintrail-official`)).status, 404);
+    server.setInstalling(false);
+    assert.equal((await fetch(`${base}@origintrail-official%2fdkg`)).status, 403);
+  } finally { await server.close(); }
 });

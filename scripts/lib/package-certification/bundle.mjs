@@ -146,6 +146,7 @@ export function verifyCertificate(bundle, receiptFile, expected) {
   assert.equal(receipt.commit, expected.commit, 'receipt subject commit');
   assert.equal(receipt.profile, expected.profile, 'wrong profile');
   assert.equal(receipt.outcome, 'PASS', 'certification did not pass');
+  assert.deepEqual(receipt.errors, [], 'receipt contains errors');
   assert.match(receipt.toolRevision, /^[a-f0-9]{40}$/);
   assert.match(receipt.runId, /^[a-z0-9-]+$/);
   assert.ok(Date.parse(receipt.startedAt) <= Date.parse(receipt.endedAt), 'invalid receipt interval');
@@ -178,6 +179,7 @@ export function verifyCertificate(bundle, receiptFile, expected) {
     for (const result of report.cases) {
       assert.equal(result.outcome, 'PASS', `required case ${result.id} did not pass`);
       assert.ok(Date.parse(result.startedAt) <= Date.parse(result.endedAt), 'invalid case interval');
+      assert.ok(Date.parse(result.startedAt) >= Date.parse(receipt.startedAt) && Date.parse(result.endedAt) <= Date.parse(receipt.endedAt), 'case lies outside receipt interval');
     }
     assert.equal(report.identity.version, expected.version);
     for (const key of ['commit', 'buildTime', 'distTag']) assert.equal(report.identity[key], manifest.buildIdentity[key], `wrong observed build ${key}`);

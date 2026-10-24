@@ -34,7 +34,7 @@ export async function startRegistry({ bundle, manifest, rpcUrl, log, upstream = 
         fs.createReadStream(path.join(bundle, pkg.tarball)).pipe(res);
         return;
       }
-      if (route.startsWith('@origintrail-official/')) {
+      if (/^@origintrail-official(?:\/|$)/.test(route)) {
         const name = route.split('/').slice(0, 2).join('/');
         const pkg = packages.get(name);
         if (!pkg || route !== name) { res.writeHead(404); res.end('{"error":"candidate package unavailable"}'); return; }

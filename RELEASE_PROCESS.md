@@ -140,7 +140,9 @@ A disposable registry overlay serves candidate tarballs and refuses all fallback
 for `@origintrail-official/*`, including public packages at the same version.
 Unrelated dependencies use the npm registry upstream. Both physical dependency
 trees, npm's full `ls` output, versions, available integrities and explicit
-permitted non-family drift from pnpm are retained. Every installed internal file
+permitted non-family drift from pnpm are retained. Global npm does not emit a lockfile: the observer hashes candidate archives
+actually fetched into the fresh npm cache and retains the archive index; local
+installs also use npm's hidden lockfile. Every installed internal file
 must match its prepared tarball. The current libp2p family must have exactly one
 copy of each pinned version. These pins do **not** freeze unrelated transitives.
 
@@ -148,7 +150,9 @@ The installed product container never mounts the checkout, workspace modules or
 build outputs. Before runtime execution it is disconnected from the install
 network and attached only to an internal Docker network. Its sole fixture gateway
 then exposes only an owned local Hardhat chain started through the existing chain
-harness. Each layout declares these required cases before execution: `install`,
+harness. The shipped testnet genesis overlay is read unchanged, with relay and
+bootstrap access disabled, all RPC/wallet endpoints explicitly set to the local
+fixture, and auto-update/telemetry disabled. No public network is joined. Each layout declares these required cases before execution: `install`,
 `dependency-policy`, `cli-identity`, `runtime-assets`, `daemon-status`,
 `rdf-readback`, `graceful-restart`. The CLI binary, UI/config/helper assets,
 `/api/status`, exact RDF write/query through public APIs, and graceful restart

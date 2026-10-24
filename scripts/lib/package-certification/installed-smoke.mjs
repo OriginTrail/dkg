@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { createRequire } from 'node:module';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { CASES, CLI, PROFILE, digest, hash, readJson, validateTree } from './bundle.mjs';
@@ -31,7 +32,10 @@ const save = () => fs.writeFileSync(reportFile, `${JSON.stringify(report, null, 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function capture(command, args, log, timeout = 15 * 60_000) {
   const result = spawnSync(command, args, { cwd: slot, env, encoding: 'utf8', timeout, maxBuffer: 64 * 1024 * 1024 });
-  if (log) fs.writeFileSync(`${evidence}/${log}`, `${result.stdout ?? ''}\n${result.stderr ?? ''}`);
+  if (log) {
+    fs.writeFileSync(`${evidence}/${log}`, log.endsWith('.json') ? result.stdout ?? '' : `${result.stdout ?? ''}\n${result.stderr ?? ''}`);
+    if (log.endsWith('.json') && result.stderr) fs.writeFileSync(`${evidence}/${log}.stderr.log`, result.stderr);
+  }
   assert.equal(result.status, 0, `${command} failed: ${result.error?.message ?? result.stderr?.slice(-3000)}`);
   return result.stdout.trim();
 }
@@ -42,13 +46,45 @@ async function observe(id, fn) {
   catch (error) { result.outcome = 'FAIL'; result.error = error.message; throw error; }
   finally { result.endedAt = new Date().toISOString(); save(); }
 }
+async function captureCacheArchives() {
+  // npm does not write a lockfile for global installs. Preserve its fresh cache's
+  // actual fetched archive identities instead of inventing a global lockfile.
+  const npm = fs.realpathSync(capture('which', ['npm']));
+  const cache = createRequire(npm)('cacache');
+  const directory = '/install/cache/_cacache';
+  const entries = Object.values(await cache.ls(directory));
+  const cached = new Set(entries.map(e => e.integrity));
+  const archives = {};
+  for (const entry of entries) {
+    if (entry.key.includes('/tarballs/')) {
+      const bytes = await cache.get.byDigest(directory, entry.integrity);
+      const prepared = manifest.packages.find(p => entry.key.endsWith(`/registry/${p.tarball}`));
+      assert.ok(prepared, 'unexpected candidate archive request');
+      const integrity = `sha512-${hash(bytes, 'sha512', 'base64')}`;
+      assert.equal(integrity, prepared.integrity, 'candidate cache archive differs');
+      archives[`${prepared.name}@${prepared.version}`] = { integrity, resolved: entry.key.replace('make-fetch-happen:request-cache:', '') };
+      continue;
+    }
+    if (entry.key.includes('.tgz')) continue;
+    const bytes = await cache.get.byDigest(directory, entry.integrity);
+    if (bytes[0] !== 123) continue;
+    let metadata;
+    try { metadata = JSON.parse(bytes); } catch { continue; }
+    if (!metadata.name || metadata.name.startsWith('@origintrail-official/')) continue;
+    for (const version of Object.values(metadata.versions ?? {})) {
+      if (version.dist?.integrity && cached.has(version.dist.integrity)) archives[`${metadata.name}@${version.version}`] = { integrity: version.dist.integrity, resolved: version.dist.tarball };
+    }
+  }
+  fs.writeFileSync(`${evidence}/${layout}-archives.json`, JSON.stringify(archives, null, 2));
+}
 function installedTree() {
-  // npm writes this for both real global and local installations. Read the
-  // integrity attached to the physical installed path, never infer it by version.
-  const lock = readJson(`${root}/node_modules/.package-lock.json`);
+  const lockPath = `${root}/node_modules/.package-lock.json`;
+  const lock = fs.existsSync(lockPath) ? readJson(lockPath) : { packages: {} };
+  const archives = readJson(`${evidence}/${layout}-archives.json`);
   const packages = [];
   const visit = directory => {
     if (!fs.existsSync(directory)) return;
+    assert.ok(!fs.lstatSync(directory).isSymbolicLink(), `linked node_modules directory: ${directory}`);
     for (const entry of fs.readdirSync(directory)) {
       if (entry.startsWith('.')) continue;
       if (entry.startsWith('@')) { visit(path.join(directory, entry)); continue; }
@@ -57,8 +93,10 @@ function installedTree() {
       if (!fs.existsSync(path.join(location, 'package.json'))) continue;
       const metadata = readJson(path.join(location, 'package.json'));
       const relative = path.relative(root, location);
-      const locked = lock.packages[relative];
-      assert.ok(locked, `npm integrity record missing: ${relative}`);
+      const locked = lock.packages[relative] ?? archives[`${metadata.name}@${metadata.version}`] ?? {};
+      if (metadata.name.startsWith('@origintrail-official/')) {
+        assert.ok(archives[`${metadata.name}@${metadata.version}`], `candidate archive not fetched: ${metadata.name}`);
+      }
       const pkg = { path: relative, name: metadata.name, version: metadata.version, integrity: locked.integrity ?? null, resolved: locked.resolved ?? null, dependencies: metadata.dependencies ?? {} };
       if (metadata.name.startsWith('@origintrail-official/')) {
         const prepared = manifest.packages.find(p => p.name === metadata.name);
@@ -145,8 +183,9 @@ try {
       capture('npm', ['install', ...(layout === 'edge-global' ? ['--global', '--prefix', prefix] : []), `${CLI}@${manifest.version}`, '--registry=http://fixture:4873/registry/', '--foreground-scripts', '--no-audit', '--no-fund'], `${layout}-install.log`);
       assert.ok(fs.existsSync(executable), 'installed dkg executable absent');
     });
-    await observe('dependency-policy', () => {
+    await observe('dependency-policy', async () => {
       capture('npm', ['ls', '--all', '--long', '--json', ...(layout === 'edge-global' ? ['--global', '--prefix', prefix] : [])], `${layout}-npm-ls.json`);
+      await captureCacheArchives();
       const tree = installedTree();
       fs.writeFileSync(`${evidence}/${layout}-tree.json`, `${JSON.stringify(tree, null, 2)}\n`);
       validateTree(tree, manifest);
@@ -166,11 +205,13 @@ try {
       }
     });
     fs.writeFileSync('/install/data/config.json', JSON.stringify({
-      name: 'installed-package-certification', networkConfig: 'package-certification-local',
+      // Use the shipped genesis overlay, as the existing Hardhat fixtures do,
+      // with every network endpoint explicitly replaced or disabled below.
+      name: 'installed-package-certification', networkConfig: 'testnet',
       apiHost: '127.0.0.1', apiPort: 19200, listenPort: 19201, nodeRole: 'edge',
       relay: 'none', bootstrapPeers: [], contextGraphs: [], auth: { enabled: false },
       autoUpdate: { enabled: false },
-      chain: { type: 'evm', rpcUrl: 'http://fixture:4873/rpc', hubAddress, chainId: 'evm:31337' },
+      chain: { type: 'evm', rpcUrl: 'http://fixture:4873/rpc', rpcUrls: [], walletRpcUrls: ['http://fixture:4873/rpc'], hubAddress, chainId: 'evm:31337' },
       // No store override: exercise the production default persistent worker.
     }, null, 2));
     await observe('daemon-status', async () => { report.identity = await start(1); });

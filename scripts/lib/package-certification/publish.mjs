@@ -5,7 +5,13 @@ import { verifyReleaseTag } from '../../release-packages.mjs';
 import { fileIdentity, verifyCertificate } from './bundle.mjs';
 import { run } from './prepare.mjs';
 
+function validateRegistry(registry) {
+  if (!registry) return;
+  const url = new URL(registry);
+  assert.ok(['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash, 'registry URL must not contain credentials or query secrets');
+}
 export function registryDist(pkg, registry) {
+  validateRegistry(registry);
   const result = spawnSync('npm', ['view', `${pkg.name}@${pkg.version}`, 'dist', '--json', ...(registry ? ['--registry', registry] : [])], { encoding: 'utf8' });
   if (result.status !== 0) {
     // Only a positively identified missing version permits publication. Network,
@@ -44,6 +50,7 @@ export function preparedRelease({
   log = console.log,
 }) {
   assert.ok(['publish', 'promote'].includes(mode));
+  validateRegistry(registry);
   assert.ok(tags?.length > 0 && new Set(tags).size === tags.length && tags.every(t => /^[a-z][a-z0-9-]*$/.test(t)), 'invalid/duplicate dist-tags');
   if (mode === 'publish') assert.equal(tags.length, 1, 'publish accepts exactly one initial dist-tag');
   const { manifest } = verify();

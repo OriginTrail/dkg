@@ -28,6 +28,7 @@ export async function expectedPolicy(rootDir, { commit, version, profile = PROFI
     }
     return { name: pkg.name, version: pkg.version, dependencies: deps };
   });
+  assert.equal(new Set(packages.map(pkg => pkg.name)).size, packages.length, 'duplicate publishable package name');
   const { lockfileFamily, findLibp2pPinViolations } = await import('../libp2p-pins.mjs');
   const family = lockfileFamily(fs.readFileSync(path.join(rootDir, 'pnpm-lock.yaml'), 'utf8'));
   assert.deepEqual(findLibp2pPinViolations({ manifests: discoverPublishablePackages(rootDir).map(p => readJson(p.packageJsonPath)), lockFamily: family }), []);
