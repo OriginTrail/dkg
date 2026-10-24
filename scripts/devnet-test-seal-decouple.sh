@@ -12,17 +12,22 @@
 #      The seal is produced off-chain BEFORE any on-chain registration; publish
 #      confirming on a CG that was never `register`-ed is the auto-register proof
 #      (without #1241 this returns 400 "not registered on-chain").
-#   B. skipSeal:true share -> unsealed SWM share ({sealed:false, publishReady:false}).
-#   C. seal-in-SWM: finalize layer:"swm" seals the stuck (skipSeal) asset in place
-#      ({sealed:true}) WITHOUT delete-and-recreate, and it then publishes.
+#   B. skipSeal is GONE. #1241 also shipped an unsealed share (skipSeal:true) and
+#      a way to seal it afterwards in shared memory (finalize layer:"swm"). The
+#      graph-scoped Knowledge Asset model removed both: an asset is finalized and
+#      shared as a whole. What is left to hold is that the old requests are
+#      refused with their own codes, and that a refused draft is not wedged: it
+#      still finalizes, shares sealed and publishes.
+#        skipSeal:true            -> 400 UNSEALED_SHARE_UNSUPPORTED
+#        skipSeal:"true"          -> 400 (not a boolean)
+#        finalize layer:"swm"     -> 409 LEGACY_KA_READ_ONLY
+#        finalize layer:"bogus"   -> 400
 #
 # Requires a running devnet (./scripts/devnet.sh start 6). Creates its OWN fresh
 # CG each run; does NOT mutate global chain params, so it is safe alongside the
-# other suites. Self-contained (bash 3.2).
-#
-# Standalone MANUAL proof — run directly; intentionally NOT wired into
-# devnet-comprehensive.sh / _devnet-full-sweep.sh (these gap proofs are kept out
-# of the shared orchestrated run; see PR #1244).
+# other suites. Self-contained (bash 3.2). scripts/devnet-comprehensive.sh runs
+# it as the first phase of devnet-test-issue-1585-named-ka-swm.sh (group
+# "regression").
 #   Run:  ./scripts/devnet-test-seal-decouple.sh
 set -uo pipefail
 
@@ -104,44 +109,54 @@ else
 fi
 
 # ============================================================================
-act "B. skipSeal:true -> UNSEALED SWM share (sealed=false, publishReady=false)"
+act "B. skipSeal and seal-in-SWM are refused, and the refused draft stays usable"
 # ============================================================================
 NAME_B="seal-dc-b-$STAMP"
 SUBJ_B="urn:seal-dc-b:$STAMP"
-req_ok "B-setup create" "$NODE" POST /api/knowledge-assets "{\"contextGraphId\":\"$CG\",\"name\":\"$NAME_B\"}"
+# The create route answers 201 for a new draft.
+R=$(api "$NODE" POST /api/knowledge-assets "{\"contextGraphId\":\"$CG\",\"name\":\"$NAME_B\"}")
+case "$(code_of "$R")" in 200|201) : ;; *) bad "B-setup create failed (HTTP $(code_of "$R")): $(body_of "$R")" ;; esac
 req_ok "B-setup write" "$NODE" POST "/api/knowledge-assets/$NAME_B/wm/write" \
-  "{\"contextGraphId\":\"$CG\",\"quads\":[{\"subject\":\"$SUBJ_B\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"unsealed $STAMP\\\"\",\"graph\":\"\"}]}"
+  "{\"contextGraphId\":\"$CG\",\"quads\":[{\"subject\":\"$SUBJ_B\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"refused unsealed share $STAMP\\\"\",\"graph\":\"\"}]}"
+
 R=$(api "$NODE" POST "/api/knowledge-assets/$NAME_B/swm/share" "{\"contextGraphId\":\"$CG\",\"skipSeal\":true}")
-SEALED_B=$(field "$(body_of "$R")" sealed); READY_B=$(field "$(body_of "$R")" publishReady)
-# The documented contract is {sealed:false, publishReady:false}: assert BOTH, so
-# a regression that leaves an unsealed share publish-ready is caught here.
-if [ "$SEALED_B" = "false" ] && [ "$READY_B" = "false" ]; then
-  ok "skipSeal share is unsealed AND not publish-ready (sealed=false, publishReady=false)"
+if [ "$(code_of "$R")" = "400" ] && [ "$(field "$(body_of "$R")" code)" = "UNSEALED_SHARE_UNSUPPORTED" ]; then
+  ok "skipSeal:true is refused (400 UNSEALED_SHARE_UNSUPPORTED)"
 else
-  bad "skipSeal contract violated (sealed=$SEALED_B publishReady=$READY_B; want false/false; HTTP $(code_of "$R")): $(body_of "$R")"
+  bad "skipSeal:true was not refused with UNSEALED_SHARE_UNSUPPORTED (HTTP $(code_of "$R")): $(body_of "$R")"
 fi
 # strict-boolean guard: a string "true" must 400
 R=$(api "$NODE" POST "/api/knowledge-assets/$NAME_B/swm/share" "{\"contextGraphId\":\"$CG\",\"skipSeal\":\"true\"}")
 [ "$(code_of "$R")" = "400" ] && ok "non-boolean skipSeal rejected with 400" \
   || bad "non-boolean skipSeal not rejected (HTTP $(code_of "$R")): $(body_of "$R")"
 
-# ============================================================================
-act "C. seal-in-SWM: finalize layer=swm seals the stuck unsealed asset in place"
-# ============================================================================
 R=$(api "$NODE" POST "/api/knowledge-assets/$NAME_B/wm/finalize" "{\"contextGraphId\":\"$CG\",\"layer\":\"swm\"}")
-if [ "$(code_of "$R")" = "200" ]; then
-  ok "finalize layer=swm sealed the in-SWM asset without recreate"
-  R2=$(api "$NODE" POST "/api/knowledge-assets/$NAME_B/vm/publish" "{\"contextGraphId\":\"$CG\"}")
-  PS2=$(field "$(body_of "$R2")" status)
-  { [ "$PS2" = "confirmed" ] || [ "$PS2" = "finalized" ]; } && ok "seal-in-SWM asset then published (status=$PS2)" \
-    || bad "seal-in-SWM asset failed to publish (status=$PS2): $(body_of "$R2")"
+if [ "$(code_of "$R")" = "409" ] && [ "$(field "$(body_of "$R")" code)" = "LEGACY_KA_READ_ONLY" ]; then
+  ok "finalize layer=swm is refused (409 LEGACY_KA_READ_ONLY)"
 else
-  bad "finalize layer=swm failed (HTTP $(code_of "$R")): $(body_of "$R")"
+  bad "finalize layer=swm was not refused with LEGACY_KA_READ_ONLY (HTTP $(code_of "$R")): $(body_of "$R")"
 fi
 # invalid layer must 400
 R=$(api "$NODE" POST "/api/knowledge-assets/$NAME_B/wm/finalize" "{\"contextGraphId\":\"$CG\",\"layer\":\"bogus\"}")
 [ "$(code_of "$R")" = "400" ] && ok "invalid finalize layer rejected with 400" \
   || bad "invalid finalize layer not rejected (HTTP $(code_of "$R"))"
+
+# None of the refusals may have wedged the draft.
+R=$(api "$NODE" POST "/api/knowledge-assets/$NAME_B/wm/finalize" "{\"contextGraphId\":\"$CG\"}")
+[ "$(code_of "$R")" = "200" ] && ok "the refused draft still finalizes" \
+  || bad "the refused draft does not finalize (HTTP $(code_of "$R")): $(body_of "$R")"
+R=$(api "$NODE" POST "/api/knowledge-assets/$NAME_B/swm/share" "{\"contextGraphId\":\"$CG\"}")
+SEALED_B=$(field "$(body_of "$R")" sealed); READY_B=$(field "$(body_of "$R")" publishReady)
+if [ "$SEALED_B" = "true" ] && [ "$READY_B" = "true" ]; then
+  ok "the refused draft shares sealed and publish-ready"
+else
+  bad "the refused draft did not share sealed (sealed=$SEALED_B publishReady=$READY_B; HTTP $(code_of "$R")): $(body_of "$R")"
+fi
+R=$(api "$NODE" POST "/api/knowledge-assets/$NAME_B/vm/publish" "{\"contextGraphId\":\"$CG\"}")
+PS2=$(field "$(body_of "$R")" status)
+{ [ "$(code_of "$R")" = "200" ] && { [ "$PS2" = "confirmed" ] || [ "$PS2" = "finalized" ]; }; } \
+  && ok "the refused draft then published (status=$PS2)" \
+  || bad "the refused draft failed to publish (HTTP $(code_of "$R") status=$PS2): $(body_of "$R")"
 
 # ============================================================================
 echo

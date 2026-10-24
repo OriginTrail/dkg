@@ -48,6 +48,14 @@
 #
 # Runtime: ~3-5 minutes (verdaccio cold-start + pack/publish of ~15
 # workspace packages + two `npm install -g` round-trips dominate).
+#
+# STATUS (October 2026): this script does not get past step 4. The registry it
+# boots has no upstream (`uplinks: {}` below) and holds the workspace packages
+# only, so `npm install -g` cannot resolve the CLI's third-party dependencies
+# from it (the first one it asks for answers 404). Making it run means letting
+# the scratch registry proxy the public one for everything outside the
+# workspace scope. It uses no devnet and is not part of
+# scripts/devnet-comprehensive.sh.
 
 set -euo pipefail
 
