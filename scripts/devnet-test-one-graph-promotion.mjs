@@ -186,7 +186,8 @@ import { createReport } from './lib/member-sharing/report.mjs';
 import { describe, subscriptionResults } from './lib/qa/member-sharing.mjs';
 import {
   admissionPolicyProblem, catchupDataTriples, definitionInTime, heldAtSubscribe, memberPublishOutcome, pairOutcome, parseAdmissions,
-  postPromotionCheck, profileStatusProblems, promotionOutcome, promotionResult, subGraphWriteResult, syncedAfterRemedyResult, syncedAtEndResult,
+  postPromotionCheck, profileStatusProblems, promotionOutcome, promotionResult, subGraphListing, subGraphWriteResult, syncedAfterRemedyResult,
+  syncedAtEndResult,
 } from './lib/qa/one-graph-promotion.mjs';
 import { busyEdge } from './lib/one-graph/busy-transfer.mjs';
 import { OneGraphEdges } from './lib/one-graph/edges.mjs';
@@ -413,11 +414,11 @@ async function ensureDefinition(node, graph, caseId) {
   return from;
 }
 
-/** Whether a node's sub-graph listing names the graph's sub-graph: { ok, why }. */
+/** Whether a node's sub-graph listing names the graph's sub-graph: { ok, readable (subGraphListing), why }. */
 async function listsSubGraph(node, graph) {
   const answer = await devnet.api(node, 'GET', `/api/sub-graph/list?contextGraphId=${encodeURIComponent(graph.id)}`);
-  const names = Array.isArray(answer.json?.subGraphs) ? answer.json.subGraphs.map(sub => sub?.name) : [];
-  return { ok: names.includes(graph.sub), why: answer.status === 200 ? `it lists ${names.length ? names.join(', ') : 'no sub-graph'}` : brief(answer) };
+  const seen = subGraphListing(answer.status, answer.json, graph.sub);
+  return { ok: seen.readable && seen.listed, readable: seen.readable, why: seen.readable ? seen.why : `${seen.why} (${brief(answer)})` };
 }
 
 /**
@@ -466,7 +467,8 @@ async function remedy(node, graph, caseId, { onSubscribed } = {}) {
     const listed = await listsSubGraph(node, graph);
     probe = await shareReport(caseId, node, graph, `${node.role} write before its sub-graph`, from + SYNCED_MS);
     if (!probe.error) probeWatch = io.watch(io.pairs(caseId, probe, edges.running.filter(other => other !== node), 'swm'));
-    report.record(caseId, subGraphWriteResult({ node, graph, record: probe, listed: listed.ok }));
+    // An unreadable listing is no evidence either way (null), never a listing without the sub-graph.
+    report.record(caseId, subGraphWriteResult({ node, graph, record: probe, listed: listed.readable ? listed.ok : null }));
     const made = await devnet.api(node, 'POST', '/api/sub-graph/create', { contextGraphId: graph.id, subGraphName: graph.sub });
     const after = await listsSubGraph(node, graph);
     if (made.json?.created === graph.sub && after.ok) pass(10, `${node.label} registered the sub-graph ${graph.sub} of ${graph.key} and lists it`);

@@ -599,11 +599,28 @@ export function busyReceiptOutcome(result, { received, life, held, delivery = fa
 }
 
 /**
+ * A node's answer to its sub-graph listing (GET /api/sub-graph/list):
+ * { readable, listed (whether it names `sub`), why }. Only a successful
+ * answer with a list of named sub-graphs is readable; an HTTP failure or a
+ * malformed answer tells nothing, and is never taken for a listing without
+ * the sub-graph.
+ */
+export function subGraphListing(status, json, sub) {
+  const entries = json?.subGraphs;
+  if (status !== 200 || !Array.isArray(entries) || !entries.every(entry => typeof entry?.name === 'string')) {
+    return { readable: false, listed: false, why: status === 200 ? 'its sub-graph listing is malformed' : `its sub-graph listing answered HTTP ${status ?? 0}` };
+  }
+  const names = entries.map(entry => entry.name);
+  return { readable: true, listed: names.includes(sub), why: `it lists ${names.length ? names.join(', ') : 'no sub-graph'}` };
+}
+
+/**
  * A subscriber's write into the graph's sub-graph before it registers the
  * sub-graph itself, as a check with the evidence known gap #3293 takes:
  * `record` is the report (written, or refused with `error` and its
  * structured `refusal`), `listed` whether the writer's listing named the
- * sub-graph, and the writer held the definition. The evidence is the
+ * sub-graph (null when the listing could not be read: no evidence either
+ * way), and the writer held the definition. The evidence is the
  * refusal's own: the create's HTTP status, and the server's error, whose
  * wording is all that names the unregistered sub-graph (it carries no code),
  * never the message the suite prints.
@@ -612,14 +629,15 @@ export function subGraphWriteResult({ node, graph, record, listed }) {
   const evidence = { definitionHeld: true, subGraphListed: listed };
   const where = `${graph.key}/${record.sub}`;
   if (!record.error) {
-    const learned = listed ? ' (its listing already named it)' : '';
+    const learned = listed === true ? ' (its listing already named it)' : listed === null ? ' (its listing could not be read)' : '';
     return { check: 'sub-graph-write', outcome: 'pass', text: `${node.label} wrote into ${where} before registering the sub-graph itself${learned}`, evidence };
   }
   const refusal = record.refusal ?? {};
+  const listing = listed === true ? 'its listing names it' : listed === false ? 'its listing does not name it' : 'its listing could not be read';
   return {
     check: 'sub-graph-write',
     outcome: 'fail',
-    text: `${node.label} could not write into ${where} before registering the sub-graph itself (${listed ? 'its listing names it' : 'its listing does not name it'}): ${record.error}`,
+    text: `${node.label} could not write into ${where} before registering the sub-graph itself (${listing}): ${record.error}`,
     evidence: {
       ...evidence,
       httpStatus: refusal.phase === 'create' && Number.isInteger(refusal.status) ? refusal.status : null,

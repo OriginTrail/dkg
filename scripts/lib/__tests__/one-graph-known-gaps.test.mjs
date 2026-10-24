@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   catchupDataTriples, definitionInTime, heldAtSubscribe, memberPublishOutcome, postPromotionCheck, promotionOutcome, promotionResult,
-  subGraphWriteResult, syncedAfterRemedyResult, syncedAtEndResult,
+  subGraphListing, subGraphWriteResult, syncedAfterRemedyResult, syncedAtEndResult,
 } from '../qa/one-graph-promotion.mjs';
 import { classify } from '../qa/known-gaps.mjs';
 import { createReport } from '../member-sharing/report.mjs';
@@ -372,4 +372,26 @@ test('#3296: snapshots a recovery committed are data it inserted, even when the 
     `2026-10-16 14:50:13 sync ${op} [DKGAgent] SWM recovery for "${CG}" from 12D3KooWPeer: replaced 0 roots, 2 exact graphs, 6 data + 10 meta triples`,
   ].join('\n');
   assert.deepEqual(catchupDataTriples(completed, CG), { passes: 1, data: 6 });
+});
+
+test('#3293: an unreadable sub-graph listing is no evidence that the writer lacks the sub-graph', () => {
+  const listing = (status, json) => subGraphListing(status, json, 'reports');
+  assert.deepEqual(listing(200, { subGraphs: [{ name: 'reports' }] }), { readable: true, listed: true, why: 'it lists reports' });
+  assert.deepEqual(listing(200, { subGraphs: [] }), { readable: true, listed: false, why: 'it lists no sub-graph' });
+  // An HTTP failure, or a 200 answer without a list of named sub-graphs, cannot be read.
+  for (const [status, json] of [[503, { error: 'unavailable' }], [0, null], [200, {}], [200, { subGraphs: 'reports' }], [200, { subGraphs: [{ id: 'x' }] }]]) {
+    assert.equal(listing(status, json).readable, false, JSON.stringify([status, json]));
+  }
+  // The documented refusal from a writer whose listing could not be read: a plain failure, not #3293.
+  const refused = { author, graph: { key: 'main' }, sub: 'reports', value: 'edgeA write before its sub-graph (3)', error: 'the author refused the asset: HTTP 500',
+    refusal: { phase: 'create', status: 500, error: 'Sub-graph "reports" has not been registered in context graph "0xabc/one-graph-main-1".' } };
+  const unread = subGraphWriteResult({ node, graph: { key: 'main' }, record: refused, listed: null });
+  assert.match(unread.text, /\(its listing could not be read\)/);
+  assert.deepEqual([verdictOf(unread), gapOf(unread)], ['fail', null]);
+  assert.match(classify(unread).text, /the writer's sub-graph listing could not be read, so this is not known to be #3293$/);
+  // With a readable listing that names no sub-graph, the same refusal is the gap.
+  assert.deepEqual([verdictOf(subGraphWriteResult({ node, graph: { key: 'main' }, record: refused, listed: false })), gapOf(subGraphWriteResult({ node, graph: { key: 'main' }, record: refused, listed: false }))], ['xfail', '#3293']);
+  // A write that went through from a writer whose listing could not be read is a plain pass, not an XPASS.
+  const written = subGraphWriteResult({ node, graph: { key: 'main' }, record: { ...refused, error: null, refusal: undefined }, listed: null });
+  assert.deepEqual([written.outcome, verdictOf(written)], ['pass', 'pass']);
 });

@@ -35,7 +35,9 @@ const SUB_GRAPH_UNREGISTERED = {
     if (evidence.subGraphListed === false && evidence.httpStatus === 500 && evidence.unregisteredSubGraph === true) {
       return { expected: true, because: 'the writer holds the definition but not the sub-graph' };
     }
-    return { expected: false, because: evidence.subGraphListed === true ? 'the writer lists the sub-graph, so this is not #3293' : undefined };
+    if (evidence.subGraphListed === true) return { expected: false, because: 'the writer lists the sub-graph, so this is not #3293' };
+    if (evidence.subGraphListed !== false) return { expected: false, because: 'the writer\'s sub-graph listing could not be read, so this is not known to be #3293' };
+    return { expected: false, because: undefined };
   },
 };
 
