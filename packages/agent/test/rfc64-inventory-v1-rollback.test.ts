@@ -38,6 +38,7 @@ import {
   INVENTORY_SCHEMA_DOWNGRADES_V1,
   INVENTORY_SCHEMA_FIRST_RELEASES_V1,
 } from '../src/rfc64/inventory-v1/schema-migrations.js';
+import { INVENTORY_V1_PRE_MIGRATION_COPY_RESERVE_BYTES } from '../src/rfc64/inventory-v1/pre-migration-copy.js';
 import {
   planRfc64InventoryRollbackV1,
   prepareRfc64InventoryForRollbackV1,
@@ -385,6 +386,43 @@ describe('RFC-64 inventory pre-migration copy', () => {
     expect(headerUserVersion(databasePath(dataDir))).toBe(5);
     expect(inventoryEntries(dataDir).filter((name) => name.includes('.pre-migration.'))).toEqual([]);
     expect(inventoryEntries(dataDir).filter((name) => !before.includes(name))).toEqual([]);
+  });
+
+  it('drops the copy of an attempt that stopped before its first step before checking room for a new one', async () => {
+    const dataDir = dataDirectory();
+    await writeV5(dataDir);
+    // An earlier start published its pending copy and stopped before migrating.
+    const earlier = new DatabaseSync(databasePath(dataDir));
+    earlier.exec(`VACUUM INTO '${copyPath(dataDir, 5, INVENTORY_V1_USER_VERSION, true).replaceAll("'", "''")}'`);
+    earlier.close();
+    const volume = fs.statfsSync(dataDir);
+    let copiesAtCheck: string[] | undefined;
+    vi.mocked(fs.statfsSync).mockImplementationOnce(() => {
+      copiesAtCheck = inventoryEntries(dataDir).filter((name) => name.includes('.pre-migration.'));
+      return volume;
+    });
+
+    close(await open(dataDir));
+
+    expect(copiesAtCheck).toEqual([]);
+    expect(inventoryEntries(dataDir).filter((name) => name.includes('.pre-migration.'))).toEqual([
+      'inventory-v1.schema-v5-to-v6.pre-migration.sqlite3',
+    ]);
+  });
+
+  it('counts the write-ahead log in the room a copy needs', async () => {
+    const dataDir = dataDirectory();
+    await writeV5(dataDir);
+    await crashAfterCommitting(databasePath(dataDir), 'SELECT 1', laterRepair);
+    const walBytes = fs.statSync(`${databasePath(dataDir)}-wal`).size;
+    const volume = fs.statfsSync(dataDir);
+    // Room for the main file, the log once and the reserve, but not for the log a second time.
+    const freeBytes = fs.statSync(databasePath(dataDir)).size + walBytes + INVENTORY_V1_PRE_MIGRATION_COPY_RESERVE_BYTES;
+    vi.mocked(fs.statfsSync).mockReturnValueOnce({ ...volume, bavail: Math.floor(freeBytes / volume.bsize) });
+
+    await expect(open(dataDir)).rejects.toSatisfy((error: unknown) =>
+      error instanceof InventoryV1OpenError && /not enough free disk space/.test(error.message));
+    expect(headerUserVersion(databasePath(dataDir))).toBe(5);
   });
 
   it('removes a torn copy and keeps the database at v5 when writing the copy fails', async () => {

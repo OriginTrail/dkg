@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import {
   closeSync,
+  existsSync,
   fsyncSync,
   openSync,
   readdirSync,
@@ -100,7 +101,7 @@ export function listInventoryV1PreMigrationCopies(databasePath: string): Invento
  * `VACUUM INTO` writes a consistent snapshot, write-ahead log included, as a
  * rollback-journal database that can be checked read-only without leaving
  * SQLite files next to it. The copy is written under a temporary name, fsynced
- * and renamed; it replaces the copies earlier migrations kept, one per store.
+ * and renamed, after the copies earlier migrations kept are removed: one per store.
  */
 export function keepInventoryV1PreMigrationCopy(database: DatabaseSync, databasePath: string): void {
   const userVersion = Number(database.prepare('PRAGMA user_version').get()?.user_version);
@@ -114,7 +115,17 @@ export function keepInventoryV1PreMigrationCopy(database: DatabaseSync, database
 
   const directory = dirname(databasePath);
   const copyPath = inventoryV1PreMigrationCopyPath(databasePath, userVersion, INVENTORY_V1_USER_VERSION, true);
-  const neededBytes = statSync(databasePath).size + INVENTORY_V1_PRE_MIGRATION_COPY_RESERVE_BYTES;
+  // The new copy replaces every earlier one, an attempt that stopped before
+  // its first step included, so they go first and never take room twice.
+  const earlierCopy = copyNamePattern(databasePath, '(?:\\.tmp-[0-9a-f]{16})?');
+  for (const name of readdirSync(directory)) {
+    if (earlierCopy.test(name)) unlinkSync(join(directory, name));
+  }
+  // The snapshot holds what the write-ahead log holds, and folding the log
+  // after the migration can grow the main file by as much again.
+  const walPath = `${databasePath}-wal`;
+  const walBytes = existsSync(walPath) ? statSync(walPath).size : 0;
+  const neededBytes = statSync(databasePath).size + 2 * walBytes + INVENTORY_V1_PRE_MIGRATION_COPY_RESERVE_BYTES;
   const volume = statfsSync(directory);
   const freeBytes = volume.bavail * volume.bsize;
   if (freeBytes < neededBytes) {
@@ -140,10 +151,6 @@ export function keepInventoryV1PreMigrationCopy(database: DatabaseSync, database
       `failed to keep ${basename(copyPath)} before the inventory schema migration`,
       { cause },
     );
-  }
-  const earlierCopy = copyNamePattern(databasePath, '(?:\\.tmp-[0-9a-f]{16})?');
-  for (const name of readdirSync(directory)) {
-    if (name !== basename(copyPath) && earlierCopy.test(name)) unlinkSync(join(directory, name));
   }
   fsyncRfc64DirectorySyncV1(directory);
 }

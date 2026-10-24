@@ -33,7 +33,7 @@ vi.mock('../src/rollback-node-ui.js', async (importOriginal) => {
 });
 
 import {
-  executeCoreRollbackActivation,
+  executeRollbackActivation,
   registerMaintenanceCommands,
 } from '../src/commands/maintenance.js';
 
@@ -48,17 +48,16 @@ describe('maintenance command shutdown gate', () => {
     await rm(commandWiring.root, { recursive: true, force: true });
   });
 
-  it('aborts Core rollback before swapping slots when daemon shutdown times out', async () => {
+  it('aborts a rollback before activating the target when daemon shutdown times out', async () => {
     const swapSlot = vi.fn(async () => {});
     const errors: string[] = [];
 
     const prepareStores = vi.fn(async () => ({ release() {} }));
-    await expect(executeCoreRollbackActivation('b', {
+    await expect(executeRollbackActivation(() => swapSlot('b'), {
       stopDaemon: async () => false,
       prepareStores,
-      swapSlot,
       error: (message) => errors.push(message),
-    })).resolves.toBe(false);
+    })).resolves.toBeNull();
 
     expect(prepareStores).not.toHaveBeenCalled();
 
@@ -68,42 +67,39 @@ describe('maintenance command shutdown gate', () => {
     ]);
   });
 
-  it('stops the daemon and readies the stores before activating the exact Core rollback target', async () => {
+  it('stops the daemon and readies the stores before activating the rollback target', async () => {
     const calls: string[] = [];
 
-    await expect(executeCoreRollbackActivation('b', {
+    await expect(executeRollbackActivation(async () => { calls.push('swap:b'); return 'activated'; }, {
       stopDaemon: async () => { calls.push('stop'); return true; },
       prepareStores: async () => {
         calls.push('stores');
         return { release: () => { calls.push('release'); } };
       },
-      swapSlot: async (target) => { calls.push(`swap:${target}`); },
       error: () => {},
-    })).resolves.toBe(true);
+    })).resolves.toEqual({ result: 'activated' });
 
     expect(calls).toEqual(['stop', 'stores', 'swap:b', 'release']);
   });
 
-  it('keeps the current slot when the stores cannot be readied for the target', async () => {
+  it('keeps the current version when the stores cannot be readied for the target', async () => {
     const swapSlot = vi.fn(async () => {});
 
-    await expect(executeCoreRollbackActivation('b', {
+    await expect(executeRollbackActivation(() => swapSlot('b'), {
       stopDaemon: async () => true,
       prepareStores: async () => null,
-      swapSlot,
       error: () => {},
-    })).resolves.toBe(false);
+    })).resolves.toBeNull();
 
     expect(swapSlot).not.toHaveBeenCalled();
   });
 
-  it('releases the stores when the slot switch fails', async () => {
+  it('releases the stores when the activation fails', async () => {
     const release = vi.fn();
 
-    await expect(executeCoreRollbackActivation('b', {
+    await expect(executeRollbackActivation(async () => { throw new Error('slot link refused'); }, {
       stopDaemon: async () => true,
       prepareStores: async () => ({ release }),
-      swapSlot: async () => { throw new Error('slot link refused'); },
       error: () => {},
     })).rejects.toThrow('slot link refused');
 

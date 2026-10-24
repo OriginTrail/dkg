@@ -130,18 +130,6 @@ export async function executeRollbackActivation<T>(
   }
 }
 
-export interface CoreRollbackActivationDependencies extends RollbackActivationDependencies {
-  swapSlot(target: 'a' | 'b'): Promise<void>;
-}
-
-/** A Core activates the rollback target by switching its blue-green slot. */
-export async function executeCoreRollbackActivation(
-  target: 'a' | 'b',
-  dependencies: CoreRollbackActivationDependencies,
-): Promise<boolean> {
-  return await executeRollbackActivation(() => dependencies.swapSlot(target), dependencies) !== null;
-}
-
 export function registerMaintenanceCommands(program: Command): void {
   registerUpdateCommand(program);
 
@@ -240,10 +228,10 @@ program
 
     const targetVersion = readSlotVersion(targetDir);
     if (!checkRollbackStores(dkgDir(), targetVersion, currentVersion)) process.exit(1);
-    if (!await executeCoreRollbackActivation(target, {
+    // A Core activates the rollback target by switching its blue-green slot.
+    if (!await executeRollbackActivation(() => swapSlot(target), {
       stopDaemon: stopDaemonIfRunning,
       prepareStores: () => prepareRollbackStores(dkgDir(), targetVersion, currentVersion),
-      swapSlot,
       error: (message) => console.error(message),
     })) {
       process.exit(1);
