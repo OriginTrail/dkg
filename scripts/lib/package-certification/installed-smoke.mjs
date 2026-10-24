@@ -3,10 +3,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { createRequire } from 'node:module';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { CASES, CLI, PROFILE, digest, hash, readJson, validateTree, validateRdfReadback } from './bundle.mjs';
+
+import { readNpmCache } from './npm-cache.mjs';
 
 const [operation, layout, runId, hubAddress] = process.argv.slice(2);
 const manifest = readJson('/bundle/manifest.json');
@@ -48,34 +49,11 @@ async function observe(id, fn) {
   finally { result.endedAt = new Date().toISOString(); save(); }
 }
 async function captureCacheArchives() {
-  // npm does not write a lockfile for global installs. Preserve its fresh cache's
-  // actual fetched archive identities instead of inventing a global lockfile.
-  const npm = fs.realpathSync(capture('which', ['npm']));
-  const cache = createRequire(npm)('cacache');
-  const directory = '/install/cache/_cacache';
-  const entries = Object.values(await cache.ls(directory));
-  const cached = new Set(entries.map(e => e.integrity));
-  const archives = {};
-  for (const entry of entries) {
-    if (entry.key.includes('/tarballs/')) {
-      const bytes = await cache.get.byDigest(directory, entry.integrity);
-      const prepared = manifest.packages.find(p => entry.key.endsWith(`/registry/${p.tarball}`));
-      assert.ok(prepared, 'unexpected candidate archive request');
-      const integrity = `sha512-${hash(bytes, 'sha512', 'base64')}`;
-      assert.equal(integrity, prepared.integrity, 'candidate cache archive differs');
-      archives[`${prepared.name}@${prepared.version}`] = { integrity, resolved: entry.key.replace('make-fetch-happen:request-cache:', '') };
-      continue;
-    }
-    if (entry.key.includes('.tgz')) continue;
-    const bytes = await cache.get.byDigest(directory, entry.integrity);
-    if (bytes[0] !== 123) continue;
-    let metadata;
-    try { metadata = JSON.parse(bytes); } catch { continue; }
-    if (!metadata.name || metadata.name.startsWith('@origintrail-official/')) continue;
-    for (const version of Object.values(metadata.versions ?? {})) {
-      if (version.dist?.integrity && cached.has(version.dist.integrity)) archives[`${metadata.name}@${version.version}`] = { integrity: version.dist.integrity, resolved: version.dist.tarball };
-    }
-  }
+  const { reader, archives } = await readNpmCache({
+    npmExecutable: fs.realpathSync(capture('which', ['npm'])),
+    npmVersion: report.runtime.npm, cacheDirectory: '/install/cache', manifest,
+  });
+  report.cacheReader = reader;
   fs.writeFileSync(`${evidence}/${layout}-archives.json`, JSON.stringify(archives, null, 2));
 }
 function installedTree() {

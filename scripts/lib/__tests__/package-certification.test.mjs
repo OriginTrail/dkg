@@ -6,6 +6,7 @@ import { verifyCertificate, verifyBundle, digest, readJson, tarFiles, fileIdenti
 import { preparedRelease, checkRegistrySet } from '../package-certification/publish.mjs';
 import { fixture, writeJson, archive } from './package-certification-fixture.mjs';
 import { startRegistry } from '../package-certification/registry.mjs';
+import { archiveRecords } from '../package-certification/npm-cache.mjs';
 
 test('portable bundle and complete observed receipt verify against independently supplied candidate', t => {
   const f = fixture(t);
@@ -18,9 +19,6 @@ for (const [name, damage] of [
   ['changed tarball', f => fs.appendFileSync(path.join(f.bundle, f.manifest.packages[0].tarball), 'tamper')],
   ['wrong tool revision', f => { f.receipt.toolRevision = 'b'.repeat(40); }],
   ['wrong digest', f => { f.manifest.packageSetDigest = 'bad'; }],
-  ['missing package', f => { f.manifest.packages.pop(); }],
-  ['duplicate package', f => { f.manifest.packages.push(f.manifest.packages[0]); }],
-  ['wrong internal dependency', f => { f.manifest.expectedPackages[0].dependencies.dependencies['@origintrail-official/dkg-core'] = '9.0.0'; }],
   ['missing report', f => fs.unlinkSync(path.join(f.attempt, 'core-slot-report.json'))],
   ['changed report', f => fs.appendFileSync(path.join(f.attempt, 'core-slot-report.json'), ' ')],
   ['absent layout', f => { f.receipt.layouts.pop(); }],
@@ -37,6 +35,18 @@ for (const [name, damage] of [
   writeJson(f.receiptFile, f.receipt);
   assert.throws(() => verifyCertificate(f.bundle, f.receiptFile, originalExpected));
 });
+for (const [name, damage, error] of [
+  ['missing package', m => m.packages.pop(), /missing\/duplicate package/],
+  ['duplicate package', m => m.packages.push(m.packages[0]), /missing\/duplicate package/],
+  ['wrong internal dependency', m => { m.expectedPackages[0].dependencies.dependencies['@origintrail-official/dkg-core'] = '9.0.0'; }, /missing\/duplicate\/unexpected package or dependency/],
+]) test(`rehashed manifest enforces intended policy: ${name}`, t => {
+  const f = fixture(t), expected = structuredClone(f.expected);
+  damage(f.manifest);
+  delete f.manifest.packageSetDigest;
+  f.manifest.packageSetDigest = digest(f.manifest);
+  writeJson(path.join(f.bundle, 'manifest.json'), f.manifest);
+  assert.throws(() => verifyBundle(f.bundle, expected), error);
+});
 for (const [name, damage] of [
   ['missing case', r => r.cases.pop()], ['zero cases', r => { r.cases = []; }],
   ['skipped case', r => { r.cases[0].outcome = 'SKIP'; }],
@@ -50,10 +60,41 @@ for (const [name, damage] of [
   ['wrong restarted query response', r => { r.restartedRdfResponse.result.bindings[0].value = '"different"'; }],
   ['legacy query response shape', r => { r.rdfResponse = r.rdfResponse.result; }],
   ['no daemon logs', r => { r.logs = []; }],
+  ['missing cache reader', r => { delete r.cacheReader; }],
+  ['wrong cache installer', r => { r.cacheReader.npmVersion = '10.0.0'; }],
+  ['unsupported cache dependency', r => { r.cacheReader.cacacheVersion = '20.0.0'; }],
 ]) test(`rejects internally rehashed execution evidence: ${name}`, t => {
   const f = fixture(t), file = path.join(f.attempt, 'core-slot-report.json');
   const report = readJson(file); damage(report); writeJson(file, report); f.seal();
   assert.throws(() => verifyCertificate(f.bundle, f.receiptFile, f.expected));
+});
+
+test('cache adapter hashes fetched candidate bytes and records only fetched third-party versions', async t => {
+  const f = fixture(t), pkg = f.manifest.packages[0];
+  const prefix = 'make-fetch-happen:request-cache:';
+  const metadata = Buffer.from(JSON.stringify({ name: 'third-party', versions: {
+    '1.0.0': { version: '1.0.0', dist: { integrity: 'sha512-fetched', tarball: 'https://registry.npmjs.org/third-party/-/1.tgz' } },
+    '2.0.0': { version: '2.0.0', dist: { integrity: 'sha512-not-fetched', tarball: 'https://registry.npmjs.org/third-party/-/2.tgz' } },
+  } }));
+  const entries = [
+    { key: `${prefix}http://fixture:4873/registry/${pkg.tarball}`, integrity: 'candidate-cache-key' },
+    { key: `${prefix}http://fixture:4873/registry/third-party`, integrity: 'metadata-cache-key' },
+    { key: `${prefix}https://registry.npmjs.org/third-party/-/1.tgz`, integrity: 'sha512-fetched' },
+  ];
+  const records = await archiveRecords({ entries, manifest: f.manifest,
+    readBytes: key => key === 'candidate-cache-key' ? fs.readFileSync(path.join(f.bundle, pkg.tarball)) : metadata,
+  });
+  assert.equal(records[`${pkg.name}@${pkg.version}`].integrity, pkg.integrity);
+  assert.equal(records['third-party@1.0.0'].integrity, 'sha512-fetched');
+  assert.equal(records['third-party@2.0.0'], undefined);
+});
+
+test('cache adapter refuses substituted candidate bytes even when the cache key claims expected integrity', async t => {
+  const f = fixture(t), pkg = f.manifest.packages[0];
+  await assert.rejects(archiveRecords({ manifest: f.manifest,
+    entries: [{ key: `make-fetch-happen:request-cache:http://fixture:4873/registry/${pkg.tarball}`, integrity: pkg.integrity }],
+    readBytes: () => Buffer.from('public package with the same version'),
+  }), /candidate cache archive differs/);
 });
 for (const [name, damage] of [
   ['public same-version substitution', tree => { tree.packages[0].integrity = 'sha512-public'; }],
@@ -107,6 +148,38 @@ for (const [name, alter, message] of [
 });
 function releaseOptions(f, extra = {}) {
   return { mode: 'publish', bundle: f.bundle, receiptFile: f.receiptFile, expected: f.expected, tags: ['canary'], authorize: () => {}, readDist: () => null, log: () => {}, ...extra };
+}
+for (const mode of ['publish', 'promote']) for (const matches of [true, false]) {
+  test(`${mode} default authorization ${matches ? 'accepts' : 'rejects'} the resolved tag subject`, t => {
+    const f = fixture(t), tag = `v${f.expected.version}`, object = 'c'.repeat(40);
+    const responses = new Map([
+      [`rev-parse --verify refs/tags/${tag}`, object],
+      [`cat-file -t refs/tags/${tag}`, 'tag'],
+      [`cat-file tag refs/tags/${tag}`, '-----BEGIN SSH SIGNATURE-----'],
+      [`merge-base --is-ancestor ${tag}^{commit} origin/main`, ''],
+      [`ls-remote origin refs/tags/${tag}`, `${object}\trefs/tags/${tag}`],
+      [`rev-parse ${tag}^{commit}`, matches ? f.expected.commit : 'b'.repeat(40)],
+    ]);
+    let reads = 0, mutations = 0;
+    const options = releaseOptions(f, { mode, tag, authorize: undefined,
+      gitRunner: (command, args) => {
+        assert.equal(command, 'git');
+        assert.ok(responses.has(args.join(' ')), `unexpected git operation: ${args.join(' ')}`);
+        return responses.get(args.join(' '));
+      },
+      readDist: pkg => { reads++; return mode === 'promote' ? { integrity: pkg.integrity } : null; },
+      runner: () => { mutations++; },
+    });
+    if (matches) {
+      preparedRelease(options);
+      assert.equal(reads, f.manifest.packages.length);
+      assert.equal(mutations, f.manifest.packages.length);
+    } else {
+      assert.throws(() => preparedRelease(options), /tag does not identify prepared source/);
+      assert.equal(reads, 0, 'authorization must precede registry acquisition');
+      assert.equal(mutations, 0, 'authorization must precede mutation');
+    }
+  });
 }
 test('publisher receives exact verified tarballs; no build/repack commands', t => {
   const f = fixture(t), calls = [];

@@ -1,9 +1,9 @@
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { verifyReleaseTag } from '../../release-packages.mjs';
+import { verifyReleaseTag } from '../release-policy.mjs';
 import { fileIdentity, verifyCertificate } from './bundle.mjs';
-import { run } from './prepare.mjs';
+import { run } from '../release-process.mjs';
 
 function validateRegistry(registry) {
   if (!registry) return;
@@ -41,11 +41,11 @@ export function preparedRelease({
   mode, bundle, receiptFile, expected, rootDir, tag, tags, registry, otp,
   dryRun = false, readDist = pkg => registryDist(pkg, registry), runner = mutate,
   verify = () => verifyCertificate(bundle, receiptFile, expected),
+  gitRunner = (cmd, args) => run(cmd, args, { cwd: rootDir }),
   authorize = () => {
-    const git = (cmd, args) => run(cmd, args, { cwd: rootDir });
-    const problems = verifyReleaseTag({ tag, version: expected.version, runner: git });
+    const problems = verifyReleaseTag({ tag, version: expected.version, runner: gitRunner });
     assert.deepEqual(problems, [], 'release signed-tag/version/ancestry preflight failed');
-    assert.equal(git('git', ['rev-parse', `${tag}^{commit}`]), expected.commit, 'tag does not identify prepared source');
+    assert.equal(gitRunner('git', ['rev-parse', `${tag}^{commit}`]), expected.commit, 'tag does not identify prepared source');
   },
   log = console.log,
 }) {

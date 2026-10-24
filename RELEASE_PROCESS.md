@@ -175,6 +175,14 @@ trusting the receipt's own subject. Paths inside portable evidence are relative.
 This local consistency check is **not cryptographic proof of who executed it**;
 retain authenticated Actions artifacts for CI runs. There is no new signing PKI.
 
+Global npm installs do not produce a lockfile. The versioned `npm10-cacache19-v1`
+adapter reads the fresh installer's bundled cacache 19 through npm 10 and hashes
+the fetched candidate archives; its exact npm/cacache versions are recorded and
+verified in each report. This is an explicit tooling dependency on the pinned
+container image. A different npm/cache major requires an adapter compatibility
+update and a new rehearsal. Cache acquisition and record interpretation are
+separate from installed-tree policy validation.
+
 Exercise the actual installation boundary with a separate negative attempt:
 
 ```bash

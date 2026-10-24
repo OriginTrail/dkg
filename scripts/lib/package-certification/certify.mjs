@@ -5,7 +5,8 @@ import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { CASES, LAYOUTS, PROFILE, SCHEMA, digest, readJson, verifyBundle, verifyCertificate } from './bundle.mjs';
-import { run, requireCleanSource } from './prepare.mjs';
+import { run } from '../release-process.mjs';
+import { requireCleanSource } from './source.mjs';
 import { startRegistry } from './registry.mjs';
 import { recordAttempt } from './attempt.mjs';
 
@@ -107,7 +108,7 @@ export async function certifyInstall({ rootDir, bundle, output, expected, image 
         containers.add(container);
         await docker(['run', '-d', '--name', container, '--network', egress, '--mount', `type=bind,src=${bundle},dst=/bundle,readonly`, '--mount', `type=bind,src=${output},dst=/evidence`, image, 'node', '-e', 'setInterval(()=>{},100000)']);
         await docker(['exec', container, 'mkdir', '-p', '/harness']);
-        for (const file of ['installed-smoke.mjs', 'bundle.mjs']) await docker(['cp', path.join(scripts, file), `${container}:/harness/${file}`]);
+        for (const file of ['installed-smoke.mjs', 'bundle.mjs', 'npm-cache.mjs']) await docker(['cp', path.join(scripts, file), `${container}:/harness/${file}`]);
         await docker(['exec', container, 'node', '/harness/installed-smoke.mjs', 'install', layout, runId, chain.hubAddress], `${layout}-observer.log`);
         receipt.timings[`${layout}-install`] = Date.now() - installStart;
         registry.setInstalling(false);

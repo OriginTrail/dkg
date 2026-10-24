@@ -11,6 +11,13 @@ export const CASES = ['install', 'dependency-policy', 'cli-identity', 'runtime-a
 export const SCHEMA = 1;
 export const BUILD_INPUTS = ['pnpm-lock.yaml', 'package.json', 'pnpm-workspace.yaml', '.npmrc', '.nvmrc', 'turbo.json'];
 export const CLI = '@origintrail-official/dkg';
+export const CACHE_READER_ID = 'npm10-cacache19-v1';
+export function validateCacheReader(reader, npmVersion) {
+  assert.equal(reader?.id, CACHE_READER_ID, 'unsupported cache reader');
+  assert.equal(reader.npmVersion, npmVersion, 'cache reader installer mismatch');
+  assert.match(reader.npmVersion, /^10\.\d+\.\d+$/, 'cache reader requires npm 10');
+  assert.match(reader.cacacheVersion, /^19\.\d+\.\d+$/, 'cache reader requires cacache 19');
+}
 export const hash = (bytes, algorithm = 'sha256', encoding = 'hex') => createHash(algorithm).update(bytes).digest(encoding);
 export function canonical(value) {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
@@ -196,6 +203,7 @@ export function verifyCertificate(bundle, receiptFile, expected) {
     assert.match(report.runtime.node, /^v22\.\d+\.\d+$/);
     assert.ok(Number(report.runtime.node.split('.')[1]) >= 13, 'unsupported installed Node runtime');
     assert.match(report.runtime.npm, /^\d+\./);
+    validateCacheReader(report.cacheReader, report.runtime.npm);
     assert.deepEqual(report.cases.map(c => c.id), CASES, 'missing/duplicate/zero executed cases');
     for (const result of report.cases) {
       assert.equal(result.outcome, 'PASS', `required case ${result.id} did not pass`);
