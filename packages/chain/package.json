@@ -17,10 +17,8 @@
     "@origintrail-official/dkg-core": "workspace:*",
     "ethers": "^6"
   },
-  "optionalDependencies": {
-    "@origintrail-official/dkg-evm-module": "workspace:*"
-  },
   "devDependencies": {
+    "@origintrail-official/dkg-evm-module": "workspace:*",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/sdk-metrics": "^2.8.0",
     "@vitest/coverage-v8": "^4.0.18",
