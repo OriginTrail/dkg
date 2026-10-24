@@ -175,7 +175,9 @@ export function toEpcisEvent(binding: SparqlBinding): EPCISEventProjection {
 /** Add the stored subject as the stable identifier promised by query responses. */
 function decodeQueryEvent(binding: SparqlBinding): EPCISQueryEvent {
   const eventID = binding.event;
-  if (typeof eventID !== 'string' || !isSafeIri(eventID)) {
+  // Match the storage result decoder: RFC 3987 also permits a bare scheme:.
+  if (typeof eventID !== 'string'
+    || !(isSafeIri(eventID) || /^[a-zA-Z][a-zA-Z0-9+.-]*:$/.test(eventID))) {
     throw new EpcisQueryError('Events query returned a result without a reusable event IRI', 502);
   }
   return { ...toEpcisEvent(binding), eventID };
