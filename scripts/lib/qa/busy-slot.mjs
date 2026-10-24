@@ -14,6 +14,13 @@
 export const TRANSFER_CONFIRM_MS = 5_000;
 /** The trace lists the admissions that hold a slot once a second: one that no line of the last few seconds lists may have ended. */
 export const TRACE_FRESH_MS = 3_000;
+/**
+ * How soon after the transfer's release a pull of the large graph may take the
+ * general slot and still continue it: a catch-up whose round ended incomplete
+ * (a snapshot the node could not store yet) pulls again at once, in a new
+ * admission, and then pulls the graph from its next peers.
+ */
+export const TRANSFER_READMIT_MS = 250;
 
 /**
  * Whether the general sync pool has the policy of case 6's member: one slot
@@ -74,26 +81,62 @@ export function generalSlotIdleFor(admissions, now, { freshMs = TRACE_FRESH_MS }
 }
 
 /**
- * Until when the trace shows the transfer in the general slot, read once the
- * window of the writes and their receipt checks has ended at `until`: its
- * release, or the last `holding` line that lists it, never later (a lost
- * release or a dead process ends the evidence there). Another admission in
- * the one general slot meanwhile contradicts the trace, and then nothing is
- * proven. Returns { held (through `until`), provenUntil, reason }.
+ * The transfer's admission and the ones that continue it, in order: each next
+ * one is a pull of the large graph (`isTransfer`; the same pull, by its label,
+ * when not given) in the general slot that starts within `readmitMs` of the
+ * release of the one before. A release that was not read (lost, or not
+ * written yet) ends the chain.
  */
-export function busySlotCovered({ transfer, admissions, until }) {
+export function transferChain(transfer, admissions, { readmitMs = TRANSFER_READMIT_MS, isTransfer = admission => admission.label === transfer.label } = {}) {
+  const first = admissions?.find(admission => admission.id === transfer.id);
+  if (!first) return [];
+  const chain = [first];
+  for (let last = first; last.releasedAt !== null;) {
+    const next = admissions.find(admission => isTransfer(admission) && admission.slot === 'general'
+      && admission.startedAt >= last.releasedAt && admission.startedAt - last.releasedAt <= readmitMs);
+    if (!next) break;
+    chain.push(next);
+    last = next;
+  }
+  return chain;
+}
+
+/**
+ * Whether the trace can be judged for a window that ended at `until`, read at
+ * `now`: the transfer, as far as it continues (transferChain), was released
+ * or is listed holding at `until` or later; a release before `until` counts
+ * only once its pull had `readmitMs` to take the slot again.
+ */
+export function transferSettled(transfer, admissions, { until, now, readmitMs = TRANSFER_READMIT_MS, isTransfer }) {
+  const last = transferChain(transfer, admissions, { readmitMs, isTransfer }).at(-1);
+  if (!last || last.heldUntil >= until) return true;
+  return last.releasedAt !== null && now - last.releasedAt > readmitMs;
+}
+
+/**
+ * Until when the trace shows the transfer in the general slot, read once the
+ * window of the writes and their receipt checks has ended at `until`: the
+ * release of the last admission that continues it (transferChain), or the
+ * last `holding` line that lists that one, never later (a lost release or a
+ * dead process ends the evidence there). Another admission in the one general
+ * slot meanwhile, between the admissions of the transfer included,
+ * contradicts the trace, and then nothing is proven. Returns { held (through
+ * `until`), provenUntil, reason }.
+ */
+export function busySlotCovered({ transfer, admissions, until, readmitMs = TRANSFER_READMIT_MS, isTransfer }) {
   if (!transfer) return { held: false, reason: 'no transfer of it was admitted to a sync slot', provenUntil: null };
-  const traced = admissions?.find(admission => admission.id === transfer.id);
-  if (!traced) return { held: false, reason: 'the trace no longer shows the transfer', provenUntil: null };
-  const other = admissions.find(admission => admission.id !== traced.id && admission.slot === 'general'
-    && admission.startedAt < traced.heldUntil && admission.heldUntil > traced.startedAt);
+  const chain = transferChain(transfer, admissions, { readmitMs, isTransfer });
+  if (chain.length === 0) return { held: false, reason: 'the trace no longer shows the transfer', provenUntil: null };
+  const [first, last] = [chain[0], chain.at(-1)];
+  const other = admissions.find(admission => !chain.includes(admission) && admission.slot === 'general'
+    && admission.startedAt < last.heldUntil && admission.heldUntil > first.startedAt);
   if (other) return { held: false, reason: `the trace shows ${other.label} in the one general slot while the transfer held it`, provenUntil: null };
-  const provenUntil = traced.heldUntil;
+  const provenUntil = last.heldUntil;
   if (provenUntil >= until) return { held: true, provenUntil };
   return {
     held: false,
     provenUntil,
-    reason: traced.releasedAt === null ? 'no trace line shows the transfer holding the slot after then' : 'the transfer gave up the slot',
+    reason: last.releasedAt === null ? 'no trace line shows the transfer holding the slot after then' : 'the transfer gave up the slot',
   };
 }
 
