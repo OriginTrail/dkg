@@ -86,7 +86,8 @@ export function judgeReport(rows, expected) {
  * shared memory (it was promoted before), `kept` in shared memory at every
  * reading while other reports are promoted, `unpublished` in no reading of
  * Verified Memory from before its publish was sent (its publish was
- * refused). A kind that holds `throughout` fails at the first reading that
+ * refused), `unpromoted` in no reading of Verified Memory (it was not
+ * selected: a promotion of another report must not carry it there). A kind that holds `throughout` fails at the first reading that
  * breaks it, whatever comes after. A pair is read twice, with the layer's
  * view and with the cross-partition read, and holds once both showed it.
  */
@@ -97,6 +98,7 @@ export const PAIR_KINDS = Object.freeze({
   absent: { layer: 'swm', want: 'gone' },
   kept: { layer: 'swm', want: 'held', throughout: true },
   unpublished: { layer: 'vm', want: 'gone', throughout: true },
+  unpromoted: { layer: 'vm', want: 'gone', throughout: true },
 });
 const LAYER_NAMES = { swm: 'shared memory', vm: 'Verified Memory' };
 
@@ -321,7 +323,9 @@ export function parseAdmissions(logText) {
       at: new Date(`${head[1]}T${head[2]}`).getTime(),
       ctx: head[3],
       label,
-      reserved: rest.slice(label.length).startsWith(' in a reserved shared-memory slot'),
+      // A shared-memory pull or a control-plane fetch may hold a reserved slot of its pool instead of the general one.
+      reserved: /^ in a reserved \S+ slot/.test(rest.slice(label.length)),
+      pool: /^ in a reserved (\S+) slot/.exec(rest.slice(label.length))?.[1] ?? 'general',
       limit: policy ? Number(policy[1]) : null,
       queueLimit: policy ? Number(policy[2]) : null,
     });
@@ -376,12 +380,21 @@ const lineTime = line => {
  * reserved shared-memory slot, so under one general slot there is at most one.
  */
 export function durableStart(reading) {
-  if (!reading || reading.unreadable || !Number.isFinite(reading.at)) return null;
-  const durable = (Array.isArray(reading.operations) ? reading.operations : []).filter(isDurable);
-  if (durable.length === 0) return null;
-  const age = Math.max(...durable.map(operation => operation.oldestAgeMs));
+  return durableStarts(reading)[0] ?? null;
+}
+
+/**
+ * When each durable operation a reading shows started, oldest first: [{ from,
+ * to, age, operation }]. Durable work is not all the general slot's: a
+ * control-plane fetch (`durable:control-plane`) may hold a reserved slot of
+ * its own pool beside it, so each operation is dated on its own.
+ */
+export function durableStarts(reading) {
+  if (!reading || reading.unreadable || !Number.isFinite(reading.at)) return [];
   const sentAt = Number.isFinite(reading.sentAt) ? reading.sentAt : reading.at;
-  return { from: sentAt - age - 1, to: reading.at - age, age };
+  return (Array.isArray(reading.operations) ? reading.operations : []).filter(isDurable)
+    .map(operation => ({ from: sentAt - operation.oldestAgeMs - 1, to: reading.at - operation.oldestAgeMs, age: operation.oldestAgeMs, operation: operation.operation }))
+    .sort((a, b) => b.age - a.age);
 }
 
 /**
@@ -390,17 +403,29 @@ export function durableStart(reading) {
  * general-slot admission of the large transfer did (`isTransfer`, by label)
  * and no other durable admission started then; 'other' (durable work of
  * another admission, or none); 'unclear' (the answer came too slowly to date
- * the work, or the log names no admission, or several, that it can be); or
- * 'unreadable'.
+ * the work, or the log names no admission, or several, that it can be, or
+ * cannot tell a reserved slot's work from the general slot's); or
+ * 'unreadable'. Each durable operation is tied to the admissions it started
+ * with: work whose admissions all went to a reserved slot (a control-plane
+ * fetch beside the transfer, say) does not hold the general slot.
  */
 export function slotHolder(reading, admissions, isTransfer) {
   if (!reading || reading.unreadable) return { state: 'unreadable' };
-  const start = durableStart(reading);
-  if (!start) return { state: 'other' };
-  if (start.to - start.from > DATING_LATENCY_MS) return { state: 'unclear' };
-  const candidates = admissions.filter(admission => !admission.reserved && admission.label.startsWith('durable:')
-    && overlaps(start, { from: admission.at - LOG_LAG_MS, to: admission.at + 999 }));
-  if (candidates.length === 0) return { state: 'unclear' };
+  const starts = durableStarts(reading);
+  if (starts.length === 0) return { state: 'other' };
+  const general = [];
+  for (const start of starts) {
+    if (start.to - start.from > DATING_LATENCY_MS) return { state: 'unclear' };
+    const candidates = admissions.filter(admission => admission.label.startsWith('durable:')
+      && overlaps(start, { from: admission.at - LOG_LAG_MS, to: admission.at + 999 }));
+    if (candidates.length === 0) return { state: 'unclear' };
+    if (candidates.every(admission => admission.reserved)) continue;
+    if (candidates.some(admission => admission.reserved)) return { state: 'unclear' };
+    general.push({ start, candidates });
+  }
+  if (general.length === 0) return { state: 'other' };
+  if (general.length > 1) return { state: 'unclear' };
+  const [{ start, candidates }] = general;
   if (!candidates.some(isTransfer)) return { state: 'other', admission: candidates[0] };
   if (!candidates.every(isTransfer)) return { state: 'unclear' };
   return { state: 'transfer', admission: candidates[0], candidates, start };

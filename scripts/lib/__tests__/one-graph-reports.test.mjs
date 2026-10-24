@@ -427,3 +427,34 @@ test('a refused publish fails at any reading that finds the report in Verified M
   assert.equal(never.outcome, 'pass');
   assert.match(never.text, /: absent from Verified Memory at every reading from the own publish to the end of the 0 s$/);
 });
+
+test('a report the curator did not select fails at any reading that finds it in Verified Memory, though it is still in shared memory', { timeout: 10_000 }, async () => {
+  const cg = '0xabc/one-graph-main-1';
+  const rows = [{ p: RDF_TYPE, o: 'urn:one-graph:Report' }, { p: LABEL, o: '"r (1)"' }, { p: BODY, o: '"report 1 of run S: payload"' }];
+  const placed = async inVm => {
+    const started = Date.now();
+    const api = async (_node, _method, _path, body) => {
+      const swmRows = rows;
+      const vmRows = inVm ? rows : [];
+      const bindings = body.view === 'shared-working-memory' ? swmRows
+        : body.view === 'verifiable-memory' ? vmRows
+          : [...swmRows.map(row => ({ g: `${sharedMemoryScope(cg, 'reports')}/0xaa/1`, ...row })), ...vmRows.map(row => ({ g: `did:dkg:context-graph:${cg}/reports/_verifiable_memory/1`, ...row }))];
+      return { status: 200, json: null, text: JSON.stringify({ result: { type: 'bindings', bindings } }) };
+    };
+    const io = reportsOver(api);
+    const record = wholeReport(cg, started - 60_000);
+    const options = { from: started, fromWhat: 'start of the promotions', bound: 200 };
+    const handle = io.watch([...io.pairs(4, record, [node], 'kept', options), ...io.pairs(4, record, [node], 'unpromoted', options)]);
+    await handle.done;
+    return handle.pairs.map(pair => pairOutcome(pair, { boundMs: 200 }));
+  };
+  // Carried into Verified Memory by another report's promotion, and still in shared memory: the shared-memory check holds, the other fails.
+  const [kept, leaked] = await placed(true);
+  assert.equal(kept.outcome, 'pass');
+  assert.equal(leaked.outcome, 'fail');
+  assert.match(leaked.text, /: FOUND in (the verifiable-memory view of reports|the cross-partition read) \(3 row\(s\) of it\) 0 s after the start of the promotions, though it must never be in Verified Memory$/);
+  // Only in shared memory: both hold.
+  const [keptOnly, absent] = await placed(false);
+  assert.deepEqual([keptOnly.outcome, absent.outcome], ['pass', 'pass']);
+  assert.match(absent.text, /: absent from Verified Memory at every reading from the start of the promotions to the end of the 0 s$/);
+});

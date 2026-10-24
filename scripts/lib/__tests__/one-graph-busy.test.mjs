@@ -65,7 +65,8 @@ const moment = at => ({ after: at, by: at });
 test('a reading dates the running durable work; shared-memory work beside it is not the transfer', () => {
   assert.equal(durableStart(reading(T0 + 2500, 20, [{ operation: 'shared-memory:sync-on-connect', oldestAgeMs: 900 }])), null);
   assert.equal(durableStart({ at: T0, unreadable: 'HTTP 503' }), null);
-  assert.deepEqual(durableStart(reading(T0 + 2500, 20, [durable(2500), { operation: 'shared-memory:x', oldestAgeMs: 100 }])), { from: T0 - 1, to: T0 + 20, age: 2500 });
+  assert.deepEqual(durableStart(reading(T0 + 2500, 20, [durable(2500), { operation: 'shared-memory:x', oldestAgeMs: 100 }])),
+    { from: T0 - 1, to: T0 + 20, age: 2500, operation: 'durable:catchup-foreground' });
 });
 
 test('a reading shows the transfer in the slot only when the log ties its durable work to the transfer and nothing else', () => {
@@ -84,8 +85,8 @@ test('a reading shows the transfer in the slot only when the log ties its durabl
   assert.equal(slotHolder(reading(T0 + 2500, 20, [durable(2500)]), rival, isTransfer).state, 'unclear');
   const other = [{ ...admissions[0], label: 'durable:0xabc/one-graph-main-1:QP4sWZbL' }];
   assert.equal(slotHolder(reading(T0 + 2500, 20, [durable(2500)]), other, isTransfer).state, 'other');
-  // A reserved shared-memory admission never holds the general slot.
-  assert.equal(slotHolder(reading(T0 + 2500, 20, [durable(2500)]), [{ ...admissions[0], reserved: true }], isTransfer).state, 'unclear');
+  // Durable work tied only to an admission to a reserved slot holds that slot, not the general one.
+  assert.equal(slotHolder(reading(T0 + 2500, 20, [durable(2500)]), [{ ...admissions[0], reserved: true }], isTransfer).state, 'other');
 });
 
 const TRANSFER_LOG = [
@@ -536,4 +537,30 @@ test('a promotion\'s delivery that waited for the slot and landed before the cur
   const result = { outcome: 'pass', text: '"c (2)" by node7 (curator) in main/reports at node9 (edgeB): in Verified Memory 0 s after the promotion' };
   assert.deepEqual(busyReceiptOutcome(result, { received: window.by, life, held: deliveryEvidence(contended, through), delivery: true }),
     { outcome: 'pass', text: `${result.text}, after contending with the transfer for the general slot` });
+});
+
+test('a control-plane fetch in a reserved slot beside the transfer does not hide the transfer holding the general slot', () => {
+  const base = new Date('2026-10-16T01:40:00').getTime();
+  const log = [
+    '2026-10-16 01:40:01 sync cp01 [DKGAgent] Sync backpressure running durable:control-plane in a reserved control-plane slot (global inflight=1/1, queued=0/0, reserved control-plane=1/1)',
+    '2026-10-16 01:40:03 sync tr01 [DKGAgent] Sync backpressure running durable:0xabc/one-graph-large-1:QP4sWZbL (global inflight=1/1, queued=0/0)',
+  ].join('\n');
+  const admissions = parseAdmissions(log);
+  assert.deepEqual(admissions.map(admission => [admission.label, admission.reserved, admission.pool]),
+    [['durable:control-plane', true, 'control-plane'], ['durable:0xabc/one-graph-large-1:QP4sWZbL', false, 'general']]);
+  // At 4.1 s the reading shows both: the older reserved fetch (started at 1 s) and the transfer's admission (at 3 s).
+  const both = reading(base + 4100, 20, [
+    { lane: 'durable', operation: 'durable:control-plane', oldestAgeMs: 3100 },
+    { lane: 'durable', operation: 'durable:catchup-foreground', oldestAgeMs: 1100 },
+  ]);
+  const holder = slotHolder(both, admissions, isTransfer);
+  assert.equal(holder.state, 'transfer');
+  assert.equal(holder.admission.label, 'durable:0xabc/one-graph-large-1:QP4sWZbL');
+  // A receipt at 3.5 s lies inside the transfer's admission, whatever the reserved fetch beside it.
+  assert.deepEqual(transferHeldThrough({ after: base + 3400, by: base + 3600 }, [both], admissions, isTransfer), { held: true, why: null });
+  // The same fetch in the general slot (its log names no reserved slot) cannot share it with the transfer: nothing is told.
+  const general = parseAdmissions(log.replace(' in a reserved control-plane slot', ''));
+  assert.equal(slotHolder(both, general, isTransfer).state, 'unclear');
+  // The reserved fetch alone: the general slot holds no durable work.
+  assert.equal(slotHolder(reading(base + 2100, 20, [{ lane: 'durable', operation: 'durable:control-plane', oldestAgeMs: 1100 }]), admissions, isTransfer).state, 'other');
 });

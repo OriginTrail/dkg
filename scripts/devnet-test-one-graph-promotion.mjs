@@ -106,8 +106,9 @@
 //   4  promotion: the curator promotes the first report of each Edge, its
 //      own included (each promotion is a check); every Edge, the author
 //      included, holds it in Verified Memory and no longer in shared memory,
-//      and every report not promoted is in shared memory at every reading,
-//      from before the first promotion to the end of the last one's watch
+//      and every report not promoted is in shared memory, and in no reading
+//      of Verified Memory, from before the first promotion to the end of the
+//      last one's watch
 //   5  an author whose report was promoted still shares: edgeA and edgeB,
 //      each once its report of case 4 was promoted, share one more report,
 //      and every other Edge must hold it. An author whose report was not
@@ -137,7 +138,7 @@
 //      Edge when it already held the reports at its subscribe)
 //   9  the end state: on every Edge, each promoted report is in Verified
 //      Memory and not in shared memory, and every other report is in shared
-//      memory
+//      memory and in no reading of Verified Memory
 //  10  the client remedy of edgeA, edgeB and the late Edge (above): dialing
 //      the curator, the definition after subscribing again with
 //      forceCatchup, and the sub-graph registered and listed
@@ -518,11 +519,15 @@ function reportSubscription(handle, observation, definitionCase) {
   return undefined;
 }
 
-/** The pairs every Edge in `nodes` must show for each report, by where it should be by now. */
+/**
+ * The pairs every Edge in `nodes` must show for each report, by where it
+ * should be by now: a promoted report in Verified Memory and out of shared
+ * memory, any other in shared memory and at no reading in Verified Memory.
+ */
 function placementPairs(caseId, records, promoted, nodes, options) {
   return records.filter(record => !record.error).flatMap(record => (promoted.has(record)
     ? [...io.pairs(caseId, record, nodes, 'vm', options), ...io.pairs(caseId, record, nodes, 'absent', options)]
-    : io.pairs(caseId, record, nodes, 'swm', options)));
+    : [...io.pairs(caseId, record, nodes, 'swm', options), ...io.pairs(caseId, record, nodes, 'unpromoted', options)]));
 }
 
 async function run() {
@@ -621,8 +626,10 @@ async function run() {
   await precondition(4, 'before the promotions');
   const candidates = [a1, b1, c1];
   const retained = [];
+  // ... and at no reading in Verified Memory: a promotion carries only the report it selected.
   const retain = (records, fromWhat) => {
-    if (records.length) retained.push(io.watch(records.flatMap(record => io.pairs(4, record, edges.running, 'kept', { from: Date.now(), fromWhat, bound: Infinity }))));
+    const options = { from: Date.now(), fromWhat, bound: Infinity };
+    if (records.length) retained.push(io.watch(records.flatMap(record => [...io.pairs(4, record, edges.running, 'kept', options), ...io.pairs(4, record, edges.running, 'unpromoted', options)])));
   };
   retain(shared.filter(record => !record.error && !candidates.includes(record) && !promoted.has(record)), 'start of the promotions');
   const promotions = [];
