@@ -91,13 +91,8 @@
 // Known gaps (scripts/lib/qa/known-gaps.mjs, applied to every check before it
 // is reported): a check that fails for the reason of an open issue, with
 // evidence of that reason, is printed as XFAIL with the issue and does not
-// fail its case. Today one: #3264, a member of the registered graph never
-// obtains its definition here. The definition check itself (case 7; printed as
-// XPASS when the member holds it); a member's write refused as a write to an
-// unknown graph while its listing shows no definition (case 7); and the synced
-// flag staying false while the same listing shows no definition (case 8). A
-// member that holds the definition and still cannot write or never syncs
-// fails. Once #3264 is fixed and these hold, remove its entry there.
+// fail its case. None is open: the last, #3264 (a member of the registered
+// graph never obtained its definition here), was retired once its checks held.
 //
 // After a restart each member dials the owner again, as a client of the
 // issue's kind does; the script does not wait for the nodes to find each
