@@ -11,7 +11,7 @@ import { waitFor } from './devnet.mjs';
 import { heldAt, watched } from './observation.mjs';
 import { traceAdmissions } from '../qa/admission-trace.mjs';
 import {
-  admissionsBySlot, attemptVerdict, busySlotCovered, generalSlotIdleFor, heldTransfer, nextLargeSize, transferChain, transferSettled,
+  admissionsBySlot, attemptVerdict, besideTransfer, busySlotCovered, generalSlotIdleFor, heldTransfer, nextLargeSize, transferChain, transferSettled,
 } from '../qa/busy-slot.mjs';
 import { describe } from '../qa/member-sharing.mjs';
 
@@ -68,12 +68,13 @@ const sizeText = size => `${size.assets} assets of ${size.triples} triples`;
  * general slot, as not exercised. A write never received fails the case at
  * once, whatever the slot did; so does a node that writes no trace or runs
  * another sync policy, and a trace that shows another admission in the one
- * general slot beside the transfer.
+ * general slot at the same time as the transfer.
  *
  * `ctx` is { devnet, edges, graphs, io, report, precondition, boundMs, sub,
- * attempts (1), largeGraph (attempt, size) => the next large graph, admitMs
- * (how long the transfer has to take the general slot, 60 s), idleMs (how
- * long the general slot must have been free before the subscribe, 1.5 s),
+ * attempts (1), largeGraph (attempt, size) => the next large graph, connect
+ * (dials what each attempt needs, before it: a relay's circuit lasts 30 min),
+ * admitMs (how long the transfer has to take the general slot, 60 s), idleMs
+ * (how long the general slot must have been free before the subscribe, 1.5 s),
  * sizing (options of nextLargeSize) }; `pub` is a graph and `big` a large
  * graph, with its `size` ({ assets, triples per asset }).
  */
@@ -82,7 +83,8 @@ export async function busyMember(ctx, pub, big) {
   for (let attempt = 1; ; attempt += 1) {
     const outcome = await busyAttempt(ctx, pub, big, { attempt, attempts });
     if (!outcome.again) return undefined;
-    const size = nextLargeSize(big.size, outcome.measured, ctx.sizing);
+    // Without a window to size it for (the transfer was over before the writes), the next graph is twice as large.
+    const size = nextLargeSize(big.size, outcome.measured, { ...(outcome.measured.neededMs === null ? { minGrowth: 2 } : {}), ...ctx.sizing });
     const sizing = size.expectedHoldMs === null ? 'no rate was measured' : `sized to hold the slot about ${seconds(size.expectedHoldMs)} s at the rate measured`;
     report.note(`case 6, attempt ${attempt} of ${attempts}: ${outcome.why}; attempt ${attempt + 1} transfers a large graph of ${sizeText(size)}, ${sizing}`);
     try {
@@ -105,8 +107,14 @@ export async function busyMember(ctx, pub, big) {
 async function busyAttempt(ctx, pub, big, { attempt, attempts }) {
   const { devnet, edges, io, report, precondition, boundMs, sub, admitMs = 60_000, idleMs = 1_500 } = ctx;
   const { owner, member1, member2 } = edges;
-  const last = attempt === attempts;
+  const last = attempt >= attempts;
   const of = attempts > 1 ? `, attempt ${attempt} of ${attempts}` : '';
+  try {
+    await ctx.connect?.();
+  } catch (error) {
+    report.fail(6, `${error?.message ?? error}${of}`);
+    return { again: false };
+  }
   await precondition(6, `before the large transfer${of}`);
   const offset = devnet.logSize(member2);
   const isTransfer = admission => admission.label.includes(`:${big.id}:`);
@@ -175,8 +183,10 @@ async function busyAttempt(ctx, pub, big, { attempt, attempts }) {
     }
   };
   // Another attempt can prove a write that arrived after the transfer gave up the slot; it cannot change a write
-  // never received, nor a trace that shows another admission in the one general slot or no longer shows the transfer.
-  if (verdict.exercised || verdict.missing.length > 0 || busy.provenUntil === null || last) {
+  // never received, nor a trace that no longer shows the transfer or shows another admission in the one general
+  // slot at the same time as it (one that only took the slot between the transfer's admissions can be retried).
+  const contradicted = chain.length === 0 || besideTransfer(chain, settled.admissions) !== null;
+  if (verdict.exercised || verdict.missing.length > 0 || contradicted || last) {
     judge();
     report.note(noteText);
     return { again: false };

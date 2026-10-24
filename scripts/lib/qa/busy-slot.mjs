@@ -159,6 +159,19 @@ export function busySlotCovered({ transfer, admissions, until, readmitMs = TRANS
 export const receivedWhileHeld = (receivedAt, busy) => busy.provenUntil !== null && receivedAt <= busy.provenUntil;
 
 /**
+ * An admission in the one general slot at the same time as one of the
+ * transfer's own admissions (`chain`, transferChain): two admissions holding
+ * one slot at once, which the node's policy does not allow, and which no
+ * other attempt can explain away. One that only took the slot between two of
+ * the transfer's admissions is not: the slot was free then, and another
+ * attempt may still show the case. Returns that admission, or null.
+ */
+export function besideTransfer(chain, admissions) {
+  return (admissions ?? []).find(admission => !chain.includes(admission) && admission.slot === 'general'
+    && chain.some(own => admission.startedAt < own.heldUntil && admission.heldUntil > own.startedAt)) ?? null;
+}
+
+/**
  * One attempt of case 6, judged on its writes: when each was received
  * (`receipts`, null for a write its reads did not find within its bound)
  * against the evidence of the slot (`busy`, busySlotCovered). A write received
@@ -185,11 +198,13 @@ export function attemptVerdict(receipts, busy) {
  */
 export const LARGE_ASSET_MAX_TRIPLES = 10_000;
 /**
- * The most triples the large graph of a later attempt carries: a node's time
- * to write grows with the triples it already holds, and each large graph of
- * the attempts before stays on the node that holds them.
+ * The most triples the large graph of a later attempt carries: the large
+ * graphs of all attempts stay on the node that holds them, which writes more
+ * slowly the more it holds, and reach member 2 over its circuit through one
+ * relay, which carries at most 256 MiB (about 300 bytes a triple: three
+ * attempts of up to 128,000, 256,000 and 256,000 triples stay under it).
  */
-export const LARGE_GRAPH_MAX_TRIPLES = 192_000;
+export const LARGE_GRAPH_MAX_TRIPLES = 256_000;
 
 /**
  * The size of the large graph for case 6's next attempt, from what member 2's

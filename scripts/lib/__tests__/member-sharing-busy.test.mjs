@@ -16,16 +16,19 @@ import { busyMember } from '../member-sharing/busy-member.mjs';
  * general slot once the transfer has ended, with `afterwards: 'readmit'` the
  * same pull takes it again at once and holds it `readmitRunsMs` longer, with
  * `afterwards: 'overlap'` a pull of the public graph holds the general slot
- * beside the transfer from its start. Each
+ * beside the transfer from its start, with `afterwards: 'gap'` such a pull
+ * takes the slot for 100 ms once the transfer gave it up, and the transfer
+ * takes it again 200 ms after its release. Each
  * write is found by its reads at `receivedAt` (given the transfer; null: never
  * found). `policy` is the general pool's policy its trace records. `transfers`
  * gives each attempt's transfer (the first one's by default the options
- * themselves); `attempts` is how many case 6 may make. Returns the lines case
- * 6 reported, and the large graphs it asked for and unsubscribed from.
+ * themselves); `attempts` is how many case 6 may make; `connect` stands for the
+ * dials before each attempt. Returns the lines case 6 reported, the large
+ * graphs it asked for and unsubscribed from, and how often it dialed.
  */
 async function runCase6(t, {
   runsMs, afterwards = 'nothing', readmitRunsMs = 60_000, receivedAt, slot = 'general', lostRelease = false,
-  policy = { limit: 1, queueLimit: 0, partitioned: false }, writesTrace = true, attempts, transfers,
+  policy = { limit: 1, queueLimit: 0, partitioned: false }, writesTrace = true, attempts, transfers, connect = async () => {},
 }) {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-case6-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -70,6 +73,14 @@ async function runCase6(t, {
           start(`${id}-pull`, `shared-memory:${pub.id}:Owner123`);
           timers.push(setTimeout(() => release(`${id}-pull`, `shared-memory:${pub.id}:Owner123`), 500));
         }
+        if (after === 'gap') {
+          start(`${id}-pull`, `shared-memory:${pub.id}:Owner123`);
+          timers.push(setTimeout(() => release(`${id}-pull`, `shared-memory:${pub.id}:Owner123`), 100));
+          timers.push(setTimeout(() => {
+            start(`${id}-again`, label);
+            timers.push(setTimeout(() => release(`${id}-again`, label), again));
+          }, 200));
+        }
         if (after === 'readmit') {
           start(`${id}-again`, label);
           timers.push(setTimeout(() => release(`${id}-again`, label), again));
@@ -97,11 +108,12 @@ async function runCase6(t, {
     reportPair: pair => { lines.push(['PAIR', pair.caseId, pair.record.value, pair.progress.view === null ? 'missing' : 'held']); },
   };
   const largeGraph = async (number, size) => { asked.push([number, size]); return largeGraphOf(number, size); };
+  let dialed = 0;
   await busyMember({
     devnet, edges: { owner, member1, member2 }, graphs, io, report, precondition: async () => true, boundMs: 60_000, sub: 's', admitMs: 2_000,
-    attempts, largeGraph,
+    attempts, largeGraph, connect: async () => { dialed += 1; await connect(dialed); },
   }, pub, first);
-  return Object.assign(lines, { asked, unsubscribed });
+  return Object.assign(lines, { asked, unsubscribed, dialed });
 }
 
 const notExercised = (lines, reason) => {
@@ -214,10 +226,40 @@ test('case 6: a node that cannot show the case fails at once; a transfer that ga
   assert.deepEqual(lines.filter(entry => entry[0] !== 'NOTE'), held);
   assert.match(lines.find(entry => entry[0] === 'NOTE')[1], /^case 6, attempt 1 of 2: member2's transfer of the large graph \(64 assets of 2000 triples\) did not hold its general sync slot within 2 s of the subscribe \(no transfer of it holds a slot now/);
   assert.deepEqual(lines.unsubscribed, ['large']);
+  // No window was measured, so the next graph is twice as large.
+  assert.deepEqual(lines.asked, [[2, { assets: 26, triples: 9847, expectedHoldMs: lines.asked[0][1].expectedHoldMs }]]);
 });
 
 test('case 6: a trace that shows another admission in the one general slot beside the transfer is judged at once, without another attempt', async t => {
   const lines = await runCase6(t, { attempts: 3, ...tooShort, afterwards: 'overlap' });
   assert.equal(lines.asked.length, 0);
   notExercised(lines, 'the trace shows shared-memory:0xabc/issue-3251-public-1:Owner123 in the one general slot while the transfer held it');
+});
+
+test('case 6: a pull that took the slot only between two of the transfer\'s admissions proves nothing, and another attempt follows', async t => {
+  const lines = await runCase6(t, {
+    attempts: 3,
+    transfers: [{ runsMs: 1_000, afterwards: 'gap', readmitRunsMs: 3_000, receivedAt: transfer => transfer.endsAt + 500 }, holds],
+  });
+  assert.deepEqual(lines.filter(entry => entry[0] !== 'NOTE'), held);
+  assert.match(lines.find(entry => entry[0] === 'NOTE')[1], /^case 6, attempt 1 of 3: member2's transfer .* \(then the trace shows shared-memory:0xabc\/issue-3251-public-1:Owner123 in the one general slot while the transfer held it\)/);
+  assert.equal(lines.asked.length, 1);
+});
+
+test('case 6: the members dial again before each attempt; an attempt whose dial fails fails the case', async t => {
+  const twice = await runCase6(t, { attempts: 3, transfers: [{ ...tooShort, afterwards: 'pull' }, holds] });
+  assert.equal(twice.dialed, 2);
+  const lines = await runCase6(t, {
+    attempts: 3, transfers: [{ ...tooShort, afterwards: 'pull' }, holds],
+    connect: async n => { if (n === 2) throw new Error('node9 (member2) could not dial the feeder through the relay: HTTP 0'); },
+  });
+  assert.deepEqual(lines.filter(entry => entry[0] !== 'NOTE'),
+    [['FAIL', 6, 'node9 (member2) could not dial the feeder through the relay: HTTP 0, attempt 2 of 3']]);
+  assert.equal(lines.asked.length, 1);
+});
+
+test('case 6: an attempt count below one makes one attempt', async t => {
+  const lines = await runCase6(t, { attempts: 0, ...tooShort, afterwards: 'pull' });
+  notExercised(lines, 'the transfer gave up the slot');
+  assert.equal(lines.asked.length, 0);
 });

@@ -3,8 +3,8 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { traceAdmissions } from '../qa/admission-trace.mjs';
 import {
-  admissionsBySlot, attemptVerdict, busySlotCovered, heldTransfer, LARGE_ASSET_MAX_TRIPLES, LARGE_GRAPH_MAX_TRIPLES, nextLargeSize, receivedWhileHeld,
-  singleSlotProblem, transferChain, transferSettled, TRANSFER_READMIT_MS,
+  admissionsBySlot, attemptVerdict, besideTransfer, busySlotCovered, heldTransfer, LARGE_ASSET_MAX_TRIPLES, LARGE_GRAPH_MAX_TRIPLES, nextLargeSize,
+  receivedWhileHeld, singleSlotProblem, transferChain, transferSettled, TRANSFER_READMIT_MS,
 } from '../qa/busy-slot.mjs';
 
 // Member 2's intended general pool: one slot, no queue (as the trace records it).
@@ -297,7 +297,33 @@ test('the next attempt\'s large graph is sized from the rate the last transfer h
   assert.deepEqual(nextLargeSize({ assets: 16, triples: 8000 }, {}, { ...options, minGrowth: 1.5 }), { assets: 20, triples: 9600, expectedHoldMs: null });
   assert.deepEqual(nextLargeSize({ assets: 16, triples: 8000 }, { heldMs: 10_000, neededMs: null }, { ...options, minGrowth: 1.5 }),
     { assets: 20, triples: 9600, expectedHoldMs: 15_000 });
-  // The defaults keep an asset under the owner's 4 MB gossip limit and a later graph within what the owner holds well.
+  // The defaults keep an asset under the 4 MB gossip limit and a later graph at most twice the first one. On the gate
+  // run's numbers they give 26 assets of 9847 triples, held about 24 s, for the 21 s the writes needed.
   const defaults = nextLargeSize({ assets: 64, triples: 2000 }, { heldMs: 5_000, neededMs: 60_000 });
   assert.ok(defaults.triples <= LARGE_ASSET_MAX_TRIPLES && defaults.assets * defaults.triples <= LARGE_GRAPH_MAX_TRIPLES + defaults.assets, JSON.stringify(defaults));
+  assert.deepEqual(nextLargeSize({ assets: 64, triples: 2000 }, { heldMs: 11_900, neededMs: 21_000 }), { assets: 26, triples: 9847, expectedHoldMs: 23_802 });
+});
+
+test('another admission at the same time as one of the transfer\'s own contradicts the one-slot policy; one between them does not', () => {
+  const transfer = { id: '41-2', label: LARGE, startedAt: 100_000 };
+  // A pull of the public graph in the general slot while the transfer holds it.
+  const overlapping = trace(line('start', '41-2', LARGE, 100_000), line('start', '41-3', PUBLIC, 103_000), ...heartbeats(101_000, 110_000, '41-2', '41-3'));
+  assert.equal(besideTransfer(transferChain(transfer, overlapping), overlapping)?.id, '41-3');
+  // The review's example: the pull runs in the gap between two of the transfer's admissions. busySlotCovered proves
+  // nothing for it, but the slot was free then: no admission held it beside the transfer.
+  const gap = trace(
+    line('start', '41-2', LARGE, 100_000), ...heartbeats(101_000, 104_000, '41-2'), line('release', '41-2', LARGE, 105_000),
+    line('start', '41-9', PUBLIC, 105_020), line('release', '41-9', PUBLIC, 105_150),
+    line('start', '41-4', LARGE, 105_200), ...heartbeats(106_000, 119_000, '41-4'), line('release', '41-4', LARGE, 120_000),
+  );
+  const chain = transferChain(transfer, gap);
+  assert.deepEqual(chain.map(admission => admission.id), ['41-2', '41-4']);
+  assert.equal(busySlotCovered({ transfer, admissions: gap, until: 110_000 }).provenUntil, null);
+  assert.equal(besideTransfer(chain, gap), null);
+  // Admissions in a reserved slot, or that end as the transfer starts, are not beside it.
+  const reserved = trace(line('start', '41-2', LARGE, 100_000), line('start', '41-3', PUBLIC, 101_000, 'shared-memory'), line('release', '41-2', LARGE, 102_000));
+  assert.equal(besideTransfer(transferChain(transfer, reserved), reserved), null);
+  const before = trace(line('start', '41-1', PUBLIC, 90_000), line('release', '41-1', PUBLIC, 100_000), line('start', '41-2', LARGE, 100_000));
+  assert.equal(besideTransfer(transferChain(transfer, before), before), null);
+  assert.equal(besideTransfer([], null), null);
 });

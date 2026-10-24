@@ -185,7 +185,7 @@ const LATER_MS = positive('MEMBER_SHARING_LATER_SECS', 300) * 1000;
 // (busy-member.mjs), up to MEMBER_SHARING_BUSY_ATTEMPTS attempts in all.
 const BIG_ASSETS = Math.round(positive('MEMBER_SHARING_BIG_ASSETS', 64));
 const BIG_TRIPLES = Math.round(positive('MEMBER_SHARING_BIG_TRIPLES', 2000));
-const BUSY_ATTEMPTS = Math.round(positive('MEMBER_SHARING_BUSY_ATTEMPTS', 3));
+const BUSY_ATTEMPTS = Math.max(1, Math.round(positive('MEMBER_SHARING_BUSY_ATTEMPTS', 3)));
 const SUB = 's';
 const STAMP = `${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}-${process.pid}`;
 const STARTED = Date.now();
@@ -330,15 +330,23 @@ async function run() {
   for (const scenario of active) live.push(...await scenario.memberWrites(scenarioIo, owner, members));
   await settle(live);
 
-  // Case 6: member 2's only general sync slot busy with a large transfer of another graph.
+  // Case 6: member 2's only general sync slot busy with a large transfer of another graph. A relay's circuit
+  // lasts 30 min, and the attempts with their large graphs can take long: before each one the members dial the
+  // owner again and member 2 the feeder (a dial of a node already connected changes nothing).
+  const redial = async () => {
+    for (const member of members) await edges.dialOwner(member);
+    if (edges.feeder) await edges.dial(member2, edges.feeder);
+  };
   if (big) {
-    await busyMember({ devnet, edges, graphs, io, report, precondition, boundMs: BOUND_MS, sub: SUB, attempts: BUSY_ATTEMPTS, largeGraph }, pub.graph, big);
+    await busyMember({ devnet, edges, graphs, io, report, precondition, boundMs: BOUND_MS, sub: SUB, attempts: BUSY_ATTEMPTS, largeGraph, connect: redial }, pub.graph, big);
   }
 
-  // Case 5: members that subscribed LATER_MS ago.
+  // Case 5: members that subscribed LATER_MS ago (after case 6, the members dial the owner again, as above).
   const since = Math.max(...members.map(member => pub.subscribedAt.get(member)));
   const rest = since + LATER_MS - Date.now();
   if (rest > 0) { say(`waiting ${seconds(rest)} s for case 5 (${elapsed()})`); await sleep(rest); }
+  // A member that cannot dial the owner fails case 5's precondition below.
+  for (const member of members) await edges.dialOwner(member).catch(error => note(`before case 5: ${error?.message ?? error}`));
   await precondition(5, `${seconds(Date.now() - since)} s after the members subscribed`);
   await settle([
     await io.writeAndWatch(5, owner, pub.graph, null, 'owner later, root', members),
