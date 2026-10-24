@@ -1,10 +1,25 @@
 import { describe, expect, it } from 'vitest';
+import * as root from '@origintrail-official/dkg-core';
+import * as publicLexer from '@origintrail-official/dkg-core/sparql-lexer';
+import { stripSparqlLiteralsAndComments as legacyMask } from '@origintrail-official/dkg-core/dist/sparql-operation.js';
+import { stripSparqlLiteralsAndComments as sourceLegacyMask } from '../src/sparql-operation.js';
 import {
   prepareSparql,
   stripSparqlLiteralsAndComments,
 } from '../src/sparql-lexer.js';
 
 describe('Core SPARQL lexer boundary', () => {
+  it('preserves masking through the published root, lexer, and legacy operation entry points', () => {
+    const source = 'ASK { ?s ?p "x" } # c';
+    const expected = 'ASK { ?s ?p     }    ';
+    for (const mask of [root.stripSparqlLiteralsAndComments, publicLexer.stripSparqlLiteralsAndComments,
+      legacyMask, sourceLegacyMask, stripSparqlLiteralsAndComments]) {
+      expect(mask(source)).toBe(expected);
+    }
+    expect(root.prepareSparql(source).masked).toBe(expected);
+    expect(publicLexer.prepareSparql(source).masked).toBe(expected);
+  });
+
   it('keeps opaque strings, IRIs, and comments out of structural masking', () => {
     const source = String.raw`SELECT ?s WHERE {
       ?s <https://example.test/a#b> "literal { not a group }" . # comment { }

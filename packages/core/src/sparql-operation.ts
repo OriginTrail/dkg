@@ -1,4 +1,6 @@
 import { SparqlAnalysisCache } from './sparql-analysis-cache.js';
+// Preserve the published dist/sparql-operation.js compatibility surface.
+export { stripSparqlLiteralsAndComments } from './sparql-lexer.js';
 import {
   prepareSparql,
   type PreparedSparql,
