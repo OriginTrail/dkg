@@ -52,7 +52,10 @@ export class TemporaryEdges {
   /** Whether a node number is one of the temporary nodes. */
   isTemporary(number) { return [...this.nodes, this.feeder].some(node => node?.number === number); }
 
-  ownMark(number) { return join(this.devnet.nodeDir(number), OWN_MARK); }
+  /** The name of the file that marks a node folder as this suite's: a suite built on this class names its own, so that no suite takes another's nodes for its own. */
+  get markName() { return OWN_MARK; }
+
+  ownMark(number) { return join(this.devnet.nodeDir(number), this.markName); }
 
   /** Whether a node's folder carries this run's claim: addnode wrote it there, so this run created the folder. */
   claims(node) {
@@ -172,7 +175,7 @@ export class TemporaryEdges {
       added = await this.devnet.devnetSh(['addnode', String(node.number), 'edge'], {
         ...node.env,
         DEVNET_ADDNODE_CONFIG_OVERRIDES: JSON.stringify(node.overrides),
-        DEVNET_ADDNODE_MARK_NAME: OWN_MARK,
+        DEVNET_ADDNODE_MARK_NAME: this.markName,
         DEVNET_ADDNODE_MARK_TEXT: `${this.stamp} ${node.role} starting`,
       }, undefined, { signal: pending.signal });
     } finally {

@@ -33,8 +33,9 @@ test('a gap turns the failures it explains into expected ones and its own check 
   assert.deepEqual(gapSummaries({}, [SAMPLE]), []);
 });
 
-test('no gap is open: every check of a member of a registered graph is reported as it is (#3264 retired)', () => {
-  assert.deepEqual(KNOWN_GAPS, []);
+test('no gap covers a member of a registered graph: every such check is reported as it is (#3264 retired)', () => {
+  // The open gaps are the one-graph promotion suite's; none covers these checks.
+  assert.deepEqual(KNOWN_GAPS.map(gap => gap.issue), ['#3293', '#3294', '#3296']);
   const lacking = { registered: true, private: false, member: true, definitionHeld: false, definitionSeen: false };
   for (const check of ['definition', 'synced']) {
     assert.deepEqual(classify({ check, outcome: 'fail', text: 'seen', evidence: lacking }), { verdict: 'fail', text: 'seen', gap: null });
