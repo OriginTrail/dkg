@@ -71,8 +71,9 @@ A release can move a local store to a newer schema that older releases refuse.
   example `rfc64-sync/inventory-v1.schema-v5-to-v6.pre-migration.sqlite3`. A
   node keeps one such copy per store, and the next migration replaces it; a
   migration that stopped part-way keeps its first copy. Migrating needs free
-  disk space for the copy plus 64 MiB; with less, the node stops at start-up
-  and says so, and the database stays as it was.
+  disk space for the copy, twice the database's write-ahead log and 64 MiB;
+  with less, the node stops at start-up and says so, and the database stays
+  as it was.
 - If the database is not exactly the v6 schema, `dkg rollback` restores that
   copy instead and keeps the replaced database next to it as
   `rfc64-sync/inventory-v1.schema-v6.before-rollback.sqlite3`. The restored
