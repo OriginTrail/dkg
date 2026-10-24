@@ -85,18 +85,18 @@ export function generalSlotIdleFor(admissions, now, { freshMs = TRACE_FRESH_MS }
  * one is a pull of the large graph (`isTransfer`; the same pull, by its label,
  * when not given) in the general slot that starts within `readmitMs` of the
  * release of the one before. A release that was not read (lost, or not
- * written yet) ends the chain.
+ * written yet) ends the chain. The admissions are taken in the order the trace
+ * started them, each at most once.
  */
 export function transferChain(transfer, admissions, { readmitMs = TRANSFER_READMIT_MS, isTransfer = admission => admission.label === transfer.label } = {}) {
-  const first = admissions?.find(admission => admission.id === transfer.id);
-  if (!first) return [];
-  const chain = [first];
-  for (let last = first; last.releasedAt !== null;) {
-    const next = admissions.find(admission => isTransfer(admission) && admission.slot === 'general'
-      && admission.startedAt >= last.releasedAt && admission.startedAt - last.releasedAt <= readmitMs);
-    if (!next) break;
-    chain.push(next);
-    last = next;
+  const firstIndex = admissions?.findIndex(admission => admission.id === transfer.id) ?? -1;
+  if (firstIndex < 0) return [];
+  const chain = [admissions[firstIndex]];
+  for (const admission of admissions.slice(firstIndex + 1)) {
+    const last = chain.at(-1);
+    if (last.releasedAt === null) break;
+    if (isTransfer(admission) && admission.slot === 'general'
+      && admission.startedAt >= last.releasedAt && admission.startedAt - last.releasedAt <= readmitMs) chain.push(admission);
   }
   return chain;
 }

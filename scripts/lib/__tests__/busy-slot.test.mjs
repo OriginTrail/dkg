@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { traceAdmissions } from '../qa/admission-trace.mjs';
 import { admissionsBySlot, busySlotCovered, heldTransfer, receivedWhileHeld, singleSlotProblem, transferChain, transferSettled, TRANSFER_READMIT_MS } from '../qa/busy-slot.mjs';
@@ -236,4 +237,29 @@ test('the trace is read for judgement once the transfer as far as it continues r
   // A trace that no longer shows the transfer has nothing to wait for.
   assert.equal(transferSettled(transfer, [], { until, now: 120_000 }), true);
   assert.equal(transferSettled(transfer, null, { until, now: 120_000 }), true);
+});
+
+test('a continuation that starts and ends in the same millisecond is taken once, and the chain ends', () => {
+  // transferChain runs synchronously: a chain that never ended would hang this process, so it runs in a child with a
+  // deadline. The transfer releases at 110,000 ms; the same pull takes the slot again at 110,001 ms and releases it
+  // in that millisecond; a Core's pull of the large graph follows at once.
+  const code = `
+    const { traceAdmissions } = await import(${JSON.stringify(new URL('../qa/admission-trace.mjs', import.meta.url).href)});
+    const { transferChain } = await import(${JSON.stringify(new URL('../qa/busy-slot.mjs', import.meta.url).href)});
+    const lines = ${JSON.stringify([
+      line('start', '41-2', LARGE, 100_000), line('release', '41-2', LARGE, 110_000),
+      line('start', '41-3', LARGE, 110_001), line('release', '41-3', LARGE, 110_001),
+      line('start', '41-4', 'shared-memory:0xabc/issue-3251-large-1:Core456', 110_001),
+      line('release', '41-4', 'shared-memory:0xabc/issue-3251-large-1:Core456', 110_050),
+    ])};
+    const isLarge = admission => admission.label.includes(':0xabc/issue-3251-large-1:');
+    const transfer = { id: '41-2', label: ${JSON.stringify(LARGE)} };
+    console.log(JSON.stringify([
+      transferChain(transfer, traceAdmissions(lines.join('\\n'))).map(admission => admission.id),
+      transferChain(transfer, traceAdmissions(lines.join('\\n')), { isTransfer: isLarge }).map(admission => admission.id),
+    ]));
+  `;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(child.status, 0, child.error?.message ?? child.stderr);
+  assert.deepEqual(JSON.parse(child.stdout), [['41-2', '41-3'], ['41-2', '41-3', '41-4']]);
 });
