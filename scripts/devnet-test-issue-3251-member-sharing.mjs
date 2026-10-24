@@ -30,7 +30,10 @@
 // hosted by the Cores, as on the public network (they serve its definition to
 // a new member); case 7 checks it that way. Member 2 runs with one sync slot
 // and no queue (`syncGlobalMaxInflight: 1`, `syncGlobalQueueLimit: 0`), as the
-// member whose slot was starved in the issue.
+// member whose slot was starved in the issue. A fourth temporary Edge, the
+// feeder, holds the large graphs of case 6 and serves them to member 2, which
+// dials it through node 2 as it dials the owner; it follows no graph of the
+// other cases and must not follow the public graph at the end.
 //
 // A write is one asset with a subject of its own, written and shared the way a
 // client does it (create, then the asynchronous share job). A node HOLDS it
@@ -72,24 +75,29 @@
 //      2 although the general slot is busy (the diagnostics report the reserved
 //      slots as part of one pool, so they are not read for this). Its daemon
 //      starts with the sync environment variables pinned to that policy (they
-//      override config), and its catch-up asks one peer at a time, the owner
-//      first (DKG_CATCHUP_MAX_CONCURRENT_PEERS=1), and member 2 subscribes to
-//      the large graph once its general slot is free: so the owner's transfer
-//      is the pull that takes the general slot. The three writes are made as
-//      soon as the trace shows the transfer in the slot. How long the transfer
-//      holds it is not known in advance, and a write may take up to its bound
-//      to arrive: when a write arrives only after the transfer gave up the slot
-//      (the attempt proves nothing), or the transfer gave it up before the
-//      writes could start, member 2 leaves that graph and the case makes
-//      another attempt, up to MEMBER_SHARING_BUSY_ATTEMPTS in all: a new large
-//      graph, sized from the rate member 2's trace measured for the last
-//      transfer to hold the slot past the window the last writes needed
-//      (within what the owner holds well), and the three writes again. The
-//      last attempt is judged as the case. A write member 2 does not hold
-//      within its bound fails the case at once, whatever the slot did. A write
-//      received after the transfer gave up the slot, a transfer that took a
-//      reserved slot, or a transfer never admitted, fails the case as not
-//      exercised; a running catch-up job alone proves nothing
+//      override config), its catch-up asks one peer at a time
+//      (DKG_CATCHUP_MAX_CONCURRENT_PEERS=1), and member 2 subscribes to the
+//      large graph once its general slot is free: so the transfer from the
+//      feeder, the only node that holds the graph, is the pull that takes the
+//      general slot (the other peers' pulls of it find nothing and continue it
+//      at once). The large graph is the feeder's, not the owner's: a node
+//      writes more slowly the more it holds, and the owner's writes are among
+//      those the case waits for (without a fourth node number the owner holds
+//      it). The three writes are made as soon as the trace shows the transfer
+//      in the slot. How long the transfer holds it is not known in advance,
+//      and a write may take up to its bound to arrive: when a write arrives
+//      only after the transfer gave up the slot (the attempt proves nothing),
+//      or the transfer gave it up before the writes could start, member 2
+//      leaves that graph and the case makes another attempt, up to
+//      MEMBER_SHARING_BUSY_ATTEMPTS in all: a new large graph, sized from the
+//      rate member 2's trace measured for the last transfer to hold the slot
+//      past the window the last writes needed (within what one node holds
+//      well), and the three writes again. The last attempt is judged as the
+//      case. A write member 2 does not hold within its bound fails the case at
+//      once, whatever the slot did. A write received after the transfer gave
+//      up the slot, a transfer that took a reserved slot, or a transfer never
+//      admitted, fails the case as not exercised; a running catch-up job alone
+//      proves nothing
 //   7  cases 1, 2 and 3 on a public graph registered on chain, and cases 1
 //      and 3 on a private graph whose members joined through the signed
 //      request flow. A member's write into a private graph sets up its sender
@@ -108,7 +116,8 @@
 // other by themselves.
 //
 // Temporary node numbers. The suite takes the first three free of 7, 8, 9 and
-// 10 (no folder, nothing listening on the node's API or libp2p port). A node
+// 10 (no folder, nothing listening on the node's API or libp2p port), and the
+// fourth for the feeder when it is free too. A node
 // folder of its own carries a mark that addnode writes right after it created
 // the folder (with one mkdir, which fails on a folder that exists), before the
 // daemon starts: a start that fails or is interrupted (a signal while the node
@@ -129,9 +138,9 @@
 //   MEMBER_SHARING_BOUND_SECS    time a write has to reach a node (60)
 //   MEMBER_SHARING_SYNCED_SECS   time a member has to list a graph as synced (90)
 //   MEMBER_SHARING_LATER_SECS    age of the members' subscription in case 5 (300)
-//   MEMBER_SHARING_NODES         temporary nodes owner,member1,member2 (default: the
-//                                first three of 7, 8, 9, 10 with no folder and no
-//                                listener on their API or libp2p port)
+//   MEMBER_SHARING_NODES         temporary nodes owner,member1,member2[,feeder] (default:
+//                                those of 7, 8, 9, 10 with no folder and no listener
+//                                on their API or libp2p port, in that order)
 //   MEMBER_SHARING_BIG_ASSETS    assets of the large graph of case 6's first attempt (64)
 //   MEMBER_SHARING_BIG_TRIPLES   triples per asset of that graph (2000)
 //   MEMBER_SHARING_BUSY_ATTEMPTS attempts case 6 may make (3)
@@ -222,14 +231,16 @@ async function precondition(caseId, when) {
 }
 
 /**
- * The large graph of case 6's attempt `attempt`: the owner's, kept away from
- * the Cores, filled with `size` ({ assets, triples per asset }).
+ * The large graph of case 6's attempt `attempt`: the feeder's (the owner's
+ * without one), kept away from the Cores, filled with `size` ({ assets,
+ * triples per asset }).
  */
 async function largeGraph(attempt, size) {
-  const graph = await graphs.createGraph(attempt === 1 ? 'large' : `large${attempt}`, { accessPolicy: 0, publishPolicy: 1, register: false });
+  const author = edges.largeAuthor;
+  const graph = await graphs.createGraph(attempt === 1 ? 'large' : `large${attempt}`, { accessPolicy: 0, publishPolicy: 1, register: false }, { by: author });
   await graphs.keepCoresOut(graph);
   const started = Date.now();
-  await fillBigGraph(io, edges.owner, graph, { ...size, stamp: STAMP });
+  await fillBigGraph(io, author, graph, { ...size, stamp: STAMP });
   say(`large graph ${graph.key} written: ${size.assets} assets of ${size.triples} triples in ${seconds(Date.now() - started)} s (${elapsed()})`);
   return { ...graph, size };
 }
@@ -252,10 +263,21 @@ async function run() {
   if (picked.problem) return skip(picked.problem);
   if (picked.taken.length) note(`node numbers in use, left alone: ${picked.taken.join('; ')}`);
   const { owner, member1, member2, members } = edges;
-  say(`bound ${seconds(BOUND_MS)} s per write, ${seconds(SYNCED_MS)} s for the synced flag; owner node${owner.number}, members node${member1.number} and node${member2.number} (member 2 with one sync slot and no queue); run ${STAMP}`);
+  const feeder = edges.feeder ? `, feeder node${edges.feeder.number} (case 6's large graphs)` : '; no fourth node number is free: the owner holds case 6\'s large graphs';
+  say(`bound ${seconds(BOUND_MS)} s per write, ${seconds(SYNCED_MS)} s for the synced flag; owner node${owner.number}, members node${member1.number} and node${member2.number} (member 2 with one sync slot and no queue)${feeder}; run ${STAMP}`);
 
   for (const node of edges.nodes) await edges.start(node);
   for (const member of members) await edges.dialOwner(member);
+  // Member 2 dials the feeder through node 2, as it dials the owner. Without it the owner holds the large graphs.
+  if (edges.feeder) {
+    try {
+      await edges.start(edges.feeder);
+      await edges.dial(member2, edges.feeder);
+    } catch (error) {
+      note(`the feeder could not be set up (${error?.message ?? error}): the owner holds case 6's large graphs`);
+      edges.feeder = null;
+    }
+  }
   say(`temporary Edges up and dialed (${elapsed()})`);
 
   // The unregistered public graph carries cases 1 to 6; without it nothing runs.
@@ -355,6 +377,11 @@ async function run() {
   const cores = await graphs.coresFollowing(pub.graph);
   if (cores.following.length) fail(2, `at the end Core(s) ${cores.following.join(', ')} follow the public graph: their gossip may have carried writes`);
   if (cores.unknown.length) fail(2, `at the end it is not known whether Core(s) ${cores.unknown.join(', ')} follow the public graph`);
+  if (edges.feeder) {
+    const fed = await graphs.following(edges.feeder, pub.graph);
+    if (fed.state === 'following') fail(2, `at the end the feeder ${edges.feeder.label} follows the public graph: its gossip may have carried writes`);
+    else if (fed.state !== 'not-following') fail(2, `at the end it is not known whether the feeder ${edges.feeder.label} follows the public graph (${fed.reason ?? fed.state})`);
+  }
   await precondition(2, 'at the end');
 }
 

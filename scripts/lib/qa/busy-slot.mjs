@@ -179,16 +179,15 @@ export function attemptVerdict(receipts, busy) {
 }
 
 /**
- * The most triples one asset of a large graph carries: the owner shares an
+ * The most triples one asset of a large graph carries: a node shares an
  * asset in one gossip message of about 300 bytes a triple, and refuses one
  * over 4 MB.
  */
 export const LARGE_ASSET_MAX_TRIPLES = 10_000;
 /**
- * The most triples the large graph of a later attempt carries: the owner's
- * time to write anything grows with the triples it already holds (each large
- * graph of the attempts before stays on it), which lengthens the writes' own
- * window as well as the fill.
+ * The most triples the large graph of a later attempt carries: a node's time
+ * to write grows with the triples it already holds, and each large graph of
+ * the attempts before stays on the node that holds them.
  */
 export const LARGE_GRAPH_MAX_TRIPLES = 192_000;
 
@@ -204,7 +203,7 @@ export const LARGE_GRAPH_MAX_TRIPLES = 192_000;
  * measured, at least `minGrowth` times the last graph's (all that is known
  * without a rate), and at most `maxTriples` (or the last graph's, if that is
  * more). They are spread over as few assets as `maxTriplesPerAsset` allows:
- * the owner writes fewer, larger assets faster. Returns { assets, triples
+ * a node writes fewer, larger assets faster. Returns { assets, triples
  * (per asset), expectedHoldMs (at the rate measured; null without one) }.
  */
 export function nextLargeSize(size, { heldMs = null, neededMs = null } = {}, {

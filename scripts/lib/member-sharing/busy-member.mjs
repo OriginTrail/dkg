@@ -16,18 +16,19 @@ import {
 import { describe } from '../qa/member-sharing.mjs';
 
 /**
- * The large graph: `assets` assets of `triples` triples, each over 50 subjects
- * with an equal share of them, about 100 bytes a value. `graph.key` keeps the
- * assets of each large graph apart.
+ * The large graph, written by `author` (the feeder, or the owner): `assets`
+ * assets of `triples` triples, each over 50 subjects with an equal share of
+ * them, about 100 bytes a value. `graph.key` keeps the assets of each large
+ * graph apart.
  */
-export async function fillBigGraph(io, owner, graph, { assets, triples, stamp }) {
+export async function fillBigGraph(io, author, graph, { assets, triples, stamp }) {
   const perSubject = Math.max(1, Math.ceil(triples / 50));
   for (let i = 0; i < assets; i++) {
     const quads = Array.from({ length: triples }, (_, t) => ({
       subject: `urn:issue3251:${graph.key}:${stamp}:${i}:${Math.floor(t / perSubject)}`, predicate: `urn:issue3251:payload:${t % perSubject}`,
       object: `"row ${t} of asset ${i} ${'x'.repeat(80)}"`, graph: '',
     }));
-    const outcome = await io.createAndShare(owner, { contextGraphId: graph.id, name: `i3251-${graph.key}-${stamp.toLowerCase()}-${i}`, quads },
+    const outcome = await io.createAndShare(author, { contextGraphId: graph.id, name: `i3251-${graph.key}-${stamp.toLowerCase()}-${i}`, quads },
       { createTimeoutMs: 300_000, jobTimeoutMs: 300_000, pollMs: 500 });
     if (outcome.error) throw new Error(`asset ${i} of the ${graph.key} graph: ${outcome.error}`);
   }
@@ -60,7 +61,7 @@ const sizeText = size => `${size.assets} assets of ${size.triples} triples`;
  * it up before the writes could start, another attempt follows, up to
  * `attempts` in all: member 2 subscribes to a new large graph (`largeGraph`),
  * sized from the rate its trace measured for the last transfer to hold the
- * slot past the window the last writes needed, within what the owner holds
+ * slot past the window the last writes needed, within what one node holds
  * well (nextLargeSize), and the three writes are made again. Only the last
  * attempt is judged as the case: its writes as usual, and a write of it
  * received after the slot was free, or a transfer never admitted to the
@@ -113,9 +114,9 @@ async function busyAttempt(ctx, pub, big, { attempt, attempts }) {
   // A pull takes the general slot when it is free and otherwise the reserved
   // shared-memory slot, so the subscribe waits for a moment when member 2's
   // general slot is free (its other graphs' pulls come and go). Its catch-up
-  // asks one peer at a time, the owner first (DKG_CATCHUP_MAX_CONCURRENT_PEERS=1,
-  // temporary-edges.mjs): the owner's pull is the transfer, and no Core's
-  // empty pull of the large graph can take the general slot before it.
+  // asks one peer at a time (DKG_CATCHUP_MAX_CONCURRENT_PEERS=1,
+  // temporary-edges.mjs): the pull from the node that holds the large graph
+  // is the transfer, and the other peers' empty pulls of it continue it.
   await waitFor(() => ({ ok: generalSlotIdleFor(readTrace(member2.trace), Date.now()) >= idleMs }), 60_000, 250);
   await ctx.graphs.subscribe(member2, big);
   const admitted = await waitFor(() => {
