@@ -14,7 +14,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify, stripVTControlCharacters } from 'node:util';
 import { execFile } from 'node:child_process';
-import type { PlaywrightManagedMarker } from './bootstrap-devnet.js';
+import type { PlaywrightManagedMarker } from './bootstrap-devnet-runtime.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '../../..');
@@ -45,7 +45,7 @@ async function stopPid(pid: number, label: string): Promise<void> {
   throw new Error(`Owned ${label} (PID ${pid}) did not exit after SIGTERM`);
 }
 
-async function stopNode(devnetDir: string, nodeIndex: number): Promise<void> {
+export async function stopManagedNode(devnetDir: string, nodeIndex: number): Promise<void> {
   if (!existsSync(resolve(devnetDir, `node${nodeIndex}`))) return;
   // The existing scoped stop discovers supervisor/worker/store descendants by
   // DKG_HOME as well as PID files. Cancellation can precede daemon.pid creation.
@@ -67,7 +67,10 @@ async function stopHardhat(devnetDir: string): Promise<void> {
   try { rmSync(pidfile, { force: true }); } catch { /* best-effort */ }
 }
 
-export async function cleanupManagedDevnet(devnetDir: string): Promise<void> {
+export async function cleanupManagedDevnet(
+  devnetDir: string,
+  { stopNode = stopManagedNode }: { stopNode?: typeof stopManagedNode } = {},
+): Promise<void> {
   const markerFile = resolve(devnetDir, '.playwright-managed');
   const marker = readMarker(markerFile);
   if (!marker) {

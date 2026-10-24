@@ -18,6 +18,20 @@ export function resolveCiProfile({ eventName, profile = '', seed = '', runNumber
   return { schemaVersion: 1, profile: name, seed: Number(actualSeed), requestedTrials: nightly ? 1000 : 100, managedLocal: nightly };
 }
 
+/** Validate a resolved record against the settings owned by this resolver. */
+export function validateResolvedProfile(record) {
+  if (!record || record.schemaVersion !== 1 || !/^[a-f0-9]{40}$/.test(record.subject ?? '')
+    || typeof record.runId !== 'string' || !/^[1-9]\d*$/.test(record.runId)
+    || !['standard', 'nightly-equivalent'].includes(record.profile) || !Number.isInteger(record.seed)) {
+    throw new Error('Missing/invalid resolved execution profile');
+  }
+  const settings = resolveCiProfile({ eventName: 'workflow_dispatch', profile: record.profile, seed: String(record.seed) });
+  if (record.requestedTrials !== settings.requestedTrials || record.managedLocal !== settings.managedLocal) {
+    throw new Error('Resolved execution profile has inconsistent settings');
+  }
+  return record;
+}
+
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
   const profile = resolveCiProfile({ eventName: process.env.EVENT_NAME, profile: process.env.PROFILE_INPUT,
     seed: process.env.SEED_INPUT, runNumber: process.env.GITHUB_RUN_NUMBER });

@@ -18,18 +18,19 @@ const LIFECYCLE_TESTS = [
 ];
 const LIFT_TEST = 'generated claim, validate, finalize and restart sequences preserve durable lifecycle state';
 const subject = 'a'.repeat(40);
+const runId = '40079149573';
 const workflow = parse(fs.readFileSync(new URL('../../../.github/workflows/ci.yml', import.meta.url), 'utf8'));
 function packet() {
   return {
-    profile: { ...resolveCiProfile({ eventName: 'schedule', runNumber: '13064' }), subject },
+    profile: { ...resolveCiProfile({ eventName: 'schedule', runNumber: '13064' }), subject, runId, attempt: '1', repository: 'OriginTrail/dkg', workflow: 'CI' },
     needs: Object.fromEntries(['changes', 'tornado-publisher', 'kosava-node-ui-e2e'].map(job => [job, { result: 'success' }])),
     browsers: Array.from({ length: 7 }, (_, index) => ({ shard: index + 1,
-      runtime: { subject, profile: 'nightly-equivalent', managedLocal: true, seed: '13064', requestedTrials: '1000' },
+      runtime: { subject, runId, attempt: '1', profile: 'nightly-equivalent', managedLocal: true, seed: '13064', requestedTrials: '1000' },
       tests: (index === 2 ? LIFECYCLE_TESTS : ['another test']).map(title => ({
       title, identity: title, file: index === 2 ? LIFECYCLE_FILE : 'other.spec.ts', project: 'real-node', expectedStatus: 'passed',
       attempts: [{ status: 'passed', durationMs: 10 }],
     })) })),
-    campaigns: [{ schemaVersion: 1, identity: LIFT_TEST, subject, profile: 'nightly-equivalent', status: 'passed',
+    campaigns: [{ schemaVersion: 1, identity: LIFT_TEST, subject, runId, profile: 'nightly-equivalent', status: 'passed',
       seed: 13064, requestedTrials: 1000, completedTrials: 1000, interrupted: false, numSkips: 0, durationMs: 42000 }],
   };
 }
@@ -59,6 +60,41 @@ test('complete actual executions certify; missing/skipped/cancelled/zero discove
   for (const mutate of mutations) {
     const input = packet(); mutate(input);
     assert.equal(summarizeNightlyProfile(input).status, 'failed', String(mutate));
+  }
+});
+
+for (const [field, wrong] of Object.entries({
+  subject: 'b'.repeat(40), runId: '40079149574', profile: 'standard',
+  managedLocal: false, seed: '640905', requestedTrials: '100',
+})) {
+  test(`browser evidence must match the resolved ${field}`, () => {
+    for (const value of [wrong, undefined]) {
+      const input = packet(); input.browsers[0].runtime[field] = value;
+      const result = summarizeNightlyProfile(input);
+      assert.equal(result.status, 'failed');
+      assert.ok(result.errors.includes('Browser shard 1 does not match the resolved profile'));
+    }
+  });
+}
+
+test('invalid profile settings retain missing browser and failed campaign diagnostics', () => {
+  const input = packet(); input.profile.requestedTrials = 100;
+  input.browsers = []; input.campaigns[0].status = 'failed';
+  const result = summarizeNightlyProfile(input);
+  assert.equal(result.status, 'failed');
+  assert.match(result.errors.join('\n'), /inconsistent settings/);
+  assert.match(result.errors.join('\n'), /browser shard/);
+  assert.match(result.errors.join('\n'), /campaign failed/);
+});
+
+test('both profiles require a valid resolved record and nonempty run identity', () => {
+  for (const profile of ['standard', 'nightly-equivalent']) {
+    const input = packet();
+    input.profile = { ...input.profile, ...resolveCiProfile({ eventName: 'workflow_dispatch', profile, seed: '13064' }) };
+    assert.equal(summarizeNightlyProfile(input).status, 'passed');
+    for (const bad of [{ runId: undefined }, { runId: '' }, { seed: '13064' }, { seed: 2147483648 }, { schemaVersion: 2 }]) {
+      assert.equal(summarizeNightlyProfile({ ...input, profile: { ...input.profile, ...bad } }).status, 'failed');
+    }
   }
 });
 

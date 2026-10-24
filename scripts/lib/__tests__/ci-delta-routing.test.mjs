@@ -390,8 +390,8 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   const loadedBy = trace.loaded;
 
   for (const [target, requirement, why] of [
-    ['packages/node-ui/e2e/bootstrap-devnet.ts', 'kosava_node_ui_e2e', 'the bootstrap failure regression executes an isolated copy of the production bootstrap'],
-    ['packages/node-ui/e2e/helpers/devnet.ts', 'kosava_node_ui_e2e', 'the isolated bootstrap copies its production devnet helper'],
+    ['packages/node-ui/e2e/bootstrap-devnet-runtime.ts', 'kosava_node_ui_e2e', 'the bootstrap failure child fixture imports production orchestration'],
+    ['packages/node-ui/e2e/helpers/devnet.ts', 'kosava_node_ui_e2e', 'bootstrap orchestration reads the selected directory through its devnet helper'],
     ['packages/node-ui/src/ui/agent-identity-api.ts', 'evm:chain', 'the wallet integration suite loads shared identity transport through the API'],
     ['packages/node-ui/src/ui/assertion-identity.ts', 'evm:chain', 'the wallet integration suite loads the API assertion decoder'],
     ['packages/node-ui/src/ui/assertions-page.ts', 'evm:chain', 'the wallet integration suite loads shared assertion discovery through the API'],

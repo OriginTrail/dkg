@@ -17,7 +17,7 @@ test('shared setup passes standard/nightly settings to test runners and browser 
   const originalEnv = { ...process.env };
   t.after(() => { for (const key of Object.keys(process.env)) if (!(key in originalEnv)) delete process.env[key]; Object.assign(process.env, originalEnv); });
   for (const [profile, seed, runs, local] of [['standard', '640905', '100', '0'], ['nightly-equivalent', '13064', '1000', '1'], ['nightly-equivalent', '0', '1000', '1']]) {
-    const record = { ...resolveCiProfile({ eventName: 'workflow_dispatch', profile, seed }), subject };
+    const record = { ...resolveCiProfile({ eventName: 'workflow_dispatch', profile, seed }), subject, runId: '40079149573' };
     const envFile = path.join(dir, 'env');
     fs.writeFileSync(envFile, '');
     execFileSync(process.execPath, ['scripts/ci/apply-ci-profile.mjs'], {
@@ -49,7 +49,7 @@ test('shared setup passes standard/nightly settings to test runners and browser 
 test('invalid or stale profiles cannot publish partial runner settings', t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-profile-invalid-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const record = { ...resolveCiProfile({ eventName: 'schedule', runNumber: '13064' }), subject };
+  const record = { ...resolveCiProfile({ eventName: 'schedule', runNumber: '13064' }), subject, runId: '40079149573' };
   for (const bad of [null, { ...record, seed: '13064' }, { ...record, subject: 'wrong' },
     { ...record, seed: 2147483648 }, { ...record, requestedTrials: 100 }, { ...record, managedLocal: false }]) {
     assert.throws(() => profileEnvironment(bad));

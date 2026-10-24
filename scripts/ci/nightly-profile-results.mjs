@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import { validateResolvedProfile } from './resolve-ci-profile.mjs';
 import { playwrightExecutions } from '../lib/playwright-executions.mjs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -23,13 +24,14 @@ export function summarizeNightlyProfile({ profile, needs, browsers = [], campaig
   const summary = { schemaVersion: 1, ...profile, recordedAt: now, status: 'failed', errors,
     jobs: Object.fromEntries(Object.entries(needs).map(([key, value]) => [key, value.result])),
     browsers, campaigns };
-  if (!profile || profile.schemaVersion !== 1 || !/^[a-f0-9]{40}$/.test(profile.subject ?? '')) errors.push('Missing/invalid resolved profile identity');
+  let validated;
+  try { validated = validateResolvedProfile(profile); }
+  catch (error) { errors.push(error.message); }
   for (const [job, state] of Object.entries(needs)) {
     if (['failure', 'cancelled'].includes(state.result)) errors.push(`${job}: ${state.result}`);
   }
   if (needs.changes?.result !== 'success') errors.push('Profile planning did not succeed');
   if (profile?.profile === 'nightly-equivalent') {
-    if (profile.requestedTrials !== 1000 || profile.managedLocal !== true) errors.push('Nightly settings are incomplete');
     for (const job of ['tornado-publisher', 'kosava-node-ui-e2e']) {
       if (needs[job]?.result !== 'success') errors.push(`Required ${job} execution did not succeed`);
     }
@@ -37,10 +39,10 @@ export function summarizeNightlyProfile({ profile, needs, browsers = [], campaig
       const rows = browsers.filter(row => row.shard === shard);
       if (rows.length !== 1) { errors.push(`Missing/duplicate browser shard ${shard}/7`); continue; }
       const row = rows[0];
-      if (row.runtime?.subject !== profile.subject || row.runtime?.profile !== profile.profile
-        || row.runtime?.managedLocal !== true || Number(row.runtime?.seed) !== profile.seed
-        || Number(row.runtime?.requestedTrials) !== profile.requestedTrials
-        || row.runtime?.runId !== profile.runId) errors.push(`Browser shard ${shard} does not match the resolved profile`);
+      if (!validated || row.runtime?.subject !== validated.subject || row.runtime?.profile !== validated.profile
+        || row.runtime?.managedLocal !== validated.managedLocal || Number(row.runtime?.seed) !== validated.seed
+        || Number(row.runtime?.requestedTrials) !== validated.requestedTrials
+        || row.runtime?.runId !== validated.runId) errors.push(`Browser shard ${shard} does not match the resolved profile`);
       if (row.errors?.length) errors.push(`Browser shard ${shard} has runner errors`);
       if (!row.tests.length) errors.push(`Browser shard ${shard} discovered zero tests`);
       for (const test of row.tests) {
@@ -57,15 +59,15 @@ export function summarizeNightlyProfile({ profile, needs, browsers = [], campaig
     }
     if (campaigns.length !== 1) errors.push('Missing/duplicate lift lifecycle campaign');
     for (const campaign of campaigns) {
-      if (campaign.schemaVersion !== 1 || campaign.identity !== LIFT_TEST || campaign.status !== 'passed'
-        || campaign.subject !== profile.subject || campaign.seed !== profile.seed
-        || campaign.requestedTrials !== 1000 || campaign.completedTrials !== 1000
+      if (!validated || campaign.schemaVersion !== 1 || campaign.identity !== LIFT_TEST || campaign.status !== 'passed'
+        || campaign.subject !== validated.subject || campaign.seed !== validated.seed
+        || campaign.requestedTrials !== validated.requestedTrials || campaign.completedTrials !== validated.requestedTrials
         || campaign.interrupted !== false || campaign.numSkips !== 0
-        || campaign.profile !== profile.profile || campaign.runId !== profile.runId || !(campaign.durationMs >= 0)) {
+        || campaign.profile !== validated.profile || campaign.runId !== validated.runId || !(campaign.durationMs >= 0)) {
         errors.push('Lift lifecycle campaign failed, unfinished, or does not match the resolved profile');
       }
     }
-  } else if (profile?.profile !== 'standard') errors.push('Unknown resolved profile');
+  }
   summary.status = errors.length ? 'failed' : 'passed';
   return summary;
 }
