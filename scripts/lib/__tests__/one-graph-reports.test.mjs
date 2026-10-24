@@ -8,7 +8,8 @@ import {
   arrivalWindow, inVerifiedScope, judgeGone, judgeReport, pairOutcome, readOutcome, verifiedScope, writeRetryable,
 } from '../qa/one-graph-promotion.mjs';
 import { sharedMemoryScope } from '../qa/member-sharing.mjs';
-import { createReports } from '../one-graph/reports.mjs';
+import { promotionRound } from '../one-graph/promotion-round.mjs';
+import { createReports, settled } from '../one-graph/reports.mjs';
 import { author, BODY, CG, LABEL, node, RDF_TYPE } from './one-graph-fixtures.mjs';
 
 test('Verified Memory of a sub-graph is its content graph and the per-asset graphs below it, nothing else', () => {
@@ -457,4 +458,74 @@ test('a report the curator did not select fails at any reading that finds it in 
   const [keptOnly, absent] = await placed(false);
   assert.deepEqual([keptOnly.outcome, absent.outcome], ['pass', 'pass']);
   assert.match(absent.text, /: absent from Verified Memory at every reading from the start of the promotions to the end of the 0 s$/);
+});
+
+test('a report that arrives in the last interval before the deadline is read in time: the last interval is shortened', { timeout: 10_000 }, async () => {
+  const cg = '0xabc/one-graph-main-1';
+  // Reads every 100 ms with a bound of 500 ms; the report reaches the node at 430 ms, after the read at 400 ms.
+  const stub = wholeReportNode(cg, age => age >= 430);
+  const io = reportsOver(stub.api);
+  const handle = io.watch(io.pairs(2, wholeReport(cg, stub.started), [node], 'swm', { from: stub.started, bound: 500, everyMs: 100 }));
+  await handle.done;
+  const [pair] = handle.pairs;
+  const result = pairOutcome(pair, { boundMs: 500 });
+  assert.equal(result.outcome, 'pass', result.text);
+  // Found by a read that went out after the report arrived and came back before the deadline.
+  assert.ok(pair.dating.view.hit.sentAt - stub.started >= 430 && pair.dating.view.hit.completedAt - stub.started < 500, JSON.stringify(pair.dating.view));
+});
+
+test('case 4 watches each candidate until its own promotion: a promotion that carries another candidate into Verified Memory fails', { timeout: 15_000 }, async () => {
+  const cg = '0xabc/one-graph-main-1';
+  const vmGraph = `did:dkg:context-graph:${cg}/reports/_verifiable_memory/1`;
+  const swmGraph = `${sharedMemoryScope(cg, 'reports')}/0xaa/1`;
+  const layers = new Map();
+  const rowsOf = n => [{ p: RDF_TYPE, o: 'urn:one-graph:Report' }, { p: LABEL, o: `"r (${n})"` }, { p: BODY, o: `"report ${n}"` }];
+  const api = async (_node, _method, _path, body) => {
+    const n = Number(/<urn:one-graph:R:(\d+)>/.exec(body.sparql)[1]);
+    const { swm, vm } = layers.get(n);
+    const bindings = body.view === 'shared-working-memory' ? (swm ? rowsOf(n) : [])
+      : body.view === 'verifiable-memory' ? (vm ? rowsOf(n) : [])
+        : [...(swm ? rowsOf(n).map(row => ({ g: swmGraph, ...row })) : []), ...(vm ? rowsOf(n).map(row => ({ g: vmGraph, ...row })) : [])];
+    return { status: 200, json: null, text: JSON.stringify({ result: { type: 'bindings', bindings } }) };
+  };
+  const report = n => {
+    layers.set(n, { swm: true, vm: false });
+    return {
+      author, graph: { key: 'main', id: cg, resolved: cg }, sub: 'reports', name: `og-r-${n}`, subject: `urn:one-graph:R:${n}`, value: `r (${n})`,
+      doneAt: Date.now() - 60_000, error: null,
+      triples: [{ name: 'class', predicate: RDF_TYPE, iri: 'urn:one-graph:Report' }, { name: 'value', predicate: LABEL, text: `r (${n})` }, { name: 'body', predicate: BODY, text: `report ${n}` }],
+    };
+  };
+  const [a1, b1, c1, other] = [1, 2, 3, 4].map(report);
+  const io = reportsOver(api);
+  const outcomes = [];
+  const settle = async handles => {
+    const pairs = await settled(handles);
+    for (const pair of pairs) outcomes.push({ value: pair.record.value, kind: pair.kind, ...pairOutcome(pair, { boundMs: 600 }) });
+    return pairs;
+  };
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+  // Promoting a1 also carries b1 into Verified Memory, leaving it in shared memory until its own promotion.
+  const promote = async record => {
+    if (record === a1) {
+      layers.set(1, { swm: false, vm: true });
+      layers.set(2, { swm: true, vm: true });
+      await wait(150);
+    } else {
+      layers.set(Number(record.subject.split(':').at(-1)), { swm: false, vm: true });
+      await wait(50);
+    }
+    return Date.now();
+  };
+  const { promoted } = await promotionRound({ io, caseId: 4, nodes: [node], candidates: [a1, b1, c1], others: [other], promote, settle });
+  assert.deepEqual(promoted.map(record => record.value), ['r (1)', 'r (2)', 'r (3)']);
+  const failed = outcomes.filter(outcome => outcome.outcome === 'fail');
+  // b1, watched until its own promotion, was seen in Verified Memory before it was selected.
+  assert.equal(failed.length, 1, JSON.stringify(failed));
+  assert.deepEqual([failed[0].value, failed[0].kind], ['r (2)', 'unpromoted']);
+  assert.match(failed[0].text, /: FOUND in .* after the start of the promotions, though it must never be in Verified Memory$/);
+  // Everything else holds: the other report, each candidate until its promotion, and every promotion's placement.
+  assert.ok(outcomes.some(outcome => outcome.value === 'r (4)' && outcome.kind === 'unpromoted' && outcome.outcome === 'pass'));
+  assert.ok(outcomes.some(outcome => outcome.value === 'r (2)' && outcome.kind === 'kept' && outcome.outcome === 'pass'));
+  assert.ok(['r (1)', 'r (2)', 'r (3)'].every(value => outcomes.some(outcome => outcome.value === value && outcome.kind === 'vm' && outcome.outcome === 'pass')));
 });

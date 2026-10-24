@@ -15,6 +15,8 @@ import { parseObservation } from '../qa/query-observation.mjs';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const READS = ['view', 'partitions'];
+// How long before a pair's deadline its last read goes out, at most (half an interval when that is shorter).
+const FINAL_READ_LEAD_MS = 250;
 
 /**
  * `config` is { stamp, sub, predicate, type, boundMs, definitionMs, syncedMs,
@@ -182,10 +184,11 @@ export function createReports(devnet, config) {
    * completed, one history for the delivery and for arrivalWindow;
    * `pair.progress` (each read's age at its first find within the bound) is
    * derived from it once the bound has its anchor (`pair.from`). Returns a
-   * handle { pairs, done, cancel, close, arm }, not a promise, so that
-   * whoever starts a watch does not wait; `close()` ends the bound of a pair
-   * that runs until closed at that moment, and `arm(from)` starts the bound
-   * of its pending pairs.
+   * handle { pairs, done, cancel, close, readOnce, arm }, not a promise, so
+   * that whoever starts a watch does not wait; `close()` ends the bound of a
+   * pair that runs until closed at that moment, `readOnce()` resolves once
+   * each of its reads has been made at least once, and `arm(from)` starts the
+   * bound of its pending pairs.
    */
   function watch(list) {
     const anchored = pair => pair.from !== null && pair.from !== undefined;
@@ -245,7 +248,11 @@ export function createReports(devnet, config) {
           if (over(pair, which)) return;
         }
         const every = pair.everyMs ?? pollMs;
-        await sleep(anchored(pair) ? Math.min(every, Math.max(0, pair.from + pair.boundMs - Date.now())) : every);
+        // The last interval is shortened, so that the last read goes out a little before the deadline,
+        // where its answer can still count: no stretch longer than that lead goes unread.
+        const lead = Math.min(FINAL_READ_LEAD_MS, every / 2);
+        const left = anchored(pair) ? pair.from + pair.boundMs - Date.now() : Infinity;
+        await sleep(left > lead ? Math.min(every, left - lead) : Math.max(0, left));
       }
     };
     // The check after the bound: each read until one answers, up to three times.
@@ -266,10 +273,15 @@ export function createReports(devnet, config) {
       if (!cancelled && throughout(pair) && anchored(pair) && pairHeld(pair.progress) && !pair.lapsed) await confirm(pair);
     };
     const done = Promise.all(list.map(settle)).then(() => undefined);
+    // The bound ends now: a read that has completed by now counts.
     const close = () => {
-      for (const pair of list) if (anchored(pair) && !Number.isFinite(pair.boundMs)) pair.boundMs = Math.max(0, Date.now() - pair.from);
+      for (const pair of list) if (anchored(pair) && !Number.isFinite(pair.boundMs)) pair.boundMs = Math.max(0, Date.now() - pair.from) + 1;
     };
-    return { pairs: list, done, cancel: () => { cancelled = true; }, close, arm: from => { for (const pair of list) if (pair.pending) arm(pair, from); } };
+    // Resolves once each read of each pair has completed at least once (or the watch is over for it).
+    const readOnce = async () => {
+      while (!cancelled && list.some(pair => !pair.record.error && READS.some(which => pair.last[which] === null))) await sleep(10);
+    };
+    return { pairs: list, done, cancel: () => { cancelled = true; }, close, readOnce, arm: from => { for (const pair of list) if (pair.pending) arm(pair, from); } };
   }
 
   /**
