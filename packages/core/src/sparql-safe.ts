@@ -53,6 +53,17 @@ export function isSafeIri(value: string): boolean {
   return IRI_SCHEME_RE.test(value);
 }
 
+// RFC 3987 lets an absolute IRI's hier-part be empty, so a bare `scheme:`
+// such as `a:` is an IRI the stores accept on write and return from SELECT.
+// core's isSafeIri needs a character after the colon. This admits exactly
+// that shape, which holds only scheme characters and the colon.
+const SCHEME_ONLY_IRI = /^[a-zA-Z][a-zA-Z0-9+.-]*:$/;
+
+/** core's isSafeIri plus a bare `scheme:`; every other value gets isSafeIri's answer. */
+export function isSafeResultIri(value: string): boolean {
+  return isSafeIri(value) || SCHEME_ONLY_IRI.test(value);
+}
+
 /**
  * Returns `<value>` after validating the IRI is safe for SPARQL interpolation.
  * Throws on unsafe input.

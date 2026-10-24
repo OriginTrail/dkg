@@ -44,6 +44,27 @@ function makeBindings(overrides: Partial<Record<string, string>> = {}): Record<s
 }
 
 describe('handleEventsQuery', () => {
+  it('preserves scheme-only subjects alongside ordinary event identities', async () => {
+    const ids = ['a:', 'urn:uuid:event-1', 'x+scheme.v1:'];
+    const { engine } = createTrackingQueryEngine(ids.map(event => makeBindings({ event })));
+    const { body } = await handleEventsQuery(new URLSearchParams(), {
+      contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH,
+    });
+    expect(body.epcisBody.queryResults.resultsBody.eventList.map(event => event.eventID)).toEqual(ids);
+  });
+
+  it.each([undefined, '', '_:blank', 'https://example.org/Event>', 'bad iri', '1:', 'a: '])(
+    'rejects missing, blank-node or unsafe subjects: %j', async (event) => {
+      const binding = makeBindings();
+      if (event === undefined) delete binding.event;
+      else binding.event = event;
+      const { engine } = createTrackingQueryEngine([makeBindings(), binding]);
+      await expect(handleEventsQuery(new URLSearchParams(), {
+        contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH,
+      })).rejects.toMatchObject({ statusCode: 502 });
+    },
+  );
+
   it.each(['https://gs1.github.io/EPCIS/CustomEvent', 'urn:epcis:CustomEvent'])(
     'reuses the returned extended type as the exact query filter: %s', (type) => {
       const event = toEpcisEvent(makeBindings({ eventType: type }));
@@ -96,6 +117,7 @@ describe('handleEventsQuery', () => {
 
     const event = eventList[0];
     expect(event.type).toBe('ObjectEvent');
+    expect(event.eventID).toBe('urn:uuid:event-1');
     expect(event['dkg:ual']).toBe('did:dkg:mock:31337/42');
     expect(event.configurationId).toBe('CFG-001');
     expect(event.shipmentId).toBe('SHIP-001');
@@ -292,6 +314,22 @@ describe('handleEventsQuery', () => {
     expect(body.epcisBody.queryResults.resultsBody.eventList).toHaveLength(10);
     expect(headers?.link).toBeDefined();
     expect(headers!.link).toContain('rel="next"');
+  });
+
+  it.each(['', '_:blank', 'relative-event', 'https://example.org/event>'])('rejects an unusable stored event subject with 502: %s', async (event) => {
+    const { engine } = createTrackingQueryEngine([makeBindings({ event })]);
+    await expect(handleEventsQuery(new URLSearchParams(), {
+      contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH,
+    })).rejects.toMatchObject({ statusCode: 502 });
+  });
+
+  it('rejects a query result that has no event subject with 502', async () => {
+    const binding = makeBindings();
+    delete binding.event;
+    const { engine } = createTrackingQueryEngine([binding]);
+    await expect(handleEventsQuery(new URLSearchParams(), {
+      contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH,
+    })).rejects.toMatchObject({ statusCode: 502 });
   });
 
   it('Link header URL preserves original query params and adds nextPageToken', async () => {
