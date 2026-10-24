@@ -236,11 +236,13 @@ describe('sync-on-connect churn gates', () => {
     // The third argument is the bounded admission origin (issue #2006): the
     // reconciler's queue pressure must be attributable to `reconcile`, not
     // indistinguishable from sync-on-connect. Selected/ordinary phase history
-    // exists only inside a queued peer job.
+    // exists only inside a queued peer job. The fourth, `null`, is the graph
+    // scope: the reconciler always syncs the peer's whole scope.
     expect(trySyncFromPeer.calls).toEqual([[
       PEER_A,
       expect.any(Function),
       'reconcile',
+      null,
     ]]);
   });
 

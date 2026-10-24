@@ -1,0 +1,106 @@
+import { EntityGraphReader, PAGE_SIZE } from './documents.js';
+import { documentKey, indexKey } from './identity.js';
+import { EntityIndexStore, type IndexState } from './store.js';
+import { EntitySearchError, checkDeadline, unitVector, type EntityEmbedder, type EntityIndexStatus, type EntityReadinessResponse, type EntitySearchResponse, type EntityDocument } from './types.js';
+import type { NormalizedIndexRequest, NormalizedReadinessRequest, NormalizedSearchRequest } from './types.js';
+
+/** Lifecycle-owned service. Index pages are explicit operator work; reads never start a rebuild. */
+export class EntitySearchService {
+  private busy = new Set<string>();
+  private searches = 0;
+  private preparing = false;
+  constructor(readonly store: EntityIndexStore, readonly embedder: EntityEmbedder) {}
+  async index(request: NormalizedIndexRequest, reader: EntityGraphReader, signal: AbortSignal, deadline: number): Promise<EntityIndexStatus> {
+    const { restart, timeoutMs: _timeoutMs, chainEvidenceMode: _chainEvidenceMode, ...spec } = request, id = indexKey(spec, this.embedder.fingerprint);
+    if (this.preparing || this.busy.size) throw new EntitySearchError('ENTITY_INDEX_BUSY', 429);
+    this.busy.add(id);
+    try {
+      await reader.authorize(request, signal, deadline);
+      let state = this.store.state(id);
+      if (!state && this.store.indexCount() >= 32) throw new EntitySearchError('ENTITY_INDEX_CAPACITY', 422);
+      if (!state || restart) {
+        state = { id, spec, fingerprint: this.embedder.fingerprint,
+          cursor: null, scanComplete: false, completedAt: null };
+        this.store.begin(state);
+      }
+      if (state.scanComplete) return this.checkedStatus(state, signal, deadline);
+      const page = await reader.page(request, state.cursor, signal, deadline);
+      for (const entity of page) {
+        const doc = await reader.document(request, entity, signal, deadline);
+        if (!doc) continue;
+        const cached = this.store.cached(id, documentKey(doc));
+        const vector = cached?.contentHash === doc.contentHash ? cached.vector : await this.embedder.embed(doc.text, 'document', signal);
+        const normalized = unitVector(vector, this.embedder.dimensions);
+        checkDeadline(signal, deadline);
+        this.store.upsert(state, { entityUri: doc.entityUri, sourceGraph: doc.sourceGraph, contentHash: doc.contentHash, vector: normalized });
+      }
+      checkDeadline(signal, deadline);
+      if (page.length) state.cursor = page[page.length - 1];
+      if (page.length < PAGE_SIZE) {
+        state.scanComplete = true; state.completedAt = new Date().toISOString();
+        this.store.finish(state);
+      } else this.store.save(state);
+      return this.checkedStatus(state, signal, deadline);
+    } finally { this.busy.delete(id); }
+  }
+  private status(state: IndexState): EntityIndexStatus {
+    return { indexId: state.id, contextGraphId: state.spec.contextGraphId, view: state.spec.view,
+      modelFingerprint: state.fingerprint, indexedEntities: this.store.count(state.id), scanComplete: state.scanComplete,
+      completedAt: state.completedAt, coverage: 'local-indexed-subset' as const, graphComplete: null };
+  }
+  private checkedStatus(state: IndexState, signal: AbortSignal, deadline: number): EntityIndexStatus {
+    const status = this.status(state);
+    checkDeadline(signal, deadline);
+    return status;
+  }
+  /** A fresh residency check, with explicit bounded warm-up outside a query's budget. */
+  async readiness(request: NormalizedReadinessRequest, reader: EntityGraphReader,
+    signal: AbortSignal, deadline: number): Promise<EntityReadinessResponse> {
+    const { indexId: id, contextGraphId, warmup } = request;
+    if (this.preparing || (warmup && (this.searches > 0 || this.busy.size > 0))) throw new EntitySearchError('ENTITY_SEARCH_BUSY', 429);
+    if (warmup) this.preparing = true;
+    try {
+      const state = this.store.state(id);
+      if (!state || state.spec.contextGraphId !== contextGraphId) throw new EntitySearchError('ENTITY_INDEX_NOT_FOUND', 404);
+      await reader.authorize({ ...state.spec, chainEvidenceMode: request.chainEvidenceMode }, signal, deadline);
+      if (state.fingerprint !== this.embedder.fingerprint) throw new EntitySearchError('ENTITY_EMBEDDING_MODEL_CHANGED');
+      if (warmup) await this.embedder.embed('readiness probe', 'query', signal);
+      const ready = await this.embedder.ready(signal);
+      checkDeadline(signal, deadline);
+      return { ...this.checkedStatus(state, signal, deadline), ready, observedAt: new Date().toISOString() };
+    } finally { if (warmup) this.preparing = false; }
+  }
+  async search(request: NormalizedSearchRequest, reader: EntityGraphReader,
+    signal: AbortSignal, deadline: number): Promise<EntitySearchResponse> {
+    const { indexId: id, contextGraphId, query, limit } = request;
+    if (this.preparing || this.searches >= 2) throw new EntitySearchError('ENTITY_SEARCH_BUSY', 429);
+    this.searches++;
+    try {
+      const state = this.store.state(id);
+      if (!state || state.spec.contextGraphId !== contextGraphId) throw new EntitySearchError('ENTITY_INDEX_NOT_FOUND', 404);
+      const readSpec = { ...state.spec, chainEvidenceMode: request.chainEvidenceMode };
+      await reader.authorize(readSpec, signal, deadline);
+      if (state.fingerprint !== this.embedder.fingerprint) throw new EntitySearchError('ENTITY_EMBEDDING_MODEL_CHANGED');
+      const vector = unitVector(await this.embedder.embed(query, 'query', signal), this.embedder.dimensions);
+      const candidates = this.store.rank(id, vector, Math.min(80, limit * 4), signal, deadline);
+      const entities = [];
+      let staleCandidates = 0;
+      for (const candidate of candidates) {
+        let current: EntityDocument | null;
+        try { current = await reader.document(readSpec, candidate, signal, deadline); }
+        catch (error) {
+          if (!(error instanceof EntitySearchError) || error.code !== 'ENTITY_DOCUMENT_TOO_LARGE') throw error;
+          staleCandidates++; continue;
+        }
+        if (!current || current.contentHash !== candidate.contentHash) { staleCandidates++; continue; }
+        entities.push({ ...current, score: candidate.score });
+        if (entities.length === limit) break;
+      }
+      checkDeadline(signal, deadline);
+      return { ...this.checkedStatus(state, signal, deadline), entities, staleCandidates, observedAt: new Date().toISOString(),
+        // Content is re-read under current authorization. New entities require a rescan.
+        freshness: 'candidates-revalidated', exhaustive: false };
+    } finally { this.searches--; }
+  }
+  close(): void { this.store.close(); }
+}

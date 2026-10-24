@@ -1,3 +1,4 @@
+import { getPromoteNoEffectProof, PROMOTE_NO_EFFECT_REJECTION_CODE, type PromoteNoEffectProof } from './promote-no-effect-rejection.js';
 import {
   isStoreOperationTimeoutError,
   isStoreSchedulerBusyError,
@@ -52,6 +53,12 @@ export type PromoteFailureDiagnostic =
   | PromotePostCommitFailureDiagnostic;
 
 export type PromoteFailureDisposition =
+  | {
+      readonly classification: 'cap_exceeded';
+      readonly retryable: false;
+      readonly diagnostic: { readonly name: 'PromoteNoEffectRejection'; readonly code: 'PROMOTE_NO_EFFECT_REJECTION' };
+      readonly noEffectProof: PromoteNoEffectProof;
+    }
   | {
       readonly classification: 'transient';
       readonly retryable: true;
@@ -114,16 +121,17 @@ export function isStoreOperationProvenNotStarted(error: unknown): boolean {
 /**
  * The single classification boundary for idempotent durable finalization that a
  * replay of the same committed operation repairs: the publisher's commit tail
- * and the agent's SWM pointer stamp. Never wrap observer hooks or gossip in it.
+ * and the agent's SWM pointer / bound inventory CAS. Never wrap detached observers
+ * or gossip: only an immutable operation's validated durable tail qualifies.
  * A storage operation proven not to have started can re-enter the same
  * immutable operation and repair its tail. Unknown/indeterminate outcomes and
  * unrelated retry markers cannot earn that permission here.
  */
-export async function runPromoteCommittedFinalization(
-  finalize: () => Promise<void>,
-): Promise<void> {
+export async function runPromoteCommittedFinalization<T>(
+  finalize: () => Promise<T>,
+): Promise<T> {
   try {
-    await finalize();
+    return await finalize();
   } catch (error) {
     if (isStoreOperationProvenNotStarted(error)) throw error;
     throw createPromotePostCommitFailure(error);
@@ -227,6 +235,9 @@ export function getPromoteReplaySafeErrorDiagnostic(
 export function getPromoteFailureDisposition(
   error: unknown,
 ): PromoteFailureDisposition | undefined {
+  const noEffectProof = getPromoteNoEffectProof(error);
+  if (noEffectProof) return {classification: 'cap_exceeded', retryable: false, noEffectProof,
+    diagnostic: {name: 'PromoteNoEffectRejection', code: PROMOTE_NO_EFFECT_REJECTION_CODE}};
   const postCommitDiagnostic = getPromotePostCommitFailureDiagnostic(error);
   if (postCommitDiagnostic) {
     return {

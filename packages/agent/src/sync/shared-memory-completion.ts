@@ -56,6 +56,8 @@ interface RecoverContextGraphSwmResultFields {
   readonly insertedDataQuads: number;
   readonly insertedMetaQuads: number;
   readonly droppedDataTriples: number;
+  /** Graph-scoped assets of a completed round whose exact content the store already held. */
+  readonly alreadyHeldGraphs?: number;
   /** Verified immutable snapshot refs ready in the local cache after this round. */
   readonly readySnapshots: number;
   /** Manifest-bound progress across rounds; retry accounting, not permission to reuse a ref. */

@@ -233,8 +233,17 @@ describe('experimental public Core streaming recovery host', () => {
     expect(h.transportModes).toEqual(['stream-preferred', 'stream-required']);
   });
 
-  it.each(['unset', '0', 'private', 'unknown-authority', 'no-protocol', 'not-core'] as const)('retains ordinary ordering/large-KA singleton limits when %s', async guard => {
-    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', guard === 'unset' ? undefined : guard === '0' ? '0' : '1');
+  it('selects a public capable core without a stream environment override', async () => {
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', undefined);
+    vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', undefined);
+    const h = await harness();
+    await h.run();
+    expect(h.fetched[0]!.peerId).toBe(core);
+    expect(h.transportModes).toContain('stream-preferred');
+  });
+
+  it.each(['0', 'private', 'unknown-authority', 'no-protocol', 'not-core'] as const)('retains ordinary ordering/large-KA singleton limits when %s', async guard => {
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', guard === '0' ? '0' : '1');
     const h = await harness({ public: guard !== 'private', core: guard !== 'not-core', advertised: guard !== 'no-protocol' });
     if (guard === 'unknown-authority') h.authority.mockResolvedValue({ kind: 'unknown' } as never);
     await h.run();
@@ -242,7 +251,7 @@ describe('experimental public Core streaming recovery host', () => {
     expect(h.fetched.every(({ uals }) => uals.length === 1)).toBe(true);
     expect(h.transportModes.every(mode => mode === 'legacy')).toBe(true);
     expect(h.attemptTimeouts.every((attempt) => attempt.totalTimeoutMs === undefined)).toBe(true);
-    if (guard === 'unset' || guard === '0' || guard === 'not-core' || guard === 'no-protocol') expect(h.authority).not.toHaveBeenCalled();
+    if (guard === '0' || guard === 'not-core' || guard === 'no-protocol') expect(h.authority).not.toHaveBeenCalled();
   });
 
   it.each(['unknown', 'oversize'] as const)('retains legacy singleton wire for %s footprints even on a public supported Core', async footprint => {
@@ -530,8 +539,8 @@ describe('a stream Core whose attempt ended without a verdict on its data', () =
       expect(peersOf(await h.runPending())).toEqual([core, older, olderB]);
 
       if (boundary === 'recovery is closed') {
-        h.internals.closeVmReconcileRotationState();
-        h.internals.openVmReconcileRotationState();
+        h.internals.workLifetime.close(); h.internals.closeVmReconcileRotationState();
+        h.internals.workLifetime.open(); h.internals.openVmReconcileRotationState();
       } else {
         h.internals.clearVmReconcileRotationStateForContextGraph(cg);
       }

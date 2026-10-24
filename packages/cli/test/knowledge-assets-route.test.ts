@@ -35,6 +35,7 @@
  * keccak256 fileHash; share-async → 200 {state:'queued'}.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createServer } from 'node:http';
 import {
   startLiveDaemon,
   stopLiveDaemon,
@@ -95,41 +96,43 @@ async function postJsonAsAgent(authToken: string, path: string, body: unknown) {
 function postJsonAsNode(path: string, body: unknown) {
   return postJsonAsAgent(String(daemon.token), path, body);
 }
-/**
- * Share a KA the way an API client is expected to.
- *
- * A share can reach the node while one of its prerequisite reads is briefly
- * unavailable, most easily straight after a Context Graph registration. The
- * node first repeats that read for a short time itself; if the outage outlasts
- * that, the route answers a retryable 503 that names the same asset, and the
- * client sends the same share again after Retry-After. Only that answer is
- * repeated here, and its contract is asserted each time it is seen, so every
- * other outcome still reaches the calling test's own assertions.
- */
+/** Observe an admitted share's owner; retry HTTP only before durable admission. */
 async function shareToSwm(
   post: (path: string, body: unknown) => ReturnType<typeof postJsonAsAgent>,
   name: string,
   body: { contextGraphId: string } & Record<string, unknown>,
+  get: (path: string) => ReturnType<typeof getJsonAsAgent> = path => getJsonAsAgent(String(daemon.token), path),
 ) {
   const path = `/api/knowledge-assets/${name}/swm/share`;
   let res = await post(path, body);
-  for (
-    let repeats = 0;
-    repeats < 5 && res.status === 503 && res.body.code === 'PROMOTE_RETRYABLE_FAILURE';
-    repeats += 1
-  ) {
-    expect(res.body, `retryable share answer: ${JSON.stringify(res.body)}`).toMatchObject({
-      retryable: true,
-      retryAction: 'resume_existing_knowledge_asset',
-      retryPhase: 'swm-share',
-      contextGraphId: body.contextGraphId,
-      retryKnowledgeAssetName: name,
-    });
+  for (let repeats = 0; repeats < 5 && res.status === 503; repeats++) {
+    if (res.body.recoveryJobId) {
+      expect(res.body.recoveryState).toBe('pending');
+      const deadline = Date.now() + 90_000;
+      while (Date.now() < deadline) {
+        const status = await get(res.body.recoveryStatusUrl);
+        expect(status.status).toBe(200);
+        expect(['queued', 'running', 'failed_retrying', 'succeeded']).toContain(status.body.state);
+        if (status.body.state === 'succeeded') {
+          const descriptor = await get(`/api/knowledge-assets/${name}?contextGraphId=${encodeURIComponent(body.contextGraphId)}`);
+          expect(descriptor.status).toBe(200);
+          expect(descriptor.body.status).toBe('swm-shared');
+          // Expose the actual job response; do not fabricate a synchronous body
+          // or replay the POST after recovery to make HTTP assertions pass.
+          return { ...status, retryAfter: null, recovered: true };
+        }
+        await sleep(500);
+      }
+      throw new Error(`Durable share did not complete: ${JSON.stringify(res.body)}`);
+    }
+    if (res.body.code !== 'PROMOTE_RETRYABLE_FAILURE') break;
+    expect(res.body).toMatchObject({ retryable: true, retryAction: 'resume_existing_knowledge_asset',
+      retryPhase: 'swm-share', contextGraphId: body.contextGraphId, retryKnowledgeAssetName: name });
     expect(res.retryAfter).toBe('1');
-    await sleep(Number(res.retryAfter) * 1000);
+    await sleep(1000);
     res = await post(path, body);
   }
-  return res;
+  return { ...res, recovered: false };
 }
 async function getJsonAsAgent(authToken: string, path: string) {
   const r = await fetch(`${daemon.base}${path}`, { headers: { Authorization: `Bearer ${authToken}` } });
@@ -444,6 +447,14 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(body.count).toBe(2);
       // Sorted: ex:A precedes ex:Z.
       expect(body.quads[0].subject).toBe('ex:A');
+      const descriptor = await getJson(daemon, `/api/knowledge-assets/sorted?contextGraphId=${LOCAL}`);
+      const author = String(descriptor.body.agentAddress);
+      for (const spelling of [author, author.toLowerCase(), caseVariantAddress(author)]) {
+        const equivalent = await getJson(daemon,
+          `/api/knowledge-assets/sorted/wm/quads?contextGraphId=${LOCAL}&agentAddress=${spelling}`);
+        expect(equivalent.status).toBe(200);
+        expect(equivalent.body).toEqual(body);
+      }
     });
 
     it('rejects a bad assertion name (400, no query)', async () => {
@@ -632,8 +643,10 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(finalized.status, `finalize failed: ${JSON.stringify(finalized.body)}`).toBe(200);
       const res = await shareToSwm(postJsonAsNode, 'share', { contextGraphId: REG });
       expect(res.status, `share failed: ${JSON.stringify(res.body)}`).toBe(200);
-      expect(res.body.swmShared).toBe(true);
-      expect(res.body.promotedCount).toBeGreaterThan(0);
+      if (!res.recovered) {
+        expect(res.body.swmShared).toBe(true);
+        expect(res.body.promotedCount).toBeGreaterThan(0);
+      }
     });
 
     it('agent-scoped token full share auto-seals as the token agent', async () => {
@@ -651,12 +664,14 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(draft.status, `agent draft: ${JSON.stringify(draft.body)}`).toBe(201);
       expect(draft.body.status).toBe('draft-open');
 
-      const res = await shareToSwm(agent.post, name, { contextGraphId: cg });
+      const res = await shareToSwm(agent.post, name, { contextGraphId: cg }, agent.get);
 
       expect(res.status, `agent share: ${JSON.stringify(res.body)}`).toBe(200);
-      expect(res.body.swmShared).toBe(true);
-      expect(res.body.sealed).toBe(true);
-      expect(res.body.publishReady).toBe(true);
+      if (!res.recovered) {
+        expect(res.body.swmShared).toBe(true);
+        expect(res.body.sealed).toBe(true);
+        expect(res.body.publishReady).toBe(true);
+      }
       const descriptor = await agent.get(
         `/api/knowledge-assets/${name}?contextGraphId=${cg}&agentAddress=${agent.agentAddress}`,
       );
@@ -689,10 +704,12 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
         expect(written.status, `full share write: ${JSON.stringify(written.body)}`).toBe(200);
         const res = await shareToSwm(postJsonAsNode, 'share-full-default', { contextGraphId: REG });
         expect(res.status, `full share: ${JSON.stringify(res.body)}`).toBe(200);
-        expect(res.body.swmShared).toBe(true);
-        expect(res.body.promotedCount).toBeGreaterThan(0);
-        expect(res.body.sealed).toBe(true);
-        expect(res.body.publishReady).toBe(true);
+        if (!res.recovered) {
+          expect(res.body.swmShared).toBe(true);
+          expect(res.body.promotedCount).toBeGreaterThan(0);
+          expect(res.body.sealed).toBe(true);
+          expect(res.body.publishReady).toBe(true);
+        }
       });
 
       it('a skipSeal:true full share is rejected before SWM mutation', async () => {
@@ -1038,7 +1055,7 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
 
       // This share follows a registration directly, where a prerequisite read
       // of the share is most likely to be briefly unavailable.
-      const shareRes = await shareToSwm(agent.post, name, { contextGraphId: cg });
+      const shareRes = await shareToSwm(agent.post, name, { contextGraphId: cg }, agent.get);
       expect(shareRes.status, `share: ${JSON.stringify(shareRes.body)}`).toBe(200);
 
       const pullRes = await agent.post(`/api/knowledge-assets/${name}/wm/pull-from`, {
@@ -1049,10 +1066,60 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(pullRes.status, `pull: ${JSON.stringify(pullRes.body)}`).toBe(200);
       expect(pullRes.body.seeded).toBeGreaterThan(0);
 
+      const recoverExact = { kaUal: pullRes.body.kaUal, assertionVersion: pullRes.body.assertionVersion, merkleRoot: pullRes.body.merkleRoot };
+      const path = `/api/knowledge-assets/${name}/wm/pull-from`;
+      // A real HTTP proxy forwards a complete pull but drops its response.
+      let forwardedStatus: number | undefined;
+      const proxy = createServer(async (req, res) => {
+        try {
+          const chunks = [];
+          for await (const chunk of req) chunks.push(chunk);
+          const upstream = await fetch(`${daemon.base}${path}`, { method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${agent.authToken}` },
+            body: Buffer.concat(chunks) });
+          const completed = await upstream.json();
+          forwardedStatus = upstream.status;
+          expect(completed.seeded).toBeGreaterThan(0);
+          res.destroy();
+        } catch (error) { res.destroy(error as Error); }
+      });
+      await new Promise<void>(resolve => proxy.listen(0, '127.0.0.1', resolve));
+      try {
+        const address = proxy.address() as { port: number };
+        await expect(fetch(`http://127.0.0.1:${address.port}${path}`, { method: 'POST',
+          body: JSON.stringify({ contextGraphId: cg, layer: 'swm', onConflict: 'replace' }) })).rejects.toThrow();
+      } finally { await new Promise<void>(resolve => proxy.close(() => resolve())); }
+      expect(forwardedStatus).toBe(200);
+      expect((await agent.post(path, { contextGraphId: cg, layer: 'swm' })).body.code).toBe('WM_DRAFT_CONFLICT');
+      const recovered = await agent.post(path, { contextGraphId: cg, layer: 'swm', recoverExact });
+      expect(recovered.status, JSON.stringify(recovered.body)).toBe(200);
+      const missingSubgraph = await agent.post(path, { contextGraphId: cg, layer: 'swm', subGraphName: 'missing' });
+      expect(missingSubgraph.status, JSON.stringify(missingSubgraph.body)).toBe(400);
+      expect(missingSubgraph.body.code).toBe('SUB_GRAPH_NOT_FOUND');
+      expect(recovered.body).toMatchObject({ recovered: true, draftEvidence: {
+        agentAddress: agent.agentAddress, contextGraphId: cg, privateTripleCount: 0, ...recoverExact } });
+      expect((await agent.post(path, { contextGraphId: cg, layer: 'swm',
+        recoverExact: { ...recoverExact, assertionVersion: '999' } })).body.code).toBe('WM_RECOVERY_SOURCE_UNAVAILABLE');
+      for (const invalid of [null, {}, { ...recoverExact, assertionVersion: 1 }]) {
+        expect((await agent.post(path, { contextGraphId: cg, layer: 'swm', recoverExact: invalid })).status).toBe(400);
+      }
+      expect((await agent.post(path, { contextGraphId: cg, layer: 'swm', recoverExact, onConflict: 'replace' })).status).toBe(400);
+      const other = await registerAgentClient('ka-wrong-recovery-actor');
+      const wrongActor = await other.post(path, { contextGraphId: cg, layer: 'swm', recoverExact, agentAddress: agent.agentAddress });
+      expect(wrongActor.status).toBe(400); // Named mutation targets cannot override the bearer actor.
+      expect((await fetch(`${daemon.base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contextGraphId: cg, layer: 'swm', recoverExact }) })).status).toBe(401);
+
       const readRes = await agent.get(`/api/knowledge-assets/${name}/wm/quads?contextGraphId=${cg}`);
       expect(readRes.status, `read: ${JSON.stringify(readRes.body)}`).toBe(200);
       expect(readRes.body.count).toBeGreaterThan(0);
       expect(readRes.body.quads.some((q: any) => q.subject === 'ex:token-pull')).toBe(true);
+      for (const spelling of [agent.agentAddress.toLowerCase(), caseVariantAddress(agent.agentAddress)]) {
+        const equivalent = await agent.get(
+          `/api/knowledge-assets/${name}/wm/quads?contextGraphId=${cg}&agentAddress=${spelling}`);
+        expect(equivalent.status).toBe(200);
+        expect(equivalent.body).toEqual(readRes.body);
+      }
     });
   });
 

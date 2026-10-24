@@ -9,6 +9,7 @@ import {
   resolveBooleanSwitch,
   resolveExactBatchStreamEnabled,
   resolveNonNegativeIntegerSwitch,
+  resolvePositiveIntegerSwitch,
   resolveSyncGlobalBackpressure,
   resolveSyncReconcilerEnabled,
   resolveVmReconcilerEnabled,
@@ -1513,6 +1514,9 @@ describe('sync global backpressure', () => {
 
       expect(resolveBooleanSwitch(true, 'DKG_SYNC_RECONCILER_ENABLED', true)).toBe(false);
       expect(resolveNonNegativeIntegerSwitch(15_000, 'DKG_STORAGE_ACK_HANDLER_DEADLINE_MS')).toBe(60_000);
+      expect(resolvePositiveIntegerSwitch(15_000, 'DKG_STORAGE_ACK_HANDLER_DEADLINE_MS')).toBe(60_000);
+      expect(resolvePositiveIntegerSwitch(0, 'DKG_UNSET_POSITIVE_SWITCH_FOR_TEST')).toBeUndefined();
+      expect(resolvePositiveIntegerSwitch(undefined, 'DKG_UNSET_POSITIVE_SWITCH_FOR_TEST')).toBeUndefined();
     } finally {
       if (oldReconciler === undefined) delete process.env.DKG_SYNC_RECONCILER_ENABLED;
       else process.env.DKG_SYNC_RECONCILER_ENABLED = oldReconciler;
@@ -1577,7 +1581,7 @@ describe('sync global backpressure', () => {
     try {
       delete process.env.DKG_EXACT_BATCH_STREAM_ENABLED;
       delete process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM;
-      expect(resolveExactBatchStreamEnabled()).toBe(false);
+      expect(resolveExactBatchStreamEnabled()).toBe(true);
 
       process.env.DKG_EXACT_BATCH_STREAM_ENABLED = '1';
       expect(resolveExactBatchStreamEnabled()).toBe(true);
@@ -1810,9 +1814,11 @@ describe('sync global backpressure', () => {
     const snapshot = backpressureRegistry.capture().schedulers.find(
       (scheduler) => scheduler.scheduler === 'sync-global',
     );
+    // The slow lane also carries the reserved shared-memory slot and its own
+    // queue (#3251): 72 + 16 queued and 10 + 1 running in total.
     expect(snapshot).toMatchObject({
       capacityModel: 'partitioned',
-      totals: { queueLimit: 72, inflightLimit: 10, inflight: 0 },
+      totals: { queueLimit: 88, inflightLimit: 11, inflight: 0 },
     });
     expect(snapshot!.lanes.find((lane) => lane.lane === 'fast')).toMatchObject({
       capacityModel: 'partitioned',
@@ -1821,8 +1827,8 @@ describe('sync global backpressure', () => {
     });
     expect(snapshot!.lanes.find((lane) => lane.lane === 'slow')).toMatchObject({
       capacityModel: 'partitioned',
-      queueLimit: 8,
-      inflightLimit: 2,
+      queueLimit: 24,
+      inflightLimit: 3,
     });
   });
 
@@ -1878,10 +1884,13 @@ describe('sync global backpressure', () => {
       );
       // The scheduler-level ceilings are what a shared lane's ceiling resolves
       // to, so dropping either one from the publish would silently take the
-      // depth branches back out of service.
+      // depth branches back out of service. They include the reserved
+      // shared-memory slot and its queue (#3251) and the reserved
+      // control-plane slot, which has no queue (#3280): 2 + 16 queued,
+      // 1 + 1 + 1 running.
       expect(snapshot).toMatchObject({
         capacityModel: 'shared',
-        totals: { queueLimit: 2, inflightLimit: 1 },
+        totals: { queueLimit: 18, inflightLimit: 3 },
       });
       // Scoping this to one lane would be decorative: under `shared` every
       // field below resolves from scheduler-level capacity, so it is identical
@@ -1891,7 +1900,7 @@ describe('sync global backpressure', () => {
       // fact: the admission just made is active in the lane it was sent to.
       expect(snapshot!.lanes.length).toBeGreaterThan(0);
       for (const lane of snapshot!.lanes) {
-        expect(lane).toMatchObject({ capacityModel: 'shared', queueLimit: 2, inflightLimit: 1 });
+        expect(lane).toMatchObject({ capacityModel: 'shared', queueLimit: 18, inflightLimit: 3 });
       }
       const durable = snapshot!.lanes.find((lane) => lane.lane === 'durable');
       expect(durable).toMatchObject({
@@ -1962,17 +1971,20 @@ describe('sync global backpressure', () => {
     }));
     await tick();
 
-    expect(events).toEqual(['changelog-a-start', 'shared-start']);
+    // #3251: the ordinary shared-memory pull runs at once in the reserved
+    // shared-memory slot, so it takes neither a general slot nor the one kept
+    // for the selected provider.
+    expect(events).toEqual(['changelog-a-start', 'ordinary-shared-start', 'shared-start']);
     releaseShared();
     await shared;
-    expect(events).toEqual(['changelog-a-start', 'shared-start']);
+    expect(events).toEqual(['changelog-a-start', 'ordinary-shared-start', 'shared-start']);
     releaseRoutine();
     await Promise.all([changelogA, vmRecovery, ordinaryShared]);
     expect(events).toEqual([
       'changelog-a-start',
+      'ordinary-shared-start',
       'shared-start',
       'vm-recovery-start',
-      'ordinary-shared-start',
     ]);
   });
 
@@ -2498,11 +2510,21 @@ describe('sync global backpressure', () => {
       policy,
       ctx,
       contextGraphId: 'urn:cg:another-unrelated',
+      label: 'durable:another-unrelated-vm-recovery',
+      lane: 'durable',
+      source: 'vm-recovery',
+    }, async () => { events.push('second-background-start'); }))
+      .rejects.toMatchObject({ reason: 'queue_full' });
+    // #3251: unrelated shared-memory recovery runs in the reserved
+    // shared-memory slot instead, which leaves the selected slot alone.
+    await withGlobalSyncBackpressure({
+      policy,
+      ctx,
+      contextGraphId: 'urn:cg:another-unrelated',
       label: 'swm-recovery:unrelated',
       lane: 'swm_recovery',
       source: 'swm-recovery',
-    }, async () => { events.push('second-background-start'); }))
-      .rejects.toMatchObject({ reason: 'queue_full' });
+    }, async () => { events.push('unrelated-swm-recovery-start'); });
 
     const selected = withGlobalSyncBackpressure({
       policy,
@@ -2528,7 +2550,12 @@ describe('sync global backpressure', () => {
     await tick();
 
     try {
-      expect(events).toEqual(['background-start', 'selected-start', 'fast-start']);
+      expect(events).toEqual([
+        'background-start',
+        'unrelated-swm-recovery-start',
+        'selected-start',
+        'fast-start',
+      ]);
       expect(getSyncBackpressureSnapshot(policy)).toMatchObject({
         inflight: 3,
         queued: 0,
@@ -2592,9 +2619,11 @@ describe('sync global backpressure', () => {
       const snapshot = backpressureRegistry.capture().schedulers.find(
         (scheduler) => scheduler.scheduler === 'sync-global',
       );
+      // 72 + 16 queued and 10 + 1 running: the reserved shared-memory slot
+      // and its queue (#3251) are part of the slow lane.
       expect(snapshot).toMatchObject({
         capacityModel: 'partitioned',
-        totals: { queueLimit: 72, inflightLimit: 10, inflight: 2 },
+        totals: { queueLimit: 88, inflightLimit: 11, inflight: 2 },
       });
       expect(snapshot!.lanes.find((lane) => lane.lane === 'fast')).toMatchObject({
         capacityModel: 'partitioned',
@@ -2604,8 +2633,8 @@ describe('sync global backpressure', () => {
       });
       expect(snapshot!.lanes.find((lane) => lane.lane === 'slow')).toMatchObject({
         capacityModel: 'partitioned',
-        queueLimit: 8,
-        inflightLimit: 2,
+        queueLimit: 24,
+        inflightLimit: 3,
         inflight: 1,
       });
     } finally {

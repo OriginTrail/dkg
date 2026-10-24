@@ -12,8 +12,11 @@ import {
 import { agentFromPrivateKey, DKGAgent } from '../src/index.js';
 import { watchCuratorRegistrationRefusal } from '../src/curator-registration-refusal.js';
 import {
+  JOIN_APPROVAL_METADATA_NUDGE_FLOOR_MS,
+  nudgeJoinApprovalMetadataRecovery,
   runJoinApprovalMetadataRecovery,
   runPostApprovalSyncWithMetadataRecovery,
+  waitForJoinApprovalMetadataRetry,
 } from '../src/join-approval-metadata-refetch.js';
 import {
   resolveApprovedMemberAcceptanceDecision,
@@ -405,6 +408,34 @@ describe('metadata of a join approved while the node runs (#3109)', () => {
     expect(watchCuratorRegistrationRefusal(agent, contextGraphId, CURATOR_PEER)()).toBe(false);
   }, 30_000);
 
+  it('ends a pending approval that a complete snapshot of its curator no longer lists (#3421)', async () => {
+    agent = await startMember('JoinMetadataMemberOmitted');
+    const contextGraphId = 'join-metadata-member-omitted';
+    const member = approve(agent, contextGraphId);
+    const requestGeneration = `0x${'8'.repeat(64)}`;
+    await agent.setRequesterJoinRequestPending(contextGraphId, member, requestGeneration, CURATOR_PEER);
+    await agent.applyRequesterJoinDecision(contextGraphId, member, requestGeneration, 'approved', CURATOR_PEER);
+    // The curator's complete snapshot holds the definition and lists another
+    // agent, not this member: the curator no longer counts it as a member.
+    const otherAgent = '0x00000000000000000000000000000000000000b2';
+    const calls = reachCurator(agent, contextGraphId, () => curatorSnapshot(contextGraphId, otherAgent, agent!.peerId));
+    const sync = vi.spyOn(agent, 'runImmediatePostApprovalSync').mockResolvedValue(undefined);
+
+    await expect(agent.resumePendingJoinApprovalMetadata(contextGraphId, CURATOR_PEER)).resolves.toBe('retry');
+
+    expect(calls.metadataFetches).toBe(1);
+    expect(sync).not.toHaveBeenCalled();
+    // The approval is pending again and its binding is gone, which ends the
+    // recovery and sends the next join request to the curator.
+    await expect(agent.readRequesterJoinRequestState(contextGraphId, member)).resolves.toMatchObject({
+      status: 'pending',
+      requestGeneration,
+    });
+    expect(internalsOf(agent).localApprovedAgentByCG.has(contextGraphId)).toBe(false);
+    await expect(agent.resumePendingJoinApprovalMetadata(contextGraphId, CURATOR_PEER)).resolves.toBe('stop');
+    expect(calls.metadataFetches).toBe(1);
+  }, 30_000);
+
   describe('after the post-approval sync', () => {
     const contextGraphId = 'join-metadata-after-sync';
     const dialAddress = `/ip4/127.0.0.1/tcp/9090/p2p/${CURATOR_PEER}`;
@@ -494,6 +525,109 @@ describe('metadata of a join approved while the node runs (#3109)', () => {
 
       expect(attempt).toHaveBeenCalledTimes(3);
       expect(attempt).toHaveBeenLastCalledWith(contextGraphId, CURATOR_PEER, dialAddress);
+    });
+
+    it('keeps retrying a row that looks ready while the approved member is not confirmed (#3421)', async () => {
+      const { member, recover, confirmed } = await approvedMember(false);
+      recover.mockRestore();
+      // A catch-up set `synced` and the graph's own public definition
+      // `metaSynced`; the member list that names the member has not arrived.
+      internalsOf(member).subscribedContextGraphs.set(contextGraphId, {
+        ...member.getSubscribedContextGraphs().get(contextGraphId)!,
+        synced: true,
+        metaSynced: true,
+        pendingMeta: false,
+      });
+      const attempt = vi.spyOn(member, 'resumePendingJoinApprovalMetadata')
+        .mockResolvedValueOnce('retry')
+        .mockResolvedValueOnce('completed');
+      vi.useFakeTimers();
+
+      const running = member.recoverPendingJoinApprovalMetadata(contextGraphId, CURATOR_PEER, dialAddress);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(attempt).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(15_000);
+      await running;
+
+      expect(confirmed).toHaveBeenCalled();
+      expect(attempt).toHaveBeenCalledTimes(2);
+    });
+
+    it('ends the retry of a ready row once the approved member is confirmed', async () => {
+      const { member, recover } = await approvedMember(true);
+      recover.mockRestore();
+      internalsOf(member).subscribedContextGraphs.set(contextGraphId, {
+        ...member.getSubscribedContextGraphs().get(contextGraphId)!,
+        synced: true,
+        metaSynced: true,
+        pendingMeta: false,
+      });
+      const attempt = vi.spyOn(member, 'resumePendingJoinApprovalMetadata').mockResolvedValue('retry');
+      vi.useFakeTimers();
+
+      const running = member.recoverPendingJoinApprovalMetadata(contextGraphId, CURATOR_PEER);
+      await vi.advanceTimersByTimeAsync(15_000);
+      await running;
+
+      expect(attempt).toHaveBeenCalledTimes(1);
+    });
+
+    it('brings the next attempt forward when nudged, no sooner than the floor after the last one (#3421)', async () => {
+      const { member, recover } = await approvedMember(false);
+      recover.mockRestore();
+      const attempt = vi.spyOn(member, 'resumePendingJoinApprovalMetadata')
+        .mockResolvedValueOnce('retry')
+        .mockResolvedValueOnce('retry')
+        .mockResolvedValueOnce('completed');
+      vi.useFakeTimers();
+
+      const running = member.recoverPendingJoinApprovalMetadata(contextGraphId, CURATOR_PEER);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(attempt).toHaveBeenCalledTimes(2);
+      // Five seconds into the 30-second wait after the second attempt.
+      await vi.advanceTimersByTimeAsync(5_000);
+      nudgeJoinApprovalMetadataRecovery(member, contextGraphId, CURATOR_PEER);
+      await vi.advanceTimersByTimeAsync(JOIN_APPROVAL_METADATA_NUDGE_FLOOR_MS - 5_000 - 1);
+      expect(attempt).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      await running;
+
+      expect(attempt).toHaveBeenCalledTimes(3);
+      // The recovery ended, so a later nudge starts a new one.
+      vi.spyOn(member, 'recoverPendingJoinApprovalMetadata').mockResolvedValue(undefined);
+      nudgeJoinApprovalMetadataRecovery(member, contextGraphId, CURATOR_PEER);
+      expect(member.recoverPendingJoinApprovalMetadata).toHaveBeenCalledWith(contextGraphId, CURATOR_PEER, undefined);
+    });
+
+    it('leaves a recovery in the middle of an attempt alone when nudged', async () => {
+      const { member, recover } = await approvedMember(false);
+      let finish!: () => void;
+      recover.mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+
+      const running = runJoinApprovalMetadataRecovery(member, contextGraphId, CURATOR_PEER);
+      nudgeJoinApprovalMetadataRecovery(member, contextGraphId, CURATOR_PEER);
+      finish();
+      await running;
+
+      // The nudge neither started a second recovery nor asked this one to run again.
+      expect(recover).toHaveBeenCalledTimes(1);
+    });
+
+    it('ends a retry wait at once when nudged after the floor, and reports a stop', async () => {
+      vi.useFakeTimers();
+      const owner = {};
+      const nudged = waitForJoinApprovalMetadataRetry(owner, contextGraphId, CURATOR_PEER, 300_000, undefined);
+      await vi.advanceTimersByTimeAsync(JOIN_APPROVAL_METADATA_NUDGE_FLOOR_MS + 1);
+      nudgeJoinApprovalMetadataRecovery(owner, contextGraphId, CURATOR_PEER);
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(nudged).resolves.toBe(true);
+
+      const stop = new AbortController();
+      const stopped = waitForJoinApprovalMetadataRetry(owner, contextGraphId, CURATOR_PEER, 300_000, stop.signal);
+      stop.abort();
+      await expect(stopped).resolves.toBe(false);
+      await expect(waitForJoinApprovalMetadataRetry(owner, contextGraphId, CURATOR_PEER, 1, stop.signal))
+        .resolves.toBe(false);
     });
 
     it('runs one recovery for a graph and curator at a time, and once more for a request it skipped', async () => {

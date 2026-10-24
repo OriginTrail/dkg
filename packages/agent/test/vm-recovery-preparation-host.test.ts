@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 /** Opt-in next-batch sizing preparation, exercised through the real recovery pass. */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DKGAgent } from '../src/index.js';
@@ -224,7 +225,7 @@ describe('VM recovery next-batch sizing preparation', () => {
     // The cancelled read has not physically settled, so shutdown must still be waiting for it:
     // the agent's drain holds the owner's close, and neither the network nor the store is torn down.
     await new Promise((resolve) => setTimeout(resolve, 20));
-    expect((harness.agent as unknown as { vmReconcilePhysicalRuns: Set<Promise<unknown>> }).vmReconcilePhysicalRuns.size)
+    expect((harness.agent as unknown as { workLifetime: AgentWorkLifetime }).workLifetime.physicalRuns.size)
       .toBeGreaterThan(0);
     expect(stopped).toBe(false);
     expect(stopNode).not.toHaveBeenCalled();

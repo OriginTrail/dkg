@@ -1,3 +1,4 @@
+import { fixtureRoot } from './verified-asset-root-fixture.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   BlazegraphStore,
@@ -256,7 +257,8 @@ async function coldRecoveryFixture(name: string, localCgId: string) {
   }, { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
     batchId: kaId, materializedVersion: { blockNumber: 100, txIndex: 0 },
   } } });
-  const asset = { contextGraphId: localCgId, ual: scope.ual, assertionVersion: 1n, assertionGraph,
+  const asset = {
+      merkleRootHex: fixtureRoot(metadataQuads), contextGraphId: localCgId, ual: scope.ual, assertionVersion: 1n, assertionGraph,
     metaGraph: `did:dkg:context-graph:${localCgId}/_meta`,
     dataQuads: publicQuads.map((quad) => ({ ...quad, graph: assertionGraph })), metadataQuads };
   const targetOptions = { isTargetCurrent: () => true, revalidateTarget: async () => true };
