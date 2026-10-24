@@ -4131,6 +4131,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               { stopOnBackoffWorthyFailure: true, source },
             ),
           );
+          // The peer may publish its own profile just after this pull ran.
+          if (ordinary.includes(SYSTEM_CONTEXT_GRAPHS.AGENTS)) this.followUpPeerAgentProfile(peerId, session);
         }
         return finalizeDurableSyncCompletion(accumulator);
       },
