@@ -59,9 +59,10 @@ export function openDevnet({ repoRoot, dir, apiPortBase, libp2pPortBase, adminTo
 
   /**
    * devnet.sh without blocking: the watches of the nodes that stay up keep
-   * reading while another node stops, starts or restarts.
+   * reading while another node stops, starts or restarts. `signal` stops it
+   * (a run that is being interrupted cancels a node's start).
    */
-  function devnetSh(args, env = {}, timeoutMs = 300_000) {
+  function devnetSh(args, env = {}, timeoutMs = 300_000, { signal } = {}) {
     return new Promise(resolve => {
       const child = spawn('bash', [script, ...args], {
         cwd: repoRoot, env: { ...process.env, DEVNET_DIR: dir, ...env }, stdio: ['ignore', 'pipe', 'pipe'],
@@ -69,9 +70,16 @@ export function openDevnet({ repoRoot, dir, apiPortBase, libp2pPortBase, adminTo
       let output = '';
       child.stdout.on('data', chunk => { output += chunk; });
       child.stderr.on('data', chunk => { output += chunk; });
-      const timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
+      const stop = () => child.kill('SIGTERM');
+      const timer = setTimeout(stop, timeoutMs);
+      if (signal?.aborted) stop();
+      else signal?.addEventListener('abort', stop, { once: true });
       child.on('error', error => { output += String(error?.message ?? error); });
-      child.on('close', status => { clearTimeout(timer); resolve({ status, output: output.trim() }); });
+      child.on('close', status => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', stop);
+        resolve({ status, output: output.trim() });
+      });
     });
   }
   /** The same, for the cleanup, which must also work from a signal handler. */

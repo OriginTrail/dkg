@@ -38,8 +38,12 @@ export function createReport(cases, { print = console.log } = {}) {
     return undefined; // a quiet pass: a precondition that held
   }
 
-  /** One pair's result (a write, a node that must hold it), under its case. */
-  const reportPair = (pair, { boundMs }) => record(pair.caseId, pairResult(pair, { boundMs }));
+  /**
+   * One pair's result (a write, a node that must hold it), under its case.
+   * `definitionSeen` is the snapshot of the author's history with the graph's
+   * definition, taken now (observation.mjs).
+   */
+  const reportPair = (pair, { boundMs, definitionSeen }) => record(pair.caseId, pairResult(pair, { boundMs, definitionSeen }));
 
   /** An observed subscription: the definition under `caseId`, the synced flag under case 8. */
   function reportSubscription(caseId, { node, graph, observation }, deadlines) {

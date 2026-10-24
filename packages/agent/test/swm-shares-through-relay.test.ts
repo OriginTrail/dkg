@@ -252,6 +252,38 @@ describe('recipients of a share into a public graph', () => {
     expect(result.directFollowers).toEqual([PEER_B]);
   });
 
+  it('have the connected members of a curated public graph, subscribers or not, beside its followers (#3421)', async () => {
+    const asked: string[] = [];
+    const enumerator = createCGMemberEnumerator(makeDeps({
+      getTopicSubscribers: () => [PEER_A],
+      getSharedMemoryFollowers: () => [PEER_B],
+      getAllowlistedAgentPeers: async (cgId) => {
+        asked.push(cgId);
+        return [PEER_A, PEER_C, SELF, PEER_C];
+      },
+    }));
+    const result = await enumerator.enumerate(GRAPH);
+    expect(result.source).toBe('topic-subscribers');
+    expect(result.members).toEqual([PEER_A]);
+    // The member that subscribes is a direct recipient too: the narrowing of subscribers does not apply to it.
+    expect(result.directFollowers).toEqual([PEER_A, PEER_C, PEER_B]);
+    expect(asked).toEqual([GRAPH]);
+  });
+
+  it('have the members of a curated public graph without a subscriber, the reachable ones, and none when the lookup fails (#3421)', async () => {
+    const members = createCGMemberEnumerator(makeDeps({
+      getAllowlistedAgentPeers: async () => [PEER_A, PEER_C],
+      isPeerDialable: (peerId) => peerId === PEER_C,
+    }));
+    expect(await members.enumerate(GRAPH)).toEqual({ source: 'none', members: [], directFollowers: [PEER_C] });
+
+    const failing = createCGMemberEnumerator(makeDeps({
+      getSharedMemoryFollowers: () => [PEER_B],
+      getAllowlistedAgentPeers: async () => { throw new Error('agent registry unavailable'); },
+    }));
+    expect(await failing.enumerate(GRAPH)).toEqual({ source: 'none', members: [], directFollowers: [PEER_B] });
+  });
+
   it('carry no followers field when none can be reached', async () => {
     const enumerator = createCGMemberEnumerator(makeDeps({
       getTopicSubscribers: () => [PEER_C],
@@ -332,14 +364,20 @@ describe('recipients of a share into a public graph', () => {
       asked += 1;
       return [PEER_B];
     };
+    const getAllowlistedAgentPeers = async (): Promise<string[]> => {
+      asked += 1;
+      return [PEER_C];
+    };
     const allowlisted = createCGMemberEnumerator(makeDeps({
       getContextGraphAllowedPeers: async () => [PEER_A],
       getSharedMemoryFollowers,
+      getAllowlistedAgentPeers,
     }));
     expect((await allowlisted.enumerate(GRAPH)).members).toEqual([PEER_A]);
     const privateGraph = createCGMemberEnumerator(makeDeps({
       isPrivateContextGraph: async () => true,
       getSharedMemoryFollowers,
+      getAllowlistedAgentPeers,
     }));
     expect(await privateGraph.enumerate(GRAPH)).toEqual({ source: 'none', members: [] });
     expect(asked).toBe(0);
@@ -411,6 +449,14 @@ describe('a share into a public graph that has followers', () => {
     const followers = ['follower-1', 'follower-2', 'follower-3', 'follower-4', 'follower-5'];
     const { share } = await agentWith({ subscribers: [], followers });
     expect(await share('reports')).toEqual(followers);
+  });
+
+  it('goes to every connected member of a curated public graph, past the probe limit and the cap (#3421)', async () => {
+    const members = ['member-1', 'member-2', 'member-3', 'member-4', 'member-5'];
+    const { host, share } = await agentWith({ subscribers: [PEER_A, PEER_C], followers: [], members });
+    host.swmSubstrateMaxMembers = 1;
+    // The subscribers get it by gossip alone; every member is sent it directly.
+    expect(await share('reports')).toEqual(members);
   });
 
   it('still goes to a follower that refused the share before', async () => {

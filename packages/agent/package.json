@@ -145,6 +145,7 @@
     "./dist/rfc64/public-catalog-reconciliation-outcome-v1.js": null,
     "./dist/rfc64/public-catalog-receiver-v1.js": null,
     "./dist/rfc64/public-catalog-receiver-task-lifecycle-v1.js": null,
+    "./dist/rfc64/announced-current-head-retry-v1.js": null,
     "./dist/rfc64/public-catalog-service-v1.js": null,
     "./dist/rfc64/public-catalog-head-delivery-v1.js": null,
     "./dist/rfc64/public-catalog-head-fanout-v1.js": null,
@@ -185,8 +186,8 @@
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.1",
-    "@libp2p/peer-id": "^6.0.9",
-    "@multiformats/multiaddr": "^13.0.3",
+    "@libp2p/peer-id": "6.0.18",
+    "@multiformats/multiaddr": "13.0.3",
     "@noble/ciphers": "^2.2.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
@@ -202,7 +203,7 @@
     "jsonld": "^8.3.3"
   },
   "devDependencies": {
-    "@libp2p/crypto": "^5.1.18",
+    "@libp2p/crypto": "5.2.0",
     "@opentelemetry/sdk-metrics": "^2.8.0",
     "@types/js-yaml": "^4.0.9",
     "@vitest/coverage-v8": "^4.0.18",
