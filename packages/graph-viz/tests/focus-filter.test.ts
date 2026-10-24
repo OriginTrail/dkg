@@ -167,3 +167,21 @@ describe('FocusFilter', () => {
     expect(result.edges.size).toBe(0);
   });
 });
+
+
+describe('FocusFilter empty and zero-hop boundaries', () => {
+  it('permits empty focus results without a focal node', () => {
+    const focus = new FocusFilter({ maxNodes: -1 });
+    expect(focus.compute(new GraphModel())).toEqual({ nodes: new Map(), edges: new Map() });
+  });
+  it('limits a zero-hop focus to its focal node and can re-enable without changing that node', () => {
+    const model = new GraphModel();
+    model.addTriples([{ subject: 'urn:a', predicate: 'urn:p', object: 'urn:b' }, { subject: 'urn:b', predicate: 'urn:p', object: 'urn:c' }]);
+    const focus = new FocusFilter({ maxNodes: 2, hops: 0 });
+    focus.enable('urn:b');
+    expect([...focus.compute(model).nodes.keys()]).toEqual(['urn:b']);
+    focus.disable();
+    focus.enable();
+    expect(focus.focalNode).toBe('urn:b');
+  });
+});
