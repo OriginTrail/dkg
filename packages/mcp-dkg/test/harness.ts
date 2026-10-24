@@ -1,6 +1,6 @@
 import { z, type ZodRawShape, type ZodTypeAny } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { DkgClient } from '../src/client.js';
+import type { DkgClient, PeerInfo } from '../src/client.js';
 import type { DkgConfig } from '../src/config.js';
 
 export interface RegisteredTool {
@@ -166,7 +166,7 @@ export class FakeClient {
    */
   readonly peerInfoByPeerId = new Map<
     string,
-    Record<string, unknown>
+    PeerInfo
   >();
 
   constructor(private readonly overrides: ClientMethods = {}) {}
@@ -537,7 +537,7 @@ export class FakeClient {
   async getPeerInfo(peerId: string) {
     if (this.overrides.getPeerInfo) return this.overrides.getPeerInfo.call(this, peerId);
     const seeded = this.peerInfoByPeerId.get(peerId);
-    if (seeded) return seeded as ReturnType<DkgClient['getPeerInfo']> extends Promise<infer T> ? T : never;
+    if (seeded) return seeded;
     // Default fixture: not connected, no peerStore entry, no outbox.
     return {
       peerId,
