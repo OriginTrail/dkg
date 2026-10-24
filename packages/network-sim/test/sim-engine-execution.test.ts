@@ -218,7 +218,7 @@ describe('simulation scheduling and event delivery', () => {
     expect((await request('/sim/status')).body.opsPerSec).toBe(0);
     expect(pending).toHaveLength(3);
   });
-  it('stops pending operations by aborting their signals and emits only one terminal event', async () => {
+  it('keeps server work running after SSE disconnect, then reconnects and stops it with one terminal event', async () => {
     const fallback = fetchMock.getMockImplementation()!;
     let signal: AbortSignal;
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
@@ -230,9 +230,18 @@ describe('simulation scheduling and event delivery', () => {
     });
     await start('query', { opCount: 10 });
     expect(signal!.aborted).toBe(false);
+    const disconnected = stream;
+    streamRequest.emit('close');
+    const writesAtDisconnect = disconnected.write.mock.calls.length;
+    expect((await request('/sim/status')).body.running).toBe(true);
+    expect(signal!.aborted).toBe(false);
+    await subscribe();
+    expect(events.at(-1)).toMatchObject({ type: 'status', completed: 0 });
     expect((await request('/sim/stop', 'POST')).body).toEqual({ stopped: true });
     expect(signal!.aborted).toBe(true);
     await finish();
+    expect(disconnected.write).toHaveBeenCalledTimes(writesAtDisconnect);
+    expect((await request('/sim/status')).body.running).toBe(false);
     expect(events.filter(e => e.type === 'done')).toHaveLength(1);
     expect(events.find(e => e.type === 'op')).toMatchObject({ success: false, detail: 'aborted (simulation stopped)' });
     expect((await request('/sim/stop', 'POST')).body.stopped).toBe(false);

@@ -13,6 +13,7 @@ class TestEventSource {
   static instances: TestEventSource[] = [];
   onmessage: ((event: { data: string }) => void) | null = null;
   onerror: (() => void) | null = null;
+  onopen: (() => void) | null = null;
   close = vi.fn();
   constructor(readonly url: string) { TestEventSource.instances.push(this); }
   emit(event: unknown) { act(() => this.onmessage?.({ data: JSON.stringify(event) })); }
@@ -30,19 +31,71 @@ afterEach(() => { ui.unmount(); vi.useRealTimers(); vi.restoreAllMocks(); vi.uns
 const source = () => TestEventSource.instances.at(-1)!;
 
 describe('simulation form and streamed results', () => {
-  it('clears the running state after an event-stream disconnect', async () => {
+  it('keeps Stop available on disconnect and resumes results when the stream reconnects', async () => {
     await ui.click('Play Simulation');
-    expect(ui.field('Total Ops').disabled).toBe(true);
     act(() => source().onerror?.());
-    expect(source().close).toHaveBeenCalledTimes(1);
+    expect(source().close).not.toHaveBeenCalled(); // Leave native EventSource reconnection enabled.
+    expect(store.dispatch).not.toHaveBeenCalledWith({ type: 'STOP_SIMULATION' });
+    expect(ui.button('Stop Simulation').disabled).toBe(false);
+    expect(ui.field('Total Ops').disabled).toBe(true);
+    expect(ui.container.querySelector('[role="status"]')?.textContent).toContain('Connection lost');
+    expect(ui.container.querySelector('.sim-summary')).toBeNull();
+    act(() => source().onopen?.());
+    expect(ui.container.querySelector('[role="status"]')).toBeNull();
+    source().emit({ type: 'status', completed: 12, errors: 1 });
+    expect(ui.container.querySelector('.sim-stat-value')?.textContent).toBe('11/500');
+    source().emit({ type: 'done', completed: 500, errors: 1 });
+    expect(ui.container.textContent).toContain('Simulation complete: 499 succeeded, 1 failed');
+    expect(source().close).toHaveBeenCalledOnce();
+    expect(ui.button('Play Simulation').disabled).toBe(false);
+  });
+  it('waits for server cancellation before hiding Stop after a disconnect', async () => {
+    await ui.click('Play Simulation');
+    act(() => source().onerror?.());
+    let confirm!: (response: Response) => void;
+    fetchMock.mockImplementationOnce(() => new Promise<Response>(resolve => { confirm = resolve; }));
+    await ui.click('Stop Simulation');
+    expect(fetchMock).toHaveBeenLastCalledWith('/sim/stop', { method: 'POST' });
+    expect(store.dispatch).not.toHaveBeenCalledWith({ type: 'STOP_SIMULATION' });
+    expect(ui.button('Stop Simulation').disabled).toBe(false);
+    await act(async () => confirm(Response.json({ stopped: true })));
+    expect(source().close).toHaveBeenCalledOnce();
     expect(store.dispatch).toHaveBeenLastCalledWith({ type: 'STOP_SIMULATION' });
     expect(ui.button('Play Simulation').disabled).toBe(false);
-    expect(ui.field('Total Ops').disabled).toBe(false);
-    const calls = vi.mocked(store.dispatch).mock.calls.length;
+  });
+  it.each(['network', 'http'])('retains Stop after a %s cancellation failure and permits retry', async failure => {
+    await ui.click('Play Simulation');
     act(() => source().onerror?.());
-    source().emit({ type: 'op', opType: 'query', nodeId: 2, success: true });
-    expect(store.dispatch).toHaveBeenCalledTimes(calls);
-    expect(store.addOperation).not.toHaveBeenCalled();
+    if (failure === 'network') fetchMock.mockRejectedValueOnce(new Error('stop unavailable'));
+    else fetchMock.mockResolvedValueOnce(Response.json({ error: 'unavailable' }, { status: 503 }));
+    await ui.click('Stop Simulation');
+    expect(source().close).not.toHaveBeenCalled();
+    expect(store.dispatch).not.toHaveBeenCalledWith({ type: 'STOP_SIMULATION' });
+    expect(ui.button('Stop Simulation').disabled).toBe(false);
+    expect(ui.container.querySelector('.sim-summary')).toBeNull();
+    fetchMock.mockResolvedValueOnce(Response.json({ stopped: true }));
+    await ui.click('Stop Simulation');
+    expect(source().close).toHaveBeenCalledOnce();
+    expect(store.dispatch).toHaveBeenLastCalledWith({ type: 'STOP_SIMULATION' });
+    expect(ui.button('Play Simulation').disabled).toBe(false);
+  });
+  it('ignores a late stop response and stream callbacks from a previous run', async () => {
+    await ui.click('Play Simulation');
+    const oldSource = source();
+    let confirm!: (response: Response) => void;
+    fetchMock.mockImplementationOnce(() => new Promise<Response>(resolve => { confirm = resolve; }));
+    await ui.click('Stop Simulation');
+    oldSource.emit({ type: 'done', completed: 500, errors: 0 });
+    await ui.click('Play Simulation');
+    act(() => source().onerror?.());
+    await act(async () => {
+      confirm(Response.json({ stopped: true }));
+      oldSource.onopen?.(); oldSource.onerror?.();
+    });
+    expect(ui.button('Stop Simulation').disabled).toBe(false);
+    expect(ui.container.querySelector('[role="status"]')?.textContent).toContain('Connection lost');
+    expect(source().close).not.toHaveBeenCalled();
+    expect(store.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'START_SIMULATION' }));
   });
   it.each(['op', 'status'])('counts failures once in progress and excludes them from succeeded totals via %s events', async eventType => {
     await ui.fill('Total Ops', '2');
@@ -99,7 +152,6 @@ describe('simulation form and streamed results', () => {
     source().emit({ type: 'error', message: 'setup error' });
     source().emit({ type: 'status', completed: 1, errors: 0 });
     expect(ui.container.querySelector('.sim-stat-value')?.textContent).toBe('1/1');
-    fetchMock.mockRejectedValueOnce(new Error('stop unavailable'));
     await ui.click('Stop Simulation');
     expect(source().close).toHaveBeenCalledTimes(1);
     expect(store.dispatch).toHaveBeenLastCalledWith({ type: 'STOP_SIMULATION' });

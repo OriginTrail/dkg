@@ -275,6 +275,7 @@ function SimulateTab() {
   const [contextGraphId, setContextGraphId] = useState('devnet-test');
   const [enabledOps, setEnabledOps] = useState<Set<SimOp>>(new Set(['publish', 'workspace', 'query', 'chat']));
   const [running, setRunning] = useState(false);
+  const [disconnected, setDisconnected] = useState(false);
   const [stats, setStats] = useState<SimStats | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const contextGraphIds = useContextGraphIds();
@@ -305,6 +306,7 @@ function SimulateTab() {
     const simStats: SimStats = { total: opCount, completed: 0, errors: 0, startedAt: Date.now() };
     setStats({ ...simStats });
     setRunning(true);
+    setDisconnected(false);
 
     try {
       const res = await fetch('/sim/start', {
@@ -375,22 +377,16 @@ function SimulateTab() {
       } catch { /* ignore parse errors */ }
     };
 
-    es.onerror = () => {
-      es.close();
-      eventSourceRef.current = null;
-      if (!simStats.finishedAt) {
-        simStats.finishedAt = Date.now();
-        setStats({ ...simStats });
-        setRunning(false);
-        dispatch({ type: 'STOP_SIMULATION' });
-      }
-    };
+    es.onopen = () => { if (eventSourceRef.current === es) setDisconnected(false); };
+    es.onerror = () => { if (eventSourceRef.current === es) setDisconnected(true); };
   }, [opCount, opsPerSec, concurrency, contextGraphId, enabledOps, simName, kasPerPublish, addBroadcast, addOperation, completeOperation, dispatch]);
 
   const stopSimulation = useCallback(async () => {
-    eventSourceRef.current?.close();
+    const es = eventSourceRef.current;
+    const stopped = await fetch('/sim/stop', { method: 'POST' }).then(res => res.ok, () => false);
+    if (!stopped || eventSourceRef.current !== es) return;
+    es?.close();
     eventSourceRef.current = null;
-    await fetch('/sim/stop', { method: 'POST' }).catch(() => {});
     dispatch({ type: 'STOP_SIMULATION' });
     setRunning(false);
   }, [dispatch]);
@@ -479,6 +475,7 @@ function SimulateTab() {
         {running ? 'Stop Simulation' : 'Play Simulation'}
       </button>
 
+      {running && disconnected && <div role="status">Connection lost. The server may still be running; reconnecting automatically. Use Stop Simulation to cancel.</div>}
       {stats && (
         <div className="sim-stats">
           <div className="sim-progress-bar">
