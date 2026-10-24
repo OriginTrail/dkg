@@ -430,6 +430,14 @@ second fallback chain endpoint (#3385).
   campaigns ran; and an evaluation of uncached Blazegraph graph-prefix
   queries is recorded, with no production change, in
   `packages/storage/docs/blazegraph-graph-prefix-evaluation.md`.
+- **Releases are certified through real npm installs** (#3468): a release
+  prepares one immutable set of the 22 public packages, installs those
+  exact tarballs with npm, locally and globally, against a local chain,
+  checks the installed CLI, the daemon's identity, an RDF read-back and a
+  graceful restart on the default store, and publishes and promotes only
+  the certified set; see `RELEASE_PROCESS.md`.
+  `@origintrail-official/dkg-chain` lists the private contracts workspace
+  as a development dependency only.
 - **Stronger tests** (#3469, #3470, #3471, #3472, #3478, #3480, #3481,
   #3482, #3483, #3487, #3488): a failed assertion fails its test, also
   inside an exception handler, and new cases cover the ElizaOS and Prime
