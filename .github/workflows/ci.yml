@@ -66,10 +66,6 @@ jobs:
     outputs:
       profile: ${{ steps.profile.outputs.profile }}
       profile_json: ${{ steps.profile.outputs.profile_json }}
-      property_runs: ${{ steps.profile.outputs.property_runs }}
-      property_seed: ${{ steps.profile.outputs.property_seed }}
-      managed_local: ${{ steps.profile.outputs.managed_local }}
-      subject: ${{ steps.profile.outputs.subject }}
       full_ci: ${{ steps.plan.outputs.full_ci }}
       run_node: ${{ steps.plan.outputs.run_node }}
       node_test_artifacts: ${{ steps.plan.outputs.node_test_artifacts }}
@@ -234,11 +230,6 @@ jobs:
   # cache repeated builds on the same branch are fast.
   # ------------------------------------------------------------------
   build:
-    env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     outputs:
       test_matrices: ${{ steps.test-matrices.outputs.matrices }}
     name: Build packages
@@ -439,11 +430,6 @@ jobs:
   # time on their critical path.
   # ------------------------------------------------------------------
   evm-node-test-artifacts:
-    env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: Compile EVM test artifacts (0.8.20/london)
     needs: changes
     if: needs.changes.outputs.node_test_artifacts == 'true'
@@ -473,11 +459,6 @@ jobs:
           if-no-files-found: error
 
   evm-devnet-test-artifacts:
-    env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: Compile devnet EVM artifacts (0.8.24/cancun)
     needs: changes
     if: needs.changes.outputs.kosava_node_ui_e2e == 'true'
@@ -513,10 +494,6 @@ jobs:
   # ------------------------------------------------------------------
   tornado-core:
     env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
       DKG_CI_COVERAGE: '1'
       DKG_CI_ROW: ${{ matrix.row }}
     name: "Tornado: ${{ matrix.label }}"
@@ -548,6 +525,10 @@ jobs:
       - uses: ./.github/actions/restore-evm-node-test-artifacts
         if: matrix.suite == 'chain'
 
+      - name: Apply resolved execution profile
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+        run: node scripts/ci/apply-ci-profile.mjs
       - name: Run canonical test row
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       - name: Authority mutation pilot
@@ -591,11 +572,6 @@ jobs:
   # tests `describe.skipIf`-skip, so local `pnpm test` needs no Docker.
   # ------------------------------------------------------------------
   tornado-blazegraph:
-    env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: "Tornado: storage Blazegraph integration (live server)"
     needs: [changes, build]
     if: needs.changes.outputs.tornado_blazegraph == 'true'
@@ -689,10 +665,6 @@ jobs:
   # ------------------------------------------------------------------
   tornado-publisher:
     env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
       DKG_CI_COVERAGE: '1'
       DKG_CI_ROW: ${{ matrix.row }}
     name: "Tornado: publisher [${{ matrix.shard }}/${{ matrix.shards }}]"
@@ -724,6 +696,10 @@ jobs:
       # Publisher globalSetup deploys the same Hardhat contracts as chain/CLI.
       # Restore the shared compiler outputs before starting its isolated node.
       - uses: ./.github/actions/restore-evm-node-test-artifacts
+      - name: Apply resolved execution profile
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+        run: node scripts/ci/apply-ci-profile.mjs
       - name: "Publisher tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       - name: Upload lift campaign progress
@@ -751,10 +727,6 @@ jobs:
   # ------------------------------------------------------------------
   tornado-agent:
     env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
       DKG_CI_COVERAGE: '1'
       DKG_CI_ROW: ${{ matrix.row }}
     name: "Tornado: agent [${{ matrix.shard }}/${{ matrix.shards }}]"
@@ -785,6 +757,10 @@ jobs:
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
       - uses: ./.github/actions/restore-evm-node-test-artifacts
+      - name: Apply resolved execution profile
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+        run: node scripts/ci/apply-ci-profile.mjs
       - name: "Agent tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       # Gate 0's unit tests also run here because the Windows inventory leg
@@ -823,10 +799,6 @@ jobs:
   # ------------------------------------------------------------------
   bura-cli:
     env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
       DKG_CI_COVERAGE: '1'
       DKG_CI_ROW: ${{ matrix.row }}
     name: "Bura: cli [${{ matrix.shard }}/${{ matrix.shards }}]"
@@ -859,6 +831,10 @@ jobs:
       - name: "Verify provisioned Blazegraph image contract"
         if: matrix.shard == 1
         run: bash scripts/ci/verify-blazegraph-image-contract.sh
+      - name: Apply resolved execution profile
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+        run: node scripts/ci/apply-ci-profile.mjs
       - name: "CLI tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       - name: "Publisher pause/resume process-death durability (Oxigraph)"
@@ -872,11 +848,6 @@ jobs:
           artifact-name: vitest-cli-${{ matrix.shard }}-of-${{ matrix.shards }}
 
   bura-blazegraph-arm64:
-    env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: "Bura: Blazegraph arm64 image (native)"
     needs: changes
     if: needs.changes.outputs.bura_blazegraph_arm64 == 'true'
@@ -892,10 +863,6 @@ jobs:
 
   bura-supporting:
     env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
       DKG_CI_COVERAGE: '1'
       DKG_CI_ROW: ${{ matrix.row }}
     name: "Bura: query"
@@ -924,6 +891,10 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
+      - name: Apply resolved execution profile
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+        run: node scripts/ci/apply-ci-profile.mjs
       - name: "Query tests"
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       - name: Upload Vitest JUnit and coverage reports
@@ -943,10 +914,6 @@ jobs:
   # ------------------------------------------------------------------
   kosava-node-ui:
     env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
       DKG_CI_COVERAGE: '1'
       DKG_CI_ROW: ${{ matrix.row }}
     name: "Kosava: node-ui"
@@ -977,6 +944,10 @@ jobs:
         run: tar -xzf /tmp/build-outputs.tgz
       - name: "node-ui production build (896 MB heap budget)"
         run: pnpm --filter @origintrail-official/dkg-node-ui run build:ui
+      - name: Apply resolved execution profile
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+        run: node scripts/ci/apply-ci-profile.mjs
       - name: "node-ui tests"
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       - name: Upload Vitest JUnit and coverage reports
@@ -1005,12 +976,6 @@ jobs:
   # Channel is pinned to bundled chromium in playwright.config.ts under CI
   # (see `ciChromium`) since we only `playwright install chromium`.
   kosava-node-ui-e2e:
-    env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
-      PW_DEVNET_LOCAL: ${{ needs.changes.outputs.managed_local }}
     name: "Kosava: node-ui e2e [${{ matrix.shard }}/7] (Playwright real-node devnet)"
     needs: [changes, build, evm-devnet-test-artifacts]
     if: needs.changes.outputs.kosava_node_ui_e2e == 'true'
@@ -1049,6 +1014,10 @@ jobs:
         run: tar -xzf /tmp/evm-devnet-test-artifacts.tgz
       - name: Install Playwright Chromium
         run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium --with-deps
+      - name: Apply resolved execution profile
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+        run: node scripts/ci/apply-ci-profile.mjs
       - name: node-ui memory preview and WebGL regressions
         if: matrix.shard == 1
         run: pnpm --dir packages/node-ui exec playwright test --config playwright.pr3236.config.ts
@@ -1091,10 +1060,6 @@ jobs:
 
   kosava-supporting:
     env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
       DKG_CI_COVERAGE: '1'
       DKG_CI_ROW: ${{ matrix.row }}
     name: "Kosava: adapters + utilities + demo"
@@ -1137,6 +1102,10 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
+      - name: Apply resolved execution profile
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+        run: node scripts/ci/apply-ci-profile.mjs
       - name: "Supporting Kosava packages"
         # DKG_REQUIRE_PYTEST=1 makes the adapter-hermes Python suite REQUIRED in
         # CI: run-pytest.mjs fails (not skips) if no interpreter/pytest is found,
@@ -1172,10 +1141,6 @@ jobs:
   # ------------------------------------------------------------------
   kosava-hardhat-plugins:
     env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
       DKG_CI_COVERAGE: '1'
       DKG_CI_ROW: ${{ matrix.row }}
     name: "Kosava: random-sampling + kafka-plugin (real Hardhat)"
@@ -1205,6 +1170,10 @@ jobs:
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
       - uses: ./.github/actions/restore-evm-node-test-artifacts
+      - name: Apply resolved execution profile
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+        run: node scripts/ci/apply-ci-profile.mjs
       - name: Hardhat plugin tests
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       - name: Upload Vitest JUnit and coverage reports
@@ -1228,11 +1197,6 @@ jobs:
   # copy-paste away.
   # ------------------------------------------------------------------
   abi-freshness:
-    env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: "Tornado: ABI freshness (committed abi/ vs hardhat compile)"
     needs: changes
     if: needs.changes.outputs.abi_freshness == 'true'
@@ -1314,11 +1278,6 @@ jobs:
   #                                the safety-net job unsharded).
   # ------------------------------------------------------------------
   solidity:
-    env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: "Tornado: Solidity [${{ matrix.shard }}/4]"
     needs: changes
     runs-on: ubuntu-latest
@@ -1458,11 +1417,6 @@ jobs:
   # not on the critical path so ~20-25 min here is acceptable.
   # ------------------------------------------------------------------
   solidity-coverage:
-    env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: "Tornado: Solidity coverage (push safety net)"
     needs: changes
     runs-on: ubuntu-latest
@@ -1536,11 +1490,6 @@ jobs:
   # solhint is also a npm devDep and is pulled by the standard install.
   # ------------------------------------------------------------------
   tornado-static-analysis:
-    env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: "Tornado: static analysis (informational)"
     needs: changes
     runs-on: ubuntu-latest
@@ -1688,11 +1637,6 @@ jobs:
     uses: ./.github/workflows/rfc64-inventory-windows.yml
 
   coverage-results:
-    env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: Verify merged package coverage
     if: always()
     needs: [changes, tornado-core, tornado-publisher, tornado-agent, bura-cli, bura-supporting, kosava-node-ui, kosava-supporting, kosava-hardhat-plugins]
@@ -1715,6 +1659,10 @@ jobs:
         with:
           pattern: vitest-*
           path: ci-test-results
+      - name: Apply resolved execution profile
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+        run: node scripts/ci/apply-ci-profile.mjs
       - name: Verify complete shards, production source, floors and changed lines
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
@@ -1741,11 +1689,6 @@ jobs:
           if-no-files-found: error
 
   profile-results:
-    env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: Verify execution profile
     if: always()
     needs: [changes, tornado-publisher, kosava-node-ui-e2e]
@@ -1785,11 +1728,6 @@ jobs:
           overwrite: true
 
   ci-gate:
-    env:
-      DKG_PROPERTY_RUNS: ${{ needs.changes.outputs.property_runs }}
-      DKG_PROPERTY_SEED: ${{ needs.changes.outputs.property_seed }}
-      DKG_CI_PROFILE: ${{ needs.changes.outputs.profile }}
-      DKG_CI_SUBJECT: ${{ needs.changes.outputs.subject }}
     name: CI gate
     if: always()
     needs:

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import { playwrightExecutions } from '../lib/playwright-executions.mjs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -14,20 +15,7 @@ export const LIFECYCLE_TESTS = [
 ];
 export const LIFT_TEST = 'generated claim, validate, finalize and restart sequences preserve durable lifecycle state';
 
-export function browserExecutions(report) {
-  const tests = [];
-  function visit(suite, parents = []) {
-    const titles = [...parents, suite.title].filter(Boolean);
-    for (const spec of suite.specs ?? []) for (const test of spec.tests ?? []) {
-      tests.push({ file: spec.file, title: spec.title, identity: [...titles, spec.title].join(' > '),
-        project: test.projectName, expectedStatus: test.expectedStatus,
-        attempts: (test.results ?? []).map(({ status, duration, startTime, retry }) => ({ status, durationMs: duration, startTime, retry })) });
-    }
-    for (const child of suite.suites ?? []) visit(child, titles);
-  }
-  visit(report);
-  return tests;
-}
+export const browserExecutions = report => [...playwrightExecutions(report)];
 
 /** Collect every error: missing UI evidence must not hide a publisher failure. */
 export function summarizeNightlyProfile({ profile, needs, browsers = [], campaigns = [], now = new Date().toISOString() }) {

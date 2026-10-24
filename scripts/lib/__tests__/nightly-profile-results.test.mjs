@@ -3,9 +3,20 @@ import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { parse } from 'yaml';
-import { LIFECYCLE_FILE, LIFECYCLE_TESTS, LIFT_TEST, browserExecutions, summarizeNightlyProfile } from '../../ci/nightly-profile-results.mjs';
+import { browserExecutions, summarizeNightlyProfile } from '../../ci/nightly-profile-results.mjs';
 import { resolveCiProfile } from '../../ci/resolve-ci-profile.mjs';
 
+// Independent acceptance contract: do not import the verifier's requirement list.
+const LIFECYCLE_FILE = 'devnet-local/wm-swm-vm-lifecycle.devnet.spec.ts';
+const LIFECYCLE_TESTS = [
+  'creates WM assertion on devnet CG',
+  'promotes assertion to SWM',
+  'full WM → SWM → VM pipeline mints a confirmed on-chain kaId',
+  'published entity label appears in VM layer after refresh',
+  'operations view loads after publish activity',
+  'update endpoint requires a precomputed attestation for on-chain update',
+];
+const LIFT_TEST = 'generated claim, validate, finalize and restart sequences preserve durable lifecycle state';
 const subject = 'a'.repeat(40);
 const workflow = parse(fs.readFileSync(new URL('../../../.github/workflows/ci.yml', import.meta.url), 'utf8'));
 function packet() {
@@ -51,6 +62,23 @@ test('complete actual executions certify; missing/skipped/cancelled/zero discove
   }
 });
 
+for (const title of LIFECYCLE_TESTS) {
+  test(`certification requires an executed pass for ${title}`, () => {
+    for (const mode of ['missing', 'skipped', 'no attempts', 'expected failure']) {
+      const input = packet();
+      const tests = input.browsers[2].tests;
+      const scenario = tests.find(test => test.title === title);
+      if (mode === 'missing') tests.splice(tests.indexOf(scenario), 1);
+      if (mode === 'skipped') scenario.attempts[0].status = 'skipped';
+      if (mode === 'no attempts') scenario.attempts = [];
+      if (mode === 'expected failure') scenario.expectedStatus = 'failed';
+      const result = summarizeNightlyProfile(input);
+      assert.equal(result.status, 'failed', mode);
+      assert.ok(result.errors.includes(`Required lifecycle scenario did not pass exactly once: ${title}`), mode);
+    }
+  });
+}
+
 test('a failed property remains visible alongside missing browser evidence', () => {
   const input = packet(); input.browsers = []; input.campaigns[0].status = 'failed';
   input.needs['tornado-publisher'].result = 'failure';
@@ -81,17 +109,23 @@ test('the existing aggregate gate requires the profile verdict even if coverage 
   assert.equal(gate.steps.find(s => s.name === 'Verify selected lanes completed').if, 'always()');
 });
 
-test('profile settings drive all package jobs; candidate refs and controller pins cannot diverge', () => {
+test('profile setup reaches only execution and coverage consumers; checkout identities stay pinned', () => {
   for (const [name, job] of Object.entries(workflow.jobs)) {
-    if (job.needs && job.steps && !['profile-results'].includes(name)) {
-      assert.equal(job.env.DKG_PROPERTY_RUNS, '${{ needs.changes.outputs.property_runs }}', name);
-      assert.equal(job.env.DKG_PROPERTY_SEED, '${{ needs.changes.outputs.property_seed }}', name);
+    const steps = job.steps ?? [];
+    const consumer = steps.some(step => /run-vitest-lanes|playwright test|merge-coverage/.test(step.run ?? ''));
+    const setup = steps.filter(step => step.run === 'node scripts/ci/apply-ci-profile.mjs');
+    assert.equal(setup.length, consumer ? 1 : 0, name);
+    if (consumer) {
+      assert.equal(setup[0].env.PROFILE_JSON, '${{ needs.changes.outputs.profile_json }}', name);
+      assert.ok(steps.indexOf(setup[0]) < steps.findIndex(step => /run-vitest-lanes|playwright test|merge-coverage/.test(step.run ?? '')), name);
     }
-    for (const step of job.steps ?? []) if (step.uses?.startsWith('actions/checkout@')) {
+    for (const key of ['DKG_PROPERTY_RUNS', 'DKG_PROPERTY_SEED', 'DKG_CI_PROFILE', 'DKG_CI_SUBJECT', 'PW_DEVNET_LOCAL']) {
+      assert.equal(job.env?.[key], undefined, `${name}: duplicated ${key}`);
+    }
+    for (const step of steps) if (step.uses?.startsWith('actions/checkout@')) {
       assert.equal(step.with.ref, step.with.path === 'trusted-ci' ? '8af04a376332c17527ce0f7dffaac8432ba1a9b3' : '${{ github.sha }}', name);
     }
   }
-  assert.equal(workflow.jobs['kosava-node-ui-e2e'].env.PW_DEVNET_LOCAL, '${{ needs.changes.outputs.managed_local }}');
   const steps = workflow.jobs.changes.steps;
   assert.ok(steps.findIndex(s => s.id === 'profile') > steps.findIndex(s => s.id === 'plan'));
   assert.equal(workflow.concurrency['cancel-in-progress'], true);

@@ -28,8 +28,7 @@ if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === imp
     attempt: process.env.GITHUB_RUN_ATTEMPT, resolvedAt: new Date().toISOString() };
   console.log(JSON.stringify(record));
   if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT, Object.entries({
-    profile: record.profile, property_seed: record.seed, property_runs: record.requestedTrials,
-    managed_local: record.managedLocal ? '1' : '0', subject, profile_json: JSON.stringify(record),
+    profile: record.profile, profile_json: JSON.stringify(record),
   }).map(([key, value]) => `${key}=${value}\n`).join(''));
   if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
     `\nExecution profile: **${record.profile}**; commit \`${subject}\`; seed \`${record.seed}\`; requested trials **${record.requestedTrials}**; managed local **${record.managedLocal}**.\n`);
