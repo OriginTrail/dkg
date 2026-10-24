@@ -184,7 +184,11 @@ pnpm release:certify-install --bundle "$BUNDLE" --commit "$COMMIT" --version "$V
 ```
 
 Logs and diagnostic data survive failures; owned containers, networks and chain
-processes are stopped. `*-data/` contains disposable local wallet keys and is
+processes are stopped. SIGINT/SIGTERM cancel active commands, attempt every owned
+resource cleanup and retain an `INCOMPLETE` receipt; cleanup errors are recorded.
+The initial receipt is written before execution, so SIGKILL or host loss also
+leaves non-passing evidence, but cannot guarantee cleanup. Inspect resources
+named `dkg-cert-<receipt.runId>-*` after a forced termination. `*-data/` contains disposable local wallet keys and is
 local diagnosis only: exclude it from uploads. Portable evidence is the complete
 bundle plus attempt top-level JSON/JSONL/log files. The separately named manual
 `package-certification.yml` workflow uploads those files, with no npm credentials.

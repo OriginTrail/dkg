@@ -10,7 +10,9 @@ export async function startRegistry({ bundle, manifest, rpcUrl, log, upstream = 
     ...pkg, metadata: JSON.parse(tarFiles(fs.readFileSync(path.join(bundle, pkg.tarball))).get('package.json')),
   }]));
   let installing = true;
-  const server = http.createServer(async (req, res) => {
+  const stopping = new AbortController();
+  const pending = new Set();
+  const handle = async (req, res) => {
     try {
       const url = new URL(req.url, 'http://fixture:4873');
       if (url.pathname === '/rpc' && req.method === 'POST') {
@@ -18,7 +20,7 @@ export async function startRegistry({ bundle, manifest, rpcUrl, log, upstream = 
         for await (const chunk of req) chunks.push(chunk);
         const body = Buffer.concat(chunks);
         if (body.length > 1024 * 1024) throw new Error('RPC fixture body limit');
-        const upstreamResponse = await fetch(rpcUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body, signal: AbortSignal.timeout(30_000) });
+        const upstreamResponse = await fetch(rpcUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body, signal: AbortSignal.any([stopping.signal, AbortSignal.timeout(30_000)]) });
         res.writeHead(upstreamResponse.status, { 'content-type': 'application/json' });
         res.end(Buffer.from(await upstreamResponse.arrayBuffer()));
         return;
@@ -43,7 +45,7 @@ export async function startRegistry({ bundle, manifest, rpcUrl, log, upstream = 
         res.end(JSON.stringify({ name, 'dist-tags': { latest: pkg.version }, versions: { [pkg.version]: metadata } }));
         return;
       }
-      const response = await fetch(`${upstream}/${route}${url.search}`, { signal: AbortSignal.timeout(120_000) });
+      const response = await fetch(`${upstream}/${route}${url.search}`, { signal: AbortSignal.any([stopping.signal, AbortSignal.timeout(120_000)]) });
       res.writeHead(response.status, { 'content-type': response.headers.get('content-type') ?? 'application/octet-stream' });
       res.end(Buffer.from(await response.arrayBuffer()));
     } catch (error) {
@@ -51,7 +53,18 @@ export async function startRegistry({ bundle, manifest, rpcUrl, log, upstream = 
       if (!res.headersSent) res.writeHead(502);
       res.end();
     }
+  };
+  const server = http.createServer((req, res) => {
+    const request = handle(req, res);
+    pending.add(request);
+    void request.then(() => pending.delete(request), () => pending.delete(request));
   });
   await new Promise(resolve => server.listen(0, '0.0.0.0', resolve));
-  return { port: server.address().port, setInstalling: value => { installing = value; }, close: () => new Promise(resolve => server.close(resolve)) };
+  return { port: server.address().port, setInstalling: value => { installing = value; }, close: async () => {
+    stopping.abort();
+    const closed = new Promise(resolve => server.close(resolve));
+    server.closeAllConnections();
+    await closed;
+    await Promise.allSettled(pending);
+  } };
 }
