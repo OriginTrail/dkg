@@ -8,6 +8,7 @@ vi.mock('../src/core/rdf-graph-viz.js', () => ({ RdfGraphViz: class {
   clear = vi.fn(); loadTriples = vi.fn(); loadNTriples = vi.fn(async () => {});
   loadNQuads = vi.fn(async () => {}); loadTurtle = vi.fn(async () => {}); loadJsonLd = vi.fn(async () => {});
   model = { clear: this.clear };
+  zoomToFit = vi.fn(); centerOnNode = vi.fn();
   applyView = vi.fn(); refresh = vi.fn(); destroy = vi.fn();
   styleEngine = { setNodeColors: vi.fn() };
   constructor() { state.viz = this; }
@@ -80,4 +81,53 @@ describe('React graph updates', () => {
     expect(hover).toHaveBeenCalledOnce(); expect(unhover).toHaveBeenCalledOnce();
     expect(state.viz.loadTriples).toHaveBeenCalledOnce();
   });
+});
+
+
+describe('React camera and asynchronous error handling', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+  it('fits only the first completed load and reschedules focus when the selected entity changes', async () => {
+    await act(async () => root.render(React.createElement(RdfGraph, { data: 'first', initialFit: true, initialFocus: 'urn:first' })));
+    await act(async () => vi.advanceTimersByTime(299)); expect(state.viz.zoomToFit).not.toHaveBeenCalled();
+    await act(async () => vi.advanceTimersByTime(1)); expect(state.viz.zoomToFit).toHaveBeenCalledOnce();
+    await act(async () => root.render(React.createElement(RdfGraph, { data: 'second', initialFit: true, initialFocus: 'urn:second' })));
+    await act(async () => vi.advanceTimersByTime(550)); expect(state.viz.zoomToFit).toHaveBeenCalledOnce(); expect(state.viz.centerOnNode).toHaveBeenCalledExactlyOnceWith('urn:second', { durationMs: 600, zoomLevel: 2 });
+    state.viz.centerOnNode.mockImplementation(() => { throw new Error('removed node'); });
+    await act(async () => root.render(React.createElement(RdfGraph, { data: 'second', initialFocus: 'urn:removed' })));
+    await act(async () => vi.advanceTimersByTime(550)); expect(state.viz.centerOnNode).toHaveBeenCalledTimes(2);
+  });
+  it('cancels camera timers and suppresses late load failures after unmount', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await act(async () => root.render(React.createElement(RdfGraph, { data: 'first', initialFit: true, initialFocus: 'urn:first' })));
+    let reject!: (error: Error) => void;
+    state.viz.loadNTriples.mockImplementationOnce(() => new Promise((_, fail) => { reject = fail; }));
+    await act(async () => root.render(React.createElement(RdfGraph, { data: 'pending', initialFit: true, initialFocus: 'urn:pending' })));
+    act(() => root.unmount()); await act(async () => { reject(new Error('obsolete')); }); vi.advanceTimersByTime(1000);
+    expect(state.viz.centerOnNode).not.toHaveBeenCalled(); expect(state.viz.zoomToFit).not.toHaveBeenCalled(); expect(error).not.toHaveBeenCalled();
+  });
+  it('reports a current load failure and falls back to N-Triples for string data with triples format', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await act(async () => root.render(React.createElement(RdfGraph, {})));
+    const failure = new Error('bad RDF'); state.viz.loadNTriples.mockRejectedValueOnce(failure);
+    await act(async () => root.render(React.createElement(RdfGraph, { data: 'bad', format: 'triples' })));
+    expect(state.viz.loadNTriples).toHaveBeenCalledWith('bad', expect.any(AbortSignal)); expect(error).toHaveBeenCalledWith('[RdfGraph] Error loading data:', failure);
+  });
+});
+
+it('permits selection and hover state updates without application event callbacks', async () => {
+  await act(async () => root.render(React.createElement(RdfGraph, { data: 'source' })));
+  expect(() => act(() => {
+    state.viz.handlers.get('node:click')({ id: 'urn:s' }); state.viz.handlers.get('node:hover')({ id: 'urn:s' }); state.viz.handlers.get('node:unhover')({ id: 'urn:s' });
+  })).not.toThrow();
+  expect(state.viz.loadNTriples).toHaveBeenCalledOnce();
+});
+
+it('does not apply a superseded parse result or schedule an initial fit after unmount', async () => {
+  await act(async () => root.render(React.createElement(RdfGraph, {})));
+  let resolve!: () => void; state.viz.loadNTriples.mockImplementationOnce(() => new Promise<void>(done => { resolve = done; }));
+  await act(async () => root.render(React.createElement(RdfGraph, { data: 'pending', initialFit: true, viewConfig: { name: 'old' } })));
+  const applied = state.viz.applyView.mock.calls.length; act(() => root.unmount());
+  await act(async () => { resolve(); });
+  expect(state.viz.applyView).toHaveBeenCalledTimes(applied); expect(state.viz.zoomToFit).not.toHaveBeenCalled();
 });

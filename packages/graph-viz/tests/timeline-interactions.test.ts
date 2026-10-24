@@ -132,3 +132,13 @@ describe('timeline DOM interactions with the real temporal filter', () => {
     expect(filter.cursor?.getTime()).toBe(start); expect(paint.fillRect).not.toHaveBeenCalled();
   });
 });
+
+it('accepts controls before mounting without creating a timer or touching a cursor', () => {
+  const { overlay, filter } = make([]); const changed = vi.fn(); overlay.onChange(changed);
+  overlay.updateCount(7); overlay.setCursor(new Date(start)); overlay.play(); overlay.pause();
+  expect(vi.getTimerCount()).toBe(0); expect(filter.cursor).toBeNull(); expect(changed).not.toHaveBeenCalled(); expect(container.children).toHaveLength(0);
+});
+it('continues playback from a middle cursor instead of restarting it', () => {
+  const { overlay, filter } = make([start, start + 10 * day]); overlay.mount(); overlay.setCursor(new Date(start + 3 * day)); playButton().click();
+  vi.advanceTimersByTime(200); expect(filter.cursor?.getTime()).toBe(start + 4 * day);
+});
