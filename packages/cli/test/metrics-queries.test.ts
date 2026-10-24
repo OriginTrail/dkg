@@ -255,7 +255,7 @@ describe('createStoreCountMetrics', () => {
       let now = 1_000;
       const metrics = createStoreCountMetrics(
         (sparql) => queryWithPublicSnapshotTrust(store, engine, sparql, {}, undefined),
-        { now: () => now, healthIntervalMs: 30, reconcileIntervalMs: 300 },
+        { now: () => now, reconcileIntervalMs: 300 },
       );
       const DKG = 'http://dkg.io/ontology/';
       await store.insert([

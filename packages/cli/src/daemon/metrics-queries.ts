@@ -79,13 +79,10 @@ export const GET_STORE_COUNT_SNAPSHOT_SPARQL = `SELECT ?totalTriples ?totalKCs ?
 
 const STORE_METRICS_HEALTH_SPARQL = 'ASK {}';
 export const STORE_COUNT_RECONCILE_INTERVAL_MS = 5 * 60_000;
-export const STORE_COUNT_HEALTH_INTERVAL_MS = 30_000;
 
 export interface StoreCountMetricsOptions {
   /** Exact full-store reconciliation cadence. Defaults to five minutes. */
   reconcileIntervalMs?: number;
-  /** Cheap liveness-probe cadence while a reconciled snapshot is reused. */
-  healthIntervalMs?: number;
   /** Monotonic clock injection for deterministic tests. */
   now?: () => number;
 }
@@ -100,19 +97,10 @@ interface MetricsAgentQueryResult {
   readonly bindings: ReadonlyArray<Readonly<Record<string, string>>>;
 }
 
-type ReconciliationOutcome =
-  | { readonly status: 'empty' }
-  | {
-      readonly status: 'success';
-      readonly value: StoreCountSnapshot;
-      readonly reconciledAt: number;
-      readonly healthyAt: number;
-    }
-  | {
-      readonly status: 'failure';
-      readonly error: unknown;
-      readonly failedAt: number;
-    };
+interface ReconciledStoreCountSnapshot {
+  readonly value: StoreCountSnapshot;
+  readonly reconciledAt: number;
+}
 
 /**
  * The store counts of the daemon's metrics source, read through the agent's
@@ -128,14 +116,8 @@ export function createStoreCountMetrics(
     STORE_COUNT_RECONCILE_INTERVAL_MS,
     'reconcileIntervalMs',
   );
-  const healthIntervalMs = finiteInterval(
-    options.healthIntervalMs,
-    STORE_COUNT_HEALTH_INTERVAL_MS,
-    'healthIntervalMs',
-  );
   const now = options.now ?? (() => performance.now());
-  let outcome: ReconciliationOutcome = { status: 'empty' };
-  let readInflight: Promise<StoreCountSnapshot> | null = null;
+  let reconciled: ReconciledStoreCountSnapshot | null = null;
 
   const reconcile = async (): Promise<StoreCountSnapshot> => {
     try {
@@ -152,16 +134,15 @@ export function createStoreCountMetrics(
         confirmedKCs: parseRdfInt(row.confirmedKCs),
         tentativeKCs: parseRdfInt(row.tentativeKCs),
       });
-      const reconciledAt = now();
-      outcome = { status: 'success', value, reconciledAt, healthyAt: reconciledAt };
+      reconciled = { value, reconciledAt: now() };
       return value;
     } catch (error) {
-      outcome = { status: 'failure', error, failedAt: now() };
+      reconciled = null;
       throw error;
     }
   };
 
-  const assertHealthy = async (): Promise<number> => {
+  const assertHealthy = async (): Promise<void> => {
     try {
       const result = await query(STORE_METRICS_HEALTH_SPARQL, {
         source: 'daemon.metrics.storeHealth',
@@ -170,34 +151,18 @@ export function createStoreCountMetrics(
       if (result.bindings[0]?.result !== 'true') {
         throw new Error('Store metrics health probe was denied');
       }
-      return now();
     } catch (error) {
-      outcome = { status: 'failure', error, failedAt: now() };
+      reconciled = null;
       throw error;
     }
   };
 
-  const readOnce = async (): Promise<StoreCountSnapshot> => {
-    const checkedAt = now();
-    if (outcome.status === 'empty') return reconcile();
-    if (outcome.status === 'failure') {
-      if (withinInterval(checkedAt, outcome.failedAt, healthIntervalMs)) {
-        throw outcome.error;
-      }
-      await assertHealthy();
-      return reconcile();
-    }
-
-    let current = outcome;
-    if (!withinInterval(checkedAt, current.healthyAt, healthIntervalMs)) {
-      const healthyAt = await assertHealthy();
-      if (outcome.status !== 'success') {
-        throw new Error('Store metrics snapshot became unavailable during health check');
-      }
-      current = { ...outcome, healthyAt };
-      outcome = current;
-    }
-
+  const read = async (): Promise<StoreCountSnapshot> => {
+    const current = reconciled;
+    if (current === null) return reconcile();
+    // The collector owns the 30-second request cache and in-flight
+    // coalescing. Every cache miss validates the retained exact snapshot once.
+    await assertHealthy();
     const refreshedAt = now();
     if (
       refreshedAt < current.reconciledAt
@@ -211,22 +176,9 @@ export function createStoreCountMetrics(
     return current.value;
   };
 
-  const read = (): Promise<StoreCountSnapshot> => {
-    if (readInflight) return readInflight;
-    const run = readOnce().finally(() => {
-      if (readInflight === run) readInflight = null;
-    });
-    readInflight = run;
-    return run;
-  };
-
   return {
     getStoreCountSnapshot: read,
   };
-}
-
-function withinInterval(now: number, then: number, intervalMs: number): boolean {
-  return now >= then && now - then < intervalMs;
 }
 
 function finiteInterval(value: number | undefined, fallback: number, label: string): number {
