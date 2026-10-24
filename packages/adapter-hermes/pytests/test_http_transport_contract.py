@@ -194,3 +194,18 @@ def test_transport_failure_redacts_the_configured_token(client, monkeypatch):
 
     monkeypatch.setattr(client._get_session(), "get", fail)
     assert client.status() == {"success": False, "error": "could not connect using [REDACTED]"}
+
+
+def test_health_malformed_body_returns_false(client, daemon):
+    daemon.reply("bad JSON", content_type="text/plain")
+    assert client.health_check() is False
+
+
+@pytest.mark.parametrize("body,content_type", [({}, "application/json"), ("", "text/plain")])
+def test_empty_http_error_body_remains_a_definite_failure(client, daemon, body, content_type):
+    daemon.reply(body, status=503, content_type=content_type)
+    result = client.query("ASK {}")
+    assert result["success"] is False
+    assert "outcomeUnknown" not in result
+    if content_type == "text/plain":
+        assert "503" in result["error"]
