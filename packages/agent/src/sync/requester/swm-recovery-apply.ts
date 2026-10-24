@@ -86,10 +86,10 @@ export interface SwmRecoveryMutationRuntimeV1 {
  * cleanup, oversize, cache-invalidation, and atomic-replace mechanics itself.
  */
 export function createSwmRecoveryMutationRuntimeV1(params: Readonly<{
+  /** Mutations own their projection invalidation at the supplied store boundary. */
   store: TripleStore;
   recordDrops: OversizeGuardHooks['recordDrops'];
   invalidateListContextGraphsCache: () => void;
-  markMetaProjectionDirty: (quads: Quad[]) => void;
 }>): SwmRecoveryMutationRuntimeV1 {
   const graphManager = new GraphManager(params.store);
   const store: SwmRecoveryStore = {
@@ -105,7 +105,6 @@ export function createSwmRecoveryMutationRuntimeV1(params: Readonly<{
       );
       if (inserted.length > 0) {
         params.invalidateListContextGraphsCache();
-        params.markMetaProjectionDirty(inserted);
       }
     },
     replaceGraph: async (graph, quads) => {

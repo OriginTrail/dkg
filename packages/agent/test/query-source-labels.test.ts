@@ -15,6 +15,7 @@ import type { DKGAgent } from '../src/dkg-agent.js';
 import { JoinRequestMethods } from '../src/dkg-agent-join.js';
 import { QueryMethods } from '../src/dkg-agent-query.js';
 import { canReadUnscopedQuery } from '../src/unscoped-query-admission.js';
+import { resolveRfc64PrivateReadRoster } from '../src/rfc64/private-read-roster-v1.js';
 import {
   createRfc64CatalogAccessPolicyRegistryFixture,
 } from './support/rfc64-catalog-access-policy-fixture.js';
@@ -187,7 +188,97 @@ function runtimePrivateQueryAgent(options: {
   };
 }
 
+describe('minimal RFC-64 private roster authority', () => {
+  function fixture() {
+    const { acceptedPolicySnapshot } = runtimePrivateQueryAgent();
+    const current = acceptedPolicySnapshot(RUNTIME_NETWORK_ID, RUNTIME_PRIVATE_CG)!;
+    acceptedPolicySnapshot.mockClear();
+    const input = {
+      activeNetworkId: RUNTIME_NETWORK_ID as string | undefined,
+      acceptedPolicies: undefined,
+      service: { acceptedPolicySnapshot },
+      isJoinDerived: () => false,
+    } satisfies Parameters<typeof resolveRfc64PrivateReadRoster>[0];
+    const policies = [{ policyEnvelope: { payload: {
+      networkId: RUNTIME_NETWORK_ID, contextGraphId: RUNTIME_PRIVATE_CG, accessPolicy: 1 as const,
+    } } }];
+    return { input, policies, current, acceptedPolicySnapshot };
+  }
+
+  it('returns a frozen accepted roster through only the typed lookup capability', () => {
+    const { input, acceptedPolicySnapshot } = fixture();
+    const result = resolveRfc64PrivateReadRoster(input, RUNTIME_PRIVATE_CG);
+    expect(result).toEqual([LOCAL_MEMBER, REMOTE_MEMBER]);
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(acceptedPolicySnapshot).toHaveBeenCalledExactlyOnceWith(RUNTIME_NETWORK_ID, RUNTIME_PRIVATE_CG);
+  });
+
+  it('keeps unselected authority undefined and configured unavailable authority null', () => {
+    const { input, policies } = fixture();
+    expect(resolveRfc64PrivateReadRoster({ ...input, service: undefined }, RUNTIME_PRIVATE_CG)).toBeUndefined();
+    expect(resolveRfc64PrivateReadRoster({ ...input, service: undefined, acceptedPolicies: policies }, RUNTIME_PRIVATE_CG)).toBeNull();
+    expect(resolveRfc64PrivateReadRoster({ ...input, service: undefined, acceptedPolicies: policies }, 'unselected')).toBeUndefined();
+  });
+
+  it('distinguishes missing, empty and public rosters', () => {
+    const { input, current, acceptedPolicySnapshot } = fixture();
+    acceptedPolicySnapshot.mockReturnValue({ ...current, roster: null });
+    expect(resolveRfc64PrivateReadRoster(input, RUNTIME_PRIVATE_CG)).toBeNull();
+    acceptedPolicySnapshot.mockReturnValue({ ...current, roster: { ...current.roster!, members: [] } });
+    expect(resolveRfc64PrivateReadRoster(input, RUNTIME_PRIVATE_CG)).toEqual([]);
+    acceptedPolicySnapshot.mockReturnValue({ ...current, policy: { ...current.policy, accessPolicy: 0 } });
+    expect(resolveRfc64PrivateReadRoster(input, RUNTIME_PRIVATE_CG)).toBeUndefined();
+  });
+
+  it('excludes live join-derived acceptance from the read authority result', () => {
+    const { input } = fixture();
+    expect(resolveRfc64PrivateReadRoster({ ...input, isJoinDerived: () => true }, RUNTIME_PRIVATE_CG)).toBeUndefined();
+  });
+
+  it.each([
+    { networkId: ' invalid network ', contextGraphId: RUNTIME_PRIVATE_CG },
+    { networkId: RUNTIME_NETWORK_ID, contextGraphId: ' invalid graph ' },
+  ])('skips the live lookup for invalid identifiers: $networkId / $contextGraphId', ({ networkId, contextGraphId }) => {
+    const { input, acceptedPolicySnapshot } = fixture();
+    expect(resolveRfc64PrivateReadRoster({ ...input, activeNetworkId: networkId }, contextGraphId)).toBeUndefined();
+    expect(acceptedPolicySnapshot).not.toHaveBeenCalled();
+  });
+
+  it('uses configured policy authority after the active-network lookup misses', () => {
+    const { input, policies, acceptedPolicySnapshot } = fixture();
+    expect(resolveRfc64PrivateReadRoster({ ...input, activeNetworkId: 'otp:1', acceptedPolicies: policies }, RUNTIME_PRIVATE_CG))
+      .toEqual([LOCAL_MEMBER, REMOTE_MEMBER]);
+    expect(acceptedPolicySnapshot.mock.calls).toEqual([
+      ['otp:1', RUNTIME_PRIVATE_CG], [RUNTIME_NETWORK_ID, RUNTIME_PRIVATE_CG],
+    ]);
+    acceptedPolicySnapshot.mockReturnValue(null);
+    expect(resolveRfc64PrivateReadRoster({ ...input, acceptedPolicies: policies }, RUNTIME_PRIVATE_CG)).toBeNull();
+  });
+});
+
 describe('runtime-accepted RFC-64 private query authorization', () => {
+  it.each([true, false])('redacts private query literals for allowed and denied reads: %s', async redactQuery => {
+    const fixture = runtimePrivateQueryAgent();
+    const info = vi.spyOn(fixture.agent.log, 'info');
+    const literal = 'private-query-canary';
+    const sparql = `SELECT ?s WHERE { ?s ?p "${literal}" }`;
+    for (const callerAgentAddress of [REMOTE_MEMBER, OUTSIDER]) {
+      info.mockClear();
+      const pending = QueryMethods.prototype.query.call(fixture.agent as never, sparql, {
+        contextGraphId: RUNTIME_PRIVATE_CG, view: 'verifiable-memory',
+        callerAgentAddress, redactQuery, accessDenied: 'error',
+      });
+      if (callerAgentAddress === OUTSIDER) await expect(pending).rejects.toMatchObject({ code: 'QUERY_ACCESS_DENIED' });
+      else await expect(pending).resolves.toMatchObject({ bindings: [{ value: 'visible' }] });
+      expect(info).toHaveBeenCalled();
+      const diagnostics = JSON.stringify(info.mock.calls);
+      if (redactQuery) {
+        expect(diagnostics).not.toContain(literal);
+        expect(diagnostics).toContain('[redacted]');
+      } else expect(diagnostics).toContain(literal);
+    }
+  });
+
   it('does not execute SPARQL when unscoped read authority throws', async () => {
     const fixture = runtimePrivateQueryAgent();
     const authorityFailure = new Error('authority lookup failed');
@@ -233,12 +324,26 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
       },
     );
     expect(outsider.bindings).toEqual([]);
+    await expect(QueryMethods.prototype.query.call(fixture.agent as never,
+      'SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: RUNTIME_PRIVATE_CG,
+        view: 'verifiable-memory', callerAgentAddress: OUTSIDER, accessDenied: 'error', redactQuery: true,
+      })).rejects.toMatchObject({ code: 'QUERY_ACCESS_DENIED' });
     expect(fixture.queryEngine.query).toHaveBeenCalledTimes(1);
     expect(fixture.isPrivateContextGraph).not.toHaveBeenCalled();
     expect(fixture.acceptedPolicySnapshot).toHaveBeenCalledWith(
       RUNTIME_NETWORK_ID,
       RUNTIME_PRIVATE_CG,
     );
+  });
+
+  it('fails explicitly when shared memory access is denied before querying', async () => {
+    const fixture = runtimePrivateQueryAgent();
+    Object.assign(fixture.agent, { resolveSharedMemoryReadAdmission: async () => ({ outcome: 'denied' }) });
+    await expect(QueryMethods.prototype.query.call(fixture.agent as never,
+      'SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: RUNTIME_PRIVATE_CG,
+        view: 'shared-working-memory', callerAgentAddress: REMOTE_MEMBER, accessDenied: 'error',
+      })).rejects.toMatchObject({ code: 'QUERY_ACCESS_DENIED' });
+    expect(fixture.queryEngine.query).not.toHaveBeenCalled();
   });
 
   it('filters a runtime-only private subscription from outsider unscoped reads', async () => {
@@ -259,7 +364,6 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
     );
     expect(outsider.bindings).toEqual([]);
     expect(fixture.queryEngine.query).toHaveBeenCalledTimes(1);
-    expect(fixture.store.query).toHaveBeenCalledTimes(2);
     expect(fixture.isPrivateContextGraph).not.toHaveBeenCalled();
   });
 
@@ -272,7 +376,8 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
     {
       label: 'COUNT',
       sparql: 'SELECT (COUNT(*) AS ?count) WHERE { GRAPH ?g { ?s ?p ?o } }',
-      expected: { bindings: [] },
+      // What the count returns over no data: one row, never an answer without rows.
+      expected: { bindings: [{ count: '"0"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
     },
     {
       label: 'SELECT',
@@ -322,3 +427,22 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
     expect(fixture.isPrivateContextGraph).not.toHaveBeenCalled();
   });
 });
+
+
+it.each(['finalized-name-absence-unaccepted', 'authority-circuit-open'])(
+  'keeps %s retryable for strict reads of an absent graph', async reason => {
+    const fixture = runtimePrivateQueryAgent({ subscribed: false });
+    Object.assign(fixture.agent, {
+      resolveContextGraphReadAuthority: async () => ({ outcome: 'unavailable', source: 'registered-chain', reason }),
+      localContextGraphProvenance: { hasLocalCreate: () => false },
+      contextGraphExists: async () => false,
+    });
+    const query = () => QueryMethods.prototype.query.call(fixture.agent as never,
+      'SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: 'absent-graph' });
+    await expect(query()).resolves.toEqual({ bindings: [] });
+    await expect(QueryMethods.prototype.query.call(fixture.agent as never,
+      'SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: 'absent-graph', accessDenied: 'error' }))
+      .rejects.toMatchObject({ code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', retryable: true, reason });
+    expect(fixture.queryEngine.query).not.toHaveBeenCalled();
+  },
+);

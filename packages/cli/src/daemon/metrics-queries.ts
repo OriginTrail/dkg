@@ -32,6 +32,52 @@ const WALLET_SCOPED_CONTEXT_GRAPH_RE = /^0x[a-fA-F0-9]{40}\/.+$/;
 export const GET_TOTAL_TRIPLES_SPARQL =
   'SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }';
 
+// RFC ka-metadata-trim (Phase 2 ⊕ / Phase 3 P3.1): the KC/KA counters are
+// predicate-based, not rdf:type-based — `generateKCMetadata` no longer
+// emits `rdf:type dkg:KnowledgeCollection` / `dkg:KnowledgeAsset` rows.
+//   - KC ≙ a subject carrying `dkg:status` (every KC row, old shape or
+//     new, has exactly one tentative/confirmed status quad).
+//   - KA ≙ read-both: a legacy `<ual>/<n>` token row carrying
+//     `dkg:partOf`, OR (collapsed shape, P3.1) a UAL subject carrying
+//     `dkg:status` + the entity pair with NO token row pointing at it
+//     (the NOT-EXISTS guard prevents double-counting old-shape rows,
+//     whose aggregate UAL node also carries `dkg:rootEntity`).
+export const GET_TOTAL_KCS_SPARQL =
+  'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> ?s } }';
+export const GET_TOTAL_KAS_SPARQL = `SELECT (COUNT(DISTINCT ?ka) AS ?c) WHERE { GRAPH ?g {
+          { ?ka <http://dkg.io/ontology/partOf> ?kc }
+          UNION
+          { ?ka <http://dkg.io/ontology/status> ?st .
+            ?ka <http://dkg.io/ontology/rootEntity> ?re .
+            FILTER NOT EXISTS { ?tok <http://dkg.io/ontology/partOf> ?ka } }
+        } }`;
+export const GET_CONFIRMED_KCS_SPARQL =
+  'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "confirmed" } }';
+export const GET_TENTATIVE_KCS_SPARQL =
+  'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "tentative" } }';
+
+type MetricsCountQuery = (
+  sparql: string,
+  options: { source: string },
+) => Promise<{ bindings?: ReadonlyArray<Record<string, string | undefined>> } | undefined>;
+
+/**
+ * The store counts of the daemon's metrics source, read through the agent's
+ * query API with no context graph. Unscoped reads leave core-cache-marked
+ * graphs out, so after a core-cache snapshot job these count everything else.
+ */
+export function createStoreCountMetrics(query: MetricsCountQuery) {
+  const count = (sparql: string, source: string) => async () =>
+    parseRdfInt((await query(sparql, { source }))?.bindings?.[0]?.c);
+  return {
+    getTotalTriples: count(GET_TOTAL_TRIPLES_SPARQL, 'daemon.metrics.totalTriples'),
+    getTotalKCs: count(GET_TOTAL_KCS_SPARQL, 'daemon.metrics.totalKCs'),
+    getTotalKAs: count(GET_TOTAL_KAS_SPARQL, 'daemon.metrics.totalKAs'),
+    getConfirmedKCs: count(GET_CONFIRMED_KCS_SPARQL, 'daemon.metrics.confirmedKCs'),
+    getTentativeKCs: count(GET_TENTATIVE_KCS_SPARQL, 'daemon.metrics.tentativeKCs'),
+  };
+}
+
 type MetricSubscriptionCandidate = {
   onChainId?: string;
   onChainHash?: string;

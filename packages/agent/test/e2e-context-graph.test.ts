@@ -3,10 +3,10 @@
  *
  * 1. Create a context graph on-chain
  * 2. Write data to workspace → replicate via GossipSub
- * 3. The legacy (not graph-scoped) publish into the `<cg>/context/<id>`
- *    partition, with or without the same-graph root dual-write, is refused by
- *    a 10.0.19 Core: it cannot keep a copy of such a publish that it could
- *    promote to VM, so it declines the StorageACK (CORE_VM_PROMOTION_DISABLED)
+ * 3. A publish into the `<cg>/context/<id>` partition that carries no per-KA
+ *    scope, with or without the same-graph root dual-write, is refused by the
+ *    publishing agent: root-entity Knowledge Assets are read-only, and no
+ *    peer would keep or finalize such a publish
  * 4. The same assertion publishes graph-scoped: B ACKs it and promotes it
  *
  * Uses a shared EVMChainAdapter so both nodes see the same on-chain events,
@@ -46,8 +46,8 @@ async function readPhysicalPlacement(node: DKGAgent, sparql: string): Promise<Se
   return result;
 }
 
-/** Run a legacy publish and report how it ended, without throwing. */
-async function legacyPublishOutcome(
+/** Run a publish without a per-KA scope and report how it ended, without throwing. */
+async function unscopedPublishOutcome(
   publish: Promise<{ status: string }>,
 ): Promise<{ status: string; error: string }> {
   return publish.then(
@@ -175,15 +175,15 @@ describe('E2E: context graph publish + finalization (shared chain)', () => {
     expect(bWorkspace.bindings[0]['name']).toBe('"Context Graph Entity"');
   }, 25_000);
 
-  it('a gated receiver refuses the legacy publish into the context graph partition', async () => {
-    const outcome = await legacyPublishOutcome(nodeA.publishFromSharedMemory(
+  it('the agent refuses a publish into the context graph partition that carries no per-KA scope', async () => {
+    const outcome = await unscopedPublishOutcome(nodeA.publishFromSharedMemory(
       CONTEXT_GRAPH,
       'all',
       { subContextGraphId: contextGraphId, clearSharedMemoryAfter: true },
     ));
 
     expect(outcome.status).not.toBe('confirmed');
-    expect(outcome.error).toContain('CORE_VM_PROMOTION_DISABLED');
+    expect(outcome.error).toContain('Legacy root-scoped Knowledge Assets are read-only');
     const ctxDataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${contextGraphId}`;
     for (const node of [nodeA, nodeB]) {
       const data = await readPhysicalPlacement(node,
@@ -235,7 +235,7 @@ describe('E2E: context graph publish + finalization (shared chain)', () => {
       await sleep(1500);
     }, 30_000);
 
-    it('a gated receiver refuses the legacy same-graph dual-write publish', async () => {
+    it('the agent refuses a same-graph publish that carries no per-KA scope', async () => {
       await stageRootlessAssertion(nodeA, SAMEG_LABEL, 'same-graph-entity', [
         { subject: ENTITY_SAMEG, predicate: 'http://schema.org/name', object: '"Same-Graph Entity"' },
       ]);
@@ -249,14 +249,14 @@ describe('E2E: context graph publish + finalization (shared chain)', () => {
         await sleep(500);
       }
 
-      const outcome = await legacyPublishOutcome(nodeA.publishFromSharedMemory(
+      const outcome = await unscopedPublishOutcome(nodeA.publishFromSharedMemory(
         SAMEG_LABEL,
         'all',
         { clearSharedMemoryAfter: true },
       ));
 
       expect(outcome.status).not.toBe('confirmed');
-      expect(outcome.error).toContain('CORE_VM_PROMOTION_DISABLED');
+      expect(outcome.error).toContain('Legacy root-scoped Knowledge Assets are read-only');
       const ctxDataGraph = `did:dkg:context-graph:${SAMEG_LABEL}/context/${samegOnChainId}`;
       const bPerCgIdData = await readPhysicalPlacement(nodeB,
         `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_SAMEG}> <http://schema.org/name> ?name } }`,

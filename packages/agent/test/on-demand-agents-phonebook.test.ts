@@ -199,6 +199,62 @@ describe('OnDemandAgentsPhonebookFetcher', () => {
     expect(h.syncCalls.map(({ peerId }) => peerId)).toEqual([CORE_B]);
   });
 
+  it('asks a peer again while this node\'s own sync slots turn the request away, and counts no answer until one comes', async () => {
+    const deferred = { fetchedTriples: 0, insertedTriples: 0, complete: false, deferred: true };
+    let refusals = 2;
+    let addOwner = (): void => {};
+    const h = createHarness({
+      localDeferralRetryMs: 1,
+      sync: async () => {
+        if (refusals > 0) {
+          refusals -= 1;
+          return deferred;
+        }
+        addOwner();
+        return complete(75_141);
+      },
+    });
+    addOwner = () => { h.phonebook.add(OWNER.toLowerCase()); };
+
+    h.fetcher.request(CG, 'subscribe');
+    await h.fetcher.whenIdle();
+
+    expect(h.syncCalls.map(({ peerId }) => peerId)).toEqual([CORE_A, CORE_A, CORE_A]);
+    expect(h.info).toHaveLength(1);
+    expect(h.info[0]).toContain(`peers=[${CORE_A.slice(-8)}:core:complete:75141]`);
+    expect(h.info[0]).toContain('outcome=complete');
+    expect(h.resolvedBatches).toEqual([[CG]]);
+  });
+
+  it('starts no cooldown when this node\'s own sync slots stay busy, and asks again on the re-check', async () => {
+    const deferred = { fetchedTriples: 0, insertedTriples: 0, complete: false, deferred: true };
+    let busy = true;
+    let addOwner = (): void => {};
+    const h = createHarness({
+      localDeferralRetryMs: 1,
+      localDeferralMaxRetries: 2,
+      sync: async () => {
+        if (busy) return deferred;
+        addOwner();
+        return complete(75_141);
+      },
+    });
+    addOwner = () => { h.phonebook.add(OWNER.toLowerCase()); };
+
+    h.fetcher.request(CG, 'subscribe');
+    await h.fetcher.whenIdle();
+    // Asked once and again twice; never counted as an answer.
+    expect(h.syncCalls).toHaveLength(3);
+    expect(h.info).toEqual([]);
+    expect(h.debug.some((line) => line.includes("this node's sync slots stayed busy"))).toBe(true);
+
+    busy = false;
+    await vi.waitFor(() => expect(h.info).toHaveLength(1));
+    await h.fetcher.whenIdle();
+    expect(h.info[0]).toContain('outcome=complete');
+    expect(h.resolvedBatches).toEqual([[CG]]);
+  });
+
   it('does not take an empty "complete" Core answer for the network phonebook', async () => {
     // A just-started or lean Core answers a full scan as complete with no rows.
     const h = createHarness({
@@ -331,7 +387,7 @@ describe('OnDemandAgentsPhonebookFetcher', () => {
     expect(h.info[0]).toContain('outcome=complete');
   });
 
-  it('reports a partial fetch when data arrived but the owner is still unknown', async () => {
+  it('reports a partial fetch when data arrived but the owner is still unknown, and asks again after the short cooldown', async () => {
     const h = createHarness({
       maxPeers: 1,
       sync: async () => ({ fetchedTriples: 900, insertedTriples: 900, complete: false }),
@@ -341,8 +397,43 @@ describe('OnDemandAgentsPhonebookFetcher', () => {
     await h.fetcher.whenIdle();
 
     expect(h.info[0]).toContain('curatorResolved=0/1 outcome=partial');
-    expect(h.info[0]).toContain(`nextFetchInMs=${AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS}`);
+    // A partial fetch left what it was asked for unresolved: it is spaced like a failed one.
+    expect(h.info[0]).toContain(`nextFetchInMs=${AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS}`);
     expect(h.resolvedBatches).toEqual([]);
+
+    h.advance(AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS - 1);
+    h.fetcher.request(CG, 'vm-reconcile');
+    await h.fetcher.whenIdle();
+    expect(h.syncCalls).toHaveLength(1);
+    h.advance(1);
+    h.fetcher.request(CG, 'vm-reconcile');
+    await h.fetcher.whenIdle();
+    expect(h.syncCalls).toHaveLength(2);
+  });
+
+  // Partial answers that repeat come from Cores that stay overloaded: only the
+  // first partial fetch in a row is followed by the short cooldown.
+  it('spaces a second partial fetch in a row by the full cooldown, and the first partial after another outcome by the short one', async () => {
+    const answers: Array<'partial' | 'failed'> = ['partial', 'partial', 'partial', 'failed', 'partial'];
+    const h = createHarness({
+      maxPeers: 1,
+      sync: async () => {
+        if (answers.shift() === 'failed') throw new Error('stream reset');
+        return { fetchedTriples: 900, insertedTriples: 900, complete: false };
+      },
+    });
+    const spacings: string[] = [];
+    for (let fetch = 0; fetch < 5; fetch += 1) {
+      h.fetcher.request(CG, 'vm-reconcile');
+      await h.fetcher.whenIdle();
+      const line = h.info.at(-1) ?? '';
+      spacings.push(`${/outcome=(\w+)/.exec(line)?.[1]}:${/nextFetchInMs=(\d+)/.exec(line)?.[1]}`);
+      h.advance(AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS);
+    }
+    const short = AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS;
+    const full = AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS;
+    expect(spacings).toEqual([`partial:${short}`, `partial:${full}`, `partial:${full}`, `failed:${short}`, `partial:${short}`]);
+    expect(h.syncCalls).toHaveLength(5);
   });
 
   it('does not repeat inside the cooldown, and fetches again once it expires', async () => {
@@ -971,6 +1062,48 @@ describe('OnDemandAgentsPhonebookFetcher.ensureWallets (#2849)', () => {
     await h.fetcher.whenIdle();
     expect([...(await h.fetcher.ensureWallets([MEMBER]))]).toEqual([member]);
     expect(h.syncCalls).toHaveLength(1);
+  });
+
+  // The owner of a graph a relay-only member shares into is looked up this way
+  // when the share is made. Overloaded Cores answer the first fetch only in
+  // part; the owner's lookup must not then wait half an hour for the next one.
+  it('fetches again for a wallet a partial fetch left unknown once the short cooldown has passed, not before', async () => {
+    let answersInFull = false;
+    const h = createHarness({
+      maxPeers: 1,
+      sync: async () => {
+        if (!answersInFull) return { fetchedTriples: 900, insertedTriples: 900, complete: false };
+        h.recipientKeys.add(member);
+        return complete(75_141);
+      },
+    });
+
+    expect([...(await h.fetcher.ensureWallets([MEMBER]))]).toEqual([]);
+    expect(h.info.at(-1)).toContain('outcome=partial');
+    expect(h.info.at(-1)).toContain(`nextFetchInMs=${AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS}`);
+    answersInFull = true;
+
+    h.advance(AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS - 1);
+    expect([...(await h.fetcher.ensureWallets([MEMBER]))]).toEqual([]);
+    expect(h.syncCalls).toHaveLength(1);
+
+    h.advance(1);
+    expect([...(await h.fetcher.ensureWallets([MEMBER]))]).toEqual([member]);
+    expect(h.syncCalls).toHaveLength(2);
+  });
+
+  it('still spaces the next fetch by the full cooldown after a complete one', async () => {
+    const h = createHarness({ syncAddsWallets: [member] });
+    expect([...(await h.fetcher.ensureWallets([MEMBER]))]).toEqual([member]);
+    expect(h.info.at(-1)).toContain('outcome=complete');
+    expect(h.info.at(-1)).toContain(`nextFetchInMs=${AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS}`);
+
+    h.advance(AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS);
+    expect([...(await h.fetcher.ensureWallets([MEMBER_2]))]).toEqual([]);
+    expect(h.syncCalls).toHaveLength(1);
+    h.advance(AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS - AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS);
+    await h.fetcher.ensureWallets([MEMBER_2]);
+    expect(h.syncCalls).toHaveLength(2);
   });
 
   it('starts no cooldown when no peer could be asked', async () => {

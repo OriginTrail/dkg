@@ -1572,41 +1572,17 @@ describe('DashboardDB — context graph subscriptions', () => {
   });
 });
 
-describe('DashboardDB — durable VM reconcile negative cache', () => {
-  it('round-trips and deletes restart-durable generation-gated misses', () => {
-    db.upsertVmReconcileNegative({
-      cache_key: 'cg\0ual#root',
-      context_graph_id: 'cg',
-      failures: 2,
-      next_retry_at: 12_345,
-      swm_gen: 'generation',
-      candidate_namespaces: JSON.stringify([{ metaGraph: 'urn:meta', dataGraph: 'urn:data' }]),
-      peer_topology_key: 'peers',
-      updated_at: 100,
-    });
-
-    expect(db.getVmReconcileNegative('cg\0ual#root')).toMatchObject({
-      context_graph_id: 'cg',
-      failures: 2,
-      swm_gen: 'generation',
-    });
-    db.deleteVmReconcileNegativesForContextGraph('cg');
-    expect(db.getVmReconcileNegative('cg\0ual#root')).toBeUndefined();
-  });
-
-  it('prunes records after their bounded retry window', () => {
-    db.upsertVmReconcileNegative({
-      cache_key: 'expired',
-      context_graph_id: 'cg',
-      failures: 1,
-      next_retry_at: Date.now() - 1,
-      swm_gen: 'generation',
-      candidate_namespaces: '[]',
-      peer_topology_key: 'peers',
-      updated_at: Date.now() - 1_000,
-    });
-    db.prune();
-    expect(db.getVmReconcileNegative('expired')).toBeUndefined();
+describe('DashboardDB — legacy VM reconcile negative records', () => {
+  it('opens and prunes an older database without decoding obsolete records', () => {
+    (db as any).db.exec(`INSERT INTO vm_reconcile_negative_cache VALUES (
+      'old', 'cg', 1, 0, 'obsolete', 'unparseable', 'unparseable', 0
+    )`);
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    expect(() => db.prune()).not.toThrow();
+    // The inactive legacy table is ignored, including malformed encodings.
+    expect((db as any).db.prepare('SELECT COUNT(*) AS n FROM vm_reconcile_negative_cache')
+      .get().n).toBe(1);
   });
 });
 

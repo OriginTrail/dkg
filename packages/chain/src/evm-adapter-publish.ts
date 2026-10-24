@@ -9,9 +9,9 @@
  * via applyMixins(); see evm-adapter.ts for the assembly.
  */
 
-import { EVMChainAdapterBase, decodeConvictionCostCovered } from './evm-adapter-base.js';
+import { EVMChainAdapterBase, decodeConvictionCostCovered, type EvmSigner } from './evm-adapter-base.js';
 import { numericChainIdOf } from './evm-adapter-storage-reads.js';
-import { ethers, Wallet, Contract } from 'ethers';
+import { ethers, Contract } from 'ethers';
 import type {
   BatchMintParams,
   BatchMintResult,
@@ -33,17 +33,16 @@ import type {
 import { publisherPublishPlanByteSize } from './chain-adapter.js';
 import { floorPublishTokenAmount, computeUpdateACKDigest, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import { resolveQuotedPublisherCandidatePricing } from './publisher-plan.js';
-import { errorCode, errorMessage, InsufficientPublisherFundsError, PcaFundingUnknownError } from './evm-adapter-errors.js';
+import { reconcilePublisherCandidateFunding, type PublisherPcaPricingEvidence } from './evm-publisher-funding.js';
+import { errorCode, errorMessage } from './evm-adapter-errors.js';
 import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
-import {
-} from './evm-adapter-constants.js';
 
 type PublisherCandidatePlan = PublisherPublishPlan & {
-  signer: Wallet;
+  signer: EvmSigner;
   address: string;
-  pcaProbeError?: unknown;
+  pcaPricing: PublisherPcaPricingEvidence;
 };
 
 /**
@@ -116,7 +115,7 @@ export class PublishMethods extends EVMChainAdapterBase {
   }
 
   private async _publisherCandidatePlan(
-    signer: Wallet,
+    signer: EvmSigner,
     request: PublisherPublishPlanRequest,
     quote: (epochs: number, purpose: 'pca' | 'direct') => Promise<bigint>,
   ): Promise<PublisherCandidatePlan> {
@@ -144,12 +143,12 @@ export class PublishMethods extends EVMChainAdapterBase {
       publisherAddress: signer.address,
       publishEpochs: pricing.publishEpochs,
       tokenAmount: pricing.tokenAmount,
-      ...(diagnostics?.pcaProbeError !== undefined && (
+      pcaPricing: diagnostics?.pcaProbeError !== undefined && (
         isRetryableRpcError(diagnostics.pcaProbeError)
         || errorCode(diagnostics.pcaProbeError) === 'CALL_EXCEPTION'
       )
-        ? { pcaProbeError: diagnostics.pcaProbeError }
-        : {}),
+        ? { kind: 'unavailable', error: diagnostics.pcaProbeError }
+        : { kind: 'available' },
     };
   }
 
@@ -161,67 +160,18 @@ export class PublishMethods extends EVMChainAdapterBase {
     request: PublisherPublishPlanRequest,
     quote: (epochs: number, purpose: 'pca' | 'direct') => Promise<bigint>,
   ): Promise<PublisherCandidatePlan> {
-    const select = () => this._selectFundedCandidateOrThrow(
-      plans,
-      (plan) => ({
+    return reconcilePublisherCandidateFunding({
+      candidates: plans,
+      assess: (currentPlans) => this._assessFundedCandidates(currentPlans, (plan) => ({
         kind: 'native+trac',
         nativeFloorWei: this.minPublisherNativeWei,
         tracFloorWei: this.minPublisherTracWei,
         requiredTracWei: plan.tokenAmount,
         pca: { kind: 'publish', epochs: plan.publishEpochs },
-      }),
-      { preferIdle: false },
-    );
-
-    try {
-      return await select();
-    } catch (error) {
-      if (!(error instanceof InsufficientPublisherFundsError)) throw error;
-      if (!plans.some((plan) => plan.pcaProbeError !== undefined)) throw error;
-    }
-
-    // A failed lock/coverage lookup can leave a direct-spend lifetime that is
-    // wrong for a real PCA. Re-price only candidates that can still use PCA.
-    for (let index = 0; index < plans.length; index += 1) {
-      const plan = plans[index];
-      if (plan.pcaProbeError === undefined) continue;
-      const funds = await this.getWalletFunding(plan.address, { forceRefresh: true });
-      if (funds.native !== null && funds.native <= this.minPublisherNativeWei) continue;
-      if (funds.trac === null || (funds.trac > this.minPublisherTracWei && funds.trac >= plan.tokenAmount)) continue;
-      plans[index] = await this._publisherCandidatePlan(plan.signer, request, quote);
-    }
-
-    try {
-      return await select();
-    } catch (error) {
-      if (!(error instanceof InsufficientPublisherFundsError)) throw error;
-      // A strict false can be only a lifetime mismatch against direct-spend
-      // fallback pricing. It did not probe coverage at the PCA's real lock.
-      for (const plan of plans) {
-        if (plan.pcaProbeError === undefined) continue;
-        const funds = await this.getWalletFunding(plan.address, { forceRefresh: true });
-        if (funds.native !== null && funds.native <= this.minPublisherNativeWei) continue;
-        if (funds.trac === null || (funds.trac > this.minPublisherTracWei && funds.trac >= plan.tokenAmount)) continue;
-        const reader = this.publisherConvictionPlanReader();
-        if (!reader) continue;
-        let accountId: bigint;
-        let lockEpochs: number;
-        try {
-          accountId = await reader.getAccountId(plan.address);
-          if (accountId <= 0n) continue;
-          lockEpochs = await reader.getLockDurationEpochs(accountId);
-        } catch (readError) {
-          if (isRetryableRpcError(readError) || errorCode(readError) === 'CALL_EXCEPTION') {
-            throw new PcaFundingUnknownError(errorCode(readError));
-          }
-          throw readError;
-        }
-        if (lockEpochs > 0 && lockEpochs !== plan.publishEpochs) {
-          throw new PcaFundingUnknownError(errorCode(plan.pcaProbeError));
-        }
-      }
-      throw error;
-    }
+      }), { preferIdle: false }),
+      reprice: (plan) => this._publisherCandidatePlan(plan.signer, request, quote),
+      conviction: () => this.publisherConvictionPlanReader(),
+    });
   }
 
   /**
@@ -277,7 +227,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       }
       return this._selectFundedPublisherPlanOrThrow(plans, request, quote);
     });
-    // Do not expose the internal Wallet carried only for cursor advancement.
+    // Do not expose the internal signer carried only for cursor advancement.
     return {
       publisherAddress: selectedPlan.publisherAddress,
       publishEpochs: selectedPlan.publishEpochs,
@@ -803,15 +753,11 @@ export class PublishMethods extends EVMChainAdapterBase {
     });
     if (!receipt || receipt.status !== 1) return { receipt, publish: null };
 
-    const v10 = this.contracts.knowledgeAssetStorage
-      ? await this.parseV10PublishReceipt(receipt, options)
-      : null;
-    if (v10) return { receipt, publish: v10 };
-
-    const v9 = this.contracts.knowledgeAssetsStorage
-      ? await this.parseV9PublishReceipt(receipt, options)
-      : null;
-    return { receipt, publish: v9 };
+    const facts = (this.contracts.knowledgeAssetStorage
+      ? this.decodeV10PublishReceipt(receipt) : null)
+      ?? (this.contracts.knowledgeAssetsStorage
+        ? this.decodeV9PublishReceipt(receipt) : null);
+    return { receipt, publish: facts ? await this.enrichPublishReceipt(receipt, facts, options) : null };
   }
 
   /**
@@ -887,27 +833,28 @@ export class PublishMethods extends EVMChainAdapterBase {
       : { status: 'rejected' };
   }
 
-  /**
-   * The receipt block's timestamp for a publish projection, whichever event format the
-   * receipt carries. When the caller already checked receipt finality, naming this exact hash
-   * reuses that header timestamp; direct parsers safely fall through to RPC. A caller that
-   * declared it never reads the timestamp (`skipBlockTimestamp`) skips the lookup and gets 0,
-   * the value already reported when the header is unavailable. The policy lives here once so
-   * the two format decoders stay free of caller-specific read rules.
-   */
-  private receiptBlockTimestamp(
+  /** Apply header-read policy once, outside either event-format decoder. */
+  private async enrichPublishReceipt(
     receipt: Pick<ethers.TransactionReceipt, 'blockNumber' | 'blockHash'>,
+    facts: Omit<OnChainPublishResult, 'blockTimestamp'>,
     options: PublishReceiptReadOptions,
-  ): Promise<number> {
-    return options.skipBlockTimestamp === true
-      ? Promise.resolve(0)
-      : this.getFinalizedBlockTimestamp(receipt.blockNumber, receipt.blockHash, options);
+  ): Promise<OnChainPublishResult> {
+    const blockTimestamp = options.skipBlockTimestamp === true ? 0
+      : await this.getFinalizedBlockTimestamp(receipt.blockNumber, receipt.blockHash, options);
+    return { ...facts, blockTimestamp };
   }
 
   async parseV10PublishReceipt(
     receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
     options: PublishReceiptReadOptions = {},
   ): Promise<OnChainPublishResult | null> {
+    const facts = this.decodeV10PublishReceipt(receipt);
+    return facts ? this.enrichPublishReceipt(receipt, facts, options) : null;
+  }
+
+  private decodeV10PublishReceipt(
+    receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
+  ): Omit<OnChainPublishResult, 'blockTimestamp'> | null {
     const kas = this.contracts.knowledgeAssetStorage;
     if (!kas) return null;
 
@@ -951,7 +898,6 @@ export class PublishMethods extends EVMChainAdapterBase {
       publisherAddress = receipt.from ?? authorAddress ?? '';
     }
 
-    const blockTimestamp = await this.receiptBlockTimestamp(receipt, options);
     const convictionCostCovered = decodeConvictionCostCovered(receipt.logs);
 
     return {
@@ -964,7 +910,6 @@ export class PublishMethods extends EVMChainAdapterBase {
       txHash: receipt.hash,
       blockNumber: receipt.blockNumber,
       txIndex: receipt.index,
-      blockTimestamp,
       publisherAddress,
       authorAddress,
       ...(convictionCostCovered ? { convictionCostCovered } : {}),
@@ -975,6 +920,13 @@ export class PublishMethods extends EVMChainAdapterBase {
     receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
     options: PublishReceiptReadOptions = {},
   ): Promise<OnChainPublishResult | null> {
+    const facts = this.decodeV9PublishReceipt(receipt);
+    return facts ? this.enrichPublishReceipt(receipt, facts, options) : null;
+  }
+
+  private decodeV9PublishReceipt(
+    receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
+  ): Omit<OnChainPublishResult, 'blockTimestamp'> | null {
     const storage = this.contracts.knowledgeAssetsStorage;
     if (!storage) return null;
 
@@ -1011,7 +963,6 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     if (!foundBatchCreated) return null;
 
-    const blockTimestamp = await this.receiptBlockTimestamp(receipt, options);
 
     return {
       batchId,
@@ -1021,7 +972,6 @@ export class PublishMethods extends EVMChainAdapterBase {
       txHash: receipt.hash,
       blockNumber: receipt.blockNumber,
       txIndex: receipt.index,
-      blockTimestamp,
       publisherAddress,
     };
   }
@@ -1294,7 +1244,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       throw new Error('KnowledgeAssetsLifecycle contract not deployed — cannot update via V10 path.');
     }
 
-    let signer: Wallet | undefined;
+    let signer: EvmSigner | undefined;
 
     // Look up the on-chain publisher to select the correct signer.
     const kas = this.contracts.knowledgeAssetStorage;
@@ -1485,7 +1435,7 @@ export class PublishMethods extends EVMChainAdapterBase {
           false,
           ctx.sendContractTransaction,
         );
-        return this.populateAndSignV10WithAllowanceRecovery(
+        return this.signPreparedTransaction(await this.prepareV10WithAllowanceRecovery(
           signer,
           ka as Contract,
           'update',
@@ -1494,7 +1444,7 @@ export class PublishMethods extends EVMChainAdapterBase {
           newTokenAmount,
           'approve V10 update TRAC (forced re-approve, #888)',
           ctx.sendContractTransaction,
-        );
+        ));
       },
       (preBroadcastTxHash) => {
         throw new Error(
@@ -1503,6 +1453,7 @@ export class PublishMethods extends EVMChainAdapterBase {
         );
       },
       params.onBroadcastAccepted,
+      params.onBeforeReplacementBroadcast,
     );
 
     return {

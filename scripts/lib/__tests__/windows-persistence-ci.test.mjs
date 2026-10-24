@@ -41,6 +41,14 @@ test('Windows groups retain every original test selector exactly once', () => {
     /--config vitest\.unit\.config\.ts\s+\$\{\{ matrix.tests \}\}/);
 });
 
+test('the Windows Node 22 gate executes the regression launcher and process-tree checks', () => {
+  const node = job.steps.find((step) => step.uses?.startsWith('actions/setup-node@'));
+  assert.equal(node.with['node-version'], 22);
+  const smoke = job.steps.find((step) => step.run === 'pnpm qa:check-regression-launcher');
+  assert.ok(smoke); assert.equal(smoke.if, undefined); assert.equal(smoke['continue-on-error'], undefined);
+  assert.ok(job.steps.indexOf(smoke) > job.steps.findIndex((step) => step.run === 'pnpm install --frozen-lockfile'));
+});
+
 const scripts = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8')).scripts;
 const prefix = 'test:gate0:rfc64-persistence-lifecycle';
 const harnessDir = 'devnet/rfc64-persistence-lifecycle';

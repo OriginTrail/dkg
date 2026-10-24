@@ -52,7 +52,7 @@ Run a quick subset while iterating on benchmark wiring:
 DKG_ESBENCH_PAYLOAD_SIZES=10kb pnpm bench
 ```
 
-The root ESBench config is `esbench.config.mjs`. It was verified against ESBench `0.8.1`, whose CLI runs suites with `esbench --config <file>` and generates reports from saved result files with `esbench report <patterns...> --config <file>`.
+The ESBench config is `bench/esbench.config.mjs`. Run it from the repository root: its suite globs, temp directory and output paths are relative to the working directory, not to the config file. It was verified against ESBench `0.8.1`, whose CLI runs suites with `esbench --config <file>` and generates reports from saved result files with `esbench report <patterns...> --config <file>`.
 
 ## HTML Reports
 

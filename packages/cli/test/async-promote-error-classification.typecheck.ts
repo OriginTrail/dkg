@@ -1,8 +1,6 @@
 import type { PromoteFailureDisposition, PromoteStepName } from '@origintrail-official/dkg-publisher';
-import type {
-  ClassifiedPromoteError,
-  diagnosticPromoteStage,
-} from '../src/daemon/worker/async-promote-error-classification.js';
+import type { diagnosticPromoteStage } from '../src/daemon/promote-stage-diagnostics.js';
+import type { ClassifiedPromoteError } from '../src/daemon/worker/async-promote-error-classification.js';
 
 type AssertTrue<Value extends true> = Value;
 type AssertFalse<Value extends false> = Value;

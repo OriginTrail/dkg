@@ -533,6 +533,34 @@ describe('RFC-64 bounded public root native reconciler v1', () => {
     await expect(reconciler.isHeadSatisfied(applied)).rejects.toThrow('inventory unavailable');
   });
 
+  it('replays an exact applied head while a late legacy boundary remains', async () => {
+    const applied = announcement('1');
+    let lateBoundaryCount = 0;
+    const synchronize = vi.fn(async () => {
+      lateBoundaryCount = 0;
+      return { inventoryRowCount: 1 } as never;
+    });
+    const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
+      nativeReceiver: receiver(synchronize),
+      inventory: { readAppliedCatalogHeadV1: () => snapshot(applied) },
+      resolveTrustedCatalogScope,
+      resolveDeployment: async () => DEPLOYMENT,
+      stagedCatalogHeads: createRfc64VerifiedStagedCatalogHeadMemoV1(async () => (
+        stagedHead(applied, '1')
+      )),
+      requiresAppliedHeadPrecommit: () => lateBoundaryCount > 0,
+    });
+
+    await expect(reconciler.isHeadSatisfied(applied)).resolves.toBe(true);
+    lateBoundaryCount = 1;
+    expect(reconciler.isHeadKnownSatisfied!(applied)).toBe(false);
+    await expect(reconciler.isHeadSatisfied(applied)).resolves.toBe(false);
+    await expect(reconciler.reconcileHead('peer-a', applied, new AbortController().signal))
+      .resolves.toBe('applied');
+    expect(synchronize).toHaveBeenCalledOnce();
+    await expect(reconciler.isHeadSatisfied(applied)).resolves.toBe(true);
+  });
+
   it('remembers only exact verified staged heads, within its bound', async () => {
     const first = announcement('1');
     const second = announcement('1', {

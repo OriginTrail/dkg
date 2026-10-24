@@ -29,9 +29,16 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import { rememberBounded } from './bounded-map.js';
+import { conflictsWithOwnedContextGraphBinding } from './context-graph-chain-discovery-binding.js';
 import { runBoundedOperation } from './bounded-operation.js';
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { isUnrecordedNameHashRow } from './context-graph-claim-proof.js';
+import {
+  captureInactiveContextGraphNamePredecessor,
+  retireCommittedContextGraphNamePredecessors,
+  persistedContextGraphIdAliases,
+} from './context-graph-persisted-name-aliases.js';
+export { partitionSupersededContextGraphNamePlaceholders } from './context-graph-persisted-name-aliases.js';
 import {
   CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
   CONTEXT_GRAPH_SUBJECT_PREFIX,
@@ -55,7 +62,11 @@ import {
   type ContextGraphNameSource,
   type ContextGraphNameTarget,
 } from './context-graph-name-resolver.js';
-import { projectContextGraphSubscriptionPersistence } from './context-graph-subscription-policy.js';
+import {
+  isContextGraphSubscriptionPersistenceTargetCurrent,
+  projectContextGraphSubscriptionPersistence,
+  type ContextGraphSubscriptionPersistenceProjection,
+} from './context-graph-subscription-policy.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { ContextGraphSub, ContextGraphSubscriptionRecord } from './dkg-agent-types.js';
 import type { DKGAgent } from './dkg-agent.js';
@@ -152,41 +163,6 @@ function stateOf(agent: object): ContextGraphNameState {
     contextGraphNameStates.set(agent, state);
   }
   return state;
-}
-
-/**
- * Split persisted subscription rows into those to activate and hash-keyed
- * placeholders already superseded by a durable cleartext row for the same
- * commitment. A superseded placeholder must not be rehydrated: activating it
- * would re-point the reverse name-hash index at the hash and undo adoption.
- */
-export function partitionSupersededContextGraphNamePlaceholders<
-  T extends Pick<ContextGraphSubscriptionRecord, 'id' | 'onChainHash'>,
->(rows: readonly T[]): { readonly active: T[]; readonly superseded: T[] } {
-  const cleartextByHash = persistedContextGraphIdAliases(rows);
-  const active: T[] = [];
-  const superseded: T[] = [];
-  for (const row of rows) {
-    const nameHash = normalizeContextGraphNameHash(row.id);
-    const placeholder = nameHash !== null
-      && normalizeContextGraphNameHash(row.onChainHash) === nameHash;
-    if (placeholder && cleartextByHash.has(nameHash!)) superseded.push(row);
-    else active.push(row);
-  }
-  return { active, superseded };
-}
-
-/** name hash -> cleartext id for durable rows whose id is the hash's preimage. */
-function persistedContextGraphIdAliases(
-  rows: readonly Pick<ContextGraphSubscriptionRecord, 'id' | 'onChainHash'>[],
-): Map<string, string> {
-  const aliases = new Map<string, string>();
-  for (const row of rows) {
-    const nameHash = normalizeContextGraphNameHash(row.onChainHash);
-    if (nameHash === null || row.id.toLowerCase() === nameHash) continue;
-    if (verifyContextGraphNameCandidate(row.id, nameHash) === row.id) aliases.set(nameHash, row.id);
-  }
-  return aliases;
 }
 
 export class ContextGraphNameResolutionMethods extends DKGAgentBase {
@@ -489,12 +465,13 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     }
   }
 
-  /** Remember durable aliases (called by rehydration with every persisted row). */
+  /** Replace snapshot-owned aliases from the complete durable row snapshot. */
   recordPersistedContextGraphIdAliases(
     this: DKGAgent,
-    rows: readonly Pick<ContextGraphSubscriptionRecord, 'id' | 'onChainHash'>[],
+    rows: readonly Pick<ContextGraphSubscriptionRecord, 'id' | 'onChainHash' | 'onChainId'>[],
   ): void {
     const aliases = stateOf(this).persistedAliases;
+    aliases.clear();
     for (const [nameHash, contextGraphId] of persistedContextGraphIdAliases(rows)) {
       aliases.set(nameHash, contextGraphId);
     }
@@ -652,7 +629,7 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     // scope and durable member row). The row itself stays for the canonical
     // promotion below.
     if (wasSubscribed) {
-      this.unsubscribeFromContextGraph(target.nameHash, { persist: true, supersededBy: contextGraphId });
+      this.unsubscribeFromContextGraph(target.nameHash, { persist: false, supersededBy: contextGraphId });
     }
 
     // Promote through the canonical setter. The placeholder is the reverse
@@ -705,31 +682,54 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     const nameHash = this.contextGraphNameCommitment(contextGraphId);
     const placeholder = this.contextGraphNamePlaceholder(nameHash);
     if (placeholder === null || placeholder.subscription.subscribed !== true) return;
-    this.unsubscribeFromContextGraph(nameHash, { persist: true, supersededBy: contextGraphId });
+    if (conflictsWithOwnedContextGraphBinding(placeholder.subscription.onChainId, this.subscribedContextGraphs.get(contextGraphId)?.onChainId)) return;
+    this.unsubscribeFromContextGraph(nameHash, { persist: false, supersededBy: contextGraphId });
   }
 
-  /**
-   * Delete the durable subscription row (and node member row) of a retired
-   * name-hash placeholder that was made durable while hash-keyed. Without
-   * this, the next rehydration resurrects the hash row.
-   *
-   * The caller has already removed the in-memory row, so persisting its id
-   * projects a `delete` of the durable record: that is the intent here, not
-   * a side effect. `row` is the retired row as it was, judged by the same
-   * persistence rule that saved it. The write is queued like every other
-   * subscription write and ordered by its persist revision.
-   */
-  retirePersistedContextGraphNamePlaceholder(this: DKGAgent, contextGraphId: string, row: ContextGraphSub): void {
-    const persisted = projectContextGraphSubscriptionPersistence({ contextGraphId, subscription: row, syncScoped: false });
-    if (persisted.action !== 'save') return;
-    if (this.config.contextGraphSubscriptionStore) {
-      void this.persistContextGraphSubscription(contextGraphId, {
-        revision: this.nextContextGraphSubscriptionPersistRevision(contextGraphId),
-        updateRehydrationStatus: true,
-      });
-    }
-    if (persisted.persistMemberIntent && row.subscribed === true) {
-      this.deleteContextGraphMember(contextGraphId, 'node', this.peerId);
+  /** Native ownership callbacks for post-commit durable name migration. */
+  async retirePersistedContextGraphNamePredecessors(
+    this: DKGAgent,
+    input: Parameters<typeof projectContextGraphSubscriptionPersistence>[0],
+    captured: ContextGraphSub | undefined,
+    generation: number,
+    revision: number | undefined,
+    persistence: ContextGraphSubscriptionPersistenceProjection,
+    retired?: Pick<ContextGraphSubscriptionRecord, 'id' | 'onChainId' | 'onChainHash' | 'coreHosted'>,
+  ): Promise<void> {
+    try {
+      const store = this.config.contextGraphSubscriptionStore;
+      const id = input.contextGraphId;
+      if (!store || !input.subscription || persistence.action === 'skip') return;
+      const destinationCurrent = () => (
+        this.contextGraphBindingState.isGenerationCurrent(id, generation)
+        && isContextGraphSubscriptionPersistenceTargetCurrent(captured, input, this.subscribedContextGraphs.get(id), {
+          revision,
+          pendingRevisions: this.contextGraphSubscriptionPersistPendingRevisions.get(id),
+          syncScoped: (this.config.syncContextGraphs ?? []).includes(id),
+        })
+      );
+      const destination = { ...input.subscription, id };
+      await retireCommittedContextGraphNamePredecessors(destination,
+        persistence.action === 'save' && persistence.record.coreHosted === true, retired, {
+          store,
+          membershipStore: this.config.contextGraphMembershipStore,
+          principalId: this.normalizeMembershipPrincipal('node', this.peerId),
+          destinationCurrent,
+          queueSubscription: (sourceId, write) => this.enqueueContextGraphSubscriptionPersistWrite(sourceId, write),
+          queueMembership: (key, write) => this.enqueueContextGraphMembershipPersistWrite(key, write, { strict: true }),
+          captureSource: (row) => captureInactiveContextGraphNamePredecessor(row, destination, {
+            current: (sourceId) => this.subscribedContextGraphs.get(sourceId),
+            binding: this.contextGraphBindingState,
+            nextRevision: this.nextContextGraphSubscriptionPersistRevision.bind(this),
+            claimRevision: this.claimContextGraphSubscriptionPersistRevision.bind(this),
+            retireRuntime: this.deleteContextGraphSubscription.bind(this),
+            refreshMembership: (sourceId) => this.scheduleRfc64CatalogResponsibilityReconciliationV1(sourceId),
+            clearStatus: (sourceId) => this.updateContextGraphSubscriptionRehydrationStatusAfterClear([sourceId]),
+          }),
+        });
+    } catch (error) {
+      this.log.warn(createOperationContext('system'),
+        `Failed to retire durable name predecessors for "${input.contextGraphId}": ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 

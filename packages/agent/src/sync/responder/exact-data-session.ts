@@ -162,7 +162,7 @@ async function loadExactDataSession(params: ExactDataPageParams, cache: RowListC
   const revisionSource = params.exactGraphReadMode === 'page-only' ? asGraphWriteRevisionSource(params.store) : null;
   const prefix = `did:dkg:context-graph:${params.contextGraphId}/_meta`;
   const revision = revisionSource?.getWriteRevision(prefix);
-  const manifest = await readGraphScopedVmManifest(params.store, params.contextGraphId, signal);
+  const manifest = await readGraphScopedVmManifest(params.store, params.contextGraphId, signal, params.assetUals);
   const entries = manifest.confirmedEntries.filter(entry => requested.has(entry.ual));
   const payloadRevisions = revisionSource ? entries.map(entry => {
     const current = revisionSource.getWriteRevision(entry.graph);

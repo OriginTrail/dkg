@@ -163,7 +163,7 @@ it('rejects first-time creation if a symlinked parent changes after inspection',
   expect(readdirSync(second)).toEqual([]);
 });
 
-// test-disable-allow: D1 #425 -- owner=branarakic lane=mcp-config-native-macos expires=2026-10-08 Native ACL/xattr case runs on macos-latest in mcp-config-native.yml.
+// test-disable-allow: D1 #425 -- owner=branarakic lane=mcp-config-native-macos expires=2026-11-08 Native ACL/xattr case runs on macos-latest in mcp-config-native.yml.
 it.runIf(nativeMetadata && process.platform === 'darwin')('preserves macOS permissions, ownership, ACLs and extended attributes', () => {
   chmodSync(path, 0o640);
   execFileSync('/bin/chmod', ['+a', 'everyone allow read', path]);
@@ -180,7 +180,7 @@ it.runIf(nativeMetadata && process.platform === 'darwin')('preserves macOS permi
   expect(readdirSync(directory)).toEqual(["config 'quoted'.json"]);
 });
 
-// test-disable-allow: D1 #425 -- owner=branarakic lane=mcp-config-native-linux expires=2026-10-08 Required Linux ACL/xattr tools are installed by mcp-config-native.yml.
+// test-disable-allow: D1 #425 -- owner=branarakic lane=mcp-config-native-linux expires=2026-11-08 Required Linux ACL/xattr tools are installed by mcp-config-native.yml.
 it.runIf(nativeMetadata && process.platform === 'linux')('preserves Linux ACLs and extended attributes', () => {
   execFileSync('setfacl', ['-m', 'u:65534:r--', path]);
   execFileSync('setfattr', ['-n', 'user.dkg_fixture', '-v', 'retained', path]);
@@ -193,7 +193,7 @@ it.runIf(nativeMetadata && process.platform === 'linux')('preserves Linux ACLs a
   expect(readdirSync(directory)).toEqual(["config 'quoted'.json"]);
 });
 
-// test-disable-allow: D1 #425 -- owner=branarakic lane=mcp-config-native-windows expires=2026-10-08 Native security-descriptor case runs on windows-latest in mcp-config-native.yml.
+// test-disable-allow: D1 #425 -- owner=branarakic lane=mcp-config-native-windows expires=2026-11-08 Native security-descriptor case runs on windows-latest in mcp-config-native.yml.
 it.runIf(nativeMetadata && process.platform === 'win32')('preserves a protected Windows DACL and owner through replacement', () => {
   const systemPowerShell = win32.join(process.env.SystemRoot!, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   const powershell = (script: string) => execFileSync(systemPowerShell, ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference='Stop'; $env:PSModulePath = $PSHOME + '\\Modules'; ${script}`], {

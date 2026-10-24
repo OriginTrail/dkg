@@ -8,9 +8,8 @@
  * current answer for each shape, driven through the real publisher at each persisted status, so the decision
  * can be extracted into a pure function without anyone having to re-derive what the old nested branches did.
  *
- * Quirks pinned as CURRENT behaviour, not endorsed: the legacy claimed/validated path reads
- * `String(error)` (a non-Error throw with a `.message` classifies as '[object Object]'); a hostile throw
- * rejects with nothing recorded; an invalid (code, origin) pair rejects with nothing recorded.
+ * GH#3419: unknown pre-validation throws no longer establish content failure or retry safety.
+ * Invalid (code, origin) pairs still reject without discarding persisted evidence.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { RpcEndpointsExhaustedError, hostOnlyRpcText } from '@origintrail-official/dkg-chain';
@@ -23,11 +22,15 @@ import {
   type ExecutionFailureEvidence,
   type LiftJobFailureCode,
   type LiftJobState,
+  type TripleStoreAsyncLiftPublisher,
 } from '../src/index.js';
 import { isKnowledgeAssetPublishPreconditionFailure, mapExecutionFailure } from '../src/async-lift-execution-failure.js';
+import { CONTROL_STATUS } from '../src/async-lift-control-plane.js';
+import { isHeldForChainProof } from '../src/async-lift-retry-disposition.js';
 import {
   TX_HASH,
   corruptHeadError,
+  confirmedPublishResult,
   createAsyncLift2270Harness,
   expectFailed,
 } from './_helpers/async-lift-2270-harness.js';
@@ -87,6 +90,11 @@ const withCode = (message: string, fields: Record<string, unknown>) => Object.as
 const authorityUnavailable = (reason?: string) => withCode('registered-CG authority gate refused', {
   code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE', ...(reason === undefined ? {} : { reason }),
 });
+// Proposed publisher-local contract; no production export is needed to author the regression.
+const catalogProofUnavailable = (site = 'finalized-proof', cause: unknown = exhaustedWithoutKeywords()) =>
+  withCode('Catalog floor verification could not complete', {
+    code: 'CATALOG_FLOOR_AUTHORITY_UNAVAILABLE', site, cause,
+  });
 const txHashBearingKeywordless = () => new RpcEndpointsExhaustedError(
   'publish transaction preparation failed on all configured RPC endpoints: 429 Too Many Requests',
   { rpcUrls: [], txHash: TX_HASH },
@@ -94,7 +102,7 @@ const txHashBearingKeywordless = () => new RpcEndpointsExhaustedError(
 const nullPrototypeThrow = () => Object.create(null);
 
 const to = (origin: LiftJobState, code: LiftJobFailureCode, extra: { timeout?: true; message?: string } = {}) =>
-  ({ origin, code, ...extra }) as const;
+  ({ origin, code, ...extra, ...(code === 'validation_unknown' ? { message: 'Publication validation failed for an unknown reason' } : {}) }) as const;
 const preSend = to('validated', 'workspace_unavailable');
 const row = (
   name: string,
@@ -110,23 +118,23 @@ const MAPPING_ROWS: readonly MappingRow[] = [
   row('A typed transient failure with no keyword is recorded retryable (the C conjunct)', 'claimed', 'claimed',
     keyedExhaustedWithoutKeywords, to('claimed', 'workspace_unavailable')),
   row('a transient failure naming a transaction is NOT typed-transient: keyword-less -> terminal', 'claimed', 'claimed',
-    txHashBearingKeywordless, to('claimed', 'canonicalization_failed')),
+    txHashBearingKeywordless, to('claimed', 'validation_unknown')),
   row('a transient failure naming a transaction still matches the keyword chain', 'claimed', 'claimed',
-    () => broadcastExhausted(TX_HASH), to('claimed', 'workspace_unavailable')),
+    () => broadcastExhausted(TX_HASH), to('claimed', 'validation_unknown')),
   row('the ACK-precondition wrapper is unwrapped exactly one level', 'claimed', 'claimed',
     () => precondition(exhaustedWithoutKeywords()), to('claimed', 'workspace_unavailable')),
   row('two wrappers are not unwrapped', 'claimed', 'claimed',
-    () => precondition(precondition(exhaustedWithoutKeywords())), to('claimed', 'canonicalization_failed')),
+    () => precondition(precondition(exhaustedWithoutKeywords())), to('claimed', 'validation_unknown')),
   row('only the ACK-precondition wrapper is unwrapped, not an arbitrary cause', 'claimed', 'claimed',
-    () => new Error('wrapped', { cause: exhaustedWithoutKeywords() }), to('claimed', 'canonicalization_failed')),
+    () => new Error('wrapped', { cause: exhaustedWithoutKeywords() }), to('claimed', 'validation_unknown')),
   row('a claimed origin on a validated record is not the C lane (persisted status decides)', 'validated', 'claimed',
-    exhaustedWithoutKeywords, to('claimed', 'canonicalization_failed')),
+    exhaustedWithoutKeywords, to('claimed', 'validation_unknown')),
   row('at claimed a typed store rejection is classified by its words (no proof exists yet)', 'claimed', 'claimed',
     () => schedulerBusy(), to('claimed', 'workspace_unavailable')),
   row('at claimed a typed not_started with no keyword is classified by its words only', 'claimed', 'claimed',
-    typedStoreNotStarted, to('claimed', 'canonicalization_failed')),
+    typedStoreNotStarted, to('claimed', 'workspace_unavailable')),
 
-  // --- B. the keyword chain (legacy claimed/validated path): one row per keyword, then precedence ------
+  // --- B. misleading prose cannot establish a cause or retry permission (GH#3419) ------
   ...([
     ['timeout', 'request timeout while reading', 'workspace_unavailable'],
     ['timed out', 'the read timed out', 'workspace_unavailable'],
@@ -136,16 +144,22 @@ const MAPPING_ROWS: readonly MappingRow[] = [
     ['authority', 'authority denied', 'authority_forbidden'],
     ['workspace', 'workspace missing', 'workspace_slice_not_found'],
     ['root', 'root differs', 'workspace_slice_not_found'],
-    ['none', 'something else entirely', 'canonicalization_failed'],
+    ['none', 'something else entirely', 'validation_unknown'],
     ['timeout before authority', 'authority check timeout', 'workspace_unavailable'],
     ['authority before workspace', 'workspace authority', 'authority_forbidden'],
     ['store before root', 'store root', 'workspace_unavailable'],
-  ] as const).map(([label, message, code]) =>
-    row(`keyword chain: ${label}`, 'claimed', 'claimed', () => new Error(message), to('claimed', code))),
+  ] as const).map(([label, message]) =>
+    row(`untyped prose: ${label}`, 'claimed', 'claimed', () => new Error(message), to('claimed', 'validation_unknown'))),
 
   // --- C. structured preconditions decide the code, at either pre-send origin ------------------------
   row('structured: stale publish intent', 'validated', 'validated',
     () => withCode('intent is stale', { code: 'PUBLISH_INTENT_STALE' }), to('validated', 'publish_intent_stale')),
+  // GH#3049 — an update refused at SWM staging by the legacy SWM retirement fence: raised before anything is
+  // signed, and the fence ends on its own, so it is the retryable pre-send code (the agent pins the literal).
+  row('structured: legacy SWM retirement fence at update staging', 'validated', 'validated',
+    () => withCode('RFC-64 legacy SWM boundary retirement is in progress; retry promotion',
+      { code: 'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS' }),
+    to('validated', 'workspace_unavailable')),
   row('structured: fee cap below base fee', 'validated', 'validated',
     () => withCode('fee cap too low', { code: 'FEE_CAP_BELOW_BASE_FEE' }), to('validated', 'fee_cap_below_base_fee')),
   row('structured: a fee-cap failure from claimed is an invalid (code, origin) pair - rejects, nothing recorded', 'claimed', 'claimed',
@@ -213,7 +227,7 @@ const MAPPING_ROWS: readonly MappingRow[] = [
   row('two ACK-precondition wrappers do not qualify', 'validated', 'broadcast',
     () => precondition(precondition(exhaustedWithoutKeywords())), to('broadcast', 'rpc_unavailable'), PROVEN),
   row('a typed transient failure without the proof on a validated origin stays on the keyword chain', 'validated', 'validated',
-    keyedExhaustedWithoutKeywords, to('validated', 'canonicalization_failed')),
+    keyedExhaustedWithoutKeywords, to('validated', 'validation_unknown')),
 
   // --- F. the publish mapper (any origin that is not claimed/validated) --------------------------------
   row('a timeout-worded failure carries the placeholder timeout metadata', 'broadcast', 'broadcast',
@@ -230,18 +244,18 @@ const MAPPING_ROWS: readonly MappingRow[] = [
 
   // --- G. the message: the legacy path reads the thrown value verbatim, host-reduced -------------------
   row('a keyed RPC URL on the keyword chain is persisted as its host', 'validated', 'validated',
-    () => new Error(`Store query failed while reading ${KEYED_RPC_URL}: busy`), to('validated', 'workspace_unavailable')),
+    () => new Error(`Store query failed while reading ${KEYED_RPC_URL}: busy`), to('validated', 'validation_unknown')),
   row('a keyed RPC URL on the publish mapper is persisted as its host', 'broadcast', 'broadcast',
     () => new Error(`execution reverted (info={ "requestUrl": "${KEYED_RPC_URL}" })`), to('broadcast', 'tx_reverted')),
   row('a keyed RPC URL on the typed pre-send lane is persisted as its host', 'validated', 'broadcast',
     keyedExhaustedWithoutKeywords, preSend, PROVEN),
   row('a string throw is its own message', 'claimed', 'claimed',
-    () => 'timeout talking to the store', to('claimed', 'workspace_unavailable', { message: 'timeout talking to the store' })),
+    () => 'timeout talking to the store', to('claimed', 'validation_unknown')),
   row('a plain object with a .message classifies as [object Object] on the legacy path', 'claimed', 'claimed',
-    () => ({ message: 'timeout talking to the store' }), to('claimed', 'canonicalization_failed', { message: '[object Object]' })),
-  row('a null throw', 'claimed', 'claimed', () => null, to('claimed', 'canonicalization_failed', { message: 'null' })),
+    () => ({ message: 'timeout talking to the store' }), to('claimed', 'validation_unknown', { message: '[object Object]' })),
+  row('a null throw', 'claimed', 'claimed', () => null, to('claimed', 'validation_unknown', { message: 'null' })),
   row('a null-prototype throw rejects on the legacy path, nothing recorded', 'claimed', 'claimed',
-    nullPrototypeThrow, { rejects: /Cannot convert object to primitive value/ }),
+    nullPrototypeThrow, to('claimed', 'validation_unknown')),
   row('a hostile cause accessor does not escape the typed check', 'validated', 'broadcast',
     () => Object.defineProperty(
       Object.assign(new Error('hostile wrapper'), { code: 'CHAIN_WRITE_AHEAD_HOOK_FAILED' }),
@@ -252,8 +266,8 @@ const MAPPING_ROWS: readonly MappingRow[] = [
   // `String(error)`, the publish mapper prefers a string `.message`. Pinned, not endorsed.
   row('a non-Error throw with a .message: the publish mapper classifies on .message and persists it', 'broadcast', 'broadcast',
     () => ({ message: 'insufficient funds for gas' }), to('broadcast', 'insufficient_funds', { message: 'insufficient funds for gas' })),
-  row('a non-Error throw whose .message names a timeout rejects: the legacy text builds no timeout metadata', 'broadcast', 'broadcast',
-    () => ({ message: 'RPC submit timed out' }), { rejects: /Timeout metadata is required/ }),
+  row('a serialized timeout uses the publish mapper facts for valid timeout metadata', 'broadcast', 'broadcast',
+    () => ({ message: 'RPC submit timed out' }), to('broadcast', 'tx_submit_timeout', { timeout: true, message: 'RPC submit timed out' })),
 ];
 
 describe('GH#2945 recordExecutionFailure: the failure decision, characterized through the real publisher', () => {
@@ -296,7 +310,7 @@ describe('GH#2945 recordExecutionFailure: the failure decision, characterized th
     expect(failed.failure.resolution).toBe(policy.resolution);
     expect(failed.failure.errorPayloadRef).toBe(`urn:dkg:publisher:error:${jobId}`);
     expect(failed.failure.message).toBe(
-      r.expected.message ?? hostOnlyRpcText(error instanceof Error ? error.message : String(error)),
+      r.expected.message ?? hostOnlyRpcText(error instanceof Error ? error.message : 'Unknown publication execution failure'),
     );
     if (r.expected.timeout) {
       expect(failed.failure.timeout).toEqual({
@@ -317,9 +331,177 @@ describe('GH#2945 recordExecutionFailure: the failure decision, characterized th
   it('records nothing when the failure decision rejects: the job keeps its persisted status', async () => {
     const { publisher, jobId, session } = await sessionAt('validated');
 
-    await expect(session.recordExecutionFailure('claimed', nullPrototypeThrow())).rejects.toThrow();
+    await expect(session.recordExecutionFailure('claimed', withCode('cap', { code: 'FEE_CAP_BELOW_BASE_FEE' }))).rejects.toThrow();
 
     expect((await publisher.getStatus(jobId))?.status).toBe('validated');
+  });
+});
+
+describe('catalog proof availability at the real queued execution boundary', () => {
+  function expectCatalogFailure(job: Awaited<ReturnType<TripleStoreAsyncLiftPublisher['processNext']>>) {
+    if (job?.status !== 'failed') throw new Error(`expected failed, got ${job?.status ?? 'null'}`);
+    return job;
+  }
+  async function expectHeldWalletExcludesEligibleSibling(publisher: TripleStoreAsyncLiftPublisher) {
+    const siblingId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      contextGraphId: 'catalog-guard-independent-sibling',
+      intentKey: `sha256:${'cd'.repeat(32)}`,
+    }));
+    expect(await publisher.getStatus(siblingId)).toMatchObject({ status: 'accepted' });
+    // Same queue and eligible job: only the proof-bound wallet must be excluded.
+    expect(await publisher.claimNext('wallet-1')).toBeNull();
+    expect(await publisher.claimNext('wallet-2')).toMatchObject({
+      jobId: siblingId, status: 'claimed', claim: { walletId: 'wallet-2' },
+    });
+  }
+
+  it('retries a typed unavailable proof only before dispatch, retaining the same job', async () => {
+    const h = createAsyncLift2270Harness();
+    const { stage } = createStoreRejectionFixtures(h);
+    const attempts = { n: 0 };
+    let writeAhead = 0;
+    let sends = 0;
+    const publisher = h.createPublisher({
+      ...RETRY_LANE,
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          attempts.n += 1;
+          if (attempts.n === 1) throw catalogProofUnavailable();
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH, nonce: 7, operationKind: 'create' });
+          writeAhead += 1;
+          sends += 1; // Deterministic adapter send seam; no network or signing.
+          const confirmed = confirmedPublishResult();
+          return { ...confirmed, onChainResult: { ...confirmed.onChainResult, txHash: TX_HASH } };
+        },
+      },
+    });
+    await stage();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const failed = expectCatalogFailure(await publisher.processNext('wallet-1'));
+    expect(failed.failure).toMatchObject({ code: 'authority_unavailable', failedFromState: 'validated' });
+    expect(failed.timestamps.nextRetryAt).toEqual(expect.any(Number));
+    expect(failed.broadcast).toBeUndefined();
+    expect({ writeAhead, sends }).toEqual({ writeAhead: 0, sends: 0 });
+    h.advance(10_000);
+    expect(await publisher.processNext('wallet-1')).toMatchObject({ jobId, status: 'finalized' });
+    expect(attempts.n).toBe(2);
+    expect({ writeAhead, sends }).toEqual({ writeAhead: 1, sends: 1 });
+  });
+
+  it.each(['broadcast', 'included'] as const)(
+    'keeps real %s transaction evidence despite a later typed unavailable proof', async (state) => {
+      const h = createAsyncLift2270Harness();
+      const { stage } = createStoreRejectionFixtures(h);
+      let attempts = 0;
+      let include: (() => Promise<void>) | undefined;
+      const publisher = h.createPublisher({
+        ...RETRY_LANE,
+        knowledgeAssetVmPublishHandler: {
+          execute: async (input) => {
+            attempts += 1;
+            await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH, nonce: 7, operationKind: 'create' });
+            await include?.();
+            throw catalogProofUnavailable();
+          },
+        },
+      });
+      await stage();
+      const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+      if (state === 'included') include = () => publisher.update(jobId, 'included', {
+        broadcast: { txHash: TX_HASH, walletId: 'wallet-1' },
+        inclusion: { txHash: TX_HASH, blockNumber: 42 },
+      });
+      const processed = await publisher.processNext('wallet-1');
+      expect(processed).toMatchObject({ jobId, status: state, broadcast: { txHash: TX_HASH, walletId: 'wallet-1' } });
+      if (state === 'included') expect(processed).toHaveProperty('inclusion.txHash', TX_HASH);
+      expect(processed?.timestamps.nextRetryAt).toBeUndefined();
+      expect(await publisher.recover()).toBe(0);
+      h.advance(10_000);
+      expect(await publisher.processNext('wallet-2')).toBeNull();
+      await expectHeldWalletExcludesEligibleSibling(publisher);
+      expect(await publisher.getStatus(jobId)).toMatchObject({ status: state, broadcast: { txHash: TX_HASH, walletId: 'wallet-1' } });
+      expect(attempts).toBe(1);
+    },
+  );
+
+  it.each([
+    ['unknown site', () => catalogProofUnavailable('unregistered-proof-site')],
+    ['permanent cause', () => catalogProofUnavailable('finalized-proof', new Error('unsupported implementation'))],
+    ['missing site', () => withCode('Catalog proof refused', { code: 'CATALOG_FLOOR_AUTHORITY_UNAVAILABLE', cause: exhaustedWithoutKeywords() })],
+    ['missing code', () => withCode('Catalog proof refused', { site: 'finalized-proof', cause: exhaustedWithoutKeywords() })],
+    ['missing cause', () => withCode('Catalog proof refused', { code: 'CATALOG_FLOOR_AUTHORITY_UNAVAILABLE', site: 'finalized-proof' })],
+    ['transaction-bearing cause', () => catalogProofUnavailable('finalized-proof', txHashBearingKeywordless())],
+    ['rewrapped cause', () => catalogProofUnavailable('finalized-proof', new Error('wrapped', { cause: exhaustedWithoutKeywords() }))],
+    ...(['txHash', 'transactionHash', 'receipt'] as const).map((key) => [
+      `outer ${key} evidence`, () => Object.assign(catalogProofUnavailable(), { [key]: TX_HASH }),
+    ] as const),
+    ...(['code', 'site', 'cause', 'txHash', 'transactionHash', 'receipt'] as const).map((key) => [
+      `throwing ${key} accessor`,
+      () => Object.defineProperty(catalogProofUnavailable(), key, { get() { throw new Error('hostile accessor'); } }),
+    ] as const),
+  ] as const)('does not automatically retry a marker with %s', async (_label, error) => {
+    const h = createAsyncLift2270Harness();
+    const { stage, failsOnceThenPublishes } = createStoreRejectionFixtures(h);
+    const attempts = { n: 0 };
+    const publisher = h.createPublisher({
+      ...RETRY_LANE,
+      knowledgeAssetVmPublishHandler: failsOnceThenPublishes(error, attempts),
+    });
+    await stage();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const failed = expectCatalogFailure(await publisher.processNext('wallet-1'));
+    expect(failed.timestamps.nextRetryAt).toBeUndefined();
+    expect(failed.failure.code).not.toBe('authority_unavailable');
+    h.advance(10_000);
+    expect(await publisher.processNext('wallet-2')).toBeNull();
+    expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+    expect(attempts.n).toBe(1);
+  });
+
+  it('does not let a typed unavailable proof bypass a failed write-ahead rollback', async () => {
+    const h = createAsyncLift2270Harness();
+    const { stage } = createStoreRejectionFixtures(h);
+    const write = h.store.replaceSubjectAndInsert.bind(h.store);
+    let armed = false;
+    let rejectedRollback = false;
+    let attempts = 0;
+    h.store.flush = async () => { armed = true; throw schedulerBusy(); };
+    h.store.replaceSubjectAndInsert = async (...args) => {
+      if (armed && !rejectedRollback) {
+        expect(args[2].find((quad) => quad.predicate === CONTROL_STATUS)?.object).toBe('"validated"');
+        rejectedRollback = true;
+        throw schedulerBusy();
+      }
+      return await write(...args);
+    };
+    const publisher = h.createPublisher({
+      ...RETRY_LANE,
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          attempts += 1;
+          try {
+            await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH, nonce: 7, operationKind: 'create' });
+          } catch {
+            // Even a recognized error cannot override the remaining canonical tx carrier.
+            throw catalogProofUnavailable();
+          }
+          throw new Error('unexpected successful write-ahead');
+        },
+      },
+    });
+    await stage();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const failed = expectCatalogFailure(await publisher.processNext('wallet-1'));
+    expect(rejectedRollback).toBe(true);
+    expect(failed.failure.failedFromState).toBe('broadcast');
+    expect(failed.broadcast?.txHash).toBe(TX_HASH);
+    expect(isHeldForChainProof(failed)).toBe(true);
+    expect(failed.timestamps.nextRetryAt).toBeUndefined();
+    h.advance(10_000);
+    expect(await publisher.processNext('wallet-2')).toBeNull();
+    await expectHeldWalletExcludesEligibleSibling(publisher);
+    expect(await publisher.getStatus(jobId)).toMatchObject({ status: 'failed', broadcast: { txHash: TX_HASH, walletId: 'wallet-1' } });
+    expect(attempts).toBe(1);
   });
 });
 
@@ -339,11 +521,21 @@ describe('GH#2945 isKnowledgeAssetPublishPreconditionFailure: the pre-send routi
 
   it('routes a structured precondition code with none of those words', () => {
     expect(isKnowledgeAssetPublishPreconditionFailure(withCode('x', { code: 'PUBLISH_INTENT_STALE' }))).toBe(true);
+    expect(isKnowledgeAssetPublishPreconditionFailure(
+      withCode('x', { code: 'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS' }),
+    )).toBe(true);
   });
 
-  it('reads a string throw and a non-Error object with a .message, in any case', () => {
+  it('does not route a similar-looking code or the same words without the code', () => {
+    expect(isKnowledgeAssetPublishPreconditionFailure(withCode('x', { code: 'RFC64_LEGACY_SWM_BOUNDARY' }))).toBe(false);
+    expect(isKnowledgeAssetPublishPreconditionFailure(
+      new Error('RFC-64 legacy SWM boundary retirement is in progress; retry promotion'),
+    )).toBe(false);
+  });
+
+  it('reads strings without coercing unknown thrown objects', () => {
     expect(isKnowledgeAssetPublishPreconditionFailure('The assertion IS NOT FINALIZED')).toBe(true);
-    expect(isKnowledgeAssetPublishPreconditionFailure({ message: 'No quads in shared memory' })).toBe(true);
+    expect(isKnowledgeAssetPublishPreconditionFailure({ message: 'No quads in shared memory' })).toBe(false);
     expect(isKnowledgeAssetPublishPreconditionFailure('transport exploded')).toBe(false);
   });
 
@@ -352,14 +544,14 @@ describe('GH#2945 isKnowledgeAssetPublishPreconditionFailure: the pre-send routi
     expect(isKnowledgeAssetPublishPreconditionFailure(null)).toBe(false);
   });
 
-  it('rejects on a null-prototype throw, as the legacy text read does (pinned, not hardened here)', () => {
-    expect(() => isKnowledgeAssetPublishPreconditionFailure(nullPrototypeThrow())).toThrow(/Cannot convert object to primitive value/);
+  it('leaves a null-prototype throw unknown without invoking coercion', () => {
+    expect(isKnowledgeAssetPublishPreconditionFailure(nullPrototypeThrow())).toBe(false);
   });
 });
 
 describe('GH#2945 mapExecutionFailure: the same decision as a pure function', () => {
   // The legacy text the mapper tests for timeout wording (NOT the publish mapper's own extraction).
-  const legacyText = (error: unknown) => (error instanceof Error ? error.message : String(error));
+  const legacyText = (error: unknown) => (error instanceof Error ? error.message : 'Unknown publication execution failure');
   const namesTimeout = (text: string) => /timeout|timed out/i.test(text);
 
   function countingClock() {
@@ -403,7 +595,7 @@ describe('GH#2945 mapExecutionFailure: the same decision as a pure function', ()
     // The clock is read once, and only when a non-pre-send origin's legacy text names a timeout - even when
     // the publish mapper then drops the metadata (a permanent author refusal beats the timeout wording).
     const preSendOrigin = failure.failedFromState === 'claimed' || failure.failedFromState === 'validated';
-    expect(clock.calls).toBe(!preSendOrigin && namesTimeout(legacyText(error)) ? 1 : 0);
+    expect(clock.calls).toBe(!preSendOrigin && (r.expected.timeout || namesTimeout(legacyText(error))) ? 1 : 0);
   });
 
   it('reads the clock exactly once for a timeout wording whose metadata the publish mapper drops', () => {
@@ -431,7 +623,7 @@ describe('GH#2945 mapExecutionFailure: the same decision as a pure function', ()
       now: countingClock().now,
     });
 
-    expect(failure).toMatchObject({ failedFromState: 'validated', code: 'canonicalization_failed' });
+    expect(failure).toMatchObject({ failedFromState: 'validated', code: 'validation_unknown' });
   });
 
   describe('origins production never reports (pinned as the current collapse)', () => {

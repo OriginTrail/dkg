@@ -9,6 +9,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../src/api-client.js';
 import { registerLifecycleCommands } from '../src/commands/lifecycle.js';
+import * as manifest from '../src/daemon/manifest.js';
 import { handleStatusRoutes } from '../src/daemon/routes/status.js';
 import { invalidateExternalStoreQuadsCache } from '../src/daemon/store-quads-cache.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
@@ -87,11 +88,17 @@ async function startStatusServer(
   // beforeReply is awaited inside the route after the store fields are read and
   // the reachability check has started, as the real status blocks await I/O: a
   // count can settle meanwhile, and a test can see every request reach it.
-  // agentOverrides replaces agent members a test needs to stub.
+  // agentOverrides replaces agent members a test needs to stub; authentication
+  // is the caller every request is from (anonymous unless a test says otherwise).
   {
     beforeReply,
     agentOverrides = {},
-  }: { beforeReply?: () => Promise<void>; agentOverrides?: Record<string, unknown> } = {},
+    authentication = requestAuthentication({ kind: 'anonymous' }),
+  }: {
+    beforeReply?: () => Promise<void>;
+    agentOverrides?: Record<string, unknown>;
+    authentication?: ReturnType<typeof requestAuthentication>;
+  } = {},
 ): Promise<{
   server: Server;
   baseUrl: string;
@@ -139,7 +146,7 @@ async function startStatusServer(
       nodeVersion: '0.0.0-test',
       nodeCommit: '',
       admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
-      authentication: requestAuthentication({ kind: 'anonymous' }),
+      authentication,
     } as unknown as RequestContext);
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -187,6 +194,9 @@ describe('/api/status external-store quad count', () => {
   afterEach(cleanUpStoreQuads);
 
   it('reports the full source commit for exact-build devnet release checks', async () => {
+    vi.spyOn(manifest, 'loadBuildInfo').mockReturnValue({
+      commit: 'uncommitted', commitShort: '00000000', buildTime: null, distTag: 'monorepo', ciRun: null,
+    });
     const { server, baseUrl } = await startStatusServer(async () => COUNT_123, LOCAL_STORE);
     try {
       const expected = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim();
@@ -196,6 +206,20 @@ describe('/api/status external-store quad count', () => {
       await closeServer(server);
     }
   });
+
+  it.each(['a'.repeat(40), `${'a'.repeat(40)}-dirty`])(
+    'reports the immutable compiled identity %s even if the checkout now points at B', async commit => {
+      vi.spyOn(manifest, 'loadBuildInfo').mockReturnValue({
+        commit, commitShort: commit.slice(0, 8), buildTime: '2026-10-10T00:00:00Z', distTag: 'monorepo', ciRun: null,
+      });
+      const liveHead = vi.spyOn(manifest, 'getCurrentCommitFull').mockReturnValue('b'.repeat(40));
+      const { server, baseUrl } = await startStatusServer(async () => COUNT_123, LOCAL_STORE);
+      try {
+        expect((await fetchStatus(baseUrl)).body.commit).toBe(commit);
+        expect(liveHead).not.toHaveBeenCalled();
+      } finally { await closeServer(server); }
+    },
+  );
 
   it.each([
     ['an external SPARQL store', SPARQL_HTTP_STORE, 'http://127.0.0.1:9/query'],
@@ -736,6 +760,21 @@ describe('dkg status against the status route', () => {
     }
   });
 
+  it("prints the daemon's Node.js release for a node operator only", async () => {
+    const operator = await startStatusServer(async () => COUNT_66, LOCAL_STORE, {
+      authentication: requestAuthentication({ kind: 'nodeOperator' }),
+    });
+    const anonymous = await startStatusServer(async () => COUNT_66, LOCAL_STORE);
+
+    try {
+      expect(await runStatusCommand(operator.baseUrl)).toContain(`  Runtime:   Node.js ${process.version}`);
+      expect(await runStatusCommand(anonymous.baseUrl)).not.toContain('Runtime:');
+    } finally {
+      await closeServer(operator.server);
+      await closeServer(anonymous.server);
+    }
+  });
+
   it('reports subscriptions known only by their name hash, as a count, and prints it', async () => {
     const nameHash = `0x${'6d'.repeat(32)}`;
     const { server, baseUrl } = await startStatusServer(async () => COUNT_66, LOCAL_STORE, { agentOverrides: {
@@ -1092,6 +1131,31 @@ describe('/api/status store reachability check', () => {
     } finally {
       answer.resolve(ASK_TRUE);
       await closeServer(server);
+    }
+  });
+});
+
+describe('/api/status runtime', () => {
+  afterEach(cleanUpStoreQuads);
+
+  it('reports the Node.js release of the daemon to a caller that may administer the node, and null to others', async () => {
+    const callers = [
+      ['nodeOperator', requestAuthentication({ kind: 'nodeOperator' }), { nodeVersion: process.version }],
+      ['auth disabled', requestAuthentication({ kind: 'anonymous', mode: 'disabled' }), { nodeVersion: process.version }],
+      ['anonymous', requestAuthentication({ kind: 'anonymous' }), null],
+      ['agent', requestAuthentication({ kind: 'agent', agentAddress: '0x00000000000000000000000000000000000000a1' }), null],
+    ] as const;
+
+    for (const [caller, authentication, runtime] of callers) {
+      const { server, baseUrl } = await startStatusServer(async () => COUNT_66, LOCAL_STORE, { authentication });
+      try {
+        const response = await fetch(`${baseUrl}/api/status`);
+        const body = await response.json() as { runtime?: unknown };
+        expect(response.status, caller).toBe(200);
+        expect(body.runtime, caller).toEqual(runtime);
+      } finally {
+        await closeServer(server);
+      }
     }
   });
 });

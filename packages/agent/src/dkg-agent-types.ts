@@ -1,3 +1,5 @@
+import type { CoreChainCacheNetwork } from './core-chain-cache-config.js';
+import type { PreparedContentCacheConfig } from './sync/responder/prepared-content-cache.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -51,7 +53,6 @@ import type {
   UnsignedMemberRosterEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import type {
-  PublisherAssertionPromoteOptions,
   PublicationPricingPolicy,
   PhaseCallback,
   SharedMemoryPublicSnapshotStorageConfig,
@@ -67,8 +68,10 @@ import type {
   ContextGraphAuthorityHistoryStore,
   ContextGraphAuthorityIndexStore,
   ContextGraphRegistryScanCursorStore,
+  ExternalAuthorSigners,
   RpcRequestAdmission,
 } from '@origintrail-official/dkg-chain';
+import type { AgentChainSignerSource } from './agent-chain-signer-source.js';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
 import type { CclFactResolutionMode } from './ccl-fact-resolution.js';
@@ -90,24 +93,14 @@ import type {
   SyncResponderSnapshotLimitsConfig,
 } from './sync/policy.js';
 import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
-import type { FinalizationRecoveryStore } from './finalization-recovery-store.js';
+import type { FinalizationRecoveryStoreFactory } from './finalization-recovery-store.js';
 import type { AuthorityIndexConfig } from './authority-index-config.js';
 import type { ContextGraphStorageDiscoveryStore } from './context-graph-storage-discovery.js';
 
 // ── File-local structural types ─────────────────────────────────────
 
-/** Public options for the agent assertion-promote facade. */
-export interface AssertionPromoteOptions extends Pick<
-  PublisherAssertionPromoteOptions,
-  'entities' | 'subGraphName' | 'accessPolicy' | 'allowedPeers'
-> {
-  agentAddress?: string;
-  authorAgentAddress?: string;
-  preSignedAuthorAttestation?: PreSignedAuthorAttestation;
-  awaitCuratorAck?: boolean;
-  curatorAckTimeoutMs?: number;
-  skipSeal?: boolean;
-}
+/** Public options distinguish ordinary promotion from immutable bound replay. */
+export type { AssertionPromoteOptions } from './internal/promote/assertion-promote-input.js';
 
 /**
  * Pre-signed AuthorAttestation payload supplied at finalize-time by
@@ -143,12 +136,10 @@ export type LocalSwmSenderKeySendState = {
   senderAgentAddress: string;
   epochId: string;
   membershipHash: string;
-  /**
-   * Exact transport-route snapshot seeded for this epoch. Optional only for
-   * sender state persisted before route-aware epoch rotation was introduced;
-   * such legacy state rotates once before it can be reused.
-   */
+  /** Exact transport-route snapshot seeded for this epoch. State saved before route-aware rotation has none and rotates once. */
   recipientRouteHash?: string;
+  /** Set on an epoch whose `chainKey` is always the key of `nextMessageIndex`. State saved without it rotates once. */
+  chainKeyMatchesIndex?: true;
   chainKey: Uint8Array;
   nextMessageIndex: number;
   senderSigningSecretKey: Uint8Array;
@@ -486,6 +477,8 @@ export interface PeerConnectionSnapshot {
    * limited connections not being reused by `dialProtocol`.
    */
   limited: boolean;
+  /** What is left on a relayed connection as libp2p reports it (bytes as a decimal string); null on a direct one. */
+  allowance: { bytes: string | null; seconds: number | null } | null;
   /** Active stream count (multiplexer-level). */
   streams: number;
   /** UNIX-ms when the connection was opened, or `null` if libp2p didn't expose it. */
@@ -837,11 +830,13 @@ export interface DurableContextGraphSubscriptionBinding {
   onChainHash?: string;
 }
 
+/** @deprecated Compatibility shape for retired negative-cache store adapters. */
 export interface VmReconcilePeerTopologyPeer {
   peerId: string;
   core: boolean;
 }
 
+/** @deprecated Compatibility shape; VM recovery no longer reads a miss cache. */
 export type VmReconcilePeerTopology =
   | { kind: 'unreadable' }
   | {
@@ -852,7 +847,7 @@ export type VmReconcilePeerTopology =
     peers: VmReconcilePeerTopologyPeer[];
   };
 
-/** Historical proof attached to a cached miss, separate from live topology. */
+/** @deprecated Historical shape for retired negative-cache store adapters. */
 export interface VmReconcilePeerTopologyEvidence {
   topology: VmReconcilePeerTopology;
   cleanMissPeerIds: string[];
@@ -863,10 +858,27 @@ export interface ContextGraphSubscriptionStore {
   load?(contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null>;
   save(record: ContextGraphSubscriptionRecord): Promise<void>;
   delete(contextGraphId: string): Promise<void>;
+  /** @deprecated Compatibility only; VM recovery never calls this hook. */
   loadVmReconcileNegative?(cacheKey: string): Promise<VmReconcileNegativeRecord | null>;
+  /** @deprecated Compatibility only; VM recovery never calls this hook. */
   saveVmReconcileNegative?(record: VmReconcileNegativeRecord): Promise<void>;
+  /** @deprecated Compatibility only; VM recovery never calls this hook. */
   deleteVmReconcileNegative?(cacheKey: string): Promise<void>;
+  /** @deprecated Compatibility only; VM recovery never calls this hook. */
   deleteVmReconcileNegativesForContextGraph?(contextGraphId: string): Promise<void>;
+}
+
+/** @deprecated Retained for custom subscription stores; the runtime no longer consumes these records. */
+export interface VmReconcileNegativeRecord {
+  cacheKey: string;
+  localCgId: string;
+  failures: number;
+  nextRetryAt: number;
+  swmGen: string;
+  candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
+  peerTopologyKey: string;
+  peerTopology?: VmReconcilePeerTopology;
+  cleanMissPeerIds?: string[];
 }
 
 /**
@@ -901,26 +913,6 @@ export interface SelectedVmReconcileCursorRecord {
   watermark: number;
 }
 
-/** Restart-durable, generation-gated record of one authoritative no-match scan. */
-export interface VmReconcileNegativeRecord {
-  cacheKey: string;
-  localCgId: string;
-  failures: number;
-  nextRetryAt: number;
-  swmGen: string;
-  candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
-  /**
-   * Legacy serialized topology contract. Required during the v1-to-v2
-   * migration so existing custom stores can keep reading and persisting the
-   * field they were compiled against.
-   */
-  peerTopologyKey: string;
-  /** Typed topology used by v2-aware stores; absent when loading a legacy row. */
-  peerTopology?: VmReconcilePeerTopology;
-  /** V2 clean-miss evidence; absent legacy records conservatively imply none. */
-  cleanMissPeerIds?: string[];
-}
-
 /** Fences for experimental transport reuse; never asset or absence authority. */
 export interface VmReconcilePublicCoreHolderCredit {
   readonly deploymentId: string;
@@ -953,6 +945,12 @@ export interface VmReconcileRotationRecord {
   collectionDeadlineAt: number;
   /** Cursor only; every physical attempt advances it, regardless of outcome. */
   lastAttemptedPeerId?: string;
+  /**
+   * Peers whose last attempt for this target ended without a verdict on their
+   * data and left the target its turn at them (a busy answer, a broken
+   * stream). Ordering only: never read as attempted, present or absent.
+   */
+  streamSetbackPeerIds?: Set<string>;
   failures: number;
   nextRetryAt: number;
 }
@@ -1027,8 +1025,8 @@ export interface ContextGraphWritePreflightProbe {
    * `storeErrorMessage`.
    */
   storeUnavailable?: boolean;
-  /** First store-read failure message, retained for 503 diagnostics. */
-  storeErrorMessage?: string;
+  storeErrorMessage?: string; // Existing 503 message; new attribution never copies it.
+  failureAttribution?: readonly import('./write-preflight-attribution.js').WritePreflightFailure[];
 }
 
 export type ContextGraphMemberPrincipalType = 'node' | 'agent' | 'identity';
@@ -1402,16 +1400,13 @@ export interface Rfc64CatalogBootstrapConfigV1 {
   readonly retryIntervalMs?: number;
 }
 
-/**
- * Creates the durable finalization inbox for one agent data directory.
- * The factory must return a fresh, open store. The agent owns the returned
- * store and closes it during normal startup rollback or shutdown.
- */
-export type FinalizationRecoveryStoreFactory = (
-  dataDir: string,
-) => Promise<FinalizationRecoveryStore>;
+export type { FinalizationRecoveryStoreFactory } from './finalization-recovery-store.js';
 
 export interface DKGAgentConfig {
+  /** Lower RPC usage by using the DKG Core chain cache. */
+  DKG_Core_chain_cache?: boolean;
+  /** Trusted local deployment configuration; never taken from a peer response. */
+  coreChainCacheNetworks?: readonly CoreChainCacheNetwork[];
   name: string;
   /**
    * Construction seam for the durable finalization inbox. Embedders and tests
@@ -1507,18 +1502,16 @@ export interface DKGAgentConfig {
    */
   networkRelays?: readonly string[];
   /**
-   * Relay multiaddrs declared by the OTHER DKG networks bundled with this
-   * build (the daemon derives them from network/*.json). With a network
-   * identity the node refuses to dial these peers, store their addresses or
-   * accept their connections. `relayPeers` win over this static list only: a
-   * `relayPeers` entry that fails the network-identity proof is refused like
-   * any other peer (`DKGNodeConfig.otherNetworkRelays`).
+   * Relay multiaddrs declared by the OTHER DKG networks bundled with this build
+   * (the daemon derives them from network/*.json). With a network identity the
+   * node refuses to dial these peers, store their addresses or accept their
+   * connections. `relayPeers` win over this static list only: a `relayPeers` entry
+   * that fails the network-identity proof is refused like any other peer (`DKGNodeConfig.otherNetworkRelays`).
    */
   otherNetworkRelays?: readonly string[];
   /**
-   * Transport-level network peer isolation (`DKGNodeConfig.networkPeerIsolation`).
-   * Default true; false is the operator kill switch, leaving other networks'
-   * peers to network admission alone.
+   * Transport-level network peer isolation (`DKGNodeConfig.networkPeerIsolation`). Default true; false is
+   * the operator kill switch, leaving other networks' peers to network admission alone.
    */
   networkPeerIsolation?: boolean;
   /** Legacy ACK candidate allowlist. When set, unlisted connected peers are not dialed for ACKs. */
@@ -1537,6 +1530,8 @@ export interface DKGAgentConfig {
   preferredACKPeerIds?: string[];
   /** Multiaddrs to announce to the network (for VPS/cloud nodes with a public IP not on the interface). */
   announceAddresses?: string[];
+  /** Announce public and relay addresses only, and take only a peer's public addresses for a direct route. Default false. */
+  publicAddressesOnly?: boolean;
   skills?: Array<{
     skillType: string;
     pricePerCall?: number;
@@ -1627,6 +1622,8 @@ export interface DKGAgentConfig {
   syncAdmission?: SyncAdmissionConfig;
   /** Daemon-local retained responder snapshot row/estimated-byte policy. */
   syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
+  /** Persistent verified public assertion bytes. Default on for cores with dataDir; never cached authority. */
+  preparedContentCache?: PreparedContentCacheConfig;
   /**
    * Local requester/responder priority by Context Graph ID. Higher runs first.
    * System Context Graphs default to a deprioritized priority so they run
@@ -1775,15 +1772,11 @@ export interface DKGAgentConfig {
    */
   publisherAddress?: string;
   /**
-   * EVM chain configuration. If omitted, publishing won't have on-chain finality.
-   * `adminPrivateKey` is the private key for the profile admin wallet used
-   * only for profile/key-management transactions. Nodes may omit it when they
-   * already have an on-chain identity and do not need profile creation/key-repair
-   * privileges; profile mutation paths will fail fast if admin authority is
-   * required but unavailable.
-   * `operationalKeys` are the private keys for operational wallets.
-   * The first key is the primary signer (identity, staking); all are used
-   * round-robin for publish TXs to avoid nonce collisions on parallel publishes.
+   * EVM chain configuration; without it publishing has no on-chain finality. `adminPrivateKey`:
+   * profile admin key, only for profile/key-management txs (optional; those paths fail fast without
+   * it). One source of operational wallets (`AgentChainSignerSource`): `operationalKeys` (first =
+   * primary signer; all pay publish txs round-robin), or `signers` (external only, not with a
+   * supplied `chainAdapter`), or neither. External author keys are `authorSigners`, beside it.
    */
   chainConfig?: {
     rpcUrl: string;
@@ -1796,7 +1789,6 @@ export interface DKGAgentConfig {
     /** Optional TRAC token contract override. When omitted, the adapter resolves Hub.Token. */
     tokenAddress?: string;
     adminPrivateKey?: string;
-    operationalKeys: string[];
     chainId?: string;
     /** Overall submitted-transaction receipt deadline (default 10 minutes). */
     receiptTimeoutMs?: number;
@@ -1849,12 +1841,14 @@ export interface DKGAgentConfig {
      */
     minPublisherNativeWei?: bigint;
     minPublisherTracWei?: bigint;
-  };
+  } & AgentChainSignerSource;
+  /** Author keys of an external signer, which never pay: agents registered by their addresses sign through it, with or without `chainConfig`. Its default author authors the node's own publishes only when its operational wallets sign externally too. */
+  authorSigners?: ExternalAuthorSigners;
   /** Cross-agent query access configuration. */
   queryAccess?: QueryAccessConfig;
   /** User-selected context graph IDs to sync automatically on peer connect. */
   syncContextGraphs?: string[];
-  /** TTL for shared memory data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */
+  /** TTL for shared memory data in milliseconds. Expired operations are periodically cleaned up. Default: 30 days (`DEFAULT_SWM_TTL_MS`). Set to 0 to disable. */
   sharedMemoryTtlMs?: number;
   /**
    * OT-RFC-38 LU-6 — settings for the core-side host-mode SWM store.
@@ -1866,7 +1860,7 @@ export interface DKGAgentConfig {
    *  - `unregistered`: TTL/byte-cap for CGs the core knows about but that aren't on-chain registered yet.
    *  - `registered`: TTL/byte-cap for on-chain registered CGs (typically larger).
    *  - `pruneIntervalMs`: how often the TTL/cap sweep runs.
-   *  - `reconcileIntervalMs`: how often the host-mode subscription reconciler ensures cores are subscribed to all known curated CGs.
+   *  - `reconcileIntervalMs`: how often the host-mode subscription reconciler sweeps known curated CGs. With `stripCiphertext` on (the default) it declines them, so no curated CG is hosted in host mode.
    *  - `reconcileBatchSize`: max known CGs reconciled per tick. Default 32.
    *  - `reconcileJitterRatio`: startup interval jitter ratio in [0, 1]. Default 0.15.
    */
@@ -1924,8 +1918,9 @@ export interface DKGAgentConfig {
   /**
    * Whether durable context-graph subscription rows become live subscriptions
    * during startup. Defaults to `true`. When `false`, startup still opens the
-   * same durable stores and leaves every row and RDF graph intact, but it does
-   * not restore those rows into gossip handlers or automatic sync scope.
+   * same durable stores and leaves every row and RDF graph intact. Canonical
+   * saved numeric identity is restored into inactive rows before discovery;
+   * subscription, hosting, readiness, gossip and automatic sync stay disabled.
    * Explicit subscriptions made after boot continue to work normally.
    */
   contextGraphSubscriptionRehydrationEnabled?: boolean;
@@ -2030,6 +2025,7 @@ export interface DKGAgentACKTransportOptions {
 export type ResolvedDKGAgentConfig =
   Omit<
     DKGAgentConfig,
+    | 'DKG_Core_chain_cache' | 'coreChainCacheNetworks'
     | 'storageAckTiming'
     | 'ackHandlerDeadlineMs'
     | 'ackSendTimeoutMs'
@@ -2046,6 +2042,7 @@ export type ResolvedDKGAgentConfig =
     | 'rfc64CatalogDeploymentProfile'
     | 'contextGraphSubscriptionRehydrationEnabled'
   > & {
+    readonly coreChainCacheNetworks: readonly CoreChainCacheNetwork[];
     contextGraphSubscriptionRehydrationEnabled: boolean;
     storageAckTiming: StorageAckTiming;
     syncReconcilerTiming: SyncReconcilerTiming;
@@ -2053,6 +2050,8 @@ export type ResolvedDKGAgentConfig =
     chainAuthorityReadBudgets: ChainAuthorityReadBudgets;
     rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
     rfc64CatalogBootstrap?: Readonly<Rfc64CatalogBootstrapConfigV1>;
+    /** Graphs the manual peer table of `rfc64Catalog.accessPolicyAuthority` covers. */
+    rfc64CatalogManualTrustRootContextGraphs?: readonly string[];
     /** Sole immutable restart-stable D17/D18 runtime authority for this boot. */
     rfc64CatalogExecutionPlan: import('./rfc64/catalog-rollout-authority-v1.js')
       .Rfc64CatalogExecutionPlanV1;

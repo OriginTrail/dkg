@@ -26,6 +26,27 @@ export interface ApprovedPrivateReplicaAuthority {
    * authority shape accepted from older callers.
    */
   readonly allowedPeers?: readonly string[];
+  /**
+   * Deadline of the delegation this proof rests on, in epoch milliseconds;
+   * `null` when that delegation has no expiry. A consumer that awaits further
+   * reads before it uses the proof re-checks it with
+   * {@link isApprovedPrivateReplicaDelegationActive}. Current producers always
+   * set this; optionality preserves the public authority shape.
+   */
+  readonly delegationExpiresAtMs?: number | null;
+}
+
+/**
+ * Whether the delegation an earlier proof rested on is still active. No store
+ * write marks the moment a delegation expires, so the revision fences cannot
+ * see it; an authority without a recorded deadline is not extended.
+ */
+export function isApprovedPrivateReplicaDelegationActive(
+  authority: ApprovedPrivateReplicaAuthority,
+  nowMs = Date.now(),
+): boolean {
+  return authority.delegationExpiresAtMs !== undefined
+    && isApprovedMemberDelegationExpiryActive(authority.delegationExpiresAtMs, nowMs);
 }
 
 /**
@@ -47,6 +68,24 @@ export type ApprovedPrivateReplicaAuthorityResolution =
       onChainId: string;
       authority: ApprovedPrivateReplicaAuthority;
     }>;
+
+/**
+ * Hooks for a caller that may run the proof again for the same decision. Both
+ * can only take a result away from a run; neither can add one.
+ */
+export interface ApprovedPrivateReplicaProofRun {
+  /**
+   * Called with the generation of the approved request the run starts from.
+   * `false` ends the run without a proof, which is how every run of one
+   * decision is held to the generation the first one read.
+   */
+  acceptsRequestGeneration(requestGeneration: string): boolean;
+  /**
+   * Called when a run is discarded for a moved metadata revision and nothing
+   * else: every check before that one held.
+   */
+  metadataMoved(): void;
+}
 
 /**
  * Classify the exact own-meta on-chain binding returned by the same proof.
@@ -88,6 +127,7 @@ export async function resolveApprovedPrivateReplicaAuthority(
   approvalStillHolds: () => boolean,
   metadataStillCurrent: () => boolean,
   signal?: AbortSignal,
+  run?: ApprovedPrivateReplicaProofRun,
 ): Promise<ApprovedPrivateReplicaAuthorityResolution | null> {
   const approved = approvedAgentAddress?.toLowerCase();
   const hasLocalAgent = () => agent.listLocalAgents().some(
@@ -106,6 +146,7 @@ export async function resolveApprovedPrivateReplicaAuthority(
     || !EVM_ADDRESS.test(state.curatorAgentAddress)
     || state.curatorAgentAddress === ZERO_ADDRESS
   ) return null;
+  if (run?.acceptsRequestGeneration(state.requestGeneration) === false) return null;
 
   const ownerAddress = state.curatorAgentAddress;
   const meta = await agent.getOwnCgMetaFacts(contextGraphId, { signal });
@@ -163,8 +204,12 @@ export async function resolveApprovedPrivateReplicaAuthority(
     || current.curatorPeerId !== state.curatorPeerId
     || current.curatorAgentAddress !== ownerAddress
     || current.curatorAuthorityEra !== '0'
-    || !metadataStillCurrent()
   ) return null;
+  // Checked last, so a run discarded here had every earlier check hold.
+  if (!metadataStillCurrent()) {
+    run?.metadataMoved();
+    return null;
+  }
 
   // The proof query embeds its start time. Recheck the deadline it proved
   // after every await so a delegation cannot expire while the read is in
@@ -183,6 +228,7 @@ export async function resolveApprovedPrivateReplicaAuthority(
     // must not re-read the merged metadata projection, where source identity
     // has already been discarded.
     allowedPeers: Object.freeze([...meta.allowedPeers]),
+    delegationExpiresAtMs: delegationExpiry,
   });
   if (registeredMetaOnChainId !== null) {
     return Object.freeze({

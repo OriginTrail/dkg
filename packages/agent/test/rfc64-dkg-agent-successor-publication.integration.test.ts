@@ -272,6 +272,74 @@ describe('RFC-64 DKGAgent public/open successor publication', () => {
       signatureVariantDigest: genesis.signatureVariantDigest,
     })).toBe(genesis.headObjectDigest);
   }, 60_000);
+
+  it('stops a successor whose caller has already given up before it signs or stages', async () => {
+    const dataDir = await createDataDir('cancelled-before');
+    const agent = await startAgent('successor-cancelled-before', dataDir);
+    const signMessage = vi.fn((digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest));
+    const author = { address: AUTHOR_WALLET.address, signMessage };
+    const genesis = await publishGenesis(agent);
+    const filesBefore = await recursiveFiles(dataDir);
+    const reason = new Error('caller gave up');
+
+    await expect(agent.publishOpenAuthorCatalogExactSetSuccessorV1({
+      previousHead: {
+        objectDigest: genesis.headObjectDigest,
+        signatureVariantDigest: genesis.signatureVariantDigest,
+      },
+      author,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assets: [{
+        assertionCoordinate: 'gate-1-object' as never,
+        projectionBytes: PROJECTION,
+        seal: await authorSeal(),
+      }],
+      deployment: DEPLOYMENT,
+      issuedAt: SUCCESSOR_ISSUED_AT,
+      peers: [],
+      signal: AbortSignal.abort(reason),
+    })).rejects.toBe(reason);
+
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(await recursiveFiles(dataDir)).toEqual(filesBefore);
+  }, 60_000);
+
+  it('stages nothing for a successor that is cancelled after its catalog objects were signed', async () => {
+    const dataDir = await createDataDir('cancelled-signed');
+    const agent = await startAgent('successor-cancelled-signed', dataDir);
+    const genesis = await publishGenesis(agent);
+    const filesBefore = await recursiveFiles(dataDir);
+    const controller = new AbortController();
+    const reason = new Error('caller gave up');
+    // The head is the last object signed; the rows are verified once more
+    // after it, and that pass is where the cancellation is seen.
+    const signMessage = vi.fn(async (digest: Uint8Array) => {
+      const signature = await AUTHOR_WALLET.signMessage(digest);
+      if (signMessage.mock.calls.length === 3) controller.abort(reason);
+      return signature;
+    });
+
+    await expect(agent.publishOpenAuthorCatalogExactSetSuccessorV1({
+      previousHead: {
+        objectDigest: genesis.headObjectDigest,
+        signatureVariantDigest: genesis.signatureVariantDigest,
+      },
+      author: { address: AUTHOR_WALLET.address, signMessage },
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assets: [{
+        assertionCoordinate: 'gate-1-object' as never,
+        projectionBytes: PROJECTION,
+        seal: await authorSeal(),
+      }],
+      deployment: DEPLOYMENT,
+      issuedAt: SUCCESSOR_ISSUED_AT,
+      peers: [],
+      signal: controller.signal,
+    })).rejects.toBe(reason);
+
+    expect(signMessage).toHaveBeenCalledTimes(3);
+    expect(await recursiveFiles(dataDir)).toEqual(filesBefore);
+  }, 60_000);
 });
 
 async function createDataDir(label: string): Promise<string> {

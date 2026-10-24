@@ -1,3 +1,7 @@
+import { INVENTORY_SCHEMA_MIGRATIONS_V1, type InventorySchemaMigrationV1 } from './schema-migrations.js';
+import { InventoryV1OpenError } from './open-error.js';
+export { InventoryV1OpenError, type InventoryV1OpenErrorCode } from './open-error.js';
+import type { Rfc64SwmAuthorInventoryOperationsV1 } from './swm-author-inventory-contracts.js';
 import {
   closeSync,
   existsSync,
@@ -43,20 +47,8 @@ import {
   INVENTORY_V1_DDL,
   INVENTORY_V1_DIRECTORY_MODE,
   INVENTORY_V1_FILE_MODE,
-  INVENTORY_V1_LEGACY_USER_OBJECTS,
-  INVENTORY_V1_LEGACY_USER_VERSION,
-  INVENTORY_V1_MIGRATE_V1_TO_V2_SQL,
-  INVENTORY_V1_MIGRATE_V2_TO_V3_SQL,
-  INVENTORY_V1_MIGRATE_V3_TO_V4_SQL,
-  INVENTORY_V1_MIGRATE_V4_TO_V5_SQL,
   INVENTORY_V1_USER_OBJECTS,
   INVENTORY_V1_USER_VERSION,
-  INVENTORY_V1_V2_USER_OBJECTS,
-  INVENTORY_V1_V2_USER_VERSION,
-  INVENTORY_V1_V3_USER_OBJECTS,
-  INVENTORY_V1_V3_USER_VERSION,
-  INVENTORY_V1_V4_USER_OBJECTS,
-  INVENTORY_V1_V4_USER_VERSION,
   normalizeInventoryV1SchemaSql,
 } from './sql.js';
 import {
@@ -91,7 +83,6 @@ import type {
   EvmAddressV1,
   KaIdV1,
   SignedAuthorCatalogHeadEnvelopeV1,
-  SwmAuthorInventorySnapshotV1,
 } from '@origintrail-official/dkg-core';
 import {
   createProductionInventoryV1LifecycleAdapter,
@@ -116,28 +107,6 @@ const LEASE_CREATION_RACE_TIMEOUT_MS = 1_000;
 const LEASE_CREATION_RACE_RETRY_MS = 10;
 const RECOVERY_MARKER_MAX_BYTES = 4_096;
 
-export type InventoryV1OpenErrorCode =
-  | 'sqlite-unavailable'
-  | 'foreign-database'
-  | 'newer-schema'
-  | 'ambiguous-database'
-  | 'unsafe-path'
-  | 'pragma-mismatch'
-  | 'database-busy'
-  | 'durability-unavailable'
-  | 'database-closed'
-  | 'database-io';
-
-export class InventoryV1OpenError extends Error {
-  constructor(
-    readonly code: InventoryV1OpenErrorCode,
-    message: string,
-    options: ErrorOptions = {},
-  ) {
-    super(`[${code}] ${message}`, options);
-    this.name = 'InventoryV1OpenError';
-  }
-}
 
 class InventoryV1TargetCloseError extends InventoryV1OpenError {
   constructor(
@@ -303,6 +272,7 @@ async function openInventoryV1WithLifecycleAdapter(
 
 class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   #database: DatabaseSyncV1 | null;
+  #unavailableCause: unknown;
   #candidate: CandidateInventoryV1;
   #lease: InventoryV1Lease | null;
   constructor(
@@ -365,6 +335,7 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   }
 
   close(): void {
+    this.#unavailableCause = undefined;
     this.#candidate.close();
     const database = this.#database;
     if (database !== null) {
@@ -530,23 +501,24 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     return this.#candidate.compareAndSwapAppliedCatalogHeadV1(input);
   }
 
-  readSwmAuthorInventoryHeadDigestV1(
-    inventoryScopeDigest: Digest32V1,
-    authorAddress: EvmAddressV1,
-  ): Digest32V1 | null {
+  listSwmAuthorInventoryScopesV1(): ReturnType<Rfc64SwmAuthorInventoryOperationsV1['listSwmAuthorInventoryScopesV1']> {
     this.requireOpen();
-    return this.#candidate.readSwmAuthorInventoryHeadDigestV1(inventoryScopeDigest, authorAddress);
+    return this.#candidate.listSwmAuthorInventoryScopesV1();
   }
 
-  readSwmAuthorInventorySnapshotV1(
-    inventoryScopeDigest: Digest32V1,
-    authorAddress: EvmAddressV1,
-  ): SwmAuthorInventorySnapshotV1 | null {
+  readSwmAuthorInventoryHeadDigestV1(...input: Parameters<Rfc64SwmAuthorInventoryOperationsV1['readSwmAuthorInventoryHeadDigestV1']>): ReturnType<Rfc64SwmAuthorInventoryOperationsV1['readSwmAuthorInventoryHeadDigestV1']> {
     this.requireOpen();
-    return this.#candidate.readSwmAuthorInventorySnapshotV1(
-      inventoryScopeDigest,
-      authorAddress,
-    );
+    return this.#candidate.readSwmAuthorInventoryHeadDigestV1(...input);
+  }
+
+  readSwmAuthorInventoryRowV1(...input: Parameters<Rfc64SwmAuthorInventoryOperationsV1['readSwmAuthorInventoryRowV1']>): ReturnType<Rfc64SwmAuthorInventoryOperationsV1['readSwmAuthorInventoryRowV1']> {
+    this.requireOpen();
+    return this.#candidate.readSwmAuthorInventoryRowV1(...input);
+  }
+
+  readSwmAuthorInventorySnapshotV1(...input: Parameters<Rfc64SwmAuthorInventoryOperationsV1['readSwmAuthorInventorySnapshotV1']>): ReturnType<Rfc64SwmAuthorInventoryOperationsV1['readSwmAuthorInventorySnapshotV1']> {
+    this.requireOpen();
+    return this.#candidate.readSwmAuthorInventorySnapshotV1(...input);
   }
 
   deleteSwmAuthorInventoryV1(input: DeleteSwmAuthorInventoryInputV1): void {
@@ -587,6 +559,15 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     this.#candidate.deleteFinalizedPrivatePlacementRepair(repair);
   }
 
+  readFinalizedPrivatePlacementFailure(...input: Parameters<Rfc64InventoryV1CandidateApi['readFinalizedPrivatePlacementFailure']>) {
+    this.requireOpen();
+    return this.#candidate.readFinalizedPrivatePlacementFailure(...input);
+  }
+  writeFinalizedPrivatePlacementFailures(...input: Parameters<Rfc64InventoryV1CandidateApi['writeFinalizedPrivatePlacementFailures']>): void {
+    this.requireOpen();
+    this.#candidate.writeFinalizedPrivatePlacementFailures(...input);
+  }
+
   readUnregisteredAuthoritySeedV1(
     ...input: Parameters<Rfc64InventoryV1CandidateApi['readUnregisteredAuthoritySeedV1']>
   ) {
@@ -603,7 +584,7 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
 
   private requireOpen(): DatabaseSyncV1 {
     if (this.#database === null) {
-      throw new InventoryV1OpenError('database-closed', 'inventory database is closed');
+      throw new InventoryV1OpenError('database-closed', 'inventory database is closed', { cause: this.#unavailableCause });
     }
     return this.#database;
   }
@@ -633,8 +614,10 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
             this.lifecycle,
           );
           this.#database = reopened;
+          this.#unavailableCause = undefined;
           return reopened;
         } catch (cause) {
+          this.#unavailableCause = cause;
           if (cause instanceof InventoryV1TargetCloseError) this.retainFailStop(cause);
           // Never quarantine, rebuild, or manufacture a candidate outcome on the
           // latency/indeterminate-COMMIT path. The live foundation stays closed.
@@ -646,7 +629,8 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
         }
       },
       undefined,
-      (rejectedDatabase) => {
+      (rejectedDatabase, cause) => {
+        this.#unavailableCause = cause;
         // Candidate validation happens after the provider returns. Detach the
         // adopted replacement before closing it so `closed` and requireOpen()
         // cannot observe a stale closed DatabaseSync handle.
@@ -667,6 +651,7 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
 
   private retainFailStop(error: unknown): never {
     if (!(error instanceof InventoryV1TargetCloseError)) throw error;
+    this.#unavailableCause = error;
     if (this.#lease !== null) {
       retainInventoryFailStop(this.#lease, error);
       this.#lease = null;
@@ -1255,54 +1240,7 @@ function schemaMatches(
   });
 }
 
-interface InventorySchemaMigrationV1 {
-  readonly fromVersion: number;
-  readonly toVersion: number;
-  readonly fromLabel: string;
-  readonly toLabel: string;
-  readonly fromObjects: Readonly<Record<string, string>>;
-  readonly toObjects: Readonly<Record<string, string>>;
-  readonly sql: string;
-}
 
-const INVENTORY_SCHEMA_MIGRATIONS_V1: readonly InventorySchemaMigrationV1[] = Object.freeze([
-  Object.freeze({
-    fromVersion: INVENTORY_V1_LEGACY_USER_VERSION,
-    toVersion: INVENTORY_V1_V2_USER_VERSION,
-    fromLabel: 'v1',
-    toLabel: 'v2',
-    fromObjects: INVENTORY_V1_LEGACY_USER_OBJECTS,
-    toObjects: INVENTORY_V1_V2_USER_OBJECTS,
-    sql: INVENTORY_V1_MIGRATE_V1_TO_V2_SQL,
-  }),
-  Object.freeze({
-    fromVersion: INVENTORY_V1_V2_USER_VERSION,
-    toVersion: INVENTORY_V1_V3_USER_VERSION,
-    fromLabel: 'v2',
-    toLabel: 'v3',
-    fromObjects: INVENTORY_V1_V2_USER_OBJECTS,
-    toObjects: INVENTORY_V1_V3_USER_OBJECTS,
-    sql: INVENTORY_V1_MIGRATE_V2_TO_V3_SQL,
-  }),
-  Object.freeze({
-    fromVersion: INVENTORY_V1_V3_USER_VERSION,
-    toVersion: INVENTORY_V1_V4_USER_VERSION,
-    fromLabel: 'v3',
-    toLabel: 'v4',
-    fromObjects: INVENTORY_V1_V3_USER_OBJECTS,
-    toObjects: INVENTORY_V1_V4_USER_OBJECTS,
-    sql: INVENTORY_V1_MIGRATE_V3_TO_V4_SQL,
-  }),
-  Object.freeze({
-    fromVersion: INVENTORY_V1_V4_USER_VERSION,
-    toVersion: INVENTORY_V1_USER_VERSION,
-    fromLabel: 'v4',
-    toLabel: 'v5',
-    fromObjects: INVENTORY_V1_V4_USER_OBJECTS,
-    toObjects: INVENTORY_V1_USER_OBJECTS,
-    sql: INVENTORY_V1_MIGRATE_V4_TO_V5_SQL,
-  }),
-]);
 
 type InventorySchemaVersionClassV1 =
   | 'current'

@@ -1,13 +1,33 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import {
+  UNSCOPED_QUERY_INVALIDATED_CODE,
+  UNSCOPED_QUERY_INVALIDATED_MESSAGE,
+} from '@origintrail-official/dkg-core';
 import { asGraphWriteRevisionSource } from '@origintrail-official/dkg-storage';
 
 const unsupported = () => new Error(
   'Unscoped query requires a store with all-writer consistency coverage; specify contextGraphId to scope the query',
 );
-const invalidated = () => new Error(
-  'Unscoped query dataset or read authority changed; retry the query or specify contextGraphId',
-);
+
+/**
+ * A local write or a read-authority change landed inside the interval an
+ * unscoped query has to hold unchanged, so its result was withheld. The request
+ * is sound and the same query can succeed once that change has settled. The
+ * code and the sentence are the dkg-core contract the daemon answers with; the
+ * class itself stays out of the public agent surface.
+ */
+export class UnscopedQueryInvalidatedError extends Error {
+  readonly code = UNSCOPED_QUERY_INVALIDATED_CODE;
+  readonly retryable = true;
+
+  constructor() {
+    super(UNSCOPED_QUERY_INVALIDATED_MESSAGE);
+    this.name = 'UnscopedQueryInvalidatedError';
+  }
+}
+
+const invalidated = () => new UnscopedQueryInvalidatedError();
 
 /**
  * Own result release across one unchanged local dataset/metadata interval.

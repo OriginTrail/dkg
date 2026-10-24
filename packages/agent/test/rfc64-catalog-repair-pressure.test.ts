@@ -49,12 +49,15 @@ function fixture(reconcile: (signal: AbortSignal) => Promise<void>, queueLimit =
   // compatible with both sides of the regression without fabricating repair policy.
   const dependencies = {
     resolvePartition: () => undefined,
+    listDurableInventoryScopes: () => [],
     listLocalAuthorAddresses: () => [AUTHOR],
     acceptsPublicRootLane: () => true,
     acceptsFinalizedPrivateLane: () => true,
+    readPrivateFailure: () => null,
+    writePrivateFailures: () => {},
     listFinalizedPrivateRepairs: () => [],
     repairFinalizedPrivatePlacement: async () => {},
-    readRepairRevision: () => 'revision-1',
+    readRepairRevision: () => ({ scopeIdentity: 'scope-1', headRevision: 'revision-1' }),
     reconcile: async ({ signal }: { signal: AbortSignal }) => { await reconcile(signal); return null; },
     warn: () => {},
   };

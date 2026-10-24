@@ -30,8 +30,17 @@ import type {
 } from '@origintrail-official/dkg-chain';
 import { NO_NAME_COMMITMENT } from './context-graph-claim-proof.js';
 
-/** Ids read per durable page (one checkpoint save per page). */
-export const CONTEXT_GRAPH_STORAGE_DISCOVERY_PAGE_SIZE = 16;
+/**
+ * Ids read per durable page (one checkpoint save per page). A page costs its
+ * anchor and latest-id reads whatever its size, and where the chain adapter
+ * aggregates, one more request per 32 ids. So a page is sized for a chain
+ * with a few dozen Context Graphs to be one page. An id that cannot be read
+ * ends its page there and the ids before it are saved, so a failed read costs
+ * no more with a larger page. A pass cancelled inside a page reads that page
+ * again: a few requests where the adapter aggregates, two per id where it
+ * does not.
+ */
+export const CONTEXT_GRAPH_STORAGE_DISCOVERY_PAGE_SIZE = 64;
 
 /**
  * Ids one discovery or refresh pass may read. Both mainnets hold fewer than

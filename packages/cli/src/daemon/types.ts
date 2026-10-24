@@ -23,8 +23,16 @@ export interface CatchupJob {
   finishedAt?: number;
   result?: CatchupJobResult;
   error?: string;
+  /** Current registration applicability, not sticky VM verification. */
+  durablePlane?: 'required' | 'not-applicable';
   /** The verified cleartext id the job continued under (name-hash requests). */
   resolvedContextGraphId?: string;
+  /**
+   * The job's walk found the graph's selected SWM lane not active, so it asked
+   * a peer nothing through it: this node had not put the graph's RFC-64
+   * authority in place yet.
+   */
+  selectedLaneFoundInactive?: true;
 }
 
 export interface CatchupTracker {
@@ -53,6 +61,7 @@ export function toCatchupStatusResponse(
     ...(job.finishedAt === undefined ? {} : { finishedAt: job.finishedAt }),
     ...(job.result === undefined ? {} : { result: job.result }),
     ...(job.error === undefined ? {} : { error: job.error }),
+    ...(job.durablePlane === undefined ? {} : { durablePlane: job.durablePlane }),
     ...(graphSync === undefined ? {} : { graphSync }),
     ...(job.resolvedContextGraphId === undefined
       ? {}

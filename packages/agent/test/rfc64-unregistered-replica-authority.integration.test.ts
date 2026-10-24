@@ -11,7 +11,9 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   NoChainAdapter,
+  connectRemoteSigners,
   type ContextGraphAuthoritySnapshot,
+  type OperationalSigning,
 } from '@origintrail-official/dkg-chain';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
@@ -23,16 +25,21 @@ import { CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS } from
 import {
   RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1,
   mintRfc64UnregisteredReplicaAuthorityEvidenceV1,
+  mintRfc64UnregisteredReplicaAuthoritySeedV1,
 } from '../src/rfc64/unregistered-replica-authority-v1.js';
 import { composeRfc64UnregisteredCatalogAuthorityV1 } from
   '../src/rfc64/release-native-catalog-authority-v1.js';
 import { Rfc64CatalogAuthorityRefreshLoopV1 } from
   '../src/rfc64/catalog-authority-refresh-loop-v1.js';
+import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
+  '../src/rfc64/catalog-authority-config-v1.js';
 import {
   createRfc64RolloutAgentHarness,
   RFC64_ROLLOUT_DEPLOYMENT as DEPLOYMENT,
   RFC64_ROLLOUT_NETWORK_ID as NETWORK_ID,
 } from './_helpers/rfc64-rollout-agent-harness.js';
+import { HARDHAT_KEYS } from '../../chain/test/hardhat-harness.js';
+import { startFakeRemoteSigner, type FakeSigner } from '../../chain/test/helpers/fake-remote-signer.js';
 
 const OWNER_WALLET = new ethers.Wallet(`0x${'71'.repeat(32)}`);
 const OWNER = OWNER_WALLET.address.toLowerCase() as EvmAddressV1;
@@ -44,6 +51,16 @@ const OTHER_CONTEXT_GRAPH_ID = `${OWNER}/other` as ContextGraphIdV1;
 const CONTEXT_GRAPH_SUBJECT = contextGraphDataGraphUri(CONTEXT_GRAPH_ID);
 const ONTOLOGY_GRAPH = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
 const HUB = '0x3333333333333333333333333333333333333333';
+const EXTERNAL_PAYER_TOKEN = 'replica-authority-payer-credential-4e5f6a7b';
+const EXTERNAL_AUTHOR_TOKEN = 'replica-authority-author-credential-7b6a5f4e';
+const EXTERNAL_AUTHOR = new ethers.Wallet(HARDHAT_KEYS.EXTRA2);
+
+/** The chain adapter of a node whose operational wallets sign through an external signer. */
+class ExternallySignedNoChain extends NoChainAdapter {
+  operationalSigning(): OperationalSigning {
+    return { external: true, payerAddresses: [] };
+  }
+}
 
 const {
   createDataDir,
@@ -52,9 +69,11 @@ const {
   cleanup,
 } = createRfc64RolloutAgentHarness();
 
+const fakes: FakeSigner[] = [];
 afterEach(async () => {
   await cleanup();
   vi.restoreAllMocks();
+  while (fakes.length > 0) await fakes.pop()!.close();
 });
 
 describe('RFC-64 unregistered replica authority', () => {
@@ -123,17 +142,77 @@ describe('RFC-64 unregistered replica authority', () => {
     const publisher = await startPublisher('unregistered-evidence-admin-token');
     const namespaceAgent = await publisher.registerAgent('namespace-owner');
     const namespaceOwner = namespaceAgent.agentAddress.toLowerCase();
-    const getSigner = vi.spyOn(publisher, 'getWorkspaceSigningAgentForAddress');
+    const custodialKeys = vi.spyOn(publisher, 'getCustodialAgentPrivateKey');
+    const ownerKeyReads = () => custodialKeys.mock.calls
+      .filter(([address]) => address.toLowerCase() === namespaceOwner).length;
 
     await expect(publisher.createContextGraph({
       id: `${namespaceOwner}/admin-token-attempt`,
       name: 'Admin-token attempt',
       accessPolicy: 0,
     })).rejects.toThrow(/uses wallet namespace.*authenticated caller/iu);
-    expect(getSigner).not.toHaveBeenCalled();
+    expect(ownerKeyReads()).toBe(0);
     await expect(publisher.contextGraphExists(
       `${namespaceOwner}/admin-token-attempt`,
     )).resolves.toBe(false);
+
+    // The owner's own request reads its key and creates the graph.
+    await publisher.createContextGraph({
+      id: `${namespaceOwner}/owner-request`,
+      name: 'Owner request',
+      accessPolicy: 0,
+      callerAgentAddress: namespaceOwner,
+    });
+    expect(ownerKeyReads()).toBeGreaterThan(0);
+    await expect(publisher.contextGraphExists(`${namespaceOwner}/owner-request`)).resolves.toBe(true);
+  });
+
+  it('rejects a mismatched caller before looking up an external author key or asking the signer', async () => {
+    const fake = await startFakeRemoteSigner({
+      credentials: [
+        { token: EXTERNAL_PAYER_TOKEN, keys: [HARDHAT_KEYS.PUBLISHER] },
+        { token: EXTERNAL_AUTHOR_TOKEN, keys: [EXTERNAL_AUTHOR.privateKey] },
+      ],
+    });
+    fakes.push(fake);
+    const remote = await connectRemoteSigners({
+      url: fake.url,
+      authToken: EXTERNAL_PAYER_TOKEN,
+      author: { authToken: EXTERNAL_AUTHOR_TOKEN },
+    });
+    const publisher = await startAgent({
+      name: 'unregistered-evidence-external-author',
+      config: {
+        rfc64CatalogDeploymentProfile: DEPLOYMENT,
+        chainAdapter: new ExternallySignedNoChain(),
+        authorSigners: remote.authors,
+      },
+    });
+    const owner = EXTERNAL_AUTHOR.address.toLowerCase();
+    expect(publisher.getDefaultAgentAddress()?.toLowerCase()).toBe(owner);
+    const authors = remote.authors!;
+    const lookups = [vi.spyOn(authors, 'signerFor'), vi.spyOn(authors, 'firstSignerOf')];
+    const custodialKeys = vi.spyOn(publisher, 'getCustodialAgentPrivateKey');
+    const requestsBefore = fake.requests.length;
+
+    await expect(publisher.createContextGraph({
+      id: `${owner}/mismatched-caller`,
+      name: 'Mismatched caller',
+      accessPolicy: 0,
+      callerAgentAddress: ATTACKER,
+    })).rejects.toThrow(/uses wallet namespace.*authenticated caller/iu);
+    for (const lookup of lookups) expect(lookup).not.toHaveBeenCalled();
+    expect(custodialKeys.mock.calls.filter(([address]) => address.toLowerCase() === owner)).toEqual([]);
+    expect(fake.requests).toHaveLength(requestsBefore);
+    await expect(publisher.contextGraphExists(`${owner}/mismatched-caller`)).resolves.toBe(false);
+
+    // The owner's own request looks its author key up and has the signer sign the seed.
+    await publisher.createContextGraph({ id: `${owner}/owner-request`, name: 'Owner request', accessPolicy: 0 });
+    expect(lookups.some((lookup) => lookup.mock.calls.length > 0)).toBe(true);
+    const signed = fake.calls('eth_sign');
+    expect(signed).toHaveLength(1);
+    expect(signed[0]!.authorization).toBe(`Bearer ${EXTERNAL_AUTHOR_TOKEN}`);
+    await expect(publisher.contextGraphExists(`${owner}/owner-request`)).resolves.toBe(true);
   });
 
   it('rejects a matching caller when its custodial signing key is unavailable', async () => {
@@ -145,7 +224,7 @@ describe('RFC-64 unregistered replica authority', () => {
       name: 'Missing signer attempt',
       accessPolicy: 0,
       callerAgentAddress: externalOwner,
-    })).rejects.toThrow(/no custodial signing key/iu);
+    })).rejects.toThrow(/no signing key/iu);
     await expect(publisher.contextGraphExists(
       `${externalOwner}/missing-signer-attempt`,
     )).resolves.toBe(false);
@@ -425,6 +504,8 @@ describe('RFC-64 unregistered replica authority', () => {
       scheduler: {
         setInterval: vi.fn(() => timer),
         clearInterval: vi.fn(),
+        setTimeout: vi.fn(() => timer),
+        clearTimeout: vi.fn(),
       },
     });
     scheduledRefresh.start();
@@ -533,7 +614,7 @@ describe('RFC-64 unregistered replica authority', () => {
       outcome: 'unavailable',
       source: 'registered-chain',
     });
-    expect(whenIdle).toHaveBeenCalledTimes(2);
+    expect(whenIdle).toHaveBeenCalledOnce();
     expect(receiver.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(false);
   });
 
@@ -625,7 +706,7 @@ describe('RFC-64 unregistered replica authority', () => {
     });
 
     expect(resolveFinalized).toHaveBeenCalledOnce();
-    expect(whenIdle).toHaveBeenCalledOnce();
+    expect(whenIdle).not.toHaveBeenCalled();
     expect(legacyScalar).not.toHaveBeenCalled();
     expect(legacyBatch).not.toHaveBeenCalled();
     expect(localPolicy).not.toHaveBeenCalled();
@@ -689,7 +770,7 @@ describe('RFC-64 unregistered replica authority', () => {
     receiver.subscribeToContextGraph(CONTEXT_GRAPH_ID);
     expect(receiver.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(true);
     expect(resolveFinalized).toHaveBeenCalledTimes(3);
-    expect(whenIdle).toHaveBeenCalledTimes(3);
+    expect(whenIdle).toHaveBeenCalledOnce();
     expect(pointRead).not.toHaveBeenCalled();
     expect(legacyScalar).not.toHaveBeenCalled();
     expect(legacyBatch).not.toHaveBeenCalled();
@@ -733,7 +814,7 @@ describe('RFC-64 unregistered replica authority', () => {
       CONTEXT_GRAPH_ID,
     )).toBe(true);
     expect(resolveFinalized).toHaveBeenCalledTimes(2);
-    expect(whenIdle).toHaveBeenCalledTimes(2);
+    expect(whenIdle).not.toHaveBeenCalled();
     expect(pointRead).not.toHaveBeenCalled();
     expect(legacyScalar).not.toHaveBeenCalled();
     expect(legacyBatch).not.toHaveBeenCalled();
@@ -969,7 +1050,200 @@ describe('RFC-64 unregistered replica authority', () => {
       vi.useRealTimers();
     }
   });
+
+  it('keeps a seeded public replica readable when a refresh pass outlasts the graph\'s own refresh', async () => {
+    const receiver = await startSeededPublicReplica('unregistered-seed-refresh-overlap');
+    const failures: unknown[] = [];
+    const requestKinds: string[] = [];
+    let requestBatches = 0;
+    let markRefreshStarted!: () => void;
+    let releaseRefresh!: () => void;
+    let markRefreshDone!: () => void;
+    let markSecondBatchStarted!: () => void;
+    let releaseSecondBatch!: () => void;
+    const refreshStarted = new Promise<void>((resolve) => { markRefreshStarted = resolve; });
+    const refreshGate = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    const refreshDone = new Promise<void>((resolve) => { markRefreshDone = resolve; });
+    const secondBatchStarted = new Promise<void>((resolve) => {
+      markSecondBatchStarted = resolve;
+    });
+    const secondBatchGate = new Promise<void>((resolve) => { releaseSecondBatch = resolve; });
+    // A fresh loop, so its first pass is the forced initial one and its
+    // second an ordinary one, wired the way the agent wires its own.
+    const refresh = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => [CONTEXT_GRAPH_ID],
+      createRefreshRequests: async (contextGraphIds, signal) => {
+        requestBatches += 1;
+        if (requestBatches === 2) {
+          markSecondBatchStarted();
+          await secondBatchGate;
+        }
+        return receiver.createRfc64CatalogAuthorityRefreshRequestsV1(contextGraphIds, signal);
+      },
+      refreshContextGraph: async (contextGraphId, signal, request) => {
+        requestKinds.push(request.kind);
+        const first = requestKinds.length === 1;
+        if (first) {
+          markRefreshStarted();
+          await refreshGate;
+        }
+        try {
+          return await receiver.reconcileRfc64CatalogAccessAuthorityV1(
+            contextGraphId,
+            signal,
+            request,
+          ) === null ? 'superseded' : 'committed';
+        } finally {
+          if (first) markRefreshDone();
+        }
+      },
+      onActiveContextGraphIdsReadFailure: vi.fn(),
+      onRefreshFailure: (_contextGraphId, error) => { failures.push(error); },
+      scheduler: {
+        setInterval: vi.fn(() => ({}) as ReturnType<typeof setInterval>),
+        clearInterval: vi.fn(),
+        setTimeout: vi.fn(() => ({}) as ReturnType<typeof setTimeout>),
+        clearTimeout: vi.fn(),
+      },
+    });
+
+    refresh.start();
+    await refreshStarted;
+    // Subscribing to another graph nudges a pass while this graph's own
+    // refresh still runs, and that pass's finalized read outlasts it.
+    refresh.trigger();
+    await secondBatchStarted;
+    releaseRefresh();
+    await refreshDone;
+    await settleEventLoopTurns();
+    releaseSecondBatch();
+    await refresh.whenIdle();
+    await refresh.close();
+
+    expect(requestBatches).toBe(2);
+    expect(requestKinds).toEqual(['finalized-absence']);
+    expect(failures).toEqual([]);
+    await expect(receiver.canUseSharedMemoryForContextGraph(CONTEXT_GRAPH_ID))
+      .resolves.toBe(true);
+  });
+
+  it('re-establishes a seeded public replica from the refresh loop\'s own retry', async () => {
+    const receiver = await startSeededPublicReplica('unregistered-seed-refresh-retry');
+    const owner = (receiver as any).rfc64PublicCatalogOwnerV1;
+    // One refresh cannot read the stored seed (a closed or stalled inventory).
+    vi.spyOn(receiver, 'readRfc64UnregisteredAuthoritySeedV1')
+      .mockRejectedValueOnce(new Error('seed inventory unavailable'));
+    const warn = vi.spyOn((receiver as any).log, 'warn');
+
+    owner.requestAuthorityRefresh();
+    await owner.whenIdle();
+    expect(warn.mock.calls.filter(([, message]) => String(message)
+      .includes('authority refresh incomplete'))).toHaveLength(1);
+    await expect(receiver.canUseSharedMemoryForContextGraph(CONTEXT_GRAPH_ID))
+      .resolves.toBe(false);
+
+    // No lifecycle nudge, sync work or interval tick follows: the loop's own
+    // retry reads the stored seed again within its first delay.
+    await vi.waitFor(async () => {
+      await expect(receiver.canUseSharedMemoryForContextGraph(CONTEXT_GRAPH_ID))
+        .resolves.toBe(true);
+    }, {
+      timeout: RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.failureRetryDelaysMs[0]! + 4_000,
+      interval: 100,
+    });
+    expect(warn.mock.calls.filter(([, message]) => String(message)
+      .includes('authority refresh incomplete'))).toHaveLength(1);
+  });
+
+  it('catches up only the re-established graph after the refresh loop\'s own retry', async () => {
+    const receiver = await startSeededPublicReplica('unregistered-seed-refresh-retry-catchup');
+    // The first acceptance's catch-up window passes before any peer connects.
+    await new Promise<void>((resolve) => setTimeout(resolve, 3_100));
+    const remotePeerId = '12D3KooWRefreshRetryCatchupPeer';
+    vi.spyOn(receiver.node.libp2p, 'getPeers').mockReturnValue(
+      [{ toString: () => remotePeerId }] as never,
+    );
+    const queueSync = vi.spyOn(receiver, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
+    const owner = (receiver as any).rfc64PublicCatalogOwnerV1;
+    vi.spyOn(receiver, 'readRfc64UnregisteredAuthoritySeedV1')
+      .mockRejectedValueOnce(new Error('seed inventory unavailable'));
+
+    owner.requestAuthorityRefresh();
+    await owner.whenIdle();
+    await expect(receiver.canUseSharedMemoryForContextGraph(CONTEXT_GRAPH_ID))
+      .resolves.toBe(false);
+    expect(queueSync).not.toHaveBeenCalled();
+
+    // The loop's own retry accepts the graph again, and the catch-up that
+    // acceptance schedules asks the connected peer for this graph only.
+    await vi.waitFor(() => expect(queueSync).toHaveBeenCalledOnce(), {
+      timeout: RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.failureRetryDelaysMs[0]! + 3_000 + 4_000,
+      interval: 100,
+    });
+    expect(queueSync).toHaveBeenCalledWith(remotePeerId, expect.any(Function), 0, {
+      authorityScopeChanged: true,
+      authorityScopeContextGraphIds: new Set([CONTEXT_GRAPH_ID]),
+    });
+    await expect(receiver.canUseSharedMemoryForContextGraph(CONTEXT_GRAPH_ID))
+      .resolves.toBe(true);
+  });
 });
+
+/**
+ * A member that stored the owner-signed seed of an unregistered public graph
+ * when it subscribed, the way a seed fetched from a peer is kept, and whose
+ * authority for that graph is accepted and readable. Its own authority
+ * refresh loop is idle when this returns.
+ */
+async function startSeededPublicReplica(name: string): Promise<DKGAgent> {
+  const chainAdapter = Object.assign(new NoChainAdapter(), {
+    contextGraphAuthorityIndexRevisionReader: {
+      resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: vi.fn(async () => new Map()),
+      readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+      whenIdle: vi.fn(async () => undefined),
+    },
+  });
+  const receiver = await startAgent({
+    name,
+    config: { rfc64CatalogDeploymentProfile: DEPLOYMENT, chainAdapter },
+  });
+  const seed = await mintRfc64UnregisteredReplicaAuthoritySeedV1({
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    ownerAddress: OWNER,
+    accessPolicy: 0,
+    publishPolicy: 1,
+    publishAuthorityAccountId: '0',
+    memberAddresses: [],
+    rosterVersion: '0',
+    signer: {
+      issuer: OWNER,
+      signDigest: (digest) => OWNER_WALLET.signMessage(digest),
+    },
+  });
+  await receiver.persistVerifiedRfc64UnregisteredAuthoritySeedV1({
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    canonicalEnvelopeBytes: seed.canonicalEnvelopeBytes,
+  });
+  vi.spyOn(receiver, 'isLocalFirstUnregisteredContextGraph').mockResolvedValue(false);
+  await expect(receiver.reconcileRfc64CatalogAccessAuthorityV1(
+    CONTEXT_GRAPH_ID,
+    undefined,
+    { kind: 'finalized-absence' },
+  )).resolves.toMatchObject({ source: 'owner-signed-unregistered' });
+  receiver.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+  await receiver.whenRfc64CatalogResponsibilitiesIdleV1();
+  await (receiver as any).rfc64PublicCatalogOwnerV1.whenIdle();
+  await expect(receiver.canUseSharedMemoryForContextGraph(CONTEXT_GRAPH_ID))
+    .resolves.toBe(true);
+  return receiver;
+}
+
+async function settleEventLoopTurns(): Promise<void> {
+  await new Promise<void>((resolve) => { setImmediate(resolve); });
+  await new Promise<void>((resolve) => { setImmediate(resolve); });
+}
 
 async function startPublisher(name: string): Promise<DKGAgent> {
   return startAgent({

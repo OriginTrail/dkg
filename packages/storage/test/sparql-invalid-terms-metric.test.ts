@@ -64,6 +64,33 @@ describe('dkg.store.sparql_invalid_terms_total', () => {
     expect(points.filter((point) => point.attributes && 'enforcement' in point.attributes)).toHaveLength(1);
   });
 
+  it('publishes a relative datatype under kind relative-iri and position datatype', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = new OxigraphStore();
+    const points = await captureCounters(async () => {
+      // The N-Quads load rejects it, but only after the insert has counted it.
+      await expect(store.insert([{
+        subject: 'http://ex.org/s',
+        predicate: 'http://ex.org/p',
+        object: '"42"^^<integer>',
+        graph: 'http://ex.org/g',
+      }])).rejects.toThrow(/No scheme found in an absolute IRI/);
+    });
+    await store.close();
+
+    expect(points.filter((point) => point.metric === 'dkg.store.sparql_invalid_terms_total')).toEqual([{
+      metric: 'dkg.store.sparql_invalid_terms_total',
+      value: 1,
+      attributes: {
+        adapter: 'oxigraph',
+        operation: 'insert',
+        position: 'datatype',
+        kind: 'relative-iri',
+        enforcement: 'observe',
+      },
+    }]);
+  });
+
   it('labels every embedded Oxigraph call site', async () => {
     const observed = observeInvalidSparqlTerms();
     const store = new OxigraphStore();

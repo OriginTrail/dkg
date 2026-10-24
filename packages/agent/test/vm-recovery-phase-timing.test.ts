@@ -26,11 +26,17 @@ function timing(input: {
     schemaVersion: 1,
     background: {
       admissionWait: input.bgWait ?? distribution(0, 0),
+      admissionDeadlineWait: distribution(0, 0),
+      admissionCancelledWait: distribution(0, 0),
+      admissionRejectedWait: distribution(0, 0),
       endpointLatency: input.bgEndpoint ?? distribution(0, 0),
       endpointFailures: input.bgFailures ?? 0,
     },
     foreground: {
       admissionWait: distribution(0, 0),
+      admissionDeadlineWait: distribution(0, 0),
+      admissionCancelledWait: distribution(0, 0),
+      admissionRejectedWait: distribution(0, 0),
       endpointLatency: input.fgEndpoint ?? distribution(0, 0),
       endpointFailures: 0,
     },
@@ -43,7 +49,7 @@ function usageSnapshot(
 ): ReturnType<VmRecoveryTimingSources['usage']> {
   return {
     schemaVersion: 1,
-    consumerVocabularyVersion: 2,
+    consumerVocabularyVersion: 3,
     processEpoch: 'test',
     capturedAtUtc: '2026-10-01T00:00:00.000Z',
     capturedAtMonotonicMs: 0,

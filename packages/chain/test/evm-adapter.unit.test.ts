@@ -28,6 +28,7 @@ import {
   type ApprovalPolicy,
 } from '../src/chain-adapter.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
+import { explainOutOfGasRevert } from '../src/evm-adapter-rpc.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 import {
   DEFAULT_FINALITY_CONFIRMATIONS,
@@ -191,7 +192,7 @@ it('caps populated transaction fee fields when the operator sets maxFeePerGasWei
     resolveName: async (name: string) => name,
     _isProvider: true,
   } as never);
-  const { signedTx } = await adapter.signPopulatedTransaction(wallet, {
+  const { signedTx } = await prepareAndSign(adapter, wallet, {
     to: '0x0000000000000000000000000000000000000002',
     value: 0n,
     nonce: 3,
@@ -208,7 +209,7 @@ it('caps populated transaction fee fields when the operator sets maxFeePerGasWei
     .toThrow(/maxFeePerGasWei must be greater than zero/);
 });
 
-it('rejects an EIP-1559 fee cap below the current base fee before signing', async () => {
+it('rejects an EIP-1559 fee cap below the current base fee while preparing, before signing', async () => {
   const adapter: any = new EVMChainAdapter(minimalConfig({ maxFeePerGasWei: 100n }));
   const wallet = new ethers.Wallet(DEPLOYER_PK).connect({
     getNetwork: async () => ({ chainId: 31337n, name: 'stub' }),
@@ -220,7 +221,7 @@ it('rejects an EIP-1559 fee cap below the current base fee before signing', asyn
     _isProvider: true,
   } as never);
 
-  await expect(adapter.signPopulatedTransaction(wallet, {
+  await expect(prepareAndSign(adapter, wallet, {
     to: '0x0000000000000000000000000000000000000002',
     value: 0n,
     nonce: 3,
@@ -243,7 +244,7 @@ it('caps a legacy gas price without applying the EIP-1559 base-fee rule', async 
     resolveName: async (name: string) => name,
     _isProvider: true,
   } as never);
-  const { signedTx } = await adapter.signPopulatedTransaction(wallet, {
+  const { signedTx } = await prepareAndSign(adapter, wallet, {
     to: '0x0000000000000000000000000000000000000002',
     value: 0n,
     nonce: 3,
@@ -848,7 +849,63 @@ describe('EVMChainAdapter random sampling identity lookup', () => {
     expect(a.nextRandomSamplingSigner.calls).toHaveLength(1);
     expect(sendSpy.calls[0][1]).toBe('createChallenge');
     expect(sendSpy.calls[0][3]).toBe(w1); // the SELECTED signer
-    expect(sendSpy.calls[0][5]).toEqual({ gasLimitBufferBps: 5_000 }); // gas headroom preserved
+    // gas headroom: +50%, and never less than 2.5M
+    expect(sendSpy.calls[0][5]).toEqual({ gasLimitBufferBps: 5_000, gasLimitMinBuffer: 2_500_000n });
+  });
+
+  it('createChallenge signs a gas limit that fits a draw costlier than the one its estimate saw', async () => {
+    // The contract settles every graph its weighted draw lands on without
+    // finding a live asset, then draws again. Which graphs a creation lands on
+    // follows from the block it runs in, so the estimate and the mined
+    // transaction take independent draws, and a settle is a fixed amount of
+    // extra work. Numbers from one test network: a creation without a settle
+    // and one with the cheapest settle (local fork of its state), and the
+    // costliest of 5,336 creations estimated there in 24 days.
+    const estimatedWithoutSettle = 319_732n;
+    const neededWithCheapestSettle = 499_275n;
+    const costliestEstimateSeen = 2_580_738n;
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
+    const provider = { name: 'only' } as any;
+    const signer = new ethers.Wallet(DEPLOYER_PK, provider);
+    const rsInterface = new Interface([
+      'event ChallengeGenerated(uint72 indexed identityId,uint256 indexed contextGraphId,uint256 knowledgeAssetId,uint256 chunkId,uint256 epoch,uint256 activeProofPeriodStartBlock)',
+    ]);
+    const encoded = rsInterface.encodeEventLog(rsInterface.getEvent('ChallengeGenerated')!, [7n, 3n, 11n, 2n, 3n, 4n]);
+    const receipt = {
+      hash: '0x' + '44'.repeat(32), blockNumber: 8, index: 0, status: 1,
+      logs: [{ topics: encoded.topics, data: encoded.data }],
+    };
+    const challengeRaw = {
+      knowledgeAssetId: 11n, knowledgeAssetStorageContract: ethers.ZeroAddress, chunkId: 2n, epoch: 3n,
+      activeProofPeriodStartBlock: 4n, proofingPeriodDurationInBlocks: 5n, solved: false, isCurated: false,
+      challengeLeafCount: 1n, challengeRoot: ethers.ZeroHash,
+    };
+    // No gasLimit from populate: the buffered estimate decides it.
+    const populateTransaction = recorder(async () => (
+      { to: '0x0000000000000000000000000000000000000001', data: '0x1234' } as any
+    ));
+    const estimateGas = recorder(async () => estimatedWithoutSettle);
+    const rs = {
+      interface: rsInterface,
+      connect: recorder(() => ({ createChallenge: { populateTransaction, estimateGas } })),
+    };
+    a.init = async () => undefined;
+    a.getRandomSampling = async () => ({ rs, rss: {} });
+    a.readContract = recorder(async () => challengeRaw);
+    a.nextRandomSamplingSigner = async () => signer;
+    a.providers = [provider];
+    const { prepare: prepareSpy } = stubPrepareAndSign(a, () => ({ signedTx: '0xdead', txHash: receipt.hash }));
+    a.sendSignedTransactionAndWait = recorder(async () => receipt);
+
+    await expect(a.createChallenge()).resolves.toMatchObject({ hash: receipt.hash, success: true });
+
+    expect(estimateGas.calls).toHaveLength(1);
+    const signedGasLimit = prepareSpy.calls[0][1].gasLimit;
+    // 319,732 + 2,500,000: +50% of the estimate would add 159,866
+    expect(signedGasLimit).toBe(2_819_732n);
+    expect(signedGasLimit >= costliestEstimateSeen).toBe(true);
+    // +50% alone, the previous limit, was below even the cheapest settle.
+    expect((estimatedWithoutSettle * 3n) / 2n < neededWithCheapestSettle).toBe(true);
   });
 
   it('submitProof signs with the wallet selected by nextRandomSamplingSigner', async () => {
@@ -866,6 +923,48 @@ describe('EVMChainAdapter random sampling identity lookup', () => {
     expect(a.nextRandomSamplingSigner.calls).toHaveLength(1);
     expect(sendSpy.calls[0][1]).toBe('submitProof');
     expect(sendSpy.calls[0][3]).toBe(w1); // the SELECTED signer
+    expect(sendSpy.calls[0][5]).toEqual({ gasLimitBufferBps: 5_000 }); // gas headroom
+  });
+
+  it('submitProof signs a gas limit above the estimate, so a proof that costs more one block later still fits', async () => {
+    // The contract settles the node's stake to `block.timestamp` and skips the
+    // settle when the node is already settled at that timestamp, which is the
+    // case on the block that holds the node's own createChallenge. An estimate
+    // taken on that block comes out below what the proof needs one block
+    // later. Numbers from one observed case: estimate 294,443, needed 306,807;
+    // sent with the raw estimate, the proof ran out of gas.
+    const estimatedOnChallengeBlock = 294_443n;
+    const neededOneBlockLater = 306_807n;
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
+    const provider = { name: 'only' } as any;
+    const signer = new ethers.Wallet(DEPLOYER_PK, provider);
+    const receipt = { hash: '0x' + '33'.repeat(32), blockNumber: 6, index: 0, status: 1, logs: [] };
+    // No gasLimit from populate: without headroom ethers would fill in the raw
+    // estimate while signing.
+    const populateTransaction = recorder(async () => (
+      { to: '0x0000000000000000000000000000000000000001', data: '0x1234' } as any
+    ));
+    const estimateGas = recorder(async () => estimatedOnChallengeBlock);
+    const rs = {
+      connect: recorder(() => ({ submitProof: { populateTransaction, estimateGas } })),
+    };
+    a.init = async () => undefined;
+    a.getRandomSampling = async () => ({ rs });
+    a.nextRandomSamplingSigner = async () => signer;
+    a.providers = [provider];
+    const { prepare: prepareSpy } = stubPrepareAndSign(a, () => ({ signedTx: '0xdead', txHash: receipt.hash }));
+    a.sendSignedTransactionAndWait = recorder(async () => receipt);
+
+    await expect(a.submitProof(new Uint8Array([1, 2, 3]), [])).resolves.toMatchObject({
+      hash: receipt.hash,
+      success: true,
+    });
+
+    expect(estimateGas.calls).toHaveLength(1);
+    const signedGasLimit = prepareSpy.calls[0][1].gasLimit;
+    // 294_443 * (10_000 + 5_000) / 10_000, rounded down
+    expect(signedGasLimit).toBe(441_664n);
+    expect(signedGasLimit >= neededOneBlockLater).toBe(true);
   });
 
   // ── self-heal for STALE eligibility: an out-of-band removed wallet that
@@ -940,6 +1039,25 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
   const fn = (...args: A): R => { calls.push(args); return impl(...args); };
   return Object.assign(fn, { calls });
+}
+
+/** The adapter's two steps for one write: the signer-side preparation of `populated`, then the one signature. */
+async function prepareAndSign(adapter: any, signer: unknown, populated: ethers.TransactionRequest) {
+  const transaction = await adapter.prepareSignerTransaction(signer, populated);
+  return adapter.signPreparedTransaction({ transaction, signer });
+}
+
+/**
+ * Stub an adapter's signer-side preparation, which hands the contract-populated
+ * transaction on unchanged and records the endpoint-bound signer and the
+ * transaction it saw, and its one signature, which answers `signed()`.
+ */
+function stubPrepareAndSign(adapter: unknown, signed: () => unknown) {
+  const prepare = recorder(async (_signer: any, populated: any) => populated);
+  const sign = recorder(async (_prepared: any) => signed());
+  (adapter as any).prepareSignerTransaction = prepare;
+  (adapter as any).signPreparedTransaction = sign;
+  return { prepare, sign };
 }
 
 async function flushAsyncWork(turns = 8): Promise<void> {
@@ -1360,11 +1478,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       }),
     };
     (a as any).providers = [primaryProvider, backupProvider];
-    const signPopulatedTransaction = recorder(async (..._a: unknown[]) => ({
-      signedTx: '0xdeadbeef',
-      txHash: receipt.hash,
-    }));
-    (a as any).signPopulatedTransaction = signPopulatedTransaction;
+    const { prepare, sign } = stubPrepareAndSign(a, () => ({ signedTx: '0xdeadbeef', txHash: receipt.hash }));
     (a as any).sendSignedTransactionAndWait = recorder(async () => receipt);
 
     await expect((a as any).sendContractTransaction(
@@ -1377,10 +1491,12 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
 
     expect(populateTransaction.calls).toHaveLength(2);
     expect(runners.map((runner) => runner.provider)).toEqual([primaryProvider, backupProvider]);
-    expect(signPopulatedTransaction.calls).toContainEqual([
+    expect(prepare.calls).toContainEqual([
       runners[1],
       populated,
     ]);
+    // The transaction prepared on the backup is signed once, with that endpoint's signer.
+    expect(sign.calls).toEqual([[{ transaction: populated, signer: runners[1] }]]);
   });
 
   it('inflates gasLimit by gasLimitBufferBps when populate leaves it unset (OOG headroom)', async () => {
@@ -1400,8 +1516,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       connect: recorder(() => ({ createChallenge: { populateTransaction, estimateGas } })),
     };
     (a as any).providers = [provider];
-    const signSpy = recorder(async (..._a: any[]) => ({ signedTx: '0xdead', txHash: receipt.hash }));
-    (a as any).signPopulatedTransaction = signSpy;
+    const { prepare: prepareSpy } = stubPrepareAndSign(a, () => ({ signedTx: '0xdead', txHash: receipt.hash }));
     (a as any).sendSignedTransactionAndWait = recorder(async () => receipt);
 
     await expect((a as any).sendContractTransaction(
@@ -1415,10 +1530,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
 
     expect(estimateGas.calls).toHaveLength(1);
     // 1_000_000 * (10_000 + 5_000) / 10_000 = 1_500_000
-    expect(signSpy.calls[0][1].gasLimit).toBe(1_500_000n);
+    expect(prepareSpy.calls[0][1].gasLimit).toBe(1_500_000n);
   });
 
-  it('falls back to the unbuffered signing flow and warns when buffered estimateGas throws', async () => {
+  it('falls back to the unbuffered preparation and warns when buffered estimateGas throws', async () => {
     const a = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
     const provider = { name: 'only' } as any;
     const signer = new ethers.Wallet(DEPLOYER_PK, provider);
@@ -1430,8 +1545,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       connect: recorder(() => ({ createChallenge: { populateTransaction, estimateGas } })),
     };
     (a as any).providers = [provider];
-    const signSpy = recorder(async (..._a: any[]) => ({ signedTx: '0xdead', txHash: receipt.hash }));
-    (a as any).signPopulatedTransaction = signSpy;
+    const { prepare: prepareSpy } = stubPrepareAndSign(a, () => ({ signedTx: '0xdead', txHash: receipt.hash }));
     (a as any).sendSignedTransactionAndWait = recorder(async () => receipt);
     const origWarn = console.warn;
     const warnSpy = recorder((..._a: unknown[]) => undefined);
@@ -1446,9 +1560,9 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
         { gasLimitBufferBps: 5_000 },
       )).resolves.toBe(receipt);
 
-      // No headroom applied — gasLimit stays unset so ethers estimates during
-      // signing (unbuffered, but no worse than before the buffer existed).
-      expect(signSpy.calls[0][1].gasLimit).toBeUndefined();
+      // No headroom applied — gasLimit stays unset so ethers estimates during the
+      // signer-side preparation (unbuffered, but no worse than before the buffer existed).
+      expect(prepareSpy.calls[0][1].gasLimit).toBeUndefined();
       expect(warnSpy.calls).toHaveLength(1);
       expect(String(warnSpy.calls[0][0])).toContain('buffered gas estimation failed');
     } finally {
@@ -1468,8 +1582,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       connect: recorder(() => ({ createChallenge: { populateTransaction, estimateGas } })),
     };
     (a as any).providers = [provider];
-    const signSpy = recorder(async (..._a: any[]) => ({ signedTx: '0xdead', txHash: receipt.hash }));
-    (a as any).signPopulatedTransaction = signSpy;
+    const { prepare: prepareSpy } = stubPrepareAndSign(a, () => ({ signedTx: '0xdead', txHash: receipt.hash }));
     (a as any).sendSignedTransactionAndWait = recorder(async () => receipt);
 
     await expect((a as any).sendContractTransaction(
@@ -1482,7 +1595,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     )).resolves.toBe(receipt);
 
     expect(estimateGas.calls).toEqual([]);
-    expect(signSpy.calls[0][1].gasLimit).toBe(800_000n);
+    expect(prepareSpy.calls[0][1].gasLimit).toBe(800_000n);
   });
 
   it('fails over to the next RPC when buffered estimateGas is rate-limited (keeps the OOG headroom)', async () => {
@@ -1522,8 +1635,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       }),
     };
     (a as any).providers = [primaryProvider, backupProvider];
-    const signSpy = recorder(async (..._a: any[]) => ({ signedTx: '0xdead', txHash: receipt.hash }));
-    (a as any).signPopulatedTransaction = signSpy;
+    const { prepare: prepareSpy } = stubPrepareAndSign(a, () => ({ signedTx: '0xdead', txHash: receipt.hash }));
     (a as any).sendSignedTransactionAndWait = recorder(async () => receipt);
     const origWarn = console.warn;
     const warnSpy = recorder((..._a: unknown[]) => undefined);
@@ -1541,9 +1653,9 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       expect(estimateGas.calls).toHaveLength(2);
       expect(populateTransaction.calls).toHaveLength(2);
       // Buffer still applied on the healthy provider.
-      expect(signSpy.calls[0][1].gasLimit).toBe(1_500_000n);
-      // Signed against the BACKUP runner, not the rate-limited primary.
-      expect(signSpy.calls[0][0].provider).toBe(backupProvider);
+      expect(prepareSpy.calls[0][1].gasLimit).toBe(1_500_000n);
+      // Prepared (and so signed) against the BACKUP runner, not the rate-limited primary.
+      expect(prepareSpy.calls[0][0].provider).toBe(backupProvider);
       // Failover, not silent fallback: the "headroom not applied" fallback
       // warning must NOT fire (the buffer was applied on the healthy backup).
       const headroomWarnings = warnSpy.calls.filter(
@@ -1579,11 +1691,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       connect: recorder(() => ({ createContextGraph: { populateTransaction } })),
     };
     (a as any).providers = [primaryProvider, backupProvider];
-    const signPopulatedTransaction = recorder(async () => ({
-      signedTx: '0xdeadbeef',
-      txHash: '0xabc',
-    }));
-    (a as any).signPopulatedTransaction = signPopulatedTransaction;
+    const { prepare, sign } = stubPrepareAndSign(a, () => ({ signedTx: '0xdeadbeef', txHash: '0xabc' }));
     const sendSignedTransactionAndWait = recorder(async () => ({}));
     (a as any).sendSignedTransactionAndWait = sendSignedTransactionAndWait;
 
@@ -1614,7 +1722,8 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(thrown.message).toContain('backup.example');
     expect(thrown.message).not.toContain('https://');
     expect(populateTransaction.calls).toHaveLength(2);
-    expect(signPopulatedTransaction.calls).toEqual([]);
+    expect(prepare.calls).toEqual([]);
+    expect(sign.calls).toEqual([]);
     expect(sendSignedTransactionAndWait.calls).toEqual([]);
   });
 
@@ -1637,8 +1746,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       connect: recorder(() => ({ createContextGraph: { populateTransaction } })),
     };
     (a as any).providers = [onlyProvider];
-    const signPopulatedTransaction = recorder(() => undefined);
-    (a as any).signPopulatedTransaction = signPopulatedTransaction;
+    const { prepare, sign } = stubPrepareAndSign(a, () => undefined);
     const sendSignedTransactionAndWait = recorder(() => undefined);
     (a as any).sendSignedTransactionAndWait = sendSignedTransactionAndWait;
 
@@ -1667,7 +1775,8 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect((thrown as Error).cause).toBeInstanceOf(Error);
     expect((thrown as { cause: Error }).cause.message).toBe('connect ECONNREFUSED 127.0.0.1:8545');
     expect(populateTransaction.calls).toHaveLength(1);
-    expect(signPopulatedTransaction.calls).toEqual([]);
+    expect(prepare.calls).toEqual([]);
+    expect(sign.calls).toEqual([]);
     expect(sendSignedTransactionAndWait.calls).toEqual([]);
   });
 
@@ -1773,8 +1882,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       connect: recorder(() => ({ createContextGraph: { populateTransaction } })),
     };
     (a as any).providers = [primaryProvider, backupProvider];
-    const signPopulatedTransaction = recorder(async () => ({ signedTx, txHash }));
-    (a as any).signPopulatedTransaction = signPopulatedTransaction;
+    const { sign: signPreparedTransaction } = stubPrepareAndSign(a, () => ({ signedTx, txHash }));
 
     await expect((a as any).sendContractTransaction(
       contract,
@@ -1787,7 +1895,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       txHash,
     });
     expect(populateTransaction.calls).toHaveLength(1);
-    expect(signPopulatedTransaction.calls).toHaveLength(1);
+    expect(signPreparedTransaction.calls).toHaveLength(1);
     expect(primaryProvider.broadcastTransaction.calls).toContainEqual([signedTx]);
     expect(backupProvider.broadcastTransaction.calls).toEqual([]);
     // The wait retried past the first exhausted pass: multiple lookups per endpoint.
@@ -1825,8 +1933,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
         connect: recorder(() => ({ createContextGraph: { populateTransaction } })),
       };
       (a as any).providers = [primary, backup];
-      const signPopulatedTransaction = recorder(async () => ({ signedTx, txHash }));
-      (a as any).signPopulatedTransaction = signPopulatedTransaction;
+      const { sign: signPreparedTransaction } = stubPrepareAndSign(a, () => ({ signedTx, txHash }));
 
       const thrown = (async () => {
         try {
@@ -1850,7 +1957,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       // chain-transport error (so the daemon maps it to 504), not a bare shape.
       expect(isChainRpcTransportError(timeoutErr)).toBe(true);
       expect(populateTransaction.calls).toHaveLength(1);
-      expect(signPopulatedTransaction.calls).toHaveLength(1);
+      expect(signPreparedTransaction.calls).toHaveLength(1);
       expect(primary.broadcastTransaction.calls).toContainEqual([signedTx]);
       expect(primary.getTransactionReceipt.calls).toHaveLength(1);
       // The first hung lookup consumes the shared operation budget; the
@@ -1879,8 +1986,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
         connect: recorder(() => ({ createContextGraph: { populateTransaction } })),
       };
       (a as any).providers = [provider];
-      const signPopulatedTransaction = recorder(async () => ({ signedTx, txHash }));
-      (a as any).signPopulatedTransaction = signPopulatedTransaction;
+      const { sign: signPreparedTransaction } = stubPrepareAndSign(a, () => ({ signedTx, txHash }));
 
       const outcome = (a as any).sendContractTransaction(
         contract,
@@ -1911,7 +2017,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       expect(result.status === 'rejected' ? (result.reason as Error).message : '')
         .toContain('after 600000ms');
       expect(populateTransaction.calls).toHaveLength(1);
-      expect(signPopulatedTransaction.calls).toHaveLength(1);
+      expect(signPreparedTransaction.calls).toHaveLength(1);
       expect(provider.broadcastTransaction.calls).toContainEqual([signedTx]);
       expect(provider.getTransactionReceipt.calls.length).toBeGreaterThan(0);
     } finally {
@@ -2007,6 +2113,109 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       receipt,
     });
     expect(backup.getTransactionReceipt.calls).toEqual([]);
+  });
+
+  describe('a mined write that reverted: out-of-gas hint', () => {
+    const GAS_LIMIT = 294_443n;
+    const blockHash = '0x' + '48'.repeat(32);
+
+    async function signWithGasLimit(gasLimit: bigint) {
+      const signedTx = await new ethers.Wallet(DEPLOYER_PK).signTransaction({
+        to: '0x0000000000000000000000000000000000000001',
+        data: '0x1234',
+        gasLimit,
+        nonce: 0,
+        chainId: 31337n,
+        type: 2,
+        maxFeePerGas: 1n,
+        maxPriorityFeePerGas: 1n,
+      });
+      return { signedTx, txHash: ethers.Transaction.from(signedTx).hash! };
+    }
+
+    async function sendAndRevert(signedTx: string, txHash: string, gasUsed: bigint): Promise<any> {
+      const a = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
+      const receipt = { hash: txHash, blockNumber: 48, blockHash, status: 0, gasUsed, logs: [] };
+      (a as any).providers = [{
+        broadcastTransaction: recorder(async () => ({ hash: txHash })),
+        getTransactionReceipt: recorder(async () => receipt),
+        getBlockNumber: recorder(async () => 48),
+        getBlock: recorder(async () => ({ number: 48, hash: blockHash })),
+      }];
+      const error = await (a as any).sendSignedTransactionAndWait(signedTx, txHash, 'unit write')
+        .then(() => undefined, (err: unknown) => err);
+      expect(error).toMatchObject({ code: 'CALL_EXCEPTION', receipt });
+      return error;
+    }
+
+    it('says so when the transaction used nearly its whole gas limit', async () => {
+      const { signedTx, txHash } = await signWithGasLimit(GAS_LIMIT);
+
+      // The observed case: 416 gas short of the limit, no logs, no revert data.
+      const error = await sendAndRevert(signedTx, txHash, 294_027n);
+
+      expect(error.message).toBe(
+        `unit write tx ${txHash} was mined but reverted (status=0); ` +
+        'it used 294027 of its 294443 gas limit, so it probably ran out of gas',
+      );
+    });
+
+    it('applies when at most 1/32 of the limit is left, and not below', async () => {
+      // A call hands its callee at most 63/64 of its gas. When a callee two
+      // calls deep runs out, both callers above it keep 1/64: at most 1/32 of
+      // the limit is left when the transaction reverts.
+      const { signedTx, txHash } = await signWithGasLimit(1_280_000n);
+      const plain = `unit write tx ${txHash} was mined but reverted (status=0)`;
+
+      expect((await sendAndRevert(signedTx, txHash, 1_240_000n)).message).toBe(
+        `${plain}; it used 1240000 of its 1280000 gas limit, so it probably ran out of gas`,
+      );
+      // An ordinary revert leaves more gas unused: the message stays as it was.
+      expect((await sendAndRevert(signedTx, txHash, 1_239_999n)).message).toBe(plain);
+    });
+
+    it.each([
+      // Challenge creations that ran out of gas on a test network: status 0, no logs.
+      [476_714, 482_200], // 98.86%
+      [460_505, 466_182], // 98.78%
+      [484_904, 492_139], // 98.53%
+      [497_260, 503_787], // 98.70%
+      // The lowest share among 557 such failures in 24 days: below 63/64 (98.44%).
+      [765_413, 781_749], // 97.91%
+      // Reproduced on a local fork: the loop two calls below the transaction ran out.
+      [494_198, 501_151], // 98.61%
+    ])('recognises a callee that ran out of gas: %i used of %i', async (gasUsed, gasLimit) => {
+      const { signedTx, txHash } = await signWithGasLimit(BigInt(gasLimit));
+
+      const error = await sendAndRevert(signedTx, txHash, BigInt(gasUsed));
+
+      expect(error.message).toBe(
+        `unit write tx ${txHash} was mined but reverted (status=0); ` +
+        `it used ${gasUsed} of its ${gasLimit} gas limit, so it probably ran out of gas`,
+      );
+    });
+
+    it('leaves the message alone when the signed bytes cannot be decoded', async () => {
+      const txHash = '0x' + '34'.repeat(32);
+
+      const error = await sendAndRevert('0xdeadbeef', txHash, GAS_LIMIT);
+
+      expect(error.message).toBe(`unit write tx ${txHash} was mined but reverted (status=0)`);
+    });
+
+    it('rethrows any other rejection untouched', async () => {
+      const { signedTx } = await signWithGasLimit(GAS_LIMIT);
+      const handler = explainOutOfGasRevert(signedTx);
+      const timeout = Object.assign(new Error('no receipt yet'), { code: 'RPC_TIMEOUT' });
+      const notAnError = { receipt: { status: 0, gasUsed: GAS_LIMIT } };
+
+      expect(() => handler(timeout)).toThrow(timeout);
+      expect(timeout.message).toBe('no receipt yet');
+      let thrown: unknown;
+      try { handler(notAnError); } catch (err) { thrown = err; }
+      expect(thrown).toBe(notAnError);
+      expect(notAnError).toEqual({ receipt: { status: 0, gasUsed: GAS_LIMIT } });
+    });
   });
 
   it('signMessage returns 32-byte r and vs (no contract init)', async () => {
@@ -4170,12 +4379,13 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     (a as any).sendContractTransactionUnlocked = sendSpy;
 
     // Stop the publish/update flow right after the approval gate by throwing
-    // a sentinel at the signing step. We only need to observe the signer
-    // arguments at `ensureV10ApproveTrac` and `signPopulatedTransaction`.
+    // a sentinel at the signer-side preparation, which runs with the signer that
+    // would sign. We only need to observe the signer arguments at
+    // `ensureV10ApproveTrac` and `prepareSignerTransaction`.
     const signSpy = recorder(async (..._a: unknown[]) => {
       throw new Error('SENTINEL_STOP_AFTER_APPROVE');
     });
-    (a as any).signPopulatedTransaction = signSpy;
+    (a as any).prepareSignerTransaction = signSpy;
 
     return { a, walletA, walletB, wallets: signerPool, tokenWithSigner, sendSpy, signSpy, populateSpy, nativeByAddr, tracByAddr };
   }
@@ -4252,7 +4462,7 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     expect(approveSender).toBe(walletB);
 
     expect(signSpy.calls).toHaveLength(1);
-    // R1/OBS-1: populateAndSignAcrossProviders signs on the per-provider runner
+    // R1/OBS-1: prepareAcrossProviders prepares (and the write signs) on the per-provider runner
     // (signer.connect(providers[i])) — same key/ADDRESS as walletB, new object.
     // Assert the signer ADDRESS, not object identity (#870 "publish signed by
     // walletB, no mid-flight rotation" invariant is preserved).
@@ -4362,7 +4572,7 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     expect(approveLabel).toBe('approve V10 update TRAC');
 
     expect(signSpy.calls).toHaveLength(1);
-    // R1/OBS-1: populateAndSignAcrossProviders signs on the per-provider runner
+    // R1/OBS-1: prepareAcrossProviders prepares (and the write signs) on the per-provider runner
     // (signer.connect(providers[i])) — same key/ADDRESS as walletB, new object.
     // Assert the signer ADDRESS, not object identity (#870 "publish signed by
     // walletB, no mid-flight rotation" invariant is preserved).
@@ -4506,8 +4716,8 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     nativeByAddr.set(lc(walletA.address), 0n); nativeByAddr.set(lc(walletB.address), 0n);
     tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 0n);
-    // The signing step throws an ethers-style INSUFFICIENT_FUNDS error.
-    (a as any).signPopulatedTransaction = recorder(async () => {
+    // The signer-side preparation (nonce, gas, fees) throws an ethers-style INSUFFICIENT_FUNDS error.
+    (a as any).prepareSignerTransaction = recorder(async () => {
       const e: any = new Error('insufficient funds for gas * price + value');
       e.code = 'INSUFFICIENT_FUNDS';
       throw e;
@@ -4612,7 +4822,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
 
   it('does NOT wrap a non-funds contract revert on a funded wallet (no masking)', async () => {
     const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner()); // both abundantly funded
-    (a as any).signPopulatedTransaction = recorder(async () => {
+    (a as any).prepareSignerTransaction = recorder(async () => {
       const e: any = new Error('execution reverted: InvalidAuthorAttestation');
       e.code = 'CALL_EXCEPTION';
       throw e;
@@ -4626,7 +4836,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
   it('does NOT wrap a non-revert error (nonce) even on a zero-TRAC wallet', async () => {
     const { a, walletA, walletB, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 0n);
-    (a as any).signPopulatedTransaction = recorder(async () => {
+    (a as any).prepareSignerTransaction = recorder(async () => {
       const e: any = new Error('nonce has already been used');
       e.code = 'NONCE_EXPIRED';
       throw e;
@@ -4646,7 +4856,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       addr.toLowerCase() === walletA.address.toLowerCase());
     const params = makeV10PublishParams(walletA.address);
     params.tokenAmount = 1000n;
-    (a as any).signPopulatedTransaction = recorder(async () => {
+    (a as any).prepareSignerTransaction = recorder(async () => {
       const e: any = new Error('execution reverted: ERC20: transfer amount exceeds balance');
       e.code = 'CALL_EXCEPTION';
       throw e;
@@ -4663,7 +4873,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 0n);
     // A generic contract revert (CALL_EXCEPTION) on a short wallet must surface
     // unchanged — NOT be converted to NO_FUNDED_PUBLISHER_WALLET.
-    (a as any).signPopulatedTransaction = recorder(async () => {
+    (a as any).prepareSignerTransaction = recorder(async () => {
       const e: any = new Error('execution reverted: InvalidAuthorAttestation');
       e.code = 'CALL_EXCEPTION';
       throw e;
@@ -4681,7 +4891,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), ONE);
     const params = makeV10PublishParams(walletA.address);
     params.tokenAmount = 1000n;
-    (a as any).signPopulatedTransaction = recorder(async () => {
+    (a as any).prepareSignerTransaction = recorder(async () => {
       const e: any = new Error('execution reverted: ERC20: transfer amount exceeds balance');
       e.code = 'CALL_EXCEPTION';
       throw e;
@@ -4698,7 +4908,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
     tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 0n);
-    (a as any).signPopulatedTransaction = recorder(async () => {
+    (a as any).prepareSignerTransaction = recorder(async () => {
       const e: any = new Error('execution reverted: ERC20: transfer amount exceeds balance');
       e.code = 'CALL_EXCEPTION';
       throw e;
@@ -4713,7 +4923,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
     tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 0n);
-    (a as any).signPopulatedTransaction = recorder(async () => {
+    (a as any).prepareSignerTransaction = recorder(async () => {
       const error: any = new Error('execution reverted: TooLowBalance(0xabc, 1000, 2000)');
       error.code = 'CALL_EXCEPTION';
       throw error;
@@ -4860,6 +5070,69 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     expect(lockReadStrict.length).toBeGreaterThan(1);
     expect(lockReadStrict.filter(Boolean).length).toBeGreaterThanOrEqual(2);
     expect(coverReadStrict[0]).toBe(true);
+  });
+
+  it.each([
+    { name: 'native floor equality', native: 5n, trac: 0n, pca: true, eligible: false },
+    { name: 'direct funding', native: 10n, trac: 100n, pca: true, eligible: false },
+    { name: 'short own TRAC', native: 10n, trac: 10n, pca: true, eligible: true },
+    { name: 'TRAC floor equality', native: 10n, trac: 5n, pca: true, eligible: true },
+    { name: 'PCA disabled', native: 10n, trac: 0n, pca: false, eligible: false },
+  ])('refreshes assessed PCA eligibility: $name', async ({ native, trac, pca, eligible }) => {
+    const { a, walletA, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), 10n);
+    tracByAddr.set(lc(walletA.address), 0n);
+    const selection = await (a as any)._assessFundedCandidates([walletA], () => ({
+      kind: 'native+trac', nativeFloorWei: 5n, tracFloorWei: 5n, requiredTracWei: 100n,
+      pca: pca ? { kind: 'publish', epochs: 12 } : { kind: 'none' },
+    }), { preferIdle: false });
+    expect(selection.kind).toBe('unfunded');
+    const assessment = selection.assessments[0];
+    expect(assessment.candidate).toBe(walletA);
+    const reads = (a as any).provider.getBalance.calls.length;
+    nativeByAddr.set(lc(walletA.address), native);
+    tracByAddr.set(lc(walletA.address), trac);
+    await expect(assessment.refreshPcaEligibility()).resolves.toBe(eligible);
+    expect((a as any).provider.getBalance.calls.length).toBe(reads + 1);
+  });
+
+  it('refreshes a later wallet after an earlier PCA repricing waits', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE);
+    nativeByAddr.set(lc(walletB.address), 0n);
+    tracByAddr.set(lc(walletA.address), 0n);
+    tracByAddr.set(lc(walletB.address), 0n);
+    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    (a as any).getConvictionAgentAccountId = recorder(async (address: string) => lc(address) === lc(walletA.address) ? 41n : 42n);
+    (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => 24);
+    (a as any).convictionAccountCanCover = recorder(async (account: bigint) => account === 42n);
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    let entered!: () => void;
+    const firstReprice = new Promise<void>((resolve) => { entered = resolve; });
+    const plansByAddress = new Map<string, number>();
+    const order: string[] = [];
+    (a as any)._publisherCandidatePlan = async (signer: ethers.Wallet) => {
+      const visits = plansByAddress.get(signer.address) ?? 0;
+      plansByAddress.set(signer.address, visits + 1);
+      const base = { signer, address: signer.address, publisherAddress: signer.address };
+      if (visits === 0) return { ...base, publishEpochs: 12, tokenAmount: 120n,
+        pcaPricing: { kind: 'unavailable', error: new Error('transient lock probe') } };
+      order.push(signer.address);
+      if (signer.address === walletA.address) { entered(); await hold; }
+      return { ...base, publishEpochs: 24, tokenAmount: 240n, pcaPricing: { kind: 'available' } };
+    };
+    const pending = a.resolvePublisherPublishPlan({
+      contextGraphId: CG, billableByteSize: 100n, effectiveByteSize: 100n, defaultPublishEpochs: 12,
+    });
+    try {
+      await firstReprice;
+      expect(order).toEqual([walletA.address]);
+      nativeByAddr.set(lc(walletB.address), ONE);
+      release();
+      await expect(pending).resolves.toEqual({ publisherAddress: walletB.address, publishEpochs: 24, tokenAmount: 240n });
+      expect(order).toEqual([walletA.address, walletB.address]);
+    } finally { release(); }
   });
 
   it('reports confirmed non-coverage after failed PCA planning as insufficient funds', async () => {
@@ -5119,7 +5392,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     const params = makeV10PublishParams();
     params.tokenAmount = 1000n; // publish costs 1000 wei TRAC
     let chosenSigner: any;
-    (a as any).signPopulatedTransaction = recorder(async (signer: any) => { chosenSigner = signer; throw new Error('SENTINEL'); });
+    (a as any).prepareSignerTransaction = recorder(async (signer: any) => { chosenSigner = signer; throw new Error('SENTINEL'); });
     await expect(a.createKnowledgeAssets(params)).rejects.toThrow('SENTINEL');
     expect(chosenSigner.address).toBe(walletB.address); // dust-TRAC head skipped for the covering wallet
   });
@@ -5158,7 +5431,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       return cost <= 1n; // covers the 1-wei liveness probe only, NOT a real publish cost
     });
     let chosenSigner: any;
-    (a as any).signPopulatedTransaction = recorder(async (signer: any) => { chosenSigner = signer; throw new Error('SENTINEL'); });
+    (a as any).prepareSignerTransaction = recorder(async (signer: any) => { chosenSigner = signer; throw new Error('SENTINEL'); });
     await expect(a.createKnowledgeAssets(params)).rejects.toThrow('SENTINEL');
     expect(chosenSigner.address).toBe(walletB.address); // PCA head can't cover the REAL cost → skipped
     expect(coverCalls.length).toBe(1); // only walletA's PCA was probed (walletB fundable via own-TRAC)
@@ -5199,7 +5472,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     params.epochs = 5;
     params.tokenAmount = 1_000n;
     let chosenSigner: ethers.Wallet | undefined;
-    (a as any).signPopulatedTransaction = recorder(async (signer: ethers.Wallet) => {
+    (a as any).prepareSignerTransaction = recorder(async (signer: ethers.Wallet) => {
       chosenSigner = signer;
       throw new Error('SENTINEL');
     });
@@ -5322,6 +5595,27 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       requiredTracWei: 0n,
       pca: { kind: 'provisional-publish' as const },
     };
+
+    it.each([
+      { name: 'native balance takes precedence over TRAC', native: [2n, 1n], trac: [0n, 100n], expected: 0 },
+      { name: 'TRAC breaks equal native balances', native: [0n, 0n], trac: [1n, 2n], expected: 1 },
+      { name: 'equal balances retain candidate order', native: [0n, 0n], trac: [1n, 1n], expected: 0 },
+      { name: 'native floor equality remains unfunded', native: [100n, 99n], trac: [0n, 100n], expected: 0 },
+    ])('unfunded fallback: $name', async ({ native, trac, expected }) => {
+      const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
+      const wallets = [walletA, walletB];
+      for (const [index, wallet] of wallets.entries()) {
+        nativeByAddr.set(lc(wallet.address), native[index]);
+        tracByAddr.set(lc(wallet.address), trac[index]);
+      }
+      const chosen = await (a as any).selectSigner({
+        txClass: 'rotatable-free',
+        funding: { ...nativeAndTrac, nativeFloorWei: 100n, pca: { kind: 'none' } },
+        preferIdle: true,
+      });
+      expect(chosen).toBe(wallets[expected]);
+    });
 
     it('native-only funding gates on GAS ALONE — a gas-funded zero-TRAC wallet stays fundable', async () => {
       const { a, walletA, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
@@ -5743,16 +6037,22 @@ describe('ensureV10ApproveTrac — forced re-approve + visibility poll (#888)', 
 // PR #896 review (🔴): the forced-re-approve recovery was inlined in the
 // publish path only, leaving `updateV10` exposed to the same stale-allowance
 // race on metadata-only updates. The recovery now lives in a shared helper
-// (`populateAndSignV10WithAllowanceRecovery`) used by BOTH V10 write paths.
-// These tests pin that shared behaviour directly.
+// (`prepareV10WithAllowanceRecovery`) used by BOTH V10 write paths, which sign
+// its result once (pinned at their entry points in
+// evm-adapter-external-signer.unit.test.ts). These tests pin the shared
+// recovery directly. Preparation runs through the real endpoint loop (with a
+// stubbed signer-side population); `signSpy` records any signature, which the
+// recovery never asks for.
 function makeRecoveryAdapter() {
   const a = new EVMChainAdapter(minimalConfig());
   const ensureSpy = recorder(async (..._a: unknown[]) => {});
-  const signSpy = recorder(async (..._a: unknown[]) => ({ signedTx: '0xsigned', txHash: '0xhash' }));
   (a as any).ensureV10ApproveTrac = ensureSpy;
-  (a as any).signPopulatedTransaction = signSpy;
+  const { sign: signSpy } = stubPrepareAndSign(a, () => ({ signedTx: '0xsigned', txHash: '0xhash' }));
   return { a, ensureSpy, signSpy, signer: new ethers.Wallet(DEPLOYER_PK) };
 }
+
+/** A V10 transaction as preparation hands it over, for tests that stub the preparation loop. */
+const PREPARED_V10_TX = { transaction: { to: V10_KA_ADDRESS, data: '0xabcd' }, signer: null };
 
 const tooLowAllowanceRevert = () =>
   new Error('execution reverted: TooLowAllowance(0xTRAC, 0, 1)');
@@ -5770,7 +6070,7 @@ const rawTooLowAllowanceRevert = () => {
   return err;
 };
 
-describe('populateAndSignV10WithAllowanceRecovery — shared publish/update recovery (#888/#896)', () => {
+describe('prepareV10WithAllowanceRecovery — shared publish/update recovery (#888/#896)', () => {
 
   it('applies 25% gas headroom to every concurrent V10 publish preparation', async () => {
     const { a } = makeRecoveryAdapter();
@@ -5778,27 +6078,27 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     const signerB = new ethers.Wallet(OTHER_PK);
     let inFlight = 0;
     let maxInFlight = 0;
-    const populateAndSign = recorder(async (..._args: unknown[]) => {
+    const prepareAcross = recorder(async (..._args: unknown[]) => {
       inFlight += 1;
       maxInFlight = Math.max(maxInFlight, inFlight);
       await Promise.resolve();
       inFlight -= 1;
-      return { signedTx: '0xsigned', txHash: '0xhash' };
+      return PREPARED_V10_TX;
     });
-    (a as any).populateAndSignAcrossProviders = populateAndSign;
+    (a as any).prepareAcrossProviders = prepareAcross;
 
     await Promise.all([
-      (a as any).populateAndSignV10WithAllowanceRecovery(
+      (a as any).prepareV10WithAllowanceRecovery(
         signerA, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label A',
       ),
-      (a as any).populateAndSignV10WithAllowanceRecovery(
+      (a as any).prepareV10WithAllowanceRecovery(
         signerB, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label B',
       ),
     ]);
 
-    expect(populateAndSign.calls).toHaveLength(2);
+    expect(prepareAcross.calls).toHaveLength(2);
     expect(maxInFlight).toBe(2);
-    for (const call of populateAndSign.calls) {
+    for (const call of prepareAcross.calls) {
       expect(call[4]).toBe('V10 publish');
       expect(call[5]).toEqual({ gasLimitBufferBps: 2_500 });
     }
@@ -5806,24 +6106,22 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
 
   it('applies the same 25% gas headroom to V10 update preparation', async () => {
     const { a, signer } = makeRecoveryAdapter();
-    const populateAndSign = recorder(async (..._args: unknown[]) => (
-      { signedTx: '0xsigned', txHash: '0xhash' }
-    ));
-    (a as any).populateAndSignAcrossProviders = populateAndSign;
+    const prepareAcross = recorder(async (..._args: unknown[]) => PREPARED_V10_TX);
+    (a as any).prepareAcrossProviders = prepareAcross;
 
-    await (a as any).populateAndSignV10WithAllowanceRecovery(
+    await (a as any).prepareV10WithAllowanceRecovery(
       signer, {}, 'update', {}, V10_KA_ADDRESS, 1n, 'label',
     );
 
-    expect(populateAndSign.calls).toHaveLength(1);
-    expect(populateAndSign.calls[0][4]).toBe('V10 update');
-    expect(populateAndSign.calls[0][5]).toEqual({ gasLimitBufferBps: 2_500 });
+    expect(prepareAcross.calls).toHaveLength(1);
+    expect(prepareAcross.calls[0][4]).toBe('V10 update');
+    expect(prepareAcross.calls[0][5]).toEqual({ gasLimitBufferBps: 2_500 });
   });
 
   // The 🔴 fix: BOTH write paths recover from a pre-broadcast
   // `TooLowAllowance` revert, not just publish.
   it.each(['publish', 'update'] as const)(
-    'forces a fresh approve and retries populate+sign exactly once on a stale TooLowAllowance (%s)',
+    'forces a fresh approve and prepares again exactly once on a stale TooLowAllowance, and returns that preparation unsigned (%s)',
     async (method) => {
       const { a, ensureSpy, signSpy, signer } = makeRecoveryAdapter();
       // mockRejectedValueOnce → mockResolvedValueOnce chain as a shift()ed queue
@@ -5837,7 +6135,7 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
       )());
       const kaContract = connectable({ [method]: { populateTransaction: populate } });
 
-      const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
+      const result = await (a as any).prepareV10WithAllowanceRecovery(
         signer,
         kaContract,
         method,
@@ -5847,9 +6145,9 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
         `approve V10 ${method} TRAC (forced re-approve, #888)`,
       );
 
-      expect(result).toEqual({ signedTx: '0xsigned', txHash: '0xhash' });
+      expect(result.transaction).toMatchObject({ to: V10_KA_ADDRESS, data: '0xabcd' });
       expect(populate.calls).toHaveLength(2); // initial revert + one retry
-      expect(signSpy.calls).toHaveLength(1);  // signed only after the retry
+      expect(signSpy.calls).toEqual([]);      // the write path signs the result, once
       // forced re-approve fired once, against the right KA + with force=true.
       expect(ensureSpy.calls).toHaveLength(1);
       expect(ensureSpy.calls[0][0]).toBe(signer);
@@ -5869,7 +6167,7 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     )());
     const kaContract = connectable({ publish: { populateTransaction: populate } });
 
-    const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
+    const result = await (a as any).prepareV10WithAllowanceRecovery(
       signer,
       kaContract,
       'publish',
@@ -5879,9 +6177,9 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
       'approve V10 publish TRAC (forced re-approve, #888)',
     );
 
-    expect(result).toEqual({ signedTx: '0xsigned', txHash: '0xhash' });
+    expect(result.transaction).toMatchObject({ to: V10_KA_ADDRESS, data: '0xabcd' });
     expect(populate.calls).toHaveLength(2);
-    expect(signSpy.calls).toHaveLength(1);
+    expect(signSpy.calls).toEqual([]);
     expect(ensureSpy.calls).toHaveLength(1);
     expect(ensureSpy.calls[0][4]).toBe(true);
   });
@@ -5892,7 +6190,7 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     const kaContract = connectable({ publish: { populateTransaction: populate } });
 
     await expect(
-      (a as any).populateAndSignV10WithAllowanceRecovery(
+      (a as any).prepareV10WithAllowanceRecovery(
         signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
       ),
     ).rejects.toThrow('TooLowAllowance');
@@ -5922,20 +6220,20 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     });
     const kaContract = connectable({ publish: { populateTransaction: populate } });
 
-    const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
+    const result = await (a as any).prepareV10WithAllowanceRecovery(
       signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
     );
 
-    expect(result).toEqual({ signedTx: '0xsigned', txHash: '0xhash' });
+    expect(result.transaction).toMatchObject({ to: V10_KA_ADDRESS, data: '0xabcd' });
     expect(ensureSpy.calls).toHaveLength(1);  // EXACTLY ONE forced approve across the failover
     expect(ensureSpy.calls[0][4]).toBe(true); // force=true
-    expect(signSpy.calls).toHaveLength(1);    // publish signed exactly once (INV-1)
+    expect(signSpy.calls).toEqual([]);        // the publish signs the result, once (INV-1)
     expect(populate.calls).toHaveLength(3);   // p0(429) → p1(TooLow) → [approve] → p0(ok)
   });
 
-  it('OBS-1: a RETRYABLE populate failure fails over to the next provider and signs exactly once (no double-sign)', async () => {
+  it('OBS-1: a RETRYABLE populate failure fails over to the next provider and prepares there, unsigned', async () => {
     // Plain OBS-1 populate failover (no allowance recovery): provider #1's
-    // populate is rate-limited, provider #2 populates fine → signed once on #2.
+    // populate is rate-limited, provider #2 populates fine → prepared on #2.
     const { a, ensureSpy, signSpy, signer } = makeRecoveryAdapter();
     (a as any).providers = [{}, {}];
     const r429 = () => { const e = new Error('429 too many requests'); (e as any).status = 429; return e; };
@@ -5947,13 +6245,13 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     });
     const kaContract = connectable({ publish: { populateTransaction: populate } });
 
-    const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
+    const result = await (a as any).prepareV10WithAllowanceRecovery(
       signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
     );
 
-    expect(result).toEqual({ signedTx: '0xsigned', txHash: '0xhash' });
+    expect(result.transaction).toMatchObject({ to: V10_KA_ADDRESS, data: '0xabcd' });
     expect(populate.calls).toHaveLength(2); // p0(429) → p1(ok)
-    expect(signSpy.calls).toHaveLength(1);  // signed once, on the healthy provider
+    expect(signSpy.calls).toEqual([]);      // the write path signs the result, once
     expect(ensureSpy.calls).toEqual([]);    // no TooLowAllowance → no forced approve
   });
 
@@ -5970,21 +6268,21 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
         return error;
       };
       let call = 0;
-      const populateAndSign = recorder(async () => {
+      const prepareAcross = recorder(async () => {
         call += 1;
         if (call <= 2) throw r429();
-        return { signedTx: '0xsigned', txHash: '0xhash' };
+        return PREPARED_V10_TX;
       });
-      (a as any).populateAndSignAcrossProviders = populateAndSign;
+      (a as any).prepareAcrossProviders = prepareAcross;
 
-      const pending = (a as any).populateAndSignV10WithAllowanceRecovery(
+      const pending = (a as any).prepareV10WithAllowanceRecovery(
         signer, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label',
       );
       await vi.advanceTimersByTimeAsync(RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS);
       await vi.advanceTimersByTimeAsync(RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS * 2);
 
-      await expect(pending).resolves.toEqual({ signedTx: '0xsigned', txHash: '0xhash' });
-      expect(populateAndSign.calls).toHaveLength(3);
+      await expect(pending).resolves.toBe(PREPARED_V10_TX);
+      expect(prepareAcross.calls).toHaveLength(3);
       expect(ensureSpy.calls).toEqual([]);
     } finally {
       try { adapter?.destroy(); } catch { /* test providers may already be closed */ }
@@ -5998,16 +6296,16 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     const queueFull = Object.assign(new Error('RPC request queue is full'), {
       code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
     });
-    const populateAndSign = recorder(async () => { throw queueFull; });
-    (a as any).populateAndSignAcrossProviders = populateAndSign;
+    const prepareAcross = recorder(async () => { throw queueFull; });
+    (a as any).prepareAcrossProviders = prepareAcross;
 
     await expect(
-      (a as any).populateAndSignV10WithAllowanceRecovery(
+      (a as any).prepareV10WithAllowanceRecovery(
         signer, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label',
       ),
     ).rejects.toBe(queueFull);
 
-    expect(populateAndSign.calls).toHaveLength(1);
+    expect(prepareAcross.calls).toHaveLength(1);
     expect(ensureSpy.calls).toEqual([]);
   });
 
@@ -6018,7 +6316,7 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
 
     let thrown: any;
     try {
-      await (a as any).populateAndSignV10WithAllowanceRecovery(
+      await (a as any).prepareV10WithAllowanceRecovery(
         signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
       );
     } catch (err) {
@@ -6040,7 +6338,7 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     const kaContract = connectable({ update: { populateTransaction: populate } });
 
     await expect(
-      (a as any).populateAndSignV10WithAllowanceRecovery(
+      (a as any).prepareV10WithAllowanceRecovery(
         signer, kaContract, 'update', {}, V10_KA_ADDRESS, 0n, 'label',
       ),
     ).rejects.toThrow('NotBatchPublisher');
@@ -6074,11 +6372,11 @@ describe('pre-broadcast signal comes from the signed transaction [GH#2270]', () 
     a.init = async () => {};
     const wallet = new ethers.Wallet(SIGNER_PK);
 
-    // Drive the PRODUCTION signer. `signPopulatedTransaction` is where the one decode of the
+    // Drive the PRODUCTION signer. `signPreparedTransaction` is where the one decode of the
     // signed bytes happens, so the hash and the nonce this row asserts on are both produced by
     // the code under test — nothing is handed in. A stub provider is enough because every field
     // is prefilled; ethers only needs it to exist.
-    const signed = await a.signPopulatedTransaction(wallet.connect({
+    const signed = await prepareAndSign(a, wallet.connect({
       getNetwork: async () => ({ chainId: 31337n, name: 'stub' }),
       estimateGas: async () => 21_000n,
       getTransactionCount: async () => KNOWN_NONCE,

@@ -1,3 +1,7 @@
+import { createEncodedResponseLease } from './encoded-response-lease.js';
+import type { PreparedContentCache } from './prepared-content-cache.js';
+import { EXACT_EXPORT_METADATA_OPERATION, EXACT_EXPORT_PAYLOAD_OPERATION,
+  retryExactMetadataAdmission, retryExactPayloadAdmission, type ExactExportReadPriority } from './exact-metadata-admission.js';
 import { assertSafeIri, compareCodePoint } from '@origintrail-official/dkg-core';
 import {
   StoreResponseTooLargeError,
@@ -72,10 +76,12 @@ export interface ExactAssetEncodedExportLease {
   release(): void;
 }
 
-export type ExactAssetExportStage = 'export-metadata-before' | 'export-store-payload-query'
-  | 'export-canonical-preparation-root' | 'export-metadata-after';
+export type ExactAssetExportStage = 'export-metadata-before' | 'export-metadata-admission-retry' | 'export-store-payload-query'
+  | 'export-payload-admission-retry' | 'export-canonical-preparation-root' | 'export-metadata-after';
 
 export interface ExactAssetExportRequest {
+  /** Local admitted exports use normal capacity; other readers remain background. */
+  readonly readPriority?: ExactExportReadPriority;
   readonly contextGraphId: string;
   readonly assetUal: string;
   readonly graph: string;
@@ -106,6 +112,7 @@ export interface ExactAssetExportCache {
     exports: number;
     cacheHits: number;
     encodedCacheHits: number;
+    preparedCacheHits: number;
     encodedCacheEntries: number;
     encodedCacheBytes: number;
     fallbacks: Readonly<Partial<Record<ExactAssetExportFallbackReason, number>>>;
@@ -165,6 +172,12 @@ function invalid(): Error {
   });
 }
 
+/** An absent confirmed envelope cannot be served by the exact profile. */
+export class ExactBatchAssetMissingError extends Error {
+  readonly code = 'SYNC_EXACT_ASSET_MISSING';
+  constructor() { super('Exact asset has no confirmed export envelope'); }
+}
+
 function compareRows(a: SyncRow, b: SyncRow): number {
   return compareCodePoint(a.s, b.s) || compareCodePoint(a.p, b.p) || compareCodePoint(a.o, b.o);
 }
@@ -182,6 +195,7 @@ export function createBoundedExactAssetExportCache(params: {
   readonly ttlMs?: number;
   readonly maxEntries?: number;
   /** Test/operator construction may shrink, never raise, encoded retention. */
+  readonly preparedContentCache?: PreparedContentCache;
   readonly encodedTtlMs?: number;
   readonly encodedMaxEntries?: number;
   readonly encodedMaxBytes?: number;
@@ -212,6 +226,7 @@ export function createBoundedExactAssetExportCache(params: {
   let exports = 0;
   let cacheHits = 0;
   let encodedCacheHits = 0;
+  let preparedCacheHits = 0;
   const fallbacks: Partial<Record<ExactAssetExportFallbackReason, number>> = {};
   const refuse = (
     reason: ExactAssetExportFallbackReason,
@@ -277,14 +292,14 @@ export function createBoundedExactAssetExportCache(params: {
     throwIfAborted(request.signal);
     const metaGraph = `did:dkg:context-graph:${request.contextGraphId}/_meta`;
     let result;
-    try { result = await store.query(`
+    try { result = await retryExactMetadataAdmission(() => store.query(`
       SELECT ?predicate ?object WHERE {
         GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(request.assetUal)}> ?predicate ?object }
       } LIMIT ${METADATA_MAX_ROWS + 1}
     `, {
-      source: 'sync.responder.exactAssetExport.metadata', priority: 'background',
+      source: EXACT_EXPORT_METADATA_OPERATION, priority: request.readPriority ?? 'background',
       signal: request.signal, maxResponseBytes: METADATA_MAX_BYTES,
-    }); } catch (error) {
+    }), request.signal, waitMs => observeExactBatch(() => request.onStage?.('export-metadata-admission-retry', waitMs)), request.readPriority); } catch (error) {
       if (error instanceof StoreResponseTooLargeError) {
         if (expected?.expectedIdentity !== undefined) throw changed();
         return refuse('metadata-profile', request);
@@ -307,7 +322,12 @@ export function createBoundedExactAssetExportCache(params: {
     const { identity, confirmed: parsed } = metadata;
     throwIfAborted(request.signal);
     if (expected?.expectedIdentity !== undefined && identity !== expected.expectedIdentity) throw changed();
-    if (parsed.state !== 'confirmed') throw invalid();
+    if (parsed.state !== 'confirmed') {
+      if (parsed.state === 'absent' && expected === undefined) {
+        throw new ExactBatchAssetMissingError();
+      }
+      throw invalid();
+    }
     if (metadata.accessPolicy !== 'public') {
       if (metadata.accessPolicy !== 'absent' || parsed.envelope.privateTripleCount !== 0
         || !request.authorizeMissingAccessPolicy || (await request.authorizeMissingAccessPolicy()) !== true) {
@@ -400,7 +420,7 @@ export function createBoundedExactAssetExportCache(params: {
       let retained = false;
       try {
         stageStarted = performance.now();
-        const payload = await readBoundedGraphPayload(store, request.graph, {
+        const payload = await retryExactPayloadAdmission(() => readBoundedGraphPayload(store, request.graph, {
           expectedQuadCount: request.expectedRows, outputGraph: request.graph, canonicalGraph: '',
           profile: {
             maxRows: EXACT_ASSET_EXPORT_MAX_ROWS, maxResponseBytes: EXACT_ASSET_EXPORT_MAX_STORE_BYTES,
@@ -408,14 +428,14 @@ export function createBoundedExactAssetExportCache(params: {
             rowOverheadBytes: 160, heapAccounting: 'output-graph',
           },
           queryOptions: {
-            source: 'sync.responder.exactAssetExport.payload', priority: 'background', signal: request.signal,
+            source: EXACT_EXPORT_PAYLOAD_OPERATION, priority: request.readPriority ?? 'background', signal: request.signal,
           },
           onQuerySettled: () => {
             // Includes scheduler wait, HTTP/body settlement and JSON decoding.
             observeStage('export-store-payload-query', stageStarted);
             stageStarted = performance.now();
           },
-        });
+        }), request.signal, ms => observeExactBatch(() => request.onStage?.('export-payload-admission-retry', ms)), request.readPriority);
         throwIfAborted(request.signal);
         if (payload.status === 'refused') return refuse(payload.reason, request);
         const { heapBytes } = payload;
@@ -522,12 +542,15 @@ export function createBoundedExactAssetExportCache(params: {
   return {
     stats() {
       pruneEncoded();
-      return Object.freeze({ exports, cacheHits, encodedCacheHits,
+      return Object.freeze({ exports, cacheHits, encodedCacheHits, preparedCacheHits,
         encodedCacheEntries: encodedCache.size, encodedCacheBytes,
         fallbacks: Object.freeze({ ...fallbacks }) });
     },
-    acquire: acquireRows,
-    async acquireEncoded(scope) {
+    acquire: request => acquireRows({ ...request, readPriority: request.readPriority ?? 'background' }),
+    async acquireEncoded(input) {
+      // Capture scheduling policy so later lease callbacks do not depend on
+      // the caller's async scope or subsequent mutation of its request object.
+      const scope = { ...input, readPriority: input.readPriority ?? 'background' };
       throwIfAborted(scope.signal);
       if (!canReadWholeAsset) return refuse('store-capability', scope);
       const started = performance.now();
@@ -542,11 +565,38 @@ export function createBoundedExactAssetExportCache(params: {
         s: request.assetUal, p: row.predicate, o: row.object, g: metadata.metaGraph,
       }))));
       if (metaBytes.byteLength > EXACT_BATCH_MAX_FRAME_BYTES) return refuse('metadata-profile', request);
-      const metaDigest = bytesToHex(sha256(metaBytes));
       const { key: revision, reusable } = sourceRevision(request.graph, metadata.metaGraph);
       const key = encodedKey(request, metadata, revision);
       pruneEncoded();
+      // Disk keys exclude process-local write generations. The full confirmed
+      // metadata identity selects an immutable assertion across restarts; fresh
+      // authority and the current process's revision fence still apply.
+      const diskKey = encodedKey(request, metadata, null);
       const hit = reusable ? encodedCache.get(key) : undefined;
+      if (!hit && reusable && params.preparedContentCache) {
+        const readId = Symbol('prepared-content-read');
+        const rejected = reserve(readId, `${key}:prepared-read`, 0, RESPONSE_RESERVATION_BYTES, () => {});
+        if (rejected) return refuse('response-admission', request, rejected.reason);
+        let transferred = false;
+        try {
+          const prepared = await params.preparedContentCache.get(diskKey);
+          throwIfAborted(request.signal);
+          if (prepared) {
+            if (sourceRevision(request.graph, metadata.metaGraph).key !== revision) throw changed();
+            // Keep the read reservation as response ownership even if memory retention declines.
+            const body = prepared.body; // get() transfers ownership; retention below makes its own copy.
+            retainEncoded(key, body, prepared.plainBytes, metadata.identity);
+            const response = createEncodedResponseLease({ metadata: metaBytes, body, plainBytes: prepared.plainBytes,
+              identity: metadata.identity, wholePayloadExports: 0, encodingDurationMs: 0 }, {
+              assertCurrent: () => assertEncodedCurrent(request, metadata.identity, revision),
+              release: () => { budget.remove(readId); },
+            }, { changed, invalid });
+            preparedCacheHits++;
+            transferred = true;
+            return response;
+          }
+        } finally { if (!transferred) budget.remove(readId); }
+      }
       if (hit && Date.now() - hit.lastUsedAt < encodedTtlMs) {
         // Only the independently verified immutable assertion copy is reused.
         // On revisionless stores this is not evidence that present physical
@@ -566,23 +616,14 @@ export function createBoundedExactAssetExportCache(params: {
           hit.lastUsedAt = Date.now();
           encodedCache.delete(key); encodedCache.set(key, hit);
           encodedCacheHits += 1;
-          return Object.freeze({ metadata: metaBytes, body, plainBytes: hit.plainBytes, identity: hit.identity,
-            wholePayloadExports: 0 as const, encodingDurationMs: 0,
-            async assertCurrent() {
-              if (response.released) throw changed();
-              await assertEncodedCurrent(request, hit.identity, revision);
-              if (bytesToHex(sha256(metaBytes)) !== metaDigest) throw invalid();
-            },
-            release() {
-              response.release(() => {
-                if (Date.now() - hit.lastUsedAt >= encodedTtlMs) {
-                  discardEncoded(hit);
-                  return false;
-                }
-                return true;
-              });
-            },
-          });
+          return createEncodedResponseLease({ metadata: metaBytes, body, plainBytes: hit.plainBytes, identity: hit.identity,
+            wholePayloadExports: 0, encodingDurationMs: 0 }, {
+            assertCurrent: () => assertEncodedCurrent(request, hit.identity, revision),
+            release: () => response.release(() => {
+              if (Date.now() - hit.lastUsedAt >= encodedTtlMs) { discardEncoded(hit); return false; }
+              return true;
+            }),
+          }, { changed, invalid });
         } catch (error) {
           response.release(() => true);
           throw error;
@@ -605,29 +646,15 @@ export function createBoundedExactAssetExportCache(params: {
         if (body.byteLength < 1 || body.byteLength > EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES
           || plainBytes > EXACT_SYNC_GZIP_MAX_INFLATED_BYTES) throw invalid();
         const encodingDurationMs = performance.now() - encodeStarted;
-        const digest = bytesToHex(sha256(body));
-        let released = false;
-        let retained = false;
-        const encoded = Object.freeze({ metadata: metaBytes, body, plainBytes, identity: rows.identity,
-          wholePayloadExports: rows.wholePayloadExports ?? 1, encodingDurationMs,
-          async assertCurrent() {
-            if (released) throw changed();
-            await rows.assertCurrent();
-            if (bytesToHex(sha256(metaBytes)) !== metaDigest) throw invalid();
-            // The cold response is caller-owned until promotion. Never retain
-            // bytes changed by a send adapter or another response consumer.
-            if (bytesToHex(sha256(body)) !== digest) throw invalid();
-            if (!retained && reusable) {
-              retainEncoded(key, body, plainBytes, rows.identity);
-              retained = true;
-            }
-          },
-          release() {
-            if (released) return;
-            released = true;
-            rows.release();
-          },
-        });
+        const encoded = createEncodedResponseLease({ metadata: metaBytes, body, plainBytes, identity: rows.identity,
+          wholePayloadExports: rows.wholePayloadExports ?? 1, encodingDurationMs }, {
+          assertCurrent: () => rows.assertCurrent(), release: () => rows.release(),
+          publish: reusable ? () => {
+            retainEncoded(key, body, plainBytes, rows.identity);
+            // Disk publication must not alias the caller's mutable response buffer.
+            return params.preparedContentCache?.put(diskKey, { body: body.slice(), plainBytes });
+          } : undefined,
+        }, { changed, invalid });
         transferred = true;
         return encoded;
       } finally {

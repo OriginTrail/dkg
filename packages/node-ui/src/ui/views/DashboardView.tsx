@@ -16,6 +16,7 @@ import {
 import { formatEth, formatEthTooltip } from '../lib/formatEth.js';
 import { nativeGasSymbol } from '../lib/nativeGasSymbol.js';
 import { PcaDashboardRow } from '../pages/conviction/PcaDashboardRow.js';
+import { dashboardSizePresentation } from './dashboard-size-presentation.js';
 
 // Single user-facing description shown inside the My Context Graphs
 // card (one line, no separate footnote — round-2 feedback: the split
@@ -436,11 +437,9 @@ function CgRow({
             )
             : mem.partial
               ? (
-                // Some (not all) memory layers failed — the counts are
-                // a lower bound, not exact. Mark with a "~" + tooltip so
-                // the row doesn't silently undercount (Codex).
-                <span title="Partial — one or more memory layers were unavailable; counts are a lower bound">
-                  ~{abbrev(entities.total)} <span className="v10-cg-dim">entities</span> · ~{abbrev(triples.total)} <span className="v10-cg-dim">triples</span>
+                // More layers can reveal residue and reduce canonical triple totals.
+                <span title="Loaded preview only — some memory layers are capped or unavailable; total triples may increase or decrease as layers load">
+                  {entities.total.toLocaleString()}+ <span className="v10-cg-dim">entities</span> · ~{triples.total.toLocaleString()} <span className="v10-cg-dim">triples · loaded preview</span>
                 </span>
               )
               : <>{abbrev(entities.total)} <span className="v10-cg-dim">entities</span> · {abbrev(triples.total)} <span className="v10-cg-dim">triples</span></>}
@@ -472,16 +471,12 @@ export function DashboardView() {
   const { data: wb, loading: wbLoading, error: wbError } = useFetch(api.fetchWalletsBalances, [], 30_000);
   const { openTab } = useTabsStore();
   const { setActiveProject } = useProjectsStore();
-  const { myCgs, identity, identityLoading, cgsLoading } = useMyContextGraphs();
-  // Older daemons with no `callerInvolved` resolve membership only once
-  // the agent identity (curator-DID fallback) arrives. Until then an
-  // empty list is "not known yet", not a real zero — show a loading
-  // state rather than a false "0 / No context graphs yet" flash (Codex).
-  // Suppress the "no context graphs" empty state until BOTH the
-  // identity AND the first CG-list fetch have settled — on a cold load
-  // one can settle before the other, briefly flashing a false empty
-  // state (Codex).
-  const cgsResolving = (identityLoading || cgsLoading) && myCgs.length === 0;
+  const { myCgs, identity, identityLoading, cgsError, identityError, inventoryLoading, inventoryError, retry } = useMyContextGraphs();
+  const inventoryFailed = Boolean(inventoryError);
+  const cgsResolving = inventoryLoading && myCgs.length === 0;
+  const graphCount = inventoryFailed ? (myCgs.length ? `~${myCgs.length}` : '—') : myCgs.length;
+  const emptyInventoryMessage = inventoryFailed ? 'Context graph inventory is unavailable.'
+    : cgsResolving ? 'Loading context graphs…' : 'No context graphs yet.';
 
   const [reports, setReports] = useState<Record<string, CgReport>>({});
   const onReport = useCallback((id: string, r: CgReport) => {
@@ -563,6 +558,7 @@ export function DashboardView() {
       hasCgs,
     };
   }, [myCgs, reports]);
+  const sizePresentation = dashboardSizePresentation(agg);
 
   // Curator vs joined split for the My Context Graphs card bar — same
   // isCurator rule CgRow uses for the Role badge (round-2 feedback).
@@ -618,12 +614,20 @@ export function DashboardView() {
         </p>
       </div>
 
+      {inventoryFailed ? (
+        <div role="alert" className="v10-cg-empty">
+          {cgsError ? 'Context graph list could not be loaded. ' : ''}
+          {identityError ? 'Agent identity could not be loaded. ' : ''}
+          {myCgs.length ? 'Showing the last available graphs; counts may be incomplete. ' : 'Graph availability is unknown. '}
+          <button type="button" disabled={inventoryLoading} onClick={() => { void retry(); }}>Retry</button>
+        </div>
+      ) : null}
       <div className="v10-dash-stats v10-dash-stats-3">
         <StatCard
           label="My Context Graphs"
           className="v10-stat-tight"
           icon={<Share2 size={13} aria-hidden />}
-          value={cgsResolving ? <span className="v10-stat-loading">loading…</span> : myCgs.length}
+          value={cgsResolving ? <span className="v10-stat-loading">loading…</span> : graphCount}
           accentColor="var(--accent-blue)"
           sub={CG_DEFINITION}
         >
@@ -631,7 +635,7 @@ export function DashboardView() {
             <RoleBar
               curator={roleSplit.curator}
               joined={roleSplit.joined}
-              refreshing={identityLoading}
+              refreshing={identityLoading || Boolean(identityError)}
             />
           ) : null}
         </StatCard>
@@ -650,48 +654,22 @@ export function DashboardView() {
               <div className="v10-cg-size-metric">
                 <div className="v10-cg-size-num">
                   <span className="v10-cg-size-big">
-                    {/* Mixed (some rows on the summary fallback, some
-                        live) → "~" approximate prefix; pure all-fallback
-                        keeps the bare number under the explicit
-                        "summary" label below (Codex). */}
-                    {agg.sizeApprox && !agg.triplesUnknown ? '~' : ''}
-                    {agg.entities.total.toLocaleString()}
+                    {sizePresentation.entityValue}
                   </span>
-                  {agg.triplesUnknown ? (
-                    // Pure fallback: number is the published
-                    // Knowledge-Asset summary, NOT the all-layer entity
-                    // count — different unit, labelled explicitly.
-                    <span
-                      className="v10-cg-dim"
-                      title="Live entity count unavailable — showing the published Knowledge-Asset summary (not the full WM/SWM/VM entity total)"
-                    >
-                      Knowledge Assets (summary)
-                    </span>
-                  ) : agg.sizeApprox ? (
-                    <span
-                      className="v10-cg-dim"
-                      title="Some context graphs reported only their Knowledge-Asset summary — this total mixes summary and live counts and is approximate"
-                    >
-                      entities / KA · approx.
-                    </span>
-                  ) : (
-                    <span className="v10-cg-dim">entities / Knowledge Assets</span>
-                  )}
+                  <span className="v10-cg-dim" title={sizePresentation.entityTitle}>{sizePresentation.entityLabel}</span>
                 </div>
                 {/* Hide the proportion bar whenever any row fell back —
                     the WM/SWM/VM breakdown is unreliable then. */}
-                {agg.triplesUnknown || agg.sizeApprox ? null : <LayerBar counts={agg.entities} />}
+                {sizePresentation.showLayerBars ? <LayerBar counts={agg.entities} /> : null}
               </div>
               <div className="v10-cg-size-metric">
                 <div className="v10-cg-size-num">
                   <span className="v10-cg-size-big">
-                    {agg.triplesUnknown
-                      ? '—'
-                      : `${agg.sizeApprox ? '~' : ''}${agg.triples.total.toLocaleString()}`}
+                    {sizePresentation.tripleValue}
                   </span>
-                  <span className="v10-cg-dim">triples</span>
+                  <span className="v10-cg-dim">{sizePresentation.tripleLabel}</span>
                 </div>
-                {agg.triplesUnknown || agg.sizeApprox ? null : <LayerBar counts={agg.triples} />}
+                {sizePresentation.showLayerBars ? <LayerBar counts={agg.triples} /> : null}
               </div>
               <LayerLegend />
             </div>
@@ -699,9 +677,9 @@ export function DashboardView() {
           <div className="stat-sub">
             {agg.hasCgs
               ? (agg.sizePartial
-                  ? 'Some context graphs could not report size; total is partial.'
+                  ? 'Partial preview — some memory layers are capped or unavailable. Context graphs may contain more entities; triple totals may increase or decrease as layers load.'
                   : 'Totals across all your context graphs, summed over Working, Shared Working & Verifiable Memory. Knowledge Assets are entities that have been published to Verifiable Memory.')
-              : 'No context graphs yet.'}
+              : emptyInventoryMessage}
           </div>
         </StatCard>
         <StatCard
@@ -716,7 +694,7 @@ export function DashboardView() {
               // exact figure that silently excludes those graphs (Codex).
               : agg.agentsPartial ? `~${agg.agentCount}` : agg.agentCount}
           sub={!agg.hasCgs
-            ? 'No context graphs yet.'
+            ? emptyInventoryMessage
             : agg.agentsPartial
               ? 'Some context graphs could not report agents; count is partial.'
               : "Unique agents — your own and others' — allow-listed and collaborating across your context graphs."}
@@ -731,10 +709,12 @@ export function DashboardView() {
               <Share2 size={13} aria-hidden />
               <h3>My Context Graphs</h3>
             </div>
-            <span className="v10-dash-section-badge">{myCgs.length}</span>
+            <span className="v10-dash-section-badge">{cgsResolving ? '…' : graphCount}</span>
           </div>
           {cgsResolving ? (
             <p className="v10-cg-empty">Loading context graphs…</p>
+          ) : inventoryFailed && myCgs.length === 0 ? (
+            <p className="v10-cg-empty">Context graphs could not be confirmed. Retry the failed request above.</p>
           ) : myCgs.length === 0 ? (
             <p className="v10-cg-empty">
               No context graphs yet — create or join one from the sidebar.

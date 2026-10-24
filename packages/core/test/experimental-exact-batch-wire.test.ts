@@ -52,8 +52,12 @@ describe('experimental exact batch bounded framing', () => {
   });
   it('allows only the closed wire refusal vocabulary', async () => {
     expect(await decoded(encodeExactBatchFrame(refuse('RESOURCE_LIMIT')))).toEqual([refuse('RESOURCE_LIMIT')]);
+    expect(await decoded(encodeExactBatchFrame(refuse('BUSY')))).toEqual([refuse('BUSY')]);
     expect(() => encodeExactBatchFrame(refuse('raw sensitive error'))).toThrow('Unknown');
-
+    // The vocabulary is exact: no case folding and no prefix match.
+    for (const near of ['busy', 'BUSY ', 'BUSY_RETRY']) {
+      expect(() => encodeExactBatchFrame(refuse(near))).toThrow('Unknown');
+    }
   });
 });
 
@@ -67,6 +71,7 @@ describe('fixed exact-batch wire byte compatibility', () => {
     [frame(K.ACK, 0, 1), '444b4231050000000000000100000000'],
     [frame(K.BATCH_END, 255, 10), '444b423106ff00000000000a00000000'],
     [refuse('DENIED'), '444b423107ff0000000000000000000644454e494544'],
+    [refuse('BUSY'), '444b423107ff0000000000000000000442555359'],
   ])('preserves the frozen bytes for kind %j', async (item, hex) => {
     const bytes = Uint8Array.from(hex.match(/../g)!.map(byte => Number.parseInt(byte, 16)));
     expect(encodeExactBatchFrame(item)).toEqual(bytes);

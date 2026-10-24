@@ -5,6 +5,7 @@ import { GossipSubManager } from '../src/gossipsub-manager.js';
 import { DKGEvent, TypedEventBus } from '../src/event-bus.js';
 import { PeerDiscoveryManager } from '../src/discovery.js';
 import { multiaddr } from '@multiformats/multiaddr';
+import { peerIdFromString } from '@libp2p/peer-id';
 
 async function connectNodes(a: DKGNode, b: DKGNode): Promise<void> {
   const bAddr = b.multiaddrs[0];
@@ -55,6 +56,41 @@ describe('DKGNode', () => {
     const peers = node1.libp2p.getPeers().map((p) => p.toString());
     expect(peers).toContain(node2.peerId);
   }, 10000);
+
+  it('advertises a protocol registered after peers have already identified', async () => {
+    const node1 = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
+    const node2 = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
+    nodes.push(node1, node2);
+    await node1.start();
+    await node2.start();
+    // Install the listener before dialing. Otherwise a slow initial Identify
+    // exchange could include lateProtocol and make this test pass without Push.
+    const initialIdentify = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        node1.libp2p.removeEventListener('peer:identify', onIdentify);
+        reject(new Error('Initial peer identification timed out'));
+      }, 6_000);
+      const onIdentify = (event: CustomEvent<{ peerId: { toString(): string } }>) => {
+        if (event.detail.peerId.toString() !== node2.peerId) return;
+        clearTimeout(timeout);
+        node1.libp2p.removeEventListener('peer:identify', onIdentify);
+        resolve();
+      };
+      node1.libp2p.addEventListener('peer:identify', onIdentify);
+    });
+    await node1.libp2p.dial(multiaddr(node2.multiaddrs[0]));
+    await initialIdentify;
+
+    const remotePeer = peerIdFromString(node2.peerId);
+    const lateProtocol = '/test/late-sync-advertisement/1.0.0';
+    const initialProtocols = (await node1.libp2p.peerStore.get(remotePeer)).protocols;
+    expect(initialProtocols.length).toBeGreaterThan(0);
+    expect(initialProtocols).not.toContain(lateProtocol);
+    new ProtocolRouter(node2).register(lateProtocol, async () => new Uint8Array());
+    await vi.waitFor(async () => {
+      expect((await node1.libp2p.peerStore.get(remotePeer)).protocols).toContain(lateProtocol);
+    }, { timeout: 6_000, interval: 100 });
+  }, 10_000);
 
   it('getConnections returns ConnectionInfo with direct transport for local peers', async () => {
     const node1 = new DKGNode({

@@ -1,3 +1,10 @@
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
+import * as recoveryGraph from '../src/durable-recovery-graph.js';
+import * as recoveryExecution from '../src/durable-recovery-execution.js';
+import * as recoveryAuthority from '../src/durable-recovery-authority.js';
+import * as exactRecovery from '../src/exact-recovery-execution.js';
+import { fixtureRoot } from './verified-asset-root-fixture.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
@@ -87,12 +94,15 @@ vi.mock('../src/sync/requester/finalized-swm-twin-reconciliation.js', async (imp
 import { PROTOCOL_SYNC_CHANGELOG, createOperationContext } from '@origintrail-official/dkg-core';
 import { resolveSyncGlobalBackpressure, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
 import { createDurableSyncAccumulator } from '../src/sync/durable-progress.js';
+import { exactAssetFetchSessionPolicy } from '../src/sync/requester/exact-durable-fetch.js';
+import { createUalOnlyExactAssetSelection } from '../src/sync/exact-assets.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
   durableSyncRequestPageSize,
   LifecycleSyncMethods,
 } from '../src/dkg-agent-lifecycle.js';
 import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
+import { continueContextGraphSubscriptionLine } from '../src/context-graph-subscription-policy.js';
 import {
   runDurableSync,
   runDurableSyncDetailed,
@@ -136,6 +146,20 @@ function graphScopedAsset(
 ): VerifiedGraphScopedAsset {
   const rootHex = Array.from(root, (byte) => byte.toString(16).padStart(2, '0')).join('');
   return {
+      merkleRootHex: fixtureRoot([
+      {
+        subject: ual,
+        predicate: `${DKG}merkleRoot`,
+        object: `"${rootHex}"`,
+        graph: metaGraph,
+      },
+      {
+        subject: ual,
+        predicate: `${DKG}transactionHash`,
+        object: `"0x${assertionVersion.toString(16).padStart(64, '0')}"`,
+        graph: metaGraph,
+      },
+    ]),
     contextGraphId,
     ual,
     assertionVersion,
@@ -189,7 +213,7 @@ async function captureGraphScopedStore(
     contextGraphBindingState: new ContextGraphBindingState(),
     wireIdToLocalCgId: new Map(),
     graphScopedStoreClosed: false,
-    graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
+    workLifetime: new AgentWorkLifetime(),
     bindSubscriptionOnChainId: vi.fn(),
     persistContextGraphSyncStateStrict: vi.fn(),
     processDurableBatchInWorker: async () => ({}),
@@ -240,6 +264,8 @@ describe('durable sync lifecycle chain binding', () => {
   });
 
   beforeEach(() => {
+    // This suite isolates legacy lifecycle ownership with a partial host.
+    vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '0');
     mockedRunDurableSync.mockClear();
     mockedRunDurableSyncDetailed.mockClear();
     mockedMaterialize.mockClear();
@@ -253,6 +279,7 @@ describe('durable sync lifecycle chain binding', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it.each(['ordinary-first', 'callback-first', 'two-callbacks'] as const)(
@@ -305,7 +332,7 @@ describe('durable sync lifecycle chain binding', () => {
       let release!: () => void;
       const started = new Promise<void>(resolve => { entered = resolve; });
       const held = new Promise<void>(resolve => { release = resolve; });
-      const physical = vi.spyOn(LifecycleSyncMethods.prototype, 'runLegacyDurableSyncForContextGraphDetailed')
+      const physical = vi.spyOn(recoveryGraph, 'runAdmittedDurableGraph')
         .mockImplementationOnce(async () => {
           entered();
           await held;
@@ -536,35 +563,94 @@ describe('durable sync lifecycle chain binding', () => {
     });
   });
 
+  it.each(['durable', 'graph'] as const)('normalizes selection and freshness once before the %s executor', async entry => {
+    const selected = createUalOnlyExactAssetSelection([ual]);
+    const explicit = exactAssetFetchSessionPolicy(selected);
+    const refreshed = exactAssetFetchSessionPolicy(selected, 'vm-update-refresh');
+    const execute = vi.spyOn(recoveryExecution, 'runDurableRecovery')
+      .mockResolvedValue({ admission: 'work-started', result: {} as any });
+    const graphExecute = vi.spyOn(recoveryGraph, 'runAdmittedDurableGraph')
+      .mockResolvedValue({ result: {} as any });
+    const signal = new AbortController().signal;
+    for (const [input, expected] of [
+      [{ exactAssetFetchPolicy: explicit, exactAssetSelection: createUalOnlyExactAssetSelection([ual.replace('/1', '/2')]), forceFreshExactSession: true }, explicit],
+      [{ exactAssetSelection: selected, forceFreshExactSession: true }, refreshed],
+      [{ exactAssetSelection: selected }, explicit],
+    ] as const) {
+      const options = { ...input, signal };
+      if (entry === 'durable') {
+        await LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed.call(
+          {} as any, ctx, 'peer', [contextGraphId], undefined, undefined, undefined, options,
+        );
+      } else {
+        await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraphDetailed.call(
+          {} as any, ctx, 'peer', contextGraphId, 1, options,
+        );
+      }
+      const forwarded = entry === 'durable' ? execute.mock.calls.at(-1)![0].options : graphExecute.mock.calls.at(-1)![0].options;
+      expect(forwarded).toMatchObject({ signal, exactAssetFetchPolicy: expected });
+      expect(forwarded).not.toHaveProperty('exactAssetSelection');
+      expect(forwarded).not.toHaveProperty('forceFreshExactSession');
+      expect(forwarded).not.toHaveProperty('registeredPublicEvidence');
+    }
+  });
+
+  it('resolves ordinary authority once and shares the internal executor with snapshot recovery', async () => {
+    const ordinaryAuthority = { coalescing: 'allowed' } as any;
+    const snapshotAuthority = { coalescing: 'owner-only' } as any;
+    const registeredPublicEvidence = {} as any;
+    const resolve = vi.spyOn(recoveryAuthority, 'createRecoveryAuthority')
+      .mockReturnValue(ordinaryAuthority);
+    const execute = vi.spyOn(recoveryExecution, 'runDurableRecovery')
+      .mockResolvedValue({ result: {} as any, exactFetchDisposition: 'found' });
+    const reenterPublic = vi.fn(() => { throw new Error('Internal recovery must not re-enter public SDK normalization'); });
+    const agentLike = { runLegacyDurableSyncDetailed: reenterPublic } as any;
+    const signal = new AbortController().signal;
+    await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed.call(
+      agentLike, 'fixture-peer', contextGraphId, [ual], { registeredPublicEvidence, signal },
+    );
+    await exactRecovery.runExactRecovery({ host: (DKGAgentBase as any).createDurableRecoveryCapabilities(agentLike), ctx: createOperationContext('sync'), remotePeerId: 'fixture-peer', contextGraphId: contextGraphId, policy: exactAssetFetchSessionPolicy(createUalOnlyExactAssetSelection([ual])), authority: snapshotAuthority, options: { signal } });
+    expect(resolve).toHaveBeenCalledOnce();
+    expect(resolve.mock.calls[0][1]).toEqual({ registeredPublicEvidence });
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute.mock.calls[0][0].authority).toBe(ordinaryAuthority);
+    expect(execute.mock.calls[1][0].authority).toBe(snapshotAuthority);
+    for (const call of execute.mock.calls) {
+      expect(call[0].options).toMatchObject({ signal, source: 'vm-recovery', priority: 1_000 });
+      expect(call[0].options).not.toHaveProperty('registeredPublicEvidence');
+    }
+    expect(reenterPublic).not.toHaveBeenCalled();
+  });
+
   it.each<ExactRecoveryTransportMode>(['legacy', 'stream-preferred', 'stream-required'])(
     'passes the closed %s transport decision through exact durable dispatch', async exactRecoveryTransportMode => {
-      const runLegacyDurableSyncDetailed = vi.fn(async () => ({
+      const runDurableSyncWithAuthority = vi.spyOn(recoveryExecution, 'runDurableRecovery').mockResolvedValue({
         admission: 'work-started' as const,
         result: {} as Awaited<ReturnType<typeof runDurableSync>>,
         exactFetchDisposition: 'incomplete' as const,
-      }));
+      });
       const signal = new AbortController().signal;
       const onWorkStarted = vi.fn();
       const isCurrent = () => true;
       await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed.call(
-        { runLegacyDurableSyncDetailed } as any, 'fixture-peer', contextGraphId,
+        {} as any, 'fixture-peer', contextGraphId,
         { kind: 'ual-only', assetUals: [ual] },
         { exactRecoveryTransportMode, signal, onWorkStarted, isCurrent },
       );
-      expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).toMatchObject({
+      expect(runDurableSyncWithAuthority.mock.calls[0]?.[0].options).toMatchObject({
         exactRecoveryTransportMode, signal, onWorkStarted, isCurrent,
-        exactAssetSelection: { kind: 'ual-only', assetUals: [ual] },
+        exactAssetFetchPolicy: { kind: 'durable-materialization', selection: { kind: 'ual-only', assetUals: [ual] }, forceFreshSession: false, allowDurableCheckpoints: true },
       });
     },
   );
 
   it('selects the dedicated field-sized exact-recovery transfer policy', async () => {
     const physicalResult = {} as Awaited<ReturnType<typeof runDurableSync>>;
-    const runLegacyDurableSyncDetailed = vi.fn(async () => ({
+    const runDurableSyncWithAuthority = vi.spyOn(recoveryExecution, 'runDurableRecovery').mockResolvedValue({
       result: physicalResult,
       exactFetchDisposition: 'clean-absent' as const,
-    }));
-    const agentLike = { runLegacyDurableSyncDetailed };
+    });
+    const agentLike = {};
     const exactUal = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/1';
     const controller = new AbortController();
 
@@ -576,9 +662,9 @@ describe('durable sync lifecycle chain binding', () => {
       { signal: controller.signal },
     );
 
-    expect(runLegacyDurableSyncDetailed).toHaveBeenCalledTimes(1);
-    expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).toMatchObject({
-      exactAssetSelection: { kind: 'ual-only', assetUals: [exactUal] },
+    expect(runDurableSyncWithAuthority).toHaveBeenCalledTimes(1);
+    expect(runDurableSyncWithAuthority.mock.calls[0]?.[0].options).toMatchObject({
+      exactAssetFetchPolicy: { kind: 'durable-materialization', selection: { kind: 'ual-only', assetUals: [exactUal] }, forceFreshSession: false, allowDurableCheckpoints: true },
       stopOnBackoffWorthyFailure: true,
       priority: 1_000,
       // The admission SOURCE is what makes this show up as `durable:vm-recovery`
@@ -588,8 +674,83 @@ describe('durable sync lifecycle chain binding', () => {
       source: 'vm-recovery',
       signal: controller.signal,
     });
-    expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).not.toHaveProperty('totalTimeoutMs');
+    expect(runDurableSyncWithAuthority.mock.calls[0]?.[0].options).not.toHaveProperty('totalTimeoutMs');
     expect(detailed).toEqual({ result: physicalResult, disposition: 'clean-absent' });
+  });
+
+  it('forwards a caller deadline through the real exact-sync lifecycle boundary', async () => {
+    const runDurableSyncWithAuthority = vi.spyOn(recoveryExecution, 'runDurableRecovery').mockResolvedValue({
+      result: {} as Awaited<ReturnType<typeof runDurableSync>>,
+      exactFetchDisposition: 'incomplete' as const,
+    });
+    await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed.call(
+      {} as any,
+      '12D3KooWExactRecoveryPeer',
+      '0x1111111111111111111111111111111111111111/public-recovery',
+      { kind: 'ual-only', assetUals: ['did:dkg:base:84532/0x1111111111111111111111111111111111111111/1'] },
+      { totalTimeoutMs: 120_000 },
+    );
+    expect(runDurableSyncWithAuthority.mock.calls[0]?.[0].options).toMatchObject({
+      totalTimeoutMs: 120_000,
+      stopOnBackoffWorthyFailure: true,
+      source: 'vm-recovery',
+    });
+  });
+
+  it.each(['complete', 'responder-busy', 'stream-interrupted', undefined] as const)(
+    'carries the stream outcome %s from the per-graph run to the exact-sync result', async (outcome) => {
+      const perGraph = vi.spyOn(recoveryGraph, 'runAdmittedDurableGraph')
+        .mockResolvedValue({
+          result: {} as Awaited<ReturnType<typeof runDurableSync>>,
+          exactFetchDisposition: outcome === 'complete' ? 'found' : 'incomplete',
+          ...(outcome === undefined ? {} : { exactStreamOutcome: outcome }),
+        });
+      const agentLike: any = {
+        config: {},
+        runContextGraphSyncWithBackpressure: async (
+          _ctx: unknown, _contextGraphId: string, _lane: string, _operationId: string,
+          work: () => Promise<unknown>,
+        ) => work(),
+        log: { info: () => {}, warn: () => {}, debug: () => {} },
+      };
+      agentLike.runLegacyDurableSyncDetailed = LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed;
+
+      const settled = await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed.call(
+        agentLike,
+        '12D3KooWExactStreamOutcomePeer',
+        contextGraphId,
+        [ual],
+        { exactRecoveryTransportMode: 'stream-required' },
+      );
+
+      expect(perGraph).toHaveBeenCalledOnce();
+      expect(settled.disposition).toBe(outcome === 'complete' ? 'found' : 'incomplete');
+      if (outcome === undefined) expect(settled).not.toHaveProperty('streamOutcome');
+      else expect(settled.streamOutcome).toBe(outcome);
+    });
+
+  it('reports no stream outcome for a run over several graphs', async () => {
+    vi.spyOn(recoveryGraph, 'runAdmittedDurableGraph')
+      .mockResolvedValue({
+        result: {} as Awaited<ReturnType<typeof runDurableSync>>,
+        exactFetchDisposition: 'incomplete',
+        exactStreamOutcome: 'responder-busy',
+      });
+    const agentLike: any = {
+      config: {},
+      runContextGraphSyncWithBackpressure: async (
+        _ctx: unknown, _contextGraphId: string, _lane: string, _operationId: string,
+        work: () => Promise<unknown>,
+      ) => work(),
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+    const detailed = await LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed.call(
+      agentLike, ctx, 'peer-multi-stream', ['stream-cg-one', 'stream-cg-two'],
+      undefined, undefined, undefined,
+      { exactAssetSelection: createUalOnlyExactAssetSelection([ual]) },
+    );
+    expect(detailed.exactFetchDisposition).toBe('incomplete');
+    expect(detailed).not.toHaveProperty('exactStreamOutcome');
   });
 
   it('projects the public exact-sync result from the detailed implementation', async () => {
@@ -978,6 +1139,24 @@ describe('durable sync lifecycle chain binding', () => {
     expect(runChangelogLane).toHaveBeenCalledTimes(1);
     expect(runLegacyDurableSync).not.toHaveBeenCalled();
 
+    const selected = createUalOnlyExactAssetSelection([ual]);
+    const selectedOptions = [
+      { exactAssetSelection: selected, forceFreshExactSession: true },
+      { exactAssetFetchPolicy: exactAssetFetchSessionPolicy(selected, 'vm-update-refresh') },
+    ];
+    for (const options of selectedOptions) {
+      await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
+        agentLike, 'peer-changelog-capable', [contextGraphId], undefined, undefined, undefined, options,
+      );
+      expect(runChangelogLane).toHaveBeenCalledTimes(1);
+      expect(runLegacyDurableSync.mock.calls.at(-1)?.[6]).toBe(options);
+    }
+    await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
+      agentLike, 'peer-changelog-capable', [contextGraphId], undefined, undefined, undefined,
+      { forceFreshExactSession: true },
+    );
+    expect(runChangelogLane).toHaveBeenCalledTimes(2);
+
     const controller = new AbortController();
     controller.abort(new Error('caller cancelled before lane selection'));
     await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
@@ -989,9 +1168,9 @@ describe('durable sync lifecycle chain binding', () => {
       undefined,
       { signal: controller.signal },
     );
-    expect(runChangelogLane).toHaveBeenCalledTimes(1);
-    expect(runLegacyDurableSync).toHaveBeenCalledTimes(1);
-    expect(runLegacyDurableSync.mock.calls[0]?.[6]).toMatchObject({
+    expect(runChangelogLane).toHaveBeenCalledTimes(2);
+    expect(runLegacyDurableSync).toHaveBeenCalledTimes(3);
+    expect(runLegacyDurableSync.mock.calls.at(-1)?.[6]).toMatchObject({
       signal: controller.signal,
     });
   });
@@ -1097,7 +1276,7 @@ describe('durable sync lifecycle chain binding', () => {
       contextGraphBindingState: new ContextGraphBindingState(),
       wireIdToLocalCgId: new Map(),
       graphScopedStoreClosed: false,
-      graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
+      workLifetime: new AgentWorkLifetime(),
       bindSubscriptionOnChainId,
       persistContextGraphSyncStateStrict,
       processDurableBatchInWorker: async () => ({}),
@@ -1128,6 +1307,20 @@ describe('durable sync lifecycle chain binding', () => {
     expect(storeGraphScopedAsset).toBeTypeOf('function');
 
     const asset: VerifiedGraphScopedAsset = {
+      merkleRootHex: fixtureRoot([
+        {
+          subject: ual,
+          predicate: `${DKG}merkleRoot`,
+          object: `"${rootHex}"`,
+          graph: metaGraph,
+        },
+        {
+          subject: ual,
+          predicate: `${DKG}transactionHash`,
+          object: `"0x${'02'.padStart(64, '0')}"`,
+          graph: metaGraph,
+        },
+      ]),
       contextGraphId,
       ual,
       assertionVersion: 2n,
@@ -1401,6 +1594,65 @@ describe('durable sync lifecycle chain binding', () => {
     expect(agentLike.invalidateListContextGraphsCache).toHaveBeenCalled();
   });
 
+  it.each([
+    ['the root graph', undefined],
+    ['a named subgraph', 'code'],
+  ] as const)(
+    'retires the legacy marker in the namespace of a twin retired from %s',
+    async (_label, subGraphName) => {
+      const root = new Uint8Array(32);
+      root[31] = 2;
+      const chain = {
+        chainId: 'otp:2043',
+        getLatestMerkleRoot: async () => root,
+        getMerkleRootCount: async () => 2n,
+        getKAContextGraphId: async () => 14n,
+        getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+        getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+        verifyKAUpdate: async () => ({
+          verified: true,
+          onChainMerkleRoot: root,
+          blockNumber: 123,
+          txIndex: 4,
+          merkleRootCount: 2n,
+        }),
+      } as ChainAdapter;
+      // The reconciler derives the twin's namespace from the authenticated
+      // asset and hands it to the retirement callback.
+      mockedReconcileFinalizedSwmTwin.mockImplementationOnce(async ({ retire }) => {
+        await retire({
+          contextGraphId,
+          kaUal: ual,
+          agentAddress: '0x1111111111111111111111111111111111111111',
+          kaNumber: 1n,
+          swmGraph: 'urn:swm',
+          ...(subGraphName === undefined ? {} : { subGraphName }),
+        } satisfies FinalizedSwmTwinRetirement);
+        return 'retired';
+      });
+      const retireLegacySwmAfterVerifiedVmTwin = vi.fn(async () => {});
+      const warnings = vi.fn();
+      const storeGraphScopedAsset = await captureGraphScopedStore(chain, warnings, {
+        onAgentLike: (value) => {
+          value.retireLegacySwmAfterVerifiedVmTwin = retireLegacySwmAfterVerifiedVmTwin;
+        },
+      });
+
+      await expect(storeGraphScopedAsset(
+        graphScopedStoreRequest(graphScopedAsset(root), Date.now() + 60_000),
+      )).resolves.toBe('applied');
+
+      // A root marker must never be retired on the evidence of a subgraph twin.
+      expect(retireLegacySwmAfterVerifiedVmTwin).toHaveBeenCalledExactlyOnceWith({
+        contextGraphId,
+        kaUal: ual,
+        assertionVersion: 2n,
+        subGraphName,
+      });
+      expect(warnings).not.toHaveBeenCalled();
+    },
+  );
+
   it('maps already-retired SWM recovery evidence to metadata suppression at the lifecycle boundary', async () => {
     let disposition: unknown;
     mockedReconcileFinalizedSwmTwinFromDescriptor.mockResolvedValueOnce(
@@ -1671,7 +1923,7 @@ describe('durable sync lifecycle chain binding', () => {
       contextGraphBindingState: new ContextGraphBindingState(),
       wireIdToLocalCgId: new Map(),
       graphScopedStoreClosed: false,
-      graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
+      workLifetime: new AgentWorkLifetime(),
       bindSubscriptionOnChainId: vi.fn(
         (_localId: string, sub: typeof subscription, onChainId: string) => {
           sub.onChainId = onChainId;
@@ -1704,6 +1956,20 @@ describe('durable sync lifecycle chain binding', () => {
     const asset = (kaNumber: number): VerifiedGraphScopedAsset => {
       const assetUal = `did:dkg:otp:2043/0x1111111111111111111111111111111111111111/${kaNumber}`;
       return {
+      merkleRootHex: fixtureRoot([
+          {
+            subject: assetUal,
+            predicate: `${DKG}merkleRoot`,
+            object: `"${rootHex}"`,
+            graph: metaGraph,
+          },
+          {
+            subject: assetUal,
+            predicate: `${DKG}transactionHash`,
+            object: `"0x${'02'.padStart(64, '0')}"`,
+            graph: metaGraph,
+          },
+        ]),
         contextGraphId,
         ual: assetUal,
         assertionVersion: 2n,
@@ -1805,7 +2071,7 @@ describe('durable sync lifecycle chain binding', () => {
     const chain = {
       chainId: 'otp:2043',
       getLatestMerkleRoot: async () => {
-        physicalRunsSeenByAdapter = agentLike.graphScopedStorePhysicalRuns.size;
+        physicalRunsSeenByAdapter = agentLike.workLifetime.physicalRuns.size;
         return root;
       },
       getMerkleRootCount: async () => 2n,
@@ -1828,10 +2094,10 @@ describe('durable sync lifecycle chain binding', () => {
       graphScopedAsset(root),
       Date.now() + 120_000,
     ));
-    expect(agentLike.graphScopedStorePhysicalRuns.size).toBe(1);
+    expect(agentLike.workLifetime.physicalRuns.size).toBe(1);
     await expect(pending).resolves.toBe('applied');
     expect(physicalRunsSeenByAdapter).toBe(1);
-    expect(agentLike.graphScopedStorePhysicalRuns.size).toBe(0);
+    expect(agentLike.workLifetime.physicalRuns.size).toBe(0);
   });
 
   it('rejects an ordinary durable asset when its subscription rebinds during authentication', async () => {
@@ -1871,7 +2137,7 @@ describe('durable sync lifecycle chain binding', () => {
       contextGraphBindingState: new ContextGraphBindingState(),
       wireIdToLocalCgId: new Map(),
       graphScopedStoreClosed: false,
-      graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
+      workLifetime: new AgentWorkLifetime(),
       bindSubscriptionOnChainId,
       persistContextGraphSyncStateStrict,
       processDurableBatchInWorker: async () => ({}),
@@ -1913,6 +2179,162 @@ describe('durable sync lifecycle chain binding', () => {
     expect(syncCheckpoints).toEqual(new Map([['unchanged', 17]]));
     expect(subscription).toEqual({ subscribed: true, onChainId: '14', lastReconciledOrdinal: 9 });
     expect(agentLike.subscribedContextGraphs.get(contextGraphId)).toBe(reboundSubscription);
+  });
+
+  /** What the subscription setter does when it stores `next` over the live row. */
+  function storeAgain(agent: any, next: Record<string, unknown>): void {
+    continueContextGraphSubscriptionLine(
+      agent.subscribedContextGraphs.get(contextGraphId),
+      next as never,
+    );
+    agent.subscribedContextGraphs.set(contextGraphId, next);
+  }
+
+  /**
+   * Run one graph-scoped store whose authentication waits on a chain read, and
+   * apply `whileAuthenticating` to the live rows before that read answers.
+   */
+  async function storeWithRowChangeDuringAuthentication(
+    captured: Record<string, unknown>,
+    whileAuthenticating: (agentLike: any) => void,
+  ) {
+    const root = new Uint8Array(32);
+    let releaseRoot!: () => void;
+    let markRootReadStarted!: () => void;
+    const rootReadStarted = new Promise<void>((resolve) => { markRootReadStarted = resolve; });
+    const rootGate = new Promise<void>((resolve) => { releaseRoot = resolve; });
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => {
+        markRootReadStarted();
+        await rootGate;
+        return root;
+      },
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+      getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+      verifyKAUpdate: async () => ({
+        verified: true,
+        onChainMerkleRoot: root,
+        blockNumber: 123,
+        txIndex: 4,
+        merkleRootCount: 2n,
+      }),
+    } as ChainAdapter;
+    let agentLike!: any;
+    const storeGraphScopedAsset = await captureGraphScopedStore(chain, vi.fn(), {
+      onAgentLike: (created) => {
+        agentLike = created;
+        created.subscribedContextGraphs.set(contextGraphId, captured);
+        created.persistContextGraphSyncStateStrict = vi.fn(async () => {});
+      },
+    });
+    const pending = storeGraphScopedAsset(graphScopedStoreRequest(
+      graphScopedAsset(root),
+      Date.now() + 120_000,
+    ));
+    await rootReadStarted;
+    whileAuthenticating(agentLike);
+    releaseRoot();
+    return { pending, agentLike };
+  }
+
+  it('stores a durable asset whose subscription row was stored again with the same binding during authentication', async () => {
+    const captured = { subscribed: true, syncMode: 'always-on', synced: false, onChainId: '14', metaSynced: true };
+    // What a repeated subscribe or a catch-up readiness result stores: the
+    // same admission and binding, other readiness bookkeeping.
+    const storedAgain = { ...captured, sharedMemorySynced: false, lastReconciledOrdinal: 3 };
+    mockedMaterialize.mockImplementationOnce(async request => {
+      expect(request.isCurrent?.()).toBe(true);
+      return 'applied';
+    });
+    const { pending, agentLike } = await storeWithRowChangeDuringAuthentication(
+      captured,
+      (agent) => storeAgain(agent, storedAgain),
+    );
+
+    await expect(pending).resolves.toBe('applied');
+    expect(mockedMaterialize).toHaveBeenCalledOnce();
+    expect(agentLike.bindSubscriptionOnChainId).not.toHaveBeenCalled();
+    expect(agentLike.persistContextGraphSyncStateStrict).not.toHaveBeenCalled();
+    expect(agentLike.subscribedContextGraphs.get(contextGraphId)).toBe(storedAgain);
+    // The completed operation must no longer authorize escaped storage work.
+    expect(mockedMaterialize.mock.calls[0]![0].isCurrent?.()).toBe(false);
+  });
+
+  it('binds the row that was stored again, not the one the store started under', async () => {
+    const captured = { subscribed: true, syncMode: 'always-on', synced: false };
+    const storedAgain = { ...captured, sharedMemorySynced: false };
+    const { pending, agentLike } = await storeWithRowChangeDuringAuthentication(
+      captured,
+      (agent) => storeAgain(agent, storedAgain),
+    );
+
+    await expect(pending).resolves.toBe('applied');
+    expect(agentLike.persistContextGraphSyncStateStrict).toHaveBeenCalledWith(
+      contextGraphId,
+      { ...storedAgain, onChainId: '14', lastReconciledOrdinal: 0 },
+      'on-chain id binding',
+      expect.any(Function),
+    );
+    expect(agentLike.bindSubscriptionOnChainId).toHaveBeenCalledOnce();
+    expect(agentLike.bindSubscriptionOnChainId.mock.calls[0]![1]).toBe(storedAgain);
+  });
+
+  it.each([
+    ['is no longer subscribed', (row: Record<string, unknown>) => ({ ...row, subscribed: false })],
+    ['became core-hosted', (row: Record<string, unknown>) => ({ ...row, coreHosted: true })],
+    ['changed its lifetime', (row: Record<string, unknown>) => ({ ...row, syncMode: 'on-demand' })],
+    ['is bound to another name commitment', (row: Record<string, unknown>) => ({ ...row, onChainHash: `0x${'ab'.repeat(32)}` })],
+    ['lost its metadata proof', (row: Record<string, unknown>) => ({ ...row, metaSynced: false })],
+    ['waits for metadata again', (row: Record<string, unknown>) => ({ ...row, pendingMeta: true })],
+    ['went away', () => undefined],
+  ] as const)('still refuses a durable asset whose row %s during authentication', async (_what, change) => {
+    const captured = { subscribed: true, syncMode: 'always-on', synced: false, onChainId: '14', metaSynced: true };
+    const { pending, agentLike } = await storeWithRowChangeDuringAuthentication(captured, (agent) => {
+      const next = change(captured);
+      if (next === undefined) agent.subscribedContextGraphs.delete(contextGraphId);
+      else storeAgain(agent, next);
+    });
+
+    await expect(pending).rejects.toMatchObject({
+      name: 'AbortError',
+      message: expect.stringContaining('changed during graph-scoped store'),
+    });
+    expect(mockedMaterialize).not.toHaveBeenCalled();
+    expect(agentLike.bindSubscriptionOnChainId).not.toHaveBeenCalled();
+    expect(agentLike.persistContextGraphSyncStateStrict).not.toHaveBeenCalled();
+  });
+
+  it('still refuses a durable asset when its subscription was deleted and subscribed again during authentication', async () => {
+    // A fresh, unbound subscription: its binding generation is 0, and it is 0
+    // again after the subscription is deleted and the graph subscribed anew.
+    const captured = { subscribed: true, syncMode: 'always-on', synced: false };
+    const { pending, agentLike } = await storeWithRowChangeDuringAuthentication(captured, (agent) => {
+      agent.subscribedContextGraphs.delete(contextGraphId);
+      agent.contextGraphBindingState.delete(contextGraphId);
+      agent.subscribedContextGraphs.set(contextGraphId, { ...captured });
+    });
+
+    await expect(pending).rejects.toMatchObject({
+      name: 'AbortError',
+      message: expect.stringContaining('changed during graph-scoped store'),
+    });
+    expect(mockedMaterialize).not.toHaveBeenCalled();
+    expect(agentLike.bindSubscriptionOnChainId).not.toHaveBeenCalled();
+    expect(agentLike.persistContextGraphSyncStateStrict).not.toHaveBeenCalled();
+  });
+
+  it('still refuses a row stored again with the same fields once its binding generation moved', async () => {
+    const captured = { subscribed: true, syncMode: 'always-on', synced: false, onChainId: '14', metaSynced: true };
+    const { pending } = await storeWithRowChangeDuringAuthentication(captured, (agent) => {
+      storeAgain(agent, { ...captured });
+      agent.contextGraphBindingState.bump(contextGraphId);
+    });
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(mockedMaterialize).not.toHaveBeenCalled();
   });
 
   it('cancels and retries a hung root read within the graph deadline', async () => {

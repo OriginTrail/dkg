@@ -768,34 +768,60 @@ describe('RPC request transport', () => {
   it('paces concurrent governed sends as independent single-entry HTTP requests', async () => {
     const rpc = await startLoopbackRpc();
     servers.push(rpc);
+    // Keep refill time independent of real HTTP/CI scheduling. Otherwise the
+    // 50 ms permit window can expire before the observer sees the first hit.
+    let governorNowMs = 0;
     const governor = new RpcRequestGovernor({
       maxRequestsPerSecond: 20,
       foregroundReservePercent: 0,
       burstRequests: 1,
       maxQueueSize: 8,
       startupJitterMs: 0,
+    }, {
+      clock: {
+        now: () => governorNowMs,
+        random: () => 0,
+        setTimeout,
+        clearTimeout,
+      },
     });
     const provider = createRpcRequestProvider(rpc.url, {
       maxRetries: 0,
       admission: governor,
     });
+    const controller = new AbortController();
+    const sends: Promise<unknown>[] = [];
     try {
-      const first = provider._send({
+      const first = withOwnedRpcRequestContext({ signal: controller.signal }, () => provider._send({
         id: 1, jsonrpc: '2.0', method: 'eth_blockNumber', params: [],
-      });
-      const second = provider._send({
+      }));
+      const second = withOwnedRpcRequestContext({ signal: controller.signal }, () => provider._send({
         id: 2, jsonrpc: '2.0', method: 'eth_chainId', params: [],
-      });
+      }));
+      sends.push(first, second);
+      const both = Promise.all(sends);
+      // Own an unexpected rejection even while asserting the queued state.
+      void both.catch(() => {});
       await expect.poll(() => governor.snapshot().foregroundQueued).toBe(1);
-      await expect.poll(() => rpc.totalHits()).toBe(1);
-      await Promise.all([first, second]);
+      await first;
+      expect(rpc.totalHits()).toBe(1);
+      governorNowMs = 49;
+      expect(governor.snapshot()).toMatchObject({
+        foregroundAdmitted: 1,
+        foregroundQueued: 1,
+      });
+      governorNowMs = 50;
+      await both;
       expect(rpc.totalHits()).toBe(2);
+      expect(rpc.httpRequestMethods()).toEqual([['eth_blockNumber'], ['eth_chainId']]);
       expect(governor.snapshot()).toMatchObject({
         foregroundAdmitted: 2,
         foregroundQueued: 0,
       });
     } finally {
+      controller.abort(new Error('test teardown'));
       provider.destroy();
+      await Promise.allSettled(sends);
     }
   });
 

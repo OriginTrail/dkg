@@ -96,6 +96,11 @@ describe('network admission when the peer connects mid-probe', () => {
     const address = foreign.multiaddrs.find((entry) => entry.includes('/tcp/') && !entry.includes('/p2p-circuit'));
     expect(address).toBeDefined();
 
+    // Exercise rejection in one direction. Otherwise the foreign node's
+    // automatic reciprocal probe can reject and disconnect local before local
+    // receives the real signed foreign proof, yielding a transient empty stream.
+    foreign.networkAdmission.markVerifiedSameNetwork(local.peerId);
+
     // The first connection is allowed so identity admission can ask for a
     // signed proof. Production admission then closes it and installs the
     // transport refusal before libp2p's reconnect machinery reacts.

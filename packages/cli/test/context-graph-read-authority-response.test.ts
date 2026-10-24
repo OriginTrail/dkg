@@ -224,6 +224,20 @@ describe('read-authority 503 attribution in the daemon log (#2834)', () => {
     expect(fromDecision.headers['x-dkg-operation-id']).toBe(ctx.operationId);
     expect(lineFor(ctx.operationId).message).toContain('source=legacy-local reason=response-test-d dependency=store');
   });
+
+  it('names the detail code of a thrown marker in the log and keeps it out of the response', () => {
+    const ctx = createOperationContext('query');
+    const res = mockResponse();
+    const withDetail = Object.assign(attributed('unknown', 'response-test-e'), { detailCode: 'replica-proof-timeout' });
+
+    expect(respondIfContextGraphReadAuthorityUnavailable(res, withDetail, ctx)).toBe(true);
+
+    expect(lineFor(ctx.operationId).message)
+      .toContain('source=registered-chain reason=response-test-e dependency=unknown detail=replica-proof-timeout');
+    expect(res.statusCode).toBe(503);
+    expect(res.body).not.toContain('replica-proof-timeout');
+    expect(res.body).not.toContain('response-test-e');
+  });
 });
 
 describe('corsHeaders', () => {

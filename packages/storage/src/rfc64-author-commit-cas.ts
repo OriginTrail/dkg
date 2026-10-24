@@ -12,9 +12,11 @@ import {
   decodeRfc64AuthorCommitPlanV1,
   finalizeRfc64AuthorCommitPlanV1,
   mapRfc64AuthorCommitPlanV1,
+  rfc64AuthorCommitControlTermsV1,
   sourceFromRfc64AuthorCommitPlanV1,
   type NormalizedRfc64AuthorCommitCasV1,
   type Rfc64AuthorCommitCasMapperV1,
+  type Rfc64AuthorCommitControlTermV1,
   type Rfc64AuthorCommitGraphReplacementPlanV1,
   type Rfc64AuthorCommitGuardPlanV1,
   type Rfc64AuthorCommitPredicateReplacementPlanV1,
@@ -25,6 +27,7 @@ export type {
   NormalizedRfc64LegacyAuthorCommitCasV1,
   NormalizedRfc64SemanticAuthorCommitCasV1,
   Rfc64AuthorCommitCasMapperV1,
+  Rfc64AuthorCommitControlTermV1,
   Rfc64AuthorCommitGraphReplacementPlanV1,
   Rfc64AuthorCommitGuardPlanV1,
   Rfc64AuthorCommitPredicateReplacementPlanV1,
@@ -143,6 +146,12 @@ export interface Rfc64AuthorCommitCasUpdateV1 {
   readonly receiptAsk: string;
   readonly receiptGraph: string;
   readonly semanticQuads: readonly Quad[];
+  /**
+   * Every input term the update interpolates besides `semanticQuads`
+   * (`rfc64AuthorCommitControlTermsV1` in the plan codec). The storage
+   * adapters check both against the absolute-IRI rule.
+   */
+  readonly controlTerms: readonly Rfc64AuthorCommitControlTermV1[];
   readonly touchedGraphs: readonly string[];
 }
 
@@ -635,6 +644,7 @@ export function buildRfc64AuthorCommitCasUpdateFromNormalizedV1(
     receiptAsk: `ASK WHERE { ${receiptPattern} }`,
     receiptGraph,
     semanticQuads: manifest.semanticQuads,
+    controlTerms: rfc64AuthorCommitControlTermsV1(manifest),
     touchedGraphs: manifest.touchedGraphs,
   });
 }

@@ -1,4 +1,4 @@
-import { AsyncLocalStorage } from 'node:async_hooks';
+import { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';
 import { performance } from 'node:perf_hooks';
 import { availableParallelism } from 'node:os';
 import {
@@ -13,6 +13,7 @@ import {
   STORE_WORK_PRIORITIES,
   type StorePressureSnapshot,
   type StoreWorkPriority,
+  type TripleStore,
 } from './triple-store.js';
 import {
   STORE_OPERATION_OUTCOME_TAG,
@@ -40,6 +41,24 @@ export function withDefaultStoreWorkPriority<T>(priority: StoreWorkPriority, fn:
 /** The ambient default lane in effect here, if a caller set one. */
 export function activeDefaultStoreWorkPriority(): StoreWorkPriority | undefined {
   return defaultStoreWorkPriority.getStore();
+}
+
+/**
+ * How many operations of one shared lane `store` admits at once, or undefined
+ * when the store does not say. Without `priority` it answers for the lane that
+ * unprioritised work started here runs in. A caller that fans out reads uses
+ * it as its width: a wider fan-out only queues the surplus behind its own
+ * siblings, where each read waits against the queue deadline.
+ */
+export function storeLaneInflightLimit(
+  store: Pick<TripleStore, 'getPressureSnapshot'>,
+  priority: StoreWorkPriority = activeDefaultStoreWorkPriority() ?? 'normal',
+): number | undefined {
+  const snapshot = store.getPressureSnapshot?.();
+  const limit = priority === 'background'
+    ? snapshot?.backgroundInflightLimit
+    : priority === 'normal' ? snapshot?.normalInflightLimit : undefined;
+  return Number.isSafeInteger(limit) && (limit as number) > 0 ? limit : undefined;
 }
 
 export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
@@ -188,6 +207,7 @@ const MIN_ACK_SAFE_MAX_CONCURRENT = DEFAULT_ACK_RESERVED_SLOTS + 1;
 const DEFAULT_HEALTH_RESERVED_SLOTS = 1;
 const DEFAULT_NORMAL_RESERVED_SLOTS = 1;
 const DEFAULT_BACKGROUND_RESERVED_SLOTS = 1;
+const MAX_CONTENDED_NORMAL_DISPATCHES = 8;
 export const DEFAULT_STORE_QUEUE_LIMIT = 64;
 export const DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS = 10_000;
 
@@ -334,6 +354,8 @@ export class StorePriorityScheduler extends ObservableScheduler {
   private readonly reportTimeout?: ReturnType<typeof createRateLimitedStoreTimeoutDiagnosticReporter>;
   private readonly queueLimits: StorePriorityQueueLimits;
   private readonly nonAckLanePolicy: NonAckLanePolicy;
+  private readonly shareSingleOrdinarySlot: boolean;
+  private contendedNormalDispatches = 0;
 
   constructor(options?: StorePrioritySchedulerOptions);
   /** @deprecated Use the named options object. Retained for package compatibility. */
@@ -406,6 +428,10 @@ export class StorePriorityScheduler extends ObservableScheduler {
       requestedNormalFloor,
       requestedBackgroundFloor,
     );
+    // A physical background reserve would exclude normal work from the sole
+    // ordinary slot. Preserve requested background progress by sharing turns.
+    this.shareSingleOrdinarySlot = this.nonAckLanePolicy.totalLimit === 1
+      && requestedBackgroundFloor > 0;
     this.queueWaitTimeoutMs = resolvedQueueWaitTimeoutMs;
     this.now = resolvedNow;
     this.reportTimeout = options.timeoutDiagnosticSink
@@ -452,6 +478,8 @@ export class StorePriorityScheduler extends ObservableScheduler {
       healthReservedSlots: this.healthReservedSlots,
       normalReservedSlots: this.nonAckLanePolicy.normalFloor,
       backgroundReservedSlots: this.nonAckLanePolicy.backgroundFloor,
+      normalInflightLimit: this.nonAckLanePolicy.totalLimit,
+      backgroundInflightLimit: this.nonAckLanePolicy.backgroundLimit,
       ackQueueLimit: this.queueLimits.ack,
       healthQueueLimit: this.queueLimits.health,
       normalQueueLimit: this.queueLimits.normal,
@@ -497,7 +525,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
         storeOperation: metadata?.storeOperation,
         queuedAt: this.now(),
         pressureTicket,
-        work,
+        work: AsyncResource.bind(work),
         resolve,
         reject,
         signal,
@@ -550,9 +578,15 @@ export class StorePriorityScheduler extends ObservableScheduler {
   }
 
   private nextRunnable(): QueueEntry<unknown> | undefined {
+    if (this.queues.background.length === 0) this.contendedNormalDispatches = 0;
     for (const priority of STORE_WORK_PRIORITIES) {
       const queue = this.queues[priority];
       if (queue.length === 0) continue;
+      if (priority === 'normal' && this.shareSingleOrdinarySlot
+        && this.contendedNormalDispatches >= MAX_CONTENDED_NORMAL_DISPATCHES
+        && this.queues.background.length > 0 && this.canStart('background')) {
+        return this.queues.background.shift();
+      }
       if (!this.canStart(priority)) continue;
       return queue.shift();
     }
@@ -581,6 +615,9 @@ export class StorePriorityScheduler extends ObservableScheduler {
   }
 
   private start(entry: QueueEntry<unknown>): void {
+    if (entry.priority === 'background') this.contendedNormalDispatches = 0;
+    else if (entry.priority === 'normal' && this.shareSingleOrdinarySlot
+      && this.queues.background.length > 0) this.contendedNormalDispatches += 1;
     this.cleanupQueuedEntry(entry);
     this.increment(entry.priority);
     const startedAt = this.now();
@@ -666,8 +703,14 @@ export class StorePriorityScheduler extends ObservableScheduler {
   }
 
   private observeDuration(entry: QueueEntry<unknown>, startedAt: number, outcome: 'ok' | 'error'): void {
+    const durationMs = Math.max(0, this.now() - startedAt);
+    getMetrics().storeSchedulerOperationDurationMs.record(durationMs, {
+      priority: entry.priority,
+      operation: metricOperation(entry.operation),
+      outcome,
+    });
     if (entry.priority !== 'ack') return;
-    getMetrics().storageAckStoreOpDurationMs.record(Math.max(0, this.now() - startedAt), {
+    getMetrics().storageAckStoreOpDurationMs.record(durationMs, {
       operation: metricOperation(entry.operation),
       outcome,
     });

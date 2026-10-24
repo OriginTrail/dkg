@@ -1,3 +1,4 @@
+import { isBoundPromoteRequest } from './bound-promote-request.js';
 /**
  * Async Promote Queue — utils.
  *
@@ -269,6 +270,9 @@ function isPromoteRequest(value: unknown): value is PromoteRequest {
   if (value['subGraphName'] !== undefined && typeof value['subGraphName'] !== 'string') return false;
   if (value['agentAddress'] !== undefined && typeof value['agentAddress'] !== 'string') return false;
   if (value['authorAgentAddress'] !== undefined && typeof value['authorAgentAddress'] !== 'string') return false;
+  if (value['recoveryBinding'] !== undefined) {
+    return isBoundPromoteRequest(value);
+  }
   const entities = value['entities'];
   if (entities === 'all') return true;
   return Array.isArray(entities) && entities.every((e) => typeof e === 'string' && e.length > 0);
@@ -328,6 +332,7 @@ export function classifyJobPayload(binding: string | undefined): PromoteJobParse
     // state), so — like every other malformed field — it is `malformed`, never `unknown`.
     if (typeof parsed['state'] !== 'string' || parsed['state'].length === 0) return { kind: 'malformed' };
     if (!isPromoteRequest(parsed['request'])) return { kind: 'malformed' };
+    if (parsed['request'].recoveryBinding !== undefined && parsed['formatVersion'] !== 4) return { kind: 'malformed' };
     if (!isFiniteNumber(parsed['enqueuedAt']) || !isFiniteNumber(parsed['updatedAt'])) return { kind: 'malformed' };
     if (!isRecord(parsed['attempt'])) return { kind: 'malformed' };
     if (!isFiniteNumber(parsed['attempt']['count']) || !isFiniteNumber(parsed['attempt']['maxRetries'])) {
@@ -380,14 +385,7 @@ export function postCommitRecoveryExhaustedReason(attempts: number): string {
   return `automatic post-commit recovery exhausted after ${attempts} attempts; needs operator inspection`;
 }
 
-/**
- * Default exponential backoff: 1m, 2m, 4m, 8m, 15m (cap). Caller passes
- * 1-indexed attempt count.
- */
-export function defaultBackoffMs(attemptCount: number): number {
-  const base = 60_000 * 2 ** Math.max(0, attemptCount - 1);
-  return Math.min(base, 15 * 60_000);
-}
+export { defaultBackoffMs, createDefaultPromoteBackoff } from './promote-retry-policy.js';
 
 /**
  * Stable sort key for queued/failed_retrying jobs: oldest `nextRetryAt`

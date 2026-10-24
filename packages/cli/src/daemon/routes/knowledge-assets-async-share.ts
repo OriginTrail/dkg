@@ -1,3 +1,6 @@
+import { classifyPromoteAdmissionError, promoteConflictResponse } from './promote-admission-response.js';
+import { PromoteJobCancellationConflictError } from '@origintrail-official/dkg-publisher';
+import { hasNodeOperatorReadAccess, requireContextGraphReadAuthority } from './context-graph-read-authority.js';
 // daemon/routes/knowledge-assets-async-share.ts
 //
 // Async SWM-share queue routes for the GitHub-shaped Knowledge Asset HTTP
@@ -22,7 +25,7 @@
 // error mapping, and response shapes are identical to the legacy handlers.
 // Shared logic lives in `./shared-assertion-helpers.js`.
 
-import type { RequestContext } from "./context.js";
+import { type RequestContext } from "./context.js";
 import { authenticatedAgentAddress } from '../../auth.js';
 import { respondTerminalClearOutcome } from "./terminal-clear-response.js";
 import {
@@ -121,11 +124,10 @@ export async function handleKaShareAsyncEnqueue(ctx: RequestContext, name: strin
       state: "queued",
     });
   } catch (err: any) {
+    const admission = classifyPromoteAdmissionError(err);
+    if (admission) return jsonResponse(res, admission.status, admission.body, undefined, admission.headers);
     if (err instanceof PromoteJobConflictError) {
-      return jsonResponse(res, 409, {
-        error: err.message,
-        existingJobId: err.existingJobId,
-      });
+      return jsonResponse(res, 409, promoteConflictResponse(err));
     }
     if (
       err.message?.includes("required") ||
@@ -171,6 +173,9 @@ export async function handleKaShareJobsList(ctx: RequestContext): Promise<void> 
       error: "limit must be a positive integer ≤ 1000",
     });
   }
+  if (contextGraphId !== undefined || !hasNodeOperatorReadAccess(ctx)) {
+    if (!(await requireContextGraphReadAuthority(ctx, contextGraphId))) return;
+  }
   const jobs = await agent.assertion.listPromoteAsyncJobs({
     state: stateFilter,
     contextGraphId,
@@ -191,6 +196,7 @@ export async function handleKaShareJobStatus(ctx: RequestContext, jobId: string)
   if (!job) {
     return jsonResponse(res, 404, { error: `Promote job not found: ${jobId}` });
   }
+  if (!(await requireContextGraphReadAuthority(ctx, job.request.contextGraphId))) return;
   return jsonResponse(res, 200, promoteJobToView(job));
 }
 
@@ -210,7 +216,7 @@ export async function handleKaShareJobCancel(ctx: RequestContext, jobId: string)
       return jsonResponse(res, 404, { error: err.message });
     }
     // "Cannot cancel job in state 'running'" etc.
-    if (err.message?.includes("Cannot cancel")) {
+    if (err instanceof PromoteJobCancellationConflictError || err.message?.includes("Cannot cancel")) {
       return jsonResponse(res, 409, { error: err.message });
     }
     throw err;

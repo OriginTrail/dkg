@@ -17,7 +17,39 @@ dkg publisher enable
 dkg publisher publish-async <context-graph-id> <name>
 ```
 
+## Pause and resume the running publisher
+
+Node administrators can pause all new claims, including jobs already accepted in the queue:
+
+```bash
+curl -H "Authorization: Bearer $DKG_API_TOKEN" -X POST -d '{}' http://127.0.0.1:9200/api/publisher/pause
+curl -H "Authorization: Bearer $DKG_API_TOKEN" http://127.0.0.1:9200/api/publisher/control
+curl -H "Authorization: Bearer $DKG_API_TOKEN" -X POST -d '{}' http://127.0.0.1:9200/api/publisher/resume
+```
+
+Use the daemon's configured API port. Agent-scoped tokens cannot call these node-wide controls. Responses contain `desiredState`, `effectiveState`, `generation`, `acknowledgedGeneration`, `updatedAt`, and each wallet's claim gate and generation. A successful pause waits for claims already inside the claim transaction to finish and fences every wallet before acknowledging. A job claimed before that boundary may continue execution, broadcasting, receipt handling, and finalization. Recovery remains active while paused; pause does not cancel or clear job evidence, and admission can continue accepting jobs.
+
+The live runtime persists desired state in `publisher-control.json` in its data directory, and restores it before startup recovery or wallet loops begin. Repeating the current desired state is idempotent; successful transitions increment the durable generation. Resume persists intent before opening gates. Shutdown closes gates before draining a concurrent control request, so a persisted resume may take effect on the next startup while the closing runtime remains fenced. `DKG_PUBLISHER_START_PAUSED=1` overrides persisted running intent at startup; a subsequent live resume can reopen the runtime.
+
+A missing runtime returns HTTP 503. A persistence/control failure also returns 503, fences the runtime, and requires restart to reload durable intent; a failed request has no acknowledgement. A status read during a transition may show the previous acknowledged desired state alongside gates already closing. File contents are synced before atomic rename, and the parent directory is synced on supported POSIX hosts. Windows preserves process-restart state without claiming the same directory-fsync power-loss guarantee.
+
+The isolated native restart campaign runs actual two-wallet runtime composition, authenticated loopback HTTP routes, persistent Oxigraph queue evidence and SIGKILL/restart. After building publisher and CLI, run `node --experimental-sqlite --import tsx scripts/repro/publisher-live-control-restart.test.mts`. It uses a disposable data directory and `NoChainAdapter`; it verifies queue/control behavior rather than on-chain execution.
+
+## Receipt, finality, and local completion
+
+A job enters `broadcast` when its signed transaction is durably recorded before send. Receipt confirmation can trigger reconciliation while the executor finishes local work. The reconciler independently checks the transaction at the configured confirmation depth and binds canonical publish evidence to that job before writing `included` and releasing its wallet. `finalized` also requires the executor to settle, local lifecycle repair/private staging to complete, and the final job record to be persisted. An `included` job can therefore have already reached chain finality while local work remains.
+
+`GET /api/publisher/job?id=<id>` and `GET /api/publisher/jobs` expose `timestamps.receiptObservedAt` and `timestamps.finalityObservedAt` (Unix milliseconds). The first records the receipt-confirmation callback, or the inclusion itself when nothing was observed earlier (it then equals `includedAt`). The second is recorded only when a reconciliation or recovery pass proves the transaction at the configured confirmation depth. A job whose executor completes before any such pass has no `finalityObservedAt`: reaching `finalized` is local completion, and it is not recorded as a chain observation. Both are distinct from `includedAt` and `finalizedAt`, which describe job transitions. Receipt observations are diagnostics and never release a wallet or authorize a publish. Observations are matched to the job's transaction hash. A daemon that runs the publisher shows them on these endpoints as soon as they are made, and the next state transition persists them. A restart before that transition loses the observation, and a job view read by another process shows it only once it is persisted. Older jobs and local-only finalizations omit both fields.
+
+RFC-64 exact-set verification yields between rows after roughly 25 ms of work, allowing receipt polling and store timers to progress. Every row still passes verification before signing and bundle/control-object staging. One large row or whole-object codec operation can take longer than a slice.
+
+The default scheduler has four total slots (capped by available logical CPUs), with one slot each reserved for ACK and health work. This leaves two shared normal/background slots on a four-CPU host. Background work protects one normal slot and uses at most one slot by default. These are intentional backend admission limits, rather than a count of publisher wallets; six wallets do not imply six concurrent store operations. `DKG_STORE_MAX_CONCURRENT` and the lane reservation settings control these limits. Job-state reads/writes and post-confirmation store work use this scheduler, and the daemon's main event loop also gates their completion.
+
 ## Admission retries
+
+All publisher wallets share the daemon's RPC request budget. For rate sizing,
+the restart requirement and diagnosing local wait versus provider latency, see
+[RPC Request Budget](rpc-request-budget.md).
 
 Before `POST /api/knowledge-assets/{name}/vm/publish-async` enqueues a job, it verifies the immutable SWM snapshot. Temporary store pressure or recovery returns `503` with `code: "STORE_SCHEDULER_BUSY"` or `"STORE_OPERATION_TIMEOUT"`, `retryable: true`, and `Retry-After: 1`. Retry the same request after the store recovers without re-sharing valid content. A genuine snapshot mismatch still returns `409 PUBLISH_INTENT_STALE`; so does a finalized update that is not numbered one above the KA's latest confirmed version, which could never be published (see [Stale update intents](#stale-update-intents) below and [Editing a published Knowledge Asset](knowledge-asset-lifecycle.md#editing-a-published-knowledge-asset)).
 
@@ -88,6 +120,45 @@ Retryable jobs that carry no transaction evidence get a blocker too. `not_auto_r
 4. **If no adequate proof can be obtained, an operator cannot manufacture a safe retry either.** Keep the hold and its evidence. Elapsed time is not proof of non-effect, and neither is a missing receipt; escalating or deliberately abandoning the job is a decision, not a proof.
 5. **What clearing does.** `POST /api/publisher/clear-job` with `{ "jobId": "<id>", "allowPendingTransaction": true }` (node-operator token, or the agent that enqueued the job) removes that one record: it **abandons this node's tracking** of the job. It does not cancel a transaction that was already sent, does not prove that none was, and does not authorize a duplicate-safe replacement — a re-submit afterwards mints a **new** job for the Knowledge Asset, which may publish it a second time. A clear never touches the journal, so whatever it recorded about the job (best-effort, named-KA jobs) stays readable. `POST /api/publisher/cancel` removes only a job that is still `accepted` and cannot act on a held one.
 
+## Publication latency and store pressure
+
+Measure queueing separately from chain time using the job's `timestamps`:
+`acceptedAt` to `claimedAt` is admission wait; `rpcAcceptedAt` to
+`receiptObservedAt` is receipt wait; `finalityObservedAt` to `finalizedAt`
+is the remaining local completion interval. Missing timestamps mean that
+stage was not observed, rather than a zero-duration stage.
+
+Wallet count alone does not determine throughput. Claims serialize durable
+job and wallet ownership writes, and those writes share store capacity with
+other node work. Durable admission and resume wake parked wallet loops; repeated
+notifications coalesce, and ownership checks and error backoff still apply.
+The polling interval remains a fallback, rather than a required delay for new work.
+Automatic retry selection uses the persisted retry deadline
+index, and recovery inventories exclude accepted and finalized history.
+Recovery still retains every failed job needed to preserve its proof backoff.
+
+A detached named-KA executor can finish its own queue record after confirmed
+chain execution and successful local finalization. Failed local bookkeeping,
+incomplete results, or lost claim ownership retain the existing recovery path.
+Private catalog placement remains asynchronous after its durable repair marker
+is stored; publication does not wait for placement.
+
+Use `GET /api/diagnostics/backpressure` to inspect store lane occupancy. The
+`dkg.store.scheduler_queue_wait_ms` and
+`dkg.store.scheduler_operation_duration_ms` histograms separate admission wait
+from admitted execution time by `priority` and static `operation` label. The
+duration histogram also labels `outcome` as `ok` or `error`; its sample count
+shows completed operation volume. Increasing store concurrency is not a
+substitute for diagnosing the operations occupying the normal lane.
+
+For a focused investigation, start the daemon with `DKG_ASYNC_PUBLISH_TRACE=1`.
+The opt-in `async_publish_claim_trace` log records monotonic claim-lock wait/hold
+boundaries, native wallet-ownership decisions, durable lock changes and worker
+outcomes. It adds no store reads and is disabled by default. Wallet identifiers
+are hashed; job IDs are retained for correlation, so treat these logs as
+operational diagnostics. A free wallet can still wait for the claim lock or
+store capacity, and a worker may still be finishing an earlier execution after
+its wallet is released. Do not infer wallet availability from job finalization.
 ## Funding
 
 Every async publisher wallet needs the chain's native gas token because it submits on-chain transactions.

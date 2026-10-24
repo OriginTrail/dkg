@@ -6,6 +6,7 @@ const SYSTEM_PREREQUISITES = ['built runtime packages', 'isolated local devnet']
 
 /** Explicit inventory semantics for every canonical and registered test lane. */
 export const TEST_LANE_METADATA = Object.freeze({
+  'chain-rpc-node26': { layer: 'transport regression', prerequisites: ['Node 26 (bundled undici 8)', 'pnpm frozen install', 'local TLS loopback'] },
   'tornado-core': { layer: 'unit/component', prerequisites: UNIT_PREREQUISITES },
   'tornado-publisher': { layer: 'unit/component', prerequisites: UNIT_PREREQUISITES },
   'tornado-agent': { layer: 'unit/component', prerequisites: UNIT_PREREQUISITES },
@@ -88,6 +89,9 @@ export function compileCiTopology(topology = CI_LANE_TOPOLOGY) {
         row: rows.length, suite: group.id, shard: group.shards === 1 ? 0 : index + 1, shards: group.shards,
         label: group.shards === 1 ? group.label ?? group.id : `${group.id} [${index + 1}/${group.shards}]`,
         sidecars: group.runner === 'agent' && AGENT_SHARD_POLICY.descriptors[index]?.reservedOverheadMs > 0,
+        ...(group.runner === 'agent' ? {
+          timeoutMinutes: AGENT_SHARD_POLICY.descriptors[index].inventory === 'integration' ? 12 : 10,
+        } : {}),
       });
     }
     jobs[job] = packages;

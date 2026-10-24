@@ -530,6 +530,65 @@ describe('Rfc64SeedFetchMethods replica peer selection', () => {
     expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1()).toEqual(attempt1);
   });
 
+  it('rotates a smaller window the same way, keeping a slot for a peer that is not a core', () => {
+    // A caller that asks fewer peers per attempt (a write's sub-graph lookup, a
+    // Core's fetch of a hosted definition) gets the smaller window from the
+    // selection itself: one rotation, so successive attempts still tile every
+    // connected peer, and a non-core slot, so an edge behind the cores is reached.
+    const cores = Array.from({ length: 6 }, (_, index) => `peer-core-${index}`);
+    const edges = Array.from({ length: 8 }, (_, index) => `peer-edge-${index}`);
+    const { agent } = createFetchAgent({
+      libp2p: libp2pWith({ self: 'peer-self', peers: [...cores, ...edges] }),
+      corePeerIds: cores,
+    });
+    const scope = { contextGraphId: CONTEXT_GRAPH_ID, maxPeers: 3 };
+    const seen = new Set<string>();
+    const windows = Array.from({ length: 8 }, () => agent.resolveRfc64UnregisteredAuthoritySeedPeersV1(scope));
+    for (const window of windows) {
+      expect(window).toHaveLength(3);
+      expect(window.filter((peerId) => cores.includes(peerId))).toHaveLength(2);
+      expect(window.filter((peerId) => edges.includes(peerId))).toHaveLength(1);
+      for (const peerId of window) seen.add(peerId);
+    }
+    // Eight attempts of one edge slot reach every edge; three of two core slots every core.
+    expect(seen.size).toBe(cores.length + edges.length);
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID, maxPeers: 1 })).toHaveLength(1);
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID, maxPeers: 100 })).toHaveLength(CAP);
+  });
+
+  it('leaves one slot of a window that provider hints would fill, and rotates the hints', () => {
+    // Pinned providers lead the window, but a graph with as many pins as the
+    // window would otherwise never reach another connected peer, the one
+    // holding the registration a write names, for instance.
+    const providers = ['peer-provider-a', 'peer-provider-b', 'peer-provider-c'];
+    const { agent } = createFetchAgent({
+      libp2p: libp2pWith({ self: 'peer-self', peers: [...providers, 'peer-edge-holder'] }),
+      completeProviders: { [CONTEXT_GRAPH_ID]: providers },
+    });
+    const seenProviders = new Set<string>();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const window = agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID, maxPeers: 2 });
+      expect(window).toHaveLength(2);
+      expect(window[1]).toBe('peer-edge-holder');
+      expect(providers).toContain(window[0]);
+      seenProviders.add(window[0]!);
+    }
+    expect(seenProviders.size).toBe(providers.length);
+    const three = agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID, maxPeers: 3 });
+    expect(three.slice(0, 2).every((peerId) => providers.includes(peerId))).toBe(true);
+    expect(three[2]).toBe('peer-edge-holder');
+    // Pins that fit the window with room to spare are all taken, as before.
+    const whole = agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID });
+    expect(whole).toEqual([...providers, 'peer-edge-holder']);
+    // With no other peer connected, the hints fill the window.
+    const only = createFetchAgent({
+      libp2p: libp2pWith({ self: 'peer-self', peers: providers }),
+      completeProviders: { [CONTEXT_GRAPH_ID]: providers },
+    }).agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID, maxPeers: 2 });
+    expect(only).toHaveLength(2);
+    expect(only.every((peerId) => providers.includes(peerId))).toBe(true);
+  });
+
   it('asks connected configured complete providers first and ignores absent or rejected pins', () => {
     const { agent } = createFetchAgent({
       libp2p: libp2pWith({
@@ -650,5 +709,112 @@ describe('Rfc64SeedFetchMethods replica fetch outcomes', () => {
     expect(bytesEqual(hit.persist.mock.calls[0]![0].canonicalEnvelopeBytes, seed.canonicalEnvelopeBytes)).toBe(true);
     expect(hit.log.info).toHaveBeenCalledOnce();
     expect(String(hit.log.info.mock.calls[0]?.[1])).toContain('peer-a');
+  });
+
+  it('leads every later window for a scope with the peer that served its seed', async () => {
+    // A node with eight cores and four edges connected. The author is an edge
+    // and the only holder of the seed and of the graph's definition. The seed
+    // fetch reaches it in the first window; the metadata bootstrap selects
+    // next, runs once, and the rotation alone would hand it the two other
+    // edges.
+    const CAP = RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1;
+    const cores = Array.from({ length: CAP }, (_, index) => `peer-core-${index}`);
+    const edges = ['peer-edge-a', 'peer-edge-author', 'peer-edge-c', 'peer-edge-d'];
+    let connected = [...cores, ...edges];
+    const libp2p = {
+      peerId: { toString: () => 'peer-self' },
+      getPeers: () => connected.map((peerId) => ({ toString: () => peerId })),
+    };
+    const scope = { contextGraphId: CONTEXT_GRAPH_ID };
+
+    const rotationOnly = createFetchAgent({ libp2p, corePeerIds: cores });
+    expect(rotationOnly.agent.resolveRfc64UnregisteredAuthoritySeedPeersV1(scope))
+      .toContain('peer-edge-author');
+    expect(rotationOnly.agent.resolveRfc64UnregisteredAuthoritySeedPeersV1(scope))
+      .not.toContain('peer-edge-author');
+
+    const seed = await mintSeed();
+    const { agent } = createFetchAgent({
+      service: service({
+        remotePeerId: 'peer-edge-author',
+        seed: { canonicalBytes: seed.canonicalEnvelopeBytes, policyDigest: seed.policyDigest },
+      }),
+      libp2p,
+      corePeerIds: cores,
+      rejectedPeerIds: ['peer-edge-d'],
+    });
+    await expect(agent.fetchRfc64UnregisteredAuthoritySeedFromPeersV1(CONTEXT_GRAPH_ID))
+      .resolves.toBe('fetched');
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const window = agent.resolveRfc64UnregisteredAuthoritySeedPeersV1(scope);
+      expect(window[0]).toBe('peer-edge-author');
+      expect(window).toHaveLength(CAP);
+      expect(new Set(window).size).toBe(CAP);
+      expect(window).not.toContain('peer-edge-d');
+    }
+    // The hint belongs to the scope that was fetched.
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1()[0]).toBe('peer-core-0');
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({
+      contextGraphId: `${OWNER}/other-scope`,
+    })[0]).toBe('peer-core-0');
+    // A source that is no longer connected is not asked, and not dialed.
+    connected = connected.filter((peerId) => peerId !== 'peer-edge-author');
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1(scope))
+      .not.toContain('peer-edge-author');
+  });
+
+  it('gives a configured complete provider precedence over the seed source and never lists it twice', async () => {
+    const seed = await mintSeed();
+    const libp2p = {
+      peerId: { toString: () => 'peer-self' },
+      getPeers: () => ['peer-core-a', 'peer-edge-a', 'peer-provider'].map((peerId) => ({ toString: () => peerId })),
+    };
+    const fetchedFrom = (remotePeerId: string) => createFetchAgent({
+      service: service({
+        remotePeerId,
+        seed: { canonicalBytes: seed.canonicalEnvelopeBytes, policyDigest: seed.policyDigest },
+      }),
+      libp2p,
+      corePeerIds: ['peer-core-a'],
+      completeProviders: { [CONTEXT_GRAPH_ID]: ['peer-provider'] },
+    });
+
+    const fromEdge = fetchedFrom('peer-edge-a');
+    await fromEdge.agent.fetchRfc64UnregisteredAuthoritySeedFromPeersV1(CONTEXT_GRAPH_ID);
+    expect(fromEdge.agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID }))
+      .toEqual(['peer-provider', 'peer-edge-a', 'peer-core-a']);
+
+    const fromProvider = fetchedFrom('peer-provider');
+    await fromProvider.agent.fetchRfc64UnregisteredAuthoritySeedFromPeersV1(CONTEXT_GRAPH_ID);
+    expect(fromProvider.agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: CONTEXT_GRAPH_ID }))
+      .toEqual(['peer-provider', 'peer-core-a', 'peer-edge-a']);
+  });
+
+  it('bounds the remembered seed sources and forgets the oldest scope first', async () => {
+    const seed = await mintSeed();
+    const { agent } = createFetchAgent({
+      service: service({
+        remotePeerId: 'peer-edge-author',
+        seed: { canonicalBytes: seed.canonicalEnvelopeBytes, policyDigest: seed.policyDigest },
+      }),
+      libp2p: {
+        peerId: { toString: () => 'peer-self' },
+        getPeers: () => ['peer-core-a', 'peer-edge-author'].map((peerId) => ({ toString: () => peerId })),
+      },
+      corePeerIds: ['peer-core-a'],
+    });
+    const graphs = Array.from({ length: 1_025 }, (_, index) => `${OWNER}/remembered-${index}`);
+    for (const contextGraphId of graphs) {
+      await expect(agent.fetchRfc64UnregisteredAuthoritySeedFromPeersV1(contextGraphId))
+        .resolves.toBe('fetched');
+    }
+
+    // The newest scope still leads with its seed source; the oldest fell back
+    // to the plain order, cores first.
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: graphs.at(-1)! }))
+      .toEqual(['peer-edge-author', 'peer-core-a']);
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId: graphs[0]! }))
+      .toEqual(['peer-core-a', 'peer-edge-author']);
   });
 });
