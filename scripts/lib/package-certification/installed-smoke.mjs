@@ -6,7 +6,7 @@ import os from 'node:os';
 import { createRequire } from 'node:module';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { CASES, CLI, PROFILE, digest, hash, readJson, validateTree } from './bundle.mjs';
+import { CASES, CLI, PROFILE, digest, hash, readJson, validateTree, validateRdfReadback } from './bundle.mjs';
 
 const [operation, layout, runId, hubAddress] = process.argv.slice(2);
 const manifest = readJson('/bundle/manifest.json');
@@ -27,6 +27,7 @@ const env = {
   NPM_CONFIG_USERCONFIG: '/install/npmrc', NPM_CONFIG_GLOBALCONFIG: '/install/global-npmrc',
   NPM_CONFIG_CACHE: '/install/cache',
   DKG_HOME: '/install/data', DKG_NO_BLUE_GREEN: '1', DKG_DISABLE_TELEMETRY: '1',
+  DO_NOT_TRACK: '1', OPENUI_TELEMETRY_DISABLED: '1',
 };
 const save = () => fs.writeFileSync(reportFile, `${JSON.stringify(report, null, 2)}\n`);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -164,16 +165,13 @@ async function start(attempt) {
   }
   throw new Error('daemon startup timeout');
 }
-async function readFixture() {
+async function readFixture(field) {
   const response = await api('/api/query', {
     contextGraphId: 'package-certification', view: 'working-memory',
     sparql: 'SELECT ?value WHERE { <urn:package-certification:subject> <urn:package-certification:value> ?value }',
   });
-  const bindings = response.bindings ?? response.results?.bindings;
-  assert.equal(bindings?.length, 1, `exact RDF row count: ${JSON.stringify(response).slice(0, 1000)}`);
-  const value = bindings[0].value?.value ?? bindings[0].value;
-  assert.equal(value, 'installed-package-certification');
-  return value;
+  report[field] = response;
+  return validateRdfReadback(response);
 }
 try {
   if (operation === 'install') {
@@ -220,13 +218,13 @@ try {
     await observe('daemon-status', async () => { report.identity = await start(1); });
     await observe('rdf-readback', async () => {
       await api('/api/context-graph/create', { id: 'package-certification', name: 'Package certification', register: false });
-      await api('/api/knowledge-assets', { contextGraphId: 'package-certification', name: 'fixture', quads: [{ subject: 'urn:package-certification:subject', predicate: 'urn:package-certification:value', object: '"installed-package-certification"', graph: '' }] });
-      report.rdfValue = await readFixture();
+      await api('/api/knowledge-assets', { contextGraphId: 'package-certification', name: 'fixture', finalize: false, quads: [{ subject: 'urn:package-certification:subject', predicate: 'urn:package-certification:value', object: '"installed-package-certification"', graph: '' }] });
+      report.rdfValue = await readFixture('rdfResponse');
     });
     await observe('graceful-restart', async () => {
       await stop();
       report.restartedIdentity = await start(2);
-      report.restartedRdfValue = await readFixture();
+      report.restartedRdfValue = await readFixture('restartedRdfResponse');
       await stop();
     });
   }

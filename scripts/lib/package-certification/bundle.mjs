@@ -149,6 +149,12 @@ export function validateTree(tree, manifest) {
     assert.equal(installed[0].version, version, `unacceptable family dependency drift: ${name}`);
   }
 }
+export function validateRdfReadback(response) {
+  assert.equal(response?.result?.type, 'bindings', 'expected public query bindings response');
+  assert.deepEqual(response.result.bindings, [{ value: '"installed-package-certification"' }], 'exact RDF readback');
+  // The API returns canonical RDF terms, including the literal's quotes.
+  return JSON.parse(response.result.bindings[0].value);
+}
 export function verifyCertificate(bundle, receiptFile, expected) {
   const manifest = verifyBundle(bundle, expected);
   const receipt = readJson(receiptFile);
@@ -177,6 +183,7 @@ export function verifyCertificate(bundle, receiptFile, expected) {
     assert.ok(evidence.has(layout.report) && evidence.has(layout.tree) && evidence.has(layout.installLog), 'missing layout evidence');
     const report = readJson(evidence.get(layout.report));
     const tree = readJson(evidence.get(layout.tree));
+    assert.equal(tree.layout, layout.layout, 'dependency tree belongs to another install layout');
     assert.equal(digest(tree), layout.treeDigest, 'dependency-tree digest');
     validateTree(tree, manifest);
     assert.equal(report.profile, expected.profile, 'report profile');
@@ -203,6 +210,8 @@ export function verifyCertificate(bundle, receiptFile, expected) {
     assert.equal(report.restartedIdentity.storeBackend, 'oxigraph-worker');
     assert.equal(report.rdfValue, 'installed-package-certification');
     assert.equal(report.restartedRdfValue, report.rdfValue);
+    assert.equal(validateRdfReadback(report.rdfResponse), report.rdfValue);
+    assert.equal(validateRdfReadback(report.restartedRdfResponse), report.restartedRdfValue);
     for (const log of report.logs) assert.ok(evidence.has(log), `missing runtime log ${log}`);
     assert.ok(report.logs.length >= 2, 'restart logs missing');
   }

@@ -116,7 +116,9 @@ the full UI-inclusive build, version/runtime-guard checks, unconditional CLI ass
 materialization, and `pnpm pack` on every package from the existing public-package
 discovery. `pnpm pack` rewrites workspace dependencies; `npm pack` is not an
 interchangeable substitute. Actual tarball manifests are checked for escaped
-workspace/link/local-file references and exact internal versions. The compiler
+workspace/link/local-file references and exact internal versions. Private
+build-only workspaces may appear as rewritten development dependencies; runtime,
+optional and peer dependencies must resolve within the public prepared set. The compiler
 stamps build identity once during the build; preparation retains that stamp.
 Later commands never regenerate it. Its historical `distTag: monorepo` field is
 build provenance, **not the deployed channel**. npm dist-tags remain deployment
@@ -155,7 +157,8 @@ bootstrap access disabled, all RPC/wallet endpoints explicitly set to the local
 fixture, and auto-update/telemetry disabled. No public network is joined. Each layout declares these required cases before execution: `install`,
 `dependency-policy`, `cli-identity`, `runtime-assets`, `daemon-status`,
 `rdf-readback`, `graceful-restart`. The CLI binary, UI/config/helper assets,
-`/api/status`, exact RDF write/query through public APIs, and graceful restart
+`/api/status`, an editable RDF draft (`finalize: false`) written/queried through
+public APIs, and graceful restart
 with the same data directory are checked. No store override is applied: this
 profile exercises the default persistent `oxigraph-worker` store. Both layouts
 run a single edge-role daemon; layout coverage is not a multi-role topology test.
@@ -163,7 +166,7 @@ run a single edge-role daemon; layout coverage is not a multi-role topology test
 Every attempt gets a fresh ID and directory; failed attempts are never rewritten
 to PASS. `receipt.json` binds the package digest, subject, tool revision,
 OS/architecture/Node/npm, layouts, required cases, tree digests, times and hashed
-reports/logs. In CI it also records workflow/run/attempt. `FAIL` means an observed
+reports/logs, including both raw query responses. In CI it also records workflow/run/attempt. `FAIL` means an observed
 case failed; `INCOMPLETE` means execution or evidence is incomplete. Missing,
 skipped, cancelled, timed-out and zero-case reports cannot pass. The read-only
 verifier accepts the intended commit/version/profile from the caller and derives

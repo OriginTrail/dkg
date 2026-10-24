@@ -46,6 +46,9 @@ for (const [name, damage] of [
   ['wrong build identity', r => { r.identity.commit = 'b'.repeat(40); }],
   ['wrong restart', r => { r.restartedIdentity.commit = 'b'.repeat(40); }],
   ['wrong readback', r => { r.rdfValue = 'something else'; }],
+  ['wrong query response', r => { r.rdfResponse.result.bindings = []; }],
+  ['wrong restarted query response', r => { r.restartedRdfResponse.result.bindings[0].value = '"different"'; }],
+  ['legacy query response shape', r => { r.rdfResponse = r.rdfResponse.result; }],
   ['no daemon logs', r => { r.logs = []; }],
 ]) test(`rejects internally rehashed execution evidence: ${name}`, t => {
   const f = fixture(t), file = path.join(f.attempt, 'core-slot-report.json');
@@ -58,6 +61,7 @@ for (const [name, damage] of [
   ['missing internal package', tree => { tree.packages.splice(1, 1); }],
   ['family drift', tree => { tree.packages[2].version = '99.0.0'; }],
   ['family duplicate', tree => { tree.packages.push({ ...tree.packages[2], path: 'nested/libp2p' }); }],
+  ['swapped layout tree', tree => { tree.layout = 'edge-global'; }],
 ]) test(`rejects resolved dependency evidence: ${name}`, t => {
   const f = fixture(t), file = path.join(f.attempt, 'core-slot-tree.json');
   const tree = readJson(file); damage(tree); writeJson(file, tree);

@@ -51,13 +51,15 @@ export function fixture(t) {
   const receiptFile = path.join(attempt, 'receipt.json');
   const receipt = { schemaVersion: 1, runId: 'test-run', profile: PROFILE, commit, toolRevision: commit, packageSetDigest: manifest.packageSetDigest, outcome: 'PASS', errors: [], startedAt: buildIdentity.buildTime, endedAt: buildIdentity.buildTime, requiredCases: CASES, layouts: [], evidence: [] };
   for (const layout of LAYOUTS) {
-    const tree = { packages: [...packages.map(p => ({ path: `node_modules/${p.name}`, name: p.name, version, integrity: p.integrity, filesDigest: digest(p.files) })), { name: 'libp2p', version: '3.5.1', path: 'node_modules/libp2p' }] };
+    const tree = { layout, packages: [...packages.map(p => ({ path: `node_modules/${p.name}`, name: p.name, version, integrity: p.integrity, filesDigest: digest(p.files) })), { name: 'libp2p', version: '3.5.1', path: 'node_modules/libp2p' }] };
     const report = {
       profile: PROFILE, layout, runId: receipt.runId, packageSetDigest: manifest.packageSetDigest,
       runtime: { os: 'linux', arch: 'arm64', node: 'v22.23.4', npm: '10.9.8' },
       cases: CASES.map(id => ({ id, outcome: 'PASS', errors: [], startedAt: receipt.startedAt, endedAt: receipt.endedAt })),
       identity: { version, ...buildIdentity, storeBackend: 'oxigraph-worker' }, restartedIdentity: { version, ...buildIdentity, storeBackend: 'oxigraph-worker' },
       rdfValue: 'installed-package-certification', restartedRdfValue: 'installed-package-certification',
+      rdfResponse: { result: { type: 'bindings', bindings: [{ value: '"installed-package-certification"' }] } },
+      restartedRdfResponse: { result: { type: 'bindings', bindings: [{ value: '"installed-package-certification"' }] } },
       logs: [`${layout}-daemon-1.log`, `${layout}-daemon-2.log`],
     };
     writeJson(path.join(attempt, `${layout}-tree.json`), tree);
