@@ -49,13 +49,13 @@ describe('handleEventsQuery', () => {
       const event = toEpcisEvent(makeBindings({ eventType: type }));
       expect(event.type).toBe(type);
       expect(buildEpcisQuery({ eventType: String(event.type) }, CONTEXT_GRAPH_ID))
-        .toContain(`FILTER(?eventType = <${type}>)`);
+        .toContain(`FILTER(?eventType IN (<${type}>))`);
     },
   );
 
   it('preserves legacy compact extension-name filters', () => {
     expect(buildEpcisQuery({ eventType: 'CustomEvent' }, CONTEXT_GRAPH_ID))
-      .toContain('FILTER(?eventType = <https://gs1.github.io/EPCIS/CustomEvent>)');
+      .toContain('FILTER(?eventType IN (<https://gs1.github.io/EPCIS/CustomEvent>))');
   });
 
   it.each(['https://example.org/Event>', '_:blank', 'bad type'])('rejects unsafe eventType before querying: %s', async (eventType) => {
@@ -226,7 +226,7 @@ describe('handleEventsQuery', () => {
       { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
     );
 
-    expect(calls[0].sparql).toContain('FILTER(?eventType = <https://gs1.github.io/EPCIS/ObjectEvent>)');
+    expect(calls[0].sparql).toContain('FILTER(?eventType IN (<https://gs1.github.io/EPCIS/ObjectEvent>, <https://ref.gs1.org/epcis/ObjectEvent>))');
   });
 
   it('passes action filter through to SPARQL query via alias', async () => {
@@ -259,7 +259,7 @@ describe('handleEventsQuery', () => {
       { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
     );
 
-    expect(calls[0].sparql).toContain('epcis:readPoint <urn:epc:id:sgln:4012345.00001.0>');
+    expect(calls[0].sparql).toContain('?event ?_epcis_readPoint_value <urn:epc:id:sgln:4012345.00001.0>');
   });
 
   it('passes extension configurationId and shipmentId filters through to SPARQL', async () => {
