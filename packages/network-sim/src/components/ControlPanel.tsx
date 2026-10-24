@@ -278,6 +278,7 @@ function SimulateTab() {
   const [disconnected, setDisconnected] = useState(false);
   const [stats, setStats] = useState<SimStats | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const activeRunRef = useRef<{ start: Promise<Response> | null } | null>(null);
   const contextGraphIds = useContextGraphIds();
 
   const toggleOp = useCallback((op: SimOp) => {
@@ -295,7 +296,8 @@ function SimulateTab() {
   const runSimulation = useCallback(async () => {
     const ops = Array.from(enabledOps);
     const simId = `sim-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-
+    const run = { start: null as Promise<Response> | null };
+    activeRunRef.current = run;
     dispatch({
       type: 'START_SIMULATION',
       id: simId,
@@ -307,14 +309,16 @@ function SimulateTab() {
     setStats({ ...simStats });
     setRunning(true);
     setDisconnected(false);
-
     try {
-      const res = await fetch('/sim/start', {
+      run.start = fetch('/sim/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: simName, opCount, opsPerSec, concurrency, kasPerPublish, contextGraph: contextGraphId, enabledOps: ops }),
       });
+      const res = await run.start;
+      if (activeRunRef.current !== run) return;
       if (!res.ok) {
+        activeRunRef.current = null;
         const body = await res.json().catch(() => ({ error: 'Unknown error' }));
         simStats.errors = 1;
         simStats.finishedAt = Date.now();
@@ -324,18 +328,18 @@ function SimulateTab() {
         return;
       }
     } catch {
+      if (activeRunRef.current !== run) return;
+      activeRunRef.current = null;
       setRunning(false);
       dispatch({ type: 'STOP_SIMULATION' });
       return;
     }
-
     const es = new EventSource('/sim/events');
     eventSourceRef.current = es;
-
     es.onmessage = (e) => {
+      if (activeRunRef.current !== run) return;
       try {
         const event = JSON.parse(e.data);
-
         if (event.type === 'op') {
           if (simStats.finishedAt) return; // ignore late op events after done
           const opType = event.opType as string;
@@ -350,42 +354,41 @@ function SimulateTab() {
           if (!event.success) simStats.errors++;
           setStats({ ...simStats });
         }
-
         if (event.type === 'status') {
           if (simStats.finishedAt) return;
           simStats.completed = event.completed;
           simStats.errors = event.errors;
           setStats({ ...simStats });
         }
-
         if (event.type === 'done') {
           simStats.completed = event.completed;
           simStats.errors = event.errors;
           simStats.finishedAt = Date.now();
           setStats({ ...simStats });
           es.close();
+          activeRunRef.current = null;
           eventSourceRef.current = null;
           setRunning(false);
           dispatch({ type: 'STOP_SIMULATION' });
           setSimName(`Simulation #${++simCounter}`);
         }
-
         if (event.type === 'error') {
           simStats.errors++;
           setStats({ ...simStats });
         }
       } catch { /* ignore parse errors */ }
     };
-
     es.onopen = () => { if (eventSourceRef.current === es) setDisconnected(false); };
     es.onerror = () => { if (eventSourceRef.current === es) setDisconnected(true); };
   }, [opCount, opsPerSec, concurrency, contextGraphId, enabledOps, simName, kasPerPublish, addBroadcast, addOperation, completeOperation, dispatch]);
 
   const stopSimulation = useCallback(async () => {
-    const es = eventSourceRef.current;
+    const run = activeRunRef.current;
+    if (!run || !await run.start?.then(res => res.ok, () => false) || activeRunRef.current !== run) return;
     const stopped = await fetch('/sim/stop', { method: 'POST' }).then(res => res.ok, () => false);
-    if (!stopped || eventSourceRef.current !== es) return;
-    es?.close();
+    if (!stopped || activeRunRef.current !== run) return;
+    eventSourceRef.current?.close();
+    activeRunRef.current = null;
     eventSourceRef.current = null;
     dispatch({ type: 'STOP_SIMULATION' });
     setRunning(false);

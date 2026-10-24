@@ -100,6 +100,43 @@ describe('simulation form and streamed results', () => {
     act(() => oldSource.onerror?.());
     expect(ui.container.querySelector('[role="status"]')).toBeNull();
   });
+  it.each(['start-first', 'stop-first'])('honors startup cancellation when responses arrive %s', async ordering => {
+    let started!: (response: Response) => void;
+    let stopped!: (response: Response) => void;
+    const startResponse = new Promise<Response>(resolve => { started = resolve; });
+    const stopResponse = new Promise<Response>(resolve => { stopped = resolve; });
+    fetchMock.mockReturnValueOnce(startResponse).mockReturnValueOnce(stopResponse);
+    await ui.click('Play Simulation');
+    expect(TestEventSource.instances).toHaveLength(0);
+    await ui.click('Stop Simulation');
+    expect(ui.button('Stop Simulation').disabled).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // Cancellation waits for the server to accept this start.
+    if (ordering === 'start-first') {
+      await act(async () => started(Response.json({ started: true })));
+      await act(async () => stopped(Response.json({ stopped: true })));
+    } else {
+      await act(async () => stopped(Response.json({ stopped: true })));
+      await act(async () => started(Response.json({ started: true })));
+    }
+    expect(store.dispatch).toHaveBeenLastCalledWith({ type: 'STOP_SIMULATION' });
+    expect(ui.button('Play Simulation').disabled).toBe(false);
+    expect(TestEventSource.instances.filter(stream => stream.close.mock.calls.length === 0)).toHaveLength(0);
+    const calls = vi.mocked(store.dispatch).mock.calls.length;
+    source()?.emit({ type: 'op', opType: 'query', nodeId: 2, success: true });
+    expect(store.dispatch).toHaveBeenCalledTimes(calls);
+  });
+  it.each(['http', 'network'])('does not cancel another run after a pending start fails via %s', async failure => {
+    let resolve!: (response: Response) => void, reject!: (error: Error) => void;
+    fetchMock.mockReturnValueOnce(new Promise<Response>((yes, no) => { resolve = yes; reject = no; }));
+    await ui.click('Play Simulation'); await ui.click('Stop Simulation');
+    await act(async () => {
+      if (failure === 'http') resolve(Response.json({ error: 'another run is active' }, { status: 409 }));
+      else reject(new Error('start unavailable'));
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(TestEventSource.instances).toHaveLength(0);
+    expect(ui.button('Play Simulation').disabled).toBe(false);
+  });
   it.each(['op', 'status'])('counts failures once in progress and excludes them from succeeded totals via %s events', async eventType => {
     await ui.fill('Total Ops', '2');
     await ui.click('Play Simulation');
