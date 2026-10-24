@@ -24,11 +24,11 @@ export interface RelayStatsSnapshot {
 }
 
 export interface StoreCountSnapshot {
-  totalTriples: number;
-  totalKCs: number;
-  totalKAs: number;
-  confirmedKCs: number;
-  tentativeKCs: number;
+  readonly totalTriples: number;
+  readonly totalKCs: number;
+  readonly totalKAs: number;
+  readonly confirmedKCs: number;
+  readonly tentativeKCs: number;
 }
 
 export interface MetricsSource {

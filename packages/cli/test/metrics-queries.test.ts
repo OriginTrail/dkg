@@ -252,7 +252,11 @@ describe('createStoreCountMetrics', () => {
     try {
       const engine = new DKGQueryEngine(store);
       // The composition agent.query uses for a query without a context graph.
-      let metrics = createStoreCountMetrics((sparql) => queryWithPublicSnapshotTrust(store, engine, sparql, {}, undefined));
+      let now = 1_000;
+      const metrics = createStoreCountMetrics(
+        (sparql) => queryWithPublicSnapshotTrust(store, engine, sparql, {}, undefined),
+        { now: () => now, healthIntervalMs: 30, reconcileIntervalMs: 300 },
+      );
       const DKG = 'http://dkg.io/ontology/';
       await store.insert([
         { subject: 'did:dkg:evm:31337/0xab/1', predicate: `${DKG}status`, object: '"confirmed"', graph: 'did:dkg:context-graph:local/_meta' },
@@ -268,9 +272,12 @@ describe('createStoreCountMetrics', () => {
         };
       };
       expect(await read()).toEqual({ triples: 4, kcs: 2, kas: 2, confirmed: 1, tentative: 1 });
+      // The real query engine normalizes ASK to `{ bindings: [{ result: 'true' }] }`.
+      // Prove that shape authorizes reuse without another exact COUNT.
+      now += 30;
+      expect(await read()).toEqual({ triples: 4, kcs: 2, kas: 2, confirmed: 1, tentative: 1 });
       await markCoreTrustedGraph(store, 'imported');
-      // A new reconciler models the next low-frequency exact refresh.
-      metrics = createStoreCountMetrics((sparql) => queryWithPublicSnapshotTrust(store, engine, sparql, {}, undefined));
+      now += 270;
       // Two local triples plus the trust marker; nothing from the marked graph.
       expect(await read()).toEqual({ triples: 3, kcs: 1, kas: 1, confirmed: 1, tentative: 0 });
     } finally {

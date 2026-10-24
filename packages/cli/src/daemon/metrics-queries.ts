@@ -1,4 +1,5 @@
 import { DKG_ONTOLOGY, sparqlIri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import type { StoreCountSnapshot } from '@origintrail-official/dkg-node-ui';
 
 // Canonical SPARQL + result parsing for the daemon's metrics reads.
 //
@@ -80,14 +81,6 @@ const STORE_METRICS_HEALTH_SPARQL = 'ASK {}';
 export const STORE_COUNT_RECONCILE_INTERVAL_MS = 5 * 60_000;
 export const STORE_COUNT_HEALTH_INTERVAL_MS = 30_000;
 
-export interface StoreCountSnapshot {
-  readonly totalTriples: number;
-  readonly totalKCs: number;
-  readonly totalKAs: number;
-  readonly confirmedKCs: number;
-  readonly tentativeKCs: number;
-}
-
 export interface StoreCountMetricsOptions {
   /** Exact full-store reconciliation cadence. Defaults to five minutes. */
   reconcileIntervalMs?: number;
@@ -100,11 +93,26 @@ export interface StoreCountMetricsOptions {
 type MetricsCountQuery = (
   sparql: string,
   options: { source: string; priority: 'background' | 'health' },
-) => Promise<{
-  type?: string;
-  value?: boolean;
-  bindings?: ReadonlyArray<Record<string, string | undefined>>;
-} | undefined>;
+) => Promise<MetricsAgentQueryResult>;
+
+/** The normalized result contract returned by `DKGAgent.query()`. */
+interface MetricsAgentQueryResult {
+  readonly bindings: ReadonlyArray<Readonly<Record<string, string>>>;
+}
+
+type ReconciliationOutcome =
+  | { readonly status: 'empty' }
+  | {
+      readonly status: 'success';
+      readonly value: StoreCountSnapshot;
+      readonly reconciledAt: number;
+      readonly healthyAt: number;
+    }
+  | {
+      readonly status: 'failure';
+      readonly error: unknown;
+      readonly failedAt: number;
+    };
 
 /**
  * The store counts of the daemon's metrics source, read through the agent's
@@ -126,22 +134,18 @@ export function createStoreCountMetrics(
     'healthIntervalMs',
   );
   const now = options.now ?? (() => performance.now());
-  let snapshot: { value: StoreCountSnapshot; reconciledAt: number } | null = null;
-  let reconcileInflight: Promise<StoreCountSnapshot> | null = null;
-  let healthInflight: Promise<void> | null = null;
-  let lastHealthyAt: number | null = null;
-  let lastReconcileError: unknown;
-  let lastReconcileFailureAt: number | null = null;
+  let outcome: ReconciliationOutcome = { status: 'empty' };
+  let readInflight: Promise<StoreCountSnapshot> | null = null;
 
-  const reconcile = (): Promise<StoreCountSnapshot> => {
-    if (reconcileInflight) return reconcileInflight;
-    const run = query(GET_STORE_COUNT_SNAPSHOT_SPARQL, {
-      source: 'daemon.metrics.storeCountReconcile',
-      priority: 'background',
-    }).then((result) => {
-      const row = result?.bindings?.[0];
+  const reconcile = async (): Promise<StoreCountSnapshot> => {
+    try {
+      const result = await query(GET_STORE_COUNT_SNAPSHOT_SPARQL, {
+        source: 'daemon.metrics.storeCountReconcile',
+        priority: 'background',
+      });
+      const row = result.bindings[0];
       if (!row) throw new Error('Store metrics reconciliation returned no binding');
-      const value = Object.freeze({
+      const value: StoreCountSnapshot = Object.freeze({
         totalTriples: parseRdfInt(row.totalTriples),
         totalKCs: parseRdfInt(row.totalKCs),
         totalKAs: parseRdfInt(row.totalKAs),
@@ -149,78 +153,80 @@ export function createStoreCountMetrics(
         tentativeKCs: parseRdfInt(row.tentativeKCs),
       });
       const reconciledAt = now();
-      snapshot = { value, reconciledAt };
-      lastHealthyAt = reconciledAt;
-      lastReconcileError = undefined;
-      lastReconcileFailureAt = null;
+      outcome = { status: 'success', value, reconciledAt, healthyAt: reconciledAt };
       return value;
-    }).catch((error) => {
-      lastReconcileError = error;
-      lastReconcileFailureAt = now();
+    } catch (error) {
+      outcome = { status: 'failure', error, failedAt: now() };
       throw error;
-    }).finally(() => {
-      if (reconcileInflight === run) reconcileInflight = null;
-    });
-    reconcileInflight = run;
-    return run;
+    }
   };
 
-  const assertHealthy = (): Promise<void> => {
-    const checkedAt = now();
-    if (
-      lastHealthyAt !== null
-      && checkedAt >= lastHealthyAt
-      && checkedAt - lastHealthyAt < healthIntervalMs
-    ) return Promise.resolve();
-    if (healthInflight) return healthInflight;
-    const run = query(STORE_METRICS_HEALTH_SPARQL, {
-      source: 'daemon.metrics.storeHealth',
-      priority: 'health',
-    }).then((result) => {
-      if (result?.type !== 'boolean' || result.value !== true) {
+  const assertHealthy = async (): Promise<number> => {
+    try {
+      const result = await query(STORE_METRICS_HEALTH_SPARQL, {
+        source: 'daemon.metrics.storeHealth',
+        priority: 'health',
+      });
+      if (result.bindings[0]?.result !== 'true') {
         throw new Error('Store metrics health probe was denied');
       }
-      lastHealthyAt = now();
-    }).finally(() => {
-      if (healthInflight === run) healthInflight = null;
-    });
-    healthInflight = run;
-    return run;
+      return now();
+    } catch (error) {
+      outcome = { status: 'failure', error, failedAt: now() };
+      throw error;
+    }
   };
 
-  const read = async (): Promise<StoreCountSnapshot> => {
-    let checkedAt = now();
-    if (snapshot === null) {
-      if (
-        lastReconcileFailureAt !== null
-        && checkedAt >= lastReconcileFailureAt
-        && checkedAt - lastReconcileFailureAt < healthIntervalMs
-      ) throw lastReconcileError;
+  const readOnce = async (): Promise<StoreCountSnapshot> => {
+    const checkedAt = now();
+    if (outcome.status === 'empty') return reconcile();
+    if (outcome.status === 'failure') {
+      if (withinInterval(checkedAt, outcome.failedAt, healthIntervalMs)) {
+        throw outcome.error;
+      }
+      await assertHealthy();
       return reconcile();
     }
-    await assertHealthy();
-    checkedAt = now();
+
+    let current = outcome;
+    if (!withinInterval(checkedAt, current.healthyAt, healthIntervalMs)) {
+      const healthyAt = await assertHealthy();
+      if (outcome.status !== 'success') {
+        throw new Error('Store metrics snapshot became unavailable during health check');
+      }
+      current = { ...outcome, healthyAt };
+      outcome = current;
+    }
+
+    const refreshedAt = now();
     if (
-      lastReconcileFailureAt !== null
-      && checkedAt >= lastReconcileFailureAt
-      && checkedAt - lastReconcileFailureAt < healthIntervalMs
-    ) throw lastReconcileError;
-    if (
-      checkedAt < snapshot.reconciledAt
-      || checkedAt - snapshot.reconciledAt >= reconcileIntervalMs
+      refreshedAt < current.reconciledAt
+      || refreshedAt - current.reconciledAt >= reconcileIntervalMs
     ) {
       // The collector persists this result for up to a day, so the collection
       // that detects expiry must await the exact replacement rather than save
       // the previous snapshot and strand the refreshed value in memory.
       return reconcile();
     }
-    if (lastReconcileError !== undefined) throw lastReconcileError;
-    return snapshot.value;
+    return current.value;
+  };
+
+  const read = (): Promise<StoreCountSnapshot> => {
+    if (readInflight) return readInflight;
+    const run = readOnce().finally(() => {
+      if (readInflight === run) readInflight = null;
+    });
+    readInflight = run;
+    return run;
   };
 
   return {
     getStoreCountSnapshot: read,
   };
+}
+
+function withinInterval(now: number, then: number, intervalMs: number): boolean {
+  return now >= then && now - then < intervalMs;
 }
 
 function finiteInterval(value: number | undefined, fallback: number, label: string): number {
