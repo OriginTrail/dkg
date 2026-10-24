@@ -4,11 +4,15 @@ import { RemoteSparqlSource } from '../src/data-sources/remote-sparql-source.js'
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe('remote SPARQL response boundaries', () => {
-  it('preserves empty literals in CONSTRUCT results', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('<urn:s> <urn:p> "" .')));
+  it.each([
+    { literal: '""', datatype: undefined, language: undefined },
+    { literal: '""^^<http://www.w3.org/2001/XMLSchema#string>', datatype: 'http://www.w3.org/2001/XMLSchema#string', language: undefined },
+    { literal: '""@en', datatype: undefined, language: 'en' },
+  ])('preserves empty literal $literal and its metadata in CONSTRUCT results', async ({ literal, datatype, language }) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(`<urn:s> <urn:p> ${literal} .`)));
     const source = new RemoteSparqlSource({ endpoint: 'http://endpoint.test/sparql' });
     const result = await source.construct('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }');
-    expect(result.triples).toEqual([{ subject: 'urn:s', predicate: 'urn:p', object: '', datatype: undefined, language: undefined }]);
+    expect(result.triples).toEqual([{ subject: 'urn:s', predicate: 'urn:p', object: '', datatype, language }]);
   });
 
   it('maps only declared and bound SELECT variables and resolves the namespace URL', async () => {
