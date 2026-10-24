@@ -115,7 +115,7 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
             if (!selected) throw Object.assign(new Error('Component revision unavailable.'), { code: 'WORKFLOW_CAPABILITY_CHANGED', status: 409 });
             if (selected.requiresExportAuthorization) authorize();
             let input; try { input = normalizeComponentInput(selected.descriptor, value.input); }
-            catch (e) { throw Object.assign(e, { code: 'INVALID_WORKFLOW', status: 400 }); }
+            catch (e) { throw Object.assign(selected.retired ? new Error('This older component version does not accept these inputs. Choose Use current component version, then invoke it again. Your URL and field settings are kept.') : e, { code: 'INVALID_WORKFLOW', status: 400 }); }
             json(res, 200, await invoke(selected, input, value.invocationId));
           }
         } else json(res, 405, { error: 'Method unavailable.' });
