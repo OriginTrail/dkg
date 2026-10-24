@@ -35,4 +35,19 @@ describe('graph event delivery', () => {
     events.removeAll(); events.emit('background:click', { x: 0, y: 1 }); events.emit('focus:change', { focalNode: null, visibleNodes: 0 });
     expect(replacement).toHaveBeenCalledOnce(); expect(other).toHaveBeenCalledOnce();
   });
+
+  it.each([false, true])('preserves re-registration of the same handler after removeAll (all events: %s)', allEvents => {
+    const events = new GraphEventEmitter();
+    const handler = vi.fn();
+    const unsubscribeOld = events.on('background:click', handler);
+    events.removeAll(allEvents ? undefined : 'background:click');
+    const unsubscribeNew = events.on('background:click', handler);
+    unsubscribeOld();
+    const event = { x: 3, y: 4 };
+    events.emit('background:click', event);
+    expect(handler).toHaveBeenCalledExactlyOnceWith(event);
+    unsubscribeNew();
+    events.emit('background:click', event);
+    expect(handler).toHaveBeenCalledOnce();
+  });
 });

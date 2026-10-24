@@ -1,14 +1,36 @@
 // @vitest-environment happy-dom
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const boundary = vi.hoisted(() => ({ instances: [] as any[] }));
-vi.mock('../src/core/renderer.js', () => ({ Canvas2DRenderer: class {
-  init = vi.fn(); render = vi.fn(); resize = vi.fn(); destroy = vi.fn(); refresh = vi.fn();
-  applyAnimation = vi.fn(); applyPalette = vi.fn(); setKaGroups = vi.fn(); centerOnNode = vi.fn(); zoomToFit = vi.fn(); getCanvas = vi.fn();
-  constructor() { boundary.instances.push(this); }
-} }));
-vi.mock('../src/core/renderer-3d.js', () => ({ createWebGL3DRenderer: async () => {
-  const renderer = { render: vi.fn(), resize: vi.fn(), destroy: vi.fn() }; boundary.instances.push(renderer); return renderer;
-} }));
+import { afterEach, beforeEach, describe, expect, it, vi, type Mocked } from 'vitest';
+import type { RendererBackend } from '../src/core/renderer-backend.js';
+const boundary = vi.hoisted(() => {
+  const instances: Mocked<RendererBackend>[] = [];
+  function create(overrides: Partial<Mocked<RendererBackend>> = {}): Mocked<RendererBackend> {
+    const renderer: Mocked<RendererBackend> = {
+      init: vi.fn<RendererBackend['init']>(),
+      render: vi.fn<RendererBackend['render']>(),
+      resize: vi.fn<RendererBackend['resize']>(),
+      destroy: vi.fn<RendererBackend['destroy']>(),
+      refresh: vi.fn<NonNullable<RendererBackend['refresh']>>(),
+      applyAnimation: vi.fn<NonNullable<RendererBackend['applyAnimation']>>(),
+      applyPalette: vi.fn<NonNullable<RendererBackend['applyPalette']>>(),
+      setKaGroups: vi.fn<NonNullable<RendererBackend['setKaGroups']>>(),
+      centerOnNode: vi.fn<RendererBackend['centerOnNode']>(),
+      zoomToFit: vi.fn<RendererBackend['zoomToFit']>(),
+      getCanvas: vi.fn<RendererBackend['getCanvas']>().mockReturnValue(null),
+      ...overrides,
+    };
+    instances.push(renderer);
+    return renderer;
+  }
+  return { instances, create };
+});
+vi.mock('../src/core/renderer.js', () => ({
+  Canvas2DRenderer: vi.fn(function () { return boundary.create(); }),
+}));
+vi.mock('../src/core/renderer-3d.js', () => ({
+  createWebGL3DRenderer: async () => boundary.create({
+    refresh: undefined, applyAnimation: undefined, applyPalette: undefined, setKaGroups: undefined,
+  }),
+}));
 import { RdfGraphViz } from '../src/core/rdf-graph-viz.js';
 import { parseNTriples } from '../src/parsers/ntriples.js';
 import type { RdfGraphVizConfig, RdfTriple } from '../src/core/types.js';
@@ -16,8 +38,8 @@ import type { GraphDataSource } from '../src/data-sources/types.js';
 
 let container: HTMLDivElement; const views: RdfGraphViz[] = [];
 const make = (options?: RdfGraphVizConfig) => { const viz = new RdfGraphViz(container, options); views.push(viz); return viz; };
-const backend = () => boundary.instances.at(-1);
-const rendered = () => backend().render.mock.calls.at(-1) as [Map<string, unknown>, Map<string, unknown>, Set<string>];
+const backend = () => boundary.instances.at(-1)!;
+const rendered = (): Parameters<RendererBackend['render']> => backend().render.mock.calls.at(-1)!;
 const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
 class Observer { static callback: () => void; observe = vi.fn(); disconnect = vi.fn(); constructor(callback: () => void) { Observer.callback = callback; } }
 beforeEach(() => {
@@ -98,7 +120,10 @@ describe('exports and view integration', () => {
   });
   it('exports a PNG blob and reports absent canvas and failed encoding', async () => {
     const viz = make(); await expect(viz.exportImage()).rejects.toThrow('no canvas');
-    const blob = new Blob(['png'], { type: 'image/png' }); const toBlob = vi.fn((callback: BlobCallback) => callback(blob)); backend().getCanvas.mockReturnValue({ toBlob });
+    const blob = new Blob(['png'], { type: 'image/png' });
+    const canvas = document.createElement('canvas');
+    const toBlob = vi.spyOn(canvas, 'toBlob').mockImplementation(callback => callback(blob));
+    backend().getCanvas.mockReturnValue(canvas);
     expect(await viz.exportImage()).toBe(blob); expect(toBlob).toHaveBeenCalledWith(expect.any(Function), 'image/png');
     toBlob.mockImplementation(callback => callback(null)); await expect(viz.exportImage()).rejects.toThrow('toBlob returned null');
   });
