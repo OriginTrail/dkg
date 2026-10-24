@@ -137,9 +137,12 @@ it.each([EPCIS, EPCIS_CURRENT])('discovers published legacy GS1 extension roots 
   } finally { await store.dropGraph(graph); await store.dropGraph(metaGraph); await store.close(); }
 });
 
+// This integration case makes 23 sequential HTTP queries on Blazegraph.
+// Allow the complete matrix and cleanup to finish on shared CI runners.
 it('projects and filters official-context EPCIS properties', async () => {
   const store = create();
-  const graph = contextGraphDataUri(CG);
+  const contextGraphId = `${CG}-official-properties`;
+  const graph = contextGraphDataUri(contextGraphId);
   const subject = 'urn:event:current-vocabulary';
   try {
     await store.insert([
@@ -159,7 +162,7 @@ it('projects and filters official-context EPCIS properties', async () => {
       { subject, predicate: `${EPCIS_CURRENT}bizLocation`, object: 'urn:business:location', graph },
     ]);
     const query = async (params = '') => handleEventsQuery(new URLSearchParams(params), {
-      contextGraphId: CG,
+      contextGraphId,
       basePath: '/api/epcis/events',
       queryEngine: { query: async (sparql: string) => {
         const result = await store.query(sparql);
@@ -205,7 +208,7 @@ it('projects and filters official-context EPCIS properties', async () => {
     await store.dropGraph(graph);
     await store.close();
   }
-});
+}, 30_000);
 
 it('paginates admitted events with missing and malformed times deterministically', async () => {
   const store = create();

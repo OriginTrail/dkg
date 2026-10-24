@@ -1,8 +1,8 @@
+import { buildEpcisEventDiscoveryPattern } from './epcis-event-discovery.js';
 import {
   EPCIS_DECLARED_EVENT_TYPE,
   EPCIS_CURRENT_PREFIX,
   standardEpcisEventIris,
-  EPCIS_NAMESPACES,
   epcisPropertyIris,
   EPCIS_TYPE_PREFIX,
   resolveEpcisQueryEventType,
@@ -136,42 +136,6 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
     const binding = epcisPropertyPattern(field, `?${field}`);
     if (required) sharedRequiredPatterns.push(binding);
     else optionalClauses.push(`OPTIONAL ${binding}`);
-  }
-
-  // Declared captures include every accepted namespace. A document's
-  // `eventList` is the positive discriminator for unmarked JSON-LD events;
-  // legacy direct-RDF event roots are identified by publication
-  // metadata. Keep this filter inside each GRAPH block so the event-list
-  // lookup uses the same named graph as the event row.
-  let noFilterEventPattern: string | undefined;
-  let privateNoFilterEventPattern: string | undefined;
-  if (!eventTypeIri) {
-    const standardTypes = standardEpcisEventIris().map(sparqlIri).join(', ');
-    const declaredEvidence = 'BOUND(?_declaredEventType)';
-    const eventListEvidence = `EXISTS { VALUES ?_eventListPred { ${propertyAlternatives('eventList')} }
-      ?_eventList ?_eventListPred ?event . }`;
-    const publicationEvidence = `EXISTS { GRAPH <${metaGraph}> { ?_rootPublication dkg:rootEntity ?event . } }`;
-    const privateTimeEvidence = `EXISTS { VALUES ?_privateEventEvidencePred { ${propertyAlternatives('eventTime')} }
-      ?event ?_privateEventEvidencePred ?_privateEventEvidence . }`;
-    // Membership proves which subject is an event, not which of its RDF
-    // classes is the event discriminator. Prefer its standard EPCIS class;
-    // legacy GS1 extensions need timing shape and no standard discriminator.
-    const standardType = `?eventType IN (${standardTypes})`;
-    const gs1Type = EPCIS_NAMESPACES.map((prefix) =>
-      `STRSTARTS(STR(?eventType), "${prefix}")`).join(' || ');
-    const timingEvidence = ['eventTime', 'eventTimeZoneOffset'].map((field) =>
-      `EXISTS ${epcisPropertyPattern(field, `?_typeEvidence_${field}`, 'evidence')}`).join(' && ');
-    const noStandardType = `NOT EXISTS { ?event a ?_standardEventType .
-      FILTER(?_standardEventType IN (${standardTypes})) }`;
-    const legacyType = `(${standardType} || ((${gs1Type}) && ${timingEvidence} && ${noStandardType}))`;
-    const evidenceFilter = (allowPrivateTime: boolean): string => {
-      const rootEvidence = [eventListEvidence, publicationEvidence, ...(allowPrivateTime ? [privateTimeEvidence] : [])];
-      return `FILTER(${declaredEvidence} || (${legacyType} && (${rootEvidence.join(' || ')})))`;
-    };
-    noFilterEventPattern = evidenceFilter(false);
-    // The extra shape evidence applies only to anchored private SWM payloads.
-    // Sharing it with the public body would admit unmarked public resources.
-    privateNoFilterEventPattern = evidenceFilter(partition === 'swm');
   }
 
   // eventID filter — matches the RDF subject (the event's @id / rootEntity)
@@ -320,18 +284,18 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   if (!Number.isSafeInteger(offset) || offset > 10_000) {
     throw new EpcisQueryInputError('offset must be a safe integer no greater than 10000');
   }
-  const graphBody = (eventPattern: string | undefined) => [
+  const graphBody = (source: 'public' | 'anchored-private') => [
     ...sharedRequiredPatterns,
-    ...(eventPattern ? [eventPattern] : []),
+    ...(!eventTypeIri ? [buildEpcisEventDiscoveryPattern({ metaGraph, source, partition })] : []),
     ...optionalClauses,
   ].join('\n      ');
-  const publicGraphBody = graphBody(noFilterEventPattern);
+  const publicGraphBody = graphBody('public');
   // Private SWM payloads are readable before finalization and can contain
   // legacy standard event roots without a finalized publication metadata
   // record. The private anchor on the public graph already gates this branch;
   // require an EPCIS event-time predicate as the additional positive shape
   // evidence so document and vocabulary resources remain excluded.
-  const privateGraphBody = graphBody(privateNoFilterEventPattern);
+  const privateGraphBody = graphBody('anchored-private');
 
   // sparql-scan-allow: R3 -- Exact CG graphs, LIMIT <=1000 and checked OFFSET <=10000 bound each request.
   return `${PREFIXES}
