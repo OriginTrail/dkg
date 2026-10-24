@@ -40,7 +40,7 @@ import type {
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
-import { decodeSparqlHttpQueryResponse } from './sparql-query-response.js';
+import { decodeSparqlHttpQueryResponse, sparqlQueryResponseAccept } from './sparql-query-response.js';
 import {
   externalStorePriorityScheduler,
   type StorePriorityScheduler,
@@ -1098,17 +1098,15 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
           );
         }
 
-        const useStreamingTsv = this.managedOxigraph && !isAsk;
+        const mode = isAsk ? 'ask-json' : this.managedOxigraph ? 'select-tsv' : 'select-json';
         return await this.postQuery(
           trimmed,
-          useStreamingTsv
-            ? 'text/tab-separated-values'
-            : 'application/sparql-results+json',
+          sparqlQueryResponseAccept(mode),
           'query',
           canonicalOperation,
           effectiveOptions,
           (res) => decodeSparqlHttpQueryResponse(res, {
-            isAsk, useStreamingTsv, operation: canonicalOperation,
+            mode, operation: canonicalOperation,
             maxResponseBytes: effectiveOptions.maxResponseBytes,
             managedOxigraph: this.managedOxigraph,
           }),

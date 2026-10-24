@@ -8,7 +8,7 @@ import {
   formatCanonicalRdfLiteralTerm,
   isRdfTerm,
   normalizeRdfObject,
-  parseAndCanonicalizeRdfLiteralTerm,
+  parseSparqlTsvLiteralTerm,
   parseRdfLiteralLexicalTerm,
   parseRdfLiteralTerm,
   type RdfLiteralTerm,
@@ -141,15 +141,10 @@ describe('RDF literal term codec', () => {
       [`"${value}"@en`, '"a\\u0001b\\u007F"@en'],
       [`"${value}"^^<urn:test:type>`, '"a\\u0001b\\u007F"^^<urn:test:type>'],
     ]) {
-      expect(parseAndCanonicalizeRdfLiteralTerm(input, {
-        allowRawControlCharacters: true,
-      })?.canonical).toBe(expected);
+      expect(formatCanonicalRdfLiteralTerm(parseSparqlTsvLiteralTerm(input)!)).toBe(expected);
     }
     const ordinary = '"already canonical"';
-    expect(parseAndCanonicalizeRdfLiteralTerm(ordinary)).toEqual({
-      term: { kind: 'plain', value: 'already canonical' },
-      canonical: ordinary,
-    });
+    expect(parseSparqlTsvLiteralTerm(ordinary)).toEqual({ kind: 'plain', value: 'already canonical' });
   });
 
   it('rejects non-literal and malformed literal terms', () => {

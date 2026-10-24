@@ -8,12 +8,17 @@ import {
   readSparqlResponseText,
 } from './sparql-response-policy.js';
 
+export type SparqlQueryResponseMode = 'ask-json' | 'select-json' | 'select-tsv';
+
+export function sparqlQueryResponseAccept(mode: SparqlQueryResponseMode): string {
+  return mode === 'select-tsv' ? 'text/tab-separated-values' : 'application/sparql-results+json';
+}
+
 export interface SparqlQueryResponseOptions {
-  readonly isAsk: boolean;
+  readonly mode: SparqlQueryResponseMode;
   readonly managedOxigraph: boolean;
   readonly maxResponseBytes?: number;
   readonly operation: StoreOperation;
-  readonly useStreamingTsv: boolean;
 }
 
 /** Own response-format negotiation and decoding outside the oversized adapter. */
@@ -34,7 +39,7 @@ export async function decodeSparqlHttpQueryResponse(
   // Managed Oxigraph honors TSV. A proxy that explicitly identifies JSON
   // keeps the established fallback; generic endpoints never request TSV.
   const contentType = response.headers?.get?.('content-type')?.toLowerCase() ?? '';
-  if (options.useStreamingTsv && !contentType.includes('json')) {
+  if (options.mode === 'select-tsv' && !contentType.includes('json')) {
     return decodeSparqlTsvSelectResponse(response, {
       maxResponseBytes: options.maxResponseBytes,
     }, options.managedOxigraph
@@ -46,5 +51,5 @@ export async function decodeSparqlHttpQueryResponse(
     managedOxigraph: options.managedOxigraph,
     operation: options.operation,
   });
-  return decodeSparqlJsonQueryResult(text, options.isAsk ? 'ask' : 'select');
+  return decodeSparqlJsonQueryResult(text, options.mode === 'ask-json' ? 'ask' : 'select');
 }

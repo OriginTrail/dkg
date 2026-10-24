@@ -66,6 +66,48 @@ describe('SPARQL TSV SELECT decoding', () => {
     }]);
   });
 
+  it.each([
+    ["'hello'", '"hello"'],
+    ["'hello'@en", '"hello"@en'],
+    ["'7'^^<urn:type>", '"7"^^<urn:type>'],
+    [String.raw`'say "hello" and \'bye\'\\'`, String.raw`"say \"hello\" and 'bye'\\"`],
+    [String.raw`'\t\n\r\uD83D\uDE00'`, '"\\t\\n\\r😀"'],
+    [String.raw`'7'^^<urn:\u0074ype>`, '"7"^^<urn:type>'],
+    [String.raw`"7"^^<urn:\u0074ype>`, '"7"^^<urn:type>'],
+    ["'a\u0001b\u007F'@en", '"a\\u0001b\\u007F"@en'],
+  ])('canonicalizes %s through buffered and streamed decoding', async (literal, canonical) => {
+    const body = `?v\n${literal}\n`;
+    const expected = { type: 'bindings', variables: ['v'], bindings: [{ v: canonical }] };
+    expect(decodeSparqlTsvSelectResult(body)).toEqual(expected);
+    const chunks = Array.from(new TextEncoder().encode(body), byte => Uint8Array.of(byte));
+    await expect(decodeSparqlTsvSelectResponse(chunkedResponse(chunks))).resolves.toEqual(expected);
+  });
+
+  it.each([
+    String.raw`"7"^^urn:type`,
+    String.raw`'7'^^urn:type`,
+    String.raw`"7"^^<relative>`,
+    String.raw`'7'^^<relative>`,
+    String.raw`"7"^^<urn:\q>`,
+    String.raw`"7"^^<urn:\uD800>`,
+    String.raw`"\q"`,
+    String.raw`'\q'`,
+    String.raw`"\u123"`,
+    String.raw`"\uD800"`,
+    String.raw`'\uDC00'`,
+    String.raw`"\U00110000"`,
+    String.raw`'unescaped'quote'`,
+    String.raw`"mismatched'`,
+    String.raw`'''long'''`,
+    String.raw`"""long"""`,
+  ])('rejects malformed wire literal %s through both decoders', async (literal) => {
+    const body = `?v\n${literal}\n`;
+    expect(() => decodeSparqlTsvSelectResult(body)).toThrow(SparqlTsvResultsShapeError);
+    const chunks = Array.from(new TextEncoder().encode(body), byte => Uint8Array.of(byte));
+    await expect(decodeSparqlTsvSelectResponse(chunkedResponse(chunks)))
+      .rejects.toBeInstanceOf(SparqlTsvResultsShapeError);
+  });
+
   it('handles BOM, CRLF, empty results, zero-column rows, and __proto__ safely', () => {
     const decoded = decodeSparqlTsvSelectResult('\uFEFF?__proto__\r\n"safe"\r\n');
     expect(decoded.type).toBe('bindings');
@@ -169,10 +211,9 @@ describe('SPARQL TSV SELECT decoding', () => {
     await expect(decodeSparqlHttpQueryResponse(chunkedResponse([body], {
       'Content-Type': 'text/tab-separated-values',
     }), {
-      isAsk: false,
+      mode: 'select-tsv',
       managedOxigraph: true,
       operation: 'query',
-      useStreamingTsv: true,
     })).rejects.toMatchObject({
       code: 'STORE_OPERATION_TIMEOUT',
       backend: 'oxigraph-server',

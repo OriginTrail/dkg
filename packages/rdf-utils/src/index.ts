@@ -112,7 +112,11 @@ const RDF_LANGUAGE_TAG_PATTERN = /^[A-Za-z]+(?:-[A-Za-z0-9]+)*$/;
  * canonicalization. This does not validate or decode the literal body.
  */
 export function parseRdfLiteralLexicalTerm(term: string): RdfLiteralLexicalTerm | null {
-  const match = RDF_LITERAL_LEXICAL_PATTERN.exec(term);
+  return parseRdfLiteralLexicalTermWith(term, RDF_LITERAL_LEXICAL_PATTERN);
+}
+
+function parseRdfLiteralLexicalTermWith(term: string, pattern: RegExp): RdfLiteralLexicalTerm | null {
+  const match = pattern.exec(term);
   if (!match) return null;
   if (match[2] !== undefined) {
     return { body: match[1], suffix: { kind: 'language', language: match[2] } };
@@ -295,6 +299,7 @@ function scanNTriplesEscape(
 interface RdfLiteralGrammar {
   readonly body: RegExp;
   readonly bareDatatype: boolean;
+  readonly lexical?: RegExp;
 }
 
 /** The form {@link formatCanonicalRdfLiteralTerm} emits. */
@@ -314,19 +319,23 @@ const WRITABLE_RDF_LITERAL_GRAMMAR: RdfLiteralGrammar = {
   bareDatatype: true,
 };
 
-const RDF_RESULT_WIRE_LITERAL_GRAMMAR: RdfLiteralGrammar = {
-  body: WRITABLE_RDF_LITERAL_GRAMMAR.body,
+const TSV_DOUBLE_QUOTED_LITERAL_GRAMMAR: RdfLiteralGrammar = {
+  body: /^(?:[^"\\\t\n\r]|\\(?:[tbnrf"'\\]|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}))*$/,
   bareDatatype: false,
 };
 
-const CANONICAL_PLAIN_LITERAL_FAST_PATH = /^"[^"\\\u0000-\u001F\u007F]*"$/;
+const TSV_SINGLE_QUOTED_LITERAL_GRAMMAR: RdfLiteralGrammar = {
+  lexical: /^'((?:[^'\\]|\\.)*)'(?:@([A-Za-z0-9-]+)|\^\^(?:<([^>]+)>|([^<].*)))?$/,
+  body: /^(?:[^'\\\t\n\r]|\\(?:[tbnrf"'\\]|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}))*$/,
+  bareDatatype: false,
+};
 
 function parseRdfLiteralTermWith(
   term: string,
   grammar: RdfLiteralGrammar,
   options: ParseRdfLiteralTermOptions = {},
 ): RdfLiteralTerm | null {
-  const lexical = parseRdfLiteralLexicalTerm(term);
+  const lexical = parseRdfLiteralLexicalTermWith(term, grammar.lexical ?? RDF_LITERAL_LEXICAL_PATTERN);
   if (!lexical || !grammar.body.test(lexical.body)) return null;
   const value = decodeRdfLiteralBody(lexical.body, {
     combineSurrogatePairs: options.combineSurrogatePairs === true,
@@ -348,17 +357,6 @@ export interface ParseRdfLiteralTermOptions {
   combineSurrogatePairs?: boolean;
 }
 
-export interface ParseAndCanonicalizeRdfLiteralTermOptions
-  extends ParseRdfLiteralTermOptions {
-  /** Accept raw controls allowed by SPARQL/N-Triples wire literals. */
-  allowRawControlCharacters?: boolean;
-}
-
-export interface ParsedCanonicalRdfLiteralTerm {
-  readonly term: RdfLiteralTerm;
-  readonly canonical: string;
-}
-
 /** Parse the N-Triples-style literal term emitted by {@link formatCanonicalRdfLiteralTerm}. */
 export function parseRdfLiteralTerm(
   term: string,
@@ -368,26 +366,17 @@ export function parseRdfLiteralTerm(
 }
 
 /**
- * Parse a wire literal and serialize it under the canonical DKG result policy.
- * Already-canonical plain literals are returned unchanged on the hot path.
+ * Parse a SPARQL TSV literal with either quote delimiter. Raw controls other
+ * than TSV's tab/line delimiters are allowed; datatype IRIs remain encoded so
+ * callers can normalize and validate them before canonical serialization.
  */
-export function parseAndCanonicalizeRdfLiteralTerm(
+export function parseSparqlTsvLiteralTerm(
   input: string,
-  options: ParseAndCanonicalizeRdfLiteralTermOptions = {},
-): ParsedCanonicalRdfLiteralTerm | null {
-  if (CANONICAL_PLAIN_LITERAL_FAST_PATH.test(input)) {
-    return {
-      term: { kind: 'plain', value: input.slice(1, -1) },
-      canonical: input,
-    };
-  }
-  const grammar = options.allowRawControlCharacters === true
-    ? RDF_RESULT_WIRE_LITERAL_GRAMMAR
-    : CANONICAL_RDF_LITERAL_GRAMMAR;
-  const term = parseRdfLiteralTermWith(input, grammar, options);
-  return term === null
-    ? null
-    : { term, canonical: formatCanonicalRdfLiteralTerm(term) };
+  options: ParseRdfLiteralTermOptions = {},
+): RdfLiteralTerm | null {
+  return parseRdfLiteralTermWith(input, input.startsWith("'")
+    ? TSV_SINGLE_QUOTED_LITERAL_GRAMMAR
+    : TSV_DOUBLE_QUOTED_LITERAL_GRAMMAR, options);
 }
 
 /**

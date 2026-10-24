@@ -3,8 +3,7 @@ import {
   formatCanonicalRdfLiteralTerm,
   isRdfBlankNodeLabel,
   isSparqlVariableNameRaw,
-  parseAndCanonicalizeRdfLiteralTerm,
-  type ParsedCanonicalRdfLiteralTerm,
+  parseSparqlTsvLiteralTerm,
   type RdfLiteralTerm,
 } from '@origintrail-official/dkg-rdf-utils';
 import { consumeStoreResponseBodyChunks } from './http-response-limit.js';
@@ -20,6 +19,8 @@ const XSD_NAMESPACE = 'http://www.w3.org/2001/XMLSchema#';
 const TSV_INTEGER = /^[+-]?[0-9]+$/;
 const TSV_DECIMAL = /^[+-]?(?:[0-9]*\.[0-9]+)$/;
 const TSV_DOUBLE = /^[+-]?(?:(?:[0-9]+\.[0-9]*|\.[0-9]+)[eE][+-]?[0-9]+|[0-9]+[eE][+-]?[0-9]+)$/;
+// eslint-disable-next-line no-control-regex -- Raw controls require canonical escaping and cannot use this fast path.
+const CANONICAL_PLAIN_LITERAL = /^"[^"\\\u0000-\u001F\u007F]*"$/;
 export class SparqlTsvResultsShapeError extends SparqlResultsShapeError {
   constructor(message: string, options: ErrorOptions = {}) {
     super(message, options);
@@ -194,11 +195,10 @@ class TsvResultNormalizer {
   }
 
   formatLiteral(
-    parsed: ParsedCanonicalRdfLiteralTerm,
+    term: RdfLiteralTerm,
     column: number,
     label: string,
   ): string {
-    const term = parsed.term;
     if (term.kind === 'typed') {
       let datatype = term.datatype;
       if (datatype.includes('\\')) {
@@ -209,18 +209,9 @@ class TsvResultNormalizer {
       if (!(this.datatypeValidators[column] ?? isSafeSparqlResultIri)(datatype)) {
         malformed(`${label} datatype must be an absolute safe IRI`);
       }
-      return datatype === term.datatype
-        ? parsed.canonical
-        : formatCanonicalRdfLiteralTerm({ ...term, datatype });
+      return formatCanonicalRdfLiteralTerm({ ...term, datatype });
     }
-    return parsed.canonical;
-  }
-
-  formatScalarLiteral(term: RdfLiteralTerm, column: number, label: string): string {
-    return this.formatLiteral({
-      term,
-      canonical: formatCanonicalRdfLiteralTerm(term),
-    }, column, label);
+    return formatCanonicalRdfLiteralTerm(term);
   }
 }
 
@@ -230,8 +221,10 @@ function formatTsvTerm(
   label: string,
   normalizer: TsvResultNormalizer,
 ): string {
+  // Canonical plain literals need no normalization or additional allocation.
+  if (CANONICAL_PLAIN_LITERAL.test(cell)) return cell;
   if (cell === 'true' || cell === 'false') {
-    return normalizer.formatScalarLiteral(
+    return normalizer.formatLiteral(
       { kind: 'typed', value: cell, datatype: `${XSD_NAMESPACE}boolean` },
       column,
       label,
@@ -245,7 +238,7 @@ function formatTsvTerm(
         ? 'double'
         : undefined;
   if (numericDatatype !== undefined) {
-    return normalizer.formatScalarLiteral(
+    return normalizer.formatLiteral(
       { kind: 'typed', value: cell, datatype: `${XSD_NAMESPACE}${numericDatatype}` },
       column,
       label,
@@ -264,8 +257,7 @@ function formatTsvTerm(
     if (!isRdfBlankNodeLabel(labelValue)) malformed(`${label} is not a valid RDF term`);
     return `_:${labelValue}`;
   }
-  const literal = parseAndCanonicalizeRdfLiteralTerm(cell, {
-    allowRawControlCharacters: true,
+  const literal = parseSparqlTsvLiteralTerm(cell, {
     combineSurrogatePairs: true,
   });
   if (literal === null) malformed(`${label} is not a valid RDF term`);
