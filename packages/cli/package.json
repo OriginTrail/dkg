@@ -63,7 +63,7 @@
     "@libp2p/ping": "3.1.17",
     "@libp2p/record": "4.0.15",
     "@libp2p/utils": "7.4.5",
-    "@modelcontextprotocol/sdk": "^1",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@multiformats/dns": "1.0.15",
     "@multiformats/multiaddr": "13.0.3",
     "@multiformats/multiaddr-matcher": "3.0.2",
