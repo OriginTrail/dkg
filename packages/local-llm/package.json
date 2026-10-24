@@ -24,7 +24,7 @@
     "@origintrail-official/dkg-rdf-utils": "workspace:*"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@types/node": "^22",
     "vitest": "^4.0.18"
   },

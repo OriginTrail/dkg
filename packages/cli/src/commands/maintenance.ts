@@ -92,32 +92,42 @@ import {
   runForegroundSupervisor,
 } from '../cli-supervisor.js';
 import { registerUpdateCommand } from './update.js';
+import {
+  checkRollbackStores,
+  prepareRollbackStores,
+  readSlotVersion,
+  type PreparedRollbackStores,
+} from '../update/rollback-stores.js';
 
-export interface CoreRollbackActivationDependencies {
+export interface RollbackActivationDependencies {
   stopDaemon(): Promise<boolean>;
-  swapSlot(target: 'a' | 'b'): Promise<void>;
+  /** Ready the stores for the target version; null stops the rollback. */
+  prepareStores(): Promise<PreparedRollbackStores | null>;
   error(message: string): void;
 }
 
-const defaultCoreRollbackActivationDependencies: CoreRollbackActivationDependencies = {
-  stopDaemon: stopDaemonIfRunning,
-  swapSlot,
-  error: (message) => console.error(message),
-};
-
-/** Executable command boundary: activation is forbidden until shutdown succeeds. */
-export async function executeCoreRollbackActivation(
-  target: 'a' | 'b',
-  dependencies: CoreRollbackActivationDependencies = defaultCoreRollbackActivationDependencies,
-): Promise<boolean> {
+/**
+ * Executable command boundary for both roles: activation is forbidden until
+ * shutdown succeeds and the stores are ready for the target, and the stores
+ * stay held until the activation ends. Null when the rollback stopped first.
+ */
+export async function executeRollbackActivation<T>(
+  activate: () => Promise<T>,
+  dependencies: RollbackActivationDependencies,
+): Promise<{ readonly result: T } | null> {
   if (!await dependencies.stopDaemon()) {
     dependencies.error(
       'Rollback aborted because the daemon did not stop before its configured shutdown deadline.',
     );
-    return false;
+    return null;
   }
-  await dependencies.swapSlot(target);
-  return true;
+  const stores = await dependencies.prepareStores();
+  if (stores === null) return null;
+  try {
+    return { result: await activate() };
+  } finally {
+    stores.release();
+  }
 }
 
 export function registerMaintenanceCommands(program: Command): void {
@@ -128,7 +138,22 @@ export function registerMaintenanceCommands(program: Command): void {
 program
   .command('rollback')
   .description('Roll back to the previous DKG version (Edge: npm reinstall; Core: blue-green slot flip)')
-  .action(async () => {
+  .option(
+    '--stores-for <version>',
+    'Only ready the stopped node\'s local stores for <version>, without switching versions',
+  )
+  .action(async (opts: { storesFor?: string }) => {
+    const currentVersion = getCurrentCliVersion();
+    if (opts.storesFor !== undefined) {
+      const stores = await prepareRollbackStores(
+        dkgDir(), opts.storesFor, currentVersion, undefined, 'Nothing was changed.',
+      );
+      if (!stores) process.exit(1);
+      stores.release();
+      console.log(`Local stores are ready for ${opts.storesFor}.`);
+      return;
+    }
+
     // OT-RFC-41 §4.8 / Bundle B1b: Edge rollback is a pure
     // `npm install -g @<previous>` against the npm-global install.
     // The previous version is recorded in `~/.dkg/previous-version`
@@ -157,27 +182,29 @@ program
         process.exit(1);
       }
 
-      const currentVersion = getCurrentCliVersion();
-      console.log(`Rolling back from ${currentVersion} to ${targetVersion} via NPM...`);
-      const rollbackStatus = await performNpmUpdateEdge(
-        targetVersion,
-        currentVersion,
-        (msg) => console.log(msg),
-      );
-      if (rollbackStatus !== 'updated') {
-        console.error('Rollback failed. Check logs and retry.');
-        process.exit(1);
-      }
-      const stopped = await stopDaemonIfRunning();
-      if (!stopped) {
-        console.error('Rollback applied but the old daemon did not stop before the configured shutdown deadline.');
+      // An Edge activates the rollback target by reinstalling it, with the
+      // stores readied and held through the reinstall.
+      if (!checkRollbackStores(dkgDir(), targetVersion, currentVersion)) process.exit(1);
+      const activation = await executeRollbackActivation(() => {
+        console.log(`Rolling back from ${currentVersion} to ${targetVersion} via NPM...`);
+        return performNpmUpdateEdge(targetVersion, currentVersion, (msg) => console.log(msg));
+      }, {
+        stopDaemon: stopDaemonIfRunning,
+        prepareStores: () => prepareRollbackStores(dkgDir(), targetVersion, currentVersion),
+        error: (message) => console.error(message),
+      });
+      if (!activation) process.exit(1);
+      if (activation.result !== 'updated') {
+        console.error(
+          `Rollback failed. Check logs and retry. The daemon is stopped: run "dkg start" to start ${currentVersion} again.`,
+        );
         process.exit(1);
       }
       console.log(`Rolled back to ${targetVersion}. Run "dkg start" to start with the rolled-back version.`);
       return;
     }
 
-    // Core path: existing slot-flip rollback (unchanged).
+    // Core path: blue-green slot flip.
     const current = await activeSlot();
     if (!current) {
       console.error('Blue-green slots not initialized. Nothing to roll back.');
@@ -199,7 +226,14 @@ program
       process.exit(1);
     }
 
-    if (!await executeCoreRollbackActivation(target)) {
+    const targetVersion = readSlotVersion(targetDir);
+    if (!checkRollbackStores(dkgDir(), targetVersion, currentVersion)) process.exit(1);
+    // A Core activates the rollback target by switching its blue-green slot.
+    if (!await executeRollbackActivation(() => swapSlot(target), {
+      stopDaemon: stopDaemonIfRunning,
+      prepareStores: () => prepareRollbackStores(dkgDir(), targetVersion, currentVersion),
+      error: (message) => console.error(message),
+    })) {
       process.exit(1);
     }
     const commitFile = join(dkgDir(), '.current-commit');
@@ -219,18 +253,7 @@ program
       try { await unlink(commitFile); } catch { /* already absent */ }
     }
     try {
-      // Try git layout first, then NPM layout for version metadata.
-      const candidates = [
-        join(targetDir, 'packages', 'cli', 'package.json'),
-        join(targetDir, 'node_modules', '@origintrail-official', 'dkg', 'package.json'),
-      ];
-      for (const pkgPath of candidates) {
-        try {
-          const pkgRaw = readFileSync(pkgPath, 'utf-8');
-          const version = String((JSON.parse(pkgRaw) as { version?: string }).version ?? '').trim();
-          if (version) { await writeFile(versionFile, version); break; }
-        } catch { /* try next */ }
-      }
+      if (targetVersion) await writeFile(versionFile, targetVersion);
     } catch (err) {
       console.warn(`Warning: failed to update rollback version metadata: ${toErrorMessage(err)}`);
     }

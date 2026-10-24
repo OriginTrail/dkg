@@ -13,12 +13,13 @@ import { busyMember } from '../member-sharing/busy-member.mjs';
  * the fake lists the admissions that hold a slot in its trace (every 200 ms
  * here). With `lostRelease` the transfer's release line is never written; with
  * `afterwards: 'pull'` a pull of the public graph takes the general slot once
- * the transfer has ended. Each write is found by its reads at `receivedAt`
+ * the transfer has ended, with `afterwards: 'readmit'` the same pull takes it
+ * again at once and holds it `readmitRunsMs` longer. Each write is found by its reads at `receivedAt`
  * (given the transfer). `policy` is the general pool's policy its trace
  * records. Returns the lines case 6 reported.
  */
 async function runCase6(t, {
-  runsMs, afterwards = 'nothing', receivedAt, slot = 'general', lostRelease = false,
+  runsMs, afterwards = 'nothing', readmitRunsMs = 60_000, receivedAt, slot = 'general', lostRelease = false,
   policy = { limit: 1, queueLimit: 0, partitioned: false }, writesTrace = true,
 }) {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-case6-'));
@@ -50,6 +51,10 @@ async function runCase6(t, {
       timers.push(setTimeout(() => {
         release('41-1', label, slot);
         if (afterwards === 'pull') start('41-2', `shared-memory:${pub.id}:Owner123`);
+        if (afterwards === 'readmit') {
+          start('41-3', label);
+          timers.push(setTimeout(() => release('41-3', label), readmitRunsMs));
+        }
       }, runsMs));
       return Date.now();
     },
@@ -119,4 +124,16 @@ test('case 6: a transfer in a reserved slot, a node without a trace, or spare ge
     const lines = await runCase6(t, { runsMs: 60_000, receivedAt: () => Date.now() + 300, ...options });
     assert.deepEqual(lines, [['FAIL', 6, `not exercised: member2's transfer of the large graph did not hold its general sync slot within 2 s of the subscribe (${why}); raise MEMBER_SHARING_BIG_ASSETS / MEMBER_SHARING_BIG_TRIPLES`]]);
   }
+});
+
+test('case 6: the transfer taking the slot again at once still holds it for the writes received meanwhile (gate run of 556ad8d48)', async t => {
+  // The transfer gives up the slot 1 s after the subscribe and the same pull takes it again at once for 3 s more;
+  // each write is found 0.5 s after that first release.
+  const lines = await runCase6(t, { runsMs: 1_000, afterwards: 'readmit', readmitRunsMs: 3_000, receivedAt: transfer => transfer.endsAt + 500 });
+  assert.deepEqual(lines.filter(entry => entry[0] !== 'NOTE'), [
+    ['PAIR', 6, 'owner while member2 is busy, root'],
+    ['PAIR', 6, 'owner while member2 is busy, sub-graph'],
+    ['PAIR', 6, 'member1 while member2 is busy, root'],
+  ]);
+  assert.match(lines.at(-1)[1], /held its general sync slot through every receipt check \(\d+ s\), taking it again at once 1 time\(s\);/);
 });

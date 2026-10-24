@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 import { waitFor } from './devnet.mjs';
 import { heldAt, watched } from './observation.mjs';
 import { traceAdmissions } from '../qa/admission-trace.mjs';
-import { admissionsBySlot, busySlotCovered, generalSlotIdleFor, heldTransfer, receivedWhileHeld } from '../qa/busy-slot.mjs';
+import { admissionsBySlot, busySlotCovered, generalSlotIdleFor, heldTransfer, receivedWhileHeld, transferChain, transferSettled } from '../qa/busy-slot.mjs';
 import { describe } from '../qa/member-sharing.mjs';
 
 /** The large graph: `assets` assets of `triples` triples, each over 50 subjects with an equal share of them, about 100 bytes a value. */
@@ -37,10 +37,12 @@ function readTrace(file) {
  * pool one slot and no queue, as the trace records the effective policy; the
  * reserved slots beside it are the fixes under test), and a write counts only
  * when it was received before the last trace line that shows that admission
- * holding the slot (its release, or a `holding` line once a second). A running
- * catch-up job proves nothing by itself. A write received only after that, or
- * a transfer never admitted to the general slot, means the case was not
- * exercised.
+ * holding the slot (its release, or a `holding` line once a second); a pull of
+ * the large graph taking the slot again at once continues it (transferChain).
+ * The three writes are made at once, so that their window is short beside the
+ * transfer. A running catch-up job proves nothing by itself. A write received
+ * only after that, or a transfer never admitted to the general slot, means the
+ * case was not exercised.
  *
  * `ctx` is { devnet, edges, graphs, io, report, precondition, boundMs, sub,
  * admitMs (how long the transfer has to take the general slot, 60 s), idleMs
@@ -71,21 +73,20 @@ export async function busyMember(ctx, pub, big) {
     return report.fail(6, `not exercised: member2's transfer of the large graph did not hold its general sync slot within ${seconds(admitMs)} s of the subscribe (${admitted.why}); raise MEMBER_SHARING_BIG_ASSETS / MEMBER_SHARING_BIG_TRIPLES`);
   }
   const from = Date.now();
-  const handles = [
-    await io.writeAndWatch(6, owner, pub, null, 'owner while member2 is busy, root', [member2]),
-    await io.writeAndWatch(6, owner, pub, sub, 'owner while member2 is busy, sub-graph', [member2]),
-    await io.writeAndWatch(6, member1, pub, null, 'member1 while member2 is busy, root', [member2]),
-  ];
+  const handles = await Promise.all([
+    io.writeAndWatch(6, owner, pub, null, 'owner while member2 is busy, root', [member2]),
+    io.writeAndWatch(6, owner, pub, sub, 'owner while member2 is busy, sub-graph', [member2]),
+    io.writeAndWatch(6, member1, pub, null, 'member1 while member2 is busy, root', [member2]),
+  ]);
   const pairs = await watched(handles);
   const until = Date.now();
   // The evidence must reach past the last receipt check: the transfer's
   // release, or a `holding` line written after it (once a second).
   const settled = await waitFor(() => {
     const admissions = readTrace(member2.trace);
-    const traced = admissions?.find(admission => admission.id === admitted.transfer.id);
-    return { ok: !traced || traced.releasedAt !== null || traced.heldUntil >= until, admissions };
+    return { ok: transferSettled(admitted.transfer, admissions, { until, now: Date.now(), isTransfer }), admissions };
   }, 5_000, 250);
-  const busy = busySlotCovered({ transfer: admitted.transfer, admissions: settled.admissions, until });
+  const busy = busySlotCovered({ transfer: admitted.transfer, admissions: settled.admissions, until, isTransfer });
   for (const pair of pairs) {
     // A receipt counts only when the trace shows the transfer still holding the slot at or after it.
     const received = heldAt(pair);
@@ -98,6 +99,7 @@ export async function busyMember(ctx, pub, big) {
   const refused = log.split(`Sync backpressure rejected shared-memory:${pub.id}:`).length - 1;
   // A shared-memory read the node refuses answers like one that finds nothing; its log says which it was.
   const deniedReads = log.split(`Shared memory query denied for unauthorized or unconfirmed context graph "${pub.id}"`).length - 1;
-  report.note(`case 6: member2's transfer of the large graph held its general sync slot ${busy.held ? `through every receipt check (${seconds(until - from)} s)` : `for ${busy.provenUntil === null ? 0 : Math.max(0, seconds(busy.provenUntil - from))} s of ${seconds(until - from)} s (then ${busy.reason})`}; member2's pulls of the public graph meanwhile: ${pulls.length ? pulls.join(', ') : 'none'}; refused for a busy slot: ${refused}; shared-memory reads of it member2 refused as unauthorized or unconfirmed: ${deniedReads}`);
+  const readmitted = transferChain(admitted.transfer, settled.admissions, { isTransfer }).length - 1;
+  report.note(`case 6: member2's transfer of the large graph held its general sync slot ${busy.held ? `through every receipt check (${seconds(until - from)} s)` : `for ${busy.provenUntil === null ? 0 : Math.max(0, seconds(busy.provenUntil - from))} s of ${seconds(until - from)} s (then ${busy.reason})`}${readmitted > 0 ? `, taking it again at once ${readmitted} time(s)` : ''}; member2's pulls of the public graph meanwhile: ${pulls.length ? pulls.join(', ') : 'none'}; refused for a busy slot: ${refused}; shared-memory reads of it member2 refused as unauthorized or unconfirmed: ${deniedReads}`);
   return undefined;
 }

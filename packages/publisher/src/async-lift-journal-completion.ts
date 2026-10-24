@@ -51,7 +51,10 @@ export class AsyncLiftJournalCompletion {
   private static readonly domains = new WeakMap<object, Map<string, QueueCompletions>>();
   // Reserve under canonical ownership, but dispatch after release; journal work never acquires it.
   private static readonly lineageQueues = new Map<string, Promise<void>>();
-  private readonly context = new AsyncLocalStorage<CompletionOwner>();
+  // Node propagates every enabled AsyncLocalStorage on each async resource.
+  // One per publisher accumulates hooks across restarts, even after settlement.
+  // Keep one context resource, with instance-scoped owners for nested calls.
+  private static readonly context = new AsyncLocalStorage<ReadonlyMap<AsyncLiftJournalCompletion, CompletionOwner>>();
   private readonly identity: object;
 
   constructor(
@@ -71,7 +74,9 @@ export class AsyncLiftJournalCompletion {
     const finished = new Promise<void>((resolve) => { release = resolve; });
     queue.owners.add(finished);
     // Invoke work synchronously: the canonical lock must reserve its place before we yield.
-    return this.context.run(owner, async () => {
+    const owners = new Map(AsyncLiftJournalCompletion.context.getStore());
+    owners.set(this, owner);
+    return AsyncLiftJournalCompletion.context.run(owners, async () => {
       try {
         return await work({ [operationBrand]: true, runCanonical: (work) => this.runCanonical(owner, work) });
       } finally {
@@ -185,7 +190,7 @@ export class AsyncLiftJournalCompletion {
 
   async drain(): Promise<void> {
     // The runner invokes this outside operation ownership, after stopping its producers.
-    if (this.context.getStore()?.open) throw new Error('Cannot drain publisher journals from an active publisher operation');
+    if (AsyncLiftJournalCompletion.context.getStore()?.get(this)?.open) throw new Error('Cannot drain publisher journals from an active publisher operation');
     for (;;) {
       const queue = this.existingQueue();
       if (!queue || (queue.owners.size === 0 && queue.jobs.size === 0)) return;

@@ -404,6 +404,15 @@ second fallback chain endpoint (#3385).
   `runtime.nodeVersion` in `GET /api/status` and the `Runtime:` line of
   `dkg status`.
 
+### Security
+
+- `dkg start`, daemon start and auto-update slot activation now log a
+  `WARNING` when Node.js predates the 2026-10-21 security release for its line
+  (22.23.4, 24.22.1, 26.12.1) or is on an end-of-life line. The node still
+  starts. `dkg doctor` reports the same thing as the `node-security` warning,
+  which sets exit code 1 and can be skipped with `doctor.skipChecks`. The README
+  and quickstart now recommend the patched releases.
+
 ## [10.0.25] - 2026-10-19
 
 A patch for shared memory between the members of a public Context Graph,
