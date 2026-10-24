@@ -126,15 +126,17 @@ async function stop() {
   if (child.exitCode !== null) throw new Error(`daemon exited before graceful stop: ${child.exitCode}`);
   const ended = new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
   child.kill('SIGTERM');
-  const result = await Promise.race([ended, sleep(30_000).then(() => null)]);
+  let timer;
+  const result = await Promise.race([ended, new Promise(resolve => { timer = setTimeout(() => resolve(null), 30_000); })]);
+  clearTimeout(timer);
   if (!result) { child.kill('SIGKILL'); await ended; throw new Error('graceful shutdown timed out'); }
   assert.equal(result.code, 0, `daemon did not exit gracefully (${result.signal})`);
 }
-async function api(route, body) {
+async function api(route, body, timeout = 30_000) {
   const response = await fetch(`http://127.0.0.1:19200${route}`, {
     method: body === undefined ? 'GET' : 'POST',
     headers: { 'content-type': 'application/json' },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30_000),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(timeout),
   });
   const text = await response.text();
   assert.ok(response.ok, `${route} HTTP ${response.status}: ${text.slice(0, 2000)}`);
@@ -146,10 +148,11 @@ async function start(attempt) {
   const fd = fs.openSync(`${evidence}/${logName}`, 'w');
   daemon = spawn(executable, ['daemon-worker'], { cwd: slot, env, stdio: ['ignore', fd, fd] });
   fs.closeSync(fd);
-  for (let i = 0; i < 120; i++) {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
     assert.equal(daemon.exitCode, null, `daemon exited during startup (${daemon.exitCode}); see ${logName}`);
     try {
-      const identity = await api('/api/status');
+      const identity = await api('/api/status', undefined, 1000);
       assert.equal(identity.version, manifest.version);
       for (const key of ['commit', 'buildTime', 'distTag']) assert.equal(identity[key], manifest.buildIdentity[key], `status ${key} mismatch`);
       assert.equal(identity.storeBackend, 'oxigraph-worker');
