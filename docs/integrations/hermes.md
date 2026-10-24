@@ -18,7 +18,13 @@ dkg hermes status
 dkg hermes verify
 ```
 
-Setup replaces the memory provider by default. Use `--preserve-provider` if you intend to retain the existing provider; that is a different memory configuration. Use `--profile <name>` consistently for a non-default profile. Existing nodes retain their network.
+Setup replaces the memory provider by default. To connect DKG tools while retaining another memory provider, use tools-only mode:
+
+```bash
+dkg hermes setup --network testnet --memory-mode tools-only
+```
+
+`--preserve-provider` is a conflict guard: in the default provider mode it aborts setup if another memory provider is configured. It does not select tools-only mode. Use `--profile <name>` consistently for a non-default profile. Existing nodes retain their network.
 
 Start Hermes using its installed runtime's instructions. For the API gateway path, ensure `API_SERVER_ENABLED=true` in the selected Hermes environment and run:
 
