@@ -11,6 +11,7 @@ import {
   MAX_CACHED_SPARQL_IRI_VARIABLES,
   type SparqlResultIriValidator,
 } from './sparql-result-iri.js';
+import { SparqlResultsShapeError } from './sparql-results-shape-error.js';
 import type { AskResult, QueryResult, SelectResult } from './triple-store.js';
 
 // Keep the parser provenance stable if application code later replaces the
@@ -104,7 +105,7 @@ export interface ParsedSparqlJsonSelectResponse {
   bindings: Array<Record<string, string>>;
 }
 
-export class SparqlJsonResultsShapeError extends Error {
+export class SparqlJsonResultsShapeError extends SparqlResultsShapeError {
   constructor(message: string, options: ErrorOptions = {}) {
     super(message, options);
     this.name = 'SparqlJsonResultsShapeError';

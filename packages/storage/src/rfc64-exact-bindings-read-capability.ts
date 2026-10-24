@@ -13,8 +13,7 @@ import {
   type QueryResult,
   type TripleStore,
 } from './triple-store.js';
-import { SparqlJsonResultsShapeError } from './sparql-json-query-result.js';
-import { SparqlTsvResultsShapeError } from './sparql-tsv-query-result.js';
+import { SparqlResultsShapeError } from './sparql-results-shape-error.js';
 import {
   readOwnEnumerableDataProperty,
   snapshotDenseDataArray,
@@ -77,10 +76,7 @@ export async function executeRfc64ExactBindingsReadCapabilityV1(
       maxResponseBytes: operation.responseByteCeiling,
     });
   } catch (cause) {
-    if (
-      cause instanceof SparqlJsonResultsShapeError
-      || cause instanceof SparqlTsvResultsShapeError
-    ) {
+    if (cause instanceof SparqlResultsShapeError) {
       throw new Rfc64ExactBindingsReadResultErrorV1(
         'exact-bindings read received malformed SPARQL results',
         { cause },

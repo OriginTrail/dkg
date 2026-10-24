@@ -5,6 +5,7 @@ export {
   SparqlTsvResultsShapeError,
   type SparqlTsvResponseOptions,
 } from './sparql-tsv-query-result.js';
+export { SparqlResultsShapeError } from './sparql-results-shape-error.js';
 export { nonEmptyNamedGraphEnumerationPattern } from './adapters/graph-enumeration-query.js';
 export {
   BlazegraphNamespaceManager,

@@ -3,7 +3,8 @@ import {
   formatCanonicalRdfLiteralTerm,
   isRdfBlankNodeLabel,
   isSparqlVariableNameRaw,
-  parseRdfLiteralTerm,
+  parseAndCanonicalizeRdfLiteralTerm,
+  type ParsedCanonicalRdfLiteralTerm,
   type RdfLiteralTerm,
 } from '@origintrail-official/dkg-rdf-utils';
 import { consumeStoreResponseBodyChunks } from './http-response-limit.js';
@@ -12,26 +13,14 @@ import {
   isSafeSparqlResultIri,
   MAX_CACHED_SPARQL_IRI_VARIABLES,
 } from './sparql-result-iri.js';
+import { SparqlResultsShapeError } from './sparql-results-shape-error.js';
 import type { SelectResult } from './triple-store.js';
 
 const XSD_NAMESPACE = 'http://www.w3.org/2001/XMLSchema#';
 const TSV_INTEGER = /^[+-]?[0-9]+$/;
 const TSV_DECIMAL = /^[+-]?(?:[0-9]*\.[0-9]+)$/;
 const TSV_DOUBLE = /^[+-]?(?:(?:[0-9]+\.[0-9]*|\.[0-9]+)[eE][+-]?[0-9]+|[0-9]+[eE][+-]?[0-9]+)$/;
-const TSV_FAST_PLAIN_LITERAL = /^"[^"\\]*"$/;
-
-function hasForbiddenLiteralControlCharacter(cell: string): boolean {
-  for (let index = 1; index < cell.length - 1; index += 1) {
-    const characterCode = cell.charCodeAt(index);
-    if (characterCode <= 0x1f || characterCode === 0x7f) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-export class SparqlTsvResultsShapeError extends Error {
+export class SparqlTsvResultsShapeError extends SparqlResultsShapeError {
   constructor(message: string, options: ErrorOptions = {}) {
     super(message, options);
     this.name = 'SparqlTsvResultsShapeError';
@@ -204,7 +193,12 @@ class TsvResultNormalizer {
     return value;
   }
 
-  formatLiteral(term: RdfLiteralTerm, column: number, label: string): string {
+  formatLiteral(
+    parsed: ParsedCanonicalRdfLiteralTerm,
+    column: number,
+    label: string,
+  ): string {
+    const term = parsed.term;
     if (term.kind === 'typed') {
       let datatype = term.datatype;
       if (datatype.includes('\\')) {
@@ -215,9 +209,18 @@ class TsvResultNormalizer {
       if (!(this.datatypeValidators[column] ?? isSafeSparqlResultIri)(datatype)) {
         malformed(`${label} datatype must be an absolute safe IRI`);
       }
-      return formatCanonicalRdfLiteralTerm({ ...term, datatype });
+      return datatype === term.datatype
+        ? parsed.canonical
+        : formatCanonicalRdfLiteralTerm({ ...term, datatype });
     }
-    return formatCanonicalRdfLiteralTerm(term);
+    return parsed.canonical;
+  }
+
+  formatScalarLiteral(term: RdfLiteralTerm, column: number, label: string): string {
+    return this.formatLiteral({
+      term,
+      canonical: formatCanonicalRdfLiteralTerm(term),
+    }, column, label);
   }
 }
 
@@ -227,14 +230,8 @@ function formatTsvTerm(
   label: string,
   normalizer: TsvResultNormalizer,
 ): string {
-  if (
-    TSV_FAST_PLAIN_LITERAL.test(cell) &&
-    !hasForbiddenLiteralControlCharacter(cell)
-  ) {
-    return `"${cell.slice(1, -1)}"`;
-  }
   if (cell === 'true' || cell === 'false') {
-    return normalizer.formatLiteral(
+    return normalizer.formatScalarLiteral(
       { kind: 'typed', value: cell, datatype: `${XSD_NAMESPACE}boolean` },
       column,
       label,
@@ -248,7 +245,7 @@ function formatTsvTerm(
         ? 'double'
         : undefined;
   if (numericDatatype !== undefined) {
-    return normalizer.formatLiteral(
+    return normalizer.formatScalarLiteral(
       { kind: 'typed', value: cell, datatype: `${XSD_NAMESPACE}${numericDatatype}` },
       column,
       label,
@@ -267,7 +264,10 @@ function formatTsvTerm(
     if (!isRdfBlankNodeLabel(labelValue)) malformed(`${label} is not a valid RDF term`);
     return `_:${labelValue}`;
   }
-  const literal = parseRdfLiteralTerm(cell, { combineSurrogatePairs: true });
+  const literal = parseAndCanonicalizeRdfLiteralTerm(cell, {
+    allowRawControlCharacters: true,
+    combineSurrogatePairs: true,
+  });
   if (literal === null) malformed(`${label} is not a valid RDF term`);
   return normalizer.formatLiteral(literal, column, label);
 }

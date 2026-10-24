@@ -97,25 +97,36 @@ describe('bounded response body collection', () => {
   it('cancels an open stream before surfacing an asynchronous consumer rejection', async () => {
     const consumerFailure = new Error('async consumer failed');
     const events: string[] = [];
+    let releaseCancellation!: () => void;
+    const cancellationCompleted = new Promise<void>((resolve) => {
+      releaseCancellation = resolve;
+    });
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(Uint8Array.of(1));
       },
-      cancel(reason) {
+      async cancel(reason) {
         expect(reason).toBe(consumerFailure);
+        events.push('cancelling');
+        await cancellationCompleted;
         events.push('cancelled');
       },
     });
 
+    let rejected = false;
     const failure = consumeResponseBodyChunks(new Response(body), 10, async () => {
       await Promise.resolve();
       throw consumerFailure;
     }).catch((error: unknown) => {
+      rejected = true;
       events.push('rejected');
       throw error;
     });
+    await vi.waitFor(() => expect(events).toEqual(['cancelling']));
+    expect(rejected).toBe(false);
+    releaseCancellation();
     await expect(failure).rejects.toBe(consumerFailure);
-    expect(events).toEqual(['cancelled', 'rejected']);
+    expect(events).toEqual(['cancelling', 'cancelled', 'rejected']);
   });
 
   it('rejects invalid limits before reading the response', async () => {

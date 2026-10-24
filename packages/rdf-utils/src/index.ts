@@ -314,6 +314,13 @@ const WRITABLE_RDF_LITERAL_GRAMMAR: RdfLiteralGrammar = {
   bareDatatype: true,
 };
 
+const RDF_RESULT_WIRE_LITERAL_GRAMMAR: RdfLiteralGrammar = {
+  body: WRITABLE_RDF_LITERAL_GRAMMAR.body,
+  bareDatatype: false,
+};
+
+const CANONICAL_PLAIN_LITERAL_FAST_PATH = /^"[^"\\\u0000-\u001F\u007F]*"$/;
+
 function parseRdfLiteralTermWith(
   term: string,
   grammar: RdfLiteralGrammar,
@@ -341,12 +348,46 @@ export interface ParseRdfLiteralTermOptions {
   combineSurrogatePairs?: boolean;
 }
 
+export interface ParseAndCanonicalizeRdfLiteralTermOptions
+  extends ParseRdfLiteralTermOptions {
+  /** Accept raw controls allowed by SPARQL/N-Triples wire literals. */
+  allowRawControlCharacters?: boolean;
+}
+
+export interface ParsedCanonicalRdfLiteralTerm {
+  readonly term: RdfLiteralTerm;
+  readonly canonical: string;
+}
+
 /** Parse the N-Triples-style literal term emitted by {@link formatCanonicalRdfLiteralTerm}. */
 export function parseRdfLiteralTerm(
   term: string,
   options: ParseRdfLiteralTermOptions = {},
 ): RdfLiteralTerm | null {
   return parseRdfLiteralTermWith(term, CANONICAL_RDF_LITERAL_GRAMMAR, options);
+}
+
+/**
+ * Parse a wire literal and serialize it under the canonical DKG result policy.
+ * Already-canonical plain literals are returned unchanged on the hot path.
+ */
+export function parseAndCanonicalizeRdfLiteralTerm(
+  input: string,
+  options: ParseAndCanonicalizeRdfLiteralTermOptions = {},
+): ParsedCanonicalRdfLiteralTerm | null {
+  if (CANONICAL_PLAIN_LITERAL_FAST_PATH.test(input)) {
+    return {
+      term: { kind: 'plain', value: input.slice(1, -1) },
+      canonical: input,
+    };
+  }
+  const grammar = options.allowRawControlCharacters === true
+    ? RDF_RESULT_WIRE_LITERAL_GRAMMAR
+    : CANONICAL_RDF_LITERAL_GRAMMAR;
+  const term = parseRdfLiteralTermWith(input, grammar, options);
+  return term === null
+    ? null
+    : { term, canonical: formatCanonicalRdfLiteralTerm(term) };
 }
 
 /**

@@ -5,6 +5,7 @@ import {
   SparqlTsvResultsShapeError,
 } from '../src/sparql-tsv-query-result.js';
 import { decodeSparqlHttpQueryResponse } from '../src/adapters/sparql-query-response.js';
+import { formatSparqlJsonBindings } from '../src/sparql-json-query-result.js';
 
 function chunkedResponse(
   chunks: readonly Uint8Array[],
@@ -43,6 +44,26 @@ describe('SPARQL TSV SELECT decoding', () => {
         boolean: '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>',
       }],
     });
+  });
+
+  it('matches JSON canonicalization for raw controls in every literal form', () => {
+    const value = 'a\u0001b\u007F';
+    const expected = formatSparqlJsonBindings({
+      head: { vars: ['plain', 'language', 'typed'] },
+      results: { bindings: [{
+        plain: { type: 'literal', value },
+        language: { type: 'literal', value, 'xml:lang': 'en' },
+        typed: { type: 'typed-literal', value, datatype: 'urn:test:type' },
+      }] },
+    });
+    expect(decodeSparqlTsvSelectResult(
+      `?plain\t?language\t?typed\n"${value}"\t"${value}"@en\t"${value}"^^<urn:test:type>\n`,
+    ).bindings).toEqual(expected);
+    expect(expected).toEqual([{
+      plain: '"a\\u0001b\\u007F"',
+      language: '"a\\u0001b\\u007F"@en',
+      typed: '"a\\u0001b\\u007F"^^<urn:test:type>',
+    }]);
   });
 
   it('handles BOM, CRLF, empty results, zero-column rows, and __proto__ safely', () => {
