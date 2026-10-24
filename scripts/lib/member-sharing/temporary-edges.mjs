@@ -10,8 +10,8 @@
 // first start), env (its daemon's environment), peerId, agentAddress };
 // member 2's also `trace`, the file its node writes its sync admission trace
 // to (DKG_SYNC_ADMISSION_TRACE). The feeder, when a fourth node number is
-// free, holds the large graphs of case 6's later attempts and serves them to
-// member 2; it runs only while case 6 needs it.
+// free, holds the large graph of a later attempt of case 6 and serves it to
+// member 2; it runs only while case 6 needs it, fresh for each attempt.
 
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -177,6 +177,25 @@ export class TemporaryEdges {
       throw error;
     }
     this.feederUp = true;
+  }
+
+  /**
+   * Replaces the feeder with a fresh one on the same number: the one that ran
+   * is stopped and its folder removed, with all it held, and a new one starts
+   * (startFeeder). A node writes more slowly the more it holds, and its store
+   * stalls under the large graphs of several attempts, so each later attempt
+   * gets a feeder that holds nothing yet. Throws when it cannot be removed or
+   * started.
+   */
+  async renewFeeder() {
+    await this.stopFeeder();
+    if (existsSync(this.devnet.nodeDir(this.feeder.number))) {
+      const problem = this.removeOwnNode(this.feeder.number);
+      if (problem) throw new Error(problem);
+    }
+    this.feeder.peerId = null;
+    this.feeder.agentAddress = null;
+    await this.startFeeder();
   }
 
   /**

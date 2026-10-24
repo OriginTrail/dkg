@@ -31,10 +31,10 @@
 // a new member); case 7 checks it that way. Member 2 runs with one sync slot
 // and no queue (`syncGlobalMaxInflight: 1`, `syncGlobalQueueLimit: 0`), as the
 // member whose slot was starved in the issue. A fourth temporary Edge, the
-// feeder, starts only when case 6 makes another attempt: it holds that
-// attempt's large graph and serves it to member 2, which dials it through
-// node 2 as it dials the owner. It follows no graph of the other cases, must
-// not follow the public graph, and stops after case 6.
+// feeder, starts only when case 6 makes another attempt, fresh for each one:
+// it holds that attempt's large graph and serves it to member 2, which dials
+// it through node 2 as it dials the owner. It follows no graph of the other
+// cases, must not follow the public graph, and stops after case 6.
 //
 // A write is one asset with a subject of its own, written and shared the way a
 // client does it (create, then the asynchronous share job). A node HOLDS it
@@ -91,14 +91,15 @@
 //      rate member 2's trace measured for the last transfer to hold the slot
 //      past the window the last writes needed (within what one node holds
 //      well), and the three writes again. The first large graph is the
-//      owner's, as before; a later one is the feeder's (without a fourth node
-//      number, the owner's): a node writes more slowly the more it holds, and
-//      the owner's writes are among those the case waits for. The last
-//      attempt is judged as the case. A write member 2 does not hold within
-//      its bound fails the case at once, whatever the slot did. A write
-//      received after the transfer gave up the slot, a transfer that took a
-//      reserved slot, or a transfer never admitted, fails the case as not
-//      exercised; a running catch-up job alone proves nothing
+//      owner's, as before; a later one is written by a feeder that holds
+//      nothing yet (without a fourth node number, by the owner): a node writes
+//      more slowly the more it holds, and the owner's writes are among those
+//      the case waits for. The last attempt is judged as the case. A write
+//      member 2 does not hold within its bound fails the case at once,
+//      whatever the slot did. A write received after the transfer gave up the
+//      slot, a transfer that took a reserved slot, or a transfer never
+//      admitted, fails the case as not exercised; a running catch-up job
+//      alone proves nothing
 //   7  cases 1, 2 and 3 on a public graph registered on chain, and cases 1
 //      and 3 on a private graph whose members joined through the signed
 //      request flow. A member's write into a private graph sets up its sender
@@ -234,18 +235,30 @@ async function precondition(caseId, when) {
 // Whether the feeder could not be set up for a later attempt of case 6 (it is not tried again).
 let feederFailed = false;
 
+/** A feeder that ran must not follow the public graph (`publicGraph`), as no Core may: its gossip could carry writes. */
+async function feederOutOf(publicGraph, when) {
+  const fed = await graphs.following(edges.feeder, publicGraph);
+  if (fed.state === 'following') fail(2, `${when} the feeder ${edges.feeder.label} follows the public graph: its gossip may have carried writes`);
+  else if (fed.state !== 'not-following') fail(2, `${when} it is not known whether the feeder ${edges.feeder.label} follows the public graph (${fed.reason ?? fed.state})`);
+}
+
 /**
  * The large graph of case 6's attempt `attempt`, kept away from the Cores and
  * filled with `size` ({ assets, triples per asset }). The first is the
- * owner's. A later one is the feeder's, started for it (member 2 dials it
- * through node 2), so that the owner, whose writes case 6 waits for, holds no
- * more than before; without a feeder it is the owner's too.
+ * owner's. A later one is written by a feeder that holds nothing yet, started
+ * for it (member 2 dials it through node 2), or put in place of the one that
+ * wrote the attempt before (once it was seen out of `publicGraph`): the owner,
+ * whose writes case 6 waits for, holds no more than before, and no node holds
+ * the large graphs of several attempts. Without a feeder the owner writes it.
  */
-async function largeGraph(attempt, size) {
-  if (attempt > 1 && edges.feeder && !edges.feederUp && !feederFailed) {
+async function largeGraph(attempt, size, publicGraph) {
+  if (attempt > 1 && edges.feeder && !feederFailed) {
     try {
-      await edges.startFeeder();
-      say(`feeder ${edges.feeder.label} up and dialed by member2 (${elapsed()})`);
+      if (edges.feederRunning) {
+        await feederOutOf(publicGraph, `before attempt ${attempt} of case 6`);
+        await edges.renewFeeder();
+      } else await edges.startFeeder();
+      say(`feeder ${edges.feeder.label} up, holding nothing yet, and dialed by member2 (${elapsed()})`);
     } catch (error) {
       note(`the feeder could not be set up (${error?.message ?? error}): the owner writes the large graphs of case 6's later attempts`);
       feederFailed = true;
@@ -303,7 +316,7 @@ async function run() {
   // The large graph of case 6's first attempt; a failure here fails case 6 only.
   let big = null;
   try {
-    big = await largeGraph(1, { assets: BIG_ASSETS, triples: BIG_TRIPLES });
+    big = await largeGraph(1, { assets: BIG_ASSETS, triples: BIG_TRIPLES }, pub.graph);
   } catch (error) {
     fail(6, `the large graph could not be set up: ${error?.message ?? error}; case 6 did not run`);
     big = null;
@@ -343,15 +356,14 @@ async function run() {
     if (edges.feederUp) await edges.dial(member2, edges.feeder);
   };
   if (big) {
-    await busyMember({ devnet, edges, graphs, io, report, precondition, boundMs: BOUND_MS, sub: SUB, attempts: BUSY_ATTEMPTS, largeGraph, connect: redial }, pub.graph, big);
+    const nextLargeGraph = (attempt, size) => largeGraph(attempt, size, pub.graph);
+    await busyMember({ devnet, edges, graphs, io, report, precondition, boundMs: BOUND_MS, sub: SUB, attempts: BUSY_ATTEMPTS, largeGraph: nextLargeGraph, connect: redial }, pub.graph, big);
   }
   // A feeder that ran must not have followed the public graph, as no Core may; then it stops, and the cases
   // after case 6 run with the owner and the members alone, as before it. One that cannot be stopped (asked
   // twice) fails case 6: the cases after it would run beside it.
   if (edges.feederRunning) {
-    const fed = await graphs.following(edges.feeder, pub.graph);
-    if (fed.state === 'following') fail(2, `after case 6 the feeder ${edges.feeder.label} follows the public graph: its gossip may have carried writes`);
-    else if (fed.state !== 'not-following') fail(2, `after case 6 it is not known whether the feeder ${edges.feeder.label} follows the public graph (${fed.reason ?? fed.state})`);
+    await feederOutOf(pub.graph, 'after case 6');
     const stopped = await edges.stopFeeder().catch(() => edges.stopFeeder()).then(() => null, error => error);
     if (stopped) fail(6, `the feeder ${edges.feeder.label} could not be stopped after case 6, so the cases after it run beside it: ${stopped?.message ?? stopped}`);
   }

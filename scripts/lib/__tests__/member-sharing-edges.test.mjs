@@ -127,6 +127,29 @@ test('a fourth free node number is kept for the feeder of case 6\'s later attemp
     /MEMBER_SHARING_NODES must name three or four/);
 });
 
+test('each later attempt of case 6 gets a fresh feeder: the one that ran is stopped and its folder removed before a new one starts', async t => {
+  const log = { say() {}, note() {} };
+  const devnet = fakeDevnet(t);
+  const edges = new TemporaryEdges(devnet, { stamp: 'S', log });
+  edges.allocate({ relay1: 'r1', relay2: 'r2' });
+  await edges.startFeeder();
+  writeFileSync(join(devnet.nodeDir(10), 'held-large-graph'), 'the large graph of the attempt before');
+  await edges.renewFeeder();
+  assert.deepEqual(devnet.calls.filter(call => /^(addnode|stop-node) 10/.test(call)), ['addnode 10 edge', 'stop-node 10', 'stop-node 10', 'addnode 10 edge']);
+  assert.ok(!existsSync(join(devnet.nodeDir(10), 'held-large-graph')), 'the new feeder holds nothing of the old one');
+  assert.ok(edges.feederRunning && edges.feederUp && edges.feeder.peerId === 'peer-10');
+  assert.equal(edges.largeAuthor, edges.feeder);
+  // A feeder that cannot be stopped is not replaced.
+  let stops = 0;
+  const stuck = fakeDevnet(t, { stopStatus: () => (++stops >= 1 ? 1 : 0) });
+  const stubborn = new TemporaryEdges(stuck, { stamp: 'S', log });
+  stubborn.allocate({ relay1: 'r1', relay2: 'r2' });
+  await stubborn.startFeeder();
+  await assert.rejects(stubborn.renewFeeder(), /the feeder could not be stopped/);
+  assert.equal(stuck.calls.filter(call => call === 'addnode 10 edge').length, 1);
+  assert.ok(stubborn.feederRunning);
+});
+
 test('a node another suite took after it was picked is left untouched, and the cleanup removes only nodes this run added', async t => {
   const devnet = fakeDevnet(t);
   const edges = new TemporaryEdges(devnet, { stamp: 'S', log: { say() {}, note() {} } });
