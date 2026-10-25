@@ -327,7 +327,11 @@ contextGraphCmd
     'forwarding (e.g. to hand off to the curator out-of-band), use ' +
     '`dkg context-graph sign-join` instead.',
   )
-  .action(async (contextGraphId: string, curatorPeerId: string) => {
+  .option(
+    '--re-request',
+    'Send a new request even when the curator has approved this agent and the graph\'s member list is still on its way',
+  )
+  .action(async (contextGraphId: string, curatorPeerId: string, opts: { reRequest?: boolean }) => {
     try {
       const client = await ApiClient.connect();
       // Step 1: sign-only. Returns the SignedAgentDelegation. Cheap and
@@ -337,7 +341,19 @@ contextGraphCmd
       // Step 2: forward via P2P. The daemon delivers the signed
       // delegation directly to the curator. Returns delivery count so we can
       // warn on no-curator.
-      const result = await client.requestJoin(contextGraphId, signed.delegation, curatorPeerId);
+      const result = await client.requestJoin(
+        contextGraphId,
+        signed.delegation,
+        curatorPeerId,
+        undefined,
+        { reRequest: opts.reRequest === true },
+      );
+      if (result.joinState === 'approved-metadata-pending') {
+        console.log(`Join approved for "${contextGraphId}"; the graph's member list is still on its way from the curator.`);
+        console.log('  Shares are retried until it arrives. Check status with:');
+        console.log(`  dkg context-graph info ${contextGraphId}`);
+        return;
+      }
       if (result.delivered === 0 && result.queued !== true) {
         console.error(`Could not deliver join request to curator for "${contextGraphId}". No reachable curator found.`);
         process.exit(1);

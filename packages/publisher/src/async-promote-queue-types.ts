@@ -1,3 +1,5 @@
+import type { ShareReconciliationInput, ShareReconciliationResult } from './share-reconciliation.js';
+import type { ShareCompletionEvidence } from './share-completion-evidence.js';
 import type { PromoteNoEffectProof } from './promote-no-effect-rejection.js';
 import type { PromoteRecoveryBinding } from './promote-recovery-binding.js';
 /**
@@ -87,7 +89,7 @@ export interface OrdinaryPromoteRequest extends PromoteRequestScope {
   entities: readonly string[] | 'all';
 }
 
-/** Internal immutable synchronous-recovery authority; never client supplied. */
+/** Internal immutable share-recovery authority; never client supplied. */
 export interface BoundPromoteRequest extends PromoteRequestScope {
   recoveryBinding: PromoteRecoveryBinding;
   entities: 'all';
@@ -124,6 +126,12 @@ export interface PromoteAttemptError {
    * never reach the queue row. The recovery sweep keys on it.
    */
   diagnosticCode?: string;
+  /**
+   * The context-graph authority reason behind a retryable prerequisite failure,
+   * when the worker recognized one from its closed set (for example
+   * `approved-member-metadata-pending`). Never free text.
+   */
+  authorityReason?: string;
   /** Producer certificate; only the fenced first failed attempt may retire its owner. */
   noEffectProof?: PromoteNoEffectProof;
 }
@@ -136,6 +144,8 @@ export interface PromoteAttemptState {
 }
 
 export interface PromoteResult {
+  /** Additive versioned observation; not queue replay authority. */
+  shareEvidence?: ShareCompletionEvidence;
   promotedCount: number;
   succeededAt: number;
   /** Informational only — populated when the worker observed the gossip payload size. */
@@ -176,6 +186,8 @@ export interface PromoteJob {
   lease?: PromoteLease;
   attempt: PromoteAttemptState;
   result?: PromoteResult;
+  /** Contiguous initial attempts proven to have failed before promotion started. */
+  preparationAttempts?: number;
   commitMarker?: PromoteCommitMarker;
   /**
    * Stable string describing why a job is currently in its state when
@@ -257,10 +269,13 @@ export interface AsyncPromoteQueue {
   enqueue(request: PromoteRequest): Promise<string>;
   /** Persist ownership and the inline lease together, before content mutation. */
   enqueueAndClaim?(request: BoundPromoteRequest, workerId: string): Promise<BoundPromoteJob>;
+  /** Bind a claimed, unstarted job under the publisher lifecycle fence. Never HTTP supplied. */
+  bindRecovery?(jobId: string, claimToken: string, binding: PromoteRecoveryBinding): Promise<BoundPromoteJob>;
   // RFC §3.2
   getStatus(jobId: string): Promise<PromoteJob | null>;
   // RFC §3.3
   list(filter?: PromoteListFilter): Promise<PromoteJob[]>;
+  reconcileShare?(input: ShareReconciliationInput): Promise<ShareReconciliationResult>;
   // RFC §3.4
   cancel(jobId: string): Promise<void>;
   recover(jobId: string): Promise<void>;
@@ -295,6 +310,11 @@ export interface AsyncPromoteQueue {
   readonly workScheduling?: {
     attachScheduler(scheduler: { onWorkAvailable(): void }): () => void;
   };
+}
+
+/** Required on agent-owned queues that expose the reconciliation read API. */
+export interface PromoteShareReconciler {
+  reconcileShare(input: ShareReconciliationInput): Promise<ShareReconciliationResult>;
 }
 
 /**

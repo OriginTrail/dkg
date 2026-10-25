@@ -12,8 +12,14 @@ import { traceLaneLoads } from './load-graph.mjs';
 // load-closure guard cannot follow, each with the reason it needs no route of
 // its own.
 export const UNFOLLOWED_LOADS = new Map([
+  ['scripts/test-mcp-wsl-launch.mjs: execute = execFileSync',
+    'injected test seam defaults to node:child_process; calls only system /usr/bin/wslpath and /usr/bin/env, while the repository Windows driver is a literal URL also loaded directly by the smoke test'],
   ['scripts/ci/run-chain-rpc-node26.mjs: vitest',
     'the Vitest CLI resolved from packages/chain node_modules, run with the verified process.execPath; not a repository file'],
+  ['scripts/ci/run-chain-rpc-node26.mjs: tsc',
+    'the TypeScript compiler resolved from the root node_modules, run with the verified process.execPath on the NODE26_WORKSPACE_BUILDS packages, whose changes already select the lane; not a repository file'],
+  ["scripts/repro/rfc64-catalog-durable-head.mts: resolve(repo, 'node_modules/vitest/vitest.mjs')",
+    'the installed Vitest CLI, not a repository file; the isolated campaign config, worker and fixtures are agent package inputs that select the required agent lane'],
   ['packages/agent/test/sync-native-export-hostile.test.ts: pathToFileURL(`${oldDist}/dkg-agent-cg-resolve.js`).href',
     'an optional user-supplied external frozen 10.0.20 build; compatibility cases always execute the repository historical source fixture, and no repository lane can route the external build'],
   ['packages/agent/src/generic-sql-source.ts: moduleName', 'the optional mssql driver and node:sqlite, neither a repository file'],
@@ -109,7 +115,9 @@ export const UNFOLLOWED_LOADS = new Map([
   ['packages/cli/test/oxigraph-server.test.ts: standin', 'an Oxigraph standin binary fixture'],
   ['packages/core/src/daemon-lifecycle.ts: node',
     'process.execPath running the CLI entry resolveDkgCli() finds (packages/cli/dist/cli.js, or an installed CLI), CLI code the CLI rule routes'],
-  ['scripts/release-packages.mjs: cmd', "the npm, pnpm and git commands its run helpers take; verify-pack's is declared in SUBCOMMAND_CHILD_COMMANDS"],
+  ['scripts/lib/release-process.mjs: command', 'manual prepared-package runner for git/pnpm/npm; scripts/lib changes select full CI, and script tests inject no build execution'],
+  ['scripts/lib/package-certification/publish.mjs: command', 'manual npm tarball/tag mutation runner; script tests inject or shim npm, while scripts/lib changes select full CI'],
+  ['scripts/lib/package-certification/certify.mjs: command', 'opt-in Docker rehearsal runner, outside primary lane execution; scripts/lib changes select full CI'],
   ['packages/cli/scripts/bundle-markitdown-binaries.mjs: python.command', 'the Python interpreter it builds a virtual environment with'],
   ['packages/cli/scripts/bundle-markitdown-binaries.mjs: venvPython', "the build's virtual-environment Python, outside the repository"],
   ['packages/cli/test/devnet-publish-helpers-smoke.test.ts: toWslPath(scriptPath)',

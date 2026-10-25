@@ -199,6 +199,7 @@ test('repository support paths route to the lanes that execute them', () => {
     ['scripts/devnet-test-invite-flow.sh', []],
     ['scripts/import-ontology.mjs', []],
     ['scripts/repro/wm-persistence-regression.mjs', []],
+    ['scripts/repro/rfc64-catalog-durable-head.mts', ['tornado_blazegraph', 'tornado_agent']],
     ['scripts/devnet-publish-helpers.sh', ['bura_cli']],
     // The chain lane runs the ABI sync script (sync-chain-abis.unit.test.ts).
     ['scripts/sync-chain-abis.mjs', ['tornado_core']],
@@ -389,6 +390,9 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   const loadedBy = trace.loaded;
 
   for (const [target, requirement, why] of [
+    ['packages/node-ui/e2e/bootstrap-devnet-runtime.ts', 'kosava_node_ui_e2e', 'the bootstrap failure child fixture imports production orchestration'],
+    ['packages/node-ui/e2e/helpers/devnet.ts', 'kosava_node_ui_e2e', 'bootstrap orchestration reads the selected directory through its devnet helper'],
+    ['packages/node-ui/src/ui/agent-identity-api.ts', 'evm:chain', 'the wallet integration suite loads shared identity transport through the API'],
     ['packages/node-ui/src/ui/assertion-identity.ts', 'evm:chain', 'the wallet integration suite loads the API assertion decoder'],
     ['packages/node-ui/src/ui/assertions-page.ts', 'evm:chain', 'the wallet integration suite loads shared assertion discovery through the API'],
     ['packages/node-ui/src/ui/query-bindings.ts', 'evm:chain', 'assertion discovery decodes terms through the shared binding codec'],

@@ -1,3 +1,4 @@
+import { forwardedWslEnvironment } from './mcp-wsl-environment.js';
 import { isDeepStrictEqual } from 'node:util';
 import type {
   McpPhysicalConfig,
@@ -13,6 +14,7 @@ export interface McpRegistration {
   command?: string;
   args?: string[];
   dkgHome?: string;
+  env?: Record<string, unknown>;
 }
 export type RegistrationRead =
   | { kind: 'absent' }
@@ -31,12 +33,16 @@ function normalizeRegistration(value: unknown): RegistrationRead {
     command: typeof value.command === 'string' ? value.command : undefined,
     args: Array.isArray(value.args) ? value.args : undefined,
     dkgHome: typeof env?.DKG_HOME === 'string' ? env.DKG_HOME : undefined,
+    env,
   } };
 }
 
 export function classifyRegistration(current: RegistrationRead, expected: DesiredRegistration): 'registered' | 'stale' | 'not-registered' {
   if (current.kind === 'absent') return 'not-registered';
   if (current.kind !== 'entry') return 'stale';
+  if (expected.environmentTransfer && current.registration.env?.WSLENV !== forwardedWslEnvironment(
+    { ...current.registration.env, ...expected.env }, expected.environmentTransfer.inherited,
+  )) return 'stale';
   return current.registration.command === expected.command
     && current.registration.args !== undefined
     && isDeepStrictEqual(current.registration.args, expected.args)
@@ -212,10 +218,15 @@ export function writeRegistration(
   const currentEntry = container[DKG_SERVER_KEY];
   const currentEntryObj = isPlainRecord(currentEntry) ? currentEntry : {};
   const currentEnv = isPlainRecord(currentEntryObj.env) ? currentEntryObj.env : {};
+  const mergedEnv: PersistedRegistration['env'] = { ...currentEnv, ...entry.env, DKG_HOME: entry.env.DKG_HOME };
+  if (entry.environmentTransfer) {
+    mergedEnv.WSLENV = forwardedWslEnvironment(mergedEnv, entry.environmentTransfer.inherited);
+  }
   const mergedEntry: PersistedRegistration = {
     ...currentEntryObj,
-    ...entry,
-    env: { ...currentEnv, ...entry.env, DKG_HOME: entry.env.DKG_HOME },
+    command: entry.command,
+    args: entry.args,
+    env: mergedEnv,
   };
   applyRegistrationEdit(target, { kind: 'upsert', registration: mergedEntry }, source);
 }

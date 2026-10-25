@@ -1,3 +1,4 @@
+import { bindUnstartedPromoteJob, classifyQueuedSharePreparation } from '../src/bind-promote-recovery.js';
 import { literal, uniquenessKey, PROMOTE_UNIQUENESS_KEY, PROMOTE_STATE, PROMOTE_PAYLOAD } from '../src/async-promote-queue-utils.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
@@ -8,7 +9,7 @@ import { finalizeRootlessAssertionForTest } from './_helpers/rootless-lifecycle.
 const CG = 'bound-mutation', NAME = 'asset', AUTHOR = `0x${'11'.repeat(20)}`;
 const triples = [{subject:'urn:asset',predicate:'urn:value',object:'"original"'}];
 const stores: OxigraphStore[] = [];
-afterEach(async () => { await Promise.all(stores.splice(0).map(store => store.close())); });
+afterEach(async () => { vi.restoreAllMocks(); await Promise.all(stores.splice(0).map(store => store.close())); });
 async function setup() {
   const store = new OxigraphStore(); stores.push(store);
   const keypair = await generateEd25519Keypair();
@@ -25,6 +26,64 @@ async function setup() {
   return {store,publisher,reopen,queue,request,seal};
 }
 describe('bound ownership extends the publisher lifecycle mutation fence', () => {
+  it.each(['acknowledged', 'not-written', 'lost-ack'])('binds the original leased job atomically (%s)', async outcome => {
+    const { publisher, queue, request, store } = await setup();
+    const jobId = await queue.enqueue({ ...request, recoveryBinding: undefined });
+    const original = (await queue.claimNext('worker'))!;
+    const replace = store.replaceSubject.bind(store);
+    const writer = vi.spyOn(store, 'replaceSubject').mockImplementation(async (...args) => {
+      if (outcome === 'not-written') throw new Error('store unavailable');
+      await replace(...args);
+      if (outcome === 'lost-ack') throw new Error('acknowledgement lost');
+    });
+    const authority = { assertCurrent: vi.fn(async () => undefined), run: async <T>(fn: () => Promise<T>) => fn() };
+    const binding = publisher.admitPreparedAssertionShare(request,
+      () => queue.bindRecovery(jobId, original.lease!.claimToken, request.recoveryBinding), authority);
+    if (outcome === 'acknowledged') await expect(binding).resolves.toMatchObject({ jobId, request });
+    else await expect(binding).rejects.toMatchObject({ name: 'PromoteAdmissionUncertainError', jobId });
+    writer.mockRestore();
+    const persisted = (await queue.getStatus(jobId))!;
+    expect(persisted.lease).toEqual(original.lease);
+    expect(persisted.attempt).toEqual(original.attempt);
+    expect(persisted.commitMarker).toEqual(original.commitMarker);
+    expect(persisted.request.recoveryBinding).toEqual(outcome === 'not-written' ? undefined : request.recoveryBinding);
+    expect(authority.assertCurrent).toHaveBeenCalled();
+    expect(await queue.list()).toHaveLength(1);
+    if (outcome !== 'not-written') {
+      expect(classifyQueuedSharePreparation(persisted)).toBe('bound');
+      await expect(queue.bindRecovery(jobId, original.lease!.claimToken, request.recoveryBinding)).rejects.toThrow('unstarted');
+    }
+  });
+
+  it('refuses binding after promotion starts or with another claim token without altering the job', async () => {
+    const { queue, request } = await setup();
+    const id = await queue.enqueue({ ...request, recoveryBinding: undefined });
+    const job = (await queue.claimNext('worker'))!;
+    await expect(queue.bindRecovery(id, 'wrong-token', request.recoveryBinding)).rejects.toMatchObject({ name: 'PromoteJobLeaseError' });
+    expect(await queue.getStatus(id)).toEqual(job);
+    await queue.recordCommitMarker(id, job.lease!.claimToken, 'promoteStarted');
+    const started = await queue.getStatus(id);
+    await expect(queue.bindRecovery(id, job.lease!.claimToken, request.recoveryBinding)).rejects.toThrow('unstarted');
+    expect(await queue.getStatus(id)).toEqual(started);
+  });
+
+  it.each(['old-format', 'missing-lane', 'subset', 'blank-lane', 'missing-marker', 'committed-marker'])('does not invent replay authority for %s', async mode => {
+    const { queue, request } = await setup();
+    await queue.enqueue({ ...request, recoveryBinding: undefined });
+    const job = (await queue.claimNext('worker'))!;
+    if (mode === 'old-format') job.formatVersion = 3;
+    if (mode === 'missing-lane') delete job.request.agentAddress;
+    if (mode === 'subset') job.request.entities = ['urn:asset'];
+    if (mode === 'blank-lane') job.request.agentAddress = ' ';
+    if (mode === 'missing-marker') delete job.commitMarker;
+    if (mode === 'committed-marker') job.commitMarker!.swmInserted = true;
+    const before = structuredClone(job);
+    if (mode === 'old-format' || mode === 'missing-lane') expect(classifyQueuedSharePreparation(job)).toBe('legacy');
+    else expect(() => classifyQueuedSharePreparation(job)).toThrow('unstarted');
+    expect(() => bindUnstartedPromoteJob(job, request.recoveryBinding, Date.now())).toThrow('unstarted');
+    expect(job).toEqual(before);
+  });
+
   it('keeps a failed bound owner in async admission observations until its obligation completes', async () => {
     const { queue, request } = await setup();
     const job = await queue.enqueueAndClaim(request, 'owner');

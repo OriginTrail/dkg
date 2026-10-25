@@ -275,7 +275,7 @@ start_hardhat() {
       );
       child.unref();
       if (!child.pid) process.exit(1);
-      console.log(child.pid);
+      process.stdout.write(String(child.pid) + "\n");
     ')
   echo "$hh_pid" > "$pidfile"
   log "Hardhat node started (PID $hh_pid)"
@@ -1220,8 +1220,9 @@ collect_devnet_node_pids() {
   fi
 
   if command -v ps >/dev/null 2>&1; then
-    ps_pids=$(ps eww -axo pid=,command= 2>/dev/null | awk -v root="$root_node" '
-      index($0, "DKG_HOME=" root) > 0 || index($0, root "/") > 0 { print $1 }
+    # Keep BSD selection flags together: GNU ps rejects the mixed -axo form.
+    ps_pids=$(ps axeww -o pid=,command= 2>/dev/null | awk -v root="$root_node" -v exact="$node_num" '
+      (index($0, "DKG_HOME=" root) > 0 && (exact == "" || index($0 " ", "DKG_HOME=" root " ") > 0)) || index($0, root "/") > 0 { print $1 }
     ' 2>/dev/null || true)
     for pid in $ps_pids; do pids+=" $pid"; done
   fi
@@ -2241,6 +2242,25 @@ cmd_addnode() {
   fi
 
   log "Adding node $node_num (role=$role)..."
+  # One mkdir claims the folder: it fails when another caller made the folder
+  # since the check above, so only the caller that created it goes on. A caller
+  # that names a mark (DEVNET_ADDNODE_MARK_NAME, a file name, with
+  # DEVNET_ADDNODE_MARK_TEXT) has it written into the folder before anything
+  # else happens there, the daemon's start included: it can then tell its own
+  # node from another caller's even when this addnode is interrupted.
+  if ! mkdir "$DEVNET_DIR/node${node_num}" 2>/dev/null; then
+    echo "[devnet] node${node_num} already exists at $DEVNET_DIR/node${node_num}"
+    exit 1
+  fi
+  if [ -n "${DEVNET_ADDNODE_MARK_NAME:-}" ]; then
+    case "$DEVNET_ADDNODE_MARK_NAME" in
+      */*|.|..)
+        echo "[devnet] DEVNET_ADDNODE_MARK_NAME must be a file name; node${node_num} was not started"
+        rm -rf "$DEVNET_DIR/node${node_num}"
+        exit 1 ;;
+    esac
+    printf '%s\n' "${DEVNET_ADDNODE_MARK_TEXT:-}" > "$DEVNET_DIR/node${node_num}/$DEVNET_ADDNODE_MARK_NAME"
+  fi
   DEVNET_NODE_ROLE_OVERRIDE="$role" create_node_config "$node_num"
 
   # A test that needs the new node to differ from the first second it runs

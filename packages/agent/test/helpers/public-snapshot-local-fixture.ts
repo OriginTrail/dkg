@@ -8,11 +8,12 @@ import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../../src/dkg-agent.js';
+import type { DKGAgentConfig } from '../../src/dkg-agent-types.js';
 import { getSharedContext, createProvider, makeAdapterConfig, HARDHAT_KEYS } from '../../../chain/test/evm-test-context.js';
 
 export const graph = 'public-snapshot-local';
 const abi = (name: string) => JSON.parse(readFileSync(new URL(`../../../chain/abi/${name}.json`, import.meta.url), 'utf8'));
-export async function publicSnapshotFixture(transport: 'exact' | 'bulk') {
+export async function publicSnapshotFixture(transport: 'exact' | 'bulk', assetCount = 12) {
   const agents: DKGAgent[] = [], directories: string[] = [];
   const dispose = async () => {
     for (const agent of agents.splice(0).reverse()) await agent.stop();
@@ -54,7 +55,7 @@ export async function publicSnapshotFixture(transport: 'exact' | 'bulk') {
       MULTICALL3_RUNTIME_CODE,
     ]);
     const source = new OxigraphStore();
-    for (let n = 1; n <= 12; n++) {
+    for (let n = 1; n <= assetCount; n++) {
       const id = (BigInt(signer.address) << 96n) | BigInt(n);
       const ual = `did:dkg:evm:31337/${signer.address.toLowerCase()}/${n}`;
       const subGraphName = n === 3 ? 'code' : undefined;
@@ -127,6 +128,7 @@ export async function publicSnapshotFixture(transport: 'exact' | 'bulk') {
       nodeRole: "core" | "edge",
       chainAdapter: EVMChainAdapter,
       store: OxigraphStore,
+      overrides: Partial<DKGAgentConfig> = {},
     ) => {
       const dataDir = await mkdtemp(join(tmpdir(), "snapshot-local-")); directories.push(dataDir);
       const a = await DKGAgent.create({
@@ -142,6 +144,7 @@ export async function publicSnapshotFixture(transport: 'exact' | 'bulk') {
         syncOnConnectEnabled: false,
         syncReconcilerEnabled: false,
         vmReconcilerEnabled: false,
+        ...overrides,
       });
       agents.push(a);
       await a.start();
