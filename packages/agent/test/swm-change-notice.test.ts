@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   SWM_CHANGE_NOTICE_KIND_V1,
   SWM_CHANGE_NOTICE_MAX_BYTES,
+  SWM_CHANGE_NOTICE_NEW_FOLLOWER_WINDOW_MS,
   SwmChangeNoticeReceiver,
   SwmChangeNotifier,
   decodeSwmChangeNoticeV1,
@@ -477,6 +478,152 @@ describe('the owner\'s resends to the followers a notice did not reach (#3421)',
     expect(log).toHaveBeenCalledWith(
       `SWM change notice for "${CG}" sub-graph "notes" (op-1): reached 2 of 3 follower(s); not reached: ${MEMBER_2.slice(-8)}=timeout`,
     );
+  });
+});
+
+describe('the owner\'s notice to a peer that becomes a follower after a change', () => {
+  // An owner that has just restarted knows no follower until each one asks
+  // again: the notice of a change that comes before that goes to nobody.
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function restartedOwner(overrides: Partial<SwmChangeNotifierPorts> = {}) {
+    const deliveries: Array<{ at: number; notice: SwmChangeNoticeV1; recipients: readonly string[] }> = [];
+    const log = vi.fn();
+    const owner = new SwmChangeNotifier({
+      ownsPublicGraph: async () => true,
+      followers: async () => [],
+      deliver: async (delivered, recipients) => {
+        deliveries.push({ at: Date.now(), notice: delivered, recipients });
+        return reachedAll(recipients);
+      },
+      selfPeerId: () => OWNER,
+      log,
+      ...overrides,
+    });
+    return { owner, deliveries, log };
+  }
+
+  const change = (sourcePeerId: string, hint: string, subGraphName: string | null = 'notes'): SwmRemoteChange => ({
+    contextGraphId: CG,
+    subGraphName,
+    hint,
+    sourcePeerId,
+  });
+
+  it('tells it of the change another member made before it asked, which no follower was told of (case 4 of the member-sharing suite)', async () => {
+    const { owner, deliveries, log } = restartedOwner();
+    owner.afterRemoteChange(change(MEMBER_2, 'op-31'));
+    await owner.settled();
+    expect(deliveries).toEqual([]);
+
+    owner.afterNewFollower(CG, MEMBER_1);
+    await owner.settled();
+
+    expect(deliveries.map(({ notice: told, recipients }) => ({ told, recipients })))
+      .toEqual([{ told: notice('notes', 'op-31'), recipients: [MEMBER_1] }]);
+    expect(log).toHaveBeenCalledWith(
+      `SWM change notice for "${CG}" sub-graph "notes" (op-31) to new follower ${MEMBER_1.slice(-8)}: reached`,
+    );
+  });
+
+  it('tells it of the latest change a peer other than itself made, of whichever scope', async () => {
+    vi.useFakeTimers();
+    const { owner, deliveries } = restartedOwner();
+    owner.afterRemoteChange(change(MEMBER_2, 'op-a'));
+    await vi.advanceTimersByTimeAsync(10);
+    owner.afterRemoteChange(change(MEMBER_3, 'op-b', null));
+    await vi.advanceTimersByTimeAsync(10);
+    owner.afterRemoteChange(change(MEMBER_1, 'op-c'));
+    await vi.advanceTimersByTimeAsync(1_000);
+    await owner.settled();
+
+    owner.afterNewFollower(CG, MEMBER_1);
+    await owner.settled();
+
+    expect(deliveries.map(({ notice: told, recipients }) => ({ told, recipients })))
+      .toEqual([{ told: notice(null, 'op-b'), recipients: [MEMBER_1] }]);
+  });
+
+  it('tells it nothing of its own change, of a change older than the window, of another graph, or of a graph it does not own', async () => {
+    vi.useFakeTimers();
+    const own = restartedOwner();
+    own.owner.afterRemoteChange(change(MEMBER_1, 'op-1'));
+    own.owner.afterNewFollower(CG, MEMBER_1);
+    await own.owner.settled();
+    const old = restartedOwner();
+    old.owner.afterRemoteChange(change(MEMBER_2, 'op-2'));
+    await vi.advanceTimersByTimeAsync(SWM_CHANGE_NOTICE_NEW_FOLLOWER_WINDOW_MS + 1);
+    old.owner.afterNewFollower(CG, MEMBER_1);
+    await old.owner.settled();
+    const other = restartedOwner();
+    other.owner.afterRemoteChange(change(MEMBER_2, 'op-3'));
+    other.owner.afterNewFollower(`${CG}-other`, MEMBER_1);
+    await other.owner.settled();
+    const notOwner = restartedOwner({ ownsPublicGraph: async () => false });
+    notOwner.owner.afterRemoteChange(change(MEMBER_2, 'op-4'));
+    notOwner.owner.afterNewFollower(CG, MEMBER_1);
+    await notOwner.owner.settled();
+
+    expect([own, old, other, notOwner].map(({ deliveries }) => deliveries)).toEqual([[], [], [], []]);
+  });
+
+  it('sends it again when it does not reach the new follower, 3 s later and 15 s after that', async () => {
+    vi.useFakeTimers();
+    const started = Date.now();
+    const outcomes: SwmChangeNoticeOutcome[] = ['timeout', 'reset'];
+    const { owner, deliveries, log } = restartedOwner({
+      deliver: async (delivered, recipients) => {
+        deliveries.push({ at: Date.now(), notice: delivered, recipients });
+        return recipients.map((peerId) => ({ peerId, outcome: outcomes.shift() ?? 'reached' }));
+      },
+    });
+
+    owner.afterRemoteChange(change(MEMBER_2, 'op-1'));
+    owner.afterNewFollower(CG, MEMBER_1);
+    await vi.advanceTimersByTimeAsync(18_000);
+    await owner.settled();
+
+    expect(deliveries.map(({ at }) => at - started)).toEqual([0, 3_000, 18_000]);
+    expect(log).toHaveBeenCalledWith(
+      `SWM change notice for "${CG}" sub-graph "notes" (op-1) to new follower ${MEMBER_1.slice(-8)}: reached on a resend`,
+    );
+  });
+
+  it('logs a new follower it never reached', async () => {
+    vi.useFakeTimers();
+    const { owner, deliveries, log } = restartedOwner({
+      deliver: async (delivered, recipients) => {
+        deliveries.push({ at: Date.now(), notice: delivered, recipients });
+        return recipients.map((peerId) => ({ peerId, outcome: 'unreachable' }));
+      },
+    });
+
+    owner.afterRemoteChange(change(MEMBER_2, 'op-1'));
+    owner.afterNewFollower(CG, MEMBER_1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await owner.settled();
+
+    expect(deliveries).toHaveLength(3);
+    expect(log).toHaveBeenCalledWith(
+      `SWM change notice for "${CG}" sub-graph "notes" (op-1) to new follower ${MEMBER_1.slice(-8)}: not reached (unreachable)`,
+    );
+  });
+
+  it('sends nothing to a peer known not to speak the notice protocol, or once stopped', async () => {
+    const without = restartedOwner({ supportsNotice: async () => false });
+    without.owner.afterRemoteChange(change(MEMBER_2, 'op-1'));
+    without.owner.afterNewFollower(CG, MEMBER_1);
+    await without.owner.settled();
+    const stopped = restartedOwner();
+    stopped.owner.afterRemoteChange(change(MEMBER_2, 'op-1'));
+    stopped.owner.stop();
+    stopped.owner.afterNewFollower(CG, MEMBER_1);
+    await stopped.owner.settled();
+
+    expect(without.deliveries).toEqual([]);
+    expect(stopped.deliveries).toEqual([]);
   });
 });
 

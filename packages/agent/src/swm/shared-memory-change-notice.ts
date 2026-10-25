@@ -29,6 +29,17 @@
  * speak it is not sent it at all. The owner logs who it did not reach and why.
  * Nothing waits for the notice.
  *
+ * The followers are those the owner knows at the change, and it knows them
+ * from their requests since it started. A member that asks again only after
+ * the change, as one that comes back a moment after the owner restarted,
+ * would get the change only at its next periodic pull, a minute or more
+ * later. So a peer that becomes a follower by asking for the graph's catalog
+ * heads is sent the notice of the latest change another peer made within
+ * {@link SWM_CHANGE_NOTICE_NEW_FOLLOWER_WINDOW_MS}, once
+ * ({@link SwmChangeNotifier.afterNewFollower}). A peer that becomes a
+ * follower by pulling the graph needs none: its pull carries every change
+ * before it.
+ *
  * A root share of a catalog-owned graph does not use this notice: it reaches
  * the owner as its author's catalog head, and the owner passes the head's
  * announcement on through the catalog's own delivery. The followers it tells
@@ -36,6 +47,8 @@
  */
 
 import { isProtocolUnsupportedError, validateContextGraphId, validateSubGraphName } from '@origintrail-official/dkg-core';
+import { rememberBounded } from '../bounded-map.js';
+import { SHARED_MEMORY_FOLLOWER_TTL_MS } from './shared-memory-followers.js';
 
 export const SWM_CHANGE_NOTICE_KIND_V1 = 'dkg-swm-change-notice-v1';
 /** Upper bound of an encoded notice; a valid one is well below it. */
@@ -189,6 +202,14 @@ export const SWM_CHANGE_NOTICE_RESEND_DELAYS_MS: readonly number[] = [3_000, 15_
 const MAX_LOGGED_MISSES = 8;
 /** Scopes with a trailing notice waiting at once; a burst over more drops the excess, periodic sync stays. */
 const MAX_WAITING_SCOPES = 256;
+/**
+ * How long a change is told to a peer that becomes a follower after it: as
+ * long as a follower stays one without asking again, so that a peer that was
+ * no follower at the change has had no notice of it.
+ */
+export const SWM_CHANGE_NOTICE_NEW_FOLLOWER_WINDOW_MS = SHARED_MEMORY_FOLLOWER_TTL_MS;
+/** Sources whose latest change is kept per graph; the one that changed it the longest ago makes room. */
+const RECENT_CHANGE_SOURCES_PER_GRAPH = 16;
 
 interface WaitingChange {
   change: SwmRemoteChange;
@@ -222,6 +243,8 @@ export class SwmChangeNotifier {
    * own change is sent to.
    */
   readonly #latest = new Map<string, NoticeRun>();
+  /** Per graph, the latest change of each source and when it was applied here, for a later follower. */
+  readonly #recentChanges = new Map<string, Map<string, { readonly change: SwmRemoteChange; readonly at: number }>>();
   readonly #whenStopped: Promise<void>;
   #markStopped!: () => void;
   #stopped = false;
@@ -238,6 +261,7 @@ export class SwmChangeNotifier {
   /** Called after a share from another peer was applied here. Never throws and never waits for the delivery. */
   afterRemoteChange(change: SwmRemoteChange): void {
     if (this.#stopped) return;
+    this.#rememberChange(change);
     const key = scopeKey(change.contextGraphId, change.subGraphName);
     const waiting = this.#waiting.get(key);
     if (waiting !== undefined) {
@@ -258,6 +282,25 @@ export class SwmChangeNotifier {
     }, this.#minIntervalMs - sinceLast);
     timer.unref?.();
     this.#waiting.set(key, { change, sources: new Set([change.sourcePeerId]), timer });
+  }
+
+  /**
+   * Called when a peer became a follower of a graph by asking for its catalog
+   * heads, not following it here before. The notices of earlier changes did
+   * not go to it, and the replay it asked for carries the root's catalog
+   * heads, not the named sub-graphs. It is sent the notice of the latest
+   * change another peer made to the graph within the window, once, and pulls
+   * the graph. Never throws and never waits for the delivery.
+   */
+  afterNewFollower(contextGraphId: string, peerId: string): void {
+    if (this.#stopped) return;
+    const latest = this.#latestChangeFor(contextGraphId, peerId);
+    if (latest === undefined) return;
+    const run = this.#tellNewFollower(latest, peerId).catch((error: unknown) => {
+      this.#ports.log?.(`SWM change notice for "${contextGraphId}" not delivered to new follower ${peerId.slice(-8)}: ${errorText(error)}`);
+    });
+    this.#inFlight.add(run);
+    void run.finally(() => this.#inFlight.delete(run));
   }
 
   /** Resolves when every delivery started so far has ended; for tests and shutdown. */
@@ -339,6 +382,50 @@ export class SwmChangeNotifier {
       + (misses.length > MAX_LOGGED_MISSES ? ` (+${misses.length - MAX_LOGGED_MISSES} more)` : '')
       + (handedOver && misses.length > 0 ? '; a newer notice takes over the resends' : '')
       + (unsupported.size > 0 ? `; ${unsupported.size} without the notice protocol` : ''),
+    );
+  }
+
+  /** Keep a change for a peer that becomes a follower after it: per graph, the latest of each source. */
+  #rememberChange(change: SwmRemoteChange): void {
+    const bySource = this.#recentChanges.get(change.contextGraphId)
+      ?? new Map<string, { readonly change: SwmRemoteChange; readonly at: number }>();
+    rememberBounded(bySource, change.sourcePeerId, { change, at: this.#now() }, RECENT_CHANGE_SOURCES_PER_GRAPH);
+    rememberBounded(this.#recentChanges, change.contextGraphId, bySource, 4 * MAX_WAITING_SCOPES);
+  }
+
+  /** The latest change to a graph within the window that a peer other than `peerId` made. */
+  #latestChangeFor(contextGraphId: string, peerId: string): SwmRemoteChange | undefined {
+    const bySource = this.#recentChanges.get(contextGraphId);
+    if (bySource === undefined) return undefined;
+    const oldest = this.#now() - SWM_CHANGE_NOTICE_NEW_FOLLOWER_WINDOW_MS;
+    let latest: { readonly change: SwmRemoteChange; readonly at: number } | undefined;
+    for (const [source, entry] of bySource) {
+      if (source === peerId || entry.at < oldest) continue;
+      if (latest === undefined || entry.at >= latest.at) latest = entry;
+    }
+    return latest?.change;
+  }
+
+  /** The notice of `change` to one new follower, sent again as any notice is; one log line. */
+  async #tellNewFollower(change: SwmRemoteChange, peerId: string): Promise<void> {
+    if (peerId === this.#ports.selfPeerId() || !await this.#ports.ownsPublicGraph(change.contextGraphId)) return;
+    if ((await this.#knownWithoutNotice([peerId])).length > 0) return;
+    const { contextGraphId, subGraphName, hint } = change;
+    let outcome: SwmChangeNoticeOutcome = 'failed';
+    let attempt = 0;
+    for (; attempt <= this.#resendDelaysMs.length; attempt += 1) {
+      if (attempt > 0) {
+        await Promise.race([this.#sleep(this.#resendDelaysMs[attempt - 1]!), this.#whenStopped]);
+        if (this.#stopped) break;
+      }
+      const delivered = await this.#ports.deliver({ contextGraphId, subGraphName, hint }, [peerId]);
+      outcome = delivered.find((delivery) => delivery.peerId === peerId)?.outcome ?? 'failed';
+      if (outcome === 'reached' || outcome === 'unsupported') break;
+    }
+    const scope = subGraphName === null ? 'root' : `sub-graph "${subGraphName}"`;
+    this.#ports.log?.(
+      `SWM change notice for "${contextGraphId}" ${scope} (${hint}) to new follower ${peerId.slice(-8)}: `
+        + (outcome === 'reached' ? `reached${attempt > 0 ? ' on a resend' : ''}` : `not reached (${outcome})`),
     );
   }
 

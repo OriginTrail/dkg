@@ -4244,6 +4244,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         acceptedPolicyDigest: this.rfc64PublicCatalogServiceV1
           ?.acceptedPolicySnapshot(request.networkId, request.contextGraphId)?.policyDigest,
         queue: () => this.tryQueueRfc64CatalogHeadReplayV1(remotePeerId, request),
+        // A follower this node did not know yet is told of a recent change it may lack.
+        onNewFollower: (contextGraphId, peerId) => this.swmChangeNotifierV1().afterNewFollower(contextGraphId, peerId),
         log: { info: (message) => this.log.info(ctx, message), warn: (message) => this.log.warn(ctx, message) },
       }),
     });
