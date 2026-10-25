@@ -70,6 +70,7 @@ import type {
   ExternalAuthorSigners,
   RpcRequestAdmission,
 } from '@origintrail-official/dkg-chain';
+import type { DKGAgentMarketplaceConfig } from './marketplace/config.js';
 import type { AgentChainSignerSource } from './agent-chain-signer-source.js';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
@@ -1841,6 +1842,8 @@ export interface DKGAgentConfig {
   authorSigners?: ExternalAuthorSigners;
   /** Cross-agent query access configuration. */
   queryAccess?: QueryAccessConfig;
+  /** OT-RFC-27 marketplace runtime (off when omitted). */
+  marketplace?: DKGAgentMarketplaceConfig;
   /** User-selected context graph IDs to sync automatically on peer connect. */
   syncContextGraphs?: string[];
   /** TTL for shared memory data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */

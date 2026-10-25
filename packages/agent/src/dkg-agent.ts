@@ -544,6 +544,7 @@ import { VmReconcileSchedulingMethods } from './dkg-agent-vm-reconcile-schedulin
 import { VmPromotionMethods } from './dkg-agent-vm-promotion.js';
 import { AgentsPhonebookMethods } from './dkg-agent-agents-phonebook.js';
 import { SwmChangeNoticeMethods } from './dkg-agent-swm-change-notice.js';
+import { MarketplaceMethods } from './dkg-agent-marketplace.js';
 import { ContextGraphMethods } from './dkg-agent-context-graph.js';
 import { ContextGraphNameResolutionMethods } from './dkg-agent-cg-name-resolution.js';
 import { ContextGraphOnChainIdMethods } from './dkg-agent-cg-on-chain-id.js';
@@ -2803,6 +2804,9 @@ export class DKGAgent extends DKGAgentBase {
       clearInterval(this.swmCleanupTimer);
       this.swmCleanupTimer = null;
     }
+    // OT-RFC-27 marketplace: stop the receipt flush timer (pending claims are
+    // reported, not retried — see dkg-agent-marketplace.ts).
+    this.stopMarketplaceRuntimeV1();
     if (this.hostModeReconcilerTimer) {
       clearInterval(this.hostModeReconcilerTimer);
       this.hostModeReconcilerTimer = null;
@@ -4434,5 +4438,5 @@ export class DKGAgent extends DKGAgentBase {
 }
 
 
-export interface DKGAgent extends PublicSnapshotMethods, ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods {}
-applyMixins(DKGAgent, [PublicSnapshotMethods,ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods]);
+export interface DKGAgent extends PublicSnapshotMethods, ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods, MarketplaceMethods {}
+applyMixins(DKGAgent, [PublicSnapshotMethods,ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods, SwmChangeNoticeMethods, MarketplaceMethods]);

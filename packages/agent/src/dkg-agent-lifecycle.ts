@@ -2000,6 +2000,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // every other node protocol. Dormant when no dataDir opened persistence.
     this.startRfc64CatalogRuntimeV1(ctx);
 
+    // OT-RFC-27 marketplace prototype: quote/serve handlers, receipt flush
+    // timer, and the buyer runtime. No-op (logged once) unless
+    // config.marketplace.enabled and the chain adapter settles marketplace
+    // receipts; see dkg-agent-marketplace.ts.
+    this.startMarketplaceRuntimeV1(ctx);
+
     const effectiveRole = this.config.nodeRole ?? 'edge';
     const ackSignerCandidates = this.getACKSignerCandidateWallets(ctx);
     let onChainIdentityId = 0n;

@@ -187,6 +187,54 @@ export {
   CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_ERROR_CODE,
 } from './context-graph-subscription-persist-scheduler.js';
 export { buildEndorsementQuads, DKG_ENDORSES, DKG_ENDORSED_AT } from './endorse.js';
+// ── OT-RFC-27 marketplace (prototype) ───────────────────────────────
+export {
+  MarketplaceSellerService,
+  type MarketplaceSellerDeps,
+  type MarketplaceSellerOffering,
+  type MarketplaceMessenger,
+  type MarketplaceLogger,
+  type MarketplaceFlushResult,
+} from './marketplace/seller-service.js';
+export {
+  MarketplaceBuyerService,
+  MarketplaceInvokeError,
+  MarketplaceNotSubscribedError,
+  MarketplaceRouteError,
+  type MarketplaceBuyerDeps,
+  type MarketplaceInvokeResult,
+  type MarketplaceSubscribeResult,
+} from './marketplace/buyer-service.js';
+export {
+  MarketplaceExecutionError,
+  createQueryExecutor,
+  createStubInferenceExecutor,
+  type MarketplaceExecution,
+  type MarketplaceExecutionErrorCode,
+  type MarketplaceExecutor,
+  type MarketplaceExecutorKind,
+  type MarketplaceQueryFn,
+} from './marketplace/executors.js';
+export {
+  MKT_NAMESPACE,
+  buildMarketplaceOfferQuads,
+  createContextGraphOfferSource,
+  marketplaceOfferSubject,
+  parseMarketplaceOfferBindings,
+  publishMarketplaceOfferings,
+  type MarketplaceOfferPublishPort,
+  type MarketplaceOfferQueryPort,
+  type MarketplaceOfferSource,
+  type MarketplaceSellerIdentity,
+} from './marketplace/offer-publisher.js';
+export {
+  type MarketplaceSettleAction,
+  type MarketplaceStatus,
+} from './dkg-agent-marketplace.js';
+export type {
+  DKGAgentMarketplaceConfig,
+  MarketplaceOfferingConfig,
+} from './marketplace/config.js';
 export {
   CclEvaluator,
   parseCclPolicy,
