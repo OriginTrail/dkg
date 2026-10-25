@@ -448,3 +448,59 @@ Registration (all four, or `pnpm test:devnet:manifest` fails): directory,
 4. `pnpm lint`, `node scripts/audit-*.mjs`, `pnpm test:inventory`
 5. `pnpm build && ./scripts/devnet.sh clean && ./scripts/devnet.sh start 6 &&
    node devnet/_bootstrap/bootstrap.cjs && pnpm test:devnet:marketplace-rfc27`
+
+## 10. Post-review amendments
+
+Changes landed after the adversarial review and the first live devnet run.
+They refine the design above (which is left as written); the code is the
+authority for details.
+
+- **Session keys bind per buyer, permanently.** `sessionKeyOwner` (a global
+  key→buyer map, squattable by front-running another buyer's key) is removed.
+  `boundSessionKeys[buyer][key]` records every key a buyer ever registered;
+  receipt verification accepts ANY bound key, so a rotation via a later
+  `fundSubscription` keeps OLD keys valid and can never strand already-served
+  receipts. Two buyers binding the same key is harmless — each binding spends
+  only its own buckets. `SessionKeyAlreadyBound` no longer exists; view
+  `isSessionKeyBound(buyer, key)` added.
+- **Zero-value claims revert (`ZeroClaimValue`) and enrollment is explicit.**
+  A zero-ask claim could previously enroll a claimant whose pro-rata share
+  divides by its own zero claim and brick finalization; sellers now enroll
+  once via an explicit flag (`getSellerClaim` returns a 3rd `enrolled` field),
+  so repeated claims cannot multiply a claimant's list entries. The domain
+  `proRataFinalize` mirror and the finalize loop OMIT `claimed == 0` sellers
+  as defense in depth.
+- **Finalization is paginated.** `finalizeBucket(buyer, epoch, maxSellers)`
+  (0 = all remaining) with a stored cursor and `BucketFinalizeProgress`, so a
+  bucket with more claimants than one block's gas still finalizes; claims on a
+  finalized or mid-pagination bucket revert `ClaimsClosedForBucket`. The chain
+  adapter's `marketplaceFinalizeBucket` takes an optional `maxSellers`
+  (omitted = 0 = all), so existing 2-arg callers are unchanged.
+- **Reward cap + per-epoch distribution tracking.** `rewardCapMultiple`
+  (uint16, default 10, 0 = uncapped; 4th member of `getParams()`) caps
+  `claimEpochReward` at `min(pool·QIF_i/1e18, rewardCapMultiple·R_i)` — the
+  wash-trading guard against harvesting an under-utilized pool's stake-side
+  QIF with fabricated self-claims. Paid rewards are tracked per epoch:
+  `getEpochRewardDistribution(epoch) → (pool, distributed, undistributed)`;
+  the capped remainder stays in the contract (governance follow-up).
+- **The marketplace CG is registered on-chain and buyers sync to it.** Under
+  RFC-64 an unregistered plain-name CG has no authority a replica will accept,
+  so offer shares never propagated. The FIRST seller publish now registers the
+  `marketplace` CG on-chain (one extra tx from the seller's operational
+  wallet; later sellers adopt the existing binding); marketplace-enabled nodes
+  subscribe with always-on sync, and empty discovery triggers a throttled
+  (≥30s) SWM backfill from connected peers. First-publish → buyer discovery
+  convergence can take up to ~3 minutes (sync catchup backoff 30/60/120/240s).
+- **Authorization expiry derives from CHAIN time**, not the buyer's wall
+  clock, fixing repeated-run `AuthorizationExpired` drift on time-warped
+  devnets where `block.timestamp` runs ahead of real time.
+- **Router NO_ROUTE reasons distinguish empty discovery from policy.**
+  `no-offers` = discovery returned nothing (rejections `[]`, typically an
+  unsynced CG); `no-eligible-offer` = offers were seen and every one carries a
+  rejection (`soft-ceiling`, `price-cap`, `deny-list`, …). The daemon invoke
+  route surfaces both as 409 `{ code: 'NO_ROUTE', reason, rejections }`.
+- **Seller-side serve hardening.** The seller refuses to serve with errorCode
+  `UNDERFUNDED` when the buyer's bucket cannot cover the call's worst-case
+  exposure, and refuses stale authorizations; its replay guard and
+  pending-receipt batch are persisted durably so a restart neither re-serves a
+  consumed callId nor drops signed-but-unsubmitted receipts.

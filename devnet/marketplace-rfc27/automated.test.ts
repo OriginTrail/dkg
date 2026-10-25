@@ -8,8 +8,9 @@
  *   1. Sellers (node1 = A, node3 = B, both core) configure offerings via
  *      `POST /api/marketplace/seller/offerings`; the offer KAs land in the
  *      shared `marketplace` Context Graph.
- *   2. Buyer (node2) discovers all three offers over CG sync (polled —
- *      gossip latency is real).
+ *   2. Buyer (node2) discovers all three offers over CG sync (polled — the
+ *      FIRST seller publish also registers the `marketplace` CG on-chain, and
+ *      buyer-side subscription catchup/backfill can take minutes to converge).
  *   3. Buyer funds an on-chain subscription (`POST /api/marketplace/subscribe`)
  *      with a per-bucket plan policy; the bucket funding and the registered
  *      session key are asserted against the Marketplace contract views.
@@ -22,16 +23,21 @@
  *   6. A deny-list re-subscribe drives usage to B, so combined A+B claims
  *      EXCEED the funded bucket (the over-authorization drill).
  *   7. Soft ceiling: a call whose worst case (`maxUnits·ask`) crosses 95% of
- *      its bucket is refused locally with a soft-ceiling error and ZERO meter
- *      movement (no reservation leak).
+ *      its bucket is refused locally (409 NO_ROUTE / 'no-eligible-offer' with
+ *      a 'soft-ceiling' rejection) and ZERO meter movement (no reservation
+ *      leak).
  *   8. `timeWarpSeconds` past `settlementDeadline(epoch)` → finalize →
- *      pro-rata (floor) asserted against an independent bigint mirror → both
- *      sellers claim; operational-wallet TRAC deltas equal `pool·QIF_i/1e18`
- *      within rounding, with QIF recomputed in the test from the on-chain
- *      `R_i, Q_i, ΣR, ΣQ, λ`.
+ *      pro-rata (floor) asserted against an independent bigint mirror (which,
+ *      like the contract and the domain `proRataFinalize`, OMITS claimed==0
+ *      sellers) → both sellers claim; operational-wallet TRAC deltas equal
+ *      `min(pool·QIF_i/1e18, rewardCapMultiple·R_i)` within rounding, with QIF
+ *      recomputed in the test from the on-chain `R_i, Q_i, ΣR, ΣQ, λ`, and the
+ *      per-epoch reward distribution totals reconciled against the payouts.
  *
  * AMOUNTS: the subscription is deliberately funded in SMALL wei amounts
- * (Σ = 0.001 TRAC) while the buyer wallet holds 10 TRAC — at the RFC-pinned
+ * (Σ = 0.001 TRAC) while the buyer wallet is topped up BY 10 TRAC on top of
+ * whatever it already holds (its bootstrap balance is real node capital and
+ * must survive this suite) — at the RFC-pinned
  * asks (0.5 µTRAC/token, 15 µTRAC/query-unit) that is what makes the
  * over-authorization drill (totalClaimed > funded) reachable with a handful
  * of real metered calls. The LOCAL plan-policy budgets are larger than the
@@ -130,6 +136,10 @@ interface SuiteCtx {
   /** The Chronos epoch every subscription tranche funds (pinned explicitly on
    *  each subscribe call so a mid-test epoch flip fails loudly, not subtly). */
   epoch: bigint;
+  /** The session key registered by the FIRST subscribe (step 3) — step 6
+   *  asserts it STAYS bound: session keys bind per buyer permanently, so a
+   *  later fundSubscription can never invalidate an earlier key. */
+  firstSessionKey?: string;
   expectedClaimA: bigint;
   expectedClaimB: bigint;
 }
@@ -267,15 +277,18 @@ async function flushAndConfirmClaim(
 ): Promise<void> {
   const flush = await postJson(seller, '/api/marketplace/settle', { action: 'flush-receipts' });
   expect(flush.status, `${label} flush-receipts failed: ${JSON.stringify(flush.json)}`).toBe(200);
-  await waitFor(
+  const claim = await waitFor(
     `${label}: getSellerClaim(buyer, ${ctx.epoch}, ${identityId}).claimed == ${expectedClaimedWei}`,
     120_000,
     3_000,
     async () => {
-      const claim = await ctx.marketplace.getSellerClaim(ctx.buyerAddr, ctx.epoch, identityId);
-      return claim.claimed === expectedClaimedWei ? claim : null;
+      const c = await ctx.marketplace.getSellerClaim(ctx.buyerAddr, ctx.epoch, identityId);
+      return c.claimed === expectedClaimedWei ? c : null;
     },
   );
+  // getSellerClaim's 3rd field: the first accepted claim must set the explicit
+  // enrollment flag (the claimant-list membership finalization iterates).
+  expect(claim.enrolled, `${label}: an accepted claim must enroll the seller`).toBe(true);
 }
 
 /** Sum a node's operational-wallet TRAC — rewards pay the submitting
@@ -367,10 +380,14 @@ beforeAll(async () => {
   const epoch: bigint = await chronos.getCurrentEpoch();
   expect(epoch).toBeGreaterThan(0n);
 
-  // Fund the buyer's on-chain funding wallet (node2's primary operational
+  // TOP UP the buyer's on-chain funding wallet (node2's primary operational
   // wallet — the adapter's primary signer is fundSubscription's msg.sender).
+  // fundTrac OVERWRITES the ERC-20 balance slot, so read-modify-write: setting
+  // it to a bare 10 TRAC would wipe the wallet's bootstrap balance (~1M TRAC),
+  // which the node's other on-chain roles rely on.
   const buyerAddr = buyer.opWallets[0]!.address;
-  await fundTrac(state, buyerAddr, ethers.parseEther('10'));
+  const buyerTracBefore: bigint = await state.token.balanceOf(buyerAddr);
+  await fundTrac(state, buyerAddr, buyerTracBefore + ethers.parseEther('10'));
 
   ctx = {
     state,
@@ -393,11 +410,18 @@ beforeAll(async () => {
 // The `it`s below are ONE sequential scenario (sequence.concurrent = false):
 // each step builds on the previous step's marketplace state, exactly like the
 // RFC's buyer/seller lifecycle. Receipt-ordering note: every phase's receipts
-// are confirmed on-chain BEFORE the next subscribe, so a session-key rotation
-// by a later tranche can never strand signed-but-unsubmitted receipts.
+// are confirmed on-chain BEFORE the next subscribe so the exact claim-sum
+// assertions stay phase-local. (Session-key rotation by a later tranche could
+// never strand them anyway: keys bind per buyer PERMANENTLY — boundSessionKeys
+// — so every historically bound key keeps authorizing receipts.)
 
 describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
   it('1. sellers publish offer KAs into the marketplace CG', async () => {
+    // The FIRST publish also anchors the `marketplace` CG on-chain (an extra
+    // ContextGraphs.createContextGraph tx from the seller's operational
+    // wallet) so buyer replicas can verify its RFC-64 authority. This suite
+    // intentionally asserts no seller nonces/ETH, and the only seller TRAC
+    // deltas it measures (step 9) are taken long after this tx.
     const offersA = await postJson(ctx.sellerA, '/api/marketplace/seller/offerings', {
       offerings: [
         {
@@ -452,9 +476,14 @@ describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
       );
 
     // CG gossip from two sellers to the buyer is eventually consistent — poll.
+    // Discovery can take up to ~3 minutes after the FIRST publish: that publish
+    // registers the CG on-chain, and the buyer's subscription converges through
+    // the sync catchup backoff (30/60/120/240s) plus the ≥30s-throttled SWM
+    // backfill that every empty GET /api/marketplace/offers poll nudges — so
+    // the window is kept ≥ 300s and each poll doubles as a backfill nudge.
     const offers = await waitFor(
       'buyer sees all 3 marketplace offers (A: devnet-llm + devnet-knowledge, B: devnet-llm) via CG sync',
-      240_000,
+      360_000,
       3_000,
       async () => {
         const r = await getJson(ctx.buyer, '/api/marketplace/offers');
@@ -516,6 +545,13 @@ describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
       ethers.ZeroAddress,
     );
     expect(sessionKey.toLowerCase()).toBe(String(sub.json?.sessionKeyAddress).toLowerCase());
+    // Session keys bind per buyer PERMANENTLY (boundSessionKeys): registering
+    // must also bind, and step 6 asserts the binding survives a re-subscribe.
+    expect(
+      await ctx.marketplace.isSessionKeyBound(ctx.buyerAddr, sessionKey),
+      'the registered session key must be bound to the buyer',
+    ).toBe(true);
+    ctx.firstSessionKey = sessionKey;
 
     // And the status route reflects the live subscription (step 3's assert).
     const st = await getJson(ctx.buyer, '/api/marketplace/status');
@@ -582,6 +618,15 @@ describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
       'tranche 2',
     );
 
+    // Subscribing again must NOT invalidate anything key-side: bindings are
+    // per buyer and permanent, so the step-3 key stays bound (and, since the
+    // buyer persists one session key, stays the active one) — a rotation via
+    // a later fundSubscription would keep the OLD key valid for settlement.
+    expect(
+      await ctx.marketplace.isSessionKeyBound(ctx.buyerAddr, ctx.firstSessionKey!),
+      're-subscribing must keep the originally bound session key valid',
+    ).toBe(true);
+
     for (let i = 0; i < 2; i++) {
       const r = await postJson(ctx.buyer, '/api/marketplace/invoke', {
         serviceType: 'inference',
@@ -627,9 +672,23 @@ describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
     const refusalText = JSON.stringify(refused.json);
     expect(
       refused.status,
-      `a soft-ceiling-crossing call must be refused, got ${refused.status}: ${refusalText}`,
-    ).toBeGreaterThanOrEqual(400);
-    expect(refusalText, 'the refusal must name the soft ceiling').toMatch(/soft[\s_-]?ceiling/i);
+      `a soft-ceiling-crossing call must be refused with 409, got ${refused.status}: ${refusalText}`,
+    ).toBe(409);
+    expect(refused.json?.code, `refusal code: ${refusalText}`).toBe('NO_ROUTE');
+    // The router distinguishes empty discovery (reason 'no-offers',
+    // rejections []) from offers all rejected by policy ('no-eligible-offer',
+    // rejections populated). Here offers EXIST — both devnet-llm asks pass the
+    // price cap — and every one is rejected by the soft ceiling, so the reason
+    // must be 'no-eligible-offer'. ('no-offers' is not assertable from this
+    // scenario without subscribing before the first publish, and re-runs on a
+    // shared devnet leave offers in the CG — the unit lane covers it.)
+    expect(refused.json?.reason, `refusal reason: ${refusalText}`).toBe('no-eligible-offer');
+    const rejections: any[] = Array.isArray(refused.json?.rejections) ? refused.json.rejections : [];
+    expect(rejections.length, `rejections must be populated: ${refusalText}`).toBeGreaterThan(0);
+    expect(
+      rejections.some((r) => /soft[-_\s]?ceiling/i.test(String(r?.reason))),
+      `a rejections[] entry must name the soft ceiling: ${refusalText}`,
+    ).toBe(true);
 
     // Zero movement: a refused call must not leak a reservation into the meter.
     const meterAfter = await getJson(ctx.buyer, '/api/marketplace/meter');
@@ -651,6 +710,8 @@ describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
 
     const claimA = await ctx.marketplace.getSellerClaim(ctx.buyerAddr, ctx.epoch, ctx.idA);
     const claimB = await ctx.marketplace.getSellerClaim(ctx.buyerAddr, ctx.epoch, ctx.idB);
+    expect(claimA.enrolled, 'seller A must be enrolled as a bucket claimant').toBe(true);
+    expect(claimB.enrolled, 'seller B must be enrolled as a bucket claimant').toBe(true);
 
     // Warp strictly past settlementDeadline(epoch) = epochEnd + grace.
     const deadline: bigint = await ctx.marketplace.settlementDeadline(ctx.epoch);
@@ -658,6 +719,11 @@ describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
     const warp = deadline - BigInt(block!.timestamp) + 15n;
     if (warp > 0n) await timeWarpSeconds(ctx.state.provider, Number(warp));
 
+    // The settle route takes { action, buyer?, epoch? } only — pagination is
+    // internal: the agent calls the adapter's marketplaceFinalizeBucket without
+    // a bound, which hits the contract's finalizeBucket(buyer, epoch,
+    // maxSellers) with maxSellers = 0 = all remaining claimants in one page
+    // (paging only matters past one block's gas worth of claimants).
     const fin = await postJson(ctx.buyer, '/api/marketplace/settle', {
       action: 'finalize',
       epoch: Number(ctx.epoch),
@@ -669,32 +735,47 @@ describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
     });
 
     // Independent pro-rata mirror — pure bigint floor division, no priority:
-    // finalized_i = claimed_i · funded / totalClaimed (residue stays pooled).
-    const finExpectedA = (claimA.claimed * bucket.funded) / bucket.totalClaimed;
-    const finExpectedB = (claimB.claimed * bucket.funded) / bucket.totalClaimed;
+    // finalized_i = claimed_i · funded / totalClaimed (residue stays pooled),
+    // and Q_i scales with the finalized share: qiScore_i = qiRaw_i·fin_i/claimed_i.
+    // Like the contract loop and the domain proRataFinalize, the mirror OMITS
+    // claimed==0 sellers — they contribute nothing and must never reach the
+    // divisions. No zero-claim seller can occur in this suite (zero-value
+    // claims revert ZeroClaimValue), but the mirror stays byte-exact with the
+    // reference semantics anyway.
+    const mirror = (c: { claimed: bigint; qiRaw: bigint }): { fin: bigint; qi: bigint } => {
+      if (c.claimed === 0n) return { fin: 0n, qi: 0n }; // omitted by the finalize loop
+      const fin = (c.claimed * bucket.funded) / bucket.totalClaimed;
+      return { fin, qi: (c.qiRaw * fin) / c.claimed };
+    };
+    const mirrorA = mirror(claimA);
+    const mirrorB = mirror(claimB);
     const acctA = await ctx.marketplace.getNodeEpochAccounting(ctx.epoch, ctx.idA);
     const acctB = await ctx.marketplace.getNodeEpochAccounting(ctx.epoch, ctx.idB);
-    expect(acctA.finalizedValue, 'seller A pro-rata (floor) mismatch').toBe(finExpectedA);
-    expect(acctB.finalizedValue, 'seller B pro-rata (floor) mismatch').toBe(finExpectedB);
-    expect(acctA.totalFinalizedValue).toBe(finExpectedA + finExpectedB);
+    expect(acctA.finalizedValue, 'seller A pro-rata (floor) mismatch').toBe(mirrorA.fin);
+    expect(acctB.finalizedValue, 'seller B pro-rata (floor) mismatch').toBe(mirrorB.fin);
+    expect(acctA.totalFinalizedValue).toBe(mirrorA.fin + mirrorB.fin);
     expect(
       acctA.totalFinalizedValue,
       'pro-rata may never finalize more than the funding',
     ).toBeLessThanOrEqual(bucket.funded);
-
-    // Q_i scales with the finalized share: qiScore_i = qiRaw_i·fin_i/claimed_i.
-    expect(acctA.qiScore, 'seller A qiScore scaling').toBe(
-      (claimA.qiRaw * finExpectedA) / claimA.claimed,
-    );
-    expect(acctB.qiScore, 'seller B qiScore scaling').toBe(
-      (claimB.qiRaw * finExpectedB) / claimB.claimed,
-    );
+    expect(acctA.qiScore, 'seller A qiScore scaling').toBe(mirrorA.qi);
+    expect(acctB.qiScore, 'seller B qiScore scaling').toBe(mirrorB.qi);
   });
 
-  it('9. epoch rewards: TRAC deltas equal pool·QIF within rounding (QIF recomputed from chain)', async () => {
+  it('9. epoch rewards: TRAC deltas equal min(pool·QIF, cap·R_i) within rounding (QIF recomputed from chain)', async () => {
+    // getParams grew a 4th member: the wash-trading reward cap. Destructure
+    // all four and pin the deploy defaults the math below depends on.
     const params = await ctx.marketplace.getParams();
     const lambda: bigint = params.lambdaQif18;
+    const rewardCapMultiple: bigint = params.rewardCapMultiple;
+    expect(params.settlementGraceSeconds).toBeGreaterThan(0n);
+    expect(params.softCeilingBps).toBe(9_500n);
+    expect(
+      rewardCapMultiple,
+      'getParams().rewardCapMultiple must be the deploy default (10; 0 would mean uncapped)',
+    ).toBe(10n);
 
+    let totalPaid = 0n;
     for (const [seller, identityId, label] of [
       [ctx.sellerA, ctx.idA, 'seller A'],
       [ctx.sellerB, ctx.idB, 'seller B'],
@@ -730,31 +811,44 @@ describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
       });
 
       const delta = (await nodeOpTrac(seller)) - balBefore;
-      const expectedReward = (acct.pool * myQif) / SCALE18;
+      // Expected payout = min(pool·QIF/1e18, rewardCapMultiple·R_i): the cap
+      // bounds a staked node's harvest of an under-utilized pool to a multiple
+      // of its own finalized receipt value. At this suite's stakes/claims the
+      // cap is NOT binding (QIF ≤ 1e18 ⇒ pool·QIF ≤ pool ≈ ΣR ≤ 10·R_i), so
+      // min() must still select the QIF payout — asserting through min keeps
+      // the mirror honest if the deploy default ever changes.
+      let expectedReward = (acct.pool * myQif) / SCALE18;
+      if (rewardCapMultiple !== 0n) {
+        const rewardCap = rewardCapMultiple * acct.finalizedValue;
+        if (expectedReward > rewardCap) expectedReward = rewardCap;
+      }
       expect(delta, `${label} reward must move TRAC to the operational wallet`).toBeGreaterThan(0n);
       expect(
         absDiff(delta, expectedReward),
-        `${label}: TRAC delta ${delta} vs pool·QIF ${expectedReward} (pool=${acct.pool}, qif18=${myQif})`,
+        `${label}: TRAC delta ${delta} vs min(pool·QIF, cap·R_i) ${expectedReward} `
+          + `(pool=${acct.pool}, qif18=${myQif}, cap=${rewardCapMultiple}·${acct.finalizedValue})`,
       ).toBeLessThanOrEqual(REWARD_TOLERANCE_WEI);
       if (res.json?.rewardWei !== undefined) {
         expect(big(res.json.rewardWei, `${label} rewardWei`)).toBe(delta);
       }
+      totalPaid += delta;
     }
 
-    // The pool is the subscription funding, and QIF distributes essentially
-    // all of it across the two claimants (floor residue only).
-    const acct = await ctx.marketplace.getNodeEpochAccounting(ctx.epoch, ctx.idA);
-    expect(acct.pool, 'epoch pool must equal the summed subscription tranches').toBe(
+    // Per-epoch distribution tracking: the pool is exactly the summed
+    // subscription tranches, `distributed` is exactly what the two claims
+    // paid out, and `undistributed` is the identity `pool − distributed` —
+    // which here is floor residue only (the reward cap is not binding), so it
+    // stays within the rounding tolerance.
+    const dist = await ctx.marketplace.getEpochRewardDistribution(ctx.epoch);
+    expect(dist.pool, 'epoch pool must equal the summed subscription tranches').toBe(
       FUNDED_TOTAL_WEI,
     );
-    const pool: bigint = acct.pool;
-    const qifA: bigint = await ctx.marketplace.getQif18(ctx.epoch, ctx.idA);
-    const qifB: bigint = await ctx.marketplace.getQif18(ctx.epoch, ctx.idB);
-    const paidA = (pool * qifA) / SCALE18;
-    const paidB = (pool * qifB) / SCALE18;
-    expect(paidA + paidB).toBeLessThanOrEqual(pool);
+    expect(dist.distributed, 'distributed must equal the summed paid rewards').toBe(totalPaid);
+    expect(dist.undistributed, 'undistributed must be pool − distributed').toBe(
+      dist.pool - dist.distributed,
+    );
     expect(
-      pool - (paidA + paidB),
+      dist.undistributed,
       'QIF must distribute the pool up to floor residue',
     ).toBeLessThanOrEqual(REWARD_TOLERANCE_WEI);
   });
