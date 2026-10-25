@@ -19,16 +19,11 @@ import { isSafeJobId, SAFE_JOB_ID_ERROR } from '@origintrail-official/dkg-publis
 import { DkgHomeFiles, isProcessRunning } from './config.js';
 import type { ContextGraphListOnChainView } from './context-graph-list-format.js';
 import type { ContextGraphJoinResult } from './context-graph-join-result.js';
-import {
-  serializeAgentListOptions,
-  type AgentListPageOptions,
-} from '@origintrail-official/dkg-core';
+import { serializeAgentListOptions, type AgentListPageOptions } from '@origintrail-official/dkg-core';
 import { loadApiClientToken } from './auth.js';
+import { createMarketplaceClient } from './api-client-marketplace.js';
 import type { KnowledgeAssetWritableQuad } from './knowledge-asset-write-contract.js';
-import {
-  finalizedPublishOptionsPayload,
-  type KnowledgeAssetFinalizedPublishOptions,
-} from './finalized-publish-options.js';
+import { finalizedPublishOptionsPayload, type KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import {
@@ -2465,6 +2460,9 @@ export class ApiClient {
   }
 
   readonly entities = createEntityClient((path, body, deadline) => this.post(path, body, deadline));
+
+  // OT-RFC-27 marketplace routes; typed methods live in api-client-marketplace.ts.
+  readonly marketplace = createMarketplaceClient((path) => this.get(path), (path, body) => this.post(path, body));
 
   private async post<T>(path: string, body: unknown, deadline: RequestDeadline = {}): Promise<T> {
     return this.send<T>(path, {

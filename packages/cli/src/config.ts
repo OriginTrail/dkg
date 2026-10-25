@@ -1,6 +1,7 @@
 import type { SharedMemoryPublicSnapshotStorageConfig } from '@origintrail-official/dkg-publisher';
 import { normalizeOxigraphMemoryLimits, oxigraphMemorySupportError } from './oxigraph-memory-limits.js';
 import { resolveBooleanEnvOverride } from './boolean-env-override.js';
+import type { DkgMarketplaceConfig } from './marketplace-config.js';
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
 import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origintrail-official/dkg-publisher';
 import { join, dirname, basename } from 'node:path';
@@ -1113,6 +1114,8 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
      */
     useWorkerThread?: boolean;
   };
+  /** OT-RFC-27 marketplace block, mapped into `DKGAgentConfig.marketplace` by `resolveMarketplaceAgentConfig` (marketplace-config.ts; `DKG_MARKETPLACE_ENABLED` overrides `enabled`). */
+  marketplace?: DkgMarketplaceConfig;
   /**
    * RFC 04 v0.3 / Issue #461 — opt this node into the Network State
    * Registry as a circuit-relay provider. When true, the daemon flips

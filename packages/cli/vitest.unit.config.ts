@@ -85,6 +85,9 @@ export default defineConfig({
           'test/daemon/plugin-loader.test.ts',
           'test/daemon/routes/plugins.test.ts',
           'test/daemon-pca-routes.test.ts',
+          // OT-RFC-27 marketplace routes — pure handler tests (fake req/res,
+          // stubbed agent mixin), no hardhat/daemon.
+          'test/daemon-marketplace-routes.test.ts',
           'test/knowledge-assets-error-mapping.test.ts',
           'test/promote-admission-route.test.ts',
           'test/daemon-identity-wallet-routes.test.ts',
@@ -161,6 +164,9 @@ export default defineConfig({
           'test/node-runtime-preflight.test.ts',
           'test/dkg-doctor.test.ts',
           'test/metrics-collector-config.test.ts',
+          // OT-RFC-27 marketplace config mapping (wei strings → bigint,
+          // DKG_MARKETPLACE_ENABLED override). Pure logic, no hardhat.
+          'test/marketplace-config.test.ts',
           'test/init.test.ts',
           'test/init-command.test.ts',
           'test/init-chain-config.test.ts',

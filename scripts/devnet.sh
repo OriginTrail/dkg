@@ -782,6 +782,7 @@ create_node_config() {
     "pollIntervalMs": 12000,
     "errorBackoffMs": 5000
   },
+  "marketplace": { "enabled": true },
   ${devnet_auth_block}
   ${rs_block}
   ${publisher_block}

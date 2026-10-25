@@ -158,6 +158,7 @@ import {
   formatMetricsCollectorStartupLog,
   resolveMetricsCollectorConfig,
 } from '../metrics-collector-config.js';
+import { resolveMarketplaceAgentConfig } from '../marketplace-config.js';
 import { assertNodeRuntimeSupported } from '../node-runtime-preflight.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
 import {
@@ -1903,6 +1904,11 @@ async function runDaemonInnerWithStartupOwnership(
     randomSamplingWalPath: config.randomSampling?.walPath,
     randomSamplingTickIntervalMs: config.randomSampling?.tickIntervalMs,
     randomSamplingUseWorkerThread: config.randomSampling?.useWorkerThread,
+    // OT-RFC-27 marketplace: wei strings in config.json become bigint here, and
+    // DKG_MARKETPLACE_ENABLED overrides the enabled flag. A malformed block
+    // throws at this boundary so the daemon fails boot instead of silently
+    // running without the runtime the operator configured.
+    marketplace: resolveMarketplaceAgentConfig(config.marketplace),
     storageAckTiming,
     syncCheckpointStore: protocolStores.syncCheckpointStore,
     changelogCursorStore: protocolStores.changelogCursorStore,
