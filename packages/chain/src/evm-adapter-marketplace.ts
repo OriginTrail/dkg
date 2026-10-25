@@ -65,6 +65,40 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
     return this.requireMarketplace().getAddress();
   }
 
+  /**
+   * Latest block timestamp — CHAIN time for authorization-expiry derivation.
+   * A tip read, so `null` (a lagging endpoint) fails over rather than masking
+   * as zero; callers treat a throw as "fall back to the wall clock".
+   */
+  async getLatestBlockTimestamp(): Promise<bigint> {
+    await this.init();
+    const block = await this.readProviderRetryingNull(
+      'getBlock(latest)',
+      (provider) => provider.getBlock('latest'),
+      { rpcUsageConsumer: 'getBlock' },
+    );
+    if (block?.timestamp == null) {
+      throw new Error('getLatestBlockTimestamp: no endpoint returned the latest block');
+    }
+    return BigInt(block.timestamp);
+  }
+
+  /**
+   * `MarketplaceStorage.consumedAuth(authDigest)` — the contract's durable
+   * replay guard, readable so a restarted seller can refuse an already-settled
+   * authorization before it poisons a batch. The storage contract is resolved
+   * lazily (its ADDRESS is memoized by `resolveContract`), because only this
+   * read needs it.
+   */
+  async marketplaceIsAuthConsumed(authDigest: string): Promise<boolean> {
+    await this.init();
+    this.requireMarketplace();
+    const storage = await this.resolveContract('MarketplaceStorage');
+    return Boolean(await this.readContract(
+      storage, 'marketplaceStorage.consumedAuth', 'consumedAuth', authDigest,
+    ));
+  }
+
   async marketplaceFundSubscription(params: MarketplaceFundSubscriptionParams): Promise<TxResult> {
     await this.init();
     const marketplace = this.requireMarketplace();

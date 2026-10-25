@@ -105,6 +105,49 @@ describe('ReceiptBatcher', () => {
     expect(batcher.drainAll()).toEqual([]);
   });
 
+  it('requeue puts drained claims back at the front with a fresh delay window', () => {
+    const { batcher, advance } = batcherWith({ maxBatchSize: 10 });
+    batcher.add(claim({ callId: '0x' + '01'.repeat(32) }));
+    batcher.add(claim({ callId: '0x' + '02'.repeat(32) }));
+    advance(60_000);
+    const [batch] = batcher.collectDue();
+    expect(batch.claims).toHaveLength(2);
+    expect(batcher.pendingCount()).toBe(0);
+    // Transient submission failure → requeue; nothing is forfeited.
+    batcher.requeue(batch.claims);
+    expect(batcher.pendingCount()).toBe(2);
+    expect(batcher.pendingClaims().map((entry) => entry.callId)).toEqual([
+      '0x' + '01'.repeat(32),
+      '0x' + '02'.repeat(32),
+    ]);
+    // The fresh addedAtMs acts as the retry backoff: not due again until the
+    // delay window elapses once more.
+    expect(batcher.collectDue()).toEqual([]);
+    advance(60_000);
+    expect(batcher.collectDue()).toHaveLength(1);
+  });
+
+  it('requeue({ dueImmediately: true }) backdates claims for restart resubmission', () => {
+    const { batcher } = batcherWith({ maxBatchSize: 10 });
+    batcher.requeue([claim()], { dueImmediately: true });
+    const batches = batcher.collectDue();
+    expect(batches).toHaveLength(1);
+    expect(batches[0].trigger).toBe('delay');
+  });
+
+  it('requeue interleaves ahead of claims that arrived meanwhile and drops zero-value ones', () => {
+    const { batcher, advance } = batcherWith({ maxBatchSize: 10 });
+    batcher.add(claim({ callId: '0x' + '0a'.repeat(32) }));
+    advance(60_000);
+    const [batch] = batcher.collectDue();
+    batcher.add(claim({ callId: '0x' + '0b'.repeat(32) }));
+    batcher.requeue([...batch.claims, claim({ callId: '0x' + '0c'.repeat(32), servedUnits: 0n })]);
+    expect(batcher.pendingClaims().map((entry) => entry.callId)).toEqual([
+      '0x' + '0a'.repeat(32), // requeued first (front)
+      '0x' + '0b'.repeat(32),
+    ]);
+  });
+
   it('refuses enqueueing zero-value claims (contract ZeroClaimValue, batch atomicity)', () => {
     const { batcher } = batcherWith();
     expect(() => batcher.add(claim({ askPerUnitWei: 0n }))).toThrow('zero-value claim refused');

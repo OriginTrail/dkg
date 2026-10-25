@@ -106,7 +106,8 @@ function respondMarketplaceError(res: RequestContext['res'], err: any, prefix: s
 
 function parseIdentityIdList(raw: unknown, field: string): bigint[] {
   if (!Array.isArray(raw)) throw new Error(`${field} must be an array of node identityIds`);
-  return raw.map((entry, index) => parseMarketplaceUint(entry, `${field}[${index}]`));
+  // Identity ids are uint72 on-chain.
+  return raw.map((entry, index) => parseMarketplaceUint(entry, `${field}[${index}]`, 72));
 }
 
 /**
@@ -145,8 +146,9 @@ function parsePlanPolicy(raw: unknown): AgentPlanPolicy {
         ...(match.modelId !== undefined ? { modelId: match.modelId } : {}),
       },
       budgetWei: parseMarketplaceUint(bucket.budgetWei, `${field}.budgetWei`),
-      priceCapWeiPerUnit: parseMarketplaceUint(bucket.priceCapWeiPerUnit, `${field}.priceCapWeiPerUnit`),
-      maxUnitsPerCall: parseMarketplaceUint(bucket.maxUnitsPerCall, `${field}.maxUnitsPerCall`),
+      // Width-bound at the boundary: asks are uint96, units uint64 on-chain.
+      priceCapWeiPerUnit: parseMarketplaceUint(bucket.priceCapWeiPerUnit, `${field}.priceCapWeiPerUnit`, 96),
+      maxUnitsPerCall: parseMarketplaceUint(bucket.maxUnitsPerCall, `${field}.maxUnitsPerCall`, 64),
     };
   });
   if (policy.softCeilingBps !== undefined
@@ -163,14 +165,15 @@ function parsePlanPolicy(raw: unknown): AgentPlanPolicy {
   };
 }
 
-/** `amountWei` (decimal wei string) or `amountTrac` (decimal TRAC) — exactly one. */
+/** `amountWei` (decimal wei string) or `amountTrac` (decimal TRAC) — exactly one.
+ * Funded amounts are uint96 on-chain, so both spellings are bounded here. */
 function parseSubscriptionAmountWei(body: Record<string, unknown>): bigint {
   const { amountWei, amountTrac } = body;
   if ((amountWei === undefined) === (amountTrac === undefined)) {
     throw new Error('pass exactly one of amountWei (decimal wei string) or amountTrac (decimal TRAC)');
   }
   if (amountWei !== undefined) {
-    const wei = parseMarketplaceUint(amountWei, 'amountWei');
+    const wei = parseMarketplaceUint(amountWei, 'amountWei', 96);
     if (wei <= 0n) throw new Error('amountWei must be > 0');
     return wei;
   }
@@ -181,6 +184,7 @@ function parseSubscriptionAmountWei(body: Record<string, unknown>): bigint {
   if (!/^\d+(\.\d+)?$/.test(s)) throw new Error('amountTrac must be a positive decimal number of TRAC tokens');
   const wei = ethers.parseEther(s);
   if (wei <= 0n) throw new Error('amountTrac must be > 0');
+  if (wei >= 1n << 96n) throw new Error(`amountTrac must fit in uint96, got: ${wei} wei`);
   return wei;
 }
 
@@ -273,7 +277,7 @@ export async function handleMarketplaceRoutes(ctx: RequestContext): Promise<void
     try {
       amountWei = parseSubscriptionAmountWei(value);
       policy = parsePlanPolicy(value.policy);
-      epoch = value.epoch === undefined ? undefined : parseMarketplaceUint(value.epoch, 'epoch');
+      epoch = value.epoch === undefined ? undefined : parseMarketplaceUint(value.epoch, 'epoch', 64);
     } catch (err: any) {
       return jsonResponse(res, 400, { error: err?.message ?? String(err) });
     }
@@ -318,7 +322,7 @@ export async function handleMarketplaceRoutes(ctx: RequestContext): Promise<void
     }
     let units: bigint;
     try {
-      units = maxUnits === undefined ? DEFAULT_INVOKE_MAX_UNITS : parseMarketplaceUint(maxUnits, 'maxUnits');
+      units = maxUnits === undefined ? DEFAULT_INVOKE_MAX_UNITS : parseMarketplaceUint(maxUnits, 'maxUnits', 64);
     } catch (err: any) {
       return jsonResponse(res, 400, { error: err?.message ?? String(err) });
     }
@@ -372,7 +376,7 @@ export async function handleMarketplaceRoutes(ctx: RequestContext): Promise<void
     }
     let epochValue: bigint | undefined;
     try {
-      epochValue = epoch === undefined ? undefined : parseMarketplaceUint(epoch, 'epoch');
+      epochValue = epoch === undefined ? undefined : parseMarketplaceUint(epoch, 'epoch', 64);
     } catch (err: any) {
       return jsonResponse(res, 400, { error: err?.message ?? String(err) });
     }

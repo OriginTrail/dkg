@@ -2804,9 +2804,9 @@ export class DKGAgent extends DKGAgentBase {
       clearInterval(this.swmCleanupTimer);
       this.swmCleanupTimer = null;
     }
-    // OT-RFC-27 marketplace: stop the receipt flush timer (pending claims are
-    // reported, not retried — see dkg-agent-marketplace.ts).
-    this.stopMarketplaceRuntimeV1();
+    // OT-RFC-27 marketplace: stop the flush timer + one bounded final receipt
+    // flush; the rest persists under dataDir — see dkg-agent-marketplace.ts.
+    await this.stopMarketplaceRuntimeV1();
     if (this.hostModeReconcilerTimer) {
       clearInterval(this.hostModeReconcilerTimer);
       this.hostModeReconcilerTimer = null;

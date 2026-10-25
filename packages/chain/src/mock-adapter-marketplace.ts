@@ -159,7 +159,11 @@ function addTo(map: Map<string, bigint>, key: string, amount: bigint): void {
 }
 
 function mockRevert(detail: string): never {
-  throw new Error(`Mock marketplace: ${detail}`);
+  const error = new Error(`Mock marketplace: ${detail}`);
+  // Mirror ethers' revert shape so callers classify a mock rejection exactly
+  // like an on-chain revert (vs a transient transport failure).
+  (error as Error & { code?: string }).code = 'CALL_EXCEPTION';
+  throw error;
 }
 
 export class MockMarketplaceMethods {
@@ -179,6 +183,21 @@ export class MockMarketplaceMethods {
 
   async marketplaceGetAddress(this: MockChainAdapter): Promise<string> {
     return MOCK_MARKETPLACE_ADDRESS;
+  }
+
+  /**
+   * CHAIN time (the clock authorization expiry is checked against). Backed by
+   * the same `nowSeconds` field `marketplaceSubmitReceiptBatch` enforces, so a
+   * buyer deriving expiry from chain time stays consistent with the mock's
+   * expiry checks even when a test drives `nowSeconds` far from `Date.now()`.
+   */
+  async getLatestBlockTimestamp(this: MockChainAdapter): Promise<bigint> {
+    return stateFor(this).nowSeconds;
+  }
+
+  /** `MarketplaceStorage.consumedAuth` mirror (durable replay guard read). */
+  async marketplaceIsAuthConsumed(this: MockChainAdapter, authDigest: string): Promise<boolean> {
+    return stateFor(this).consumedAuth.has(authDigest.toLowerCase());
   }
 
   async marketplaceFundSubscription(

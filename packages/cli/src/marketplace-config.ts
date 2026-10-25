@@ -68,24 +68,33 @@ export interface DkgMarketplaceConfig {
  * be plain decimal integers; numbers must be non-negative safe integers (a
  * JSON number above 2^53 is already rounded by the parser, so it is rejected
  * rather than silently read as a different amount — same rule as the PCA
- * route's `primaryNode`). Throws naming `field` so a config typo fails boot
- * and a bad request body maps to a 400 with the offending key.
+ * route's `primaryNode`). An optional `maxBits` width-bounds the value at the
+ * boundary (uint96 for wei amounts/asks, uint64 for units/epochs, uint72 for
+ * identity ids — the contract's own column widths, mirroring the domain
+ * package's digest asserts). Throws naming `field` so a config typo fails
+ * boot and a bad request body maps to a 400 with the offending key.
  */
-export function parseMarketplaceUint(value: unknown, field: string): bigint {
+export function parseMarketplaceUint(value: unknown, field: string, maxBits?: 64 | 72 | 96): bigint {
+  let parsed: bigint;
   if (typeof value === 'number') {
     if (!Number.isSafeInteger(value) || value < 0) {
       throw new Error(`${field} must be a non-negative integer (pass values above 2^53 as a decimal string)`);
     }
-    return BigInt(value);
+    parsed = BigInt(value);
+  } else {
+    if (typeof value !== 'string' || !/^\d+$/.test(value.trim())) {
+      throw new Error(`${field} must be a non-negative decimal integer string`);
+    }
+    parsed = BigInt(value.trim());
   }
-  if (typeof value !== 'string' || !/^\d+$/.test(value.trim())) {
-    throw new Error(`${field} must be a non-negative decimal integer string`);
+  if (maxBits !== undefined && parsed >= 1n << BigInt(maxBits)) {
+    throw new Error(`${field} must fit in uint${maxBits}, got: ${parsed}`);
   }
-  return BigInt(value.trim());
+  return parsed;
 }
 
-function parseOptionalMarketplaceUint(value: unknown, field: string): bigint | undefined {
-  return value === undefined ? undefined : parseMarketplaceUint(value, field);
+function parseOptionalMarketplaceUint(value: unknown, field: string, maxBits?: 64 | 72 | 96): bigint | undefined {
+  return value === undefined ? undefined : parseMarketplaceUint(value, field, maxBits);
 }
 
 function requireString(value: unknown, field: string): string {
@@ -112,7 +121,7 @@ export function parseMarketplaceOffering(raw: unknown, field: string): Marketpla
     throw new Error(`${field} must be an offering object`);
   }
   const offering = raw as Record<string, unknown>;
-  const capacity = parseOptionalMarketplaceUint(offering.capacityUnitsPerMin, `${field}.capacityUnitsPerMin`);
+  const capacity = parseOptionalMarketplaceUint(offering.capacityUnitsPerMin, `${field}.capacityUnitsPerMin`, 64);
   if (offering.expiresAt !== undefined
     && (typeof offering.expiresAt !== 'number' || !Number.isSafeInteger(offering.expiresAt) || offering.expiresAt <= 0)) {
     throw new Error(`${field}.expiresAt must be a positive integer (unix seconds)`);
@@ -122,7 +131,7 @@ export function parseMarketplaceOffering(raw: unknown, field: string): Marketpla
     serviceType: requireOneOf(offering.serviceType, MARKETPLACE_SERVICE_TYPES, `${field}.serviceType`),
     ...(offering.modelId !== undefined ? { modelId: requireString(offering.modelId, `${field}.modelId`) } : {}),
     unit: requireOneOf(offering.unit, MARKETPLACE_UNITS, `${field}.unit`),
-    askPerUnitWei: parseMarketplaceUint(offering.askPerUnitWei, `${field}.askPerUnitWei`),
+    askPerUnitWei: parseMarketplaceUint(offering.askPerUnitWei, `${field}.askPerUnitWei`, 96),
     ...(capacity !== undefined ? { capacityUnitsPerMin: capacity } : {}),
     ...(offering.expiresAt !== undefined ? { expiresAt: offering.expiresAt } : {}),
     ...(offering.executor !== undefined

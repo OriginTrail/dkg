@@ -282,7 +282,10 @@ marketplaceCmd
         return;
       }
       if (result.batches !== undefined) {
-        console.log(`Flushed ${result.batches} batch(es), ${result.claims} claim(s) submitted, ${result.failedClaims} dropped`);
+        console.log(
+          `Flushed ${result.batches} batch(es), ${result.claims} claim(s) submitted, `
+          + `${result.failedClaims} dropped, ${result.requeuedClaims ?? 0} requeued`,
+        );
         for (const error of result.errors ?? []) console.log(`  error: ${error}`);
         return;
       }

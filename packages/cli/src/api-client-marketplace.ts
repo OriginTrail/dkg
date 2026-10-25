@@ -90,6 +90,8 @@ export interface MarketplaceSettleResponse {
   batches?: number;
   claims?: number;
   failedClaims?: number;
+  /** Claims put back in the batcher after a transient submission failure. */
+  requeuedClaims?: number;
   errors?: string[];
   // finalize / claim / roll: the mined transaction (+ claim's parsed reward).
   txHash?: string;

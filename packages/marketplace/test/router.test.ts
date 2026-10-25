@@ -166,11 +166,19 @@ describe('selectRoute policy matrix', () => {
   it('refuses a call whose worst case crosses the soft ceiling of the bucket', () => {
     const a = offer();
     const policy = policyWith();
-    const meter = new BuyerMeter(policy);
-    // Fill the inference bucket until only 4e14 wei remain: the 95% soft
-    // allowance is then 3.8e14 wei, i.e. exactly 760 units at the 5e11 ask.
-    meter.reserve(0, 'call-fill', 6n * TRAC - 400_000_000_000_000n);
-    const snapshot = meter.snapshot();
+    // A meter snapshot with only 4e14 wei of inference headroom left: the 95%
+    // soft allowance is then 3.8e14 wei, i.e. exactly 760 units at the 5e11
+    // ask. Built literally — `reserve()` itself now enforces the ceiling, so
+    // a meter cannot be driven into this state in one reservation.
+    const settledWei = 6n * TRAC - 400_000_000_000_000n;
+    const snapshot = {
+      ...new BuyerMeter(policy).snapshot(),
+      totalSettledWei: settledWei,
+      buckets: [
+        { budgetWei: 6n * TRAC, settledWei, reservedWei: 0n },
+        { budgetWei: 5n * TRAC, settledWei: 0n, reservedWei: 0n },
+      ],
+    };
     expect(softCeilingAllowanceWei(snapshot.buckets[0], snapshot.softCeilingBps)).toBe(380_000_000_000_000n);
     const within = selectRoute([a], [quoteFor(a)], policy, snapshot, request({ maxUnits: 760n }));
     expect(within.ok).toBe(true);

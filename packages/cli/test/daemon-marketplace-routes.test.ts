@@ -158,6 +158,21 @@ describe('POST /api/marketplace/seller/offerings', () => {
     expect(called).toBe(false);
   });
 
+  it('→ 400 when askPerUnitWei exceeds uint96 (the contract ask width)', async () => {
+    let called = false;
+    const agent = { marketplaceSetOfferings: async () => { called = true; return { offerings: 0, published: [] }; } };
+    const { res, done } = runCtx('POST', '/api/marketplace/seller/offerings', agent, {
+      offerings: [{
+        offeringLocalId: 'devnet-llm', serviceType: 'inference', unit: 'token',
+        askPerUnitWei: (1n << 96n).toString(),
+      }],
+    });
+    await done;
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(/offerings\[0\]\.askPerUnitWei must fit in uint96/);
+    expect(called).toBe(false);
+  });
+
   it('→ 409 SELLER_UNAVAILABLE when the node has no operational signing key', async () => {
     const agent = {
       marketplaceSetOfferings: async () => {
@@ -271,6 +286,67 @@ describe('POST /api/marketplace/subscribe', () => {
     expect(JSON.parse(badCap.res.body).error).toMatch(/policy\.buckets\[0\]\.priceCapWeiPerUnit/);
   });
 
+  it('width-bounds numeric inputs at the boundary → 400 naming the field', async () => {
+    let called = false;
+    const agent = { marketplaceSubscribe: async () => { called = true; return {} as never; } };
+    const uint96Max = (1n << 96n) - 1n;
+    const uint64Max = (1n << 64n) - 1n;
+
+    // amountWei over uint96.
+    const bigAmount = runCtx('POST', '/api/marketplace/subscribe', agent, {
+      amountWei: (uint96Max + 1n).toString(), policy,
+    });
+    await bigAmount.done;
+    expect(bigAmount.res.statusCode).toBe(400);
+    expect(JSON.parse(bigAmount.res.body).error).toMatch(/amountWei must fit in uint96/);
+
+    // amountTrac that converts past uint96 (~79.2 billion TRAC).
+    const bigTrac = runCtx('POST', '/api/marketplace/subscribe', agent, {
+      amountTrac: '99228162514264337594', policy,
+    });
+    await bigTrac.done;
+    expect(bigTrac.res.statusCode).toBe(400);
+    expect(JSON.parse(bigTrac.res.body).error).toMatch(/amountTrac must fit in uint96/);
+
+    // priceCapWeiPerUnit over uint96 / maxUnitsPerCall over uint64.
+    const bigCap = runCtx('POST', '/api/marketplace/subscribe', agent, {
+      amountTrac: '1',
+      policy: { ...policy, buckets: [{ ...policy.buckets[0], priceCapWeiPerUnit: (uint96Max + 1n).toString() }] },
+    });
+    await bigCap.done;
+    expect(bigCap.res.statusCode).toBe(400);
+    expect(JSON.parse(bigCap.res.body).error).toMatch(/policy\.buckets\[0\]\.priceCapWeiPerUnit must fit in uint96/);
+    const bigUnits = runCtx('POST', '/api/marketplace/subscribe', agent, {
+      amountTrac: '1',
+      policy: { ...policy, buckets: [{ ...policy.buckets[0], maxUnitsPerCall: (uint64Max + 1n).toString() }] },
+    });
+    await bigUnits.done;
+    expect(bigUnits.res.statusCode).toBe(400);
+    expect(JSON.parse(bigUnits.res.body).error).toMatch(/policy\.buckets\[0\]\.maxUnitsPerCall must fit in uint64/);
+
+    // epoch over uint64; identity ids over uint72.
+    const bigEpoch = runCtx('POST', '/api/marketplace/subscribe', agent, {
+      amountTrac: '1', policy, epoch: (uint64Max + 1n).toString(),
+    });
+    await bigEpoch.done;
+    expect(bigEpoch.res.statusCode).toBe(400);
+    expect(JSON.parse(bigEpoch.res.body).error).toMatch(/epoch must fit in uint64/);
+    const bigIdentity = runCtx('POST', '/api/marketplace/subscribe', agent, {
+      amountTrac: '1', policy: { ...policy, sellerAllow: [(1n << 72n).toString()] },
+    });
+    await bigIdentity.done;
+    expect(bigIdentity.res.statusCode).toBe(400);
+    expect(JSON.parse(bigIdentity.res.body).error).toMatch(/policy\.sellerAllow\[0\] must fit in uint72/);
+
+    // Exactly at the bound passes the parser (the mixin double answers).
+    const atBound = runCtx('POST', '/api/marketplace/subscribe', { marketplaceSubscribe: async () => ({ epoch: 1n, sessionKeyAddress: '0x' + 'c'.repeat(40), tx: { hash: '0x1', blockNumber: 1 } }) }, {
+      amountWei: uint96Max.toString(), policy,
+    });
+    await atBound.done;
+    expect(atBound.res.statusCode).toBe(200);
+    expect(called).toBe(false);
+  });
+
   it('→ 503 when the chain adapter has no marketplace surface', async () => {
     const agent = {
       marketplaceSubscribe: async () => {
@@ -335,6 +411,13 @@ describe('POST /api/marketplace/invoke', () => {
     await zero.done;
     expect(zero.res.statusCode).toBe(400);
     expect(JSON.parse(zero.res.body).error).toMatch(/maxUnits must be > 0/);
+    // Units are uint64 on-chain — width-bounded at the route boundary.
+    const wide = runCtx('POST', '/api/marketplace/invoke', agent, {
+      serviceType: 'query', payload: { sparql: 'x' }, maxUnits: (1n << 64n).toString(),
+    });
+    await wide.done;
+    expect(wide.res.statusCode).toBe(400);
+    expect(JSON.parse(wide.res.body).error).toMatch(/maxUnits must fit in uint64/);
   });
 
   it('→ 400 for an unknown serviceType or a non-object payload', async () => {

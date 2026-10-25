@@ -48,7 +48,6 @@ import {
 } from '../src/marketplace/seller-service.js';
 import {
   MarketplaceBuyerService,
-  MarketplaceInvokeError,
   MarketplaceRouteError,
 } from '../src/marketplace/buyer-service.js';
 import {
@@ -152,6 +151,9 @@ function createHarness(opts: { inferenceExecutor?: MarketplaceExecutor } = {}): 
   // Buyer and sellers settle against ONE marketplace deployment.
   sellerChain.__attachMarketplaceState(buyerChain.__marketplaceState());
   sellerChain.seedIdentity(sellerWallet.address, SELLER_IDENTITY);
+  // IdentityStorage is global on a real chain: the buyer resolves the
+  // RECOVERED receipt signer to its identityId through its own adapter.
+  buyerChain.seedIdentity(sellerWallet.address, SELLER_IDENTITY);
   buyerChain.__marketplaceState().nowSeconds = BigInt(NOW_SECONDS);
 
   const buyerEndpoint = makeEndpoint(BUYER_PEER);
@@ -169,6 +171,9 @@ function createHarness(opts: { inferenceExecutor?: MarketplaceExecutor } = {}): 
     now: () => NOW_SECONDS * 1000,
     // Keep every flush manual: the tests drive settlement deterministically.
     batching: { maxBatchSize: 100, maxDelayMs: 3_600_000, maxBuyerExposureWei: 1_000_000n * TRAC },
+    // The manual-flush maxDelayMs above would otherwise balloon the derived
+    // expiry safety margin past the 600s authorization TTL.
+    expiryMarginSeconds: 60,
   });
   seller.setOfferings(makeOfferings(queryCalls, opts.inferenceExecutor));
   seller.registerProtocolHandlers();
@@ -360,7 +365,11 @@ describe('marketplace agent runtime — chainless end-to-end flow', () => {
       expect(accounting.totalFinalizedValue).toBe(inferenceCost + queryCost);
       expect(accounting.pool).toBe(10n * TRAC);
 
-      // Only claimant: QIF = (1−λ)·R/ΣR + λ·Q/ΣQ = 1e18 → the whole pool.
+      // Only claimant: QIF = (1−λ)·R/ΣR + λ·Q/ΣQ = 1e18 → the whole pool,
+      // capped by the wash-trading guard at rewardCapMultiple·R_i. Lift the
+      // cap here (0 = uncapped) so the QIF math itself is what is asserted;
+      // the mock-adapter suite covers the cap behaviour.
+      h.buyerChain.__marketplaceState().rewardCapMultiple = 0;
       const reward = await h.sellerChain.marketplaceClaimEpochReward(SELLER_IDENTITY, 1n);
       expect(reward.rewardWei).toBe(10n * TRAC);
       expect(h.buyerChain.__marketplaceState().rewardsPaidWei.get(h.sellerWallet.address.toLowerCase()))
@@ -383,16 +392,44 @@ describe('marketplace agent runtime — chainless end-to-end flow', () => {
     });
     try {
       await h.buyer.subscribe({ amountWei: 1n * TRAC, policy: h.policy, epoch: 1n });
-      // Two calls at 0.7 TRAC claimed each → 1.4 TRAC over a 1 TRAC bucket.
-      for (let i = 0; i < 2; i += 1) {
-        const invoked = await h.buyer.invoke({
-          serviceType: 'inference',
-          payload: { prompt: 'bulk usage' },
-          maxUnits: 1_500_000n,
-        });
-        expect(invoked.costWei).toBe(servedUnits * INFERENCE_ASK);
-      }
+      // One 0.7 TRAC call through the runtime; the seller's own UNDERFUNDED
+      // admission would refuse a second over-claiming call from THIS node, so
+      // the racing 0.7 TRAC claim (another seller landing first in a real
+      // over-claim) is submitted directly — the contract accepts both and
+      // caps at finalization, never at claim time.
+      const invoked = await h.buyer.invoke({
+        serviceType: 'inference',
+        payload: { prompt: 'bulk usage' },
+        maxUnits: 1_500_000n,
+      });
+      expect(invoked.costWei).toBe(servedUnits * INFERENCE_ASK);
       await h.seller.flushReceipts({ all: true });
+      const racingFields: AuthorizationFields = {
+        chainId: 31337n,
+        marketplaceAddress: MOCK_MARKETPLACE_ADDRESS,
+        buyer: h.buyerWallet.address,
+        sellerIdentityId: SELLER_IDENTITY,
+        offeringId: offeringIdFor(LLM_OFFERING),
+        callId: ethers.hexlify(randomBytes(32)),
+        epoch: 1n,
+        maxUnits: servedUnits,
+        askPerUnitWei: INFERENCE_ASK,
+        expiry: BigInt(NOW_SECONDS + 600),
+      };
+      await h.sellerChain.marketplaceSubmitReceiptBatch([{
+        buyer: racingFields.buyer,
+        epoch: racingFields.epoch,
+        offeringId: racingFields.offeringId,
+        callId: racingFields.callId,
+        maxUnits: racingFields.maxUnits,
+        askPerUnitWei: racingFields.askPerUnitWei,
+        expiry: racingFields.expiry,
+        servedUnits,
+        resultCommitment: ethers.sha256(ethers.toUtf8Bytes('racing result')),
+        authSignature: await eip191SignDigest(
+          sessionKeyWallet(h.buyer.ensureSessionKey()), computeAuthDigest(racingFields),
+        ),
+      }]);
       const claimedWei = 2n * servedUnits * INFERENCE_ASK;
       expect(claimedWei).toBeGreaterThan(1n * TRAC);
 
@@ -482,20 +519,22 @@ describe('marketplace agent runtime — chainless end-to-end flow', () => {
     }
   });
 
-  it('voids the reservation when the receipt does not verify against the offer seller address', async () => {
+  it('ignores a spoofed offer sellerAddress: receipt trust is resolved on-chain by the signer identity', async () => {
     const h = createHarness();
     try {
       await h.buyer.subscribe({ amountWei: 10n * TRAC, policy: h.policy, epoch: 1n });
-      // Poison the discovered offer: the receipt will be signed by the real
-      // seller wallet, so verification against this address MUST fail.
+      // Poison the discovered offer's RDF-published sellerAddress — it is
+      // UNAUTHENTICATED data, so verification must not key off it. The real
+      // seller signs the receipt, its wallet resolves to the authorized
+      // identity on-chain, and the call succeeds regardless of the spoof.
       h.offers[0].sellerAddress = new ethers.Wallet(ethers.hexlify(randomBytes(32))).address;
-      const attempt = h.buyer.invoke({ serviceType: 'inference', payload: { prompt: 'hi there' }, maxUnits: 100n });
-      await expect(attempt).rejects.toBeInstanceOf(MarketplaceInvokeError);
-      const error = await attempt.catch((e: MarketplaceInvokeError) => e);
-      expect(error.code).toBe('BAD_RECEIPT');
+      const invoked = await h.buyer.invoke({ serviceType: 'inference', payload: { prompt: 'hi there' }, maxUnits: 100n });
+      expect(invoked.seller.identityId).toBe(SELLER_IDENTITY);
+      // The reported seller wallet is the RECOVERED signer, never the offer hint.
+      expect(invoked.seller.address).toBe(h.sellerWallet.address);
       const meter = h.buyer.meterState();
       expect(meter?.totalReservedWei).toBe(0n);
-      expect(meter?.totalSettledWei).toBe(0n);
+      expect(meter?.totalSettledWei).toBe(invoked.costWei);
     } finally {
       h.cleanup();
     }

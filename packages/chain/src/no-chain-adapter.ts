@@ -65,6 +65,8 @@ export class NoChainAdapter implements ChainAdapter {
   supportsMarketplace(): boolean { return false; }
   async getCurrentEpoch(): Promise<bigint> { noChain(); }
   async marketplaceGetAddress(): Promise<string> { noChain(); }
+  async getLatestBlockTimestamp(): Promise<bigint> { noChain(); }
+  async marketplaceIsAuthConsumed(_authDigest: string): Promise<boolean> { noChain(); }
   async marketplaceFundSubscription(_params: MarketplaceFundSubscriptionParams): Promise<TxResult> { noChain(); }
   async marketplaceSubmitReceiptBatch(_claims: ReceiptClaimInput[]): Promise<TxResult> { noChain(); }
   async marketplaceFinalizeBucket(_buyer: string, _epoch: bigint, _maxSellers?: bigint): Promise<TxResult> { noChain(); }

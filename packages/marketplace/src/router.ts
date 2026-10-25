@@ -4,7 +4,7 @@
  * function — no I/O, no clock reads (`request.nowSeconds` is injected) — so
  * the policy matrix is exhaustively unit-testable.
  */
-import { DEFAULT_SOFT_CEILING_BPS } from './metering.js';
+import { DEFAULT_SOFT_CEILING_BPS, softCeilingAllowanceWei } from './metering.js';
 import type {
   DeliveryStats,
   MarketplaceOffer,
@@ -17,8 +17,6 @@ import type {
   RouteRequest,
 } from './types.js';
 
-const BPS_DENOMINATOR = 10_000n;
-
 /** First policy bucket admitting the request, or -1. */
 export function matchPolicyBucket(policy: PlanPolicy, request: RouteRequest): number {
   return policy.buckets.findIndex(
@@ -26,16 +24,6 @@ export function matchPolicyBucket(policy: PlanPolicy, request: RouteRequest): nu
       bucket.match.serviceType === request.serviceType &&
       (bucket.match.modelId === undefined || bucket.match.modelId === request.modelId),
   );
-}
-
-/** Remaining spend a bucket admits under the soft ceiling (wei, floored). */
-export function softCeilingAllowanceWei(
-  bucket: { budgetWei: bigint; settledWei: bigint; reservedWei: bigint },
-  softCeilingBps: number,
-): bigint {
-  const remaining = bucket.budgetWei - bucket.settledWei - bucket.reservedWei;
-  if (remaining <= 0n) return 0n;
-  return (remaining * BigInt(softCeilingBps)) / BPS_DENOMINATOR;
 }
 
 /** Net delivery score: deterministic integer tie-break input. */

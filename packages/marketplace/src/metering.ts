@@ -13,6 +13,32 @@ import type { MeterBucketState, MeterState, PlanPolicy } from './types.js';
 export const DEFAULT_SOFT_CEILING_BPS = 9500;
 
 const WEI_PER_TRAC = 10n ** 18n;
+const BPS_DENOMINATOR = 10_000n;
+
+/** Remaining spend a bucket admits under the soft ceiling (wei, floored). */
+export function softCeilingAllowanceWei(
+  bucket: { budgetWei: bigint; settledWei: bigint; reservedWei: bigint },
+  softCeilingBps: number,
+): bigint {
+  const remaining = bucket.budgetWei - bucket.settledWei - bucket.reservedWei;
+  if (remaining <= 0n) return 0n;
+  return (remaining * BigInt(softCeilingBps)) / BPS_DENOMINATOR;
+}
+
+/**
+ * A reservation that would pierce the plan's soft ceiling. Typed so the buyer
+ * runtime can map a concurrency race (two calls routed off the same meter
+ * snapshot) onto the same `soft-ceiling` refusal the router gives — the
+ * router's check is check-then-act across awaits, so `reserve()` re-checks.
+ */
+export class SoftCeilingExceededError extends Error {
+  constructor(bucketIndex: number, worstCaseWei: bigint, allowanceWei: bigint) {
+    super(
+      `bucket ${bucketIndex} reservation crosses the soft ceiling: ${worstCaseWei} > allowance ${allowanceWei}`,
+    );
+    this.name = 'SoftCeilingExceededError';
+  }
+}
 
 function ceilDiv(numerator: bigint, denominator: bigint): bigint {
   return (numerator + denominator - 1n) / denominator;
@@ -137,8 +163,12 @@ export class BuyerMeter {
   }
 
   /** Reserve the worst-case cost of one admitted call. Throws when the
-   * bucket or the plan total cannot cover it — the router's soft ceiling
-   * should have stopped the call earlier; this is the hard backstop. */
+   * bucket or the plan total cannot cover it (hard backstop), or — typed as
+   * `SoftCeilingExceededError` — when the reservation would pierce the soft
+   * ceiling. The router checks the ceiling too, but its check-then-act spans
+   * awaits (quote probes, signing), so two concurrent calls routed off the
+   * same meter snapshot could otherwise both land; the atomic re-check here
+   * is what actually holds the line. */
   reserve(bucketIndex: number, callId: string, worstCaseWei: bigint): void {
     if (worstCaseWei <= 0n) throw new Error(`reservation must be positive, got: ${worstCaseWei}`);
     if (this.#reservations.has(callId)) throw new Error(`duplicate reservation for call: ${callId}`);
@@ -146,6 +176,10 @@ export class BuyerMeter {
     const bucketRemaining = bucket.budgetWei - bucket.settledWei - bucket.reservedWei;
     if (worstCaseWei > bucketRemaining) {
       throw new Error(`bucket ${bucketIndex} cannot cover reservation: ${worstCaseWei} > ${bucketRemaining}`);
+    }
+    const allowanceWei = softCeilingAllowanceWei(bucket, this.#softCeilingBps);
+    if (worstCaseWei > allowanceWei) {
+      throw new SoftCeilingExceededError(bucketIndex, worstCaseWei, allowanceWei);
     }
     const totalRemaining = this.#totalBudgetWei - this.totalSettledWei - this.totalReservedWei;
     if (worstCaseWei > totalRemaining) {

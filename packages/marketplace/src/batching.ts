@@ -70,10 +70,44 @@ export class ReceiptBatcher {
     this.#pending.set(key, entries);
   }
 
+  /**
+   * Put already-drained claims back into the queue — the requeue-preserving
+   * seam the seller's submission loop uses when a batch fails for a
+   * TRANSIENT reason (transport/estimation), so the claims are not forfeited.
+   * Claims re-enter at the FRONT of their epoch's queue (rough FIFO) with a
+   * fresh `addedAtMs`, so the `maxDelayMs` trigger acts as a natural retry
+   * backoff; `dueImmediately` backdates them instead (restart resubmission).
+   * Zero-value claims (possible only from a corrupted restore source) are
+   * silently dropped — `add()`'s guard, without the throw, because this runs
+   * inside failure handling.
+   */
+  requeue(claims: readonly ReceiptClaimInput[], opts: { dueImmediately?: boolean } = {}): void {
+    const addedAtMs = opts.dueImmediately ? this.#now() - this.#policy.maxDelayMs : this.#now();
+    // Walk in reverse so unshifting preserves the claims' relative order.
+    for (let index = claims.length - 1; index >= 0; index -= 1) {
+      const claim = claims[index];
+      const valueWei = claim.servedUnits * claim.askPerUnitWei;
+      if (valueWei <= 0n) continue;
+      const key = claim.epoch.toString();
+      const entries = this.#pending.get(key) ?? [];
+      entries.unshift({ claim, addedAtMs, valueWei });
+      this.#pending.set(key, entries);
+    }
+  }
+
   pendingCount(): number {
     let count = 0;
     for (const entries of this.#pending.values()) count += entries.length;
     return count;
+  }
+
+  /** Snapshot of every pending claim (persistence seam); insertion order per epoch. */
+  pendingClaims(): ReceiptClaimInput[] {
+    const claims: ReceiptClaimInput[] = [];
+    for (const entries of this.#pending.values()) {
+      for (const entry of entries) claims.push(entry.claim);
+    }
+    return claims;
   }
 
   /** Unsubmitted claim value for one buyer bucket (wei). */

@@ -59,7 +59,17 @@ interface MarketplaceRuntime {
   sellerAddress?: string;
   flushTimer: ReturnType<typeof setInterval> | null;
   log: MarketplaceLogger;
+  /**
+   * Set (with the reason) when the one-time capability probe found no live
+   * Marketplace contract behind the adapter: the runtime stays wired so
+   * status/discovery answer, but every settlement call will fail until the
+   * deployment registers the contract. Reported by `marketplaceStatus`.
+   */
+  degraded?: string;
 }
+
+/** Bounded final receipt flush at shutdown (persistence keeps the rest). */
+const STOP_FLUSH_TIMEOUT_MS = 5_000;
 
 /** Runtime per agent — mixin holders cannot carry instance fields. */
 const marketplaceRuntimes = new WeakMap<DKGAgentBase, MarketplaceRuntime>();
@@ -70,6 +80,8 @@ export interface MarketplaceStatus {
   enabled: boolean;
   sellerReady: boolean;
   buyerReady: boolean;
+  /** Present (with the reason) when the chain has no live Marketplace contract. */
+  degraded?: string;
   epoch?: bigint;
   settlementDeadline?: bigint;
   seller?: { offerings: number; pendingReceipts: number; submittedClaims: number };
@@ -244,12 +256,15 @@ export class MarketplaceMethods extends DKGAgentBase {
       ?? this.config.chainConfig?.operationalKeys?.[0];
     if (signerKey) {
       const receiptSigner = new ethers.Wallet(signerKey);
+      const flushIntervalMs = config.seller?.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
       const seller = new MarketplaceSellerService({
         messenger: this.messenger,
         chain: this.chain,
         receiptSigner,
         receiptSignerAddress: receiptSigner.address,
         log,
+        flushIntervalMs,
+        ...(this.config.dataDir ? { stateDir: join(this.config.dataDir, 'marketplace') } : {}),
         ...(config.seller?.batching ? { batching: config.seller.batching } : {}),
       });
       seller.setOfferings((config.seller?.offerings ?? []).map((offering) => resolveOffering(this, offering)));
@@ -258,7 +273,7 @@ export class MarketplaceMethods extends DKGAgentBase {
       runtime.sellerAddress = receiptSigner.address;
       runtime.flushTimer = setInterval(() => {
         void seller.flushReceipts();
-      }, config.seller?.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS);
+      }, flushIntervalMs);
       if (runtime.flushTimer.unref) runtime.flushTimer.unref();
     } else {
       this.log.info(ctx, '[marketplace] no operational signing key — seller role unavailable, buyer runtime only');
@@ -269,19 +284,68 @@ export class MarketplaceMethods extends DKGAgentBase {
       ctx,
       `[marketplace] runtime wired (seller=${runtime.seller ? 'ready' : 'off'}, buyer=ready)`,
     );
+
+    // One-time capability probe, detached: `supportsMarketplace()` only turns
+    // true once the adapter's init resolved the Hub binding, so force one
+    // resolution and degrade LOUDLY (once) when the deployment carries no
+    // Marketplace contract — otherwise the misconfiguration surfaces as a
+    // cryptic failure on the first settlement call. The runtime stays wired;
+    // `marketplaceStatus` reports the degraded state.
+    void (async () => {
+      try {
+        if (typeof this.chain.marketplaceGetAddress !== 'function') {
+          runtime.degraded = 'the chain adapter has no marketplace surface';
+        } else {
+          await this.chain.marketplaceGetAddress();
+          return;
+        }
+      } catch (error) {
+        runtime.degraded = `no Marketplace contract is reachable: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      log.warn(
+        `[marketplace] runtime degraded — ${runtime.degraded} (quotes/offers still answer; `
+        + 'funding, serving and settlement will fail until the deployment registers the Marketplace contract)',
+      );
+    })();
   }
 
-  /** Clear the flush timer at shutdown; pending receipts are reported, not retried. */
-  stopMarketplaceRuntimeV1(this: DKGAgent): void {
+  /**
+   * Shutdown: stop the flush timer, attempt one BOUNDED final receipt flush
+   * (so a clean stop does not strand claims until the next boot), then report
+   * whatever remains — with a `stateDir` it is persisted for resubmission.
+   */
+  async stopMarketplaceRuntimeV1(this: DKGAgent): Promise<void> {
     const runtime = marketplaceRuntimes.get(this);
     if (!runtime) return;
     if (runtime.flushTimer) {
       clearInterval(runtime.flushTimer);
       runtime.flushTimer = null;
     }
-    const pending = runtime.seller?.pendingReceiptCount() ?? 0;
-    if (pending > 0) {
-      runtime.log.warn(`[marketplace] stopping with ${pending} unsubmitted receipt claim(s)`);
+    const seller = runtime.seller;
+    if (seller && seller.pendingReceiptCount() > 0) {
+      try {
+        const flushed = await Promise.race([
+          seller.flushReceipts({ all: true }),
+          new Promise<undefined>((resolve) => {
+            const timer = setTimeout(() => resolve(undefined), STOP_FLUSH_TIMEOUT_MS);
+            timer.unref?.();
+          }),
+        ]);
+        if (flushed === undefined) {
+          runtime.log.warn(`[marketplace] final receipt flush still running after ${STOP_FLUSH_TIMEOUT_MS}ms — not waiting`);
+        }
+      } catch (error) {
+        runtime.log.warn(
+          `[marketplace] final receipt flush failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const pending = seller.pendingReceiptCount();
+      if (pending > 0) {
+        runtime.log.warn(
+          `[marketplace] stopping with ${pending} unsubmitted receipt claim(s)`
+          + `${this.config.dataDir ? ' (persisted; resubmitted on the next start)' : ' (LOST — no data dir)'}`,
+        );
+      }
     }
     marketplaceRuntimes.delete(this);
   }
@@ -295,6 +359,7 @@ export class MarketplaceMethods extends DKGAgentBase {
       enabled: true,
       sellerReady: runtime.seller !== undefined,
       buyerReady: true,
+      ...(runtime.degraded !== undefined ? { degraded: runtime.degraded } : {}),
       ...(runtime.seller ? { seller: runtime.seller.status() } : {}),
       buyer: runtime.buyer.status(),
     };

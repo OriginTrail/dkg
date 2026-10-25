@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { BuyerMeter, countTokens, formatTrac, proRataFinalize, queryUnits } from '../src/index.js';
+import {
+  BuyerMeter,
+  SoftCeilingExceededError,
+  countTokens,
+  formatTrac,
+  proRataFinalize,
+  queryUnits,
+  softCeilingAllowanceWei,
+} from '../src/index.js';
 import type { PlanPolicy } from '../src/index.js';
 
 const TRAC = 10n ** 18n;
@@ -11,6 +19,9 @@ const POLICY: PlanPolicy = {
     { match: { serviceType: 'query' }, budgetWei: 5n * TRAC, priceCapWeiPerUnit: 10n ** 14n, maxUnitsPerCall: 512n },
   ],
 };
+
+/** The hard-backstop tests need reservations the 95% ceiling would refuse. */
+const POLICY_NO_CEILING: PlanPolicy = { ...POLICY, softCeilingBps: 10_000 };
 
 describe('BuyerMeter reserve / settle / void', () => {
   it('reserves at admission and settles the actual value, releasing the rest', () => {
@@ -31,13 +42,13 @@ describe('BuyerMeter reserve / settle / void', () => {
   });
 
   it('refuses reservations beyond the bucket budget', () => {
-    const meter = new BuyerMeter(POLICY);
+    const meter = new BuyerMeter(POLICY_NO_CEILING);
     meter.reserve(0, 'call-3', 6n * TRAC);
     expect(() => meter.reserve(0, 'call-4', 1n)).toThrow('bucket 0 cannot cover');
   });
 
   it('refuses reservations beyond the plan total even with bucket headroom', () => {
-    const meter = new BuyerMeter(POLICY);
+    const meter = new BuyerMeter(POLICY_NO_CEILING);
     meter.reserve(0, 'call-5', 6n * TRAC);
     // Bucket 1 alone could cover 5 TRAC, but the plan total (10) cannot.
     expect(() => meter.reserve(1, 'call-6', 5n * TRAC)).toThrow('plan total cannot cover');
@@ -52,6 +63,37 @@ describe('BuyerMeter reserve / settle / void', () => {
     expect(() => meter.settle('call-8', TRAC + 1n)).toThrow('outside reservation');
     expect(() => meter.reserve(0, 'call-9', 0n)).toThrow('must be positive');
     expect(() => meter.reserve(5, 'call-10', 1n)).toThrow('unknown meter bucket');
+  });
+
+  it('re-checks the soft ceiling atomically so concurrent routing cannot pierce it', () => {
+    const policy: PlanPolicy = {
+      totalBudgetWei: 100n,
+      buckets: [{ match: { serviceType: 'inference' }, budgetWei: 100n, priceCapWeiPerUnit: 1n, maxUnitsPerCall: 100n }],
+    };
+    const meter = new BuyerMeter(policy);
+    // Two calls routed off the SAME meter snapshot (the router's check spans
+    // awaits): the first reservation lands, the second must hit the ceiling
+    // inside reserve() even though the hard bucket budget could cover it.
+    meter.reserve(0, 'race-1', 50n);
+    // remaining 50 → allowance floor(50·9500/10000) = 47; 48 fits the hard
+    // budget but not the ceiling.
+    expect(softCeilingAllowanceWei(meter.snapshot().buckets[0], 9_500)).toBe(47n);
+    expect(() => meter.reserve(0, 'race-2', 48n)).toThrow(SoftCeilingExceededError);
+    expect(() => meter.reserve(0, 'race-2', 48n)).toThrow('crosses the soft ceiling');
+    // Nothing was reserved by the refused call; 47 (exactly the allowance) fits.
+    meter.reserve(0, 'race-3', 47n);
+    expect(meter.totalReservedWei).toBe(97n);
+  });
+
+  it('honors a custom softCeilingBps (10000 disables the ceiling)', () => {
+    const policy: PlanPolicy = {
+      totalBudgetWei: 100n,
+      softCeilingBps: 10_000,
+      buckets: [{ match: { serviceType: 'inference' }, budgetWei: 100n, priceCapWeiPerUnit: 1n, maxUnitsPerCall: 100n }],
+    };
+    const meter = new BuyerMeter(policy);
+    meter.reserve(0, 'full', 100n);
+    expect(meter.totalReservedWei).toBe(100n);
   });
 
   it('renders the RFC meter line from bigint accounting only', () => {

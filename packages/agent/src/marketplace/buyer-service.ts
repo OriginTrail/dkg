@@ -10,10 +10,24 @@
  *
  * The meter reserves the worst case (`maxUnits · ask`) at admission and only
  * settles the verified receipt value, so "remaining" is always safe against
- * in-flight calls; every failure voids the reservation. Routing keeps a local
- * delivery history per seller peer as the deterministic tie-break.
+ * in-flight calls. Failure settlement follows what is KNOWN about delivery:
+ * a definitive non-delivery or seller refusal voids immediately; a response
+ * that proves the seller served but cannot be verified settles pessimistically
+ * at the reserved worst case (the seller can still claim); an AMBIGUOUS
+ * transport failure (timeout mid-flight) holds the reservation until the
+ * authorization expiry passes, then voids — the seller may have served and
+ * may still claim until then. Serve/quote requests go over the messenger's
+ * request-owned send, never the durable outbox, so a "failed" call can never
+ * be silently retried-and-served later behind the meter's back.
+ *
+ * Receipt trust is resolved ON-CHAIN: the receipt signer recovered from
+ * `sellerSig` must resolve (IdentityStorage) to the AUTHORIZED
+ * `sellerIdentityId` — the offer's RDF-published `sellerAddress` is an
+ * unauthenticated routing hint and is never trusted for verification.
+ * Delivery history is keyed by seller identityId for the same reason.
  */
 import { randomBytes } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { ethers } from 'ethers';
 import {
   MARKETPLACE_SERVE_VERSION,
@@ -27,7 +41,10 @@ import {
 import type { ChainAdapter, TxResult } from '@origintrail-official/dkg-chain';
 import {
   BuyerMeter,
+  SoftCeilingExceededError,
+  computeReceiptDigest,
   createSessionKey,
+  eip191RecoverDigest,
   loadSessionKey,
   persistSessionKey,
   selectRoute,
@@ -45,6 +62,8 @@ import {
   type RouteRejection,
   type SessionKeyRecord,
 } from '@origintrail-official/dkg-marketplace';
+import { rememberBounded } from '../bounded-map.js';
+import { createChainClock, type ChainClock } from './chain-clock.js';
 import type { MarketplaceOfferSource } from './offer-publisher.js';
 import type { MarketplaceLogger, MarketplaceMessenger } from './seller-service.js';
 
@@ -72,12 +91,51 @@ export class MarketplaceRouteError extends Error {
   }
 }
 
+/**
+ * What is KNOWN about delivery when an invoke fails — it decides how the
+ * meter reservation resolves:
+ *  - `not-served`: the seller provably did not serve (definitive non-delivery
+ *    or an explicit refusal errorCode) → void immediately.
+ *  - `served`: the seller responded ok (it holds a claimable receipt) but the
+ *    result/receipt could not be trusted → settle pessimistically at the
+ *    reserved worst case.
+ *  - `ambiguous`: the request may or may not have reached the seller
+ *    (timeout mid-flight) → hold the reservation until the authorization
+ *    expiry passes, then void.
+ */
+export type MarketplaceDeliveryState = 'not-served' | 'served' | 'ambiguous';
+
 /** The selected seller failed the call (transport, errorCode, or bad receipt). */
 export class MarketplaceInvokeError extends Error {
-  constructor(readonly code: string, detail: string) {
+  constructor(
+    readonly code: string,
+    detail: string,
+    readonly delivery: MarketplaceDeliveryState = 'not-served',
+  ) {
     super(`marketplace: invoke failed (${code}): ${detail}`);
     this.name = 'MarketplaceInvokeError';
   }
+}
+
+/**
+ * Transport errors that PROVE the request never reached the seller (dial /
+ * address-resolution failures happen before any bytes go out). Anything else
+ * — timeouts, stream resets, unknown faults — is ambiguous: the seller may
+ * have received, served and enqueued a claim while the response was lost.
+ */
+const DEFINITE_NON_DELIVERY_PATTERNS = [
+  'no valid addresses',
+  'all multiaddr dials failed',
+  'no_reservation',
+  'econnrefused',
+  'protocol selection failed',
+  'no route to', // in-process test router double
+  'no handler for', // remote never registered the marketplace protocols
+];
+
+function isDefinitelyUndelivered(message: string): boolean {
+  const lower = message.toLowerCase();
+  return DEFINITE_NON_DELIVERY_PATTERNS.some((needle) => lower.includes(needle));
 }
 
 export interface MarketplaceBuyerDeps {
@@ -143,19 +201,49 @@ interface ActivePlan {
   meter: BuyerMeter;
 }
 
+/** A reservation held through an ambiguous failure, voidable once expired. */
+interface DeferredVoid {
+  meter: BuyerMeter;
+  callId: string;
+  /** Chain-time unix seconds (the authorization's expiry). */
+  expirySeconds: bigint;
+}
+
+/** Bound on cached receipt-signer → identityId resolutions. */
+const SIGNER_IDENTITY_CACHE_BOUND = 1_024;
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
 export class MarketplaceBuyerService {
   readonly #deps: MarketplaceBuyerDeps;
   readonly #nowSeconds: () => number;
+  readonly #chainClock: ChainClock;
+  /** Keyed by seller identityId (decimal string) — see the header note. */
   readonly #deliveryHistory = new Map<string, DeliveryStats>();
+  /** Receipt signer address (lowercase) → resolved on-chain identityId. */
+  readonly #signerIdentityCache = new Map<string, bigint>();
+  /** Reservations surviving ambiguous failures until their expiry passes. */
+  #deferredVoids: DeferredVoid[] = [];
   #sessionKey: SessionKeyRecord | undefined;
   #plan: ActivePlan | undefined;
 
   constructor(deps: MarketplaceBuyerDeps) {
     this.#deps = deps;
     this.#nowSeconds = deps.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
+    this.#chainClock = createChainClock({
+      chain: deps.chain,
+      localNowSeconds: () => this.#nowSeconds(),
+      warn: (message) => deps.log.warn(message),
+    });
   }
 
-  /** Load or mint the persisted session key. */
+  /**
+   * Load or mint the persisted session key. Minting happens ONLY when the
+   * file does not exist (`ENOENT`): any other load failure (corruption,
+   * permissions) rethrows, because silently overwriting a possibly
+   * on-chain-registered key would strand every funded bucket bound to it.
+   * The in-memory key is assigned only after the (atomic) persist succeeded,
+   * so a persist failure never leaves an unrecoverable key signing in memory.
+   */
   ensureSessionKey(): SessionKeyRecord {
     if (this.#sessionKey) return this.#sessionKey;
     const path = this.#deps.sessionKeyPath;
@@ -166,12 +254,27 @@ export class MarketplaceBuyerService {
     }
     try {
       this.#sessionKey = loadSessionKey(path);
-    } catch {
-      this.#sessionKey = createSessionKey();
-      persistSessionKey(path, this.#sessionKey);
-      this.#deps.log.info(`[marketplace] minted session key ${this.#sessionKey.address} → ${path}`);
+      return this.#sessionKey;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        throw new Error(
+          `marketplace: session key file ${path} failed to load — refusing to mint a replacement over a `
+          + `possibly-registered key (fix or remove the file): ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
-    return this.#sessionKey;
+    const minted = createSessionKey();
+    if (existsSync(path)) {
+      // Can only happen when the file appeared between the ENOENT and now.
+      this.#deps.log.warn(
+        `[marketplace] session key file ${path} appeared mid-mint — REPLACING it with ${minted.address}; `
+        + 'any key registered from the replaced file can no longer sign',
+      );
+    }
+    persistSessionKey(path, minted);
+    this.#sessionKey = minted;
+    this.#deps.log.info(`[marketplace] minted session key ${minted.address} → ${path}`);
+    return minted;
   }
 
   /**
@@ -217,6 +320,7 @@ export class MarketplaceBuyerService {
   }): Promise<MarketplaceInvokeResult> {
     const plan = this.#plan;
     if (!plan) throw new MarketplaceNotSubscribedError();
+    this.releaseExpiredReservations();
     const sessionKey = this.ensureSessionKey();
     const nowSeconds = this.#nowSeconds();
 
@@ -227,15 +331,10 @@ export class MarketplaceBuyerService {
       modelId: opts.modelId,
       maxUnits: opts.maxUnits,
       nowSeconds,
-      deliveryHistory: this.#deliveryHistory,
+      deliveryHistory: this.#deliveryHistoryByPeer(offers),
     });
     if (!decision.ok) throw new MarketplaceRouteError(decision.reason, decision.rejections);
     const { offer } = decision;
-    // Fail closed BEFORE reserving: without the seller's receipt-signing
-    // wallet on the offer the returned receipt can never be verified.
-    if (!offer.sellerAddress) {
-      throw new MarketplaceInvokeError('NO_SELLER_ADDRESS', `offer ${offer.offerId} carries no mkt:sellerAddress`);
-    }
 
     const chainId = await this.#deps.chain.getEvmChainId();
     const marketplaceAddress = await this.#deps.chain.marketplaceGetAddress?.();
@@ -243,6 +342,9 @@ export class MarketplaceBuyerService {
       throw new MarketplaceInvokeError('NO_MARKETPLACE_ADDRESS', 'chain adapter reports no Marketplace contract');
     }
     const callId = ethers.hexlify(randomBytes(32));
+    // Expiry is CHAIN time: the contract checks it against block.timestamp,
+    // and devnet/drifted chain time can sit far from this host's wall clock.
+    const chainNowSeconds = await this.#chainClock.nowSeconds();
     const authorization = await signAuthorization(sessionKey, {
       chainId,
       marketplaceAddress,
@@ -253,20 +355,90 @@ export class MarketplaceBuyerService {
       epoch: plan.epoch,
       maxUnits: opts.maxUnits,
       askPerUnitWei: decision.askPerUnitWei,
-      expiry: BigInt(nowSeconds + (this.#deps.authTtlSeconds ?? DEFAULT_AUTH_TTL_SECONDS)),
+      expiry: chainNowSeconds + BigInt(this.#deps.authTtlSeconds ?? DEFAULT_AUTH_TTL_SECONDS),
     });
 
-    plan.meter.reserve(decision.bucketIndex, callId, decision.worstCaseCostWei);
+    try {
+      plan.meter.reserve(decision.bucketIndex, callId, decision.worstCaseCostWei);
+    } catch (error) {
+      if (error instanceof SoftCeilingExceededError) {
+        // A concurrent call reserved between this call's route check and now.
+        throw new MarketplaceRouteError('no-eligible-offer', [{ offerId: offer.offerId, reason: 'soft-ceiling' }]);
+      }
+      throw error;
+    }
     try {
       const invokeResult = await this.#serve(offer, authorization, opts.payload);
       plan.meter.settle(callId, invokeResult.costWei);
-      this.#recordDelivery(offer.sellerPeerId, true);
+      this.#recordDelivery(offer.sellerIdentityId, true);
       return invokeResult;
     } catch (error) {
-      plan.meter.voidReservation(callId);
-      this.#recordDelivery(offer.sellerPeerId, false);
+      this.#recordDelivery(offer.sellerIdentityId, false);
+      this.#resolveFailedReservation(plan.meter, callId, decision.worstCaseCostWei, authorization.expiry, error);
       throw error;
     }
+  }
+
+  /**
+   * Resolve the meter reservation of a failed call by delivery knowledge:
+   * provably-not-served voids now; provably-served settles the worst case
+   * (the seller holds a claimable receipt); anything ambiguous HOLDS the
+   * reservation until the authorization expiry passes — only then is the
+   * exposure provably dead on-chain and safe to void.
+   */
+  #resolveFailedReservation(
+    meter: BuyerMeter,
+    callId: string,
+    worstCaseCostWei: bigint,
+    expirySeconds: bigint,
+    error: unknown,
+  ): void {
+    const delivery = error instanceof MarketplaceInvokeError ? error.delivery : 'ambiguous';
+    if (delivery === 'not-served') {
+      meter.voidReservation(callId);
+      return;
+    }
+    if (delivery === 'served') {
+      meter.settle(callId, worstCaseCostWei);
+      return;
+    }
+    this.#deferredVoids.push({ meter, callId, expirySeconds });
+    this.#deps.log.warn(
+      `[marketplace] call ${callId} failed with delivery state unknown — holding the ${worstCaseCostWei} wei `
+      + `reservation until the authorization expires at ${expirySeconds}`,
+    );
+    // Best-effort wall-clock sweep so the hold releases without further calls;
+    // releaseExpiredReservations() is the deterministic path (and test seam).
+    const delayMs = Math.min(
+      MAX_TIMEOUT_MS,
+      Math.max(1_000, Number(expirySeconds - this.#chainClock.nowSecondsSync() + 2n) * 1000),
+    );
+    const timer = setTimeout(() => this.releaseExpiredReservations(), delayMs);
+    timer.unref?.();
+  }
+
+  /** Void every held reservation whose authorization expiry has passed. */
+  releaseExpiredReservations(): number {
+    const nowSeconds = this.#chainClock.nowSecondsSync();
+    const remaining: DeferredVoid[] = [];
+    let released = 0;
+    for (const entry of this.#deferredVoids) {
+      if (entry.expirySeconds >= nowSeconds) {
+        remaining.push(entry);
+        continue;
+      }
+      try {
+        entry.meter.voidReservation(entry.callId);
+        released += 1;
+        this.#deps.log.info(
+          `[marketplace] released the held reservation for ${entry.callId} (authorization expired)`,
+        );
+      } catch {
+        // Already settled/voided through another path — nothing held anymore.
+      }
+    }
+    this.#deferredVoids = remaining;
+    return released;
   }
 
   async #probeQuotes(
@@ -293,7 +465,9 @@ export class MarketplaceBuyerService {
 
   async #probeQuote(offer: MarketplaceOffer): Promise<MarketplaceQuote | undefined> {
     try {
-      const sent = await this.#deps.messenger.sendReliable(
+      // Request-owned: a quote probe must never park in the durable outbox
+      // and get retried hours later against a long-gone routing decision.
+      const sent = await this.#deps.messenger.sendRequestOwned(
         offer.sellerPeerId,
         PROTOCOL_MARKETPLACE_QUOTE,
         encodeMarketplaceQuoteRequest({ offeringId: ethers.getBytes(offer.offeringId) }),
@@ -349,26 +523,47 @@ export class MarketplaceBuyerService {
       payloadKind: offer.serviceType === 'query' ? 'query' : 'inference',
       payload: new TextEncoder().encode(JSON.stringify(payload)),
     });
-    const sent = await this.#deps.messenger.sendReliable(
-      offer.sellerPeerId,
-      PROTOCOL_MARKETPLACE_SERVE,
-      request,
-      this.#deps.serveTimeoutMs !== undefined ? { timeoutMs: this.#deps.serveTimeoutMs } : undefined,
-    );
+    // Request-owned send: it either completes on the wire or throws — the
+    // durable outbox must never retry a serve in the background after the
+    // meter already resolved this call (the seller would serve + claim with
+    // nothing reserved). A throw that proves the dial never reached the
+    // seller voids immediately; everything else stays ambiguous.
+    let sent;
+    try {
+      sent = await this.#deps.messenger.sendRequestOwned(
+        offer.sellerPeerId,
+        PROTOCOL_MARKETPLACE_SERVE,
+        request,
+        this.#deps.serveTimeoutMs !== undefined ? { timeoutMs: this.#deps.serveTimeoutMs } : undefined,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isDefinitelyUndelivered(message)) {
+        throw new MarketplaceInvokeError('NOT_DELIVERED', message, 'not-served');
+      }
+      throw new MarketplaceInvokeError('DELIVERY_UNKNOWN', `serve transport failed mid-flight: ${message}`, 'ambiguous');
+    }
     if (!sent.delivered) {
-      throw new MarketplaceInvokeError('NOT_DELIVERED', sent.error ?? 'serve request not delivered');
+      // Request-owned sends never queue; this is the in-flight dedup shape —
+      // another attempt owns the wire, so the outcome is unknown here.
+      throw new MarketplaceInvokeError('DELIVERY_UNKNOWN', sent.error ?? 'serve request state unknown', 'ambiguous');
     }
     const response = decodeMarketplaceServeResponse(sent.response);
     if (!response.ok) {
-      throw new MarketplaceInvokeError(response.errorCode ?? 'SELLER_ERROR', `seller ${offer.sellerPeerId} refused`);
+      // An explicit refusal: the seller rejected BEFORE serving — no claim exists.
+      throw new MarketplaceInvokeError(
+        response.errorCode ?? 'SELLER_ERROR', `seller ${offer.sellerPeerId} refused`, 'not-served',
+      );
     }
+    // From here on the seller HAS served (ok response): failures settle
+    // pessimistically, because a claim for this authorization exists.
     if (
       !response.resultCommitment || response.resultCommitment.byteLength !== 32
       || !response.sellerSignature || response.sellerSignature.byteLength !== 65
       || !response.authDigest || response.authDigest.byteLength !== 32
       || !response.receiptValueWei || !response.result
     ) {
-      throw new MarketplaceInvokeError('MALFORMED_RECEIPT', 'serve response is missing receipt fields');
+      throw new MarketplaceInvokeError('MALFORMED_RECEIPT', 'serve response is missing receipt fields', 'served');
     }
     const receipt: QueryInferenceReceipt = {
       authDigest: ethers.hexlify(response.authDigest),
@@ -378,21 +573,41 @@ export class MarketplaceBuyerService {
       sellerSig: ethers.hexlify(response.sellerSignature),
     };
     if (receipt.authDigest !== authorization.authDigest) {
-      throw new MarketplaceInvokeError('MALFORMED_RECEIPT', 'receipt settles a different authorization');
+      throw new MarketplaceInvokeError('MALFORMED_RECEIPT', 'receipt settles a different authorization', 'served');
+    }
+    // Recover the receipt signer FIRST, then verify everything against the
+    // recovered wallet and resolve its on-chain identity. The offer's
+    // RDF-published sellerAddress is unauthenticated data — a spoofed offer
+    // must not decide which wallet a receipt verifies against.
+    let signerAddress: string;
+    try {
+      signerAddress = eip191RecoverDigest(computeReceiptDigest(receipt), receipt.sellerSig);
+    } catch (error) {
+      throw new MarketplaceInvokeError(
+        'BAD_RECEIPT', `sellerSig unrecoverable: ${error instanceof Error ? error.message : String(error)}`, 'served',
+      );
     }
     const verification = verifyReceiptAgainstAuthorization(receipt, authorization, {
-      // invoke() fails closed earlier when the offer has no sellerAddress.
-      sellerAddress: offer.sellerAddress as string,
+      sellerAddress: signerAddress,
       resultBytes: response.result,
     });
     if (!verification.ok) {
-      throw new MarketplaceInvokeError('BAD_RECEIPT', verification.errors.join('; '));
+      throw new MarketplaceInvokeError('BAD_RECEIPT', verification.errors.join('; '), 'served');
+    }
+    const signerIdentityId = await this.#resolveSignerIdentity(signerAddress);
+    if (signerIdentityId !== authorization.sellerIdentityId) {
+      throw new MarketplaceInvokeError(
+        'BAD_RECEIPT',
+        `receipt signer ${signerAddress} resolves to identity ${signerIdentityId}, `
+        + `the authorization binds seller ${authorization.sellerIdentityId}`,
+        'served',
+      );
     }
     let result: unknown;
     try {
       result = JSON.parse(new TextDecoder().decode(response.result));
     } catch {
-      throw new MarketplaceInvokeError('MALFORMED_RESULT', 'result bytes are not valid JSON');
+      throw new MarketplaceInvokeError('MALFORMED_RESULT', 'result bytes are not valid JSON', 'served');
     }
     return {
       result,
@@ -401,19 +616,62 @@ export class MarketplaceBuyerService {
       authorization,
       seller: {
         peerId: offer.sellerPeerId,
-        identityId: offer.sellerIdentityId,
-        address: offer.sellerAddress as string,
+        identityId: authorization.sellerIdentityId,
+        // The RECOVERED, identity-verified signer — never the offer hint.
+        address: signerAddress,
       },
       servedUnits: receipt.servedUnits,
       costWei: receipt.receiptValueWei,
     };
   }
 
-  #recordDelivery(sellerPeerId: string, success: boolean): void {
-    const stats = this.#deliveryHistory.get(sellerPeerId) ?? { successes: 0, failures: 0 };
+  /**
+   * Resolve the recovered receipt signer to its on-chain identityId
+   * (`IdentityStorage.getIdentityId`). Fails CLOSED: without a trustworthy
+   * resolution the receipt cannot be attributed to the authorized seller.
+   * The seller HAS served, so callers settle pessimistically on this error.
+   */
+  async #resolveSignerIdentity(signerAddress: string): Promise<bigint> {
+    const cacheKey = signerAddress.toLowerCase();
+    const cached = this.#signerIdentityCache.get(cacheKey);
+    if (cached !== undefined && cached > 0n) return cached;
+    if (typeof this.#deps.chain.getIdentityIdForAddress !== 'function') {
+      throw new MarketplaceInvokeError(
+        'UNVERIFIABLE_SELLER', 'chain adapter cannot resolve wallet identities', 'served',
+      );
+    }
+    let identityId: bigint;
+    try {
+      identityId = await this.#deps.chain.getIdentityIdForAddress(signerAddress);
+    } catch (error) {
+      throw new MarketplaceInvokeError(
+        'UNVERIFIABLE_SELLER',
+        `identity lookup for receipt signer ${signerAddress} failed: ${error instanceof Error ? error.message : String(error)}`,
+        'served',
+      );
+    }
+    if (identityId > 0n) {
+      rememberBounded(this.#signerIdentityCache, cacheKey, identityId, SIGNER_IDENTITY_CACHE_BOUND);
+    }
+    return identityId;
+  }
+
+  /** History is KEYED by identityId; the router looks sellers up by peer id. */
+  #deliveryHistoryByPeer(offers: readonly MarketplaceOffer[]): Map<string, DeliveryStats> {
+    const byPeer = new Map<string, DeliveryStats>();
+    for (const offer of offers) {
+      const stats = this.#deliveryHistory.get(offer.sellerIdentityId.toString());
+      if (stats) byPeer.set(offer.sellerPeerId, stats);
+    }
+    return byPeer;
+  }
+
+  #recordDelivery(sellerIdentityId: bigint, success: boolean): void {
+    const key = sellerIdentityId.toString();
+    const stats = this.#deliveryHistory.get(key) ?? { successes: 0, failures: 0 };
     if (success) stats.successes += 1;
     else stats.failures += 1;
-    this.#deliveryHistory.set(sellerPeerId, stats);
+    this.#deliveryHistory.set(key, stats);
   }
 
   /** The RFC's one-line meter: `used · remaining · resets`. */

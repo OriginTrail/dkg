@@ -51,6 +51,23 @@ describe('persist / load round trip', () => {
     fs.rmSync(directory, { recursive: true, force: true });
   });
 
+  it('writes atomically: 0o600 mode, no temp residue, replaced key stays loadable', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mkt-session-key-'));
+    const file = path.join(directory, 'session-key.json');
+    const first = createSessionKey(() => 0);
+    persistSessionKey(file, first);
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    }
+    // A second persist replaces via rename — never a truncate-then-write.
+    const second = createSessionKey(() => 1);
+    persistSessionKey(file, second);
+    expect(loadSessionKey(file)).toEqual(second);
+    // No .tmp residue left behind in the directory.
+    expect(fs.readdirSync(directory)).toEqual(['session-key.json']);
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
   it('serialization is stable JSON with a trailing newline', () => {
     const record = createSessionKey(() => 0);
     const serialized = serializeSessionKey(record);

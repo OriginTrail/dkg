@@ -116,6 +116,9 @@ describe('MockChainAdapter marketplace — capability + funding', () => {
     const bucket = await h.buyer.marketplaceGetBucket(buyerWallet.address, 1n);
     expect(bucket).toEqual({ funded: 0n, totalClaimed: 0n, totalFinalized: 0n, finalized: false });
     await expect(h.buyer.marketplaceGetActiveSessionKey(buyerWallet.address)).resolves.toBe(ethers.ZeroAddress);
+    // Chain-time read: backed by the same clock the expiry checks enforce.
+    h.state.nowSeconds = 7_777n;
+    await expect(h.buyer.getLatestBlockTimestamp()).resolves.toBe(7_777n);
   });
 
   it('funds a bucket, registers the session key and accrues the epoch pool', async () => {
@@ -211,7 +214,22 @@ describe('MockChainAdapter marketplace — receipt batches', () => {
     const h = createHarness();
     await fund(h, TRAC);
     const claim = await authorizedClaim(h, { sellerIdentityId: 7n, servedUnits: 5n, askPerUnitWei: 100n });
+    const digest = computeAuthDigest({
+      chainId: 31337n,
+      marketplaceAddress: MOCK_MARKETPLACE_ADDRESS,
+      buyer: claim.buyer,
+      sellerIdentityId: 7n,
+      offeringId: claim.offeringId,
+      callId: claim.callId,
+      epoch: claim.epoch,
+      maxUnits: claim.maxUnits,
+      askPerUnitWei: claim.askPerUnitWei,
+      expiry: claim.expiry,
+    });
+    await expect(h.sellerA.marketplaceIsAuthConsumed(digest)).resolves.toBe(false);
     await h.sellerA.marketplaceSubmitReceiptBatch([claim]);
+    // The durable replay guard is readable (cold-restart seller pre-check).
+    await expect(h.sellerA.marketplaceIsAuthConsumed(digest)).resolves.toBe(true);
     await expect(h.sellerA.marketplaceSubmitReceiptBatch([claim]))
       .rejects.toThrow('AuthorizationAlreadyConsumed');
 
@@ -508,6 +526,8 @@ describe('NoChainAdapter marketplace stubs', () => {
     expect(none.supportsMarketplace()).toBe(false);
     await expect(none.getCurrentEpoch()).rejects.toThrow('No blockchain configured');
     await expect(none.marketplaceGetAddress()).rejects.toThrow('No blockchain configured');
+    await expect(none.getLatestBlockTimestamp()).rejects.toThrow('No blockchain configured');
+    await expect(none.marketplaceIsAuthConsumed('0x' + '00'.repeat(32))).rejects.toThrow('No blockchain configured');
     await expect(none.marketplaceFundSubscription({ amountWei: 1n, epoch: 1n }))
       .rejects.toThrow('No blockchain configured');
     await expect(none.marketplaceSubmitReceiptBatch([])).rejects.toThrow('No blockchain configured');

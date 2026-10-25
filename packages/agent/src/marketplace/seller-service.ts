@@ -6,12 +6,17 @@
  * settlement through `chain.marketplaceSubmitReceiptBatch`.
  *
  * Fault philosophy mirrors the contract: every objective fault is rejected
- * BEFORE execution (version, field shapes, wrong seller, expiry, settlement
- * window, replay, signature against the buyer's registered session key), and
- * the response carries a machine-readable `errorCode` instead of receipt
- * fields. The per-`authDigest` replay guard is marked consumed at admission —
- * a failed execution keeps the authorization burned (fail closed; the buyer
- * voids its reservation and signs a fresh callId).
+ * BEFORE execution (version, field shapes, wrong seller, expiry against CHAIN
+ * time plus a batching-window margin, settlement window, replay, signature
+ * against the buyer's registered session key, and bucket funding/headroom —
+ * `UNDERFUNDED` refuses service a bucket can never pay for), and the response
+ * carries a machine-readable `errorCode` instead of receipt fields. The
+ * per-`authDigest` replay guard is marked consumed at admission — a failed
+ * execution keeps the authorization burned (fail closed; the buyer voids its
+ * reservation and signs a fresh callId). With a `stateDir`, the replay guard
+ * and the unsubmitted claims persist across restarts, and claim submission
+ * requeues on transient faults / bisects on reverts instead of dropping
+ * honest receipts.
  *
  * The service is deliberately agent-agnostic: it takes the messenger's
  * reliable register/send surface, a `ChainAdapter`, an EIP-191 receipt signer
@@ -30,7 +35,7 @@ import {
   encodeMarketplaceQuoteResponse,
   encodeMarketplaceServeResponse,
 } from '@origintrail-official/dkg-core';
-import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import { isChainRpcTransportError, type ChainAdapter, type MarketplaceBucket } from '@origintrail-official/dkg-chain';
 import {
   ReceiptBatcher,
   buildReceipt,
@@ -46,7 +51,9 @@ import {
 import { rememberBounded } from '../bounded-map.js';
 import type { MarketplaceExecutor } from './executors.js';
 import { MarketplaceExecutionError } from './executors.js';
-import type { ReliableSendResult, SendReliableOpts } from '../p2p/messenger.js';
+import { createChainClock, type ChainClock } from './chain-clock.js';
+import { MarketplaceSellerStateStore } from './seller-state-store.js';
+import type { ReliableSendResult, SendReliableOpts, ThrowingReliableSendResult } from '../p2p/messenger.js';
 
 /** The reliable-messenger slice the marketplace services use (structurally `Messenger`). */
 export interface MarketplaceMessenger {
@@ -60,6 +67,19 @@ export interface MarketplaceMessenger {
     payload: Uint8Array,
     opts?: SendReliableOpts,
   ): Promise<ReliableSendResult>;
+  /**
+   * Reliable framing WITHOUT the durable background-retry outbox: the request
+   * either completes on the wire or throws to the caller, never getting
+   * re-sent later behind the caller's back. The buyer's quote/serve calls use
+   * this — a serve that the outbox silently retried after the buyer already
+   * voided its reservation would be served and claimed with nothing metered.
+   */
+  sendRequestOwned(
+    peerId: string,
+    protocolId: string,
+    payload: Uint8Array,
+    opts?: SendReliableOpts,
+  ): Promise<ThrowingReliableSendResult>;
 }
 
 /** Context-free logger slice; the agent mixin binds it onto `Logger` + ctx. */
@@ -95,18 +115,37 @@ export interface MarketplaceSellerDeps {
   /** Address of `receiptSigner`, published on offers for buyer-side verification. */
   receiptSignerAddress: string;
   log: MarketplaceLogger;
-  /** Injectable ms wall clock (expiry checks + batcher delay trigger). */
+  /** Injectable ms wall clock (batcher delay trigger + cache TTLs). */
   now?: () => number;
   batching?: Partial<ReceiptBatcherPolicy>;
   /** Cached buyer session keys go stale after this long. */
   sessionKeyCacheTtlMs?: number;
+  /** Cached buyer funding buckets go stale after this long. Default 15s. */
+  bucketCacheTtlMs?: number;
+  /**
+   * Durable state home (replay guard + pending claims), usually
+   * `<dataDir>/marketplace`. Omitted → in-memory only (tests / dataless
+   * nodes): a restart forfeits pending receipts and forgets burned
+   * authorizations (the contract's replay guard still backstops).
+   */
+  stateDir?: string;
+  /**
+   * The agent's receipt flush-timer cadence; feeds the authorization expiry
+   * safety margin so a claim admitted now cannot expire inside the batching
+   * window (flush interval + batcher maxDelay + a submit allowance).
+   */
+  flushIntervalMs?: number;
+  /** Explicit expiry safety margin override (seconds). */
+  expiryMarginSeconds?: number;
 }
 
 export interface MarketplaceFlushResult {
   batches: number;
   claims: number;
-  /** Claims dropped because their batch submission reverted/failed. */
+  /** Claims dropped because the chain REVERTED them (objective faults). */
   failedClaims: number;
+  /** Claims put back in the batcher after a transient submission failure. */
+  requeuedClaims: number;
   errors: string[];
 }
 
@@ -118,7 +157,29 @@ const DEFAULT_BATCHING: ReceiptBatcherPolicy = {
 };
 
 const SESSION_KEY_CACHE_TTL_MS = 60_000;
+const BUCKET_CACHE_TTL_MS = 15_000;
 const REPLAY_GUARD_BOUND = 100_000;
+/** Per-buyer cache bounds (H): a stranger spray cannot grow these unbounded. */
+const SESSION_KEY_CACHE_BOUND = 4_096;
+const BUCKET_CACHE_BOUND = 4_096;
+/** Submission allowance on top of the batching window (tx build + mine time). */
+const SUBMIT_ALLOWANCE_SECONDS = 30;
+const DEFAULT_FLUSH_INTERVAL_MS = 5_000;
+
+/**
+ * Transient vs revert classification for `submitReceiptBatch` failures.
+ * Transport faults (RPC down/timeout/queue-full) and anything unrecognized
+ * requeue the claims — dropping on an unknown error would forfeit real
+ * receipts. Only an actual on-chain revert (ethers `CALL_EXCEPTION`, an
+ * `execution reverted` message, or the mock adapter's revert shape) drops —
+ * and then only after bisection has isolated the poisoned claim.
+ */
+function isBatchRevert(error: unknown): boolean {
+  if (isChainRpcTransportError(error)) return false;
+  if ((error as { code?: unknown })?.code === 'CALL_EXCEPTION') return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /execution reverted|reverted with custom error/i.test(message);
+}
 
 /** uint64 wire fields decode to safe-integer numbers; normalize to bigint. */
 function wireUint64ToBigint(value: number | bigint | { toString(): string }): bigint {
@@ -140,12 +201,26 @@ export class MarketplaceSellerService {
   readonly #now: () => number;
   readonly #batcher: ReceiptBatcher;
   readonly #sessionKeyCacheTtlMs: number;
+  readonly #bucketCacheTtlMs: number;
   /** offeringId (bytes32 hex, lowercase) → offering. */
   #offerings = new Map<string, MarketplaceSellerOffering>();
   /** Locally consumed authDigests (bounded; the contract is the durable guard). */
   readonly #consumedAuth = new Map<string, true>();
-  /** buyer (lowercase) → cached registered session key. */
+  /** buyer (lowercase) → cached registered session key (bounded). */
   readonly #sessionKeyCache = new Map<string, { key: string; fetchedAtMs: number }>();
+  /** `${buyer}|${epoch}` → cached funding bucket (bounded, short TTL). */
+  readonly #bucketCache = new Map<string, { bucket: MarketplaceBucket; fetchedAtMs: number }>();
+  readonly #stateStore: MarketplaceSellerStateStore | undefined;
+  /**
+   * True when no persisted replay state could be restored (no state dir, or
+   * an empty/unreadable file): a local replay-cache miss then also consults
+   * the contract's `consumedAuth` view, so a restart without durable state
+   * cannot double-serve an authorization that already settled on-chain.
+   */
+  readonly #coldReplayCache: boolean;
+  /** Authorization must outlive the batching window by this many seconds. */
+  readonly #expiryMarginSeconds: bigint;
+  readonly #chainClock: ChainClock;
   #identityId: bigint | undefined;
   #digestContext: { chainId: bigint; marketplaceAddress: string } | undefined;
   #registered = false;
@@ -154,8 +229,39 @@ export class MarketplaceSellerService {
   constructor(deps: MarketplaceSellerDeps) {
     this.#deps = deps;
     this.#now = deps.now ?? Date.now;
-    this.#batcher = new ReceiptBatcher({ ...DEFAULT_BATCHING, ...deps.batching }, this.#now);
+    const batching: ReceiptBatcherPolicy = { ...DEFAULT_BATCHING, ...deps.batching };
+    this.#batcher = new ReceiptBatcher(batching, this.#now);
     this.#sessionKeyCacheTtlMs = deps.sessionKeyCacheTtlMs ?? SESSION_KEY_CACHE_TTL_MS;
+    this.#bucketCacheTtlMs = deps.bucketCacheTtlMs ?? BUCKET_CACHE_TTL_MS;
+    this.#expiryMarginSeconds = BigInt(
+      deps.expiryMarginSeconds
+      ?? Math.ceil(((deps.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS) + batching.maxDelayMs) / 1000)
+        + SUBMIT_ALLOWANCE_SECONDS,
+    );
+    this.#chainClock = createChainClock({
+      chain: deps.chain,
+      localNowSeconds: () => Math.floor(this.#now() / 1000),
+      warn: (message) => deps.log.warn(message),
+    });
+
+    // Durable state: reload burned authorizations and unsubmitted claims so a
+    // restart neither double-serves nor forfeits receipts. Restored claims are
+    // requeued as immediately due — the first flush tick resubmits them.
+    if (deps.stateDir) {
+      this.#stateStore = new MarketplaceSellerStateStore(
+        deps.stateDir, REPLAY_GUARD_BOUND, (message) => deps.log.warn(message),
+      );
+      const digests = this.#stateStore.loadConsumedAuth();
+      for (const digest of digests) rememberBounded(this.#consumedAuth, digest, true, REPLAY_GUARD_BOUND);
+      const restored = this.#stateStore.loadPendingClaims();
+      if (restored.length > 0) {
+        this.#batcher.requeue(restored, { dueImmediately: true });
+        deps.log.info(`[marketplace] restored ${restored.length} unsubmitted receipt claim(s) for resubmission`);
+      }
+      this.#coldReplayCache = digests.length === 0;
+    } else {
+      this.#coldReplayCache = true;
+    }
   }
 
   /** Replace the served offering set (keyed by offeringId). */
@@ -260,8 +366,19 @@ export class MarketplaceSellerService {
     const maxUnits = wireUint64ToBigint(request.maxUnits);
     if (maxUnits <= 0n) throw new ServeRejection('MALFORMED_REQUEST', 'maxUnits must be positive');
     const expiry = wireUint64ToBigint(request.expiry);
-    const nowSeconds = BigInt(Math.floor(this.#now() / 1000));
+    // CHAIN time — the clock the contract checks expiry against (wall-clock
+    // fallback when the adapter has no latest-block read).
+    const nowSeconds = await this.#chainClock.nowSeconds();
     if (nowSeconds > expiry) throw new ServeRejection('EXPIRED', `expiry ${expiry}, now ${nowSeconds}`);
+    // The claim must survive the whole batching window (flush interval +
+    // batcher maxDelay + a submit allowance) or it expires INSIDE the batcher
+    // and poisons its submission — refuse up front instead.
+    if (expiry - nowSeconds < this.#expiryMarginSeconds) {
+      throw new ServeRejection(
+        'STALE_AUTHORIZATION',
+        `expiry ${expiry} leaves ${expiry - nowSeconds}s, below the ${this.#expiryMarginSeconds}s batching margin`,
+      );
+    }
 
     const epoch = wireUint64ToBigint(request.epoch);
     const currentEpoch = (await this.#deps.chain.getCurrentEpoch?.()) ?? 0n;
@@ -285,11 +402,35 @@ export class MarketplaceSellerService {
     });
 
     // Replay guard — burned at admission, so a failed execution cannot be
-    // retried under the same single-use authorization (fail closed).
+    // retried under the same single-use authorization (fail closed). With a
+    // COLD local cache (restart without durable state) the contract's own
+    // `consumedAuth` view is consulted too, so an already-settled
+    // authorization cannot be double-served into a doomed batch.
     if (this.#consumedAuth.has(authDigest)) {
       throw new ServeRejection('REPLAYED_CALL_ID', authDigest);
     }
+    if (this.#coldReplayCache && typeof this.#deps.chain.marketplaceIsAuthConsumed === 'function') {
+      const consumedOnChain = await this.#deps.chain.marketplaceIsAuthConsumed(authDigest).catch((error: unknown) => {
+        // Transport fault: proceed on the local guard — the contract still
+        // rejects a true replay at submission (and bisection isolates it).
+        this.#deps.log.warn(
+          `[marketplace] consumedAuth pre-check failed (serving on the local guard): ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return false;
+      });
+      if (consumedOnChain) throw new ServeRejection('REPLAYED_CALL_ID', `${authDigest} already consumed on-chain`);
+    }
     rememberBounded(this.#consumedAuth, authDigest, true, REPLAY_GUARD_BOUND);
+    this.#stateStore?.appendConsumedAuth(authDigest);
+
+    // Funding/headroom admission (UNDERFUNDED): a 1-wei bucket must not buy
+    // unbounded service, and a claim the bucket can never pay would poison
+    // receipt batches later. Headroom = funded − on-chain totalClaimed (every
+    // seller) − this node's own unsubmitted exposure; the worst case of THIS
+    // call must fit. Checked before the signature: an unfunded buyer has no
+    // registered session key either, and the bucket read is cached/bounded
+    // exactly like the session-key read.
+    await this.#assertBucketHeadroom(buyer, epoch, maxUnits * askPerUnitWei);
 
     const authSignature = ethers.hexlify(request.authSignature);
     await this.#verifyAuthSignature(buyer, authDigest, authSignature);
@@ -331,6 +472,7 @@ export class MarketplaceSellerService {
       authSignature,
     };
     this.#batcher.add(claim);
+    this.#persistPendingClaims();
     // Opportunistic flush for size/exposure triggers — detached so chain
     // submission latency never sits on the serve response path, and
     // `#submitBatches` never rejects (failures are logged + counted).
@@ -395,8 +537,44 @@ export class MarketplaceSellerService {
       throw new ServeRejection('SELLER_NOT_READY', 'chain adapter cannot read session keys');
     }
     const key = await this.#deps.chain.marketplaceGetActiveSessionKey(buyer);
-    this.#sessionKeyCache.set(cacheKey, { key, fetchedAtMs: this.#now() });
+    rememberBounded(this.#sessionKeyCache, cacheKey, { key, fetchedAtMs: this.#now() }, SESSION_KEY_CACHE_BOUND);
     return key;
+  }
+
+  /** The buyer's funding bucket, cached briefly (same pattern as session keys). */
+  async #bucketFor(buyer: string, epoch: bigint): Promise<MarketplaceBucket> {
+    const cacheKey = `${buyer.toLowerCase()}|${epoch}`;
+    const cached = this.#bucketCache.get(cacheKey);
+    if (cached && this.#now() - cached.fetchedAtMs < this.#bucketCacheTtlMs) {
+      return cached.bucket;
+    }
+    if (typeof this.#deps.chain.marketplaceGetBucket !== 'function') {
+      throw new ServeRejection('SELLER_NOT_READY', 'chain adapter cannot read funding buckets');
+    }
+    const bucket = await this.#deps.chain.marketplaceGetBucket(buyer, epoch);
+    rememberBounded(this.#bucketCache, cacheKey, { bucket, fetchedAtMs: this.#now() }, BUCKET_CACHE_BOUND);
+    return bucket;
+  }
+
+  /** UNDERFUNDED admission: refuse when the bucket cannot pay this call. */
+  async #assertBucketHeadroom(buyer: string, epoch: bigint, worstCaseWei: bigint): Promise<void> {
+    const bucket = await this.#bucketFor(buyer, epoch);
+    if (bucket.funded === 0n) {
+      throw new ServeRejection('UNDERFUNDED', `bucket (${buyer}, ${epoch}) holds no funding`);
+    }
+    const unsubmittedWei = this.#batcher.pendingExposureWei(buyer, epoch);
+    const headroomWei = bucket.funded - bucket.totalClaimed - unsubmittedWei;
+    if (worstCaseWei > headroomWei) {
+      throw new ServeRejection(
+        'UNDERFUNDED',
+        `worst case ${worstCaseWei} wei exceeds bucket headroom ${headroomWei} `
+        + `(funded ${bucket.funded}, claimed ${bucket.totalClaimed}, unsubmitted ${unsubmittedWei})`,
+      );
+    }
+  }
+
+  #persistPendingClaims(): void {
+    this.#stateStore?.savePendingClaims(this.#batcher.pendingClaims());
   }
 
   /** Flush timer / settle-rail entry point. `all` drains regardless of triggers. */
@@ -406,32 +584,67 @@ export class MarketplaceSellerService {
   }
 
   async #submitBatches(batches: ReceiptBatch[]): Promise<MarketplaceFlushResult> {
-    const result: MarketplaceFlushResult = { batches: 0, claims: 0, failedClaims: 0, errors: [] };
+    const result: MarketplaceFlushResult = { batches: 0, claims: 0, failedClaims: 0, requeuedClaims: 0, errors: [] };
     for (const batch of batches) {
+      await this.#submitClaims(batch.epoch, batch.claims, batch.trigger, result);
+    }
+    if (batches.length > 0) this.#persistPendingClaims();
+    return result;
+  }
+
+  /**
+   * Submit one drained batch with failure isolation. Transient faults
+   * (transport/estimation) REQUEUE the claims — the batcher's fresh delay
+   * window is the retry backoff and nothing is forfeited. An on-chain revert
+   * voids the whole submission atomically, so a reverted multi-claim batch is
+   * BISECTED (split and resubmitted in halves, at most ~2·log₂(n) extra
+   * submissions) until the poisoned claim is isolated; only that single claim
+   * is dropped, honest receipts around it still settle.
+   */
+  async #submitClaims(
+    epoch: bigint,
+    claims: ReceiptClaimInput[],
+    trigger: ReceiptBatch['trigger'],
+    result: MarketplaceFlushResult,
+  ): Promise<void> {
+    const queue: ReceiptClaimInput[][] = [claims];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
       try {
         if (typeof this.#deps.chain.marketplaceSubmitReceiptBatch !== 'function') {
           throw new Error('chain adapter cannot submit receipt batches');
         }
-        await this.#deps.chain.marketplaceSubmitReceiptBatch(batch.claims);
+        await this.#deps.chain.marketplaceSubmitReceiptBatch(current);
         result.batches += 1;
-        result.claims += batch.claims.length;
-        this.#submittedClaims += batch.claims.length;
+        result.claims += current.length;
+        this.#submittedClaims += current.length;
         this.#deps.log.info(
-          `[marketplace] submitted receipt batch: epoch=${batch.epoch} claims=${batch.claims.length} trigger=${batch.trigger}`,
+          `[marketplace] submitted receipt batch: epoch=${epoch} claims=${current.length} trigger=${trigger}`,
         );
       } catch (error) {
-        // Prototype behaviour: any objective fault reverts the WHOLE batch
-        // on-chain, so a poisoned batch is dropped (not retried) with a loud
-        // warning rather than wedging the flush loop forever.
         const message = error instanceof Error ? error.message : String(error);
-        result.failedClaims += batch.claims.length;
-        result.errors.push(message);
-        this.#deps.log.warn(
-          `[marketplace] receipt batch submission failed (dropping ${batch.claims.length} claim(s)): ${message}`,
-        );
+        if (!isBatchRevert(error)) {
+          this.#batcher.requeue(current);
+          result.requeuedClaims += current.length;
+          result.errors.push(message);
+          this.#deps.log.warn(
+            `[marketplace] receipt batch submission failed transiently (requeued ${current.length} claim(s)): ${message}`,
+          );
+        } else if (current.length === 1) {
+          result.failedClaims += 1;
+          result.errors.push(message);
+          this.#deps.log.warn(
+            `[marketplace] dropping reverted receipt claim (callId ${current[0].callId}): ${message}`,
+          );
+        } else {
+          const mid = Math.ceil(current.length / 2);
+          queue.unshift(current.slice(0, mid), current.slice(mid));
+          this.#deps.log.warn(
+            `[marketplace] receipt batch of ${current.length} reverted — bisecting to isolate the poisoned claim: ${message}`,
+          );
+        }
       }
     }
-    return result;
   }
 
   pendingReceiptCount(): number {

@@ -50,10 +50,23 @@ export function parseSessionKey(json: string): SessionKeyRecord {
   return { privateKey: wallet.privateKey, address: wallet.address, createdAt };
 }
 
-/** Persist a session key record (0o600 — it contains a private key). */
+/**
+ * Persist a session key record (0o600 — it contains a private key).
+ * Atomic: written to a same-directory temp file and renamed into place, so a
+ * crash mid-write can never leave a truncated key file where a registered
+ * key used to be (a load failure would otherwise strand the on-chain bucket).
+ */
 export function persistSessionKey(filePath: string, record: SessionKeyRecord): void {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, serializeSessionKey(record), { mode: 0o600 });
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true });
+  const tmpPath = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+  fs.writeFileSync(tmpPath, serializeSessionKey(record), { mode: 0o600 });
+  try {
+    fs.renameSync(tmpPath, filePath);
+  } catch (error) {
+    try { fs.unlinkSync(tmpPath); } catch { /* best-effort cleanup */ }
+    throw error;
+  }
 }
 
 /** Load and validate a persisted session key record. */

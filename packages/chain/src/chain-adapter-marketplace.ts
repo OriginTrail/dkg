@@ -126,6 +126,25 @@ export interface ChainAdapterMarketplace {
   marketplaceGetAddress?(): Promise<string>;
 
   /**
+   * The latest block's unix timestamp — CHAIN time. Marketplace authorization
+   * expiries are checked against `block.timestamp` on-chain, so buyers derive
+   * `expiry` from this (plus a cached monotonic local offset) instead of the
+   * wall clock: on devnets (`evm_increaseTime`) and drifted RPCs chain time
+   * can be far ahead of the host clock, and a wall-clock expiry would make
+   * every claim revert `AuthorizationExpired`. Callers fall back to the wall
+   * clock when the read is unavailable or fails.
+   */
+  getLatestBlockTimestamp?(): Promise<bigint>;
+
+  /**
+   * Whether `authDigest` was already consumed by an accepted claim
+   * (`MarketplaceStorage.consumedAuth`). Sellers consult it on a cold local
+   * replay-cache miss after a restart, so a replayed single-use authorization
+   * cannot poison a receipt batch before the contract's own guard fires.
+   */
+  marketplaceIsAuthConsumed?(authDigest: string): Promise<boolean>;
+
+  /**
    * Fund a non-refundable period subscription (TRAC `approve` +
    * `fundSubscription`) and register/rotate the buyer's session key.
    */
