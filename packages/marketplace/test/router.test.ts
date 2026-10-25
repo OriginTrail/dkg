@@ -196,6 +196,19 @@ describe('selectRoute policy matrix', () => {
     });
   });
 
+  it("reports 'no-offers' (not 'no-eligible-offer') when discovery handed the router nothing", () => {
+    const policy = policyWith();
+    const meter = meterFor(policy);
+    const empty = selectRoute([], [], policy, meter, request());
+    expect(empty).toMatchObject({ ok: false, reason: 'no-offers' });
+    expect(empty.rejections).toEqual([]);
+    // Policy faults still win over the empty-discovery diagnosis.
+    expect(selectRoute([], [], policy, meter, request({ serviceType: 'graph-ml' }))).toMatchObject({
+      ok: false,
+      reason: 'no-bucket',
+    });
+  });
+
   it('breaks ask ties by delivery history, then lexicographic peer id', () => {
     const a = offer({ offerId: 'ual:offer-a', sellerIdentityId: 1n, sellerPeerId: 'peer-b' });
     const b = offer({ offerId: 'ual:offer-b', sellerIdentityId: 2n, sellerPeerId: 'peer-a' });

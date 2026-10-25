@@ -132,7 +132,10 @@ export function selectRoute(
     }
     if (!best || preferCandidate(outcome, best, request.deliveryHistory)) best = outcome;
   }
-  if (!best) return { ok: false, reason: 'no-eligible-offer', rejections };
+  // An empty discovery is a sync/visibility fault, not a policy one: calling
+  // it `no-eligible-offer` with zero rejections hides that the router never
+  // saw an offer at all.
+  if (!best) return { ok: false, reason: offers.length === 0 ? 'no-offers' : 'no-eligible-offer', rejections };
   return {
     ok: true,
     offer: best.offer,

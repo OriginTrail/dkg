@@ -41,6 +41,7 @@ import {
   type MeterState,
   type PlanPolicy,
   type QueryInferenceReceipt,
+  type RouteFailureReason,
   type RouteRejection,
   type SessionKeyRecord,
 } from '@origintrail-official/dkg-marketplace';
@@ -57,12 +58,14 @@ export class MarketplaceNotSubscribedError extends Error {
 /** The router found no admissible seller; `rejections` carry the full fault picture. */
 export class MarketplaceRouteError extends Error {
   constructor(
-    readonly reason: 'no-bucket' | 'max-units' | 'no-eligible-offer',
+    readonly reason: RouteFailureReason,
     readonly rejections: RouteRejection[],
   ) {
     super(
       `marketplace: no route (${reason})${rejections.length > 0
         ? ` — rejected: ${rejections.map((r) => `${r.offerId}:${r.reason}`).join(', ')}`
+        : ''}${reason === 'no-offers'
+        ? ' — discovery returned no offers (is this node synced to the marketplace context graph?)'
         : ''}`,
     );
     this.name = 'MarketplaceRouteError';
@@ -83,6 +86,21 @@ export interface MarketplaceBuyerDeps {
   /** Funding wallet — the on-chain `msg.sender` of `fundSubscription`. */
   resolveBuyerAddress: () => Promise<string>;
   offerSource: MarketplaceOfferSource;
+  /**
+   * Idempotently (re)subscribe this node to the `marketplace` context graph so
+   * SWM-shared offer KAs sync into the local store the offer source queries.
+   * Invoked before every discovery: a subscription that could not install at
+   * startup, or a CG a seller creates only later, converges on the next call.
+   */
+  ensureOfferSubscription?: () => void;
+  /**
+   * Fire-and-forget backfill nudge, invoked when discovery finds NO offers:
+   * the periodic sync reconciler treats recently-synced peers as fresh, so a
+   * node whose first marketplace sync raced the CG's authority bootstrap
+   * would otherwise stay empty until the staleness window expires. The
+   * implementation throttles itself and contains its own failures.
+   */
+  requestOfferBackfill?: () => void;
   log: MarketplaceLogger;
   /**
    * Where the session key persists (JSON, mode 0o600). Omitted → an
@@ -184,7 +202,10 @@ export class MarketplaceBuyerService {
   }
 
   async discoverOffers(): Promise<MarketplaceOffer[]> {
-    return this.#deps.offerSource.discoverOffers();
+    this.#deps.ensureOfferSubscription?.();
+    const offers = await this.#deps.offerSource.discoverOffers();
+    if (offers.length === 0) this.#deps.requestOfferBackfill?.();
+    return offers;
   }
 
   async invoke(opts: {

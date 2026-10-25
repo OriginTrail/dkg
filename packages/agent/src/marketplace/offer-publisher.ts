@@ -104,11 +104,17 @@ export interface MarketplaceOfferPublishPort {
  * Graph, creating the CG (open access) when this node has not seen it yet.
  * Re-publishing an offering shares the same subject again — SWM applies it
  * as an update of the existing offer node.
+ *
+ * `opts.ensureRegistered` runs after the CG exists and BEFORE the shares: a
+ * plain-name unregistered CG carries no authority a replica can verify, so
+ * without an on-chain anchor buyer nodes never accept its shares. The hook
+ * must contain its own failures (a later publish retries).
  */
 export async function publishMarketplaceOfferings(
   port: MarketplaceOfferPublishPort,
   offerings: readonly MarketplaceSellerOffering[],
   seller: MarketplaceSellerIdentity,
+  opts: { ensureRegistered?: (contextGraphId: string) => Promise<void> } = {},
 ): Promise<{ published: string[]; shareOperationIds: string[] }> {
   if (!(await port.contextGraphExists(MARKETPLACE_CONTEXT_GRAPH))) {
     await port.createContextGraph({
@@ -117,6 +123,7 @@ export async function publishMarketplaceOfferings(
       description: 'OT-RFC-27 NeuroSymbolic Marketplace offers',
     });
   }
+  await opts.ensureRegistered?.(MARKETPLACE_CONTEXT_GRAPH);
   const published: string[] = [];
   const shareOperationIds: string[] = [];
   for (const offering of offerings) {

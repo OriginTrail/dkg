@@ -184,7 +184,13 @@ export interface RouteRejection {
   reason: RouteRejectionReason;
 }
 
-export type RouteFailureReason = 'no-bucket' | 'max-units' | 'no-eligible-offer';
+/**
+ * Why no route exists. `no-offers` means discovery returned NOTHING for the
+ * router to evaluate (typically the local node has not synced the marketplace
+ * context graph yet) — distinct from `no-eligible-offer`, where offers were
+ * seen but every one carries a rejection.
+ */
+export type RouteFailureReason = 'no-bucket' | 'max-units' | 'no-offers' | 'no-eligible-offer';
 
 export type RouteDecision =
   | {

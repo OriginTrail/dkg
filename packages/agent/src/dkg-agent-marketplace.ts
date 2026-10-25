@@ -14,7 +14,7 @@
 
 import { join } from 'node:path';
 import { ethers } from 'ethers';
-import type { OperationContext } from '@origintrail-official/dkg-core';
+import { MARKETPLACE_CONTEXT_GRAPH, type OperationContext } from '@origintrail-official/dkg-core';
 import type { TxResult } from '@origintrail-official/dkg-chain';
 import {
   offeringIdFor,
@@ -48,6 +48,9 @@ import {
 } from './marketplace/offer-publisher.js';
 
 const DEFAULT_FLUSH_INTERVAL_MS = 5_000;
+/** Empty-discovery SWM backfill: at most one peer sweep per interval. */
+const OFFER_BACKFILL_MIN_INTERVAL_MS = 30_000;
+const OFFER_BACKFILL_MAX_PEERS = 4;
 
 interface MarketplaceRuntime {
   buyer: MarketplaceBuyerService;
@@ -73,6 +76,39 @@ export interface MarketplaceStatus {
   buyer?: { subscribed: boolean; epoch?: bigint; sessionKeyAddress?: string; meter?: MeterState };
 }
 
+/**
+ * Best-effort on-chain anchor for the shared `marketplace` CG. Under RFC-64 a
+ * plain-name unregistered CG has no authority a replica can verify (its
+ * creator is a peer DID, and only wallet-namespace ids mint an owner-signed
+ * seed), so buyer nodes fail closed and never materialize its offer shares.
+ * Registration gives every node the finalized chain binding to resolve. The
+ * first seller to publish registers; a later seller adopts the existing
+ * binding instead of minting a duplicate graph for the same name. Failures
+ * are contained — the offers are still shared locally and the next publish
+ * retries the anchor.
+ */
+async function ensureMarketplaceContextGraphRegistered(agent: DKGAgent, log: MarketplaceLogger): Promise<void> {
+  try {
+    if (await agent.isContextGraphRegistered(MARKETPLACE_CONTEXT_GRAPH)) return;
+    const authority = await agent.resolveContextGraphSubscriptionBootstrapAuthority(
+      MARKETPLACE_CONTEXT_GRAPH,
+      { signal: AbortSignal.timeout(20_000), freshness: 'bounded' },
+    ).catch(() => undefined);
+    if (authority?.outcome === 'allowed' && authority.onChainId !== undefined) return;
+    const { onChainId, txHash } = await agent.registerContextGraph(MARKETPLACE_CONTEXT_GRAPH);
+    log.info(
+      `[marketplace] anchored the "${MARKETPLACE_CONTEXT_GRAPH}" context graph on-chain `
+      + `(onChainId=${onChainId}${txHash ? `, tx=${txHash}` : ''}) so buyers can verify its authority`,
+    );
+  } catch (error) {
+    log.warn(
+      `[marketplace] could not register the "${MARKETPLACE_CONTEXT_GRAPH}" context graph on-chain — `
+      + `buyer nodes cannot sync its offers until a seller registers it: `
+      + `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
 function requireRuntime(agent: DKGAgentBase): MarketplaceRuntime {
   const runtime = marketplaceRuntimes.get(agent);
   if (!runtime) {
@@ -87,7 +123,14 @@ function resolveExecutor(agent: DKGAgent, config: MarketplaceOfferingConfig): Ma
   const kind = config.executor ?? (config.serviceType === 'query' ? 'local-query' : 'stub-inference');
   if (kind === 'local-query') {
     return createQueryExecutor(async (sparql) => {
-      const result = await agent.query(sparql);
+      // Scoped read: an UNSCOPED query needs a store with all-writer revision
+      // coverage, which backend stores (e.g. oxigraph-server) do not provide —
+      // the executor would refuse every call there. The prototype serves the
+      // buyer's SPARQL over this node's synced marketplace CG view.
+      const result = await agent.query(sparql, {
+        contextGraphId: MARKETPLACE_CONTEXT_GRAPH,
+        includeSharedMemory: true,
+      });
       const bindings = (result as { bindings?: unknown })?.bindings;
       return { rowCount: Array.isArray(bindings) ? bindings.length : 0, result };
     });
@@ -127,6 +170,50 @@ export class MarketplaceMethods extends DKGAgentBase {
       warn: (message) => this.log.warn(ctx, message),
     };
 
+    // Offers travel as SWM shares of the shared `marketplace` CG. A seller is
+    // subscribed implicitly when it creates the CG, but nothing creates it on
+    // a buyer — without this subscription the shares never reach this node
+    // and discovery stays empty forever. Subscribe every marketplace node the
+    // same way the lifecycle subscribes the system CGs (`always-on`): the
+    // subscription is idempotent, needs no local CG to exist yet, and puts
+    // the CG into the sync-on-connect/catchup scope so shares published
+    // before this node joined are backfilled from peers.
+    const ensureOfferSubscription = (): void => {
+      try {
+        this.subscribeToContextGraph(MARKETPLACE_CONTEXT_GRAPH, { syncMode: 'always-on' });
+      } catch (error) {
+        log.warn(
+          `[marketplace] could not subscribe to the "${MARKETPLACE_CONTEXT_GRAPH}" context graph `
+          + `(retried on the next offer discovery): ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    };
+    ensureOfferSubscription();
+
+    // Empty-discovery self-heal: pull the marketplace CG's shared memory from
+    // a few connected peers directly. The periodic sync reconciler skips
+    // recently-synced peers, so a node whose first marketplace sync ran
+    // before the CG's authority was anchored on-chain would otherwise stay
+    // empty until the staleness window expires. Throttled; failures logged.
+    let lastOfferBackfillAtMs = 0;
+    const requestOfferBackfill = (): void => {
+      const now = Date.now();
+      if (now - lastOfferBackfillAtMs < OFFER_BACKFILL_MIN_INTERVAL_MS) return;
+      lastOfferBackfillAtMs = now;
+      const peers = this.node.libp2p.getPeers()
+        .map((peer) => peer.toString())
+        .filter((peerId) => peerId !== this.peerId)
+        .slice(0, OFFER_BACKFILL_MAX_PEERS);
+      for (const peerId of peers) {
+        this.syncSharedMemoryFromPeer(peerId, [MARKETPLACE_CONTEXT_GRAPH]).catch((error: unknown) => {
+          log.warn(
+            `[marketplace] offer backfill SWM pull from ${peerId.slice(-8)} failed: `
+            + `${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+      }
+    };
+
     const buyer = new MarketplaceBuyerService({
       messenger: this.messenger,
       chain: this.chain,
@@ -136,6 +223,8 @@ export class MarketplaceMethods extends DKGAgentBase {
         return address;
       },
       offerSource: createContextGraphOfferSource(this),
+      ensureOfferSubscription,
+      requestOfferBackfill,
       log,
       ...(this.config.dataDir
         ? { sessionKeyPath: join(this.config.dataDir, 'marketplace', 'session-key.json') }
@@ -253,6 +342,8 @@ export class MarketplaceMethods extends DKGAgentBase {
       sellerIdentityId,
       sellerPeerId: this.peerId,
       sellerAddress: runtime.sellerAddress,
+    }, {
+      ensureRegistered: async () => ensureMarketplaceContextGraphRegistered(this, runtime.log),
     });
     return { published };
   }

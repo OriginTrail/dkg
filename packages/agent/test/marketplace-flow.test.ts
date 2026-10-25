@@ -501,6 +501,62 @@ describe('marketplace agent runtime — chainless end-to-end flow', () => {
     }
   });
 
+  it('(re)ensures the marketplace CG subscription before every offer discovery', async () => {
+    const h = createHarness();
+    try {
+      let ensured = 0;
+      const buyer = new MarketplaceBuyerService({
+        messenger: h.buyerEndpoint.messenger,
+        chain: h.buyerChain,
+        resolveBuyerAddress: async () => h.buyerWallet.address,
+        offerSource: { discoverOffers: async () => h.offers },
+        // The agent injects `subscribeToContextGraph('marketplace',
+        // {syncMode:'always-on'})` here — idempotent, so the buyer re-arms it
+        // on every discovery in case the CG did not exist at startup.
+        ensureOfferSubscription: () => { ensured += 1; },
+        log: silentLog(),
+        sessionKeyPath: h.sessionKeyPath,
+        nowSeconds: () => NOW_SECONDS,
+      });
+      expect(await buyer.discoverOffers()).toHaveLength(2);
+      expect(ensured).toBe(1);
+      // invoke() discovers through the same path, so it re-ensures too.
+      await buyer.subscribe({ amountWei: 10n * TRAC, policy: h.policy, epoch: 1n });
+      await buyer.invoke({ serviceType: 'inference', payload: { prompt: 'hi' }, maxUnits: 100n });
+      expect(ensured).toBe(2);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("distinguishes an empty discovery ('no-offers') from ineligible offers, and nudges backfill", async () => {
+    const h = createHarness();
+    try {
+      let backfills = 0;
+      const buyer = new MarketplaceBuyerService({
+        messenger: h.buyerEndpoint.messenger,
+        chain: h.buyerChain,
+        resolveBuyerAddress: async () => h.buyerWallet.address,
+        offerSource: { discoverOffers: async () => [] },
+        requestOfferBackfill: () => { backfills += 1; },
+        log: silentLog(),
+        sessionKeyPath: h.sessionKeyPath,
+        nowSeconds: () => NOW_SECONDS,
+      });
+      await buyer.subscribe({ amountWei: 10n * TRAC, policy: h.policy, epoch: 1n });
+      const attempt = buyer.invoke({ serviceType: 'inference', payload: { prompt: 'hi' }, maxUnits: 100n });
+      await expect(attempt).rejects.toBeInstanceOf(MarketplaceRouteError);
+      const error = await attempt.catch((e: MarketplaceRouteError) => e);
+      expect(error.reason).toBe('no-offers');
+      expect(error.rejections).toEqual([]);
+      expect(error.message).toContain('discovery returned no offers');
+      // Empty discovery is the backfill trigger — non-empty discovery is not.
+      expect(backfills).toBe(1);
+    } finally {
+      h.cleanup();
+    }
+  });
+
   it('persists the buyer session key under the node data dir and reloads it', async () => {
     const h = createHarness();
     try {

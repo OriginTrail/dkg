@@ -48,6 +48,11 @@ describe('marketplace agent wiring', () => {
     expect(status.epoch).toBe(1n);
     expect(status.seller?.offerings).toBe(1);
 
+    // The runtime subscribes every marketplace node to the `marketplace` CG
+    // (always-on, like the system CGs) so offer shares from OTHER nodes sync
+    // here — a buyer never creates the CG, so without this it sees no offers.
+    expect(agent.getSyncContextGraphIds()).toContain('marketplace');
+
     // Offer publication through the agent's real CG APIs...
     const { published } = await agent.marketplacePublishOfferings();
     expect(published).toEqual([`urn:dkg:marketplace:offer:${agent.peerId}:devnet-llm`]);
@@ -97,5 +102,6 @@ describe('marketplace agent wiring', () => {
     await agent.start();
     expect(await agent.marketplaceStatus()).toMatchObject({ enabled: false, sellerReady: false, buyerReady: false });
     await expect(agent.marketplaceDiscoverOffers()).rejects.toThrow(/marketplace is not running/);
+    expect(agent.getSyncContextGraphIds()).not.toContain('marketplace');
   });
 });

@@ -88,6 +88,29 @@ describe('marketplace offer publication', () => {
     expect(created).toEqual([MARKETPLACE_CONTEXT_GRAPH]);
   });
 
+  it('runs the ensureRegistered anchor after the CG exists and before any share', async () => {
+    const calls: string[] = [];
+    let exists = false;
+    const port = {
+      contextGraphExists: async () => exists,
+      createContextGraph: async () => {
+        calls.push('create');
+        exists = true;
+      },
+      share: async () => {
+        calls.push('share');
+        return { shareOperationId: `op-${calls.length}` };
+      },
+    };
+    await publishMarketplaceOfferings(port, [offering()], SELLER, {
+      ensureRegistered: async (contextGraphId) => {
+        expect(contextGraphId).toBe(MARKETPLACE_CONTEXT_GRAPH);
+        calls.push('register');
+      },
+    });
+    expect(calls).toEqual(['create', 'register', 'share']);
+  });
+
   it('round-trips offers through SPARQL bindings and skips malformed rows', async () => {
     const goodRow = {
       offer: marketplaceOfferSubject(SELLER.sellerPeerId, 'devnet-llm'),
