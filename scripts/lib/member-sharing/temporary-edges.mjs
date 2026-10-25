@@ -188,13 +188,19 @@ export class TemporaryEdges {
    * started.
    */
   async renewFeeder() {
+    const { feeder } = this;
     await this.stopFeeder();
-    if (existsSync(this.devnet.nodeDir(this.feeder.number))) {
-      const problem = this.removeOwnNode(this.feeder.number);
+    if (existsSync(this.devnet.nodeDir(feeder.number))) {
+      const problem = this.removeOwnNode(feeder.number);
       if (problem) throw new Error(problem);
     }
-    this.feeder.peerId = null;
-    this.feeder.agentAddress = null;
+    // Without its folder the number is free again: another suite may take it
+    // before the new feeder's addnode does, and the cleanup must not remove
+    // that suite's node. start() records the new feeder once its addnode has
+    // claimed the folder.
+    this.started = this.started.filter(node => node !== feeder);
+    feeder.peerId = null;
+    feeder.agentAddress = null;
     await this.startFeeder();
   }
 
@@ -338,6 +344,14 @@ export class TemporaryEdges {
     }
     const kept = join(this.devnet.dir, 'issue-3251-member-sharing', this.stamp);
     for (const node of this.started) {
+      // Only a folder that still carries this run's claim is stopped and
+      // removed: a number whose folder this run gave up (a feeder it replaced)
+      // may be another suite's by now, and one without a folder has nothing to
+      // stop.
+      if (!this.claims(node)) {
+        if (existsSync(this.devnet.nodeDir(node))) this.log.say(`node${node.number} is not this run's any more; it is left as it is`);
+        continue;
+      }
       this.devnet.devnetShSync(['stop-node', String(node.number)]);
       if (failed && existsSync(this.devnet.logFile(node))) {
         mkdirSync(kept, { recursive: true });

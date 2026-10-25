@@ -150,6 +150,29 @@ test('each later attempt of case 6 gets a fresh feeder: the one that ran is stop
   assert.ok(stubborn.feederRunning);
 });
 
+test('a number another suite took while the feeder was replaced is left to that suite: the cleanup neither stops nor removes its node', async t => {
+  const says = [];
+  // Another suite's addnode takes node 10 after the old feeder's folder was removed, before the new feeder's addnode.
+  let adds = 0;
+  const devnet = fakeDevnet(t, { duringAddnode: number => { if (number === 10 && ++adds === 2) foreign(devnet, 10); } });
+  const edges = new TemporaryEdges(devnet, { stamp: 'S', log: { say: line => says.push(line), note() {} } });
+  edges.allocate({ relay1: 'r1', relay2: 'r2' });
+  for (const node of edges.nodes) await edges.start(node);
+  await edges.startFeeder();
+  await assert.rejects(edges.renewFeeder(), /temporary node 10 could not be added \(its folder, if any, is left as it is\): \[devnet\] node10 already exists/);
+  assert.ok(!edges.started.includes(edges.feeder) && !edges.feederRunning && !edges.feederUp);
+  assert.equal(edges.largeAuthor, edges.owner);
+  // Nor does the cleanup take a folder for this run's that lost its claim some other way (removed from outside, and taken).
+  rmSync(devnet.nodeDir(9), { recursive: true, force: true });
+  foreign(devnet, 9);
+  const before = devnet.calls.length;
+  edges.cleanup({ keep: false, failed: true });
+  assert.ok(untouched(devnet, 10) && untouched(devnet, 9));
+  assert.deepEqual(devnet.calls.slice(before), ['stop-node 7', 'stop-node 7', 'stop-node 8', 'stop-node 8']);
+  assert.ok(!existsSync(devnet.nodeDir(7)) && !existsSync(devnet.nodeDir(8)));
+  assert.deepEqual(says, ['node9 is not this run\'s any more; it is left as it is']);
+});
+
 test('a node another suite took after it was picked is left untouched, and the cleanup removes only nodes this run added', async t => {
   const devnet = fakeDevnet(t);
   const edges = new TemporaryEdges(devnet, { stamp: 'S', log: { say() {}, note() {} } });
