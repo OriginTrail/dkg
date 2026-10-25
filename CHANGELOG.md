@@ -4,7 +4,7 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
-## [10.0.26] - 2026-10-24
+## [10.0.26] - 2026-10-25
 
 Curated Context Graphs whose curator is reachable only through relays
 admit new members and replicate their shared memory (#3421). A newly
@@ -107,8 +107,9 @@ results as TSV that the node decodes as they stream (#3473), the node UI
 dashboard counts the store once every 5 minutes (#3474), the MCP server
 answers an oversized tool result with a short error and stays connected
 (#3424), graph visualization keeps named SELECT bindings and empty literals
-(#3489), and the local LLM runtime keeps conversation history within its
-budget (#3477).
+(#3489), the local LLM runtime keeps conversation history within its
+budget (#3477), and creating and registering a context graph waits out a
+momentarily full store queue (#3497).
 
 **No smart-contract, ABI or deployment registry changes.** Four new
 protocols. The connection monitor pings over `/dkg-liveness/ping/1.0.0`
@@ -182,6 +183,7 @@ second fallback chain endpoint (#3385).
 | A catalog head is committed once its data is durable (#3338, #3284) | RFC-64 native activation waits for the store's durability barrier after the precommit writes and before it commits the applied head, for genesis, successor and replay paths, and a failed flush rolls back with its cause. On the embedded store each catalog application includes a snapshot write; HTTP stores keep their write acknowledgement | None |
 | A member keeps only the newest private roster generation (#3342, #3245) | Durable sync removes older valid roster generations of a private graph from the graph's own root metadata with one server-side update; a stale page cannot remove a newer one, and malformed values stay, so the reader fails closed. A store without server-side UPDATE keeps every generation | None |
 | A clean source build updated from git reports its plain commit (#3340, #3169) | The git updater's quarantine folder, `.dkg-stale-workspace-dependencies/`, does not count toward the build identity. Untracked user files and tracked source changes still mark a source build dirty, so the `commit` field in `GET /api/status` can still end in `-dirty`; npm build identities are unchanged | None |
+| Creating and registering a context graph wait out a momentarily full store queue (#3497) | When the store refuses a step before it started because its queue is full (`STORE_SCHEDULER_BUSY`, `queue_full`), `POST /api/context-graph/create` repeats its existence check, and a registration repeats its status read, its status writes and the on-chain id binding written after a mined or reconciled registration: first after 250 ms, then with doubling waits of up to 2 s, within 15 s. Each repeat is logged. The create's declaration write is not repeated, so a refused declaration still ends the request; other errors, an abort and a refusal after the budget propagate unchanged | None |
 | Managed Oxigraph serves SELECT results as TSV, decoded as they stream (#3473) | A SELECT on the managed Oxigraph store asks for TSV and decodes it row by row from the response body, under the same byte limits and with UTF-8, row-shape, RDF-term and datatype checks; a cancelled query stops the decoding. ASK queries, generic SPARQL endpoints and responses that identify themselves as JSON keep JSON decoding. The public `SelectResult` is unchanged, and both literal quote styles give the existing canonical values | None |
 | The node UI dashboard counts the store once every 5 minutes (#3474) | The dashboard's five store counts come from one exact query, kept for 5 minutes and refreshed at background priority, in place of five full-store counts every 30 s; between refreshes a light health query confirms the store before the counts are reused. A failed health check or refresh records the five store counts as unknown and tries again after 30 s, and the Context Graph count stays independent | None |
 | The testnet defaults list a different second fallback chain endpoint (#3385) | In `network/testnet.json`, `chain.rpcUrls` and `walletRpcUrls` list a public, keyless endpoint that serves block-pinned reads as their second fallback; the primary stays first. The mainnet defaults are unchanged | None, unless the node's configuration lists its own chain endpoints |
@@ -240,6 +242,10 @@ second fallback chain endpoint (#3385).
 - **The local LLM runtime keeps conversation history within its budget**
   (#3477): the omission marker shrinks to fit a small budget, so the
   rendered history never passes it.
+- **Creating and registering a context graph wait out a momentarily full
+  store queue** (#3497): see the upgrade table. On a public testnet, the
+  concurrency scenario, whose set-up had once met a full queue, passed on
+  its first attempt.
 - **An approved member of a relay-only curator's graph writes as soon as
   its member list arrives** (#3436, #3421): until then its writes are
   refused as retryable, a repeated join request sends nothing, and the
@@ -416,12 +422,20 @@ second fallback chain endpoint (#3385).
   refuses an `entities` array with `KA_ATOMIC_SHARE_REQUIRED`; which
   server-sent events the daemon writes; and that `sharedMemoryTtlMs`
   defaults to 30 days.
+- **The release branch carries the refreshed builder and agent
+  documentation** (#3495): the documentation site refresh with its
+  contract checks and the overview image, which `main` has had since
+  10.0.25.
 - **Test and CI plumbing** (#3279, #3398, #3403, #3404, #3337, #3476,
-  #3479): the member-sharing devnet suite judges its busy-slot case on
-  member 2's own admission trace, follows a large transfer across the
-  admissions that continue it, and cleans up starts that a stopped run
-  interrupted, and its expected failure for #3264 is retired, since a
-  member of the registered graph holds its definition; the RFC-64 crash
+  #3479, #3498, #3292, #3496): the member-sharing devnet suite judges its
+  busy-slot case on member 2's own admission trace, follows a large
+  transfer across the admissions that continue it, makes up to three
+  attempts with its large graphs on a fourth temporary node, and cleans up
+  starts that a stopped run interrupted, and its expected failure for
+  #3264 is retired, since a member of the registered graph holds its
+  definition; a devnet suite, run on its own, covers the promotion flow of
+  a curated registered graph; the chain's stuck-transaction timeout test
+  runs on fake timers; the RFC-64 crash
   campaign and the publisher pause and resume restart campaign run in
   required CI; a real-daemon test checks that vector search keeps agents
   apart; agent shards take their deadlines from the test inventory; the
@@ -439,10 +453,10 @@ second fallback chain endpoint (#3385).
   `@origintrail-official/dkg-chain` lists the private contracts workspace
   as a development dependency only.
 - **Stronger tests** (#3469, #3470, #3471, #3472, #3478, #3480, #3481,
-  #3482, #3483, #3487, #3488): a failed assertion fails its test, also
-  inside an exception handler, and new cases cover the ElizaOS and Prime
-  Agent adapters'
-  lifecycles, HTTP byte limits and cancellation, RDF and SPARQL lexical
+  #3482, #3483, #3487, #3488, #3492): a failed assertion fails its test,
+  also inside an exception handler, and new cases cover the ElizaOS, Prime
+  Agent and Hermes adapters' lifecycles and recovery, HTTP byte limits and
+  cancellation, RDF and SPARQL lexical
   boundaries, store reopen durability, query policy and graph isolation,
   the loopback CORS allowlist, MCP manifest installation and HTTP failure
   boundaries, and proof-worker recovery. Only tests change.
