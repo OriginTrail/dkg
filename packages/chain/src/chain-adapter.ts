@@ -15,6 +15,9 @@ import type { ContextGraphAuthorityProjectionServedEvidence } from
   './context-graph-authority-index-projection.js';
 export type { ContextGraphAuthorityIndexId } from
   './context-graph-authority-index-id.js';
+// OT-RFC-27 marketplace fragment (this file is at its ratcheted size budget).
+import type { ChainAdapterMarketplace } from './chain-adapter-marketplace.js';
+export * from './chain-adapter-marketplace.js';
 
 /**
  * The Publishing-Conviction-Account read methods the funded-wallet selector
@@ -1516,7 +1519,7 @@ export function operationalSigningOf(
  * V9 introduces publisher-namespaced UALs: did:dkg:{chainId}/{publisherAddress}/{localKAId}
  * Publishers reserve ID ranges via their signer address, then batch-mint KAs from those ranges.
  */
-export interface ChainAdapter {
+export interface ChainAdapter extends ChainAdapterMarketplace {
   /** Complete coherent public chain evidence for explicit snapshot recovery. */
   readPublicGraphSnapshot?(contextGraphId: string, onChainId: string, options?: ChainReadOptions): Promise<import('./public-graph-snapshot.js').PublicGraphSnapshot>;
 

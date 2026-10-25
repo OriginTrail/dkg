@@ -1,47 +1,24 @@
 import { normalizeContextGraphNameHashBatch } from './context-graph-name-hash-resolver.js';
+import { MockMarketplaceMethods } from './mock-adapter-marketplace.js';
 import type {
-  ChainAdapter,
-  IdentityProof,
-  ReservedRange,
-  BatchMintParams,
-  BatchMintResult,
-  CanonicalFinalizationReceiptReadOptions,
-  CanonicalFinalizationReceiptResolution,
-  ChainReadOptions,
-  ContextGraphAuthorityReadOptions,
-  ContextGraphLiveAuthorityReadOptions,
-  CreateKCParams,
-  FinalizedChainProofSnapshot,
-  UpdateKCParams,
-  TxResult,
-  ChainEvent,
-  EventFilter,
-  CreateContextGraphParams,
-  OnChainPublishResult,
-  KAUpdateVerification,
-  CreateOnChainContextGraphParams,
-  CreateOnChainContextGraphResult,
-  VerifyParams,
-  PublishToContextGraphParams,
-  V10PublishParams,
-  V10UpdateKAParams,
-  NodeChallenge,
-  ProofPeriodStatus,
-  CreateChallengeResult,
+  ChainAdapter, IdentityProof, ReservedRange,
+  BatchMintParams, BatchMintResult,
+  CanonicalFinalizationReceiptReadOptions, CanonicalFinalizationReceiptResolution,
+  ChainReadOptions, ContextGraphAuthorityReadOptions, ContextGraphLiveAuthorityReadOptions,
+  CreateKCParams, UpdateKCParams, FinalizedChainProofSnapshot,
+  TxResult, ChainEvent, EventFilter,
+  CreateContextGraphParams, OnChainPublishResult, KAUpdateVerification,
+  CreateOnChainContextGraphParams, CreateOnChainContextGraphResult,
+  VerifyParams, PublishToContextGraphParams,
+  V10PublishParams, V10UpdateKAParams,
+  NodeChallenge, ProofPeriodStatus, CreateChallengeResult,
   OperationalWalletRegistrationResult,
-  V10PublishingConvictionAccountInfo,
-  NodePublishingConvictionAccount,
-  PcaAccountRelation,
-  ShardingTableNode,
-  PcaContracts,
-  PcaRpcMethod,
-  BrowserWalletRpcMethod,
-  IdentityWalletContracts,
-  PublishTransactionResolution,
-  VerifyACKIdentityResult,
+  V10PublishingConvictionAccountInfo, NodePublishingConvictionAccount,
+  PcaAccountRelation, ShardingTableNode, PcaContracts, PcaRpcMethod,
+  BrowserWalletRpcMethod, IdentityWalletContracts,
+  PublishTransactionResolution, VerifyACKIdentityResult,
   KnowledgeAssetUpdateContext,
-  ContextGraphAuthoritySnapshot,
-  ContextGraphFinalizedCreation,
+  ContextGraphAuthoritySnapshot, ContextGraphFinalizedCreation,
 } from './chain-adapter.js';
 import type { RandomSamplingReadContextReader } from './random-sampling-read-context.js';
 import type { ContextGraphLiveAuthority } from './chain-adapter.js';
@@ -207,7 +184,10 @@ function applyV10UpdateContext(
  * In-memory mock chain adapter for off-chain development.
  * Implements both V9 (UAL-based) and V8 (legacy KC) interfaces.
  */
-export class MockChainAdapter implements ChainAdapter {
+// The OT-RFC-27 marketplace surface lives in the stateless base-class holder
+// (this file sits at its ratcheted file-size budget; the full in-memory
+// contract semantics live in mock-adapter-marketplace.ts).
+export class MockChainAdapter extends MockMarketplaceMethods implements ChainAdapter {
   readonly chainType = 'evm' as const;
   readonly chainId: string;
   readonly signerAddress: string;
@@ -264,6 +244,7 @@ export class MockChainAdapter implements ChainAdapter {
     signerAddress = MOCK_DEFAULT_SIGNER,
     options: Readonly<MockChainAdapterOptions> = {},
   ) {
+    super();
     this.chainId = chainId;
     this.signerAddress = signerAddress;
     this.allowedPublisherAddresses = new Set([ethers.getAddress(signerAddress).toLowerCase()]);

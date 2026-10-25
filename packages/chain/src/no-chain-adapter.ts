@@ -4,7 +4,14 @@ import type {
   ReservedRange,
   BatchMintParams,
   BatchMintResult,
+  MarketplaceBucket,
+  MarketplaceClaimEpochRewardResult,
+  MarketplaceFundSubscriptionParams,
+  MarketplaceNodeEpochAccounting,
+  MarketplaceParams,
+  MarketplaceSellerClaim,
   OnChainPublishResult,
+  ReceiptClaimInput,
   TxResult,
   ChainEvent,
   EventFilter,
@@ -50,4 +57,22 @@ export class NoChainAdapter implements ChainAdapter {
   // instead of throwing. Do NOT re-add them as noChain() stubs.
   isV10Ready(): boolean { return false; }
   isRandomSamplingReady(): boolean { return false; }
+
+  // OT-RFC-27 marketplace surface: the capability gate answers false, and the
+  // method stubs throw so a caller that skipped the gate fails loudly instead
+  // of silently settling nothing.
+  supportsMarketplace(): boolean { return false; }
+  async getCurrentEpoch(): Promise<bigint> { noChain(); }
+  async marketplaceGetAddress(): Promise<string> { noChain(); }
+  async marketplaceFundSubscription(_params: MarketplaceFundSubscriptionParams): Promise<TxResult> { noChain(); }
+  async marketplaceSubmitReceiptBatch(_claims: ReceiptClaimInput[]): Promise<TxResult> { noChain(); }
+  async marketplaceFinalizeBucket(_buyer: string, _epoch: bigint): Promise<TxResult> { noChain(); }
+  async marketplaceClaimEpochReward(_identityId: bigint, _epoch: bigint): Promise<MarketplaceClaimEpochRewardResult> { noChain(); }
+  async marketplaceRollEpochPool(_epoch: bigint): Promise<TxResult> { noChain(); }
+  async marketplaceGetBucket(_buyer: string, _epoch: bigint): Promise<MarketplaceBucket> { noChain(); }
+  async marketplaceGetSellerClaim(_buyer: string, _epoch: bigint, _identityId: bigint): Promise<MarketplaceSellerClaim> { noChain(); }
+  async marketplaceGetNodeEpochAccounting(_epoch: bigint, _identityId: bigint): Promise<MarketplaceNodeEpochAccounting> { noChain(); }
+  async marketplaceGetActiveSessionKey(_buyer: string): Promise<string> { noChain(); }
+  async marketplaceGetParams(): Promise<MarketplaceParams> { noChain(); }
+  async marketplaceSettlementDeadline(_epoch: bigint): Promise<bigint> { noChain(); }
 }

@@ -230,6 +230,8 @@ export interface ContractCache {
   dkgPublishingConvictionNFT?: Contract;
   randomSampling?: Contract;
   randomSamplingStorage?: Contract;
+  /** OT-RFC-27 marketplace settlement. Optional — `supportsMarketplace()` gates. */
+  marketplace?: Contract;
   identityStorage?: Contract;
   convictionStakingStorage?: Contract;
   stakingStorage?: Contract;

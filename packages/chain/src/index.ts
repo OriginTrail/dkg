@@ -249,6 +249,12 @@ export {
 export { MockChainAdapter, MOCK_DEFAULT_SIGNER } from './mock-adapter.js';
 export type { MockChainAdapterOptions } from './mock-adapter.js';
 export {
+  MockMarketplaceMethods,
+  MockMarketplaceState,
+  MOCK_MARKETPLACE_ADDRESS,
+  MOCK_MARKETPLACE_EPOCH_LENGTH_SECONDS,
+} from './mock-adapter-marketplace.js';
+export {
   EVMChainAdapter,
   type EVMAdapterConfig,
   type EVMAdapterOptions,

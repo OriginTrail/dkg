@@ -292,6 +292,12 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'requireConvictionNFT',
   'pcaWrite',
   'pcaWriteAndInvalidate',
+  // Protected EVM-only capability guard behind the OT-RFC-27 marketplace
+  // surface (throws when the Hub has no `Marketplace` binding). The public
+  // `marketplace*` methods and `supportsMarketplace` ARE mirrored on
+  // MockChainAdapter (mock-adapter-marketplace.ts); the mock is always
+  // "deployed", so it has no binding to guard.
+  'requireMarketplace',
   // Identity read-cache helpers are EVM-only: the mock's identity registry is
   // in-memory and its writes are already immediately visible.
   'invalidateIdentityStorageBinding',

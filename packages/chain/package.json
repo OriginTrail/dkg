@@ -15,6 +15,7 @@
   "dependencies": {
     "@origintrail-official/dkg-http-utils": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-marketplace": "workspace:*",
     "ethers": "^6"
   },
   "optionalDependencies": {

@@ -210,6 +210,7 @@ const HUB_BINDING_INVALIDATOR_ENTRIES = [
   ['ContextGraphStorage',        { contractKey: 'contextGraphStorage' }],
   ['DKGPublishingConvictionNFT', { contractKey: 'dkgPublishingConvictionNFT' }],
   ['Chronos',                    { contractKey: 'chronos' }],
+  ['Marketplace',                { contractKey: 'marketplace' }],
 ] as const satisfies ReadonlyArray<readonly [string, HubBindingInvalidationPolicy]>;
 
 const HUB_BINDING_INVALIDATORS = new Map<string, HubBindingInvalidationPolicy>(
@@ -3207,6 +3208,12 @@ export class EVMChainAdapterBase {
     // adapters bound to deploys that pre-date the Chronos registration.
     await resolveOptionalHubBinding(async () => {
       bind('chronos', await this.resolveContract('Chronos'));
+    });
+
+    // Marketplace not deployed — the OT-RFC-27 marketplace surface stays
+    // unavailable (`supportsMarketplace()` false; callers gate on it).
+    await resolveOptionalHubBinding(async () => {
+      bind('marketplace', await this.resolveContract('Marketplace'));
     });
 
     // RandomSampling not deployed — proof submission unavailable
