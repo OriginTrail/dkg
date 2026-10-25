@@ -45,7 +45,7 @@ function response(): {
 function snapshot(): RpcUsageCumulativeSnapshot {
   return {
     schemaVersion: 1,
-    consumerVocabularyVersion: 4,
+    consumerVocabularyVersion: 5,
     processEpoch: 'epoch-1',
     capturedAtUtc: '2026-09-20T12:00:00.000Z',
     capturedAtMonotonicMs: 123,
