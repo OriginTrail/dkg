@@ -14,6 +14,7 @@ export default defineConfig({
       'packages/storage',
       'packages/query',
       'packages/chain',
+      'packages/marketplace',
       'packages/publisher',
       'packages/agent',
       'packages/cli',
