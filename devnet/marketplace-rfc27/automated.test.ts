@@ -14,14 +14,20 @@
  *   3. Buyer funds an on-chain subscription (`POST /api/marketplace/subscribe`)
  *      with a per-bucket plan policy; the bucket funding and the registered
  *      session key are asserted against the Marketplace contract views.
- *   4. Chat-style invokes route to seller A (CHEAPER ask — B offers the same
- *      `devnet-llm` at a higher price as the routing check), a SPARQL invoke
- *      serves against A's local graph; results, metered costs, receipt value
- *      math and the shared RCPT_DOMAIN EIP-191 crypto are asserted.
- *   5. Receipt flush on A (`settle {action:'flush-receipts'}`) → on-chain
- *      `getSellerClaim` equals the summed invoke costs EXACTLY.
- *   6. A deny-list re-subscribe drives usage to B, so combined A+B claims
- *      EXCEED the funded bucket (the over-authorization drill).
+ *   4. Drill phase A: a chat-style invoke routes to seller A (CHEAPER ask — B
+ *      offers the same `devnet-llm` at a higher price as the routing check)
+ *      and a SPARQL invoke serves against A's local graph; results, metered
+ *      costs, receipt value math and the shared RCPT_DOMAIN EIP-191 crypto
+ *      are asserted. A's claims stay UNSUBMITTED (no flush).
+ *   5. Drill phase B: a deny-list re-subscribe drives usage to B while A's
+ *      claims are still unsubmitted — the genuine RFC over-authorization
+ *      race. Sellers now refuse UNDERFUNDED when on-chain claimed + their OWN
+ *      unsubmitted exposure + the call's worst case (maxUnits·ask) exceeds
+ *      bucket.funded, so serialized claim visibility can never over-claim;
+ *      only mutually INVISIBLE unsubmitted exposure can.
+ *   6. Both sellers flush (`settle {action:'flush-receipts'}`) → per-seller
+ *      `getSellerClaim` equals each seller's summed invoke costs EXACTLY, and
+ *      combined A+B claims EXCEED the final funded bucket.
  *   7. Soft ceiling: a call whose worst case (`maxUnits·ask`) crosses 95% of
  *      its bucket is refused locally (409 NO_ROUTE / 'no-eligible-offer' with
  *      a 'soft-ceiling' rejection) and ZERO meter movement (no reservation
@@ -40,10 +46,19 @@
  * must survive this suite) — at the RFC-pinned
  * asks (0.5 µTRAC/token, 15 µTRAC/query-unit) that is what makes the
  * over-authorization drill (totalClaimed > funded) reachable with a handful
- * of real metered calls. The LOCAL plan-policy budgets are larger than the
- * on-chain funding on purpose: the local meter governs admission, the chain
- * bucket governs settlement, and the gap between them is exactly what the
- * pro-rata finalization exists to absorb.
+ * of real metered calls, each with a TIGHT maxUnits so the seller's
+ * UNDERFUNDED headroom check admits it (reserved worst case == metered actual
+ * — see the drill arithmetic at the tranche constants). The LOCAL plan-policy
+ * budgets are larger than the on-chain funding on purpose: the local meter
+ * governs admission, the chain bucket governs settlement, and the gap between
+ * them is exactly what the pro-rata finalization exists to absorb.
+ *
+ * RACE WINDOW: seller receipt batchers auto-submit once their oldest pending
+ * claim is 15s old (checked by a 5s flush timer), and seller B reads the
+ * bucket fresh at admission (15s cache) — so everything from A's FIRST drill
+ * serve (step 4) through B's serve (step 5) must complete within ~15s, or A's
+ * claims land on-chain first and B CORRECTLY refuses UNDERFUNDED. Steps 4–5
+ * run back-to-back with no waits; do not insert polling between them.
  *
  * ISOLATION: mutates only marketplace state keyed to this buyer/epoch
  * (fresh buckets, this suite's own offer KAs in the `marketplace` CG) plus
@@ -90,21 +105,44 @@ const ASK_KNOWLEDGE_A = 15_000_000_000_000n; // 1.5e13 wei/query-unit
 const ASK_LLM_B = 800_000_000_000n; // 8e11 wei/token
 
 // On-chain subscription tranches (all land in the SAME (buyer, epoch) bucket;
-// fundSubscription accumulates). Sized so the metered claims driven below
-// comfortably over-claim the funded total (see the pre-finalize assertion).
+// fundSubscription accumulates). Drill arithmetic against the seller's
+// UNDERFUNDED admission check (on-chain claimed + the seller's OWN
+// unsubmitted exposure + the call's worst case maxUnits·ask must fit
+// bucket.funded):
+//   phase A (funded 5e14, nothing claimed): inference worst 500·5e11 = 2.5e14
+//     ≤ 5e14 ✓, then query worst 16·1.5e13 = 2.4e14 on top of A's own 2.5e14
+//     pending → 4.9e14 ≤ 5e14 ✓
+//   phase B (funded 9e14 after tranche 2; A's claims still UNSUBMITTED and
+//     invisible to B): inference worst 800·8e11 = 6.4e14 ≤ 9e14 ✓
+//   combined actuals ≥ 2.5e14 + 11·1.5e13 + 6.4e14 = 1.055e15 > 1e15 = the
+//     final funded total (tranche 3 lands only after both phases flushed).
 const SUB1_WEI = 500_000_000_000_000n; // 5e14
 const SUB2_WEI = 400_000_000_000_000n; // 4e14
 const SUB3_WEI = 100_000_000_000_000n; // 1e14
 const FUNDED_TOTAL_WEI = SUB1_WEI + SUB2_WEI + SUB3_WEI; // 1e15 (0.001 TRAC)
 
-// ~2.1 KB prompt ⇒ ≥ ~530 tokens metered per call (countTokens = ceil(utf8/4);
-// the deterministic stub echoes, so served units only grow from here). Two
-// calls per seller at the pinned asks puts total claims well past the funding.
-const PROMPT =
-  'OT-RFC-27 devnet drill: the neurosymbolic marketplace pays sellers from a pooled subscription by finalized receipt value. '.repeat(
-    18,
-  );
-const SPARQL_PROBE = 'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 5';
+// The shared prototype token schedule is countTokens = ceil(utf8Bytes/4), and
+// the deterministic inference stub SATURATES: the echo is truncated to fit,
+// so for an ASCII prompt with promptTokens ≤ maxUnits < 2·promptTokens the
+// served units equal maxUnits EXACTLY. That makes the reserved worst case
+// (maxUnits·ask) equal the metered actual — the property the drill arithmetic
+// above depends on.
+const BASE_SENTENCE =
+  'OT-RFC-27 devnet drill: the neurosymbolic marketplace pays sellers from a pooled subscription by finalized receipt value. '; // 122 UTF-8 bytes
+/** 15 × 122 B = 1830 B → 458 tokens: inside (400, 500], so BOTH drill
+ *  inference grants below saturate (458 ≤ 500 < 916 and 458 ≤ 800 < 916);
+ *  step 4 asserts these bounds before serving anything. */
+const DRILL_PROMPT = BASE_SENTENCE.repeat(15);
+/** Large prompt for the soft-ceiling step — never served, refused locally. */
+const PROMPT = BASE_SENTENCE.repeat(18);
+const SPARQL_PROBE = 'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 5'; // 42 UTF-8 bytes
+
+// TIGHT per-call unit grants: worst case == actual for the saturated
+// inference calls; the query's worst case caps the deterministic schedule
+// queryUnits = 10 + ceil(42/100) + rows, rows ≤ 5 (LIMIT 5) → [11, 16] units.
+const INF_MAX_UNITS_A = 500n; // worst 500·5e11 = 2.5e14 (tranche-1 bucket 5e14)
+const INF_MAX_UNITS_B = 800n; // worst 800·8e11 = 6.4e14 (funded 9e14 at phase B)
+const QUERY_MAX_UNITS = 16n; // worst 16·1.5e13 = 2.4e14 (fits 5e14 − 2.5e14 pending)
 
 // Shared crypto spec (MUST match Solidity + packages/marketplace byte-for-byte).
 const RCPT_DOMAIN = 'DKG_MKT_RCPT_V1';
@@ -136,7 +174,7 @@ interface SuiteCtx {
   /** The Chronos epoch every subscription tranche funds (pinned explicitly on
    *  each subscribe call so a mid-test epoch flip fails loudly, not subtly). */
   epoch: bigint;
-  /** The session key registered by the FIRST subscribe (step 3) — step 6
+  /** The session key registered by the FIRST subscribe (step 3) — step 5
    *  asserts it STAYS bound: session keys bind per buyer permanently, so a
    *  later fundSubscription can never invalidate an earlier key. */
   firstSessionKey?: string;
@@ -229,8 +267,14 @@ async function subscribeAndConfirm(
  * Assert a served invoke end to end: routed to the expected seller, cost math
  * (`costWei == servedUnits·ask`), receipt value math, and the shared
  * RCPT_DOMAIN crypto — the seller's EIP-191 signature over the independently
- * recomputed receipt digest must recover to the seller wallet the invoke
- * response names (the same wallet that submits the on-chain batch).
+ * recomputed receipt digest must recover to `seller.address`, which the buyer
+ * now sets to the RECOVERED, on-chain-identity-verified receipt signer (on
+ * this devnet the seller's operational wallet, the same wallet that submits
+ * the receipt batch). Recovering the SAME address from the INDEPENDENTLY
+ * recomputed digest proves the signature covers exactly the servedUnits,
+ * value and resultCommitment this response carries.
+ * `expectedUnits` (drill calls) pins the stub's saturation: served == maxUnits
+ * exactly, so the admission-time worst case equals the metered actual.
  * Returns `costWei` so callers can accumulate the expected on-chain claim.
  */
 function assertServedInvoke(
@@ -238,6 +282,7 @@ function assertServedInvoke(
   label: string,
   expectedSellerId: bigint,
   askPerUnitWei: bigint,
+  expectedUnits?: bigint,
 ): bigint {
   expect(r.status, `${label} failed: ${JSON.stringify(r.json)}`).toBe(200);
   const inv = r.json;
@@ -247,6 +292,12 @@ function assertServedInvoke(
   ).toBe(expectedSellerId);
   const servedUnits = big(inv?.servedUnits, `${label} servedUnits`);
   expect(servedUnits, `${label}: servedUnits must be metered`).toBeGreaterThan(0n);
+  if (expectedUnits !== undefined) {
+    expect(
+      servedUnits,
+      `${label}: the saturating stub must serve maxUnits exactly (reserved worst case == actual)`,
+    ).toBe(expectedUnits);
+  }
   const costWei = big(inv?.costWei, `${label} costWei`);
   expect(costWei, `${label}: costWei must equal servedUnits·askPerUnit`).toBe(
     servedUnits * askPerUnitWei,
@@ -409,11 +460,13 @@ beforeAll(async () => {
 //
 // The `it`s below are ONE sequential scenario (sequence.concurrent = false):
 // each step builds on the previous step's marketplace state, exactly like the
-// RFC's buyer/seller lifecycle. Receipt-ordering note: every phase's receipts
-// are confirmed on-chain BEFORE the next subscribe so the exact claim-sum
-// assertions stay phase-local. (Session-key rotation by a later tranche could
-// never strand them anyway: keys bind per buyer PERMANENTLY — boundSessionKeys
-// — so every historically bound key keeps authorizing receipts.)
+// RFC's buyer/seller lifecycle. Receipt-ordering note: the drill DELIBERATELY
+// holds both sellers' claims unsubmitted across phases A and B (steps 4–5) —
+// mutually invisible unsubmitted exposure is the only way past the sellers'
+// UNDERFUNDED headroom admission — and flushes both in step 6, where
+// getSellerClaim still pins each seller's EXACT summed costs. (Session-key
+// rotation can strand nothing: keys bind per buyer PERMANENTLY —
+// boundSessionKeys — so every historically bound key keeps authorizing.)
 
 describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
   it('1. sellers publish offer KAs into the marketplace CG', async () => {
@@ -560,31 +613,59 @@ describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
     expect(big(st.json?.buyer?.epoch, 'status buyer.epoch')).toBe(ctx.epoch);
   });
 
-  it('4. invokes: router picks the cheaper seller A; SPARQL serves from A; meter moves', async () => {
+  it('4. drill phase A: router picks the cheaper seller A; SPARQL serves from A; claims stay unsubmitted', async () => {
+    // Saturation preconditions — pure math, so a mis-sized prompt fails HERE
+    // with a clear message instead of as an UNDERFUNDED/arithmetic surprise:
+    // promptTokens ≤ maxUnits < 2·promptTokens makes the stub serve maxUnits
+    // exactly (countTokens = ceil(utf8/4); ASCII prompt).
+    const drillPromptTokens = BigInt(
+      Math.ceil(new TextEncoder().encode(DRILL_PROMPT).length / 4),
+    );
+    for (const [grant, label] of [
+      [INF_MAX_UNITS_A, 'A'],
+      [INF_MAX_UNITS_B, 'B'],
+    ] as const) {
+      expect(drillPromptTokens, `drill prompt must fit seller ${label}'s grant`).toBeLessThanOrEqual(grant);
+      expect(2n * drillPromptTokens, `drill prompt must saturate seller ${label}'s grant`).toBeGreaterThan(grant);
+    }
+
     const meterBefore = await getJson(ctx.buyer, '/api/marketplace/meter');
     expect(meterBefore.status).toBe(200);
 
-    // Two chat-style calls — with BOTH devnet-llm offers eligible under the
-    // price cap, landing on A proves lowest-ask routing.
-    for (let i = 0; i < 2; i++) {
-      const r = await postJson(ctx.buyer, '/api/marketplace/invoke', {
-        serviceType: 'inference',
-        payload: { prompt: `${PROMPT} [call ${i}]` },
-        maxUnits: '4000',
-      });
-      ctx.expectedClaimA += assertServedInvoke(r, `inference invoke #${i}`, ctx.idA, ASK_LLM_A);
-    }
+    // One chat-style call — with BOTH devnet-llm offers eligible under the
+    // price cap, landing on A proves lowest-ask routing. TIGHT maxUnits: the
+    // seller's UNDERFUNDED admission reserves maxUnits·ask = 2.5e14 against
+    // the 5e14 tranche-1 funding. THE RACE WINDOW OPENS HERE: A's batcher
+    // auto-submits this claim ~15–20s from now, so steps 4–5 stay lean.
+    const r = await postJson(ctx.buyer, '/api/marketplace/invoke', {
+      serviceType: 'inference',
+      payload: { prompt: DRILL_PROMPT },
+      maxUnits: INF_MAX_UNITS_A.toString(),
+    });
+    ctx.expectedClaimA += assertServedInvoke(
+      r,
+      'phase-A inference invoke',
+      ctx.idA,
+      ASK_LLM_A,
+      INF_MAX_UNITS_A, // saturated
+    );
 
     // One SPARQL call — only A offers `devnet-knowledge`, served against A's
-    // local graph via the query executor.
+    // local graph via the query executor. Worst case 16·1.5e13 = 2.4e14 fits
+    // the 5e14 bucket on top of A's own 2.5e14 unsubmitted exposure.
     const q = await postJson(ctx.buyer, '/api/marketplace/invoke', {
       serviceType: 'query',
       payload: { sparql: SPARQL_PROBE },
-      maxUnits: '200',
+      maxUnits: QUERY_MAX_UNITS.toString(),
     });
-    ctx.expectedClaimA += assertServedInvoke(q, 'query invoke', ctx.idA, ASK_KNOWLEDGE_A);
+    const queryCost = assertServedInvoke(q, 'query invoke', ctx.idA, ASK_KNOWLEDGE_A);
+    // The deterministic schedule: 10 + ceil(42/100) + rows(0..5) ∈ [11, 16].
+    expect(big(q.json?.servedUnits, 'query servedUnits')).toBeGreaterThanOrEqual(11n);
+    ctx.expectedClaimA += queryCost;
 
     // Meter movement: settled usage must be visible on the meter route.
+    // NO FLUSH here — A's claims must stay unsubmitted (invisible to B) when
+    // phase B is admitted, or the over-authorization drill is impossible.
     const meterAfter = await getJson(ctx.buyer, '/api/marketplace/meter');
     expect(meterAfter.status).toBe(200);
     expect(
@@ -593,14 +674,11 @@ describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
     ).not.toBe(JSON.stringify(meterBefore.json));
   });
 
-  it('5. seller A flushes receipts; on-chain claim equals the summed costs exactly', async () => {
-    expect(ctx.expectedClaimA).toBeGreaterThan(0n);
-    await flushAndConfirmClaim(ctx.sellerA, ctx.idA, ctx.expectedClaimA, 'seller A');
-  });
-
-  it('6. deny-list re-subscribe drives usage to seller B; combined claims over-claim the bucket', async () => {
+  it('5. drill phase B: deny-list re-subscribe routes to pricier seller B before anything flushes', async () => {
     // Same epoch, extra funds, NEW local policy: seller A is denied, so the
-    // router must fall through to B's pricier devnet-llm.
+    // router must fall through to B's pricier devnet-llm. The subscribe POST
+    // returns with the tx already mined, so the confirm poll resolves on its
+    // first probe — the race window stays open.
     await subscribeAndConfirm(
       SUB2_WEI,
       policyJson(
@@ -618,6 +696,22 @@ describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
       'tranche 2',
     );
 
+    // B's admission: funded 9e14, on-chain claimed 0 (A has NOT flushed), B's
+    // own pending 0 → worst case 800·8e11 = 6.4e14 fits. If this returns 502
+    // UNDERFUNDED, A's auto-flush won the race (a slow devnet run) — rerun.
+    const r = await postJson(ctx.buyer, '/api/marketplace/invoke', {
+      serviceType: 'inference',
+      payload: { prompt: DRILL_PROMPT },
+      maxUnits: INF_MAX_UNITS_B.toString(),
+    });
+    ctx.expectedClaimB += assertServedInvoke(
+      r,
+      'phase-B (deny-list) inference invoke',
+      ctx.idB,
+      ASK_LLM_B,
+      INF_MAX_UNITS_B, // saturated
+    );
+
     // Subscribing again must NOT invalidate anything key-side: bindings are
     // per buyer and permanent, so the step-3 key stays bound (and, since the
     // buyer persists one session key, stays the active one) — a rotation via
@@ -626,22 +720,29 @@ describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
       await ctx.marketplace.isSessionKeyBound(ctx.buyerAddr, ctx.firstSessionKey!),
       're-subscribing must keep the originally bound session key valid',
     ).toBe(true);
+  });
 
-    for (let i = 0; i < 2; i++) {
-      const r = await postJson(ctx.buyer, '/api/marketplace/invoke', {
-        serviceType: 'inference',
-        payload: { prompt: `${PROMPT} [deny-listed call ${i}]` },
-        maxUnits: '4000',
-      });
-      ctx.expectedClaimB += assertServedInvoke(
-        r,
-        `deny-list inference invoke #${i}`,
-        ctx.idB,
-        ASK_LLM_B,
-      );
-    }
+  it('6. both sellers flush; combined on-chain claims over-claim the bucket', async () => {
+    expect(ctx.expectedClaimA).toBeGreaterThan(0n);
+    expect(ctx.expectedClaimB).toBeGreaterThan(0n);
 
+    // A's claims may ALREADY be on-chain (its batcher's 15s delay trigger) —
+    // the manual flush then just drains nothing; getSellerClaim still pins the
+    // EXACT per-seller sums either way. The flush response's requeuedClaims /
+    // failedClaims counters are deliberately not asserted here.
+    await flushAndConfirmClaim(ctx.sellerA, ctx.idA, ctx.expectedClaimA, 'seller A');
     await flushAndConfirmClaim(ctx.sellerB, ctx.idB, ctx.expectedClaimB, 'seller B');
+
+    // The over-authorization is already on-chain: combined claims exceed even
+    // the FINAL funded total (tranche 3, another 1e14, lands in step 7).
+    const bucket = await ctx.marketplace.getBucket(ctx.buyerAddr, ctx.epoch);
+    expect(bucket.totalClaimed, 'combined claims must be exact').toBe(
+      ctx.expectedClaimA + ctx.expectedClaimB,
+    );
+    expect(
+      bucket.totalClaimed,
+      'mutually invisible unsubmitted exposure must over-claim the final funding',
+    ).toBeGreaterThan(FUNDED_TOTAL_WEI);
   });
 
   it('7. soft ceiling: a call crossing 95% of its bucket is refused with zero meter movement', async () => {
