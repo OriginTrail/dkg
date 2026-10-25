@@ -38,7 +38,10 @@ import {
   INVENTORY_SCHEMA_DOWNGRADES_V1,
   INVENTORY_SCHEMA_FIRST_RELEASES_V1,
 } from '../src/rfc64/inventory-v1/schema-migrations.js';
-import { INVENTORY_V1_PRE_MIGRATION_COPY_RESERVE_BYTES } from '../src/rfc64/inventory-v1/pre-migration-copy.js';
+import {
+  INVENTORY_V1_PRE_MIGRATION_COPY_RESERVE_BYTES,
+  listInventoryV1PreMigrationCopies,
+} from '../src/rfc64/inventory-v1/pre-migration-copy.js';
 import {
   planRfc64InventoryRollbackV1,
   prepareRfc64InventoryForRollbackV1,
@@ -468,6 +471,21 @@ describe('RFC-64 inventory pre-migration copy', () => {
       'inventory-v1.schema-v5-to-v6.pre-migration.sqlite3',
     ]);
     expect(repairCount(copyPath(dataDir, 5))).toBe(1);
+  });
+
+  it('lists only the copies of the database it names, whatever characters its file name holds', () => {
+    const store = join(dataDirectory(), 'rfc64-sync');
+    fs.mkdirSync(store, { recursive: true });
+    // As a pattern, `inventory+v1` would match `inventoryyv1` and not itself.
+    fs.writeFileSync(join(store, 'inventory+v1.schema-v5-to-v6.pre-migration.sqlite3'), '');
+    fs.writeFileSync(join(store, 'inventoryyv1.schema-v5-to-v6.pre-migration.sqlite3'), '');
+
+    expect(listInventoryV1PreMigrationCopies(join(store, 'inventory+v1.sqlite3'))).toEqual([{
+      path: join(store, 'inventory+v1.schema-v5-to-v6.pre-migration.sqlite3'),
+      fromVersion: 5,
+      toVersion: 6,
+      pending: false,
+    }]);
   });
 });
 
