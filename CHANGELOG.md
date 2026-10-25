@@ -6,110 +6,64 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [10.0.26] - 2026-10-25
 
-Curated Context Graphs whose curator is reachable only through relays
-admit new members and replicate their shared memory (#3421). A newly
-approved member of a public graph registered on chain with a curated
-publish policy writes into it as soon as the curator's member list
-arrives, and a member's write that the curator has stored reaches the
-graph's other members within about a minute and a half, also when every
-link to them is relayed and the curator's change notice does not get
-through. In an end-to-end test with three nodes behind a relay on a local
-chain, the other member held such a write about 5 s after the curator
-stored it, while the curator's notice to that member failed on every
-attempt.
+10.0.26 makes collaboration between AI agents dependable on any network.
+Agents that share a context graph can join it, add knowledge and see each
+other's contributions within seconds, also when they run behind home
+routers, company firewalls or cloud networks and reach each other only
+through relays. The release also makes nodes steadier and lighter on
+resources, adds a one-command way back to 10.0.25, and strengthens
+security.
 
-Edges on the bundled networks announce only their public and relay
-addresses, and they reach a peer that announces no public address over
-the relay circuit already open to it, from the first request (#3444).
-Every node reuses an open circuit when a dial would only lead back to it
-(#3379). A second circuit to an admitted peer starts no further
-admission, catalog replay or sync, and a circuit enters the peer store
-once it has reached its peer (#3445). Relays keep a refreshed reservation
-until it expires, and the connection monitor gives a ping 20 to 25 s to
-answer, so a node or relay whose event loop stalls for 15 s keeps its
-connections (#3437).
+### Highlights
 
-An approved member whose member list is still on its way waits for it:
-its writes are refused as retryable and go through once the list arrives,
-and it sends no further join request (#3436). Subscribers take a graph's
-member list only from its curator (#3439). The curator sends its change
-notice again to the followers it did not reach, a member keeps pulling the
-graphs it belongs to and connects to the owner for them, and a catch-up
-always asks the graph's owner (#3435). A share into a curated public graph
-goes straight to the graph's other connected members, and a pull of shared
-memory fetches its data phase only when the graph holds data of that kind
-(#3438).
+- **Collaboration on any network.** Newly approved members of a curated
+  context graph can write as soon as the curator's member list reaches
+  them, and every member receives the others' contributions within
+  seconds. On the public testnet, a member's write reached the other
+  members in 3 to 8 s, with every connection between them going through
+  relays (#3421).
+- **A steadier network.** Nodes reuse the connections they already have,
+  relays keep the reservations agents depend on, and every installation
+  runs exactly the network libraries that the tests cover (#3379, #3437,
+  #3440, #3444, #3445).
+- **Large context graphs, small footprint.** Nodes sync even very large
+  context graphs within fixed memory limits (#3430).
+- **Data arrives quickly.** Core nodes keep verified content and stream
+  exact assets to the nodes that ask for them, query results stream
+  straight from the store, and edge nodes can opt in to a shared,
+  authenticated chain cache on core nodes for fewer blockchain requests
+  (#3391, #3473).
+- **A safe way back.** `dkg rollback` returns a node to 10.0.25 with its
+  data (#3484).
+- **More reliable sharing and publishing.** Interrupted shares finish
+  under their original job, a client can confirm a share whose answer it
+  lost, transactions keep going through when network fees spike, and
+  creating a context graph rides out a busy moment on the node (#3389,
+  #3393, #3396, #3434, #3497).
+- **Security first.** Nodes tell you when Node.js lacks its latest
+  security fixes, refuse Brotli-compressed web responses as an extra
+  safeguard, and run updated dependencies (#3422, #3424, #3449).
+- **Easier to operate.** Nodes write a short resource summary every five
+  minutes, keep three days of logs on their own, and can pause and resume
+  publishing (#3354, #3412).
 
-npm installs run the libp2p versions that CI tests: the published packages
-pin the libp2p family to exact versions, among them libp2p 3.5.1,
-circuit-relay-v2 4.2.17 and gossipsub 16.1.1 (#3440).
+### Before you upgrade
 
-A node syncs a large graph in bounded memory. A full-graph durable data
-round ends at a graph boundary once it holds 131,072 rows or about 64 MiB,
-the next round resumes there, and the store's background lane serves other
-work between asset writes (#3430). After an authority change a node
-catches up only the graphs whose authority changed (#3380). A receiver
-applies the newest delivered catalog head of a scope in one lease turn and
-lets new data go ahead of replays (#3383), the chain event lane keeps its
-progress when its scan lease expires (#3399), and a replica keeps a public
-graph's authority through overlapping refreshes and retries a failed
-refresh after 1, 5 and 30 s (#3411).
+- Upgrade Node.js to 22.23.4, 24.22.1, 26.12.1 or later, then restart the
+  node.
+- Back up the node as usual, and leave some free disk space: at its first
+  start on this release the node keeps a copy of one of its databases.
+  `dkg rollback` returns it to 10.0.25 if you need to.
+- Upgrade both edge and core nodes: the network improvements use both.
+- If your nodes reach each other over a private LAN or VPN, set
+  `lanAddressesEnabled: true`.
+- Remove any external `logrotate` rule for `daemon.log`.
+- Nothing changes on chain.
 
-Cores serve the exact-asset stream for public graphs by default, nodes
-request it from them, and a Core with a data directory keeps the verified
-asset bodies it serves for later requests, also across a restart. An
-Edge's snapshot job for a public graph can take the graph's chain
-inventory from authenticated Cores of any official deployment of its
-environment, with `"DKG_Core_chain_cache": true` in its configuration; in
-a local test a complete recovery of a 12-asset public graph through the
-cache took 16 to 19 chain requests from the Edge (#3391).
+The details follow: compatibility, the full upgrade table, and every
+change.
 
-A node logs its memory, store lanes and sync slots every 5 minutes, keeps
-72 hours of `daemon.log` within 512 MB, and reports repeated refusals of
-metadata refreshes in one line per 10 minutes (#3412). Transactions carry
-headroom over the base fee, with at least a 2 gwei fee cap and a 1 gwei
-tip on Gnosis, and a synchronous publication or a standalone write that
-stays unmined while it holds its wallet's next nonce is sent again at that
-nonce with higher fees (#3393).
-
-An interrupted asynchronous share resumes under its original job (#3396,
-#3434), a client that lost every answer to an asynchronous share can prove
-which job ran it (#3389), and a pull into working memory whose answer was
-lost can be checked against the exact draft (#3429). Node administrators
-can pause and resume the running publisher, also across a restart (#3354),
-and retry parked private catalog placements (#3352). The default worker
-store saves and reopens snapshots larger than 512 MiB (#3335), and a
-catalog head is committed once its data is durable in the store (#3338).
-Memory search shares its result limit across the memory layers (#3336),
-`dkg mcp setup` inside WSL registers Windows MCP clients that start the
-node's MCP server (#3348), and the node UI keeps what it loaded and offers
-Retry when a read fails (#3345).
-
-Outbound HTTP refuses Brotli-encoded responses, as defence in depth for
-CVE-2026-111497 in the Brotli decoder that Node.js bundles, and
-`GET /api/status` reports the Node.js release the daemon runs on (#3449).
-`dkg start`, daemon start and auto-update warn, and `dkg doctor` reports a
-`node-security` warning, while Node.js lacks the 2026-10-21 security fixes
-(#3422). Upgrade Node.js to 22.23.4, 24.22.1, 26.12.1 or later, and restart
-the node.
-
-`dkg rollback` takes a node on this release back to 10.0.25 with its data.
-It gives the RFC-64 inventory database back in the form 10.0.25 opens, by
-lowering it from schema 6 or by restoring the copy the node kept before
-the migration, and refuses, changing nothing, when it can do neither
-(#3484).
-
-A member's first subscribe to an unregistered public graph reaches an
-author that is not in the first window of connected peers (#3467), and a
-Core pulls a peer's agent profile again until it arrives, so it lists the
-agents of Cores that start after it (#3475). Managed Oxigraph serves SELECT
-results as TSV that the node decodes as they stream (#3473), the node UI
-dashboard counts the store once every 5 minutes (#3474), the MCP server
-answers an oversized tool result with a short error and stays connected
-(#3424), graph visualization keeps named SELECT bindings and empty literals
-(#3489), the local LLM runtime keeps conversation history within its
-budget (#3477), and creating and registering a context graph waits out a
-momentarily full store queue (#3497).
+### Compatibility
 
 **No smart-contract, ABI or deployment registry changes.** Four new
 protocols. The connection monitor pings over `/dkg-liveness/ping/1.0.0`
