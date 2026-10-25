@@ -205,6 +205,22 @@ export const PROTOCOL_STORAGE_UPDATE_ACK_V2 = '/dkg/10.0.2/storage-update-ack';
 export const PROTOCOL_GET_CIPHERTEXT_CHUNK = '/dkg/10.0.2/get-ciphertext-chunk';
 export const PROTOCOL_NETWORK_IDENTITY = '/dkg/10.0.1/network-identity';
 
+// OT-RFC-27 NeuroSymbolic Marketplace (protocol-level prototype): NEW
+// protocols — no predecessors — on the /dkg/10.0.1/* Universal Messenger
+// prefix like the other short-message protocols. Quote is the buyer router's
+// cheap availability/price probe fanned out before seller selection; serve
+// carries the session-key-authorized bounded request and returns the seller-
+// signed result + QueryInferenceReceipt. Wire shapes: `proto/marketplace.ts`.
+export const PROTOCOL_MARKETPLACE_QUOTE = '/dkg/10.0.1/marketplace-quote';
+export const PROTOCOL_MARKETPLACE_SERVE = '/dkg/10.0.1/marketplace-serve';
+
+/**
+ * Name of the shared Marketplace Context Graph (OT-RFC-27): sellers publish
+ * offers into it as ordinary Knowledge Assets (standard CG graph-URI builders
+ * apply); buyers subscribe/sync it over SWM and discover offers via SPARQL.
+ */
+export const MARKETPLACE_CONTEXT_GRAPH = 'marketplace';
+
 export const DHT_PROTOCOL = '/dkg/kad/1.0.0';
 
 const NETWORK_TOPIC_PREFIX = 'dkg/network';

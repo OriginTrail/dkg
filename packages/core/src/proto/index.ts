@@ -186,6 +186,22 @@ export {
 } from './update-intent.js';
 
 export {
+  type MarketplaceQuoteRequestMsg,
+  type MarketplaceQuoteResponseMsg,
+  type MarketplaceServeRequestMsg,
+  type MarketplaceServeResponseMsg,
+  MARKETPLACE_SERVE_VERSION,
+  encodeMarketplaceQuoteRequest,
+  decodeMarketplaceQuoteRequest,
+  encodeMarketplaceQuoteResponse,
+  decodeMarketplaceQuoteResponse,
+  encodeMarketplaceServeRequest,
+  decodeMarketplaceServeRequest,
+  encodeMarketplaceServeResponse,
+  decodeMarketplaceServeResponse,
+} from './marketplace.js';
+
+export {
   CIPHERTEXT_CHUNK_PREDICATE,
   ciphertextChunkStoreGraph,
   ciphertextChunkStoreSubject,
