@@ -26,7 +26,9 @@
  * Authorization signatures are verified for real: the mock recomputes the
  * shared `DKG_MKT_AUTH_V1` digest (chainId 31337, `MOCK_MARKETPLACE_ADDRESS`)
  * via the domain package and EIP-191-recovers the signer, so replay,
- * wrong-seller and rotated-session-key failures behave exactly as on-chain.
+ * wrong-seller and never-bound-key failures behave exactly as on-chain —
+ * including the per-buyer `boundSessionKeys` semantics where every key the
+ * buyer ever bound keeps settling after a rotation.
  *
  * Several MockChainAdapter instances can settle against ONE marketplace (a
  * buyer node and seller nodes in one test) by sharing the state object:
@@ -42,6 +44,7 @@ import type { TxResult } from './chain-adapter.js';
 import type {
   MarketplaceBucket,
   MarketplaceClaimEpochRewardResult,
+  MarketplaceEpochRewardDistribution,
   MarketplaceFundSubscriptionParams,
   MarketplaceNodeEpochAccounting,
   MarketplaceParams,
@@ -76,6 +79,8 @@ export class MockMarketplaceState {
   /** Reported through getParams; the deadline predicate is the epoch counter. */
   settlementGraceSeconds = MOCK_MARKETPLACE_EPOCH_LENGTH_SECONDS / 4n;
   softCeilingBps = 9500;
+  /** Wash-trading guard: reward ≤ rewardCapMultiple·R_i. Contract default 10; 0 = uncapped. */
+  rewardCapMultiple = 10;
   /** Unix-seconds clock authorization expiry is checked against. */
   nowSeconds = BigInt(Math.floor(Date.now() / 1000));
   /** identityId → S18 at acceptance; absent = SCALE18 (node at the stake cap). */
@@ -83,10 +88,14 @@ export class MockMarketplaceState {
   /** `${buyer}|${epoch}` → bucket. */
   readonly buckets = new Map<string, MockBucket>();
   readonly bucketSellers = new Map<string, bigint[]>();
+  /** `${buyer}|${epoch}` → paginated-finalization cursor into bucketSellers. */
+  readonly finalizeCursor = new Map<string, bigint>();
   /** `${buyer}|${epoch}|${identityId}` → claim accruals. */
-  readonly sellerClaims = new Map<string, { claimed: bigint; qiRaw: bigint }>();
-  /** sessionKey (lowercase) → buyer (lowercase). */
-  readonly sessionKeyOwner = new Map<string, string>();
+  readonly sellerClaims = new Map<string, { claimed: bigint; qiRaw: bigint; enrolled: boolean }>();
+  /** buyer (lowercase) → every session key (lowercase) the buyer ever bound.
+   * Per-buyer scope — mirrors `boundSessionKeys` (historic keys keep settling
+   * after a rotation; two buyers sharing a key is harmless). */
+  readonly boundSessionKeys = new Map<string, Set<string>>();
   /** buyer (lowercase) → sessionKey (as registered). */
   readonly activeSessionKey = new Map<string, string>();
   readonly consumedAuth = new Set<string>();
@@ -100,6 +109,8 @@ export class MockMarketplaceState {
   readonly epochTotalFinalizedValue = new Map<string, bigint>();
   readonly epochTotalQiScore = new Map<string, bigint>();
   readonly rewardClaimed = new Set<string>();
+  /** epoch → Σ reward wei paid out (the capped remainder stays pooled). */
+  readonly epochRewardDistributed = new Map<string, bigint>();
   /** TRAC "transferred out" per wallet (lowercase) — the payout ledger tests assert. */
   readonly rewardsPaidWei = new Map<string, bigint>();
   private nextTxSeq = 1;
@@ -190,11 +201,12 @@ export class MockMarketplaceMethods {
         mockRevert(`NoActiveSessionKey(${this.signerAddress})`);
       }
     } else {
-      const keyOwner = state.sessionKeyOwner.get(sessionKey.toLowerCase());
-      if (keyOwner !== undefined && keyOwner !== buyer) {
-        mockRevert(`SessionKeyAlreadyBound(${sessionKey}, ${keyOwner})`);
-      }
-      state.sessionKeyOwner.set(sessionKey.toLowerCase(), buyer);
+      // Per-buyer binding (no global uniqueness): the key joins the buyer's
+      // permanent bound set and becomes the active key. Historic keys keep
+      // settling, so a rotation never strands already-served receipts.
+      const bound = state.boundSessionKeys.get(buyer) ?? new Set<string>();
+      bound.add(sessionKey.toLowerCase());
+      state.boundSessionKeys.set(buyer, bound);
       state.activeSessionKey.set(buyer, sessionKey);
     }
 
@@ -242,8 +254,15 @@ export class MockMarketplaceMethods {
     const batchConsumed = new Set<string>();
     for (const claim of claims) {
       const key = bucketKey(claim.buyer, claim.epoch);
-      if ((state.buckets.get(key)?.funded ?? 0n) === 0n) {
+      const bucket = state.buckets.get(key);
+      if ((bucket?.funded ?? 0n) === 0n) {
         mockRevert(`BucketNotFunded(${claim.buyer}, ${claim.epoch})`);
+      }
+      // A finalized bucket — or one whose paginated finalization started —
+      // accepts no further claims (checked before the window, exactly like
+      // the contract: a grace increase cannot re-open settled buckets).
+      if (bucket?.finalized || (state.finalizeCursor.get(key) ?? 0n) !== 0n) {
+        mockRevert(`ClaimsClosedForBucket(${claim.buyer}, ${claim.epoch})`);
       }
       if (currentEpoch > claim.epoch) {
         mockRevert(`SettlementClosed(${claim.epoch}, ${currentEpoch})`);
@@ -256,6 +275,11 @@ export class MockMarketplaceMethods {
       }
       if (claim.servedUnits > claim.maxUnits) {
         mockRevert(`ServedOverMaxUnits(${claim.callId}, ${claim.servedUnits}, ${claim.maxUnits})`);
+      }
+      // servedUnits > 0, so zero value means a zero ask — rejected: accepting
+      // it would enroll a seller whose finalization divides by claimed value.
+      if (claim.askPerUnitWei === 0n) {
+        mockRevert(`ZeroClaimValue(${claim.callId})`);
       }
 
       const authDigest = computeAuthDigest({
@@ -275,15 +299,17 @@ export class MockMarketplaceMethods {
       }
       batchConsumed.add(authDigest);
 
-      const sessionKey = state.activeSessionKey.get(claim.buyer.toLowerCase());
+      // Any key the buyer EVER bound authorizes, not just the active one —
+      // mirrors `boundSessionKeys` (rotation is never retroactive).
       let recovered: string;
       try {
         recovered = eip191RecoverDigest(authDigest, claim.authSignature);
       } catch {
         recovered = ethers.ZeroAddress;
       }
-      if (!sessionKey || recovered.toLowerCase() !== sessionKey.toLowerCase()) {
-        mockRevert(`InvalidAuthorizationSignature(${authDigest}, ${recovered}, ${sessionKey ?? ethers.ZeroAddress})`);
+      if (!state.boundSessionKeys.get(claim.buyer.toLowerCase())?.has(recovered.toLowerCase())) {
+        const active = state.activeSessionKey.get(claim.buyer.toLowerCase()) ?? ethers.ZeroAddress;
+        mockRevert(`InvalidAuthorizationSignature(${authDigest}, ${recovered}, ${active})`);
       }
 
       accruals.push({ claim, authDigest, value: claim.servedUnits * claim.askPerUnitWei });
@@ -297,8 +323,13 @@ export class MockMarketplaceMethods {
       const ck = claimKey(claim.buyer, claim.epoch, identityId);
       let sellerClaim = state.sellerClaims.get(ck);
       if (!sellerClaim) {
-        sellerClaim = { claimed: 0n, qiRaw: 0n };
+        sellerClaim = { claimed: 0n, qiRaw: 0n, enrolled: false };
         state.sellerClaims.set(ck, sellerClaim);
+      }
+      // Explicit enrollment flag (not a claimed == 0 test): the claimant list
+      // push is idempotent, exactly like `MarketplaceStorage.addSellerClaim`.
+      if (!sellerClaim.enrolled) {
+        sellerClaim.enrolled = true;
         const sellers = state.bucketSellers.get(key) ?? [];
         sellers.push(identityId);
         state.bucketSellers.set(key, sellers);
@@ -313,6 +344,7 @@ export class MockMarketplaceMethods {
     this: MockChainAdapter,
     buyer: string,
     epoch: bigint,
+    maxSellers?: bigint,
   ): Promise<TxResult> {
     const state = stateFor(this);
     const currentEpoch = await this.getCurrentEpoch();
@@ -328,10 +360,23 @@ export class MockMarketplaceMethods {
       mockRevert(`BucketAlreadyFinalized(${buyer}, ${epoch})`);
     }
 
+    // Cursor pagination, exactly like the contract: `maxSellers` 0n/omitted
+    // processes all remaining claimants; otherwise the cursor advances and
+    // the bucket finalizes only when it reaches the end.
+    const sellers = state.bucketSellers.get(key) ?? [];
+    const cursor = Number(state.finalizeCursor.get(key) ?? 0n);
+    const bound = Number(maxSellers ?? 0n);
+    const end = bound === 0 || sellers.length - cursor <= bound ? sellers.length : cursor + bound;
+
     const proRata = bucket.totalClaimed > bucket.funded;
-    let totalFinalized = 0n;
-    for (const identityId of state.bucketSellers.get(key) ?? []) {
+    let pageFinalized = 0n;
+    for (const identityId of sellers.slice(cursor, end)) {
       const sellerClaim = state.sellerClaims.get(claimKey(buyer, epoch, identityId))!;
+      // Defense in depth, mirrored: a zero-claimed entry (impossible under the
+      // ZeroClaimValue guard) must never divide by zero here.
+      if (sellerClaim.claimed === 0n) {
+        continue;
+      }
       const finalizedValue = proRata
         ? (sellerClaim.claimed * bucket.funded) / bucket.totalClaimed
         : sellerClaim.claimed;
@@ -342,9 +387,13 @@ export class MockMarketplaceMethods {
       addTo(state.nodeQiScore, nodeKey(epoch, identityId), qiScore);
       addTo(state.epochTotalFinalizedValue, epoch.toString(), finalizedValue);
       addTo(state.epochTotalQiScore, epoch.toString(), qiScore);
-      totalFinalized += finalizedValue;
+      pageFinalized += finalizedValue;
     }
-    bucket.totalFinalized = totalFinalized;
+    bucket.totalFinalized += pageFinalized;
+    if (end < sellers.length) {
+      state.finalizeCursor.set(key, BigInt(end));
+      return state.txResult();
+    }
     bucket.finalized = true;
     addTo(state.openBuckets, epoch.toString(), -1n);
     return state.txResult();
@@ -383,9 +432,19 @@ export class MockMarketplaceMethods {
     const qTerm18 = totalQ > 0n
       ? (lambda18 * (state.nodeQiScore.get(nodeKey(epoch, identityId)) ?? 0n)) / totalQ
       : 0n;
-    const rewardWei = ((state.epochPool.get(epoch.toString()) ?? 0n) * (rTerm18 + qTerm18)) / SCALE18;
+    let rewardWei = ((state.epochPool.get(epoch.toString()) ?? 0n) * (rTerm18 + qTerm18)) / SCALE18;
+    // Wash-trading guard, exactly like the contract: payout ≤
+    // rewardCapMultiple·R_i (0 = uncapped); the remainder stays pooled.
+    if (state.rewardCapMultiple !== 0) {
+      const rewardCap =
+        BigInt(state.rewardCapMultiple) * (state.nodeFinalizedValue.get(nodeKey(epoch, identityId)) ?? 0n);
+      if (rewardWei > rewardCap) {
+        rewardWei = rewardCap;
+      }
+    }
 
     state.rewardClaimed.add(nodeKey(epoch, identityId));
+    addTo(state.epochRewardDistributed, epoch.toString(), rewardWei);
     addTo(state.rewardsPaidWei, this.signerAddress.toLowerCase(), rewardWei);
     return { ...state.txResult(), rewardWei };
   }
@@ -433,7 +492,11 @@ export class MockMarketplaceMethods {
     identityId: bigint,
   ): Promise<MarketplaceSellerClaim> {
     const sellerClaim = stateFor(this).sellerClaims.get(claimKey(buyer, epoch, identityId));
-    return { claimed: sellerClaim?.claimed ?? 0n, qiRaw: sellerClaim?.qiRaw ?? 0n };
+    return {
+      claimed: sellerClaim?.claimed ?? 0n,
+      qiRaw: sellerClaim?.qiRaw ?? 0n,
+      enrolled: sellerClaim?.enrolled ?? false,
+    };
   }
 
   async marketplaceGetNodeEpochAccounting(
@@ -462,7 +525,18 @@ export class MockMarketplaceMethods {
       lambdaQif18: state.lambdaQif18,
       settlementGraceSeconds: state.settlementGraceSeconds,
       softCeilingBps: state.softCeilingBps,
+      rewardCapMultiple: state.rewardCapMultiple,
     };
+  }
+
+  async marketplaceGetEpochRewardDistribution(
+    this: MockChainAdapter,
+    epoch: bigint,
+  ): Promise<MarketplaceEpochRewardDistribution> {
+    const state = stateFor(this);
+    const pool = state.epochPool.get(epoch.toString()) ?? 0n;
+    const distributed = state.epochRewardDistributed.get(epoch.toString()) ?? 0n;
+    return { pool, distributed, undistributed: pool - distributed };
   }
 
   async marketplaceSettlementDeadline(this: MockChainAdapter, epoch: bigint): Promise<bigint> {

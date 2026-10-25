@@ -24,7 +24,7 @@ contract MarketplaceStorage is INamed, IVersioned, ContractStatus, IInitializabl
     error InvalidBps(uint16 bps);
 
     string private constant _NAME = "MarketplaceStorage";
-    string private constant _VERSION = "1.0.0";
+    string private constant _VERSION = "1.1.0";
 
     uint256 private constant SCALE18 = 1e18;
 
@@ -50,6 +50,18 @@ contract MarketplaceStorage is INamed, IVersioned, ContractStatus, IInitializabl
     ///         ceiling off-chain.
     uint16 public softCeilingBps;
 
+    /// @notice Wash-trading bound: a node's epoch reward is capped at
+    ///         `rewardCapMultiple · R_i(e)` (its own finalized receipt value).
+    ///         Without it, a staked node funding its own 1-wei buckets and
+    ///         fabricating self-claims could harvest idle buyers' pooled TRAC
+    ///         through the λ-blended QIF (see the RFC's λ-calibration
+    ///         discussion: the Q term redistributes under-utilized pools
+    ///         toward stake, which is exactly what a wash trader fakes
+    ///         cheaply). Default 10; 0 = uncapped. The capped remainder stays
+    ///         in the contract — remainder handling (burn / roll / treasury)
+    ///         is a governance follow-up.
+    uint16 public rewardCapMultiple;
+
     // ============================================================
     //                 Buckets, claims, session keys
     // ============================================================
@@ -57,15 +69,23 @@ contract MarketplaceStorage is INamed, IVersioned, ContractStatus, IInitializabl
     /// @dev bucket[buyer][epoch].
     mapping(address => mapping(uint256 => MarketplaceLib.Bucket)) internal buckets;
     /// @dev Identity ids that claimed against bucket[buyer][epoch] (first
-    ///      accepted claim pushes).
+    ///      accepted claim pushes, guarded by `SellerClaim.enrolled`).
     mapping(address => mapping(uint256 => uint72[])) internal bucketSellers;
     /// @dev sellerClaims[buyer][epoch][identityId].
     mapping(address => mapping(uint256 => mapping(uint72 => MarketplaceLib.SellerClaim))) internal sellerClaims;
+    /// @notice Paginated-finalization cursor: index into
+    ///         `bucketSellers[buyer][epoch]` of the next seller to process.
+    mapping(address => mapping(uint256 => uint256)) public finalizeCursor;
 
-    /// @notice Buyer that registered a given session key (anti-hijack: a key
-    ///         can only ever belong to one buyer).
-    mapping(address => address) public sessionKeyOwner;
-    /// @notice Current authorization-signing key for a buyer.
+    /// @notice Every session key a buyer ever bound (per-buyer scope: two
+    ///         buyers binding the same key is harmless, each binding only
+    ///         authorizes that buyer's own buckets). Historic keys stay valid
+    ///         for receipt settlement so a rotation can never retroactively
+    ///         invalidate already-served receipts — authorizations are
+    ///         single-use, seller-bound and expiring, so honoring them is safe.
+    mapping(address => mapping(address => bool)) public boundSessionKeys;
+    /// @notice Current authorization-signing key for a buyer (UX/getter
+    ///         surface; settlement accepts any `boundSessionKeys` key).
     mapping(address => address) public activeSessionKey;
 
     /// @notice Replay guard: consumed authorization digests.
@@ -94,6 +114,10 @@ contract MarketplaceStorage is INamed, IVersioned, ContractStatus, IInitializabl
     mapping(uint256 => uint256) public epochTotalQiScore;
     /// @notice Epoch reward already paid out to a node.
     mapping(uint256 => mapping(uint72 => bool)) public rewardClaimed;
+    /// @notice Σ reward wei actually paid out for an epoch (QIF flooring and
+    ///         the `rewardCapMultiple` cap keep it ≤ `epochPool`; the
+    ///         remainder stays in the contract pending governance follow-up).
+    mapping(uint256 => uint256) public epochRewardDistributed;
 
     // @dev Only transactions by HubController owner or one of the owners of
     //      the MultiSig Wallet (ParametersStorage convention).
@@ -105,6 +129,7 @@ contract MarketplaceStorage is INamed, IVersioned, ContractStatus, IInitializabl
     constructor(address hubAddress) ContractStatus(hubAddress) {
         lambdaQif18 = 4e17; // 0.4
         softCeilingBps = 9_500;
+        rewardCapMultiple = 10;
         // settlementGraceSeconds defaults to epochLength/4 in initialize(),
         // once Chronos is resolvable through the Hub.
     }
@@ -151,6 +176,12 @@ contract MarketplaceStorage is INamed, IVersioned, ContractStatus, IInitializabl
         emit ParameterChanged("softCeilingBps", bps);
     }
 
+    function setRewardCapMultiple(uint16 capMultiple) external onlyOwnerOrMultiSigOwner {
+        rewardCapMultiple = capMultiple;
+
+        emit ParameterChanged("rewardCapMultiple", capMultiple);
+    }
+
     // ============================================================
     //                          Writes
     // ============================================================
@@ -160,10 +191,13 @@ contract MarketplaceStorage is INamed, IVersioned, ContractStatus, IInitializabl
     }
 
     /// @notice Registers/rotates a buyer's session key. The caller
-    ///         (`Marketplace`) enforces non-zero keys and single ownership.
+    ///         (`Marketplace`) enforces non-zero keys. The key is bound to the
+    ///         buyer permanently (`boundSessionKeys`): rotation changes the
+    ///         active key but never invalidates receipts the old key already
+    ///         authorized.
     function setSessionKey(address buyer, address sessionKey) external onlyContracts {
         activeSessionKey[buyer] = sessionKey;
-        sessionKeyOwner[sessionKey] = buyer;
+        boundSessionKeys[buyer][sessionKey] = true;
     }
 
     function markAuthConsumed(bytes32 authDigest) external onlyContracts {
@@ -171,8 +205,10 @@ contract MarketplaceStorage is INamed, IVersioned, ContractStatus, IInitializabl
     }
 
     /// @notice Accrues one accepted receipt claim: pushes the seller onto the
-    ///         bucket's claimant list on its first claim, then bumps the
-    ///         seller accumulators and the bucket's `totalClaimed`.
+    ///         bucket's claimant list on its first claim (explicit `enrolled`
+    ///         flag, so the push is idempotent regardless of claimed value),
+    ///         then bumps the seller accumulators and the bucket's
+    ///         `totalClaimed`.
     function addSellerClaim(
         address buyer,
         uint256 epoch,
@@ -181,7 +217,8 @@ contract MarketplaceStorage is INamed, IVersioned, ContractStatus, IInitializabl
         uint256 qiRaw
     ) external onlyContracts {
         MarketplaceLib.SellerClaim storage sellerClaim = sellerClaims[buyer][epoch][identityId];
-        if (sellerClaim.claimed == 0) {
+        if (!sellerClaim.enrolled) {
+            sellerClaim.enrolled = true;
             bucketSellers[buyer][epoch].push(identityId);
         }
         sellerClaim.claimed += value;
@@ -189,8 +226,21 @@ contract MarketplaceStorage is INamed, IVersioned, ContractStatus, IInitializabl
         buckets[buyer][epoch].totalClaimed += value;
     }
 
-    function setBucketFinalized(address buyer, uint256 epoch, uint256 totalFinalized) external onlyContracts {
-        buckets[buyer][epoch].totalFinalized = totalFinalized;
+    /// @notice Accrues one finalization page's value and advances the cursor
+    ///         (paginated `finalizeBucket`; the last page calls
+    ///         `setBucketFinalized` instead of this).
+    function recordFinalizeProgress(
+        address buyer,
+        uint256 epoch,
+        uint256 cursor,
+        uint256 pageFinalized
+    ) external onlyContracts {
+        finalizeCursor[buyer][epoch] = cursor;
+        buckets[buyer][epoch].totalFinalized += pageFinalized;
+    }
+
+    function setBucketFinalized(address buyer, uint256 epoch, uint256 pageFinalized) external onlyContracts {
+        buckets[buyer][epoch].totalFinalized += pageFinalized;
         buckets[buyer][epoch].finalized = true;
     }
 
@@ -228,8 +278,9 @@ contract MarketplaceStorage is INamed, IVersioned, ContractStatus, IInitializabl
         epochTotalQiScore[epoch] += qiScore;
     }
 
-    function markRewardClaimed(uint256 epoch, uint72 identityId) external onlyContracts {
+    function markRewardClaimed(uint256 epoch, uint72 identityId, uint256 rewardWei) external onlyContracts {
         rewardClaimed[epoch][identityId] = true;
+        epochRewardDistributed[epoch] += rewardWei;
     }
 
     // ============================================================
@@ -250,6 +301,16 @@ contract MarketplaceStorage is INamed, IVersioned, ContractStatus, IInitializabl
 
     function getBucketSellers(address buyer, uint256 epoch) external view returns (uint72[] memory) {
         return bucketSellers[buyer][epoch];
+    }
+
+    /// @notice Claimant-list length — lets paginated finalization size a page
+    ///         without copying the whole array.
+    function bucketSellerCount(address buyer, uint256 epoch) external view returns (uint256) {
+        return bucketSellers[buyer][epoch].length;
+    }
+
+    function bucketSellerAt(address buyer, uint256 epoch, uint256 index) external view returns (uint72) {
+        return bucketSellers[buyer][epoch][index];
     }
 
     function getEpochBuyers(uint256 epoch) external view returns (address[] memory) {

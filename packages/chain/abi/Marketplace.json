@@ -70,6 +70,22 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "ClaimsClosedForBucket",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "ECDSAInvalidSignature",
     "type": "error"
@@ -287,22 +303,6 @@
   {
     "inputs": [
       {
-        "internalType": "address",
-        "name": "sessionKey",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "owner",
-        "type": "address"
-      }
-    ],
-    "name": "SessionKeyAlreadyBound",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "uint256",
         "name": "epoch",
         "type": "uint256"
@@ -356,6 +356,17 @@
         "type": "bytes32"
       }
     ],
+    "name": "ZeroClaimValue",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "callId",
+        "type": "bytes32"
+      }
+    ],
     "name": "ZeroServedUnits",
     "type": "error"
   },
@@ -363,6 +374,37 @@
     "inputs": [],
     "name": "ZeroTokenAmount",
     "type": "error"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "processedSellers",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "totalSellers",
+        "type": "uint256"
+      }
+    ],
+    "name": "BucketFinalizeProgress",
+    "type": "event"
   },
   {
     "anonymous": false,
@@ -729,6 +771,11 @@
         "internalType": "uint256",
         "name": "epoch",
         "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "maxSellers",
+        "type": "uint256"
       }
     ],
     "name": "finalizeBucket",
@@ -811,6 +858,35 @@
         "internalType": "uint256",
         "name": "epoch",
         "type": "uint256"
+      }
+    ],
+    "name": "getEpochRewardDistribution",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "pool",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "distributed",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "undistributed",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
       },
       {
         "internalType": "uint72",
@@ -872,6 +948,11 @@
         "internalType": "uint16",
         "name": "softCeilingBps",
         "type": "uint16"
+      },
+      {
+        "internalType": "uint16",
+        "name": "rewardCapMultiple",
+        "type": "uint16"
       }
     ],
     "stateMutability": "view",
@@ -932,6 +1013,11 @@
             "internalType": "uint256",
             "name": "qiRaw",
             "type": "uint256"
+          },
+          {
+            "internalType": "bool",
+            "name": "enrolled",
+            "type": "bool"
           }
         ],
         "internalType": "struct MarketplaceLib.SellerClaim",
@@ -992,6 +1078,30 @@
     "name": "initialize",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "sessionKey",
+        "type": "address"
+      }
+    ],
+    "name": "isSessionKeyBound",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {

@@ -105,6 +105,13 @@ describe('ReceiptBatcher', () => {
     expect(batcher.drainAll()).toEqual([]);
   });
 
+  it('refuses enqueueing zero-value claims (contract ZeroClaimValue, batch atomicity)', () => {
+    const { batcher } = batcherWith();
+    expect(() => batcher.add(claim({ askPerUnitWei: 0n }))).toThrow('zero-value claim refused');
+    expect(() => batcher.add(claim({ servedUnits: 0n }))).toThrow('zero-value claim refused');
+    expect(batcher.pendingCount()).toBe(0);
+  });
+
   it('validates its policy', () => {
     expect(() => new ReceiptBatcher({ maxBatchSize: 0, maxDelayMs: 1, maxBuyerExposureWei: 0n })).toThrow(
       'maxBatchSize',

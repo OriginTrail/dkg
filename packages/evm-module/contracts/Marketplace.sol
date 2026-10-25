@@ -61,13 +61,18 @@ contract Marketplace is INamed, IVersioned, ContractStatus, IInitializable {
         uint256 totalClaimed,
         uint256 totalFinalized
     );
+    event BucketFinalizeProgress(
+        address indexed buyer,
+        uint256 indexed epoch,
+        uint256 processedSellers,
+        uint256 totalSellers
+    );
     event EpochRewardClaimed(uint256 indexed epoch, uint72 indexed identityId, address indexed operational, uint256 reward);
     event EpochPoolRolled(uint256 indexed fromEpoch, uint256 indexed toEpoch, uint256 amount);
 
     error ZeroTokenAmount();
     error InvalidSubscriptionEpoch(uint256 epoch, uint256 currentEpoch);
     error NoActiveSessionKey(address buyer);
-    error SessionKeyAlreadyBound(address sessionKey, address owner);
     error NotACoreNode(address operationalWallet);
     error EmptyReceiptBatch();
     error ReceiptBatchTooLarge(uint256 length);
@@ -76,7 +81,9 @@ contract Marketplace is INamed, IVersioned, ContractStatus, IInitializable {
     error SettlementStillOpen(uint256 epoch, uint256 deadline);
     error AuthorizationExpired(bytes32 callId, uint40 expiry);
     error ZeroServedUnits(bytes32 callId);
+    error ZeroClaimValue(bytes32 callId);
     error ServedOverMaxUnits(bytes32 callId, uint64 servedUnits, uint64 maxUnits);
+    error ClaimsClosedForBucket(address buyer, uint256 epoch);
     error AuthorizationAlreadyConsumed(bytes32 authDigest);
     error InvalidAuthorizationSignature(bytes32 authDigest, address recovered, address sessionKey);
     error BucketAlreadyFinalized(address buyer, uint256 epoch);
@@ -88,7 +95,7 @@ contract Marketplace is INamed, IVersioned, ContractStatus, IInitializable {
     error EmptyEpochPool(uint256 epoch);
 
     string private constant _NAME = "Marketplace";
-    string private constant _VERSION = "1.0.0";
+    string private constant _VERSION = "1.1.0";
 
     /// @notice Domain separator for buyer session-key authorizations. Packed
     ///         as raw ASCII (no length prefix) — MUST match the TS side
@@ -137,8 +144,12 @@ contract Marketplace is INamed, IVersioned, ContractStatus, IInitializable {
     /// @notice Funds a non-refundable period subscription for `epoch` (current
     ///         or next) and registers/rotates the buyer's session key.
     ///         `sessionKey == address(0)` keeps the current key (rejected if
-    ///         the buyer has none — the bucket would be unspendable). There is
-    ///         no withdrawal path by construction.
+    ///         the buyer has none — the bucket would be unspendable). Keys are
+    ///         bound per buyer and stay valid for settlement after a rotation
+    ///         (`boundSessionKeys`), so rotating can never retroactively
+    ///         invalidate already-served receipts; two buyers binding the same
+    ///         key is harmless, each binding only spends its own buckets.
+    ///         There is no withdrawal path by construction.
     function fundSubscription(uint96 amount, address sessionKey, uint256 epoch) external {
         if (amount == 0) {
             revert ZeroTokenAmount();
@@ -154,15 +165,9 @@ contract Marketplace is INamed, IVersioned, ContractStatus, IInitializable {
             if (ms.activeSessionKey(msg.sender) == address(0)) {
                 revert NoActiveSessionKey(msg.sender);
             }
-        } else {
-            address keyOwner = ms.sessionKeyOwner(sessionKey);
-            if (keyOwner != address(0) && keyOwner != msg.sender) {
-                revert SessionKeyAlreadyBound(sessionKey, keyOwner);
-            }
-            if (ms.activeSessionKey(msg.sender) != sessionKey) {
-                ms.setSessionKey(msg.sender, sessionKey);
-                emit SessionKeyRotated(msg.sender, sessionKey);
-            }
+        } else if (ms.activeSessionKey(msg.sender) != sessionKey) {
+            ms.setSessionKey(msg.sender, sessionKey);
+            emit SessionKeyRotated(msg.sender, sessionKey);
         }
 
         bool firstFunding = ms.getBucket(msg.sender, epoch).funded == 0;
@@ -221,8 +226,18 @@ contract Marketplace is INamed, IVersioned, ContractStatus, IInitializable {
         uint72 identityId,
         uint256 stakeFactor18
     ) internal {
-        if (ms.getBucket(claim.buyer, claim.epoch).funded == 0) {
+        MarketplaceLib.Bucket memory bucket = ms.getBucket(claim.buyer, claim.epoch);
+        if (bucket.funded == 0) {
             revert BucketNotFunded(claim.buyer, claim.epoch);
+        }
+        // A finalized bucket accepts no further claims, even if a later
+        // `settlementGraceSeconds` increase re-opens the time window — a
+        // post-finalization claim would accrue value that can never finalize.
+        // A bucket whose paginated finalization already started (cursor > 0)
+        // is closed too: a new claim would shift `totalClaimed` under the
+        // pages already finalized.
+        if (bucket.finalized || ms.finalizeCursor(claim.buyer, claim.epoch) != 0) {
+            revert ClaimsClosedForBucket(claim.buyer, claim.epoch);
         }
         uint256 deadline = settlementDeadline(claim.epoch);
         if (block.timestamp > deadline) {
@@ -236,6 +251,12 @@ contract Marketplace is INamed, IVersioned, ContractStatus, IInitializable {
         }
         if (claim.servedUnits > claim.maxUnits) {
             revert ServedOverMaxUnits(claim.callId, claim.servedUnits, claim.maxUnits);
+        }
+        // Zero-value claims are rejected (`servedUnits > 0`, so this is a zero
+        // ask): accepting one would enroll a seller whose pro-rata share
+        // divides by its claimed value at finalization.
+        if (claim.askPerUnit == 0) {
+            revert ZeroClaimValue(claim.callId);
         }
 
         bytes32 authDigest = computeAuthDigest(
@@ -253,10 +274,13 @@ contract Marketplace is INamed, IVersioned, ContractStatus, IInitializable {
         }
         ms.markAuthConsumed(authDigest);
 
-        address sessionKey = ms.activeSessionKey(claim.buyer);
+        // Any key the buyer EVER bound authorizes (not just the active one):
+        // a rotation must not strand receipts served under the previous key.
+        // Authorizations are single-use (`consumedAuth`), seller-bound and
+        // expiring, so honoring historically bound keys is safe.
         address recovered = ECDSA.recover(MessageHashUtils.toEthSignedMessageHash(authDigest), claim.authSignature);
-        if (sessionKey == address(0) || recovered != sessionKey) {
-            revert InvalidAuthorizationSignature(authDigest, recovered, sessionKey);
+        if (!ms.boundSessionKeys(claim.buyer, recovered)) {
+            revert InvalidAuthorizationSignature(authDigest, recovered, ms.activeSessionKey(claim.buyer));
         }
 
         uint256 value = uint256(claim.servedUnits) * claim.askPerUnit;
@@ -283,7 +307,13 @@ contract Marketplace is INamed, IVersioned, ContractStatus, IInitializable {
     ///         buckets pro-rate `claimed_i · funded / totalClaimed` with no
     ///         submission-order priority (floor; the residue stays in the
     ///         epoch pool and is redistributed through QIF). Permissionless.
-    function finalizeBucket(address buyer, uint256 epoch) external {
+    ///
+    ///         Paginated: `maxSellers` bounds the claimants processed in this
+    ///         call (0 = all remaining) so a bucket with more claimants than
+    ///         one block's gas can finalize across repeated calls — a stored
+    ///         cursor keeps the position, and the bucket is marked finalized
+    ///         when the cursor reaches the end of the claimant list.
+    function finalizeBucket(address buyer, uint256 epoch, uint256 maxSellers) external {
         uint256 deadline = settlementDeadline(epoch);
         if (block.timestamp <= deadline) {
             revert SettlementStillOpen(epoch, deadline);
@@ -298,31 +328,59 @@ contract Marketplace is INamed, IVersioned, ContractStatus, IInitializable {
             revert BucketAlreadyFinalized(buyer, epoch);
         }
 
-        uint72[] memory sellers = ms.getBucketSellers(buyer, epoch);
+        uint256 sellerCount = ms.bucketSellerCount(buyer, epoch);
+        uint256 cursor = ms.finalizeCursor(buyer, epoch);
+        uint256 end = maxSellers == 0 || sellerCount - cursor <= maxSellers ? sellerCount : cursor + maxSellers;
+
         bool proRata = bucket.totalClaimed > bucket.funded;
-        uint256 totalFinalized;
-        for (uint256 i; i < sellers.length; i++) {
-            MarketplaceLib.SellerClaim memory sellerClaim = ms.getSellerClaim(buyer, epoch, sellers[i]);
+        uint256 pageFinalized;
+        for (uint256 i = cursor; i < end; i++) {
+            uint72 sellerId = ms.bucketSellerAt(buyer, epoch, i);
+            MarketplaceLib.SellerClaim memory sellerClaim = ms.getSellerClaim(buyer, epoch, sellerId);
+            // Defense in depth: `_acceptClaim` rejects zero-value claims, so
+            // an enrolled seller always has `claimed > 0` — but a zero entry
+            // must never brick finalization with a division by zero.
+            if (sellerClaim.claimed == 0) {
+                continue;
+            }
             uint256 finalizedValue = proRata
                 ? (sellerClaim.claimed * bucket.funded) / bucket.totalClaimed
                 : sellerClaim.claimed;
             // Q_i accrues proportionally to the finalized share so the stake
             // factor captured at acceptance survives pro-rating.
             uint256 qiScore = (sellerClaim.qiRaw * finalizedValue) / sellerClaim.claimed;
-            ms.addNodeFinalized(epoch, sellers[i], finalizedValue, qiScore);
-            totalFinalized += finalizedValue;
+            ms.addNodeFinalized(epoch, sellerId, finalizedValue, qiScore);
+            pageFinalized += finalizedValue;
         }
 
-        ms.setBucketFinalized(buyer, epoch, totalFinalized);
+        if (end < sellerCount) {
+            ms.recordFinalizeProgress(buyer, epoch, end, pageFinalized);
+
+            emit BucketFinalizeProgress(buyer, epoch, end, sellerCount);
+            return;
+        }
+
+        ms.setBucketFinalized(buyer, epoch, pageFinalized);
         ms.decrementOpenBuckets(epoch);
 
-        emit BucketFinalized(buyer, epoch, bucket.funded, bucket.totalClaimed, totalFinalized);
+        emit BucketFinalized(buyer, epoch, bucket.funded, bucket.totalClaimed, bucket.totalFinalized + pageFinalized);
     }
 
-    /// @notice Pays a node's epoch reward `pool(e) · QIF_i(e)` to the calling
-    ///         operational wallet, once every bucket of the epoch is
-    ///         finalized. Prototype pays the gross node reward (operator-fee /
-    ///         delegator split via StakingKPI is a documented follow-up).
+    /// @notice Pays a node's epoch reward to the calling operational wallet,
+    ///         once every bucket of the epoch is finalized:
+    ///         `min(pool(e) · QIF_i(e), rewardCapMultiple · R_i(e))`.
+    ///         The cap is the wash-trading guard (see
+    ///         `MarketplaceStorage.rewardCapMultiple` and the RFC's
+    ///         λ-calibration discussion): an under-utilized pool redistributes
+    ///         through QIF toward stake, which a staked node could otherwise
+    ///         harvest by funding 1-wei buckets of its own and fabricating
+    ///         self-claims; bounding the payout to a multiple of the node's
+    ///         finalized receipt value makes that harvest proportional to
+    ///         real, paid-for usage. The capped remainder stays in the
+    ///         contract (`getEpochRewardDistribution`) — remainder handling is
+    ///         a governance follow-up. Prototype pays the gross node reward
+    ///         (operator-fee / delegator split via StakingKPI is a documented
+    ///         follow-up).
     function claimEpochReward(uint72 identityId, uint256 epoch) external {
         uint256 deadline = settlementDeadline(epoch);
         if (block.timestamp <= deadline) {
@@ -345,7 +403,14 @@ contract Marketplace is INamed, IVersioned, ContractStatus, IInitializable {
         }
 
         uint256 reward = (ms.epochPool(epoch) * getQif18(epoch, identityId)) / SCALE18;
-        ms.markRewardClaimed(epoch, identityId);
+        uint256 capMultiple = ms.rewardCapMultiple();
+        if (capMultiple != 0) {
+            uint256 rewardCap = capMultiple * ms.nodeFinalizedValue(epoch, identityId);
+            if (reward > rewardCap) {
+                reward = rewardCap;
+            }
+        }
+        ms.markRewardClaimed(epoch, identityId, reward);
 
         token.safeTransfer(msg.sender, reward);
 
@@ -496,12 +561,37 @@ contract Marketplace is INamed, IVersioned, ContractStatus, IInitializable {
         return marketplaceStorage.activeSessionKey(buyer);
     }
 
+    /// @notice Whether `sessionKey` was ever bound by `buyer`. Bound keys stay
+    ///         valid for settlement after a rotation.
+    function isSessionKeyBound(address buyer, address sessionKey) external view returns (bool) {
+        return marketplaceStorage.boundSessionKeys(buyer, sessionKey);
+    }
+
+    /// @notice Reward wei paid out so far for `epoch` and the remainder still
+    ///         sitting in the contract. `undistributed` is final only once
+    ///         every node claimed (or abstained past interest); the remainder
+    ///         is NOT redistributed for now — handling it (burn / roll /
+    ///         treasury) is a governance follow-up.
+    function getEpochRewardDistribution(
+        uint256 epoch
+    ) external view returns (uint256 pool, uint256 distributed, uint256 undistributed) {
+        MarketplaceStorage ms = marketplaceStorage;
+        pool = ms.epochPool(epoch);
+        distributed = ms.epochRewardDistributed(epoch);
+        undistributed = pool - distributed;
+    }
+
     function getParams()
         external
         view
-        returns (uint256 lambdaQif18, uint256 settlementGraceSeconds, uint16 softCeilingBps)
+        returns (
+            uint256 lambdaQif18,
+            uint256 settlementGraceSeconds,
+            uint16 softCeilingBps,
+            uint16 rewardCapMultiple
+        )
     {
         MarketplaceStorage ms = marketplaceStorage;
-        return (ms.lambdaQif18(), ms.settlementGraceSeconds(), ms.softCeilingBps());
+        return (ms.lambdaQif18(), ms.settlementGraceSeconds(), ms.softCeilingBps(), ms.rewardCapMultiple());
     }
 }

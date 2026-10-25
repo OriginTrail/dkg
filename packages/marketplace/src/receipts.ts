@@ -26,6 +26,7 @@ export async function buildReceipt(args: {
   signer: Eip191Signer;
 }): Promise<QueryInferenceReceipt> {
   if (args.servedUnits <= 0n) throw new Error(`servedUnits must be positive, got: ${args.servedUnits}`);
+  if (args.askPerUnitWei <= 0n) throw new Error(`askPerUnitWei must be positive, got: ${args.askPerUnitWei}`);
   const receiptValueWei = args.servedUnits * args.askPerUnitWei;
   const resultCommitment = resultCommitmentFor(args.resultBytes);
   const receiptDigest = computeReceiptDigest({
@@ -71,6 +72,11 @@ export function verifyReceiptAgainstAuthorization(
   if (receipt.receiptValueWei !== expectedValueWei) {
     errors.push(`receiptValueWei ${receipt.receiptValueWei} != servedUnits * askPerUnitWei ${expectedValueWei}`);
   }
+  // Defense in depth: the contract rejects zero-value claims (ZeroClaimValue),
+  // so a zero-value receipt can never settle — fail it at verification.
+  if (receipt.receiptValueWei <= 0n) {
+    errors.push(`receiptValueWei must be positive, got: ${receipt.receiptValueWei}`);
+  }
   if (options.resultBytes && resultCommitmentFor(options.resultBytes) !== receipt.resultCommitment) {
     errors.push('resultCommitment does not match the delivered result bytes');
   }
@@ -96,6 +102,12 @@ export function receiptToClaimInput(
 ): ReceiptClaimInput {
   if (receipt.authDigest !== authorization.authDigest) {
     throw new Error('receipt does not settle this authorization');
+  }
+  // The contract rejects zero-value claims (ZeroClaimValue); never build one.
+  if (receipt.servedUnits * authorization.askPerUnitWei <= 0n) {
+    throw new Error(
+      `claim value must be positive: servedUnits ${receipt.servedUnits} × askPerUnitWei ${authorization.askPerUnitWei}`,
+    );
   }
   return {
     buyer: authorization.buyer,

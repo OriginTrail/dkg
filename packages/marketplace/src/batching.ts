@@ -55,9 +55,18 @@ export class ReceiptBatcher {
   }
 
   add(claim: ReceiptClaimInput): void {
+    const valueWei = claim.servedUnits * claim.askPerUnitWei;
+    // Defense in depth: the contract rejects zero-value claims
+    // (ZeroClaimValue) and one bad claim voids its WHOLE batch on-chain, so a
+    // zero-value claim must never ride along with honest receipts.
+    if (valueWei <= 0n) {
+      throw new Error(
+        `zero-value claim refused (callId ${claim.callId}): servedUnits ${claim.servedUnits} × askPerUnitWei ${claim.askPerUnitWei}`,
+      );
+    }
     const key = claim.epoch.toString();
     const entries = this.#pending.get(key) ?? [];
-    entries.push({ claim, addedAtMs: this.#now(), valueWei: claim.servedUnits * claim.askPerUnitWei });
+    entries.push({ claim, addedAtMs: this.#now(), valueWei });
     this.#pending.set(key, entries);
   }
 

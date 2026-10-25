@@ -49,6 +49,8 @@ export interface MarketplaceSellerClaim {
   claimed: bigint;
   /** Σ claimValue·S18/1e18 with the stake factor captured at acceptance. */
   qiRaw: bigint;
+  /** Explicit bucket-claimant membership (set on the first accepted claim). */
+  enrolled: boolean;
 }
 
 /** Mirrors the `getNodeEpochAccounting(epoch, identityId)` tuple. */
@@ -75,6 +77,19 @@ export interface MarketplaceParams {
   settlementGraceSeconds: bigint;
   /** Node-side serve guidance (stored for discoverability, not enforced). */
   softCeilingBps: number;
+  /**
+   * Wash-trading guard: epoch rewards are capped at
+   * `rewardCapMultiple · R_i(e)` (default 10, 0 = uncapped).
+   */
+  rewardCapMultiple: number;
+}
+
+/** Mirrors `getEpochRewardDistribution(epoch)` (all wei). */
+export interface MarketplaceEpochRewardDistribution {
+  pool: bigint;
+  distributed: bigint;
+  /** `pool − distributed`; stays in the contract (governance follow-up). */
+  undistributed: bigint;
 }
 
 /** `claimEpochReward` result carrying the paid amount from `EpochRewardClaimed`. */
@@ -124,12 +139,18 @@ export interface ChainAdapterMarketplace {
    */
   marketplaceSubmitReceiptBatch?(claims: ReceiptClaimInput[]): Promise<TxResult>;
 
-  /** Finalize a (buyer, epoch) bucket after the settlement deadline. Permissionless. */
-  marketplaceFinalizeBucket?(buyer: string, epoch: bigint): Promise<TxResult>;
+  /**
+   * Finalize a (buyer, epoch) bucket after the settlement deadline.
+   * Permissionless and paginated: `maxSellers` bounds the claimants processed
+   * per call (omitted or 0n = all remaining); a stored cursor lets repeated
+   * calls finish a bucket too large for one block.
+   */
+  marketplaceFinalizeBucket?(buyer: string, epoch: bigint, maxSellers?: bigint): Promise<TxResult>;
 
   /**
-   * Claim the node's epoch reward `pool(e) · QIF_i(e)`; paid to the calling
-   * operational wallet once every bucket of the epoch is finalized.
+   * Claim the node's epoch reward `min(pool(e) · QIF_i(e),
+   * rewardCapMultiple · R_i(e))`; paid to the calling operational wallet once
+   * every bucket of the epoch is finalized.
    */
   marketplaceClaimEpochReward?(identityId: bigint, epoch: bigint): Promise<MarketplaceClaimEpochRewardResult>;
 
@@ -146,6 +167,9 @@ export interface ChainAdapterMarketplace {
   marketplaceGetActiveSessionKey?(buyer: string): Promise<string>;
 
   marketplaceGetParams?(): Promise<MarketplaceParams>;
+
+  /** Paid-out vs remaining reward wei for an epoch (reward-cap remainder). */
+  marketplaceGetEpochRewardDistribution?(epoch: bigint): Promise<MarketplaceEpochRewardDistribution>;
 
   /**
    * Receipts for `epoch` are accepted until this unix timestamp (inclusive);

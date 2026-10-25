@@ -64,6 +64,10 @@ export interface SellerFinalizedValue {
  * exceed the funded bucket every claimant is pro-rated WITHOUT
  * submission-order priority: `finalized_i = floor(claimed_i * funded /
  * totalClaimed)`; the flooring residue stays in the epoch pool.
+ *
+ * Sellers with `claimedWei == 0` are SKIPPED (omitted from the result),
+ * exactly like the contract's defensive `claimed == 0` guard — a zero entry
+ * accrues nothing on-chain and must never divide finalization by zero.
  */
 export function proRataFinalize(
   fundedWei: bigint,
@@ -75,11 +79,13 @@ export function proRataFinalize(
     if (claim.claimedWei < 0n) throw new Error(`claimedWei must be non-negative, got: ${claim.claimedWei}`);
     totalClaimed += claim.claimedWei;
   }
-  return claims.map((claim) => ({
-    identityId: claim.identityId,
-    finalizedWei:
-      totalClaimed <= fundedWei ? claim.claimedWei : (claim.claimedWei * fundedWei) / totalClaimed,
-  }));
+  return claims
+    .filter((claim) => claim.claimedWei > 0n)
+    .map((claim) => ({
+      identityId: claim.identityId,
+      finalizedWei:
+        totalClaimed <= fundedWei ? claim.claimedWei : (claim.claimedWei * fundedWei) / totalClaimed,
+    }));
 }
 
 interface Reservation {

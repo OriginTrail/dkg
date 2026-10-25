@@ -22,6 +22,7 @@ import type { TxResult } from './chain-adapter.js';
 import type {
   MarketplaceBucket,
   MarketplaceClaimEpochRewardResult,
+  MarketplaceEpochRewardDistribution,
   MarketplaceFundSubscriptionParams,
   MarketplaceNodeEpochAccounting,
   MarketplaceParams,
@@ -126,12 +127,13 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
     return marketplaceTxResult(receipt);
   }
 
-  async marketplaceFinalizeBucket(buyer: string, epoch: bigint): Promise<TxResult> {
+  async marketplaceFinalizeBucket(buyer: string, epoch: bigint, maxSellers?: bigint): Promise<TxResult> {
     await this.init();
     const receipt = await this.sendContractTransaction(
       this.requireMarketplace(),
       'finalizeBucket',
-      [buyer, epoch],
+      // 0n = all remaining claimants; a bound makes the call paginated.
+      [buyer, epoch, maxSellers ?? 0n],
       this.signer,
       'marketplace finalizeBucket',
     );
@@ -198,6 +200,7 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
     return {
       claimed: BigInt(raw.claimed ?? raw[0]),
       qiRaw: BigInt(raw.qiRaw ?? raw[1]),
+      enrolled: Boolean(raw.enrolled ?? raw[2]),
     };
   }
 
@@ -232,6 +235,19 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
       lambdaQif18: BigInt(raw.lambdaQif18 ?? raw[0]),
       settlementGraceSeconds: BigInt(raw.settlementGraceSeconds ?? raw[1]),
       softCeilingBps: Number(raw.softCeilingBps ?? raw[2]),
+      rewardCapMultiple: Number(raw.rewardCapMultiple ?? raw[3]),
+    };
+  }
+
+  async marketplaceGetEpochRewardDistribution(epoch: bigint): Promise<MarketplaceEpochRewardDistribution> {
+    await this.init();
+    const raw = await this.readContract(
+      this.requireMarketplace(), 'marketplace.getEpochRewardDistribution', 'getEpochRewardDistribution', epoch,
+    );
+    return {
+      pool: BigInt(raw.pool ?? raw[0]),
+      distributed: BigInt(raw.distributed ?? raw[1]),
+      undistributed: BigInt(raw.undistributed ?? raw[2]),
     };
   }
 

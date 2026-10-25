@@ -19,9 +19,14 @@ library MarketplaceLib {
     /// @notice Per-(buyer, epoch, seller identity) claim accumulator.
     ///         `qiRaw` is Σ claimValue·S18/1e18 with the stake factor S18
     ///         captured at receipt-batch acceptance (NOT at finalization).
+    ///         `enrolled` is the explicit bucketSellers membership flag: the
+    ///         identity is pushed exactly once, on its first accepted claim
+    ///         (a `claimed == 0` membership test would re-push on repeated
+    ///         zero-value claims and multiply the seller's finalized share).
     struct SellerClaim {
         uint256 claimed;
         uint256 qiRaw;
+        bool enrolled;
     }
 
     /// @notice One buyer-authorized receipt claim, as submitted on-chain by a

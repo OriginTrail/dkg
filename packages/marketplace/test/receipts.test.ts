@@ -59,6 +59,19 @@ describe('buildReceipt', () => {
       }),
     ).rejects.toThrow('must be positive');
   });
+
+  it('refuses a zero ask — the contract rejects zero-value claims (ZeroClaimValue)', async () => {
+    const { authorization } = await fixture();
+    await expect(
+      buildReceipt({
+        authDigest: authorization.authDigest,
+        servedUnits: 640n,
+        askPerUnitWei: 0n,
+        resultBytes: RESULT_BYTES,
+        signer: SELLER_WALLET,
+      }),
+    ).rejects.toThrow('askPerUnitWei must be positive');
+  });
 });
 
 describe('verifyReceiptAgainstAuthorization', () => {
@@ -139,6 +152,25 @@ describe('verifyReceiptAgainstAuthorization', () => {
     expect(result.errors.join('\n')).toContain('authorization digest mismatch');
   });
 
+  it('flags a zero-value receipt even when its value math is self-consistent', async () => {
+    // A zero-ask authorization makes servedUnits · ask = 0 "exact", but the
+    // contract would reject the claim (ZeroClaimValue) — verification must too.
+    const zeroAskFields = { ...FIELDS, askPerUnitWei: 0n };
+    const authorization = await signAuthorization(createSessionKey(() => 0), zeroAskFields);
+    const receipt: QueryInferenceReceipt = {
+      authDigest: authorization.authDigest,
+      servedUnits: 640n,
+      receiptValueWei: 0n,
+      resultCommitment: resultCommitmentFor(RESULT_BYTES),
+      sellerSig: '0x1234',
+    };
+    const result = verifyReceiptAgainstAuthorization(receipt, authorization, {
+      sellerAddress: SELLER_WALLET.address,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.errors.join('\n')).toContain('receiptValueWei must be positive');
+  });
+
   it('reports an unverifiable signature instead of throwing', async () => {
     const { authorization, receipt } = await fixture();
     const broken = { ...receipt, sellerSig: '0x1234' };
@@ -171,5 +203,18 @@ describe('receiptToClaimInput', () => {
     const { authorization, receipt } = await fixture();
     const foreign = { ...receipt, authDigest: '0x' + 'dd'.repeat(32) };
     expect(() => receiptToClaimInput(authorization, foreign)).toThrow('does not settle');
+  });
+
+  it('refuses assembling a zero-value claim (would revert on-chain, voiding its batch)', async () => {
+    const zeroAskFields = { ...FIELDS, askPerUnitWei: 0n };
+    const authorization = await signAuthorization(createSessionKey(() => 0), zeroAskFields);
+    const receipt: QueryInferenceReceipt = {
+      authDigest: authorization.authDigest,
+      servedUnits: 640n,
+      receiptValueWei: 0n,
+      resultCommitment: resultCommitmentFor(RESULT_BYTES),
+      sellerSig: '0x1234',
+    };
+    expect(() => receiptToClaimInput(authorization, receipt)).toThrow('claim value must be positive');
   });
 });

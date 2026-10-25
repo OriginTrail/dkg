@@ -134,6 +134,28 @@ describe('proRataFinalize (mirror of Marketplace.finalizeBucket)', () => {
     );
   });
 
+  it('skips claimed == 0 sellers exactly like the contract', () => {
+    // A zero-claimed entry accrues nothing on-chain (finalizeBucket
+    // `continue`s past it) — the mirror omits it rather than emitting a 0.
+    expect(
+      proRataFinalize(10n, [
+        { identityId: 1n, claimedWei: 0n },
+        { identityId: 2n, claimedWei: 4n },
+      ]),
+    ).toEqual([{ identityId: 2n, finalizedWei: 4n }]);
+    // Pro-rata path: the zero entry contributes nothing to totalClaimed either.
+    expect(
+      proRataFinalize(10n, [
+        { identityId: 1n, claimedWei: 0n },
+        { identityId: 2n, claimedWei: 15n },
+        { identityId: 3n, claimedWei: 5n },
+      ]),
+    ).toEqual([
+      { identityId: 2n, finalizedWei: 7n }, // floor(150 / 20)
+      { identityId: 3n, finalizedWei: 2n }, // floor(50 / 20)
+    ]);
+  });
+
   it('validates inputs', () => {
     expect(() => proRataFinalize(-1n, [])).toThrow('non-negative');
     expect(() => proRataFinalize(1n, [{ identityId: 1n, claimedWei: -1n }])).toThrow('non-negative');

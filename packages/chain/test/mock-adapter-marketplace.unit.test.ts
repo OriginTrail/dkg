@@ -109,6 +109,7 @@ describe('MockChainAdapter marketplace — capability + funding', () => {
     expect(params.lambdaQif18).toBe(400_000_000_000_000_000n);
     expect(params.settlementGraceSeconds).toBe(900n);
     expect(params.softCeilingBps).toBe(9500);
+    expect(params.rewardCapMultiple).toBe(10);
     // Chronos mirror: timestampForEpoch(epoch + 1) + grace over the 3600s mock schedule.
     await expect(h.buyer.marketplaceSettlementDeadline(1n)).resolves.toBe(3600n + 900n);
     // Unknown lookups answer Solidity's zero-init shapes.
@@ -141,18 +142,39 @@ describe('MockChainAdapter marketplace — capability + funding', () => {
     // Only current or current+1 epochs accept funding.
     await expect(fund(h, TRAC, 3n)).rejects.toThrow('InvalidSubscriptionEpoch');
     await expect(fund(h, TRAC, 2n)).resolves.toMatchObject({ success: true });
-    // A session key bound to one buyer cannot be hijacked by another.
+    // Bindings are per-buyer: another buyer binding the same session key is
+    // harmless (no global squatting surface) and both bindings work.
     const otherBuyer = new MockChainAdapter('mock:31337', sellerBWallet.address);
     otherBuyer.__attachMarketplaceState(h.state);
     await expect(otherBuyer.marketplaceFundSubscription({
       amountWei: TRAC, sessionKey: sessionWallet.address, epoch: 1n,
-    })).rejects.toThrow('SessionKeyAlreadyBound');
+    })).resolves.toMatchObject({ success: true });
+    await expect(otherBuyer.marketplaceGetActiveSessionKey(sellerBWallet.address))
+      .resolves.toBe(sessionWallet.address);
+    await expect(h.buyer.marketplaceGetActiveSessionKey(buyerWallet.address))
+      .resolves.toBe(sessionWallet.address);
+  });
+
+  it('zero-ask claims are rejected and never enroll the seller', async () => {
+    const h = createHarness();
+    await fund(h, TRAC);
+    const zeroAsk = await authorizedClaim(h, { sellerIdentityId: 7n, servedUnits: 5n, askPerUnitWei: 0n });
+    await expect(h.sellerA.marketplaceSubmitReceiptBatch([zeroAsk])).rejects.toThrow('ZeroClaimValue');
+    const sellerClaim = await h.sellerA.marketplaceGetSellerClaim(buyerWallet.address, 1n, 7n);
+    expect(sellerClaim).toEqual({ claimed: 0n, qiRaw: 0n, enrolled: false });
+    // The bucket still finalizes (nothing was enrolled with zero value).
+    h.sellerA.__advanceEpoch();
+    await expect(h.sellerA.marketplaceFinalizeBucket(buyerWallet.address, 1n))
+      .resolves.toMatchObject({ success: true });
   });
 });
 
 describe('MockChainAdapter marketplace — receipt batches', () => {
   it('settles the full fund → claim → finalize → reward happy path', async () => {
     const h = createHarness();
+    // Uncapped path (rewardCapMultiple = 0): identical to pre-cap behavior —
+    // the sole claimant's QIF reward sweeps the whole pool.
+    h.state.rewardCapMultiple = 0;
     await fund(h, 10n * TRAC);
     const ask = 500_000_000_000n; // 0.5 µTRAC per token-unit, the devnet ask
     const claims = [
@@ -165,6 +187,7 @@ describe('MockChainAdapter marketplace — receipt batches', () => {
     const sellerClaim = await h.sellerA.marketplaceGetSellerClaim(buyerWallet.address, 1n, 7n);
     expect(sellerClaim.claimed).toBe(expectedValue);
     expect(sellerClaim.qiRaw).toBe(expectedValue); // default S18 = 1e18
+    expect(sellerClaim.enrolled).toBe(true);
     expect((await h.buyer.marketplaceGetBucket(buyerWallet.address, 1n)).totalClaimed).toBe(expectedValue);
 
     // Settlement opens once the epoch counter passes the bucket's epoch.
@@ -251,24 +274,33 @@ describe('MockChainAdapter marketplace — receipt batches', () => {
     await expect(h.sellerA.marketplaceSubmitReceiptBatch([])).rejects.toThrow('EmptyReceiptBatch');
   });
 
-  it('closes the settlement window and honors session key rotation', async () => {
+  it('closes the settlement window; rotation keeps historically bound keys settling', async () => {
     const h = createHarness();
     await fund(h, TRAC);
-    // Rotate the session key (funding epoch 2 = current+1 keeps epoch 1 funded).
+    // Rotate the session key: the active key changes, but the retired key
+    // stays in the buyer's bound set.
     await h.buyer.marketplaceFundSubscription({
       amountWei: TRAC, sessionKey: otherSessionWallet.address, epoch: 1n,
     });
     await expect(h.buyer.marketplaceGetActiveSessionKey(buyerWallet.address))
       .resolves.toBe(otherSessionWallet.address);
-    // Authorizations signed by the retired key are rejected...
+    // Authorizations signed by the retired key STILL settle (the buyer cannot
+    // consume service and then rotate to stiff the seller)...
     const oldKey = await authorizedClaim(h, { sellerIdentityId: 7n, servedUnits: 5n, askPerUnitWei: 100n });
     await expect(h.sellerA.marketplaceSubmitReceiptBatch([oldKey]))
-      .rejects.toThrow('InvalidAuthorizationSignature');
-    // ...and the rotated key authorizes.
+      .resolves.toMatchObject({ success: true });
+    // ...the rotated key authorizes too...
     const newKey = await authorizedClaim(h, {
       sellerIdentityId: 7n, servedUnits: 5n, askPerUnitWei: 100n, signer: otherSessionWallet,
     });
     await h.sellerA.marketplaceSubmitReceiptBatch([newKey]);
+    // ...and a key the buyer never bound is rejected.
+    const strangerWallet = new ethers.Wallet('0x' + '26'.repeat(32));
+    const neverBound = await authorizedClaim(h, {
+      sellerIdentityId: 7n, servedUnits: 5n, askPerUnitWei: 100n, signer: strangerWallet,
+    });
+    await expect(h.sellerA.marketplaceSubmitReceiptBatch([neverBound]))
+      .rejects.toThrow('InvalidAuthorizationSignature');
 
     // Past the epoch, receipts for it are no longer accepted.
     h.sellerA.__advanceEpoch();
@@ -276,6 +308,28 @@ describe('MockChainAdapter marketplace — receipt batches', () => {
       sellerIdentityId: 7n, servedUnits: 2n, askPerUnitWei: 100n, signer: otherSessionWallet,
     });
     await expect(h.sellerA.marketplaceSubmitReceiptBatch([late])).rejects.toThrow('SettlementClosed');
+  });
+
+  it('a finalized bucket accepts no claims and enrollment stays single-entry', async () => {
+    const h = createHarness();
+    await fund(h, TRAC);
+    // Several claims from one seller: one membership entry, every value accrued.
+    for (const servedUnits of [3n, 4n]) {
+      await h.sellerA.marketplaceSubmitReceiptBatch([
+        await authorizedClaim(h, { sellerIdentityId: 7n, servedUnits, askPerUnitWei: 100n }),
+      ]);
+    }
+    expect(h.state.bucketSellers.get(`${buyerWallet.address.toLowerCase()}|1`)).toEqual([7n]);
+
+    h.sellerA.__advanceEpoch();
+    await h.sellerA.marketplaceFinalizeBucket(buyerWallet.address, 1n);
+    // The seller is credited exactly once: 700, not a multiple of it.
+    expect((await h.sellerA.marketplaceGetNodeEpochAccounting(1n, 7n)).finalizedValue).toBe(700n);
+
+    // Claims against the finalized bucket are rejected ahead of the window
+    // check (mirrors ClaimsClosedForBucket ordering in `_acceptClaim`).
+    const late = await authorizedClaim(h, { sellerIdentityId: 7n, servedUnits: 1n, askPerUnitWei: 100n });
+    await expect(h.sellerA.marketplaceSubmitReceiptBatch([late])).rejects.toThrow('ClaimsClosedForBucket');
   });
 });
 
@@ -308,6 +362,63 @@ describe('MockChainAdapter marketplace — finalization, QIF rewards, rollover',
     const qifA = ((SCALE18 - lambda) * 538n) / 999n + (lambda * 538n) / 999n;
     const { rewardWei } = await h.sellerA.marketplaceClaimEpochReward(7n, 1n);
     expect(rewardWei).toBe((1000n * qifA) / SCALE18);
+  });
+
+  it('paginated finalization (maxSellers cursor) equals the one-shot sweep', async () => {
+    const run = async (maxSellers?: bigint) => {
+      const h = createHarness();
+      await fund(h, 1000n);
+      await h.sellerA.marketplaceSubmitReceiptBatch([
+        await authorizedClaim(h, { sellerIdentityId: 7n, servedUnits: 7n, askPerUnitWei: 100n }),
+      ]);
+      await h.sellerB.marketplaceSubmitReceiptBatch([
+        await authorizedClaim(h, { sellerIdentityId: 8n, servedUnits: 6n, askPerUnitWei: 100n }),
+      ]);
+      h.sellerA.__advanceEpoch();
+      if (maxSellers === undefined) {
+        await h.sellerA.marketplaceFinalizeBucket(buyerWallet.address, 1n);
+      } else {
+        // One claimant per call: the first page leaves the bucket open...
+        await h.sellerA.marketplaceFinalizeBucket(buyerWallet.address, 1n, maxSellers);
+        expect((await h.sellerA.marketplaceGetBucket(buyerWallet.address, 1n)).finalized).toBe(false);
+        await expect(h.sellerA.marketplaceClaimEpochReward(7n, 1n)).rejects.toThrow('OpenBucketsRemaining');
+        // ...and the second page closes it.
+        await h.sellerA.marketplaceFinalizeBucket(buyerWallet.address, 1n, maxSellers);
+      }
+      return {
+        bucket: await h.sellerA.marketplaceGetBucket(buyerWallet.address, 1n),
+        acctA: await h.sellerA.marketplaceGetNodeEpochAccounting(1n, 7n),
+        acctB: await h.sellerB.marketplaceGetNodeEpochAccounting(1n, 8n),
+      };
+    };
+
+    const oneShot = await run();
+    const paginated = await run(1n);
+    expect(paginated.bucket).toEqual(oneShot.bucket);
+    expect(paginated.acctA).toEqual(oneShot.acctA);
+    expect(paginated.acctB).toEqual(oneShot.acctB);
+    expect(oneShot.bucket.finalized).toBe(true);
+  });
+
+  it('caps the epoch reward at rewardCapMultiple·R_i and reports the remainder', async () => {
+    const h = createHarness();
+    await fund(h, 10n * TRAC);
+    // Tiny finalized value in a big pool: uncapped QIF would sweep the pool.
+    await h.sellerA.marketplaceSubmitReceiptBatch([
+      await authorizedClaim(h, { sellerIdentityId: 7n, servedUnits: 5n, askPerUnitWei: 100n }),
+    ]);
+    h.sellerA.__advanceEpoch();
+    await h.sellerA.marketplaceFinalizeBucket(buyerWallet.address, 1n);
+
+    // Default cap multiple 10 → payout = 10 · 500 wei, not 10 TRAC.
+    const { rewardWei } = await h.sellerA.marketplaceClaimEpochReward(7n, 1n);
+    expect(rewardWei).toBe(5000n);
+    expect(h.state.rewardsPaidWei.get(sellerAWallet.address.toLowerCase())).toBe(5000n);
+    await expect(h.sellerA.marketplaceGetEpochRewardDistribution(1n)).resolves.toEqual({
+      pool: 10n * TRAC,
+      distributed: 5000n,
+      undistributed: 10n * TRAC - 5000n,
+    });
   });
 
   it('blends rewards by λ and the per-identity stake factor', async () => {
@@ -408,6 +519,7 @@ describe('NoChainAdapter marketplace stubs', () => {
     await expect(none.marketplaceGetNodeEpochAccounting(1n, 1n)).rejects.toThrow('No blockchain configured');
     await expect(none.marketplaceGetActiveSessionKey(buyerWallet.address)).rejects.toThrow('No blockchain configured');
     await expect(none.marketplaceGetParams()).rejects.toThrow('No blockchain configured');
+    await expect(none.marketplaceGetEpochRewardDistribution(1n)).rejects.toThrow('No blockchain configured');
     await expect(none.marketplaceSettlementDeadline(1n)).rejects.toThrow('No blockchain configured');
   });
 });
