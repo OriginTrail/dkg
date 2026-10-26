@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 import { TripleStoreAsyncLiftPublisher } from '../src/index.js';
 import { LiftJobStoreSelectors } from '../src/lift-job-store-selectors.js';
 import { LiftLegacyScanMemo } from '../src/lift-legacy-scan-memo.js';
-import type { LiftJob, PersistedLiftJob } from '../src/lift-job.js';
+import type { LiftJob, PersistedLiftJob, RawLiftRequest } from '../src/lift-job.js';
 import {
   CONTROL_LIFECYCLE_KEY,
   CONTROL_PAYLOAD,
@@ -15,6 +16,7 @@ import {
   serializeJob,
 } from '../src/async-lift-control-plane.js';
 import { KA_VM_VALIDATION, kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
+import { seedLegacyRawLiftTestJob } from './_helpers/legacy-raw-lift.js';
 
 // OT-RFC-73 P7 (S2) - the publisher's admission lookup is bounded by the lifecycle key once no LEGACY un-indexed VM-publish row can exist.
 // `findActiveVmPublish` used to UNION the key-bound index branch with a branch that joins status and payload of EVERY retained job
@@ -23,6 +25,13 @@ import { KA_VM_VALIDATION, kaVmPublishRequest } from '../../../scripts/testing/k
 const FIND_ACTIVE = 'publisher.asyncLift.findActiveVmPublish';
 const BACKFILL = 'publisher.asyncLift.ensureVmPublishIntentIndex';
 const SEPARATOR = String.fromCharCode(0x1f);
+
+const rawLiftRequest = (): RawLiftRequest => ({
+  swmId: 'swm-1', namespace: 'default', contextGraphId: 'music-social', shareOperationId: 'share-op-1', roots: [],
+  contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION, kaUal: 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/7',
+  assertionVersion: '1', publicTripleCount: 2, privateTripleCount: 0, scope: 'full', transitionType: 'CREATE',
+  authority: { type: 'owner', proofRef: 'proof:owner:1' },
+});
 
 interface RecordedQuery { readonly source?: string; readonly sparql: string; readonly payloads: number }
 
@@ -175,6 +184,18 @@ describe('bounded VM-publish admission lookup', () => {
       expect(await p.enqueueKnowledgeAssetVmPublish(request('songs'))).toBe(id);
       expect(unions()).toEqual([true, false]);
       expect(await p.ensureVmPublishIntentIndex()).toBe(1);                 // still un-indexable, still counted: the backfill's count is unchanged
+    });
+
+    it('a legacy RAW-LIFT row (restorePersistedLegacyRawLiftJob can leave one in a mainnet queue) is returned by the scan but is no VM-publish job, so it does not keep the scan on', async () => {
+      const rawId = await seedLegacyRawLiftTestJob(store, rawLiftRequest(), { idGenerator: () => 'raw-1', now: () => 500 });
+      const p = publisher();
+      const id = await p.enqueueKnowledgeAssetVmPublish(request('albums'));
+      expect(findActive()[0]!.payloads).toBe(1);                            // the scan really transferred the raw-lift row ...
+      expect(await p.enqueueKnowledgeAssetVmPublish(request('albums'))).toBe(id);
+      expect(await p.enqueueKnowledgeAssetVmPublish(request('songs'))).not.toBe(id);
+      expect(unions()).toEqual([true, false, false]);                       // ... and one scan was still enough: admission does not scan forever
+      expect(await p.getStatus(rawId)).toMatchObject({ jobId: rawId, status: 'accepted' });
+      expect(await p.ensureVmPublishIntentIndex()).toBe(0);                 // the backfill leaves raw-lift rows alone, as before
     });
 
     it('a failed scan learns nothing: the next admission scans again', async () => {

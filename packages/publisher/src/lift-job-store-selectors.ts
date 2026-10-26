@@ -66,6 +66,11 @@ export class LiftJobStoreSelectors {
    * process-wide memo (`LiftLegacyScanMemo`), and later admissions of any publisher instance over
    * this store send only the indexed branch. A restart scans once more. `options.legacyUnindexedScan`
    * forces either form (tests, diagnostics) and leaves the memo alone.
+   *
+   * Accepted narrowing (P7's own, beyond the share-side D1/D2/D4 of plan D-5): a legacy un-indexed
+   * VM-publish row that appears AFTER the memo has cleared is not seen until the next boot
+   * backfill (`ensureVmPublishIntentIndex`) or restart. Nothing writes such a row any more, and
+   * every node owns its store, so it does not arise in practice.
    */
   async vmPublishAdmissionCandidates(
     lifecycleKey: string,
@@ -105,6 +110,9 @@ export class LiftJobStoreSelectors {
     // A legacy row counts against clearing the memo only when it has a lifecycle key: a keyless one
     // (a pre-guard admission whose name carries U+001F, which the backfill cannot index either)
     // drops out of every group, so it can never change an admission decision.
+    // Corruption-only edge: such a row carrying the payload jobId of an indexed job on ANOTHER subject
+    // (one jobId on two subjects = corrupted data) replaced that job in the map above before P7, but
+    // once the memo has cleared it is never read, so the indexed job now stays: a different decision.
     let keyedLegacyRows = 0;
     for (const row of rows) {
       if (row['indexed'] !== undefined) continue;

@@ -52,7 +52,7 @@ describe('#1828 async lift intent lookup', () => {
   // OT-RFC-73 P7: admission clears its legacy un-indexed scan per process and store. A test that seeds a
   // legacy row after some publisher admitted a job on this store models a queue that already held that row
   // when the process started, so it forgets what those admissions learned.
-  const restartProcess = (): void => new LiftLegacyScanMemo(store, DEFAULT_CONTROL_GRAPH_URI).forget();
+  const restartProcess = (): void => new LiftLegacyScanMemo(store, DEFAULT_CONTROL_GRAPH_URI).forgetForTesting();
 
   // The facts a recovering client retains (never the jobId or intentKey).
   const facts = { contextGraphId: 'music-social', name: 'albums' };

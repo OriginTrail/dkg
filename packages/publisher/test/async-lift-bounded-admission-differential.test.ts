@@ -154,7 +154,7 @@ it('the bounded admission lookup and the unindexed-only backfill decide exactly 
   templates.held = await scratch(async (publisher, jobId) => {
     await claimAndValidate(publisher, jobId);
     await publisher.update(jobId, 'broadcast', { broadcast: KA_VM_BROADCAST_TX });
-    await publisher.update(jobId, 'included', { broadcast: KA_VM_BROADCAST_TX, inclusion: KA_VM_INCLUSION });
+    await publisher.update(jobId, 'included', { broadcast: KA_VM_BROADCAST_TX, inclusion: { ...KA_VM_INCLUSION, txHash: KA_VM_BROADCAST_TX.txHash } });
     await publisher.recordPublishFailure(jobId, {
       error: new Error('on-chain confirmation mismatch'),
       failedFromState: 'included',

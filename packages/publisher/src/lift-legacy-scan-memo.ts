@@ -13,6 +13,10 @@ import { findTripleStoreCapability } from '@origintrail-official/dkg-storage';
  * documented decorator accessor, so a decorated view of a store shares its backend's memo.
  * A new process starts with nothing learned. Reads never allocate: a short-lived publisher
  * retains no global state until a scan has actually cleared its graph.
+ *
+ * Accepted narrowing (P7's own, an extension of plan D-5): a legacy un-indexed VM-publish row that
+ * appears after the memo has cleared is not seen until the next boot backfill or process restart.
+ * Nothing writes such a row any more and each node owns its store, so it does not arise in practice.
  */
 export class LiftLegacyScanMemo {
   private static readonly cleared = new WeakMap<object, Set<string>>();
@@ -38,8 +42,12 @@ export class LiftLegacyScanMemo {
     graphs.add(this.graphUri);
   }
 
-  /** Forget what was learned, as a process restart does (tests that seed legacy rows, diagnostics). */
-  forget(): void {
+  /**
+   * Test-only: forget what was learned, as a process restart does, so a test can seed legacy rows
+   * and watch the memo clear again. Nothing in the daemon calls it.
+   * @internal
+   */
+  forgetForTesting(): void {
     LiftLegacyScanMemo.cleared.get(this.identity)?.delete(this.graphUri);
   }
 }
