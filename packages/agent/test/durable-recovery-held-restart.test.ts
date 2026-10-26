@@ -1,4 +1,5 @@
-import { createStoreMutationOwner } from '../src/internal/observed-store-mutation.js';
+import { StoreContentFence } from '../src/internal/store-content-fence.js';
+import { createObservedStoreMutation } from '../src/internal/observed-store-mutation.js';
 import { createMutationObservedStore } from '../src/internal/context-graph-cache-invalidating-store.js';
 import { RecoveryMaterializationOwner } from '../src/durable-recovery-materialization.js';
 import { continueContextGraphSubscriptionLine } from '../src/context-graph-subscription-policy.js';
@@ -166,8 +167,8 @@ function node(
   const chain = options.chain ?? (() => Object.values(peers)[0]!.current());
   const rawStore = new OxigraphStore();
   stores.push(rawStore);
-  const mutationOwner = createStoreMutationOwner(() => {});
-  const store = createMutationObservedStore(rawStore, mutationOwner);
+  const contentFence = new StoreContentFence();
+  const store = createMutationObservedStore(rawStore, createObservedStoreMutation(() => {}, contentFence));
   const writes: string[] = [];
   const info: string[] = [];
   let holdingsUnreadable = options.holdingsUnreadable === true;
@@ -249,7 +250,7 @@ function node(
     ...roundOptions,
     graphRecovery: roundOptions.graphRecovery ? { ...roundOptions.graphRecovery, held: {
       reader: holdings(fence.binding)!, assertCurrent: fence.assertCurrent,
-      withStoreFence: mutationOwner.contentFence.withScope.bind(mutationOwner.contentFence),
+      withStoreFence: contentFence.withScope.bind(contentFence),
     } } : undefined,
     processDurableBatchInWorker: async (...args) => { await options.beforeVerify?.(); return processBatch(...args); },
     storeInsert: async ({ quads }) => { await options.beforeMetaStore?.(); await store.insert(quads); },

@@ -1,16 +1,20 @@
-import { expect, it } from 'vitest';
+import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { STORAGE_ACK_LEDGER_GRAPH, STORAGE_ACK_LEDGER_PREDICATES } from '@origintrail-official/dkg-publisher';
+import { createAgentStoreComposition } from '../src/internal/agent-store-composition.js';
+import { expect, it, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { createMutationObservedStore } from '../src/internal/context-graph-cache-invalidating-store.js';
-import { createStoreMutationOwner } from '../src/internal/observed-store-mutation.js';
+import { StoreContentFence } from '../src/internal/store-content-fence.js';
+import { createObservedStoreMutation } from '../src/internal/observed-store-mutation.js';
 
 const scope = { assertionGraphs: ['urn:assertion'], metadataGraph: 'urn:meta', subjects: ['urn:asset'] };
 const quad = { subject: 'urn:s', predicate: 'urn:p', object: '"value"', graph: 'urn:assertion' };
 function fixture() {
   const raw = new OxigraphStore();
-  const mutationOwner = createStoreMutationOwner(() => {});
-  const execute = mutationOwner.execute;
-  const store = createMutationObservedStore(raw, { ...mutationOwner, execute: mutationOwner.execute.bind(undefined) });
-  return { raw, store, execute, fence: mutationOwner.contentFence };
+  const fence = new StoreContentFence();
+  const execute = createObservedStoreMutation(() => {}, fence);
+  const store = createMutationObservedStore(raw, execute.bind(undefined));
+  return { raw, store, execute, fence };
 }
 
 it('observes shared typed writers as well as graph drops and partial row deletes', async () => {
@@ -68,4 +72,28 @@ it('treats blank-node mutation subjects as potentially affecting any metadata su
       expect(assertCurrent).toThrow('Held assertion content changed');
     });
   } finally { await f.store.close(); }
+});
+
+it.each(['lifecycle', 'ledger'] as const)('composes the production %s writer with pre-dispatch content fencing', async kind => {
+  const raw = new OxigraphStore();
+  const outcomes: string[] = [];
+  const composed = createAgentStoreComposition(raw, () => {}, { begin: () => outcome => { outcomes.push(outcome); } });
+  const input = { contextGraphId: 'typed-fence', agentAddress: '0x1111111111111111111111111111111111111111',
+    name: 'asset', publishedUal: 'urn:published', merkleRoot: 'ab'.repeat(32) };
+  const subject = kind === 'ledger' ? 'urn:ledger' : assertionLifecycleUri(input.contextGraphId, input.agentAddress, input.name);
+  const metadataGraph = kind === 'ledger' ? STORAGE_ACK_LEDGER_GRAPH : contextGraphMetaUri(input.contextGraphId);
+  try {
+    await composed.heldContent.withScope({ assertionGraphs: [], metadataGraph, subjects: [subject] }, async assertCurrent => {
+      const update = raw.update.bind(raw);
+      vi.spyOn(raw, 'update').mockImplementation(async (...args) => {
+        expect(assertCurrent).toThrow('Held assertion content changed');
+        return update(...args);
+      });
+      assertCurrent();
+      if (kind === 'ledger') await composed.ledgerTimestampWriter(subject, STORAGE_ACK_LEDGER_PREDICATES.seenAt, new Date(0), {});
+      else await composed.publishedLifecycleWriter(input);
+      expect(assertCurrent).toThrow('Held assertion content changed');
+    });
+    expect(outcomes).toEqual(['changed']);
+  } finally { await composed.store.close(); }
 });

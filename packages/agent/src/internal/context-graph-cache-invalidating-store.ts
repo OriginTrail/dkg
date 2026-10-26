@@ -9,7 +9,7 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import type { StoreMutation, StoreMutationObserver } from './store-mutation.js';
-import { createStoreMutationOwner, type StoreMutationOwner, type ProjectionDirtyCallback } from './observed-store-mutation.js';
+import { createObservedStoreMutation, type ObservedStoreMutation, type ProjectionDirtyCallback } from './observed-store-mutation.js';
 export type { ProjectionDirtyCallback } from './observed-store-mutation.js';
 
 type MutationObservedStore = TripleStore & Partial<SortedGraphSetSource>;
@@ -32,15 +32,14 @@ export function createListContextGraphsCacheInvalidatingStore(
   // ones) and the observer sees it before dispatch and again when it settles.
   observerOrCallback?: StoreMutationObserver | ProjectionDirtyCallback,
 ): MutationObservedStore {
-  return createMutationObservedStore(innerStore, createStoreMutationOwner(invalidate, observerOrCallback));
+  return createMutationObservedStore(innerStore, createObservedStoreMutation(invalidate, observerOrCallback));
 }
 
 /** Compose a store with the same observation owner used by typed agent writers. */
 export function createMutationObservedStore(
   innerStore: TripleStore,
-  mutationOwner: StoreMutationOwner,
+  invalidateAfterMutation: ObservedStoreMutation,
 ): MutationObservedStore {
-  const invalidateAfterMutation = mutationOwner.execute;
   const sortedSource = typeof (innerStore as Partial<SortedGraphSetSource>).listGraphsSorted
     === 'function'
     ? innerStore as TripleStore & SortedGraphSetSource

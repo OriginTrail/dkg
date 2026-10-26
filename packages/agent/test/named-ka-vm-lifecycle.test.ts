@@ -4,7 +4,7 @@ import { GraphSetIndexStore, OxigraphStore, UnsupportedTripleStoreCapabilityErro
 import { VM_CURRENT_ASSERTION_PRED } from '@origintrail-official/dkg-publisher';
 import { applyPublishedNamedKaVmLifecycle, createPublishedNamedKaVmLifecycleWriter, type PublishedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle.js';
 import { createMutationObservedStore } from '../src/internal/context-graph-cache-invalidating-store.js';
-import { createStoreMutationOwner } from '../src/internal/observed-store-mutation.js';
+import { createObservedStoreMutation } from '../src/internal/observed-store-mutation.js';
 import type { StoreMutationObserver } from '../src/internal/store-mutation.js';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
 import { createProjectionMutationObserver } from '../src/internal/projection-mutation-observer.js';
@@ -18,9 +18,8 @@ const input: PublishedNamedKaVmLifecycleInput = {
 const stores: OxigraphStore[] = [];
 afterEach(async () => { for (const store of stores.splice(0)) await store.close(); });
 function compose(store: TripleStore, invalidate: () => void = () => {}, observer?: StoreMutationObserver) {
-  const mutationOwner = createStoreMutationOwner(invalidate, observer);
-  const executeMutation = mutationOwner.execute;
-  const wrapper = createMutationObservedStore(store, mutationOwner);
+  const executeMutation = createObservedStoreMutation(invalidate, observer);
+  const wrapper = createMutationObservedStore(store, executeMutation);
   const writer = createPublishedNamedKaVmLifecycleWriter({ updateStore: store, fallbackStore: wrapper, executeMutation });
   return { wrapper, writer };
 }

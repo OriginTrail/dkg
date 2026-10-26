@@ -1,5 +1,5 @@
 import type { GraphOwnedRecoveryContext } from './graph-owned-recovery.js';
-import { verifyDurablePage, prepareDurableVerifiedPage, persistDurableRemainingMetadata, persistDurableHoldingsMetadata } from './durable-verified-page.js';
+import { verifyDurablePage, prepareDurableVerifiedPage, persistDurableRemainingMetadata } from './durable-verified-page.js';
 export type { DurableMetaContinuation, DurableMetaContinuationState } from './durable-meta-continuation.js';
 import type { DurableRecoveryRoundDecision } from '../durable-recovery-round.js';
 import type { VerifiedDurableBoundary } from '../durable-recovery-boundary-seed.js';
@@ -49,8 +49,7 @@ import {
 } from './verified-asset-preparation.js';
 import type { DurableSyncBudget } from './durable-sync-budget.js';
 import { createDurableDataRoundBoundary } from './durable-data-round.js';
-import { planDurableDataFromLocalHoldings, settleDurableDataFromHoldings,
-  } from './durable-data-holdings.js';
+import { attemptDurableHoldingsPhase } from './durable-holdings-phase.js';
 import {
   normalizeDurableSyncContext,
   type LegacyDurableSyncContext, type NormalizedDurableSyncContext,
@@ -968,33 +967,13 @@ async function runDurableSyncWithBudget(
         );
       }
       const graphScopedManifest = preparedMeta.manifestPlan;
-      // Ownership spans the first holdings read through synchronous settlement.
-      recoveryRound = { strategy: 'full', continuation: 'full-graph', confirmedCopies: 0 };
-      const held = graphRecovery?.held;
-      if (graphScopedManifest && held && exactAssetUals === undefined && onVerifiedFullSnapshot === undefined) {
-        const settled = await held.withStoreFence({
-          assertionGraphs: graphScopedManifest.descriptors.map(descriptor => descriptor.assertionGraph),
-          metadataGraph: metaGraph, subjects: graphScopedManifest.descriptors.map(descriptor => descriptor.ual),
-        }, async assertStoreCurrent => {
-          const assertCurrent = () => { held.assertCurrent(); assertStoreCurrent(); };
-          assertCurrent();
-          const outcome = await planDurableDataFromLocalHoldings({ contextGraphId: pid, manifest: graphScopedManifest,
-            options: graphRecovery.holdings, holdings: held.reader, signal, logWarn: message => logWarn(ctx, message) });
-          recoveryRound = { strategy: 'full', continuation: outcome.continuation, confirmedCopies: outcome.confirmedCopies };
-          const holdings = outcome.plan;
-          if (!holdings || holdings.kind === 'full') return false;
-          assertCurrent();
-          await persistDurableHoldingsMetadata(context, pid, metaResult, accumulator, assertCurrent);
-          assertCurrent();
-          recoveryRound = holdings.kind === 'held'
-            ? { strategy: 'held', confirmedCopies: outcome.confirmedCopies }
-            : { strategy: 'exact-missing', batches: holdings.batches, confirmedCopies: outcome.confirmedCopies };
-          recordPhaseOutcome(metaResult, { updateCheckpoint: true });
-          logInfo(ctx, settleDurableDataFromHoldings({ plan: holdings, remotePeerId, contextGraphId: pid,
-            manifest: graphScopedManifest, metaResult, accumulator, deleteCheckpoint, setCheckpoint }));
-          return true;
-        });
-        if (settled) { endPhase(); continue; }
+      recoveryRound = await attemptDurableHoldingsPhase({
+        context, contextGraphId: pid, manifest: graphScopedManifest, meta: metaResult, accumulator,
+        recovery: exactAssetUals === undefined && onVerifiedFullSnapshot === undefined ? graphRecovery : undefined,
+        recordMetaPhase: () => recordPhaseOutcome(metaResult, { updateCheckpoint: true }),
+      });
+      if (recoveryRound.strategy === 'held' || recoveryRound.strategy === 'exact-missing') {
+        endPhase(); continue;
       }
       const rawDataResult = await fetchPhase(
         'data',

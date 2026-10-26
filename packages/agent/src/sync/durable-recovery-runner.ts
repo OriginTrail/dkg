@@ -254,7 +254,7 @@ export class DurableRecoveryRunner {
       }
       const peerResults = [...peerExecutions].map(([peerId, execution]) => ({
         peerId,
-        result: withProgressTotals(execution.result, execution.progressTotals),
+        result: withProgressTotals({ ...execution.result, complete: outcome === 'terminal' && peerId === lastPeerId }, execution.progressTotals),
       }));
       let result = withProgressTotals(lastResult, progressTotals);
       if (outcome !== 'terminal' && peerResults.length > 1) {
@@ -266,7 +266,7 @@ export class DurableRecoveryRunner {
       }
       return {
         outcome,
-        result,
+        result: { ...result, complete: outcome === 'terminal' },
         peerResults,
         slices,
         ...(lastPeerId ? { peerId: lastPeerId } : {}),
@@ -384,7 +384,8 @@ export class DurableRecoveryRunner {
       try {
         if (action.kind === 'exact-batch') {
           const exact = await deps.executeExactSlice!(action.peerId, action.assets.map(asset => asset.ual));
-          lastResult = exact.result;
+          // Exact completion covers only this selection, never the graph.
+          lastResult = { ...exact.result, complete: false };
           exactComplete = exact.complete;
         } else {
           let metaContinuation = metaContinuations.get(action.peerId);

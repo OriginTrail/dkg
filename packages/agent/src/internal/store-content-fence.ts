@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { isSafeIri } from '@origintrail-official/dkg-core';
-import type { StoreMutation, StoreMutationOutcome } from './store-mutation.js';
+import type { StoreMutation, StoreMutationOutcome, StoreMutationObserver } from './store-mutation.js';
 
 export interface StoreContentScope {
   readonly assertionGraphs: readonly string[];
@@ -12,7 +12,7 @@ export interface StoreContentScope {
  * the first read until synchronous settlement. Writes invalidate before dispatch;
  * an indeterminate write disables shortcuts until the store owner is recreated.
  */
-export class StoreContentFence {
+export class StoreContentFence implements StoreMutationObserver {
   private readonly pending = new Map<StoreMutation, number>();
   private readonly watches = new Set<{ touches(mutation: StoreMutation): boolean; valid: boolean }>();
   private indeterminate = false;

@@ -44,6 +44,7 @@ function runner(
   rounds: Round[],
   exact: (assetUals: readonly string[]) => Promise<boolean> = async () => true,
   withExactRequests = true,
+  isRunning = () => true,
 ) {
   const store = new MemorySyncCheckpointStore();
   const offered: boolean[] = [];
@@ -51,7 +52,7 @@ function runner(
   const warnings: string[] = [];
   const dependencies: DurableRecoveryRunnerDependencies = {
     checkpointStore: store,
-    isRunning: () => true,
+    isRunning,
     resolvePreferredPeerId: async () => undefined,
     connectRequestedPeer: async () => {},
     primeConnections: async () => {},
@@ -96,6 +97,31 @@ describe('durable recovery fetches the assets a held generation lacks', () => {
     expect(f.offered).toEqual([true, true]);
     expect(execution.slices).toBe(4);
     expect(execution.result.insertedDataTriples).toBe(14);
+  });
+
+  it.each([1, 2])('stays graph-incomplete when stopped after %s exact batches', async stopAfter => {
+    let running = true, completed = 0;
+    const f = runner([leaves(missing(['ual-1', '2']), missing(['ual-9', '3'])), held], async () => {
+      if (++completed === stopAfter) running = false;
+      return true;
+    }, true, () => running);
+    const execution = await f.run();
+    expect(execution.outcome).toBe('no-progress');
+    expect(execution.result.complete).toBe(false);
+    expect(execution.result.insertedDataTriples).toBe(stopAfter * 7);
+    expect(execution.peerResults).toHaveLength(1);
+    expect(execution.peerResults[0]!.result.complete).toBe(false);
+    expect(execution.peerResults[0]!.result.insertedDataTriples).toBe(stopAfter * 7);
+    expect(f.exactRequests).toHaveLength(stopAfter);
+    expect(f.offered).toEqual([true]);
+  });
+
+  it('refuses graph readiness without a persisted terminal boundary', async () => {
+    const f = runner([async () => durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), complete: true })]);
+    const execution = await f.run();
+    expect(execution.outcome).toBe('no-progress');
+    expect(execution.result.complete).toBe(false);
+    expect(execution.peerResults[0]!.result.complete).toBe(false);
   });
 
   it('pulls full-graph rounds for the rest of the run after an exact request fails', async () => {

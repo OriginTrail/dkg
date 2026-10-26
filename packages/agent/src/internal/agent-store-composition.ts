@@ -2,8 +2,9 @@
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { createPublishedNamedKaVmLifecycleWriter } from '../named-ka-vm-lifecycle.js';
 import { createMutationObservedStore } from './context-graph-cache-invalidating-store.js';
-import { createStoreMutationOwner } from './observed-store-mutation.js';
+import { createObservedStoreMutation } from './observed-store-mutation.js';
 import { createStorageAckLedgerTimestampWriter } from './storage-ack-ledger-timestamp-writer.js';
+import { StoreContentFence } from './store-content-fence.js';
 import type { StoreMutationObserver } from './store-mutation.js';
 
 /** One private owner observes ordinary mutations and both typed raw-store writers. */
@@ -12,13 +13,20 @@ export function createAgentStoreComposition(
   invalidate: () => void,
   observer: StoreMutationObserver,
 ) {
-  const owner = createStoreMutationOwner(invalidate, observer);
-  const store = createMutationObservedStore(raw, owner);
+  const heldContent = new StoreContentFence();
+  const executeMutation = createObservedStoreMutation(invalidate, {
+    begin(mutation) {
+      const settleProjection = observer.begin(mutation);
+      const settleContent = heldContent.begin(mutation);
+      return outcome => { settleContent(outcome); settleProjection(outcome); };
+    },
+  });
+  const store = createMutationObservedStore(raw, executeMutation);
   return {
-    store, heldContent: owner.contentFence,
+    store, heldContent,
     publishedLifecycleWriter: createPublishedNamedKaVmLifecycleWriter({
-      updateStore: raw, fallbackStore: store, executeMutation: owner.execute,
+      updateStore: raw, fallbackStore: store, executeMutation,
     }),
-    ledgerTimestampWriter: createStorageAckLedgerTimestampWriter(raw, owner.execute),
+    ledgerTimestampWriter: createStorageAckLedgerTimestampWriter(raw, executeMutation),
   };
 }

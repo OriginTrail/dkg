@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { StoreContentFence } from './store-content-fence.js';
 import { isStoreOperationNotStarted, type Quad, type StoreOperation } from '@origintrail-official/dkg-storage';
 import type { StoreMutation, StoreMutationObserver } from './store-mutation.js';
 
@@ -33,21 +32,11 @@ export type ObservedStoreMutation = <T>(
   operation?: StoreOperation,
 ) => Promise<T>;
 
-export interface StoreMutationOwner {
-  readonly execute: ObservedStoreMutation;
-  readonly contentFence: StoreContentFence;
-}
-
-export function createObservedStoreMutation(
-  invalidate: () => void, observerOrCallback?: StoreMutationObserver | ProjectionDirtyCallback,
-): ObservedStoreMutation { return createStoreMutationOwner(invalidate, observerOrCallback).execute; }
-
 /** Shared mutation observation for the store wrapper and explicitly composed typed writers. */
-export function createStoreMutationOwner(
+export function createObservedStoreMutation(
   invalidate: () => void,
   observerOrCallback?: StoreMutationObserver | ProjectionDirtyCallback,
-): StoreMutationOwner {
-  const contentFence = new StoreContentFence();
+): ObservedStoreMutation {
   const observer = typeof observerOrCallback === 'function'
     ? observerFromCallback(observerOrCallback)
     : observerOrCallback;
@@ -57,11 +46,7 @@ export function createStoreMutationOwner(
     mutation?: StoreMutation,
     operation?: StoreOperation,
   ): Promise<T> => {
-    const settleObserver = mutation === undefined ? undefined : observer?.begin(mutation);
-    const settleContent = mutation === undefined ? undefined : contentFence.begin(mutation);
-    const settle = (outcome: Parameters<NonNullable<typeof settleContent>>[0]) => {
-      settleContent?.(outcome); settleObserver?.(outcome);
-    };
+    const settle = mutation === undefined ? undefined : observer?.begin(mutation);
     let result: T;
     try {
       result = await work();
@@ -80,5 +65,5 @@ export function createStoreMutationOwner(
     settle?.(didChange ? 'changed' : 'unchanged');
     return result;
   };
-  return { execute: invalidateAfterMutation, contentFence };
+  return invalidateAfterMutation;
 }

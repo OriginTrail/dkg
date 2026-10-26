@@ -254,7 +254,7 @@ describe('planning a DATA phase from holdings', () => {
     expect(planDurableDataFromHoldings(manifest, firstHeld, true, budget(8))).toEqual({ kind: 'full', held: 1 });
   });
 
-  it('hands a fetch-missing plan to the owner and plans nothing when the store read fails', async () => {
+  it('hands a fetch-missing plan to the owner and reconsiders holdings after a failed store read', async () => {
     const manifest = generation(3);
     const channel: DurableHoldingsOptions = { ownerFetchesMissingAssets: true };
     const outcome = await planDurableDataFromLocalHoldings({
@@ -264,7 +264,7 @@ describe('planning a DATA phase from holdings', () => {
       holdings: { read: async () => new Set(uals(manifest).slice(1)), confirmCurrent: async () => {} },
       logWarn: () => {},
     });
-    const plan = outcome.plan;
+    const plan = outcome;
     expect(plan?.kind).toBe('fetch-missing');
     expect(plan?.kind === 'fetch-missing' ? plan.batches : undefined).toEqual([[{ ual: uals(manifest)[0], assertionVersion: '1' }]]);
     expect(describeDurableHoldingsPlan(CG, manifest, plan as Exclude<typeof plan, undefined | { kind: 'full' }>))
@@ -278,7 +278,7 @@ describe('planning a DATA phase from holdings', () => {
       holdings: { read: async () => { throw new Error('store queue wait timeout'); }, confirmCurrent: async () => {} },
       logWarn,
     });
-    expect(failed).toEqual({ confirmedCopies: 0, continuation: 'reconsider-holdings' });
+    expect(failed).toEqual({ kind: 'full', held: 0, confirmedCopies: 0, continuation: 'reconsider-holdings' });
     expect(logWarn).toHaveBeenCalledWith(expect.stringContaining('store queue wait timeout'));
 
     const aborted = new AbortController();
@@ -317,11 +317,11 @@ describe('planning a DATA phase from holdings', () => {
     });
 
     // Full-graph rounds authenticate everything they fetch, as a first recovery's rounds do.
-    expect(await plan(uals(manifest).slice(1), false)).toMatchObject({ plan: { kind: 'full' } });
-    expect(await plan([], true)).toMatchObject({ plan: { kind: 'full' } });
+    expect(await plan(uals(manifest).slice(1), false)).toMatchObject({ kind: 'full' });
+    expect(await plan([], true)).toMatchObject({ kind: 'full' });
     expect(confirmCurrent).not.toHaveBeenCalled();
-    expect(await plan(uals(manifest).slice(1), true)).toMatchObject({ plan: { kind: 'fetch-missing' } });
-    expect(await plan(uals(manifest), true)).toMatchObject({ plan: { kind: 'held' } });
+    expect(await plan(uals(manifest).slice(1), true)).toMatchObject({ kind: 'fetch-missing' });
+    expect(await plan(uals(manifest), true)).toMatchObject({ kind: 'held' });
     expect(confirmCurrent).toHaveBeenCalledTimes(2);
   });
 
@@ -522,7 +522,7 @@ describe('holding a copy only while it is current on chain', () => {
     });
 
     // No shortcut this round, and no failure: the round pulls the graph in bounded rounds.
-    expect(plan.plan).toBeUndefined();
+    expect(plan).toMatchObject({ kind: 'full', continuation: 'reconsider-holdings' });
     expect(plan.confirmedCopies).toBe(100);
     expect(logWarn).toHaveBeenCalledWith(expect.stringContaining("against the chain within the round's budget"));
   });

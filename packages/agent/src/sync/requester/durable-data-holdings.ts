@@ -327,7 +327,7 @@ export function planDurableDataFromHoldings(
  * Plan a graph-owned round's DATA phase once its META generation is verified,
  * and leave a `fetch-missing` plan to the owner. A held copy the chain shows
  * superseded fails the round. A store or chain read that cannot answer plans
- * nothing: the round then runs its bounded full-graph rounds as before.
+ * a retryable full-graph attempt: the round then runs its bounded full-graph rounds as before.
  */
 export async function planDurableDataFromLocalHoldings(input: {
   readonly contextGraphId: string;
@@ -336,7 +336,7 @@ export async function planDurableDataFromLocalHoldings(input: {
   readonly holdings: DurableHoldingsReader;
   readonly signal?: AbortSignal;
   readonly logWarn: (message: string) => void;
-}): Promise<{ plan?: DurableHoldingsPlan; confirmedCopies: number; continuation: 'full-graph' | 'reconsider-holdings' }> {
+}): Promise<DurableHoldingsPlan & { confirmedCopies: number; continuation: 'full-graph' | 'reconsider-holdings' }> {
   const { contextGraphId, manifest, options, holdings } = input;
   let confirmedCopies = 0;
   const request = { contextGraphId, descriptors: manifest.descriptors, signal: input.signal };
@@ -353,9 +353,9 @@ export async function planDurableDataFromLocalHoldings(input: {
       `Could not establish which assets of "${contextGraphId}" this node holds; fetching the graph: `
         + `${error instanceof Error ? error.message : String(error)}`,
     );
-    return { confirmedCopies, continuation: 'reconsider-holdings' };
+    return { kind: 'full', held: 0, confirmedCopies, continuation: 'reconsider-holdings' };
   }
-  return { plan, confirmedCopies, continuation: plan.kind === 'full' ? 'full-graph' : 'reconsider-holdings' };
+  return { ...plan, confirmedCopies, continuation: plan.kind === 'full' ? 'full-graph' : 'reconsider-holdings' };
 }
 
 /**
