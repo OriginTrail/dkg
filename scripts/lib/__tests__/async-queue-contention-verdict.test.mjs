@@ -3,7 +3,7 @@
 // before the product is loaded.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test, { after } from 'node:test';
@@ -19,6 +19,7 @@ import {
   extractRecord,
   finalizeRequests,
   flat,
+  flatArmProblems,
   groundTruth,
   guards,
   halve,
@@ -48,6 +49,9 @@ const rec = (p95Ms, o = {}) => ({
 });
 const pairsOf = (aVals, bVals, opts = {}) =>
   aVals.map((a, i) => ({ key: `r${i}`, a: rec(a, opts.a), b: rec(bVals[i], opts.b), valid: opts.valid?.[i] ?? true }));
+/** The runs of these pairs labelled with the histories of the arms (the flatness rule's base 0, candidate 50k). */
+const onHistories = (pairs, a = '0', b = '50k') =>
+  pairs.map((p) => ({ ...p, a: { ...p.a, cell: { history: a } }, b: { ...p.b, cell: { history: b } } }));
 
 test('percentile and summarize use linear interpolation', () => {
   const s = summarize([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
@@ -278,7 +282,7 @@ test('a rule needs three valid paired repeats in every cell: the pairs of differ
   const cells = ['0|default|L3', '0|none|L3', '50k|default|L3'];
   const oneEach = cellPairs(cells.map((cell) => [cell, [[10_000, 4000]]]));
   assert.deepEqual(repeatsPerCell(oneEach), { cells: Object.fromEntries(cells.map((c) => [c, 1])), have: 1 });
-  for (const result of [halve(oneEach), flat(oneEach), equivalent(oneEach, 0.5)]) {
+  for (const result of [halve(oneEach), flat(onHistories(oneEach)), equivalent(oneEach, 0.5)]) {
     assert.equal(result.status, 'incomplete', result.label);
     assert.deepEqual([result.have, result.need], [1, 3]);
     assert.match(result.reason, /needs 3 valid paired repeats in every cell, the thinnest has 1 \(/);
@@ -325,10 +329,47 @@ test('halve: candidate P95 <= 0.5 x base in 3 of 3 paired repeats', () => {
 });
 
 test('flat: history 50k P95 <= 1.25 x history 0 in 3 of 3 paired repeats', () => {
-  assert.equal(flat(pairsOf([800, 900, 1000], [1000, 1125, 1250])).status, 'pass');
-  const fail = flat(pairsOf([800, 900, 1000], [1000, 1126, 1250]));
+  assert.equal(flat(onHistories(pairsOf([800, 900, 1000], [1000, 1125, 1250]))).status, 'pass');
+  const fail = flat(onHistories(pairsOf([800, 900, 1000], [1000, 1126, 1250])));
   assert.equal(fail.status, 'fail');
   assert.equal(fail.perRepeat[1].ratio, 1.2511);
+});
+
+test('flat needs history 0 in arm a and history 50k in arm b: reversed, equal or unlabelled arms never pass', () => {
+  const good = onHistories(pairsOf([800, 900, 1000], [1000, 1125, 1250]));
+  assert.deepEqual(flatArmProblems(good.map((p) => p.a), good.map((p) => p.b)), []);
+  // swapped arms: base 5000 ms at history 50k against 1000 ms at history 0 is a ratio of 0.2, far under the limit
+  const reversed = flat(onHistories(pairsOf([5000, 5000, 5000], [1000, 1000, 1000]), '50k', '0'));
+  assert.equal(reversed.status, 'incomplete');
+  assert.deepEqual([reversed.have, reversed.perRepeat], [0, []]);
+  assert.match(reversed.reason, /--a must hold history 0 runs only \(found history 50k\)/);
+  assert.match(reversed.reason, /--b must hold history 50k runs only \(found history 0\)/);
+  // one history against itself is a ratio of 1
+  const same = flat(onHistories(pairsOf([1000, 1000, 1000], [1000, 1000, 1000]), '0', '0'));
+  assert.equal(same.status, 'incomplete');
+  assert.match(same.reason, /--b must hold history 50k runs only \(found history 0\)/);
+  assert.doesNotMatch(same.reason, /--a must/);
+  const sameLarge = flat(onHistories(pairsOf([1000, 1000, 1000], [1000, 1000, 1000]), '50k', '50k'));
+  assert.equal(sameLarge.status, 'incomplete');
+  assert.match(sameLarge.reason, /--a must hold history 0 runs only \(found history 50k\)/);
+  // another history is not the large one
+  assert.equal(flat(onHistories(pairsOf([800, 900, 1000], [1000, 1000, 1000]), '0', '10k')).status, 'incomplete');
+  // numbers and strings read alike: a summary written by hand may carry history 0 as a number
+  assert.equal(flat(onHistories(pairsOf([800, 900, 1000], [1000, 1125, 1250]), 0, '50k')).status, 'pass');
+  // records that carry no history cannot be told from either arm
+  const unlabelled = flat(pairsOf([800, 900, 1000], [1000, 1125, 1250]));
+  assert.equal(unlabelled.status, 'incomplete');
+  assert.match(unlabelled.reason, /found history undefined/);
+  // the whole arms are checked, not only the runs that paired: a stray history 50k run in arm a counts
+  const stray = flat(good, {
+    aRecords: [...good.map((p) => p.a), { cell: { history: '50k' } }],
+    bRecords: good.map((p) => p.b),
+  });
+  assert.equal(stray.status, 'incomplete');
+  assert.match(stray.reason, /--a must hold history 0 runs only \(found history 50k\)/);
+  // no runs at all is not an orientation problem: it is incomplete for want of pairs
+  assert.deepEqual(flatArmProblems([], []), []);
+  assert.equal(flat([]).status, 'incomplete');
 });
 
 test('noiseMargin is the worst A/A deviation with a 10 % floor; equivalent needs it declared', () => {
@@ -520,6 +561,43 @@ test('validity: arrivals, drain, invariants, driver headroom, quiet idle publish
   }
 });
 
+test('validity fails a run whose measure window saw no request, however short the window', () => {
+  const worker = {
+    agentErrors: 0,
+    crashes: 0,
+    failedTerminal: 0,
+    succeeded: 20,
+    attempted: 20,
+    dataOps: 20 * DATA_OPS_PER_SHARE,
+  };
+  // --measure 0.1 at 8 shares/s expects 0.8 arrivals: zero is inside the 4-sigma band, and the warmup completions
+  // satisfy the worker contract, so nothing else rejects a run that measured nothing
+  const empty = {
+    lambda: 8,
+    measureMs: 100,
+    measured: 0,
+    stillInflight: 0,
+    reconcileError: null,
+    successWithoutJob: 0,
+    doubleAdmissions: 0,
+    driverCpu: 0.1,
+    idlePublisherErrors: 0,
+    worker,
+    seedFileVerified: true,
+  };
+  const checks = validity(empty);
+  assert.deepEqual(
+    [checks.arrivalsWithin4Sigma, checks.workerContractOk, checks.dataPlaneReplayed],
+    [true, true, true],
+    'the other checks hold',
+  );
+  assert.deepEqual([checks.measurementObserved, checks.ok], [false, false]);
+  const one = validity({ ...empty, measured: 1 });
+  assert.deepEqual([one.measurementObserved, one.ok], [true, true], 'a single request in the window is enough');
+  assert.equal(validity({ ...empty, measured: Number.NaN }).measurementObserved, false);
+  assert.equal(validity({ ...empty, measureMs: 180_000, measured: 0 }).ok, false, 'and a long window still needs one');
+});
+
 test('validity fails a run whose worker side did not work (agent errors, crashes, replayed operations)', () => {
   const run = {
     lambda: 8,
@@ -665,6 +743,24 @@ test('extractRecord maps a summary and ledgerMarkdown lists every run', () => {
   );
   const table = ledgerMarkdown([good, bad]).split('\n');
   assert.equal(table.length, 4);
+  // a run with no measured request has no P95 and no failure fraction: it never counts, whatever validity.ok says
+  const emptyWindow = (submission) => ({ ...summaryOf(true, 1), submission });
+  for (const submission of [
+    { n: 0, F: null, latencyMs: null },
+    { n: 0, F: null, latencyMs: { p95: null } },
+    { n: 3, F: 0.1, latencyMs: null },
+    { n: 3, latencyMs: { p95: 100 } },
+    { n: 3, F: 0.1, latencyMs: { p95: Number.NaN } },
+  ]) {
+    const empty = extractRecord(emptyWindow(submission));
+    assert.deepEqual([empty.valid, empty.failedChecks], [false, ['finiteMetrics']], JSON.stringify(submission));
+  }
+  const failing = extractRecord({
+    ...emptyWindow({ n: 0, F: null, latencyMs: null }),
+    validity: { ok: false, measurementObserved: false },
+  });
+  assert.deepEqual(failing.failedChecks, ['ok', 'measurementObserved', 'finiteMetrics']);
+  assert.equal(extractRecord(emptyWindow({ n: 1, F: 0, latencyMs: { p95: 0 } })).valid, true, 'zero is a metric');
   assert.match(table[0], /\| worker ok\/failed\/agent errors \| P8c \|/);
   assert.match(table[2], /\| 400\/1\/2 \| ok \|/);
   assert.match(table[3], /INVALID: ok, drained/);
@@ -778,6 +874,8 @@ function runs(
     dirty = false,
     meta = {},
     worker = {},
+    submission = null,
+    checks = null,
   } = {},
 ) {
   p95s.forEach((p95, i) => {
@@ -796,10 +894,10 @@ function runs(
           distStaleSuspected: false,
           ...meta,
         },
-        submission: { F, latencyMs: { p95 } },
+        submission: submission ?? { F, latencyMs: { p95 } },
         worker: { completionsPerMin: 100, ...worker },
         observer: { latencyMs: { p95: 10 } },
-        validity: { drained: ok, ok },
+        validity: checks ?? { drained: ok, ok },
       }),
     );
   });
@@ -843,6 +941,104 @@ test('verdict flat pairs across histories and honours --where', () => {
   );
   const none = cli('verdict', '--rule', 'flat', '--a', lo, '--b', hi, '--where', 'observer=paged');
   assert.equal(none.code, 2, 'no run matches the filter: incomplete, not a pass');
+});
+
+test('verdict flat needs --a at history 0 and --b at history 50k: reversed or equal arms never pass', () => {
+  const lo = runs('fl-h0', [1000, 1000, 1000]);
+  const hi = runs('fl-h50k', [5000, 5000, 5000], { history: '50k' });
+  const oriented = cli('verdict', '--rule', 'flat', '--a', lo, '--b', hi);
+  assert.equal(oriented.code, 1, 'history 50k at 5 x the P95 of history 0 fails the rule');
+  // the same two directories the other way round: b/a = 0.2, which an unchecked rule reads as a pass
+  const reversed = cli('verdict', '--rule', 'flat', '--a', hi, '--b', lo);
+  assert.equal(reversed.code, 2);
+  assert.match(reversed.out, /flat: history 50k P95 <= 1\.25 x history 0: INCOMPLETE/);
+  assert.match(reversed.out, /--a must hold history 0 runs only \(found history 50k\)/);
+  assert.match(reversed.out, /--b must hold history 50k runs only \(found history 0\)/);
+  // one history against itself
+  const itself = cli('verdict', '--rule', 'flat', '--a', lo, '--b', lo);
+  assert.equal(itself.code, 2);
+  assert.match(itself.out, /--b must hold history 50k runs only \(found history 0\)/);
+  const itself50k = cli('verdict', '--rule', 'flat', '--a', hi, '--b', hi);
+  assert.equal(itself50k.code, 2);
+  assert.match(itself50k.out, /--a must hold history 0 runs only \(found history 50k\)/);
+  // --where applies to both arms, so it cannot pick the two histories apart
+  assert.equal(cli('verdict', '--rule', 'flat', '--a', lo, '--b', hi, '--where', 'history=0').code, 2);
+  // a stray run of the wrong history in an arm is not ignored because it did not pair
+  const stray = runs('fl-stray', [1000, 1000, 1000], { tag: 'h0-' });
+  runs('fl-stray', [1000], { history: '50k', observer: 'paged', tag: 'h50k-' });
+  const mixed = cli('verdict', '--rule', 'flat', '--a', stray, '--b', hi);
+  assert.equal(mixed.code, 2);
+  assert.match(mixed.out, /--a must hold history 0 runs only \(found history 50k\)/);
+  const json = JSON.parse(cli('verdict', '--rule', 'flat', '--a', hi, '--b', lo, '--json').out);
+  assert.deepEqual([json.result.status, json.result.perRepeat], ['incomplete', []]);
+  assert.match(json.result.reason, /compares history 0 \(--a\) with history 50k \(--b\)/);
+});
+
+test('verdict does not count a run with no request in its measure window: incomplete, not a FAIL', () => {
+  // the run a --measure 0.1 invocation can produce: resolved from the real CLI config, then judged by the real checks
+  const dry = cli('run', '--dry', '--rung', 'L3', '--measure', '0.1');
+  assert.equal(dry.code, 0, dry.err);
+  const { lambda, measureMs } = JSON.parse(dry.out).config;
+  assert.equal(measureMs, 100);
+  const worker = {
+    agentErrors: 0,
+    crashes: 0,
+    failedTerminal: 0,
+    succeeded: 20,
+    attempted: 20,
+    dataOps: 20 * DATA_OPS_PER_SHARE,
+  };
+  const emptyChecks = validity({
+    lambda,
+    measureMs,
+    measured: 0,
+    stillInflight: 0,
+    reconcileError: null,
+    successWithoutJob: 0,
+    doubleAdmissions: 0,
+    driverCpu: 0.1,
+    idlePublisherErrors: 0,
+    worker,
+    seedFileVerified: true,
+  });
+  const empty = { n: 0, nWarmup: 20, nCooldown: 1, outcomes: {}, F: null, latencyMs: null };
+  const base = runs('em-base', [10_000, 11_000, 9000]);
+  const never = (name, opts) => runs(name, [0, 0, 0], { submission: empty, ...opts });
+  // (1) the summary carries the run's own checks
+  const measured = never('em-checks', { checks: emptyChecks });
+  const r1 = cli('verdict', '--rule', 'halve', '--a', base, '--b', measured);
+  assert.equal(r1.code, 2, `incomplete, not a FAIL: ${r1.out}`);
+  assert.match(r1.out, /INCOMPLETE \(0 valid pairs, 3 needed\)/);
+  assert.doesNotMatch(r1.out, /NaN|null/);
+  // the same runs as a base: no valid base either
+  assert.equal(cli('verdict', '--rule', 'halve', '--a', measured, '--b', base).code, 2);
+  assert.match(
+    cli('verdict', '--rule', 'ledger', '--a', measured).out,
+    /INVALID: measurementObserved, ok, finiteMetrics/,
+    'the ledger says why',
+  );
+  // (2) a summary written before the measurement check existed: validity.ok holds, the metrics are null
+  const legacy = never('em-legacy', { checks: { drained: true, ok: true } });
+  const r2 = cli('verdict', '--rule', 'halve', '--a', base, '--b', legacy);
+  assert.equal(r2.code, 2, `incomplete, not a FAIL: ${r2.out}`);
+  assert.match(r2.out, /INCOMPLETE \(0 valid pairs, 3 needed\)/);
+  assert.match(cli('verdict', '--rule', 'ledger', '--a', legacy).out, /INVALID: finiteMetrics/);
+  // the other rules read the same records
+  assert.equal(cli('verdict', '--rule', 'equal', '--a', base, '--b', legacy, '--margin', '0.2').code, 2);
+  const flatLo = runs('em-h0', [1000, 1000, 1000]);
+  const flatHi = never('em-h50k', { history: '50k', checks: emptyChecks });
+  assert.equal(cli('verdict', '--rule', 'flat', '--a', flatLo, '--b', flatHi).code, 2);
+  assert.equal(cli('verdict', '--rule', 'aa', '--a', base, '--b', legacy).code, 2);
+  // one empty repeat in an otherwise complete arm leaves the cell one pair short instead of failing it
+  const partial = runs('em-partial', [4000, 5500, 4500]);
+  const some = JSON.parse(readFileSync(path.join(partial, 'r1', 'summary.json'), 'utf8'));
+  writeFileSync(
+    path.join(partial, 'r1', 'summary.json'),
+    JSON.stringify({ ...some, submission: empty, validity: emptyChecks }),
+  );
+  const short = cli('verdict', '--rule', 'halve', '--a', base, '--b', partial);
+  assert.equal(short.code, 2);
+  assert.match(short.out, /INCOMPLETE \(2 valid pairs, 3 needed\)/);
 });
 
 test('verdict aa prints the noise margin, equal needs it declared, ledger lists every run', () => {

@@ -353,8 +353,53 @@ export function ratioRule({ pairs, metric = 'p95Ms', limit, lower, label, checkK
 }
 export const halve = (pairs) =>
   ratioRule({ pairs, limit: HALVE_MAX, label: 'halve: candidate P95 <= 0.5 x base', checkKnee: true });
-export const flat = (pairs) =>
-  ratioRule({ pairs, limit: FLAT_MAX, label: 'flat: history 50k P95 <= 1.25 x history 0' });
+
+/** The histories the flatness rule compares: arm a is the base (history 0), arm b the candidate (history 50k). */
+export const FLAT_ARMS = { a: '0', b: '50k' };
+const FLAT_LABEL = 'flat: history 50k P95 <= 1.25 x history 0';
+
+/**
+ * Why two arms are not the flatness rule's history-0 base and history-50k candidate ([] when they are). The rule
+ * drops history from the pairing key (it pairs across histories), so without this check two arms of the same history,
+ * or the two arms swapped, would pair up and be judged: a reversed pair yields a ratio far under the limit and a
+ * self-comparison a ratio of 1, both a PASS that says nothing about history.
+ */
+export function flatArmProblems(aRecords, bRecords) {
+  const problems = [];
+  for (const [side, records] of [
+    ['a', aRecords],
+    ['b', bRecords],
+  ]) {
+    const want = FLAT_ARMS[side];
+    const found = [...new Set(records.map((r) => String(r.cell?.history)))].filter((h) => h !== want);
+    if (found.length)
+      problems.push(`--${side} must hold history ${want} runs only (found history ${found.join(', ')})`);
+  }
+  return problems;
+}
+
+/**
+ * AC5: history 50k P95 <= 1.25 x history 0. Arm a must be history 0 and arm b history 50k, whatever the pairs: a
+ * mismatch is incomplete (never a pass) and says which arm is wrong. `aRecords` / `bRecords` default to the runs of the
+ * pairs; pass the whole arms to also check the runs that did not pair.
+ */
+export function flat(pairs, { aRecords = pairs.map((p) => p.a), bRecords = pairs.map((p) => p.b) } = {}) {
+  const problems = flatArmProblems(aRecords, bRecords);
+  if (!problems.length) return ratioRule({ pairs, limit: FLAT_MAX, label: FLAT_LABEL });
+  return {
+    label: FLAT_LABEL,
+    metric: 'p95Ms',
+    limit: FLAT_MAX,
+    need: PAIRED_MIN,
+    have: 0,
+    cells: {},
+    perRepeat: [],
+    status: 'incomplete',
+    reason:
+      `the flatness rule compares history ${FLAT_ARMS.a} (--a) with history ${FLAT_ARMS.b} (--b): ` +
+      problems.join('; '),
+  };
+}
 
 /**
  * A/A: pairs of two same-build runs (a = first, b = second); the margin is the worst deviation, never below the 10 %
@@ -415,6 +460,9 @@ export function validity({
   const expected = (lambda * measureMs) / 1000;
   const w = worker ?? {};
   const checks = {
+    // a window so short that its expected arrivals fit the 4-sigma band of zero (--measure 0.1) can pass the check
+    // below with no request at all: the run then has nothing to compare
+    measurementObserved: measured > 0,
     arrivalsWithin4Sigma: Math.abs(measured - expected) <= 4 * Math.sqrt(Math.max(expected, 1)),
     drained: stillInflight === 0,
     noReconcileError: !reconcileError,
@@ -440,15 +488,20 @@ export function extractRecord(s) {
   const v = s.validity;
   const counters = s.worker?.counters ?? {};
   const seed = s.meta.seedFile;
+  const p95Ms = s.submission.latencyMs?.p95 ?? null;
+  const failureFrac = s.submission.F;
+  // a run counts toward a verdict only with the metrics the rules compare: a run with no request in the measure window
+  // (its worker checks can still hold on warmup completions) has none, and null / null is NaN, a FAIL, not "no data"
+  const metricsFinite = Number.isFinite(p95Ms) && Number.isFinite(failureFrac);
   return {
     key: pairKey({ cell }),
     label: s.meta.label ?? null,
     cell,
     repeat: cell.repeat,
-    valid: v.ok === true,
-    failedChecks: Object.keys(v).filter((k) => v[k] === false),
-    p95Ms: s.submission.latencyMs?.p95 ?? null,
-    failureFrac: s.submission.F,
+    valid: v.ok === true && metricsFinite,
+    failedChecks: [...Object.keys(v).filter((k) => v[k] === false), ...(metricsFinite ? [] : ['finiteMetrics'])],
+    p95Ms,
+    failureFrac,
     completionsPerMin: s.worker?.completionsPerMin ?? null,
     observerP95Ms: s.observer?.latencyMs?.p95 ?? null,
     workerCounters: {

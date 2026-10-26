@@ -230,6 +230,26 @@ for (const [what, drop] of Object.entries(DROPS)) {
 }
 
 // ---------------------------------------------------------------- the fixture's reused assets
+const DKG = 'http://dkg.io/ontology/';
+/**
+ * What one completed share leaves on the asset of its slot in the meta graph, as predicate -> object: the 9-predicate
+ * provenance stamp (fixture.mjs PROVENANCE, valued per slot) and the operation intent. The seal evidence read returns
+ * all of it plus swmShareComplete, which carries the key of the last share (checked separately: it differs per cycle).
+ */
+const stampOf = (slot) => ({
+  state: `"v0-${slot}"`,
+  memoryLayer: `"v1-${slot}"`,
+  assertionGraph: `"v2-${slot}"`,
+  shareOperationId: `"op-${slot}"`,
+  type: `"v4-${slot}"`,
+  startedAtTime: `"v5-${slot}"`,
+  p7: `"v6-${slot}"`,
+  p8: `"v7-${slot}"`,
+  p9: `"v8-${slot}"`,
+  promoteOperationIntent: '"{\\"v\\":1}"',
+});
+const STAMP_TRIPLES = Object.keys(stampOf(0)).length + 1; // + swmShareComplete
+
 test('cycling the asset pool keeps the metadata and the seal result of every asset at a fixed size', async () => {
   const store = new deps.storage.OxigraphStore();
   await seedMainNamespace(store, deps.core);
@@ -244,12 +264,14 @@ test('cycling the asset pool keeps the metadata and the seal result of every ass
     wmG: wmPoolGraph(jn % WM_POOL),
   });
   const assets = Array.from({ length: ASSET_POOL }, (_, i) => assetOf(i));
+  let sealQuads;
   const measure = async () => {
     const count = await store.query(
       `SELECT (COUNT(*) AS ?n) WHERE { GRAPH <${metaGraph()}> { VALUES ?s { ${assets.map((a) => `<${a}>`).join(' ')} } ?s ?p ?o } }`,
     );
     // the seal evidence read of each asset: the CONSTRUCT the replay issues as sealEvidence.prepare
     const seals = await Promise.all(assets.map((_, i) => ops.sealPrepare[2](store, shareOf(i), {})));
+    sealQuads = seals.map((seal) => seal.quads);
     return { metaTriples: Number(/\d+/.exec(count.bindings[0].n)[0]), sealTriples: seals.map((s) => s.quads.length) };
   };
   const cycles = [];
@@ -259,9 +281,24 @@ test('cycling the asset pool keeps the metadata and the seal result of every ass
     cycles.push(await measure());
   }
   for (const c of cycles.slice(1)) assert.deepEqual(c, cycles[0], 'a completed share leaves the asset as it found it');
-  assert.ok(
-    cycles[0].sealTriples.every((n) => n <= 12),
-    `a seal read returns a share's stamp, not the history of the asset: ${cycles[0].sealTriples}`,
+  // Stable and small is not enough: a seal query that matched nothing (the wrong subject, graph or variable) reads
+  // zero triples every cycle. The read must return exactly the stamp the replay wrote on that asset.
+  assert.deepEqual(
+    cycles[0].sealTriples,
+    Array(ASSET_POOL).fill(STAMP_TRIPLES),
+    `a seal read returns a share's stamp (${STAMP_TRIPLES} triples), not the history of the asset or nothing`,
   );
-  assert.ok(cycles[0].metaTriples <= ASSET_POOL * 12, `${cycles[0].metaTriples} triples on ${ASSET_POOL} assets`);
+  assert.equal(cycles[0].metaTriples, ASSET_POOL * STAMP_TRIPLES, `the metadata of ${ASSET_POOL} assets`);
+  for (const [slot, quads] of sealQuads.entries()) {
+    const what = `the seal read of ${assets[slot]}: ${JSON.stringify(quads)}`;
+    assert.ok(
+      quads.every((quad) => quad.subject === assets[slot]),
+      what,
+    );
+    const { swmShareComplete, ...stamp } = Object.fromEntries(
+      quads.map((quad) => [quad.predicate.replace(DKG, ''), quad.object]),
+    );
+    assert.deepEqual(stamp, stampOf(slot), what);
+    assert.match(swmShareComplete, /^"k\d+"$/, what);
+  }
 });

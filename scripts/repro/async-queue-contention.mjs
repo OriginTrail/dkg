@@ -32,8 +32,8 @@
 // Latency is intended arrival to response, censored at 20 s; every non-success and every client timeout is a failure.
 // Exit codes: 0 ok/pass, 1 fail, 2 usage or incomplete, 3 refused backend.
 // Small-host cell: DKG_STORE_MAX_CONCURRENT=2 (recorded under meta.env). Scheduler warnings are counted, not printed.
-// A run is valid only if the worker side did its job (workerContractOk, dataPlaneReplayed), the load drained, and a
-// seed file hashed as its manifest says.
+// A run is valid only if the measure window saw requests (measurementObserved), the worker side did its job
+// (workerContractOk, dataPlaneReplayed), the load drained, and a seed file hashed as its manifest says.
 //
 // Runbook. Backend: a Blazegraph that YOU started (never reuse someone else's container); the script only takes a URL
 // and refuses non-loopback hosts, e.g.
@@ -58,6 +58,7 @@
 //      node ... run --calibration ... --history 0 --label h0 --repeats 3 ...
 //      node ... run --calibration ... --history 50k --seed-file $OUT/seed-50k.nq.gz --label h50k --repeats 3 ...
 //      node ... verdict --rule flat --a $OUT/h0 --b $OUT/h50k --where observer=default
+//    --a must hold history 0 runs only and --b history 50k runs only: swapped or equal arms are INCOMPLETE, not a pass.
 // 5. Put `verdict --rule ledger --a ... --b ...` in the PR: every run is listed (worker counters and the P8c indicator
 //    included), a discarded run with its failed checks. Two valid runs of one cell are ambiguous and the pair does not
 //    count: delete the one that is not meant to count, it stays in the PR.
@@ -862,7 +863,12 @@ function verdictCommand(v) {
     console.log(JSON.stringify({ margin: noiseMargin(pairs), validPairs: have, cells, warnings, missing }));
     process.exit(have >= PAIRED_MIN ? 0 : 2);
   }
-  const result = rule === 'halve' ? halve(pairs) : rule === 'flat' ? flat(pairs) : equivalent(pairs, margin);
+  const result =
+    rule === 'halve'
+      ? halve(pairs)
+      : rule === 'flat'
+        ? flat(pairs, { aRecords: A, bRecords: B })
+        : equivalent(pairs, margin);
   const g = guards(pairs);
   const warnings = integrityWarnings([...A, ...B], pairs, result);
   if (v.json) {
