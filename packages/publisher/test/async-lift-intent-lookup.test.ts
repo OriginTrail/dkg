@@ -7,6 +7,7 @@ import {
 } from '../src/index.js';
 import type { LiftJob } from '../src/lift-job.js';
 import { LiftJobStoreSelectors } from '../src/lift-job-store-selectors.js';
+import { LiftLegacyScanMemo } from '../src/lift-legacy-scan-memo.js';
 import {
   CONTROL_LIFECYCLE_KEY,
   CONTROL_PAYLOAD,
@@ -47,6 +48,11 @@ describe('#1828 async lift intent lookup', () => {
       ...config,
     });
   }
+
+  // OT-RFC-73 P7: admission clears its legacy un-indexed scan per process and store. A test that seeds a
+  // legacy row after some publisher admitted a job on this store models a queue that already held that row
+  // when the process started, so it forgets what those admissions learned.
+  const restartProcess = (): void => new LiftLegacyScanMemo(store, DEFAULT_CONTROL_GRAPH_URI).forgetForTesting();
 
   // The facts a recovering client retains (never the jobId or intentKey).
   const facts = { contextGraphId: 'music-social', name: 'albums' };
@@ -550,11 +556,22 @@ describe('#1828 async lift intent lookup', () => {
       }
       return result;
     };
+    // The first admission of a process still scans for legacy un-indexed rows: the original assertions hold for it.
+    restartProcess();
     expect(await publisher.enqueueKnowledgeAssetVmPublish(request)).toBe(targetId);
     expect(transferredPayloads).toBe(1);
     expect(queries).toHaveLength(1);
     expect(queries[0]?.[1]).toEqual({ source: 'publisher.asyncLift.findActiveVmPublish' });
     expect(queries[0]?.[0]).toContain('UNION');
+    // That scan found no un-indexed VM-publish row, so the next admission is bound by the lifecycle key alone.
+    queries.length = 0;
+    transferredPayloads = 0;
+    expect(await publisher.enqueueKnowledgeAssetVmPublish(request)).toBe(targetId);
+    expect(transferredPayloads).toBe(1);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]?.[1]).toEqual({ source: 'publisher.asyncLift.findActiveVmPublish' });
+    expect(queries[0]?.[0]).not.toContain('UNION');
+    expect(queries[0]?.[0]).not.toContain('NOT EXISTS');
   });
 
   it('keeps legacy duplicate payload precedence regardless of candidate row order', async () => {
@@ -572,6 +589,7 @@ describe('#1828 async lift intent lookup', () => {
       const result = await query(...args);
       return result.type === 'bindings' ? { ...result, bindings: result.bindings.reverse() } : result;
     };
+    restartProcess();
     const selectors = new LiftJobStoreSelectors(store, DEFAULT_CONTROL_GRAPH_URI, (job) => job);
     const candidates = await selectors.vmPublishAdmissionCandidates(
       knowledgeAssetVmPublishLifecycleKey(request),
@@ -609,6 +627,7 @@ describe('#1828 async lift intent lookup', () => {
       { subject: jobSubject('broken-legacy'), predicate: CONTROL_PAYLOAD, object: literal('{not-json'), graph: DEFAULT_CONTROL_GRAPH_URI },
       { subject: jobSubject('broken-legacy'), predicate: CONTROL_STATUS, object: literal('accepted'), graph: DEFAULT_CONTROL_GRAPH_URI },
     ]);
+    restartProcess();
     expect(await publisher.enqueueKnowledgeAssetVmPublish(request)).toBe(jobId);
   });
 
@@ -650,6 +669,7 @@ describe('#1828 async lift intent lookup', () => {
       subject: jobSubject(unindexed === 'older' ? failedId : finished.jobId),
       predicate: CONTROL_LIFECYCLE_KEY, graph: DEFAULT_CONTROL_GRAPH_URI,
     });
+    restartProcess();
     now += 2_000;
     if (held) {
       await expect(publisher.enqueueKnowledgeAssetVmPublish(request)).rejects.toMatchObject({

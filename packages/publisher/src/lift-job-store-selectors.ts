@@ -12,9 +12,11 @@ import {
 import {
   compareAcceptedJobs,
   expectBindings,
+  isKnowledgeAssetVmPublishJobRequest,
   projectListedLiftJobs,
 } from './async-lift-publisher-utils.js';
 import { decodeLiftJobPayload, decodedLiftJobOrThrow } from './lift-job-payload-codec.js';
+import { LiftLegacyScanMemo } from './lift-legacy-scan-memo.js';
 
 /**
  * Read-only queue candidate selection. These snapshots never authorize a transition: callers
@@ -26,6 +28,7 @@ export class LiftJobStoreSelectors {
     private readonly store: Pick<TripleStore, 'query'>,
     private readonly graphUri: string,
     private readonly project: (job: PersistedLiftJob) => PersistedLiftJob,
+    private readonly legacyScan = new LiftLegacyScanMemo(store, graphUri),
   ) {}
 
   async list(filter: { status?: LiftJobState; contextGraphId?: string } = {}): Promise<PersistedLiftJob[]> {
@@ -53,21 +56,41 @@ export class LiftJobStoreSelectors {
     return this.projectInventory(result);
   }
 
-  /** Valid writers index every lifecycle; only pre-index rows need the tolerant fallback. */
+  /**
+   * Valid writers index every lifecycle; only pre-index rows need the tolerant fallback.
+   *
+   * The indexed branch is bound by the lifecycle-key literal, so its cost follows the rows under
+   * THIS key. The fallback branch has no such bound: it joins status and payload of EVERY retained
+   * job and removes the indexed ones with FILTER NOT EXISTS, and admission runs it under the
+   * global claim lock. A scan that finds no un-indexed VM-publish row therefore clears the
+   * process-wide memo (`LiftLegacyScanMemo`), and later admissions of any publisher instance over
+   * this store send only the indexed branch. A restart scans once more. `options.legacyUnindexedScan`
+   * forces either form (tests, diagnostics) and leaves the memo alone.
+   *
+   * Accepted narrowing (P7's own, beyond the share-side D1/D2/D4 of plan D-5): a legacy un-indexed
+   * VM-publish row that appears AFTER the memo has cleared is not seen until the next boot
+   * backfill (`ensureVmPublishIntentIndex`) or restart. Nothing writes such a row any more, and
+   * every node owns its store, so it does not arise in practice.
+   */
   async vmPublishAdmissionCandidates(
     lifecycleKey: string,
     keyOfJob: (job: PersistedLiftJob) => string | null,
+    options: { readonly legacyUnindexedScan?: boolean } = {},
   ): Promise<PersistedLiftJob[]> {
-    const result = await this.store.query(
-      `SELECT ?payload ?status ?indexed WHERE { GRAPH <${this.graphUri}> {
-        {
+    const forced = options.legacyUnindexedScan !== undefined;
+    const scanLegacy = options.legacyUnindexedScan ?? this.legacyScan.scanRequired();
+    const indexedBranch = `{
           ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(lifecycleKey)} ; <${CONTROL_PAYLOAD}> ?payload .
           OPTIONAL { ?job <${CONTROL_STATUS}> ?status }
           BIND(true AS ?indexed)
-        } UNION {
+        }`;
+    const legacyBranch = `{
           ?job <${CONTROL_STATUS}> ?status ; <${CONTROL_PAYLOAD}> ?payload .
           FILTER NOT EXISTS { ?job <${CONTROL_LIFECYCLE_KEY}> ?lifecycleKey }
-        }
+        }`;
+    const result = await this.store.query(
+      `SELECT ?payload ?status ?indexed WHERE { GRAPH <${this.graphUri}> {
+        ${scanLegacy ? `${indexedBranch} UNION ${legacyBranch}` : indexedBranch}
       } }`,
       { source: 'publisher.asyncLift.findActiveVmPublish' },
     );
@@ -84,12 +107,37 @@ export class LiftJobStoreSelectors {
       if (job !== null && row['status'] !== undefined) jobs.set(job.jobId, job);
     }
     // Include all statuses: finalized siblings demote ordinary failed history, but never held jobs.
+    // A legacy row counts against clearing the memo only when it has a lifecycle key: a keyless one
+    // (a pre-guard admission whose name carries U+001F, which the backfill cannot index either)
+    // drops out of every group, so it can never change an admission decision.
+    // Corruption-only edge: such a row carrying the payload jobId of an indexed job on ANOTHER subject
+    // (one jobId on two subjects = corrupted data) replaced that job in the map above before P7, but
+    // once the memo has cleared it is never read, so the indexed job now stays: a different decision.
+    let keyedLegacyRows = 0;
     for (const row of rows) {
       if (row['indexed'] !== undefined) continue;
       const job = parseInventoryPayload(row['payload']);
-      if (job !== null) jobs.set(job.jobId, job);
+      if (job === null) continue;
+      jobs.set(job.jobId, job);
+      if (keyOfJob(job) !== null) keyedLegacyRows += 1;
     }
+    if (scanLegacy && !forced && keyedLegacyRows === 0) this.legacyScan.clear();
     return projectListedLiftJobs([...jobs.values()], undefined, this.project);
+  }
+
+  /**
+   * The VM-publish jobs the boot backfill can repair: rows with a status and a payload but no
+   * lifecycle-key index. Indexed history is filtered in the store, so it never transfers.
+   */
+  async unindexedVmPublishJobs(): Promise<PersistedLiftJob[]> {
+    const result = await this.store.query(
+      `SELECT ?payload ?status WHERE { GRAPH <${this.graphUri}> {
+        ?job <${CONTROL_STATUS}> ?status ; <${CONTROL_PAYLOAD}> ?payload .
+        FILTER NOT EXISTS { ?job <${CONTROL_LIFECYCLE_KEY}> ?lifecycleKey }
+      } }`,
+      { source: 'publisher.asyncLift.ensureVmPublishIntentIndex' },
+    );
+    return this.projectInventory(result).filter((job) => isKnowledgeAssetVmPublishJobRequest(job.request));
   }
 
   /** Select the oldest accepted payload, skipping malformed rows without starving later work. */

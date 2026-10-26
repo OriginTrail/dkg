@@ -922,31 +922,15 @@ export class TripleStoreAsyncLiftPublisher
 
   /**
    * #1828 — idempotently backfill the ephemeral lifecycle index for VM-publish
-   * jobs admitted before the index existed. Reads the subjects already carrying
-   * the index and inserts ONLY the missing ones (additive insert; never
-   * deletes/rewrites, so it cannot race the runner), returning the real number
-   * of jobs repaired rather than a full-reindex count. Run once at boot.
+   * jobs admitted before the index existed. Selects ONLY the jobs missing the
+   * index (indexed history never transfers) and inserts their index rows
+   * (additive insert; never deletes/rewrites, so it cannot race the runner),
+   * returning the real number of jobs repaired rather than a full-reindex
+   * count. Run once at boot.
    */
   async ensureVmPublishIntentIndex(): Promise<number> {
     await this.ensureGraph();
-    const vmPublishJobs = (await this.list()).filter((job) =>
-      isKnowledgeAssetVmPublishJobRequest(job.request),
-    );
-    if (vmPublishJobs.length === 0) return 0;
-    // Subjects that already carry the lifecycle index. Object-unbound read of the
-    // one predicate — no job-payload scan — so we diff in JS and insert only the
-    // jobs missing it (VM-publish filtered above, never via a SPARQL MINUS, which
-    // would over-select raw-lift jobs).
-    const indexed = await this.store.query(
-      `SELECT ?job WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_LIFECYCLE_KEY}> ?lifecycleKey } }`,
-      { source: 'publisher.asyncLift.ensureVmPublishIntentIndex' },
-    );
-    const alreadyIndexed = new Set(
-      expectBindings(indexed)
-        .map((row) => row['job'])
-        .filter((subject): subject is string => typeof subject === 'string'),
-    );
-    const missing = vmPublishJobs.filter((job) => !alreadyIndexed.has(jobSubject(job.jobId)));
+    const missing = await this.jobSelectors.unindexedVmPublishJobs();
     const quads = missing.flatMap((job) => serializeVmPublishIntentIndex(job, this.graphUri));
     if (quads.length > 0) await this.store.insert(quads, { source: 'publisher.asyncLift.writeVmPublishIntentIndex' });
     return missing.length;
