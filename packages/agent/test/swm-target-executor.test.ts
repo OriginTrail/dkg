@@ -520,6 +520,7 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
       await store.deleteByPattern({ graph: swmMetaGraph, subject: operationSubject });
     });
     const logInfo = vi.fn();
+    const logWarn = vi.fn();
     const ctx = createOperationContext('sync');
     const ports: SwmTargetExecutorPortsV1 = {
       store,
@@ -569,7 +570,7 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
       ...(options.retireMarker === undefined ? {} : { retireLegacySwmAfterVerifiedVmTwin: options.retireMarker }),
       ...(options.markerOutstanding === undefined ? {} : { hasOutstandingLegacySwmMarker: options.markerOutstanding }),
       logInfo,
-      logWarn: () => undefined,
+      logWarn,
       logDebug: () => undefined,
     };
     const sessions = new SwmTargetExecutorSessionFactoryV1(ports);
@@ -586,8 +587,22 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
       ...payload.map((quad) => ({ ...quad, graph: swmGraph })),
       ...remoteMeta,
     ]);
-    return { store, payload, vmGraph, swmGraph, retireFinalizedSwmTwin, logInfo, ctx, round, shareAgain };
+    // A later publication finalized another version: VM metadata moved on, its graph name did not.
+    const finalizeLaterVersion = async () => {
+      await store.deleteByPattern({ graph: vmMetaGraph, subject: ual, predicate: `${dkg}assertionVersion` });
+      await store.insert([
+        { subject: ual, predicate: `${dkg}assertionVersion`, object: `"2"^^<${xsdInteger}>`, graph: vmMetaGraph },
+      ]);
+    };
+    return {
+      store, payload, vmGraph, swmGraph, retireFinalizedSwmTwin, logInfo, logWarn, ctx, round, shareAgain,
+      finalizeLaterVersion,
+    };
   }
+  type FinalizedTwinRounds = Awaited<ReturnType<typeof finalizedTwinRounds>>;
+  const loggedTimes = (log: { readonly mock: { readonly calls: readonly (readonly unknown[])[] } }, text: string) => (
+    log.mock.calls.filter(([, message]) => String(message).includes(text)).length
+  );
 
   it.each([
     ['done', { retireMarker: async () => undefined }],
@@ -613,21 +628,61 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
     );
   });
 
-  it('takes a snapshot whose copy a share brought back the usual way, and retires it again', async () => {
+  it('retires a copy a share brought back as it holds the twin, and writes nothing', async () => {
     const rounds = await finalizedTwinRounds('public-finalized-twin-shared-again');
     await rounds.round();
     expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledOnce();
 
     await rounds.shareAgain();
     expect(await rounds.store.countQuads(rounds.swmGraph)).toBe(rounds.payload.length);
-    await rounds.round();
-    // The remembered retirement no longer describes the store: the twin is proven and retired again.
+    // The proof that holds the twin finds the copy back, and retires it.
+    expect((await rounds.round()).alreadyHeldAssets).toBe(1);
+    expect(loggedTimes(rounds.logInfo, 'already retired here as finalized Verified Memory twins')).toBe(1);
+    expect(loggedTimes(rounds.logInfo, 'Retired byte-identical SWM twin')).toBe(2);
     expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledTimes(2);
     expect(await rounds.store.countQuads(rounds.swmGraph)).toBe(0);
 
-    // And remembered again: a third round holds it.
+    // Its head and operation rows stayed out of the round's writes: a third round finds nothing to retire.
     expect((await rounds.round()).alreadyHeldAssets).toBe(1);
     expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['its graph dropped', (rounds: FinalizedTwinRounds) => rounds.store.dropGraph(rounds.vmGraph)],
+    ['a later version finalized', (rounds: FinalizedTwinRounds) => rounds.finalizeLaterVersion()],
+  ] as const)('takes the snapshot again once Verified Memory no longer proves the retirement (%s)', async (label, change) => {
+    const rounds = await finalizedTwinRounds(`public-finalized-twin-vm-${label.replace(/ /g, '-')}`);
+    await rounds.round();
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledOnce();
+    expect(await rounds.store.countQuads(rounds.swmGraph)).toBe(0);
+
+    await change(rounds);
+    const later = await rounds.round();
+    // Not held: the round wrote the snapshot back, and its own proof keeps the copy.
+    expect(later.failedPhases).toBe(0);
+    expect(later.alreadyHeldAssets).toBe(0);
+    expect(loggedTimes(rounds.logInfo, 'already retired here as finalized Verified Memory twins')).toBe(0);
+    expect(await rounds.store.countQuads(rounds.swmGraph)).toBe(rounds.payload.length);
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledOnce();
+  });
+
+  it('takes the snapshot the usual way when the proof that would hold it cannot run', async () => {
+    const rounds = await finalizedTwinRounds('public-finalized-twin-proof-failed');
+    await rounds.round();
+    await rounds.shareAgain();
+    rounds.retireFinalizedSwmTwin.mockImplementationOnce(async () => {
+      throw new Error('store unavailable');
+    });
+
+    const later = await rounds.round();
+    expect(later.failedPhases).toBe(0);
+    expect(loggedTimes(rounds.logWarn, 'its proof did not run: store unavailable')).toBe(1);
+    expect(loggedTimes(rounds.logInfo, 'already retired here as finalized Verified Memory twins')).toBe(0);
+    // The usual way proved the twin and retired the copy, and remembered it: a third round holds it.
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledTimes(3);
+    expect(await rounds.store.countQuads(rounds.swmGraph)).toBe(0);
+    expect((await rounds.round()).alreadyHeldAssets).toBe(1);
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledTimes(3);
   });
 
   it.each([

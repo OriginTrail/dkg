@@ -1045,8 +1045,8 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
         for (const descriptor of descriptors) {
           const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
           if (materializedKeys.has(graphKey)) continue;
-          // Retired here as a finalized twin by an earlier round and not back:
-          // held, and nothing to write that would only be retired again.
+          // Retired here as a finalized twin by an earlier round, and proven
+          // so again: held, and nothing to write that would only be retired again.
           if (await recoveryBoundary.admitAsyncMutation(() => snapshotCommit.holdRetiredFinalizedTwin(pid, descriptor))) {
             materializedKeys.add(graphKey);
             finalizedTwinsHeld += 1;

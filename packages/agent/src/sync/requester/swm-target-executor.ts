@@ -314,37 +314,11 @@ export class SwmTargetExecutorV1 {
       ordinaryRootSnapshotApplyAllowed: this.#ports.ordinaryRootSnapshotApplyAllowed,
       resolveRootSnapshotAtomicCompanion:
         this.#ports.resolveRootSnapshotAtomicCompanion,
-      reconcileFinalizedTwin: async (contextGraphId, descriptor) => {
-        const retirement = await reconcileFinalizedSwmTwinFromDescriptor({
-          store: this.#ports.store,
-          writeLocks: this.#ports.writeLocks,
-          contextGraphId,
-          descriptor,
-          retire: (candidate) => this.#ports.retireFinalizedSwmTwin(candidate, target.ctx),
-        });
-        const twinRetired = retirement === 'retired'
-          || retirement === 'already-retired-finalized';
-        if (twinRetired) {
-          // The content is proven finalized here: a later round holds it.
-          this.finalizedTwins.remember(contextGraphId, descriptor);
-          // The twin's graph and head are already gone at this point. Marker
-          // retirement is a second, separate cleanup: if its failure escaped,
-          // the caller would treat the whole reconciliation as deferred, skip
-          // the suppression below, and its bulk append would write the retired
-          // head and operation rows back without their graph. A marker left
-          // behind is the conservative state (the graph stays reported as
-          // incomplete) until a later pass or a catalog replay retires it.
-          await this.#retireLegacyMarker(target, contextGraphId, descriptor);
-        }
-        if (retirement === 'retired') {
-          this.#ports.invalidateListContextGraphsCache();
-          this.#ports.logInfo(
-            target.ctx,
-            `Retired byte-identical SWM twin after SWM recovery found finalized VM for ${descriptor.kaUal}`,
-          );
-        }
-        return twinRetired ? 'suppress-metadata' : 'preserve';
-      },
+      reconcileFinalizedTwin: async (contextGraphId, descriptor) => (
+        await this.#reconcileFinalizedTwin(target, contextGraphId, descriptor, 'retire')
+          ? 'suppress-metadata'
+          : 'preserve'
+      ),
       heldAsRetiredFinalizedTwin: (contextGraphId, descriptor) => (
         this.#heldAsRetiredFinalizedTwin(target, contextGraphId, descriptor)
       ),
@@ -387,10 +361,14 @@ export class SwmTargetExecutorV1 {
 
   /**
    * A snapshot this node proved finalized and retired in an earlier round
-   * (`finalized-swm-twin-memo.ts`) is held while no copy of it is back. A share
-   * that brought one back makes the round take it the usual way, which proves
-   * and retires it again. A legacy marker that outlived the retirement is
-   * retried here, so a round that holds the twin is still a way back for it.
+   * (`finalized-swm-twin-memo.ts`) is held only once the same proof passes
+   * again. It reads Verified Memory and the shared-memory head and graph under
+   * the asset's write lock, and writes nothing unless a share brought the copy
+   * back, which it retires. When Verified Memory no longer holds that content,
+   * or another head is back, the proof fails, the entry is forgotten and the
+   * round takes the snapshot the usual way, as it does when the proof cannot
+   * run. A legacy marker that outlived the retirement is retried here, so a
+   * round that holds the twin is still a way back for it.
    */
   async #heldAsRetiredFinalizedTwin(
     target: PublicSwmTargetV1,
@@ -398,18 +376,65 @@ export class SwmTargetExecutorV1 {
     descriptor: GraphScopedSwmRecoveryDescriptor,
   ): Promise<boolean> {
     if (!this.finalizedTwins.retired(contextGraphId, descriptor)) return false;
-    const head = await this.#snapshotMaterializer.withKaWriteLock(
+    return this.#reconcileFinalizedTwin(target, contextGraphId, descriptor, 'retire-if-outstanding')
+      .catch((cause: unknown) => {
+        this.finalizedTwins.forget(contextGraphId, descriptor);
+        this.#ports.logWarn(
+          target.ctx,
+          `Taking the snapshot of retired finalized SWM twin ${descriptor.kaUal} again: its proof `
+            + `did not run: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
+        return false;
+      });
+  }
+
+  /**
+   * The finalized-twin proof (`finalized-swm-twin-reconciliation.ts`): Verified
+   * Memory holds this snapshot's exact content, and a shared-memory copy of it
+   * is retired. False when the proof fails and a copy stays. The memo follows:
+   * a proven twin is remembered, so a later round holds it, and a failed proof
+   * forgets it. `marker` says when the legacy marker is retired after a proof
+   * that found no copy to retire: always, or only when one is outstanding (a
+   * round that holds the twin).
+   */
+  async #reconcileFinalizedTwin(
+    target: PublicSwmTargetV1,
+    contextGraphId: string,
+    descriptor: GraphScopedSwmRecoveryDescriptor,
+    marker: 'retire' | 'retire-if-outstanding',
+  ): Promise<boolean> {
+    const retirement = await reconcileFinalizedSwmTwinFromDescriptor({
+      store: this.#ports.store,
+      writeLocks: this.#ports.writeLocks,
       contextGraphId,
-      descriptor.subGraphName,
-      descriptor.kaUal,
-      () => this.#snapshotMaterializer.readStoredHead(descriptor),
-    );
-    if (head.version !== null) {
+      descriptor,
+      retire: (candidate) => this.#ports.retireFinalizedSwmTwin(candidate, target.ctx),
+    });
+    if (retirement !== 'retired' && retirement !== 'already-retired-finalized') {
       this.finalizedTwins.forget(contextGraphId, descriptor);
       return false;
     }
-    if (this.#ports.hasOutstandingLegacySwmMarker?.(contextGraphId, descriptor.kaUal) === true) {
+    this.finalizedTwins.remember(contextGraphId, descriptor);
+    // The twin's graph and head are already gone at this point. Marker
+    // retirement is a second, separate cleanup: if its failure escaped, the
+    // caller would treat the whole reconciliation as deferred, skip the
+    // metadata suppression, and its bulk append would write the retired head
+    // and operation rows back without their graph. A marker left behind is the
+    // conservative state (the graph stays reported as incomplete) until a later
+    // pass or a catalog replay retires it.
+    if (
+      marker === 'retire'
+      || retirement === 'retired'
+      || this.#ports.hasOutstandingLegacySwmMarker?.(contextGraphId, descriptor.kaUal) === true
+    ) {
       await this.#retireLegacyMarker(target, contextGraphId, descriptor);
+    }
+    if (retirement === 'retired') {
+      this.#ports.invalidateListContextGraphsCache();
+      this.#ports.logInfo(
+        target.ctx,
+        `Retired byte-identical SWM twin after SWM recovery found finalized VM for ${descriptor.kaUal}`,
+      );
     }
     return true;
   }

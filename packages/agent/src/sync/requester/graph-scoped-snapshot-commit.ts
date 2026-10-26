@@ -15,7 +15,7 @@ export type FinalizedTwinReconciler = (
   contextGraphId: string,
   descriptor: GraphScopedSwmRecoveryDescriptor,
 ) => Promise<FinalizedTwinMetadataDisposition>;
-/** This node already retired this exact snapshot as a finalized twin, and no copy of it is back. */
+/** This node retired this exact snapshot as a finalized twin, and Verified Memory still proves it. */
 export type HeldFinalizedTwinCheck = (
   contextGraphId: string,
   descriptor: GraphScopedSwmRecoveryDescriptor,
@@ -108,10 +108,10 @@ export class GraphScopedSnapshotCommitCoordinator {
   /**
    * True for a snapshot that an earlier round wrote, found finalized in
    * Verified Memory with the same bytes, and retired
-   * (`finalized-swm-twin-memo.ts`), and whose copy has not come back since.
-   * Writing it again would only see it retired again, so the caller counts the
-   * asset as held and writes nothing, and its metadata stays out of the
-   * round's writes, as the retirement left it.
+   * (`finalized-swm-twin-memo.ts`), when the same proof passes again now (it
+   * retires a copy a share brought back). Writing it again would only see it
+   * retired again, so the caller counts the asset as held and writes nothing,
+   * and its metadata stays out of the round's writes, as the retirement left it.
    */
   async holdRetiredFinalizedTwin(contextGraphId: string, descriptor: GraphScopedSwmRecoveryDescriptor): Promise<boolean> {
     if (this.#heldAsRetiredFinalizedTwin === undefined) return false;

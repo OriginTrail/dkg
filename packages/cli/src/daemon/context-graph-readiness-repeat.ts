@@ -47,15 +47,16 @@
 // A walk that stalls is not such a cause. Each job walks every capable peer
 // and pulls the graph's shared-memory metadata from each, with further passes
 // while they make progress. A job stalled when peers served it that metadata
-// through the graph's lane, nothing was deferred, the walk stopped because a
-// further pass made no progress (`coverage-stalled`), and no new shared-memory
-// data was written from any peer. Two such jobs in a row end the sequence: the
-// next one would walk the same peers again and write nothing more. After a
-// restart every node of a network catches its subscriptions up at once, and a
-// graph whose snapshots no job completes was otherwise pulled from every peer
-// for hours. A job that reached no peer, ran before the lane was active, failed
-// before metadata arrived or was deferred is never counted as stalled, so the
-// delayed repeats still cover peers that come later.
+// through the graph's lane, its walk was clean (no failed, timed-out, deferred
+// or locally yielded work, and no snapshot it could not write), the walk
+// stopped because a further pass made no progress (`coverage-stalled`), and no
+// new shared-memory data was written from any peer. Two such jobs in a row end
+// the sequence: the next one would walk the same peers again and write nothing
+// more. After a restart every node of a network catches its subscriptions up
+// at once, and a graph whose snapshots no job completes was otherwise pulled
+// from every peer for hours. A job that reached no peer, ran before the lane
+// was active, or whose work failed or was cut short is never counted as
+// stalled, so the delayed repeats still cover peers and faults that pass.
 
 import type { ContextGraphReadAuthorityDecision } from '@origintrail-official/dkg-agent';
 import { selectedSharedMemoryLaneActive } from '../catchup-selected-lane.js';
@@ -153,11 +154,19 @@ function admitsRepeat(authority: ContextGraphReadAuthorityDecision): boolean {
 function stalledWithoutProgress(job: CatchupJob): boolean {
   const result = job.result;
   const sharedMemory = result?.diagnostics?.sharedMemory;
-  // The job's own count leaves out deferrals of continuation passes; the
-  // shared-memory diagnostic counts every one.
+  // Only a clean walk is evidence: no peer or phase failed or timed out, local
+  // admission neither deferred (the job's own count leaves out continuation
+  // passes; the shared-memory diagnostic counts every one) nor yielded, and
+  // every snapshot that arrived was written. Failed or interrupted work may go
+  // through on a later job.
   return job.selectedLaneFoundInactive !== true
     && result?.deferredBackpressure === 0
     && sharedMemory?.deferredBackpressure === 0
+    && sharedMemory.failedPeers === 0
+    && sharedMemory.failedPhases === 0
+    && sharedMemory.timedOutPhases === 0
+    && sharedMemory.localYield !== true
+    && (sharedMemory.swmCoverage?.materializationFailures ?? 0) === 0
     && sharedMemory.continuationStopReason === 'coverage-stalled'
     && sharedMemory.fetchedMetaTriples > 0
     && sharedMemory.insertedDataTriples === 0;
