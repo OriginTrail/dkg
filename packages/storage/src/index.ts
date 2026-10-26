@@ -25,6 +25,7 @@ export {
   type QueryResult,
   type QueryOptions,
   type StoreWorkPriority,
+  type StoreControlQueue,
   type StorePressureSnapshot,
   type SelectResult,
   type ConstructResult,
@@ -118,6 +119,27 @@ export {
   type StoreSchedulerBusyErrorOptions,
   type StoreSchedulerBusyErrorLike,
 } from './store-priority-scheduler.js';
+export type { StoreSchedulerPriority } from './store-scheduler-timeout-diagnostics.js';
+export {
+  STORE_CONTROL_MAX_SLOTS,
+  STORE_CONTROL_PATH_ON_BY_DEFAULT,
+  STORE_CONTROL_QUEUES,
+  STORE_CONTROL_RESERVED_SLOTS_ENV,
+  STORE_CONTROL_SCHEDULER_ID_PREFIX,
+  buildStoreControlPath,
+  controlStoreOptions,
+  defaultStoreControlSlots,
+  describeStoreControlPath,
+  getStoreControlPath,
+  logStoreControlPathGeometry,
+  registerStoreControlPath,
+  resolveStoreControlConfig,
+  selectStoreScheduler,
+  setStoreControlPathForTesting,
+  type StoreControlConfig,
+  type StoreControlPath,
+  type StoreControlSlots,
+} from './store-control-path.js';
 export {
   STORE_QUEUE_WAIT_BUCKET_UPPER_MS,
   StoreSchedulerStats,
