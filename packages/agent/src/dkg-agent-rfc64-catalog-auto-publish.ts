@@ -186,6 +186,7 @@ export interface RecordRfc64SwmAuthorInventoryShadowParamsV1 {
   /** Lifecycle identity whose assertion URI owns the durable seal. */
   readonly lifecycleAgentAddress: string;
   readonly shareOperationId: string;
+  readonly sealDigest?: string;
 }
 
 export interface RemoveRfc64SwmAuthorInventoryShadowParamsV1 {
@@ -737,6 +738,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       assertionCoordinate: params.assertionCoordinate,
       subGraphName: params.subGraphName ?? undefined,
       source: 'agent.rfc64.swmInventory.seal',
+      sealDigest: params.sealDigest,
     });
     if (candidate === undefined) {
       return Object.freeze({ status: 'stale', reason: 'missing-seal' });

@@ -8,9 +8,10 @@
  * only an authority refresh or a responsibility change can open. Before it reports success it
  * leaves a durable marker; the owed-inventory owner writes the row through the same writer and
  * under the same per-asset lock as the handoff once the lane opens, at a later start included.
- * The detached observer still runs for the share; whichever comes second finds the row present.
+ * A durable marker selects this owner instead of the detached observer.
  */
 
+import { settleDurableSwmInventoryV1, requestDurableSwmInventoryProjectionV1 } from './internal/durable-swm-inventory-execution.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import { withOwnedRpcRequestContext } from '@origintrail-official/dkg-chain';
 import { withDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
@@ -63,14 +64,14 @@ export class Rfc64OwedShareInventoryMethods extends DKGAgentBase {
    * when it resolves; a graph without a catalog obligation, or without RFC-64 persistence, owes
    * nothing here.
    */
-  async recordRfc64OwedShareInventoryV1(this: DKGAgent, params: BoundDurableSwmPromotionParamsV1): Promise<void> {
+  async recordRfc64OwedShareInventoryV1(this: DKGAgent, params: BoundDurableSwmPromotionParamsV1): Promise<boolean> {
     const store = this.rfc64PersistenceV1?.owedShareInventories;
-    if (store === undefined) return;
+    if (store === undefined) return false;
     let owed: boolean;
     // An authority that is not ready yet cannot rule the obligation out.
     try { owed = this.requiresRfc64ShareInventoryV1(params.contextGraphId, params.subGraphName ?? undefined); }
     catch (cause) { if (!(cause instanceof SwmCatalogAuthorityNotReady)) throw cause; owed = true; }
-    if (!owed) return;
+    if (!owed) return false;
     let marker: Readonly<Rfc64OwedShareInventoryV1>;
     try {
       marker = snapshotRfc64OwedShareInventoryV1({
@@ -86,10 +87,11 @@ export class Rfc64OwedShareInventoryMethods extends DKGAgentBase {
       // The catalog writer refuses the same identifiers, so no row could ever be written.
       this.log.warn(params.ctx, `Share ${params.recoveryBinding.intent.operationId} owes no catalog inventory row: `
         + (cause instanceof Error ? cause.message : String(cause)));
-      return;
+      return false;
     }
     await store.put(marker);
     this.requestRfc64OwedShareInventoryDrainV1();
+    return true;
   }
 
   /** One attempt at an owed row, under the asset's inventory write lock. */
@@ -101,13 +103,16 @@ export class Rfc64OwedShareInventoryMethods extends DKGAgentBase {
     if (signal.aborted) return 'waiting';
     const asset = { contextGraphId: marker.contextGraphId, subGraphName: marker.subGraphName,
       authorAddress: marker.authorAddress, assertionCoordinate: marker.assertionCoordinate };
+    const params = { ...asset, lifecycleAgentAddress: marker.authorAddress, shareOperationId: marker.shareOperationId,
+      sealDigest: marker.sealDigest, ctx };
     return withDefaultStoreWorkPriority('background', () => withOwnedRpcRequestContext({
       requestClass: 'background', signal,
-    }, () => runtime.runInventoryWriteExclusive(asset, async (): Promise<OwedShareInventoryDrainOutcomeV1> => {
+    }, async (): Promise<OwedShareInventoryDrainOutcomeV1> => {
       let result: SwmInventoryAttemptOutcome;
       try {
-        result = await this.tryCommitRfc64SwmAuthorInventoryV1({ ...asset, lifecycleAgentAddress: marker.authorAddress,
-          shareOperationId: marker.shareOperationId });
+        result = await settleDurableSwmInventoryV1(this, params,
+          () => runtime.runInventoryWriteExclusive(asset, () => this.tryCommitRfc64SwmAuthorInventoryV1(params)),
+          message => this.log.warn(ctx, message));
       } catch (error) {
         const cause = error instanceof SwmInventoryWriteFailure ? error.cause : error;
         if (cause instanceof SwmCatalogAuthorityNotReady) return 'waiting';
@@ -118,9 +123,8 @@ export class Rfc64OwedShareInventoryMethods extends DKGAgentBase {
         return result.dormantReason === 'inactive-lane' || result.dormantReason === 'authority-transition'
           ? 'waiting' : result.dormantReason;
       }
-      // The row is durable; a projection the supervisor does not admit now is found by its next discovery.
-      this.requestRfc64SwmCatalogProjectionV1({ contextGraphId: marker.contextGraphId, authorAddress: marker.authorAddress, ctx });
-      return 'written';
-    })));
+      // Retain the durable obligation if authority turnover prevents projection admission.
+      return await requestDurableSwmInventoryProjectionV1(this, params) ? 'written' : 'waiting';
+    }));
   }
 }

@@ -141,20 +141,24 @@ describe('owed share inventory owner', () => {
   });
 
   it('warns about a pass that failed as a whole and tries again on the next request', async () => {
-    const { owner, kept, warnings } = fixture({ listed: ['written'] });
-    const list = vi.fn(() => { throw new Error('persistence owner is closed'); });
+    const { kept, warnings, drain, remove } = fixture({ listed: ['written'] });
+    const list = vi.fn(() => [...kept.values()]).mockImplementationOnce(() => { throw new Error('persistence owner is closed'); });
     const failing = new Rfc64OwedShareInventoryOwnerV1({
-      list, unreadableAtOpen: () => 0, drain: vi.fn(), remove: vi.fn(), retryIntervalMs: () => 0,
+      list, unreadableAtOpen: () => 0, drain, remove, retryIntervalMs: () => 0,
       warn: (_ctx, line) => { warnings.push(line); },
     });
     failing.start(createOperationContext('system'));
     await failing.whenIdle();
     expect(warnings).toEqual(['Owed share inventory pass failed: persistence owner is closed']);
-    await failing.close();
-    owner.start(createOperationContext('system'));
-    await owner.whenIdle();
+    expect(kept.size).toBe(1);
+    expect(drain).not.toHaveBeenCalled();
+    failing.request();
+    await failing.whenIdle();
+    expect(list).toHaveBeenCalledTimes(3); // The successful pass rechecks for remaining markers.
+    expect(drain).toHaveBeenCalledOnce();
+    expect(remove).toHaveBeenCalledOnce();
     expect(kept.size).toBe(0);
-    await owner.close();
+    await failing.close();
   });
 
   it('stops a pass at close without counting the attempt as failed', async () => {

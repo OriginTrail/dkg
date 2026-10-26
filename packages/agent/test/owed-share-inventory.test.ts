@@ -8,9 +8,13 @@ import {
   canonicalGraphScopedAuthorSealFromAssertionSealV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   createOperationContext,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+  MemoryLayer,
 } from '@origintrail-official/dkg-core';
 import { describe, expect, it, vi } from 'vitest';
 
+import { resolveDurableGraphScopedAuthorSealCandidateV1 } from '../src/durable-author-seal-resolver-v1.js';
 import { DKGAgent } from '../src/index.js';
 import { finishDurableShare } from '../src/internal/promote/durable-share-inventory.js';
 import {
@@ -24,6 +28,7 @@ import {
   AUTHOR_WALLET,
   CONTEXT_GRAPH_ID,
   NETWORK_ID,
+  PROJECTION_QUADS,
   agents,
   seedDurableWorkspaceAssetV1,
   startRepairAgentV1,
@@ -61,6 +66,8 @@ function fakeAgent(options: { store?: boolean; requires?: () => boolean } = {}) 
   agent.requiresRfc64ShareInventoryV1 = vi.fn(options.requires ?? (() => true));
   agent.tryCommitRfc64SwmAuthorInventoryV1 = vi.fn();
   agent.requestRfc64SwmCatalogProjectionV1 = vi.fn(() => true);
+  agent.rfc64CatalogAuthorityRefreshFailureReasonV1 = vi.fn(() => 'registered-authority-unfinalized');
+  agent.reconcileRfc64CatalogResponsibilityV1 = vi.fn(async () => ({ active: true, mode: 'catalog', selectionSource: 'default' }));
   return { agent, store, kept };
 }
 
@@ -77,8 +84,8 @@ describe('owed share inventory marker at share completion', () => {
     await finishDurableShare(agent, bound('fenced-share'), async () => undefined, detached);
     expect(store.put).toHaveBeenCalledWith(MARKER);
     expect(request).toHaveBeenCalledOnce();
-    // The detached observer still runs for the share.
-    expect(detached).toHaveBeenCalledWith(expect.objectContaining({ shareOperationId: 'fenced-share' }));
+    // Durable ownership replaces the detached execution path.
+    expect(detached).not.toHaveBeenCalled();
     expect(agent.requiresRfc64ShareInventoryV1).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, undefined);
   });
 
@@ -111,6 +118,61 @@ describe('owed share inventory marker at share completion', () => {
       .rejects.toMatchObject({ code: 'PROMOTE_POST_COMMIT_FAILURE' });
   });
 
+  it.each(['stamp', 'record', 'unavailable'] as const)('preserves observer fallback when %s cannot transfer ownership', async mode => {
+    const { agent, store } = fakeAgent({ store: mode !== 'unavailable' });
+    const detached = vi.fn();
+    if (mode === 'record') store.put.mockRejectedValueOnce(new Error('disk full'));
+    const completion = finishDurableShare(agent, bound('fallback'), async () => {
+      if (mode === 'stamp') throw new Error('pointer unavailable');
+    }, detached);
+    if (mode === 'unavailable') await completion;
+    else await expect(completion).rejects.toMatchObject({ code: 'PROMOTE_POST_COMMIT_FAILURE' });
+    expect(detached).toHaveBeenCalledOnce();
+    expect(detached).toHaveBeenCalledWith(expect.objectContaining({ shareOperationId: 'fallback' }));
+  });
+
+  it('runs a recorded share once when completion and repeated drain requests race', async () => {
+    const { agent, kept } = fakeAgent();
+    let release!: () => void;
+    agent.tryCommitRfc64SwmAuthorInventoryV1.mockImplementationOnce(() => new Promise(resolve => {
+      release = () => resolve({ status: 'applied' });
+    }));
+    const owner = agent.createRfc64OwedShareInventoryOwnerV1(() => ({ retryIntervalMs: 0 }));
+    owner.start(createOperationContext('system'));
+    await owner.whenIdle();
+    const detached = vi.fn();
+    try {
+      await finishDurableShare(agent, bound('racing-share'), async () => undefined, detached);
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      agent.requestRfc64OwedShareInventoryDrainV1();
+      agent.requestRfc64OwedShareInventoryDrainV1();
+      expect(kept).toHaveLength(1);
+      release();
+      await owner.whenIdle();
+      expect(kept).toEqual([]);
+      expect(agent.tryCommitRfc64SwmAuthorInventoryV1).toHaveBeenCalledOnce();
+      expect(agent.requestRfc64SwmCatalogProjectionV1).toHaveBeenCalledOnce();
+      expect(detached).not.toHaveBeenCalled();
+    } finally { release?.(); await owner.close(); }
+  });
+
+  it('does not report success or schedule an observer before durable recording finishes', async () => {
+    const { agent, store } = fakeAgent();
+    let release!: () => void;
+    store.put.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+    const detached = vi.fn();
+    let completed = false;
+    const completion = finishDurableShare(agent, bound('slow-disk'), async () => undefined, detached)
+      .then(() => { completed = true; });
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    expect(completed).toBe(false);
+    expect(detached).not.toHaveBeenCalled();
+    release();
+    await completion;
+    expect(completed).toBe(true);
+    expect(detached).not.toHaveBeenCalled();
+  });
+
   it('warns and keeps no marker for identifiers the catalog writer would refuse', async () => {
     const { agent, store } = fakeAgent();
     await agent.recordRfc64OwedShareInventoryV1(bound('bad', { assertionCoordinate: 'bad\u0000name' }));
@@ -135,7 +197,7 @@ describe('one attempt at an owed row', () => {
     await expect(agent.drainRfc64OwedShareInventoryV1(MARKER, createOperationContext('system'))).resolves.toBe(outcome);
     expect(agent.tryCommitRfc64SwmAuthorInventoryV1).toHaveBeenCalledWith({ contextGraphId: CONTEXT_GRAPH_ID,
       subGraphName: null, authorAddress: AUTHOR, assertionCoordinate: 'asset', lifecycleAgentAddress: AUTHOR,
-      shareOperationId: 'fenced-share' });
+      shareOperationId: 'fenced-share', sealDigest: SEAL_DIGEST, ctx: expect.anything() });
     expect(agent.requestRfc64SwmCatalogProjectionV1).toHaveBeenCalledTimes(outcome === 'written' ? 1 : 0);
   });
 
@@ -147,6 +209,32 @@ describe('one attempt at an owed row', () => {
     const failure = new SwmInventoryWriteFailure('inventory-maintenance', 'u', new Error('database locked'));
     agent.tryCommitRfc64SwmAuthorInventoryV1.mockRejectedValueOnce(failure);
     await expect(agent.drainRfc64OwedShareInventoryV1(MARKER, createOperationContext('system'))).rejects.toBe(failure);
+  });
+
+  it('settles responsibility outside the asset lock before retrying the exact owed share', async () => {
+    const { agent } = fakeAgent();
+    const runtime = rfc64SwmInventoryShadowRuntimeV1(agent);
+    vi.spyOn(runtime, 'waitForResponsibilitySettlement').mockResolvedValue(true);
+    agent.rfc64CatalogAuthorityRefreshFailureReasonV1.mockReturnValue(undefined);
+    agent.tryCommitRfc64SwmAuthorInventoryV1.mockResolvedValueOnce({ status: 'dormant', dormantReason: 'inactive-lane' })
+      .mockResolvedValueOnce({ status: 'applied' });
+    agent.reconcileRfc64CatalogResponsibilityV1.mockImplementation(async () => {
+      expect(runtime.hasInventoryWrites({ contextGraphId: CONTEXT_GRAPH_ID, authorAddress: AUTHOR })).toBe(false);
+      return { active: true, mode: 'catalog', selectionSource: 'default' };
+    });
+    await expect(agent.drainRfc64OwedShareInventoryV1(MARKER, createOperationContext('system'))).resolves.toBe('written');
+    expect(agent.tryCommitRfc64SwmAuthorInventoryV1).toHaveBeenCalledTimes(2);
+    expect(agent.reconcileRfc64CatalogResponsibilityV1).toHaveBeenCalledOnce();
+    expect(agent.requestRfc64SwmCatalogProjectionV1).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the marker when projection cannot accept the durable row', async () => {
+    const { agent } = fakeAgent();
+    agent.tryCommitRfc64SwmAuthorInventoryV1.mockResolvedValue({ status: 'existing' });
+    agent.requestRfc64SwmCatalogProjectionV1.mockReturnValue(false);
+    await expect(agent.drainRfc64OwedShareInventoryV1(MARKER, createOperationContext('system'))).resolves.toBe('waiting');
+    expect(agent.reconcileRfc64CatalogResponsibilityV1).toHaveBeenCalledOnce();
+    expect(agent.requestRfc64SwmCatalogProjectionV1).toHaveBeenCalledTimes(2);
   });
 
   it('runs the owner over the node\'s markers and logs a failed attempt', async () => {
@@ -191,7 +279,7 @@ describe('owed share inventory on a started agent', () => {
     return agent;
   }
 
-  it('writes the row of a share made behind the fence once the lane opens, after a restart', async () => {
+  it('recovers the exact shared version after reopening for editing and restarting behind a fence', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-owed-share-inventory-'));
     tempDirs.push(dataDir);
     const author = await startAuthor('owed-share-author', dataDir, true);
@@ -206,12 +294,22 @@ describe('owed share inventory on a started agent', () => {
       recoveryBinding: { ...bound('x').recoveryBinding, sealDigest,
         intent: { ...bound('x').recoveryBinding.intent, operationId: seeded.shareOperationId } },
     }));
-    // The detached observer gives up at once; nothing else would write the row.
+    // Only the durable owner is scheduled for this share.
     await author.awaitInFlightRfc64SwmInventoryObserversV1();
     expect(author.readRfc64SwmAuthorInventorySnapshotV1(scope)).toBeNull();
     const owed = { version: 1, contextGraphId: CONTEXT_GRAPH_ID, subGraphName: null, authorAddress: AUTHOR,
       assertionCoordinate: seeded.assertionCoordinate, sealDigest, shareOperationId: seeded.shareOperationId };
     expect(markers(author)).toEqual([owed]);
+    const sharedGraph = knowledgeAssetLayerGraphUri(CONTEXT_GRAPH_ID, MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(seeded.seal.kaUal!, seeded.seal.assertionVersion!));
+    await author.store.insert(PROJECTION_QUADS.map(quad => ({ ...quad, graph: sharedGraph })));
+    await author.assertion.pullFrom(CONTEXT_GRAPH_ID, seeded.assertionCoordinate, 'swm', { agentAddress: AUTHOR });
+    expect(await resolveDurableGraphScopedAuthorSealCandidateV1({ store: author.store,
+      contextGraphId: CONTEXT_GRAPH_ID, agentAddress: AUTHOR, assertionCoordinate: seeded.assertionCoordinate,
+      source: 'test.reopened.active' })).toBeUndefined();
+    expect(await resolveDurableGraphScopedAuthorSealCandidateV1({ store: author.store,
+      contextGraphId: CONTEXT_GRAPH_ID, agentAddress: AUTHOR, assertionCoordinate: seeded.assertionCoordinate,
+      source: 'test.reopened.exact', sealDigest })).toBeDefined();
 
     await author.stop();
     agents.splice(agents.indexOf(author), 1);
@@ -240,7 +338,8 @@ describe('owed share inventory on a started agent', () => {
     const author = await startAuthor('owed-share-superseded', dataDir, false);
     const seeded = await seedDurableWorkspaceAssetV1(author, 'moved-on', 102n);
     const store = (author as any).rfc64PersistenceV1.owedShareInventories;
-    const replaced = { ...MARKER, assertionCoordinate: seeded.assertionCoordinate, shareOperationId: 'replaced-share' };
+    const replaced = { ...MARKER, assertionCoordinate: seeded.assertionCoordinate, shareOperationId: 'replaced-share',
+      sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(canonicalGraphScopedAuthorSealFromAssertionSealV1(seeded.seal)) };
     const unsealed = { ...MARKER, assertionCoordinate: 'never-sealed', shareOperationId: 'unsealed-share' };
     await store.put(replaced);
     await store.put(unsealed);
