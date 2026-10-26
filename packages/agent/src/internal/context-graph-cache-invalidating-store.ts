@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { bindStoreContentFence, storeContentFence } from './store-content-fence.js';
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import {
   deleteByPatternWithoutCount,
@@ -236,5 +237,7 @@ export function createMutationObservedStore(
       return innerStore.close();
     },
   };
+  const fence = storeContentFence(invalidateAfterMutation);
+  if (fence) bindStoreContentFence(wrapper, fence);
   return wrapper;
 }

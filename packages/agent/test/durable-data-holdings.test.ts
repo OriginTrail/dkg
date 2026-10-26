@@ -250,7 +250,7 @@ describe('planning a DATA phase from holdings', () => {
       holdings: { read: async () => { throw new Error('store queue wait timeout'); }, confirmCurrent: async () => {} },
       logWarn,
     });
-    expect(failed).toEqual({ confirmedCopies: 0 });
+    expect(failed).toEqual({ confirmedCopies: 0, continuation: 'reconsider-holdings' });
     expect(logWarn).toHaveBeenCalledWith(expect.stringContaining('store queue wait timeout'));
 
     const aborted = new AbortController();

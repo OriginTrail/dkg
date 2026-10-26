@@ -4,6 +4,7 @@ import type { SyncAdmissionSource, SyncContextGraphPriorityConfig } from './sync
 import type { SyncOperationLane } from './sync/attempt-telemetry.js';
 import type { SyncCheckpointStore } from './sync/checkpoint/state.js';
 import type { DurableSyncContext, DurableSyncFetchRequest } from './sync/requester/durable-sync.js';
+import type { StoreContentFence } from './internal/store-content-fence.js';
 import type { HeldGraphScopedAssetsRequest } from './sync/requester/durable-data-holdings.js';
 import type { ExactBatchStreamDriverPorts } from './sync/requester/exact-batch-stream-driver.js';
 import type { DurableRecoveryAuthority, DurableRecoveryInput } from './durable-recovery-authority.js';
@@ -54,7 +55,10 @@ export interface DurableRecoveryHost {
   };
   readonly storeInsert: DurableSyncContext['storeInsert'];
   /** Which assets of a verified generation the store holds; a graph-owned round skips their DATA. */
-  readonly readHeldGraphScopedAssets?: (request: HeldGraphScopedAssetsRequest) => Promise<ReadonlySet<string>>;
+  readonly heldStore?: {
+    readonly read: (request: HeldGraphScopedAssetsRequest) => Promise<ReadonlySet<string>>;
+    readonly withScope: StoreContentFence['withScope'];
+  };
   materialization(scope: RecoveryMaterializationScope): RecoveryMaterialization;
   resolveOrdinaryAuthority(ctx: OperationContext, input: DurableRecoveryInput): DurableRecoveryAuthority;
 }

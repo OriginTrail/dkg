@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { DurableRecoveryRoundDecision } from './durable-recovery-round.js';
 import type { MissingDurableAsset, DurableHoldingsOptions } from './requester/durable-data-holdings.js';
 
 export type DurableRecoveryAction =
@@ -30,6 +31,10 @@ export class DurableRecoveryFetchPolicy {
     if (repeated > 0) this.useFullGraph();
     else this.pending = batches.map(assets => ({ kind: 'exact-batch', peerId, assets }));
     return repeated;
+  }
+
+  recordRound(decision: DurableRecoveryRoundDecision, advanced: boolean): void {
+    if (advanced && decision.strategy === 'full' && decision.continuation === 'full-graph') this.useFullGraph();
   }
 
   recordExact(complete: boolean): void {

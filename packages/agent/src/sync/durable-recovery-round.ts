@@ -7,7 +7,8 @@ export type DurableRecoveryRoundDecision = {
   readonly confirmedCopies: number;
   readonly rejectedResumeOffset?: number;
 } & (
-  | { readonly strategy: 'not-started' | 'full' | 'held' }
+  | { readonly strategy: 'not-started' | 'held' }
+  | { readonly strategy: 'full'; readonly continuation: 'full-graph' | 'reconsider-holdings' }
   | { readonly strategy: 'exact-missing'; readonly batches: readonly (readonly MissingDurableAsset[])[] }
 );
 

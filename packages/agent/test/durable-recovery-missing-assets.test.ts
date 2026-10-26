@@ -25,7 +25,7 @@ const missing = (...assets: Array<[string, string]>): MissingDurableAsset[] => (
 /** A round that found the rest of the generation held and left these batches to the owner. */
 const leaves = (...batches: MissingDurableAsset[][]): Round => async (continuation) => {
   return durableRecoveryRoundOutcome(createIncompleteDurableSyncResult(), continuation.ownerFetchesMissingAssets
-    ? { strategy: 'exact-missing', batches, confirmedCopies: 0 } : { strategy: 'full', confirmedCopies: 0 });
+    ? { strategy: 'exact-missing', batches, confirmedCopies: 0 } : { strategy: 'full', continuation: 'full-graph', confirmedCopies: 0 });
 };
 /** A round that found the whole generation held: it settles the terminal boundary. */
 const held: Round = async (_continuation, store) => {
@@ -154,7 +154,7 @@ describe('durable recovery fetches the assets a held generation lacks', () => {
         stored = 10;
         store.setManifestBoundOffset(dataKey, stored, GENERATION, Date.now(), PREFIX);
         return durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), checkpointAdvances: 1 },
-          { strategy: 'full', confirmedCopies: 0 });
+          { strategy: 'full', continuation: 'full-graph', confirmedCopies: 0 });
       }
       return leavesOrPulls(missing(['ual-1', '1']))(continuation, store);
     };
@@ -163,6 +163,18 @@ describe('durable recovery fetches the assets a held generation lacks', () => {
     expect((await f.run()).outcome).toBe('terminal');
     expect(f.offered).toEqual([true, false]);
     expect(f.exactRequests).toEqual([]);
+  });
+
+  it.each([0, 3])('uses the explicit reconsider policy independently of %s confirmed copies', async confirmedCopies => {
+    const advance: Round = async (_continuation, store) => {
+      store.setManifestBoundOffset(dataKey, 10, GENERATION, Date.now(), PREFIX);
+      return durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), checkpointAdvances: 1 },
+        { strategy: 'full', continuation: 'reconsider-holdings', confirmedCopies });
+    };
+    const f = runner([advance, leaves(missing(['ual-1', '2'])), held]);
+    expect((await f.run()).outcome).toBe('terminal');
+    expect(f.offered).toEqual([true, true, true]);
+    expect(f.exactRequests).toEqual([['ual-1']]);
   });
 
   it('offers nothing to rounds when it cannot make exact requests', async () => {

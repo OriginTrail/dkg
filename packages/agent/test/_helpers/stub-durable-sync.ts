@@ -9,7 +9,7 @@ export function stubDurableSync(
     syncFromPeerDetailed: sync,
     canUseLegacyDurableSyncForContextGraphV1: async () => true,
     runLegacyDurableSyncDetailed: async (_ctx: unknown, ...args: Parameters<typeof sync>) => ({
-      result: await sync(...args), recoveryRound: { strategy: 'full', confirmedCopies: 0 },
+      result: await sync(...args), recoveryRound: { strategy: 'full', continuation: 'full-graph', confirmedCopies: 0 },
     }),
   });
 }

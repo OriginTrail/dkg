@@ -42,12 +42,12 @@ export async function persistDurableRemainingMetadata(
 
 /** Preserve admissible META even when local holdings replace the DATA transfer. */
 export async function persistDurableHoldingsMetadata(
-  context: Pick<DurableSyncContext, 'ctx' | 'signal' | 'processDurableBatchInWorker' | 'storeInsert' | 'admitVerifiedPage' | 'assertHeldGenerationCurrent'>,
+  context: Pick<DurableSyncContext, 'ctx' | 'signal' | 'processDurableBatchInWorker' | 'storeInsert' | 'admitVerifiedPage'>,
   contextGraphId: string,
   meta: SyncPageResult,
   accumulator: DurableSyncAccumulator,
+  assertCurrent: () => void,
 ): Promise<void> {
-  const assertCurrent = () => { context.signal?.throwIfAborted(); context.assertHeldGenerationCurrent?.(); };
   assertCurrent();
   // No assertion payload was fetched. Its envelope is already held or belongs
   // to a later exact request; only independently admissible META may be stored.

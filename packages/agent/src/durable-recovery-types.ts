@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { DurableRecoveryRoundDecision } from './sync/durable-recovery-round.js';
-import type { DurableHoldingsOptions } from './sync/requester/durable-data-holdings.js';
-import type { VerifiedDurableBoundary } from './sync/durable-recovery-boundary-seed.js';
+import type { GraphOwnedRecoveryInput } from './sync/requester/graph-owned-recovery.js';
 import { type DurableRecoveryInput } from './durable-recovery-authority.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
 import { type ChallengePinnedGraphScopedAsset } from './sync/requester/graph-scoped-materialization.js';
 import { type PhaseCallback } from '@origintrail-official/dkg-publisher';
 import { type ExactAssetSelection } from './sync/exact-assets.js';
-import { type DurableMetaContinuation, type ExactAssetResponderCapability, type VerifiedFullSnapshot } from './sync/requester/durable-sync.js';
+import { type ExactAssetResponderCapability, type VerifiedFullSnapshot } from './sync/requester/durable-sync.js';
 import { type ExactAssetFetchSessionPolicy, type ExactDurableFetchDisposition } from './sync/requester/exact-durable-fetch.js';
 import { type SyncAdmissionSource } from './sync/policy.js';
 import { type DurableSyncResult } from './dkg-agent-types.js';
@@ -65,9 +64,7 @@ export type DurableRecoveryOptions = {
   /** Internal transport decision; required streams never replay an enlarged selection. */
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
   /** Owner-private retained META prefix for bounded durable recovery. */
-  durableMetaContinuation?: DurableMetaContinuation;
-  durableRecoveryRound?: DurableHoldingsOptions;
-  durableResumeBoundary?: VerifiedDurableBoundary;
+  graphRecovery?: GraphOwnedRecoveryInput;
   /** Admission override for foreground VM recovery. */
   priority?: number;
   /**
@@ -135,9 +132,7 @@ export type DurableGraphOptions = {
   settlementSliceTimeoutMs?: number;
   signal?: AbortSignal;
   isCurrent?: () => boolean;
-  durableMetaContinuation?: DurableMetaContinuation;
-  durableRecoveryRound?: DurableHoldingsOptions;
-  durableResumeBoundary?: VerifiedDurableBoundary;
+  graphRecovery?: GraphOwnedRecoveryInput;
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
 };
 

@@ -487,7 +487,7 @@ export class DurableRecoveryRunner {
         );
       }
       if (outcome === 'partial-progress') {
-        if ((checkpointAdvanced || manifestRebound) && round.decision.strategy === 'full' && round.decision.confirmedCopies === 0) fetchPolicy.useFullGraph();
+        fetchPolicy.recordRound(round.decision, checkpointAdvanced || manifestRebound);
         health.successfulSlices += 1;
         health.lastSuccessfulTransportAtMs = Date.now();
         if ((lastResult.timedOutPhases ?? 0) > 0) health.recentTimeouts += 1;

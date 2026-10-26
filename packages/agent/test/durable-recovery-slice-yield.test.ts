@@ -131,7 +131,7 @@ async function recoverWithSpentSlices(peer: ReturnType<typeof servingPeer>) {
     contextGraphIds: [CG],
     durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
     settlementSliceDeadline: Date.now(),
-    durableMetaContinuation,
+    graphRecovery: { meta: durableMetaContinuation, holdings: {} },
     fetchSyncPages: (request) => {
       if (request.phase === 'data') {
         dataRounds.push({

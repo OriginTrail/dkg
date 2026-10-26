@@ -104,9 +104,7 @@ export async function runDurableRecovery(request: DurableRecoveryRequest): Promi
               settlementSliceTimeoutMs: options?.settlementSliceTimeoutMs,
               signal: operationBoundary.signal,
               isCurrent: options?.isCurrent,
-              durableMetaContinuation: options?.durableMetaContinuation,
-              durableRecoveryRound: options?.durableRecoveryRound,
-              durableResumeBoundary: options?.durableResumeBoundary,
+              graphRecovery: options?.graphRecovery,
             },
           });
           if (detailed.exactFetchDisposition !== undefined) {

@@ -44,8 +44,7 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
     settlementSliceTimeoutMs,
     signal,
     isCurrent,
-    durableMetaContinuation, durableResumeBoundary,
-    durableRecoveryRound,
+    graphRecovery,
   } = options;
   const exactAssetFetchPolicy = options.exactAssetFetchPolicy;
   const exactAssetSelection = exactAssetFetchPolicy?.selection;
@@ -94,8 +93,6 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
     exactAssetFetchPolicyFor: exactAssetFetchPolicy?.kind !== 'ephemeral-challenge'
       ? () => exactAssetFetchPolicy
       : undefined,
-    durableMetaContinuation, durableResumeBoundary,
-    durableRecoveryRound,
     stopOnBackoffWorthyFailure,
     admitVerifiedPage: page => authority.admitVerifiedPage(page),
     processDurableBatchInWorker: host.verification.processBatch,
@@ -157,13 +154,15 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
       case 'unsupported-before-start': return runDurableSyncDetailed(durableContext);
     }
   }
-  if (!durableMetaContinuation) return { result: await runDurableSync(durableContext) };
-  return materialization.withHeldAssetFence(fence => runDurableSyncDetailed({
-    ...durableContext,
-    assertHeldGenerationCurrent: fence.assertCurrent,
-    heldGraphScopedAssets: currentHeldGraphScopedAssetsReader({
-      readHeld: host.readHeldGraphScopedAssets, binding: fence.binding,
+  if (!graphRecovery || onVerifiedFullSnapshot) return { result: await runDurableSync(durableContext) };
+  return materialization.withHeldAssetFence(fence => {
+    const reader = currentHeldGraphScopedAssetsReader({
+      readHeld: host.heldStore?.read, binding: fence.binding,
       readChainState: authority.readHeldAssetChainState?.bind(authority), budget: contextGraphBudget,
-    }),
-  }), signal);
+    });
+    return runDurableSyncDetailed({ ...durableContext, graphRecovery: { ...graphRecovery,
+      held: reader && host.heldStore ? { reader, assertCurrent: fence.assertCurrent,
+        withStoreFence: host.heldStore.withScope } : undefined,
+    } });
+  }, signal);
 }

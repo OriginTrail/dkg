@@ -1,3 +1,4 @@
+import { storeContentFence } from './internal/store-content-fence.js';
 import { mergeRpcUsageWindows } from '@origintrail-official/dkg-chain';
 import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
 import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-recovery-host.js';
@@ -584,6 +585,7 @@ export class DKGAgentBase {
     };
     const reconcile: DurableRecoveryHost['reconcile'] = (asset, ctx) =>
       reconcileAfterMaterialization(cleanup, asset, ctx);
+    const heldContent = storeContentFence(agent.store);
     const materialization = new RecoveryMaterializationOwner({
       chain: () => agent.chain,
       store: () => agent.store,
@@ -654,7 +656,7 @@ export class DKGAgentBase {
       storeInsert: ({ quads, signal }) => agent.insertSyncedQuadsAndInvalidateListCache(quads, {
         priority: 'background', source: 'agent.durableSync.storeInsert', signal,
       }),
-      readHeldGraphScopedAssets: heldGraphScopedAssetsReader(agent.store),
+      heldStore: heldContent ? { read: heldGraphScopedAssetsReader(agent.store), withScope: heldContent.withScope.bind(heldContent) } : undefined,
       materialization: scope => materialization.forOperation(scope),
       checkpoints: {
         deleteCheckpoint: key => deleteSyncPageCheckpoint(agent.syncCheckpoints, key),

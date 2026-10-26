@@ -332,7 +332,7 @@ export async function planDurableDataFromLocalHoldings(input: {
   readonly holdings: DurableHoldingsReader;
   readonly signal?: AbortSignal;
   readonly logWarn: (message: string) => void;
-}): Promise<{ plan?: DurableHoldingsPlan; confirmedCopies: number }> {
+}): Promise<{ plan?: DurableHoldingsPlan; confirmedCopies: number; continuation: 'full-graph' | 'reconsider-holdings' }> {
   const { contextGraphId, manifest, options, holdings } = input;
   let confirmedCopies = 0;
   const request = { contextGraphId, descriptors: manifest.descriptors, signal: input.signal };
@@ -349,9 +349,9 @@ export async function planDurableDataFromLocalHoldings(input: {
       `Could not establish which assets of "${contextGraphId}" this node holds; fetching the graph: `
         + `${error instanceof Error ? error.message : String(error)}`,
     );
-    return { confirmedCopies };
+    return { confirmedCopies, continuation: 'reconsider-holdings' };
   }
-  return { plan, confirmedCopies };
+  return { plan, confirmedCopies, continuation: plan.kind === 'full' ? 'full-graph' : 'reconsider-holdings' };
 }
 
 /**

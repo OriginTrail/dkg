@@ -6602,7 +6602,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             stopOnBackoffWorthyFailure: true, totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS,
             settlementSliceTimeoutMs: DURABLE_RECOVERY_SETTLEMENT_SLICE_TIMEOUT_MS,
             signal: this.node.stopSignal ?? undefined, priority: FOREGROUND_CATCHUP_SYNC_PRIORITY,
-            source: 'vm-recovery', durableMetaContinuation, durableRecoveryRound, durableResumeBoundary,
+            source: 'vm-recovery', graphRecovery: { meta: durableMetaContinuation, holdings: durableRecoveryRound, boundary: durableResumeBoundary },
           });
           return durableRecoveryRoundOutcome(detailed.result, detailed.recoveryRound);
         },

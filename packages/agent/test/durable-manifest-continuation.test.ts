@@ -215,7 +215,7 @@ function createTwoRoundHarness(
       contextGraphIds: [contextGraphId],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages: fetch,
-      durableMetaContinuation, durableResumeBoundary,
+      graphRecovery: durableMetaContinuation || durableResumeBoundary ? { meta: durableMetaContinuation ?? { requesterScope: 'candidate-test-meta' }, holdings: {}, boundary: durableResumeBoundary } : undefined,
       exactAssetSelectionFor: exactAssetUals
         ? () => ({ kind: 'ual-only', assetUals: exactAssetUals })
         : undefined,
@@ -762,7 +762,7 @@ describe('manifest-bound durable DATA continuation', () => {
       ctx,
       remotePeerId,
       contextGraphIds: [contextGraphId],
-      durableMetaContinuation: continuation,
+      graphRecovery: { meta: continuation, holdings: {} },
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages: async ({ phase, manifestDigest }) => {
         if (phase === 'meta') {

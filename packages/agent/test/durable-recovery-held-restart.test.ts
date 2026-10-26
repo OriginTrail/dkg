@@ -1,3 +1,5 @@
+import { createListContextGraphsCacheInvalidatingStore } from '../src/internal/context-graph-cache-invalidating-store.js';
+import { storeContentFence } from '../src/internal/store-content-fence.js';
 import { RecoveryMaterializationOwner } from '../src/durable-recovery-materialization.js';
 import { continueContextGraphSubscriptionLine } from '../src/context-graph-subscription-policy.js';
 import type { ContextGraphSub } from '../src/dkg-agent-types.js';
@@ -162,8 +164,9 @@ function node(
 ) {
   const peers: Record<string, ServingPeer> = 'send' in serving ? { [PEER]: serving as ServingPeer } : serving;
   const chain = options.chain ?? (() => Object.values(peers)[0]!.current());
-  const store = new OxigraphStore();
-  stores.push(store);
+  const rawStore = new OxigraphStore();
+  stores.push(rawStore);
+  const store = createListContextGraphsCacheInvalidatingStore(rawStore, () => {});
   const writes: string[] = [];
   const info: string[] = [];
   let holdingsUnreadable = options.holdingsUnreadable === true;
@@ -205,7 +208,7 @@ function node(
   const round = (
     checkpointStore: MemorySyncCheckpointStore,
     remotePeerId: string,
-    roundOptions: Pick<DurableSyncContext, 'durableMetaContinuation' | 'durableRecoveryRound' | 'exactAssetSelectionFor' | 'settlementSliceDeadline' | 'durableResumeBoundary'>,
+    roundOptions: Pick<DurableSyncContext, 'graphRecovery' | 'exactAssetSelectionFor' | 'settlementSliceDeadline'>,
   ) => materialization.withHeldAssetFence(fence => runDurableSyncDetailed({
     ctx,
     remotePeerId,
@@ -243,8 +246,10 @@ function node(
       logDebug: () => {},
     }),
     ...roundOptions,
-    heldGraphScopedAssets: holdings(fence.binding),
-    assertHeldGenerationCurrent: fence.assertCurrent,
+    graphRecovery: roundOptions.graphRecovery ? { ...roundOptions.graphRecovery, held: {
+      reader: holdings(fence.binding)!, assertCurrent: fence.assertCurrent,
+      withStoreFence: storeContentFence(store)!.withScope.bind(storeContentFence(store)!),
+    } } : undefined,
     processDurableBatchInWorker: async (...args) => { await options.beforeVerify?.(); return processBatch(...args); },
     storeInsert: async ({ quads }) => { await options.beforeMetaStore?.(); await store.insert(quads); },
     storeGraphScopedAsset: async ({ asset: verified }) => {
@@ -294,7 +299,7 @@ function node(
       executeSlice: async (peerId, durableMetaContinuation: DurableMetaContinuation, durableRecoveryRound, durableResumeBoundary) => {
         chainAnswersLeft = chainAnswersPerRound;
         const detailed = await round(checkpointStore, peerId, {
-          durableMetaContinuation, durableRecoveryRound, durableResumeBoundary,
+          graphRecovery: { meta: durableMetaContinuation, holdings: durableRecoveryRound, boundary: durableResumeBoundary },
           settlementSliceDeadline: startOptions.sliceSpent ? Date.now() : undefined,
         });
         return durableRecoveryRoundOutcome(detailed.result, detailed.recoveryRound);
@@ -376,7 +381,7 @@ describe('a restarted Core and a graph it has already recovered', () => {
   });
 
   it.each(['chain', 'verification', 'metadata-store'].flatMap(stage =>
-    ['deactivate', 'recreate', 'equivalent'].map(change => ({ stage, change }))))(
+    ['deactivate', 'recreate', 'equivalent', 'delete-assertions'].map(change => ({ stage, change }))))(
     'fences held completion across $change during $stage', async ({ stage, change }) => {
       const peer = servingPeer(generation());
       let subscription: ContextGraphSub | undefined = {
@@ -401,10 +406,13 @@ describe('a restarted Core and a graph it has already recovered', () => {
       const restarted = core.start();
       const recovering = restarted.recover();
       await paused;
-      const previous = subscription!;
-      if (change === 'recreate') subscription = undefined; // Ends the subscription line; generation stays zero.
-      subscription = { ...previous, ...(change === 'deactivate' ? { subscribed: false } : { synced: false }) };
-      if (change !== 'recreate') continueContextGraphSubscriptionLine(previous, subscription);
+      if (change === 'delete-assertions') await core.store.dropGraph(peer.current()[0]!.graph);
+      else {
+        const previous = subscription!;
+        if (change === 'recreate') subscription = undefined;
+        subscription = { ...previous, ...(change === 'deactivate' ? { subscribed: false } : { synced: false }) };
+        if (change !== 'recreate') continueContextGraphSubscriptionLine(previous, subscription);
+      }
       release();
       const result = await recovering;
       const terminal = restarted.checkpointStore.get(getSyncCheckpointKey(PEER, CG, false, 'data'))?.terminal === true;
