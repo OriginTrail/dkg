@@ -51,10 +51,13 @@
 // Exit codes: 0 ok/pass, 1 fail, 2 usage or incomplete, 3 refused backend.
 // Small-host cell: DKG_STORE_MAX_CONCURRENT=2 (recorded under meta.env). Scheduler warnings are counted, not printed.
 // A run is valid only if the measure window saw requests (measurementObserved), the worker side did its job
-// (workerContractOk, dataPlaneReplayed), the load drained, and a seed file hashed as its manifest says. A run with a
-// publisher stream must also show its own evidence: requests in the window, no runner error, jobs claimed, the handler's
-// work matching the jobs finished (publisherBodyReplayed), no retried or recovered job (the handler never fails, and a
-// record keeps its last claim only), and the probes and ACKs that were switched on having run.
+// (workerContractOk, dataPlaneReplayed), the load drained, every admission write the queue left running past its caller's
+// deadline settled before the ground truth was read (admissionsSettled), and a seed file hashed as its manifest says.
+// The P8c backlog leg reads the largest active backlog of the whole run (warmup to cooldown); worker.backlog stays the
+// measurement window's. A run with a publisher stream must also show its own evidence: requests in the window, no runner
+// error, jobs claimed, the handler's work matching the jobs finished (publisherBodyReplayed), no retried or recovered job
+// (the handler never fails, and a record keeps its last claim only), and the probes and ACKs that were switched on
+// having run.
 //
 // Publisher metrics (summary.publish, plan D-15/D-16, see pickup.mjs): pick-up is accepted -> first claim over the jobs
 // accepted in the measure window, the run's value its p50, a job nobody claimed by the end of the run right-censored
@@ -81,8 +84,10 @@
 //      node ... verdict --rule halve --a $OUT/base --b $OUT/head                         # G1 from P4: b/a <= 0.5
 //      node ... verdict --rule equal --a $OUT/base --b $OUT/head --margin <from step 2>  # AC2 path off
 //    verdict only counts a pair whose two runs share windows, load, arrival seed, observer period, calibration, seed
-//    file and host (plan 8.3: identical flags), and a rule needs 3 valid paired repeats in EVERY cell (history,
-//    observer, rung) it sees: use --where to judge one cell; it lists what else it saw.
+//    file and host (CPU count, platform, CPU model and a hash of the hostname; plan 8.3: identical flags; a summary that
+//    predates the last three cannot be confirmed to be one host and is warned about), and a rule needs 3 valid paired
+//    repeats in EVERY cell (history, observer, rung) with a run in either arm, a cell with none is incomplete and named:
+//    use --where to judge one cell; it lists what else it saw.
 // 4. AC5, history cells (observer default and paged), 3 repeats each; then verdict --rule flat (b/a <= 1.25 in 3/3):
 //      node scripts/repro/async-queue-seed-history.mjs --jobs 50k --out $OUT/seed-50k.nq.gz
 //      node ... run --calibration ... --history 0 --label h0 --repeats 3 ...
@@ -166,12 +171,11 @@ import {
   median,
   noWorse,
   noiseMargin,
-  p8cTrigger,
+  p8cOfRun,
   pairKey,
   pairRuns,
   pickReproductionRung,
   repeatsPerCell,
-  shareBacklog,
   summarize,
   validity,
   withMetric,
@@ -182,10 +186,13 @@ import {
   createIdlePublisher,
   createWorker,
   makePreflight,
+  readShareJobs,
+  reconcileAdmissions,
   sleepUntil,
   startObserver,
   startReaders,
   startShareProducers,
+  trackAdmissionWork,
   within,
 } from './async-queue-contention/workload.mjs';
 
@@ -609,6 +616,9 @@ async function runOnce(c, dist, endpoint, outDir) {
     loadavgStart: os.loadavg().map((x) => Math.round(x * 100) / 100),
     platform: `${process.platform}-${process.arch}`,
     model: os.cpus()[0]?.model ?? null,
+    // a hash of the hostname: verdict pairs only runs of one machine (the CPU count, platform and model can match across
+    // two), and the summaries do not carry the name itself
+    hostId: createHash('sha256').update(os.hostname()).digest('hex').slice(0, 16),
   };
   const startedAt = new Date().toISOString();
   let schedulerWarnings = 0;
@@ -659,6 +669,7 @@ async function runOnce(c, dist, endpoint, outDir) {
         const publisherSide = liftSide ?? idle;
         let worker = null;
         let sampler = null;
+        let admissions = null;
         let running = false;
         const loopMonitor = monitorEventLoopDelay({ resolution: 10 });
         try {
@@ -678,6 +689,10 @@ async function runOnce(c, dist, endpoint, outDir) {
           for (let n = 0; n < arrivals.length; n++) await liftSide.stage(n);
           if (useShare) {
             world.queue = new pub.TripleStoreAsyncPromoteQueue(store);
+            // the admission work an enqueue leaves running after its caller was answered at the deadline
+            admissions = trackAdmissionWork(
+              dist.admission.PromoteAdmissionCoordinator.for(store, utils.DEFAULT_PROMOTE_CONTROL_GRAPH_URI),
+            );
             worker = createWorker(world, dist);
           }
           const schedulerSnapshot = storage.getExternalStorePrioritySchedulerSnapshot();
@@ -763,26 +778,16 @@ async function runOnce(c, dist, endpoint, outDir) {
           clearInterval(sampler);
           const runMs = performance.now() - world.t0; // the publisher can no longer claim: the censoring time of an unclaimed job
 
-          // ground truth: which request keys became persisted jobs (read off the unscheduled seed store)
-          const jobsByName = new Map();
-          let reconcileError = null;
-          if (useShare) {
-            try {
-              const rs = await seedStore.query(
-                `SELECT ?payload WHERE { GRAPH <${utils.DEFAULT_PROMOTE_CONTROL_GRAPH_URI}> { ` +
-                  `?job <${utils.PROMOTE_ASSERTION_NAME}> ?name ; <${utils.PROMOTE_PAYLOAD}> ?payload . ` +
-                  `FILTER(STRSTARTS(?name, "${runTag}-s")) } }`,
-              );
-              for (const b of rs.bindings ?? []) {
-                const verdict = utils.classifyJobPayload(b.payload);
-                if (verdict.kind !== 'job') throw new Error(`unreadable queue row (${verdict.kind})`);
-                const name = verdict.job.request.assertionName;
-                jobsByName.set(name, [...(jobsByName.get(name) ?? []), verdict.job]);
-              }
-            } catch (e) {
-              reconcileError = String(e?.message ?? e).slice(0, 300);
-            }
-          }
+          // ground truth: which request keys became persisted jobs (read off the unscheduled seed store), once the
+          // admission writes the queue left running past their callers' deadline have settled
+          const reconciled = useShare
+            ? await reconcileAdmissions({
+                tracker: admissions,
+                issued: world.requests.some((r) => r.enqStart !== undefined),
+                readJobs: () => readShareJobs(seedStore, utils, runTag),
+              })
+            : { jobsByName: new Map(), reconcileError: null, admissions: null };
+          const { jobsByName, reconcileError } = reconciled;
           let liftByName = new Map();
           let liftReconcileError = null;
           if (useLift) {
@@ -802,11 +807,13 @@ async function runOnce(c, dist, endpoint, outDir) {
           const reads = world.readerEvents.filter(inWin);
           const done = world.completions.filter(inWin);
           const claims = world.claimMs.filter(inWin);
-          const backlog = shareBacklog({
+          // backlog = the measurement window's statistics; the P8c backlog leg reads the whole run's maximum
+          const { backlog, p8c } = p8cOfRun({
             requests: world.requests,
             completions: world.completions,
-            from: window.from,
-            to: window.to,
+            claimNext: world.claimMs,
+            windows: { warmupMs: c.warmupMs, measureMs: c.measureMs, cooldownMs: c.cooldownMs },
+            runMs,
           });
           const counters = worker?.supervisor.getCounters() ?? {};
           const rejected = (cap) =>
@@ -845,6 +852,7 @@ async function runOnce(c, dist, endpoint, outDir) {
             measureMs: c.measureMs,
             measured: submission.n,
             stillInflight,
+            admissionsPending: reconciled.admissions?.pending,
             reconcileError: reconcileError ?? liftReconcileError,
             successWithoutJob: gt.successWithoutPersistedJob,
             doubleAdmissions: gt.doubleAdmissions,
@@ -977,7 +985,7 @@ async function runOnce(c, dist, endpoint, outDir) {
                   counters,
                   agent,
                   backlog,
-                  p8c: p8cTrigger({ claimNext: world.claimMs, backlogMax: backlog.max ?? 0, runMs }),
+                  p8c,
                   workerLogLines: worker.log.count,
                   workerLog: worker.log.lines,
                 }
@@ -1003,6 +1011,7 @@ async function runOnce(c, dist, endpoint, outDir) {
             eventLoop,
             groundTruth: gt,
             reconcileError,
+            admissions: reconciled.admissions,
             validity: validityChecks,
           };
           writeFileSync(path.join(outDir, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
@@ -1026,6 +1035,7 @@ async function runOnce(c, dist, endpoint, outDir) {
           return summary;
         } finally {
           clearInterval(sampler);
+          admissions?.dispose();
           loopMonitor.disable();
           // only when the run failed half way
           if (running) await within(Promise.allSettled([worker?.supervisor.stop(), publisherSide.stop()]), 25_000);
@@ -1244,21 +1254,21 @@ function verdictCommand(v) {
     ignoreLiftSeed: rule === 'flat' && family !== 'share',
   });
   if (rule === 'aa') {
-    // three repeats of EACH cell: valid pairs of different cells do not add up
+    // three repeats of EACH cell, whatever cell has a run in either arm: valid pairs of different cells do not add up
     const judged = withMetric(pairs, family, { minSamples });
-    const { have, cells } = repeatsPerCell(judged);
+    const { have, cells } = repeatsPerCell(judged, missing);
     const warnings = integrityWarnings([...A, ...B], judged, null);
     console.log(JSON.stringify({ margin: noiseMargin(pairs, family, { minSamples }), validPairs: have, cells, warnings, missing }));
     process.exit(have >= PAIRED_MIN ? 0 : 2);
   }
-  const options = { family, minSamples };
+  const options = { missing, family, minSamples };
   // the pairs the rule can judge: one whose runs lack the metric says why among the warnings
   const judged = withMetric(pairs, family, { minSamples });
   const result =
     rule === 'halve'
       ? halve(judged, options)
       : rule === 'flat'
-        ? flat(judged, { aRecords: A, bRecords: B, family })
+        ? flat(judged, { aRecords: A, bRecords: B, family, missing })
         : rule === 'noworse'
           ? noWorse(judged, margin, options)
           : equivalent(judged, margin, options);

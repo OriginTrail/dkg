@@ -12,7 +12,7 @@ import {
   replayOps,
   vmGraph,
 } from '../../repro/async-queue-contention/fixture.mjs';
-import { finalizeRequests } from '../../repro/async-queue-contention/verdict.mjs';
+import { finalizeRequests, validity } from '../../repro/async-queue-contention/verdict.mjs';
 import {
   OBSERVER_CALLS,
   beginEpoch,
@@ -22,10 +22,12 @@ import {
   makePreflight,
   mulberry32,
   poissonArrivals,
+  reconcileAdmissions,
   sleepUntil,
   startObserver,
   startReaders,
   startShareProducers,
+  trackAdmissionWork,
   within,
 } from '../../repro/async-queue-contention/workload.mjs';
 
@@ -383,6 +385,184 @@ test('sleepUntil counts from the epoch, so a window boundary does not drift with
   const past = performance.now();
   await sleepUntil(w, 10);
   assert.ok(performance.now() - past < 50, 'a boundary already passed does not wait');
+});
+
+// ---------------------------------------------------------------- admission work and reconciliation
+/**
+ * A coordinator as the queue uses it (promote-admission.js): run() starts the work in a microtask, answers its caller
+ * at the deadline, and the work goes on. Its run() is a prototype method, like the product's.
+ */
+class DeadlineCoordinator {
+  async run(_request, work, timeoutMs) {
+    const operation = Promise.resolve().then(() => work({}));
+    const deadline = sleep(timeoutMs).then(() => {
+      throw new Error('deadline');
+    });
+    return Promise.race([operation, deadline]);
+  }
+}
+const gate = () => {
+  let open;
+  const opened = new Promise((resolve) => {
+    open = resolve;
+  });
+  return { opened, open };
+};
+
+test('trackAdmissionWork follows a work past the deadline its caller was answered at, until it settles', async () => {
+  const coordinator = new DeadlineCoordinator();
+  const tracker = trackAdmissionWork(coordinator);
+  const g = gate();
+  const work = async () => {
+    await g.opened;
+    return 'job-1';
+  };
+  const caller = await coordinator.run({}, work, 20).catch((e) => e.message);
+  assert.equal(caller, 'deadline', 'the caller was answered while the work is still running');
+  assert.deepEqual([tracker.installed, tracker.started, tracker.pending()], [true, 1, 1]);
+  assert.equal(await tracker.settle(40), 1, 'a work that outlives the cap is reported, not waited for');
+  const settled = tracker.settle(2000);
+  g.open();
+  assert.equal(await settled, 0);
+  assert.deepEqual([tracker.started, tracker.pending()], [1, 0]);
+  assert.equal(await coordinator.run({}, async () => 'job-2', 1000), 'job-2', 'the wrapper answers like run()');
+
+  // a work that fails settles too
+  const failing = await coordinator
+    .run(
+      {},
+      async () => {
+        throw new Error('write failed');
+      },
+      1000,
+    )
+    .catch((e) => e.message);
+  assert.equal(failing, 'write failed');
+  assert.deepEqual([tracker.started, tracker.pending()], [3, 0]);
+
+  // a run() that refuses before it starts any work leaves nothing to wait for
+  const refusing = {
+    async run() {
+      throw new Error('refused');
+    },
+  };
+  const refused = trackAdmissionWork(refusing);
+  await assert.rejects(refusing.run({}, async () => 'never', 1000), /refused/);
+  assert.deepEqual([refused.started, refused.pending(), await refused.settle(50)], [0, 0, 0]);
+});
+
+test('trackAdmissionWork puts run() back, and is not installed on a coordinator without one', () => {
+  const coordinator = new DeadlineCoordinator();
+  const tracker = trackAdmissionWork(coordinator);
+  assert.ok(Object.hasOwn(coordinator, 'run'));
+  tracker.dispose();
+  assert.ok(!Object.hasOwn(coordinator, 'run'), 'the prototype method is what is left');
+  const own = { run: async () => 'x' };
+  const original = own.run;
+  trackAdmissionWork(own).dispose();
+  assert.equal(own.run, original, 'an own run() is restored as it was');
+  const none = trackAdmissionWork({});
+  assert.deepEqual([none.installed, none.started, none.pending(), none.dispose()], [false, 0, 0, undefined]);
+  assert.equal(trackAdmissionWork(undefined).installed, false);
+});
+
+const gateChecks = (admissions) =>
+  validity({
+    lambda: 8,
+    measureMs: 1000,
+    measured: 8,
+    stillInflight: 0,
+    admissionsPending: admissions.pending,
+    reconcileError: null,
+    successWithoutJob: 0,
+    doubleAdmissions: 0,
+    driverCpu: 0.1,
+    idlePublisherErrors: 0,
+    worker: { agentErrors: 0, crashes: 0, failedTerminal: 0, succeeded: 1, attempted: 1, dataOps: DATA_OPS_PER_SHARE },
+    seedFileVerified: true,
+  });
+
+test('reconciliation reads the ground truth only after the admission writes behind the deadline have settled', async () => {
+  const coordinator = new DeadlineCoordinator();
+  const tracker = trackAdmissionWork(coordinator);
+  const persisted = new Map();
+  const g = gate();
+  // the write commits 60 ms after its caller was answered
+  const write = async () => {
+    await g.opened;
+    persisted.set('t-s0', [{ jobId: 'j0' }]);
+  };
+  coordinator.run({}, write, 20).catch(() => {});
+  await sleep(40);
+  assert.equal(tracker.pending(), 1);
+  setTimeout(g.open, 60);
+  const seen = [];
+  const r = await reconcileAdmissions({
+    tracker,
+    issued: true,
+    readJobs: async () => {
+      seen.push(persisted.size);
+      return new Map(persisted);
+    },
+    settleMs: 2000,
+  });
+  assert.deepEqual(seen, [1], 'the read came after the write');
+  assert.deepEqual([r.reconcileError, r.jobsByName.get('t-s0')?.[0].jobId], [null, 'j0']);
+  assert.deepEqual([r.admissions.works, r.admissions.pendingAtDrain, r.admissions.pending], [1, 1, 0]);
+  assert.ok(r.admissions.settleWaitMs >= 30, `waited ${r.admissions.settleWaitMs} ms for the write`);
+  assert.equal(gateChecks(r.admissions).admissionsSettled, true);
+});
+
+test('a reconciliation that cannot establish the admission writes is unresolved and the run invalid', async () => {
+  // (1) a write that never settles within the bound
+  const coordinator = new DeadlineCoordinator();
+  const tracker = trackAdmissionWork(coordinator);
+  const g = gate();
+  coordinator.run({}, async () => g.opened, 10).catch(() => {});
+  await sleep(30);
+  const stuck = await reconcileAdmissions({
+    tracker,
+    issued: true,
+    readJobs: async () => new Map(),
+    settleMs: 60,
+  });
+  g.open();
+  assert.equal(stuck.admissions.pending, 1);
+  assert.ok(stuck.admissions.settleWaitMs >= 50 && stuck.admissions.settleWaitMs < 1000, 'the wait is bounded');
+  const checks = gateChecks(stuck.admissions);
+  assert.deepEqual([checks.admissionsSettled, checks.ok], [false, false]);
+
+  // (2) a tracker that saw no work although requests reached enqueue is not attached to this queue
+  const unattached = await reconcileAdmissions({
+    tracker: trackAdmissionWork(new DeadlineCoordinator()),
+    issued: true,
+    readJobs: async () => new Map(),
+  });
+  assert.equal(unattached.admissions.pending, null);
+  assert.equal(gateChecks(unattached.admissions).ok, false);
+  const noRun = await reconcileAdmissions({
+    tracker: trackAdmissionWork({}),
+    issued: false,
+    readJobs: async () => new Map(),
+  });
+  assert.equal(noRun.admissions.pending, null, 'a coordinator without run() establishes nothing');
+  // no request reached enqueue: there is nothing to wait for
+  const idle = await reconcileAdmissions({
+    tracker: trackAdmissionWork(new DeadlineCoordinator()),
+    issued: false,
+    readJobs: async () => new Map(),
+  });
+  assert.deepEqual([idle.admissions.pending, gateChecks(idle.admissions).admissionsSettled], [0, true]);
+
+  // (3) a failing read is the reconcile error
+  const broken = await reconcileAdmissions({
+    tracker: trackAdmissionWork(new DeadlineCoordinator()),
+    issued: false,
+    readJobs: async () => {
+      throw new Error('boom');
+    },
+  });
+  assert.deepEqual([broken.reconcileError, broken.jobsByName.size], ['boom', 0]);
 });
 
 // ---------------------------------------------------------------- readers and observer

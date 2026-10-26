@@ -204,7 +204,8 @@
       "ws@>=8.0.0 <8.20.1": "8.20.1"
     },
     "patchedDependencies": {
-      "hardhat@2.28.6": "patches/hardhat@2.28.6.patch"
+      "hardhat@2.28.6": "patches/hardhat@2.28.6.patch",
+      "kafkajs@2.2.4": "patches/kafkajs@2.2.4.patch"
     }
   }
 }

@@ -70,13 +70,16 @@ const cfgOf = (o = {}) => ({
   loadFactors: G1B_SETUP.loadFactors,
   liftModel: G1B_SETUP.liftModel,
   cpus: 10,
+  platform: 'darwin-arm64',
+  cpuModel: 'Apple M2',
+  hostId: 'a1b2c3d4e5f60718',
   ...o,
 });
 
 test('a pair must share the publish rate, the load factors, the chain-time model and the lift seed file', () => {
   const a = { config: cfgOf() };
   const same = comparability(a, { config: cfgOf() });
-  assert.deepEqual(same, { differs: [], envDiffers: false });
+  assert.deepEqual(same, { differs: [], envDiffers: false, unverified: [] });
   for (const [k, v] of [
     ['mu', 0.8],
     ['loadFactors', { ...G1B_SETUP.loadFactors, ack: false }],
@@ -102,6 +105,7 @@ const base = {
   measureMs: 180_000,
   measured: 720,
   stillInflight: 0,
+  admissionsPending: 0,
   reconcileError: null,
   successWithoutJob: 0,
   doubleAdmissions: 0,
@@ -122,7 +126,7 @@ const publisher = {
   executions: 69,
   tailOps: 69 * LIFT_TAIL_OPS,
 };
-const SHARE_CHECKS = ['measurementObserved', 'arrivalsWithin4Sigma', 'noSuccessWithoutJob', 'noDoubleAdmission', 'workerContractOk', 'dataPlaneReplayed'];
+const SHARE_CHECKS = ['measurementObserved', 'arrivalsWithin4Sigma', 'admissionsSettled', 'noSuccessWithoutJob', 'noDoubleAdmission', 'workerContractOk', 'dataPlaneReplayed'];
 const PUBLISH_CHECKS = [
   'publishMeasurementObserved',
   'publishArrivalsWithin4Sigma',

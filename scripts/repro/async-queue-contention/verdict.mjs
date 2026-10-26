@@ -171,16 +171,46 @@ export function depthSeries(intervals, from, to, stepMs = 1000) {
 }
 
 /**
+ * Largest depth the [start, end) intervals (end = Infinity allowed) reach at any instant of [from, to], both ends
+ * included. Exact: a sweep over the +1 (start) and -1 (end) events, not a sampling, so a backlog that rises and falls
+ * between two samples is seen, and so is one that appears after the last whole second. The intervals are half-open, as
+ * in depthSeries, so at one instant the ends go first: a job completed at t and a job acknowledged at t are never open
+ * together, and counting the start first would invent a depth the queue never had. An interval with no length (done at
+ * or before it was acknowledged) is never open. An interval that began before `from` counts from `from`.
+ */
+export function peakDepth(intervals, from, to) {
+  const events = [];
+  for (const [a, b] of intervals) {
+    if (!(a < b) || a > to || b <= from) continue;
+    events.push([Math.max(a, from), 1]);
+    if (b <= to) events.push([b, -1]);
+  }
+  events.sort((p, q) => p[0] - q[0] || p[1] - q[1]);
+  let depth = 0;
+  let peak = 0;
+  for (const [, step] of events) {
+    depth += step;
+    if (depth > peak) peak = depth;
+  }
+  return peak;
+}
+
+/**
  * Active share backlog: from each admitted request's response to its completion (or Infinity). A request is admitted
  * when the client was acknowledged (its job id) or when reconciliation found a persisted job for it (groundTruth's
  * gtJobId, run first): an indeterminate admission that landed is still an unfinished job. Times are run-relative ms.
  */
-export function shareBacklog({ requests, completions, from, to }) {
+function backlogIntervals({ requests, completions }) {
   const doneAt = new Map(completions.map((c) => [c.jobId, c.t]));
   const jobIdOf = (r) => ((r.rawOutcome ?? r.outcome) === 'success' ? r.jobId : r.gtJobId);
-  const intervals = requests
+  return requests
     .filter((r) => jobIdOf(r) !== undefined && r.ended !== undefined)
     .map((r) => [r.ended, Math.max(r.ended, doneAt.get(jobIdOf(r)) ?? Infinity)]);
+}
+
+/** The backlog statistics of [from, to), sampled every second (depthSeries), and the job counts. */
+export function shareBacklog({ requests, completions, from, to }) {
+  const intervals = backlogIntervals({ requests, completions });
   return {
     ...depthSeries(intervals, from, to),
     jobs: intervals.length,
@@ -188,10 +218,17 @@ export function shareBacklog({ requests, completions, from, to }) {
   };
 }
 
+/** The exact largest active backlog over [from, to] (peakDepth of the intervals shareBacklog samples). */
+export const peakBacklog = ({ requests, completions, from, to }) =>
+  peakDepth(backlogIntervals({ requests, completions }), from, to);
+
 /**
  * Plan 8.3 trigger for the bounded claimNext candidate read (P8c): claimNext P95 over the last 5 min above 2x the first
  * 5 min, or an active backlog above 5,000. claimNext = [{t (run-relative start ms), ms}]. The ratio needs a run of at
- * least 10 min and 20 samples in each end window; the backlog leg needs no window.
+ * least 10 min and 20 samples in each end window; the backlog leg needs no window. backlogMax is the largest active
+ * backlog of the WHOLE run (warmup, measure and cooldown: p8cOfRun), not the measurement window's, and an exact
+ * maximum, not a sampled one: a queue that grows past 5,000 only in the cooldown, or only between two samples, has still
+ * outgrown the read.
  */
 export function p8cTrigger({ claimNext, backlogMax, runMs }) {
   const backlogTrip = backlogMax > 5000;
@@ -207,6 +244,20 @@ export function p8cTrigger({ claimNext, backlogMax, runMs }) {
     return { evaluable: false, ratio: null, backlogTrip, trigger: backlogTrip };
   const ratio = percentile(last, 0.95) / percentile(first, 0.95);
   return { evaluable: true, ratio: r2(ratio), backlogTrip, trigger: ratio > 2 || backlogTrip };
+}
+
+/**
+ * The backlog figures of one run. `backlog` = the measurement window's statistics, sampled every second (what the
+ * summary reports and the verdict reads), unchanged. `p8c` = the P8c trigger judged on the largest active backlog over
+ * the whole run, warmup through cooldown, taken exactly from the admission and completion times (`backlogMax`,
+ * recorded in it; the end of the cooldown included, peakDepth for how ties at one instant are ordered): the 5,000-job
+ * leg is neither a measurement-window statistic nor a sampled one.
+ */
+export function p8cOfRun({ requests, completions, claimNext, windows, runMs }) {
+  const { warmupMs, measureMs, cooldownMs } = windows;
+  const backlog = shareBacklog({ requests, completions, from: warmupMs, to: warmupMs + measureMs });
+  const backlogMax = peakBacklog({ requests, completions, from: 0, to: warmupMs + measureMs + cooldownMs });
+  return { backlog, p8c: { ...p8cTrigger({ claimNext, backlogMax, runMs }), backlogMax } };
 }
 
 // ---------------------------------------------------------------- the knee and the reproduction rung
@@ -254,7 +305,8 @@ const canon = (x) =>
  * Settings the two runs of a pair must share (plan 8.3: "identical flags"): `seed` is the arrival schedule and
  * `observerMs` the list observer's polling period; `mu` is the publish rate, `loadFactors` the probe and ACK load and
  * their cadences, `liftModel` the wallets, wallet hold and poll of the chain-time model. The seed files are left out
- * for the flatness rules, which compare histories.
+ * for the flatness rules, which compare histories. The last four identify the machine (the runbook runs both arms of a
+ * verdict on the same physical host): the CPU count, the platform, the CPU model and a hash of the hostname.
  */
 const SAME_IN_A_PAIR = [
   'windows',
@@ -270,18 +322,33 @@ const SAME_IN_A_PAIR = [
   'loadFactors',
   'liftModel',
   'cpus',
+  'platform',
+  'cpuModel',
+  'hostId',
 ];
 
 /**
- * { differs: the settings that differ, envDiffers }. The DKG_STORE_* env may differ on purpose (the knob under test),
- * so it is only reported.
+ * The machine settings of SAME_IN_A_PAIR that older summaries lack (only the CPU count was recorded): a missing value is
+ * unknown. Unknown is not "different" (an old summary stays usable) and not "the same" either: two runs that differ in a
+ * field both record are not a pair, and a field either lacks is listed as `unverified`, which the verdict reports as a
+ * warning (integrityWarnings) so that an unconfirmed host never passes silently.
+ */
+const HOST_IDENTITY = ['platform', 'cpuModel', 'hostId'];
+const isUnknown = (v) => v === null || v === undefined;
+
+/**
+ * { differs: the settings that differ, envDiffers, unverified: the HOST_IDENTITY fields that cannot be compared }. The
+ * DKG_STORE_* env may differ on purpose (the knob under test), so it is only reported.
  */
 export function comparability(a, b, { ignoreSeed = false, ignoreLiftSeed = false } = {}) {
   const left = a.config ?? {};
   const right = b.config ?? {};
+  const unverified = HOST_IDENTITY.filter((k) => isUnknown(left[k]) || isUnknown(right[k]));
   const skipped = (k) => (ignoreSeed && k === 'seedFileSha256') || (ignoreLiftSeed && k === 'liftSeedFileSha256');
-  const differs = SAME_IN_A_PAIR.filter((k) => !skipped(k) && canon(left[k]) !== canon(right[k]));
-  return { differs, envDiffers: canon(left.env) !== canon(right.env) };
+  const differs = SAME_IN_A_PAIR.filter(
+    (k) => !skipped(k) && !unverified.includes(k) && canon(left[k]) !== canon(right[k]),
+  );
+  return { differs, envDiffers: canon(left.env) !== canon(right.env), unverified };
 }
 
 /**
@@ -302,7 +369,7 @@ function indexRuns(records, keyOf) {
 /**
  * Pairs the runs of two arms by key. A pair counts (valid) only when both runs are valid, the key has exactly one valid
  * run per arm, and the runs share the settings of SAME_IN_A_PAIR; `reasons` says why a pair with two valid runs does
- * not count.
+ * not count, `unverified` lists the host fields (HOST_IDENTITY) a run lacks, which do not stop a pair from counting.
  */
 export function pairRuns(
   aRecords,
@@ -333,9 +400,17 @@ export function pairRuns(
         );
       }
     }
-    const { differs, envDiffers } = comparability(a, b, { ignoreSeed, ignoreLiftSeed });
+    const { differs, envDiffers, unverified } = comparability(a, b, { ignoreSeed, ignoreLiftSeed });
     if (differs.length) reasons.push(`the runs differ in ${differs.join(', ')}`);
-    pairs.push({ key, a, b, reasons, envDiffers, valid: Boolean(a.valid && b.valid) && reasons.length === 0 });
+    pairs.push({
+      key,
+      a,
+      b,
+      reasons,
+      envDiffers,
+      unverified,
+      valid: Boolean(a.valid && b.valid) && reasons.length === 0,
+    });
   }
   for (const key of B.chosen.keys()) if (!A.chosen.has(key)) missing.push({ key, missingIn: 'a' });
   return { pairs, missing };
@@ -347,14 +422,17 @@ const cellOfKey = (key) => (key.includes('|') ? key.slice(0, key.lastIndexOf('|'
 /**
  * Valid paired repeats per comparison cell (history, observer, rung): { cells: { cell: count }, have }. A rule needs
  * PAIRED_MIN in EVERY cell, so `have` is the thinnest cell's count and the valid pairs of different cells never add up.
+ * A cell is in the comparison as soon as any run of it is, in either arm: a cell whose pairs are all discarded, and a
+ * cell only one arm ran (`missing`, from pairRuns), is a cell with 0 valid repeats, never a cell to leave out. A rerun
+ * that replaces a discarded run of the same key (pairRuns) is what brings such a cell back to its repeats.
  */
-export function repeatsPerCell(pairs) {
+export function repeatsPerCell(pairs, missing = []) {
   const repeats = new Map();
-  for (const p of pairs) {
-    if (!p.valid) continue;
-    const cell = cellOfKey(p.key);
-    repeats.set(cell, (repeats.get(cell) ?? new Set()).add(p.key));
+  for (const { key } of [...pairs, ...missing]) {
+    const cell = cellOfKey(key);
+    if (!repeats.has(cell)) repeats.set(cell, new Set());
   }
+  for (const p of pairs) if (p.valid) repeats.get(cellOfKey(p.key)).add(p.key);
   const cells = Object.fromEntries([...repeats].map(([cell, keys]) => [cell, keys.size]));
   const counts = Object.values(cells);
   return { cells, have: counts.length ? Math.min(...counts) : 0 };
@@ -362,12 +440,13 @@ export function repeatsPerCell(pairs) {
 
 /**
  * metric ratio b/a per valid pair against limit (and an optional lower bound). Pass: >= PAIRED_MIN valid paired repeats
- * in every cell and every pair inside the bounds. Incomplete (not a fail): fewer valid repeats in some cell. With
- * checkKnee, `belowKnee` lists the pairs whose base run did not reach the knee: the plan calibrates the rung once on
- * the base and does not re-judge each repeat, so this is reported (a halving test against a healthy base is weak), not
- * gating.
+ * in every cell and every pair inside the bounds. Incomplete (not a fail): fewer valid repeats in some cell, a cell
+ * with none included (and named in the reason); `missing` = pairRuns' runs that only one arm has, which put their cell
+ * in the comparison (repeatsPerCell). With checkKnee, `belowKnee` lists the pairs whose base run did not reach the
+ * knee: the plan calibrates the rung once on the base and does not re-judge each repeat, so this is reported (a halving
+ * test against a healthy base is weak), not gating.
  */
-export function ratioRule({ pairs, metric = 'p95Ms', limit, lower, label, checkKnee = false }) {
+export function ratioRule({ pairs, missing = [], metric = 'p95Ms', limit, lower, label, checkKnee = false }) {
   const valid = pairs.filter((p) => p.valid);
   const perRepeat = valid.map((p) => {
     const a = p.a[metric];
@@ -375,15 +454,17 @@ export function ratioRule({ pairs, metric = 'p95Ms', limit, lower, label, checkK
     const ratio = a === 0 ? (b === 0 ? 1 : Infinity) : b / a;
     return { key: p.key, a, b, ratio: r4(ratio), ok: ratio <= limit && (lower === undefined || ratio >= lower) };
   });
-  const { cells, have } = repeatsPerCell(pairs);
+  const { cells, have } = repeatsPerCell(pairs, missing);
   const out = { label, metric, limit, need: PAIRED_MIN, have, cells, perRepeat };
   if (checkKnee) out.belowKnee = valid.filter((p) => !kneeReached(p.a)).map((p) => p.key);
   if (have < PAIRED_MIN) {
     const perCell = Object.keys(cells).length > 1 ? ` (${JSON.stringify(cells)})` : '';
+    const empty = Object.keys(cells).filter((cell) => cells[cell] === 0);
+    const none = empty.length ? `; no valid pair in ${empty.join(', ')}` : '';
     return {
       ...out,
       status: 'incomplete',
-      reason: `needs ${PAIRED_MIN} valid paired repeats in every cell, the thinnest has ${have}${perCell}`,
+      reason: `needs ${PAIRED_MIN} valid paired repeats in every cell, the thinnest has ${have}${perCell}${none}`,
     };
   }
   return { ...out, status: perRepeat.every((r) => r.ok) ? 'pass' : 'fail' };
@@ -437,9 +518,10 @@ export function withMetric(pairs, name = 'share', { minSamples = 0 } = {}) {
 
 const labelled = (name, text) => (name === 'share' ? text.replace('{m}', 'P95') : text.replace('{m}', familyOf(name).label));
 
-export const halve = (pairs, { family = 'share', minSamples } = {}) =>
+export const halve = (pairs, { missing = [], family = 'share', minSamples } = {}) =>
   ratioRule({
     pairs: withMetric(pairs, family, { minSamples }),
+    missing,
     metric: familyOf(family).key,
     limit: HALVE_MAX,
     label: labelled(family, 'halve: candidate {m} <= 0.5 x base'),
@@ -495,17 +577,19 @@ function liftFlatArmProblems(aRecords, bRecords) {
 /**
  * AC5: history 50k P95 <= 1.25 x history 0. Arm a must be history 0 and arm b history 50k, whatever the pairs: a
  * mismatch is incomplete (never a pass) and says which arm is wrong. `aRecords` / `bRecords` default to the runs of the
- * pairs; pass the whole arms to also check the runs that did not pair.
+ * pairs; pass the whole arms to also check the runs that did not pair. `missing` is pairRuns' unpaired runs.
  */
 export function flat(
   pairs,
-  { aRecords = pairs.map((p) => p.a), bRecords = pairs.map((p) => p.b), family = 'share' } = {},
+  { aRecords = pairs.map((p) => p.a), bRecords = pairs.map((p) => p.b), missing = [], family = 'share' } = {},
 ) {
   if (family !== 'share' && family !== 'publish') throw new Error(`the flatness rule judges a P95, not ${family}`);
   const problems = flatArmProblems(aRecords, bRecords, family);
   const metric = familyOf(family).key;
   const label = family === 'share' ? FLAT_LABEL : liftFlatLabel(bRecords, family);
-  if (!problems.length) return ratioRule({ pairs: withMetric(pairs, family), metric, limit: FLAT_MAX, label });
+  if (!problems.length) {
+    return ratioRule({ pairs: withMetric(pairs, family), missing, metric, limit: FLAT_MAX, label });
+  }
   return {
     label,
     metric,
@@ -549,11 +633,12 @@ export function noiseMargin(aaPairs, family = 'share', { minSamples } = {}) {
 /**
  * AC2 path-off equivalence: every b/a inside [1/(1+m), 1+m]. The margin is required so it is declared before the A/B.
  */
-export function equivalent(pairs, margin, { family = 'share', minSamples } = {}) {
+export function equivalent(pairs, margin, { missing = [], family = 'share', minSamples } = {}) {
   if (!Number.isFinite(margin) || margin < 0)
     throw new Error('equivalent needs the declared margin (from the A/A pair)');
   return ratioRule({
     pairs: withMetric(pairs, family, { minSamples }),
+    missing,
     metric: familyOf(family).key,
     limit: 1 + margin,
     lower: 1 / (1 + margin),
@@ -564,10 +649,11 @@ export function equivalent(pairs, margin, { family = 'share', minSamples } = {})
  * A guardrail (G2's publish submission P95: "not worse than B0 by more than the A/A margin"): every b/a at most 1 + the
  * declared margin. Faster is fine, which is what separates it from the two-sided `equivalent`.
  */
-export function noWorse(pairs, margin, { family = 'share', minSamples } = {}) {
+export function noWorse(pairs, margin, { missing = [], family = 'share', minSamples } = {}) {
   if (!Number.isFinite(margin) || margin < 0) throw new Error('noWorse needs the declared margin (from the A/A pair)');
   return ratioRule({
     pairs: withMetric(pairs, family, { minSamples }),
+    missing,
     metric: familyOf(family).key,
     limit: 1 + margin,
     label: labelled(family, `noworse: candidate {m} <= (1 + ${margin}) x base`),
@@ -620,7 +706,9 @@ function publisherChecks(p, measureMs) {
  * Pure checks of one run; every key but `ok` is a boolean that must hold. `worker` = { agentErrors, crashes,
  * failedTerminal, succeeded, attempted, dataOps }: the fake agent and the supervisor must have worked, or a faster
  * admission could be nothing but a worker that no longer runs the 43-operation share body (a missing field fails the
- * check).
+ * check). `admissionsPending` = the queue's admission writes still running when reconciliation read the ground truth
+ * (workload.mjs reconcileAdmissions): 0 when every one had settled, null when that could not be established; anything
+ * but 0 (a missing field included) leaves the reconciliation unresolved and the run invalid.
  * P2b: `queue` is the run's stream(s): 'share' (default; the idle publisher runs beside it), 'lift' or 'both'. A lift
  * run has no share stream, so the share checks are left out; `publisher` (see publisherChecks) adds the publisher
  * stream's; `load` = { probes, ack, statusProbes, metricsProbes, acksStarted } requires the probe and ACK load that was
@@ -632,6 +720,7 @@ export function validity({
   measureMs,
   measured,
   stillInflight,
+  admissionsPending,
   reconcileError,
   successWithoutJob,
   doubleAdmissions,
@@ -657,6 +746,7 @@ export function validity({
         }
       : {}),
     drained: stillInflight === 0,
+    ...(withShare ? { admissionsSettled: admissionsPending === 0 } : {}),
     noReconcileError: !reconcileError,
     ...(withShare ? { noSuccessWithoutJob: successWithoutJob === 0, noDoubleAdmission: doubleAdmissions === 0 } : {}),
     driverHeadroomOk: driverCpu < 0.8,
@@ -743,6 +833,9 @@ export function extractRecord(s) {
       seed: cell.seed ?? null,
       observerMs: cell.observerMs ?? null,
       cpus: s.meta.host?.cpus ?? null,
+      platform: s.meta.host?.platform ?? null,
+      cpuModel: s.meta.host?.model ?? null,
+      hostId: s.meta.host?.hostId ?? null,
       ...(extended
         ? {
             mu: cell.mu ?? null,
@@ -796,6 +889,15 @@ export function integrityWarnings(records, pairs, result) {
   if (records.some((r) => r.git?.dirty)) warnings.push('a run came from a dirty working tree');
   for (const p of pairs.filter((x) => x.reasons?.length))
     warnings.push(`pair ${p.key} does not count: ${p.reasons.join('; ')}`);
+  const unconfirmed = pairs.filter((p) => p.unverified?.length);
+  if (unconfirmed.length) {
+    const fields = HOST_IDENTITY.filter((k) => unconfirmed.some((p) => p.unverified.includes(k)));
+    warnings.push(
+      `host identity (${fields.join(', ')}) is missing from a run of ${unconfirmed.map((p) => p.key).join(', ')}: ` +
+        'those pairs cannot be confirmed to come from one machine (summaries from before it was recorded; the runbook ' +
+        'requires the same physical host)',
+    );
+  }
   const envPairs = pairs.filter((p) => p.envDiffers).map((p) => p.key);
   if (envPairs.length) {
     warnings.push(
@@ -805,7 +907,9 @@ export function integrityWarnings(records, pairs, result) {
   for (const r of records.filter((x) => x.p8c?.trigger)) {
     const why = [
       r.p8c.ratio !== null && r.p8c.ratio > 2 ? `claimNext P95 ratio ${r.p8c.ratio}` : null,
-      r.p8c.backlogTrip ? 'active backlog above 5,000' : null,
+      r.p8c.backlogTrip
+        ? `active backlog above 5,000${Number.isFinite(r.p8c.backlogMax) ? ` (run maximum ${r.p8c.backlogMax})` : ''}`
+        : null,
     ];
     warnings.push(`run ${r.runId}: P8c trigger (${why.filter(Boolean).join(', ')}): record it in the PR`);
   }

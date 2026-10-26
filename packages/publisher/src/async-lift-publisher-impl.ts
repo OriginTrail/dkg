@@ -948,7 +948,7 @@ export class TripleStoreAsyncLiftPublisher
     );
     const missing = vmPublishJobs.filter((job) => !alreadyIndexed.has(jobSubject(job.jobId)));
     const quads = missing.flatMap((job) => serializeVmPublishIntentIndex(job, this.graphUri));
-    if (quads.length > 0) await this.store.insert(quads);
+    if (quads.length > 0) await this.store.insert(quads, { source: 'publisher.asyncLift.writeVmPublishIntentIndex' });
     return missing.length;
   }
 
@@ -3091,8 +3091,8 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   private async deleteJob(jobId: string): Promise<void> {
-    await deleteByPatternWithoutCount(this.store, { subject: jobSubject(jobId), graph: this.graphUri });
-    await deleteByPatternWithoutCount(this.store, { subject: requestSubject(jobId), graph: this.graphUri });
+    await deleteByPatternWithoutCount(this.store, { subject: jobSubject(jobId), graph: this.graphUri }, { source: 'publisher.asyncLift.deleteJob' });
+    await deleteByPatternWithoutCount(this.store, { subject: requestSubject(jobId), graph: this.graphUri }, { source: 'publisher.asyncLift.deleteJobRequest' });
   }
 
   // Scheduling-only — the claim attempt re-checks every guard — and it must never throw into
