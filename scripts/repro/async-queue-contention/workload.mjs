@@ -546,11 +546,21 @@ export function createWorker(world, deps) {
         accessPolicy: 'public',
       }),
     });
+  /**
+   * The resources one job's replay names. Everything here is derived from the admitted request's assertion name, which
+   * is fixed at enqueue and carried by every attempt of the job, and never from a clock or a counter: a retry after a
+   * transient storage rejection replays the bound job from its promote and must name the SWM and snapshot graphs and
+   * the share / head subjects the earlier attempt may already have written (replacing them, as the replay's replace and
+   * drop-then-insert operations do), not add a second set. A per-attempt key would inflate the graph and subject
+   * cardinality with every retry and skew the list and read costs later in the run. Nothing in the replay is genuinely
+   * per-attempt, so there is no per-attempt part to this key. encodeURIComponent keeps the name unique (it is
+   * injective) and safe inside the graph and subject IRIs built from it.
+   */
   const shareOf = (name) => {
     const jn = Number(/-s(\d+)$/.exec(String(name))?.[1] ?? 0);
     return {
       jn,
-      key: `${jn.toString(36)}-${Date.now().toString(36)}`,
+      key: encodeURIComponent(String(name)),
       a: assetOf(jn),
       privG: `${metaGraph()}/private-${jn % 4}`,
       wmG: wmPoolGraph(jn % WM_POOL),
