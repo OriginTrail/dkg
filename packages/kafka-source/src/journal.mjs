@@ -18,6 +18,7 @@ export class Journal {
         topic TEXT, partition INTEGER, nextOffset TEXT,
         PRIMARY KEY(topic, partition));
       CREATE TABLE IF NOT EXISTS scheduling (topic TEXT PRIMARY KEY, lastPartition INTEGER);
+      CREATE TABLE IF NOT EXISTS http_cooldown (id INTEGER PRIMARY KEY, retryAt INTEGER);
       CREATE TABLE IF NOT EXISTS write_rejections (position TEXT PRIMARY KEY, code TEXT, retryAt INTEGER);
       CREATE TABLE IF NOT EXISTS write_errors (position TEXT PRIMARY KEY, code TEXT, httpStatus INTEGER, retryAt INTEGER);`);
     const stored = this.db.prepare('SELECT value FROM scope WHERE id=1').get();
@@ -53,6 +54,12 @@ export class Journal {
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   rejection(position) { return this.db.prepare('SELECT code, retryAt FROM write_rejections WHERE position=?').get(position); }
+  deferHttp(retryAt) {
+    // A read cooldown must never clear or otherwise classify a write intent.
+    this.db.prepare(`INSERT INTO http_cooldown VALUES (1, ?)
+      ON CONFLICT(id) DO UPDATE SET retryAt=MAX(retryAt, excluded.retryAt)`).run(retryAt);
+  }
+  httpRetryAt() { return this.db.prepare('SELECT retryAt FROM http_cooldown WHERE id=1').get()?.retryAt; }
   startPosition(topic, partition, fallback) {
     const checkpoint = this.db.prepare('SELECT nextOffset FROM checkpoints WHERE topic=? AND partition=?').get(topic, partition);
     if (checkpoint) return checkpoint.nextOffset;

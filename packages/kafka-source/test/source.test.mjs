@@ -22,13 +22,20 @@ const message = (offset = '0') => ({ topic: source.topic, partition: 0, offset, 
 function daemon() {
   const assets = new Map(); let writes = 0; let loseResponse = false; let corrupt = false; let invisible = false;
   let rejection, descriptor = {}, normalize = false, changedLiteral = false, posts = 0;
-  let cooldownUntil = 0, requests = 0;
+  let cooldownUntil = 0, requests = 0, readThrottle;
   const fetch = async (url, options) => {
     requests++;
     if (Date.now() < cooldownUntil) return Response.json({ error: 'Too many requests' }, {
       status: 429, headers: { 'Retry-After': String(Math.ceil((cooldownUntil - Date.now()) / 1000)) },
     });
     const path = new URL(url).pathname;
+    if (readThrottle?.path === path && writes >= readThrottle.afterWrites) {
+      readThrottle = undefined;
+      cooldownUntil = Date.now() + 60000;
+      return Response.json({ error: 'unclassified read throttling' }, {
+        status: 429, headers: { 'Retry-After': '60' },
+      });
+    }
     if (path === '/api/context-graph/list') return Response.json({contextGraphs: [{id: source.contextGraphId, accessPolicy: 'private'}]});
     if (path === '/api/query') {
       const graph = JSON.parse(options.body).sparql.match(/GRAPH <([^>]+)>/)[1];
@@ -64,7 +71,8 @@ function daemon() {
       assertionGraph: `did:dkg:context-graph:${source.contextGraphId}/_working_memory/${owner}/${hash(asset)}`, ...descriptor });
   };
   return { fetch, assets, get writes() { return writes; }, lose() { loseResponse = true; },
-    corrupt() { corrupt = true; }, invisible() { invisible = true; },
+    corrupt(value = true) { corrupt = value; }, invisible(value = true) { invisible = value; },
+    throttleRead(path, afterWrites = 0) { readThrottle = { path, afterWrites }; },
     rejectNext(status = 429, body = { error: 'Too many requests' }, headers = { 'Retry-After': '0' }, cooldownMs = 0) {
       rejection = { status, body, headers, cooldownMs };
     },
@@ -181,7 +189,9 @@ test('a public graph is rejected before any Kafka event is written', async () =>
     if (options.method === 'POST') creates++;
     return Response.json({contextGraphs: [{id: source.contextGraphId, accessPolicy: 'open'}]});
   });
-  await assert.rejects(sink.ensure(source, buildAsset(source, message()), {}, { rejection: () => undefined }), /DKG_PRIVATE_GRAPH_REQUIRED/);
+  await assert.rejects(sink.ensure(source, buildAsset(source, message()), {}, {
+    rejection: () => undefined, httpRetryAt: () => undefined,
+  }), /DKG_PRIVATE_GRAPH_REQUIRED/);
   assert.equal(creates, 0);
 });
 
@@ -231,6 +241,74 @@ test('daemon-wide Retry-After cooldown survives handler restarts without HTTP re
   await f.restart();
   assert.equal((await f.run()).sources[source.id].lastStatus, 'completed');
   assert.equal(f.api.posts, 2); assert.equal(f.api.writes, 1); assert.deepEqual(f.commits, ['0']);
+});
+
+const descriptorPath = `/api/knowledge-assets/${encodeURIComponent(buildAsset(source, message()).name)}/wm`;
+test.each([
+  ['graph preflight', '/api/context-graph/list', 0],
+  ['descriptor preflight', descriptorPath, 0],
+  ['descriptor readback', descriptorPath, 1],
+  ['query readback', '/api/query', 1],
+])('%s 429 persists cooldown across restarts without spending retries or duplicate creates', async (_name, path, afterWrites) => {
+  let now = Date.now(); const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+  onTestFinished(() => clock.mockRestore());
+  const f = await fixture(); f.api.throttleRead(path, afterWrites);
+  const initial = (await f.run()).sources[source.id];
+  assert.equal(initial.lastStatus, 'retry-wait'); assert.equal(initial.attemptCount, 0);
+  assert.equal(initial.retryAt, now + 60000);
+  const requests = f.api.requests;
+  for (let i = 0; i < 10; i++) {
+    now += 5000; await f.restart();
+    const state = (await f.run()).sources[source.id];
+    assert.equal(state.lastStatus, 'retry-wait'); assert.equal(state.attemptCount, 0);
+    assert.notEqual(state.manualReviewRequired, true);
+    assert.equal(f.api.requests, requests); assert.deepEqual(f.commits, []);
+    assert.equal(f.api.posts, afterWrites);
+  }
+  now += 10001; await f.restart();
+  assert.equal((await f.run()).sources[source.id].lastStatus, 'completed');
+  assert.equal(f.api.posts, 1); assert.equal(f.api.writes, 1); assert.deepEqual(f.commits, ['0']);
+});
+
+test('readback cooldown retains an uncertain write intent even while the asset is invisible', async t => {
+  let now = Date.now(); const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+  t.onTestFinished(() => clock.mockRestore());
+  const f = await fixture(t); f.api.lose(); f.api.invisible(); f.api.throttleRead(descriptorPath, 1);
+  assert.equal((await f.run()).sources[source.id].lastStatus, 'retry-wait');
+  const requests = f.api.requests;
+  for (let i = 0; i < 5; i++) {
+    now += 5000; await f.restart();
+    assert.equal((await f.run()).sources[source.id].lastStatus, 'retry-wait');
+    assert.equal(f.api.requests, requests);
+  }
+  now += 35001; await f.restart();
+  assert.equal((await f.run()).sources[source.id].lastError, 'DKG_WRITE_OUTCOME_UNKNOWN');
+  assert.equal(f.api.posts, 1); assert.equal(f.api.writes, 1); assert.deepEqual(f.commits, []);
+  f.api.invisible(false); await f.restart();
+  assert.equal((await f.run()).sources[source.id].lastStatus, 'completed');
+  assert.equal(f.api.posts, 1); assert.deepEqual(f.commits, ['0']);
+});
+
+test('read throttling at the last available attempt preserves its prior failure count', async t => {
+  let now = Date.now(); const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+  t.onTestFinished(() => clock.mockRestore());
+  const f = await fixture(t); f.api.corrupt();
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const state = (await f.run()).sources[source.id];
+    assert.equal(state.lastError, 'DKG_READBACK_MISMATCH'); assert.equal(state.attemptCount, attempt);
+  }
+  f.api.throttleRead('/api/context-graph/list');
+  assert.equal((await f.run()).sources[source.id].lastStatus, 'retry-wait');
+  const requests = f.api.requests;
+  for (let i = 0; i < 5; i++) {
+    now += 5000; await f.restart();
+    const state = (await f.run()).sources[source.id];
+    assert.equal(state.lastStatus, 'retry-wait'); assert.equal(state.attemptCount, 2);
+    assert.equal(f.api.requests, requests); assert.deepEqual(f.commits, []);
+  }
+  now += 35001; f.api.corrupt(false); await f.restart();
+  assert.equal((await f.run()).sources[source.id].lastStatus, 'completed');
+  assert.equal(f.api.posts, 1); assert.deepEqual(f.commits, ['0']);
 });
 
 test.each([500, 429])('unclassified HTTP %s remains ambiguous and cannot issue another create', async (status, t) => {
@@ -290,6 +368,41 @@ test('partial poison batch acknowledges only its valid prefix through retry exha
   for (let i = 0; i < 6; i++) state = await f.run();
   assert.equal(state.sources[source.id].manualReviewRequired, true);
   assert.deepEqual(f.commits, ['0']); assert.equal(f.api.writes, 1);
+});
+
+test.each([false, true])('alternating poison replay and broker outages exhaust retries across restarts (outage first: %s)', async (outageFirst, t) => {
+  const f = await fixture(t);
+  f.setQueue([{ ...message(), valueBase64: Buffer.from('invalid JSON').toString('base64') }]);
+  let fingerprint, state, failures = 0;
+  for (let poll = 0; poll < 10; poll++) {
+    const outage = poll % 2 === (outageFirst ? 0 : 1);
+    f.readFailure(outage ? 'KAFKA_READ_FAILED' : undefined); await f.restart();
+    state = (await f.run()).sources[source.id];
+    if (!outage && !fingerprint) fingerprint = state.fingerprint;
+    if (fingerprint) assert.equal(state.fingerprint, fingerprint);
+    if (state.lastStatus === 'failed' && fingerprint) {
+      failures++;
+      assert.equal(state.attemptCount, failures);
+      assert.equal(state.lastError, outage ? 'KAFKA_READ_FAILED' : 'KAFKA_MAPPING_JSON_REQUIRED');
+    }
+    assert.deepEqual(f.commits, []); assert.equal(f.api.writes, 0);
+  }
+  assert.equal(failures, 3);
+  assert.equal(state.manualReviewRequired, true); assert.equal(state.attemptCount, 4);
+});
+
+test('new delivery content retains a fresh retry budget after a preparation outage', async t => {
+  const f = await fixture(t);
+  const poison = offset => ({ ...message(offset), valueBase64: Buffer.from('invalid JSON').toString('base64') });
+  f.setQueue([poison('0')]);
+  const first = (await f.run()).sources[source.id];
+  f.readFailure('KAFKA_READ_FAILED'); await f.restart();
+  const outage = (await f.run()).sources[source.id];
+  assert.equal(outage.fingerprint, first.fingerprint); assert.equal(outage.attemptCount, 2);
+  f.readFailure(undefined); f.setQueue([poison('1')]); await f.restart();
+  const changed = (await f.run()).sources[source.id];
+  assert.notEqual(changed.fingerprint, first.fingerprint); assert.equal(changed.attemptCount, 1);
+  assert.deepEqual(f.commits, []); assert.equal(f.api.writes, 0);
 });
 
 
