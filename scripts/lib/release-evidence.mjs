@@ -51,6 +51,8 @@ function validateRunIdentity(actual, descriptor, commit) {
   assert.match(actual.path ?? '', /^\.github\/workflows\/ci\.yml(?:@.+)?$/, 'wrong workflow');
   assert.equal(actual.head_sha, commit, 'run tested a different commit');
 }
+const FAILURE_CONCLUSIONS = new Set(['failure', 'cancelled', 'timed_out', 'startup_failure', 'action_required']);
+const isFailedRun = run => FAILURE_CONCLUSIONS.has(run.conclusion);
 function successfulRun(descriptor, commit, readRun) {
   const actual = readRun(descriptor.runId, descriptor.attempt);
   validateRunIdentity(actual, descriptor, commit);
@@ -150,14 +152,14 @@ export function verifyReleaseEvidence({ evidenceFile, expected, manifest, rootDi
     assert.ok(attempts.slice(i + 1).some(row => row.id === resolution.supersededBy && row.passed), `unresolved required failure ${attempt.id}: ${attempt.validationError.message}`);
   }
   assert.ok(Array.isArray(decision.priorCiFailures), 'prior CI failure inventory is required (may be empty)');
-  const historicalFailures = history.filter(run => ['failure', 'cancelled', 'timed_out'].includes(run.conclusion));
+  const historicalFailures = history.filter(isFailedRun);
   for (const run of historicalFailures) assert.ok(decision.priorCiFailures.some(row => String(row.runId) === String(run.id)
     && row.attempt === run.run_attempt), `omitted failed CI attempt: ${run.id}/${run.run_attempt}`);
   assert.equal(new Set(decision.priorCiFailures.map(row => `${row.runId}/${row.attempt}`)).size, decision.priorCiFailures.length, 'duplicate prior CI failure');
   for (const failure of decision.priorCiFailures) {
     const actual = getRun(failure.runId, failure.attempt);
     validateRunIdentity(actual, failure, expected.commit);
-    assert.ok(['failure', 'cancelled', 'timed_out'].includes(actual.conclusion), 'prior failure is not a failed run');
+    assert.ok(isFailedRun(actual), 'prior failure is not a failed run');
     assert.ok(['product', 'test', 'environment', 'unknown'].includes(failure.classification), 'CI failure lacks classification');
     assert.match(failure.issue ?? '', /^https:\/\/github\.com\/OriginTrail\/dkg\/issues\/\d+$/, 'CI failure needs an owning issue');
     const replacement = [decision.ci, decision.nightly].find(row => String(row.runId) === String(failure.supersededBy?.runId)

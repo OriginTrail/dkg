@@ -139,3 +139,23 @@ test('malformed harness receipt retains a validation diagnostic', t => {
   f.decision.harness.attempts[0].receipt = f.write('suite.json', null);
   assert.throws(f.verify, /latest harness attempt first did not qualify: harness receipt must be an object/);
 });
+
+for (const conclusion of ['startup_failure', 'action_required']) {
+  test(`CI ${conclusion} must be inventoried and can be resolved`, t => {
+    const f = fixture(t), read = f.options.readRun;
+    f.options.readRunAttempts = () => [{ ...read('121', 1), conclusion, run_started_at: '2026-10-26T10:00:00Z' }];
+    f.options.readRun = (...args) => ({ ...read(...args), run_started_at: '2026-10-26T11:00:00Z' });
+    assert.throws(f.verify, /omitted failed CI attempt: 121\/1/);
+    f.decision.priorCiFailures = [{ runId: '121', attempt: 1, classification: 'environment',
+      issue: 'https://github.com/OriginTrail/dkg/issues/3502', supersededBy: f.decision.ci }];
+    assert.equal(f.verify().outcome, 'PASS');
+  });
+}
+for (const [field, reason] of [['dkgCommit', /step tested a different product/], ['harnessCommit', /step used a different harness/]]) {
+  test(`child step ${field} cannot disagree with a valid suite identity`, t => {
+    const f = fixture(t);
+    f.state.steps['overlap:share-publish'][field] = 'f'.repeat(40);
+    f.decision.harness.attempts[0].receipt = f.write('suite.json', f.state);
+    assert.throws(f.verify, reason);
+  });
+}
