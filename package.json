@@ -1,6 +1,6 @@
 {
   "name": "dkg-v10",
-  "version": "10.0.25",
+  "version": "10.0.26",
   "private": true,
   "packageManager": "pnpm@10.28.1",
   "dkgBuild": {
@@ -141,7 +141,11 @@
     "test:regression-proofs": "node --test scripts/lib/__tests__/regression-proofs.test.mjs",
     "qa:check-regression-launcher": "node scripts/qa-check-regression-launcher.mjs",
     "qa:check-regressions": "node scripts/qa-check-regressions.mjs",
-    "qa:prove-regression": "node scripts/qa-prove-regression.mjs"
+    "qa:prove-regression": "node scripts/qa-prove-regression.mjs",
+    "release:prepare-packages": "node scripts/release-packages.mjs prepare-packages",
+    "release:certify-install": "node scripts/release-packages.mjs certify-install",
+    "release:verify-package-certificate": "node scripts/release-packages.mjs verify-package-certificate",
+    "release:publish-prepared": "node scripts/release-packages.mjs publish-prepared"
   },
   "devDependencies": {
     "@origintrail-official/dkg": "workspace:*",

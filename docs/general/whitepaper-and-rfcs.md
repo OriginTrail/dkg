@@ -9,11 +9,13 @@ doc_type: reference
 
 ## Whitepaper
 
-Explore the [OriginTrail Whitepaper](https://origintrail.io/ecosystem/whitepaper) for the vision behind a verifiable internet for AI — leveraging the synergies of crypto, internet, and AI technologies.
+Explore the [OriginTrail Whitepaper](https://origintrail.io/ecosystem/whitepaper) for the wider vision: people and agents contributing knowledge across a network, with provenance and integrity that AI applications can inspect. The [neuro-symbolic roadmap](../how-dkg-works/roadmap-and-convergence.md#reasoning-and-learning-over-shared-knowledge) connects that vision to graph reasoning, graph neural networks, and shared knowledge services.
 
 ## RFCs (OT-RFCs)
 
 OriginTrail development is transparent and guided by public technical **Requests for Comments (OT-RFCs)**. RFCs live in the [OT-RFC repository](https://github.com/OriginTrail/OT-RFC-repository).
+
+The [NeuroSymbolic Marketplace RFC](https://github.com/OriginTrail/OT-RFC-repository/tree/main/RFCs/OT-RFC-27_NeuroSymbolic_Marketplace) develops the direction for query, reasoning, graph-ML, and inference services across participants. Read its proposed design and prototype evidence alongside the [availability reference](../references/availability.md) when planning an integration.
 
 ### RFC lifecycle
 
