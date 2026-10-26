@@ -9,8 +9,8 @@
 //        --load http://127.0.0.1:9999/bigdata/namespace/<ns>/sparql [--force-nonempty]
 //
 // --load posts the file to a namespace you own (loopback only unless --allow-remote-backend) and refuses a namespace
-// whose queue control graph already holds rows unless --force-nonempty. To seed a G2 node's namespace: stop the node
-// first, then
+// whose queue control graph already holds rows, or that cannot be inspected, unless --force-nonempty. To seed a G2
+// node's namespace: stop the node first, then
 //   curl --data-binary @seed.nq -H 'Content-Type: text/x-nquads' <namespace sparql url>
 // (gunzip a .gz file first). Prints one JSON line: the manifest.
 //
@@ -77,7 +77,14 @@ if (target && !values['force-nonempty']) {
     console.error(`could not inspect ${target}: HTTP ${res.status}`);
     process.exit(1);
   }
-  if ((await res.json()).boolean) {
+  // Fail closed: an answer that is not a SPARQL ASK result (an HTML page, a SELECT result of a wrong URL) says nothing
+  // about the namespace, so it is as un-inspectable as an HTTP error.
+  const answer = await res.json().catch(() => null);
+  if (typeof answer?.boolean !== 'boolean') {
+    console.error(`could not inspect ${target}: the answer is not a SPARQL ASK result`);
+    process.exit(1);
+  }
+  if (answer.boolean) {
     console.error('the queue control graph of that namespace is not empty; use --force-nonempty to load anyway');
     process.exit(1);
   }
