@@ -10,8 +10,14 @@
 // holding its slot. The node's diagnostics cannot serve: they report one pool,
 // grown by the reserved slots.
 
-/** How long the transfer must have held the general slot before the writes start: a pull that ends at once is not the transfer. */
-export const TRANSFER_CONFIRM_MS = 5_000;
+/**
+ * How long the transfer must have held the general slot before the writes
+ * start: a `holding` line after its start (once a second) shows it still in
+ * the slot, so an empty pull that ends at once is not taken for it. Longer
+ * only shortens the time left for the writes; a transfer that ends early is
+ * caught by the judgement afterwards.
+ */
+export const TRANSFER_CONFIRM_MS = 1_000;
 /** The trace lists the admissions that hold a slot once a second: one that no line of the last few seconds lists may have ended. */
 export const TRACE_FRESH_MS = 3_000;
 /**
@@ -48,23 +54,26 @@ export function singleSlotProblem(policy) {
  * leaves the general one to other work, so a transfer there is not the case.
  * A catch-up job that is merely running proves nothing: without an admission
  * there is nothing that holds the slot. Returns { transfer } (its admission)
- * or { why }.
+ * or { why, kind }: `kind` is 'no-trace', 'policy' or 'not-admitted' when the
+ * node cannot show the case at all, and 'young', 'reserved' or 'ended' when a
+ * transfer was admitted but did not hold the general slot as the case needs,
+ * which a longer transfer may.
  */
 export function heldTransfer(admissions, isTransfer, { now, confirmMs = TRANSFER_CONFIRM_MS, freshMs = TRACE_FRESH_MS }) {
-  if (admissions === null) return { why: 'the node writes no admission trace (DKG_SYNC_ADMISSION_TRACE)' };
+  if (admissions === null) return { kind: 'no-trace', why: 'the node writes no admission trace (DKG_SYNC_ADMISSION_TRACE)' };
   const transfers = admissions.filter(isTransfer);
-  if (transfers.length === 0) return { why: 'no transfer of it was admitted to a sync slot' };
+  if (transfers.length === 0) return { kind: 'not-admitted', why: 'no transfer of it was admitted to a sync slot' };
   const holding = transfers.filter(admission => admission.releasedAt === null && now - admission.heldUntil <= freshMs);
   const general = holding.filter(admission => admission.slot === 'general');
   const confirmed = general.filter(admission => admission.heldUntil - admission.startedAt >= confirmMs);
   if (confirmed.length) {
     const transfer = confirmed.at(-1);
     const policy = singleSlotProblem(transfer.policy);
-    return policy ? { why: policy } : { transfer };
+    return policy ? { kind: 'policy', why: policy } : { transfer };
   }
-  if (general.length) return { why: `its transfer of the large graph has held the general slot for less than ${Math.round(confirmMs / 1000)} s` };
-  if (holding.length) return { why: `its transfer of the large graph holds a reserved ${holding.at(-1).slot} slot, not the general one` };
-  return { why: 'no transfer of it holds a slot now: each gave it up, or no recent trace line shows it holding' };
+  if (general.length) return { kind: 'young', why: `its transfer of the large graph has held the general slot for less than ${Math.round(confirmMs / 1000)} s` };
+  if (holding.length) return { kind: 'reserved', why: `its transfer of the large graph holds a reserved ${holding.at(-1).slot} slot, not the general one` };
+  return { kind: 'ended', why: 'no transfer of it holds a slot now: each gave it up, or no recent trace line shows it holding' };
 }
 
 /**
@@ -148,6 +157,82 @@ export function busySlotCovered({ transfer, admissions, until, readmitMs = TRANS
  * write.
  */
 export const receivedWhileHeld = (receivedAt, busy) => busy.provenUntil !== null && receivedAt <= busy.provenUntil;
+
+/**
+ * An admission in the one general slot at the same time as one of the
+ * transfer's own admissions (`chain`, transferChain): two admissions holding
+ * one slot at once, which the node's policy does not allow, and which no
+ * other attempt can explain away. One that only took the slot between two of
+ * the transfer's admissions is not: the slot was free then, and another
+ * attempt may still show the case. Returns that admission, or null.
+ */
+export function besideTransfer(chain, admissions) {
+  return (admissions ?? []).find(admission => !chain.includes(admission) && admission.slot === 'general'
+    && chain.some(own => admission.startedAt < own.heldUntil && admission.heldUntil > own.startedAt)) ?? null;
+}
+
+/**
+ * One attempt of case 6, judged on its writes: when each was received
+ * (`receipts`, null for a write its reads did not find within its bound)
+ * against the evidence of the slot (`busy`, busySlotCovered). A write received
+ * after the last trace line that shows the transfer holding the slot is late:
+ * it proves nothing about the busy slot, and an attempt with a transfer that
+ * holds the slot longer can. A write never received is missing: it fails the
+ * case whatever the slot did, and no other attempt changes that. Returns the
+ * indexes of the `late` and the `missing` writes, and `exercised` (none late).
+ */
+export function attemptVerdict(receipts, busy) {
+  const late = [];
+  const missing = [];
+  receipts.forEach((receivedAt, i) => {
+    if (receivedAt === null) missing.push(i);
+    else if (!receivedWhileHeld(receivedAt, busy)) late.push(i);
+  });
+  return { late, missing, exercised: late.length === 0 };
+}
+
+/**
+ * The most triples one asset of a large graph carries: a node shares an
+ * asset in one gossip message of about 300 bytes a triple, and refuses one
+ * over 4 MB.
+ */
+export const LARGE_ASSET_MAX_TRIPLES = 10_000;
+/**
+ * The most triples the large graph of a later attempt carries: the large
+ * graphs of all attempts stay on the node that holds them, which writes more
+ * slowly the more it holds, and reach member 2 over its circuit through one
+ * relay, which carries at most 256 MiB (about 300 bytes a triple: three
+ * attempts of up to 128,000, 256,000 and 256,000 triples stay under it).
+ */
+export const LARGE_GRAPH_MAX_TRIPLES = 256_000;
+
+/**
+ * The size of the large graph for case 6's next attempt, from what member 2's
+ * trace measured on the last: its transfer of `size` ({ assets, triples per
+ * asset }) held the general slot for `heldMs` (from the transfer's admission
+ * to the last trace line that shows it holding; null when nothing held it),
+ * and the writes needed it held for `neededMs` from that admission (to their
+ * last receipt; null when no write was made). A transfer holds the slot about
+ * as long as its triples take to arrive, so the next graph carries `margin`
+ * times the triples that hold the slot through `neededMs` at the rate
+ * measured, at least `minGrowth` times the last graph's (all that is known
+ * without a rate), and at most `maxTriples` (or the last graph's, if that is
+ * more). They are spread over as few assets as `maxTriplesPerAsset` allows:
+ * a node writes fewer, larger assets faster. Returns { assets, triples
+ * (per asset), expectedHoldMs (at the rate measured; null without one) }.
+ */
+export function nextLargeSize(size, { heldMs = null, neededMs = null } = {}, {
+  margin = 1.5, minGrowth = 1, maxTriplesPerAsset = LARGE_ASSET_MAX_TRIPLES, maxTriples = LARGE_GRAPH_MAX_TRIPLES,
+} = {}) {
+  const carried = size.assets * size.triples;
+  const rate = heldMs > 0 ? carried / heldMs : null;
+  let wanted = carried * minGrowth;
+  if (rate !== null && neededMs > 0) wanted = Math.max(wanted, rate * neededMs * margin);
+  wanted = Math.ceil(Math.min(wanted, Math.max(maxTriples, carried)));
+  const assets = Math.ceil(wanted / maxTriplesPerAsset);
+  const triples = Math.ceil(wanted / assets);
+  return { assets, triples, expectedHoldMs: rate === null ? null : Math.round((assets * triples) / rate) };
+}
 
 /**
  * The admissions of `isOther` (the public graph's pulls) that held a slot

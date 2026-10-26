@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { traceAdmissions } from '../qa/admission-trace.mjs';
-import { admissionsBySlot, busySlotCovered, heldTransfer, receivedWhileHeld, singleSlotProblem, transferChain, transferSettled, TRANSFER_READMIT_MS } from '../qa/busy-slot.mjs';
+import {
+  admissionsBySlot, attemptVerdict, besideTransfer, busySlotCovered, heldTransfer, LARGE_ASSET_MAX_TRIPLES, LARGE_GRAPH_MAX_TRIPLES, nextLargeSize,
+  receivedWhileHeld, singleSlotProblem, transferChain, transferSettled, TRANSFER_READMIT_MS,
+} from '../qa/busy-slot.mjs';
 
 // Member 2's intended general pool: one slot, no queue (as the trace records it).
 const POLICY = { limit: 1, queueLimit: 0, partitioned: false };
@@ -49,23 +52,25 @@ test('the transfer holds the slot only when the trace shows an admission of the 
   const now = 106_500;
   const held = trace(line('start', '41-1', PUBLIC, 90_000), line('release', '41-1', PUBLIC, 90_100), line('start', '41-2', LARGE, 100_000), ...heartbeats(101_000, 106_000, '41-2'));
   assert.deepEqual(heldTransfer(held, isLarge, { now }), { transfer: { id: '41-2', label: LARGE, slot: 'general', policy: POLICY, startedAt: 100_000, releasedAt: null, heldUntil: 106_000 } });
-  // A pull that has held the slot for less than five seconds may end at once: not yet the transfer.
-  const young = trace(line('start', '41-2', LARGE, 104_000), ...heartbeats(105_000, 106_000, '41-2'));
-  assert.equal(heldTransfer(young, isLarge, { now }).why, 'its transfer of the large graph has held the general slot for less than 5 s');
+  // A pull no holding line has shown in the slot a second after its start may end at once: not yet the transfer.
+  const young = trace(line('start', '41-2', LARGE, 105_800), holding(106_400, '41-2'));
+  assert.deepEqual(heldTransfer(young, isLarge, { now }), { kind: 'young', why: 'its transfer of the large graph has held the general slot for less than 1 s' });
+  // One holding line a second after its start confirms it: the writes start then.
+  assert.equal(heldTransfer(trace(line('start', '41-2', LARGE, 105_400), holding(106_400, '41-2')), isLarge, { now }).transfer.id, '41-2');
   // No line of the last three seconds lists it: its release may have been lost, or the node died.
   const silent = trace(line('start', '41-2', LARGE, 95_000), ...heartbeats(96_000, 103_000, '41-2'));
-  assert.equal(heldTransfer(silent, isLarge, { now }).why, 'no transfer of it holds a slot now: each gave it up, or no recent trace line shows it holding');
+  assert.deepEqual(heldTransfer(silent, isLarge, { now }), { kind: 'ended', why: 'no transfer of it holds a slot now: each gave it up, or no recent trace line shows it holding' });
   // A running catch-up job without an admission of the large graph does not make member 2 busy.
-  assert.equal(heldTransfer(trace(line('start', '41-1', PUBLIC, 90_000)), isLarge, { now }).why, 'no transfer of it was admitted to a sync slot');
+  assert.deepEqual(heldTransfer(trace(line('start', '41-1', PUBLIC, 90_000)), isLarge, { now }), { kind: 'not-admitted', why: 'no transfer of it was admitted to a sync slot' });
   assert.equal(heldTransfer([], isLarge, { now }).why, 'no transfer of it was admitted to a sync slot');
   // A transfer that has already given up the slot holds nothing.
   const ended = trace(line('start', '41-2', LARGE, 100_000), line('release', '41-2', LARGE, 100_500), line('start', '41-3', PUBLIC, 101_000));
-  assert.equal(heldTransfer(ended, isLarge, { now }).why, 'no transfer of it holds a slot now: each gave it up, or no recent trace line shows it holding');
+  assert.deepEqual(heldTransfer(ended, isLarge, { now }), { kind: 'ended', why: 'no transfer of it holds a slot now: each gave it up, or no recent trace line shows it holding' });
   // A transfer in a reserved shared-memory slot leaves the general slot to others: it is not the case.
   const reserved = trace(line('start', '41-4', LARGE, 100_000, 'shared-memory'), ...heartbeats(101_000, 106_000, '41-4'));
-  assert.equal(heldTransfer(reserved, isLarge, { now }).why, 'its transfer of the large graph holds a reserved shared-memory slot, not the general one');
+  assert.deepEqual(heldTransfer(reserved, isLarge, { now }), { kind: 'reserved', why: 'its transfer of the large graph holds a reserved shared-memory slot, not the general one' });
   // A node that writes no trace.
-  assert.equal(heldTransfer(null, isLarge, { now }).why, 'the node writes no admission trace (DKG_SYNC_ADMISSION_TRACE)');
+  assert.deepEqual(heldTransfer(null, isLarge, { now }), { kind: 'no-trace', why: 'the node writes no admission trace (DKG_SYNC_ADMISSION_TRACE)' });
   // Of two admissions of the large graph that qualify, the latest is the transfer.
   const two = trace(line('start', '41-2', LARGE, 99_000), line('start', '41-3', LARGE, 100_000), ...heartbeats(101_000, 106_000, '41-2', '41-3'));
   assert.equal(heldTransfer(two, isLarge, { now }).transfer.id, '41-3');
@@ -84,7 +89,7 @@ test('case 6 counts only on one general sync slot and no queue; the reserved slo
   assert.equal(singleSlotProblem(undefined), 'its trace names no sync policy');
   // The transfer's own record decides.
   const spare = trace(line('start', '41-2', LARGE, 100_000, 'general', { limit: 8, queueLimit: 0, partitioned: false }), ...heartbeats(101_000, 106_000, '41-2'));
-  assert.equal(heldTransfer(spare, isLarge, { now: 106_500 }).why, 'the node runs 8 general sync slot(s), not one');
+  assert.deepEqual(heldTransfer(spare, isLarge, { now: 106_500 }), { kind: 'policy', why: 'the node runs 8 general sync slot(s), not one' });
   // The diagnostics report one pool of 3 slots and a queue of 16 for this node (#3258, #3302); the trace shows the
   // general pool (1 slot, no queue) holding the transfer while a pull of the public graph runs in the reserved slot.
   const fixed = trace(
@@ -262,4 +267,63 @@ test('a continuation that starts and ends in the same millisecond is taken once,
   const child = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', timeout: 10_000 });
   assert.equal(child.status, 0, child.error?.message ?? child.stderr);
   assert.deepEqual(JSON.parse(child.stdout), [['41-2', '41-3'], ['41-2', '41-3', '41-4']]);
+});
+
+test('an attempt counts only when no write arrived after the transfer gave up the slot; a write never received fails it whatever the slot did', () => {
+  const busy = { held: false, provenUntil: 120_000, reason: 'the transfer gave up the slot' };
+  assert.deepEqual(attemptVerdict([100_000, 119_000, 120_000], busy), { late: [], missing: [], exercised: true });
+  assert.deepEqual(attemptVerdict([100_000, 120_001, 130_000], busy), { late: [1, 2], missing: [], exercised: false });
+  assert.deepEqual(attemptVerdict([null, 130_000, 100_000], busy), { late: [1], missing: [0], exercised: false });
+  // A trace that never showed the transfer proves no receipt.
+  assert.deepEqual(attemptVerdict([100_000], { held: false, provenUntil: null, reason: 'no transfer of it was admitted to a sync slot' }), { late: [0], missing: [], exercised: false });
+  assert.deepEqual(attemptVerdict([], busy), { late: [], missing: [], exercised: true });
+});
+
+test('the next attempt\'s large graph is sized from the rate the last transfer held the slot at, spread over as few assets as allowed', () => {
+  const options = { margin: 1.5, minGrowth: 1, maxTriplesPerAsset: 10_000, maxTriples: 400_000 };
+  // The gate run of 1747d1a7d: 64 x 2000 triples held the slot 11.9 s; the writes needed it 21 s from the admission.
+  // At 10,756 triples/s, 1.5 x 21 s takes 338,824 triples: 34 assets of 9966.
+  const gate = nextLargeSize({ assets: 64, triples: 2000 }, { heldMs: 11_900, neededMs: 21_000 }, options);
+  assert.deepEqual(gate, { assets: 34, triples: 9966, expectedHoldMs: 31_502 });
+  // Never smaller than the last graph: a transfer that held the slot long enough for less still gets as many.
+  assert.deepEqual(nextLargeSize({ assets: 16, triples: 8000 }, { heldMs: 20_000, neededMs: 5_000 }, options),
+    { assets: 13, triples: 9847, expectedHoldMs: 20_002 });
+  // At most maxTriples, unless the last graph carried more.
+  assert.deepEqual(nextLargeSize({ assets: 16, triples: 8000 }, { heldMs: 10_000, neededMs: 60_000 }, options),
+    { assets: 40, triples: 10_000, expectedHoldMs: 31_250 });
+  assert.deepEqual(nextLargeSize({ assets: 50, triples: 10_000 }, { heldMs: 10_000, neededMs: 60_000 }, options),
+    { assets: 50, triples: 10_000, expectedHoldMs: 10_000 });
+  // Without a rate (nothing held the slot, or no write was made), it grows by minGrowth.
+  assert.deepEqual(nextLargeSize({ assets: 16, triples: 8000 }, {}, { ...options, minGrowth: 1.5 }), { assets: 20, triples: 9600, expectedHoldMs: null });
+  assert.deepEqual(nextLargeSize({ assets: 16, triples: 8000 }, { heldMs: 10_000, neededMs: null }, { ...options, minGrowth: 1.5 }),
+    { assets: 20, triples: 9600, expectedHoldMs: 15_000 });
+  // The defaults keep an asset under the 4 MB gossip limit and a later graph at most twice the first one. On the gate
+  // run's numbers they give 26 assets of 9847 triples, held about 24 s, for the 21 s the writes needed.
+  const defaults = nextLargeSize({ assets: 64, triples: 2000 }, { heldMs: 5_000, neededMs: 60_000 });
+  assert.ok(defaults.triples <= LARGE_ASSET_MAX_TRIPLES && defaults.assets * defaults.triples <= LARGE_GRAPH_MAX_TRIPLES + defaults.assets, JSON.stringify(defaults));
+  assert.deepEqual(nextLargeSize({ assets: 64, triples: 2000 }, { heldMs: 11_900, neededMs: 21_000 }), { assets: 26, triples: 9847, expectedHoldMs: 23_802 });
+});
+
+test('another admission at the same time as one of the transfer\'s own contradicts the one-slot policy; one between them does not', () => {
+  const transfer = { id: '41-2', label: LARGE, startedAt: 100_000 };
+  // A pull of the public graph in the general slot while the transfer holds it.
+  const overlapping = trace(line('start', '41-2', LARGE, 100_000), line('start', '41-3', PUBLIC, 103_000), ...heartbeats(101_000, 110_000, '41-2', '41-3'));
+  assert.equal(besideTransfer(transferChain(transfer, overlapping), overlapping)?.id, '41-3');
+  // The review's example: the pull runs in the gap between two of the transfer's admissions. busySlotCovered proves
+  // nothing for it, but the slot was free then: no admission held it beside the transfer.
+  const gap = trace(
+    line('start', '41-2', LARGE, 100_000), ...heartbeats(101_000, 104_000, '41-2'), line('release', '41-2', LARGE, 105_000),
+    line('start', '41-9', PUBLIC, 105_020), line('release', '41-9', PUBLIC, 105_150),
+    line('start', '41-4', LARGE, 105_200), ...heartbeats(106_000, 119_000, '41-4'), line('release', '41-4', LARGE, 120_000),
+  );
+  const chain = transferChain(transfer, gap);
+  assert.deepEqual(chain.map(admission => admission.id), ['41-2', '41-4']);
+  assert.equal(busySlotCovered({ transfer, admissions: gap, until: 110_000 }).provenUntil, null);
+  assert.equal(besideTransfer(chain, gap), null);
+  // Admissions in a reserved slot, or that end as the transfer starts, are not beside it.
+  const reserved = trace(line('start', '41-2', LARGE, 100_000), line('start', '41-3', PUBLIC, 101_000, 'shared-memory'), line('release', '41-2', LARGE, 102_000));
+  assert.equal(besideTransfer(transferChain(transfer, reserved), reserved), null);
+  const before = trace(line('start', '41-1', PUBLIC, 90_000), line('release', '41-1', PUBLIC, 100_000), line('start', '41-2', LARGE, 100_000));
+  assert.equal(besideTransfer(transferChain(transfer, before), before), null);
+  assert.equal(besideTransfer([], null), null);
 });
