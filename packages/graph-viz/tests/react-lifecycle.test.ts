@@ -17,6 +17,8 @@ vi.mock('../src/core/rdf-graph-viz.js', () => ({ RdfGraphViz: class {
   }
 } }));
 import { RdfGraph } from '../src/react/RdfGraph.js';
+import { useRdfGraph } from '../src/react/useRdfGraph.js';
+import { GraphModelNode } from '../src/core/graph-node.js';
 
 let root: Root; let container: HTMLDivElement;
 beforeEach(() => {
@@ -115,11 +117,21 @@ describe('React camera and asynchronous error handling', () => {
   });
 });
 
-it('permits selection and hover state updates without application event callbacks', async () => {
-  await act(async () => root.render(React.createElement(RdfGraph, { data: 'source' })));
-  expect(() => act(() => {
-    state.viz.handlers.get('node:click')({ id: 'urn:s' }); state.viz.handlers.get('node:hover')({ id: 'urn:s' }); state.viz.handlers.get('node:unhover')({ id: 'urn:s' });
-  })).not.toThrow();
+it('updates public selection and hover state without application event callbacks', async () => {
+  let observed!: ReturnType<typeof useRdfGraph>;
+  function Probe() { observed = useRdfGraph(); return null; }
+  await act(async () => root.render(React.createElement(RdfGraph, { data: 'source' }, React.createElement(Probe))));
+  const selected = new GraphModelNode('urn:selected'), hovered = new GraphModelNode('urn:hovered');
+  act(() => state.viz.handlers.get('node:click')(selected));
+  expect(observed.selectedNode).toBe(selected);
+  act(() => state.viz.handlers.get('node:hover')(hovered));
+  expect(observed.hoveredNode).toBe(hovered);
+  expect(observed.selectedNode).toBe(selected);
+  act(() => state.viz.handlers.get('node:unhover')(hovered));
+  expect(observed.hoveredNode).toBeNull();
+  expect(observed.selectedNode).toBe(selected);
+  act(() => state.viz.handlers.get('background:click')({ x: 0, y: 0 }));
+  expect(observed.selectedNode).toBeNull();
   expect(state.viz.loadNTriples).toHaveBeenCalledOnce();
 });
 

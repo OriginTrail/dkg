@@ -139,7 +139,7 @@ describe('ReificationCollapser', () => {
 });
 
 
-describe('ReificationCollapser metadata and fallback annotations', () => {
+describe('ReificationCollapser metadata and annotation identity', () => {
   it('collapses statements whose structural links are stored as metadata and attaches typed annotations', () => {
     const model = new GraphModel([RDF + 'subject', RDF + 'predicate', RDF + 'object', 'urn:meta']);
     model.addTriple({ subject: 'urn:s', predicate: 'urn:p', object: 'value' });
@@ -156,29 +156,49 @@ describe('ReificationCollapser metadata and fallback annotations', () => {
       { predicate: 'urn:meta', value: 'trusted', datatype: undefined },
     ]));
   });
-  it('attaches annotations to metadata values, preserves earlier annotations, and ignores incomplete statements', () => {
+  it.each([{ value: 'value', previous: true }, { value: 'urn:resource', previous: false }])('attaches metadata annotations to a matching value and preserves earlier annotations: %j', ({ value, previous }) => {
     const model = new GraphModel(['urn:p']);
-    model.addTriple({ subject: 'urn:s', predicate: 'urn:p', object: 'value' });
-    addStandardReification(model, 'urn:stmt', 'urn:s', 'urn:p', 'urn:resource', [
+    model.addTriple({ subject: 'urn:s', predicate: 'urn:p', object: value });
+    addStandardReification(model, 'urn:stmt', 'urn:s', 'urn:p', value, [
       { pred: 'urn:confidence', val: 'high' },
     ]);
     model.addTriple({ subject: 'urn:incomplete', predicate: RDF + 'type', object: RDF + 'Statement' });
-    model.getNode('urn:s')!.metadata.get('urn:p')![0].annotations = [{ predicate: 'urn:previous', value: 'keep' }];
+    if (previous) model.getNode('urn:s')!.metadata.get('urn:p')![0].annotations = [{ predicate: 'urn:previous', value: 'keep' }];
     expect(new ReificationCollapser({ enabled: true }).collapse(model)).toEqual(new Set(['urn:stmt']));
     expect(model.getNode('urn:s')!.metadata.get('urn:p')![0].annotations).toEqual([
-      { predicate: 'urn:previous', value: 'keep' },
+      ...(previous ? [{ predicate: 'urn:previous', value: 'keep' }] : []),
       { predicate: 'urn:confidence', value: 'high', datatype: undefined },
     ]);
   });
-  it('falls back to the first property value when a statement does not identify an existing literal', () => {
+  it.each(['absent entity', 'empty subject'])('leaves an unresolved statement visible: %s', mode => {
+    const model = new GraphModel([RDF + 'subject', RDF + 'predicate', RDF + 'object']);
+    addStandardReification(model, 'urn:stmt', 'urn:absent', 'urn:p', 'value', [
+      { pred: 'urn:annotation', val: 'evidence' },
+    ]);
+    if (mode === 'empty subject') model.getNode('urn:stmt')!.metadata.set(RDF + 'subject', []);
+    expect(model.getNode('urn:absent')).toBeUndefined();
+    expect(new ReificationCollapser({ enabled: true }).collapse(model)).toEqual(new Set());
+    expect(model.getNode('urn:stmt')?.properties.get('urn:annotation')?.[0].value).toBe('evidence');
+  });
+
+  it('attaches separate statement annotations only to their matching property values', () => {
     const model = new GraphModel();
-    model.addTriple({ subject: 'urn:s', predicate: 'urn:p', object: 'actual' });
-    addStandardReification(model, 'urn:stmt', 'urn:s', 'urn:p', 'other', [
-      { pred: 'urn:annotation', val: 'context' },
+    for (const value of ['unrelated', 'first', 'second']) {
+      model.addTriple({ subject: 'urn:s', predicate: 'urn:p', object: value });
+    }
+    addStandardReification(model, 'urn:stmt-first', 'urn:s', 'urn:p', 'first', [
+      { pred: 'urn:annotation', val: 'first evidence' },
     ]);
-    new ReificationCollapser({ enabled: true }).collapse(model);
-    expect(model.getNode('urn:s')?.properties.get('urn:p')?.[0].annotations).toEqual([
-      { predicate: 'urn:annotation', value: 'context', datatype: undefined },
+    addStandardReification(model, 'urn:stmt-second', 'urn:s', 'urn:p', 'second', [
+      { pred: 'urn:annotation', val: 'second evidence' },
     ]);
+    expect(new ReificationCollapser({ enabled: true }).collapse(model))
+      .toEqual(new Set(['urn:stmt-first', 'urn:stmt-second']));
+    expect(model.getNode('urn:s')?.properties.get('urn:p')?.map(({ value, annotations }) => ({ value, annotations })))
+      .toEqual([
+        { value: 'unrelated', annotations: undefined },
+        { value: 'first', annotations: [{ predicate: 'urn:annotation', value: 'first evidence', datatype: undefined }] },
+        { value: 'second', annotations: [{ predicate: 'urn:annotation', value: 'second evidence', datatype: undefined }] },
+      ]);
   });
 });
