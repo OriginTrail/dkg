@@ -26,6 +26,7 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { MarketplaceOfferingConfig } from './marketplace/config.js';
 import { inferAdapterPublisherAddress } from './dkg-agent-helpers.js';
+import { VmReconcileQueueClosedError } from './vm-reconcile-service.js';
 import {
   MarketplaceSellerService,
   type MarketplaceFlushResult,
@@ -45,10 +46,15 @@ import {
 import {
   createContextGraphOfferSource,
   publishMarketplaceOfferings,
+  type MarketplaceOfferPublishResult,
 } from './marketplace/offer-publisher.js';
+import {
+  createMarketplaceOfferAssetPort,
+  ensureMarketplaceContextGraphAnchor,
+} from './marketplace/offer-assets.js';
 
 const DEFAULT_FLUSH_INTERVAL_MS = 5_000;
-/** Empty-discovery SWM backfill: at most one peer sweep per interval. */
+/** Discovery refresh (VM reconcile; SWM peer pull when empty): at most once per interval. */
 const OFFER_BACKFILL_MIN_INTERVAL_MS = 30_000;
 const OFFER_BACKFILL_MAX_PEERS = 4;
 
@@ -88,39 +94,6 @@ export interface MarketplaceStatus {
   buyer?: { subscribed: boolean; epoch?: bigint; sessionKeyAddress?: string; meter?: MeterState };
 }
 
-/**
- * Best-effort on-chain anchor for the shared `marketplace` CG. Under RFC-64 a
- * plain-name unregistered CG has no authority a replica can verify (its
- * creator is a peer DID, and only wallet-namespace ids mint an owner-signed
- * seed), so buyer nodes fail closed and never materialize its offer shares.
- * Registration gives every node the finalized chain binding to resolve. The
- * first seller to publish registers; a later seller adopts the existing
- * binding instead of minting a duplicate graph for the same name. Failures
- * are contained — the offers are still shared locally and the next publish
- * retries the anchor.
- */
-async function ensureMarketplaceContextGraphRegistered(agent: DKGAgent, log: MarketplaceLogger): Promise<void> {
-  try {
-    if (await agent.isContextGraphRegistered(MARKETPLACE_CONTEXT_GRAPH)) return;
-    const authority = await agent.resolveContextGraphSubscriptionBootstrapAuthority(
-      MARKETPLACE_CONTEXT_GRAPH,
-      { signal: AbortSignal.timeout(20_000), freshness: 'bounded' },
-    ).catch(() => undefined);
-    if (authority?.outcome === 'allowed' && authority.onChainId !== undefined) return;
-    const { onChainId, txHash } = await agent.registerContextGraph(MARKETPLACE_CONTEXT_GRAPH);
-    log.info(
-      `[marketplace] anchored the "${MARKETPLACE_CONTEXT_GRAPH}" context graph on-chain `
-      + `(onChainId=${onChainId}${txHash ? `, tx=${txHash}` : ''}) so buyers can verify its authority`,
-    );
-  } catch (error) {
-    log.warn(
-      `[marketplace] could not register the "${MARKETPLACE_CONTEXT_GRAPH}" context graph on-chain — `
-      + `buyer nodes cannot sync its offers until a seller registers it: `
-      + `${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-}
-
 function requireRuntime(agent: DKGAgentBase): MarketplaceRuntime {
   const runtime = marketplaceRuntimes.get(agent);
   if (!runtime) {
@@ -138,11 +111,12 @@ function resolveExecutor(agent: DKGAgent, config: MarketplaceOfferingConfig): Ma
       // Scoped read: an UNSCOPED query needs a store with all-writer revision
       // coverage, which backend stores (e.g. oxigraph-server) do not provide —
       // the executor would refuse every call there. The prototype serves the
-      // buyer's SPARQL over this node's synced marketplace CG view.
-      const result = await agent.query(sparql, {
-        contextGraphId: MARKETPLACE_CONTEXT_GRAPH,
-        includeSharedMemory: true,
-      });
+      // buyer's SPARQL over this node's Verifiable Memory of the marketplace
+      // CG (the confirmed offer KAs). Not shared memory too: that route runs
+      // the query once per partition and unions the results, so a `LIMIT n`
+      // could return up to 2n rows — metered past the buyer's maxUnits —
+      // whenever offer KAs are also held in shared memory (around a publish).
+      const result = await agent.query(sparql, { contextGraphId: MARKETPLACE_CONTEXT_GRAPH });
       const bindings = (result as { bindings?: unknown })?.bindings;
       return { rowCount: Array.isArray(bindings) ? bindings.length : 0, result };
     });
@@ -182,14 +156,14 @@ export class MarketplaceMethods extends DKGAgentBase {
       warn: (message) => this.log.warn(ctx, message),
     };
 
-    // Offers travel as SWM shares of the shared `marketplace` CG. A seller is
-    // subscribed implicitly when it creates the CG, but nothing creates it on
-    // a buyer — without this subscription the shares never reach this node
-    // and discovery stays empty forever. Subscribe every marketplace node the
-    // same way the lifecycle subscribes the system CGs (`always-on`): the
-    // subscription is idempotent, needs no local CG to exist yet, and puts
-    // the CG into the sync-on-connect/catchup scope so shares published
-    // before this node joined are backfilled from peers.
+    // Offers are Knowledge Assets of the shared `marketplace` CG (published to
+    // Verifiable Memory, updated in place on-chain). Nothing creates that CG
+    // on a buyer — without a subscription this node never binds the CG's
+    // on-chain anchor, never reconciles its offers, and discovery stays empty
+    // forever. Subscribe every marketplace node the same way the lifecycle
+    // subscribes the system CGs (`always-on`): the subscription is
+    // idempotent, needs no local CG to exist yet, and puts the CG into the
+    // chain-driven VM reconcile and sync-on-connect scope.
     const ensureOfferSubscription = (): void => {
       try {
         this.subscribeToContextGraph(MARKETPLACE_CONTEXT_GRAPH, { syncMode: 'always-on' });
@@ -202,16 +176,28 @@ export class MarketplaceMethods extends DKGAgentBase {
     };
     ensureOfferSubscription();
 
-    // Empty-discovery self-heal: pull the marketplace CG's shared memory from
-    // a few connected peers directly. The periodic sync reconciler skips
-    // recently-synced peers, so a node whose first marketplace sync ran
-    // before the CG's authority was anchored on-chain would otherwise stay
-    // empty until the staleness window expires. Throttled; failures logged.
+    // Discovery refresh, throttled: reconcile the marketplace CG's Verifiable
+    // Memory from the chain now instead of on the next periodic sweep, so an
+    // offer update confirmed on-chain reaches this buyer's next discovery
+    // (the reconcile also binds a freshly anchored CG). An EMPTY discovery
+    // additionally pulls the CG's shared memory from a few connected peers:
+    // the periodic sync reconciler skips recently-synced peers, so a node
+    // whose first marketplace sync ran before the CG was anchored would
+    // otherwise stay empty until the staleness window expires.
     let lastOfferBackfillAtMs = 0;
-    const requestOfferBackfill = (): void => {
+    const requestOfferBackfill = (empty: boolean): void => {
       const now = Date.now();
       if (now - lastOfferBackfillAtMs < OFFER_BACKFILL_MIN_INTERVAL_MS) return;
       lastOfferBackfillAtMs = now;
+      this.runVmReconcileForCg(MARKETPLACE_CONTEXT_GRAPH, 'manual').catch((error: unknown) => {
+        if (error instanceof VmReconcileQueueClosedError) return; // node shutting down
+        // Expected until this node binds the CG's anchor; the sweep retries.
+        log.info(
+          `[marketplace] offer refresh VM reconcile did not run (the periodic sweep retries): `
+          + `${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+      if (!empty) return;
       const peers = this.node.libp2p.getPeers()
         .map((peer) => peer.toString())
         .filter((peerId) => peerId !== this.peerId)
@@ -382,35 +368,48 @@ export class MarketplaceMethods extends DKGAgentBase {
   async marketplaceSetOfferings(this: DKGAgent,
     offerings: MarketplaceOfferingConfig[],
     opts: { publish?: boolean } = {},
-  ): Promise<{ offerings: number; published: string[] }> {
+  ): Promise<{ offerings: number; published: string[]; assets?: MarketplaceOfferPublishResult['assets'] }> {
     const runtime = requireRuntime(this);
     if (!runtime.seller) {
       throw new Error('marketplace: seller role unavailable on this node (no operational signing key)');
     }
     runtime.seller.setOfferings(offerings.map((offering) => resolveOffering(this, offering)));
     if (opts.publish === false) return { offerings: offerings.length, published: [] };
-    const { published } = await this.marketplacePublishOfferings();
-    return { offerings: offerings.length, published };
+    const { published, assets } = await this.marketplacePublishOfferings();
+    return { offerings: offerings.length, published, assets };
   }
 
-  /** Publish every configured offering as a KA into the `marketplace` CG. */
-  async marketplacePublishOfferings(this: DKGAgent): Promise<{ published: string[] }> {
+  /**
+   * Publish every configured offering as its own Knowledge Asset into the
+   * `marketplace` CG (Verifiable Memory; a changed offering updates its KA
+   * on-chain, an unchanged one is left alone). The KAs are authored by the
+   * receipt-signing agent: buyers accept an offer only from a KA whose author
+   * is the offer's `sellerAddress`.
+   */
+  async marketplacePublishOfferings(this: DKGAgent): Promise<MarketplaceOfferPublishResult> {
     const runtime = requireRuntime(this);
-    if (!runtime.seller || !runtime.sellerAddress) {
+    const sellerAddress = runtime.sellerAddress;
+    if (!runtime.seller || !sellerAddress) {
       throw new Error('marketplace: seller role unavailable on this node (no operational signing key)');
     }
     const sellerIdentityId = this.identityId > 0n ? this.identityId : await this.chain.getIdentityId();
     if (sellerIdentityId <= 0n) {
       throw new Error('marketplace: cannot publish offerings before the node has an on-chain identity');
     }
-    const { published } = await publishMarketplaceOfferings(this, runtime.seller.listOfferings(), {
-      sellerIdentityId,
-      sellerPeerId: this.peerId,
-      sellerAddress: runtime.sellerAddress,
-    }, {
-      ensureRegistered: async () => ensureMarketplaceContextGraphRegistered(this, runtime.log),
-    });
-    return { published };
+    const author = [this.defaultAgentAddress, ...this.listLocalAgents().map(({ agentAddress }) => agentAddress)]
+      .find((address) => address?.toLowerCase() === sellerAddress.toLowerCase());
+    if (!author) {
+      throw new Error(
+        `marketplace: the receipt signer ${sellerAddress} is not a local agent of this node, so it cannot author `
+        + 'the offer Knowledge Assets (buyers accept an offer only from a KA authored by its sellerAddress)',
+      );
+    }
+    return publishMarketplaceOfferings(
+      createMarketplaceOfferAssetPort(this, author),
+      runtime.seller.listOfferings(),
+      { sellerIdentityId, sellerPeerId: this.peerId, sellerAddress },
+      { ensureAnchor: async () => ensureMarketplaceContextGraphAnchor(this, this.chain, runtime.log) },
+    );
   }
 
   async marketplaceDiscoverOffers(this: DKGAgent): Promise<MarketplaceOffer[]> {

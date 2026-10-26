@@ -2,15 +2,22 @@
  * OT-RFC-27 marketplace — DKGAgent mixin + lifecycle wiring. A real agent
  * boots with `config.marketplace.enabled` over a `MockChainAdapter`, and the
  * runtime comes up through `startMarketplaceRuntimeV1`: the mixin surface is
- * callable, offer KAs publish through the agent's real Context Graph APIs
- * (`createContextGraph` + `share`), and discovery finds them back via the
- * agent's local SPARQL entry point — the production (non-injected) offer
- * source. A node without the config block stays dormant.
+ * callable, the first publish anchors the `marketplace` CG on-chain and
+ * publishes each offering as its own Knowledge Asset to Verifiable Memory
+ * through the agent's real KA lifecycle (a republish of unchanged offerings
+ * is a no-op), and discovery finds them back via the agent's local SPARQL
+ * entry point — the production (non-injected) offer source. A node without
+ * the config block stays dormant.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { Wallet } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { offeringIdFor } from '@origintrail-official/dkg-marketplace';
+import {
+  assertionLifecycleUri,
+  contextGraphAssertionUri,
+  contextGraphMetaUri,
+} from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 
@@ -24,9 +31,16 @@ describe('marketplace agent wiring', () => {
     const chain = new MockChainAdapter('mock:31337', wallet.address);
     chain.setMockACKSigner(wallet);
     chain.seedIdentity(wallet.address, 7n);
+    // A core self-acknowledges its own VM publish on the mock chain; the
+    // operational key makes the receipt signer the node's default agent, the
+    // author of its offer KAs.
     const agent = await DKGAgent.create({
-      name: 'MarketplaceSeller', listenHost: '127.0.0.1', listenPort: 0, nodeRole: 'edge',
+      name: 'MarketplaceSeller', listenHost: '127.0.0.1', listenPort: 0, nodeRole: 'core',
       chainAdapter: chain, kaNumberAllocator: makeTestKaNumberAllocator(),
+      chainConfig: {
+        rpcUrl: 'http://127.0.0.1:1', hubAddress: '0x0000000000000000000000000000000000000001',
+        operationalKeys: [wallet.privateKey],
+      },
       rfc64CatalogActivation: { enabled: false },
       marketplace: {
         enabled: true,
@@ -53,9 +67,37 @@ describe('marketplace agent wiring', () => {
     // here — a buyer never creates the CG, so without this it sees no offers.
     expect(agent.getSyncContextGraphIds()).toContain('marketplace');
 
-    // Offer publication through the agent's real CG APIs...
-    const { published } = await agent.marketplacePublishOfferings();
-    expect(published).toEqual([`urn:dkg:marketplace:offer:${agent.peerId}:devnet-llm`]);
+    // Offer publication through the agent's real KA lifecycle: the first
+    // publish anchors the CG on-chain, then mints the offer KA in VM...
+    const first = await agent.marketplacePublishOfferings();
+    expect(first.published).toEqual([`urn:dkg:marketplace:offer:${agent.peerId}:devnet-llm`]);
+    expect(first.assets).toMatchObject([{ assetName: 'marketplace-offer-devnet-llm', outcome: 'published' }]);
+    expect(await agent.getContextGraphOnChainId('marketplace')).toBe('1');
+    const history = await agent.assertion.history('marketplace', 'marketplace-offer-devnet-llm');
+    expect(history?.status).toBe('vm-confirmed');
+    expect(history?.agentAddress.toLowerCase()).toBe(wallet.address.toLowerCase());
+
+    // ...and a republish of the same offerings adopts the existing anchor
+    // (never a second registration) and leaves the unchanged KA alone.
+    const again = await agent.marketplacePublishOfferings();
+    expect(again.assets).toMatchObject([{ assetName: 'marketplace-offer-devnet-llm', outcome: 'unchanged' }]);
+    expect(await chain.resolveContextGraphIdsByNameHashes([agent.contextGraphNameCommitment('marketplace')]))
+      .toEqual(new Map([[agent.contextGraphNameCommitment('marketplace'), 1n]]));
+
+    // A node whose store did not keep the offer's lifecycle record (an
+    // in-memory store across a restart) still recognises its own confirmed
+    // offer in Verifiable Memory: an unchanged republish stays a no-op.
+    const author = history!.agentAddress;
+    const lostRecords = [
+      assertionLifecycleUri('marketplace', author, 'marketplace-offer-devnet-llm'),
+      contextGraphAssertionUri('marketplace', author, 'marketplace-offer-devnet-llm'),
+    ];
+    for (const prefix of lostRecords) {
+      await agent.store.deleteBySubjectPrefix(contextGraphMetaUri('marketplace'), prefix);
+    }
+    expect(await agent.assertion.history('marketplace', 'marketplace-offer-devnet-llm')).toBeNull();
+    const afterLoss = await agent.marketplacePublishOfferings();
+    expect(afterLoss.assets).toMatchObject([{ outcome: 'unchanged', revision: first.assets[0].revision }]);
 
     // ...and discovery back through the agent's local SPARQL entry point.
     const offers = await agent.marketplaceDiscoverOffers();

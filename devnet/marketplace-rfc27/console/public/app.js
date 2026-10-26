@@ -444,7 +444,7 @@
       let body;
       if (reason === 'no-offers') {
         title = 'No offers discovered yet';
-        body = 'The buyer node has not synced any offers from the marketplace context graph. Discovery can take up to ~3 minutes after the first seller publish; each Offers refresh nudges a backfill.';
+        body = 'The buyer node has not synced any offers from the marketplace context graph. Discovery normally takes seconds after the first seller publish (up to about a minute); each Offers refresh nudges a re-sync.';
       } else if (reason === 'no-bucket') {
         title = 'Your plan has no bucket for this service';
         body = 'Add a bucket for this service type to your plan (Subscribe), then try again.';
@@ -624,11 +624,14 @@
 
   /**
    * What the SELLER side currently says about one discovered offer. The
-   * buyer's discovered ask can be stale (an updated offer KA may not have
-   * reached the buyer node), while the router ranks on the live quote, which
-   * answers with the seller's currently served ask. Sources, best first:
+   * buyer's discovered ask lags a seller's update by seconds, up to about a
+   * minute (an on-chain update of the offer KA), while the router ranks on
+   * the live quote, which answers with the seller's currently served ask.
+   * Sources, best first:
    *   1. the offering set the console last published to that seller node,
-   *      when the node still serves a set of that size;
+   *      when the node still serves a set of that size — unless that set was
+   *      published and the seller node's own graph view now holds a different
+   *      ask (the seller was republished outside this console since);
    *   2. the seller node's own view of its offer in the marketplace graph;
    *   3. the ask carried by a live quote this browser saw in an invoke.
    * → { node, liveAsk (bigint|null), served (bool|null), source, stale }
@@ -639,6 +642,8 @@
     const out = { node: n, liveAsk: null, served: null, source: null, stale: false, at: null };
     const localId = localIdOf(o.offerId);
     if (n) {
+      const own = (S.offers[n]?.data?.offers ?? []).filter((x) => x.offerId === o.offerId);
+      const graphAsk = own.length === 1 ? W(own[0].askPerUnitWei) : null;
       const remembered = S.cstate.data?.offerings?.[String(n)];
       const servedCount = S.status[n]?.data?.seller?.offerings;
       if (remembered?.offerings && servedCount !== undefined && servedCount === remembered.offerings.length) {
@@ -648,16 +653,18 @@
         if (entry) {
           out.served = true;
           out.liveAsk = W(entry.askPerUnitWei);
+          if (remembered.publish !== false && graphAsk !== null && graphAsk !== out.liveAsk) {
+            out.liveAsk = graphAsk;
+            out.source = 'seller-graph';
+            out.at = null;
+          }
         } else {
           out.served = false;
         }
       }
-      if (out.liveAsk === null && out.served === null) {
-        const own = (S.offers[n]?.data?.offers ?? []).filter((x) => x.offerId === o.offerId);
-        if (own.length === 1) {
-          out.liveAsk = W(own[0].askPerUnitWei);
-          out.source = 'seller-graph';
-        }
+      if (out.liveAsk === null && out.served === null && graphAsk !== null) {
+        out.liveAsk = graphAsk;
+        out.source = 'seller-graph';
       }
     }
     if (out.liveAsk === null && out.served === null) {
@@ -1505,7 +1512,7 @@
     if (!o.data) {
       const msg = String(o.error?.json?.error ?? '');
       if (/read authority is unavailable|context graph/i.test(msg)) {
-        setBody('offers', `${infoBox('Waiting for the marketplace context graph', 'This node has not synced the <code>marketplace</code> context graph yet — no seller has published, or its on-chain registration has not reached this node. Discovery can take up to ~3 minutes after the first seller publish; polling continues.')}
+        setBody('offers', `${infoBox('Waiting for the marketplace context graph', 'This node has not synced the <code>marketplace</code> context graph yet — no seller has published, or its on-chain registration has not reached this node. Discovery normally takes seconds after the first seller publish (up to about a minute); polling continues.')}
           <details><summary class="hint">Raw message</summary><div class="hex">${esc(msg)}</div></details>`);
       } else {
         setBody('offers', errorBox(o.error, { retry: true }));
@@ -1514,7 +1521,7 @@
     }
     const offers = dedupeOffers(o.data.offers);
     if (offers.length === 0) {
-      setBody('offers', emptyBox('No offers discovered yet', 'Sellers publish offers as Knowledge Assets into the shared <code>marketplace</code> context graph. After the first publish, discovery on this node can take up to ~3 minutes; every refresh nudges a backfill. (Seed with <code>pnpm devnet:marketplace:seed</code>.)'));
+      setBody('offers', emptyBox('No offers discovered yet', 'Sellers publish offers as Knowledge Assets into the shared <code>marketplace</code> context graph. After the first publish, discovery on this node normally takes seconds (up to about a minute); every refresh nudges a re-sync. (Seed with <code>pnpm devnet:marketplace:seed</code>.)'));
       return;
     }
     const ap = activePlan();
@@ -1535,7 +1542,7 @@
       } else if (side.stale) {
         anyStale = true;
         const from = side.source === 'quote' ? 'seen in a live quote' : side.source === 'console' ? 'published via this console' : 'in the seller’s own graph view';
-        askNote = `<div class="why warn-text ask-note"><span class="tag tag-warn">stale</span> seller now asks ${askAmt(side.liveAsk, x.unit)} (${esc(from)}); this node has not received the update</div>`;
+        askNote = `<div class="why warn-text ask-note"><span class="tag tag-warn">stale</span> seller now asks ${askAmt(side.liveAsk, x.unit)} (${esc(from)}); this node has not received the update yet</div>`;
       }
       const routerCell = v.pick
         ? `<span class="tag tag-ok">router pick</span>${side.stale && side.liveAsk !== null ? '<div class="why">ranked on the seller’s current ask</div>' : ''}`
@@ -1555,7 +1562,7 @@
       : 'your <strong>active plan</strong>';
     setBody('offers', `${staleBanner(o)}
       <p class="lede">${offers.length} offer${offers.length === 1 ? '' : 's'} discovered in node 2’s view of the <code>marketplace</code> context graph. The <strong>router ranks on each seller’s live quote</strong>, not on the discovered ask; where a seller’s own node reports a newer ask, it is flagged and used here. “Router” previews the pick with ${basis}; at call time the live quotes and the soft ceiling decide.</p>
-      ${anyStale ? warnBox('Some discovered asks are out of date', 'A seller changed an offer, but the update has not reached the buyer node (on this prototype an updated offer KA can fail to propagate between nodes; see the seller’s Offerings panel). Calls still use the seller’s live quote, so you pay the current ask.') : ''}
+      ${anyStale ? warnBox('Some discovered asks are out of date', 'A seller changed an offer and buyer node 2 has not applied the update yet. An update usually arrives within seconds and at most about a minute later; the seller’s Offerings panel warns when one takes longer. Calls still use the seller’s live quote, so you pay the current ask.') : ''}
       <div class="table-wrap"><table class="table-cards">
         <thead><tr><th>Seller</th><th>Router</th><th class="r">Ask (discovered)</th><th>Service</th><th>Offering</th></tr></thead>
         <tbody>${rows}</tbody>
@@ -2010,26 +2017,36 @@
     const remembered = S.cstate.data?.offerings?.[String(n)];
     let rows = null;
     let source = 'none';
+    const myId = W(nodeInfo(n)?.identityId);
+    const own = dedupeOffers(S.offers[n].data?.offers ?? []).filter((o) => myId > 0n && W(o.sellerIdentityId) === myId);
     if (remembered?.offerings) {
-      rows = remembered.offerings.map((o) => ({
-        id: o.offeringLocalId,
-        serviceType: o.serviceType,
-        unit: o.unit,
-        modelId: o.modelId ?? '',
-        askMicro: decimal(W(o.askPerUnitWei), 12).replace(/,/g, ''),
-      }));
+      // A published set is mirrored by this node's own graph view; a different
+      // ask there means the node was republished outside this console since.
+      const graphAsk = (localId) => {
+        const hits = remembered.publish !== false ? own.filter((o) => localIdOf(o.offerId) === localId) : [];
+        return hits.length === 1 ? W(hits[0].askPerUnitWei) : null;
+      };
       source = 'console';
-    } else {
-      const myId = W(nodeInfo(n)?.identityId);
-      const own = dedupeOffers(S.offers[n].data?.offers ?? []).filter((o) => myId > 0n && W(o.sellerIdentityId) === myId);
-      if (own.length) {
-        const byId = new Map();
-        for (const o of own) byId.set(localIdOf(o.offerId) || o.offeringId, o);
-        rows = [...byId.entries()].map(([id, o]) => ({ id, serviceType: o.serviceType, unit: o.unit, modelId: o.modelId ?? '', askMicro: decimal(W(o.askPerUnitWei), 12).replace(/,/g, '') }));
-        source = 'graph';
-      }
+      rows = remembered.offerings.map((o) => {
+        const ask = graphAsk(o.offeringLocalId) ?? W(o.askPerUnitWei);
+        if (ask !== W(o.askPerUnitWei)) source = 'console+graph';
+        return {
+          id: o.offeringLocalId,
+          serviceType: o.serviceType,
+          unit: o.unit,
+          modelId: o.modelId ?? '',
+          askMicro: decimal(ask, 12).replace(/,/g, ''),
+        };
+      });
+    } else if (own.length) {
+      const byId = new Map();
+      for (const o of own) byId.set(localIdOf(o.offerId) || o.offeringId, o);
+      rows = [...byId.entries()].map(([id, o]) => ({ id, serviceType: o.serviceType, unit: o.unit, modelId: o.modelId ?? '', askMicro: decimal(W(o.askPerUnitWei), 12).replace(/,/g, '') }));
+      source = 'graph';
     }
-    S.editors[n] = { rows: rows ?? [], source, dirty: false, touched: false, initialized: S.cstate.loaded && (S.offers[n].loaded || Boolean(remembered)) };
+    // A published set waits for the graph view too (its asks may be newer).
+    const ready = S.offers[n].loaded || (Boolean(remembered) && remembered.publish === false);
+    S.editors[n] = { rows: rows ?? [], source, dirty: false, touched: false, initialized: S.cstate.loaded && ready };
     return S.editors[n];
   }
 
@@ -2108,7 +2125,7 @@
   function renderOfferingsLive(n) {
     const ed = S.editors[n];
     if (!ed) return;
-    if (!ed.initialized && S.cstate.loaded && S.offers[n].loaded) {
+    if (!ed.initialized && !ed.dirty && S.cstate.loaded && S.offers[n].loaded) {
       initEditor(n, { force: true });
       S.editors[n].initialized = true;
       mountOfferings(n);
@@ -2120,7 +2137,9 @@
     if (note) {
       note.textContent = ed.dirty
         ? 'Unpublished changes.'
-        : ed.source === 'console' ? `Matches the set the console last published.` : ed.source === 'graph' ? 'Loaded from this node’s view of the marketplace graph.' : '';
+        : ed.source === 'console' ? `Matches the set the console last published.`
+          : ed.source === 'console+graph' ? 'The set the console last published, with the asks this node has published since (outside this console).'
+          : ed.source === 'graph' ? 'Loaded from this node’s view of the marketplace graph.' : '';
     }
     const btn = $('#of-submit');
     if (btn) {
@@ -2154,16 +2173,16 @@
               ok = true;
             } else buyerCell = `<span class="warn-text">still sees ${seenByBuyer.map((b) => askAmt(b.askPerUnitWei, b.unit)).join(', ')}</span>`;
             const ageMin = publishedAt ? (Date.now() - publishedAt) / 60000 : null;
-            if (!ok && buyerView.data && seenByBuyer.length === 0 && ageMin !== null && ageMin > 8 && !propagationWarn) {
+            if (!ok && buyerView.data && seenByBuyer.length === 0 && ageMin !== null && ageMin > 3 && !propagationWarn) {
               propagationWarn = warnBox(
                 `Not discovered by the buyer after ${esc(fmtDur(Math.round(ageMin * 60)))}`,
-                `First-time discovery needs the buyer node to sync the <code>marketplace</code> context graph and has been seen to take ~6 minutes on a fresh devnet. Much longer than that usually means the share was rejected — check <code>.devnet/node${n}/daemon.log</code> for “SWM substrate fan-out … rejected”.`,
+                `Each offer is a Knowledge Asset published on-chain, and buyer node 2 usually discovers it within seconds, at most about a minute later (the first publish also anchors the <code>marketplace</code> context graph on-chain). Check that the publish succeeded, and look in <code>.devnet/node2/daemon.log</code> for <code>VM reconcile for "marketplace" failed</code> after the publish. (“SWM substrate fan-out … rejected” lines in this node’s log are expected: peers take the offer from the catalog and the chain instead.)`,
               );
             }
-            if (!ok && buyerView.data && seenByBuyer.length > 0 && ageMin !== null && ageMin > 3 && !propagationWarn) {
+            if (!ok && buyerView.data && seenByBuyer.length > 0 && ageMin !== null && ageMin > 2 && !propagationWarn) {
               propagationWarn = warnBox(
                 `Not propagated to the buyer after ${esc(fmtDur(Math.round(ageMin * 60)))}`,
-                `The last publish from this console was ${esc(fmtDur(Math.round(ageMin * 60)))} ago, but buyer node 2 still does not see this node’s current ask. On this prototype, an <strong>updated</strong> offer KA can be rejected by peers (this node’s <code>.devnet/node${n}/daemon.log</code> then shows “SWM substrate fan-out … rejected”), and periodic sync does not replace it. Calls still route on the seller’s <strong>live quote</strong>, so buyers pay the new ask; only their Offers table shows the old one (the console flags it as stale).`,
+                `The last publish from this console was ${esc(fmtDur(Math.round(ageMin * 60)))} ago, but buyer node 2 still does not see this node’s current ask. A changed ask is an on-chain update of the same offer Knowledge Asset and usually reaches the buyer within seconds, at most about a minute later. Check that the publish succeeded, and look in <code>.devnet/node2/daemon.log</code> for <code>VM reconcile for "marketplace" failed</code>. Calls still route on the seller’s <strong>live quote</strong>, so buyers pay the new ask; only their Offers table shows the old one (the console flags it as stale).`,
               );
             }
             return `<tr><td data-label="Offering"><code>${esc(localIdOf(x.offerId))}</code></td><td data-label="Service">${esc(SERVICE_LABEL[x.serviceType] ?? x.serviceType)}</td><td class="r" data-label="Ask (this node)">${askAmt(x.askPerUnitWei, x.unit)}</td><td data-label="Buyer node 2">${buyerCell}</td></tr>`;
@@ -2186,9 +2205,28 @@
     if (res) {
       const r = S.results[`publish${n}`];
       setHtml(res, r ? (r.ok
-        ? okBox(`Published ${esc(String(r.json?.published?.length ?? 0))} offer KA${r.json?.published?.length === 1 ? '' : 's'}`, `This node now serves ${esc(String(r.json?.offerings ?? 0))} offering${r.json?.offerings === 1 ? '' : 's'} and quotes the new asks right away. Whether buyer node 2 has received the KAs is tracked in “In the marketplace graph” above (first-time discovery can take a few minutes).`)
+        ? okBox(esc(publishSummary(r.json)), `This node now serves ${esc(String(r.json?.offerings ?? 0))} offering${r.json?.offerings === 1 ? '' : 's'} and quotes the new asks right away. Whether buyer node 2 has received the KAs is tracked in “In the marketplace graph” above (usually seconds, at most about a minute).`)
         : errorBox(r)) : '');
     }
+  }
+
+  /**
+   * "1 offer KA published on-chain · 1 unchanged" from a publish response: a
+   * node leaves an offering whose published content is unchanged alone (no
+   * transaction) and updates a changed one in place.
+   */
+  function publishSummary(json) {
+    const assets = Array.isArray(json?.assets) ? json.assets : null;
+    if (!assets) {
+      const count = json?.published?.length ?? 0;
+      return `${count} offer KA${count === 1 ? '' : 's'} published`;
+    }
+    const published = assets.filter((a) => a.outcome !== 'unchanged').length;
+    const unchanged = assets.length - published;
+    const parts = [];
+    if (published > 0 || unchanged === 0) parts.push(`${published} offer KA${published === 1 ? '' : 's'} published on-chain`);
+    if (unchanged > 0) parts.push(`${unchanged} unchanged (no transaction)`);
+    return parts.join(' · ');
   }
 
   async function doPublish(n) {
@@ -2215,7 +2253,7 @@
     if (r.ok) {
       ed.dirty = false;
       ed.source = 'console';
-      toast(`Published ${esc(String(r.json?.published?.length ?? 0))} offer(s) from node ${n}.`);
+      toast(`Node ${n}: ${esc(publishSummary(r.json))}.`);
     }
     await refreshAll({ full: true });
   }

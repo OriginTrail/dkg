@@ -470,11 +470,13 @@ beforeAll(async () => {
 
 describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
   it('1. sellers publish offer KAs into the marketplace CG', async () => {
-    // The FIRST publish also anchors the `marketplace` CG on-chain (an extra
-    // ContextGraphs.createContextGraph tx from the seller's operational
-    // wallet) so buyer replicas can verify its RFC-64 authority. This suite
-    // intentionally asserts no seller nonces/ETH, and the only seller TRAC
-    // deltas it measures (step 9) are taken long after this tx.
+    // Each offering is its own Knowledge Asset published to Verifiable Memory
+    // (an on-chain KA publish from the seller's operational wallet), and the
+    // FIRST publish also anchors the `marketplace` CG on-chain
+    // (ContextGraphs.createContextGraph) so buyer replicas can verify its
+    // RFC-64 authority. This suite intentionally asserts no seller nonces/ETH,
+    // and the only seller TRAC deltas it measures (step 9) are taken long
+    // after these txs.
     const offersA = await postJson(ctx.sellerA, '/api/marketplace/seller/offerings', {
       offerings: [
         {
@@ -528,12 +530,13 @@ describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
           sameId(o?.sellerIdentityId, sellerId),
       );
 
-    // CG gossip from two sellers to the buyer is eventually consistent — poll.
-    // Discovery can take up to ~3 minutes after the FIRST publish: that publish
-    // registers the CG on-chain, and the buyer's subscription converges through
-    // the sync catchup backoff (30/60/120/240s) plus the ≥30s-throttled SWM
-    // backfill that every empty GET /api/marketplace/offers poll nudges — so
-    // the window is kept ≥ 300s and each poll doubles as a backfill nudge.
+    // Offers from two sellers reach the buyer eventually — poll. Discovery is
+    // usually seconds: each offer KA is shared, then published on-chain. The
+    // buyer must first bind the CG anchor the FIRST publish registers, and a
+    // node that missed the shared copy waits for its chain reconcile of the
+    // KA, so the window stays generous and each GET /api/marketplace/offers
+    // poll also nudges the buyer's throttled refresh (VM reconcile; SWM
+    // backfill while empty).
     const offers = await waitFor(
       'buyer sees all 3 marketplace offers (A: devnet-llm + devnet-knowledge, B: devnet-llm) via CG sync',
       360_000,

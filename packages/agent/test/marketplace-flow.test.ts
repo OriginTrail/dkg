@@ -544,6 +544,7 @@ describe('marketplace agent runtime — chainless end-to-end flow', () => {
     const h = createHarness();
     try {
       let ensured = 0;
+      const refreshes: boolean[] = [];
       const buyer = new MarketplaceBuyerService({
         messenger: h.buyerEndpoint.messenger,
         chain: h.buyerChain,
@@ -553,6 +554,9 @@ describe('marketplace agent runtime — chainless end-to-end flow', () => {
         // {syncMode:'always-on'})` here — idempotent, so the buyer re-arms it
         // on every discovery in case the CG did not exist at startup.
         ensureOfferSubscription: () => { ensured += 1; },
+        // ...and a throttled chain reconcile, so a confirmed offer UPDATE
+        // reaches the next discovery (non-empty: no peer backfill).
+        requestOfferBackfill: (empty) => { refreshes.push(empty); },
         log: silentLog(),
         sessionKeyPath: h.sessionKeyPath,
         nowSeconds: () => NOW_SECONDS,
@@ -563,6 +567,7 @@ describe('marketplace agent runtime — chainless end-to-end flow', () => {
       await buyer.subscribe({ amountWei: 10n * TRAC, policy: h.policy, epoch: 1n });
       await buyer.invoke({ serviceType: 'inference', payload: { prompt: 'hi' }, maxUnits: 100n });
       expect(ensured).toBe(2);
+      expect(refreshes).toEqual([false, false]);
     } finally {
       h.cleanup();
     }
@@ -571,13 +576,13 @@ describe('marketplace agent runtime — chainless end-to-end flow', () => {
   it("distinguishes an empty discovery ('no-offers') from ineligible offers, and nudges backfill", async () => {
     const h = createHarness();
     try {
-      let backfills = 0;
+      const backfills: boolean[] = [];
       const buyer = new MarketplaceBuyerService({
         messenger: h.buyerEndpoint.messenger,
         chain: h.buyerChain,
         resolveBuyerAddress: async () => h.buyerWallet.address,
         offerSource: { discoverOffers: async () => [] },
-        requestOfferBackfill: () => { backfills += 1; },
+        requestOfferBackfill: (empty) => { backfills.push(empty); },
         log: silentLog(),
         sessionKeyPath: h.sessionKeyPath,
         nowSeconds: () => NOW_SECONDS,
@@ -589,8 +594,9 @@ describe('marketplace agent runtime — chainless end-to-end flow', () => {
       expect(error.reason).toBe('no-offers');
       expect(error.rejections).toEqual([]);
       expect(error.message).toContain('discovery returned no offers');
-      // Empty discovery is the backfill trigger — non-empty discovery is not.
-      expect(backfills).toBe(1);
+      // Every discovery nudges the (throttled) refresh; only an empty one asks
+      // for the peer backfill on top of the chain reconcile.
+      expect(backfills).toEqual([true]);
     } finally {
       h.cleanup();
     }

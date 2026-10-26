@@ -37,14 +37,20 @@ pnpm devnet:marketplace:console    # → http://127.0.0.1:9300/
    - `devnet-knowledge`: SPARQL, 15 µTRAC per query unit
 2. **Seller B** (node3) serves and publishes `devnet-llm` at 0.8 µTRAC per
    token. The higher price checks routing: the buyer's router should pick A.
+
+   Each offering is its own Knowledge Asset in Verifiable Memory. The seeder
+   always sends the full set; the node leaves an unchanged offering alone (no
+   transaction, logged as `unchanged`) and publishes a changed one as an
+   on-chain update of the same KA. A rerun therefore also restores asks that
+   were changed elsewhere.
 3. It tops up the buyer's primary operational wallet by **100 TRAC**. It keeps
    the existing balance, and does this once per deployment.
 4. It polls the buyer's `GET /api/marketplace/offers` until it sees all 3
    offers.
-   - Discovery after the first publish usually takes about 3 minutes, and
-     was seen at about 6 minutes on a fresh devnet. The default wait is
-     600 s.
-   - Every poll also nudges a backfill.
+   - The buyer usually sees all three within about 10 s on a fresh devnet,
+     including the first publish, which also anchors the `marketplace` CG
+     on-chain. The default wait is 300 s.
+   - Every poll also nudges the buyer's offer refresh.
 5. It does **not** subscribe the buyer, because subscribing is part of the
    buyer experience.
 
@@ -53,7 +59,7 @@ Flags:
 | Flag | Effect |
 |---|---|
 | `--subscribe` | Pre-subscribe the buyer with the console's default plan |
-| `--force` | Republish the offerings, or re-subscribe |
+| `--force` | With `--subscribe`: re-subscribe even when already subscribed |
 | `--topup-again` | Add another 100 TRAC |
 | `--timeout <s>` | Change the discovery wait |
 
@@ -203,8 +209,11 @@ link to it.
     shown), then **Publish**.
   - **In the marketplace graph** lists this node's own offers and what buyer
     node 2 sees for each (same ask / still sees the old ask / not discovered).
-    If an update has not reached node 2 after 3 minutes (8 for a first
-    discovery), a warning explains it (see Known issues).
+    An update usually reaches node 2 within seconds, at most about a minute
+    later. If it has not after 2 minutes (3 for a first discovery), a warning
+    says where to look.
+  - The publish result counts offerings published on-chain and offerings left
+    unchanged (no transaction).
 - **Receipts**: **Flush receipts now**. It shows the batch, claim, requeued
   and failed counts.
 - **Claims on-chain**:
@@ -289,13 +298,27 @@ Notes:
 
 ## Known issues (outside the console)
 
-- **Republished offers may not reach other nodes.** Changing an existing
-  offering's ask and publishing again updates the seller node's own graph and
-  its live quotes at once, but peers can reject the shared-memory update
-  (the seller's `.devnet/nodeN/daemon.log` shows `SWM substrate fan-out …
-  rejected=…` and the buyer's shows `legacy SWM apply is not authoritative for
-  root scope of context graph "marketplace"`). Periodic sync does not replace
-  the old KA either. Routing is unaffected (the router ranks on live quotes
-  and buyers pay the current ask), but buyers' discovered asks stay stale. The
-  console flags the stale ask on the buyer side and the propagation failure on
-  the seller side.
+- **Fixed: republished offers did not reach other nodes.** Each (seller,
+  offering) is now one Knowledge Asset in Verifiable Memory, and a changed
+  ask is an on-chain update of that same KA. Right after the publish every
+  node briefly holds the new ask in shared memory (for about 1–3 s); a node
+  whose discovery runs then shows it at once (the console's refresh after
+  **Publish** usually does). Otherwise a node shows it once it applies the
+  update from the chain: on the devnet about 10–25 s on the edge nodes and
+  about 50–60 s on the core nodes that signed the update, buyer node 2
+  included. A node's discovery never lists the old and new ask together and
+  never goes back to an older ask once it has shown a newer one. The
+  buyer-side stale flag and the seller-side "Not propagated" warning stay as
+  signals for an update still in flight or stuck.
+- **Expected log noise.** Each offer publish still logs `SWM substrate
+  fan-out … rejected=…` on the seller and `legacy SWM apply is not
+  authoritative for root scope of context graph "marketplace"` on the other
+  nodes. The KA's shared-memory copy is also offered over the legacy SWM
+  lane, which nodes that hold the graph's RFC-64 catalog decline; they take
+  the offer from the catalog and the chain instead. Any KA published into a
+  registered context graph does the same (for example the bootstrap's
+  `devnet-test` publishes).
+- **Removing an offering does not unpublish it.** A seller that drops an
+  offering from its set stops serving it, but its offer KA stays in the
+  graph. Buyers still discover it and the seller's live quote declines it;
+  the console marks it "no longer serves this offering".

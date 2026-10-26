@@ -7,15 +7,20 @@
 //      0.5 µTRAC/token) and `devnet-knowledge` (query, query-unit,
 //      15 µTRAC/query-unit); seller B (node3) serves + publishes `devnet-llm`
 //      at 0.8 µTRAC/token (the routing check: the router must pick A).
-//      Skipped when the console already published that exact set and the node
-//      still serves it (--force republishes).
+//      Each offering is its own Knowledge Asset in Verifiable Memory. The set
+//      is always sent: the node leaves an offering whose published content is
+//      unchanged alone (no transaction) and publishes a changed one as an
+//      on-chain update of the same KA, so a rerun also restores asks that
+//      were changed elsewhere.
 //   2. Tops up the BUYER's (node2) primary operational wallet by 100 TRAC,
 //      preserving its existing balance — once per devnet deployment
 //      (--topup-again adds another 100).
 //   3. Polls the buyer's GET /api/marketplace/offers until all three offers
-//      are discovered. CG sync usually converges ~3 min after the first
-//      publish but was observed at ~6 min on a fresh devnet, so the default
-//      window is 600 s (--timeout <s> overrides; rerunning keeps polling).
+//      are discovered. The buyer usually sees an offer within seconds of its
+//      publish (~10 s for all three on a fresh devnet, the first publish
+//      included, which also anchors the `marketplace` CG on-chain); the
+//      default window is 300 s (--timeout <s> overrides; rerunning keeps
+//      polling).
 //   4. --subscribe: pre-subscribe the buyer with the console's default plan.
 //      By default the buyer is left UNSUBSCRIBED — subscribing is part of the
 //      buyer experience in the console.
@@ -40,7 +45,7 @@ const SUBSCRIBE = flag('--subscribe');
 const FORCE = flag('--force');
 const TOPUP_AGAIN = flag('--topup-again');
 const timeoutIdx = argv.indexOf('--timeout');
-const DISCOVERY_TIMEOUT_S = timeoutIdx >= 0 ? Number(argv[timeoutIdx + 1]) : 600;
+const DISCOVERY_TIMEOUT_S = timeoutIdx >= 0 ? Number(argv[timeoutIdx + 1]) : 300;
 if (flag('--help') || flag('-h')) {
   console.log('usage: seed.mjs [--subscribe] [--force] [--topup-again] [--timeout <seconds>]');
   process.exit(0);
@@ -103,19 +108,8 @@ async function ensureIdentity(num) {
   throw new Error(`node${num} did not register an identity within 60s`);
 }
 
-function sameOfferings(a, b) {
-  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
-}
-
 async function publishOfferings(num, label) {
   const desired = OFFERINGS[num];
-  const remembered = readConsoleState().offerings?.[num];
-  const status = await marketplaceStatus(num);
-  const serving = status?.seller?.offerings ?? 0;
-  if (!FORCE && remembered && sameOfferings(remembered.offerings, desired) && serving === desired.length) {
-    log(`${label} (node${num}) already serves + published ${desired.map((o) => o.offeringLocalId).join(', ')} — skipped (--force republishes)`);
-    return;
-  }
   log(`${label} (node${num}) publishing ${desired.map((o) => `${o.offeringLocalId} @ ${formatMicroTrac(o.askPerUnitWei)} µTRAC/${o.unit}`).join(', ')} …`);
   const r = await nodeFetch(num, '/api/marketplace/seller/offerings', {
     method: 'POST',
@@ -126,7 +120,11 @@ async function publishOfferings(num, label) {
   updateConsoleState((s) => {
     s.offerings[num] = { offerings: desired, published: r.json?.published ?? [], publish: true, at: new Date().toISOString() };
   });
-  log(`${label} published ${r.json?.published?.length ?? 0} offer KA(s) into the marketplace context graph`);
+  const assets = Array.isArray(r.json?.assets) ? r.json.assets : [];
+  const outcome = (a) => (a.outcome === 'unchanged'
+    ? `${a.offeringLocalId} unchanged (no transaction)`
+    : `${a.offeringLocalId} published on-chain (revision ${a.revision})`);
+  log(`${label}: ${assets.length > 0 ? assets.map(outcome).join(' · ') : `${r.json?.published?.length ?? 0} offer KA(s) published`}`);
 }
 
 async function topUpBuyer() {
@@ -182,7 +180,7 @@ async function waitForDiscovery(idA, idB) {
       lastLine = line;
       lastPrint = Date.now();
     }
-    await sleep(4000); // each poll also nudges the buyer's throttled SWM backfill
+    await sleep(4000); // each poll also nudges the buyer's throttled offer refresh
   }
   fail(`buyer did not discover all 3 offers within ${DISCOVERY_TIMEOUT_S}s — check node logs (.devnet/node2/daemon.log); rerun this seeder to keep polling`);
   return [];
