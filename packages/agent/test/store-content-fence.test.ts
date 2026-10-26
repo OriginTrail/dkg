@@ -97,3 +97,32 @@ it.each(['lifecycle', 'ledger'] as const)('composes the production %s writer wit
     expect(outcomes).toEqual(['changed']);
   } finally { await composed.store.close(); }
 });
+
+it('isolates indeterminate graph and metadata-subject writes from unrelated proofs', async () => {
+  const f = fixture();
+  try {
+    await f.fence.withScope(scope, async assertCurrent => {
+      for (const mutation of [
+        { removals: [{ graph: 'urn:unrelated' }] },
+        { quads: [{ ...quad, graph: 'urn:meta', subject: 'urn:other-asset' }] },
+      ]) {
+        await expect(f.execute(async () => { throw new Error('lost response'); }, () => true, mutation, 'update'))
+          .rejects.toThrow('lost response');
+        assertCurrent();
+      }
+    });
+    expect(await f.fence.withScope(scope, async check => { check(); return true; })).toBe(true);
+    expect(f.fence.openScope({ ...scope, assertionGraphs: ['urn:unrelated'] })).toBeUndefined();
+    expect(f.fence.openScope({ ...scope, subjects: ['urn:other-asset'] })).toBeUndefined();
+  } finally { await f.store.close(); }
+});
+
+it.each([{ everything: true }, { removals: [{}] }, { quads: [{ ...quad, graph: 'unsafe graph' }] }])(
+  'keeps unknown indeterminate scopes fail closed: %j', mutation => {
+    const fence = new StoreContentFence();
+    const proof = fence.openScope(scope)!;
+    fence.begin(mutation)('indeterminate');
+    expect(proof.assertCurrent).toThrow('Held assertion content changed');
+    proof.close();
+    expect(fence.openScope(scope)).toBeUndefined();
+  });

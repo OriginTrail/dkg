@@ -545,6 +545,12 @@ export async function readConfirmedGraphKnowledgeAssetMetadataEnvelope(
   return parseConfirmedGraphKnowledgeAssetMetadataEnvelope(rows, input);
 }
 
+/** Canonical projection for bounded readers of the confirmed envelope below. */
+export const GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES: readonly string[] = Object.freeze([
+  'contentScopeVersion', 'assertionVersion', 'publicTripleCount', 'privateTripleCount', 'batchId',
+  'merkleRoot', 'privateMerkleRoot', 'assertionGraph', 'kaUal', 'status', 'transactionHash', 'subGraphName',
+].map(name => `${DKG}${name}`));
+
 /** Parse an already-loaded graph-scoped assertion envelope without store IO. */
 export function parseConfirmedGraphKnowledgeAssetMetadataEnvelope(
   rows: readonly Pick<Quad, 'predicate' | 'object'>[],

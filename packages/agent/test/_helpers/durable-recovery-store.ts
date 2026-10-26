@@ -327,7 +327,7 @@ export function node(
   };
   const failHoldingsReads = (fail: boolean) => { holdingsUnreadable = fail; };
   const limitChainAnswersPerRound = (answers: number) => { chainAnswersPerRound = answers; };
-  return { store, writes, info, start, round, failHoldingsReads, limitChainAnswersPerRound };
+  return { rawStore, store, writes, info, start, round, failHoldingsReads, limitChainAnswersPerRound };
 }
 
 export const generation = (version3 = '1') => [1, 2, 3, 4, 5, 6].map((n) => asset(n, n === 3 ? version3 : '1'));

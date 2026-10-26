@@ -1,18 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import { parseConfirmedGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphKnowledgeAssetMetadataRead } from '@origintrail-official/dkg-publisher';
+import { GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, parseConfirmedGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphKnowledgeAssetMetadataRead } from '@origintrail-official/dkg-publisher';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { GraphScopedDescriptor } from '../durable-integrity.js';
 import { verifyExactGraphContent } from '../../exact-graph-content-verifier.js';
 import type { VerifiedGraphScopedAsset } from './graph-scoped-materialization.js';
-
-const DKG_NS = 'http://dkg.io/ontology/';
-
-/** The metadata rows `parseConfirmedGraphKnowledgeAssetMetadataEnvelope` reads. */
-const ENVELOPE_PREDICATES = [
-  'contentScopeVersion', 'assertionVersion', 'publicTripleCount', 'privateTripleCount', 'batchId',
-  'merkleRoot', 'privateMerkleRoot', 'assertionGraph', 'kaUal', 'status', 'transactionHash', 'subGraphName',
-].map((name) => `${DKG_NS}${name}`);
 
 /** Assets per store read: one VALUES list of exact metadata subjects. */
 const HOLDINGS_READ_CHUNK = 200;
@@ -40,7 +32,7 @@ export async function readHeldGraphScopedAssets(
   onVerified?: (asset: VerifiedGraphScopedAsset) => Promise<void>,
 ): Promise<Set<string>> {
   const metaGraph = assertSafeIri(contextGraphMetaUri(request.contextGraphId));
-  const predicates = ENVELOPE_PREDICATES.map((predicate) => `<${predicate}>`).join(' ');
+  const predicates = GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES.map((predicate) => `<${predicate}>`).join(' ');
   const options = { priority: 'background' as const, signal: request.signal };
   const held = new Set<string>();
   for (let start = 0; start < request.descriptors.length; start += chunkSize) {
