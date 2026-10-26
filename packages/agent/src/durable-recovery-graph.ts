@@ -163,7 +163,9 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
       reconcileHeld: (request, held) => host.heldStore?.reconcile?.(request, held, ctx) ?? Promise.resolve(),
       readChainState: authority.readHeldAssetChainState?.bind(authority), budget: contextGraphBudget,
     });
-    return runDurableSyncDetailed({ ...durableContext, graphRecovery: { ...graphRecovery,
+    return runDurableSyncDetailed({ ...durableContext,
+      storedPrefix: host.heldStore && { read: host.heldStore.read, openScope: host.heldStore.openScope, assertCurrent: fence.assertCurrent },
+      graphRecovery: { ...graphRecovery,
       held: reader && host.heldStore ? { reader, assertCurrent: fence.assertCurrent,
         withStoreFence: host.heldStore.withScope } : undefined,
     } });

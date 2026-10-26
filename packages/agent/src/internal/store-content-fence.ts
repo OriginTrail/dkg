@@ -27,7 +27,7 @@ export class StoreContentFence implements StoreMutationObserver {
     };
   }
 
-  async withScope<T>(scope: StoreContentScope, operation: (assertCurrent: () => void) => Promise<T>): Promise<T | undefined> {
+  openScope(scope: StoreContentScope): { assertCurrent(): void; close(): void } | undefined {
     const graphs = new Set(scope.assertionGraphs), subjects = new Set(scope.subjects);
     const touches = (mutation: StoreMutation) => mutation.everything === true
       || mutation.quads?.some(quad => !isSafeIri(quad.graph) || graphs.has(quad.graph)
@@ -37,11 +37,18 @@ export class StoreContentFence implements StoreMutationObserver {
     if (this.indeterminate || [...this.pending.keys()].some(touches)) return undefined;
     const watch = { touches, valid: true };
     this.watches.add(watch);
-    try {
-      return await operation(() => {
+    return {
+      assertCurrent: () => {
         if (!watch.valid || this.indeterminate) throw Object.assign(
           new Error('Held assertion content changed during recovery'), { name: 'AbortError' });
-      });
-    } finally { this.watches.delete(watch); }
+      },
+      close: () => { this.watches.delete(watch); },
+    };
+  }
+
+  async withScope<T>(scope: StoreContentScope, operation: (assertCurrent: () => void) => Promise<T>): Promise<T | undefined> {
+    const proof = this.openScope(scope);
+    if (!proof) return undefined;
+    try { return await operation(proof.assertCurrent); } finally { proof.close(); }
   }
 }

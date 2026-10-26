@@ -74,7 +74,7 @@ function runner(peers: string[], slices: Record<string, Slice[]>, store = new Me
 /** A slice that verified and stored the graphs up to `offset` of `GENERATION`. */
 const advanceTo = (offset: number, prefix: `sha256:${string}`, terminal = false): Slice => async (peerId, store) => {
   store.setManifestBoundOffset(dataKey(peerId), offset, GENERATION, undefined, prefix, terminal);
-  return durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), complete: terminal }, { strategy: 'full', continuation: 'full-graph', confirmedCopies: 0 });
+  return durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), complete: terminal }, { strategy: 'full', continuation: 'full-graph' });
 };
 const failWith = (message: string): Slice => async () => { throw new Error(message); };
 /** A DATA round whose rows did not start the next manifest graph after the boundary it resumed at. */
@@ -82,7 +82,7 @@ const refuseResume: Slice = async (peerId, store) => {
   const resumedAt = store.get(dataKey(peerId))?.offset ?? 0;
   store.delete(dataKey(peerId));
   return durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), failedPhases: 1 },
-    { strategy: 'full', continuation: 'full-graph', confirmedCopies: 0, rejectedResumeOffset: resumedAt });
+    { strategy: 'full', continuation: 'full-graph', rejectedResumeOffset: resumedAt });
 };
 const noProgress: Slice = async () => durableRecoveryRoundOutcome(createIncompleteDurableSyncResult());
 

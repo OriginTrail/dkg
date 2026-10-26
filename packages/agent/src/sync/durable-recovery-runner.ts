@@ -460,9 +460,8 @@ export class DurableRecoveryRunner {
       );
       const outcome = classifyDurableRecoverySlice({
         terminalPersisted: lastResult.complete === true
-          && after?.terminal === true
-          && after.manifestDigest !== undefined
-          && after.manifestPrefixDigest !== undefined,
+          && (round.decision.strategy === 'legacy' || (after?.terminal === true
+            && after.manifestDigest !== undefined && after.manifestPrefixDigest !== undefined)),
         checkpointAdvanced,
         manifestRebound,
         metadataContinuationAdvanced,

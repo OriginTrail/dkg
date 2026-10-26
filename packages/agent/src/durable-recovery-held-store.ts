@@ -12,7 +12,7 @@ export function createDurableHeldStore(
 ): DurableRecoveryHost['heldStore'] {
   if (!fence) return undefined;
   return {
-    read: heldGraphScopedAssetsReader(store), withScope: fence.withScope.bind(fence),
+    read: heldGraphScopedAssetsReader(store), withScope: fence.withScope.bind(fence), openScope: fence.openScope.bind(fence),
     reconcile: async (request, held, ctx) => {
       // Re-read one copy at a time rather than retain an entire generation's payload.
       // Canonical reconciliation rechecks VM and SWM under the publisher lock.

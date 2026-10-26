@@ -4,10 +4,9 @@ import type { MissingDurableAsset } from './requester/durable-data-holdings.js';
 
 /** Decisions from one graph round; retained META and confirmation caches are inputs. */
 export type DurableRecoveryRoundDecision = {
-  readonly confirmedCopies: number;
   readonly rejectedResumeOffset?: number;
 } & (
-  | { readonly strategy: 'not-started' | 'held' }
+  | { readonly strategy: 'not-started' | 'held' | 'legacy' }
   | { readonly strategy: 'full'; readonly continuation: 'full-graph' | 'reconsider-holdings' }
   | { readonly strategy: 'exact-missing'; readonly batches: readonly (readonly MissingDurableAsset[])[] }
 );
@@ -19,7 +18,7 @@ export interface DurableRecoveryRoundOutcome {
 
 export function durableRecoveryRoundOutcome(
   result: DurableSyncResult,
-  decision: DurableRecoveryRoundDecision = { strategy: 'not-started', confirmedCopies: 0 },
+  decision: DurableRecoveryRoundDecision = { strategy: 'not-started' },
 ): DurableRecoveryRoundOutcome {
   return { result, decision };
 }

@@ -398,6 +398,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         } as any));
 
         const durableResult = (overrides: Partial<{
+          complete: boolean;
           insertedTriples: number;
           insertedDataTriples: number;
           timedOutPhases: number;
@@ -483,6 +484,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           insertedTriples: 1,
           insertedDataTriples: 1,
           completedPhases: 1,
+          complete: true,
         }));
 
         await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
@@ -617,6 +619,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
             };
           }
           return {
+            complete: true,
             insertedTriples: 1,
             fetchedMetaTriples: 0,
             fetchedDataTriples: 1,
@@ -872,6 +875,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         const syncedEvents: unknown[] = [];
         agent.eventBus.on(DKGEvent.PROJECT_SYNCED, (event) => syncedEvents.push(event));
         stubDurableSync((agent as any), recorder(async () => ({
+          complete: true,
           insertedTriples: 1,
           fetchedMetaTriples: 1,
           fetchedDataTriples: 0,

@@ -24,10 +24,11 @@ export async function attemptDurableHoldingsPhase(input: {
   readonly accumulator: DurableSyncAccumulator;
   readonly recordMetaPhase: () => void;
 }): Promise<DurableRecoveryRoundDecision> {
-  const full: DurableRecoveryRoundDecision = { strategy: 'full', continuation: 'full-graph', confirmedCopies: 0 };
+  const full: DurableRecoveryRoundDecision = { strategy: 'full', continuation: 'full-graph' };
   const { context, contextGraphId, manifest, recovery, meta, accumulator } = input;
   const held = recovery?.held;
-  if (!manifest || !held) return full;
+  if (!manifest) return { strategy: 'legacy' };
+  if (!held) return full;
   const outcome = await held.withStoreFence({
     assertionGraphs: manifest.descriptors.map(descriptor => descriptor.assertionGraph),
     metadataGraph: contextGraphMetaUri(contextGraphId), subjects: manifest.descriptors.map(descriptor => descriptor.ual),
@@ -38,7 +39,7 @@ export async function attemptDurableHoldingsPhase(input: {
       contextGraphId, manifest, options: recovery.holdings, holdings: held.reader,
       signal: context.signal, logWarn: message => context.logWarn(context.ctx, message),
     });
-    if (plan.kind === 'full') return { strategy: 'full', continuation: plan.continuation, confirmedCopies: plan.confirmedCopies };
+    if (plan.kind === 'full') return { strategy: 'full', continuation: plan.continuation };
     assertCurrent();
     await persistDurableHoldingsMetadata(context, contextGraphId, meta, accumulator, assertCurrent);
     assertCurrent();
@@ -48,8 +49,8 @@ export async function attemptDurableHoldingsPhase(input: {
       accumulator, deleteCheckpoint: context.deleteCheckpoint, setCheckpoint: context.setCheckpoint,
     }));
     return plan.kind === 'held'
-      ? { strategy: 'held', confirmedCopies: plan.confirmedCopies }
-      : { strategy: 'exact-missing', batches: plan.batches, confirmedCopies: plan.confirmedCopies };
+      ? { strategy: 'held' }
+      : { strategy: 'exact-missing', batches: plan.batches };
   });
   return outcome ?? full;
 }

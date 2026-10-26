@@ -278,7 +278,7 @@ describe('planning a DATA phase from holdings', () => {
       holdings: { read: async () => { throw new Error('store queue wait timeout'); }, confirmCurrent: async () => {} },
       logWarn,
     });
-    expect(failed).toEqual({ kind: 'full', held: 0, confirmedCopies: 0, continuation: 'reconsider-holdings' });
+    expect(failed).toEqual({ kind: 'full', held: 0, continuation: 'reconsider-holdings' });
     expect(logWarn).toHaveBeenCalledWith(expect.stringContaining('store queue wait timeout'));
 
     const aborted = new AbortController();
@@ -523,7 +523,6 @@ describe('holding a copy only while it is current on chain', () => {
 
     // No shortcut this round, and no failure: the round pulls the graph in bounded rounds.
     expect(plan).toMatchObject({ kind: 'full', continuation: 'reconsider-holdings' });
-    expect(plan.confirmedCopies).toBe(100);
     expect(logWarn).toHaveBeenCalledWith(expect.stringContaining("against the chain within the round's budget"));
   });
 

@@ -248,6 +248,7 @@ function node(
       logDebug: () => {},
     }),
     ...roundOptions,
+    storedPrefix: { read: heldGraphScopedAssetsReader(store), openScope: contentFence.openScope.bind(contentFence), assertCurrent: fence.assertCurrent },
     graphRecovery: roundOptions.graphRecovery ? { ...roundOptions.graphRecovery, held: {
       reader: holdings(fence.binding)!, assertCurrent: fence.assertCurrent,
       withStoreFence: contentFence.withScope.bind(contentFence),
@@ -285,15 +286,15 @@ function node(
    * `sliceSpent`, each round starts past its slice's soft deadline, as once
    * held-copy checks used the slice: a DATA round stops at its first complete graph.
    */
-  const start = (startOptions: { exactRequests?: boolean; sliceSpent?: boolean } = {}) => {
+  const start = (startOptions: { exactRequests?: boolean; sliceSpent?: boolean | (() => boolean); isRunning?: () => boolean; peerIds?: () => string[]; afterSlice?: () => void } = {}) => {
     const checkpointStore = new MemorySyncCheckpointStore();
     const dependencies: DurableRecoveryRunnerDependencies = {
       checkpointStore,
-      isRunning: () => true,
+      isRunning: startOptions.isRunning ?? (() => true),
       resolvePreferredPeerId: async () => undefined,
       connectRequestedPeer: async () => {},
       primeConnections: async () => {},
-      liveConnectionPeerIds: () => Object.keys(peers),
+      liveConnectionPeerIds: startOptions.peerIds ?? (() => Object.keys(peers)),
       admitPeer: async () => true,
       isPrivateContextGraph: async () => false,
       orderPeerIds: (peerIds) => [...peerIds],
@@ -302,8 +303,9 @@ function node(
         chainAnswersLeft = chainAnswersPerRound;
         const detailed = await round(checkpointStore, peerId, {
           graphRecovery: { meta: durableMetaContinuation, holdings: durableRecoveryRound, boundary: durableResumeBoundary },
-          settlementSliceDeadline: startOptions.sliceSpent ? Date.now() : undefined,
+          settlementSliceDeadline: (typeof startOptions.sliceSpent === 'function' ? startOptions.sliceSpent() : startOptions.sliceSpent) ? Date.now() : undefined,
         });
+        startOptions.afterSlice?.();
         return durableRecoveryRoundOutcome(detailed.result, detailed.recoveryRound);
       },
       ...(startOptions.exactRequests === false ? {} : {
@@ -317,9 +319,10 @@ function node(
       logInfo: (message) => { info.push(message); },
       logWarn: (message) => { info.push(message); },
     };
+    const runner = new DurableRecoveryRunner();
     return {
       checkpointStore,
-      recover: () => new DurableRecoveryRunner().run({ contextGraphId: CG, dependencies }),
+      recover: () => runner.run({ contextGraphId: CG, dependencies }),
     };
   };
   const failHoldingsReads = (fail: boolean) => { holdingsUnreadable = fail; };
@@ -346,6 +349,48 @@ describe('a recovery whose rounds outlast their slices', () => {
       contextGraphId: CG,
       descriptors: createGraphScopedDurableManifestPlan(graph.flatMap((fixture) => fixture.meta), CG)!.descriptors,
     })).toEqual(new Set(graph.map((fixture) => fixture.ual)));
+  });
+});
+
+describe('cross-peer recovery keeps the actually stored prefix', () => {
+  it.each(['clean', 'deleted', 'corrupted'])('checks a live source checkpoint after the prefix is %s', async change => {
+    const fixtures = generation();
+    const a = servingPeer(fixtures), b = servingPeer(fixtures);
+    const core = node({ [PEER]: a, [SECOND_PEER]: b });
+    let running = true, first = true, activePeer = PEER;
+    const lifetime = core.start({ sliceSpent: () => first, exactRequests: false,
+      isRunning: () => running, peerIds: () => [activePeer],
+      afterSlice: () => { if (first) running = false; },
+    });
+    const partial = await lifetime.recover();
+    expect(partial.outcome).toBe('no-progress');
+    const sourceKey = getSyncCheckpointKey(PEER, CG, false, 'data');
+    const checkpoint = lifetime.checkpointStore.get(sourceKey)!;
+    expect(checkpoint.offset).toBeGreaterThan(0);
+    expect(checkpoint.offset).toBeLessThan(rowsOf(fixtures));
+    expect(checkpoint.terminal).not.toBe(true);
+    const prefix = fixtures.find(fixture => core.writes.includes(fixture.ual))!;
+    expect(await core.store.countQuads(prefix.graph)).toBe(prefix.payload.length);
+    if (change === 'deleted') await core.store.dropGraph(prefix.graph);
+    if (change === 'corrupted') {
+      await core.store.delete([prefix.payload[0]!]);
+      await core.store.insert([{ ...prefix.payload[0]!, object: '"tampered"' }]);
+    }
+    // Keep the original checkpoint and owner alive; only the serving peer changes.
+    expect(lifetime.checkpointStore.get(sourceKey)).toEqual(checkpoint);
+    first = false; running = true; activePeer = SECOND_PEER;
+    const recovered = await lifetime.recover();
+    expect(recovered.outcome).toBe('terminal');
+    expect(recovered.result.complete).toBe(true);
+    expect(classifyDurableProgress(recovered.result, { complete: recovered.result.complete }).completedReadinessCleanly).toBe(true);
+    const held = await readHeldGraphScopedAssets(core.store, {
+      contextGraphId: CG, descriptors: createGraphScopedDurableManifestPlan(fixtures.flatMap(fixture => fixture.meta), CG)!.descriptors,
+    });
+    expect(held).toEqual(new Set(fixtures.map(fixture => fixture.ual)));
+    expect(lifetime.checkpointStore.get(getSyncCheckpointKey(SECOND_PEER, CG, false, 'data'))?.terminal).toBe(true);
+    // A new peer primes its generation at offset zero, then resumes. The stored
+    // prefix must not be materialized again unless its actual content is invalid.
+    expect(core.writes.filter(ual => ual === prefix.ual)).toHaveLength(change === 'clean' ? 1 : 2);
   });
 });
 

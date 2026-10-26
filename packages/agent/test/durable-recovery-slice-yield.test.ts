@@ -1,3 +1,4 @@
+import { StoreContentFence } from '../src/internal/store-content-fence.js';
 import { durableRecoveryRoundOutcome } from '../src/sync/durable-recovery-round.js';
 import { describe, expect, it } from 'vitest';
 import {
@@ -132,6 +133,8 @@ async function recoverWithSpentSlices(peer: ReturnType<typeof servingPeer>) {
     durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
     settlementSliceDeadline: Date.now(),
     graphRecovery: { meta: durableMetaContinuation, holdings: {} },
+    storedPrefix: { read: async () => new Set(writes), assertCurrent: () => {},
+      openScope: scope => new StoreContentFence().openScope(scope) },
     fetchSyncPages: (request) => {
       if (request.phase === 'data') {
         dataRounds.push({

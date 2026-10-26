@@ -25,13 +25,13 @@ const missing = (...assets: Array<[string, string]>): MissingDurableAsset[] => (
 /** A round that found the rest of the generation held and left these batches to the owner. */
 const leaves = (...batches: MissingDurableAsset[][]): Round => async (continuation) => {
   return durableRecoveryRoundOutcome(createIncompleteDurableSyncResult(), continuation.ownerFetchesMissingAssets
-    ? { strategy: 'exact-missing', batches, confirmedCopies: 0 } : { strategy: 'full', continuation: 'full-graph', confirmedCopies: 0 });
+    ? { strategy: 'exact-missing', batches } : { strategy: 'full', continuation: 'full-graph' });
 };
 /** A round that found the whole generation held: it settles the terminal boundary. */
 const held: Round = async (_continuation, store) => {
   store.setManifestBoundOffset(dataKey, 30, GENERATION, Date.now(), PREFIX, true);
   return durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), completedPhases: 2, resumedPhases: 1, complete: true },
-    { strategy: 'held', confirmedCopies: 0 });
+    { strategy: 'held' });
 };
 /** A bounded full-graph round that verified the rest of the graph. */
 const pulledAll: Round = held;
@@ -116,6 +116,16 @@ describe('durable recovery fetches the assets a held generation lacks', () => {
     expect(f.offered).toEqual([true]);
   });
 
+  it('preserves verified legacy completion without a rootless manifest checkpoint', async () => {
+    const f = runner([async () => durableRecoveryRoundOutcome(
+      { ...createIncompleteDurableSyncResult(), insertedDataTriples: 3, complete: true }, { strategy: 'legacy' },
+    )]);
+    const execution = await f.run();
+    expect(execution.outcome).toBe('terminal');
+    expect(execution.result.complete).toBe(true);
+    expect(execution.peerResults[0]!.result.complete).toBe(true);
+  });
+
   it('refuses graph readiness without a persisted terminal boundary', async () => {
     const f = runner([async () => durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), complete: true })]);
     const execution = await f.run();
@@ -180,7 +190,7 @@ describe('durable recovery fetches the assets a held generation lacks', () => {
         stored = 10;
         store.setManifestBoundOffset(dataKey, stored, GENERATION, Date.now(), PREFIX);
         return durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), checkpointAdvances: 1 },
-          { strategy: 'full', continuation: 'full-graph', confirmedCopies: 0 });
+          { strategy: 'full', continuation: 'full-graph' });
       }
       return leavesOrPulls(missing(['ual-1', '1']))(continuation, store);
     };
@@ -191,11 +201,11 @@ describe('durable recovery fetches the assets a held generation lacks', () => {
     expect(f.exactRequests).toEqual([]);
   });
 
-  it.each([0, 3])('uses the explicit reconsider policy independently of %s confirmed copies', async confirmedCopies => {
+  it('uses the explicit reconsider policy after partial progress', async () => {
     const advance: Round = async (_continuation, store) => {
       store.setManifestBoundOffset(dataKey, 10, GENERATION, Date.now(), PREFIX);
       return durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), checkpointAdvances: 1 },
-        { strategy: 'full', continuation: 'reconsider-holdings', confirmedCopies });
+        { strategy: 'full', continuation: 'reconsider-holdings' });
     };
     const f = runner([advance, leaves(missing(['ual-1', '2'])), held]);
     expect((await f.run()).outcome).toBe('terminal');
