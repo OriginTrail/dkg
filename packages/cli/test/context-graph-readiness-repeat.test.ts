@@ -425,6 +425,79 @@ describe('a public graph that its subscribe job left unproven is caught up again
       `"${CG}" is still not proven synced after ${CONTEXT_GRAPH_READINESS_REPEAT_DELAYS_MS.length} repeated catch-up job(s)`,
     );
   });
+  /** An unproven round whose shared-memory walk stopped making progress at `resolved` snapshots. */
+  function stalledRound(resolved: number, total = 40): () => CatchupJobResult {
+    return () => {
+      const round = lossyEmptyRound();
+      return {
+        ...round,
+        diagnostics: {
+          ...round.diagnostics!,
+          sharedMemory: {
+            ...round.diagnostics!.sharedMemory,
+            continuationStopReason: 'coverage-stalled',
+            swmCoverage: {
+              contextGraphId: CG,
+              peerIdSuffix: 'peer0001',
+              snapshotsResolved: resolved,
+              snapshotsTotal: total,
+              manifestComplete: true,
+              descriptorsAuthoritative: true,
+              missingCount: total - resolved,
+              missingSample: [],
+              materializationFailures: 0,
+            },
+          },
+        },
+      };
+    };
+  }
+
+  it('ends the chain when a job stalls again at no more snapshots than the attempt before it', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const member = memberEdge();
+    const { runs } = stubRunner([stalledRound(12), stalledRound(12)]);
+    const api = await startRoutes(member);
+    await api.finished(await api.subscribe());
+
+    // One stalled attempt is not enough: what stopped it may have passed.
+    fire(await waitUntil(() => armed()[0], 'the first repeat armed'));
+    await waitUntil(() => (runs.length === 2 ? true : undefined), 'the first repeat');
+    await api.finished(api.latestJobId()!);
+    await waitUntil(
+      () => (log.mock.calls.flat().join('\n').includes('not repeating') ? true : undefined),
+      'the line that ends the chain',
+    );
+
+    expect(log.mock.calls.flat().join('\n')).toContain(
+      `not repeating the catch-up of "${CG}": its shared-memory walk stalled again at 12 of 40 snapshot(s)`,
+    );
+    expect(armed()).toEqual([]);
+    expect(runs).toHaveLength(2);
+    expect(member.subscription()).toMatchObject({ synced: false });
+  });
+
+  it('keeps repeating while a stalled walk still resolves more snapshots each time', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const member = memberEdge();
+    const { runs } = stubRunner([stalledRound(5), stalledRound(9), stalledRound(9)]);
+    const api = await startRoutes(member);
+    await api.finished(await api.subscribe());
+
+    fire(await waitUntil(() => armed()[0], 'the first repeat armed'));
+    await waitUntil(() => (runs.length === 2 ? true : undefined), 'the first repeat');
+    await api.finished(api.latestJobId()!);
+    // From 5 to 9 snapshots is progress.
+    fire(await waitUntil(() => armed()[0], 'the second repeat armed'));
+    await waitUntil(() => (runs.length === 3 ? true : undefined), 'the second repeat');
+    await api.finished(api.latestJobId()!);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // Stalled at 9 twice: no third repeat.
+    expect(armed()).toEqual([]);
+    expect(runs).toHaveLength(3);
+  });
+
   it('repeats a job that local backpressure deferred, also when the metadata pull failed', async () => {
     const member = memberEdge();
     (member.agent as any).bootstrapRfc64CatalogContextGraphMetadataFromPeersV1 = async () => {
