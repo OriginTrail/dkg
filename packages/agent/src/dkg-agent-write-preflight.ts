@@ -12,12 +12,18 @@
  *    store's mutation observer (an ack of such a write follows its bump, so a caller that learns of
  *    the write can never share a probe that began before it);
  *  - the context graph's own subscription entry, which the probe also reads (in-memory state and the
- *    private participant list). The registry is a plain map written from many places, so the entry is
- *    compared by value when a call arrives instead of being hooked.
+ *    private participant list). The registry counts the writes made to each entry (a `set`, a `delete` or
+ *    a `clear` moves that entry's version, even to an equal row), so a change that is reverted before the
+ *    next caller arrives is still seen; the entry's value is compared as well, for a row edited in place.
  *
- * The probe's other reads (whether the graph has content, the persisted subscription row, on-chain
- * identity IDs) do not move the stamp; the coalescing and cache rules account for them (the daemon's
- * `write-preflight-coalescing.ts`).
+ * The probe's other reads do NOT move the stamp: whether the graph exists (`contextGraphExists`), whether it
+ * has local content, the persisted subscription row and on-chain identity IDs. Nothing marks a probe that
+ * began before one of these changed as outdated, so a caller that learned of the change before it called may
+ * still be given the older read, from a probe that began no earlier than the daemon's join limit ago (a fresh
+ * read, started after the change, would have seen it). The coalescing and cache rules account for these
+ * reads (the daemon's `write-preflight-coalescing.ts`): the join limit, the fresh second pass after a
+ * readiness wait, and a result cache that never keeps an answer that consulted the chain or found the store
+ * unavailable.
  */
 
 import { SYSTEM_CONTEXT_GRAPHS, contextGraphDataGraphUri, isSafeIri } from '@origintrail-official/dkg-core';
@@ -26,6 +32,7 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { ContextGraphSub } from './dkg-agent-types.js';
 import type { StoreMutation, StoreMutationObserver } from './internal/store-mutation.js';
+import { VersionedSubscriptionRegistry } from './internal/versioned-subscription-registry.js';
 
 const CONTEXT_GRAPH_PREFIX = 'did:dkg:context-graph:';
 const ONTOLOGY_GRAPH = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
@@ -112,7 +119,7 @@ export function attachWritePreflightGeneration<T extends object>(agent: T, gener
 export interface WritePreflightIdentity {
   /** The context graph and the caller as the probe judges it (a string that names no address judges as no caller). */
   readonly key: string;
-  /** The policy generation and this context graph's subscription state. */
+  /** The policy generation and this context graph's subscription entry (its version and its value). */
   readonly stamp: string;
 }
 
@@ -126,7 +133,8 @@ export class WritePreflightIdentityMethods extends DKGAgentBase {
   /**
    * Two probe calls with an equal key and an equal stamp read the same answer, so the second may use the
    * first's result while the stamp holds. Undefined when this agent's store observer does not feed the
-   * generation (an agent not built by `DKGAgent.create`): nothing may then be shared.
+   * generation (an agent not built by `DKGAgent.create`), or when its subscription registry does not count
+   * its writes: nothing may then be shared.
    */
   writePreflightIdentity(
     this: DKGAgent,
@@ -134,10 +142,11 @@ export class WritePreflightIdentityMethods extends DKGAgentBase {
     callerAgentAddress?: string | null,
   ): WritePreflightIdentity | undefined {
     const generation = generations.get(this);
-    if (!generation) return undefined;
+    const registry = this.subscribedContextGraphs;
+    if (!generation || !(registry instanceof VersionedSubscriptionRegistry)) return undefined;
     return {
       key: `${normalizeWritePreflightCaller(callerAgentAddress) ?? '-'}\n${contextGraphId}`,
-      stamp: `${generation.current}:${subscriptionStamp(this.getSubscribedContextGraphs().get(contextGraphId))}`,
+      stamp: `${generation.current}:${registry.versionOf(contextGraphId)}:${subscriptionStamp(registry.get(contextGraphId))}`,
     };
   }
 }

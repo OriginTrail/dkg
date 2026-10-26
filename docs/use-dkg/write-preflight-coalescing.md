@@ -25,22 +25,29 @@ graphs: the allowlist is the graph's and the verdict is the caller's. A caller
 the node cannot read as an address (`null`, an empty string, a malformed
 address) is judged as no caller, and shares with no address.
 
-A probe stops being joinable the moment something it reads may have changed:
+A probe stops being joinable the moment something it watches may have changed:
 
 - a write to the ontology graph, the agents graph or any context graph's
   `_meta` graph settles (a curator revokes an agent, a graph becomes private,
   a roster changes), or
-- the graph's own subscription entry changes (subscribed, synced, its
-  participant list).
+- the graph's own subscription entry is written (subscribed, synced, its
+  participant list). Any write counts, including one that puts an equal row back:
+  a change that was made and then reverted cannot be told from no change, so it
+  ends the probe too.
 
 A request that arrives after such a change starts its own probe and never gets
 the answer read before it. The callers that had already joined keep the earlier
 answer: their requests were in flight when the change landed.
 
-The probe's other reads do not end a probe's joinability: whether the graph
-holds content yet, the persisted subscription row, and an on-chain identity
-lookup. A request can therefore join a probe that read them up to one probe
-earlier, never more than 10 seconds, as a read that raced the change would.
+Some of the probe's reads are **not** watched: whether the graph exists
+(`contextGraphExists`), whether it holds content yet, the persisted subscription
+row, and an on-chain identity lookup. A change to one of these does not end a
+probe, so a request that arrives after the change can still join a probe that
+began before it and read the older state. That probe began no more than 10
+seconds earlier, usually far less. A read started after the change would have
+seen it; the shared one does not. The older answer is what the request would
+have had if it had arrived a moment sooner, and a graph that is still catching
+up is covered by the readiness wait below.
 
 Two more rules keep a stale answer away:
 

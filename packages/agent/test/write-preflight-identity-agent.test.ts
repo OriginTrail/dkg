@@ -64,6 +64,29 @@ describe('the write-preflight identity of a real agent', () => {
     expect(stamp()).not.toBe(initial);
   });
 
+  it('moves when the participant list of a graph\'s subscription is flipped and put back', async () => {
+    const agent = await createAgent();
+    const caller = Wallet.createRandom().address;
+    const [first, second] = [Wallet.createRandom().address, Wallet.createRandom().address];
+    const graph = 'participants-cg';
+    const subscribe = (participantAgents: string[]) =>
+      agent.setContextGraphSubscription(graph, { subscribed: true, synced: true, participantAgents }, { persist: false });
+    subscribe([first]);
+    const before = agent.writePreflightIdentity(graph, caller)!.stamp;
+    expect(agent.writePreflightIdentity(graph, caller)!.stamp).toBe(before);
+
+    subscribe([first, second]);
+    subscribe([first]);
+
+    // The row is equal to what it was; the stamp is not, so a probe that began before cannot be joined.
+    expect(agent.getSubscribedContextGraphs().get(graph)?.participantAgents).toEqual([first]);
+    expect(agent.writePreflightIdentity(graph, caller)!.stamp).not.toBe(before);
+    // Another graph's subscription does not move it.
+    const after = agent.writePreflightIdentity(graph, caller)!.stamp;
+    agent.setContextGraphSubscription('unrelated-cg', { subscribed: true, synced: true }, { persist: false });
+    expect(agent.writePreflightIdentity(graph, caller)!.stamp).toBe(after);
+  });
+
   it('keeps the caller as the probe judges it in the key', async () => {
     const agent = await createAgent();
     const caller = Wallet.createRandom().address;

@@ -20,6 +20,7 @@ import {
 } from '../src/context-graph-write-preflight.js';
 import { createMutationObservedStore } from '../src/internal/context-graph-cache-invalidating-store.js';
 import { createObservedStoreMutation } from '../src/internal/observed-store-mutation.js';
+import { MAX_TRACKED_SUBSCRIPTION_CHANGES, VersionedSubscriptionRegistry } from '../src/internal/versioned-subscription-registry.js';
 import type { StoreMutation, StoreMutationObserver, StoreMutationOutcome } from '../src/internal/store-mutation.js';
 
 const CG = '0x1111111111111111111111111111111111111111/policy-cg';
@@ -173,9 +174,10 @@ describe('the generation follows writes as they settle', () => {
 });
 
 describe('what makes two probe calls interchangeable', () => {
-  function agentWith(subs: Map<string, Record<string, unknown>> = new Map()) {
+  // The agent's own registry, which counts the writes made to each entry; the rows here are partial on purpose.
+  function agentWith(subs = new VersionedSubscriptionRegistry() as unknown as Map<string, Record<string, unknown>>) {
     const generation = new WritePreflightGeneration();
-    const agent = { getSubscribedContextGraphs: () => subs } as never;
+    const agent = { subscribedContextGraphs: subs } as never;
     const identity = (contextGraphId: string, caller?: string | null) =>
       WritePreflightIdentityMethods.prototype.writePreflightIdentity.call(agent, contextGraphId, caller);
     return { agent, generation, subs, identity, attach: () => attachWritePreflightGeneration(agent, generation) };
@@ -212,7 +214,7 @@ describe('what makes two probe calls interchangeable', () => {
     expect(identity(CG, CHECKSUM)!.stamp).not.toBe(first);
   });
 
-  it('moves the stamp when this graph\'s subscription entry changes, and only then', () => {
+  it('moves the stamp when this graph\'s subscription entry is written, and only then', () => {
     const { identity, subs, attach } = agentWith();
     attach();
     const absent = identity(CG, CHECKSUM)!.stamp;
@@ -225,13 +227,114 @@ describe('what makes two probe calls interchangeable', () => {
     subs.set(CG, { subscribed: true, synced: true, participantAgents: [CHECKSUM] });
     const withParticipants = identity(CG, CHECKSUM)!.stamp;
     expect(withParticipants).not.toBe(synced);
-    // The same entry replaced by an equal one, and another graph's entry, leave the stamp where it was.
-    subs.set(CG, { subscribed: true, synced: true, participantAgents: [CHECKSUM], onChainId: '7' });
-    expect(identity(CG, CHECKSUM)!.stamp).toBe(withParticipants);
+    // Another graph's entry leaves the stamp where it was, and so does a read.
     subs.set('another-cg', { subscribed: true, synced: true });
+    subs.delete('another-cg');
+    subs.get(CG);
     expect(identity(CG, CHECKSUM)!.stamp).toBe(withParticipants);
+    // A write of an equal row is still a write: the entry may have been changed and put back.
+    subs.set(CG, { subscribed: true, synced: true, participantAgents: [CHECKSUM] });
+    expect(identity(CG, CHECKSUM)!.stamp).not.toBe(withParticipants);
+  });
+
+  it('never returns to a stamp it had once: a change that is reverted is still a change', () => {
+    const { identity, subs, attach } = agentWith();
+    attach();
+    const stamps = new Set<string>();
+    const seen = (): void => {
+      const stamp = identity(CG, CHECKSUM)!.stamp;
+      expect(stamps.has(stamp)).toBe(false);
+      stamps.add(stamp);
+    };
+    seen(); // no entry
+    subs.set(CG, { subscribed: true, synced: true, participantAgents: [CHECKSUM] });
+    seen();
+    // The participant list is flipped and put back: the entry is equal to what it was, the stamp is not.
+    subs.set(CG, { subscribed: true, synced: true, participantAgents: [CHECKSUM, '0x2222222222222222222222222222222222222222'] });
+    subs.set(CG, { subscribed: true, synced: true, participantAgents: [CHECKSUM] });
+    seen();
+    // The entry removed and put back, and removed for good: neither is the stamp of before.
     subs.delete(CG);
-    expect(identity(CG, CHECKSUM)!.stamp).toBe(absent);
+    seen();
+    subs.set(CG, { subscribed: true, synced: true, participantAgents: [CHECKSUM] });
+    seen();
+    subs.delete(CG);
+    seen();
+    // A registry cleared with the entry in it is a change of the entry too.
+    subs.set(CG, { subscribed: true, synced: true, participantAgents: [CHECKSUM] });
+    seen();
+    subs.clear();
+    seen();
+  });
+
+  it('has no identity when the subscription registry does not count its writes', () => {
+    const generation = new WritePreflightGeneration();
+    const agent = { subscribedContextGraphs: new Map() } as never;
+    attachWritePreflightGeneration(agent, generation);
+    expect(WritePreflightIdentityMethods.prototype.writePreflightIdentity.call(agent, CG, CHECKSUM)).toBeUndefined();
+  });
+});
+
+describe('the subscription registry\'s versions', () => {
+  const row = { subscribed: true, synced: true } as never;
+
+  it('moves an entry\'s version on set, replace and delete, and not on a read or another entry', () => {
+    const registry = new VersionedSubscriptionRegistry();
+    const initial = registry.versionOf('a');
+    registry.get('a');
+    registry.has('a');
+    registry.delete('a'); // nothing to delete
+    expect(registry.versionOf('a')).toBe(initial);
+    registry.set('a', row);
+    const created = registry.versionOf('a');
+    expect(created).not.toBe(initial);
+    registry.set('b', row);
+    expect(registry.versionOf('a')).toBe(created);
+    registry.set('a', row); // an equal row is a write
+    const replaced = registry.versionOf('a');
+    expect(replaced).not.toBe(created);
+    expect(registry.delete('a')).toBe(true);
+    expect(registry.versionOf('a')).not.toBe(replaced);
+    expect(registry.versionOf('a')).not.toBe(initial);
+    expect(registry.has('b')).toBe(true);
+  });
+
+  it('keeps the map behavior of the registry it replaces', () => {
+    const registry = new VersionedSubscriptionRegistry();
+    expect(registry).toBeInstanceOf(Map);
+    expect(registry.set('a', row)).toBe(registry);
+    expect(registry.get('a')).toBe(row);
+    expect([...registry.keys()]).toEqual(['a']);
+    registry.clear();
+    expect(registry.size).toBe(0);
+  });
+
+  it('moves every entry\'s version when the registry is cleared, and not when an empty one is', () => {
+    const registry = new VersionedSubscriptionRegistry();
+    const emptied = registry.versionOf('a');
+    registry.clear();
+    expect(registry.versionOf('a')).toBe(emptied);
+    registry.set('a', row);
+    const before = [registry.versionOf('a'), registry.versionOf('b')];
+    registry.clear();
+    expect([registry.versionOf('a'), registry.versionOf('b')]).not.toContain(before[0]);
+    expect(registry.versionOf('b')).not.toBe(before[1]);
+  });
+
+  it('forgets old changes in bounded memory without ever repeating a version', () => {
+    const registry = new VersionedSubscriptionRegistry();
+    registry.set('first', row);
+    const first = registry.versionOf('first');
+    const seen = new Set<string>();
+    for (let i = 0; i < MAX_TRACKED_SUBSCRIPTION_CHANGES + 10; i += 1) {
+      registry.set(`cg-${i}`, row);
+      registry.delete(`cg-${i}`);
+      expect(seen.has(registry.versionOf(`cg-${i}`))).toBe(false);
+      seen.add(registry.versionOf(`cg-${i}`));
+    }
+    // A graph whose change was forgotten has a version it never had.
+    expect(registry.versionOf('first')).not.toBe(first);
+    expect(seen.has(registry.versionOf('first'))).toBe(false);
   });
 });
 

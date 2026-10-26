@@ -22,6 +22,7 @@ import {
 } from '../../agent/src/dkg-agent-write-preflight.js';
 import { createMutationObservedStore } from '../../agent/src/internal/context-graph-cache-invalidating-store.js';
 import { createObservedStoreMutation } from '../../agent/src/internal/observed-store-mutation.js';
+import { VersionedSubscriptionRegistry } from '../../agent/src/internal/versioned-subscription-registry.js';
 import { resolveRequiredWriteContextGraphId } from '../src/daemon/http-utils.js';
 import { WRITE_PREFLIGHT_CACHE_ENV, configureWritePreflightCoalescing } from '../src/daemon/write-preflight-coalescing.js';
 
@@ -63,7 +64,8 @@ async function seamAgent() {
     () => {},
     withWritePreflightGeneration({ begin: () => () => {} }, generation),
   ));
-  const subs = new Map<string, Record<string, unknown>>();
+  // The agent's own registry, which counts the writes made to each entry; the rows here are partial on purpose.
+  const subs = new VersionedSubscriptionRegistry() as unknown as Map<string, Record<string, unknown>>;
   const harness: any = {
     store,
     config: {},
@@ -196,6 +198,22 @@ describe('a ratchet commit during an in-flight probe', () => {
     const before = seam.resolve();
     await seam.reached;
     seam.subs.set(CG, { subscribed: true, synced: true });
+    await whileHeld(seam.resolve());
+    expect(seam.declarationReads()).toBe(2);
+    seam.release();
+    await before;
+  });
+
+  it('is seen through a subscription change that is flipped and reverted while the probe runs', async () => {
+    const seam = await seamAgent();
+    const other = '0x3333333333333333333333333333333333333333';
+    seam.subs.set(CG, { subscribed: true, synced: true, participantAgents: [ON_ALLOWLIST] });
+    const before = seam.resolve();
+    await seam.reached;
+    // The participant list changes and changes back before the probe ends: by value the graph's entry is what it
+    // was when the probe began, but the probe may have read it in between.
+    seam.subs.set(CG, { subscribed: true, synced: true, participantAgents: [ON_ALLOWLIST, other] });
+    seam.subs.set(CG, { subscribed: true, synced: true, participantAgents: [ON_ALLOWLIST] });
     await whileHeld(seam.resolve());
     expect(seam.declarationReads()).toBe(2);
     seam.release();

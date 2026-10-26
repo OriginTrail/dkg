@@ -12,6 +12,7 @@ import {
   WritePreflightIdentityMethods,
   attachWritePreflightGeneration,
 } from '../../agent/src/dkg-agent-write-preflight.js';
+import { VersionedSubscriptionRegistry } from '../../agent/src/internal/versioned-subscription-registry.js';
 import {
   WRITE_PREFLIGHT_CACHE_DEFAULT_TTL_MS,
   WRITE_PREFLIGHT_CACHE_ENV,
@@ -56,14 +57,15 @@ interface PendingProbe {
 
 /** An agent whose probe stays pending until the test settles it, with the real identity rules. */
 function fakeAgent(options: { attached?: boolean } = {}) {
-  const subs = new Map<string, Record<string, unknown>>();
+  // The agent's own registry, which counts the writes made to each entry; the rows here are partial on purpose.
+  const subs = new VersionedSubscriptionRegistry() as unknown as Map<string, Record<string, unknown>>;
   const generation = new WritePreflightGeneration();
   const pending: PendingProbe[] = [];
   const probe = vi.fn((contextGraphId: string, opts?: PendingProbe['opts']) => new Promise<Probe>((resolve, reject) => {
     pending.push({ contextGraphId, opts, resolve, reject });
   }));
   const agent = {
-    getSubscribedContextGraphs: () => subs,
+    subscribedContextGraphs: subs,
     probeContextGraphWritePreflight: probe,
     writePreflightIdentity(contextGraphId: string, caller?: string | null) {
       return WritePreflightIdentityMethods.prototype.writePreflightIdentity.call(agent as never, contextGraphId, caller);
