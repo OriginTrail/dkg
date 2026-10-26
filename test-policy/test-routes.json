@@ -148,7 +148,7 @@
   {
     "pattern": "packages/publisher/test-live/**/*.blazegraph.test.ts",
     "lane": "tornado-blazegraph",
-    "reason": "Live Blazegraph differential of the bounded share conflict lookup (OT-RFC-73 AC4), required in the existing Tornado Blazegraph CI lane",
+    "reason": "Live Blazegraph differential of the bounded share conflict lookup (OT-RFC-73 AC4), required in the existing Tornado Blazegraph CI lane: on its service container and again on the blazegraph-image.json image with the U+001F reproduction required",
     "cadence": "required",
     "command": "pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts"
   },

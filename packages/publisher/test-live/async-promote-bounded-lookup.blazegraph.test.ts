@@ -19,6 +19,10 @@ import { AG, decisive, differentialCase, ids, job, probeUnitSeparatorCollapse, p
 // (they differ by a trailing U+001F) ONE stored term. Whether an image does is a property of that image, so the run reports it, and
 // BLAZEGRAPH_REQUIRE_U001F_COLLAPSE=1 turns "the engine reproduces the duplication" into a requirement (use it on the image that is meant to prove the de-duplication;
 // the in-memory collapsing engine of the unit and property tests proves the code path on every run).
+// CI (tornado-blazegraph) runs this file twice: on the lyrasis/blazegraph service container, where it only REPORTS the `INFO  U+001F ...` line (that engine's behaviour was not
+// measured when the lane was added, so its first run tells), and on the blazegraph-image.json image through `docker run` with BLAZEGRAPH_REQUIRE_U001F_COLLAPSE=1.
+// That image is the engine the node setup provisions and the one that reproduces the duplication (52 of 150 stores in the recorded run); a bump of it to an engine
+// that stops identifying the pair fails the second run instead of letting the real-engine G1 pass without exercising the payload de-duplication.
 
 const CASES = Number(process.env.DKG_PROMOTE_LOOKUP_LIVE_CASES ?? '150');
 const SEED_BASE = 20_261_950;
@@ -72,8 +76,9 @@ describe('bounded promote conflict lookup (live Blazegraph)', () => {
     expect(probe.legacyMatches).toBe(1);
     if (g1.cases > 0) expect(probe.collapses).toBe(g1.storesWithRepeats > 0);              // the engine either identifies the pair (and repeats rows) or it does not (and cannot)
     if (requireCollapse) {
-      expect(probe.collapses).toBe(true);
-      expect(g1.storesWithRepeats).toBeGreaterThan(0);
+      const missing = 'BLAZEGRAPH_REQUIRE_U001F_COLLAPSE=1, but this engine does not reproduce the duplicate rows: the real-engine G1 would pass without ever exercising the payload de-duplication';
+      expect(probe.collapses, missing).toBe(true);
+      expect(g1.storesWithRepeats, missing).toBeGreaterThan(0);
     }
   }, 60_000);
 
