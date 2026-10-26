@@ -198,21 +198,6 @@ export function readRfc64LegacySwmBoundaryCountV1(
     ?.entriesByContextGraph.get(contextGraphId)?.size ?? 0;
 }
 
-/** Whether a legacy marker of this asset is outstanding here: a process-local read, no I/O. */
-export function hasRfc64LegacySwmBoundaryEntryV1(
-  owner: object,
-  contextGraphId: string,
-  kaUal: string,
-): boolean {
-  const entries = rfc64LegacySwmBoundaryStatesV1.get(owner)?.entriesByContextGraph.get(contextGraphId);
-  if (entries === undefined) return false;
-  try {
-    return entries.has(assertCanonicalDeterministicUalV1(kaUal).ual);
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Resolve the exact root SWM graphs that a cold catalog bootstrap may preserve
  * as legacy read-only state. Immutable upgrade-capture entries are rechecked

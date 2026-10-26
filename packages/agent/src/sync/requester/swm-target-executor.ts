@@ -81,14 +81,18 @@ export interface SwmTargetExecutorPortsV1 {
     retirement: FinalizedSwmTwinRetirement,
     ctx: OperationContext,
   ) => Promise<void>;
+  /**
+   * The rest of a finalized twin's cleanup, which its lifecycle owns: the
+   * legacy marker while one is outstanding, and the author's inventory row
+   * while one is left. Idempotent, so every round that proves the twin
+   * retired asks again.
+   */
   readonly retireLegacySwmAfterVerifiedVmTwin?: (input: Readonly<{
     contextGraphId: string;
     kaUal: string;
     assertionVersion: string;
     subGraphName?: string;
   }>) => Promise<void>;
-  /** Process-local, no I/O: a legacy marker of the asset is still outstanding. */
-  readonly hasOutstandingLegacySwmMarker?: (contextGraphId: string, kaUal: string) => boolean;
   readonly logInfo: (ctx: OperationContext, message: string) => void;
   readonly logWarn: (ctx: OperationContext, message: string) => void;
   readonly logDebug: (ctx: OperationContext, message: string) => void;
@@ -315,7 +319,7 @@ export class SwmTargetExecutorV1 {
       resolveRootSnapshotAtomicCompanion:
         this.#ports.resolveRootSnapshotAtomicCompanion,
       reconcileFinalizedTwin: async (contextGraphId, descriptor) => (
-        await this.#reconcileFinalizedTwin(target, contextGraphId, descriptor, 'retire')
+        await this.#reconcileFinalizedTwin(target, contextGraphId, descriptor)
           ? 'suppress-metadata'
           : 'preserve'
       ),
@@ -334,9 +338,10 @@ export class SwmTargetExecutorV1 {
   }
 
   /**
-   * Retire the legacy marker of a finalized twin. A failure stays a warning: a
-   * marker left behind is the conservative state, retried by its own owner, by
-   * a later round that holds the twin, or by the asset's next publication.
+   * Ask the twin's lifecycle for the rest of its cleanup: its legacy marker and
+   * its author's inventory row. A failure stays a warning: a marker left behind
+   * is the conservative state, retried by its own owner, by a later round that
+   * proves the twin retired again, or by the asset's next publication.
    */
   async #retireLegacyMarker(
     target: PublicSwmTargetV1,
@@ -362,13 +367,12 @@ export class SwmTargetExecutorV1 {
   /**
    * A snapshot this node proved finalized and retired in an earlier round
    * (`finalized-swm-twin-memo.ts`) is held only once the same proof passes
-   * again. It reads Verified Memory and the shared-memory head and graph under
-   * the asset's write lock, and writes nothing unless a share brought the copy
-   * back, which it retires. When Verified Memory no longer holds that content,
-   * or another head is back, the proof fails, the entry is forgotten and the
-   * round takes the snapshot the usual way, as it does when the proof cannot
-   * run. A legacy marker that outlived the retirement is retried here, so a
-   * round that holds the twin is still a way back for it.
+   * again, under the asset's write lock: Verified Memory still holds that
+   * content, and the shared-memory copy is gone. The proof writes nothing
+   * unless a share brought the copy back, which it retires. When Verified
+   * Memory no longer holds that content, another head is back, or a row of a
+   * head is left, the entry is forgotten and the round takes the snapshot the
+   * usual way, as it does when the proof cannot run.
    */
   async #heldAsRetiredFinalizedTwin(
     target: PublicSwmTargetV1,
@@ -376,7 +380,7 @@ export class SwmTargetExecutorV1 {
     descriptor: GraphScopedSwmRecoveryDescriptor,
   ): Promise<boolean> {
     if (!this.finalizedTwins.retired(contextGraphId, descriptor)) return false;
-    return this.#reconcileFinalizedTwin(target, contextGraphId, descriptor, 'retire-if-outstanding')
+    return this.#reconcileFinalizedTwin(target, contextGraphId, descriptor, { beforeMaterialization: true })
       .catch((cause: unknown) => {
         this.finalizedTwins.forget(contextGraphId, descriptor);
         this.#ports.logWarn(
@@ -393,15 +397,13 @@ export class SwmTargetExecutorV1 {
    * Memory holds this snapshot's exact content, and a shared-memory copy of it
    * is retired. False when the proof fails and a copy stays. The memo follows:
    * a proven twin is remembered, so a later round holds it, and a failed proof
-   * forgets it. `marker` says when the legacy marker is retired after a proof
-   * that found no copy to retire: always, or only when one is outstanding (a
-   * round that holds the twin).
+   * forgets it.
    */
   async #reconcileFinalizedTwin(
     target: PublicSwmTargetV1,
     contextGraphId: string,
     descriptor: GraphScopedSwmRecoveryDescriptor,
-    marker: 'retire' | 'retire-if-outstanding',
+    options: { readonly beforeMaterialization?: boolean } = {},
   ): Promise<boolean> {
     const retirement = await reconcileFinalizedSwmTwinFromDescriptor({
       store: this.#ports.store,
@@ -410,25 +412,29 @@ export class SwmTargetExecutorV1 {
       descriptor,
       retire: (candidate) => this.#ports.retireFinalizedSwmTwin(candidate, target.ctx),
     });
-    if (retirement !== 'retired' && retirement !== 'already-retired-finalized') {
+    // Only the call right after this round wrote the snapshot may read a head
+    // that is not exact as a finished retirement (see the reconciliation).
+    // Before that write it counts only once no row of the head is left: a
+    // partial or ambiguous head is residue that materialization repairs, and
+    // any row of it keeps the asset's legacy marker from retiring. That check
+    // takes the lock again: a writer in between is seen, or meets the next round.
+    const proven = retirement === 'retired' || (
+      retirement === 'already-retired-finalized'
+      && (options.beforeMaterialization !== true || await this.#swmCopyGone(contextGraphId, descriptor))
+    );
+    if (!proven) {
       this.finalizedTwins.forget(contextGraphId, descriptor);
       return false;
     }
     this.finalizedTwins.remember(contextGraphId, descriptor);
-    // The twin's graph and head are already gone at this point. Marker
-    // retirement is a second, separate cleanup: if its failure escaped, the
-    // caller would treat the whole reconciliation as deferred, skip the
-    // metadata suppression, and its bulk append would write the retired head
-    // and operation rows back without their graph. A marker left behind is the
-    // conservative state (the graph stays reported as incomplete) until a later
-    // pass or a catalog replay retires it.
-    if (
-      marker === 'retire'
-      || retirement === 'retired'
-      || this.#ports.hasOutstandingLegacySwmMarker?.(contextGraphId, descriptor.kaUal) === true
-    ) {
-      await this.#retireLegacyMarker(target, contextGraphId, descriptor);
-    }
+    // The twin's graph and head are already gone at this point. The rest of
+    // its cleanup is separate: if its failure escaped, the caller would treat
+    // the whole reconciliation as deferred, skip the metadata suppression, and
+    // its bulk append would write the retired head and operation rows back
+    // without their graph. Its owner does only what is still owed, so every
+    // proof asks again, and a marker left behind, the conservative state (the
+    // graph stays reported as incomplete), has a way back in each such round.
+    await this.#retireLegacyMarker(target, contextGraphId, descriptor);
     if (retirement === 'retired') {
       this.#ports.invalidateListContextGraphsCache();
       this.#ports.logInfo(
@@ -437,6 +443,31 @@ export class SwmTargetExecutorV1 {
       );
     }
     return true;
+  }
+
+  /**
+   * Under the asset's write lock: no row of the snapshot's shared-memory head,
+   * exact or partial, and no quad of its graph is left. That is also the state
+   * in which the asset's legacy marker can retire.
+   */
+  async #swmCopyGone(contextGraphId: string, descriptor: GraphScopedSwmRecoveryDescriptor): Promise<boolean> {
+    const anyRow = async (pattern: string): Promise<boolean> => {
+      const result = await this.#ports.store.query(`SELECT * WHERE { ${pattern} } LIMIT 1`, {
+        priority: 'background',
+        source: 'agent.sharedMemorySync.finalizedTwin.copyGone',
+      });
+      // A result that is not bindings proves nothing: count it as a row.
+      return result.type !== 'bindings' || result.bindings.length > 0;
+    };
+    return this.#snapshotMaterializer.withKaWriteLock(
+      contextGraphId,
+      descriptor.subGraphName,
+      descriptor.kaUal,
+      async () => (
+        !await anyRow(`GRAPH <${assertSafeIri(descriptor.metaGraph)}> { <${assertSafeIri(descriptor.headSubject)}> ?p ?o }`)
+        && !await anyRow(`GRAPH <${assertSafeIri(descriptor.assertionGraph)}> { ?s ?p ?o }`)
+      ),
+    );
   }
 
   /**

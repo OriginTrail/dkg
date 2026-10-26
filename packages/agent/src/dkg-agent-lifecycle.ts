@@ -1200,6 +1200,13 @@ function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
 }
 
 export class LifecycleSyncMethods extends DKGAgentBase {
+  /**
+   * The rest of a finalized twin's cleanup once its shared-memory copy is retired: the asset's row
+   * in its author's SWM inventory, and its legacy SWM boundary marker. Idempotent: the marker is
+   * retired only while one is outstanding (a process-local read decides, with no store I/O), and
+   * the row is removed only while the author's inventory still holds it. A caller that proves the
+   * twin retired again asks again, and what an earlier call left behind goes then.
+   */
   async retireLegacySwmAfterVerifiedVmTwin(
     this: DKGAgent,
     input: Readonly<{

@@ -128,7 +128,7 @@ import {
 } from './context-graph-discovery-options.js';
 export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
 import {
-  awaitRfc64LegacySwmPromoteAdmissionV1, endRfc64LegacySwmBoundaryAdmissionWaitsV1, hasRfc64LegacySwmBoundaryEntryV1, prepareRfc64LateLegacySwmBoundaryV1,
+  awaitRfc64LegacySwmPromoteAdmissionV1, endRfc64LegacySwmBoundaryAdmissionWaitsV1, prepareRfc64LateLegacySwmBoundaryV1,
 } from './rfc64/legacy-swm-boundary-v1.js';
 import { enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type ChainAdapter, type ChainEventLogBinding, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
@@ -918,7 +918,6 @@ export class DKGAgent extends DKGAgentBase {
       retireLegacySwmAfterVerifiedVmTwin: (input) => (
         this.retireLegacySwmAfterVerifiedVmTwin(input)
       ),
-      hasOutstandingLegacySwmMarker: (contextGraphId, kaUal) => hasRfc64LegacySwmBoundaryEntryV1(this, contextGraphId, kaUal),
       logInfo: (ctx, message) => this.log.info(ctx, message),
       logWarn: (ctx, message) => this.log.warn(ctx, message),
       logDebug: (ctx, message) => this.log.debug(ctx, message),

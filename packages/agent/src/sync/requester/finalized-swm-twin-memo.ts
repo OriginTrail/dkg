@@ -13,12 +13,12 @@
  *
  * Remembering the retirement lets a later round count the snapshot as held and
  * write nothing, once the same proof passes again: Verified Memory still holds
- * that content, and no other head is back. The proof only reads, unless a share
- * brought the copy back, which it retires. The memo is process-local, bounded
- * and short-lived: a restart starts it empty, an entry expires, and another
- * version, digest or private commitment of the same asset is another entry. It
- * records only what the retirement proved: that the content is finalized here.
- * The legacy marker's cleanup has a lifecycle of its own
+ * that content, and no row of the shared-memory copy is left. The proof only
+ * reads, unless a share brought the copy back, which it retires. The memo is
+ * process-local, bounded and short-lived: a restart starts it empty, an entry
+ * expires, and another version, digest or private commitment of the same asset
+ * is another entry. It records only what the retirement proved: that the content
+ * is finalized here. The rest of the twin's cleanup has a lifecycle of its own
  * (`owed-legacy-swm-retirements.ts`), and an entry is forgotten once its proof
  * fails or cannot run.
  */

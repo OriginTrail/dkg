@@ -15,7 +15,6 @@ import {
   computeFlatKCRootV10,
   generateKnowledgeAssetShareMetadata,
   workspacePublicQuadsDigest,
-  type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import type { FinalizedSwmTwinRetirement } from
@@ -271,186 +270,6 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
     await Promise.all(stores.splice(0).map((store) => store.close()));
   });
 
-  it('keeps retired SWM metadata out of the bulk append when legacy marker retirement fails', async () => {
-    const store = new OxigraphStore();
-    stores.push(store);
-    const contextGraphId = 'public-finalized-twin-marker-deferral';
-    const author = '0x1111111111111111111111111111111111111111';
-    const ual = `did:dkg:hardhat:31337/${author}/7`;
-    const dkg = 'http://dkg.io/ontology/';
-    const xsdInteger = 'http://www.w3.org/2001/XMLSchema#integer';
-    const scope = createGraphKnowledgeAssetScope(ual, 1);
-    const vmGraph = knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.VerifiableMemory, scope);
-    const swmGraph = knowledgeAssetLayerGraphUri(
-      contextGraphId,
-      MemoryLayer.SharedWorkingMemory,
-      scope,
-    );
-    const vmMetaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
-    const swmMetaGraph = contextGraphWorkspaceMetaGraphUri(contextGraphId);
-    const shareOperationId = 'finalized-twin-marker-deferral-op';
-    const operationSubject = `urn:dkg:share:${contextGraphId}:${shareOperationId}`;
-    const headSubject = `${ual}#dkg-swm-head`;
-    const payload: Quad[] = [
-      { subject: 'urn:twin:a', predicate: 'http://schema.org/status', object: '"finalized"', graph: '' },
-      { subject: 'urn:twin:b', predicate: 'http://schema.org/status', object: '"finalized"', graph: '' },
-    ];
-    const digest = workspacePublicQuadsDigest(payload);
-    // Finalized VM is already local: the SWM snapshot below arrives second.
-    await store.insert([
-      ...payload.map((quad) => ({ ...quad, graph: vmGraph })),
-      { subject: ual, predicate: `${dkg}assertionVersion`, object: `"1"^^<${xsdInteger}>`, graph: vmMetaGraph },
-      { subject: ual, predicate: `${dkg}assertionGraph`, object: vmGraph, graph: vmMetaGraph },
-      { subject: ual, predicate: `${dkg}status`, object: '"confirmed"', graph: vmMetaGraph },
-      { subject: ual, predicate: `${dkg}publicTripleCount`, object: `"${payload.length}"^^<${xsdInteger}>`, graph: vmMetaGraph },
-      { subject: ual, predicate: `${dkg}privateTripleCount`, object: `"0"^^<${xsdInteger}>`, graph: vmMetaGraph },
-      {
-        subject: ual,
-        predicate: `${dkg}merkleRoot`,
-        object: `"${ethers.hexlify(computeFlatKCRootV10(payload, []))}"`,
-        graph: vmMetaGraph,
-      },
-    ]);
-    const remoteMeta: Quad[] = [
-      ...generateKnowledgeAssetShareMetadata({
-        shareOperationId,
-        contextGraphId,
-        kaUal: ual,
-        assertionVersion: 1,
-        publicTripleCount: payload.length,
-        privateTripleCount: 0,
-        publisherPeerId: 'peer-source',
-        timestamp: new Date(0),
-      }, swmMetaGraph),
-      { subject: operationSubject, predicate: `${dkg}publicQuadsDigest`, object: `"${digest}"`, graph: swmMetaGraph },
-      { subject: operationSubject, predicate: `${dkg}publicSnapshotRef`, object: `"${digest}"`, graph: swmMetaGraph },
-      { subject: headSubject, predicate: `${dkg}contentScopeVersion`, object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${xsdInteger}>`, graph: swmMetaGraph },
-      { subject: headSubject, predicate: `${dkg}kaUal`, object: ual, graph: swmMetaGraph },
-      { subject: headSubject, predicate: `${dkg}assertionVersion`, object: `"1"^^<${xsdInteger}>`, graph: swmMetaGraph },
-      { subject: headSubject, predicate: `${dkg}assertionGraph`, object: swmGraph, graph: swmMetaGraph },
-      { subject: headSubject, predicate: `${dkg}shareOperationId`, object: `"${shareOperationId}"`, graph: swmMetaGraph },
-    ];
-    const snapshots = new Map<string, Quad[]>([[digest, payload]]);
-    const publicSnapshotStore: WorkspacePublicSnapshotStore = {
-      putSnapshot: async (input) => {
-        snapshots.set(input.digest, input.quads.map((quad) => ({ ...quad })));
-        return { ref: input.digest, byteLength: 0 };
-      },
-      getSnapshot: async (ref) => snapshots.get(ref)?.map((quad) => ({ ...quad })) ?? null,
-    };
-    const subjectRows = async (subject: string) => {
-      const result = await store.query(
-        `SELECT ?p ?o WHERE { GRAPH <${swmMetaGraph}> { <${subject}> ?p ?o } }`,
-      );
-      return result.type === 'bindings' ? result.bindings : [];
-    };
-    const swmRowsWhenRetired: number[] = [];
-    // Stand-in for the publisher's named-lifecycle cleanup: graph, then head and operation.
-    const retireFinalizedSwmTwin = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
-      swmRowsWhenRetired.push(
-        await store.countQuads(candidate.swmGraph),
-        (await subjectRows(headSubject)).length,
-      );
-      await store.dropGraph(candidate.swmGraph);
-      await store.deleteByPattern({ graph: swmMetaGraph, subject: headSubject });
-      await store.deleteByPattern({ graph: swmMetaGraph, subject: operationSubject });
-    });
-    const invalidateListContextGraphsCache = vi.fn();
-    let invalidationsBeforeMarkerRetirement = -1;
-    const retireLegacySwmAfterVerifiedVmTwin = vi.fn(async () => {
-      invalidationsBeforeMarkerRetirement = invalidateListContextGraphsCache.mock.calls.length;
-      throw new Error('legacy boundary store unavailable');
-    });
-    const logInfo = vi.fn();
-    const logWarn = vi.fn();
-    const ctx = createOperationContext('sync');
-    const executor = new SwmTargetExecutorV1({
-      store,
-      writeLocks: new Map(),
-      listSubGraphs: async () => [],
-      createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
-      fetchSyncPages: async (
-        _ctx,
-        _peerId,
-        _contextGraphId,
-        _includeSharedMemory,
-        phase,
-      ) => {
-        const quads = phase === 'meta' ? remoteMeta.map((quad) => ({ ...quad })) : [];
-        return {
-          quads,
-          bytesReceived: 0,
-          timedOut: false,
-          resumedFromOffset: 0,
-          nextOffset: quads.length,
-          checkpointKey: `public:${phase}`,
-          completed: true,
-        };
-      },
-      processSharedMemoryBatch: async (dataQuads, metaQuads) => ({
-        verifiedData: dataQuads,
-        verifiedMeta: metaQuads,
-        totalFetchedDataQuads: dataQuads.length,
-        totalFetchedMetaQuads: metaQuads.length,
-        droppedDataTriples: 0,
-        emptyResponses: 0,
-        entityCreators: [],
-      }),
-      publicSnapshotStore,
-      recordDrops: () => undefined,
-      invalidateListContextGraphsCache,
-      recoveryMutation: createSwmRecoveryMutationRuntimeV1({
-        store,
-        recordDrops: () => undefined,
-        invalidateListContextGraphsCache: () => undefined,
-      }),
-      setCheckpoint: () => undefined,
-      deleteCheckpoint: () => undefined,
-      deletePublicCheckpoint: () => undefined,
-      ensureOwnedMap: () => new Map(),
-      retireFinalizedSwmTwin,
-      retireLegacySwmAfterVerifiedVmTwin,
-      logInfo,
-      logWarn,
-      logDebug: () => undefined,
-    });
-
-    const summary = await executor.syncPublicTarget({
-      ctx,
-      remotePeerId: 'peer-source',
-      contextGraphId,
-      remainingContextGraphs: 1,
-      mode: { kind: 'ordinary' },
-    });
-
-    expect(summary.failedPhases).toBe(0);
-    // The snapshot was materialized with its head, then the twin was retired.
-    expect(retireFinalizedSwmTwin).toHaveBeenCalledOnce();
-    expect(swmRowsWhenRetired).toEqual([payload.length, 5]);
-    expect(retireLegacySwmAfterVerifiedVmTwin).toHaveBeenCalledExactlyOnceWith({
-      contextGraphId,
-      kaUal: ual,
-      assertionVersion: '1',
-      subGraphName: undefined,
-    });
-    // The round's closing bulk append must not put the retired rows back.
-    expect(await store.countQuads(swmGraph)).toBe(0);
-    expect(await subjectRows(headSubject)).toEqual([]);
-    expect(await subjectRows(operationSubject)).toEqual([]);
-    expect(await store.countQuads(vmGraph)).toBe(payload.length);
-    // The retirement itself is still completed and reported; only the marker is deferred.
-    expect(invalidateListContextGraphsCache.mock.calls.length)
-      .toBeGreaterThan(invalidationsBeforeMarkerRetirement);
-    expect(logInfo).toHaveBeenCalledWith(
-      ctx,
-      `Retired byte-identical SWM twin after SWM recovery found finalized VM for ${ual}`,
-    );
-    expect(logWarn).toHaveBeenCalledWith(
-      ctx,
-      expect.stringMatching(/legacy SWM boundary.*legacy boundary store unavailable/),
-    );
-  });
-
   /**
    * A finalized asset whose shared-memory snapshot a peer still serves: VM is
    * local with the same bytes, so a round writes the snapshot and retires it.
@@ -458,10 +277,7 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
    */
   async function finalizedTwinRounds(
     contextGraphId: string,
-    options: {
-      readonly retireMarker?: () => Promise<void>;
-      readonly markerOutstanding?: () => boolean;
-    } = {},
+    options: { readonly retireMarker?: () => Promise<void> } = {},
   ) {
     const store = new OxigraphStore();
     stores.push(store);
@@ -514,11 +330,25 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
       { subject: headSubject, predicate: `${dkg}shareOperationId`, object: `"${shareOperationId}"`, graph: swmMetaGraph },
     ];
     const snapshots = new Map<string, Quad[]>([[digest, payload]]);
+    const subjectRows = async (subject: string) => {
+      const result = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${swmMetaGraph}> { <${subject}> ?p ?o } }`,
+      );
+      return result.type === 'bindings' ? result.bindings : [];
+    };
+    // What each retirement found: the copy's graph quads, then its head rows.
+    const swmRowsWhenRetired: number[] = [];
+    // Stand-in for the publisher's named-lifecycle cleanup: graph, then head and operation.
     const retireFinalizedSwmTwin = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
+      swmRowsWhenRetired.push(
+        await store.countQuads(candidate.swmGraph),
+        (await subjectRows(headSubject)).length,
+      );
       await store.dropGraph(candidate.swmGraph);
       await store.deleteByPattern({ graph: swmMetaGraph, subject: headSubject });
       await store.deleteByPattern({ graph: swmMetaGraph, subject: operationSubject });
     });
+    const invalidateListContextGraphsCache = vi.fn();
     const logInfo = vi.fn();
     const logWarn = vi.fn();
     const ctx = createOperationContext('sync');
@@ -556,7 +386,7 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
         getSnapshot: async (ref) => snapshots.get(ref)?.map((quad) => ({ ...quad })) ?? null,
       },
       recordDrops: () => undefined,
-      invalidateListContextGraphsCache: () => undefined,
+      invalidateListContextGraphsCache,
       recoveryMutation: createSwmRecoveryMutationRuntimeV1({
         store,
         recordDrops: () => undefined,
@@ -568,7 +398,6 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
       ensureOwnedMap: () => new Map(),
       retireFinalizedSwmTwin,
       ...(options.retireMarker === undefined ? {} : { retireLegacySwmAfterVerifiedVmTwin: options.retireMarker }),
-      ...(options.markerOutstanding === undefined ? {} : { hasOutstandingLegacySwmMarker: options.markerOutstanding }),
       logInfo,
       logWarn,
       logDebug: () => undefined,
@@ -594,15 +423,57 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
         { subject: ual, predicate: `${dkg}assertionVersion`, object: `"2"^^<${xsdInteger}>`, graph: vmMetaGraph },
       ]);
     };
+    // A partial replay left one row of the head, and nothing else of the copy.
+    const leavePartialHead = () => store.insert([
+      { subject: headSubject, predicate: `${dkg}assertionVersion`, object: `"1"^^<${xsdInteger}>`, graph: swmMetaGraph },
+    ]);
     return {
-      store, payload, vmGraph, swmGraph, retireFinalizedSwmTwin, logInfo, logWarn, ctx, round, shareAgain,
-      finalizeLaterVersion,
+      store, ual, payload, vmGraph, swmGraph, headSubject, operationSubject, subjectRows, swmRowsWhenRetired,
+      retireFinalizedSwmTwin, invalidateListContextGraphsCache, logInfo, logWarn, ctx, round, shareAgain,
+      finalizeLaterVersion, leavePartialHead,
     };
   }
   type FinalizedTwinRounds = Awaited<ReturnType<typeof finalizedTwinRounds>>;
   const loggedTimes = (log: { readonly mock: { readonly calls: readonly (readonly unknown[])[] } }, text: string) => (
     log.mock.calls.filter(([, message]) => String(message).includes(text)).length
   );
+
+  it('keeps retired SWM metadata out of the bulk append when legacy marker retirement fails', async () => {
+    const contextGraphId = 'public-finalized-twin-marker-deferral';
+    let invalidationsBeforeMarkerRetirement = -1;
+    const retireMarker = vi.fn(async () => {
+      invalidationsBeforeMarkerRetirement = rounds.invalidateListContextGraphsCache.mock.calls.length;
+      throw new Error('legacy boundary store unavailable');
+    });
+    const rounds = await finalizedTwinRounds(contextGraphId, { retireMarker });
+
+    expect((await rounds.round()).failedPhases).toBe(0);
+    // The snapshot was materialized with its head, then the twin was retired.
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledOnce();
+    expect(rounds.swmRowsWhenRetired).toEqual([rounds.payload.length, 5]);
+    expect(retireMarker).toHaveBeenCalledExactlyOnceWith({
+      contextGraphId,
+      kaUal: rounds.ual,
+      assertionVersion: '1',
+      subGraphName: undefined,
+    });
+    // The round's closing bulk append must not put the retired rows back.
+    expect(await rounds.store.countQuads(rounds.swmGraph)).toBe(0);
+    expect(await rounds.subjectRows(rounds.headSubject)).toEqual([]);
+    expect(await rounds.subjectRows(rounds.operationSubject)).toEqual([]);
+    expect(await rounds.store.countQuads(rounds.vmGraph)).toBe(rounds.payload.length);
+    // The retirement itself is still completed and reported; only the marker is deferred.
+    expect(rounds.invalidateListContextGraphsCache.mock.calls.length)
+      .toBeGreaterThan(invalidationsBeforeMarkerRetirement);
+    expect(rounds.logInfo).toHaveBeenCalledWith(
+      rounds.ctx,
+      `Retired byte-identical SWM twin after SWM recovery found finalized VM for ${rounds.ual}`,
+    );
+    expect(rounds.logWarn).toHaveBeenCalledWith(
+      rounds.ctx,
+      expect.stringMatching(/legacy SWM boundary.*legacy boundary store unavailable/),
+    );
+  });
 
   it.each([
     ['done', { retireMarker: async () => undefined }],
@@ -685,20 +556,46 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
     expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledTimes(3);
   });
 
-  it.each([
-    [true, 2],
-    [false, 1],
-  ] as const)('retries the legacy marker while it holds the twin only when one is outstanding (%s)', async (outstanding, calls) => {
-    const retireMarker = vi.fn(async () => undefined);
-    const rounds = await finalizedTwinRounds(`public-finalized-twin-marker-outstanding-${outstanding}`, {
-      retireMarker,
-      markerOutstanding: () => outstanding,
+  it('takes the snapshot the usual way when a row of its head was left, so the twin and its marker can retire', async () => {
+    const headRowsWhenAsked: number[] = [];
+    const retireMarker = vi.fn(async () => {
+      headRowsWhenAsked.push((await rounds.subjectRows(rounds.headSubject)).length);
     });
+    const rounds = await finalizedTwinRounds('public-finalized-twin-partial-head', { retireMarker });
+    await rounds.round();
+    await rounds.leavePartialHead();
+
+    // Not held: the round wrote the snapshot back with a whole head, and retired the twin with it.
+    const later = await rounds.round();
+    expect(later.failedPhases).toBe(0);
+    expect(loggedTimes(rounds.logInfo, 'already retired here as finalized Verified Memory twins')).toBe(0);
+    expect(rounds.swmRowsWhenRetired).toEqual([rounds.payload.length, 5, rounds.payload.length, 5]);
+    expect(await rounds.subjectRows(rounds.headSubject)).toEqual([]);
+    expect(await rounds.store.countQuads(rounds.swmGraph)).toBe(0);
+    // Its marker's owner was asked once no row of the head was left, which a marker needs to retire.
+    expect(headRowsWhenAsked).toEqual([0, 0]);
+
+    // A third round holds it.
+    expect((await rounds.round()).alreadyHeldAssets).toBe(1);
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks the twin\'s cleanup owner again in each round that holds it', async () => {
+    const contextGraphId = 'public-finalized-twin-cleanup-asked-again';
+    const retireMarker = vi.fn(async () => undefined);
+    const rounds = await finalizedTwinRounds(contextGraphId, { retireMarker });
     await rounds.round();
     expect(retireMarker).toHaveBeenCalledOnce();
 
+    // The owner retires a marker only while one is outstanding: the round asks without knowing.
     expect((await rounds.round()).alreadyHeldAssets).toBe(1);
     expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledOnce();
-    expect(retireMarker).toHaveBeenCalledTimes(calls);
+    expect(retireMarker).toHaveBeenCalledTimes(2);
+    expect(retireMarker).toHaveBeenLastCalledWith({
+      contextGraphId,
+      kaUal: rounds.ual,
+      assertionVersion: '1',
+      subGraphName: undefined,
+    });
   });
 });
