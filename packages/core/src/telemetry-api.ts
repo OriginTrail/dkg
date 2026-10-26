@@ -204,7 +204,7 @@ export interface DkgMetrics {
   storageAckInflight: Histogram;
   /** queue_depth sample for background/normal store work competing with ACK */
   syncBackgroundQueueDepth: Histogram;
-  /** priority={ack|health|normal|background}, reason={queue_full|queue_wait_timeout}, operation_family=first two dot-separated segments of the caller's source (at most 64 per scheduler, then `other`) */
+  /** priority={ack|health|normal|background|control}, reason={queue_full|queue_wait_timeout}, operation_family=first two dot-separated segments of the caller's source (at most 64 per scheduler, then `other`). `control` is the queue control path's own schedulers (one per async queue). */
   storeSchedulerRejectionsTotal: Counter;
   /** ms; priority and operation identify the bounded admission lane and static caller */
   storeSchedulerQueueWaitMs: Histogram;
