@@ -129,3 +129,56 @@ export function seedVerifiedDurableBoundary(
   );
   return true;
 }
+
+/** Cross-peer resume state for one graph, retained across recovery runs. */
+export class DurableGraphResumePolicy {
+  private boundary: VerifiedDurableBoundary | undefined;
+  private readonly refusedByPeer = new Map<string, string>();
+
+  private remember(store: SyncCheckpointStore, candidates: readonly {
+    checkpointKey: string; checkpoint: SyncCheckpointEntry | undefined;
+  }[]): void {
+    this.boundary = candidates.reduce(
+      (current, candidate) => preferVerifiedDurableBoundary(
+        current, verifiedDurableBoundaryOf(candidate.checkpoint, candidate.checkpointKey),
+      ),
+      liveDurableBoundarySource(store, this.boundary) ? this.boundary : undefined,
+    );
+  }
+
+  /** A refused seed ends cross-peer seeding for this run, with one own-state retry per peer. */
+  startRun(store: SyncCheckpointStore) {
+    let seedingRefused = false;
+    let rejectedPeer: string | undefined;
+    const retried = new Set<string>();
+    return {
+      discover: (candidates: readonly { checkpointKey: string; checkpoint: SyncCheckpointEntry | undefined }[]) => {
+        this.remember(store, candidates);
+      },
+      seed: (peerId: string, checkpointKey: string): { kind: 'seeded'; offset: number } | { kind: 'own-checkpoint' } => {
+        const boundary = seedingRefused ? undefined : this.boundary;
+        if (boundary && this.refusedByPeer.get(peerId) !== durableBoundaryIdentity(boundary.manifestDigest, boundary.offset)
+          && seedVerifiedDurableBoundary(store, checkpointKey, boundary)) {
+          return { kind: 'seeded', offset: boundary.offset };
+        }
+        return { kind: 'own-checkpoint' };
+      },
+      recordSlice: (input: {
+        peerId: string; checkpointKey: string; before: SyncCheckpointEntry | undefined;
+        after: SyncCheckpointEntry | undefined; rejectedOffset: number | undefined; seeded: boolean;
+      }) => {
+        rejectedPeer = input.rejectedOffset === undefined ? undefined : input.peerId;
+        if (input.rejectedOffset !== undefined) {
+          this.refusedByPeer.set(input.peerId, durableBoundaryIdentity(input.before?.manifestDigest, input.rejectedOffset));
+          if (input.seeded) seedingRefused = true;
+        }
+        this.remember(store, [{ checkpointKey: input.checkpointKey, checkpoint: input.after }]);
+      },
+      retryRejectedSlice: (peerId: string): boolean => {
+        if (rejectedPeer !== peerId || retried.has(peerId)) return false;
+        retried.add(peerId);
+        return true;
+      },
+    };
+  }
+}
