@@ -197,7 +197,7 @@ export interface DkgMetrics {
   storageAckInflight: Histogram;
   /** queue_depth sample for background/normal store work competing with ACK */
   syncBackgroundQueueDepth: Histogram;
-  /** priority={ack|health|normal|background}, reason={queue_full|queue_wait_timeout} */
+  /** priority={ack|health|normal|background}, reason={queue_full|queue_wait_timeout}, operation_family=first two dot-separated segments of the caller's source (at most 64 per scheduler, then `other`) */
   storeSchedulerRejectionsTotal: Counter;
   /** ms; priority and operation identify the bounded admission lane and static caller */
   storeSchedulerQueueWaitMs: Histogram;
@@ -418,7 +418,7 @@ function buildMetrics(): DkgMetrics {
       description: 'Sampled non-ACK store queue depth',
     }),
     storeSchedulerRejectionsTotal: meter.createCounter('dkg.store.scheduler_rejections_total', {
-      description: 'External-store work rejected before dispatch by bounded priority and reason',
+      description: 'External-store work rejected before dispatch by bounded priority, reason and operation family',
     }),
     storeSchedulerQueueWaitMs: meter.createHistogram('dkg.store.scheduler_queue_wait_ms', {
       unit: 'ms',
