@@ -99,7 +99,14 @@ export async function writeSeedFile(deps, { jobs, baseTime, path }) {
  */
 export async function loadSeedFile(sparqlUrl, path, { chunkBytes = 4 << 20 } = {}) {
   const source = createReadStream(path);
-  const stream = path.endsWith('.gz') ? source.pipe(createGunzip()) : source;
+  let stream = source;
+  if (path.endsWith('.gz')) {
+    // pipeline, not source.pipe(): it destroys the consumed gunzip stream with a read error of the file (so the loop
+    // below rejects instead of the file stream's unhandled 'error' crashing the process) and closes the file when the
+    // loop stops early. Every error reaches the loop through the consumed stream, so the promise has nothing to add.
+    stream = createGunzip();
+    pipeline(source, stream).catch(() => {});
+  }
   stream.setEncoding('utf8');
   const hash = createHash('sha256');
   let pending = '';

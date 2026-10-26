@@ -364,6 +364,82 @@ for (const [failAt, what] of Object.entries(PARTIAL_WRITES)) {
   });
 }
 
+test('two completed shares that reuse one asset slot each keep their own SWM graph, snapshot graph, share and head subject', async () => {
+  // aqc-s0 and aqc-s<ASSET_POOL> are different requests that stamp the same pooled asset subject
+  assert.equal(assetOf(0), assetOf(ASSET_POOL));
+  const first = 0;
+  const second = ASSET_POOL;
+  const r = await rig();
+  const done = (n) => () => {
+    const c = r.worker.supervisor.getCounters();
+    return c.succeeded >= n || c.failedTerminal > 0 || r.worker.log.crashes > 0 || r.worker.stats.agentErrors > 0;
+  };
+  let split;
+  try {
+    await r.enqueue(first);
+    await until(done(1), 'the first share to finish or break');
+    split = r.calls.length;
+    await r.enqueue(second);
+    await until(done(2), 'the second share to finish or break');
+  } finally {
+    await r.stop();
+  }
+  const { counters, checks } = workerChecks(r);
+  const evidence = JSON.stringify([r.worker.stats.firstAgentError, r.worker.log.lines]);
+  assert.deepEqual([counters.succeeded, counters.failedTerminal, counters.attempted], [2, 0, 2], evidence);
+  assert.deepEqual([r.worker.stats.agentErrors, r.worker.log.crashes], [0, 0], evidence);
+  assert.deepEqual([checks.workerContractOk, checks.dataPlaneReplayed, checks.ok], [true, true, true]);
+  assert.equal(split, DATA_OPS_PER_SHARE, 'the first share ran all of its operations before the second was admitted');
+  assert.equal(r.calls.length, 2 * DATA_OPS_PER_SHARE);
+
+  // what each share's operations name, by kind (the first share's calls come before the split, the second's after)
+  const named = (calls) => {
+    const names = calls.flatMap((call) => [...call.graphs, ...call.subjects]);
+    const of = (pattern) => [...new Set(names.filter((name) => pattern.test(name)))];
+    return {
+      swm: of(/\/_shared_memory\//),
+      snapshot: of(/\/_shared_memory_snapshots\//),
+      share: of(/^urn:dkg:share:/),
+      head: of(/^urn:dkg:head:/),
+    };
+  };
+  const jobs = [named(r.calls.slice(0, split)), named(r.calls.slice(split))];
+  for (const kind of ['swm', 'snapshot', 'share', 'head']) {
+    assert.deepEqual(
+      jobs.map((job) => job[kind].length),
+      [1, 1],
+      `each share names exactly one ${kind} resource`,
+    );
+    assert.notEqual(jobs[0][kind][0], jobs[1][kind][0], `the two shares name different ${kind} resources`);
+  }
+
+  // the final store holds both payloads, each whole and in the graphs its own share named
+  const graphs = (await r.inner.listGraphs()).filter((graph) => /\/_shared_memory(_snapshots)?\//.test(graph));
+  assert.equal(graphs.length, 4, 'two SWM graphs and two snapshot graphs');
+  const count = async (graph, filter = '') => {
+    const result = await r.inner.query(`SELECT (COUNT(*) AS ?n) WHERE { GRAPH <${graph}> { ?s ?p ?o ${filter} } }`);
+    return Number(/\d+/.exec(result.bindings[0].n)[0]);
+  };
+  for (const [i, jn] of [first, second].entries()) {
+    for (const graph of [jobs[i].swm[0], jobs[i].snapshot[0]]) {
+      assert.ok(graphs.includes(graph), `${graph} is in the store`);
+      assert.equal(await count(graph), PAYLOAD_TRIPLES, `${graph} holds exactly one payload`);
+      assert.equal(
+        await count(graph, `FILTER(STRSTARTS(STR(?s), "urn:aqc:job:${jn}:"))`),
+        PAYLOAD_TRIPLES,
+        `${graph} holds the payload of share ${jn}`,
+      );
+    }
+    const metaRows = (subject) => count(swmMetaGraph(), `FILTER(?s = <${subject}>)`);
+    assert.equal(await metaRows(jobs[i].share[0]), 14, `share ${jn} keeps its metadata`);
+    assert.equal(await metaRows(jobs[i].head[0]), 5, `share ${jn} keeps its head`);
+  }
+  const subjects = await r.inner.query(
+    `SELECT DISTINCT ?s WHERE { GRAPH <${swmMetaGraph()}> { ?s ?p ?o } } ORDER BY ?s`,
+  );
+  assert.equal(subjects.bindings.length, 4, 'two share and two head subjects, none replaced by the other share');
+});
+
 const DROPS = {
   'the recovery binding': (job) => ({ ...job, request: { ...job.request, recoveryBinding: undefined } }),
   'the request': (job) => ({ ...job, request: undefined }),
