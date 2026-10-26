@@ -96,7 +96,7 @@ for (const workflow of ['.github/workflows/ci.yml', '.github/workflows/ci.yml@ma
     f.decision.priorCiFailures = [{ runId: '121', attempt: 1, classification: 'test', issue: 'https://github.com/OriginTrail/dkg/issues/3502', supersededBy: f.decision.ci }];
     assert.equal(f.verify().outcome, 'PASS');
     f.options.readRunAttempts = () => [{ ...read('121', 1), path: '.github/workflows/other.yml@main', conclusion: 'failure' }];
-    assert.throws(f.verify, /wrong prior workflow/);
+    assert.throws(f.verify, /wrong workflow/);
     f.options.readRun = (...args) => ({ ...read(...args), path: '.github/workflows/other.yml@main' });
     assert.throws(f.verify, /wrong workflow/);
   });

@@ -44,13 +44,16 @@ export function githubNightlyReceipt(runId, attempt) {
     return fs.readFileSync(path.join(dir, 'nightly-profile-summary.json'));
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
-function successfulRun(descriptor, commit, readRun) {
-  const actual = readRun(descriptor.runId, descriptor.attempt);
+function validateRunIdentity(actual, descriptor, commit) {
   assert.equal(String(actual.id), String(descriptor.runId), 'wrong run ID');
   assert.equal(actual.run_attempt, descriptor.attempt, 'wrong run attempt');
   assert.equal(actual.repository?.full_name, 'OriginTrail/dkg', 'wrong run repository');
   assert.match(actual.path ?? '', /^\.github\/workflows\/ci\.yml(?:@.+)?$/, 'wrong workflow');
   assert.equal(actual.head_sha, commit, 'run tested a different commit');
+}
+function successfulRun(descriptor, commit, readRun) {
+  const actual = readRun(descriptor.runId, descriptor.attempt);
+  validateRunIdentity(actual, descriptor, commit);
   // PR API head_sha identifies the branch even when checkout tests a synthetic
   // merge. Only direct-subject runs can certify the prepared candidate here.
   assert.ok(['push', 'workflow_dispatch', 'schedule'].includes(actual.event), 'CI must test the candidate directly, not a PR merge');
@@ -153,11 +156,7 @@ export function verifyReleaseEvidence({ evidenceFile, expected, manifest, rootDi
   assert.equal(new Set(decision.priorCiFailures.map(row => `${row.runId}/${row.attempt}`)).size, decision.priorCiFailures.length, 'duplicate prior CI failure');
   for (const failure of decision.priorCiFailures) {
     const actual = getRun(failure.runId, failure.attempt);
-    assert.equal(String(actual.id), String(failure.runId), 'wrong prior run ID');
-    assert.equal(actual.run_attempt, failure.attempt, 'wrong prior run attempt');
-    assert.equal(actual.repository?.full_name, 'OriginTrail/dkg');
-    assert.match(actual.path ?? '', /^\.github\/workflows\/ci\.yml(?:@.+)?$/, 'wrong prior workflow');
-    assert.equal(actual.head_sha, expected.commit, 'prior failure subject mismatch');
+    validateRunIdentity(actual, failure, expected.commit);
     assert.ok(['failure', 'cancelled', 'timed_out'].includes(actual.conclusion), 'prior failure is not a failed run');
     assert.ok(['product', 'test', 'environment', 'unknown'].includes(failure.classification), 'CI failure lacks classification');
     assert.match(failure.issue ?? '', /^https:\/\/github\.com\/OriginTrail\/dkg\/issues\/\d+$/, 'CI failure needs an owning issue');
