@@ -303,6 +303,29 @@ async_admission_usage interval_s=300 store_rejections=store/background/publisher
 | `lift_pickup_unclassified` | cumulative | Jobs whose wallet state at ready time could not be determined, and which are left out of the worker-free sample |
 | `lift_c2f_n`, `_p50_ms`, `_p95_ms` | window | Claim-to-finish: claimed to finalized |
 | `lift_finalized`, `lift_failed` | cumulative | Publisher jobs that reached a terminal state through a worker; with the share counters these give completions per minute |
+| `preflight_flights` | cumulative | Write preflight probes started for a request that could share one: the probes the store was actually asked for. The second pass of a write that waited for its graph starts one too |
+| `preflight_joins` | cumulative | Requests that joined a probe already in flight instead of starting one |
+| `preflight_cache_hits`, `preflight_cache_stores` | cumulative | Requests served from the fast-accept result cache, and probes kept in it (one probe shared by several requests is kept once). Both stay `0` while the cache is off, which is the default |
+| `preflight_direct` | cumulative | Requests probed outright: coalescing is switched off, or the agent gives no identity to share by |
+
+
+### Write preflight coalescing
+
+Every share and publish request probes its target context graph before it is
+admitted. Concurrent requests for the same graph and the same caller can share
+one probe ([Write preflight coalescing](./write-preflight-coalescing.md)), and
+the `preflight_*` counters say how often they did. Each request is counted once,
+as a start, a join, a cache hit or a direct probe, so between two lines:
+
+```text
+join rate = Δpreflight_joins / (Δpreflight_flights + Δpreflight_joins + Δpreflight_cache_hits + Δpreflight_direct)
+```
+
+is the share of requests that did not read the store themselves. A low rate
+under load means the requests rarely overlap on one graph and caller, or that
+writes to the policy graphs and subscription changes keep ending the probes in
+flight; the qualification run (the mixed cell) reads it for exactly that. The
+counters start at zero when the daemon starts.
 
 ### Queue-wait P95 is a bucket upper bound
 

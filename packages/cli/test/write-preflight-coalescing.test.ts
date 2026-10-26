@@ -24,6 +24,7 @@ import {
   WRITE_PREFLIGHT_FLIGHT_MAX_JOIN_MS,
   configureWritePreflightCoalescing,
   getWritePreflightCoalescingConfig,
+  getWritePreflightCoalescingCounters,
   probeWritePreflight,
   resolveWritePreflightCoalescingConfig,
   type CoalescingProbeAgent,
@@ -637,5 +638,177 @@ describe('the re-resolve after a readiness wait', () => {
     expect(probes).toBe(3);
     finishOther();
     await other;
+  });
+});
+
+describe('the counters', () => {
+  const counts = () => getWritePreflightCoalescingCounters();
+  const zero = { flights: 0, joins: 0, cacheHits: 0, cacheStores: 0, direct: 0 };
+
+  it('start at zero, and a daemon start zeroes them', async () => {
+    expect(counts()).toEqual(zero);
+    const { agent, pending } = fakeAgent();
+    const first = call(agent, ALICE);
+    pending[0]!.resolve(ACCEPT);
+    await first;
+    expect(counts()).toEqual({ ...zero, flights: 1 });
+    configure();
+    expect(counts()).toEqual(zero);
+  });
+
+  it('count a probe started as a flight and each call that shares it as a join', async () => {
+    const { agent, pending } = fakeAgent();
+    const calls = [call(agent, ALICE), call(agent, ALICE_LOWER), call(agent, ALICE)];
+    expect(counts()).toEqual({ ...zero, flights: 1, joins: 2 });
+    pending[0]!.resolve(ACCEPT);
+    await Promise.all(calls);
+    // A call after the probe is over starts another.
+    const later = call(agent, ALICE);
+    pending[1]!.resolve(ACCEPT);
+    await later;
+    expect(counts()).toEqual({ ...zero, flights: 2, joins: 2 });
+  });
+
+  it('count a call that could not join as a flight of its own: another caller, another graph, a moved stamp', async () => {
+    const { agent, pending, generation } = fakeAgent();
+    const calls = [call(agent, ALICE), call(agent, BOB), call(agent, ALICE, OTHER_CG)];
+    expect(counts()).toEqual({ ...zero, flights: 3 });
+    generation.bump();
+    calls.push(call(agent, ALICE)); // the first probe's stamp is outdated
+    expect(counts()).toEqual({ ...zero, flights: 4 });
+    pending.forEach((entry) => entry.resolve(ACCEPT));
+    await Promise.all(calls);
+  });
+
+  it('count the join limit and the fresh second pass as flights, not joins', async () => {
+    vi.useFakeTimers();
+    const { agent, pending } = fakeAgent();
+    const hung = call(agent, ALICE);
+    const afterWait = call(agent, ALICE, CG, true);
+    expect(counts()).toEqual({ ...zero, flights: 2 });
+    vi.advanceTimersByTime(WRITE_PREFLIGHT_FLIGHT_MAX_JOIN_MS);
+    const pastTheLimit = call(agent, ALICE);
+    expect(counts()).toEqual({ ...zero, flights: 3 });
+    pending.forEach((entry) => entry.resolve(ACCEPT));
+    await Promise.all([hung, afterWait, pastTheLimit]);
+  });
+
+  it('count a failed probe and every call that joined it all the same', async () => {
+    const { agent, pending } = fakeAgent();
+    const calls = [call(agent, ALICE), call(agent, ALICE)];
+    pending[0]!.reject(new Error('store closed'));
+    await Promise.allSettled(calls);
+    expect(counts()).toEqual({ ...zero, flights: 1, joins: 1 });
+  });
+
+  it('count a call probed outright as direct: no identity, a throwing identity, or coalescing off', async () => {
+    const detached = fakeAgent({ attached: false });
+    const first = call(detached.agent, ALICE);
+    detached.pending[0]!.resolve(ACCEPT);
+    await first;
+    expect(counts()).toEqual({ ...zero, direct: 1 });
+
+    const throwing = { probeContextGraphWritePreflight: async () => ACCEPT, writePreflightIdentity: () => { throw new Error('no identity'); } };
+    await probeWritePreflight(throwing, CG, ALICE, { accepts: fastAccepts });
+    expect(counts()).toEqual({ ...zero, direct: 2 });
+
+    // Switching coalescing off is a new daemon run, which counts from zero: only these two calls are here.
+    configure({ [WRITE_PREFLIGHT_COALESCING_ENV]: '0' });
+    const off = fakeAgent();
+    const offCalls = [call(off.agent, ALICE), call(off.agent, ALICE)];
+    expect(off.probe).toHaveBeenCalledTimes(2);
+    off.pending.forEach((entry) => entry.resolve(ACCEPT));
+    await Promise.all(offCalls);
+    expect(counts()).toEqual({ ...zero, direct: 2 });
+  });
+
+  it('count every call exactly once', async () => {
+    configure({ [WRITE_PREFLIGHT_CACHE_ENV]: '1' });
+    const { agent, pending } = fakeAgent();
+    const detached = fakeAgent({ attached: false });
+    let calls = 0;
+    const run = (target: CoalescingProbeAgent, caller: string | null, contextGraphId = CG, fresh = false) => {
+      calls += 1;
+      return call(target, caller, contextGraphId, fresh);
+    };
+    const first = run(agent, ALICE);
+    const joined = run(agent, ALICE);
+    const other = run(agent, BOB);
+    const fresh = run(agent, ALICE, CG, true);
+    const direct = run(detached.agent, ALICE);
+    pending.forEach((entry) => entry.resolve(ACCEPT));
+    detached.pending[0]!.resolve(ACCEPT);
+    const settled = await Promise.all([first, joined, other, fresh, direct]);
+    settled.forEach((result) => result.fastAccepted());
+    await run(agent, BOB); // served from the cache
+    const { flights, joins, cacheHits, direct: outright } = counts();
+    expect(flights + joins + cacheHits + outright).toBe(calls);
+    expect(counts()).toMatchObject({ cacheHits: 1, direct: 1, joins: 1 });
+  });
+
+  describe('of the result cache', () => {
+    beforeEach(() => { configure({ [WRITE_PREFLIGHT_CACHE_ENV]: '1' }); });
+
+    it('count a hit when a kept probe is served, and a store when a fast accept is kept', async () => {
+      const { agent, pending } = fakeAgent();
+      const first = call(agent, ALICE);
+      pending[0]!.resolve(ACCEPT);
+      (await first).fastAccepted();
+      expect(counts()).toEqual({ ...zero, flights: 1, cacheStores: 1 });
+      await call(agent, ALICE_LOWER);
+      await call(agent, ALICE);
+      expect(counts()).toEqual({ ...zero, flights: 1, cacheStores: 1, cacheHits: 2 });
+    });
+
+    it('count a probe shared by several calls that all fast-accept as one store', async () => {
+      const { agent, pending } = fakeAgent();
+      const calls = [call(agent, ALICE), call(agent, ALICE), call(agent, ALICE)];
+      pending[0]!.resolve(ACCEPT);
+      (await Promise.all(calls)).forEach((result) => result.fastAccepted());
+      expect(counts()).toEqual({ ...zero, flights: 1, joins: 2, cacheStores: 1 });
+    });
+
+    it('count a store for each later probe that is kept in its place', async () => {
+      const { agent, pending, generation } = fakeAgent();
+      const first = call(agent, ALICE);
+      pending[0]!.resolve(ACCEPT);
+      (await first).fastAccepted();
+      generation.bump(); // the kept probe is outdated: a miss, then a new probe, kept in its place
+      const second = call(agent, ALICE);
+      pending[1]!.resolve(ACCEPT);
+      (await second).fastAccepted();
+      expect(counts()).toEqual({ ...zero, flights: 2, cacheStores: 2 });
+    });
+
+    it('count no store for what is not kept: a refusal, an unavailable store, a chain-derived answer', async () => {
+      const { agent, pending } = fakeAgent();
+      const refused = call(agent, ALICE); // the caller refuses and never reports a fast accept
+      pending[0]!.resolve({ ...ACCEPT, callerAuthorized: false });
+      await refused;
+      const down = call(agent, BOB);
+      pending[1]!.resolve({ storeAvailable: false, storeUnavailable: true, inMemorySubscription: { subscribed: true, synced: true } });
+      (await down).fastAccepted();
+      const viaChain = call(agent, ALICE, OTHER_CG);
+      pending[2]!.opts!.onChainLookup!();
+      pending[2]!.resolve(ACCEPT);
+      (await viaChain).fastAccepted();
+      expect(counts()).toEqual({ ...zero, flights: 3 });
+    });
+
+    it('count no hit for a kept probe the asking caller would not fast-accept, or one that expired', async () => {
+      vi.useFakeTimers();
+      const { agent, pending } = fakeAgent();
+      const first = call(agent, ALICE);
+      pending[0]!.resolve(ACCEPT);
+      (await first).fastAccepted();
+      const declined = probeWritePreflight(agent, CG, ALICE, { accepts: () => false });
+      pending[1]!.resolve(ACCEPT);
+      await declined;
+      vi.advanceTimersByTime(WRITE_PREFLIGHT_CACHE_DEFAULT_TTL_MS);
+      const expired = call(agent, ALICE);
+      pending[2]!.resolve(ACCEPT);
+      await expired;
+      expect(counts()).toMatchObject({ cacheHits: 0, flights: 3 });
+    });
   });
 });

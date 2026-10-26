@@ -115,12 +115,14 @@ export function resolveWritePreflightCoalescingConfig(
 
 let effectiveConfig: WritePreflightCoalescingConfig = { coalescing: true, cacheTtlMs: 0 };
 
-/** Resolves the switches and logs the outcome once, at daemon start; a change needs a restart. */
+/** Resolves the switches and logs the outcome once, at daemon start (which also zeroes the counters); a change needs a restart. */
 export function configureWritePreflightCoalescing(
   env: Readonly<Record<string, string | undefined>>,
   logger: WritePreflightCoalescingLogger,
 ): WritePreflightCoalescingConfig {
   effectiveConfig = resolveWritePreflightCoalescingConfig(env, logger);
+  // A daemon run counts from zero.
+  Object.assign(counters, { flights: 0, joins: 0, cacheHits: 0, cacheStores: 0, direct: 0 });
   logger.info(
     `Write preflight coalescing: ${effectiveConfig.coalescing ? 'on' : 'off'}, ` +
     `result cache: ${effectiveConfig.cacheTtlMs > 0 ? `on (${effectiveConfig.cacheTtlMs} ms)` : 'off'} ` +
@@ -131,6 +133,31 @@ export function configureWritePreflightCoalescing(
 
 export function getWritePreflightCoalescingConfig(): WritePreflightCoalescingConfig {
   return effectiveConfig;
+}
+
+/**
+ * What the coalescer has done since the daemon started (the `preflight_*` figures of the
+ * `async_admission_usage` line). Every call of `probeWritePreflight` is counted exactly once, as a
+ * start, a join, a cache hit or a direct probe, so `joins / (flights + joins + cacheHits + direct)` is
+ * the share of preflights that did not read the store themselves.
+ */
+export interface WritePreflightCoalescingCounters {
+  /** Probes started for a call that could be coalesced: the reads the store was actually asked for. */
+  flights: number;
+  /** Calls that joined a probe already in flight. */
+  joins: number;
+  /** Calls answered from the result cache. */
+  cacheHits: number;
+  /** Fast-accepted probes kept in the result cache (a probe shared by several callers is kept once). */
+  cacheStores: number;
+  /** Calls probed outright: coalescing off, or the agent gave no identity. */
+  direct: number;
+}
+
+const counters: WritePreflightCoalescingCounters = { flights: 0, joins: 0, cacheHits: 0, cacheStores: 0, direct: 0 };
+
+export function getWritePreflightCoalescingCounters(): Readonly<WritePreflightCoalescingCounters> {
+  return { ...counters };
 }
 
 type Probe = ContextGraphWritePreflightProbe;
@@ -148,6 +175,7 @@ export interface CoalescingProbeAgent {
 }
 
 interface Flight {
+  readonly id: number;
   readonly stamp: string;
   readonly startedAt: number;
   /** The probe consulted the chain, so its answer can change without a local write. */
@@ -156,6 +184,8 @@ interface Flight {
 }
 
 interface CachedProbe {
+  /** The probe the entry was kept from: callers that shared it keep the one entry, which is counted once. */
+  readonly flightId: number;
   readonly stamp: string;
   readonly startedAt: number;
   readonly probe: Probe;
@@ -167,6 +197,7 @@ interface AgentState {
 }
 
 const states = new WeakMap<object, AgentState>();
+let nextFlightId = 0;
 
 function stateOf(agent: object): AgentState {
   let state = states.get(agent);
@@ -224,6 +255,7 @@ export async function probeWritePreflight(
   const config = effectiveConfig;
   const identity = config.coalescing ? identityOf(agent, contextGraphId, callerAgentAddress) : undefined;
   if (identity === undefined) {
+    counters.direct += 1;
     return { probe: await agent.probeContextGraphWritePreflight(contextGraphId, { callerAgentAddress }), fastAccepted: noop };
   }
 
@@ -235,13 +267,16 @@ export async function probeWritePreflight(
     if (hit !== undefined) {
       const age = now - hit.startedAt;
       if (hit.stamp !== identity.stamp || age < 0 || age >= config.cacheTtlMs) state.cache.delete(identity.key);
-      else if (options.accepts(hit.probe)) return { probe: copyProbe(hit.probe), fastAccepted: noop };
+      else if (options.accepts(hit.probe)) {
+        counters.cacheHits += 1;
+        return { probe: copyProbe(hit.probe), fastAccepted: noop };
+      }
     }
   }
 
   let flight = options.fresh === true ? undefined : state.flights.get(identity.key);
   if (flight === undefined || flight.stamp !== identity.stamp || now - flight.startedAt >= WRITE_PREFLIGHT_FLIGHT_MAX_JOIN_MS) {
-    const started: Flight = { stamp: identity.stamp, startedAt: now, chainDerived: false, promise: undefined as unknown as Promise<Probe> };
+    const started: Flight = { id: nextFlightId += 1, stamp: identity.stamp, startedAt: now, chainDerived: false, promise: undefined as unknown as Promise<Probe> };
     // A synchronous throw of the probe call becomes the flight's rejection, as for a rejected promise.
     started.promise = new Promise<Probe>((resolve) => resolve(agent.probeContextGraphWritePreflight(contextGraphId, {
       callerAgentAddress,
@@ -251,7 +286,10 @@ export async function probeWritePreflight(
       if (state.flights.get(identity.key) === started) state.flights.delete(identity.key);
     });
     state.flights.set(identity.key, started);
+    counters.flights += 1;
     flight = started;
+  } else {
+    counters.joins += 1;
   }
 
   const joined = flight;
@@ -263,8 +301,9 @@ export async function probeWritePreflight(
       if (shared.storeAvailable === false || shared.storeUnavailable === true) return;
       // Kept under the stamp it began with: a policy write or subscription change after that, even one that landed
       // while the probe ran, makes the entry a miss.
+      if (state.cache.get(identity.key)?.flightId !== joined.id) counters.cacheStores += 1;
       state.cache.delete(identity.key);
-      state.cache.set(identity.key, { stamp: joined.stamp, startedAt: joined.startedAt, probe: copyProbe(shared) });
+      state.cache.set(identity.key, { flightId: joined.id, stamp: joined.stamp, startedAt: joined.startedAt, probe: copyProbe(shared) });
       while (state.cache.size > WRITE_PREFLIGHT_CACHE_MAX_ENTRIES) {
         const oldest = state.cache.keys().next();
         if (oldest.done) break;

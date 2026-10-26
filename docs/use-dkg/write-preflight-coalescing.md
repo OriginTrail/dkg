@@ -78,6 +78,18 @@ falls back to the default, each with a warning.
 
 To roll back, set `DKG_WRITE_PREFLIGHT_COALESCING=0` and restart.
 
+## Seeing how often it works
+
+The `async_admission_usage` line counts what the coalescer did since the daemon
+started: `preflight_flights` (probes started), `preflight_joins`,
+`preflight_cache_hits`, `preflight_cache_stores` and `preflight_direct`. Every
+request is counted once, so the share that did not read the store itself is
+`joins / (flights + joins + cache hits + direct)` between two lines. See
+[Backpressure observability](./backpressure-observability.md#write-preflight-coalescing).
+A write to a policy graph ends every probe in flight, not only the target
+graph's, so under heavy policy writes the join rate can be low; if it is low in
+the mixed qualification cell, a per-graph generation is the refinement.
+
 ## The result cache
 
 Off by default. When it is on, a probe that ended in a **fast accept** for a
