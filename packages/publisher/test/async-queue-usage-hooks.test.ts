@@ -4,7 +4,7 @@
  * and read what the process-wide recorder saw, so a hook that moves or disappears fails here.
  * Behavior of the queues themselves is pinned by their own suites.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 import {
@@ -78,6 +78,37 @@ describe('share queue lease recovery figures', () => {
     expect(await queue.getStatus(reclaimable)).toMatchObject({ state: 'queued' });
     expect(await queue.getStatus(ambiguous)).toMatchObject({ state: 'failed' });
     expect(asyncAdmissionUsage.take()).toMatchObject({ shareReclaimed: 1, shareAbandoned: 1 });
+  });
+
+  it.each([
+    ['reclaimed', 'findActiveConflict', false, { reclaimed: 1, abandoned: 0 }],
+    ['reclaimed', 'writeJob', false, { reclaimed: 1, abandoned: 0 }],
+    ['abandoned', 'findActiveConflict', true, { reclaimed: 0, abandoned: 1 }],
+  ] as const)('counts a lease %s although %s throws for the next job in the same sweep', async (_outcome, failingStep, ambiguous, counted) => {
+    const queue = createQueue();
+    const jobIds = [await queue.enqueue(request('a')), await queue.enqueue(request('b'))];
+    for (const worker of ['worker-1', 'worker-2']) {
+      const claimed = await queue.claimNext(worker);
+      if (ambiguous) await queue.recordCommitMarker(claimed!.jobId, claimed!.lease!.claimToken, 'swmInserted');
+    }
+    now += 60_000;
+    asyncAdmissionUsage.take();
+
+    // The sweep's first job commits; the step it takes for the second throws.
+    const steps = queue as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+    const realStep = steps[failingStep]!.bind(queue);
+    let calls = 0;
+    vi.spyOn(steps, failingStep).mockImplementation(async (...args) => {
+      if (++calls === 2) throw new Error('injected sweep failure');
+      return await realStep(...args);
+    });
+
+    await expect(queue.recoverOnStartup()).rejects.toThrow('injected sweep failure');
+
+    // One job left its expired lease before the failure; the other was never reached.
+    const states = (await Promise.all(jobIds.map((id) => queue.getStatus(id)))).map((job) => job?.state).sort();
+    expect(states).toEqual(ambiguous ? ['failed', 'running'] : ['queued', 'running']);
+    expect(asyncAdmissionUsage.take()).toMatchObject({ shareReclaimed: counted.reclaimed, shareAbandoned: counted.abandoned });
   });
 
   it('adds nothing when no lease expired', async () => {
@@ -241,6 +272,40 @@ describe('publisher queue figures', () => {
     expect(usage.liftFailed).toBe(1);
     expect(usage.liftFinalized).toBe(0);
     expect(usage.liftClaimToFinish.n).toBe(0);
+  });
+
+  it('counts a job entering a terminal state once, not each repeated update of the finished job', async () => {
+    const publisher = createPublisher();
+    const failure = (jobId: string) => createLiftJobFailureMetadata({
+      failedFromState: 'claimed',
+      code: 'workspace_slice_not_found',
+      message: 'gone',
+      errorPayloadRef: `urn:error:${jobId}`,
+    });
+    const finalizedId = await publisher.enqueueKnowledgeAssetVmPublish(vmPublish(1));
+    const failedId = await publisher.enqueueKnowledgeAssetVmPublish(vmPublish(2));
+    await publisher.claimNext('wallet-1');
+    await publisher.claimNext('wallet-2');
+    now += 1_000;
+    await publisher.update(finalizedId, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.update(finalizedId, 'finalized', { finalization: { mode: 'local' } });
+    await publisher.update(failedId, 'failed', { failure: failure(failedId) });
+    const first = asyncAdmissionUsage.take();
+    expect(first).toMatchObject({ liftFinalized: 1, liftFailed: 1 });
+    expect(first.liftClaimToFinish.n).toBe(1);
+
+    // The totals are cumulative and the latency window is drained by the read above, so a repeat
+    // that counted again would raise the totals or put a stale sample back in the window.
+    now += 5_000;
+    await publisher.update(finalizedId, 'finalized', { finalization: { mode: 'local' } });
+    await publisher.update(failedId, 'failed', { failure: failure(failedId) });
+
+    const repeated = asyncAdmissionUsage.take();
+    expect(await publisher.getStatus(finalizedId)).toMatchObject({ status: 'finalized' });
+    expect(await publisher.getStatus(failedId)).toMatchObject({ status: 'failed' });
+    expect(repeated.liftFinalized).toBe(1);
+    expect(repeated.liftFailed).toBe(1);
+    expect(repeated.liftClaimToFinish.n).toBe(0);
   });
 
   it('counts a reclaim and the stale claim of the worker that lost the job', async () => {

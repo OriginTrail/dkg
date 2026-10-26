@@ -417,7 +417,10 @@ export class AsyncLiftClaimCoordinator {
     this.dependencies.assertJobMatchesStatus(next);
     const committed = await this.dependencies.writeJob(section, next, kind);
     await this.persistOwnershipState(committed);
-    asyncAdmissionUsage.recordLiftFinish(committed.status, committed.timestamps.claimedAt, committed.timestamps.finalizedAt ?? committed.timestamps.failedAt ?? this.config.now());
+    // A finish is the entry into a terminal state; repeating an update of a finalized or failed job is not one.
+    if (current.status !== committed.status) {
+      asyncAdmissionUsage.recordLiftFinish(committed.status, committed.timestamps.claimedAt, committed.timestamps.finalizedAt ?? committed.timestamps.failedAt ?? this.config.now());
+    }
     return committed;
   }
 

@@ -9,11 +9,10 @@ import { recordUnstartedPromoteAttempt, isRetiredBoundRejection } from './promot
 import { createPromoteOwnershipReader, hasUnfinishedBoundObligation, readPromoteOwnershipCandidates, promoteOwnershipLookup, storedPromoteLaneScope, type PromoteConflictLookup } from './async-promote-ownership.js';
 import { isBoundPromoteJob, snapshotPromoteRequest, claimPromoteJob } from './bound-promote-job.js';
 import { DEFAULT_PROMOTE_RETRY_TUNING } from './promote-retry-policy.js';
-import { isAutomaticallyRecoverablePostCommitFailure, missingStorageLaneForAuthorOnlyJob, promoteFailureTransition, requiresManualInspection } from './async-promote-recovery-policy.js';
+import { countLeaseRecovery, isAutomaticallyRecoverablePostCommitFailure, missingStorageLaneForAuthorOnlyJob, promoteFailureTransition, requiresManualInspection } from './async-promote-recovery-policy.js';
 /** RDF queue: immutable bound replay or conservative legacy recovery; one owner per assertion. */
 
 import { deleteByPatternWithoutCount, type TripleStore } from '@origintrail-official/dkg-storage';
-import { asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
 import { isSafeJobId } from './job-id.js';
 import {
@@ -423,15 +422,14 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       'publisher.asyncPromote.recoverExpired',
     );
 
-    let reclaimed = 0;
-    let abandoned = 0;
+    const summary: PromoteRecoverySummary = { reclaimed: 0, abandoned: 0 };
 
     for (const job of running) {
       const expiresAt = job.lease?.expiresAt ?? 0;
       if (expiresAt > now) continue; // lease still valid; worker is fine
 
       if (await this.abandonIfMissingStorageLane(job, now)) {
-        abandoned += 1;
+        countLeaseRecovery(summary, 'abandoned');
         continue;
       }
 
@@ -444,7 +442,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
           `recovery conflict: active promote job ${conflicting.job.jobId} already owns this assertion`,
           `Startup recovery found active promote job ${conflicting.job.jobId} for the same assertion`,
         );
-        abandoned += 1;
+        countLeaseRecovery(summary, 'abandoned');
         continue;
       }
 
@@ -471,7 +469,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
           formatVersion: ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
         };
         await this.writeJob(reclaimedJob);
-        reclaimed += 1;
+        countLeaseRecovery(summary, 'reclaimed');
         continue;
       }
 
@@ -498,10 +496,10 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
             ? 'Worker crashed after SWM insert; recovery aborted to prevent duplicate gossip'
             : 'Worker lease expired during promote; recovery aborted to prevent duplicate SWM/gossip'),
       );
-      abandoned += 1;
+      countLeaseRecovery(summary, 'abandoned');
     }
 
-    return asyncAdmissionUsage.recordShareLeaseRecovery({ reclaimed, abandoned });
+    return summary;
   }
 
   async recoverPostCommitFailures(): Promise<PromotePostCommitRecoveryEvent[]> {
