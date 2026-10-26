@@ -35,7 +35,10 @@ export interface RecoveryMaterializationScope {
   readonly onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
 }
 export interface RecoveryMaterialization {
-  readonly heldAssetBinding: () => Readonly<{ onChainId?: string; generation: number }>;
+  withHeldAssetFence<T>(operation: (fence: {
+    binding(): Readonly<{ onChainId?: string; generation: number }>;
+    assertCurrent(): void;
+  }) => Promise<T>, signal?: AbortSignal): Promise<T>;
   readonly authenticateChallengePinnedAsset: ChallengeExactAssetFetchContext['authenticateChallengePinnedAsset'];
   readonly storeGraphScopedAsset: NonNullable<DurableSyncContext['storeGraphScopedAsset']>;
 }
@@ -81,11 +84,21 @@ export class RecoveryMaterializationOwner {
     });
     let wroteAsset = false;
     return {
-      heldAssetBinding: () => {
-        assertLifecycleCurrent();
-        if (ports.isClosed()) throw asSyncFetchAbortError(new Error('Held asset check is closed for node shutdown'));
-        return { onChainId: ports.subscription(contextGraphId)?.onChainId, generation: ports.bindingGeneration(contextGraphId) };
-      },
+      withHeldAssetFence: (operation, signal) => runGraphScopedOperation({
+        contextGraphId, signal,
+        closedError: () => asSyncFetchAbortError(new Error('Held asset recovery is closed for node shutdown')),
+        bindingChangedError: () => asSyncFetchAbortError(new Error(`Subscription for ${contextGraphId} changed during held recovery`)),
+        operation: control => {
+          const assertCurrent = () => { control.adoptEquivalentSubscription(); control.assertCurrent(); };
+          return operation({
+            assertCurrent,
+            binding: () => {
+              assertCurrent();
+              return { onChainId: control.subscription?.onChainId, generation: ports.bindingGeneration(contextGraphId) };
+            },
+          });
+        },
+      }),
       authenticateChallengePinnedAsset: ({
         asset,
         commitment,

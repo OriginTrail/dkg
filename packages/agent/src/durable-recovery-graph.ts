@@ -44,7 +44,7 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
     settlementSliceTimeoutMs,
     signal,
     isCurrent,
-    durableMetaContinuation,
+    durableMetaContinuation, durableResumeBoundary,
     durableRecoveryRound,
   } = options;
   const exactAssetFetchPolicy = options.exactAssetFetchPolicy;
@@ -94,14 +94,8 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
     exactAssetFetchPolicyFor: exactAssetFetchPolicy?.kind !== 'ephemeral-challenge'
       ? () => exactAssetFetchPolicy
       : undefined,
-    durableMetaContinuation,
+    durableMetaContinuation, durableResumeBoundary,
     durableRecoveryRound,
-    heldGraphScopedAssets: currentHeldGraphScopedAssetsReader({
-      readHeld: host.readHeldGraphScopedAssets,
-      binding: materialization.heldAssetBinding,
-      readChainState: authority.readHeldAssetChainState?.bind(authority),
-      budget: contextGraphBudget,
-    }),
     stopOnBackoffWorthyFailure,
     admitVerifiedPage: page => authority.admitVerifiedPage(page),
     processDurableBatchInWorker: host.verification.processBatch,
@@ -163,5 +157,13 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
       case 'unsupported-before-start': return runDurableSyncDetailed(durableContext);
     }
   }
-  return durableMetaContinuation ? runDurableSyncDetailed(durableContext) : { result: await runDurableSync(durableContext) };
+  if (!durableMetaContinuation) return { result: await runDurableSync(durableContext) };
+  return materialization.withHeldAssetFence(fence => runDurableSyncDetailed({
+    ...durableContext,
+    assertHeldGenerationCurrent: fence.assertCurrent,
+    heldGraphScopedAssets: currentHeldGraphScopedAssetsReader({
+      readHeld: host.readHeldGraphScopedAssets, binding: fence.binding,
+      readChainState: authority.readHeldAssetChainState?.bind(authority), budget: contextGraphBudget,
+    }),
+  }), signal);
 }

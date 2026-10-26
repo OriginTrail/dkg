@@ -617,6 +617,7 @@ export class DKGAgentBase {
             signal: fetchContext.signal,
             manifestDigest: request.manifestDigest,
             manifestPrefixDigestAtOffset: request.manifestPrefixDigestAtOffset,
+            durableResumeBoundary: request.durableResumeBoundary,
             shouldStopAfterPage: request.shouldStopAfterPage,
             returnAcceptedPrefixOnRetryableTransportFailure: request.returnAcceptedPrefixOnRetryableTransportFailure,
             requesterScope: request.requesterScope,

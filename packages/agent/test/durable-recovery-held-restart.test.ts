@@ -1,3 +1,6 @@
+import { RecoveryMaterializationOwner } from '../src/durable-recovery-materialization.js';
+import { continueContextGraphSubscriptionLine } from '../src/context-graph-subscription-policy.js';
+import type { ContextGraphSub } from '../src/dkg-agent-types.js';
 import { durableRecoveryRoundOutcome } from '../src/sync/durable-recovery-round.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createRpcTimeoutError } from '@origintrail-official/dkg-chain';
@@ -155,7 +158,7 @@ type ServingPeer = ReturnType<typeof servingPeer>;
  */
 function node(
   serving: ServingPeer | Record<string, ServingPeer>,
-  options: { holdingsUnreadable?: boolean; chain?: () => readonly AssetFixture[]; subscriptionId?: () => string } = {},
+  options: { holdingsUnreadable?: boolean; chain?: () => readonly AssetFixture[]; subscriptionId?: () => string; subscription?: () => ContextGraphSub | undefined; beforeChainRead?: () => Promise<void>; beforeVerify?: () => Promise<void>; beforeMetaStore?: () => Promise<void> } = {},
 ) {
   const peers: Record<string, ServingPeer> = 'send' in serving ? { [PEER]: serving as ServingPeer } : serving;
   const chain = options.chain ?? (() => Object.values(peers)[0]!.current());
@@ -167,13 +170,31 @@ function node(
   // Chain checks answered per round; later ones time out, as on a throttled endpoint past the round's budget.
   let chainAnswersPerRound = Number.POSITIVE_INFINITY;
   let chainAnswersLeft = chainAnswersPerRound;
-  const holdings = currentHeldGraphScopedAssetsReader({
-    binding: () => ({ onChainId: options.subscriptionId?.() ?? '323', generation: 0 }),
+  let defaultSubscription: ContextGraphSub = { syncMode: 'continuous', subscribed: true, synced: true, onChainId: '323' };
+  const materialization = new RecoveryMaterializationOwner({
+    chain: () => { throw new Error('chain reads supplied below'); }, store: () => store,
+    isClosed: () => false, subscription: () => {
+      if (options.subscription) return options.subscription();
+      const onChainId = options.subscriptionId?.() ?? '323';
+      if (defaultSubscription.onChainId !== onChainId) defaultSubscription = { ...defaultSubscription, onChainId };
+      return defaultSubscription;
+    },
+    bindingGeneration: () => 0, isBindingGenerationCurrent: (_id, captured) => captured === 0,
+    track: () => {}, verifyBinding: async () => true,
+    persistSubscription: async () => { throw new Error('already bound'); },
+    bindSubscription: () => { throw new Error('already bound'); }, recordDrops: () => {}, reconcile: async () => {},
+  }).forOperation({ ctx, contextGraphId: CG, authority: {
+    coalescing: 'owner-only', admitVerifiedPage() {}, isRegisteredPublic: () => true,
+    authenticate: () => { throw new Error('materialization supplied below'); },
+  } });
+  const holdings = (binding: () => Readonly<{ onChainId?: string; generation: number }>) => currentHeldGraphScopedAssetsReader({
+    binding,
     readHeld: async (request) => {
       if (holdingsUnreadable) throw new Error('store queue wait timeout');
       return heldGraphScopedAssetsReader(store)(request);
     },
     readChainState: async ({ ual }) => {
+      await options.beforeChainRead?.();
       if (chainAnswersLeft <= 0) throw createRpcTimeoutError('held chain check exceeded its context-graph deadline');
       chainAnswersLeft -= 1;
       const onChain = chain().find((fixture) => fixture.ual === ual)!;
@@ -184,8 +205,8 @@ function node(
   const round = (
     checkpointStore: MemorySyncCheckpointStore,
     remotePeerId: string,
-    roundOptions: Pick<DurableSyncContext, 'durableMetaContinuation' | 'durableRecoveryRound' | 'exactAssetSelectionFor' | 'settlementSliceDeadline'>,
-  ) => runDurableSyncDetailed({
+    roundOptions: Pick<DurableSyncContext, 'durableMetaContinuation' | 'durableRecoveryRound' | 'exactAssetSelectionFor' | 'settlementSliceDeadline' | 'durableResumeBoundary'>,
+  ) => materialization.withHeldAssetFence(fence => runDurableSyncDetailed({
     ctx,
     remotePeerId,
     contextGraphIds: [CG],
@@ -209,6 +230,7 @@ function node(
       forceFreshSession: request.forceFreshSession,
       manifestDigest: request.manifestDigest,
       manifestPrefixDigestAtOffset: request.manifestPrefixDigestAtOffset,
+      durableResumeBoundary: request.durableResumeBoundary,
       shouldStopAfterPage: request.shouldStopAfterPage,
       returnAcceptedPrefixOnRetryableTransportFailure: request.returnAcceptedPrefixOnRetryableTransportFailure,
       requesterScope: request.requesterScope,
@@ -221,9 +243,10 @@ function node(
       logDebug: () => {},
     }),
     ...roundOptions,
-    heldGraphScopedAssets: holdings,
-    processDurableBatchInWorker: processBatch,
-    storeInsert: async ({ quads }) => { await store.insert(quads); },
+    heldGraphScopedAssets: holdings(fence.binding),
+    assertHeldGenerationCurrent: fence.assertCurrent,
+    processDurableBatchInWorker: async (...args) => { await options.beforeVerify?.(); return processBatch(...args); },
+    storeInsert: async ({ quads }) => { await options.beforeMetaStore?.(); await store.insert(quads); },
     storeGraphScopedAsset: async ({ asset: verified }) => {
       writes.push(verified.ual);
       // As chain authentication leaves it: confirmed, written with its rows in one replacement.
@@ -248,7 +271,7 @@ function node(
     logInfo: (_ctx, message) => { info.push(message); },
     logWarn: (_ctx, message) => { info.push(message); },
     logDebug: () => {},
-  });
+  }));
 
   /**
    * A process lifetime: a new owner and a new checkpoint store. With
@@ -268,10 +291,10 @@ function node(
       isPrivateContextGraph: async () => false,
       orderPeerIds: (peerIds) => [...peerIds],
       isSyncCapable: async () => true,
-      executeSlice: async (peerId, durableMetaContinuation: DurableMetaContinuation, durableRecoveryRound) => {
+      executeSlice: async (peerId, durableMetaContinuation: DurableMetaContinuation, durableRecoveryRound, durableResumeBoundary) => {
         chainAnswersLeft = chainAnswersPerRound;
         const detailed = await round(checkpointStore, peerId, {
-          durableMetaContinuation, durableRecoveryRound,
+          durableMetaContinuation, durableRecoveryRound, durableResumeBoundary,
           settlementSliceDeadline: startOptions.sliceSpent ? Date.now() : undefined,
         });
         return durableRecoveryRoundOutcome(detailed.result, detailed.recoveryRound);
@@ -351,6 +374,53 @@ describe('a restarted Core and a graph it has already recovered', () => {
       .toMatchObject({ offset: rowsOf(generation()), terminal: true });
     expect(core.info).toContainEqual(expect.stringContaining('already held at this META generation'));
   });
+
+  it.each(['chain', 'verification', 'metadata-store'].flatMap(stage =>
+    ['deactivate', 'recreate', 'equivalent'].map(change => ({ stage, change }))))(
+    'fences held completion across $change during $stage', async ({ stage, change }) => {
+      const peer = servingPeer(generation());
+      let subscription: ContextGraphSub | undefined = {
+        syncMode: 'continuous', subscribed: true, synced: true, onChainId: '323',
+      };
+      let entered!: () => void;
+      let release!: () => void;
+      const paused = new Promise<void>(resolve => { entered = resolve; });
+      const resumed = new Promise<void>(resolve => { release = resolve; });
+      let pause = false;
+      const suspend = async (at: string) => { if (pause && stage === at) { entered(); await resumed; } };
+      const core = node(peer, { subscription: () => subscription,
+        beforeChainRead: () => suspend('chain'), beforeVerify: () => suspend('verification'),
+        beforeMetaStore: () => suspend('metadata-store'),
+      });
+      expect((await core.start().recover()).outcome).toBe('terminal');
+      peer.current()[0]!.meta.push({ subject: 'urn:held-restart:lifecycle',
+        predicate: 'http://dkg.io/ontology/operationId', object: '"new-operation"',
+        graph: peer.current()[0]!.meta[0]!.graph });
+      pause = true;
+      peer.served.dataRows = 0;
+      const restarted = core.start();
+      const recovering = restarted.recover();
+      await paused;
+      const previous = subscription!;
+      if (change === 'recreate') subscription = undefined; // Ends the subscription line; generation stays zero.
+      subscription = { ...previous, ...(change === 'deactivate' ? { subscribed: false } : { synced: false }) };
+      if (change !== 'recreate') continueContextGraphSubscriptionLine(previous, subscription);
+      release();
+      const result = await recovering;
+      const terminal = restarted.checkpointStore.get(getSyncCheckpointKey(PEER, CG, false, 'data'))?.terminal === true;
+      if (change === 'equivalent') {
+        expect(result.outcome).toBe('terminal');
+        expect(result.result.verifiedHeldAssets).toBe(6);
+        expect(terminal).toBe(true);
+      } else {
+        expect(result.outcome).not.toBe('terminal');
+        expect(result.result.verifiedHeldAssets ?? 0).toBe(0);
+        expect(terminal).toBe(false);
+        expect(classifyDurableProgress(result.result, { complete: result.result.complete }).completedReadinessCleanly).toBe(false);
+      }
+      expect(peer.served.dataRows).toBe(0);
+    },
+  );
 
   it.each([false, true])('stores new admissible META while skipping held DATA (missing asset: %s)', async (missing) => {
     const graph = generation();

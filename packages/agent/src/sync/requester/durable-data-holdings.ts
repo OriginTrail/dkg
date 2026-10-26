@@ -22,7 +22,6 @@ import { DEFAULT_DURABLE_DATA_ROUND_BUDGET, type DurableDataRoundBudget } from '
 import type { DurableSyncContext } from './durable-sync.js';
 import type { GraphScopedAssetChainState } from './graph-scoped-materialization.js';
 import type { SyncPageResult } from './page-fetch.js';
-import { assertNoLegacyRfc64ControlGraphs, partitionVerifiedGraphScopedAssets } from './verified-asset-preparation.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 
@@ -345,7 +344,7 @@ export async function planDurableDataFromLocalHoldings(input: {
     if (plan.kind !== 'full') await holdings.confirmCurrent(request, held, options.confirmedHeldCopies, () => { confirmedCopies += 1; });
   } catch (error) {
     input.signal?.throwIfAborted();
-    if (error instanceof HeldGenerationNotCurrentError) throw error;
+    if (error instanceof HeldGenerationNotCurrentError || (error instanceof Error && error.name === 'AbortError')) throw error;
     input.logWarn(
       `Could not establish which assets of "${contextGraphId}" this node holds; fetching the graph: `
         + `${error instanceof Error ? error.message : String(error)}`,
@@ -417,38 +416,4 @@ export function describeDurableHoldingsPlan(
     : `Durable data for "${contextGraphId}": ${plan.held} of ${manifest.descriptors.length} assets already held; `
       + `leaving ${manifest.descriptors.length - plan.held} asset(s) (${plan.rows} rows) `
       + `to ${plan.batches.length} exact request(s)`;
-}
-
-/** Preserve admissible META even when local holdings replace the DATA transfer. */
-export async function persistDurableHoldingsMetadata(
-  context: Pick<DurableSyncContext, 'ctx' | 'signal' | 'processDurableBatchInWorker' | 'storeInsert' | 'admitVerifiedPage'>,
-  contextGraphId: string,
-  meta: SyncPageResult,
-  accumulator: DurableSyncAccumulator,
-): Promise<void> {
-  context.signal?.throwIfAborted();
-  // No assertion payload was fetched. Its envelope is already held or belongs
-  // to a later exact request; only independently admissible META may be stored.
-  const processed = await context.processDurableBatchInWorker([], meta.quads, context.ctx, false,
-    { kind: 'changelogPage', changedDataGraphs: [] });
-  context.signal?.throwIfAborted();
-  if (processed.rejectedKcs > 0 || processed.dataRejectedMissingMeta > 0) {
-    recordDurableSyncDiagnostics(accumulator, { rejectedKcs: processed.rejectedKcs,
-      dataRejectedMissingMeta: processed.dataRejectedMissingMeta });
-    throw new Error('Held durable generation has rejected metadata');
-  }
-  assertNoLegacyRfc64ControlGraphs(contextGraphId, processed.verifiedData, processed.verifiedMeta,
-    processed.verifiedGraphScopedDataGraphs ?? []);
-  const partitioned = partitionVerifiedGraphScopedAssets(contextGraphId, processed.verifiedData, processed.verifiedMeta,
-    processed.verifiedGraphScopedDataGraphs ?? []);
-  context.admitVerifiedPage?.(partitioned);
-  if (partitioned.assets.length > 0 || partitioned.remainingData.length > 0) {
-    throw new Error('Held metadata verification unexpectedly selected unfetched DATA');
-  }
-  if (partitioned.remainingMeta.length > 0) {
-    await context.storeInsert({ quads: partitioned.remainingMeta, signal: context.signal });
-    recordDurableSyncDiagnostics(accumulator, { insertedTriples: partitioned.remainingMeta.length,
-      insertedMetaTriples: partitioned.remainingMeta.length });
-  }
-  context.signal?.throwIfAborted();
 }

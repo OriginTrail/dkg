@@ -5,7 +5,7 @@ import type {
   SyncCheckpointEntry,
   SyncCheckpointStore,
 } from './checkpoint/state.js';
-import { deleteSyncPageCheckpoint } from './requester/page-fetch.js';
+import { resolveManifestCheckpointDecision } from './requester/manifest-resume-policy.js';
 
 /**
  * A verified DATA prefix of one manifest generation, whichever peer served it.
@@ -83,37 +83,42 @@ export function durableBoundaryIdentity(manifestDigest: string | undefined, offs
   return `${manifestDigest ?? ''}\0${offset}`;
 }
 
-/**
- * Give a peer the graph's verified boundary when its own checkpoint is behind
- * it, so its next DATA round continues there instead of at row 0.
- *
- * The boundary is written without a responder token. The round then primes a
- * fresh responder session and jumps to the boundary only if the peer's META
- * proves the same prefix (`resolveManifestCheckpointDecision`); otherwise it
- * starts at row 0 as before. A terminal boundary is never given: there is no
- * interrupted round to continue, and it would replace the peer's own offset.
- * The written checkpoint keeps the source checkpoint's lifetime, and nothing
- * is written once that checkpoint no longer records the boundary. Returns
- * whether the checkpoint was replaced.
- */
+/** A live, non-terminal source that advances the peer's own checkpoint. */
+export function eligibleDurableBoundarySource(
+  store: SyncCheckpointStore, checkpointKey: string, boundary: VerifiedDurableBoundary | undefined,
+): SyncCheckpointEntry | undefined {
+  if (!boundary || boundary.terminal) return undefined;
+  const source = liveDurableBoundarySource(store, boundary);
+  const current = store.get(checkpointKey);
+  return source && (!current || current.offset < boundary.offset) ? source : undefined;
+}
+
+/** Install a proposed boundary only after this peer's completed META proves it. */
 export function seedVerifiedDurableBoundary(
   store: SyncCheckpointStore,
   checkpointKey: string,
   boundary: VerifiedDurableBoundary | undefined,
+  proof: {
+    manifestDigest?: DurableManifestDigest;
+    prefixDigestAtOffset?: (offset: number) => DurableManifestPrefixDigest | undefined;
+    clearCheckpoint: () => void;
+  },
 ): boolean {
-  if (!boundary || boundary.terminal) return false;
-  const source = liveDurableBoundarySource(store, boundary);
-  if (!source) return false;
-  const current = store.get(checkpointKey);
-  if (current && current.offset >= boundary.offset) return false;
-  deleteSyncPageCheckpoint(store, checkpointKey);
-  store.setManifestBoundOffset(
-    checkpointKey,
-    boundary.offset,
-    boundary.manifestDigest,
-    source.updatedAtMs,
-    boundary.manifestPrefixDigest,
-  );
+  const source = eligibleDurableBoundarySource(store, checkpointKey, boundary);
+  if (!source || !proof.manifestDigest) return false;
+  // The source's raw responder coordinate belongs to another peer. Only its
+  // verified manifest boundary is proposed; the destination keeps its own
+  // checkpoint and session until that boundary is proven by its current META.
+  const decision = resolveManifestCheckpointDecision({
+    checkpoint: { ...source, responderSessionOffset: undefined },
+    manifestDigest: proof.manifestDigest,
+    prefixDigestAtOffset: proof.prefixDigestAtOffset?.(source.offset),
+    hasExactAssetFilter: false,
+  });
+  if (decision.kind === 'reset') return false;
+  proof.clearCheckpoint();
+  store.setManifestBoundOffset(checkpointKey, source.offset, source.manifestDigest!,
+    source.updatedAtMs, source.manifestPrefixDigest);
   return true;
 }
 
@@ -142,22 +147,25 @@ export class DurableGraphResumePolicy {
       discover: (candidates: readonly { checkpointKey: string; checkpoint: SyncCheckpointEntry | undefined }[]) => {
         this.remember(store, candidates);
       },
-      seed: (peerId: string, checkpointKey: string): { kind: 'seeded'; offset: number } | { kind: 'own-checkpoint' } => {
+      seed: (peerId: string, checkpointKey: string): { kind: 'candidate'; boundary: VerifiedDurableBoundary } | { kind: 'own-checkpoint' } => {
         const boundary = seedingRefused ? undefined : this.boundary;
         if (boundary && this.refusedByPeer.get(peerId) !== durableBoundaryIdentity(boundary.manifestDigest, boundary.offset)
-          && seedVerifiedDurableBoundary(store, checkpointKey, boundary)) {
-          return { kind: 'seeded', offset: boundary.offset };
+          && eligibleDurableBoundarySource(store, checkpointKey, boundary)) {
+          return { kind: 'candidate', boundary };
         }
         return { kind: 'own-checkpoint' };
       },
       recordSlice: (input: {
         peerId: string; checkpointKey: string; before: SyncCheckpointEntry | undefined;
-        after: SyncCheckpointEntry | undefined; rejectedOffset: number | undefined; seeded: boolean;
+        after: SyncCheckpointEntry | undefined; rejectedOffset: number | undefined; candidate?: VerifiedDurableBoundary;
       }) => {
         rejectedPeer = input.rejectedOffset === undefined ? undefined : input.peerId;
         if (input.rejectedOffset !== undefined) {
-          this.refusedByPeer.set(input.peerId, durableBoundaryIdentity(input.before?.manifestDigest, input.rejectedOffset));
-          if (input.seeded) seedingRefused = true;
+          const seeded = input.candidate?.offset === input.rejectedOffset;
+          this.refusedByPeer.set(input.peerId, durableBoundaryIdentity(
+            seeded ? input.candidate!.manifestDigest : input.before?.manifestDigest, input.rejectedOffset,
+          ));
+          if (seeded) seedingRefused = true;
         }
         this.remember(store, [{ checkpointKey: input.checkpointKey, checkpoint: input.after }]);
       },

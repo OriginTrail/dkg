@@ -5632,7 +5632,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // an unfinished offset-zero requester session remains cached.
       forceFreshSession,
       manifestDigest,
-      manifestPrefixDigestAtOffset,
+      manifestPrefixDigestAtOffset, durableResumeBoundary,
       shouldStopAfterPage,
       workAdmission,
       // Exact VM recovery filter. Included in checkpoint, coalescing, wire and
@@ -5782,7 +5782,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ephemeralRequesterState,
       forceFreshSession,
       manifestDigest,
-      manifestPrefixDigestAtOffset,
+      manifestPrefixDigestAtOffset, durableResumeBoundary,
       shouldStopAfterPage,
       workAdmission: effectiveWorkAdmission,
       buildSyncRequest: this.buildSyncRequest.bind(this),
@@ -6594,7 +6594,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         isSyncCapable: (peerId) => this.waitForSyncProtocol({
           toString: () => peerId,
         }),
-        executeSlice: async (peerId, durableMetaContinuation, durableRecoveryRound) => {
+        executeSlice: async (peerId, durableMetaContinuation, durableRecoveryRound, durableResumeBoundary) => {
           if (!durableSyncEnabled(this.config) || !await this.canUseLegacyDurableSyncForContextGraphV1(contextGraphId)) {
             return durableRecoveryRoundOutcome(createIncompleteDurableSyncResult());
           }
@@ -6602,7 +6602,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             stopOnBackoffWorthyFailure: true, totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS,
             settlementSliceTimeoutMs: DURABLE_RECOVERY_SETTLEMENT_SLICE_TIMEOUT_MS,
             signal: this.node.stopSignal ?? undefined, priority: FOREGROUND_CATCHUP_SYNC_PRIORITY,
-            source: 'vm-recovery', durableMetaContinuation, durableRecoveryRound,
+            source: 'vm-recovery', durableMetaContinuation, durableRecoveryRound, durableResumeBoundary,
           });
           return durableRecoveryRoundOutcome(detailed.result, detailed.recoveryRound);
         },

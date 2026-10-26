@@ -1,6 +1,8 @@
+import { verifyDurablePage, prepareDurableVerifiedPage, persistDurableRemainingMetadata, persistDurableHoldingsMetadata } from './durable-verified-page.js';
 import type { DurableMetaContinuation } from './durable-meta-continuation.js';
 export type { DurableMetaContinuation, DurableMetaContinuationState } from './durable-meta-continuation.js';
 import type { DurableRecoveryRoundDecision } from '../durable-recovery-round.js';
+import type { VerifiedDurableBoundary } from '../durable-recovery-boundary-seed.js';
 import type { DetailedDurableSyncResult } from './durable-sync-result.js';
 import { randomUUID } from 'node:crypto';
 import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
@@ -43,12 +45,11 @@ import type {
   VerifiedGraphScopedAsset,
 } from './graph-scoped-materialization.js';
 import {
-  assertNoLegacyRfc64ControlGraphs,
   partitionVerifiedGraphScopedAssets,
 } from './verified-asset-preparation.js';
 import type { DurableSyncBudget } from './durable-sync-budget.js';
 import { createDurableDataRoundBoundary } from './durable-data-round.js';
-import { planDurableDataFromLocalHoldings, settleDurableDataFromHoldings, persistDurableHoldingsMetadata,
+import { planDurableDataFromLocalHoldings, settleDurableDataFromHoldings,
   type DurableHoldingsOptions, type DurableHoldingsReader } from './durable-data-holdings.js';
 import {
   normalizeDurableSyncContext,
@@ -154,6 +155,7 @@ export interface DurableSyncFetchRequest {
   readonly exactAssetUals?: string[];
   /** Canonical META generation that authorizes this DATA continuation. */
   readonly manifestDigest?: DurableManifestDigest;
+  readonly durableResumeBoundary?: VerifiedDurableBoundary;
   /** Canonical descriptor-prefix proof for safe cross-generation reuse. */
   readonly manifestPrefixDigestAtOffset?: (
     offset: number,
@@ -330,6 +332,8 @@ export interface DurableSyncContext {
   durableRecoveryRound?: DurableHoldingsOptions;
   /** Which assets of a verified generation this node holds; plans that runner's DATA phase. */
   heldGraphScopedAssets?: DurableHoldingsReader;
+  assertHeldGenerationCurrent?: () => void;
+  durableResumeBoundary?: VerifiedDurableBoundary;
   stopOnBackoffWorthyFailure?: boolean;
   processDurableBatchInWorker: (
     dataQuads: Quad[],
@@ -602,11 +606,10 @@ async function runDurableSyncWithBudget(
     fetchSyncPages,
     sinceBatchIdFor,
     exactAssetFetchPolicyFor,
-    durableMetaContinuation,
+    durableMetaContinuation, durableResumeBoundary,
     durableRecoveryRound,
     heldGraphScopedAssets,
     stopOnBackoffWorthyFailure = false,
-    processDurableBatchInWorker,
     storeInsert,
     storeGraphScopedAsset,
     authenticateChallengePinnedAsset,
@@ -834,6 +837,7 @@ async function runDurableSyncWithBudget(
         exactAssetUals,
         manifestDigest,
         manifestPrefixDigestAtOffset,
+        durableResumeBoundary: phase === 'data' && exactAssetUals === undefined ? durableResumeBoundary : undefined,
         // DATA safely resumes at verified graph boundaries. META is the
         // manifest that proves those boundaries, so resuming it independently
         // would return only a suffix and make the DATA prefix unverifiable.
@@ -980,6 +984,7 @@ async function runDurableSyncWithBudget(
       recoveryRound = { strategy: 'full', confirmedCopies: holdingsOutcome?.confirmedCopies ?? 0 };
       if (graphScopedManifest && holdings && holdings.kind !== 'full') {
         await persistDurableHoldingsMetadata(context, pid, metaResult, accumulator);
+        context.assertHeldGenerationCurrent?.();
         recoveryRound = holdings.kind === 'held'
           ? { ...recoveryRound, strategy: 'held' }
           : { ...recoveryRound, strategy: 'exact-missing', batches: holdings.batches };
@@ -1163,10 +1168,9 @@ async function runDurableSyncWithBudget(
       const verifyStartedAt = Date.now();
       let processed: Awaited<ReturnType<DurableSyncContext['processDurableBatchInWorker']>>;
       try {
-        processed = await processDurableBatchInWorker(
-          dataForVerification,
+        processed = await verifyDurablePage(
+          context, dataForVerification,
           effectiveMetaResult.quads,
-          ctx,
           isSystemContextGraph,
           verificationMode,
         );
@@ -1334,19 +1338,7 @@ async function runDurableSyncWithBudget(
 
       startPhase('store');
       const storeStartedAt = Date.now();
-      assertNoLegacyRfc64ControlGraphs(
-        pid,
-        processed.verifiedData,
-        processed.verifiedMeta,
-        processed.verifiedGraphScopedDataGraphs ?? [],
-      );
-      const partitioned = partitionVerifiedGraphScopedAssets(
-        pid,
-        processed.verifiedData,
-        processed.verifiedMeta,
-        processed.verifiedGraphScopedDataGraphs ?? [],
-      );
-      context.admitVerifiedPage?.(partitioned);
+      const partitioned = prepareDurableVerifiedPage(context, pid, processed);
       if (partitioned.assets.length && exactAssetSelection?.kind !== 'challenge-pinned' && !storeGraphScopedAsset)
         throw Object.assign(new Error('Verified graph-scoped durable sync requires an exact materialization store path'),
           { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' });
@@ -1456,17 +1448,7 @@ async function runDurableSyncWithBudget(
           insertedDataTriples: partitioned.remainingData.length,
         });
       }
-      if (partitioned.remainingMeta.length > 0) {
-        throwIfOperationAborted();
-        await storeInsert({
-          quads: partitioned.remainingMeta,
-          signal,
-        });
-        recordDurableSyncDiagnostics(accumulator, {
-          insertedTriples: partitioned.remainingMeta.length,
-          insertedMetaTriples: partitioned.remainingMeta.length,
-        });
-      }
+      await persistDurableRemainingMetadata(context, partitioned.remainingMeta, accumulator, throwIfOperationAborted);
       // An already-started atomic write is awaited, counted, and manifest-
       // checkpointed truthfully. An expired operation may not enter another
       // commit boundary or claim the whole page terminal.

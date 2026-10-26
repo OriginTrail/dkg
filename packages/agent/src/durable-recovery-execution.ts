@@ -106,6 +106,7 @@ export async function runDurableRecovery(request: DurableRecoveryRequest): Promi
               isCurrent: options?.isCurrent,
               durableMetaContinuation: options?.durableMetaContinuation,
               durableRecoveryRound: options?.durableRecoveryRound,
+              durableResumeBoundary: options?.durableResumeBoundary,
             },
           });
           if (detailed.exactFetchDisposition !== undefined) {
