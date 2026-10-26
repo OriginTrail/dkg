@@ -1,10 +1,16 @@
 // Known answers for the async queue contention verdict library (OT-RFC-73 P2a). Pure functions only: no backend, no dist.
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import test, { after } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import {
   CENSOR_MS, RUNGS, admissionSummary, depthSeries, equivalent, extractRecord, finalizeRequests, flat, groundTruth, guards, halve, kneeReached, ledgerMarkdown,
   median, noiseMargin, p8cTrigger, pairKey, pairRuns, percentile, pickReproductionRung, shareBacklog, summarize, validity,
 } from '../../repro/async-queue-contention/verdict.mjs';
+import { OBSERVER_CALLS, walkPages } from '../../repro/async-queue-contention/workload.mjs';
 
 const rec = (p95Ms, o = {}) => ({ key: o.key ?? 'k', p95Ms, failureFrac: o.failureFrac ?? 0.5, valid: o.valid ?? true, completionsPerMin: o.completionsPerMin ?? 100 });
 const pairsOf = (aVals, bVals, opts = {}) => aVals.map((a, i) => ({ key: `r${i}`, a: rec(a, opts.a), b: rec(bVals[i], opts.b), valid: opts.valid?.[i] ?? true }));
@@ -199,4 +205,105 @@ test('extractRecord maps a summary and ledgerMarkdown lists every run', () => {
   const table = ledgerMarkdown([good, bad]).split('\n');
   assert.equal(table.length, 4);
   assert.match(table[3], /INVALID: ok, drained/);
+});
+
+test('walkPages walks every page and stops on a falsy cursor; the paged seam is empty until P8a/P9b', async () => {
+  const pages = [{ rows: 100, nextCursor: 'c1' }, { rows: 100, nextCursor: 'c2' }, { rows: 37, nextCursor: null }], seen = [];
+  const walked = await walkPages(async (cursor) => { seen.push(cursor); return pages[seen.length - 1]; });
+  assert.deepEqual([walked.rows, walked.pages, walked.pageMs.length], [237, 3, 3]);
+  assert.deepEqual(seen, [undefined, 'c1', 'c2']);
+  const single = await walkPages(async () => ({ rows: 5 }));
+  assert.deepEqual([single.rows, single.pages, single.pageMs.length], [5, 1, 1]);
+  await assert.rejects(walkPages(async () => ({ rows: 1, nextCursor: 'same' })), /did not advance/);
+  // This documents the seam: the PR that adds the paged listing (P8a / P9b) fills `paged` and MUST also update `default` (see workload.mjs); it changes this assertion.
+  assert.equal(OBSERVER_CALLS.paged, null);
+  assert.equal(typeof OBSERVER_CALLS.default, 'function');
+  assert.equal((await OBSERVER_CALLS.default({ list: async (options) => { assert.deepEqual(options, {}); return [1, 2]; } })).rows, 2);
+});
+
+// ---------------------------------------------------------------- the verdict subcommand end to end (no backend)
+const ENTRY = fileURLToPath(new URL('../../repro/async-queue-contention.mjs', import.meta.url));
+const tmp = mkdtempSync(path.join(tmpdir(), 'aqc-verdict-'));
+after(() => rmSync(tmp, { recursive: true, force: true }));
+
+/** Writes <root>/<name>/r<i>/summary.json for each p95 and returns the directory. */
+function runs(name, p95s, { history = '0', observer = 'default', valid = [], F = 0.5, sha = 'abc', dirty = false } = {}) {
+  p95s.forEach((p95, i) => {
+    const dir = path.join(tmp, name, `r${i}`);
+    mkdirSync(dir, { recursive: true });
+    const ok = valid[i] ?? true;
+    writeFileSync(path.join(dir, 'summary.json'), JSON.stringify({
+      meta: { runId: `${name}-${i}`, label: name, cell: { history, observer, rung: 'L3', repeat: i }, git: { sha: '0123456789abcdef', dirty }, scriptSha256: sha, distStaleSuspected: false },
+      submission: { F, latencyMs: { p95 } }, worker: { completionsPerMin: 100 }, observer: { latencyMs: { p95: 10 } }, validity: { drained: ok, ok },
+    }));
+  });
+  return path.join(tmp, name);
+}
+const cli = (...args) => { const r = spawnSync(process.execPath, [ENTRY, ...args], { encoding: 'utf8' }); return { code: r.status, out: r.stdout, err: r.stderr }; };
+
+test('verdict halve: exit 0 on a pass, 1 on a fail, 2 when incomplete', () => {
+  const base = runs('base', [10_000, 11_000, 9000]);
+  const pass = cli('verdict', '--rule', 'halve', '--a', base, '--b', runs('good', [4000, 5500, 4500]));
+  assert.equal(pass.code, 0);
+  assert.match(pass.out, /halve: candidate P95 <= 0\.5 x base: PASS/);
+  const fail = cli('verdict', '--rule', 'halve', '--a', base, '--b', runs('slow', [4000, 5501, 4500]));
+  assert.equal(fail.code, 1);
+  assert.match(fail.out, /FAIL/);
+  const incomplete = cli('verdict', '--rule', 'halve', '--a', base, '--b', runs('thin', [4000, 5500, 4500], { valid: [true, false, true] }));
+  assert.equal(incomplete.code, 2);
+  assert.match(incomplete.out, /INCOMPLETE \(2 valid pairs/);
+  const json = JSON.parse(cli('verdict', '--rule', 'halve', '--a', base, '--b', path.join(tmp, 'good'), '--json').out);
+  assert.deepEqual([json.result.status, json.result.perRepeat.length, json.missing.length], ['pass', 3, 0]);
+});
+
+test('verdict flat pairs across histories and honours --where', () => {
+  const lo = runs('h0', [800, 900, 1000]), hi = runs('h50k', [1000, 1125, 1250], { history: '50k' });
+  assert.equal(cli('verdict', '--rule', 'flat', '--a', lo, '--b', hi, '--where', 'observer=default').code, 0);
+  assert.equal(cli('verdict', '--rule', 'flat', '--a', lo, '--b', runs('h50k-slow', [1000, 1126, 1250], { history: '50k' })).code, 1);
+  const none = cli('verdict', '--rule', 'flat', '--a', lo, '--b', hi, '--where', 'observer=paged');
+  assert.equal(none.code, 2, 'no run matches the filter: incomplete, not a pass');
+});
+
+test('verdict aa prints the noise margin, equal needs it declared, ledger lists every run', () => {
+  const first = runs('aa-1', [1000, 1000, 1000]), second = runs('aa-2', [1040, 1220, 980]);
+  const aa = cli('verdict', '--rule', 'aa', '--a', first, '--b', second);
+  assert.equal(aa.code, 0);
+  assert.equal(JSON.parse(aa.out).margin, 0.22);
+  assert.equal(cli('verdict', '--rule', 'equal', '--a', first, '--b', second).code, 2);
+  assert.equal(cli('verdict', '--rule', 'equal', '--a', first, '--b', second, '--margin', '0.22').code, 0);
+  assert.equal(cli('verdict', '--rule', 'equal', '--a', first, '--b', second, '--margin', '0.1').code, 1);
+  const ledger = cli('verdict', '--rule', 'ledger', '--a', first, '--b', runs('aa-3', [1, 2], { valid: [true, false] }));
+  assert.equal(ledger.code, 0);
+  assert.equal(ledger.out.trim().split('\n').length, 2 + 3 + 2);
+  assert.match(ledger.out, /aa-3-1 \| 0\/default\/L3\/r1 \| INVALID: drained, ok/);
+});
+
+test('verdict warns about differing script hashes and dirty trees, and refuses bad usage', () => {
+  const a = runs('w-a', [10_000, 10_000, 10_000], { sha: 'one' }), b = runs('w-b', [1, 1, 1], { sha: 'two', dirty: true });
+  const out = cli('verdict', '--rule', 'halve', '--a', a, '--b', b).out;
+  assert.match(out, /warning: base and candidate ran different benchmark script files/);
+  assert.match(out, /warning: a run came from a dirty working tree/);
+  assert.equal(cli('verdict', '--rule', 'nope', '--a', a, '--b', b).code, 2);
+  assert.equal(cli('verdict', '--rule', 'halve', '--a', a).code, 2);
+  assert.equal(cli('verdict', '--rule', 'halve', '--a', path.join(tmp, 'missing'), '--b', b).code, 2);
+  assert.equal(cli('verdict', '--bogus').code, 2);
+  assert.equal(cli('frobnicate').code, 2);
+});
+
+test('run refuses the paged observer before touching a backend and a non-loopback backend with exit 3', () => {
+  assert.equal(cli('run', '--rung', 'L3', '--observer', 'paged').code, 2);
+  assert.match(cli('run', '--rung', 'L3', '--observer', 'paged').err, /paged listing is not available in this build \(needs P8a\/P9b\)/);
+  assert.equal(cli('run', '--rung', 'L9').code, 2);
+  assert.equal(cli('run').code, 2);
+  const refused = cli('run', '--rung', 'L3', '--blazegraph-url', 'http://10.1.2.3:9999/bigdata/namespace/kb/sparql');
+  assert.equal(refused.code, 3);
+  assert.match(refused.err, /refusing the non-loopback backend 10\.1\.2\.3/);
+});
+
+test('run --dry loads the built product and prints the resolved config without a backend', () => {
+  const r = cli('run', '--dry', '--rung', 'L3', '--history', '10k', '--repeat', '2');
+  assert.equal(r.code, 0, r.err);
+  const out = JSON.parse(r.out);
+  assert.deepEqual([out.dry, out.config.lambda, out.config.history, out.config.seed, out.config.warmupMs, out.config.measureMs], [true, 8, '10k', 7302, 30_000, 180_000]);
+  assert.match(out.provenance.scriptSha256, /^[0-9a-f]{64}$/);
 });

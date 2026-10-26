@@ -8,7 +8,8 @@ import path from 'node:path';
 import test, { after, before } from 'node:test';
 import { gunzipSync } from 'node:zlib';
 import { EXIT_REFUSED_BACKEND, loadDist, provenance, resolveEndpoint } from '../../repro/async-queue-contention/backend.mjs';
-import { AGENT, CG_ID, historyBatches, historyJob, loadGenerated, loadSeedFile, parseCount, writeSeedFile } from '../../repro/async-queue-contention/history.mjs';
+import { AGENT, CG_ID } from '../../repro/async-queue-contention/fixture.mjs';
+import { historyBatches, historyJob, loadGenerated, loadSeedFile, parseCount, writeSeedFile } from '../../repro/async-queue-contention/history.mjs';
 
 const BASE = 1_790_000_000_000;
 let deps, dir;

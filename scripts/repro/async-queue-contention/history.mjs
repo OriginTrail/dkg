@@ -5,9 +5,8 @@ import { createReadStream, createWriteStream, writeFileSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { createGunzip, createGzip } from 'node:zlib';
 import { gitInfo } from './backend.mjs';
+import { AGENT, CG_ID } from './fixture.mjs';
 
-export const CG_ID = 'aqc-bench-cg';
-export const AGENT = '0x1234567890abcdef1234567890abcdef12345678';
 const HOUR_MS = 3_600_000;
 
 /** '10k' -> 10000, '50000' -> 50000. */

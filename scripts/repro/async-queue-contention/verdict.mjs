@@ -201,6 +201,6 @@ export function extractRecord(s) {
 
 /** Markdown table of EVERY run, discarded ones included with the failed checks (the PR lists each run). */
 export function ledgerMarkdown(records) {
-  const row = (r) => `| ${r.label ?? ''} | ${r.runId} | ${r.key} | ${r.valid ? 'valid' : `INVALID: ${r.failedChecks.join(', ')}`} | ${r.p95Ms} | ${r.failureFrac === null ? '' : r4(r.failureFrac)} | ${r.completionsPerMin ?? ''} | ${r.observerP95Ms ?? ''} | ${String(r.git?.sha ?? '').slice(0, 9)}${r.git?.dirty ? '+dirty' : ''} |`;
-  return ['| label | run | cell (history,observer,rung,repeat) | validity | P95 ms | F | completions/min | observer P95 ms | git |', '|---|---|---|---|---|---|---|---|---|', ...records.map(row)].join('\n');
+  const row = (r) => `| ${r.label ?? ''} | ${r.runId} | ${r.cell.history}/${r.cell.observer}/${r.cell.rung}/r${r.cell.repeat} | ${r.valid ? 'valid' : `INVALID: ${r.failedChecks.join(', ')}`} | ${r.p95Ms} | ${r.failureFrac === null ? '' : r4(r.failureFrac)} | ${r.completionsPerMin ?? ''} | ${r.observerP95Ms ?? ''} | ${String(r.git?.sha ?? '').slice(0, 9)}${r.git?.dirty ? '+dirty' : ''} |`;
+  return ['| label | run | history/observer/rung/repeat | validity | P95 ms | F | completions/min | observer P95 ms | git |', '|---|---|---|---|---|---|---|---|---|', ...records.map(row)].join('\n');
 }
