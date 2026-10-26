@@ -1,4 +1,5 @@
-// Shape of the seeded share-queue history of the async queue contention benchmark (OT-RFC-73 P2a). Uses the real built dist: run pnpm run build:packages first.
+// Shape of the seeded share-queue history of the async queue contention benchmark (OT-RFC-73 P2a). Uses the real built
+// dist: run pnpm run build:packages first.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -7,17 +8,37 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test, { after, before } from 'node:test';
 import { gunzipSync } from 'node:zlib';
-import { EXIT_REFUSED_BACKEND, loadDist, provenance, resolveEndpoint } from '../../repro/async-queue-contention/backend.mjs';
+import {
+  EXIT_REFUSED_BACKEND,
+  loadDist,
+  provenance,
+  resolveEndpoint,
+} from '../../repro/async-queue-contention/backend.mjs';
 import { AGENT, CG_ID } from '../../repro/async-queue-contention/fixture.mjs';
-import { historyBatches, historyJob, loadGenerated, loadSeedFile, parseCount, writeSeedFile } from '../../repro/async-queue-contention/history.mjs';
+import {
+  historyBatches,
+  historyJob,
+  loadGenerated,
+  loadSeedFile,
+  parseCount,
+  writeSeedFile,
+} from '../../repro/async-queue-contention/history.mjs';
 
 const BASE = 1_790_000_000_000;
-let deps, dir;
-before(async () => { deps = await loadDist(); dir = mkdtempSync(path.join(tmpdir(), 'aqc-history-')); });
-after(() => { rmSync(dir, { recursive: true, force: true }); });
+let deps;
+let dir;
+before(async () => {
+  deps = await loadDist();
+  dir = mkdtempSync(path.join(tmpdir(), 'aqc-history-'));
+});
+after(() => {
+  rmSync(dir, { recursive: true, force: true });
+});
 
-const jobOf = (j, baseTime = BASE) => historyJob(j, { baseTime, formatVersion: deps.pub.ASYNC_PROMOTE_QUEUE_FORMAT_VERSION });
-const quadsOf = (j, baseTime = BASE) => deps.utils.serializeJobRecord(jobOf(j, baseTime), deps.utils.DEFAULT_PROMOTE_CONTROL_GRAPH_URI).jobQuads;
+const jobOf = (j, baseTime = BASE) =>
+  historyJob(j, { baseTime, formatVersion: deps.pub.ASYNC_PROMOTE_QUEUE_FORMAT_VERSION });
+const quadsOf = (j, baseTime = BASE) =>
+  deps.utils.serializeJobRecord(jobOf(j, baseTime), deps.utils.DEFAULT_PROMOTE_CONTROL_GRAPH_URI).jobQuads;
 const objectOf = (quads, predicate) => quads.find((q) => q.predicate === predicate).object;
 const sha = (text) => createHash('sha256').update(text).digest('hex');
 
@@ -54,7 +75,11 @@ test('the payload quad round-trips through the product classifier', () => {
 
 test('8 quads per job, ASCII N-Quads ending in a newline', () => {
   const batches = [...historyBatches(deps, 7, { baseTime: BASE, batchJobs: 3 })];
-  assert.deepEqual(batches.map((b) => b.length), [24, 24, 8], 'batches of 3, 3 and 1 jobs');
+  assert.deepEqual(
+    batches.map((b) => b.length),
+    [24, 24, 8],
+    'batches of 3, 3 and 1 jobs',
+  );
   const text = `${deps.storage.quadsToNQuads(batches.flat())}\n`;
   assert.ok(text.endsWith('\n'));
   assert.equal(Buffer.byteLength(text), text.length, 'ASCII only');
@@ -73,7 +98,10 @@ test('writeSeedFile writes the manifest and the bytes it hashes, plain and gzipp
   const plain = await writeSeedFile(deps, { jobs, baseTime: BASE, path: path.join(dir, 'seed.nq') });
   const gz = await writeSeedFile(deps, { jobs, baseTime: BASE, path: path.join(dir, 'seed.nq.gz') });
   for (const m of [plain, gz]) {
-    assert.deepEqual([m.schema, m.kind, m.jobs, m.quads, m.baseTime, m.formatVersion], [1, 'share', jobs, jobs * 8, BASE, deps.pub.ASYNC_PROMOTE_QUEUE_FORMAT_VERSION]);
+    assert.deepEqual(
+      [m.schema, m.kind, m.jobs, m.quads, m.baseTime, m.formatVersion],
+      [1, 'share', jobs, jobs * 8, BASE, deps.pub.ASYNC_PROMOTE_QUEUE_FORMAT_VERSION],
+    );
     assert.equal(m.graph, deps.utils.DEFAULT_PROMOTE_CONTROL_GRAPH_URI);
   }
   assert.equal(plain.sha256, gz.sha256);
@@ -87,12 +115,15 @@ test('writeSeedFile writes the manifest and the bytes it hashes, plain and gzipp
 
 test('loadSeedFile posts line-aligned N-Quads chunks that add up to the file', async () => {
   const jobs = 20;
-  await writeSeedFile(deps, { jobs, baseTime: BASE, path: path.join(dir, 'load.nq.gz') });
+  const manifest = await writeSeedFile(deps, { jobs, baseTime: BASE, path: path.join(dir, 'load.nq.gz') });
   const posts = [];
   const server = createServer((req, res) => {
     const parts = [];
     req.on('data', (c) => parts.push(c));
-    req.on('end', () => { posts.push({ type: req.headers['content-type'], body: Buffer.concat(parts).toString('utf8') }); res.end('ok'); });
+    req.on('end', () => {
+      posts.push({ type: req.headers['content-type'], body: Buffer.concat(parts).toString('utf8') });
+      res.end('ok');
+    });
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
@@ -100,26 +131,60 @@ test('loadSeedFile posts line-aligned N-Quads chunks that add up to the file', a
     const result = await loadSeedFile(url, path.join(dir, 'load.nq.gz'), { chunkBytes: 20_000 });
     assert.ok(result.chunks > 2, `${result.chunks} chunks`);
     assert.equal(result.quads, jobs * 8);
-    assert.ok(posts.every((p) => p.type === 'text/x-nquads' && p.body.endsWith('\n') && p.body.length <= 20_000 + 1500));
-    assert.equal(posts.map((p) => p.body).join(''), gunzipSync(readFileSync(path.join(dir, 'load.nq.gz'))).toString('utf8'));
-  } finally { server.close(); }
+    assert.equal(
+      result.sha256,
+      manifest.sha256,
+      'the hash of the bytes loaded is the manifest hash (the run records both)',
+    );
+    assert.ok(
+      posts.every((p) => p.type === 'text/x-nquads' && p.body.endsWith('\n') && p.body.length <= 20_000 + 1500),
+    );
+    assert.equal(
+      posts.map((p) => p.body).join(''),
+      gunzipSync(readFileSync(path.join(dir, 'load.nq.gz'))).toString('utf8'),
+    );
+  } finally {
+    server.close();
+  }
 });
 
 test('loadSeedFile reports a rejected load', async () => {
-  const server = createServer((req, res) => { req.resume(); res.statusCode = 400; res.end('bad quads'); });
+  const server = createServer((req, res) => {
+    req.resume();
+    res.statusCode = 400;
+    res.end('bad quads');
+  });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
-    await assert.rejects(loadSeedFile(`http://127.0.0.1:${server.address().port}/s`, path.join(dir, 'seed.nq')), /HTTP 400 bad quads/);
-  } finally { server.close(); }
+    await assert.rejects(
+      loadSeedFile(`http://127.0.0.1:${server.address().port}/s`, path.join(dir, 'seed.nq')),
+      /HTTP 400 bad quads/,
+    );
+  } finally {
+    server.close();
+  }
 });
 
 test('loadGenerated inserts every batch with at most two in flight', async () => {
-  let inflight = 0, peak = 0;
+  let inflight = 0;
+  let peak = 0;
   const inserted = [];
-  const store = { async insert(quads, options) { inflight++; peak = Math.max(peak, inflight); await new Promise((r) => setTimeout(r, 5)); inflight--; inserted.push({ n: quads.length, source: options.source }); } };
+  const store = {
+    async insert(quads, options) {
+      inflight++;
+      peak = Math.max(peak, inflight);
+      await new Promise((r) => setTimeout(r, 5));
+      inflight--;
+      inserted.push({ n: quads.length, source: options.source });
+    },
+  };
   const result = await loadGenerated(store, deps, { jobs: 6000, baseTime: BASE });
   assert.equal(result.jobs, 6000);
-  assert.deepEqual(inserted.map((i) => i.n).sort((x, y) => x - y), [8000, 20_000, 20_000], 'batches of 2500, 2500 and 1000 jobs');
+  assert.deepEqual(
+    inserted.map((i) => i.n).sort((x, y) => x - y),
+    [8000, 20_000, 20_000],
+    'batches of 2500, 2500 and 1000 jobs',
+  );
   assert.ok(inserted.every((i) => i.source === 'bench.seedHistory'));
   assert.equal(peak, 2);
 });
@@ -127,13 +192,37 @@ test('loadGenerated inserts every batch with at most two in flight', async () =>
 test('resolveEndpoint refuses anything that is not a loopback http(s) URL unless told otherwise', () => {
   const ok = 'http://127.0.0.1:19554/bigdata/namespace/kb/sparql';
   assert.equal(resolveEndpoint({ url: ok }), ok);
-  assert.equal(resolveEndpoint({ url: 'http://localhost:9999/bigdata/namespace/kb/sparql' }), 'http://localhost:9999/bigdata/namespace/kb/sparql');
-  assert.equal(resolveEndpoint({ url: 'http://[::1]:9999/bigdata/namespace/kb/sparql' }), 'http://[::1]:9999/bigdata/namespace/kb/sparql');
-  for (const url of ['http://blazegraph.example.org:9999/bigdata/namespace/kb/sparql', 'http://10.1.2.3:9999/x', 'ftp://127.0.0.1/x', 'not a url']) {
-    assert.throws(() => resolveEndpoint({ url }), (e) => e.exitCode === EXIT_REFUSED_BACKEND, url);
+  assert.equal(
+    resolveEndpoint({ url: 'http://localhost:9999/bigdata/namespace/kb/sparql' }),
+    'http://localhost:9999/bigdata/namespace/kb/sparql',
+  );
+  assert.equal(
+    resolveEndpoint({ url: 'http://[::1]:9999/bigdata/namespace/kb/sparql' }),
+    'http://[::1]:9999/bigdata/namespace/kb/sparql',
+  );
+  for (const url of [
+    'http://blazegraph.example.org:9999/bigdata/namespace/kb/sparql',
+    'http://10.1.2.3:9999/x',
+    'ftp://127.0.0.1/x',
+    'not a url',
+  ]) {
+    assert.throws(
+      () => resolveEndpoint({ url }),
+      (e) => e.exitCode === EXIT_REFUSED_BACKEND,
+      url,
+    );
   }
   assert.equal(resolveEndpoint({ url: 'http://10.1.2.3:9999/x', allowRemote: true }), 'http://10.1.2.3:9999/x');
-  assert.throws(() => resolveEndpoint({ url: undefined }), /BLAZEGRAPH_TEST_URL/);
+  const saved = process.env.BLAZEGRAPH_TEST_URL;
+  try {
+    delete process.env.BLAZEGRAPH_TEST_URL;
+    assert.throws(() => resolveEndpoint({ url: undefined }), /BLAZEGRAPH_TEST_URL/);
+    process.env.BLAZEGRAPH_TEST_URL = ok;
+    assert.equal(resolveEndpoint({ url: undefined }), ok, 'the environment variable is the fallback');
+  } finally {
+    if (saved === undefined) delete process.env.BLAZEGRAPH_TEST_URL;
+    else process.env.BLAZEGRAPH_TEST_URL = saved;
+  }
 });
 
 test('provenance hashes the script bytes and records the DKG_STORE_ environment', () => {
