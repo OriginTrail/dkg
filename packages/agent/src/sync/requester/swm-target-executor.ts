@@ -19,6 +19,7 @@ import {
   type FinalizedSwmTwinRetirement,
 } from './finalized-swm-twin-reconciliation.js';
 import { FinalizedSwmTwinMemoV1 } from './finalized-swm-twin-memo.js';
+import type { LegacySwmRetirementCallerOutcomeV1 } from '../../internal/owed-legacy-swm-retirements.js';
 import type { RecoveryExecutionGuard } from './recovery-execution-guard.js';
 import {
   runSharedMemorySync,
@@ -80,12 +81,13 @@ export interface SwmTargetExecutorPortsV1 {
     retirement: FinalizedSwmTwinRetirement,
     ctx: OperationContext,
   ) => Promise<void>;
+  /** Resolves with how the marker's retirement ended inside the caller's wait, when it says. */
   readonly retireLegacySwmAfterVerifiedVmTwin?: (input: Readonly<{
     contextGraphId: string;
     kaUal: string;
     assertionVersion: string;
     subGraphName?: string;
-  }>) => Promise<void>;
+  }>) => Promise<LegacySwmRetirementCallerOutcomeV1 | void>;
   readonly logInfo: (ctx: OperationContext, message: string) => void;
   readonly logWarn: (ctx: OperationContext, message: string) => void;
   readonly logDebug: (ctx: OperationContext, message: string) => void;
@@ -330,15 +332,18 @@ export class SwmTargetExecutorV1 {
           // behind is the conservative state (the graph stays reported as
           // incomplete) until a later pass or a catalog replay retires it.
           try {
-            await this.#ports.retireLegacySwmAfterVerifiedVmTwin?.({
+            const marker = await this.#ports.retireLegacySwmAfterVerifiedVmTwin?.({
               contextGraphId,
               kaUal: descriptor.kaUal,
               assertionVersion: descriptor.assertionVersion,
               subGraphName: descriptor.subGraphName,
             });
-            // Only a finished retirement is remembered: a later pass is what
-            // retries a marker left behind.
-            this.finalizedTwins.remember(contextGraphId, descriptor);
+            // Only a retirement that ended is remembered. One that did not get
+            // its turn, or still runs past the wait, may yet leave its marker,
+            // and a later pass is what retries a marker left behind.
+            if (marker === undefined || marker === 'retired' || marker === 'kept') {
+              this.finalizedTwins.remember(contextGraphId, descriptor);
+            }
           } catch (cause) {
             this.#ports.logWarn(
               target.ctx,

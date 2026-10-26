@@ -24,8 +24,10 @@ import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recov
 export const FINALIZED_SWM_TWIN_MEMO_TTL_MS = 6 * 60 * 60_000;
 export const FINALIZED_SWM_TWIN_MEMO_MAX_ENTRIES = 20_000;
 
+/** Every field the finalized-twin proof compares with Verified Memory, the private commitment included. */
 type FinalizedSwmTwinIdentity = Pick<GraphScopedSwmRecoveryDescriptor,
-  'subGraphName' | 'kaUal' | 'assertionVersion' | 'publicQuadsDigest' | 'publicQuadsCount' | 'privateMerkleRoot'>;
+  'subGraphName' | 'kaUal' | 'assertionVersion' | 'publicQuadsDigest' | 'publicQuadsCount'
+  | 'privateTripleCount' | 'privateMerkleRoot'>;
 
 function memoKey(contextGraphId: string, descriptor: FinalizedSwmTwinIdentity): string {
   return JSON.stringify([
@@ -35,6 +37,7 @@ function memoKey(contextGraphId: string, descriptor: FinalizedSwmTwinIdentity): 
     descriptor.assertionVersion,
     descriptor.publicQuadsDigest,
     descriptor.publicQuadsCount,
+    descriptor.privateTripleCount,
     descriptor.privateMerkleRoot ?? null,
   ]);
 }

@@ -46,12 +46,14 @@
 //
 // A walk that stalls is not such a cause. Each job walks every capable peer
 // and pulls the graph's shared-memory metadata from each, with further passes
-// while they make progress. When a job's walk stopped because a further pass
-// made none (`coverage-stalled`), and the attempt before it had stalled too at
-// as many snapshots or more, the sequence ends: the next job would walk the
-// same peers again and resolve nothing more. After a restart every node of a
-// network catches its subscriptions up at once, and a graph whose snapshots
-// no job completes was otherwise pulled from every peer for hours.
+// while they make progress. A job stalled when its walk reached the peers
+// through the graph's lane, stopped because a further pass made no progress
+// (`coverage-stalled`), and wrote no new shared-memory data from any peer. Two
+// such jobs in a row end the sequence: the next one would walk the same peers
+// again and write nothing more. After a restart every node of a network catches
+// its subscriptions up at once, and a graph whose snapshots no job completes
+// was otherwise pulled from every peer for hours. A walk that ran before the
+// lane was active asked nobody, so it is never counted as stalled.
 
 import type { ContextGraphReadAuthorityDecision } from '@origintrail-official/dkg-agent';
 import { selectedSharedMemoryLaneActive } from '../catchup-selected-lane.js';
@@ -138,16 +140,16 @@ function admitsRepeat(authority: ContextGraphReadAuthorityDecision): boolean {
 }
 
 /**
- * The snapshot coverage a job's shared-memory walk ended at, when the walk
- * stopped because a further pass made no progress (`coverage-stalled`).
+ * The job's walk reached its peers through the graph's lane, stopped because
+ * a further pass made no progress (`coverage-stalled`), and wrote no new
+ * shared-memory data from any of them. Progress is judged across every peer
+ * of the job, not by the one peer the coverage diagnostic describes.
  */
-function stalledSnapshotCoverage(job: CatchupJob): { resolved: number; total: number } | undefined {
+function stalledWithoutProgress(job: CatchupJob): boolean {
   const sharedMemory = job.result?.diagnostics?.sharedMemory;
-  if (sharedMemory?.continuationStopReason !== 'coverage-stalled') return undefined;
-  return {
-    resolved: sharedMemory.swmCoverage?.snapshotsResolved ?? 0,
-    total: sharedMemory.swmCoverage?.snapshotsTotal ?? 0,
-  };
+  return job.selectedLaneFoundInactive !== true
+    && sharedMemory?.continuationStopReason === 'coverage-stalled'
+    && sharedMemory.insertedDataTriples === 0;
 }
 
 /** The repeats that follow one subscribe call's job for one graph. */
@@ -162,8 +164,8 @@ class ReadinessRepeatSequence {
   #laneFoundInactive = false;
   /** The armed repeat follows a settled attempt, not an admission that could not be read. */
   #armedAfterAttempt = false;
-  /** Snapshots resolved by the last attempt, when its shared-memory walk stalled. */
-  #stalledAt: number | undefined;
+  /** Attempts in a row whose walk stalled without writing anything new. */
+  #stalledInARow = 0;
 
   constructor(caller: ContextGraphReadinessRepeatCaller) {
     this.#caller = caller;
@@ -203,7 +205,8 @@ class ReadinessRepeatSequence {
   /**
    * After an attempt settles: arm the next repeat while the graph is still
    * actively subscribed and unsynced, with shared memory requested and no
-   * denial, unless its walk stalled again without resolving more; else end.
+   * denial, unless two attempts in a row stalled without writing anything new;
+   * else end.
    * A denial is not cleared by asking again, and without shared memory
    * nothing could prove an unregistered graph.
    */
@@ -225,17 +228,16 @@ class ReadinessRepeatSequence {
         this.cancel();
         return;
       }
-      const stalled = stalledSnapshotCoverage(job);
-      if (stalled !== undefined && this.#stalledAt !== undefined && stalled.resolved <= this.#stalledAt) {
+      this.#stalledInARow = stalledWithoutProgress(job) ? this.#stalledInARow + 1 : 0;
+      if (this.#stalledInARow >= 2) {
         console.log(
-          `[catchup] not repeating the catch-up of "${this.#caller.contextGraphId}": its shared-memory walk `
-            + `stalled again at ${stalled.resolved} of ${stalled.total} snapshot(s), so another job would walk `
-            + 'every peer again for nothing; subscribe again or restart to start over',
+          `[catchup] not repeating the catch-up of "${this.#caller.contextGraphId}": two jobs in a row walked `
+            + 'its peers until no pass made progress and wrote nothing new, so another job would walk them '
+            + 'again for nothing; subscribe again or restart to start over',
         );
         this.cancel();
         return;
       }
-      this.#stalledAt = stalled?.resolved;
       this.#armNext(true);
     } catch {
       // A repeat is a convenience on top of a settled job; it must not turn

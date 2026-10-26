@@ -425,8 +425,13 @@ describe('a public graph that its subscribe job left unproven is caught up again
       `"${CG}" is still not proven synced after ${CONTEXT_GRAPH_READINESS_REPEAT_DELAYS_MS.length} repeated catch-up job(s)`,
     );
   });
-  /** An unproven round whose shared-memory walk stopped making progress at `resolved` snapshots. */
-  function stalledRound(resolved: number, total = 40): () => CatchupJobResult {
+  /**
+   * An unproven round whose shared-memory walk stopped making progress. The
+   * coverage diagnostic describes one peer (`resolved` of 40); `inserted` is
+   * the new data the job wrote from all of its peers.
+   */
+  function stalledRound(resolved: number, inserted = 0): () => CatchupJobResult {
+    const total = 40;
     return () => {
       const round = lossyEmptyRound();
       return {
@@ -435,6 +440,7 @@ describe('a public graph that its subscribe job left unproven is caught up again
           ...round.diagnostics!,
           sharedMemory: {
             ...round.diagnostics!.sharedMemory,
+            insertedDataTriples: inserted,
             continuationStopReason: 'coverage-stalled',
             swmCoverage: {
               contextGraphId: CG,
@@ -453,7 +459,7 @@ describe('a public graph that its subscribe job left unproven is caught up again
     };
   }
 
-  it('ends the chain when a job stalls again at no more snapshots than the attempt before it', async () => {
+  it('ends the chain after two jobs in a row that stalled without writing anything new', async () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     const member = memberEdge();
     const { runs } = stubRunner([stalledRound(12), stalledRound(12)]);
@@ -470,32 +476,32 @@ describe('a public graph that its subscribe job left unproven is caught up again
     );
 
     expect(log.mock.calls.flat().join('\n')).toContain(
-      `not repeating the catch-up of "${CG}": its shared-memory walk stalled again at 12 of 40 snapshot(s)`,
+      `not repeating the catch-up of "${CG}": two jobs in a row walked its peers until no pass made progress `
+        + 'and wrote nothing new',
     );
     expect(armed()).toEqual([]);
     expect(runs).toHaveLength(2);
     expect(member.subscription()).toMatchObject({ synced: false });
   });
 
-  it('keeps repeating while a stalled walk still resolves more snapshots each time', async () => {
+  it('keeps repeating while any peer still delivers, though the coverage diagnostic stays the same', async () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     const member = memberEdge();
-    const { runs } = stubRunner([stalledRound(5), stalledRound(9), stalledRound(9)]);
+    // The diagnostic peer stays at 12 of 40 throughout; the second job wrote new data from another peer.
+    const { runs } = stubRunner([stalledRound(12), stalledRound(12, 4), stalledRound(12), stalledRound(12)]);
     const api = await startRoutes(member);
     await api.finished(await api.subscribe());
 
-    fire(await waitUntil(() => armed()[0], 'the first repeat armed'));
-    await waitUntil(() => (runs.length === 2 ? true : undefined), 'the first repeat');
-    await api.finished(api.latestJobId()!);
-    // From 5 to 9 snapshots is progress.
-    fire(await waitUntil(() => armed()[0], 'the second repeat armed'));
-    await waitUntil(() => (runs.length === 3 ? true : undefined), 'the second repeat');
-    await api.finished(api.latestJobId()!);
+    for (let repeat = 1; repeat <= 3; repeat += 1) {
+      fire(await waitUntil(() => armed()[0], `repeat ${repeat} armed`));
+      await waitUntil(() => (runs.length === repeat + 1 ? true : undefined), `repeat ${repeat}`);
+      await api.finished(api.latestJobId()!);
+    }
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    // Stalled at 9 twice: no third repeat.
+    // Stalled without progress in jobs 3 and 4 only: the chain ends after them.
     expect(armed()).toEqual([]);
-    expect(runs).toHaveLength(3);
+    expect(runs).toHaveLength(4);
   });
 
   it('repeats a job that local backpressure deferred, also when the metadata pull failed', async () => {

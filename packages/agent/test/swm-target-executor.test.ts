@@ -20,6 +20,7 @@ import {
 import { ethers } from 'ethers';
 import type { FinalizedSwmTwinRetirement } from
   '../src/sync/requester/finalized-swm-twin-reconciliation.js';
+import type { LegacySwmRetirementCallerOutcomeV1 } from '../src/internal/owed-legacy-swm-retirements.js';
 import {
   SwmTargetExecutorSessionFactoryV1,
   SwmTargetExecutorV1,
@@ -455,7 +456,10 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
    * A finalized asset whose shared-memory snapshot a peer still serves: VM is
    * local with the same bytes, so a round writes the snapshot and retires it.
    */
-  async function finalizedTwinRounds(contextGraphId: string, retireMarker: () => Promise<void>) {
+  async function finalizedTwinRounds(
+    contextGraphId: string,
+    retireMarker: () => Promise<LegacySwmRetirementCallerOutcomeV1 | void>,
+  ) {
     const store = new OxigraphStore();
     stores.push(store);
     const ual = `did:dkg:hardhat:31337/0x2222222222222222222222222222222222222222/9`;
@@ -576,8 +580,12 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
     return { store, payload, vmGraph, swmGraph, retireFinalizedSwmTwin, logInfo, ctx, round };
   }
 
-  it('writes nothing in a later round for a snapshot it retired as a finalized twin', async () => {
-    const rounds = await finalizedTwinRounds('public-finalized-twin-remembered', async () => undefined);
+  it.each([
+    ['retired', 'retired'],
+    ['kept', 'kept'],
+    ['unsaid', undefined],
+  ] as const)('writes nothing in a later round for a snapshot it retired as a finalized twin (marker %s)', async (label, marker) => {
+    const rounds = await finalizedTwinRounds(`public-finalized-twin-remembered-${label}`, async () => marker);
     expect((await rounds.round()).failedPhases).toBe(0);
     expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledOnce();
 
@@ -595,10 +603,13 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
     );
   });
 
-  it('writes and retires the snapshot again when the retirement left its marker behind', async () => {
-    const rounds = await finalizedTwinRounds('public-finalized-twin-marker-left', async () => {
-      throw new Error('legacy boundary store unavailable');
-    });
+  it.each([
+    // Still running when the caller's wait ended: it may yet fail and leave its marker.
+    ['waited-out', async () => 'waited-out' as const],
+    ['not-run', async () => 'not-run' as const],
+    ['failed', async () => { throw new Error('legacy boundary store unavailable'); }],
+  ])('writes and retires the snapshot again when the marker retirement is %s', async (label, retireMarker) => {
+    const rounds = await finalizedTwinRounds(`public-finalized-twin-marker-${label}`, retireMarker);
     await rounds.round();
     await rounds.round();
     // A later pass is what retries the marker, so nothing was remembered.

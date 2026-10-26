@@ -572,6 +572,7 @@ import {
   describeOwedLegacySwmRetirementEventV1,
   owedLegacySwmRetirementsOfV1,
   peekOwedLegacySwmRetirementsV1,
+  type LegacySwmRetirementCallerOutcomeV1,
   type OwedLegacySwmRetirementsV1,
 } from './internal/owed-legacy-swm-retirements.js';
 import {
@@ -1208,14 +1209,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       assertionVersion: string | bigint;
       subGraphName?: string;
     }>,
-  ): Promise<void> {
+  ): Promise<LegacySwmRetirementCallerOutcomeV1> {
     // GH#3081 — nothing a caller does next depends on the marker. It waits a short time for the
     // retirement, which then goes on without it and is repeated if it did not get its turn. The
     // retirement stays this node's until it ended: stop() ends its wait and drains its work.
+    // Resolves with what the retirement ended with inside that wait, or `waited-out`.
     const assertionVersion = String(input.assertionVersion);
     // GH#3134 — the asset's row in its author's SWM inventory goes with the twin, detached.
     this.scheduleRfc64SwmInventoryRowRemovalAfterFinalizedTwinV1({ ...input, assertionVersion });
-    await this.owedLegacySwmRetirementsV1().retire(
+    return this.owedLegacySwmRetirementsV1().retire(
       JSON.stringify([input.contextGraphId, input.subGraphName ?? null, input.kaUal, assertionVersion]),
       (signal) => retireRfc64LegacySwmAfterFinalizedVmV1(
         this,

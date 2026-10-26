@@ -24,6 +24,11 @@ import { AsyncResource } from 'node:async_hooks';
 
 /** What one attempt ended with; `not-run` is an attempt that did not get its turn. */
 export type LegacySwmRetirementAttemptV1 = 'retired' | 'kept' | 'not-run';
+/**
+ * What the caller learns: what the first attempt ended with when it ended inside the caller's
+ * wait, or `waited-out` when it still ran. Only `retired` and `kept` leave nothing to come back for.
+ */
+export type LegacySwmRetirementCallerOutcomeV1 = LegacySwmRetirementAttemptV1 | 'waited-out';
 
 /** How long a caller waits for the retirement it asked for. */
 export const LEGACY_SWM_RETIREMENT_CALLER_WAIT_MS = 1_000;
@@ -188,10 +193,10 @@ export class OwedLegacySwmRetirementsV1 {
    * promise. A failure inside the wait is thrown to the caller, as it was when the caller waited
    * to the end. Whether the caller is still waiting or not, an attempt that did not run or
    * failed is repeated. A closed owner starts nothing: the node is stopping, and the marker
-   * stays.
+   * stays. Resolves with the caller's outcome ({@link LegacySwmRetirementCallerOutcomeV1}).
    */
-  async retire(key: string, attempt: LegacySwmRetirementAttemptFnV1): Promise<void> {
-    if (this.#closed) return;
+  async retire(key: string, attempt: LegacySwmRetirementAttemptFnV1): Promise<LegacySwmRetirementCallerOutcomeV1> {
+    if (this.#closed) return 'not-run';
     const run = this.#run;
     const first = this.#start(attempt, run);
     // The owner's part: it is told what the first attempt ended with, before the caller is.
@@ -205,7 +210,9 @@ export class OwedLegacySwmRetirementsV1 {
     });
     try {
       const settled = await Promise.race([first, waitedOut]);
-      if (settled !== WAITED_OUT && 'error' in settled) throw settled.error;
+      if (settled === WAITED_OUT) return 'waited-out';
+      if ('error' in settled) throw settled.error;
+      return settled.outcome;
     } finally {
       clearTimeout(timer);
     }

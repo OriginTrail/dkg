@@ -6,6 +6,7 @@ const asset = {
   assertionVersion: '1',
   publicQuadsDigest: 'digest-a',
   publicQuadsCount: 2,
+  privateTripleCount: 0,
 } as const;
 const version = (n: number) => ({ ...asset, assertionVersion: String(n) });
 
@@ -21,6 +22,15 @@ describe('the finalized shared-memory twins this node retired', () => {
     expect(memo.retired('cg-a', { ...asset, publicQuadsDigest: 'digest-b' })).toBe(false);
     expect(memo.retired('cg-a', { ...asset, publicQuadsCount: 3 })).toBe(false);
     expect(memo.retired('cg-a', { ...asset, privateMerkleRoot: '0x01' })).toBe(false);
+  });
+
+  it('tells apart private commitments that differ only in their triple count', () => {
+    // The finalized proof compares both the root and the count with Verified Memory.
+    const memo = new FinalizedSwmTwinMemoV1();
+    memo.remember('cg', { ...asset, privateTripleCount: 1, privateMerkleRoot: '0x0r' });
+
+    expect(memo.retired('cg', { ...asset, privateTripleCount: 1, privateMerkleRoot: '0x0r' })).toBe(true);
+    expect(memo.retired('cg', { ...asset, privateTripleCount: 2, privateMerkleRoot: '0x0r' })).toBe(false);
   });
 
   it('forgets a retirement once its entry expires', () => {
