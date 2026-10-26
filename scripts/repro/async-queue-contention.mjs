@@ -54,8 +54,10 @@
 //      node ... verdict --rule halve --a $OUT/base --b $OUT/head                         # G1 from P4: b/a <= 0.5
 //      node ... verdict --rule equal --a $OUT/base --b $OUT/head --margin <from step 2>  # AC2 path off
 //    verdict only counts a pair whose two runs share windows, load, arrival seed, observer period, calibration, seed
-//    file and host (plan 8.3: identical flags), and a rule needs 3 valid paired repeats in EVERY cell (history,
-//    observer, rung) it sees: use --where to judge one cell; it lists what else it saw.
+//    file and host (CPU count, platform, CPU model and a hash of the hostname; plan 8.3: identical flags; a summary that
+//    predates the last three cannot be confirmed to be one host and is warned about), and a rule needs 3 valid paired
+//    repeats in EVERY cell (history, observer, rung) with a run in either arm, a cell with none is incomplete and named:
+//    use --where to judge one cell; it lists what else it saw.
 // 4. AC5, history cells (observer default and paged), 3 repeats each; then verdict --rule flat (b/a <= 1.25 in 3/3):
 //      node scripts/repro/async-queue-seed-history.mjs --jobs 50k --out $OUT/seed-50k.nq.gz
 //      node ... run --calibration ... --history 0 --label h0 --repeats 3 ...
@@ -421,6 +423,9 @@ async function runOnce(c, dist, endpoint, outDir) {
     loadavgStart: os.loadavg().map((x) => Math.round(x * 100) / 100),
     platform: `${process.platform}-${process.arch}`,
     model: os.cpus()[0]?.model ?? null,
+    // a hash of the hostname: verdict pairs only runs of one machine (the CPU count, platform and model can match across
+    // two), and the summaries do not carry the name itself
+    hostId: createHash('sha256').update(os.hostname()).digest('hex').slice(0, 16),
   };
   const startedAt = new Date().toISOString();
   let schedulerWarnings = 0;
@@ -862,18 +867,18 @@ function verdictCommand(v) {
   const keyOf = rule === 'flat' ? (r) => pairKey(r, { ignoreHistory: true }) : (r) => r.key;
   const { pairs, missing } = pairRuns(A, B, keyOf, { ignoreSeed: rule === 'flat' });
   if (rule === 'aa') {
-    // three repeats of EACH cell: valid pairs of different cells do not add up
-    const { have, cells } = repeatsPerCell(pairs);
+    // three repeats of EACH cell, whatever cell has a run in either arm: valid pairs of different cells do not add up
+    const { have, cells } = repeatsPerCell(pairs, missing);
     const warnings = integrityWarnings([...A, ...B], pairs, null);
     console.log(JSON.stringify({ margin: noiseMargin(pairs), validPairs: have, cells, warnings, missing }));
     process.exit(have >= PAIRED_MIN ? 0 : 2);
   }
   const result =
     rule === 'halve'
-      ? halve(pairs)
+      ? halve(pairs, { missing })
       : rule === 'flat'
-        ? flat(pairs, { aRecords: A, bRecords: B })
-        : equivalent(pairs, margin);
+        ? flat(pairs, { aRecords: A, bRecords: B, missing })
+        : equivalent(pairs, margin, { missing });
   const g = guards(pairs);
   const warnings = integrityWarnings([...A, ...B], pairs, result);
   if (v.json) {

@@ -191,12 +191,15 @@ const config = (o = {}) => ({
   calibrationSha256: 'cal',
   seedFileSha256: null,
   cpus: 10,
+  platform: 'linux-x64',
+  cpuModel: 'Intel(R) Xeon(R) CPU',
+  hostId: 'host-a',
   ...o,
 });
 const withConfig = (o = {}, extra = {}) => ({ key: 'k0', runId: 'r', valid: true, config: config(o), ...extra });
 
 test('comparability names the settings two runs of a pair must share and only reports an env difference', () => {
-  assert.deepEqual(comparability(withConfig(), withConfig()), { differs: [], envDiffers: false });
+  assert.deepEqual(comparability(withConfig(), withConfig()), { differs: [], envDiffers: false, unverified: [] });
   const env = { DKG_STORE_QUEUE_LIMIT: '64', DKG_STORE_MAX_CONCURRENT: '2' };
   assert.equal(comparability(withConfig(), withConfig({ env })).envDiffers, false, 'key order does not matter');
   assert.equal(comparability(withConfig(), withConfig({ env: { DKG_STORE_MAX_CONCURRENT: '4' } })).envDiffers, true);
@@ -210,6 +213,9 @@ test('comparability names the settings two runs of a pair must share and only re
     calibrationSha256: 'other',
     seedFileSha256: 'seed',
     cpus: 8,
+    platform: 'darwin-arm64',
+    cpuModel: 'Apple M4',
+    hostId: 'host-b',
   });
   assert.deepEqual(comparability(withConfig(), other).differs, [
     'windows',
@@ -221,6 +227,9 @@ test('comparability names the settings two runs of a pair must share and only re
     'calibrationSha256',
     'seedFileSha256',
     'cpus',
+    'platform',
+    'cpuModel',
+    'hostId',
   ]);
   assert.equal(
     comparability(withConfig(), other, { ignoreSeed: true }).differs.includes('seedFileSha256'),
@@ -232,7 +241,47 @@ test('comparability names the settings two runs of a pair must share and only re
     ['seed', 'observerMs'],
     'but the arrival schedule and the observer load must still match',
   );
-  assert.deepEqual(comparability({}, {}), { differs: [], envDiffers: false }, 'records without a config compare equal');
+  assert.deepEqual(
+    comparability({}, {}),
+    { differs: [], envDiffers: false, unverified: ['platform', 'cpuModel', 'hostId'] },
+    'records without a config do not differ, but their host cannot be confirmed to be the same',
+  );
+});
+
+test('comparability needs one platform, CPU model and host; a host field a summary lacks is unverified', () => {
+  const on = (o) => withConfig(o);
+  // cpus=10 on both: only the platform and the CPU model tell a Linux Intel host from a macOS Apple one
+  const linux = on({ cpus: 10, platform: 'linux-x64', cpuModel: 'Intel(R) Xeon(R) CPU', hostId: null });
+  const mac = on({ cpus: 10, platform: 'darwin-arm64', cpuModel: 'Apple M4', hostId: null });
+  assert.deepEqual(comparability(linux, mac).differs, ['platform', 'cpuModel']);
+  assert.deepEqual(comparability(linux, on({ cpuModel: 'Apple M4', platform: 'linux-x64', hostId: null })).differs, [
+    'cpuModel',
+  ]);
+  assert.deepEqual(comparability(on({ hostId: 'host-a' }), on({ hostId: 'host-b' })).differs, ['hostId']);
+  assert.deepEqual(comparability(on({ hostId: 'host-a' }), on({ hostId: 'host-a' })), {
+    differs: [],
+    envDiffers: false,
+    unverified: [],
+  });
+  // a summary from before these fields were recorded: nothing to compare, so nothing differs, but nothing confirms the
+  // host either
+  const old = on({ platform: null, cpuModel: null, hostId: null });
+  assert.deepEqual(comparability(old, old), {
+    differs: [],
+    envDiffers: false,
+    unverified: ['platform', 'cpuModel', 'hostId'],
+  });
+  assert.deepEqual(
+    comparability(old, on({})).unverified,
+    ['platform', 'cpuModel', 'hostId'],
+    'one side lacking is enough',
+  );
+  assert.deepEqual(comparability(on({}), old).differs, []);
+  // unknown on one field never hides a known difference on another
+  const partial = comparability(on({ platform: null, cpuModel: 'Apple M4' }), on({ platform: 'darwin-arm64' }));
+  assert.deepEqual([partial.differs, partial.unverified], [['cpuModel'], ['platform']]);
+  const known = comparability(on({ platform: 'darwin-arm64', cpuModel: null, hostId: null }), on({ hostId: null }));
+  assert.deepEqual([known.differs, known.unverified], [['platform'], ['cpuModel', 'hostId']]);
 });
 
 test('pairRuns does not count a pair that differs in shared settings or has two valid runs of one cell', () => {
@@ -275,6 +324,38 @@ test('pairRuns does not count a pair whose runs differ in the arrival seed or th
   assert.equal(pairRuns([record(base)], [record({ ...base, observerMs: 1000 })]).pairs[0].valid, false);
 });
 
+test('pairRuns does not count a pair recorded on different hosts, however many CPUs they share', () => {
+  const record = (host) => extractRecord(summaryOf(true, 1000, { meta: { host } }));
+  const linux = { cpus: 10, platform: 'linux-x64', model: 'Intel(R) Xeon(R) CPU', hostId: 'host-a' };
+  const mac = { cpus: 10, platform: 'darwin-arm64', model: 'Apple M4', hostId: 'host-b' };
+  const pair = (a, b, opts) => pairRuns([record(a)], [record(b)], undefined, opts).pairs[0];
+  assert.deepEqual([pair(linux, linux).valid, pair(linux, linux).reasons], [true, []]);
+  // cpus=10 on both, and nothing else in the configuration differs
+  const across = pair({ ...linux, hostId: undefined }, { ...mac, hostId: undefined });
+  assert.equal(across.valid, false);
+  assert.deepEqual(across.reasons, ['the runs differ in platform, cpuModel']);
+  assert.equal(pair(linux, mac).valid, false);
+  assert.match(pair(linux, mac).reasons[0], /differ in platform, cpuModel, hostId/);
+  assert.equal(pair(linux, mac, { ignoreSeed: true }).valid, false, 'the flatness rule compares histories, not hosts');
+  // one machine model, two machines
+  assert.deepEqual(pair(linux, { ...linux, hostId: 'host-c' }).reasons, ['the runs differ in hostId']);
+  // summaries from before the identity was recorded still pair (nothing differs) but are flagged as unconfirmed
+  const old = pair({ cpus: 10 }, { cpus: 10 });
+  assert.deepEqual([old.valid, old.reasons, old.unverified], [true, [], ['platform', 'cpuModel', 'hostId']]);
+  const mixed = pair({ cpus: 10 }, linux);
+  assert.deepEqual([mixed.valid, mixed.unverified], [true, ['platform', 'cpuModel', 'hostId']]);
+  // a known difference is not hidden by an unknown field next to it
+  const half = pair({ cpus: 10, platform: 'linux-x64' }, { cpus: 10, platform: 'darwin-arm64' });
+  assert.deepEqual(
+    [half.valid, half.reasons, half.unverified],
+    [false, ['the runs differ in platform'], ['cpuModel', 'hostId']],
+  );
+  assert.deepEqual(pair(linux, linux).unverified, []);
+  // and the repeats of such a pair do not add up to a verdict
+  const pairs = [0, 1, 2].map((i) => ({ ...pair(linux, mac), key: `0|default|L3|${i}` }));
+  assert.deepEqual([halve(pairs).status, halve(pairs).have], ['incomplete', 0]);
+});
+
 /** Valid pairs [a, b] P95s per cell; the key is the pairKey of the cell and the repeat index. */
 const cellPairs = (spec) =>
   spec.flatMap(([cell, p95s]) => p95s.map(([a, b], i) => ({ key: `${cell}|${i}`, a: rec(a), b: rec(b), valid: true })));
@@ -297,10 +378,77 @@ test('a rule needs three valid paired repeats in every cell: the pairs of differ
   assert.deepEqual(incomplete.cells, { '0|default|L3': 3, '0|none|L3': 2 });
   const slow = cellPairs([['0|default|L3', three], ['0|none|L3', [[10_000, 4000], [11_000, 5501], [9000, 4500]]]]);
   assert.equal(halve(slow).status, 'fail', 'every cell is judged: one failing repeat fails the rule');
-  // a cell with no valid pair at all is not a cell of the verdict; a discarded run does not block it
+  // a cell that is in the comparison but has no valid pair is still a cell of the verdict (with 0 valid repeats): a
+  // discarded run does not make it go away
   const stray = [...cellPairs([['0|default|L3', three]]), { key: '0|none|L3|0', a: rec(1), b: rec(1), valid: false }];
-  assert.equal(halve(stray).status, 'pass');
+  const strayResult = halve(stray);
+  assert.deepEqual([strayResult.status, strayResult.have], ['incomplete', 0]);
+  assert.deepEqual(strayResult.cells, { '0|default|L3': 3, '0|none|L3': 0 });
   assert.deepEqual(repeatsPerCell([]), { cells: {}, have: 0 });
+});
+
+test('a cell with no valid pair at all makes every rule incomplete and is named with its 0 valid repeats', () => {
+  const three = [[10_000, 4000], [11_000, 5500], [9000, 4500]];
+  const history0 = cellPairs([['0|default|L3', three]]);
+  assert.equal(halve(history0).status, 'pass', 'history 0 on its own passes');
+  // history 50k: three repeats, every one of them discarded (invalid), so no valid pair in that cell
+  const history50k = cellPairs([['50k|default|L3', three]]).map((p) => ({ ...p, valid: false }));
+  const pairs = [...history0, ...history50k];
+  const expectedCells = { '0|default|L3': 3, '50k|default|L3': 0 };
+  assert.deepEqual(repeatsPerCell(pairs), { cells: expectedCells, have: 0 });
+  for (const result of [halve(pairs), equivalent(pairs, 0.5), flat(onHistories(pairs))]) {
+    assert.equal(result.status, 'incomplete', `${result.label}: never a pass with an unverified cell`);
+    assert.deepEqual([result.have, result.cells], [0, expectedCells], result.label);
+    assert.match(result.reason, /needs 3 valid paired repeats in every cell, the thinnest has 0 \(/, result.label);
+    assert.match(result.reason, /; no valid pair in 50k\|default\|L3$/, result.label);
+  }
+  // a cell that has runs in one arm only is a cell of the verdict too: pairRuns reports it as missing, not as a pair
+  const onlyInA = [{ key: '50k|default|L3|0', missingIn: 'b' }];
+  assert.deepEqual(repeatsPerCell(history0, onlyInA), {
+    cells: { '0|default|L3': 3, '50k|default|L3': 0 },
+    have: 0,
+  });
+  for (const result of [
+    halve(history0, { missing: onlyInA }),
+    equivalent(history0, 0.5, { missing: onlyInA }),
+    flat(onHistories(history0), { missing: onlyInA }),
+  ]) {
+    assert.equal(result.status, 'incomplete', result.label);
+    assert.match(result.reason, /; no valid pair in 50k\|default\|L3$/, result.label);
+  }
+  // a missing repeat of a cell that has valid pairs is not a cell of its own
+  assert.deepEqual(repeatsPerCell(history0, [{ key: '0|default|L3|9', missingIn: 'a' }]).cells, { '0|default|L3': 3 });
+});
+
+test('a valid rerun replaces a discarded repeat in the same cell, so the cell keeps its three valid pairs', () => {
+  const side = (history, repeat, valid, p95Ms) => {
+    const cell = { history, observer: 'default', rung: 'L3', repeat };
+    return { key: pairKey({ cell }), cell, valid, p95Ms, failureFrac: 0.5, completionsPerMin: 100 };
+  };
+  const base = [
+    side('0', 0, true, 10_000),
+    side('0', 1, false, 99_999),
+    side('0', 1, true, 11_000),
+    side('0', 2, true, 9000),
+  ];
+  const head = [side('0', 0, true, 4000), side('0', 1, true, 5500), side('0', 2, true, 4500)];
+  const { pairs, missing } = pairRuns(base, head);
+  assert.deepEqual(missing, []);
+  assert.deepEqual(
+    pairs.map((p) => [p.key, p.valid, p.a.p95Ms]),
+    [
+      ['0|default|L3|0', true, 10_000],
+      ['0|default|L3|1', true, 11_000],
+      ['0|default|L3|2', true, 9000],
+    ],
+    'the discarded run is replaced, not paired',
+  );
+  const result = halve(pairs, { missing });
+  assert.deepEqual([result.status, result.have, result.cells], ['pass', 3, { '0|default|L3': 3 }]);
+  // without the rerun the repeat is a pair that does not count, and the cell is one short
+  const discarded = pairRuns([base[0], base[1], base[3]], head);
+  const short = halve(discarded.pairs);
+  assert.deepEqual([discarded.pairs[1].valid, short.status, short.have], [false, 'incomplete', 2]);
 });
 
 test('halve: candidate P95 <= 0.5 x base in 3 of 3 paired repeats', () => {
@@ -585,6 +733,67 @@ test('p8cOfRun judges the 5,000-job backlog leg on the whole run, not on the mea
   });
 });
 
+test('p8cOfRun reads the exact whole-run backlog peak, not the one-second samples of it', () => {
+  const windows = { warmupMs: 30_000, measureMs: 180_000, cooldownMs: 10_000 };
+  const runMs = 220_000;
+  const horizon = windows.warmupMs + windows.measureMs + windows.cooldownMs;
+  assert.equal(horizon, runMs);
+  const admittedAt = (n, ended, prefix) =>
+    Array.from({ length: n }, (_, i) => ({
+      key: `${prefix}${i}`,
+      windowTag: 'measure',
+      rawOutcome: 'success',
+      outcome: 'success',
+      jobId: `${prefix}${i}`,
+      ended,
+    }));
+  const judged = (requests, completions = []) => p8cOfRun({ requests, completions, claimNext: [], windows, runMs });
+  const done = (prefix, t) => ({ jobId: prefix, t });
+
+  // 5,000 jobs open from the start, then one admitted at 100 ms and completed at 900 ms: the backlog reaches 5,001 for
+  // 800 ms, between the samples at t = 0 and t = 1,000 ms
+  const burst = judged([...admittedAt(5000, 0, 'open'), ...admittedAt(1, 100, 'blip')], [done('blip0', 900)]);
+  assert.deepEqual(burst.p8c, { evaluable: false, ratio: null, backlogTrip: true, trigger: true, backlogMax: 5001 });
+  assert.equal(burst.backlog.max, 5000, 'the measurement window statistics are the samples of the window, unchanged');
+
+  // 5,010 acknowledged at 219,500 ms, with the 220 s horizon and no completion: after the last whole-second sample
+  const late = judged(admittedAt(5010, 219_500, 'late'));
+  assert.deepEqual(late.p8c, { evaluable: false, ratio: null, backlogTrip: true, trigger: true, backlogMax: 5010 });
+  assert.equal(late.backlog.max, 0);
+
+  // exactly 5,000 is not above 5,000, however it is reached
+  const edgeLate = judged(admittedAt(5000, 219_500, 'edge'));
+  assert.deepEqual([edgeLate.p8c.backlogMax, edgeLate.p8c.backlogTrip, edgeLate.p8c.trigger], [5000, false, false]);
+  const edgeBurst = judged([...admittedAt(4999, 0, 'open'), ...admittedAt(1, 100, 'blip')], [done('blip0', 900)]);
+  assert.deepEqual([edgeBurst.p8c.backlogMax, edgeBurst.p8c.backlogTrip], [5000, false]);
+
+  // a completion at the instant of an admission is not a phantom peak: a job done at 500 ms hands over to one admitted
+  // at 500 ms (intervals are [admitted, completed)), so the depth never exceeds 5,000 ...
+  const handover = judged(
+    [...admittedAt(4999, 0, 'open'), ...admittedAt(1, 100, 'first'), ...admittedAt(1, 500, 'second')],
+    [done('first0', 500), done('second0', 900)],
+  );
+  assert.deepEqual([handover.p8c.backlogMax, handover.p8c.backlogTrip], [5000, false]);
+  // ... and with one millisecond of overlap it does: 5,001
+  const overlap = judged(
+    [...admittedAt(4999, 0, 'open'), ...admittedAt(1, 100, 'first'), ...admittedAt(1, 500, 'second')],
+    [done('first0', 501), done('second0', 900)],
+  );
+  assert.deepEqual([overlap.p8c.backlogMax, overlap.p8c.backlogTrip], [5001, true]);
+
+  // a job completed no later than it was acknowledged is never open: no phantom peak either
+  const instant = judged([...admittedAt(5000, 0, 'open'), ...admittedAt(1, 100, 'quick')], [done('quick0', 100)]);
+  assert.equal(instant.p8c.backlogMax, 5000);
+  const beforeAck = judged([...admittedAt(5000, 0, 'open'), ...admittedAt(1, 100, 'quick')], [done('quick0', 40)]);
+  assert.equal(beforeAck.p8c.backlogMax, 5000);
+
+  // the horizon is part of the run: a job acknowledged at the end of the cooldown counts, one after it does not
+  assert.equal(judged([...admittedAt(5000, 0, 'open'), ...admittedAt(1, horizon, 'end')]).p8c.backlogMax, 5001);
+  assert.equal(judged([...admittedAt(5000, 0, 'open'), ...admittedAt(1, horizon + 1, 'after')]).p8c.backlogMax, 5000);
+  assert.equal(judged(admittedAt(3, 0, 'x')).p8c.backlogMax, 3);
+  assert.equal(judged([]).p8c.backlogMax, 0);
+});
+
 test('validity: arrivals, drain, invariants, driver headroom, quiet idle publisher', () => {
   const worker = {
     agentErrors: 0,
@@ -740,7 +949,7 @@ const summaryOf = (valid, p95, o = {}) => ({
     distStaleSuspected: false,
     windows: { warmupMs: 30_000, measureMs: 180_000, cooldownMs: 10_000 },
     env: { DKG_STORE_MAX_CONCURRENT: '2' },
-    host: { cpus: 10 },
+    host: { cpus: 10, platform: 'linux-x64', model: 'Intel(R) Xeon(R) CPU', hostId: 'host-a' },
     calibration: { sha256: 'cal', windowsDiffer: false },
     seedFile: { sha256: 'manifest', loadedSha256: 'loaded' },
     ...o.meta,
@@ -793,6 +1002,9 @@ test('extractRecord maps a summary and ledgerMarkdown lists every run', () => {
       calibrationSha256: 'cal',
       seedFileSha256: 'loaded',
       cpus: 10,
+      platform: 'linux-x64',
+      cpuModel: 'Intel(R) Xeon(R) CPU',
+      hostId: 'host-a',
     },
     windowsDifferFromCalibration: false,
     git: { sha: '0123456789abcdef', dirty: false },
@@ -816,6 +1028,14 @@ test('extractRecord maps a summary and ledgerMarkdown lists every run', () => {
     [null, null],
     'a summary from before the schedule was recorded compares as unknown, not as a match to a known value',
   );
+  const legacyHost = extractRecord(summaryOf(true, 1, { meta: { host: { cpus: 10 } } }));
+  assert.deepEqual(
+    [legacyHost.config.cpus, legacyHost.config.platform, legacyHost.config.cpuModel, legacyHost.config.hostId],
+    [10, null, null, null],
+    'a summary from before the host identity was recorded compares as unknown, not as a match to a known host',
+  );
+  const noHost = extractRecord(summaryOf(true, 1, { meta: { host: undefined } }));
+  assert.deepEqual([noHost.config.cpus, noHost.config.platform, noHost.config.hostId], [null, null, null]);
   const table = ledgerMarkdown([good, bad]).split('\n');
   assert.equal(table.length, 4);
   // a run with no measured request has no P95 and no failure fraction: it never counts, whatever validity.ok says
@@ -890,6 +1110,19 @@ test('integrityWarnings reports what a verdict reader must see next to the resul
     "runs with windows other than their calibration's: b",
     'the base run is below the knee in k2: the halving test is weak in those repeats',
   ]);
+  // pairs whose runs do not record the host cannot be confirmed to come from one machine: one warning, naming them
+  const unconfirmed = integrityWarnings(
+    [rec('a'), rec('b')],
+    [
+      { key: 'k0', reasons: [], envDiffers: false, unverified: ['platform', 'cpuModel', 'hostId'] },
+      { key: 'k1', reasons: [], envDiffers: false, unverified: ['hostId'] },
+      { key: 'k2', reasons: [], envDiffers: false, unverified: [] },
+    ],
+    null,
+  );
+  assert.equal(unconfirmed.length, 1);
+  assert.match(unconfirmed[0], /^host identity \(platform, cpuModel, hostId\) is missing from a run of k0, k1: /);
+  assert.match(unconfirmed[0], /cannot be confirmed to come from one machine/);
 });
 
 test('walkPages walks every page and stops on a falsy cursor; the paged seam is empty until P8a/P9b', async () => {
@@ -1172,6 +1405,61 @@ test('verdict does not count a pair whose runs differ in windows, load or host, 
   assert.match(cli('verdict', '--rule', 'halve', '--a', a, '--b', otherHost).out, /the runs differ in cpus/);
 });
 
+test('verdict does not count a pair from another platform or CPU model, and warns of an unrecorded host', () => {
+  const linux = { cpus: 10, platform: 'linux-x64', model: 'Intel(R) Xeon(R) CPU', hostId: 'host-a' };
+  const mac = { cpus: 10, platform: 'darwin-arm64', model: 'Apple M4', hostId: 'host-b' };
+  const arm = (name, p95s, host) => runs(name, p95s, { meta: { windows: WINDOWS, host } });
+  const base = arm('hp-base', [10_000, 11_000, 9000], linux);
+  const same = cli('verdict', '--rule', 'halve', '--a', base, '--b', arm('hp-same', [4000, 5500, 4500], linux));
+  assert.equal(same.code, 0);
+  assert.doesNotMatch(same.out, /host identity/);
+  // the same number of CPUs, a different machine: not three valid pairs
+  const across = cli('verdict', '--rule', 'halve', '--a', base, '--b', arm('hp-mac', [4000, 5500, 4500], mac));
+  assert.equal(across.code, 2);
+  assert.match(across.out, /INCOMPLETE \(0 valid pairs, 3 needed\)/);
+  assert.match(
+    across.out,
+    /warning: pair 0\|default\|L3\|0 does not count: the runs differ in platform, cpuModel, hostId/,
+  );
+  const noHostId = { ...mac, hostId: undefined };
+  const linuxNoHostId = { ...linux, hostId: undefined };
+  const model = cli(
+    'verdict',
+    '--rule',
+    'halve',
+    '--a',
+    arm('hp-l2', [10_000, 11_000, 9000], linuxNoHostId),
+    '--b',
+    arm('hp-m2', [4000, 5500, 4500], noHostId),
+  );
+  assert.equal(model.code, 2);
+  assert.match(model.out, /the runs differ in platform, cpuModel\n/);
+  // another machine of the same kind
+  const sibling = arm('hp-twin', [4000, 5500, 4500], { ...linux, hostId: 'host-c' });
+  const twin = cli('verdict', '--rule', 'halve', '--a', base, '--b', sibling);
+  assert.equal(twin.code, 2);
+  assert.match(twin.out, /the runs differ in hostId/);
+  // summaries from before the host identity was recorded still pair, and the verdict says the host is unconfirmed
+  const old = cli(
+    'verdict',
+    '--rule',
+    'halve',
+    '--a',
+    arm('hp-old-a', [10_000, 11_000, 9000], { cpus: 10 }),
+    '--b',
+    arm('hp-old-b', [4000, 5500, 4500], { cpus: 10 }),
+  );
+  assert.equal(old.code, 0);
+  assert.match(
+    old.out,
+    /warning: host identity \(platform, cpuModel, hostId\) is missing from a run of 0\|default\|L3\|0, /,
+  );
+  // the A/A count reads the same pairs
+  const aaB = arm('hp-aa', [10_000, 11_000, 9000], mac);
+  const aa = JSON.parse(cli('verdict', '--rule', 'aa', '--a', base, '--b', aaB).out);
+  assert.equal(aa.validPairs, 0);
+});
+
 test('verdict does not count a pair whose runs differ in the arrival seed or the observer period', () => {
   const load = { seed: 7300, observerMs: 5000 };
   const a = runs('s-a', [10_000, 11_000, 9000], { cellExtra: load });
@@ -1217,6 +1505,58 @@ test('verdict needs three valid paired repeats in every cell, for the rules and 
   assert.equal(cli('verdict', '--rule', 'halve', '--a', ma, '--b', mb, '--where', 'observer=default').code, 0);
   const aaOne = cli('verdict', '--rule', 'aa', '--a', ma, '--b', mb, '--where', 'observer=default');
   assert.deepEqual([aaOne.code, JSON.parse(aaOne.out).validPairs], [0, 3]);
+});
+
+test('verdict does not leave out an included cell that has no valid pair: incomplete, naming the cell', () => {
+  const arm = (name, p95, { valid50k, with50k = true, observers = [] } = {}) => {
+    runs(name, [p95, p95, p95], { tag: 'h0-' });
+    if (with50k) runs(name, [p95, p95, p95], { history: '50k', tag: 'h50k-', valid: valid50k });
+    for (const observer of observers) runs(name, [p95, p95, p95], { observer, tag: `${observer}-` });
+    return path.join(tmp, name);
+  };
+  const base = arm('z-base', 10_000);
+  const allInvalid = arm('z-bad', 4000, { valid50k: [false, false, false] });
+  // history 0: three passing repeats; history 50k: three invalid repeats (in both arms, no pair of it counts)
+  const r = cli('verdict', '--rule', 'halve', '--a', base, '--b', allInvalid);
+  assert.equal(r.code, 2, `incomplete, never a PASS: ${r.out}`);
+  assert.match(r.out, /halve: candidate P95 <= 0\.5 x base: INCOMPLETE \(0 valid pairs, 3 needed\)/);
+  assert.match(r.out, /the thinnest has 0 \(\{"0\|default\|L3":3,"50k\|default\|L3":0\}\)/);
+  assert.match(r.out, /; no valid pair in 50k\|default\|L3\n/);
+  const json = JSON.parse(cli('verdict', '--rule', 'halve', '--a', base, '--b', allInvalid, '--json').out);
+  assert.deepEqual([json.result.status, json.result.have], ['incomplete', 0]);
+  assert.deepEqual(json.result.cells, { '0|default|L3': 3, '50k|default|L3': 0 });
+  assert.equal(cli('verdict', '--rule', 'equal', '--margin', '0.5', '--a', base, '--b', allInvalid).code, 2);
+  // --where is the way to judge the cell that has its pairs on its own: the filtered-out cell is not in the verdict
+  assert.equal(cli('verdict', '--rule', 'halve', '--a', base, '--b', allInvalid, '--where', 'history=0').code, 0);
+  assert.equal(cli('verdict', '--rule', 'halve', '--a', base, '--b', allInvalid, '--where', 'history=50k').code, 2);
+  // a cell that only one arm holds is a cell of the verdict too
+  const withoutCell = arm('z-none', 4000, { with50k: false });
+  const lopsided = cli('verdict', '--rule', 'halve', '--a', base, '--b', withoutCell);
+  assert.equal(lopsided.code, 2);
+  assert.match(lopsided.out, /; no valid pair in 50k\|default\|L3\n/);
+  assert.match(lopsided.out, /missing in b: 50k\|default\|L3\|0/);
+  assert.equal(cli('verdict', '--rule', 'halve', '--a', withoutCell, '--b', base).code, 2, 'in either arm');
+  // the A/A count is judged the same way: no noise margin from a cell with no valid pair
+  const aa = cli('verdict', '--rule', 'aa', '--a', base, '--b', allInvalid);
+  assert.equal(aa.code, 2);
+  assert.deepEqual(JSON.parse(aa.out).cells, { '0|default|L3': 3, '50k|default|L3': 0 });
+  assert.equal(JSON.parse(aa.out).validPairs, 0);
+  assert.equal(cli('verdict', '--rule', 'aa', '--a', base, '--b', allInvalid, '--where', 'history=0').code, 0);
+  // the flatness rule: observer cells (history is the arm), one of which has no valid pair
+  const lo = arm('z-lo', 1000, { with50k: false, observers: ['paged'] });
+  const hiValid = path.join(tmp, 'z-hi');
+  runs('z-hi', [1000, 1000, 1000], { history: '50k', tag: 'default-' });
+  runs('z-hi', [1000, 1000, 1000], { history: '50k', observer: 'paged', tag: 'paged-', valid: [false, false, false] });
+  const flatCells = cli('verdict', '--rule', 'flat', '--a', lo, '--b', hiValid);
+  assert.equal(flatCells.code, 2);
+  assert.match(flatCells.out, /; no valid pair in paged\|L3\n/);
+  assert.equal(cli('verdict', '--rule', 'flat', '--a', lo, '--b', hiValid, '--where', 'observer=default').code, 0);
+  // valid reruns replace the discarded repeats of a cell: the cell keeps its three valid pairs
+  const rerun = arm('z-rerun', 4000, { valid50k: [false, true, true] });
+  runs('z-rerun', [4000], { history: '50k', tag: 'h50k-rerun-', cellExtra: { repeat: 0 } });
+  const replaced = cli('verdict', '--rule', 'halve', '--a', base, '--b', rerun);
+  assert.equal(replaced.code, 0, replaced.out);
+  assert.match(replaced.out, /PASS \(3 valid pairs, 3 needed\)/);
 });
 
 test('verdict does not pick between two valid runs of a cell, and reports env, P8c and a base under the knee', () => {
