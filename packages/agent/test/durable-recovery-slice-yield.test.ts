@@ -1,3 +1,4 @@
+import { StoreContentFence } from '../src/internal/store-content-fence.js';
 import { describe, expect, it } from 'vitest';
 import {
   MemoryLayer,
@@ -131,6 +132,8 @@ async function recoverWithSpentSlices(peer: ReturnType<typeof servingPeer>) {
     durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
     settlementSliceDeadline: Date.now(),
     durableMetaContinuation,
+    storedPrefix: { read: async () => new Set(writes), assertCurrent: () => {},
+      openScope: scope => new StoreContentFence().openScope(scope) },
     fetchSyncPages: (request) => {
       if (request.phase === 'data') {
         dataRounds.push({

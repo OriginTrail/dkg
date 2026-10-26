@@ -188,6 +188,8 @@ export default defineConfig({
       "test/durable-data-round.test.ts",
       "test/durable-recovery-resume.test.ts",
       "test/durable-recovery-slice-yield.test.ts",
+      "test/durable-recovery-stored-prefix.test.ts",
+      "test/store-content-fence.test.ts",
       "test/store-lane-yield.test.ts",
       "test/durable-progress.test.ts",
       "test/gossip-publish-handler.test.ts",

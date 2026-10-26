@@ -1,3 +1,4 @@
+import { StoreContentFence } from '../src/internal/store-content-fence.js';
 import { verifiedDurableBoundaryOf, type VerifiedDurableBoundary } from '../src/sync/durable-recovery-boundary-seed.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -213,6 +214,8 @@ function createTwoRoundHarness(
       remotePeerId,
       contextGraphIds: [contextGraphId],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      storedPrefix: { read: async () => new Set(storedAssetUals), assertCurrent: () => {},
+        openScope: scope => new StoreContentFence().openScope(scope) },
       fetchSyncPages: fetch,
       durableMetaContinuation, durableResumeBoundary,
       exactAssetSelectionFor: exactAssetUals
@@ -483,6 +486,8 @@ describe('manifest-bound durable DATA continuation', () => {
     expect(original.responderSessionId).toEqual(expect.any(String));
     const manifest = createGraphScopedDurableManifestPlan(meta, contextGraphId)!;
     const offset = x[0]!.payload.length + x[1]!.payload.length;
+    // Model the second assertion already stored by the source peer.
+    harness.storedAssetUals.push(x[1]!.ual);
     const sourceKey = getSyncCheckpointKey('source-peer', contextGraphId, false, 'data');
     harness.checkpointStore.setManifestBoundOffset(sourceKey, offset, manifest.manifestDigest, Date.now(),
       graphScopedDurableManifestPrefixAtOffset(manifest, offset)!.prefixDigest);

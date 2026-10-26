@@ -6,6 +6,7 @@ import {
   ExactGraphReadError,
   readExactGraph,
   type Quad,
+  type QueryOptions,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 
@@ -45,6 +46,7 @@ export async function verifyExactGraphContent(
     expectedMerkleRoot: Uint8Array;
     expectedPublicQuadsDigest?: string;
     source: string;
+    queryOptions?: Omit<QueryOptions, 'source'>;
   },
 ): Promise<ExactGraphContentVerification> {
   let quads: Quad[];
@@ -53,7 +55,7 @@ export async function verifyExactGraphContent(
       profile: 'bounded-single-result',
       expectedQuadCount: input.publicTripleCount,
       outputGraph: '',
-      queryOptions: { source: input.source },
+      queryOptions: { ...input.queryOptions, source: input.source },
     });
   } catch (error) {
     if (

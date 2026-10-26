@@ -9,7 +9,7 @@ import { durableAssertionShareMethods } from './internal/promote/durable-asserti
 import { normalizeAgentPreparedCacheConfig } from './prepared-cache-config.js';
 import { PublicSnapshotMethods } from './dkg-agent-public-snapshot.js';
 import { CatalogRepairConditionErrorV1 } from './rfc64/catalog-repair-diagnostics-v1.js';
-import { createStorageAckLedgerTimestampWriter, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
+import type { StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
 
 import { createACKSendP2P } from './internal/storage-ack-owned-request.js';
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
@@ -469,9 +469,9 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
-import { createMutationObservedStore } from './internal/context-graph-cache-invalidating-store.js';
-import { createObservedStoreMutation } from './internal/observed-store-mutation.js';
-import { createPublishedNamedKaVmLifecycleWriter, type PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
+import type { StoreContentFence } from './internal/store-content-fence.js';
+import { createAgentStoreComposition } from './internal/agent-store-composition.js';
+import type { PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
 import { createProjectionMutationObserver } from './internal/projection-mutation-observer.js';
 import { catalogPlacementTimingV1 } from './internal/catalog-placement-timing.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
@@ -827,6 +827,7 @@ export class DKGAgent extends DKGAgentBase {
     workspaceOwnedEntities: Map<string, Map<string, string>>,
     writeLocks: Map<string, Promise<void>>,
     publicSnapshotStore?: WorkspacePublicSnapshotStore,
+    heldStoreContentFence?: StoreContentFence,
   ) {
     super(
       config,
@@ -842,6 +843,7 @@ export class DKGAgent extends DKGAgentBase {
       publicSnapshotStore,
       publishedLifecycleWriter,
       ledgerTimestampWriter,
+      heldStoreContentFence,
     );
     this.initializeVmReconcilePublicCoreTransportPreferencePolicy();
     this.configureSwmTargetExecutorSessionsV1({
@@ -1501,18 +1503,10 @@ export class DKGAgent extends DKGAgentBase {
       !adapterCanPublishFromAdvertisedSigner &&
       (!configuredPublisherAddress || publisherAddressMatchesLegacyKey),
     );
-    const executeMutation = createObservedStoreMutation(
-      () => {
-        agentRef?.invalidateListContextGraphsCache();
-      },
+    const { store: agentStore, publishedLifecycleWriter, ledgerTimestampWriter, heldContent } = createAgentStoreComposition(
+      store, () => agentRef?.invalidateListContextGraphsCache(),
       createProjectionMutationObserver(() => agentRef?.contextGraphMetaProjection),
     );
-    const agentStore = createMutationObservedStore(store, executeMutation);
-    const publishedLifecycleWriter = createPublishedNamedKaVmLifecycleWriter({
-      updateStore: store, fallbackStore: agentStore, executeMutation,
-    });
-
-    const ledgerTimestampWriter = createStorageAckLedgerTimestampWriter(store, executeMutation);
 
     const publicSnapshotStore = config.publicSnapshotStore ?? (config.publicSnapshotStoreFactory
       ? config.publicSnapshotStoreFactory(agentStore)
@@ -1619,7 +1613,7 @@ export class DKGAgent extends DKGAgentBase {
 
     const agent = new DKGAgent(
       resolvedConfig, wallet, node, agentStore, publishedLifecycleWriter, ledgerTimestampWriter, publisher, queryEngine, eventBus, chain,
-      workspaceOwnedEntities, writeLocks, publicSnapshotStore,
+      workspaceOwnedEntities, writeLocks, publicSnapshotStore, heldContent,
     );
     agentRef = agent;
     if (config.importedArtifactByteStore) {

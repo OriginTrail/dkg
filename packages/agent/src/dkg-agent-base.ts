@@ -1,9 +1,11 @@
+import type { StoreContentFence } from './internal/store-content-fence.js';
 import { mergeRpcUsageWindows } from '@origintrail-official/dkg-chain';
 import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
 import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-recovery-host.js';
 import { createRecoveryAuthority } from './durable-recovery-authority.js';
 import { RecoveryMaterializationOwner } from './durable-recovery-materialization.js';
 import { deleteSyncPageCheckpoint } from './sync/requester/page-fetch.js';
+import { createDurableHeldStore } from './durable-recovery-held-store.js';
 import { AgentWorkLifetime } from './agent-work-lifetime.js';
 import { applyStorageAckLedgerTimestamp, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
 import { applyPublishedNamedKaVmLifecycle, type PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
@@ -653,6 +655,7 @@ export class DKGAgentBase {
       storeInsert: ({ quads, signal }) => agent.insertSyncedQuadsAndInvalidateListCache(quads, {
         priority: 'background', source: 'agent.durableSync.storeInsert', signal,
       }),
+      heldStore: createDurableHeldStore(agent.store, agent.heldStoreContentFence, reconcile),
       materialization: scope => materialization.forOperation(scope),
       checkpoints: {
         deleteCheckpoint: key => deleteSyncPageCheckpoint(agent.syncCheckpoints, key),
@@ -2090,6 +2093,7 @@ export class DKGAgentBase {
     publicSnapshotStore?: WorkspacePublicSnapshotStore,
     publishedLifecycleWriter?: PublishedNamedKaVmLifecycleWriter,
     ledgerTimestampWriter?: StorageAckLedgerTimestampWriter,
+    private readonly heldStoreContentFence?: StoreContentFence,
   ) {
     this.config = config;
     this.wallet = wallet;

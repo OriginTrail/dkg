@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { StoreContentFence } from './internal/store-content-fence.js';
+import type { HeldGraphScopedAssetsRequest } from './sync/requester/stored-graph-assets.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { SyncAdmissionSource, SyncContextGraphPriorityConfig } from './sync/policy.js';
 import type { SyncOperationLane } from './sync/attempt-telemetry.js';
@@ -52,6 +54,13 @@ export interface DurableRecoveryHost {
     readonly debug: DurableSyncContext['logDebug'];
   };
   readonly storeInsert: DurableSyncContext['storeInsert'];
+  /** Which assets of a verified generation the store holds; a graph-owned round skips their DATA. */
+  readonly heldStore?: {
+    readonly read: (request: HeldGraphScopedAssetsRequest) => Promise<ReadonlySet<string>>;
+    readonly withScope: StoreContentFence['withScope'];
+    readonly openScope: StoreContentFence['openScope'];
+    reconcile?(request: HeldGraphScopedAssetsRequest, held: ReadonlySet<string>, ctx: OperationContext): Promise<void>;
+  };
   materialization(scope: RecoveryMaterializationScope): RecoveryMaterialization;
   resolveOrdinaryAuthority(ctx: OperationContext, input: DurableRecoveryInput): DurableRecoveryAuthority;
 }

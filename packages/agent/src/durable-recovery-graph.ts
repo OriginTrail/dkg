@@ -92,7 +92,6 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
     exactAssetFetchPolicyFor: exactAssetFetchPolicy?.kind !== 'ephemeral-challenge'
       ? () => exactAssetFetchPolicy
       : undefined,
-    durableMetaContinuation, durableResumeBoundary,
     stopOnBackoffWorthyFailure,
     admitVerifiedPage: page => authority.admitVerifiedPage(page),
     processDurableBatchInWorker: host.verification.processBatch,
@@ -154,5 +153,9 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
       case 'unsupported-before-start': return runDurableSyncDetailed(durableContext);
     }
   }
-  return { result: await runDurableSync(durableContext) };
+  if (!durableMetaContinuation || onVerifiedFullSnapshot) return { result: await runDurableSync(durableContext) };
+  return materialization.withHeldAssetFence(fence => runDurableSyncDetailed({
+    ...durableContext, durableMetaContinuation, durableResumeBoundary,
+    storedPrefix: host.heldStore && { read: host.heldStore.read, openScope: host.heldStore.openScope, assertCurrent: fence.assertCurrent },
+  }), signal);
 }

@@ -54,7 +54,8 @@ export function createObservedStoreMutation(
       // A mutation may have committed before its response was lost. Only an
       // outcome-tagged pre-dispatch refusal proves cache/authority state did
       // not change; every indeterminate outcome must invalidate fail-closed.
-      const indeterminate = operation !== undefined && !isStoreOperationNotStarted(error, operation);
+      const indeterminate = operation === undefined
+        ? mutation !== undefined : !isStoreOperationNotStarted(error, operation);
       if (indeterminate) invalidate();
       settle?.(indeterminate ? 'indeterminate' : 'unchanged');
       throw error;
