@@ -49,7 +49,12 @@ const rec = (p95Ms, o = {}) => ({
   failureFrac: o.failureFrac ?? 0.5,
   valid: o.valid ?? true,
   completionsPerMin: o.completionsPerMin ?? 100,
+  ...(o.git === undefined ? {} : { git: o.git }),
 });
+/** Two product revisions (meta.git as runOnce records it), and one dirty working tree of the first. */
+const REV_A = { sha: '1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', dirty: false };
+const REV_B = { sha: '2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', dirty: false };
+const REV_A_DIRTY = { ...REV_A, dirty: true };
 const pairsOf = (aVals, bVals, opts = {}) =>
   aVals.map((a, i) => ({ key: `r${i}`, a: rec(a, opts.a), b: rec(bVals[i], opts.b), valid: opts.valid?.[i] ?? true }));
 /** The runs of these pairs labelled with the histories of the arms (the flatness rule's base 0, candidate 50k). */
@@ -635,7 +640,13 @@ test('zero P95s: 0 vs 0 is a ratio of 1, a zero against a nonzero P95 is unbound
 });
 
 test('aaDeclaration: complete only with 3 valid repeats per cell and a finite margin', () => {
-  const aa = (pairs) => pairs.map(([a, b], i) => ({ key: `cell|r${i}`, a: rec(a), b: rec(b), valid: true }));
+  const aa = (pairs) =>
+    pairs.map(([a, b], i) => ({
+      key: `cell|r${i}`,
+      a: rec(a, { git: REV_A }),
+      b: rec(b, { git: REV_A }),
+      valid: true,
+    }));
   const zeros = aaDeclaration(
     aa([
       [0, 0],
@@ -680,6 +691,76 @@ test('aaDeclaration: complete only with 3 valid repeats per cell and a finite ma
     ]),
   );
   assert.match(both.reason, /thinnest has 2.*unbounded/);
+});
+
+test('aaDeclaration declares a margin only for one build: a revision difference is not noise', () => {
+  const pairsAcross = (a, b, git) =>
+    [0, 1, 2].map((i) => ({ key: `cell|r${i}`, a: rec(a, { git: git.a }), b: rec(b, { git: git.b }), valid: true }));
+  // the reproduced case: P95 1000 ms on one revision, 3000 ms on another. The margin of these pairs is 2, and the
+  // equal rule accepts the 3x slower build under it: a regression laundered into a "noise" margin
+  const across = pairsAcross(1000, 3000, { a: REV_A, b: REV_B });
+  assert.equal(noiseMargin(across), 2);
+  assert.equal(equivalent(across, 2).status, 'pass', 'what the declared margin would have let through');
+  const declared = aaDeclaration(across);
+  assert.equal(declared.status, 'incomplete');
+  assert.equal(declared.margin, null, 'no number to declare');
+  assert.equal(declared.validPairs, 3, 'the repeat count alone is complete');
+  assert.match(declared.reason, /different builds/);
+  assert.match(declared.reason, /1111111aa/, 'names the revision of --a');
+  assert.match(declared.reason, /2222222bb/, 'names the revision of --b');
+
+  // the same deviation on one build is noise and is declared
+  const same = aaDeclaration(pairsAcross(1000, 3000, { a: REV_A, b: REV_A }));
+  assert.deepEqual(same, { margin: 2, validPairs: 3, cells: { cell: 3 }, status: 'complete' });
+
+  // the dirty flag is part of the identity: a clean run and a dirty run of one commit are two builds
+  const dirty = aaDeclaration(pairsAcross(1000, 1040, { a: REV_A, b: REV_A_DIRTY }));
+  assert.equal(dirty.status, 'incomplete');
+  assert.equal(dirty.margin, null);
+  assert.match(dirty.reason, /1111111aa\b/);
+  assert.match(dirty.reason, /1111111aa\+dirty/);
+
+  // one revision in one arm, another in a single run of the same arm: still two builds
+  const mixedArm = pairsAcross(1000, 1040, { a: REV_A, b: REV_A });
+  mixedArm[1].b = rec(1040, { git: REV_B });
+  assert.match(aaDeclaration(mixedArm).reason, /different builds/);
+
+  // a run that records no identity cannot show it ran the same build: positive evidence is required, never assumed
+  for (const [what, missing] of [
+    ['no git at all', undefined],
+    ['git unavailable at run time', { sha: null, dirty: null }],
+    ['no dirty flag', { sha: REV_A.sha }],
+    ['an empty sha', { sha: '', dirty: false }],
+  ]) {
+    const one = pairsAcross(1000, 1040, { a: REV_A, b: REV_A });
+    one[2].b = rec(1040, { git: missing });
+    const r = aaDeclaration(one);
+    assert.equal(r.status, 'incomplete', `${what}: not a success`);
+    assert.equal(r.margin, null, `${what}: no margin`);
+    assert.match(r.reason, /no build identity/, what);
+    assert.doesNotMatch(r.reason, /different builds/, `${what}: nothing is known to differ`);
+  }
+  const none = aaDeclaration(pairsOf([1000, 1000, 1000], [1000, 1000, 1000]));
+  assert.equal(none.status, 'incomplete', 'records that carry no git at all');
+  assert.match(none.reason, /no build identity/);
+
+  // every run of both arms counts, the ones that did not pair included (the CLI passes the whole arms)
+  const paired = pairsAcross(1000, 1040, { a: REV_A, b: REV_A });
+  const arms = (extra) => ({
+    aRecords: paired.map((p) => p.a),
+    bRecords: [...paired.map((p) => p.b), ...extra],
+  });
+  assert.equal(aaDeclaration(paired, [], arms([rec(1000, { git: REV_A })])).status, 'complete');
+  const stray = aaDeclaration(paired, [{ key: 'cell|r3', missingIn: 'a' }], arms([rec(1000, { git: REV_B })]));
+  assert.equal(stray.status, 'incomplete');
+  assert.equal(stray.margin, null);
+  assert.match(stray.reason, /different builds/);
+
+  // ordinary A/B rules compare two revisions on purpose: they still evaluate
+  assert.equal(halve(pairsAcross(10_000, 4000, { a: REV_A, b: REV_B })).status, 'pass');
+  assert.equal(equivalent(pairsAcross(1000, 1050, { a: REV_A, b: REV_B }), 0.22).status, 'pass');
+  assert.equal(equivalent(pairsAcross(1000, 3000, { a: REV_A, b: REV_B }), 0.22).status, 'fail');
+  assert.equal(flat(onHistories(pairsAcross(1000, 1100, { a: REV_A, b: REV_B }))).status, 'pass');
 });
 
 test('guards report the candidate failure fraction and completions without gating', () => {
@@ -1523,6 +1604,65 @@ test('verdict aa prints the noise margin, equal needs it declared, ledger lists 
   assert.equal(ledger.code, 0);
   assert.equal(ledger.out.trim().split('\n').length, 2 + 3 + 2);
   assert.match(ledger.out, /aa-3-1 \| 0\/default\/L3\/r1 \| INVALID: drained, ok/);
+});
+
+test('verdict aa declares no margin across revisions; the A/B rules still compare them', () => {
+  const arm = (name, p95s, git, extra = {}) => runs(name, p95s, { meta: { git }, ...extra });
+  // three otherwise matching repeats per arm, P95 1000 ms on one revision and 3000 ms on another: before the build
+  // check the margin was 2, and `equal --margin 2` then read the 3x slower build as no change
+  const first = arm('xr-1', [1000, 1000, 1000], REV_A);
+  const second = arm('xr-2', [3000, 3000, 3000], REV_B);
+  const across = cli('verdict', '--rule', 'aa', '--a', first, '--b', second);
+  assert.equal(across.code, 2, across.out);
+  const out = JSON.parse(across.out);
+  assert.equal(out.margin, null, 'no usable margin');
+  assert.equal(out.status, 'incomplete');
+  assert.equal(out.validPairs, 3, 'the repeats are complete: the builds are what is wrong');
+  assert.match(out.reason, /different builds/);
+  assert.match(out.reason, /1111111aa/);
+  assert.match(out.reason, /2222222bb/);
+
+  // the same deviation from one revision is noise: the same-revision case stays a success
+  const sameRev = cli('verdict', '--rule', 'aa', '--a', first, '--b', arm('xr-same', [3000, 3000, 3000], REV_A));
+  assert.equal(sameRev.code, 0, sameRev.out);
+  assert.equal(JSON.parse(sameRev.out).margin, 2);
+  assert.equal(JSON.parse(sameRev.out).status, 'complete');
+
+  // a clean run against a dirty run of one commit is two builds
+  const dirty = cli('verdict', '--rule', 'aa', '--a', first, '--b', arm('xr-dirty', [1000, 1000, 1000], REV_A_DIRTY));
+  assert.equal(dirty.code, 2);
+  assert.equal(JSON.parse(dirty.out).margin, null);
+  assert.match(JSON.parse(dirty.out).reason, /1111111aa\+dirty/);
+
+  // a run that records no identity (git unavailable when it ran) is no evidence of one build
+  const unknown = cli(
+    'verdict',
+    '--rule',
+    'aa',
+    '--a',
+    first,
+    '--b',
+    arm('xr-unknown', [1000, 1000, 1000], { sha: null, dirty: null }),
+  );
+  assert.equal(unknown.code, 2);
+  assert.equal(JSON.parse(unknown.out).margin, null);
+  assert.match(JSON.parse(unknown.out).reason, /no build identity/);
+  assert.doesNotMatch(JSON.parse(unknown.out).reason, /different builds/);
+
+  // a run of another revision that did not pair (a fourth repeat) is still in the arm
+  const stray = arm('xr-stray', [1000, 1000, 1000], REV_A);
+  runs('xr-stray', [1000], { tag: 'extra-', cellExtra: { repeat: 3 }, meta: { git: REV_B } });
+  const strayRun = cli('verdict', '--rule', 'aa', '--a', first, '--b', stray);
+  assert.equal(strayRun.code, 2);
+  assert.equal(JSON.parse(strayRun.out).margin, null);
+  assert.deepEqual(JSON.parse(strayRun.out).missing, [{ key: '0|default|L3|3', missingIn: 'a' }]);
+
+  // the A/B rules compare two revisions on purpose: halve and equal still evaluate across them
+  const base = arm('xr-base', [10_000, 11_000, 9000], REV_A);
+  const head = arm('xr-head', [4000, 5500, 4500], REV_B);
+  assert.equal(cli('verdict', '--rule', 'halve', '--a', base, '--b', head).code, 0);
+  assert.equal(cli('verdict', '--rule', 'equal', '--a', first, '--b', second, '--margin', '2').code, 0);
+  assert.equal(cli('verdict', '--rule', 'equal', '--a', first, '--b', second, '--margin', '0.1').code, 1);
 });
 
 test('verdict aa exits 0 only with a finite margin: 0 vs 0 is fine, a zero against a nonzero is incomplete', () => {

@@ -493,6 +493,7 @@ test('the ledger gains the publisher columns when a run has them, and warns abou
 const prec = (o = {}) => ({
   key: 'k',
   valid: true,
+  git: { sha: '0123456789abcdef', dirty: false },
   p95Ms: 1000,
   failureFrac: 0,
   completionsPerMin: 20,
@@ -807,6 +808,12 @@ test('a zero value in an A/A pair is decided once for every family: 0 vs 0 holds
   assert.equal(noiseMargin(pickupZero), 0.1);
   assert.equal(noiseMargin(pickupZero, 'publish'), 0.1);
   assert.equal(noiseMargin(pickupZero, 'pickup'), Infinity);
+  // the one-build rule of P2a holds for every family: runs of two commits declare no margin, whatever the metric
+  const builds = pairsOn([1000, 1000, 1000], [1040, 1000, 1000], 'pickupP50Ms');
+  builds[0].b.git = { sha: 'fedcba9876543210', dirty: false };
+  const across = aaDeclaration(builds, [], { family: 'pickup' });
+  assert.deepEqual([across.status, across.margin], ['incomplete', null]);
+  assert.match(across.reason, /the runs come from different builds/);
   // a pair without the family's number is no repeat: the declaration is incomplete on the repeat count, with a finite margin
   const missing = pairsOn([1000, 1000, 1000], [1040, 1000, 1000], 'pickupP50Ms');
   missing[2].b.pickupP50Ms = null;
