@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { inside, sha256 } from './identity.mjs';
+import { withDerivedNames } from './profile-contract.mjs';
 import { namedTestDiscoveryInvocation, discoverNamedTests } from './named-test-discovery.mjs';
 import { analyzeTestSource } from '../disabled-test-scanner.mjs';
 function bytes(root, file) {
@@ -34,8 +35,10 @@ export function validateIncidentClosure(root, records, inventory, { discover = d
     assert.ok(Array.isArray(record.detectors) && record.detectors.length, 'missing detector binding');
     for (const detector of record.detectors) {
       const source = bytes(root, detector.file).toString();
-      assert.ok(source.includes(detector.anchor), `missing named detector: ${record.id}`);
-      assert.equal(discovered.filter(row => row.file === detector.file && row.name.includes(detector.anchor)).length, 1, `missing/ambiguous executable detector: ${record.id}`);
+      assert.ok(typeof detector.suite === 'string' && detector.suite.trim()
+        && typeof detector.title === 'string' && detector.title.trim(), 'missing detector suite/title');
+      const identity = withDerivedNames(detector);
+      assert.equal(discovered.filter(row => row.file === detector.file && row.name === identity.discoveryName).length, 1, `missing/ambiguous executable detector: ${record.id}`);
       const scan = analyzeTestSource(source, detector.file, { applyWaivers: false });
       assert.equal(scan.focused.length, 0, 'focused incident detector');
       assert.equal(scan.disabled.length, 0, 'disabled incident detector');
@@ -52,7 +55,7 @@ export function validateIncidentClosure(root, records, inventory, { discover = d
     const production = bound(root, proof.production).toString(); bound(root, proof.test);
     assert.ok(proof.mutation.old && proof.mutation.old !== proof.mutation.new
       && production.split(proof.mutation.old).length === 2, 'mutation no longer identifies one production guard');
-    assert.ok(record.detectors.some(row => row.file === proof.test.file && proof.test.fullName.includes(row.anchor)), 'proof tests another detector');
+    assert.ok(record.detectors.some(row => row.file === proof.test.file && proof.test.fullName === withDerivedNames(row).fullName), 'proof tests another detector');
     for (const side of ['red','green']) {
       const report = JSON.parse(bound(root, proof[side]));
       assert.equal(report.assertions.length, 1, 'proof must execute exactly the selected test');

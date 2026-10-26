@@ -29,11 +29,19 @@ for (const [name, damage] of [
   f.decision.nightly.receipt = f.write('nightly.json', f.nightly);
   assert.throws(f.verify);
 });
-for (const [field, value] of [['status','in_progress'],['conclusion','failure'],['head_sha','wrong'],['path','.github/workflows/optional.yml'],['run_attempt',2],['repository',{ full_name: 'some/fork' }],['event','pull_request'],['event','merge_group']]) {
-  test(`release refuses GitHub ${field} mismatch`, t => {
+for (const selected of ['ci', 'nightly']) for (const [field, value, reason] of [
+  ['id', 999, /wrong run ID/],
+  ['status', 'in_progress', /run is incomplete/], ['conclusion', 'failure', /run did not succeed/],
+  ['head_sha', 'wrong', /different commit/], ['path', '.github/workflows/optional.yml', /wrong workflow/],
+  ['run_attempt', 2, /wrong run attempt/], ['repository', { full_name: 'some/fork' }, /wrong run repository/],
+  ['event', 'pull_request', /candidate directly/], ['event', 'merge_group', /candidate directly/],
+]) {
+  test(`release independently refuses ${selected} ${field} mismatch: ${String(value)}`, t => {
     const f = fixture(t), read = f.options.readRun;
-    f.options.readRun = (...args) => ({ ...read(...args), [field]: value });
-    assert.throws(f.verify);
+    f.options.readRun = (id, attempt) => ({ ...read(id, attempt),
+      ...(String(id) === f.decision[selected].runId ? { [field]: value } : {}),
+    });
+    assert.throws(f.verify, reason);
   });
 }
 test('prior failed harness attempts remain blocked until a later full pass resolves them', t => {

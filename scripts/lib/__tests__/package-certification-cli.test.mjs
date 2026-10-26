@@ -104,7 +104,7 @@ for (const mode of ['publish-prepared', 'promote']) for (const mismatch of [fals
     assert.equal(calls.length, mismatch || mode === 'promote' ? 0 : f.manifest.packages.length);
     assert.ok(calls.every(args => args[0] === 'view'), 'dry-run must never publish or change dist-tags');
     if (mismatch) assert.match(result.stderr, /intended candidate checkout/);
-    else if (mode === 'promote') assert.match(result.stderr, /Missing required --evidence/);
+    else if (mode === 'promote') assert.match(result.stderr, /release decision file is required/);
     else {
       const progress = JSON.parse(result.stdout.slice(result.stdout.indexOf('{')));
       assert.equal(progress.dryRun, true);

@@ -11,8 +11,9 @@
     "detectors": [
       {
         "file": "packages/agent/test/rfc64-catalog-head-replay-peers.test.ts",
-        "anchor": "GH-3502: a change before the first replay after an empty owner restart triggers the real notice receiver",
-        "lane": "tornado-agent"
+        "lane": "tornado-agent",
+        "suite": "an agent answering a peer's replay request it cannot serve now",
+        "title": "GH-3502: a change before the first replay after an empty owner restart triggers the real notice receiver"
       }
     ],
     "status": "detector-proven",
@@ -36,8 +37,9 @@
     "detectors": [
       {
         "file": "packages/agent/test/peer-profile-follow-up-agent.test.ts",
-        "anchor": "a Core pulls the agents graph again when its connect-time pull lacked",
-        "lane": "tornado-agent"
+        "lane": "tornado-agent",
+        "suite": "follow-up pull of a peer's own agent profile",
+        "title": "a Core pulls the agents graph again when its connect-time pull lacked the peer's own profile"
       }
     ],
     "status": "detector-proven",
@@ -61,8 +63,9 @@
     "detectors": [
       {
         "file": "packages/agent/test/rfc64-unregistered-seed-fetch-agent.test.ts",
-        "anchor": "reserves window slots for non-core peers so a lone edge author is asked in the first window",
-        "lane": "tornado-agent"
+        "lane": "tornado-agent",
+        "suite": "Rfc64SeedFetchMethods replica peer selection",
+        "title": "reserves window slots for non-core peers so a lone edge author is asked in the first window"
       }
     ],
     "status": "detector-proven",
@@ -86,8 +89,9 @@
     "detectors": [
       {
         "file": "packages/agent/test/swm-shares-through-relay.test.ts",
-        "anchor": "is one reached only through a relay that grants what a Core node grants",
-        "lane": "tornado-agent"
+        "lane": "tornado-agent",
+        "suite": "a peer the node may send a share to directly",
+        "title": "is one reached only through a relay that grants what a Core node grants"
       }
     ],
     "status": "open",
@@ -108,8 +112,9 @@
     "detectors": [
       {
         "file": "packages/agent/test/agent-restart-gossip-resubscribe.test.ts",
-        "anchor": "re-subscribes a subscribed context graph and the system graphs on the fresh manager, on every restart",
-        "lane": "tornado-agent"
+        "lane": "tornado-agent",
+        "suite": "DKGAgent same-instance restart re-subscribes gossip",
+        "title": "re-subscribes a subscribed context graph and the system graphs on the fresh manager, on every restart"
       }
     ],
     "status": "open",

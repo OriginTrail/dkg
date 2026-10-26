@@ -112,14 +112,11 @@ async function commandPreparedRelease(args, mode) {
   const { preparedRelease } = await import('./lib/package-certification/publish.mjs');
   const context = await packageContext(args);
   const tags = parseTags(requireArg(args, mode === 'publish' ? 'dist-tag' : 'tags'));
-  // A canary publication supplies the bytes that qualification installs. Moving
-  // production tags requires the complete decision, including for a dry-run.
-  const evidenceFile = mode === 'promote' || tags.some(tag => ['latest', 'mainnet'].includes(tag))
-    ? path.resolve(requireArg(args, 'evidence')) : undefined;
+  const evidenceFile = typeof args.evidence === 'string' ? path.resolve(args.evidence) : undefined;
   const progress = await preparedRelease({
     ...context, mode, evidenceFile,
     tag: requireArg(args, 'tag'),
-    tags: parseTags(requireArg(args, mode === 'publish' ? 'dist-tag' : 'tags')),
+    tags,
     otp: typeof args.otp === 'string' ? args.otp : process.env.NPM_CONFIG_OTP,
     registry: typeof args.registry === 'string' ? args.registry : undefined,
     dryRun: Boolean(args['dry-run']),

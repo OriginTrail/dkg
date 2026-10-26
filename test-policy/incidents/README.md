@@ -2,7 +2,9 @@
 
 This extends the historical regression register without changing its two proven
 historical-replay profiles. `release-10.0.26.json` records five incidents, their
-classification, exact detector and required lane. `detector-proven` means the
+classification, exact detector and required lane. Detector `suite`/`title` fields
+use the historical registry’s shared name derivation; discovery and proof reports
+must match the resulting identities exactly. `detector-proven` means the
 stated component invariant has red/green evidence. It does not mean every
 reported symptom is explained or that a network release campaign passed.
 

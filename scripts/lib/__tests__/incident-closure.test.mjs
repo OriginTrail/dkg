@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { withDerivedNames } from '../regressions/profile-contract.mjs';
+import { sha256 } from '../regressions/identity.mjs';
 import { validateIncidentClosure, incidentDiscoveryInvocation } from '../regressions/incident-closure.mjs';
 const root = path.resolve(import.meta.dirname, '../../..');
 const records = JSON.parse(fs.readFileSync(path.join(root, 'test-policy/incidents/release-10.0.26.json'), 'utf8'));
-const discover = () => records.flatMap(row => row.detectors.map(d => ({ file: d.file, name: d.anchor })));
+const discover = () => records.flatMap(row => row.detectors.map(d => ({ file: d.file, name: withDerivedNames(d).discoveryName })));
 const options = { discover };
 const inventory = records.flatMap(row => row.detectors.map(d => ({ file: d.file, execution: [{ lane: d.lane, cadence: 'required' }] })));
 test('discovery uses the required config and never treats a test as a JSON output path', () => {
@@ -23,7 +25,7 @@ test('observed mutation proofs verify and unresolved incidents remain explicit',
   assert.deepEqual(status.filter(row => row.status === 'open').map(row => row.id), ['GH-3421','GH-3408']);
 });
 for (const [name, damage] of [
-  ['deleted detector', r => { r[0].detectors[0].anchor = 'never declared test'; }],
+  ['deleted detector', r => { r[0].detectors[0].title = 'never declared test'; }],
   ['changed proof hash', r => { r[0].proof.sha256 = 'bad'; }],
   ['silent closure', r => { r[3].status = 'detector-proven'; }],
   ['unknown classification', r => { r[0].classification = 'all-fixes-are-regressions'; }],
@@ -65,4 +67,31 @@ test('incident evidence cannot escape through a path or a symlink', t => {
   const target = path.join(checkout, row.detectors[0].file); fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.symlinkSync(outside, target);
   assert.throws(() => validateIncidentClosure(checkout, [row], inventory, options), /symlink escapes repository/);
+});
+
+test('incident discovery requires the exact derived suite and title', () => {
+  for (const change of [name => `prefix ${name}`, name => `${name} suffix`]) {
+    assert.throws(() => validateIncidentClosure(root, records, inventory,
+      { discover: () => discover().map(row => ({ ...row, name: change(row.name) })) }), /executable detector/);
+  }
+});
+
+test('proof assertion identities cannot extend or truncate the registered title', t => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'incident-name-proof-'));
+  t.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
+  const row = structuredClone(records[0]);
+  const proof = JSON.parse(fs.readFileSync(path.join(root, row.proof.file), 'utf8'));
+  for (const file of [proof.production.file, proof.test.file, proof.red.file, proof.green.file]) {
+    fs.mkdirSync(path.dirname(path.join(scratch, file)), { recursive: true });
+    fs.copyFileSync(path.join(root, file), path.join(scratch, file));
+  }
+  const write = (file, data) => { const bytes = JSON.stringify(data); fs.writeFileSync(path.join(scratch, file), bytes); return sha256(bytes); };
+  proof.test.fullName += ' different assertion';
+  for (const side of ['red', 'green']) {
+    const report = JSON.parse(fs.readFileSync(path.join(scratch, proof[side].file), 'utf8'));
+    report.assertions[0].fullName = proof.test.fullName;
+    proof[side].sha256 = write(proof[side].file, report);
+  }
+  row.proof.sha256 = write(row.proof.file, proof);
+  assert.throws(() => validateIncidentClosure(scratch, [row], inventory, options), /proof tests another detector/);
 });

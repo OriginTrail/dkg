@@ -295,3 +295,17 @@ test('promotion and direct stable publication cannot omit the decision or mutate
     assert.throws(() => preparedRelease(options), /decision invalid/);
   }
 });
+
+for (const dryRun of [false, true]) test(`evidence invalidated during registry acquisition blocks ${dryRun ? 'dry-run planning' : 'every mutation'}`, t => {
+  const f = fixture(t);
+  let verified = 0, acquired = 0, mutations = 0, valid = true;
+  const options = releaseOptions(f, { mode: 'promote', tags: ['mainnet'], dryRun, evidenceFile: 'decision.json',
+    verifyEvidence: () => { verified++; assert.ok(valid, 'qualification changed during acquisition'); },
+    readDist: pkg => { acquired++; valid = false; return { integrity: pkg.integrity }; },
+    runner: () => { mutations++; },
+  });
+  assert.throws(() => preparedRelease(options), /qualification changed during acquisition/);
+  assert.equal(verified, 2);
+  assert.equal(acquired, f.manifest.packages.length);
+  assert.equal(mutations, 0);
+});
