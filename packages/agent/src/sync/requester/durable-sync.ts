@@ -1,3 +1,4 @@
+import type { VerifiedDurableBoundary } from '../durable-recovery-boundary-seed.js';
 import type { DetailedDurableSyncResult } from './durable-sync-result.js';
 import { randomUUID } from 'node:crypto';
 import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
@@ -149,6 +150,7 @@ export interface DurableSyncFetchRequest {
   readonly exactAssetUals?: string[];
   /** Canonical META generation that authorizes this DATA continuation. */
   readonly manifestDigest?: DurableManifestDigest;
+  readonly durableResumeBoundary?: VerifiedDurableBoundary;
   /** Canonical descriptor-prefix proof for safe cross-generation reuse. */
   readonly manifestPrefixDigestAtOffset?: (
     offset: number,
@@ -339,6 +341,7 @@ export interface DurableSyncContext {
   exactAssetFetchPolicyFor?: (contextGraphId: string) => Exclude<ExactAssetFetchSessionPolicy, { kind: 'ephemeral-challenge' }> | undefined;
   /** Present only for the graph-owned bounded recovery runner. */
   durableMetaContinuation?: DurableMetaContinuation;
+  durableResumeBoundary?: VerifiedDurableBoundary;
   stopOnBackoffWorthyFailure?: boolean;
   processDurableBatchInWorker: (
     dataQuads: Quad[],
@@ -610,7 +613,7 @@ async function runDurableSyncWithBudget(
     fetchSyncPages,
     sinceBatchIdFor,
     exactAssetFetchPolicyFor,
-    durableMetaContinuation,
+    durableMetaContinuation, durableResumeBoundary,
     stopOnBackoffWorthyFailure = false,
     processDurableBatchInWorker,
     storeInsert,
@@ -839,6 +842,7 @@ async function runDurableSyncWithBudget(
         exactAssetUals,
         manifestDigest,
         manifestPrefixDigestAtOffset,
+        durableResumeBoundary: phase === 'data' && exactAssetUals === undefined ? durableResumeBoundary : undefined,
         // DATA safely resumes at verified graph boundaries. META is the
         // manifest that proves those boundaries, so resuming it independently
         // would return only a suffix and make the DATA prefix unverifiable.

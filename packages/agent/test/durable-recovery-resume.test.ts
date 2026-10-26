@@ -9,7 +9,7 @@ import {
   durableBoundaryIdentity,
   liveDurableBoundarySource,
   preferVerifiedDurableBoundary,
-  seedVerifiedDurableBoundary,
+  seedVerifiedDurableBoundary as installSeed,
   takeRejectedResumeOffset,
   verifiedDurableBoundaryOf,
 } from '../src/sync/durable-recovery-boundary-seed.js';
@@ -18,6 +18,7 @@ import {
   DurableRecoveryRunner,
   type DurableRecoveryRunnerDependencies,
 } from '../src/sync/durable-recovery-runner.js';
+import { deleteSyncPageCheckpoint } from '../src/sync/requester/page-fetch.js';
 import type { DurableMetaContinuation } from '../src/sync/requester/durable-sync.js';
 
 const GRAPH = 'resume-across-peers';
@@ -27,6 +28,14 @@ const PREFIX_10 = `sha256:${'c3'.repeat(32)}` as const;
 const PREFIX_20 = `sha256:${'d4'.repeat(32)}` as const;
 
 const dataKey = (peerId: string) => getSyncCheckpointKey(peerId, GRAPH, false, 'data');
+
+const seedVerifiedDurableBoundary = (
+  store: MemorySyncCheckpointStore, key: string, boundary: Parameters<typeof installSeed>[2],
+) => installSeed(store, key, boundary, {
+  manifestDigest: GENERATION,
+  prefixDigestAtOffset: () => boundary?.manifestPrefixDigest,
+  clearCheckpoint: () => deleteSyncPageCheckpoint(store, key),
+});
 
 type Slice = (
   peerId: string,
@@ -48,7 +57,8 @@ function runner(peers: string[], slices: Record<string, Slice[]>, store = new Me
     isPrivateContextGraph: async () => false,
     orderPeerIds: (peerIds) => [...peerIds],
     isSyncCapable: async () => true,
-    executeSlice: async (peerId, continuation) => {
+    executeSlice: async (peerId, continuation, boundary) => {
+      seedVerifiedDurableBoundary(store, dataKey(peerId), boundary);
       atSliceStart.push({ peerId, checkpoint: store.get(dataKey(peerId)) });
       const next = slices[peerId]?.shift();
       if (!next) throw new Error(`no scripted slice left for ${peerId}`);
@@ -102,7 +112,7 @@ describe('durable recovery continues a verified prefix with another peer', () =>
       manifestPrefixDigest: PREFIX_10,
     });
     expect(f.atSliceStart[2]!.checkpoint?.responderSessionId).toBeUndefined();
-    expect(f.info).toContainEqual(expect.stringContaining('from verified offset 10'));
+    expect(f.info).toContainEqual(expect.stringContaining('verified offset 10'));
   });
 
   it('remembers the boundary for a later owner run and peers that are behind it', async () => {

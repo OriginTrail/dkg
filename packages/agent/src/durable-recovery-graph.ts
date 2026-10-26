@@ -43,7 +43,7 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
     settlementSliceTimeoutMs,
     signal,
     isCurrent,
-    durableMetaContinuation,
+    durableMetaContinuation, durableResumeBoundary,
   } = options;
   const exactAssetFetchPolicy = options.exactAssetFetchPolicy;
   const exactAssetSelection = exactAssetFetchPolicy?.selection;
@@ -92,7 +92,7 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
     exactAssetFetchPolicyFor: exactAssetFetchPolicy?.kind !== 'ephemeral-challenge'
       ? () => exactAssetFetchPolicy
       : undefined,
-    durableMetaContinuation,
+    durableMetaContinuation, durableResumeBoundary,
     stopOnBackoffWorthyFailure,
     admitVerifiedPage: page => authority.admitVerifiedPage(page),
     processDurableBatchInWorker: host.verification.processBatch,

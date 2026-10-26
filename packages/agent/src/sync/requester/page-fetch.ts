@@ -1,3 +1,5 @@
+export type { SyncPageFetchOptions } from './sync-page-fetch-options.js';
+import { seedVerifiedDurableBoundary, type VerifiedDurableBoundary } from '../durable-recovery-boundary-seed.js';
 import {
   assertSyncWorkAdmission,
   composeSyncWorkAdmission,
@@ -405,47 +407,6 @@ class AdaptiveSyncPageSizer {
   }
 }
 
-/**
- * Optional modifiers for one Agent-owned page fetch.
- *
- * Keep these named: checkpoint identity, cancellation, recovery semantics and
- * accumulation ceilings are independent concerns. A positional tail made it
- * too easy for a new modifier to occupy an older modifier's slot.
- */
-export interface SyncPageFetchOptions {
-  readonly workAdmission?: SyncWorkAdmission;
-  readonly snapshotRef?: string;
-  readonly sinceBatchId?: string;
-  readonly signal?: AbortSignal;
-  readonly recovery?: boolean;
-  readonly forceFreshSession?: boolean;
-  /** Completed canonical META generation that defines a durable DATA plan. */
-  readonly manifestDigest?: DurableManifestDigest;
-  /** Canonical prefix proof for any candidate checkpoint offset. */
-  readonly manifestPrefixDigestAtOffset?: (
-    offset: number,
-  ) => DurableManifestPrefixDigest | undefined;
-  readonly assetUals?: string[];
-  /**
-   * Permit the selected-SWM transfer owner to retain a validated metadata
-   * prefix after a retryable transport interruption. Checkpoint identity is
-   * intentionally independent of this transfer policy.
-   */
-  readonly returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
-  readonly requesterScope?: SyncCheckpointScope;
-  /** Override used by proof-only callers that own a private in-memory store. */
-  readonly checkpointStore?: SyncCheckpointStore;
-  /** Proof-only requester state is invocation-local and must not survive this call. */
-  readonly ephemeralRequesterState?: boolean;
-  readonly maxAcceptedQuads?: number;
-  readonly maxAcceptedHeapBytesEstimate?: number;
-  /**
-   * Soft owner boundary after a page made forward progress, given the rows and
-   * estimated heap retained so far and the page's own rows. True yields an
-   * incomplete prefix without a timeout; callers still verify and checkpoint.
-   */
-  readonly shouldStopAfterPage?: (progress: SyncPageProgress) => boolean;
-}
 
 export class SyncPageAccumulationLimitError extends Error {
   readonly code = 'SYNC_PAGE_ACCUMULATION_LIMIT' as const;
@@ -503,6 +464,7 @@ interface FetchSyncPagesParams {
   forceFreshSession?: boolean;
   /** Enforces generation identity for durable DATA continuation state. */
   manifestDigest?: DurableManifestDigest;
+  durableResumeBoundary?: VerifiedDurableBoundary;
   /** Allows a changed generation to retain a cryptographically identical prefix. */
   manifestPrefixDigestAtOffset?: (
     offset: number,
@@ -666,7 +628,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
     checkpointStore,
     forceFreshSession,
     manifestDigest,
-    manifestPrefixDigestAtOffset,
+    manifestPrefixDigestAtOffset, durableResumeBoundary,
     recovery,
     buildSyncRequest,
     sinceBatchId,
@@ -704,6 +666,12 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
   if (forceFreshSession) {
     checkpointStore.delete(checkpointKey);
     unfinishedSyncResponderSessions.delete(checkpointKey);
+  }
+  if (!forceFreshSession && !includeSharedMemory && phase === 'data' && assetUals === undefined) {
+    seedVerifiedDurableBoundary(checkpointStore, checkpointKey, durableResumeBoundary, {
+      manifestDigest, prefixDigestAtOffset: manifestPrefixDigestAtOffset,
+      clearCheckpoint: () => deleteSyncPageCheckpoint(checkpointStore, checkpointKey),
+    });
   }
   let checkpoint = checkpointStore.get(checkpointKey);
   const savedPrefixDigest = checkpoint && manifestDigest

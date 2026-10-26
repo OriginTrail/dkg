@@ -23,7 +23,7 @@ import {
 } from './durable-recovery-coordinator.js';
 import { deleteSyncPageCheckpoint } from './requester/page-fetch.js';
 import type { DurableMetaContinuation } from './requester/durable-sync.js';
-import { DurableGraphResumePolicy, takeRejectedResumeOffset } from './durable-recovery-boundary-seed.js';
+import { DurableGraphResumePolicy, takeRejectedResumeOffset, type VerifiedDurableBoundary } from './durable-recovery-boundary-seed.js';
 
 export interface DurableRecoveryExecution {
   readonly outcome: DurableRecoveryContinuationOutcome;
@@ -64,6 +64,7 @@ export interface DurableRecoveryRunnerDependencies {
   executeSlice(
     peerId: string,
     metaContinuation: DurableMetaContinuation,
+    durableResumeBoundary?: VerifiedDurableBoundary,
   ): Promise<DurableSyncResult>;
   logDebug(message: string): void;
   logInfo(message: string): void;
@@ -324,8 +325,8 @@ export class DurableRecoveryRunner {
         'data',
       );
       const seed = resume.seed(candidate.peerId, checkpointKey);
-      if (seed.kind === 'seeded') {
-        deps.logInfo(`Durable recovery for "${contextGraphId}" continues with ${candidate.peerId.slice(-8)} from verified offset ${seed.offset}`);
+      if (seed.kind === 'candidate') {
+        deps.logInfo(`Durable recovery for "${contextGraphId}" offers ${candidate.peerId.slice(-8)} verified offset ${seed.boundary.offset}`);
       }
       const before = deps.checkpointStore.get(checkpointKey);
       const health = this.healthFor(contextGraphId, candidate.peerId);
@@ -339,7 +340,7 @@ export class DurableRecoveryRunner {
           metaContinuation = this.createMetaContinuation();
           metaContinuations.set(candidate.peerId, metaContinuation);
         }
-        lastResult = await deps.executeSlice(candidate.peerId, metaContinuation);
+        lastResult = await deps.executeSlice(candidate.peerId, metaContinuation, seed.kind === 'candidate' ? seed.boundary : undefined);
       } catch (error) {
         lastResult = createFailedPeerDurableSyncResult();
         deps.logWarn(
@@ -351,7 +352,7 @@ export class DurableRecoveryRunner {
       recordPeerSlice(candidate.peerId, lastResult);
       const after = deps.checkpointStore.get(checkpointKey);
       resume.recordSlice({ peerId: candidate.peerId, checkpointKey, before, after,
-        rejectedOffset: takeRejectedResumeOffset(metaContinuations.get(candidate.peerId)), seeded: seed.kind === 'seeded' });
+        rejectedOffset: takeRejectedResumeOffset(metaContinuations.get(candidate.peerId)), candidate: seed.kind === 'candidate' ? seed.boundary : undefined });
       const manifestDigest = after?.manifestDigest ?? before?.manifestDigest;
       const checkpointOffset = after?.offset ?? before?.offset ?? 0;
       if (manifestDigest && manifestDigest !== owner.manifestDigest) {

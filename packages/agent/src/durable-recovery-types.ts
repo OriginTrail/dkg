@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { VerifiedDurableBoundary } from './sync/durable-recovery-boundary-seed.js';
 import { type DurableRecoveryInput } from './durable-recovery-authority.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
@@ -63,6 +64,7 @@ export type DurableRecoveryOptions = {
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
   /** Owner-private retained META prefix for bounded durable recovery. */
   durableMetaContinuation?: DurableMetaContinuation;
+  durableResumeBoundary?: VerifiedDurableBoundary;
   /** Admission override for foreground VM recovery. */
   priority?: number;
   /**
@@ -130,6 +132,7 @@ export type DurableGraphOptions = {
   signal?: AbortSignal;
   isCurrent?: () => boolean;
   durableMetaContinuation?: DurableMetaContinuation;
+  durableResumeBoundary?: VerifiedDurableBoundary;
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
 };
 
