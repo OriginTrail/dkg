@@ -53,11 +53,13 @@
 // A run is valid only if the measure window saw requests (measurementObserved), the worker side did its job
 // (workerContractOk, dataPlaneReplayed), the load drained, every admission write the queue left running past its caller's
 // deadline settled before the ground truth was read (admissionsSettled), and a seed file hashed as its manifest says.
-// The P8c backlog leg reads the largest active backlog of the whole run (warmup to cooldown); worker.backlog stays the
-// measurement window's. A run with a publisher stream must also show its own evidence: requests in the window, no runner
-// error, jobs claimed, the handler's work matching the jobs finished (publisherBodyReplayed), no retried or recovered job
-// (the handler never fails, and a record keeps its last claim only), and the probes and ACKs that were switched on
-// having run.
+// The P8c backlog leg reads the largest active backlog of the whole workload (warmup to cooldown); worker.backlog stays
+// the measurement window's. The P8c claimNext windows (first and last 5 min) are anchored to that same workload
+// horizon, never to when the run ended: claims after it are shutdown, not workload. meta.timing records the horizon,
+// the drain after it and the run's total, apart from every window. A run with a publisher stream must also show its own
+// evidence: requests in the window, no runner error, jobs claimed, the handler's work matching the jobs finished
+// (publisherBodyReplayed), no retried or recovered job (the handler never fails, and a record keeps its last claim
+// only), and the probes and ACKs that were switched on having run.
 //
 // Publisher metrics (summary.publish, plan D-15/D-16, see pickup.mjs): pick-up is accepted -> first claim over the jobs
 // accepted in the measure window, the run's value its p50, a job nobody claimed by the end of the run right-censored
@@ -79,6 +81,8 @@
 //      node ... run --blazegraph-url $URL --calibration $OUT/calib/calibration.json --label aa-1 --repeats 3 \
 //           --out $OUT/aa-1                                                              (and aa-2)
 //      node ... verdict --rule aa --a $OUT/aa-1 --b $OUT/aa-2                            # prints {"margin": ...}
+//    exit 0 only with 3 valid paired repeats per cell AND a finite margin: an A/A pair with a P95 of 0 against a
+//    nonzero one deviates without bound, so it is INCOMPLETE (exit 2, margin null, the reason in the output)
 // 3. A/B: run THIS script file from the base and the head worktree (rebuild each worktree's packages first), same
 //    calibration file, same flags and env except the knob under test, alternating base and head per repeat (ABBA):
 //      node ... verdict --rule halve --a $OUT/base --b $OUT/head                         # G1 from P4: b/a <= 0.5
@@ -156,9 +160,9 @@ import {
 } from './async-queue-contention/publisher.mjs';
 import {
   FAMILIES,
-  PAIRED_MIN,
   PUBLISH_RUNGS,
   RUNGS,
+  aaDeclaration,
   admissionSummary,
   equivalent,
   extractRecord,
@@ -172,12 +176,10 @@ import {
   ledgerMarkdown,
   median,
   noWorse,
-  noiseMargin,
   p8cOfRun,
   pairKey,
   pairRuns,
   pickReproductionRung,
-  repeatsPerCell,
   summarize,
   validity,
   withMetric,
@@ -763,6 +765,7 @@ async function runOnce(c, dist, endpoint, outDir) {
             maxMs: Math.round((loopMonitor.max / 1e6) * 10) / 10,
           };
           await sleepUntil(world, window.to + c.cooldownMs);
+          const horizonReachedAt = performance.now() - world.t0;
           producers.stop(); // an arrival overdue at the horizon is still issued, so none is missing from the stats
           pubProducers.stop();
           readers.stop();
@@ -782,7 +785,14 @@ async function runOnce(c, dist, endpoint, outDir) {
           await publisherSide.stop();
           running = false;
           clearInterval(sampler);
-          const runMs = performance.now() - world.t0; // the publisher can no longer claim: the censoring time of an unclaimed job
+          // the shutdown after the workload horizon: reported on its own, it is no input to any window. The publisher can
+          // no longer claim at runMs: the censoring time of an unclaimed job
+          const runMs = performance.now() - world.t0;
+          const timing = {
+            horizonMs,
+            drainMs: Math.round(runMs - horizonReachedAt),
+            runMs: Math.round(runMs),
+          };
 
           // ground truth: which request keys became persisted jobs (read off the unscheduled seed store), once the
           // admission writes the queue left running past their callers' deadline have settled
@@ -819,7 +829,6 @@ async function runOnce(c, dist, endpoint, outDir) {
             completions: world.completions,
             claimNext: world.claimMs,
             windows: { warmupMs: c.warmupMs, measureMs: c.measureMs, cooldownMs: c.cooldownMs },
-            runMs,
           });
           const counters = worker?.supervisor.getCounters() ?? {};
           const rejected = (cap) =>
@@ -954,6 +963,7 @@ async function runOnce(c, dist, endpoint, outDir) {
                 liftModel: c.liftModel,
               },
               windows: { warmupMs: c.warmupMs, measureMs: c.measureMs, cooldownMs: c.cooldownMs },
+              timing,
               calibration: c.calibration,
               // sha256 is the manifest's, loadedSha256 the hash of the bytes this run loaded (validity.seedFileVerified
               // compares them)
@@ -1274,19 +1284,11 @@ function verdictCommand(v) {
   const { pairs, missing } = pairRuns(A, B, keyOf, { ignoreSeed: rule === 'flat', ignoreLiftSeed: rule === 'flat' });
   if (rule === 'aa') {
     // three repeats of EACH cell, whatever cell has a run in either arm: valid pairs of different cells do not add up
-    const judged = withMetric(pairs, family, { minSamples });
-    const { have, cells } = repeatsPerCell(judged, missing);
-    const warnings = integrityWarnings([...A, ...B], judged, null);
-    console.log(
-      JSON.stringify({
-        margin: noiseMargin(pairs, family, { minSamples }),
-        validPairs: have,
-        cells,
-        warnings,
-        missing,
-      }),
-    );
-    process.exit(have >= PAIRED_MIN ? 0 : 2);
+    // and a finite margin: an unbounded A/A deviation (a zero value against a nonzero one, in any metric) declares nothing
+    const declaration = aaDeclaration(pairs, missing, { family, minSamples });
+    const warnings = integrityWarnings([...A, ...B], withMetric(pairs, family, { minSamples }), null);
+    console.log(JSON.stringify({ ...declaration, warnings, missing }));
+    process.exit(declaration.status === 'complete' ? 0 : 2);
   }
   const options = { missing, family, minSamples };
   // the pairs the rule can judge: one whose runs lack the metric says why among the warnings
