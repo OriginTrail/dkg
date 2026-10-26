@@ -14,8 +14,12 @@ test('catalog process-death campaign is required once in the reserved agent side
   assert.equal(steps.length, 1, 'the parent campaign must run, not the disposable worker directly');
   assert.equal(steps[0].if, 'matrix.sidecars');
   assert.notEqual(steps[0]['continue-on-error'], true);
-  assert.ok(steps[0]['timeout-minutes'] > 0 && steps[0]['timeout-minutes'] <= job['timeout-minutes']);
-  assert.equal(CI_MATRICES['tornado-agent'].include.filter(({ sidecars }) => sidecars).length, 1);
+  assert.equal(job['timeout-minutes'], '${{ matrix.timeoutMinutes }}');
+  const selected = CI_MATRICES['tornado-agent'].include.filter(({ sidecars }) => sidecars);
+  assert.equal(selected.length, 1);
+  assert.ok(Number.isInteger(steps[0]['timeout-minutes']) && steps[0]['timeout-minutes'] > 0);
+  assert.ok(selected.every(({ timeoutMinutes }) => Number.isInteger(timeoutMinutes)
+    && steps[0]['timeout-minutes'] <= timeoutMinutes));
   const route = JSON.parse(read('test-policy/test-routes.json'))
     .find(({ pattern }) => pattern === 'packages/agent/campaigns/catalog-durable-head.test.ts');
   assert.equal(route.cadence, 'required');

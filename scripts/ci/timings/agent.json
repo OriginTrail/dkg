@@ -199,6 +199,7 @@
     "test/e2e-sub-graphs.test.ts": 11345,
     "test/e2e-subscription-persist-lifecycle.test.ts": 9998,
     "test/e2e-swm-relay-only-core-holder.test.ts": 70793,
+    "test/e2e-swm-relay-only-curated-member.test.ts": 90000,
     "test/e2e-swm-relay-only-owner-via-core.test.ts": 45116,
     "test/e2e-swm-relay-only.test.ts": 115299,
     "test/e2e-workspace.test.ts": 10607,

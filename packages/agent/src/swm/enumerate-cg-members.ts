@@ -99,13 +99,15 @@ interface CGMemberEnumerationBase {
   readonly substrateEligibleMembers?: readonly string[];
   /**
    * Peers that follow a public CG's shared memory without being topic
-   * subscribers (see `shared-memory-followers.ts`), already filtered by
-   * {@link CGMemberEnumeratorDeps.isPeerDialable}. GossipSub does not run
-   * over a relayed connection, so a direct send is their only delivery path:
-   * the fan-out sends to them whatever tier it chose for the subscribers and
-   * without the narrowing it applies to subscribers. Set only for a public
-   * CG and only when there is one; read on every `enumerate()` call and
-   * never held in the cache.
+   * subscribers (see `shared-memory-followers.ts`), and the connected peers
+   * of the agents on its allowlist, subscribers or not (#3421), already
+   * filtered by {@link CGMemberEnumeratorDeps.isPeerDialable}. GossipSub does
+   * not run over a relayed connection, so a direct send is a follower's only
+   * delivery path, and a member is one of the graph's writers: the fan-out
+   * sends to them whatever tier it chose for the subscribers and without the
+   * narrowing it applies to subscribers. Set only for a public CG and only
+   * when there is one; read on every `enumerate()` call and never held in the
+   * cache.
    */
   readonly directFollowers?: readonly string[];
 }
@@ -251,6 +253,14 @@ export interface CGMemberEnumeratorDeps {
    * roster is authoritative.
    */
   getSharedMemoryFollowers?: (cgId: string) => readonly string[];
+  /**
+   * The connected peers of the agents on a public CG's allowlist (#3421): the
+   * members of a curated public graph (see `public-allowlist-peers.ts`). They
+   * are returned with the {@link CGMemberEnumeration.directFollowers}, whether
+   * or not they subscribe, and pass {@link isPeerDialable} like them. Read on
+   * every `enumerate()` call, outside the cache; a failed read adds none.
+   */
+  getAllowlistedAgentPeers?: (cgId: string) => Promise<readonly string[]>;
   /**
    * Lazy accessor for our own peer ID. Always excluded from the
    * returned member set — we don't fan-out to ourselves (the local
@@ -470,13 +480,15 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
    * path; the snapshot would still list it and it would be left without one.
    */
   async function directFollowersOf(cgId: string, resolved: ResolvedMembers): Promise<string[]> {
-    if (!resolved.isPublic || !deps.getSharedMemoryFollowers) return [];
-    const followers = deps.getSharedMemoryFollowers(cgId);
-    if (followers.length === 0) return [];
+    if (!resolved.isPublic) return [];
+    const followers = deps.getSharedMemoryFollowers?.(cgId) ?? [];
+    const members = await deps.getAllowlistedAgentPeers?.(cgId).catch(() => []) ?? [];
+    if (followers.length === 0 && members.length === 0) return [];
     const subscribers = new Set(deps.getTopicSubscribers(deps.topicForCG(cgId)));
-    return dialable(
-      dedupAndExcludeSelf(followers, deps.getSelfPeerId()).filter((peerId) => !subscribers.has(peerId)),
-    );
+    return dialable(dedupAndExcludeSelf(
+      [...members, ...followers.filter((peerId) => !subscribers.has(peerId))],
+      deps.getSelfPeerId(),
+    ));
   }
 
   /**

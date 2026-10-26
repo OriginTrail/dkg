@@ -1,3 +1,4 @@
+import type { QueryOptions } from './query-options.js';
 import { shareJobsPath, shareReconciliationPath } from './share-job-client-paths.js';
 import { createEntityClient } from './entity-search/client.js';
 import { readFile } from 'node:fs/promises';
@@ -9,7 +10,7 @@ import type {
   RandomSamplingDisabledReason,
 } from '@origintrail-official/dkg-agent';
 import type {
-  ShareReconciliationInput, ShareReconciliationResult,
+  ShareReconciliationInput, ShareReconciliationResult, AssertionPullFromOptions,
   AsyncLiftRetryOutcome,
   AsyncPreparedPublishPayload,
   JournalReadResult,
@@ -31,14 +32,14 @@ import {
   finalizedPublishOptionsPayload,
   type KnowledgeAssetFinalizedPublishOptions,
 } from './finalized-publish-options.js';
-import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
-import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import { parseRegisterPcaAgentResult, type RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import {
   serializeStatusQuery,
   type StatusQueryOptions,
   type StoreQuadsStatusFields,
   type StoreReachabilityFields,
 } from './status-store-quads-wire.js';
+import type { DaemonRuntimeStatusFields } from './status-runtime-wire.js';
 import type {
   CatchupContextGraphIdentity,
   CatchupStatusResponse,
@@ -440,7 +441,7 @@ export interface RelayStatusResponse {
   configuredAnnounceAddresses: string[];
 }
 
-export interface DaemonStatusResponse extends StoreQuadsStatusFields, StoreReachabilityFields {
+export interface DaemonStatusResponse extends StoreQuadsStatusFields, StoreReachabilityFields, DaemonRuntimeStatusFields {
   name: string;
   peerId: string;
   nodeRole?: string;
@@ -1018,7 +1019,7 @@ export class ApiClient {
     contextGraphId: string,
     name: string,
     layer: 'swm' | 'vm',
-    options?: { subGraphName?: string; onConflict?: 'reject' | 'replace' },
+    options?: AssertionPullFromOptions,
   ): Promise<Record<string, unknown>> {
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/pull-from`, { contextGraphId, layer, ...(options ?? {}) });
   }
@@ -1718,25 +1719,7 @@ export class ApiClient {
   async query(
     sparql: string,
     contextGraphId?: string,
-    opts?: {
-      graphSuffix?: string;
-      includeSharedMemory?: boolean;
-      includeContextGraphPartitions?: boolean;
-      view?: 'working-memory' | 'shared-working-memory' | 'verifiable-memory';
-      agentAddress?: string;
-      assertionName?: string;
-      subGraphName?: string;
-      verifiedGraph?: string;
-      minTrust?:
-        | 'SelfAttested'
-        | 'Endorsed'
-        | 'PartiallyVerified'
-        | 'ConsensusVerified'
-        | 0
-        | 1
-        | 2
-        | 3;
-    },
+    opts?: QueryOptions,
   ): Promise<{ result: QueryResult }> {
     return this.post('/api/query', {
       sparql,
@@ -1744,6 +1727,7 @@ export class ApiClient {
       graphSuffix: opts?.graphSuffix,
       includeSharedMemory: opts?.includeSharedMemory,
       includeContextGraphPartitions: opts?.includeContextGraphPartitions,
+      includeSharedMemoryMeta: opts?.includeSharedMemoryMeta,
       view: opts?.view,
       agentAddress: opts?.agentAddress,
       assertionName: opts?.assertionName,
@@ -2130,20 +2114,20 @@ export class ApiClient {
   }
 
   /**
-   * Forward a previously-signed join delegation to the curator over
-   * P2P. The daemon dials `curatorPeerId` directly (DHT-resolved if
-   * not currently connected). Returns the delivery count so callers can detect
-   * "no curator reachable" without inspecting log output.
+   * Forward a previously-signed join delegation to the curator over P2P (the daemon dials
+   * `curatorPeerId` directly). Returns the delivery count so callers can detect "no curator
+   * reachable"; `reRequest` sends a request even while an approval's member list is pending.
    */
   async requestJoin(
     contextGraphId: string,
     delegation: unknown,
     curatorPeerId: string,
     agentName?: string,
+    options: { reRequest?: boolean } = {},
   ): Promise<ContextGraphJoinResult> {
     return this.post(
       `/api/context-graph/${encodeURIComponent(contextGraphId)}/request-join`,
-      { delegation, curatorPeerId, ...(agentName ? { agentName } : {}) },
+      { delegation, curatorPeerId, ...(agentName ? { agentName } : {}), ...(options.reRequest ? { reRequest: true } : {}) },
     );
   }
 

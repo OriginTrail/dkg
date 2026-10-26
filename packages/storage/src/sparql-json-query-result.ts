@@ -1,11 +1,17 @@
 import { formatCanonicalRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
-import { isSafeIri } from '@origintrail-official/dkg-core';
 import {
   isOrdinaryDataRecord,
   readOwnEnumerableDataProperty,
   snapshotDenseDataArray,
   snapshotExactOrdinaryDataRecord,
 } from './closed-data-snapshot.js';
+import {
+  createSparqlResultIriValidator,
+  isSafeSparqlResultIri,
+  MAX_CACHED_SPARQL_IRI_VARIABLES,
+  type SparqlResultIriValidator,
+} from './sparql-result-iri.js';
+import { SparqlResultsShapeError } from './sparql-results-shape-error.js';
 import type { AskResult, QueryResult, SelectResult } from './triple-store.js';
 
 // Keep the parser provenance stable if application code later replaces the
@@ -29,52 +35,6 @@ type AdapterSparqlJsonTerm =
 const SPARQL_JSON_BLANK_NODE_LABEL =
   /^[\p{L}\p{Nl}_0-9][\p{L}\p{Nl}\p{M}\p{Nd}_.\-\u00B7\u203F-\u2040]*$/u;
 const SPARQL_JSON_LANGUAGE_TAG = /^[A-Za-z]+(?:-[A-Za-z0-9]+)*$/u;
-const MAX_CACHED_IRI_VARIABLES = 128;
-const MAX_CACHED_IRI_LENGTH = 1024;
-const MAX_CONSECUTIVE_IRI_MISSES = 16;
-const PAUSED_IRI_COMPARISON_ROWS = 128;
-type IriValidator = (value: string) => boolean;
-
-// RFC 3987 lets an absolute IRI's hier-part be empty, so a bare `scheme:`
-// such as `a:` is an IRI the stores accept on write and return from SELECT.
-// core's isSafeIri needs a character after the colon. This admits exactly
-// that shape, which holds only scheme characters and the colon.
-const SCHEME_ONLY_IRI = /^[a-zA-Z][a-zA-Z0-9+.-]*:$/;
-
-/** core's isSafeIri plus a bare `scheme:`; every other value gets isSafeIri's answer. */
-function isSafeResultIri(value: string): boolean {
-  return isSafeIri(value) || SCHEME_ONLY_IRI.test(value);
-}
-
-/** One last successful value per column role, never a growing per-row/global cache. */
-function createIriValidator(): IriValidator {
-  let lastValidIri: string | undefined;
-  let consecutiveMisses = 0;
-  let pausedRows = 0;
-  return value => {
-    // High-cardinality columns (e.g. one subject per row) should not keep
-    // doing cache comparisons/assignments without ever saving validation.
-    // The pause is a bounded window rather than a latch, so a unique prefix
-    // cannot cost the response the repeated run that may follow it.
-    if (pausedRows > 0) {
-      pausedRows--;
-      return isSafeResultIri(value);
-    }
-    if (value === lastValidIri) {
-      consecutiveMisses = 0;
-      return true;
-    }
-    const valid = isSafeResultIri(value);
-    if (valid && value.length <= MAX_CACHED_IRI_LENGTH) lastValidIri = value;
-    if (++consecutiveMisses >= MAX_CONSECUTIVE_IRI_MISSES) {
-      pausedRows = PAUSED_IRI_COMPARISON_ROWS;
-      consecutiveMisses = 0;
-      lastValidIri = undefined;
-    }
-    return valid;
-  };
-}
-
 interface ResponseDataReader {
   read: typeof ownDataValue;
   exact: typeof snapshotExactOrdinaryDataRecord;
@@ -145,7 +105,7 @@ export interface ParsedSparqlJsonSelectResponse {
   bindings: Array<Record<string, string>>;
 }
 
-export class SparqlJsonResultsShapeError extends Error {
+export class SparqlJsonResultsShapeError extends SparqlResultsShapeError {
   constructor(message: string, options: ErrorOptions = {}) {
     super(message, options);
     this.name = 'SparqlJsonResultsShapeError';
@@ -239,9 +199,11 @@ function parseSelectResponse(
   );
   // Term values and literal datatypes are separate populations, so a column
   // carrying both must not let them evict each other from one shared slot.
-  const cachedColumns = rows.length > 1 ? variables.slice(0, MAX_CACHED_IRI_VARIABLES) : [];
-  const iriValidators = cachedColumns.map(createIriValidator);
-  const datatypeValidators = cachedColumns.map(createIriValidator);
+  const cachedColumns = rows.length > 1
+    ? variables.slice(0, MAX_CACHED_SPARQL_IRI_VARIABLES)
+    : [];
+  const iriValidators = cachedColumns.map(createSparqlResultIriValidator);
+  const datatypeValidators = cachedColumns.map(createSparqlResultIriValidator);
   const bindings = rows.map((input, rowIndex) => {
     const row = reader.record(input, `SPARQL JSON binding ${rowIndex}`, 'plain object');
     for (const key of reader.keys(row)) {
@@ -256,8 +218,8 @@ function parseSelectResponse(
       const term = reader.read(row, variable, `SPARQL JSON binding ${rowIndex}`);
       const formatted = formatValidatedSparqlJsonTerm(
         term, rowIndex, variable, reader,
-        iriValidators[variableIndex] ?? isSafeResultIri,
-        datatypeValidators[variableIndex] ?? isSafeResultIri,
+        iriValidators[variableIndex] ?? isSafeSparqlResultIri,
+        datatypeValidators[variableIndex] ?? isSafeSparqlResultIri,
       );
       // `__proto__` is a legal SPARQL variable name, and a plain assignment
       // hits the inherited setter and drops the column. Define it instead, so
@@ -293,7 +255,7 @@ function denseArray(input: unknown, label: string): unknown[] {
   return [...snapshotDenseDataArray(input, label, malformed)];
 }
 
-function formatValidatedSparqlJsonTerm(input: unknown, rowIndex: number, variable: string, reader: ResponseDataReader, validateIri: IriValidator, validateDatatype: IriValidator): string {
+function formatValidatedSparqlJsonTerm(input: unknown, rowIndex: number, variable: string, reader: ResponseDataReader, validateIri: SparqlResultIriValidator, validateDatatype: SparqlResultIriValidator): string {
   const label = `SPARQL JSON binding ${rowIndex}.${variable}`;
   const term = reader.record(input, label, 'plain term object');
   const type = reader.read(term, 'type', label);

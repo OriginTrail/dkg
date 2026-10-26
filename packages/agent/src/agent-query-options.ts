@@ -25,6 +25,8 @@ export interface AgentQueryOptions {
    * registered public content partitions in a scoped `GRAPH ?g` scan.
    */
   includeContextGraphPartitions?: boolean;
+  /** Include registered subgraph SWM metadata in scoped GRAPH-variable expansion; requires includeContextGraphPartitions. */
+  includeSharedMemoryMeta?: boolean;
   excludeWorkingMemoryPartitions?: boolean;
   /**
    * Opt-in: allow the scoped query to reference the context graph's own

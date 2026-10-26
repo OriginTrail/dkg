@@ -6,6 +6,8 @@ export {
   type ValidPreparedSparql,
 } from './sparql-lexical-scanner.js';
 
+export { isSparqlVariableNameRaw } from './sparql-lexical-primitives.js';
+
 export {
   indexSparqlStructure,
   sparqlTokenIndexesAtDepth,
