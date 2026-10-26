@@ -479,7 +479,7 @@ async function runSimulation(config: SimConfig, run: SimulationRun) {
 
       let promise: Promise<OpEvent>;
       switch (opType) {
-        case 'publish':
+        default: // The request boundary restricts this remaining case to publish.
           promise = execPublish(node, config, signal);
           break;
         case 'query':
@@ -491,8 +491,6 @@ async function runSimulation(config: SimConfig, run: SimulationRun) {
         case 'chat':
           promise = execChat(node, nodes, signal);
           break;
-        default:
-          promise = execPublish(node, config, signal);
       }
 
       promise.then(onOpDone).catch(() => onOpDone({
@@ -561,6 +559,11 @@ export async function handleSimRequest(req: IncomingMessage, res: ServerResponse
 
     if (!config.opCount || !config.opsPerSec || !config.enabledOps?.length) {
       jsonResponse(res, 400, { error: 'Missing required fields: opCount, opsPerSec, enabledOps' });
+      return;
+    }
+
+    if (!Array.isArray(config.enabledOps) || !config.enabledOps.every(op => ['publish', 'query', 'workspace', 'chat'].includes(op))) {
+      jsonResponse(res, 400, { error: 'enabledOps must be an array of supported operations: publish, query, workspace, chat' });
       return;
     }
 

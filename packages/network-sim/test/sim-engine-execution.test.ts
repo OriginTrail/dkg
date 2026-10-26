@@ -292,6 +292,21 @@ describe('simulation scheduling and event delivery', () => {
 
 
 describe('executor rejection recovery', () => {
+  it.each(['__proto__', 'constructor', 'toString', 'unknown', 'query', null, 42].map(value => ({ enabledOps: value === 'query' ? value : [value] })))(
+    'rejects invalid operation selections before admission: $enabledOps', async ({ enabledOps }) => {
+      const before = Object.getOwnPropertyDescriptors(Object.prototype);
+      const result = await request('/sim/start?runId=invalid-ops', 'POST', {
+        opCount: 1, opsPerSec: 1, enabledOps, kasPerPublish: 4294967296,
+      });
+      // Assert before advancing execution: the old implementation admits this payload.
+      expect(result).toEqual({ code: 400, body: { error: 'enabledOps must be an array of supported operations: publish, query, workspace, chat' } });
+      await finish();
+      expect((await request('/sim/status?runId=invalid-ops')).code).toBe(404);
+      expect(operations()).toEqual([]);
+      expect(Object.getOwnPropertyDescriptors(Object.prototype)).toEqual(before);
+    },
+  );
+
   it('finishes and reports failures when an operation cannot allocate its requested batch', async () => {
     // Exceeds JavaScript's maximum array length and throws immediately, without allocating a huge array.
     await start('publish', { kasPerPublish: 2 ** 32, opCount: 2 });

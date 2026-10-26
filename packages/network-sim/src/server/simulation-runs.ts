@@ -1,4 +1,5 @@
 import type { ServerResponse } from 'node:http';
+import { accumulateMetric, metricsFromOpStats, opStatsFromMetrics, ownValue } from '../simulation-metrics.js';
 
 import type { CancellationResult, DoneEvent, OpEvent, OpStats, RunStatus, SimEvent, ScopedSimEvent } from '../simulation-protocol.js';
 
@@ -67,14 +68,10 @@ export class SimulationRuns {
     stats.completed++;
     stats.recentTimestamps.push(Date.now());
     if (!event.success) stats.errors++;
-    const op = stats.byOp[event.opType] ??= { ok: 0, fail: 0, timeouts: 0, totalMs: 0, allMs: 0, phaseTotals: {}, phaseCounts: {} };
-    if (event.success) { op.ok++; op.totalMs += event.durationMs; } else op.fail++;
-    if (!event.success && event.detail.startsWith('timeout')) op.timeouts++;
-    op.allMs += event.durationMs;
-    for (const [phase, ms] of Object.entries(event.phases)) {
-      op.phaseTotals[phase] = (op.phaseTotals[phase] ?? 0) + ms;
-      op.phaseCounts[phase] = (op.phaseCounts[phase] ?? 0) + 1;
-    }
+    const previous = ownValue(stats.byOp, event.opType);
+    const metric = accumulateMetric(previous && metricsFromOpStats(previous), event);
+    const timeouts = (previous?.timeouts ?? 0) + Number(!event.success && event.detail.startsWith('timeout'));
+    stats.byOp = { ...stats.byOp, [event.opType]: opStatsFromMetrics(metric, timeouts) };
     this.emit(run, event);
     return true;
   }

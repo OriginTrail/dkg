@@ -14,6 +14,7 @@ interface ClientRun {
   startAbort: AbortController;
   stream: EventSource | null;
   stats: SimStats;
+  cancelling?: boolean;
 }
 
 export function useSimulation(onComplete: () => void) {
@@ -40,6 +41,32 @@ export function useSimulation(onComplete: () => void) {
     dispatch({ type: 'STOP_SIMULATION' });
     if (typeof result !== 'string') onComplete();
   }, [dispatch, onComplete]);
+
+  const cancel = useCallback(async (run: ClientRun) => {
+    if (active.current !== run || run.cancelling) return;
+    run.cancelling = true;
+    const controller = new AbortController();
+    let timeout: ReturnType<typeof setTimeout>;
+    try {
+      const deadline = new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => { controller.abort(); reject(new Error('Cancellation timed out')); }, 10_000);
+      });
+      const result = await Promise.race([
+        fetch(`/sim/stop?runId=${run.id}`, { method: 'POST', signal: controller.signal }).then(async response => {
+          if (!response.ok) throw new Error('Cancellation failed');
+          return response.json() as Promise<CancellationResult>;
+        }), deadline,
+      ]);
+      if (!result.stopped || result.runId !== run.id || (result.snapshot && result.snapshot.runId !== run.id)) throw new Error('Cancellation was not confirmed');
+      finish(run, result.snapshot ?? 'Cancellation confirmed. Final results are unavailable.');
+    } catch {
+      if (active.current === run) setFailure('Unable to confirm cancellation. Use Stop Simulation to retry.');
+    } finally { clearTimeout(timeout!); run.cancelling = false; }
+  }, [finish]);
+
+  const stop = useCallback(async () => {
+    if (active.current) await cancel(active.current);
+  }, [cancel]);
 
   const start = useCallback(async (options: SimulationOptions) => {
     if (active.current) return;
@@ -69,7 +96,14 @@ export function useSimulation(onComplete: () => void) {
           const event = JSON.parse(message.data) as ScopedSimEvent;
           if (event.runId !== id) return;
           if (event.type === 'done') { finish(run, event); return; }
-          if (event.type === 'unavailable') { finish(run, event.message); return; }
+          if (event.type === 'unavailable') {
+            // Recovery can overtake a delayed start. Unknown state is not proof
+            // that the server cannot admit this ID; confirm cancellation first.
+            stream.close(); run.stream = null;
+            setDisconnected(true);
+            void cancel(run);
+            return;
+          }
           if (event.type === 'op') {
             const opType = event.opType as OperationType;
             const add = opType === 'publish' || opType === 'workspace' ? addBroadcast : addOperation;
@@ -90,7 +124,9 @@ export function useSimulation(onComplete: () => void) {
     try {
       const response = await run.start;
       if (active.current !== run) return;
-      if (!response.ok) { finish(run, 'Simulation could not be started.'); return; }
+      if (!response.ok && response.status < 500) { finish(run, 'Simulation could not be started.'); return; }
+      // A proxy 5xx may also hide an accepted or still queued upstream request.
+      if (!response.ok) setDisconnected(true);
       connect();
     } catch {
       if (active.current !== run) return;
@@ -98,29 +134,8 @@ export function useSimulation(onComplete: () => void) {
       setDisconnected(true);
       connect();
     }
-  }, [dispatch, addBroadcast, addOperation, completeOperation, finish]);
+  }, [dispatch, addBroadcast, addOperation, completeOperation, finish, cancel]);
 
-  const stop = useCallback(async () => {
-    const run = active.current;
-    if (!run) return;
-    const controller = new AbortController();
-    let timeout: ReturnType<typeof setTimeout>;
-    try {
-      const deadline = new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => { controller.abort(); reject(new Error('Cancellation timed out')); }, 10_000);
-      });
-      const result = await Promise.race([
-        fetch(`/sim/stop?runId=${run.id}`, { method: 'POST', signal: controller.signal }).then(async response => {
-          if (!response.ok) throw new Error('Cancellation failed');
-          return response.json() as Promise<CancellationResult>;
-        }), deadline,
-      ]);
-      if (!result.stopped || result.runId !== run.id || (result.snapshot && result.snapshot.runId !== run.id)) throw new Error('Cancellation was not confirmed');
-      finish(run, result.snapshot ?? 'Cancellation confirmed. Final results are unavailable.');
-    } catch {
-      if (active.current === run) setFailure('Unable to confirm cancellation. Use Stop Simulation to retry.');
-    } finally { clearTimeout(timeout!); }
-  }, [finish]);
 
   useEffect(() => () => {
     const run = active.current;

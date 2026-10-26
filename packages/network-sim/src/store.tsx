@@ -12,25 +12,8 @@ import type { DoneEvent, StatusEvent } from './simulation-protocol';
 import { snapshotMetrics, recordMetric, combineMetrics, emptyMetrics } from './simulation-metrics';
 import { fetchDevnetConfig, fetchNodeStatus } from './api';
 
-export interface PerTypeMetrics {
-  total: number;
-  success: number;
-  errors: number;
-  totalDurationMs: number;
-  successDurationMs: number;
-  /** Accumulated phase durations (e.g. prepare, store, chain, broadcast) */
-  phaseTotals: Record<string, number>;
-  phaseCounts: Record<string, number>;
-}
-
-export interface LiveOpMetrics {
-  total: number;
-  success: number;
-  errors: number;
-  byType: Record<string, PerTypeMetrics>;
-  /** Rolling window of recent op timestamps for ops/sec calculation */
-  recentTimestamps: number[];
-}
+import type { LiveOpMetrics } from './simulation-metrics';
+export type { LiveOpMetrics, PerTypeMetrics } from './simulation-metrics';
 
 export interface SimulationRun {
   id: string;

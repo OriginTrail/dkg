@@ -110,6 +110,46 @@ const runId = () => new URL(String(transport.mock.calls.find(([url]) => String(u
 const status = async (id: string) => (await http(`/sim/status?runId=${id}`)).json();
 
 describe('simulation UI with real server recovery', () => {
+  it.each([{ retry: false, proxy: false }, { retry: true, proxy: false }, { retry: false, proxy: true }])('cancels ambiguous startup before relinquishing control when recovery overtakes admission (%j)', async ({ retry, proxy }) => {
+    arrivalGate = deferred();
+    const original = transport.getMockImplementation()!;
+    let releaseStop!: () => void;
+    const stopGate = new Promise<void>(resolve => { releaseStop = resolve; });
+    let stops = 0;
+    transport.mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.startsWith('/sim/start')) {
+        // The proxy loses the response while the upstream request is still queued.
+        void original(input, init);
+        return proxy ? Promise.resolve(Response.json({}, { status: 502 })) : Promise.reject(new Error('proxy disconnected'));
+      }
+      if (url.startsWith('/sim/stop')) {
+        stops++;
+        if (retry && stops === 1) return Promise.resolve(Response.json({}, { status: 503 }));
+        return stopGate.then(() => original(input, init));
+      }
+      return original(input, init);
+    });
+    await ui.click('Play Simulation');
+    const id = runId();
+    expect(LocalEventSource.instances).toHaveLength(1);
+    expect(ui.button('Stop Simulation').disabled).toBe(false);
+    expect(store.state.activeSimulationId).toBe(id);
+    expect(stops).toBe(1);
+    if (retry) {
+      expect(ui.container.querySelector('[role="alert"]')?.textContent).toContain('retry');
+      await ui.click('Stop Simulation');
+    }
+    await act(async () => { releaseStop(); });
+    expect(ui.button('Play Simulation').disabled).toBe(false);
+    expect(store.state.activeSimulationId).toBeNull();
+    await act(async () => { arrivalGate!.resolve(); await clientRequests[0]; });
+    expect((await clientRequests[0]).status).toBe(409);
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    expect((await http(`/sim/status?runId=${id}`)).status).toBe(404);
+    expect(transport.mock.calls.filter(([url]) => String(url).endsWith('/api/query'))).toHaveLength(0);
+  });
+
   it('recovers A after offline completion while B is running without recording B in A', async () => {
     await ui.click('Play Simulation'); await accepted.promise;
     await act(async () => vi.advanceTimersByTimeAsync(501));

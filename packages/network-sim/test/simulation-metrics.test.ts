@@ -1,0 +1,41 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { SimulationRuns } from '../src/server/simulation-runs';
+import { combineMetrics, emptyMetrics, recordMetric, snapshotMetrics } from '../src/simulation-metrics';
+import type { OpEvent } from '../src/simulation-protocol';
+
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
+
+it.each(['query', '__proto__', 'constructor', 'toString'])('keeps incremental and recovered metrics equivalent and immutable for %s', opType => {
+  vi.useFakeTimers(); vi.setSystemTime(1000);
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  const prototype = Object.getOwnPropertyDescriptors(Object.prototype);
+  const registry = new SimulationRuns();
+  const admission = registry.admit('metrics', 3);
+  if (!admission.accepted) throw new Error('fixture run rejected');
+  let incremental = emptyMetrics();
+  const history: Array<{ value: typeof incremental; copy: typeof incremental }> = [];
+  const events: OpEvent[] = [
+    { type: 'op', opType, nodeId: 1, success: true, durationMs: 100, detail: 'ok', phases: { query: 40, ['__proto__']: 3 } },
+    { type: 'op', opType, nodeId: 2, success: false, durationMs: 50, detail: 'timeout after 50ms', phases: { query: 20, constructor: 4 } },
+    { type: 'op', opType, nodeId: 3, success: false, durationMs: 0, detail: 'executor failure', phases: {} },
+  ];
+  for (const event of events) {
+    history.push({ value: incremental, copy: structuredClone(incremental) });
+    incremental = recordMetric(incremental, event);
+    expect(registry.record(admission.run, event)).toBe(true);
+    expect(snapshotMetrics({ type: 'status', ...registry.status(admission.run) }, incremental)).toEqual(incremental);
+    vi.advanceTimersByTime(100);
+  }
+  const expected = { total: 3, success: 1, errors: 2, totalDurationMs: 150, successDurationMs: 100,
+    phaseTotals: { query: 60, ['__proto__']: 3, constructor: 4 },
+    phaseCounts: { query: 2, ['__proto__']: 1, constructor: 1 } };
+  expect(incremental.byType[opType]).toEqual(expected);
+  expect(incremental.recentTimestamps).toEqual([1000, 1100, 1200]);
+  expect(registry.finish(admission.run).byOp[opType]).toEqual({ ok: 1, fail: 2, timeouts: 1, totalMs: 100, allMs: 150,
+    phaseTotals: expected.phaseTotals, phaseCounts: expected.phaseCounts });
+  expect(snapshotMetrics(registry.finish(admission.run), incremental)).toEqual(incremental);
+  const manual = recordMetric(emptyMetrics(), { opType: 'manual', success: true, durationMs: 9 });
+  expect(combineMetrics(manual, incremental).byType).toEqual({ manual: manual.byType.manual, [opType]: expected });
+  for (const { value, copy } of history) expect(value).toEqual(copy);
+  expect(Object.getOwnPropertyDescriptors(Object.prototype)).toEqual(prototype);
+});

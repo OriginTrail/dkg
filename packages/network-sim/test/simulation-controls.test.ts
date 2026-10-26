@@ -207,11 +207,11 @@ describe('simulation form and streamed results', () => {
     expect(store.dispatch).toHaveBeenLastCalledWith({ type: 'STOP_SIMULATION' });
     expect(ui.button('Play Simulation').disabled).toBe(false);
   });
-  it.each(['rejected', 'invalid-json', 'network'])('cleans up a %s start failure', async mode => {
+  it.each(['rejected', 'proxy', 'network'])('cleans up a %s start failure', async mode => {
     if (mode === 'network') fetchMock.mockRejectedValueOnce(new Error('offline'));
     else fetchMock.mockResolvedValueOnce(mode === 'rejected' ? Response.json({ error: 'busy' }, { status: 409 }) : new Response('bad JSON', { status: 500 }));
     await ui.click('Play Simulation');
-    if (mode === 'network') source().emit({ type: 'unavailable', message: 'Results for this simulation are no longer available.' });
+    if (mode !== 'rejected') await act(async () => source().emit({ type: 'unavailable', message: 'Results for this simulation are no longer available.' }));
     else expect(TestEventSource.instances).toEqual([]);
     expect(store.dispatch).toHaveBeenLastCalledWith({ type: 'STOP_SIMULATION' });
     expect(ui.button('Play Simulation').disabled).toBe(false);
@@ -240,8 +240,9 @@ describe('run-scoped client recovery', () => {
 
   it('reports unavailable results without fabricating successful completion', async () => {
     await ui.click('Play Simulation');
-    source().emit({ type: 'unavailable', message: 'Results for this simulation are no longer available.' });
-    expect(ui.container.querySelector('[role="alert"]')?.textContent).toContain('no longer available');
+    await act(async () => source().emit({ type: 'unavailable', message: 'Results for this simulation are no longer available.' }));
+    expect(fetchMock).toHaveBeenLastCalledWith(`/sim/stop?runId=${runId()}`, expect.objectContaining({ method: 'POST' }));
+    expect(ui.container.querySelector('[role="alert"]')?.textContent).toContain('Cancellation confirmed');
     expect(ui.container.querySelector('.sim-summary')).toBeNull();
     expect(ui.button('Play Simulation').disabled).toBe(false);
     await ui.click('Play Simulation');
