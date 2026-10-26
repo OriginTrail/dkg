@@ -463,7 +463,11 @@ export async function walkPages(fetchPage) {
  * Sequential like a polling script: the next poll starts observerMs after the previous one settled. `calls`, `target`
  * and `events` default to the share queue's; the publisher's observer passes its own (publisher.mjs).
  */
-export function startObserver(world, mode, { calls = OBSERVER_CALLS, target = world.queue, events = world.observerEvents } = {}) {
+export function startObserver(
+  world,
+  mode,
+  { calls = OBSERVER_CALLS, target = world.queue, events = world.observerEvents } = {},
+) {
   const call = calls[mode];
   const { observerMs } = world.cfg;
   if (mode === 'none' || !call) return NOOP;

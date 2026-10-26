@@ -12,7 +12,12 @@ test('jobRow turns the publisher timestamps into run-relative times and takes re
     jobId: 'j1',
     status: 'finalized',
     request: { knowledgeAssetVmPublish: { name: 'pub-x-1' } },
-    timestamps: { acceptedAt: at(500), claimedAt: at(1000), finalizedAt: at(4000), lastRetriedAt: at(800) },
+    timestamps: {
+      acceptedAt: at(500),
+      claimedAt: at(1000),
+      finalizedAt: at(4000),
+      lastRetriedAt: at(800),
+    },
   };
   assert.deepEqual(jobRow(job, EPOCH), {
     jobId: 'j1',
@@ -27,9 +32,19 @@ test('jobRow turns the publisher timestamps into run-relative times and takes re
   });
   const plain = jobRow({ jobId: 'j2', timestamps: { acceptedAt: at(7), lastRecoveredAt: at(3) } }, EPOCH);
   assert.deepEqual([plain.acceptedAt, plain.readyAt, plain.claimedAt, plain.reclaimed], [7, 7, null, true]);
-  const iso = jobRow({ jobId: 'j3', timestamps: { acceptedAt: new Date(at(250)).toISOString() } }, EPOCH);
+  const iso = jobRow(
+    {
+      jobId: 'j3',
+      timestamps: { acceptedAt: new Date(at(250)).toISOString() },
+    },
+    EPOCH,
+  );
   assert.equal(iso.acceptedAt, 250, 'an ISO timestamp is read too');
-  assert.equal(jobRow({ jobId: 'j4', timestamps: {} }, EPOCH).readyAt, null, 'a job with no acceptance has no ready time');
+  assert.equal(
+    jobRow({ jobId: 'j4', timestamps: {} }, EPOCH).readyAt,
+    null,
+    'a job with no acceptance has no ready time',
+  );
   assert.equal(jobRow({ jobId: 'j5', timestamps: { acceptedAt: at(1) } }, EPOCH).reclaimed, false);
 });
 
@@ -62,7 +77,11 @@ test('walletClassifier: busy strictly inside a lock, renewals and stray deletes 
   assert.equal(classify(700), 'busy', 'both open locks');
   assert.equal(walletClassifier(events, [])(100), 'unknown', 'no wallet configured');
   assert.equal(walletClassifier([], ['w0'])(100), 'free', 'no lock was ever written');
-  assert.equal(walletClassifier([ev(100, 'written', 'w0')], ['w0'])(100), 'free', 'an open lock is busy only after it was written');
+  assert.equal(
+    walletClassifier([ev(100, 'written', 'w0')], ['w0'])(100),
+    'free',
+    'an open lock is busy only after it was written',
+  );
   assert.equal(walletClassifier([ev(100, 'written', 'w0')], ['w0'])(101), 'busy');
   assert.equal(walletClassifier(events, ['w0', 'w1'], 120)(110), 'unknown', 'before knownFrom');
   assert.equal(walletClassifier([], ['w0', 'w0', 'w1'])(1), 'free', 'duplicates are one wallet');
@@ -97,7 +116,13 @@ test('pickupBlock: accepted -> first claim over the window, an unclaimed job rig
     row('E', 4999, 5200, { finalizedAt: 8000 }),
     row('F', 5000, 5100), // the window is half open: 5000 is outside
   ];
-  const b = pickupBlock({ rows, window: WINDOW, runEnd: 20_000, walletEvents: BUSY, walletIds: ['w0', 'w1'] });
+  const b = pickupBlock({
+    rows,
+    window: WINDOW,
+    runEnd: 20_000,
+    walletEvents: BUSY,
+    walletIds: ['w0', 'w1'],
+  });
   // waits 100, 300, censored 20000 - 2500 = 17500, and 201
   assert.deepEqual(b.pickup, {
     nAccepted: 4,
@@ -109,12 +134,26 @@ test('pickupBlock: accepted -> first claim over the window, an unclaimed job rig
     p95: 14_920,
     p99: 16_984,
     max: 17_500,
-    claimedOnly: { n: 3, mean: 200.33, p50: 201, p95: 290.1, p99: 298.02, max: 300 },
+    claimedOnly: {
+      n: 3,
+      mean: 200.33,
+      p50: 201,
+      p95: 290.1,
+      p99: 298.02,
+      max: 300,
+    },
   });
   assert.equal(b.unclaimed.unclaimedAtEnd, 1);
   assert.equal(b.unclaimed.max, 1);
   assert.equal(b.unclaimed.last, 1, 'C is still waiting at the end of the window');
-  assert.deepEqual(b.claimToFinishMs, { n: 3, mean: 2933.33, p50: 3000, p95: 3000, p99: 3000, max: 3000 });
+  assert.deepEqual(b.claimToFinishMs, {
+    n: 3,
+    mean: 2933.33,
+    p50: 3000,
+    p95: 3000,
+    p99: 3000,
+    max: 3000,
+  });
   assert.equal(b.finalizedInWindow, 1, 'only A finished inside [1000, 5000)');
   assert.deepEqual(b.states, { finalized: 6 });
   assert.equal(b.reclaimed, 0);
@@ -127,7 +166,13 @@ test('pickupBlock: the worker-free split keeps the jobs that became ready while 
     row('C', 2500, null), // ready while both are locked, never claimed
     row('E', 4999, 5200), // free again: qualifies, 201
   ];
-  const b = pickupBlock({ rows, window: WINDOW, runEnd: 20_000, walletEvents: BUSY, walletIds: ['w0', 'w1'] });
+  const b = pickupBlock({
+    rows,
+    window: WINDOW,
+    runEnd: 20_000,
+    walletEvents: BUSY,
+    walletIds: ['w0', 'w1'],
+  });
   assert.deepEqual(b.workerFree, {
     traceLive: true,
     nQualifying: 2,
@@ -147,7 +192,13 @@ test('pickupBlock: the worker-free split keeps the jobs that became ready while 
 
 test('pickupBlock: a retried job is timed from when it became ready, and counted as reclaimed', () => {
   const rows = [row('A', 1500, 3000, { readyAt: 2800, reclaimed: true })];
-  const b = pickupBlock({ rows, window: WINDOW, runEnd: 9000, walletEvents: [ev(2900, 'written', 'w0')], walletIds: ['w0'] });
+  const b = pickupBlock({
+    rows,
+    window: WINDOW,
+    runEnd: 9000,
+    walletEvents: [ev(2900, 'written', 'w0')],
+    walletIds: ['w0'],
+  });
   assert.equal(b.pickup.p50, 1500, 'D-15 counts from acceptance');
   assert.equal(b.workerFree.p50, 200, 'D-16 counts from ready');
   assert.equal(b.reclaimed, 1);
@@ -155,16 +206,34 @@ test('pickupBlock: a retried job is timed from when it became ready, and counted
 
 test('pickupBlock: a trace that saw no lock although jobs were claimed is dead, so nothing is called worker-free', () => {
   const rows = [row('A', 1500, 1600), row('B', 2000, 2300)];
-  const dead = pickupBlock({ rows, window: WINDOW, runEnd: 9000, walletEvents: [], walletIds: ['w0', 'w1'] });
+  const dead = pickupBlock({
+    rows,
+    window: WINDOW,
+    runEnd: 9000,
+    walletEvents: [],
+    walletIds: ['w0', 'w1'],
+  });
   assert.deepEqual(
     [dead.workerFree.traceLive, dead.workerFree.nQualifying, dead.workerFree.nUnknown, dead.workerFree.n],
     [false, 0, 2, 0],
   );
   assert.equal(dead.pickup.n, 2, 'the plain pick-up does not depend on the trace');
   // no job was claimed either: an empty trace is then just an idle publisher
-  const idle = pickupBlock({ rows: [row('A', 1500, null)], window: WINDOW, runEnd: 9000, walletEvents: [], walletIds: ['w0'] });
+  const idle = pickupBlock({
+    rows: [row('A', 1500, null)],
+    window: WINDOW,
+    runEnd: 9000,
+    walletEvents: [],
+    walletIds: ['w0'],
+  });
   assert.deepEqual([idle.workerFree.traceLive, idle.workerFree.nQualifying, idle.workerFree.nCensored], [true, 1, 1]);
-  const none = pickupBlock({ rows: [], window: WINDOW, runEnd: 9000, walletEvents: [], walletIds: ['w0'] });
+  const none = pickupBlock({
+    rows: [],
+    window: WINDOW,
+    runEnd: 9000,
+    walletEvents: [],
+    walletIds: ['w0'],
+  });
   assert.deepEqual([none.pickup.n, none.pickup.nAccepted, none.pickup.p50], [0, 0, undefined]);
   assert.deepEqual([none.states, none.unclaimed.unclaimedAtEnd, none.unclaimed.max], [{}, 0, 0]);
 });
@@ -190,7 +259,10 @@ test('publishSummary adds the ground truth, the finished counts, the rate and th
     [7, 0.1, 2, 9, 2, 1, 1, 0.5],
   );
   assert.deepEqual(s.walletEvents, { written: 2, deleted: 1 });
-  assert.deepEqual([s.handler, s.runner, s.config, s.groundTruth], [{ executions: 1 }, { errors: 0 }, { wallets: 1, mu: 0.4 }, { doubleAdmissions: 0 }]);
+  assert.deepEqual(
+    [s.handler, s.runner, s.config, s.groundTruth],
+    [{ executions: 1 }, { errors: 0 }, { wallets: 1, mu: 0.4 }, { doubleAdmissions: 0 }],
+  );
   assert.equal(s.pickup.nAccepted, 2);
   assert.equal(s.workerFree.traceLive, true);
 });

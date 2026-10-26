@@ -22,7 +22,13 @@ const run = (id, r, o = {}, cfg = {}) => {
     valid: true,
     failedChecks: [],
     queue: def.queue,
-    cell: { history: '0', liftHistory: '0', observer: 'default', rung: def.rung, repeat: r },
+    cell: {
+      history: '0',
+      liftHistory: '0',
+      observer: 'default',
+      rung: def.rung,
+      repeat: r,
+    },
     config: {
       windows: G1B_SETUP.windows,
       observerMs: 5000,
@@ -44,7 +50,11 @@ const cell = (id, over = () => ({})) => Array.from({ length: G1B_REPEATS }, (_, 
 const everything = (over = {}) => ['g9L3', 'g9mix', 'g9pub'].flatMap((id) => cell(id, over[id]));
 
 test('G0b is the reference: the Q12 medians, the five seeds and the three cells', () => {
-  assert.deepEqual(G0B_REFERENCE, { g9L3: { shareP95: 713 }, g9mix: { shareP95: 701, pickup: 267 }, g9pub: { pickup: 1687 } });
+  assert.deepEqual(G0B_REFERENCE, {
+    g9L3: { shareP95: 713 },
+    g9mix: { shareP95: 701, pickup: 267 },
+    g9pub: { pickup: 1687 },
+  });
   assert.equal(G1B_SEED_BASE, 20_262_901);
   assert.equal(G1B_REPEATS, 5);
   assert.deepEqual(
@@ -55,9 +65,24 @@ test('G0b is the reference: the Q12 medians, the five seeds and the three cells'
       ['g9pub', 'lift', 'PSTAR', ['pickup']],
     ],
   );
-  assert.deepEqual(G1B_CELLS.g9L3.load, { lambda: 8, mu: 0, content: 4, aggregate: 2 });
-  assert.deepEqual(G1B_CELLS.g9mix.load, { lambda: 4, mu: 0.4, content: 3, aggregate: 1 });
-  assert.deepEqual(G1B_CELLS.g9pub.load, { lambda: 0, mu: 0.8, content: 4, aggregate: 2 });
+  assert.deepEqual(G1B_CELLS.g9L3.load, {
+    lambda: 8,
+    mu: 0,
+    content: 4,
+    aggregate: 2,
+  });
+  assert.deepEqual(G1B_CELLS.g9mix.load, {
+    lambda: 4,
+    mu: 0.4,
+    content: 3,
+    aggregate: 1,
+  });
+  assert.deepEqual(G1B_CELLS.g9pub.load, {
+    lambda: 0,
+    mu: 0.8,
+    content: 4,
+    aggregate: 2,
+  });
 });
 
 test('the bands are 25 % of the G0b median, widened to 0.5 s for the pick-up', () => {
@@ -71,11 +96,35 @@ test('a product that reproduces G0b passes: the medians of the five repeats agai
   const r = g1b(everything());
   assert.deepEqual([r.status, r.have, r.need], ['pass', 5, 5]);
   assert.match(r.label, /^g1b: /);
-  assert.deepEqual(r.cells.g9L3.metrics.shareP95, { median: 713, ref: 713, deviation: 0, lo: 534.75, hi: 891.25, ok: true });
+  assert.deepEqual(r.cells.g9L3.metrics.shareP95, {
+    median: 713,
+    ref: 713,
+    deviation: 0,
+    lo: 534.75,
+    hi: 891.25,
+    ok: true,
+  });
   assert.deepEqual(Object.keys(r.cells.g9mix.metrics), ['shareP95', 'pickup']);
-  assert.deepEqual(r.cells.g9pub.metrics.pickup, { median: 1687, ref: 1687, deviation: 0, lo: 1187, hi: 2187, ok: true });
-  assert.deepEqual(r.cells.g9mix.metrics.pickup, { median: 267, ref: 267, deviation: 0, lo: -233, hi: 767, ok: true });
-  assert.deepEqual(Object.values(r.cells).map((c) => [c.have, c.problems]), Array(3).fill([5, []]));
+  assert.deepEqual(r.cells.g9pub.metrics.pickup, {
+    median: 1687,
+    ref: 1687,
+    deviation: 0,
+    lo: 1187,
+    hi: 2187,
+    ok: true,
+  });
+  assert.deepEqual(r.cells.g9mix.metrics.pickup, {
+    median: 267,
+    ref: 267,
+    deviation: 0,
+    lo: -233,
+    hi: 767,
+    ok: true,
+  });
+  assert.deepEqual(
+    Object.values(r.cells).map((c) => [c.have, c.problems]),
+    Array(3).fill([5, []]),
+  );
 });
 
 test('the median decides, not the mean: two bad repeats of five pass, three fail', () => {
@@ -129,7 +178,10 @@ test('fewer than five repeats of a cell is INCOMPLETE, whatever the repeats that
 });
 
 test('an invalid run does not count, and two valid runs of one repeat are ambiguous', () => {
-  const bad = { valid: false, failedChecks: ['publisherQuiet', 'finitePublishMetrics'] };
+  const bad = {
+    valid: false,
+    failedChecks: ['publisherQuiet', 'finitePublishMetrics'],
+  };
   const runs = everything();
   runs[runs.findIndex((r) => r.runId === 'g9mix-r2')] = run('g9mix', 2, bad);
   const r = g1b(runs);
@@ -140,10 +192,13 @@ test('an invalid run does not count, and two valid runs of one repeat are ambigu
   // two valid ones: the one not meant to count has to be removed
   const twice = g1b([...everything(), { ...run('g9L3', 1), runId: 'g9L3-r1-again' }]);
   assert.equal(twice.status, 'incomplete');
-  assert.match(twice.cells.g9L3.problems[0], /repeat 1: 2 valid runs \(g9L3-r1, g9L3-r1-again\); remove the ones that are not meant to count/);
+  assert.match(
+    twice.cells.g9L3.problems[0],
+    /repeat 1: 2 valid runs \(g9L3-r1, g9L3-r1-again\); remove the ones that are not meant to count/,
+  );
 });
 
-test('a run is G0b-conforming only with G0b\'s windows, observer, loads, wallets, seed and no calibration', () => {
+test("a run is G0b-conforming only with G0b's windows, observer, loads, wallets, seed and no calibration", () => {
   const def = (id) => G1B_CELLS[id];
   assert.deepEqual(setupProblems(run('g9mix', 0), def('g9mix')), []);
   const problem = (id, r, o, cfg, pattern) => {
@@ -153,10 +208,51 @@ test('a run is G0b-conforming only with G0b\'s windows, observer, loads, wallets
   };
   problem('g9L3', 0, {}, { windows: { warmupMs: 30_000, measureMs: 60_000, cooldownMs: 10_000 } }, /^windows is /);
   problem('g9L3', 0, {}, { observerMs: 1000 }, /^observerMs is 1000/);
-  problem('g9L3', 0, { cell: { history: '50k', liftHistory: '0', observer: 'default', rung: 'L3', repeat: 0 } }, {}, /^history is "50k"/);
-  problem('g9mix', 0, { cell: { history: '0', liftHistory: '10k', observer: 'default', rung: 'MIX', repeat: 0 } }, {}, /^lift history is "10k"/);
+  problem(
+    'g9L3',
+    0,
+    {
+      cell: {
+        history: '50k',
+        liftHistory: '0',
+        observer: 'default',
+        rung: 'L3',
+        repeat: 0,
+      },
+    },
+    {},
+    /^history is "50k"/,
+  );
+  problem(
+    'g9mix',
+    0,
+    {
+      cell: {
+        history: '0',
+        liftHistory: '10k',
+        observer: 'default',
+        rung: 'MIX',
+        repeat: 0,
+      },
+    },
+    {},
+    /^lift history is "10k"/,
+  );
   problem('g9L3', 0, { cell: { history: '0', observer: 'paged', rung: 'L3', repeat: 0 } }, {}, /^observer is "paged"/);
-  problem('g9pub', 0, {}, { loadFactors: { ...G1B_SETUP.loadFactors, ack: false, ackMs: null, ackPayload: null } }, /^probe and ACK load is /);
+  problem(
+    'g9pub',
+    0,
+    {},
+    {
+      loadFactors: {
+        ...G1B_SETUP.loadFactors,
+        ack: false,
+        ackMs: null,
+        ackPayload: null,
+      },
+    },
+    /^probe and ACK load is /,
+  );
   problem('g9pub', 0, {}, { loadFactors: { ...G1B_SETUP.loadFactors, statusMs: 5000 } }, /^probe and ACK load is /);
   problem('g9pub', 0, {}, { liftModel: { ...G1B_SETUP.liftModel, wallets: 3 } }, /^chain-time model is /);
   problem('g9mix', 1, {}, { seed: 7301 }, /^seed is 7301, G0b ran 20262902/);
@@ -165,26 +261,51 @@ test('a run is G0b-conforming only with G0b\'s windows, observer, loads, wallets
   problem('g9pub', 0, {}, { mu: 0.4 }, /^mu is 0.4, G0b ran 0.8/);
   problem('g9mix', 0, {}, { content: 5 }, /^content is 5/);
   // a run from before P2b records none of this and cannot stand in for a G0b run
-  const legacy = { ...run('g9L3', 0), queue: undefined, config: { windows: G1B_SETUP.windows, lambda: 8, content: 4, aggregate: 2, seed: G1B_SEED_BASE, observerMs: 5000 } };
+  const legacy = {
+    ...run('g9L3', 0),
+    queue: undefined,
+    config: {
+      windows: G1B_SETUP.windows,
+      lambda: 8,
+      content: 4,
+      aggregate: 2,
+      seed: G1B_SEED_BASE,
+      observerMs: 5000,
+    },
+  };
   assert.ok(setupProblems(legacy, def('g9L3')).some((p) => p.startsWith('probe and ACK load is undefined')));
   // a share cell has no chain-time model to check
   assert.deepEqual(setupProblems(run('g9L3', 0, {}, { liftModel: { wallets: 99 } }), def('g9L3')), []);
 });
 
 test('a non-conforming repeat makes the cell INCOMPLETE and names why', () => {
-  const runs = everything({ g9pub: (r) => (r === 4 ? { config: { ...run('g9pub', 4).config, seed: 1 } } : {}) });
+  const runs = everything({
+    g9pub: (r) => (r === 4 ? { config: { ...run('g9pub', 4).config, seed: 1 } } : {}),
+  });
   const r = g1b(runs);
   assert.deepEqual([r.status, r.cells.g9pub.have, r.cells.g9L3.have], ['incomplete', 4, 5]);
   assert.match(r.cells.g9pub.problems[0], /repeat 4 \(g9pub-r4\): seed is 1, G0b ran 20262905/);
 });
 
-test('runs of other rungs or streams are not part of G0b\'s cells, and a repeat beyond the fifth is flagged', () => {
-  const other = { ...run('g9L3', 0), runId: 'ladder', cell: { ...run('g9L3', 0).cell, rung: 'L2' } };
+test("runs of other rungs or streams are not part of G0b's cells, and a repeat beyond the fifth is flagged", () => {
+  const other = {
+    ...run('g9L3', 0),
+    runId: 'ladder',
+    cell: { ...run('g9L3', 0).cell, rung: 'L2' },
+  };
   assert.equal(g1b([...everything(), other]).status, 'pass');
   const sixth = { ...run('g9pub', 5), runId: 'g9pub-r5' };
   const r = g1b([...everything(), sixth]);
   assert.equal(r.status, 'pass', 'the five G0b repeats decide');
   assert.deepEqual(r.cells.g9pub.problems, ['run g9pub-r5: repeat 5 is outside the five G0b repeats']);
-  const wrongStream = { ...run('g9pub', 0), runId: 'both-pstar', queue: 'both' };
-  assert.equal(g1b([...everything().filter((x) => x.runId !== 'g9pub-r0'), wrongStream]).cells.g9pub.have, 4, 'PSTAR run as a mixed cell is not g9pub');
+  const wrongStream = {
+    ...run('g9pub', 0),
+    runId: 'both-pstar',
+    queue: 'both',
+  };
+  assert.equal(
+    g1b([...everything().filter((x) => x.runId !== 'g9pub-r0'), wrongStream]).cells.g9pub.have,
+    4,
+    'PSTAR run as a mixed cell is not g9pub',
+  );
 });

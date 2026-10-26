@@ -512,11 +512,14 @@ export function withMetric(pairs, name = 'share', { minSamples = 0 } = {}) {
     ]
       .filter(([, w]) => w)
       .map(([side, w]) => `${side}: ${w}`);
-    return why.length ? { ...p, valid: false, reasons: [...(p.reasons ?? []), `${f.label} unusable (${why.join('; ')})`] } : p;
+    return why.length
+      ? { ...p, valid: false, reasons: [...(p.reasons ?? []), `${f.label} unusable (${why.join('; ')})`] }
+      : p;
   });
 }
 
-const labelled = (name, text) => (name === 'share' ? text.replace('{m}', 'P95') : text.replace('{m}', familyOf(name).label));
+const labelled = (name, text) =>
+  name === 'share' ? text.replace('{m}', 'P95') : text.replace('{m}', familyOf(name).label);
 
 export const halve = (pairs, { missing = [], family = 'share', minSamples } = {}) =>
   ratioRule({
@@ -754,7 +757,8 @@ export function validity({
     ...(withShare
       ? {
           workerContractOk: w.agentErrors === 0 && w.crashes === 0 && w.failedTerminal === 0 && w.succeeded > 0,
-          dataPlaneReplayed: w.dataOps >= DATA_OPS_PER_SHARE * w.succeeded && w.dataOps <= DATA_OPS_PER_SHARE * w.attempted,
+          dataPlaneReplayed:
+            w.dataOps >= DATA_OPS_PER_SHARE * w.succeeded && w.dataOps <= DATA_OPS_PER_SHARE * w.attempted,
         }
       : {}),
     seedFileVerified: seedFileVerified === true,
@@ -940,7 +944,9 @@ export function ledgerMarkdown(records) {
           r.cell.liftHistory ?? '',
           r.publishP95Ms ?? '',
           r.pickupP50Ms ?? '',
-          r.pickupFreeP50Ms === null || r.pickupFreeP50Ms === undefined ? '' : `${r.pickupFreeP50Ms} (n ${r.pickupFreeN})`,
+          r.pickupFreeP50Ms === null || r.pickupFreeP50Ms === undefined
+            ? ''
+            : `${r.pickupFreeP50Ms} (n ${r.pickupFreeN})`,
           r.probeP95Ms === null || r.probeP95Ms === undefined ? '' : `${r.probeP95Ms} / ${r.probeNoAnswer}`,
           r.ackOpP95Ms ?? '',
         ]
@@ -976,7 +982,15 @@ export function ledgerMarkdown(records) {
     'observer P95 ms',
     'git',
     ...(extended
-      ? ['queue', 'lift history', 'publish P95 ms', 'pick-up p50 ms', 'worker-free p50 ms', 'probe P95 / no-answer', 'ACK op P95 ms']
+      ? [
+          'queue',
+          'lift history',
+          'publish P95 ms',
+          'pick-up p50 ms',
+          'worker-free p50 ms',
+          'probe P95 / no-answer',
+          'ACK op P95 ms',
+        ]
       : []),
   ];
   return [`| ${head.join(' | ')} |`, `|${head.map(() => '---').join('|')}|`, ...records.map(row)].join('\n');

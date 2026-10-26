@@ -369,7 +369,8 @@ const NO_LOAD = loadFactorsOf({});
 function seedManifest(file, { what, historyFlag, kind, jobs }) {
   if (!existsSync(file)) die(2, `the ${what} ${file} does not exist`);
   const manifest = readJson(`${file}.json`, `${what} manifest`);
-  if (manifest.kind !== undefined && manifest.kind !== kind) die(2, `the ${what} ${file} holds ${manifest.kind} jobs, not ${kind}`);
+  if (manifest.kind !== undefined && manifest.kind !== kind)
+    die(2, `the ${what} ${file} holds ${manifest.kind} jobs, not ${kind}`);
   if (manifest.jobs !== jobs) die(2, `--${historyFlag} ${jobs} does not match the ${what} (${manifest.jobs} jobs)`);
   return { path: path.resolve(file), sha256: manifest.sha256, jobs: manifest.jobs, baseTime: manifest.baseTime };
 }
@@ -423,7 +424,10 @@ function resolveConfig(v) {
     die(2, 'lambda must be positive; content and aggregate must be non-negative numbers');
   }
   if (withLift && !(mu > 0)) {
-    die(2, `--queue ${queue} needs a positive publish rate mu (--mu, or a rung with publish arrivals: ${PUBLISH_RUNGS.map((r) => r.id).join(', ')})`);
+    die(
+      2,
+      `--queue ${queue} needs a positive publish rate mu (--mu, or a rung with publish arrivals: ${PUBLISH_RUNGS.map((r) => r.id).join(', ')})`,
+    );
   }
   if (!withLift && mu > 0) die(2, `the load has publish arrivals (mu ${mu}): use --queue lift or --queue both`);
   if (!withShare && lambda > 0) die(2, `the load has share arrivals (lambda ${lambda}): use --queue both`);
@@ -837,7 +841,11 @@ async function runOnce(c, dist, endpoint, outDir) {
               rows,
               window,
               runEnd: runMs,
-              walletEvents: liftSide.trace.events.map((e) => ({ t: e.at - world.epoch0, ev: e.ev, walletId: e.walletId })),
+              walletEvents: liftSide.trace.events.map((e) => ({
+                t: e.at - world.epoch0,
+                ev: e.ev,
+                walletId: e.walletId,
+              })),
               walletIds: liftSide.walletIds,
               scheduledArrivals: arrivals.length,
               reconcileError: liftReconcileError,
@@ -846,7 +854,12 @@ async function runOnce(c, dist, endpoint, outDir) {
               config: { ...c.liftModel, mu: c.mu },
             });
           }
-          const pa = probeAckSummary({ probeState: probeLoad?.state, ackState: ackLoad?.state, from: window.from, to: window.to });
+          const pa = probeAckSummary({
+            probeState: probeLoad?.state,
+            ackState: ackLoad?.state,
+            from: window.from,
+            to: window.to,
+          });
           const validityChecks = validity({
             lambda: c.lambda,
             measureMs: c.measureMs,
@@ -1195,7 +1208,8 @@ function loadRecords(dir, where) {
 function familyFlags(v) {
   const family = v.metric ?? 'share';
   if (!Object.hasOwn(FAMILIES, family)) die(2, `--metric must be ${Object.keys(FAMILIES).join(', ')}`);
-  if (v['min-qualifying'] !== undefined && family !== 'pickupFree') die(2, '--min-qualifying belongs to --metric pickupFree');
+  if (v['min-qualifying'] !== undefined && family !== 'pickupFree')
+    die(2, '--min-qualifying belongs to --metric pickupFree');
   if (family !== 'pickupFree') return { family };
   if (v['min-qualifying'] === undefined)
     die(2, '--metric pickupFree needs --min-qualifying N (the sample the protocol requires, declared before the A/B)');
@@ -1204,12 +1218,16 @@ function familyFlags(v) {
 
 function printG1b(result, warnings) {
   const reason = result.reason ? ` - ${result.reason}` : '';
-  console.log(`${result.label}: ${result.status.toUpperCase()} (${result.have} usable repeats in the thinnest cell, ${result.need} needed)${reason}`);
+  console.log(
+    `${result.label}: ${result.status.toUpperCase()} (${result.have} usable repeats in the thinnest cell, ${result.need} needed)${reason}`,
+  );
   for (const [id, cell] of Object.entries(result.cells)) {
     console.log(`  ${id} (--queue ${cell.queue}, rung ${cell.rung}): ${cell.have} of ${result.need} repeats usable`);
     for (const [name, m] of Object.entries(cell.metrics)) {
       const pct = `${m.deviation >= 0 ? '+' : ''}${(m.deviation * 100).toFixed(1)} %`;
-      console.log(`    ${G1B_METRICS[name].label}: median ${m.median} ms vs G0b ${m.ref} ms (${pct}), band ${m.lo}..${m.hi} ms  ${m.ok ? 'ok' : 'MISS'}`);
+      console.log(
+        `    ${G1B_METRICS[name].label}: median ${m.median} ms vs G0b ${m.ref} ms (${pct}), band ${m.lo}..${m.hi} ms  ${m.ok ? 'ok' : 'MISS'}`,
+      );
     }
     for (const p of cell.problems) console.log(`    problem: ${p}`);
   }
@@ -1230,7 +1248,9 @@ function verdictCommand(v) {
     const result = g1b(A);
     const warnings = integrityWarnings(A, [], null);
     if (!A.some((r) => r.config?.env?.DKG_STORE_CONTROL_RESERVED_SLOTS !== undefined))
-      warnings.push('no run recorded DKG_STORE_CONTROL_RESERVED_SLOTS: G1b is judged with the control path on, check the default of this build');
+      warnings.push(
+        'no run recorded DKG_STORE_CONTROL_RESERVED_SLOTS: G1b is judged with the control path on, check the default of this build',
+      );
     if (v.json) console.log(JSON.stringify({ result, warnings }));
     else printG1b(result, warnings);
     process.exit({ pass: 0, fail: 1, incomplete: 2 }[result.status]);
@@ -1258,7 +1278,15 @@ function verdictCommand(v) {
     const judged = withMetric(pairs, family, { minSamples });
     const { have, cells } = repeatsPerCell(judged, missing);
     const warnings = integrityWarnings([...A, ...B], judged, null);
-    console.log(JSON.stringify({ margin: noiseMargin(pairs, family, { minSamples }), validPairs: have, cells, warnings, missing }));
+    console.log(
+      JSON.stringify({
+        margin: noiseMargin(pairs, family, { minSamples }),
+        validPairs: have,
+        cells,
+        warnings,
+        missing,
+      }),
+    );
     process.exit(have >= PAIRED_MIN ? 0 : 2);
   }
   const options = { missing, family, minSamples };

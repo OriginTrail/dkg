@@ -38,11 +38,17 @@ async function until(condition, what, ms = 15_000) {
 }
 
 test('the publisher arrival schedule is the harness one: seed * 31 + 7, the same exponential recurrence', () => {
-  const cfg = { seed: 20_262_901, mu: 0.8, warmupMs: 30_000, measureMs: 180_000, cooldownMs: 10_000 };
+  const cfg = {
+    seed: 20_262_901,
+    mu: 0.8,
+    warmupMs: 30_000,
+    measureMs: 180_000,
+    cooldownMs: 10_000,
+  };
   // the recurrence of harness 0.9 (run.mjs), written out
   const rng = mulberry32(cfg.seed * 31 + 7);
   const expected = [];
-  for (let t = 0; ; ) {
+  for (let t = 0; ;) {
     t += (-Math.log(1 - rng()) / cfg.mu) * 1000;
     if (t >= 220_000) break;
     expected.push(t);
@@ -63,12 +69,21 @@ test('makeVmRequest gives every publication its own name, share operation, UAL a
   assert.equal(a.contentScopeVersion, deps.core.GRAPH_KA_CONTENT_SCOPE_VERSION);
   assert.deepEqual(makeVmRequest(0, 'tag', deps.core), a, 'a pure function of (index, tag)');
   assert.deepEqual(walletIdsOf(3), ['aqc-wallet-0', 'aqc-wallet-1', 'aqc-wallet-2']);
-  assert.deepEqual(LIFT_DEFAULTS, { wallets: 6, walletHoldMs: 3000, pollMs: 1000 });
+  assert.deepEqual(LIFT_DEFAULTS, {
+    wallets: 6,
+    walletHoldMs: 3000,
+    pollMs: 1000,
+  });
 });
 
 test('the wallet trace records lock writes and deletes, passes every call through and leaves emit as it found it', () => {
   const calls = [];
-  const trace = { emit: function (...args) { calls.push([this === trace, ...args]); return 7; } };
+  const trace = {
+    emit: function (...args) {
+      calls.push([this === trace, ...args]);
+      return 7;
+    },
+  };
   const own = installWalletTrace(trace);
   assert.equal(trace.emit('wallet_lock_written', { jobId: 'j1' }, 'w0', 'tok'), 7, 'the original return value');
   trace.emit('wallet_lock_deleted', {}, 'w0');
@@ -109,7 +124,9 @@ test('the wallet trace records lock writes and deletes, passes every call throug
 
 test('the publish preflight is the share probe, then 13 reads; a degraded probe stops it at once', async () => {
   const reads = [];
-  const store = { query: async (sparql, options) => void reads.push([options.source, sparql]) };
+  const store = {
+    query: async (sparql, options) => void reads.push([options.source, sparql]),
+  };
   const world = { store };
   let probes = 0;
   const ok = createPublishPreflight(world, async () => (probes++, { ok: true }));
@@ -120,14 +137,22 @@ test('the publish preflight is the share probe, then 13 reads; a degraded probe 
   assert.equal(new Set(reads.map(([source]) => source)).size, 13);
   assert.match(reads[0][1], /asset-3/, 'the asset slot follows the publication index');
   reads.length = 0;
-  const reject = { reject: { outcome: 'typed_reject_not_admitted', code: 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE' } };
+  const reject = {
+    reject: {
+      outcome: 'typed_reject_not_admitted',
+      code: 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE',
+    },
+  };
   assert.deepEqual(await createPublishPreflight(world, async () => reject)(0), reject);
   assert.equal(reads.length, 0);
 });
 
 test('the synthetic handler verifies before the send, holds the wallet for the chain and replays the 16 tail operations', async () => {
   const log = [];
-  const record = (kind) => async (...args) => void log.push([kind, args.at(-1)?.source]);
+  const record =
+    (kind) =>
+    async (...args) =>
+      void log.push([kind, args.at(-1)?.source]);
   const store = {
     query: record('query'),
     insert: record('insert'),
@@ -137,8 +162,14 @@ test('the synthetic handler verifies before the send, holds the wallet for the c
     update: record('update'),
   };
   const world = { store, cfg: { walletHoldMs: 40 } };
-  const handler = createLiftHandler(world, { storage: { deleteByPatternWithoutCount: async (_s, _spec, o) => void log.push(['deleteByPattern', o.source]) } });
-  assert.deepEqual(await handler.preflight({ request: { name: 'pub-t-4' } }), { action: 'execute' });
+  const handler = createLiftHandler(world, {
+    storage: {
+      deleteByPatternWithoutCount: async (_s, _spec, o) => void log.push(['deleteByPattern', o.source]),
+    },
+  });
+  assert.deepEqual(await handler.preflight({ request: { name: 'pub-t-4' } }), {
+    action: 'execute',
+  });
   assert.equal(log.length, 5, 'five verification reads');
   assert.ok(log.every(([kind, source]) => kind === 'query' && source.startsWith('bench.vr.')));
   log.length = 0;
@@ -157,7 +188,11 @@ test('the synthetic handler verifies before the send, holds the wallet for the c
   assert.equal(log[0][1], 'bench.vr.lifecyclePointer');
   assert.equal(log.length - 1, LIFT_TAIL_OPS, 'one pointer read, then the executor tail');
   assert.ok(log.slice(1).every(([, source]) => source.startsWith('bench.dp.lift.')));
-  assert.deepEqual(handler.state, { preflights: 1, executions: 1, tailOps: LIFT_TAIL_OPS });
+  assert.deepEqual(handler.state, {
+    preflights: 1,
+    executions: 1,
+    tailOps: LIFT_TAIL_OPS,
+  });
   assert.deepEqual([result.status, result.kaId, result.ual], ['confirmed', 1004n, 'did:dkg:x']);
 });
 
@@ -183,26 +218,46 @@ async function rig({ wallets = 2, walletHoldMs = 150, publications = 4 } = {}) {
     pubRequests: [],
     liftObserverEvents: [],
   };
-  const liftSide = createLiftSide(world, deps, { stageStore: store, graphManager: new deps.storage.GraphManager(store) });
+  const liftSide = createLiftSide(world, deps, {
+    stageStore: store,
+    graphManager: new deps.storage.GraphManager(store),
+  });
   for (let n = 0; n < publications; n++) await liftSide.stage(n);
   await beginEpoch(world, () => liftSide.start());
   return { world, liftSide, store };
 }
 
-const enqueue = (liftSide, n) => liftSide.admission.enqueueKnowledgeAssetVmPublish(liftSide.request(n), { admittedByAgentAddress: AGENT });
+const enqueue = (liftSide, n) =>
+  liftSide.admission.enqueueKnowledgeAssetVmPublish(liftSide.request(n), {
+    admittedByAgentAddress: AGENT,
+  });
 
 test('the real publisher claims, executes and finishes the submitted jobs; the trace and the metrics read them back', async () => {
-  const { world, liftSide, store } = await rig({ wallets: 2, walletHoldMs: 250, publications: 3 });
+  const { world, liftSide, store } = await rig({
+    wallets: 2,
+    walletHoldMs: 250,
+    publications: 3,
+  });
   try {
     const wallets = [];
     await enqueue(liftSide, 0);
     await enqueue(liftSide, 1);
     // both wallets locked: the third publication becomes ready with no worker free
-    await until(() => new Set(liftSide.trace.events.filter((e) => e.ev === 'written').map((e) => e.walletId)).size === 2, 'both wallets locked');
+    await until(
+      () => new Set(liftSide.trace.events.filter((e) => e.ev === 'written').map((e) => e.walletId)).size === 2,
+      'both wallets locked',
+    );
     wallets.push(...liftSide.trace.events.map((e) => e.walletId));
     await enqueue(liftSide, 2);
-    await until(async () => (await liftSide.admission.list({ status: 'finalized' })).length === 3, 'three finalized jobs');
-    assert.deepEqual(liftSide.handler.state, { preflights: liftSide.handler.state.preflights, executions: 3, tailOps: 3 * LIFT_TAIL_OPS });
+    await until(
+      async () => (await liftSide.admission.list({ status: 'finalized' })).length === 3,
+      'three finalized jobs',
+    );
+    assert.deepEqual(liftSide.handler.state, {
+      preflights: liftSide.handler.state.preflights,
+      executions: 3,
+      tailOps: 3 * LIFT_TAIL_OPS,
+    });
     assert.ok(liftSide.handler.state.preflights >= 3);
     assert.equal(liftSide.state.errors, 0);
     assert.deepEqual(liftSide.state.bootBackfill, { ok: true });
@@ -213,7 +268,11 @@ test('the real publisher claims, executes and finishes the submitted jobs; the t
     assert.equal((await readLiftJobs(store, deps, 'other')).size, 0, 'another run tag reads nothing');
 
     const rows = [...byName.values()].flat().map((j) => jobRow(j, world.epoch0));
-    const events = liftSide.trace.events.map((e) => ({ t: e.at - world.epoch0, ev: e.ev, walletId: e.walletId }));
+    const events = liftSide.trace.events.map((e) => ({
+      t: e.at - world.epoch0,
+      ev: e.ev,
+      walletId: e.walletId,
+    }));
     assert.equal(events.filter((e) => e.ev === 'deleted').length, 3, 'each job releases its wallet once');
     assert.ok(events.filter((e) => e.ev === 'written').length >= 3);
     assert.ok(events.every((e) => liftSide.walletIds.includes(e.walletId)));
@@ -224,7 +283,10 @@ test('the real publisher claims, executes and finishes the submitted jobs; the t
       walletEvents: events,
       walletIds: liftSide.walletIds,
     });
-    assert.deepEqual([block.pickup.nAccepted, block.pickup.nClaimed, block.pickup.nCensored, block.reclaimed], [3, 3, 0, 0]);
+    assert.deepEqual(
+      [block.pickup.nAccepted, block.pickup.nClaimed, block.pickup.nCensored, block.reclaimed],
+      [3, 3, 0, 0],
+    );
     assert.equal(block.workerFree.traceLive, true);
     assert.equal(block.workerFree.nQualifying + block.workerFree.nBusy + block.workerFree.nUnknown, 3);
     const third = rows.find((r) => r.name === 'pub-tg-2');
@@ -240,7 +302,11 @@ test('the real publisher claims, executes and finishes the submitted jobs; the t
 });
 
 test('publish producers run the preflight, enqueue and record every outcome in the window they were due in', async () => {
-  const { world, liftSide, store } = await rig({ wallets: 2, walletHoldMs: 20, publications: 3 });
+  const { world, liftSide, store } = await rig({
+    wallets: 2,
+    walletHoldMs: 20,
+    publications: 3,
+  });
   try {
     const preflight = createPublishPreflight(world, async () => ({ ok: true }));
     const producers = startPublishProducers(world, liftSide, preflight, [5, 30, 55]);
@@ -250,30 +316,55 @@ test('publish producers run the preflight, enqueue and record every outcome in t
     assert.equal(await producers.drain(5000), 0);
     finalizeRequests(world.pubRequests);
     const recs = world.pubRequests;
-    assert.deepEqual(recs.map((r) => r.key), ['pub-tg-0', 'pub-tg-1', 'pub-tg-2']);
-    assert.ok(recs.every((r) => r.outcome === 'success' && r.windowTag === 'measure' && r.jobId && r.preMs >= 0 && r.enqMs >= 0));
+    assert.deepEqual(
+      recs.map((r) => r.key),
+      ['pub-tg-0', 'pub-tg-1', 'pub-tg-2'],
+    );
+    assert.ok(
+      recs.every(
+        (r) => r.outcome === 'success' && r.windowTag === 'measure' && r.jobId && r.preMs >= 0 && r.enqMs >= 0,
+      ),
+    );
     await until(async () => (await liftSide.admission.list({ status: 'finalized' })).length === 3, 'the jobs finish');
-    assert.deepEqual([...(await readLiftJobs(store, deps, 'tg')).keys()].sort(), recs.map((r) => r.key));
+    assert.deepEqual(
+      [...(await readLiftJobs(store, deps, 'tg')).keys()].sort(),
+      recs.map((r) => r.key),
+    );
     // a rejected probe is the route's 503: no enqueue, a recorded failure
     const rejecting = createPublishPreflight(world, async () => ({
-      reject: { outcome: 'typed_reject_not_admitted', code: 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE', phase: 'preflight' },
+      reject: {
+        outcome: 'typed_reject_not_admitted',
+        code: 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE',
+        phase: 'preflight',
+      },
     }));
     world.pubRequests = [];
     const again = startPublishProducers(world, liftSide, rejecting, [0]);
     again.stop();
     await again.drain(2000);
-    assert.deepEqual(world.pubRequests.map((r) => [r.outcome, r.code, r.jobId]), [['typed_reject_not_admitted', 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE', undefined]]);
+    assert.deepEqual(
+      world.pubRequests.map((r) => [r.outcome, r.code, r.jobId]),
+      [['typed_reject_not_admitted', 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE', undefined]],
+    );
   } finally {
     await liftSide.stop();
   }
 });
 
 test('the publisher list observer polls the full list; the paged call waits for P9a', async () => {
-  const { liftSide } = await rig({ wallets: 1, walletHoldMs: 10, publications: 2 });
+  const { liftSide } = await rig({
+    wallets: 1,
+    walletHoldMs: 10,
+    publications: 2,
+  });
   try {
-    assert.deepEqual(await LIFT_OBSERVER_CALLS.default(liftSide.admission), { rows: 0 });
+    assert.deepEqual(await LIFT_OBSERVER_CALLS.default(liftSide.admission), {
+      rows: 0,
+    });
     await enqueue(liftSide, 0);
-    assert.deepEqual(await LIFT_OBSERVER_CALLS.default(liftSide.admission), { rows: 1 });
+    assert.deepEqual(await LIFT_OBSERVER_CALLS.default(liftSide.admission), {
+      rows: 1,
+    });
     assert.equal(LIFT_OBSERVER_CALLS.paged, null);
   } finally {
     await liftSide.stop();
@@ -281,7 +372,11 @@ test('the publisher list observer polls the full list; the paged call waits for 
 });
 
 test('stop() reports a runner that does not stop in time and still takes the trace off', async () => {
-  const { liftSide } = await rig({ wallets: 1, walletHoldMs: 10, publications: 1 });
+  const { liftSide } = await rig({
+    wallets: 1,
+    walletHoldMs: 10,
+    publications: 1,
+  });
   const stop = liftSide.runner.stop.bind(liftSide.runner);
   liftSide.runner.stop = () => new Promise(() => {}); // never settles
   const realSetTimeout = globalThis.setTimeout;

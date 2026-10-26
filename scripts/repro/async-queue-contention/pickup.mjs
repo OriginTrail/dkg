@@ -120,8 +120,9 @@ export function pickupBlock({ rows, window, runEnd, walletEvents, walletIds }) {
     },
     reclaimed: rows.filter((j) => j.reclaimed).length,
     states: rows.reduce((acc, j) => ({ ...acc, [j.status]: (acc[j.status] ?? 0) + 1 }), {}),
-    finalizedInWindow: rows.filter((j) => j.finalizedAt !== null && j.finalizedAt >= window.from && j.finalizedAt < window.to)
-      .length,
+    finalizedInWindow: rows.filter(
+      (j) => j.finalizedAt !== null && j.finalizedAt >= window.from && j.finalizedAt < window.to,
+    ).length,
   };
 }
 

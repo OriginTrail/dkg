@@ -22,9 +22,18 @@ import { poissonArrivals, startArrivals, within } from './workload.mjs';
 
 export const AUTHOR = '0x1111111111111111111111111111111111111111';
 /** The harness's chain-time scaling: wallets, wallet hold (ms) and idle poll (ms). */
-export const LIFT_DEFAULTS = Object.freeze({ wallets: 6, walletHoldMs: 3000, pollMs: 1000 });
+export const LIFT_DEFAULTS = Object.freeze({
+  wallets: 6,
+  walletHoldMs: 3000,
+  pollMs: 1000,
+});
 const DKG = 'http://dkg.io/ontology/';
-const q = (graph, subject, predicate, object) => ({ graph, subject, predicate, object });
+const q = (graph, subject, predicate, object) => ({
+  graph,
+  subject,
+  predicate,
+  object,
+});
 const lit = (s) => JSON.stringify(String(s));
 
 export const walletIdsOf = (n) => Array.from({ length: n }, (_, i) => `aqc-wallet-${i}`);
@@ -81,7 +90,10 @@ export function createPublishPreflight(world, shareProbe) {
     const S = swmMetaGraph();
     const pf = await shareProbe();
     if (pf.reject) return pf;
-    await read('intent.slots', `SELECT ?s WHERE { GRAPH <${M}> { ?s <${DKG}state> ?o . FILTER(STRSTARTS(STR(?s), "urn:dkg:assertion:${CG_ID}:") && STRENDS(STR(?s), ":asset-${n % 16}")) } } LIMIT 100`);
+    await read(
+      'intent.slots',
+      `SELECT ?s WHERE { GRAPH <${M}> { ?s <${DKG}state> ?o . FILTER(STRSTARTS(STR(?s), "urn:dkg:assertion:${CG_ID}:") && STRENDS(STR(?s), ":asset-${n % 16}")) } } LIMIT 100`,
+    );
     await read('intent.seal', `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${M}> { VALUES ?s { <${a}> } ?s ?p ?o } }`);
     await read('intent.state', `SELECT ?state WHERE { GRAPH <${M}> { <${a}> <${DKG}state> ?state } }`);
     await read('intent.events', `SELECT ?p ?o WHERE { GRAPH <${M}> { <${a}> ?p ?o } } LIMIT 100`);
@@ -93,7 +105,10 @@ export function createPublishPreflight(world, shareProbe) {
     await read('snapshot.count1', `SELECT (COUNT(*) AS ?count) WHERE { GRAPH <${M}/private-${n % 4}> { ?s ?p ?o } }`);
     await read('snapshot.select', `SELECT ?s ?p ?o WHERE { GRAPH <${M}/private-${n % 4}> { ?s ?p ?o } } LIMIT 256`);
     await read('snapshot.count2', `SELECT (COUNT(*) AS ?count) WHERE { GRAPH <${M}/private-${n % 4}> { ?s ?p ?o } }`);
-    await read('snapshot.chain', `SELECT ?id WHERE { GRAPH <${M}> { <did:dkg:context-graph:${CG_ID}> <${DKG}onChainId> ?id } }`);
+    await read(
+      'snapshot.chain',
+      `SELECT ?id WHERE { GRAPH <${M}> { <did:dkg:context-graph:${CG_ID}> <${DKG}onChainId> ?id } }`,
+    );
     return { ok: true };
   };
 }
@@ -143,14 +158,26 @@ export function createLiftHandler(world, deps) {
     await op(() => store.insert([q(M, a, `${DKG}retireAt`, lit(Date.now()))], o('retireSchedule')));
     await op(() => store.listGraphs(o('scopeGraphs')));
     await op(() => store.dropGraph(`did:dkg:context-graph:${CG_ID}/_shared_memory/pub${jn}`, o('dropSwm')));
-    await op(() => store.dropGraph(`did:dkg:context-graph:${CG_ID}/_shared_memory_snapshots/pub${jn}`, o('dropSnapshot')));
+    await op(() =>
+      store.dropGraph(`did:dkg:context-graph:${CG_ID}/_shared_memory_snapshots/pub${jn}`, o('dropSnapshot')),
+    );
     await drop('ackCopy', { graph: S, subject: `urn:dkg:ackcopy:${jn}` });
     await drop('headDelete', { graph: S, subject: `urn:dkg:head:${jn}` });
-    await drop('opDelete1', { graph: S, subject: `urn:dkg:share:${CG_ID}:so${jn}` });
-    await drop('opDelete2', { graph: M, subject: a, predicate: `${DKG}swmShareComplete` });
+    await drop('opDelete1', {
+      graph: S,
+      subject: `urn:dkg:share:${CG_ID}:so${jn}`,
+    });
+    await drop('opDelete2', {
+      graph: M,
+      subject: a,
+      predicate: `${DKG}swmShareComplete`,
+    });
     await op(() => store.delete([q(M, a, `${DKG}state`, lit('shared'))], o('lifecycleDelete')));
     await op(() =>
-      store.insert([q(M, a, `${DKG}state`, lit('published')), q(M, a, `${DKG}publishedAt`, lit(Date.now()))], o('lifecycleInsert')),
+      store.insert(
+        [q(M, a, `${DKG}state`, lit('published')), q(M, a, `${DKG}publishedAt`, lit(Date.now()))],
+        o('lifecycleInsert'),
+      ),
     );
     await op(() => store.insert([q(M, a, `${DKG}vmTwin`, lit(`vm${jn}`))], o('vmTwin')));
     await op(() => store.insert([q(M, a, `${DKG}catalogObligation`, lit(`c${jn}`))], o('catalog')));
@@ -166,10 +193,9 @@ export function createLiftHandler(world, deps) {
     async execute(input) {
       state.executions++;
       const jn = jnOf(input);
-      await store.query(
-        `SELECT ?o WHERE { GRAPH <${metaGraph()}> { <${assetOf(jn)}> <${DKG}lifecyclePointer> ?o } }`,
-        { source: 'bench.vr.lifecyclePointer' },
-      );
+      await store.query(`SELECT ?o WHERE { GRAPH <${metaGraph()}> { <${assetOf(jn)}> <${DKG}lifecyclePointer> ?o } }`, {
+        source: 'bench.vr.lifecyclePointer',
+      });
       const txHash = `0x${randomBytes(32).toString('hex')}`;
       const n = ++nonce;
       await input.publishOptions.onBeforeBroadcast?.({ txHash, nonce: n });
@@ -207,10 +233,17 @@ export function installWalletTrace(claimTrace) {
   const events = [];
   const hadOwn = Object.prototype.hasOwnProperty.call(claimTrace, 'emit');
   const original = claimTrace.emit;
-  if (typeof original !== 'function') throw new Error('wallet trace: claimTrace.emit not found (product code changed?)');
+  if (typeof original !== 'function')
+    throw new Error('wallet trace: claimTrace.emit not found (product code changed?)');
   claimTrace.emit = function walletTracingEmit(event, fields, walletId, claimToken) {
     try {
-      if (event === 'wallet_lock_written') events.push({ at: Date.now(), ev: 'written', walletId, jobId: fields?.jobId ?? null });
+      if (event === 'wallet_lock_written')
+        events.push({
+          at: Date.now(),
+          ev: 'written',
+          walletId,
+          jobId: fields?.jobId ?? null,
+        });
       else if (event === 'wallet_lock_deleted') events.push({ at: Date.now(), ev: 'deleted', walletId });
     } catch {
       /* instrumentation must never change behaviour */
@@ -235,7 +268,12 @@ export function installWalletTrace(claimTrace) {
 export function createLiftSide(world, deps, { stageStore, graphManager }) {
   const { store, cfg } = world;
   const { pub, core } = deps;
-  const state = { errors: 0, first: null, bootBackfill: null, stopTimedOut: null };
+  const state = {
+    errors: 0,
+    first: null,
+    bootBackfill: null,
+    stopTimedOut: null,
+  };
   const note = (e) => {
     state.errors++;
     state.first ??= String(e?.message ?? e).slice(0, 200);
@@ -243,7 +281,10 @@ export function createLiftSide(world, deps, { stageStore, graphManager }) {
   const handler = createLiftHandler(world, deps);
   const base = { journalWrites: true };
   const admission = new pub.TripleStoreAsyncLiftPublisher(store, base);
-  const runtime = new pub.TripleStoreAsyncLiftPublisher(store, { ...base, knowledgeAssetVmPublishHandler: handler });
+  const runtime = new pub.TripleStoreAsyncLiftPublisher(store, {
+    ...base,
+    knowledgeAssetVmPublishHandler: handler,
+  });
   const walletIds = walletIdsOf(cfg.wallets);
   const runner = new pub.AsyncLiftRunner({
     publisher: runtime,
@@ -274,8 +315,18 @@ export function createLiftSide(world, deps, { stageStore, graphManager }) {
         assertionVersion: '1',
         publisherPeerId: 'aqc-peer',
         quads: [
-          { subject: `urn:aqc:ka:${n}:a`, predicate: 'http://schema.org/name', object: '"One"', graph: '' },
-          { subject: `urn:aqc:ka:${n}:b`, predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
+          {
+            subject: `urn:aqc:ka:${n}:a`,
+            predicate: 'http://schema.org/name',
+            object: '"One"',
+            graph: '',
+          },
+          {
+            subject: `urn:aqc:ka:${n}:b`,
+            predicate: 'http://schema.org/name',
+            object: '"Two"',
+            graph: '',
+          },
         ],
       });
     },
@@ -284,13 +335,20 @@ export function createLiftSide(world, deps, { stageStore, graphManager }) {
         await admission.ensureVmPublishIntentIndex?.();
         state.bootBackfill = { ok: true };
       } catch (e) {
-        state.bootBackfill = { ok: false, err: String(e?.message ?? e).slice(0, 160) };
+        state.bootBackfill = {
+          ok: false,
+          err: String(e?.message ?? e).slice(0, 160),
+        };
       } // fail-open like the daemon's boot backfill
       await runner.start();
     },
     /** Resolves true when the runner stopped within the cap. */
     async stop() {
-      state.stopTimedOut = (await within(runner.stop().then(() => 'stopped'), 25_000)) !== 'stopped';
+      state.stopTimedOut =
+        (await within(
+          runner.stop().then(() => 'stopped'),
+          25_000,
+        )) !== 'stopped';
       trace.uninstall();
       return !state.stopTimedOut;
     },

@@ -36,7 +36,8 @@ export const jobIdOf = (j) => {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
 };
 /** Whether history job j is a terminal failure, for a fraction in [0, 1]: a fixed pseudo-random subset. */
-export const isFailedHistoryJob = (j, fraction) => fraction > 0 && (Math.imul(j + 1, 2654435761) >>> 0) % 100_000 < fraction * 100_000;
+export const isFailedHistoryJob = (j, fraction) =>
+  fraction > 0 && (Math.imul(j + 1, 2654435761) >>> 0) % 100_000 < fraction * 100_000;
 
 /** The lifecycle order of the job's timestamps; every present one is moved to acceptedAt + its rank seconds. */
 const TIMESTAMP_ORDER = [
@@ -60,8 +61,10 @@ export function normalizeTemplate(tpl) {
   present.forEach((k, rank) => {
     job.timestamps[k] = rank * STEP_MS;
   });
-  for (const k of Object.keys(job.timestamps)) if (!present.includes(k) && typeof job.timestamps[k] === 'number') delete job.timestamps[k];
-  if (job.claim?.claimLeaseExpiresAt !== undefined) job.claim.claimLeaseExpiresAt = job.timestamps.claimedAt + CLAIM_LEASE_MS;
+  for (const k of Object.keys(job.timestamps))
+    if (!present.includes(k) && typeof job.timestamps[k] === 'number') delete job.timestamps[k];
+  if (job.claim?.claimLeaseExpiresAt !== undefined)
+    job.claim.claimLeaseExpiresAt = job.timestamps.claimedAt + CLAIM_LEASE_MS;
   const journal = tpl.journal.map((e) => ({ ...e, at: e.seq * STEP_MS }));
   return { ...tpl, job, journal };
 }
@@ -113,8 +116,13 @@ export async function buildLiftTemplates(deps) {
       };
     },
   };
-  const admission = new pub.TripleStoreAsyncLiftPublisher(store, { journalWrites: true });
-  const runtime = new pub.TripleStoreAsyncLiftPublisher(store, { journalWrites: true, knowledgeAssetVmPublishHandler: handler });
+  const admission = new pub.TripleStoreAsyncLiftPublisher(store, {
+    journalWrites: true,
+  });
+  const runtime = new pub.TripleStoreAsyncLiftPublisher(store, {
+    journalWrites: true,
+    knowledgeAssetVmPublishHandler: handler,
+  });
   const stage = async (n, quads) => {
     const request = makeVmRequest(n, 'tpl', core);
     await pub.storeKnowledgeAssetOperationPublicQuads({
@@ -130,8 +138,18 @@ export async function buildLiftTemplates(deps) {
     return request;
   };
   const two = [
-    { subject: 'urn:aqc:tpl:a', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
-    { subject: 'urn:aqc:tpl:b', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
+    {
+      subject: 'urn:aqc:tpl:a',
+      predicate: 'http://schema.org/name',
+      object: '"One"',
+      graph: '',
+    },
+    {
+      subject: 'urn:aqc:tpl:b',
+      predicate: 'http://schema.org/name',
+      object: '"Two"',
+      graph: '',
+    },
   ];
   const out = {};
   // the failed one stages a single triple against a request that declares two: canonicalization_failed
@@ -141,8 +159,11 @@ export async function buildLiftTemplates(deps) {
   ]) {
     const request = await stage(n, quads);
     const mark = journalInserts.length;
-    await admission.enqueueKnowledgeAssetVmPublish(request, { admittedByAgentAddress: AGENT });
-    if (!(await runtime.processNext('aqc-tpl-wallet'))) throw new Error(`lift template: processNext returned no job for ${kind}`);
+    await admission.enqueueKnowledgeAssetVmPublish(request, {
+      admittedByAgentAddress: AGENT,
+    });
+    if (!(await runtime.processNext('aqc-tpl-wallet')))
+      throw new Error(`lift template: processNext returned no job for ${kind}`);
     const job = (await admission.list()).find((j) => j.request.knowledgeAssetVmPublish.name === request.name);
     if (!job || job.status !== kind) throw new Error(`lift template: expected a ${kind} job, got ${job?.status}`);
     const journal = journalInserts
@@ -155,7 +176,11 @@ export async function buildLiftTemplates(deps) {
         return entry;
       })
       .sort((a, b) => a.seq - b.seq);
-    out[kind] = normalizeTemplate({ job: JSON.parse(JSON.stringify(job)), journal, request });
+    out[kind] = normalizeTemplate({
+      job: JSON.parse(JSON.stringify(job)),
+      journal,
+      request,
+    });
   }
   await runtime.drainDetachedExecutions?.();
   return out;
@@ -182,9 +207,18 @@ export function cloneHistoryJob(tpl, j, { liftControl: CP }, { baseTime, wallets
   payload.wmCurrentAssertion = payload.swmCurrentAssertion = root.slice(2);
   payload.seal.reservedKaId = ((BigInt(AUTHOR) << 96n) | BigInt(ualNumber)).toString();
   job.jobSlug = CP.createJobSlug(job.request);
-  job.controlPlane = { jobRef: CP.jobSubject(id), walletLockRef: CP.walletLockSubject(wallet) };
-  if (job.claim) job.claim = { ...job.claim, walletId: wallet, claimToken: `${wallet}:${id}:${sha(`claim-${j}`).slice(0, 36)}` };
-  if (job.validation) job.validation.authorityProofRef = `urn:dkg:knowledge-assets:${CG_ID}:${name}:${shareOperationId}:vm-publish`;
+  job.controlPlane = {
+    jobRef: CP.jobSubject(id),
+    walletLockRef: CP.walletLockSubject(wallet),
+  };
+  if (job.claim)
+    job.claim = {
+      ...job.claim,
+      walletId: wallet,
+      claimToken: `${wallet}:${id}:${sha(`claim-${j}`).slice(0, 36)}`,
+    };
+  if (job.validation)
+    job.validation.authorityProofRef = `urn:dkg:knowledge-assets:${CG_ID}:${name}:${shareOperationId}:vm-publish`;
   if (job.broadcast) {
     job.broadcast.txHash = tx;
     job.broadcast.walletId = wallet;
@@ -199,7 +233,10 @@ export function cloneHistoryJob(tpl, j, { liftControl: CP }, { baseTime, wallets
   const shift = baseTime - HOUR_MS - j * 1000; // the job is accepted at least an hour before baseTime
   for (const k of Object.keys(job.timestamps)) if (typeof job.timestamps[k] === 'number') job.timestamps[k] += shift;
   if (job.claim?.claimLeaseExpiresAt) job.claim.claimLeaseExpiresAt += shift;
-  const lineageKey = CP.knowledgeAssetVmPublishLifecycleKey({ contextGraphId: CG_ID, name });
+  const lineageKey = CP.knowledgeAssetVmPublishLifecycleKey({
+    contextGraphId: CG_ID,
+    name,
+  });
   const journal = tpl.journal.map((e) => {
     const entry = { ...e, jobId: id, lineageKey, at: e.at + shift };
     if (e.intentKey !== undefined) entry.intentKey = payload.intentKey;
@@ -230,7 +267,11 @@ export function* liftHistoryBatches(deps, templates, n, { baseTime, failedFracti
     const counts = { jobs: 0, failed: 0, jobQuads: 0, journalQuads: 0 };
     const quads = [];
     for (let j = from; j < Math.min(n, from + batchJobs); j++) {
-      const r = historyJobQuads(templates, j, deps, { baseTime, failedFraction, wallets });
+      const r = historyJobQuads(templates, j, deps, {
+        baseTime,
+        failedFraction,
+        wallets,
+      });
       counts.jobs++;
       if (r.status === 'failed') counts.failed++;
       counts.jobQuads += r.jobQuads.length;
@@ -248,9 +289,19 @@ export function* liftHistoryBatches(deps, templates, n, { baseTime, failedFracti
 export async function writeLiftSeedFile(deps, { jobs, baseTime, failedFraction = 0.05, wallets = 6, path }) {
   const templates = await buildLiftTemplates(deps);
   const hash = createHash('sha256');
-  const totals = { quads: 0, bytes: 0, failed: 0, jobQuads: 0, journalQuads: 0 };
+  const totals = {
+    quads: 0,
+    bytes: 0,
+    failed: 0,
+    jobQuads: 0,
+    journalQuads: 0,
+  };
   async function* text() {
-    for (const { quads, counts } of liftHistoryBatches(deps, templates, jobs, { baseTime, failedFraction, wallets })) {
+    for (const { quads, counts } of liftHistoryBatches(deps, templates, jobs, {
+      baseTime,
+      failedFraction,
+      wallets,
+    })) {
       const chunk = `${deps.storage.quadsToNQuads(quads)}\n`; // ASCII only, as Blazegraph's bulk endpoint reads it
       hash.update(chunk);
       totals.quads += quads.length;
@@ -287,7 +338,11 @@ export async function loadGeneratedLift(seedStore, deps, { jobs, baseTime, faile
   const templates = await buildLiftTemplates(deps);
   const inFlight = new Set();
   const failures = [];
-  for (const { quads } of liftHistoryBatches(deps, templates, jobs, { baseTime, failedFraction, wallets })) {
+  for (const { quads } of liftHistoryBatches(deps, templates, jobs, {
+    baseTime,
+    failedFraction,
+    wallets,
+  })) {
     if (failures.length) break;
     const tracked = (async () => seedStore.insert(quads, { source: 'bench.seedLiftHistory' }))()
       .catch((err) => {

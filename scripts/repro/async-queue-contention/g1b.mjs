@@ -25,25 +25,47 @@ export const G0B_REFERENCE = Object.freeze({
 });
 /** G0b's cells: the stream(s), the named rung and its load, and what G1b compares. */
 export const G1B_CELLS = Object.freeze({
-  g9L3: { queue: 'share', rung: 'L3', load: { lambda: 8, mu: 0, content: 4, aggregate: 2 }, metrics: ['shareP95'] },
+  g9L3: {
+    queue: 'share',
+    rung: 'L3',
+    load: { lambda: 8, mu: 0, content: 4, aggregate: 2 },
+    metrics: ['shareP95'],
+  },
   g9mix: {
     queue: 'both',
     rung: 'MIX',
     load: { lambda: 4, mu: 0.4, content: 3, aggregate: 1 },
     metrics: ['shareP95', 'pickup'],
   },
-  g9pub: { queue: 'lift', rung: 'PSTAR', load: { lambda: 0, mu: 0.8, content: 4, aggregate: 2 }, metrics: ['pickup'] },
+  g9pub: {
+    queue: 'lift',
+    rung: 'PSTAR',
+    load: { lambda: 0, mu: 0.8, content: 4, aggregate: 2 },
+    metrics: ['pickup'],
+  },
 });
 export const G1B_METRICS = Object.freeze({
   shareP95: { label: 'share P95', field: 'p95Ms', band: (ref) => 0.25 * ref },
-  pickup: { label: 'pick-up p50', field: 'pickupP50Ms', band: (ref) => Math.max(0.25 * ref, 500) },
+  pickup: {
+    label: 'pick-up p50',
+    field: 'pickupP50Ms',
+    band: (ref) => Math.max(0.25 * ref, 500),
+  },
 });
 /** The standard factors of every G0b run: windows, observer, empty histories, probe and ACK load, the chain-time model. */
 export const G1B_SETUP = Object.freeze({
   windows: { warmupMs: 30_000, measureMs: 180_000, cooldownMs: 10_000 },
   observer: 'default',
   observerMs: 5000,
-  loadFactors: { probes: true, ack: true, statusMs: 10_000, metricsMs: 30_000, countMs: 60_000, ackMs: 4000, ackPayload: 32 },
+  loadFactors: {
+    probes: true,
+    ack: true,
+    statusMs: 10_000,
+    metricsMs: 30_000,
+    countMs: 60_000,
+    ackMs: 4000,
+    ackPayload: 32,
+  },
   liftModel: { wallets: 6, walletHoldMs: 3000, liftPollMs: 1000 },
 });
 
@@ -87,9 +109,13 @@ export function g1b(records) {
       const valid = runs.filter((r) => r.valid);
       if (!runs.length) problems.push(`repeat ${repeat}: no run`);
       else if (!valid.length) {
-        problems.push(`repeat ${repeat}: no valid run (${runs.map((r) => `${r.runId}: ${r.failedChecks.join(', ')}`).join('; ')})`);
+        problems.push(
+          `repeat ${repeat}: no valid run (${runs.map((r) => `${r.runId}: ${r.failedChecks.join(', ')}`).join('; ')})`,
+        );
       } else if (valid.length > 1) {
-        problems.push(`repeat ${repeat}: ${valid.length} valid runs (${valid.map((r) => r.runId).join(', ')}); remove the ones that are not meant to count`);
+        problems.push(
+          `repeat ${repeat}: ${valid.length} valid runs (${valid.map((r) => r.runId).join(', ')}); remove the ones that are not meant to count`,
+        );
       } else {
         const off = setupProblems(valid[0], def);
         if (off.length) problems.push(`repeat ${repeat} (${valid[0].runId}): ${off.join('; ')}`);
@@ -107,10 +133,23 @@ export function g1b(records) {
         const lo = ref - band(ref);
         const hi = ref + band(ref);
         const ok = m >= lo - EPS && m <= hi + EPS;
-        metrics[name] = { median: m, ref, deviation: Math.round(((m - ref) / ref) * 1e4) / 1e4, lo, hi, ok };
+        metrics[name] = {
+          median: m,
+          ref,
+          deviation: Math.round(((m - ref) / ref) * 1e4) / 1e4,
+          lo,
+          hi,
+          ok,
+        };
       }
     }
-    cells[id] = { queue: def.queue, rung: def.rung, have: usable.length, problems, metrics };
+    cells[id] = {
+      queue: def.queue,
+      rung: def.rung,
+      have: usable.length,
+      problems,
+      metrics,
+    };
   }
   const have = Math.min(...Object.values(cells).map((c) => c.have));
   const label = 'g1b: median of the five seeded repeats within the G0b band (D-15)';
@@ -128,5 +167,11 @@ export function g1b(records) {
     };
   }
   const ok = Object.values(cells).every((c) => Object.values(c.metrics).every((m) => m.ok));
-  return { label, status: ok ? 'pass' : 'fail', need: G1B_REPEATS, have, cells };
+  return {
+    label,
+    status: ok ? 'pass' : 'fail',
+    need: G1B_REPEATS,
+    have,
+    cells,
+  };
 }

@@ -93,7 +93,9 @@ if (target && !values['force-nonempty']) {
     process.exit(1);
   }
   if ((await res.json()).boolean) {
-    console.error(`the queue graphs of that namespace (${graphs.join(', ')}) are not empty; use --force-nonempty to load anyway`);
+    console.error(
+      `the queue graphs of that namespace (${graphs.join(', ')}) are not empty; use --force-nonempty to load anyway`,
+    );
     process.exit(1);
   }
 }

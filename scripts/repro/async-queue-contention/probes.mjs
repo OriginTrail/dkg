@@ -76,7 +76,17 @@ export function makeMetricsQuery(store, counters) {
   return async (sparql, options) => {
     if (options?.source === PROBE_RECONCILE_SOURCE) {
       counters.reconcilesStubbed++;
-      return { bindings: [{ totalTriples: '"0"', totalKCs: '"0"', totalKAs: '"0"', confirmedKCs: '"0"', tentativeKCs: '"0"' }] };
+      return {
+        bindings: [
+          {
+            totalTriples: '"0"',
+            totalKCs: '"0"',
+            totalKAs: '"0"',
+            confirmedKCs: '"0"',
+            tentativeKCs: '"0"',
+          },
+        ],
+      };
     }
     counters.queries++;
     const r = await store.query(sparql, options);
@@ -115,7 +125,13 @@ export async function startProbeLoad(world, deps, cfg) {
       result = 'threw';
       err = e?.code ?? e?.name;
     }
-    events.push({ kind: 'status', t: t0 - world.t0, ms: performance.now() - t0, result, err });
+    events.push({
+      kind: 'status',
+      t: t0 - world.t0,
+      ms: performance.now() - t0,
+      result,
+      err,
+    });
   };
   const metricsOnce = async () => {
     const t0 = performance.now();
@@ -127,7 +143,13 @@ export async function startProbeLoad(world, deps, cfg) {
       result = e?.code === 'STORE_SCHEDULER_BUSY' ? 'busy' : 'error';
       err = e?.code ?? e?.name;
     }
-    events.push({ kind: 'metrics', t: t0 - world.t0, ms: performance.now() - t0, result, err });
+    events.push({
+      kind: 'metrics',
+      t: t0 - world.t0,
+      ms: performance.now() - t0,
+      result,
+      err,
+    });
   };
   const countOnce = () => {
     const t0 = performance.now();
@@ -158,7 +180,11 @@ export async function startProbeLoad(world, deps, cfg) {
     metrics: fixedSchedule(cfg.metricsMs, cfg.metricsPhaseMs ?? LOAD_DEFAULTS.metricsPhaseMs, cfg.horizonMs),
     count: fixedSchedule(cfg.countMs, cfg.countPhaseMs ?? LOAD_DEFAULTS.countPhaseMs, cfg.horizonMs),
   };
-  const loops = [loop(schedule.status, statusOnce), loop(schedule.metrics, metricsOnce), loop(schedule.count, countOnce)];
+  const loops = [
+    loop(schedule.status, statusOnce),
+    loop(schedule.metrics, metricsOnce),
+    loop(schedule.count, countOnce),
+  ];
   return {
     state: { events, counters, schedule },
     stop() {
@@ -272,7 +298,15 @@ export function startAckLoad(world, { deleteByPatternWithoutCount }, cfg) {
         ok = false;
         err = e?.code ?? e?.name;
       }
-      state.events.push({ k, due, t: t0 - world.t0, lateMs: t0 - world.t0 - due, ms: performance.now() - t0, ok, err });
+      state.events.push({
+        k,
+        due,
+        t: t0 - world.t0,
+        lateMs: t0 - world.t0 - due,
+        ms: performance.now() - t0,
+        ok,
+        err,
+      });
     }
   })();
   return {
