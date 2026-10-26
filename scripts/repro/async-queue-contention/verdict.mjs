@@ -528,15 +528,82 @@ export function noiseMargin(aaPairs) {
 }
 
 /**
- * The A/A declaration of two same-build arms' pairs: the noise margin, and whether it may be declared. Complete only
- * with PAIRED_MIN valid paired repeats in every cell (repeatsPerCell) AND a finite margin; either lack is incomplete
- * with the reason stated, never a success. margin is null whenever it is not finite (an unbounded A/A deviation: a zero
- * P95 against a nonzero one), so it cannot be mistaken for a number to declare.
+ * The build a run measured, as its summary records it: the commit (meta.git.sha) and whether the working tree was dirty
+ * (meta.git.dirty). That is the strongest identity a summary carries: scriptSha256 hashes the benchmark's own files,
+ * not the product, and distStaleSuspected is only a warning. A clean run and a dirty run of one commit are two builds,
+ * so the dirty flag is part of the identity. Two dirty runs of one commit cannot be told apart by what is recorded
+ * (the edits are not fingerprinted); they count as one build and integrityWarnings still reports the dirty tree.
+ * null when the commit or the flag is not recorded (git unavailable when the run started, or a summary that predates
+ * it): an unknown build, which is not the same build.
  */
-export function aaDeclaration(pairs, missing = []) {
+function buildIdentity(record) {
+  const { sha, dirty } = record?.git ?? {};
+  if (typeof sha !== 'string' || sha === '' || typeof dirty !== 'boolean') return null;
+  return { sha, dirty, id: `${sha}${dirty ? '+dirty' : ''}`, short: `${sha.slice(0, 9)}${dirty ? '+dirty' : ''}` };
+}
+
+/**
+ * Why the runs of two A/A arms are not known to be one build ([] when they are): an A/A margin is the noise of ONE
+ * build run twice, and the pairing checks (comparability) allow different product revisions, because the A/B rules
+ * compare two on purpose. So here every run of both arms, a discarded or unpaired one included, must record its build
+ * identity (buildIdentity) and all of them the same one. A difference names the revisions of each arm. A missing
+ * identity is a problem too: the same build needs positive evidence, an unknown build is not assumed to be the same.
+ */
+function aaBuildProblems(aRecords, bRecords) {
+  const arms = [
+    ['a', aRecords],
+    ['b', bRecords],
+  ];
+  const unrecorded = [];
+  const builds = new Map();
+  const perArm = { a: new Set(), b: new Set() };
+  for (const [side, records] of arms) {
+    for (const r of records) {
+      const build = buildIdentity(r);
+      if (!build) {
+        unrecorded.push(`${side}:${r.runId ?? r.key ?? '?'}`);
+        continue;
+      }
+      builds.set(build.id, build);
+      perArm[side].add(build.id);
+    }
+  }
+  const problems = [];
+  if (builds.size > 1) {
+    const names = (side) => [...perArm[side]].map((id) => builds.get(id).short).join(', ') || 'none';
+    problems.push(
+      `the runs come from different builds (--a: ${names('a')}; --b: ${names('b')}): an A/A margin is the noise of ` +
+        'one build run twice, a difference between revisions is not noise',
+    );
+  }
+  if (unrecorded.length) {
+    const shown = unrecorded.slice(0, 5).join(', ');
+    problems.push(
+      `no build identity (git sha and dirty flag) is recorded for ${unrecorded.length} run(s) (${shown}` +
+        `${unrecorded.length > 5 ? ', ...' : ''}): an A/A margin needs evidence that every run is the same build`,
+    );
+  }
+  return problems;
+}
+
+/**
+ * The A/A declaration of two same-build arms' pairs: the noise margin, and whether it may be declared. Complete only
+ * with PAIRED_MIN valid paired repeats in every cell (repeatsPerCell), a finite margin AND one build in both arms
+ * (aaBuildProblems); any lack is incomplete with the reason stated, never a success. margin is null whenever it cannot
+ * be declared: not finite (an unbounded A/A deviation: a zero P95 against a nonzero one) or computed across builds or
+ * unknown ones, so it cannot be mistaken for a number to declare. `aRecords` / `bRecords` default to the runs of the
+ * pairs; pass the whole arms to also check the runs that did not pair (as `flat` does). `missing` is pairRuns' unpaired
+ * runs.
+ */
+export function aaDeclaration(
+  pairs,
+  missing = [],
+  { aRecords = pairs.map((p) => p.a), bRecords = pairs.map((p) => p.b) } = {},
+) {
   const { have, cells } = repeatsPerCell(pairs, missing);
   const margin = noiseMargin(pairs);
-  const reasons = [];
+  const build = aaBuildProblems(aRecords, bRecords);
+  const reasons = [...build];
   if (have < PAIRED_MIN)
     reasons.push(`needs ${PAIRED_MIN} valid paired repeats in every cell, the thinnest has ${have}`);
   if (!Number.isFinite(margin))
@@ -544,7 +611,7 @@ export function aaDeclaration(pairs, missing = []) {
       'the noise margin is unbounded: an A/A pair has a P95 of 0 against a nonzero P95, so no margin can be declared',
     );
   return {
-    margin: Number.isFinite(margin) ? margin : null,
+    margin: Number.isFinite(margin) && !build.length ? margin : null,
     validPairs: have,
     cells,
     status: reasons.length ? 'incomplete' : 'complete',

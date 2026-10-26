@@ -51,8 +51,10 @@
 //      node ... run --blazegraph-url $URL --calibration $OUT/calib/calibration.json --label aa-1 --repeats 3 \
 //           --out $OUT/aa-1                                                              (and aa-2)
 //      node ... verdict --rule aa --a $OUT/aa-1 --b $OUT/aa-2                            # prints {"margin": ...}
-//    exit 0 only with 3 valid paired repeats per cell AND a finite margin: an A/A pair with a P95 of 0 against a
-//    nonzero one deviates without bound, so it is INCOMPLETE (exit 2, margin null, the reason in the output)
+//    exit 0 only with 3 valid paired repeats per cell, a finite margin AND one build in both arms: an A/A pair with a
+//    P95 of 0 against a nonzero one deviates without bound, and runs from different commits (or a clean and a dirty
+//    tree of one) are not noise, and a run with no recorded git sha / dirty flag is no evidence of one build: each is
+//    INCOMPLETE (exit 2, margin null, the reason in the output). The A/B rules below still compare two revisions.
 // 3. A/B: run THIS script file from the base and the head worktree (rebuild each worktree's packages first), same
 //    calibration file, same flags and env except the knob under test, alternating base and head per repeat (ABBA):
 //      node ... verdict --rule halve --a $OUT/base --b $OUT/head                         # G1 from P4: b/a <= 0.5
@@ -877,8 +879,9 @@ function verdictCommand(v) {
   const { pairs, missing } = pairRuns(A, B, keyOf, { ignoreSeed: rule === 'flat' });
   if (rule === 'aa') {
     // three repeats of EACH cell, whatever cell has a run in either arm: valid pairs of different cells do not add up
-    // and a finite margin: an unbounded A/A deviation (a zero P95 against a nonzero one) declares nothing
-    const declaration = aaDeclaration(pairs, missing);
+    // and a finite margin: an unbounded A/A deviation (a zero P95 against a nonzero one) declares nothing, and neither
+    // do runs of different (or unrecorded) builds: the whole arms are checked, the runs that did not pair included
+    const declaration = aaDeclaration(pairs, missing, { aRecords: A, bRecords: B });
     const warnings = integrityWarnings([...A, ...B], pairs, null);
     console.log(JSON.stringify({ ...declaration, warnings, missing }));
     process.exit(declaration.status === 'complete' ? 0 : 2);
