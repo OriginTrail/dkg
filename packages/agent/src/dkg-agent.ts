@@ -3881,6 +3881,22 @@ export class DKGAgent extends DKGAgentBase {
         }
       },
 
+      /** Append RDF directly to the private partition, without JSON-LD conversion. */
+      async writePrivate(
+        contextGraphId: string,
+        name: string,
+        quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
+        opts?: { subGraphName?: string; agentAddress?: string },
+      ): Promise<void> {
+        return agent.publisher.assertionWritePrivate(contextGraphId, name, opts?.agentAddress ?? agentAddress,
+          quads.map(quad => ({ ...quad, graph: quad.graph ?? '' })), opts?.subGraphName);
+      },
+
+      /** Read one locally confirmed private KA. HTTP authorization remains caller-bound. */
+      async queryPrivateVm(contextGraphId: string, ual: string, opts?: { subGraphName?: string }) {
+        return agent.publisher.readPrivateKnowledgeAsset(contextGraphId, ual, opts?.subGraphName);
+      },
+
       async query(contextGraphId: string, name: string, opts?: { subGraphName?: string; agentAddress?: string }): Promise<import('@origintrail-official/dkg-storage').Quad[]> {
         const queryAgentAddress = opts?.agentAddress ?? agentAddress;
         return agent.publisher.assertionQuery(contextGraphId, name, queryAgentAddress, opts?.subGraphName);

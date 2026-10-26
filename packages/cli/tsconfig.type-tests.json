@@ -15,6 +15,7 @@
     "test/genui-read-authority.test.ts",
     "test/memory-search-read-authority.test.ts",
     "test/knowledge-assets-local-curator-read.test.ts",
+    "test/knowledge-assets-private-partitions.test.ts",
     "test/publisher-journal-route.test.ts",
     "test/context-graph-route-read-authority-native.test.ts"
   ]

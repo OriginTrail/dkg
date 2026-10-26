@@ -42,8 +42,13 @@ Named Knowledge Assets use the lifecycle route family below. The active publishi
 | Seed/edit from SWM or VM | `POST /api/knowledge-assets/{name}/wm/pull-from` |
 | Discard WM draft | `POST /api/knowledge-assets/{name}/wm/discard` |
 | Read WM quads | `GET /api/knowledge-assets/{name}/wm/quads` |
+| Read an owned KA's private WM/VM partition | `GET /api/knowledge-assets/{identifier}/{wm\|vm}/quads?partition=private` |
 | Read lifecycle descriptor | `GET /api/knowledge-assets/{name}` |
 
 Both VM publish routes accept `options.publisherNodeIdentityIdOverride`. Use a non-negative decimal string; `0` means explicit no-attribution. Omit the option to use the publisher wallet's resolved default identity, which may also be `0`. Optional node attribution for a separate publisher wallet can be configured through `/api/operational-wallets`.
 
 For exact request bodies, response shapes, and MCP tool names, use [Node Skill](node-skill.md).
+
+Create and WM write accept `privateQuads` as well as public `quads`. See the
+[private-partition HTTP contract](../api/private-knowledge-asset-partitions.md)
+for draft defaults, owner authorization and exact confirmed VM readback.

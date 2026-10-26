@@ -12,6 +12,7 @@ import {
   type KnowledgeAssetWritableQuad,
 } from '../knowledge-asset-write-contract.js';
 import { validateWritableQuadLiteralSizes } from './http-utils.js';
+import { findReservedSubjectPrefix } from '@origintrail-official/dkg-publisher';
 
 /**
  * GH #306 / #787 — shape guard for the lifecycle write routes. The `graph`
@@ -67,4 +68,22 @@ export function validateWritableQuads(
   }
   const literalSize = validateWritableQuadLiteralSizes(label, quads);
   return literalSize.ok ? null : literalSize.body;
+}
+
+/** Validate both partitions before create/write can mutate either one. */
+export function validateKnowledgeAssetPartitions(body: Record<string, unknown>): Record<string, unknown> | null {
+  for (const label of ['quads', 'privateQuads'] as const) {
+    const values = body[label];
+    if (values === undefined) continue;
+    if (!Array.isArray(values)) return { error: `"${label}" must be an array` };
+    const invalid = validateWritableQuads(label, values);
+    if (invalid) return invalid;
+    if (label === 'privateQuads' && values.some(quad => quad.graph !== undefined && quad.graph !== '')) {
+      return { error: '"privateQuads" must not contain named graphs' };
+    }
+    if (label === 'privateQuads' && values.some(quad => findReservedSubjectPrefix(quad.subject.replace(/^<|>$/g, '')))) {
+      return { error: '"privateQuads" must not contain protocol-reserved subjects' };
+    }
+  }
+  return null;
 }
