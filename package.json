@@ -208,7 +208,8 @@
       "@bytecodealliance/weval@0.4.1>decompress": "npm:@xhmikosr/decompress@11.1.4"
     },
     "patchedDependencies": {
-      "hardhat@2.28.6": "patches/hardhat@2.28.6.patch"
+      "hardhat@2.28.6": "patches/hardhat@2.28.6.patch",
+      "kafkajs@2.2.4": "patches/kafkajs@2.2.4.patch"
     }
   }
 }

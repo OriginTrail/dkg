@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionBridge, tokenMatches } from '../extension/src/extension.js';
+import { createBridgeHost, commitBridgeRun, type PreparedBridgeRun } from './bridge-host-support.js';
 
 const TOKEN = 'test-bridge-token-value';
 // I/O barriers stay on real time while timeout scenarios advance a fake clock.
@@ -28,21 +29,8 @@ function visiblePrompt(text: string): string {
   return separator < 0 ? text : text.slice(separator + 1);
 }
 
-/** Minimal stand-in for the host ExtensionAPI surface the bridge uses. */
-function stubPi(onSend: (text: string, options?: { deliverAs?: 'steer' | 'followUp' }) => void) {
-  return {
-    on: () => {},
-    sendUserMessage: (content: string, options?: { deliverAs?: 'steer' | 'followUp' }) => {
-      // Mirror Prime's submission flow faithfully: the bridge keeps its tag on
-      // the prepared action and nothing strips it until message_start. `sent`
-      // therefore records the RAW submission; assertions apply visiblePrompt()
-      // wherever they mean operator-visible text, so the strip point stays in
-      // the code under test instead of hiding in this harness.
-      const result = bridge.onInput({ source: 'extension', text: content });
-      if (result.action === 'handled') return;
-      onSend(result.action === 'transform' ? result.text : content, options);
-    },
-  };
+function stubPi(onSend: Parameters<typeof createBridgeHost>[1]) {
+  return createBridgeHost(() => bridge, onSend);
 }
 
 /**
@@ -69,24 +57,11 @@ async function bridgeBaseUrl(b: SessionBridge): Promise<string> {
   return mine.bridgeUrl;
 }
 
-type PreparedBridgeRun = NonNullable<ReturnType<SessionBridge['onBeforeAgentStart']>>;
-
-/** Commit a bridge action using the marker Prime cached during preparation. */
 function startBridgeRun(
   ctx?: Parameters<SessionBridge['onAgentStart']>[0],
   prepared?: PreparedBridgeRun,
 ): void {
-  const prompt = sent.at(-1);
-  if (!prompt) throw new Error('startBridgeRun(): no injected prompt');
-  const ownership = prepared ?? bridge.onBeforeAgentStart({ prompt });
-  if (!ownership) throw new Error('startBridgeRun(): prompt did not receive an ownership marker');
-  bridge.onAgentStart(ctx);
-  bridge.onMessageStart({
-    message: { role: 'user', content: [{ type: 'text', text: prompt }] },
-  });
-  bridge.onMessageStart({
-    message: { role: 'custom', ...ownership.message },
-  });
+  commitBridgeRun(bridge, { prompt: sent.at(-1), context: ctx, prepared });
 }
 
 /** A locally typed prompt is a fresh run, but must not claim a bridge request. */

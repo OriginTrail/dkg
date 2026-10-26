@@ -1,4 +1,5 @@
 import { recordUnstartedPromoteAttempt, canRetireBoundRejection, PROMOTE_NO_EFFECT_REJECTION_CODE } from './promote-no-effect-rejection.js';
+import { asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 import { isBoundPromoteJob } from './bound-promote-job.js';
 import {
   ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION,
@@ -6,9 +7,19 @@ import {
   type PromoteAttemptState,
   type PromoteJob,
   type PromoteFailureTransition,
+  type PromoteRecoverySummary,
 } from './async-promote-queue-types.js';
 import { isPromotePostCommitAttemptError } from './async-promote-queue-utils.js';
 import { PROMOTE_RETRYABLE_FAILURE_CODE } from './promote-replay-safety.js';
+
+/**
+ * Counts one expired-lease transition as soon as its write has committed, so a
+ * later job's failing read or write in the same sweep cannot drop it.
+ */
+export function countLeaseRecovery(summary: PromoteRecoverySummary, outcome: keyof PromoteRecoverySummary): void {
+  summary[outcome] += 1;
+  asyncAdmissionUsage.recordShareLeaseRecovery({ reclaimed: 0, abandoned: 0, [outcome]: 1 });
+}
 
 /**
  * How long after it was enqueued a job keeps retrying a typed prerequisite

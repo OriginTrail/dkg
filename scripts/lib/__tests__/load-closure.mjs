@@ -130,7 +130,7 @@ export const UNFOLLOWED_LOADS = new Map([
     'process.execPath running the CLI entry resolveDkgCli() finds (packages/cli/dist/cli.js, or an installed CLI), CLI code the CLI rule routes'],
   ['scripts/lib/release-process.mjs: command', 'manual prepared-package runner for git/pnpm/npm; scripts/lib changes select full CI, and script tests inject no build execution'],
   ['scripts/lib/package-certification/publish.mjs: command', 'manual npm tarball/tag mutation runner; script tests inject or shim npm, while scripts/lib changes select full CI'],
-  ['scripts/lib/package-certification/certify.mjs: command', 'opt-in Docker rehearsal runner, outside primary lane execution; scripts/lib changes select full CI'],
+  ['scripts/lib/package-certification/certify.mjs: command', 'Docker certification runner for main pushes and manual rehearsals, outside primary lane execution; scripts/lib changes select full CI'],
   ['packages/cli/scripts/bundle-markitdown-binaries.mjs: python.command', 'the Python interpreter it builds a virtual environment with'],
   ['packages/cli/scripts/bundle-markitdown-binaries.mjs: venvPython', "the build's virtual-environment Python, outside the repository"],
   ['packages/cli/test/devnet-publish-helpers-smoke.test.ts: toWslPath(scriptPath)',

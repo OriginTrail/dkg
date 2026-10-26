@@ -232,6 +232,11 @@ export default defineConfig({
           'test/event-loop-delay-monitor.test.ts',
           // The periodic `resource_usage` line: its fields and its schedule.
           'test/resource-usage-log.test.ts',
+          // The periodic `async_admission_usage` line, the HTTP admission trace behind it and
+          // the routes' phase labels.
+          'test/async-admission-usage-log.test.ts',
+          'test/async-admission-trace.test.ts',
+          'test/async-admission-routes.test.ts',
           'test/supervisor-liveness.test.ts',
           'test/liveness-diagnostics.test.ts',
           'test/liveness-supervisor-log.test.ts',

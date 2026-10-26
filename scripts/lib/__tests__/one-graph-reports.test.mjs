@@ -4,6 +4,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { setImmediate } from 'node:timers/promises';
 import {
   arrivalWindow, inVerifiedScope, judgeGone, judgeReport, pairOutcome, readOutcome, verifiedScope, writeRetryable,
 } from '../qa/one-graph-promotion.mjs';
@@ -330,14 +331,28 @@ test('a watch started before the share ended reads at once, and its bound starts
   assert.match(pairOutcome(never.pairs[0], { boundMs: 600 }).text, /: not written, the share job ended failed: null$/);
 });
 
-test('a report that must stay in shared memory fails at the first reading that misses it, even if it comes back', async () => {
+test('a report that must stay in shared memory fails at the first reading that misses it, even if it comes back', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_000_000 });
+  const advance = async ms => {
+    // Drain the asynchronous reads before advancing to the next poll. A single
+    // large tick would skip the intervals whose presence/absence we test.
+    await setImmediate();
+    for (let elapsed = 0; elapsed < ms; elapsed += 20) {
+      t.mock.timers.tick(Math.min(20, ms - elapsed));
+      await setImmediate();
+    }
+    // The confirmation schedules a zero-delay sleep after the polls finish.
+    t.mock.timers.tick(0);
+    await setImmediate();
+  };
   const cg = '0xabc/one-graph-main-1';
   const kept = async (present, { closeAfter = 300, bound = Infinity } = {}) => {
     const stub = wholeReportNode(cg, present);
     const io = reportsOver(stub.api);
     const handle = io.watch(io.pairs(4, wholeReport(cg, stub.started), [node], 'kept', { from: stub.started, fromWhat: 'start of the promotions', bound }));
-    await new Promise(resolve => setTimeout(resolve, closeAfter));
+    await advance(closeAfter);
     handle.close();
+    await advance(40);
     await handle.done;
     return pairOutcome(handle.pairs[0], { boundMs: 600 });
   };
@@ -351,17 +366,23 @@ test('a report that must stay in shared memory fails at the first reading that m
   assert.match(dipped.text, /: MISSING from (the shared-working-memory view of reports|the cross-partition read) 0 s after the start of the promotions, though it must stay in shared memory$/);
   // Missing at the first reading and present later: a failure too.
   assert.equal((await kept(age => age >= 100)).outcome, 'fail');
-  // Missing only at the final confirmation: an in-flight periodic read must
-  // still see the report even if it finishes after close().
-  let pair;
-  const stub = wholeReportNode(cg, () => !pair.confirm);
+  // Missing at the check after the watch was closed.
+  let present = true;
+  const stub = wholeReportNode(cg, () => present);
   const io = reportsOver(stub.api);
-  [pair] = io.pairs(4, wholeReport(cg, stub.started), [node], 'kept', { from: stub.started, fromWhat: 'start of the promotions', bound: Infinity });
-  const handle = io.watch([pair]);
-  await handle.readOnce();
+  const handle = io.watch(io.pairs(4, wholeReport(cg, stub.started), [node], 'kept', { from: stub.started, fromWhat: 'start of the promotions', bound: Infinity }));
+  await advance(200);
   handle.close();
+  // close() includes reads completed in the current millisecond. Keep the
+  // report present through that window, then remove it for the confirmation.
+  await advance(handle.pairs[0].boundMs - (Date.now() - stub.started));
+  present = false;
+  await advance(40);
   await handle.done;
-  assert.match(pairOutcome(handle.pairs[0], { boundMs: 600 }).text, /: in shared memory at every reading, then MISSING from the shared-working-memory view of reports and from the cross-partition read when the 0 s had passed$/);
+  const [pair] = handle.pairs;
+  assert.equal(pair.lapsed, undefined);
+  assert.deepEqual([pair.confirm.view.satisfied, pair.confirm.partitions.satisfied], [false, false]);
+  assert.match(pairOutcome(pair, { boundMs: 600 }).text, /: in shared memory at every reading, then MISSING from the shared-working-memory view of reports and from the cross-partition read when the 0 s had passed$/);
 });
 
 test('a pending watch reads from before the promotion and starts its bound when armed; a refused promotion cancels it', async () => {
