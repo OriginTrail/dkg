@@ -1,5 +1,5 @@
 import { createManifestSettlementCheckpointer } from './manifest-settlement-checkpointer.js';
-import { proveStoredDurablePrefix, type StoredDurablePrefix } from './durable-prefix-proof.js';
+import { DurableGraphSettlementGuard, type StoredDurablePrefix } from './durable-prefix-proof.js';
 import type { GraphOwnedRecoveryContext } from './graph-owned-recovery.js';
 import { verifyDurablePage, prepareDurableVerifiedPage, persistDurableRemainingMetadata } from './durable-verified-page.js';
 export type { DurableMetaContinuation, DurableMetaContinuationState } from './durable-meta-continuation.js';
@@ -499,16 +499,6 @@ async function runDurableSyncWithBudget(
     logDebug,
   } = context;
 
-  let prefixProof: Awaited<ReturnType<typeof proveStoredDurablePrefix>> | undefined;
-  let rejectPrefix: (() => void) | undefined;
-  const assertPrefixCurrent = () => {
-    try { prefixProof?.assertCurrent(); } catch (error) { rejectPrefix?.(); throw error; }
-  };
-  const throwIfOperationAborted = () => {
-    assertPrefixCurrent();
-    if (!signal?.aborted) return;
-    throw normalizeDurableSyncAbortReason(signal.reason);
-  };
   const fetchContext = (deadline: number): DurableSyncFetchContext => ({
     deadline,
     signal,
@@ -630,6 +620,9 @@ async function runDurableSyncWithBudget(
     return true;
   };
   for (const [contextGraphIndex, pid] of contextGraphIds.entries()) {
+    const settlement = new DurableGraphSettlementGuard(() => {
+      if (signal?.aborted) throw normalizeDurableSyncAbortReason(signal.reason);
+    });
     let activePhase: 'fetch' | 'verify' | 'store' | undefined;
     let peerRespondedForContextGraph = false;
     let exactFetchDispositionIndex: number | undefined;
@@ -645,7 +638,7 @@ async function runDurableSyncWithBudget(
     };
 
     try {
-      throwIfOperationAborted();
+      settlement.assertCurrent();
       const dataGraph = contextGraphDataGraphUri(pid);
       const metaGraph = contextGraphMetaGraphUri(pid);
       const isSystemContextGraph = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(pid);
@@ -759,7 +752,7 @@ async function runDurableSyncWithBudget(
       // per-phase budget. Keep going so data can use the time reserved for it;
       // the post-processing timeout gate below still prevents fanout to the
       // next context graph when stopOnBackoffWorthyFailure is enabled.
-      throwIfOperationAborted();
+      settlement.assertCurrent();
       let metaResult = rawMetaResult;
       if (!skipAgentsMeta && durableMetaContinuation) {
         const retained = durableMetaContinuation.state;
@@ -887,7 +880,7 @@ async function runDurableSyncWithBudget(
                   + `(offset ${resumedFromOffset}->${nextOffset}) without a complete graph to checkpoint`) })
           : undefined,
       );
-      throwIfOperationAborted();
+      settlement.assertCurrent();
       peerRespondedForContextGraph = true;
       endPhase();
       const fetchDurationMs = Date.now() - fetchStartedAt;
@@ -1036,15 +1029,11 @@ async function runDurableSyncWithBudget(
       }
 
       if (graphScopedManifest && dataResult.resumedFromOffset > 0) {
-        rejectPrefix = () => {
+        await settlement.acquire(context.storedPrefix, graphScopedManifest, dataResult.resumedFromOffset, () => {
           deleteCheckpoint(dataResult.checkpointKey);
           deleteCheckpoint(metaResult.checkpointKey);
           recoveryRound = { ...recoveryRound, rejectedResumeOffset: dataResult.resumedFromOffset };
-        };
-        try {
-          prefixProof = await proveStoredDurablePrefix(context.storedPrefix, graphScopedManifest,
-            dataResult.resumedFromOffset, signal);
-        } catch (error) { rejectPrefix(); throw error; }
+        }, signal);
       }
 
       startPhase('verify');
@@ -1061,7 +1050,7 @@ async function runDurableSyncWithBudget(
         if (graphScopedManifest) deleteCheckpoint(rawDataResult.checkpointKey);
         throw error;
       }
-      throwIfOperationAborted();
+      settlement.assertCurrent();
       endPhase();
       const verifyDurationMs = Date.now() - verifyStartedAt;
 
@@ -1189,7 +1178,7 @@ async function runDurableSyncWithBudget(
         (processed.verifiedData.length === 0 && processed.verifiedMeta.length === 0 && processed.metaOnlyResponses > 0)
       ) {
         await notifyVerifiedFullSnapshot();
-        throwIfOperationAborted();
+        settlement.assertCurrent();
         // The verifier reports an empty batch only when both fetched phase
         // payloads are empty. Record each phase independently: a completed
         // zero-offset phase is a real clean-empty response, while a sibling
@@ -1260,7 +1249,7 @@ async function runDurableSyncWithBudget(
         // Bounded verification includes private-only assets in every round.
         // The proven prefix already owns these copies; rewriting them would
         // invalidate its content watch without adding any settled work.
-        if (prefixProof?.covers(asset.ual)) continue;
+        if (settlement.covers(asset.ual)) continue;
         if (
           assetIndex > 0
           && mayYieldAtSettledManifestBoundary
@@ -1270,7 +1259,7 @@ async function runDurableSyncWithBudget(
           yieldedAtSettledManifestBoundary = true;
           break;
         }
-        throwIfOperationAborted();
+        settlement.assertCurrent();
         const challengeCommitment = challengeCommitments.get(asset.ual);
         if (exactAssetSelection?.kind === 'challenge-pinned') {
           if (challengeCommitment === undefined) {
@@ -1306,7 +1295,7 @@ async function runDurableSyncWithBudget(
             logWarn(ctx, `Quarantined graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
           }
         }
-        assertPrefixCurrent();
+        settlement.assertCurrent();
         const settledCheckpoint = checkpointSettledManifestGraph?.(asset.assertionGraph);
         if (settledCheckpoint) mayYieldAtSettledManifestBoundary = true;
         if (settledCheckpoint?.numericAdvance && !incrementalCheckpointAdvanceRecorded) {
@@ -1326,7 +1315,7 @@ async function runDurableSyncWithBudget(
         break;
       }
       if (partitioned.remainingData.length > 0) {
-        throwIfOperationAborted();
+        settlement.assertCurrent();
         await storeInsert({
           quads: partitioned.remainingData,
           signal,
@@ -1336,13 +1325,13 @@ async function runDurableSyncWithBudget(
           insertedDataTriples: partitioned.remainingData.length,
         });
       }
-      await persistDurableRemainingMetadata(context, partitioned.remainingMeta, accumulator, throwIfOperationAborted);
+      await persistDurableRemainingMetadata(context, partitioned.remainingMeta, accumulator, settlement.assertCurrent);
       // An already-started atomic write is awaited, counted, and manifest-
       // checkpointed truthfully. An expired operation may not enter another
       // commit boundary or claim the whole page terminal.
-      throwIfOperationAborted();
+      settlement.assertCurrent();
       await notifyVerifiedFullSnapshot();
-      throwIfOperationAborted();
+      settlement.assertCurrent();
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
       recordPhaseOutcome(effectiveDataResult, {
         updateCheckpoint: updateDataCheckpoint,
@@ -1419,7 +1408,7 @@ async function runDurableSyncWithBudget(
       }
       if (signal?.aborted) break;
     } finally {
-      prefixProof?.close(); prefixProof = undefined; rejectPrefix = undefined;
+      settlement.close();
     }
   }
   if (peerFailed) {

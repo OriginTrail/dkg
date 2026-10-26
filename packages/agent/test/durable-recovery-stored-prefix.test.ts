@@ -141,11 +141,16 @@ describe('resumed-prefix edge cases', () => {
   });
 });
 
-it('completes bounded recovery after an unrelated indeterminate write', async () => {
+it.each(['other-graph', 'other-metadata-subject'])('completes bounded recovery after an unrelated indeterminate write (%s)', async scope => {
   const fixtures = generation();
   const core = node(servingPeer(fixtures), { holdingsShortcut: false });
-  vi.spyOn(core.rawStore, 'dropGraph').mockRejectedValueOnce(new Error('lost response'));
-  await expect(core.store.dropGraph('urn:unrelated-failed-write')).rejects.toThrow('lost response');
+  if (scope === 'other-graph') {
+    vi.spyOn(core.rawStore, 'dropGraph').mockRejectedValueOnce(new Error('lost response'));
+    await expect(core.store.dropGraph('urn:unrelated-failed-write')).rejects.toThrow('lost response');
+  } else {
+    vi.spyOn(core.rawStore, 'insert').mockRejectedValueOnce(new Error('lost response'));
+    await expect(core.store.insert([{ ...fixtures[0]!.meta[0]!, subject: 'urn:unrelated-asset' }])).rejects.toThrow('lost response');
+  }
   let rounds = 0;
   const result = await core.start({ exactRequests: false, sliceSpent: true, isRunning: () => rounds < 20,
     afterSlice: () => { rounds++; } }).recover();
