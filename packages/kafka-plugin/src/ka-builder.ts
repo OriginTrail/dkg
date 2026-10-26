@@ -1,4 +1,5 @@
 import type { CoreFields } from './schema.js';
+import { STREAMS } from './registry.js';
 
 export interface KafkaStreamKa {
   '@context': Record<string, string>;
@@ -20,6 +21,7 @@ const DKG_STREAMS_MAPPING: Array<[keyof CoreFields, string]> = [
   ['kafkaAuthMethod', 'dkg-streams:kafkaAuthMethod'],
   ['kafkaSaslMechanism', 'dkg-streams:kafkaSaslMechanism'],
   ['dataFormat', 'dkg-streams:dataFormat'],
+  ['clusterId', 'dkg-streams:clusterId'],
 ];
 
 export function mergeAugmentFragment(
@@ -43,7 +45,7 @@ export function mergeAugmentFragment(
       logCollisionOnce(key, loggedCollisionKeys);
       continue;
     }
-    if (key in baseKa) {
+    if (key in baseKa || isCoreProperty(key, baseKa['@context'], augmentFragment['@context'])) {
       logCollisionOnce(key, loggedCollisionKeys);
       continue;
     }
@@ -54,6 +56,17 @@ export function mergeAugmentFragment(
     merged[key] = value;
   }
   return merged;
+}
+
+function isCoreProperty(key: string, base: Record<string, string>, extension: unknown): boolean {
+  const extra = extension && typeof extension === 'object' ? extension as Record<string, unknown> : {};
+  const context = { ...extra, ...base };
+  const colon = key.indexOf(':');
+  const resolved = colon === -1
+    ? context[key] ?? (typeof context['@vocab'] === 'string' ? context['@vocab'] + key : key)
+    : typeof context[key.slice(0, colon)] === 'string'
+      ? context[key.slice(0, colon)] + key.slice(colon + 1) : key;
+  return typeof resolved === 'string' && resolved.startsWith(STREAMS);
 }
 
 function mergeTypes(baseType: KafkaStreamKa['@type'], extType: unknown): string | string[] {
@@ -134,5 +147,9 @@ export function buildKa(parsed: CoreFields): KafkaStreamKa {
       ka[iri] = value;
     }
   }
+  for (const field of ['providerIri', 'schemaIri'] as const) {
+    if (parsed[field] !== undefined) ka[`dkg-streams:${field}`] = { '@id': parsed[field] };
+  }
+  if (parsed.about !== undefined) ka['schema:about'] = parsed.about.map(iri => ({ '@id': iri }));
   return ka;
 }

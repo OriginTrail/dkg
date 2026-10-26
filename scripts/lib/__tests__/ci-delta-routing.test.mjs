@@ -607,6 +607,7 @@ test('Blazegraph provisioning changes include the native arm64 contract lane', (
     'bura_blazegraph_arm64',
     'kosava_node_ui',
     'kosava_node_ui_e2e',
+    'kosava_supporting',
     'kosava_hardhat_plugins',
   ]);
 });

@@ -30,6 +30,78 @@ added by this PoC. The Source Worker currently formats a completed result as
 "published" in its CLI log; here that means **sealed private Working Memory**,
 not a shared or on-chain-published assertion.
 
+## Enroll a registered stream
+
+The generic `kafka-plugin` registry can supply stream connection metadata. An
+operator first selects a readable registration UAL, then explicitly creates a
+local source config. The registry does not start consumers or supply credentials,
+consumer groups, the target graph, or the consuming DKG agent.
+
+Create an operator options file, substituting an existing authorized agent and
+private graph. `fromBeginning` is an explicit initial-position choice; an
+existing group's committed positions still take precedence.
+
+```json
+{
+  "id": "selected-application-events",
+  "groupId": "approved-local-consumer-group",
+  "agentAddress": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "contextGraphId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/private-events",
+  "fromBeginning": false,
+  "usernameEnv": "KAFKA_USERNAME",
+  "passwordEnv": "KAFKA_PASSWORD"
+}
+```
+
+From this repository's root, with the registry API token already in
+`DKG_REGISTRY_TOKEN`:
+
+```sh
+node packages/kafka-source/src/enroll-cli.mjs \
+  --registry-url http://127.0.0.1:9200/api/kafka/streams \
+  --registry-context-graph stream-catalog \
+  --ual 'did:dkg:31337/0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/1' \
+  --registry-token-env DKG_REGISTRY_TOKEN \
+  --options kafka-local-options.json \
+  --out kafka-source.private.json
+```
+
+The packaged binary is `dkg-kafka-enroll`. Optional `--expected-hash` and
+`--expected-publisher` pin a previously inspected descriptor digest and native
+publisher attribution. The resolver rejects redirects, mismatched graph/UAL,
+invalid hashes, ambiguous descriptors and responses over 1 MiB. It makes one
+authenticated registry read and no Kafka connections. Errors do not echo the
+registry token or response body.
+
+The output is **one source object**, to add to the existing private Source Worker
+config's `sources` array. It is created with mode 0600 and refuses to overwrite
+an existing file. It contains environment variable names, never their values.
+Keep the existing `daemonUrl`, `daemonToken`, `stateFile` and `handlerModule`
+in the parent worker config, then use the existing `dkg source-worker run`.
+
+The resulting `registryRef` embeds the validated descriptor, selected UAL,
+catalog graph, digest and available publisher attribution. The worker checks
+this pin against broker/topic/transport settings **before opening its journal or
+connecting to Kafka**. Polling uses the local snapshot, so it adds no registry
+HTTP reads during the existing durable Retry-After cooldown.
+
+Enrollment supports `SSL`, `SASL_SSL` with PLAIN/SCRAM-SHA-256/SCRAM-SHA-512,
+and `PLAINTEXT` only with `"allowPlaintext": true` in the local options.
+Bootstrap URLs must use `kafka://` or `kafkas://`, specify a port, and contain
+no credentials, query, fragment or non-root path. Missing auth metadata defaults
+to TLS. SASL requires local `usernameEnv`/`passwordEnv` references. Legacy
+registrations without `clusterId` require an explicit local stable `clusterId`.
+Schema references and data formats are descriptive; enrollment adds no schema
+fetching, Avro/Protobuf decoding or domain mapping.
+
+New records include the registration UAL, catalog graph, descriptor digest and
+available publisher attribution. The pin participates in the KA identity for
+enrolled sources. Unchanged snapshots replay the same KA across restarts;
+manually configured sources keep their existing identities. A changed source
+configuration is rejected by the existing journal scope check, not silently
+reset. Select a new registration and deliberately provision a new source/state
+when changing the stream; the helper never rewinds broker offsets.
+
 ## What gets stored
 
 Each consumed record becomes one named KA. It contains the original Kafka key,
@@ -149,6 +221,20 @@ Tested scenarios include lost responses, readback mismatch, offset-commit
 failure, empty polls, tombstones, changed bytes at the same position, and
 re-reading records without additional KAs. See `POC-VERIFICATION.md` for actual
 run evidence and deployment boundaries.
+
+The kafka-plugin live-daemon E2E also exercises registry enrollment, native
+private-WM sealing and restart/replay. Its normal mode uses a labelled synthetic
+Kafka delivery with real DKG HTTP lifecycle calls. To use an actual disposable
+Kafka-compatible broker for that same test:
+
+```sh
+DKG_KAFKA_REGISTRY_BROKER=127.0.0.1:19096 \
+  pnpm --filter @origintrail-official/kafka-plugin test:coverage
+```
+
+This suite provisions a local Hardhat network and temporary DKG nodes. In broker
+mode it creates/deletes its own topic and uses its own consumer group, and
+verifies the broker offset before replay. It does not need partner infrastructure.
 
 This remains a bounded PoC. It does not provide a new Sources UI, broker-side
 exactly-once transactions, Protobuf/Avro decoding, Schema Registry, automatic

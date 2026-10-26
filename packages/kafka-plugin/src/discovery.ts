@@ -1,3 +1,4 @@
+import { registryFilterPattern, type RegistryFilters } from './registry-filters.js';
 const DKG_STREAMS = 'https://ontology.dkg.io/streams#';
 const SCHEMA = 'https://schema.org/';
 const DKG_ONT = 'http://dkg.io/ontology/';
@@ -83,11 +84,13 @@ export interface ListQueryParams {
   subGraphName?: string;
   limit: number;
   offset: number;
+  filters?: RegistryFilters;
 }
 
 export interface CountQueryParams {
   contextGraphId: string;
   subGraphName?: string;
+  filters?: RegistryFilters;
 }
 
 export interface SingleQueryParams {
@@ -145,27 +148,30 @@ function streamCandidatePattern(
     }
 ${registrationScopeClause(ualTerm, subGraphName, '    ')}
     ${ualTerm} <${PUBLISHED_AT}> ?receivedAt .
+    OPTIONAL { ${ualTerm} <http://www.w3.org/ns/prov#wasAttributedTo> ?publisher . FILTER(isIRI(?publisher)) }
   }
   GRAPH ?publicGraph { ?root ?markerP ?markerO . }
   GRAPH ?contentGraph { ?root a <${KAFKA_STREAM_TYPE}> . }`;
 }
 
-export function buildListQuery({ contextGraphId, subGraphName, limit, offset }: ListQueryParams): string {
+export function buildListQuery({ contextGraphId, subGraphName, limit, offset, filters }: ListQueryParams): string {
   assertSafeCgId(contextGraphId);
   if (subGraphName !== undefined) assertSafeSubGraphName(subGraphName);
   // sparql-scan-allow: R3 -- compatibility offset pagination runs only on the metadata selector and each payload fetch is capped at 1000 exact targets
-  return `SELECT DISTINCT ?ual ?root ?receivedAt ?contentGraph WHERE {
+  return `SELECT DISTINCT ?ual ?root ?receivedAt ?contentGraph ?publisher WHERE {
   ${streamCandidatePattern(contextGraphId, subGraphName, '?ual')}
+  ${registryFilterPattern(filters)}
 }
 ORDER BY DESC(?receivedAt) ?ual ?root ?contentGraph
 LIMIT ${limit} OFFSET ${offset}`;
 }
 
-export function buildCountQuery({ contextGraphId, subGraphName }: CountQueryParams): string {
+export function buildCountQuery({ contextGraphId, subGraphName, filters }: CountQueryParams): string {
   assertSafeCgId(contextGraphId);
   if (subGraphName !== undefined) assertSafeSubGraphName(subGraphName);
   return `SELECT (COUNT(DISTINCT ?ual) AS ?count) WHERE {
   ${streamCandidatePattern(contextGraphId, subGraphName, '?ual')}
+  ${registryFilterPattern(filters)}
 }`;
 }
 
@@ -180,7 +186,7 @@ export function buildSingleByUalQuery({ contextGraphId, subGraphName, ual }: Sin
   // same ?root and every `?root ?p ?o` data triple would otherwise be returned
   // twice — turning scalar properties into duplicate arrays in bindingsToKa.
   // sparql-scan-allow: R2 -- metadata binds one admitted exact content graph and one stream root before payload lookup
-  return `SELECT DISTINCT ?root ?p ?o WHERE {
+  return `SELECT DISTINCT ?root ?p ?o ?publisher WHERE {
   ${streamCandidatePattern(contextGraphId, subGraphName, `<${ual}>`)}
   GRAPH ?contentGraph { ?root ?p ?o . }
 }`;
@@ -255,7 +261,10 @@ export function bindingsToKa(bindings: ReadonlyArray<BindingRow>): KafkaStreamKa
       continue;
     }
     const key = compactIriWithCtx(predicate, ctx, namespaceToPrefix);
-    appendProperty(properties, key, decodeRdfTerm(objectRaw));
+    const isRegistryReference = predicate === `${DKG_STREAMS}providerIri`
+      || predicate === `${DKG_STREAMS}schemaIri` || predicate === `${SCHEMA}about`;
+    const value = isRegistryReference ? { '@id': stripIriQuoting(objectRaw) } : decodeRdfTerm(objectRaw);
+    appendProperty(properties, key, value);
   }
 
   const sortedTypes = sortBaselineFirst(types);
@@ -271,6 +280,9 @@ export function bindingsToKa(bindings: ReadonlyArray<BindingRow>): KafkaStreamKa
     '@type': finalType,
     ...properties,
   };
+  if (ka['schema:about'] !== undefined && !Array.isArray(ka['schema:about'])) {
+    ka['schema:about'] = [ka['schema:about']];
+  }
   if (id) ka['@id'] = id;
   return ka;
 }

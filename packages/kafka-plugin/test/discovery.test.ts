@@ -54,7 +54,7 @@ function expectLegacyAndV2GraphResolution(
 describe('discovery — buildListQuery', () => {
   it('selects one bounded page of legacy or V2 stream targets without expanding payload triples', () => {
     const q = buildListQuery({ contextGraphId: 'urn:cg:demo', limit: 30, offset: 0 });
-    expect(q).toMatch(/^SELECT DISTINCT \?ual \?root \?receivedAt \?contentGraph WHERE/);
+    expect(q).toMatch(/^SELECT DISTINCT \?ual \?root \?receivedAt \?contentGraph \?publisher WHERE/);
     expect(q).toContain(`GRAPH <${META_URI}>`);
     expect(q).not.toContain('SELECT ?ual ?root ?receivedAt ?p ?o');
     expectLegacyAndV2GraphResolution(q);
@@ -96,7 +96,7 @@ describe('discovery — buildListQuery', () => {
   });
   it('orders and paginates stream targets before the separate payload fetch', () => {
     const q = buildListQuery({ contextGraphId: 'urn:cg:demo', limit: 30, offset: 0 });
-    expect(q).toMatch(/^SELECT DISTINCT \?ual \?root \?receivedAt \?contentGraph WHERE/);
+    expect(q).toMatch(/^SELECT DISTINCT \?ual \?root \?receivedAt \?contentGraph \?publisher WHERE/);
     expect(q).toContain('ORDER BY DESC(?receivedAt) ?ual ?root ?contentGraph');
     expect(q.trimEnd()).toMatch(/LIMIT 30 OFFSET 0$/);
   });
@@ -150,7 +150,7 @@ describe('discovery — buildCountQuery', () => {
 describe('discovery — buildSingleByUalQuery', () => {
   it('resolves an exact legacy or V2 UAL and fetches only its admitted content graph', () => {
     const q = buildSingleByUalQuery({ contextGraphId: 'urn:cg:demo', ual: 'did:dkg:1/0xabc' });
-    expect(q).toMatch(/^SELECT DISTINCT \?root \?p \?o WHERE/);
+    expect(q).toMatch(/^SELECT DISTINCT \?root \?p \?o \?publisher WHERE/);
     expect(q).toContain(`GRAPH <${META_URI}>`);
     expect(q).toContain('<did:dkg:1/0xabc>');
     expectLegacyAndV2GraphResolution(q);
@@ -165,7 +165,7 @@ describe('discovery — buildSingleByUalQuery', () => {
   // buildListQuery already guards this via its inner SELECT DISTINCT.
   it('selects DISTINCT ?root ?p ?o so mixed-store double rootEntity bindings cannot duplicate data triples', () => {
     const q = buildSingleByUalQuery({ contextGraphId: 'urn:cg:demo', ual: 'did:dkg:1/0xabc' });
-    expect(q).toMatch(/^SELECT DISTINCT \?root \?p \?o WHERE/);
+    expect(q).toMatch(/^SELECT DISTINCT \?root \?p \?o \?publisher WHERE/);
   });
   it('selects DISTINCT for a configured subGraphName too', () => {
     const q = buildSingleByUalQuery({
@@ -173,7 +173,7 @@ describe('discovery — buildSingleByUalQuery', () => {
       subGraphName: 'streams',
       ual: 'did:dkg:1/0xabc',
     });
-    expect(q).toMatch(/^SELECT DISTINCT \?root \?p \?o WHERE/);
+    expect(q).toMatch(/^SELECT DISTINCT \?root \?p \?o \?publisher WHERE/);
   });
   it('keeps scalar properties scalar after DISTINCT dedupes the mixed-store double bindings', () => {
     // The exact rows the single-UAL query yields on a mixed store. PRE-FIX (no

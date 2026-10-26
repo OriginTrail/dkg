@@ -6,7 +6,12 @@ const literalTerm = value => formatCanonicalRdfLiteralTerm({ kind: 'plain', valu
 export const NS = 'https://ontology.dkg.io/streams#';
 export const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export const position = (source, record) => [source.clusterId, record.topic, record.partition, record.offset];
-export const assetIdentity = (source, record) => hash([position(source, record), source.id, source.mapping ?? []]);
+export const assetIdentity = (source, record) => {
+  const identity = [position(source, record), source.id, source.mapping ?? []];
+  if (source.registryRef) identity.push(['registry-v1', source.registryRef.contextGraphId,
+    source.registryRef.ual, source.registryRef.descriptorHash, source.registryRef.publisherIri ?? null]);
+  return hash(identity);
+};
 
 export function buildAsset(source, record) {
   const identity = assetIdentity(source, record);
@@ -22,6 +27,13 @@ export function buildAsset(source, record) {
   literal('sourceFetchedAt', record.fetchedAt);
   literal('mappingVersion', 'kafka-envelope-v1');
   literal('sourceRecordJson', JSON.stringify(record));
+  if (source.registryRef) {
+    const ref = source.registryRef;
+    quads.push({ subject, predicate: NS + 'registryUal', object: ref.ual, graph: '' });
+    literal('registryContextGraphId', ref.contextGraphId);
+    literal('registryDescriptorHash', ref.descriptorHash);
+    if (ref.publisherIri) quads.push({ subject, predicate: NS + 'registryPublisher', object: ref.publisherIri, graph: '' });
+  }
   // Optional, operator-defined projection. Kafka itself supplies no domain
   // ontology; bytes and Kafka provenance are always retained verbatim.
   if (source.mapping?.length && record.valueBase64 !== null) {

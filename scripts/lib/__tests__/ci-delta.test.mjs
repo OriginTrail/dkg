@@ -347,10 +347,10 @@ test('ordinary network-sim changes remain a narrow delta after the trust hardeni
   assert.deepEqual(plan.evmScopes, []);
 });
 
-test('Kafka source edits select the supporting test lane and shared build', () => {
+test('Kafka source edits select consumer and live registry integration lanes plus shared build', () => {
   const plan = pullRequestPlan([change('packages/kafka-source/src/kafka.mjs')]);
   assert.equal(plan.mode, 'delta');
-  assert.deepEqual(selectedLanes(plan), ['kosava_supporting']);
+  assert.deepEqual(selectedLanes(plan), ['kosava_supporting', 'kosava_hardhat_plugins']);
   assert.equal(needsSharedBuild(plan), true);
   assert.deepEqual(plan.evmScopes, []);
 });

@@ -1123,6 +1123,9 @@ importers:
       '@origintrail-official/dkg':
         specifier: workspace:*
         version: link:../cli
+      '@origintrail-official/dkg-core':
+        specifier: workspace:*
+        version: link:../core
       zod:
         specifier: ^3.25.76
         version: 3.25.76
@@ -1130,9 +1133,15 @@ importers:
       '@origintrail-official/dkg-chain':
         specifier: workspace:*
         version: link:../chain
+      '@origintrail-official/dkg-storage':
+        specifier: workspace:*
+        version: link:../storage
       '@vitest/coverage-v8':
         specifier: ^4.0.18
         version: 4.0.18(vitest@4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0))
+      kafkajs:
+        specifier: 2.2.4
+        version: 2.2.4(patch_hash=d9e175a6f3fb040faee97b6ffb2af1780b75cf4ed113f29a905c11f8fe99fa3e)
       vitest:
         specifier: ^4.0.18
         version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0)
@@ -1145,6 +1154,9 @@ importers:
       '@origintrail-official/dkg-rdf-utils':
         specifier: workspace:*
         version: link:../rdf-utils
+      '@origintrail-official/kafka-plugin':
+        specifier: workspace:*
+        version: link:../kafka-plugin
       kafkajs:
         specifier: 2.2.4
         version: 2.2.4(patch_hash=d9e175a6f3fb040faee97b6ffb2af1780b75cf4ed113f29a905c11f8fe99fa3e)

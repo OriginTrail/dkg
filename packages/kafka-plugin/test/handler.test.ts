@@ -81,6 +81,79 @@ const validBody = {
   kafkaBootstrapUrl: 'kafka://broker:9092',
   kafkaTopicName: 'demo-topic',
 };
+describe('generic registry route contract', () => {
+  const ual = 'urn:registry:application-events';
+  const publisher = 'did:dkg:agent:0x' + 'a'.repeat(40);
+  const streamRows = [
+    { ual, p: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', o: 'https://ontology.dkg.io/streams#KafkaStream', publisher },
+    { ual, p: 'https://schema.org/name', o: '"Application events"', publisher },
+    { ual, p: 'https://ontology.dkg.io/streams#kafkaBootstrapUrl', o: '"kafka://broker:9094"', publisher },
+    { ual, p: 'https://ontology.dkg.io/streams#kafkaTopicName', o: '"events"', publisher },
+  ];
+  it('stamps the authenticated registrar independently of the signing publisher', async () => {
+    const request = mockReqRes('POST', '/api/kafka/streams/register', { ...validBody, about: ['urn:app:one'] });
+    const { ctx, publishAsync } = mockCtx({ requestAgentAddress: '0x' + 'A'.repeat(40) });
+    await createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'catalog' })(attachRequest(ctx, request.req, request.res));
+    expect(publishAsync.mock.calls[0][1].private['dkg-streams:registeredByAgentAddress']).toBe('0x' + 'a'.repeat(40));
+    expect(publishAsync.mock.calls[0][1].public).not.toHaveProperty('dkg-streams:registeredByAgentAddress');
+  });
+  it.each(['provider=not-an-iri', 'provider=urn:a&provider=urn:b', 'includeRegistry=invalid'])(
+    'rejects invalid filtering/response options before querying: %s', async query => {
+      const request = mockReqRes('GET', '/api/kafka/streams?' + query);
+      const { ctx, query: execute } = mockCtx();
+      await createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'catalog' })(attachRequest(ctx, request.req, request.res));
+      expect(request.captured.statusCode).toBe(400); expect(execute).not.toHaveBeenCalled();
+    },
+  );
+  it('returns an opt-in snapshot with publisher provenance and consistent count/page filters', async () => {
+    const request = mockReqRes('GET', '/api/kafka/streams?provider=urn:provider:alpha&includeRegistry=true');
+    const { ctx, query } = mockCtx();
+    query.mockImplementation(async (sparql: string) => ({ bindings: sparql.includes('COUNT(') ? [{ count: '1' }]
+      : sparql.startsWith('SELECT DISTINCT ?ual ?root ?receivedAt') ? [{ ual, root: 'urn:root', contentGraph: 'urn:private', publisher }]
+      : streamRows }));
+    await createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'catalog' })(attachRequest(ctx, request.req, request.res));
+    expect(request.captured.statusCode).toBe(200);
+    expect(request.captured.body).toMatchObject({ total: 1, items: [{ registry: { ual, contextGraphId: 'catalog', publisherIri: publisher } }] });
+    for (const call of query.mock.calls.slice(0, 2)) {
+      expect(call[0]).toContain('<urn:provider:alpha>');
+      expect(call[1]).toMatchObject({ callerAgentAddress: ctx.requestAgentAddress, includePrivate: true });
+    }
+  });
+  it('pins a single UAL and does not expose malformed registry payloads as snapshots', async () => {
+    const handler = createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'catalog' });
+    const { ctx, query } = mockCtx(); query.mockResolvedValue({ bindings: streamRows });
+    const request = mockReqRes('GET', '/api/kafka/streams/' + encodeURIComponent(ual) + '?includeRegistry=true');
+    await handler(attachRequest(ctx, request.req, request.res));
+    expect(request.captured.statusCode).toBe(200);
+    expect(request.captured.body).toMatchObject({ registry: { ual, descriptorHash: expect.stringMatching(/^sha256:/) } });
+    query.mockResolvedValue({ bindings: streamRows.filter(row => !row.p.endsWith('kafkaTopicName')) });
+    const invalid = mockReqRes('GET', request.req.url!);
+    await handler(attachRequest(ctx, invalid.req, invalid.res));
+    expect(invalid.captured.statusCode).toBe(503);
+    expect(invalid.captured.body).toEqual({ error: 'RegistryDescriptorInvalid' });
+    const badFlag = mockReqRes('GET', '/api/kafka/streams/' + encodeURIComponent(ual) + '?includeRegistry=bad');
+    await handler(attachRequest(ctx, badFlag.req, badFlag.res));
+    expect(badFlag.captured.statusCode).toBe(400);
+  });
+  it('returns no catalog totals or entries when the graph query is denied', async () => {
+    const request = mockReqRes('GET', '/api/kafka/streams?includeRegistry=true');
+    const { ctx, query } = mockCtx(); query.mockRejectedValue(new Error('Access denied'));
+    await createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'catalog' })(attachRequest(ctx, request.req, request.res));
+    expect(request.captured.statusCode).toBe(503);
+    expect(request.captured.body).not.toHaveProperty('total');
+    expect(request.captured.body).not.toHaveProperty('items');
+  });
+  it('fails closed on malformed opt-in list entries', async () => {
+    const request = mockReqRes('GET', '/api/kafka/streams?includeRegistry=true');
+    const { ctx, query } = mockCtx();
+    query.mockResolvedValueOnce({ bindings: [{ count: '1' }] })
+      .mockResolvedValueOnce({ bindings: [{ ual, root: 'urn:root', contentGraph: 'urn:private' }] })
+      .mockResolvedValueOnce({ bindings: streamRows.filter(row => !row.p.endsWith('kafkaTopicName')) });
+    await createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'catalog' })(attachRequest(ctx, request.req, request.res));
+    expect(request.captured.statusCode).toBe(503);
+    expect(request.captured.body).toEqual({ error: 'RegistryDescriptorInvalid' });
+  });
+});
 describe('handler — POST /register happy path', () => {
   it('returns 202 with captureID/contextGraphId/receivedAt and invokes publishAsync', async () => {
     const { req, res, captured } = mockReqRes('POST', '/api/kafka/streams/register', validBody);

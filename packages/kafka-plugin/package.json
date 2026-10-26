@@ -4,6 +4,11 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./registry": { "types": "./dist/registry.d.ts", "default": "./dist/registry.js" },
+    "./*": "./*"
+  },
   "scripts": {
     "build": "tsc",
     "test": "vitest run --coverage",
@@ -11,10 +16,13 @@
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
+    "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg": "workspace:*",
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@origintrail-official/dkg-storage": "workspace:*",
+    "kafkajs": "2.2.4",
     "@origintrail-official/dkg-chain": "workspace:*",
     "@vitest/coverage-v8": "^4.0.18",
     "vitest": "^4.0.18"
