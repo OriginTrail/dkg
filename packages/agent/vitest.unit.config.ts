@@ -460,6 +460,9 @@ export default defineConfig({
       // #3296 — a newer stored head proves an asset held only with its content.
       "test/swm-stored-head-proof.test.ts",
       "test/swm-head-identity-preservation.test.ts",
+      // One publishedAt per share operation, and a defective head set aside
+      // instead of every descriptor of its graph.
+      "test/swm-operation-published-at.test.ts",
       // #2079 — the already-materialized witness: the warm-path win, the count
       // gate that keeps it self-healing, and the digest binding that makes an
       // equal-count version change safe.

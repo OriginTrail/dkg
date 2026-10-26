@@ -1,4 +1,5 @@
 import { stripMetadataLiteral as stripLiteral } from './metadata-literal.js';
+import { operationPublishedAtMs } from './swm-operation-published-at.js';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -39,7 +40,6 @@ const PUBLIC_SNAPSHOT_GRAPH = `${DKG}publicSnapshotGraph`;
 const PRIVATE_TRIPLE_COUNT = `${DKG}privateTripleCount`;
 const PRIVATE_MERKLE_ROOT = `${DKG}privateMerkleRoot`;
 const PUBLISHER_PEER_ID = `${DKG}publisherPeerId`;
-const PUBLISHED_AT = `${DKG}publishedAt`;
 const ACCESS_POLICY = `${DKG}accessPolicy`;
 const ALLOWED_PEER = `${DKG}allowedPeer`;
 const SUB_GRAPH_NAME = `${DKG}subGraphName`;
@@ -615,11 +615,7 @@ function resolveEquivalentHeadOperation(params: {
       assertionVersion: params.assertionVersion,
       subGraphName: params.subGraphName,
     });
-    const publishedAt = stripLiteral(requireSingle(operationRows, PUBLISHED_AT, 'publishedAt'));
-    const publishedAtMs = Date.parse(publishedAt);
-    if (!Number.isFinite(publishedAtMs)) {
-      throw new Error(`Graph-scoped SWM operation ${operationSubject} has an invalid publishedAt`);
-    }
+    const publishedAtMs = operationPublishedAtMs(operationRows, operationSubject);
     const headShareOperationRow = params.headRows
       .filter((row) => row.predicate === SHARE_OPERATION_ID)
       .find((row) => stripLiteral(row.object).trim() === shareOperationId);
@@ -756,7 +752,7 @@ function validateOperationRows(params: {
   if (!rows.some((row) => row.predicate === RDF_TYPE && row.object === WORKSPACE_OPERATION)) {
     throw new Error(`Graph-scoped SWM operation ${params.operationSubject} is missing its type`);
   }
-  requireSingle(rows, PUBLISHED_AT, 'publishedAt');
+  operationPublishedAtMs(rows, params.operationSubject);
   if (requireSafeInteger(rows, CONTENT_SCOPE_VERSION, 'contentScopeVersion') !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
     throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has an invalid scope version`);
   }

@@ -50,9 +50,9 @@ import {
   canonicalGraphScopedSnapshotManifestQuads,
   canonicalizeGraphScopedSwmHeadRows,
   materializeGraphScopedSwmRecoveryAsset,
-  parseGraphScopedSwmRecoveryDescriptors,
   type GraphScopedSwmRecoveryDescriptor,
 } from '../graph-scoped-swm-recovery.js';
+import { SetAsideGraphScopedSwmHeads } from '../graph-scoped-swm-set-aside.js';
 import { admitServedSubGraphNames } from './served-sub-graph-admission.js';
 import { fetchPublicSwmDataPhase } from './public-swm-data-phase.js';
 import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
@@ -772,9 +772,9 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       // recovery lane (`swm-recovery.ts` materializeReadySnapshot).
       //
       // Descriptors are parsed ONLY from verified meta, and only when the meta
-      // phase completed: parseGraphScopedSwmRecoveryDescriptors throws on
-      // incomplete metadata, and this lane pages meta, so a timed-out page would
-      // otherwise abort the whole CG fanout. A parse failure here must degrade to
+      // phase completed: the descriptor parser rejects incomplete metadata, and
+      // this lane pages meta, so a timed-out page would otherwise abort the
+      // whole CG fanout. A parse failure here must degrade to
       // "no materialization this round" — never take down the sync.
       const snapshotDescriptorsByRef = new Map<string, GraphScopedSwmRecoveryDescriptor[]>();
       const graphBackedDescriptors: GraphScopedSwmRecoveryDescriptor[] = [];
@@ -791,9 +791,10 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       // descriptors never parsed is a third state, distinct both from a
       // truncated meta phase and from a genuine entity-share manifest that has
       // no head rows to describe.
+      const setAsideHeads = new SetAsideGraphScopedSwmHeads((message) => logWarn(ctx, message));
       if (snapshotMaterializer && wsMetaResult.completed) {
         try {
-          const descriptors = parseGraphScopedSwmRecoveryDescriptors({
+          const descriptors = setAsideHeads.parse({
             contextGraphId: pid,
             metaQuads: processed.verifiedMeta,
             // Without the subgraph admission context every KA under a
@@ -806,6 +807,8 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
               : {}),
             ...(excludedSubGraphNames ? { excludedSubGraphNames } : {}),
           });
+          // A defective head is set aside alone, and nothing may certify it.
+          if (setAsideHeads.any) descriptorsAuthoritativeForCg = false;
           verifiedMetaForInsert = canonicalizeGraphScopedSwmHeadRows({
             metaQuads: processed.verifiedMeta,
             descriptors,
@@ -832,9 +835,9 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
           // The map is now empty because parsing FAILED, not because there was
           // nothing to describe. Without this the vacuity rule would read every
           // manifest ref as "nothing to write" and report the graph fully
-          // materialized while zero assertion graphs were written — and because
-          // the parser builds its whole array before returning, ONE malformed
-          // head discards the descriptors of every valid KA alongside it.
+          // materialized while zero assertion graphs were written. A defective
+          // head is set aside above; only a conflict between heads lands here,
+          // and it discards the descriptors of every valid KA alongside them.
           descriptorsAuthoritativeForCg = false;
         }
       }
@@ -1431,11 +1434,11 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
           }
         }
         // Resolved means LOCALLY MATERIALIZED — every descriptor for this ref
-        // written or already present. A ref that fetched and then failed to
-        // write is not resolved, which is what stops an all-cached round whose
-        // writes all failed from reporting maximal coverage and silently
-        // ending the continuation.
-        if (refMaterialized) {
+        // written or already present, and no set-aside asset sharing it. A ref
+        // that fetched and then failed to write is not resolved, which is what
+        // stops an all-cached round whose writes all failed from reporting
+        // maximal coverage and silently ending the continuation.
+        if (refMaterialized && !setAsideHeads.mayOwn(snapshotRef, manifest.sourceSubjectsByRef)) {
           materializedRefs.add(snapshotRef);
           materializedRefsForCg = materializedRefs.size;
         }
