@@ -156,8 +156,11 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
   }
   if (!graphRecovery || onVerifiedFullSnapshot) return { result: await runDurableSync(durableContext) };
   return materialization.withHeldAssetFence(fence => {
-    const reader = currentHeldGraphScopedAssetsReader({
+    // An unbound subscription must authenticate and persist its numeric binding
+    // through the existing materialization owner before it can skip DATA.
+    const reader = fence.binding().onChainId === undefined ? undefined : currentHeldGraphScopedAssetsReader({
       readHeld: host.heldStore?.read, binding: fence.binding,
+      reconcileHeld: (request, held) => host.heldStore?.reconcile?.(request, held, ctx) ?? Promise.resolve(),
       readChainState: authority.readHeldAssetChainState?.bind(authority), budget: contextGraphBudget,
     });
     return runDurableSyncDetailed({ ...durableContext, graphRecovery: { ...graphRecovery,

@@ -160,16 +160,30 @@ describe('which assets of a verified generation this node holds', () => {
       .toEqual(new Set());
   });
 
+  it('keeps exact content verification in the cancellable background lane', async () => {
+    const local = store();
+    const fixture = asset(1);
+    await storeConfirmed(local, fixture);
+    const query = vi.spyOn(local, 'query');
+    const signal = new AbortController().signal;
+    expect(await readHeldGraphScopedAssets(local, {
+      contextGraphId: CG, descriptors: manifestOf([fixture]).descriptors, signal,
+    })).toEqual(new Set([fixture.ual]));
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('SELECT ?s ?p ?o'), expect.objectContaining({
+      source: 'agent.durableSync.heldAssetContent', priority: 'background', signal,
+    }));
+  });
+
   it('fails an assertion read that does not return bindings', async () => {
     const local = store();
     await storeConfirmed(local, asset(1));
     const counting = {
-      query: (sparql: string, options?: object) => (sparql.includes('SELECT ?subject')
+      query: (sparql: string, options?: object) => (sparql.includes('SELECT ?s ?p ?o')
         ? Promise.resolve({ type: 'quads', quads: [] })
         : local.query(sparql, options)),
     } as unknown as TripleStore;
     await expect(readHeldGraphScopedAssets(counting, { contextGraphId: CG, descriptors: manifestOf([asset(1)]).descriptors }))
-      .rejects.toThrow('Held asset content SELECT expected a bindings result');
+      .rejects.toThrow('Exact graph read expected SELECT bindings');
   });
 
   it('fails a store read that does not return complete bindings', async () => {

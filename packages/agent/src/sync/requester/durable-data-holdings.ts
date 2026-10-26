@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import {
-  computeFlatKCRootV10,
   parseConfirmedGraphKnowledgeAssetMetadataEnvelope,
   type ConfirmedGraphKnowledgeAssetMetadataRead,
 } from '@origintrail-official/dkg-publisher';
@@ -21,7 +20,8 @@ import { MAX_EXACT_SYNC_ASSETS } from '../exact-assets.js';
 import { mapWithConcurrencyDrained } from '../../map-with-concurrency.js';
 import { DEFAULT_DURABLE_DATA_ROUND_BUDGET, type DurableDataRoundBudget } from './durable-data-round.js';
 import type { DurableSyncContext } from './durable-sync.js';
-import type { GraphScopedAssetChainState } from './graph-scoped-materialization.js';
+import { verifyExactGraphContent } from '../../exact-graph-content-verifier.js';
+import type { VerifiedGraphScopedAsset, GraphScopedAssetChainState } from './graph-scoped-materialization.js';
 import type { SyncPageResult } from './page-fetch.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
@@ -87,6 +87,7 @@ export async function readHeldGraphScopedAssets(
   store: TripleStore,
   request: HeldGraphScopedAssetsRequest,
   chunkSize = HOLDINGS_READ_CHUNK,
+  onVerified?: (asset: VerifiedGraphScopedAsset) => Promise<void>,
 ): Promise<Set<string>> {
   const metaGraph = assertSafeIri(contextGraphMetaUri(request.contextGraphId));
   const predicates = ENVELOPE_PREDICATES.map((predicate) => `<${predicate}>`).join(' ');
@@ -119,22 +120,24 @@ export async function readHeldGraphScopedAssets(
     ));
     for (const descriptor of confirmed) {
       request.signal?.throwIfAborted();
-      const graph = assertSafeIri(descriptor.assertionGraph);
-      // sparql-scan-allow: R4 -- one exact assertion graph, bounded by its verified descriptor count
-      const payload = await store.query(
-        `SELECT ?subject ?predicate ?object WHERE { GRAPH <${graph}> { ?subject ?predicate ?object } } LIMIT ${descriptor.publicTripleCount + 1}`,
-        { ...options, source: 'agent.durableSync.heldAssetContent' },
-      );
-      if (payload.type !== 'bindings') throw new Error('Held asset content SELECT expected a bindings result');
-      if (payload.bindings.length !== descriptor.publicTripleCount) continue;
-      const quads = payload.bindings.map(({ subject, predicate, object }) => {
-        if (subject === undefined || predicate === undefined || object === undefined) {
-          throw new Error('Held asset content SELECT returned an incomplete binding');
-        }
-        return { subject, predicate, object, graph };
+      const content = await verifyExactGraphContent(store, {
+        graphUri: descriptor.assertionGraph,
+        publicTripleCount: descriptor.publicTripleCount,
+        privateMerkleRoot: descriptor.privateRoot,
+        expectedMerkleRoot: Buffer.from(descriptor.claimedRootHex, 'hex'),
+        source: 'agent.durableSync.heldAssetContent', queryOptions: options,
       });
-      const root = computeFlatKCRootV10(quads, descriptor.privateRoot ? [descriptor.privateRoot] : []);
-      if (Buffer.from(root).toString('hex') === descriptor.claimedRootHex) held.add(descriptor.ual);
+      if (content.status !== 'verified') continue;
+      held.add(descriptor.ual);
+      await onVerified?.({
+        contextGraphId: request.contextGraphId, ual: descriptor.ual,
+        assertionVersion: BigInt(descriptor.assertionVersion), assertionGraph: descriptor.assertionGraph,
+        subGraphName: descriptor.subGraphName, merkleRootHex: descriptor.claimedRootHex,
+        metaGraph, dataQuads: content.quads,
+        metadataQuads: (rowsBySubject.get(descriptor.ual) ?? []).map(row => ({
+          ...row, subject: descriptor.ual, graph: metaGraph,
+        })),
+      });
     }
   }
   return held;
@@ -196,6 +199,8 @@ const heldCopyKey = (descriptor: GraphScopedDescriptor) =>
 /** A store read and a chain read make a holdings reader; without either, rounds plan no shortcut. */
 export function currentHeldGraphScopedAssetsReader(input: {
   readonly readHeld?: (request: HeldGraphScopedAssetsRequest) => Promise<ReadonlySet<string>>;
+  /** Retry best-effort SWM housekeeping after every skipped copy is authenticated. */
+  readonly reconcileHeld?: (request: HeldGraphScopedAssetsRequest, held: ReadonlySet<string>) => Promise<void>;
   readonly binding?: () => Readonly<{ onChainId?: string; generation: number }>;
   readonly readChainState?: (copy: { readonly ual: string; readonly contextGraphId: string },
     deadline: number, signal?: AbortSignal) => Promise<GraphScopedAssetChainState>;
@@ -246,6 +251,7 @@ export function currentHeldGraphScopedAssetsReader(input: {
           onConfirmed?.();
         },
       );
+      await input.reconcileHeld?.(request, held);
       if (input.binding && bindingKey(input.binding()) !== capturedBinding) {
         throw new HeldGenerationNotCurrentError(`Local binding for "${contextGraphId}" changed during held-copy checks`);
       }

@@ -12,9 +12,7 @@ import type { StoreMutation, StoreMutationObserver } from './store-mutation.js';
 import { createStoreMutationOwner, type StoreMutationOwner, type ProjectionDirtyCallback } from './observed-store-mutation.js';
 export type { ProjectionDirtyCallback } from './observed-store-mutation.js';
 
-export type MutationObservedStore = TripleStore & Partial<SortedGraphSetSource> & {
-  readonly mutationOwner: StoreMutationOwner;
-};
+type MutationObservedStore = TripleStore & Partial<SortedGraphSetSource>;
 
 // A commit the canonical plan refuses is refused by the store before dispatch too; until it is,
 // it may change anything.
@@ -49,7 +47,7 @@ export function createMutationObservedStore(
     : null;
   const wrapper: MutationObservedStore
     & { readonly innerStore: TripleStore } = {
-    innerStore, mutationOwner,
+    innerStore,
     get queryCancellation() {
       return innerStore.queryCancellation;
     },

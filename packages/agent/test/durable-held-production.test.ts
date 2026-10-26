@@ -2,8 +2,8 @@ import { readHeldGraphScopedAssets } from '../src/sync/requester/durable-data-ho
 import { createGraphScopedDurableManifestPlan } from '../src/sync/durable-integrity.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
-import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
+import { createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer, GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
+import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata, workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { getSyncCheckpointKey } from '../src/sync/checkpoint/state.js';
@@ -17,10 +17,16 @@ afterEach(async () => { for (const agent of agents.splice(0)) await agent.stop()
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r; }); return { promise, resolve }; }
 
 it.each(['chain', 'worker'].flatMap(phase =>
-  ['clean', 'deactivate', 'recreate', 'equivalent', 'drop-graph', 'remove-subgraph'].map(change => [phase, change] as const)).concat([['preexisting', 'corrupt-before']]))(
+  ['clean', 'deactivate', 'recreate', 'equivalent', 'drop-graph', 'remove-subgraph'].map(change => [phase, change] as const)).concat(['corrupt-before', 'unbound', 'binding-save-fails', 'cleanup-retry', 'newer-swm'].map(change => ['preexisting', change] as const)))(
   'fences held readiness through production recovery at %s: %s', async (phase, change) => {
     const chain = new MockChainAdapter('hardhat:31337');
+    const savedBindings: string[] = [];
+    const save = vi.fn(async (record: { onChainId?: string }) => {
+      if (record.onChainId && change === 'binding-save-fails') throw new Error('subscription persistence failed');
+      if (record.onChainId) savedBindings.push(record.onChainId);
+    });
     const agent = await DKGAgent.create({ name: 'HeldProduction', listenHost: '127.0.0.1', chainAdapter: chain,
+      contextGraphSubscriptionStore: { loadAll: async () => [], save, delete: async () => {} },
       rfc64CatalogActivation: { enabled: true, rollout: { killSwitch: true, defaultMode: 'legacy', contextGraphModes: { [CG]: 'legacy' } } } });
     agents.push(agent);
     await agent.start();
@@ -30,7 +36,9 @@ it.each(['chain', 'worker'].flatMap(phase =>
     vi.spyOn(internal.networkAdmissionCoordinator, 'ensureAdmitted').mockResolvedValue(true);
     vi.spyOn(internal, 'ensurePeerConnected').mockResolvedValue(undefined);
     vi.spyOn(internal, 'ensurePeerAdmittedForRecovery').mockResolvedValue(true);
-    const subscription = { syncMode: 'always-on' as const, subscribed: true, synced: false, onChainId: CG };
+    const unbound = change === 'unbound' || change === 'binding-save-fails';
+    const subscription = { syncMode: 'always-on' as const, subscribed: true, synced: false, ...(unbound ? {} : { onChainId: CG }) };
+    const persist = vi.spyOn(internal, 'persistContextGraphSyncStateStrict');
     internal.subscribedContextGraphs.set(CG, subscription);
     const ual = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ef/7';
     const graph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(ual, '1'), 'reports');
@@ -43,11 +51,33 @@ it.each(['chain', 'worker'].flatMap(phase =>
       batchId: 0n, materializedVersion: { blockNumber: 1, txIndex: 0 },
     } } });
     await internal.store.insert([...data, ...meta]);
-    expect(internal.store.mutationOwner.contentFence).toBeDefined();
+    expect(internal.store).not.toHaveProperty('mutationOwner');
     expect(await readHeldGraphScopedAssets(internal.store, { contextGraphId: CG, descriptors: createGraphScopedDurableManifestPlan(meta, CG)!.descriptors })).toEqual(new Set([ual]));
     if (change === 'corrupt-before') {
       await internal.store.delete(data);
       await internal.store.insert([{ ...data[0]!, object: '"tampered"' }]);
+    }
+    const cleanup = change === 'cleanup-retry' || change === 'newer-swm';
+    const swmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, createGraphKnowledgeAssetScope(ual, '1'), 'reports');
+    const retire = vi.spyOn(internal, 'retireFinalizedSwmTwinCandidate');
+    if (cleanup) {
+      const ns = 'http://dkg.io/ontology/';
+      const swmMeta = `did:dkg:context-graph:${CG}/reports/_shared_memory_meta`;
+      const head = `${ual}#dkg-swm-head`, operation = `urn:dkg:share:${CG}:held-twin`;
+      const version = change === 'newer-swm' ? '2' : '1';
+      const integer = (value: string | number) => `"${value}"^^<http://www.w3.org/2001/XMLSchema#integer>`;
+      const row = (subject: string, predicate: string, object: string): Quad => ({ subject, predicate: ns + predicate, object, graph: swmMeta });
+      await internal.store.insert([
+        ...data.map(quad => ({ ...quad, graph: swmGraph, ...(change === 'newer-swm' ? { object: '"newer"' } : {}) })),
+        row(head, 'contentScopeVersion', integer(GRAPH_KA_CONTENT_SCOPE_VERSION)), row(head, 'kaUal', ual),
+        row(head, 'assertionVersion', integer(version)), row(head, 'assertionGraph', swmGraph),
+        row(head, 'shareOperationId', '"held-twin"'),
+        row(operation, 'shareOperationId', '"held-twin"'), row(operation, 'kaUal', ual),
+        row(operation, 'assertionVersion', integer(version)),
+        row(operation, 'publicQuadsDigest', `"${workspacePublicQuadsDigest(data)}"`),
+        row(operation, 'publicQuadsCount', integer(1)), row(operation, 'privateTripleCount', integer(0)),
+      ]);
+      if (change === 'cleanup-retry') retire.mockRejectedValueOnce(new Error('temporary cleanup failure'));
     }
     const entered = deferred(), release = deferred();
     vi.spyOn(chain, 'getLatestMerkleRoot').mockImplementation(async () => {
@@ -65,7 +95,7 @@ it.each(['chain', 'worker'].flatMap(phase =>
     let dataRequests = 0;
     stubLifecycleFetch(agent, async call => {
       if (call.phase === 'data') dataRequests++;
-      const quads = call.phase === 'meta' ? meta : change === 'corrupt-before' && call.phase === 'data' ? data : [];
+      const quads = call.phase === 'meta' ? meta : (change === 'corrupt-before' || unbound) && call.phase === 'data' ? data : [];
       return { quads, bytesReceived: quads.length * 100, resumedFromOffset: 0, nextOffset: quads.length,
         checkpointKey: getSyncCheckpointKey(PEER, CG, false, call.phase), completed: true, timedOut: false };
     });
@@ -73,6 +103,39 @@ it.each(['chain', 'worker'].flatMap(phase =>
     const run = agent.syncDurableRecoveryContextGraph(CG, {
       candidatePeerIds: [PEER], restrictToCandidatePeerIds: true, candidatesAreSyncCapable: true,
     });
+    if (unbound) {
+      const recovered = await run;
+      expect(dataRequests).toBeGreaterThan(0);
+      expect(recovered.result.verifiedHeldAssets ?? 0).toBe(0);
+      expect(persist).toHaveBeenCalledWith(CG, expect.objectContaining({ onChainId: CG }), 'on-chain id binding', expect.any(Function));
+      expect(recovered.outcome === 'terminal').toBe(change === 'unbound');
+      expect(savedBindings).toEqual(change === 'unbound' ? [CG] : []);
+      expect(internal.subscribedContextGraphs.get(CG).onChainId).toBe(change === 'unbound' ? CG : undefined);
+      expect(internal.syncCheckpoints.get(getSyncCheckpointKey(PEER, CG, false, 'data'))?.terminal === true).toBe(change === 'unbound');
+      return;
+    }
+    if (cleanup) {
+      const recovered = await run;
+      expect(recovered.outcome).toBe('terminal');
+      expect(recovered.result.verifiedHeldAssets).toBe(1);
+      expect(await internal.store.countQuads(swmGraph)).toBe(1);
+      if (change === 'cleanup-retry') {
+        expect(retire).toHaveBeenCalledTimes(1);
+        const replay = await agent.syncDurableRecoveryContextGraph(CG, {
+          candidatePeerIds: [PEER], restrictToCandidatePeerIds: true, candidatesAreSyncCapable: true,
+        });
+        expect(replay.outcome).toBe('terminal');
+        expect(replay.result.verifiedHeldAssets).toBe(1);
+        expect(retire).toHaveBeenCalledTimes(2);
+        expect(await internal.store.countQuads(swmGraph)).toBe(0);
+      } else {
+        expect(retire).not.toHaveBeenCalled();
+        const rows = await internal.store.query(`SELECT ?object WHERE { GRAPH <${swmGraph}> { ?subject ?predicate ?object } }`);
+        expect(rows.bindings).toEqual([{ object: '"newer"' }]);
+      }
+      expect(dataRequests).toBe(0);
+      return;
+    }
     if (change === 'corrupt-before') {
       const recovered = await run;
       expect(dataRequests).toBeGreaterThan(0);

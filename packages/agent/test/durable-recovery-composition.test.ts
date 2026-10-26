@@ -1,4 +1,3 @@
-import { createStoreMutationOwner } from '../src/internal/observed-store-mutation.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import type { DurableRecoveryHost } from '../src/durable-recovery-host.js';
@@ -12,7 +11,7 @@ it('binds lazy verification and one reconciliation adapter at the agent boundary
   const parseAndFilter = vi.fn(async () => ({ quads: [] }));
   const worker = { parseAndFilter };
   const agent = {
-    store: { mutationOwner: createStoreMutationOwner(() => {}) }, writeLocks: new Map(), log: {},
+    store: {  }, writeLocks: new Map(), log: {},
     getOrCreateSyncVerifyWorker: vi.fn(() => worker),
     processDurableBatchInWorker: vi.fn(async function (this: unknown) {
       expect(this).toBe(agent); return { dataQuads: [] };

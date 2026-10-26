@@ -1,11 +1,11 @@
-import type { MutationObservedStore } from './internal/context-graph-cache-invalidating-store.js';
+import type { StoreContentFence } from './internal/store-content-fence.js';
 import { mergeRpcUsageWindows } from '@origintrail-official/dkg-chain';
 import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
 import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-recovery-host.js';
 import { createRecoveryAuthority } from './durable-recovery-authority.js';
 import { RecoveryMaterializationOwner } from './durable-recovery-materialization.js';
 import { deleteSyncPageCheckpoint } from './sync/requester/page-fetch.js';
-import { heldGraphScopedAssetsReader } from './sync/requester/durable-data-holdings.js';
+import { createDurableHeldStore } from './durable-recovery-held-store.js';
 import { AgentWorkLifetime } from './agent-work-lifetime.js';
 import { applyStorageAckLedgerTimestamp, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
 import { applyPublishedNamedKaVmLifecycle, type PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
@@ -209,7 +209,7 @@ import  {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
 import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -585,7 +585,6 @@ export class DKGAgentBase {
     };
     const reconcile: DurableRecoveryHost['reconcile'] = (asset, ctx) =>
       reconcileAfterMaterialization(cleanup, asset, ctx);
-    const heldContent = agent.store.mutationOwner.contentFence;
     const materialization = new RecoveryMaterializationOwner({
       chain: () => agent.chain,
       store: () => agent.store,
@@ -656,7 +655,7 @@ export class DKGAgentBase {
       storeInsert: ({ quads, signal }) => agent.insertSyncedQuadsAndInvalidateListCache(quads, {
         priority: 'background', source: 'agent.durableSync.storeInsert', signal,
       }),
-      heldStore: { read: heldGraphScopedAssetsReader(agent.store), withScope: heldContent.withScope.bind(heldContent) },
+      heldStore: createDurableHeldStore(agent.store, agent.heldStoreContentFence, reconcile),
       materialization: scope => materialization.forOperation(scope),
       checkpoints: {
         deleteCheckpoint: key => deleteSyncPageCheckpoint(agent.syncCheckpoints, key),
@@ -685,7 +684,7 @@ export class DKGAgentBase {
 
   readonly wallet: AgentWallet;
   readonly node: DKGNode;
-  readonly store: MutationObservedStore;
+  readonly store: TripleStore;
   protected readonly storageAckLedgerTimestampWriter: StorageAckLedgerTimestampWriter;
   protected readonly publishedNamedKaVmLifecycleWriter: PublishedNamedKaVmLifecycleWriter;
   readonly publisher: DKGPublisher;
@@ -2084,7 +2083,7 @@ export class DKGAgentBase {
     config: ResolvedDKGAgentConfig,
     wallet: DKGAgentWallet,
     node: DKGNode,
-    store: MutationObservedStore,
+    store: TripleStore,
     publisher: DKGPublisher,
     queryEngine: DKGQueryEngine,
     eventBus: TypedEventBus,
@@ -2094,6 +2093,7 @@ export class DKGAgentBase {
     publicSnapshotStore?: WorkspacePublicSnapshotStore,
     publishedLifecycleWriter?: PublishedNamedKaVmLifecycleWriter,
     ledgerTimestampWriter?: StorageAckLedgerTimestampWriter,
+    private readonly heldStoreContentFence?: StoreContentFence,
   ) {
     this.config = config;
     this.wallet = wallet;

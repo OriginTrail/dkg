@@ -58,6 +58,7 @@ export interface DurableRecoveryHost {
   readonly heldStore?: {
     readonly read: (request: HeldGraphScopedAssetsRequest) => Promise<ReadonlySet<string>>;
     readonly withScope: StoreContentFence['withScope'];
+    reconcile?(request: HeldGraphScopedAssetsRequest, held: ReadonlySet<string>, ctx: OperationContext): Promise<void>;
   };
   materialization(scope: RecoveryMaterializationScope): RecoveryMaterialization;
   resolveOrdinaryAuthority(ctx: OperationContext, input: DurableRecoveryInput): DurableRecoveryAuthority;

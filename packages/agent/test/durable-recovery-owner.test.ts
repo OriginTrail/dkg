@@ -1,4 +1,3 @@
-import { createStoreMutationOwner } from '../src/internal/observed-store-mutation.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
@@ -25,7 +24,7 @@ it('serializes non-coalesced operations across separately bound recovery hosts',
     return { result: {} as Awaited<ReturnType<typeof runDurableSync>> };
   });
   const agentLike = {
-    store: { mutationOwner: createStoreMutationOwner(() => {}) },
+    store: {  },
     config: {},
     runContextGraphSyncWithBackpressure: async (
       _ctx: unknown, _graph: string, _lane: string, _label: string,

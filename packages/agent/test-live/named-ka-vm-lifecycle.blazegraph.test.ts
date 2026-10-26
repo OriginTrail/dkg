@@ -7,7 +7,7 @@ import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-officia
 import { BlazegraphNamespaceManager, blazegraphNamespaceApiUrlFromSparqlEndpoint, createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { applyPublishedNamedKaVmLifecycle, createPublishedNamedKaVmLifecycleWriter, type PublishedNamedKaVmLifecycleWriter } from '../src/named-ka-vm-lifecycle.js';
 import { createMutationObservedStore } from '../src/internal/context-graph-cache-invalidating-store.js';
-import { createObservedStoreMutation } from '../src/internal/observed-store-mutation.js';
+import { createStoreMutationOwner } from '../src/internal/observed-store-mutation.js';
 
 // This explicit backend suite requires its CI/local lane to provide a Blazegraph endpoint.
 describe('named KA lifecycle scoped update (live Blazegraph)', () => {
@@ -31,8 +31,9 @@ describe('named KA lifecycle scoped update (live Blazegraph)', () => {
       graphSetIndex: true, changelog: true,
       largeLiteralStorage: { enabled: true, directory, thresholdBytes: 4096 },
     });
-    const executeMutation = createObservedStoreMutation(() => {});
-    store = createMutationObservedStore(composed, executeMutation);
+    const owner = createStoreMutationOwner(() => {});
+    const executeMutation = owner.execute;
+    store = createMutationObservedStore(composed, owner);
     writer = createPublishedNamedKaVmLifecycleWriter({ updateStore: composed, fallbackStore: store, executeMutation });
   });
   afterAll(async () => {
