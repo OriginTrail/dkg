@@ -21,6 +21,7 @@ import { ethers } from 'ethers';
 import type { FinalizedSwmTwinRetirement } from
   '../src/sync/requester/finalized-swm-twin-reconciliation.js';
 import {
+  SwmTargetExecutorSessionFactoryV1,
   SwmTargetExecutorV1,
   type SwmTargetExecutorPortsV1,
 } from '../src/sync/requester/swm-target-executor.js';
@@ -448,5 +449,159 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
       ctx,
       expect.stringMatching(/legacy SWM boundary.*legacy boundary store unavailable/),
     );
+  });
+
+  /**
+   * A finalized asset whose shared-memory snapshot a peer still serves: VM is
+   * local with the same bytes, so a round writes the snapshot and retires it.
+   */
+  async function finalizedTwinRounds(contextGraphId: string, retireMarker: () => Promise<void>) {
+    const store = new OxigraphStore();
+    stores.push(store);
+    const ual = `did:dkg:hardhat:31337/0x2222222222222222222222222222222222222222/9`;
+    const dkg = 'http://dkg.io/ontology/';
+    const xsdInteger = 'http://www.w3.org/2001/XMLSchema#integer';
+    const scope = createGraphKnowledgeAssetScope(ual, 1);
+    const vmGraph = knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.VerifiableMemory, scope);
+    const swmGraph = knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.SharedWorkingMemory, scope);
+    const vmMetaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+    const swmMetaGraph = contextGraphWorkspaceMetaGraphUri(contextGraphId);
+    const shareOperationId = `${contextGraphId}-op`;
+    const operationSubject = `urn:dkg:share:${contextGraphId}:${shareOperationId}`;
+    const headSubject = `${ual}#dkg-swm-head`;
+    const payload: Quad[] = [
+      { subject: 'urn:twin:c', predicate: 'http://schema.org/status', object: '"finalized"', graph: '' },
+    ];
+    const digest = workspacePublicQuadsDigest(payload);
+    await store.insert([
+      ...payload.map((quad) => ({ ...quad, graph: vmGraph })),
+      { subject: ual, predicate: `${dkg}assertionVersion`, object: `"1"^^<${xsdInteger}>`, graph: vmMetaGraph },
+      { subject: ual, predicate: `${dkg}assertionGraph`, object: vmGraph, graph: vmMetaGraph },
+      { subject: ual, predicate: `${dkg}status`, object: '"confirmed"', graph: vmMetaGraph },
+      { subject: ual, predicate: `${dkg}publicTripleCount`, object: `"${payload.length}"^^<${xsdInteger}>`, graph: vmMetaGraph },
+      { subject: ual, predicate: `${dkg}privateTripleCount`, object: `"0"^^<${xsdInteger}>`, graph: vmMetaGraph },
+      {
+        subject: ual,
+        predicate: `${dkg}merkleRoot`,
+        object: `"${ethers.hexlify(computeFlatKCRootV10(payload, []))}"`,
+        graph: vmMetaGraph,
+      },
+    ]);
+    const remoteMeta: Quad[] = [
+      ...generateKnowledgeAssetShareMetadata({
+        shareOperationId,
+        contextGraphId,
+        kaUal: ual,
+        assertionVersion: 1,
+        publicTripleCount: payload.length,
+        privateTripleCount: 0,
+        publisherPeerId: 'peer-source',
+        timestamp: new Date(0),
+      }, swmMetaGraph),
+      { subject: operationSubject, predicate: `${dkg}publicQuadsDigest`, object: `"${digest}"`, graph: swmMetaGraph },
+      { subject: operationSubject, predicate: `${dkg}publicSnapshotRef`, object: `"${digest}"`, graph: swmMetaGraph },
+      { subject: headSubject, predicate: `${dkg}contentScopeVersion`, object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${xsdInteger}>`, graph: swmMetaGraph },
+      { subject: headSubject, predicate: `${dkg}kaUal`, object: ual, graph: swmMetaGraph },
+      { subject: headSubject, predicate: `${dkg}assertionVersion`, object: `"1"^^<${xsdInteger}>`, graph: swmMetaGraph },
+      { subject: headSubject, predicate: `${dkg}assertionGraph`, object: swmGraph, graph: swmMetaGraph },
+      { subject: headSubject, predicate: `${dkg}shareOperationId`, object: `"${shareOperationId}"`, graph: swmMetaGraph },
+    ];
+    const snapshots = new Map<string, Quad[]>([[digest, payload]]);
+    const retireFinalizedSwmTwin = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
+      await store.dropGraph(candidate.swmGraph);
+      await store.deleteByPattern({ graph: swmMetaGraph, subject: headSubject });
+      await store.deleteByPattern({ graph: swmMetaGraph, subject: operationSubject });
+    });
+    const logInfo = vi.fn();
+    const ctx = createOperationContext('sync');
+    const ports: SwmTargetExecutorPortsV1 = {
+      store,
+      writeLocks: new Map(),
+      listSubGraphs: async () => [],
+      createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
+      fetchSyncPages: async (_ctx, _peerId, _contextGraphId, _includeSharedMemory, phase) => {
+        const quads = phase === 'meta' ? remoteMeta.map((quad) => ({ ...quad })) : [];
+        return {
+          quads,
+          bytesReceived: 0,
+          timedOut: false,
+          resumedFromOffset: 0,
+          nextOffset: quads.length,
+          checkpointKey: `public:${phase}`,
+          completed: true,
+        };
+      },
+      processSharedMemoryBatch: async (dataQuads, metaQuads) => ({
+        verifiedData: dataQuads,
+        verifiedMeta: metaQuads,
+        totalFetchedDataQuads: dataQuads.length,
+        totalFetchedMetaQuads: metaQuads.length,
+        droppedDataTriples: 0,
+        emptyResponses: 0,
+        entityCreators: [],
+      }),
+      publicSnapshotStore: {
+        putSnapshot: async (input) => {
+          snapshots.set(input.digest, input.quads.map((quad) => ({ ...quad })));
+          return { ref: input.digest, byteLength: 0 };
+        },
+        getSnapshot: async (ref) => snapshots.get(ref)?.map((quad) => ({ ...quad })) ?? null,
+      },
+      recordDrops: () => undefined,
+      invalidateListContextGraphsCache: () => undefined,
+      recoveryMutation: createSwmRecoveryMutationRuntimeV1({
+        store,
+        recordDrops: () => undefined,
+        invalidateListContextGraphsCache: () => undefined,
+      }),
+      setCheckpoint: () => undefined,
+      deleteCheckpoint: () => undefined,
+      deletePublicCheckpoint: () => undefined,
+      ensureOwnedMap: () => new Map(),
+      retireFinalizedSwmTwin,
+      retireLegacySwmAfterVerifiedVmTwin: retireMarker,
+      logInfo,
+      logWarn: () => undefined,
+      logDebug: () => undefined,
+    };
+    const sessions = new SwmTargetExecutorSessionFactoryV1(ports);
+    // Each round is a catch-up job's own session, as on a node.
+    const round = () => sessions.createSession().syncPublicTarget({
+      ctx,
+      remotePeerId: 'peer-source',
+      contextGraphId,
+      remainingContextGraphs: 1,
+      mode: { kind: 'ordinary' },
+    });
+    return { store, payload, vmGraph, swmGraph, retireFinalizedSwmTwin, logInfo, ctx, round };
+  }
+
+  it('writes nothing in a later round for a snapshot it retired as a finalized twin', async () => {
+    const rounds = await finalizedTwinRounds('public-finalized-twin-remembered', async () => undefined);
+    expect((await rounds.round()).failedPhases).toBe(0);
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledOnce();
+
+    const later = await rounds.round();
+    expect(later.failedPhases).toBe(0);
+    expect(later.alreadyHeldAssets).toBe(1);
+    expect(later.swmCoverage).toMatchObject({ snapshotsResolved: 1, snapshotsTotal: 1, missingCount: 0 });
+    // Not written and retired a second time: the copy stays gone, VM stays whole.
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledOnce();
+    expect(await rounds.store.countQuads(rounds.swmGraph)).toBe(0);
+    expect(await rounds.store.countQuads(rounds.vmGraph)).toBe(rounds.payload.length);
+    expect(rounds.logInfo).toHaveBeenCalledWith(
+      rounds.ctx,
+      expect.stringContaining('1 snapshot(s) already retired here as finalized Verified Memory twins'),
+    );
+  });
+
+  it('writes and retires the snapshot again when the retirement left its marker behind', async () => {
+    const rounds = await finalizedTwinRounds('public-finalized-twin-marker-left', async () => {
+      throw new Error('legacy boundary store unavailable');
+    });
+    await rounds.round();
+    await rounds.round();
+    // A later pass is what retries the marker, so nothing was remembered.
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledTimes(2);
   });
 });

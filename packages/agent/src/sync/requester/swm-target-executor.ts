@@ -18,6 +18,7 @@ import {
   reconcileFinalizedSwmTwinFromDescriptor,
   type FinalizedSwmTwinRetirement,
 } from './finalized-swm-twin-reconciliation.js';
+import { FinalizedSwmTwinMemoV1 } from './finalized-swm-twin-memo.js';
 import type { RecoveryExecutionGuard } from './recovery-execution-guard.js';
 import {
   runSharedMemorySync,
@@ -142,6 +143,7 @@ export class SwmTargetExecutorV1 {
   constructor(
     ports: SwmTargetExecutorPortsV1,
     private readonly privateSnapshotWalks = new PrivateSwmSnapshotWalkRegistry(),
+    private readonly finalizedTwins = new FinalizedSwmTwinMemoV1(),
   ) {
     this.#ports = ports;
     this.#privateRecoveryBudgetMs = normalizePrivateSwmRecoveryBudgetMs(
@@ -334,6 +336,9 @@ export class SwmTargetExecutorV1 {
               assertionVersion: descriptor.assertionVersion,
               subGraphName: descriptor.subGraphName,
             });
+            // Only a finished retirement is remembered: a later pass is what
+            // retries a marker left behind.
+            this.finalizedTwins.remember(contextGraphId, descriptor);
           } catch (cause) {
             this.#ports.logWarn(
               target.ctx,
@@ -351,6 +356,7 @@ export class SwmTargetExecutorV1 {
         }
         return twinRetired ? 'suppress-metadata' : 'preserve';
       },
+      isFinalizedTwinRetired: (contextGraphId, descriptor) => this.finalizedTwins.retired(contextGraphId, descriptor),
       storeInsert,
       publicSnapshotStore: this.#ports.publicSnapshotStore,
       deleteCheckpoint: this.#ports.deletePublicCheckpoint,
@@ -402,21 +408,27 @@ export class SwmTargetExecutorV1 {
   }
 }
 
-/** Stable typed composition with isolated session caches and shared manifest progress. */
+/**
+ * Stable typed composition with isolated session caches, shared manifest
+ * progress and the node's shared memo of retired finalized twins.
+ */
 export class SwmTargetExecutorSessionFactoryV1 {
   readonly #ports: SwmTargetExecutorPortsV1;
   readonly #privateSnapshotWalks: PrivateSwmSnapshotWalkRegistry;
+  readonly #finalizedTwins: FinalizedSwmTwinMemoV1;
 
   constructor(
     ports: SwmTargetExecutorPortsV1,
     privateSnapshotWalks = new PrivateSwmSnapshotWalkRegistry(),
+    finalizedTwins = new FinalizedSwmTwinMemoV1(),
   ) {
     this.#ports = ports;
     this.#privateSnapshotWalks = privateSnapshotWalks;
+    this.#finalizedTwins = finalizedTwins;
   }
 
   createSession(): SwmTargetExecutorV1 {
-    return new SwmTargetExecutorV1(this.#ports, this.#privateSnapshotWalks);
+    return new SwmTargetExecutorV1(this.#ports, this.#privateSnapshotWalks, this.#finalizedTwins);
   }
 }
 
