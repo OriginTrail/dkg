@@ -210,3 +210,38 @@ describe('chain RPC cursor stores', () => {
     expect(await reopened.load(scope)).toEqual({ token: 4, value: first });
   });
 });
+
+
+describe('corrupt opaque checkpoints', () => {
+  it('fails closed on malformed registry repair JSON and preserves scope isolation', async () => {
+    const store = new SqliteContextGraphRegistryScanCursorStore(db);
+    const key = { chainId: '1', deploymentId: 'deploy', registryAddress: '0xABCD' };
+    expect(await store.repairAudit.load(key)).toBeUndefined();
+    await store.repairAudit.save(key, { nextBlock: 42 });
+    db.db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(
+      '{broken', 'contextGraphRegistryScan.repair:v1:1:deploy:0xabcd',
+    );
+    expect(await store.repairAudit.load(key)).toBeUndefined();
+    await store.repairAudit.save(key, { nextBlock: 43 });
+    expect(await store.repairAudit.load({ ...key, registryAddress: '0xabcd' })).toEqual({ nextBlock: 43 });
+    expect(await store.repairAudit.load({ ...key, deploymentId: 'other' })).toBeUndefined();
+    await expect(store.repairAudit.save(key, undefined)).rejects.toThrow('not serializable');
+    expect(await store.repairAudit.load(key)).toEqual({ nextBlock: 43 });
+  });
+
+  it('ignores malformed history JSON, permits repair and deletes only the requested checkpoint', async () => {
+    const store = new SqliteContextGraphAuthorityHistoryStore(db);
+    await store.save('one', { block: 10 });
+    await store.save('two', { block: 20 });
+    db.db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(
+      '{broken', 'contextGraphAuthorityHistory.checkpoint:v1:one',
+    );
+    expect(await store.load('one')).toBeUndefined();
+    expect(await store.load('two')).toEqual({ block: 20 });
+    await store.save('one', { block: 11 });
+    expect(await store.load('one')).toEqual({ block: 11 });
+    await store.delete('one');
+    expect(await store.load('one')).toBeUndefined();
+    expect(await store.load('two')).toEqual({ block: 20 });
+  });
+});

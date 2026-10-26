@@ -78,6 +78,8 @@ interface DepsOverrides {
   commands?: Record<string, { stdout?: string; stderr?: string; code: number } | null>;
   /** `process.env.DKG_HOME` value at invocation. */
   dkgHomeEnv?: string | null;
+  /** Deterministic Node.js runtime surface; defaults to the test process. */
+  runtime?: DoctorDeps['runtime'];
 }
 
 function makeDeps(over: DepsOverrides = {}): DoctorDeps {
@@ -110,6 +112,7 @@ function makeDeps(over: DepsOverrides = {}): DoctorDeps {
     monorepoRoot: over.monorepoRoot ?? null,
     extraScanRoots: over.extraScanRoots ?? [],
     skipChecks: over.skipChecks ?? [],
+    runtime: over.runtime,
 
     exists(path) {
       const trimmed = path.replace(/\/+$/, '');
@@ -1266,5 +1269,38 @@ describe('runDoctor orchestrator', () => {
       .toContain(report.state.runtime.nodeVersion);
     expect(formatted.find((line) => line.includes('runtime.nodeSqlite')))
       .toContain(String(report.state.runtime.nodeSqliteAvailable));
+  });
+
+  describe('node-security dispatch', () => {
+    const sqlite = () => ({ DatabaseSync: class {} });
+    const unpatched = { version: 'v22.20.0', getBuiltinModule: sqlite };
+    const patched = { version: 'v22.23.4', getBuiltinModule: sqlite };
+    // Skip everything else so the exit code reflects node-security alone.
+    const otherChecks = ALL_CHECK_IDS.filter((id) => id !== 'node-security');
+
+    it('runs by default and exits 1 on an unpatched runtime', async () => {
+      expect(ALL_CHECK_IDS).toContain('node-security');
+      const report = await runDoctor(makeDeps({ runtime: unpatched, skipChecks: otherChecks }));
+      expect(report.state.runtime.nodeVersion).toBe('v22.20.0');
+      expect(report.findings).toEqual([
+        expect.objectContaining({ check: 'node-security', severity: 'warning', subject: 'v22.20.0' }),
+      ]);
+      expect(report.exitCode).toBe(1);
+    });
+
+    it('reports nothing and exits 0 on a patched runtime', async () => {
+      const report = await runDoctor(makeDeps({ runtime: patched, skipChecks: otherChecks }));
+      expect(report.findings).toEqual([]);
+      expect(report.exitCode).toBe(0);
+    });
+
+    it('is suppressed by skipChecks while the other checks still run', async () => {
+      const report = await runDoctor(makeDeps({
+        runtime: unpatched,
+        skipChecks: ['node-security'],
+        fs: { '/test/.dkg/config.json': '{}' },
+      }));
+      expect(report.findings.some((f) => f.check === 'node-security')).toBe(false);
+    });
   });
 });
