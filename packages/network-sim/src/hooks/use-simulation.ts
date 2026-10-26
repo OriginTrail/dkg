@@ -100,7 +100,8 @@ export function useSimulation(onComplete: () => void) {
             // Recovery can overtake a delayed start. Unknown state is not proof
             // that the server cannot admit this ID; confirm cancellation first.
             stream.close(); run.stream = null;
-            setDisconnected(true);
+            setDisconnected(false);
+            setFailure('Results unavailable. Confirming cancellation…');
             void cancel(run);
             return;
           }

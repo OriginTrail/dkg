@@ -136,6 +136,8 @@ describe('simulation UI with real server recovery', () => {
     expect(ui.button('Stop Simulation').disabled).toBe(false);
     expect(store.state.activeSimulationId).toBe(id);
     expect(stops).toBe(1);
+    expect(ui.container.querySelector('[role="status"]')).toBeNull();
+    if (!retry) expect(ui.container.querySelector('[role="alert"]')?.textContent).toContain('Confirming cancellation');
     if (retry) {
       expect(ui.container.querySelector('[role="alert"]')?.textContent).toContain('retry');
       await ui.click('Stop Simulation');
