@@ -6,7 +6,13 @@ import {
   type LatencySummary,
 } from '@origintrail-official/dkg-core';
 import { readLiftJournalEntryCount, readLiftQueueDepth, readShareQueueDepth } from '@origintrail-official/dkg-publisher';
-import { takeStoreSchedulerStatsReports, type StoreSchedulerStatsReport, type TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  estimateQueueWaitPercentileMs,
+  STORE_QUEUE_WAIT_BUCKET_UPPER_MS,
+  takeStoreSchedulerStatsReports,
+  type StoreSchedulerStatsReport,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 
 /**
  * One `async_admission_usage` line every five minutes: how the async share and async publish
@@ -22,10 +28,20 @@ import { takeStoreSchedulerStatsReports, type StoreSchedulerStatsReport, type Tr
  * Line shape (one line, wrapped here):
  *   async_admission_usage interval_s=300
  *     store_rejections=store/background/publisher.asyncLift/queue_full:3 store_max_wait_ms=store/ack:0,store/background:812
+ *     store_wait_n=store/ack:412,store/background:57 store_wait_p95_ms=store/ack:1,store/background:539
+ *     store_wait_buckets=store/ack:1x400|2x10|9x2,store/background:31x50|539x7
  *     http=publish_async/enqueue/202/-:41,publish_async/snapshot_preflight/503/store_busy:2 http_share_n=120 ...
  *     share_depth=failed:0,failed_retrying:0,queued:3,running:1,succeeded:200 lift_depth=accepted:2,... lift_journal=812 depth_errors=0
  *     share_reclaimed=0 share_abandoned=0 lift_reclaimed=0 lift_stale_claims=0
  *     share_hb_n=40 share_hb_p95_ms=12 ... share_claim_n=300 ... lift_wallets=2 lift_pickup_n=41 ...
+ *
+ * `store_wait_p95_ms` is an upper bound: the top of the fixed bucket (about 10 % wider than the one below, 1 to
+ * 10000 ms) holding the 95th-percentile wait, so the true P95 is at most that and up to one step lower; past
+ * 10000 ms it is the interval's longest wait. It is 0 for a lane with no wait (`store_wait_n` is that lane's
+ * count), and `store/ack` is the storage-ACK queue-wait P95. P95s of single lines cannot be merged, so the line
+ * also prints `store_wait_buckets`, the lane's wait counts as `<upper bound ms>x<count>` for each bucket that
+ * holds a wait, ascending, joined by `|` (`infx<count>` past 10000 ms, `-` for none). Adding those counts over
+ * the lines of a test cell or a monitoring window gives that window's P95 (docs/use-dkg/backpressure-observability.md).
  *
  * `http=` counts every admission request, 2xx included: `<route>/<phase>/<status>/<code>`, where
  * the phase is the step that answered (`request`, `write_preflight`, `intent_resolution`,
@@ -71,14 +87,23 @@ function ms(value: number | null): string {
   return value === null ? UNKNOWN : `${Math.round(value)}`;
 }
 
-/** `key:n` entries sorted by key; `-` when there are none. */
-function list(entries: Iterable<[string, number]>): string {
+/** `key:value` entries sorted by key; `-` when there are none. */
+function list(entries: Iterable<[string, number | string]>): string {
   const sorted = [...entries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   return sorted.length === 0 ? UNKNOWN : sorted.map(([key, n]) => `${key}:${n}`).join(',');
 }
 
 function depthList(depth: Record<string, number> | null): string {
   return depth === null ? UNKNOWN : list(Object.entries(depth).map(([state, n]) => [component(state), n]));
+}
+
+/** A lane's wait counts: `<upper bound ms>x<count>` for each bucket that holds a wait (`inf` for the overflow bucket), `|`-joined; `-` for none. */
+function waitBucketCounts(buckets: readonly number[]): string {
+  const counts: string[] = [];
+  buckets.forEach((count, index) => {
+    if (count > 0) counts.push(`${STORE_QUEUE_WAIT_BUCKET_UPPER_MS[index] ?? 'inf'}x${count}`);
+  });
+  return counts.length === 0 ? UNKNOWN : counts.join('|');
 }
 
 type Figure = 'p50' | 'p95' | 'p99' | 'max';
@@ -95,12 +120,19 @@ export function formatAsyncAdmissionUsageLine(sample: AsyncAdmissionUsageSample)
   const { usage, depth, shareWorker } = sample;
   const rejections: Array<[string, number]> = [];
   const maxWaits: Array<[string, number]> = [];
+  const waitCounts: Array<[string, number]> = [];
+  const waitP95s: Array<[string, number]> = [];
+  const waitBuckets: Array<[string, string]> = [];
   for (const report of sample.store) {
     for (const r of report.rejections) {
       rejections.push([[report.scheduler, r.lane, r.family, r.reason].map(component).join('/'), r.count]);
     }
     for (const w of report.queueWaits) {
-      maxWaits.push([[report.scheduler, w.lane].map(component).join('/'), Math.round(w.maxQueueWaitMs)]);
+      const key = [report.scheduler, w.lane].map(component).join('/');
+      maxWaits.push([key, Math.round(w.maxQueueWaitMs)]);
+      waitCounts.push([key, w.queueWaitCount]);
+      waitP95s.push([key, Math.round(estimateQueueWaitPercentileMs(w.queueWaitBuckets, 0.95, w.maxQueueWaitMs))]);
+      waitBuckets.push([key, waitBucketCounts(w.queueWaitBuckets)]);
     }
   }
   const http = usage.http.map((entry): [string, number] => [
@@ -112,6 +144,9 @@ export function formatAsyncAdmissionUsageLine(sample: AsyncAdmissionUsageSample)
     `interval_s=${Math.max(0, Math.round(sample.intervalSeconds))}`,
     `store_rejections=${list(rejections)}`,
     `store_max_wait_ms=${list(maxWaits)}`,
+    `store_wait_n=${list(waitCounts)}`,
+    `store_wait_p95_ms=${list(waitP95s)}`,
+    `store_wait_buckets=${list(waitBuckets)}`,
     `http=${list(http)}`,
     ...windowFields('http_share', usage.httpLatency.share_async, ['p50', 'p95', 'max']),
     ...windowFields('http_publish', usage.httpLatency.publish_async, ['p50', 'p95', 'max']),

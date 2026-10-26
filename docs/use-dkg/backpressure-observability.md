@@ -257,7 +257,7 @@ rate-limited. The line is never rate-limited and is logged when the node is idle
 It is logfmt, like `resource_usage`:
 
 ```text
-async_admission_usage interval_s=300 store_rejections=store/background/publisher.asyncLift/queue_full:3 store_max_wait_ms=store/ack:0,store/background:812,store/health:0,store/normal:120 http=publish_async/enqueue/202/-:41,publish_async/snapshot_preflight/503/STORE_SCHEDULER_BUSY:2,share_async/enqueue/200/-:120 http_share_n=120 http_share_p50_ms=40 http_share_p95_ms=211 http_share_max_ms=900 ...
+async_admission_usage interval_s=300 store_rejections=store/background/publisher.asyncLift/queue_full:3 store_max_wait_ms=store/ack:80,store/background:812,store/health:0,store/normal:120 store_wait_n=store/ack:40,store/background:10,store/health:0,store/normal:1 store_wait_p95_ms=store/ack:4,store/background:869,store/health:0,store/normal:129 store_wait_buckets=store/ack:4x38|80x2,store/background:31x9|869x1,store/health:-,store/normal:129x1 http=publish_async/enqueue/202/-:41,publish_async/snapshot_preflight/503/STORE_SCHEDULER_BUSY:2,share_async/enqueue/200/-:120 http_share_n=120 http_share_p50_ms=40 http_share_p95_ms=211 http_share_max_ms=900 ...
 ```
 
 ### Cumulative counters and interval windows
@@ -281,6 +281,9 @@ async_admission_usage interval_s=300 store_rejections=store/background/publisher
 | `interval_s` | seconds | Time since the previous line (`0` for the first) |
 | `store_rejections=<scheduler>/<lane>/<family>/<reason>:<n>` | cumulative | Store scheduler rejections by the lane, the operation family (the first two segments of the caller's `source`, such as `publisher.asyncLift`) and the reason (`queue_full`, `queue_wait_timeout`), for every registered scheduler |
 | `store_max_wait_ms=<scheduler>/<lane>:<ms>` | window | The longest queue wait that ended in the interval, per lane; `0` for a lane with none |
+| `store_wait_n=<scheduler>/<lane>:<n>` | window | How many queue waits ended in the interval, per lane. Every started operation counts, including one that starts at once, as a wait of about 0 ms; so do operations that timed out in the queue or were cancelled there. A rejection on a full queue never queued and is not counted. It is the sample count behind `store_wait_p95_ms`; on a quiet lane most of it is those instant starts; read a P95 of a handful of waits with care |
+| `store_wait_p95_ms=<scheduler>/<lane>:<ms>` | window | The 95th-percentile queue wait that ended in the interval, per lane, over the same waits as `store_wait_n` (instant starts included), as a **bucket upper bound** (see below); `0` for a lane with none. `store/ack` is the **storage-ACK queue-wait P95**, the figure the testnet test (G2) and the mainnet monitoring (G3) read as "ACK queue-wait P95" |
+| `store_wait_buckets=<scheduler>/<lane>:<bound>x<n>\|<bound>x<n>...` | window | The wait counts behind the P95: for each bucket that holds a wait, its upper bound in ms and the count, ascending; `infx<n>` for waits past 10000 ms; `-` for a lane with none. Counts of several lines add up, so they give the P95 of a longer window (see below) |
 | `http=<route>/<phase>/<status>/<code>:<n>` | cumulative | Admission requests by route (`share_async`, `publish_async`), answering phase, HTTP status and error code (`-` for none). Every outcome is counted, 2xx included, so rates have a denominator. Status `0` is a client that left before any answer (`client_closed`). After 64 distinct series, a new code counts as `other` for its route, phase and status, so the list can exceed 64 entries (bounded) |
 | `http_share_*`, `http_publish_*` (`_n`, `_p50_ms`, `_p95_ms`, `_max_ms`) | window | Admission latency per route, request start to response, every outcome |
 | `share_depth=<state>:<n>` | gauge | Share jobs per state (`queued`, `running`, `failed_retrying`, `succeeded`, `failed`); `-` if unreadable |
@@ -300,6 +303,81 @@ async_admission_usage interval_s=300 store_rejections=store/background/publisher
 | `lift_pickup_unclassified` | cumulative | Jobs whose wallet state at ready time could not be determined, and which are left out of the worker-free sample |
 | `lift_c2f_n`, `_p50_ms`, `_p95_ms` | window | Claim-to-finish: claimed to finalized |
 | `lift_finalized`, `lift_failed` | cumulative | Publisher jobs that reached a terminal state through a worker; with the share counters these give completions per minute |
+
+### Queue-wait P95 is a bucket upper bound
+
+The scheduler does not keep every wait; it counts them in fixed buckets and the
+line reports the P95 from those counts. A lane's `store_wait_p95_ms` is the upper
+bound of the bucket that holds the 95th-percentile wait (rank `ceil(0.95 * n)` of
+the interval's `n` waits). The inclusive upper bounds are these 83 values in
+milliseconds, plus an overflow bucket for anything longer. They grow by about
+10 % per step (`round(1.1 ** k)`, duplicates dropped, then 10000, the default
+queue-wait timeout):
+
+```text
+1 2 3 4 5 6 7 8 9 10 11 12 13 14 16 17 19 21 23 26 28 31 34 37 41 45 50 55 60 66 73 80
+88 97 107 117 129 142 156 172 189 208 229 252 277 304 335 368 405 446 490 539 593 653
+718 790 869 956 1051 1156 1272 1399 1539 1693 1862 2048 2253 2479 2726 2999 3299 3629
+3992 4391 4830 5313 5844 6429 7072 7779 8557 9412 10000
+```
+
+The list does not change between builds, so a figure from one build compares
+with a figure from another.
+
+- The true P95 is **at most** the printed value and up to one step lower. From
+  7 ms up a step is at most 15 %, so a printed value is within 15 % above the
+  truth, and two printed values can be held to a margin such as "not worse than
+  25 %" with that much slack. Below 7 ms the steps are whole milliseconds, so a
+  relative margin on a P95 of a few milliseconds is a difference of a millisecond
+  or two, within clock noise; pair it with an absolute floor.
+- A lane whose waits all took 3 ms prints `3`, and a lane with one 120 ms wait
+  prints `129`, which is above its `store_max_wait_ms` of `120`. Do not read a
+  printed value as "exactly that many ms". A threshold between two bounds
+  behaves like the bound above it, so set P95 thresholds on a bound.
+- **Work that starts at once counts**, as a wait of about 0 ms, as it does in the
+  `dkg.storage_ack.queue_wait_ms` OpenTelemetry histogram. On a quiet ACK lane
+  most of `store_wait_n` is such instant starts, and the P95 then prints `1`, the
+  first bound. The P95 is over all operations that ended a wait, not only over
+  the ones that actually queued.
+- Past `10000` ms the rank falls in the overflow bucket and the value is that
+  lane's longest wait of the interval, the same figure as `store_max_wait_ms`. The
+  default queue-wait timeout is also 10 s, so a wait that times out in the queue
+  ends here or in the last bucket.
+- An interval with no waits prints `0` for the P95 and for `store_wait_n`, and `-`
+  for `store_wait_buckets`.
+- Like `store_max_wait_ms`, these fields cover the five minutes before the line
+  and start over after each one. The max stays on the line because it shows the
+  one slow wait that a P95 hides.
+
+**The P95 of a longer window** (a test cell of 30 minutes, a monitoring window of
+7 days) comes from the counts, not from the lines' P95s. P95s of different
+intervals cannot be averaged, and the largest of them is not the window's P95
+either. For one lane, over the lines whose interval lies inside the window:
+
+1. Add the counts of each bound over the lines (`store_wait_buckets`). Let `n` be
+   the sum of all counts.
+2. Walk the bounds upward, adding their counts, until the running total reaches
+   `ceil(0.95 * n)`. That bound is the window's P95.
+3. If the walk ends in `inf`, the P95 is the largest `store_max_wait_ms` of that
+   lane over the lines.
+
+`estimateQueueWaitPercentileMs` in `@origintrail-official/dkg-storage` does steps 2
+and 3 on the summed counts. The first line after a restart has `interval_s=0` and
+covers the time since the process started; leave it out when the window should
+not include start-up.
+
+For example, three lines of `store/ack` with `store_wait_p95_ms` of `1`, `718` and
+`41` and these counts:
+
+```text
+store/ack:1x400
+store/ack:1x70|718x30
+store/ack:1x90|41x10
+```
+
+add up to `1x560|41x10|718x30`: `n` is 600, the rank is 570, and the running
+total passes it at the bound `41`. The window's P95 is `41`, which is neither the
+mean (253) nor the largest (718) of the three printed P95s.
 
 ### Admission phases
 
