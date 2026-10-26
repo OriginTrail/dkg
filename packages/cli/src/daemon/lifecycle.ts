@@ -466,6 +466,7 @@ import {
 
 import { handleRequest } from './handle-request.js';
 import { configureApiQueryPriority } from './api-query-priority.js';
+import { configureWritePreflightCoalescing } from './write-preflight-coalescing.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
 import { buildChatMemoryStack } from './memory-tool-context.js';
@@ -1308,6 +1309,7 @@ async function runDaemonInnerWithStartupOwnership(
     info: log,
     warn: log,
   });
+  configureWritePreflightCoalescing(process.env, { info: log, warn: log });
 
   const startupLogRotationMessage = startupLogRotation
     && describeDaemonLogRotation(startupLogRotation, 'during startup');

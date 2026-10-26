@@ -343,6 +343,12 @@ export default defineConfig({
           // slow/closed. Real resolver + real agent probe + real (closed)
           // OxigraphWorkerStore; no hardhat needed.
           'test/write-preflight-resilience.test.ts',
+          // OT-RFC-73 S4a — concurrent write preflights share one probe: who may
+          // share, when a probe in flight stops being joinable, the optional
+          // result cache, the switches. Fake agent; the seam test runs the real
+          // probe, store observer and resolver. Neither needs hardhat.
+          'test/write-preflight-coalescing.test.ts',
+          'test/write-preflight-coalescing-seam.test.ts',
           // A store-busy refusal in the preflight's follow-up reads answers 503
           // at both async admission routes.
           'test/write-preflight-store-busy-route.test.ts',
