@@ -416,11 +416,13 @@ export class AsyncLiftClaimCoordinator {
     const next = this.renewActiveOwnership(candidate);
     this.dependencies.assertJobMatchesStatus(next);
     const committed = await this.dependencies.writeJob(section, next, kind);
-    await this.persistOwnershipState(committed);
     // A finish is the entry into a terminal state; repeating an update of a finalized or failed job is not one.
+    // It is counted as soon as the write commits: the wallet cleanup below can still reject, and the retry
+    // that follows finds the status unchanged and counts nothing.
     if (current.status !== committed.status) {
       asyncAdmissionUsage.recordLiftFinish(committed.status, committed.timestamps.claimedAt, committed.timestamps.finalizedAt ?? committed.timestamps.failedAt ?? this.config.now());
     }
+    await this.persistOwnershipState(committed);
     return committed;
   }
 

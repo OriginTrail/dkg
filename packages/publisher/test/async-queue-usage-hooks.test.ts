@@ -5,13 +5,14 @@
  * Behavior of the queues themselves is pinned by their own suites.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 import {
   createLiftJobFailureMetadata,
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
 } from '../src/index.js';
+import { AsyncLiftWalletPersistence } from '../src/async-lift-wallet-persistence.js';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
 import type { AsyncPromoteQueueConfig } from '../src/async-promote-queue-types.js';
 import {
@@ -306,6 +307,37 @@ describe('publisher queue figures', () => {
     expect(repeated.liftFinalized).toBe(1);
     expect(repeated.liftFailed).toBe(1);
     expect(repeated.liftClaimToFinish.n).toBe(0);
+  });
+
+  it('counts a finish whose terminal write committed although the wallet-lock cleanup then throws', async () => {
+    const publisher = createPublisher();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(vmPublish(1));
+    await publisher.claimNext('wallet-1');
+    now += 1_000;
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    asyncAdmissionUsage.take();
+
+    // The finalized write commits, then releasing the wallet lock is refused by a busy store.
+    now += 2_000;
+    const cleanup = vi.spyOn(AsyncLiftWalletPersistence.prototype, 'delete')
+      .mockRejectedValueOnce(new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'publisher.asyncLift.walletLock.delete'));
+    await expect(publisher.update(jobId, 'finalized', { finalization: { mode: 'local' } })).rejects.toMatchObject({ code: 'STORE_SCHEDULER_BUSY' });
+    cleanup.mockRestore();
+
+    expect(await publisher.getStatus(jobId)).toMatchObject({ status: 'finalized' });
+    const committed = asyncAdmissionUsage.take();
+    expect(committed.liftFinalized).toBe(1);
+    expect(committed.liftClaimToFinish.n).toBe(1);
+    expect(committed.liftClaimToFinish.maxMs).toBe(3_000);
+
+    // The caller retries the same update: it finds the job already finalized, finishes the cleanup
+    // and must not count the finish a second time.
+    now += 5_000;
+    await publisher.update(jobId, 'finalized', { finalization: { mode: 'local' } });
+
+    const retried = asyncAdmissionUsage.take();
+    expect(retried.liftFinalized).toBe(1);
+    expect(retried.liftClaimToFinish.n).toBe(0);
   });
 
   it('counts a reclaim and the stale claim of the worker that lost the job', async () => {
