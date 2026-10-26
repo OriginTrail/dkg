@@ -119,6 +119,16 @@ export {
   type StoreSchedulerBusyErrorLike,
 } from './store-priority-scheduler.js';
 export {
+  StoreSchedulerStats,
+  registerStoreSchedulerStats,
+  takeStoreSchedulerStatsReports,
+  storeOperationFamily,
+  type StoreSchedulerLaneWait,
+  type StoreSchedulerRejectionTotal,
+  type StoreSchedulerStatsReport,
+  type StoreSchedulerStatsSource,
+} from './store-scheduler-stats.js';
+export {
   STORE_OPERATION_TIMEOUT_CODE,
   StoreOperationTimeoutError,
   isStoreOperationTimeoutError,

@@ -150,6 +150,16 @@ Decorators validate that tagged operation-outcome contract rather than the
 error class alone: a rejected nested read does not imply that an enclosing
 replace failed before mutation.
 
+OTel is opt-in, so the scheduler also keeps its rejection and wait figures
+in-process. The `dkg.store.scheduler_rejections_total` counter carries
+`priority`, `reason` and `operation_family` (the first two dot-separated
+segments of the caller's `source`, such as `publisher.asyncLift`; at most 64
+families per process, then `other`). `takeStoreSchedulerStatsReports()` returns,
+for each registered scheduler, the longest queue wait of each lane since the
+previous call (a wait ends when work starts, times out in the queue or is
+cancelled there) and the cumulative rejections by lane, family and reason. Each
+call ends the interval, so only the periodic admission log line should call it.
+
 | Environment variable | Default | Purpose |
 |---|---:|---|
 | `DKG_STORE_MAX_CONCURRENT` | `4` | Maximum external-store operations in flight, capped to available CPUs while preserving the default ACK reserve on single-CPU hosts. |

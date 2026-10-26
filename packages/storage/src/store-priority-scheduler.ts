@@ -25,6 +25,7 @@ import {
   createRateLimitedStoreTimeoutDiagnosticReporter,
   type StoreSchedulerTimeoutDiagnostic,
 } from './store-scheduler-timeout-diagnostics.js';
+import { StoreSchedulerStats, metricOperation, registerStoreSchedulerStats } from './store-scheduler-stats.js';
 
 const defaultStoreWorkPriority = new AsyncLocalStorage<StoreWorkPriority>();
 
@@ -324,12 +325,6 @@ function normalizeNonAckLanePolicy(
   };
 }
 
-function metricOperation(operation: string): string {
-  const trimmed = operation.trim();
-  if (!trimmed) return 'unknown';
-  return trimmed.replace(/[^\w:./-]/g, '_').slice(0, 80) || 'unknown';
-}
-
 export function storeWorkPriorityRank(priority: StoreWorkPriority): number {
   return STORE_WORK_PRIORITIES.indexOf(priority);
 }
@@ -356,6 +351,9 @@ export class StorePriorityScheduler extends ObservableScheduler {
   private readonly nonAckLanePolicy: NonAckLanePolicy;
   private readonly shareSingleOrdinarySlot: boolean;
   private contendedNormalDispatches = 0;
+  // Wait and rejection figures for the periodic line. The lanes come from `queues`:
+  // STORE_WORK_PRIORITIES can still be uninitialised when the singleton below is built.
+  readonly stats = new StoreSchedulerStats(Object.keys(this.queues));
 
   constructor(options?: StorePrioritySchedulerOptions);
   /** @deprecated Use the named options object. Retained for package compatibility. */
@@ -534,6 +532,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
         if (this.removeQueued(entry as QueueEntry<unknown>)) {
           this.cleanupQueuedEntry(entry as QueueEntry<unknown>);
           this.pressureCancelQueued(entry.pressureTicket, 'aborted');
+          this.stats.recordQueueWait(entry.priority, this.now() - entry.queuedAt);
           const reason = signal?.reason;
           reject(reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')));
           this.observeDepths();
@@ -557,7 +556,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
           () => this.getBackpressureSnapshot(),
         );
         this.pressureRejectQueued(entry.pressureTicket, error.reason);
-        this.observeRejection(error);
+        this.observeRejection(error, this.now() - entry.queuedAt);
         reject(error);
         this.observeDepths();
         this.drain();
@@ -696,6 +695,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
       priority: entry.priority,
       operation: metricOperation(entry.operation),
     });
+    this.stats.recordQueueWait(entry.priority, waitMs);
     if (entry.priority !== 'ack') return;
     getMetrics().storageAckQueueWaitMs.record(waitMs, {
       operation: metricOperation(entry.operation),
@@ -716,10 +716,11 @@ export class StorePriorityScheduler extends ObservableScheduler {
     });
   }
 
-  private observeRejection(error: StoreSchedulerBusyError): void {
+  private observeRejection(error: StoreSchedulerBusyError, waitMs = 0): void {
     getMetrics().storeSchedulerRejectionsTotal.add(1, {
       priority: error.priority,
       reason: error.reason,
+      operation_family: this.stats.recordRejection(error.priority, error.operation, error.reason, waitMs),
     });
   }
 
@@ -736,6 +737,7 @@ export const externalStorePriorityScheduler = new StorePriorityScheduler({
     console.warn('[store scheduler] queue wait timeout', diagnostic),
 });
 backpressureRegistry.register(externalStorePriorityScheduler);
+registerStoreSchedulerStats(externalStorePriorityScheduler);
 
 export function getExternalStorePrioritySchedulerSnapshot(): StorePrioritySchedulerSnapshot {
   return externalStorePriorityScheduler.snapshot;
