@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Marketplace Test Console</title>
+  <meta name="description" content="OT-RFC-27 NeuroSymbolic Marketplace devnet test console — buyer and seller perspectives.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <h1>Marketplace test console</h1>
+      <span class="sub">OT-RFC-27 NeuroSymbolic Marketplace · protocol prototype</span>
+      <span class="tag tag-devnet" title="Everything here runs against the local devnet">Devnet</span>
+    </div>
+    <div class="spacer"></div>
+    <div class="tools">
+      <label class="check" title="Show the exact wei value under every main amount (notes and hints: hover or click an amount)">
+        <input type="checkbox" id="toggle-wei"> Exact wei
+      </label>
+      <div class="seg-toggle" role="group" aria-label="Color theme">
+        <button type="button" data-theme-choice="auto" aria-pressed="true">Auto</button>
+        <button type="button" data-theme-choice="light" aria-pressed="false">Light</button>
+        <button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
+      </div>
+    </div>
+  </header>
+
+  <section class="netstrip" id="netstrip" aria-label="Network state" aria-busy="true">
+    <div class="net-cell"><div class="net-label">Network</div><div class="net-value muted">Loading…</div></div>
+  </section>
+
+  <div class="perspective-bar">
+  <nav class="perspective" role="tablist" aria-label="Perspective">
+    <button type="button" role="tab" id="tab-buyer" aria-controls="view" aria-selected="true" data-view="buyer">
+      <span class="dot dot-buyer"></span>Buyer <span class="node-tag">node 2</span>
+    </button>
+    <button type="button" role="tab" id="tab-seller-a" aria-controls="view" aria-selected="false" data-view="seller-a" tabindex="-1">
+      <span class="dot dot-seller-a"></span>Seller A <span class="node-tag">node 1</span>
+    </button>
+    <button type="button" role="tab" id="tab-seller-b" aria-controls="view" aria-selected="false" data-view="seller-b" tabindex="-1">
+      <span class="dot dot-seller-b"></span>Seller B <span class="node-tag">node 3</span>
+    </button>
+  </nav>
+  <div class="devtools">
+    <button type="button" class="btn btn-sm btn-devnet" id="tt-open" data-action="open-timetravel" aria-haspopup="dialog" aria-controls="tt-dialog" disabled>Devnet time travel…</button>
+  </div>
+  </div>
+
+  <main id="view" role="tabpanel" aria-labelledby="tab-buyer" tabindex="-1">
+    <div class="state state-empty">Loading the console…</div>
+  </main>
+
+  <footer>
+    Devnet test console for the OT-RFC-27 marketplace prototype. Node bearer tokens stay on the console server;
+    amounts are exact bigint wei (click any amount, or tick “Exact wei”, to see it). Time travel and TRAC top-ups
+    only exist on the local devnet.
+  </footer>
+
+  <dialog id="tt-dialog" class="tt-dialog" aria-labelledby="tt-title">
+    <div class="tt-head">
+      <h2 id="tt-title">Devnet time travel</h2>
+      <button type="button" class="btn btn-sm" data-action="tt-cancel" id="tt-cancel">Cancel</button>
+    </div>
+    <div id="tt-body"></div>
+  </dialog>
+
+  <div class="toast-region" id="toasts" aria-live="polite"></div>
+</body>
+</html>
