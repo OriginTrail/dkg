@@ -210,23 +210,27 @@ export const peakBacklog = ({ requests, completions, from, to }) =>
 
 /**
  * Plan 8.3 trigger for the bounded claimNext candidate read (P8c): claimNext P95 over the last 5 min above 2x the first
- * 5 min, or an active backlog above 5,000. claimNext = [{t (run-relative start ms), ms}]. The ratio needs a run of at
- * least 10 min and 20 samples in each end window; the backlog leg needs no window. backlogMax is the largest active
- * backlog of the WHOLE run (warmup, measure and cooldown: p8cOfRun), not the measurement window's, and an exact
- * maximum, not a sampled one: a queue that grows past 5,000 only in the cooldown, or only between two samples, has still
- * outgrown the read.
+ * 5 min, or an active backlog above 5,000. claimNext = [{t (run-relative start ms), ms}]. The windows are anchored to
+ * the WORKLOAD horizon (horizonMs = warmup + measure + cooldown, where the producers stop), never to the moment the
+ * run ended: the shutdown after the horizon (draining the producers, stopping the worker and the idle publisher) takes
+ * as long as it takes, and a claim that starts after the horizon is the worker winding down, not workload, so it is
+ * dropped and the last window is the 5 min up to the horizon. The ratio needs a horizon of at least 10 min and 20
+ * samples in each end window; the backlog leg needs no window. backlogMax is the largest active backlog of the WHOLE
+ * workload (warmup, measure and cooldown: p8cOfRun), not the measurement window's, and an exact maximum, not a sampled
+ * one: a queue that grows past 5,000 only in the cooldown, or only between two samples, has still outgrown the read.
  */
-export function p8cTrigger({ claimNext, backlogMax, runMs }) {
+export function p8cTrigger({ claimNext, backlogMax, horizonMs }) {
   const backlogTrip = backlogMax > 5000;
-  const first = claimNext
+  const inWorkload = claimNext.filter((c) => c.t < horizonMs);
+  const first = inWorkload
     .filter((c) => c.t < FIVE_MIN)
     .map((c) => c.ms)
     .sort(num);
-  const last = claimNext
-    .filter((c) => c.t >= runMs - FIVE_MIN)
+  const last = inWorkload
+    .filter((c) => c.t >= horizonMs - FIVE_MIN)
     .map((c) => c.ms)
     .sort(num);
-  if (runMs < 600_000 || first.length < 20 || last.length < 20)
+  if (!(horizonMs >= 600_000) || first.length < 20 || last.length < 20)
     return { evaluable: false, ratio: null, backlogTrip, trigger: backlogTrip };
   const ratio = percentile(last, 0.95) / percentile(first, 0.95);
   return { evaluable: true, ratio: r2(ratio), backlogTrip, trigger: ratio > 2 || backlogTrip };
@@ -234,16 +238,18 @@ export function p8cTrigger({ claimNext, backlogMax, runMs }) {
 
 /**
  * The backlog figures of one run. `backlog` = the measurement window's statistics, sampled every second (what the
- * summary reports and the verdict reads), unchanged. `p8c` = the P8c trigger judged on the largest active backlog over
- * the whole run, warmup through cooldown, taken exactly from the admission and completion times (`backlogMax`,
- * recorded in it; the end of the cooldown included, peakDepth for how ties at one instant are ordered): the 5,000-job
- * leg is neither a measurement-window statistic nor a sampled one.
+ * summary reports and the verdict reads), unchanged. `p8c` = the P8c trigger judged on the workload horizon
+ * (warmup + measure + cooldown): the largest active backlog over it, taken exactly from the admission and completion
+ * times (`backlogMax`, recorded in it; the end of the cooldown included, peakDepth for how ties at one instant are
+ * ordered): the 5,000-job leg is neither a measurement-window statistic nor a sampled one; and the claimNext windows up
+ * to it. How long the shutdown after the horizon took is not an input: it cannot change the result.
  */
-export function p8cOfRun({ requests, completions, claimNext, windows, runMs }) {
+export function p8cOfRun({ requests, completions, claimNext, windows }) {
   const { warmupMs, measureMs, cooldownMs } = windows;
+  const horizonMs = warmupMs + measureMs + cooldownMs;
   const backlog = shareBacklog({ requests, completions, from: warmupMs, to: warmupMs + measureMs });
-  const backlogMax = peakBacklog({ requests, completions, from: 0, to: warmupMs + measureMs + cooldownMs });
-  return { backlog, p8c: { ...p8cTrigger({ claimNext, backlogMax, runMs }), backlogMax } };
+  const backlogMax = peakBacklog({ requests, completions, from: 0, to: horizonMs });
+  return { backlog, p8c: { ...p8cTrigger({ claimNext, backlogMax, horizonMs }), backlogMax } };
 }
 
 // ---------------------------------------------------------------- the knee and the reproduction rung
@@ -401,19 +407,27 @@ export function repeatsPerCell(pairs, missing = []) {
 }
 
 /**
- * metric ratio b/a per valid pair against limit (and an optional lower bound). Pass: >= PAIRED_MIN valid paired repeats
- * in every cell and every pair inside the bounds. Incomplete (not a fail): fewer valid repeats in some cell, a cell
- * with none included (and named in the reason); `missing` = pairRuns' runs that only one arm has, which put their cell
- * in the comparison (repeatsPerCell). With checkKnee, `belowKnee` lists the pairs whose base run did not reach the
- * knee: the plan calibrates the rung once on the base and does not re-judge each repeat, so this is reported (a halving
- * test against a healthy base is weak), not gating.
+ * The ratio b/a of one pair's P95s (a = base or first run, b = candidate or second run), with the zero cases decided
+ * once for every rule and for the A/A margin: 0 / 0 is 1 (two identical runs, no deviation), a candidate of 0 over a
+ * nonzero base is 0 (a real, extreme improvement), and a nonzero candidate over a base of 0 is Infinity (unbounded: no
+ * ratio limit holds, and an A/A pair like that sets no margin). Never NaN.
+ */
+export const p95Ratio = (a, b) => (a === 0 ? (b === 0 ? 1 : Infinity) : b / a);
+
+/**
+ * metric ratio b/a (p95Ratio) per valid pair against limit (and an optional lower bound). Pass: >= PAIRED_MIN valid
+ * paired repeats in every cell and every pair inside the bounds. Incomplete (not a fail): fewer valid repeats in some
+ * cell, a cell with none included (and named in the reason); `missing` = pairRuns' runs that only one arm has, which
+ * put their cell in the comparison (repeatsPerCell). With checkKnee, `belowKnee` lists the pairs whose base run did not
+ * reach the knee: the plan calibrates the rung once on the base and does not re-judge each repeat, so this is reported
+ * (a halving test against a healthy base is weak), not gating.
  */
 export function ratioRule({ pairs, missing = [], metric = 'p95Ms', limit, lower, label, checkKnee = false }) {
   const valid = pairs.filter((p) => p.valid);
   const perRepeat = valid.map((p) => {
     const a = p.a[metric];
     const b = p.b[metric];
-    const ratio = a === 0 ? (b === 0 ? 1 : Infinity) : b / a;
+    const ratio = p95Ratio(a, b);
     return { key: p.key, a, b, ratio: r4(ratio), ok: ratio <= limit && (lower === undefined || ratio >= lower) };
   });
   const { cells, have } = repeatsPerCell(pairs, missing);
@@ -485,26 +499,57 @@ export function flat(
 }
 
 /**
+ * The relative deviation of an A/A pair's P95s: |b - a| / min(a, b), the same as the ratio's distance from 1 in the
+ * direction away from it. Identical P95s deviate by 0, zeros included (0 vs 0 is the ratio 1 of p95Ratio); a zero
+ * against a nonzero P95 deviates without bound (Infinity), never NaN.
+ */
+const p95Deviation = (a, b) => (a === b ? 0 : Math.abs(b - a) / Math.min(a, b));
+
+/**
  * A/A: pairs of two same-build runs (a = first, b = second); the margin is the worst deviation, never below the 10 %
  * floor. It is rounded UP to 4 decimals, never to nearest: equivalent() compares the unrounded ratios, so a margin a
- * hair under the worst deviation would fail the very A/A pairs that set it.
+ * hair under the worst deviation would fail the very A/A pairs that set it. A pair of two zero P95s deviates by 0 (the
+ * floor holds); a pair with one zero P95 deviates without bound, so the margin is Infinity: no usable margin
+ * (aaDeclaration reports that as incomplete, equivalent() refuses it).
  */
 export function noiseMargin(aaPairs) {
   const valid = aaPairs.filter((p) => p.valid);
-  const worst = Math.max(
-    NOISE_FLOOR,
-    ...valid.map((p) => Math.abs(p.b.p95Ms - p.a.p95Ms) / Math.min(p.a.p95Ms, p.b.p95Ms)),
-  );
+  const worst = Math.max(NOISE_FLOOR, ...valid.map((p) => p95Deviation(p.a.p95Ms, p.b.p95Ms)));
   if (!Number.isFinite(worst)) return worst;
   // also covers equivalent()'s own comparison, whose floats can sit an ulp off the deviation computed above
   const covers = (m) =>
     valid.every((p) => {
-      const ratio = p.b.p95Ms / p.a.p95Ms;
+      const ratio = p95Ratio(p.a.p95Ms, p.b.p95Ms);
       return ratio <= 1 + m && ratio >= 1 / (1 + m);
     });
   let n = Math.round(worst * 1e4);
   while (n / 1e4 < worst || !covers(n / 1e4)) n++;
   return n / 1e4;
+}
+
+/**
+ * The A/A declaration of two same-build arms' pairs: the noise margin, and whether it may be declared. Complete only
+ * with PAIRED_MIN valid paired repeats in every cell (repeatsPerCell) AND a finite margin; either lack is incomplete
+ * with the reason stated, never a success. margin is null whenever it is not finite (an unbounded A/A deviation: a zero
+ * P95 against a nonzero one), so it cannot be mistaken for a number to declare.
+ */
+export function aaDeclaration(pairs, missing = []) {
+  const { have, cells } = repeatsPerCell(pairs, missing);
+  const margin = noiseMargin(pairs);
+  const reasons = [];
+  if (have < PAIRED_MIN)
+    reasons.push(`needs ${PAIRED_MIN} valid paired repeats in every cell, the thinnest has ${have}`);
+  if (!Number.isFinite(margin))
+    reasons.push(
+      'the noise margin is unbounded: an A/A pair has a P95 of 0 against a nonzero P95, so no margin can be declared',
+    );
+  return {
+    margin: Number.isFinite(margin) ? margin : null,
+    validPairs: have,
+    cells,
+    status: reasons.length ? 'incomplete' : 'complete',
+    ...(reasons.length ? { reason: reasons.join('; ') } : {}),
+  };
 }
 /**
  * AC2 path-off equivalence: every b/a inside [1/(1+m), 1+m]. The margin is required so it is declared before the A/B.

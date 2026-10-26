@@ -12,6 +12,7 @@ import { DATA_OPS_PER_SHARE } from '../../repro/async-queue-contention/fixture.m
 import {
   CENSOR_MS,
   RUNGS,
+  aaDeclaration,
   admissionSummary,
   comparability,
   depthSeries,
@@ -31,6 +32,7 @@ import {
   p8cOfRun,
   p8cTrigger,
   pairKey,
+  p95Ratio,
   pairRuns,
   percentile,
   pickReproductionRung,
@@ -572,6 +574,114 @@ test('noiseMargin is the worst A/A deviation with a 10 % floor; equivalent needs
   assert.throws(() => equivalent(ab), /margin/);
 });
 
+test('zero P95s: 0 vs 0 is a ratio of 1, a zero against a nonzero P95 is unbounded, never NaN', () => {
+  const aa = (pairs) => pairs.map(([a, b], i) => ({ key: `r${i}`, a: rec(a), b: rec(b), valid: true }));
+  // the one ratio every rule and the A/A margin read
+  assert.equal(p95Ratio(0, 0), 1);
+  assert.equal(p95Ratio(0, 5), Infinity, 'a nonzero candidate over a base of 0');
+  assert.equal(p95Ratio(5, 0), 0, 'a candidate of 0 over a nonzero base');
+  assert.equal(p95Ratio(1000, 1250), 1.25);
+
+  // three identical zero pairs: no deviation, the 10 % floor is the margin, and the pairs pass it
+  const zeros = aa([
+    [0, 0],
+    [0, 0],
+    [0, 0],
+  ]);
+  assert.equal(noiseMargin(zeros), 0.1);
+  const zeroRun = pairsOf([0, 0, 0], [0, 0, 0]);
+  const same = equivalent(zeroRun, noiseMargin(zeros));
+  assert.equal(same.status, 'pass');
+  assert.deepEqual(
+    same.perRepeat.map((r) => r.ratio),
+    [1, 1, 1],
+  );
+  // a zero pair among healthy ones does not move the margin either
+  assert.equal(
+    noiseMargin(
+      aa([
+        [0, 0],
+        [1000, 1220],
+        [1000, 980],
+      ]),
+    ),
+    0.22,
+  );
+
+  // a zero against a nonzero P95 deviates without bound, in either order: no margin, not NaN
+  for (const pair of [
+    [0, 5],
+    [5, 0],
+  ]) {
+    const margin = noiseMargin(aa([pair, [1000, 1000], [1000, 1000]]));
+    assert.equal(margin, Infinity, `${pair}: an unbounded margin`);
+    assert.throws(() => equivalent(pairsOf([0, 0, 0], [0, 0, 0]), margin), /margin/, 'it cannot be declared');
+  }
+
+  // ratioRule: the zero cases, once for halve, flat and equal
+  const bothZero = pairsOf([0, 0, 0], [0, 0, 0]);
+  assert.equal(halve(bothZero).status, 'fail', '0 vs 0 is a ratio of 1, above 0.5');
+  assert.equal(flat(onHistories(bothZero)).status, 'pass', '0 vs 0 is a ratio of 1, inside 1.25');
+  const zeroBase = pairsOf([0, 0, 0], [5, 5, 5]);
+  for (const result of [halve(zeroBase), flat(onHistories(zeroBase)), equivalent(zeroBase, 0.5)]) {
+    assert.equal(result.status, 'fail', `${result.label}: a nonzero candidate over a base of 0 is unbounded`);
+    assert.ok(result.perRepeat.every((r) => r.ratio === Infinity && !r.ok));
+  }
+  const zeroCandidate = pairsOf([5, 5, 5], [0, 0, 0]);
+  assert.equal(halve(zeroCandidate).status, 'pass', 'a candidate P95 of 0 over a nonzero base is a ratio of 0');
+  assert.ok(halve(zeroCandidate).perRepeat.every((r) => r.ratio === 0));
+  assert.equal(flat(onHistories(zeroCandidate)).status, 'pass');
+  assert.equal(equivalent(zeroCandidate, 0.5).status, 'fail', 'a ratio of 0 is under 1 / (1 + m)');
+});
+
+test('aaDeclaration: complete only with 3 valid repeats per cell and a finite margin', () => {
+  const aa = (pairs) => pairs.map(([a, b], i) => ({ key: `cell|r${i}`, a: rec(a), b: rec(b), valid: true }));
+  const zeros = aaDeclaration(
+    aa([
+      [0, 0],
+      [0, 0],
+      [0, 0],
+    ]),
+  );
+  assert.deepEqual(zeros, { margin: 0.1, validPairs: 3, cells: { cell: 3 }, status: 'complete' });
+
+  for (const pair of [
+    [0, 5],
+    [5, 0],
+  ]) {
+    const unbounded = aaDeclaration(
+      aa([
+        [1000, 1040],
+        [1000, 1000],
+        pair,
+      ]),
+    );
+    assert.equal(unbounded.status, 'incomplete', `${pair}: no success`);
+    assert.equal(unbounded.margin, null, 'no number to declare');
+    assert.equal(unbounded.validPairs, 3, 'the repeat count alone is complete');
+    assert.match(unbounded.reason, /noise margin is unbounded.*P95 of 0 against a nonzero P95/);
+  }
+
+  // too few repeats stays incomplete, with its own reason, and both reasons are stated together
+  const two = aaDeclaration(
+    aa([
+      [1000, 1040],
+      [1000, 1000],
+    ]),
+  );
+  assert.equal(two.status, 'incomplete');
+  assert.equal(two.margin, 0.1);
+  assert.match(two.reason, /needs 3 valid paired repeats in every cell, the thinnest has 2/);
+  assert.doesNotMatch(two.reason, /unbounded/);
+  const both = aaDeclaration(
+    aa([
+      [0, 5],
+      [1000, 1000],
+    ]),
+  );
+  assert.match(both.reason, /thinnest has 2.*unbounded/);
+});
+
 test('guards report the candidate failure fraction and completions without gating', () => {
   const pairs = pairsOf([10_000, 10_000], [4000, 4000]);
   pairs[0].b.failureFrac = 0.03;
@@ -660,29 +770,29 @@ test('shareBacklog counts an indeterminate admission that reconciliation found p
   groundTruth(many, new Map([['x', [{ jobId: 'sx' }]]]));
   const backlog = shareBacklog({ requests: many, completions: [], from: 0, to: 1000 });
   assert.equal(backlog.max, 5001);
-  assert.equal(p8cTrigger({ claimNext: [], backlogMax: backlog.max, runMs: 1000 }).backlogTrip, true);
+  assert.equal(p8cTrigger({ claimNext: [], backlogMax: backlog.max, horizonMs: 1000 }).backlogTrip, true);
 });
 
 test('p8cTrigger: claimNext P95 doubling between the first and last 5 minutes, or a 5,000-job backlog', () => {
-  const runMs = 900_000;
+  const horizonMs = 900_000;
   const series = (firstMs, lastMs) => [
     ...Array.from({ length: 30 }, (_, i) => ({ t: i * 1000, ms: firstMs })),
-    ...Array.from({ length: 30 }, (_, i) => ({ t: runMs - 300_000 + i * 1000, ms: lastMs })),
+    ...Array.from({ length: 30 }, (_, i) => ({ t: horizonMs - 300_000 + i * 1000, ms: lastMs })),
   ];
-  assert.deepEqual(p8cTrigger({ claimNext: series(100, 250), backlogMax: 10, runMs }), {
+  assert.deepEqual(p8cTrigger({ claimNext: series(100, 250), backlogMax: 10, horizonMs }), {
     evaluable: true,
     ratio: 2.5,
     backlogTrip: false,
     trigger: true,
   });
-  assert.equal(p8cTrigger({ claimNext: series(100, 190), backlogMax: 10, runMs }).trigger, false);
-  assert.equal(p8cTrigger({ claimNext: series(100, 190), backlogMax: 5000, runMs }).trigger, false);
-  assert.equal(p8cTrigger({ claimNext: series(100, 190), backlogMax: 5001, runMs }).trigger, true);
-  const short = p8cTrigger({ claimNext: series(100, 250), backlogMax: 10, runMs: 180_000 });
+  assert.equal(p8cTrigger({ claimNext: series(100, 190), backlogMax: 10, horizonMs }).trigger, false);
+  assert.equal(p8cTrigger({ claimNext: series(100, 190), backlogMax: 5000, horizonMs }).trigger, false);
+  assert.equal(p8cTrigger({ claimNext: series(100, 190), backlogMax: 5001, horizonMs }).trigger, true);
+  const short = p8cTrigger({ claimNext: series(100, 250), backlogMax: 10, horizonMs: 180_000 });
   assert.equal(short.evaluable, false);
   assert.equal(short.trigger, false);
   assert.equal(
-    p8cTrigger({ claimNext: series(100, 250).slice(0, 25), backlogMax: 0, runMs }).evaluable,
+    p8cTrigger({ claimNext: series(100, 250).slice(0, 25), backlogMax: 0, horizonMs }).evaluable,
     false,
     'fewer than 20 samples in the last window',
   );
@@ -690,7 +800,6 @@ test('p8cTrigger: claimNext P95 doubling between the first and last 5 minutes, o
 
 test('p8cOfRun judges the 5,000-job backlog leg on the whole run, not on the measurement window', () => {
   const windows = { warmupMs: 30_000, measureMs: 180_000, cooldownMs: 10_000 };
-  const runMs = 220_000;
   const admitted = (n, ended, prefix) =>
     Array.from({ length: n }, (_, i) => ({
       key: `${prefix}${i}`,
@@ -701,14 +810,14 @@ test('p8cOfRun judges the 5,000-job backlog leg on the whole run, not on the mea
       ended,
     }));
   const claimNext = []; // no claimNext sample: the ratio leg cannot trip
-  const judged = (requests, completions = []) => p8cOfRun({ requests, completions, claimNext, windows, runMs });
+  const judged = (requests, completions = []) => p8cOfRun({ requests, completions, claimNext, windows });
 
   // 4,990 open jobs through the measurement window, 5,010 by the end of the cooldown
   const growing = [...admitted(4990, 40_000, 'm'), ...admitted(20, 215_000, 'c')];
   const run = judged(growing);
   assert.equal(run.backlog.max, 4990, 'the measurement window statistics are the window');
   assert.equal(
-    p8cTrigger({ claimNext, backlogMax: run.backlog.max, runMs }).backlogTrip,
+    p8cTrigger({ claimNext, backlogMax: run.backlog.max, horizonMs: 220_000 }).backlogTrip,
     false,
     'the window maximum alone does not trip: that is what was judged before',
   );
@@ -735,9 +844,8 @@ test('p8cOfRun judges the 5,000-job backlog leg on the whole run, not on the mea
 
 test('p8cOfRun reads the exact whole-run backlog peak, not the one-second samples of it', () => {
   const windows = { warmupMs: 30_000, measureMs: 180_000, cooldownMs: 10_000 };
-  const runMs = 220_000;
   const horizon = windows.warmupMs + windows.measureMs + windows.cooldownMs;
-  assert.equal(horizon, runMs);
+  assert.equal(horizon, 220_000);
   const admittedAt = (n, ended, prefix) =>
     Array.from({ length: n }, (_, i) => ({
       key: `${prefix}${i}`,
@@ -747,7 +855,7 @@ test('p8cOfRun reads the exact whole-run backlog peak, not the one-second sample
       jobId: `${prefix}${i}`,
       ended,
     }));
-  const judged = (requests, completions = []) => p8cOfRun({ requests, completions, claimNext: [], windows, runMs });
+  const judged = (requests, completions = []) => p8cOfRun({ requests, completions, claimNext: [], windows });
   const done = (prefix, t) => ({ jobId: prefix, t });
 
   // 5,000 jobs open from the start, then one admitted at 100 ms and completed at 900 ms: the backlog reaches 5,001 for
@@ -792,6 +900,48 @@ test('p8cOfRun reads the exact whole-run backlog peak, not the one-second sample
   assert.equal(judged([...admittedAt(5000, 0, 'open'), ...admittedAt(1, horizon + 1, 'after')]).p8c.backlogMax, 5000);
   assert.equal(judged(admittedAt(3, 0, 'x')).p8c.backlogMax, 3);
   assert.equal(judged([]).p8c.backlogMax, 0);
+});
+
+test('P8c claimNext windows end at the workload horizon: a slow shutdown cannot change the result', () => {
+  const windows = { warmupMs: 60_000, measureMs: 780_000, cooldownMs: 60_000 };
+  const horizon = windows.warmupMs + windows.measureMs + windows.cooldownMs;
+  assert.equal(horizon, 900_000);
+  // 100 ms claims in the first 5 min, 250 ms ones in the last 5 min up to the horizon: a ratio of 2.5
+  const workload = [
+    ...Array.from({ length: 30 }, (_, i) => ({ t: i * 1000, ms: 100 })),
+    ...Array.from({ length: 30 }, (_, i) => ({ t: horizon - 300_000 + i * 1000, ms: 250 })),
+  ];
+  const judged = (claimNext, extra = {}) =>
+    p8cOfRun({ requests: [], completions: [], claimNext, windows, ...extra }).p8c;
+  const base = judged(workload);
+  assert.deepEqual(base, { evaluable: true, ratio: 2.5, backlogTrip: false, trigger: true, backlogMax: 0 });
+
+  // a 50 s drain after the horizon: the run ends at 950 s (the old input), and the winding-down worker keeps polling an
+  // empty queue, fast. None of that is workload: the same claims in the workload give the same verdict
+  const windDown = Array.from({ length: 50 }, (_, i) => ({ t: horizon + i * 1000, ms: 5 }));
+  assert.deepEqual(judged([...workload, ...windDown], { runMs: 950_000 }), base);
+  assert.deepEqual(judged([...workload, ...windDown]), base);
+  // slow claims in the shutdown cannot trip a run that did not trip either ...
+  const calm = [
+    ...workload.slice(0, 30),
+    ...workload.slice(30).map((c) => ({ ...c, ms: 150 })),
+    ...Array.from({ length: 50 }, (_, i) => ({ t: horizon + i * 1000, ms: 5000 })),
+  ];
+  assert.deepEqual(judged(calm, { runMs: 950_000 }), {
+    evaluable: true,
+    ratio: 1.5,
+    backlogTrip: false,
+    trigger: false,
+    backlogMax: 0,
+  });
+  // ... and the shutdown cannot make a run evaluable that has no claim in its last 5 min of workload
+  const noLast = judged([...workload.slice(0, 30), ...windDown]);
+  assert.deepEqual([noLast.evaluable, noLast.trigger], [false, false]);
+
+  // the horizon is half-open, like the arrivals: a claim started 1 ms before it is workload, one at it is shutdown
+  const slowAt = (t) => [...workload, ...Array.from({ length: 4 }, () => ({ t, ms: 100_000 }))];
+  assert.equal(p8cTrigger({ claimNext: slowAt(horizon - 1), backlogMax: 0, horizonMs: horizon }).ratio, 1000);
+  assert.equal(p8cTrigger({ claimNext: slowAt(horizon), backlogMax: 0, horizonMs: horizon }).ratio, 2.5);
 });
 
 test('validity: arrivals, drain, invariants, driver headroom, quiet idle publisher', () => {
@@ -1373,6 +1523,31 @@ test('verdict aa prints the noise margin, equal needs it declared, ledger lists 
   assert.equal(ledger.code, 0);
   assert.equal(ledger.out.trim().split('\n').length, 2 + 3 + 2);
   assert.match(ledger.out, /aa-3-1 \| 0\/default\/L3\/r1 \| INVALID: drained, ok/);
+});
+
+test('verdict aa exits 0 only with a finite margin: 0 vs 0 is fine, a zero against a nonzero is incomplete', () => {
+  // identical zero P95s: the margin is the floor, and the equal rule accepts the same pairs with it
+  const z1 = runs('aa-z1', [0, 0, 0]);
+  const z2 = runs('aa-z2', [0, 0, 0]);
+  const zeros = cli('verdict', '--rule', 'aa', '--a', z1, '--b', z2);
+  assert.equal(zeros.code, 0, zeros.err);
+  assert.equal(JSON.parse(zeros.out).margin, 0.1);
+  assert.equal(JSON.parse(zeros.out).status, 'complete');
+  assert.equal(cli('verdict', '--rule', 'equal', '--a', z1, '--b', z2, '--margin', '0.1').code, 0);
+
+  // a zero against a nonzero P95 in one repeat: three valid repeats, but no margin to declare
+  for (const [name, first, second] of [
+    ['zero-then-some', [1000, 1000, 0], [1000, 1000, 500]],
+    ['some-then-zero', [1000, 1000, 500], [1000, 1000, 0]],
+  ]) {
+    const r = cli('verdict', '--rule', 'aa', '--a', runs(`${name}-1`, first), '--b', runs(`${name}-2`, second));
+    assert.equal(r.code, 2, `${name}: ${r.out}`);
+    const out = JSON.parse(r.out);
+    assert.equal(out.margin, null);
+    assert.equal(out.status, 'incomplete');
+    assert.equal(out.validPairs, 3);
+    assert.match(out.reason, /noise margin is unbounded/);
+  }
 });
 
 test('verdict warns about differing script hashes and dirty trees, and refuses bad usage', () => {
