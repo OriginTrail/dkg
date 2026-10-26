@@ -25,15 +25,17 @@ async function request(url: string | undefined, method = 'GET', body?: unknown) 
   await engine.handleSimRequest(req, res as unknown as ServerResponse);
   return { code: res.code, body: res.body ? JSON.parse(res.body) : undefined };
 }
-async function subscribe() {
-  streamRequest = Object.assign(new EventEmitter(), { url: '/sim/events', method: 'GET' }) as IncomingMessage;
+async function subscribe(runId?: string) {
+  streamRequest = Object.assign(new EventEmitter(), { url: runId ? `/sim/events?runId=${runId}` : '/sim/events', method: 'GET' }) as IncomingMessage;
   streamRequests.push(streamRequest);
   stream = response();
   await engine.handleSimRequest(streamRequest, stream as unknown as ServerResponse);
 }
-async function start(op: string, options: Record<string, unknown> = {}) {
-  expect(await request('/sim/start', 'POST', { name: 'test', opCount: 1, opsPerSec: 100, concurrency: 1, kasPerPublish: 2, contextGraph: 'owner/team', enabledOps: [op], ...options })).toEqual({ code: 200, body: { started: true, name: 'test' } });
+async function start(op: string, options: Record<string, unknown> = {}, runId?: string) {
+  const result = await request(runId ? `/sim/start?runId=${runId}` : '/sim/start', 'POST', { name: 'test', opCount: 1, opsPerSec: 100, concurrency: 1, kasPerPublish: 2, contextGraph: 'owner/team', enabledOps: [op], ...options });
+  expect(result).toMatchObject({ code: 200, body: { started: true, name: 'test', runId: expect.any(String) } });
   await vi.advanceTimersByTimeAsync(501);
+  return result.body.runId as string;
 }
 async function finish(ms = 1000) { await vi.advanceTimersByTimeAsync(ms); return events.filter(e => e.type === 'op'); }
 function operations() { return writes.filter(w => !w.url.pathname.startsWith('/api/context-graph') && w.url.pathname !== '/api/status'); }
@@ -243,7 +245,7 @@ describe('simulation scheduling and event delivery', () => {
     expect(disconnected.write).toHaveBeenCalledTimes(writesAtDisconnect);
     expect((await request('/sim/status')).body.running).toBe(false);
     expect(events.filter(e => e.type === 'done')).toHaveLength(1);
-    expect(events.find(e => e.type === 'op')).toMatchObject({ success: false, detail: 'aborted (simulation stopped)' });
+    expect(events.at(-1)).toMatchObject({ type: 'done', completed: 0 }); // Late aborted operations cannot change terminal totals.
     expect((await request('/sim/stop', 'POST')).body.stopped).toBe(false);
   });
   it('drops failed/disconnected SSE clients and bounds error logging', async () => {
@@ -297,5 +299,127 @@ describe('executor rejection recovery', () => {
     expect(failed.every(event => !event.success && event.detail === 'Unexpected executor error')).toBe(true);
     expect(events.at(-1)).toMatchObject({ type: 'done', completed: 2, errors: 2 });
     expect((await request('/sim/status')).body.running).toBe(false);
+  });
+});
+
+
+describe('run-scoped recovery and cancellation', () => {
+  const messages = (res: ReturnType<typeof response>) => res.write.mock.calls
+    .filter(([chunk]) => chunk.startsWith('data: ')).map(([chunk]) => JSON.parse(chunk.slice(6)));
+  const config = { opCount: 1, opsPerSec: 1, enabledOps: ['query'] };
+
+  it('replays the original terminal result after another run starts without accepting its events', async () => {
+    const first = await start('query', { opCount: 2, opsPerSec: 1 }, 'first');
+    streamRequest.emit('close');
+    await finish(2000);
+    const result = (await request(`/sim/status?runId=${first}`)).body;
+    expect(result).toMatchObject({ runId: first, running: false, completed: 2, errors: 0 });
+    await start('query', { opCount: 10, opsPerSec: 1 }, 'second');
+    await subscribe(first);
+    const recovered = stream;
+    expect(messages(recovered)).toEqual([expect.objectContaining({ type: 'done', runId: first, completed: 2, errors: 0, elapsedMs: result.elapsedMs })]);
+    await finish(2000);
+    expect(messages(recovered)).toHaveLength(1);
+    expect((await request(`/sim/status?runId=${first}`)).body).toEqual(result);
+    expect((await request('/sim/status?runId=second')).body).toMatchObject({ running: true, completed: 3 });
+  });
+
+  it('sends running snapshots and operations only to subscribers of that run', async () => {
+    const id = await start('query', { opCount: 3, opsPerSec: 1 }, 'scoped');
+    await subscribe(id);
+    const scoped = stream;
+    expect(messages(scoped)[0]).toMatchObject({ type: 'status', runId: id, running: true, completed: 1 });
+    await finish(2000);
+    expect(messages(scoped).filter(event => event.type === 'op')).toHaveLength(2);
+    expect(messages(scoped).at(-1)).toMatchObject({ type: 'done', completed: 3, runId: id });
+    const count = scoped.write.mock.calls.length;
+    await start('query', {}, 'later'); await finish();
+    expect(scoped.write).toHaveBeenCalledTimes(count);
+  });
+
+  it('cancels its own pending start without cancelling an active different run', async () => {
+    await start('query', { opCount: 10, opsPerSec: 1 }, 'active');
+    expect((await request('/sim/stop?runId=not-accepted', 'POST')).body).toEqual({ stopped: true, runId: 'not-accepted' });
+    expect((await request('/sim/status?runId=active')).body.running).toBe(true);
+    await request('/sim/stop?runId=active', 'POST');
+    expect((await request('/sim/start?runId=not-accepted', 'POST', config)).code).toBe(409);
+    expect((await request('/sim/status')).body).toMatchObject({ runId: 'active', running: false });
+  });
+
+  it('honors cancellation received while the start body is still being read', async () => {
+    const req = Object.assign(new EventEmitter(), { url: '/sim/start?runId=delayed-body', method: 'POST' }) as IncomingMessage;
+    const res = response();
+    const starting = engine.handleSimRequest(req, res as unknown as ServerResponse);
+    await request('/sim/stop?runId=delayed-body', 'POST');
+    req.emit('data', Buffer.from(JSON.stringify(config))); req.emit('end'); await starting;
+    expect(res.code).toBe(409);
+    await finish();
+    expect(operations()).toEqual([]);
+  });
+
+  it('serializes concurrent start bodies before accepting a run', async () => {
+    const delayed = Object.assign(new EventEmitter(), { url: '/sim/start?runId=loser', method: 'POST' }) as IncomingMessage;
+    const res = response(); const pending = engine.handleSimRequest(delayed, res as unknown as ServerResponse);
+    await start('query', { opCount: 10, opsPerSec: 1 }, 'winner');
+    delayed.emit('data', Buffer.from(JSON.stringify(config))); delayed.emit('end'); await pending;
+    expect(res.code).toBe(409);
+    expect((await request('/sim/status')).body.runId).toBe('winner');
+  });
+
+  it('keeps terminal totals immutable when an aborted operation resolves after the next start', async () => {
+    const fallback = fetchMock.getMockImplementation()!;
+    let complete!: (response: Response) => void;
+    fetchMock.mockImplementationOnce(fallback);
+    fetchMock.mockImplementation((url, init) => url.endsWith('/query')
+      ? new Promise<Response>(resolve => { complete = resolve; }) : fallback(url, init));
+    await start('query', {}, 'old');
+    const stopped = (await request('/sim/stop?runId=old', 'POST')).body;
+    expect(stopped).toMatchObject({ stopped: true, runId: 'old', snapshot: { type: 'done', completed: 0 } });
+    fetchMock.mockImplementation(fallback);
+    await start('query', { opCount: 20, opsPerSec: 1 }, 'new');
+    complete(Response.json({ result: { bindings: [] } })); await finish(1);
+    expect((await request('/sim/status')).body).toMatchObject({ runId: 'new', running: true, completed: 1, errors: 0 });
+    expect((await request('/sim/stop?runId=old', 'POST')).body).toEqual(stopped);
+    expect((await request('/sim/status?runId=new')).body.running).toBe(true);
+    expect((await request('/sim/status?runId=old')).body.completed).toBe(0);
+  });
+
+  it('does not reuse a completed run ID', async () => {
+    await start('query', {}, 'once'); await finish();
+    expect((await request('/sim/start?runId=once', 'POST', config)).code).toBe(409);
+    expect((await request('/sim/status?runId=once')).body).toMatchObject({ running: false, completed: 1 });
+  });
+
+  it('retains a bounded history and explicitly reports missing results', async () => {
+    for (let i = 0; i < 101; i++) {
+      const id = `history-${i}`;
+      expect((await request(`/sim/start?runId=${id}`, 'POST', config)).code).toBe(200);
+      await request(`/sim/stop?runId=${id}`, 'POST');
+    }
+    expect((await request('/sim/status?runId=history-0')).code).toBe(404);
+    expect((await request('/sim/status?runId=history-1')).body.running).toBe(false);
+    await subscribe('history-0');
+    expect(messages(stream)).toEqual([{ type: 'unavailable', runId: 'history-0', message: expect.stringContaining('no longer available') }]);
+    expect(stream.end).toHaveBeenCalledOnce();
+  });
+
+  it('bounds pending cancellations without forgetting confirmations or blocking cancellation of accepted runs', async () => {
+    for (let i = 0; i < 100; i++) expect((await request(`/sim/stop?runId=cancel-${i}`, 'POST')).body.stopped).toBe(true);
+    expect((await request('/sim/stop?runId=overflow', 'POST')).body.stopped).toBe(false);
+    expect((await request('/sim/stop?runId=cancel-0', 'POST')).body.stopped).toBe(true);
+    expect((await request('/sim/start?runId=cancel-0', 'POST', config)).code).toBe(409);
+    await start('query', { opCount: 10, opsPerSec: 1 }, 'accepted');
+    expect((await request('/sim/stop?runId=accepted', 'POST')).body.stopped).toBe(true);
+  });
+
+  it('rejects an empty run ID without falling back to global cancellation', async () => {
+    await start('query', { opCount: 10, opsPerSec: 1 }, 'still-running');
+    expect((await request('/sim/stop?runId=', 'POST')).code).toBe(400);
+    expect((await request('/sim/status?runId=still-running')).body.running).toBe(true);
+  });
+
+  it.each(['/sim/start', '/sim/stop', '/sim/events', '/sim/status'])('rejects malformed run IDs on %s', async path => {
+    const result = await request(`${path}?runId=%20`, path.endsWith('start') || path.endsWith('stop') ? 'POST' : 'GET', config);
+    expect(result).toEqual({ code: 400, body: { error: 'Invalid simulation run ID' } });
   });
 });
