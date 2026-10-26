@@ -428,9 +428,10 @@ describe('a public graph that its subscribe job left unproven is caught up again
   /**
    * An unproven round whose shared-memory walk stopped making progress. The
    * coverage diagnostic describes one peer (`resolved` of 40); `inserted` is
-   * the new data the job wrote from all of its peers.
+   * the new data the job wrote from all of its peers; `fetchedMeta` is the
+   * metadata peers served it, none when no peer was reached.
    */
-  function stalledRound(resolved: number, inserted = 0): () => CatchupJobResult {
+  function stalledRound(resolved: number, inserted = 0, fetchedMeta = 27): () => CatchupJobResult {
     const total = 40;
     return () => {
       const round = lossyEmptyRound();
@@ -440,6 +441,7 @@ describe('a public graph that its subscribe job left unproven is caught up again
           ...round.diagnostics!,
           sharedMemory: {
             ...round.diagnostics!.sharedMemory,
+            fetchedMetaTriples: fetchedMeta,
             insertedDataTriples: inserted,
             continuationStopReason: 'coverage-stalled',
             swmCoverage: {
@@ -482,6 +484,26 @@ describe('a public graph that its subscribe job left unproven is caught up again
     expect(armed()).toEqual([]);
     expect(runs).toHaveLength(2);
     expect(member.subscription()).toMatchObject({ synced: false });
+  });
+
+  it('keeps repeating while no peer served the graph or the work was deferred, and proves it once a peer answers', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const member = memberEdge();
+    const noPeer = stalledRound(0, 0, 0);
+    const deferred = () => ({ ...stalledRound(12)(), deferredBackpressure: 1 });
+    const { runs } = stubRunner([noPeer, noPeer, deferred, deferred, cleanEmptyRound]);
+    const api = await startRoutes(member);
+    await api.finished(await api.subscribe());
+
+    for (let repeat = 1; repeat <= 4; repeat += 1) {
+      fire(await waitUntil(() => armed()[0], `repeat ${repeat} armed`));
+      await waitUntil(() => (runs.length === repeat + 1 ? true : undefined), `repeat ${repeat}`);
+      await api.finished(api.latestJobId()!);
+    }
+
+    expect(runs).toHaveLength(5);
+    expect(member.subscription()).toMatchObject({ synced: true });
+    expect(armed()).toEqual([]);
   });
 
   it('keeps repeating while any peer still delivers, though the coverage diagnostic stays the same', async () => {

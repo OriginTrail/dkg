@@ -46,14 +46,16 @@
 //
 // A walk that stalls is not such a cause. Each job walks every capable peer
 // and pulls the graph's shared-memory metadata from each, with further passes
-// while they make progress. A job stalled when its walk reached the peers
-// through the graph's lane, stopped because a further pass made no progress
-// (`coverage-stalled`), and wrote no new shared-memory data from any peer. Two
-// such jobs in a row end the sequence: the next one would walk the same peers
-// again and write nothing more. After a restart every node of a network catches
-// its subscriptions up at once, and a graph whose snapshots no job completes
-// was otherwise pulled from every peer for hours. A walk that ran before the
-// lane was active asked nobody, so it is never counted as stalled.
+// while they make progress. A job stalled when peers served it that metadata
+// through the graph's lane, nothing was deferred, the walk stopped because a
+// further pass made no progress (`coverage-stalled`), and no new shared-memory
+// data was written from any peer. Two such jobs in a row end the sequence: the
+// next one would walk the same peers again and write nothing more. After a
+// restart every node of a network catches its subscriptions up at once, and a
+// graph whose snapshots no job completes was otherwise pulled from every peer
+// for hours. A job that reached no peer, ran before the lane was active, failed
+// before metadata arrived or was deferred is never counted as stalled, so the
+// delayed repeats still cover peers that come later.
 
 import type { ContextGraphReadAuthorityDecision } from '@origintrail-official/dkg-agent';
 import { selectedSharedMemoryLaneActive } from '../catchup-selected-lane.js';
@@ -140,15 +142,21 @@ function admitsRepeat(authority: ContextGraphReadAuthorityDecision): boolean {
 }
 
 /**
- * The job's walk reached its peers through the graph's lane, stopped because
- * a further pass made no progress (`coverage-stalled`), and wrote no new
- * shared-memory data from any of them. Progress is judged across every peer
- * of the job, not by the one peer the coverage diagnostic describes.
+ * The job walked its peers and it made no difference: peers served the
+ * graph's shared-memory metadata through its lane, local admission deferred
+ * none of the work, the walk stopped because a further pass made no progress
+ * (`coverage-stalled`), and no new shared-memory data was written from any
+ * peer. Progress is judged across every peer of the job, not by the one peer
+ * the coverage diagnostic describes. A job that reached no peer, whose rounds
+ * failed before any metadata arrived, or whose work was deferred, is not one.
  */
 function stalledWithoutProgress(job: CatchupJob): boolean {
-  const sharedMemory = job.result?.diagnostics?.sharedMemory;
+  const result = job.result;
+  const sharedMemory = result?.diagnostics?.sharedMemory;
   return job.selectedLaneFoundInactive !== true
+    && result?.deferredBackpressure === 0
     && sharedMemory?.continuationStopReason === 'coverage-stalled'
+    && sharedMemory.fetchedMetaTriples > 0
     && sharedMemory.insertedDataTriples === 0;
 }
 

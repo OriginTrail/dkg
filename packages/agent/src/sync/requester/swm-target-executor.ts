@@ -81,13 +81,13 @@ export interface SwmTargetExecutorPortsV1 {
     retirement: FinalizedSwmTwinRetirement,
     ctx: OperationContext,
   ) => Promise<void>;
-  /** Resolves with how the marker's retirement ended inside the caller's wait, when it says. */
+  /** Resolves with how the marker's retirement ended inside the caller's wait. Absent: no marker lane. */
   readonly retireLegacySwmAfterVerifiedVmTwin?: (input: Readonly<{
     contextGraphId: string;
     kaUal: string;
     assertionVersion: string;
     subGraphName?: string;
-  }>) => Promise<LegacySwmRetirementCallerOutcomeV1 | void>;
+  }>) => Promise<LegacySwmRetirementCallerOutcomeV1>;
   readonly logInfo: (ctx: OperationContext, message: string) => void;
   readonly logWarn: (ctx: OperationContext, message: string) => void;
   readonly logDebug: (ctx: OperationContext, message: string) => void;
@@ -332,7 +332,8 @@ export class SwmTargetExecutorV1 {
           // behind is the conservative state (the graph stays reported as
           // incomplete) until a later pass or a catalog replay retires it.
           try {
-            const marker = await this.#ports.retireLegacySwmAfterVerifiedVmTwin?.({
+            const retireMarker = this.#ports.retireLegacySwmAfterVerifiedVmTwin;
+            const marker = retireMarker === undefined ? 'no-marker-lane' : await retireMarker({
               contextGraphId,
               kaUal: descriptor.kaUal,
               assertionVersion: descriptor.assertionVersion,
@@ -340,8 +341,9 @@ export class SwmTargetExecutorV1 {
             });
             // Only a retirement that ended is remembered. One that did not get
             // its turn, or still runs past the wait, may yet leave its marker,
-            // and a later pass is what retries a marker left behind.
-            if (marker === undefined || marker === 'retired' || marker === 'kept') {
+            // and a later pass is what retries a marker left behind. Without a
+            // marker lane, nothing is left behind.
+            if (marker === 'no-marker-lane' || marker === 'retired' || marker === 'kept') {
               this.finalizedTwins.remember(contextGraphId, descriptor);
             }
           } catch (cause) {

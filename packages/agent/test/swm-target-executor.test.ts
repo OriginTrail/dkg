@@ -456,9 +456,10 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
    * A finalized asset whose shared-memory snapshot a peer still serves: VM is
    * local with the same bytes, so a round writes the snapshot and retires it.
    */
+  /** `retireMarker` undefined: the node has no legacy marker lane. */
   async function finalizedTwinRounds(
     contextGraphId: string,
-    retireMarker: () => Promise<LegacySwmRetirementCallerOutcomeV1 | void>,
+    retireMarker: (() => Promise<LegacySwmRetirementCallerOutcomeV1>) | undefined,
   ) {
     const store = new OxigraphStore();
     stores.push(store);
@@ -563,7 +564,7 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
       deletePublicCheckpoint: () => undefined,
       ensureOwnedMap: () => new Map(),
       retireFinalizedSwmTwin,
-      retireLegacySwmAfterVerifiedVmTwin: retireMarker,
+      ...(retireMarker === undefined ? {} : { retireLegacySwmAfterVerifiedVmTwin: retireMarker }),
       logInfo,
       logWarn: () => undefined,
       logDebug: () => undefined,
@@ -581,11 +582,11 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
   }
 
   it.each([
-    ['retired', 'retired'],
-    ['kept', 'kept'],
-    ['unsaid', undefined],
-  ] as const)('writes nothing in a later round for a snapshot it retired as a finalized twin (marker %s)', async (label, marker) => {
-    const rounds = await finalizedTwinRounds(`public-finalized-twin-remembered-${label}`, async () => marker);
+    ['retired', async () => 'retired' as const],
+    ['kept', async () => 'kept' as const],
+    ['no-lane', undefined],
+  ] as const)('writes nothing in a later round for a snapshot it retired as a finalized twin (marker %s)', async (label, retireMarker) => {
+    const rounds = await finalizedTwinRounds(`public-finalized-twin-remembered-${label}`, retireMarker);
     expect((await rounds.round()).failedPhases).toBe(0);
     expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledOnce();
 
