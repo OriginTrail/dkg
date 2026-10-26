@@ -1,17 +1,27 @@
-// G1b, the product check of the chosen S1 geometry (OT-RFC-73 plan 8.3 and decision D-15). Pure: no I/O.
+// G1b REHEARSAL on the repo benchmark (OT-RFC-73 plan 8.3 and decision D-15). Pure: no I/O.
 //
-// G1b re-runs G0b's two-publisher-slot cells on the real product code with the path on and the same five G0b seeds, and
-// shows the product reproduces what G0b measured. Each cell is compared as the MEDIAN OF THE FIVE SEEDED REPEATS against
-// the G0b cell median (Q12, harness 0.9 results/gate9/analysis, plan 8.2): per run, the share P95 is censored at the 20 s
-// caller deadline, and the pick-up is accepted -> first claim, the p50 of the run, unclaimed jobs right-censored at the
-// run end (pickup.mjs). The worker-free split (D-16) is G2/G3's, not G1b's.
+// NOT THE G1b GATE. The plan fixes G1b to harness 0.9 (the harness archive), adapted only to set the P3 env value and
+// drive the P4/P5 tagging, with the backend limited to 3 CPUs (--expect-backend-cpus 3, as G0b stamped and required)
+// and the harness's own recording scheduler and fixture. This benchmark is a different instrument: P2a's share replay
+// and fixture, the real default scheduler, no backend CPU gate. Its medians are therefore not the medians G0b's harness
+// produced, and a PASS or a MISS here neither releases nor stops P14. The rule below only says whether this
+// benchmark's product runs land inside the D-15 bands: a way to rehearse the cells and to catch a gross regression
+// before the real G1b. Making it the G1b instrument would be a plan change (it would also have to gate on the backend
+// CPU limit and the host, as G0b did).
+//
+// What it rehearses: G0b's two-publisher-slot cells on the real product code with the path on and the same five G0b
+// seeds. Each cell is compared as the MEDIAN OF THE FIVE SEEDED REPEATS against the G0b cell median (Q12, harness 0.9
+// results/gate9/analysis, plan 8.2): per run, the share P95 is censored at the 20 s caller deadline, and the pick-up is
+// accepted -> first claim, the p50 of the run, unclaimed jobs right-censored at the run end (pickup.mjs). The worker-free
+// split (D-16) is G2/G3's, not G1b's.
 // Pass margins (D-15), "within" read as two-sided (the product must REPRODUCE G0b, not only stay under it; the
 // signed deviation is printed either way):
 //   share P95 (g9L3, g9mix)       within 25 % of the G0b median
 //   pick-up p50 (g9pub, g9mix)    within 25 % or 0.5 s of the G0b median, whichever is larger (g9mix's median is 267 ms,
 //                                 so a 25 % band alone, about 67 ms, would be inside run-to-run noise)
-// A miss stops P14 (plan 10). Strict like every rule here: a cell needs all five repeats, valid, with the G0b setup;
-// anything less is INCOMPLETE, never a PASS.
+// Strict like every rule here: a cell needs all five repeats, valid, with the G0b setup AND the control path on (every
+// run must record DKG_STORE_CONTROL_RESERVED_SLOTS at the S1 geometry: a run with the variable unset, 0 or malformed ran
+// the path off and is not a G1b run); anything less is INCOMPLETE, never a PASS.
 import { median } from './verdict.mjs';
 
 /** The seeds of the five G0b repeats: 20262901 + repeat (specs/gate9.json). */
@@ -52,6 +62,10 @@ export const G1B_METRICS = Object.freeze({
     band: (ref) => Math.max(0.25 * ref, 500),
   },
 });
+/** The setting that switches the control path (plan 5.1) and the geometry the rehearsal needs it at (D-3). */
+export const CONTROL_SLOTS_ENV = 'DKG_STORE_CONTROL_RESERVED_SLOTS';
+export const G1B_SLOTS = Object.freeze({ share: 1, publisher: 2 });
+export const G1B_SLOTS_VALUE = 'share:1,publisher:2';
 /** The standard factors of every G0b run: windows, observer, empty histories, probe and ACK load, the chain-time model. */
 export const G1B_SETUP = Object.freeze({
   windows: { warmupMs: 30_000, measureMs: 180_000, cooldownMs: 10_000 },
@@ -73,6 +87,27 @@ const EPS = 1e-9; // a comparison at a band edge is inside, as in the other pre-
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const queueOf = (r) => r.queue ?? 'share';
 
+/**
+ * Why a recorded DKG_STORE_CONTROL_RESERVED_SLOTS is not the control path on at the G1b geometry (null when it is).
+ * The setting takes per-queue values ("share:1,publisher:2"); "0" turns the whole path off, a malformed value leaves it
+ * off (plan 5.1, no silent fallback), and a value above a queue's maximum is clamped to it. So only a value whose
+ * effective share and publisher slots are G1B_SLOTS counts, and a variable the run did not record is no evidence that
+ * the path was on.
+ */
+export function controlSlotsProblem(value) {
+  const want = `G1b needs the control path on (${CONTROL_SLOTS_ENV}=${G1B_SLOTS_VALUE})`;
+  if (value === undefined || value === null) return `${CONTROL_SLOTS_ENV} is not recorded: ${want}`;
+  const slots = {};
+  let wellFormed = true;
+  for (const part of String(value).split(',')) {
+    const m = /^\s*(share|publisher)\s*:\s*(\d+)\s*$/.exec(part);
+    if (!m || Object.hasOwn(slots, m[1])) wellFormed = false;
+    else slots[m[1]] = Math.min(Number(m[2]), G1B_SLOTS[m[1]]);
+  }
+  if (wellFormed && Object.entries(G1B_SLOTS).every(([queue, n]) => slots[queue] === n)) return null;
+  return `${CONTROL_SLOTS_ENV} is ${JSON.stringify(String(value))}, which is the path off or another geometry: ${want}`;
+}
+
 /** Why a run is not a G0b-conforming run of this cell ([] when it is). */
 export function setupProblems(r, def) {
   const problems = [];
@@ -91,12 +126,23 @@ export function setupProblems(r, def) {
   check('seed', config.seed, G1B_SEED_BASE + r.repeat);
   check('calibration', config.calibrationSha256, null);
   for (const [k, want] of Object.entries(def.load)) check(k, config[k], want);
+  // G1b is judged with the path on: the setting is part of the run's setup, so a run without it is non-conforming and
+  // its cell is INCOMPLETE (no warning that lets a path-off run grade)
+  const slots = controlSlotsProblem(config.env?.[CONTROL_SLOTS_ENV]);
+  if (slots) problems.push(slots);
   return problems;
 }
 
+export const REHEARSAL_NOTE =
+  'rehearsal on the repo benchmark, NOT the D-15 G1b: G1b runs harness 0.9 (backend limited to 3 CPUs, its recording ' +
+  'scheduler and fixture), adapted only to set the P3 env and drive the P4/P5 tagging (plan 8.3). This is another ' +
+  "instrument, so its medians are not comparable with G0b's as G1b requires, and a PASS or a MISS here neither " +
+  'releases nor stops P14';
+
 /**
- * The G1b verdict over the runs of the product arm. Result: { label, status, need, have (the thinnest cell's usable
- * repeats), cells: { id: { have, problems, metrics: { name: { median, ref, deviation, lo, hi, ok } } } }, reason }.
+ * The G1b rehearsal verdict over the runs of the product arm. Result: { label, gating: false, note, status, need,
+ * have (the thinnest cell's usable repeats), cells: { id: { have, problems, metrics: { name: { median, ref, deviation,
+ * lo, hi, ok } } } }, reason }.
  */
 export function g1b(records) {
   const cells = {};
@@ -152,13 +198,14 @@ export function g1b(records) {
     };
   }
   const have = Math.min(...Object.values(cells).map((c) => c.have));
-  const label = 'g1b: median of the five seeded repeats within the G0b band (D-15)';
+  const label = 'g1b rehearsal (not the D-15 gate): median of the five seeded repeats within the G0b band';
+  const head = { label, gating: false, note: REHEARSAL_NOTE };
   if (have < G1B_REPEATS) {
     const thin = Object.entries(cells)
       .filter(([, c]) => c.have < G1B_REPEATS)
       .map(([id, c]) => `${id} ${c.have}`);
     return {
-      label,
+      ...head,
       status: 'incomplete',
       need: G1B_REPEATS,
       have,
@@ -168,7 +215,7 @@ export function g1b(records) {
   }
   const ok = Object.values(cells).every((c) => Object.values(c.metrics).every((m) => m.ok));
   return {
-    label,
+    ...head,
     status: ok ? 'pass' : 'fail',
     need: G1B_REPEATS,
     have,

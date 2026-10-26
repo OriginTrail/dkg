@@ -3,12 +3,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  CONTROL_SLOTS_ENV,
   G0B_REFERENCE,
   G1B_CELLS,
   G1B_METRICS,
   G1B_REPEATS,
   G1B_SEED_BASE,
   G1B_SETUP,
+  G1B_SLOTS_VALUE,
+  REHEARSAL_NOTE,
+  controlSlotsProblem,
   g1b,
   setupProblems,
 } from '../../repro/async-queue-contention/g1b.mjs';
@@ -37,7 +41,7 @@ const run = (id, r, o = {}, cfg = {}) => {
       seed: G1B_SEED_BASE + r,
       calibrationSha256: null,
       ...def.load,
-      env: { DKG_STORE_CONTROL_RESERVED_SLOTS: '2' },
+      env: { [CONTROL_SLOTS_ENV]: G1B_SLOTS_VALUE },
       ...cfg,
     },
     p95Ms: G0B_REFERENCE[id].shareP95 ?? null,
@@ -95,7 +99,9 @@ test('the bands are 25 % of the G0b median, widened to 0.5 s for the pick-up', (
 test('a product that reproduces G0b passes: the medians of the five repeats against the three cells', () => {
   const r = g1b(everything());
   assert.deepEqual([r.status, r.have, r.need], ['pass', 5, 5]);
-  assert.match(r.label, /^g1b: /);
+  assert.match(r.label, /^g1b rehearsal \(not the D-15 gate\): /);
+  assert.deepEqual([r.gating, r.note], [false, REHEARSAL_NOTE]);
+  assert.match(r.note, /NOT the D-15 G1b: G1b runs harness 0.9 \(backend limited to 3 CPUs/);
   assert.deepEqual(r.cells.g9L3.metrics.shareP95, {
     median: 713,
     ref: 713,
@@ -308,4 +314,79 @@ test("runs of other rungs or streams are not part of G0b's cells, and a repeat b
     4,
     'PSTAR run as a mixed cell is not g9pub',
   );
+});
+
+test('the control path counts as on only at the G1b geometry; unset, 0, malformed or another geometry is the path off', () => {
+  for (const on of [
+    'share:1,publisher:2',
+    'publisher:2,share:1',
+    ' share : 1 , publisher : 2 ',
+    'share:3,publisher:9', // clamped to each queue's maximum (plan 5.1), which is the geometry
+  ])
+    assert.equal(controlSlotsProblem(on), null, on);
+  for (const off of [
+    '0',
+    '',
+    '2',
+    'share:0,publisher:0',
+    'share:1',
+    'publisher:2',
+    'share:1,publisher:1',
+    'share:0,publisher:2',
+    'share:1,publisher:2,share:1',
+    'share:1;publisher:2',
+    'share:x,publisher:2',
+    'SHARE:1,PUBLISHER:2',
+    'share:1,other:2',
+  ]) {
+    const why = controlSlotsProblem(off);
+    assert.match(why, /^DKG_STORE_CONTROL_RESERVED_SLOTS is ".*", which is the path off or another geometry: /, off);
+    assert.match(why, /G1b needs the control path on \(DKG_STORE_CONTROL_RESERVED_SLOTS=share:1,publisher:2\)/);
+  }
+  for (const missing of [undefined, null])
+    assert.match(controlSlotsProblem(missing), /^DKG_STORE_CONTROL_RESERVED_SLOTS is not recorded: G1b needs/);
+});
+
+test('a run that did not record the path on is non-conforming: its cell is INCOMPLETE, never graded', () => {
+  const def = G1B_CELLS.g9mix;
+  const withEnv = (env) => setupProblems(run('g9mix', 0, {}, { env }), def);
+  assert.deepEqual(withEnv({ [CONTROL_SLOTS_ENV]: G1B_SLOTS_VALUE }), []);
+  assert.deepEqual(withEnv({ [CONTROL_SLOTS_ENV]: '0' }), [controlSlotsProblem('0')]);
+  assert.deepEqual(withEnv({}), [controlSlotsProblem(undefined)]);
+  assert.deepEqual(withEnv(undefined), [controlSlotsProblem(undefined)], 'a record with no env at all');
+  assert.deepEqual(withEnv({ DKG_STORE_MAX_CONCURRENT: '2' }), [controlSlotsProblem(undefined)]);
+
+  // every run of every cell ran with the path off or unrecorded: the medians would be a perfect G0b match, and still no verdict
+  for (const env of [{}, { [CONTROL_SLOTS_ENV]: '0' }, { [CONTROL_SLOTS_ENV]: 'share:1' }]) {
+    const all = g1b(
+      Object.keys(G1B_CELLS).flatMap((id) => Array.from({ length: G1B_REPEATS }, (_, r) => run(id, r, {}, { env }))),
+    );
+    assert.deepEqual([all.status, all.have], ['incomplete', 0], JSON.stringify(env));
+    assert.deepEqual(
+      Object.values(all.cells).map((c) => Object.keys(c.metrics).length),
+      [0, 0, 0],
+    );
+    assert.match(all.cells.g9L3.problems[0], /^repeat 0 \(g9L3-r0\): DKG_STORE_CONTROL_RESERVED_SLOTS is /);
+  }
+
+  // one repeat with the path off thins its cell to four, and a miss elsewhere does not outrank the missing evidence
+  const runs = everything({
+    g9pub: (r) => (r === 3 ? { config: { ...run('g9pub', 3).config, env: { [CONTROL_SLOTS_ENV]: '0' } } } : {}),
+    g9L3: () => ({ p95Ms: 9000 }),
+  });
+  const r = g1b(runs);
+  assert.deepEqual([r.status, r.cells.g9pub.have, r.cells.g9L3.have], ['incomplete', 4, 5]);
+  assert.match(r.cells.g9pub.problems[0], /^repeat 3 \(g9pub-r3\): DKG_STORE_CONTROL_RESERVED_SLOTS is "0", which is/);
+  assert.match(r.reason, /g9pub 4/);
+});
+
+test('the rehearsal says it is not the D-15 gate in every outcome', () => {
+  for (const runs of [everything(), everything({ g9L3: () => ({ p95Ms: 9000 }) }), []]) {
+    const r = g1b(runs);
+    assert.equal(r.gating, false, r.status);
+    assert.match(r.label, /^g1b rehearsal \(not the D-15 gate\)/);
+    assert.equal(r.note, REHEARSAL_NOTE);
+  }
+  assert.match(REHEARSAL_NOTE, /neither releases nor stops P14/);
+  assert.match(REHEARSAL_NOTE, /harness 0\.9/);
 });

@@ -28,7 +28,8 @@ export const RUNGS = [
 /**
  * Named loads of the publisher and mixed cells (P2b): the levels G0b ran (PSTAR publish-only, MIX mixed) and the low
  * publish rung. mu = publish submissions per second. Not a ladder: the publish ladder is calibrated per host and
- * pre-declared in the G2 protocol (calibrate covers the share ladder only), and G1b needs exactly these fixed loads.
+ * pre-declared in the G2 protocol (calibrate covers the share ladder only), and the G1b rehearsal needs exactly these
+ * fixed loads.
  */
 export const PUBLISH_RUNGS = [
   { id: 'PLOW', lambda: 0, mu: 0.4, content: 3, aggregate: 1 },

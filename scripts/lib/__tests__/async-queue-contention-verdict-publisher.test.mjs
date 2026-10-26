@@ -10,11 +10,19 @@ import path from 'node:path';
 import test, { after } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { LIFT_TAIL_OPS } from '../../repro/async-queue-contention/fixture.mjs';
-import { G0B_REFERENCE, G1B_CELLS, G1B_SEED_BASE, G1B_SETUP } from '../../repro/async-queue-contention/g1b.mjs';
+import {
+  CONTROL_SLOTS_ENV,
+  G0B_REFERENCE,
+  G1B_CELLS,
+  G1B_SEED_BASE,
+  G1B_SETUP,
+  G1B_SLOTS_VALUE,
+} from '../../repro/async-queue-contention/g1b.mjs';
 import {
   FAMILIES,
   PUBLISH_RUNGS,
   RUNGS,
+  aaDeclaration,
   comparability,
   equivalent,
   extractRecord,
@@ -327,7 +335,7 @@ const summaryOf = ({
         ...o.cell,
       },
       windows: G1B_SETUP.windows,
-      env: { DKG_STORE_CONTROL_RESERVED_SLOTS: '2' },
+      env: o.env ?? { [CONTROL_SLOTS_ENV]: G1B_SLOTS_VALUE },
       host: { cpus: 10 },
       git: { sha: '0123456789abcdef', dirty: false },
       scriptSha256: 'abc',
@@ -763,6 +771,53 @@ test('the A/A margin and the reported guards follow the family', () => {
   assert.deepEqual(guards(pairsOn([1], [1], 'p95Ms')).failureFrac, [{ key: 'r0', value: 0, ok: true }]);
 });
 
+test('a zero value in an A/A pair is decided once for every family: 0 vs 0 holds the floor, 0 vs nonzero is unbounded, never NaN', () => {
+  for (const [family, key, options] of [
+    ['share', 'p95Ms', {}],
+    ['publish', 'publishP95Ms', {}],
+    ['pickup', 'pickupP50Ms', {}],
+    ['pickupFree', 'pickupFreeP50Ms', { minSamples: 10 }],
+  ]) {
+    const aa = (a, b) => pairsOn(a, b, key);
+    // identical zeros (a pick-up p50 of 0 ms in both runs) deviate by 0: the 10 % floor
+    const zeros = aa([0, 0, 0], [0, 0, 0]);
+    assert.equal(noiseMargin(zeros, family, options), 0.1, `${family}: 0 vs 0`);
+    const complete = aaDeclaration(zeros, [], { family, ...options });
+    assert.deepEqual([complete.status, complete.margin, complete.validPairs], ['complete', 0.1, 3], family);
+    // a zero against a nonzero value has no finite deviation, whichever arm holds the zero
+    for (const [a, b] of [
+      [0, 40],
+      [40, 0],
+    ]) {
+      const pairs = aa([1000, 1000, a], [1040, 1000, b]);
+      assert.equal(noiseMargin(pairs, family, options), Infinity, `${family}: ${a} vs ${b}`);
+      const declared = aaDeclaration(pairs, [], { family, ...options });
+      assert.deepEqual([declared.status, declared.margin], ['incomplete', null], `${family}: ${a} vs ${b}`);
+      const label = familyOf(family).label;
+      assert.match(
+        declared.reason,
+        new RegExp(`unbounded: an A/A pair has a ${label} of 0 against a nonzero ${label}`),
+      );
+    }
+    // equivalent() then refuses the unbounded margin instead of judging with it
+    assert.throws(() => equivalent(aa([0], [40]), Infinity, { family, ...options }), /declared margin/);
+  }
+  // the family decides which number is looked at: a zero pick-up leaves the share and publish margins alone
+  const pickupZero = pairsOn([0, 0, 0], [0, 0, 40], 'pickupP50Ms');
+  assert.equal(noiseMargin(pickupZero), 0.1);
+  assert.equal(noiseMargin(pickupZero, 'publish'), 0.1);
+  assert.equal(noiseMargin(pickupZero, 'pickup'), Infinity);
+  // a pair without the family's number is no repeat: the declaration is incomplete on the repeat count, with a finite margin
+  const missing = pairsOn([1000, 1000, 1000], [1040, 1000, 1000], 'pickupP50Ms');
+  missing[2].b.pickupP50Ms = null;
+  assert.deepEqual(
+    (({ status, validPairs, margin }) => ({ status, validPairs, margin }))(
+      aaDeclaration(missing, [], { family: 'pickup' }),
+    ),
+    { status: 'incomplete', validPairs: 2, margin: 0.1 },
+  );
+});
+
 // ---------------------------------------------------------------- the command line
 /** Writes the summaries of one cell's repeats under dir/<sub>/r<i>/summary.json. */
 function writeCell(dir, id, over = () => ({})) {
@@ -794,15 +849,16 @@ test('verdict --rule g1b reads the three cells of one directory: exit 0 on a pas
   assert.equal(pass.status, 0, pass.stdout + pass.stderr);
   assert.match(
     pass.stdout,
-    /^g1b: median of the five seeded repeats within the G0b band \(D-15\): PASS \(5 usable repeats in the thinnest cell, 5 needed\)/,
+    /^g1b rehearsal \(not the D-15 gate\): median of the five seeded repeats within the G0b band: PASS \(5 usable repeats in the thinnest cell, 5 needed\)\n {2}rehearsal on the repo benchmark, NOT the D-15 G1b: G1b runs harness 0\.9/,
   );
   assert.match(
     pass.stdout,
     /g9mix \(--queue both, rung MIX\): 5 of 5 repeats usable\n\s+share P95: median 701 ms vs G0b 701 ms \(\+0.0 %\), band 525.75\.\.876.25 ms {2}ok\n\s+pick-up p50: median 267 ms vs G0b 267 ms \(\+0.0 %\), band -233\.\.767 ms {2}ok/,
   );
-  assert.doesNotMatch(pass.stdout, /warning: no run recorded/, 'the runs recorded the path setting');
+  assert.doesNotMatch(pass.stdout, /DKG_STORE_CONTROL_RESERVED_SLOTS/, 'the runs recorded the path on');
   const json = JSON.parse(cli('verdict', '--rule', 'g1b', '--a', dir, '--json').stdout);
   assert.deepEqual([json.result.status, json.result.have, json.warnings], ['pass', 5, []]);
+  assert.deepEqual([json.result.gating, typeof json.result.note], [false, 'string'], 'the JSON carries the same label');
   assert.deepEqual(Object.keys(json.result.cells), ['g9L3', 'g9mix', 'g9pub']);
 
   const miss = path.join(tmp, 'g1b-miss');
@@ -823,20 +879,55 @@ test('verdict --rule g1b reads the three cells of one directory: exit 0 on a pas
   assert.match(incomplete.stdout, /problem: repeat 0: no run/);
 });
 
-test('verdict --rule g1b warns when no run recorded the control-path setting and refuses a second arm', () => {
-  const dir = path.join(tmp, 'g1b-env');
+/** Rewrites the control-path setting recorded in the summaries of the given runs (every run when `only` is absent). */
+function setEnv(dir, env, only = () => true) {
   for (const id of Object.keys(G1B_CELLS)) {
-    writeCell(dir, id);
     for (let repeat = 0; repeat < 5; repeat++) {
+      if (!only(id, repeat)) continue;
       const file = path.join(dir, id, `r${repeat}`, 'summary.json');
       const s = JSON.parse(readFileSync(file, 'utf8'));
-      s.meta.env = {};
+      s.meta.env = env;
       writeFileSync(file, JSON.stringify(s));
     }
   }
-  const run = cli('verdict', '--rule', 'g1b', '--a', dir);
-  assert.equal(run.status, 0);
-  assert.match(run.stdout, /warning: no run recorded DKG_STORE_CONTROL_RESERVED_SLOTS/);
+}
+
+test('verdict --rule g1b is INCOMPLETE (exit 2, the reason named) for a run without the control path on, and refuses a second arm', () => {
+  // a perfect G0b match in every run, with the path unset, off or at another geometry: no run is a G1b run
+  for (const [name, env, reason] of [
+    ['unset', {}, /DKG_STORE_CONTROL_RESERVED_SLOTS is not recorded: G1b needs the control path on/],
+    ['zero', { [CONTROL_SLOTS_ENV]: '0' }, /DKG_STORE_CONTROL_RESERVED_SLOTS is "0", which is the path off/],
+    [
+      'malformed',
+      { [CONTROL_SLOTS_ENV]: 'share=1' },
+      /DKG_STORE_CONTROL_RESERVED_SLOTS is "share=1", which is the path off/,
+    ],
+    ['share only', { [CONTROL_SLOTS_ENV]: 'share:1' }, /is "share:1", which is the path off or another geometry/],
+  ]) {
+    const dir = path.join(tmp, `g1b-env-${name.replace(' ', '-')}`);
+    for (const id of Object.keys(G1B_CELLS)) writeCell(dir, id);
+    setEnv(dir, env);
+    const run = cli('verdict', '--rule', 'g1b', '--a', dir);
+    assert.equal(run.status, 2, `${name}: ${run.stdout}`);
+    assert.match(run.stdout, /INCOMPLETE \(0 usable repeats in the thinnest cell, 5 needed\)/, name);
+    assert.match(run.stdout, reason, name);
+    assert.match(run.stdout, /problem: repeat 0 \(\w+-\w+-r0\): DKG_STORE_CONTROL_RESERVED_SLOTS/, name);
+    const json = JSON.parse(cli('verdict', '--rule', 'g1b', '--a', dir, '--json').stdout);
+    assert.deepEqual([json.result.status, json.result.have, json.result.gating], ['incomplete', 0, false], name);
+  }
+
+  // one repeat of one cell that ran with the path off thins that cell: no verdict, whatever the other 14 runs say
+  const one = path.join(tmp, 'g1b-env-one');
+  for (const id of Object.keys(G1B_CELLS)) writeCell(one, id);
+  setEnv(one, { [CONTROL_SLOTS_ENV]: '0' }, (id, repeat) => id === 'g9mix' && repeat === 3);
+  const thin = cli('verdict', '--rule', 'g1b', '--a', one);
+  assert.equal(thin.status, 2, thin.stdout);
+  assert.match(thin.stdout, /INCOMPLETE \(4 usable repeats in the thinnest cell, 5 needed\) - .*\(g9mix 4\)/);
+  assert.match(thin.stdout, /g9mix \(--queue both, rung MIX\): 4 of 5 repeats usable/);
+  assert.match(thin.stdout, /problem: repeat 3 \(both-MIX-r3\): DKG_STORE_CONTROL_RESERVED_SLOTS is "0"/);
+
+  const dir = path.join(tmp, 'g1b-env-two');
+  for (const id of Object.keys(G1B_CELLS)) writeCell(dir, id);
   const two = cli('verdict', '--rule', 'g1b', '--a', dir, '--b', dir);
   assert.equal(two.status, 2);
   assert.match(two.stderr, /judges one arm \(--a DIR\).*drop --b/);
@@ -961,6 +1052,34 @@ test('verdict aa, equal, noworse and flat take the metric; the margin and the ar
   const badFlat = cli('verdict', '--rule', 'flat', '--metric', 'pickup', '--a', A, '--b', B);
   assert.equal(badFlat.status, 2);
   assert.match(badFlat.stderr, /--rule flat judges a P95: --metric share or publish/);
+});
+
+test('verdict aa on the pick-up: a zero p50 against a nonzero one declares no margin (exit 2); zeros on both sides do', () => {
+  const run = (name, a, b, ...extra) => {
+    const dir = twoArms(name, { a: { pickup: a }, b: (r) => ({ pickup: b(r) }) });
+    const r = cli(
+      'verdict',
+      '--rule',
+      'aa',
+      '--metric',
+      'pickup',
+      ...extra,
+      '--a',
+      path.join(dir, 'a'),
+      '--b',
+      path.join(dir, 'b'),
+    );
+    return { status: r.status, out: JSON.parse(r.stdout) };
+  };
+  const zeros = run('aa-pickup-zeros', 0, () => 0);
+  assert.equal(zeros.status, 0, JSON.stringify(zeros.out));
+  assert.deepEqual([zeros.out.status, zeros.out.margin, zeros.out.validPairs], ['complete', 0.1, 3]);
+  const unbounded = run('aa-pickup-unbounded', 0, (r) => (r === 2 ? 40 : 0));
+  assert.equal(unbounded.status, 2, JSON.stringify(unbounded.out));
+  assert.deepEqual([unbounded.out.status, unbounded.out.margin, unbounded.out.validPairs], ['incomplete', null, 3]);
+  assert.match(unbounded.out.reason, /unbounded: an A\/A pair has a pick-up p50 of 0 against a nonzero pick-up p50/);
+  const finite = run('aa-pickup-finite', 250, (r) => 250 + 10 * r);
+  assert.deepEqual([finite.status, finite.out.margin], [0, 0.1]);
 });
 
 test('verdict flat --metric publish pairs a lift history 0 arm with a 10k arm and judges the publish P95', () => {

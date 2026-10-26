@@ -27,11 +27,12 @@
 //                                            lift|both only: a wallet is held for the hold while a job "publishes"
 //   --probes --ack-load                      the status-probe and ACK load (cadences: --probe-status-ms 10000,
 //                                            --probe-metrics-ms 30000, --probe-count-ms 60000, --ack-interval-ms 4000,
-//                                            --ack-payload 32); off by default, ON in every G0/G0b/G1b run
+//                                            --ack-payload 32); off by default, ON in every G0/G0b and G1b-rehearsal run
 //   --observer default|paged|none            the list observer's call; --observer-ms 5000 its polling period
 //   --repeats N                              N repeats, one fresh process each; --repeat I runs only repeat I
 //   --seed S                                 default seed-base+repeat: a repeat is the same arrival schedule in every build;
-//   --seed-base B                            B+repeat for each repeat (default 7300; G1b uses 20262901, the G0b seeds)
+//   --seed-base B                            B+repeat for each repeat (default 7300; the G1b rehearsal uses 20262901,
+//                                            the G0b seeds)
 //   --warmup 30 --measure 180 --cooldown 10 seconds; with --calibration these default to the calibration's own windows
 //                                            (its knee was measured with them); other values are flagged in the run's
 //                                            meta and in the verdict. calibrate uses the run defaults, so the rung it
@@ -121,16 +122,20 @@
 //    (--history 50k --seed-file ... --lift-history 10k --lift-seed-file ...) from one seed file of each kind; flat then
 //    judges it twice over the same two arms, --a empty in both histories: the share P95 (b must be history 50k, the
 //    default metric) and --metric publish (b one lift history).
-// 8. G1b (D-15), the product code against G0b's two-publisher-slot cells, the same five seeds (20262901 + repeat), path
-//    on (the P3 env), probes and ACK on, fixed rungs (no calibration), 5 repeats of each of G0b's three cells:
-//      node ... run --blazegraph-url $URL --queue share --rung L3 --probes --ack-load --seed-base 20262901 --repeats 5 \
-//           --out $OUT/g9L3
-//      node ... run --blazegraph-url $URL --queue both  --rung MIX   (same flags) --out $OUT/g9mix
-//      node ... run --blazegraph-url $URL --queue lift  --rung PSTAR  (same flags) --out $OUT/g9pub
-//      node ... verdict --rule g1b --a $OUT        # one directory holding the three cells
-//    g1b checks each run's setup against G0b's (windows, observer, loads, wallets, seed) and takes the median of the five
-//    repeats against the G0b medians: share P95 within 25 %, pick-up within 25 % or 0.5 s, whichever is larger. A miss
-//    stops P14; a missing, invalid or non-conforming repeat is INCOMPLETE.
+// 8. G1b REHEARSAL, not the D-15 G1b. The plan fixes G1b to harness 0.9 (adapted only to set the P3 env and drive the
+//    P4/P5 tagging, backend limited to 3 CPUs); this benchmark is another instrument (P2a's share replay and fixture, no
+//    backend CPU gate), so what follows rehearses G0b's cells here and says nothing about P14: a PASS or a MISS neither
+//    releases nor stops it. G0b's two-publisher-slot cells, the same five seeds (20262901 + repeat), the path on (the P3
+//    env at the S1 geometry), probes and ACK on, fixed rungs (no calibration), 5 repeats of each of G0b's three cells:
+//      DKG_STORE_CONTROL_RESERVED_SLOTS=share:1,publisher:2 node ... run --blazegraph-url $URL --queue share --rung L3 \
+//           --probes --ack-load --seed-base 20262901 --repeats 5 --out $OUT/g9L3
+//      (same env and flags)  node ... run --blazegraph-url $URL --queue both --rung MIX ... --out $OUT/g9mix
+//      (same env and flags)  node ... run --blazegraph-url $URL --queue lift --rung PSTAR ... --out $OUT/g9pub
+//      node ... verdict --rule g1b --a $OUT        # one directory holding the three cells; labelled a rehearsal
+//    g1b checks each run's setup against G0b's (windows, observer, loads, wallets, seed) and that the run recorded the
+//    path on (DKG_STORE_CONTROL_RESERVED_SLOTS at share:1,publisher:2: unset, 0, malformed or another geometry is
+//    non-conforming), and takes the median of the five repeats against the G0b medians: share P95 within 25 %, pick-up
+//    within 25 % or 0.5 s, whichever is larger. A missing, invalid or non-conforming repeat is INCOMPLETE.
 //
 // Not modelled (see fixture.mjs, publisher.mjs): the preflight's O(catalog) list leg, the readiness wait and the chain
 // rescue, the real chain (the publisher waits a fixed hold), publisher retries.
@@ -1233,6 +1238,7 @@ function printG1b(result, warnings) {
   console.log(
     `${result.label}: ${result.status.toUpperCase()} (${result.have} usable repeats in the thinnest cell, ${result.need} needed)${reason}`,
   );
+  console.log(`  ${result.note}`);
   for (const [id, cell] of Object.entries(result.cells)) {
     console.log(`  ${id} (--queue ${cell.queue}, rung ${cell.rung}): ${cell.have} of ${result.need} repeats usable`);
     for (const [name, m] of Object.entries(cell.metrics)) {
@@ -1259,10 +1265,6 @@ function verdictCommand(v) {
     if (v.b) die(2, '--rule g1b judges one arm (--a DIR) against the G0b medians: drop --b');
     const result = g1b(A);
     const warnings = integrityWarnings(A, [], null);
-    if (!A.some((r) => r.config?.env?.DKG_STORE_CONTROL_RESERVED_SLOTS !== undefined))
-      warnings.push(
-        'no run recorded DKG_STORE_CONTROL_RESERVED_SLOTS: G1b is judged with the control path on, check the default of this build',
-      );
     if (v.json) console.log(JSON.stringify({ result, warnings }));
     else printG1b(result, warnings);
     process.exit({ pass: 0, fail: 1, incomplete: 2 }[result.status]);
