@@ -1,6 +1,6 @@
 import type { ServerResponse } from 'node:http';
 
-import type { CancellationResult, DoneEvent, OpStats, RunStatus, SimEvent, ScopedSimEvent } from '../simulation-protocol.js';
+import type { CancellationResult, DoneEvent, OpEvent, OpStats, RunStatus, SimEvent, ScopedSimEvent } from '../simulation-protocol.js';
 
 export interface RunStats {
   total: number;
@@ -31,13 +31,20 @@ export class SimulationRuns {
   latest: SimulationRun | null = null;
   private runs = new Map<string, SimulationRun>();
   private cancelledStarts = new Set<string>();
+  private processedCancellations = new Set<string>();
   private clients = new Map<ServerResponse, string | undefined>();
 
   get(id: string) { return this.runs.get(id); }
 
   admit(id: string, total: number): { accepted: true; run: SimulationRun } | { accepted: false; error: string } {
+    // Pending reservations are never evicted. Once their start has arrived,
+    // retain only a bounded replay tombstone and release the pending capacity.
+    if (this.cancelledStarts.delete(id)) {
+      this.processedCancellations.add(id);
+      if (this.processedCancellations.size > 100) this.processedCancellations.delete(this.processedCancellations.values().next().value!);
+    }
     if (this.active) return { accepted: false, error: 'Simulation already running' };
-    if (this.runs.has(id) || this.cancelledStarts.has(id)) {
+    if (this.runs.has(id) || this.processedCancellations.has(id)) {
       return { accepted: false, error: 'Simulation run ID was completed or cancelled' };
     }
     const run: SimulationRun = { id, abort: new AbortController(), errorLogCount: 0,
@@ -52,6 +59,30 @@ export class SimulationRuns {
       completed: run.stats.completed, errors: run.stats.errors,
       elapsedMs: run.terminal?.elapsedMs ?? Date.now() - run.stats.startedAt,
       opsPerSec: run.terminal ? 0 : Math.round(currentOpsPerSec(run.stats) * 10) / 10, byOp: run.stats.byOp };
+  }
+
+  record(run: SimulationRun, event: OpEvent): boolean {
+    if (run.terminal) return false;
+    const stats = run.stats;
+    stats.completed++;
+    stats.recentTimestamps.push(Date.now());
+    if (!event.success) stats.errors++;
+    const op = stats.byOp[event.opType] ??= { ok: 0, fail: 0, timeouts: 0, totalMs: 0, allMs: 0, phaseTotals: {}, phaseCounts: {} };
+    if (event.success) { op.ok++; op.totalMs += event.durationMs; } else op.fail++;
+    if (!event.success && event.detail.startsWith('timeout')) op.timeouts++;
+    op.allMs += event.durationMs;
+    for (const [phase, ms] of Object.entries(event.phases)) {
+      op.phaseTotals[phase] = (op.phaseTotals[phase] ?? 0) + ms;
+      op.phaseCounts[phase] = (op.phaseCounts[phase] ?? 0) + 1;
+    }
+    this.emit(run, event);
+    return true;
+  }
+
+  fail(run: SimulationRun, error: unknown) {
+    if (run.terminal) return;
+    run.stats.errors++;
+    this.emit(run, { type: 'error', message: String(error instanceof Error ? error.message : error) });
   }
 
   emit(run: SimulationRun, event: SimEvent) {
@@ -82,6 +113,7 @@ export class SimulationRuns {
     const run = id ? this.get(id) : this.active;
     if (!run) {
       if (!id) return { stopped: false, reason: 'No simulation running' };
+      if (this.processedCancellations.has(id)) return { stopped: true, runId: id };
       // A stop may arrive before the corresponding start body has been read.
       if (!this.cancelledStarts.has(id) && this.cancelledStarts.size >= 100) {
         return { stopped: false, runId: id, reason: 'Pending cancellation limit reached; retry after start is accepted' };

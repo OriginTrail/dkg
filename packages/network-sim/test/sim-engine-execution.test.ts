@@ -297,7 +297,7 @@ describe('executor rejection recovery', () => {
     await start('publish', { kasPerPublish: 2 ** 32, opCount: 2 });
     const failed = await finish(); expect(failed).toHaveLength(2);
     expect(failed.every(event => !event.success && event.detail === 'Unexpected executor error')).toBe(true);
-    expect(events.at(-1)).toMatchObject({ type: 'done', completed: 2, errors: 2 });
+    expect(events.at(-1)).toMatchObject({ type: 'done', completed: 2, errors: 2, byOp: { publish: { ok: 0, fail: 2, allMs: 0, totalMs: 0, phaseTotals: {}, phaseCounts: {} } } });
     expect((await request('/sim/status')).body.running).toBe(false);
   });
 });
@@ -410,6 +410,50 @@ describe('run-scoped recovery and cancellation', () => {
     expect((await request('/sim/start?runId=cancel-0', 'POST', config)).code).toBe(409);
     await start('query', { opCount: 10, opsPerSec: 1 }, 'accepted');
     expect((await request('/sim/stop?runId=accepted', 'POST')).body.stopped).toBe(true);
+  });
+
+  it('reclaims processed early-cancellation capacity while protecting unprocessed and retained IDs', async () => {
+    expect((await request('/sim/stop?runId=still-delayed', 'POST')).body.stopped).toBe(true);
+    for (let i = 0; i < 130; i++) {
+      expect((await request(`/sim/stop?runId=processed-${i}`, 'POST')).body.stopped).toBe(true);
+      expect((await request(`/sim/start?runId=processed-${i}`, 'POST', config)).code).toBe(409);
+    }
+    expect((await request('/sim/stop?runId=fresh', 'POST')).body).toEqual({ stopped: true, runId: 'fresh' });
+    expect((await request('/sim/stop?runId=processed-129', 'POST')).body).toEqual({ stopped: true, runId: 'processed-129' });
+    expect((await request('/sim/start?runId=processed-129', 'POST', config)).code).toBe(409);
+    expect((await request('/sim/start?runId=still-delayed', 'POST', config)).code).toBe(409);
+    expect((await request('/sim/start?runId=fresh', 'POST', config)).code).toBe(409);
+    expect(operations()).toEqual([]);
+    await start('query', { opCount: 10 }, 'active-during-rejection');
+    await request('/sim/stop?runId=cancel-while-active', 'POST');
+    expect((await request('/sim/start?runId=cancel-while-active', 'POST', config)).code).toBe(409);
+    await request('/sim/stop?runId=active-during-rejection', 'POST');
+    expect((await request('/sim/start?runId=cancel-while-active', 'POST', config)).code).toBe(409);
+  });
+
+  it('replays exact latency and phase totals for successful and failed operations', async () => {
+    const fallback = fetchMock.getMockImplementation()!;
+    let queries = 0;
+    fetchMock.mockImplementation((url, init) => {
+      if (!url.endsWith('/api/query')) return fallback(url, init);
+      const first = ++queries === 1;
+      return new Promise<Response>(resolve => setTimeout(() => resolve(Response.json(
+        { result: { bindings: [] }, phases: { query: first ? 20 : 10 } },
+        { status: first ? 200 : 500 },
+      )), first ? 100 : 40));
+    });
+    await start('query', { opCount: 2, opsPerSec: 1, concurrency: 1 }, 'latency');
+    await finish(2000);
+    const snapshot = (await request('/sim/status?runId=latency')).body;
+    const expected = { query: { ok: 1, fail: 1, timeouts: 0, totalMs: 100, allMs: 140,
+      phaseTotals: { query: 30 }, phaseCounts: { query: 2 } } };
+    expect(snapshot).toMatchObject({ running: false, completed: 2, errors: 1, byOp: expected });
+    const statusEvents = events.filter(event => event.type === 'status' && event.completed === 1);
+    expect(statusEvents.length).toBeGreaterThan(0);
+    expect(statusEvents[0].byOp.query).toEqual({ ok: 1, fail: 0, timeouts: 0, totalMs: 100, allMs: 100,
+      phaseTotals: { query: 20 }, phaseCounts: { query: 1 } });
+    await subscribe('latency');
+    expect(messages(stream)).toEqual([expect.objectContaining({ type: 'done', completed: 2, errors: 1, byOp: expected })]);
   });
 
   it('rejects an empty run ID without falling back to global cancellation', async () => {
