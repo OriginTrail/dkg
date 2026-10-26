@@ -30,6 +30,8 @@ describe('generic registry contract', () => {
   });
   it('pins normalized descriptor bytes, detects changes and rejects ambiguous scalar values', () => {
     const entry = createRegistryEntry(ka(), ual, 'catalog', 'did:dkg:agent:publisher');
+    // Persisted source pins and record identities must survive library updates.
+    expect(entry.descriptorHash).toBe('sha256:34a67e8ea74b7325f1b2c8e9ecfdae80fd1b487a220819fb1710e77cffced10b');
     expect(validateRegistryEntry(JSON.parse(JSON.stringify(entry)))).toEqual(entry);
     expect(entry.descriptorHash).toBe(descriptorHash({ ...entry.descriptor, about: ['urn:app:b', 'urn:app:a'] }));
     expect(descriptorHash({ ...entry.descriptor, about: [] })).toBe(descriptorHash({ ...entry.descriptor, about: undefined }));
