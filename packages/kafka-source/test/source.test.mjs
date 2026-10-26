@@ -405,6 +405,24 @@ test('new delivery content retains a fresh retry budget after a preparation outa
   assert.deepEqual(f.commits, []); assert.equal(f.api.writes, 0);
 });
 
+test('read cooldown for changed delivery content does not inherit the old delivery failure count', async t => {
+  let now = Date.now(); const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+  t.onTestFinished(() => clock.mockRestore());
+  const f = await fixture(t);
+  f.setQueue([{ ...message(), valueBase64: Buffer.from('invalid JSON').toString('base64') }]);
+  for (let attempt = 1; attempt <= 2; attempt++)
+    assert.equal((await f.run()).sources[source.id].attemptCount, attempt);
+  f.setQueue([message('1')]); f.api.throttleRead('/api/context-graph/list'); await f.restart();
+  assert.equal((await f.run()).sources[source.id].attemptCount, 0);
+  now += 5000; await f.restart();
+  const waiting = (await f.run()).sources[source.id];
+  assert.equal(waiting.lastStatus, 'retry-wait'); assert.equal(waiting.attemptCount, 0);
+  assert.deepEqual(f.commits, []);
+  now += 55001; await f.restart();
+  assert.equal((await f.run()).sources[source.id].lastStatus, 'completed');
+  assert.equal(f.api.writes, 1); assert.deepEqual(f.commits, ['1']);
+});
+
 
 test('a genuinely changed RDF literal still prevents acknowledgement', async t => {
   const f = await fixture(t); f.api.normalize(); f.api.changeLiteral();

@@ -102,7 +102,8 @@ export function createHandler({ read = readKafka, sinkFactory = createDkgSink } 
             if (error.message !== 'DKG_RETRY_LATER') throw error;
             return { sourceId: source.id, skipped: true, reason: 'retry-after',
               nextState: { ..._state, fingerprint, lastRunAt: new Date().toISOString(),
-                lastStatus: 'retry-wait', attemptCount: _state?.attemptCount ?? 0, retryAt: error.retryAt } };
+                lastStatus: 'retry-wait', retryAt: error.retryAt,
+                attemptCount: _state?.fingerprint === fingerprint ? _state.attemptCount ?? 0 : 0 } };
           } finally {
             deliveries.delete(source.id);
             await delivery.close().catch(() => {});

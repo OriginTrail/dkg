@@ -10,8 +10,8 @@ The consumer is a generic DKG Source Worker handler loaded through
 Parent head: `fbca3a0e059f68e5dea1ba8fad63d89aafc7c488`, with current
 `testnet-canary` `137283d31f7b619118e79db3cbb17eb7370fe4eb` already merged.
 
-- Nine new regressions fail against the parent implementation while its
-  existing 49 tests pass. After the fixes, **58/58 focused tests pass** on
+- Ten new regressions fail against the parent implementation while its
+  existing 49 tests pass. After the fixes, **59/59 focused tests pass** on
   Node 22.23.2, with **96.73% line coverage** and all existing coverage floors.
 - Graph-list and descriptor preflight, descriptor readback after creation,
   and query readback each persist `Retry-After: 60`. Ten five-second polls
@@ -26,7 +26,8 @@ Parent head: `fbca3a0e059f68e5dea1ba8fad63d89aafc7c488`, with current
 - Alternating poison-record replay and `KAFKA_READ_FAILED`, starting with
   either condition, reaches native manual review after three failed attempts.
   Ten restarted polls never acknowledge the poison record. A genuinely changed
-  delivery still receives a fresh retry budget.
+  delivery still receives a fresh retry budget, including when its first
+  HTTP request is throttled.
 - These checks use the native Source Worker and the labelled HTTP/transport
   doubles. No live broker or DKG lifecycle integration was rerun for these fixes;
   earlier real-broker evidence below remains separately dated.
