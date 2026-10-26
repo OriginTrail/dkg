@@ -70,9 +70,9 @@ export class StoreContentFence implements StoreMutationObserver {
         || (quad.graph === scope.metadataGraph && (quad.subject.startsWith('_:') || subjects.has(quad.subject)))) === true
       || mutation.removals?.some(removal => !removal.graph || !isSafeIri(removal.graph) || graphs.has(removal.graph)
         || (removal.graph === scope.metadataGraph && (!removal.subject || removal.subject.startsWith('_:') || subjects.has(removal.subject)))) === true;
-    if (this.isUncertain(scope, generation) || [...this.pending].some(pending =>
-      !(generation !== undefined && pending.generation !== undefined && pending.generation < generation)
-      && touches(pending.mutation))) return undefined;
+    // A client-side operation can span a backend restart and dispatch more work.
+    // Only settled indeterminate outcomes can be retired by a newer generation.
+    if (this.isUncertain(scope, generation) || [...this.pending].some(pending => touches(pending.mutation))) return undefined;
     const watch = { touches, valid: true };
     this.watches.add(watch);
     return {
