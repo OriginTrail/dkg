@@ -17,18 +17,18 @@ import { STORE_WORK_PRIORITIES } from '../src/triple-store.js';
 
 const LANES = [...STORE_WORK_PRIORITIES];
 const waits = (stats: StoreSchedulerStats) =>
-  Object.fromEntries(stats.takeIntervalMaxQueueWaitMs().map((w) => [w.lane, w.maxQueueWaitMs]));
+  Object.fromEntries(stats.takeIntervalQueueWaits().map((w) => [w.lane, w.maxQueueWaitMs]));
 const OVERFLOW = STORE_QUEUE_WAIT_BUCKET_UPPER_MS.length;
 const BUCKETS = OVERFLOW + 1;
 /** Bucket counts of one lane's interval, as `{ bucketIndex: count }` so a test names only the non-empty ones. */
 const sparse = (buckets: number[]) =>
   Object.fromEntries(buckets.flatMap((count, index) => (count ? [[index, count]] : [])));
 const laneWait = (stats: StoreSchedulerStats, lane: string) => {
-  const taken = stats.takeIntervalMaxQueueWaitMs().find((w) => w.lane === lane)!;
+  const taken = stats.takeIntervalQueueWaits().find((w) => w.lane === lane)!;
   return { ...taken, queueWaitBuckets: sparse(taken.queueWaitBuckets) };
 };
 const laneP95 = (stats: StoreSchedulerStats, lane: string) => {
-  const taken = stats.takeIntervalMaxQueueWaitMs().find((w) => w.lane === lane)!;
+  const taken = stats.takeIntervalQueueWaits().find((w) => w.lane === lane)!;
   return estimateQueueWaitPercentileMs(taken.queueWaitBuckets, 0.95, taken.maxQueueWaitMs);
 };
 
@@ -61,7 +61,7 @@ describe('StoreSchedulerStats', () => {
     stats.recordQueueWait('normal', 25);
     stats.recordQueueWait('normal', -5);
     stats.recordQueueWait('normal', Number.NaN);
-    expect(stats.takeIntervalMaxQueueWaitMs().map(({ lane, maxQueueWaitMs, queueWaitCount }) => ({ lane, maxQueueWaitMs, queueWaitCount }))).toEqual([
+    expect(stats.takeIntervalQueueWaits().map(({ lane, maxQueueWaitMs, queueWaitCount }) => ({ lane, maxQueueWaitMs, queueWaitCount }))).toEqual([
       { lane: 'ack', maxQueueWaitMs: 3, queueWaitCount: 1 },
       { lane: 'health', maxQueueWaitMs: 0, queueWaitCount: 0 },
       { lane: 'normal', maxQueueWaitMs: 40, queueWaitCount: 3 },
@@ -79,7 +79,7 @@ describe('StoreSchedulerStats', () => {
     const ack = laneWait(stats, 'ack');
     expect(ack.queueWaitBuckets).toEqual({ 0: 2, 1: 2, 2: 2, 3: 1, 4: 2, 5: 1, 6: 1, 7: 1, 8: 2, [OVERFLOW]: 2 });
     expect(ack).toMatchObject({ queueWaitCount: 16, maxQueueWaitMs: 600000 });
-    expect(stats.takeIntervalMaxQueueWaitMs().every((w) => w.queueWaitBuckets.length === BUCKETS)).toBe(true);
+    expect(stats.takeIntervalQueueWaits().every((w) => w.queueWaitBuckets.length === BUCKETS)).toBe(true);
   });
 
   it('ignores a non-finite wait, counts a negative one as zero, and keeps lanes apart', () => {
@@ -96,7 +96,7 @@ describe('StoreSchedulerStats', () => {
   it('starts every lane\'s buckets again on each take, and hands out arrays the stats no longer use', () => {
     const stats = new StoreSchedulerStats(LANES);
     stats.recordQueueWait('background', 70);
-    const [first] = stats.takeIntervalMaxQueueWaitMs().filter((w) => w.lane === 'background');
+    const [first] = stats.takeIntervalQueueWaits().filter((w) => w.lane === 'background');
     first.queueWaitBuckets.fill(99);
     stats.recordQueueWait('background', 2_000);
     expect(laneWait(stats, 'background')).toMatchObject({ queueWaitCount: 1, queueWaitBuckets: { 6: 1 } });
@@ -134,7 +134,7 @@ describe('StoreSchedulerStats', () => {
     ];
     expect(stats.rejectionTotals()).toEqual(expected);
     // Only the timeouts queued: the full-queue rejections are not zero-length waits.
-    const taken = stats.takeIntervalMaxQueueWaitMs();
+    const taken = stats.takeIntervalQueueWaits();
     expect(taken.map((w) => [w.lane, w.maxQueueWaitMs, w.queueWaitCount])).toEqual([
       ['ack', 9_000, 1], ['health', 0, 0], ['normal', 10_000, 1], ['background', 0, 0],
     ]);
@@ -196,7 +196,7 @@ describe('estimateQueueWaitPercentileMs', () => {
 describe('store scheduler stats registry', () => {
   it('registers the shared scheduler under its id with the four lanes', () => {
     const report = takeStoreSchedulerStatsReports().find((entry) => entry.scheduler === 'store');
-    expect(report?.maxQueueWaitMs.map((wait) => wait.lane)).toEqual(LANES);
+    expect(report?.queueWaits.map((wait) => wait.lane)).toEqual(LANES);
     expect(externalStorePriorityScheduler.stats).toBeInstanceOf(StoreSchedulerStats);
   });
 
@@ -227,10 +227,10 @@ describe('store scheduler stats registry', () => {
       const taken = () => takeStoreSchedulerStatsReports().find((entry) => entry.scheduler === 'test-stats-interval');
       const buckets = (index: number | null) =>
         Array.from({ length: BUCKETS }, (_, n) => (n === index ? 1 : 0));
-      expect(taken()?.maxQueueWaitMs).toEqual([
+      expect(taken()?.queueWaits).toEqual([
         { lane: 'control', maxQueueWaitMs: 31, queueWaitCount: 1, queueWaitBuckets: buckets(1) },
       ]);
-      expect(taken()?.maxQueueWaitMs).toEqual([
+      expect(taken()?.queueWaits).toEqual([
         { lane: 'control', maxQueueWaitMs: 0, queueWaitCount: 0, queueWaitBuckets: buckets(null) },
       ]);
     } finally {
@@ -258,7 +258,7 @@ describe('StorePriorityScheduler stats wiring', () => {
     now = 30;
     release();
     await Promise.all([blocker, ack, background]);
-    const taken = sut.stats.takeIntervalMaxQueueWaitMs();
+    const taken = sut.stats.takeIntervalQueueWaits();
     expect(taken.map((w) => [w.lane, w.maxQueueWaitMs, w.queueWaitCount])).toEqual([
       ['ack', 30, 1], ['health', 0, 0], ['normal', 0, 1], ['background', 30, 1],
     ]);

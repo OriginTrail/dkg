@@ -109,7 +109,7 @@ export class StoreSchedulerStats {
   }
 
   /** Longest queue wait and per-bucket wait counts per lane since the previous call; starts a new interval. */
-  takeIntervalMaxQueueWaitMs(): StoreSchedulerLaneWait[] {
+  takeIntervalQueueWaits(): StoreSchedulerLaneWait[] {
     const taken = [...this.laneWaits].map(([lane, { maxMs, buckets }]) => ({
       lane,
       maxQueueWaitMs: maxMs,
@@ -136,7 +136,7 @@ export interface StoreSchedulerStatsSource {
 
 export interface StoreSchedulerStatsReport {
   scheduler: string;
-  maxQueueWaitMs: StoreSchedulerLaneWait[];
+  queueWaits: StoreSchedulerLaneWait[];
   rejections: StoreSchedulerRejectionTotal[];
 }
 
@@ -157,14 +157,14 @@ export function registerStoreSchedulerStats(source: StoreSchedulerStatsSource): 
 
 /**
  * One report per registered scheduler, ordered by id. Taking a report ends the
- * interval of its max waits and wait buckets, so call it from one place only (the periodic line).
+ * interval of its queue waits (the max and the bucket counts), so call it from one place only (the periodic line).
  */
 export function takeStoreSchedulerStatsReports(): StoreSchedulerStatsReport[] {
   return [...sources.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([scheduler, { stats }]) => ({
       scheduler,
-      maxQueueWaitMs: stats.takeIntervalMaxQueueWaitMs(),
+      queueWaits: stats.takeIntervalQueueWaits(),
       rejections: stats.rejectionTotals(),
     }));
 }
