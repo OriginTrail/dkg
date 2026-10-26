@@ -7,16 +7,6 @@
  * listContextGraphs enumeration. 1:1 move; methods take `this: DKGAgent` so
  * cross-calls resolve against the composed class.
  */
-
-// SPDX-License-Identifier: Apache-2.0
-/**
- * Context-graph resolution subsystem extracted from dkg-agent.ts as a mixin
- * holder: existence/curation checks, sync-request envelope parse/build/auth,
- * on-chain participant + curator resolution, wire-id <-> local-id mapping,
- * access-policy resolution, private-CG participant listing, and the
- * listContextGraphs enumeration. 1:1 move; methods take `this: DKGAgent` so
- * cross-calls resolve against the composed class.
- */
 import { probeContextGraphWritePreflight } from './context-graph-write-preflight.js';
 import { throwIfOperationAborted } from './bounded-operation.js';
 import { resolveContextGraphNameBindingTarget, type ContextGraphNameHashBindingTarget } from './context-graph-name-binding-target.js';

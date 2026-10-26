@@ -22,20 +22,6 @@ import { RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1, mintRfc64Unregistere
 import { type SignedAgentDelegation } from './auth/agent-delegation.js';
 import { BEACON_ACCESS_POLICY_CURATED } from './swm/cg-discovery-beacon.js';
 import { toLibp2pPeerId } from './p2p/peer-id.js';
-// rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
-// (durable, SQLite-backed) replaces it. We keep a minimal local
-// type alias so listPendingJoinApprovalRetries() retains its old
-// public shape while it stubs out to []. PR-12 rebuilds the operator
-// diagnostic surface on top of the substrate outbox and will return
-// real entries with substrate-shaped metadata.
-type JoinApprovalRetryEntry = {
-  contextGraphId: string;
-  agentAddress: string;
-  attempts: number;
-  firstFailureAt: number;
-  nextAttemptAt: number;
-  lastError: string;
-};
 import { LOCAL_ACCESS_OPEN, LOCAL_ACCESS_CURATED, EVM_PUBLISH_CURATED, EVM_PUBLISH_OPEN, MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS } from './dkg-agent-constants.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { LocalContextGraphRegistrationStatusStore } from './local-context-graph-registration-status.js';
