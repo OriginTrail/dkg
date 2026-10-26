@@ -6,15 +6,16 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ControlPanel } from '../src/components/ControlPanel';
 import * as api from '../src/api';
-import { makeStore, mountUi, type MountedUi } from './ui-test-support';
+import { mountUi, type MountedUi } from './ui-test-support';
 vi.mock('../src/api');
-vi.mock('../src/store', () => ({ useStore: () => store }));
+import { StoreProvider, useStore } from '../src/store';
 vi.mock('node:fs/promises', () => {
   const readFile = vi.fn().mockRejectedValue(new Error('no devnet token'));
   return { readFile, default: { readFile } };
 });
 
-let store = makeStore();
+let store: ReturnType<typeof useStore>;
+function StoreProbe() { store = useStore(); return null; }
 let ui: MountedUi;
 let engine: typeof import('../src/server/sim-engine');
 let transport: ReturnType<typeof vi.fn<typeof fetch>>;
@@ -64,10 +65,15 @@ class LocalEventSource {
 
 beforeEach(async () => {
   vi.resetModules(); vi.useFakeTimers(); vi.setSystemTime(new Date('2026-01-01'));
-  store = makeStore(); LocalEventSource.instances = []; clientRequests = [];
+  LocalEventSource.instances = []; clientRequests = [];
   accepted = deferred(); arrivalGate = responseGate = undefined;
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true); vi.stubGlobal('EventSource', LocalEventSource);
+  vi.spyOn(console, 'error').mockImplementation(() => {});
   vi.mocked(api.fetchContextGraphs).mockResolvedValue({ contextGraphs: [] });
+  vi.mocked(api.fetchDevnetConfig).mockResolvedValue({ nodes: [{ id: 1, name: 'Node 1', apiPort: 9201, listenPort: 10001, nodeRole: 'core' }], contracts: {}, hubAddress: '', chainRpc: '' });
+  vi.mocked(api.fetchNodeStatus).mockResolvedValue({ name: 'Node 1', peerId: 'peer-1', nodeRole: 'core', uptimeMs: 0, connectedPeers: 0, connections: 0, relayConnected: false, multiaddrs: [] });
+  vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
+  vi.stubGlobal('cancelAnimationFrame', vi.fn());
   engine = await import('../src/server/sim-engine');
   transport = vi.fn<typeof fetch>((input, init) => {
     const url = String(input);
@@ -85,7 +91,7 @@ beforeEach(async () => {
     return pending;
   });
   vi.stubGlobal('fetch', transport);
-  ui = await mountUi(React.createElement(ControlPanel)); await ui.click('Simulate');
+  ui = await mountUi(React.createElement(StoreProvider, null, React.createElement(StoreProbe), React.createElement(ControlPanel))); await ui.click('Simulate');
   await ui.fill('Total Ops', '2'); await ui.fill('Ops/sec', '1');
   // Keep only Query enabled through the real form controls.
   const operations = ui.container.querySelector('.graph-target-pills')!;
@@ -115,13 +121,66 @@ describe('simulation UI with real server recovery', () => {
     const second = await http('/sim/start?runId=other-client', { method: 'POST', body: JSON.stringify({ opCount: 10, opsPerSec: 1, enabledOps: ['query'] }) });
     expect(second.status).toBe(200);
     await act(async () => vi.advanceTimersByTimeAsync(501));
-    const recorded = vi.mocked(store.addOperation).mock.calls.length;
+    const recorded = store.state.activities.length;
     await act(async () => stream.reconnect());
     expect(ui.container.textContent).toContain('Simulation complete: 2 succeeded, 0 failed');
     expect(ui.button('Play Simulation').disabled).toBe(false);
     await act(async () => vi.advanceTimersByTimeAsync(1000));
-    expect(store.addOperation).toHaveBeenCalledTimes(recorded);
+    expect(store.state.activities).toHaveLength(recorded);
+    expect(store.state.simulationRuns[0].metrics).toMatchObject({ total: 2, success: 2, errors: 0, byType: { query: { total: 2, success: 2 } } });
+    expect(store.state.liveMetrics).toEqual(store.state.simulationRuns[0].metrics);
+    expect(store.state.activeSimulationId).toBeNull();
     expect((await status('other-client')).running).toBe(true);
+  });
+
+  it('retains progress and cancellation when switching control tabs', async () => {
+    await ui.click('Play Simulation'); await accepted.promise;
+    await act(async () => vi.advanceTimersByTimeAsync(501));
+    const id = runId();
+    await ui.click('Query', ui.container.querySelector('.tab-bar')!);
+    expect(store.state.activeSimulationId).toBe(id);
+    expect(LocalEventSource.instances).toHaveLength(1);
+    await ui.click('Simulate');
+    expect(ui.field('Total Ops').value).toBe('2');
+    expect(ui.container.textContent).toContain('1/2');
+    await ui.click('Stop Simulation');
+    expect((await status(id)).running).toBe(false);
+    expect(store.state.activeSimulationId).toBeNull();
+    expect(store.state.simulationRuns[0].metrics.total).toBe(1);
+  });
+
+  it('records completion while another control tab is visible', async () => {
+    await ui.click('Play Simulation'); await accepted.promise;
+    await ui.click('Query', ui.container.querySelector('.tab-bar')!);
+    await act(async () => vi.advanceTimersByTimeAsync(2500));
+    expect(store.state.activeSimulationId).toBeNull();
+    expect(store.state.simulationRuns[0].finishedAt).toBeDefined();
+    expect(store.state.simulationRuns[0].metrics).toMatchObject({ total: 2, success: 2, errors: 0 });
+    await ui.click('Simulate');
+    expect(ui.container.textContent).toContain('Simulation complete: 2 succeeded, 0 failed');
+  });
+
+  it('reconciles missed failures while running and avoids counting a replayed snapshot twice', async () => {
+    await ui.fill('Total Ops', '4');
+    await ui.click('Play Simulation'); await accepted.promise;
+    await act(async () => vi.advanceTimersByTimeAsync(501));
+    const stream = LocalEventSource.instances[0];
+    act(() => stream.disconnect());
+    const original = transport.getMockImplementation()!;
+    transport.mockImplementation((input, init) => String(input).endsWith('/api/query')
+      ? Promise.resolve(Response.json({ error: 'fixture query failure' }, { status: 500 })) : original(input, init));
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    await act(async () => stream.reconnect());
+    expect(store.state.simulationRuns[0].metrics).toMatchObject({ total: 2, success: 1, errors: 1 });
+    // A second reconnect must replace the same totals, never append them.
+    act(() => stream.disconnect());
+    await act(async () => stream.reconnect());
+    expect(store.state.liveMetrics.total).toBe(2);
+    await act(async () => vi.advanceTimersByTimeAsync(3000));
+    expect(store.state.liveMetrics).toMatchObject({ total: 4, success: 1, errors: 3,
+      byType: { query: { total: 4, success: 1, errors: 3 } } });
+    expect(store.state.simulationRuns[0].metrics).toEqual(store.state.liveMetrics);
+    expect(ui.container.textContent).toContain('Simulation complete: 1 succeeded, 3 failed');
   });
 
   it('cancels server work while the accepted start response is still withheld', async () => {

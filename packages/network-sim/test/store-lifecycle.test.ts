@@ -152,14 +152,55 @@ describe('public store operations', () => {
     expect(store.state.animations).toEqual([]);
   });
 
+  it('reconciles server totals without double counting or overwriting manual work', async () => {
+    await mount();
+    act(() => store.dispatch({ type: 'START_SIMULATION', id: 'older', name: 'Older', config: runConfig }));
+    act(() => store.dispatch({ type: 'STOP_SIMULATION' }));
+    const older = structuredClone(store.state.simulationRuns[0]);
+    act(() => store.dispatch({ type: 'START_SIMULATION', id: 'recovering', name: 'Recovering', config: runConfig }));
+    act(() => store.dispatch({ type: 'RECORD_OP', simulationId: 'recovering', opType: 'publish', success: true, durationMs: 100, phases: { prepare: 10, chain: 70 } }));
+    act(() => store.dispatch({ type: 'RECORD_OP', opType: 'publish', success: true, durationMs: 30, phases: { prepare: 5, manualOnly: 3 } }));
+    act(() => store.dispatch({ type: 'RECORD_OP', opType: 'query', success: true, durationMs: 20 }));
+    expect(store.state.simulationRuns[1].metrics.total).toBe(1);
+    const previous = store.state.simulationRuns[1];
+    const saved = structuredClone(previous);
+    const snapshot = { type: 'status' as const, total: 4, completed: 3, errors: 1, elapsedMs: 1_000, opsPerSec: 3,
+      byOp: { publish: { ok: 2, fail: 1, timeouts: 0, totalMs: 200, allMs: 250,
+        phaseTotals: { prepare: 30, chain: 140, commit: 40 }, phaseCounts: { prepare: 3, chain: 2, commit: 1 } } } };
+    act(() => store.dispatch({ type: 'RECONCILE_SIMULATION', id: 'recovering', snapshot }));
+    expect(previous).toEqual(saved);
+    expect(store.state.simulationRuns[0]).toEqual(older);
+    expect(store.state.simulationRuns[1].metrics).toMatchObject({ total: 3, success: 2, errors: 1,
+      byType: { publish: { totalDurationMs: 250, successDurationMs: 200,
+        phaseTotals: { prepare: 30, chain: 140, commit: 40 }, phaseCounts: { prepare: 3, chain: 2, commit: 1 } } } });
+    expect(store.state.liveMetrics).toMatchObject({ total: 5, success: 4, errors: 1,
+      byType: { publish: { total: 4, totalDurationMs: 280, successDurationMs: 230,
+        phaseTotals: { prepare: 35, chain: 140, commit: 40, manualOnly: 3 }, phaseCounts: { prepare: 4, chain: 2, commit: 1, manualOnly: 1 } },
+      query: { total: 1, success: 1, totalDurationMs: 20 } } });
+    const recovered = structuredClone(store.state.liveMetrics);
+    act(() => store.dispatch({ type: 'RECONCILE_SIMULATION', id: 'recovering', snapshot }));
+    act(() => store.dispatch({ type: 'RECONCILE_SIMULATION', id: 'older', snapshot }));
+    expect(store.state.liveMetrics).toEqual(recovered);
+    // Resetting the live view clears manual work, while retaining the active run
+    // contribution required for the next authoritative replacement.
+    act(() => store.dispatch({ type: 'RESET_LIVE_METRICS' }));
+    act(() => store.dispatch({ type: 'RECONCILE_SIMULATION', id: 'recovering', snapshot }));
+    expect(store.state.liveMetrics).toEqual(store.state.simulationRuns[1].metrics);
+    act(() => store.dispatch({ type: 'RECONCILE_SIMULATION', id: 'recovering', snapshot: { ...snapshot, type: 'done' } }));
+    const finishedAt = store.state.simulationRuns[1].finishedAt;
+    vi.setSystemTime(Date.now() + 5_000);
+    act(() => store.dispatch({ type: 'STOP_SIMULATION' }));
+    expect(store.state.simulationRuns[1].finishedAt).toBe(finishedAt);
+  });
+
   it('keeps success/error durations and phase counts distinct without mutating earlier snapshots', async () => {
     await mount();
     act(() => store.dispatch({ type: 'START_SIMULATION', id: 'one', name: 'First', config: runConfig }));
-    act(() => store.dispatch({ type: 'RECORD_OP', opType: 'publish', success: true, durationMs: 100, phases: { prepare: 10, chain: 70 } }));
+    act(() => store.dispatch({ type: 'RECORD_OP', simulationId: 'one', opType: 'publish', success: true, durationMs: 100, phases: { prepare: 10, chain: 70 } }));
     const snapshot = structuredClone(store.state.liveMetrics);
     const previous = store.state.liveMetrics;
     vi.setSystemTime(Date.now() + 10000);
-    act(() => store.dispatch({ type: 'RECORD_OP', opType: 'publish', success: false, durationMs: 40, phases: { prepare: 15 } }));
+    act(() => store.dispatch({ type: 'RECORD_OP', simulationId: 'one', opType: 'publish', success: false, durationMs: 40, phases: { prepare: 15 } }));
     expect(previous).toEqual(snapshot);
     expect(store.state.liveMetrics).toMatchObject({ total: 2, success: 1, errors: 1,
       byType: { publish: { total: 2, success: 1, errors: 1, totalDurationMs: 140, successDurationMs: 100,
@@ -174,7 +215,7 @@ describe('public store operations', () => {
     expect(store.state.liveMetrics).toEqual({ total: 0, success: 0, errors: 0, byType: {}, recentTimestamps: [] });
     act(() => store.dispatch({ type: 'RECORD_OP', opType: 'publish', success: false, durationMs: 20 }));
     act(() => store.dispatch({ type: 'START_SIMULATION', id: 'two', name: 'Second', config: runConfig }));
-    act(() => store.dispatch({ type: 'RECORD_OP', opType: 'query', success: true, durationMs: 7 }));
+    act(() => store.dispatch({ type: 'RECORD_OP', simulationId: 'two', opType: 'query', success: true, durationMs: 7 }));
     expect(store.state.simulationRuns[0]).toEqual(finished);
     expect(store.state.simulationRuns[1].metrics).toEqual(store.state.liveMetrics);
     expect(store.state.liveMetrics.total).toBe(1);

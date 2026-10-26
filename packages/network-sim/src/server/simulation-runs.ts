@@ -1,45 +1,6 @@
 import type { ServerResponse } from 'node:http';
 
-export interface OpEvent {
-  type: 'op';
-  opType: string;
-  nodeId: number;
-  success: boolean;
-  durationMs: number;
-  detail: string;
-  phases: Record<string, number>;
-}
-
-export interface StatusEvent {
-  type: 'status';
-  total: number;
-  completed: number;
-  errors: number;
-  opsPerSec: number;
-}
-
-export interface DoneEvent {
-  type: 'done';
-  total: number;
-  completed: number;
-  errors: number;
-  elapsedMs: number;
-  byOp?: Record<string, OpStats>;
-}
-
-interface ErrorEvent {
-  type: 'error';
-  message: string;
-}
-
-export type SimEvent = OpEvent | StatusEvent | DoneEvent | ErrorEvent;
-
-export interface OpStats {
-  ok: number;
-  fail: number;
-  timeouts: number;
-  totalMs: number;
-}
+import type { CancellationResult, DoneEvent, OpStats, RunStatus, SimEvent, ScopedSimEvent } from '../simulation-protocol.js';
 
 export interface RunStats {
   total: number;
@@ -73,17 +34,20 @@ export class SimulationRuns {
   private clients = new Map<ServerResponse, string | undefined>();
 
   get(id: string) { return this.runs.get(id); }
-  wasCancelled(id: string) { return this.cancelledStarts.has(id); }
 
-  create(id: string, total: number): SimulationRun {
+  admit(id: string, total: number): { accepted: true; run: SimulationRun } | { accepted: false; error: string } {
+    if (this.active) return { accepted: false, error: 'Simulation already running' };
+    if (this.runs.has(id) || this.cancelledStarts.has(id)) {
+      return { accepted: false, error: 'Simulation run ID was completed or cancelled' };
+    }
     const run: SimulationRun = { id, abort: new AbortController(), errorLogCount: 0,
       stats: { total, completed: 0, errors: 0, startedAt: Date.now(), recentTimestamps: [], byOp: {} } };
     this.runs.set(id, run);
     this.active = this.latest = run;
-    return run;
+    return { accepted: true, run };
   }
 
-  status(run: SimulationRun) {
+  status(run: SimulationRun): RunStatus {
     return { runId: run.id, running: !run.terminal, total: run.stats.total,
       completed: run.stats.completed, errors: run.stats.errors,
       elapsedMs: run.terminal?.elapsedMs ?? Date.now() - run.stats.startedAt,
@@ -114,7 +78,7 @@ export class SimulationRuns {
     return run.terminal;
   }
 
-  cancel(id?: string) {
+  cancel(id?: string): CancellationResult {
     const run = id ? this.get(id) : this.active;
     if (!run) {
       if (!id) return { stopped: false, reason: 'No simulation running' };
@@ -139,7 +103,7 @@ export class SimulationRuns {
     }
     this.clients.set(client, id);
     if (run) {
-      const snapshot = run.terminal ?? { type: 'status', ...this.status(run) };
+      const snapshot: ScopedSimEvent = run.terminal ?? { type: 'status', ...this.status(run) };
       this.send(client, snapshot);
       if (id && run.terminal) { this.clients.delete(client); client.end(); }
     }
@@ -147,13 +111,13 @@ export class SimulationRuns {
 
   unsubscribe(client: ServerResponse) { this.clients.delete(client); }
 
-  private publish(id: string, event: object) {
+  private publish(id: string, event: ScopedSimEvent) {
     for (const [client, scope] of this.clients) {
       if (!scope || scope === id) this.send(client, event);
     }
   }
 
-  private send(client: ServerResponse, event: object) {
+  private send(client: ServerResponse, event: ScopedSimEvent) {
     try { client.write(`data: ${JSON.stringify(event)}\n\n`); }
     catch { this.clients.delete(client); }
   }

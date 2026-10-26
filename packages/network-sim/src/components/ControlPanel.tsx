@@ -23,6 +23,7 @@ const SIM_TAB: { id: Tab; label: string; op: OperationType } = { id: 'simulate',
 export function ControlPanel() {
   const { state, dispatch, addOperation, completeOperation } = useStore();
   const [activeTab, setActiveTab] = useState<Tab>('publish');
+  const [simulationOpened, setSimulationOpened] = useState(false);
 
   return (
     <div className="control-panel">
@@ -61,7 +62,7 @@ export function ControlPanel() {
         <button
           className={`tab-btn tab-btn-sim ${activeTab === SIM_TAB.id ? 'active' : ''}`}
           style={activeTab === SIM_TAB.id ? { borderColor: '#f59e0b' } : undefined}
-          onClick={() => setActiveTab(SIM_TAB.id)}
+          onClick={() => { setActiveTab(SIM_TAB.id); setSimulationOpened(true); }}
         >
           <span className="tab-dot" style={{ background: '#f59e0b' }} />
           {SIM_TAB.label}
@@ -70,7 +71,7 @@ export function ControlPanel() {
 
       <div className="tab-content">
         {activeTab === 'setup' && <SetupTab />}
-        {activeTab === 'simulate' && <SimulateTab />}
+        <div hidden={activeTab !== 'simulate'}>{simulationOpened && <SimulateTab />}</div>
         {activeTab === 'sharedMemory' && <SharedMemoryTab />}
         {activeTab === 'publish' && <PublishTab />}
         {activeTab === 'query' && <QueryTab />}

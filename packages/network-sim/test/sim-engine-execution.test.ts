@@ -133,7 +133,7 @@ describe('simulator operations through the request handler', () => {
     await start(op);
     const [event] = await finish();
     expect(event).toMatchObject({ opType: op, success: false, detail: `timeout (${op === 'chat' ? 10 : op === 'query' ? 30 : 60}s)`, phases: {} });
-    expect((await request('/sim/status')).body.byOp[op]).toEqual({ ok: 0, fail: 1, timeouts: 1, totalMs: 0 });
+    expect((await request('/sim/status')).body.byOp[op]).toMatchObject({ ok: 0, fail: 1, timeouts: 1, totalMs: 0 });
   });
   it.each([{ delivered: false, error: 'peer rejected' }, { delivered: false }])('reports chat delivery result %j', async body => {
     const fallback = fetchMock.getMockImplementation()!;

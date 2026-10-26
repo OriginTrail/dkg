@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
 import type { OperationType } from '../types';
-import type { DoneEvent, SimEvent } from '../server/simulation-runs';
+import type { CancellationResult, DoneEvent, ScopedSimEvent } from '../simulation-protocol';
 
 interface SimStats { total: number; completed: number; errors: number; startedAt: number; finishedAt?: number }
 interface SimulationOptions {
@@ -15,7 +15,6 @@ interface ClientRun {
   stream: EventSource | null;
   stats: SimStats;
 }
-type StreamEvent = (SimEvent | { type: 'unavailable'; message: string }) & { runId: string };
 
 export function useSimulation(onComplete: () => void) {
   const { dispatch, addBroadcast, addOperation, completeOperation } = useStore();
@@ -36,6 +35,7 @@ export function useSimulation(onComplete: () => void) {
       Object.assign(run.stats, { completed: result.completed, errors: result.errors });
       run.stats.finishedAt = run.stats.startedAt + result.elapsedMs;
       setStats({ ...run.stats });
+      dispatch({ type: 'RECONCILE_SIMULATION', id: run.id, snapshot: result });
     }
     dispatch({ type: 'STOP_SIMULATION' });
     if (typeof result !== 'string') onComplete();
@@ -66,7 +66,7 @@ export function useSimulation(onComplete: () => void) {
       stream.onmessage = message => {
         if (active.current !== run) return;
         try {
-          const event = JSON.parse(message.data) as StreamEvent;
+          const event = JSON.parse(message.data) as ScopedSimEvent;
           if (event.runId !== id) return;
           if (event.type === 'done') { finish(run, event); return; }
           if (event.type === 'unavailable') { finish(run, event.message); return; }
@@ -75,11 +75,12 @@ export function useSimulation(onComplete: () => void) {
             const add = opType === 'publish' || opType === 'workspace' ? addBroadcast : addOperation;
             const opId = add(opType, event.nodeId, `sim ${opType}`);
             completeOperation(opId, event.success ? 'success' : 'error', event.detail);
-            dispatch({ type: 'RECORD_OP', opType, success: event.success, durationMs: event.durationMs, phases: event.phases });
+            dispatch({ type: 'RECORD_OP', simulationId: id, opType, success: event.success, durationMs: event.durationMs, phases: event.phases });
             run.stats.completed++;
             if (!event.success) run.stats.errors++;
           } else if (event.type === 'status') {
             run.stats.completed = event.completed; run.stats.errors = event.errors;
+            dispatch({ type: 'RECONCILE_SIMULATION', id, snapshot: event });
             setFailure(null);
           } else if (event.type === 'error') run.stats.errors++;
           setStats({ ...run.stats });
@@ -111,7 +112,7 @@ export function useSimulation(onComplete: () => void) {
       const result = await Promise.race([
         fetch(`/sim/stop?runId=${run.id}`, { method: 'POST', signal: controller.signal }).then(async response => {
           if (!response.ok) throw new Error('Cancellation failed');
-          return response.json() as Promise<{ stopped: boolean; runId: string; snapshot?: DoneEvent & { runId: string } }>;
+          return response.json() as Promise<CancellationResult>;
         }), deadline,
       ]);
       if (!result.stopped || result.runId !== run.id || (result.snapshot && result.snapshot.runId !== run.id)) throw new Error('Cancellation was not confirmed');

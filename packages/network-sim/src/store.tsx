@@ -8,6 +8,8 @@ import {
   type ReactNode,
 } from 'react';
 import type { DevnetNode, Activity, GraphAnimation, DevnetConfig, OperationType } from './types';
+import type { DoneEvent, StatusEvent } from './simulation-protocol';
+import { snapshotMetrics, reconcileLiveMetrics } from './simulation-metrics';
 import { fetchDevnetConfig, fetchNodeStatus } from './api';
 
 export interface PerTypeMetrics {
@@ -70,9 +72,10 @@ type Action =
   | { type: 'ADD_ANIMATIONS'; animations: GraphAnimation[] }
   | { type: 'TICK_ANIMATIONS'; dt: number }
   | { type: 'REMOVE_ANIMATION'; id: string }
-  | { type: 'RECORD_OP'; opType: string; success: boolean; durationMs: number; phases?: Record<string, number> }
+  | { type: 'RECORD_OP'; simulationId?: string; opType: string; success: boolean; durationMs: number; phases?: Record<string, number> }
   | { type: 'RESET_LIVE_METRICS' }
   | { type: 'START_SIMULATION'; id: string; name: string; config: SimulationRun['config'] }
+  | { type: 'RECONCILE_SIMULATION'; id: string; snapshot: DoneEvent | StatusEvent }
   | { type: 'STOP_SIMULATION' };
 
 const MAX_ACTIVITIES = 200;
@@ -151,7 +154,7 @@ function reducer(state: State, action: Action): State {
       m.recentTimestamps = [...m.recentTimestamps.filter((t) => now - t < 10_000), now];
 
       let runs = state.simulationRuns;
-      if (state.activeSimulationId) {
+      if (state.activeSimulationId && action.simulationId === state.activeSimulationId) {
         runs = runs.map((r) => {
           if (r.id !== state.activeSimulationId) return r;
           const rm = { ...r.metrics };
@@ -175,8 +178,11 @@ function reducer(state: State, action: Action): State {
       }
       return { ...state, liveMetrics: m, simulationRuns: runs };
     }
-    case 'RESET_LIVE_METRICS':
-      return { ...state, liveMetrics: { total: 0, success: 0, errors: 0, byType: {}, recentTimestamps: [] } };
+    case 'RESET_LIVE_METRICS': {
+      // Keep the active run's contribution so its next snapshot can be reconciled.
+      const activeRun = state.simulationRuns.find(r => r.id === state.activeSimulationId);
+      return { ...state, liveMetrics: activeRun?.metrics ?? { total: 0, success: 0, errors: 0, byType: {}, recentTimestamps: [] } };
+    }
     case 'START_SIMULATION': {
       const run: SimulationRun = {
         id: action.id,
@@ -192,9 +198,19 @@ function reducer(state: State, action: Action): State {
         liveMetrics: { total: 0, success: 0, errors: 0, byType: {}, recentTimestamps: [] },
       };
     }
+    case 'RECONCILE_SIMULATION': {
+      if (action.id !== state.activeSimulationId) return state;
+      const run = state.simulationRuns.find(r => r.id === action.id)!;
+      const metrics = snapshotMetrics(action.snapshot, run.metrics);
+      const updated = { ...run, metrics,
+        ...(action.snapshot.type === 'done' ? { finishedAt: run.startedAt + action.snapshot.elapsedMs } : {}) };
+      return { ...state,
+        liveMetrics: reconcileLiveMetrics(state.liveMetrics, run.metrics, metrics),
+        simulationRuns: state.simulationRuns.map(r => r.id === action.id ? updated : r) };
+    }
     case 'STOP_SIMULATION': {
       const runs = state.simulationRuns.map((r) =>
-        r.id === state.activeSimulationId ? { ...r, finishedAt: Date.now() } : r,
+        r.id === state.activeSimulationId ? { ...r, finishedAt: r.finishedAt ?? Date.now() } : r,
       );
       return { ...state, activeSimulationId: null, simulationRuns: runs };
     }

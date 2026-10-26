@@ -3,7 +3,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { SimulationRuns, currentOpsPerSec, type SimulationRun, type RunStats, type OpEvent, type SimEvent } from './simulation-runs.js';
+import { SimulationRuns, type SimulationRun, type RunStats } from './simulation-runs.js';
+import type { OpEvent, SimEvent } from '../simulation-protocol.js';
 
 const DEVNET_NUM_NODES = 6;
 const DEVNET_API_PORT_BASE = 9201;
@@ -116,12 +117,17 @@ function jsonResponse(res: ServerResponse, status: number, body: unknown) {
 
 const runs = new SimulationRuns();
 
-function recordOp(stats: RunStats, opType: string, success: boolean, durationMs: number, isTimeout: boolean) {
-  if (!stats.byOp[opType]) stats.byOp[opType] = { ok: 0, fail: 0, timeouts: 0, totalMs: 0 };
+function recordOp(stats: RunStats, opType: string, success: boolean, durationMs: number, isTimeout: boolean, phases: Record<string, number>) {
+  if (!stats.byOp[opType]) stats.byOp[opType] = { ok: 0, fail: 0, timeouts: 0, totalMs: 0, allMs: 0, phaseTotals: {}, phaseCounts: {} };
   const s = stats.byOp[opType];
   if (success) s.ok++; else s.fail++;
   if (isTimeout) s.timeouts++;
   if (success) s.totalMs += durationMs;
+  s.allMs += durationMs;
+  for (const [phase, ms] of Object.entries(phases)) {
+    s.phaseTotals[phase] = (s.phaseTotals[phase] ?? 0) + ms;
+    s.phaseCounts[phase] = (s.phaseCounts[phase] ?? 0) + 1;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -448,18 +454,12 @@ async function runSimulation(config: SimConfig, run: SimulationRun) {
   }
 
   if (signal.aborted) return;
-  broadcast({ type: 'status', total: config.opCount, completed: 0, errors: 0, opsPerSec: 0 });
+  broadcast({ type: 'status', ...runs.status(run) });
 
   // Periodic status broadcaster
   const statusInterval = setInterval(() => {
     if (signal.aborted) return;
-    broadcast({
-      type: 'status',
-      total: config.opCount,
-      completed: stats.completed,
-      errors: stats.errors,
-      opsPerSec: Math.round(currentOpsPerSec(stats) * 10) / 10,
-    });
+    broadcast({ type: 'status', ...runs.status(run) });
   }, 500);
 
   let dispatched = 0;
@@ -476,7 +476,7 @@ async function runSimulation(config: SimConfig, run: SimulationRun) {
       stats.recentTimestamps.push(Date.now());
       const isTimeout = !event.success && event.detail.startsWith('timeout');
       if (!event.success) stats.errors++;
-      recordOp(stats, event.opType, event.success, event.durationMs, isTimeout);
+      recordOp(stats, event.opType, event.success, event.durationMs, isTimeout, event.phases);
       broadcast(event);
 
       if (stats.completed >= config.opCount) {
@@ -519,6 +519,7 @@ async function runSimulation(config: SimConfig, run: SimulationRun) {
         inflight--;
         stats.completed++;
         stats.errors++;
+        recordOp(stats, opType, false, 0, false, {});
         stats.recentTimestamps.push(Date.now());
         broadcast({
           type: 'op',
@@ -603,12 +604,13 @@ export async function handleSimRequest(req: IncomingMessage, res: ServerResponse
     config.name = config.name ?? `Sim-${rndId()}`;
 
     const id = runId ?? randomUUID();
-    // Check after reading the body: another start/stop may have completed meanwhile.
-    if (runs.active || runs.get(id) || runs.wasCancelled(id)) {
-      jsonResponse(res, 409, { error: runs.active ? 'Simulation already running' : 'Simulation run ID was completed or cancelled' });
+    // Admission is synchronous and follows body parsing, including early cancellation.
+    const admission = runs.admit(id, config.opCount);
+    if (!admission.accepted) {
+      jsonResponse(res, 409, { error: admission.error });
       return;
     }
-    const run = runs.create(id, config.opCount);
+    const { run } = admission;
     jsonResponse(res, 200, { started: true, name: config.name, runId: id });
     runSimulation(config, run)
       .catch((err) => {
