@@ -16,6 +16,7 @@ import {
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { appendInPlace } from './append-in-place.js';
 import { compareCodePoint } from './code-point-order.js';
+import { createGraphScopedDurablePrefix } from './durable-prefix.js';
 import { prepareDurableMeta, type PreparedDurableMeta } from './durable-metadata-intake.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
@@ -427,94 +428,16 @@ export function planBoundedGraphScopedDurableBatch(
     )
   ) return null;
 
-  const descriptors = manifest.descriptors;
-  const descriptorByGraph = new Map(
-    descriptors.map((descriptor) => [descriptor.assertionGraph, descriptor] as const),
-  );
-
-  const observedCounts = new Map<string, number>();
-  for (const quad of dataQuads) {
-    if (!descriptorByGraph.has(quad.graph)) return null;
-    observedCounts.set(quad.graph, (observedCounts.get(quad.graph) ?? 0) + 1);
-  }
-
-  let manifestOffset = 0;
-  let reachedResumeBoundary = resumedFromOffset === 0;
-  let stoppedAtIncompleteGraph = false;
-  let safeNextOffset = resumedFromOffset;
-  let completedGraphCount = 0;
-  const completeGraphs = new Set<string>();
-  const completedPositiveGraphs: Array<{ graph: string; rowCount: number }> = [];
-
-  // Zero-public V2 assets have no responder rows, but their metadata envelope
-  // is independently verifiable. Keep them in scope on every bounded round;
-  // this is idempotent and avoids an offset ambiguity for zero-width entries.
-  for (const descriptor of descriptors) {
-    if (descriptor.publicTripleCount === 0) completeGraphs.add(descriptor.assertionGraph);
-  }
-
-  for (const descriptor of descriptors) {
-    const expected = descriptor.publicTripleCount;
-    if (expected === 0) continue;
-    const graphStart = manifestOffset;
-    const graphEnd = graphStart + expected;
-    if (!Number.isSafeInteger(graphEnd)) return null;
-    manifestOffset = graphEnd;
-
-    if (!reachedResumeBoundary) {
-      if (graphEnd <= resumedFromOffset) {
-        if ((observedCounts.get(descriptor.assertionGraph) ?? 0) !== 0) return null;
-        continue;
-      }
-      if (graphStart !== resumedFromOffset) return null;
-      reachedResumeBoundary = true;
-    }
-
-    const observed = observedCounts.get(descriptor.assertionGraph) ?? 0;
-    if (stoppedAtIncompleteGraph) {
-      // The responder can fetch exact graphs through independent partitions.
-      // An interrupted round may therefore contain rows for later graphs even
-      // though an earlier graph is short. Those rows are not part of the
-      // contiguous checkpointable prefix, but their presence does not make the
-      // already-complete leading graphs ambiguous: graph-scoped metadata still
-      // gives every row an exact owner and the verifier authenticates each
-      // selected graph before storage. Drop the non-contiguous tail and replay
-      // it from the first incomplete boundary on the next round.
-      continue;
-    }
-    if (observed === expected) {
-      completeGraphs.add(descriptor.assertionGraph);
-      completedPositiveGraphs.push({
-        graph: descriptor.assertionGraph,
-        rowCount: expected,
-      });
-      safeNextOffset += expected;
-      completedGraphCount += 1;
-      continue;
-    }
-    if (observed < 0 || observed > expected) return null;
-    stoppedAtIncompleteGraph = true;
-  }
-
-  if (!reachedResumeBoundary || safeNextOffset > rawNextOffset) return null;
-
-  // A timed-out fetch can stop exactly on a graph boundary without receiving
-  // the terminal empty page. Do not checkpoint the final complete graph in
-  // that case: the next round must receive at least one verified data graph so
-  // its clean completion can serve as readiness evidence rather than an empty
-  // terminal probe after all useful rows were persisted by timed-out rounds.
-  // Filtered rows can move the raw offset past the manifest's end, so an
-  // incomplete round never checkpoints that end either: no graph starts there.
-  if (
-    !phaseCompleted
-    && (safeNextOffset === rawNextOffset || safeNextOffset === manifestOffset)
-    && completedPositiveGraphs.length > 0
-  ) {
-    const replay = completedPositiveGraphs.pop()!;
-    completeGraphs.delete(replay.graph);
-    safeNextOffset -= replay.rowCount;
-    completedGraphCount -= 1;
-  }
+  const prefix = createGraphScopedDurablePrefix(manifest, resumedFromOffset);
+  prefix.observe(dataQuads);
+  const retained = prefix.prefix(rawNextOffset, phaseCompleted);
+  if (retained === null) return null;
+  const { safeNextOffset, completedGraphCount } = retained;
+  const manifestOffset = prefix.manifestRowCount;
+  // Zero-public envelopes remain in scope in every round; they have no DATA rows.
+  const completeGraphs = new Set(manifest.descriptors
+    .filter(descriptor => descriptor.publicTripleCount === 0).map(descriptor => descriptor.assertionGraph));
+  for (let index = 0; index < completedGraphCount; index += 1) completeGraphs.add(prefix.graphs[index]!.graph);
 
   const boundedData = dataQuads.filter((quad) => completeGraphs.has(quad.graph));
   if (boundedData.length !== safeNextOffset - resumedFromOffset) return null;
