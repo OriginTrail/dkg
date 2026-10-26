@@ -26,9 +26,13 @@ References:
 The resource exposes typed `advance` and `inspect` methods. `advance` is an
 asynchronous component export and returns terminal output or a diagnostic.
 
-The component wrapper calls the existing `dkg-runtime-wasm` kernel directly,
-so there is still one parser and execution implementation. The kernel's
-internal effect state is never exported through WIT. The component can invoke
+Both transport wrappers call `dkg-runtime-executor` for typed compilation,
+admission, materialization, advancement, and inspection. The `dkg-runtime-wasm`
+adapter owns CBOR envelopes and numeric handle tables. The component converts
+typed results to WIT records and owns a Rust execution partition in each
+resource, without internal transport envelopes or payload decoders. There is
+one parser and execution implementation. The kernel's internal effect state is
+never exported through WIT. The component can invoke
 only the explicit `investigator`, `query-catalog`, and `remote-execute` imports
 compiled into its world; there is no generic operation-name import or exported
 effect dispatcher.

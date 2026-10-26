@@ -276,11 +276,22 @@ dependencies = [
 name = "dkg-runtime-component"
 version = "0.1.0"
 dependencies = [
- "dkg-runtime-codec",
+ "dkg-ir",
+ "dkg-runtime-executor",
  "dkg-runtime-types",
- "dkg-runtime-wasm",
- "minicbor",
+ "dkg-strategy-compiler",
  "wit-bindgen 0.61.1",
+]
+
+[[package]]
+name = "dkg-runtime-executor"
+version = "0.1.0"
+dependencies = [
+ "dkg-ir",
+ "dkg-runtime-kernel",
+ "dkg-runtime-types",
+ "dkg-strategy-compiler",
+ "sha2",
 ]
 
 [[package]]
@@ -315,11 +326,11 @@ version = "0.1.0"
 dependencies = [
  "dkg-ir",
  "dkg-runtime-codec",
+ "dkg-runtime-executor",
  "dkg-runtime-kernel",
  "dkg-runtime-types",
  "dkg-strategy-compiler",
  "minicbor",
- "sha2",
  "wasm-bindgen",
 ]
 

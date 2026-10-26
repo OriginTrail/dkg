@@ -47,39 +47,7 @@ pub mod message_type {
     pub const APPLY_PLAN: u16 = 12;
 }
 
-/// One value produced by a logical agent during plan execution.
-pub struct PlanValue {
-    /// Declared delegate role.
-    pub role: String,
-    /// Stable logical process identity.
-    pub process_id: [u8; 32],
-    /// Emitted value or external operation result.
-    pub value: String,
-}
-
-/// Optional host result supplied while driving a plan.
-pub enum PlanApplyInput {
-    /// Continue deterministic execution without supplying an external result.
-    Continue,
-    /// Result for the single currently pending external operation.
-    EffectResult {
-        /// Stable request identity generated inside Wasm.
-        effect_id: u64,
-        /// Successful value or redaction-safe failure code.
-        result: Result<String, String>,
-    },
-}
-
-/// Redaction-safe identity and lifecycle state for one materialized logical agent.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StartedAgentSummary {
-    /// Stable role declared by the admitted `delegate` form.
-    pub role: String,
-    /// Deterministic process identity derived from the canonical plan.
-    pub process_id: [u8; 32],
-    /// Stable lifecycle state name.
-    pub status: &'static str,
-}
+pub use dkg_runtime_types::{PlanApplyInput, PlanValue, StartedAgentSummary};
 
 /// Successful ABI response payload.
 #[derive(Clone, Debug, Eq, PartialEq)]

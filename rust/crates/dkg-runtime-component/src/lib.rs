@@ -1,8 +1,8 @@
 //! WASI 0.3 Component Model boundary for the deterministic semantic kernel.
 //!
 //! The component exports typed WIT records, variants, results, and an opaque
-//! execution resource. The existing CBOR codec is used only behind this
-//! boundary to reuse the already-conformant deterministic kernel.
+//! execution resource. It calls the same typed executor as the wasm-bindgen
+//! boundary, without internal CBOR envelopes or numeric handles.
 
 #[allow(clippy::same_length_and_capacity)]
 mod bindings {
@@ -25,39 +25,17 @@ use bindings::origintrail::semantic_runtime::capability::ExecutionCapability;
 use bindings::origintrail::semantic_runtime::{
     asset_create, investigator, query_catalog, remote_execute, safe_llm, sparql_read,
 };
-use dkg_runtime_codec::{
-    AbiResponse, PlanApplyInput, decode_response, encode_admit_request, encode_apply_plan_request,
-    encode_compile_request, encode_empty_request, encode_start_plan_request, message_type,
+use dkg_runtime_executor::{
+    self as executor, ExecutorError, PlanEffectRequest, PlanReceipt, PlanRuntime, PlanStep,
 };
-use dkg_runtime_types::{ABI_VERSION, SCHEMA_VERSION};
-use minicbor::{Decoder, data::Type};
-
-const REQUEST_ID: u64 = 1;
+use dkg_runtime_types::{ABI_VERSION, PlanApplyInput, SCHEMA_VERSION};
+use std::cell::RefCell;
 
 struct Component;
 
 struct ExecutionState {
-    handle: u32,
+    runtime: RefCell<PlanRuntime>,
     capability: ExecutionCapability,
-}
-
-struct KernelEffectRequest {
-    effect_id: u64,
-    operation: String,
-    version: u16,
-    arguments: Vec<String>,
-}
-
-enum KernelStep {
-    EffectRequested(KernelEffectRequest),
-    Completed(Completion),
-}
-
-impl Drop for ExecutionState {
-    fn drop(&mut self) {
-        let request = encode_empty_request(REQUEST_ID, message_type::DROP_PLAN);
-        let _ = dkg_runtime_wasm::runtime_drop_plan(self.handle, &request);
-    }
 }
 
 #[allow(clippy::unused_async_trait_impl)]
@@ -65,10 +43,13 @@ impl GuestExecution for ExecutionState {
     async fn advance(&self) -> Result<Step, Diagnostic> {
         let mut input = PlanApplyInput::Continue;
         loop {
-            let request = encode_apply_plan_request(REQUEST_ID, &input);
-            let response = dkg_runtime_wasm::runtime_apply_plan(self.handle, &request);
-            match decode_kernel_step(&success_payload(&response, message_type::APPLY_PLAN)?)? {
-                KernelStep::EffectRequested(effect) => {
+            let step = self
+                .runtime
+                .borrow_mut()
+                .advance(input)
+                .map_err(executor_diagnostic)?;
+            match step {
+                PlanStep::EffectRequested(effect) => {
                     let effect_id = effect.effect_id;
                     let output = dispatch_tool(&self.capability, effect).await?;
                     input = PlanApplyInput::EffectResult {
@@ -76,19 +57,18 @@ impl GuestExecution for ExecutionState {
                         result: Ok(output),
                     };
                 }
-                KernelStep::Completed(completion) => return Ok(Step::Completed(completion)),
+                PlanStep::Completed(completion) => {
+                    return Ok(Step::Completed(Completion {
+                        events: completion.events.into_iter().map(plan_value).collect(),
+                        outputs: completion.outputs.into_iter().map(plan_value).collect(),
+                    }));
+                }
             }
         }
     }
 
     fn inspect(&self) -> Result<ExecutionReceipt, Diagnostic> {
-        let request = encode_empty_request(REQUEST_ID, message_type::INSPECT_PLAN);
-        let response = dkg_runtime_wasm::runtime_inspect_plan(self.handle, &request);
-        decode_receipt(
-            &success_payload(&response, message_type::INSPECT_PLAN)?,
-            false,
-        )
-        .map(|(_, receipt)| receipt)
+        Ok(execution_receipt(self.runtime.borrow().inspect()))
     }
 }
 
@@ -100,17 +80,15 @@ impl Guest for Component {
     }
 
     fn compile(source: String) -> Result<AdmittedPlan, Vec<AdmissionDiagnostic>> {
-        let request = encode_compile_request(REQUEST_ID, source.as_bytes());
-        let response = dkg_runtime_wasm::runtime_compile_strategy(&request);
-        let payload = success_payload(&response, message_type::COMPILE)
-            .map_err(|error| vec![abi_admission_diagnostic(error)])?;
-        decode_compile(&payload).map_err(|error| vec![abi_admission_diagnostic(error)])?
+        executor::compile(source.as_bytes())
+            .map(admitted_plan)
+            .map_err(|diagnostics| diagnostics.into_iter().map(admission_diagnostic).collect())
     }
 
     fn admit(plan: Vec<u8>) -> Result<AdmittedPlan, Diagnostic> {
-        let request = encode_admit_request(REQUEST_ID, &plan);
-        let response = dkg_runtime_wasm::runtime_admit_plan(&request);
-        decode_admitted_plan(&success_payload(&response, message_type::ADMIT)?)
+        executor::admit(&plan)
+            .map(admitted_plan)
+            .map_err(executor_diagnostic)
     }
 
     fn start(
@@ -118,195 +96,104 @@ impl Guest for Component {
         plan: Vec<u8>,
         logical_time: u64,
     ) -> Result<(Execution, ExecutionReceipt), Diagnostic> {
-        let request = encode_start_plan_request(REQUEST_ID, &plan, logical_time);
-        let response = dkg_runtime_wasm::runtime_start_plan(&request);
-        let (handle, receipt) =
-            decode_receipt(&success_payload(&response, message_type::START_PLAN)?, true)?;
-        let handle = handle.ok_or_else(|| diagnostic("COMPONENT_HANDLE", "component"))?;
+        let runtime = executor::start(&plan, logical_time).map_err(executor_diagnostic)?;
+        let receipt = execution_receipt(runtime.inspect());
         Ok((
-            Execution::new(ExecutionState { handle, capability }),
+            Execution::new(ExecutionState {
+                runtime: RefCell::new(runtime),
+                capability,
+            }),
             receipt,
         ))
     }
 }
 
-fn success_payload(input: &[u8], operation: u16) -> Result<Vec<u8>, Diagnostic> {
-    match decode_response(input, operation).map_err(|error| diagnostic(error.code(), "codec"))? {
-        AbiResponse::Success(success) if success.request_id == REQUEST_ID => Ok(success.payload),
-        AbiResponse::Success(_) => Err(diagnostic("REQUEST_ID_MISMATCH", "component")),
-        AbiResponse::Failure(failure) => Err(Diagnostic {
-            code: failure.code,
-            message: "semantic kernel rejected the operation".into(),
-            category: failure.category,
-            retryable: failure.retryable,
-        }),
-    }
-}
-
-fn decode_compile(
-    payload: &[u8],
-) -> Result<Result<AdmittedPlan, Vec<AdmissionDiagnostic>>, Diagnostic> {
-    let mut decoder = Decoder::new(payload);
-    require_array(&mut decoder, 2)?;
-    let tag = decoder.u8().map_err(decode_error)?;
-    let body = decoder.bytes().map_err(decode_error)?;
-    let result = match tag {
-        0 => Ok(decode_admitted_plan(body)?),
-        1 => Err(decode_admission_diagnostics(body)?),
-        _ => return Err(diagnostic("COMPONENT_COMPILE_TAG", "codec")),
-    };
-    require_finished(&decoder, payload.len())?;
-    Ok(result)
-}
-
-fn decode_admitted_plan(payload: &[u8]) -> Result<AdmittedPlan, Diagnostic> {
-    let mut decoder = Decoder::new(payload);
-    require_array(&mut decoder, 10)?;
-    let canonical_plan = decoder.bytes().map_err(decode_error)?.to_vec();
-    let canonical_hash = decoder.bytes().map_err(decode_error)?.to_vec();
-    let strategy_ref = decoder.str().map_err(decode_error)?.to_owned();
-    let scope = decoder.str().map_err(decode_error)?.to_owned();
-    let goal = decoder.str().map_err(decode_error)?.to_owned();
-    let required_capabilities = decode_strings(&mut decoder)?;
-    let effect_upper_bound = decode_strings(&mut decoder)?;
-    let approval_requirements = decode_strings(&mut decoder)?;
-    let adapter_count = decoder
-        .map()
-        .map_err(decode_error)?
-        .ok_or_else(|| diagnostic("COMPONENT_INDEFINITE_MAP", "codec"))?;
-    let mut adapter_versions = Vec::with_capacity(to_usize(adapter_count)?);
-    for _ in 0..adapter_count {
-        adapter_versions.push(AdapterVersion {
-            operation: decoder.str().map_err(decode_error)?.to_owned(),
-            version: decoder.u16().map_err(decode_error)?,
-        });
-    }
-    require_array(&mut decoder, 4)?;
-    let bounds = ResourceBounds {
-        processes: decoder.u32().map_err(decode_error)?,
-        host_commands: decoder.u32().map_err(decode_error)?,
-        retry_attempts: decoder.u32().map_err(decode_error)?,
-        depth: decoder.u16().map_err(decode_error)?,
-    };
-    require_finished(&decoder, payload.len())?;
-    Ok(AdmittedPlan {
-        canonical_plan,
-        canonical_hash,
-        strategy_ref,
-        scope,
-        goal,
-        required_capabilities,
-        effect_upper_bound,
-        approval_requirements,
-        adapter_versions,
-        bounds,
-    })
-}
-
-fn decode_admission_diagnostics(payload: &[u8]) -> Result<Vec<AdmissionDiagnostic>, Diagnostic> {
-    let mut decoder = Decoder::new(payload);
-    let count = require_list(&mut decoder)?;
-    let mut diagnostics = Vec::with_capacity(to_usize(count)?);
-    for _ in 0..count {
-        require_array(&mut decoder, 7)?;
-        let code = decoder.str().map_err(decode_error)?.to_owned();
-        let start = SourcePosition {
-            line: decoder.u64().map_err(decode_error)?,
-            column: decoder.u64().map_err(decode_error)?,
-        };
-        let end = SourcePosition {
-            line: decoder.u64().map_err(decode_error)?,
-            column: decoder.u64().map_err(decode_error)?,
-        };
-        let message = decoder.str().map_err(decode_error)?.to_owned();
-        let help = if decoder.datatype().map_err(decode_error)? == Type::Null {
-            decoder.null().map_err(decode_error)?;
-            None
-        } else {
-            Some(decoder.str().map_err(decode_error)?.to_owned())
-        };
-        diagnostics.push(AdmissionDiagnostic {
-            code,
-            primary: SourceSpan { start, end },
-            message,
-            help,
-        });
-    }
-    require_finished(&decoder, payload.len())?;
-    Ok(diagnostics)
-}
-
-fn decode_receipt(
-    payload: &[u8],
-    includes_handle: bool,
-) -> Result<(Option<u32>, ExecutionReceipt), Diagnostic> {
-    let mut decoder = Decoder::new(payload);
-    require_array(&mut decoder, if includes_handle { 6 } else { 5 })?;
-    let handle = if includes_handle {
-        Some(decoder.u32().map_err(decode_error)?)
-    } else {
-        None
-    };
-    let canonical_hash = decoder.bytes().map_err(decode_error)?.to_vec();
-    let strategy_ref = decoder.str().map_err(decode_error)?.to_owned();
-    let logical_time = decoder.u64().map_err(decode_error)?;
-    let state_digest = decoder.bytes().map_err(decode_error)?.to_vec();
-    let count = require_list(&mut decoder)?;
-    let mut agents = Vec::with_capacity(to_usize(count)?);
-    for _ in 0..count {
-        require_array(&mut decoder, 3)?;
-        agents.push(LogicalAgent {
-            role: decoder.str().map_err(decode_error)?.to_owned(),
-            process_id: decoder.bytes().map_err(decode_error)?.to_vec(),
-            status: decoder.str().map_err(decode_error)?.to_owned(),
-        });
-    }
-    require_finished(&decoder, payload.len())?;
-    Ok((
-        handle,
-        ExecutionReceipt {
-            canonical_hash,
-            strategy_ref,
-            logical_time,
-            state_digest,
-            agents,
+fn admitted_plan(plan: dkg_strategy_compiler::AdmittedPlan) -> AdmittedPlan {
+    AdmittedPlan {
+        canonical_plan: plan.canonical_plan_cbor,
+        canonical_hash: plan.canonical_hash.to_vec(),
+        strategy_ref: plan.strategy_ref,
+        scope: plan.scope,
+        goal: plan.goal,
+        required_capabilities: plan.required_capabilities.into_iter().collect(),
+        effect_upper_bound: plan
+            .effect_upper_bound
+            .into_iter()
+            .map(|effect| effect.as_str().to_owned())
+            .collect(),
+        approval_requirements: plan
+            .approval_requirements
+            .into_iter()
+            .map(|effect| effect.as_str().to_owned())
+            .collect(),
+        adapter_versions: plan
+            .adapter_versions
+            .into_iter()
+            .map(|(operation, version)| AdapterVersion { operation, version })
+            .collect(),
+        bounds: ResourceBounds {
+            processes: plan.resource_bounds.processes,
+            host_commands: plan.resource_bounds.host_commands,
+            retry_attempts: plan.resource_bounds.retry_attempts,
+            depth: plan.resource_bounds.depth,
         },
-    ))
+    }
 }
 
-fn decode_kernel_step(payload: &[u8]) -> Result<KernelStep, Diagnostic> {
-    let mut decoder = Decoder::new(payload);
-    let length = decoder
-        .array()
-        .map_err(decode_error)?
-        .ok_or_else(|| diagnostic("COMPONENT_INDEFINITE_ARRAY", "codec"))?;
-    let tag = decoder.u8().map_err(decode_error)?;
-    let step = match (tag, length) {
-        (0, 6) => {
-            let effect = KernelEffectRequest {
-                effect_id: decoder.u64().map_err(decode_error)?,
-                operation: {
-                    let _process_id = decoder.bytes().map_err(decode_error)?;
-                    decoder.str().map_err(decode_error)?.to_owned()
-                },
-                version: decoder.u16().map_err(decode_error)?,
-                arguments: decode_strings(&mut decoder)?,
-            };
-            KernelStep::EffectRequested(effect)
-        }
-        (1, 3) => KernelStep::Completed(Completion {
-            events: decode_plan_values(&mut decoder)?,
-            outputs: decode_plan_values(&mut decoder)?,
-        }),
-        _ => return Err(diagnostic("COMPONENT_STEP_TAG", "codec")),
+fn admission_diagnostic(value: dkg_ir::Diagnostic) -> AdmissionDiagnostic {
+    let position = |value: dkg_ir::SourcePosition| SourcePosition {
+        line: u64::try_from(value.line).expect("source line fits u64"),
+        column: u64::try_from(value.column).expect("source column fits u64"),
     };
-    require_finished(&decoder, payload.len())?;
-    Ok(step)
+    AdmissionDiagnostic {
+        code: value.code.as_str().into(),
+        primary: SourceSpan {
+            start: position(value.primary.start),
+            end: position(value.primary.end),
+        },
+        message: value.message,
+        help: value.help,
+    }
+}
+
+fn execution_receipt(receipt: PlanReceipt) -> ExecutionReceipt {
+    ExecutionReceipt {
+        canonical_hash: receipt.canonical_hash.to_vec(),
+        strategy_ref: receipt.strategy_ref,
+        logical_time: receipt.logical_time,
+        state_digest: receipt.state_digest.to_vec(),
+        agents: receipt
+            .agents
+            .into_iter()
+            .map(|agent| LogicalAgent {
+                role: agent.role,
+                process_id: agent.process_id.to_vec(),
+                status: agent.status.into(),
+            })
+            .collect(),
+    }
+}
+
+fn plan_value(value: dkg_runtime_types::PlanValue) -> PlanValue {
+    PlanValue {
+        role: value.role,
+        process_id: value.process_id.to_vec(),
+        value: value.value,
+    }
+}
+
+fn executor_diagnostic(error: ExecutorError) -> Diagnostic {
+    Diagnostic {
+        code: error.code.into(),
+        message: "semantic kernel rejected the operation".into(),
+        category: error.category.into(),
+        retryable: false,
+    }
 }
 
 async fn dispatch_tool(
     capability: &ExecutionCapability,
-    effect: KernelEffectRequest,
+    effect: PlanEffectRequest,
 ) -> Result<String, Diagnostic> {
     if effect.version != 1 {
         return Err(diagnostic("COMPONENT_TOOL_VERSION", "tool"));
@@ -425,81 +312,11 @@ fn tool_diagnostic(code: String, message: String, retryable: bool) -> Diagnostic
     }
 }
 
-fn decode_plan_values(decoder: &mut Decoder<'_>) -> Result<Vec<PlanValue>, Diagnostic> {
-    let count = require_list(decoder)?;
-    let mut values = Vec::with_capacity(to_usize(count)?);
-    for _ in 0..count {
-        require_array(decoder, 3)?;
-        values.push(PlanValue {
-            role: decoder.str().map_err(decode_error)?.to_owned(),
-            process_id: decoder.bytes().map_err(decode_error)?.to_vec(),
-            value: decoder.str().map_err(decode_error)?.to_owned(),
-        });
-    }
-    Ok(values)
-}
-
-fn decode_strings(decoder: &mut Decoder<'_>) -> Result<Vec<String>, Diagnostic> {
-    let count = require_list(decoder)?;
-    let mut values = Vec::with_capacity(to_usize(count)?);
-    for _ in 0..count {
-        values.push(decoder.str().map_err(decode_error)?.to_owned());
-    }
-    Ok(values)
-}
-
-fn require_array(decoder: &mut Decoder<'_>, expected: u64) -> Result<(), Diagnostic> {
-    if decoder.array().map_err(decode_error)? != Some(expected) {
-        return Err(diagnostic("COMPONENT_ARRAY_SHAPE", "codec"));
-    }
-    Ok(())
-}
-
-fn require_list(decoder: &mut Decoder<'_>) -> Result<u64, Diagnostic> {
-    decoder
-        .array()
-        .map_err(decode_error)?
-        .ok_or_else(|| diagnostic("COMPONENT_INDEFINITE_ARRAY", "codec"))
-}
-
-fn require_finished(decoder: &Decoder<'_>, length: usize) -> Result<(), Diagnostic> {
-    if decoder.position() != length {
-        return Err(diagnostic("COMPONENT_TRAILING_DATA", "codec"));
-    }
-    Ok(())
-}
-
-fn to_usize(value: u64) -> Result<usize, Diagnostic> {
-    usize::try_from(value).map_err(|_| diagnostic("COMPONENT_LIMIT", "limit"))
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn decode_error(error: minicbor::decode::Error) -> Diagnostic {
-    Diagnostic {
-        code: "COMPONENT_DECODE".into(),
-        message: error.to_string(),
-        category: "codec".into(),
-        retryable: false,
-    }
-}
-
 fn diagnostic(code: &str, category: &str) -> Diagnostic {
     Diagnostic {
         code: code.into(),
         message: "semantic component boundary rejected malformed kernel data".into(),
         category: category.into(),
         retryable: false,
-    }
-}
-
-fn abi_admission_diagnostic(error: Diagnostic) -> AdmissionDiagnostic {
-    AdmissionDiagnostic {
-        code: error.code,
-        primary: SourceSpan {
-            start: SourcePosition { line: 1, column: 0 },
-            end: SourcePosition { line: 1, column: 0 },
-        },
-        message: error.message,
-        help: None,
     }
 }
