@@ -65,8 +65,12 @@ function mutate(command, args) {
 // interactive or web authentication prompt. The one-time code reaches npm in
 // its environment, never its arguments, and a failure carries npm's error code
 // only, never its output or arguments.
-function quietNpm(args, { otp, timeout = 60_000 } = {}) {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'npm_config_otp'));
+function quietNpm(args, { otp, timeout = 60_000, mutation = false } = {}) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+    key.toLowerCase() !== 'npm_config_otp' && (!mutation || key.toLowerCase() !== 'npm_config_fetch_retries')));
+  // A 429 must reach the scheduler immediately, before another write starts.
+  // npm's default retry delays would outlast this wrapper's timeout.
+  if (mutation) env.npm_config_fetch_retries = '0';
   if (otp) env.npm_config_otp = otp;
   return new Promise((resolve, reject) => {
     const child = spawn('npm', args, { stdio: ['ignore', 'pipe', 'pipe'], env });
@@ -127,14 +131,15 @@ function stopped({ stop, otp, completed, planned, remaining, version }) {
 // version, so a re-run continues where an earlier run stopped.
 async function promote({ manifest, tags, bundle, receiptFile, expected, registry, otp, dryRun, readTags, runner, askOtp, parallel, settle, log }) {
   const describe = ({ pkg, channel }) => ({ package: pkg.name, tag: channel });
-  const readPairs = read => inParallel(manifest.packages, parallel, async pkg => {
+  const readPackages = read => inParallel(manifest.packages, parallel, async pkg => {
     const current = await read(pkg);
-    return tags.map(channel => ({ pkg, channel, now: current === null ? 'not readable' : current?.[channel] ?? 'unset' }));
-  }).then(perPackage => perPackage.flat());
+    return { pkg, moves: tags.map(channel => ({ pkg, channel, now: current === null ? 'not readable' : current?.[channel] ?? 'unset' })) };
+  });
   const pending = pairs => pairs.filter(({ pkg, now }) => now !== pkg.version);
-  const before = await readPairs(readTags);
-  const planned = pending(before);
-  const progress = { mode: 'promote', dryRun, reused: [], alreadyOnVersion: before.length - planned.length, completed: [], planned: planned.map(describe) };
+  const before = await readPackages(readTags);
+  const lanes = before.map(({ pkg, moves }) => ({ pkg, moves: pending(moves) })).filter(lane => lane.moves.length > 0);
+  const planned = lanes.flatMap(lane => lane.moves);
+  const progress = { mode: 'promote', dryRun, reused: [], alreadyOnVersion: manifest.packages.length * tags.length - planned.length, completed: [], planned: planned.map(describe) };
   log(`${manifest.packages.length} packages, tags ${tags.join(', ')}: ${progress.alreadyOnVersion} already on ${expected.version}, ${planned.length} to move`);
   // Asked for after the reads, so the code is fresh when the writes start.
   const entered = dryRun || planned.length === 0 ? undefined : otp || (askOtp ? await askOtp() : undefined);
@@ -168,17 +173,17 @@ async function promote({ manifest, tags, bundle, receiptFile, expected, registry
     log(`Moved ${channel} of ${pkg.name} to ${pkg.version}`);
     return true;
   };
-  const lanes = manifest.packages.map(pkg => planned.filter(pair => pair.pkg === pkg)).filter(lane => lane.length > 0);
   // The first write goes alone, so npm refuses a stale or mistyped code once
   // rather than once per parallel write: refused codes count towards its rate
   // limit. Then packages in parallel, each package's tags in sequence: two
   // writes to one package's dist-tags at once can fail with E409 Conflict.
-  if (await move(lanes[0].shift())) {
-    await inParallel(lanes.filter(lane => lane.length > 0), parallel, async lane => { for (const pair of lane) if (!await move(pair)) return; });
+  if (await move(lanes[0].moves.shift())) {
+    await inParallel(lanes.filter(lane => lane.moves.length > 0), parallel, async lane => { for (const pair of lane.moves) if (!await move(pair)) return; });
   }
   // npm has accepted tag writes before that the registry never showed.
   if (settle > 0) await new Promise(resolve => setTimeout(resolve, settle));
-  const remaining = pending(await readPairs(async pkg => { try { return await readTags(pkg); } catch { return null; } }));
+  const remaining = (await readPackages(async pkg => { try { return await readTags(pkg); } catch { return null; } }))
+    .flatMap(({ moves }) => pending(moves));
   progress.remaining = remaining.map(pair => ({ ...describe(pair), now: pair.now }));
   for (const { pkg, channel, now } of remaining) log(`Not on ${pkg.version} yet: ${channel} of ${pkg.name} is ${now}`);
   if (!stop && remaining.length === 0) {
@@ -193,7 +198,7 @@ export async function preparedRelease({
   mode, bundle, receiptFile, expected, rootDir, tag, tags, registry, otp,
   dryRun = false, readDist = pkg => registryDist(pkg, registry),
   readTags = pkg => registryDistTags(pkg, registry),
-  runner = mode === 'promote' ? (_command, args, options) => quietNpm(args, options) : mutate,
+  runner = mode === 'promote' ? (_command, args, options) => quietNpm(args, { ...options, mutation: true }) : mutate,
   askOtp = process.stdin.isTTY ? promptOtp : null, parallel = 8, settle = 4_000,
   gitRunner = (cmd, args) => run(cmd, args, { cwd: rootDir }),
   log = console.log,

@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
+import fs from 'node:fs';
+import path from 'node:path';
+import { createServer } from 'node:http';
 import { preparedRelease, promptOtp } from '../package-certification/publish.mjs';
 import { fixture, releaseGitFixture } from './package-certification-fixture.mjs';
 
@@ -200,4 +203,84 @@ test('the code prompt asks, but never shows the typed code', async () => {
   const cancelled = promptOtp({ input: interrupted, output });
   interrupted.write('\x03');
   await assert.rejects(cancelled, /Cancelled; no tag moved/);
+});
+
+
+test('real npm makes one PUT on HTTP 429 and stops promotion with rate-limit guidance', async t => {
+  const f = fixture(t), npm = fakeNpm(f);
+  const requests = [];
+  const server = createServer((request, response) => {
+    requests.push({ method: request.method, url: request.url });
+    request.resume();
+    response.setHeader('content-type', 'application/json');
+    if (request.method === 'PUT') {
+      response.writeHead(429);
+      response.end(JSON.stringify({ error: 'rate limited' }));
+    } else {
+      response.end(JSON.stringify(Object.fromEntries(TAGS.map(tag => [tag, OLD]))));
+    }
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const config = {
+    NPM_CONFIG_USERCONFIG: path.join(f.root, 'user.npmrc'),
+    NPM_CONFIG_GLOBALCONFIG: path.join(f.root, 'global.npmrc'),
+    NPM_CONFIG_CACHE: path.join(f.root, 'npm-cache'),
+    NPM_CONFIG_FETCH_RETRIES: '2',
+    NPM_CONFIG_FETCH_RETRY_MINTIMEOUT: '1',
+    NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT: '1',
+  };
+  fs.writeFileSync(config.NPM_CONFIG_USERCONFIG, '');
+  fs.writeFileSync(config.NPM_CONFIG_GLOBALCONFIG, '');
+  const saved = Object.fromEntries(Object.keys(config).map(key => [key, process.env[key]]));
+  Object.assign(process.env, config);
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  const error = await failure(preparedRelease(options(f, npm, {
+    runner: undefined,
+    registry: `http://127.0.0.1:${server.address().port}`,
+  })));
+  assert.match(error.message, /E429.*Wait about ten minutes/);
+  const puts = requests.filter(request => request.method === 'PUT');
+  assert.equal(puts.length, 1, 'inherited npm retry settings must not retry a rate-limited write');
+  assert.equal(error.progress.completed.length, 0);
+  assert.equal(error.progress.remaining.length, 6);
+});
+
+test('changing the certificate during OTP entry rejects promotion before every write', async t => {
+  const f = fixture(t), npm = fakeNpm(f);
+  await assert.rejects(preparedRelease(options(f, npm, {
+    otp: undefined,
+    askOtp: () => {
+      const receipt = JSON.parse(fs.readFileSync(f.receiptFile, 'utf8'));
+      fs.writeFileSync(f.receiptFile, JSON.stringify({ ...receipt, outcome: 'FAIL' }));
+      return CODE;
+    },
+  })), /certification did not pass/);
+  assert.equal(npm.calls.length, 0);
+});
+
+test('a pending tarball changed after the first write is never promoted and progress stays accurate', async t => {
+  const f = packageSet(t), npm = fakeNpm(f), pending = f.manifest.packages[1];
+  let changed = false;
+  const error = await failure(preparedRelease(options(f, npm, {
+    runner: async (...args) => {
+      await npm.runner(...args);
+      if (!changed) {
+        fs.appendFileSync(path.join(f.bundle, pending.tarball), 'changed after first write');
+        changed = true;
+      }
+    },
+  })));
+  assert.match(error.message, /bundle's tarball .* changed/);
+  assert.ok(changed);
+  assert.ok(npm.calls.every(({ args }) => args[2] !== `${pending.name}@${pending.version}`));
+  const moved = npm.events.filter(([kind]) => kind === 'end').map(([, name, tag]) => `${tag} of ${name}`).sort();
+  assert.ok(moved.length > 0);
+  assert.deepEqual(pairs(error.progress.completed), moved);
+  assert.equal(error.progress.remaining.length, 36 - moved.length);
+  assert.equal(error.progress.remaining.filter(({ package: name }) => name === pending.name).length, 3);
 });
