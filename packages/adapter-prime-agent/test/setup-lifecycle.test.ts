@@ -6,7 +6,7 @@ import {
   ADAPTER_CONFIG_FILENAME, DEFAULT_PUBLISH_GUARD, MANAGED_BY, SETUP_STATE_FILENAME,
   PrimeAgentAdapterPlugin, PRIME_AGENT_ADAPTER_VERSION,
   defaultExtensionPath, disconnectPrimeAgentProfile, loadDkgAuthToken,
-  readSettings, readSetupState, resolveAgentDir, resolvePrimeAgentProfile, restorePrimeAgentProfile,
+  planPrimeAgentSetup, readSettings, readSetupState, resolveAgentDir, resolvePrimeAgentProfile, restorePrimeAgentProfile,
   runDisconnect, runDoctor, runPrimeAgentSetup, runReconnect, runSetup, runStatus, runUninstall,
   runVerify, setupPrimeAgentProfile, verifyPrimeAgentProfile, writeSessionDescriptor,
   type DaemonPluginApi,
@@ -321,6 +321,43 @@ describe('orchestration and CLI results', () => {
     rmSync(readSetupState(profile())!.priorSettings!.settingsBackupPath);
     writeFileSync(settingsPath(), '{unfinished again');
     await expect(runUninstall(options())).rejects.toThrow(/failed to uninstall/);
+  });
+});
+
+describe('configuration recovery boundaries', () => {
+  it('reuses the original daemon home when a repeated setup omits it', () => {
+    const first = setup();
+    vi.stubEnv('DKG_HOME', join(root, 'different-daemon'));
+    const repeat = planPrimeAgentSetup({ agentDir, extensionPath });
+    expect(repeat.state.dkgHome).toBe(first.state.dkgHome);
+    expect(repeat.state.installedAt).toBe(first.state.installedAt);
+    rmSync(profile().stateDir, { recursive: true });
+    expect(planPrimeAgentSetup({ agentDir, extensionPath }).state.dkgHome).toBe(join(root, 'different-daemon'));
+    vi.stubEnv('DKG_HOME', dkgHome);
+    expect(loadDkgAuthToken()).toBe(token);
+  });
+
+  it('does not rewrite settings whose extension list was removed by the operator', () => {
+    setup();
+    writeSettings({ theme: 'user-theme' });
+    const bytes = readFileSync(settingsPath(), 'utf8');
+    expect(restorePrimeAgentProfile({ agentDir })).toEqual({ ok: true, path: 'noop' });
+    expect(readFileSync(settingsPath(), 'utf8')).toBe(bytes);
+    expect(verifyPrimeAgentProfile(options()).errors).toContain('extension path is not registered in settings.json');
+  });
+
+  it('doctor reports verification errors for an installed adapter', async () => {
+    setup();
+    rmSync(extensionPath);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await runDoctor(options());
+    expect(log.mock.calls.at(-1)![0]).toContain('error          : extension bundle missing');
+  });
+
+  it('uses configured environment defaults for the no-argument orchestrator', async () => {
+    const result = await runPrimeAgentSetup();
+    expect(result).toMatchObject({ ok: true, profile: { agentDir }, state: { dkgHome } });
+    expect(readSettings(settingsPath()).extensions).toEqual([defaultExtensionPath()]);
   });
 });
 
