@@ -16,6 +16,7 @@ import {
   createPublishPreflight,
   installWalletTrace,
   makeVmRequest,
+  pagedObserverProblem,
   publishArrivals,
   readLiftJobs,
   startPublishProducers,
@@ -369,6 +370,31 @@ test('the publisher list observer polls the full list; the paged call waits for 
   } finally {
     await liftSide.stop();
   }
+});
+
+test('the paged observer is refused only for a stream that runs: a lift-only run has no share observer to page', () => {
+  const page = async () => ({ rows: 1 });
+  const none = { paged: null };
+  const withPaged = { paged: page };
+  const share = { withShare: true, withLift: false };
+  const lift = { withShare: false, withLift: true };
+  const both = { withShare: true, withLift: true };
+  const problem = (streams, shareCalls, liftCalls) => pagedObserverProblem(streams, { shareCalls, liftCalls });
+  // the state of this build: neither paged call exists, so each run is refused for the call of ITS stream
+  assert.match(problem(share, none, none), /^the share queue's paged listing .* \(needs P8a\/P9b\)/);
+  assert.match(problem(lift, none, none), /^the publisher's paged listing .* \(needs P9a\/P9b\)/);
+  assert.match(problem(both, none, none), /^the share queue's/, 'a mixed run names the first missing call');
+  // the share queue's call alone: a lift run (which polls no share queue) is allowed, a share or mixed run is not
+  assert.equal(problem(lift, none, withPaged), null);
+  assert.equal(problem(share, none, withPaged), problem(share, none, none));
+  assert.match(problem(both, none, withPaged), /^the share queue's/);
+  // the publisher's call alone: a share run is allowed, a lift or mixed run is not
+  assert.equal(problem(share, withPaged, none), null);
+  assert.match(problem(lift, withPaged, none), /^the publisher's/);
+  assert.match(problem(both, withPaged, none), /^the publisher's/);
+  assert.equal(problem(both, withPaged, withPaged), null);
+  assert.equal(pagedObserverProblem(lift), pagedObserverProblem(lift, {}), 'the real tables are the default');
+  assert.equal(LIFT_OBSERVER_CALLS.paged, null, 'this build has no publisher paged call yet');
 });
 
 test('stop() reports a runner that does not stop in time and still takes the trace off', async () => {

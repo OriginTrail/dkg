@@ -8,7 +8,10 @@
 //   daemon.status.storeProbe     probeExternalStore(agent): ASK, the caller waits at most 5 s and gets 'no-answer'
 //                                (also when the scheduler rejects it); concurrent callers share the running probe
 //   daemon.status.storeQuads     requestExternalStoreQuads(agent, now): the full-store COUNT, started in the background
-//                                unless a result younger than 30 s is cached or one is running
+//                                unless a result younger than 30 s is cached or one is running. The product returns no
+//                                handle to it, so the agent given to this call sees the store through withTrackedCount:
+//                                the COUNT's query is tracked and drain() waits for it (bounded), or it would still be
+//                                reading when the run closes the store and drops the namespace
 //   daemon.metrics.storeHealth   createStoreCountMetrics(query).getStoreCountSnapshot(): ASK {}, on every read that
 //                                reuses a reconciled snapshot. The one reconcile it needs first (background lane,
 //                                source daemon.metrics.storeCountReconcile, at most once per 5 min in production) is
@@ -26,10 +29,18 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { CG_ID } from './fixture.mjs';
 import { summarize } from './verdict.mjs';
+import { within } from './workload.mjs';
 
 export const PROBE_RECONCILE_SOURCE = 'daemon.metrics.storeCountReconcile';
+/** The source label of the full-store COUNT (store-quads-cache.ts countStoreQuads). */
+export const COUNT_SOURCE = 'daemon.status.storeQuads';
 /** store-reachability.ts STORE_PROBE_WAIT_MS: a status probe that has not answered by then reports 'no-answer'. */
 export const NO_ANSWER_MS = 5000;
+/**
+ * How long the end of a run waits for the probe load to finish (startProbeLoad's drain): the status probes answer
+ * within NO_ANSWER_MS by construction, the full-store COUNT is never aborted (like the daemon's) and has no such bound.
+ */
+export const PROBE_DRAIN_MS = 30_000;
 /** The harness's cadences and phases in ms, and the ACK payload in quads. */
 export const LOAD_DEFAULTS = Object.freeze({
   statusMs: 10_000,
@@ -91,9 +102,33 @@ export function makeMetricsQuery(store, counters) {
 }
 
 /**
+ * The store as the full-store COUNT sees it: every other member is the store's own, and a query labelled COUNT_SOURCE
+ * is handed to track(promise) as well as returned. The product starts that COUNT in the background and keeps no handle
+ * to it (requestExternalStoreQuads returns the cached fields at once), so this is the only way to know when it has
+ * settled. The query itself is untouched: same options, same scheduler lane, same result or rejection.
+ */
+export function withTrackedCount(store, track) {
+  return new Proxy(store, {
+    get(target, prop) {
+      if (prop === 'query') {
+        return (sparql, options) => {
+          const running = target.query(sparql, options);
+          if (options?.source === COUNT_SOURCE) track(Promise.resolve(running));
+          return running;
+        };
+      }
+      const member = Reflect.get(target, prop, target);
+      return typeof member === 'function' ? member.bind(target) : member;
+    },
+  });
+}
+
+/**
  * Starts the probe load (call it after beginEpoch). deps = the loaded dist; cfg = { statusMs, metricsMs, countMs,
  * horizonMs } with 0 switching a probe off, and optional phases. Returns { state, stop(), drain(capMs) }; state.events
- * is [{ kind: 'status' | 'metrics' | 'count-request', t, ms, result, err }], t run-relative.
+ * is [{ kind: 'status' | 'metrics' | 'count-request', t, ms, result, err }], t run-relative. drain(capMs) waits for
+ * the probes in flight and for the COUNT's query (see withTrackedCount), for at most capMs in all, and returns how many
+ * were still running then.
  */
 export async function startProbeLoad(world, deps, cfg) {
   const { store } = world;
@@ -110,6 +145,7 @@ export async function startProbeLoad(world, deps, cfg) {
     inflight.add(p);
     p.finally(() => inflight.delete(p)).catch(() => {});
   };
+  const countAgent = { store: withTrackedCount(store, track) };
   const statusOnce = async () => {
     const t0 = performance.now();
     let result;
@@ -150,7 +186,7 @@ export async function startProbeLoad(world, deps, cfg) {
     const t0 = performance.now();
     let fields;
     try {
-      fields = deps.probeQuads.requestExternalStoreQuads(agent, Date.now());
+      fields = deps.probeQuads.requestExternalStoreQuads(countAgent, Date.now());
     } catch (e) {
       fields = { error: e?.code ?? e?.name };
     }
@@ -187,7 +223,9 @@ export async function startProbeLoad(world, deps, cfg) {
     },
     async drain(capMs) {
       await Promise.allSettled(loops);
-      await Promise.race([Promise.allSettled(inflight), sleep(capMs)]);
+      // the probes in flight and the COUNT's query (tracked by withTrackedCount); the cap bounds the wait, and its
+      // timer does not outlive the work
+      await within(Promise.allSettled(inflight), capMs);
       return inflight.size;
     },
   };

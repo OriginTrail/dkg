@@ -487,20 +487,38 @@ export function ratioRule({ pairs, missing = [], metric = 'p95Ms', limit, lower,
 }
 
 /**
+ * D-16: the accepted-but-unclaimed backlog and the claim-to-finish time are "always reported next to pick-up, with no
+ * threshold". They ride with the two pick-up families (FAMILIES[..].companions) in the ledger, the rules' output and
+ * the A/A declaration, and judge nothing: a slow pick-up beside a growing backlog is a worker-capacity finding to read,
+ * not a rule to fail.
+ */
+export const PICKUP_COMPANIONS = Object.freeze([
+  Object.freeze({ key: 'claimToFinishP50Ms', label: 'claim-to-finish p50 ms' }),
+  Object.freeze({ key: 'unclaimedMax', label: 'unclaimed max' }),
+]);
+
+/**
  * The metric families the rules judge. `key` is the record field; `failure` and `completions` feed the reported guards;
  * `samples` is the field counting the sample behind the value (the worker-free pick-up needs a minimum, declared with
- * the protocol like the A/A margin).
+ * the protocol like the A/A margin); `companions` are the record fields reported next to the value, never judged.
  */
 export const FAMILIES = {
   share: { key: 'p95Ms', label: 'P95', failure: 'failureFrac', completions: 'completionsPerMin' },
   publish: { key: 'publishP95Ms', label: 'publish P95', failure: 'publishFailureFrac', completions: 'publishPerMin' },
-  pickup: { key: 'pickupP50Ms', label: 'pick-up p50', failure: 'publishFailureFrac', completions: 'publishPerMin' },
+  pickup: {
+    key: 'pickupP50Ms',
+    label: 'pick-up p50',
+    failure: 'publishFailureFrac',
+    completions: 'publishPerMin',
+    companions: PICKUP_COMPANIONS,
+  },
   pickupFree: {
     key: 'pickupFreeP50Ms',
     label: 'worker-free pick-up p50',
     failure: 'publishFailureFrac',
     completions: 'publishPerMin',
     samples: 'pickupFreeN',
+    companions: PICKUP_COMPANIONS,
   },
 };
 export const familyOf = (name = 'share') => {
@@ -782,6 +800,34 @@ export function noWorse(pairs, margin, { missing = [], family = 'share', minSamp
   });
 }
 /**
+ * The companions of a family's value for every valid pair, base (a) against candidate (b):
+ * [{ key, <field>: { a, b } }], a field a run does not have as null. [] for a family without companions (the share and
+ * publish P95s). Reported next to the result, never judged (PICKUP_COMPANIONS).
+ */
+export function companionsOf(pairs, family = 'share') {
+  const companions = familyOf(family).companions ?? [];
+  if (!companions.length) return [];
+  return pairs
+    .filter((p) => p.valid)
+    .map((p) => ({
+      key: p.key,
+      ...Object.fromEntries(companions.map(({ key }) => [key, { a: p.a[key] ?? null, b: p.b[key] ?? null }])),
+    }));
+}
+
+/** companionsOf as the lines a verdict prints under its result (none when there are none). */
+export function companionLines(rows, family = 'share') {
+  const companions = familyOf(family).companions ?? [];
+  if (!rows.length) return [];
+  const shown = (v) => (v === null || v === undefined ? 'n/a' : v);
+  const change = (row, c) => `${c.label} ${shown(row[c.key].a)} -> ${shown(row[c.key].b)}`;
+  return [
+    `reported next to the ${familyOf(family).label}, no threshold (D-16):`,
+    ...rows.map((row) => `  ${row.key}  ${companions.map((c) => change(row, c)).join('; ')}`),
+  ];
+}
+
+/**
  * Reported, not gating (G0 rule R28 and the G2 table): candidate failure fraction <= 2 % per repeat, completions/min >=
  * 0.9 x base.
  */
@@ -834,8 +880,9 @@ function publisherChecks(p, measureMs) {
  * P2b: `queue` is the run's stream(s): 'share' (default; the idle publisher runs beside it), 'lift' or 'both'. A lift
  * run has no share stream, so the share checks are left out; `publisher` (see publisherChecks) adds the publisher
  * stream's; `load` = { probes, ack, statusProbes, metricsProbes, acksStarted } requires the probe and ACK load that was
- * switched on to have run; `liftSeedFileVerified` is the lift seed file's hash check. Without these the result is the
- * P2a one.
+ * switched on to have run (probesRan, acksRan): the counts are probes and ACKs STARTED in the measure window whatever
+ * their result, so a probe that got no answer still ran (the answers are reported in summary.probes.noAnswer, not
+ * checked here); `liftSeedFileVerified` is the lift seed file's hash check. Without these the result is the P2a one.
  */
 export function validity({
   lambda,
@@ -884,7 +931,7 @@ export function validity({
     ...(liftSeedFileVerified === undefined ? {} : { liftSeedFileVerified: liftSeedFileVerified === true }),
     // a run with a publisher stream and no evidence from it is no run
     ...(publisher ? publisherChecks(publisher, measureMs) : queue === 'share' ? {} : { publisherEvidence: false }),
-    ...(load?.probes ? { probesAnswered: load.statusProbes > 0 && load.metricsProbes > 0 } : {}),
+    ...(load?.probes ? { probesRan: load.statusProbes > 0 && load.metricsProbes > 0 } : {}),
     ...(load?.ack ? { acksRan: load.acksStarted > 0 } : {}),
   };
   return {
@@ -1066,6 +1113,8 @@ export function ledgerMarkdown(records) {
           r.pickupFreeP50Ms === null || r.pickupFreeP50Ms === undefined
             ? ''
             : `${r.pickupFreeP50Ms} (n ${r.pickupFreeN})`,
+          // D-16: next to the pick-up, always
+          ...PICKUP_COMPANIONS.map((c) => r[c.key] ?? ''),
           r.probeP95Ms === null || r.probeP95Ms === undefined ? '' : `${r.probeP95Ms} / ${r.probeNoAnswer}`,
           r.ackOpP95Ms ?? '',
         ]
@@ -1107,6 +1156,7 @@ export function ledgerMarkdown(records) {
           'publish P95 ms',
           'pick-up p50 ms',
           'worker-free p50 ms',
+          ...PICKUP_COMPANIONS.map((c) => c.label),
           'probe P95 / no-answer',
           'ACK op P95 ms',
         ]

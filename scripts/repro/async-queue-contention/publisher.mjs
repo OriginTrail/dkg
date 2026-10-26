@@ -18,7 +18,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { AGENT, CG_ID, metaGraph, swmMetaGraph } from './fixture.mjs';
-import { poissonArrivals, startArrivals, within } from './workload.mjs';
+import { OBSERVER_CALLS, poissonArrivals, startArrivals, within } from './workload.mjs';
 
 export const AUTHOR = '0x1111111111111111111111111111111111111111';
 /** The harness's chain-time scaling: wallets, wallet hold (ms) and idle poll (ms). */
@@ -413,3 +413,20 @@ export const LIFT_OBSERVER_CALLS = {
   default: async (publisher) => ({ rows: (await publisher.list()).length }),
   paged: null,
 };
+
+/**
+ * Why a run cannot use the `paged` list observer (null when it can). Every stream that runs has its own observer: the
+ * share queue's in a share or mixed run, the publisher's in a lift or mixed run, so a stream's missing paged call
+ * refuses the run only when that stream is in it. A `--queue lift` run polls no share queue, so the share queue's
+ * missing paged call (P8a / P9b) is no reason to refuse it. The calls default to the real tables; tests pass their own.
+ */
+export function pagedObserverProblem(
+  { withShare, withLift },
+  { shareCalls = OBSERVER_CALLS, liftCalls = LIFT_OBSERVER_CALLS } = {},
+) {
+  if (withShare && !shareCalls.paged)
+    return "the share queue's paged listing is not available in this build (needs P8a/P9b)";
+  if (withLift && !liftCalls.paged)
+    return "the publisher's paged listing is not available in this build (needs P9a/P9b)";
+  return null;
+}

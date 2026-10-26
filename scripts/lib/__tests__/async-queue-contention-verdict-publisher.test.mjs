@@ -22,7 +22,10 @@ import {
   FAMILIES,
   PUBLISH_RUNGS,
   RUNGS,
+  PICKUP_COMPANIONS,
   aaDeclaration,
+  companionLines,
+  companionsOf,
   comparability,
   equivalent,
   extractRecord,
@@ -278,16 +281,20 @@ test('the probes and ACKs that were switched on must have run, and a lift seed f
   );
   assert.deepEqual(
     [
-      run({ probes: true, ack: false, statusProbes: 0, metricsProbes: 6 }).probesAnswered,
-      run({ probes: true, ack: false, statusProbes: 3, metricsProbes: 0 }).probesAnswered,
+      run({ probes: true, ack: false, statusProbes: 0, metricsProbes: 6 }).probesRan,
+      run({ probes: true, ack: false, statusProbes: 3, metricsProbes: 0 }).probesRan,
     ],
     [false, false],
   );
+  // the check counts probes STARTED in the window whatever their result (no-answer ones included), so its name says
+  // that they ran, not that they were answered
+  const ran = run({ probes: true, ack: false, statusProbes: 1, metricsProbes: 1 });
+  assert.deepEqual([ran.probesRan, 'probesAnswered' in ran, ran.ok], [true, false, true]);
   const noAck = run({ probes: false, ack: true, acksStarted: 0 });
-  assert.deepEqual([noAck.acksRan, noAck.ok, 'probesAnswered' in noAck], [false, false, false]);
-  assert.equal('probesAnswered' in run(null), false);
+  assert.deepEqual([noAck.acksRan, noAck.ok, 'probesRan' in noAck], [false, false, false]);
+  assert.equal('probesRan' in run(null), false);
   assert.equal(
-    run({ probes: true, statusProbes: undefined, metricsProbes: 1 }).probesAnswered,
+    run({ probes: true, statusProbes: undefined, metricsProbes: 1 }).probesRan,
     false,
     'missing evidence fails',
   );
@@ -308,6 +315,8 @@ const summaryOf = ({
   pickup = 250,
   free = 240,
   freeN = 30,
+  claim = 3200,
+  backlog = 4,
   o = {},
 } = {}) => {
   const lift = queue !== 'share';
@@ -352,8 +361,8 @@ const summaryOf = ({
           completionsPerMin: 24,
           pickup: { nAccepted: 72, nCensored: 0, p50: pickup },
           workerFree: { nQualifying: freeN, p50: free },
-          claimToFinishMs: { p50: 3200 },
-          unclaimed: { max: 4 },
+          claimToFinishMs: { p50: claim },
+          unclaimed: { max: backlog },
           ...o.publish,
         }
       : undefined,
@@ -462,9 +471,22 @@ test('the ledger gains the publisher columns when a run has them, and warns abou
   const [head, , row] = ledgerMarkdown([r]).split('\n');
   assert.match(
     head,
-    /\| git \| queue \| lift history \| publish P95 ms \| pick-up p50 ms \| worker-free p50 ms \| probe P95 \/ no-answer \| ACK op P95 ms \|$/,
+    /\| git \| queue \| lift history \| publish P95 ms \| pick-up p50 ms \| worker-free p50 ms \| claim-to-finish p50 ms \| unclaimed max \| probe P95 \/ no-answer \| ACK op P95 ms \|$/,
   );
-  assert.match(row, /\| both \| 0 \| 6000 \| 250 \| 240 \(n 30\) \| 40 \/ 0 \| 12 \|$/);
+  // D-16: the claim-to-finish time and the backlog sit right after the pick-up columns
+  assert.match(row, /\| both \| 0 \| 6000 \| 250 \| 240 \(n 30\) \| 3200 \| 4 \| 40 \/ 0 \| 12 \|$/);
+  const idle = extractRecord(summaryOf({ backlog: 0 }));
+  assert.match(
+    ledgerMarkdown([idle]).split('\n')[2],
+    /\| 3200 \| 0 \| 40 \/ 0 \|/,
+    'a zero backlog is shown, not blank',
+  );
+  const noPublish = extractRecord({ ...summaryOf({ queue: 'share', rung: 'L3' }), publish: undefined });
+  assert.match(
+    ledgerMarkdown([noPublish]).split('\n')[2],
+    /\| 0 \|(?: {2}\|){5} 40 \/ 0 \|/,
+    'no publisher stream, no numbers: the five publisher columns are blank',
+  );
   const old = extractRecord({
     ...summaryOf(),
     meta: {
@@ -1026,6 +1048,87 @@ test('verdict halve --metric pickup judges the pick-up of two arms; the worker-f
   assert.match(enough.stdout, /FAIL/);
 });
 
+test('the pick-up families carry the backlog and the claim-to-finish time as companions; the P95 families carry none', () => {
+  assert.deepEqual(
+    PICKUP_COMPANIONS.map((c) => c.key),
+    ['claimToFinishP50Ms', 'unclaimedMax'],
+    'the two record fields extractRecord reads off the summary',
+  );
+  for (const name of ['pickup', 'pickupFree']) assert.equal(familyOf(name).companions, PICKUP_COMPANIONS, name);
+  for (const name of ['share', 'publish']) {
+    assert.equal(familyOf(name).companions, undefined, name);
+    assert.deepEqual(companionsOf(pairsOn([1], [2], familyOf(name).key), name), []);
+    assert.deepEqual(companionLines([], name), []);
+  }
+  const pairs = [
+    ...pairsOn([1000, 1000], [400, 400], 'pickupP50Ms', {
+      a: { claimToFinishP50Ms: 3000, unclaimedMax: 2 },
+      b: { claimToFinishP50Ms: 3100, unclaimedMax: 0 },
+    }),
+    { key: 'gone', valid: false, a: prec(), b: prec() },
+    { key: 'old', valid: true, a: prec(), b: prec() }, // records without the fields
+  ];
+  assert.deepEqual(companionsOf(pairs, 'pickup'), [
+    { key: 'r0', claimToFinishP50Ms: { a: 3000, b: 3100 }, unclaimedMax: { a: 2, b: 0 } },
+    { key: 'r1', claimToFinishP50Ms: { a: 3000, b: 3100 }, unclaimedMax: { a: 2, b: 0 } },
+    { key: 'old', claimToFinishP50Ms: { a: null, b: null }, unclaimedMax: { a: null, b: null } },
+  ]);
+  assert.deepEqual(companionLines(companionsOf(pairs, 'pickupFree'), 'pickupFree'), [
+    'reported next to the worker-free pick-up p50, no threshold (D-16):',
+    '  r0  claim-to-finish p50 ms 3000 -> 3100; unclaimed max 2 -> 0',
+    '  r1  claim-to-finish p50 ms 3000 -> 3100; unclaimed max 2 -> 0',
+    '  old  claim-to-finish p50 ms n/a -> n/a; unclaimed max n/a -> n/a',
+  ]);
+  assert.deepEqual(companionLines([], 'pickup'), [], 'no valid pair, nothing to print');
+});
+
+test('verdict prints the claim-to-finish time and the backlog under a pick-up result, and in its JSON, whatever the result', () => {
+  const dir = twoArms('companions', {
+    a: (r) => ({ pickup: 2000, claim: 3000 + r, backlog: 2 }),
+    b: (r) => ({ pickup: 900, claim: 3500 + r, backlog: 9 }),
+  });
+  const A = path.join(dir, 'a');
+  const B = path.join(dir, 'b');
+  for (const metric of ['pickup', 'pickupFree']) {
+    const extra = metric === 'pickupFree' ? ['--min-qualifying', '30'] : [];
+    const text = cli('verdict', '--rule', 'halve', '--metric', metric, ...extra, '--a', A, '--b', B);
+    const label = metric === 'pickup' ? 'pick-up p50' : 'worker-free pick-up p50';
+    assert.match(text.stdout, new RegExp(`\\nreported next to the ${label}, no threshold \\(D-16\\):\\n`), metric);
+    for (const r of [0, 1, 2]) {
+      assert.match(
+        text.stdout,
+        new RegExp(
+          `\\n {2}0\\|default\\|PSTAR\\|lift\\|${r} {2}claim-to-finish p50 ms ${3000 + r} -> ${3500 + r}; unclaimed max 2 -> 9\\n`,
+        ),
+        `${metric} repeat ${r}`,
+      );
+    }
+    const json = JSON.parse(
+      cli('verdict', '--rule', 'halve', '--metric', metric, ...extra, '--json', '--a', A, '--b', B).stdout,
+    );
+    assert.deepEqual(json.companions[0], {
+      key: '0|default|PSTAR|lift|0',
+      claimToFinishP50Ms: { a: 3000, b: 3500 },
+      unclaimedMax: { a: 2, b: 9 },
+    });
+    assert.equal(json.companions.length, 3);
+  }
+  // the P95 families print none, and a failing pick-up result still shows them
+  const share = cli('verdict', '--rule', 'halve', '--metric', 'publish', '--a', A, '--b', B);
+  assert.doesNotMatch(share.stdout, /D-16|claim-to-finish/);
+  const failing = cli('verdict', '--rule', 'halve', '--metric', 'pickup', '--a', B, '--b', A);
+  assert.equal(failing.status, 1);
+  assert.match(failing.stdout, /claim-to-finish p50 ms 3500 -> 3000; unclaimed max 9 -> 2/);
+  // the A/A declaration carries them as well (JSON only)
+  const aa = JSON.parse(cli('verdict', '--rule', 'aa', '--metric', 'pickup', '--a', A, '--b', A).stdout);
+  assert.equal(aa.companions.length, 3);
+  assert.deepEqual(aa.companions[2].unclaimedMax, { a: 2, b: 2 });
+  assert.equal(
+    JSON.parse(cli('verdict', '--rule', 'aa', '--metric', 'publish', '--a', A, '--b', A).stdout).companions.length,
+    0,
+  );
+});
+
 test('verdict aa, equal, noworse and flat take the metric; the margin and the arms are required as before', () => {
   const dir = twoArms('rules', {
     a: { publish: 6000 },
@@ -1324,9 +1427,15 @@ test('run refuses a rung that does not fit the stream, flags that belong to anot
   );
   fails(['--queue', 'lift', '--rung', 'PSTAR', '--seed-file', '/nope'], /--seed-file seeds the share queue/);
   fails(['--queue', 'lift', '--rung', 'PSTAR', '--lift-history', 'lots'], /--lift-history: not a count: lots/);
+  // each stream has its own paged call: a lift-only run is refused for the publisher's, not for the share queue's,
+  // which it never polls; a mixed run needs both
   fails(
     ['--queue', 'lift', '--rung', 'PSTAR', '--observer', 'paged'],
-    /paged listing is not available in this build \(needs P8a\/P9b\)/,
+    /^the publisher's paged listing is not available in this build \(needs P9a\/P9b\)/,
+  );
+  fails(
+    ['--queue', 'both', '--rung', 'MIX', '--observer', 'paged'],
+    /^the share queue's paged listing is not available in this build \(needs P8a\/P9b\)/,
   );
   fails(['--rung', 'L3', '--seed-base', 'x'], /--seed-base must be an integer >= 0/);
 });

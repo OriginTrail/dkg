@@ -28,7 +28,10 @@
 //   --probes --ack-load                      the status-probe and ACK load (cadences: --probe-status-ms 10000,
 //                                            --probe-metrics-ms 30000, --probe-count-ms 60000, --ack-interval-ms 4000,
 //                                            --ack-payload 32); off by default, ON in every G0/G0b and G1b-rehearsal run
-//   --observer default|paged|none            the list observer's call; --observer-ms 5000 its polling period
+//   --observer default|paged|none            the list observer's call; --observer-ms 5000 its polling period. paged
+//                                            needs the paged call of each stream the run has (the share queue's:
+//                                            P8a/P9b, the publisher's: P9a/P9b): a --queue lift run needs only the
+//                                            publisher's
 //   --repeats N                              N repeats, one fresh process each; --repeat I runs only repeat I
 //   --seed S                                 default seed-base+repeat: a repeat is the same arrival schedule in every build;
 //   --seed-base B                            B+repeat for each repeat (default 7300; the G1b rehearsal uses 20262901,
@@ -68,7 +71,9 @@
 // acceptedAt, lastRetriedAt, lastRecoveredAt) over the jobs that became ready while at least one of the N wallets held
 // no wallet lock; the busy intervals are the wallet-lock writes and deletes (the product's claim trace, never job
 // finish times), and workerFree.nQualifying is the sample behind it. The accepted-but-unclaimed backlog and the
-// claim-to-finish time are reported next to both, with no threshold. The probe and ACK numbers are what the caller saw
+// claim-to-finish time are reported next to both, with no threshold: in the ledger (two columns after the pick-up ones)
+// and under every `verdict --metric pickup|pickupFree` result (text lines, and `companions` in the JSON of the rules
+// and of aa), whatever the result. The probe and ACK numbers are what the caller saw
 // (queue wait included); the ACK queue-wait P95 of G2 comes from the product's per-lane counts, not from here.
 //
 // Runbook. Backend: a Blazegraph that YOU started (never reuse someone else's container); the script only takes a URL
@@ -113,8 +118,9 @@
 //      node ... verdict --rule halve --metric pickupFree --min-qualifying 20 --a $OUT/base --b $OUT/head
 //      node ... verdict --rule noworse --metric publish --margin <A/A> --a $OUT/base --b $OUT/head   # G2's guardrail
 //    pickupFree needs --min-qualifying: the protocol states how many qualifying jobs an arm needs, and a run below it is
-//    INCOMPLETE (so is one whose wallet trace recorded nothing). Cells of other streams never pair: the stream joins the
-//    cell key, as does a lift history.
+//    INCOMPLETE (so is one whose wallet trace recorded nothing). Both pick-up metrics print the claim-to-finish p50 and
+//    the unclaimed max of each pair under the result (D-16), judged by nothing. Cells of other streams never pair: the
+//    stream joins the cell key, as does a lift history.
 // 7. Publisher history (AC5's publisher flatness, G2's 10k lift jobs), 3 repeats each, then flat on the publish P95:
 //      node scripts/repro/async-queue-seed-history.mjs --kind lift --jobs 10k --out $OUT/lift-10k.nq.gz
 //      node ... run --queue lift --rung PSTAR --lift-history 0 --label l0 --repeats 3 ...
@@ -156,12 +162,19 @@ import { G1B_METRICS, g1b } from './async-queue-contention/g1b.mjs';
 import { loadGenerated, loadSeedFile, parseCount } from './async-queue-contention/history.mjs';
 import { loadGeneratedLift } from './async-queue-contention/lift-history.mjs';
 import { jobRow, publishSummary } from './async-queue-contention/pickup.mjs';
-import { LOAD_DEFAULTS, probeAckSummary, startAckLoad, startProbeLoad } from './async-queue-contention/probes.mjs';
+import {
+  LOAD_DEFAULTS,
+  PROBE_DRAIN_MS,
+  probeAckSummary,
+  startAckLoad,
+  startProbeLoad,
+} from './async-queue-contention/probes.mjs';
 import {
   LIFT_DEFAULTS,
   LIFT_OBSERVER_CALLS,
   createLiftSide,
   createPublishPreflight,
+  pagedObserverProblem,
   publishArrivals,
   readLiftJobs,
   startPublishProducers,
@@ -172,6 +185,8 @@ import {
   RUNGS,
   aaDeclaration,
   admissionSummary,
+  companionLines,
+  companionsOf,
   equivalent,
   extractRecord,
   finalizeRequests,
@@ -477,10 +492,8 @@ function resolveConfig(v) {
     die(2, '--namespace-prefix must match [A-Za-z0-9._-]{1,40}');
   if (!(observer in OBSERVER_CALLS) && observer !== 'none')
     die(2, `unknown --observer ${observer} (default, paged, none)`);
-  if (observer === 'paged' && !OBSERVER_CALLS.paged)
-    die(2, 'paged listing is not available in this build (needs P8a/P9b)');
-  if (observer === 'paged' && withLift && !LIFT_OBSERVER_CALLS.paged)
-    die(2, "the publisher's paged listing is not available in this build (needs P9a/P9b)");
+  const pagedProblem = observer === 'paged' ? pagedObserverProblem({ withShare, withLift }) : null;
+  if (pagedProblem) die(2, pagedProblem);
   const windows = windowsFor(v, windowDefaults);
   checkWindows(windows);
   const windowsMs = [windows.warmup * 1000, windows.measure * 1000, windows.cooldown * 1000];
@@ -785,8 +798,10 @@ async function runOnce(c, dist, endpoint, outDir) {
           await readers.drain(5000);
           await observer.drain(1000);
           await liftObserver.drain(1000);
-          // a status probe answers within its 5 s wait by construction; a COUNT may still run (never aborted, like the daemon's)
-          const probesStillInflight = probeLoad ? await probeLoad.drain(6000) : 0;
+          // a status probe answers within its 5 s wait by construction; the COUNT is never aborted (like the daemon's),
+          // so the drain waits for it too, up to PROBE_DRAIN_MS: one still running then is reported
+          // (stillInflightAtDrain)
+          const probesStillInflight = probeLoad ? await probeLoad.drain(PROBE_DRAIN_MS) : 0;
           await ackLoad?.drain(10_000);
           worker?.freeze(); // jobs cut short by the shutdown are not worker contract breaks
           await worker?.supervisor.stop();
@@ -1293,8 +1308,9 @@ function verdictCommand(v) {
     // nothing, and neither do runs of different (or unrecorded) builds: the whole arms are checked, the runs that did
     // not pair included
     const declaration = aaDeclaration(pairs, missing, { family, minSamples, aRecords: A, bRecords: B });
-    const warnings = integrityWarnings([...A, ...B], withMetric(pairs, family, { minSamples }), null);
-    console.log(JSON.stringify({ ...declaration, warnings, missing }));
+    const aaPairs = withMetric(pairs, family, { minSamples });
+    const warnings = integrityWarnings([...A, ...B], aaPairs, null);
+    console.log(JSON.stringify({ ...declaration, warnings, missing, companions: companionsOf(aaPairs, family) }));
     process.exit(declaration.status === 'complete' ? 0 : 2);
   }
   const options = { missing, family, minSamples };
@@ -1310,8 +1326,10 @@ function verdictCommand(v) {
           : equivalent(judged, margin, options);
   const g = guards(judged, family);
   const warnings = integrityWarnings([...A, ...B], judged, result);
+  // D-16: the backlog and the claim-to-finish time, next to a pick-up result, whatever the result
+  const companions = companionsOf(judged, family);
   if (v.json) {
-    console.log(JSON.stringify({ result, guards: g, missing, warnings }));
+    console.log(JSON.stringify({ result, guards: g, missing, warnings, companions }));
   } else {
     const reason = result.reason ? ` - ${result.reason}` : '';
     console.log(
@@ -1326,6 +1344,7 @@ function verdictCommand(v) {
       `guards (reported, not gating): candidate failure fraction <= 0.02 ${failureOk}; ` +
         `completions >= 0.9 x base ${completionsOk}`,
     );
+    for (const line of companionLines(companions, family)) console.log(line);
     for (const w of warnings) console.log(`warning: ${w}`);
   }
   process.exit({ pass: 0, fail: 1, incomplete: 2 }[result.status]);

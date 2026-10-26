@@ -7,8 +7,13 @@
 // Worker-free pick-up (D-16, G2 / G3): ready -> claimed, where ready is the latest of acceptedAt, lastRetriedAt and
 // lastRecoveredAt, over the jobs that became ready while at least one of the N configured wallets held no wallet lock
 // (each wallet runs one publisher worker, so a free wallet means a worker was free to claim). The busy intervals come
-// from wallet-lock writes and deletes, never from job finish times: the same rule the product's WalletBusyTracker
-// (core, P1b) applies to the live `async_admission_usage` line, so this number and that line mean the same thing.
+// from wallet-lock writes and deletes, never from job finish times, as in the product's WalletBusyTracker (core, P1b),
+// which feeds the live `async_admission_usage` line. One rule differs on purpose. The product treats a wallet as
+// unknown before its first event (knownSince): the process may have started with the lock already held, so a job that
+// became ready before then is 'unknown' (counted as lift_pickup_unclassified), not 'free'. The benchmark assumes every
+// wallet is free from the epoch (walletClassifier's knownFrom 0), which is valid only because a run starts on a fresh
+// namespace with no seeded wallet locks; a run that seeded locks would need a later knownFrom. So this number matches
+// the live line's worker-free pick-up once the product knows every wallet, and differs from it before that.
 import { depthSeries, summarize } from './verdict.mjs';
 
 /** A persisted lift job (or a `ljob` row) as run-relative times: the publisher stamps Date.now(), `epoch0` is the run's. */

@@ -9,8 +9,10 @@ import { CG_ID } from '../../repro/async-queue-contention/fixture.mjs';
 import {
   ACK_OPS_PER_ACK,
   ACK_SOURCES,
+  COUNT_SOURCE,
   LOAD_DEFAULTS,
   NO_ANSWER_MS,
+  PROBE_DRAIN_MS,
   PROBE_RECONCILE_SOURCE,
   ackOnce,
   fixedSchedule,
@@ -18,6 +20,7 @@ import {
   probeAckSummary,
   startAckLoad,
   startProbeLoad,
+  withTrackedCount,
 } from '../../repro/async-queue-contention/probes.mjs';
 import { beginEpoch } from '../../repro/async-queue-contention/workload.mjs';
 
@@ -197,6 +200,111 @@ test('a probe cadence of 0 switches that probe off', async () => {
   load.stop();
   await load.drain(2000);
   assert.deepEqual([...new Set(load.state.events.map((e) => e.kind))], ['status']);
+});
+
+/** A store that answers everything at once except the full-store COUNT, which settles when the test says so. */
+function storeWithGatedCount() {
+  const gate = { calls: 0 };
+  const counted = new Promise((resolve, reject) => {
+    gate.release = () => resolve({ type: 'bindings', bindings: [{ c: '"7"' }] });
+    gate.fail = () => reject(Object.assign(new Error('store closed'), { code: 'STORE_CLOSED' }));
+  });
+  gate.store = {
+    query: async (_sparql, options) => {
+      if (options?.source !== COUNT_SOURCE) return { type: 'boolean', value: true };
+      gate.calls++;
+      return counted;
+    },
+  };
+  return gate;
+}
+
+/** The one COUNT request of a probe load that only counts (the schedule has a single entry), once it has started. */
+async function startCountOnlyLoad(gate) {
+  const world = await epochOn(gate.store);
+  const load = await startProbeLoad(world, deps, {
+    statusMs: 0,
+    metricsMs: 0,
+    countMs: 1000,
+    countPhaseMs: 5,
+    horizonMs: 100,
+  });
+  for (let i = 0; i < 200 && gate.calls === 0; i++) await sleep(5);
+  assert.equal(gate.calls, 1, 'the COUNT reached the store');
+  load.stop();
+  return load;
+}
+
+test('drain waits for the background COUNT the product started, and returns once it has settled', async () => {
+  const gate = storeWithGatedCount();
+  const load = await startCountOnlyLoad(gate);
+  let settled = null;
+  const drained = load.drain(10_000).then((left) => (settled = left));
+  await sleep(150);
+  assert.equal(settled, null, 'the COUNT is still reading the store, so the drain is still waiting');
+  gate.release();
+  assert.equal(await drained, 0, 'nothing is left running once the COUNT settled');
+  assert.deepEqual(
+    load.state.events.map((e) => e.kind),
+    ['count-request'],
+  );
+});
+
+test('drain waits for a COUNT that fails too, and gives up on one that never settles at its cap', async () => {
+  const failing = storeWithGatedCount();
+  const failed = await startCountOnlyLoad(failing);
+  let settled = null;
+  const drained = failed.drain(10_000).then((left) => (settled = left));
+  await sleep(100);
+  assert.equal(settled, null);
+  failing.fail();
+  assert.equal(await drained, 0, 'a rejected COUNT settles the drain as well, without an unhandled rejection');
+
+  const stuck = storeWithGatedCount();
+  const load = await startCountOnlyLoad(stuck);
+  const t0 = performance.now();
+  assert.equal(await load.drain(120), 1, 'the COUNT is reported as still running');
+  const waited = performance.now() - t0;
+  assert.ok(waited >= 100 && waited < 2000, `the wait is bounded by the cap (${Math.round(waited)} ms)`);
+  stuck.release(); // so the product's in-flight marker does not outlive the test
+  await sleep(10);
+  assert.ok(PROBE_DRAIN_MS > NO_ANSWER_MS, 'the run waits longer than a status probe can take');
+});
+
+test('withTrackedCount hands only the COUNT query to the tracker and leaves every call as it was', async () => {
+  const calls = [];
+  const target = {
+    name: 'store',
+    query: async function (sparql, options) {
+      calls.push([this === target, sparql, options]);
+      return { type: 'boolean', value: true };
+    },
+    size() {
+      return this.name.length;
+    },
+  };
+  const tracked = [];
+  const view = withTrackedCount(target, (p) => tracked.push(p));
+  await view.query('ASK {}', { priority: 'health', source: 'daemon.status.storeProbe' });
+  assert.equal(tracked.length, 0, 'a query of another source is not tracked');
+  await view.query('SELECT 1');
+  assert.equal(tracked.length, 0, 'nor one without options');
+  const options = { priority: 'health', source: COUNT_SOURCE };
+  const result = view.query('SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }', options);
+  assert.equal(tracked.length, 1);
+  assert.deepEqual(await result, { type: 'boolean', value: true }, "the caller still gets the store's own answer");
+  assert.equal(await tracked[0], await result);
+  assert.deepEqual(
+    calls.map(([own, , o]) => [own, o]),
+    [
+      [true, { priority: 'health', source: 'daemon.status.storeProbe' }],
+      [true, undefined],
+      [true, options],
+    ],
+    'the store sees the same options on the same instance',
+  );
+  assert.equal(view.name, 'store');
+  assert.equal(view.size(), 5, 'other members keep their own this');
 });
 
 test('the ACK load runs the ACKs one at a time on its schedule and records each operation', async () => {
