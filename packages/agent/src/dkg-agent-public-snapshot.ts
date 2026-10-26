@@ -8,6 +8,8 @@ import { recoverPublicSnapshotBulk } from './public-snapshot-bulk.js';
 import { recoverPublicSnapshotExact } from './public-snapshot-exact.js';
 import { createPublicSnapshotHeldAssetCheck } from './public-snapshot-held-assets.js';
 import { isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
+import { vmRecoveryRetryDelay } from './vm-recovery-pass-authority.js';
+import { PUBLIC_SNAPSHOT_RETRY_MS } from './public-snapshot-exact-pacing.js';
 import { admitAuthenticatedContextGraphSubscription } from './context-graph-subscription-admission.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { createPublicSnapshotServingRuntime } from './public-snapshot-serving-runtime.js';
@@ -100,11 +102,6 @@ export class PublicSnapshotMethods extends DKGAgentBase {
     const rpcScope = new RpcUsageScope();
     if (jobs.has(this)) throw new Error("A snapshot job is already running");
     if (!this.started || this.workLifetime.closed) throw new Error("Node is stopping");
-    const subscription = this.subscribedContextGraphs.get(contextGraphId);
-    if (subscription && (!subscription.subscribed && !subscription.coreHosted))
-      throw new Error("Graph subscription is inactive");
-    if (subscription?.onChainId && subscription.onChainId !== onChainId)
-      throw new Error("Graph binding differs from requested snapshot");
     const lifetime = this.workLifetime.generation;
     jobs.add(this);
     const startedAt = Date.now();
@@ -113,6 +110,26 @@ export class PublicSnapshotMethods extends DKGAgentBase {
     ]);
     const { signal } = lifecycle;
     try {
+      // Authority recovery installs a provisional row before its asynchronous
+      // prepare/persistence can commit or roll back. Capture no snapshot owner
+      // from that row. The existing recovery runtime owns its retries; this
+      // local wait issues no RPC and consumes the original job deadline.
+      const assertWaitingCurrent = () => {
+        if (signal.aborted || lifetime !== this.workLifetime.generation || !this.started)
+          throw new Error('Snapshot job ownership changed');
+      };
+      if (this.contextGraphSubscriptionDormancyById?.get(contextGraphId) === 'authorityUnavailable') await this.workLifetime.track((async () => {
+        while (this.contextGraphSubscriptionDormancyById?.get(contextGraphId) === 'authorityUnavailable') {
+          assertWaitingCurrent();
+          await vmRecoveryRetryDelay(PUBLIC_SNAPSHOT_RETRY_MS, signal);
+        }
+        assertWaitingCurrent();
+      })());
+      const subscription = this.subscribedContextGraphs.get(contextGraphId);
+      if (subscription && (!subscription.subscribed && !subscription.coreHosted))
+        throw new Error("Graph subscription is inactive");
+      if (subscription?.onChainId && subscription.onChainId !== onChainId)
+        throw new Error("Graph binding differs from requested snapshot");
       return await rpcScope.run(() => runGraphScopedPhysicalOperation({
         contextGraphId, signal,
         isClosed: () => !this.started || this.workLifetime.closed,

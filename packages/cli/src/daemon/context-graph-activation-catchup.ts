@@ -178,11 +178,17 @@ function currentContextGraphId(input: ActivationCatchupInput, contextGraphId: st
 function wanted(input: ActivationCatchupInput, contextGraphId: string, live: () => boolean): boolean {
   if (!live() || !daemonState.catchupAcceptingJobs || !daemonState.catchupRunner) return false;
   if (systemContextGraphs.has(contextGraphId)) return false;
+  if (isDormant(input, contextGraphId)) return false;
   const subscription = input.agent.getSubscribedContextGraphs().get(contextGraphId);
   if (subscription?.subscribed !== true || subscription.synced === true) return false;
   const latestJobId = input.catchupTracker.latestByContextGraph.get(contextGraphId);
   const latest = latestJobId === undefined ? undefined : input.catchupTracker.jobs.get(latestJobId);
   return latest?.status !== 'queued' && latest?.status !== 'running';
+}
+
+/** Recovery may expose a provisional subscribed row before activation commits. */
+function isDormant(input: ActivationCatchupInput, contextGraphId: string): boolean {
+  return input.agent.getContextGraphSubscriptionRehydrationStatus?.()?.dormantIds.includes(contextGraphId) === true;
 }
 
 async function catchUp(
@@ -192,6 +198,9 @@ async function catchUp(
 ): Promise<CatchUpOutcome> {
   // A stopping daemon touches no readiness store.
   if (!live() || !daemonState.catchupAcceptingJobs) return 'skipped';
+  // The committed activation event will enqueue it later. Do not migrate or
+  // read authority from a provisional row that recovery may still roll back.
+  if (isDormant(input, queuedContextGraphId)) return 'skipped';
   // A no-op for rows that carry current provenance; a row that was dormant
   // when the startup pass ran is classified here instead.
   await migrateLegacyContextGraphReadiness({ agent: input.agent, store: input.store, log: input.log });
