@@ -46,6 +46,9 @@ function successfulRun(descriptor, commit, readRun) {
   assert.equal(actual.repository?.full_name, 'OriginTrail/dkg', 'wrong run repository');
   assert.equal(actual.path, '.github/workflows/ci.yml', 'wrong workflow');
   assert.equal(actual.head_sha, commit, 'run tested a different commit');
+  // PR API head_sha identifies the branch even when checkout tests a synthetic
+  // merge. Only direct-subject runs can certify the prepared candidate here.
+  assert.ok(['push', 'workflow_dispatch', 'schedule'].includes(actual.event), 'CI must test the candidate directly, not a PR merge');
   assert.equal(actual.status, 'completed', 'run is incomplete');
   assert.equal(actual.conclusion, 'success', 'run did not succeed');
   return actual;

@@ -65,7 +65,7 @@ for (const [name, damage] of [
   f.decision.nightly.receipt = f.write('nightly.json', f.nightly);
   assert.throws(f.verify);
 });
-for (const [field, value] of [['status','in_progress'],['conclusion','failure'],['head_sha','wrong'],['path','.github/workflows/optional.yml'],['run_attempt',2],['repository',{ full_name: 'some/fork' }]]) {
+for (const [field, value] of [['status','in_progress'],['conclusion','failure'],['head_sha','wrong'],['path','.github/workflows/optional.yml'],['run_attempt',2],['repository',{ full_name: 'some/fork' }],['event','pull_request'],['event','merge_group']]) {
   test(`release refuses GitHub ${field} mismatch`, t => {
     const f = fixture(t), read = f.options.readRun;
     f.options.readRun = (...args) => ({ ...read(...args), [field]: value });

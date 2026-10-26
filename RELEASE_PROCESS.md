@@ -280,6 +280,11 @@ passing harness attempt. A failure cannot be dismissed solely by relabeling it.
 Local attempt history is operator supplied; the verifier does not claim to
 discover unarchived private runs.
 
+Selected CI must be a successful push, scheduled or dispatched run of the
+candidate itself. Pull-request and merge-queue runs are ineligible here: GitHub's
+API head SHA alone does not prove the synthetic merge tree they checked out.
+The same complete dispatched nightly may satisfy both CI and nightly entries.
+
 Promotion and direct `latest`/`mainnet` publication require `--evidence`, including
 dry-runs. Canary publication can precede qualification. The package, registry and
 signed-tag checks still apply. A new candidate requires fresh receipts at its
