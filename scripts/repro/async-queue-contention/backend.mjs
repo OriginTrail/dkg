@@ -21,6 +21,13 @@ const DIST = {
   preflight: 'agent/dist/context-graph-write-preflight.js',
   resolve: 'agent/dist/dkg-agent-cg-resolve.js',
   worker: 'cli/dist/daemon/worker/async-promote-worker.js',
+  // the publisher stream and the background load (P2b)
+  liftControl: 'publisher/dist/async-lift-control-plane.js',
+  liftCodec: 'publisher/dist/lift-job-payload-codec.js',
+  liftClaimTrace: 'publisher/dist/async-lift-claim-trace.js',
+  probeReach: 'cli/dist/daemon/store-reachability.js',
+  probeQuads: 'cli/dist/daemon/store-quads-cache.js',
+  probeMetrics: 'cli/dist/daemon/metrics-queries.js',
 };
 
 export async function loadDist(root = REPO_ROOT) {

@@ -1,8 +1,11 @@
-// Pure library of the async queue contention benchmark (OT-RFC-73 P2a): statistics, the knee, rung choice, run pairing
-// and the deterministic G1 / AC5 / AC2 rules. No I/O and no dist imports (fixture.mjs is a plain constants and
+// Pure library of the async queue contention benchmark (OT-RFC-73 P2a/P2b): statistics, the knee, rung choice, run
+// pairing and the deterministic G1 / AC5 / AC2 rules. No I/O and no dist imports (fixture.mjs is a plain constants and
 // replay-table module), so the node:test known answers run anywhere. The plan's rules are "3/3 paired repeats" rules
 // (plan 8.3): there is no bootstrap, only per-repeat ratios against fixed limits.
-import { DATA_OPS_PER_SHARE } from './fixture.mjs';
+// The rules judge one metric family (FAMILIES): the share stream's P95 (the default, P2a) or, from P2b, the publisher
+// stream's publish P95, its pick-up p50 (D-15) or its worker-free pick-up p50 (D-16). A pair that lacks the family's
+// metric is not a valid pair: the rule is INCOMPLETE, never a PASS and never a FAIL on a missing number.
+import { DATA_OPS_PER_SHARE, LIFT_TAIL_OPS } from './fixture.mjs';
 
 export const CENSOR_MS = 20_000; // a request slower than this counts as a failed (caller timeout) request
 export const KNEE = { p95Ms: 5000, failureFrac: 0.05 };
@@ -20,6 +23,17 @@ export const RUNGS = [
   { id: 'L3', lambda: 8, content: 4, aggregate: 2 },
   { id: 'L4', lambda: 16, content: 6, aggregate: 3 },
   { id: 'L5', lambda: 32, content: 8, aggregate: 4 },
+];
+
+/**
+ * Named loads of the publisher and mixed cells (P2b): the levels G0b ran (PSTAR publish-only, MIX mixed) and the low
+ * publish rung. mu = publish submissions per second. Not a ladder: the publish ladder is calibrated per host and
+ * pre-declared in the G2 protocol (calibrate covers the share ladder only), and G1b needs exactly these fixed loads.
+ */
+export const PUBLISH_RUNGS = [
+  { id: 'PLOW', lambda: 0, mu: 0.4, content: 3, aggregate: 1 },
+  { id: 'PSTAR', lambda: 0, mu: 0.8, content: 4, aggregate: 2 },
+  { id: 'MIX', lambda: 4, mu: 0.4, content: 3, aggregate: 1 },
 ];
 
 const num = (a, b) => a - b;
@@ -207,9 +221,23 @@ export function pickReproductionRung(rungResults) {
 }
 
 // ---------------------------------------------------------------- pairing and the rules
-/** Pairing key of a record (history is dropped for the flatness rule, which compares histories). */
-export const pairKey = (r, { ignoreHistory = false } = {}) =>
-  [...(ignoreHistory ? [] : [r.cell.history]), r.cell.observer, r.cell.rung, r.cell.repeat].join('|');
+const queueOf = (cell) => cell.queue ?? 'share';
+const liftHistoryOf = (cell) => String(cell.liftHistory ?? '0');
+
+/**
+ * Pairing key of a record (history is dropped for the flatness rule, which compares histories, and the lift history for
+ * its publisher variant). A share cell with no lift history keeps the P2a key; other queues and a lift history add a
+ * segment, so the cells of different streams never pair.
+ */
+export const pairKey = (r, { ignoreHistory = false, ignoreLiftHistory = false } = {}) =>
+  [
+    ...(ignoreHistory ? [] : [r.cell.history]),
+    r.cell.observer,
+    r.cell.rung,
+    ...(queueOf(r.cell) === 'share' ? [] : [queueOf(r.cell)]),
+    ...(ignoreLiftHistory || liftHistoryOf(r.cell) === '0' ? [] : [`lift${liftHistoryOf(r.cell)}`]),
+    r.cell.repeat,
+  ].join('|');
 
 /**
  * Stable text of a value (object keys sorted), so two records compare equal whatever the order their JSON was written
@@ -224,18 +252,23 @@ const canon = (x) =>
 
 /**
  * Settings the two runs of a pair must share (plan 8.3: "identical flags"): `seed` is the arrival schedule and
- * `observerMs` the list observer's polling period. The seed file is left out for the flatness rule, which compares
- * histories.
+ * `observerMs` the list observer's polling period; `mu` is the publish rate, `loadFactors` the probe and ACK load and
+ * their cadences, `liftModel` the wallets, wallet hold and poll of the chain-time model. The seed files are left out
+ * for the flatness rules, which compare histories.
  */
 const SAME_IN_A_PAIR = [
   'windows',
   'lambda',
+  'mu',
   'content',
   'aggregate',
   'seed',
   'observerMs',
   'calibrationSha256',
   'seedFileSha256',
+  'liftSeedFileSha256',
+  'loadFactors',
+  'liftModel',
   'cpus',
 ];
 
@@ -243,12 +276,11 @@ const SAME_IN_A_PAIR = [
  * { differs: the settings that differ, envDiffers }. The DKG_STORE_* env may differ on purpose (the knob under test),
  * so it is only reported.
  */
-export function comparability(a, b, { ignoreSeed = false } = {}) {
+export function comparability(a, b, { ignoreSeed = false, ignoreLiftSeed = false } = {}) {
   const left = a.config ?? {};
   const right = b.config ?? {};
-  const differs = SAME_IN_A_PAIR.filter(
-    (k) => !(ignoreSeed && k === 'seedFileSha256') && canon(left[k]) !== canon(right[k]),
-  );
+  const skipped = (k) => (ignoreSeed && k === 'seedFileSha256') || (ignoreLiftSeed && k === 'liftSeedFileSha256');
+  const differs = SAME_IN_A_PAIR.filter((k) => !skipped(k) && canon(left[k]) !== canon(right[k]));
   return { differs, envDiffers: canon(left.env) !== canon(right.env) };
 }
 
@@ -272,7 +304,12 @@ function indexRuns(records, keyOf) {
  * run per arm, and the runs share the settings of SAME_IN_A_PAIR; `reasons` says why a pair with two valid runs does
  * not count.
  */
-export function pairRuns(aRecords, bRecords, keyOf = (r) => r.key, { ignoreSeed = false } = {}) {
+export function pairRuns(
+  aRecords,
+  bRecords,
+  keyOf = (r) => r.key,
+  { ignoreSeed = false, ignoreLiftSeed = false } = {},
+) {
   const A = indexRuns(aRecords, keyOf);
   const B = indexRuns(bRecords, keyOf);
   const pairs = [];
@@ -296,7 +333,7 @@ export function pairRuns(aRecords, bRecords, keyOf = (r) => r.key, { ignoreSeed 
         );
       }
     }
-    const { differs, envDiffers } = comparability(a, b, { ignoreSeed });
+    const { differs, envDiffers } = comparability(a, b, { ignoreSeed, ignoreLiftSeed });
     if (differs.length) reasons.push(`the runs differ in ${differs.join(', ')}`);
     pairs.push({ key, a, b, reasons, envDiffers, valid: Boolean(a.valid && b.valid) && reasons.length === 0 });
   }
@@ -351,12 +388,72 @@ export function ratioRule({ pairs, metric = 'p95Ms', limit, lower, label, checkK
   }
   return { ...out, status: perRepeat.every((r) => r.ok) ? 'pass' : 'fail' };
 }
-export const halve = (pairs) =>
-  ratioRule({ pairs, limit: HALVE_MAX, label: 'halve: candidate P95 <= 0.5 x base', checkKnee: true });
+
+/**
+ * The metric families the rules judge. `key` is the record field; `failure` and `completions` feed the reported guards;
+ * `samples` is the field counting the sample behind the value (the worker-free pick-up needs a minimum, declared with
+ * the protocol like the A/A margin).
+ */
+export const FAMILIES = {
+  share: { key: 'p95Ms', label: 'P95', failure: 'failureFrac', completions: 'completionsPerMin' },
+  publish: { key: 'publishP95Ms', label: 'publish P95', failure: 'publishFailureFrac', completions: 'publishPerMin' },
+  pickup: { key: 'pickupP50Ms', label: 'pick-up p50', failure: 'publishFailureFrac', completions: 'publishPerMin' },
+  pickupFree: {
+    key: 'pickupFreeP50Ms',
+    label: 'worker-free pick-up p50',
+    failure: 'publishFailureFrac',
+    completions: 'publishPerMin',
+    samples: 'pickupFreeN',
+  },
+};
+export const familyOf = (name = 'share') => {
+  if (!Object.hasOwn(FAMILIES, name)) throw new Error(`unknown metric ${name} (${Object.keys(FAMILIES).join(', ')})`);
+  return FAMILIES[name];
+};
+
+/**
+ * The pairs that can be judged on a family: a valid pair whose runs lack the family's number (or, for the worker-free
+ * pick-up, hold fewer than minSamples qualifying jobs) stops being valid and says why, so the rule is incomplete. A
+ * pair that was not valid already is returned as it is.
+ */
+export function withMetric(pairs, name = 'share', { minSamples = 0 } = {}) {
+  const f = familyOf(name);
+  const problem = (r) => {
+    if (!Number.isFinite(r[f.key])) return `no ${f.label}`;
+    if (f.samples && !(r[f.samples] >= minSamples)) return `${r[f.samples] ?? 0} qualifying jobs, ${minSamples} needed`;
+    return null;
+  };
+  return pairs.map((p) => {
+    if (!p.valid) return p;
+    const why = [
+      ['a', problem(p.a)],
+      ['b', problem(p.b)],
+    ]
+      .filter(([, w]) => w)
+      .map(([side, w]) => `${side}: ${w}`);
+    return why.length ? { ...p, valid: false, reasons: [...(p.reasons ?? []), `${f.label} unusable (${why.join('; ')})`] } : p;
+  });
+}
+
+const labelled = (name, text) => (name === 'share' ? text.replace('{m}', 'P95') : text.replace('{m}', familyOf(name).label));
+
+export const halve = (pairs, { family = 'share', minSamples } = {}) =>
+  ratioRule({
+    pairs: withMetric(pairs, family, { minSamples }),
+    metric: familyOf(family).key,
+    limit: HALVE_MAX,
+    label: labelled(family, 'halve: candidate {m} <= 0.5 x base'),
+    checkKnee: family === 'share',
+  });
 
 /** The histories the flatness rule compares: arm a is the base (history 0), arm b the candidate (history 50k). */
 export const FLAT_ARMS = { a: '0', b: '50k' };
 const FLAT_LABEL = 'flat: history 50k P95 <= 1.25 x history 0';
+const liftFlatLabel = (bRecords, key) => {
+  const histories = [...new Set(bRecords.map((r) => liftHistoryOf(r.cell ?? {})))];
+  const b = histories.length === 1 ? ` ${histories[0]}` : '';
+  return `flat: lift history${b} ${familyOf(key).label} <= 1.25 x lift history 0`;
+};
 
 /**
  * Why two arms are not the flatness rule's history-0 base and history-50k candidate ([] when they are). The rule
@@ -364,7 +461,8 @@ const FLAT_LABEL = 'flat: history 50k P95 <= 1.25 x history 0';
  * or the two arms swapped, would pair up and be judged: a reversed pair yields a ratio far under the limit and a
  * self-comparison a ratio of 1, both a PASS that says nothing about history.
  */
-export function flatArmProblems(aRecords, bRecords) {
+export function flatArmProblems(aRecords, bRecords, family = 'share') {
+  if (family !== 'share') return liftFlatArmProblems(aRecords, bRecords);
   const problems = [];
   for (const [side, records] of [
     ['a', aRecords],
@@ -379,16 +477,38 @@ export function flatArmProblems(aRecords, bRecords) {
 }
 
 /**
+ * The publisher variant of the arm check (AC5: "publisher flatness: same rule"): arm a holds lift history 0 only and arm
+ * b ONE non-zero lift history (10k in G2's seeded cell, 50k for the plan's wording), whatever its size.
+ */
+function liftFlatArmProblems(aRecords, bRecords) {
+  const problems = [];
+  const seen = (records) => [...new Set(records.map((r) => liftHistoryOf(r.cell ?? {})))];
+  const foundA = seen(aRecords).filter((h) => h !== '0');
+  if (foundA.length) problems.push(`--a must hold lift history 0 runs only (found lift history ${foundA.join(', ')})`);
+  const foundB = seen(bRecords);
+  if (foundB.includes('0') || foundB.length > 1) {
+    problems.push(`--b must hold runs of ONE non-zero lift history (found ${foundB.join(', ') || 'none'})`);
+  }
+  return problems;
+}
+
+/**
  * AC5: history 50k P95 <= 1.25 x history 0. Arm a must be history 0 and arm b history 50k, whatever the pairs: a
  * mismatch is incomplete (never a pass) and says which arm is wrong. `aRecords` / `bRecords` default to the runs of the
  * pairs; pass the whole arms to also check the runs that did not pair.
  */
-export function flat(pairs, { aRecords = pairs.map((p) => p.a), bRecords = pairs.map((p) => p.b) } = {}) {
-  const problems = flatArmProblems(aRecords, bRecords);
-  if (!problems.length) return ratioRule({ pairs, limit: FLAT_MAX, label: FLAT_LABEL });
+export function flat(
+  pairs,
+  { aRecords = pairs.map((p) => p.a), bRecords = pairs.map((p) => p.b), family = 'share' } = {},
+) {
+  if (family !== 'share' && family !== 'publish') throw new Error(`the flatness rule judges a P95, not ${family}`);
+  const problems = flatArmProblems(aRecords, bRecords, family);
+  const metric = familyOf(family).key;
+  const label = family === 'share' ? FLAT_LABEL : liftFlatLabel(bRecords, family);
+  if (!problems.length) return ratioRule({ pairs: withMetric(pairs, family), metric, limit: FLAT_MAX, label });
   return {
-    label: FLAT_LABEL,
-    metric: 'p95Ms',
+    label,
+    metric,
     limit: FLAT_MAX,
     need: PAIRED_MIN,
     have: 0,
@@ -396,27 +516,30 @@ export function flat(pairs, { aRecords = pairs.map((p) => p.a), bRecords = pairs
     perRepeat: [],
     status: 'incomplete',
     reason:
-      `the flatness rule compares history ${FLAT_ARMS.a} (--a) with history ${FLAT_ARMS.b} (--b): ` +
-      problems.join('; '),
+      family === 'share'
+        ? `the flatness rule compares history ${FLAT_ARMS.a} (--a) with history ${FLAT_ARMS.b} (--b): ${problems.join('; ')}`
+        : `the publisher flatness rule compares lift history 0 (--a) with one lift history (--b): ${problems.join('; ')}`,
   };
 }
 
 /**
- * A/A: pairs of two same-build runs (a = first, b = second); the margin is the worst deviation, never below the 10 %
+ * A/A: pairs of two same-build runs (a = first, b = second); the margin is the worst deviation of the family's metric
+ * (the share P95 by default), never below the 10 %
  * floor. It is rounded UP to 4 decimals, never to nearest: equivalent() compares the unrounded ratios, so a margin a
  * hair under the worst deviation would fail the very A/A pairs that set it.
  */
-export function noiseMargin(aaPairs) {
-  const valid = aaPairs.filter((p) => p.valid);
+export function noiseMargin(aaPairs, family = 'share', { minSamples } = {}) {
+  const key = familyOf(family).key;
+  const valid = withMetric(aaPairs, family, { minSamples }).filter((p) => p.valid);
   const worst = Math.max(
     NOISE_FLOOR,
-    ...valid.map((p) => Math.abs(p.b.p95Ms - p.a.p95Ms) / Math.min(p.a.p95Ms, p.b.p95Ms)),
+    ...valid.map((p) => Math.abs(p.b[key] - p.a[key]) / Math.min(p.a[key], p.b[key])),
   );
   if (!Number.isFinite(worst)) return worst;
   // also covers equivalent()'s own comparison, whose floats can sit an ulp off the deviation computed above
   const covers = (m) =>
     valid.every((p) => {
-      const ratio = p.b.p95Ms / p.a.p95Ms;
+      const ratio = p.b[key] / p.a[key];
       return ratio <= 1 + m && ratio >= 1 / (1 + m);
     });
   let n = Math.round(worst * 1e4);
@@ -426,26 +549,41 @@ export function noiseMargin(aaPairs) {
 /**
  * AC2 path-off equivalence: every b/a inside [1/(1+m), 1+m]. The margin is required so it is declared before the A/B.
  */
-export function equivalent(pairs, margin) {
+export function equivalent(pairs, margin, { family = 'share', minSamples } = {}) {
   if (!Number.isFinite(margin) || margin < 0)
     throw new Error('equivalent needs the declared margin (from the A/A pair)');
   return ratioRule({
-    pairs,
+    pairs: withMetric(pairs, family, { minSamples }),
+    metric: familyOf(family).key,
     limit: 1 + margin,
     lower: 1 / (1 + margin),
-    label: `equal: candidate P95 within +-${margin} of base`,
+    label: labelled(family, `equal: candidate {m} within +-${margin} of base`),
+  });
+}
+/**
+ * A guardrail (G2's publish submission P95: "not worse than B0 by more than the A/A margin"): every b/a at most 1 + the
+ * declared margin. Faster is fine, which is what separates it from the two-sided `equivalent`.
+ */
+export function noWorse(pairs, margin, { family = 'share', minSamples } = {}) {
+  if (!Number.isFinite(margin) || margin < 0) throw new Error('noWorse needs the declared margin (from the A/A pair)');
+  return ratioRule({
+    pairs: withMetric(pairs, family, { minSamples }),
+    metric: familyOf(family).key,
+    limit: 1 + margin,
+    label: labelled(family, `noworse: candidate {m} <= (1 + ${margin}) x base`),
   });
 }
 /**
  * Reported, not gating (G0 rule R28 and the G2 table): candidate failure fraction <= 2 % per repeat, completions/min >=
  * 0.9 x base.
  */
-export function guards(pairs) {
+export function guards(pairs, family = 'share') {
+  const { failure, completions } = familyOf(family);
   const valid = pairs.filter((p) => p.valid);
   return {
-    failureFrac: valid.map((p) => ({ key: p.key, value: p.b.failureFrac, ok: p.b.failureFrac <= 0.02 })),
+    failureFrac: valid.map((p) => ({ key: p.key, value: p.b[failure], ok: p.b[failure] <= 0.02 })),
     completions: valid.map((p) => {
-      const ratio = p.a.completionsPerMin ? r4(p.b.completionsPerMin / p.a.completionsPerMin) : null;
+      const ratio = p.a[completions] ? r4(p.b[completions] / p.a[completions]) : null;
       return { key: p.key, ratio, ok: ratio === null || ratio >= 0.9 };
     }),
   };
@@ -453,10 +591,41 @@ export function guards(pairs) {
 
 // ---------------------------------------------------------------- validity and the run record
 /**
+ * The publisher stream's checks (queue lift or both). `p` = { measured (publish requests in the measure window), mu,
+ * successWithoutJob, doubleAdmissions, errors (runner errors), stopTimedOut, reclaimed (jobs the record shows retried or
+ * recovered), claimed, finalized, executions, tailOps (the synthetic handler's counts) }; a missing field fails its check.
+ * The handler never fails, so a retried or recovered job is a run defect (the record keeps the last claim only, which
+ * would no longer be the first), and the body check ties the handler's work to the jobs the publisher finished: no more
+ * executions than claims, at least the 16 tail operations of every finished job and no more than its executions issued.
+ */
+function publisherChecks(p, measureMs) {
+  const expected = (p.mu * measureMs) / 1000;
+  return {
+    publishMeasurementObserved: p.measured > 0,
+    publishArrivalsWithin4Sigma: Math.abs(p.measured - expected) <= 4 * Math.sqrt(Math.max(expected, 1)),
+    publishNoSuccessWithoutJob: p.successWithoutJob === 0,
+    publishNoDoubleAdmission: p.doubleAdmissions === 0,
+    publisherQuiet: p.errors === 0,
+    publisherStopped: p.stopTimedOut === false,
+    publisherNoReclaims: p.reclaimed === 0,
+    publisherClaimed: p.claimed > 0,
+    publisherBodyReplayed:
+      p.executions <= p.claimed &&
+      p.tailOps >= LIFT_TAIL_OPS * p.finalized &&
+      p.tailOps <= LIFT_TAIL_OPS * p.executions,
+  };
+}
+
+/**
  * Pure checks of one run; every key but `ok` is a boolean that must hold. `worker` = { agentErrors, crashes,
  * failedTerminal, succeeded, attempted, dataOps }: the fake agent and the supervisor must have worked, or a faster
  * admission could be nothing but a worker that no longer runs the 43-operation share body (a missing field fails the
  * check).
+ * P2b: `queue` is the run's stream(s): 'share' (default; the idle publisher runs beside it), 'lift' or 'both'. A lift
+ * run has no share stream, so the share checks are left out; `publisher` (see publisherChecks) adds the publisher
+ * stream's; `load` = { probes, ack, statusProbes, metricsProbes, acksStarted } requires the probe and ACK load that was
+ * switched on to have run; `liftSeedFileVerified` is the lift seed file's hash check. Without these the result is the
+ * P2a one.
  */
 export function validity({
   lambda,
@@ -470,50 +639,89 @@ export function validity({
   idlePublisherErrors,
   worker,
   seedFileVerified,
+  queue = 'share',
+  publisher = null,
+  load = null,
+  liftSeedFileVerified,
 }) {
   const expected = (lambda * measureMs) / 1000;
   const w = worker ?? {};
+  const withShare = queue !== 'lift';
   const checks = {
     // a window so short that its expected arrivals fit the 4-sigma band of zero (--measure 0.1) can pass the check
     // below with no request at all: the run then has nothing to compare
-    measurementObserved: measured > 0,
-    arrivalsWithin4Sigma: Math.abs(measured - expected) <= 4 * Math.sqrt(Math.max(expected, 1)),
+    ...(withShare
+      ? {
+          measurementObserved: measured > 0,
+          arrivalsWithin4Sigma: Math.abs(measured - expected) <= 4 * Math.sqrt(Math.max(expected, 1)),
+        }
+      : {}),
     drained: stillInflight === 0,
     noReconcileError: !reconcileError,
-    noSuccessWithoutJob: successWithoutJob === 0,
-    noDoubleAdmission: doubleAdmissions === 0,
+    ...(withShare ? { noSuccessWithoutJob: successWithoutJob === 0, noDoubleAdmission: doubleAdmissions === 0 } : {}),
     driverHeadroomOk: driverCpu < 0.8,
-    idlePublisherQuiet: idlePublisherErrors === 0,
-    workerContractOk: w.agentErrors === 0 && w.crashes === 0 && w.failedTerminal === 0 && w.succeeded > 0,
-    dataPlaneReplayed: w.dataOps >= DATA_OPS_PER_SHARE * w.succeeded && w.dataOps <= DATA_OPS_PER_SHARE * w.attempted,
+    ...(queue === 'share' ? { idlePublisherQuiet: idlePublisherErrors === 0 } : {}),
+    ...(withShare
+      ? {
+          workerContractOk: w.agentErrors === 0 && w.crashes === 0 && w.failedTerminal === 0 && w.succeeded > 0,
+          dataPlaneReplayed: w.dataOps >= DATA_OPS_PER_SHARE * w.succeeded && w.dataOps <= DATA_OPS_PER_SHARE * w.attempted,
+        }
+      : {}),
     seedFileVerified: seedFileVerified === true,
+    ...(liftSeedFileVerified === undefined ? {} : { liftSeedFileVerified: liftSeedFileVerified === true }),
+    // a run with a publisher stream and no evidence from it is no run
+    ...(publisher ? publisherChecks(publisher, measureMs) : queue === 'share' ? {} : { publisherEvidence: false }),
+    ...(load?.probes ? { probesAnswered: load.statusProbes > 0 && load.metricsProbes > 0 } : {}),
+    ...(load?.ack ? { acksRan: load.acksStarted > 0 } : {}),
   };
   return {
     arrivalsMeasured: measured,
     arrivalsExpected: r2(expected),
+    ...(publisher
+      ? { publishArrivalsMeasured: publisher.measured, publishArrivalsExpected: r2((publisher.mu * measureMs) / 1000) }
+      : {}),
     ...checks,
     ok: Object.values(checks).every(Boolean),
   };
 }
 
-/** summary.json -> the record the rules and the ledger read. */
+/**
+ * summary.json -> the record the rules and the ledger read. A summary from before P2b (no queue in its cell, no publish,
+ * probe or ack block) maps to exactly the P2a record; a P2b summary adds the publisher stream's numbers, the load's and
+ * the settings a pair must share.
+ */
 export function extractRecord(s) {
   const { cell } = s.meta;
   const v = s.validity;
+  const queue = cell.queue ?? 'share';
   const counters = s.worker?.counters ?? {};
   const seed = s.meta.seedFile;
   const p95Ms = s.submission.latencyMs?.p95 ?? null;
   const failureFrac = s.submission.F;
+  const pub = s.publish ?? null;
+  const publishP95Ms = pub?.latencyMs?.p95 ?? null;
+  const publishFailureFrac = pub?.F ?? null;
+  const pickupP50Ms = pub?.pickup?.p50 ?? null;
   // a run counts toward a verdict only with the metrics the rules compare: a run with no request in the measure window
-  // (its worker checks can still hold on warmup completions) has none, and null / null is NaN, a FAIL, not "no data"
-  const metricsFinite = Number.isFinite(p95Ms) && Number.isFinite(failureFrac);
+  // (its worker checks can still hold on warmup completions) has none, and null / null is NaN, a FAIL, not "no data".
+  // A lift run has no share stream; a run with a publisher stream also needs its P95, failures and pick-up.
+  const shareOk = queue === 'lift' || (Number.isFinite(p95Ms) && Number.isFinite(failureFrac));
+  const publishOk =
+    queue === 'share' ||
+    (Number.isFinite(publishP95Ms) && Number.isFinite(publishFailureFrac) && Number.isFinite(pickupP50Ms));
+  const extended = cell.queue !== undefined || pub !== null || s.probes !== undefined || s.ack !== undefined;
+  const liftSeed = s.meta.liftSeedFile;
   return {
     key: pairKey({ cell }),
     label: s.meta.label ?? null,
     cell,
     repeat: cell.repeat,
-    valid: v.ok === true && metricsFinite,
-    failedChecks: [...Object.keys(v).filter((k) => v[k] === false), ...(metricsFinite ? [] : ['finiteMetrics'])],
+    valid: v.ok === true && shareOk && publishOk,
+    failedChecks: [
+      ...Object.keys(v).filter((k) => v[k] === false),
+      ...(shareOk ? [] : ['finiteMetrics']),
+      ...(publishOk ? [] : ['finitePublishMetrics']),
+    ],
     p95Ms,
     failureFrac,
     completionsPerMin: s.worker?.completionsPerMin ?? null,
@@ -535,12 +743,40 @@ export function extractRecord(s) {
       seed: cell.seed ?? null,
       observerMs: cell.observerMs ?? null,
       cpus: s.meta.host?.cpus ?? null,
+      ...(extended
+        ? {
+            mu: cell.mu ?? null,
+            loadFactors: cell.loadFactors ?? null,
+            liftModel: cell.liftModel ?? null,
+            liftSeedFileSha256: liftSeed ? (liftSeed.loadedSha256 ?? liftSeed.sha256 ?? null) : null,
+          }
+        : {}),
     },
     windowsDifferFromCalibration: Boolean(s.meta.calibration?.windowsDiffer),
     git: s.meta.git,
     scriptSha256: s.meta.scriptSha256,
     distStaleSuspected: Boolean(s.meta.distStaleSuspected),
     runId: s.meta.runId,
+    ...(extended
+      ? {
+          queue,
+          factorsDifferFromCalibration: Boolean(s.meta.calibration?.factorsDiffer),
+          publishP95Ms,
+          publishFailureFrac,
+          publishPerMin: pub?.completionsPerMin ?? null,
+          pickupP50Ms,
+          pickupN: pub?.pickup?.nAccepted ?? null,
+          pickupCensored: pub?.pickup?.nCensored ?? null,
+          pickupFreeP50Ms: pub?.workerFree?.p50 ?? null,
+          pickupFreeN: pub?.workerFree?.nQualifying ?? null,
+          claimToFinishP50Ms: pub?.claimToFinishMs?.p50 ?? null,
+          unclaimedMax: pub?.unclaimed?.max ?? null,
+          probeP95Ms: s.probes?.latencyMs?.p95 ?? null,
+          probeNoAnswer: s.probes?.noAnswer ?? null,
+          ackOpP95Ms: s.ack?.opMs?.p95 ?? null,
+          readerFailFrac: s.readers?.failFrac ?? null,
+        }
+      : {}),
   };
 }
 
@@ -576,6 +812,9 @@ export function integrityWarnings(records, pairs, result) {
   const offCalibration = records.filter((r) => r.windowsDifferFromCalibration).map((r) => r.runId);
   if (offCalibration.length)
     warnings.push(`runs with windows other than their calibration's: ${offCalibration.join(', ')}`);
+  const offFactors = records.filter((r) => r.factorsDifferFromCalibration).map((r) => r.runId);
+  if (offFactors.length)
+    warnings.push(`runs with a probe or ACK load other than their calibration's: ${offFactors.join(', ')}`);
   if (result?.belowKnee?.length) {
     warnings.push(
       `the base run is below the knee in ${result.belowKnee.join(', ')}: the halving test is weak in those repeats`,
@@ -588,6 +827,20 @@ const p8cCell = (p8c) => (p8c?.trigger ? 'TRIP' : p8c?.evaluable ? 'ok' : 'n/e')
 
 /** Markdown table of EVERY run, discarded ones included with the failed checks (the PR lists each run). */
 export function ledgerMarkdown(records) {
+  // the publisher stream's and the load's columns come after the P2a ones, and only when a run has them
+  const extended = records.some((r) => r.queue !== undefined);
+  const extra = (r) =>
+    extended
+      ? [
+          r.queue ?? '',
+          r.cell.liftHistory ?? '',
+          r.publishP95Ms ?? '',
+          r.pickupP50Ms ?? '',
+          r.pickupFreeP50Ms === null || r.pickupFreeP50Ms === undefined ? '' : `${r.pickupFreeP50Ms} (n ${r.pickupFreeN})`,
+          r.probeP95Ms === null || r.probeP95Ms === undefined ? '' : `${r.probeP95Ms} / ${r.probeNoAnswer}`,
+          r.ackOpP95Ms ?? '',
+        ]
+      : [];
   const row = (r) => {
     const w = r.workerCounters ?? {};
     const cells = [
@@ -602,6 +855,7 @@ export function ledgerMarkdown(records) {
       p8cCell(r.p8c),
       r.observerP95Ms ?? '',
       `${String(r.git?.sha ?? '').slice(0, 9)}${r.git?.dirty ? '+dirty' : ''}`,
+      ...extra(r),
     ];
     return `| ${cells.join(' | ')} |`;
   };
@@ -617,6 +871,9 @@ export function ledgerMarkdown(records) {
     'P8c',
     'observer P95 ms',
     'git',
+    ...(extended
+      ? ['queue', 'lift history', 'publish P95 ms', 'pick-up p50 ms', 'worker-free p50 ms', 'probe P95 / no-answer', 'ACK op P95 ms']
+      : []),
   ];
   return [`| ${head.join(' | ')} |`, `|${head.map(() => '---').join('|')}|`, ...records.map(row)].join('\n');
 }
