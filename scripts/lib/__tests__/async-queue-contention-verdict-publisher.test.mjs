@@ -332,6 +332,7 @@ const summaryOf = ({
       git: { sha: '0123456789abcdef', dirty: false },
       scriptSha256: 'abc',
       calibration: null,
+      seedFile: o.seedFile,
       liftSeedFile: o.liftSeedFile,
     },
     submission: withShare ? { n: 720, F: 0, latencyMs: { p95: share } } : { n: 0, F: null, latencyMs: null },
@@ -695,6 +696,40 @@ test('publisher flatness: lift history b against 0, publish P95 within 1.25 x in
   );
 });
 
+test("G2's seeded cell is both histories: the empty arm is empty in both, the seeded arm judged on its own stream's history", () => {
+  const rec = (history, liftHistory) => ({ cell: { history, liftHistory } });
+  const empty = [rec('0', '0')];
+  const seeded = [rec('50k', '10k')];
+  assert.deepEqual(
+    flatArmProblems(empty, seeded),
+    [],
+    'the share P95: history 50k, whatever lift history comes with it',
+  );
+  assert.deepEqual(
+    flatArmProblems(empty, seeded, 'publish'),
+    [],
+    'the publish P95: one lift history, whatever share history',
+  );
+  assert.deepEqual(flatArmProblems([rec('0', '10k')], seeded), [
+    '--a must hold lift history 0 runs only (found lift history 10k)',
+  ]);
+  assert.deepEqual(flatArmProblems([rec('50k', '0')], seeded, 'publish'), [
+    '--a must hold history 0 runs only (found history 50k)',
+  ]);
+  assert.deepEqual(
+    flatArmProblems([rec('50k', '10k')], seeded, 'publish').length,
+    2,
+    'a seeded arm a is wrong on both counts',
+  );
+  assert.deepEqual(flatArmProblems(empty, [rec('50k', '0')], 'publish'), [
+    '--b must hold runs of ONE non-zero lift history (found 0)',
+  ]);
+  assert.deepEqual(flatArmProblems(empty, [rec('0', '10k')]), [
+    '--b must hold history 50k runs only (found history 0)',
+  ]);
+  assert.deepEqual(flatArmProblems(empty, [rec('50k', '10k'), rec('0', '10k')]).length, 1);
+});
+
 test('the A/A margin and the reported guards follow the family', () => {
   const aa = pairsOn([6000, 5000, 4000], [6300, 5000, 4400], 'publishP95Ms');
   assert.equal(noiseMargin(aa, 'publish'), 0.1);
@@ -979,6 +1014,47 @@ test('verdict flat --metric publish pairs a lift history 0 arm with a 10k arm an
       .length,
     2,
   );
+});
+
+test("verdict flat judges G2's seeded cell, share 50k and lift 10k at once, for both streams", () => {
+  const dir = path.join(tmp, 'g2-seeded');
+  const seeded = { history: '50k', liftHistory: '10k' };
+  for (const [arm, o] of [
+    ['a', { share: 1000, publish: 6000 }],
+    [
+      'b',
+      {
+        share: 1200,
+        publish: 7000,
+        cell: seeded,
+        seedFile: { sha256: 's', loadedSha256: 's' },
+        liftSeedFile: { sha256: 'l', loadedSha256: 'l' },
+      },
+    ],
+  ]) {
+    for (let repeat = 0; repeat < 3; repeat++) {
+      const file = path.join(dir, arm, `r${repeat}`, 'summary.json');
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(
+        file,
+        JSON.stringify(summaryOf({ queue: 'both', rung: 'MIX', repeat, share: o.share, publish: o.publish, o })),
+      );
+    }
+  }
+  const A = path.join(dir, 'a');
+  const B = path.join(dir, 'b');
+  const share = cli('verdict', '--rule', 'flat', '--a', A, '--b', B);
+  assert.equal(share.status, 0, share.stdout);
+  assert.match(share.stdout, /^flat: history 50k P95 <= 1.25 x history 0: PASS \(3 valid pairs, 3 needed\)/);
+  assert.match(share.stdout, / {2}default\|MIX\|both\|0 {2}1000 -> 1200 {2}ratio 1.2 {2}ok/);
+  const publish = cli('verdict', '--rule', 'flat', '--metric', 'publish', '--a', A, '--b', B);
+  assert.equal(publish.status, 0, publish.stdout);
+  assert.match(publish.stdout, /^flat: lift history 10k publish P95 <= 1.25 x lift history 0: PASS/);
+  assert.match(publish.stdout, / {2}6000 -> 7000 {2}ratio 1.1667 {2}ok/);
+  // a cell that is seeded on one side only is not the empty arm
+  const wrong = cli('verdict', '--rule', 'flat', '--a', B, '--b', A);
+  assert.equal(wrong.status, 2);
+  assert.match(wrong.stdout, /INCOMPLETE .*--a must hold history 0 runs only.*--b must hold history 50k runs only/);
 });
 
 // ---------------------------------------------------------------- the run flags of the new cells

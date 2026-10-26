@@ -114,7 +114,9 @@
 //           --repeats 3 ...
 //      node ... verdict --rule flat --metric publish --a $OUT/l0 --b $OUT/l10k
 //    --a must hold lift history 0 only and --b ONE non-zero lift history. G2's seeded cell is both histories at once
-//    (--history 50k --seed-file ... --lift-history 10k --lift-seed-file ...) from one seed file of each kind.
+//    (--history 50k --seed-file ... --lift-history 10k --lift-seed-file ...) from one seed file of each kind; flat then
+//    judges it twice over the same two arms, --a empty in both histories: the share P95 (b must be history 50k, the
+//    default metric) and --metric publish (b one lift history).
 // 8. G1b (D-15), the product code against G0b's two-publisher-slot cells, the same five seeds (20262901 + repeat), path
 //    on (the P3 env), probes and ACK on, fixed rungs (no calibration), 5 repeats of each of G0b's three cells:
 //      node ... run --blazegraph-url $URL --queue share --rung L3 --probes --ack-load --seed-base 20262901 --repeats 5 \
@@ -1266,13 +1268,10 @@ function verdictCommand(v) {
   const { family, minSamples } = familyFlags(v);
   if (rule === 'flat' && family !== 'share' && family !== 'publish')
     die(2, '--rule flat judges a P95: --metric share or publish');
-  // the flatness rule pairs across histories: the share one across share histories, the publisher one across lift histories
-  const flatKey = family === 'share' ? { ignoreHistory: true } : { ignoreLiftHistory: true };
+  // the flatness rule pairs across histories and their seed files, the share and the lift one (G2's seeded cell is both)
+  const flatKey = { ignoreHistory: true, ignoreLiftHistory: true };
   const keyOf = rule === 'flat' ? (r) => pairKey(r, flatKey) : (r) => r.key;
-  const { pairs, missing } = pairRuns(A, B, keyOf, {
-    ignoreSeed: rule === 'flat' && family === 'share',
-    ignoreLiftSeed: rule === 'flat' && family !== 'share',
-  });
+  const { pairs, missing } = pairRuns(A, B, keyOf, { ignoreSeed: rule === 'flat', ignoreLiftSeed: rule === 'flat' });
   if (rule === 'aa') {
     // three repeats of EACH cell, whatever cell has a run in either arm: valid pairs of different cells do not add up
     const judged = withMetric(pairs, family, { minSamples });

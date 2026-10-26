@@ -274,6 +274,7 @@ export function pickReproductionRung(rungResults) {
 // ---------------------------------------------------------------- pairing and the rules
 const queueOf = (cell) => cell.queue ?? 'share';
 const liftHistoryOf = (cell) => String(cell.liftHistory ?? '0');
+const historyOf = (cell) => String(cell.history ?? '0');
 
 /**
  * Pairing key of a record (history is dropped for the flatness rule, which compares histories, and the lift history for
@@ -541,38 +542,39 @@ const liftFlatLabel = (bRecords, key) => {
 };
 
 /**
- * Why two arms are not the flatness rule's history-0 base and history-50k candidate ([] when they are). The rule
- * drops history from the pairing key (it pairs across histories), so without this check two arms of the same history,
- * or the two arms swapped, would pair up and be judged: a reversed pair yields a ratio far under the limit and a
- * self-comparison a ratio of 1, both a PASS that says nothing about history.
+ * Why two arms are not the flatness rule's empty base and seeded candidate ([] when they are). The rule drops the
+ * histories from the pairing key (it pairs across histories), so without this check two arms of the same history, or
+ * the two arms swapped, would pair up and be judged: a reversed pair yields a ratio far under the limit and a
+ * self-comparison a ratio of 1, both a PASS that says nothing about history. Arm a is EMPTY in both streams (share
+ * history 0 and lift history 0: "its empty-history value", G2); arm b is the share P95's history 50k (AC5), whatever
+ * lift history comes with it, or, for the publisher variant (AC5: "publisher flatness: same rule"), ONE non-zero lift
+ * history (10k in G2's seeded cell), whatever share history comes with it.
  */
 export function flatArmProblems(aRecords, bRecords, family = 'share') {
-  if (family !== 'share') return liftFlatArmProblems(aRecords, bRecords);
   const problems = [];
-  for (const [side, records] of [
-    ['a', aRecords],
-    ['b', bRecords],
-  ]) {
-    const want = FLAT_ARMS[side];
-    const found = [...new Set(records.map((r) => String(r.cell?.history)))].filter((h) => h !== want);
-    if (found.length)
-      problems.push(`--${side} must hold history ${want} runs only (found history ${found.join(', ')})`);
-  }
-  return problems;
-}
-
-/**
- * The publisher variant of the arm check (AC5: "publisher flatness: same rule"): arm a holds lift history 0 only and arm
- * b ONE non-zero lift history (10k in G2's seeded cell, 50k for the plan's wording), whatever its size.
- */
-function liftFlatArmProblems(aRecords, bRecords) {
-  const problems = [];
-  const seen = (records) => [...new Set(records.map((r) => liftHistoryOf(r.cell ?? {})))];
-  const foundA = seen(aRecords).filter((h) => h !== '0');
-  if (foundA.length) problems.push(`--a must hold lift history 0 runs only (found lift history ${foundA.join(', ')})`);
-  const foundB = seen(bRecords);
-  if (foundB.includes('0') || foundB.length > 1) {
-    problems.push(`--b must hold runs of ONE non-zero lift history (found ${foundB.join(', ') || 'none'})`);
+  const histories = (records, of) => [...new Set(records.map((r) => of(r.cell ?? {})))];
+  const emptyA = (of, what) => {
+    const found = histories(aRecords, of).filter((h) => h !== '0');
+    if (found.length) problems.push(`--a must hold ${what} 0 runs only (found ${what} ${found.join(', ')})`);
+  };
+  if (family === 'share') {
+    for (const [side, records] of [
+      ['a', aRecords],
+      ['b', bRecords],
+    ]) {
+      const want = FLAT_ARMS[side];
+      const found = [...new Set(records.map((r) => String(r.cell?.history)))].filter((h) => h !== want);
+      if (found.length)
+        problems.push(`--${side} must hold history ${want} runs only (found history ${found.join(', ')})`);
+    }
+    emptyA(liftHistoryOf, 'lift history');
+  } else {
+    emptyA(historyOf, 'history');
+    emptyA(liftHistoryOf, 'lift history');
+    const foundB = histories(bRecords, liftHistoryOf);
+    if (foundB.includes('0') || foundB.length > 1) {
+      problems.push(`--b must hold runs of ONE non-zero lift history (found ${foundB.join(', ') || 'none'})`);
+    }
   }
   return problems;
 }

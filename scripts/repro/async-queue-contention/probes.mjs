@@ -27,11 +27,6 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { CG_ID } from './fixture.mjs';
 import { summarize } from './verdict.mjs';
 
-export const PROBE_SOURCES = Object.freeze({
-  status: 'daemon.status.storeProbe',
-  count: 'daemon.status.storeQuads',
-  metrics: 'daemon.metrics.storeHealth',
-});
 export const PROBE_RECONCILE_SOURCE = 'daemon.metrics.storeCountReconcile';
 /** store-reachability.ts STORE_PROBE_WAIT_MS: a status probe that has not answered by then reports 'no-answer'. */
 export const NO_ANSWER_MS = 5000;
