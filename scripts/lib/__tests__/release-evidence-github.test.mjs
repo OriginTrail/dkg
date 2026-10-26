@@ -69,3 +69,20 @@ test('GitHub fixture refuses an artifact requested from another run or repositor
     { env: f.gh.env, stdio: 'pipe' }), /unexpected artifact source/);
   }
 });
+
+test('GitHub fixture enforces method, candidate and projection semantics', t => {
+  const f = githubFixture(t);
+  const base = ['api', '--paginate', '-X', 'GET', 'repos/OriginTrail/dkg/actions/workflows/ci.yml/runs',
+    '-f', `head_sha=${f.options.expected.commit}`, '-f', 'per_page=100', '--jq', '.workflow_runs[] | {id, run_attempt}'];
+  const run = args => execFileSync('gh', args, { env: f.gh.env, encoding: 'utf8', stdio: 'pipe' });
+  assert.equal(run(base).trim().split('\n').length, 3);
+  for (const [args, reason] of [
+    [base.filter((_, i) => i !== 2 && i !== 3), /must use GET/],
+    [base.map(arg => arg === 'GET' ? 'POST' : arg), /must use GET/],
+    [base.slice(0, -2), /wrong run history projection/],
+    [base.map(arg => arg === '.workflow_runs[] | {id, run_attempt}' ? '.workflow_runs[] | {id}' : arg), /wrong run history projection/],
+    [base.map(arg => arg.startsWith('head_sha=') ? `head_sha=${'f'.repeat(40)}` : arg), /wrong candidate query/],
+    [base.filter((_, i) => i !== 5 && i !== 6), /wrong candidate query/],
+    [base.map(arg => arg.replace('repos/OriginTrail/dkg/', 'repos/some/fork/')), /unexpected API repository/],
+  ]) assert.throws(() => run(args), reason);
+});

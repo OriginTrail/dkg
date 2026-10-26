@@ -9,7 +9,7 @@ export function installGithubFixture(bin, config) {
   const configFile = path.join(bin, 'github-fixture.json');
   const calls = path.join(bin, 'github-calls.jsonl');
   const script = path.join(bin, 'gh-fixture.cjs');
-  const encoded = value => JSON.stringify({ ...value, artifacts: { 'OriginTrail/dkg/123/nightly-profile-summary': value.nightlyBytes } });
+  const encoded = value => JSON.stringify({ ...value, candidateCommit: value.runs['123/1'].head_sha, artifacts: { 'OriginTrail/dkg/123/nightly-profile-summary': value.nightlyBytes } });
   fs.writeFileSync(configFile, encoded(config));
   fs.writeFileSync(script, `const fs = require('node:fs'), path = require('node:path');
 const config = JSON.parse(fs.readFileSync(${JSON.stringify(configFile)}, 'utf8'));
@@ -17,7 +17,15 @@ const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args) + '\\n');
 if (args[0] === 'api') {
   const endpoint = args.find(a => a.startsWith('repos/'));
+  if (!endpoint?.startsWith('repos/OriginTrail/dkg/actions/')) throw new Error('unexpected API repository: ' + endpoint);
   if (endpoint.endsWith('/workflows/ci.yml/runs')) {
+    const option = flag => args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined;
+    const fields = args.flatMap((arg, index) => ['-f', '--raw-field', '-F', '--field'].includes(arg) ? [args[index + 1]] : []);
+    const method = option('-X') ?? option('--method') ?? (fields.length ? 'POST' : 'GET');
+    if (method !== 'GET') throw new Error('run history must use GET');
+    if (fields.filter(field => field?.startsWith('head_sha=')).length !== 1
+      || !fields.includes('head_sha=' + config.candidateCommit)) throw new Error('wrong candidate query');
+    if (option('--jq') !== '.workflow_runs[] | {id, run_attempt}') throw new Error('wrong run history projection');
     const pages = args.includes('--paginate') ? config.pages : config.pages.slice(0, 1);
     process.stdout.write(pages.flat().map(row => JSON.stringify(row)).join('\\n'));
   } else {

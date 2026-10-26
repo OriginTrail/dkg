@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { listTrackedFiles } from '../lib/disabled-test-git.mjs';
+import { isD1ScannableFile } from '../lib/disabled-test-scanner.mjs';
 import { swallowedAssertions } from '../lib/swallowed-assertions.mjs';
-const files = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8' }).split('\0')
-  .filter(file => /\.(test|spec)\.[cm]?[jt]sx?$/.test(file) && !file.includes('/archive/'));
+// The shared D1 policy selects test source; D2 discovery configuration is not an assertion surface.
+const files = listTrackedFiles().filter(isD1ScannableFile);
 const findings = files.flatMap(file => swallowedAssertions(fs.readFileSync(file, 'utf8'), file));
 for (const row of findings) console.error(`${row.file}:${row.line}: ${row.message}`);
 if (findings.length) process.exitCode = 1;
