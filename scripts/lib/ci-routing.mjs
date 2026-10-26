@@ -409,6 +409,12 @@ export const PATH_TRIGGERS = Object.freeze([
     reason: 'Blazegraph provisioning contract changed',
   },
   {
+    patterns: [/^blazegraph-image\.json$/],
+    lanes: ['tornado_blazegraph'],
+    evmScopes: [],
+    reason: 'the Blazegraph job runs the share promote lookup differential on the pinned image (U+001F positive control)',
+  },
+  {
     patterns: IDENTITY_WALLET_EVM_PATTERNS,
     lanes: [],
     evmScopes: ['chain'],
