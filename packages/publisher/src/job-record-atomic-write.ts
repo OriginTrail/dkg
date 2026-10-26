@@ -17,6 +17,6 @@ export async function persistLiftJobRecord(store: TripleStore, graphUri: string,
   if (replaced) return;
   // Only absent capability / clean preflight refusal reaches this existing request-first path.
   // Execution errors propagate: replay after an uncertain commit could overwrite a later claim.
-  await store.insert(requestQuads);
+  await store.insert(requestQuads, { source: 'publisher.asyncLift.writeJobRequest' });
   await replaceSubjectAtomicallyOrFallback(store, graphUri, jobRef, jobQuads, 'publisher.asyncLift.writeJob');
 }
