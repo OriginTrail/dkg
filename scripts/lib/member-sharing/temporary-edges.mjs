@@ -4,11 +4,13 @@
 // the topology between them is, and the cleanup after them.
 //
 // Each node is an explicit record: { number, role ('owner' | 'member1' |
-// 'member2'), member (not the owner), subject (how a sentence names it),
-// label (`node<N> (<role>)`), relay (the relay a member dials the owner
-// through), overrides (its config from the first start), env (its daemon's
-// environment), peerId, agentAddress }; member 2's also `trace`, the file its
-// node writes its sync admission trace to (DKG_SYNC_ADMISSION_TRACE).
+// 'member2' | 'feeder'), member (a member of the graphs), subject (how a
+// sentence names it), label (`node<N> (<role>)`), relay (the relay a member
+// dials the owner through, and the feeder's), overrides (its config from the
+// first start), env (its daemon's environment), peerId, agentAddress };
+// member 2's also `trace`, the file its node writes its sync admission trace
+// to (DKG_SYNC_ADMISSION_TRACE). The feeder, when a fourth node number is
+// free, holds the large graphs of case 6 and serves them to member 2.
 
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -36,6 +38,7 @@ export class TemporaryEdges {
     this.owner = null;
     this.member1 = null;
     this.member2 = null;
+    this.feeder = null;
     // Every node this run added: the cleanup stops and removes these only.
     this.started = [];
     // The starts still running, each with what cancels it.
@@ -44,10 +47,15 @@ export class TemporaryEdges {
 
   get nodes() { return [this.owner, this.member1, this.member2]; }
   get members() { return [this.member1, this.member2]; }
+  /** The node that holds case 6's large graphs: the feeder, or the owner without one. */
+  get largeAuthor() { return this.feeder ?? this.owner; }
   /** Whether a node number is one of the temporary nodes. */
-  isTemporary(number) { return this.nodes.some(node => node?.number === number); }
+  isTemporary(number) { return [...this.nodes, this.feeder].some(node => node?.number === number); }
 
-  ownMark(number) { return join(this.devnet.nodeDir(number), OWN_MARK); }
+  /** The name of the file that marks a node folder as this suite's: a suite built on this class names its own, so that no suite takes another's nodes for its own. */
+  get markName() { return OWN_MARK; }
+
+  ownMark(number) { return join(this.devnet.nodeDir(number), this.markName); }
 
   /** Whether a node's folder carries this run's claim: addnode wrote it there, so this run created the folder. */
   claims(node) {
@@ -89,11 +97,14 @@ export class TemporaryEdges {
   }
 
   /**
-   * The temporary nodes: the first three free numbers of 7, 8, 9, 10, or the
-   * three of `explicit` (MEMBER_SHARING_NODES), which must all be free. An
+   * The temporary nodes: the first three free numbers of 7, 8, 9, 10 for the
+   * owner and the members, and a fourth free one for the feeder; or the three
+   * or four of `explicit` (MEMBER_SHARING_NODES), which must all be free.
+   * Without a fourth number the owner holds the large graphs itself. An
    * earlier suite can leave a node folder or a running node behind; such a
-   * number is left alone. Member 1 reserves on node 1 (`relay1`), member 2 on
-   * node 2 (`relay2`), the owner on both. Returns { taken } or { problem }.
+   * number is left alone. Member 1 reserves on node 1 (`relay1`), member 2
+   * and the feeder on node 2 (`relay2`), the owner on both. Returns { taken }
+   * or { problem }.
    */
   allocate({ explicit, relay1, relay2 }) {
     const candidates = explicit ? explicit.split(',').map(Number) : NODE_CANDIDATES;
@@ -104,12 +115,12 @@ export class TemporaryEdges {
       if (why) taken.push(`node${number}: ${why}`);
       else free.push(number);
     }
-    if (explicit ? taken.length > 0 || free.length !== 3 : free.length < 3) {
-      return { problem: `no three free node numbers among ${candidates.join(', ')} (${taken.join('; ') || 'MEMBER_SHARING_NODES must name three'})` };
+    if (explicit ? taken.length > 0 || ![3, 4].includes(free.length) : free.length < 3) {
+      return { problem: `no three free node numbers among ${candidates.join(', ')} (${taken.join('; ') || 'MEMBER_SHARING_NODES must name three or four'})` };
     }
-    const [owner, member1, member2] = free;
+    const [owner, member1, member2, feeder] = free;
     const record = (number, role, subject, relay, overrides, env = {}) => ({
-      number, role, member: role !== 'owner', subject, label: `node${number} (${role})`, relay, overrides, env, peerId: null, agentAddress: null,
+      number, role, member: role.startsWith('member'), subject, label: `node${number} (${role})`, relay, overrides, env, peerId: null, agentAddress: null,
     });
     // Reachable through relays only: the owner through node 1 and node 2, member 1
     // through node 1 (the devnet's relay for an Edge), member 2 through node 2.
@@ -123,8 +134,8 @@ export class TemporaryEdges {
     // slots. So they are pinned to its policy.
     // Case 6 needs to know which admission holds its slot, and when: the node
     // writes its admission trace into its folder. Its catch-up asks one peer at
-    // a time (the owner first), so that the large graph's transfer from the
-    // owner is the pull that takes its general slot (busy-member.mjs).
+    // a time, so that the large graph's transfer from the node that holds it
+    // is the pull that takes its general slot (busy-member.mjs).
     const trace = join(this.devnet.nodeDir(member2), 'sync-admissions.jsonl');
     this.member2 = {
       ...record(member2, 'member2', 'member2', relay2,
@@ -135,6 +146,12 @@ export class TemporaryEdges {
         }),
       trace,
     };
+    // Case 6's large graphs come from the feeder, which member 2 reaches the
+    // way it reaches the owner: through node 2. A node writes more slowly the
+    // more it holds, and the owner's writes are among those case 6 waits for,
+    // so the owner holds no large graph when a feeder can.
+    this.feeder = feeder === undefined ? null
+      : record(feeder, 'feeder', 'the feeder', relay2, { relay: relay2, announceAddresses: [DEAD_DIRECT_ADDRESS, `${relay2}/p2p-circuit`] });
     return { taken };
   }
 
@@ -158,7 +175,7 @@ export class TemporaryEdges {
       added = await this.devnet.devnetSh(['addnode', String(node.number), 'edge'], {
         ...node.env,
         DEVNET_ADDNODE_CONFIG_OVERRIDES: JSON.stringify(node.overrides),
-        DEVNET_ADDNODE_MARK_NAME: OWN_MARK,
+        DEVNET_ADDNODE_MARK_NAME: this.markName,
         DEVNET_ADDNODE_MARK_TEXT: `${this.stamp} ${node.role} starting`,
       }, undefined, { signal: pending.signal });
     } finally {
@@ -183,13 +200,16 @@ export class TemporaryEdges {
   }
 
   /** A member dials the owner through its relay; the owner's reservation there may need a moment. */
-  async dialOwner(member) {
-    const multiaddr = `${member.relay}/p2p-circuit/p2p/${this.owner.peerId}`;
+  dialOwner(member) { return this.dial(member, this.owner); }
+
+  /** A member dials another node through the member's relay, on which that node holds a reservation. */
+  async dial(member, to) {
+    const multiaddr = `${member.relay}/p2p-circuit/p2p/${to.peerId}`;
     const dialed = await waitFor(async () => {
       const answer = await this.devnet.api(member, 'POST', '/api/connect', { multiaddr }, { timeoutMs: 30_000 });
       return { ok: answer.status === 200 && answer.json?.connected !== false, why: brief(answer) };
     }, 120_000, 3000);
-    if (!dialed.ok) throw new Error(`${member.label} could not dial the owner through the relay: ${dialed.why}`);
+    if (!dialed.ok) throw new Error(`${member.label} could not dial ${to.subject} through the relay: ${dialed.why}`);
   }
 
   async stop(node) {

@@ -4,23 +4,471 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+## [10.0.26] - 2026-10-25
+
+10.0.26 makes collaboration between AI agents dependable on any network.
+Agents that share a context graph can join it, add knowledge and see each
+other's contributions within seconds, also when they run behind home
+routers, company firewalls or cloud networks and reach each other only
+through relays. The release also makes nodes steadier and lighter on
+resources, adds a one-command way back to 10.0.25, and strengthens
+security.
+
+### Highlights
+
+- **Collaboration on any network.** Newly approved members of a curated
+  context graph can write as soon as the curator's member list reaches
+  them, and every member receives the others' contributions within
+  seconds. On the public testnet, a member's write reached the other
+  members in 3 to 8 s, with every connection between them going through
+  relays (#3421).
+- **A steadier network.** Nodes reuse the connections they already have,
+  relays keep the reservations agents depend on, and every installation
+  runs exactly the network libraries that the tests cover (#3379, #3437,
+  #3440, #3444, #3445).
+- **Large context graphs, small footprint.** Nodes sync even very large
+  context graphs within fixed memory limits (#3430).
+- **Data arrives quickly.** Core nodes keep verified content and stream
+  exact assets to the nodes that ask for them, query results stream
+  straight from the store, and edge nodes can opt in to a shared,
+  authenticated chain cache on core nodes for fewer blockchain requests
+  (#3391, #3473).
+- **A safe way back.** `dkg rollback` returns a node to 10.0.25 with its
+  data (#3484).
+- **More reliable sharing and publishing.** Interrupted shares finish
+  under their original job, a client can confirm a share whose answer it
+  lost, transactions keep going through when network fees spike, and
+  creating a context graph rides out a busy moment on the node (#3389,
+  #3393, #3396, #3434, #3497).
+- **Security first.** Nodes tell you when Node.js lacks its latest
+  security fixes, refuse Brotli-compressed web responses as an extra
+  safeguard, and run updated dependencies (#3422, #3424, #3449).
+- **Easier to operate.** Nodes write a short resource summary every five
+  minutes, keep three days of logs on their own, and can pause and resume
+  publishing (#3354, #3412).
+
+### Before you upgrade
+
+- Upgrade Node.js to 22.23.4, 24.22.1, 26.12.1 or later, then restart the
+  node.
+- Back up the node as usual, and leave some free disk space: at its first
+  start on this release the node keeps a copy of one of its databases.
+  `dkg rollback` returns it to 10.0.25 if you need to.
+- Upgrade both edge and core nodes: the network improvements use both.
+- If your nodes reach each other over a private LAN or VPN, set
+  `lanAddressesEnabled: true`.
+- Remove any external `logrotate` rule for `daemon.log`.
+- Nothing changes on chain.
+
+The details follow: compatibility, the full upgrade table, and every
+change.
+
+### Compatibility
+
+**No smart-contract, ABI or deployment registry changes.** Four new
+protocols. The connection monitor pings over `/dkg-liveness/ping/1.0.0`
+(#3437); a node on 10.0.25 answers that it does not support it, which
+counts as alive, and this release still answers `/ipfs/ping/1.0.0`. A
+Core on an official deployment serves the chain cache over
+`/dkg/10.0.0/core-chain-cache-source/1` and
+`/dkg/10.0.0/core-chain-cache-snapshot/1`, and a Base mainnet Core proves
+itself a snapshot source over `/dkg/10.0.0/public-snapshot-source/1`
+(#3391); nodes on 10.0.25 register none of them. gossipsub 16.1.1 keeps
+the wire format, signatures and message ids of the 15.x line that nodes on
+10.0.25 run, so nodes of both versions share one gossip mesh (#3440). The
+share, notice, sync and catalog messages are unchanged: a member on
+10.0.25 receives the resent notices and the member fan-out, and a pull
+from this release asks a peer on 10.0.25 for less, never differently
+(#3435, #3438). Peers on 10.0.25 use the open relay circuit to an Edge on
+this release once identify gives them its new address list (#3444). The
+RFC-64 inventory database moves to schema 6 at its first start on this
+release, which a node on 10.0.25 refuses until `dkg rollback` gives it back
+(#3484), and a queued publication can end with a failure code that 10.0.25
+does not know (#3352, #3431); see the upgrade table before you upgrade. The testnet defaults list a different
+second fallback chain endpoint (#3385).
+
+### Upgrading from 10.0.25
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| Node.js 22.23.4, 24.22.1 and 26.12.1 fix CVE-2026-111497, and outbound HTTP refuses Brotli-encoded responses (#3449) | The node takes `br` out of the Accept-Encoding of its outbound requests and fails a response whose Content-Encoding names `br` before anything decodes it, with `DKG_BROTLI_RESPONSE_REFUSED`: chain RPC, the daemon's own requests and local-agent forwards. At start it logs `Outbound HTTP refuses Brotli-encoded responses (CVE-2026-111497 hardening)`, or a `WARNING` with the reason when it cannot install the refusal. `GET /api/status` reports `runtime.nodeVersion` to a caller that may administer the node and `null` to others, and `dkg status` prints it on its `Runtime:` line. The node also starts on an earlier Node.js release, and auto-update keeps working there | Upgrade Node.js to 22.23.4 or later on the 22 line, 24.22.1 or later on 24, or 26.12.1 or later on 26; the 23 and 25 lines get no fix. On a NodeSource install, `sudo apt-get update && sudo apt-get install --only-upgrade nodejs`. Restart the node and check the `Runtime:` line of `dkg status`. See `docs/use-dkg/updates-and-rollback.md` |
+| A node warns while Node.js lacks the 2026-10-21 security fixes (#3422) | `dkg start`, daemon start and auto-update slot activation log a `WARNING` when Node.js predates 22.23.4, 24.22.1 or 26.12.1 on its line, or runs an end-of-life line (21 or older, 23 or 25), and the node still starts. `dkg doctor` reports the same as the `node-security` warning, which sets exit code 1. `engines.node` and the `node:sqlite` floor are unchanged, so every node that starts on 10.0.25 starts on this release | Upgrade Node.js, as in the row above. `doctor.skipChecks` skips the `node-security` check |
+| The RFC-64 inventory database moves to schema 6 (#3352) | At its first start on this release the node adds one table for the failure records of private catalog placements; canonical markers, digests and signatures are unchanged. A node on 10.0.25 supports schema 5 only and refuses the upgraded database until `dkg rollback` gives it back, as in the next row | Use `dkg rollback` to go back to 10.0.25; a backup of the node's data before you upgrade stays the safest way back. Do not lower the database's `user_version` by hand or delete owed markers to start an earlier version |
+| `dkg rollback` takes a node on this release back to 10.0.25 with its data (#3484) | Before it stops the node, `dkg rollback` checks that the local stores can be given back in a form the older release opens, and otherwise refuses and changes nothing. It lowers the RFC-64 inventory database from schema 6 to 5 and keeps every row 10.0.25 reads, including rows written after the update. Before any schema migration the node keeps one copy of the database as it was, for example `rfc64-sync/inventory-v1.schema-v5-to-v6.pre-migration.sqlite3`; migrating needs free disk space for the copy, twice the write-ahead log and 64 MiB, and with less the node stops at start-up, says so and leaves the database as it was. When the database is not exactly schema 6, the rollback restores that copy, which lacks what the node recorded after the update, and keeps the replaced database as `rfc64-sync/inventory-v1.schema-v6.before-rollback.sqlite3`. The stores stay held until the older release is installed (Edge) or its slot is active (Core). `dkg rollback --stores-for <version>` readies a stopped node's stores for a version installed by hand. Described in `docs/use-dkg/updates-and-rollback.md` | Keep free disk space for the copy before you upgrade. To roll back, stop a service manager that restarts the node by itself (for example systemd with `Restart=always`), run `dkg publisher clear failed` (see the row for #3431) and `dkg rollback`, then start the node or service |
+| Edges with public relays announce only public and relay addresses (#3444) | On an Edge whose configured relays all have public addresses, as on the bundled networks, the node leaves loopback, private (RFC 1918), shared (100.64/10), link-local and unique-local addresses out of its address list, its peer record and identify; relay circuit addresses stay, and an explicit `announceAddresses` list is announced as given. Such an Edge treats a peer that announces no public address or DNS name as relay-only, and sends its requests, sync pages, catalog replays and metadata fetches included, over the relay circuit already open to it, without a dial. At start it logs `Addresses: announcing public and relay addresses only; a peer that announces no public address is reached over its open relay circuit (set lanAddressesEnabled for a LAN or VPN deployment)`. Cores keep their routes, and so do devnets, whose relays are local. Peers on 10.0.25 take the new address list with the next identify and then use the open circuit too | None on the bundled networks. Where nodes reach each other over a LAN or VPN, set `lanAddressesEnabled: true` in the node configuration, or `DKG_LAN_ADDRESSES_ENABLED=1`, which wins |
+| A node reuses an open relay circuit and gives each peer one round of connection work (#3379, #3445) | After a dial leaves only relayed connections to a peer open, or a request's deadline cuts the dial while a circuit stays open, the node records the peer with its set of direct addresses for 5 minutes, at most 4,096 peers, and opens later streams on the open circuit without a dial, while the circuit has at least 16 MiB of its data allowance left and outlives the operation's time budget. A changed address set, a direct connection or the end of the 5 minutes brings the dial back. Once a peer is admitted, a second relayed connection to it starts no network admission, catalog replay or sync-on-connect; a peer that is not admitted yet gets the full work on its next connection. A circuit through a relay enters the peer store only once it has reached the peer, each failed circuit candidate is logged with its address and error, and the node's profile names a configured relay it holds a reservation on | None |
+| Relays keep refreshed reservations, and the connection monitor allows 20 to 25 s for a ping (#3437) | On a node that runs the relay server, a refreshed reservation stays, with its circuits, until one reservation lifetime after its last refresh, and an expiry removes only the peer's current reservation. The libp2p connection monitor pings each connection every 30 s, allows 20 to 25 s for the answer and aborts a connection whose ping fails, so a peer that stops answering goes within 55 s. It pings over the new protocol `/dkg-liveness/ping/1.0.0`; a node on 10.0.25 answers that it does not support it, which counts as alive, and this release still answers `/ipfs/ping/1.0.0`. The peer health check opens no ping stream of its own and reports the round trip the monitor measured. These are libp2p's own options and a runtime repair, so npm installs run them; the workspace patch on libp2p is removed | Upgrade relays and Cores to keep refreshed reservations |
+| The published packages pin the libp2p family to exact versions (#3440) | An npm install, `npm install -g` on an Edge or an install into a Core's release slot, places the versions CI tests: libp2p 3.5.1, circuit-relay-v2 4.2.17, yamux 8.0.7, tcp 11.0.32, identify 4.1.18, kad-dht 16.4.9, `@libp2p/utils` 7.4.5, gossipsub 16.1.1 and the rest of the family's 34 packages. The CLI package pins the 21 family packages that other packages depend on, so every dependent reuses them. These are the versions that fresh npm installs resolve, except gossipsub, which moves from the 15.x line to 16.1.1. The workspace patches on libp2p and yamux are removed; yamux 8.0.2 and later carry that fix. Generic utilities below the family keep their ranges | None. Do not override the pinned versions in an install |
+| Gossip runs on gossipsub 16.1.1 (#3440) | gossipsub 16.1.1 keeps the wire format, signatures and message ids of the 15.x line that nodes on 10.0.25 run, so nodes of both versions share one gossip mesh. A peer that subscribes to a topic whose mesh is short is grafted at once | None |
+| An approved member waits for its member list (#3436, #3439) | After a curator approves a join, the member fetches the graph's metadata from the curator. Until the member list arrives, a write by the approved agent is refused with the retryable authority reason `approved-member-metadata-pending`: a synchronous share answers 503 with `retryable: true`, and an async share job stays `failed_retrying`, names the reason in `lastError.authorityReason` and goes through once the list arrives. `POST /api/context-graph/<id>/request-join` (`dkg context-graph request-join`) then sends nothing, answers 200 with `status: "approved"` and `joinState: "approved-metadata-pending"`, and brings the next metadata fetch forward, no sooner than 15 s after the last one; `reRequest: true` (`--re-request`) sends a new request anyway. `GET /api/context-graph/list` shows `joinState: "approved-metadata-pending"` on such a row, and the node skill tells agents not to ask again while it shows. A complete snapshot from the curator that leaves the member out ends the state. The metadata recovery after an approval ends once the member's metadata is confirmed. The curator of a public graph registered on chain answers a repeated request from an admitted member as already a member. Subscribers take a graph's member list only from its curator | Retry the 503 of a synchronous share, or follow the async job. Upgrade the members' nodes and the curator's node |
+| A member's first subscribe to an unregistered public graph reaches its author behind the first peer window (#3467) | The fetch of the graph's owner-signed seed asks the next windows of the same rotation of connected peers before it reports a miss: each connected peer once, at most 32 peers, and no new window once the fan-out budget is spent, so an Edge's first attempt asks every peer it is connected to. Peer selection, rotation and acceptance are unchanged, and a miss logs at debug level how many peers were asked | None |
+| A Core pulls a peer's agent profile again until it arrives (#3475) | When a connect-time pull of a peer's `agents` graph leaves that peer's own profile missing, the node pulls the graph from that peer again 2 s, 10 s and 30 s later, until the profile is there: one episode per peer at a time, only while the peer stays connected, and none again in the session for a peer whose episode ran out. Only nodes that sync the system graphs on connect do this, Cores by default; Edges are unchanged. The catch-up after an authority change stays scoped to the changed graphs (#3380) | None |
+| The curator resends missed change notices, and members keep pulling their graphs from the owner (#3435) | A follower that a change notice did not reach is sent it again 3 s later and once more 15 s after that; a newer notice of the same scope takes the resends over. A follower whose identify lists no notice protocol is left out, and one that refuses the protocol is not sent it again. Each notice writes one line, for example `SWM change notice for "<graph>" root (<operation>): reached 14 of 15 follower(s), 3 on a resend; not reached: <peer>=timeout; 1 without the notice protocol`. The once-a-minute pull of #3258 covers a public graph whose allowlist names one of the node's agents, not revoked, for as long as it does, except a graph the node curates. When no owner peer is connected and no other peer gave new data, that pull connects to the owner the way a share does, within 10 s and with a 60 s pause for an owner peer it could not reach: at most one more pull per graph and interval, and none for a graph whose authority is not confirmed yet. A catch-up asks the graph owner's peers whenever they are candidates, and one peer not yet known as a good source beside the known ones; an answer with metadata and no data does not make a peer a good source | Upgrade the curator's node for the resends and the members' nodes for the pulls. `DKG_RECENT_SHARED_MEMORY_PULL_ENABLED=0` turns the pull off |
+| A share into a curated public graph goes to the graph's connected members, and a shared-memory pull fetches its data phase only when needed (#3438) | A share into a public graph also goes to the connected peers of the agents on the graph's allowlist, as the local agent registry maps them, subscribers or not, outside the per-share probe limit and the large-graph cap: at most 64 agents a graph and 8 peers each, with the lookup kept for a minute and the connections read at each share. Private graphs and graphs with a peer allowlist are unchanged. A public shared-memory round asks for the data phase only when the metadata it fetched names a legacy root or a graph-backed snapshot, or cannot tell; shares of Knowledge Assets arrive in the snapshot phase. A round that asks for it leaves the graphs that carry such shares out of the root-entity check, and the drop warning names the graph and the peer. No wire change: a peer is asked for less, never differently | Upgrade the members' nodes |
+| Cores serve the exact-asset stream and keep the verified bodies they serve, by default (#3391) | The exact-asset stream is on unless switched off: a Core serves it for graphs registered as public, and every node requests it from Cores that advertise it, for eligible public assets; peers without it are asked over the ordinary sync protocol. A Core with a `dataDir` keeps each root-verified export in `<dataDir>/prepared-content-v1`, by default at most 1 GiB and 8,192 entries for at most 6 hours, and reuses it after the usual authorization and source checks, also after a restart. Edges, and agents without a `dataDir`, keep the cache off unless configured. The bulk transport stays opt-in. Described in `docs/sync/warm-sync-rollout.md` | None. Allow the cache its disk space on Cores. `DKG_EXACT_BATCH_STREAM_ENABLED=0` keeps the ordinary sync path, and `preparedContentCache.enabled: false` turns the cache off |
+| An Edge's snapshot job can take a public graph's chain inventory from authenticated Cores (#3391) | Opt-in on an Edge with `"DKG_Core_chain_cache": true` in the node configuration, for `POST /api/context-graph/snapshot-sync` with `sourcePolicy: "DKG_Core_chain_cache"` and an empty `trustedCorePeerIds`; the job's `GET` lists the policy in `capabilities.sourcePolicies` only on a node that has the setting, and the setting stops the start of a node outside an official deployment. A Core on an official mainnet or testnet deployment serves the cache by default over `/dkg/10.0.0/core-chain-cache-source/1` and `/dkg/10.0.0/core-chain-cache-snapshot/1`, and reads cache misses from its own chain endpoints. A Core of any official deployment of the same environment qualifies, mainnet with mainnet and testnet with testnet, and peers of such a deployment may use these two protocols and nothing else. The Core signs a fresh challenge that binds both peers, the graph and the deployments, and the Edge checks the Core's operational key and active ShardingTable membership on its own configured deployment; a peer never names an RPC endpoint or a contract. A job probes at most 16 candidates, four at a time, pins at most four, takes content from the data network's peers, checks each asset against its identity and root, and reports `chainCacheRpcUsage` when it completes. On Base mainnet, `sourcePolicy: "base-mainnet-registered-cores"` selects registered Base mainnet Cores that host the graph, over `/dkg/10.0.0/public-snapshot-source/1`. Described in `docs/sync/warm-sync-rollout.md` and `docs/sync/public-core-snapshot-recovery.md` | None on a Core; `"DKG_Core_chain_cache": false` turns the service off. On an Edge, set `"DKG_Core_chain_cache": true` to use it, once the Cores it should use run this release |
+| A full-graph durable data round is bounded, and the store's background lane yields between asset writes (#3430) | Every rootless full-graph data round ends at a graph boundary it can checkpoint once it holds 131,072 rows or an estimated 64 MiB; it always holds the first asset after its resume offset whole, and past that asset it ends at 262,144 rows or 128 MiB at the latest. The next round resumes at the checkpoint with the same responder session. A round that yields after its recovery slice expired fetches the metadata phase again, so every data round runs under a complete manifest. Between two asset writes of one recovery, a round waits while other background store work is queued or running, at most as long as the previous write took and never more than 10 s. A graph whose responder session ended, after a restart, a change of peer or a gap of more than ten minutes, starts again at row 0, in bounded rounds | None |
+| A node catches up only the graphs whose accepted authority changed (#3380) | An accepted RFC-64 authority change queues, after the same 3 s quiet window, a pass from every connected peer that covers only the graphs whose authority changed in that window, durable and shared memory both. Such a pass does not mark the peer fresh, record peer progress or take the on-connect cooldown, so the peer's next full pass goes ahead on its usual schedule | None |
+| A receiver takes fewer lease turns for catalog heads (#3383) | When a scope's next lease turn comes, the newest delivered head of that scope runs in place of the older queued ones, within one signed lineage window of the durable head and only from a provider that delivered all of them; a head a caller awaits keeps its place. A re-pull of an announced head that no provider serves waits 5 s, then 10, 20 and so on up to 2 minutes; a repeated hint pulls only for a newer head or an untried provider, and a head whose budget ran out stays quiet for 15 minutes for the providers already tried. A lease that only replays the applied head lets leases that apply new data, and whole-graph retirements, go first; the 30 s wait limit is unchanged | None |
+| The chain event lane for Knowledge Asset updates keeps its progress when its scan lease expires (#3399) | A scan that outlasts its lease keeps the memory of the events it dispatched, so a retry dispatches only what is still owed. After at least one new dispatch the lane scans the range again at its next poll without escalating its backoff; a lease that expired before any dispatch keeps the backoff. The cursor advances only after a whole range passes under one lease | None |
+| A failed RFC-64 authority refresh retries itself (#3411, #3386) | A refresh pass hands each lane exactly the request it created, and a lane that was busy keeps the outcome of its own refresh. A failed refresh is retried on the refresh loop's own timer after 1 s, 5 s and 30 s, for that graph only, and a commit resets the count. A replica that holds a public graph's owner-signed seed re-establishes the graph's authority this way with no sync slot | None |
+| `daemon.log` rotates by itself and keeps 72 hours within 512 MB (#3412) | Past 50 MB the live file is renamed to `daemon.log.1`, and earlier files move up one number. A rotated file is removed once its newest line is 72 hours old, or sooner, oldest first, when the live and rotated files together would pass 512 MB: the full 72 hours at the 6.5 MB an hour of the busiest Cores, and at least 48 hours up to about 9 MB an hour. The daemon checks every 10 minutes, rotations and restarts keep every line, and a restart moves an oversized log to `daemon.log.1` whole. Described in `docs/use-dkg/migrate-to-npm.md` | Remove an external `logrotate` rule for `daemon.log`: it writes the same numbered file names |
+| A `resource_usage` line every 5 minutes (#3412) | One logfmt line at start and every 5 minutes, through the structured logger and so also to a configured log exporter: worker RSS, V8 heap used and heap limit, external memory, each store lane's running work against its slots with its queue depth and the operations holding it, and the sync slots in flight with the operations that hold them, for example `resource_usage rss_mb=147 heap_used_mb=38 heap_limit_mb=4144 external_mb=10 store_ack=0/4 ... sync=2/3 sync_queued=0/16`. A day of lines is under 1 MB | None |
+| Refused metadata refreshes are summarized once per 10 minutes (#3412) | A curator metadata refresh that finds no free sync slot is refused at once and asked again later. These refusals are counted, and one warning per interval gives the count, the number of graphs and the last slot state, for example `Sync backpressure rejected durable:control-plane 4 time(s) in the last 600 s for 3 graph(s), each asked again later (last: ...)`; the open interval is written when the node stops. Every other refusal, and a metadata fetch that ends any other way, keeps its own line | Tooling that counted the single `Sync backpressure rejected durable:control-plane` lines should read the count in the summary |
+| The supervisor logs each liveness probe and the probes behind a restart (#3395, #3394) | With the liveness watchdog on, as by default, the supervisor writes one `[supervisor] liveness probe {...}` line to `daemon.log` and its standard error for each probe, every 30 s: the transport outcome, the duration, whether it connected and got headers, the HTTP status, the count of failures in a row and the shutdown-grace state, under the worker's generation. Before it restarts a worker after five failed probes in a row it writes `[supervisor] liveness restart {...}` with up to the last eight probes. No error text, endpoints, credentials or payloads are written. Each watcher makes one restart decision and cancels its probe when it stops | None |
+| Transactions carry headroom over the base fee, with a floor on Gnosis and Chiado (#3393) | Every write the node signs with EIP-1559 fees takes the higher of the chain's suggested tip and the chain's floor as `maxPriorityFeePerGas`, and three times the latest base fee plus that tip as `maxFeePerGas`. On Gnosis and Chiado the fee cap is at least 2 gwei and the tip at least 1 gwei, about 0.001 xDAI for a publish of about 1M gas; other chains have no floor. A block charges its base fee plus at most the tip, so the cap raises the balance a wallet must hold, about 0.002 xDAI per publish on Gnosis, and not what it pays. `chain.maxFeePerGasWei` still caps every fee; fees a caller chose, legacy transactions and operator transactions that the CLI signs keep their fees. Preparing a transaction takes one chain request fewer | Keep Gnosis operational wallets funded for the higher fee cap |
+| A transaction that stays unmined at its wallet's next nonce is sent again with higher fees (#3393) | While the node waits for a receipt, it reads the wallet's `latest` nonce and the base fee from one endpoint every 30 s. When the transaction holds the next nonce and its fee cap is below the base fee, or when the 10-minute receipt deadline arrives, it re-signs the same nonce, calldata, gas limit and chain id with fees at least 12.5% higher, within the operator cap, polls every hash it sent and returns whichever is mined: at most 5 replacements and 2 renewals of the deadline. A transaction queued behind an earlier nonce gets its deadline renewed, and a nonce something else consumed is never replaced. Standalone writes (approvals, Random Sampling proofs, staking, identity and Context Graph writes) and synchronous publications and updates get this; a synchronous publication records a replacement as a `chain:txreplaced:tx-<hash>` breadcrumb. A queued publication takes the new fees and keeps one hash per job. A failed replacement is logged and never becomes the operation's error | Before you upgrade, replace by hand any transaction that an earlier release left unmined: the node speeds up only the transactions it is waiting for. A write queued behind such a nonce waits up to three receipt timeouts, about 30 minutes, before it fails |
+| Node administrators can pause and resume the running publisher (#3354, #1858) | `POST /api/publisher/pause` closes every wallet's claim gate once the claims inside the claim transaction finish, `POST /api/publisher/resume` opens them, and `GET /api/publisher/control` shows `desiredState`, `effectiveState`, the generations and each wallet's gate. Work claimed before a pause may finish, recovery stays on, and admission keeps accepting jobs. The desired state is kept in `publisher-control.json` in the data directory and restored before startup recovery; an unreadable or invalid file keeps the publisher from starting. `DKG_PUBLISHER_START_PAUSED=1` still starts the publisher paused. A missing runtime or a failed control write answers 503, and a failed write keeps the gates closed until a restart. Agent-scoped tokens cannot call these routes. Described in `docs/use-dkg/async-publisher-wallets.md` | None |
+| Failed private catalog placements back off, park and keep their history (#3352, #3178) | A finalized private publication whose catalog placement fails records the failure's kind, counts and times in the RFC-64 inventory database. The same kind of failure backs off from the repair interval, 5 s by default, up to 30 minutes, and three `policy_conflict`, `version_conflict` or `signer_mismatch` failures in a row park the placement; capacity parking keeps its own wakeups. `failures` under `rfc64Catalog.finalizedPrivatePlacementQueue` in `GET /api/status` counts failed and parked placements, by kind, with their age, and names no graph, asset or error. After correcting a parked condition a node operator sends `POST /api/rfc64/private-placement/retry-failed`, which answers 202 with `{ "requested": N }` once the retries are scheduled; agent-scoped tokens cannot call it. Described in `packages/agent/docs/finalized-private-repair-failures.md` | See the schema row above. A 202 means the retry is scheduled, not that the placement succeeded |
+| A client that lost the answers to an asynchronous share can prove which job ran it (#3389, #3388) | New read-only route `GET /api/knowledge-assets/swm/share-jobs/reconcile` and SDK method `ApiClient.knowledgeAssetReconcileShare`. Given the finalized asset's exact identity (graph, name, storage lane, author, UAL, version, Merkle root and selector), it answers `outcome: "proven"` with one retained successful `jobId` and its evidence, or an unproven reason such as `absent_or_pruned`, `ambiguous`, `unsupported_legacy_evidence` or `incomplete_inventory`, with 503 for `unavailable`, and always `mutationRetryAllowed: false`. The worker stores the evidence with each successful share; jobs completed before this release carry none. The read covers at most 1,000 retained jobs, an agent token reads only its own storage lane, and anonymous callers are refused. A share whose explicit author does not match the finalized seal answers 409 `KA_SHARE_AUTHOR_MISMATCH`. Described in `docs/api/share-reconciliation.md` | Clients that matched a 500 for an author mismatch should expect 409 `KA_SHARE_AUTHOR_MISMATCH`. Do not share again because a reconcile answer is empty or unavailable |
+| An interrupted asynchronous share resumes under its original job (#3396, #3434) | Before it promotes, the worker prepares the share and binds the job to it under the queue lock and the job's lease, as synchronous shares do. A share interrupted after that, by a restart or a stalled worker, is reclaimed once its lease expires, 15 minutes by default, and completes with its original seal, operation and inventory entry; a binding whose acknowledgement was lost keeps the job from running. Jobs left ambiguous by an earlier release keep their inspection policy. A graph whose saved subscription is reactivating after a worker restart finishes that activation before store discovery re-saves it, so the share's inventory handoff completes | None |
+| A store read that fails before a queued publication's validation is retried in the same job (#3431, #3419) | A queued publication whose preflight read of the store fails before anything was dispatched is retried in the same job as `workspace_unavailable`. An unrecognized exception before validation ends the job with the new terminal code `validation_unknown`, and explicit payload guards keep `canonicalization_failed`. The failure record carries closed stage and cause values with fixed messages, never raw store responses or content. A node on 10.0.25 does not know the new code or the diagnostic field: it leaves such jobs out of job lists, answers an error when asked for one by id, and refuses a new Verified Memory publish of the same asset while one exists | Before going back to 10.0.25, let queued publications finish and run `dkg publisher clear failed`, which keeps the failed jobs that may still have a transaction on chain |
+| A pull into working memory whose answer was lost can be checked against the exact draft (#3429, #3350) | `POST /api/knowledge-assets/<name>/wm/pull-from` takes `recoverExact: { kaUal, assertionVersion, merkleRoot }` with `onConflict` left at `reject`, and `dkg ka pull-from` takes `--recover-exact-ual`, `--recover-exact-version` and `--recover-exact-root`. Under the lifecycle lock it checks the pinned source and both draft partitions against the same seal, writes nothing, and answers `recovered: true` with `draftEvidence` (counts and roots, no private payload); otherwise 409 `WM_DRAFT_NOT_EXACT` or `WM_RECOVERY_SOURCE_UNAVAILABLE`, 400 `INVALID_PULL_RECOVERY_OPTIONS`, a retryable 503, or 500 `WM_RECOVERY_VERIFICATION_FAILED`. Every pull answer carries the source's `merkleRoot`. Described in `docs/use-dkg/wm-draft-recovery.md` | Keep the source's UAL, version and Merkle root before a pull you may need to recover |
+| A read of a named working-memory draft matches the author in any letter case (#3428, #3356) | The read resolves the stored spelling of the author's EVM address first, so a checksummed, lowercase, uppercase or mixed-case author returns the same draft. Two stored spellings of one author for one name answer `KA_WM_LIFECYCLE_CORRUPT`. Writes, signatures and authorization are unchanged | None |
+| Each publish and update writes one `[StorageACKAdmission]` summary (#3355, #3271) | One JSON line at info per StorageACK collection: preflight time, the queue and collector phases, peer attempts, retry backoffs and their causes, terminal candidate counts and the outcome, with no peer ids, graph ids, payloads or peer-supplied text. A queued collection is cancelled when the node begins to stop, so no collector starts during shutdown. Quorum, selection, deadlines and the default of one collector at a time are unchanged. Described in `docs/investigations/storage-ack-admission-3271.md` | None |
+| A node operator can request a private Knowledge Asset from its publisher (#3353, #409) | New route `POST /api/access/request` and agent method `requestPrivateAccess({ publisherPeerId, kaUal })`, for a node-operator token only: one request per node at a time, a 30 s deadline tied to the HTTP request and to node shutdown, at most 1 MiB on the wire, 10,000 quads and 2 MiB of JSON, and 413 past a limit. The answer carries the content with `storedInGraph: false` and `verification: { kind: "peer-root-self-check", matches: true, chainAnchored: false }`: it is checked against the root the same peer sent, nothing is written to a graph and nothing is queued for a retry. The publisher applies its own access policy. Described in `docs/adr/0008-manual-private-access.md` | None |
+| Memory search shares its result limit across the requested layers (#3336, #2656) | `POST /api/memory/search` selects results in rounds over the requested layers, in request order, so Shared and Verified Memory matches appear beside a full working-memory layer. Each result names its `memoryLayer`, `resultCount` is the number of results returned, and `unavailableLayers` lists a shared-memory layer the read gate refused, for example `{ "layer": "swm", "reason": "read-authority" }`. A node operator's search runs at most four guarded text reads at a time, and a client disconnect cancels the reads. Described in `docs/use-dkg/memory-search.md` | Read `resultCount` as the number of results returned |
+| A query can include shared-memory metadata across a graph's registered sub-graphs (#3339, #1056) | `includeSharedMemoryMeta: true`, with `includeContextGraphPartitions: true` and no `view`, extends `GRAPH ?g` to the shared-memory metadata partitions of the root and of the registered sub-graphs, never to child Context Graphs, unregistered sub-graphs, private graphs or staging partitions, under the usual shared-memory read admission. `/api/query`, the CLI API client and the MCP `dkg_query` tool accept it, and the node UI's attribution and Verified Memory anchors use it. The default scope is unchanged. Described in `packages/query/README.md` | None |
+| A write preflight that cannot validate its graph names the failed read (#3343, #3289) | A 503 `CONTEXT_GRAPH_VALIDATION_UNAVAILABLE` carries an `x-dkg-operation-id` header, and the daemon logs one diagnostic per such answer under the same id, with the site and kind of the read that failed and whether the chain rescue was unavailable, denied or timed out, at most nine entries and no private details. Status, code and body are unchanged | None |
+| The node UI recovers from loading failures and labels public subscriptions (#3345, #3346) | A failed Context Graph list or agent identity read shows an error with Retry on the dashboard, the sidebar and the Memory Stack, and keeps the graphs already loaded; an unknown count shows apart from a confirmed empty list, and identity reads end after 10 s. A public graph the node subscribes to shows "Public subscriber", and one browsed without a subscription "Public viewer", apart from agent membership | None |
+| `dkg mcp setup` inside WSL registers Windows MCP clients with a WSL launcher (#3348, #433) | A Windows client's entry runs the absolute Windows `wsl.exe`, pinned to the current distribution and Linux user, which starts the same Node and CLI with the resolved `DKG_HOME`. Configured per-server environment values cross into WSL through `WSLENV`, and token values stay out of the arguments. Native clients keep the direct Node command. A later setup replaces an entry with a Linux path or without the forwarding | Run `dkg mcp setup` again inside WSL to replace a Windows client's entry that points at a Linux path |
+| The MCP server bounds each tool result to 8 MiB (#3424) | A tool result whose serialized form, escaping and framing included, would pass 8 MiB, below the MCP client's default 10 MiB receive buffer, is answered with a short error that asks the caller to narrow or page the query, or to read a large artifact through the daemon's HTTP API. The session stays connected for retries and later calls, local LLM sessions included. The MCP SDK resolves to 1.32.2, hono to 4.13.13, `@hono/node-server` to 1.19.17 and `proxy-addr` to 2.0.8 | Page large queries, and read large artifacts over the HTTP API |
+| The default worker store saves and reopens snapshots larger than 512 MiB (#3335, #3291) | The persistent Oxigraph worker writes its N-Quads snapshot in chunks and reads it back in chunks through one parser, so a snapshot larger than one JavaScript string is saved and reopened. The file format and the atomic write are unchanged, and a read error stays apart from malformed RDF, so it never quarantines a valid snapshot. The store keeps the dataset in memory and writes the whole snapshot each time | None. Large and growing graphs belong on `store.backend: oxigraph-server` or Blazegraph |
+| A catalog head is committed once its data is durable (#3338, #3284) | RFC-64 native activation waits for the store's durability barrier after the precommit writes and before it commits the applied head, for genesis, successor and replay paths, and a failed flush rolls back with its cause. On the embedded store each catalog application includes a snapshot write; HTTP stores keep their write acknowledgement | None |
+| A member keeps only the newest private roster generation (#3342, #3245) | Durable sync removes older valid roster generations of a private graph from the graph's own root metadata with one server-side update; a stale page cannot remove a newer one, and malformed values stay, so the reader fails closed. A store without server-side UPDATE keeps every generation | None |
+| A clean source build updated from git reports its plain commit (#3340, #3169) | The git updater's quarantine folder, `.dkg-stale-workspace-dependencies/`, does not count toward the build identity. Untracked user files and tracked source changes still mark a source build dirty, so the `commit` field in `GET /api/status` can still end in `-dirty`; npm build identities are unchanged | None |
+| Creating and registering a context graph wait out a momentarily full store queue (#3497) | When the store refuses a step before it started because its queue is full (`STORE_SCHEDULER_BUSY`, `queue_full`), `POST /api/context-graph/create` repeats its existence check, and a registration repeats its status read, its status writes and the on-chain id binding written after a mined or reconciled registration: first after 250 ms, then with doubling waits of up to 2 s, within 15 s. Each repeat is logged. The create's declaration write is not repeated, so a refused declaration still ends the request; other errors, an abort and a refusal after the budget propagate unchanged | None |
+| Managed Oxigraph serves SELECT results as TSV, decoded as they stream (#3473) | A SELECT on the managed Oxigraph store asks for TSV and decodes it row by row from the response body, under the same byte limits and with UTF-8, row-shape, RDF-term and datatype checks; a cancelled query stops the decoding. ASK queries, generic SPARQL endpoints and responses that identify themselves as JSON keep JSON decoding. The public `SelectResult` is unchanged, and both literal quote styles give the existing canonical values | None |
+| The node UI dashboard counts the store once every 5 minutes (#3474) | The dashboard's five store counts come from one exact query, kept for 5 minutes and refreshed at background priority, in place of five full-store counts every 30 s; between refreshes a light health query confirms the store before the counts are reused. A failed health check or refresh records the five store counts as unknown and tries again after 30 s, and the Context Graph count stays independent | None |
+| The testnet defaults list a different second fallback chain endpoint (#3385) | In `network/testnet.json`, `chain.rpcUrls` and `walletRpcUrls` list a public, keyless endpoint that serves block-pinned reads as their second fallback; the primary stays first. The mainnet defaults are unchanged | None, unless the node's configuration lists its own chain endpoints |
+| An opt-in trace of sync slot admissions (#3279) | With `DKG_SYNC_ADMISSION_TRACE` naming a file, the agent writes a line for each start and release of an admission to the global sync slots, with an opaque id, the label, the slot (`general`, `shared-memory` or `control-plane`), the general pool's policy and the time, and a `holding` line once a second while an admission holds a slot. Without the variable nothing is written | None |
+
 ### Security
 
-- Outbound HTTP from the node refuses Brotli-encoded responses, as defence in
+- **Outbound HTTP refuses Brotli-encoded responses** (#3449), as defence in
   depth for CVE-2026-111497 in the Brotli decoder that Node.js bundles: a
-  request no longer offers `br`, and a response encoded with it fails before
+  request does not offer `br`, and a response encoded with it fails before
   anything decodes it. Operators should still upgrade Node.js to 22.23.4,
   24.22.1, 26.12.1 or later and restart the node (see
-  `docs/use-dkg/updates-and-rollback.md`). `GET /api/status` reports the Node.js
-  release the daemon runs on as `runtime.nodeVersion` to a node-operator token,
-  and `dkg status` prints it.
+  `docs/use-dkg/updates-and-rollback.md`). `GET /api/status` reports the
+  Node.js release the daemon runs on as `runtime.nodeVersion` to a
+  node-operator token, and `dkg status` prints it.
+- **A node warns while Node.js lacks the 2026-10-21 security fixes**
+  (#3422): `dkg start`, daemon start and auto-update slot activation log a
+  `WARNING` when Node.js predates the security release for its line
+  (22.23.4, 24.22.1, 26.12.1) or is on an end-of-life line, and the node
+  still starts. `dkg doctor` reports the same thing as the `node-security`
+  warning, which sets exit code 1 and can be skipped with
+  `doctor.skipChecks`. The README and quickstart recommend the patched
+  releases.
+- **Dependency updates** (#3424): the MCP SDK resolves to 1.32.2, hono to
+  4.13.13, `@hono/node-server` to 1.19.17 and `proxy-addr` to 2.0.8, each
+  with upstream security fixes.
 
 ### Fixed
 
-- Git updater quarantine files no longer cause an otherwise clean source build
-  to report `<commit>-dirty` (#3169). Untracked user files and tracked source
-  changes still mark source builds dirty. The `commit` field in `GET /api/status`
-  can therefore still end in `-dirty`; npm build identities are unchanged.
+- **`dkg rollback` takes a node on this release back to 10.0.25 with its
+  data** (#3484): it lowers the RFC-64 inventory database from schema 6 or
+  restores the copy kept before the migration, and otherwise refuses and
+  changes nothing; see the upgrade table and
+  `docs/use-dkg/updates-and-rollback.md`. The released 10.0.25 opened the
+  databases the rollback lowered, among them copies of five node databases
+  that this release had migrated, with their rows, and opened a restored
+  copy too.
+- **A member's first subscribe to an unregistered public graph reaches an
+  author behind the first peer window** (#3467): see the upgrade table. On
+  three fresh mainnet Edges, with the graph's owner sorting last among the
+  member's connected peers, 6 of 6 first subscribes went through, in 6 to
+  7 s each.
+- **A Core lists the agents of Cores that start after it** (#3475): it
+  pulls a peer's `agents` graph again until the peer's own profile is
+  there, so an Edge's phonebook lookup through the Cores resolves every
+  member of a private graph; see the upgrade table. On fresh devnets every
+  Core held each later Core's profile about 2 s after that Core started,
+  and the peer-list check of `v10-rc-validation` and the first private
+  share of `rfc38-curator-offline-midbatch` passed in two of two runs.
+- **An oversized MCP tool result leaves the session connected** (#3424):
+  the server answers it with a short error; see the upgrade table.
+- **Graph visualization keeps named SELECT bindings and empty literals**
+  (#3489): an Oxigraph SELECT such as `SELECT ?s ?name` keeps both
+  bindings, and a remote CONSTRUCT keeps plain, typed and language-tagged
+  empty string literals.
+- **The local LLM runtime keeps conversation history within its budget**
+  (#3477): the omission marker shrinks to fit a small budget, so the
+  rendered history never passes it.
+- **Creating and registering a context graph wait out a momentarily full
+  store queue** (#3497): see the upgrade table. On a public testnet, the
+  concurrency scenario, whose set-up had once met a full queue, passed on
+  its first attempt.
+- **An approved member of a relay-only curator's graph writes as soon as
+  its member list arrives** (#3436, #3421): until then its writes are
+  refused as retryable, a repeated join request sends nothing, and the
+  graph listing shows `joinState: "approved-metadata-pending"`; see the
+  upgrade table. In an end-to-end test of two agents over libp2p, in which
+  the member's metadata fetches from the curator failed for a while, the
+  member's share was refused as retryable, a repeated join reached nothing
+  on the curator, and the same share reached the curator once the member
+  list arrived.
+- **Subscribers take a graph's member list only from its curator** (#3439,
+  #3421).
+- **A member's write reaches the other members of a relay-only curated
+  graph** (#3435, #3438, #3421): the curator sends its change notice again
+  to the followers it did not reach, a member keeps pulling a graph it
+  belongs to and connects to the owner for it, a catch-up always asks the
+  owner, and a member's share goes to the graph's other connected members;
+  see the upgrade table. In an end-to-end test with three agents behind a
+  relay and a graph registered with a curated publish policy, a member's
+  write into a sub-graph reached the other member about 5 s after the
+  owner stored it, while the owner's notice to that member failed on all
+  three attempts.
+- **A shared-memory pull fetches its data phase only when the graph needs
+  it** (#3438): shares of Knowledge Assets arrive in the snapshot phase, so
+  a round asks for the data phase only when the fetched metadata names a
+  legacy root or a graph-backed snapshot, or cannot tell, and reaches the
+  snapshot phase that delivers the shares.
+- **Requests to a relay-only peer run on the relay circuit already open to
+  it** (#3379, #3444, #3445): see the upgrade table. In a test on real
+  nodes with a target whose only direct address was a private one, a slow
+  request crossed the circuit with no dial and the circuit stayed open,
+  and in an end-to-end test an approved member of a relay-only curator
+  that announces private addresses received the curator's metadata, wrote
+  into the graph and synced pages without dialing the curator.
+- **Relays keep a refreshed reservation until it expires, and connections
+  outlast an event-loop stall of 15 s** (#3437): see the upgrade table. In
+  a time-scaled test on the real relay store, a twice-refreshed
+  reservation stayed until one lifetime after its last refresh, and a ping
+  answered 6 s late left its connection and an active bulk stream intact.
+- **A large graph syncs in bounded memory** (#3430): every full-graph
+  durable data round is bounded, a round that yields fetches its manifest
+  again, and the store's background lane serves other work between asset
+  writes; see the upgrade table. Over a synthetic snapshot of 565 graphs
+  and 6.4 million rows, a round stopped at the first graph it could
+  checkpoint past its soft budget, and an asset of 300,000 rows was held
+  whole, with the next round continuing after it.
+- **An authority change catches up only the graphs it changed** (#3380):
+  see the upgrade table. In a test with two in-process nodes, the catch-up
+  after an acceptance delivered the changed graph's data, asked for that
+  graph only and left the peer's freshness alone.
+- **A receiver applies the newest catalog head of a scope in one lease
+  turn** (#3383): see the upgrade table. With six heads of one scope
+  delivered while the first waited for its turn, the receiver took two
+  lease turns, for the first head and the newest.
+- **The chain event lane for Knowledge Asset updates advances through a
+  burst of updates on a busy store** (#3399): each event is dispatched
+  once, and a scan that outlasts its lease keeps its progress; see the
+  upgrade table. In a test in which every dispatch outlasted one index
+  revision, the range finished after one poll per event.
+- **A replica keeps a public graph's authority through overlapping refresh
+  passes** (#3411, #3386): a pass hands each lane exactly the request it
+  made, and a failed refresh retries itself after 1, 5 and 30 s, with no
+  sync slot needed. On a local devnet the member-sharing suite's case of a
+  member whose general sync slot is busy with another graph passed in 5 of
+  5 runs.
+- **An interrupted asynchronous share resumes under its original job**
+  (#3396, #3434): see the upgrade table. In runs on a public testnet,
+  three interrupted jobs recovered on their second attempt with unchanged
+  bindings, and after a watchdog restart with a share and a publication in
+  flight the node reactivated the graph and completed both under their
+  original ids.
+- **A transaction stays includable through a base-fee spike** (#3393):
+  see the upgrade table. In tests that replay a Gnosis base-fee spike to
+  36M wei, transactions price at a 2 gwei fee cap and a 1 gwei tip, and a
+  pending transaction under the spike is re-signed above it with the same
+  nonce, calldata and gas limit.
+- **A store read that fails before a queued publication's validation is
+  retried in the same job** (#3431, #3419): see the upgrade table. On a
+  public testnet an update whose preflight met a refused store connection
+  completed in the same job.
+- **A read of a named working-memory draft matches the author in any
+  letter case** (#3428, #3356): on managed Oxigraph and Blazegraph, a
+  checksummed, lowercase, uppercase or mixed-case author returned the same
+  complete draft, also after a shared-memory pull and a restart.
+- **A pull into working memory whose answer was lost can be verified
+  against the exact draft** (#3429, #3350): the check writes nothing; see
+  the upgrade table.
+- **A catalog head is committed once its data is durable** (#3338, #3284):
+  in tests that killed the node before the flush, before the head's commit
+  and right after it, every restart recovered the exact catalog with all
+  of its shared-memory, seal and Verified Memory triples.
+- **Failed private catalog placements back off, park and keep their
+  history across a restart** (#3352, #3178): see the upgrade table.
+- **A StorageACK collection ends with the node** (#3355, #3271): a queued
+  collection is cancelled when the node begins to stop, so no collector
+  starts during shutdown, and each publish and update reports its phases;
+  see the upgrade table.
+- **The default worker store saves and reopens snapshots larger than
+  512 MiB** (#3335, #3291): a snapshot of 558 MB was saved, survived a
+  SIGKILL and reopened with all 9,001 of its test values intact.
+- **Paged durable metadata sync from Blazegraph carries the active
+  members' delegations** (#3334, #3186), as the snapshot lane and Oxigraph
+  do.
+- **A member keeps only the newest private roster generation** (#3342,
+  #3245): see the upgrade table. On Blazegraph, 200 historical generations
+  were compacted in one update.
+- **A subscribe-time readiness proof of an empty private graph stops when
+  the node stops** (#3349, #3109), as the join-metadata settlement does,
+  and a late proof cannot commit readiness after it.
+- **A clean source build updated from git reports its plain commit**
+  (#3340, #3169): the git updater's quarantine folder does not count
+  toward the build identity. Untracked user files and tracked source
+  changes still mark source builds dirty, so the `commit` field in
+  `GET /api/status` can still end in `-dirty`; npm build identities are
+  unchanged.
+- **Memory search shares its result limit across the requested layers**
+  (#3336, #2656): see the upgrade table.
+- **The node UI attributes shared memory across a graph's registered
+  sub-graphs** (#3339, #1056): a graph with five authors over its root and
+  four sub-graphs lists all five, and child Context Graphs stay out.
+- **The node UI keeps what it loaded and offers Retry when a list or
+  identity read fails** (#3345, #1135): see the upgrade table.
+- **The node UI shows a public subscription as such** (#3346, #866):
+  "Public subscriber" for a public graph the node subscribes to and
+  "Public viewer" for one browsed without a subscription; curator and
+  participant roles come first.
+- **Windows MCP clients set up from WSL start the node's MCP server**
+  (#3348, #433): see the upgrade table. In CI on Windows, a client
+  launched the registered `wsl.exe` command and reached the node's MCP
+  server inside WSL, which received the client's configured project.
+- **A write preflight that cannot validate its graph names what failed**
+  (#3343, #3289): see the upgrade table.
+- **The supervisor keeps the probes behind a worker restart** (#3395,
+  #3394): see the upgrade table.
+- **The testnet defaults list fallback chain endpoints that serve
+  block-pinned reads** (#3385).
+
+### Changed
+
+- **The libp2p family is pinned to exact versions** (#3440): libp2p 3.5.1,
+  circuit-relay-v2 4.2.17, yamux 8.0.7 and gossipsub 16.1.1 among them,
+  the workspace patches on libp2p and yamux are gone, and `pnpm lint`
+  keeps the pins and the lockfile in step. An npm resolution of the CLI
+  places all 34 family packages at the lockfile's versions, both in the
+  hoisted layout of a Core's release slot and in the nested layout of
+  `npm install -g`; see the upgrade table.
+- **Edges with public relays announce only public and relay addresses**
+  (#3444): see the upgrade table.
+- **The connection monitor runs on libp2p's own options** (#3437): a ping
+  every 30 s, 20 to 25 s to answer, a protocol of its own, and peer health
+  read from the monitor's round trip; see the upgrade table.
+- **Cores serve the exact-asset stream and keep prepared content by
+  default** (#3391): see the upgrade table and
+  `docs/sync/warm-sync-rollout.md`.
+- **Fees carry headroom over the base fee** (#3393): three times the
+  latest base fee plus the tip, with a floor on Gnosis and Chiado; see the
+  upgrade table.
+- **`daemon.log` rotates by itself** (#3412): numbered files, 72 hours
+  within 512 MB; `docs/use-dkg/migrate-to-npm.md` describes the built-in
+  rotation.
+- **Refused metadata refreshes are summarized** (#3412): one warning per
+  10 minutes with the count, the graphs and the last slot state; see the
+  upgrade table.
+- **Managed Oxigraph SELECT results stream as TSV** (#3473): the node
+  decodes each row as it arrives, in place of building the whole JSON
+  answer first; see the upgrade table.
+- **The node UI dashboard counts the store once every 5 minutes** (#3474):
+  one exact count query with a light health check in between; see the
+  upgrade table.
+- **The documentation matches the code on curated-graph custody, shares
+  and events** (#3384): `docs/use-dkg/host-mode-manual-subscribe.md`,
+  `docs/ARCHITECTURE.md` and the node skill say that with the default
+  configuration only a curated graph's curator and members, Cores that
+  joined as members included, hold its data; that a share is atomic and
+  refuses an `entities` array with `KA_ATOMIC_SHARE_REQUIRED`; which
+  server-sent events the daemon writes; and that `sharedMemoryTtlMs`
+  defaults to 30 days.
+- **The release branch carries the refreshed builder and agent
+  documentation** (#3495): the documentation site refresh with its
+  contract checks and the overview image, which `main` has had since
+  10.0.25.
+- **Test and CI plumbing** (#3279, #3398, #3403, #3404, #3337, #3476,
+  #3479, #3498, #3292, #3496): the member-sharing devnet suite judges its
+  busy-slot case on member 2's own admission trace, follows a large
+  transfer across the admissions that continue it, makes up to three
+  attempts with its large graphs on a fourth temporary node, and cleans up
+  starts that a stopped run interrupted, and its expected failure for
+  #3264 is retired, since a member of the registered graph holds its
+  definition; a devnet suite, run on its own, covers the promotion flow of
+  a curated registered graph; the chain's stuck-transaction timeout test
+  runs on fake timers; the RFC-64 crash
+  campaign and the publisher pause and resume restart campaign run in
+  required CI; a real-daemon test checks that vector search keeps agents
+  apart; agent shards take their deadlines from the test inventory; the
+  scheduled nightly CI profile can be dispatched at a candidate commit,
+  and the CI gate requires evidence that its browser scenarios and
+  campaigns ran; and an evaluation of uncached Blazegraph graph-prefix
+  queries is recorded, with no production change, in
+  `packages/storage/docs/blazegraph-graph-prefix-evaluation.md`.
+- **Releases are certified through real npm installs** (#3468): a release
+  prepares one immutable set of the 22 public packages, installs those
+  exact tarballs with npm, locally and globally, against a local chain,
+  checks the installed CLI, the daemon's identity, an RDF read-back and a
+  graceful restart on the default store, and publishes and promotes only
+  the certified set; see `RELEASE_PROCESS.md`.
+  `@origintrail-official/dkg-chain` lists the private contracts workspace
+  as a development dependency only.
+- **Stronger tests** (#3469, #3470, #3471, #3472, #3478, #3480, #3481,
+  #3482, #3483, #3487, #3488, #3492): a failed assertion fails its test,
+  also inside an exception handler, and new cases cover the ElizaOS, Prime
+  Agent and Hermes adapters' lifecycles and recovery, HTTP byte limits and
+  cancellation, RDF and SPARQL lexical
+  boundaries, store reopen durability, query policy and graph isolation,
+  the loopback CORS allowlist, MCP manifest installation and HTTP failure
+  boundaries, and proof-worker recovery. Only tests change.
+
+### Added
+
+- **An authenticated Core chain cache for Edges** (#3391):
+  `DKG_Core_chain_cache` in the node configuration, the snapshot job's
+  `sourcePolicy` values `"DKG_Core_chain_cache"` and
+  `"base-mainnet-registered-cores"`, `capabilities.sourcePolicies` and
+  `chainCacheRpcUsage`, and the protocols
+  `/dkg/10.0.0/core-chain-cache-source/1`,
+  `/dkg/10.0.0/core-chain-cache-snapshot/1` and
+  `/dkg/10.0.0/public-snapshot-source/1`; see the upgrade table and
+  `docs/sync/warm-sync-rollout.md`.
+- **`lanAddressesEnabled`** (#3444), with `DKG_LAN_ADDRESSES_ENABLED`, for
+  Edges whose nodes reach each other over a LAN or VPN.
+- **A `resource_usage` line** (#3412), at start and every 5 minutes.
+- **Live publisher control** (#3354): `POST /api/publisher/pause`,
+  `POST /api/publisher/resume` and `GET /api/publisher/control` for node
+  administrators, with the desired state in `publisher-control.json`.
+- **Share reconciliation** (#3389):
+  `GET /api/knowledge-assets/swm/share-jobs/reconcile`,
+  `ApiClient.knowledgeAssetReconcileShare` and 409
+  `KA_SHARE_AUTHOR_MISMATCH`; see `docs/api/share-reconciliation.md`.
+- **Exact recovery of a working-memory draft** (#3429): `recoverExact` on
+  `wm/pull-from` and the `--recover-exact-*` options of `dkg ka pull-from`;
+  see `docs/use-dkg/wm-draft-recovery.md`.
+- **Private placement failure status and retry** (#3352): `failures` under
+  `rfc64Catalog.finalizedPrivatePlacementQueue` in `GET /api/status` and
+  `POST /api/rfc64/private-placement/retry-failed`; see
+  `packages/agent/docs/finalized-private-repair-failures.md`.
+- **A private access request for node operators** (#3353):
+  `POST /api/access/request` and `requestPrivateAccess`; see
+  `docs/adr/0008-manual-private-access.md`.
+- **The join state of an approved member** (#3436): `joinState` on
+  `request-join` answers and graph listings, `reRequest` and
+  `dkg context-graph request-join --re-request`, and the retryable reason
+  `approved-member-metadata-pending`.
+- **Shared-memory metadata across registered sub-graphs** (#3339): the
+  query option `includeSharedMemoryMeta` on `/api/query`, the CLI API
+  client and the MCP `dkg_query` tool.
+- **Memory search fields** (#3336): `memoryLayer` on each result and
+  `unavailableLayers`; see `docs/use-dkg/memory-search.md`.
+- **Diagnostics** (#3355, #3343, #3395, #3279): the `[StorageACKAdmission]`
+  summary, the `x-dkg-operation-id` header on a write preflight's 503, the
+  `[supervisor] liveness probe` and `liveness restart` lines, and an
+  opt-in trace of sync slot admissions under `DKG_SYNC_ADMISSION_TRACE`.
+- **The connection monitor's ping protocol** (#3437):
+  `/dkg-liveness/ping/1.0.0`.
+- **The daemon's Node.js release in its status** (#3449):
+  `runtime.nodeVersion` in `GET /api/status` and the `Runtime:` line of
+  `dkg status`.
+- **Store readiness for a rollback** (#3484):
+  `dkg rollback --stores-for <version>` readies a stopped node's stores for
+  a version installed by hand, and a schema migration of the RFC-64
+  inventory database keeps a pre-migration copy of it.
+- **The `node-security` check of `dkg doctor`** (#3422).
 
 ## [10.0.25] - 2026-10-19
 

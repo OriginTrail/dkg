@@ -40,6 +40,7 @@ export default defineConfig({
       'test/async-lift-journal-serialize.test.ts',
       'test/async-lift-journal-append.test.ts',
       'test/async-lift-journal-completion.test.ts',
+      'test/async-lift-journal-context.test.ts',
       'test/async-lift-journal-completion-ownership.test.ts',
       'test/async-lift-journal-completion-scope.test.ts',
       'test/async-lift-completion-trace.test.ts',

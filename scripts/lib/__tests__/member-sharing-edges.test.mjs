@@ -55,6 +55,37 @@ const untouched = (devnet, number) => existsSync(devnet.nodeDir(number))
   && readFileSync(join(devnet.nodeDir(number), 'config.json'), 'utf8') === '{"theirs":true}'
   && !existsSync(join(devnet.nodeDir(number), MARK));
 
+test('a fourth free node number becomes the feeder of case 6\'s large graphs; without one the owner holds them', t => {
+  const log = { say() {}, note() {} };
+  const edges = new TemporaryEdges(fakeDevnet(t), { stamp: 'S', log });
+  assert.deepEqual(edges.allocate({ relay1: 'r1', relay2: 'r2' }), { taken: [] });
+  assert.deepEqual([edges.owner, edges.member1, edges.member2, edges.feeder].map(node => node.number), [7, 8, 9, 10]);
+  assert.equal(edges.largeAuthor, edges.feeder);
+  // It reserves on member 2's relay and announces only that circuit: member 2 reaches it as it reaches the owner.
+  assert.deepEqual({ label: edges.feeder.label, relay: edges.feeder.relay, member: edges.feeder.member, overrides: edges.feeder.overrides }, {
+    label: 'node10 (feeder)', relay: 'r2', member: false, overrides: { relay: 'r2', announceAddresses: ['/ip4/127.0.0.1/tcp/9', 'r2/p2p-circuit'] },
+  });
+  // It is a temporary node, but no participant of the other cases' graphs.
+  assert.ok(edges.isTemporary(10) && !edges.nodes.includes(edges.feeder));
+  assert.deepEqual([edges.owner, edges.member1, edges.member2].map(node => node.member), [false, true, true]);
+  // Node 10 taken by another suite: no feeder, the owner holds the large graphs.
+  const crowded = fakeDevnet(t);
+  foreign(crowded, 10);
+  const without = new TemporaryEdges(crowded, { stamp: 'S', log });
+  assert.deepEqual(without.allocate({ relay1: 'r1', relay2: 'r2' }), { taken: ['node10: its folder exists'] });
+  assert.equal(without.feeder, null);
+  assert.equal(without.largeAuthor, without.owner);
+  // MEMBER_SHARING_NODES names three numbers, or four with the feeder's.
+  const three = new TemporaryEdges(fakeDevnet(t), { stamp: 'S', log });
+  assert.deepEqual(three.allocate({ explicit: '10,9,8', relay1: 'r1', relay2: 'r2' }), { taken: [] });
+  assert.deepEqual([three.owner.number, three.feeder], [10, null]);
+  const four = new TemporaryEdges(fakeDevnet(t), { stamp: 'S', log });
+  assert.deepEqual(four.allocate({ explicit: '10,9,8,7', relay1: 'r1', relay2: 'r2' }), { taken: [] });
+  assert.equal(four.feeder.number, 7);
+  assert.match(new TemporaryEdges(fakeDevnet(t), { stamp: 'S', log }).allocate({ explicit: '7,8', relay1: 'r1', relay2: 'r2' }).problem,
+    /MEMBER_SHARING_NODES must name three or four/);
+});
+
 test('a node another suite took after it was picked is left untouched, and the cleanup removes only nodes this run added', async t => {
   const devnet = fakeDevnet(t);
   const edges = new TemporaryEdges(devnet, { stamp: 'S', log: { say() {}, note() {} } });
