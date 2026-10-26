@@ -19,6 +19,7 @@ import {
   type PromoteJob,
   type PromoteRequest, type PromoteExecutionAuthority,
 } from '@origintrail-official/dkg-publisher';
+import { asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 import { createClaimFailureBackoff } from './claim-failure-backoff.js';
 import { logPromoteAttemptFailure, promoteAttemptAuthorityReason } from './async-promote-attempt-diagnostics.js';
 import {
@@ -295,7 +296,7 @@ export async function runPromoteJob<T extends { promotedCount: number; shareEvid
   if (heartbeatIntervalMs > 0) {
     heartbeatTimer = setInterval(() => {
       if (cancelled) return;
-      queue.heartbeat(job.jobId, claimToken).catch((err: unknown) => {
+      asyncAdmissionUsage.observeShareHeartbeat(queue.heartbeat(job.jobId, claimToken)).catch((err: unknown) => {
         if (err instanceof PromoteJobLeaseError) {
           // Expected when the job has already succeeded/failed and the lease was cleared.
           return;
@@ -604,7 +605,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
     if (!claimFailureBackoff.isDue()) return false;
     let claimed: PromoteJob | null;
     try {
-      claimed = await config.agent.promoteQueue.claimNext(slot.workerId);
+      claimed = await asyncAdmissionUsage.timeShareClaim(() => config.agent.promoteQueue.claimNext(slot.workerId));
       claimFailureBackoff.reset();
       clearClaimRetryTimer();
     } catch (err: unknown) {

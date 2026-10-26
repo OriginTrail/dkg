@@ -28,7 +28,7 @@ import {
   type PromoteRequest,
 } from '@origintrail-official/dkg-publisher';
 import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
-import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE } from '@origintrail-official/dkg-core';
+import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE, asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 import {
   createPromoteWorkerSupervisor,
   runPromoteJob,
@@ -102,6 +102,80 @@ describe('runPromoteJob', () => {
   beforeEach(() => {
     fixture = createAsyncPromoteWorkerFixture();
     ({ queue, logs, makeRequest, enqueueAndClaim } = fixture);
+  });
+
+  describe('async admission usage figures', () => {
+    beforeEach(() => asyncAdmissionUsage.reset());
+
+    it('times every claimNext, an idle one and one that throws', async () => {
+      let throwing = false;
+      const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
+      wrappedQueue.claimNext = async (workerId: string) => {
+        if (throwing) throw new Error('store unavailable');
+        return queue.claimNext(workerId);
+      };
+      const sup = createPromoteWorkerSupervisor({
+        agent: {
+          promoteQueue: wrappedQueue,
+          assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 0 }) },
+        } as any,
+        workerConcurrency: 1,
+        pollIntervalMs: 60_000,
+        heartbeatIntervalMs: 0,
+        log: () => {},
+        workerIdPrefix: 'usage',
+      });
+      await sup.start();
+      expect(await sup.tickOnce()).toBe(0);
+      throwing = true;
+      expect(await sup.tickOnce()).toBe(0);
+      await sup.stop();
+
+      expect(asyncAdmissionUsage.take().shareClaim.n).toBe(2);
+    });
+
+    it('measures each lease renewal, and shows one still waiting as pending', async () => {
+      const job = await enqueueAndClaim();
+      const release = deferred();
+      const finishPromote = deferred();
+      const heartbeat = queue.heartbeat.bind(queue);
+      vi.spyOn(queue, 'heartbeat').mockImplementation(async (...args) => {
+        await release.promise;
+        return heartbeat(...args);
+      });
+      const run = runPromoteJob({
+        job, queue, workerId: 'worker-test',
+        runPromote: async () => { await finishPromote.promise; return { promotedCount: 1 }; },
+        now: fixture.clock.now, heartbeatIntervalMs: 5, log: message => logs.push(message),
+      });
+
+      await vi.waitFor(() => expect(asyncAdmissionUsage.take().shareHeartbeat.pending).toBeGreaterThan(0));
+      release.resolve();
+      finishPromote.resolve();
+      expect(await run).toMatchObject({ outcome: 'succeeded' });
+
+      const { shareHeartbeat } = asyncAdmissionUsage.take();
+      expect(shareHeartbeat.n).toBeGreaterThan(0);
+      expect(shareHeartbeat.pending).toBe(0);
+    });
+
+    it('keeps a lease renewal failure on the worker\'s own handler', async () => {
+      const job = await enqueueAndClaim();
+      const finishPromote = deferred();
+      const failure = new Error('store went away');
+      vi.spyOn(queue, 'heartbeat').mockRejectedValue(failure);
+      const run = runPromoteJob({
+        job, queue, workerId: 'worker-test',
+        runPromote: async () => { await finishPromote.promise; return { promotedCount: 1 }; },
+        now: fixture.clock.now, heartbeatIntervalMs: 5, log: message => logs.push(message),
+      });
+
+      await vi.waitFor(() => expect(logs.some((message) => message.includes(`Heartbeat error for ${job.jobId}: store went away`))).toBe(true));
+      finishPromote.resolve();
+      await run;
+
+      expect(asyncAdmissionUsage.take().shareHeartbeat.n).toBeGreaterThan(0);
+    });
   });
 
   it('retries a definitely-not-started marker write without running promotion twice', async () => {
