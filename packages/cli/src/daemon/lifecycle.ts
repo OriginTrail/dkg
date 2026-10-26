@@ -51,6 +51,7 @@ import {
   startDaemonLogRotationChecks,
 } from './log-rotation.js';
 import { startResourceUsageLog } from './resource-usage-log.js';
+import { readAsyncQueueDepth, startAsyncAdmissionUsageLog } from './async-admission-usage-log.js';
 import { resolveUpdateTelemetryVersionStatus } from './update-telemetry-status.js';
 const { homedir } = osModule;
 import { fileURLToPath } from 'node:url';
@@ -217,6 +218,7 @@ import { startActivationCatchups } from './context-graph-activation-catchup.js';
 import { cancelContextGraphReadinessRepeats } from './context-graph-readiness-repeat.js';
 import { endContextGraphWriteReadinessWaits } from './context-graph-write-readiness.js';
 import { startContextGraphCatchupProgress } from './context-graph-catchup-progress-sources.js';
+import { beginAsyncAdmissionTrace } from './async-admission-trace.js';
 import { authenticateHttpRequest, canAdministerNode, loadTokens } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
@@ -2902,6 +2904,11 @@ async function runDaemonInnerWithStartupOwnership(
   });
   // Memory, store lanes and sync slots, one `resource_usage` line every 5 minutes.
   const resourceUsageLog = startResourceUsageLog();
+  // How the async share and publish queues are doing, one `async_admission_usage` line every 5 minutes.
+  const asyncAdmissionUsageLog = startAsyncAdmissionUsageLog({
+    readDepth: (signal) => readAsyncQueueDepth(agent.store, signal),
+    shareWorkerCounters: () => promoteWorkerLifecycle?.getSupervisor()?.getCounters() ?? null,
+  });
 
   // A time window cannot bound a same-day compatibility-log storm. This
   // independent maintenance helper enforces only the published count cap;
@@ -3403,6 +3410,7 @@ async function runDaemonInnerWithStartupOwnership(
       // Resolve CORS origin once per request (request-scoped, not global)
       const reqCorsOrigin = resolveCorsOrigin(req, corsAllowed) ?? null;
       (res as any).__corsOrigin = reqCorsOrigin;
+      beginAsyncAdmissionTrace(req.method, reqUrl.pathname, res);
 
       // Rate limiting — include CORS headers so browsers surface 429 instead of opaque CORS failure
       const clientIp = req.socket.remoteAddress ?? 'unknown';
@@ -3707,6 +3715,7 @@ async function runDaemonInnerWithStartupOwnership(
         clearInterval(pruneTimer);
         daemonLogRotationChecks.stop();
         resourceUsageLog.stop();
+        asyncAdmissionUsageLog.stop();
         await runChainDiscoveryScan.close().catch((err: unknown) => {
           log(`Chain discovery scan drain error: ${err instanceof Error ? err.message : String(err)}`);
         });

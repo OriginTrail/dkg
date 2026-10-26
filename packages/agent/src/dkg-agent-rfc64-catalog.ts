@@ -72,7 +72,6 @@ import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { resolveChainFinalityConfirmationsV1 } from './chain-finality-confirmations-v1.js';
 import type { DKGAgent } from './dkg-agent.js';
-import { sharedMemoryFollowersOf } from './swm/shared-memory-followers.js';
 import {
   answerRfc64CatalogHeadReplayRequestV1,
   rfc64CatalogReplayPeerFailureV1,
@@ -4240,7 +4239,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       onCatalogHeadReplayRequested: (request, remotePeerId) => answerRfc64CatalogHeadReplayRequestV1({
         request,
         remotePeerId,
-        followers: sharedMemoryFollowersOf(this),
+        ...this.swmCatalogHeadReplayFollowerPortsV1(),
         acceptedPolicyDigest: this.rfc64PublicCatalogServiceV1
           ?.acceptedPolicySnapshot(request.networkId, request.contextGraphId)?.policyDigest,
         queue: () => this.tryQueueRfc64CatalogHeadReplayV1(remotePeerId, request),
