@@ -716,7 +716,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
     });
   }
 
-  private observeRejection(error: StoreSchedulerBusyError, waitMs = 0): void {
+  private observeRejection(error: StoreSchedulerBusyError, waitMs?: number): void {
     getMetrics().storeSchedulerRejectionsTotal.add(1, {
       priority: error.priority,
       reason: error.reason,

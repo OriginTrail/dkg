@@ -119,7 +119,9 @@ export {
   type StoreSchedulerBusyErrorLike,
 } from './store-priority-scheduler.js';
 export {
+  STORE_QUEUE_WAIT_BUCKET_UPPER_MS,
   StoreSchedulerStats,
+  estimateQueueWaitPercentileMs,
   registerStoreSchedulerStats,
   takeStoreSchedulerStatsReports,
   storeOperationFamily,

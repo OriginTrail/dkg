@@ -157,8 +157,17 @@ segments of the caller's `source`, such as `publisher.asyncLift`; at most 64
 families per scheduler, then `other`). `takeStoreSchedulerStatsReports()` returns,
 for each registered scheduler, the longest queue wait of each lane since the
 previous call (a wait ends when work starts, times out in the queue or is
-cancelled there) and the cumulative rejections by lane, family and reason. Each
-call ends the interval, so only the periodic admission log line should call it.
+cancelled there), the count of those waits in fixed buckets, and the cumulative
+rejections by lane, family and reason. A rejection on a full queue never
+queued, so it adds no wait. The buckets (`queueWaitBuckets`) have the inclusive
+upper bounds in `STORE_QUEUE_WAIT_BUCKET_UPPER_MS` (10, 50, 100, 250, 500,
+1000, 2500, 5000 and 10000 ms) plus an overflow bucket for anything longer;
+`queueWaitCount` is their sum. `estimateQueueWaitPercentileMs(buckets, 0.95,
+maxQueueWaitMs)` turns them into a P95: the upper bound of the bucket that
+holds the rank, so it overstates the true value by up to one bucket width, it is
+0 for an empty interval, and in the overflow bucket it is the interval maximum.
+Each call ends the interval, so only the periodic admission log line should
+call it.
 
 | Environment variable | Default | Purpose |
 |---|---:|---|

@@ -1,7 +1,8 @@
 /**
  * In-process figures a store scheduler keeps beside its OTel metrics. OTel is
  * opt-in and write-only, so the periodic admission log line reads these
- * instead: the longest queue wait of each lane over the interval, and the
+ * instead: the longest queue wait of each lane over the interval, how many
+ * waits fell in each fixed bucket (enough to estimate a P95), and the
  * cumulative rejections by lane, operation family and reason.
  *
  * One `StoreSchedulerStats` belongs to one scheduler instance and is keyed by
@@ -27,9 +28,35 @@ export function storeOperationFamily(operation: string): string {
   return metricOperation(String(operation ?? '')).split('.', 2).join('.');
 }
 
+/** Inclusive upper bounds (ms) of the queue-wait buckets; one more bucket counts anything longer. */
+export const STORE_QUEUE_WAIT_BUCKET_UPPER_MS: readonly number[] = [10, 50, 100, 250, 500, 1000, 2500, 5000, 10000];
+
+/**
+ * Estimate a percentile (`0 < percentile <= 1`, default P95) of queue waits from
+ * bucket counts. It is the upper bound of the bucket holding that rank, so the
+ * true value is at most this and can be up to one bucket width lower. It is 0
+ * when no wait was counted, and `overflowMs` (the interval max, else Infinity)
+ * when the rank falls in the overflow bucket.
+ */
+export function estimateQueueWaitPercentileMs(buckets: readonly number[], percentile = 0.95, overflowMs = Infinity): number {
+  const total = buckets.reduce((sum, count) => sum + count, 0);
+  if (total <= 0) return 0;
+  const rank = Math.max(1, Math.ceil(total * Math.min(1, percentile)));
+  let seen = 0;
+  for (let i = 0; i < buckets.length; i++) {
+    seen += buckets[i];
+    if (seen >= rank) return STORE_QUEUE_WAIT_BUCKET_UPPER_MS[i] ?? overflowMs;
+  }
+  return overflowMs;
+}
+
 export interface StoreSchedulerLaneWait {
   lane: string;
   maxQueueWaitMs: number;
+  /** Waits that ended in the interval (the sum of `queueWaitBuckets`). */
+  queueWaitCount: number;
+  /** Waits per bucket: `STORE_QUEUE_WAIT_BUCKET_UPPER_MS` in order, then the overflow bucket. */
+  queueWaitBuckets: number[];
 }
 
 export interface StoreSchedulerRejectionTotal {
@@ -39,28 +66,35 @@ export interface StoreSchedulerRejectionTotal {
   count: number;
 }
 
+const emptyLaneWaits = () => ({ maxMs: 0, buckets: new Array<number>(STORE_QUEUE_WAIT_BUCKET_UPPER_MS.length + 1).fill(0) });
+
 export class StoreSchedulerStats {
-  private readonly maxWaitMs = new Map<string, number>();
+  private readonly laneWaits = new Map<string, ReturnType<typeof emptyLaneWaits>>();
   private readonly rejections = new Map<string, StoreSchedulerRejectionTotal>();
   private readonly families = new Set<string>();
 
   /** `lanes` are reported in this order, with 0 when no wait ended in the interval. */
   constructor(lanes: readonly string[]) {
-    for (const lane of lanes) this.maxWaitMs.set(lane, 0);
+    for (const lane of lanes) this.laneWaits.set(lane, emptyLaneWaits());
   }
 
   /** A queue wait ended: the entry started, timed out or was cancelled while queued. */
   recordQueueWait(lane: string, waitMs: number): void {
     if (!Number.isFinite(waitMs)) return;
-    this.maxWaitMs.set(lane, Math.max(this.maxWaitMs.get(lane) ?? 0, waitMs));
+    let waits = this.laneWaits.get(lane);
+    if (!waits) this.laneWaits.set(lane, (waits = emptyLaneWaits()));
+    waits.maxMs = Math.max(waits.maxMs, waitMs);
+    const bucket = STORE_QUEUE_WAIT_BUCKET_UPPER_MS.findIndex((upper) => waitMs <= upper);
+    waits.buckets[bucket < 0 ? STORE_QUEUE_WAIT_BUCKET_UPPER_MS.length : bucket] += 1;
   }
 
   /**
-   * Count one rejection, and the time it queued (0 when it never queued).
+   * Count one rejection, and the time it queued (omitted when it never queued,
+   * so a full queue does not count as a zero-length wait).
    * Returns the bounded family it was counted under: the first
    * `MAX_FAMILIES` distinct families keep their name, later ones count as `other`.
    */
-  recordRejection(lane: string, operation: string, reason: string, waitMs = 0): string {
+  recordRejection(lane: string, operation: string, reason: string, waitMs?: number): string {
     let family = storeOperationFamily(operation);
     if (!this.families.has(family)) {
       if (this.families.size >= MAX_FAMILIES) family = OTHER_FAMILY;
@@ -70,14 +104,19 @@ export class StoreSchedulerStats {
     const total = this.rejections.get(key);
     if (total) total.count += 1;
     else this.rejections.set(key, { lane, family, reason, count: 1 });
-    this.recordQueueWait(lane, waitMs);
+    if (waitMs !== undefined) this.recordQueueWait(lane, waitMs);
     return family;
   }
 
-  /** Longest queue wait per lane since the previous call; starts a new interval. */
+  /** Longest queue wait and per-bucket wait counts per lane since the previous call; starts a new interval. */
   takeIntervalMaxQueueWaitMs(): StoreSchedulerLaneWait[] {
-    const taken = [...this.maxWaitMs].map(([lane, maxQueueWaitMs]) => ({ lane, maxQueueWaitMs }));
-    for (const lane of this.maxWaitMs.keys()) this.maxWaitMs.set(lane, 0);
+    const taken = [...this.laneWaits].map(([lane, { maxMs, buckets }]) => ({
+      lane,
+      maxQueueWaitMs: maxMs,
+      queueWaitCount: buckets.reduce((sum, count) => sum + count, 0),
+      queueWaitBuckets: buckets,
+    }));
+    for (const lane of this.laneWaits.keys()) this.laneWaits.set(lane, emptyLaneWaits());
     return taken;
   }
 
@@ -118,7 +157,7 @@ export function registerStoreSchedulerStats(source: StoreSchedulerStatsSource): 
 
 /**
  * One report per registered scheduler, ordered by id. Taking a report ends the
- * interval of its max waits, so call it from one place only (the periodic line).
+ * interval of its max waits and wait buckets, so call it from one place only (the periodic line).
  */
 export function takeStoreSchedulerStatsReports(): StoreSchedulerStatsReport[] {
   return [...sources.entries()]
