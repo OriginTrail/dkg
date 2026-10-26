@@ -126,19 +126,26 @@ export {
   STORE_CONTROL_QUEUES,
   STORE_CONTROL_RESERVED_SLOTS_ENV,
   STORE_CONTROL_SCHEDULER_ID_PREFIX,
-  buildStoreControlPath,
   controlStoreOptions,
   defaultStoreControlSlots,
   describeStoreControlPath,
   getStoreControlPath,
   logStoreControlPathGeometry,
-  registerStoreControlPath,
   resolveStoreControlConfig,
   selectStoreScheduler,
-  setStoreControlPathForTesting,
   type StoreControlConfig,
   type StoreControlPath,
   type StoreControlSlots,
+} from './store-control-path.js';
+/**
+ * Test hooks of the control path: build instances, register them with the diagnostics, and replace the
+ * process-wide path.
+ * @internal Not part of the package's supported API; production code never calls them.
+ */
+export {
+  buildStoreControlPath,
+  registerStoreControlPath,
+  setStoreControlPathForTesting,
 } from './store-control-path.js';
 export {
   STORE_QUEUE_WAIT_BUCKET_UPPER_MS,

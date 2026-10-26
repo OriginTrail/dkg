@@ -234,7 +234,7 @@ backends ignore priority and so see no effect.
 
 | Environment variable | Default | Purpose |
 |---|---:|---|
-| `DKG_STORE_CONTROL_RESERVED_SLOTS` | unset (off) | `0` turns the path off. `share:1,publisher:2` sets the slots per queue (caps: share 1, publisher 2; a queue left out gets 0; a higher number is clamped with a warning). A malformed value is refused with a warning and leaves the path off. An explicit value is honoured on any host; the default, when it is switched on, adds no slots on hosts with 2 or fewer CPUs. Read once at start. |
+| `DKG_STORE_CONTROL_RESERVED_SLOTS` | unset (off) | `0` turns the path off. `share:1,publisher:2` sets the slots per queue (caps: share 1, publisher 2; a queue left out gets 0; a higher number is clamped with a warning). A malformed value, or a variable that is set but blank, is refused with a warning and leaves the path off. An explicit value is honoured on any host; the default, when it is switched on, adds no slots on hosts with 2 or fewer CPUs. Read once at start. |
 
 The daemon logs the effective geometry once at start
 (`logStoreControlPathGeometry`). Tests replace the process-wide path with

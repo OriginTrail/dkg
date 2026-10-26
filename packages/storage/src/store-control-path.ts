@@ -64,30 +64,33 @@ export interface StoreControlConfig {
 
 /**
  * Resolve `DKG_STORE_CONTROL_RESERVED_SLOTS`: per-queue values (`share:1,publisher:2`; a queue left out gets 0),
- * `0` for the whole path off, or unset for the default. A value above a queue's cap is clamped with a warning.
- * A malformed value is refused with a warning and leaves the path off, so a mistyped rollback can never
- * leave it on. An explicit value may enable slots on any host, small ones included.
+ * `0` for the whole path off, or an unset variable for the default. A value above a queue's cap is clamped with a
+ * warning. A malformed value is refused with a warning and leaves the path off, so a mistyped rollback can never
+ * leave it on; a variable that is set but blank (empty or only whitespace) is malformed too, not "unset", so it
+ * never means the default. An explicit value may enable slots on any host, small ones included.
  */
 export function resolveStoreControlConfig(
   raw: string | undefined,
   options: { cpus?: number; onByDefault?: boolean } = {},
 ): StoreControlConfig {
-  const text = raw?.trim();
-  if (!text) {
+  if (raw === undefined) {
     return {
       slots: defaultStoreControlSlots(options.cpus ?? availableParallelism(), options.onByDefault),
       source: 'default',
       warnings: [],
     };
   }
+  const text = raw.trim();
   const refused = (): StoreControlConfig => ({
     slots: NO_SLOTS,
     source: 'refused',
     warnings: [
-      `Invalid ${STORE_CONTROL_RESERVED_SLOTS_ENV}=${JSON.stringify(text.slice(0, 64))}; expected "0" or per-queue `
-      + 'values such as "share:1,publisher:2". The control path stays off.',
+      `Invalid ${STORE_CONTROL_RESERVED_SLOTS_ENV}=${JSON.stringify(text.slice(0, 64))}`
+      + `${text ? '' : ' (set but blank)'}; expected "0" or per-queue values such as "share:1,publisher:2". `
+      + 'The control path stays off.',
     ],
   });
+  if (!text) return refused();
   if (text === '0') return { slots: NO_SLOTS, source: 'env', warnings: [] };
   const slots: Record<StoreControlQueue, number> = { share: 0, publisher: 0 };
   const warnings: string[] = [];
@@ -118,6 +121,7 @@ export type StoreControlPath = Readonly<Partial<Record<StoreControlQueue, StoreP
  * and no class default reaches them: no ACK, health, normal or background reserve (a default ACK reserve would
  * hold one of the publisher's two slots), and the shared scheduler's resolved queue limit and wait as values.
  * Registration with the diagnostics is `registerStoreControlPath`'s job.
+ * @internal Exported for tests and the daemon wiring; not part of the package's supported API.
  */
 export function buildStoreControlPath(
   slots: StoreControlSlots,
@@ -143,12 +147,18 @@ export function buildStoreControlPath(
   return Object.freeze(path);
 }
 
-/** Make the instances visible to the backpressure registry and the queue-wait stats; returns the undo. */
+/**
+ * Make the instances visible to the backpressure registry and the queue-wait stats; returns the undo.
+ * If any registration throws, the ones already made are undone before the error propagates.
+ * @internal Exported for tests; not part of the package's supported API.
+ */
 export function registerStoreControlPath(path: StoreControlPath): () => void {
   const undo: Array<() => void> = [];
   try {
     for (const scheduler of Object.values(path)) {
-      undo.push(backpressureRegistry.register(scheduler), registerStoreSchedulerStats(scheduler));
+      // Two steps: if the second throws, the first's undo has already been recorded and the catch runs it.
+      undo.push(backpressureRegistry.register(scheduler));
+      undo.push(registerStoreSchedulerStats(scheduler));
     }
   } catch (error) {
     for (const fn of undo) fn();
@@ -195,6 +205,7 @@ export function getStoreControlPath(): StoreControlPath {
 /**
  * Test injection point. Replaces the process-wide path with `path` (injected instances are not registered), or
  * with nothing to build it from the environment again; either way the previous path's registrations are undone.
+ * @internal Test hook; not part of the package's supported API.
  */
 export function setStoreControlPathForTesting(path?: StoreControlPath): void {
   resolved?.unregister();

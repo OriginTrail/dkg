@@ -120,6 +120,11 @@ the id, `lane` is `control`), the `priority="control"` attribute of the
 (`store-control-share/control`) and the `resource_usage` line
 (`store_control_share=0/1 store_control_share_queued=0`). A queue-wait timeout
 warning from a control scheduler names only that scheduler's own active work.
+That warning is rate-limited (at most 16 per 60 s, and one per priority and
+operation per 60 s) **per scheduler instance**: each control scheduler has its
+own budget beside the one of `store`, so with the path on a node can log up to
+16 timeout diagnostics per minute from each of the three schedulers (48 in all),
+not 16 in total.
 
 The path is switched by `DKG_STORE_CONTROL_RESERVED_SLOTS`, read once at daemon
 start (a change needs a restart). The daemon logs the effective geometry once
@@ -127,7 +132,8 @@ at start (`Store control path: ...`).
 
 | Value | Effect |
 | --- | --- |
-| unset | The built-in default. In this release the path is **off** |
+| unset (the variable does not exist) | The built-in default. In this release the path is **off** |
+| set but blank (empty or only spaces) | Refused with a warning, and the path stays **off**. A blank value is a typo, never the default, so a mistyped rollback can not leave the path on once the default is switched on |
 | `0` | Off. No scheduler is built or registered, and a call that names its queue behaves exactly like one that does not |
 | `share:1,publisher:2` | The slots per queue, up to a cap of 1 for `share` and 2 for `publisher`. A queue left out gets 0. An explicit value is honoured on any host, hosts with 2 or fewer CPUs included |
 | a number above a queue's cap | Clamped to the cap, with a warning |

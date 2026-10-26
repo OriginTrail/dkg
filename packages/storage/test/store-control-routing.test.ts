@@ -326,6 +326,27 @@ describe('AC1 (2): control options route every scheduler run to the queue\'s own
   });
 });
 
+describe('an untagged call never reaches the control path', () => {
+  // Both instances are on and the call names no queue: it must stay on the shared scheduler, in the lane it
+  // always had (explicit priority, else the ambient default, else normal), on every stack and under every ambient.
+  it.each(stackCalls.map((c) => [label(c), c] as const))('%s', async (_name, { stack, call }) => {
+    const h = harnesses.get(stack.name)!;
+    h.inject(STORE_CONTROL_QUEUES);
+    for (const ambient of AMBIENTS) {
+      for (const [shape, options] of [['no options', undefined], ['a source only', { source: SOURCE }]] as const) {
+        const context = `${shape}, ambient ${ambient ?? 'none'}`;
+        const seen = await h.observe(call, options, ambient);
+        expectCount(stack, call, seen.runs);
+        expect(seen.runs.map((run) => run.scheduler), context).toEqual(seen.runs.map(() => 'shared'));
+        expect(seen.runs.map(sharedLane), context).toEqual(seen.runs.map(() => ambient ?? 'normal'));
+        expect(seen.lanes.share, context).toEqual([]);
+        expect(seen.lanes.publisher, context).toEqual([]);
+        expect(seen.lanes.shared, context).toEqual(seen.runs.map(() => ambient ?? 'normal'));
+      }
+    }
+  });
+});
+
 describe('only controlQueue routes: no priority and no ambient lane reaches the control path', () => {
   const stack = STACKS[0];
   const rows: ReadonlyArray<[string, QueryOptions]> = [

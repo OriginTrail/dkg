@@ -4,7 +4,11 @@ import {
   StorePriorityScheduler,
   externalStorePriorityScheduler,
 } from '../src/store-priority-scheduler.js';
-import { takeStoreSchedulerStatsReports } from '../src/store-scheduler-stats.js';
+import {
+  StoreSchedulerStats,
+  registerStoreSchedulerStats,
+  takeStoreSchedulerStatsReports,
+} from '../src/store-scheduler-stats.js';
 import {
   STORE_CONTROL_MAX_SLOTS,
   STORE_CONTROL_PATH_ON_BY_DEFAULT,
@@ -15,6 +19,7 @@ import {
   describeStoreControlPath,
   getStoreControlPath,
   logStoreControlPathGeometry,
+  registerStoreControlPath,
   resolveStoreControlConfig,
   selectStoreScheduler,
   setStoreControlPathForTesting,
@@ -37,11 +42,29 @@ describe('DKG_STORE_CONTROL_RESERVED_SLOTS', () => {
         slots: { share: 0, publisher: 0 }, source: 'default', warnings: [],
       });
     }
-    // Blank is unset, not a malformed value.
-    for (const blank of ['', '   ']) {
-      expect(resolveStoreControlConfig(blank, { cpus: 8 })).toMatchObject({ source: 'default', warnings: [] });
-    }
   });
+
+  it.each(['', ' ', '   ', '\t', ' \n '])(
+    'refuses the set-but-blank value %j with a warning and leaves the path off, even when the default is on',
+    (blank) => {
+      // Set-but-blank is a typo (`VAR=` from a template or a shell), not "unset": it must not mean the default,
+      // or a mistyped rollback would leave the path on once the default is switched on.
+      for (const onByDefault of [false, true]) {
+        for (const cpus of [1, 2, 8, 64]) {
+          const config = resolveStoreControlConfig(blank, { cpus, onByDefault });
+          expect(config.slots, `${cpus} CPUs, onByDefault ${onByDefault}`).toEqual({ share: 0, publisher: 0 });
+          expect(config.source).toBe('refused');
+          expect(config.warnings).toHaveLength(1);
+          expect(config.warnings[0]).toContain(STORE_CONTROL_RESERVED_SLOTS_ENV);
+          expect(config.warnings[0]).toContain('blank');
+          expect(config.warnings[0]).toContain('stays off');
+        }
+      }
+      // Only a truly unset value means the default.
+      expect(resolveStoreControlConfig(undefined, { cpus: 8, onByDefault: true }))
+        .toMatchObject({ slots: { share: 1, publisher: 2 }, source: 'default', warnings: [] });
+    },
+  );
 
   it('would, once the default is switched on, be share 1 + publisher 2 with no added slots on hosts of 2 or fewer CPUs', () => {
     expect(defaultStoreControlSlots(8, true)).toEqual({ share: 1, publisher: 2 });
@@ -169,6 +192,48 @@ describe('buildStoreControlPath', () => {
   });
 });
 
+describe('registerStoreControlPath', () => {
+  const controlIds = (ids: string[]) => ids.filter((id) => id.startsWith('store-control-'));
+  const squatStats = (id: string) => registerStoreSchedulerStats({ backpressureId: id, stats: new StoreSchedulerStats(['control']) });
+
+  it('registers each instance with the backpressure registry and the queue-wait stats, and undoes both', () => {
+    const path = buildStoreControlPath({ share: 1, publisher: 2 });
+    const undo = registerStoreControlPath(path);
+    expect(controlIds(registeredIds())).toEqual(['store-control-publisher', 'store-control-share']);
+    expect(controlIds(statsIds())).toEqual(['store-control-publisher', 'store-control-share']);
+    undo();
+    expect(controlIds(registeredIds())).toEqual([]);
+    expect(controlIds(statsIds())).toEqual([]);
+  });
+
+  it('undoes the backpressure registration when the stats registration of the same instance fails', () => {
+    const path = buildStoreControlPath({ share: 1, publisher: 0 });
+    const release = squatStats('store-control-share');
+    try {
+      expect(() => registerStoreControlPath(path)).toThrow(/already registered/);
+      // The failure came after the registry accepted the instance; its undo must have been recorded and run.
+      expect(controlIds(registeredIds())).toEqual([]);
+    } finally {
+      release();
+    }
+    expect(controlIds(statsIds())).toEqual([]);
+  });
+
+  it('leaves nothing from an earlier instance behind when a later one fails in its second step', () => {
+    const path = buildStoreControlPath({ share: 1, publisher: 2 });
+    const release = squatStats('store-control-publisher');
+    try {
+      expect(() => registerStoreControlPath(path)).toThrow(/already registered/);
+      expect(controlIds(registeredIds())).toEqual([]);
+      // The squatter's own entry is not ours to undo.
+      expect(controlIds(statsIds())).toEqual(['store-control-publisher']);
+    } finally {
+      release();
+    }
+    expect(controlIds(statsIds())).toEqual([]);
+  });
+});
+
 describe('the process-wide control path', () => {
   it('builds and registers nothing while the path is off', () => {
     vi.stubEnv(STORE_CONTROL_RESERVED_SLOTS_ENV, '0');
@@ -180,8 +245,22 @@ describe('the process-wide control path', () => {
   });
 
   it('is off when the variable is unset', () => {
-    vi.stubEnv(STORE_CONTROL_RESERVED_SLOTS_ENV, '');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.stubEnv(STORE_CONTROL_RESERVED_SLOTS_ENV, undefined);
     expect(getStoreControlPath()).toEqual({});
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('refuses a variable that is set but blank, with one warning, and leaves the path off', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.stubEnv(STORE_CONTROL_RESERVED_SLOTS_ENV, '  ');
+    expect(getStoreControlPath()).toEqual({});
+    expect(getStoreControlPath()).toEqual({});
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain('[store control]');
+    expect(warn.mock.calls[0][0]).toContain('stays off');
+    expect(describeStoreControlPath()).toContain('refused as malformed');
+    expect(registeredIds().filter((id) => id.startsWith('store-control-'))).toEqual([]);
   });
 
   it('builds both instances once from the environment and registers them with the diagnostics', () => {
@@ -237,6 +316,21 @@ describe('the process-wide control path', () => {
       expect(statsIds().filter((id) => id.startsWith('store-control-'))).toEqual([]);
     } finally {
       undo();
+    }
+  });
+
+  it('keeps admission working, with one warning, when only the stats registration is refused', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const release = registerStoreSchedulerStats({ backpressureId: 'store-control-publisher', stats: new StoreSchedulerStats(['control']) });
+    try {
+      vi.stubEnv(STORE_CONTROL_RESERVED_SLOTS_ENV, 'share:1,publisher:2');
+      const path = getStoreControlPath();
+      expect(selectStoreScheduler(externalStorePriorityScheduler, { controlQueue: 'share' })).toBe(path.share);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain('not registered with the diagnostics');
+      expect(registeredIds().filter((id) => id.startsWith('store-control-'))).toEqual([]);
+    } finally {
+      release();
     }
   });
 
@@ -309,6 +403,9 @@ describe('the startup geometry line', () => {
   });
 
   it('says the path is off by default, and that a malformed value was refused', () => {
+    // Do not depend on the ambient environment: the variable is explicitly unset here (restored after the test).
+    vi.stubEnv(STORE_CONTROL_RESERVED_SLOTS_ENV, undefined);
+    setStoreControlPathForTesting(undefined);
     const unset = capture();
     logStoreControlPathGeometry(unset.logger);
     expect(unset.info[0]).toContain('off');
