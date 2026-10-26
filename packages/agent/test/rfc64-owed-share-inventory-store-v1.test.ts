@@ -22,7 +22,7 @@ import {
 } from '../src/rfc64/persistence-root-ownership-v1-internal.js';
 
 const AUTHOR = '0x1111111111111111111111111111111111111111';
-const MARKER = Object.freeze({
+const MARKER: Readonly<Rfc64OwedShareInventoryV1> = snapshotRfc64OwedShareInventoryV1({
   version: 1,
   contextGraphId: `${AUTHOR}/owed-share-inventory`,
   subGraphName: null,
@@ -30,7 +30,7 @@ const MARKER = Object.freeze({
   assertionCoordinate: 'fenced-share',
   sealDigest: `0x${'ab'.repeat(32)}`,
   shareOperationId: 'swm-share-op-1',
-}) as Rfc64OwedShareInventoryV1;
+});
 
 const roots: string[] = [];
 const opened: Rfc64PersistenceV1[] = [];
@@ -59,6 +59,13 @@ function markerDirectory(dir: string): string {
 }
 
 describe('RFC-64 owed share inventory store', () => {
+  it.each([null, [], 'marker', {}, { ...MARKER, authorAddress: 7 },
+    { ...MARKER, assertionCoordinate: 'bad\u0000name' }, { ...MARKER, sealDigest: 'bad' }])(
+    'rejects unvalidated marker input %j', (raw: unknown) => {
+      expect(() => snapshotRfc64OwedShareInventoryV1(raw)).toThrow();
+    },
+  );
+
   it('keeps a marker across a restart until it is deleted', async () => {
     const dir = await dataDir();
     const first = await open(dir);

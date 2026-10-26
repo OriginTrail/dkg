@@ -15,7 +15,6 @@ import { DKGAgent } from '../src/index.js';
 import { finishDurableShare } from '../src/internal/promote/durable-share-inventory.js';
 import {
   SwmCatalogAuthorityNotReady,
-  SwmInventoryShareSuperseded,
   SwmInventoryWriteFailure,
 } from '../src/internal/swm-inventory-write.js';
 import type { Rfc64OwedShareInventoryV1 } from '../src/rfc64/owed-share-inventory-store-v1.js';
@@ -60,7 +59,7 @@ function fakeAgent(options: { store?: boolean; requires?: () => boolean } = {}) 
   agent.rfc64PersistenceV1 = options.store === false ? undefined : { owedShareInventories: store };
   agent.log = { warn: vi.fn(), info: vi.fn(), debug: vi.fn(), error: vi.fn() };
   agent.requiresRfc64ShareInventoryV1 = vi.fn(options.requires ?? (() => true));
-  agent.commitRfc64SwmAuthorInventoryV1 = vi.fn();
+  agent.tryCommitRfc64SwmAuthorInventoryV1 = vi.fn();
   agent.requestRfc64SwmCatalogProjectionV1 = vi.fn(() => true);
   return { agent, store, kept };
 }
@@ -128,33 +127,32 @@ describe('one attempt at an owed row', () => {
     [{ status: 'dormant', dormantReason: 'policy-mismatch' }, 'policy-mismatch'],
     [{ status: 'dormant', dormantReason: 'inactive-lane' }, 'waiting'],
     [{ status: 'dormant', dormantReason: 'authority-transition' }, 'waiting'],
+    [{ status: 'superseded', reason: 'missing-seal' }, 'superseded'],
+    [{ status: 'superseded', reason: 'workspace-mismatch' }, 'superseded'],
   ])('maps %j to %s', async (result, outcome) => {
     const { agent } = fakeAgent();
-    agent.commitRfc64SwmAuthorInventoryV1.mockResolvedValue(result);
+    agent.tryCommitRfc64SwmAuthorInventoryV1.mockResolvedValue(result);
     await expect(agent.drainRfc64OwedShareInventoryV1(MARKER, createOperationContext('system'))).resolves.toBe(outcome);
-    expect(agent.commitRfc64SwmAuthorInventoryV1).toHaveBeenCalledWith({ contextGraphId: CONTEXT_GRAPH_ID,
+    expect(agent.tryCommitRfc64SwmAuthorInventoryV1).toHaveBeenCalledWith({ contextGraphId: CONTEXT_GRAPH_ID,
       subGraphName: null, authorAddress: AUTHOR, assertionCoordinate: 'asset', lifecycleAgentAddress: AUTHOR,
-      shareOperationId: 'fenced-share' }, { staleShareIsTerminal: true });
+      shareOperationId: 'fenced-share' });
     expect(agent.requestRfc64SwmCatalogProjectionV1).toHaveBeenCalledTimes(outcome === 'written' ? 1 : 0);
   });
 
-  it('ends a superseded share, waits for a readiness gap, and fails on anything else', async () => {
+  it('waits for a readiness gap and fails on anything else', async () => {
     const { agent } = fakeAgent();
-    agent.commitRfc64SwmAuthorInventoryV1.mockRejectedValueOnce(new SwmInventoryWriteFailure('preparation-read', null,
-      new SwmInventoryShareSuperseded('workspace-mismatch')));
-    await expect(agent.drainRfc64OwedShareInventoryV1(MARKER, createOperationContext('system'))).resolves.toBe('superseded');
-    agent.commitRfc64SwmAuthorInventoryV1.mockRejectedValueOnce(new SwmInventoryWriteFailure('authority', null,
+    agent.tryCommitRfc64SwmAuthorInventoryV1.mockRejectedValueOnce(new SwmInventoryWriteFailure('authority', null,
       new SwmCatalogAuthorityNotReady('service-unavailable')));
     await expect(agent.drainRfc64OwedShareInventoryV1(MARKER, createOperationContext('system'))).resolves.toBe('waiting');
     const failure = new SwmInventoryWriteFailure('inventory-maintenance', 'u', new Error('database locked'));
-    agent.commitRfc64SwmAuthorInventoryV1.mockRejectedValueOnce(failure);
+    agent.tryCommitRfc64SwmAuthorInventoryV1.mockRejectedValueOnce(failure);
     await expect(agent.drainRfc64OwedShareInventoryV1(MARKER, createOperationContext('system'))).rejects.toBe(failure);
   });
 
   it('runs the owner over the node\'s markers and logs a failed attempt', async () => {
     const { agent, kept } = fakeAgent();
     kept.push(MARKER);
-    agent.commitRfc64SwmAuthorInventoryV1.mockRejectedValueOnce(new Error('signer unavailable'));
+    agent.tryCommitRfc64SwmAuthorInventoryV1.mockRejectedValueOnce(new Error('signer unavailable'));
     const owner = agent.createRfc64OwedShareInventoryOwnerV1(() => undefined);
     owner.start(createOperationContext('system'));
     await owner.whenIdle();
@@ -168,7 +166,7 @@ describe('one attempt at an owed row', () => {
     const { agent } = fakeAgent();
     await rfc64SwmInventoryShadowRuntimeV1(agent).closeAndDrain();
     await expect(agent.drainRfc64OwedShareInventoryV1(MARKER, createOperationContext('system'))).resolves.toBe('waiting');
-    expect(agent.commitRfc64SwmAuthorInventoryV1).not.toHaveBeenCalled();
+    expect(agent.tryCommitRfc64SwmAuthorInventoryV1).not.toHaveBeenCalled();
   });
 });
 
@@ -220,7 +218,7 @@ describe('owed share inventory on a started agent', () => {
     // The fence outlasts the restart: the start-up pass keeps the marker.
     const restarted = await startAuthor('owed-share-author-restarted', dataDir, true);
     expect(markers(restarted)).toEqual([owed]);
-    const writer = vi.spyOn(restarted, 'commitRfc64SwmAuthorInventoryV1');
+    const writer = vi.spyOn(restarted, 'tryCommitRfc64SwmAuthorInventoryV1');
     restarted.requestRfc64OwedShareInventoryDrainV1();
     await vi.waitFor(() => expect(writer).toHaveBeenCalled());
     await expect(writer.mock.results[0]!.value).resolves.toMatchObject({ status: 'dormant', dormantReason: 'inactive-lane' });
@@ -246,11 +244,20 @@ describe('owed share inventory on a started agent', () => {
     const unsealed = { ...MARKER, assertionCoordinate: 'never-sealed', shareOperationId: 'unsealed-share' };
     await store.put(replaced);
     await store.put(unsealed);
-    const writer = vi.spyOn(author, 'commitRfc64SwmAuthorInventoryV1');
+    const writer = vi.spyOn(author, 'tryCommitRfc64SwmAuthorInventoryV1');
     author.requestRfc64OwedShareInventoryDrainV1();
     await vi.waitFor(() => expect(markers(author)).toEqual([]), { timeout: 10_000 });
-    for (const result of writer.mock.results) {
-      await expect(result.value).rejects.toMatchObject({ cause: expect.any(SwmInventoryShareSuperseded) });
+    expect(writer).toHaveBeenCalledTimes(2);
+    const outcomes = await Promise.all(writer.mock.results.map(result => result.value));
+    expect(outcomes).toEqual(expect.arrayContaining([
+      { status: 'superseded', reason: 'missing-seal' },
+      { status: 'superseded', reason: 'workspace-mismatch' },
+    ]));
+    for (const marker of [replaced, unsealed]) {
+      await expect(author.commitRfc64SwmAuthorInventoryV1({ ...marker, lifecycleAgentAddress: AUTHOR }))
+        .rejects.toMatchObject({ phase: 'preparation-read', cause: { message: marker === unsealed
+          ? 'durable SWM assertion has no strict graph-scoped author seal'
+          : 'durable SWM head does not match the committed share and author seal' } });
     }
     expect(author.readRfc64SwmAuthorInventorySnapshotV1({ inventoryScopeDigest: seeded.scopeDigest, authorAddress: AUTHOR }))
       .toBeNull();

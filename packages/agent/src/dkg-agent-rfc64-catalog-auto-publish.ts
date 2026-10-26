@@ -1,7 +1,7 @@
 import type { AfterDurableSwmPromotionParamsV1, ObserveRfc64DurableSwmPromotionParamsV1, ObserveRfc64ConfirmedVmParamsV1, ConfirmedInventoryRemovalOutcomeV1 } from './internal/promote/swm-handoff-types.js';
 export type { AfterDurableSwmPromotionParamsV1, ObserveRfc64DurableSwmPromotionParamsV1, ObserveRfc64ConfirmedVmParamsV1, ConfirmedInventoryRemovalOutcomeV1, BoundDurableSwmPromotionParamsV1 } from './internal/promote/swm-handoff-types.js';
 import { repairConfirmedPlacement } from './internal/confirmed-placement-repair.js';
-import { requireInventoryRemovalLane, SwmInventoryShareSuperseded, SwmInventoryWriteFailure, type SwmInventoryWriteOutcome } from './internal/swm-inventory-write.js';
+import { requireInventoryRemovalLane, type SwmInventoryAttemptOutcome, SwmInventoryWriteFailure, type SwmInventoryWriteOutcome } from './internal/swm-inventory-write.js';
 import { finishDurableShare } from './internal/promote/durable-share-inventory.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -389,7 +389,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
                   lifecycleAgentAddress: authorAddress,
                   shareOperationId: row.shareOperationId,
                 },
-                { allowTerminalStale: true, graphManager },
+                { graphManager },
               );
               if (prepared.status === 'stale') {
                 staleRows.push(Object.freeze({
@@ -713,9 +713,8 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: RecordRfc64SwmAuthorInventoryShadowParamsV1,
     options: Readonly<{
-      allowTerminalStale: boolean;
       graphManager?: GraphManager;
-    }>,
+    }> = {},
   ): Promise<PreparedRfc64SwmAuthorInventoryRowV1> {
     const lane = this.resolveRfc64CatalogAuthoringLaneV1(
       params.contextGraphId,
@@ -740,10 +739,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       source: 'agent.rfc64.swmInventory.seal',
     });
     if (candidate === undefined) {
-      if (options.allowTerminalStale) {
-        return Object.freeze({ status: 'stale', reason: 'missing-seal' });
-      }
-      throw new Error('durable SWM assertion has no strict graph-scoped author seal');
+      return Object.freeze({ status: 'stale', reason: 'missing-seal' });
     }
     const expectedScope = params.subGraphName
       ? `${params.contextGraphId}/${params.subGraphName}`
@@ -793,10 +789,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       || head.publicTripleCount !== Number(canonicalSeal.publicTripleCount)
       || head.privateTripleCount !== Number(canonicalSeal.privateTripleCount)
     ) {
-      if (options.allowTerminalStale) {
-        return Object.freeze({ status: 'stale', reason: 'workspace-mismatch' });
-      }
-      throw new Error('durable SWM head does not match the committed share and author seal');
+      return Object.freeze({ status: 'stale', reason: 'workspace-mismatch' });
     }
     if (!rfc64CatalogLaneAcceptsWorkspaceHeadV1(lane, head.access.accessPolicy)) {
       return Object.freeze({ status: 'stale', reason: 'policy-mismatch' });
@@ -836,10 +829,21 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     });
   }
 
-  /** Prepare and commit inventory with scope fencing; throws without suppressing failures (a typed one for a superseded share, when asked). */
+  /** Preserve strict handoff/observer errors at their existing boundary. */
   async commitRfc64SwmAuthorInventoryV1(
-    this: DKGAgent, params: RecordRfc64SwmAuthorInventoryShadowParamsV1, options: Readonly<{ staleShareIsTerminal?: boolean }> = {},
+    this: DKGAgent, params: RecordRfc64SwmAuthorInventoryShadowParamsV1,
   ): Promise<SwmInventoryWriteOutcome> {
+    const result = await this.tryCommitRfc64SwmAuthorInventoryV1(params);
+    if (result.status !== 'superseded') return result;
+    throw new SwmInventoryWriteFailure('preparation-read', null, new Error(result.reason === 'missing-seal'
+      ? 'durable SWM assertion has no strict graph-scoped author seal'
+      : 'durable SWM head does not match the committed share and author seal'));
+  }
+
+  /** Prepare and commit with scope fencing; superseded shares are domain outcomes. */
+  async tryCommitRfc64SwmAuthorInventoryV1(
+    this: DKGAgent, params: RecordRfc64SwmAuthorInventoryShadowParamsV1,
+  ): Promise<SwmInventoryAttemptOutcome> {
     let kaUal: string | null = null;
     let phase: SwmInventoryWriteFailure['phase'] = 'authority';
     const dormant = (dormantReason: Extract<SwmInventoryWriteOutcome, { status: 'dormant' }>['dormantReason']): SwmInventoryWriteOutcome =>
@@ -847,8 +851,8 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     try {
       if (this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, params.subGraphName) === null) return dormant('inactive-lane');
       phase = 'preparation-read';
-      const prepared = await this.prepareRfc64SwmAuthorInventoryRowV1(params, { allowTerminalStale: options.staleShareIsTerminal === true });
-      if (prepared.status === 'stale' && (prepared.reason === 'missing-seal' || prepared.reason === 'workspace-mismatch')) throw new SwmInventoryShareSuperseded(prepared.reason);
+      const prepared = await this.prepareRfc64SwmAuthorInventoryRowV1(params);
+      if (prepared.status === 'stale' && (prepared.reason === 'missing-seal' || prepared.reason === 'workspace-mismatch')) return { status: 'superseded', reason: prepared.reason };
       if (prepared.status === 'stale') return dormant(prepared.reason === 'policy-mismatch' ? 'policy-mismatch' : 'vm-confirmed');
       kaUal = prepared.row.kaUal;
       phase = 'authority';

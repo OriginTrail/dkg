@@ -24,9 +24,8 @@ import {
 } from './internal/owed-share-inventory-owner.js';
 import {
   SwmCatalogAuthorityNotReady,
-  SwmInventoryShareSuperseded,
   SwmInventoryWriteFailure,
-  type SwmInventoryWriteOutcome,
+  type SwmInventoryAttemptOutcome,
 } from './internal/swm-inventory-write.js';
 import {
   snapshotRfc64OwedShareInventoryV1,
@@ -76,11 +75,11 @@ export class Rfc64OwedShareInventoryMethods extends DKGAgentBase {
     try {
       marker = snapshotRfc64OwedShareInventoryV1({
         version: 1,
-        contextGraphId: params.contextGraphId as Rfc64OwedShareInventoryV1['contextGraphId'],
-        subGraphName: (params.subGraphName ?? null) as Rfc64OwedShareInventoryV1['subGraphName'],
-        authorAddress: params.lifecycleAgentAddress.toLowerCase() as Rfc64OwedShareInventoryV1['authorAddress'],
-        assertionCoordinate: params.assertionCoordinate as Rfc64OwedShareInventoryV1['assertionCoordinate'],
-        sealDigest: params.recoveryBinding.sealDigest as Rfc64OwedShareInventoryV1['sealDigest'],
+        contextGraphId: params.contextGraphId,
+        subGraphName: (params.subGraphName ?? null),
+        authorAddress: params.lifecycleAgentAddress.toLowerCase(),
+        assertionCoordinate: params.assertionCoordinate,
+        sealDigest: params.recoveryBinding.sealDigest,
         shareOperationId: params.recoveryBinding.intent.operationId,
       });
     } catch (cause) {
@@ -105,16 +104,16 @@ export class Rfc64OwedShareInventoryMethods extends DKGAgentBase {
     return withDefaultStoreWorkPriority('background', () => withOwnedRpcRequestContext({
       requestClass: 'background', signal,
     }, () => runtime.runInventoryWriteExclusive(asset, async (): Promise<OwedShareInventoryDrainOutcomeV1> => {
-      let result: SwmInventoryWriteOutcome;
+      let result: SwmInventoryAttemptOutcome;
       try {
-        result = await this.commitRfc64SwmAuthorInventoryV1({ ...asset, lifecycleAgentAddress: marker.authorAddress,
-          shareOperationId: marker.shareOperationId }, { staleShareIsTerminal: true });
+        result = await this.tryCommitRfc64SwmAuthorInventoryV1({ ...asset, lifecycleAgentAddress: marker.authorAddress,
+          shareOperationId: marker.shareOperationId });
       } catch (error) {
         const cause = error instanceof SwmInventoryWriteFailure ? error.cause : error;
-        if (cause instanceof SwmInventoryShareSuperseded) return 'superseded';
         if (cause instanceof SwmCatalogAuthorityNotReady) return 'waiting';
         throw error;
       }
+      if (result.status === 'superseded') return 'superseded';
       if (result.status === 'dormant') {
         return result.dormantReason === 'inactive-lane' || result.dormantReason === 'authority-transition'
           ? 'waiting' : result.dormantReason;

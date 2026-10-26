@@ -783,7 +783,7 @@ describe('durable synchronous share ownership', () => {
       restarted.rfc64PersistenceV1 = persistence;
       restarted.resolveRfc64CatalogReceiverAuthorityV1 = () => OPEN_LANE;
       const writer = vi.fn(async () => ({ status: 'applied', attempts: 1, headObjectDigest: 'owed-head', kaUal: finalized.kaUal }));
-      restarted.commitRfc64SwmAuthorInventoryV1 = writer;
+      restarted.tryCommitRfc64SwmAuthorInventoryV1 = writer;
       restarted.requestRfc64SwmCatalogProjectionV1 = vi.fn(() => true);
       expect(persistence.owedShareInventories.list()).toEqual([owed]);
       const owner = restarted.createRfc64OwedShareInventoryOwnerV1(() => ({ retryIntervalMs: 0 }));
@@ -791,7 +791,7 @@ describe('durable synchronous share ownership', () => {
       await owner.whenIdle();
       await owner.close();
       expect(writer).toHaveBeenCalledWith(expect.objectContaining({ assertionCoordinate: NAME,
-        shareOperationId: (owed as { shareOperationId: string }).shareOperationId }), { staleShareIsTerminal: true });
+        shareOperationId: (owed as { shareOperationId: string }).shareOperationId }));
       expect(restarted.requestRfc64SwmCatalogProjectionV1).toHaveBeenCalledWith(expect.objectContaining({ contextGraphId: CG, authorAddress: AUTHOR }));
       expect(persistence.owedShareInventories.list()).toEqual([]);
     } finally { await persistence.close(); await store.close(); await rm(dataDir, { recursive: true, force: true }); }

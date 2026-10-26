@@ -84,8 +84,12 @@ export interface Rfc64OwedShareInventoryStoreV1 {
 }
 
 export function snapshotRfc64OwedShareInventoryV1(
-  input: Readonly<Rfc64OwedShareInventoryV1>,
+  raw: unknown,
 ): Readonly<Rfc64OwedShareInventoryV1> {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new TypeError('RFC-64 owed share inventory marker is malformed');
+  }
+  const input = raw as Record<string, unknown>;
   if (input.version !== 1) throw new TypeError('RFC-64 owed share inventory version is invalid');
   assertContextGraphIdV1(input.contextGraphId, 'owed share inventory contextGraphId');
   if (input.subGraphName !== null) {
@@ -128,7 +132,7 @@ export function parseRfc64OwedShareInventoryV1(
   if (Object.keys(parsed).sort().join('\n') !== MARKER_KEYS) {
     throw new Error('RFC-64 owed share inventory marker has unknown fields');
   }
-  return snapshotRfc64OwedShareInventoryV1(parsed as Rfc64OwedShareInventoryV1);
+  return snapshotRfc64OwedShareInventoryV1(parsed);
 }
 
 function markerKey(bytes: Uint8Array): string {
