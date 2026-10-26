@@ -12,10 +12,8 @@ import { DEFAULT_PROMOTE_RETRY_TUNING } from './promote-retry-policy.js';
 import { isAutomaticallyRecoverablePostCommitFailure, missingStorageLaneForAuthorOnlyJob, promoteFailureTransition, requiresManualInspection } from './async-promote-recovery-policy.js';
 /** RDF queue: immutable bound replay or conservative legacy recovery; one owner per assertion. */
 
-import {
-  deleteByPatternWithoutCount,
-  type TripleStore,
-} from '@origintrail-official/dkg-storage';
+import { deleteByPatternWithoutCount, type TripleStore } from '@origintrail-official/dkg-storage';
+import { asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
 import { isSafeJobId } from './job-id.js';
 import {
@@ -503,7 +501,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       abandoned += 1;
     }
 
-    return { reclaimed, abandoned };
+    return asyncAdmissionUsage.recordShareLeaseRecovery({ reclaimed, abandoned });
   }
 
   async recoverPostCommitFailures(): Promise<PromotePostCommitRecoveryEvent[]> {
