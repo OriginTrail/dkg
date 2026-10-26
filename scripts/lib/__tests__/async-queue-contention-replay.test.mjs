@@ -18,8 +18,16 @@ import {
   seedMainNamespace,
   wmPoolGraph,
 } from '../../repro/async-queue-contention/fixture.mjs';
-import { validity } from '../../repro/async-queue-contention/verdict.mjs';
-import { beginEpoch, createWorker } from '../../repro/async-queue-contention/workload.mjs';
+import { finalizeRequests, groundTruth, validity } from '../../repro/async-queue-contention/verdict.mjs';
+import {
+  beginEpoch,
+  createWorker,
+  poissonArrivals,
+  readShareJobs,
+  reconcileAdmissions,
+  startShareProducers,
+  trackAdmissionWork,
+} from '../../repro/async-queue-contention/workload.mjs';
 
 let deps;
 before(async () => {
@@ -109,6 +117,7 @@ function workerChecks({ worker }) {
     measureMs: 1000,
     measured: 1,
     stillInflight: 0,
+    admissionsPending: 0,
     reconcileError: null,
     successWithoutJob: 0,
     doubleAdmissions: 0,
@@ -228,6 +237,132 @@ for (const [what, drop] of Object.entries(DROPS)) {
     assert.equal(checks.ok, false);
   });
 }
+
+// ---------------------------------------------------------------- reconciliation after the admission deadline
+const RUN_TAG = 'aqc';
+
+/**
+ * One share arrival through the benchmark's producers into the real queue (admissionTimeoutMs 100) over a store whose
+ * job write is held until release() is called: the caller is answered at the admission deadline with an indeterminate
+ * verdict while the persistence write is still pending, which then commits after the deadline.
+ */
+async function lateAdmission() {
+  const inner = new deps.storage.OxigraphStore();
+  let release;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  const store = new Proxy(inner, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop, target);
+      if (typeof value !== 'function') return value;
+      if (prop === 'replaceSubject') {
+        return async (...args) => {
+          if (args.at(-1)?.source === 'publisher.asyncPromote.writeJob') await held;
+          return value.apply(target, args);
+        };
+      }
+      return value.bind(target);
+    },
+  });
+  const queue = new deps.pub.TripleStoreAsyncPromoteQueue(store, { admissionTimeoutMs: 100 });
+  const tracker = trackAdmissionWork(
+    deps.admission.PromoteAdmissionCoordinator.for(store, deps.utils.DEFAULT_PROMOTE_CONTROL_GRAPH_URI),
+  );
+  // a schedule of exactly one arrival, early in the run
+  const seed = Array.from({ length: 500 }, (_, i) => i).find((n) => {
+    const arrivals = poissonArrivals(n, 2, 1000);
+    return arrivals.length === 1 && arrivals[0] < 200;
+  });
+  assert.notEqual(seed, undefined);
+  const world = {
+    cfg: { warmupMs: 0, measureMs: 1000, cooldownMs: 0, lambda: 2, seed, runTag: RUN_TAG },
+    t0: performance.now(),
+    queue,
+    requests: [],
+  };
+  const producers = startShareProducers(world, async () => ({ ok: true }));
+  await until(() => world.requests[0]?.ended !== undefined, 'the caller to be answered at the admission deadline');
+  producers.stop();
+  assert.equal(await producers.drain(5000), 0, 'the load drained: every caller was answered');
+  const [request] = world.requests;
+  assert.deepEqual(
+    [request.outcome, request.code, request.phase, request.admissionOutcome],
+    ['indeterminate', 'PROMOTE_ADMISSION_UNAVAILABLE', 'persist', 'indeterminate'],
+  );
+  assert.ok(request.jobId, 'the verdict names the job whose write is pending');
+  assert.equal(tracker.pending(), 1, 'and that write is still running');
+  const readJobs = () => readShareJobs(inner, deps.utils, RUN_TAG);
+  return { world, request, tracker, readJobs, release, dispose: () => tracker.dispose() };
+}
+
+test('a job whose persistence commits after the admission deadline is reconciled as admitted', async () => {
+  const run = await lateAdmission();
+  try {
+    assert.equal((await run.readJobs()).size, 0, 'read right after the drain, the job is not there yet');
+    setTimeout(run.release, 150); // the write lands while reconciliation waits for it
+    const reconciled = await reconcileAdmissions({
+      tracker: run.tracker,
+      issued: true,
+      readJobs: run.readJobs,
+      settleMs: 5000,
+    });
+    assert.equal(reconciled.reconcileError, null);
+    const jobs = reconciled.jobsByName.get(run.request.key);
+    assert.deepEqual([jobs?.length, jobs?.[0].jobId], [1, run.request.jobId]);
+    finalizeRequests(run.world.requests);
+    const truth = groundTruth(run.world.requests, reconciled.jobsByName);
+    assert.deepEqual(
+      [truth.nonSuccess, truth.uncertainButAdmitted, truth.notAdmitted, run.request.gtJobId],
+      [1, 1, 0, run.request.jobId],
+      'the late commit is counted as admitted, not as not admitted',
+    );
+    assert.deepEqual(
+      [reconciled.admissions.works, reconciled.admissions.pendingAtDrain, reconciled.admissions.pending],
+      [1, 1, 0],
+    );
+    assert.ok(reconciled.admissions.settleWaitMs >= 100, `waited ${reconciled.admissions.settleWaitMs} ms`);
+  } finally {
+    run.release();
+    run.dispose();
+  }
+});
+
+test('a write that does not settle within the bound leaves the reconciliation unresolved and the run invalid', async () => {
+  const run = await lateAdmission();
+  try {
+    const reconciled = await reconcileAdmissions({
+      tracker: run.tracker,
+      issued: true,
+      readJobs: run.readJobs,
+      settleMs: 200,
+    });
+    assert.equal(reconciled.admissions.pending, 1);
+    assert.equal(reconciled.jobsByName.size, 0, 'the read it took is the earlier snapshot');
+    const checks = validity({
+      lambda: 2,
+      measureMs: 1000,
+      measured: 2,
+      stillInflight: 0,
+      admissionsPending: reconciled.admissions.pending,
+      reconcileError: reconciled.reconcileError,
+      successWithoutJob: 0,
+      doubleAdmissions: 0,
+      driverCpu: 0.1,
+      idlePublisherErrors: 0,
+      worker: { agentErrors: 0, crashes: 0, failedTerminal: 0, succeeded: 1, attempted: 1, dataOps: DATA_OPS_PER_SHARE },
+      seedFileVerified: true,
+    });
+    assert.deepEqual([checks.admissionsSettled, checks.ok], [false, false]);
+    // and the write does land afterwards: counting from that snapshot would have been wrong
+    run.release();
+    assert.equal(await run.tracker.settle(5000), 0);
+    assert.equal((await run.readJobs()).get(run.request.key)?.length, 1);
+  } finally {
+    run.release();
+    run.dispose();
+  }
+});
 
 // ---------------------------------------------------------------- the fixture's reused assets
 const DKG = 'http://dkg.io/ontology/';

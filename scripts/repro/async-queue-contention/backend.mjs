@@ -16,6 +16,7 @@ const DIST = {
   core: 'core/dist/index.js',
   pub: 'publisher/dist/index.js',
   utils: 'publisher/dist/async-promote-queue-utils.js',
+  admission: 'publisher/dist/promote-admission.js',
   binding: 'publisher/dist/promote-recovery-binding.js',
   intent: 'publisher/dist/promote-operation-intent.js',
   preflight: 'agent/dist/context-graph-write-preflight.js',

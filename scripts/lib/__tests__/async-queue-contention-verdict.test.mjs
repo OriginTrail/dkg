@@ -28,6 +28,7 @@ import {
   ledgerMarkdown,
   median,
   noiseMargin,
+  p8cOfRun,
   p8cTrigger,
   pairKey,
   pairRuns,
@@ -539,6 +540,51 @@ test('p8cTrigger: claimNext P95 doubling between the first and last 5 minutes, o
   );
 });
 
+test('p8cOfRun judges the 5,000-job backlog leg on the whole run, not on the measurement window', () => {
+  const windows = { warmupMs: 30_000, measureMs: 180_000, cooldownMs: 10_000 };
+  const runMs = 220_000;
+  const admitted = (n, ended, prefix) =>
+    Array.from({ length: n }, (_, i) => ({
+      key: `${prefix}${i}`,
+      windowTag: 'measure',
+      rawOutcome: 'success',
+      outcome: 'success',
+      jobId: `${prefix}${i}`,
+      ended,
+    }));
+  const claimNext = []; // no claimNext sample: the ratio leg cannot trip
+  const judged = (requests, completions = []) => p8cOfRun({ requests, completions, claimNext, windows, runMs });
+
+  // 4,990 open jobs through the measurement window, 5,010 by the end of the cooldown
+  const growing = [...admitted(4990, 40_000, 'm'), ...admitted(20, 215_000, 'c')];
+  const run = judged(growing);
+  assert.equal(run.backlog.max, 4990, 'the measurement window statistics are the window');
+  assert.equal(
+    p8cTrigger({ claimNext, backlogMax: run.backlog.max, runMs }).backlogTrip,
+    false,
+    'the window maximum alone does not trip: that is what was judged before',
+  );
+  assert.deepEqual(run.p8c, { evaluable: false, ratio: null, backlogTrip: true, trigger: true, backlogMax: 5010 });
+
+  // a peak in the warmup that has drained by the measurement window is still a backlog past the read's bound
+  const drainedAt20s = Array.from({ length: 5010 }, (_, i) => ({ jobId: `w${i}`, t: 20_000 }));
+  const early = judged(admitted(5010, 5_000, 'w'), drainedAt20s);
+  assert.deepEqual([early.backlog.max, early.p8c.backlogMax, early.p8c.backlogTrip], [0, 5010, true]);
+
+  // 5,000 exactly is not above 5,000, in any window
+  const edge = judged([...admitted(4990, 40_000, 'm'), ...admitted(10, 215_000, 'c')]);
+  assert.deepEqual([edge.p8c.backlogMax, edge.p8c.backlogTrip, edge.p8c.trigger], [5000, false, false]);
+
+  // no request at all: a zero backlog, not a missing one
+  assert.deepEqual(judged([]).p8c, {
+    evaluable: false,
+    ratio: null,
+    backlogTrip: false,
+    trigger: false,
+    backlogMax: 0,
+  });
+});
+
 test('validity: arrivals, drain, invariants, driver headroom, quiet idle publisher', () => {
   const worker = {
     agentErrors: 0,
@@ -553,6 +599,7 @@ test('validity: arrivals, drain, invariants, driver headroom, quiet idle publish
     measureMs: 180_000,
     measured: 1440,
     stillInflight: 0,
+    admissionsPending: 0,
     reconcileError: null,
     successWithoutJob: 0,
     doubleAdmissions: 0,
@@ -573,9 +620,18 @@ test('validity: arrivals, drain, invariants, driver headroom, quiet idle publish
     { successWithoutJob: 1 },
     { doubleAdmissions: 1 },
     { idlePublisherErrors: 3 },
+    { admissionsPending: 1 },
   ]) {
     assert.equal(validity({ ...ok, ...bad }).ok, false, JSON.stringify(bad));
   }
+  // admission writes still running when the ground truth was read: the reconciliation is unresolved, the run invalid
+  assert.equal(validity(ok).admissionsSettled, true);
+  for (const unresolved of [1, 12, null, undefined]) {
+    const checks = validity({ ...ok, admissionsPending: unresolved });
+    assert.deepEqual([checks.admissionsSettled, checks.ok], [false, false], String(unresolved));
+  }
+  const { admissionsPending: _omitted, ...withoutField } = ok;
+  assert.equal(validity(withoutField).admissionsSettled, false, 'a summary without the evidence is not valid');
 });
 
 test('validity fails a run whose measure window saw no request, however short the window', () => {
@@ -594,6 +650,7 @@ test('validity fails a run whose measure window saw no request, however short th
     measureMs: 100,
     measured: 0,
     stillInflight: 0,
+    admissionsPending: 0,
     reconcileError: null,
     successWithoutJob: 0,
     doubleAdmissions: 0,
@@ -621,6 +678,7 @@ test('validity fails a run whose worker side did not work (agent errors, crashes
     measureMs: 180_000,
     measured: 1440,
     stillInflight: 0,
+    admissionsPending: 0,
     reconcileError: null,
     successWithoutJob: 0,
     doubleAdmissions: 0,
@@ -811,6 +869,7 @@ test('integrityWarnings reports what a verdict reader must see next to the resul
       rec('b', { scriptSha256: 'two', git: { dirty: true }, windowsDifferFromCalibration: true }),
       rec('c', { p8c: { evaluable: true, ratio: 2.5, backlogTrip: false, trigger: true } }),
       rec('d', { p8c: { evaluable: false, ratio: null, backlogTrip: true, trigger: true } }),
+      rec('e', { p8c: { evaluable: false, ratio: null, backlogTrip: true, trigger: true, backlogMax: 5010 } }),
     ],
     [
       { key: 'k0', reasons: ['the runs differ in windows'], envDiffers: false },
@@ -827,6 +886,7 @@ test('integrityWarnings reports what a verdict reader must see next to the resul
     'the DKG_STORE_* env differs between the arms in k1, k2 (expected only for the knob under test)',
     'run c: P8c trigger (claimNext P95 ratio 2.5): record it in the PR',
     'run d: P8c trigger (active backlog above 5,000): record it in the PR',
+    'run e: P8c trigger (active backlog above 5,000 (run maximum 5010)): record it in the PR',
     "runs with windows other than their calibration's: b",
     'the base run is below the knee in k2: the halving test is weak in those repeats',
   ]);
@@ -1010,6 +1070,7 @@ test('verdict does not count a run with no request in its measure window: incomp
     measureMs,
     measured: 0,
     stillInflight: 0,
+    admissionsPending: 0,
     reconcileError: null,
     successWithoutJob: 0,
     doubleAdmissions: 0,

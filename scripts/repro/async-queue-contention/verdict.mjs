@@ -177,7 +177,9 @@ export function shareBacklog({ requests, completions, from, to }) {
 /**
  * Plan 8.3 trigger for the bounded claimNext candidate read (P8c): claimNext P95 over the last 5 min above 2x the first
  * 5 min, or an active backlog above 5,000. claimNext = [{t (run-relative start ms), ms}]. The ratio needs a run of at
- * least 10 min and 20 samples in each end window; the backlog leg needs no window.
+ * least 10 min and 20 samples in each end window; the backlog leg needs no window. backlogMax is the largest active
+ * backlog of the WHOLE run (warmup, measure and cooldown: p8cOfRun), not the measurement window's: a queue that grows
+ * past 5,000 only in the cooldown has still outgrown the read.
  */
 export function p8cTrigger({ claimNext, backlogMax, runMs }) {
   const backlogTrip = backlogMax > 5000;
@@ -193,6 +195,19 @@ export function p8cTrigger({ claimNext, backlogMax, runMs }) {
     return { evaluable: false, ratio: null, backlogTrip, trigger: backlogTrip };
   const ratio = percentile(last, 0.95) / percentile(first, 0.95);
   return { evaluable: true, ratio: r2(ratio), backlogTrip, trigger: ratio > 2 || backlogTrip };
+}
+
+/**
+ * The backlog figures of one run. `backlog` = the measurement window's statistics (what the summary reports and the
+ * verdict reads), unchanged. `p8c` = the P8c trigger judged on the largest active backlog over the whole run, warmup
+ * through cooldown (`backlogMax`, recorded in it): the 5,000-job leg is not a measurement-window statistic.
+ */
+export function p8cOfRun({ requests, completions, claimNext, windows, runMs }) {
+  const { warmupMs, measureMs, cooldownMs } = windows;
+  const sampled = (from, to) => shareBacklog({ requests, completions, from, to });
+  const backlog = sampled(warmupMs, warmupMs + measureMs);
+  const backlogMax = sampled(0, warmupMs + measureMs + cooldownMs).max ?? 0;
+  return { backlog, p8c: { ...p8cTrigger({ claimNext, backlogMax, runMs }), backlogMax } };
 }
 
 // ---------------------------------------------------------------- the knee and the reproduction rung
@@ -456,13 +471,16 @@ export function guards(pairs) {
  * Pure checks of one run; every key but `ok` is a boolean that must hold. `worker` = { agentErrors, crashes,
  * failedTerminal, succeeded, attempted, dataOps }: the fake agent and the supervisor must have worked, or a faster
  * admission could be nothing but a worker that no longer runs the 43-operation share body (a missing field fails the
- * check).
+ * check). `admissionsPending` = the queue's admission writes still running when reconciliation read the ground truth
+ * (workload.mjs reconcileAdmissions): 0 when every one had settled, null when that could not be established; anything
+ * but 0 (a missing field included) leaves the reconciliation unresolved and the run invalid.
  */
 export function validity({
   lambda,
   measureMs,
   measured,
   stillInflight,
+  admissionsPending,
   reconcileError,
   successWithoutJob,
   doubleAdmissions,
@@ -479,6 +497,7 @@ export function validity({
     measurementObserved: measured > 0,
     arrivalsWithin4Sigma: Math.abs(measured - expected) <= 4 * Math.sqrt(Math.max(expected, 1)),
     drained: stillInflight === 0,
+    admissionsSettled: admissionsPending === 0,
     noReconcileError: !reconcileError,
     noSuccessWithoutJob: successWithoutJob === 0,
     noDoubleAdmission: doubleAdmissions === 0,
@@ -569,7 +588,9 @@ export function integrityWarnings(records, pairs, result) {
   for (const r of records.filter((x) => x.p8c?.trigger)) {
     const why = [
       r.p8c.ratio !== null && r.p8c.ratio > 2 ? `claimNext P95 ratio ${r.p8c.ratio}` : null,
-      r.p8c.backlogTrip ? 'active backlog above 5,000' : null,
+      r.p8c.backlogTrip
+        ? `active backlog above 5,000${Number.isFinite(r.p8c.backlogMax) ? ` (run maximum ${r.p8c.backlogMax})` : ''}`
+        : null,
     ];
     warnings.push(`run ${r.runId}: P8c trigger (${why.filter(Boolean).join(', ')}): record it in the PR`);
   }

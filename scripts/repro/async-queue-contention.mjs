@@ -33,7 +33,10 @@
 // Exit codes: 0 ok/pass, 1 fail, 2 usage or incomplete, 3 refused backend.
 // Small-host cell: DKG_STORE_MAX_CONCURRENT=2 (recorded under meta.env). Scheduler warnings are counted, not printed.
 // A run is valid only if the measure window saw requests (measurementObserved), the worker side did its job
-// (workerContractOk, dataPlaneReplayed), the load drained, and a seed file hashed as its manifest says.
+// (workerContractOk, dataPlaneReplayed), the load drained, every admission write the queue left running past its caller's
+// deadline settled before the ground truth was read (admissionsSettled), and a seed file hashed as its manifest says.
+// The P8c backlog leg reads the largest active backlog of the whole run (warmup to cooldown); worker.backlog stays the
+// measurement window's.
 //
 // Runbook. Backend: a Blazegraph that YOU started (never reuse someone else's container); the script only takes a URL
 // and refuses non-loopback hosts, e.g.
@@ -92,12 +95,11 @@ import {
   ledgerMarkdown,
   median,
   noiseMargin,
-  p8cTrigger,
+  p8cOfRun,
   pairKey,
   pairRuns,
   pickReproductionRung,
   repeatsPerCell,
-  shareBacklog,
   summarize,
   validity,
 } from './async-queue-contention/verdict.mjs';
@@ -107,10 +109,13 @@ import {
   createIdlePublisher,
   createWorker,
   makePreflight,
+  readShareJobs,
+  reconcileAdmissions,
   sleepUntil,
   startObserver,
   startReaders,
   startShareProducers,
+  trackAdmissionWork,
   within,
 } from './async-queue-contention/workload.mjs';
 
@@ -458,6 +463,7 @@ async function runOnce(c, dist, endpoint, outDir) {
         const idle = createIdlePublisher(world, dist);
         let worker = null;
         let sampler = null;
+        let admissions = null;
         let running = false;
         const loopMonitor = monitorEventLoopDelay({ resolution: 10 });
         try {
@@ -468,6 +474,10 @@ async function runOnce(c, dist, endpoint, outDir) {
             else await loadGenerated(seedStore, dist, { jobs: c.historyJobs, baseTime: Date.now() });
           }
           world.queue = new pub.TripleStoreAsyncPromoteQueue(store);
+          // the admission work an enqueue leaves running after its caller was answered at the deadline
+          admissions = trackAdmissionWork(
+            dist.admission.PromoteAdmissionCoordinator.for(store, utils.DEFAULT_PROMOTE_CONTROL_GRAPH_URI),
+          );
           worker = createWorker(world, dist);
           const schedulerSnapshot = storage.getExternalStorePrioritySchedulerSnapshot();
           const maxOldest = {};
@@ -522,24 +532,14 @@ async function runOnce(c, dist, endpoint, outDir) {
           clearInterval(sampler);
           const runMs = performance.now() - world.t0;
 
-          // ground truth: which request keys became persisted jobs (read off the measured scheduler)
-          const jobsByName = new Map();
-          let reconcileError = null;
-          try {
-            const rs = await seedStore.query(
-              `SELECT ?payload WHERE { GRAPH <${utils.DEFAULT_PROMOTE_CONTROL_GRAPH_URI}> { ` +
-                `?job <${utils.PROMOTE_ASSERTION_NAME}> ?name ; <${utils.PROMOTE_PAYLOAD}> ?payload . ` +
-                `FILTER(STRSTARTS(?name, "${runTag}-s")) } }`,
-            );
-            for (const b of rs.bindings ?? []) {
-              const verdict = utils.classifyJobPayload(b.payload);
-              if (verdict.kind !== 'job') throw new Error(`unreadable queue row (${verdict.kind})`);
-              const name = verdict.job.request.assertionName;
-              jobsByName.set(name, [...(jobsByName.get(name) ?? []), verdict.job]);
-            }
-          } catch (e) {
-            reconcileError = String(e?.message ?? e).slice(0, 300);
-          }
+          // ground truth: which request keys became persisted jobs (read off the measured scheduler), once the admission
+          // writes the queue left running past their callers' deadline have settled
+          const reconciled = await reconcileAdmissions({
+            tracker: admissions,
+            issued: world.requests.some((r) => r.enqStart !== undefined),
+            readJobs: () => readShareJobs(seedStore, utils, runTag),
+          });
+          const { jobsByName, reconcileError } = reconciled;
 
           finalizeRequests(world.requests);
           const submission = admissionSummary(world.requests);
@@ -549,11 +549,13 @@ async function runOnce(c, dist, endpoint, outDir) {
           const reads = world.readerEvents.filter(inWin);
           const done = world.completions.filter(inWin);
           const claims = world.claimMs.filter(inWin);
-          const backlog = shareBacklog({
+          // backlog = the measurement window's statistics; the P8c backlog leg reads the whole run's maximum
+          const { backlog, p8c } = p8cOfRun({
             requests: world.requests,
             completions: world.completions,
-            from: window.from,
-            to: window.to,
+            claimNext: world.claimMs,
+            windows: { warmupMs: c.warmupMs, measureMs: c.measureMs, cooldownMs: c.cooldownMs },
+            runMs,
           });
           const counters = worker.supervisor.getCounters();
           const rejected = (cap) =>
@@ -569,6 +571,7 @@ async function runOnce(c, dist, endpoint, outDir) {
             measureMs: c.measureMs,
             measured: submission.n,
             stillInflight,
+            admissionsPending: reconciled.admissions.pending,
             reconcileError,
             successWithoutJob: gt.successWithoutPersistedJob,
             doubleAdmissions: gt.doubleAdmissions,
@@ -647,7 +650,7 @@ async function runOnce(c, dist, endpoint, outDir) {
               counters,
               agent,
               backlog,
-              p8c: p8cTrigger({ claimNext: world.claimMs, backlogMax: backlog.max ?? 0, runMs }),
+              p8c,
               workerLogLines: worker.log.count,
               workerLog: worker.log.lines,
             },
@@ -670,6 +673,7 @@ async function runOnce(c, dist, endpoint, outDir) {
             eventLoop,
             groundTruth: gt,
             reconcileError,
+            admissions: reconciled.admissions,
             validity: validityChecks,
           };
           writeFileSync(path.join(outDir, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
@@ -687,6 +691,7 @@ async function runOnce(c, dist, endpoint, outDir) {
           return summary;
         } finally {
           clearInterval(sampler);
+          admissions?.dispose();
           loopMonitor.disable();
           // only when the run failed half way
           if (running) await within(Promise.allSettled([worker.supervisor.stop(), idle.stop()]), 25_000);

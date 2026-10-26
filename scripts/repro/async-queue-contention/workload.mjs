@@ -253,6 +253,114 @@ export function startShareProducers(world, preflight) {
   };
 }
 
+// ---------------------------------------------------------------- admission work and reconciliation
+/**
+ * How long reconciliation waits for the queue's own admission work once the load has stopped. The product bounds the
+ * caller at 10 s (the admission deadline) and one store operation at 30 s; the queue's mutation lock runs one admission
+ * at a time and an expired one gives up at its next phase, so what is left at the end is a short chain of writes.
+ */
+export const ADMISSION_SETTLE_MS = 120_000;
+
+const noop = () => {};
+
+/**
+ * enqueue answers its caller at the admission deadline (an indeterminate PromoteAdmissionError) while the admission work
+ * it started - the mutation lock, the conflict read and the persistence write - keeps running, and producers.drain()
+ * waits for the callers, not for that work: a write that commits after the deadline is invisible to a reconciliation
+ * read taken right after the drain. This wraps the coordinator's run(), the one place the queue starts that work, so
+ * every work is tracked from its start until it settles (it registers when run() invokes it, which is before run() can
+ * hand its caller any answer; a run() that refuses before starting work leaves nothing to wait for). `installed` is
+ * false when the coordinator has no run(), and `started` counts the works, so a tracker that never saw one can be told
+ * from one that saw them all settle. dispose() puts run() back.
+ */
+export function trackAdmissionWork(coordinator) {
+  const outstanding = new Set();
+  const installed = typeof coordinator?.run === 'function';
+  const ownRun = installed && Object.hasOwn(coordinator, 'run');
+  const original = installed ? coordinator.run : null;
+  let started = 0;
+  if (installed) {
+    coordinator.run = (request, work, ...rest) =>
+      original.call(
+        coordinator,
+        request,
+        (attempt) => {
+          started++;
+          const operation = (async () => work(attempt))();
+          const entry = operation.then(noop, noop);
+          outstanding.add(entry);
+          void entry.then(() => outstanding.delete(entry));
+          return operation;
+        },
+        ...rest,
+      );
+  }
+  return {
+    installed,
+    get started() {
+      return started;
+    },
+    pending: () => outstanding.size,
+    /** Waits for every tracked work to settle, at most capMs; returns how many are still pending. */
+    async settle(capMs) {
+      const end = performance.now() + capMs;
+      while (outstanding.size > 0 && performance.now() < end) {
+        await within(Promise.all(outstanding), end - performance.now());
+      }
+      return outstanding.size;
+    },
+    dispose() {
+      if (!installed) return;
+      if (ownRun) coordinator.run = original;
+      else delete coordinator.run;
+    },
+  };
+}
+
+/**
+ * Which request keys of the run are persisted jobs: the queue's own rows, read straight off the store (not through the
+ * queue, whose mutation lock a still-running write would hold). Map(request key -> persisted jobs).
+ */
+export async function readShareJobs(store, utils, runTag) {
+  const byName = new Map();
+  const rs = await store.query(
+    `SELECT ?payload WHERE { GRAPH <${utils.DEFAULT_PROMOTE_CONTROL_GRAPH_URI}> { ` +
+      `?job <${utils.PROMOTE_ASSERTION_NAME}> ?name ; <${utils.PROMOTE_PAYLOAD}> ?payload . ` +
+      `FILTER(STRSTARTS(?name, "${runTag}-s")) } }`,
+  );
+  for (const b of rs.bindings ?? []) {
+    const verdict = utils.classifyJobPayload(b.payload);
+    if (verdict.kind !== 'job') throw new Error(`unreadable queue row (${verdict.kind})`);
+    const name = verdict.job.request.assertionName;
+    byName.set(name, [...(byName.get(name) ?? []), verdict.job]);
+  }
+  return byName;
+}
+
+/**
+ * The run's ground truth: which request keys became persisted jobs, read only after every admission write the queue
+ * started has settled (waiting at most settleMs). Anything less can classify a job as not admitted that commits a moment
+ * later. `readJobs()` -> Map(request key -> jobs); `issued` = some request reached enqueue. admissions.pending is how
+ * many writes were still running when the wait ended; null when the tracker is not attached to this queue (it saw no
+ * work although requests reached enqueue): either way the reconciliation is unresolved and validity fails the run.
+ */
+export async function reconcileAdmissions({ tracker, issued, readJobs, settleMs = ADMISSION_SETTLE_MS }) {
+  const works = tracker.started;
+  const pendingAtDrain = tracker.pending();
+  const waitFrom = performance.now();
+  const wired = tracker.installed && (works > 0 || !issued);
+  const pending = wired ? await tracker.settle(settleMs) : null;
+  const settleWaitMs = Math.round(performance.now() - waitFrom);
+  let jobsByName = new Map();
+  let reconcileError = null;
+  try {
+    jobsByName = await readJobs();
+  } catch (e) {
+    reconcileError = String(e?.message ?? e).slice(0, 300);
+  }
+  return { jobsByName, reconcileError, admissions: { works, pendingAtDrain, pending, settleWaitMs } };
+}
+
 /**
  * Closed-loop client readers on the background lane (the api.query default): point queries and the CG-wide aggregate
  * COUNT over the NS_GRAPHS graphs.
