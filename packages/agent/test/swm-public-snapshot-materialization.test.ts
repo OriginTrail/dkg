@@ -143,8 +143,8 @@ interface HarnessOverrides {
   selectRepairIdentity?: () =>
     Awaited<ReturnType<SharedMemorySnapshotMaterializer['selectRepairIdentity']>>;
   reconcileDisposition?: 'preserve' | 'suppress-metadata';
-  /** This node already retired the snapshot as a finalized twin. */
-  finalizedTwinRetired?: () => boolean;
+  /** This node already retired the snapshot as a finalized twin, and no copy is back. */
+  heldAsRetiredFinalizedTwin?: () => Promise<boolean>;
   publisherPeerId?: string;
   additionalVerifiedMeta?: Quad[];
   onStoreInsert?: () => void | Promise<void>;
@@ -280,7 +280,7 @@ function harness(overrides: HarnessOverrides = {}) {
         await overrides.reconcileImpl?.();
         return overrides.reconcileDisposition ?? 'preserve';
       },
-      ...(overrides.finalizedTwinRetired ? { isFinalizedTwinRetired: overrides.finalizedTwinRetired } : {}),
+      ...(overrides.heldAsRetiredFinalizedTwin ? { heldAsRetiredFinalizedTwin: overrides.heldAsRetiredFinalizedTwin } : {}),
       publicSnapshotStore: snapshotStore,
       deleteCheckpoint: () => {},
       setCheckpoint: () => {},
@@ -448,7 +448,7 @@ describe('public SWM snapshot materialization', () => {
   });
 
   it('counts a snapshot this node retired as a finalized twin as held, and writes nothing for it', async () => {
-    const h = harness({ finalizedTwinRetired: () => true });
+    const h = harness({ heldAsRetiredFinalizedTwin: async () => true });
     const summary = await h.run();
     expect(summary.failedPhases).toBe(0);
     expect(summary.alreadyHeldAssets).toBe(1);

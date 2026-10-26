@@ -491,17 +491,27 @@ describe('a public graph that its subscribe job left unproven is caught up again
     const member = memberEdge();
     const noPeer = stalledRound(0, 0, 0);
     const deferred = () => ({ ...stalledRound(12)(), deferredBackpressure: 1 });
-    const { runs } = stubRunner([noPeer, noPeer, deferred, deferred, cleanEmptyRound]);
+    // A continuation pass that was deferred shows only in the shared-memory diagnostic.
+    const continuationDeferred = () => {
+      const round = stalledRound(12)();
+      return {
+        ...round,
+        diagnostics: { ...round.diagnostics!, sharedMemory: { ...round.diagnostics!.sharedMemory, deferredBackpressure: 2 } },
+      };
+    };
+    const { runs } = stubRunner([
+      noPeer, noPeer, deferred, deferred, continuationDeferred, continuationDeferred, cleanEmptyRound,
+    ]);
     const api = await startRoutes(member);
     await api.finished(await api.subscribe());
 
-    for (let repeat = 1; repeat <= 4; repeat += 1) {
+    for (let repeat = 1; repeat <= 6; repeat += 1) {
       fire(await waitUntil(() => armed()[0], `repeat ${repeat} armed`));
       await waitUntil(() => (runs.length === repeat + 1 ? true : undefined), `repeat ${repeat}`);
       await api.finished(api.latestJobId()!);
     }
 
-    expect(runs).toHaveLength(5);
+    expect(runs).toHaveLength(7);
     expect(member.subscription()).toMatchObject({ synced: true });
     expect(armed()).toEqual([]);
   });

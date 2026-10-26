@@ -15,7 +15,9 @@
  * write nothing. The memo is process-local, bounded and short-lived: a restart
  * starts it empty, an entry expires, and another version, digest or private
  * commitment of the same asset is another entry. It records only what the
- * retirement proved.
+ * retirement proved: that the content is finalized here. The legacy marker's
+ * cleanup has a lifecycle of its own (`owed-legacy-swm-retirements.ts`), and an
+ * entry is forgotten once a copy of the snapshot is back.
  */
 
 import { BoundedLruCache } from '@origintrail-official/dkg-core';
@@ -57,6 +59,11 @@ export class FinalizedSwmTwinMemoV1 {
   /** The retirement of this exact snapshot proved its content finalized here. */
   remember(contextGraphId: string, descriptor: FinalizedSwmTwinIdentity): void {
     this.#entries.set(memoKey(contextGraphId, descriptor), this.#now() + this.#ttlMs);
+  }
+
+  /** A copy of the snapshot is back, so the retirement no longer describes the store. */
+  forget(contextGraphId: string, descriptor: FinalizedSwmTwinIdentity): void {
+    this.#entries.delete(memoKey(contextGraphId, descriptor));
   }
 
   /** Whether this exact snapshot was retired as finalized here, and the entry is still current. */

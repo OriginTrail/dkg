@@ -8,7 +8,7 @@ export async function reconcileAfterMaterialization(agent: {
   store: Parameters<typeof reconcileFinalizedSwmTwin>[0]["store"];
   writeLocks: Parameters<typeof reconcileFinalizedSwmTwin>[0]["writeLocks"];
   retireFinalizedSwmTwinCandidate: (candidate: FinalizedSwmTwinRetirement, ctx: OperationContext) => Promise<void>;
-  retireLegacySwmAfterVerifiedVmTwin: (params: { contextGraphId: string; kaUal: string; assertionVersion: bigint; subGraphName?: string }) => Promise<unknown>;
+  retireLegacySwmAfterVerifiedVmTwin: (params: { contextGraphId: string; kaUal: string; assertionVersion: bigint; subGraphName?: string }) => Promise<void>;
   invalidateListContextGraphsCache: () => void;
   log: { info: (ctx: OperationContext, message: string) => void; warn: (ctx: OperationContext, message: string) => void };
 }, asset: VerifiedGraphScopedAsset, ctx: OperationContext): Promise<void> {

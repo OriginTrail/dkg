@@ -153,9 +153,12 @@ function admitsRepeat(authority: ContextGraphReadAuthorityDecision): boolean {
 function stalledWithoutProgress(job: CatchupJob): boolean {
   const result = job.result;
   const sharedMemory = result?.diagnostics?.sharedMemory;
+  // The job's own count leaves out deferrals of continuation passes; the
+  // shared-memory diagnostic counts every one.
   return job.selectedLaneFoundInactive !== true
     && result?.deferredBackpressure === 0
-    && sharedMemory?.continuationStopReason === 'coverage-stalled'
+    && sharedMemory?.deferredBackpressure === 0
+    && sharedMemory.continuationStopReason === 'coverage-stalled'
     && sharedMemory.fetchedMetaTriples > 0
     && sharedMemory.insertedDataTriples === 0;
 }

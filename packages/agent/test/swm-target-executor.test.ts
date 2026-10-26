@@ -20,7 +20,6 @@ import {
 import { ethers } from 'ethers';
 import type { FinalizedSwmTwinRetirement } from
   '../src/sync/requester/finalized-swm-twin-reconciliation.js';
-import type { LegacySwmRetirementCallerOutcomeV1 } from '../src/internal/owed-legacy-swm-retirements.js';
 import {
   SwmTargetExecutorSessionFactoryV1,
   SwmTargetExecutorV1,
@@ -455,11 +454,14 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
   /**
    * A finalized asset whose shared-memory snapshot a peer still serves: VM is
    * local with the same bytes, so a round writes the snapshot and retires it.
+   * `retireMarker` undefined: the node has no legacy marker lane.
    */
-  /** `retireMarker` undefined: the node has no legacy marker lane. */
   async function finalizedTwinRounds(
     contextGraphId: string,
-    retireMarker: (() => Promise<LegacySwmRetirementCallerOutcomeV1>) | undefined,
+    options: {
+      readonly retireMarker?: () => Promise<void>;
+      readonly markerOutstanding?: () => boolean;
+    } = {},
   ) {
     const store = new OxigraphStore();
     stores.push(store);
@@ -564,7 +566,8 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
       deletePublicCheckpoint: () => undefined,
       ensureOwnedMap: () => new Map(),
       retireFinalizedSwmTwin,
-      ...(retireMarker === undefined ? {} : { retireLegacySwmAfterVerifiedVmTwin: retireMarker }),
+      ...(options.retireMarker === undefined ? {} : { retireLegacySwmAfterVerifiedVmTwin: options.retireMarker }),
+      ...(options.markerOutstanding === undefined ? {} : { hasOutstandingLegacySwmMarker: options.markerOutstanding }),
       logInfo,
       logWarn: () => undefined,
       logDebug: () => undefined,
@@ -578,15 +581,21 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
       remainingContextGraphs: 1,
       mode: { kind: 'ordinary' },
     });
-    return { store, payload, vmGraph, swmGraph, retireFinalizedSwmTwin, logInfo, ctx, round };
+    // A share that brings the copy back: graph, head and operation, as its apply writes them.
+    const shareAgain = () => store.insert([
+      ...payload.map((quad) => ({ ...quad, graph: swmGraph })),
+      ...remoteMeta,
+    ]);
+    return { store, payload, vmGraph, swmGraph, retireFinalizedSwmTwin, logInfo, ctx, round, shareAgain };
   }
 
   it.each([
-    ['retired', async () => 'retired' as const],
-    ['kept', async () => 'kept' as const],
-    ['no-lane', undefined],
-  ] as const)('writes nothing in a later round for a snapshot it retired as a finalized twin (marker %s)', async (label, retireMarker) => {
-    const rounds = await finalizedTwinRounds(`public-finalized-twin-remembered-${label}`, retireMarker);
+    ['done', { retireMarker: async () => undefined }],
+    // The proof does not wait on the marker: its cleanup has a lifecycle of its own.
+    ['failed', { retireMarker: async () => { throw new Error('legacy boundary store unavailable'); } }],
+    ['no-lane', {}],
+  ] as const)('writes nothing in a later round for a snapshot it retired as a finalized twin (marker %s)', async (label, options) => {
+    const rounds = await finalizedTwinRounds(`public-finalized-twin-remembered-${label}`, options);
     expect((await rounds.round()).failedPhases).toBe(0);
     expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledOnce();
 
@@ -604,16 +613,37 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
     );
   });
 
-  it.each([
-    // Still running when the caller's wait ended: it may yet fail and leave its marker.
-    ['waited-out', async () => 'waited-out' as const],
-    ['not-run', async () => 'not-run' as const],
-    ['failed', async () => { throw new Error('legacy boundary store unavailable'); }],
-  ])('writes and retires the snapshot again when the marker retirement is %s', async (label, retireMarker) => {
-    const rounds = await finalizedTwinRounds(`public-finalized-twin-marker-${label}`, retireMarker);
+  it('takes a snapshot whose copy a share brought back the usual way, and retires it again', async () => {
+    const rounds = await finalizedTwinRounds('public-finalized-twin-shared-again');
     await rounds.round();
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledOnce();
+
+    await rounds.shareAgain();
+    expect(await rounds.store.countQuads(rounds.swmGraph)).toBe(rounds.payload.length);
     await rounds.round();
-    // A later pass is what retries the marker, so nothing was remembered.
+    // The remembered retirement no longer describes the store: the twin is proven and retired again.
     expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledTimes(2);
+    expect(await rounds.store.countQuads(rounds.swmGraph)).toBe(0);
+
+    // And remembered again: a third round holds it.
+    expect((await rounds.round()).alreadyHeldAssets).toBe(1);
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    [true, 2],
+    [false, 1],
+  ] as const)('retries the legacy marker while it holds the twin only when one is outstanding (%s)', async (outstanding, calls) => {
+    const retireMarker = vi.fn(async () => undefined);
+    const rounds = await finalizedTwinRounds(`public-finalized-twin-marker-outstanding-${outstanding}`, {
+      retireMarker,
+      markerOutstanding: () => outstanding,
+    });
+    await rounds.round();
+    expect(retireMarker).toHaveBeenCalledOnce();
+
+    expect((await rounds.round()).alreadyHeldAssets).toBe(1);
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledOnce();
+    expect(retireMarker).toHaveBeenCalledTimes(calls);
   });
 });

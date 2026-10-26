@@ -61,8 +61,7 @@ describe('legacy SWM boundary retirements a caller stopped waiting for', () => {
       // Before anything is awaited: a fence the attempt raises is up when this call returns.
       expect(started).toHaveLength(1);
       started[0]!.end(outcome);
-      // The caller learns how it ended.
-      await expect(asked).resolves.toBe(outcome);
+      await asked;
 
       expect(owed.owed).toBe(0);
       expect(events).toEqual([]);
@@ -74,15 +73,14 @@ describe('legacy SWM boundary retirements a caller stopped waiting for', () => {
   it('lets the caller go after its wait and leaves the attempt to end on its own', async () => {
     const { owed, events } = owner();
     const { attempt, started } = attempts();
-    let returned: string | undefined;
-    const asked = owed.retire('asset', attempt).then((outcome) => { returned = outcome; });
+    let returned = false;
+    const asked = owed.retire('asset', attempt).then(() => { returned = true; });
 
     await vi.advanceTimersByTimeAsync(LEGACY_SWM_RETIREMENT_CALLER_WAIT_MS - 1);
-    expect(returned).toBeUndefined();
+    expect(returned).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     await asked;
-    // The caller learns only that the attempt outlived its wait, not how it will end.
-    expect(returned).toBe('waited-out');
+    expect(returned).toBe(true);
     // The attempt is still running: nothing is owed a repeat yet.
     expect(owed.owed).toBe(0);
 
@@ -97,11 +95,11 @@ describe('legacy SWM boundary retirements a caller stopped waiting for', () => {
   it('repeats an attempt that did not get its turn, whether the caller had left or not', async () => {
     const { owed, events } = owner();
 
-    // Inside the wait: the caller returns without a failure, and learns the attempt did not run.
+    // Inside the wait: the caller returns without a failure, as it always did.
     const inside = attempts();
     const asked = owed.retire('inside', inside.attempt);
     inside.started[0]!.end('not-run');
-    await expect(asked).resolves.toBe('not-run');
+    await expect(asked).resolves.toBeUndefined();
 
     // After the wait.
     const after = attempts();
@@ -161,7 +159,7 @@ describe('legacy SWM boundary retirements a caller stopped waiting for', () => {
 
     const asked = owed.retire('asset', failing);
     await vi.advanceTimersByTimeAsync(LEGACY_SWM_RETIREMENT_CALLER_WAIT_MS);
-    await expect(asked).resolves.toBe('waited-out');
+    await expect(asked).resolves.toBeUndefined();
     late.started[0]!.fail(new Error('failed late'));
     await settled();
 
@@ -293,8 +291,7 @@ describe('legacy SWM boundary retirements a caller stopped waiting for', () => {
     expect(owed.owed).toBe(0);
     expect(vi.getTimerCount()).toBe(0);
 
-    // A closed owner runs nothing, and says so.
-    await expect(owed.retire('asset', notRun)).resolves.toBe('not-run');
+    await owed.retire('asset', notRun);
     expect(notRun).toHaveBeenCalledTimes(1);
     expect(owed.owed).toBe(0);
     // Reopening an open owner changes nothing.

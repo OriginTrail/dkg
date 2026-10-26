@@ -19,7 +19,7 @@ import {
   type FinalizedSwmTwinRetirement,
 } from './finalized-swm-twin-reconciliation.js';
 import { FinalizedSwmTwinMemoV1 } from './finalized-swm-twin-memo.js';
-import type { LegacySwmRetirementCallerOutcomeV1 } from '../../internal/owed-legacy-swm-retirements.js';
+import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 import type { RecoveryExecutionGuard } from './recovery-execution-guard.js';
 import {
   runSharedMemorySync,
@@ -81,13 +81,14 @@ export interface SwmTargetExecutorPortsV1 {
     retirement: FinalizedSwmTwinRetirement,
     ctx: OperationContext,
   ) => Promise<void>;
-  /** Resolves with how the marker's retirement ended inside the caller's wait. Absent: no marker lane. */
   readonly retireLegacySwmAfterVerifiedVmTwin?: (input: Readonly<{
     contextGraphId: string;
     kaUal: string;
     assertionVersion: string;
     subGraphName?: string;
-  }>) => Promise<LegacySwmRetirementCallerOutcomeV1>;
+  }>) => Promise<void>;
+  /** Process-local, no I/O: a legacy marker of the asset is still outstanding. */
+  readonly hasOutstandingLegacySwmMarker?: (contextGraphId: string, kaUal: string) => boolean;
   readonly logInfo: (ctx: OperationContext, message: string) => void;
   readonly logWarn: (ctx: OperationContext, message: string) => void;
   readonly logDebug: (ctx: OperationContext, message: string) => void;
@@ -324,6 +325,8 @@ export class SwmTargetExecutorV1 {
         const twinRetired = retirement === 'retired'
           || retirement === 'already-retired-finalized';
         if (twinRetired) {
+          // The content is proven finalized here: a later round holds it.
+          this.finalizedTwins.remember(contextGraphId, descriptor);
           // The twin's graph and head are already gone at this point. Marker
           // retirement is a second, separate cleanup: if its failure escaped,
           // the caller would treat the whole reconciliation as deferred, skip
@@ -331,28 +334,7 @@ export class SwmTargetExecutorV1 {
           // head and operation rows back without their graph. A marker left
           // behind is the conservative state (the graph stays reported as
           // incomplete) until a later pass or a catalog replay retires it.
-          try {
-            const retireMarker = this.#ports.retireLegacySwmAfterVerifiedVmTwin;
-            const marker = retireMarker === undefined ? 'no-marker-lane' : await retireMarker({
-              contextGraphId,
-              kaUal: descriptor.kaUal,
-              assertionVersion: descriptor.assertionVersion,
-              subGraphName: descriptor.subGraphName,
-            });
-            // Only a retirement that ended is remembered. One that did not get
-            // its turn, or still runs past the wait, may yet leave its marker,
-            // and a later pass is what retries a marker left behind. Without a
-            // marker lane, nothing is left behind.
-            if (marker === 'no-marker-lane' || marker === 'retired' || marker === 'kept') {
-              this.finalizedTwins.remember(contextGraphId, descriptor);
-            }
-          } catch (cause) {
-            this.#ports.logWarn(
-              target.ctx,
-              `Deferred legacy SWM boundary retirement after finalized VM twin cleanup for `
-                + `${descriptor.kaUal}: ${cause instanceof Error ? cause.message : String(cause)}`,
-            );
-          }
+          await this.#retireLegacyMarker(target, contextGraphId, descriptor);
         }
         if (retirement === 'retired') {
           this.#ports.invalidateListContextGraphsCache();
@@ -363,7 +345,9 @@ export class SwmTargetExecutorV1 {
         }
         return twinRetired ? 'suppress-metadata' : 'preserve';
       },
-      isFinalizedTwinRetired: (contextGraphId, descriptor) => this.finalizedTwins.retired(contextGraphId, descriptor),
+      heldAsRetiredFinalizedTwin: (contextGraphId, descriptor) => (
+        this.#heldAsRetiredFinalizedTwin(target, contextGraphId, descriptor)
+      ),
       storeInsert,
       publicSnapshotStore: this.#ports.publicSnapshotStore,
       deleteCheckpoint: this.#ports.deletePublicCheckpoint,
@@ -373,6 +357,61 @@ export class SwmTargetExecutorV1 {
       logWarn: this.#ports.logWarn,
       logDebug: this.#ports.logDebug,
     });
+  }
+
+  /**
+   * Retire the legacy marker of a finalized twin. A failure stays a warning: a
+   * marker left behind is the conservative state, retried by its own owner, by
+   * a later round that holds the twin, or by the asset's next publication.
+   */
+  async #retireLegacyMarker(
+    target: PublicSwmTargetV1,
+    contextGraphId: string,
+    descriptor: GraphScopedSwmRecoveryDescriptor,
+  ): Promise<void> {
+    try {
+      await this.#ports.retireLegacySwmAfterVerifiedVmTwin?.({
+        contextGraphId,
+        kaUal: descriptor.kaUal,
+        assertionVersion: descriptor.assertionVersion,
+        subGraphName: descriptor.subGraphName,
+      });
+    } catch (cause) {
+      this.#ports.logWarn(
+        target.ctx,
+        `Deferred legacy SWM boundary retirement after finalized VM twin cleanup for `
+          + `${descriptor.kaUal}: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    }
+  }
+
+  /**
+   * A snapshot this node proved finalized and retired in an earlier round
+   * (`finalized-swm-twin-memo.ts`) is held while no copy of it is back. A share
+   * that brought one back makes the round take it the usual way, which proves
+   * and retires it again. A legacy marker that outlived the retirement is
+   * retried here, so a round that holds the twin is still a way back for it.
+   */
+  async #heldAsRetiredFinalizedTwin(
+    target: PublicSwmTargetV1,
+    contextGraphId: string,
+    descriptor: GraphScopedSwmRecoveryDescriptor,
+  ): Promise<boolean> {
+    if (!this.finalizedTwins.retired(contextGraphId, descriptor)) return false;
+    const head = await this.#snapshotMaterializer.withKaWriteLock(
+      contextGraphId,
+      descriptor.subGraphName,
+      descriptor.kaUal,
+      () => this.#snapshotMaterializer.readStoredHead(descriptor),
+    );
+    if (head.version !== null) {
+      this.finalizedTwins.forget(contextGraphId, descriptor);
+      return false;
+    }
+    if (this.#ports.hasOutstandingLegacySwmMarker?.(contextGraphId, descriptor.kaUal) === true) {
+      await this.#retireLegacyMarker(target, contextGraphId, descriptor);
+    }
+    return true;
   }
 
   /**

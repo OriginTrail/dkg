@@ -64,7 +64,7 @@ import {
 import {
   GraphScopedSnapshotCommitCoordinator,
   type FinalizedTwinReconciler,
-  type FinalizedTwinRetiredCheck,
+  type HeldFinalizedTwinCheck,
 } from './graph-scoped-snapshot-commit.js';
 import { storedVersionOutranksDescriptor } from './swm-stored-head-proof.js';
 
@@ -315,12 +315,12 @@ export interface SharedMemorySyncContext {
    */
   reconcileFinalizedTwin?: FinalizedTwinReconciler;
   /**
-   * Process-local, no I/O: this node already retired exactly this snapshot's
-   * copy because its Verified Memory holds the same bytes
-   * (`finalized-swm-twin-memo.ts`). The round counts the asset as held and
-   * writes nothing for it, where a write would only be retired again.
+   * This node already retired exactly this snapshot's copy because its
+   * Verified Memory holds the same bytes (`finalized-swm-twin-memo.ts`), and no
+   * copy is back. The round counts the asset as held and writes nothing for
+   * it, where a write would only be retired again.
    */
-  isFinalizedTwinRetired?: FinalizedTwinRetiredCheck;
+  heldAsRetiredFinalizedTwin?: HeldFinalizedTwinCheck;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
@@ -355,7 +355,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
     ordinaryRootSnapshotApplyAllowed,
     resolveRootSnapshotAtomicCompanion,
     reconcileFinalizedTwin,
-    isFinalizedTwinRetired,
+    heldAsRetiredFinalizedTwin,
     publicSnapshotStore,
     getRegisteredSubGraphNames,
     getExcludedSubGraphNames,
@@ -799,7 +799,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       const snapshotCommit = new GraphScopedSnapshotCommitCoordinator(
         processed.verifiedMeta,
         reconcileFinalizedTwin,
-        isFinalizedTwinRetired,
+        heldAsRetiredFinalizedTwin,
       );
       // A selected continuation skips blob and assertion-graph work for its
       // verified prefix, but the final bulk metadata append is owned by this
@@ -1045,9 +1045,9 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
         for (const descriptor of descriptors) {
           const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
           if (materializedKeys.has(graphKey)) continue;
-          // Retired here as a finalized twin by an earlier round: held, and
-          // nothing to write that would only be retired again.
-          if (snapshotCommit.holdRetiredFinalizedTwin(pid, descriptor)) {
+          // Retired here as a finalized twin by an earlier round and not back:
+          // held, and nothing to write that would only be retired again.
+          if (await recoveryBoundary.admitAsyncMutation(() => snapshotCommit.holdRetiredFinalizedTwin(pid, descriptor))) {
             materializedKeys.add(graphKey);
             finalizedTwinsHeld += 1;
             summary.alreadyHeldAssets += 1;

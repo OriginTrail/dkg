@@ -345,8 +345,7 @@ describe('a member asset that a curator publishes (GH#3134)', () => {
 
     const removal = vi.spyOn(member, 'removeRfc64SwmAuthorInventoryConfirmedRowV1')
       .mockRejectedValueOnce(new Error('inventory write refused'));
-    // The caller learns how the marker's retirement ended inside its wait.
-    await expect(retire()).resolves.toBe('kept');
+    await expect(retire()).resolves.toBeUndefined();
     await member.awaitInFlightRfc64SwmInventoryObserversV1();
     expect(removal).toHaveBeenCalledOnce();
     expect(inventoryRows(member)).toEqual([a.kaUal]);
@@ -355,7 +354,7 @@ describe('a member asset that a curator publishes (GH#3134)', () => {
     vi.spyOn(lanes, 'resolveRfc64CatalogAuthoringLaneDecisionV1').mockImplementationOnce(() => {
       throw new Error('lane unreadable');
     });
-    await expect(retire()).resolves.toBe('kept');
+    await expect(retire()).resolves.toBeUndefined();
     await member.awaitInFlightRfc64SwmInventoryObserversV1();
     expect(inventoryRows(member)).toEqual([a.kaUal]);
     expect(warnings).toEqual(expect.arrayContaining([
