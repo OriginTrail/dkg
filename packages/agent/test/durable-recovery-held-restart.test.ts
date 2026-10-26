@@ -170,7 +170,7 @@ function node(
   // Chain checks answered per round; later ones time out, as on a throttled endpoint past the round's budget.
   let chainAnswersPerRound = Number.POSITIVE_INFINITY;
   let chainAnswersLeft = chainAnswersPerRound;
-  let defaultSubscription: ContextGraphSub = { syncMode: 'continuous', subscribed: true, synced: true, onChainId: '323' };
+  let defaultSubscription: ContextGraphSub = { syncMode: 'always-on', subscribed: true, synced: true, onChainId: '323' };
   const materialization = new RecoveryMaterializationOwner({
     chain: () => { throw new Error('chain reads supplied below'); }, store: () => store,
     isClosed: () => false, subscription: () => {
@@ -380,7 +380,7 @@ describe('a restarted Core and a graph it has already recovered', () => {
     'fences held completion across $change during $stage', async ({ stage, change }) => {
       const peer = servingPeer(generation());
       let subscription: ContextGraphSub | undefined = {
-        syncMode: 'continuous', subscribed: true, synced: true, onChainId: '323',
+        syncMode: 'always-on', subscribed: true, synced: true, onChainId: '323',
       };
       let entered!: () => void;
       let release!: () => void;
