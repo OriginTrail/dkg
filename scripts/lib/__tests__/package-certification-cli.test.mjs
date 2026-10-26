@@ -9,6 +9,8 @@ import assert from 'node:assert/strict';
 import { expectedPolicy } from '../package-certification/source.mjs';
 import { BUILD_INPUTS, CLI, PROFILE } from '../package-certification/bundle.mjs';
 import { fixture } from './package-certification-fixture.mjs';
+import { fixture as evidenceFixture } from './release-evidence-fixture.mjs';
+import { installGithubFixture } from './github-evidence-fixture.mjs';
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
@@ -45,6 +47,7 @@ async function cliFixture(t, mode) {
   const gitResults = {
     'status --porcelain --untracked-files=no': '', 'rev-parse HEAD': commit,
     'rev-parse --show-object-format': 'sha1',
+    [`rev-parse ${commit}^{tree}`]: 'e'.repeat(40),
     [`ls-tree -r -z --full-tree ${commit}`]: [...new Set(tracked)].sort().map(name => {
       const bytes = fs.readFileSync(path.join(source, name));
       const oid = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
@@ -84,7 +87,7 @@ if (args[0] !== 'view') process.exit(91);
 if (${JSON.stringify(mode)} === 'publish-prepared') {
   process.stdout.write(JSON.stringify({ error: { code: 'E404' } })); process.exitCode = 1;
 } else process.stdout.write(JSON.stringify({ integrity: ${JSON.stringify(integrity)}[args[1]] }));`);
-  return { ...f, source, env, calls, tag };
+  return { ...f, source, env, calls, tag, bin };
 }
 
 for (const mode of ['publish-prepared', 'promote']) for (const mismatch of [false, true]) {
@@ -110,3 +113,30 @@ for (const mode of ['publish-prepared', 'promote']) for (const mismatch of [fals
     }
   });
 }
+
+test('promotion dry-run verifies default GitHub acquisition and complete candidate evidence before planning tags', async t => {
+  const f = await cliFixture(t, 'promote');
+  const { commit, version, sourceInputsDigest } = f.expected;
+  const evidence = evidenceFixture(t, { expected: { commit, version, sourceInputsDigest }, manifest: f.manifest, tree: 'e'.repeat(40) });
+  evidence.write('decision.json', evidence.decision);
+  const gh = installGithubFixture(f.bin, {
+    latestAttempt: 1, nightlyBytes: JSON.stringify(evidence.nightly),
+    pages: [[{ id: 122, run_attempt: 1 }], [{ id: 123, run_attempt: 1 }]],
+    runs: { '122/1': evidence.options.readRun(122, 1), '123/1': evidence.options.readRun(123, 1) },
+  });
+  const result = spawnSync(process.execPath, [path.join(f.source, 'scripts/release-packages.mjs'), 'promote',
+    '--bundle', f.bundle, '--certificate', f.receiptFile, '--evidence', evidence.options.evidenceFile,
+    '--commit', commit, '--version', version, '--profile', PROFILE, '--tag', f.tag,
+    '--tags', 'testnet,mainnet', '--dry-run',
+  ], { cwd: f.source, env: f.env, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(result.status, 0, result.stderr);
+  const progress = JSON.parse(result.stdout.slice(result.stdout.indexOf('{')));
+  assert.equal(progress.dryRun, true);
+  assert.equal(progress.planned.length, f.manifest.packages.length * 2);
+  assert.deepEqual(progress.completed, []);
+  const calls = fs.readFileSync(f.calls, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(calls.length, f.manifest.packages.length);
+  assert.ok(calls.every(args => args[0] === 'view'));
+  const githubCalls = fs.readFileSync(gh.calls, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.ok(githubCalls.some(args => args[0] === 'run' && args[1] === 'download'));
+});

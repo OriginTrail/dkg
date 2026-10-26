@@ -2,8 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
-import { pnpmInvocation } from './subprocess.mjs';
+import { namedTestDiscoveryInvocation, discoverNamedTests } from './named-test-discovery.mjs';
 import { analyzeTestSource } from '../disabled-test-scanner.mjs';
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 function bytes(root, file) {
@@ -17,17 +16,12 @@ function bound(root, descriptor) {
   assert.equal(sha(raw), descriptor.sha256, `stale incident evidence: ${descriptor.file}`);
   return raw;
 }
+const detectorFiles = records => records.flatMap(row => row.detectors.map(detector => detector.file));
 export function incidentDiscoveryInvocation(records) {
-  const files = [...new Set(records.flatMap(row => row.detectors.map(d => d.file.replace('packages/agent/', ''))))];
-  // Vitest accepts an optional output path after --json. Keep it last so
-  // discovery cannot overwrite a selected test file with the JSON report.
-  return pnpmInvocation(['--dir', 'packages/agent', 'exec', 'vitest', 'list', '--config', 'vitest.unit.config.ts', ...files, '--json']);
+  return namedTestDiscoveryInvocation(detectorFiles(records));
 }
 export function discoverIncidentTests(root, records) {
-  const invocation = incidentDiscoveryInvocation(records);
-  const result = spawnSync(invocation.command, invocation.args, { cwd: root, encoding: 'utf8', timeout: 60000, maxBuffer: 8 * 1024 * 1024 });
-  assert.equal(result.status, 0, `incident detector discovery failed: ${result.error?.message ?? result.stderr}`);
-  return JSON.parse(result.stdout).map(row => ({ file: path.relative(root, row.file).split(path.sep).join('/'), name: row.name }));
+  return discoverNamedTests(root, detectorFiles(records));
 }
 export function validateIncidentClosure(root, records, inventory, { discover = discoverIncidentTests } = {}) {
   assert.ok(Array.isArray(records) && records.length, 'empty incident register');

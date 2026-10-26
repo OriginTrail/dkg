@@ -1,12 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { profileFor } from './profiles.mjs';
 import { REQUIRED_ROUTE } from './profile-contract.mjs';
 import { inside, sha256, proofIdentity, verifyIdentity } from './identity.mjs';
 import { sidePhases } from './phases.mjs';
 import { inspectExecution } from './results.mjs';
-import { pnpmInvocation } from './subprocess.mjs';
+import { namedTestDiscoveryInvocation, discoverNamedTests } from './named-test-discovery.mjs';
 import { analyzeTestSource } from '../disabled-test-scanner.mjs';
 import { planAgentShards } from '../../ci/plan-agent-shards.mjs';
 
@@ -68,8 +67,7 @@ export function validateEvidence(root, record, profile) {
 // The named-assertion discovery command, launched exactly as the proof runner
 // launches pnpm (see subprocess.mjs), including through Node on Windows.
 export function discoveryInvocation(profiles, options) {
-  return pnpmInvocation(['--dir', 'packages/agent', 'exec', 'vitest', 'list', '--config', REQUIRED_ROUTE.config,
-    ...profiles.map((profile) => profile.file.replace('packages/agent/', '')), '--json'], options);
+  return namedTestDiscoveryInvocation(profiles.map(profile => profile.file), options);
 }
 export function validateRegressions(root, inventory, { records = loadRecords(root), discover, shards } = {}) {
   if (!records.length) throw new Error('empty regression register');
@@ -83,12 +81,7 @@ export function validateRegressions(root, inventory, { records = loadRecords(roo
     if (analysis.disabled.length || analysis.focused.length) throw new Error(`${profile.file}: disabled or focused regression test`);
   }
   const assigned = shards ?? planAgentShards(root);
-  const discovered = discover ? discover(profiles) : (() => {
-    const invocation = discoveryInvocation(profiles);
-    const result = spawnSync(invocation.command, invocation.args, { cwd: root, encoding: 'utf8', timeout: 60000, maxBuffer: 8 * 1024 * 1024 });
-    if (result.error || result.status !== 0) throw new Error(`regression discovery failed: ${result.error?.message ?? result.stderr}`);
-    return JSON.parse(result.stdout).map((row) => ({ ...row, file: path.relative(root, row.file).split(path.sep).join('/') }));
-  })();
+  const discovered = discover ? discover(profiles) : discoverNamedTests(root, profiles.map(profile => profile.file));
   return records.map(({ file, record }) => {
     const profile = validateRecord(record, file, inventory, discovered, assigned);
     validateEvidence(root, record, profile);

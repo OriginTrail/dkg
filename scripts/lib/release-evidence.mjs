@@ -25,10 +25,15 @@ export function githubRunAttempts(commit) {
   const listing = execFileSync('gh', ['api', '--paginate', '-X', 'GET',
     'repos/OriginTrail/dkg/actions/workflows/ci.yml/runs', '-f', `head_sha=${commit}`, '-f', 'per_page=100',
     '--jq', '.workflow_runs[] | {id, run_attempt}'], { encoding: 'utf8', timeout: 60000, maxBuffer: 8 * 1024 * 1024 });
-  return listing.trim().split('\n').filter(Boolean).flatMap(line => {
+  const attempts = new Map();
+  for (const line of listing.trim().split('\n').filter(Boolean)) {
     const run = JSON.parse(line);
-    return Array.from({ length: run.run_attempt }, (_, i) => githubRun(run.id, i + 1));
-  });
+    for (let attempt = 1; attempt <= run.run_attempt; attempt++) {
+      const key = `${run.id}/${attempt}`;
+      if (!attempts.has(key)) attempts.set(key, githubRun(run.id, attempt));
+    }
+  }
+  return [...attempts.values()];
 }
 export function githubNightlyReceipt(runId, attempt) {
   const current = JSON.parse(execFileSync('gh', ['api', `repos/OriginTrail/dkg/actions/runs/${runId}`], { encoding: 'utf8', timeout: 30000 }));
@@ -44,7 +49,7 @@ function successfulRun(descriptor, commit, readRun) {
   assert.equal(String(actual.id), String(descriptor.runId), 'wrong run ID');
   assert.equal(actual.run_attempt, descriptor.attempt, 'wrong run attempt');
   assert.equal(actual.repository?.full_name, 'OriginTrail/dkg', 'wrong run repository');
-  assert.equal(actual.path, '.github/workflows/ci.yml', 'wrong workflow');
+  assert.match(actual.path ?? '', /^\.github\/workflows\/ci\.yml(?:@.+)?$/, 'wrong workflow');
   assert.equal(actual.head_sha, commit, 'run tested a different commit');
   // PR API head_sha identifies the branch even when checkout tests a synthetic
   // merge. Only direct-subject runs can certify the prepared candidate here.
@@ -89,8 +94,17 @@ export function verifyReleaseEvidence({ evidenceFile, expected, manifest, rootDi
     sourceInputsDigest: expected.sourceInputsDigest, packageSetDigest: manifest.packageSetDigest }, 'stale candidate/package identity');
   assert.match(decision.harness?.commit ?? '', /^[a-f0-9]{40}$/, 'full harness commit required');
   assert.equal(decision.harness.profile, HARNESS_PROFILE, 'wrong harness profile');
-  successfulRun(decision.ci, expected.commit, readRun);
-  const nightlyRun = successfulRun(decision.nightly, expected.commit, readRun);
+  // Snapshot acquisition belongs to this invocation only. The pre-publication
+  // verification gets fresh history, including reruns that arrived since review.
+  const history = readRunAttempts(expected.commit);
+  const runs = new Map(history.map(run => [`${run.id}/${run.run_attempt}`, run]));
+  const getRun = (id, attempt) => {
+    const key = `${id}/${attempt}`;
+    if (!runs.has(key)) runs.set(key, readRun(id, attempt));
+    return runs.get(key);
+  };
+  successfulRun(decision.ci, expected.commit, getRun);
+  const nightlyRun = successfulRun(decision.nightly, expected.commit, getRun);
   assert.ok(['workflow_dispatch', 'schedule'].includes(nightlyRun.event), 'nightly must be a full dispatched or scheduled run');
   const nightly = artifact(root, decision.nightly.receipt);
   assert.equal(hash(readNightly(decision.nightly.runId, decision.nightly.attempt)), decision.nightly.receipt.sha256, 'nightly receipt differs from authenticated Actions artifact');
@@ -127,16 +141,16 @@ export function verifyReleaseEvidence({ evidenceFile, expected, manifest, rootDi
     assert.ok(attempts.slice(i + 1).some(row => row.id === resolution.supersededBy && row.passed), 'unresolved required failure');
   }
   assert.ok(Array.isArray(decision.priorCiFailures), 'prior CI failure inventory is required (may be empty)');
-  const historicalFailures = readRunAttempts(expected.commit).filter(run => ['failure', 'cancelled', 'timed_out'].includes(run.conclusion));
+  const historicalFailures = history.filter(run => ['failure', 'cancelled', 'timed_out'].includes(run.conclusion));
   for (const run of historicalFailures) assert.ok(decision.priorCiFailures.some(row => String(row.runId) === String(run.id)
     && row.attempt === run.run_attempt), `omitted failed CI attempt: ${run.id}/${run.run_attempt}`);
   assert.equal(new Set(decision.priorCiFailures.map(row => `${row.runId}/${row.attempt}`)).size, decision.priorCiFailures.length, 'duplicate prior CI failure');
   for (const failure of decision.priorCiFailures) {
-    const actual = readRun(failure.runId, failure.attempt);
+    const actual = getRun(failure.runId, failure.attempt);
     assert.equal(String(actual.id), String(failure.runId), 'wrong prior run ID');
     assert.equal(actual.run_attempt, failure.attempt, 'wrong prior run attempt');
     assert.equal(actual.repository?.full_name, 'OriginTrail/dkg');
-    assert.equal(actual.path, '.github/workflows/ci.yml');
+    assert.match(actual.path ?? '', /^\.github\/workflows\/ci\.yml(?:@.+)?$/, 'wrong prior workflow');
     assert.equal(actual.head_sha, expected.commit, 'prior failure subject mismatch');
     assert.ok(['failure', 'cancelled', 'timed_out'].includes(actual.conclusion), 'prior failure is not a failed run');
     assert.ok(['product', 'test', 'environment', 'unknown'].includes(failure.classification), 'CI failure lacks classification');
@@ -144,7 +158,7 @@ export function verifyReleaseEvidence({ evidenceFile, expected, manifest, rootDi
     const replacement = [decision.ci, decision.nightly].find(row => String(row.runId) === String(failure.supersededBy?.runId)
       && row.attempt === failure.supersededBy?.attempt);
     assert.ok(replacement, 'unresolved CI failure');
-    const next = readRun(replacement.runId, replacement.attempt);
+    const next = getRun(replacement.runId, replacement.attempt);
     assert.ok(Date.parse(next.run_started_at) > Date.parse(actual.run_started_at), 'replacement must follow failure');
   }
   return { outcome: 'PASS', candidate: decision.candidate, harness: { commit: decision.harness.commit, profile: HARNESS_PROFILE },
