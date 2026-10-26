@@ -1,3 +1,4 @@
+import { durableRecoveryRoundOutcome } from './sync/durable-recovery-round.js';
 // SPDX-License-Identifier: Apache-2.0
 import { normalizeExactAssetFetchPolicy } from './sync/requester/durable-sync-compat.js';
 import { exactAssetFetchSessionPolicy, requireUalOnlyExactAssetSelection } from './sync/requester/exact-durable-fetch.js';
@@ -6593,22 +6594,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         isSyncCapable: (peerId) => this.waitForSyncProtocol({
           toString: () => peerId,
         }),
-        executeSlice: (peerId, durableMetaContinuation) => this.syncFromPeerDetailed(
-          peerId,
-          [contextGraphId],
-          undefined,
-          undefined,
-          undefined,
-          {
-            stopOnBackoffWorthyFailure: true,
-            totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS,
+        executeSlice: async (peerId, durableMetaContinuation, durableRecoveryRound) => {
+          if (!durableSyncEnabled(this.config) || !await this.canUseLegacyDurableSyncForContextGraphV1(contextGraphId)) {
+            return durableRecoveryRoundOutcome(createIncompleteDurableSyncResult());
+          }
+          const detailed = await this.runLegacyDurableSyncDetailed(ctx, peerId, [contextGraphId], undefined, undefined, undefined, {
+            stopOnBackoffWorthyFailure: true, totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS,
             settlementSliceTimeoutMs: DURABLE_RECOVERY_SETTLEMENT_SLICE_TIMEOUT_MS,
-            signal: this.node.stopSignal ?? undefined,
-            priority: FOREGROUND_CATCHUP_SYNC_PRIORITY,
-            source: 'vm-recovery',
-            durableMetaContinuation,
-          },
-        ),
+            signal: this.node.stopSignal ?? undefined, priority: FOREGROUND_CATCHUP_SYNC_PRIORITY,
+            source: 'vm-recovery', durableMetaContinuation, durableRecoveryRound,
+          });
+          return durableRecoveryRoundOutcome(detailed.result, detailed.recoveryRound);
+        },
         executeExactSlice: exactMissingAssetRequest(this, contextGraphId, DURABLE_RECOVERY_HARD_TIMEOUT_MS),
         logDebug: (message) => this.log.debug(ctx, message),
         logInfo: (message) => this.log.info(ctx, message),

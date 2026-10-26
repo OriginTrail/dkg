@@ -35,6 +35,7 @@ export interface RecoveryMaterializationScope {
   readonly onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
 }
 export interface RecoveryMaterialization {
+  readonly heldAssetBinding: () => Readonly<{ onChainId?: string; generation: number }>;
   readonly authenticateChallengePinnedAsset: ChallengeExactAssetFetchContext['authenticateChallengePinnedAsset'];
   readonly storeGraphScopedAsset: NonNullable<DurableSyncContext['storeGraphScopedAsset']>;
 }
@@ -78,9 +79,13 @@ export class RecoveryMaterializationOwner {
       asAbortError: asSyncFetchAbortError,
       track: (run) => ports.track(run),
     });
-    // How long this operation's last asset write held the store, if it wrote one.
-    let previousWriteMs: number | undefined;
+    let wroteAsset = false;
     return {
+      heldAssetBinding: () => {
+        assertLifecycleCurrent();
+        if (ports.isClosed()) throw asSyncFetchAbortError(new Error('Held asset check is closed for node shutdown'));
+        return { onChainId: ports.subscription(contextGraphId)?.onChainId, generation: ports.bindingGeneration(contextGraphId) };
+      },
       authenticateChallengePinnedAsset: ({
         asset,
         commitment,
@@ -124,8 +129,8 @@ export class RecoveryMaterializationOwner {
         )),
         operation: async (control): Promise<GraphScopedMaterializationOutcome> => {
           // This operation's asset writes run back to back: let queued store work in between them.
-          if (previousWriteMs !== undefined) {
-            await yieldStoreBackgroundLane({ store: ports.store(), previousWriteMs, signal: operationSignal });
+          if (wroteAsset) {
+            await yieldStoreBackgroundLane({ signal: operationSignal });
           }
           const { isBindingCurrent, recaptureBindingGeneration, assertCurrent } = control;
           const authentication = await authority.authenticate(asset, authenticationDeadline, operationSignal);
@@ -168,7 +173,6 @@ export class RecoveryMaterializationOwner {
           assertCurrent();
           onAtomicCommitStarted?.(asset.contextGraphId, asset.ual);
           assertCurrent();
-          const writeStartedAt = Date.now();
           const outcome = await materializeVerifiedGraphScopedAsset({
             store: ports.store(),
             asset: authentication.asset,
@@ -190,7 +194,7 @@ export class RecoveryMaterializationOwner {
             },
           });
           if (outcome === 'applied') await ports.reconcile(authentication.asset, ctx);
-          previousWriteMs = Date.now() - writeStartedAt;
+          wroteAsset = true;
           return outcome;
         },
       }),

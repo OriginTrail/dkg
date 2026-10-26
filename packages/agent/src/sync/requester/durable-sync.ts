@@ -1,3 +1,6 @@
+import type { DurableMetaContinuation, DurableMetaContinuationState } from './durable-meta-continuation.js';
+export type { DurableMetaContinuation, DurableMetaContinuationState } from './durable-meta-continuation.js';
+import type { DurableRecoveryRoundDecision } from '../durable-recovery-round.js';
 import type { DetailedDurableSyncResult } from './durable-sync-result.js';
 import { randomUUID } from 'node:crypto';
 import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
@@ -45,8 +48,8 @@ import {
 } from './verified-asset-preparation.js';
 import type { DurableSyncBudget } from './durable-sync-budget.js';
 import { createDurableDataRoundBoundary } from './durable-data-round.js';
-import { planDurableDataFromLocalHoldings, settleDurableDataFromHoldings,
-  type DurableHoldingsChannel, type DurableHoldingsReader } from './durable-data-holdings.js';
+import { planDurableDataFromLocalHoldings, settleDurableDataFromHoldings, persistDurableHoldingsMetadata,
+  type DurableHoldingsOptions, type DurableHoldingsReader } from './durable-data-holdings.js';
 import {
   normalizeDurableSyncContext,
   type LegacyDurableSyncContext, type NormalizedDurableSyncContext,
@@ -168,23 +171,6 @@ export interface DurableSyncFetchRequest {
   /** Proof bytes own an invocation-local page/session store with terminal cleanup. */
   readonly ephemeralRequesterState?: boolean;
   readonly fetchContext: DurableSyncFetchContext;
-}
-
-export interface DurableMetaContinuationState {
-  checkpointKey: string;
-  quads: Quad[];
-  quadRawOffsets?: number[];
-  bytesReceived: number;
-  nextOffset: number;
-  rawNextOffset: number;
-}
-
-/** One graph-owner-private retained META prefix across bounded recovery slices. */
-export interface DurableMetaContinuation extends DurableHoldingsChannel {
-  readonly requesterScope: SyncCheckpointScope;
-  state?: DurableMetaContinuationState;
-  /** Set by a DATA round whose rows did not line up with the boundary it resumed at; the owner clears it. */
-  rejectedResumeOffset?: number;
 }
 
 export interface DurableSyncStoreInsertRequest {
@@ -341,6 +327,7 @@ export interface DurableSyncContext {
   exactAssetFetchPolicyFor?: (contextGraphId: string) => Exclude<ExactAssetFetchSessionPolicy, { kind: 'ephemeral-challenge' }> | undefined;
   /** Present only for the graph-owned bounded recovery runner. */
   durableMetaContinuation?: DurableMetaContinuation;
+  durableRecoveryRound?: DurableHoldingsOptions;
   /** Which assets of a verified generation this node holds; plans that runner's DATA phase. */
   heldGraphScopedAssets?: DurableHoldingsReader;
   stopOnBackoffWorthyFailure?: boolean;
@@ -561,6 +548,7 @@ export async function runDurableSyncDetailed(
   const detailed = await runDurableSyncWithBudget(normalizeDurableSyncContext(context));
   return {
     result: detailed.result,
+    ...(detailed.recoveryRound ? { recoveryRound: detailed.recoveryRound } : {}),
     ...(detailed.committedExactAssetUals === undefined ? {} : { committedExactAssetUals: detailed.committedExactAssetUals }),
     ...(detailed.exactFetchDisposition === undefined
       ? {}
@@ -615,6 +603,7 @@ async function runDurableSyncWithBudget(
     sinceBatchIdFor,
     exactAssetFetchPolicyFor,
     durableMetaContinuation,
+    durableRecoveryRound,
     heldGraphScopedAssets,
     stopOnBackoffWorthyFailure = false,
     processDurableBatchInWorker,
@@ -641,6 +630,7 @@ async function runDurableSyncWithBudget(
   });
 
   const accumulator = createDurableSyncAccumulator();
+  let recoveryRound: DurableRecoveryRoundDecision = { strategy: 'not-started', confirmedCopies: 0 };
   const exactFetchDispositions: ExactDurableFetchDisposition[] = [];
   const exactResponderCapabilities: (ExactAssetResponderCapability | undefined)[] = [];
   const authenticatedExactAssets: ChallengePinnedGraphScopedAsset[] = [];
@@ -980,13 +970,19 @@ async function runDurableSyncWithBudget(
       }
       const graphScopedManifest = preparedMeta.manifestPlan;
       // A graph-owned round fetches only the rows of the verified generation that this node lacks.
-      const holdings = graphScopedManifest && exactAssetUals === undefined && onVerifiedFullSnapshot === undefined
+      const holdingsOutcome = graphScopedManifest && exactAssetUals === undefined && onVerifiedFullSnapshot === undefined
         && durableMetaContinuation && heldGraphScopedAssets
         ? await planDurableDataFromLocalHoldings({ contextGraphId: pid, manifest: graphScopedManifest,
-            channel: durableMetaContinuation, holdings: heldGraphScopedAssets, signal,
+            options: durableRecoveryRound ?? {}, holdings: heldGraphScopedAssets, signal,
             logWarn: (message) => logWarn(ctx, message) })
         : undefined;
+      const holdings = holdingsOutcome?.plan;
+      recoveryRound = { strategy: 'full', confirmedCopies: holdingsOutcome?.confirmedCopies ?? 0 };
       if (graphScopedManifest && holdings && holdings.kind !== 'full') {
+        await persistDurableHoldingsMetadata(context, pid, metaResult, accumulator);
+        recoveryRound = holdings.kind === 'held'
+          ? { ...recoveryRound, strategy: 'held' }
+          : { ...recoveryRound, strategy: 'exact-missing', batches: holdings.batches };
         recordPhaseOutcome(metaResult, { updateCheckpoint: true });
         logInfo(ctx, settleDurableDataFromHoldings({ plan: holdings, remotePeerId, contextGraphId: pid,
           manifest: graphScopedManifest, metaResult, accumulator, deleteCheckpoint, setCheckpoint }));
@@ -1118,7 +1114,7 @@ async function runDurableSyncWithBudget(
         if (!bounded && graphScopedManifest) {
           deleteCheckpoint(dataResult.checkpointKey);
           if (durableMetaContinuation && dataResult.resumedFromOffset > 0) {
-            durableMetaContinuation.rejectedResumeOffset = dataResult.resumedFromOffset;
+            recoveryRound = { ...recoveryRound, rejectedResumeOffset: dataResult.resumedFromOffset };
           }
           throw Object.assign(
             new Error(
@@ -1572,6 +1568,7 @@ async function runDurableSyncWithBudget(
 
   return {
     result,
+    ...(durableMetaContinuation ? { recoveryRound } : {}),
     ...(exactFetchDisposition ? { exactFetchDisposition, committedExactAssetUals: Object.freeze([...committedExactAssetUals]) } : {}),
     ...(exactResponderCapability ? { exactResponderCapability } : {}),
     ...(authenticatedExactAssets.length === 0

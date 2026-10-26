@@ -1,3 +1,5 @@
+import { durableRecoveryRoundOutcome, type DurableRecoveryRoundOutcome } from './durable-recovery-round.js';
+import type { DurableHoldingsOptions } from './requester/durable-data-holdings.js';
 import type { DurableSyncResult } from '../dkg-agent-types.js';
 import {
   createDurableSyncAccumulator,
@@ -29,7 +31,6 @@ import {
   liveDurableBoundarySource,
   preferVerifiedDurableBoundary,
   seedVerifiedDurableBoundary,
-  takeRejectedResumeOffset,
   verifiedDurableBoundaryOf,
   type VerifiedDurableBoundary,
 } from './durable-recovery-boundary-seed.js';
@@ -74,7 +75,8 @@ export interface DurableRecoveryRunnerDependencies {
   executeSlice(
     peerId: string,
     metaContinuation: DurableMetaContinuation,
-  ): Promise<DurableSyncResult>;
+    holdings: DurableHoldingsOptions,
+  ): Promise<DurableRecoveryRoundOutcome>;
   /**
    * Fetch assets this node lacks with one exact request; `complete` when every
    * one was found, verified and stored. Without it, rounds pull the full graph.
@@ -403,17 +405,18 @@ export class DurableRecoveryRunner {
       health.attempts += 1;
       slices += 1;
       lastPeerId = candidate.peerId;
-      const confirmedBefore = confirmedHeldCopies.size;
+      let round = durableRecoveryRoundOutcome(createFailedPeerDurableSyncResult());
 
       try {
         let metaContinuation = metaContinuations.get(candidate.peerId);
         if (!metaContinuation) {
-          metaContinuation = { ...this.createMetaContinuation(), confirmedHeldCopies };
+          metaContinuation = this.createMetaContinuation();
           metaContinuations.set(candidate.peerId, metaContinuation);
         }
-        metaContinuation.ownerFetchesMissingAssets = deps.executeExactSlice !== undefined && !pullsFullGraph;
-        metaContinuation.missingAssetBatches = undefined;
-        lastResult = await deps.executeSlice(candidate.peerId, metaContinuation);
+        round = await deps.executeSlice(candidate.peerId, metaContinuation, {
+          ownerFetchesMissingAssets: deps.executeExactSlice !== undefined && !pullsFullGraph, confirmedHeldCopies,
+        });
+        lastResult = round.result;
       } catch (error) {
         lastResult = createFailedPeerDurableSyncResult();
         deps.logWarn(
@@ -426,7 +429,7 @@ export class DurableRecoveryRunner {
       const after = deps.checkpointStore.get(checkpointKey);
       // The round reports a boundary its peer's rows did not line up with: that peer never gets it
       // again, and after a refused seed the rest of this run uses each peer's own checkpoint.
-      const rejectedResumeOffset = takeRejectedResumeOffset(metaContinuations.get(candidate.peerId));
+      const rejectedResumeOffset = round.decision.rejectedResumeOffset;
       if (rejectedResumeOffset !== undefined) {
         this.refusedBoundaryByGraphPeer.set(graphPeerKey, durableBoundaryIdentity(before?.manifestDigest, rejectedResumeOffset));
         if (seeded) seedingRefused = true;
@@ -446,10 +449,8 @@ export class DurableRecoveryRunner {
       }
 
       // The round found this node holding the rest of the generation and left these assets to us.
-      const continuation = metaContinuations.get(candidate.peerId);
-      const missingAssetBatches = continuation?.missingAssetBatches;
-      if (continuation && missingAssetBatches && deps.executeExactSlice) {
-        continuation.missingAssetBatches = undefined;
+      const missingAssetBatches = round.decision.strategy === 'exact-missing' ? round.decision.batches : undefined;
+      if (missingAssetBatches && deps.executeExactSlice) {
         health.successfulSlices += 1;
         health.lastSuccessfulTransportAtMs = Date.now();
         const versionOf = (asset: MissingDurableAsset) => `${asset.ual}\0${asset.assertionVersion}`;
@@ -534,7 +535,7 @@ export class DurableRecoveryRunner {
         );
       }
       if (outcome === 'partial-progress') {
-        if ((checkpointAdvanced || manifestRebound) && confirmedHeldCopies.size === confirmedBefore) pullsFullGraph = true;
+        if ((checkpointAdvanced || manifestRebound) && round.decision.strategy === 'full' && round.decision.confirmedCopies === 0) pullsFullGraph = true;
         health.successfulSlices += 1;
         health.lastSuccessfulTransportAtMs = Date.now();
         if ((lastResult.timedOutPhases ?? 0) > 0) health.recentTimeouts += 1;

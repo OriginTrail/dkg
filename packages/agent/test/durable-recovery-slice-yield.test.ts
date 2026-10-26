@@ -1,3 +1,4 @@
+import { durableRecoveryRoundOutcome } from '../src/sync/durable-recovery-round.js';
 import { describe, expect, it } from 'vitest';
 import {
   MemoryLayer,
@@ -10,7 +11,7 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import { SYNC_PAGE_SIZE } from '../src/dkg-agent-constants.js';
 import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { DurableRecoveryRunner, type DurableRecoveryRunnerDependencies } from '../src/sync/durable-recovery-runner.js';
-import { runDurableSync, type DurableMetaContinuation } from '../src/sync/requester/durable-sync.js';
+import { runDurableSyncDetailed, type DurableMetaContinuation } from '../src/sync/requester/durable-sync.js';
 import { deleteSyncPageCheckpoint, fetchSyncPages } from '../src/sync/requester/page-fetch.js';
 import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
 import type { DurableBatchVerificationMode } from '../src/sync-verify-worker.js';
@@ -124,7 +125,7 @@ async function recoverWithSpentSlices(peer: ReturnType<typeof servingPeer>) {
   const info: string[] = [];
   const dataRounds: Array<{ manifestBound: boolean; bounded: boolean }> = [];
   const dataCheckpoints: Array<{ offset: number; terminal: boolean }> = [];
-  const round = (durableMetaContinuation: DurableMetaContinuation) => runDurableSync({
+  const round = (durableMetaContinuation: DurableMetaContinuation) => runDurableSyncDetailed({
     ctx,
     remotePeerId: PEER,
     contextGraphIds: [CG],
@@ -196,7 +197,10 @@ async function recoverWithSpentSlices(peer: ReturnType<typeof servingPeer>) {
     isPrivateContextGraph: async () => false,
     orderPeerIds: (peerIds) => [...peerIds],
     isSyncCapable: async () => true,
-    executeSlice: (_peerId, continuation) => round(continuation),
+    executeSlice: async (_peerId, continuation) => {
+      const detailed = await round(continuation);
+      return durableRecoveryRoundOutcome(detailed.result, detailed.recoveryRound);
+    },
     logDebug: () => {},
     logInfo: (message) => { info.push(message); },
     logWarn: (message) => { info.push(message); },

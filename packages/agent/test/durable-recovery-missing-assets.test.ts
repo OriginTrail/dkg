@@ -1,3 +1,4 @@
+import { durableRecoveryRoundOutcome, type DurableRecoveryRoundOutcome } from '../src/sync/durable-recovery-round.js';
 import { describe, expect, it } from 'vitest';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { createIncompleteDurableSyncResult } from '../src/sync/durable-progress.js';
@@ -7,8 +8,7 @@ import {
   type DurableRecoveryRunnerDependencies,
   type ExactMissingAssetSource,
 } from '../src/sync/durable-recovery-runner.js';
-import type { MissingDurableAsset } from '../src/sync/requester/durable-data-holdings.js';
-import type { DurableMetaContinuation } from '../src/sync/requester/durable-sync.js';
+import type { MissingDurableAsset, DurableHoldingsOptions } from '../src/sync/requester/durable-data-holdings.js';
 
 const GRAPH = 'missing-assets-graph';
 const PEER = 'peer-missing-aaaaaaaa';
@@ -16,7 +16,7 @@ const GENERATION = `sha256:${'e5'.repeat(32)}` as const;
 const PREFIX = `sha256:${'f6'.repeat(32)}` as const;
 const dataKey = getSyncCheckpointKey(PEER, GRAPH, false, 'data');
 
-type Round = (continuation: DurableMetaContinuation, store: MemorySyncCheckpointStore) => Promise<ReturnType<typeof createIncompleteDurableSyncResult>>;
+type Round = (options: DurableHoldingsOptions, store: MemorySyncCheckpointStore) => Promise<DurableRecoveryRoundOutcome>;
 
 const missing = (...assets: Array<[string, string]>): MissingDurableAsset[] => (
   assets.map(([ual, assertionVersion]) => ({ ual, assertionVersion }))
@@ -24,13 +24,14 @@ const missing = (...assets: Array<[string, string]>): MissingDurableAsset[] => (
 
 /** A round that found the rest of the generation held and left these batches to the owner. */
 const leaves = (...batches: MissingDurableAsset[][]): Round => async (continuation) => {
-  if (continuation.ownerFetchesMissingAssets) continuation.missingAssetBatches = batches;
-  return createIncompleteDurableSyncResult();
+  return durableRecoveryRoundOutcome(createIncompleteDurableSyncResult(), continuation.ownerFetchesMissingAssets
+    ? { strategy: 'exact-missing', batches, confirmedCopies: 0 } : { strategy: 'full', confirmedCopies: 0 });
 };
 /** A round that found the whole generation held: it settles the terminal boundary. */
 const held: Round = async (_continuation, store) => {
   store.setManifestBoundOffset(dataKey, 30, GENERATION, Date.now(), PREFIX, true);
-  return { ...createIncompleteDurableSyncResult(), completedPhases: 2, resumedPhases: 1, complete: true };
+  return durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), completedPhases: 2, resumedPhases: 1, complete: true },
+    { strategy: 'held', confirmedCopies: 0 });
 };
 /** A bounded full-graph round that verified the rest of the graph. */
 const pulledAll: Round = held;
@@ -59,7 +60,7 @@ function runner(
     isPrivateContextGraph: async () => false,
     orderPeerIds: (peerIds) => [...peerIds],
     isSyncCapable: async () => true,
-    executeSlice: async (_peerId, continuation) => {
+    executeSlice: async (_peerId, _meta, continuation) => {
       offered.push(continuation.ownerFetchesMissingAssets === true);
       const next = rounds.shift();
       if (!next) throw new Error('no scripted round left');
@@ -152,7 +153,8 @@ describe('durable recovery fetches the assets a held generation lacks', () => {
       if (stored === 0) {
         stored = 10;
         store.setManifestBoundOffset(dataKey, stored, GENERATION, Date.now(), PREFIX);
-        return { ...createIncompleteDurableSyncResult(), checkpointAdvances: 1 };
+        return durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), checkpointAdvances: 1 },
+          { strategy: 'full', confirmedCopies: 0 });
       }
       return leavesOrPulls(missing(['ual-1', '1']))(continuation, store);
     };

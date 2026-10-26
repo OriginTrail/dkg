@@ -1,3 +1,4 @@
+import { durableRecoveryRoundOutcome } from '../src/sync/durable-recovery-round.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createRpcTimeoutError } from '@origintrail-official/dkg-chain';
 import {
@@ -24,7 +25,7 @@ import {
   readHeldGraphScopedAssets,
 } from '../src/sync/requester/durable-data-holdings.js';
 import {
-  runDurableSync,
+  runDurableSyncDetailed,
   type DurableMetaContinuation,
   type DurableSyncContext,
 } from '../src/sync/requester/durable-sync.js';
@@ -154,7 +155,7 @@ type ServingPeer = ReturnType<typeof servingPeer>;
  */
 function node(
   serving: ServingPeer | Record<string, ServingPeer>,
-  options: { holdingsUnreadable?: boolean; chain?: () => readonly AssetFixture[] } = {},
+  options: { holdingsUnreadable?: boolean; chain?: () => readonly AssetFixture[]; subscriptionId?: () => string } = {},
 ) {
   const peers: Record<string, ServingPeer> = 'send' in serving ? { [PEER]: serving as ServingPeer } : serving;
   const chain = options.chain ?? (() => Object.values(peers)[0]!.current());
@@ -167,6 +168,7 @@ function node(
   let chainAnswersPerRound = Number.POSITIVE_INFINITY;
   let chainAnswersLeft = chainAnswersPerRound;
   const holdings = currentHeldGraphScopedAssetsReader({
+    binding: () => ({ onChainId: options.subscriptionId?.() ?? '323', generation: 0 }),
     readHeld: async (request) => {
       if (holdingsUnreadable) throw new Error('store queue wait timeout');
       return heldGraphScopedAssetsReader(store)(request);
@@ -175,15 +177,15 @@ function node(
       if (chainAnswersLeft <= 0) throw createRpcTimeoutError('held chain check exceeded its context-graph deadline');
       chainAnswersLeft -= 1;
       const onChain = chain().find((fixture) => fixture.ual === ual)!;
-      return { merkleRootHex: onChain.rootHex, assertionVersion: BigInt(onChain.version), bound: true };
+      return { merkleRootHex: onChain.rootHex, assertionVersion: BigInt(onChain.version), bound: true, onChainContextGraphId: '323' };
     },
     budget: { createGraphScopedAuthenticationDeadline: () => Date.now() + 60_000 },
   });
   const round = (
     checkpointStore: MemorySyncCheckpointStore,
     remotePeerId: string,
-    roundOptions: Pick<DurableSyncContext, 'durableMetaContinuation' | 'exactAssetSelectionFor' | 'settlementSliceDeadline'>,
-  ) => runDurableSync({
+    roundOptions: Pick<DurableSyncContext, 'durableMetaContinuation' | 'durableRecoveryRound' | 'exactAssetSelectionFor' | 'settlementSliceDeadline'>,
+  ) => runDurableSyncDetailed({
     ctx,
     remotePeerId,
     contextGraphIds: [CG],
@@ -266,17 +268,18 @@ function node(
       isPrivateContextGraph: async () => false,
       orderPeerIds: (peerIds) => [...peerIds],
       isSyncCapable: async () => true,
-      executeSlice: (peerId, durableMetaContinuation: DurableMetaContinuation) => {
+      executeSlice: async (peerId, durableMetaContinuation: DurableMetaContinuation, durableRecoveryRound) => {
         chainAnswersLeft = chainAnswersPerRound;
-        return round(checkpointStore, peerId, {
-          durableMetaContinuation,
+        const detailed = await round(checkpointStore, peerId, {
+          durableMetaContinuation, durableRecoveryRound,
           settlementSliceDeadline: startOptions.sliceSpent ? Date.now() : undefined,
         });
+        return durableRecoveryRoundOutcome(detailed.result, detailed.recoveryRound);
       },
       ...(startOptions.exactRequests === false ? {} : {
         executeExactSlice: async (peerId: string, assetUals: readonly string[]) => {
           const selection = createUalOnlyExactAssetSelection(assetUals);
-          const result = await round(checkpointStore, peerId, { exactAssetSelectionFor: () => selection });
+          const { result } = await round(checkpointStore, peerId, { exactAssetSelectionFor: () => selection });
           return { result, complete: result.complete === true };
         },
       }),
@@ -347,6 +350,46 @@ describe('a restarted Core and a graph it has already recovered', () => {
     expect(restarted.checkpointStore.get(getSyncCheckpointKey(PEER, CG, false, 'data')))
       .toMatchObject({ offset: rowsOf(generation()), terminal: true });
     expect(core.info).toContainEqual(expect.stringContaining('already held at this META generation'));
+  });
+
+  it.each([false, true])('stores new admissible META while skipping held DATA (missing asset: %s)', async (missing) => {
+    const graph = generation();
+    const peer = servingPeer(graph);
+    const core = node(peer);
+    expect((await core.start().recover()).outcome).toBe('terminal');
+    const metaGraph = graph[0]!.meta[0]!.graph;
+    const additions: Quad[] = [
+      { subject: 'urn:held-restart:lifecycle', predicate: 'http://dkg.io/ontology/operationId', object: '"later-operation"', graph: metaGraph },
+      { subject: 'urn:held-restart:reports', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/SubGraph', graph: metaGraph },
+      { subject: 'urn:held-restart:reports', predicate: 'http://dkg.io/ontology/name', object: '"reports"', graph: metaGraph },
+    ];
+    graph[0]!.meta.push(...additions);
+    if (missing) await core.store.dropGraph(graph[1]!.graph);
+    peer.served.dataRows = 0;
+    const recovered = await core.start().recover();
+    expect(recovered.outcome).toBe('terminal');
+    expect(peer.served.dataRows).toBe(missing ? graph[1]!.payload.length : 0);
+    for (const quad of additions) {
+      const object = quad.object.startsWith('"') ? quad.object : `<${quad.object}>`;
+      const result = await core.store.query(`ASK { GRAPH <${quad.graph}> { <${quad.subject}> <${quad.predicate}> ${object} } }`);
+      expect(result).toEqual({ type: 'boolean', value: true });
+    }
+  });
+
+  it('cannot use a held copy from another numeric graph slot as terminal proof', async () => {
+    const peer = servingPeer(generation());
+    let subscriptionId = '323';
+    const core = node(peer, { subscriptionId: () => subscriptionId });
+    expect((await core.start().recover()).outcome).toBe('terminal');
+    // Both slots commit the same name; the chain name-binding proof still succeeds.
+    subscriptionId = '582';
+    peer.served.dataRows = 0;
+    const restarted = core.start();
+    const recovered = await restarted.recover();
+    expect(recovered.outcome).not.toBe('terminal');
+    expect(recovered.result.verifiedHeldAssets).toBe(0);
+    expect(restarted.checkpointStore.get(getSyncCheckpointKey(PEER, CG, false, 'data'))?.terminal).not.toBe(true);
+    expect(peer.served.dataRows).toBe(0);
   });
 
   it('fetches an asset again when its rows were removed and its envelope kept', async () => {

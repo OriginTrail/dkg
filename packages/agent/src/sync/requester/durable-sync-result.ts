@@ -1,7 +1,9 @@
+import type { DurableRecoveryRoundDecision } from '../durable-recovery-round.js';
 import type { InitializedDurableSyncResult } from '../durable-progress.js';
 import type { ExactAssetResponderCapability, ExactDurableFetchDisposition } from './exact-durable-fetch.js';
 
 export interface DetailedDurableSyncResult {
+  readonly recoveryRound?: DurableRecoveryRoundDecision;
   /** Assets whose normal atomic materialization completed, including a partial exact run. */
   readonly committedExactAssetUals?: readonly string[];
   readonly result: InitializedDurableSyncResult;

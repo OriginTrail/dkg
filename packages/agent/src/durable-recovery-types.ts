@@ -1,3 +1,5 @@
+import type { DurableRecoveryRoundDecision } from './sync/durable-recovery-round.js';
+import type { DurableHoldingsOptions } from './sync/requester/durable-data-holdings.js';
 // SPDX-License-Identifier: Apache-2.0
 import { type DurableRecoveryInput } from './durable-recovery-authority.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
@@ -63,6 +65,7 @@ export type DurableRecoveryOptions = {
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
   /** Owner-private retained META prefix for bounded durable recovery. */
   durableMetaContinuation?: DurableMetaContinuation;
+  durableRecoveryRound?: DurableHoldingsOptions;
   /** Admission override for foreground VM recovery. */
   priority?: number;
   /**
@@ -102,6 +105,7 @@ export interface ExactKnowledgeAssetSyncResult {
 }
 
 export type PhysicalDurableSyncResult = {
+  readonly recoveryRound?: DurableRecoveryRoundDecision;
   readonly result: DurableSyncResult;
   readonly exactFetchDisposition?: ExactDurableFetchDisposition;
   readonly exactResponderCapability?: ExactAssetResponderCapability;
@@ -130,6 +134,7 @@ export type DurableGraphOptions = {
   signal?: AbortSignal;
   isCurrent?: () => boolean;
   durableMetaContinuation?: DurableMetaContinuation;
+  durableRecoveryRound?: DurableHoldingsOptions;
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
 };
 

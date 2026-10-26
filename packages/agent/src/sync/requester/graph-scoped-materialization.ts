@@ -138,6 +138,7 @@ export async function authenticateChallengePinnedGraphScopedAsset(
 
 /** Where the chain stands for one graph-scoped asset. */
 export interface GraphScopedAssetChainState {
+  readonly onChainContextGraphId: string;
   readonly merkleRootHex: string;
   readonly assertionVersion: bigint;
   /** The asset is bound on chain to the local context graph. */
@@ -173,6 +174,7 @@ export async function readGraphScopedAssetChainState(
     chain.getKAContextGraphId(kaId, { signal: options.signal }),
   ]);
   return {
+    onChainContextGraphId: boundContextGraphId.toString(),
     merkleRootHex: Buffer.from(latestRoot).toString('hex'),
     assertionVersion: rootCount,
     bound: boundContextGraphId > 0n

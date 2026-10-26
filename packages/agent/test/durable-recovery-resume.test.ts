@@ -1,3 +1,4 @@
+import { durableRecoveryRoundOutcome, type DurableRecoveryRoundOutcome } from '../src/sync/durable-recovery-round.js';
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_SYNC_CHECKPOINT_TTL_MS,
@@ -10,7 +11,6 @@ import {
   liveDurableBoundarySource,
   preferVerifiedDurableBoundary,
   seedVerifiedDurableBoundary,
-  takeRejectedResumeOffset,
   verifiedDurableBoundaryOf,
 } from '../src/sync/durable-recovery-boundary-seed.js';
 import { createIncompleteDurableSyncResult } from '../src/sync/durable-progress.js';
@@ -32,7 +32,7 @@ type Slice = (
   peerId: string,
   store: MemorySyncCheckpointStore,
   continuation: DurableMetaContinuation,
-) => Promise<ReturnType<typeof createIncompleteDurableSyncResult>>;
+) => Promise<DurableRecoveryRoundOutcome>;
 
 function runner(peers: string[], slices: Record<string, Slice[]>, store = new MemorySyncCheckpointStore()) {
   const atSliceStart: Array<{ peerId: string; checkpoint?: SyncCheckpointEntry }> = [];
@@ -64,17 +64,17 @@ function runner(peers: string[], slices: Record<string, Slice[]>, store = new Me
 /** A slice that verified and stored the graphs up to `offset` of `GENERATION`. */
 const advanceTo = (offset: number, prefix: `sha256:${string}`, terminal = false): Slice => async (peerId, store) => {
   store.setManifestBoundOffset(dataKey(peerId), offset, GENERATION, undefined, prefix, terminal);
-  return { ...createIncompleteDurableSyncResult(), complete: terminal };
+  return durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), complete: terminal }, { strategy: 'full', confirmedCopies: 0 });
 };
 const failWith = (message: string): Slice => async () => { throw new Error(message); };
 /** A DATA round whose rows did not start the next manifest graph after the boundary it resumed at. */
-const refuseResume: Slice = async (peerId, store, continuation) => {
+const refuseResume: Slice = async (peerId, store) => {
   const resumedAt = store.get(dataKey(peerId))?.offset ?? 0;
   store.delete(dataKey(peerId));
-  continuation.rejectedResumeOffset = resumedAt;
-  return { ...createIncompleteDurableSyncResult(), failedPhases: 1 };
+  return durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), failedPhases: 1 },
+    { strategy: 'full', confirmedCopies: 0, rejectedResumeOffset: resumedAt });
 };
-const noProgress: Slice = async () => createIncompleteDurableSyncResult();
+const noProgress: Slice = async () => durableRecoveryRoundOutcome(createIncompleteDurableSyncResult());
 
 describe('durable recovery continues a verified prefix with another peer', () => {
   it('seeds the next peer with the verified boundary instead of row 0', async () => {
@@ -240,12 +240,7 @@ describe('durable recovery continues a verified prefix with another peer', () =>
     expect(store.get(dataKey('peer-bbbbbbbb'))).toMatchObject({ offset: 20, terminal: true });
   });
 
-  it('reads and clears the boundary a round refused', () => {
-    const continuation: Pick<DurableMetaContinuation, 'rejectedResumeOffset'> = { rejectedResumeOffset: 10 };
-    expect(takeRejectedResumeOffset(continuation)).toBe(10);
-    expect(continuation.rejectedResumeOffset).toBeUndefined();
-    expect(takeRejectedResumeOffset(continuation)).toBeUndefined();
-    expect(takeRejectedResumeOffset(undefined)).toBeUndefined();
+  it('identifies refused boundaries by generation and offset', () => {
     expect(durableBoundaryIdentity(GENERATION, 10)).not.toBe(durableBoundaryIdentity(GENERATION, 20));
     expect(durableBoundaryIdentity(undefined, 10)).not.toBe(durableBoundaryIdentity(GENERATION, 10));
   });

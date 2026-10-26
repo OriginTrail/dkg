@@ -1,3 +1,4 @@
+import type { DurableRecoveryRoundDecision } from './sync/durable-recovery-round.js';
 // SPDX-License-Identifier: Apache-2.0
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
 import { type DurableRecoveryAuthority } from './durable-recovery-authority.js';
@@ -70,6 +71,7 @@ export async function runDurableRecovery(request: DurableRecoveryRequest): Promi
   const committedExactAssetUals: string[] = [];
   // What the stream established about this peer for one graph. A run over
   // several graphs has no single answer, so it reports none.
+  let recoveryRound: DurableRecoveryRoundDecision | undefined;
   let exactStreamOutcome: ExactBatchStreamOutcome | undefined;
   const markExactFetchIncomplete = () => {
     if (exactAssetUals === undefined) return;
@@ -103,6 +105,7 @@ export async function runDurableRecovery(request: DurableRecoveryRequest): Promi
               signal: operationBoundary.signal,
               isCurrent: options?.isCurrent,
               durableMetaContinuation: options?.durableMetaContinuation,
+              durableRecoveryRound: options?.durableRecoveryRound,
             },
           });
           if (detailed.exactFetchDisposition !== undefined) {
@@ -121,7 +124,7 @@ export async function runDurableRecovery(request: DurableRecoveryRequest): Promi
           if (detailed.committedExactAssetUals !== undefined) {
             committedExactAssetUals.push(...detailed.committedExactAssetUals);
           }
-          if (orderedContextGraphIds.length === 1) exactStreamOutcome = detailed.exactStreamOutcome;
+          if (orderedContextGraphIds.length === 1) { exactStreamOutcome = detailed.exactStreamOutcome; recoveryRound = detailed.recoveryRound; }
           return durableSyncAccumulatorFromResult(detailed.result);
         },
       })),
@@ -180,6 +183,7 @@ export async function runDurableRecovery(request: DurableRecoveryRequest): Promi
     });
     return {
       admission: admissionBoundary.snapshot(),
+      ...(recoveryRound ? { recoveryRound } : {}),
       result: finalizeDurableSyncCompletion(accumulator),
       ...(exactFetchDisposition ? { exactFetchDisposition } : {}),
       ...(exactResponderCapability ? { exactResponderCapability } : {}),

@@ -45,6 +45,7 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
     signal,
     isCurrent,
     durableMetaContinuation,
+    durableRecoveryRound,
   } = options;
   const exactAssetFetchPolicy = options.exactAssetFetchPolicy;
   const exactAssetSelection = exactAssetFetchPolicy?.selection;
@@ -94,8 +95,10 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
       ? () => exactAssetFetchPolicy
       : undefined,
     durableMetaContinuation,
+    durableRecoveryRound,
     heldGraphScopedAssets: currentHeldGraphScopedAssetsReader({
       readHeld: host.readHeldGraphScopedAssets,
+      binding: materialization.heldAssetBinding,
       readChainState: authority.readHeldAssetChainState?.bind(authority),
       budget: contextGraphBudget,
     }),
@@ -160,5 +163,5 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
       case 'unsupported-before-start': return runDurableSyncDetailed(durableContext);
     }
   }
-  return { result: await runDurableSync(durableContext) };
+  return durableMetaContinuation ? runDurableSyncDetailed(durableContext) : { result: await runDurableSync(durableContext) };
 }

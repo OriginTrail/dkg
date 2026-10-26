@@ -28,7 +28,7 @@ import {
   readHeldGraphScopedAssets,
   settleDurableDataFromHoldings,
   settleHeldDurableData,
-  type DurableHoldingsChannel,
+  type DurableHoldingsOptions,
   type DurableHoldingsReader,
 } from '../src/sync/requester/durable-data-holdings.js';
 import { materializeVerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
@@ -228,16 +228,17 @@ describe('planning a DATA phase from holdings', () => {
 
   it('hands a fetch-missing plan to the owner and plans nothing when the store read fails', async () => {
     const manifest = generation(3);
-    const channel: DurableHoldingsChannel = { ownerFetchesMissingAssets: true };
-    const plan = await planDurableDataFromLocalHoldings({
+    const channel: DurableHoldingsOptions = { ownerFetchesMissingAssets: true };
+    const outcome = await planDurableDataFromLocalHoldings({
       contextGraphId: CG,
       manifest,
-      channel,
+      options: channel,
       holdings: { read: async () => new Set(uals(manifest).slice(1)), confirmCurrent: async () => {} },
       logWarn: () => {},
     });
+    const plan = outcome.plan;
     expect(plan?.kind).toBe('fetch-missing');
-    expect(channel.missingAssetBatches).toEqual([[{ ual: uals(manifest)[0], assertionVersion: '1' }]]);
+    expect(plan?.kind === 'fetch-missing' ? plan.batches : undefined).toEqual([[{ ual: uals(manifest)[0], assertionVersion: '1' }]]);
     expect(describeDurableHoldingsPlan(CG, manifest, plan as Exclude<typeof plan, undefined | { kind: 'full' }>))
       .toContain('2 of 3 assets already held; leaving 1 asset(s) (3 rows) to 1 exact request(s)');
 
@@ -245,11 +246,11 @@ describe('planning a DATA phase from holdings', () => {
     const failed = await planDurableDataFromLocalHoldings({
       contextGraphId: CG,
       manifest,
-      channel: {},
+      options: {},
       holdings: { read: async () => { throw new Error('store queue wait timeout'); }, confirmCurrent: async () => {} },
       logWarn,
     });
-    expect(failed).toBeUndefined();
+    expect(failed).toEqual({ confirmedCopies: 0 });
     expect(logWarn).toHaveBeenCalledWith(expect.stringContaining('store queue wait timeout'));
 
     const aborted = new AbortController();
@@ -257,7 +258,7 @@ describe('planning a DATA phase from holdings', () => {
     await expect(planDurableDataFromLocalHoldings({
       contextGraphId: CG,
       manifest,
-      channel: {},
+      options: {},
       holdings: { read: async () => { throw new Error('aborted read'); }, confirmCurrent: async () => {} },
       signal: aborted.signal,
       logWarn,
@@ -267,7 +268,7 @@ describe('planning a DATA phase from holdings', () => {
     await expect(planDurableDataFromLocalHoldings({
       contextGraphId: CG,
       manifest,
-      channel: {},
+      options: {},
       holdings: {
         read: async () => new Set(uals(manifest)),
         confirmCurrent: async () => { throw new HeldGenerationNotCurrentError('behind the chain'); },
@@ -282,17 +283,17 @@ describe('planning a DATA phase from holdings', () => {
     const plan = (held: readonly string[], ownerFetchesMissingAssets: boolean) => planDurableDataFromLocalHoldings({
       contextGraphId: CG,
       manifest,
-      channel: { ownerFetchesMissingAssets },
+      options: { ownerFetchesMissingAssets },
       holdings: { read: async () => new Set(held), confirmCurrent },
       logWarn: () => {},
     });
 
     // Full-graph rounds authenticate everything they fetch, as a first recovery's rounds do.
-    expect(await plan(uals(manifest).slice(1), false)).toMatchObject({ kind: 'full' });
-    expect(await plan([], true)).toMatchObject({ kind: 'full' });
+    expect(await plan(uals(manifest).slice(1), false)).toMatchObject({ plan: { kind: 'full' } });
+    expect(await plan([], true)).toMatchObject({ plan: { kind: 'full' } });
     expect(confirmCurrent).not.toHaveBeenCalled();
-    expect(await plan(uals(manifest).slice(1), true)).toMatchObject({ kind: 'fetch-missing' });
-    expect(await plan(uals(manifest), true)).toMatchObject({ kind: 'held' });
+    expect(await plan(uals(manifest).slice(1), true)).toMatchObject({ plan: { kind: 'fetch-missing' } });
+    expect(await plan(uals(manifest), true)).toMatchObject({ plan: { kind: 'held' } });
     expect(confirmCurrent).toHaveBeenCalledTimes(2);
   });
 
@@ -375,13 +376,13 @@ describe('planning a DATA phase from holdings', () => {
 });
 
 describe('holding a copy only while it is current on chain', () => {
-  type ChainState = { merkleRootHex: string; assertionVersion: bigint; bound: boolean };
+  type ChainState = { onChainContextGraphId: string; merkleRootHex: string; assertionVersion: bigint; bound: boolean };
   const generation = (count = 3) => manifestOf(Array.from({ length: count }, (_, index) => asset(index + 1)));
   const currentOf = (manifest: GraphScopedDurableManifestPlan) => new Map<string, ChainState>(
     manifest.descriptors.map((descriptor) => [descriptor.ual, {
       merkleRootHex: descriptor.claimedRootHex,
       assertionVersion: BigInt(descriptor.assertionVersion),
-      bound: true,
+      bound: true, onChainContextGraphId: '9',
     }]),
   );
   function reader(
@@ -404,6 +405,29 @@ describe('holding a copy only while it is current on chain', () => {
   }
   const confirm = (holdings: DurableHoldingsReader, manifest: GraphScopedDurableManifestPlan, held: readonly string[],
     signal?: AbortSignal) => holdings.confirmCurrent({ contextGraphId: CG, descriptors: manifest.descriptors, signal }, new Set(held));
+
+  it('rechecks a cached held copy when the numeric subscription binding changes', async () => {
+    const manifest = generation(1);
+    const descriptor = manifest.descriptors[0]!;
+    let onChainId = '323';
+    const readChainState = vi.fn(async () => ({
+      merkleRootHex: descriptor.claimedRootHex, assertionVersion: BigInt(descriptor.assertionVersion),
+      bound: true, onChainContextGraphId: '323',
+    }));
+    const holdings = currentHeldGraphScopedAssetsReader({
+      readHeld: async () => new Set([descriptor.ual]), readChainState,
+      binding: () => ({ onChainId, generation: 0 }),
+      budget: { createGraphScopedAuthenticationDeadline: () => Date.now() + 1000 },
+    })!;
+    const confirmed = new Set<string>();
+    const request = { contextGraphId: CG, descriptors: manifest.descriptors };
+    await holdings.confirmCurrent(request, new Set([descriptor.ual]), confirmed);
+    await holdings.confirmCurrent(request, new Set([descriptor.ual]), confirmed);
+    expect(readChainState).toHaveBeenCalledTimes(1);
+    onChainId = '582';
+    await expect(holdings.confirmCurrent(request, new Set([descriptor.ual]), confirmed)).rejects.toBeInstanceOf(HeldGenerationNotCurrentError);
+    expect(readChainState).toHaveBeenCalledTimes(2);
+  });
 
   it('confirms held copies the chain shows current, and reads only those', async () => {
     const manifest = generation();
@@ -458,20 +482,20 @@ describe('holding a copy only while it is current on chain', () => {
     const manifest = generation(300);
     const answered = new Map([...currentOf(manifest)].slice(0, 100));
     const holdings = reader(answered);
-    const channel: DurableHoldingsChannel = { ownerFetchesMissingAssets: true };
+    const channel: DurableHoldingsOptions = { ownerFetchesMissingAssets: true };
     const logWarn = vi.fn();
 
     const plan = await planDurableDataFromLocalHoldings({
       contextGraphId: CG,
       manifest,
-      channel,
+      options: channel,
       holdings: { read: async () => new Set(manifest.descriptors.map((descriptor) => descriptor.ual)), confirmCurrent: holdings.confirmCurrent },
       logWarn,
     });
 
     // No shortcut this round, and no failure: the round pulls the graph in bounded rounds.
-    expect(plan).toBeUndefined();
-    expect(channel.missingAssetBatches).toBeUndefined();
+    expect(plan.plan).toBeUndefined();
+    expect(plan.confirmedCopies).toBe(100);
     expect(logWarn).toHaveBeenCalledWith(expect.stringContaining("against the chain within the round's budget"));
   });
 

@@ -27,7 +27,7 @@ describe('the chain views of a held graph-scoped asset', () => {
       getLatestMerkleRoot: async (kaId: bigint) => { asked.push(kaId); return ROOT; },
     }), COPY, verifyBinding);
 
-    expect(state).toEqual({ merkleRootHex: '5a'.repeat(32), assertionVersion: 3n, bound: true });
+    expect(state).toEqual({ merkleRootHex: '5a'.repeat(32), assertionVersion: 3n, bound: true, onChainContextGraphId: '9' });
     expect(asked).toEqual([KA_ID]);
   });
 
@@ -61,7 +61,7 @@ describe('the chain views of a held graph-scoped asset', () => {
     });
     await expect(readHeldGraphScopedAssetChainStateWithinDeadline({
       chain: flaky, copy: COPY, verifyContextGraphBinding: async () => true, deadline: Date.now() + 30_000,
-    })).resolves.toMatchObject({ assertionVersion: 3n, bound: true });
+    })).resolves.toMatchObject({ assertionVersion: 3n, bound: true, onChainContextGraphId: '9' });
     expect(reads).toBe(2);
 
     await expect(readHeldGraphScopedAssetChainStateWithinDeadline({
@@ -80,7 +80,7 @@ describe('the chain views of a held graph-scoped asset', () => {
 
     for (let read = 0; read < 2; read += 1) {
       await expect(authority.readHeldAssetChainState!(COPY, Date.now() + 30_000))
-        .resolves.toEqual({ merkleRootHex: '5a'.repeat(32), assertionVersion: 3n, bound: true });
+        .resolves.toEqual({ merkleRootHex: '5a'.repeat(32), assertionVersion: 3n, bound: true, onChainContextGraphId: '9' });
     }
     expect(verifyContextGraphBinding).toHaveBeenCalledOnce();
     expect(verifyContextGraphBinding.mock.calls[0]!.slice(0, 2)).toEqual([COPY.contextGraphId, '9']);

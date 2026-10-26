@@ -22,6 +22,7 @@ import { DEFAULT_DURABLE_DATA_ROUND_BUDGET, type DurableDataRoundBudget } from '
 import type { DurableSyncContext } from './durable-sync.js';
 import type { GraphScopedAssetChainState } from './graph-scoped-materialization.js';
 import type { SyncPageResult } from './page-fetch.js';
+import { assertNoLegacyRfc64ControlGraphs, partitionVerifiedGraphScopedAssets } from './verified-asset-preparation.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 
@@ -54,17 +55,15 @@ export interface MissingDurableAsset {
  * node lacks. The owner fetches a few such assets with exact requests; a round
  * that finds only those missing leaves them to it instead of pulling the graph.
  */
-export interface DurableHoldingsChannel {
+export interface DurableHoldingsOptions {
   /** Set by the owner when it fetches missing assets itself. */
-  ownerFetchesMissingAssets?: boolean;
-  /** Set by a round that left its missing assets to the owner: one exact request each. */
-  missingAssetBatches?: readonly (readonly MissingDurableAsset[])[];
+  readonly ownerFetchesMissingAssets?: boolean;
   /**
    * Held copies the owner's run has confirmed current on chain, shared by its
    * rounds: a round whose checks ran out of budget leaves the next round only
    * the rest. A full-graph run likewise authenticates each asset once.
    */
-  confirmedHeldCopies?: Set<string>;
+  readonly confirmedHeldCopies?: Set<string>;
 }
 
 export type DurableHoldingsPlan =
@@ -190,6 +189,7 @@ export interface DurableHoldingsReader {
     request: HeldGraphScopedAssetsRequest,
     held: ReadonlySet<string>,
     confirmed?: Set<string>,
+    onConfirmed?: () => void,
   ): Promise<void>;
 }
 
@@ -199,6 +199,7 @@ const heldCopyKey = (descriptor: GraphScopedDescriptor) =>
 /** A store read and a chain read make a holdings reader; without either, rounds plan no shortcut. */
 export function currentHeldGraphScopedAssetsReader(input: {
   readonly readHeld?: (request: HeldGraphScopedAssetsRequest) => Promise<ReadonlySet<string>>;
+  readonly binding?: () => Readonly<{ onChainId?: string; generation: number }>;
   readonly readChainState?: (copy: { readonly ual: string; readonly contextGraphId: string },
     deadline: number, signal?: AbortSignal) => Promise<GraphScopedAssetChainState>;
   /** The round's budget: the chain checks share one authentication deadline. */
@@ -208,15 +209,19 @@ export function currentHeldGraphScopedAssetsReader(input: {
   if (!readHeld || !readChainState) return undefined;
   return {
     read: readHeld,
-    confirmCurrent: async (request, held, confirmed) => {
+    confirmCurrent: async (request, held, confirmed, onConfirmed) => {
       const deadline = Math.min(
         input.budget.createGraphScopedAuthenticationDeadline(),
         Date.now() + HELD_CHAIN_CHECK_BUDGET_MS,
       );
       const { contextGraphId } = request;
+      const binding = input.binding?.();
+      const bindingKey = (value: typeof binding) => `${contextGraphId}\0${value?.generation ?? ''}\0${value?.onChainId ?? ''}`;
+      const capturedBinding = bindingKey(binding);
+      const cacheKey = (descriptor: GraphScopedDescriptor) => `${capturedBinding}\0${heldCopyKey(descriptor)}`;
       await mapWithConcurrencyDrained(
         request.descriptors.filter((descriptor) => held.has(descriptor.ual)
-          && !confirmed?.has(heldCopyKey(descriptor))),
+          && !confirmed?.has(cacheKey(descriptor))),
         HELD_CHAIN_CHECK_CONCURRENCY,
         async (descriptor) => {
           const { ual, assertionVersion, claimedRootHex } = descriptor;
@@ -231,7 +236,7 @@ export function currentHeldGraphScopedAssetsReader(input: {
               { cause: error },
             );
           }
-          if (!state.bound) {
+          if (!state.bound || (binding?.onChainId !== undefined && binding.onChainId !== state.onChainContextGraphId)) {
             throw new HeldGenerationNotCurrentError(`Held asset ${ual} is not bound to "${contextGraphId}" on chain`);
           }
           if (state.assertionVersion !== BigInt(assertionVersion) || state.merkleRootHex !== claimedRootHex) {
@@ -240,9 +245,13 @@ export function currentHeldGraphScopedAssetsReader(input: {
                 + `${state.assertionVersion} on chain, ${assertionVersion} here and at the peer`,
             );
           }
-          confirmed?.add(heldCopyKey(descriptor));
+          confirmed?.add(cacheKey(descriptor));
+          onConfirmed?.();
         },
       );
+      if (input.binding && bindingKey(input.binding()) !== capturedBinding) {
+        throw new HeldGenerationNotCurrentError(`Local binding for "${contextGraphId}" changed during held-copy checks`);
+      }
     },
   };
 }
@@ -320,19 +329,20 @@ export function planDurableDataFromHoldings(
 export async function planDurableDataFromLocalHoldings(input: {
   readonly contextGraphId: string;
   readonly manifest: GraphScopedDurableManifestPlan;
-  readonly channel: DurableHoldingsChannel;
+  readonly options: DurableHoldingsOptions;
   readonly holdings: DurableHoldingsReader;
   readonly signal?: AbortSignal;
   readonly logWarn: (message: string) => void;
-}): Promise<DurableHoldingsPlan | undefined> {
-  const { contextGraphId, manifest, channel, holdings } = input;
+}): Promise<{ plan?: DurableHoldingsPlan; confirmedCopies: number }> {
+  const { contextGraphId, manifest, options, holdings } = input;
+  let confirmedCopies = 0;
   const request = { contextGraphId, descriptors: manifest.descriptors, signal: input.signal };
   let plan: DurableHoldingsPlan;
   try {
     const held = await holdings.read(request);
-    plan = planDurableDataFromHoldings(manifest, held, channel.ownerFetchesMissingAssets === true);
+    plan = planDurableDataFromHoldings(manifest, held, options.ownerFetchesMissingAssets === true);
     // Full-graph rounds authenticate every asset they fetch: only a plan that skips held copies asks the chain.
-    if (plan.kind !== 'full') await holdings.confirmCurrent(request, held, channel.confirmedHeldCopies);
+    if (plan.kind !== 'full') await holdings.confirmCurrent(request, held, options.confirmedHeldCopies, () => { confirmedCopies += 1; });
   } catch (error) {
     input.signal?.throwIfAborted();
     if (error instanceof HeldGenerationNotCurrentError) throw error;
@@ -340,10 +350,9 @@ export async function planDurableDataFromLocalHoldings(input: {
       `Could not establish which assets of "${contextGraphId}" this node holds; fetching the graph: `
         + `${error instanceof Error ? error.message : String(error)}`,
     );
-    return undefined;
+    return { confirmedCopies };
   }
-  if (plan.kind === 'fetch-missing') channel.missingAssetBatches = plan.batches;
-  return plan;
+  return { plan, confirmedCopies };
 }
 
 /**
@@ -408,4 +417,38 @@ export function describeDurableHoldingsPlan(
     : `Durable data for "${contextGraphId}": ${plan.held} of ${manifest.descriptors.length} assets already held; `
       + `leaving ${manifest.descriptors.length - plan.held} asset(s) (${plan.rows} rows) `
       + `to ${plan.batches.length} exact request(s)`;
+}
+
+/** Preserve admissible META even when local holdings replace the DATA transfer. */
+export async function persistDurableHoldingsMetadata(
+  context: Pick<DurableSyncContext, 'ctx' | 'signal' | 'processDurableBatchInWorker' | 'storeInsert' | 'admitVerifiedPage'>,
+  contextGraphId: string,
+  meta: SyncPageResult,
+  accumulator: DurableSyncAccumulator,
+): Promise<void> {
+  context.signal?.throwIfAborted();
+  // No assertion payload was fetched. Its envelope is already held or belongs
+  // to a later exact request; only independently admissible META may be stored.
+  const processed = await context.processDurableBatchInWorker([], meta.quads, context.ctx, false,
+    { kind: 'changelogPage', changedDataGraphs: [] });
+  context.signal?.throwIfAborted();
+  if (processed.rejectedKcs > 0 || processed.dataRejectedMissingMeta > 0) {
+    recordDurableSyncDiagnostics(accumulator, { rejectedKcs: processed.rejectedKcs,
+      dataRejectedMissingMeta: processed.dataRejectedMissingMeta });
+    throw new Error('Held durable generation has rejected metadata');
+  }
+  assertNoLegacyRfc64ControlGraphs(contextGraphId, processed.verifiedData, processed.verifiedMeta,
+    processed.verifiedGraphScopedDataGraphs ?? []);
+  const partitioned = partitionVerifiedGraphScopedAssets(contextGraphId, processed.verifiedData, processed.verifiedMeta,
+    processed.verifiedGraphScopedDataGraphs ?? []);
+  context.admitVerifiedPage?.(partitioned);
+  if (partitioned.assets.length > 0 || partitioned.remainingData.length > 0) {
+    throw new Error('Held metadata verification unexpectedly selected unfetched DATA');
+  }
+  if (partitioned.remainingMeta.length > 0) {
+    await context.storeInsert({ quads: partitioned.remainingMeta, signal: context.signal });
+    recordDurableSyncDiagnostics(accumulator, { insertedTriples: partitioned.remainingMeta.length,
+      insertedMetaTriples: partitioned.remainingMeta.length });
+  }
+  context.signal?.throwIfAborted();
 }

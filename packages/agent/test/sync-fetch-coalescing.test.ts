@@ -1713,10 +1713,10 @@ describe('DKGAgent sync fetch coalescing', () => {
       (agent as any).refreshMetaSyncedFlags = async () => undefined;
       (agent.node.libp2p as any).getConnections = () => [{ remotePeer }];
       (agent.node.libp2p.peerStore as any).get = async () => ({ protocols: [PROTOCOL_SYNC] });
-      (agent as any).syncFromPeerDetailed = async () => {
+      stubDurableSync(agent, async () => {
         durableSyncs++;
         return durableResponse.promise;
-      };
+      });
 
       const first = agent.syncContextGraphFromConnectedPeers('coalesced-cg');
       const second = agent.syncContextGraphFromConnectedPeers('coalesced-cg');
@@ -1751,7 +1751,7 @@ describe('DKGAgent sync fetch coalescing', () => {
       await agent.start();
       (agent as any).waitForSyncProtocol = async () => true;
       (agent as any).refreshMetaSyncedFlags = async () => undefined;
-      (agent as any).syncFromPeerDetailed = async (
+      stubDurableSync(agent, async (
         _peerId: string,
         _contextGraphIds: string[],
         _onPhase: unknown,
@@ -1770,7 +1770,7 @@ describe('DKGAgent sync fetch coalescing', () => {
               deferredBackpressure: 1,
             }
           : cleanDurableSyncResult();
-      };
+      });
       (agent as any).syncSharedMemoryFromPeerDetailed = async (
         _peerId: string,
         _contextGraphIds: string[],
@@ -1825,12 +1825,12 @@ describe('DKGAgent sync fetch coalescing', () => {
       (agent as any).refreshMetaSyncedFlags = async () => undefined;
       (agent.node.libp2p as any).getConnections = () => [{ remotePeer }];
       (agent.node.libp2p.peerStore as any).get = async () => ({ protocols: [PROTOCOL_SYNC] });
-      (agent as any).syncFromPeerDetailed = async () => ({
+      stubDurableSync(agent, async () => ({
         ...cleanDurableSyncResult(),
         insertedTriples: 3,
         insertedDataTriples: 3,
         rejectedKcs: 1,
-      });
+      }));
 
       const result = await agent.syncContextGraphFromConnectedPeers('coalesced-cg');
 
@@ -1859,7 +1859,7 @@ describe('DKGAgent sync fetch coalescing', () => {
       (agent as any).refreshMetaSyncedFlags = async () => undefined;
       (agent.node.libp2p as any).getConnections = () => [{ remotePeer }];
       (agent.node.libp2p.peerStore as any).get = async () => ({ protocols: [PROTOCOL_SYNC] });
-      (agent as any).syncFromPeerDetailed = async () => heldGenerationRoundResult(agent, 'coalesced-cg', PEER_A);
+      stubDurableSync(agent, async () => heldGenerationRoundResult(agent, 'coalesced-cg', PEER_A));
       const projectSynced = vi.fn();
       agent.eventBus.on(DKGEvent.PROJECT_SYNCED, projectSynced);
       expect(agent.getSubscribedContextGraphs().get('coalesced-cg')?.synced).not.toBe(true);
@@ -1894,14 +1894,14 @@ describe('DKGAgent sync fetch coalescing', () => {
       (agent as any).refreshMetaSyncedFlags = async () => undefined;
       (agent.node.libp2p as any).getConnections = () => [{ remotePeer }];
       (agent.node.libp2p.peerStore as any).get = async () => ({ protocols: [PROTOCOL_SYNC] });
-      (agent as any).syncFromPeerDetailed = async () => ({
+      stubDurableSync(agent, async () => ({
         ...cleanDurableSyncResult(),
         complete: false,
         insertedTriples: 40_000,
         fetchedDataTriples: 40_000,
         insertedDataTriples: 40_000,
         checkpointAdvances: 1,
-      });
+      }));
 
       const result = await agent.syncContextGraphFromConnectedPeers('coalesced-cg');
 
@@ -1933,7 +1933,7 @@ describe('DKGAgent sync fetch coalescing', () => {
       (agent as any).ensurePeerConnected = async () => undefined;
       (agent as any).ensurePeerAdmittedForRecovery = async () => true;
       (agent as any).isPrivateContextGraph = async () => false;
-      (agent as any).syncFromPeerDetailed = async () => {
+      stubDurableSync(agent, async () => {
         slices += 1;
         if (slices === 1) {
           (agent as any).syncCheckpoints.setManifestBoundOffset(
@@ -1960,7 +1960,7 @@ describe('DKGAgent sync fetch coalescing', () => {
           true,
         );
         return { ...cleanDurableSyncResult(), complete: true };
-      };
+      });
 
       const result = await agent.syncDurableRecoveryContextGraph(contextGraphId, {
         candidatePeerIds: [PEER_A],
@@ -2008,7 +2008,7 @@ describe('DKGAgent sync fetch coalescing', () => {
         probed.push(peer.toString());
         return false;
       };
-      (agent as any).syncFromPeerDetailed = async (peerId: string) => {
+      stubDurableSync(agent, async (peerId: string) => {
         expect(peerId).toBe(PEER_A);
         const key = getSyncCheckpointKey(peerId, contextGraphId, false, 'data');
         (agent as any).syncCheckpoints.setManifestBoundOffset(
@@ -2020,7 +2020,7 @@ describe('DKGAgent sync fetch coalescing', () => {
           true,
         );
         return { ...cleanDurableSyncResult(), complete: true };
-      };
+      });
 
       const result = await agent.syncDurableRecoveryContextGraph(contextGraphId, {
         candidatePeerIds: [PEER_A],
@@ -2071,10 +2071,10 @@ describe('DKGAgent sync fetch coalescing', () => {
         (agent as any).refreshMetaSyncedFlags = async () => undefined;
         (agent.node.libp2p as any).getConnections = () => [{ remotePeer }];
         (agent.node.libp2p.peerStore as any).get = async () => ({ protocols: [PROTOCOL_SYNC] });
-        (agent as any).syncFromPeerDetailed = async () => {
+        stubDurableSync(agent, async () => {
           durableSyncs++;
           return cleanDurableSyncResult();
-        };
+        });
         (agent as any).syncSharedMemoryFromPeerDetailed = async () => cleanSharedMemorySyncResult();
 
         await Promise.all([
@@ -2110,7 +2110,7 @@ describe('DKGAgent sync fetch coalescing', () => {
         peers: Array<{ toString(): string }>,
         options: { peerRotationKey?: string },
       ) => options.peerRotationKey === 'window-a' ? [peers[0]] : [peers[1]];
-      (agent as any).syncFromPeerDetailed = async () => cleanDurableSyncResult();
+      stubDurableSync(agent, async () => cleanDurableSyncResult());
       (agent as any).syncSharedMemoryFromPeerDetailed = async () =>
         cleanSharedMemorySyncResult();
 
@@ -2152,7 +2152,7 @@ describe('DKGAgent sync fetch coalescing', () => {
       (agent as any).waitForSyncProtocol = async () => true;
       (agent.node.libp2p as any).getConnections = () => [{ remotePeer }];
       (agent.node.libp2p.peerStore as any).get = async () => ({ protocols: [PROTOCOL_SYNC] });
-      (agent as any).syncFromPeerDetailed = async () => cleanDurableSyncResult();
+      stubDurableSync(agent, async () => cleanDurableSyncResult());
       (agent as any).syncSharedMemoryFromPeerDetailed = async () => {
         sharedSyncs += 1;
         return cleanSharedMemorySyncResult();
@@ -2276,7 +2276,7 @@ describe('DKGAgent sync fetch coalescing', () => {
         { remotePeer: peerB },
       ];
       (agent.node.libp2p.peerStore as any).get = async () => ({ protocols: [PROTOCOL_SYNC] });
-      (agent as any).syncFromPeerDetailed = async () => cleanDurableSyncResult();
+      stubDurableSync(agent, async () => cleanDurableSyncResult());
       (agent as any).syncSharedMemoryFromPeerDetailed = async (remotePeerId: string) => {
         sharedSyncPeers.push(remotePeerId);
         // Fresh objects per call: returning a shared const would let an
@@ -2402,10 +2402,10 @@ describe('DKGAgent sync fetch coalescing', () => {
       (agent as any).refreshMetaSyncedFlags = async () => undefined;
       (agent.node.libp2p as any).getConnections = () => [{ remotePeer }];
       (agent.node.libp2p.peerStore as any).get = async () => ({ protocols: [PROTOCOL_SYNC] });
-      (agent as any).syncFromPeerDetailed = async (peerId: string) => {
+      stubDurableSync(agent, async (peerId: string) => {
         durableCalls.push(peerId);
         return cleanDurableSyncResult();
-      };
+      });
       (agent as any).syncSharedMemoryFromPeerDetailed = async (peerId: string) => {
         sharedCalls.push(peerId);
         const resolved = sharedCalls.length === 1 ? 2 : 3;
@@ -2466,7 +2466,7 @@ describe('DKGAgent sync fetch coalescing', () => {
       await agent.start();
       (agent as any).waitForSyncProtocol = async () => true;
       (agent as any).refreshMetaSyncedFlags = async () => undefined;
-      (agent as any).syncFromPeerDetailed = async () => cleanDurableSyncResult();
+      stubDurableSync(agent, async () => cleanDurableSyncResult());
       (agent as any).syncSharedMemoryFromPeerDetailed = async () => {
         sharedCalls += 1;
         return {
@@ -2495,3 +2495,11 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 });
+
+/** Stub both the public diagnostic facade and the internal round executor. */
+function stubDurableSync(agent: DKGAgent, sync: DKGAgent['syncFromPeerDetailed']) {
+  agent.syncFromPeerDetailed = sync;
+  (agent as any).runLegacyDurableSyncDetailed = async (_ctx: unknown, ...args: Parameters<typeof sync>) => ({
+    result: await sync(...args), recoveryRound: { strategy: 'full', confirmedCopies: 0 },
+  });
+}

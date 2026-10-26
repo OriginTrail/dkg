@@ -352,12 +352,13 @@ test('a report that must stay in shared memory fails at the first reading that m
   // Missing at the first reading and present later: a failure too.
   assert.equal((await kept(age => age >= 100)).outcome, 'fail');
   // Missing at the check after the watch was closed.
-  let closedAt = Infinity;
-  const stub = wholeReportNode(cg, () => Date.now() < closedAt);
+  let handle;
+  // Change the fixture only for the post-close confirmation. close() includes
+  // one final millisecond, which can still contain an ordinary poll.
+  const stub = wholeReportNode(cg, () => handle?.pairs[0].confirm === undefined);
   const io = reportsOver(stub.api);
-  const handle = io.watch(io.pairs(4, wholeReport(cg, stub.started), [node], 'kept', { from: stub.started, fromWhat: 'start of the promotions', bound: Infinity }));
-  await new Promise(resolve => setTimeout(resolve, 200));
-  closedAt = Date.now();
+  handle = io.watch(io.pairs(4, wholeReport(cg, stub.started), [node], 'kept', { from: stub.started, fromWhat: 'start of the promotions', bound: Infinity }));
+  await handle.readOnce();
   handle.close();
   await handle.done;
   assert.match(pairOutcome(handle.pairs[0], { boundMs: 600 }).text, /: in shared memory at every reading, then MISSING from the shared-working-memory view of reports and from the cross-partition read when the 0 s had passed$/);
