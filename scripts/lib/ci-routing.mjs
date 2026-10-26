@@ -230,6 +230,10 @@ export const WORKSPACE_RULES = Object.freeze({
     lanes: ['kosava_hardhat_plugins'],
     evmScopes: [],
   },
+  'packages/kafka-source': {
+    lanes: ['kosava_supporting'],
+    evmScopes: [],
+  },
   'packages/evm-module': {
     forceFull: true,
     lanes: [],
@@ -269,6 +273,7 @@ export const WORKSPACE_OWNING_LANES = Object.freeze({
   'packages/adapter-elizaos': ['kosava_supporting'],
   'packages/network-sim': ['kosava_supporting'],
   'packages/kafka-plugin': ['kosava_hardhat_plugins'],
+  'packages/kafka-source': ['kosava_supporting'],
   'packages/evm-module': ['contracts'],
   demo: ['kosava_supporting'],
 });
