@@ -21,7 +21,7 @@ import { AG, decisive, differentialCase, ids, job, probeUnitSeparatorCollapse, p
 // the in-memory collapsing engine of the unit and property tests proves the code path on every run).
 // CI (tornado-blazegraph) runs this file twice: on the lyrasis/blazegraph service container, where it only REPORTS the `INFO  U+001F ...` line (that engine's behaviour was not
 // measured when the lane was added, so its first run tells), and on the blazegraph-image.json image through `docker run` with BLAZEGRAPH_REQUIRE_U001F_COLLAPSE=1.
-// That image is the engine the node setup provisions and the one that reproduces the duplication (52 of 150 stores in the recorded run); a bump of it to an engine
+// That image is the engine the node setup provisions and the one that reproduces the duplication (46 of 150 stores repeated rows in the recorded run); a bump of it to an engine
 // that stops identifying the pair fails the second run instead of letting the real-engine G1 pass without exercising the payload de-duplication.
 
 const CASES = Number(process.env.DKG_PROMOTE_LOOKUP_LIVE_CASES ?? '150');
@@ -67,6 +67,7 @@ describe('bounded promote conflict lookup (live Blazegraph)', () => {
     console.log(`INFO  G1 live Blazegraph: ${g1.cases} stores, ${g1.conflicts} with a conflict, ${g1.wildcard} legacy wildcard lookups, ${g1.multi} multi-match; the engine repeated rows of the bounded query in ${g1.storesWithRepeats} stores (${g1.repeatedRows} surplus rows before the product's de-duplication)`);
     expect(g1.cases).toBe(CASES);
     if (CASES >= 100) expect(g1.conflicts).toBeGreaterThanOrEqual(Math.floor(CASES * 0.1));
+    if (CASES >= 100) expect(g1.wildcard).toBeGreaterThanOrEqual(Math.floor(CASES * 0.2));              // the legacy wildcard-lane query is reached on the real engine too
   }, 600_000);
 
   it('U+001F positive control: a direct probe of the legacy / default-lane key pair, consistent with the repeats G1 observed', async () => {

@@ -139,11 +139,23 @@ describe('bounded promote conflict lookup', () => {
       await expect(readPromoteOwnershipCandidates(store, GRAPH, promoteOwnershipLookup(req()))).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
       await expect(createPromoteOwnershipReader(store, GRAPH)(req())).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
     }
-    // a row without a state triple and a row with an unrecognised state are returned too
+    // A row without a state triple and rows with an unrecognised state value are returned too: the query drops two named classes, it is not an allowlist of states.
     const store = memory();
-    await put(store, GRAPH, job('no-state', 'queued'));
+    const setStateTriple = async (jobId: string, value: string) => {
+      await store.deleteByPattern({ subject: jobSubject(jobId), predicate: PROMOTE_STATE, graph: GRAPH });
+      await store.insert([{ subject: jobSubject(jobId), predicate: PROMOTE_STATE, object: literal(value), graph: GRAPH }]);
+    };
+    await put(store, GRAPH, job('no-state', 'queued'), job('weird-queued', 'queued'), job('weird-succeeded', 'succeeded'), job('plain-succeeded', 'succeeded'));
     await store.deleteByPattern({ subject: jobSubject('no-state'), predicate: PROMOTE_STATE, graph: GRAPH });
-    expect(ids(await readPromoteOwnershipCandidates(store, GRAPH, promoteOwnershipLookup(req())))).toEqual(['no-state']);
+    await setStateTriple('weird-queued', 'weird');
+    await setStateTriple('weird-succeeded', 'weird');                           // a "succeeded" payload behind an unrecognised state value is not dropped: only the triple `succeeded` is
+    const lookup = promoteOwnershipLookup(req());
+    expect(ids(await readPromoteOwnershipCandidates(store, GRAPH, lookup))).toEqual(['no-state', 'weird-queued', 'weird-succeeded']);
+    expect(ids(await referenceCandidates(store, GRAPH, lookup))).toEqual(['no-state', 'plain-succeeded', 'weird-queued', 'weird-succeeded']);   // the previous lookup, for contrast
+    // and a row whose payload itself carries an unrecognised state is unreadable to the decoder, so it fails closed exactly as before
+    await put(store, GRAPH, { ...job('weird-payload', 'queued'), state: 'weird' } as unknown as PromoteJob);
+    await expect(readPromoteOwnershipCandidates(store, GRAPH, lookup)).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
+    await expect(referenceCandidates(store, GRAPH, lookup)).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
   });
 
   describe('D-5 narrowings (corrupted rows only)', () => {
@@ -195,20 +207,24 @@ describe('bounded promote conflict lookup', () => {
   });
 
   describe('hot key: the work of a lookup is bounded by the jobs under its key, not by the history', () => {
-    // Rows read and decoded are the part of the cost this process controls; the engine-side index work is measured on Blazegraph (test-live/).
+    // Two things are observable from this process: the rows a lookup returns (and decodes), and the QUERY it issues. The engine-side index work is measured on Blazegraph (test-live/).
+    // A key with no jobs returns no row under the previous query either, so for a fresh key the rows cannot tell the two apart; the query shape can: the previous one left the
+    // uniqueness key UNBOUND (`?job <uniquenessKey> ?key . FILTER (?key IN (...))`, an enumeration of every job ever stored), the new one names each key as a constant.
     const countingStore = (inner: TripleStore) => {
-      const counter = { rows: 0 };
+      const counter = { rows: 0, queries: [] as string[] };
       const store = new Proxy(inner, { get(target, prop) {
         const v = Reflect.get(target, prop, target) as unknown;
         if (prop !== 'query' || typeof v !== 'function') return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
         return async (text: string, options?: { source?: string }) => {
           const result = await (v as (...a: unknown[]) => Promise<Parameters<typeof expectBindings>[0]>).call(target, text, options);
-          if (options?.source === 'publisher.asyncPromote.findActiveConflict') counter.rows += expectBindings(result).length;
+          if (options?.source === 'publisher.asyncPromote.findActiveConflict') { counter.rows += expectBindings(result).length; counter.queries.push(text); }
           return result;
         };
       } }) as TripleStore;
       return { store, counter };
     };
+    /** the object of every `<uniquenessKey>` pattern of a query, as written: `"..."` for a constant key, `?name` for an unbound one */
+    const keyObjects = (query: string) => [...query.matchAll(new RegExp(`<${PROMOTE_UNIQUENESS_KEY}> ("(?:[^"\\\\]|\\\\.)*"|\\?\\w+)`, 'g'))].map(m => m[1]!);
 
     it('one live job among N finished ones under the SAME key: the bounded lookup reads one row at every N, the previous one read N + 1', async () => {
       const rowsRead: Array<{ finished: number; previous: number; bounded: number }> = [];
@@ -227,14 +243,23 @@ describe('bounded promote conflict lookup', () => {
       expect(rowsRead).toEqual([{ finished: 25, previous: 26, bounded: 1 }, { finished: 100, previous: 101, bounded: 1 }, { finished: 400, previous: 401, bounded: 1 }]);
     });
 
-    it('history under OTHER keys is never read: a fresh key beside 3,000 retained jobs reads no row, and the queue admits it', async () => {
+    it('a fresh key beside 3,000 retained jobs is looked up by constant keys, never by an unbound key over the whole history; no row is read and the queue admits it', async () => {
       const inner = memory();
       await put(inner, GRAPH, ...Array.from({ length: 3_000 }, (_, i) => job(`h-${i}`, i % 9 === 0 ? 'failed' : 'succeeded', { name: `n-${i}` })));
       const { store, counter } = countingStore(inner);
-      expect(await readPromoteOwnershipCandidates(store, GRAPH, promoteOwnershipLookup(req({ assertionName: 'fresh' })))).toEqual([]);
+      const fresh = promoteOwnershipLookup(req({ assertionName: 'fresh' }));
+      // control: the previous query is flagged by the same check (one unbound key pattern), so the assertions below discriminate old from new
+      await referenceCandidates(store, GRAPH, fresh);
+      expect(counter.queries.splice(0).map(keyObjects)).toEqual([['?key']]);
+      expect(await readPromoteOwnershipCandidates(store, GRAPH, fresh)).toEqual([]);
+      expect(counter.queries.splice(0).map(keyObjects)).toEqual([uniquenessLookupKeys(req({ assertionName: 'fresh' })).map(literal)]);   // one constant per key spelling, in key order
       expect(counter.rows).toBe(0);
       const queue = new TripleStoreAsyncPromoteQueue(store, { idGenerator: () => 'fresh-1' });
       await queue.enqueue({ contextGraphId: 'cg', assertionName: 'fresh', agentAddress: AG, entities: 'all' });
+      const issued = counter.queries.splice(0).map(keyObjects);                         // the production admission path asked the same way
+      expect(issued).toHaveLength(1);
+      expect(issued[0]!.length).toBeGreaterThan(0);
+      expect(issued[0]!.every(object => object.startsWith('"'))).toBe(true);
       expect(counter.rows).toBe(0);
     });
 

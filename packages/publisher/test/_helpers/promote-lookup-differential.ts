@@ -82,16 +82,21 @@ export interface DifferentialCase { conflicts: number; wildcard: number; multi: 
 
 /**
  * One randomised store (all five states, format versions absent/1-4, lanes with case / peer-DID spellings, sub-graphs, bound and retired rows, four stored key
- * spellings) in `graph`, judged by the previous lookup (the oracle) and by the bounded one. Throws (vitest `expect`) on the first difference in:
+ * spellings) in `graph`, judged by the previous lookup (the oracle) and by the bounded one; about a third of the cases are built around a legacy wildcard-lane row
+ * that is also the probe, so the assertionWildcard branch of the query is exercised substantially. Throws (vitest `expect`) on the first difference in:
  * the conflict decision, the exact candidate id MULTISETS, the production `findActiveConflict` and the lifecycle ownership reader.
  */
 export async function differentialCase(store: TripleStore, graph: string, r: () => number): Promise<DifferentialCase> {
   const jobs: PromoteJob[] = [];
-  for (let i = 0, n = Math.floor(r() * 12); i < n; i++) {
-    const fv = pick(r, [null, 1, 2, 3, 4, 4, 4]);
-    const bound = fv === 4 && r() < 0.4;
+  // A legacy wildcard lane (a pre-v3 row with no lane) is rare among random rows and is the only request that takes the assertionWildcard branch of the
+  // query, so a third of the cases are built around one: job 0 is such a row and it is the probe, so the branch is reached in a third of the cases, not in 1-3 %.
+  const wildcardCase = r() < 0.35;
+  for (let i = 0, n = Math.max(Math.floor(r() * 12), wildcardCase ? 1 : 0); i < n; i++) {
+    const legacyLane = wildcardCase && i === 0;
+    const fv = legacyLane ? pick(r, [null, 1, 2]) : pick(r, [null, 1, 2, 3, 4, 4, 4]);
+    const bound = !legacyLane && fv === 4 && r() < 0.4;
     const state = pick(r, ['queued', 'running', 'failed_retrying', 'succeeded', 'succeeded', 'failed', 'failed'] as const);
-    const lane = bound ? pick(r, [AG, AG_MIXED, OTHER]) : pick(r, [null, AG, AG, AG_MIXED, OTHER]);
+    const lane = legacyLane ? null : bound ? pick(r, [AG, AG_MIXED, OTHER]) : pick(r, [null, AG, AG, AG_MIXED, OTHER]);
     const extra: Record<string, unknown> = state === 'running' ? { lease } : {};
     jobs.push(job(`j${i}`, state, { formatVersion: fv, bound, lane, name: pick(r, ['a', 'b']), ...(r() < 0.2 ? { subGraphName: 'sg' } : {}), ...extra }));
   }
@@ -101,7 +106,7 @@ export async function differentialCase(store: TripleStore, graph: string, r: () 
       lowerLane: `${legacyUniquenessKey(j.request)}${US}${j.request.agentAddress?.trim().toLowerCase() ?? ''}` } as const)[keyForm];
     await putSpelled(store, graph, j, spelled);
   }
-  const probe = jobs.length && r() < 0.4 ? pick(r, jobs) : null;
+  const probe = wildcardCase ? jobs[0]! : jobs.length && r() < 0.4 ? pick(r, jobs) : null;
   const wildcard = !!probe && (probe.formatVersion ?? 0) < 3 && probe.request.agentAddress === undefined;
   const lookup = probe ? promoteOwnershipLookup(probe.request, wildcard) : promoteOwnershipLookup(req({ assertionName: pick(r, ['a', 'b']), agentAddress: pick(r, [AG, AG_MIXED, OTHER]) }));
   const [ref, got] = [await referenceCandidates(store, graph, lookup), await readPromoteOwnershipCandidates(store, graph, lookup)];

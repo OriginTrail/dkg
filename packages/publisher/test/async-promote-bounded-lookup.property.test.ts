@@ -21,14 +21,16 @@ it.each(['exact', 'collapse'] as const)('the bounded lookup decides exactly as t
     try { seen = await differentialCase(engine === 'collapse' ? collapsingStore(inner) : inner, 'urn:dkg:promote-queue:control-plane', rng(caseSeed)); } finally { await inner.close(); }
     total.cases++; total.conflicts += seen.conflicts; total.wildcard += seen.wildcard; total.multi += seen.multi; total.repeatedRows += seen.repeatedRows;
   }), { seed: options.seed + (engine === 'exact' ? 0 : 1), numRuns: options.numRuns, endOnFailure: true, ...(options.path ? { path: options.path } : {}) });
-  // The generator must really reach the branches the claim is about. The floors apply from the 100-run default up: a smaller smoke budget cannot promise
-  // them, and the rare legacy wildcard lanes need the nightly budget.
-  expect(total.cases).toBe(options.numRuns);
-  if (options.numRuns >= 100) {
-    expect(total.conflicts).toBeGreaterThanOrEqual(Math.floor(options.numRuns * 0.1));
-    if (engine === 'collapse') expect(total.repeatedRows).toBeGreaterThan(0);                   // positive control: the model makes the unchanged query repeat rows
+  // The generator must really reach the branches the claim is about. The floors apply from the 100-run default up (a smaller smoke budget cannot promise them)
+  // and only to a full run: a replay of one failing path (DKG_PROPERTY_PATH) executes just the cases along that path, so it has no budget to count.
+  if (!options.path) {
+    expect(total.cases).toBe(options.numRuns);
+    if (options.numRuns >= 100) {
+      expect(total.conflicts).toBeGreaterThanOrEqual(Math.floor(options.numRuns * 0.1));
+      expect(total.wildcard).toBeGreaterThanOrEqual(Math.floor(options.numRuns * 0.2));            // the legacy wildcard lane (assertionWildcard query) is a third of the cases by construction
+      if (engine === 'collapse') expect(total.repeatedRows).toBeGreaterThan(0);                   // positive control: the model makes the unchanged query repeat rows
+    }
   }
-  if (options.numRuns >= 500) expect(total.wildcard).toBeGreaterThanOrEqual(5);
   if (engine === 'exact') expect(total.repeatedRows).toBe(0);
   console.log(`bounded lookup differential (${engine}): seed=${options.seed} runs=${total.cases} conflicts=${total.conflicts} wildcard=${total.wildcard} multi-match=${total.multi} repeated-rows=${total.repeatedRows}`);
 }, 120_000);
