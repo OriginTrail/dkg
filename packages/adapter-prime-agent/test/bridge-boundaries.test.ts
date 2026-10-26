@@ -4,6 +4,7 @@ import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionBridge, sessionsDir } from '../extension/src/extension.js';
+import { createBridgeHost, commitBridgeRun } from './bridge-host-support.js';
 
 // Keep real files and loopback HTTP; inject failures only at OS boundaries.
 vi.mock('node:fs', async (original) => ({ ...await original<typeof fs>() }));
@@ -28,25 +29,14 @@ async function until(predicate: () => boolean): Promise<void> {
 }
 
 async function start(options: ConstructorParameters<typeof SessionBridge>[2] = {}) {
-  bridge = new SessionBridge({
-    on: () => {},
-    sendUserMessage: (text) => {
-      bridge.onInput({ source: 'extension', text });
-      sent.push(text);
-    },
-  }, 'boundary-session', options);
+  bridge = new SessionBridge(createBridgeHost(() => bridge, text => sent.push(text)), 'boundary-session', options);
   await bridge.start();
   base = JSON.parse(fs.readFileSync(join(sessionsDir(), 'boundary-session.json'), 'utf8')).bridgeUrl;
 }
 
 function commit(abort?: () => void) {
-  const prompt = sent.at(-1)!;
-  const prepared = bridge.onBeforeAgentStart({ prompt });
-  expect(prepared).toBeDefined();
-  bridge.onAgentStart({ sessionManager: { getSessionId: () => bridge.sessionId }, abort });
-  bridge.onMessageStart({ message: { role: 'user', content: prompt } });
-  bridge.onMessageStart({ message: { role: 'custom', ...prepared!.message } });
-  return prepared!;
+  return commitBridgeRun(bridge, { prompt: sent.at(-1), userContent: 'string',
+    context: { sessionManager: { getSessionId: () => bridge.sessionId }, abort } });
 }
 
 function send(path = '/send', body: unknown = { text: 'answer this', correlationId: 'boundary' }) {
@@ -263,7 +253,10 @@ describe('stream terminal outcomes', () => {
   });
 
   it('closes an outstanding stream and clears turn timers on shutdown', async () => {
-    await start();
+    await start({ turnIdleTimeoutMs: 120_000, turnHardTimeoutMs: 240_000, sseKeepaliveIntervalMs: 30_000 });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+    const scheduleTimeout = vi.spyOn(globalThis, 'setTimeout');
+    const scheduleInterval = vi.spyOn(globalThis, 'setInterval');
     const clearTimeout = vi.spyOn(globalThis, 'clearTimeout');
     const clearInterval = vi.spyOn(globalThis, 'clearInterval');
     const result = await send('/stream');
@@ -273,12 +266,22 @@ describe('stream terminal outcomes', () => {
     await until(() => sent.length === 1);
     commit();
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'partial' } });
+    const idleIndex = scheduleTimeout.mock.calls.map(([, ms], index) => ms === 120_000 ? index : -1).filter(index => index >= 0).at(-1)!;
+    const hardIndex = scheduleTimeout.mock.calls.findIndex(([, ms]) => ms === 240_000);
+    const intervalIndex = scheduleInterval.mock.calls.findIndex(([, ms]) => ms === 30_000);
+    const idle = scheduleTimeout.mock.results[idleIndex]?.value;
+    const hard = scheduleTimeout.mock.results[hardIndex]?.value;
+    const heartbeat = scheduleInterval.mock.results[intervalIndex]?.value;
+    expect(idle).toBeDefined(); expect(hard).toBeDefined(); expect(heartbeat).toBeDefined();
+    // Ignore cancellation caused by the earlier delta resetting its idle timer.
+    clearTimeout.mockClear(); clearInterval.mockClear();
     await bridge.stop();
     expect(['ended', 'closed']).toContain(await drained);
     expect(server.listening).toBe(false);
     expect(fs.existsSync(join(sessionsDir(), 'boundary-session.json'))).toBe(false);
-    expect(clearTimeout).toHaveBeenCalled();
-    expect(clearInterval).toHaveBeenCalledOnce();
+    expect(clearTimeout).toHaveBeenCalledWith(idle);
+    expect(clearTimeout).toHaveBeenCalledWith(hard);
+    expect(clearInterval).toHaveBeenCalledExactlyOnceWith(heartbeat);
     bridge.onAgentEnd();
     await bridge.stop();
     expect(clearInterval).toHaveBeenCalledOnce();
