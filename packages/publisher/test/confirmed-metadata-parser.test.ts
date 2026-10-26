@@ -4,6 +4,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import {
+  GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES,
   generateGraphKnowledgeAssetMetadata,
   parseConfirmedGraphKnowledgeAssetMetadataEnvelope,
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
@@ -29,6 +30,8 @@ async function compareWithReader(rows: readonly Pick<Quad, 'predicate' | 'object
   const bindings = rows.map(row => ({ ...row }));
   const query = vi.fn(async (_sparql: string) => ({ type: 'bindings' as const, bindings }));
   const parsed = parseConfirmedGraphKnowledgeAssetMetadataEnvelope(rows, input);
+  const projected = rows.filter(row => GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES.includes(row.predicate));
+  expect(parseConfirmedGraphKnowledgeAssetMetadataEnvelope(projected, input)).toEqual(parsed);
   expect(await readConfirmedGraphKnowledgeAssetMetadataEnvelope({ query } as unknown as TripleStore, input)).toEqual(parsed);
   expect(query).toHaveBeenCalledOnce();
   expect(query.mock.calls[0]?.length).toBe(1);

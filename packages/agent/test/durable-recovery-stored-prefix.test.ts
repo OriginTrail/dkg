@@ -3,7 +3,7 @@ import { createObservedStoreMutation } from '../src/internal/observed-store-muta
 import { createMutationObservedStore } from '../src/internal/context-graph-cache-invalidating-store.js';
 import { RecoveryMaterializationOwner } from '../src/durable-recovery-materialization.js';
 import type { ContextGraphSub } from '../src/dkg-agent-types.js';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MemoryLayer,
   createGraphKnowledgeAssetScope,
@@ -293,7 +293,7 @@ function node(
       recover: () => runner.run({ contextGraphId: CG, dependencies }),
     };
   };
-  return { store, writes, info, start, round };
+  return { rawStore, store, writes, info, start, round };
 }
 
 const generation = (version3 = '1') => [1, 2, 3, 4, 5, 6].map((n) => asset(n, n === 3 ? version3 : '1'));
@@ -428,4 +428,44 @@ describe('resumed-prefix edge cases', () => {
     expect(lifetime.checkpointStore.get(getSyncCheckpointKey(PEER, CG, false, 'data'))?.terminal).not.toBe(true);
     expect(classifyDurableProgress(next.result, { complete: next.result.complete }).completedReadinessCleanly).toBe(false);
   });
+});
+
+it('completes bounded recovery after an unrelated indeterminate write', async () => {
+  const fixtures = generation();
+  const core = node(servingPeer(fixtures));
+  vi.spyOn(core.rawStore, 'dropGraph').mockRejectedValueOnce(new Error('lost response'));
+  await expect(core.store.dropGraph('urn:unrelated-failed-write')).rejects.toThrow('lost response');
+  let rounds = 0;
+  const result = await core.start({  sliceSpent: true, isRunning: () => rounds < 20,
+    afterSlice: () => { rounds++; } }).recover();
+  expect(result.outcome).toBe('terminal');
+  expect(rounds).toBeGreaterThan(1);
+  expect(core.writes).toEqual(fixtures.map(f => f.ual));
+  expect(await readHeldGraphScopedAssets(core.store, { contextGraphId: CG,
+    descriptors: createGraphScopedDurableManifestPlan(fixtures.flatMap(f => f.meta), CG)!.descriptors }))
+    .toEqual(new Set(fixtures.map(f => f.ual)));
+});
+
+it('continues the prefix between independently materialized replicas', async () => {
+  const fixtures = generation();
+  const replica = (receivedAt: Date) => fixtures.map(f => ({ ...f,
+    meta: overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(f.meta,
+      { ual: f.ual, metaGraph: f.meta[0]!.graph, receivedAt },
+      { status: 'confirmed', materializedVersion: { blockNumber: 1, txIndex: 0 },
+        confirmation: { kind: 'finalized-materialization' } }),
+  }));
+  const left = replica(new Date('2026-01-01T00:00:00Z'));
+  const right = replica(new Date('2026-02-01T00:00:00Z'));
+  expect(left[0]!.meta).not.toEqual(right[0]!.meta);
+  const core = node({ [PEER]: servingPeer(left), [SECOND_PEER]: servingPeer(right) });
+  let first = true, running = true, activePeer = PEER;
+  const lifetime = core.start({  sliceSpent: () => first, isRunning: () => running,
+    peerIds: () => [activePeer], afterSlice: () => { if (first) running = false; } });
+  await lifetime.recover();
+  const prefix = core.writes[0]!;
+  expect(lifetime.checkpointStore.get(getSyncCheckpointKey(PEER, CG, false, 'data'))?.offset).toBeGreaterThan(0);
+  first = false; running = true; activePeer = SECOND_PEER;
+  expect((await lifetime.recover()).outcome).toBe('terminal');
+  expect(core.writes.filter(ual => ual === prefix)).toHaveLength(1);
+  expect(core.writes).toEqual(fixtures.map(f => f.ual));
 });

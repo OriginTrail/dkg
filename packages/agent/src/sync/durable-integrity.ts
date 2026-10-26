@@ -163,7 +163,9 @@ function digestGraphScopedMetadataRows(rows: readonly Quad[]): string {
     hash.update(length);
     hash.update(bytes);
   };
-  const canonical = [...rows].sort((left, right) => (
+  // publishedAt is assigned by each receiving node. Keep content, routing,
+  // permissions and confirmation facts in the identity, but not that local clock.
+  const canonical = rows.filter(row => row.predicate !== `${DKG_NS}publishedAt`).sort((left, right) => (
     compareCodePoint(left.subject, right.subject)
     || compareCodePoint(left.predicate, right.predicate)
     || compareCodePoint(left.object, right.object)
@@ -205,7 +207,7 @@ function readOrderedGraphScopedDescriptors(
 }
 
 export const DURABLE_MANIFEST_DIGEST_DOMAIN = 'origintrail.dkg.durable-data-manifest';
-export const DURABLE_MANIFEST_DIGEST_VERSION = 2;
+export const DURABLE_MANIFEST_DIGEST_VERSION = 3;
 export const DURABLE_MANIFEST_PREFIX_DIGEST_DOMAIN = 'origintrail.dkg.durable-data-manifest-prefix';
 
 export interface GraphScopedDurableManifestPlan {
