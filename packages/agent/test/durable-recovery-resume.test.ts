@@ -264,18 +264,18 @@ describe('durable recovery continues a verified prefix with another peer', () =>
   it('never gives a terminal boundary, which has no interrupted round to continue', async () => {
     const store = new MemorySyncCheckpointStore();
     store.setManifestBoundOffset(dataKey('peer-ffffffff'), 5, GENERATION, Date.now(), PREFIX_10);
-    const terminal = verifiedDurableBoundaryOf({
-      offset: 20, updatedAtMs: 1, expiresAtMs: 2, terminal: true, manifestDigest: GENERATION, manifestPrefixDigest: PREFIX_20,
-    }, dataKey('peer-aaaaaaaa'));
+    store.setManifestBoundOffset(dataKey('peer-aaaaaaaa'), 20, GENERATION, Date.now(), PREFIX_20, true);
+    const terminal = verifiedDurableBoundaryOf(store.get(dataKey('peer-aaaaaaaa')), dataKey('peer-aaaaaaaa'));
+    expect(liveDurableBoundarySource(store, terminal)).toBeDefined();
     expect(terminal?.terminal).toBe(true);
     expect(seedVerifiedDurableBoundary(store, dataKey('peer-ffffffff'), terminal)).toBe(false);
     expect(store.get(dataKey('peer-ffffffff'))?.offset).toBe(5);
 
     // A completed recovery is remembered, but a later run does not hand it out.
     const recovery = new DurableRecoveryRunner();
-    const done = runner(['peer-aaaaaaaa'], { 'peer-aaaaaaaa': [advanceTo(20, PREFIX_20, true)] });
+    const done = runner(['peer-aaaaaaaa'], { 'peer-aaaaaaaa': [advanceTo(20, PREFIX_20, true)] }, store);
     expect((await recovery.run({ contextGraphId: GRAPH, dependencies: done.dependencies })).outcome).toBe('terminal');
-    const later = runner(['peer-bbbbbbbb'], { 'peer-bbbbbbbb': [advanceTo(20, PREFIX_20, true)] });
+    const later = runner(['peer-bbbbbbbb'], { 'peer-bbbbbbbb': [advanceTo(20, PREFIX_20, true)] }, store);
     expect((await recovery.run({ contextGraphId: GRAPH, dependencies: later.dependencies })).outcome).toBe('terminal');
     expect(later.atSliceStart[0]!.checkpoint).toBeUndefined();
   });
