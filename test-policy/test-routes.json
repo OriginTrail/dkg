@@ -146,6 +146,13 @@
     "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
   },
   {
+    "pattern": "packages/publisher/test-live/**/*.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Live Blazegraph differential of the bounded share conflict lookup (OT-RFC-73 AC4), required in the existing Tornado Blazegraph CI lane",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts"
+  },
+  {
     "pattern": "packages/agent/test-live/**/*.blazegraph.test.ts",
     "lane": "tornado-blazegraph",
     "reason": "Live Blazegraph regressions required in the existing Tornado Blazegraph CI lane",

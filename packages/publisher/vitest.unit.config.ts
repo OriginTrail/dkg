@@ -96,6 +96,8 @@ export default defineConfig({
       'test/async-lift-terminal-clear.test.ts',
       'test/entity-grouping.test.ts',
       'test/async-promote-terminal-clear.test.ts',
+      'test/async-promote-bounded-lookup.test.ts',
+      'test/async-promote-bounded-lookup.property.test.ts',
       'test/lift-job-types.test.ts',
       'test/lift-job-committed.test.ts',
       'test/lift-job-chain-observations.test.ts',
